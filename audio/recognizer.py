@@ -16,15 +16,18 @@ from core.events import AudioEvent
 
 logger = logging.getLogger(__name__)
 
+# 以下の正規表現はすべて raw string (r"...") で記述する。
+# バックスラッシュの二重エスケープや誤解を防ぐためのプロジェクト規約。
+
 # 連続漢数字トークンにマッチする正規表現
 _KANJI_PATTERN = re.compile(r"[一二三四五六七八九〇十百千万]+")
 
 # 算用数字 + 単位パターン（左から右に順番に試行）
 # 1万2千, 1万, 5K, 1,200, 800 の順に試行
 _MIXED_MAN_SEN = re.compile(r"(\d[\d,]*)万(\d+)千")  # 1万2千
-_MAN_ONLY = re.compile(r"(\d[\d,]*)万")              # 3万
-_K_UNIT = re.compile(r"(\d[\d,]*)[Kk]")              # 5K
-_DIGIT_ONLY = re.compile(r"\d[\d,]*")                # 800 / 1,200
+_MAN_ONLY      = re.compile(r"(\d[\d,]*)万")          # 3万
+_K_UNIT        = re.compile(r"(\d[\d,]*)[Kk]")        # 5K
+_DIGIT_ONLY    = re.compile(r"\d[\d,]*")              # 800 / 1,200
 
 
 def _kanji_to_int(kanji: str) -> int:
@@ -110,7 +113,10 @@ def parse_amount(text: str) -> int:
     if not candidates:
         return 0
 
-    # 最左（開始位置が最小）のものを採用。同じ位置なら値が大きい方を優先
+    # 最左（開始位置が最小）のものを採用。
+    # 同じ位置に複数のパターンがマッチした場合は値が大きい方を優先する。
+    # （例: "1万" と "1" が同位置にマッチするとき、より具体的な表現である
+    #   "1万"=10000 を採用するため）
     candidates.sort(key=lambda x: (x[0], -x[1]))
     return candidates[0][1]
 
@@ -119,25 +125,35 @@ def parse_action(text: str) -> Optional[AudioEvent]:
     """Whisper の認識テキストからアクション種別と金額を抽出して AudioEvent を返す。
     認識できない場合は None を返す。
 
-    キーワードは ACTION_KEYWORDS の定義順ではなく、テキスト内の出現位置（左から右）で
-    最初にマッチしたものを採用する。
+    キーワード選択ルール:
+    1. テキスト内で最も左に現れたキーワードを優先する。
+    2. 同じ開始位置に複数のキーワードがマッチした場合は、より長いキーワードを優先する。
+       （例: "all in" と "all" が同位置にマッチ → "all in" を採用）
     """
     lower = text.lower()
 
-    # アクションキーワード検索（複合キーワード "all in" / "new hand" を先に試行）
     found_action: Optional[str] = None
     found_pos = len(text)
+    found_kw_len = 0  # タイブレーク用: 同じ位置なら長い方を優先
 
     for keyword, action in ACTION_KEYWORDS.items():
         pos = lower.find(keyword.lower())
-        if pos != -1 and pos < found_pos:
+        if pos == -1:
+            continue
+        kw_len = len(keyword)
+        # 最左優先。同位置なら長いキーワードを優先（より具体的な表現を採用するため）
+        if pos < found_pos or (pos == found_pos and kw_len > found_kw_len):
             found_pos = pos
             found_action = action
+            found_kw_len = kw_len
 
     if found_action is None:
         logger.debug("No action keyword found in: %r", text)
         return None
 
+    # call/check/fold の金額: Phase 1 では parse_amount(text) の結果をそのまま使う簡易仕様。
+    # （例: "コール 500" → amount=500、"チェック" → amount=0）
+    # 精緻化する場合は action ごとに金額の妥当性検証を追加すること。
     amount = parse_amount(text)
 
     return AudioEvent(
@@ -164,15 +180,17 @@ class WhisperTranscriber:
             )
             self._model = None
 
-    def transcribe(self, audio_bytes: bytes, sample_rate: int = 16000) -> str:
+    def transcribe(self, audio_bytes: bytes) -> str:
         """PCM16 音声バイト列をテキストに変換して返す。
         変換失敗時は空文字列を返す（クラッシュしない）。
+
+        入力は 16kHz モノラル PCM16 固定を前提とする。
+        faster-whisper の transcribe() は numpy 配列の長さから 16kHz を仮定するため、
+        sample_rate は引数として受け取らない。
         """
         if self._model is None:
             return ""
         try:
-            import io
-
             import numpy as np
 
             audio_array = (
