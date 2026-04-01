@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
+
+from core.constants import STREET_ORDER
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +70,16 @@ class GameStateManager:
         return self._hand_id
 
     def advance_street(self, street: Street) -> None:
-        """ストリートを更新する（PREFLOP→FLOP→TURN→RIVER→SHOWDOWN）。"""
+        """ストリートを更新する（PREFLOP→FLOP→TURN→RIVER→SHOWDOWN の順方向のみ）。
+
+        逆方向・同一ストリートへの遷移は ValueError を送出する。
+        """
+        current_idx = STREET_ORDER.index(self._street.value)
+        new_idx = STREET_ORDER.index(street.value)
+        if new_idx <= current_idx:
+            raise ValueError(
+                f"Invalid street transition: {self._street.value!r} → {street.value!r}"
+            )
         self._street = street
         self._turn_idx = 0  # 新ストリートではターン順をリセット
         logger.debug("Street advanced to %s", street)
@@ -94,16 +105,23 @@ class GameStateManager:
     # ――― アクション適用 ―――
 
     def apply_action(self, seat: int, action: str, amount: int = 0) -> None:
-        """アクションをスタック・ポットに反映する。
+        """アクションをスタック・ポットに反映し、ターンを次のプレイヤーに進める。
 
-        - bet / raise / call / allin: スタックを amount 減らし、ポットに加算
-        - fold: is_active = False、_active_seats から除外
-        - check: 変化なし
-        対象席が存在しない場合は ValueError を送出する。
+        ターン管理方針:
+        - このメソッドが常に advance_turn() を担う。呼び出し側で advance_turn() を
+          別途呼ぶ必要はない（呼び忘れバグを防ぐため）。
+        - fold: _active_seats からの除外処理が実質的なターン進行を兼ねる。
+        - それ以外: 処理後に advance_turn() を呼び出す。
+
+        Raises:
+            ValueError: 対象席が存在しない / fold 済み席への再アクション /
+                        amount が負 / 未知の action
         """
         if seat not in self._players:
             raise ValueError(f"Unknown seat: {seat}")
         ps = self._players[seat]
+        if not ps.is_active:
+            raise ValueError(f"Seat {seat} has already folded and cannot act")
         action_lower = action.lower()
 
         if action_lower in ("bet", "raise", "call", "allin"):
@@ -116,21 +134,24 @@ class GameStateManager:
                 "Seat %d %s %d (stack: %d, pot: %d)",
                 seat, action_lower, actual, ps.stack, self._pot,
             )
+            self.advance_turn()
         elif action_lower == "fold":
             ps.is_active = False
             if seat in self._active_seats:
                 idx = self._active_seats.index(seat)
                 self._active_seats.remove(seat)
-                # ターンインデックスが除外した席以降を指していた場合に調整
+                # fold した席より後ろを指していたインデックスを補正する。
+                # これにより _turn_idx は自然に「fold した席の次」を指す。
                 if self._turn_idx > idx:
                     self._turn_idx -= 1
                 if self._active_seats:
                     self._turn_idx %= len(self._active_seats)
             logger.debug("Seat %d folded. Active seats: %s", seat, self._active_seats)
+            # fold は上記インデックス調整がターン進行を兼ねるため advance_turn() 不要
         elif action_lower == "check":
-            pass
+            self.advance_turn()
         else:
-            logger.warning("Unknown action: %s (seat=%d)", action, seat)
+            raise ValueError(f"Unknown action: {action!r} (seat={seat})")
 
     # ――― ターン管理 ―――
 

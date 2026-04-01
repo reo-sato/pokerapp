@@ -56,6 +56,20 @@ class TestAdvanceStreet:
             gsm.advance_street(street)
             assert gsm.street == street.value
 
+    def test_backward_street_raises(self, gsm: GameStateManager):
+        """逆方向のストリート遷移は ValueError を送出する。"""
+        gsm.new_hand()
+        gsm.advance_street(Street.TURN)
+        with pytest.raises(ValueError, match="Invalid street transition"):
+            gsm.advance_street(Street.FLOP)
+
+    def test_same_street_raises(self, gsm: GameStateManager):
+        """同一ストリートへの遷移は ValueError を送出する。"""
+        gsm.new_hand()
+        gsm.advance_street(Street.FLOP)
+        with pytest.raises(ValueError, match="Invalid street transition"):
+            gsm.advance_street(Street.FLOP)
+
 
 class TestEndHand:
     def test_winner_receives_pot(self, gsm: GameStateManager):
@@ -127,6 +141,42 @@ class TestApplyAction:
         gsm.new_hand()
         with pytest.raises(ValueError):
             gsm.apply_action(1, "bet", -100)
+
+    def test_unknown_action_raises(self, gsm: GameStateManager):
+        gsm.new_hand()
+        with pytest.raises(ValueError, match="Unknown action"):
+            gsm.apply_action(1, "shove", 500)
+
+    def test_folded_seat_cannot_act(self, gsm: GameStateManager):
+        """fold 済みプレイヤーへの再アクションは ValueError を送出する。"""
+        gsm.new_hand()
+        gsm.apply_action(1, "fold")
+        with pytest.raises(ValueError, match="already folded"):
+            gsm.apply_action(1, "check")
+
+    def test_bet_advances_turn(self, gsm: GameStateManager):
+        """apply_action(bet) の後、ターンが次のプレイヤーに進む。"""
+        gsm.new_hand()
+        first = gsm.get_current_player()
+        gsm.apply_action(first, "bet", 200)
+        second = gsm.get_current_player()
+        assert second != first
+
+    def test_check_advances_turn(self, gsm: GameStateManager):
+        """apply_action(check) の後、ターンが次のプレイヤーに進む。"""
+        gsm.new_hand()
+        first = gsm.get_current_player()
+        gsm.apply_action(first, "check")
+        second = gsm.get_current_player()
+        assert second != first
+
+    def test_fold_advances_turn(self, gsm: GameStateManager):
+        """apply_action(fold) の後、ターンが fold した席以外のプレイヤーに進む。"""
+        gsm.new_hand()
+        first = gsm.get_current_player()
+        gsm.apply_action(first, "fold")
+        next_player = gsm.get_current_player()
+        assert next_player != first
 
 
 class TestTurnManagement:

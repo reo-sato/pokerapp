@@ -117,10 +117,7 @@ class IntegrationThread(threading.Thread):
         if self._on_action:
             self._on_action(record)
 
-        # フォールド以外のアクションではターンを進める
-        if action != "fold":
-            gs.advance_turn()
-
+        # ターン進行は apply_action() 内で完結するため、ここでは呼ばない
         logger.debug("ActionRecord: %s", record)
 
     # ――― ハンド開始 / 終了 ―――
