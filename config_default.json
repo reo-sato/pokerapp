@@ -1,0 +1,21 @@
+{
+  "session": {
+    "num_seats": 6,
+    "blinds": {"sb": 100, "bb": 200},
+    "log_dir": "./logs"
+  },
+  "camera": {
+    "device_id": 0,
+    "resolution": [1280, 720],
+    "fps": 20,
+    "roi": {},
+    "motion_threshold": 2000
+  },
+  "audio": {
+    "device_id": 0,
+    "sample_rate": 16000,
+    "whisper_model": "medium",
+    "language": "ja",
+    "initial_prompt": "ベット コール レイズ チェック フォールド オールイン ショーダウン ウィナー ハンド開始"
+  }
+}
