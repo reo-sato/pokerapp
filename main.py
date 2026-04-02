@@ -92,6 +92,8 @@ def run_cli() -> None:
         )
 
     audio_cfg = cfg.get("audio", {})
+    cam_cfg = cfg.get("camera", {})
+
     audio_thread = AudioThread(
         audio_queue=audio_q,
         device_id=audio_cfg.get("device_id", 0),
@@ -107,6 +109,24 @@ def run_cli() -> None:
         on_action=on_action,
         stop_event=stop_event,
     )
+
+    # Phase 2: カメラが設定済みの場合のみ CameraThread を起動する
+    # Phase 3 でカメライベントと音声イベントの統合（±2秒マッチング）を追加予定
+    camera_thread = None
+    if cam_cfg.get("roi"):
+        from core.event_queue import make_camera_queue
+        from vision.camera import CameraThread
+        camera_q = make_camera_queue()
+        camera_thread = CameraThread(
+            camera_queue=camera_q,
+            device_id=cam_cfg.get("device_id", 0),
+            roi_config=cam_cfg.get("roi", {}),
+            fps=cam_cfg.get("fps", 20),
+            motion_threshold=cam_cfg.get("motion_threshold", 2000),
+            stop_event=stop_event,
+        )
+        camera_thread.start()
+        print("カメラスレッド起動（動体検出有効）。")
 
     audio_thread.start()
     integration_thread.start()
@@ -158,6 +178,8 @@ def run_cli() -> None:
         stop_event.set()
         audio_thread.join(timeout=3)
         integration_thread.join(timeout=3)
+        if camera_thread is not None:
+            camera_thread.join(timeout=3)
         print(f"\nセッション終了。ログ保存先: {json_writer.path}")
 
 
@@ -176,7 +198,11 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.calibrate:
-        print("キャリブレーションモードは Phase 2 で実装予定です。")
+        from core.config import load_config
+        from vision.calibration import run_calibration
+        cfg = load_config()
+        device_id = cfg.get("camera", {}).get("device_id", 0)
+        run_calibration(device_id=device_id)
         sys.exit(0)
 
     if args.cli:
