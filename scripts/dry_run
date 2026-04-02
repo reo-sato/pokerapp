@@ -1,0 +1,89 @@
+from core.game_state import GameStateManager, PlayerState
+from audio.recognizer import parse_action
+from output.json_writer import JsonWriter
+from core.hand_log import HandSummary, ActionRecord
+
+
+def dry_run():
+    players = [
+        PlayerState(seat=1, name="Sato", stack=10000),
+        PlayerState(seat=2, name="Yamada", stack=10000),
+    ]
+    sb, bb = 100, 200
+    session_id = "dry_run_session"
+
+    game = GameStateManager(players=players, sb=sb, bb=bb)
+    writer = JsonWriter(log_dir="logs", session_id=session_id)
+
+    hand_id = game.new_hand()
+    print(f"=== New Hand #{hand_id} ===")
+
+    # 今回は音声の代わりにテキストのリストで疑似実行
+    texts = [
+        "シート1 レイズ 800",
+        "シート2 コール",
+        "シート1 ウィナー",  # 仮仕様: 勝者宣言
+    ]
+
+    actions: list[ActionRecord] = []
+    winner_seat: int | None = None
+
+    for t in texts:
+        print(f"[INPUT] {t}")
+        ev = parse_action(t)
+        if ev is None:
+            print("  -> 無視（アクションなし）")
+            continue
+
+        seat = game.get_current_player()
+
+        if ev.action == "winner":
+            winner_seat = seat
+            game.end_hand(winner_seat)
+            print(f"  -> Seat {seat} wins. Pot={game.pot}")
+            break
+
+        game.apply_action(seat=seat, action=ev.action, amount=ev.amount)
+
+        record = ActionRecord(
+            hand_id=hand_id,
+            timestamp="2026-04-02T12:00:00",
+            street=game.street,
+            seat=seat,
+            player_name=game.get_player_name(seat),
+            action=ev.action,
+            amount=ev.amount,
+            pot_after=game.pot,
+            stack_after=game.get_stack(seat),
+            source={"audio": True, "camera": False},
+            needs_review=False,
+        )
+        actions.append(record)
+        print(
+            f"  -> {record.player_name} {record.action} {record.amount}, "
+            f"pot={record.pot_after}, stack={record.stack_after}"
+        )
+
+    if winner_seat is None:
+        winner_seat = 1  # 仮
+
+    summary = HandSummary(
+        hand_id=hand_id,
+        session_id=session_id,
+        started_at="2026-04-02T12:00:00",
+        ended_at="2026-04-02T12:01:00",
+        blinds={"sb": sb, "bb": bb},
+        board=[],
+        players=[],  # Phase1では空のままでOK
+        pot_total=game.pot,
+        winner_seat=winner_seat,
+        actions=actions,
+        review_required=False,
+    )
+
+    writer.append_hand_summary(summary)
+    print(f"Saved hand #{hand_id} to {writer.path}")
+
+
+if __name__ == "__main__":
+    dry_run()
