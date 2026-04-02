@@ -281,6 +281,66 @@ def run_gui() -> None:
     print(f"\nセッション終了。ログ保存先: {json_writer.path}")
 
 
+def export_phh(json_path: str) -> None:
+    """JSON セッションログを PHH ファイル群にエクスポートする。"""
+    import json
+    from core.hand_log import ActionRecord, HandSummary
+    from output.phh_exporter import PHHExporter
+
+    src = Path(json_path)
+    if not src.exists():
+        print(f"ファイルが見つかりません: {json_path}")
+        sys.exit(1)
+
+    data = json.loads(src.read_text(encoding="utf-8"))
+    hands_raw = data.get("hands", [])
+    if not hands_raw:
+        print("ハンドデータがありません。")
+        sys.exit(0)
+
+    summaries: list[HandSummary] = []
+    for h in hands_raw:
+        actions = [
+            ActionRecord(
+                hand_id=a["hand_id"],
+                timestamp=a["timestamp"],
+                street=a["street"],
+                seat=a["seat"],
+                player_name=a["player_name"],
+                action=a["action"],
+                amount=a["amount"],
+                pot_after=a["pot_after"],
+                stack_after=a["stack_after"],
+                source=a.get("source", {}),
+                needs_review=a.get("needs_review", False),
+                confidence=a.get("confidence", 0.0),
+            )
+            for a in h.get("actions", [])
+        ]
+        summary = HandSummary(
+            hand_id=h["hand_id"],
+            session_id=h["session_id"],
+            started_at=h["started_at"],
+            ended_at=h["ended_at"],
+            blinds=h["blinds"],
+            board=h.get("board", []),
+            board_source=h.get("board_source", ""),
+            players=h.get("players", []),
+            pot_total=h["pot_total"],
+            winner_seat=h["winner_seat"],
+            actions=actions,
+            review_required=h.get("review_required", False),
+        )
+        summaries.append(summary)
+
+    out_dir = src.parent / (src.stem + "_phh")
+    exporter = PHHExporter()
+    paths = exporter.write_session(summaries, out_dir)
+    print(f"{len(paths)} 件のハンドを {out_dir} に出力しました。")
+    for p in paths:
+        print(f"  {p}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ポーカーハンドロガー")
     parser.add_argument(
@@ -293,6 +353,11 @@ def main() -> None:
         action="store_true",
         help="ROIキャリブレーションモードで起動（Phase 2）",
     )
+    parser.add_argument(
+        "--export-phh",
+        metavar="SESSION_JSON",
+        help="JSON セッションログを PHH ファイル群に変換する（Phase 5）",
+    )
     args = parser.parse_args()
 
     if args.calibrate:
@@ -301,6 +366,10 @@ def main() -> None:
         cfg = load_config()
         device_id = cfg.get("camera", {}).get("device_id", 0)
         run_calibration(device_id=device_id)
+        sys.exit(0)
+
+    if args.export_phh:
+        export_phh(args.export_phh)
         sys.exit(0)
 
     if args.cli:
