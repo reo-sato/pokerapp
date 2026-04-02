@@ -30,6 +30,23 @@ _K_UNIT        = re.compile(r"(\d[\d,]*)[Kk]")        # 5K
 _DIGIT_ONLY    = re.compile(r"\d[\d,]*")              # 800 / 1,200
 
 
+# 席番号表現（金額パースの前に除去する）
+# 例: "シート1", "シート２", "seat 3"
+_SEAT_PATTERN = re.compile(
+    r"(?:シート[0-9０-９一二三四五六七八九十]+|seat\s*[0-9]+)",
+    re.IGNORECASE,
+)
+
+
+def _strip_seat_references(text: str) -> str:
+    """席番号表現をテキストから除去して返す。
+
+    parse_amount() が席番号の数字を金額として誤認識することを防ぐ。
+    例: "シート1 レイズ 800" → " レイズ 800"
+    """
+    return _SEAT_PATTERN.sub("", text)
+
+
 def _kanji_to_int(kanji: str) -> int:
     """連続した漢数字文字列を整数に変換する。
 
@@ -151,10 +168,12 @@ def parse_action(text: str) -> Optional[AudioEvent]:
         logger.debug("No action keyword found in: %r", text)
         return None
 
-    # call/check/fold の金額: Phase 1 では parse_amount(text) の結果をそのまま使う簡易仕様。
+    # 席番号表現（シート1 / seat 3 等）を除去してから金額を抽出する。
+    # 除去しないと parse_amount() が席番号の数字を最初の金額候補として拾ってしまう。
+    # call/check/fold の金額: Phase 1 では parse_amount() の結果をそのまま使う簡易仕様。
     # （例: "コール 500" → amount=500、"チェック" → amount=0）
     # 精緻化する場合は action ごとに金額の妥当性検証を追加すること。
-    amount = parse_amount(text)
+    amount = parse_amount(_strip_seat_references(text))
 
     return AudioEvent(
         action=found_action,

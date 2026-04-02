@@ -21,3 +21,24 @@ def test_parse_action_basic():
     assert ev is not None
     assert ev.action == "call"
     assert ev.amount == 0
+
+def test_seat_prefix_ja_raise():
+    """席番号（日本語）が amount に混入しないこと。"""
+    ev = parse_action("シート1 レイズ 800")
+    assert ev is not None
+    assert ev.action == "raise"
+    assert ev.amount == 800
+
+def test_seat_prefix_ja_call():
+    """席番号のみで金額なし → amount=0。"""
+    ev = parse_action("シート2 コール")
+    assert ev is not None
+    assert ev.action == "call"
+    assert ev.amount == 0
+
+def test_seat_prefix_en_raise():
+    """席番号（英語）が amount に混入しないこと。"""
+    ev = parse_action("seat 3 raise 1200")
+    assert ev is not None
+    assert ev.action == "raise"
+    assert ev.amount == 1200
