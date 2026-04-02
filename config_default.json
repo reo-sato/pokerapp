@@ -17,5 +17,12 @@
     "whisper_model": "medium",
     "language": "ja",
     "initial_prompt": "ベット コール レイズ チェック フォールド オールイン ショーダウン ウィナー ハンド開始"
+  },
+  "rfid": {
+    "enabled": false,
+    "reader_type": "pcsc",
+    "poll_interval_ms": 100,
+    "readers": [],
+    "card_master_file": "./rfid_cards.json"
   }
 }

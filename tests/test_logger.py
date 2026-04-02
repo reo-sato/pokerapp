@@ -18,8 +18,9 @@ def test_json_writer_creates_file(tmp_path: Path):
         amount=800,
         pot_after=800,
         stack_after=9200,
-        source={"audio": True, "camera": False},
+        source={"audio": True, "camera": False, "rfid": False},
         needs_review=False,
+        confidence=0.0,
     )
     summary = HandSummary(
         hand_id=1,
@@ -28,6 +29,7 @@ def test_json_writer_creates_file(tmp_path: Path):
         ended_at="2026-04-02T12:01:00",
         blinds={"sb": 100, "bb": 200},
         board=[],
+        board_source="",
         players=[],
         pot_total=800,
         winner_seat=1,

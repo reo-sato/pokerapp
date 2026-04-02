@@ -55,8 +55,9 @@ def dry_run():
             amount=ev.amount,
             pot_after=game.pot,
             stack_after=game.get_stack(seat),
-            source={"audio": True, "camera": False},
+            source={"audio": True, "camera": False, "rfid": False},
             needs_review=False,
+            confidence=0.0,
         )
         actions.append(record)
         print(
@@ -74,6 +75,7 @@ def dry_run():
         ended_at="2026-04-02T12:01:00",
         blinds={"sb": sb, "bb": bb},
         board=[],
+        board_source="",
         players=[],  # Phase1では空のままでOK
         pot_total=game.pot,
         winner_seat=winner_seat,

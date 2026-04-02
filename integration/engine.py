@@ -109,8 +109,9 @@ class IntegrationThread(threading.Thread):
             amount=event.amount,
             pot_after=gs.pot,
             stack_after=gs.get_stack(seat),
-            source={"camera": False, "audio": True},
+            source={"camera": False, "audio": True, "rfid": False},
             needs_review=needs_review,
+            confidence=0.0,
         )
         self._current_actions.append(record)
 
@@ -154,6 +155,7 @@ class IntegrationThread(threading.Thread):
             ended_at=_now_iso(),
             blinds={"sb": gs._sb, "bb": gs._bb},  # noqa: SLF001
             board=[],
+            board_source="",
             players=players_info,
             pot_total=sum(a.amount for a in self._current_actions if a.action in ("bet", "raise", "call", "allin")),
             winner_seat=winner_seat,

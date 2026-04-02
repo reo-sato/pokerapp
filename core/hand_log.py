@@ -16,8 +16,9 @@ class ActionRecord:
     amount: int
     pot_after: int
     stack_after: int
-    source: dict  # {"camera": bool, "audio": bool}
+    source: dict  # {"camera": bool, "audio": bool, "rfid": bool}
     needs_review: bool
+    confidence: float = 0.0  # 0.0–1.0 (FR-42: RFID+audio+camera 合意度)
 
     def to_dict(self) -> dict:
         return {
@@ -32,6 +33,7 @@ class ActionRecord:
             "stack_after": self.stack_after,
             "source": self.source,
             "needs_review": self.needs_review,
+            "confidence": self.confidence,
         }
 
 
@@ -45,6 +47,7 @@ class HandSummary:
     ended_at: str  # ISO 8601
     blinds: dict  # {"sb": int, "bb": int}
     board: list[str]  # ショーダウン時のボードカード（未確定時は空リスト）
+    board_source: str  # ボード情報のソース: "rfid" | "ocr" | "manual" | ""
     players: list[dict]  # {seat, name, hole_cards, stack_start, stack_end, result}
     pot_total: int
     winner_seat: int
@@ -59,6 +62,7 @@ class HandSummary:
             "ended_at": self.ended_at,
             "blinds": self.blinds,
             "board": self.board,
+            "board_source": self.board_source,
             "players": self.players,
             "pot_total": self.pot_total,
             "winner_seat": self.winner_seat,
