@@ -121,6 +121,25 @@ def run_cli() -> None:
         camera_thread.start()
         print("カメラスレッド起動（動体検出 + ±2秒マッチング有効）。")
 
+    # Phase 6: RFID が有効な場合のみ RFIDThread を起動する
+    rfid_thread = None
+    rfid_cfg = cfg.get("rfid", {})
+    if rfid_cfg.get("enabled", False):
+        from core.event_queue import make_rfid_queue
+        from rfid.card_master import CardMaster
+        from rfid.reader_thread import RFIDThread
+        rfid_q = make_rfid_queue()
+        card_master = CardMaster(rfid_cfg.get("card_master_file", "./rfid_cards.json"))
+        rfid_thread = RFIDThread(
+            rfid_queue=rfid_q,
+            card_master=card_master,
+            reader_configs=rfid_cfg.get("readers", []),
+            poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
+            stop_event=stop_event,
+        )
+        rfid_thread.start()
+        print("RFIDスレッド起動。")
+
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
         game_state=game_state,
@@ -181,6 +200,8 @@ def run_cli() -> None:
         integration_thread.join(timeout=3)
         if camera_thread is not None:
             camera_thread.join(timeout=3)
+        if rfid_thread is not None:
+            rfid_thread.join(timeout=3)
         print(f"\nセッション終了。ログ保存先: {json_writer.path}")
 
 
