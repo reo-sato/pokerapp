@@ -184,12 +184,109 @@ def run_cli() -> None:
         print(f"\nセッション終了。ログ保存先: {json_writer.path}")
 
 
+def run_gui() -> None:
+    """Phase 4 GUIモード: customtkinter ダッシュボードを起動する。"""
+    from core.config import load_config
+    from core.event_queue import make_audio_queue
+    from core.game_state import GameStateManager, PlayerState
+    from audio.recorder import AudioThread
+    from integration.engine import IntegrationThread
+    from output.json_writer import JsonWriter
+    from gui.dashboard import GUIDashboard
+
+    try:
+        import customtkinter  # noqa: F401
+    except ImportError:
+        print("customtkinter が見つかりません。pip install customtkinter でインストールしてください。")
+        print("または --cli オプションを使用してください。")
+        sys.exit(1)
+
+    cfg = load_config()
+    session_cfg = _prompt_session_config()
+
+    players = [
+        PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
+        for p in session_cfg["players"]
+    ]
+    game_state = GameStateManager(
+        players=players,
+        sb=session_cfg["sb"],
+        bb=session_cfg["bb"],
+    )
+
+    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
+    json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
+
+    audio_q = make_audio_queue()
+    stop_event = threading.Event()
+    camera_q = None
+
+    audio_cfg = cfg.get("audio", {})
+    cam_cfg = cfg.get("camera", {})
+
+    dash = GUIDashboard(
+        game_state=game_state,
+        json_writer=json_writer,
+        audio_queue=audio_q,
+        camera_queue=camera_q,
+        stop_event=stop_event,
+    )
+
+    audio_thread = AudioThread(
+        audio_queue=audio_q,
+        device_id=audio_cfg.get("device_id", 0),
+        sample_rate=audio_cfg.get("sample_rate", 16000),
+        model_size=audio_cfg.get("whisper_model", "medium"),
+        language=audio_cfg.get("language", "ja"),
+        stop_event=stop_event,
+    )
+
+    camera_thread = None
+    if cam_cfg.get("roi"):
+        from core.event_queue import make_camera_queue
+        from vision.camera import CameraThread
+        camera_q = make_camera_queue()
+        dash._camera_queue = camera_q
+        camera_thread = CameraThread(
+            camera_queue=camera_q,
+            device_id=cam_cfg.get("device_id", 0),
+            roi_config=cam_cfg.get("roi", {}),
+            fps=cam_cfg.get("fps", 20),
+            motion_threshold=cam_cfg.get("motion_threshold", 2000),
+            stop_event=stop_event,
+        )
+
+    integration_thread = IntegrationThread(
+        audio_queue=audio_q,
+        game_state=game_state,
+        json_writer=json_writer,
+        camera_queue=camera_q,
+        on_action=dash.on_action,
+        stop_event=stop_event,
+    )
+
+    dash.start_threads(
+        audio_thread=audio_thread,
+        integration_thread=integration_thread,
+        camera_thread=camera_thread,
+    )
+    dash.run()
+
+    # mainloop 終了後のクリーンアップ
+    stop_event.set()
+    audio_thread.join(timeout=3)
+    integration_thread.join(timeout=3)
+    if camera_thread is not None:
+        camera_thread.join(timeout=3)
+    print(f"\nセッション終了。ログ保存先: {json_writer.path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ポーカーハンドロガー")
     parser.add_argument(
         "--cli",
         action="store_true",
-        help="CLIモードで起動（Phase 1: 音声認識のみ、カメラなし）",
+        help="CLIモードで起動（音声認識のみ、カメラなし）",
     )
     parser.add_argument(
         "--calibrate",
@@ -209,9 +306,7 @@ def main() -> None:
     if args.cli:
         run_cli()
     else:
-        # デフォルトはGUIモード（Phase 4 で実装）
-        print("GUIモードは Phase 4 で実装予定です。--cli オプションを使用してください。")
-        sys.exit(0)
+        run_gui()
 
 
 if __name__ == "__main__":
