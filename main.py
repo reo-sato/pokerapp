@@ -82,6 +82,7 @@ def run_cli() -> None:
 
     audio_q = make_audio_queue()
     stop_event = threading.Event()
+    camera_q = None
 
     def on_action(record):
         print(
@@ -102,16 +103,8 @@ def run_cli() -> None:
         language=audio_cfg.get("language", "ja"),
         stop_event=stop_event,
     )
-    integration_thread = IntegrationThread(
-        audio_queue=audio_q,
-        game_state=game_state,
-        json_writer=json_writer,
-        on_action=on_action,
-        stop_event=stop_event,
-    )
-
-    # Phase 2: カメラが設定済みの場合のみ CameraThread を起動する
-    # Phase 3 でカメライベントと音声イベントの統合（±2秒マッチング）を追加予定
+    # Phase 2/3: カメラが設定済みの場合のみ CameraThread を起動する
+    # Phase 3: camera_q を IntegrationThread に渡すことで ±2秒マッチングが有効になる
     camera_thread = None
     if cam_cfg.get("roi"):
         from core.event_queue import make_camera_queue
@@ -126,8 +119,16 @@ def run_cli() -> None:
             stop_event=stop_event,
         )
         camera_thread.start()
-        print("カメラスレッド起動（動体検出有効）。")
+        print("カメラスレッド起動（動体検出 + ±2秒マッチング有効）。")
 
+    integration_thread = IntegrationThread(
+        audio_queue=audio_q,
+        game_state=game_state,
+        json_writer=json_writer,
+        camera_queue=camera_q,
+        on_action=on_action,
+        stop_event=stop_event,
+    )
     audio_thread.start()
     integration_thread.start()
 
