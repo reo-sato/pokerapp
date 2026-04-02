@@ -145,6 +145,7 @@ def run_cli() -> None:
         game_state=game_state,
         json_writer=json_writer,
         camera_queue=camera_q,
+        rfid_queue=rfid_q if rfid_cfg.get("enabled", False) else None,
         on_action=on_action,
         stop_event=stop_event,
     )
@@ -241,9 +242,11 @@ def run_gui() -> None:
     audio_q = make_audio_queue()
     stop_event = threading.Event()
     camera_q = None
+    rfid_q = None
 
     audio_cfg = cfg.get("audio", {})
     cam_cfg = cfg.get("camera", {})
+    rfid_cfg = cfg.get("rfid", {})
 
     dash = GUIDashboard(
         game_state=game_state,
@@ -277,11 +280,26 @@ def run_gui() -> None:
             stop_event=stop_event,
         )
 
+    rfid_thread = None
+    if rfid_cfg.get("enabled", False):
+        from core.event_queue import make_rfid_queue
+        from rfid.card_master import CardMaster
+        from rfid.reader_thread import RFIDThread
+        rfid_q = make_rfid_queue()
+        rfid_thread = RFIDThread(
+            rfid_queue=rfid_q,
+            card_master=CardMaster(rfid_cfg.get("card_master_file", "./rfid_cards.json")),
+            reader_configs=rfid_cfg.get("readers", []),
+            poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
+            stop_event=stop_event,
+        )
+
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
         game_state=game_state,
         json_writer=json_writer,
         camera_queue=camera_q,
+        rfid_queue=rfid_q,
         on_action=dash.on_action,
         stop_event=stop_event,
     )
@@ -290,6 +308,7 @@ def run_gui() -> None:
         audio_thread=audio_thread,
         integration_thread=integration_thread,
         camera_thread=camera_thread,
+        rfid_thread=rfid_thread,
     )
     dash.run()
 

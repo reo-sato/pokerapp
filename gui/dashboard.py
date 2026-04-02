@@ -311,14 +311,18 @@ class GUIDashboard:
         audio_thread: threading.Thread,
         integration_thread: threading.Thread,
         camera_thread: Optional[threading.Thread] = None,
+        rfid_thread: Optional[threading.Thread] = None,
     ) -> None:
         """外部で生成したスレッドを受け取って起動する。"""
         self._audio_thread = audio_thread
         self._integration_thread = integration_thread
         self._camera_thread = camera_thread
+        self._rfid_thread = rfid_thread
 
         if camera_thread is not None:
             camera_thread.start()
+        if rfid_thread is not None:
+            rfid_thread.start()
         audio_thread.start()
         integration_thread.start()
 
