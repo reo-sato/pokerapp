@@ -1,8 +1,8 @@
 """integration/engine.py
 
-Phase 7: audio / camera / RFID の 3 ソースを統合し、confidence スコアを算出する。
+audio / camera / RFID (ESP32 HTTP) の 3 ソースを統合し、confidence スコアを算出する。
 
-ソース優先度 (v2.0 §1.3): RFID > audio > camera
+ソース優先度: RFID > audio > camera
 
 Confidence 行列:
   RFID + audio + camera : 1.00
@@ -14,13 +14,14 @@ Confidence 行列:
   camera のみ           : 0.30
   なし                  : 0.00
 
-マッチングウィンドウ:
-  ±MATCH_WINDOW (2.0 秒) 以内の同席イベントを照合する。
-  それ以上古いイベントは CAMERA_BUFFER_TTL (4.0 秒) で破棄する。
+カード情報 (ESP32 RFID):
+  role="board" かつ board_index 付きイベント
+      → _board_positions[board_index] に格納、ボード枚数でストリート自動推移
+  role="seat" かつ card 付きイベント
+      → _hole_cards[seat] に最大 2 枚蓄積、手終了時に HandSummary に反映
 
-ボードカード:
-  role="board" の RFIDEvent を受信したら HandSummary.board に追記する。
-  board_source = "rfid" として記録する。
+アクション照合 (role="seat"):
+  ±MATCH_WINDOW 秒以内の同席 AudioEvent と照合して confidence 向上
 """
 from __future__ import annotations
 
@@ -39,8 +40,8 @@ from output.json_writer import JsonWriter
 
 logger = logging.getLogger(__name__)
 
-MATCH_WINDOW = 2.0             # 秒: マッチング対象とする時間幅
-CAMERA_BUFFER_TTL = MATCH_WINDOW * 2  # 秒: バッファの最大保持時間
+MATCH_WINDOW = 2.0
+CAMERA_BUFFER_TTL = MATCH_WINDOW * 2
 
 # ――― Confidence スコア定数 ―――
 _CONF_RFID_AUDIO_CAMERA = 1.00
@@ -51,15 +52,12 @@ _CONF_AUDIO_CAMERA      = 0.80
 _CONF_AUDIO_ONLY        = 0.50
 _CONF_CAMERA_ONLY       = 0.30
 
+# board_index → street 推移しきい値 (1-indexed, ≥N 枚でその street)
+_BOARD_STREET_THRESHOLDS = {3: "flop", 4: "turn", 5: "river"}
+
 
 def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
-    """センサー組み合わせから confidence スコアを返す。
-
-    Args:
-        has_rfid:   RFID イベントがマッチしたか
-        has_audio:  音声イベントがあるか（通常 True）
-        has_camera: カメライベントがマッチしたか
-    """
+    """センサー組み合わせから confidence スコアを返す。"""
     if has_rfid and has_audio and has_camera:
         return _CONF_RFID_AUDIO_CAMERA
     if has_rfid and has_audio:
@@ -78,13 +76,7 @@ def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
 
 
 class IntegrationThread(threading.Thread):
-    """Phase 7: audio / camera / RFID の 3 キューを消費して game_state を更新し、
-    ActionRecord を JsonWriter に書き出す。
-
-    各 AudioEvent に対し、±MATCH_WINDOW 秒以内の同席 CameraEvent / RFIDEvent を
-    照合して source フラグと confidence スコアを決定する。
-    role="board" の RFIDEvent はハンドのボードカードとして蓄積する。
-    """
+    """audio / camera / RFID の 3 キューを消費してゲーム状態を更新する。"""
 
     def __init__(
         self,
@@ -94,8 +86,14 @@ class IntegrationThread(threading.Thread):
         camera_queue: Optional[EventQueue] = None,
         rfid_queue: Optional[EventQueue] = None,
         on_action: Optional[Callable[[ActionRecord], None]] = None,
+        on_rfid_card: Optional[Callable[[RFIDEvent], None]] = None,
         stop_event: Optional[threading.Event] = None,
     ) -> None:
+        """
+        Args:
+            on_rfid_card: カード検出時のコールバック (GUI スレッドには渡さず
+                          _update_queue 経由で処理すること)。スレッド安全に設計すること。
+        """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
         self._camera_queue = camera_queue
@@ -103,18 +101,23 @@ class IntegrationThread(threading.Thread):
         self._game_state = game_state
         self._json_writer = json_writer
         self._on_action = on_action
+        self._on_rfid_card = on_rfid_card
         self._stop_event = stop_event or threading.Event()
 
-        # センサーイベントのバッファ（AudioEvent 処理時に照合する）
+        # センサーイベントのバッファ
         self._camera_buffer: list[CameraEvent] = []
-        self._rfid_seat_buffer: list[RFIDEvent] = []  # role="seat" のみ
+        self._rfid_seat_buffer: list[RFIDEvent] = []
 
         # ハンド内の一時バッファ
         self._current_actions: list[ActionRecord] = []
         self._hand_started_at: str = _now_iso()
         self._stack_start: dict[int, int] = {}
-        self._board_cards: list[str] = []   # role="board" RFID で検出したボードカード
+
+        # RFID カード情報
+        self._board_cards: list[str] = []          # 順序付きボードカード（表示用）
+        self._board_positions: dict[int, str] = {} # board_index → card
         self._board_source: str = ""
+        self._hole_cards: dict[int, list[str]] = {}  # seat → [card1, card2]
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -122,11 +125,9 @@ class IntegrationThread(threading.Thread):
     def run(self) -> None:
         logger.info("IntegrationThread started")
         while not self._stop_event.is_set():
-            # 1. カメラ・RFID キューを非ブロッキングで全件バッファに溜める
             self._drain_camera_queue()
             self._drain_rfid_queue()
 
-            # 2. 音声イベントを短いタイムアウトで取得
             try:
                 event = self._audio_queue.get(timeout=0.1)
             except queue.Empty:
@@ -138,7 +139,6 @@ class IntegrationThread(threading.Thread):
             except Exception:
                 logger.exception("Error handling audio event: %s", event)
 
-            # 3. 古いイベントを破棄
             self._expire_buffers()
 
         logger.info("IntegrationThread stopped")
@@ -160,18 +160,102 @@ class IntegrationThread(threading.Thread):
         while True:
             try:
                 ev: RFIDEvent = self._rfid_queue.get_nowait()
-                if ev.role == "board":
-                    # ボードカードはバッファではなく直接リストに追加
-                    if ev.card:
-                        self._board_cards.append(ev.card)
-                        if not self._board_source:
-                            self._board_source = "rfid"
-                        logger.debug("Board card detected: %s (reader=%s)", ev.card, ev.reader_id)
-                else:
-                    # role="seat": AudioEvent とマッチングするためバッファに保持
-                    self._rfid_seat_buffer.append(ev)
+                self._process_rfid_event(ev)
             except queue.Empty:
                 break
+
+    def _process_rfid_event(self, ev: RFIDEvent) -> None:
+        """受信した RFIDEvent を役割に応じて振り分ける。"""
+        if ev.role == "board":
+            self._handle_board_rfid(ev)
+        else:
+            self._handle_seat_rfid(ev)
+
+    def _handle_board_rfid(self, ev: RFIDEvent) -> None:
+        """ボードカードの RFID イベントを処理する。"""
+        if not ev.card:
+            logger.warning(
+                "Board RFID event has no card (tag=%s reader=%s) — needs_review",
+                ev.tag_id, ev.reader_id,
+            )
+            return
+
+        if ev.board_index is not None:
+            # 位置指定あり: board_positions に格納して順序保証
+            self._board_positions[ev.board_index] = ev.card
+            self._board_cards = [
+                self._board_positions[i]
+                for i in sorted(self._board_positions)
+            ]
+            logger.info(
+                "Board card [pos=%d]: %s — board so far: %s",
+                ev.board_index, ev.card, self._board_cards,
+            )
+            self._try_advance_street_from_rfid()
+        else:
+            # board_index なし: 末尾に追記
+            self._board_cards.append(ev.card)
+            logger.info(
+                "Board card (no index): %s — board so far: %s",
+                ev.card, self._board_cards,
+            )
+
+        if not self._board_source:
+            self._board_source = "rfid"
+
+        if self._on_rfid_card:
+            self._on_rfid_card(ev)
+
+    def _handle_seat_rfid(self, ev: RFIDEvent) -> None:
+        """座席カードの RFID イベントを処理する (ホールカード蓄積 + アクション照合用)。"""
+        # ホールカード蓄積 (カード情報がある場合のみ)
+        if ev.card and ev.seat is not None:
+            seat_cards = self._hole_cards.setdefault(ev.seat, [])
+            if ev.card not in seat_cards and len(seat_cards) < 2:
+                seat_cards.append(ev.card)
+                logger.info(
+                    "Hole card detected: seat=%d card=%s (cards so far: %s)",
+                    ev.seat, ev.card, seat_cards,
+                )
+                if self._on_rfid_card:
+                    self._on_rfid_card(ev)
+        elif not ev.card:
+            logger.warning(
+                "Seat RFID event has no card (tag=%s reader=%s seat=%s) — needs_review",
+                ev.tag_id, ev.reader_id, ev.seat,
+            )
+
+        # アクション照合バッファに追加
+        self._rfid_seat_buffer.append(ev)
+
+    def _try_advance_street_from_rfid(self) -> None:
+        """ボードカード枚数に応じてストリートを自動推移する (RFID 優先証拠)。"""
+        n = len(self._board_positions)
+        gs = self._game_state
+        target_street = _BOARD_STREET_THRESHOLDS.get(n)
+        if target_street is None:
+            return
+        street_enum = {
+            "flop":  Street.FLOP,
+            "turn":  Street.TURN,
+            "river": Street.RIVER,
+        }.get(target_street)
+        if street_enum is None:
+            return
+        if gs.street == street_enum.value:
+            return  # 既にそのストリート
+        try:
+            gs.advance_street(street_enum)
+            logger.info(
+                "Street auto-advanced to %s by RFID board cards (%d cards detected)",
+                target_street, n,
+            )
+        except ValueError:
+            # 後退遷移など無効な場合は無視
+            logger.debug(
+                "RFID street advance to %s skipped (current=%s)",
+                target_street, gs.street,
+            )
 
     def _expire_buffers(self) -> None:
         cutoff = time.time() - CAMERA_BUFFER_TTL
@@ -190,7 +274,7 @@ class IntegrationThread(threading.Thread):
         return best
 
     def _pop_matching_rfid_event(self, seat: int, ts: float) -> Optional[RFIDEvent]:
-        """同席・±MATCH_WINDOW 秒以内の RFIDEvent (role="seat") を返し除去する。"""
+        """同席・±MATCH_WINDOW 秒以内の RFID seat イベントを返し除去する。"""
         candidates = [
             e for e in self._rfid_seat_buffer
             if e.seat == seat and abs(e.timestamp - ts) <= MATCH_WINDOW
@@ -226,7 +310,6 @@ class IntegrationThread(threading.Thread):
             self._finalize_hand(winner_seat)
             return
 
-        # 通常アクション: bet / call / raise / check / fold / allin
         seat = gs.get_current_player()
 
         try:
@@ -237,18 +320,13 @@ class IntegrationThread(threading.Thread):
         else:
             needs_review = False
 
-        # センサーマッチング
         cam_event  = self._pop_matching_camera_event(seat, event.timestamp)
         rfid_event = self._pop_matching_rfid_event(seat, event.timestamp)
 
         has_camera = cam_event is not None
         has_rfid   = rfid_event is not None
 
-        source = {
-            "camera": has_camera,
-            "audio":  True,
-            "rfid":   has_rfid,
-        }
+        source = {"camera": has_camera, "audio": True, "rfid": has_rfid}
         confidence = calc_confidence(has_rfid=has_rfid, has_audio=True, has_camera=has_camera)
 
         if has_rfid:
@@ -293,7 +371,9 @@ class IntegrationThread(threading.Thread):
         self._hand_started_at = _now_iso()
         self._stack_start = gs.get_stacks()
         self._board_cards = []
+        self._board_positions = {}
         self._board_source = ""
+        self._hole_cards = {}
         logger.info("New hand started: hand_id=%d", gs.hand_id)
 
     def _finalize_hand(self, winner_seat: int) -> None:
@@ -301,17 +381,25 @@ class IntegrationThread(threading.Thread):
         gs.end_hand(winner_seat)
 
         stacks_end = gs.get_stacks()
-        players_info = [
-            {
-                "seat": seat,
-                "name": gs.get_player_name(seat),
-                "hole_cards": None,
-                "stack_start": self._stack_start.get(seat, 0),
-                "stack_end": stacks_end[seat],
-                "result": stacks_end[seat] - self._stack_start.get(seat, 0),
-            }
-            for seat in sorted(stacks_end.keys())
-        ]
+        players_info = []
+        for seat in sorted(stacks_end.keys()):
+            hole = self._hole_cards.get(seat, [])
+            players_info.append({
+                "seat":              seat,
+                "name":              gs.get_player_name(seat),
+                "hole_cards":        list(hole) if hole else None,
+                "hole_cards_source": "rfid" if hole else "",
+                "stack_start":       self._stack_start.get(seat, 0),
+                "stack_end":         stacks_end[seat],
+                "result":            stacks_end[seat] - self._stack_start.get(seat, 0),
+            })
+
+        if self._hole_cards:
+            logger.info(
+                "Hand %d: hole_cards from RFID — %s",
+                gs.hand_id,
+                {s: cards for s, cards in self._hole_cards.items()},
+            )
 
         summary = HandSummary(
             hand_id=gs.hand_id,
@@ -322,7 +410,10 @@ class IntegrationThread(threading.Thread):
             board=list(self._board_cards),
             board_source=self._board_source,
             players=players_info,
-            pot_total=sum(a.amount for a in self._current_actions if a.action in ("bet", "raise", "call", "allin")),
+            pot_total=sum(
+                a.amount for a in self._current_actions
+                if a.action in ("bet", "raise", "call", "allin")
+            ),
             winner_seat=winner_seat,
             actions=list(self._current_actions),
             review_required=any(a.needs_review for a in self._current_actions),

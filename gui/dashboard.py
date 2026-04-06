@@ -64,6 +64,7 @@ class GUIDashboard:
         audio_queue: queue.Queue,
         camera_queue: Optional[queue.Queue] = None,
         stop_event: Optional[threading.Event] = None,
+        rfid_receiver: Optional[object] = None,
     ) -> None:
         import customtkinter as ctk
 
@@ -72,7 +73,12 @@ class GUIDashboard:
         self._audio_queue = audio_queue
         self._camera_queue = camera_queue
         self._stop_event = stop_event or threading.Event()
+        self._rfid_receiver = rfid_receiver  # RFIDHTTPReceiver (status プロパティ用)
         self._update_queue: queue.Queue["ActionRecord"] = queue.Queue()
+        self._rfid_card_queue: queue.Queue = queue.Queue()
+        # seat → hole cards 表示用 (スレッド安全のため queue 経由で更新)
+        self._hole_cards_display: dict[int, list[str]] = {}
+        self._board_cards_display: list[str] = []
 
         # customtkinter の設定
         ctk.set_appearance_mode("dark")
@@ -112,6 +118,16 @@ class GUIDashboard:
         self._lbl_pot = ctk.CTkLabel(self._header, text="ポット: 0", anchor="e")
         self._lbl_pot.grid(row=0, column=3, padx=12, pady=8, sticky="e")
 
+        # RFID ステータスラベル (HTTP受信機が設定されている場合のみ有効)
+        self._lbl_rfid = ctk.CTkLabel(self._header, text="RFID: —", anchor="e",
+                                       font=("", 10))
+        self._lbl_rfid.grid(row=1, column=3, padx=12, pady=0, sticky="e")
+
+        # ボードカード表示ラベル
+        self._lbl_board = ctk.CTkLabel(self._header, text="ボード: —", anchor="w",
+                                        font=("Courier", 11))
+        self._lbl_board.grid(row=1, column=0, columnspan=3, padx=12, pady=0, sticky="w")
+
         # メインエリア
         main_frame = ctk.CTkFrame(root, corner_radius=0, fg_color="transparent")
         main_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=4)
@@ -147,7 +163,7 @@ class GUIDashboard:
         ctk = self._ctk
         frame = self._left
         # ヘッダー行
-        for col, text in enumerate(["席", "名前", "スタック", "状態"]):
+        for col, text in enumerate(["席", "名前", "スタック", "状態", "ホールカード"]):
             lbl = ctk.CTkLabel(frame, text=text, font=("", 11, "bold"))
             lbl.grid(row=0, column=col, padx=4, pady=2, sticky="w")
 
@@ -163,16 +179,20 @@ class GUIDashboard:
             name_lbl   = ctk.CTkLabel(frame, text=name,      text_color=color, anchor="w")
             stack_lbl  = ctk.CTkLabel(frame, text=f"{stack:,}", text_color=color, anchor="e")
             status_lbl = ctk.CTkLabel(frame, text=status,    text_color=color)
+            hole_lbl   = ctk.CTkLabel(frame, text="—",        text_color="#AAAAAA",
+                                       font=("Courier", 10))
 
             seat_lbl.grid(row=row_idx,  column=0, padx=4, pady=1, sticky="w")
             name_lbl.grid(row=row_idx,  column=1, padx=4, pady=1, sticky="w")
             stack_lbl.grid(row=row_idx, column=2, padx=4, pady=1, sticky="e")
             status_lbl.grid(row=row_idx,column=3, padx=4, pady=1)
+            hole_lbl.grid(row=row_idx,  column=4, padx=4, pady=1, sticky="w")
 
             self._player_rows[seat] = {
                 "stack_lbl":  stack_lbl,
                 "status_lbl": status_lbl,
                 "name_lbl":   name_lbl,
+                "hole_lbl":   hole_lbl,
             }
 
     def _build_controls(self, ctrl: object) -> None:
@@ -206,6 +226,13 @@ class GUIDashboard:
 
     def _cmd_new_hand(self) -> None:
         from core.events import AudioEvent
+        # ホールカード / ボードカード表示をリセット
+        self._hole_cards_display.clear()
+        self._board_cards_display.clear()
+        for row in self._player_rows.values():
+            if "hole_lbl" in row:
+                row["hole_lbl"].configure(text="—")
+        self._lbl_board.configure(text="ボード: —")
         self._audio_queue.put(AudioEvent(
             action="new_hand", amount=0, timestamp=time.time(), raw_text="",
         ))
@@ -238,11 +265,18 @@ class GUIDashboard:
     # ――― UI 更新（メインスレッド側） ―――
 
     def _poll_updates(self) -> None:
-        """100ms ごとに _update_queue を消費して UI を更新する。"""
+        """100ms ごとに _update_queue / _rfid_card_queue を消費して UI を更新する。"""
         try:
             while True:
                 record = self._update_queue.get_nowait()
                 self._apply_record(record)
+        except queue.Empty:
+            pass
+        # RFID カードイベントを処理
+        try:
+            while True:
+                rfid_ev = self._rfid_card_queue.get_nowait()
+                self._apply_rfid_card(rfid_ev)
         except queue.Empty:
             pass
         # ゲーム状態のヘッダーを常に最新化
@@ -278,11 +312,35 @@ class GUIDashboard:
         else:
             self._append_log(line, tag=tag)
 
+    def _apply_rfid_card(self, rfid_ev: object) -> None:
+        """RFIDEvent を UI に反映する (ホールカード / ボードカード更新)。"""
+        if rfid_ev.role == "seat" and rfid_ev.seat is not None and rfid_ev.card:
+            cards = self._hole_cards_display.setdefault(rfid_ev.seat, [])
+            if rfid_ev.card not in cards and len(cards) < 2:
+                cards.append(rfid_ev.card)
+            if rfid_ev.seat in self._player_rows:
+                hole_text = " ".join(cards) if cards else "—"
+                self._player_rows[rfid_ev.seat]["hole_lbl"].configure(text=hole_text)
+        elif rfid_ev.role == "board" and rfid_ev.card:
+            if rfid_ev.card not in self._board_cards_display:
+                self._board_cards_display.append(rfid_ev.card)
+            board_text = "ボード: " + " ".join(self._board_cards_display)
+            self._lbl_board.configure(text=board_text)
+
     def _refresh_header(self) -> None:
         gs = self._gs
         self._lbl_hand.configure(text=f"ハンド: #{gs.hand_id}")
         self._lbl_street.configure(text=f"ストリート: {gs.street}")
         self._lbl_pot.configure(text=f"ポット: {gs.pot:,}")
+        # RFID HTTP 受信機のステータスを表示
+        if self._rfid_receiver is not None:
+            try:
+                st = self._rfid_receiver.status
+                count = st.get("events_received", 0)
+                port = st.get("bind_port", "")
+                self._lbl_rfid.configure(text=f"RFID:{port} ({count}件)")
+            except Exception:
+                pass
 
     def _refresh_player_row(self, seat: int) -> None:
         if seat not in self._player_rows:
@@ -329,6 +387,10 @@ class GUIDashboard:
     def on_action(self, record: "ActionRecord") -> None:
         """IntegrationThread から呼ばれるコールバック。スレッド安全。"""
         self._update_queue.put(record)
+
+    def on_rfid_card(self, rfid_ev: object) -> None:
+        """IntegrationThread から呼ばれる RFID カードコールバック。スレッド安全。"""
+        self._rfid_card_queue.put(rfid_ev)
 
     def run(self) -> None:
         """mainloop を開始する（ブロッキング）。"""

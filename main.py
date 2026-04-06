@@ -121,24 +121,37 @@ def run_cli() -> None:
         camera_thread.start()
         print("カメラスレッド起動（動体検出 + ±2秒マッチング有効）。")
 
-    # Phase 6: RFID が有効な場合のみ RFIDThread を起動する
+    # Phase 6/7: RFID が有効な場合のみ起動する (transport に応じてスレッドを選択)
     rfid_thread = None
     rfid_cfg = cfg.get("rfid", {})
     if rfid_cfg.get("enabled", False):
         from core.event_queue import make_rfid_queue
         from rfid.card_master import CardMaster
-        from rfid.reader_thread import RFIDThread
         rfid_q = make_rfid_queue()
         card_master = CardMaster(rfid_cfg.get("card_master_file", "./rfid_cards.json"))
-        rfid_thread = RFIDThread(
-            rfid_queue=rfid_q,
-            card_master=card_master,
-            reader_configs=rfid_cfg.get("readers", []),
-            poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
-            stop_event=stop_event,
-        )
+        transport = rfid_cfg.get("transport", "pcsc")
+        if transport == "http":
+            from rfid.http_receiver import RFIDHTTPReceiver
+            rfid_thread = RFIDHTTPReceiver(
+                rfid_queue=rfid_q,
+                card_master=card_master,
+                reader_configs=rfid_cfg.get("readers", {}),
+                bind_host=rfid_cfg.get("bind_host", "0.0.0.0"),
+                bind_port=rfid_cfg.get("bind_port", 8787),
+                stop_event=stop_event,
+            )
+            print(f"RFID HTTP受信スレッド起動 ({rfid_cfg.get('bind_host','0.0.0.0')}:{rfid_cfg.get('bind_port',8787)})。")
+        else:
+            from rfid.reader_thread import RFIDThread
+            rfid_thread = RFIDThread(
+                rfid_queue=rfid_q,
+                card_master=card_master,
+                reader_configs=rfid_cfg.get("readers", []),
+                poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
+                stop_event=stop_event,
+            )
+            print("RFID pyscardスレッド起動。")
         rfid_thread.start()
-        print("RFIDスレッド起動。")
 
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
@@ -254,6 +267,7 @@ def run_gui() -> None:
         audio_queue=audio_q,
         camera_queue=camera_q,
         stop_event=stop_event,
+        rfid_receiver=None,  # rfid_thread 確定後に設定
     )
 
     audio_thread = AudioThread(
@@ -284,15 +298,32 @@ def run_gui() -> None:
     if rfid_cfg.get("enabled", False):
         from core.event_queue import make_rfid_queue
         from rfid.card_master import CardMaster
-        from rfid.reader_thread import RFIDThread
         rfid_q = make_rfid_queue()
-        rfid_thread = RFIDThread(
-            rfid_queue=rfid_q,
-            card_master=CardMaster(rfid_cfg.get("card_master_file", "./rfid_cards.json")),
-            reader_configs=rfid_cfg.get("readers", []),
-            poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
-            stop_event=stop_event,
-        )
+        card_master = CardMaster(rfid_cfg.get("card_master_file", "./rfid_cards.json"))
+        transport = rfid_cfg.get("transport", "pcsc")
+        if transport == "http":
+            from rfid.http_receiver import RFIDHTTPReceiver
+            rfid_thread = RFIDHTTPReceiver(
+                rfid_queue=rfid_q,
+                card_master=card_master,
+                reader_configs=rfid_cfg.get("readers", {}),
+                bind_host=rfid_cfg.get("bind_host", "0.0.0.0"),
+                bind_port=rfid_cfg.get("bind_port", 8787),
+                stop_event=stop_event,
+            )
+        else:
+            from rfid.reader_thread import RFIDThread
+            rfid_thread = RFIDThread(
+                rfid_queue=rfid_q,
+                card_master=card_master,
+                reader_configs=rfid_cfg.get("readers", []),
+                poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
+                stop_event=stop_event,
+            )
+
+    # HTTP transport の場合、rfid_receiver を GUI に渡してステータス表示する
+    if rfid_thread is not None and rfid_cfg.get("transport") == "http":
+        dash._rfid_receiver = rfid_thread
 
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
@@ -301,6 +332,7 @@ def run_gui() -> None:
         camera_queue=camera_q,
         rfid_queue=rfid_q,
         on_action=dash.on_action,
+        on_rfid_card=dash.on_rfid_card,
         stop_event=stop_event,
     )
 

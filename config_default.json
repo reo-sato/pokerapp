@@ -20,9 +20,27 @@
   },
   "rfid": {
     "enabled": false,
-    "reader_type": "pcsc",
-    "poll_interval_ms": 100,
-    "readers": [],
-    "card_master_file": "./rfid_cards.json"
+    "transport": "http",
+    "bind_host": "0.0.0.0",
+    "bind_port": 8787,
+    "card_master_file": "./rfid_cards.json",
+    "readers": {
+      "seat_1": {"role": "seat",  "seat": 1},
+      "seat_2": {"role": "seat",  "seat": 2},
+      "seat_3": {"role": "seat",  "seat": 3},
+      "seat_4": {"role": "seat",  "seat": 4},
+      "seat_5": {"role": "seat",  "seat": 5},
+      "seat_6": {"role": "seat",  "seat": 6},
+      "seat_7": {"role": "seat",  "seat": 7},
+      "seat_8": {"role": "seat",  "seat": 8},
+      "seat_9": {"role": "seat",  "seat": 9},
+      "board_1": {"role": "board", "index": 1},
+      "board_2": {"role": "board", "index": 2},
+      "board_3": {"role": "board", "index": 3},
+      "board_4": {"role": "board", "index": 4},
+      "board_5": {"role": "board", "index": 5}
+    },
+    "_pcsc_transport_comment": "transport='pcsc' の場合は以下を使用 (pyscard 必須)",
+    "_pcsc_poll_interval_ms": 100
   }
 }
