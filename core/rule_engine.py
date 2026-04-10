@@ -28,7 +28,19 @@ def legal_actions(seat: int, state: GameState) -> frozenset[ActionType]:
         stack <= call_diff → {ALL_IN, FOLD}
         call_diff > 0   → {CALL, RAISE, FOLD}
     """
-    ...
+    if seat in state.folded_seats or seat in state.all_in_seats:
+        return frozenset()
+
+    call_diff = state.call_amount - state.invested.get(seat, 0)
+
+    if call_diff == 0:
+        return frozenset({ActionType.CHECK, ActionType.BET})
+
+    if state.get_stack(seat) <= call_diff:
+        return frozenset({ActionType.ALL_IN, ActionType.FOLD})
+
+    # call_diff > 0 and stack covers the call
+    return frozenset({ActionType.CALL, ActionType.RAISE, ActionType.FOLD})
 
 
 def validate_action(
@@ -41,7 +53,11 @@ def validate_action(
     含まれる場合は (True, "") を返す。
     spec.md FR-23 の矛盾検知に使用する。
     """
-    ...
+    allowed = legal_actions(seat, state)
+    if action in allowed:
+        return (True, "")
+    allowed_names = [a.value for a in allowed]
+    return (False, f"action {action.value!r} is not legal for seat {seat} (allowed: {allowed_names})")
 
 
 def detect_street_overflow(street_action_count: int, active_count: int) -> bool:
@@ -49,7 +65,7 @@ def detect_street_overflow(street_action_count: int, active_count: int) -> bool:
 
     street_action_count > active_count の場合 True を返す。
     """
-    ...
+    return street_action_count > active_count
 
 
 def detect_fold_contradiction(
@@ -61,4 +77,4 @@ def detect_fold_contradiction(
 
     例: フォールド済みの席に再度ターンが回ってきた場合に True を返す。
     """
-    ...
+    return seat in state.folded_seats
