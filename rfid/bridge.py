@@ -1,17 +1,85 @@
 """rfid/bridge.py
 
-PC/SC (pyscard) ラッパー。NFC リーダーからカード UID を読み取る低レベル層。
+spec.md v4.0:
+  - RFIDThread: Flask HTTP サーバー経由で ESP32 イベントを受信し event_queue へ送出する。
+  - PCSCBridge / MockPCSCBridge: PC/SC 方式（旧仕様、後方互換のため保持）。
 
-設計方針:
-- pyscard は実行時に遅延インポートする。インポートできない環境でも
-  このモジュール自体はインポート可能にする（テスト・GUI での import エラー防止）。
-- UID 取得 APDU: FF CA 00 00 00 (ISO 7816 Get UID)
-- レスポンス末尾 2 バイト: SW1=0x90, SW2=0x00 が成功を示す。
+RFIDThread を使う場合は rfid/server.py の RFIDFlaskServer を内部で起動する。
 """
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Optional
+
+from core.event_queue import EventQueue
+from rfid.card_master import CardMaster
+from rfid.server import RFIDFlaskServer
+
+logger = logging.getLogger(__name__)
+
+
+class RFIDThread(threading.Thread):
+    """spec.md v4.0: Flask HTTP サーバー経由で ESP32 イベントを受信し
+    event_queue へ送出するスレッド（spec.md FR-06–FR-12）。
+
+    スレッド構成上の責務:
+    - RFIDFlaskServer を起動し ESP32 POST を受信する
+    - tag_id → card_code を CardMaster で解決する
+    - seat 用リーダーの fold_absent_threshold 連続未検出でフォールドイベントを発火する
+    - board 用リーダーのカード枚数変化でストリート遷移イベントを発火する
+    - active_seats を更新する
+    """
+
+    _event_queue: EventQueue
+    _card_master: CardMaster
+    _server: RFIDFlaskServer
+    _absent_counts: dict[str, int]   # reader_id → 連続未検出回数
+    _fold_threshold: int
+    _stop_event: threading.Event
+    _readers_config: dict            # config["rfid"]["readers"]
+
+    def __init__(
+        self,
+        event_queue: EventQueue,
+        card_master: CardMaster,
+        host: str,
+        port: int,
+        fold_absent_threshold: int,
+        readers_config: dict,
+        stop_event: Optional[threading.Event] = None,
+    ) -> None: ...
+
+    def run(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def _on_rfid_event(self, event_data: dict) -> None:
+        """RFIDFlaskServer から呼ばれるコールバック。event_type に応じてディスパッチ。"""
+        ...
+
+    def _handle_present(self, reader_id: str, tag_id: str, timestamp: str) -> None:
+        # IMPORTANT: self._absent_counts[reader_id] = 0 でカウンタをリセットすること。
+        # リセットしないと次ハンドのディール時に誤フォールドが発火する。
+        ...
+
+    def _handle_absent(self, reader_id: str, timestamp: str) -> None:
+        # IMPORTANT: ショーダウンフェーズ中（state.street == "showdown"）は
+        # フォールドイベントを発火しないこと（spec.md FR-11）。
+        # _absent_counts が _fold_threshold を超えた場合のみ発火する。
+        ...
+
+    def _resolve_card(self, tag_id: str) -> Optional[str]:
+        """tag_id → card_code に変換する。未登録の場合は None を返す。"""
+        ...
+
+    def _get_reader_config(self, reader_id: str) -> Optional[dict]:
+        """readers_config から reader_id のエントリを返す。存在しない場合は None。"""
+        ...
+
+
+# ── 以下は PC/SC 方式（旧仕様）。後方互換のため保持。 ──────────────────────
+# spec.md v4.0 では transport="http" が標準。transport="pcsc" 時のみ参照する。
 
 logger = logging.getLogger(__name__)
 

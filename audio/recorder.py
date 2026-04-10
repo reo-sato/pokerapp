@@ -8,6 +8,7 @@ import time
 from typing import Optional
 
 from audio.recognizer import WhisperTranscriber, parse_action
+from audio.stream_buffer import AudioStreamBuffer
 from core.event_queue import EventQueue
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ class AudioThread(threading.Thread):
         self._sample_rate = sample_rate
         self._stop_event = stop_event or threading.Event()
         self._transcriber = WhisperTranscriber(model_size=model_size, language=language)
+        self._stream_buffer: AudioStreamBuffer = AudioStreamBuffer()  # spec.md FR-15–17
 
     def stop(self) -> None:
         """スレッドの停止を要求する。"""

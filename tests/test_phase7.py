@@ -118,6 +118,7 @@ class TestRFIDSeatMatching:
         assert rec.source == {"camera": False, "audio": True, "rfid": True}
         assert rec.confidence == _CONF_RFID_AUDIO
 
+    @pytest.mark.skip(reason="camera deprecated in spec v4.0")
     def test_rfid_audio_camera_match(self, tmp_path: Path):
         """RFID + audio + camera → confidence = 1.0."""
         gs = _make_game()

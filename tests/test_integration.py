@@ -92,6 +92,7 @@ class TestAudioOnlyConfidence:
         assert captured[0].source["camera"] is False
 
 
+@pytest.mark.skip(reason="camera deprecated in spec v4.0")
 class TestCameraCorroboration:
     """同席・±MATCH_WINDOW 秒以内の CameraEvent がある場合、confidence = _CONF_AUDIO_CAMERA。"""
 
@@ -155,6 +156,7 @@ class TestCameraCorroboration:
         assert rec.confidence == _CONF_AUDIO_CAMERA
 
 
+@pytest.mark.skip(reason="camera deprecated in spec v4.0")
 class TestCameraWindowBoundary:
     """ウィンドウ外のカメライベントはマッチしない。"""
 
@@ -217,6 +219,7 @@ class TestCameraWindowBoundary:
         assert captured[0].confidence == _CONF_AUDIO_ONLY
 
 
+@pytest.mark.skip(reason="camera deprecated in spec v4.0")
 class TestCameraBufferExpiry:
     """古いカメライベントはバッファから破棄される。"""
 
@@ -252,6 +255,7 @@ class TestCameraBufferExpiry:
 class TestMultipleActions:
     """複数アクション: カメライベントが使い捨てになることを確認。"""
 
+    @pytest.mark.skip(reason="camera deprecated in spec v4.0")
     def test_camera_event_consumed_once(self, tmp_path: Path) -> None:
         """1つのカメライベントは1つのアクションにしか使われない。"""
         gs = _make_game()

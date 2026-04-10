@@ -1,4 +1,1 @@
-{
-  "description": "RFID tag to poker card mapping. Register each physical card with its NFC tag UID. Use 'python -m rfid.register' to register cards interactively.",
-  "cards": {}
-}
+{}
