@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 
 WHISPER_PROMPT_JA = (
-    "ベット コール レイズ チェック フォールド オールイン ショーダウン ウィナー ハンド開始"
+    "ベット コール レイズ チェック フォールド オールイン ショーダウン ウィナー ハンド開始 ポット シート BTN SB BB UTG CO"
 )
 
 # アクションキーワード → 正規化アクション名

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import datetime
 import logging
 import re
-import time
 from typing import Optional
 
 from core.constants import (
@@ -10,68 +10,62 @@ from core.constants import (
     KANJI_ALL,
     KANJI_DIGIT,
     KANJI_UNIT,
+    POSITION_KEYWORDS,
     WHISPER_PROMPT_JA,
 )
 from core.events import AudioEvent
+from core.rule_engine import ActionType
 
 logger = logging.getLogger(__name__)
 
-# 以下の正規表現はすべて raw string (r"...") で記述する。
-# バックスラッシュの二重エスケープや誤解を防ぐためのプロジェクト規約。
+# ── 正規表現パターン（すべて raw string） ────────────────────────────────────
 
-# 連続漢数字トークンにマッチする正規表現
+# 連続漢数字トークン
 _KANJI_PATTERN = re.compile(r"[一二三四五六七八九〇十百千万]+")
 
-# 算用数字 + 単位パターン（左から右に順番に試行）
-# 1万2千, 1万, 5K, 1,200, 800 の順に試行
-_MIXED_MAN_SEN = re.compile(r"(\d[\d,]*)万(\d+)千")  # 1万2千
-_MAN_ONLY      = re.compile(r"(\d[\d,]*)万")          # 3万
-_K_UNIT        = re.compile(r"(\d[\d,]*)[Kk]")        # 5K
-_DIGIT_ONLY    = re.compile(r"\d[\d,]*")              # 800 / 1,200
+# 算用数字 + 単位パターン（左から右に試行）
+_MIXED_MAN_SEN = re.compile(r"(\d[\d,]*)万(\d+)千")          # 1万2千
+_MAN_ONLY      = re.compile(r"(\d[\d,]*)万")                  # 3万
+_K_UNIT        = re.compile(r"(\d[\d,]*(?:\.\d+)?)[Kk]")     # 5K, 2.5K
+_DIGIT_ONLY    = re.compile(r"\d[\d,]*")                      # 800 / 1,200
 
-
-# 席番号表現（金額パースの前に除去する）
-# 例: "シート1", "シート２", "seat 3"
-_SEAT_PATTERN = re.compile(
-    r"(?:シート[0-9０-９一二三四五六七八九十]+|seat\s*[0-9]+)",
+# 席番号除去パターン（parse_amount が誤認識しないよう除去する）
+_SEAT_STRIP = re.compile(
+    r"(?:シート[　 ]*[0-9０-９一二三四五六七八九十]+|seat\s*[0-9]+)",
     re.IGNORECASE,
 )
 
+# 席番号抽出パターン
+_SEAT_EXTRACT = re.compile(
+    r"シート[　 ]*([0-9０-９]+)"
+    r"|seat\s*([0-9]+)"
+    r"|([0-9]+)番",
+    re.IGNORECASE,
+)
+
+# 全角数字 → 半角数字の変換テーブル
+_FULLWIDTH_TABLE = str.maketrans("０１２３４５６７８９", "0123456789")
+
 
 def _strip_seat_references(text: str) -> str:
-    """席番号表現をテキストから除去して返す。
-
-    parse_amount() が席番号の数字を金額として誤認識することを防ぐ。
-    例: "シート1 レイズ 800" → " レイズ 800"
-    """
-    return _SEAT_PATTERN.sub("", text)
+    """席番号表現を除去する（parse_amount の誤認識防止）。"""
+    return _SEAT_STRIP.sub("", text)
 
 
 def _kanji_to_int(kanji: str) -> int:
-    """連続した漢数字文字列を整数に変換する。
-
-    桁単位の乗算・累算方式:
-        二千五百 → 2×1000 + 5×100 = 2500
-        一万二千三百 → 1×10000 + 2×1000 + 3×100 = 12300
-        五千 → 5×1000 = 5000
-
-    変換できない場合は 0 を返す。
-    """
+    """連続した漢数字文字列を整数に変換する。変換できない場合は 0 を返す。"""
     if not kanji:
         return 0
-    # 万以上の単位で分割してから再帰的に処理する
-    # 万 が含まれる場合: 左側×10000 + 右側
     if "万" in kanji:
         idx = kanji.index("万")
-        left = kanji[:idx]
-        right = kanji[idx + 1 :]
-        left_val = _kanji_to_int(left) if left else 1
+        left  = kanji[:idx]
+        right = kanji[idx + 1:]
+        left_val  = _kanji_to_int(left)  if left  else 1
         right_val = _kanji_to_int(right) if right else 0
         return left_val * 10000 + right_val
 
     result = 0
-    current_digit = 0  # 単位の前にある数字（例: 二千 → current_digit=2）
-
+    current_digit = 0
     for ch in kanji:
         if ch in KANJI_DIGIT:
             current_digit = KANJI_DIGIT[ch]
@@ -82,47 +76,35 @@ def _kanji_to_int(kanji: str) -> int:
         else:
             logger.debug("Unknown kanji character: %s", ch)
             return 0
-
-    result += current_digit  # 末尾の数字（単位なし）を加算
+    result += current_digit
     return result
 
 
 def parse_amount(text: str) -> int:
     """テキストを左から右に走査し、最初にマッチした金額表現を int で返す。
     見つからなければ 0 を返す。
-
-    走査ポリシー:
-    - 連続漢数字トークン ([一二三四五六七八九〇十百千万]+) は _kanji_to_int で処理する
-    - それ以外（算用数字+単位 / K / カンマ区切り）は regex で処理する
-    - テキストを左から右に走査し、最初にマッチした表現を採用する
     """
-    # 全パターンの候補を (開始位置, 変換値) として収集し、最左のものを返す
     candidates: list[tuple[int, int]] = []
 
-    # 連続漢数字トークン
     for m in _KANJI_PATTERN.finditer(text):
         val = _kanji_to_int(m.group())
         if val > 0:
             candidates.append((m.start(), val))
 
-    # 1万2千
     for m in _MIXED_MAN_SEN.finditer(text):
         man = int(m.group(1).replace(",", ""))
         sen = int(m.group(2))
         candidates.append((m.start(), man * 10000 + sen * 1000))
 
-    # 3万（1万2千にマッチしなかった箇所）
     for m in _MAN_ONLY.finditer(text):
-        # 1万2千 として既にマッチしている範囲はスキップしない（最左判定で自然に解決）
         val = int(m.group(1).replace(",", "")) * 10000
         candidates.append((m.start(), val))
 
-    # 5K
     for m in _K_UNIT.finditer(text):
-        val = int(m.group(1).replace(",", "")) * 1000
+        # 小数対応: 2.5K → 2500
+        val = round(float(m.group(1).replace(",", "")) * 1000)
         candidates.append((m.start(), val))
 
-    # 算用数字のみ（カンマ区切り含む）
     for m in _DIGIT_ONLY.finditer(text):
         val = int(m.group().replace(",", ""))
         candidates.append((m.start(), val))
@@ -130,56 +112,117 @@ def parse_amount(text: str) -> int:
     if not candidates:
         return 0
 
-    # 最左（開始位置が最小）のものを採用。
-    # 同じ位置に複数のパターンがマッチした場合は値が大きい方を優先する。
-    # （例: "1万" と "1" が同位置にマッチするとき、より具体的な表現である
-    #   "1万"=10000 を採用するため）
+    # 最左優先。同位置なら大きい値を優先（より具体的な表現を採用）
     candidates.sort(key=lambda x: (x[0], -x[1]))
     return candidates[0][1]
 
 
-def parse_action(text: str) -> Optional[AudioEvent]:
-    """Whisper の認識テキストからアクション種別と金額を抽出して AudioEvent を返す。
-    認識できない場合は None を返す。
+# ── 公開 extract 関数（spec.md FR-19–21） ────────────────────────────────────
 
-    キーワード選択ルール:
-    1. テキスト内で最も左に現れたキーワードを優先する。
-    2. 同じ開始位置に複数のキーワードがマッチした場合は、より長いキーワードを優先する。
-       （例: "all in" と "all" が同位置にマッチ → "all in" を採用）
+def extract_action(text: str) -> Optional[ActionType]:
+    """テキストから最初に検出されたポーカーアクションを ActionType で返す。
+
+    winner / showdown / new_hand などフェーズイベントは ActionType に含まれないため
+    None を返す。
     """
     lower = text.lower()
-
     found_action: Optional[str] = None
     found_pos = len(text)
-    found_kw_len = 0  # タイブレーク用: 同じ位置なら長い方を優先
+    found_kw_len = 0
 
-    for keyword, action in ACTION_KEYWORDS.items():
+    for keyword, action_str in ACTION_KEYWORDS.items():
         pos = lower.find(keyword.lower())
         if pos == -1:
             continue
         kw_len = len(keyword)
-        # 最左優先。同位置なら長いキーワードを優先（より具体的な表現を採用するため）
         if pos < found_pos or (pos == found_pos and kw_len > found_kw_len):
             found_pos = pos
-            found_action = action
+            found_action = action_str
+            found_kw_len = kw_len
+
+    if found_action is None:
+        return None
+    try:
+        return ActionType(found_action)
+    except ValueError:
+        # "winner", "showdown", "new_hand" は ActionType に含まれない
+        return None
+
+
+def extract_amount(text: str) -> Optional[int]:
+    """テキストから金額を抽出して返す。金額が見つからない場合は None を返す。
+
+    漢数字（二千五百）・K 表記（2.5K）・万表記（3万）に対応。
+    席番号の数字は除去してから解析する。
+    """
+    val = parse_amount(_strip_seat_references(text))
+    return val if val > 0 else None
+
+
+def extract_seat(text: str) -> Optional[int]:
+    """テキストから席番号を抽出して返す（FR-26）。
+
+    対応フォーマット: 「シート3」「シート２」「seat 3」「3番」
+    """
+    m = _SEAT_EXTRACT.search(text)
+    if not m:
+        return None
+    val = next((g for g in m.groups() if g is not None), None)
+    if val is None:
+        return None
+    val = val.translate(_FULLWIDTH_TABLE)
+    return int(val)
+
+
+def extract_position(text: str) -> Optional[str]:
+    """テキストからポジション言及を抽出して正規化ポジション名を返す（FR-26）。
+
+    対応: 「BTN」「ボタン」「SB」「スモールブラインド」「BB」「UTG」「CO」「HJ」「LJ」等
+    より長いキーワードを優先（例: "スモールブラインド" > "SB"）。
+    """
+    text_lower = text.lower()
+    for keyword in sorted(POSITION_KEYWORDS, key=len, reverse=True):
+        if keyword.lower() in text_lower:
+            return POSITION_KEYWORDS[keyword]
+    return None
+
+
+# ── parse_action（IntegrationThread 向け一括パース） ─────────────────────────
+
+def parse_action(text: str) -> Optional[AudioEvent]:
+    """Whisper 認識テキストからアクション・金額・席・ポジションを抽出して
+    AudioEvent を返す。認識できない場合は None を返す。
+
+    キーワード選択ルール（最左優先・同位置なら長いキーワードを優先）。
+    """
+    lower = text.lower()
+    found_action: Optional[str] = None
+    found_pos = len(text)
+    found_kw_len = 0
+
+    for keyword, action_str in ACTION_KEYWORDS.items():
+        pos = lower.find(keyword.lower())
+        if pos == -1:
+            continue
+        kw_len = len(keyword)
+        if pos < found_pos or (pos == found_pos and kw_len > found_kw_len):
+            found_pos = pos
+            found_action = action_str
             found_kw_len = kw_len
 
     if found_action is None:
         logger.debug("No action keyword found in: %r", text)
         return None
 
-    # 席番号表現（シート1 / seat 3 等）を除去してから金額を抽出する。
-    # 除去しないと parse_amount() が席番号の数字を最初の金額候補として拾ってしまう。
-    # call/check/fold の金額: Phase 1 では parse_amount() の結果をそのまま使う簡易仕様。
-    # （例: "コール 500" → amount=500、"チェック" → amount=0）
-    # 精緻化する場合は action ごとに金額の妥当性検証を追加すること。
     amount = parse_amount(_strip_seat_references(text))
 
     return AudioEvent(
         action=found_action,
-        amount=amount,
-        timestamp=time.time(),
+        amount=amount if amount > 0 else None,
+        timestamp=datetime.datetime.now().isoformat(),
         raw_text=text,
+        mentioned_seat=extract_seat(text),
+        mentioned_position=extract_position(text),
     )
 
 
@@ -191,7 +234,6 @@ class WhisperTranscriber:
         logger.info("Loading Whisper model: %s", model_size)
         try:
             from faster_whisper import WhisperModel  # type: ignore[import]
-
             self._model = WhisperModel(model_size, device="cpu", compute_type="int8")
         except ImportError:
             logger.warning(
@@ -200,18 +242,11 @@ class WhisperTranscriber:
             self._model = None
 
     def transcribe(self, audio_bytes: bytes) -> str:
-        """PCM16 音声バイト列をテキストに変換して返す。
-        変換失敗時は空文字列を返す（クラッシュしない）。
-
-        入力は 16kHz モノラル PCM16 固定を前提とする。
-        faster-whisper の transcribe() は numpy 配列の長さから 16kHz を仮定するため、
-        sample_rate は引数として受け取らない。
-        """
+        """PCM16 音声バイト列をテキストに変換して返す。失敗時は空文字列を返す。"""
         if self._model is None:
             return ""
         try:
             import numpy as np
-
             audio_array = (
                 np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             )
