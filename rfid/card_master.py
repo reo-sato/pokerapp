@@ -54,6 +54,15 @@ class CardMaster:
         """正規化済みタグ ID からカード文字列を返す。未登録時は空文字。"""
         return self._mapping.get(normalize_tag_id(tag_id), "")
 
+    def resolve(self, tag_id: str) -> Optional[str]:
+        """正規化済みタグ ID からカード文字列を返す。未登録時は None（FR-07）。"""
+        result = self._mapping.get(normalize_tag_id(tag_id), "")
+        return result if result else None
+
+    def save(self) -> None:
+        """現在のマッピングをファイルに保存する。"""
+        self._save()
+
     def lookup_bytes(self, uid_bytes: bytes) -> str:
         """bytes 形式のタグ UID からカード文字列を返す。"""
         return self.lookup(bytes_to_tag_id(uid_bytes))
