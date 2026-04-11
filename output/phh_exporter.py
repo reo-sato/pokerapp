@@ -28,6 +28,12 @@ from typing import Optional
 from core.constants import STREET_ORDER
 from core.hand_log import ActionRecord, HandSummary
 
+try:
+    from pokerkit import HandHistory as _PKHandHistory
+    _POKERKIT_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _POKERKIT_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 # PHH variant コード（No-Limit Texas Hold'em）
@@ -57,6 +63,64 @@ class PHHExporter:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         logger.info("PHH exported: %s", path)
+
+    def export_hand(self, summary: HandSummary) -> str:
+        """PokerKit HandHistory API を使って HandSummary を PHH TOML 文字列に変換する。
+
+        FR-37: PokerKit の公式 HandHistory クラスを使用して TOML を生成する。
+        hole_cards が None（非公開）の席は 1 枚あたり "??" で埋める。
+        pokerkit が未インストールの場合は self.export() へフォールバックする。
+        """
+        if not _POKERKIT_AVAILABLE:
+            logger.warning("pokerkit not available; falling back to custom TOML exporter")
+            return self.export(summary)
+
+        players_info = summary.players
+        num_players = len(players_info)
+        if num_players == 0:
+            return self.export(summary)
+
+        antes = tuple(0 for _ in range(num_players))
+        sb = summary.blinds.get("sb", 0)
+        bb = summary.blinds.get("bb", 0)
+        blinds: list[int] = [0] * num_players
+        if num_players >= 1:
+            blinds[0] = sb
+        if num_players >= 2:
+            blinds[1] = bb
+        blinds_tuple = tuple(blinds)
+
+        starting_stacks = tuple(p.get("stack_start", 0) for p in players_info)
+        player_names = tuple(p.get("name", f"Player{i+1}") for i, p in enumerate(players_info))
+
+        phh_actions = tuple(_build_phh_actions(summary))
+
+        kwargs: dict = {
+            "variant": VARIANT_NT,
+            "ante_trimming_status": True,
+            "antes": antes,
+            "blinds_or_straddles": blinds_tuple,
+            "min_bet": summary.blinds.get("bb", 0),
+            "starting_stacks": starting_stacks,
+            "actions": phh_actions,
+        }
+        if player_names:
+            kwargs["players"] = player_names
+        if summary.hand_id:
+            kwargs["hand"] = summary.hand_id
+        if summary.started_at:
+            kwargs["time"] = summary.started_at
+        if self._author:
+            kwargs["author"] = self._author
+        if summary.review_required:
+            kwargs["note"] = "contains actions requiring review"
+
+        try:
+            hh = _PKHandHistory(**kwargs)
+            return hh.dumps()
+        except Exception as exc:
+            logger.warning("PokerKit HandHistory failed (%s); falling back to custom exporter", exc)
+            return self.export(summary)
 
     def write_session(self, summaries: list[HandSummary], directory: Path) -> list[Path]:
         """セッション内の全ハンドを {hand_id:04d}.phh として書き出す。"""
