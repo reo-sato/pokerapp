@@ -65,21 +65,15 @@ def _join_all(threads, stop: threading.Event) -> None:
         if t.is_alive(): logger.warning("スレッド %s がタイムアウトしました", t.name)
 
 
-def _run_cli(gs, audio_q, stop: threading.Event) -> None:
-    """CLIループ: q=終了  n=新ハンド  w <席>=ウィナー"""
-    from core.events import AudioEvent; import time
-    print("\nコマンド: q=終了  n=新ハンド  w <席>=ウィナー\n")
-    try:
-        while not stop.is_set():
-            try: parts = input("> ").split()
-            except (EOFError, KeyboardInterrupt): break
-            if not parts: continue
-            if parts[0] == "q": break
-            elif parts[0] == "n": gs.new_hand(); print(f"新ハンド: #{gs.hand_id}")
-            elif parts[0] == "w" and len(parts) >= 2:
-                audio_q.put(AudioEvent(action="winner", amount=0, timestamp=time.time(),
-                    raw_text=f"シート{parts[1]} ウィナー"))
-    except KeyboardInterrupt: pass
+def _run_cli(record_q: queue.Queue, stop: threading.Event) -> None:
+    """ActionRecord が届くたびに JSON Lines 形式で標準出力に逐次出力する。"""
+    import json
+    while not stop.is_set():
+        try:
+            record = record_q.get(timeout=0.1)
+            print(json.dumps(record.to_dict(), ensure_ascii=False), flush=True)
+        except queue.Empty:
+            pass
 
 
 def main() -> None:
@@ -100,11 +94,10 @@ def main() -> None:
     signal.signal(signal.SIGINT, _sig); signal.signal(signal.SIGTERM, _sig)
     rfid_t, audio_t, audio_q, rfid_q, cm = _start_rfid_audio(cfg, stop)
     if args.cli:
-        on_act = lambda r: print(f"  [{r.street}] 席{r.seat} {r.action} {r.amount}"
-                                 + (" [要確認]" if r.needs_review else ""))
+        record_q: queue.Queue = queue.Queue()
         it = IntegrationThread(audio_queue=audio_q, game_state=gs, json_writer=writer,
-            rfid_queue=rfid_q, on_action=on_act, stop_event=stop)
-        it.start(); _run_cli(gs, audio_q, stop)
+            rfid_queue=rfid_q, on_action=record_q.put, stop_event=stop)
+        it.start(); _run_cli(record_q, stop)
     else:
         from gui.dashboard import DashboardWindow
         win = DashboardWindow(update_queue=queue.Queue(), audio_queue=audio_q,
