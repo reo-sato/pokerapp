@@ -1,0 +1,202 @@
+Poker Hand Logger — CLAUDE.md
+プロジェクト概要
+ライブポーカートーナメントのハンド履歴を自動記録するPythonアプリケーション。
+ディーラー口元マイク（faster-whisper音声認識）とRFID NFC（ESP32 + PN532）の2ソースを統合し、
+JSON/PHH形式でハンドログを出力する。
+対象: 小規模クラブ・個人配信向け
+仕様書: spec.md を必ず参照すること
+カメラ（OpenCV）は本バージョンより廃止。 vision/ ディレクトリは使用しない。
+ 
+ディレクトリ構成
+poker-logger/
+├── CLAUDE.md                ← このファイル
+├── spec.md                  ← 仕様書（必読）
+├── main.py                  ← エントリーポイント・GUI起動
+├── config.json              ← ユーザー設定（ブラインド・RFID設定等）
+├── config_default.json      ← デフォルト設定テンプレート
+├── rfid_cards.json          ← tag_id → card_code マスタ（例: {"04A1B2C3": "Ah"}）
+├── requirements.txt
+│
+├── core/
+│   ├── __init__.py
+│   ├── game_state.py        ← ゲーム状態管理（active_seats・ターン順・スタック等）
+│   ├── hand_log.py          ← ハンドログのデータクラス定義
+│   ├── event_queue.py       ← スレッド間共有イベントキュー
+│   ├── constants.py         ← 定数集約
+│   └── rule_engine.py       ← PokerRuleEngine（legal_actions算出・矛盾検知）
+│
+├── audio/
+│   ├── __init__.py
+│   ├── recorder.py          ← PyAudioマイク入力スレッド
+│   ├── recognizer.py        ← faster-whisper推論・アクションパーサー
+│   └── stream_buffer.py     ← AudioStreamBuffer（確定型/確認型/宣言型分類・状態機械）
+│
+├── rfid/
+│   ├── __init__.py
+│   ├── server.py            ← Flask HTTP受信サーバー（ESP32からのPOST）
+│   ├── bridge.py            ← RFIDThread・イベント変換・active_seats更新
+│   ├── card_master.py       ← rfid_cards.json ロード・検索・保存
+│   └── events.py            ← RFIDイベントのデータクラス定義
+│
+├── integration/
+│   ├── __init__.py
+│   └── engine.py            ← IntegrationThread・アクター推定（尤度）・confidence算出
+│
+├── output/
+│   ├── __init__.py
+│   ├── json_writer.py       ← JSONログ書き込み
+│   └── phh_exporter.py      ← PHH形式エクスポート
+│
+├── gui/
+│   ├── __init__.py
+│   ├── dashboard.py         ← メインGUI（hole cards・board・RFID接続状態表示）
+│   ├── card_master_view.py  ← カードマスタ登録・編集UI
+│   └── review_panel.py      ← needs_review手動確認・修正パネル
+│
+├── tests/
+└── logs/                    ← セッションログ出力先（.gitignore）
+
+ 
+技術スタック（バージョン固定）
+Python 3.10+
+faster-whisper 1.0+    # whisperより高速なCPU推論
+pyaudio 0.2.13+
+pokerkit 0.5+          # PHH形式出力・ポーカールール
+customtkinter 5.2+     # モダンなTkinterラッパー
+numpy 1.24+
+flask 3.0+             # RFID HTTP受信サーバー
+
+opencv-python / easyocr は使用しない（カメラ廃止）
+ 
+アーキテクチャの原則
+スレッド構成（変更禁止）
+スレッド名	役割
+AudioThread	音声バッファリング + Whisper推論 + AudioStreamBuffer管理 → event_queueへ送出
+RFIDThread	HTTP受信 + card_master解決 + active_seats更新 → event_queueへ送出
+IntegrationThread	キュー消費 + PokerRuleEngine + アクター推定 + ゲーム状態更新 + ログ書き込み
+MainThread	GUI描画のみ（ブロッキング処理禁止）
+
+AudioStreamBuffer の状態機械（spec.md FR-15〜17）
+ディーラーの発話を3種に分類し、確定型または宣言型の発話のみをevent_queueへ送出する。
+IDLE
+  ├─ 確定型（「コール」「ベット 800」等） → ACTION_CONFIRMEDを即発火 → IDLE
+  ├─ 確認型（「コールですか？」等）     → PENDING_CONFIRM(action, amount)
+  └─ 宣言型（「ハンド開始」「ショーダウン」等） → PHASE_EVENTを即発火 → IDLE
+
+PENDING_CONFIRM(action, amount)
+  ├─ 確定型（同一action）  → ACTION_CONFIRMEDを発火 → IDLE
+  ├─ 確認型（別action）   → PENDING_CONFIRM(新action) ← 上書き
+  └─ 宣言型              → PHASE_EVENTを発火 → IDLE（pendingは破棄）
+
+ディーラーボタン管理（spec.md FR-05b〜05h）
+core/game_state.py の GameState はハンド開始ごとに以下を更新する。
+def advance_button(self) -> None:
+    """ハンド終了時に呼び出す。ボタンを次のアクティブ席へ1席進める。"""
+    all_seats = sorted(self.all_seats)
+    idx = all_seats.index(self.button_seat)
+    for _ in range(len(all_seats)):
+        idx = (idx + 1) % len(all_seats)
+        if all_seats[idx] not in self.busted_seats:
+            self.button_seat = all_seats[idx]
+            break
+
+def build_position_map(self) -> dict[int, str]:
+    """button_seat から全席のポジション名を算出して返す。"""
+    active = [s for s in sorted(self.all_seats) if s not in self.busted_seats]
+    n = len(active)
+    btn_idx = active.index(self.button_seat)
+    names = ["BTN", "SB", "BB", "UTG", "UTG+1", "UTG+2", "LJ", "HJ", "CO"]
+    if n == 2:  # ヘッズアップ: BTN=SB
+        names = ["BTN/SB", "BB"]
+    positions = {}
+    for i, seat in enumerate(active):
+        rel = (active.index(seat) - btn_idx) % n
+        positions[seat] = names[rel] if rel < len(names) else f"MP{rel-3}"
+    return positions
+
+def build_turn_order(self, street: Street) -> list[int]:
+    active = [s for s in self.turn_order_base if s not in self.folded_seats | self.all_in_seats]
+    if street == Street.PREFLOP:
+        # UTG start (BB+2)
+        bb_idx = self.turn_order_base.index(self._bb_seat())
+        reordered = self.turn_order_base[bb_idx+1:] + self.turn_order_base[:bb_idx+1]
+        return [s for s in reordered if s in set(active)]
+    else:
+        # SB start
+        sb_idx = self.turn_order_base.index(self._sb_seat())
+        reordered = self.turn_order_base[sb_idx:] + self.turn_order_base[:sb_idx]
+        return [s for s in reordered if s in set(active)]
+
+アクター推定ルール（spec.md FR-26〜29）
+IntegrationThreadはアクションイベント受信時に各席の尤度を算出する。
+1.	folded_seats / all_in_seats は確率0.0（候補除外）
+2.	legal_actions にアクション種別が含まれない席は確率0.0
+3.	current_turn_seat は基本確率0.90
+4.	音声中に席番号言及があれば該当席に+0.09 boost
+5.	音声中にポジション名言及（BTN/SB/BB/UTG等）があればposition_mapで当該席を特定し同様にboost
+6.	最大確率席と次点の差が0.3未満 → needs_review: true
+PokerRuleEngine（spec.md FR-22〜25）
+legal_actions(seat, state) を返す関数を core/rule_engine.py に実装する。
+call_diff = call_amount - invested[seat]
+
+call_diff == 0      → {CHECK, BET}
+call_diff > 0       → {CALL, RAISE, FOLD}
+stack <= call_diff  → {ALL_IN, FOLD}
+folded or all_in    → {} (空集合)
+
+イベント統合ルール（spec.md FR-23〜25）
+•	音声アクションが legal_actions に含まれない → needs_review: true
+•	ストリート内音声アクション数 > active_seats 人数 → needs_review: true
+•	RFIDフォールドと音声フォールドが矛盾 → needs_review: true
+ 
+エラーハンドリング方針
+•	認識エラーでクラッシュしない → 必ず try/except で捕捉し needs_review: true フラグを付与
+•	ハンド完了ごとにディスクへ書き込む（バッファリングしない）
+•	ログファイルは追記モード（既存セッションデータを上書きしない）
+•	ESP32停止・WiFi切断時 → RFIDThreadは再接続を試みる。タイムアウト後はRFIDなしモードで継続動作し、全アクションに "rfid_offline": true を付与する
+ 
+コーディング規約
+•	型ヒント必須（from __future__ import annotations 使用）
+•	データクラスは @dataclass または TypedDict を使用
+•	スレッド間通信は queue.Queue のみ（共有変数の直接参照禁止）
+•	GUIスレッドからビジネスロジックを呼ばない
+•	定数は core/constants.py に集約
+•	ログ出力は logging モジュール使用（print 禁止）
+•	RFID HTTP サーバーは rfid/server.py にFlaskで実装し、別スレッドで起動する
+ 
+開発フェーズ
+実装は以下の順序で進める。フェーズをまたいだ実装は行わない。
+フェーズ	内容	完了条件
+Phase 1	音声認識 + AudioStreamBuffer + CLIログ + ディーラーボタン管理	python main.py --cli で確定型/確認型発話が正しく分類されアクション記録できる。ボタン位置・ポジション・turn_orderが正しく生成される
+Phase 2	PokerRuleEngine実装 + legal_actions算出	ゲーム状態に応じた legal_actions が正しく返る（pytestで検証）
+Phase 3	RFID受信 + card_master + active_seats管理	ESP32からのイベントを受信しフォールド・ストリート遷移を検知できる
+Phase 4	IntegrationThread + アクター推定エンジン	音声＋RFIDの統合アクションレコードが生成される
+Phase 5	GUIダッシュボード + needs_review UI	リアルタイムでゲーム状態・カード情報・RFID接続状態が表示される
+Phase 6	PHH出力 + セッションサマリー	PokerKitでPHHファイルが生成される
+Phase 7	実卓テスト・閾値チューニング	1ハンド通しで needs_review 発生率が許容範囲内
+
+ 
+実装時の注意事項
+1.	Phase 1完了後は必ず動作確認してから次フェーズへ進む
+2.	config.json が存在しない場合は config_default.json をコピーして使用する
+3.	faster-whisperの initial_prompt には必ず audio/recognizer.py 内の定数 WHISPER_PROMPT_JA を使用する
+4.	RFID の tag_id → card_code マッピングは必ず rfid_cards.json から読み込む（ハードコード禁止）
+5.	テストは tests/ ディレクトリに配置し、pytest で実行する
+6.	Flask HTTP サーバーのバインドポートは config.json の rfid.bind_port（デフォルト8787）から読み込む
+ 
+よく使うコマンド
+# 依存関係インストール
+pip install -r requirements.txt
+
+# Phase 1: CLIモードで起動
+python main.py --cli
+
+# GUIモードで起動
+python main.py
+
+# テスト実行
+pytest tests/ -v
+
+# ログファイル確認
+ls logs/
+
