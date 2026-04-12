@@ -64,6 +64,16 @@ def _board_rfid(card: str, board_idx: int) -> RFIDEvent:
     )
 
 
+def _wait_until(condition, timeout: float = 3.0, interval: float = 0.05) -> None:
+    """condition() が True になるまで最大 timeout 秒ポーリングする。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if condition():
+            return
+        time.sleep(interval)
+    raise TimeoutError(f"condition not met within {timeout}s")
+
+
 def _make_6player_state() -> GameState:
     """button_seat=1 の 6人テーブルを new_hand() 済みで返す。"""
     players = [PlayerState(seat=i, name=f"P{i}", stack=10_000) for i in range(1, 7)]
@@ -129,8 +139,9 @@ class TestE2EOneHand:
         for idx, card in enumerate(_BOARD_CARDS, start=1):
             rfid_q.put(_board_rfid(card, idx))
 
-        # エンジンの RFID ドレインサイクル（約 0.1s）を 3 周分待つ
-        time.sleep(0.4)
+        # board_cards が 5 枚揃うまで待機（RFID ドレイン完了を確実に検知）
+        # IntegrationThread は self._board_cards に蓄積する（gs.board_cards とは別）
+        _wait_until(lambda: len(it._board_cards) == 5)
 
         # ── ウィナー宣言 ─────────────────────────────────────────────────────
         audio_q.put(_audio("winner", None, f"シート{_WINNER_SEAT} ウィナー"))
