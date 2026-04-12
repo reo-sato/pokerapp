@@ -564,6 +564,7 @@ def _load_new_gui_classes() -> None:
             game_state: object,
             json_writer: object,
             stop_event: "Optional[threading.Event]" = None,
+            card_master: object = None,
         ) -> None:
             super().__init__()
             self._update_queue = update_queue
@@ -571,6 +572,7 @@ def _load_new_gui_classes() -> None:
             self._gs = game_state
             self._writer = json_writer
             self._stop_event = stop_event or threading.Event()
+            self._card_master = card_master
 
             _ctk.set_appearance_mode("dark")
             _ctk.set_default_color_theme("blue")
@@ -584,6 +586,9 @@ def _load_new_gui_classes() -> None:
             self._canvas = None
             self._use_canvas = False
             self._log_lines: "list[str]" = []
+            # ReviewPanel floating window (created lazily)
+            self._review_window = None
+            self._review_panel = None
 
             self._build_ui()
             self.after(100, self._poll_queue)
@@ -724,6 +729,8 @@ def _load_new_gui_classes() -> None:
                 ("スタック修正",         self._cmd_fix_stack),
                 ("ターン手動補正",       self._cmd_fix_turn),
                 ("ディーラーボタン移動", self._cmd_move_dealer),
+                ("レビューパネル",       self._open_review_panel),
+                ("カードマスタ編集",     self._open_card_master_view),
             ]):
                 _ctk.CTkButton(btn_frame, text=label, height=28,
                                command=cmd).grid(row=row_i, column=0,
@@ -790,9 +797,14 @@ def _load_new_gui_classes() -> None:
         def _apply_action_item(self, item: dict) -> None:
             seat = item.get("seat")
             action = item.get("action", "")
+            record = item.get("record")
             if seat is not None and seat in self._seat_panels:
                 self._seat_panels[seat]._lbl_action.configure(text=action)
             self._append_log(f"席{seat} {action} {item.get('amount', 0):,}")
+            # needs_review なレコードは ReviewPanel に自動送信
+            if record is not None and getattr(record, "needs_review", False):
+                if self._review_panel is not None:
+                    self._review_panel.add_review_item(record)
 
         def _apply_rfid_card_item(self, item: dict) -> None:
             seat = item.get("seat")
@@ -998,15 +1010,69 @@ def _load_new_gui_classes() -> None:
             box.configure(state="disabled")
             box.see("end")
 
-        # ── ReviewPanel / CardMasterView stubs ───────────────────────────
+        # ── ReviewPanel ──────────────────────────────────────────────────
 
         def _open_review_panel(self) -> None:
-            from gui.review_panel import ReviewPanel  # noqa: F401
-            pass
+            """「レビューパネル」ボタン押下時: ReviewPanel ウィンドウを開く/前面へ。"""
+            from gui.review_panel import ReviewPanel
+
+            # 既存ウィンドウが生きていれば前面へ
+            if self._review_window is not None:
+                try:
+                    self._review_window.lift()
+                    self._review_window.focus_force()
+                    return
+                except Exception:
+                    # ウィンドウが破棄済み
+                    self._review_window = None
+                    self._review_panel = None
+
+            win = _ctk.CTkToplevel(self)
+            win.title("要確認アクション — レビューパネル")
+            win.geometry("720x420")
+            win.protocol("WM_DELETE_WINDOW", self._on_review_close)
+
+            panel = ReviewPanel(win, on_resolved=self._on_review_resolved)
+            panel.pack(fill="both", expand=True, padx=4, pady=4)
+
+            self._review_window = win
+            self._review_panel = panel
+
+        def _on_review_close(self) -> None:
+            if self._review_window is not None:
+                try:
+                    self._review_window.destroy()
+                except Exception:
+                    pass
+            self._review_window = None
+            self._review_panel = None
+
+        def _on_review_resolved(
+            self,
+            old_record: object,
+            new_record: object,
+        ) -> None:
+            hand = getattr(new_record, "hand_id", "?")
+            seat = getattr(new_record, "seat", "?")
+            act  = getattr(new_record, "action", "?")
+            amt  = getattr(new_record, "amount", 0)
+            self._append_log(f"レビュー確定: H#{hand} 席{seat} {act} {amt:,}")
+
+        # ── CardMasterView ───────────────────────────────────────────────
 
         def _open_card_master_view(self) -> None:
-            from gui.card_master_view import CardMasterView  # noqa: F401
-            pass
+            """「カードマスタ編集」ボタン押下時: CardMasterView ウィンドウを開く。"""
+            from gui.card_master_view import CardMasterView
+
+            if self._card_master is None:
+                self._append_log("⚠ カードマスタが設定されていません")
+                return
+
+            CardMasterView(
+                master=self,
+                card_master=self._card_master,
+                on_saved=lambda: self._append_log("カードマスタ保存完了"),
+            )
 
         # ── Lifecycle ────────────────────────────────────────────────────
 
