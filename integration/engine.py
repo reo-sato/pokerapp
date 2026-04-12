@@ -417,6 +417,8 @@ class IntegrationThread(threading.Thread):
             winner_seat=winner_seat,
             actions=list(self._current_actions),
             review_required=any(a.needs_review for a in self._current_actions),
+            folded_seats=[a.seat for a in self._current_actions if a.action == "fold"],
+            all_in_seats=[a.seat for a in self._current_actions if a.action == "allin"],
         )
 
         self._json_writer.append_hand_summary(summary)

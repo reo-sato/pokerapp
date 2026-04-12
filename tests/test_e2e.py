@@ -1,12 +1,13 @@
 """tests/test_e2e.py
 
-E2E hand scenarios: AudioEvent → IntegrationThread → GameStateManager → ActionRecord.
+E2E hand scenarios: AudioEvent → IntegrationThread → GameStateManager → HandSummary.
 
 Turn order follows Phase 1 round-robin (lowest seat first, simple rotation).
-folded_seats / all_in_seats are derived from the captured ActionRecord list.
+folded_seats / all_in_seats are asserted via HandSummary (written to JSON by JsonWriter).
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -28,11 +29,13 @@ def _run_events(
     session_id: str,
     *,
     sleep: float = 0.5,
-) -> list[ActionRecord]:
-    """IntegrationThread を起動してイベントを流し、キャプチャした ActionRecord を返す。
+) -> tuple[list[ActionRecord], JsonWriter]:
+    """IntegrationThread を起動してイベントを流す。
 
-    GameStateManager は new_hand() を呼ばずに渡す。
-    "new_hand" AudioEvent が _start_new_hand() を呼ぶことで手が開始される。
+    Returns:
+        (captured, writer)
+        captured: on_action コールバックで収集した ActionRecord リスト
+        writer:   ハンド終了後の JSON が書き込まれた JsonWriter
     """
     gs = GameStateManager(players=players, sb=100, bb=200)
     audio_q = make_audio_queue()
@@ -58,7 +61,13 @@ def _run_events(
     stop.set()
     thread.join(timeout=3.0)
 
-    return captured
+    return captured, writer
+
+
+def _load_summary(writer: JsonWriter) -> dict:
+    """JsonWriter が書き出した JSON の最初のハンドを返す。"""
+    data = json.loads(writer.path.read_text(encoding="utf-8"))
+    return data["hands"][0]
 
 
 # ――― シナリオ1: フォールドなし ―――
@@ -84,13 +93,14 @@ def test_full_hand_no_fold(tmp_path: Path) -> None:
         AudioEvent("winner",   0,   now + 0.03, "シート1 ウィナー"),
     ]
 
-    captured = _run_events(players, events, tmp_path, "e2e_no_fold")
+    captured, writer = _run_events(players, events, tmp_path, "e2e_no_fold")
+    summary = _load_summary(writer)
 
     # bet と call の 2 アクションのみ記録される（new_hand / winner は ActionRecord を生成しない）
     assert len(captured) == 2
     assert all(not r.needs_review for r in captured)
-    folded_seats = {r.seat for r in captured if r.action == "fold"}
-    assert len(folded_seats) == 0
+    assert summary["folded_seats"] == []
+    assert summary["all_in_seats"] == []
 
 
 # ――― シナリオ2: フォールドあり（needs_review=False を維持）―――
@@ -139,14 +149,14 @@ def test_with_folds(tmp_path: Path) -> None:
         AudioEvent("winner", 0, now + 0.11, "シート4 ウィナー"),
     ]
 
-    captured = _run_events(players, events, tmp_path, "e2e_folds", sleep=0.8)
+    captured, writer = _run_events(players, events, tmp_path, "e2e_folds", sleep=0.8)
+    summary = _load_summary(writer)
 
     assert all(not r.needs_review for r in captured)
-    folded_seats = {r.seat for r in captured if r.action == "fold"}
-    assert 2 in folded_seats
-    assert 3 in folded_seats
-    assert 5 in folded_seats
-    assert 6 in folded_seats
+    assert 2 in summary["folded_seats"]
+    assert 3 in summary["folded_seats"]
+    assert 5 in summary["folded_seats"]
+    assert 6 in summary["folded_seats"]
 
 
 # ――― シナリオ3: オールイン ―――
@@ -175,8 +185,8 @@ def test_all_in(tmp_path: Path) -> None:
         AudioEvent("winner",   0,     now + 0.04, "シート2 ウィナー"),
     ]
 
-    captured = _run_events(players, events, tmp_path, "e2e_allin")
+    captured, writer = _run_events(players, events, tmp_path, "e2e_allin")
+    summary = _load_summary(writer)
 
     assert all(not r.needs_review for r in captured)
-    all_in_seats = {r.seat for r in captured if r.action == "allin"}
-    assert 2 in all_in_seats
+    assert 2 in summary["all_in_seats"]

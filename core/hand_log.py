@@ -53,6 +53,8 @@ class HandSummary:
     winner_seat: int
     actions: list[ActionRecord]
     review_required: bool  # いずれかのアクションに needs_review=True があれば True
+    folded_seats: list[int] = field(default_factory=list)   # フォールドした席番号（順序付き）
+    all_in_seats: list[int] = field(default_factory=list)   # オールインした席番号（順序付き）
 
     def to_dict(self) -> dict:
         return {
@@ -68,4 +70,6 @@ class HandSummary:
             "winner_seat": self.winner_seat,
             "actions": [a.to_dict() for a in self.actions],
             "review_required": self.review_required,
+            "folded_seats": self.folded_seats,
+            "all_in_seats": self.all_in_seats,
         }
