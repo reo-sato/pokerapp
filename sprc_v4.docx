@@ -1,0 +1,489 @@
+ポーカーハンドログ自動記録システム 仕様書
+バージョン: 4.0
+作成日: 2026-04-09
+前バージョン: 3.0（2026-04-09）
+対象: 小規模クラブ・個人配信向け
+ 
+改訂履歴
+バージョン	日付	主な変更内容
+1.0	2026-04-02	初版（カメラ + 音声）
+2.0	2026-04-02	RFID入力経路を追加
+3.0	2026-04-09	カメラ廃止。音声をストリーム処理化。ポーカールールエンジン導入。アクター推定を尤度ベースに全面改訂
+4.0	2026-04-09	ディーラーボタン管理を追加。ポジション（BTN/SB/BB/UTG等）の自動算出・記録・ターン順生成に対応
+
+ 
+1. システム概要
+1.1 目的
+ライブポーカートーナメントにおいて、ディーラーの口元マイクからの音声とRFIDカードリーダーからのカード情報を組み合わせ、ハンド履歴をリアルタイムかつ自動的に記録するシステムを構築する。
+1.2 入力ソースと役割分担
+入力ソース	役割	検出対象
+ディーラー口元マイク（1本）	アクション種別・金額の取得	ディーラーの発話のみを入力とする。アクション種別（call/raise等）、金額、ストリート遷移宣言、ショーダウン・ウィナー宣言
+RFID NFC リーダー（最大9席 + ボード用5基）	カード情報・フォールド検知・ストリート遷移	各席のhole cards、ボードカード、フォールドによるカード消失
+
+注意: カメラ入力は本バージョンより廃止。映像解析に関する要件（FR-05〜09、NFR-01）はすべて削除する。
+1.3 出力
+•	リアルタイム表示: 現在のハンド状態（ポット、スタック、アクション履歴、各席のhole cards、ボードカード）をGUIに表示
+•	ハンドログファイル: 終了したハンドをJSON形式およびPHH形式で保存
+ 
+2. 機能要件
+2.1 セッション管理
+•	FR-01: セッション開始時に参加席数（2〜9席）を設定できる
+•	FR-01b: セッション開始時にディーラーボタンの初期位置（席番号）を設定できる
+•	FR-02: 各席に対してプレイヤー名と初期スタックを登録できる
+•	FR-03: セッション中にプレイヤーのリバイやアドオンを手動入力できる
+•	FR-04: セッション終了時にセッション全体のサマリーをファイル出力できる
+2.2 ディーラーボタン管理
+•	FR-05b: ハンド開始時にディーラーボタンを時計回り方向へ1席ずつ自動移動する。フォールドやバストアウトで欠番が生じた場合、アクティブ席の中で次の席へスキップする
+•	FR-05c: ディーラーボタン位置（button_seat）からSB・BB・UTG以降の各ポジションを自動算出する
+人数	BTN	SB	BB	UTG	UTG+1	...	CO	BTN+1=SB
+2人（HU）	BTN=SB	—	BB	—	—	—	—	—
+3人	BTN	SB	BB	—	—	—	—	—
+4〜9人	BTN	+1	+2	+3	+4	...	-1	—
+
+ヘッズアップ（2人）の場合はBTN=SBとなるポーカー標準ルールに従う。
+•	FR-05d: 算出したポジション情報（position_map: dict[int, str]）をゲーム状態に保持し、アクションレコードに記録する
+•	FR-05e: ポジション情報を用いてプリフロップのアクション開始席をUTG（BB+1）、フロップ以降のアクション開始席をSBの次のアクティブ席（SBが既フォールドの場合はBBの次）として自動決定する
+•	FR-05f: ハンド開始時にturn_orderをポーカールールに従って自動生成する
+preflop_order = [UTG, UTG+1, ..., CO, BTN, SB, BB]
+postflop_order = [SB, BB, UTG, ..., CO, BTN]  # SBから時計回り、フォールド/AIはスキップ
+
+•	FR-05g: GUIにて「ディーラーボタン手動移動」ボタンを備え、ディーラーの手違い等で位置がずれた場合に手動修正できる
+•	FR-05h: ハンドサマリーにボタン席番号（button_seat）と全席のポジション情報を記録する
+2.3 RFID カード検知
+•	FR-05: PN532 NFC/RFIDモジュール（最大9台）をTCA9548A I2Cマルチプレクサ経由でESP32に接続し、各リーダーのカード状態をポーリングできる
+•	FR-06: ESP32はカード検知イベント（reader_id・tag_id・timestamp）をWiFi経由でPythonサーバーへHTTP POSTで送信する
+•	FR-07: Python側はtag_idをカードマスタ（rfid_cards.json）と照合し、カードコード（例: Ah, Kd）に変換する
+•	FR-08: seat用リーダー（seat_1〜seat_9）へのカード着地をhole cardsイベントとして処理する
+•	FR-09: board用リーダー（board_1〜board_5）へのカード着地をboardカードイベントとして処理し、枚数に応じてストリート遷移を判定する（3枚→flop、4枚→turn、5枚→river）
+•	FR-10: ポーリング間隔内にseat用リーダーからカードが消失した場合（複数ポーリング連続で未検出）をフォールドイベントとして処理し、active_seatsを更新する
+•	FR-11: フォールドイベントとショーダウン中のカード公開を区別するため、現在のゲームフェーズをフラグとして参照する
+•	FR-12: 未登録tag_idが検出された場合、警告ログを出力し当該イベントをneeds_review: trueで保持する
+•	FR-13: カードマスタ（rfid_cards.json）はGUIから登録・編集・保存できる
+2.4 音声認識・発話ストリーム処理
+•	FR-14: ディーラー口元マイクの入力をfaster-whisperでリアルタイムにテキスト変換する（入力はディーラーの発話のみ）
+•	FR-15: 音声入力はストリート単位でバッファに蓄積する（AudioStreamBuffer）。ストリート開始・終了はRFIDのboardカード枚数変化またはディーラーの宣言発話によって区切る
+•	FR-16: バッファ内の発話を以下の3種に分類する
+発話種別	判定パターン	処理
+確定型	「レイズ 2400」「コール」「チェック」「フォールド」等、疑問形でない単発宣言	即座にアクションイベント候補として登録
+確認型	「〜ですか？」「〜でよろしいですか？」等、疑問形の発話	PENDING状態として保持。後続の確定宣言を待つ
+宣言型	「ハンド開始」「ショーダウン」「ウィナー」「ポット〜」	ゲームフェーズ遷移イベントとして処理
+
+•	FR-17: 確認型発話（PENDING）の後にディーラーが確定型発話を行った場合のみアクションイベントを確定する。確認型のみで後続確定発話がない場合はイベントを発火しない
+•	FR-18: 同一アクション種別が連続して複数回発声された場合（TDAプロトコル改変：連続アクションの毎回発声）、それぞれを独立したアクションイベントとして処理する
+•	FR-19: 以下のキーワードおよび金額をテキストから抽出する
+キーワード	対応アクション
+ベット、bet	Bet
+コール、call	Call
+レイズ、raise	Raise
+チェック、check	Check
+フォールド、fold	Fold（音声補助。主検知はRFID）
+オールイン、all in	All-in
+ショーダウン	Showdownフェーズへ移行
+ウィナー、wins	ポット授受
+ハンド開始、new hand	新ハンド開始
+
+•	FR-20: 金額は数字（漢数字含む）および「K（千）」「万」などの単位を解釈できる
+•	FR-21: Whisperのinitial_promptにポーカー用定型フレーズを設定することで認識精度を向上させる
+2.5 ポーカールールエンジン
+•	FR-22: 各席・各ゲーム状態においてlegal_actions（取りうるアクションの集合）をポーカールールに従って算出する
+call_diff = call_amount - invested[seat]
+
+call_diff == 0 の場合: {CHECK, BET}
+call_diff > 0 の場合:  {CALL, RAISE, FOLD}
+stack[seat] <= call_diff の場合: {ALL_IN, FOLD}
+folded or all_in の場合: {} （空集合）
+
+•	FR-23: 音声で検出されたアクション種別が、現在のターン席のlegal_actionsに含まれない場合、発話矛盾としてneeds_review: trueを付与しログに記録する
+•	FR-24: 音声アクションのストリート内累計発話数がactive_seatsの人数を超過した場合、ターンカウント異常としてneeds_review: trueを付与する
+•	FR-25: RFIDによるフォールド検知と音声のフォールド発話が矛盾する場合（例：フォールド済み席へのターン到達）、needs_review: trueを付与する
+2.6 アクター推定エンジン
+•	FR-26: アクション種別が確定した時点で、以下の要素に基づいてアクター（アクションを行った席）の推定確率を算出する
+要素	重み付け根拠
+ゲーム状態のターン順（current_turn_seat）	最優先。legal_actionsにも含まれる場合は確率0.95以上
+active_seats（RFIDフォールド検知で随時更新）	フォールド済み席を候補から除外（確率0.0）
+音声中の席番号言及（例:「シート3コール」）	言及あれば当該席の確率を最大値にboost
+音声中のポジション名言及（例:「UTGレイズ」「BTNコール」）	言及あればposition_mapで当該席を特定しboost（席番号言及と同等扱い）
+all_in_seats	オールイン済み席を候補から除外
+
+•	FR-27: 推定確率の最大値が単一席に集中しない場合（次点との差が0.3未満）、needs_review: trueを付与する
+•	FR-28: 確率算出後、アクターが確定した場合はゲーム状態のターン順を次席に進める
+•	FR-29: ターン進行はポーカールールに従い、フォールド済み・オールイン済みの席をスキップする
+2.7 ゲーム状態管理
+•	FR-30: 現在のストリート（preflop / flop / turn / river / showdown）を追跡する。遷移トリガーはRFIDのboardカード枚数変化を優先し、音声宣言を補助とする
+•	FR-31: 各プレイヤーのスタック残量をリアルタイムで計算・保持する
+•	FR-32: ポットサイズ（メインポット＋サイドポット）を計算する
+•	FR-33: ブラインド構造（SB/BB金額）をセッション設定で定義できる
+•	FR-34: ハンド番号を自動採番する
+•	FR-35: 以下のゲーム状態を常時保持する
+active_seats:      set[int]        # RFIDでカードを持つ席
+folded_seats:      set[int]        # フォールド済み
+all_in_seats:      set[int]        # オールイン済み
+button_seat:       int             # 現在のディーラーボタン席番号
+position_map:      dict[int, str]  # 席番号 → ポジション名（"BTN","SB","BB","UTG"等）
+turn_order:        list[int]       # 現ストリートのアクション順（フォールド/AIスキップ済み）
+current_turn_idx:  int             # 現在の手番位置（turn_orderのインデックス）
+last_aggressor:    int | None      # 最後にbet/raiseした席
+call_amount:       int             # 現在のコール額
+invested:          dict[int, int]  # 各席の現ストリート投資額
+street:            Street          # 現在のストリート
+board_cards:       list[str]       # 現在のボードカード
+
+2.8 ハンドログ出力
+•	FR-36: ハンド終了ごとにJSONファイルへ追記保存する（1ファイル＝1セッション）
+•	FR-37: PHH（Poker Hand History）形式でもエクスポートできる
+•	FR-38: 手動確認フラグが付いたアクションにはneeds_review: trueを付与する
+•	FR-39: セッション終了後、ログファイルの保存先ディレクトリを設定できる
+2.9 GUIダッシュボード
+•	FR-40: 現在のハンド状態（ストリート、ポット額、各席のスタック・直近アクション・hole cards・ポジション）をリアルタイム表示する。各席のポジション名（BTN/SB/BB/UTG等）をシートパネルに常時表示する
+•	FR-41: 直近10アクションのログを画面下部にスクロール表示する
+•	FR-42: needs_reviewが付いたアクションを強調表示し、修正UIを提供する
+•	FR-43: ボードカードと各席のhole cardsを表示する（RFIDソース表示）
+•	FR-44: RFID接続状態（各リーダーのオンライン/オフライン）を表示する
+•	FR-45: 「ハンド強制終了」「アクション手動入力」「スタック修正」「ターン手動補正」「ディーラーボタン手動移動」ボタンを備える
+•	FR-46: カードマスタ（rfid_cards.json）の登録・編集UIを備える
+ 
+3. 非機能要件
+3.1 パフォーマンス
+•	NFR-01: 音声認識のレイテンシはアナウンス終了から3秒以内
+•	NFR-02: RFIDイベントのPython受信からevent_queue送出まで100ms以内
+•	NFR-03: イベント統合からログ書き込みまで500ms以内
+•	NFR-04: ESP32のポーリング間隔は100ms以下（フォールド検知の応答性確保）
+3.2 動作環境
+•	NFR-05: OS: Windows 10/11 または macOS 12以上（Ubuntu 22.04も可）
+•	NFR-06: CPU: Intel Core i5第8世代以上（GPU不要、faster-whisper CPUモードで動作）
+•	NFR-07: RAM: 8GB以上
+•	NFR-08: Python 3.10以上
+•	NFR-09: ハードウェア: ESP32-WROOM-32 × 1、PN532 NFC/RFIDモジュール × 最大14基（seat用9 + board用5）、TCA9548A I2Cマルチプレクサ × 2、RFIDトランプ（13.56MHz対応）
+3.3 信頼性・運用
+•	NFR-10: 認識エラー時もシステムがクラッシュせず、該当アクションをneeds_review: trueフラグ付きで記録する
+•	NFR-11: セッション中断時（クラッシュ・電源断）に直前までのログを失わないよう、ハンド完了ごとにディスクへ書き込む
+•	NFR-12: ESP32停止・WiFi切断時もPythonアプリがクラッシュしない。RFID系イベントが途絶えた場合は音声のみで継続動作し、RFIDなしフラグをログに記録する
+•	NFR-13: 設定ファイル（席数、ブラインド構造、RFIDリーダー割り当て）をJSON形式で保存・再利用できる
+ 
+4. 技術スタック
+レイヤー	採用技術	理由
+音声取得	PyAudio	クロスプラットフォーム
+音声認識	faster-whisper (mediumモデル)	ローカル・低遅延・日本語対応
+RFID読み取り	ESP32 + PN532 + TCA9548A（I2C）	9席同時読み取り、WiFi送信
+RFID受信	Python HTTP サーバー（内蔵）	ESP32からのPOST受信
+ポーカールール	PokerKit (Python)	legal_actions算出・PHH出力
+ログ保存	JSON + PHH	人間可読・ツール互換
+GUI	Tkinter + CustomTkinter	標準ライブラリ、追加インストール最小
+イベントキュー	Python queue.Queue	スレッドセーフ非同期処理
+
+ 
+5. システムアーキテクチャ
+5.1 処理フロー
+[ディーラーマイク]            [ESP32 + PN532×14]
+       |                              |
+       ▼                              ▼ (WiFi HTTP POST)
+[AudioThread]               [RFIDThread]
+[PyAudio ストリーミング]     [HTTP受信 → card_master解決]
+       |                    [active_seats更新]
+       ▼                    [street遷移判定]
+[AudioStreamBuffer]                  |
+[ストリート単位で発話蓄積]            |
+[確定型/確認型/宣言型 分類]           |
+[状態機械で確定イベントのみ送出]      |
+       |                             |
+       └──────────┬──────────────────┘
+                  ▼
+           [event_queue]
+                  |
+                  ▼
+        [IntegrationThread]
+        [PokerRuleEngine]
+        ├─ legal_actions算出
+        ├─ アクター推定（尤度）
+        ├─ 矛盾検知 → needs_review
+        ├─ ゲーム状態更新
+        └─ confidence算出
+                  |
+       ┌──────────┴──────────┐
+       ▼                     ▼
+[GUIダッシュボード]      [ログライター]
+[CustomTkinter]          [JSON / PHH]
+
+5.2 スレッド構成
+スレッド名	役割
+AudioThread	音声バッファリング + Whisper推論 + AudioStreamBuffer管理
+RFIDThread	HTTP受信 + card_master解決 + active_seats更新
+IntegrationThread	イベントキュー消費 + ルールエンジン + ゲーム状態更新 + ログ書き込み
+MainThread	GUI描画のみ（ブロッキング処理禁止）
+
+5.3 AudioStreamBuffer の状態機械
+状態: IDLE
+  ├─ 確定型発話 → ACTION_CONFIRMED（即発火） → IDLE
+  ├─ 確認型発話 → PENDING_CONFIRM(action, amount)
+  └─ 宣言型発話 → PHASE_EVENT（即発火） → IDLE
+
+状態: PENDING_CONFIRM(action, amount)
+  ├─ 確定型発話（同一action） → ACTION_CONFIRMED → IDLE
+  ├─ 確認型発話（別action）  → PENDING_CONFIRM(新action) ← 上書き
+  └─ 宣言型発話             → PHASE_EVENT → IDLE（pendingは破棄）
+
+ディーラーマイクのみが入力のため、プレイヤー返答を待つ状態は存在しない。ディーラーが最終確定宣言を行うことを運用上の前提とする。
+5.4 アクター推定の尤度算出
+def estimate_actor(audio_action: ActionType, state: GameState) -> dict[int, float]:
+    scores: dict[int, float] = {}
+
+    for seat in state.all_seats:
+        # フォールド・オールイン済みは完全除外
+        if seat in state.folded_seats or seat in state.all_in_seats:
+            scores[seat] = 0.0
+            continue
+
+        legal = legal_actions(seat, state)
+
+        # ルール上取れないアクション → 除外
+        if audio_action not in legal:
+            scores[seat] = 0.0
+            continue
+
+        # ターン順による基本スコア
+        if seat == state.current_turn_seat():
+            scores[seat] = 0.90
+        else:
+            scores[seat] = 0.05  # アウトオブターンの稀なケース
+
+    # 音声中に席番号言及があればboost
+    if state.last_mentioned_seat is not None:
+        mentioned = state.last_mentioned_seat
+        if mentioned in scores and scores[mentioned] > 0.0:
+            scores[mentioned] = min(scores[mentioned] + 0.09, 1.0)
+
+    # 正規化
+    total = sum(scores.values())
+    if total == 0:
+        return scores  # 全席スコア0 → 矛盾状態
+    return {s: v / total for s, v in scores.items()}
+
+ 
+6. データ仕様
+6.1 アクションレコード（JSON）
+{
+  "hand_id": 42,
+  "timestamp": "2026-04-09T19:23:05.123",
+  "street": "flop",
+  "seat": 3,
+  "player_name": "Yamada",
+  "position": "BTN",
+  "action": "raise",
+  "amount": 800,
+  "pot_after": 2400,
+  "stack_after": 12200,
+  "source": {
+    "audio": true,
+    "rfid": false
+  },
+  "actor_confidence": 0.92,
+  "needs_review": false
+}
+
+6.2 ハンドサマリー（JSON）
+{
+  "hand_id": 42,
+  "session_id": "2026-04-09_session1",
+  "started_at": "2026-04-09T19:22:50.000",
+  "ended_at": "2026-04-09T19:24:15.000",
+  "blinds": {"sb": 100, "bb": 200},
+  "button_seat": 3,
+  "position_map": {"1": "SB", "2": "BB", "3": "BTN", "4": "UTG", "5": "UTG+1", "6": "CO"},
+  "board": ["Ah", "Kd", "7c", "2h", "Ts"],
+  "board_source": "rfid",
+  "players": [
+    {
+      "seat": 1,
+      "name": "Sato",
+      "hole_cards": ["Jh", "Js"],
+      "hole_cards_source": "rfid",
+      "stack_start": 15000,
+      "stack_end": 13500,
+      "result": -1500,
+      "folded_street": null
+    }
+  ],
+  "pot_total": 4800,
+  "winner_seat": 3,
+  "actions": [],
+  "review_required": false
+}
+
+6.3 RFIDイベント（ESP32 → Python）
+{
+  "reader_id": "seat_3",
+  "tag_id": "04A1B2C3D4E5F6",
+  "timestamp": "2026-04-09T19:23:04.980",
+  "event_type": "present"
+}
+
+event_type は "present"（カード検知）または "absent"（カード消失）とする。
+6.4 設定ファイル（config.json）
+{
+  "session": {
+    "num_seats": 6,
+    "button_seat_initial": 1,
+    "blinds": {"sb": 100, "bb": 200},
+    "log_dir": "./logs"
+  },
+  "audio": {
+    "device_id": 0,
+    "sample_rate": 16000,
+    "whisper_model": "medium",
+    "language": "ja",
+    "initial_prompt": "ベット コール レイズ チェック フォールド オールイン ショーダウン ウィナー ハンド開始 ポット"
+  },
+  "rfid": {
+    "enabled": true,
+    "transport": "http",
+    "bind_host": "0.0.0.0",
+    "bind_port": 8787,
+    "card_master_file": "./rfid_cards.json",
+    "fold_absent_threshold": 3,
+    "readers": {
+      "seat_1": {"role": "seat", "seat": 1},
+      "seat_2": {"role": "seat", "seat": 2},
+      "seat_3": {"role": "seat", "seat": 3},
+      "seat_4": {"role": "seat", "seat": 4},
+      "seat_5": {"role": "seat", "seat": 5},
+      "seat_6": {"role": "seat", "seat": 6},
+      "board_1": {"role": "board", "index": 1},
+      "board_2": {"role": "board", "index": 2},
+      "board_3": {"role": "board", "index": 3},
+      "board_4": {"role": "board", "index": 4},
+      "board_5": {"role": "board", "index": 5}
+    }
+  }
+}
+
+ 
+7. ディーラー発話プロトコル（改訂版）
+本システムはディーラーの発話のみを音声入力とする。TDAルールからの変更は最小限とし、以下の1点のみ改変する。
+TDAからの唯一の改変: 連続した席順のプレイヤーが同一アクションを行った場合でも、各アクションを個別に発声すること。
+発話プロトコル一覧
+タイミング	推奨発話	例	備考
+ハンド開始	「ハンド開始」	「ハンド開始」	
+ベット金額	「ベット〔金額〕」	「ベット 800」	
+コール（毎回発声）	「コール」	「コール」	TDA改変点。連続コールも毎回発声
+レイズ	「レイズ〔金額〕」	「レイズ 2400」	
+チェック（毎回発声）	「チェック」	「チェック」	TDA改変点。連続チェックも毎回発声
+オールイン	「オールイン〔金額〕」	「オールイン 12000」	
+フォールド（任意）	「フォールド」	「フォールド」	RFIDが主検知。音声は補助
+ショーダウン	「ショーダウン」	「ショーダウン」	
+ウィナー	「シート〔番号〕ウィナー」	「シート3 ウィナー」	席番号言及を強く推奨（アクター推定精度向上）
+ポット額	「ポット〔金額〕」	「ポット 4800」	
+確認発話	「〔アクション〕ですか？」→「〔アクション〕」	「コールですか？」→「コール」	確認後に必ず確定宣言を行うこと
+
+補足: ディーラーは「シート〇〇、〔アクション〕」または「〔ポジション〕、〔アクション〕」（例：「BTN、コール」「UTG、レイズ 2400」）の形で席番号またはポジション名を含めた発話を行うことを強く推奨する。いずれの言及もアクター推定の精度を大幅に向上させる。TDA違反にならない任意の追加発話として扱う。
+ 
+8. RFIDハードウェア仕様
+8.1 構成
+[PN532 × 9（seat用）+ PN532 × 5（board用）]
+           ↓ I2C
+[TCA9548A × 2（I2Cマルチプレクサ）]
+           ↓ I2C
+[ESP32-WROOM-32]
+           ↓ WiFi（HTTP POST）
+[Pythonサーバー（poker-logger）]
+
+8.2 reader_id の命名規則
+reader_id	物理的位置	役割
+seat_1〜seat_9	各プレイヤーのカード置き場	hole cards検知、フォールド検知
+board_1〜board_5	ボードカード置き場（左から）	flop/turn/riverカード検知
+
+8.3 フォールド検知ロジック
+カードの消失はPN532のポーリングで間接的に検知する。fold_absent_threshold（デフォルト3回）連続でカード未検出となった場合にフォールドイベントを確定する。ショーダウンフェーズ中の消失はフォールドとして処理しない。
+ 
+9. 矛盾検知と needs_review の発生条件
+条件	説明
+音声アクションがlegal_actionsに含まれない	ルール上取れないアクションが発話された
+アクター推定で最大確率席が単一に定まらない	current_turn_seatが不明またはactive_seatsとの不整合
+音声フォールドとRFIDフォールドが矛盾	発話はフォールドだがRFIDカード消失なし（またはその逆）
+ストリート内音声アクション数 > active_seats人数	ターンカウント異常
+未登録tag_idの検出	カードマスタに未登録
+ストリート遷移：音声宣言とRFIDのboard枚数が不一致	「フロップ」と発話したがboard RFIDはまだ3枚未満
+RFID通信断でRFIDなしモード動作中	信頼性低下を記録
+ディーラーボタン手動移動後、直前ハンドとボタン位置が2席以上ずれている	通常は1席進行のため、異常移動をユーザーに通知
+
+ 
+10. 制限事項・既知の課題
+項目	内容	対策
+アウトオブターンアクション	ターン外プレイヤーがアクションした場合、アクター推定が誤る可能性がある	needs_reviewを付与し手動確認
+RFIDカード距離/角度の依存性	カードがリーダーから離れると誤消失検知が起きる可能性がある	fold_absent_thresholdのチューニング
+音声の誤認識	雑音・早口・小声によるWhisperの誤変換	initial_promptの最適化、ディーラー発話プロトコルの遵守
+漢数字認識	「五千」等の漢数字は変換テーブルで対応するが網羅性に限界がある	数字のみの復唱を推奨
+サイドポット計算	オールイン複数発生時のサイドポット計算は近似値になる場合がある	review_requiredを付与し手動確認
+ショーダウンのhole cards	フォールドしたプレイヤーのhole cardsはRFIDリーダーを離れるため取得できない場合がある	ショーダウン時のみRFID状態を保持して補完
+
+ 
+11. ディレクトリ構成
+poker-logger/
+├── CLAUDE.md
+├── spec.md                  ← 本仕様書
+├── main.py
+├── config.json
+├── config_default.json
+├── rfid_cards.json          ← tag_id → card_code マスタ
+├── requirements.txt
+│
+├── core/
+│   ├── __init__.py
+│   ├── game_state.py        ← ゲーム状態管理（active_seats・ターン順・スタック等）
+│   ├── hand_log.py          ← ハンドログのデータクラス定義
+│   ├── event_queue.py       ← スレッド間共有イベントキュー
+│   ├── constants.py         ← 定数集約
+│   └── rule_engine.py       ← PokerRuleEngine（legal_actions算出・矛盾検知）
+│
+├── audio/
+│   ├── __init__.py
+│   ├── recorder.py          ← PyAudioマイク入力スレッド
+│   ├── recognizer.py        ← faster-whisper推論
+│   └── stream_buffer.py     ← AudioStreamBuffer（ストリート単位蓄積・状態機械）
+│
+├── rfid/
+│   ├── __init__.py
+│   ├── server.py            ← HTTP受信サーバー（ESP32からのPOST）
+│   ├── bridge.py            ← RFIDThread・イベント変換
+│   ├── card_master.py       ← rfid_cards.json ロード・検索・保存
+│   └── events.py            ← RFIDイベントのデータクラス定義
+│
+├── integration/
+│   ├── __init__.py
+│   └── engine.py            ← IntegrationThread・アクター推定・confidence算出
+│
+├── output/
+│   ├── __init__.py
+│   ├── json_writer.py
+│   └── phh_exporter.py
+│
+├── gui/
+│   ├── __init__.py
+│   ├── dashboard.py         ← メインGUI（hole cards・board・RFID接続状態表示）
+│   ├── card_master_view.py  ← カードマスタ登録・編集UI
+│   └── review_panel.py      ← needs_review手動確認・修正パネル
+│
+└── logs/
+
+ 
+12. 開発フェーズ計画
+フェーズ	内容	完了条件	目安工数
+Phase 1	音声認識 + AudioStreamBuffer + CLIログ	確定型/確認型発話が正しく分類されアクション記録できる	3〜5日
+Phase 2	PokerRuleEngine実装 + legal_actions算出	ゲーム状態に応じたlegal_actionsが正しく返る	3〜5日
+Phase 3	RFID受信 + card_master + active_seats管理	ESP32からのイベントを受信しフォールド検知できる	3〜5日
+Phase 4	IntegrationThread + アクター推定エンジン	音声＋RFIDの統合アクションレコードが生成される	5〜7日
+Phase 5	GUIダッシュボード + needs_review UI	リアルタイムでゲーム状態・カード情報が表示される	5〜7日
+Phase 6	PHH出力 + セッションサマリー	PokerKitでPHHファイルが生成される	2〜3日
+Phase 7	実卓テスト・閾値チューニング	1ハンド通しでneeds_review発生率が許容範囲内	随時
+
+ 
+13. 依存ライブラリ一覧
+faster-whisper>=1.0.0
+pyaudio>=0.2.13
+pokerkit>=0.5.0
+customtkinter>=5.2.0
+numpy>=1.24.0
+flask>=3.0.0       # RFID HTTP受信サーバー
+
+opencv-python、easyocr はカメラ廃止に伴い削除。
+ 
+本仕様書は開発進行に伴い随時更新する。
