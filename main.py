@@ -1,453 +1,120 @@
+"""main.py — ポーカーハンドロガー（spec.md Phase 4）
+  python main.py       → GUI (DashboardWindow)
+  python main.py --cli → CLI デバッグモード
+"""
 from __future__ import annotations
-
-import argparse
-import logging
-import sys
-import threading
+import argparse, logging, queue, signal, threading
 from datetime import datetime
-from pathlib import Path
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(threadName)s] %(levelname)s %(name)s: %(message)s",
-)
+logging.basicConfig(level=logging.INFO,
+    format="%(asctime)s [%(threadName)s] %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def _prompt_session_config() -> dict:
-    """CLIで席数・プレイヤー名・スタック・ブラインドを入力する。"""
+def _session_dialog(cfg: dict) -> dict:
+    """CLIでセッション設定（席・スタック・ブラインド・ディーラー）を入力する。"""
+    s = cfg.get("session", {}); bl = s.get("blinds", {"sb": 100, "bb": 200})
     print("=== ポーカーハンドロガー セッション設定 ===")
-
-    while True:
-        try:
-            num_seats = int(input("席数 (2〜9): ").strip())
-            if 2 <= num_seats <= 9:
-                break
-        except ValueError:
-            pass
-        print("2〜9 の整数を入力してください。")
-
-    players = []
-    for i in range(1, num_seats + 1):
-        name = input(f"席{i} プレイヤー名: ").strip() or f"Player{i}"
-        while True:
-            try:
-                stack = int(input(f"席{i} 初期スタック: ").strip())
-                if stack > 0:
-                    break
-            except ValueError:
-                pass
-            print("正の整数を入力してください。")
-        players.append({"seat": i, "name": name, "stack": stack})
-
-    while True:
-        try:
-            sb = int(input("SB金額: ").strip())
-            bb = int(input("BB金額: ").strip())
-            if sb > 0 and bb > 0:
-                break
-        except ValueError:
-            pass
-        print("正の整数を入力してください。")
-
-    log_dir = input("ログ保存先 (空Enterで ./logs): ").strip() or "./logs"
-
-    return {"players": players, "sb": sb, "bb": bb, "log_dir": log_dir}
+    def _i(p, d):
+        try: return int(input(p).strip() or d)
+        except (ValueError, EOFError): return d
+    def _nm(i):
+        try: return input(f"席{i}名前[省略=Player{i}]: ").strip() or f"Player{i}"
+        except EOFError: return f"Player{i}"
+    n = max(2, min(9, _i(f"席数[2〜9, 省略={s.get('num_seats', 6)}]: ", s.get("num_seats", 6))))
+    ps = [{"seat": i, "name": _nm(i), "stack": _i(f"席{i}スタック: ", 10000)} for i in range(1, n+1)]
+    btn = s.get("button_seat_initial", 1)
+    return {"players": ps, "sb": _i(f"SB[省略={bl['sb']}]: ", bl["sb"]),
+            "bb": _i(f"BB[省略={bl['bb']}]: ", bl["bb"]),
+            "button_seat": _i(f"ディーラー席[省略={btn}]: ", btn),
+            "log_dir": s.get("log_dir", "./logs")}
 
 
-def run_cli() -> None:
-    """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。"""
-    from core.config import load_config
-    from core.event_queue import make_audio_queue
-    from core.game_state import GameStateManager, PlayerState
-    from audio.recorder import AudioThread
-    from integration.engine import IntegrationThread
-    from output.json_writer import JsonWriter
-
-    cfg = load_config()
-    session_cfg = _prompt_session_config()
-
-    players = [
-        PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
-        for p in session_cfg["players"]
-    ]
-    game_state = GameStateManager(
-        players=players,
-        sb=session_cfg["sb"],
-        bb=session_cfg["bb"],
-    )
-
-    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
-    json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
-
-    audio_q = make_audio_queue()
-    stop_event = threading.Event()
-    camera_q = None
-
-    def on_action(record):
-        print(
-            f"  [{record.street}] 席{record.seat}({record.player_name}) "
-            f"{record.action} {record.amount or ''}"
-            f"  pot={record.pot_after}"
-            + (" [要確認]" if record.needs_review else "")
-        )
-
-    audio_cfg = cfg.get("audio", {})
-    cam_cfg = cfg.get("camera", {})
-
-    audio_thread = AudioThread(
-        audio_queue=audio_q,
-        device_id=audio_cfg.get("device_id", 0),
-        sample_rate=audio_cfg.get("sample_rate", 16000),
-        model_size=audio_cfg.get("whisper_model", "medium"),
-        language=audio_cfg.get("language", "ja"),
-        stop_event=stop_event,
-    )
-    # Phase 2/3: カメラが設定済みの場合のみ CameraThread を起動する
-    # Phase 3: camera_q を IntegrationThread に渡すことで ±2秒マッチングが有効になる
-    camera_thread = None
-    if cam_cfg.get("roi"):
-        from core.event_queue import make_camera_queue
-        from vision.camera import CameraThread
-        camera_q = make_camera_queue()
-        camera_thread = CameraThread(
-            camera_queue=camera_q,
-            device_id=cam_cfg.get("device_id", 0),
-            roi_config=cam_cfg.get("roi", {}),
-            fps=cam_cfg.get("fps", 20),
-            motion_threshold=cam_cfg.get("motion_threshold", 2000),
-            stop_event=stop_event,
-        )
-        camera_thread.start()
-        print("カメラスレッド起動（動体検出 + ±2秒マッチング有効）。")
-
-    # Phase 6/7: RFID が有効な場合のみ起動する (transport に応じてスレッドを選択)
-    rfid_thread = None
-    rfid_cfg = cfg.get("rfid", {})
-    if rfid_cfg.get("enabled", False):
-        from core.event_queue import make_rfid_queue
-        from rfid.card_master import CardMaster
-        rfid_q = make_rfid_queue()
-        card_master = CardMaster(rfid_cfg.get("card_master_file", "./rfid_cards.json"))
-        transport = rfid_cfg.get("transport", "pcsc")
-        if transport == "http":
+def _start_rfid_audio(cfg: dict, stop: threading.Event):
+    """① RFIDThread → ② AudioThread の順で起動。(rfid_t, audio_t, audio_q, rfid_q, cm) を返す。"""
+    from core.event_queue import make_audio_queue; from audio.recorder import AudioThread
+    from rfid.card_master import CardMaster
+    rc = cfg.get("rfid", {}); ac = cfg.get("audio", {})
+    cm = CardMaster(rc.get("card_master_file", "./rfid_cards.json"))
+    rfid_q = rfid_t = None
+    if rc.get("enabled", False):
+        from core.event_queue import make_rfid_queue; rfid_q = make_rfid_queue()
+        kw = dict(rfid_queue=rfid_q, card_master=cm, stop_event=stop)
+        if rc.get("transport", "pcsc") == "http":
             from rfid.http_receiver import RFIDHTTPReceiver
-            rfid_thread = RFIDHTTPReceiver(
-                rfid_queue=rfid_q,
-                card_master=card_master,
-                reader_configs=rfid_cfg.get("readers", {}),
-                bind_host=rfid_cfg.get("bind_host", "0.0.0.0"),
-                bind_port=rfid_cfg.get("bind_port", 8787),
-                stop_event=stop_event,
-            )
-            print(f"RFID HTTP受信スレッド起動 ({rfid_cfg.get('bind_host','0.0.0.0')}:{rfid_cfg.get('bind_port',8787)})。")
+            rfid_t = RFIDHTTPReceiver(**kw, reader_configs=rc.get("readers", {}),
+                bind_host=rc.get("bind_host", "0.0.0.0"), bind_port=rc.get("bind_port", 8787))
         else:
             from rfid.reader_thread import RFIDThread
-            rfid_thread = RFIDThread(
-                rfid_queue=rfid_q,
-                card_master=card_master,
-                reader_configs=rfid_cfg.get("readers", []),
-                poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
-                stop_event=stop_event,
-            )
-            print("RFID pyscardスレッド起動。")
-        rfid_thread.start()
-
-    integration_thread = IntegrationThread(
-        audio_queue=audio_q,
-        game_state=game_state,
-        json_writer=json_writer,
-        camera_queue=camera_q,
-        rfid_queue=rfid_q if rfid_cfg.get("enabled", False) else None,
-        on_action=on_action,
-        stop_event=stop_event,
-    )
-    audio_thread.start()
-    integration_thread.start()
-
-    print(f"\nセッション開始。ログ: {json_writer.path}")
-    print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー  [r <席> <金額>]=リバイ")
-    print("ディーラーがアナウンスすると自動検出されます。\n")
-
-    try:
-        while True:
-            line = input("> ").strip()
-            if not line:
-                continue
-            parts = line.split()
-            cmd = parts[0].lower()
-
-            if cmd == "q":
-                break
-            elif cmd == "n":
-                game_state.new_hand()
-                print(f"新ハンド開始: hand_id={game_state.hand_id}")
-            elif cmd == "w" and len(parts) >= 2:
-                try:
-                    seat = int(parts[1])
-                    from core.events import AudioEvent
-                    import time
-                    audio_q.put(AudioEvent(
-                        action="winner",
-                        amount=0,
-                        timestamp=time.time(),
-                        raw_text=f"シート{seat} ウィナー",
-                    ))
-                except ValueError:
-                    print("使い方: w <席番号>")
-            elif cmd == "r" and len(parts) >= 3:
-                try:
-                    seat = int(parts[1])
-                    amount = int(parts[2])
-                    game_state.rebuy(seat, amount)
-                    print(f"リバイ: 席{seat} +{amount} → スタック {game_state.get_stack(seat)}")
-                except (ValueError, Exception) as e:
-                    print(f"エラー: {e}")
-            else:
-                print("不明なコマンドです。q / n / w <席> / r <席> <金額>")
-
-    except (KeyboardInterrupt, EOFError):
-        pass
-    finally:
-        stop_event.set()
-        audio_thread.join(timeout=3)
-        integration_thread.join(timeout=3)
-        if camera_thread is not None:
-            camera_thread.join(timeout=3)
-        if rfid_thread is not None:
-            rfid_thread.join(timeout=3)
-        print(f"\nセッション終了。ログ保存先: {json_writer.path}")
-
-
-def run_gui() -> None:
-    """Phase 4 GUIモード: customtkinter ダッシュボードを起動する。"""
-    from core.config import load_config
-    from core.event_queue import make_audio_queue
-    from core.game_state import GameStateManager, PlayerState
-    from audio.recorder import AudioThread
-    from integration.engine import IntegrationThread
-    from output.json_writer import JsonWriter
-    from gui.dashboard import GUIDashboard
-
-    try:
-        import customtkinter  # noqa: F401
-    except ImportError:
-        print("customtkinter が見つかりません。pip install customtkinter でインストールしてください。")
-        print("または --cli オプションを使用してください。")
-        sys.exit(1)
-
-    cfg = load_config()
-    session_cfg = _prompt_session_config()
-
-    players = [
-        PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
-        for p in session_cfg["players"]
-    ]
-    game_state = GameStateManager(
-        players=players,
-        sb=session_cfg["sb"],
-        bb=session_cfg["bb"],
-    )
-
-    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
-    json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
-
+            rfid_t = RFIDThread(**kw, reader_configs=rc.get("readers", []),
+                poll_interval_ms=rc.get("poll_interval_ms", 100))
+        rfid_t.start()
     audio_q = make_audio_queue()
-    stop_event = threading.Event()
-    camera_q = None
-    rfid_q = None
-
-    audio_cfg = cfg.get("audio", {})
-    cam_cfg = cfg.get("camera", {})
-    rfid_cfg = cfg.get("rfid", {})
-
-    dash = GUIDashboard(
-        game_state=game_state,
-        json_writer=json_writer,
-        audio_queue=audio_q,
-        camera_queue=camera_q,
-        stop_event=stop_event,
-        rfid_receiver=None,  # rfid_thread 確定後に設定
-    )
-
-    audio_thread = AudioThread(
-        audio_queue=audio_q,
-        device_id=audio_cfg.get("device_id", 0),
-        sample_rate=audio_cfg.get("sample_rate", 16000),
-        model_size=audio_cfg.get("whisper_model", "medium"),
-        language=audio_cfg.get("language", "ja"),
-        stop_event=stop_event,
-    )
-
-    camera_thread = None
-    if cam_cfg.get("roi"):
-        from core.event_queue import make_camera_queue
-        from vision.camera import CameraThread
-        camera_q = make_camera_queue()
-        dash._camera_queue = camera_q
-        camera_thread = CameraThread(
-            camera_queue=camera_q,
-            device_id=cam_cfg.get("device_id", 0),
-            roi_config=cam_cfg.get("roi", {}),
-            fps=cam_cfg.get("fps", 20),
-            motion_threshold=cam_cfg.get("motion_threshold", 2000),
-            stop_event=stop_event,
-        )
-
-    rfid_thread = None
-    if rfid_cfg.get("enabled", False):
-        from core.event_queue import make_rfid_queue
-        from rfid.card_master import CardMaster
-        rfid_q = make_rfid_queue()
-        card_master = CardMaster(rfid_cfg.get("card_master_file", "./rfid_cards.json"))
-        transport = rfid_cfg.get("transport", "pcsc")
-        if transport == "http":
-            from rfid.http_receiver import RFIDHTTPReceiver
-            rfid_thread = RFIDHTTPReceiver(
-                rfid_queue=rfid_q,
-                card_master=card_master,
-                reader_configs=rfid_cfg.get("readers", {}),
-                bind_host=rfid_cfg.get("bind_host", "0.0.0.0"),
-                bind_port=rfid_cfg.get("bind_port", 8787),
-                stop_event=stop_event,
-            )
-        else:
-            from rfid.reader_thread import RFIDThread
-            rfid_thread = RFIDThread(
-                rfid_queue=rfid_q,
-                card_master=card_master,
-                reader_configs=rfid_cfg.get("readers", []),
-                poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
-                stop_event=stop_event,
-            )
-
-    # HTTP transport の場合、rfid_receiver を GUI に渡してステータス表示する
-    if rfid_thread is not None and rfid_cfg.get("transport") == "http":
-        dash._rfid_receiver = rfid_thread
-
-    integration_thread = IntegrationThread(
-        audio_queue=audio_q,
-        game_state=game_state,
-        json_writer=json_writer,
-        camera_queue=camera_q,
-        rfid_queue=rfid_q,
-        on_action=dash.on_action,
-        on_rfid_card=dash.on_rfid_card,
-        stop_event=stop_event,
-    )
-
-    dash.start_threads(
-        audio_thread=audio_thread,
-        integration_thread=integration_thread,
-        camera_thread=camera_thread,
-        rfid_thread=rfid_thread,
-    )
-    dash.run()
-
-    # mainloop 終了後のクリーンアップ
-    stop_event.set()
-    audio_thread.join(timeout=3)
-    integration_thread.join(timeout=3)
-    if camera_thread is not None:
-        camera_thread.join(timeout=3)
-    print(f"\nセッション終了。ログ保存先: {json_writer.path}")
+    audio_t = AudioThread(audio_queue=audio_q, device_id=ac.get("device_id", 0),
+        sample_rate=ac.get("sample_rate", 16000), model_size=ac.get("whisper_model", "medium"),
+        language=ac.get("language", "ja"), stop_event=stop)
+    audio_t.start()
+    return rfid_t, audio_t, audio_q, rfid_q, cm
 
 
-def export_phh(json_path: str) -> None:
-    """JSON セッションログを PHH ファイル群にエクスポートする。"""
-    import json
-    from core.hand_log import ActionRecord, HandSummary
-    from output.phh_exporter import PHHExporter
+def _join_all(threads, stop: threading.Event) -> None:
+    """stop_event を set してから全スレッドを join(timeout=3) で待つ。タイムアウト時は警告。"""
+    stop.set()
+    for t in threads:
+        if t is None: continue
+        t.join(timeout=3)
+        if t.is_alive(): logger.warning("スレッド %s がタイムアウトしました", t.name)
 
-    src = Path(json_path)
-    if not src.exists():
-        print(f"ファイルが見つかりません: {json_path}")
-        sys.exit(1)
 
-    data = json.loads(src.read_text(encoding="utf-8"))
-    hands_raw = data.get("hands", [])
-    if not hands_raw:
-        print("ハンドデータがありません。")
-        sys.exit(0)
-
-    summaries: list[HandSummary] = []
-    for h in hands_raw:
-        actions = [
-            ActionRecord(
-                hand_id=a["hand_id"],
-                timestamp=a["timestamp"],
-                street=a["street"],
-                seat=a["seat"],
-                player_name=a["player_name"],
-                action=a["action"],
-                amount=a["amount"],
-                pot_after=a["pot_after"],
-                stack_after=a["stack_after"],
-                source=a.get("source", {}),
-                needs_review=a.get("needs_review", False),
-                confidence=a.get("confidence", 0.0),
-            )
-            for a in h.get("actions", [])
-        ]
-        summary = HandSummary(
-            hand_id=h["hand_id"],
-            session_id=h["session_id"],
-            started_at=h["started_at"],
-            ended_at=h["ended_at"],
-            blinds=h["blinds"],
-            board=h.get("board", []),
-            board_source=h.get("board_source", ""),
-            players=h.get("players", []),
-            pot_total=h["pot_total"],
-            winner_seat=h["winner_seat"],
-            actions=actions,
-            review_required=h.get("review_required", False),
-        )
-        summaries.append(summary)
-
-    out_dir = src.parent / (src.stem + "_phh")
-    exporter = PHHExporter()
-    paths = exporter.write_session(summaries, out_dir)
-    print(f"{len(paths)} 件のハンドを {out_dir} に出力しました。")
-    for p in paths:
-        print(f"  {p}")
+def _run_cli(gs, audio_q, stop: threading.Event) -> None:
+    """CLIループ: q=終了  n=新ハンド  w <席>=ウィナー"""
+    from core.events import AudioEvent; import time
+    print("\nコマンド: q=終了  n=新ハンド  w <席>=ウィナー\n")
+    try:
+        while not stop.is_set():
+            try: parts = input("> ").split()
+            except (EOFError, KeyboardInterrupt): break
+            if not parts: continue
+            if parts[0] == "q": break
+            elif parts[0] == "n": gs.new_hand(); print(f"新ハンド: #{gs.hand_id}")
+            elif parts[0] == "w" and len(parts) >= 2:
+                audio_q.put(AudioEvent(action="winner", amount=0, timestamp=time.time(),
+                    raw_text=f"シート{parts[1]} ウィナー"))
+    except KeyboardInterrupt: pass
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ポーカーハンドロガー")
-    parser.add_argument(
-        "--cli",
-        action="store_true",
-        help="CLIモードで起動（音声認識のみ、カメラなし）",
-    )
-    parser.add_argument(
-        "--calibrate",
-        action="store_true",
-        help="ROIキャリブレーションモードで起動（Phase 2）",
-    )
-    parser.add_argument(
-        "--export-phh",
-        metavar="SESSION_JSON",
-        help="JSON セッションログを PHH ファイル群に変換する（Phase 5）",
-    )
-    args = parser.parse_args()
-
-    if args.calibrate:
-        from core.config import load_config
-        from vision.calibration import run_calibration
-        cfg = load_config()
-        device_id = cfg.get("camera", {}).get("device_id", 0)
-        run_calibration(device_id=device_id)
-        sys.exit(0)
-
-    if args.export_phh:
-        export_phh(args.export_phh)
-        sys.exit(0)
-
+    ap = argparse.ArgumentParser(description="ポーカーハンドロガー")
+    ap.add_argument("--cli", action="store_true", help="CLIモードで起動")
+    args = ap.parse_args()
+    from core.config import load_config; from core.game_state import GameState, PlayerState
+    from integration.engine import IntegrationThread; from output.json_writer import JsonWriter
+    cfg = load_config(); sess = _session_dialog(cfg)
+    gs = GameState(
+        players=[PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"]) for p in sess["players"]],
+        sb=sess["sb"], bb=sess["bb"], button_seat=sess["button_seat"])
+    gs.new_hand()
+    writer = JsonWriter(log_dir=sess["log_dir"],
+        session_id=datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session")
+    stop = threading.Event()
+    def _sig(s, f): stop.set()
+    signal.signal(signal.SIGINT, _sig); signal.signal(signal.SIGTERM, _sig)
+    rfid_t, audio_t, audio_q, rfid_q, cm = _start_rfid_audio(cfg, stop)
     if args.cli:
-        run_cli()
+        on_act = lambda r: print(f"  [{r.street}] 席{r.seat} {r.action} {r.amount}"
+                                 + (" [要確認]" if r.needs_review else ""))
+        it = IntegrationThread(audio_queue=audio_q, game_state=gs, json_writer=writer,
+            rfid_queue=rfid_q, on_action=on_act, stop_event=stop)
+        it.start(); _run_cli(gs, audio_q, stop)
     else:
-        run_gui()
+        from gui.dashboard import DashboardWindow
+        win = DashboardWindow(update_queue=queue.Queue(), audio_queue=audio_q,
+            game_state=gs, json_writer=writer, stop_event=stop, card_master=cm)
+        it = IntegrationThread(audio_queue=audio_q, game_state=gs, json_writer=writer,
+            rfid_queue=rfid_q, on_action=win.on_action, on_rfid_card=win.on_rfid_card,
+            stop_event=stop)
+        it.start(); win.run()  # mainloop — ウィンドウを閉じるまでブロック
+    _join_all([rfid_t, audio_t, it], stop)
+    logger.info("セッション終了。ログ: %s", writer.path)
 
 
 if __name__ == "__main__":
