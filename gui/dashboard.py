@@ -149,7 +149,7 @@ class GUIDashboard:
         self._log_box.tag_config("high",   foreground=_CONF_COLOR_HIGH)
         self._log_box.tag_config("medium", foreground=_CONF_COLOR_MEDIUM)
         self._log_box.tag_config("low",    foreground=_CONF_COLOR_LOW)
-        self._log_box.tag_config("review", foreground="#FF5252", font=("Courier", 12, "bold"))
+        self._log_box.tag_config("review", foreground="#FF5252")
 
         # 下部コントロール
         ctrl = ctk.CTkFrame(root, height=80, corner_radius=0)
