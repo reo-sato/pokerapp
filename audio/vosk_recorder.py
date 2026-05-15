@@ -91,13 +91,14 @@ class VoskAudioThread(threading.Thread):
 
         # ── 3. KaldiRecognizer 初期化 ─────────────────────────────────────────
         if self._grammar:
-            # ensure_ascii=True で \uXXXX エスケープにする。
-            # Windows の Vosk C++ 層が UTF-8 文字列を CP932 として読む場合に
-            # 日本語が文字化けするのを防ぐため、純粋な ASCII JSON を渡す。
+            # grammar_json は UTF-8 文字列で渡す（Vosk Python バインディングが .encode() で変換）。
+            # モデルが "Runtime graphs are not supported" を出す場合は grammar が無視され、
+            # 自動的にフリー認識にフォールバックする（vosk-model-ja-0.22 はこのケース）。
             grammar_json = json.dumps(self._grammar, ensure_ascii=False)
             recognizer = vosk.KaldiRecognizer(model, float(self._sample_rate), grammar_json)
             logger.info(
-                "Vosk grammar mode: %d words  (sample_rate=%d)",
+                "Vosk grammar mode requested: %d words  (sample_rate=%d)  "
+                "※ 'Runtime graphs are not supported' が出る場合はフリー認識に自動フォールバック",
                 len(self._grammar), self._sample_rate,
             )
         else:

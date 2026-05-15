@@ -19,17 +19,8 @@
     "language": "ja",
     "initial_prompt": "ベット コール レイズ チェック フォールド オールイン ショーダウン ウィナー ハンド開始",
     "vosk_model_path": "./models/vosk-model-ja-0.22",
-    "vosk_grammar": [
-      "フォールド",
-      "コール",
-      "チェック",
-      "ベット",
-      "レイズ",
-      "オールイン",
-      "ウィナー",
-      "[unk]"
-    ],
-    "_vosk_grammar_note": "大モデル用。語彙確認: models/vosk-model-ja-0.22/graph/words.txt"
+    "vosk_grammar": null,
+    "_vosk_grammar_note": "vosk-model-ja-0.22 は runtime graph 非対応のため grammar=null 固定。フリー認識 + parse_action() でキーワード抽出する"
   },
   "rfid": {
     "enabled": false,
