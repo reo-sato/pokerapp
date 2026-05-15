@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import time
 from typing import Optional
@@ -15,6 +17,48 @@ from core.constants import (
 from core.events import AudioEvent
 
 logger = logging.getLogger(__name__)
+
+# ── 誤認識補正テーブル ─────────────────────────────────────────────────────────
+# corrections.json: {"誤認識テキスト": "正しいテキスト", ...}
+# ファイルが存在しない場合は補正なし。アプリ起動中に編集しても次の認識で自動反映される。
+_CORRECTIONS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "corrections.json")
+_corrections_cache: dict[str, str] = {}
+_corrections_mtime: float = 0.0
+# 長いキーから順に並べたリスト（部分マッチ衝突回避のため事前ソート）
+_corrections_sorted: list[tuple[str, str]] = []
+
+
+def _load_corrections() -> None:
+    """corrections.json を読み込む。mtime が変わった場合のみ再読み込み（ホットリロード）。"""
+    global _corrections_cache, _corrections_mtime, _corrections_sorted
+    try:
+        mtime = os.stat(_CORRECTIONS_PATH).st_mtime
+    except OSError:
+        return
+    if mtime == _corrections_mtime:
+        return
+    try:
+        with open(_CORRECTIONS_PATH, encoding="utf-8") as f:
+            raw: dict = json.load(f)
+        _corrections_cache = {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
+        _corrections_sorted = sorted(_corrections_cache.items(), key=lambda x: -len(x[0]))
+        _corrections_mtime = mtime
+        logger.info("Loaded %d corrections from %s", len(_corrections_cache), _CORRECTIONS_PATH)
+    except Exception:
+        logger.exception("Failed to load corrections from %s", _CORRECTIONS_PATH)
+
+
+def apply_corrections(text: str) -> str:
+    """corrections.json の補正テーブルを text に適用して返す。
+
+    長いキーから順に置換することで短いパターンが長いマッチを壊すことを防ぐ。
+    ファイルが存在しない場合や補正なしの場合は text をそのまま返す。
+    """
+    _load_corrections()
+    for src, dst in _corrections_sorted:
+        text = text.replace(src, dst)
+    return text
+
 
 # 以下の正規表現はすべて raw string (r"...") で記述する。
 # バックスラッシュの二重エスケープや誤解を防ぐためのプロジェクト規約。
@@ -147,6 +191,7 @@ def parse_action(text: str) -> Optional[AudioEvent]:
     2. 同じ開始位置に複数のキーワードがマッチした場合は、より長いキーワードを優先する。
        （例: "all in" と "all" が同位置にマッチ → "all in" を採用）
     """
+    text = apply_corrections(text)
     lower = text.lower()
 
     found_action: Optional[str] = None
