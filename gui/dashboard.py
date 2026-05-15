@@ -103,7 +103,7 @@ class GUIDashboard:
         root.grid_columnconfigure(0, weight=1)
 
         # ヘッダー
-        self._header = ctk.CTkFrame(root, height=50, corner_radius=0)
+        self._header = ctk.CTkFrame(root, height=80, corner_radius=0)
         self._header.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
         self._header.grid_columnconfigure((0, 1, 2, 3), weight=1)
 
@@ -128,6 +128,14 @@ class GUIDashboard:
         self._lbl_board = ctk.CTkLabel(self._header, text="ボード: —", anchor="w",
                                         font=("Courier", 11))
         self._lbl_board.grid(row=1, column=0, columnspan=3, padx=12, pady=0, sticky="w")
+
+        # BettingState 詳細 (BTN/SB/BB/Actor/Street/To call) — 独立行
+        self._lbl_betting = ctk.CTkLabel(
+            self._header, text="BTN: — | SB: — | BB: — | Actor: — | Street: — | To call: —",
+            anchor="w", font=("", 11, "bold"),
+        )
+        self._lbl_betting.grid(row=2, column=0, columnspan=4, padx=12, pady=(0, 4),
+                                sticky="w")
 
         # メインエリア
         main_frame = ctk.CTkFrame(root, corner_radius=0, fg_color="transparent")
@@ -198,7 +206,7 @@ class GUIDashboard:
 
     def _build_controls(self, ctrl: object) -> None:
         ctk = self._ctk
-        ctrl.grid_columnconfigure((0, 1, 2, 3, 4, 5, 6), weight=1)
+        ctrl.grid_columnconfigure(tuple(range(10)), weight=1)
 
         # ボタン席入力 (空欄: 自動で1席左回りに進める。指定: 初期化/補正)
         seats = [str(s) for s in sorted(self._gs.get_stacks().keys())]
@@ -215,23 +223,22 @@ class GUIDashboard:
                       command=self._cmd_new_hand).grid(row=0, column=2, padx=8, pady=12)
 
         # ウィナー確定
-        ctk.CTkLabel(ctrl, text="ウィナー:").grid(row=0, column=1, padx=(12, 2))
-        seats = [str(s) for s in sorted(self._gs.get_stacks().keys())]
+        ctk.CTkLabel(ctrl, text="ウィナー:").grid(row=0, column=3, padx=(12, 2))
         self._winner_var = ctk.StringVar(value=seats[0] if seats else "1")
         ctk.CTkOptionMenu(ctrl, variable=self._winner_var, values=seats,
-                          width=70).grid(row=0, column=2, padx=2)
+                          width=70).grid(row=0, column=4, padx=2)
         ctk.CTkButton(ctrl, text="確定", width=70,
-                      command=self._cmd_winner).grid(row=0, column=3, padx=(2, 12))
+                      command=self._cmd_winner).grid(row=0, column=5, padx=(2, 12))
 
         # リバイ
-        ctk.CTkLabel(ctrl, text="リバイ 席:").grid(row=0, column=4, padx=(12, 2))
+        ctk.CTkLabel(ctrl, text="リバイ 席:").grid(row=0, column=6, padx=(12, 2))
         self._rebuy_seat_var = ctk.StringVar(value=seats[0] if seats else "1")
         ctk.CTkOptionMenu(ctrl, variable=self._rebuy_seat_var, values=seats,
-                          width=70).grid(row=0, column=5, padx=2)
+                          width=70).grid(row=0, column=7, padx=2)
         self._rebuy_amount_entry = ctk.CTkEntry(ctrl, width=90, placeholder_text="金額")
-        self._rebuy_amount_entry.grid(row=0, column=6, padx=2)
+        self._rebuy_amount_entry.grid(row=0, column=8, padx=2)
         ctk.CTkButton(ctrl, text="適用", width=70,
-                      command=self._cmd_rebuy).grid(row=0, column=7, padx=(2, 12))
+                      command=self._cmd_rebuy).grid(row=0, column=9, padx=(2, 12))
 
     # ――― コントロールコマンド ―――
 
@@ -360,7 +367,11 @@ class GUIDashboard:
         gs = self._gs
         self._lbl_hand.configure(text=f"ハンド: #{gs.hand_id}")
         # BettingState から button/SB/BB/actor を取り出してストリート表示に併記
-        bs_text = f"ストリート: {gs.street}"
+        self._lbl_street.configure(text=f"ストリート: {gs.street}")
+        self._lbl_pot.configure(text=f"ポット: {gs.pot:,}")
+
+        # BettingState 詳細を独立行に表示
+        bs_text = "BTN: — | SB: — | BB: — | Actor: — | Street: — | To call: —"
         if self._integration_thread is not None:
             try:
                 bs = self._integration_thread.betting_state  # type: ignore[attr-defined]
@@ -373,8 +384,7 @@ class GUIDashboard:
                     )
             except Exception:
                 pass
-        self._lbl_street.configure(text=bs_text)
-        self._lbl_pot.configure(text=f"ポット: {gs.pot:,}")
+        self._lbl_betting.configure(text=bs_text)
         # RFID HTTP 受信機のステータスを表示
         if self._rfid_receiver is not None:
             try:
