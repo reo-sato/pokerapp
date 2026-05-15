@@ -440,7 +440,8 @@ pytest tests/ --ignore=tests/test_vision.py
 | PokerRuleEngine | ❌ 未実装 (v6.0) | legal_actions 算出なし |
 | AudioStreamBuffer 状態機械 | ❌ 未実装 (v6.0) | 確認型発話の PENDING なし |
 | 音声/RFID 確率融合エンジン | ❌ 未実装 (v6.0+) | §「将来計画 (時刻ベース確率融合)」を参照 |
-| ベイズ推定によるアクション推定 | ❌ 未実装 (v6.0+) | §「将来計画 (ベイズ推定)」を参照 |
+| ベイズ推定によるアクション推定 (中核モデル) | ❌ 未実装 (v6.0+) | §「将来計画 (ベイズ推定)」を参照 |
+| └ M1–M3 実装計画 (Beam Search K=8〜16, 固定 prior, WINNER 後方修正) | 📋 計画策定済 | §「v6.0 実装計画 (M1–M3)」を参照 |
 | ディーラー別オンライン学習 | ❌ 未実装 (v6.0+) | §「将来計画」を参照 |
 
 ---
@@ -658,3 +659,140 @@ def infer_action_distribution(
 ```
 
 クリックで確定 → その結果が Dirichlet posterior の更新カウントになる (active learning ループ閉)。
+
+---
+
+## v6.0 実装計画 (M1–M3): ベイズ推定アクション推定レイヤ
+
+§「将来計画 (v6.0+): ベイズ推定によるアクション推定」の中核モデルを 3 マイルストーンに分割して **非破壊** で導入する具体的な実装計画。学習・階層ベイズ・ベイズリスク最小化は本計画ではスコープ外（§「将来計画」に残置）。
+
+### 中核モデル決定事項
+
+| 項目 | 決定 |
+|------|------|
+| 推定対象 | sequence MAP: $A^* = \arg\max_A P(A_{1:T} \mid \mathcal{E}_{1:T})$ |
+| アルゴリズム | **Beam Search (K=8〜16, 決定論的)**。`enable_resample=False` で粒子フィルタへの将来移行口を残す |
+| 観測 | N-best + word_timestamps + RFID interval (`t_end` 追加) |
+| パラメータ θ | 固定 prior（学習なし） |
+| 意思決定 | MAP（top-1 確定）。既存の二値 `needs_review` トリガ (check_when_bet_open 等) は維持 |
+| 後方修正 | WINNER/POT で粒子集合を再フィルタ → `IntegrationThread._current_actions` を in-place mutate |
+| 既存 API | `infer_action()` は `infer_action_distribution()` 上の薄いアダプタとして保存（243 テスト全 green 維持） |
+
+### 数学的中核
+
+- **状態**: アクション列 $A = (a_1, \dots, a_T)$、各 $a_i = (\text{seat}_i, \text{action}_i, \text{amount}_i, \tau_i)$、$\tau_1 < \dots < \tau_T$（ハード制約）
+- **観測**: `EvidenceInterval`（audio: N-best $\{(w_k, c_k)\}$ + 区間 $[t_s, t_e]$ + word_timestamps / rfid: 区間 $[t_s, t_e]$ / camera: 無情報）
+- **尤度** (モダリティ独立): $P(E_t \mid a_i) = P_\text{audio}(u_t \mid a_i) \cdot P_\text{rfid}(I_t \mid a_i)$
+  - 時刻項: $\mathcal{N}(\tau_i - t_e^\text{audio}; \mu_\text{audio}, \sigma_\text{audio}^2)$、fold-on-release は $\mathcal{N}(\tau_i - t_e^\text{rfid}; \mu_\text{rfid}, \sigma_\text{rfid}^2)$
+  - 語彙項: $\sum_k c_k \cdot \pi(w_k \mid \text{action}_i)$
+  - ハード制約: $a_i \notin \text{legal}(\text{BettingState})$ → 0、RFID 在席中の FOLD → 0
+- **事前**: $P(A \mid s) = \prod_i \pi(\text{action}_i \mid \text{position}_i) \cdot \mathbb{1}[\text{legal}]$
+- **意思決定**: $A^* = \arg\max_A \sum_t \log P(E_t \mid A) + \log P(A)$ を Beam Search で近似
+
+### 固定 Prior 初期値
+
+| パラメータ | 値 | 根拠 |
+|---|---|---|
+| $\mu_\text{audio}$, $\sigma_\text{audio}$ | 0.4s, 0.6s | 既存 `MATCH_WINDOW=2.0` の ±2σ ≈ 窓幅 |
+| $\mu_\text{rfid}$, $\sigma_\text{rfid}$ | 0.2s, 0.4s | ESP32 ポーリングは高速 |
+| 語彙 $\pi(w \mid a)$ | `speech_normalization.json` の `action_aliases` から Dirichlet pseudocount 5、未知語 $\alpha_0=0.1$ | 既存資産再利用 |
+| 位置 prior | early `{FOLD:0.55, CALL:0.30, RAISE:0.10, CHECK/BET:0.05}` / middle `{FOLD:0.40, CALL:0.35, RAISE:0.20, CHECK/BET:0.05}` / late `{FOLD:0.30, CALL:0.30, RAISE:0.30, CHECK/BET:0.10}` | loose-passive 寄り |
+| amount\|action | BET/RAISE: log-Normal(ln(2·bb), 0.7) / CALL: degenerate at `current_bet` / CHECK/FOLD: degenerate at 0 | long-tailed |
+
+定数は `integration/observation_model.py` の `PriorParams` dataclass に集約 → 将来 `profile.json` で差し替え可。
+
+### マイルストーン
+
+#### M1 — データ配線（非破壊）
+
+**目的**: 観測の richness（N-best + word_timestamps + interval）を pipeline に流すだけ、推定ロジックは変えない。
+
+- `core/events.py`:
+  - `AudioEvent` 末尾に `alternatives: list[ASRAlternative] = field(default_factory=list)`, `word_timestamps: list[WordTiming] = field(default_factory=list)`, `t_end: Optional[float] = None` を追加
+  - `RFIDEvent` 末尾に `t_end: Optional[float] = None` を追加
+  - 新 dataclass: `ASRAlternative(text, confidence, words)`, `WordTiming(word, start, end, confidence)`
+- `audio/recorder.py`: `WhisperTranscriber.transcribe()` を `best_of=5, beam_size=5, word_timestamps=True` で動かし、segment-level metadata から N-best と timing を抽出して `TranscriptionResult` で返却。`AudioThread._process_chunk` で新フィールドを `AudioEvent` に詰める
+- `audio/vosk_recorder.py`: 既存の `SetWords(True)` 出力 JSON の `result` 配列から `WordTiming` を生成（Vosk は単一仮説なので `alternatives` は 1 件）
+- `output/evidence_log.py` (新): `EvidenceLogWriter(log_dir, session_id)` で `logs/evidence_<session>.jsonl` に append-only 書き込み（session JSON と完全分離）
+- `integration/engine.py`: `EvidenceLogWriter` を `__init__` で生成、`_handle_audio_event` / `_drain_rfid_queue` で raw evidence をログに inject（推定変更なし）
+
+検証: `pytest tests/ -v --ignore=tests/test_vision.py` → 243 件 pass、`python main.py --cli` で `logs/evidence_*.jsonl` が生成。
+
+#### M2 — 観測モデル + アダプタ
+
+**目的**: 観測尤度関数を導入し、`infer_action()` を「列挙→max」型にリファクタ。`engine.py` は変更しない。
+
+- `integration/observation_model.py` (新):
+  ```python
+  @dataclass class EvidenceInterval: kind: Literal["audio","rfid","camera"]; t_start, t_end, payload
+  @dataclass class PriorParams: mu_audio, sigma_audio, mu_rfid, sigma_rfid, lexicon, position_prior, amount_prior
+  @dataclass class ActionHypothesis: action, amount, log_likelihood, reason, needs_review
+  def compute_log_likelihood(evidence, hypothesis, state, prior) -> float
+  def default_priors() -> PriorParams  # speech_normalization.json から構築
+  ```
+- `integration/action_inference.py`:
+  - 新規 `infer_action_distribution(evidence, state, actor_seat, prior) -> list[ActionHypothesis]`
+  - 既存 `infer_action()` (`:339`) は `infer_action_distribution()` を呼んで top-1 を取り出すアダプタにリファクタ。既存の `_infer_from_amount_only()` (`:230`) 6 ケースと `_validate_provided_action()` (`:299`) は内部で再利用し、各仮説に log-likelihood を埋める
+  - **N-best 単一なら top-1 == 既存出力** を `tests/test_inference_equivalence.py` で保証
+- 新規テスト: `tests/test_observation_model.py`, `tests/test_inference_equivalence.py`
+
+検証: 全 suite green、既存 `infer_action()` の出力に diff なし。
+
+#### M3 — Beam Engine + WINNER 後方修正
+
+**目的**: sequence 事後分布の MAP を Beam Search で出す。WINNER 到着時に粒子集合を再フィルタしてアクション履歴を遡及修正。
+
+- `integration/beam_search.py` (新):
+  ```python
+  @dataclass class BeamParticle: actions, log_weight, state  # BettingState を deep copy
+  class BeamEngine:
+      def __init__(self, K=8, prior=..., enable_resample=False, sink=None)  # sink は evidence_log への hook
+      def step(self, evidence) -> None                       # legal_actions × N-best 展開 → top-K 剪定
+      def map_action(self) -> ActionHypothesis               # リアルタイム MAP (最新 1 件)
+      def map_sequence(self) -> list[ActionHypothesis]
+      def apply_winner_filter(self, winner_seat, final_pot) -> list[ActionHypothesis]
+      def snapshot(self) -> list[BeamParticle]               # evidence_log 用
+  ```
+- `integration/engine.py`:
+  - `__init__` (`:134` の `self._betting_state` 隣) に `self._beam = BeamEngine(...)` を追加
+  - `_start_new_hand()` (`:419`) で `self._beam = BeamEngine(...)` 再初期化
+  - `_handle_audio_event()` (`:325`) の `infer_action()` 呼び出し (`:354`) を `self._beam.step(evidence); top = self._beam.map_action()` に置換
+  - `_drain_rfid_queue()` (`:190`) で seat/board RFID から `EvidenceInterval(kind="rfid")` を生成して `self._beam.step(...)` へ
+  - `_finalize_hand()` (`:539`) で `gs.end_hand()` (`:541`) より **前** に `revised = self._beam.apply_winner_filter(winner_seat, observed_pot)` を実行、`self._current_actions` と zip 比較し差分 record を **in-place** mutate + `needs_review=True` + `on_action_revised(record)` 発火
+  - **初版の妥協**: `pot_after`/`stack_after` は stale のまま残置（完全 replay は将来拡張）
+- 新規テスト:
+  - `tests/test_beam_search.py`: 剪定・決定論性・resample=False
+  - `tests/test_bayesian_e2e.py`: seat3「コール 600」 N-best `[(CALL, 0.55), (RAISE, 0.40)]` + 0.8s 後の RFID `t_end`（= fold）でシナリオ駆動。初期 MAP=CALL → WINNER(seat4) + pot=current_bet 到着で FOLD 粒子を昇格、`_current_actions[2].action == "fold"` を assert
+
+検証: 全 suite green、GUI smoke で revise バナー、PHH 往復。
+
+### ActionRecord 書き込み戦略
+
+採用は **(A) リアルタイム MAP + WINNER で in-place revise**。
+- `output/json_writer.py:47` `append_hand_summary()` は `_finalize_hand` 末尾でのみディスクへ書き込むため、メモリの `self._current_actions` を mutate する限り **JSON 書き込みは 1 回・確定値のみ**
+- GUI のリアルタイム性 (`on_action` `:412`) は維持、revise 時は `on_action_revised(record)` を追加発火
+- 完全 replay 型（`pot_after`/`stack_after` を再計算）は将来拡張
+
+### 観測ログ (B0)
+
+`logs/evidence_<session>.jsonl` に 1 観測 = 1 行で記録: `{ts, kind, payload, n_best, beam_snapshot_top3, map_action_id}`。session JSON と完全分離し PHH/GUI は読まない。将来オフライン学習（B2/B3/B6）の入力資料。
+
+### スコープ外（§「将来計画」に残置）
+
+- B2/B3: 共役事前 + 逐次ベイズ更新（学習）
+- B5: ベイズリスク最小化（top-2 対数差ベース needs_review）
+- B6: 階層ベイズ・夜間 MCMC
+- B7: Active learning (GUI クリック → posterior 更新)
+- 粒子フィルタの確率的サンプリング（K 増やしと resample flag のみ準備）
+- 完全 replay 型後方修正（pot_after/stack_after 再計算）
+
+### 検証コマンド
+
+```bash
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 各 M で 243 → 243+new
+pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
+pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
+python main.py --cli                                                              # M1: logs/evidence_*.jsonl が増える
+python main.py                                                                    # M3: GUI で revise バナー確認
+python main.py --export-phh logs/session_xxx.json                                 # M3: PHH 出力
+```

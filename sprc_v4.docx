@@ -1,7 +1,7 @@
 ポーカーハンドログ自動記録システム 仕様書
-バージョン: 5.2
+バージョン: 5.3
 作成日: 2026-05-15
-前バージョン: 5.1（2026-05-15）
+前バージョン: 5.2（2026-05-15）
 対象: 小規模クラブ・個人配信向け
 
 改訂履歴
@@ -13,6 +13,7 @@
 5.0	2026-05-15	実装状況に合わせて仕様を整合。音声正規化レイヤー追加（corrections.json, speech_normalization.json）。数値正規化追加（ひらがな/漢数字）。amount_only 補完（BettingState）追加。Vosk バックエンド追加。信頼度をセンサー組み合わせ行列に改訂。PokerRuleEngine / AudioStreamBuffer / ディーラーボタン管理を「未実装・将来実装」に移動
 5.1	2026-05-15	ディーラーボタン自動回転を実装（initial_button_seat、advance_button、SB/BB 自動 post、actor 自動進行、heads-up 対応、BettingState.start_hand）。GUI に BTN補正ドロップダウン・BettingState 表示行・手動入力 actor 追従を追加。CLI に初期 button プロンプトと `n <seat>` を追加。将来計画 (v6.0+) に「音声/RFID 時刻ベース確率融合エンジン」と「ディーラー別オンライン学習」を新規セクションとして追加
 5.2	2026-05-15	将来計画 (v6.0+) に「ベイズ推定によるアクション推定」セクション 14 を追加。事後分布の定式化、逐次ベイズ更新、共役事前分布 (Normal-Gamma / Dirichlet) によるオンラインパラメータ学習、観測モデル (尤度関数)、ベイズリスク最小化による review 自動判定、階層ベイズによる卓 hyperprior、段階導入計画 (B0–B8)、GUI への確率表示と active learning を仕様化
+5.3	2026-05-15	v6.0 ベイズ推定アクション推定レイヤの M1–M3 実装計画を新セクション 15 として追加。Beam Search (K=8〜16) を採用、N-best と word_timestamps を AudioEvent に追加、RFIDEvent に t_end を追加、固定 prior でパイプラインを立ち上げ、WINNER/POT による後方修正をスコープに含める。既存 infer_action() は infer_action_distribution() 上の薄いアダプタとして保存し 243 テストの後方互換を保証。学習・階層ベイズ・ベイズリスク最小化はセクション 14 に残置
 
 
 1. システム概要
@@ -480,6 +481,7 @@ PokerRuleEngine	未実装（将来 v6.0）	-
 尤度ベースのアクター推定	未実装（将来 v6.0）	-
 音声/RFID 時刻ベース確率融合エンジン	未実装（将来 v6.0+）	セクション 13 参照
 ベイズ推定によるアクション推定	未実装（将来 v6.0+）	セクション 14 参照
+└ M1–M3 実装計画 (Beam Search K=8〜16, 固定 prior, WINNER 後方修正)	計画策定済 (v5.3)	セクション 15 参照
 ディーラー別オンライン学習	未実装（将来 v6.0+）	セクション 13 参照
 
 
@@ -710,5 +712,114 @@ B0–B3 は既存パイプラインに非破壊で追加可能。B4 以降は In
 - NFR-203: 階層ベイズの夜間バッチ MCMC は 1 卓 1 セッション (約 100 ハンド) 分のデータで 5 分以内に収束することを目標とする
 
 
+15. v6.0 実装計画: ベイズ推定アクション推定レイヤ (M1–M3)
+
+15.1 位置づけ
+セクション 14 で仕様化したベイズ推定モデルを 3 マイルストーンに分割し、非破壊で段階導入する具体的な実装計画。学習 (FR-220 〜 FR-227)、階層ベイズ (FR-250 〜 FR-252)、ベイズリスク最小化 (FR-241)、GUI 確率表示と active learning (FR-270, FR-271) は本計画のスコープ外でありセクション 14 に残置する。
+
+15.2 中核モデルの決定事項
+- FR-300: 推定対象は sequence MAP (A* = argmax_A P(A_{1:T} | E_{1:T}))
+- FR-301: アルゴリズムは Beam Search (K=8 で運用開始、最大 K=16 までスケール可能)。FR-211 の粒子フィルタ (Sequential Monte Carlo) への将来移行口として `enable_resample` フラグを設けるが、本マイルストーンでは決定論的 top-K のみを採用 (再現性優先)
+- FR-302: 観測は N-best (faster-whisper / Vosk) + word_timestamps + RFID 区間 (t_end) を統合した EvidenceInterval として表現する
+- FR-303: 観測モデルのパラメータ θ はすべて固定 prior (学習なし)。FR-220 以降の共役事前分布によるオンライン学習は本計画では実装しない
+- FR-304: 意思決定は MAP のみ (FR-240 と整合)。既存の二値 needs_review トリガ (check_when_bet_open 等) は引き続き保持する
+- FR-305: WINNER/POT 到着時の後方修正 (粒子集合の再フィルタ → MAP 再計算) を実装スコープに含める (FR-130 と整合)
+- FR-306: 既存 infer_action() API は維持。内部で infer_action_distribution() を呼んで top-1 を返す薄いアダプタにリファクタする (FR-260 と整合)
+
+15.3 固定 Prior 初期値
+- FR-310: 音声遅延 (μ_audio, σ_audio) = (0.4s, 0.6s)。MATCH_WINDOW=2.0 (engine.py の既存定数) の ±2σ ≈ 窓幅と整合
+- FR-311: RFID 遅延 (μ_rfid, σ_rfid) = (0.2s, 0.4s)。ESP32 ポーリングが高速であることに合わせる
+- FR-312: 語彙 π(word | action) は speech_normalization.json の action_aliases から Dirichlet pseudocount 5 で構築。未知語は α_0 = 0.1
+- FR-313: 位置別 prior は早期/中期/後期の 3 バケットで以下:
+  early   {FOLD: 0.55, CALL: 0.30, RAISE: 0.10, CHECK/BET: 0.05}
+  middle  {FOLD: 0.40, CALL: 0.35, RAISE: 0.20, CHECK/BET: 0.05}
+  late    {FOLD: 0.30, CALL: 0.30, RAISE: 0.30, CHECK/BET: 0.10}
+- FR-314: amount | action の prior は BET/RAISE が log-Normal(ln(2·bb), 0.7)、CALL は current_bet に degenerate、CHECK/FOLD は 0 に degenerate
+- FR-315: 上記定数はすべて integration/observation_model.py の PriorParams dataclass に集約し、将来 profile.json (FR-201, FR-220) で差し替え可能とする
+
+15.4 観測モデル (尤度関数)
+- FR-320: 音声尤度 P(u | a_i) = phi_align × phi_sem
+  phi_align(τ_i, t_e^audio) = N(τ_i - t_e^audio; μ_audio, σ_audio)
+  phi_sem(N-best, a_i) = Σ_k c_k · π(w_k | action_i)
+- FR-321: RFID 尤度 (FR-231 と整合)
+  a_i = FOLD(n): N(τ_i - t_e^(n); μ_rfid, σ_rfid)
+  a_i ∈ {BET, CALL, RAISE}(seat=n): I[t_s^(n) ≤ τ_i ≤ t_e^(n)]
+  その他: 1
+- FR-322: legal_actions に違反する候補は log_likelihood = -inf (ハード制約)
+- FR-323: RFID 在席中の FOLD 候補は log_likelihood = -inf (ハード制約)
+
+15.5 マイルストーン構成
+
+M1: データ配線 (非破壊)
+- 目的: 観測の richness (N-best + word_timestamps + interval) を pipeline に流すのみ。推定ロジックは不変
+- FR-330: core/events.py の AudioEvent 末尾に alternatives, word_timestamps, t_end を default 付きで追加し、既存の positional 構築を破壊しない
+- FR-331: core/events.py の RFIDEvent 末尾に t_end を追加
+- FR-332: 新 dataclass ASRAlternative(text, confidence, words), WordTiming(word, start, end, confidence) を定義
+- FR-333: audio/recorder.py の WhisperTranscriber.transcribe() を best_of=5, beam_size=5, word_timestamps=True で動かし TranscriptionResult (text, alternatives, word_timestamps, t_end) を返却
+- FR-334: audio/vosk_recorder.py で既存の SetWords(True) 出力 JSON の result 配列から WordTiming を生成 (Vosk は単一仮説なので alternatives は 1 件)
+- FR-335: 新規 output/evidence_log.py に EvidenceLogWriter(log_dir, session_id) を実装。logs/evidence_<session>.jsonl に append-only 書き込み、session JSON と完全分離 (PHH / GUI は読まない)
+- FR-336: integration/engine.py の IntegrationThread が EvidenceLogWriter を生成し、_handle_audio_event / _drain_rfid_queue で raw evidence をログに inject (推定は変更しない)
+- 検証: pytest tests/ で 243 件 pass、python main.py --cli で logs/evidence_*.jsonl が生成されることを確認
+
+M2: 観測モデル + アダプタ
+- 目的: 観測尤度関数を導入し infer_action() を「列挙→max」型にリファクタ。engine.py は変更しない
+- FR-340: 新規 integration/observation_model.py に以下を実装
+  - EvidenceInterval(kind, t_start, t_end, payload)
+  - PriorParams (FR-310 〜 FR-314 の定数を保持)
+  - ActionHypothesis(action, amount, log_likelihood, reason, needs_review)
+  - compute_log_likelihood(evidence, hypothesis, state, prior) -> float
+  - default_priors() -> PriorParams (speech_normalization.json から構築)
+- FR-341: integration/action_inference.py に infer_action_distribution(evidence, state, actor_seat, prior) -> list[ActionHypothesis] を新設
+- FR-342: 既存 infer_action() を「infer_action_distribution() を呼んで top-1 を返すアダプタ」にリファクタ。既存の _infer_from_amount_only() 6 ケースと _validate_provided_action() のロジックは尤度関数の中で再利用する
+- FR-343: tests/test_inference_equivalence.py で「N-best が単一なら top-1 == 既存 _infer_from_amount_only() の出力」を 6 ケース全てで assert する (後方互換の必要十分条件)
+- FR-344: tests/test_observation_model.py で Normal/Dirichlet 数値、legal 制約での -inf、RFID 在席中 FOLD の -inf を assert する
+- 検証: 全 suite green、既存 infer_action() の出力 diff = 0
+
+M3: Beam Engine + WINNER 後方修正
+- 目的: sequence 事後分布の MAP を Beam Search で出す。WINNER 到着時に粒子集合を再フィルタしてアクション履歴を遡及修正
+- FR-350: 新規 integration/beam_search.py に以下を実装
+  - BeamParticle(actions, log_weight, state) (state は BettingState の deep copy)
+  - BeamEngine(K=8, prior, enable_resample=False, sink=None)
+  - step(evidence): 各粒子から legal_actions × N-best を展開し top-K に剪定
+  - map_action(): リアルタイム MAP (最新 1 件) を返す
+  - map_sequence(): MAP のアクション列を返す
+  - apply_winner_filter(winner_seat, final_pot): WINNER に整合しない粒子を 0 重み化し再正規化 → 新 MAP を返す
+  - snapshot(): evidence_log への hook 用に top-3 粒子を返す
+- FR-351: integration/engine.py の IntegrationThread に self._beam = BeamEngine(...) を追加し、_start_new_hand() で再初期化する
+- FR-352: _handle_audio_event() で infer_action() 呼び出しを self._beam.step(evidence); top = self._beam.map_action() に置換する
+- FR-353: _drain_rfid_queue() で seat/board RFID から EvidenceInterval(kind="rfid") を生成して self._beam.step(...) に流す
+- FR-354: _finalize_hand() で gs.end_hand() より前に self._beam.apply_winner_filter(winner_seat, observed_pot) を実行し、self._current_actions と zip 比較。差分 record を in-place mutate + needs_review=True + on_action_revised(record) コールバック発火
+- FR-355: M3 初版では pot_after / stack_after は stale のまま残置する。完全 replay 型修正 (GameStateManager を一から再生) は将来拡張
+- FR-356: tests/test_beam_search.py で剪定挙動・決定論性・resample=False を assert
+- FR-357: tests/test_bayesian_e2e.py で「seat3 の発話『コール 600』 N-best [(CALL, 0.55), (RAISE, 0.40)] + 0.8s 後の RFID t_end (= fold) → 初期 MAP=CALL → WINNER(seat4) + pot=current_bet 到着で beam 再フィルタが FOLD 粒子を昇格し _current_actions[2].action == 'fold' になる」シナリオを assert
+- 検証: 全 suite green、GUI smoke で revise バナー、PHH エクスポート往復
+
+15.6 ActionRecord 書き込み戦略
+- FR-360: 採用方式は「リアルタイム MAP + WINNER で in-place revise」
+- FR-361: output/json_writer.py の append_hand_summary() は _finalize_hand 末尾でのみディスクへ書き込むため、メモリの self._current_actions を mutate する限り JSON 書き込みは 1 回 (確定値のみ) で完結する (NFR-10 と整合)
+- FR-362: GUI のリアルタイム性 (on_action) は維持する。revise 時は on_action_revised(record) を追加発火する
+- FR-363: 完全 replay 型 (pot_after / stack_after を再計算) は将来拡張に回す
+
+15.7 観測ログ (B0) スキーマ
+- FR-370: logs/evidence_<session>.jsonl に 1 観測 = 1 行で記録する
+- FR-371: 各行のフィールド: {ts, kind ("audio"|"rfid"|"camera"), payload (生イベントの dict), n_best (audio 時のみ), beam_snapshot_top3 (top-3 粒子の MAP アクション + log_weight), map_action_id}
+- FR-372: 将来オフライン学習 (B2 / B3 / B6) の入力資料として活用する
+- FR-373: session_<id>.json と完全分離する (PHH / GUI は evidence_log を読まない)
+
+15.8 スコープ外 (セクション 14 に残置)
+- B2 / B3 共役事前分布によるオンライン学習 (FR-220 〜 FR-227)
+- B5 ベイズリスク最小化による review 自動判定 (FR-241)
+- B6 階層ベイズ・夜間バッチ MCMC (FR-250 〜 FR-252, NFR-203)
+- B7 Active learning ループ閉 (FR-271)
+- 粒子フィルタの確率的サンプリング (本計画では enable_resample=False で枠だけ用意)
+- 完全 replay 型後方修正 (pot_after / stack_after 再計算)
+
+15.9 NFR (M1–M3 固有)
+- NFR-300: M1 完了時点で既存 243 テストが全て pass すること (後方互換の絶対条件)
+- NFR-301: M2 完了時点で「N-best 単一なら infer_action_distribution().top1 == 既存 infer_action() 出力」が 6 ケース全てで成立すること
+- NFR-302: M3 完了時点で Beam Search 1 step あたりの計算時間は K=8 で 10ms 以内、K=16 で 30ms 以内 (NFR-200 の 50ms より厳しい中間目標)
+- NFR-303: WINNER 後方修正による in-place mutate は同期処理とし、_finalize_hand のレイテンシ増加は 100ms 以内に抑える
+
+
 本仕様書は開発進行に伴い随時更新する。
-次バージョン (v6.0) での主な追加予定: AudioStreamBuffer 状態機械、PokerRuleEngine、音声/RFID 時刻ベース確率融合エンジン、ベイズ推定によるアクション推定、ディーラー別オンライン学習。
+次バージョン (v6.0) での主な追加予定: AudioStreamBuffer 状態機械、PokerRuleEngine、音声/RFID 時刻ベース確率融合エンジン、ベイズ推定によるアクション推定 (M1–M3 から段階導入)、ディーラー別オンライン学習。
