@@ -57,7 +57,8 @@ class AudioThread(threading.Thread):
         )
         self._sample_rate = sample_rate
         self._stop_event = stop_event or threading.Event()
-        self._transcriber = WhisperTranscriber(model_size=model_size, language=language)
+        self._model_size = model_size
+        self._language = language
         # config から明示指定があれば最終フォールバックで使う（未指定なら _CHUNK_SIZE）
         self._frames_per_buffer: Optional[int] = frames_per_buffer
 
@@ -146,6 +147,16 @@ class AudioThread(threading.Thread):
             logger.warning("pyaudio not installed. AudioThread will not capture audio.")
             return
 
+        try:
+            transcriber = WhisperTranscriber(model_size=self._model_size, language=self._language)
+        except Exception:
+            logger.exception(
+                "AudioThread: failed to load WhisperTranscriber (model=%s). "
+                "AudioThread will exit.",
+                self._model_size,
+            )
+            return
+
         pa = pyaudio.PyAudio()
         try:
             stream = self._open_input_stream(pa)
@@ -198,7 +209,7 @@ class AudioThread(threading.Thread):
                     buffer = []
                     buffer_start_time = time.time()
                     silence_chunks = 0
-                    self._process_chunk(audio_bytes)
+                    self._process_chunk(audio_bytes, transcriber)
 
         finally:
             stream.stop_stream()
@@ -206,10 +217,10 @@ class AudioThread(threading.Thread):
             pa.terminate()
             logger.info("AudioThread stopped")
 
-    def _process_chunk(self, audio_bytes: bytes) -> None:
+    def _process_chunk(self, audio_bytes: bytes, transcriber: WhisperTranscriber) -> None:
         """音声チャンクをテキストに変換し、アクションを検出して queue に送出する。"""
         try:
-            text = self._transcriber.transcribe(audio_bytes)
+            text = transcriber.transcribe(audio_bytes)
             if not text:
                 return
             logger.debug("Transcribed: %r", text)
