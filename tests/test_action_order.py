@@ -6,11 +6,28 @@ from __future__ import annotations
 
 from integration.action_order import (
     advance_actor,
+    advance_button,
     compute_blinds,
     compute_first_actor_postflop,
     compute_first_actor_preflop,
     get_next_active_seat,
 )
+
+
+class TestAdvanceButton:
+    def test_dense(self) -> None:
+        assert advance_button(1, [1, 2, 3, 4, 5, 6]) == 2
+
+    def test_skip_inactive(self) -> None:
+        # active=[1,3,5,6], current=1 → 3 (2 は欠席で active に含まれない)
+        assert advance_button(1, [1, 3, 5, 6]) == 3
+
+    def test_wrap(self) -> None:
+        assert advance_button(8, [2, 4, 6, 8]) == 2
+
+    def test_button_not_in_active_still_advances(self) -> None:
+        # ボタンが置かれていた seat が離席した場合でも、円環上で次の seat を返す
+        assert advance_button(2, [1, 3, 5]) == 3
 
 
 class TestComputeBlinds:

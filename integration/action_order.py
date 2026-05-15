@@ -126,6 +126,19 @@ def compute_first_actor_postflop(
     return _next_in(button_seat, live)
 
 
+def advance_button(
+    current_button: int,
+    active_seats: Iterable[int],
+) -> Optional[int]:
+    """次ハンドの button 席を返す。current_button の左隣 (= 次に大きい active seat、
+    末尾なら先頭へ wrap) を取る。
+
+    advance_actor の特殊形 (fold/all-in 概念なし) として薄くラップした
+    名前付き API。
+    """
+    return advance_actor(current_button, active_seats)
+
+
 def advance_actor(
     current_actor: int,
     active_seats: Iterable[int],

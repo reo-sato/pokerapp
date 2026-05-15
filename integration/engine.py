@@ -38,7 +38,7 @@ from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
 from integration.action_inference import InferredAction, infer_action_from_state
-from integration.action_order import advance_actor, compute_blinds
+from integration.action_order import advance_actor, advance_button, compute_blinds
 from integration.betting_state import (
     A_ALLIN, A_BET, A_CALL, A_CHECK, A_FOLD, A_RAISE,
     BettingState,
@@ -539,15 +539,10 @@ class IntegrationThread(threading.Thread):
             return seat
 
         if self._last_button_seat is not None:
-            next_seat = advance_actor(
-                self._last_button_seat,
-                active,
-                folded_seats=set(),
-                all_in_seats=set(),
-            )
+            next_seat = advance_button(self._last_button_seat, active)
             if next_seat is not None:
                 logger.info(
-                    "Button advanced from %d to %d (auto, active=%s)",
+                    "Button advance: previous=%d next=%d active=%s",
                     self._last_button_seat, next_seat, active,
                 )
             else:

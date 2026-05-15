@@ -197,6 +197,69 @@ class TestButtonAutoAdvance:
         assert thread.betting_state.button_seat == 2
 
 
+class TestSequentialRotation:
+    """Case 2: 初回 button=1 → 次ハンドで button=2, SB=3, BB=4, first_actor=5。"""
+
+    def test_full_rotation_state(self, tmp_path: Path) -> None:
+        gs = _make_gs(seats=6)
+        audio_q = make_audio_queue()
+        writer = JsonWriter(log_dir=tmp_path, session_id="seq")
+        stop = threading.Event()
+
+        thread = IntegrationThread(
+            audio_queue=audio_q,
+            game_state=gs,
+            json_writer=writer,
+            stop_event=stop,
+            initial_button_seat=1,
+            sb_amount=100,
+            bb_amount=200,
+        )
+        ts = time.time()
+        audio_q.put(AudioEvent(action="new_hand", amount=0, timestamp=ts, raw_text=""))
+        audio_q.put(AudioEvent(action="new_hand", amount=0, timestamp=ts + 0.1, raw_text=""))
+        _drive(thread, stop, settle=0.6)
+
+        bs = thread.betting_state
+        assert bs.button_seat == 2
+        assert bs.sb_seat == 3
+        assert bs.bb_seat == 4
+        assert bs.actor_seat == 5  # preflop first actor
+
+
+class TestDuplicateBlindReview:
+    def test_voice_bet_same_as_bb_flags_review(self, tmp_path: Path) -> None:
+        gs = _make_gs(seats=6)
+        audio_q = make_audio_queue()
+        writer = JsonWriter(log_dir=tmp_path, session_id="dup")
+        stop = threading.Event()
+        captured: list[ActionRecord] = []
+
+        thread = IntegrationThread(
+            audio_queue=audio_q,
+            game_state=gs,
+            json_writer=writer,
+            on_action=captured.append,
+            stop_event=stop,
+            initial_button_seat=1,
+            sb_amount=100,
+            bb_amount=200,
+        )
+        ts = time.time()
+        audio_q.put(AudioEvent(action="new_hand", amount=0, timestamp=ts, raw_text=""))
+        # BB (seat 3) が "ベット 200" を発話 = 既に自動ポスト済みの blind 額と同額
+        audio_q.put(AudioEvent(
+            action="bet", amount=200, timestamp=ts + 0.05,
+            raw_text="シート3 ベット 200",
+        ))
+        _drive(thread, stop, settle=0.5)
+
+        bb_voice = [r for r in captured
+                    if r.seat == 3 and r.action != "BB_POST" and r.action != "SB_POST"]
+        assert bb_voice, "expected the voice action to be recorded"
+        assert bb_voice[0].needs_review is True
+
+
 class TestManualOverrideOneShot:
     """set_next_button_seat() は 1 回適用したら自動進行に戻る。"""
 

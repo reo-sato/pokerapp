@@ -269,6 +269,18 @@ def _validate_action_with_amount(
     contrib = state.player_contrib_this_street.get(seat, 0) if seat is not None else 0
 
     if action == A_BET:
+        # blind 自動投入済みの seat が同額の BET を発話 → 二重投入候補
+        if state.street == "preflop" and seat is not None:
+            if seat == state.sb_seat and amount == state.sb_amount:
+                return _review(
+                    normalized, seat, A_BET, amount,
+                    reason="duplicate_blind_post_sb",
+                )
+            if seat == state.bb_seat and amount == state.bb_amount:
+                return _review(
+                    normalized, seat, A_BET, amount,
+                    reason="duplicate_blind_post_bb",
+                )
         if state.is_opened:
             return _review(
                 normalized, seat, A_RAISE, amount,

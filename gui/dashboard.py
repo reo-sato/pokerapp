@@ -365,10 +365,11 @@ class GUIDashboard:
             try:
                 bs = self._integration_thread.betting_state  # type: ignore[attr-defined]
                 if bs.is_initialized:
+                    to_call = bs.call_amount_for(bs.actor_seat) if bs.actor_seat else 0
                     bs_text = (
-                        f"{gs.street} BTN:{bs.button_seat} "
-                        f"SB:{bs.sb_seat} BB:{bs.bb_seat} "
-                        f"actor:{bs.actor_seat} bet:{bs.current_bet}"
+                        f"BTN: {bs.button_seat} | SB: {bs.sb_seat} | "
+                        f"BB: {bs.bb_seat} | Actor: {bs.actor_seat} | "
+                        f"Street: {bs.street} | To call: {to_call}"
                     )
             except Exception:
                 pass
