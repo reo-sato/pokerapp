@@ -200,9 +200,9 @@ class GUIDashboard:
         ctk = self._ctk
         ctrl.grid_columnconfigure((0, 1, 2, 3, 4, 5, 6), weight=1)
 
-        # ボタン席入力 (空Enter で自動進行)
+        # ボタン席入力 (空欄: 自動で1席左回りに進める。指定: 初期化/補正)
         seats = [str(s) for s in sorted(self._gs.get_stacks().keys())]
-        ctk.CTkLabel(ctrl, text="ボタン席:").grid(row=0, column=0, padx=(8, 2), pady=12)
+        ctk.CTkLabel(ctrl, text="BTN補正:").grid(row=0, column=0, padx=(8, 2), pady=12)
         self._button_seat_var = ctk.StringVar(value="")
         self._button_seat_menu = ctk.CTkOptionMenu(
             ctrl, variable=self._button_seat_var,
@@ -245,7 +245,8 @@ class GUIDashboard:
                 row["hole_lbl"].configure(text="—")
         self._lbl_board.configure(text="ボード: —")
 
-        # 指定されたボタン席を IntegrationThread に伝達 (空欄なら自動進行)
+        # ボタン席は通常 IntegrationThread 側で前ハンドから自動進行する。
+        # 入力欄に値があるときのみ「初期化/補正」として 1 回限りで上書きする。
         btn_raw = self._button_seat_var.get().strip()
         metadata: Optional[dict] = None
         if btn_raw:
@@ -254,6 +255,9 @@ class GUIDashboard:
                 if self._integration_thread is not None:
                     self._integration_thread.set_next_button_seat(btn)
                 metadata = {"button_seat": btn}
+                self._append_log(f"BTN 補正: 次ハンド button=席{btn}", tag="medium")
+                # 1 回適用したら入力欄をリセットし、以降は自動進行に戻す
+                self._button_seat_var.set("")
             except ValueError:
                 self._append_log(f"⚠ ボタン席の指定が不正: {btn_raw!r}", tag="review")
 

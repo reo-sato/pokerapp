@@ -150,6 +150,86 @@ class TestSeatMismatchReview:
         assert mismatched, "expected a needs_review action"
 
 
+class TestButtonAutoAdvance:
+    """各ハンド開始時に button が前ハンドの次の active seat へ自動移動する。"""
+
+    def _run_two_hands(self, stacks: dict[int, int], initial_btn: int,
+                       tmp_path: Path) -> "IntegrationThread":
+        players = [PlayerState(seat=s, name=f"P{s}", stack=st)
+                   for s, st in stacks.items()]
+        gs = GameStateManager(players=players, sb=100, bb=200)
+        audio_q = make_audio_queue()
+        writer = JsonWriter(log_dir=tmp_path, session_id="rot")
+        stop = threading.Event()
+
+        thread = IntegrationThread(
+            audio_queue=audio_q,
+            game_state=gs,
+            json_writer=writer,
+            stop_event=stop,
+            initial_button_seat=initial_btn,
+            sb_amount=100,
+            bb_amount=200,
+        )
+        ts = time.time()
+        audio_q.put(AudioEvent(action="new_hand", amount=0, timestamp=ts, raw_text=""))
+        audio_q.put(AudioEvent(action="new_hand", amount=0, timestamp=ts + 0.1, raw_text=""))
+        _drive(thread, stop, settle=0.5)
+        return thread
+
+    def test_dense_seats_advance_by_one(self, tmp_path: Path) -> None:
+        # active=[1..6], initial=1 → 2 ハンド目で button=2
+        thread = self._run_two_hands(
+            {i: 10000 for i in range(1, 7)}, initial_btn=1, tmp_path=tmp_path,
+        )
+        assert thread.betting_state.button_seat == 2
+
+    def test_skips_empty_seats(self, tmp_path: Path) -> None:
+        # active=[1,3,5,6] (stack=0 を欠席扱い), initial=1 → next=3
+        stacks = {1: 10000, 2: 0, 3: 10000, 4: 0, 5: 10000, 6: 10000}
+        thread = self._run_two_hands(stacks, initial_btn=1, tmp_path=tmp_path)
+        assert thread.betting_state.button_seat == 3
+
+    def test_wraps_around(self, tmp_path: Path) -> None:
+        # active=[2,4,6,8], initial=8 → next=2
+        stacks = {2: 10000, 4: 10000, 6: 10000, 8: 10000}
+        thread = self._run_two_hands(stacks, initial_btn=8, tmp_path=tmp_path)
+        assert thread.betting_state.button_seat == 2
+
+
+class TestManualOverrideOneShot:
+    """set_next_button_seat() は 1 回適用したら自動進行に戻る。"""
+
+    def test_override_then_auto_advance(self, tmp_path: Path) -> None:
+        gs = _make_gs(seats=6)
+        audio_q = make_audio_queue()
+        writer = JsonWriter(log_dir=tmp_path, session_id="ov")
+        stop = threading.Event()
+
+        thread = IntegrationThread(
+            audio_queue=audio_q,
+            game_state=gs,
+            json_writer=writer,
+            stop_event=stop,
+            initial_button_seat=1,
+            sb_amount=100,
+            bb_amount=200,
+        )
+        # 1 ハンド目: initial=1
+        # 2 ハンド目: 手動で 5 に補正
+        # 3 ハンド目: 自動で 6 へ進むはず
+        ts = time.time()
+        audio_q.put(AudioEvent(action="new_hand", amount=0, timestamp=ts, raw_text=""))
+        audio_q.put(AudioEvent(
+            action="new_hand", amount=0, timestamp=ts + 0.1, raw_text="",
+            metadata={"button_seat": 5},
+        ))
+        audio_q.put(AudioEvent(action="new_hand", amount=0, timestamp=ts + 0.2, raw_text=""))
+        _drive(thread, stop, settle=0.7)
+
+        assert thread.betting_state.button_seat == 6
+
+
 class TestMetadataButtonOverride:
     def test_button_can_be_set_via_event_metadata(self, tmp_path: Path) -> None:
         gs = _make_gs()

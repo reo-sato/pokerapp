@@ -520,24 +520,43 @@ class IntegrationThread(threading.Thread):
         """新ハンドの button 席を決定する。
 
         優先順位:
-          1. set_next_button_seat() / metadata で明示された seat
-          2. 前ハンドの button から FR-05b に従って 1 席進める
-          3. 未設定なら None
+          1. set_next_button_seat() / metadata で明示された seat (手動 override)
+          2. 前ハンドの button から FR-05b に従って次の active seat へ自動移動
+          3. 一度も button が設定されていなければ None
         """
+        active = self._compute_active_seats()
+
         if self._next_button_seat is not None:
             seat = self._next_button_seat
-            # 1 ハンド使い切りで「次」を None に戻すと毎ハンド明示が必要になるので
-            # 自動進行のため保持はせず、次ハンドは last_button_seat から advance する。
             self._next_button_seat = None
+            if self._last_button_seat is None:
+                logger.info("Button seat initialized to %s (manual)", seat)
+            else:
+                logger.info(
+                    "Button seat overridden: %s -> %s (manual correction)",
+                    self._last_button_seat, seat,
+                )
             return seat
+
         if self._last_button_seat is not None:
-            active = self._compute_active_seats()
-            return advance_actor(
+            next_seat = advance_actor(
                 self._last_button_seat,
                 active,
                 folded_seats=set(),
                 all_in_seats=set(),
             )
+            if next_seat is not None:
+                logger.info(
+                    "Button advanced from %d to %d (auto, active=%s)",
+                    self._last_button_seat, next_seat, active,
+                )
+            else:
+                logger.warning(
+                    "Button could not be advanced from %d (active=%s)",
+                    self._last_button_seat, active,
+                )
+            return next_seat
+
         return None
 
     def _compute_active_seats(self) -> list[int]:
