@@ -15,6 +15,7 @@ from core.constants import (
     WHISPER_PROMPT_JA,
 )
 from core.events import AudioEvent
+from audio.speech_normalizer import normalize as _normalize_speech
 
 logger = logging.getLogger(__name__)
 
@@ -183,48 +184,65 @@ def parse_amount(text: str) -> int:
 
 
 def parse_action(text: str) -> Optional[AudioEvent]:
-    """Whisper の認識テキストからアクション種別と金額を抽出して AudioEvent を返す。
+    """ASR テキストからアクション種別と金額を抽出して AudioEvent を返す。
     認識できない場合は None を返す。
 
-    キーワード選択ルール:
-    1. テキスト内で最も左に現れたキーワードを優先する。
-    2. 同じ開始位置に複数のキーワードがマッチした場合は、より長いキーワードを優先する。
-       （例: "all in" と "all" が同位置にマッチ → "all in" を採用）
-    """
-    text = apply_corrections(text)
-    lower = text.lower()
+    処理順:
+      1. apply_corrections() - 既知の誤認識文字列を補正
+      2. _normalize_speech()  - action_aliases / seat_aliases で正規化
+      3. 正規化で action が確定した場合はそのまま採用
+      4. 確定しない場合は ACTION_KEYWORDS による従来のキーワードマッチング
 
+    キーワード選択ルール（フォールバック時）:
+      - テキスト内で最も左に現れたキーワードを優先する
+      - 同じ開始位置に複数キーワードがある場合は長い方を優先
+    """
+    original_text = text
+    text = apply_corrections(text)
+
+    # ── Speech normalization ────────────────────────────────────────────────
+    norm = _normalize_speech(text)
+    normalized = norm.normalized_text
+
+    if norm.action is not None:
+        # normalizer が action を特定済み: ACTION_KEYWORDS マッチングをスキップ
+        action = norm.action.lower()
+        amount = parse_amount(_strip_seat_references(normalized))
+        return AudioEvent(
+            action=action,
+            amount=amount,
+            timestamp=time.time(),
+            raw_text=original_text,
+        )
+
+    # ── Fallback: ACTION_KEYWORDS keyword matching ──────────────────────────
+    lower = normalized.lower()
     found_action: Optional[str] = None
-    found_pos = len(text)
-    found_kw_len = 0  # タイブレーク用: 同じ位置なら長い方を優先
+    found_pos = len(normalized)
+    found_kw_len = 0
 
     for keyword, action in ACTION_KEYWORDS.items():
         pos = lower.find(keyword.lower())
         if pos == -1:
             continue
         kw_len = len(keyword)
-        # 最左優先。同位置なら長いキーワードを優先（より具体的な表現を採用するため）
         if pos < found_pos or (pos == found_pos and kw_len > found_kw_len):
             found_pos = pos
             found_action = action
             found_kw_len = kw_len
 
     if found_action is None:
-        logger.debug("No action keyword found in: %r", text)
+        logger.debug("No action keyword found in: %r (normalized: %r)", original_text, normalized)
         return None
 
     # 席番号表現（シート1 / seat 3 等）を除去してから金額を抽出する。
-    # 除去しないと parse_amount() が席番号の数字を最初の金額候補として拾ってしまう。
-    # call/check/fold の金額: Phase 1 では parse_amount() の結果をそのまま使う簡易仕様。
-    # （例: "コール 500" → amount=500、"チェック" → amount=0）
-    # 精緻化する場合は action ごとに金額の妥当性検証を追加すること。
-    amount = parse_amount(_strip_seat_references(text))
+    amount = parse_amount(_strip_seat_references(normalized))
 
     return AudioEvent(
         action=found_action,
         amount=amount,
         timestamp=time.time(),
-        raw_text=text,
+        raw_text=original_text,
     )
 
 

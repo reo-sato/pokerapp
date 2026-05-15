@@ -47,6 +47,12 @@ def _make_audio_thread(
             stop_event=stop_event,
         )
         logger.info("Audio engine: whisper  model=%r", audio_cfg.get("whisper_model", "medium"))
+
+    # 音声認識後処理の正規化辞書を初期化する（両エンジン共通）
+    norm_path = audio_cfg.get("normalization_file", "./speech_normalization.json")
+    from audio.speech_normalizer import init_normalizer
+    init_normalizer(norm_path)
+
     return thread
 
 

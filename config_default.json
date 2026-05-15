@@ -18,6 +18,7 @@
     "whisper_model": "medium",
     "language": "ja",
     "initial_prompt": "ベット コール レイズ チェック フォールド オールイン ショーダウン ウィナー ハンド開始",
+    "normalization_file": "./speech_normalization.json",
     "vosk_model_path": "./models/vosk-model-ja-0.22",
     "vosk_grammar": null,
     "vosk_volume_threshold": 0,
