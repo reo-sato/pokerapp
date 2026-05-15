@@ -37,3 +37,7 @@ class AudioEvent:
     amount: int  # 金額なしの場合は 0
     timestamp: float  # time.time()
     raw_text: str
+    # 音声に席番号言及があれば設定 (state-aware 推定で seat 矛盾検出に使う)。
+    seat: Optional[int] = None
+    # ハンド開始時の button seat 指定など、追加メタデータ用。
+    metadata: Optional[dict] = None

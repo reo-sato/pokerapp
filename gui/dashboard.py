@@ -74,6 +74,7 @@ class GUIDashboard:
         self._camera_queue = camera_queue
         self._stop_event = stop_event or threading.Event()
         self._rfid_receiver = rfid_receiver  # RFIDHTTPReceiver (status プロパティ用)
+        self._integration_thread: Optional[object] = None  # set_integration_thread() で後付け
         self._update_queue: queue.Queue["ActionRecord"] = queue.Queue()
         self._rfid_card_queue: queue.Queue = queue.Queue()
         # seat → hole cards 表示用 (スレッド安全のため queue 経由で更新)
@@ -199,9 +200,19 @@ class GUIDashboard:
         ctk = self._ctk
         ctrl.grid_columnconfigure((0, 1, 2, 3, 4, 5, 6), weight=1)
 
+        # ボタン席入力 (空Enter で自動進行)
+        seats = [str(s) for s in sorted(self._gs.get_stacks().keys())]
+        ctk.CTkLabel(ctrl, text="ボタン席:").grid(row=0, column=0, padx=(8, 2), pady=12)
+        self._button_seat_var = ctk.StringVar(value="")
+        self._button_seat_menu = ctk.CTkOptionMenu(
+            ctrl, variable=self._button_seat_var,
+            values=[""] + seats, width=70,
+        )
+        self._button_seat_menu.grid(row=0, column=1, padx=2, pady=12)
+
         # 新ハンドボタン
         ctk.CTkButton(ctrl, text="新ハンド", width=100,
-                      command=self._cmd_new_hand).grid(row=0, column=0, padx=8, pady=12)
+                      command=self._cmd_new_hand).grid(row=0, column=2, padx=8, pady=12)
 
         # ウィナー確定
         ctk.CTkLabel(ctrl, text="ウィナー:").grid(row=0, column=1, padx=(12, 2))
@@ -233,8 +244,22 @@ class GUIDashboard:
             if "hole_lbl" in row:
                 row["hole_lbl"].configure(text="—")
         self._lbl_board.configure(text="ボード: —")
+
+        # 指定されたボタン席を IntegrationThread に伝達 (空欄なら自動進行)
+        btn_raw = self._button_seat_var.get().strip()
+        metadata: Optional[dict] = None
+        if btn_raw:
+            try:
+                btn = int(btn_raw)
+                if self._integration_thread is not None:
+                    self._integration_thread.set_next_button_seat(btn)
+                metadata = {"button_seat": btn}
+            except ValueError:
+                self._append_log(f"⚠ ボタン席の指定が不正: {btn_raw!r}", tag="review")
+
         self._audio_queue.put(AudioEvent(
             action="new_hand", amount=0, timestamp=time.time(), raw_text="",
+            metadata=metadata,
         ))
 
     def _cmd_winner(self) -> None:
@@ -330,7 +355,20 @@ class GUIDashboard:
     def _refresh_header(self) -> None:
         gs = self._gs
         self._lbl_hand.configure(text=f"ハンド: #{gs.hand_id}")
-        self._lbl_street.configure(text=f"ストリート: {gs.street}")
+        # BettingState から button/SB/BB/actor を取り出してストリート表示に併記
+        bs_text = f"ストリート: {gs.street}"
+        if self._integration_thread is not None:
+            try:
+                bs = self._integration_thread.betting_state  # type: ignore[attr-defined]
+                if bs.is_initialized:
+                    bs_text = (
+                        f"{gs.street} BTN:{bs.button_seat} "
+                        f"SB:{bs.sb_seat} BB:{bs.bb_seat} "
+                        f"actor:{bs.actor_seat} bet:{bs.current_bet}"
+                    )
+            except Exception:
+                pass
+        self._lbl_street.configure(text=bs_text)
         self._lbl_pot.configure(text=f"ポット: {gs.pot:,}")
         # RFID HTTP 受信機のステータスを表示
         if self._rfid_receiver is not None:
@@ -383,6 +421,13 @@ class GUIDashboard:
             rfid_thread.start()
         audio_thread.start()
         integration_thread.start()
+
+    def set_integration_thread(self, thread: object) -> None:
+        """IntegrationThread を後付けで接続する。
+
+        ボタン席指定 (set_next_button_seat) や BettingState 表示に使う。
+        """
+        self._integration_thread = thread
 
     def on_action(self, record: "ActionRecord") -> None:
         """IntegrationThread から呼ばれるコールバック。スレッド安全。"""

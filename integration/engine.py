@@ -32,10 +32,17 @@ import time
 from datetime import datetime
 from typing import Callable, Optional
 
+from audio.speech_normalizer import NormalizedSpeech, normalize_speech
 from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
+from integration.action_inference import InferredAction, infer_action_from_state
+from integration.action_order import advance_actor, compute_blinds
+from integration.betting_state import (
+    A_ALLIN, A_BET, A_CALL, A_CHECK, A_FOLD, A_RAISE,
+    BettingState,
+)
 from output.json_writer import JsonWriter
 
 logger = logging.getLogger(__name__)
@@ -88,11 +95,20 @@ class IntegrationThread(threading.Thread):
         on_action: Optional[Callable[[ActionRecord], None]] = None,
         on_rfid_card: Optional[Callable[[RFIDEvent], None]] = None,
         stop_event: Optional[threading.Event] = None,
+        initial_button_seat: Optional[int] = None,
+        sb_amount: Optional[int] = None,
+        bb_amount: Optional[int] = None,
+        auto_post_blinds: bool = True,
     ) -> None:
         """
         Args:
             on_rfid_card: カード検出時のコールバック (GUI スレッドには渡さず
                           _update_queue 経由で処理すること)。スレッド安全に設計すること。
+            initial_button_seat: 第 1 ハンドの button 席。None なら BettingState は
+                                 未初期化のまま (state-aware 推定はフォールバック)。
+            sb_amount/bb_amount: 自動 blind post に使う金額。None なら game_state
+                                 から読み取る。
+            auto_post_blinds: 新ハンド開始時に SB/BB を自動 post するか。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -119,8 +135,32 @@ class IntegrationThread(threading.Thread):
         self._board_source: str = ""
         self._hole_cards: dict[int, list[str]] = {}  # seat → [card1, card2]
 
+        # state-aware 推定用
+        self._betting_state = BettingState()
+        self._auto_post_blinds = auto_post_blinds
+        self._sb_amount = sb_amount if sb_amount is not None else getattr(game_state, "_sb", 0)
+        self._bb_amount = bb_amount if bb_amount is not None else getattr(game_state, "_bb", 0)
+        # 次ハンドの button 席。Manual override も可。
+        self._next_button_seat: Optional[int] = initial_button_seat
+        self._last_button_seat: Optional[int] = None
+
     def stop(self) -> None:
         self._stop_event.set()
+
+    # ――― state-aware API (GUI/CLI から呼び出し) ―――
+
+    def set_next_button_seat(self, seat: Optional[int]) -> None:
+        """次のハンド開始時に使う button 席を指定する。
+
+        GUI の「ボタン席」入力欄や、ディーラーボタン手動移動 (FR-05g) から呼ぶ。
+        """
+        self._next_button_seat = seat
+        logger.info("Next button seat set to %s", seat)
+
+    @property
+    def betting_state(self) -> BettingState:
+        """現在のベッティング状態 (state-aware 推定用)。"""
+        return self._betting_state
 
     def run(self) -> None:
         logger.info("IntegrationThread started")
@@ -285,6 +325,49 @@ class IntegrationThread(threading.Thread):
         self._rfid_seat_buffer.remove(best)
         return best
 
+    # ――― 音声正規化 ―――
+
+    def _normalize_event(self, event: AudioEvent) -> NormalizedSpeech:
+        """AudioEvent から NormalizedSpeech を構築する。
+
+        - raw_text が空でなければ speech_normalizer で再解析 (action/amount/seat を
+          まとめて取り直す)
+        - raw_text が空なら event.action / event.amount をそのまま使う
+        """
+        if event.raw_text:
+            norm = normalize_speech(event.raw_text)
+            # event 側に action が来ているのに raw_text 解析で取れなかった場合は
+            # event の値を優先 (CLI コマンドなど raw_text が空相当のケース)
+            if not norm.action and event.action:
+                norm = NormalizedSpeech(
+                    action=event.action.upper() if event.action else None,
+                    amount=norm.amount if norm.amount else (event.amount or None),
+                    seat=norm.seat if norm.seat is not None else event.seat,
+                    raw_text=event.raw_text,
+                    normalized_text=norm.normalized_text,
+                    matched_rules=norm.matched_rules + ["event_action_fallback"],
+                )
+            # event.seat が指定されていれば優先採用
+            if event.seat is not None and norm.seat is None:
+                norm = NormalizedSpeech(
+                    action=norm.action,
+                    amount=norm.amount,
+                    seat=event.seat,
+                    raw_text=norm.raw_text,
+                    normalized_text=norm.normalized_text,
+                    matched_rules=norm.matched_rules + [f"event_seat:{event.seat}"],
+                )
+            return norm
+        # raw_text 空: event の構造体値をそのまま採用
+        return NormalizedSpeech(
+            action=event.action.upper() if event.action else None,
+            amount=event.amount if event.amount else None,
+            seat=event.seat,
+            raw_text="",
+            normalized_text="",
+            matched_rules=["event_struct_only"],
+        )
+
     # ――― イベントハンドラ ―――
 
     def _handle_audio_event(self, event: AudioEvent) -> None:
@@ -292,11 +375,18 @@ class IntegrationThread(threading.Thread):
         gs = self._game_state
 
         if action == "new_hand":
+            # metadata.button_seat または事前設定 (set_next_button_seat) を使用
+            md = event.metadata or {}
+            override = md.get("button_seat") if isinstance(md, dict) else None
+            if override is not None:
+                self._next_button_seat = override
             self._start_new_hand()
             return
 
         if action == "showdown":
             gs.advance_street(Street.SHOWDOWN)
+            if self._betting_state.is_initialized:
+                self._betting_state.street = "showdown"
             return
 
         if action == "winner":
@@ -310,15 +400,36 @@ class IntegrationThread(threading.Thread):
             self._finalize_hand(winner_seat)
             return
 
-        seat = gs.get_current_player()
+        # ―― 音声テキストを state-aware に正規化・推定 ――
+        normalized = self._normalize_event(event)
+        inferred = infer_action_from_state(normalized, self._betting_state)
 
+        # legacy 経路 (BettingState 未初期化) 時は元の event.action/amount をそのまま使う
+        bs_init = self._betting_state.is_initialized
+
+        # seat / action / amount を確定
+        seat = inferred.seat if inferred.seat is not None else gs.get_current_player()
+        applied_action = (inferred.action or event.action or "").lower()
+        applied_amount = inferred.amount if inferred.amount is not None else event.amount
+
+        needs_review = inferred.needs_review
+
+        # GameStateManager (stack/pot/turn) と BettingState の両方に反映する
         try:
-            gs.apply_action(seat, action, event.amount)
+            gs.apply_action(seat, applied_action, applied_amount or 0)
         except ValueError:
-            logger.exception("apply_action failed (seat=%d, action=%s)", seat, action)
+            logger.exception(
+                "apply_action failed (seat=%d, action=%s)", seat, applied_action,
+            )
             needs_review = True
-        else:
-            needs_review = False
+
+        if bs_init and inferred.action is not None and not inferred.needs_review:
+            try:
+                self._betting_state.apply_action(seat, inferred.action, applied_amount or 0)
+                self._maybe_advance_street_on_round_complete()
+            except Exception:
+                logger.exception("BettingState.apply_action failed")
+                needs_review = True
 
         cam_event  = self._pop_matching_camera_event(seat, event.timestamp)
         rfid_event = self._pop_matching_rfid_event(seat, event.timestamp)
@@ -347,8 +458,8 @@ class IntegrationThread(threading.Thread):
             street=gs.street,
             seat=seat,
             player_name=gs.get_player_name(seat),
-            action=action,
-            amount=event.amount,
+            action=applied_action,
+            amount=applied_amount or 0,
             pot_after=gs.pot,
             stack_after=gs.get_stack(seat),
             source=source,
@@ -375,6 +486,124 @@ class IntegrationThread(threading.Thread):
         self._board_source = ""
         self._hole_cards = {}
         logger.info("New hand started: hand_id=%d", gs.hand_id)
+
+        # ボタンが指定済みなら BettingState を初期化し、SB/BB を自動 post する
+        button = self._resolve_button_seat()
+        if button is None:
+            logger.warning(
+                "Hand %d: button seat is unknown — BettingState not initialized. "
+                "state-aware inference will fall back to legacy behavior.",
+                gs.hand_id,
+            )
+            return
+
+        active = self._compute_active_seats()
+        if len(active) < 2:
+            logger.warning(
+                "Hand %d: only %d active seat(s) — cannot start hand state machine",
+                gs.hand_id, len(active),
+            )
+            return
+
+        self._betting_state.start_hand(
+            button_seat=button,
+            active_seats=active,
+            sb_amount=self._sb_amount,
+            bb_amount=self._bb_amount,
+        )
+        self._last_button_seat = button
+
+        if self._auto_post_blinds and self._betting_state.is_initialized:
+            self._post_blinds_to_records()
+
+    def _resolve_button_seat(self) -> Optional[int]:
+        """新ハンドの button 席を決定する。
+
+        優先順位:
+          1. set_next_button_seat() / metadata で明示された seat
+          2. 前ハンドの button から FR-05b に従って 1 席進める
+          3. 未設定なら None
+        """
+        if self._next_button_seat is not None:
+            seat = self._next_button_seat
+            # 1 ハンド使い切りで「次」を None に戻すと毎ハンド明示が必要になるので
+            # 自動進行のため保持はせず、次ハンドは last_button_seat から advance する。
+            self._next_button_seat = None
+            return seat
+        if self._last_button_seat is not None:
+            active = self._compute_active_seats()
+            return advance_actor(
+                self._last_button_seat,
+                active,
+                folded_seats=set(),
+                all_in_seats=set(),
+            )
+        return None
+
+    def _compute_active_seats(self) -> list[int]:
+        """ハンド開始時の active seat (= 着席かつ stack>0)。"""
+        stacks = self._game_state.get_stacks()
+        return sorted(s for s, st in stacks.items() if st > 0)
+
+    def _post_blinds_to_records(self) -> None:
+        """BettingState が SB/BB を post した結果を ActionRecord として書き出す。
+
+        スタック / ポットは GameStateManager 側にも反映する。
+        """
+        gs = self._game_state
+        bs = self._betting_state
+        for entry in bs.action_history:
+            seat = entry["seat"]
+            amount = entry["amount"]
+            action_label = entry["action"]
+            # GameStateManager 側に投入 (apply_action は turn 進行も伴うが
+            # blind post 段階では turn 順は betting_state が別管理しているため
+            # ここではスタック/ポット反映のために bet 扱いで投入する)
+            try:
+                gs.apply_action(seat, "bet", amount)
+            except ValueError:
+                logger.exception("apply_action failed during blind post (seat=%d)", seat)
+            record = ActionRecord(
+                hand_id=gs.hand_id,
+                timestamp=_now_iso(),
+                street="preflop",
+                seat=seat,
+                player_name=gs.get_player_name(seat),
+                action=action_label,
+                amount=amount,
+                pot_after=gs.pot,
+                stack_after=gs.get_stack(seat),
+                source={"camera": False, "audio": False, "rfid": False},
+                needs_review=False,
+                confidence=1.0,
+            )
+            self._current_actions.append(record)
+            if self._on_action:
+                try:
+                    self._on_action(record)
+                except Exception:
+                    logger.exception("on_action callback raised")
+
+    def _maybe_advance_street_on_round_complete(self) -> None:
+        """ラウンド完了を検知したら BettingState のストリートを進める。
+
+        GameStateManager 側のストリートは RFID イベント / 音声宣言が主で、
+        ここでは state-aware 推定のためだけに BettingState を進める。
+        """
+        bs = self._betting_state
+        if not bs.is_initialized or bs.hand_over:
+            return
+        if not bs.is_round_complete():
+            return
+        next_street = {
+            "preflop": "flop",
+            "flop": "turn",
+            "turn": "river",
+            "river": "showdown",
+        }.get(bs.street)
+        if next_street is None or next_street == "showdown":
+            return
+        bs.reset_for_new_street(next_street)
 
     def _finalize_hand(self, winner_seat: int) -> None:
         gs = self._game_state
