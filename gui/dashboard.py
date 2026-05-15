@@ -533,21 +533,27 @@ class GUIDashboard:
 
         # BettingState 詳細 (BTN/SB/BB/Actor/Street/To call)
         bs_text = "BTN: — | SB: — | BB: — | Actor: — | Street: — | To call: —"
+        actor_seat: Optional[int] = None
         if self._integration_thread is not None:
             try:
                 bs = self._integration_thread.betting_state  # type: ignore[attr-defined]
                 if bs.is_initialized:
+                    actor_seat = bs.actor_seat
                     to_call = (
-                        bs.call_amount_for(bs.actor_seat) if bs.actor_seat is not None else 0
+                        bs.call_amount_for(actor_seat) if actor_seat is not None else 0
                     )
                     bs_text = (
                         f"BTN: {bs.button_seat} | SB: {bs.sb_seat} | "
-                        f"BB: {bs.bb_seat} | Actor: {bs.actor_seat} | "
+                        f"BB: {bs.bb_seat} | Actor: {actor_seat} | "
                         f"Street: {bs.street} | To call: {to_call}"
                     )
             except Exception:
                 pass
         self._lbl_betting.configure(text=bs_text)
+
+        # 手動入力の席ドロップダウンを現在の actor seat に追従させる
+        if actor_seat is not None:
+            self._sync_manual_seat(actor_seat)
 
         # RFID HTTP 受信機のステータスを表示
         if self._rfid_receiver is not None:
@@ -562,6 +568,19 @@ class GUIDashboard:
     def set_integration_thread(self, thread: object) -> None:
         """IntegrationThread を後付けで接続する (BTN補正/BettingState表示用)。"""
         self._integration_thread = thread
+
+    def _sync_manual_seat(self, actor_seat: int) -> None:
+        """手動入力の席ドロップダウンを actor_seat に追従させる。
+
+        actor が変わった時だけ書き込むので、ユーザが入力途中で他の seat に変えていた
+        場合は同じ actor のままなら上書きしない (= 次に actor が動いた瞬間に追従する)。
+        """
+        new_val = str(actor_seat)
+        if getattr(self, "_last_synced_actor", None) == actor_seat:
+            return
+        self._last_synced_actor = actor_seat
+        if hasattr(self, "_manual_seat_var"):
+            self._manual_seat_var.set(new_val)
 
     def _refresh_player_row(self, seat: int) -> None:
         if seat not in self._player_rows:
