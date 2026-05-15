@@ -19,6 +19,7 @@ Phase 4: customtkinter ベースの GUI ダッシュボード。
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import time
 from datetime import datetime
@@ -33,6 +34,17 @@ if TYPE_CHECKING:
 _CONF_COLOR_HIGH   = "#4CAF50"  # 緑  (>= 0.75)
 _CONF_COLOR_MEDIUM = "#FF9800"  # 橙  (>= 0.5)
 _CONF_COLOR_LOW    = "#F44336"  # 赤  (< 0.5)
+
+
+_CARD_RE = re.compile(r'[2-9TJQKA][hdcs]', re.IGNORECASE)
+
+
+def _parse_cards(text: str) -> list[str]:
+    """スペース区切りまたは連結表記のカード文字列を正規化リストに変換する。
+
+    例: "AhKd" → ["Ah", "Kd"],  "ah kd" → ["Ah", "Kd"]
+    """
+    return [m[0].upper() + m[1].lower() for m in _CARD_RE.findall(text)]
 
 
 def _conf_color(conf: float) -> str:
@@ -242,6 +254,33 @@ class GUIDashboard:
         ctk.CTkButton(ctrl, text="送信", width=70,
                       command=self._cmd_manual_action).grid(row=1, column=7, padx=(2, 12), pady=(4, 10))
 
+        # ── Row 2: ホールカード手動入力 ───────────────────────────────────────
+        ctk.CTkLabel(ctrl, text="ホールカード:").grid(row=2, column=0, padx=8, pady=(4, 4))
+
+        ctk.CTkLabel(ctrl, text="席:").grid(row=2, column=1, padx=(12, 2), pady=(4, 4), sticky="e")
+        self._manual_hole_seat_var = ctk.StringVar(value=seats[0] if seats else "1")
+        ctk.CTkOptionMenu(ctrl, variable=self._manual_hole_seat_var, values=seats,
+                          width=70).grid(row=2, column=2, padx=2, pady=(4, 4))
+
+        ctk.CTkLabel(ctrl, text="カード:").grid(row=2, column=3, padx=(12, 2), pady=(4, 4), sticky="e")
+        self._manual_hole_entry = ctk.CTkEntry(ctrl, width=120, placeholder_text="例: AhKd")
+        self._manual_hole_entry.grid(row=2, column=4, columnspan=3, padx=2, pady=(4, 4), sticky="ew")
+
+        ctk.CTkButton(ctrl, text="登録", width=70,
+                      command=self._cmd_manual_hole_cards).grid(row=2, column=7, padx=(2, 12), pady=(4, 4))
+
+        # ── Row 3: ボードカード手動入力 ───────────────────────────────────────
+        ctk.CTkLabel(ctrl, text="ボード:").grid(row=3, column=0, padx=8, pady=(4, 10))
+
+        ctk.CTkLabel(ctrl, text="カード:").grid(row=3, column=1, padx=(12, 2), pady=(4, 10), sticky="e")
+        self._manual_board_entry = ctk.CTkEntry(ctrl, width=180, placeholder_text="例: AhKdQs (追加)")
+        self._manual_board_entry.grid(row=3, column=2, columnspan=4, padx=2, pady=(4, 10), sticky="ew")
+
+        ctk.CTkButton(ctrl, text="追加", width=70,
+                      command=self._cmd_manual_board_cards).grid(row=3, column=6, padx=2, pady=(4, 10))
+        ctk.CTkButton(ctrl, text="クリア", width=70, fg_color="#555555",
+                      command=self._cmd_clear_board).grid(row=3, column=7, padx=(2, 12), pady=(4, 10))
+
     # ――― コントロールコマンド ―――
 
     def _cmd_new_hand(self) -> None:
@@ -309,6 +348,69 @@ class GUIDashboard:
         )
         self._update_queue.put(record)
         self._manual_amount_entry.delete(0, "end")
+
+    def _cmd_manual_hole_cards(self) -> None:
+        import types
+
+        try:
+            seat = int(self._manual_hole_seat_var.get())
+        except ValueError:
+            self._append_log("⚠ 席番号が不正です。", tag="review")
+            return
+
+        raw = self._manual_hole_entry.get().strip()
+        cards = _parse_cards(raw)
+
+        if not cards:
+            self._append_log(f"⚠ カードを認識できません: {raw!r}  (例: AhKd)", tag="review")
+            return
+        if len(cards) > 2:
+            self._append_log(f"⚠ ホールカードは2枚まで: {cards}", tag="review")
+            return
+
+        # 既存のホールカード表示をリセットしてから登録
+        self._hole_cards_display[seat] = []
+        if seat in self._player_rows:
+            self._player_rows[seat]["hole_lbl"].configure(text="—")
+
+        ts = time.time()
+        for card in cards:
+            self._rfid_card_queue.put(
+                types.SimpleNamespace(role="seat", seat=seat, card=card, timestamp=ts)
+            )
+
+        self._append_log(f"手動 ホールカード 席{seat}: {' '.join(cards)}", tag="medium")
+        self._manual_hole_entry.delete(0, "end")
+
+    def _cmd_manual_board_cards(self) -> None:
+        import types
+
+        raw = self._manual_board_entry.get().strip()
+        cards = _parse_cards(raw)
+
+        if not cards:
+            self._append_log(f"⚠ カードを認識できません: {raw!r}  (例: AhKdQs)", tag="review")
+            return
+        if len(self._board_cards_display) + len(cards) > 5:
+            self._append_log(
+                f"⚠ ボードは5枚まで (現在 {len(self._board_cards_display)} 枚): {cards}",
+                tag="review",
+            )
+            return
+
+        ts = time.time()
+        for card in cards:
+            self._rfid_card_queue.put(
+                types.SimpleNamespace(role="board", seat=None, card=card, timestamp=ts)
+            )
+
+        self._append_log(f"手動 ボード追加: {' '.join(cards)}", tag="medium")
+        self._manual_board_entry.delete(0, "end")
+
+    def _cmd_clear_board(self) -> None:
+        self._board_cards_display.clear()
+        self._lbl_board.configure(text="ボード: —")
+        self._append_log("ボードクリア", tag="medium")
 
     def _cmd_rebuy(self) -> None:
         try:
