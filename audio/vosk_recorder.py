@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import struct
 import threading
 from typing import Optional
 
@@ -45,6 +46,7 @@ class VoskAudioThread(threading.Thread):
         grammar: Optional[list[str]] = None,
         stop_event: Optional[threading.Event] = None,
         frames_per_buffer: Optional[int] = None,
+        volume_threshold: float = 0.0,
     ) -> None:
         super().__init__(daemon=True, name="VoskAudioThread")
         self._audio_queue = audio_queue
@@ -56,6 +58,8 @@ class VoskAudioThread(threading.Thread):
         self._grammar = grammar
         self._stop_event = stop_event or threading.Event()
         self._frames_per_buffer = frames_per_buffer
+        # 0.0 = 無効。正の値を設定すると RMS がこの値未満のチャンクを無音としてスキップする
+        self._volume_threshold = volume_threshold
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -143,6 +147,16 @@ class VoskAudioThread(threading.Thread):
                 except OSError as e:
                     logger.warning("Vosk audio read error: %s", e)
                     continue
+
+                # 音量閾値フィルタ: 無音チャンクはスキップして誤認識を抑制
+                if self._volume_threshold > 0.0:
+                    n = len(data) // 2
+                    if n:
+                        samples = struct.unpack(f"{n}h", data[:n * 2])
+                        rms = (sum(s * s for s in samples) / n) ** 0.5
+                        if rms < self._volume_threshold:
+                            logger.debug("Vosk skip (rms=%.0f < threshold=%.0f)", rms, self._volume_threshold)
+                            continue
 
                 if recognizer.AcceptWaveform(data):
                     result = json.loads(recognizer.Result())

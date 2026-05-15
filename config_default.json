@@ -20,7 +20,8 @@
     "initial_prompt": "ベット コール レイズ チェック フォールド オールイン ショーダウン ウィナー ハンド開始",
     "vosk_model_path": "./models/vosk-model-ja-0.22",
     "vosk_grammar": null,
-    "_vosk_grammar_note": "vosk-model-ja-0.22 は runtime graph 非対応のため grammar=null 固定。フリー認識 + parse_action() でキーワード抽出する"
+    "vosk_volume_threshold": 0,
+    "_vosk_notes": "grammar: vosk-model-ja-0.22 は runtime graph 非対応のため null 固定 / volume_threshold: 0=無効, 500〜1500 が目安（RMS, int16スケール）"
   },
   "rfid": {
     "enabled": false,

@@ -33,6 +33,7 @@ def _make_audio_thread(
             model_path=audio_cfg.get("vosk_model_path", "./models/vosk-model-small-ja-0.22"),
             grammar=audio_cfg.get("vosk_grammar"),
             stop_event=stop_event,
+            volume_threshold=float(audio_cfg.get("vosk_volume_threshold", 0)),
         )
         logger.info("Audio engine: vosk  model=%r", audio_cfg.get("vosk_model_path"))
     else:
