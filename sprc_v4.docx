@@ -1,7 +1,7 @@
 ポーカーハンドログ自動記録システム 仕様書
-バージョン: 5.0
+バージョン: 5.1
 作成日: 2026-05-15
-前バージョン: 4.0（2026-04-09）
+前バージョン: 5.0（2026-05-15）
 対象: 小規模クラブ・個人配信向け
 
 改訂履歴
@@ -11,6 +11,7 @@
 3.0	2026-04-09	カメラ廃止。音声をストリーム処理化。ポーカールールエンジン導入。アクター推定を尤度ベースに全面改訂
 4.0	2026-04-09	ディーラーボタン管理を追加。ポジション（BTN/SB/BB/UTG 等）の自動算出・記録・ターン順生成に対応
 5.0	2026-05-15	実装状況に合わせて仕様を整合。音声正規化レイヤー追加（corrections.json, speech_normalization.json）。数値正規化追加（ひらがな/漢数字）。amount_only 補完（BettingState）追加。Vosk バックエンド追加。信頼度をセンサー組み合わせ行列に改訂。PokerRuleEngine / AudioStreamBuffer / ディーラーボタン管理を「未実装・将来実装」に移動
+5.1	2026-05-15	ディーラーボタン自動回転を実装（initial_button_seat、advance_button、SB/BB 自動 post、actor 自動進行、heads-up 対応、BettingState.start_hand）。GUI に BTN補正ドロップダウン・BettingState 表示行・手動入力 actor 追従を追加。CLI に初期 button プロンプトと `n <seat>` を追加。将来計画 (v6.0+) に「音声/RFID 時刻ベース確率融合エンジン」と「ディーラー別オンライン学習」を新規セクションとして追加
 
 
 1. システム概要
@@ -160,6 +161,19 @@ FR-31: needs_review 条件まとめ
 - FR-36: ハンド番号を自動採番する
 - FR-37: ラウンドロビン方式でターン順を管理する（フォールド席をスキップ）
 
+2.6b ディーラーボタン管理（v5.1 実装）
+- FR-37a: セッション開始時に初期ボタン席を指定できる（CLI: プロンプト、GUI: BTN補正 ドロップダウン、コンストラクタ: IntegrationThread(initial_button_seat=...)）
+- FR-37b: 2 ハンド目以降は各ハンド開始時にボタンを左隣の active seat へ自動移動する。active seat は stack > 0 の seat を昇順整列したもの。欠席・離席・stack 0 は自動スキップする
+- FR-37c: 円環順（1→2→...→9→1）で wrap し、末尾 seat の次は先頭へ折返す
+- FR-37d: set_next_button_seat(seat) または GUI BTN補正・CLI `n <seat>` で次 1 ハンドだけボタンを手動補正できる。適用後は自動進行へ復帰する
+- FR-37e: ハンド開始時に button 位置から SB / BB を自動算出する。通常時は SB = button の左隣 active、BB = SB の左隣 active。heads-up（active 2 人）では button が SB、対面が BB
+- FR-37f: ハンド開始時に SB_POST / BB_POST を action_history および ActionRecord に自動投入する。スタック・ポットも GameStateManager.apply_action 経由で反映する
+- FR-37g: preflop の first actor を BB の左隣 active seat（通常時は UTG）、heads-up では BTN/SB に設定する
+- FR-37h: postflop の first actor を button の左隣 live seat（folded/all-in をスキップ）に設定する。heads-up postflop では BB
+- FR-37i: 各 valid action 後に actor_seat を左隣の live seat へ自動進行する。folded/all-in はスキップする
+- FR-37j: ハンド開始ログに「Hand start: button=X sb=Y bb=Z first_actor=W blinds=(sb_amount/bb_amount)」、ボタン回転ログに「Button advance: previous=X next=Y active=...」を出力する
+- FR-37k: button が active_seats に含まれない、または active が 2 未満の場合、BettingState を is_initialized=False のまま legacy フォールバック挙動とする（warning ログ）
+
 2.7 ハンドログ出力
 - FR-38: ハンド終了ごとに JSON ファイルへ追記保存する（1 ファイル = 1 セッション）
 - FR-39: PHH（Poker Hand History）形式でもエクスポートできる（pokerkit 使用）
@@ -170,16 +184,20 @@ FR-31: needs_review 条件まとめ
 - FR-42: needs_review が付いたアクションを強調表示する
 - FR-43: ボードカードと各席の hole cards を表示する（RFID ソース）
 - FR-44: RFID HTTP 受信サーバーの受信件数ステータスを表示する
+- FR-45: BettingState の現在値を「BTN: X | SB: X | BB: X | Actor: X | Street: X | To call: X」形式でヘッダー行に表示する（v5.1）
+- FR-46: 下部コントロールに BTN補正 ドロップダウンを設置し、空欄=自動進行、値選択=1 回限り手動上書きとする（v5.1）
+- FR-47: 手動入力席ドロップダウンは betting_state.actor_seat に追従して自動更新する。actor が変わった瞬間のみ書き込み、入力中の手動選択は奪わない（v5.1）
 
-2.9 将来実装（現バージョン v5.0 未実装）
-以下の機能は仕様として定義されているが、現バージョンでは未実装。
+2.9 将来実装（現バージョン v5.1 未実装）
+以下の機能は仕様として定義されているが、現バージョンでは未実装。次バージョン (v6.0) で取り組む。
 
 AudioStreamBuffer 状態機械（確定型/確認型/宣言型の 3 分類、PENDING_CONFIRM フロー）
 PokerRuleEngine（legal_actions 算出・法的アクション矛盾検知）
-ディーラーボタン管理（button_seat・ポジション自動算出・UTG/SB から始まるターン順）
 尤度ベースのアクター推定（current_turn_seat 以外の候補席への確率割り当て）
 needs_review 手動修正 UI（review_panel）
 RFID フォールド検知（カード消失の連続検知でフォールド確定）
+音声/RFID 時刻ベース確率融合エンジン（後述「12. 将来計画」参照）
+ディーラー別オンライン学習（後述「12. 将来計画」参照）
 
 
 3. 非機能要件
@@ -450,10 +468,17 @@ Confidence 算出（センサー行列）	完了	integration/engine.py
 JSON ログ出力	完了	output/json_writer.py
 PHH エクスポート	完了	output/phh_exporter.py
 GUI ダッシュボード	部分実装	gui/dashboard.py
+ディーラーボタン自動回転	完了 (v5.1)	integration/action_order.py, BettingState.start_hand
+SB/BB 自動 post	完了 (v5.1)	BettingState._record_post, IntegrationThread._post_blinds_to_records
+preflop/postflop first actor	完了 (v5.1)	compute_first_actor_preflop/postflop
+actor 自動進行	完了 (v5.1)	BettingState.update_after_action -> advance_actor
+GUI BTN補正 / BettingState 表示行	完了 (v5.1)	gui/dashboard.py
+GUI 手動入力 actor 追従	完了 (v5.1)	gui/dashboard.py: _sync_manual_seat
 AudioStreamBuffer 状態機械	未実装（将来 v6.0）	-
 PokerRuleEngine	未実装（将来 v6.0）	-
-ディーラーボタン管理	未実装（将来 v6.0）	-
 尤度ベースのアクター推定	未実装（将来 v6.0）	-
+音声/RFID 時刻ベース確率融合エンジン	未実装（将来 v6.0+）	セクション 13 参照
+ディーラー別オンライン学習	未実装（将来 v6.0+）	セクション 13 参照
 
 
 11. ディレクトリ構成
@@ -490,8 +515,9 @@ pokerapp/
 |   +-- card_master.py             CardMaster
 |
 +-- integration/
-|   +-- engine.py                  IntegrationThread, calc_confidence()
+|   +-- engine.py                  IntegrationThread, calc_confidence(), button rotation
 |   +-- action_inference.py        BettingState, InferredAction, infer_action()
+|   +-- action_order.py            advance_button, compute_blinds, compute_first_actor_*
 |
 +-- output/
 |   +-- json_writer.py             JsonWriter
@@ -516,5 +542,92 @@ pytest>=7.0.0
 # pyscard は transport="pcsc" 時のみ必要: pip install pyscard>=2.0.7
 
 
+13. 将来計画 (v6.0+): 音声/RFID 時刻ベース確率融合
+
+13.1 背景と目的
+現状の infer_action は「1 つの AudioEvent から 1 つの (action, amount) を確定する単一仮説判定」であり、ASR 誤認識・複数候補・amount-only 発話の曖昧性に対して needs_review に逃げるか強引な決め打ちのいずれかしか取れない。v6.0 ではこれを「観測ごとに尤度ベクトルを持ち、ポーカールール制約下で時刻整合性付きの最尤アクション列を MAP 推定する確率フレーム」に拡張する。
+
+13.2 観測の区間化
+- FR-100: RFIDEvent に t_end フィールドを追加し、(t_start, t_end) で「seat_n がカードを保持していた期間」を表現する
+- FR-101: フォールドは present 区間の終端時刻として強観測扱いする
+- FR-102: ASR 結果に word-level timestamps と N-best 仮説 (最低 3 ベスト) を保持する
+- FR-103: 音声・RFID の観測を統一の EvidenceInterval(t_start, t_end, modality, payload, likelihoods) データクラスで扱う
+
+13.3 観測尤度のベクトル化
+- FR-110: 1 観測から各候補アクションへの尤度 dict（例: {"CALL": 0.6, "RAISE": 0.3, "BET": 0.05}）を生成する
+- FR-111: infer_action の戻り値を単一 InferredAction から list[InferredAction] に拡張する。既存の単一返り値 API は薄いアダプタで維持する
+- FR-112: 音声尤度は phi_align(τ, t_obs) × phi_sem(N-best, action) の積で算出する。phi_align はディーラー固有の遅延分布 N(τ - t_obs; μ_d, σ_d²) とする
+- FR-113: RFID 尤度は fold アクションについて (t_action - t_end_of_present) の正規分布、ストリート遷移については (t_action - t_board_k_start) の正規分布とする
+- FR-114: 1 観測区間は高々 1 アクションを explanation する（二重カウント禁止）
+
+13.4 Beam Search 推論
+- FR-120: K=64 程度の partial action sequence (粒子) を時刻順に並走する
+- FR-121: 各到着観測で全粒子を 2 通り更新する: (1) 既存の最後のアクションへの追加証拠、(2) 新しいアクションの開始証拠
+- FR-122: legal_actions はハード制約として確率 0 で枝刈りする
+- FR-123: position prior と dealer prior はソフト制約として log prior 加算で扱う
+- FR-124: top-1 と top-2 の対数尤度差が閾値 δ 未満なら needs_review を立てる
+
+13.5 ハンド終了時の後方修正
+- FR-130: WINNER 宣言時に「該当 seat が当該ストリートまで残っている粒子」を 1.0、それ以外を 0 に重み付ける
+- FR-131: 最終ポット額が宣言された場合、Σ a_i.amount = pot を満たさない粒子を破棄する
+- FR-132: RFID 最終 board 枚数（5=showdown, 0=不戦勝）でストリート列の終端を確定する
+- FR-133: 各 seat の RFID t_end でフォールドストリート（preflop/flop/turn/river のどこで降りたか）を確定する
+- FR-134: 後方修正後の唯一解を MAP として確定し、HandSummary に書き込む。残った曖昧粒子のみ needs_review として GUI へ
+
+13.6 ディーラー別オンライン学習
+- FR-140: ディーラーごとに以下のパラメータを profile.json に保持し、観測ごとに closed-form でベイズ更新する
+  - (μ_d^audio, σ_d^audio): 音声遅延分布（アクション発生から発話までの遅延、Normal-Gamma 共役）
+  - (μ_d^rfid, σ_d^rfid): RFID-アクション間遅延分布
+  - π_d(word | action): アクションごとのディーラー語彙頻度（Dirichlet 共役）
+  - π_d(action | position): 位置別アクション prior（Dirichlet 共役）
+  - 数値表現の好み（ろっぴゃく vs ろくひゃく 等）
+- FR-141: Whisper / Vosk 本体は不変。観測モデル側だけで適応する
+- FR-142: 学習されたパラメータは Vosk hot-word / Whisper initial_prompt の動的生成にも使う（session 開始時に grammar を再生成）
+
+13.7 キャリブモード
+- FR-150: 起動時に 60 秒程度のキャリブ録音モードを設置する。ディーラーに「フォールド」「コール」「ベット 600」など 10 発話を順に読み上げてもらう
+- FR-151: キャリブで (μ_d, σ_d) の初期値、語彙頻度の初期化、ASR hot-word ブースト生成を行う
+- FR-152: 既存ディーラーは profile.json から読み込み、キャリブ省略可
+
+13.8 時刻ベース矛盾検出（先行実装可能）
+v5.1 から v6.0 への過渡期として、確率モデル全体を実装する前に下記のチェッカを engine に追加できる。
+- check_temporal_consistency(action, t_action, rfid_buffer):
+  - action.type == FOLD かつ同 seat の RFID present 区間が継続中 → Inconsistency("fold_but_card_still_present", weight=0.9)
+  - action.type in (BET, CALL, RAISE) かつ同 seat のカードが既に absent → Inconsistency("bet_but_card_already_folded", weight=0.95)
+  - action.street の期待 board 枚数と現在の board 枚数が乖離 → Inconsistency("street_mismatch", weight=0.8)
+- 矛盾検出時は needs_review を立て、該当 evidence のスコアを下げる
+
+13.9 Active Learning
+- FR-160: GUI レビュー UI で操作者が修正したアクションは観測モデルへの教師データとして取り込む
+- FR-161: 同一 session 内および同一ディーラーの過去 session で学習を継続する（ハンド数の増加に伴い精度が単調増加することを期待する）
+
+13.10 段階導入ロードマップ
+無理なく載せられる順序として下記を定める。L0-L2 はリスク低・効果大のため最優先。L3 以降は infer_action の戻り値型変更を伴う。
+
+L0: RFIDEvent に t_end 追加、区間化
+L1: Vosk / Whisper の word-level timestamps + N-best を EvidenceInterval に格納
+L2: check_temporal_consistency を engine に挿入
+L3: 観測尤度ベクトル化（infer_action -> list[InferredAction]）
+L4: Beam Search (K=8 -> 64) で複数仮説並走
+L5: ハンド終了時の WINNER/POT 検算で粒子フィルタ
+L6: ディーラー別 (μ_d, σ_d) のオンライン推定、profile.json 新設
+L7: 60 秒キャリブモード GUI
+L8: per-dealer 語彙学習 → Vosk hot-word / Whisper initial_prompt に動的反映
+L9: Review UI のクリックを active learning に取り込む
+
+13.11 Phase 0: 観測ログ収集基盤
+L0 と並行して以下を常時記録する raw ログ基盤を整備する。これがなければ上記の学習は不可能。
+- 全 AudioEvent: PCM (任意) + ASR N-best + word timestamps + conf
+- 全 RFIDEvent: raw poll log（present/absent/unknown を毎ポーリング）
+- 操作ログ: GUI レビュー結果、手動入力、確定アクション
+- ハンドメタ: winner, pot, 最終 stack
+
+13.12 NFR
+- NFR-100: 確率融合エンジン導入後も、音声認識からログ書き込みまでのレイテンシは 3 秒以内を維持する
+- NFR-101: 粒子数 K=64 で 1 ハンドあたりの CPU 使用率は Intel Core i5 第 8 世代上で 50% 以下を目標とする
+- NFR-102: profile.json は 1 ディーラーあたり 100KB 以内に収める
+- NFR-103: オフライン分析のために raw observation log を gzip 圧縮で session ディレクトリに保存する
+
+
 本仕様書は開発進行に伴い随時更新する。
-次バージョン (v6.0) での主な追加予定: AudioStreamBuffer 状態機械、PokerRuleEngine、ディーラーボタン管理。
+次バージョン (v6.0) での主な追加予定: AudioStreamBuffer 状態機械、PokerRuleEngine、音声/RFID 時刻ベース確率融合エンジン、ディーラー別オンライン学習。

@@ -48,7 +48,8 @@ pokerapp/
 │
 ├── integration/
 │   ├── engine.py                  ← IntegrationThread, calc_confidence()
-│   └── action_inference.py        ← BettingState, InferredAction, infer_action()
+│   ├── action_inference.py        ← BettingState, InferredAction, infer_action()
+│   └── action_order.py            ← ディーラーボタン回転 / SB-BB / actor 順 helpers
 │
 ├── output/
 │   ├── json_writer.py             ← JsonWriter (セッション JSON ログ書き込み)
@@ -145,7 +146,8 @@ AudioEvent (audio_queue)
     ├─ action="winner"    → finalize_hand()
     │
     └─ それ以外:
-         seat = game_state.get_current_player()
+         seat = betting_state.actor_seat  ← button/blind 確定時の actor を最優先
+                ?? game_state.get_current_player()   (fallback)
          │
          ▼ infer_action(event, betting_state, seat)
          │   ├─ action="amount_only" → BettingState から BET/CALL/RAISE を推定
@@ -153,13 +155,38 @@ AudioEvent (audio_queue)
          │
          ▼ game_state.apply_action(seat, inferred.action, inferred.amount)
          │
-         ▼ betting_state.update_after_action(...)
+         ▼ betting_state.update_after_action(...)  ← actor_seat も次へ進める
          │
          ▼ camera/RFID コリオブレーション (±2秒ウィンドウ)
          │
          ▼ calc_confidence(has_rfid, has_audio, has_camera)
          │
          ▼ ActionRecord → on_action コールバック + JSON 書き込み
+```
+
+### ハンド開始処理 (button → SB/BB → 自動 post → first actor)
+
+```
+AudioEvent(action="new_hand")
+    │
+    ▼ IntegrationThread._start_new_hand()
+    │
+    ├─ _resolve_button_seat()
+    │   ├─ 1. set_next_button_seat() で予約された seat (一度限りの手動 override)
+    │   ├─ 2. advance_button(_last_button_seat, active_seats) で左隣へ自動回転
+    │   └─ 3. 未設定なら None (BettingState 未初期化のまま legacy フォールバック)
+    │
+    ├─ _compute_active_seats()  ← stack > 0 の seat を昇順
+    │
+    ▼ BettingState.start_hand(button, active, sb_amount, bb_amount)
+    │   ├─ compute_blinds() で SB / BB を決定 (heads-up は BTN = SB)
+    │   ├─ SB_POST / BB_POST を action_history と player_contrib_* に投入
+    │   ├─ current_bet = bb_amount, last_raise_to = bb_amount, is_opened = True
+    │   └─ actor_seat = compute_first_actor_preflop()
+    │
+    ▼ _post_blinds_to_records()
+    │   └─ game_state.apply_action(seat, "bet", amount) でスタック/ポット反映
+    │   └─ ActionRecord(action="SB_POST"/"BB_POST") を発火
 ```
 
 ### Confidence 行列
@@ -173,6 +200,39 @@ AudioEvent (audio_queue)
 | audio + camera | 0.80 |
 | audio のみ | 0.50 |
 | camera のみ | 0.30 |
+
+### ディーラーボタン自動回転
+
+- **基本**: 各ハンド開始時に前ハンドの button から左隣の active seat へ自動移動
+- **active seat**: `stack > 0` の seat を昇順整列、欠席/離席/バストは自動スキップ
+- **初回**: `IntegrationThread(initial_button_seat=...)` または GUI/CLI で 1 度だけ手動指定
+- **手動補正**: `set_next_button_seat(seat)` で次 1 ハンドだけ上書き、適用後は自動進行へ復帰
+- **SB/BB 自動 post**: ハンド開始時に `SB_POST` / `BB_POST` を `ActionRecord` および `action_history` に投入
+- **first actor**: preflop は BB の左隣 (UTG)、postflop は button の左隣 live seat（HU は postflop=BB）
+
+#### Heads-up 特例
+
+| 局面 | actor |
+|------|-------|
+| HU preflop | BTN (= SB) が最初 |
+| HU postflop | BB が最初 |
+| HU blind | BTN=SB、対面=BB |
+
+#### 操作 UI
+
+- **GUI**: 下部コントロール row 0 に `BTN補正:` ドロップダウン。空欄=自動進行、値選択=1回限り手動上書き
+- **GUI 表示**: ヘッダー 3 行目に `BTN: 1 | SB: 2 | BB: 3 | Actor: 4 | Street: preflop | To call: 200`
+- **GUI 連動**: 手動入力席ドロップダウン (`_manual_seat_var`) は `betting_state.actor_seat` に追従更新
+- **CLI**: `n <seat>` で次 1 ハンドだけ button を補正 (例: `n 5`)
+
+#### ログ例
+
+```
+Button advance: previous=1 next=2 active=[1, 2, 3, 4, 5, 6]
+Hand start: button=2 sb=3 bb=4 first_actor=5 blinds=(100/200)
+Auto post: seat=3 action=SB_POST amount=100
+Auto post: seat=4 action=BB_POST amount=200
+```
 
 ### action="amount_only" の補完ルール (BettingState)
 
@@ -208,11 +268,26 @@ AudioEvent (audio_queue)
 
 ### `integration/action_inference.py`
 
-- `BettingState`: ストリート単位のベッティング状態追跡
-  - `current_bet`, `is_opened`, `player_contrib_this_street`
-  - `reset_for_new_hand()`, `reset_for_new_street()`, `update_after_action()`
+- `BettingState`: ハンド単位 + ストリート単位の状態を一元保持
+  - **ハンド単位**: `button_seat`, `sb_seat`, `bb_seat`, `sb_amount`, `bb_amount`, `actor_seat`, `last_aggressor`, `player_contrib_hand`, `action_history`, `is_initialized`
+  - **ストリート単位**: `current_bet`, `is_opened`, `last_raise_to`, `player_contrib_this_street`, `folded_seats`, `all_in_seats`
+  - `start_hand(button, active, sb, bb)`: 新ハンド時に SB/BB を自動 post し first actor を確定
+  - `reset_for_new_street()`: contrib リセット + postflop first actor 再計算
+  - `update_after_action(seat, action, amount)`: contrib 更新 + actor を次の live seat へ進行
+  - `call_amount_for(seat)`: 該当 seat がコールするのに必要な追加投入額
 - `InferredAction`: 推定/検証結果 (`action`, `amount`, `confidence`, `needs_review`, `reason`)
 - `infer_action(event, state, actor_seat) → InferredAction`: 中心 API
+
+### `integration/action_order.py`
+
+ディーラーボタン位置を起点とした SB/BB/actor 算出のヘルパ群（pure functions）。
+
+- `get_next_active_seat(start, active, inclusive=False)`: 左隣の active seat を返す（円環、9 超で 1 へ wrap）
+- `advance_button(current_button, active)`: 次ハンドの button 席（左隣の active）
+- `compute_blinds(button, active) → (sb_seat, bb_seat)`: 通常時は左隣 / 左 2 隣、heads-up は BTN=SB
+- `compute_first_actor_preflop(button, active)`: 通常は BB の左隣 (UTG)、heads-up は BTN
+- `compute_first_actor_postflop(button, active, folded, all_in)`: 通常は button 左隣 live seat、heads-up は BB
+- `advance_actor(current, active, folded, all_in)`: 次の live seat へ進める
 
 ### `core/game_state.py`
 
@@ -356,6 +431,65 @@ pytest tests/ --ignore=tests/test_vision.py
 | JSON ログ出力 | ✅ 完了 | output/json_writer.py |
 | PHH エクスポート | ✅ 完了 | output/phh_exporter.py |
 | GUI ダッシュボード | 🔨 部分実装 | gui/dashboard.py |
-| PokerRuleEngine | ❌ 未実装 | legal_actions 算出なし |
-| AudioStreamBuffer 状態機械 | ❌ 未実装 | 確認型発話の PENDING なし |
-| ディーラーボタン管理 | ❌ 未実装 | 位置/ポジション算出なし |
+| ディーラーボタン自動回転 | ✅ 完了 | action_order.py, BettingState.start_hand |
+| SB/BB 自動 post | ✅ 完了 | BettingState.start_hand, ActionRecord(SB_POST/BB_POST) |
+| Preflop/Postflop first actor | ✅ 完了 | compute_first_actor_preflop/postflop |
+| actor 自動進行 | ✅ 完了 | BettingState.update_after_action |
+| GUI BettingState 表示 / BTN補正 | ✅ 完了 | dashboard.py: _lbl_betting, _button_seat_menu |
+| 手動入力席の actor 追従 | ✅ 完了 | dashboard.py: _sync_manual_seat |
+| PokerRuleEngine | ❌ 未実装 (v6.0) | legal_actions 算出なし |
+| AudioStreamBuffer 状態機械 | ❌ 未実装 (v6.0) | 確認型発話の PENDING なし |
+| 音声/RFID 確率融合エンジン | ❌ 未実装 (v6.0+) | §「将来計画」を参照 |
+| ディーラー別オンライン学習 | ❌ 未実装 (v6.0+) | §「将来計画」を参照 |
+
+---
+
+## 将来計画 (v6.0+): 音声/RFID 時刻ベース確率融合
+
+現状の `infer_action` は「単一の AudioEvent から 1 つの (action, amount) を確定し、矛盾なら `needs_review`」という二値判定。これを **「観測ごとに尤度ベクトルを作り、ポーカールール制約下で時刻整合性付きの最尤アクション列を MAP 推定する確率フレーム」** に拡張する。
+
+### 設計の核
+
+1. **観測の区間化**: `RFIDEvent` に `t_end` を追加し、`(t_start, t_end)` で「seat_n がカードを持っていた期間」を表現する。フォールドはこの区間の終端で発生したと解釈できる強観測になる。ASR 側も word-level timestamps と N-best 仮説を保持して `EvidenceInterval` に統一する。
+
+2. **観測尤度のベクトル化**: 1 観測 → 各候補 action への尤度 dict (`{"CALL": 0.6, "RAISE": 0.3, ...}`) に分解。`infer_action` の戻り値を単一 `InferredAction` から「複数仮説リスト」に拡張する。
+
+3. **Beam Search 推論**: K=64 程度の partial action sequence を時刻順に並走し、各到着観測で全粒子を更新。legal_actions はハード制約 (確率 0)、position prior はソフト制約 (log prior 加算)。
+
+4. **音声/RFID 時刻アライメント**: ディーラー固有の遅延分布 `(μ_d, σ_d)` を学習し、確率窓 `N(τ - t_obs; μ_d, σ_d²)` で固定 ±2s ウィンドウを置換。
+
+5. **ハンド終了時の後方修正**: WINNER 宣言・最終ポット額・残スタックは Oracle 級の強観測。粒子集合をこれらの制約で再フィルタし、MAP 列に collapse。残った曖昧粒子のみ `needs_review` で GUI へ。
+
+6. **ディーラー別オンライン学習**: 観測モデルパラメータ (音声遅延 / RFID 遅延 / アクション語彙頻度 / 位置別 prior / 数値表現の好み) を Dirichlet/Normal-Gamma で逐次ベイズ更新。Whisper/Vosk 本体は不変、観測モデル側だけで適応する。
+
+7. **キャリブモード**: 起動時に 60 秒の音声サンプルで `(μ_d, σ_d)` の初期値と語彙頻度を取得する設定 UI。
+
+8. **Active learning**: GUI レビュー UI のクリック結果を観測モデルに教師として取り込む (ハンド進行で精度が単調増加)。
+
+### 段階導入ロードマップ
+
+| 段階 | 内容 | 既存コードへの影響 |
+|------|------|------------------|
+| L0 | `RFIDEvent` に `t_end` 追加、区間化 | events.py に 1 フィールド |
+| L1 | Vosk / Whisper の word-level timestamps + N-best を `EvidenceInterval` に格納 | vosk_recorder.py / recognizer.py |
+| L2 | 時刻矛盾チェッカ (`check_temporal_consistency`) を engine に挿入 (fold but card present 等) | engine.py に関数追加 |
+| L3 | 観測尤度ベクトル化 (`infer_action → list[InferredAction]`) | action_inference.py |
+| L4 | Beam Search (K=8 → 64) で複数仮説並走 | engine.py 内部状態を beam に |
+| L5 | ハンド終了時の WINNER/POT 検算で粒子フィルタ | `_finalize_hand` |
+| L6 | ディーラー別 (μ_d, σ_d) オンライン推定、profile.json 新設 | 設定 + ベイズ更新 |
+| L7 | 60 秒キャリブモード GUI | GUI に「キャリブ開始」 |
+| L8 | per-dealer 語彙学習 → Vosk hot-word / Whisper initial_prompt に動的反映 | session 開始時に grammar 再生成 |
+| L9 | Review UI のクリックを active learning に取り込む | GUI + 学習ループ |
+
+L0–L2 はリスクが小さく即効性があるので優先導入する。L3 以降は `infer_action` の戻り値型変更を伴うため、内部だけ拡張して既存 API は薄いアダプタで維持する。
+
+### 「観測ログ」収集 (Phase 0)
+
+上記のすべての学習は **session 中の全観測を raw で残す** ことが前提。L0 と並行して以下を常時記録するロギング基盤を整備する。
+
+- 全 AudioEvent: PCM (任意) + ASR N-best + word timestamps + conf
+- 全 RFIDEvent: raw poll log (present/absent/unknown を毎回)
+- 操作ログ: GUI レビュー結果、手動入力、確定アクション
+- ハンドメタ: winner, pot, 最終 stack
+
+これによりオフライン分析で per-dealer モデル・遅延分布・position prior すべての学習が可能になる。
