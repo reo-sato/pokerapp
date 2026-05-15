@@ -94,7 +94,7 @@ class VoskAudioThread(threading.Thread):
             # ensure_ascii=True で \uXXXX エスケープにする。
             # Windows の Vosk C++ 層が UTF-8 文字列を CP932 として読む場合に
             # 日本語が文字化けするのを防ぐため、純粋な ASCII JSON を渡す。
-            grammar_json = json.dumps(self._grammar, ensure_ascii=True)
+            grammar_json = json.dumps(self._grammar, ensure_ascii=False)
             recognizer = vosk.KaldiRecognizer(model, float(self._sample_rate), grammar_json)
             logger.info(
                 "Vosk grammar mode: %d words  (sample_rate=%d)",
