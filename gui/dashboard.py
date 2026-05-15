@@ -152,7 +152,7 @@ class GUIDashboard:
         self._log_box.tag_config("review", foreground="#FF5252")
 
         # 下部コントロール
-        ctrl = ctk.CTkFrame(root, height=80, corner_radius=0)
+        ctrl = ctk.CTkFrame(root, corner_radius=0)
         ctrl.grid(row=2, column=0, sticky="ew", padx=0, pady=0)
         self._build_controls(ctrl)
 
@@ -197,30 +197,50 @@ class GUIDashboard:
 
     def _build_controls(self, ctrl: object) -> None:
         ctk = self._ctk
-        ctrl.grid_columnconfigure((0, 1, 2, 3, 4, 5, 6), weight=1)
+        ctrl.grid_columnconfigure((0, 1, 2, 3, 4, 5, 6, 7), weight=1)
 
-        # 新ハンドボタン
-        ctk.CTkButton(ctrl, text="新ハンド", width=100,
-                      command=self._cmd_new_hand).grid(row=0, column=0, padx=8, pady=12)
-
-        # ウィナー確定
-        ctk.CTkLabel(ctrl, text="ウィナー:").grid(row=0, column=1, padx=(12, 2))
         seats = [str(s) for s in sorted(self._gs.get_stacks().keys())]
+
+        # ── Row 0: 新ハンド / ウィナー確定 / リバイ ──────────────────────────
+        ctk.CTkButton(ctrl, text="新ハンド", width=100,
+                      command=self._cmd_new_hand).grid(row=0, column=0, padx=8, pady=(10, 4))
+
+        ctk.CTkLabel(ctrl, text="ウィナー:").grid(row=0, column=1, padx=(12, 2), pady=(10, 4))
         self._winner_var = ctk.StringVar(value=seats[0] if seats else "1")
         ctk.CTkOptionMenu(ctrl, variable=self._winner_var, values=seats,
-                          width=70).grid(row=0, column=2, padx=2)
+                          width=70).grid(row=0, column=2, padx=2, pady=(10, 4))
         ctk.CTkButton(ctrl, text="確定", width=70,
-                      command=self._cmd_winner).grid(row=0, column=3, padx=(2, 12))
+                      command=self._cmd_winner).grid(row=0, column=3, padx=(2, 12), pady=(10, 4))
 
-        # リバイ
-        ctk.CTkLabel(ctrl, text="リバイ 席:").grid(row=0, column=4, padx=(12, 2))
+        ctk.CTkLabel(ctrl, text="リバイ 席:").grid(row=0, column=4, padx=(12, 2), pady=(10, 4))
         self._rebuy_seat_var = ctk.StringVar(value=seats[0] if seats else "1")
         ctk.CTkOptionMenu(ctrl, variable=self._rebuy_seat_var, values=seats,
-                          width=70).grid(row=0, column=5, padx=2)
+                          width=70).grid(row=0, column=5, padx=2, pady=(10, 4))
         self._rebuy_amount_entry = ctk.CTkEntry(ctrl, width=90, placeholder_text="金額")
-        self._rebuy_amount_entry.grid(row=0, column=6, padx=2)
+        self._rebuy_amount_entry.grid(row=0, column=6, padx=2, pady=(10, 4))
         ctk.CTkButton(ctrl, text="適用", width=70,
-                      command=self._cmd_rebuy).grid(row=0, column=7, padx=(2, 12))
+                      command=self._cmd_rebuy).grid(row=0, column=7, padx=(2, 12), pady=(10, 4))
+
+        # ── Row 1: 手動アクション入力 ─────────────────────────────────────────
+        ctk.CTkLabel(ctrl, text="手動入力:").grid(row=1, column=0, padx=8, pady=(4, 10))
+
+        ctk.CTkLabel(ctrl, text="席:").grid(row=1, column=1, padx=(12, 2), pady=(4, 10), sticky="e")
+        self._manual_seat_var = ctk.StringVar(value=seats[0] if seats else "1")
+        ctk.CTkOptionMenu(ctrl, variable=self._manual_seat_var, values=seats,
+                          width=70).grid(row=1, column=2, padx=2, pady=(4, 10))
+
+        _actions = ["bet", "call", "raise", "check", "fold", "allin"]
+        ctk.CTkLabel(ctrl, text="アクション:").grid(row=1, column=3, padx=(12, 2), pady=(4, 10), sticky="e")
+        self._manual_action_var = ctk.StringVar(value="bet")
+        ctk.CTkOptionMenu(ctrl, variable=self._manual_action_var, values=_actions,
+                          width=90).grid(row=1, column=4, padx=2, pady=(4, 10))
+
+        ctk.CTkLabel(ctrl, text="金額:").grid(row=1, column=5, padx=(12, 2), pady=(4, 10), sticky="e")
+        self._manual_amount_entry = ctk.CTkEntry(ctrl, width=90, placeholder_text="0")
+        self._manual_amount_entry.grid(row=1, column=6, padx=2, pady=(4, 10))
+
+        ctk.CTkButton(ctrl, text="送信", width=70,
+                      command=self._cmd_manual_action).grid(row=1, column=7, padx=(2, 12), pady=(4, 10))
 
     # ――― コントロールコマンド ―――
 
@@ -247,6 +267,48 @@ class GUIDashboard:
             action="winner", amount=0, timestamp=time.time(),
             raw_text=f"シート{seat} ウィナー",
         ))
+
+    def _cmd_manual_action(self) -> None:
+        from core.hand_log import ActionRecord
+
+        try:
+            seat = int(self._manual_seat_var.get())
+        except ValueError:
+            self._append_log("⚠ 席番号が不正です。", tag="review")
+            return
+
+        action = self._manual_action_var.get()
+
+        raw = self._manual_amount_entry.get().strip()
+        try:
+            amount = int(raw) if raw else 0
+        except ValueError:
+            self._append_log(f"⚠ 金額が不正です: {raw!r}", tag="review")
+            return
+
+        try:
+            self._gs.apply_action(seat, action, amount)
+            needs_review = False
+        except Exception as e:
+            self._append_log(f"⚠ アクション適用失敗: {e}", tag="review")
+            needs_review = True
+
+        record = ActionRecord(
+            hand_id=self._gs.hand_id,
+            timestamp=datetime.now().isoformat(timespec="milliseconds"),
+            street=self._gs.street,
+            seat=seat,
+            player_name=self._gs.get_player_name(seat),
+            action=action,
+            amount=amount,
+            pot_after=self._gs.pot,
+            stack_after=self._gs.get_stack(seat),
+            source={"manual": True, "audio": False, "rfid": False, "camera": False},
+            needs_review=needs_review,
+            confidence=1.0,
+        )
+        self._update_queue.put(record)
+        self._manual_amount_entry.delete(0, "end")
 
     def _cmd_rebuy(self) -> None:
         try:
@@ -293,6 +355,8 @@ class GUIDashboard:
         conf = record.confidence
         tag = "high" if conf >= 0.75 else ("medium" if conf >= 0.5 else "low")
         src_flags = []
+        if record.source.get("manual"):
+            src_flags.append("手動")
         if record.source.get("rfid"):
             src_flags.append("RFID")
         if record.source.get("audio"):
