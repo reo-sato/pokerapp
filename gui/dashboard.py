@@ -86,6 +86,7 @@ class GUIDashboard:
         self._camera_queue = camera_queue
         self._stop_event = stop_event or threading.Event()
         self._rfid_receiver = rfid_receiver  # RFIDHTTPReceiver (status プロパティ用)
+        self._integration_thread: Optional[object] = None  # set_integration_thread で接続
         self._update_queue: queue.Queue["ActionRecord"] = queue.Queue()
         self._rfid_card_queue: queue.Queue = queue.Queue()
         # seat → hole cards 表示用 (スレッド安全のため queue 経由で更新)
@@ -114,7 +115,7 @@ class GUIDashboard:
         root.grid_columnconfigure(0, weight=1)
 
         # ヘッダー
-        self._header = ctk.CTkFrame(root, height=50, corner_radius=0)
+        self._header = ctk.CTkFrame(root, height=80, corner_radius=0)
         self._header.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
         self._header.grid_columnconfigure((0, 1, 2, 3), weight=1)
 
@@ -139,6 +140,15 @@ class GUIDashboard:
         self._lbl_board = ctk.CTkLabel(self._header, text="ボード: —", anchor="w",
                                         font=("Courier", 11))
         self._lbl_board.grid(row=1, column=0, columnspan=3, padx=12, pady=0, sticky="w")
+
+        # BTN/SB/BB/Actor/To call 詳細行 (BettingState から)
+        self._lbl_betting = ctk.CTkLabel(
+            self._header,
+            text="BTN: — | SB: — | BB: — | Actor: — | Street: — | To call: —",
+            anchor="w", font=("", 11, "bold"),
+        )
+        self._lbl_betting.grid(row=2, column=0, columnspan=4, padx=12, pady=(0, 4),
+                                sticky="w")
 
         # メインエリア
         main_frame = ctk.CTkFrame(root, corner_radius=0, fg_color="transparent")
@@ -209,29 +219,38 @@ class GUIDashboard:
 
     def _build_controls(self, ctrl: object) -> None:
         ctk = self._ctk
-        ctrl.grid_columnconfigure((0, 1, 2, 3, 4, 5, 6, 7), weight=1)
+        ctrl.grid_columnconfigure(tuple(range(10)), weight=1)
 
         seats = [str(s) for s in sorted(self._gs.get_stacks().keys())]
 
-        # ── Row 0: 新ハンド / ウィナー確定 / リバイ ──────────────────────────
+        # ── Row 0: 新ハンド / BTN補正 / ウィナー確定 / リバイ ─────────────────
         ctk.CTkButton(ctrl, text="新ハンド", width=100,
                       command=self._cmd_new_hand).grid(row=0, column=0, padx=8, pady=(10, 4))
 
-        ctk.CTkLabel(ctrl, text="ウィナー:").grid(row=0, column=1, padx=(12, 2), pady=(10, 4))
+        # BTN 補正: 通常は空欄 (自動回転)、値を選ぶと次ハンド1回だけ手動上書き
+        ctk.CTkLabel(ctrl, text="BTN補正:").grid(row=0, column=1, padx=(12, 2), pady=(10, 4))
+        self._button_seat_var = ctk.StringVar(value="")
+        self._button_seat_menu = ctk.CTkOptionMenu(
+            ctrl, variable=self._button_seat_var,
+            values=[""] + seats, width=70,
+        )
+        self._button_seat_menu.grid(row=0, column=2, padx=2, pady=(10, 4))
+
+        ctk.CTkLabel(ctrl, text="ウィナー:").grid(row=0, column=3, padx=(12, 2), pady=(10, 4))
         self._winner_var = ctk.StringVar(value=seats[0] if seats else "1")
         ctk.CTkOptionMenu(ctrl, variable=self._winner_var, values=seats,
-                          width=70).grid(row=0, column=2, padx=2, pady=(10, 4))
+                          width=70).grid(row=0, column=4, padx=2, pady=(10, 4))
         ctk.CTkButton(ctrl, text="確定", width=70,
-                      command=self._cmd_winner).grid(row=0, column=3, padx=(2, 12), pady=(10, 4))
+                      command=self._cmd_winner).grid(row=0, column=5, padx=(2, 12), pady=(10, 4))
 
-        ctk.CTkLabel(ctrl, text="リバイ 席:").grid(row=0, column=4, padx=(12, 2), pady=(10, 4))
+        ctk.CTkLabel(ctrl, text="リバイ 席:").grid(row=0, column=6, padx=(12, 2), pady=(10, 4))
         self._rebuy_seat_var = ctk.StringVar(value=seats[0] if seats else "1")
         ctk.CTkOptionMenu(ctrl, variable=self._rebuy_seat_var, values=seats,
-                          width=70).grid(row=0, column=5, padx=2, pady=(10, 4))
+                          width=70).grid(row=0, column=7, padx=2, pady=(10, 4))
         self._rebuy_amount_entry = ctk.CTkEntry(ctrl, width=90, placeholder_text="金額")
-        self._rebuy_amount_entry.grid(row=0, column=6, padx=2, pady=(10, 4))
+        self._rebuy_amount_entry.grid(row=0, column=8, padx=2, pady=(10, 4))
         ctk.CTkButton(ctrl, text="適用", width=70,
-                      command=self._cmd_rebuy).grid(row=0, column=7, padx=(2, 12), pady=(10, 4))
+                      command=self._cmd_rebuy).grid(row=0, column=9, padx=(2, 12), pady=(10, 4))
 
         # ── Row 1: 手動アクション入力 ─────────────────────────────────────────
         ctk.CTkLabel(ctrl, text="手動入力:").grid(row=1, column=0, padx=8, pady=(4, 10))
@@ -292,6 +311,19 @@ class GUIDashboard:
             if "hole_lbl" in row:
                 row["hole_lbl"].configure(text="—")
         self._lbl_board.configure(text="ボード: —")
+
+        # BTN補正: 入力欄に値があれば1回だけ手動上書きし、入力欄をクリアする
+        btn_raw = self._button_seat_var.get().strip()
+        if btn_raw:
+            try:
+                btn = int(btn_raw)
+                if self._integration_thread is not None:
+                    self._integration_thread.set_next_button_seat(btn)
+                self._append_log(f"BTN 補正: 次ハンド button=席{btn}", tag="medium")
+                self._button_seat_var.set("")
+            except ValueError:
+                self._append_log(f"⚠ ボタン席の指定が不正: {btn_raw!r}", tag="review")
+
         self._audio_queue.put(AudioEvent(
             action="new_hand", amount=0, timestamp=time.time(), raw_text="",
         ))
@@ -498,6 +530,25 @@ class GUIDashboard:
         self._lbl_hand.configure(text=f"ハンド: #{gs.hand_id}")
         self._lbl_street.configure(text=f"ストリート: {gs.street}")
         self._lbl_pot.configure(text=f"ポット: {gs.pot:,}")
+
+        # BettingState 詳細 (BTN/SB/BB/Actor/Street/To call)
+        bs_text = "BTN: — | SB: — | BB: — | Actor: — | Street: — | To call: —"
+        if self._integration_thread is not None:
+            try:
+                bs = self._integration_thread.betting_state  # type: ignore[attr-defined]
+                if bs.is_initialized:
+                    to_call = (
+                        bs.call_amount_for(bs.actor_seat) if bs.actor_seat is not None else 0
+                    )
+                    bs_text = (
+                        f"BTN: {bs.button_seat} | SB: {bs.sb_seat} | "
+                        f"BB: {bs.bb_seat} | Actor: {bs.actor_seat} | "
+                        f"Street: {bs.street} | To call: {to_call}"
+                    )
+            except Exception:
+                pass
+        self._lbl_betting.configure(text=bs_text)
+
         # RFID HTTP 受信機のステータスを表示
         if self._rfid_receiver is not None:
             try:
@@ -507,6 +558,10 @@ class GUIDashboard:
                 self._lbl_rfid.configure(text=f"RFID:{port} ({count}件)")
             except Exception:
                 pass
+
+    def set_integration_thread(self, thread: object) -> None:
+        """IntegrationThread を後付けで接続する (BTN補正/BettingState表示用)。"""
+        self._integration_thread = thread
 
     def _refresh_player_row(self, seat: int) -> None:
         if seat not in self._player_rows:

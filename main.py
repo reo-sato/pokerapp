@@ -92,9 +92,21 @@ def _prompt_session_config() -> dict:
             pass
         print("正の整数を入力してください。")
 
+    seats_available = {p["seat"] for p in players}
+    while True:
+        raw = input(f"初期ボタン席 (1〜{num_seats}): ").strip()
+        try:
+            btn = int(raw)
+            if btn in seats_available:
+                break
+        except ValueError:
+            pass
+        print(f"{sorted(seats_available)} のいずれかを入力してください。")
+
     log_dir = input("ログ保存先 (空Enterで ./logs): ").strip() or "./logs"
 
-    return {"players": players, "sb": sb, "bb": bb, "log_dir": log_dir}
+    return {"players": players, "sb": sb, "bb": bb,
+            "button_seat": btn, "log_dir": log_dir}
 
 
 def run_cli() -> None:
@@ -195,12 +207,16 @@ def run_cli() -> None:
         rfid_queue=rfid_q if rfid_cfg.get("enabled", False) else None,
         on_action=on_action,
         stop_event=stop_event,
+        initial_button_seat=session_cfg["button_seat"],
+        sb_amount=session_cfg["sb"],
+        bb_amount=session_cfg["bb"],
     )
     audio_thread.start()
     integration_thread.start()
 
     print(f"\nセッション開始。ログ: {json_writer.path}")
-    print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー  [r <席> <金額>]=リバイ")
+    print("コマンド: [q]=終了  [n [<button>]]=新ハンド  [w <席>]=ウィナー  [r <席> <金額>]=リバイ")
+    print(f"初期ボタン席: {session_cfg['button_seat']}  (以降は左隣の active 席へ自動回転)")
     print("ディーラーがアナウンスすると自動検出されます。\n")
 
     try:
@@ -214,8 +230,21 @@ def run_cli() -> None:
             if cmd == "q":
                 break
             elif cmd == "n":
-                game_state.new_hand()
-                print(f"新ハンド開始: hand_id={game_state.hand_id}")
+                btn_override = None
+                if len(parts) >= 2:
+                    try:
+                        btn_override = int(parts[1])
+                    except ValueError:
+                        print("button 席は整数で指定してください。")
+                        continue
+                if btn_override is not None:
+                    integration_thread.set_next_button_seat(btn_override)
+                from core.events import AudioEvent
+                import time as _t
+                audio_q.put(AudioEvent(
+                    action="new_hand", amount=0, timestamp=_t.time(), raw_text="",
+                ))
+                print(f"新ハンド開始リクエスト送信 (button={btn_override or 'auto'})")
             elif cmd == "w" and len(parts) >= 2:
                 try:
                     seat = int(parts[1])
@@ -360,7 +389,11 @@ def run_gui() -> None:
         on_action=dash.on_action,
         on_rfid_card=dash.on_rfid_card,
         stop_event=stop_event,
+        initial_button_seat=session_cfg["button_seat"],
+        sb_amount=session_cfg["sb"],
+        bb_amount=session_cfg["bb"],
     )
+    dash.set_integration_thread(integration_thread)
 
     dash.start_threads(
         audio_thread=audio_thread,

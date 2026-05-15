@@ -15,14 +15,26 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from core.events import AudioEvent
+from integration.action_order import (
+    advance_actor,
+    compute_blinds,
+    compute_first_actor_postflop,
+    compute_first_actor_preflop,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class BettingState:
-    """現在ストリートのベッティング状態を追跡するデータクラス。"""
+    """現在ストリートのベッティング状態 + ハンド単位のボタン/ブラインド情報を保持する。
 
+    Engine から見た「ハンド開始時に self-contained に actor / blind を確定できる」
+    一元 state。`start_hand()` を呼ぶと button から SB/BB/first_actor を算出し、
+    blind の auto post まで状態に反映する。
+    """
+
+    # ── ストリート単位の状態 ────────────────────────────────────────────────
     street: str = "preflop"
     current_bet: int = 0
     is_opened: bool = False
@@ -30,37 +42,175 @@ class BettingState:
     player_contrib_this_street: dict[int, int] = field(default_factory=dict)
     active_seats: list[int] = field(default_factory=list)
     folded_seats: list[int] = field(default_factory=list)
+    all_in_seats: list[int] = field(default_factory=list)
+
+    # ── ハンド単位 (button / blind / actor) ─────────────────────────────────
+    button_seat: Optional[int] = None
+    sb_seat: Optional[int] = None
+    bb_seat: Optional[int] = None
+    sb_amount: int = 0
+    bb_amount: int = 0
+    actor_seat: Optional[int] = None
+    last_aggressor: Optional[int] = None
+    player_contrib_hand: dict[int, int] = field(default_factory=dict)
+    action_history: list[dict] = field(default_factory=list)
+    is_initialized: bool = False  # start_hand が button/blind を確定できたか
 
     def get_contrib(self, seat: int) -> int:
         """指定席の今ストリートの投資額を返す。"""
         return self.player_contrib_this_street.get(seat, 0)
 
+    def call_amount_for(self, seat: int) -> int:
+        """seat が CALL するために必要な追加投入額 (負にはならない)。"""
+        return max(0, self.current_bet - self.get_contrib(seat))
+
     def reset_for_new_street(self) -> None:
-        """新ストリート開始時にベッティング状態をリセットする。"""
+        """新ストリート開始時にベッティング状態をリセットする。
+
+        button_seat が既知なら postflop first actor も再計算する。
+        """
         self.current_bet = 0
         self.is_opened = False
         self.last_raise_to = 0
+        self.last_aggressor = None
         self.player_contrib_this_street.clear()
+        if self.button_seat is not None and self.active_seats:
+            self.actor_seat = compute_first_actor_postflop(
+                self.button_seat,
+                self.active_seats,
+                folded_seats=set(self.folded_seats),
+                all_in_seats=set(self.all_in_seats),
+            )
 
     def reset_for_new_hand(self) -> None:
-        """新ハンド開始時に全状態をリセットする。"""
+        """新ハンド開始時に全状態をリセットする (button/blind 情報は呼び出し側で再設定)。"""
         self.street = "preflop"
         self.reset_for_new_street()
         self.folded_seats.clear()
+        self.all_in_seats.clear()
+        self.player_contrib_hand.clear()
+        self.action_history.clear()
+        self.button_seat = None
+        self.sb_seat = None
+        self.bb_seat = None
+        self.actor_seat = None
+        self.last_aggressor = None
+        self.is_initialized = False
+
+    def start_hand(
+        self,
+        *,
+        button_seat: int,
+        active_seats: list[int],
+        sb_amount: int,
+        bb_amount: int,
+    ) -> None:
+        """ハンド開始時に button / SB / BB / first actor を確定し、blind を auto post する。
+
+        この呼び出しの後、action_history には SB_POST と BB_POST が積まれ、
+        current_bet=bb_amount, is_opened=True, actor_seat=preflop first actor となる。
+
+        button が active_seats に含まれない / active が 2 人未満なら is_initialized=False。
+        """
+        self.reset_for_new_hand()
+        self.active_seats = sorted(set(active_seats))
+        self.sb_amount = sb_amount
+        self.bb_amount = bb_amount
+        self.button_seat = button_seat
+        self.player_contrib_hand = {s: 0 for s in self.active_seats}
+        self.player_contrib_this_street = {s: 0 for s in self.active_seats}
+
+        sb, bb = compute_blinds(button_seat, self.active_seats)
+        self.sb_seat = sb
+        self.bb_seat = bb
+        if sb is None or bb is None:
+            logger.warning(
+                "Hand start: blinds could not be computed (button=%s active=%s) — "
+                "BettingState not initialized",
+                button_seat, self.active_seats,
+            )
+            self.is_initialized = False
+            return
+
+        # blind 自動 post
+        self._record_post(sb, "SB_POST", sb_amount)
+        self._record_post(bb, "BB_POST", bb_amount)
+        self.current_bet = bb_amount
+        self.last_raise_to = bb_amount
+        self.is_opened = True
+        self.actor_seat = compute_first_actor_preflop(button_seat, self.active_seats)
+        self.is_initialized = True
+
+        logger.info(
+            "Hand start: button=%d sb=%d bb=%d first_actor=%s blinds=(%d/%d)",
+            button_seat, sb, bb, self.actor_seat, sb_amount, bb_amount,
+        )
+        logger.info("Auto post: seat=%d action=SB_POST amount=%d", sb, sb_amount)
+        logger.info("Auto post: seat=%d action=BB_POST amount=%d", bb, bb_amount)
+
+    def _record_post(self, seat: int, action: str, amount: int) -> None:
+        self.player_contrib_this_street[seat] = (
+            self.player_contrib_this_street.get(seat, 0) + amount
+        )
+        self.player_contrib_hand[seat] = (
+            self.player_contrib_hand.get(seat, 0) + amount
+        )
+        self.action_history.append({"seat": seat, "action": action, "amount": amount})
 
     def update_after_action(self, seat: int, action: str, amount: int) -> None:
-        """アクション実行後に状態を更新する。"""
+        """アクション実行後に状態を更新する。actor_seat も次へ進める。
+
+        amount は BET/RAISE では「raise-to の絶対値」、CALL/CHECK/FOLD では
+        無視される。ALLIN は target を amount または contrib のいずれか大きい方とする。
+        """
         a = action.lower()
-        if a in ("bet", "raise", "allin"):
-            self.current_bet = amount
-            self.last_raise_to = amount
+
+        if a in ("bet", "raise"):
+            target = max(amount, self.current_bet)
+            delta = target - self.get_contrib(seat)
+            self.player_contrib_this_street[seat] = target
+            self.player_contrib_hand[seat] = (
+                self.player_contrib_hand.get(seat, 0) + max(0, delta)
+            )
+            self.current_bet = target
+            self.last_raise_to = target
             self.is_opened = True
-            self.player_contrib_this_street[seat] = self.get_contrib(seat) + amount
+            self.last_aggressor = seat
+        elif a == "allin":
+            target = max(amount, self.get_contrib(seat))
+            delta = target - self.get_contrib(seat)
+            self.player_contrib_this_street[seat] = target
+            self.player_contrib_hand[seat] = (
+                self.player_contrib_hand.get(seat, 0) + max(0, delta)
+            )
+            if seat not in self.all_in_seats:
+                self.all_in_seats.append(seat)
+            if target > self.current_bet:
+                self.current_bet = target
+                self.last_raise_to = target
+                self.is_opened = True
+                self.last_aggressor = seat
         elif a == "call":
+            delta = self.current_bet - self.get_contrib(seat)
             self.player_contrib_this_street[seat] = self.current_bet
+            self.player_contrib_hand[seat] = (
+                self.player_contrib_hand.get(seat, 0) + max(0, delta)
+            )
         elif a == "fold":
             if seat not in self.folded_seats:
                 self.folded_seats.append(seat)
+        # check: contrib も history も増分なし
+
+        self.action_history.append({"seat": seat, "action": a, "amount": amount})
+
+        # actor を次の live seat へ進める (button_seat が既知のときのみ)
+        if self.button_seat is not None and self.active_seats:
+            self.actor_seat = advance_actor(
+                seat,
+                self.active_seats,
+                folded_seats=set(self.folded_seats),
+                all_in_seats=set(self.all_in_seats),
+            )
 
 
 @dataclass

@@ -37,6 +37,7 @@ from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
 from integration.action_inference import BettingState, infer_action
+from integration.action_order import advance_button
 from output.json_writer import JsonWriter
 
 logger = logging.getLogger(__name__)
@@ -89,11 +90,20 @@ class IntegrationThread(threading.Thread):
         on_action: Optional[Callable[[ActionRecord], None]] = None,
         on_rfid_card: Optional[Callable[[RFIDEvent], None]] = None,
         stop_event: Optional[threading.Event] = None,
+        initial_button_seat: Optional[int] = None,
+        sb_amount: Optional[int] = None,
+        bb_amount: Optional[int] = None,
+        auto_post_blinds: bool = True,
     ) -> None:
         """
         Args:
             on_rfid_card: カード検出時のコールバック (GUI スレッドには渡さず
                           _update_queue 経由で処理すること)。スレッド安全に設計すること。
+            initial_button_seat: 第 1 ハンドの button 席。None なら BettingState は
+                                 未初期化のまま (state-aware 推定はフォールバック)。
+            sb_amount/bb_amount: 自動 blind post 用の金額。None なら game_state の
+                                 設定値を読み取る。
+            auto_post_blinds: 新ハンド開始時に SB/BB を自動 post するか。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -123,8 +133,27 @@ class IntegrationThread(threading.Thread):
         # ベッティング状態（アクション推定・妥当性検証に使用）
         self._betting_state = BettingState()
 
+        # ボタン管理
+        self._auto_post_blinds = auto_post_blinds
+        self._sb_amount = sb_amount if sb_amount is not None else getattr(game_state, "_sb", 0)
+        self._bb_amount = bb_amount if bb_amount is not None else getattr(game_state, "_bb", 0)
+        self._next_button_seat: Optional[int] = initial_button_seat
+        self._last_button_seat: Optional[int] = None
+
     def stop(self) -> None:
         self._stop_event.set()
+
+    # ――― state-aware API (GUI / CLI から呼び出し) ―――
+
+    def set_next_button_seat(self, seat: Optional[int]) -> None:
+        """次のハンド開始時に使う button 席を指定する (1回限り、自動進行を上書き)。"""
+        self._next_button_seat = seat
+        logger.info("Next button seat set to %s", seat)
+
+    @property
+    def betting_state(self) -> BettingState:
+        """現在のベッティング状態 (GUI ヘッダー表示などに使う)。"""
+        return self._betting_state
 
     def run(self) -> None:
         logger.info("IntegrationThread started")
@@ -316,7 +345,11 @@ class IntegrationThread(threading.Thread):
             self._finalize_hand(winner_seat)
             return
 
-        seat = gs.get_current_player()
+        # BettingState が初期化済みなら actor_seat を優先 (button/blind から確定済み)
+        if self._betting_state.is_initialized and self._betting_state.actor_seat is not None:
+            seat = self._betting_state.actor_seat
+        else:
+            seat = gs.get_current_player()
 
         inferred = infer_action(event, self._betting_state, seat)
 
@@ -395,6 +428,113 @@ class IntegrationThread(threading.Thread):
         self._hole_cards = {}
         self._betting_state.reset_for_new_hand()
         logger.info("New hand started: hand_id=%d", gs.hand_id)
+
+        # button を確定 (手動 override → 自動回転 → 未設定)
+        button = self._resolve_button_seat()
+        if button is None:
+            logger.warning(
+                "Hand %d: button seat is unknown — BettingState not initialized. "
+                "state-aware inference will fall back to actor heuristic.",
+                gs.hand_id,
+            )
+            return
+
+        active = self._compute_active_seats()
+        if len(active) < 2:
+            logger.warning(
+                "Hand %d: only %d active seat(s) — cannot start hand state machine",
+                gs.hand_id, len(active),
+            )
+            return
+
+        self._betting_state.start_hand(
+            button_seat=button,
+            active_seats=active,
+            sb_amount=self._sb_amount,
+            bb_amount=self._bb_amount,
+        )
+        self._last_button_seat = button
+
+        if self._auto_post_blinds and self._betting_state.is_initialized:
+            self._post_blinds_to_records()
+
+    def _resolve_button_seat(self) -> Optional[int]:
+        """次ハンドの button 席を決定する。
+
+        優先順位:
+          1. set_next_button_seat() で明示された seat (一度きりの手動 override)
+          2. 前ハンドの button から左隣の active seat へ自動回転 (advance_button)
+          3. 一度も button が設定されていなければ None
+        """
+        active = self._compute_active_seats()
+
+        if self._next_button_seat is not None:
+            seat = self._next_button_seat
+            self._next_button_seat = None
+            if self._last_button_seat is None:
+                logger.info("Button seat initialized to %s (manual)", seat)
+            else:
+                logger.info(
+                    "Button seat overridden: %s -> %s (manual correction)",
+                    self._last_button_seat, seat,
+                )
+            return seat
+
+        if self._last_button_seat is not None:
+            next_seat = advance_button(self._last_button_seat, active)
+            if next_seat is not None:
+                logger.info(
+                    "Button advance: previous=%d next=%d active=%s",
+                    self._last_button_seat, next_seat, active,
+                )
+            else:
+                logger.warning(
+                    "Button could not be advanced from %d (active=%s)",
+                    self._last_button_seat, active,
+                )
+            return next_seat
+
+        return None
+
+    def _compute_active_seats(self) -> list[int]:
+        """ハンド開始時の active seat (= 着席かつ stack > 0)。"""
+        stacks = self._game_state.get_stacks()
+        return sorted(s for s, st in stacks.items() if st > 0)
+
+    def _post_blinds_to_records(self) -> None:
+        """BettingState が post した SB/BB を ActionRecord と GameStateManager に反映する。"""
+        gs = self._game_state
+        bs = self._betting_state
+        for entry in bs.action_history:
+            seat = entry["seat"]
+            amount = entry["amount"]
+            action_label = entry["action"]
+            if action_label not in ("SB_POST", "BB_POST"):
+                continue
+            try:
+                gs.apply_action(seat, "bet", amount)
+            except ValueError:
+                logger.exception("apply_action failed during blind post (seat=%d)", seat)
+            record = ActionRecord(
+                hand_id=gs.hand_id,
+                timestamp=_now_iso(),
+                street="preflop",
+                seat=seat,
+                player_name=gs.get_player_name(seat),
+                action=action_label,
+                amount=amount,
+                pot_after=gs.pot,
+                stack_after=gs.get_stack(seat),
+                source={"camera": False, "audio": False, "rfid": False},
+                needs_review=False,
+                confidence=1.0,
+            )
+            self._current_actions.append(record)
+            if self._on_action:
+                try:
+                    self._on_action(record)
+                except Exception:
+                    logger.exception("on_action callback raised")
 
     def _finalize_hand(self, winner_seat: int) -> None:
         gs = self._game_state
