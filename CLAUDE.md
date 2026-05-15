@@ -439,7 +439,8 @@ pytest tests/ --ignore=tests/test_vision.py
 | 手動入力席の actor 追従 | ✅ 完了 | dashboard.py: _sync_manual_seat |
 | PokerRuleEngine | ❌ 未実装 (v6.0) | legal_actions 算出なし |
 | AudioStreamBuffer 状態機械 | ❌ 未実装 (v6.0) | 確認型発話の PENDING なし |
-| 音声/RFID 確率融合エンジン | ❌ 未実装 (v6.0+) | §「将来計画」を参照 |
+| 音声/RFID 確率融合エンジン | ❌ 未実装 (v6.0+) | §「将来計画 (時刻ベース確率融合)」を参照 |
+| ベイズ推定によるアクション推定 | ❌ 未実装 (v6.0+) | §「将来計画 (ベイズ推定)」を参照 |
 | ディーラー別オンライン学習 | ❌ 未実装 (v6.0+) | §「将来計画」を参照 |
 
 ---
@@ -493,3 +494,167 @@ L0–L2 はリスクが小さく即効性があるので優先導入する。L3 
 - ハンドメタ: winner, pot, 最終 stack
 
 これによりオフライン分析で per-dealer モデル・遅延分布・position prior すべての学習が可能になる。
+
+---
+
+## 将来計画 (v6.0+): ベイズ推定によるアクション推定
+
+§「将来計画 (v6.0+): 音声/RFID 時刻ベース確率融合」で示した粒子フィルタ / Beam Search は、本質的に **逐次ベイズ推定 (Sequential Bayesian Inference)** のサンプリング近似である。ここでは数式表現を起点に、(1) 何を推定するか、(2) どう更新するか、(3) どう学習するか、(4) どう意思決定するか を明示し、段階的な実装計画に落とす。
+
+### 1. 推定対象とベイズ定式化
+
+求めたい事後分布は **アクション列 $A = (a_1, \ldots, a_n)$ on 観測列 $\mathcal{E}$**:
+
+$$P(A \mid \mathcal{E}, \theta) = \frac{P(\mathcal{E} \mid A, \theta)\, P(A \mid \theta)}{P(\mathcal{E} \mid \theta)}$$
+
+- **事前分布 $P(A \mid \theta)$**: ポーカールールが定める legal_actions、ディーラー $d$ ごとの position prior、stack/pot 制約による条件付き分布。`BettingState.is_initialized` 時はハード制約 + ソフト prior 混合。
+- **尤度 $P(\mathcal{E} \mid A, \theta)$**: モダリティごとに独立と仮定し $\prod_t P(\mathcal{E}_t \mid A, \theta)$ に分解。音声・RFID・時刻アライメントそれぞれの観測モデル (§ 4 参照)。
+- **モデルパラメータ $\theta$**: ディーラー固有の遅延分布 $(\mu_d, \sigma_d)$、語彙頻度 $\pi_d$、位置別アクション傾向 $\pi_d(\text{action} \mid \text{position})$ など。$\theta$ 自体も事後分布として学習する **階層ベイズ** とする。
+
+正規化定数 $P(\mathcal{E} \mid \theta)$ は不要 (MAP 推定 = $\arg\max_A$ 計算)。粒子フィルタの相対重みもこれを暗黙に消去する。
+
+### 2. 逐次ベイズ更新
+
+観測が時刻順に到着するので、$t$ 時点の事後分布 $\pi_t(A) := P(A \mid \mathcal{E}_{1:t})$ は前ステップから
+
+$$\pi_t(A) \propto P(\mathcal{E}_t \mid A)\, \pi_{t-1}(A)$$
+
+で逐次更新する (定数項を吸収)。実装は **粒子フィルタ** で:
+
+```
+# 各粒子 i = 1..K は (action_seq_i, log_weight_i, betting_state_i) を持つ
+for evidence e_t in stream:
+    for i in 1..K:
+        # 観測尤度を log で加算
+        log_weight_i += log P(e_t | action_seq_i, theta)
+        # 新アクション候補があれば分岐 (resample)
+        for cand in legal_actions(betting_state_i):
+            spawn new particle with action_seq_i + [cand]
+    # 重み正規化 + リサンプリング (Effective Sample Size 監視)
+    normalize_log_weights()
+    if ESS < K/2:
+        resample()
+```
+
+これにより **正確な事後分布の Monte Carlo 近似** が得られる ($K \to \infty$ で真の事後に収束)。
+
+### 3. 共役事前分布によるオンラインパラメータ学習
+
+ディーラー個別パラメータ $\theta_d$ は **共役事前分布** を選ぶことで closed-form 更新ができる。session 中に新観測が来るたびに事後分布をベイズ更新する。
+
+| パラメータ | 型 | 共役事前 | 事後 (更新式) |
+|---|---|---|---|
+| 音声遅延 $(\mu_d^{\text{audio}}, \tau_d^{\text{audio}})$ (精度) | 連続 | Normal-Gamma | $\mu \mid \tau \sim \mathcal{N}(\mu_n, (\kappa_n \tau)^{-1})$、$\tau \sim \text{Gamma}(\alpha_n, \beta_n)$。$n$ 観測後 $\mu_n = (\kappa_0 \mu_0 + n\bar{x})/(\kappa_0 + n)$ |
+| RFID 遅延 $(\mu_d^{\text{rfid}}, \tau_d^{\text{rfid}})$ | 連続 | Normal-Gamma | 同上 |
+| 語彙頻度 $\pi_d(\text{word} \mid \text{action})$ | カテゴリカル | Dirichlet | $\alpha_n^{(w)} = \alpha_0^{(w)} + c^{(w)}$（観測カウント加算のみ） |
+| 位置別 prior $\pi_d(\text{action} \mid \text{position})$ | カテゴリカル | Dirichlet | 同上 |
+| 数値表現の好み (`ろっぴゃく` vs `ろくひゃく`) | カテゴリカル | Dirichlet | 同上 |
+
+**初期事前** $\alpha_0$, $\mu_0$, $\kappa_0$, $\alpha_0$ (Gamma), $\beta_0$ は session 全体のグローバル統計から弱い prior として与える (e.g., $\mu_0 = 0.5$s, $\sigma_0 = 0.3$s)。  
+**忘却機構**: 古い観測を割引く必要がある場合は exponential forgetting $\alpha_n \leftarrow \lambda \alpha_n + c$ を使う ($\lambda = 0.99 / \text{hand}$ 程度)。
+
+### 4. モダリティ別の観測モデル ($P(\mathcal{E}_t \mid A)$)
+
+**音声観測** (発話 $u$ が時刻 $t^{(u)}$ で N-best $\{w_k, c_k\}$ を出す):
+
+$$P(u \mid a_i, \theta_d) = \underbrace{\mathcal{N}(\tau_i - t^{(u)};\, \mu_d^{\text{audio}}, \sigma_d^{\text{audio}})}_{\text{時刻整合性}} \cdot \underbrace{\sum_k c_k \cdot \pi_d(w_k \mid a_i)}_{\text{意味整合性}}$$
+
+**RFID 観測** (区間 $[t_s^{(n)}, t_e^{(n)}]$ で seat_n がカード保持):
+
+$$P(\text{RFID}_n \mid a_i) = \begin{cases}
+\mathcal{N}(\tau_i - t_e^{(n)};\, \mu_d^{\text{rfid}}, \sigma_d^{\text{rfid}}) & \text{if } a_i = \text{FOLD}(n) \\
+\mathbb{1}[t_s^{(n)} \le \tau_i \le t_e^{(n)}] & \text{if } a_i \in \{\text{BET, CALL, RAISE}\}(\text{seat}=n) \\
+1 & \text{otherwise (uninformative)}
+\end{cases}$$
+
+**結合尤度**: 観測モダリティが独立と仮定し積を取る。アクション同士の時刻整合 ($\tau_1 < \tau_2 < \cdots$) はハード制約。
+
+### 5. 意思決定: MAP vs ベイズリスク最小化
+
+事後分布が得られた後の最終決定には 2 通り:
+
+#### 5-1. MAP 推定 (デフォルト)
+$$A^* = \arg\max_A \pi_T(A)$$
+
+粒子フィルタなら最大重み粒子。HandSummary に確定書き込み。
+
+#### 5-2. ベイズリスク最小化 (`needs_review` 自動判定)
+誤判定コスト関数 $L(\hat{A}, A^*)$ を用いて
+
+$$\hat{A} = \arg\min_{\hat{A}} \mathbb{E}_{\pi_T}[L(\hat{A}, A)]$$
+
+を選ぶ。実用上は近似として:
+- top-1 と top-2 の対数事後差 < $\delta$ なら **棄却** → `needs_review`
+- エントロピー $H(\pi_T) > h_{\max}$ なら **棄却**
+- 期待ポット誤差 $|\mathbb{E}_{\pi_T}[\text{pot}] - \text{observed pot}|$ が閾値超過なら棄却
+
+$\delta$, $h_{\max}$ はディーラーごとに ROC-curve で校正する。
+
+### 6. 階層ベイズ拡張: 卓レベル / 全体レベル
+
+ディーラー個別 $\theta_d$ の上に **卓全体の hyperprior** $\theta_0$ を置く:
+
+$$\theta_d \sim P(\theta_d \mid \theta_0),\quad \theta_0 \sim P(\theta_0)$$
+
+これにより:
+- **新規ディーラーの cold start** が cluster prior で初期化される (60 秒キャリブを最小化)
+- **過去 session の知識転移** が自然に組み込める
+- 全体 prior は夜間バッチで MCMC (Gibbs / HMC) 更新、個別 $\theta_d$ は実時間オンライン更新の **二層構造**
+
+### 7. ベイズ推定導入の段階計画
+
+§「音声/RFID 時刻ベース確率融合」の L0–L9 を、ベイズ推定の視点で再整理する。
+
+| Phase | ベイズ推定要素 | 実装内容 |
+|---|---|---|
+| **B0** | 観測ログ収集 (事前なし、データ蓄積のみ) | Phase 0 と同じ。raw EvidenceInterval を gzip 保存 |
+| **B1** | 一様 prior + 経験的尤度 | `infer_action` を「単一仮説」→「仮説リスト + 対数尤度」に拡張 |
+| **B2** | 共役事前分布の導入 (Dirichlet for 語彙、Normal-Gamma for 遅延) | profile.json に共役事前パラメータを persist |
+| **B3** | 逐次ベイズ更新 (closed-form posterior update) | 各観測ごとに $\alpha, \beta, \mu, \kappa$ を更新 |
+| **B4** | 粒子フィルタ (Sequential Monte Carlo) で事後分布近似 | K=16 → 64 粒子、ESS リサンプリング |
+| **B5** | ベイズリスク最小化による意思決定 (review 自動判定) | top-2 対数差 / エントロピーで棄却 |
+| **B6** | 階層ベイズ (卓 hyperprior) | 夜間 MCMC バッチで $\theta_0$ 更新、個別 $\theta_d$ をその下に置く |
+| **B7** | Active learning (review クリック → 事後分布更新) | Human-in-the-loop で対話的に prior 強化 |
+| **B8** | 評価指標 (log-loss / Brier score / ECE) でモデル選択 | A/B test で Phase 別の精度比較 |
+
+B0–B3 は **既存パイプラインに非破壊で追加可能**。B4 以降は `IntegrationThread` 内部状態を粒子集合に置き換える破壊的変更を伴う。
+
+### 8. 既存コードからの最小変更で得られる第一歩 (B1)
+
+```python
+# action_inference.py に追加
+@dataclass
+class ActionHypothesis:
+    action: str
+    amount: Optional[int]
+    log_likelihood: float  # log P(evidence | this action)
+    reason: str
+
+def infer_action_distribution(
+    evidence: EvidenceInterval,
+    state: BettingState,
+    theta_d: DealerProfile,
+) -> list[ActionHypothesis]:
+    """単一の最尤アクションではなく、(候補, log尤度) のリストを返す。
+
+    既存の infer_action() は本関数の薄いラッパで実装し直す:
+        best = max(hypotheses, key=lambda h: h.log_likelihood)
+    """
+    ...
+```
+
+この変更だけで、後段 (Beam Search / 粒子フィルタ) を載せる土台ができる。`integration.engine` への影響はゼロ (top-1 を取り出すアダプタを置けば既存 API 互換)。
+
+### 9. 不確実性の可視化 (GUI)
+
+ベイズ推定の利点は **「確率付き候補」が出ること**。GUI の `needs_review` 行に top-3 候補と posterior 確率を表示することで、操作者がワンクリックで選べる:
+
+```
+ハンド #42  flop  pot=2400
+⚠ レビュー: seat3 の action
+  [ 78% ] CALL 600     (audio 0.9, rfid 0.85)
+  [ 18% ] RAISE 1200   (audio 0.6, rfid 0.85)
+  [  4% ] CHECK        (audio 0.1, rfid 0.85)
+```
+
+クリックで確定 → その結果が Dirichlet posterior の更新カウントになる (active learning ループ閉)。

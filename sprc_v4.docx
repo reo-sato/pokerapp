@@ -1,7 +1,7 @@
 ポーカーハンドログ自動記録システム 仕様書
-バージョン: 5.1
+バージョン: 5.2
 作成日: 2026-05-15
-前バージョン: 5.0（2026-05-15）
+前バージョン: 5.1（2026-05-15）
 対象: 小規模クラブ・個人配信向け
 
 改訂履歴
@@ -12,6 +12,7 @@
 4.0	2026-04-09	ディーラーボタン管理を追加。ポジション（BTN/SB/BB/UTG 等）の自動算出・記録・ターン順生成に対応
 5.0	2026-05-15	実装状況に合わせて仕様を整合。音声正規化レイヤー追加（corrections.json, speech_normalization.json）。数値正規化追加（ひらがな/漢数字）。amount_only 補完（BettingState）追加。Vosk バックエンド追加。信頼度をセンサー組み合わせ行列に改訂。PokerRuleEngine / AudioStreamBuffer / ディーラーボタン管理を「未実装・将来実装」に移動
 5.1	2026-05-15	ディーラーボタン自動回転を実装（initial_button_seat、advance_button、SB/BB 自動 post、actor 自動進行、heads-up 対応、BettingState.start_hand）。GUI に BTN補正ドロップダウン・BettingState 表示行・手動入力 actor 追従を追加。CLI に初期 button プロンプトと `n <seat>` を追加。将来計画 (v6.0+) に「音声/RFID 時刻ベース確率融合エンジン」と「ディーラー別オンライン学習」を新規セクションとして追加
+5.2	2026-05-15	将来計画 (v6.0+) に「ベイズ推定によるアクション推定」セクション 14 を追加。事後分布の定式化、逐次ベイズ更新、共役事前分布 (Normal-Gamma / Dirichlet) によるオンラインパラメータ学習、観測モデル (尤度関数)、ベイズリスク最小化による review 自動判定、階層ベイズによる卓 hyperprior、段階導入計画 (B0–B8)、GUI への確率表示と active learning を仕様化
 
 
 1. システム概要
@@ -478,6 +479,7 @@ AudioStreamBuffer 状態機械	未実装（将来 v6.0）	-
 PokerRuleEngine	未実装（将来 v6.0）	-
 尤度ベースのアクター推定	未実装（将来 v6.0）	-
 音声/RFID 時刻ベース確率融合エンジン	未実装（将来 v6.0+）	セクション 13 参照
+ベイズ推定によるアクション推定	未実装（将来 v6.0+）	セクション 14 参照
 ディーラー別オンライン学習	未実装（将来 v6.0+）	セクション 13 参照
 
 
@@ -629,5 +631,84 @@ L0 と並行して以下を常時記録する raw ログ基盤を整備する。
 - NFR-103: オフライン分析のために raw observation log を gzip 圧縮で session ディレクトリに保存する
 
 
+14. 将来計画 (v6.0+): ベイズ推定によるアクション推定
+
+14.1 位置づけと前提
+セクション 13 で示した確率融合エンジン (粒子フィルタ / Beam Search) は、実装上はベイズ推定のサンプリング近似である。本章ではその数学的定式化を明示し、共役事前分布によるオンライン学習・意思決定ルール・段階導入計画までを仕様として固定する。
+
+14.2 推定対象と定式化
+- FR-200: アクション列 A = (a_1, ..., a_n) on 観測列 E に対し、事後分布 P(A | E, θ) を推定する
+- FR-201: 推定は MAP 推定 (A* = argmax P(A | E, θ)) または期待損失最小化 (ベイズリスク最小化) のいずれかで行う
+- FR-202: モデルパラメータ θ (ディーラー固有遅延・語彙頻度・位置別 prior) も事後分布として保持する階層ベイズ構造とする
+- FR-203: 観測モダリティ間の独立性を仮定し、結合尤度を P(E | A) = ∏_t P(E_t | A) と分解する
+- FR-204: 時刻整合性 (τ_1 < τ_2 < ...) はハード制約。legal_actions もハード制約 (確率 0)。position prior と dealer prior はソフト制約 (log prior 加算)
+
+14.3 逐次ベイズ更新
+- FR-210: 観測が時刻順に到着するため、事後分布 π_t(A) := P(A | E_{1:t}) を π_t(A) ∝ P(E_t | A) π_{t-1}(A) で逐次更新する
+- FR-211: 実装は Sequential Monte Carlo (粒子フィルタ) とする。各粒子は (action_sequence, log_weight, betting_state) を保持する
+- FR-212: 各粒子は新観測ごとに log_weight を log P(E_t | A) で加算し、legal_actions による分岐生成と効果的サンプル数 (ESS) 監視によるリサンプリングを行う
+- FR-213: 粒子数 K は初期 K=16 で運用開始し、計算余裕に応じて K=64 まで増加可能とする
+
+14.4 共役事前分布によるパラメータ学習
+- FR-220: ディーラー固有パラメータ θ_d は以下の共役事前分布で表現し、観測ごとに closed-form でベイズ更新する
+- FR-221: 音声遅延 (μ_d^audio, τ_d^audio) は Normal-Gamma 分布 (μ_n = (κ_0 μ_0 + n x̄)/(κ_0 + n), κ_n = κ_0 + n)
+- FR-222: RFID 遅延 (μ_d^rfid, τ_d^rfid) は同じく Normal-Gamma 分布
+- FR-223: 語彙頻度 π_d(word | action) は Dirichlet 分布 (α_n^(w) = α_0^(w) + count^(w))
+- FR-224: 位置別アクション prior π_d(action | position) は Dirichlet 分布 (同上)
+- FR-225: 数値表現の好み (ろっぴゃく vs ろくひゃく 等) は Dirichlet 分布
+- FR-226: 初期 prior (α_0, μ_0, κ_0, α_0^Γ, β_0^Γ) は全体統計からの弱い事前として設定する (例: μ_0 = 0.5s, σ_0 = 0.3s)
+- FR-227: 古い観測を割引く必要がある場合は exponential forgetting (α_n ← λ α_n + count, λ = 0.99/hand 程度) を適用する
+
+14.5 観測モデル (尤度関数)
+- FR-230: 音声尤度 P(u | a_i, θ_d) = phi_align × phi_sem
+  - phi_align(τ_i, t^(u)) = N(τ_i - t^(u); μ_d^audio, σ_d^audio)
+  - phi_sem(N-best, a_i) = Σ_k c_k π_d(w_k | a_i)
+- FR-231: RFID 尤度
+  - a_i = FOLD(n): P(RFID_n | a_i) = N(τ_i - t_e^(n); μ_d^rfid, σ_d^rfid)
+  - a_i ∈ {BET, CALL, RAISE}(seat=n): P(RFID_n | a_i) = I[t_s^(n) ≤ τ_i ≤ t_e^(n)] (区間内かどうか)
+  - その他: 1 (情報なし)
+- FR-232: 観測区間は高々 1 アクションが explanation する (二重カウント禁止)
+
+14.6 意思決定ルール
+- FR-240: デフォルトは MAP 推定。粒子フィルタ最大重み粒子のアクション列を HandSummary に確定書き込みする
+- FR-241: ベイズリスク最小化による review 自動判定として以下のいずれかを満たす場合 needs_review=true を立てる
+  - top-1 と top-2 の対数事後差 < δ (δ はディーラーごとに ROC-curve で校正)
+  - 事後分布のエントロピー H(π_T) > h_max
+  - 期待ポット誤差 |E[pot] - observed pot| が閾値超過
+- FR-242: 閾値 δ, h_max はキャリブ時に session 設定として保存する
+
+14.7 階層ベイズ拡張
+- FR-250: ディーラー個別 θ_d の上に卓全体 hyperprior θ_0 を置く (θ_d ~ P(θ_d | θ_0))
+- FR-251: 新規ディーラーの cold start で θ_0 を初期値として使う (キャリブ時間を最小化する)
+- FR-252: θ_0 は夜間バッチで MCMC (Gibbs / HMC) 推定する。個別 θ_d は実時間オンライン更新の二層構造とする
+
+14.8 ベイズ推定導入の段階計画 (B0–B8)
+B0 観測ログ収集 (事前なし、データ蓄積のみ) — § 13.11 と兼用
+B1 仮説リスト出力 + 一様 prior + 経験的尤度: infer_action を「単一仮説」→「仮説リスト + 対数尤度」に拡張
+B2 共役事前分布の導入: profile.json に Dirichlet / Normal-Gamma パラメータを persist
+B3 逐次ベイズ更新の closed-form 実装: 各観測ごとに α, β, μ, κ をベイズ更新
+B4 粒子フィルタによる事後分布近似: K=16 → 64、ESS リサンプリング
+B5 ベイズリスク最小化による review 自動判定
+B6 階層ベイズ (卓 hyperprior θ_0) の導入
+B7 Active learning ループ閉 (review クリック → posterior 更新)
+B8 評価指標 (log-loss / Brier score / Expected Calibration Error) によるモデル選択と A/B test
+
+B0–B3 は既存パイプラインに非破壊で追加可能。B4 以降は IntegrationThread 内部状態を粒子集合に置き換える破壊的変更を伴う。
+
+14.9 既存 API への最小影響
+- FR-260: 段階 B1 を実装する際、既存の infer_action(event, state, actor_seat) → InferredAction API は維持する。内部で infer_action_distribution() → list[ActionHypothesis] を呼び、top-1 を返すアダプタとする
+- FR-261: integration.engine の呼び出しコードは段階 B3 まで変更不要。B4 で粒子フィルタを導入する際に切替える
+
+14.10 GUI への確率表示
+- FR-270: needs_review に落ちたアクションは top-3 候補と posterior 確率 (例: "78% CALL 600, 18% RAISE 1200, 4% CHECK") を表示する
+- FR-271: ユーザーがいずれかをクリックすると当該仮説を確定とし、その確定情報を Dirichlet posterior の更新カウントとして観測モデルに教師フィードバックする (active learning)
+
+14.11 NFR (ベイズ推定固有)
+- NFR-200: 粒子フィルタ (K=64) 1 ステップあたりの計算時間は 50ms 以内とする (NFR-100 のレイテンシ要件と整合)
+- NFR-201: profile.json のサイズは 1 ディーラーあたり 100KB 以内 (NFR-102 と兼用)
+- NFR-202: 評価指標 (log-loss, Brier score, ECE) は自動でセッション終了時にレポート生成する
+- NFR-203: 階層ベイズの夜間バッチ MCMC は 1 卓 1 セッション (約 100 ハンド) 分のデータで 5 分以内に収束することを目標とする
+
+
 本仕様書は開発進行に伴い随時更新する。
-次バージョン (v6.0) での主な追加予定: AudioStreamBuffer 状態機械、PokerRuleEngine、音声/RFID 時刻ベース確率融合エンジン、ディーラー別オンライン学習。
+次バージョン (v6.0) での主な追加予定: AudioStreamBuffer 状態機械、PokerRuleEngine、音声/RFID 時刻ベース確率融合エンジン、ベイズ推定によるアクション推定、ディーラー別オンライン学習。
