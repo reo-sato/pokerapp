@@ -36,6 +36,7 @@ from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
+from integration.action_inference import BettingState, infer_action
 from output.json_writer import JsonWriter
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,9 @@ class IntegrationThread(threading.Thread):
         self._board_positions: dict[int, str] = {} # board_index → card
         self._board_source: str = ""
         self._hole_cards: dict[int, list[str]] = {}  # seat → [card1, card2]
+
+        # ベッティング状態（アクション推定・妥当性検証に使用）
+        self._betting_state = BettingState()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -246,6 +250,8 @@ class IntegrationThread(threading.Thread):
             return  # 既にそのストリート
         try:
             gs.advance_street(street_enum)
+            self._betting_state.reset_for_new_street()
+            self._betting_state.street = target_street
             logger.info(
                 "Street auto-advanced to %s by RFID board cards (%d cards detected)",
                 target_street, n,
@@ -312,13 +318,26 @@ class IntegrationThread(threading.Thread):
 
         seat = gs.get_current_player()
 
-        try:
-            gs.apply_action(seat, action, event.amount)
-        except ValueError:
-            logger.exception("apply_action failed (seat=%d, action=%s)", seat, action)
+        inferred = infer_action(event, self._betting_state, seat)
+
+        if inferred.action is None:
             needs_review = True
+            logged_action = event.action or "amount_only"
+            logged_amount = inferred.amount
         else:
-            needs_review = False
+            try:
+                gs.apply_action(seat, inferred.action, inferred.amount)
+            except ValueError:
+                logger.exception(
+                    "apply_action failed (seat=%d, action=%s, amount=%d)",
+                    seat, inferred.action, inferred.amount,
+                )
+                needs_review = True
+            else:
+                needs_review = inferred.needs_review
+                self._betting_state.update_after_action(seat, inferred.action, inferred.amount)
+            logged_action = inferred.action
+            logged_amount = inferred.amount
 
         cam_event  = self._pop_matching_camera_event(seat, event.timestamp)
         rfid_event = self._pop_matching_rfid_event(seat, event.timestamp)
@@ -347,8 +366,8 @@ class IntegrationThread(threading.Thread):
             street=gs.street,
             seat=seat,
             player_name=gs.get_player_name(seat),
-            action=action,
-            amount=event.amount,
+            action=logged_action,
+            amount=logged_amount,
             pot_after=gs.pot,
             stack_after=gs.get_stack(seat),
             source=source,
@@ -374,6 +393,7 @@ class IntegrationThread(threading.Thread):
         self._board_positions = {}
         self._board_source = ""
         self._hole_cards = {}
+        self._betting_state.reset_for_new_hand()
         logger.info("New hand started: hand_id=%d", gs.hand_id)
 
     def _finalize_hand(self, winner_seat: int) -> None:

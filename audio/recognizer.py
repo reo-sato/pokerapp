@@ -236,6 +236,19 @@ def parse_action(text: str) -> Optional[AudioEvent]:
             found_kw_len = kw_len
 
     if found_action is None:
+        # 数字のみのアナウンス: ゲームステートで補完できるよう amount_only として返す
+        amount_only = parse_amount(_strip_seat_references(normalized))
+        if amount_only > 0:
+            logger.debug(
+                "Amount-only utterance: %d from %r (normalized: %r)",
+                amount_only, original_text, normalized,
+            )
+            return AudioEvent(
+                action="amount_only",
+                amount=amount_only,
+                timestamp=time.time(),
+                raw_text=original_text,
+            )
         logger.debug("No action keyword found in: %r (normalized: %r)", original_text, normalized)
         return None
 
