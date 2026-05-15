@@ -18,9 +18,18 @@
     "whisper_model": "medium",
     "language": "ja",
     "initial_prompt": "ベット コール レイズ チェック フォールド オールイン ショーダウン ウィナー ハンド開始",
-    "vosk_model_path": "./models/vosk-model-small-ja-0.22",
-    "vosk_grammar": null,
-    "_vosk_grammar_note": "null=フリー認識(推奨)。grammar 指定時は graph/words.txt の語彙に含まれる語のみ有効"
+    "vosk_model_path": "./models/vosk-model-ja-0.22",
+    "vosk_grammar": [
+      "フォールド",
+      "コール",
+      "チェック",
+      "ベット",
+      "レイズ",
+      "オールイン",
+      "ウィナー",
+      "[unk]"
+    ],
+    "_vosk_grammar_note": "大モデル用。語彙確認: models/vosk-model-ja-0.22/graph/words.txt"
   },
   "rfid": {
     "enabled": false,
