@@ -207,7 +207,11 @@ def parse_action(text: str) -> Optional[AudioEvent]:
     if norm.action is not None:
         # normalizer が action を特定済み: ACTION_KEYWORDS マッチングをスキップ
         action = norm.action.lower()
-        amount = parse_amount(_strip_seat_references(normalized))
+        # normalizer の amount を優先し、取れなかった場合のみ parse_amount() にフォールバック
+        if norm.amount is not None:
+            amount = norm.amount
+        else:
+            amount = parse_amount(_strip_seat_references(normalized))
         return AudioEvent(
             action=action,
             amount=amount,
@@ -235,8 +239,11 @@ def parse_action(text: str) -> Optional[AudioEvent]:
         logger.debug("No action keyword found in: %r (normalized: %r)", original_text, normalized)
         return None
 
-    # 席番号表現（シート1 / seat 3 等）を除去してから金額を抽出する。
-    amount = parse_amount(_strip_seat_references(normalized))
+    # normalizer の amount を優先し、取れなかった場合のみ parse_amount() にフォールバック
+    if norm.amount is not None:
+        amount = norm.amount
+    else:
+        amount = parse_amount(_strip_seat_references(normalized))
 
     return AudioEvent(
         action=found_action,

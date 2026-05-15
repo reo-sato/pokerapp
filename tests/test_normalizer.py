@@ -232,3 +232,211 @@ class TestParseActionWithNormalizer:
         ev = _with_module_normalizer(None, lambda: parse_action("コール"))
         assert ev is not None
         assert ev.action == "call"
+
+
+# ── ひらがな数詞パーサ単体テスト ──────────────────────────────────────────────
+
+from audio.speech_normalizer import _hira_to_int, _find_number_candidates
+
+
+class TestHiraToInt:
+    def test_roku_hyaku(self):
+        assert _hira_to_int("ろくひゃく") == 600
+
+    def test_sen_ni_hyaku(self):
+        assert _hira_to_int("せんにひゃく") == 1200
+
+    def test_ni_sen(self):
+        assert _hira_to_int("にせん") == 2000
+
+    def test_go_hyaku(self):
+        assert _hira_to_int("ごひゃく") == 500
+
+    def test_hyaku_alone(self):
+        assert _hira_to_int("ひゃく") == 100
+
+    def test_sen_alone(self):
+        assert _hira_to_int("せん") == 1000
+
+    def test_issen(self):
+        assert _hira_to_int("いっせん") == 1000
+
+    def test_roku_ppyaku(self):
+        assert _hira_to_int("ろっぴゃく") == 600
+
+    def test_hap_pyaku(self):
+        assert _hira_to_int("はっぴゃく") == 800
+
+    def test_san_byaku(self):
+        assert _hira_to_int("さんびゃく") == 300
+
+    def test_go_sen(self):
+        assert _hira_to_int("ごせん") == 5000
+
+    def test_ni_sen_go_hyaku(self):
+        assert _hira_to_int("にせんごひゃく") == 2500
+
+    def test_digit_only_returns_none(self):
+        """単位語なし → amount として不適切なので None。"""
+        assert _hira_to_int("に") is None
+        assert _hira_to_int("ろく") is None
+        assert _hira_to_int("ご") is None
+
+    def test_unknown_char_returns_none(self):
+        assert _hira_to_int("あいうえお") is None
+
+    def test_empty_returns_none(self):
+        assert _hira_to_int("") is None
+
+    def test_sen_ni_hyaku_spaced(self):
+        """スペースが入ると _hira_to_int は None（隣接スパン連結で対処）。"""
+        assert _hira_to_int("せん にひゃく") is None
+
+
+class TestFindNumberCandidates:
+    def test_arabic_digit(self):
+        cands = _find_number_candidates("BET 600")
+        assert any(v == 600 for _, _, v, _ in cands)
+
+    def test_kanji(self):
+        cands = _find_number_candidates("BET 六百")
+        assert any(v == 600 for _, _, v, _ in cands)
+
+    def test_hira_single(self):
+        cands = _find_number_candidates("BET ろくひゃく")
+        assert any(v == 600 for _, _, v, _ in cands)
+
+    def test_hira_adjacent_pair(self):
+        """スペース区切りひらがな → 隣接スパン連結で認識する。"""
+        cands = _find_number_candidates("BET ろく ひゃく")
+        assert any(v == 600 for _, _, v, _ in cands)
+
+    def test_spaced_digits(self):
+        """1 200 → 1200 候補が出ること。"""
+        cands = _find_number_candidates("BET 1 200")
+        assert any(v == 1200 for _, _, v, _ in cands)
+
+    def test_k_unit(self):
+        cands = _find_number_candidates("BET 5K")
+        assert any(v == 5000 for _, _, v, _ in cands)
+
+    def test_comma_digit(self):
+        cands = _find_number_candidates("RAISE 1,200")
+        assert any(v == 1200 for _, _, v, _ in cands)
+
+    def test_no_overlap(self):
+        """六百 と 百 で重複しないこと（六百が採用されるべき）。"""
+        cands = _find_number_candidates("BET 六百")
+        vals = [v for _, _, v, _ in cands]
+        assert 600 in vals
+        assert 100 not in vals  # 百は六百に含まれるのでスキップ
+
+
+# ── 数値正規化統合テスト ──────────────────────────────────────────────────────
+
+class TestNumberNormalization:
+    """SpeechNormalizer.normalize() の amount / amount_candidates テスト。"""
+
+    def test_arabic_bet(self, normalizer):
+        r = normalizer.normalize("ベッド 600")
+        assert r.action == "BET"
+        assert r.amount == 600
+
+    def test_arabic_raise(self, normalizer):
+        r = normalizer.normalize("例 1200")
+        assert r.action == "RAISE"
+        assert r.amount == 1200
+
+    def test_kanji_bet(self, normalizer):
+        r = normalizer.normalize("ベッド 六百")
+        assert r.action == "BET"
+        assert r.amount == 600
+
+    def test_hira_bet(self, normalizer):
+        r = normalizer.normalize("ベッド ろくひゃく")
+        assert r.action == "BET"
+        assert r.amount == 600
+
+    def test_hira_spaced_bet(self, normalizer):
+        r = normalizer.normalize("ベッド ろく ひゃく")
+        assert r.action == "BET"
+        assert r.amount == 600
+
+    def test_hira_senni_raise(self, normalizer):
+        r = normalizer.normalize("例 せんにひゃく")
+        assert r.action == "RAISE"
+        assert r.amount == 1200
+
+    def test_spaced_digit_bet(self, normalizer):
+        r = normalizer.normalize("ベッド 1 200")
+        assert r.action == "BET"
+        assert r.amount == 1200
+
+    def test_k_unit_raise(self, normalizer):
+        r = normalizer.normalize("例 5K")
+        assert r.action == "RAISE"
+        assert r.amount == 5000
+
+    def test_seat_does_not_pollute_amount(self, normalizer):
+        """席番号の数字が amount に混入しないこと。"""
+        r = normalizer.normalize("シート2 例 2000")
+        assert r.action == "RAISE"
+        assert r.amount == 2000
+
+    def test_call_has_no_amount(self, normalizer):
+        r = normalizer.normalize("コール")
+        assert r.action == "CALL"
+        assert r.amount is None
+
+    def test_check_has_no_amount(self, normalizer):
+        r = normalizer.normalize("チェック")
+        assert r.action == "CHECK"
+        assert r.amount is None
+
+    def test_normalized_text_has_arabic(self, normalizer):
+        """normalized_text 内の数字表現がアラビア数字に変換されること。"""
+        r = normalizer.normalize("ベッド 六百")
+        assert "600" in r.normalized_text
+
+    def test_hira_normalized_text(self, normalizer):
+        r = normalizer.normalize("ベッド ろくひゃく")
+        assert "600" in r.normalized_text
+
+    def test_amount_candidates_populated(self, normalizer):
+        r = normalizer.normalize("ベッド 600")
+        assert 600 in r.amount_candidates
+
+    def test_no_number_bet_amount_zero(self, normalizer):
+        """BET で数字が認識されない場合 → amount は None（integartion で review）。"""
+        r = normalizer.normalize("ベッド")
+        assert r.action == "BET"
+        assert r.amount is None
+
+
+class TestParseActionWithAmount:
+    """parse_action() が normalizer の amount を優先すること。"""
+
+    def test_hira_amount_used(self, normalizer):
+        ev = _with_module_normalizer(normalizer, lambda: parse_action("ベッド ろくひゃく"))
+        assert ev is not None
+        assert ev.action == "bet"
+        assert ev.amount == 600
+
+    def test_kanji_amount_used(self, normalizer):
+        ev = _with_module_normalizer(normalizer, lambda: parse_action("例 千二百"))
+        assert ev is not None
+        assert ev.action == "raise"
+        assert ev.amount == 1200
+
+    def test_seat_and_amount(self, normalizer):
+        ev = _with_module_normalizer(normalizer, lambda: parse_action("シート2 レイズ 2000"))
+        assert ev is not None
+        assert ev.action == "raise"
+        assert ev.amount == 2000
+
+    def test_call_amount_zero(self, normalizer):
+        """CALL は amount が取れなくても 0 であること（parse_amount フォールバック）。"""
+        ev = _with_module_normalizer(normalizer, lambda: parse_action("コール"))
+        assert ev is not None
+        assert ev.action == "call"
+        assert ev.amount == 0
