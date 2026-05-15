@@ -14,6 +14,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _make_audio_thread(
+    audio_cfg: dict,
+    audio_q: object,
+    stop_event: threading.Event,
+) -> threading.Thread:
+    """audio.engine 設定に応じて AudioThread または VoskAudioThread を返す。"""
+    engine = audio_cfg.get("engine", "whisper")
+    device_id = audio_cfg.get("device_id", 0)
+    sample_rate = audio_cfg.get("sample_rate", 16000)
+
+    if engine == "vosk":
+        from audio.vosk_recorder import VoskAudioThread
+        thread = VoskAudioThread(
+            audio_queue=audio_q,
+            device_id=device_id,
+            sample_rate=sample_rate,
+            model_path=audio_cfg.get("vosk_model_path", "./models/vosk-model-small-ja-0.22"),
+            grammar=audio_cfg.get("vosk_grammar"),
+            stop_event=stop_event,
+        )
+        logger.info("Audio engine: vosk  model=%r", audio_cfg.get("vosk_model_path"))
+    else:
+        from audio.recorder import AudioThread
+        thread = AudioThread(
+            audio_queue=audio_q,
+            device_id=device_id,
+            sample_rate=sample_rate,
+            model_size=audio_cfg.get("whisper_model", "medium"),
+            language=audio_cfg.get("language", "ja"),
+            stop_event=stop_event,
+        )
+        logger.info("Audio engine: whisper  model=%r", audio_cfg.get("whisper_model", "medium"))
+    return thread
+
+
 def _prompt_session_config() -> dict:
     """CLIで席数・プレイヤー名・スタック・ブラインドを入力する。"""
     print("=== ポーカーハンドロガー セッション設定 ===")
@@ -60,7 +95,6 @@ def run_cli() -> None:
     from core.config import load_config
     from core.event_queue import make_audio_queue
     from core.game_state import GameStateManager, PlayerState
-    from audio.recorder import AudioThread
     from integration.engine import IntegrationThread
     from output.json_writer import JsonWriter
 
@@ -95,14 +129,7 @@ def run_cli() -> None:
     audio_cfg = cfg.get("audio", {})
     cam_cfg = cfg.get("camera", {})
 
-    audio_thread = AudioThread(
-        audio_queue=audio_q,
-        device_id=audio_cfg.get("device_id", 0),
-        sample_rate=audio_cfg.get("sample_rate", 16000),
-        model_size=audio_cfg.get("whisper_model", "medium"),
-        language=audio_cfg.get("language", "ja"),
-        stop_event=stop_event,
-    )
+    audio_thread = _make_audio_thread(audio_cfg, audio_q, stop_event)
     # Phase 2/3: カメラが設定済みの場合のみ CameraThread を起動する
     # Phase 3: camera_q を IntegrationThread に渡すことで ±2秒マッチングが有効になる
     camera_thread = None
@@ -224,7 +251,6 @@ def run_gui() -> None:
     from core.config import load_config
     from core.event_queue import make_audio_queue
     from core.game_state import GameStateManager, PlayerState
-    from audio.recorder import AudioThread
     from integration.engine import IntegrationThread
     from output.json_writer import JsonWriter
     from gui.dashboard import GUIDashboard
@@ -270,14 +296,7 @@ def run_gui() -> None:
         rfid_receiver=None,  # rfid_thread 確定後に設定
     )
 
-    audio_thread = AudioThread(
-        audio_queue=audio_q,
-        device_id=audio_cfg.get("device_id", 0),
-        sample_rate=audio_cfg.get("sample_rate", 16000),
-        model_size=audio_cfg.get("whisper_model", "medium"),
-        language=audio_cfg.get("language", "ja"),
-        stop_event=stop_event,
-    )
+    audio_thread = _make_audio_thread(audio_cfg, audio_q, stop_event)
 
     camera_thread = None
     if cam_cfg.get("roi"):

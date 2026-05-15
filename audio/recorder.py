@@ -32,6 +32,75 @@ def _calc_rms(data: bytes) -> float:
     return math.sqrt(sum(s * s for s in samples) / n)
 
 
+def open_input_stream(
+    pa: object,
+    device_id: Optional[int],
+    sample_rate: int,
+    frames_per_buffer: Optional[int] = None,
+) -> object:
+    """PyAudio 入力ストリームを段階的フォールバックで開く共有ヘルパー。
+
+    試行順:
+      1. 明示デバイス指定 + frames_per_buffer 未指定  (device_id が有効な場合のみ)
+      2. 既定デバイス    + frames_per_buffer 未指定
+      3. 既定デバイス    + frames_per_buffer 指定      (最終フォールバック)
+    """
+    import pyaudio  # noqa: PLC0415
+
+    try:
+        di = pa.get_default_input_device_info()
+        logger.info(
+            "Default input device: id=%d name=%r channels=%d defaultRate=%.0f",
+            di["index"], di["name"], di["maxInputChannels"], di["defaultSampleRate"],
+        )
+    except Exception as e:
+        logger.warning("Could not get default input device info: %s", e)
+
+    if device_id is not None:
+        try:
+            di = pa.get_device_info_by_index(device_id)
+            logger.info(
+                "Requested input device: id=%d name=%r channels=%d defaultRate=%.0f",
+                device_id, di["name"], di["maxInputChannels"], di["defaultSampleRate"],
+            )
+        except Exception as e:
+            logger.warning("Could not get device info for device_id=%d: %s", device_id, e)
+
+    base = dict(format=pyaudio.paInt16, channels=1, rate=sample_rate, input=True)
+    fallback_fpb = frames_per_buffer if frames_per_buffer is not None else _CHUNK_SIZE
+
+    attempts: list[dict] = []
+    if device_id is not None:
+        attempts.append({**base, "input_device_index": device_id})
+    attempts.append(base.copy())
+    attempts.append({**base, "frames_per_buffer": fallback_fpb})
+
+    last_exc: Optional[Exception] = None
+    for i, kwargs in enumerate(attempts, start=1):
+        try:
+            stream = pa.open(**kwargs)
+            logger.info(
+                "pa.open() succeeded: attempt=%d device_id=%s frames_per_buffer=%s",
+                i,
+                kwargs.get("input_device_index", "default"),
+                kwargs.get("frames_per_buffer", "unset"),
+            )
+            return stream
+        except OSError as e:
+            logger.warning(
+                "pa.open() failed: attempt=%d device_id=%s rate=%d channels=1 "
+                "frames_per_buffer=%s error=%s",
+                i,
+                kwargs.get("input_device_index", "default"),
+                sample_rate,
+                kwargs.get("frames_per_buffer", "unset"),
+                e,
+            )
+            last_exc = e
+
+    raise OSError(f"All pa.open() attempts failed. Last error: {last_exc}") from last_exc
+
+
 class AudioThread(threading.Thread):
     """マイク音声を PyAudio でキャプチャし、faster-whisper で認識した AudioEvent を
     audio_queue に送出するデーモンスレッド。
@@ -67,78 +136,7 @@ class AudioThread(threading.Thread):
         self._stop_event.set()
 
     def _open_input_stream(self, pa: object) -> object:
-        """PyAudio 入力ストリームを段階的フォールバックで開く。
-
-        試行順:
-          1. 明示デバイス指定 + frames_per_buffer 未指定  (device_id が有効な場合のみ)
-          2. 既定デバイス    + frames_per_buffer 未指定
-          3. 既定デバイス    + frames_per_buffer 指定      (最終フォールバック)
-        """
-        import pyaudio  # noqa: PLC0415
-
-        # 既定入力デバイス情報をログ
-        try:
-            di = pa.get_default_input_device_info()
-            logger.info(
-                "Default input device: id=%d name=%r channels=%d defaultRate=%.0f",
-                di["index"], di["name"], di["maxInputChannels"], di["defaultSampleRate"],
-            )
-        except Exception as e:
-            logger.warning("Could not get default input device info: %s", e)
-
-        # 明示指定デバイスの情報をログ
-        if self._device_id is not None:
-            try:
-                di = pa.get_device_info_by_index(self._device_id)
-                logger.info(
-                    "Requested input device: id=%d name=%r channels=%d defaultRate=%.0f",
-                    self._device_id, di["name"],
-                    di["maxInputChannels"], di["defaultSampleRate"],
-                )
-            except Exception as e:
-                logger.warning(
-                    "Could not get device info for device_id=%d: %s", self._device_id, e
-                )
-
-        base = dict(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=self._sample_rate,
-            input=True,
-        )
-        fallback_fpb = self._frames_per_buffer if self._frames_per_buffer is not None else _CHUNK_SIZE
-
-        # 試行リストを構築
-        attempts: list[dict] = []
-        if self._device_id is not None:
-            attempts.append({**base, "input_device_index": self._device_id})
-        attempts.append(base.copy())
-        attempts.append({**base, "frames_per_buffer": fallback_fpb})
-
-        last_exc: Optional[Exception] = None
-        for i, kwargs in enumerate(attempts, start=1):
-            try:
-                stream = pa.open(**kwargs)
-                logger.info(
-                    "pa.open() succeeded: attempt=%d device_id=%s frames_per_buffer=%s",
-                    i,
-                    kwargs.get("input_device_index", "default"),
-                    kwargs.get("frames_per_buffer", "unset"),
-                )
-                return stream
-            except OSError as e:
-                logger.warning(
-                    "pa.open() failed: attempt=%d device_id=%s rate=%d channels=1 "
-                    "frames_per_buffer=%s error=%s",
-                    i,
-                    kwargs.get("input_device_index", "default"),
-                    self._sample_rate,
-                    kwargs.get("frames_per_buffer", "unset"),
-                    e,
-                )
-                last_exc = e
-
-        raise OSError(f"All pa.open() attempts failed. Last error: {last_exc}") from last_exc
+        return open_input_stream(pa, self._device_id, self._sample_rate, self._frames_per_buffer)
 
     def run(self) -> None:
         try:

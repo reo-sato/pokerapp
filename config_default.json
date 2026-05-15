@@ -12,11 +12,26 @@
     "motion_threshold": 2000
   },
   "audio": {
+    "engine": "whisper",
     "device_id": 0,
     "sample_rate": 16000,
     "whisper_model": "medium",
     "language": "ja",
-    "initial_prompt": "ベット コール レイズ チェック フォールド オールイン ショーダウン ウィナー ハンド開始"
+    "initial_prompt": "ベット コール レイズ チェック フォールド オールイン ショーダウン ウィナー ハンド開始",
+    "vosk_model_path": "./models/vosk-model-small-ja-0.22",
+    "vosk_grammar": [
+      "フォールド",
+      "コール",
+      "チェック",
+      "ベット",
+      "レイズ",
+      "オールイン",
+      "シート1", "シート2", "シート3", "シート4", "シート5",
+      "シート6", "シート7", "シート8", "シート9",
+      "一番", "二番", "三番", "四番", "五番",
+      "六番", "七番", "八番", "九番",
+      "[unk]"
+    ]
   },
   "rfid": {
     "enabled": false,
