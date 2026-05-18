@@ -398,6 +398,7 @@ def infer_action_distribution(
         confidence=legacy.confidence,
         raw_text=legacy.raw_text,
         normalized_text=legacy.normalized_text,
+        seat=actor_seat,
     )
     hypotheses: list[ActionHypothesis] = [primary]
 
@@ -427,6 +428,7 @@ def infer_action_distribution(
             confidence=0.0,
             raw_text=event.raw_text or "",
             normalized_text="",
+            seat=actor_seat,
         ))
 
     hypotheses.sort(key=lambda h: h.log_likelihood, reverse=True)

@@ -61,6 +61,8 @@ class ActionHypothesis:
     confidence: float = 0.5
     raw_text: str = ""
     normalized_text: str = ""
+    # M3 Beam Engine が WINNER 後方修正で「どの seat が fold したか」を判定するために必要
+    seat: Optional[int] = None
 
 
 @dataclass

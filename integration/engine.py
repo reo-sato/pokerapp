@@ -36,8 +36,10 @@ from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
-from integration.action_inference import BettingState, infer_action
+from integration.action_inference import BettingState, InferredAction, infer_action
 from integration.action_order import advance_button
+from integration.beam_search import BeamEngine
+from integration.observation_model import ActionHypothesis, default_priors
 from output.evidence_log import EvidenceLogWriter
 from output.json_writer import JsonWriter
 
@@ -89,12 +91,14 @@ class IntegrationThread(threading.Thread):
         camera_queue: Optional[EventQueue] = None,
         rfid_queue: Optional[EventQueue] = None,
         on_action: Optional[Callable[[ActionRecord], None]] = None,
+        on_action_revised: Optional[Callable[[ActionRecord], None]] = None,
         on_rfid_card: Optional[Callable[[RFIDEvent], None]] = None,
         stop_event: Optional[threading.Event] = None,
         initial_button_seat: Optional[int] = None,
         sb_amount: Optional[int] = None,
         bb_amount: Optional[int] = None,
         auto_post_blinds: bool = True,
+        beam_K: int = 8,
     ) -> None:
         """
         Args:
@@ -113,6 +117,7 @@ class IntegrationThread(threading.Thread):
         self._game_state = game_state
         self._json_writer = json_writer
         self._on_action = on_action
+        self._on_action_revised = on_action_revised
         self._on_rfid_card = on_rfid_card
         self._stop_event = stop_event or threading.Event()
 
@@ -141,6 +146,15 @@ class IntegrationThread(threading.Thread):
             session_id=self._json_writer._session_id,     # noqa: SLF001
         )
 
+        # ベイズ層 (v6.0+ M3) 用: Beam Search エンジン。K=8 で並行宇宙を保持し、
+        # WINNER 到着時に後方修正で過去 ActionRecord を遡及書き換えできる。
+        self._beam = BeamEngine(
+            K=beam_K,
+            prior=default_priors(),
+            enable_resample=False,                         # M3: 決定論的 Beam のみ
+            sink=self._beam_sink_to_evidence_log,
+        )
+
         # ボタン管理
         self._auto_post_blinds = auto_post_blinds
         self._sb_amount = sb_amount if sb_amount is not None else getattr(game_state, "_sb", 0)
@@ -150,6 +164,23 @@ class IntegrationThread(threading.Thread):
 
     def stop(self) -> None:
         self._stop_event.set()
+
+    # ── Beam Search → evidence_log への hook ───────────────────────────────
+
+    def _beam_sink_to_evidence_log(self, evidence, top3: list[dict]) -> None:
+        """BeamEngine が 1 step ごとに呼ぶ。直前の audio event に top3 粒子のスナップショットを付与する。
+
+        ここでは evidence_log への append-only 出力に top3 を載せた "beam_snapshot" 行を書く。
+        """
+        try:
+            self._evidence_log._write_line({                                # noqa: SLF001
+                "ts": evidence.t_end,
+                "kind": "beam_snapshot",
+                "evidence_kind": evidence.kind,
+                "top_particles": top3,
+            })
+        except Exception:
+            logger.exception("beam sink failed")
 
     # ――― state-aware API (GUI / CLI から呼び出し) ―――
 
@@ -374,6 +405,14 @@ class IntegrationThread(threading.Thread):
 
         inferred = infer_action(event, self._betting_state, seat)
 
+        # M3: Beam Engine も同じ AudioEvent で更新する。
+        # 既存の inferred 出力は legacy MAP のままで動作不変、
+        # beam の sequence MAP は _finalize_hand での WINNER 後方修正に使う。
+        try:
+            self._beam.step_audio(event, seat)
+        except Exception:
+            logger.exception("BeamEngine.step_audio failed")
+
         if inferred.action is None:
             needs_review = True
             logged_action = event.action or "amount_only"
@@ -479,6 +518,9 @@ class IntegrationThread(threading.Thread):
         if self._auto_post_blinds and self._betting_state.is_initialized:
             self._post_blinds_to_records()
 
+        # M3: Beam Engine を最新 BettingState で再初期化 (SB/BB post 後の状態を base にする)
+        self._beam.reset_with_state(self._betting_state)
+
     def _resolve_button_seat(self) -> Optional[int]:
         """次ハンドの button 席を決定する。
 
@@ -557,8 +599,56 @@ class IntegrationThread(threading.Thread):
                 except Exception:
                     logger.exception("on_action callback raised")
 
+    def _reconcile_with_beam(self, winner_seat: int) -> None:
+        """WINNER 到着時に beam の sequence MAP で _current_actions を遡及修正する (M3)。
+
+        - SB_POST / BB_POST は対象外 (auto-post なので不変)
+        - 差分があった ActionRecord は in-place mutate + needs_review=True
+        - ``on_action_revised`` コールバックを発火
+        - 完全 replay (pot_after/stack_after 再計算) は M3 初版ではスコープ外
+        """
+        try:
+            revised = self._beam.apply_winner_filter(winner_seat, final_pot=None)
+        except Exception:
+            logger.exception("BeamEngine.apply_winner_filter failed")
+            return
+        if not revised:
+            return
+
+        # SB/BB post を除いた player action だけを reconcile 対象にする
+        player_actions = [
+            r for r in self._current_actions
+            if r.action not in ("SB_POST", "BB_POST")
+        ]
+
+        for record, hyp in zip(player_actions, revised):
+            if hyp.action is None:
+                continue
+            if hyp.action == record.action and hyp.amount == record.amount:
+                continue
+            old_action, old_amount = record.action, record.amount
+            record.action = hyp.action
+            record.amount = hyp.amount
+            record.needs_review = True
+            logger.info(
+                "WINNER backward fix: hand=%d seat=%s %s %s -> %s %s",
+                record.hand_id, record.seat,
+                old_action, old_amount, record.action, record.amount,
+            )
+            if self._on_action_revised is not None:
+                try:
+                    self._on_action_revised(record)
+                except Exception:
+                    logger.exception("on_action_revised callback raised")
+
     def _finalize_hand(self, winner_seat: int) -> None:
         gs = self._game_state
+
+        # M3: WINNER 到着 → BeamEngine の sequence MAP を再フィルタし
+        # _current_actions を遡及修正 (in-place mutate)。gs.end_hand() の前に走らせる
+        # ので、後段の HandSummary は修正後の値を読む。
+        self._reconcile_with_beam(winner_seat)
+
         gs.end_hand(winner_seat)
 
         stacks_end = gs.get_stacks()
