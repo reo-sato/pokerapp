@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import math
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from core.constants import (
@@ -14,7 +16,7 @@ from core.constants import (
     KANJI_UNIT,
     WHISPER_PROMPT_JA,
 )
-from core.events import AudioEvent
+from core.events import AudioEvent, ASRAlternative, WordTiming
 from audio.speech_normalizer import normalize as _normalize_speech
 
 logger = logging.getLogger(__name__)
@@ -266,6 +268,20 @@ def parse_action(text: str) -> Optional[AudioEvent]:
     )
 
 
+@dataclass
+class TranscriptionResult:
+    """WhisperTranscriber.transcribe() の戻り値。
+
+    時刻フィールドは「チャンク先頭を 0 とする相対秒」(faster-whisper の生出力をそのまま採用)。
+    呼び出し側で chunk_start_time を加算して絶対時刻に変換する。
+    """
+
+    text: str
+    duration: float                                              # 入力チャンクの長さ (秒)
+    alternatives: list[ASRAlternative] = field(default_factory=list)  # N-best (Whisper は通常 1 件)
+    word_timestamps: list[WordTiming] = field(default_factory=list)   # top-1 仮説の単語列 (相対秒)
+
+
 class WhisperTranscriber:
     """faster-whisper を使ってマイク音声をテキストに変換するクラス。"""
 
@@ -282,28 +298,76 @@ class WhisperTranscriber:
             )
             self._model = None
 
-    def transcribe(self, audio_bytes: bytes) -> str:
-        """PCM16 音声バイト列をテキストに変換して返す。
-        変換失敗時は空文字列を返す（クラッシュしない）。
+    def transcribe(self, audio_bytes: bytes) -> TranscriptionResult:
+        """PCM16 音声バイト列を TranscriptionResult に変換して返す。
+        変換失敗時は空の TranscriptionResult を返す（クラッシュしない）。
 
         入力は 16kHz モノラル PCM16 固定を前提とする。
         faster-whisper の transcribe() は numpy 配列の長さから 16kHz を仮定するため、
         sample_rate は引数として受け取らない。
         """
-        if self._model is None:
-            return ""
         try:
             import numpy as np
 
             audio_array = (
                 np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             )
-            segments, _ = self._model.transcribe(
+            duration = float(audio_array.shape[0]) / 16000.0
+        except Exception:
+            logger.exception("Whisper audio decode failed")
+            return TranscriptionResult(text="", duration=0.0)
+
+        if self._model is None:
+            return TranscriptionResult(text="", duration=duration)
+
+        try:
+            segments_iter, _info = self._model.transcribe(
                 audio_array,
                 language=self._language,
                 initial_prompt=WHISPER_PROMPT_JA,
+                word_timestamps=True,
+                beam_size=5,
+                best_of=5,
             )
-            return " ".join(seg.text.strip() for seg in segments)
+            segments = list(segments_iter)
         except Exception:
             logger.exception("Whisper transcription failed")
-            return ""
+            return TranscriptionResult(text="", duration=duration)
+
+        if not segments:
+            return TranscriptionResult(text="", duration=duration)
+
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+
+        words: list[WordTiming] = []
+        for seg in segments:
+            seg_words = getattr(seg, "words", None) or []
+            for w in seg_words:
+                try:
+                    words.append(WordTiming(
+                        word=str(w.word),
+                        start=float(w.start),
+                        end=float(w.end),
+                        confidence=float(getattr(w, "probability", 0.0) or 0.0),
+                    ))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+
+        # faster-whisper は top-1 のみを返すので alternatives は 1 件。
+        # avg_logprob を [0,1] への proxy として exp で写像する。
+        logprobs = [getattr(seg, "avg_logprob", None) for seg in segments]
+        logprobs = [lp for lp in logprobs if lp is not None]
+        if logprobs:
+            avg_lp = sum(logprobs) / len(logprobs)
+            confidence = float(math.exp(avg_lp)) if avg_lp > -10.0 else 0.0
+            confidence = max(0.0, min(1.0, confidence))
+        else:
+            confidence = 0.0
+
+        alternatives = [ASRAlternative(text=text, confidence=confidence, words=list(words))]
+        return TranscriptionResult(
+            text=text,
+            duration=duration,
+            alternatives=alternatives,
+            word_timestamps=words,
+        )

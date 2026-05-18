@@ -18,6 +18,7 @@ class RFIDEvent:
     timestamp: float             # time.time()
     raw_tag_id: str              # デバッグ用の生タグ ID
     board_index: Optional[int] = None  # role="board" 時のボード位置 (1=flop1…5=river)
+    t_end: Optional[float] = None      # ベイズ層 (v6.0+) 用: カード保持区間の終端絶対時刻 (fold-on-release)
 
 
 @dataclass
@@ -30,6 +31,25 @@ class CameraEvent:
 
 
 @dataclass
+class WordTiming:
+    """ASR が出力する単語単位の時刻情報。時刻は絶対時刻 (unix time) で保持する。"""
+
+    word: str
+    start: float        # 単語発話開始の絶対時刻
+    end: float          # 単語発話終了の絶対時刻
+    confidence: float   # ASR の信頼度 [0, 1]
+
+
+@dataclass
+class ASRAlternative:
+    """ASR の N-best 候補 1 件。"""
+
+    text: str
+    confidence: float
+    words: list[WordTiming] = field(default_factory=list)
+
+
+@dataclass
 class AudioEvent:
     """音声認識スレッドが検出したアクションイベント。"""
 
@@ -37,3 +57,7 @@ class AudioEvent:
     amount: int  # 金額なしの場合は 0
     timestamp: float  # time.time()
     raw_text: str
+    # ベイズ推定レイヤ (v6.0+ M1) 向け追加情報。default 付きで既存 positional 構築を破壊しない
+    alternatives: list[ASRAlternative] = field(default_factory=list)  # ASR の N-best (Vosk は >=1、Whisper は通常 1)
+    word_timestamps: list[WordTiming] = field(default_factory=list)   # top-1 仮説の単語列 (絶対時刻)
+    t_end: Optional[float] = None                                      # 発話終了の絶対時刻 (φ_time の入力)

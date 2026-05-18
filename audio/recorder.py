@@ -8,6 +8,7 @@ from typing import Optional
 
 from audio.recognizer import WhisperTranscriber, parse_action
 from core.event_queue import EventQueue
+from core.events import ASRAlternative, WordTiming
 
 logger = logging.getLogger(__name__)
 
@@ -218,13 +219,39 @@ class AudioThread(threading.Thread):
     def _process_chunk(self, audio_bytes: bytes, transcriber: WhisperTranscriber) -> None:
         """音声チャンクをテキストに変換し、アクションを検出して queue に送出する。"""
         try:
-            text = transcriber.transcribe(audio_bytes)
-            if not text:
+            chunk_end_wall = time.time()
+            result = transcriber.transcribe(audio_bytes)
+            if not result.text:
                 return
-            logger.debug("Transcribed: %r", text)
-            event = parse_action(text)
-            if event is not None:
-                logger.info("AudioEvent: action=%s amount=%d", event.action, event.amount)
-                self._audio_queue.put(event)
+            logger.debug("Transcribed: %r", result.text)
+            event = parse_action(result.text)
+            if event is None:
+                return
+
+            # ベイズ層 (v6.0+) 向け: 相対秒を絶対時刻に変換して詰める。
+            # chunk_start_wall は「現在 (転写完了) - チャンク長」で近似。
+            chunk_start_wall = chunk_end_wall - max(result.duration, 0.0)
+
+            def _abs(words: list[WordTiming]) -> list[WordTiming]:
+                return [
+                    WordTiming(
+                        word=w.word,
+                        start=chunk_start_wall + w.start,
+                        end=chunk_start_wall + w.end,
+                        confidence=w.confidence,
+                    )
+                    for w in words
+                ]
+
+            event.word_timestamps = _abs(result.word_timestamps)
+            event.alternatives = [
+                ASRAlternative(text=a.text, confidence=a.confidence, words=_abs(a.words))
+                for a in result.alternatives
+            ]
+            event.t_end = (
+                max((w.end for w in event.word_timestamps), default=chunk_end_wall)
+            )
+            logger.info("AudioEvent: action=%s amount=%d", event.action, event.amount)
+            self._audio_queue.put(event)
         except Exception:
             logger.exception("Error in _process_chunk (chunk size=%d bytes)", len(audio_bytes))

@@ -38,6 +38,7 @@ from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
 from integration.action_inference import BettingState, infer_action
 from integration.action_order import advance_button
+from output.evidence_log import EvidenceLogWriter
 from output.json_writer import JsonWriter
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,13 @@ class IntegrationThread(threading.Thread):
         # ベッティング状態（アクション推定・妥当性検証に使用）
         self._betting_state = BettingState()
 
+        # ベイズ層 (v6.0+ M1) 用: raw 観測イベントを JSONL に常時書き出すロガー。
+        # session JSON と完全分離。推定ロジックには影響しない。
+        self._evidence_log = EvidenceLogWriter(
+            log_dir=self._json_writer._log_dir,           # noqa: SLF001
+            session_id=self._json_writer._session_id,     # noqa: SLF001
+        )
+
         # ボタン管理
         self._auto_post_blinds = auto_post_blinds
         self._sb_amount = sb_amount if sb_amount is not None else getattr(game_state, "_sb", 0)
@@ -174,6 +182,11 @@ class IntegrationThread(threading.Thread):
 
             self._expire_buffers()
 
+        # 終了処理: evidence log のファイルハンドルを閉じる
+        try:
+            self._evidence_log.close()
+        except Exception:
+            logger.exception("EvidenceLogWriter.close() raised")
         logger.info("IntegrationThread stopped")
 
     # ――― バッファ管理 ―――
@@ -183,9 +196,12 @@ class IntegrationThread(threading.Thread):
             return
         while True:
             try:
-                self._camera_buffer.append(self._camera_queue.get_nowait())
+                ev = self._camera_queue.get_nowait()
             except queue.Empty:
                 break
+            # M1: raw 観測ログ
+            self._evidence_log.write_camera(ev)
+            self._camera_buffer.append(ev)
 
     def _drain_rfid_queue(self) -> None:
         if self._rfid_queue is None:
@@ -199,6 +215,8 @@ class IntegrationThread(threading.Thread):
 
     def _process_rfid_event(self, ev: RFIDEvent) -> None:
         """受信した RFIDEvent を役割に応じて振り分ける。"""
+        # M1: raw 観測ログ。役割振り分けの前に書き込む。
+        self._evidence_log.write_rfid(ev)
         if ev.role == "board":
             self._handle_board_rfid(ev)
         else:
@@ -323,6 +341,9 @@ class IntegrationThread(threading.Thread):
     # ――― イベントハンドラ ―――
 
     def _handle_audio_event(self, event: AudioEvent) -> None:
+        # M1: raw 観測ログ。推定ロジックの前に常に書き込む (例外でも残す)。
+        self._evidence_log.write_audio(event)
+
         action = event.action
         gs = self._game_state
 

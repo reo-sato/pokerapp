@@ -21,8 +21,11 @@ import struct
 import threading
 from typing import Optional
 
+import time
+
 from audio.recorder import _CHUNK_SIZE, open_input_stream
 from audio.recognizer import parse_action
+from core.events import ASRAlternative, WordTiming
 from core.event_queue import EventQueue
 
 logger = logging.getLogger(__name__)
@@ -159,12 +162,44 @@ class VoskAudioThread(threading.Thread):
                             continue
 
                 if recognizer.AcceptWaveform(data):
+                    now_wall = time.time()
                     result = json.loads(recognizer.Result())
                     text = result.get("text", "").strip()
                     logger.debug("Vosk final: %r", text)
                     if text:
                         event = parse_action(text)
                         if event is not None:
+                            # ベイズ層 (v6.0+) 向け: word-level timestamp と t_end を絶対時刻で詰める。
+                            # Vosk の start/end は utterance 開始からの相対秒。
+                            # 「now_wall = 最後の単語の絶対 end」と近似してオフセットを算出する。
+                            word_results = result.get("result", []) or []
+                            last_rel_end = 0.0
+                            for w in word_results:
+                                try:
+                                    last_rel_end = max(last_rel_end, float(w.get("end", 0.0)))
+                                except (TypeError, ValueError):
+                                    continue
+                            utt_start_wall = now_wall - last_rel_end
+                            words: list[WordTiming] = []
+                            for w in word_results:
+                                try:
+                                    words.append(WordTiming(
+                                        word=str(w.get("word", "")),
+                                        start=utt_start_wall + float(w.get("start", 0.0)),
+                                        end=utt_start_wall + float(w.get("end", 0.0)),
+                                        confidence=float(w.get("conf", 0.0)),
+                                    ))
+                                except (TypeError, ValueError):
+                                    continue
+                            avg_conf = (
+                                sum(w.confidence for w in words) / len(words)
+                                if words else 0.0
+                            )
+                            event.word_timestamps = words
+                            event.alternatives = [ASRAlternative(
+                                text=text, confidence=avg_conf, words=list(words),
+                            )]
+                            event.t_end = words[-1].end if words else now_wall
                             logger.info(
                                 "VoskAudioEvent: action=%s amount=%d text=%r",
                                 event.action, event.amount, text,
