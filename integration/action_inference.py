@@ -336,15 +336,17 @@ def _validate_provided_action(
     )
 
 
-def infer_action(
+def _infer_action_core(
     event: AudioEvent,
     state: BettingState,
     actor_seat: Optional[int],
 ) -> InferredAction:
-    """AudioEvent とゲームステートからアクションを推定・検証して返す。
+    """AudioEvent から既存ロジックで InferredAction を計算する (decision-tree primary)。
 
     event.action == "amount_only" の場合: BettingState から BET/CALL/RAISE を推定。
     event.action が通常のアクション: ゲームステートとの整合性を検証。
+
+    M2 で `infer_action()` から切り出した「primary 仮説生成器」。後方互換のため挙動は不変。
     """
     raw_text = event.raw_text or ""
     normalized_text = raw_text
@@ -355,4 +357,102 @@ def infer_action(
 
     return _validate_provided_action(
         event.action, amount, state, actor_seat, raw_text, normalized_text,
+    )
+
+
+def infer_action_distribution(
+    event: AudioEvent,
+    state: BettingState,
+    actor_seat: Optional[int],
+    prior: Optional["PriorParams"] = None,
+) -> list["ActionHypothesis"]:
+    """1 観測 → アクション仮説リストを返す (v6.0+ M2)。
+
+    後方互換規約:
+      max(result, key=h.log_likelihood) は ``_infer_action_core()`` の出力と
+      (action, amount, needs_review, reason) が一致する。
+
+    実装:
+      1. ``_infer_action_core()`` で primary 仮説を計算 (legacy)
+      2. primary を log_likelihood=0.0 で先頭に置く
+      3. legal_actions に該当する他アクションを Bayesian 観測モデルで評価し、
+         log_likelihood < 0 で追加 (primary が必ず top-1)
+    """
+    # 遅延 import: observation_model は本モジュールを TYPE_CHECKING で参照しているため
+    from integration.observation_model import (
+        ActionHypothesis,
+        compute_log_likelihood,
+        default_amount_for,
+        default_priors,
+        evidence_from_audio,
+        is_legal,
+    )
+
+    legacy = _infer_action_core(event, state, actor_seat)
+    primary = ActionHypothesis(
+        action=legacy.action,
+        amount=legacy.amount,
+        log_likelihood=0.0,
+        reason=legacy.reason,
+        needs_review=legacy.needs_review,
+        confidence=legacy.confidence,
+        raw_text=legacy.raw_text,
+        normalized_text=legacy.normalized_text,
+    )
+    hypotheses: list[ActionHypothesis] = [primary]
+
+    if prior is None:
+        prior = default_priors()
+
+    evidence = evidence_from_audio(event)
+    legacy_action = (legacy.action or "").lower()
+
+    for alt_action in ("fold", "call", "check", "bet", "raise"):
+        if alt_action == legacy_action:
+            continue
+        alt_amount = default_amount_for(alt_action, state)
+        if not is_legal(alt_action, alt_amount, state, actor_seat):
+            continue
+        log_lik = compute_log_likelihood(
+            evidence, alt_action, alt_amount, state, actor_seat, prior,
+        )
+        # primary の log_likelihood=0 を超えないよう負側にクランプ
+        log_lik = min(log_lik, -1e-6)
+        hypotheses.append(ActionHypothesis(
+            action=alt_action,
+            amount=alt_amount,
+            log_likelihood=log_lik,
+            reason=f"alternative_{alt_action}",
+            needs_review=False,
+            confidence=0.0,
+            raw_text=event.raw_text or "",
+            normalized_text="",
+        ))
+
+    hypotheses.sort(key=lambda h: h.log_likelihood, reverse=True)
+    return hypotheses
+
+
+def infer_action(
+    event: AudioEvent,
+    state: BettingState,
+    actor_seat: Optional[int],
+) -> InferredAction:
+    """AudioEvent → InferredAction (既存 API)。
+
+    M2 から ``infer_action_distribution()`` を呼び top-1 を返す薄いアダプタ。
+    primary 仮説は ``_infer_action_core()`` の結果と一致するよう構築されるので
+    既存挙動と完全互換 (243 テスト維持の必要十分条件)。
+    """
+    hypotheses = infer_action_distribution(event, state, actor_seat)
+    top = hypotheses[0]
+    return InferredAction(
+        seat=actor_seat,
+        action=top.action,
+        amount=top.amount,
+        confidence=top.confidence,
+        needs_review=top.needs_review,
+        reason=top.reason,
+        raw_text=top.raw_text,
+        normalized_text=top.normalized_text,
     )
