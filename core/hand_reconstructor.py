@@ -276,6 +276,13 @@ class HandReconstructor:
         # Phase 4-B: raw-only bootstrap で blinds 額が必要。None なら raw bootstrap 失敗。
         self._default_sb = int(default_sb) if default_sb is not None else None
         self._default_bb = int(default_bb) if default_bb is not None else None
+        # Phase 5-B: 前 hand の button seat (raw / online_summary / initial_state のいずれの
+        # 経路で bootstrap した hand でも、bs.button_seat を記録しておく)。
+        # 次 hand の raw bootstrap で「前 hand の左隣」heuristic に使う。
+        # 注意: これは truth ではなく next-hand 推定の seed。online で button が手動
+        # 補正された場合は次 hand で誤推定する可能性がある (= 後段 _compute_diff で
+        # actions ズレが現れて needs_review が立つ前提)。
+        self._prev_button_seat: Optional[int] = None
 
     # ──────────────────────────────────────────────────────────────────────
     # public API
@@ -319,6 +326,18 @@ class HandReconstructor:
                 bootstrap_source=bootstrap_source,
                 bootstrap_meta=bootstrap_meta,
             )
+
+        # Phase 5-B: 次 hand の raw bootstrap で使う prev_button を更新する。
+        # 経路は問わない (initial_state / raw / online_summary のいずれでも bs.button_seat
+        # は確定している)。実際の button は truth ではないので「次 hand 推定の seed」
+        # として扱うのみ。online 側で button が手動補正された場合に推定が外れることは
+        # 想定内 (= 後段の _compute_diff で actions ズレが現れる前提)。
+        try:
+            prev_btn = getattr(bs, "button_seat", None)
+            if prev_btn is not None:
+                self._prev_button_seat = int(prev_btn)
+        except (TypeError, ValueError):
+            pass
 
         # 遅延 import: integration 層は CLI 起動時に重い依存を引かないため
         from integration.beam_search import BeamEngine
@@ -553,41 +572,38 @@ class HandReconstructor:
         self,
         events_sorted: "list[EvidenceRecord]",
     ) -> "Optional[tuple[BettingState, dict[str, Any]]]":
-        """Phase 4-B: raw EvidenceRecord 列から BettingState を起こす。
+        """Phase 4-B/5-B: raw EvidenceRecord 列から BettingState を起こす。
 
-        **Phase 4-B のスコープ (signal source)**:
-          この実装は **RFID-centric**。active seats は ``RFID role="seat"`` 観測
-          のみから推定する。AudioEvent は seat 情報を持たないため、現時点で
-          bootstrap signal にはなっていない (Phase 4-C 以降の signal 強化候補:
-          音声 raw_text から「シート N が fold」等の自然言語 seat 抽出、camera
-          dependency など)。
+        **Phase 5-B での signal source 拡張** (Phase 4-B は RFID のみだった):
+          - **primary signal (gate)**: ``RFID role="seat"`` で hole card を観測した
+            seat。**2 seat 未満なら raw bootstrap は失敗** (= conservative gate)。
+            Audio で seat ヒントだけ拾えても hole card 不在なら raw は諦める。
+          - **補助 signal**: Audio 由来の seat ヒント (``audio_seat_hints``)。
+            - ``AudioEvent.seat`` が明示的に int で入っていれば採用 (将来の event
+              拡張に備えた前向き互換)
+            - 加えて ``AudioEvent.raw_text`` から ``_extract_seat_from_text``
+              (``シートN`` / ``seatN``) で抽出した seat も採用
+            これらは **active_seats を増やす方向にのみ** 使う (RFID で 2 seat 観測
+            済みの状況で「もう 1 seat も参加していた」を補完)。
+          - **prev_button 補助**: 前 hand で raw / online_summary / initial_state
+            のいずれの経路で立ち上がった ``bs.button_seat`` を覚えておき、現 hand の
+            active set にその seat が含まれていれば「左隣の seat」を button として
+            採用する。これがライブポーカーの実際の button 進行ルール (左回り) に
+            一致する。``bootstrap_meta["button_inferred_from_prev"]`` で消費側に
+            「prev 由来か / min(active_seats) fallback か」を伝える。
+          - blinds amount: ``default_sb`` / ``default_bb`` 経由のまま (Phase 4-B
+            互換)。**どちらかが None なら raw bootstrap 失敗**。
+          - blinds 変更 TODO: session 中に blinds level が上がるケースは現状未対応。
+            ``bootstrap_meta["sb_amount"]`` / ``["bb_amount"]`` に値を埋めてフックを
+            残しておくので、Phase 5-C 以降で「actual blinds と meta を突き合わせて
+            mismatch を検出」する経路が作れる。
 
-        **戦略 (conservative)**:
-          - active seats: ``RFID(role="seat", card=非空)`` を観測した seat 集合。
-            音声 (AudioEvent) には seat 情報が無いので、現状 RFID 観測が唯一の
-            強 signal。**2 seat 未満なら bootstrap 失敗**。
-          - blinds amount: コンストラクタの ``default_sb`` / ``default_bb`` から取る
-            (audio に SB_POST/BB_POST の seat 情報は無いため raw-only では推定不可)。
-            **どちらかが None なら bootstrap 失敗**。
-          - button_seat: ``active_seats[0]`` (= 最小 seat 番号) を **deterministic
-            seed** として採用する。これは「最も button らしい seat」を確率的に
-            推定したものではなく、``BettingState.start_hand`` を起こすために
-            確定的に選ぶ値。実際の button が誰だったかは raw からは確定不能なので、
-            ``bootstrap_meta["button_inferred"]=True`` で消費側に "truth claim では
-            ない" 旨を伝える。
-          - SB/BB seat は ``BettingState.start_hand`` 側のルール (HU: BTN=SB、
-            non-HU: SB = BTN の左隣) に従って導出される。
-
-        **``bootstrap_meta["confidence"]`` の意味**:
-          固定値 ``0.5`` を返すが、これは **fixed heuristic confidence** であって
-          calibrated probability ではない (= モデルが計算した posterior でも
-          Brier-calibrated な値でもない)。「この heuristic は truth ではない」
-          という印 (= 0.5 weight で扱って下さいというメッセージ) に過ぎない。
-          signal 強度に応じた動的 confidence は Phase 4-C+ の課題。
+        **依然 conservative**: Phase 4-B で raw が失敗したケース (RFID 0/1 seat、
+        default blinds 未設定) は Phase 5-B でも raw 失敗のまま (=
+        ``online_summary`` fallback or skipped に倒す)。
 
         Returns:
-            ``(BettingState, meta)`` または ``None`` (失敗時)。``meta`` は
-            ``bootstrap_meta`` 用の診断 dict。
+            ``(BettingState, meta)`` または ``None`` (失敗時)。
         """
         from integration.action_inference import BettingState
         from integration.action_order import compute_blinds
@@ -598,21 +614,46 @@ class HandReconstructor:
             return None
 
         seats_with_hole_cards: set[int] = set()
+        seats_from_audio: set[int] = set()
         for rec in events_sorted:
-            if rec.kind != "rfid" or not isinstance(rec.event, RFIDEvent):
+            if rec.kind == "rfid" and isinstance(rec.event, RFIDEvent):
+                ev_rfid: RFIDEvent = rec.event
+                if ev_rfid.role == "seat" and ev_rfid.seat is not None and ev_rfid.card:
+                    seats_with_hole_cards.add(int(ev_rfid.seat))
                 continue
-            ev: RFIDEvent = rec.event
-            if ev.role == "seat" and ev.seat is not None and ev.card:
-                seats_with_hole_cards.add(int(ev.seat))
+            if rec.kind == "audio" and isinstance(rec.event, AudioEvent):
+                ev_audio: AudioEvent = rec.event
+                # 明示的な event.seat (将来の AudioEvent 拡張に備えた前向き互換)
+                explicit_seat = getattr(ev_audio, "seat", None)
+                if isinstance(explicit_seat, int):
+                    seats_from_audio.add(explicit_seat)
+                # raw_text から「シート N」 / 「seat N」 を抽出
+                text_seat = _extract_seat_from_text(getattr(ev_audio, "raw_text", "") or "")
+                if text_seat is not None:
+                    seats_from_audio.add(int(text_seat))
 
+        # Phase 5-B の conservative gate: RFID は依然 primary signal。
+        # Audio ヒントだけで bootstrap には踏み込まない (= 誤検知より skip を優先)。
         if len(seats_with_hole_cards) < 2:
             return None
 
-        active_seats = sorted(seats_with_hole_cards)
-        # button は deterministic seed: 「最も button らしい」推定ではなく、
-        # BettingState.start_hand を起こすために確定的に選ぶ値。実際の button は
-        # raw からは確定不能 (bootstrap_meta["button_inferred"]=True でマーク)。
-        button_seat = active_seats[0]
+        # active_seats = RFID ∪ Audio (Phase 5-B 拡張)。
+        # 音声で言及されたが RFID 未観測の seat も参加とみなす (= active を増やす方向)。
+        active_seats = sorted(seats_with_hole_cards | seats_from_audio)
+
+        # button heuristic:
+        #   - prev_button が active set に含まれていれば「ring 上で左隣 (= 次 index)」
+        #     を採用 (button は左回りで進む、というライブの基本ルールに沿う)
+        #   - そうでなければ最小 seat 番号 (Phase 4-B 互換、deterministic seed)
+        button_inferred_from_prev = False
+        prev = self._prev_button_seat
+        if prev is not None and prev in active_seats:
+            idx = active_seats.index(int(prev))
+            button_seat = active_seats[(idx + 1) % len(active_seats)]
+            button_inferred_from_prev = True
+        else:
+            button_seat = active_seats[0]
+
         sb_seat, bb_seat = compute_blinds(button_seat, active_seats)
 
         bs = BettingState()
@@ -633,10 +674,22 @@ class HandReconstructor:
             "sb_seat": int(sb_seat),
             "bb_seat": int(bb_seat),
             "button_seat": int(button_seat),
-            "button_inferred": True,    # truth 推定ではなく deterministic seed である印
+            # truth claim ではない (deterministic seed or prev 由来) 旨の印。
+            # Phase 4-B から維持。
+            "button_inferred": True,
+            # Phase 5-B: prev_button から左隣を採用した場合のみ True。
+            # False のときは min(active_seats) fallback (Phase 4-B と同等)。
+            "button_inferred_from_prev": button_inferred_from_prev,
+            "prev_button": int(prev) if prev is not None else None,
             "blinds_inferred": True,    # default_sb/bb 由来 (raw からは推定不可)
+            # Phase 5-B TODO フック: blinds level 変更検出のため amount を残す。
+            "sb_amount": int(self._default_sb),
+            "bb_amount": int(self._default_bb),
             "signals": {
                 "rfid_seat_observations": sorted(int(s) for s in seats_with_hole_cards),
+                # Phase 5-B: audio raw_text から抽出した seat 集合 (補助 signal)。
+                # 空 list なら "audio から seat ヒントは得られなかった" の意。
+                "audio_seat_hints": sorted(int(s) for s in seats_from_audio),
             },
             # `confidence` は fixed heuristic confidence。raw bootstrap が truth では
             # ないことの印 (= 0.5 weight で扱って下さいというメッセージ) であって、

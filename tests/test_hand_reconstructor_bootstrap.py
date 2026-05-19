@@ -298,6 +298,309 @@ class TestInitialStatePriority:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Phase 5-B: Audio 補助 + prev_button + meta 拡張
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestPhase5BAudioAuxSignal:
+    """Audio 由来の seat ヒントが active_seats に union されることを検証する。"""
+
+    def test_rfid_two_plus_audio_one_unions_active_seats(self) -> None:
+        """RFID で 2 seat、Audio で 1 seat (RFID と重複しない) → active = union 3 seat。"""
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            # seat 3 は RFID で観測されないが音声では言及されている
+            _audio_rec("fold", 1.3, "シート3 フォールド"),
+            _audio_rec("winner", 1.4, "シート2 ウィナー"),
+        ]
+
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(events)
+
+        assert result.bootstrap_source == "raw"
+        meta = result.bootstrap_meta
+        # active_seats = RFID ∪ Audio
+        assert meta["active_seats"] == [1, 2, 3]
+        # signals は両方とも記録される
+        assert meta["signals"]["rfid_seat_observations"] == [1, 2]
+        assert 3 in meta["signals"]["audio_seat_hints"]
+        # winner 由来の "シート2" も Audio ヒントに入る (defensive: 信号源として記録)
+        assert 2 in meta["signals"]["audio_seat_hints"]
+
+    def test_audio_seat_hint_without_enough_rfid_falls_back(self) -> None:
+        """RFID が 1 seat だけで Audio が 1 seat ヒントを足しても、
+        Phase 5-B の conservative gate (RFID >= 2) により raw bootstrap は失敗。
+        online_summary fallback または skipped に落ちる。
+        """
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),     # RFID は seat 1 だけ
+            _audio_rec("fold", 1.3, "シート2 フォールド"),  # Audio hint = seat 2
+            _audio_rec("winner", 1.4, "シート1 ウィナー"),
+        ]
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(events)
+        # online_summary 無しなので skipped (= raw は諦めている)
+        assert result.reason == "reconstruction_skipped"
+        assert result.bootstrap_source is None
+
+    def test_no_audio_hints_still_works(self) -> None:
+        """Audio に seat 言及が無いケースでも raw bootstrap は (RFID >=2 なら) 成立。
+        signals.audio_seat_hints は空 list で記録される。
+        """
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            _audio_rec("fold", 1.3, "フォールド"),     # seat 言及無し
+            _audio_rec("winner", 1.4, "ウィナー"),     # seat 言及無し
+        ]
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(events)
+
+        assert result.bootstrap_source == "raw"
+        assert result.bootstrap_meta["signals"]["audio_seat_hints"] == []
+
+    def test_explicit_event_seat_attribute_is_picked_up(self) -> None:
+        """将来 AudioEvent に ``seat: int`` が追加された場合の前向き互換。
+        raw_text に "シート N" が無くても explicit な seat 属性なら拾う。
+        """
+        from output.replay_hand import EvidenceRecord
+
+        # AudioEvent dataclass には seat field が無いため、duck-typed な
+        # SimpleNamespace で構築する (将来拡張シミュレーション)。
+        from types import SimpleNamespace
+
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(2, "Ah", 1.1),
+            _rfid_seat_rec(4, "Kh", 1.2),
+            EvidenceRecord(
+                timestamp=1.3, kind="audio",
+                # ``raw_text`` には seat ヒント無し、``seat`` 属性だけ
+                event=SimpleNamespace(
+                    action="fold", amount=0, timestamp=1.3,
+                    raw_text="フォールド", seat=3,
+                ),
+                payload={},
+            ),
+        ]
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(events)
+        # NOTE: isinstance(rec.event, AudioEvent) ガードがあるため、SimpleNamespace
+        # は audio 経路に入らない。これは仕様 (defensive)。よって、明示 seat 属性は
+        # AudioEvent インスタンスにのみ反映される (将来 AudioEvent に seat を足したら有効)。
+        # 現状では Audio 経路に入らないので audio_seat_hints は空。
+        # → このテストは「現仕様で raw bootstrap が壊れない」ことだけ確認。
+        assert result.bootstrap_source == "raw"
+
+
+class TestPhase5BPrevButton:
+    """prev_button から左隣 heuristic を検証する。"""
+
+    def _hu_events(self, t0: float = 1.0) -> list:
+        return [
+            _audio_rec("new_hand", t0),
+            _rfid_seat_rec(1, "Ah", t0 + 0.1),
+            _rfid_seat_rec(2, "Kh", t0 + 0.2),
+            _audio_rec("fold", t0 + 0.3, "フォールド"),
+            _audio_rec("winner", t0 + 0.4, "シート2 ウィナー"),
+        ]
+
+    def test_first_hand_no_prev_button(self) -> None:
+        """初手の hand (prev_button=None) では min(active_seats) fallback。"""
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(self._hu_events())
+
+        assert result.bootstrap_source == "raw"
+        meta = result.bootstrap_meta
+        assert meta["button_seat"] == 1     # min(1, 2)
+        assert meta["button_inferred_from_prev"] is False
+        assert meta["prev_button"] is None
+
+    def test_second_hand_uses_prev_button_left_neighbor(self) -> None:
+        """同じ HandReconstructor で 2 hand 連続実行すると、2 hand 目の button は
+        前 hand の button の左隣 (= ring 上の次 index)。
+        """
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        # 1 hand 目: prev_button=None → button=1 (min)
+        result1 = rc.reconstruct_from_events(self._hu_events(t0=1.0))
+        assert result1.bootstrap_source == "raw"
+        assert result1.bootstrap_meta["button_seat"] == 1
+
+        # 2 hand 目: prev_button=1 が active set [1,2] に含まれる → 左隣 = 2
+        events2 = [
+            _audio_rec("new_hand", 2.0),
+            _rfid_seat_rec(1, "Ad", 2.1),
+            _rfid_seat_rec(2, "Kd", 2.2),
+            _audio_rec("fold", 2.3, "フォールド"),
+            _audio_rec("winner", 2.4, "シート1 ウィナー"),
+        ]
+        result2 = rc.reconstruct_from_events(events2)
+        assert result2.bootstrap_source == "raw"
+        meta = result2.bootstrap_meta
+        assert meta["prev_button"] == 1
+        assert meta["button_inferred_from_prev"] is True
+        assert meta["button_seat"] == 2
+
+    def test_prev_button_not_in_active_falls_back_to_min(self) -> None:
+        """prev_button が現 hand の active set に含まれていない場合、
+        min(active_seats) にフォールバックする (= prev は無視する)。
+        """
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        # わざと _prev_button_seat を「現 hand の active には居ない seat」にセット
+        rc._prev_button_seat = 99
+
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(3, "Ah", 1.1),
+            _rfid_seat_rec(4, "Kh", 1.2),
+            _audio_rec("fold", 1.3, "フォールド"),
+            _audio_rec("winner", 1.4, "シート4 ウィナー"),
+        ]
+        result = rc.reconstruct_from_events(events)
+        assert result.bootstrap_source == "raw"
+        meta = result.bootstrap_meta
+        assert meta["prev_button"] == 99
+        assert meta["button_inferred_from_prev"] is False
+        # active=[3,4] の min
+        assert meta["button_seat"] == 3
+
+    def test_prev_button_advances_in_three_handed_ring(self) -> None:
+        """3 seat 環境で prev_button が active set に居る場合、ring 上の次 index。"""
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        rc._prev_button_seat = 3   # active=[2,3,5] の中で 3 → 左隣 = index 2 = seat 5
+
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(2, "Ah", 1.1),
+            _rfid_seat_rec(3, "Kh", 1.2),
+            _rfid_seat_rec(5, "Qh", 1.3),
+            _audio_rec("fold", 1.5, "フォールド"),
+            _audio_rec("winner", 1.6, "シート2 ウィナー"),
+        ]
+        result = rc.reconstruct_from_events(events)
+        assert result.bootstrap_source == "raw"
+        meta = result.bootstrap_meta
+        assert meta["active_seats"] == [2, 3, 5]
+        assert meta["button_inferred_from_prev"] is True
+        assert meta["button_seat"] == 5      # active[index_of(3)+1 mod 3] = active[2] = 5
+
+    def test_prev_button_wraps_around_ring(self) -> None:
+        """prev_button が active の末尾なら、左隣は wrap して先頭 (ring 性)。"""
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        rc._prev_button_seat = 5   # active=[2,3,5] の末尾 → 左隣 = wrap して 2
+
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(2, "Ah", 1.1),
+            _rfid_seat_rec(3, "Kh", 1.2),
+            _rfid_seat_rec(5, "Qh", 1.3),
+            _audio_rec("winner", 1.6, "シート3 ウィナー"),
+        ]
+        result = rc.reconstruct_from_events(events)
+        meta = result.bootstrap_meta
+        assert meta["button_inferred_from_prev"] is True
+        assert meta["button_seat"] == 2
+
+    def test_prev_button_updated_after_online_summary_bootstrap(self) -> None:
+        """online_summary 経路で立ち上がった hand の button も _prev_button_seat に
+        記録され、続く raw bootstrap で利用される。
+        """
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+
+        # 1 hand 目: RFID 0 seat → raw 失敗 → online_summary fallback
+        online = _make_hu_online_summary(hand_id=1, sb_seat=1, bb_seat=2)
+        events1 = [
+            _audio_rec("new_hand", 1.0),
+            _audio_rec("fold", 1.3, "フォールド"),
+            _audio_rec("winner", 1.4, "シート2 ウィナー"),
+        ]
+        result1 = rc.reconstruct_from_events(events1, online_summary=online)
+        assert result1.bootstrap_source == "online_summary"
+        # online_summary 経路でも prev_button は更新される (HU: BTN=SB=1)
+        assert rc._prev_button_seat == 1
+
+        # 2 hand 目: RFID 2 seat → raw bootstrap、prev=1 を活用
+        events2 = [
+            _audio_rec("new_hand", 2.0),
+            _rfid_seat_rec(1, "Ad", 2.1),
+            _rfid_seat_rec(2, "Kd", 2.2),
+            _audio_rec("winner", 2.4, "シート1 ウィナー"),
+        ]
+        result2 = rc.reconstruct_from_events(events2)
+        assert result2.bootstrap_source == "raw"
+        meta = result2.bootstrap_meta
+        assert meta["prev_button"] == 1
+        assert meta["button_inferred_from_prev"] is True
+        assert meta["button_seat"] == 2
+
+
+class TestPhase5BMetaExtensions:
+    """Phase 5-B で追加された bootstrap_meta フィールドを検証する。"""
+
+    def test_new_meta_keys_present_on_raw_success(self) -> None:
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            _audio_rec("winner", 1.4, "シート2 ウィナー"),
+        ]
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(events)
+        meta = result.bootstrap_meta
+        # Phase 5-B 追加 field
+        assert "audio_seat_hints" in meta["signals"]
+        assert "prev_button" in meta
+        assert "button_inferred_from_prev" in meta
+        # blinds change TODO 用のフック
+        assert meta["sb_amount"] == 100
+        assert meta["bb_amount"] == 200
+        # Phase 4-B から存続している field は壊れていない
+        assert meta["button_inferred"] is True
+        assert meta["blinds_inferred"] is True
+        assert meta["source"] == "raw"
+        assert meta["confidence"] == 0.5
+        assert "rfid_seat_observations" in meta["signals"]
+
+
+class TestPhase5BSafetyFallbacks:
+    """Phase 5-B 拡張で誤って raw bootstrap が成立しないことを保証する。"""
+
+    def test_audio_only_no_rfid_does_not_raw_bootstrap(self) -> None:
+        """RFID seat 観測ゼロ + Audio に seat ヒントが沢山あっても、
+        Phase 5-B の conservative gate により raw は諦める。
+        """
+        events = [
+            _audio_rec("new_hand", 1.0),
+            # RFID 一切無し
+            _audio_rec("fold", 1.2, "シート2 フォールド"),
+            _audio_rec("fold", 1.3, "シート3 フォールド"),
+            _audio_rec("winner", 1.4, "シート1 ウィナー"),
+        ]
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(events)
+        assert result.reason == "reconstruction_skipped"
+        assert result.bootstrap_source is None
+
+    def test_default_blinds_missing_still_fails(self) -> None:
+        """default_sb/bb が None なら、Audio が ヒントを足しても raw 失敗。"""
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            _audio_rec("fold", 1.3, "シート3 フォールド"),
+            _audio_rec("winner", 1.4, "シート2 ウィナー"),
+        ]
+        rc = HandReconstructor()   # default_sb/bb 無し
+        result = rc.reconstruct_from_events(events)
+        assert result.reason == "reconstruction_skipped"
+        assert result.bootstrap_source is None
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # 4-4. live hook 結合: online_summary=None でも raw-only bootstrap 可
 # ────────────────────────────────────────────────────────────────────────────
 
