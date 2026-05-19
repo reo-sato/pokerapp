@@ -1,41 +1,57 @@
 """core/hand_reconstructor.py
 
-Phase 2-C: hand window 単位の **遡及的 (retrospective) 再推定** のための skeleton。
+Phase 3: hand window 単位の **遡及的 (retrospective) 再推定** 本実装。
 
-役割 (Phase 3 以降で本実装):
+役割:
   1 ハンドの全イベント (EvidenceRecord 列) を受け取り、既存の online 推定系
-  (BettingState / infer_action / BeamEngine / HandFinalizer) を「まとめて再生」
-  することで、online では決定できなかった ambiguous なアクション列を
-  hand 全体の context (winner / showdown / final pot / RFID 区間) で再評価する。
+  (BettingState / BeamEngine / HandFinalizer) を **window 内だけで再生** することで、
+  online では決定できなかった ambiguous なアクション列を hand 全体の context
+  (winner / showdown / final pot / RFID 区間) で再評価する。
 
-設計の意図 (docstring に明記):
-  - Phase 2-C ではこのクラスは **skeleton** で、実装は ``reconstruct_from_events``
-    が呼び出し可能な hook としてだけ存在する
-  - 既存 online 経路 (IntegrationThread._finalize_hand → HandFinalizer) は本クラス
-    に依存しない。本クラスは「window が確定したあとに optional に走る診断 /
-    自動修正パス」として設計
-  - Phase 3+ で:
-    * BeamEngine を頭から再生して sequence MAP を再評価
-    * 当該 hand window 中の WINNER / 最終 pot / showdown hole cards を
-      apply_winner_filter で flagged constraint として食わせる
-    * HandFinalizer に通して新 ``HandSummary`` を生成
-    * online で出した summary との diff を取り、needs_review / 自動 patch を判断
-  - hand_id ごとに ``HandReconstructionResult`` を返す
+実装方針:
+  1. ``initial_state`` 優先、なければ ``online_summary`` から BettingState を bootstrap
+     (button / SB-BB seat は ``online_summary.actions`` の SB_POST / BB_POST から逆算)
+  2. ``BeamEngine(K=8, prior=default_priors())`` を新規構築し ``reset_with_state(bs)``
+  3. events を時刻順に走査:
+     - AudioEvent の通常 action → ``beam.step_audio`` で MAP 取得、bs.update_after_action
+     - AudioEvent ``winner`` → ``winner_seat_hint`` に格納
+     - AudioEvent ``new_hand`` / ``showdown`` → 制御 event として skip
+     - RFIDEvent ``seat`` → hole_cards に蓄積
+     - RFIDEvent ``board`` → board に蓄積、5 枚に達したら street を river へ昇格
+  4. ``winner_seat_hint`` が判明したら ``beam.apply_winner_filter(...)`` で粒子集合を絞る
+  5. ``HandFinalizer.finalize(...)`` で offline HandSummary を生成
+  6. ``online_summary`` が提供されていれば diff 計算 → ``needs_review=True`` を立てる
 
-Phase 2-C では中身は ``NotImplementedError`` ベースの stub だが、IntegrationThread
-の終局フローから ``reconstructor.reconstruct_from_events(events)`` を呼べる経路
-だけ通しておく (実装は Phase 3 以降)。
+**重要な約束** (Phase 3 スコープ):
+  - online HandSummary / JSON / PHH を **自動で書き換えない**。
+    ``HandReconstructor`` は **追加のオフライン / 後処理パス**としてのみ動作する。
+  - online と offline の差分は ``HandReconstructionResult.diff`` (機械可読 dict) と
+    ``needs_review`` フラグで返し、消費側 (CLI / GUI / 監視ツール) が判断する。
 """
 from __future__ import annotations
 
+import copy
+import logging
+import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Optional
 
-from core.hand_log import ActionRecord, HandSummary
+from core.events import AudioEvent, RFIDEvent
+from core.hand_finalizer import HandFinalizer
+from core.hand_log import ActionRecord, HandSummary, RevealedHand
 
 if TYPE_CHECKING:
     from integration.action_inference import BettingState
+    from integration.observation_model import PriorParams
     from output.replay_hand import EvidenceRecord
+
+logger = logging.getLogger(__name__)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Result
+# ────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -43,62 +59,502 @@ class HandReconstructionResult:
     """retrospective inference の結果。
 
     fields:
-      actions:       再評価後のアクション列 (Phase 3+ で beam の MAP 等から復元)
-      summary:       再評価で得られた HandSummary (online と差し替え候補)
-      needs_review:  online と diff があった / 信頼度が低かった等で人手レビューを推奨
-      reason:        分類タグ (例: ``"online_consistent"``, ``"action_revised"``,
-                     ``"settlement_mismatch"``, ``"reconstruction_skipped"``)
+      actions:       再評価後のアクション列 (SB_POST / BB_POST + beam MAP のアクション)
+      summary:       offline HandSummary' (成功時のみ)
+      needs_review:  online と diff があった / 信頼度が低い等のレビュー要否
+      reason:        ``"reconstructed_no_diff"`` / ``"reconstructed_with_diff"`` /
+                     ``"reconstructed"`` (online_summary 無しで参照不可) /
+                     ``"reconstruction_skipped"`` (bootstrap 失敗等)
+      diff:          online vs offline の差分。``None`` なら一致 or 比較不能。
+                     dict 形式 ``{field_name: {"online": ..., "offline": ...}}``
+      confidence:    再構成への簡易 confidence (audio 消費率 [0,1] or None)
     """
 
     actions: list[ActionRecord] = field(default_factory=list)
     summary: Optional[HandSummary] = None
     needs_review: bool = False
     reason: str = ""
+    diff: Optional[dict[str, Any]] = None
+    confidence: Optional[float] = None
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ────────────────────────────────────────────────────────────────────────────
+
+
+_WINNER_SEAT_RE = re.compile(r"(?:シート|seat)\s*(\d+)", re.IGNORECASE)
+
+
+def _extract_seat_from_text(text: str) -> Optional[int]:
+    m = _WINNER_SEAT_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _current_street(board: list[str]) -> str:
+    n = len([c for c in board if c])
+    if n >= 5:
+        return "river"
+    if n >= 4:
+        return "turn"
+    if n >= 3:
+        return "flop"
+    return "preflop"
+
+
+def _iso_from_unix(ts: float) -> str:
+    try:
+        return datetime.fromtimestamp(float(ts)).isoformat(timespec="milliseconds")
+    except (OSError, OverflowError, ValueError):
+        return ""
+
+
+def _compute_diff(online: HandSummary, offline: HandSummary) -> Optional[dict[str, Any]]:
+    """online と offline の構造差分を機械可読 dict にする。
+
+    比較対象 (Phase 3 MVP):
+      - resolution_status / resolution_type
+      - winner_seat
+      - pot_total
+      - seat_payouts (key を int 正規化)
+      - actions (seat, action, amount) のみ比較 (timestamp / pot_after は無視)
+      - showdown_revealed_cards (key を int 正規化)
+
+    返り値:
+      差分が 1 件もなければ ``None``、あれば dict。
+    """
+    diff: dict[str, Any] = {}
+
+    if online.resolution_type != offline.resolution_type:
+        diff["resolution_type"] = {
+            "online": online.resolution_type,
+            "offline": offline.resolution_type,
+        }
+    if online.resolution_status != offline.resolution_status:
+        diff["resolution_status"] = {
+            "online": online.resolution_status,
+            "offline": offline.resolution_status,
+        }
+    if int(online.winner_seat) != int(offline.winner_seat):
+        diff["winner_seat"] = {
+            "online": int(online.winner_seat),
+            "offline": int(offline.winner_seat),
+        }
+    if int(online.pot_total) != int(offline.pot_total):
+        diff["pot_total"] = {
+            "online": int(online.pot_total),
+            "offline": int(offline.pot_total),
+        }
+
+    # seat_payouts: JSON round-trip 後 key が str になっている可能性に備えて int 正規化
+    op = {int(k): int(v) for k, v in (online.seat_payouts or {}).items()}
+    fp = {int(k): int(v) for k, v in (offline.seat_payouts or {}).items()}
+    if op != fp:
+        diff["seat_payouts"] = {"online": op, "offline": fp}
+
+    # showdown_revealed_cards: 同様
+    orc = {int(k): list(v) for k, v in (online.showdown_revealed_cards or {}).items()}
+    frc = {int(k): list(v) for k, v in (offline.showdown_revealed_cards or {}).items()}
+    if orc != frc:
+        diff["showdown_revealed_cards"] = {"online": orc, "offline": frc}
+
+    # actions: timestamp / pot_after / stack_after はノイズなので (seat, action, amount) のみ比較
+    def _keys(actions: list[ActionRecord]) -> list[tuple]:
+        return [(int(a.seat), str(a.action), int(a.amount)) for a in (actions or [])]
+
+    oa = _keys(online.actions)
+    fa = _keys(offline.actions)
+    if oa != fa:
+        diff["actions"] = {"online": oa, "offline": fa}
+
+    return diff or None
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# HandReconstructor
+# ────────────────────────────────────────────────────────────────────────────
 
 
 class HandReconstructor:
     """hand window 単位で観測列を頭から再生して action / HandSummary を再推定する。
 
-    Phase 2-C: skeleton。``reconstruct_from_events`` は **dummy pass-through** で
-    「再評価をスキップした」結果を返す。これにより IntegrationThread から呼ぶ
-    経路 (hook) は安全に通せる。
+    Phase 3 で本実装に置き換わった。``online_summary`` を渡せば diff も計算され、
+    ``needs_review`` が立つ。
 
-    Phase 3+ の予定実装 (TODO):
-      1. ``initial_state`` から BettingState を初期化 (なければ events から推測)
-      2. ``BeamEngine(K=8, prior=default_priors())`` を新規構築
-      3. events を時刻順に走査して:
-         - AudioEvent → infer_action_distribution + beam.step_audio
-         - RFIDEvent  → fold-on-release / showdown reveal の制約として食わせる
-         - CameraEvent → (将来) chip motion から bet size の弱い prior
-      4. window 終端の winner audio / 最終 pot / showdown hole cards を
-         ``BeamEngine.apply_winner_filter(...)`` に投入し sequence MAP を絞り込む
-      5. 結果を ``HandFinalizer.finalize(...)`` で HandSummary に組み立てる
-      6. online 出力との diff があれば needs_review=True を立てる
+    既存の online 推定系 (``HandFinalizer`` / ``BeamEngine`` / ``BettingState``) を
+    そのまま再利用するため、別 variant や別 prior を試したい場合はコンストラクタ
+    引数で差し替えられる。
     """
+
+    def __init__(
+        self,
+        beam_K: int = 8,
+        prior: "Optional[PriorParams]" = None,
+        finalizer: Optional[HandFinalizer] = None,
+    ) -> None:
+        self._beam_K = int(beam_K)
+        self._prior = prior
+        self._finalizer = finalizer or HandFinalizer()
+
+    # ──────────────────────────────────────────────────────────────────────
+    # public API
+    # ──────────────────────────────────────────────────────────────────────
 
     def reconstruct_from_events(
         self,
         events: "list[EvidenceRecord]",
         initial_state: "Optional[BettingState]" = None,
+        online_summary: Optional[HandSummary] = None,
     ) -> HandReconstructionResult:
-        """events 列から hand を再構成する。
-
-        Phase 2-C: dummy pass-through (online 経路を変えない / Phase 3 で本実装)。
+        """events 列から hand を再構成し、必要なら online_summary と diff する。
 
         Args:
-            events: 単一 hand の EvidenceRecord 列 (boundary 始点〜終点)。
-            initial_state: hand 開始時の BettingState。None なら events から推測
-                (Phase 3 で実装)。
+            events: 1 hand の EvidenceRecord 列 (start 〜 end 境界の events)。
+            initial_state: hand 開始時の ``BettingState``。指定があれば deepcopy して
+                使用する。None の場合は ``online_summary`` から bootstrap。
+            online_summary: online で生成済みの ``HandSummary``。bootstrap の補助 +
+                diff 比較対象として使う。None なら diff は行わない。
 
         Returns:
-            ``reason="reconstruction_skipped"`` の空の HandReconstructionResult。
-            これにより呼び出し側 (IntegrationThread) は安全に hook を持てる。
+            ``HandReconstructionResult``。bootstrap 失敗時は ``summary=None`` で
+            ``reason="reconstruction_skipped"`` を返す。
         """
-        # Phase 2-C: skeleton — online 推定結果に介入しない。
-        # Phase 3+: ここに BeamEngine 再生 + HandFinalizer 呼び出しを実装する。
-        return HandReconstructionResult(
-            actions=[],
-            summary=None,
-            needs_review=False,
-            reason="reconstruction_skipped",
+        # 時刻順を保証 (evidence log は append-only で順序通りだが防御的に sort)
+        events_sorted = sorted(events or [], key=lambda r: float(r.timestamp))
+
+        bs = self._init_betting_state(initial_state, online_summary)
+        if bs is None:
+            return HandReconstructionResult(reason="reconstruction_skipped")
+
+        # 遅延 import: integration 層は CLI 起動時に重い依存を引かないため
+        from integration.beam_search import BeamEngine
+        from integration.observation_model import default_priors
+
+        prior = self._prior or default_priors()
+        beam = BeamEngine(K=self._beam_K, prior=prior)
+        beam.reset_with_state(bs)
+
+        # ── hand metadata の確定 ─────────────────────────────────────────
+        hand_id = int(online_summary.hand_id) if online_summary else 0
+        players_info = self._materialize_players_info(online_summary, bs)
+        name_by_seat = {int(p["seat"]): str(p.get("name", f"P{p['seat']}"))
+                        for p in players_info}
+        stack_start_by_seat = {int(p["seat"]): int(p.get("stack_start", 0))
+                               for p in players_info}
+
+        # ── 再構成 state ─────────────────────────────────────────────────
+        board: list[str] = []
+        hole_cards: dict[int, list[str]] = {}
+        winner_seat_hint: Optional[int] = None
+        reconstructed_actions: list[ActionRecord] = []
+        audio_count = 0
+        consumed_count = 0
+
+        # SB_POST / BB_POST は bs.start_hand 時に action_history に入っている。
+        # それを ActionRecord として再現する (Phase 2-B engine 経路と整合させる)。
+        self._inject_blind_post_records(
+            bs, hand_id, name_by_seat, stack_start_by_seat, reconstructed_actions,
         )
+
+        # ── events を時刻順に走査 ─────────────────────────────────────────
+        for rec in events_sorted:
+            if rec.event is None:
+                continue
+
+            if rec.kind == "audio" and isinstance(rec.event, AudioEvent):
+                audio_count += 1
+                ae: AudioEvent = rec.event
+                action_name = (ae.action or "").lower()
+
+                if action_name == "winner":
+                    extracted = _extract_seat_from_text(ae.raw_text)
+                    if extracted is not None:
+                        winner_seat_hint = extracted
+                    continue
+                if action_name in ("new_hand", "showdown", ""):
+                    # new_hand: 既に bootstrap 済み / showdown: state は board=5 で river 扱い
+                    continue
+
+                if bs.actor_seat is None:
+                    continue
+                seat = int(bs.actor_seat)
+
+                try:
+                    beam.step_audio(ae, seat)
+                except Exception:
+                    logger.exception(
+                        "Reconstructor: beam.step_audio failed (hand=%d seat=%s)",
+                        hand_id, seat,
+                    )
+                    continue
+
+                top = beam.map_action()
+                if top is None or top.action is None:
+                    continue
+
+                try:
+                    bs.update_after_action(seat, top.action, int(top.amount))
+                except Exception:
+                    logger.exception(
+                        "Reconstructor: bs.update_after_action failed "
+                        "(hand=%d seat=%d action=%s amount=%d)",
+                        hand_id, seat, top.action, int(top.amount),
+                    )
+                    continue
+
+                consumed_count += 1
+                reconstructed_actions.append(ActionRecord(
+                    hand_id=hand_id,
+                    timestamp=_iso_from_unix(rec.timestamp),
+                    street=_current_street(board),
+                    seat=seat,
+                    player_name=name_by_seat.get(seat, f"P{seat}"),
+                    action=str(top.action),
+                    amount=int(top.amount),
+                    pot_after=sum(bs.player_contrib_hand.values()),
+                    stack_after=stack_start_by_seat.get(seat, 0)
+                                - bs.player_contrib_hand.get(seat, 0),
+                    source={"audio": True, "camera": False, "rfid": False},
+                    needs_review=False,
+                    confidence=1.0,
+                ))
+
+            elif rec.kind == "rfid" and isinstance(rec.event, RFIDEvent):
+                self._absorb_rfid(rec.event, bs, board, hole_cards)
+
+        # ── winner filter (beam 終局粒子の絞り込み) ─────────────────────
+        if winner_seat_hint is not None:
+            try:
+                beam.apply_winner_filter(winner_seat_hint, final_pot=None)
+            except Exception:
+                logger.exception(
+                    "Reconstructor: beam.apply_winner_filter failed (hand=%d)",
+                    hand_id,
+                )
+
+        # board の placeholder を除去 (board_index が飛ぶケース対策)
+        board_clean = [c for c in board if c]
+
+        # ── revealed_hands を構築 ──────────────────────────────────────
+        revealed_hands = [
+            RevealedHand(seat=int(s), cards=list(c), source="rfid", observed_at=None)
+            for s, c in sorted(hole_cards.items())
+            if c
+        ]
+
+        # players_info に hole cards を反映 (online から流用した dict を更新)
+        for p in players_info:
+            seat = int(p["seat"])
+            if seat in hole_cards and hole_cards[seat]:
+                p["hole_cards"] = list(hole_cards[seat])
+                p["hole_cards_source"] = "rfid"
+
+        pot_total = sum(bs.player_contrib_hand.values())
+
+        # ── HandFinalizer で offline summary を構築 ────────────────────
+        try:
+            summary = self._finalizer.finalize(
+                betting_state=bs,
+                board=list(board_clean),
+                revealed_hands=revealed_hands,
+                pot_total=int(pot_total),
+                players_info=list(players_info),
+                hand_id=hand_id,
+                session_id=(online_summary.session_id if online_summary else ""),
+                started_at=(online_summary.started_at if online_summary else ""),
+                ended_at=(online_summary.ended_at if online_summary else ""),
+                blinds=(
+                    dict(online_summary.blinds)
+                    if online_summary
+                    else {"sb": int(bs.sb_amount), "bb": int(bs.bb_amount)}
+                ),
+                actions=list(reconstructed_actions),
+                board_source=(online_summary.board_source if online_summary else ""),
+                winner_seat_hint=winner_seat_hint,
+            )
+        except Exception:
+            logger.exception("Reconstructor: HandFinalizer.finalize failed (hand=%d)", hand_id)
+            return HandReconstructionResult(
+                actions=reconstructed_actions,
+                reason="reconstruction_skipped",
+            )
+
+        # ── diff と needs_review ────────────────────────────────────────
+        diff: Optional[dict[str, Any]] = None
+        needs_review = False
+        if online_summary is not None:
+            diff = _compute_diff(online_summary, summary)
+            needs_review = diff is not None
+            reason = "reconstructed_with_diff" if needs_review else "reconstructed_no_diff"
+        else:
+            reason = "reconstructed"
+
+        confidence = (consumed_count / audio_count) if audio_count > 0 else None
+
+        return HandReconstructionResult(
+            actions=reconstructed_actions,
+            summary=summary,
+            needs_review=needs_review,
+            reason=reason,
+            diff=diff,
+            confidence=confidence,
+        )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # bootstrap
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _init_betting_state(
+        self,
+        initial_state: "Optional[BettingState]",
+        online_summary: Optional[HandSummary],
+    ) -> "Optional[BettingState]":
+        """initial_state 優先、なければ online_summary から bootstrap。
+
+        online_summary から bootstrap する場合:
+          - active_seats: stack_start > 0 の seat
+          - sb / bb: ``online_summary.blinds``
+          - button_seat: online_summary.actions の SB_POST seat から逆算
+              (HU: BTN = SB、それ以外: BTN = active 内で SB の 1 つ前)
+        bootstrap に必要な情報が揃わない場合は ``None`` を返す。
+        """
+        from integration.action_inference import BettingState
+
+        if initial_state is not None:
+            return copy.deepcopy(initial_state)
+        if online_summary is None:
+            return None
+
+        sb = int((online_summary.blinds or {}).get("sb", 0))
+        bb = int((online_summary.blinds or {}).get("bb", 0))
+        active = sorted({
+            int(p["seat"]) for p in (online_summary.players or [])
+            if int(p.get("stack_start", 0)) > 0
+        })
+        if len(active) < 2:
+            return None
+
+        sb_seat: Optional[int] = None
+        bb_seat: Optional[int] = None
+        for a in (online_summary.actions or []):
+            if a.action == "SB_POST" and sb_seat is None:
+                sb_seat = int(a.seat)
+            elif a.action == "BB_POST" and bb_seat is None:
+                bb_seat = int(a.seat)
+            if sb_seat is not None and bb_seat is not None:
+                break
+
+        if sb_seat is None or sb_seat not in active:
+            return None
+
+        if len(active) == 2:
+            button_seat = sb_seat  # HU: BTN = SB
+        else:
+            idx = active.index(sb_seat)
+            button_seat = active[(idx - 1) % len(active)]
+
+        bs = BettingState()
+        try:
+            bs.start_hand(
+                button_seat=button_seat,
+                active_seats=active,
+                sb_amount=sb,
+                bb_amount=bb,
+            )
+        except Exception:
+            logger.exception("Reconstructor: bs.start_hand bootstrap failed")
+            return None
+        return bs
+
+    # ──────────────────────────────────────────────────────────────────────
+    # helpers
+    # ──────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _materialize_players_info(
+        online_summary: Optional[HandSummary],
+        bs: "BettingState",
+    ) -> list[dict]:
+        """players_info を online_summary から流用 (deepcopy)、無ければ bs から合成。"""
+        if online_summary and online_summary.players:
+            return [dict(p) for p in online_summary.players]
+        return [
+            {
+                "seat": int(s),
+                "name": f"P{s}",
+                "hole_cards": None,
+                "hole_cards_source": "",
+                "stack_start": 0,
+                "stack_end": 0,
+                "result": 0,
+            }
+            for s in (bs.active_seats or [])
+        ]
+
+    @staticmethod
+    def _inject_blind_post_records(
+        bs: "BettingState",
+        hand_id: int,
+        name_by_seat: dict[int, str],
+        stack_start_by_seat: dict[int, int],
+        out_actions: list[ActionRecord],
+    ) -> None:
+        """``bs.start_hand`` で記録された SB_POST / BB_POST を ActionRecord 化。"""
+        running_pot = 0
+        for entry in (bs.action_history or []):
+            label = entry.get("action")
+            if label not in ("SB_POST", "BB_POST"):
+                continue
+            seat = int(entry.get("seat", 0))
+            amount = int(entry.get("amount", 0))
+            running_pot += amount
+            out_actions.append(ActionRecord(
+                hand_id=hand_id,
+                timestamp="",
+                street="preflop",
+                seat=seat,
+                player_name=name_by_seat.get(seat, f"P{seat}"),
+                action=label,
+                amount=amount,
+                pot_after=running_pot,
+                stack_after=stack_start_by_seat.get(seat, 0) - amount,
+                source={"audio": False, "camera": False, "rfid": False},
+                needs_review=False,
+                confidence=1.0,
+            ))
+
+    @staticmethod
+    def _absorb_rfid(
+        ev: RFIDEvent,
+        bs: "BettingState",
+        board: list[str],
+        hole_cards: dict[int, list[str]],
+    ) -> None:
+        """RFIDEvent を board / hole_cards に蓄積し、street 昇格を発火させる。"""
+        if ev.role == "seat" and ev.seat is not None and ev.card:
+            cards = hole_cards.setdefault(int(ev.seat), [])
+            if ev.card not in cards and len(cards) < 2:
+                cards.append(str(ev.card))
+            return
+
+        if ev.role == "board" and ev.card:
+            if ev.board_index is not None:
+                idx = max(0, int(ev.board_index) - 1)
+                while len(board) <= idx:
+                    board.append("")
+                board[idx] = str(ev.card)
+            else:
+                if ev.card not in board:
+                    board.append(str(ev.card))
+            new_street = _current_street(board)
+            if new_street != "preflop" and getattr(bs, "street", None) != new_street:
+                try:
+                    bs.reset_for_new_street()
+                    bs.street = new_street
+                except Exception:
+                    logger.exception("Reconstructor: bs.reset_for_new_street failed")

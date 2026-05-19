@@ -37,7 +37,7 @@ pokerapp/
 │   ├── settlement.py              ← compute_pot_settlements / evaluate_hand_rank / distribute_split_pot (Phase 2-A 実装済)
 │   ├── hand_finalizer.py          ← HandFinalizer.finalize (Phase 2-B 実装済、engine._finalize_hand の主経路)
 │   ├── hand_boundary.py           ← HandBoundaryDetector (Phase 2-C): audio / RFID から hand window を検出
-│   └── hand_reconstructor.py      ← HandReconstructor (Phase 2-C skeleton): hand window 単位の retrospective inference hook
+│   └── hand_reconstructor.py      ← HandReconstructor (Phase 3 実装済): hand window を BeamEngine + HandFinalizer で再生し online と diff
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -62,7 +62,8 @@ pokerapp/
 │   ├── json_writer.py             ← JsonWriter (セッション JSON ログ書き込み)
 │   ├── phh_exporter.py            ← PHHExporter (PHH 形式エクスポート)
 │   ├── evidence_log.py            ← EvidenceLogWriter (v6.0+ M1): logs/evidence_<session>.jsonl, raw 観測の append-only ログ
-│   └── replay_hand.py             ← load_evidence_log / extract_hand_windows (Phase 2-C): hand window 再生ユーティリティ
+│   ├── replay_hand.py             ← load_evidence_log / extract_hand_windows (Phase 2-C): hand window 再生ユーティリティ
+│   └── reconstruct_session.py     ← CLI (Phase 3): session JSON + evidence JSONL を読んで各 hand を再構成、online↔offline diff を書く
 │
 ├── gui/
 │   └── dashboard.py               ← GUIDashboard (customtkinter)
@@ -437,12 +438,64 @@ audio / RFID / camera 観測の流れから hand の開始・終了境界 (hand 
   - `tick(now)`: 時刻のみ進める (no event)
   - 返り値はすべて `list[BoundaryEvent]` (0/1/2 件)
 
-### `core/hand_reconstructor.py` (Phase 2-C skeleton, Phase 3+ で本実装)
+### `core/hand_reconstructor.py` (Phase 3 実装済)
 
-hand window 単位の retrospective inference 用 hook。Phase 2-C では `reconstruct_from_events` は pass-through (`reason="reconstruction_skipped"`)。
+hand window 単位の retrospective inference。EvidenceLog の events をその hand だけ
+頭から再生して **offline HandSummary'** を生成し、online HandSummary と機械可読な
+diff を出す。**online の HandSummary / JSON / PHH は一切 mutate しない**
+(追加のオフラインパスとして動作)。
 
-- `HandReconstructionResult(actions, summary, needs_review, reason)`
-- `HandReconstructor.reconstruct_from_events(events, initial_state=None) → HandReconstructionResult`: Phase 3+ で BeamEngine 再生 + HandFinalizer 再呼び出しで online 推定との diff を取る予定
+- `HandReconstructionResult(actions, summary, needs_review, reason, diff, confidence)`:
+  - `actions`: 再構成 ActionRecord 列 (SB_POST/BB_POST + beam MAP の player actions)
+  - `summary`: offline HandSummary' (bootstrap 失敗時は None)
+  - `needs_review`: online との diff があれば True (online_summary 未指定なら False)
+  - `reason`: `"reconstructed_no_diff"` / `"reconstructed_with_diff"` / `"reconstructed"` / `"reconstruction_skipped"`
+  - `diff`: 差分 dict `{field: {"online": ..., "offline": ...}}` (一致 or 比較不能なら None)
+  - `confidence`: 簡易指標 = consumed_count / audio_count (audio が無ければ None)
+- `HandReconstructor(beam_K=8, prior=None, finalizer=None)`: テスト inject 可能
+- `HandReconstructor.reconstruct_from_events(events, initial_state=None, online_summary=None) → HandReconstructionResult`:
+  1. `initial_state` 優先、なければ `online_summary` から `_init_betting_state` で bootstrap
+     (button は `actions` の SB_POST/BB_POST から逆算: HU なら BTN=SB、それ以外は SB の左隣)
+  2. `BeamEngine(K)` を新規構築 → `reset_with_state(bs)`
+  3. events を時刻順走査: audio 通常 action → `beam.step_audio` → `bs.update_after_action`、
+     audio "winner" → `winner_seat_hint` に保存、RFID seat → hole_cards 蓄積、
+     RFID board → board 蓄積 + street 昇格
+  4. winner_seat_hint があれば `beam.apply_winner_filter(...)` で粒子集合を絞る
+  5. `HandFinalizer.finalize(...)` で offline summary を構築
+  6. `_compute_diff(online, offline)` で diff → `needs_review` を立てる
+- `_compute_diff(online, offline) → Optional[dict]`: 比較対象は
+  `resolution_status` / `resolution_type` / `winner_seat` / `pot_total` /
+  `seat_payouts` / `showdown_revealed_cards` / `actions` (seat/action/amount のみ、
+  timestamp や pot_after はノイズなので無視)
+
+### `output/reconstruct_session.py` (Phase 3 CLI)
+
+```
+python -m output.reconstruct_session --session logs/<session>.json
+```
+
+`logs/<session>.json` (JsonWriter 出力) と `logs/evidence_<session>.jsonl` (EvidenceLogWriter
+出力) を読み、各 hand を `HandReconstructor.reconstruct_from_events(window, online_summary=...)`
+にかけ、結果を `logs/reconstruct_<session>.jsonl` に 1 hand 1 行で書く。
+
+出力 schema:
+```json
+{
+  "hand_id": int,
+  "needs_review": bool,
+  "reason": "reconstructed_no_diff" | "reconstructed_with_diff" | "reconstruction_skipped",
+  "diff": {...} | null,
+  "confidence": float | null,
+  "online_summary": {...},          // JSON dict (mutate されない)
+  "offline_summary": {...} | null   // 再構成 HandSummary
+}
+```
+
+オプション: `--output PATH` / `--evidence PATH` (省略時は session.parent / "reconstruct_<id>.jsonl" / "evidence_<id>.jsonl")。`--quiet` で info ログを抑制。
+
+**約束**: online JSON (`<session>.json`) も PHH も一切 mutate しない。差分情報の
+発信は別ファイル (`reconstruct_<session>.jsonl`)。後段の GUI / 監視ツール / Phase 4+
+の自動 patch ロジックがこれを読んで判断する想定。
 
 ### `output/replay_hand.py` (Phase 2-C 実装済)
 
@@ -589,7 +642,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 402 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 416 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -611,6 +664,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_settlement_logic.py | distribute_split_pot / evaluate_hand_rank / compute_pot_settlements (heads-up / 3-way all-in / split / fold / 退化) (Phase 2-A, 20 件) |
 | test_hand_finalizer.py | HandFinalizer fold_win / showdown / sidepot_showdown / showdown_split / incomplete / winner_hint mismatch (Phase 2-B, 11 件) |
 | test_hand_boundary.py | HandBoundaryDetector (audio / board cleared / hole appeared) + extract_hand_windows + IntegrationThread 結合 + EvidenceLog round-trip (Phase 2-C, 19 件) |
+| test_hand_reconstructor.py | HandReconstructor (online↔offline diff / fallback / 複数 hand / _compute_diff) + reconstruct_session CLI round-trip (Phase 3, 14 件) |
 
 ---
 
@@ -668,10 +722,10 @@ pytest tests/ --ignore=tests/test_vision.py
 | HandBoundaryDetector (audio + RFID hand window 検出) | ✅ 完了 (Phase 2-C) | `core/hand_boundary.py`: new_hand / winner / board cleared / hole appeared を検出 |
 | hand window 抽出 (EvidenceLog → events 窓化) | ✅ 完了 (Phase 2-C) | `output/replay_hand.py:load_evidence_log` / `extract_hand_windows` |
 | IntegrationThread の live hand window バッファ | ✅ 完了 (Phase 2-C) | `_current_hand_events` / `_completed_hands` / `_track_evidence` |
-| HandReconstructor skeleton (retrospective hook) | ✅ skeleton (Phase 2-C) | `core/hand_reconstructor.py`: 終端境界で `_invoke_reconstructor_hook` が呼ぶ pass-through。本実装は Phase 3+ |
+| HandReconstructor 本実装 (beam 再生 + finalizer 再呼び出し) | ✅ 完了 (Phase 3) | `core/hand_reconstructor.py`: events → BeamEngine + HandFinalizer 再生 → online との diff、`needs_review` 自動判定 |
+| 後処理 CLI (online↔offline diff) | ✅ 完了 (Phase 3) | `output/reconstruct_session.py`: session JSON + evidence JSONL → `reconstruct_<id>.jsonl` |
 | ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
 | gs.end_hand → end_hand_with_payouts 拡張 | ❌ 未着手 (Phase 2-D 以降) | 現状 Phase 2-B では `_apply_payouts_to_gamestate` adapter が primary winner で legacy gs.end_hand を呼んでいる |
-| HandReconstructor 本実装 (beam 再生 + finalizer 再呼び出し) | ❌ 未着手 (Phase 3+) | hand window を頭から再生して needs_review / 自動 patch 判断 |
 
 ---
 
@@ -1028,13 +1082,15 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 402 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 416 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
 pytest tests/test_settlement_logic.py -v                                          # Phase 2-A (settlement core)
 pytest tests/test_hand_finalizer.py -v                                            # Phase 2-B (HandFinalizer 単体)
 pytest tests/test_hand_boundary.py -v                                             # Phase 2-C (boundary + replay + integration)
+pytest tests/test_hand_reconstructor.py -v                                        # Phase 3 (HandReconstructor + CLI)
+python -m output.reconstruct_session --session logs/<session>.json                # Phase 3 CLI: online↔offline diff を出力
 python main.py --cli                                                              # M1: logs/evidence_*.jsonl が増える
 python main.py                                                                    # M3: GUI で revise バナー確認
 python main.py --export-phh logs/session_xxx.json                                 # M3: PHH 出力 (Phase 1: resolution_status=="final" の hand のみ)
@@ -1125,8 +1181,9 @@ HandSummary {resolution_status="final", pots, seat_payouts, ...}
     ↓
 final hand のみ PHH export
 
-(オプション、Phase 3+) HandReconstructor が hand window を頭から再生して
-                       online 推定との diff を取り needs_review / 自動 patch
+(オプション、Phase 3 実装済) HandReconstructor が hand window を頭から再生して
+                              offline HandSummary' を生成 → online との diff → needs_review
+                              自動判定。online JSON / PHH は **mutate しない** (別 JSONL に書く)
 ```
 
 ### ログ / replay / retrospective inference (Phase 2-C)
@@ -1262,14 +1319,27 @@ retrospective に再評価して **incomplete → final** に昇格させる経�
     取り出せるようにする
   - 消費側で `resolution_status="provisional"` の HandSummary を生成する設計
 
-**Phase 2-D 以降の残タスク**:
+**Phase 3 完了済み (HandReconstructor 本実装 + CLI)**:
+- ✅ `core/hand_reconstructor.py:HandReconstructor.reconstruct_from_events()` — hand window を BeamEngine + bs.update_after_action で頭から再生 → `apply_winner_filter` で winner_seat_hint を投入 → `HandFinalizer.finalize` で offline HandSummary 構築
+- ✅ `HandReconstructionResult` を `actions / summary / needs_review / reason / diff / confidence` 6 field に拡張
+- ✅ `_init_betting_state` で online_summary から button/SB/BB を逆算 bootstrap (HU は BTN=SB、それ以外は SB の左隣)
+- ✅ `_compute_diff(online, offline)` で `resolution_status` / `resolution_type` / `winner_seat` / `pot_total` / `seat_payouts` / `showdown_revealed_cards` / `actions (seat,action,amount)` を比較。差分があれば `needs_review=True`
+- ✅ `output/reconstruct_session.py` CLI — session JSON + evidence JSONL → `reconstruct_<session>.jsonl` (1 hand 1 行) を出力。online JSON / PHH を mutate しない
+- ✅ JSON round-trip 時の seat key str/int 混在を吸収する正規化
+
+**Phase 3 スコープ外 (Phase 4+ 候補)**:
+- IntegrationThread の `_invoke_reconstructor_hook` で online_summary を渡してリアルタイム reconstruct を有効化 (現状は `initial_state=None / online_summary=None` で skipped 経路維持)
+- 差分検出時の **自動 patch** (online HandSummary の resolution / payouts を offline で上書きする経路。現状は別 JSONL に書くだけ)
+- 確率モデル拡張: prior の hand-specific 調整 (例えば過去 N hand の MAP 平均で smoothing)
+- 完全 replay 型 ActionRecord (pot_after / stack_after を再構成時の bs から正確に算出)
+
+**Phase 2-D / 4+ 以降の残タスク**:
 - `core/showdown_tracker.py`: `observe()` / `is_showdown_ready()` / `project_to_summary_dict()` 本実装。現状 `engine._finalize_hand` が直接 `self._hole_cards` から `RevealedHand` を組んでいる
-- `core/hand_reconstructor.py:reconstruct_from_events` 本実装 (Phase 3+): hand window を BeamEngine で頭から再生 → `apply_winner_filter` に winner / final pot / showdown reveal を投入 → HandFinalizer 再呼び出し → online summary との diff で needs_review / 自動 patch
 - `core/game_state.py`: `end_hand(winner_seat)` を `end_hand_with_payouts(payouts: dict[int, int])` に拡張。これで split / sidepot 時の stack も正しく反映される
 - `integration/engine.py`: `_apply_payouts_to_gamestate` adapter を撤去し、`end_hand_with_payouts` 直呼び出しに変更
 - `HandSummary.winner_seat` を `Optional[int]` 化 (seat_payouts ベースに完全移行)
 - `output/phh_exporter.py`: PHH skip reason を構造化、export 失敗との区別を明示
 - 全 seat の hole cards が absent になった瞬間の end シグナル (Phase 2-C スコープ外)
-- GUI 上での手動 hand boundary 修正 UI
+- GUI 上での手動 hand boundary 修正 UI / reconstruct 結果の表示
 - RFID 認識品質 (ノイズ / 誤検出) への本格対応
 - `legacy_winner_finalize` でマーク済の旧 hand を新 finalizer で再評価する migration ツール (任意)
