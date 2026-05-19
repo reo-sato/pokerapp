@@ -48,12 +48,15 @@ pokerapp/
 │
 ├── integration/
 │   ├── engine.py                  ← IntegrationThread, calc_confidence()
-│   ├── action_inference.py        ← BettingState, InferredAction, infer_action()
-│   └── action_order.py            ← ディーラーボタン回転 / SB-BB / actor 順 helpers
+│   ├── action_inference.py        ← BettingState, InferredAction, infer_action(), infer_action_distribution()
+│   ├── action_order.py            ← ディーラーボタン回転 / SB-BB / actor 順 helpers
+│   ├── observation_model.py       ← ベイズ尤度関数 (v6.0+ M2): EvidenceInterval, PriorParams, ActionHypothesis, compute_log_likelihood, default_priors
+│   └── beam_search.py             ← Beam Engine (v6.0+ M3): BeamParticle, BeamEngine (K=8 決定論的), WINNER 後方修正
 │
 ├── output/
 │   ├── json_writer.py             ← JsonWriter (セッション JSON ログ書き込み)
-│   └── phh_exporter.py            ← PHHExporter (PHH 形式エクスポート)
+│   ├── phh_exporter.py            ← PHHExporter (PHH 形式エクスポート)
+│   └── evidence_log.py            ← EvidenceLogWriter (v6.0+ M1): logs/evidence_<session>.jsonl, raw 観測の append-only ログ
 │
 ├── gui/
 │   └── dashboard.py               ← GUIDashboard (customtkinter)
@@ -68,6 +71,11 @@ pokerapp/
 │   ├── test_phh_exporter.py
 │   ├── test_rfid.py
 │   ├── test_rfid_http.py
+│   ├── test_evidence_log.py       ← EvidenceLogWriter テスト (v6.0+ M1)
+│   ├── test_observation_model.py  ← 観測尤度関数 / Dirichlet / Normal / 位置 prior (v6.0+ M2)
+│   ├── test_inference_equivalence.py ← infer_action() 薄アダプタの legacy 等価性 (v6.0+ M2)
+│   ├── test_beam_search.py        ← BeamEngine 単体 (剪定 / 決定論 / winner filter) (v6.0+ M3)
+│   ├── test_bayesian_e2e.py       ← WINNER 後方修正 E2E (v6.0+ M3)
 │   └── ...
 │
 ├── vision/                        ← レガシー（未使用）
@@ -111,8 +119,12 @@ pokerapp/
 ```
 マイク PCM16 16kHz
     │
-    ▼ faster-whisper / Vosk
-ASR テキスト (raw)
+    ▼ faster-whisper (beam_size=5, best_of=5, word_timestamps=True) / Vosk (SetWords)
+ASR 出力:
+    │   ├─ text (joined)
+    │   ├─ alternatives: [(text, confidence, words)]   ← v6.0+ M1
+    │   ├─ word_timestamps: [(word, start, end, conf)] ← v6.0+ M1
+    │   └─ t_end (発話終了の絶対時刻)                   ← v6.0+ M1
     │
     ▼ apply_corrections()          ← corrections.json: 誤認識を一括置換
 補正済みテキスト
@@ -129,7 +141,8 @@ ASR テキスト (raw)
     ▼ amount_only 検出
     │   (アクションなし・数字のみ → AudioEvent(action="amount_only"))
     │
-    ▼ AudioEvent { action, amount, timestamp, raw_text }
+    ▼ AudioEvent { action, amount, timestamp, raw_text,
+    │              alternatives, word_timestamps, t_end }   ← M1 で拡張
     │
     ▼ audio_queue
 ```
@@ -141,17 +154,23 @@ AudioEvent (audio_queue)
     │
     ▼ IntegrationThread._handle_audio_event()
     │
-    ├─ action="new_hand"  → GameState.new_hand(), BettingState.reset_for_new_hand()
+    ▼ EvidenceLogWriter.write_audio(event)   ← v6.0+ M1: raw 観測を JSONL に常時記録
+    │
+    ├─ action="new_hand"  → GameState.new_hand(), BettingState.reset_for_new_hand(),
+    │                        BeamEngine.reset_with_state(betting_state)   ← M3
     ├─ action="showdown"  → GameState.advance_street(SHOWDOWN)
-    ├─ action="winner"    → finalize_hand()
+    ├─ action="winner"    → _reconcile_with_beam(winner_seat) → gs.end_hand()  ← M3
     │
     └─ それ以外:
          seat = betting_state.actor_seat  ← button/blind 確定時の actor を最優先
                 ?? game_state.get_current_player()   (fallback)
          │
-         ▼ infer_action(event, betting_state, seat)
-         │   ├─ action="amount_only" → BettingState から BET/CALL/RAISE を推定
-         │   └─ 明示アクション       → ゲームステート整合性検証 (check+opened=needs_review)
+         ▼ inferred = infer_action(event, betting_state, seat)
+         │   └─ M2 から内部実装は infer_action_distribution() の薄いアダプタ:
+         │      primary 仮説 (log_likelihood=0.0) が常に top → legacy と完全互換
+         │
+         ▼ BeamEngine.step_audio(event, seat)   ← v6.0+ M3: K=8 並行宇宙を更新
+         │   └─ 各粒子で legal_actions × N-best 展開 → log_weight 加算 → top-K 剪定
          │
          ▼ game_state.apply_action(seat, inferred.action, inferred.amount)
          │
@@ -161,8 +180,33 @@ AudioEvent (audio_queue)
          │
          ▼ calc_confidence(has_rfid, has_audio, has_camera)
          │
-         ▼ ActionRecord → on_action コールバック + JSON 書き込み
+         ▼ ActionRecord → on_action コールバック + 後に JSON 書き込み (ハンド終了時のみ)
 ```
+
+### WINNER 後方修正 (v6.0+ M3)
+
+```
+AudioEvent(action="winner") 到着
+    │
+    ▼ winner_seat = _extract_seat_from_text(event.raw_text)
+    │
+    ▼ _finalize_hand(winner_seat)
+    │
+    ▼ _reconcile_with_beam(winner_seat):
+    │   ├─ BeamEngine.apply_winner_filter(winner_seat, final_pot=None)
+    │   │   ├─ winner_seat が fold した粒子 → log_weight = NEG_INF
+    │   │   └─ final_pot 不整合粒子        → log_weight = NEG_INF (M3 初版は許容 50-200%)
+    │   ├─ 新 MAP 列を取得
+    │   └─ self._current_actions と zip (SB/BB_POST は除外):
+    │       差分がある record を in-place mutate + needs_review=True
+    │       + on_action_revised(record) コールバック発火
+    │
+    ▼ gs.end_hand(winner_seat)
+    │
+    ▼ HandSummary 構築 (修正後の _current_actions を読む) → JSON 書き込み 1 回のみ
+```
+
+**初版の妥協**: 後方修正では `(action, amount)` のみ in-place mutate し、`pot_after`/`stack_after` は stale のまま残置 (`needs_review=True` で人手レビュー誘導)。完全 replay 型は将来拡張。
 
 ### ハンド開始処理 (button → SB/BB → 自動 post → first actor)
 
@@ -276,7 +320,52 @@ Auto post: seat=4 action=BB_POST amount=200
   - `update_after_action(seat, action, amount)`: contrib 更新 + actor を次の live seat へ進行
   - `call_amount_for(seat)`: 該当 seat がコールするのに必要な追加投入額
 - `InferredAction`: 推定/検証結果 (`action`, `amount`, `confidence`, `needs_review`, `reason`)
-- `infer_action(event, state, actor_seat) → InferredAction`: 中心 API
+- `infer_action(event, state, actor_seat) → InferredAction`: 中心 API。v6.0+ M2 から内部実装は `infer_action_distribution()` の薄いアダプタ
+- `infer_action_distribution(event, state, actor_seat, prior=None) → list[ActionHypothesis]`: 1 観測 → 仮説リスト (v6.0+ M2)。primary 仮説 (log_likelihood=0.0) を先頭に置き、legal_actions の代替仮説を負の log_likelihood で追加。`max(result, key=h.log_likelihood)` は legacy `_infer_action_core()` の出力と完全一致
+- `_infer_action_core(event, state, actor_seat)`: 既存決定木 (内部関数)。amount_only 6 ケース + explicit action 検証
+
+### `integration/observation_model.py` (v6.0+ M2)
+
+ベイズ尤度関数の中核。学習なしの固定 prior。
+
+- `EvidenceInterval(kind, t_start, t_end, payload)`: 観測の正規化表現 (`audio`/`rfid`/`camera`)
+- `PriorParams`: 固定 prior の集約 dataclass
+  - `mu_audio=0.4, sigma_audio=0.6, mu_rfid=0.2, sigma_rfid=0.4` (時刻整合)
+  - `lexicon: dict[action, dict[word, pseudocount]]` (Dirichlet, `speech_normalization.json` から構築、pseudocount=5、`alpha_unknown=0.1`)
+  - `position_prior: {early, middle, late}` (3 バケット)
+  - `bet_raise_log_sigma=0.7, bet_raise_mean_factor=2.0` (log-Normal amount)
+- `ActionHypothesis(action, amount, log_likelihood, reason, needs_review, confidence, raw_text, normalized_text, seat)`: 1 仮説の評価結果。M3 では `seat` フィールドで beam の `apply_winner_filter` が「どの seat が fold したか」を判定
+- `compute_log_likelihood(evidence, action, amount, state, actor_seat, prior) → float`: 観測尤度 + 事前 (`log P(E|a) + log P(a|state)`)。legal 違反は `NEG_INF`
+- `is_legal(action, amount, state, actor_seat) → bool`: ハード制約 (CHECK は `current_bet ≤ contrib` 時のみ、RAISE は `is_opened` のみ、folded/all-in は不可、etc.)
+- `default_amount_for(action, state) → int`: 代替仮説の典型 amount (CALL=current_bet、BET=2bb、RAISE=current_bet*2 など)
+- `default_priors(normalization_path=None) → PriorParams`: `speech_normalization.json` から固定 prior を構築
+- `evidence_from_audio/rfid/camera(event) → EvidenceInterval`: 各イベント → EvidenceInterval 変換
+
+### `integration/beam_search.py` (v6.0+ M3)
+
+sequence 事後分布の MAP を Beam Search で近似する。
+
+- `BeamParticle(actions, log_weight, state)`: 並行宇宙 1 つ分。`state` は BettingState の deep copy
+- `BeamEngine(K=8, prior=None, enable_resample=False, sink=None)`: K 個の粒子集合を管理
+  - `MAX_BRANCHING_PER_PARTICLE = 4`: 各 step で 1 粒子が分岐する候補数の上限
+  - `reset_with_state(state)`: 新ハンド開始時。全粒子を 1 つの初期粒子に潰す
+  - `step_audio(event, actor_seat)`: 各粒子で `infer_action_distribution()` から候補を列挙、`legal_actions × N-best` を展開、log_weight 加算、top-K 剪定
+  - `map_action() → ActionHypothesis`: top 粒子の最新アクション (リアルタイム速報用)
+  - `map_sequence() → list[ActionHypothesis]`: top 粒子の全アクション列
+  - `apply_winner_filter(winner_seat, final_pot=None) → list[ActionHypothesis]`: 「winner_seat が fold した粒子」と「final_pot 乖離が大きい粒子」を `NEG_INF` に落とし、新 MAP を返す
+  - `snapshot_top(n=3) → list[dict]`: top-n 粒子を辞書化 (evidence_log の sink 用)
+- `enable_resample=False` (M3 固定): 決定論的 top-K 剪定のみ。粒子フィルタへの確率的サンプリング移行口は将来 (v6.0+ B4)
+
+### `output/evidence_log.py` (v6.0+ M1)
+
+raw 観測イベントを append-only な JSONL に記録するロガー。session JSON と完全分離。
+
+- `EvidenceLogWriter(log_dir, session_id)`: `logs/evidence_<session_id>.jsonl` を line-buffered で開く
+- `write_audio(event, extra=None)`: AudioEvent を 1 行記録 (action, amount, raw_text, t_end, alternatives, word_timestamps)
+- `write_rfid(event, extra=None)`: RFIDEvent を 1 行記録 (tag_id, card, role, seat, t_end)
+- `write_camera(event, extra=None)`: CameraEvent を 1 行記録
+- `extra` 引数で beam top-3 スナップショットなど追加メタデータを merge 可能
+- 書き込み失敗は warning ログを出して継続 (IntegrationThread をクラッシュさせない)
 
 ### `integration/action_order.py`
 
@@ -397,7 +486,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 243 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 346 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -410,6 +499,11 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_rfid.py / test_rfid_http.py | RFID 受信 |
 | test_phh_exporter.py | PHH 形式出力 |
 | test_parser.py | parse_action / parse_amount |
+| test_evidence_log.py | EvidenceLogWriter / IntegrationThread への hook (v6.0+ M1, 6 件) |
+| test_observation_model.py | 観測尤度関数 / Normal / Dirichlet / 位置 prior / 金額整合 (v6.0+ M2, 26 件) |
+| test_inference_equivalence.py | infer_action() 薄アダプタの legacy 等価性 (v6.0+ M2, 16 件) |
+| test_beam_search.py | BeamEngine 単体 (剪定 / 決定論 / WINNER フィルタ / snapshot) (v6.0+ M3, 15 件) |
+| test_bayesian_e2e.py | WINNER 後方修正 E2E (3-handed seat3 fold → winner=seat3 で flip) (v6.0+ M3, 3 件) |
 
 ---
 
@@ -437,11 +531,22 @@ pytest tests/ --ignore=tests/test_vision.py
 | actor 自動進行 | ✅ 完了 | BettingState.update_after_action |
 | GUI BettingState 表示 / BTN補正 | ✅ 完了 | dashboard.py: _lbl_betting, _button_seat_menu |
 | 手動入力席の actor 追従 | ✅ 完了 | dashboard.py: _sync_manual_seat |
-| PokerRuleEngine | ❌ 未実装 (v6.0) | legal_actions 算出なし |
+| PokerRuleEngine | 🔨 部分実装 (v6.0+ M2) | observation_model.is_legal() でハード制約のみ実装 |
 | AudioStreamBuffer 状態機械 | ❌ 未実装 (v6.0) | 確認型発話の PENDING なし |
-| 音声/RFID 確率融合エンジン | ❌ 未実装 (v6.0+) | §「将来計画 (時刻ベース確率融合)」を参照 |
-| ベイズ推定によるアクション推定 (中核モデル) | ❌ 未実装 (v6.0+) | §「将来計画 (ベイズ推定)」を参照 |
-| └ M1–M3 実装計画 (Beam Search K=8〜16, 固定 prior, WINNER 後方修正) | 📋 計画策定済 | §「v6.0 実装計画 (M1–M3)」を参照 |
+| 音声/RFID 確率融合エンジン (中核) | ✅ 完了 (v6.0+ M3) | beam_search.py + observation_model.py で Beam Search K=8 動作 |
+| ASR 観測の richness (N-best, word_timestamps, RFID t_end) | ✅ 完了 (v6.0+ M1) | core/events.py 拡張、recorder.py / vosk_recorder.py で生 metadata を AudioEvent に詰める |
+| 観測ログ (B0) `evidence_<session>.jsonl` | ✅ 完了 (v6.0+ M1) | output/evidence_log.py、IntegrationThread から audio/rfid/camera を append |
+| 観測尤度関数 (φ_lex, φ_amount, φ_time, 位置 prior) | ✅ 完了 (v6.0+ M2) | observation_model.py: 固定 prior、Dirichlet 辞書 + log-Normal 金額 + 3 バケット位置 prior |
+| 仮説リスト型 infer_action (薄アダプタ) | ✅ 完了 (v6.0+ M2) | infer_action_distribution() を新設、infer_action() はその top-1 アダプタ |
+| Beam Engine (K=8, 決定論的) | ✅ 完了 (v6.0+ M3) | beam_search.py: BeamEngine + reset_with_state / step_audio / map_action / apply_winner_filter |
+| WINNER 後方修正 (in-place mutate) | ✅ 完了 (v6.0+ M3) | engine.py: _reconcile_with_beam, on_action_revised コールバック |
+| ベイズ推定によるアクション推定 (中核モデル) | ✅ M1–M3 完了 (v6.0+) | 学習なし固定 prior、MAP 推定、sequence 事後分布 |
+| 共役事前分布によるオンライン学習 (B2/B3) | ❌ 未実装 (v6.0+) | Normal-Gamma / Dirichlet の closed-form 更新は将来 |
+| ベイズリスク最小化 (review 自動判定 B5) | ❌ 未実装 (v6.0+) | top-2 対数差 / エントロピーは将来 |
+| 階層ベイズ・夜間 MCMC (B6) | ❌ 未実装 (v6.0+) | 卓 hyperprior θ_0 は将来 |
+| Active learning (GUI クリック → posterior 更新 B7) | ❌ 未実装 (v6.0+) | GUI 連動学習ループは将来 |
+| 粒子フィルタ (確率的サンプリング) | ❌ 未実装 (v6.0+ B4) | beam_search.enable_resample フラグだけ用意済み |
+| 完全 replay 型後方修正 (pot/stack 再計算) | ❌ 未実装 (将来) | 現在は (action, amount) のみ in-place mutate、pot_after/stack_after は stale |
 | ディーラー別オンライン学習 | ❌ 未実装 (v6.0+) | §「将来計画」を参照 |
 
 ---
@@ -662,9 +767,19 @@ def infer_action_distribution(
 
 ---
 
-## v6.0 実装計画 (M1–M3): ベイズ推定アクション推定レイヤ
+## v6.0 実装計画 (M1–M3): ベイズ推定アクション推定レイヤ ✅ 実装済み
 
-§「将来計画 (v6.0+): ベイズ推定によるアクション推定」の中核モデルを 3 マイルストーンに分割して **非破壊** で導入する具体的な実装計画。学習・階層ベイズ・ベイズリスク最小化は本計画ではスコープ外（§「将来計画」に残置）。
+§「将来計画 (v6.0+): ベイズ推定によるアクション推定」の中核モデルを 3 マイルストーンに分割して **非破壊** で導入する実装計画 — **3 マイルストーンすべて完了済み** (commits `608976b` / `be54632` / `70a7135`)。学習・階層ベイズ・ベイズリスク最小化はスコープ外（§「将来計画」に残置）。
+
+### 実装サマリ
+
+| Milestone | コミット | 主な追加ファイル | テスト追加 |
+|---|---|---|---|
+| M1: データ配線 | `608976b` | `output/evidence_log.py`、`core/events.py` 拡張 (alternatives / word_timestamps / t_end)、`audio/recognizer.py` (`TranscriptionResult`) | `test_evidence_log.py` 6 件 |
+| M2: 観測モデル + アダプタ | `be54632` | `integration/observation_model.py`、`infer_action_distribution()` | `test_observation_model.py` 26 件 + `test_inference_equivalence.py` 16 件 |
+| M3: Beam Engine + WINNER 後方修正 | `70a7135` | `integration/beam_search.py`、`engine.py` の `_reconcile_with_beam()` + `on_action_revised` | `test_beam_search.py` 15 件 + `test_bayesian_e2e.py` 3 件 |
+
+**全体テスト**: 280 (M0 baseline) → 346 (M3 後) = 66 件追加、既存 280 件は全 green を維持。
 
 ### 中核モデル決定事項
 
@@ -676,7 +791,7 @@ def infer_action_distribution(
 | パラメータ θ | 固定 prior（学習なし） |
 | 意思決定 | MAP（top-1 確定）。既存の二値 `needs_review` トリガ (check_when_bet_open 等) は維持 |
 | 後方修正 | WINNER/POT で粒子集合を再フィルタ → `IntegrationThread._current_actions` を in-place mutate |
-| 既存 API | `infer_action()` は `infer_action_distribution()` 上の薄いアダプタとして保存（243 テスト全 green 維持） |
+| 既存 API | `infer_action()` は `infer_action_distribution()` 上の薄いアダプタとして保存（既存テスト全 green 維持: 280 → 346） |
 
 ### 数学的中核
 
@@ -703,7 +818,7 @@ def infer_action_distribution(
 
 ### マイルストーン
 
-#### M1 — データ配線（非破壊）
+#### M1 — データ配線（非破壊） ✅ 実装済み (`608976b`)
 
 **目的**: 観測の richness（N-best + word_timestamps + interval）を pipeline に流すだけ、推定ロジックは変えない。
 
@@ -716,9 +831,9 @@ def infer_action_distribution(
 - `output/evidence_log.py` (新): `EvidenceLogWriter(log_dir, session_id)` で `logs/evidence_<session>.jsonl` に append-only 書き込み（session JSON と完全分離）
 - `integration/engine.py`: `EvidenceLogWriter` を `__init__` で生成、`_handle_audio_event` / `_drain_rfid_queue` で raw evidence をログに inject（推定変更なし）
 
-検証: `pytest tests/ -v --ignore=tests/test_vision.py` → 243 件 pass、`python main.py --cli` で `logs/evidence_*.jsonl` が生成。
+検証: `pytest tests/ -v --ignore=tests/test_vision.py` → 286 件 pass (280 baseline + 6 evidence_log)、`python main.py --cli` で `logs/evidence_*.jsonl` が生成。
 
-#### M2 — 観測モデル + アダプタ
+#### M2 — 観測モデル + アダプタ ✅ 実装済み (`be54632`)
 
 **目的**: 観測尤度関数を導入し、`infer_action()` を「列挙→max」型にリファクタ。`engine.py` は変更しない。
 
@@ -738,7 +853,7 @@ def infer_action_distribution(
 
 検証: 全 suite green、既存 `infer_action()` の出力に diff なし。
 
-#### M3 — Beam Engine + WINNER 後方修正
+#### M3 — Beam Engine + WINNER 後方修正 ✅ 実装済み (`70a7135`)
 
 **目的**: sequence 事後分布の MAP を Beam Search で出す。WINNER 到着時に粒子集合を再フィルタしてアクション履歴を遡及修正。
 
@@ -754,15 +869,15 @@ def infer_action_distribution(
       def snapshot(self) -> list[BeamParticle]               # evidence_log 用
   ```
 - `integration/engine.py`:
-  - `__init__` (`:134` の `self._betting_state` 隣) に `self._beam = BeamEngine(...)` を追加
-  - `_start_new_hand()` (`:419`) で `self._beam = BeamEngine(...)` 再初期化
-  - `_handle_audio_event()` (`:325`) の `infer_action()` 呼び出し (`:354`) を `self._beam.step(evidence); top = self._beam.map_action()` に置換
-  - `_drain_rfid_queue()` (`:190`) で seat/board RFID から `EvidenceInterval(kind="rfid")` を生成して `self._beam.step(...)` へ
-  - `_finalize_hand()` (`:539`) で `gs.end_hand()` (`:541`) より **前** に `revised = self._beam.apply_winner_filter(winner_seat, observed_pot)` を実行、`self._current_actions` と zip 比較し差分 record を **in-place** mutate + `needs_review=True` + `on_action_revised(record)` 発火
-  - **初版の妥協**: `pot_after`/`stack_after` は stale のまま残置（完全 replay は将来拡張）
+  - `__init__` に `self._beam = BeamEngine(K=beam_K, prior=default_priors(), sink=self._beam_sink_to_evidence_log)` を追加 (新引数 `beam_K=8` と `on_action_revised` コールバックも追加)
+  - `_start_new_hand()` で SB/BB auto-post の後に `self._beam.reset_with_state(self._betting_state)` を呼ぶ
+  - `_handle_audio_event()` で `infer_action()` (legacy) と `self._beam.step_audio(event, seat)` を **並行実行**。legacy 経路が引き続きリアルタイム `ActionRecord` を駆動し、beam は sequence 仮説を保持
+  - `_finalize_hand()` で `gs.end_hand()` より **前** に `self._reconcile_with_beam(winner_seat)` を実行: `apply_winner_filter` → `_current_actions` と zip → 差分 record を **in-place** mutate + `needs_review=True` + `on_action_revised(record)` 発火
+  - **初版の妥協**: `pot_after`/`stack_after` は stale のまま残置（完全 replay は将来拡張）。RFID 経路の beam 統合も M3 スコープ外（evidence_log への記録のみ）
+  - **プランからの軽微な逸脱**: 「`infer_action()` を beam 呼び出しに置換」ではなく「並行運用」を採用。primary 仮説 (log_likelihood=0) が常に top のため legacy 出力と等価で、後方互換性を最大化するための判断
 - 新規テスト:
-  - `tests/test_beam_search.py`: 剪定・決定論性・resample=False
-  - `tests/test_bayesian_e2e.py`: seat3「コール 600」 N-best `[(CALL, 0.55), (RAISE, 0.40)]` + 0.8s 後の RFID `t_end`（= fold）でシナリオ駆動。初期 MAP=CALL → WINNER(seat4) + pot=current_bet 到着で FOLD 粒子を昇格、`_current_actions[2].action == "fold"` を assert
+  - `tests/test_beam_search.py` (15 件): 剪定、決定論性、`enable_resample=False`、winner_filter の fold 粒子排除、snapshot 構造
+  - `tests/test_bayesian_e2e.py` (3 件): (a) BeamEngine 単体で seat3 fold 後に `apply_winner_filter(3)` が代替を昇格させる、(b) IntegrationThread 経由で 3-handed の seat3 fold + WINNER=seat3 → `on_action_revised` 発火・record の in-place mutate (action≠fold, needs_review=True)、(c) WINNER=seat2 (整合) → revise が走らないことの健全性確認
 
 検証: 全 suite green、GUI smoke で revise バナー、PHH 往復。
 
@@ -789,7 +904,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 各 M で 243 → 243+new
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 346 件 pass (280 baseline + 66 new)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 python main.py --cli                                                              # M1: logs/evidence_*.jsonl が増える
