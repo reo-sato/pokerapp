@@ -206,56 +206,99 @@ def test_phh_gate_skips_non_final(caplog) -> None:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def test_legacy_finalize_sets_resolution_type(tmp_path: Path) -> None:
-    """_finalize_hand 経由で生成された HandSummary が:
+def test_engine_finalize_promotes_to_canonical_fold_win(tmp_path: Path) -> None:
+    """Phase 2-B: engine._finalize_hand が HandFinalizer 経由で canonical
+    ``fold_win`` resolution を発行することを E2E で確認する。
+
+    シナリオ: heads-up, button=2 (= SB), seat1 = BB。
+    - new_hand → SB/BB auto-post (seat2: 100, seat1: 200)
+    - seat2 (BTN = first preflop actor in HU) が fold → live=[1]
+    - WINNER seat1 (補助観測、settlement と整合)
+
+    期待:
       - resolution_status == "final"
-      - resolution_type == "legacy_winner_finalize"
-      - seat_payouts == {winner_seat: pot_total}
-      - pots == [] (Phase 1 では意図的に空)
+      - resolution_type == "fold_win"  (Phase 1 の "legacy_winner_finalize" ではない)
+      - winner_seat == 1
+      - seat_payouts == {1: pot_total}
+      - pots は 1 件 (fold win も settlement core を流用して main pot を生成)
+      - showdown_revealed_cards == {} (showdown 不要)
     """
     players = [
         PlayerState(seat=1, name="A", stack=10000),
         PlayerState(seat=2, name="B", stack=10000),
-        PlayerState(seat=3, name="C", stack=10000),
     ]
     gs = GameStateManager(players=players, sb=100, bb=200)
     audio_q = EventQueue()
-    writer = JsonWriter(log_dir=tmp_path, session_id="phase1_e2e")
+    writer = JsonWriter(log_dir=tmp_path, session_id="phase2b_canonical")
     stop = threading.Event()
     thread = IntegrationThread(
         audio_queue=audio_q,
         game_state=gs,
         json_writer=writer,
         stop_event=stop,
-        initial_button_seat=3,
+        initial_button_seat=2,
         auto_post_blinds=True,
     )
 
     now = time.time()
     audio_q.put(AudioEvent("new_hand", 0, now, ""))
+    # HU preflop は BTN(=SB) が最初の actor → seat2 が fold
     audio_q.put(AudioEvent("fold", 0, now + 0.5, "フォールド"))
-    audio_q.put(AudioEvent("winner", 0, now + 1.0, "シート2 ウィナー"))
+    audio_q.put(AudioEvent("winner", 0, now + 1.0, "シート1 ウィナー"))
 
     thread.start()
     time.sleep(0.8)
     stop.set()
     thread.join(timeout=2.0)
 
-    # JSON に書かれた summary を読み戻して検証
     import json
-    json_path = tmp_path / "phase1_e2e.json"
+    json_path = tmp_path / "phase2b_canonical.json"
     assert json_path.exists()
     data = json.loads(json_path.read_text(encoding="utf-8"))
     assert len(data["hands"]) == 1
     h = data["hands"][0]
+    # Canonical fold_win promotion
     assert h["resolution_status"] == "final"
-    assert h["resolution_type"] == "legacy_winner_finalize"
-    # winner_seat は文字列 "シート2 ウィナー" から抽出した 2
-    assert h["winner_seat"] == 2
-    # seat_payouts は {winner_seat: pot_total}
-    assert int(next(iter(h["seat_payouts"].keys()))) == 2
+    assert h["resolution_type"] == "fold_win"  # Phase 1 marker ではなく canonical
+    assert h["winner_seat"] == 1
+    # seat_payouts = {winner_seat: pot_total}
+    assert int(next(iter(h["seat_payouts"].keys()))) == 1
     assert sum(h["seat_payouts"].values()) == h["pot_total"]
-    # pots は Phase 1 では空のまま
-    assert h["pots"] == []
-    # showdown_revealed_cards も空
+    # pots は 1 件 (HandFinalizer が fold_win 経路で main pot を生成)
+    assert len(h["pots"]) == 1
+    main_pot = h["pots"][0]
+    assert main_pot["pot_type"] == "main"
+    assert main_pot["winning_seats"] == [1]
+    assert main_pot["payouts"] == {"1": h["pot_total"]}  # JSON 化で int key が str
+    # showdown 不要
     assert h["showdown_revealed_cards"] == {}
+
+    # PHHExporter が従来通り final hand を出力できる (gate を通過する)
+    from core.hand_log import ActionRecord, HandSummary, PotSettlement
+    # JSON から HandSummary を最小再構築して PHHExporter に通す
+    summary_obj = HandSummary(
+        hand_id=h["hand_id"],
+        session_id=h["session_id"],
+        started_at=h["started_at"],
+        ended_at=h["ended_at"],
+        blinds=h["blinds"],
+        board=h["board"],
+        board_source=h["board_source"],
+        players=h["players"],
+        pot_total=h["pot_total"],
+        winner_seat=h["winner_seat"],
+        actions=[ActionRecord(**a) for a in h["actions"]],
+        review_required=h["review_required"],
+        folded_seats=h["folded_seats"],
+        all_in_seats=h["all_in_seats"],
+        resolution_status=h["resolution_status"],
+        resolution_type=h["resolution_type"],
+        seat_payouts={int(k): v for k, v in h["seat_payouts"].items()},
+        showdown_revealed_cards={int(k): v for k, v in h["showdown_revealed_cards"].items()},
+        pots=[PotSettlement(**p) for p in h["pots"]],
+    )
+    exporter = PHHExporter(author="phase2b")
+    phh_str = exporter.export(summary_obj)
+    # final hand なので PHH 出力対象 (gate skip しない)
+    assert phh_str != ""
+    assert "variant" in phh_str

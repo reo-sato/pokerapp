@@ -36,6 +36,8 @@ from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
+from core.hand_finalizer import HandFinalizer
+from core.hand_log import RevealedHand
 from integration.action_inference import BettingState, InferredAction, infer_action
 from integration.action_order import advance_button
 from integration.beam_search import BeamEngine
@@ -641,73 +643,127 @@ class IntegrationThread(threading.Thread):
                 except Exception:
                     logger.exception("on_action_revised callback raised")
 
-    def _finalize_hand(self, winner_seat: int) -> None:
+    def _finalize_hand(self, winner_seat: Optional[int] = None) -> None:
+        """Phase 2-B: HandFinalizer (settlement core ベース) でハンドを閉じる。
+
+        ``winner_seat`` は音声 WINNER 観測由来の **補助情報** として扱う。
+        canonical な resolution_type / seat_payouts / pots は HandFinalizer が
+        BettingState + revealed hole cards + board から導く。
+        winner_seat と settlement が食い違う場合は HandFinalizer 側で
+        review_required=True が立つ。
+        """
         gs = self._game_state
 
-        # M3: WINNER 到着 → BeamEngine の sequence MAP を再フィルタし
-        # _current_actions を遡及修正 (in-place mutate)。gs.end_hand() の前に走らせる
-        # ので、後段の HandSummary は修正後の値を読む。
-        self._reconcile_with_beam(winner_seat)
+        # M3 legacy: WINNER 到着で BeamEngine の sequence MAP を再フィルタし
+        # _current_actions を遡及修正 (in-place mutate)。HandFinalizer が読む
+        # actions は修正後の値になる。
+        if winner_seat is not None:
+            self._reconcile_with_beam(winner_seat)
 
-        gs.end_hand(winner_seat)
+        # pot_total は betting_state.player_contrib_hand の総和 (SB/BB 含む全 seat の
+        # hand 累積投入額)。これにより blind only + fold の hand でも正しく算出される
+        # (Phase 1 の action.amount 合計方式は SB_POST/BB_POST を見落として 0 を返していた)。
+        pot_total = sum((self._betting_state.player_contrib_hand or {}).values())
+        if pot_total == 0:
+            # fallback: betting_state 未初期化時の旧経路
+            pot_total = sum(
+                a.amount for a in self._current_actions
+                if a.action in ("bet", "raise", "call", "allin")
+            )
 
-        stacks_end = gs.get_stacks()
-        players_info = []
-        for seat in sorted(stacks_end.keys()):
+        # RFID 由来の hole cards を RevealedHand 集合に変換 (canonical な内部表現)。
+        # Phase 2-B 時点では ShowdownTracker は未実装なので self._hole_cards から直接構築。
+        revealed_hands = [
+            RevealedHand(seat=s, cards=list(cards), source="rfid", observed_at=None)
+            for s, cards in sorted(self._hole_cards.items())
+            if cards
+        ]
+
+        # pre-payout players_info (stack_end は placeholder。HandFinalizer 通過後に更新)
+        pre_stacks = gs.get_stacks()
+        pre_players_info: list[dict] = []
+        for seat in sorted(pre_stacks.keys()):
             hole = self._hole_cards.get(seat, [])
-            players_info.append({
+            pre_players_info.append({
                 "seat":              seat,
                 "name":              gs.get_player_name(seat),
                 "hole_cards":        list(hole) if hole else None,
                 "hole_cards_source": "rfid" if hole else "",
                 "stack_start":       self._stack_start.get(seat, 0),
-                "stack_end":         stacks_end[seat],
-                "result":            stacks_end[seat] - self._stack_start.get(seat, 0),
+                "stack_end":         pre_stacks[seat],
+                "result":            pre_stacks[seat] - self._stack_start.get(seat, 0),
             })
 
         if self._hole_cards:
             logger.info(
                 "Hand %d: hole_cards from RFID — %s",
                 gs.hand_id,
-                {s: cards for s, cards in self._hole_cards.items()},
+                dict(self._hole_cards),
             )
 
-        pot_total = sum(
-            a.amount for a in self._current_actions
-            if a.action in ("bet", "raise", "call", "allin")
-        )
-
-        # Phase 1 settlement: seat_payouts は確定情報なので埋める。
-        # pots は Phase 2 settlement.compute_pot_settlements() が走るまで意図的に空。
-        # fake な eligible_seats を入れると Phase 2 で side pot を正しく計算したとき矛盾する。
-        seat_payouts = {winner_seat: int(pot_total)}
-
-        summary = HandSummary(
+        # ── HandFinalizer で resolution_type を canonical に決定 ──────────
+        finalizer = HandFinalizer()
+        summary = finalizer.finalize(
+            betting_state=self._betting_state,
+            board=list(self._board_cards),
+            revealed_hands=revealed_hands,
+            pot_total=pot_total,
+            players_info=pre_players_info,
             hand_id=gs.hand_id,
-            session_id=self._json_writer._session_id,
+            session_id=self._json_writer._session_id,         # noqa: SLF001
             started_at=self._hand_started_at,
             ended_at=_now_iso(),
-            blinds={"sb": gs._sb, "bb": gs._bb},  # noqa: SLF001
-            board=list(self._board_cards),
-            board_source=self._board_source,
-            players=players_info,
-            pot_total=pot_total,
-            winner_seat=winner_seat,
+            blinds={"sb": gs._sb, "bb": gs._bb},                # noqa: SLF001
             actions=list(self._current_actions),
-            review_required=any(a.needs_review for a in self._current_actions),
-            folded_seats=[a.seat for a in self._current_actions if a.action == "fold"],
-            all_in_seats=[a.seat for a in self._current_actions if a.action == "allin"],
-            # Phase 1: settlement 中心の field 群を populate。
-            resolution_status="final",
-            resolution_type="legacy_winner_finalize",  # Phase 0–M3 経由で閉じた hand のマーカー
-            seat_payouts=seat_payouts,
-            showdown_revealed_cards={},                # Phase 2 で ShowdownTracker から投影
-            pots=[],                                    # Phase 2 で settlement が埋める
+            board_source=self._board_source,
+            winner_seat_hint=winner_seat,
         )
 
+        # ── GameStateManager への bridge: seat_payouts → primary winner → end_hand ──
+        self._apply_payouts_to_gamestate(summary)
+
+        # ── post-payout stacks で players[*].stack_end / result を更新 ──
+        post_stacks = gs.get_stacks()
+        for player in summary.players:
+            seat = player["seat"]
+            if seat in post_stacks:
+                player["stack_end"] = post_stacks[seat]
+                player["result"] = post_stacks[seat] - player.get("stack_start", 0)
+
         self._json_writer.append_hand_summary(summary)
-        logger.info("Hand %d finalized. Winner: seat %d", gs.hand_id, winner_seat)
+        logger.info(
+            "Hand %d finalized. resolution=%s winner_seat=%s seat_payouts=%s",
+            gs.hand_id, summary.resolution_type, summary.winner_seat, summary.seat_payouts,
+        )
         self._current_actions = []
+
+    def _apply_payouts_to_gamestate(self, summary: HandSummary) -> None:
+        """Phase 2-B 暫定 bridge: HandFinalizer の seat_payouts から primary winner を
+        選び、既存 ``GameStateManager.end_hand(winner_seat)`` を呼ぶ。
+
+        split pot / sidepot_showdown の場合、複数 seat への分配は
+        ``HandSummary.seat_payouts`` には正しく載るが、``GameStateManager`` の
+        ``stack`` 更新は primary 1 人にしか反映されない (legacy API 制約)。
+        Phase 2-C で ``end_hand_with_payouts(payouts: dict[int, int])`` への
+        signature 拡張時にこの adapter を撤去する予定。
+
+        ``incomplete`` の場合も pot を持ち越さないよう winner_seat (= hint or
+        fallback) で end_hand を呼ぶ。
+        """
+        if summary.seat_payouts:
+            primary = max(
+                summary.seat_payouts.items(),
+                key=lambda kv: (kv[1], -kv[0]),
+            )[0]
+        else:
+            primary = summary.winner_seat
+        try:
+            self._game_state.end_hand(primary)
+        except Exception:
+            logger.exception(
+                "gs.end_hand failed for hand %d, primary=%s",
+                summary.hand_id, primary,
+            )
 
 
 # ――― ユーティリティ ―――

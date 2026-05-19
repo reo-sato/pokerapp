@@ -33,9 +33,9 @@ pokerapp/
 │   ├── events.py                  ← AudioEvent, CameraEvent, RFIDEvent データクラス
 │   ├── game_state.py              ← GameStateManager (スタック/ポット/ターン管理)
 │   ├── hand_log.py                ← ActionRecord, HandSummary, PotSettlement, RevealedHand
-│   ├── showdown_tracker.py        ← ShowdownTracker (Phase 1 skeleton, Phase 2-B で実装)
+│   ├── showdown_tracker.py        ← ShowdownTracker (Phase 1 skeleton, Phase 2-C で実装予定)
 │   ├── settlement.py              ← compute_pot_settlements / evaluate_hand_rank / distribute_split_pot (Phase 2-A 実装済)
-│   └── hand_finalizer.py          ← HandFinalizer (Phase 1 skeleton, Phase 2-B で engine._finalize_hand を置換)
+│   └── hand_finalizer.py          ← HandFinalizer.finalize (Phase 2-B 実装済、engine._finalize_hand の主経路)
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -404,16 +404,25 @@ BettingState の seat 別 contribution と RevealedHand から main / side pot �
 ``betting_state.folded_seats`` だけを参照する duck-typed 設計 (本物の `BettingState`
 とテスト stub の両方を受ける)。
 
-### `core/hand_finalizer.py` (Phase 1 skeleton)
+### `core/hand_finalizer.py` (Phase 2-B 実装済)
 
-Phase 2 予定: BettingState + showdown 観測 + board から `HandSummary` を組み立て、`integration/engine.py:_finalize_hand` を置き換える。
+BettingState + showdown 観測 + board から `HandSummary` を組み立て、`integration/engine.py:_finalize_hand` の主経路として使われる。
 
-- `HandFinalizer.finalize(betting_state, revealed_hands, board, pot_total, players_info, ...) → HandSummary`:
-  - `len(live_seats) == 1` → fold_win
-  - showdown 経路で revealed_hands が live_seats を完全に覆っていなければ `resolution_status="incomplete"`
-  - `settlement.compute_pot_settlements()` で main / side pot 計算
-  - 結果から `resolution_type` を `fold_win` / `showdown` / `showdown_split` / `sidepot_showdown` のいずれかに昇格
-  - `legacy_winner_finalize` で marked された旧 hand は将来 migration で再評価可能
+- `HandFinalizer.finalize(betting_state, board, revealed_hands, pot_total, players_info, *, hand_id, session_id, started_at, ended_at, blinds, actions, board_source="", winner_seat_hint=None) → HandSummary`
+  - `live_seats = active_seats - folded_seats` を計算
+  - `len(live_seats) == 1` → `_build_fold_win`: PotSettlement 1 件で `resolution_type="fold_win"`
+  - `len(live_seats) >= 2` で showdown 経路:
+    - board が 5 枚未満 → `_build_incomplete(reason="board_under_5")`
+    - revealed_hands が live_seats を覆っていない → `_build_incomplete(reason="revealed_hands_missing")`
+    - `settlement.compute_pot_settlements(...)` 例外 / 空 → `_build_incomplete(reason="settlement_exception"/"empty_pots")`
+    - 成功時: `len(pots) >= 2` → `sidepot_showdown`、`winning_seats` 複数 → `showdown_split`、それ以外 → `showdown`
+  - `len(live_seats) == 0` (退化) → incomplete
+  - `seat_payouts` は全 pot の payouts を seat 別合算
+  - `showdown_revealed_cards` は `RevealedHand` 集合の seat→cards 投影 (canonical は内部の RevealedHand)
+  - `winner_seat` (compatibility field) は最大 payout の seat (tie 時は最低 seat 番号)
+  - `winner_seat_hint` (音声 WINNER) は **補助観測**: settlement と食い違うと `review_required=True` を立てる ("Oracle 一発確定" ではなく異常検知材料)
+  - incomplete は常に `review_required=True`
+- `_pick_primary_winner(seat_payouts, fallback_hint, live_seats, active_seats)`: compat field の決定ヘルパ
 
 ### `integration/action_order.py`
 
@@ -534,7 +543,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 372 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 383 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -554,6 +563,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_bayesian_e2e.py | WINNER 後方修正 E2E (3-handed seat3 fold → winner=seat3 で flip) (v6.0+ M3, 3 件) |
 | test_settlement_models.py | RevealedHand / PotSettlement / HandSummary 新 field / PHH gate / legacy_winner_finalize E2E (Phase 1, 6 件) |
 | test_settlement_logic.py | distribute_split_pot / evaluate_hand_rank / compute_pot_settlements (heads-up / 3-way all-in / split / fold / 退化) (Phase 2-A, 20 件) |
+| test_hand_finalizer.py | HandFinalizer fold_win / showdown / sidepot_showdown / showdown_split / incomplete / winner_hint mismatch (Phase 2-B, 11 件) |
 
 ---
 
@@ -605,8 +615,11 @@ pytest tests/ --ignore=tests/test_vision.py
 | side pot 計算 (Stratified Decomposition) | ✅ 完了 (Phase 2-A) | `core/settlement.py:compute_pot_settlements` |
 | split pot 配分 (odd chip = lowest seat 優先) | ✅ 完了 (Phase 2-A) | `core/settlement.py:distribute_split_pot` |
 | hand evaluator (pokerkit StandardHighHand) | ✅ 完了 (Phase 2-A) | `core/settlement.py:evaluate_hand_rank` |
-| HandFinalizer 本実装 (engine._finalize_hand 置換) | 🔨 skeleton (Phase 2-B) | `core/hand_finalizer.py`、settlement core を呼び出す |
-| ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-B) | `core/showdown_tracker.py` |
+| HandFinalizer 本実装 (engine._finalize_hand 置換) | ✅ 完了 (Phase 2-B) | `core/hand_finalizer.py`: fold_win / showdown / showdown_split / sidepot_showdown / incomplete を判別、settlement core を呼んで pots を埋める |
+| engine._finalize_hand → HandFinalizer 経由化 | ✅ 完了 (Phase 2-B) | `_finalize_hand(winner_seat: Optional[int])` + `_apply_payouts_to_gamestate()` adapter |
+| `winner` 音声の補助観測化 (Oracle 級ではない) | ✅ 完了 (Phase 2-B) | `winner_seat_hint` として渡し、settlement と食い違うと review_required=True |
+| ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-C) | `core/showdown_tracker.py` |
+| gs.end_hand → end_hand_with_payouts 拡張 | ❌ 未着手 (Phase 2-C) | 現状 Phase 2-B では `_apply_payouts_to_gamestate` adapter が primary winner で legacy gs.end_hand を呼んでいる |
 | RFID hand boundary detector | ❌ 未着手 | Phase 2 別タスク |
 
 ---
@@ -964,11 +977,12 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 372 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 383 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
-pytest tests/test_settlement_models.py -v                                         # Phase 1
+pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
 pytest tests/test_settlement_logic.py -v                                          # Phase 2-A (settlement core)
+pytest tests/test_hand_finalizer.py -v                                            # Phase 2-B (HandFinalizer 単体)
 python main.py --cli                                                              # M1: logs/evidence_*.jsonl が増える
 python main.py                                                                    # M3: GUI で revise バナー確認
 python main.py --export-phh logs/session_xxx.json                                 # M3: PHH 出力 (Phase 1: resolution_status=="final" の hand のみ)
@@ -1065,19 +1079,25 @@ legacy 経路は不変だが、`HandSummary` 構築時に新 field を populate:
 
 `gs.end_hand(winner_seat)` の signature は **不変**。Phase 2 で finalizer に置換する際に `end_hand_with_payouts(payouts)` 等への拡張を検討。
 
-### Phase 2 へ持ち越す TODO
+### Phase 2 進捗
 
 **Phase 2-A 完了済み (settlement core)**:
 - ✅ `core/settlement.py:compute_pot_settlements()` (Stratified Side Pot Decomposition)
 - ✅ `core/settlement.py:evaluate_hand_rank()` (pokerkit `StandardHighHand.entry.index`)
 - ✅ `core/settlement.py:distribute_split_pot()` (odd chip は lowest seat 優先)
 
-**Phase 2-B 以降の残タスク**:
-- `core/showdown_tracker.py`: `observe()` / `is_showdown_ready()` / `project_to_summary_dict()` 本実装
-- `core/hand_finalizer.py`: `finalize()` 本実装。settlement core を呼び出して `pots` を埋め、`resolution_type` を `legacy_winner_finalize` から canonical (`fold_win` / `showdown` / `showdown_split` / `sidepot_showdown`) に昇格させる
-- `integration/engine.py`: `_finalize_hand` → HandFinalizer 呼び出しに置換、`winner_seat` を Optional 化検討
-- `core/game_state.py`: `end_hand(winner_seat)` を `end_hand_with_payouts(payouts: dict[int, int])` に拡張
+**Phase 2-B 完了済み (HandFinalizer + engine 置換)**:
+- ✅ `core/hand_finalizer.py:HandFinalizer.finalize()` — fold_win / showdown / showdown_split / sidepot_showdown / incomplete を判別、settlement core を呼んで `pots` を埋め、`resolution_type` を canonical 値へ昇格
+- ✅ `integration/engine.py:_finalize_hand(winner_seat: Optional[int])` を HandFinalizer 経由に置換。`legacy_winner_finalize` は engine 経路では発行されなくなった
+- ✅ `integration/engine.py:_apply_payouts_to_gamestate(summary)` — `seat_payouts` から primary winner を選び legacy `gs.end_hand` を呼ぶ暫定 bridge (Phase 2-C で撤去予定)
+- ✅ `winner` 音声を `winner_seat_hint` として **補助観測化**。settlement と食い違うと `review_required=True` を立てる ("Oracle 一発確定" 廃止)
+- ✅ pot_total を `betting_state.player_contrib_hand.values()` の総和から計算するよう修正 (Phase 1 では blind only + fold の hand が 0 を返していたバグを解消)
+
+**Phase 2-C 以降の残タスク**:
+- `core/showdown_tracker.py`: `observe()` / `is_showdown_ready()` / `project_to_summary_dict()` 本実装。現状 `engine._finalize_hand` が直接 `self._hole_cards` から `RevealedHand` を組んでいる
+- `core/game_state.py`: `end_hand(winner_seat)` を `end_hand_with_payouts(payouts: dict[int, int])` に拡張。これで split / sidepot 時の stack も正しく反映される
+- `integration/engine.py`: `_apply_payouts_to_gamestate` adapter を撤去し、`end_hand_with_payouts` 直呼び出しに変更
+- `HandSummary.winner_seat` を `Optional[int]` 化 (Phase 2-C で seat_payouts ベースに完全移行)
 - `output/phh_exporter.py`: PHH skip reason を構造化、export 失敗との区別を明示
 - RFID hand boundary detector (hand 開始 / 終了の自動検出)
-- `winner` 音声を「補助観測」に降格
 - `legacy_winner_finalize` でマーク済の旧 hand を新 finalizer で再評価する migration ツール (任意)
