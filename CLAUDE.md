@@ -32,7 +32,10 @@ pokerapp/
 │   ├── event_queue.py             ← EventQueue (スレッド間共有キュー)
 │   ├── events.py                  ← AudioEvent, CameraEvent, RFIDEvent データクラス
 │   ├── game_state.py              ← GameStateManager (スタック/ポット/ターン管理)
-│   └── hand_log.py                ← ActionRecord, HandSummary データクラス
+│   ├── hand_log.py                ← ActionRecord, HandSummary, PotSettlement, RevealedHand
+│   ├── showdown_tracker.py        ← ShowdownTracker (Phase 1 skeleton, Phase 2 で実装)
+│   ├── settlement.py              ← compute_pot_settlements / evaluate_hand_rank (Phase 1 skeleton)
+│   └── hand_finalizer.py          ← HandFinalizer (Phase 1 skeleton, Phase 2 で engine._finalize_hand を置換)
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -206,7 +209,7 @@ AudioEvent(action="winner") 到着
     ▼ HandSummary 構築 (修正後の _current_actions を読む) → JSON 書き込み 1 回のみ
 ```
 
-**初版の妥協**: 後方修正では `(action, amount)` のみ in-place mutate し、`pot_after`/`stack_after` は stale のまま残置 (`needs_review=True` で人手レビュー誘導)。完全 replay 型は将来拡張。
+**初版の妥協**: 後方修正では `(action, amount)` のみ in-place mutate し、`pot_after`/`stack_after` は stale のまま残置 (`needs_review=True` で「あとから修正可能性を保持」)。完全 replay 型は将来拡張。
 
 ### ハンド開始処理 (button → SB/BB → 自動 post → first actor)
 
@@ -367,6 +370,37 @@ raw 観測イベントを append-only な JSONL に記録するロガー。sessi
 - `extra` 引数で beam top-3 スナップショットなど追加メタデータを merge 可能
 - 書き込み失敗は warning ログを出して継続 (IntegrationThread をクラッシュさせない)
 
+### `core/showdown_tracker.py` (Phase 1 skeleton)
+
+Phase 2 予定: RFID / manual / 派生観測から `RevealedHand` を蓄積し、全 live seat の hole cards が揃った時点で showdown_ready を通知する。
+
+- `ShowdownTracker.observe(hand: RevealedHand)`: seat 単位の hole cards を取り込む (Phase 2 で実装)
+- `revealed_hands() → list[RevealedHand]`: 観測集合を返す
+- `is_showdown_ready(live_seats) → bool`: 全 live seat の hole cards が揃ったか
+- `project_to_summary_dict() → dict[int, list[str]]`: `HandSummary.showdown_revealed_cards` 用の簡略表現に投影
+- `reset()`: 新ハンド開始時に状態をクリア
+
+canonical な内部表現は `RevealedHand` (source / observed_at を持つ)。`HandSummary.showdown_revealed_cards` は JSON 公開用の簡略投影。
+
+### `core/settlement.py` (Phase 1 skeleton)
+
+Phase 2 予定: BettingState の seat 別 contribution と RevealedHand から、main / side pot を含む全 pot の決済を計算する。
+
+- `compute_pot_settlements(betting_state, revealed_hands, board) → list[PotSettlement]`: 各 seat の累積投入額を all-in 額で stratify し main / side pot を構築・決済 (Phase 2 で実装)
+- `evaluate_hand_rank(hole_cards, board) → int`: 7-card から hand rank 整数値 (pokerkit 連携、Phase 2 で実装)
+- `distribute_split_pot(pot_amount, winning_seats, button_seat=None) → dict[int, int]`: split pot を均等分配。odd chip handling は保留中
+
+### `core/hand_finalizer.py` (Phase 1 skeleton)
+
+Phase 2 予定: BettingState + showdown 観測 + board から `HandSummary` を組み立て、`integration/engine.py:_finalize_hand` を置き換える。
+
+- `HandFinalizer.finalize(betting_state, revealed_hands, board, pot_total, players_info, ...) → HandSummary`:
+  - `len(live_seats) == 1` → fold_win
+  - showdown 経路で revealed_hands が live_seats を完全に覆っていなければ `resolution_status="incomplete"`
+  - `settlement.compute_pot_settlements()` で main / side pot 計算
+  - 結果から `resolution_type` を `fold_win` / `showdown` / `showdown_split` / `sidepot_showdown` のいずれかに昇格
+  - `legacy_winner_finalize` で marked された旧 hand は将来 migration で再評価可能
+
 ### `integration/action_order.py`
 
 ディーラーボタン位置を起点とした SB/BB/actor 算出のヘルパ群（pure functions）。
@@ -486,7 +520,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 346 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 352 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -504,6 +538,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_inference_equivalence.py | infer_action() 薄アダプタの legacy 等価性 (v6.0+ M2, 16 件) |
 | test_beam_search.py | BeamEngine 単体 (剪定 / 決定論 / WINNER フィルタ / snapshot) (v6.0+ M3, 15 件) |
 | test_bayesian_e2e.py | WINNER 後方修正 E2E (3-handed seat3 fold → winner=seat3 で flip) (v6.0+ M3, 3 件) |
+| test_settlement_models.py | RevealedHand / PotSettlement / HandSummary 新 field / PHH gate / legacy_winner_finalize E2E (Phase 1, 6 件) |
 
 ---
 
@@ -548,6 +583,15 @@ pytest tests/ --ignore=tests/test_vision.py
 | 粒子フィルタ (確率的サンプリング) | ❌ 未実装 (v6.0+ B4) | beam_search.enable_resample フラグだけ用意済み |
 | 完全 replay 型後方修正 (pot/stack 再計算) | ❌ 未実装 (将来) | 現在は (action, amount) のみ in-place mutate、pot_after/stack_after は stale |
 | ディーラー別オンライン学習 | ❌ 未実装 (v6.0+) | §「将来計画」を参照 |
+| **Settlement 中心データモデル (HandSummary 拡張)** | ✅ 完了 (Phase 1) | `resolution_status` / `resolution_type` / `seat_payouts` / `pots` / `showdown_revealed_cards` |
+| **PotSettlement / RevealedHand dataclass** | ✅ 完了 (Phase 1) | `core/hand_log.py` 同居 (暫定配置、Phase 2 で再評価) |
+| **PHH 出力 gate (final のみ出力)** | ✅ 完了 (Phase 1) | `phh_exporter.export()` 先頭で意図的 skip |
+| **showdown_tracker / settlement / hand_finalizer skeleton** | ✅ 完了 (Phase 1) | NotImplementedError stub、Phase 2 で本実装 |
+| side pot 計算 | 🔨 skeleton (Phase 2) | `core/settlement.py`、all-in 頻発のため**実質必須** |
+| split pot 配分 (odd chip 保留) | 🔨 skeleton (Phase 2) | `core/settlement.py:distribute_split_pot` |
+| hand evaluator (pokerkit) | 🔨 skeleton (Phase 2) | `core/settlement.py:evaluate_hand_rank` |
+| HandFinalizer 本実装 (engine._finalize_hand 置換) | 🔨 skeleton (Phase 2) | `core/hand_finalizer.py` |
+| RFID hand boundary detector | ❌ 未着手 | Phase 2 別タスク |
 
 ---
 
@@ -565,7 +609,7 @@ pytest tests/ --ignore=tests/test_vision.py
 
 4. **音声/RFID 時刻アライメント**: ディーラー固有の遅延分布 `(μ_d, σ_d)` を学習し、確率窓 `N(τ - t_obs; μ_d, σ_d²)` で固定 ±2s ウィンドウを置換。
 
-5. **ハンド終了時の後方修正**: WINNER 宣言・最終ポット額・残スタックは Oracle 級の強観測。粒子集合をこれらの制約で再フィルタし、MAP 列に collapse。残った曖昧粒子のみ `needs_review` で GUI へ。
+5. **ハンド終了時の後方修正**: 最終ポット額・残スタックは強観測。粒子集合をこれらの制約で再フィルタし、MAP 列に collapse。残った曖昧粒子のみ `needs_review` で GUI へ。**Phase 1 以降は WINNER 音声を canonical な終局表現に使わず**、hand state (live_seats / RevealedHand / board / pot) から自律的に finalization する設計に移行する。
 
 6. **ディーラー別オンライン学習**: 観測モデルパラメータ (音声遅延 / RFID 遅延 / アクション語彙頻度 / 位置別 prior / 数値表現の好み) を Dirichlet/Normal-Gamma で逐次ベイズ更新。Whisper/Vosk 本体は不変、観測モデル側だけで適応する。
 
@@ -904,10 +948,116 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 346 件 pass (280 baseline + 66 new)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 352 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
+pytest tests/test_settlement_models.py -v                                         # Phase 1
 python main.py --cli                                                              # M1: logs/evidence_*.jsonl が増える
 python main.py                                                                    # M3: GUI で revise バナー確認
-python main.py --export-phh logs/session_xxx.json                                 # M3: PHH 出力
+python main.py --export-phh logs/session_xxx.json                                 # M3: PHH 出力 (Phase 1: resolution_status=="final" の hand のみ)
 ```
+
+---
+
+## Phase 1: ハンド終局を settlement 中心に — データモデル整理 ✅ 実装済み
+
+`HandSummary` の終局表現を `winner_seat` 単数中心から、**settlement (resolution_status / resolution_type / seat_payouts / pots) 中心** へ移すための「器」を作るフェーズ。重いロジック (side pot 計算、hand evaluator、finalizer 本体) は Phase 2 以降。
+
+**背景**: all-in 頻発・side pot 必須・split pot 必須のライブポーカーでは、`winner_seat: int` 単数では終局を表現しきれない。複数 pot に対して別々の eligible / winning seat 集合と payouts を持たせる必要がある。
+
+### Phase 1 で導入したデータモデル
+
+`core/hand_log.py` に同居:
+
+| 型 | 役割 |
+|---|---|
+| `ResolutionStatus = Literal["final", "provisional", "incomplete"]` | PHH 出力対象になるかの 3 値 |
+| `ResolutionType = Literal["fold_win", "showdown", "showdown_split", "sidepot_showdown", "legacy_winner_finalize"]` | 終局タイプ。最後の値は migration marker |
+| `PotType = Literal["main", "side"]` | pot 種別 |
+| `RevealedCardSource = Literal["rfid", "manual", "derived"]` | hole cards の出所 |
+| `RevealedHand(seat, cards, source, observed_at)` | showdown 時の hole cards (canonical 内部表現) |
+| `PotSettlement(amount, eligible_seats, winning_seats, payouts, pot_type)` | 1 つの pot の決済結果 |
+
+`HandSummary` に追加した 5 field:
+- `resolution_status: ResolutionStatus = "final"` — 通常経路は `_finalize_hand` で常に `"final"` 設定 (既存挙動互換)
+- `resolution_type: Optional[ResolutionType] = None` — `_finalize_hand` 経由では `"legacy_winner_finalize"` を明示設定。default=None は dataclass 純粋構築用
+- `seat_payouts: dict[int, int]` — seat 別の正味払出。legacy 経路では `{winner_seat: pot_total}`
+- `showdown_revealed_cards: dict[int, list[str]]` — JSON 公開用の簡略表現 (canonical は内部の `RevealedHand`)
+- `pots: list[PotSettlement]` — 各 pot の決済。**Phase 1 では意図的に空のまま** (fake な eligible_seats を入れると Phase 2 で側 pot 計算と矛盾)
+
+### 設計思想
+
+ハンドの終端は次のいずれかで決まる:
+- **fold_win**: live player が 1 人に絞れた時点
+- **showdown**: board + RFID で revealed hole cards から rank 評価
+- **showdown_split**: 同 rank で payouts を均等分配 (odd chip は Phase 2 で議論)
+- **sidepot_showdown**: all-in を含む複数 pot の決済
+- **legacy_winner_finalize**: Phase 0–M3 経由で閉じた既存 hand の migration marker (canonical な resolution type の集合には最終的に含まれるべきではない)
+
+`winner` 音声入力は **強観測ではなく補助観測** として扱う（M1–M3 で「Oracle 級」と表現したのは過剰、Phase 2 で finalizer が hand state から自律的に決定する設計が canonical）。`needs_review` は「人手レビュー必須」ではなく **「あとから修正可能性を保持」** の意味。
+
+### `winner_seat` の位置づけ（重要）
+
+Phase 1 では `winner_seat: int` を required のまま温存するが、**canonical な終局表現ではなく後方互換のための compatibility field**。今後の canonical は:
+- `resolution_status` / `resolution_type`
+- `seat_payouts`
+- `pots`
+
+split pot や side pot を含む hand では `winner_seat` 単数では表現できないため、Phase 2 以降は `seat_payouts` / `pots` を読むコードを推奨。`winner_seat` は段階的に Optional 化または `primary_winner_seat` 等への rename を検討。
+
+### `showdown_revealed_cards` と `RevealedHand` の関係
+
+JSON 出力で扱う `showdown_revealed_cards: dict[int, list[str]]` は **簡略表現（外部投影）**。canonical な内部表現は `RevealedHand` (source / observed_at を持つ) で、将来 `ShowdownTracker` が保持する。`HandFinalizer` は `RevealedHand` の集合を読み、外部公開時に `showdown_revealed_cards` 形式へ投影する。
+
+### PHH 出力の方針
+
+PHH 出力対象は **`resolution_status == "final"` の hand のみ**。それ以外 (`provisional` / `incomplete`) は意図的 skip であり export エラーではない。`output/phh_exporter.py` の `export()` / `write()` / `write_session()` すべてに gate あり。
+
+Phase 1 戻り値は単純に `""`、Phase 2 で skip reason を構造化 (Enum or `SkipReason` dataclass) 予定。
+
+### アーキテクチャの重心変更
+
+旧 (M1–M3 後):
+```
+観測 → 推定 → ActionRecord → (WINNER 後方修正) → JSON
+```
+
+新 (Phase 1 以降):
+```
+観測収集 (ASR / RFID)
+    ↓
+hand segmentation / state tracking (BettingState + 未実装 boundary detector)
+    ↓
+settlement-ready な hand state 形成 (live_seats, hole_cards, board, pot)
+    ↓
+finalization (fold / showdown / split / side pot)   ← Phase 2: HandFinalizer
+    ↓
+HandSummary {resolution_status="final", pots, seat_payouts, ...}
+    ↓
+final hand のみ PHH export
+```
+
+### `integration/engine.py:_finalize_hand` の Phase 1 挙動
+
+legacy 経路は不変だが、`HandSummary` 構築時に新 field を populate:
+- `resolution_status="final"` (既存挙動互換)
+- `resolution_type="legacy_winner_finalize"` (migration marker)
+- `seat_payouts={winner_seat: pot_total}` (確定情報のみ)
+- `pots=[]` (空のまま、Phase 2 で再計算する前提)
+- `showdown_revealed_cards={}` (Phase 2 で ShowdownTracker から投影)
+
+`gs.end_hand(winner_seat)` の signature は **不変**。Phase 2 で finalizer に置換する際に `end_hand_with_payouts(payouts)` 等への拡張を検討。
+
+### Phase 2 へ持ち越す TODO
+
+- `core/settlement.py`: `compute_pot_settlements()` 本実装 (all-in stratify アルゴリズム)
+- `core/settlement.py`: `evaluate_hand_rank()` の pokerkit 連携
+- `core/settlement.py`: `distribute_split_pot()` (odd chip handling 含む)
+- `core/showdown_tracker.py`: `observe()` / `is_showdown_ready()` / `project_to_summary_dict()` 本実装
+- `core/hand_finalizer.py`: `finalize()` 本実装、`engine._finalize_hand` を置換
+- `integration/engine.py`: `_finalize_hand` → HandFinalizer 呼び出しに置換、`winner_seat` を Optional 化検討
+- `core/game_state.py`: `end_hand(winner_seat)` を `end_hand_with_payouts(payouts: dict[int, int])` に拡張
+- `output/phh_exporter.py`: PHH skip reason を構造化、export 失敗との区別を明示
+- RFID hand boundary detector (hand 開始 / 終了の自動検出)
+- `winner` 音声を「補助観測」に降格
+- `legacy_winner_finalize` でマーク済の旧 hand を新 finalizer で再評価する migration ツール (任意)

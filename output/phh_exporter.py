@@ -46,24 +46,49 @@ class PHHExporter:
     # ――― 公開 API ―――
 
     def export(self, summary: HandSummary) -> str:
-        """HandSummary を PHH TOML 文字列に変換して返す。"""
+        """HandSummary を PHH TOML 文字列に変換して返す。
+
+        Phase 1: ``resolution_status != "final"`` の hand は **意図的 skip** (export 失敗ではない)。
+        TODO Phase 2: skip reason を構造化 (Enum or log code) し、export 失敗と区別可能にする。
+        """
+        if summary.resolution_status != "final":
+            logger.info(
+                "PHH export skipped: hand %d status=%s (intentional, not an error)",
+                summary.hand_id, summary.resolution_status,
+            )
+            return ""
         data = self._build_phh_dict(summary)
         return _to_toml(data)
 
     def write(self, summary: HandSummary, path: Path) -> None:
-        """PHH TOML ファイルに書き出す。"""
+        """PHH TOML ファイルに書き出す。
+
+        ``resolution_status != "final"`` の hand は意図的 skip され、ファイルは作成されない。
+        """
         content = self.export(summary)
+        if not content:
+            # 意図的 skip: ログは export() 側で出している
+            return
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         logger.info("PHH exported: %s", path)
 
     def write_session(self, summaries: list[HandSummary], directory: Path) -> list[Path]:
-        """セッション内の全ハンドを {hand_id:04d}.phh として書き出す。"""
+        """セッション内の全ハンドを {hand_id:04d}.phh として書き出す。
+
+        ``resolution_status != "final"`` の hand はファイル化されないので結果リストにも含めない。
+        """
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         paths = []
         for s in summaries:
+            if s.resolution_status != "final":
+                logger.info(
+                    "PHH export skipped: hand %d status=%s (intentional, not an error)",
+                    s.hand_id, s.resolution_status,
+                )
+                continue
             out = directory / f"{s.hand_id:04d}.phh"
             self.write(s, out)
             paths.append(out)

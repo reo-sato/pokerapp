@@ -672,6 +672,16 @@ class IntegrationThread(threading.Thread):
                 {s: cards for s, cards in self._hole_cards.items()},
             )
 
+        pot_total = sum(
+            a.amount for a in self._current_actions
+            if a.action in ("bet", "raise", "call", "allin")
+        )
+
+        # Phase 1 settlement: seat_payouts は確定情報なので埋める。
+        # pots は Phase 2 settlement.compute_pot_settlements() が走るまで意図的に空。
+        # fake な eligible_seats を入れると Phase 2 で side pot を正しく計算したとき矛盾する。
+        seat_payouts = {winner_seat: int(pot_total)}
+
         summary = HandSummary(
             hand_id=gs.hand_id,
             session_id=self._json_writer._session_id,
@@ -681,15 +691,18 @@ class IntegrationThread(threading.Thread):
             board=list(self._board_cards),
             board_source=self._board_source,
             players=players_info,
-            pot_total=sum(
-                a.amount for a in self._current_actions
-                if a.action in ("bet", "raise", "call", "allin")
-            ),
+            pot_total=pot_total,
             winner_seat=winner_seat,
             actions=list(self._current_actions),
             review_required=any(a.needs_review for a in self._current_actions),
             folded_seats=[a.seat for a in self._current_actions if a.action == "fold"],
             all_in_seats=[a.seat for a in self._current_actions if a.action == "allin"],
+            # Phase 1: settlement 中心の field 群を populate。
+            resolution_status="final",
+            resolution_type="legacy_winner_finalize",  # Phase 0–M3 経由で閉じた hand のマーカー
+            seat_payouts=seat_payouts,
+            showdown_revealed_cards={},                # Phase 2 で ShowdownTracker から投影
+            pots=[],                                    # Phase 2 で settlement が埋める
         )
 
         self._json_writer.append_hand_summary(summary)
