@@ -63,7 +63,8 @@ pokerapp/
 │   ├── phh_exporter.py            ← PHHExporter (PHH 形式エクスポート)
 │   ├── evidence_log.py            ← EvidenceLogWriter (v6.0+ M1): logs/evidence_<session>.jsonl, raw 観測の append-only ログ
 │   ├── replay_hand.py             ← load_evidence_log / extract_hand_windows (Phase 2-C): hand window 再生ユーティリティ
-│   └── reconstruct_session.py     ← CLI (Phase 3): session JSON + evidence JSONL を読んで各 hand を再構成、online↔offline diff を書く
+│   ├── reconstruct_session.py     ← CLI (Phase 3): session JSON + evidence JSONL を読んで各 hand を再構成、online↔offline diff を書く
+│   └── inspect_reconstruction.py  ← CLI (Phase 4-C1): reconstruct_<session>.jsonl を読んで [OK]/[REVIEW]/[SKIPPED] 単位の一覧を表示
 │
 ├── gui/
 │   └── dashboard.py               ← GUIDashboard (customtkinter)
@@ -567,6 +568,41 @@ Phase 4-B CLI 動作: session JSON の `blinds.sb` / `blinds.bb` (トップレ�
 発信は別ファイル (`reconstruct_<session>.jsonl`)。後段の GUI / 監視ツール / Phase 4+
 の自動 patch ロジックがこれを読んで判断する想定。
 
+### `output/inspect_reconstruction.py` (Phase 4-C1 実装済)
+
+`output.reconstruct_session` が出す ``reconstruct_<session>.jsonl`` を読んで、
+hand 単位に **1 行サマリ** を標準出力に出す read-only CLI。
+
+```
+hand 1 [OK] bootstrap=online_summary reason=reconstructed_no_diff
+hand 2 [REVIEW] bootstrap=raw reason=reconstructed_with_diff diff_fields=resolution_type,seat_payouts
+hand 3 [SKIPPED] bootstrap=None reason=reconstruction_skipped
+```
+
+**使い方**:
+```bash
+python -m output.inspect_reconstruction --reconstruct logs/reconstruct_session_xxx.jsonl
+```
+
+**オプション**:
+- `--only-needs-review`: ``needs_review=true`` の hand のみ表示
+- `--fields A,B,C`: diff のうち指定 field 名のみを ``diff_fields=`` に出す
+  (例: monitoring で settlement 系の差分だけ拾いたいときは
+  `--fields resolution_type,seat_payouts`)
+- `--quiet`: loader の info ログを抑制
+
+**ステータスラベル** (優先順位順):
+1. `[SKIPPED]` — ``offline_summary`` が ``None`` または
+   ``reason == "reconstruction_skipped"``
+2. `[REVIEW]` — ``needs_review`` が truthy または
+   ``reason == "reconstructed_with_diff"``
+3. `[OK]` — それ以外 (= reconstruct 成功 + diff なし)
+
+**約束**: ``inspect_reconstruction`` は ``reconstruct_session`` が吐いた JSONL
+を読むだけの read-only ツール。online JSON / PHH / GameStateManager /
+``_last_reconstruction_by_hand_id`` のいずれにも触らない。GUI / 監視ツールが
+このログ要約を取り込むまでの当座の可視化手段。
+
 ### `output/replay_hand.py` (Phase 2-C 実装済)
 
 - `EvidenceRecord(timestamp, kind, event, payload)`: 1 観測の type-restored 表現
@@ -712,7 +748,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 437 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 451 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -737,6 +773,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_hand_reconstructor.py | HandReconstructor (online↔offline diff / fallback / 複数 hand / _compute_diff) + reconstruct_session CLI round-trip (Phase 3, 14 件) |
 | test_reconstructor_live_hook.py | IntegrationThread から advisory reconstruct を呼ぶ live hook (online_summary 注入 / 複数 hand / 例外時 online 不変 / online_summary=None で skipped or raw bootstrap) (Phase 4-A + 4-B, 10 件) |
 | test_hand_reconstructor_bootstrap.py | bootstrap 3 段階優先 (initial_state / raw / online_summary) + skipped + CLI round-trip で `bootstrap_source` 反映 (Phase 4-B, 11 件) |
+| test_inspect_reconstruction_cli.py | inspect_reconstruction CLI (label 判定 / --only-needs-review / --fields filter / 壊れた JSONL skip) (Phase 4-C1, 14 件) |
 
 ---
 
@@ -798,6 +835,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | 後処理 CLI (online↔offline diff) | ✅ 完了 (Phase 3) | `output/reconstruct_session.py`: session JSON + evidence JSONL → `reconstruct_<id>.jsonl` |
 | Live advisory reconstruct hook (IntegrationThread から online_summary 注入) | ✅ 完了 (Phase 4-A) | `integration/engine.py`: `_finalize_hand` 末尾で `_invoke_reconstructor_hook(hand_id, online_summary=summary)` を呼び、結果を `_last_summary_by_hand_id` / `_last_reconstruction_by_hand_id` に保持。online JSON / PHH / GameStateManager は mutate しない |
 | Raw-only bootstrap (online_summary 不要の HandReconstructor 起動) | ✅ 完了 (Phase 4-B) | `HandReconstructor._bootstrap_from_events`: RFID `role="seat"` 観測 + コンストラクタ `default_sb`/`default_bb` で BettingState を起こす。button は最小 seat 番号 (deterministic, `button_inferred=True`)。`HandReconstructionResult.bootstrap_source` / `bootstrap_meta` で診断情報を返す。CLI 出力 / live hook の双方で稼働 |
+| Reconstruct 結果可視化 CLI (read-only) | ✅ 完了 (Phase 4-C1) | `output/inspect_reconstruction.py`: `reconstruct_<session>.jsonl` を読んで `[OK]` / `[REVIEW]` / `[SKIPPED]` ラベル付きで hand 単位サマリを出す。`--only-needs-review` / `--fields A,B` フィルタ対応。online JSON / PHH / live hook 結果には触らない |
 | ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
 | gs.end_hand → end_hand_with_payouts 拡張 | ❌ 未着手 (Phase 2-D 以降) | 現状 Phase 2-B では `_apply_payouts_to_gamestate` adapter が primary winner で legacy gs.end_hand を呼んでいる |
 
@@ -1156,7 +1194,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 437 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 451 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
@@ -1166,6 +1204,8 @@ pytest tests/test_hand_boundary.py -v                                           
 pytest tests/test_hand_reconstructor.py -v                                        # Phase 3 (HandReconstructor + CLI)
 pytest tests/test_reconstructor_live_hook.py -v                                   # Phase 4-A (IntegrationThread live advisory hook)
 pytest tests/test_hand_reconstructor_bootstrap.py -v                              # Phase 4-B (3-stage bootstrap + CLI round-trip)
+pytest tests/test_inspect_reconstruction_cli.py -v                                # Phase 4-C1 (inspect_reconstruction CLI)
+python -m output.inspect_reconstruction --reconstruct logs/reconstruct_session_xxx.jsonl  # Phase 4-C1: reconstruct 結果一覧
 python -m output.reconstruct_session --session logs/<session>.json                # Phase 3 CLI: online↔offline diff を出力
 python main.py --cli                                                              # M1: logs/evidence_*.jsonl が増える
 python main.py                                                                    # M3: GUI で revise バナー確認
