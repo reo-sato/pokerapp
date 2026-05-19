@@ -41,6 +41,22 @@ Phase 3: hand window 単位の **遡及的 (retrospective) 再推定** 本実装
     に推定情報が入る。button_seat は raw からは確定できないため最小 seat 番号で
     deterministic に置く (``button_inferred=True`` でマーク)。
 
+    **raw-only bootstrap の意味論 (Phase 4-B で意図的に固定した点)**:
+      - **Phase 4-B raw bootstrap は RFID-centric**: active seats は
+        ``RFID role="seat"`` 観測のみから取る。AudioEvent は seat 情報を持たない
+        ので、現時点では bootstrap の signal source ではない (Phase 4-C 以降で
+        「シート N が fold」等の自然言語 seat 推定を加えるのは別 commit の候補)。
+      - **``button = min(active_seats)`` は deterministic seed であって truth 推定
+        ではない**: 「最も button らしい seat」を確率的に推定したものではなく、
+        ``BettingState.start_hand`` を起こすために必要な値を確定的に選んでいる。
+        実際の button が誰だったかは raw からは確定不能。
+        ``bootstrap_meta["button_inferred"]=True`` で消費側にこの事実を伝える。
+      - **``bootstrap_meta["confidence"] = 0.5`` は fixed heuristic confidence で
+        あって calibrated probability ではない**: モデルが計算した posterior でも
+        Brier-calibrated でもなく、**「この heuristic は truth ではない」という印**
+        (= 結果を 0.5 weight で扱って下さい、というメッセージ)。signal 強度に
+        応じた動的計算は Phase 4-C+ の課題。
+
   - **``winner_seat_hint`` は oracle ではなく終端の補助制約**:
     ``AudioEvent(action="winner")`` から抽出した seat は **強観測ではなく**、
     ``beam.apply_winner_filter(winner_seat_hint, final_pot=None)`` への入力として
@@ -524,6 +540,13 @@ class HandReconstructor:
     ) -> "Optional[tuple[BettingState, dict[str, Any]]]":
         """Phase 4-B: raw EvidenceRecord 列から BettingState を起こす。
 
+        **Phase 4-B のスコープ (signal source)**:
+          この実装は **RFID-centric**。active seats は ``RFID role="seat"`` 観測
+          のみから推定する。AudioEvent は seat 情報を持たないため、現時点で
+          bootstrap signal にはなっていない (Phase 4-C 以降の signal 強化候補:
+          音声 raw_text から「シート N が fold」等の自然言語 seat 抽出、camera
+          dependency など)。
+
         **戦略 (conservative)**:
           - active seats: ``RFID(role="seat", card=非空)`` を観測した seat 集合。
             音声 (AudioEvent) には seat 情報が無いので、現状 RFID 観測が唯一の
@@ -531,12 +554,21 @@ class HandReconstructor:
           - blinds amount: コンストラクタの ``default_sb`` / ``default_bb`` から取る
             (audio に SB_POST/BB_POST の seat 情報は無いため raw-only では推定不可)。
             **どちらかが None なら bootstrap 失敗**。
-          - button_seat heuristic: deterministic に
-            ``active_seats[0]`` (= 最小 seat 番号) を button と仮定。これは raw
-            evidence では truth を確定できないため、``bootstrap_meta["button_inferred"]
-            = True`` で記録し、消費側が信頼度を低く扱えるようにする。
+          - button_seat: ``active_seats[0]`` (= 最小 seat 番号) を **deterministic
+            seed** として採用する。これは「最も button らしい seat」を確率的に
+            推定したものではなく、``BettingState.start_hand`` を起こすために
+            確定的に選ぶ値。実際の button が誰だったかは raw からは確定不能なので、
+            ``bootstrap_meta["button_inferred"]=True`` で消費側に "truth claim では
+            ない" 旨を伝える。
           - SB/BB seat は ``BettingState.start_hand`` 側のルール (HU: BTN=SB、
             non-HU: SB = BTN の左隣) に従って導出される。
+
+        **``bootstrap_meta["confidence"]`` の意味**:
+          固定値 ``0.5`` を返すが、これは **fixed heuristic confidence** であって
+          calibrated probability ではない (= モデルが計算した posterior でも
+          Brier-calibrated な値でもない)。「この heuristic は truth ではない」
+          という印 (= 0.5 weight で扱って下さいというメッセージ) に過ぎない。
+          signal 強度に応じた動的 confidence は Phase 4-C+ の課題。
 
         Returns:
             ``(BettingState, meta)`` または ``None`` (失敗時)。``meta`` は
@@ -562,7 +594,9 @@ class HandReconstructor:
             return None
 
         active_seats = sorted(seats_with_hole_cards)
-        # heuristic: lowest seat number is button (deterministic、conservative)
+        # button は deterministic seed: 「最も button らしい」推定ではなく、
+        # BettingState.start_hand を起こすために確定的に選ぶ値。実際の button は
+        # raw からは確定不能 (bootstrap_meta["button_inferred"]=True でマーク)。
         button_seat = active_seats[0]
         sb_seat, bb_seat = compute_blinds(button_seat, active_seats)
 
@@ -584,13 +618,15 @@ class HandReconstructor:
             "sb_seat": int(sb_seat),
             "bb_seat": int(bb_seat),
             "button_seat": int(button_seat),
-            "button_inferred": True,           # raw-only では truth ではない
-            "blinds_inferred": True,           # default_sb / default_bb 由来
+            "button_inferred": True,    # truth 推定ではなく deterministic seed である印
+            "blinds_inferred": True,    # default_sb/bb 由来 (raw からは推定不可)
             "signals": {
                 "rfid_seat_observations": sorted(int(s) for s in seats_with_hole_cards),
             },
-            # confidence は operational metric (詳細はモジュール docstring 参照)。
-            # raw-only bootstrap は signal が乏しいので低め (0.5) に固定する。
+            # `confidence` は fixed heuristic confidence。raw bootstrap が truth では
+            # ないことの印 (= 0.5 weight で扱って下さいというメッセージ) であって、
+            # calibrated probability (posterior / Brier-calibrated 値) ではない。
+            # signal 強度に応じた動的計算は Phase 4-C+ の課題。
             "confidence": 0.5,
         }
         return bs, meta

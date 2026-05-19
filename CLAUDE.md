@@ -549,10 +549,10 @@ python -m output.reconstruct_session --session logs/<session>.json
   "sb_seat": int,
   "bb_seat": int,
   "button_seat": int,
-  "button_inferred": true,          // raw からは truth ではない旨を示す
-  "blinds_inferred": true,          // default_sb/bb 由来であることを示す
+  "button_inferred": true,          // button = min(active_seats) は deterministic seed (truth 推定ではない)
+  "blinds_inferred": true,          // SB/BB amount は default_sb/bb 由来 (raw からは推定不可)
   "signals": {"rfid_seat_observations": [int, ...]},
-  "confidence": 0.5                 // raw bootstrap の固定 confidence (operational)
+  "confidence": 0.5                 // fixed heuristic confidence (calibrated probability ではない)
 }
 ```
 
@@ -1461,13 +1461,28 @@ retrospective に再評価して **incomplete → final** に昇格させる経�
   raw bootstrap が成立する
 
 **raw-only bootstrap の制約 (明文化)**:
+
+- **Phase 4-B raw bootstrap は RFID-centric (audio は bootstrap signal ではない)**:
+  active seats / hole cards は ``RFID role="seat"`` 観測のみから取る。AudioEvent
+  は seat 情報を持たないので、現時点では bootstrap の signal source ではない。
+  Phase 4-C 以降で「シート N が fold」等の自然言語からの seat 抽出や camera
+  dependency を加えるのは別 commit の候補。
+- **`button = min(active_seats)` は deterministic seed であって truth 推定ではない**:
+  「最も button らしい seat」を確率的に推定したものではなく、
+  ``BettingState.start_hand`` を起こすために確定的に選ぶ値。実際の button が
+  誰だったかは raw からは分からないので
+  ``bootstrap_meta["button_inferred"]=True`` で消費側にこの事実を伝える。
+  実際の button と異なれば後段の `_compute_diff` で `actions` の差異として
+  現れ、`needs_review=True` が立つ。
+- **`bootstrap_meta["confidence"] = 0.5` は fixed heuristic confidence であって
+  calibrated probability ではない**: モデルが計算した posterior でも
+  Brier-calibrated な値でもなく、**「この heuristic は truth ではない」という印**
+  (= 結果を 0.5 weight で扱って下さい、というメッセージ)。signal 強度に応じた
+  動的計算は Phase 4-C+ の課題。
 - audio events には seat 情報が無いため、SB_POST/BB_POST の seat 推定は不可。
   blinds 額は呼び出し側 (CLI: session JSON のトップ / 各 hand から、
   live hook: GameStateManager / IntegrationThread から) を介して default として
   渡す必要がある
-- button は raw からは truth として決まらない。deterministic に最小 seat 番号を
-  選ぶ heuristic を採用。実際の button と異なれば後段の `_compute_diff` で
-  `actions` の差異として現れ、`needs_review=True` が立つ
 - raw bootstrap 失敗条件:
   - RFID `role="seat"` 観測が 2 seat 未満
   - `default_sb` または `default_bb` が None / 0 以下
