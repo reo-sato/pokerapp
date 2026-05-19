@@ -389,6 +389,13 @@ canonical な内部表現は `RevealedHand` (source / observed_at を持つ)。`
 
 BettingState の seat 別 contribution と RevealedHand から main / side pot を含む全 pot の決済を計算する pure logic 群。HandFinalizer や engine への組み込みは Phase 2-B 以降。
 
+**用語 (関数間で一貫)**:
+- **`eligible_seats`**: その pot を**勝ちうる**非 fold seat 集合 = `layer_seats - folded_seats`。fold 済み seat の chips は pot の原資には残るが、彼ら自身は eligible には入らない
+- **`contenders`**: `eligible_seats` のうち**現時点で revealed hand があり rank 評価できる** seat 集合 = `eligible_seats ∩ {rh.seat for rh in revealed_hands}`。muck した seat や RFID 未観測 seat は eligible だが contenders から外れる
+- **`winning_seats`**: `contenders` の中で最大 rank の seat 群 (split 含む)
+- Phase 2-B HandFinalizer は「eligible はいるが contenders が空 / 不足」を `incomplete` の判定材料に使う
+
+**API**:
 - `compute_pot_settlements(betting_state, revealed_hands, board) → list[PotSettlement]`:
   Stratified Side Pot Decomposition。`player_contrib_hand` を最小正額で層化し、各層で
   pot_amount = min_pos × len(layer_seats) を計算。eligible は layer_seats から folded を除外。
@@ -403,9 +410,18 @@ BettingState の seat 別 contribution と RevealedHand から main / side pot �
   優先 (lowest-seat priority)** で配分。例: `(1001, [2, 5, 9])` → `{2:334, 5:334, 9:333}`。
   `button_seat` は将来 (button 隣優先など別ルールに切り替え) の拡張ポイントで現状未使用。
 
-`compute_pot_settlements` は ``betting_state.player_contrib_hand`` と
-``betting_state.folded_seats`` だけを参照する duck-typed 設計 (本物の `BettingState`
-とテスト stub の両方を受ける)。
+**前提とスコープ (重要)**:
+- `evaluate_hand_rank()` は **Texas Hold'em + StandardHighHand (high-hand)** 専用。
+  「entry.index が大きいほど強い」の単調性は pokerkit の StandardHighHand ルックアップ
+  テーブルが保証している性質であり、他 variant には**そのまま使えない**:
+  - **Lowball** (2-7 / A-5): 弱い手ほど強い → 単調性の向きが逆
+  - **Hi/Lo split** (Omaha Hi/Lo 等): low hand 評価器が別途必要
+  - **Short deck (6+)**: フラッシュとフルハウスの順位が変わる
+- 他 variant 対応は別の評価関数 (例: `evaluate_lowball_hand_rank`) を追加し、
+  HandFinalizer 側で variant に応じて使い分ける設計に拡張する想定
+- `compute_pot_settlements` は ``betting_state.player_contrib_hand`` と
+  ``betting_state.folded_seats`` だけを参照する duck-typed 設計 (本物の `BettingState`
+  とテスト stub の両方を受ける)
 
 ### `core/hand_boundary.py` (Phase 2-C 実装済)
 
@@ -1154,6 +1170,43 @@ legacy 経路は不変だが、`HandSummary` 構築時に新 field を populate:
 - ✅ `winner` 音声を `winner_seat_hint` として **補助観測化**。settlement と食い違うと `review_required=True` を立てる ("Oracle 一発確定" 廃止)
 - ✅ pot_total を `betting_state.player_contrib_hand.values()` の総和から計算するよう修正 (Phase 1 では blind only + fold の hand が 0 を返していたバグを解消)
 
+**Phase 2-B 仕様の明文化**:
+
+**`HandSummary.pot_total` の canonical source**:
+- 終局時の `pot_total` は **`betting_state.player_contrib_hand.values()` の総和**
+  (SB/BB を含む全 seat の hand 累積投入額)。これが終局時の固定値で、
+  HandSummary の他フィールドとの不変量は:
+  - `pot_total == sum(rec.amount for rec in betting_state.action_history)`
+  - `pot_total == sum(p.amount for p in pots)` (settlement 成功時)
+  - `pot_total >= sum(seat_payouts.values())` (rake 考慮で等号は崩れる)
+- UI 表示用の途中経過 pot (street ごとの累積) や replay 中の動的 pot 表示は
+  別管理。`HandSummary.pot_total` は **終局時の固定値** として扱う
+
+**`winner_seat` の縮約ルール (`_pick_primary_winner` の仕様)**:
+`winner_seat` は canonical な終局表現ではなく compatibility field。値を決める
+ルールは以下の優先順位で固定 (Phase 2-B `_pick_primary_winner` 実装):
+1. `seat_payouts` が非空 → **最大 payout の seat** (tie 時は **最小 seat 番号**)
+2. `seat_payouts` が空 (incomplete 等) → `winner_seat_hint` (音声 WINNER 観測) を採用
+3. hint も無い → `live_seats` の最低 seat 番号
+4. live も無い → `active_seats` の最低 seat 番号
+5. それも無い → `0` (退化、実運用では到達しない)
+
+JSON / PHH / UI の読み手はこのルールを前提に `winner_seat` を解釈する。
+canonical な勝者情報は `seat_payouts` / `pots` 側を見ること。
+
+**`resolution_status="incomplete"` になる条件 (HandFinalizer の reason tag)**:
+| reason tag | 条件 |
+|---|---|
+| `board_under_5` | live_seats が 2 以上いるのに board が 5 枚未満 |
+| `revealed_hands_missing` | showdown で必要な hole cards (live_seats のいずれか) が `revealed_hands` に含まれていない |
+| `settlement_exception` | `compute_pot_settlements` 内で例外発生 |
+| `empty_pots` | `compute_pot_settlements` が空 list を返した |
+| `no_live_seats` | 全 seat が folded 等で live_seats が 0 (退化) |
+
+incomplete の hand は `resolution_type=None` / `pots=[]` / `seat_payouts={}` が
+立ち、PHH gate で意図的 skip される。Phase 3+ で `HandReconstructor` が
+retrospective に再評価して **incomplete → final** に昇格させる経路を作る予定。
+
 **Phase 2-C 完了済み (hand boundary + retrospective hook)**:
 - ✅ `core/hand_boundary.py:HandBoundaryDetector` — audio `new_hand` / `winner` を一次シグナル、RFID 由来の board cleared (BOARD_EMPTY_QUIET_SEC=1.5s)、idle 状態で 2+ seat に hole cards が現れる (hole_cards_appeared) を二次シグナルとして start / end を発行 (`list[BoundaryEvent]` 返却で end+start 同時発行に対応)
 - ✅ `output/replay_hand.py:load_evidence_log` — `logs/evidence_<session>.jsonl` を `list[EvidenceRecord]` にデシリアライズ。`_build_audio_event` / `_build_rfid_event` / `_build_camera_event` で型付き再構築
@@ -1169,6 +1222,45 @@ legacy 経路は不変だが、`HandSummary` 構築時に新 field を populate:
 | `audio_winner` | `AudioEvent(action="winner")` | 主 end シグナル |
 | `board_cleared` | board が非空→空に転落し、その後 `BOARD_EMPTY_QUIET_SEC` (= 1.5s) 静止 | 二次 end シグナル (audio 補完用) |
 | `hole_cards_appeared` | idle + board 空 + 2+ seat に hole cards | 二次 start シグナル (RFID-only シナリオ用) |
+
+**Phase 2-C 仕様の明文化**:
+
+**boundary は ground truth ではなく boundary hint / segmentation 観測**:
+- 上記 4 シグナルはいずれも「hand segmentation のための観測」であって**絶対的な
+  truth ではない**。音声誤認識、RFID 取り逃し、ディーラーの手順前後など、
+  シグナルが間違うことは起こりうる
+- 上位レイヤ (HandFinalizer 等) は boundary に依存しない設計を維持する
+- Phase 3+ では以下の拡張を予定:
+  - シグナル種別ごとに**重み / prior** を変える (例: audio_winner と board_cleared
+    が両方観測されたら confidence を上げる、片方だけなら下げる)
+  - 矛盾するシグナルから confidence を計算して provisional / incomplete 判定を返す
+  - HandReconstructor で hand window を後ろ向きに再評価する際、boundary 自体も
+    再評価対象に含める
+- Phase 2-C は初期 heuristics として全シグナルを等価な「決定論的シグナル」と
+  して扱うが、これは初期仕様であり段階的に確率化される
+
+**`IntegrationThread._completed_hands` の保持ポリシー**:
+- Phase 2-C 時点では **セッション中の全 hand を in-memory に保持** (eviction なし)
+- 根拠: `logs/evidence_<session>.jsonl` が canonical な book of record として
+  既に永続化されているため、`_completed_hands` は揮発的な convenience cache
+- 典型的なセッションは 100–200 hand 程度、1 hand あたり EvidenceRecord は数 KB
+  なので合計でも 1〜数十 MB に収まる想定
+- Phase 3+ で HandReconstructor が events を消費するようになり、長時間セッション
+  でメモリ圧が問題になる場合は、LRU eviction (例: 直近 N=50 hand) や処理済み
+  hand の即時 drop を導入する
+
+**`extract_hand_windows` の「end 未観測 hand を除外」仕様**:
+- 現在の実装は、start が観測されても対応する end が観測されなければその hand を
+  返り値 dict に**含めない**
+- 根拠: open window は不完全であり settlement が確定していない。これを return
+  値に入れると消費側 (HandReconstructor / replay UI) が誤って finalize する
+  リスクがあるため**安全側に倒した仕様**
+- TODO (Phase 3+ 拡張余地):
+  - 「end の無い hand を **provisional window** として返す」モードを追加
+    (例: `include_open_hands=True` フラグ、または別 dict `open_hands`)
+  - これによりセッション最後の未完了 hand や、replay 時の進行中 hand を診断的に
+    取り出せるようにする
+  - 消費側で `resolution_status="provisional"` の HandSummary を生成する設計
 
 **Phase 2-D 以降の残タスク**:
 - `core/showdown_tracker.py`: `observe()` / `is_showdown_ready()` / `project_to_summary_dict()` 本実装。現状 `engine._finalize_hand` が直接 `self._hole_cards` から `RevealedHand` を組んでいる

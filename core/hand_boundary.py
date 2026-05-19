@@ -8,6 +8,23 @@ Phase 2-C: ハンドの開始 / 終了境界 (hand window) を観測の流れか
   - IntegrationThread と replay (オフライン) の両方で同じ detector が使える純粋
     オブジェクト。state は内部で持ち、外部入力 (event) で進める。
 
+**重要: boundary は ground truth ではなく boundary hint / segmentation 観測**:
+  ``audio_new_hand`` / ``audio_winner`` / ``board_cleared`` / ``hole_cards_appeared``
+  はいずれも「hand segmentation のための観測」であって絶対的な truth ではない。
+  音声誤認識、RFID 取り逃し、ディーラーの手順前後など、シグナルが間違うことは
+  起こりうる。Phase 3+ では:
+
+    - シグナル種別ごとに重み / prior を変える (例: audio_winner と board_cleared
+      が両方観測されたら confidence を上げる、片方だけなら下げる)
+    - 矛盾するシグナルから confidence を計算して provisional / incomplete 判定を
+      返す
+    - HandReconstructor で hand window を後ろ向きに再評価する際、boundary 自体
+      も再評価対象に含める
+
+といった拡張を予定している。本フェーズではすべて等価な「決定論的シグナル」
+として扱うが、これは初期 heuristics であり、上位レイヤがそのまま truth として
+信じてはならない (例: HandFinalizer は boundary に依存しない設計を維持する)。
+
 Phase 2-C 初期 heuristics:
 
   start シグナル:

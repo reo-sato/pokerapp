@@ -146,7 +146,35 @@ class HandSummary:
     board_source: str  # ボード情報のソース: "rfid" | "ocr" | "manual" | ""
     players: list[dict]  # {seat, name, hole_cards, stack_start, stack_end, result}
     pot_total: int
-    winner_seat: int  # compatibility field (Phase 1 では required 維持、Phase 2 で再検討)
+    """終局時の **canonical pot total**。
+
+    Phase 2-B 以降は ``betting_state.player_contrib_hand`` の総和 (SB/BB 含む全
+    seat の hand 累積投入額) から算出する。``HandSummary`` の他フィールド
+    (``pots``, ``seat_payouts``) との不変量:
+      ``pot_total == sum(rec.amount for rec in betting_state.action_history)``
+      ``pot_total == sum(p.amount for p in pots)`` (settlement 成功時)
+      ``pot_total >= sum(seat_payouts.values())`` (settlement 成功時、rake 考慮なら等号は崩れる)
+
+    Phase 1 では bet/raise/call/allin の action.amount を sum していたため
+    blind-only + fold hand で 0 になるバグがあった (Phase 2-B で解消)。
+
+    UI 表示用の途中経過 pot (street ごとの累積) や replay 中の動的 pot 表示は
+    別管理。本 field は **終局時の固定値**として扱うこと。
+    """
+
+    winner_seat: int
+    """**Compatibility field**。canonical な終局表現は ``seat_payouts`` / ``pots``。
+
+    本 field の縮約ルール (Phase 2-B `_pick_primary_winner` 仕様):
+      1. ``seat_payouts`` が非空 → **最大 payout の seat** (tie 時は **最小 seat 番号**)
+      2. ``seat_payouts`` が空 (incomplete 等) → ``winner_seat_hint`` (音声 WINNER) を採用
+      3. hint も無い → ``live_seats`` の最低 seat 番号
+      4. live も無い → ``active_seats`` の最低 seat 番号
+      5. それも無い → ``0`` (退化、実運用では到達しない)
+
+    Phase 1 までは required ``int`` のまま温存。Phase 3+ で ``Optional[int]`` 化
+    または ``primary_winner_seat`` へのリネームを検討。
+    """
     actions: list[ActionRecord]
     review_required: bool  # いずれかのアクションに needs_review=True があれば True
     folded_seats: list[int] = field(default_factory=list)   # フォールドした席番号（順序付き）

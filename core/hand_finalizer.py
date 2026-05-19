@@ -20,6 +20,20 @@ Phase 2-B: BettingState + showdown 観測 + board から ``HandSummary`` を組�
 ``winner_seat_hint`` (音声 WINNER 観測) は **補助観測**として受け取り、settlement から
 導かれた primary winner と食い違う場合は ``review_required=True`` を立てる。
 「Oracle 一発確定」ではなく **異常検知の材料**として扱う。
+
+``resolution_status="incomplete"`` になる条件 (Phase 2-B 時点で _build_incomplete に
+入る reason tag を列挙):
+
+  - ``board_under_5``         : live_seats が 2 以上いるのに board が 5 枚未満
+  - ``revealed_hands_missing``: showdown で必要な hole cards (live_seats のいずれか)
+                                が ``revealed_hands`` に含まれていない
+  - ``settlement_exception``  : ``compute_pot_settlements`` 内で例外発生
+  - ``empty_pots``            : ``compute_pot_settlements`` が空 list を返した
+  - ``no_live_seats``         : 全 seat が folded 等で live_seats が 0 (退化)
+
+``incomplete`` の hand は ``resolution_type=None`` / ``pots=[]`` / ``seat_payouts={}``
+が立ち、PHH gate で意図的 skip される。Phase 3+ で ``HandReconstructor`` が
+retrospective に再評価して ``incomplete → final`` に昇格させる経路を作る予定。
 """
 from __future__ import annotations
 

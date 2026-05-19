@@ -88,6 +88,20 @@ def evaluate_hand_rank(hole_cards: list[str], board: list[str]) -> int:
     役種 (high card → straight flush) とキッカーまでエンコードされているので、
     数値比較で winner 判定および tie (split pot) 判定が可能。
 
+    **前提とスコープ (重要)**:
+      - 本関数は **Texas Hold'em + StandardHighHand (high-hand)** を前提とする。
+        「entry.index が大きいほど強い」の単調性は pokerkit の StandardHighHand
+        ルックアップテーブルが保証している性質であり、それ以外の variant で
+        そのまま使うと正しくない:
+          * **Lowball** (2-7 / A-5): 弱い手ほど強い → 単調性の向きが逆
+          * **Hi/Lo split** (Omaha Hi/Lo 等): 別途 low hand 評価器が必要
+          * **Short deck (6+)**: フラッシュとフルハウスの順位が変わる
+        他 variant に拡張するときは別の評価関数 (例: ``evaluate_lowball_hand_rank``)
+        を追加し、HandFinalizer 側で variant に応じて使い分ける設計に拡張する。
+      - 入力カード枚数は 7 枚 (hole 2 + board 5) が想定形。少ない枚数の hand は
+        呼び出し側で finalization 可能性を判断する責務 (HandFinalizer の incomplete
+        判定で除外される)。
+
     Args:
         hole_cards: ホールカード文字列のリスト (例: ``["Ah", "Kd"]``)。
         board: ボードカード文字列のリスト (例: ``["Qh", "Jh", "Th", "2c", "3d"]``)。
@@ -96,8 +110,6 @@ def evaluate_hand_rank(hole_cards: list[str], board: list[str]) -> int:
         役の強さを表す整数。同じ役 + 同じキッカー列なら同じ値 (split pot 対象)。
 
     Notes:
-        - 7 枚 (hole 2 + board 5) を前提とした実装。少ない枚数の hand は呼び出し側で
-          finalization 可能性を判断する責務 (HandFinalizer の incomplete 判定)。
         - 重複カード等のバリデーションは pokerkit に委ねる (例外はそのまま伝播)。
     """
     from pokerkit import StandardHighHand
@@ -118,6 +130,18 @@ def compute_pot_settlements(
     board: list[str],
 ) -> list[PotSettlement]:
     """各 seat の累積投入額と revealed hands から main / side pot を構築・決済する。
+
+    用語 (関数内で一貫):
+      - ``eligible_seats``: その pot を**勝ちうる** seat 集合 = その層に出資した
+        seat のうち fold していないもの。fold 済み seat の chips は pot の原資には
+        残るが、彼ら自身は eligible には入らない。
+      - ``contenders``: ``eligible_seats`` のうち**現時点で revealed hand があり
+        rank 評価できる** seat 集合 = ``eligible_seats ∩ {rh.seat for rh in
+        revealed_hands}``。muck した seat や RFID 未観測 seat は eligible だが
+        contenders から外れる。
+      - winning_seats は contenders の中で最大 rank の seat 群 (split 含む)。
+      - Phase 2-B の HandFinalizer は「eligible はいるが contenders が空 / 不足」
+        を ``incomplete`` の判定材料として利用する。
 
     アルゴリズム (Stratified Side Pot Decomposition):
       1. ``betting_state.player_contrib_hand`` の正の値だけを残した contrib dict を作る。

@@ -173,6 +173,20 @@ def extract_hand_windows(
       - end のみの場合 (winner / board_cleared)、trigger event は閉じる hand 側
       - hand 境界が一度も観測されなかった records は返り値 dict に含まれない
         (= 暗黙の hand 0 / -1 などには入れず捨てる。テストで明示シナリオを通すこと)
+
+    **「end 未観測 hand を除外」の仕様**:
+      現在の実装は、start が観測されても対応する end が観測されなければその hand を
+      返り値 dict に含めない。これは「open window は不完全であり、settlement が
+      確定していない」という意味で安全側に倒した仕様。
+
+      TODO (Phase 3+ 拡張余地):
+        - 「end の無い hand を **provisional window** として返す」モードを追加
+          (例: ``include_open_hands=True`` フラグ、または別 dict ``open_hands``)
+        - これによりセッション最後の未完了 hand や、replay 時の進行中 hand を
+          診断的に取り出せるようにする
+        - その際の hand_id は detector の current_hand_id をそのまま使い、
+          消費側 (HandReconstructor 等) で ``resolution_status="provisional"`` の
+          HandSummary を生成する設計が自然
     """
     if detector is None:
         detector = HandBoundaryDetector()

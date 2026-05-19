@@ -164,6 +164,16 @@ class IntegrationThread(threading.Thread):
         # - boundary detector が audio new_hand / winner / RFID board cleared を観測
         # - 各 event を _current_hand_events に push
         # - 終端境界で _completed_hands[hand_id] に window を確定、reconstructor を hook
+        #
+        # **_completed_hands の保持ポリシー (Phase 2-C 時点)**:
+        #   セッション中全 hand を in-memory に保持する (eviction なし)。これは
+        #   `logs/evidence_<session>.jsonl` が canonical な book of record として
+        #   既に永続化されているため、再起動後でも replay 可能だからシンプルにしている。
+        #   典型的なセッションは 100–200 hand 程度で、1 hand あたりの EvidenceRecord
+        #   は数 KB なので合計でも 1–数十 MB に収まる想定。
+        #   Phase 3+ で HandReconstructor が events を消費するようになり、長時間
+        #   セッションでメモリ圧が問題になる場合は、LRU eviction (例: 直近 N=50 hand)
+        #   や処理済み hand の即時 drop を導入する。
         self._boundary_detector = HandBoundaryDetector()
         self._hand_reconstructor = HandReconstructor()
         self._current_hand_events: list[EvidenceRecord] = []
