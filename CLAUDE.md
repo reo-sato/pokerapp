@@ -445,18 +445,30 @@ hand window 単位の retrospective inference。EvidenceLog の events をその
 diff を出す。**online の HandSummary / JSON / PHH は一切 mutate しない**
 (追加のオフラインパスとして動作)。
 
-#### Phase 3 MVP の仕様・制約事項 (明文化)
+#### Phase 3 MVP + Phase 4-B の bootstrap 仕様 (明文化)
 
-1. **online-bootstrap-assisted reconstruction (raw-only ではない)**:
-   Phase 3 は raw EvidenceLog 単独から button / SB / BB を立てる *raw-only*
-   reconstruction ではなく、``online_summary`` の `players` / `blinds` /
-   `actions[SB_POST,BB_POST]` を bootstrap の入力として使う
-   *online-bootstrap-assisted reconstruction*。``_init_betting_state`` は
-   ``online_summary.actions`` の SB_POST seat から button を逆算 (HU: BTN=SB、
-   それ以外: BTN は active 内で SB の 1 つ前)。``online_summary`` も
-   ``initial_state`` も無い場合は bs を起こせず ``reason="reconstruction_skipped"``
-   で抜ける。raw-only bootstrap (RFID hole_cards 出現や音声 ``new_hand`` 時点の
-   active seats から button を推定する等) は Phase 4-B の課題。
+1. **bootstrap 3 段階 (Phase 4-B)**:
+   `_bootstrap(events_sorted, initial_state, online_summary)` は次の優先順位で
+   試行し `(bs, bootstrap_source, bootstrap_meta)` を返す:
+   1. ``initial_state`` (deepcopy。テスト等で明示注入されたとき) → `"initial_state"`
+   2. raw events (`_bootstrap_from_events`、Phase 4-B 追加) → `"raw"`
+   3. ``online_summary`` (Phase 3 由来の逆算) → `"online_summary"`
+
+   **raw bootstrap の成立条件**:
+   - RFID `role="seat"` で 2 seat 以上の hole_card 観測
+   - コンストラクタの `default_sb` / `default_bb` が設定済み
+   - `BettingState.start_hand` が例外を出さない
+   成立時は button は **最小 seat 番号** で deterministic に置き
+   (`bootstrap_meta["button_inferred"]=True`)、SB/BB は `compute_blinds` で算出。
+
+   **online_summary bootstrap の成立条件**:
+   - `online_summary.players[*].stack_start > 0` の seat が 2 以上
+   - `online_summary.actions` に SB_POST seat が含まれる
+   - SB_POST seat が active set に含まれる
+   button は HU なら BTN=SB、non-HU なら SB の 1 つ前 (active 内循環順)。
+
+   3 段階すべて失敗 → `reason="reconstruction_skipped"` で抜ける
+   (`bootstrap_source=None`)。
 
 2. **`winner_seat_hint` は oracle ではなく終端の補助制約**:
    ``AudioEvent(action="winner")`` から抽出した seat は **強観測ではなく**、
@@ -476,17 +488,21 @@ diff を出す。**online の HandSummary / JSON / PHH は一切 mutate しな�
 
 #### API
 
-- `HandReconstructionResult(actions, summary, needs_review, reason, diff, confidence)`:
+- `HandReconstructionResult(actions, summary, needs_review, reason, diff, confidence, bootstrap_source, bootstrap_meta)`:
   - `actions`: 再構成 ActionRecord 列 (SB_POST/BB_POST + beam MAP の player actions)
   - `summary`: offline HandSummary' (bootstrap 失敗時は None)
   - `needs_review`: online との diff があれば True (online_summary 未指定なら False)
   - `reason`: `"reconstructed_no_diff"` / `"reconstructed_with_diff"` / `"reconstructed"` / `"reconstruction_skipped"`
   - `diff`: 差分 dict `{field: {"online": ..., "offline": ...}}` (一致 or 比較不能なら None)
   - `confidence`: **operational metric** = consumed_count / audio_count (上記参照、確率ではない)
-- `HandReconstructor(beam_K=8, prior=None, finalizer=None)`: テスト inject 可能
+  - `bootstrap_source` (Phase 4-B): `"initial_state"` / `"raw"` / `"online_summary"` / None
+  - `bootstrap_meta` (Phase 4-B): raw bootstrap 時の active_seats / sb_seat / bb_seat /
+    button_seat / button_inferred / blinds_inferred / signals / confidence などの診断 dict
+- `HandReconstructor(beam_K=8, prior=None, finalizer=None, default_sb=None, default_bb=None)`:
+  テスト inject 可能。`default_sb` / `default_bb` は raw-only bootstrap 用 (Phase 4-B)
 - `HandReconstructor.reconstruct_from_events(events, initial_state=None, online_summary=None) → HandReconstructionResult`:
-  1. `initial_state` 優先、なければ `online_summary` から `_init_betting_state` で bootstrap
-     (button は `actions` の SB_POST/BB_POST から逆算: HU なら BTN=SB、それ以外は SB の左隣)
+  1. `_bootstrap(...)` で 3 段階 bootstrap (initial_state → raw → online_summary)。
+     失敗で `reason="reconstruction_skipped"`
   2. `BeamEngine(K)` を新規構築 → `reset_with_state(bs)`
   3. events を時刻順走査: audio 通常 action → `beam.step_audio` → `bs.update_after_action`、
      audio "winner" → `winner_seat_hint` に保存 (補助制約として後段に渡す)、
@@ -518,10 +534,32 @@ python -m output.reconstruct_session --session logs/<session>.json
   "reason": "reconstructed_no_diff" | "reconstructed_with_diff" | "reconstruction_skipped",
   "diff": {...} | null,
   "confidence": float | null,
+  "bootstrap_source": "initial_state" | "raw" | "online_summary" | null,  // Phase 4-B
+  "bootstrap_meta": {...} | null,                                          // Phase 4-B (raw 時のみ非 null)
   "online_summary": {...},          // JSON dict (mutate されない)
   "offline_summary": {...} | null   // 再構成 HandSummary
 }
 ```
+
+`bootstrap_source="raw"` の場合、`bootstrap_meta` は次の dict:
+```json
+{
+  "source": "raw",
+  "active_seats": [int, ...],
+  "sb_seat": int,
+  "bb_seat": int,
+  "button_seat": int,
+  "button_inferred": true,          // raw からは truth ではない旨を示す
+  "blinds_inferred": true,          // default_sb/bb 由来であることを示す
+  "signals": {"rfid_seat_observations": [int, ...]},
+  "confidence": 0.5                 // raw bootstrap の固定 confidence (operational)
+}
+```
+
+Phase 4-B CLI 動作: session JSON の `blinds.sb` / `blinds.bb` (トップレベル、
+または各 hand `blinds` から fallback) を読み HandReconstructor の default として
+渡す。これにより raw-only bootstrap が成立し得る hand では online_summary を
+読む前に raw を試行する。
 
 オプション: `--output PATH` / `--evidence PATH` (省略時は session.parent / "reconstruct_<id>.jsonl" / "evidence_<id>.jsonl")。`--quiet` で info ログを抑制。
 
@@ -674,7 +712,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 425 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 437 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -697,7 +735,8 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_hand_finalizer.py | HandFinalizer fold_win / showdown / sidepot_showdown / showdown_split / incomplete / winner_hint mismatch (Phase 2-B, 11 件) |
 | test_hand_boundary.py | HandBoundaryDetector (audio / board cleared / hole appeared) + extract_hand_windows + IntegrationThread 結合 + EvidenceLog round-trip (Phase 2-C, 19 件) |
 | test_hand_reconstructor.py | HandReconstructor (online↔offline diff / fallback / 複数 hand / _compute_diff) + reconstruct_session CLI round-trip (Phase 3, 14 件) |
-| test_reconstructor_live_hook.py | IntegrationThread から advisory reconstruct を呼ぶ live hook (online_summary 注入 / 複数 hand / 例外時 online 不変 / online_summary=None で skipped) (Phase 4-A, 9 件) |
+| test_reconstructor_live_hook.py | IntegrationThread から advisory reconstruct を呼ぶ live hook (online_summary 注入 / 複数 hand / 例外時 online 不変 / online_summary=None で skipped or raw bootstrap) (Phase 4-A + 4-B, 10 件) |
+| test_hand_reconstructor_bootstrap.py | bootstrap 3 段階優先 (initial_state / raw / online_summary) + skipped + CLI round-trip で `bootstrap_source` 反映 (Phase 4-B, 11 件) |
 
 ---
 
@@ -758,6 +797,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | HandReconstructor 本実装 (beam 再生 + finalizer 再呼び出し) | ✅ 完了 (Phase 3) | `core/hand_reconstructor.py`: events → BeamEngine + HandFinalizer 再生 → online との diff、`needs_review` 自動判定 |
 | 後処理 CLI (online↔offline diff) | ✅ 完了 (Phase 3) | `output/reconstruct_session.py`: session JSON + evidence JSONL → `reconstruct_<id>.jsonl` |
 | Live advisory reconstruct hook (IntegrationThread から online_summary 注入) | ✅ 完了 (Phase 4-A) | `integration/engine.py`: `_finalize_hand` 末尾で `_invoke_reconstructor_hook(hand_id, online_summary=summary)` を呼び、結果を `_last_summary_by_hand_id` / `_last_reconstruction_by_hand_id` に保持。online JSON / PHH / GameStateManager は mutate しない |
+| Raw-only bootstrap (online_summary 不要の HandReconstructor 起動) | ✅ 完了 (Phase 4-B) | `HandReconstructor._bootstrap_from_events`: RFID `role="seat"` 観測 + コンストラクタ `default_sb`/`default_bb` で BettingState を起こす。button は最小 seat 番号 (deterministic, `button_inferred=True`)。`HandReconstructionResult.bootstrap_source` / `bootstrap_meta` で診断情報を返す。CLI 出力 / live hook の双方で稼働 |
 | ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
 | gs.end_hand → end_hand_with_payouts 拡張 | ❌ 未着手 (Phase 2-D 以降) | 現状 Phase 2-B では `_apply_payouts_to_gamestate` adapter が primary winner で legacy gs.end_hand を呼んでいる |
 
@@ -1116,7 +1156,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 425 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 9 Phase 4-A)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 437 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
@@ -1125,6 +1165,7 @@ pytest tests/test_hand_finalizer.py -v                                          
 pytest tests/test_hand_boundary.py -v                                             # Phase 2-C (boundary + replay + integration)
 pytest tests/test_hand_reconstructor.py -v                                        # Phase 3 (HandReconstructor + CLI)
 pytest tests/test_reconstructor_live_hook.py -v                                   # Phase 4-A (IntegrationThread live advisory hook)
+pytest tests/test_hand_reconstructor_bootstrap.py -v                              # Phase 4-B (3-stage bootstrap + CLI round-trip)
 python -m output.reconstruct_session --session logs/<session>.json                # Phase 3 CLI: online↔offline diff を出力
 python main.py --cli                                                              # M1: logs/evidence_*.jsonl が増える
 python main.py                                                                    # M3: GUI で revise バナー確認
@@ -1216,7 +1257,7 @@ HandSummary {resolution_status="final", pots, seat_payouts, ...}
     ↓
 final hand のみ PHH export
 
-(Phase 3 実装済 + Phase 4-A 完了) HandReconstructor が hand window を頭から再生して
+(Phase 3 / 4-A / 4-B 完了) HandReconstructor が hand window を頭から再生して
                               offline HandSummary' を生成 → online との diff → needs_review
                               自動判定。online JSON / PHH は **mutate しない**。
                               - 後処理 (Phase 3): `output/reconstruct_session` CLI で
@@ -1225,6 +1266,10 @@ final hand のみ PHH export
                                 advisory として呼び、結果は `_last_reconstruction_by_hand_id`
                                 に in-memory 保持。GUI / 監視ツールがここを読む想定
                                 (online JSON / PHH / GameStateManager は不変)
+                              - bootstrap (Phase 4-B): initial_state → raw events
+                                (RFID role="seat" + default_sb/bb) → online_summary
+                                の 3 段階で BettingState を起こす。`bootstrap_source` /
+                                `bootstrap_meta` で診断情報を返す
 ```
 
 ### ログ / replay / retrospective inference (Phase 2-C)
@@ -1393,23 +1438,53 @@ retrospective に再評価して **incomplete → final** に昇格させる経�
 - `_last_reconstruction_by_hand_id[hand_id].needs_review` を GUI / 監視ツールが
   読むフックは Phase 4-B+ で予定 (現状は in-memory に置くだけ)
 
-**Phase 3 / 4-A スコープ外 (Phase 4-B 以降の候補)**:
+**Phase 4-B 完了済み (raw-only bootstrap 強化)**:
+- ✅ `core/hand_reconstructor.py:HandReconstructor._bootstrap_from_events` 新設。
+  RFID `role="seat"` 観測の seat 集合 (2 seat 以上) + コンストラクタの
+  `default_sb` / `default_bb` から BettingState を起こす
+- ✅ button heuristic: deterministic に最小 seat 番号を button と仮定
+  (`bootstrap_meta["button_inferred"]=True` で truth ではない旨を記録)
+- ✅ SB/BB seat は `integration.action_order.compute_blinds` で算出
+  (HU: BTN=SB、non-HU: SB = BTN の左隣)
+- ✅ 3 段階 bootstrap: `_bootstrap(...)` が
+  `initial_state` → raw events → `online_summary` の順に試行し、
+  `(bs, bootstrap_source, bootstrap_meta)` を返す
+- ✅ `HandReconstructionResult` に `bootstrap_source: Optional[str]` /
+  `bootstrap_meta: Optional[dict]` を追加。reason / diff / confidence と並列して
+  CLI / live hook の双方で参照可能
+- ✅ CLI (`output/reconstruct_session.py`): session JSON の `blinds.sb` / `bb` を
+  `_extract_session_blinds` で抽出し HandReconstructor に渡す。出力 JSONL の各
+  行に `bootstrap_source` / `bootstrap_meta` を含める
+- ✅ Live hook (`integration/engine.py`): `_sb_amount` / `_bb_amount` を確定後に
+  HandReconstructor を構築 (Phase 4-A から構築順を入れ替え)。これにより
+  `online_summary=None` の hand window でも RFID hole_cards が揃っていれば
+  raw bootstrap が成立する
 
-- **Phase 4-B: raw-only bootstrap の強化**
-  - online_summary 無しでも reconstruct できるよう、RFID hole_cards 出現や音声
-    `new_hand` 時点の active seats から button / SB / BB を推定する。
-  - Phase 3/4-A までは「online-bootstrap-assisted」のため、これによりはじめて
-    EvidenceLog 単独で hand を立て直す *raw-only reconstruction* が可能になる。
-  - 後段で online_summary を読まずに事後監査 / 失った online ログからの復旧が
-    できる。
+**raw-only bootstrap の制約 (明文化)**:
+- audio events には seat 情報が無いため、SB_POST/BB_POST の seat 推定は不可。
+  blinds 額は呼び出し側 (CLI: session JSON のトップ / 各 hand から、
+  live hook: GameStateManager / IntegrationThread から) を介して default として
+  渡す必要がある
+- button は raw からは truth として決まらない。deterministic に最小 seat 番号を
+  選ぶ heuristic を採用。実際の button と異なれば後段の `_compute_diff` で
+  `actions` の差異として現れ、`needs_review=True` が立つ
+- raw bootstrap 失敗条件:
+  - RFID `role="seat"` 観測が 2 seat 未満
+  - `default_sb` または `default_bb` が None / 0 以下
+  - `BettingState.start_hand` が例外を投げる
+  これらのいずれかなら `online_summary` fallback (Phase 3 経路) → skipped
 
-その他 (Phase 4-B 進行後の課題):
+**Phase 4-B スコープ外 (Phase 4-C 以降の候補)**:
 - 差分検出時の **自動 patch** (online HandSummary の resolution / payouts を
   offline で上書きする経路。現状は in-memory + 別 JSONL に書くだけ)
-- GUI / CLI で live reconstruct 結果 (needs_review / diff) を見るバナー / バッジ表示
+- GUI / CLI で live reconstruct 結果 (needs_review / diff / bootstrap_source) を
+  見るバナー / バッジ表示
+- raw bootstrap の signal 強化: audio で「シート N が fold」のような自然言語から
+  seat を取り出して active seats を増やす、camera dependency も含める
 - 確率モデル拡張: prior の hand-specific 調整 (例えば過去 N hand の MAP 平均で
   smoothing)、`confidence` を operational metric から **モデル事後確率** (top-1 vs
-  top-2 log 差 / エントロピー / Brier score) に置き換え
+  top-2 log 差 / エントロピー / Brier score) に置き換え。`bootstrap_meta.confidence`
+  も現状は固定値 0.5 (raw) なので、signal 強度に応じて動的計算へ
 - 完全 replay 型 ActionRecord (pot_after / stack_after を再構成時の bs から正確に算出)
 - `_last_reconstruction_by_hand_id` の eviction policy (長時間セッションで増え続ける場合の対策)
 

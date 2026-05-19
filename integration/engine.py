@@ -175,7 +175,6 @@ class IntegrationThread(threading.Thread):
         #   セッションでメモリ圧が問題になる場合は、LRU eviction (例: 直近 N=50 hand)
         #   や処理済み hand の即時 drop を導入する。
         self._boundary_detector = HandBoundaryDetector()
-        self._hand_reconstructor = HandReconstructor()
         self._current_hand_events: list[EvidenceRecord] = []
         self._completed_hands: dict[int, list[EvidenceRecord]] = {}
         # Phase 4-A: advisory layer
@@ -195,6 +194,13 @@ class IntegrationThread(threading.Thread):
         self._auto_post_blinds = auto_post_blinds
         self._sb_amount = sb_amount if sb_amount is not None else getattr(game_state, "_sb", 0)
         self._bb_amount = bb_amount if bb_amount is not None else getattr(game_state, "_bb", 0)
+
+        # Phase 4-B: HandReconstructor は blinds 確定後に構築する (raw-only bootstrap で
+        # default_sb / default_bb を必要とするため)。
+        self._hand_reconstructor = HandReconstructor(
+            default_sb=self._sb_amount or None,
+            default_bb=self._bb_amount or None,
+        )
         self._next_button_seat: Optional[int] = initial_button_seat
         self._last_button_seat: Optional[int] = None
 

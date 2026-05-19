@@ -264,9 +264,9 @@ class TestReconstructorFailureIsolated:
 
 class TestInvokeHookWithoutOnlineSummary:
     def test_invoke_hook_none_returns_skipped(self, tmp_path: Path) -> None:
-        """_invoke_reconstructor_hook(hand_id, online_summary=None) は
-        ``reason="reconstruction_skipped"`` を返す (Phase 3 reconstructor の
-        bootstrap が成立しないため)。
+        """_invoke_reconstructor_hook(hand_id, online_summary=None) は、events が
+        空であれば raw / online_summary どちらの bootstrap も成立せず
+        ``reason="reconstruction_skipped"`` を返す。
         """
         thread, _audio_q, _stop, _writer, _gs = _build_thread(tmp_path)
         # ダミーの空 window を _completed_hands に入れる
@@ -284,3 +284,62 @@ class TestInvokeHookWithoutOnlineSummary:
         thread._invoke_reconstructor_hook(12345, online_summary=None)
         # 空 events から bootstrap できないので skipped が入る
         assert thread._last_reconstruction_by_hand_id[12345].reason == "reconstruction_skipped"
+
+    def test_invoke_hook_none_with_rfid_raw_bootstrap_succeeds(
+        self, tmp_path: Path,
+    ) -> None:
+        """Phase 4-B: online_summary=None でも _completed_hands に RFID hole_cards が
+        揃っていれば raw-only bootstrap が成立し ``reason != "reconstruction_skipped"``
+        になる。これが Phase 4-A 時代との挙動差。
+
+        IntegrationThread コンストラクタは GameStateManager から SB=100/BB=200 を
+        引き継ぎ、HandReconstructor(default_sb=100, default_bb=200) を立てる。
+        """
+        from core.events import RFIDEvent
+        from output.replay_hand import EvidenceRecord
+
+        thread, _audio_q, _stop, _writer, _gs = _build_thread(tmp_path)
+        # 1 hand 分の events を _completed_hands に直接注入
+        thread._completed_hands[77] = [
+            EvidenceRecord(
+                timestamp=1.0, kind="audio",
+                event=AudioEvent(action="new_hand", amount=0, timestamp=1.0, raw_text=""),
+                payload={},
+            ),
+            EvidenceRecord(
+                timestamp=1.1, kind="rfid",
+                event=RFIDEvent(
+                    tag_id="t1", card="Ah", reader_id="seat_1", role="seat",
+                    seat=1, timestamp=1.1, raw_tag_id="t1",
+                ),
+                payload={},
+            ),
+            EvidenceRecord(
+                timestamp=1.2, kind="rfid",
+                event=RFIDEvent(
+                    tag_id="t2", card="Kh", reader_id="seat_2", role="seat",
+                    seat=2, timestamp=1.2, raw_tag_id="t2",
+                ),
+                payload={},
+            ),
+            EvidenceRecord(
+                timestamp=1.3, kind="audio",
+                event=AudioEvent(action="fold", amount=0, timestamp=1.3,
+                                  raw_text="フォールド"),
+                payload={},
+            ),
+            EvidenceRecord(
+                timestamp=1.4, kind="audio",
+                event=AudioEvent(action="winner", amount=0, timestamp=1.4,
+                                  raw_text="シート2 ウィナー"),
+                payload={},
+            ),
+        ]
+
+        thread._invoke_reconstructor_hook(77, online_summary=None)
+
+        result = thread._last_reconstruction_by_hand_id[77]
+        assert result.bootstrap_source == "raw"
+        # online_summary が無いので reason は "reconstructed" (diff 計算なし)
+        assert result.reason == "reconstructed"
+        assert result.summary is not None

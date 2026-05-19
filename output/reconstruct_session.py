@@ -42,6 +42,32 @@ from output.replay_hand import extract_hand_windows, load_evidence_log
 logger = logging.getLogger(__name__)
 
 
+def _extract_session_blinds(session_data: dict) -> tuple[Optional[int], Optional[int]]:
+    """session JSON から (sb_default, bb_default) を取り出す (Phase 4-B 用)。
+
+    優先順位:
+      1. session_data["blinds"]["sb"/"bb"]  (一部 writer はトップレベルに置く)
+      2. session_data["hands"][0]["blinds"]["sb"/"bb"] (通常はここに入っている)
+    どちらも見つからない場合は ``(None, None)`` を返し、raw-only bootstrap を
+    成立させない (= online_summary fallback or skipped に倒す)。
+    """
+    blinds = session_data.get("blinds") or {}
+    sb = blinds.get("sb") if isinstance(blinds, dict) else None
+    bb = blinds.get("bb") if isinstance(blinds, dict) else None
+    if sb is None or bb is None:
+        hands = session_data.get("hands") or []
+        if hands and isinstance(hands[0], dict):
+            hb = hands[0].get("blinds") or {}
+            if isinstance(hb, dict):
+                sb = sb if sb is not None else hb.get("sb")
+                bb = bb if bb is not None else hb.get("bb")
+    try:
+        return (int(sb) if sb is not None else None,
+                int(bb) if bb is not None else None)
+    except (TypeError, ValueError):
+        return None, None
+
+
 def _hand_summary_from_dict(d: dict) -> HandSummary:
     """JSON dict (JsonWriter / HandSummary.to_dict() 由来) を HandSummary に復元する。
 
@@ -106,7 +132,14 @@ def reconstruct_session(
     records = load_evidence_log(evidence_path)
     windows = extract_hand_windows(records)
 
-    rc = reconstructor or HandReconstructor()
+    if reconstructor is None:
+        # Phase 4-B: session-level の blinds 設定を raw-only bootstrap の default として
+        # HandReconstructor に渡す。session JSON のトップレベルに ``blinds`` が無い場合は
+        # 各 hand_dict の最初のもの (= 通常は全 hand 共通) から拾う fallback。
+        sb_default, bb_default = _extract_session_blinds(session_data)
+        rc = HandReconstructor(default_sb=sb_default, default_bb=bb_default)
+    else:
+        rc = reconstructor
     written = 0
     with Path(output_path).open("w", encoding="utf-8") as f:
         for hand_dict in session_data.get("hands", []):
@@ -128,6 +161,9 @@ def reconstruct_session(
                 "reason": result.reason,
                 "diff": result.diff,
                 "confidence": result.confidence,
+                # Phase 4-B: bootstrap の出所と heuristic 情報
+                "bootstrap_source": result.bootstrap_source,
+                "bootstrap_meta": result.bootstrap_meta,
                 "online_summary": hand_dict,
                 "offline_summary": result.summary.to_dict() if result.summary else None,
             }

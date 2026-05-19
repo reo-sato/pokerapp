@@ -30,15 +30,16 @@ Phase 3: hand window 単位の **遡及的 (retrospective) 再推定** 本実装
 
 **Phase 3 MVP の仕様・制約事項** (明文化):
 
-  - **online-bootstrap-assisted reconstruction (raw-only ではない)**:
-    Phase 3 は raw EvidenceLog 単独から hand を立て直す *raw-only reconstruction*
-    ではなく、``online_summary`` (button / SB / BB seat、players_info、blinds) を
-    bootstrap の入力として使う *online-bootstrap-assisted reconstruction*。
-    ``_init_betting_state`` は ``online_summary.actions`` の SB_POST / BB_POST seat
-    から button を逆算するため、``online_summary`` も ``initial_state`` も無いと
-    bs を起こせず ``reason="reconstruction_skipped"`` で抜ける。raw-only bootstrap
-    (RFID hole_cards 出現や音声 "new_hand" 時点の active seats から button を推定
-    する等) は Phase 4-B の課題。
+  - **bootstrap 経路 (Phase 4-B で raw-only を追加)**:
+    Phase 3 では ``online_summary`` を bootstrap の入力に使う
+    *online-bootstrap-assisted reconstruction* のみだった。Phase 4-B で
+    ``_bootstrap_from_events`` を追加し、**initial_state → raw events → online_summary
+    の順** で bootstrap を試みる。raw-only bootstrap が成立する条件:
+      - RFID role="seat" で 2 seat 以上の hole_card 観測
+      - コンストラクタの ``default_sb`` / ``default_bb`` が設定されている
+    成立時は ``HandReconstructionResult.bootstrap_source="raw"`` + ``bootstrap_meta``
+    に推定情報が入る。button_seat は raw からは確定できないため最小 seat 番号で
+    deterministic に置く (``button_inferred=True`` でマーク)。
 
   - **``winner_seat_hint`` は oracle ではなく終端の補助制約**:
     ``AudioEvent(action="winner")`` から抽出した seat は **強観測ではなく**、
@@ -87,18 +88,23 @@ class HandReconstructionResult:
     """retrospective inference の結果。
 
     fields:
-      actions:       再評価後のアクション列 (SB_POST / BB_POST + beam MAP のアクション)
-      summary:       offline HandSummary' (成功時のみ)
-      needs_review:  online と diff があった / 信頼度が低い等のレビュー要否
-      reason:        ``"reconstructed_no_diff"`` / ``"reconstructed_with_diff"`` /
-                     ``"reconstructed"`` (online_summary 無しで参照不可) /
-                     ``"reconstruction_skipped"`` (bootstrap 失敗等)
-      diff:          online vs offline の差分。``None`` なら一致 or 比較不能。
-                     dict 形式 ``{field_name: {"online": ..., "offline": ...}}``
-      confidence:    **operational metric** = ``consumed_count / audio_count`` ∈ [0, 1]
-                     or ``None``。モデル事後確率ではなく **audio evidence の消費率**
-                     を示す (詳細はモジュール docstring を参照)。Phase 3 MVP で
-                     確率としては解釈しないこと。
+      actions:           再評価後のアクション列 (SB_POST / BB_POST + beam MAP のアクション)
+      summary:           offline HandSummary' (成功時のみ)
+      needs_review:      online と diff があった / 信頼度が低い等のレビュー要否
+      reason:            ``"reconstructed_no_diff"`` / ``"reconstructed_with_diff"`` /
+                         ``"reconstructed"`` (online_summary 無しで参照不可) /
+                         ``"reconstruction_skipped"`` (bootstrap 失敗等)
+      diff:              online vs offline の差分。``None`` なら一致 or 比較不能。
+                         dict 形式 ``{field_name: {"online": ..., "offline": ...}}``
+      confidence:        **operational metric** = ``consumed_count / audio_count`` ∈ [0, 1]
+                         or ``None``。モデル事後確率ではなく **audio evidence の消費率**
+                         を示す (詳細はモジュール docstring を参照)。Phase 3 MVP で
+                         確率としては解釈しないこと。
+      bootstrap_source:  ``"initial_state"`` / ``"raw"`` / ``"online_summary"`` /
+                         ``None`` (bootstrap 試行前 = skipped)。Phase 4-B で追加。
+      bootstrap_meta:    bootstrap で使った signal や heuristic の診断情報。raw-only
+                         成功時は active_seats / sb_seat / bb_seat / button_seat /
+                         button_inferred / confidence などを記録。Phase 4-B で追加。
     """
 
     actions: list[ActionRecord] = field(default_factory=list)
@@ -107,6 +113,8 @@ class HandReconstructionResult:
     reason: str = ""
     diff: Optional[dict[str, Any]] = None
     confidence: Optional[float] = None
+    bootstrap_source: Optional[str] = None
+    bootstrap_meta: Optional[dict[str, Any]] = None
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -222,10 +230,15 @@ class HandReconstructor:
     引数で差し替えられる。
 
     Phase 3 MVP の制約 (モジュール docstring も参照):
-      - bootstrap は ``online_summary`` または ``initial_state`` に依存
-        (= online-bootstrap-assisted reconstruction、raw-only ではない)
       - winner audio は終端の **補助制約** として ``apply_winner_filter`` に渡すのみ
       - ``confidence`` は audio 消費率の operational metric (確率ではない)
+
+    Phase 4-B 以降:
+      - bootstrap は ``initial_state`` → raw-only → ``online_summary`` の順で試す。
+        raw-only が成功する条件は ``_bootstrap_from_events`` の docstring を参照。
+      - ``default_sb`` / ``default_bb`` は raw-only bootstrap 時の blinds 額として使う
+        (audio events から SB/BB POST 観測を得る手段が無いため)。CLI / live hook 側
+        から session-level の設定を渡すことを想定。
     """
 
     def __init__(
@@ -233,10 +246,15 @@ class HandReconstructor:
         beam_K: int = 8,
         prior: "Optional[PriorParams]" = None,
         finalizer: Optional[HandFinalizer] = None,
+        default_sb: Optional[int] = None,
+        default_bb: Optional[int] = None,
     ) -> None:
         self._beam_K = int(beam_K)
         self._prior = prior
         self._finalizer = finalizer or HandFinalizer()
+        # Phase 4-B: raw-only bootstrap で blinds 額が必要。None なら raw bootstrap 失敗。
+        self._default_sb = int(default_sb) if default_sb is not None else None
+        self._default_bb = int(default_bb) if default_bb is not None else None
 
     # ──────────────────────────────────────────────────────────────────────
     # public API
@@ -253,20 +271,33 @@ class HandReconstructor:
         Args:
             events: 1 hand の EvidenceRecord 列 (start 〜 end 境界の events)。
             initial_state: hand 開始時の ``BettingState``。指定があれば deepcopy して
-                使用する。None の場合は ``online_summary`` から bootstrap。
-            online_summary: online で生成済みの ``HandSummary``。bootstrap の補助 +
+                使用する (= ``bootstrap_source="initial_state"``)。
+            online_summary: online で生成済みの ``HandSummary``。raw bootstrap が
+                失敗した場合の fallback (``bootstrap_source="online_summary"``) +
                 diff 比較対象として使う。None なら diff は行わない。
+
+        Bootstrap 優先順位 (Phase 4-B):
+          1. ``initial_state`` (テスト等で外部注入されたとき)
+          2. raw events からの推定 (``_bootstrap_from_events``)
+          3. ``online_summary`` からの逆算 (``_bootstrap_from_online_summary``)
 
         Returns:
             ``HandReconstructionResult``。bootstrap 失敗時は ``summary=None`` で
-            ``reason="reconstruction_skipped"`` を返す。
+            ``reason="reconstruction_skipped"`` を返す。``bootstrap_source`` /
+            ``bootstrap_meta`` は試行結果を反映する。
         """
         # 時刻順を保証 (evidence log は append-only で順序通りだが防御的に sort)
         events_sorted = sorted(events or [], key=lambda r: float(r.timestamp))
 
-        bs = self._init_betting_state(initial_state, online_summary)
+        bs, bootstrap_source, bootstrap_meta = self._bootstrap(
+            events_sorted, initial_state, online_summary,
+        )
         if bs is None:
-            return HandReconstructionResult(reason="reconstruction_skipped")
+            return HandReconstructionResult(
+                reason="reconstruction_skipped",
+                bootstrap_source=bootstrap_source,
+                bootstrap_meta=bootstrap_meta,
+            )
 
         # 遅延 import: integration 層は CLI 起動時に重い依存を引かないため
         from integration.beam_search import BeamEngine
@@ -422,6 +453,8 @@ class HandReconstructor:
             return HandReconstructionResult(
                 actions=reconstructed_actions,
                 reason="reconstruction_skipped",
+                bootstrap_source=bootstrap_source,
+                bootstrap_meta=bootstrap_meta,
             )
 
         # ── diff と needs_review ────────────────────────────────────────
@@ -443,38 +476,142 @@ class HandReconstructor:
             reason=reason,
             diff=diff,
             confidence=confidence,
+            bootstrap_source=bootstrap_source,
+            bootstrap_meta=bootstrap_meta,
         )
 
     # ──────────────────────────────────────────────────────────────────────
     # bootstrap
     # ──────────────────────────────────────────────────────────────────────
 
-    def _init_betting_state(
+    def _bootstrap(
         self,
+        events_sorted: "list[EvidenceRecord]",
         initial_state: "Optional[BettingState]",
         online_summary: Optional[HandSummary],
+    ) -> "tuple[Optional[BettingState], Optional[str], Optional[dict[str, Any]]]":
+        """3 段階で BettingState の bootstrap を試みる (Phase 4-B)。
+
+        優先順位:
+          1. ``initial_state`` (deepcopy。テスト等で明示注入されたとき)
+          2. raw events からの推定 (``_bootstrap_from_events``)
+          3. ``online_summary`` からの逆算 (``_bootstrap_from_online_summary``)
+
+        Returns:
+            ``(bs, bootstrap_source, bootstrap_meta)``。すべて失敗すると
+            ``(None, None, None)``。
+        """
+        if initial_state is not None:
+            return copy.deepcopy(initial_state), "initial_state", None
+
+        # Phase 4-B: raw-only を online_summary より先に試す。これにより live hook
+        # から online_summary=None で渡された hand でも reconstruct できる確率が上がる。
+        raw_result = self._bootstrap_from_events(events_sorted)
+        if raw_result is not None:
+            bs, meta = raw_result
+            return bs, "raw", meta
+
+        if online_summary is not None:
+            bs = self._bootstrap_from_online_summary(online_summary)
+            if bs is not None:
+                return bs, "online_summary", None
+
+        return None, None, None
+
+    def _bootstrap_from_events(
+        self,
+        events_sorted: "list[EvidenceRecord]",
+    ) -> "Optional[tuple[BettingState, dict[str, Any]]]":
+        """Phase 4-B: raw EvidenceRecord 列から BettingState を起こす。
+
+        **戦略 (conservative)**:
+          - active seats: ``RFID(role="seat", card=非空)`` を観測した seat 集合。
+            音声 (AudioEvent) には seat 情報が無いので、現状 RFID 観測が唯一の
+            強 signal。**2 seat 未満なら bootstrap 失敗**。
+          - blinds amount: コンストラクタの ``default_sb`` / ``default_bb`` から取る
+            (audio に SB_POST/BB_POST の seat 情報は無いため raw-only では推定不可)。
+            **どちらかが None なら bootstrap 失敗**。
+          - button_seat heuristic: deterministic に
+            ``active_seats[0]`` (= 最小 seat 番号) を button と仮定。これは raw
+            evidence では truth を確定できないため、``bootstrap_meta["button_inferred"]
+            = True`` で記録し、消費側が信頼度を低く扱えるようにする。
+          - SB/BB seat は ``BettingState.start_hand`` 側のルール (HU: BTN=SB、
+            non-HU: SB = BTN の左隣) に従って導出される。
+
+        Returns:
+            ``(BettingState, meta)`` または ``None`` (失敗時)。``meta`` は
+            ``bootstrap_meta`` 用の診断 dict。
+        """
+        from integration.action_inference import BettingState
+        from integration.action_order import compute_blinds
+
+        if self._default_sb is None or self._default_bb is None:
+            return None
+        if self._default_sb <= 0 or self._default_bb <= 0:
+            return None
+
+        seats_with_hole_cards: set[int] = set()
+        for rec in events_sorted:
+            if rec.kind != "rfid" or not isinstance(rec.event, RFIDEvent):
+                continue
+            ev: RFIDEvent = rec.event
+            if ev.role == "seat" and ev.seat is not None and ev.card:
+                seats_with_hole_cards.add(int(ev.seat))
+
+        if len(seats_with_hole_cards) < 2:
+            return None
+
+        active_seats = sorted(seats_with_hole_cards)
+        # heuristic: lowest seat number is button (deterministic、conservative)
+        button_seat = active_seats[0]
+        sb_seat, bb_seat = compute_blinds(button_seat, active_seats)
+
+        bs = BettingState()
+        try:
+            bs.start_hand(
+                button_seat=button_seat,
+                active_seats=active_seats,
+                sb_amount=self._default_sb,
+                bb_amount=self._default_bb,
+            )
+        except Exception:
+            logger.exception("Reconstructor: bs.start_hand raw bootstrap failed")
+            return None
+
+        meta: dict[str, Any] = {
+            "source": "raw",
+            "active_seats": list(active_seats),
+            "sb_seat": int(sb_seat),
+            "bb_seat": int(bb_seat),
+            "button_seat": int(button_seat),
+            "button_inferred": True,           # raw-only では truth ではない
+            "blinds_inferred": True,           # default_sb / default_bb 由来
+            "signals": {
+                "rfid_seat_observations": sorted(int(s) for s in seats_with_hole_cards),
+            },
+            # confidence は operational metric (詳細はモジュール docstring 参照)。
+            # raw-only bootstrap は signal が乏しいので低め (0.5) に固定する。
+            "confidence": 0.5,
+        }
+        return bs, meta
+
+    def _bootstrap_from_online_summary(
+        self,
+        online_summary: HandSummary,
     ) -> "Optional[BettingState]":
-        """initial_state 優先、なければ online_summary から bootstrap。
+        """``online_summary`` から button / SB / BB を逆算して BettingState を起こす。
 
-        **Phase 3 MVP の依存**: raw-only bootstrap (raw EvidenceLog 単独からの
-        button / SB / BB 推定) はサポートしない。``online_summary`` が canonical な
-        bootstrap source であり、これが無いと bs を起こせず ``None`` を返す
-        (= ``reason="reconstruction_skipped"`` で抜ける)。raw-only bootstrap は
-        Phase 4-B の課題。
+        Phase 3 で導入した online-bootstrap-assisted reconstruction の本体。
+        Phase 4-B では raw-only が失敗した時の fallback として使う。
 
-        online_summary から bootstrap する場合:
+        手順:
           - active_seats: stack_start > 0 の seat
-          - sb / bb: ``online_summary.blinds``
+          - sb / bb amount: ``online_summary.blinds``
           - button_seat: online_summary.actions の SB_POST seat から逆算
               (HU: BTN = SB、それ以外: BTN = active 内で SB の 1 つ前)
         bootstrap に必要な情報が揃わない場合は ``None`` を返す。
         """
         from integration.action_inference import BettingState
-
-        if initial_state is not None:
-            return copy.deepcopy(initial_state)
-        if online_summary is None:
-            return None
 
         sb = int((online_summary.blinds or {}).get("sb", 0))
         bb = int((online_summary.blinds or {}).get("bb", 0))
@@ -513,7 +650,7 @@ class HandReconstructor:
                 bb_amount=bb,
             )
         except Exception:
-            logger.exception("Reconstructor: bs.start_hand bootstrap failed")
+            logger.exception("Reconstructor: bs.start_hand online_summary bootstrap failed")
             return None
         return bs
 
