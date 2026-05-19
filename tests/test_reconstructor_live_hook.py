@@ -39,7 +39,11 @@ from output.json_writer import JsonWriter
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _build_thread(tmp_path: Path, session_id: str = "phase4a"):
+def _build_thread(
+    tmp_path: Path,
+    session_id: str = "phase4a",
+    on_hand_finalized=None,
+):
     """SB=100 / BB=200 / 2 players (10k each) で IntegrationThread を組む。"""
     players = [
         PlayerState(seat=1, name="A", stack=10000),
@@ -56,6 +60,7 @@ def _build_thread(tmp_path: Path, session_id: str = "phase4a"):
         stop_event=stop,
         initial_button_seat=2,
         auto_post_blinds=True,
+        on_hand_finalized=on_hand_finalized,
     )
     return thread, audio_q, stop, writer, gs
 
@@ -191,6 +196,77 @@ class TestOnlinePathUntouched:
 # ────────────────────────────────────────────────────────────────────────────
 
 
+class TestOnHandFinalizedCallback:
+    """Phase 4-C2: ``on_hand_finalized`` callback の動作。"""
+
+    def test_callback_invoked_on_hand_finalize(self, tmp_path: Path) -> None:
+        """1 hand 完了 → callback が hand_id 引数で 1 回呼ばれる。"""
+        received: list[int] = []
+        thread, audio_q, stop, _writer, _gs = _build_thread(
+            tmp_path, on_hand_finalized=received.append,
+        )
+        _drive_fold_win_hand(audio_q, time.time())
+
+        thread.start()
+        time.sleep(0.8)
+        stop.set()
+        thread.join(timeout=2.0)
+
+        assert received == [1]
+
+    def test_callback_fires_after_advisory_is_stored(self, tmp_path: Path) -> None:
+        """callback 時点で ``get_reconstruction_result`` から advisory が読める
+        (= advisory 計算後に発火している)。
+        """
+        captured: list[tuple[int, object, object]] = []
+
+        # callback 内で accessor を呼んで snapshot を取る
+        def cb(hand_id: int) -> None:
+            res = thread.get_reconstruction_result(hand_id)
+            summary = thread.get_last_summary(hand_id)
+            captured.append((hand_id, res, summary))
+
+        thread, audio_q, stop, _w, _gs = _build_thread(
+            tmp_path, on_hand_finalized=cb,
+        )
+        _drive_fold_win_hand(audio_q, time.time())
+
+        thread.start()
+        time.sleep(0.8)
+        stop.set()
+        thread.join(timeout=2.0)
+
+        assert len(captured) == 1
+        hand_id, result, summary = captured[0]
+        assert hand_id == 1
+        # advisory が確定済み (None ではない)
+        assert result is not None
+        assert summary is not None
+
+    def test_callback_exception_does_not_break_online_path(
+        self, tmp_path: Path,
+    ) -> None:
+        """callback で例外を投げても JSON 書き込みと stacks 更新は完了する。"""
+        def boom(hand_id: int) -> None:
+            raise RuntimeError("simulated callback failure")
+
+        thread, audio_q, stop, _w, gs = _build_thread(
+            tmp_path, session_id="cb_fail", on_hand_finalized=boom,
+        )
+        _drive_fold_win_hand(audio_q, time.time())
+
+        thread.start()
+        time.sleep(0.8)
+        stop.set()
+        thread.join(timeout=2.0)
+
+        # online path は完了している (JSON 書き込み + stacks 更新)
+        json_path = tmp_path / "cb_fail.json"
+        assert json_path.exists()
+        stacks = gs.get_stacks()
+        assert sum(stacks.values()) == 20000
+
+
 class TestMultipleHandsTracked:
     def test_two_hands_independently_tracked(self, tmp_path: Path) -> None:
         thread, audio_q, stop, _writer, _gs = _build_thread(tmp_path)
@@ -284,6 +360,26 @@ class TestInvokeHookWithoutOnlineSummary:
         thread._invoke_reconstructor_hook(12345, online_summary=None)
         # 空 events から bootstrap できないので skipped が入る
         assert thread._last_reconstruction_by_hand_id[12345].reason == "reconstruction_skipped"
+
+    def test_get_reconstruction_result_returns_none_for_unknown_hand_id(
+        self, tmp_path: Path,
+    ) -> None:
+        """Phase 4-C2 accessor: 該当 hand 無しなら None を返す。"""
+        thread, _aq, _stop, _w, _gs = _build_thread(tmp_path)
+        assert thread.get_reconstruction_result(999) is None
+        assert thread.get_last_summary(999) is None
+
+    def test_get_reconstruction_result_returns_stored_entry(
+        self, tmp_path: Path,
+    ) -> None:
+        """Phase 4-C2 accessor: dict に保存済みのエントリを返す。"""
+        thread, _aq, _stop, _w, _gs = _build_thread(tmp_path)
+        # ダミー entry を直接注入して accessor を検証
+        thread._completed_hands[77] = []
+        thread._invoke_reconstructor_hook(77, online_summary=None)
+        result = thread.get_reconstruction_result(77)
+        assert result is not None
+        assert result.reason == "reconstruction_skipped"
 
     def test_invoke_hook_none_with_rfid_raw_bootstrap_succeeds(
         self, tmp_path: Path,

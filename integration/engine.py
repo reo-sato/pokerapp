@@ -98,6 +98,7 @@ class IntegrationThread(threading.Thread):
         on_action: Optional[Callable[[ActionRecord], None]] = None,
         on_action_revised: Optional[Callable[[ActionRecord], None]] = None,
         on_rfid_card: Optional[Callable[[RFIDEvent], None]] = None,
+        on_hand_finalized: Optional[Callable[[int], None]] = None,
         stop_event: Optional[threading.Event] = None,
         initial_button_seat: Optional[int] = None,
         sb_amount: Optional[int] = None,
@@ -124,6 +125,9 @@ class IntegrationThread(threading.Thread):
         self._on_action = on_action
         self._on_action_revised = on_action_revised
         self._on_rfid_card = on_rfid_card
+        # Phase 4-C2: hand 終局通知 (advisory 計算後に発火)。GUI / 監視ツールが
+        # ``get_reconstruction_result(hand_id)`` を呼んで advisory を読む想定。
+        self._on_hand_finalized = on_hand_finalized
         self._stop_event = stop_event or threading.Event()
 
         # センサーイベントのバッファ
@@ -235,6 +239,31 @@ class IntegrationThread(threading.Thread):
     def betting_state(self) -> BettingState:
         """現在のベッティング状態 (GUI ヘッダー表示などに使う)。"""
         return self._betting_state
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Phase 4-C2: advisory accessors (read-only)
+    #
+    # GUI / 監視ツールが ``_last_reconstruction_by_hand_id`` 等の private
+    # store に直接触らず advisory 情報を読めるようにする。返り値は
+    # in-memory の参照 (mutation 不可前提)。online JSON / PHH / GameState には
+    # 影響しない。
+    # ──────────────────────────────────────────────────────────────────────
+
+    def get_reconstruction_result(
+        self, hand_id: int,
+    ) -> Optional[HandReconstructionResult]:
+        """``hand_id`` の advisory ``HandReconstructionResult`` を返す。
+
+        該当 hand が無いか reconstruct 例外で skip された場合は ``None``。
+        """
+        return self._last_reconstruction_by_hand_id.get(int(hand_id))
+
+    def get_last_summary(self, hand_id: int) -> Optional[HandSummary]:
+        """``hand_id`` の online ``HandSummary`` を返す (advisory 経路の参照用)。
+
+        該当 hand が ``_finalize_hand`` を通っていなければ ``None``。
+        """
+        return self._last_summary_by_hand_id.get(int(hand_id))
 
     def run(self) -> None:
         logger.info("IntegrationThread started")
@@ -914,6 +943,15 @@ class IntegrationThread(threading.Thread):
         self._last_summary_by_hand_id[summary.hand_id] = summary
         if summary.hand_id in self._completed_hands:
             self._invoke_reconstructor_hook(summary.hand_id, online_summary=summary)
+
+        # Phase 4-C2: GUI / 監視ツールへの通知。advisory が ``_last_reconstruction_by_hand_id``
+        # に確定した *後* に発火させる (= コールバックは ``get_reconstruction_result`` で
+        # 安全に advisory を引ける)。callback が例外を投げても online path は不変。
+        if self._on_hand_finalized is not None:
+            try:
+                self._on_hand_finalized(int(summary.hand_id))
+            except Exception:
+                logger.exception("on_hand_finalized callback raised")
 
     def _apply_payouts_to_gamestate(self, summary: HandSummary) -> None:
         """Phase 2-B 暫定 bridge: HandFinalizer の seat_payouts から primary winner を

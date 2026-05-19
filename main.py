@@ -388,6 +388,7 @@ def run_gui() -> None:
         rfid_queue=rfid_q,
         on_action=dash.on_action,
         on_rfid_card=dash.on_rfid_card,
+        on_hand_finalized=dash.on_hand_finalized,  # Phase 4-C2: advisory パネル更新
         stop_event=stop_event,
         initial_button_seat=session_cfg["button_seat"],
         sb_amount=session_cfg["sb"],

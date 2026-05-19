@@ -2,18 +2,24 @@
 
 Phase 4: customtkinter ベースの GUI ダッシュボード。
 
-レイアウト:
+レイアウト (Phase 4-C2 で「ハンド履歴 (advisory)」パネルを追加):
   ┌──────────────────────────────────────────────────────┐
   │  ヘッダー: セッション情報 / ハンド番号 / ストリート / ポット   │
   ├─────────────────┬────────────────────────────────────┤
   │  プレイヤー一覧   │  アクションログ                       │
   │  (左パネル)      │  (中央パネル, スクロール可)             │
   ├─────────────────┴────────────────────────────────────┤
+  │  ハンド履歴 (advisory): #1 [OK]  #2 [REVIEW] [RAW] ... │
+  │  Latest advisory: status / reason / bootstrap / diff   │
+  ├──────────────────────────────────────────────────────┤
   │  コントロール: 新ハンド / ウィナー確定 / リバイ             │
   └──────────────────────────────────────────────────────┘
 
 スレッド安全設計:
   - IntegrationThread → on_action(record) → _update_queue.put(record)
+  - IntegrationThread → on_hand_finalized(hand_id) → _hand_finalized_queue.put
+    (Phase 4-C2; advisory が ``get_reconstruction_result(hand_id)`` で読める
+     状態になった後に発火する)
   - mainloop 内で after(100, _poll_updates) を繰り返し呼び出して UI を更新
 """
 from __future__ import annotations
@@ -89,6 +95,10 @@ class GUIDashboard:
         self._integration_thread: Optional[object] = None  # set_integration_thread で接続
         self._update_queue: queue.Queue["ActionRecord"] = queue.Queue()
         self._rfid_card_queue: queue.Queue = queue.Queue()
+        # Phase 4-C2: hand 終局通知のスレッド安全な受け口。
+        # IntegrationThread が on_hand_finalized(hand_id) を呼び、main thread の
+        # _poll_updates が consume して advisory パネルを更新する。
+        self._hand_finalized_queue: queue.Queue[int] = queue.Queue()
         # seat → hole cards 表示用 (スレッド安全のため queue 経由で更新)
         self._hole_cards_display: dict[int, list[str]] = {}
         self._board_cards_display: list[str] = []
@@ -173,9 +183,42 @@ class GUIDashboard:
         self._log_box.tag_config("low",    foreground=_CONF_COLOR_LOW)
         self._log_box.tag_config("review", foreground="#FF5252")
 
-        # 下部コントロール
+        # Phase 4-C2: ハンド履歴 (advisory) パネル
+        # 各 hand 終局時に 1 行追加される。badge tag で色分け。
+        # その直下に "最新ハンドの詳細" 行を 1 段、別 label として並べる。
+        self._history_frame = ctk.CTkFrame(root, corner_radius=0, height=140)
+        self._history_frame.grid(row=2, column=0, sticky="ew", padx=0, pady=(2, 0))
+        self._history_frame.grid_columnconfigure(0, weight=1)
+
+        self._history_title = ctk.CTkLabel(
+            self._history_frame, text="ハンド履歴 (advisory)",
+            anchor="w", font=("", 11, "bold"),
+        )
+        self._history_title.grid(row=0, column=0, padx=8, pady=(4, 0), sticky="w")
+
+        self._history_box = ctk.CTkTextbox(
+            self._history_frame, state="disabled", wrap="none",
+            font=("Courier", 10), height=80,
+        )
+        self._history_box.grid(row=1, column=0, padx=8, pady=(0, 2), sticky="ew")
+        # badge / label tag に対応する色 (gui.reconstruction_badges と揃える)
+        from gui.reconstruction_badges import (
+            BADGE_COLOR_OK, BADGE_COLOR_REVIEW, BADGE_COLOR_SKIPPED,
+        )
+        self._history_box.tag_config("ok",      foreground=BADGE_COLOR_OK)
+        self._history_box.tag_config("review",  foreground=BADGE_COLOR_REVIEW)
+        self._history_box.tag_config("skipped", foreground=BADGE_COLOR_SKIPPED)
+
+        # "最新ハンドの advisory 詳細" 行 (status / reason / bootstrap / diff)
+        self._lbl_latest_advisory = ctk.CTkLabel(
+            self._history_frame, anchor="w", font=("", 10),
+            text="Latest advisory: —",
+        )
+        self._lbl_latest_advisory.grid(row=2, column=0, padx=8, pady=(0, 4), sticky="w")
+
+        # 下部コントロール (Phase 4-C2 で row 2 → row 3 にずらした)
         ctrl = ctk.CTkFrame(root, corner_radius=0)
-        ctrl.grid(row=2, column=0, sticky="ew", padx=0, pady=0)
+        ctrl.grid(row=3, column=0, sticky="ew", padx=0, pady=0)
         self._build_controls(ctrl)
 
         # セッション名を表示
@@ -475,6 +518,13 @@ class GUIDashboard:
                 self._apply_rfid_card(rfid_ev)
         except queue.Empty:
             pass
+        # Phase 4-C2: hand 終局通知を処理 (advisory 表示更新)
+        try:
+            while True:
+                hand_id = self._hand_finalized_queue.get_nowait()
+                self._apply_hand_finalized(hand_id)
+        except queue.Empty:
+            pass
         # ゲーム状態のヘッダーを常に最新化
         self._refresh_header()
         if not self._stop_event.is_set():
@@ -509,6 +559,60 @@ class GUIDashboard:
             self._append_log(line, tag="review")
         else:
             self._append_log(line, tag=tag)
+
+    def _apply_hand_finalized(self, hand_id: int) -> None:
+        """Phase 4-C2: hand 終局時に履歴パネル + 最新 advisory ラベルを更新する。
+
+        IntegrationThread の advisory store (``_last_summary_by_hand_id`` /
+        ``_last_reconstruction_by_hand_id``) を **read-only** で参照するだけで、
+        online JSON / PHH / GameStateManager には触らない。
+        """
+        from gui.reconstruction_badges import (
+            format_history_line, summarize_reconstruction,
+        )
+
+        # advisory accessor から HandSummary / HandReconstructionResult を引く。
+        # IntegrationThread が未接続 / 対象 hand 無しなら全部 None で扱う。
+        summary = None
+        result = None
+        thread = self._integration_thread
+        if thread is not None:
+            try:
+                summary = thread.get_last_summary(hand_id)  # type: ignore[attr-defined]
+            except Exception:
+                summary = None
+            try:
+                result = thread.get_reconstruction_result(hand_id)  # type: ignore[attr-defined]
+            except Exception:
+                result = None
+
+        badge_state = summarize_reconstruction(result)
+
+        winner_seat = getattr(summary, "winner_seat", None) if summary is not None else None
+        pot_total = getattr(summary, "pot_total", None) if summary is not None else None
+        line = format_history_line(hand_id, winner_seat, pot_total, badge_state)
+
+        # 履歴パネル: tag は status と同名 (ok / review / skipped) に揃える
+        box = self._history_box
+        box.configure(state="normal")
+        box.insert("end", line + "\n", badge_state.status)
+        box.configure(state="disabled")
+        box.see("end")
+
+        # "最新 advisory" ラベルを 1 行で更新
+        detail_parts = [
+            f"Latest advisory hand #{hand_id}",
+            f"status={badge_state.status}",
+            f"reason={badge_state.reason or 'none'}",
+            f"bootstrap={badge_state.bootstrap_source}",
+        ]
+        if badge_state.diff_fields:
+            detail_parts.append(f"diff={','.join(badge_state.diff_fields)}")
+        else:
+            detail_parts.append("diff=none")
+        if badge_state.button_inferred:
+            detail_parts.append("(button inferred from raw observations)")
+        self._lbl_latest_advisory.configure(text="  |  ".join(detail_parts))
 
     def _apply_rfid_card(self, rfid_ev: object) -> None:
         """RFIDEvent を UI に反映する (ホールカード / ボードカード更新)。"""
@@ -631,6 +735,18 @@ class GUIDashboard:
     def on_rfid_card(self, rfid_ev: object) -> None:
         """IntegrationThread から呼ばれる RFID カードコールバック。スレッド安全。"""
         self._rfid_card_queue.put(rfid_ev)
+
+    def on_hand_finalized(self, hand_id: int) -> None:
+        """Phase 4-C2: IntegrationThread から呼ばれる hand 終局コールバック。
+
+        ``_finalize_hand`` で advisory (reconstruction) が確定した *後* に呼ばれるので、
+        main thread 側で ``get_reconstruction_result(hand_id)`` を呼べば advisory を
+        安全に引ける。スレッド安全のため hand_id を queue に積むだけにする。
+        """
+        try:
+            self._hand_finalized_queue.put(int(hand_id))
+        except (TypeError, ValueError):
+            pass  # 不正な hand_id は黙って破棄
 
     def run(self) -> None:
         """mainloop を開始する（ブロッキング）。"""

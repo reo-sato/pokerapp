@@ -67,7 +67,8 @@ pokerapp/
 │   └── inspect_reconstruction.py  ← CLI (Phase 4-C1): reconstruct_<session>.jsonl を読んで [OK]/[REVIEW]/[SKIPPED] 単位の一覧を表示
 │
 ├── gui/
-│   └── dashboard.py               ← GUIDashboard (customtkinter)
+│   ├── dashboard.py               ← GUIDashboard (customtkinter)
+│   └── reconstruction_badges.py   ← Phase 4-C2: HandReconstructionResult → ReconstructionBadgeState 投影 helper (status / RAW バッジ / diff_fields / 履歴行整形)
 │
 ├── tests/                         ← pytest テストスイート
 │   ├── test_action_inference.py   ← BettingState / infer_action() テスト
@@ -603,6 +604,61 @@ python -m output.inspect_reconstruction --reconstruct logs/reconstruct_session_x
 ``_last_reconstruction_by_hand_id`` のいずれにも触らない。GUI / 監視ツールが
 このログ要約を取り込むまでの当座の可視化手段。
 
+### `gui/reconstruction_badges.py` (Phase 4-C2 実装済)
+
+``HandReconstructionResult`` を GUI 表示用の小さな状態
+(``ReconstructionBadgeState``) に投影する pure helper。``customtkinter`` /
+``tkinter`` に依存しない (= 通常の pytest で検証できる)。badge の判定ルールは
+Phase 4-C1 CLI (`output.inspect_reconstruction`) と統一する。
+
+- `ReconstructionBadgeState(status, show_raw_badge, reason, bootstrap_source,
+  diff_fields, button_inferred)`: GUI が表示するためのフラット dataclass
+- `summarize_reconstruction(result) → ReconstructionBadgeState`:
+  - status 判定 (優先順位):
+    1. ``result`` が None / ``summary`` が None / ``reason=="reconstruction_skipped"``
+       → ``"skipped"``
+    2. ``needs_review`` truthy / ``reason=="reconstructed_with_diff"`` → ``"review"``
+    3. それ以外 → ``"ok"``
+  - RAW バッジ: ``bootstrap_source == "raw"`` の hand のみ ``show_raw_badge=True``
+  - diff_fields は ``result.diff`` の keys を sorted (alphabetical) で返す
+- `format_history_line(hand_id, winner_seat, pot_total, badge_state) → str`:
+  1 hand を 1 行のテキストに整形 (Phase 4-C1 CLI と同じ語彙)
+
+### GUI 側の advisory パネル (Phase 4-C2 実装済)
+
+``gui/dashboard.py:GUIDashboard`` に「ハンド履歴 (advisory)」パネルを追加:
+
+- レイアウト: ヘッダー / プレイヤー一覧 + アクションログ / **ハンド履歴**(新) /
+  コントロール の 4 行
+- 履歴行: hand 終局時に追加。tag 色は status と同名 (``ok`` / ``review`` /
+  ``skipped``) で、`reconstruction_badges` の ``BADGE_COLOR_*`` を使用
+- "Latest advisory" ラベル: 最新ハンドの status / reason / bootstrap / diff /
+  button_inferred を 1 行に圧縮表示
+
+**advisory 取得経路**:
+- ``IntegrationThread`` が hand 終局時 (``_finalize_hand`` 末尾、
+  ``_invoke_reconstructor_hook`` の直後) に
+  ``on_hand_finalized(hand_id)`` callback を発火
+- GUI の ``GUIDashboard.on_hand_finalized(hand_id)`` が
+  ``_hand_finalized_queue`` に hand_id を積む (スレッド安全)
+- main thread の ``_poll_updates`` が queue を消費 →
+  ``_apply_hand_finalized(hand_id)`` を呼ぶ
+- ``_apply_hand_finalized`` は ``IntegrationThread.get_last_summary(hand_id)`` /
+  ``get_reconstruction_result(hand_id)`` を呼んで advisory を read-only で取得
+- ``summarize_reconstruction`` で badge state に投影し、``_history_box`` に
+  1 行追加 + ``_lbl_latest_advisory`` を更新
+
+**accessor (Phase 4-C2 追加、IntegrationThread)**:
+- ``get_reconstruction_result(hand_id) -> Optional[HandReconstructionResult]``:
+  該当 hand 無しなら None。GUI が ``_last_reconstruction_by_hand_id`` に直接
+  触らないようにする read-only API
+- ``get_last_summary(hand_id) -> Optional[HandSummary]``: 同上で
+  ``_last_summary_by_hand_id`` の read-only ラッパ
+
+**約束**: GUI の advisory パネルは **read-only**。online JSON / PHH /
+GameStateManager / settlement の挙動には一切触れない。badge / 詳細は
+クリックできない静的 indicator として実装 (Phase 4-C3+ で interactive 化検討)。
+
 ### `output/replay_hand.py` (Phase 2-C 実装済)
 
 - `EvidenceRecord(timestamp, kind, event, payload)`: 1 観測の type-restored 表現
@@ -748,7 +804,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 451 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 484 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -774,6 +830,9 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_reconstructor_live_hook.py | IntegrationThread から advisory reconstruct を呼ぶ live hook (online_summary 注入 / 複数 hand / 例外時 online 不変 / online_summary=None で skipped or raw bootstrap) (Phase 4-A + 4-B, 10 件) |
 | test_hand_reconstructor_bootstrap.py | bootstrap 3 段階優先 (initial_state / raw / online_summary) + skipped + CLI round-trip で `bootstrap_source` 反映 (Phase 4-B, 11 件) |
 | test_inspect_reconstruction_cli.py | inspect_reconstruction CLI (label 判定 / --only-needs-review / --fields filter / 壊れた JSONL skip) (Phase 4-C1, 14 件) |
+| test_reconstruction_badges.py | gui.reconstruction_badges 単体 (status / RAW / diff_fields / button_inferred / format_history_line) (Phase 4-C2, 20 件) |
+| test_gui.py (Phase 4-C2 追加) | GUIDashboard.on_hand_finalized / _apply_hand_finalized: queue 経由、advisory accessor 呼び出し、tag 反映 (Phase 4-C2, +8 件) |
+| test_reconstructor_live_hook.py (Phase 4-C2 追加) | IntegrationThread.on_hand_finalized callback 発火 + get_reconstruction_result / get_last_summary accessor (Phase 4-C2, +5 件) |
 
 ---
 
@@ -795,6 +854,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | JSON ログ出力 | ✅ 完了 | output/json_writer.py |
 | PHH エクスポート | ✅ 完了 | output/phh_exporter.py |
 | GUI ダッシュボード | 🔨 部分実装 | gui/dashboard.py |
+| GUI advisory パネル (hand 履歴 + 最新 advisory 詳細) | ✅ 完了 (Phase 4-C2) | `gui/dashboard.py`: hand 終局時に履歴行追加 + 最新ハンドの reason/bootstrap/diff を表示。`gui/reconstruction_badges.py:summarize_reconstruction` が status/RAW バッジ判定を担う。online JSON / PHH / GameStateManager には触らない |
 | ディーラーボタン自動回転 | ✅ 完了 | action_order.py, BettingState.start_hand |
 | SB/BB 自動 post | ✅ 完了 | BettingState.start_hand, ActionRecord(SB_POST/BB_POST) |
 | Preflop/Postflop first actor | ✅ 完了 | compute_first_actor_preflop/postflop |
@@ -1194,7 +1254,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 451 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 484 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
@@ -1205,6 +1265,7 @@ pytest tests/test_hand_reconstructor.py -v                                      
 pytest tests/test_reconstructor_live_hook.py -v                                   # Phase 4-A (IntegrationThread live advisory hook)
 pytest tests/test_hand_reconstructor_bootstrap.py -v                              # Phase 4-B (3-stage bootstrap + CLI round-trip)
 pytest tests/test_inspect_reconstruction_cli.py -v                                # Phase 4-C1 (inspect_reconstruction CLI)
+pytest tests/test_reconstruction_badges.py tests/test_gui.py -v                   # Phase 4-C2 (GUI advisory パネル + helper)
 python -m output.inspect_reconstruction --reconstruct logs/reconstruct_session_xxx.jsonl  # Phase 4-C1: reconstruct 結果一覧
 python -m output.reconstruct_session --session logs/<session>.json                # Phase 3 CLI: online↔offline diff を出力
 python main.py --cli                                                              # M1: logs/evidence_*.jsonl が増える

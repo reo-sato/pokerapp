@@ -121,3 +121,163 @@ class TestGUIDashboardLogic:
         dash._cmd_rebuy()
         # クラッシュせず、_append_log が呼ばれる
         dash._append_log.assert_called_once()
+
+
+# ――― Phase 4-C2: hand finalized → advisory パネル更新 ―――
+
+
+def _stub_summary(hand_id: int = 1, winner_seat: int = 2, pot_total: int = 300):
+    """`HandSummary` の代わりに使う最小 stub (getattr で読まれる field だけ持つ)。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        hand_id=hand_id, winner_seat=winner_seat, pot_total=pot_total,
+    )
+
+
+def _stub_result(
+    *,
+    needs_review: bool = False,
+    reason: str = "reconstructed_no_diff",
+    diff=None,
+    summary=None,
+    bootstrap_source: str = "online_summary",
+    bootstrap_meta=None,
+):
+    """`HandReconstructionResult` の duck-typed stub。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        needs_review=needs_review, reason=reason, diff=diff,
+        summary=summary if summary is not None else object(),
+        bootstrap_source=bootstrap_source, bootstrap_meta=bootstrap_meta,
+    )
+
+
+class TestOnHandFinalizedQueue:
+    def test_on_hand_finalized_puts_to_queue(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash.on_hand_finalized(42)
+        assert dash._hand_finalized_queue.get_nowait() == 42
+
+    def test_on_hand_finalized_coerces_to_int(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash.on_hand_finalized("7")  # type: ignore[arg-type]
+        assert dash._hand_finalized_queue.get_nowait() == 7
+
+    def test_on_hand_finalized_bad_value_does_not_crash(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        # int 化できない値が渡されても例外を投げない (= IntegrationThread を壊さない)
+        dash.on_hand_finalized("not-an-int")  # type: ignore[arg-type]
+        assert dash._hand_finalized_queue.empty()
+
+
+class TestApplyHandFinalized:
+    def test_apply_writes_ok_line_to_history_box(self, tmp_path: Path):
+        """OK ケース: integration thread から advisory を引き、_history_box に行追加。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+
+        # IntegrationThread accessors を stub
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary(
+            hand_id=1, winner_seat=2, pot_total=300,
+        )
+        thread.get_reconstruction_result.return_value = _stub_result(
+            needs_review=False, reason="reconstructed_no_diff",
+            bootstrap_source="online_summary",
+        )
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(1)
+
+        # _history_box.insert(...) が呼ばれ、tag="ok" で、テキストに [OK] が含まれる
+        thread.get_last_summary.assert_called_once_with(1)
+        thread.get_reconstruction_result.assert_called_once_with(1)
+        insert_calls = dash._history_box.insert.call_args_list
+        assert len(insert_calls) == 1
+        args, _kwargs = insert_calls[0]
+        # signature: insert("end", text, tag)
+        assert args[0] == "end"
+        assert "#1" in args[1]
+        assert "winner=seat2" in args[1]
+        assert "[OK]" in args[1]
+        assert "[RAW]" not in args[1]
+        assert args[2] == "ok"
+
+        # latest advisory ラベルも更新される
+        configure_calls = dash._lbl_latest_advisory.configure.call_args_list
+        assert configure_calls
+        last_text = configure_calls[-1][1]["text"]
+        assert "Latest advisory hand #1" in last_text
+        assert "status=ok" in last_text
+        assert "reason=reconstructed_no_diff" in last_text
+        assert "bootstrap=online_summary" in last_text
+
+    def test_apply_writes_review_line_with_raw_badge(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary(
+            hand_id=2, winner_seat=1, pot_total=600,
+        )
+        thread.get_reconstruction_result.return_value = _stub_result(
+            needs_review=True, reason="reconstructed_with_diff",
+            diff={"resolution_type": {}, "seat_payouts": {}},
+            bootstrap_source="raw",
+            bootstrap_meta={"button_inferred": True},
+        )
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(2)
+
+        args, _ = dash._history_box.insert.call_args_list[0]
+        assert "#2" in args[1]
+        assert "[REVIEW]" in args[1]
+        assert "[RAW]" in args[1]
+        assert "diff=resolution_type,seat_payouts" in args[1]
+        assert args[2] == "review"
+
+        last_text = dash._lbl_latest_advisory.configure.call_args_list[-1][1]["text"]
+        assert "status=review" in last_text
+        assert "diff=resolution_type,seat_payouts" in last_text
+        assert "button inferred" in last_text
+
+    def test_apply_writes_skipped_line_when_result_is_none(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary(
+            hand_id=3, winner_seat=1, pot_total=300,
+        )
+        thread.get_reconstruction_result.return_value = None    # 対象 hand 無し
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(3)
+
+        args, _ = dash._history_box.insert.call_args_list[0]
+        assert "[SKIPPED]" in args[1]
+        assert "[RAW]" not in args[1]
+        assert args[2] == "skipped"
+
+    def test_apply_handles_integration_thread_none(self, tmp_path: Path):
+        """thread 未接続でもクラッシュせず、SKIPPED で抜ける (= 例外 propagation なし)。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._integration_thread = None
+        dash._apply_hand_finalized(99)
+
+        # history box には 1 行 (SKIPPED) が入る
+        insert_calls = dash._history_box.insert.call_args_list
+        assert len(insert_calls) == 1
+        assert insert_calls[0][0][2] == "skipped"
+        assert "#99" in insert_calls[0][0][1]
+        assert "[SKIPPED]" in insert_calls[0][0][1]
+
+    def test_apply_handles_accessor_exception(self, tmp_path: Path):
+        """accessor が例外を投げても GUI 側は SKIPPED で抜ける。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.side_effect = RuntimeError("boom")
+        thread.get_reconstruction_result.side_effect = RuntimeError("boom")
+        dash._integration_thread = thread
+
+        # 例外で _apply_hand_finalized が落ちないこと
+        dash._apply_hand_finalized(5)
+        args, _ = dash._history_box.insert.call_args_list[0]
+        assert "[SKIPPED]" in args[1]
+        assert args[2] == "skipped"
