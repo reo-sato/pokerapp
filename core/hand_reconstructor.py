@@ -27,6 +27,34 @@ Phase 3: hand window 単位の **遡及的 (retrospective) 再推定** 本実装
     ``HandReconstructor`` は **追加のオフライン / 後処理パス**としてのみ動作する。
   - online と offline の差分は ``HandReconstructionResult.diff`` (機械可読 dict) と
     ``needs_review`` フラグで返し、消費側 (CLI / GUI / 監視ツール) が判断する。
+
+**Phase 3 MVP の仕様・制約事項** (明文化):
+
+  - **online-bootstrap-assisted reconstruction (raw-only ではない)**:
+    Phase 3 は raw EvidenceLog 単独から hand を立て直す *raw-only reconstruction*
+    ではなく、``online_summary`` (button / SB / BB seat、players_info、blinds) を
+    bootstrap の入力として使う *online-bootstrap-assisted reconstruction*。
+    ``_init_betting_state`` は ``online_summary.actions`` の SB_POST / BB_POST seat
+    から button を逆算するため、``online_summary`` も ``initial_state`` も無いと
+    bs を起こせず ``reason="reconstruction_skipped"`` で抜ける。raw-only bootstrap
+    (RFID hole_cards 出現や音声 "new_hand" 時点の active seats から button を推定
+    する等) は Phase 4-B の課題。
+
+  - **``winner_seat_hint`` は oracle ではなく終端の補助制約**:
+    ``AudioEvent(action="winner")`` から抽出した seat は **強観測ではなく**、
+    ``beam.apply_winner_filter(winner_seat_hint, final_pot=None)`` への入力として
+    使う「終端の補助制約の 1 つ」として扱う。粒子集合の絞り込みに使うのみで、
+    settlement の確定は ``HandFinalizer`` 側に委ねる (``HandFinalizer`` は
+    ``winner_seat_hint`` と settlement (= payouts) が食い違えば
+    ``review_required=True`` を立てる)。
+
+  - **``confidence`` は operational metric であってモデル事後確率ではない**:
+    ``HandReconstructionResult.confidence = consumed_count / audio_count`` は
+    **audio evidence の消費率** (= ``beam.step_audio`` → ``bs.update_after_action``
+    が成功した割合) を示す operational metric。値域は [0, 1] だが、Bayes posterior
+    や top-1 確率としては解釈しないこと。低い値は「再構成中に illegal action や
+    beam fail が多発した」ことを示すヒントに過ぎない。モデル確率
+    (top-1 vs top-2 の log 差、エントロピー、Brier score 等) は Phase 4+ の課題。
 """
 from __future__ import annotations
 
@@ -67,7 +95,10 @@ class HandReconstructionResult:
                      ``"reconstruction_skipped"`` (bootstrap 失敗等)
       diff:          online vs offline の差分。``None`` なら一致 or 比較不能。
                      dict 形式 ``{field_name: {"online": ..., "offline": ...}}``
-      confidence:    再構成への簡易 confidence (audio 消費率 [0,1] or None)
+      confidence:    **operational metric** = ``consumed_count / audio_count`` ∈ [0, 1]
+                     or ``None``。モデル事後確率ではなく **audio evidence の消費率**
+                     を示す (詳細はモジュール docstring を参照)。Phase 3 MVP で
+                     確率としては解釈しないこと。
     """
 
     actions: list[ActionRecord] = field(default_factory=list)
@@ -189,6 +220,12 @@ class HandReconstructor:
     既存の online 推定系 (``HandFinalizer`` / ``BeamEngine`` / ``BettingState``) を
     そのまま再利用するため、別 variant や別 prior を試したい場合はコンストラクタ
     引数で差し替えられる。
+
+    Phase 3 MVP の制約 (モジュール docstring も参照):
+      - bootstrap は ``online_summary`` または ``initial_state`` に依存
+        (= online-bootstrap-assisted reconstruction、raw-only ではない)
+      - winner audio は終端の **補助制約** として ``apply_winner_filter`` に渡すのみ
+      - ``confidence`` は audio 消費率の operational metric (確率ではない)
     """
 
     def __init__(
@@ -328,6 +365,9 @@ class HandReconstructor:
                 self._absorb_rfid(rec.event, bs, board, hole_cards)
 
         # ── winner filter (beam 終局粒子の絞り込み) ─────────────────────
+        # winner_seat_hint は **oracle ではなく終端の補助制約**。粒子集合のうち
+        # winner_seat_hint が fold した宇宙を弱める / 削るのみで、settlement の
+        # 確定は HandFinalizer に委ねる。詳細はモジュール docstring 参照。
         if winner_seat_hint is not None:
             try:
                 beam.apply_winner_filter(winner_seat_hint, final_pot=None)
@@ -415,6 +455,12 @@ class HandReconstructor:
         online_summary: Optional[HandSummary],
     ) -> "Optional[BettingState]":
         """initial_state 優先、なければ online_summary から bootstrap。
+
+        **Phase 3 MVP の依存**: raw-only bootstrap (raw EvidenceLog 単独からの
+        button / SB / BB 推定) はサポートしない。``online_summary`` が canonical な
+        bootstrap source であり、これが無いと bs を起こせず ``None`` を返す
+        (= ``reason="reconstruction_skipped"`` で抜ける)。raw-only bootstrap は
+        Phase 4-B の課題。
 
         online_summary から bootstrap する場合:
           - active_seats: stack_start > 0 の seat

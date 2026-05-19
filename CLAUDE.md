@@ -445,22 +445,54 @@ hand window 単位の retrospective inference。EvidenceLog の events をその
 diff を出す。**online の HandSummary / JSON / PHH は一切 mutate しない**
 (追加のオフラインパスとして動作)。
 
+#### Phase 3 MVP の仕様・制約事項 (明文化)
+
+1. **online-bootstrap-assisted reconstruction (raw-only ではない)**:
+   Phase 3 は raw EvidenceLog 単独から button / SB / BB を立てる *raw-only*
+   reconstruction ではなく、``online_summary`` の `players` / `blinds` /
+   `actions[SB_POST,BB_POST]` を bootstrap の入力として使う
+   *online-bootstrap-assisted reconstruction*。``_init_betting_state`` は
+   ``online_summary.actions`` の SB_POST seat から button を逆算 (HU: BTN=SB、
+   それ以外: BTN は active 内で SB の 1 つ前)。``online_summary`` も
+   ``initial_state`` も無い場合は bs を起こせず ``reason="reconstruction_skipped"``
+   で抜ける。raw-only bootstrap (RFID hole_cards 出現や音声 ``new_hand`` 時点の
+   active seats から button を推定する等) は Phase 4-B の課題。
+
+2. **`winner_seat_hint` は oracle ではなく終端の補助制約**:
+   ``AudioEvent(action="winner")`` から抽出した seat は **強観測ではなく**、
+   ``beam.apply_winner_filter(winner_seat_hint, final_pot=None)`` への入力として
+   使う「終端の補助制約の 1 つ」。粒子集合の絞り込み (winner_seat が fold した
+   宇宙を弱める / 削る) に使うのみで、settlement の確定は ``HandFinalizer`` に
+   委ねる (``HandFinalizer`` は ``winner_seat_hint`` と settlement (= payouts)
+   が食い違えば ``review_required=True`` を立てる)。
+
+3. **`confidence` は operational metric であってモデル事後確率ではない**:
+   ``HandReconstructionResult.confidence = consumed_count / audio_count`` は
+   **audio evidence の消費率** (= ``beam.step_audio`` → ``bs.update_after_action``
+   が成功した割合) を示す operational metric。値域は [0, 1] だが、Bayes posterior
+   や top-1 確率としては解釈しないこと。低い値は「再構成中に illegal action や
+   beam fail が多発した」ことを示すヒントに過ぎない。モデル確率 (top-1 vs top-2
+   の log 差、エントロピー、Brier score 等) は Phase 4+ の課題。
+
+#### API
+
 - `HandReconstructionResult(actions, summary, needs_review, reason, diff, confidence)`:
   - `actions`: 再構成 ActionRecord 列 (SB_POST/BB_POST + beam MAP の player actions)
   - `summary`: offline HandSummary' (bootstrap 失敗時は None)
   - `needs_review`: online との diff があれば True (online_summary 未指定なら False)
   - `reason`: `"reconstructed_no_diff"` / `"reconstructed_with_diff"` / `"reconstructed"` / `"reconstruction_skipped"`
   - `diff`: 差分 dict `{field: {"online": ..., "offline": ...}}` (一致 or 比較不能なら None)
-  - `confidence`: 簡易指標 = consumed_count / audio_count (audio が無ければ None)
+  - `confidence`: **operational metric** = consumed_count / audio_count (上記参照、確率ではない)
 - `HandReconstructor(beam_K=8, prior=None, finalizer=None)`: テスト inject 可能
 - `HandReconstructor.reconstruct_from_events(events, initial_state=None, online_summary=None) → HandReconstructionResult`:
   1. `initial_state` 優先、なければ `online_summary` から `_init_betting_state` で bootstrap
      (button は `actions` の SB_POST/BB_POST から逆算: HU なら BTN=SB、それ以外は SB の左隣)
   2. `BeamEngine(K)` を新規構築 → `reset_with_state(bs)`
   3. events を時刻順走査: audio 通常 action → `beam.step_audio` → `bs.update_after_action`、
-     audio "winner" → `winner_seat_hint` に保存、RFID seat → hole_cards 蓄積、
-     RFID board → board 蓄積 + street 昇格
+     audio "winner" → `winner_seat_hint` に保存 (補助制約として後段に渡す)、
+     RFID seat → hole_cards 蓄積、RFID board → board 蓄積 + street 昇格
   4. winner_seat_hint があれば `beam.apply_winner_filter(...)` で粒子集合を絞る
+     (= 終端の補助制約として適用、oracle ではない)
   5. `HandFinalizer.finalize(...)` で offline summary を構築
   6. `_compute_diff(online, offline)` で diff → `needs_review` を立てる
 - `_compute_diff(online, offline) → Optional[dict]`: 比較対象は
@@ -1328,9 +1360,29 @@ retrospective に再評価して **incomplete → final** に昇格させる経�
 - ✅ JSON round-trip 時の seat key str/int 混在を吸収する正規化
 
 **Phase 3 スコープ外 (Phase 4+ 候補)**:
-- IntegrationThread の `_invoke_reconstructor_hook` で online_summary を渡してリアルタイム reconstruct を有効化 (現状は `initial_state=None / online_summary=None` で skipped 経路維持)
-- 差分検出時の **自動 patch** (online HandSummary の resolution / payouts を offline で上書きする経路。現状は別 JSONL に書くだけ)
-- 確率モデル拡張: prior の hand-specific 調整 (例えば過去 N hand の MAP 平均で smoothing)
+
+候補の整理 (今後どちらかから進める):
+
+- **Phase 4-A: live hook に online_summary を渡して advisory reconstruct を有効化**
+  - IntegrationThread の `_invoke_reconstructor_hook` で online_summary (= 終局直後の
+    HandSummary) を渡してリアルタイム reconstruct を実行し、`needs_review` を
+    `_completed_hands` 経由で GUI / 監視ツールに通知する。
+  - online JSON / PHH は mutate しないまま、advisory layer として運用する。
+  - 現状は `initial_state=None / online_summary=None` で skipped 経路を維持。
+- **Phase 4-B: raw-only bootstrap の強化**
+  - online_summary 無しでも reconstruct できるよう、RFID hole_cards 出現や音声
+    `new_hand` 時点の active seats から button / SB / BB を推定する。
+  - Phase 3 MVP では「online-bootstrap-assisted」だったので、これにより
+    EvidenceLog 単独で hand を立て直す *raw-only reconstruction* が可能になる。
+  - 後段で online_summary を読まずに事後監査 / 失った online ログからの復旧が
+    できる。
+
+その他 (どちらか進めた後の課題):
+- 差分検出時の **自動 patch** (online HandSummary の resolution / payouts を
+  offline で上書きする経路。現状は別 JSONL に書くだけ)
+- 確率モデル拡張: prior の hand-specific 調整 (例えば過去 N hand の MAP 平均で
+  smoothing)、`confidence` を operational metric から **モデル事後確率** (top-1 vs
+  top-2 log 差 / エントロピー / Brier score) に置き換え
 - 完全 replay 型 ActionRecord (pot_after / stack_after を再構成時の bs から正確に算出)
 
 **Phase 2-D / 4+ 以降の残タスク**:
