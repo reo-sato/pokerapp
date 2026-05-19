@@ -36,14 +36,17 @@ from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
+from core.hand_boundary import BoundaryEvent, HandBoundaryDetector
 from core.hand_finalizer import HandFinalizer
 from core.hand_log import RevealedHand
+from core.hand_reconstructor import HandReconstructionResult, HandReconstructor
 from integration.action_inference import BettingState, InferredAction, infer_action
 from integration.action_order import advance_button
 from integration.beam_search import BeamEngine
 from integration.observation_model import ActionHypothesis, default_priors
 from output.evidence_log import EvidenceLogWriter
 from output.json_writer import JsonWriter
+from output.replay_hand import EvidenceRecord
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +160,16 @@ class IntegrationThread(threading.Thread):
             sink=self._beam_sink_to_evidence_log,
         )
 
+        # Phase 2-C: hand window 検出 + retrospective hook
+        # - boundary detector が audio new_hand / winner / RFID board cleared を観測
+        # - 各 event を _current_hand_events に push
+        # - 終端境界で _completed_hands[hand_id] に window を確定、reconstructor を hook
+        self._boundary_detector = HandBoundaryDetector()
+        self._hand_reconstructor = HandReconstructor()
+        self._current_hand_events: list[EvidenceRecord] = []
+        self._completed_hands: dict[int, list[EvidenceRecord]] = {}
+        self._last_reconstruction: Optional[HandReconstructionResult] = None
+
         # ボタン管理
         self._auto_post_blinds = auto_post_blinds
         self._sb_amount = sb_amount if sb_amount is not None else getattr(game_state, "_sb", 0)
@@ -234,6 +247,8 @@ class IntegrationThread(threading.Thread):
                 break
             # M1: raw 観測ログ
             self._evidence_log.write_camera(ev)
+            # Phase 2-C: hand window への蓄積 + boundary 検出
+            self._track_evidence("camera", ev)
             self._camera_buffer.append(ev)
 
     def _drain_rfid_queue(self) -> None:
@@ -250,10 +265,15 @@ class IntegrationThread(threading.Thread):
         """受信した RFIDEvent を役割に応じて振り分ける。"""
         # M1: raw 観測ログ。役割振り分けの前に書き込む。
         self._evidence_log.write_rfid(ev)
+        # Phase 2-C: hand window への蓄積 + boundary 検出
+        self._track_evidence("rfid", ev)
         if ev.role == "board":
             self._handle_board_rfid(ev)
         else:
             self._handle_seat_rfid(ev)
+        # Phase 2-C: 更新後の board/hole state snapshot を detector に渡し、
+        # board cleared (board が空のまま quiet 秒経過) の検出を進める。
+        self._observe_state_snapshot(ev.timestamp)
 
     def _handle_board_rfid(self, ev: RFIDEvent) -> None:
         """ボードカードの RFID イベントを処理する。"""
@@ -371,11 +391,108 @@ class IntegrationThread(threading.Thread):
         self._rfid_seat_buffer.remove(best)
         return best
 
+    # ――― Phase 2-C: hand window 管理 / boundary detection ―――
+
+    def _track_evidence(self, kind: str, event) -> None:
+        """Phase 2-C: イベントを hand window バッファに積み、boundary detector を回す。
+
+        boundary が emit されたら ``_current_hand_events`` の境界処理を行う:
+          - end のみ          : trigger event を終わる hand 側に含める → completed に確定
+          - start のみ        : trigger event を新 hand の最初の record に
+          - end + start (両方) : 前 hand を trigger なしで確定し、trigger を新 hand に
+          - 境界なし          : 単純に append
+
+        終端境界では ``_invoke_reconstructor_hook(hand_id)`` を呼ぶが、Phase 2-C の
+        ``HandReconstructor`` は skeleton なので online 結果には影響しない。
+        """
+        record = EvidenceRecord(timestamp=float(event.timestamp), kind=kind, event=event)
+        try:
+            if kind == "audio":
+                boundaries = self._boundary_detector.observe_audio_event(event)
+            elif kind == "rfid":
+                boundaries = self._boundary_detector.observe_rfid_event(event)
+            elif kind == "camera":
+                boundaries = self._boundary_detector.observe_camera_event(event)
+            else:
+                boundaries = []
+        except Exception:
+            logger.exception("HandBoundaryDetector.observe failed for kind=%s", kind)
+            boundaries = []
+
+        self._apply_boundaries(boundaries, record)
+
+    def _observe_state_snapshot(self, now: float) -> None:
+        """Phase 2-C: 現在の board/hole スナップショットを detector に渡す。
+
+        ``_handle_board_rfid`` / ``_handle_seat_rfid`` 後に呼び、board 全消滅判定
+        (BOARD_EMPTY_QUIET_SEC) と hole_cards_appeared 検出を進める。state-only
+        の呼び出しなので record は積まない (event は既に _track_evidence で積み済み)。
+        """
+        try:
+            boundaries = list(
+                self._boundary_detector.observe_board_state(list(self._board_cards), now)
+            )
+            boundaries.extend(
+                self._boundary_detector.observe_hole_state(dict(self._hole_cards), now)
+            )
+        except Exception:
+            logger.exception("HandBoundaryDetector snapshot observation failed")
+            boundaries = []
+        # snapshot 起因の境界は trigger event を伴わない → record=None で処理
+        self._apply_boundaries(boundaries, record=None)
+
+    def _apply_boundaries(
+        self,
+        boundaries: list[BoundaryEvent],
+        record: Optional[EvidenceRecord],
+    ) -> None:
+        has_end = any(b.kind == "end" for b in boundaries)
+        has_start = any(b.kind == "start" for b in boundaries)
+
+        if has_end and has_start:
+            end_b = next(b for b in boundaries if b.kind == "end")
+            # trigger event は新 hand 側に属する (例: new_hand audio)
+            self._completed_hands[end_b.hand_id] = list(self._current_hand_events)
+            self._invoke_reconstructor_hook(end_b.hand_id)
+            self._current_hand_events = [record] if record is not None else []
+        elif has_end:
+            end_b = next(b for b in boundaries if b.kind == "end")
+            # trigger event (例: winner audio) は終わる hand 側に含める
+            if record is not None:
+                self._current_hand_events.append(record)
+            self._completed_hands[end_b.hand_id] = list(self._current_hand_events)
+            self._invoke_reconstructor_hook(end_b.hand_id)
+            self._current_hand_events = []
+        elif has_start:
+            self._current_hand_events = [record] if record is not None else []
+        else:
+            if record is not None:
+                self._current_hand_events.append(record)
+
+    def _invoke_reconstructor_hook(self, hand_id: int) -> None:
+        """Phase 2-C: 終端境界後に HandReconstructor を呼ぶ hook。
+
+        現状 reconstructor は skeleton で online 結果に介入しない。Phase 3 以降で
+        beam 再生 + HandFinalizer 再呼び出しを実装した時に、ここから差分検出 /
+        summary 差し替え / needs_review 立てが行われる予定。
+        """
+        events = self._completed_hands.get(hand_id, [])
+        try:
+            self._last_reconstruction = self._hand_reconstructor.reconstruct_from_events(
+                events,
+                initial_state=None,
+            )
+        except Exception:
+            logger.exception("HandReconstructor.reconstruct_from_events failed")
+            self._last_reconstruction = None
+
     # ――― イベントハンドラ ―――
 
     def _handle_audio_event(self, event: AudioEvent) -> None:
         # M1: raw 観測ログ。推定ロジックの前に常に書き込む (例外でも残す)。
         self._evidence_log.write_audio(event)
+        # Phase 2-C: hand window への蓄積 + boundary 検出
+        self._track_evidence("audio", event)
 
         action = event.action
         gs = self._game_state

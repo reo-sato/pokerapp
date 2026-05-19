@@ -33,9 +33,11 @@ pokerapp/
 │   ├── events.py                  ← AudioEvent, CameraEvent, RFIDEvent データクラス
 │   ├── game_state.py              ← GameStateManager (スタック/ポット/ターン管理)
 │   ├── hand_log.py                ← ActionRecord, HandSummary, PotSettlement, RevealedHand
-│   ├── showdown_tracker.py        ← ShowdownTracker (Phase 1 skeleton, Phase 2-C で実装予定)
+│   ├── showdown_tracker.py        ← ShowdownTracker (Phase 1 skeleton、本実装は Phase 2-D 以降)
 │   ├── settlement.py              ← compute_pot_settlements / evaluate_hand_rank / distribute_split_pot (Phase 2-A 実装済)
-│   └── hand_finalizer.py          ← HandFinalizer.finalize (Phase 2-B 実装済、engine._finalize_hand の主経路)
+│   ├── hand_finalizer.py          ← HandFinalizer.finalize (Phase 2-B 実装済、engine._finalize_hand の主経路)
+│   ├── hand_boundary.py           ← HandBoundaryDetector (Phase 2-C): audio / RFID から hand window を検出
+│   └── hand_reconstructor.py      ← HandReconstructor (Phase 2-C skeleton): hand window 単位の retrospective inference hook
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -59,7 +61,8 @@ pokerapp/
 ├── output/
 │   ├── json_writer.py             ← JsonWriter (セッション JSON ログ書き込み)
 │   ├── phh_exporter.py            ← PHHExporter (PHH 形式エクスポート)
-│   └── evidence_log.py            ← EvidenceLogWriter (v6.0+ M1): logs/evidence_<session>.jsonl, raw 観測の append-only ログ
+│   ├── evidence_log.py            ← EvidenceLogWriter (v6.0+ M1): logs/evidence_<session>.jsonl, raw 観測の append-only ログ
+│   └── replay_hand.py             ← load_evidence_log / extract_hand_windows (Phase 2-C): hand window 再生ユーティリティ
 │
 ├── gui/
 │   └── dashboard.py               ← GUIDashboard (customtkinter)
@@ -404,6 +407,33 @@ BettingState の seat 別 contribution と RevealedHand から main / side pot �
 ``betting_state.folded_seats`` だけを参照する duck-typed 設計 (本物の `BettingState`
 とテスト stub の両方を受ける)。
 
+### `core/hand_boundary.py` (Phase 2-C 実装済)
+
+audio / RFID / camera 観測の流れから hand の開始・終了境界 (hand window) を検出するステートマシン。
+
+- `BoundaryEvent(kind, hand_id, t_start, t_end, reason)`: 1 境界。`kind ∈ {"start", "end"}`、`reason` は `"audio_new_hand"` / `"audio_new_hand_implicit_end"` / `"audio_winner"` / `"board_cleared"` / `"hole_cards_appeared"` のいずれか
+- `HandBoundaryDetector(board_empty_quiet_sec=1.5)`:
+  - `observe_audio_event(event)`: `new_hand` で start、`winner` で end。in_hand 中 `new_hand` は `[end, start]` の 2 件を返す
+  - `observe_rfid_event(event)`: board / hole の内部状態を更新。state-only
+  - `observe_camera_event(event)`: state は変えず `tick(timestamp)` 相当 (board quiet 経過チェック)
+  - `observe_board_state(board_cards, now)`: スナップショット API。非空→空 遷移を検出 → quiet 経過で end
+  - `observe_hole_state(hole_cards, now)`: スナップショット API。idle + board 空 + 2+ seat に cards で start
+  - `tick(now)`: 時刻のみ進める (no event)
+  - 返り値はすべて `list[BoundaryEvent]` (0/1/2 件)
+
+### `core/hand_reconstructor.py` (Phase 2-C skeleton, Phase 3+ で本実装)
+
+hand window 単位の retrospective inference 用 hook。Phase 2-C では `reconstruct_from_events` は pass-through (`reason="reconstruction_skipped"`)。
+
+- `HandReconstructionResult(actions, summary, needs_review, reason)`
+- `HandReconstructor.reconstruct_from_events(events, initial_state=None) → HandReconstructionResult`: Phase 3+ で BeamEngine 再生 + HandFinalizer 再呼び出しで online 推定との diff を取る予定
+
+### `output/replay_hand.py` (Phase 2-C 実装済)
+
+- `EvidenceRecord(timestamp, kind, event, payload)`: 1 観測の type-restored 表現
+- `load_evidence_log(log_path) → list[EvidenceRecord]`: `logs/evidence_<session>.jsonl` を読んで AudioEvent / RFIDEvent / CameraEvent に再構築 (`alternatives` / `word_timestamps` / `t_end` も含む)
+- `extract_hand_windows(records, detector=None) → dict[hand_id, list[EvidenceRecord]]`: detector を頭から流して hand_id ごとに窓化。end 未観測の hand は dict に含めない
+
 ### `core/hand_finalizer.py` (Phase 2-B 実装済)
 
 BettingState + showdown 観測 + board から `HandSummary` を組み立て、`integration/engine.py:_finalize_hand` の主経路として使われる。
@@ -543,7 +573,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 383 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 402 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -564,6 +594,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_settlement_models.py | RevealedHand / PotSettlement / HandSummary 新 field / PHH gate / legacy_winner_finalize E2E (Phase 1, 6 件) |
 | test_settlement_logic.py | distribute_split_pot / evaluate_hand_rank / compute_pot_settlements (heads-up / 3-way all-in / split / fold / 退化) (Phase 2-A, 20 件) |
 | test_hand_finalizer.py | HandFinalizer fold_win / showdown / sidepot_showdown / showdown_split / incomplete / winner_hint mismatch (Phase 2-B, 11 件) |
+| test_hand_boundary.py | HandBoundaryDetector (audio / board cleared / hole appeared) + extract_hand_windows + IntegrationThread 結合 + EvidenceLog round-trip (Phase 2-C, 19 件) |
 
 ---
 
@@ -618,9 +649,13 @@ pytest tests/ --ignore=tests/test_vision.py
 | HandFinalizer 本実装 (engine._finalize_hand 置換) | ✅ 完了 (Phase 2-B) | `core/hand_finalizer.py`: fold_win / showdown / showdown_split / sidepot_showdown / incomplete を判別、settlement core を呼んで pots を埋める |
 | engine._finalize_hand → HandFinalizer 経由化 | ✅ 完了 (Phase 2-B) | `_finalize_hand(winner_seat: Optional[int])` + `_apply_payouts_to_gamestate()` adapter |
 | `winner` 音声の補助観測化 (Oracle 級ではない) | ✅ 完了 (Phase 2-B) | `winner_seat_hint` として渡し、settlement と食い違うと review_required=True |
-| ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-C) | `core/showdown_tracker.py` |
-| gs.end_hand → end_hand_with_payouts 拡張 | ❌ 未着手 (Phase 2-C) | 現状 Phase 2-B では `_apply_payouts_to_gamestate` adapter が primary winner で legacy gs.end_hand を呼んでいる |
-| RFID hand boundary detector | ❌ 未着手 | Phase 2 別タスク |
+| HandBoundaryDetector (audio + RFID hand window 検出) | ✅ 完了 (Phase 2-C) | `core/hand_boundary.py`: new_hand / winner / board cleared / hole appeared を検出 |
+| hand window 抽出 (EvidenceLog → events 窓化) | ✅ 完了 (Phase 2-C) | `output/replay_hand.py:load_evidence_log` / `extract_hand_windows` |
+| IntegrationThread の live hand window バッファ | ✅ 完了 (Phase 2-C) | `_current_hand_events` / `_completed_hands` / `_track_evidence` |
+| HandReconstructor skeleton (retrospective hook) | ✅ skeleton (Phase 2-C) | `core/hand_reconstructor.py`: 終端境界で `_invoke_reconstructor_hook` が呼ぶ pass-through。本実装は Phase 3+ |
+| ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
+| gs.end_hand → end_hand_with_payouts 拡張 | ❌ 未着手 (Phase 2-D 以降) | 現状 Phase 2-B では `_apply_payouts_to_gamestate` adapter が primary winner で legacy gs.end_hand を呼んでいる |
+| HandReconstructor 本実装 (beam 再生 + finalizer 再呼び出し) | ❌ 未着手 (Phase 3+) | hand window を頭から再生して needs_review / 自動 patch 判断 |
 
 ---
 
@@ -977,12 +1012,13 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 383 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 402 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
 pytest tests/test_settlement_logic.py -v                                          # Phase 2-A (settlement core)
 pytest tests/test_hand_finalizer.py -v                                            # Phase 2-B (HandFinalizer 単体)
+pytest tests/test_hand_boundary.py -v                                             # Phase 2-C (boundary + replay + integration)
 python main.py --cli                                                              # M1: logs/evidence_*.jsonl が増える
 python main.py                                                                    # M3: GUI で revise バナー確認
 python main.py --export-phh logs/session_xxx.json                                 # M3: PHH 出力 (Phase 1: resolution_status=="final" の hand のみ)
@@ -1053,20 +1089,45 @@ Phase 1 戻り値は単純に `""`、Phase 2 で skip reason を構造化 (Enum 
 観測 → 推定 → ActionRecord → (WINNER 後方修正) → JSON
 ```
 
-新 (Phase 1 以降):
+新 (Phase 1 / 2-A / 2-B / 2-C 後):
 ```
-観測収集 (ASR / RFID)
+観測収集 (ASR / RFID / Camera)
     ↓
-hand segmentation / state tracking (BettingState + 未実装 boundary detector)
+EvidenceLogWriter で raw 観測を logs/evidence_<session>.jsonl に常時記録
+    ↓
+hand segmentation (Phase 2-C: HandBoundaryDetector)
+    ↓ {hand_id ごとの window: list[EvidenceRecord]}
+    ↓
+state tracking (BettingState + Beam Engine による sequence MAP)
     ↓
 settlement-ready な hand state 形成 (live_seats, hole_cards, board, pot)
     ↓
-finalization (fold / showdown / split / side pot)   ← Phase 2: HandFinalizer
+finalization (Phase 2-B: HandFinalizer) → fold / showdown / split / side pot
+    ↓ settlement core (Phase 2-A: compute_pot_settlements / evaluate_hand_rank)
     ↓
 HandSummary {resolution_status="final", pots, seat_payouts, ...}
     ↓
 final hand のみ PHH export
+
+(オプション、Phase 3+) HandReconstructor が hand window を頭から再生して
+                       online 推定との diff を取り needs_review / 自動 patch
 ```
+
+### ログ / replay / retrospective inference (Phase 2-C)
+
+**EvidenceLog (M1) → hand window → retrospective inference** の経路:
+
+1. `EvidenceLogWriter` が `logs/evidence_<session_id>.jsonl` に raw 観測 (audio / rfid / camera) を append-only で記録 (M1 から既設)
+2. `output/replay_hand.py:load_evidence_log(path)` で JSONL を `list[EvidenceRecord]` にデシリアライズ (audio / rfid / camera を型付き event に再構築)
+3. `output/replay_hand.py:extract_hand_windows(records)` が `HandBoundaryDetector` を頭から流して `dict[hand_id, list[EvidenceRecord]]` に窓化
+4. live 経路でも `IntegrationThread` が `_current_hand_events` バッファと `_completed_hands` dict を保持 (`_track_evidence(kind, event)` で 1 event ずつ追加 / boundary 処理)
+5. 終端境界で `_invoke_reconstructor_hook(hand_id)` が `HandReconstructor.reconstruct_from_events(events)` を呼ぶ。Phase 2-C は skeleton (`reason="reconstruction_skipped"`) で online 経路には介入しない
+
+**Phase 3+ で HandReconstructor が担う予定の処理**:
+- hand window 内の events を BeamEngine で頭から再生し sequence MAP を再評価
+- 当該 hand window の WINNER / 最終 pot / showdown hole cards を `apply_winner_filter(...)` に流し、絞り込み
+- HandFinalizer に通して新 `HandSummary` を生成
+- online 出力との diff から needs_review / 自動 patch を判断 (action 列の改良、HandSummary 差し替え、needs_review ラベルの再評価)
 
 ### `integration/engine.py:_finalize_hand` の Phase 1 挙動
 
@@ -1093,11 +1154,30 @@ legacy 経路は不変だが、`HandSummary` 構築時に新 field を populate:
 - ✅ `winner` 音声を `winner_seat_hint` として **補助観測化**。settlement と食い違うと `review_required=True` を立てる ("Oracle 一発確定" 廃止)
 - ✅ pot_total を `betting_state.player_contrib_hand.values()` の総和から計算するよう修正 (Phase 1 では blind only + fold の hand が 0 を返していたバグを解消)
 
-**Phase 2-C 以降の残タスク**:
+**Phase 2-C 完了済み (hand boundary + retrospective hook)**:
+- ✅ `core/hand_boundary.py:HandBoundaryDetector` — audio `new_hand` / `winner` を一次シグナル、RFID 由来の board cleared (BOARD_EMPTY_QUIET_SEC=1.5s)、idle 状態で 2+ seat に hole cards が現れる (hole_cards_appeared) を二次シグナルとして start / end を発行 (`list[BoundaryEvent]` 返却で end+start 同時発行に対応)
+- ✅ `output/replay_hand.py:load_evidence_log` — `logs/evidence_<session>.jsonl` を `list[EvidenceRecord]` にデシリアライズ。`_build_audio_event` / `_build_rfid_event` / `_build_camera_event` で型付き再構築
+- ✅ `output/replay_hand.py:extract_hand_windows` — EvidenceRecord 列を boundary detector で走査し `dict[hand_id, list[EvidenceRecord]]` に窓化
+- ✅ `integration/engine.py`: `_track_evidence(kind, event)` + `_observe_state_snapshot(now)` + `_apply_boundaries(...)` + `_invoke_reconstructor_hook(hand_id)` を新設。`_handle_audio_event` / `_process_rfid_event` / `_drain_camera_queue` から `_track_evidence` を呼ぶ。終端境界で `_completed_hands[hand_id]` に window が確定
+- ✅ `core/hand_reconstructor.py:HandReconstructor` — Phase 2-C は skeleton (`reason="reconstruction_skipped"` の pass-through)。終端境界 hook が安全に通る経路を固定
+
+**Phase 2-C 初期 heuristics (hand_boundary.py)**:
+
+| シグナル | trigger | 用途 |
+|---|---|---|
+| `audio_new_hand` | `AudioEvent(action="new_hand")` | 主 start シグナル。in_hand 中なら `[end, start]` の 2 件を返す |
+| `audio_winner` | `AudioEvent(action="winner")` | 主 end シグナル |
+| `board_cleared` | board が非空→空に転落し、その後 `BOARD_EMPTY_QUIET_SEC` (= 1.5s) 静止 | 二次 end シグナル (audio 補完用) |
+| `hole_cards_appeared` | idle + board 空 + 2+ seat に hole cards | 二次 start シグナル (RFID-only シナリオ用) |
+
+**Phase 2-D 以降の残タスク**:
 - `core/showdown_tracker.py`: `observe()` / `is_showdown_ready()` / `project_to_summary_dict()` 本実装。現状 `engine._finalize_hand` が直接 `self._hole_cards` から `RevealedHand` を組んでいる
+- `core/hand_reconstructor.py:reconstruct_from_events` 本実装 (Phase 3+): hand window を BeamEngine で頭から再生 → `apply_winner_filter` に winner / final pot / showdown reveal を投入 → HandFinalizer 再呼び出し → online summary との diff で needs_review / 自動 patch
 - `core/game_state.py`: `end_hand(winner_seat)` を `end_hand_with_payouts(payouts: dict[int, int])` に拡張。これで split / sidepot 時の stack も正しく反映される
 - `integration/engine.py`: `_apply_payouts_to_gamestate` adapter を撤去し、`end_hand_with_payouts` 直呼び出しに変更
-- `HandSummary.winner_seat` を `Optional[int]` 化 (Phase 2-C で seat_payouts ベースに完全移行)
+- `HandSummary.winner_seat` を `Optional[int]` 化 (seat_payouts ベースに完全移行)
 - `output/phh_exporter.py`: PHH skip reason を構造化、export 失敗との区別を明示
-- RFID hand boundary detector (hand 開始 / 終了の自動検出)
+- 全 seat の hole cards が absent になった瞬間の end シグナル (Phase 2-C スコープ外)
+- GUI 上での手動 hand boundary 修正 UI
+- RFID 認識品質 (ノイズ / 誤検出) への本格対応
 - `legacy_winner_finalize` でマーク済の旧 hand を新 finalizer で再評価する migration ツール (任意)
