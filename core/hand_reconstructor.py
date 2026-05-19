@@ -85,6 +85,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from core.events import AudioEvent, RFIDEvent
 from core.hand_finalizer import HandFinalizer
 from core.hand_log import ActionRecord, HandSummary, RevealedHand
+from core.patch_proposal import HandPatchProposal, compute_patch_proposal
 
 if TYPE_CHECKING:
     from integration.action_inference import BettingState
@@ -121,6 +122,9 @@ class HandReconstructionResult:
       bootstrap_meta:    bootstrap で使った signal や heuristic の診断情報。raw-only
                          成功時は active_seats / sb_seat / bb_seat / button_seat /
                          button_inferred / confidence などを記録。Phase 4-B で追加。
+      patch_proposal:    diff があった hand の修正提案 (Phase 5-A 追加)。
+                         ``can_patch_automatically`` は Phase 5-A では常に False。
+                         CLI / GUI で提案表示のみに使い、自動 apply はしない。
     """
 
     actions: list[ActionRecord] = field(default_factory=list)
@@ -131,6 +135,7 @@ class HandReconstructionResult:
     confidence: Optional[float] = None
     bootstrap_source: Optional[str] = None
     bootstrap_meta: Optional[dict[str, Any]] = None
+    patch_proposal: Optional[HandPatchProposal] = None
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -476,10 +481,19 @@ class HandReconstructor:
         # ── diff と needs_review ────────────────────────────────────────
         diff: Optional[dict[str, Any]] = None
         needs_review = False
+        patch_proposal: Optional[HandPatchProposal] = None
         if online_summary is not None:
             diff = _compute_diff(online_summary, summary)
             needs_review = diff is not None
             reason = "reconstructed_with_diff" if needs_review else "reconstructed_no_diff"
+            # Phase 5-A: diff があれば patch proposal を組み立てる (提案のみ、apply 無し)
+            if diff is not None:
+                patch_proposal = compute_patch_proposal(
+                    hand_id=hand_id,
+                    online=online_summary,
+                    offline=summary,
+                    diff=diff,
+                )
         else:
             reason = "reconstructed"
 
@@ -494,6 +508,7 @@ class HandReconstructor:
             confidence=confidence,
             bootstrap_source=bootstrap_source,
             bootstrap_meta=bootstrap_meta,
+            patch_proposal=patch_proposal,
         )
 
     # ──────────────────────────────────────────────────────────────────────

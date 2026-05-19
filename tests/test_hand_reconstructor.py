@@ -129,6 +129,8 @@ class TestReconstructorMatchesOnline:
         # online と一致 → needs_review=False, diff=None
         assert result.needs_review is False
         assert result.diff is None
+        # Phase 5-A: diff が無い hand は patch_proposal も None
+        assert result.patch_proposal is None
         assert result.reason == "reconstructed_no_diff"
         # 再構成 actions: SB_POST / BB_POST / fold の 3 件
         action_keys = [(a.seat, a.action, a.amount) for a in result.actions]
@@ -168,6 +170,11 @@ class TestReconstructorDetectsDiff:
         assert "resolution_type" in result.diff
         assert result.diff["resolution_type"]["online"] == "showdown"
         assert result.diff["resolution_type"]["offline"] == "fold_win"
+        # Phase 5-A: patch_proposal もぶら下がっている
+        assert result.patch_proposal is not None
+        assert result.patch_proposal.can_patch_automatically is False
+        names = [fp.field for fp in result.patch_proposal.fields]
+        assert "resolution_type" in names
 
     def test_tampered_seat_payouts_detected(self) -> None:
         online = _fold_win_online_summary()
@@ -182,6 +189,11 @@ class TestReconstructorDetectsDiff:
         assert result.diff["seat_payouts"]["online"] == {2: 300}
         assert result.diff["seat_payouts"]["offline"] == {1: 300}
         assert "winner_seat" in result.diff
+        # Phase 5-A: seat_payouts と winner_seat の両方が proposal に乗る
+        assert result.patch_proposal is not None
+        names = [fp.field for fp in result.patch_proposal.fields]
+        assert "seat_payouts" in names
+        assert "winner_seat" in names
 
     def test_pot_total_diff_detected(self) -> None:
         online = _fold_win_online_summary()
@@ -192,6 +204,25 @@ class TestReconstructorDetectsDiff:
         assert result.needs_review is True
         assert result.diff is not None
         assert "pot_total" in result.diff
+        # Phase 5-A: pot_total も patch 対象
+        assert result.patch_proposal is not None
+        names = [fp.field for fp in result.patch_proposal.fields]
+        assert "pot_total" in names
+
+    def test_diff_only_in_actions_yields_no_patch_proposal(self) -> None:
+        """Phase 5-A: ``actions`` だけ diff があっても patchable field ではないので
+        ``patch_proposal`` は None (= 提案するものなし)。
+        """
+        # _compute_diff の挙動を利用して "actions だけ違う" 状況を作る代わりに、
+        # compute_patch_proposal を直接呼ぶ (e2e で actions だけ違うのを再現するのは
+        # 重いので、ここでは reconstruct を通さず unit ベースで補強)
+        from core.patch_proposal import compute_patch_proposal
+        diff_only_actions = {"actions": {
+            "online": [(1, "fold", 0)], "offline": [(1, "call", 100)],
+        }}
+        assert compute_patch_proposal(
+            hand_id=1, online=None, offline=None, diff=diff_only_actions,
+        ) is None
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -359,6 +390,8 @@ class TestReconstructSessionCLI:
         # session JSON 本体は CLI で mutate されていない
         original = json.loads(session_path.read_text(encoding="utf-8"))
         assert original["hands"][0]["resolution_type"] == "fold_win"
+        # Phase 5-A: diff 無し → patch_proposal も None
+        assert entry["patch_proposal"] is None
 
     def test_cli_detects_diff_when_session_json_tampered(self, tmp_path: Path) -> None:
         """JSON を改変してから reconstruct_session を実行 → diff が検出される。
@@ -394,3 +427,10 @@ class TestReconstructSessionCLI:
         # CLI は session JSON を mutate しない
         after = json.loads(session_path.read_text(encoding="utf-8"))
         assert after["hands"][0]["resolution_type"] == "showdown"  # tamper はそのまま
+        # Phase 5-A: diff があるので patch_proposal が JSONL に含まれる
+        proposal = entry["patch_proposal"]
+        assert proposal is not None
+        assert proposal["hand_id"] == 1
+        assert proposal["can_patch_automatically"] is False
+        field_names = [fp["field"] for fp in proposal["fields"]]
+        assert "resolution_type" in field_names

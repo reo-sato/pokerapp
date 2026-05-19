@@ -49,6 +49,10 @@ class ReconstructionBadgeState:
     bootstrap_source: Optional[str] = None
     diff_fields: list[str] = field(default_factory=list)
     button_inferred: bool = False
+    # Phase 5-A: patch proposal の field 名のサマリ。proposal が無ければ空 list。
+    # GUI では "Latest advisory" ラベルに ``patch_fields=...`` として 1 件だけ
+    # 表示する用途。FieldPatch の詳細値 (online/offline) は GUI には出さない。
+    patch_fields: list[str] = field(default_factory=list)
 
 
 def summarize_reconstruction(
@@ -93,6 +97,11 @@ def summarize_reconstruction(
     meta = getattr(result, "bootstrap_meta", None) or {}
     button_inferred = bool(meta.get("button_inferred"))
 
+    # Phase 5-A: patch_proposal.fields から field 名を取り出す。
+    # proposal は HandPatchProposal インスタンス (live hook) または dict
+    # (JSONL 経由) のどちらも来る可能性があるので duck-typed に読む。
+    patch_fields = _extract_patch_field_names(getattr(result, "patch_proposal", None))
+
     return ReconstructionBadgeState(
         status=status,
         show_raw_badge=(bootstrap_source == "raw"),
@@ -100,7 +109,31 @@ def summarize_reconstruction(
         bootstrap_source=bootstrap_source,
         diff_fields=diff_fields,
         button_inferred=button_inferred,
+        patch_fields=patch_fields,
     )
+
+
+def _extract_patch_field_names(proposal: object) -> list[str]:
+    """``HandPatchProposal`` から field 名のリストを取り出す (dict / dataclass 両対応)。
+
+    proposal が None / fields 空 / 形式不正なら ``[]``。
+    """
+    if proposal is None:
+        return []
+    # dataclass instance
+    fields_attr = getattr(proposal, "fields", None)
+    if fields_attr is None and isinstance(proposal, dict):
+        fields_attr = proposal.get("fields")
+    if not fields_attr:
+        return []
+    names: list[str] = []
+    for fp in fields_attr:
+        name = getattr(fp, "field", None)
+        if name is None and isinstance(fp, dict):
+            name = fp.get("field")
+        if isinstance(name, str) and name:
+            names.append(name)
+    return names
 
 
 def format_history_line(

@@ -198,6 +198,57 @@ class TestButtonInferredFlag:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Phase 5-A: patch_fields
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestPatchFields:
+    def test_patch_fields_empty_when_no_proposal(self) -> None:
+        # _ok_result の default は patch_proposal なし (= None)
+        state = summarize_reconstruction(_ok_result())
+        assert state.patch_fields == []
+
+    def test_patch_fields_from_dataclass_proposal(self) -> None:
+        """live hook 経由: ``HandPatchProposal`` dataclass を直接渡す。"""
+        from core.patch_proposal import FieldPatch, HandPatchProposal
+        proposal = HandPatchProposal(
+            hand_id=2, can_patch_automatically=False,
+            fields=[
+                FieldPatch(field="resolution_type",
+                           online="fold_win", offline="showdown"),
+                FieldPatch(field="seat_payouts",
+                           online={1: 300}, offline={2: 300}),
+            ],
+        )
+        result = _review_result(
+            diff={"resolution_type": {}, "seat_payouts": {}},
+        )
+        result.patch_proposal = proposal       # type: ignore[attr-defined]
+        state = summarize_reconstruction(result)
+        assert state.patch_fields == ["resolution_type", "seat_payouts"]
+
+    def test_patch_fields_from_dict_proposal(self) -> None:
+        """JSONL 経由: ``patch_proposal`` が dict (asdict 後) でも読める。"""
+        result = _review_result(diff={"resolution_type": {}})
+        result.patch_proposal = {                # type: ignore[attr-defined]
+            "hand_id": 1, "can_patch_automatically": False,
+            "fields": [
+                {"field": "resolution_type", "online": "fold_win",
+                 "offline": "showdown", "note": "..."},
+            ],
+        }
+        state = summarize_reconstruction(result)
+        assert state.patch_fields == ["resolution_type"]
+
+    def test_patch_fields_skipped_when_proposal_malformed(self) -> None:
+        """proposal が壊れていても落ちず空 list で抜ける。"""
+        result = _review_result(diff={"resolution_type": {}})
+        result.patch_proposal = "bogus"          # type: ignore[attr-defined]
+        state = summarize_reconstruction(result)
+        assert state.patch_fields == []
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # format_history_line: 出力テキスト
 # ────────────────────────────────────────────────────────────────────────────
 

@@ -11,6 +11,7 @@ import pytest
 
 from output.inspect_reconstruction import (
     format_entry,
+    format_patch_lines,
     inspect,
     main,
 )
@@ -54,6 +55,25 @@ def _review_entry(hand_id: int, diff: dict, **overrides) -> dict:
         "confidence": 0.7,
         "online_summary": {"hand_id": hand_id},
         "offline_summary": {"hand_id": hand_id},
+        # Phase 5-A: patch_proposal は diff から派生して埋める (PATCHABLE_FIELDS のみ)
+        "patch_proposal": {
+            "hand_id": hand_id,
+            "can_patch_automatically": False,
+            "fields": [
+                {
+                    "field": k,
+                    "online": v.get("online"),
+                    "offline": v.get("offline"),
+                    "note": f"{k} differs",
+                }
+                for k, v in diff.items()
+                if k in (
+                    "resolution_type", "seat_payouts", "winner_seat",
+                    "pot_total", "showdown_revealed_cards",
+                )
+            ],
+            "summary_note": None,
+        },
     }
     base.update(overrides)
     return base
@@ -275,6 +295,110 @@ class TestMainCli:
 # ────────────────────────────────────────────────────────────────────────────
 # 6. 防御的: 壊れた行は skip
 # ────────────────────────────────────────────────────────────────────────────
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Phase 5-A: --show-patches / format_patch_lines
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestFormatPatchLines:
+    def test_proposal_with_two_fields_yields_two_patch_lines(self) -> None:
+        entry = _review_entry(1, diff={
+            "resolution_type": {"online": "fold_win", "offline": "showdown"},
+            "seat_payouts":    {"online": {1: 300}, "offline": {1: 150, 2: 150}},
+        })
+        lines = format_patch_lines(entry)
+        assert len(lines) == 2
+        assert all(l.startswith("  PATCH: ") for l in lines)
+        joined = "\n".join(lines)
+        assert "resolution_type" in joined
+        assert "online=fold_win" in joined
+        assert "offline=showdown" in joined
+        assert "seat_payouts" in joined
+
+    def test_no_proposal_yields_empty_list(self) -> None:
+        entry = _ok_entry(1)  # patch_proposal が無い (= None)
+        assert format_patch_lines(entry) == []
+
+    def test_proposal_none_explicitly_yields_empty_list(self) -> None:
+        entry = _skipped_entry(1)
+        entry["patch_proposal"] = None
+        assert format_patch_lines(entry) == []
+
+    def test_malformed_proposal_does_not_crash(self) -> None:
+        """proposal が dict 以外 / fields が list 以外でも空 list で抜ける。"""
+        entry = _ok_entry(1)
+        entry["patch_proposal"] = "bogus"  # type: ignore[assignment]
+        assert format_patch_lines(entry) == []
+        entry["patch_proposal"] = {"fields": "not-a-list"}
+        assert format_patch_lines(entry) == []
+
+
+class TestShowPatchesFlag:
+    def test_show_patches_emits_patch_lines_between_hands(
+        self, tmp_path: Path,
+    ) -> None:
+        path = tmp_path / "r.jsonl"
+        _write_jsonl(path, [
+            _ok_entry(1),
+            _review_entry(2, diff={
+                "resolution_type": {"online": "fold_win", "offline": "showdown"},
+                "seat_payouts":    {"online": {1: 300}, "offline": {2: 300}},
+            }),
+        ])
+        lines = inspect(path, show_patches=True)
+        # hand 1 [OK] (no PATCH lines) + hand 2 [REVIEW] + 2 PATCH 行 = 4 行
+        assert len(lines) == 4
+        assert lines[0].startswith("hand 1 [OK]")
+        assert lines[1].startswith("hand 2 [REVIEW]")
+        assert lines[2].startswith("  PATCH: ")
+        assert lines[3].startswith("  PATCH: ")
+
+    def test_show_patches_false_omits_patch_lines(self, tmp_path: Path) -> None:
+        path = tmp_path / "r.jsonl"
+        _write_jsonl(path, [
+            _review_entry(2, diff={
+                "resolution_type": {"online": "fold_win", "offline": "showdown"},
+            }),
+        ])
+        # show_patches=False (default)
+        lines = inspect(path)
+        assert len(lines) == 1
+        assert lines[0].startswith("hand 2 [REVIEW]")
+        assert not any(l.startswith("  PATCH:") for l in lines)
+
+    def test_show_patches_skips_hands_without_proposal(
+        self, tmp_path: Path,
+    ) -> None:
+        """OK / SKIPPED の hand は --show-patches でも PATCH 行を出さない。"""
+        path = tmp_path / "r.jsonl"
+        _write_jsonl(path, [
+            _ok_entry(1),
+            _skipped_entry(2),
+        ])
+        lines = inspect(path, show_patches=True)
+        assert len(lines) == 2  # 2 つの hand 行のみ、PATCH 行は無い
+        assert not any(l.startswith("  PATCH:") for l in lines)
+
+    def test_main_with_show_patches_flag(self, tmp_path: Path, capsys) -> None:
+        path = tmp_path / "r.jsonl"
+        _write_jsonl(path, [
+            _review_entry(1, diff={
+                "resolution_type": {"online": "fold_win", "offline": "showdown"},
+            }),
+        ])
+        ret = main([
+            "--reconstruct", str(path),
+            "--show-patches",
+            "--quiet",
+        ])
+        assert ret == 0
+        out = capsys.readouterr().out
+        assert "hand 1 [REVIEW]" in out
+        assert "  PATCH: resolution_type" in out
+        assert "online=fold_win" in out
+        assert "offline=showdown" in out
 
 
 class TestRobustness:

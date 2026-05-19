@@ -19,6 +19,8 @@ Phase 4-C1: ``output.reconstruct_session`` が出力した
 オプション:
     --only-needs-review        ``needs_review=true`` の hand のみ表示
     --fields field1,field2     diff のうち指定 field のみを ``diff_fields=`` に出す
+    --show-patches             Phase 5-A: hand の patch proposal を ``  PATCH: ...``
+                               行で続けて表示する (proposal が無い hand には何も追加しない)
     --quiet                    info ログを抑制
 
 ステータスラベル:
@@ -113,10 +115,38 @@ def format_entry(entry: dict, only_fields: Optional[list[str]] = None) -> str:
     return " ".join(parts)
 
 
+def format_patch_lines(entry: dict) -> list[str]:
+    """Phase 5-A: entry の patch_proposal から ``  PATCH: ...`` 行を組み立てる。
+
+    proposal が無い / fields が空 / 形式不正なら空 list を返す
+    (= 呼び元は単純に extend してもよい)。
+
+    出力例 (1 hand に複数 patch がある場合):
+        ``  PATCH: resolution_type  online=fold_win  offline=showdown``
+        ``  PATCH: seat_payouts  online={'2': 300}  offline={'1': 150, '2': 150}``
+    """
+    proposal = entry.get("patch_proposal")
+    if not isinstance(proposal, dict):
+        return []
+    fields = proposal.get("fields") or []
+    if not isinstance(fields, list):
+        return []
+    lines: list[str] = []
+    for f in fields:
+        if not isinstance(f, dict):
+            continue
+        name = f.get("field", "?")
+        online = f.get("online")
+        offline = f.get("offline")
+        lines.append(f"  PATCH: {name}  online={online}  offline={offline}")
+    return lines
+
+
 def inspect(
     reconstruct_path: Path,
     only_needs_review: bool = False,
     only_fields: Optional[list[str]] = None,
+    show_patches: bool = False,
 ) -> list[str]:
     """JSONL を読んで 1 hand 1 行のフォーマット文字列リストを返す (hand_id 昇順)。
 
@@ -124,6 +154,8 @@ def inspect(
         reconstruct_path: ``reconstruct_<session>.jsonl`` のパス。
         only_needs_review: True なら ``needs_review=true`` の hand のみ含める。
         only_fields: 指定すると diff のうちこの field のみを表示対象にする。
+        show_patches: Phase 5-A: True なら hand 行の直後に
+            ``  PATCH: ...`` 行を続けて出す (proposal がある hand のみ)。
 
     Returns:
         フォーマット済み文字列のリスト (hand_id 昇順)。
@@ -137,6 +169,8 @@ def inspect(
         if only_needs_review and not entry.get("needs_review"):
             continue
         output.append(format_entry(entry, only_fields=only_fields))
+        if show_patches:
+            output.extend(format_patch_lines(entry))
     return output
 
 
@@ -169,6 +203,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--show-patches", action="store_true",
+        help=(
+            "Phase 5-A: append `  PATCH: <field> online=... offline=...` lines "
+            "after each hand row when a patch proposal exists. Read-only — "
+            "this does not apply any patch."
+        ),
+    )
+    parser.add_argument(
         "--quiet", action="store_true",
         help="Suppress info logs from the loader.",
     )
@@ -183,6 +225,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.reconstruct,
         only_needs_review=args.only_needs_review,
         only_fields=args.fields,
+        show_patches=args.show_patches,
     )
     for line in lines:
         print(line)

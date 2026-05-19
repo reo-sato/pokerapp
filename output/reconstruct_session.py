@@ -32,6 +32,7 @@ import argparse
 import json
 import logging
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
@@ -164,6 +165,12 @@ def reconstruct_session(
                 # Phase 4-B: bootstrap の出所と heuristic 情報
                 "bootstrap_source": result.bootstrap_source,
                 "bootstrap_meta": result.bootstrap_meta,
+                # Phase 5-A: patch proposal (提案のみ、apply はしない)。
+                # asdict で plain dict 化して JSONL に乗せる。読み手 (inspect CLI 等)
+                # は dict として扱えば良い。
+                "patch_proposal": (
+                    asdict(result.patch_proposal) if result.patch_proposal else None
+                ),
                 "online_summary": hand_dict,
                 "offline_summary": result.summary.to_dict() if result.summary else None,
             }

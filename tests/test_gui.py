@@ -142,6 +142,7 @@ def _stub_result(
     summary=None,
     bootstrap_source: str = "online_summary",
     bootstrap_meta=None,
+    patch_proposal=None,
 ):
     """`HandReconstructionResult` の duck-typed stub。"""
     from types import SimpleNamespace
@@ -149,6 +150,7 @@ def _stub_result(
         needs_review=needs_review, reason=reason, diff=diff,
         summary=summary if summary is not None else object(),
         bootstrap_source=bootstrap_source, bootstrap_meta=bootstrap_meta,
+        patch_proposal=patch_proposal,
     )
 
 
@@ -217,11 +219,23 @@ class TestApplyHandFinalized:
         thread.get_last_summary.return_value = _stub_summary(
             hand_id=2, winner_seat=1, pot_total=600,
         )
+        # Phase 5-A: patch_proposal もぶら下がっている stub
+        from core.patch_proposal import FieldPatch, HandPatchProposal
+        proposal = HandPatchProposal(
+            hand_id=2, can_patch_automatically=False,
+            fields=[
+                FieldPatch(field="resolution_type",
+                           online="fold_win", offline="showdown"),
+                FieldPatch(field="seat_payouts",
+                           online={1: 600}, offline={2: 600}),
+            ],
+        )
         thread.get_reconstruction_result.return_value = _stub_result(
             needs_review=True, reason="reconstructed_with_diff",
             diff={"resolution_type": {}, "seat_payouts": {}},
             bootstrap_source="raw",
             bootstrap_meta={"button_inferred": True},
+            patch_proposal=proposal,
         )
         dash._integration_thread = thread
 
@@ -237,7 +251,27 @@ class TestApplyHandFinalized:
         last_text = dash._lbl_latest_advisory.configure.call_args_list[-1][1]["text"]
         assert "status=review" in last_text
         assert "diff=resolution_type,seat_payouts" in last_text
+        # Phase 5-A: patch_fields が detail label に出る
+        assert "patch_fields=resolution_type,seat_payouts" in last_text
         assert "button inferred" in last_text
+
+    def test_apply_omits_patch_fields_when_no_proposal(self, tmp_path: Path):
+        """Phase 5-A: patch_proposal が None の hand (OK 等) は patch_fields= を出さない。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary(
+            hand_id=1, winner_seat=2, pot_total=300,
+        )
+        thread.get_reconstruction_result.return_value = _stub_result(
+            needs_review=False, reason="reconstructed_no_diff",
+            bootstrap_source="online_summary",
+            patch_proposal=None,
+        )
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(1)
+        last_text = dash._lbl_latest_advisory.configure.call_args_list[-1][1]["text"]
+        assert "patch_fields" not in last_text
 
     def test_apply_writes_skipped_line_when_result_is_none(self, tmp_path: Path):
         dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)

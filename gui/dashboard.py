@@ -610,6 +610,10 @@ class GUIDashboard:
             detail_parts.append(f"diff={','.join(badge_state.diff_fields)}")
         else:
             detail_parts.append("diff=none")
+        # Phase 5-A: patch proposal がある場合 field 名サマリだけ追加表示。
+        # proposal の online/offline 詳細値は GUI には出さない (CLI --show-patches で見る)。
+        if badge_state.patch_fields:
+            detail_parts.append(f"patch_fields={','.join(badge_state.patch_fields)}")
         if badge_state.button_inferred:
             detail_parts.append("(button inferred from raw observations)")
         self._lbl_latest_advisory.configure(text="  |  ".join(detail_parts))

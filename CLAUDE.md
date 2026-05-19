@@ -37,7 +37,8 @@ pokerapp/
 │   ├── settlement.py              ← compute_pot_settlements / evaluate_hand_rank / distribute_split_pot (Phase 2-A 実装済)
 │   ├── hand_finalizer.py          ← HandFinalizer.finalize (Phase 2-B 実装済、engine._finalize_hand の主経路)
 │   ├── hand_boundary.py           ← HandBoundaryDetector (Phase 2-C): audio / RFID から hand window を検出
-│   └── hand_reconstructor.py      ← HandReconstructor (Phase 3 実装済): hand window を BeamEngine + HandFinalizer で再生し online と diff
+│   ├── hand_reconstructor.py      ← HandReconstructor (Phase 3 実装済): hand window を BeamEngine + HandFinalizer で再生し online と diff
+│   └── patch_proposal.py          ← Phase 5-A: HandPatchProposal / FieldPatch / compute_patch_proposal (diff → 修正提案、apply はしない)
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -440,6 +441,32 @@ audio / RFID / camera 観測の流れから hand の開始・終了境界 (hand 
   - `tick(now)`: 時刻のみ進める (no event)
   - 返り値はすべて `list[BoundaryEvent]` (0/1/2 件)
 
+### `core/patch_proposal.py` (Phase 5-A 実装済)
+
+online HandSummary と offline HandSummary' の **diff から修正案 (patch proposal)
+を構造化** する。**apply は Phase 5-A スコープ外**: CLI / GUI で「提案」を見せる
+だけで、online JSON / PHH / GameStateManager は自動で書き換えない。
+
+- `PATCHABLE_FIELDS = ("resolution_type", "seat_payouts", "winner_seat",
+  "pot_total", "showdown_revealed_cards")` — Phase 5-A で対象とする canonical
+  settlement 系 field。``actions`` は heavy なので別フェーズ
+- `FieldPatch(field, online, offline, note)`: 1 field 分の修正提案
+- `HandPatchProposal(hand_id, can_patch_automatically, fields, summary_note)`:
+  1 hand 分。``can_patch_automatically`` は Phase 5-A では **常に False**
+  (Phase 5-B 以降で安全条件 + apply 判定を入れる想定の placeholder)
+- `compute_patch_proposal(hand_id, online, offline, diff) → Optional[HandPatchProposal]`:
+  - ``diff`` is None / 空 / 対象 field 無し → None
+  - ``PATCHABLE_FIELDS`` の宣言順で FieldPatch をリスト化 (deterministic 出力)
+  - field 毎に short note を ``_NOTE_TEMPLATES`` から format (online / offline 値を埋める)
+  - ``summary_note`` は ``"resolution_type, seat_payouts differ; candidate to update settlement fields"`` 形式
+
+**シリアライズ**: ``HandReconstructionResult.patch_proposal`` は dataclass。
+``reconstruct_session`` CLI は ``dataclasses.asdict`` で plain dict に変換して
+``reconstruct_<session>.jsonl`` に乗せる。``inspect_reconstruction`` CLI は
+その dict をそのまま読んで ``  PATCH: <field> online=... offline=...`` 行を組み立てる。
+GUI の ``summarize_reconstruction`` は dataclass / dict 両対応で
+``ReconstructionBadgeState.patch_fields`` (field 名だけ) を埋める。
+
 ### `core/hand_reconstructor.py` (Phase 3 実装済)
 
 hand window 単位の retrospective inference。EvidenceLog の events をその hand だけ
@@ -538,6 +565,15 @@ python -m output.reconstruct_session --session logs/<session>.json
   "confidence": float | null,
   "bootstrap_source": "initial_state" | "raw" | "online_summary" | null,  // Phase 4-B
   "bootstrap_meta": {...} | null,                                          // Phase 4-B (raw 時のみ非 null)
+  "patch_proposal": {                                                       // Phase 5-A
+    "hand_id": int,
+    "can_patch_automatically": false,                                       // Phase 5-A 常に false
+    "fields": [
+      {"field": "resolution_type", "online": "fold_win", "offline": "showdown", "note": "..."},
+      {"field": "seat_payouts",    "online": {...},      "offline": {...},      "note": "..."}
+    ],
+    "summary_note": "resolution_type, seat_payouts differ; ..."
+  } | null,                                                                 // diff があれば proposal、無ければ null
   "online_summary": {...},          // JSON dict (mutate されない)
   "offline_summary": {...} | null   // 再構成 HandSummary
 }
@@ -590,7 +626,18 @@ python -m output.inspect_reconstruction --reconstruct logs/reconstruct_session_x
 - `--fields A,B,C`: diff のうち指定 field 名のみを ``diff_fields=`` に出す
   (例: monitoring で settlement 系の差分だけ拾いたいときは
   `--fields resolution_type,seat_payouts`)
+- `--show-patches` (Phase 5-A): hand 行の直後に ``  PATCH: <field>
+  online=... offline=...`` 行を出す (proposal がある hand のみ)。proposal は
+  ``reconstruct_session`` が JSONL に乗せた ``patch_proposal`` を読むだけで、
+  apply は **しない** (= 完全に read-only)
 - `--quiet`: loader の info ログを抑制
+
+**`--show-patches` 出力例**:
+```
+hand 2 [REVIEW] bootstrap=raw reason=reconstructed_with_diff diff_fields=resolution_type,seat_payouts
+  PATCH: resolution_type  online=fold_win  offline=showdown
+  PATCH: seat_payouts  online={'2': 300}  offline={'1': 150, '2': 150}
+```
 
 **ステータスラベル** (優先順位順):
 1. `[SKIPPED]` — ``offline_summary`` が ``None`` または
@@ -602,7 +649,8 @@ python -m output.inspect_reconstruction --reconstruct logs/reconstruct_session_x
 **約束**: ``inspect_reconstruction`` は ``reconstruct_session`` が吐いた JSONL
 を読むだけの read-only ツール。online JSON / PHH / GameStateManager /
 ``_last_reconstruction_by_hand_id`` のいずれにも触らない。GUI / 監視ツールが
-このログ要約を取り込むまでの当座の可視化手段。
+このログ要約を取り込むまでの当座の可視化手段。Phase 5-A の ``--show-patches``
+も同様で、patch を apply するコマンドはまだ存在しない (Phase 5-B 以降の課題)。
 
 ### `gui/reconstruction_badges.py` (Phase 4-C2 実装済)
 
@@ -804,7 +852,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 484 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 511 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -833,6 +881,11 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_reconstruction_badges.py | gui.reconstruction_badges 単体 (status / RAW / diff_fields / button_inferred / format_history_line) (Phase 4-C2, 20 件) |
 | test_gui.py (Phase 4-C2 追加) | GUIDashboard.on_hand_finalized / _apply_hand_finalized: queue 経由、advisory accessor 呼び出し、tag 反映 (Phase 4-C2, +8 件) |
 | test_reconstructor_live_hook.py (Phase 4-C2 追加) | IntegrationThread.on_hand_finalized callback 発火 + get_reconstruction_result / get_last_summary accessor (Phase 4-C2, +5 件) |
+| test_patch_proposal.py | compute_patch_proposal 単体 (各 patchable field の note 形成 / PATCHABLE_FIELDS 順序 / 非対象 field 無視 / asdict round-trip) (Phase 5-A, 13 件) |
+| test_inspect_reconstruction_cli.py (Phase 5-A 追加) | --show-patches + format_patch_lines (Phase 5-A, +8 件) |
+| test_reconstruction_badges.py (Phase 5-A 追加) | TestPatchFields: HandPatchProposal (dataclass/dict) → patch_fields 投影 (Phase 5-A, +4 件) |
+| test_gui.py (Phase 5-A 追加) | _apply_hand_finalized で patch_fields= が Latest advisory ラベルに含まれる / proposal=None 時は出ない (Phase 5-A, +1 件) |
+| test_hand_reconstructor.py (Phase 5-A 追加) | diff 検出時に patch_proposal がぶら下がる / 無 diff/actions-only では None / CLI JSONL で patch_proposal が serialize される (Phase 5-A, +1 件 + 既存 4 件強化) |
 
 ---
 
@@ -896,6 +949,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | Live advisory reconstruct hook (IntegrationThread から online_summary 注入) | ✅ 完了 (Phase 4-A) | `integration/engine.py`: `_finalize_hand` 末尾で `_invoke_reconstructor_hook(hand_id, online_summary=summary)` を呼び、結果を `_last_summary_by_hand_id` / `_last_reconstruction_by_hand_id` に保持。online JSON / PHH / GameStateManager は mutate しない |
 | Raw-only bootstrap (online_summary 不要の HandReconstructor 起動) | ✅ 完了 (Phase 4-B) | `HandReconstructor._bootstrap_from_events`: RFID `role="seat"` 観測 + コンストラクタ `default_sb`/`default_bb` で BettingState を起こす。button は最小 seat 番号 (deterministic, `button_inferred=True`)。`HandReconstructionResult.bootstrap_source` / `bootstrap_meta` で診断情報を返す。CLI 出力 / live hook の双方で稼働 |
 | Reconstruct 結果可視化 CLI (read-only) | ✅ 完了 (Phase 4-C1) | `output/inspect_reconstruction.py`: `reconstruct_<session>.jsonl` を読んで `[OK]` / `[REVIEW]` / `[SKIPPED]` ラベル付きで hand 単位サマリを出す。`--only-needs-review` / `--fields A,B` フィルタ対応。online JSON / PHH / live hook 結果には触らない |
+| Patch proposal (差分 → 修正案、apply は無し) | ✅ 完了 (Phase 5-A) | `core/patch_proposal.py`: `HandPatchProposal` / `FieldPatch` / `compute_patch_proposal`。対象 field は resolution_type / seat_payouts / winner_seat / pot_total / showdown_revealed_cards。`HandReconstructionResult.patch_proposal` に乗り、CLI `--show-patches` と GUI ``patch_fields=`` 表示で見える。``can_patch_automatically=False`` (Phase 5-B 以降で apply 判定) |
 | ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
 | gs.end_hand → end_hand_with_payouts 拡張 | ❌ 未着手 (Phase 2-D 以降) | 現状 Phase 2-B では `_apply_payouts_to_gamestate` adapter が primary winner で legacy gs.end_hand を呼んでいる |
 
@@ -1254,7 +1308,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 484 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 511 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
@@ -1266,6 +1320,8 @@ pytest tests/test_reconstructor_live_hook.py -v                                 
 pytest tests/test_hand_reconstructor_bootstrap.py -v                              # Phase 4-B (3-stage bootstrap + CLI round-trip)
 pytest tests/test_inspect_reconstruction_cli.py -v                                # Phase 4-C1 (inspect_reconstruction CLI)
 pytest tests/test_reconstruction_badges.py tests/test_gui.py -v                   # Phase 4-C2 (GUI advisory パネル + helper)
+pytest tests/test_patch_proposal.py -v                                            # Phase 5-A (compute_patch_proposal 単体)
+python -m output.inspect_reconstruction --reconstruct logs/reconstruct_session_xxx.jsonl --show-patches  # Phase 5-A: PATCH 提案も併記
 python -m output.inspect_reconstruction --reconstruct logs/reconstruct_session_xxx.jsonl  # Phase 4-C1: reconstruct 結果一覧
 python -m output.reconstruct_session --session logs/<session>.json                # Phase 3 CLI: online↔offline diff を出力
 python main.py --cli                                                              # M1: logs/evidence_*.jsonl が増える
