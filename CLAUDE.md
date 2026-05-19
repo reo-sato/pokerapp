@@ -674,7 +674,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 416 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 425 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -697,6 +697,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_hand_finalizer.py | HandFinalizer fold_win / showdown / sidepot_showdown / showdown_split / incomplete / winner_hint mismatch (Phase 2-B, 11 件) |
 | test_hand_boundary.py | HandBoundaryDetector (audio / board cleared / hole appeared) + extract_hand_windows + IntegrationThread 結合 + EvidenceLog round-trip (Phase 2-C, 19 件) |
 | test_hand_reconstructor.py | HandReconstructor (online↔offline diff / fallback / 複数 hand / _compute_diff) + reconstruct_session CLI round-trip (Phase 3, 14 件) |
+| test_reconstructor_live_hook.py | IntegrationThread から advisory reconstruct を呼ぶ live hook (online_summary 注入 / 複数 hand / 例外時 online 不変 / online_summary=None で skipped) (Phase 4-A, 9 件) |
 
 ---
 
@@ -756,6 +757,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | IntegrationThread の live hand window バッファ | ✅ 完了 (Phase 2-C) | `_current_hand_events` / `_completed_hands` / `_track_evidence` |
 | HandReconstructor 本実装 (beam 再生 + finalizer 再呼び出し) | ✅ 完了 (Phase 3) | `core/hand_reconstructor.py`: events → BeamEngine + HandFinalizer 再生 → online との diff、`needs_review` 自動判定 |
 | 後処理 CLI (online↔offline diff) | ✅ 完了 (Phase 3) | `output/reconstruct_session.py`: session JSON + evidence JSONL → `reconstruct_<id>.jsonl` |
+| Live advisory reconstruct hook (IntegrationThread から online_summary 注入) | ✅ 完了 (Phase 4-A) | `integration/engine.py`: `_finalize_hand` 末尾で `_invoke_reconstructor_hook(hand_id, online_summary=summary)` を呼び、結果を `_last_summary_by_hand_id` / `_last_reconstruction_by_hand_id` に保持。online JSON / PHH / GameStateManager は mutate しない |
 | ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
 | gs.end_hand → end_hand_with_payouts 拡張 | ❌ 未着手 (Phase 2-D 以降) | 現状 Phase 2-B では `_apply_payouts_to_gamestate` adapter が primary winner で legacy gs.end_hand を呼んでいる |
 
@@ -1114,7 +1116,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 416 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 425 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 9 Phase 4-A)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
@@ -1122,6 +1124,7 @@ pytest tests/test_settlement_logic.py -v                                        
 pytest tests/test_hand_finalizer.py -v                                            # Phase 2-B (HandFinalizer 単体)
 pytest tests/test_hand_boundary.py -v                                             # Phase 2-C (boundary + replay + integration)
 pytest tests/test_hand_reconstructor.py -v                                        # Phase 3 (HandReconstructor + CLI)
+pytest tests/test_reconstructor_live_hook.py -v                                   # Phase 4-A (IntegrationThread live advisory hook)
 python -m output.reconstruct_session --session logs/<session>.json                # Phase 3 CLI: online↔offline diff を出力
 python main.py --cli                                                              # M1: logs/evidence_*.jsonl が増える
 python main.py                                                                    # M3: GUI で revise バナー確認
@@ -1213,9 +1216,15 @@ HandSummary {resolution_status="final", pots, seat_payouts, ...}
     ↓
 final hand のみ PHH export
 
-(オプション、Phase 3 実装済) HandReconstructor が hand window を頭から再生して
+(Phase 3 実装済 + Phase 4-A 完了) HandReconstructor が hand window を頭から再生して
                               offline HandSummary' を生成 → online との diff → needs_review
-                              自動判定。online JSON / PHH は **mutate しない** (別 JSONL に書く)
+                              自動判定。online JSON / PHH は **mutate しない**。
+                              - 後処理 (Phase 3): `output/reconstruct_session` CLI で
+                                別 JSONL (`reconstruct_<id>.jsonl`) に書く
+                              - live (Phase 4-A): IntegrationThread が hand 終局時に
+                                advisory として呼び、結果は `_last_reconstruction_by_hand_id`
+                                に in-memory 保持。GUI / 監視ツールがここを読む想定
+                                (online JSON / PHH / GameStateManager は不変)
 ```
 
 ### ログ / replay / retrospective inference (Phase 2-C)
@@ -1359,31 +1368,50 @@ retrospective に再評価して **incomplete → final** に昇格させる経�
 - ✅ `output/reconstruct_session.py` CLI — session JSON + evidence JSONL → `reconstruct_<session>.jsonl` (1 hand 1 行) を出力。online JSON / PHH を mutate しない
 - ✅ JSON round-trip 時の seat key str/int 混在を吸収する正規化
 
-**Phase 3 スコープ外 (Phase 4+ 候補)**:
+**Phase 4-A 完了済み (live advisory reconstruct hook)**:
+- ✅ `integration/engine.py` の `IntegrationThread`:
+  - `_last_summary_by_hand_id: dict[int, HandSummary]` を追加
+  - `_last_reconstruction_by_hand_id: dict[int, HandReconstructionResult]` を追加
+  - `_last_reconstruction` は最新エントリへの convenience pointer として残す
+- ✅ `_invoke_reconstructor_hook(hand_id, online_summary: Optional[HandSummary]=None)` シグネチャ拡張
+- ✅ `_apply_boundaries`: end の `reason == "audio_winner"` のときは invoke を遅延
+  (直後の `_finalize_hand` 経由で summary 付きで呼ぶため)。`board_cleared` /
+  `audio_new_hand_implicit_end` 等の他 reason では従来通り `online_summary=None` で invoke
+- ✅ `_finalize_hand`: `JsonWriter.append_hand_summary(summary)` 直後に
+  `_last_summary_by_hand_id[summary.hand_id] = summary` を保存し、対応 hand window
+  が ``_completed_hands`` にあれば `_invoke_reconstructor_hook(hand_id, online_summary=summary)`
+- ✅ reconstructor で例外が出ても online path は不変 (`_last_reconstruction = None` で抜ける)
+- ✅ online HandSummary / `logs/<session>.json` / PHH / `GameStateManager.stacks` は
+  Phase 2-B と完全同一 (advisory layer は読み取り専用)
 
-候補の整理 (今後どちらかから進める):
+**Phase 4-A 保持ポリシー**:
+- `_last_summary_by_hand_id` / `_last_reconstruction_by_hand_id` は **in-memory のみ**。
+  canonical な book of record は `logs/evidence_<session>.jsonl` (raw 観測) +
+  `logs/<session>.json` (online HandSummary) + `output/reconstruct_session` CLI が
+  出力する `logs/reconstruct_<session>.jsonl` (offline reconstruction) で永続化済み。
+  advisory 結果はプロセス再起動で揮発する設計
+- `_last_reconstruction_by_hand_id[hand_id].needs_review` を GUI / 監視ツールが
+  読むフックは Phase 4-B+ で予定 (現状は in-memory に置くだけ)
 
-- **Phase 4-A: live hook に online_summary を渡して advisory reconstruct を有効化**
-  - IntegrationThread の `_invoke_reconstructor_hook` で online_summary (= 終局直後の
-    HandSummary) を渡してリアルタイム reconstruct を実行し、`needs_review` を
-    `_completed_hands` 経由で GUI / 監視ツールに通知する。
-  - online JSON / PHH は mutate しないまま、advisory layer として運用する。
-  - 現状は `initial_state=None / online_summary=None` で skipped 経路を維持。
+**Phase 3 / 4-A スコープ外 (Phase 4-B 以降の候補)**:
+
 - **Phase 4-B: raw-only bootstrap の強化**
   - online_summary 無しでも reconstruct できるよう、RFID hole_cards 出現や音声
     `new_hand` 時点の active seats から button / SB / BB を推定する。
-  - Phase 3 MVP では「online-bootstrap-assisted」だったので、これにより
+  - Phase 3/4-A までは「online-bootstrap-assisted」のため、これによりはじめて
     EvidenceLog 単独で hand を立て直す *raw-only reconstruction* が可能になる。
   - 後段で online_summary を読まずに事後監査 / 失った online ログからの復旧が
     できる。
 
-その他 (どちらか進めた後の課題):
+その他 (Phase 4-B 進行後の課題):
 - 差分検出時の **自動 patch** (online HandSummary の resolution / payouts を
-  offline で上書きする経路。現状は別 JSONL に書くだけ)
+  offline で上書きする経路。現状は in-memory + 別 JSONL に書くだけ)
+- GUI / CLI で live reconstruct 結果 (needs_review / diff) を見るバナー / バッジ表示
 - 確率モデル拡張: prior の hand-specific 調整 (例えば過去 N hand の MAP 平均で
   smoothing)、`confidence` を operational metric から **モデル事後確率** (top-1 vs
   top-2 log 差 / エントロピー / Brier score) に置き換え
 - 完全 replay 型 ActionRecord (pot_after / stack_after を再構成時の bs から正確に算出)
+- `_last_reconstruction_by_hand_id` の eviction policy (長時間セッションで増え続ける場合の対策)
 
 **Phase 2-D / 4+ 以降の残タスク**:
 - `core/showdown_tracker.py`: `observe()` / `is_showdown_ready()` / `project_to_summary_dict()` 本実装。現状 `engine._finalize_hand` が直接 `self._hole_cards` から `RevealedHand` を組んでいる

@@ -305,7 +305,14 @@ class TestIntegrationThreadWindowCollection:
         assert len(thread._current_hand_events) >= 1
 
     def test_reconstructor_hook_invoked_on_end(self, tmp_path: Path) -> None:
-        """end boundary 時に HandReconstructor.reconstruct_from_events が呼ばれる。"""
+        """end boundary + _finalize_hand 経由で HandReconstructor が advisory 実行される。
+
+        Phase 4-A: ``audio_winner`` の end boundary では ``_apply_boundaries`` 内では
+        invoke を遅延し、その直後の ``_finalize_hand`` から online_summary 付きで
+        呼ばれる。結果 ``reason`` は ``"reconstructed_no_diff"`` または
+        ``"reconstructed_with_diff"`` (Phase 2-C skeleton 時代の
+        ``"reconstruction_skipped"`` ではない)。
+        """
         thread, audio_q, stop, _writer = self._build_thread(tmp_path)
         now = time.time()
         audio_q.put(AudioEvent("new_hand", 0, now, ""))
@@ -317,9 +324,15 @@ class TestIntegrationThreadWindowCollection:
         stop.set()
         thread.join(timeout=2.0)
 
-        # skeleton reconstructor は ``"reconstruction_skipped"`` を返す
+        # Phase 4-A: advisory reconstruct の結果が in-memory に保持されている
         assert thread._last_reconstruction is not None
-        assert thread._last_reconstruction.reason == "reconstruction_skipped"
+        assert thread._last_reconstruction.reason in {
+            "reconstructed_no_diff", "reconstructed_with_diff",
+        }
+        # hand_id 別 dict にも入っている
+        assert 1 in thread._last_reconstruction_by_hand_id
+        # _last_summary_by_hand_id にも online summary が保持されている
+        assert 1 in thread._last_summary_by_hand_id
 
 
 # ────────────────────────────────────────────────────────────────────────────

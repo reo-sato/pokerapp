@@ -178,6 +178,17 @@ class IntegrationThread(threading.Thread):
         self._hand_reconstructor = HandReconstructor()
         self._current_hand_events: list[EvidenceRecord] = []
         self._completed_hands: dict[int, list[EvidenceRecord]] = {}
+        # Phase 4-A: advisory layer
+        # - _last_summary_by_hand_id: _finalize_hand が build した online HandSummary を保持。
+        #   reconstructor の online_summary 入力に使う。
+        # - _last_reconstruction_by_hand_id: hand_id ごとの reconstruct 結果。
+        #   GUI / 監視ツール / Phase 4-B+ の自動 patch 経路がここを読む。
+        # - _last_reconstruction: 直近の結果へのショートカット参照 (既存 API 互換)。
+        # 保持ポリシー: in-memory のみ。canonical な book of record は
+        # logs/evidence_<session>.jsonl + logs/<session>.json で永続化されているため、
+        # advisory 結果はプロセス再起動で揮発する設計。Phase 4-B+ で file 出力検討。
+        self._last_summary_by_hand_id: dict[int, HandSummary] = {}
+        self._last_reconstruction_by_hand_id: dict[int, HandReconstructionResult] = {}
         self._last_reconstruction: Optional[HandReconstructionResult] = None
 
         # ボタン管理
@@ -456,6 +467,14 @@ class IntegrationThread(threading.Thread):
         boundaries: list[BoundaryEvent],
         record: Optional[EvidenceRecord],
     ) -> None:
+        """境界 (start/end) を window バッファに反映し、必要なら reconstructor を呼ぶ。
+
+        Phase 4-A: end の reason が ``"audio_winner"`` の場合、reconstructor 呼び出しは
+        **遅延** する (この直後に ``_finalize_hand`` が走り、そこで online_summary 付き
+        で invoke するため)。それ以外の end (``board_cleared`` /
+        ``audio_new_hand_implicit_end`` 等) では ``_finalize_hand`` は走らないので、
+        ここで online_summary=None のまま invoke する。
+        """
         has_end = any(b.kind == "end" for b in boundaries)
         has_start = any(b.kind == "start" for b in boundaries)
 
@@ -463,7 +482,8 @@ class IntegrationThread(threading.Thread):
             end_b = next(b for b in boundaries if b.kind == "end")
             # trigger event は新 hand 側に属する (例: new_hand audio)
             self._completed_hands[end_b.hand_id] = list(self._current_hand_events)
-            self._invoke_reconstructor_hook(end_b.hand_id)
+            if end_b.reason != "audio_winner":
+                self._invoke_reconstructor_hook(end_b.hand_id, online_summary=None)
             self._current_hand_events = [record] if record is not None else []
         elif has_end:
             end_b = next(b for b in boundaries if b.kind == "end")
@@ -471,7 +491,8 @@ class IntegrationThread(threading.Thread):
             if record is not None:
                 self._current_hand_events.append(record)
             self._completed_hands[end_b.hand_id] = list(self._current_hand_events)
-            self._invoke_reconstructor_hook(end_b.hand_id)
+            if end_b.reason != "audio_winner":
+                self._invoke_reconstructor_hook(end_b.hand_id, online_summary=None)
             self._current_hand_events = []
         elif has_start:
             self._current_hand_events = [record] if record is not None else []
@@ -479,22 +500,36 @@ class IntegrationThread(threading.Thread):
             if record is not None:
                 self._current_hand_events.append(record)
 
-    def _invoke_reconstructor_hook(self, hand_id: int) -> None:
-        """Phase 2-C: 終端境界後に HandReconstructor を呼ぶ hook。
+    def _invoke_reconstructor_hook(
+        self,
+        hand_id: int,
+        online_summary: Optional[HandSummary] = None,
+    ) -> None:
+        """終端境界後 / ``_finalize_hand`` 後に HandReconstructor を呼ぶ advisory hook。
 
-        現状 reconstructor は skeleton で online 結果に介入しない。Phase 3 以降で
-        beam 再生 + HandFinalizer 再呼び出しを実装した時に、ここから差分検出 /
-        summary 差し替え / needs_review 立てが行われる予定。
+        Phase 2-C: skeleton で online 結果に介入しない。
+        Phase 3:   HandReconstructor 本実装。online_summary が無いと bootstrap できず
+                   ``reason="reconstruction_skipped"`` で返る (raw-only bootstrap は
+                   Phase 4-B の課題)。
+        Phase 4-A: IntegrationThread からも online_summary を渡すパスを開通。結果は
+                   ``_last_reconstruction_by_hand_id[hand_id]`` に保持 (in-memory のみ)。
+                   **online HandSummary / JSON / PHH / GameStateManager は一切 mutate
+                   しない** (advisory layer)。
         """
         events = self._completed_hands.get(hand_id, [])
         try:
-            self._last_reconstruction = self._hand_reconstructor.reconstruct_from_events(
+            result = self._hand_reconstructor.reconstruct_from_events(
                 events,
                 initial_state=None,
+                online_summary=online_summary,
             )
         except Exception:
             logger.exception("HandReconstructor.reconstruct_from_events failed")
             self._last_reconstruction = None
+            return
+        self._last_reconstruction_by_hand_id[hand_id] = result
+        self._last_reconstruction = result
+        # TODO Phase 4-B+: needs_review を GUI / logs / 自動 patch 経路へ反映する
 
     # ――― イベントハンドラ ―――
 
@@ -863,6 +898,16 @@ class IntegrationThread(threading.Thread):
             gs.hand_id, summary.resolution_type, summary.winner_seat, summary.seat_payouts,
         )
         self._current_actions = []
+
+        # Phase 4-A: advisory reconstruct hook
+        # online HandSummary が確定したので、対応する hand window を再生して
+        # offline HandSummary' を計算し diff を取る。結果は in-memory に保持し、
+        # online JSON / PHH / GameStateManager には一切影響を与えない。
+        # `_apply_boundaries` 側は ``audio_winner`` end の場合 invoke を遅延しているので
+        # ここが当該 hand の唯一の reconstructor 呼び出し点となる。
+        self._last_summary_by_hand_id[summary.hand_id] = summary
+        if summary.hand_id in self._completed_hands:
+            self._invoke_reconstructor_hook(summary.hand_id, online_summary=summary)
 
     def _apply_payouts_to_gamestate(self, summary: HandSummary) -> None:
         """Phase 2-B 暫定 bridge: HandFinalizer の seat_payouts から primary winner を
