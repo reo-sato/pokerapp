@@ -654,6 +654,11 @@ class GUIDashboard:
         IntegrationThread の advisory store (``_last_summary_by_hand_id`` /
         ``_last_reconstruction_by_hand_id``) を **read-only** で参照するだけで、
         online JSON / PHH / GameStateManager には触らない。
+
+        Phase 5-E: blind 情報 (``blinds=SB/BB``, ``source=...``, ``blind_mismatch``)
+        を Latest advisory ラベルと history 行に表示する。判定は ``summary.blinds`` /
+        ``result.bootstrap_meta["blind_source"]`` / ``result.patch_proposal.fields``
+        から read-only で行い、reconstruct ロジックには触らない。
         """
         from gui.reconstruction_badges import (
             format_history_line, summarize_reconstruction,
@@ -680,6 +685,14 @@ class GUIDashboard:
         pot_total = getattr(summary, "pot_total", None) if summary is not None else None
         line = format_history_line(hand_id, winner_seat, pot_total, badge_state)
 
+        # Phase 5-E: history 行に blind 情報の lightweight suffix を付ける。
+        # - blind_source="current_state" のときだけ ``blinds=SB/BB (current_state)``
+        #   (session_default はノイズ削減のため省略)
+        # - blind_mismatch があれば ``(blind_mismatch)`` を末尾に付ける
+        blind_suffix = self._format_blind_suffix_for_history(summary, result)
+        if blind_suffix:
+            line = line + "  " + blind_suffix
+
         # 履歴パネル: tag は status と同名 (ok / review / skipped) に揃える
         box = self._history_box
         box.configure(state="normal")
@@ -694,6 +707,16 @@ class GUIDashboard:
             f"reason={badge_state.reason or 'none'}",
             f"bootstrap={badge_state.bootstrap_source}",
         ]
+        # Phase 5-E: blind 情報を bootstrap と diff の間に挟む。
+        # ``blinds=SB/BB (source=current_state|session_default|unknown)`` を常に表示
+        # (値が無ければ ``?/?`` / ``unknown`` にフォールバック)。
+        detail_parts.append(self._format_blind_for_advisory(summary, result))
+        # blind_mismatch は patch_proposal に field="blinds" がある場合 (= Phase 5-D
+        # の advisory が立った hand) のみ ``blind_mismatch=yes`` を出す。
+        # ``=no`` は出さない (ノイズ削減)。
+        if self._has_blind_patch(result):
+            detail_parts.append("blind_mismatch=yes")
+
         if badge_state.diff_fields:
             detail_parts.append(f"diff={','.join(badge_state.diff_fields)}")
         else:
@@ -705,6 +728,101 @@ class GUIDashboard:
         if badge_state.button_inferred:
             detail_parts.append("(button inferred from raw observations)")
         self._lbl_latest_advisory.configure(text="  |  ".join(detail_parts))
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Phase 5-E: blind advisory helpers (read-only)
+    #
+    # GUI が ``summary.blinds`` / ``result.bootstrap_meta`` / ``patch_proposal``
+    # に触れる際の小さなヘルパ群。reconstruct ロジックには触らず、表示用に
+    # 値を読むだけ。``result`` が None / 形が壊れていても例外を出さないように
+    # defensively に getattr / isinstance で防御する。
+    # ──────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _blind_source_text(result: object) -> str:
+        """``bootstrap_meta["blind_source"]`` を short ラベルに正規化する。
+
+        既知値 (``"current_state"`` / ``"session_default"``) はそのまま、
+        それ以外 / 不在 / 不正は ``"unknown"`` で固定。
+        """
+        if result is None:
+            return "unknown"
+        meta = getattr(result, "bootstrap_meta", None)
+        if not isinstance(meta, dict):
+            return "unknown"
+        src = meta.get("blind_source")
+        if src in ("current_state", "session_default"):
+            return src
+        return "unknown"
+
+    @staticmethod
+    def _has_blind_patch(result: object) -> bool:
+        """Phase 5-D の blind FieldPatch がぶら下がっているかを判定する。
+
+        - dataclass の ``FieldPatch`` (live hook 経由) と dict 形 (JSONL 経由) の
+          両方に対応 (= ``patch_proposal`` が asdict 後でも読める設計)。
+        - ``proposal`` が None / fields が無い / 不正形式なら False。
+        """
+        if result is None:
+            return False
+        proposal = getattr(result, "patch_proposal", None)
+        if proposal is None:
+            return False
+        fields = getattr(proposal, "fields", None)
+        if fields is None and isinstance(proposal, dict):
+            fields = proposal.get("fields")
+        if not fields:
+            return False
+        for fp in fields:
+            name = getattr(fp, "field", None)
+            if name is None and isinstance(fp, dict):
+                name = fp.get("field")
+            if name == "blinds":
+                return True
+        return False
+
+    def _format_blind_for_advisory(self, summary: object, result: object) -> str:
+        """Latest advisory 用: ``blinds=<sb>/<bb> (source=<...>)`` 文字列を返す。
+
+        ``summary.blinds`` が無い / dict でない場合は ``?/?`` にフォールバック、
+        ``blind_source`` が無い場合は ``unknown`` にフォールバック。
+        """
+        sb_text = "?"
+        bb_text = "?"
+        if summary is not None:
+            blinds = getattr(summary, "blinds", None)
+            if isinstance(blinds, dict):
+                sb = blinds.get("sb")
+                bb = blinds.get("bb")
+                if sb is not None:
+                    sb_text = str(int(sb)) if isinstance(sb, (int, float)) else str(sb)
+                if bb is not None:
+                    bb_text = str(int(bb)) if isinstance(bb, (int, float)) else str(bb)
+        source = self._blind_source_text(result)
+        return f"blinds={sb_text}/{bb_text} (source={source})"
+
+    def _format_blind_suffix_for_history(
+        self, summary: object, result: object,
+    ) -> str:
+        """history 1 行用: 必要な場合だけ末尾に付ける lightweight suffix を返す。
+
+        - blind_source="current_state" のときだけ ``blinds=SB/BB (current_state)``
+          (session_default はキャッシュゲームでデフォルト状態なので省略)
+        - blind FieldPatch があれば ``(blind_mismatch)`` を末尾に追記
+        - どちらも該当しなければ空文字列 (= suffix なし)
+        """
+        parts: list[str] = []
+        source = self._blind_source_text(result)
+        if source == "current_state" and summary is not None:
+            blinds = getattr(summary, "blinds", None)
+            if isinstance(blinds, dict):
+                sb = blinds.get("sb")
+                bb = blinds.get("bb")
+                if sb is not None and bb is not None:
+                    parts.append(f"blinds={sb}/{bb} (current_state)")
+        if self._has_blind_patch(result):
+            parts.append("(blind_mismatch)")
+        return "  ".join(parts)
 
     def _apply_rfid_card(self, rfid_ev: object) -> None:
         """RFIDEvent を UI に反映する (ホールカード / ボードカード更新)。"""

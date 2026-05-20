@@ -757,6 +757,61 @@ Phase 4-C1 CLI (`output.inspect_reconstruction`) と統一する。
 GameStateManager / settlement の挙動には一切触れない。badge / 詳細は
 クリックできない静的 indicator として実装 (Phase 4-C3+ で interactive 化検討)。
 
+### GUI blind advisory 表示 (Phase 5-E 実装済)
+
+Phase 5-C / 5-D で蓄積された blind 関連 advisory 情報 (``summary.blinds`` /
+``bootstrap_meta.blind_source`` / ``patch_proposal`` に含まれる
+``field="blinds"`` FieldPatch) を、operator が一目で確認できるように
+``gui/dashboard.py`` から表示する。
+
+**4 つの read-only helper** (``gui/dashboard.py``、external module には触らない):
+
+- ``_blind_source_text(result) -> str``:
+  ``bootstrap_meta["blind_source"]`` を short label に正規化
+  (``current_state`` / ``session_default`` 既知値はそのまま、それ以外 /
+  None / 不正形式は ``unknown``)
+- ``_has_blind_patch(result) -> bool``:
+  ``patch_proposal.fields`` に ``field="blinds"`` があれば True。
+  dataclass instance (live hook 経由) と dict 形 (JSONL から読み戻し)
+  の両方に対応 (= ``summarize_reconstruction`` と同じ duck-typed 寛容性)
+- ``_format_blind_for_advisory(summary, result) -> str``:
+  Latest advisory 用 ``blinds=SB/BB (source=...)`` 文字列。``summary.blinds``
+  が無ければ ``?/?`` フォールバック、``blind_source`` が無ければ ``unknown``
+- ``_format_blind_suffix_for_history(summary, result) -> str``:
+  history 行 用の lightweight suffix。``blind_source="current_state"``
+  のときだけ ``blinds=SB/BB (current_state)`` を出し、``session_default``
+  ではノイズ削減のため省略する。``_has_blind_patch=True`` のときは末尾に
+  ``(blind_mismatch)`` を付ける
+
+**Latest advisory ラベルへの統合** (``_apply_hand_finalized`` 内):
+
+順序は ``bootstrap`` と ``diff`` の間に挿入:
+
+```
+Latest advisory hand #2  |  status=review  |  reason=reconstructed_with_blind_mismatch
+  |  bootstrap=raw  |  blinds=200/400 (source=session_default)  |  blind_mismatch=yes
+  |  diff=none  |  patch_fields=blinds
+```
+
+- ``blinds=SB/BB (source=...)`` は **常時表示** (degrade 時は ``?/?`` /
+  ``unknown``)
+- ``blind_mismatch=yes`` は Phase 5-D の blind FieldPatch がぶら下がる hand
+  のときだけ追加 (``=no`` は出さない、ノイズ削減方針)
+
+**history 行 への suffix**:
+
+- ``blind_source=current_state`` の hand: ``blinds=SB/BB (current_state)``
+  を末尾に付ける
+- ``blind_source=session_default`` の hand: ``blinds=…`` suffix を **省略**
+  (キャッシュゲームの定常状態なのでノイズになる)
+- blind FieldPatch ありの hand: ``(blind_mismatch)`` を末尾に追記
+  (current_state / session_default いずれの場合も)
+
+**約束**: GUI の blind 表示は **read-only**。online JSON / PHH /
+GameStateManager / settlement / reconstruct ロジックには触らない。
+変更ファイルは ``gui/dashboard.py`` (helper 追加 +
+``_apply_hand_finalized`` 内拡張) と ``tests/test_gui.py`` のみ。
+
 ### `output/replay_hand.py` (Phase 2-C 実装済)
 
 - `EvidenceRecord(timestamp, kind, event, payload)`: 1 観測の type-restored 表現
@@ -902,7 +957,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 553 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 563 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -929,6 +984,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_hand_reconstructor_bootstrap.py | bootstrap 3 段階優先 (initial_state / raw / online_summary) + skipped + CLI round-trip で `bootstrap_source` 反映 (Phase 4-B, 11 件) + Phase 5-B: Audio 補助 signal / prev_button 左隣 heuristic / meta 拡張 / safety fallback (Phase 5-B, +13 件) + Phase 5-B+: audio_seat_hint_sources 分類 / staged confidence (4 levels) / skipped hand を跨いだ prev_button 保持 (Phase 5-B+, +9 件) + Phase 5-C: HandReconstructor.update_blinds + blind_source field (Phase 5-C, +4 件) + Phase 5-D: blind mismatch advisory (Pattern A propagation health / Pattern B amount mismatch / 既存 proposal への append / e2e) (Phase 5-D, +10 件) |
 | test_reconstructor_live_hook.py (Phase 5-C 追加) | IntegrationThread.update_blinds で canonical state を同期 / 不正値で ValueError / 過去 hand の summary は変更しない (Phase 5-C, +3 件) |
 | test_gui.py (Phase 5-C 追加) | _cmd_update_blinds が IntegrationThread.update_blinds を呼ぶ / 不正値拒否 / thread 未接続時の warning (Phase 5-C, +3 件) |
+| test_gui.py (Phase 5-E 追加) | Latest advisory に `blinds=SB/BB (source=...)` 表示 / `blind_mismatch=yes` (patch_proposal に blinds 含む時) / history 行に current_state のみ blinds suffix / `(blind_mismatch)` marker / dict 形 proposal 互換 / source 正規化 (Phase 5-E, +10 件) |
 | test_inspect_reconstruction_cli.py | inspect_reconstruction CLI (label 判定 / --only-needs-review / --fields filter / 壊れた JSONL skip) (Phase 4-C1, 14 件) |
 | test_reconstruction_badges.py | gui.reconstruction_badges 単体 (status / RAW / diff_fields / button_inferred / format_history_line) (Phase 4-C2, 20 件) |
 | test_gui.py (Phase 4-C2 追加) | GUIDashboard.on_hand_finalized / _apply_hand_finalized: queue 経由、advisory accessor 呼び出し、tag 反映 (Phase 4-C2, +8 件) |
@@ -1004,6 +1060,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | Raw bootstrap signal 細分化 + staged confidence | ✅ 完了 (Phase 5-B+) | `signals.audio_seat_hint_sources` で audio seat hint を ``action`` / ``winner`` / ``other`` の 3 カテゴリに分割 (action のみ confidence boost 対象)。`confidence` を固定 0.5 から ``_compute_raw_bootstrap_confidence`` による staged ``[0.4, 0.7]`` に変更 (baseline 0.4 + RFID>=3 / action overlap / button_inferred_from_prev の 3 boost)。依然 operational metric であって calibrated probability ではない。``_prev_button_seat`` は **直近 successfully bootstrapped hand** の seed を保持 (skipped hand を跨いでも壊さない) |
 | Blind level 変更の canonical state 同期 | ✅ 完了 (Phase 5-C) | `IntegrationThread.update_blinds(sb, bb)` が **唯一の書き込み口** (canonical)。``GameStateManager._sb/_bb`` と ``HandReconstructor._default_sb/_bb`` は **projection** として canonical を反映 (独立に書き換えない)。GUI に SB/BB 入力 + "Blinds 更新" ボタンを追加 (`_cmd_update_blinds`)。`bootstrap_meta.blind_source` で `"current_state"` (runtime 更新後) / `"session_default"` (初期値のまま) を区別。**次 hand から有効**、現 hand の HandSummary.blinds は不変。音声起源の blind 推定はしない (= GUI 操作起点のみ)。`session_default` を自動 ``needs_review`` の根拠にはしない (キャッシュゲームでノイズが多すぎる) |
 | Blind mismatch advisory (reconstruct への反映) | ✅ 完了 (Phase 5-D) | `HandReconstructor._apply_blind_mismatch_advisory`: (A) `_blinds_updated_at_runtime=True` だが meta が `session_default` のままの **propagation health check**、(B) `online_summary.blinds` と `bootstrap_meta.sb_amount/bb_amount` の **amount mismatch** を検出。検出時は `needs_review=True`、reason を ``reconstructed_with_blind_mismatch`` に昇格 (settlement diff が既にある場合はそのまま)、`patch_proposal` に `FieldPatch(field="blinds", online=..., offline=...)` を append。proposal が無ければ blind-only proposal を新規作成。`can_patch_automatically=False` (apply は依然しない) |
+| GUI blind 表示 (advisory ラベル + history 行) | ✅ 完了 (Phase 5-E) | `gui/dashboard.py` の helper (`_format_blind_for_advisory` / `_format_blind_suffix_for_history` / `_has_blind_patch` / `_blind_source_text`) で `summary.blinds` / `bootstrap_meta.blind_source` / `patch_proposal.fields` を read-only に参照。Latest advisory に `blinds=SB/BB (source=current_state\|session_default\|unknown)` を常時表示、`blind_mismatch=yes` を Phase 5-D の blind FieldPatch ありの hand のみ表示。history 行 suffix は `current_state` のときだけ `blinds=SB/BB (current_state)` を出す (`session_default` はノイズ削減のため省略)、blind mismatch は `(blind_mismatch)` marker。online JSON / PHH / reconstruct ロジックには触らない |
 | Reconstruct 結果可視化 CLI (read-only) | ✅ 完了 (Phase 4-C1) | `output/inspect_reconstruction.py`: `reconstruct_<session>.jsonl` を読んで `[OK]` / `[REVIEW]` / `[SKIPPED]` ラベル付きで hand 単位サマリを出す。`--only-needs-review` / `--fields A,B` フィルタ対応。online JSON / PHH / live hook 結果には触らない |
 | Patch proposal (差分 → 修正案、apply は無し) | ✅ 完了 (Phase 5-A) | `core/patch_proposal.py`: `HandPatchProposal` / `FieldPatch` / `compute_patch_proposal`。対象 field は resolution_type / seat_payouts / winner_seat / pot_total / showdown_revealed_cards。`HandReconstructionResult.patch_proposal` に乗り、CLI `--show-patches` と GUI ``patch_fields=`` 表示で見える。``can_patch_automatically=False`` (Phase 5-B 以降で apply 判定) |
 | ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
@@ -1364,7 +1421,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 553 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+ + 10 Phase 5-C + 10 Phase 5-D)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 563 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+ + 10 Phase 5-C + 10 Phase 5-D + 10 Phase 5-E)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
@@ -1833,6 +1890,34 @@ projection にリファクタする可能性は別フェーズで検討。
   であって、``compute_patch_proposal`` の責務拡張ではない (= 既存 helper の
   scope を変えていない)
 - **音声からの blind 値推定はしない** (Phase 5-C と同じ仕様継続)
+
+**Phase 5-E 完了済み (GUI への blind 表示)**:
+- ✅ ``gui/dashboard.py`` に 4 つの read-only helper を追加
+  (``_blind_source_text`` / ``_has_blind_patch`` /
+  ``_format_blind_for_advisory`` / ``_format_blind_suffix_for_history``)。
+  ``summary.blinds`` / ``bootstrap_meta.blind_source`` / ``patch_proposal``
+  から表示用の文字列を組み立てるだけで、reconstruct ロジックには触らない
+- ✅ **Latest advisory ラベル**: ``bootstrap=...`` と ``diff=...`` の間に
+  ``blinds=SB/BB (source=current_state|session_default|unknown)`` を **常時表示**
+  (degrade 時は ``?/?`` / ``unknown``)、``blind_mismatch=yes`` を Phase 5-D の
+  blind FieldPatch がぶら下がる hand のみに表示
+- ✅ **history 1 行 suffix**: ``blind_source="current_state"`` の hand のときだけ
+  ``blinds=SB/BB (current_state)`` を末尾に付ける (``session_default`` はキャッシュ
+  ゲームの定常状態なのでノイズ削減のため省略)。blind FieldPatch ありの hand は
+  ``(blind_mismatch)`` marker を末尾に追記
+- ✅ ``_has_blind_patch`` は dataclass / dict 両形の patch_proposal に対応
+  (= live hook と JSONL ロードのどちらでも動く duck-typed 設計)
+- ✅ 変更ファイルは ``gui/dashboard.py`` と ``tests/test_gui.py`` のみ。
+  ``gui/reconstruction_badges.py`` / ``HandReconstructor`` /
+  ``HandReconstructionResult`` / ``patch_proposal`` のロジックは無変更
+
+**Phase 5-E スコープ外**:
+- ``ReconstructionBadgeState`` に blind 関連フィールドを追加するのは見送り
+  (= ``summarize_reconstruction`` の責務拡張を避け、dashboard 側の helper で
+  ``summary`` / ``result`` を直接読む設計を採用)。将来 ``inspect_reconstruction``
+  CLI でも同じ表示が欲しくなった場合は badges.py 側に移すか検討
+- 色 / アイコン強調はしない (= テキストレベルの indicator のみ。``[REVIEW]``
+  と同じ赤系 tag は既存ロジックで自動付与される)
 
 **Phase 5-B+ (Phase 5-B 直後の改善、同フェーズ扱い)**:
 - ✅ **Audio seat hint の出所カテゴリ化**: ``signals.audio_seat_hint_sources``

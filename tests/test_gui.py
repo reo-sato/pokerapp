@@ -126,11 +126,22 @@ class TestGUIDashboardLogic:
 # ――― Phase 4-C2: hand finalized → advisory パネル更新 ―――
 
 
-def _stub_summary(hand_id: int = 1, winner_seat: int = 2, pot_total: int = 300):
-    """`HandSummary` の代わりに使う最小 stub (getattr で読まれる field だけ持つ)。"""
+def _stub_summary(
+    hand_id: int = 1,
+    winner_seat: int = 2,
+    pot_total: int = 300,
+    blinds=None,
+):
+    """`HandSummary` の代わりに使う最小 stub (getattr で読まれる field だけ持つ)。
+
+    Phase 5-E: ``blinds`` (dict 形式: ``{"sb": ..., "bb": ...}``) を任意で渡せる。
+    default は ``{}`` (= 既存 Phase 4-C2 / 5-A / 5-C 系テストでは blinds 属性は
+    あるが空、``_format_blind_for_advisory`` は ``?/?`` にフォールバック)。
+    """
     from types import SimpleNamespace
     return SimpleNamespace(
         hand_id=hand_id, winner_seat=winner_seat, pot_total=pot_total,
+        blinds=blinds if blinds is not None else {},
     )
 
 
@@ -389,3 +400,272 @@ class TestApplyHandFinalized:
         args, _ = dash._history_box.insert.call_args_list[0]
         assert "[SKIPPED]" in args[1]
         assert args[2] == "skipped"
+
+
+# ――― Phase 5-E: blind 関連 advisory 表示 ―――
+
+
+class TestPhase5EBlindAdvisoryDisplay:
+    """Phase 5-E: Latest advisory ラベル と history 行に blind 情報を表示する。"""
+
+    def test_advisory_shows_blinds_with_current_state_source(
+        self, tmp_path: Path,
+    ) -> None:
+        """summary.blinds + bootstrap_meta.blind_source=current_state →
+        Latest advisory に ``blinds=200/400`` と ``source=current_state`` が含まれる。
+        mismatch なしなので ``blind_mismatch=yes`` は出ない。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary(
+            hand_id=1, winner_seat=2, pot_total=600,
+            blinds={"sb": 200, "bb": 400},
+        )
+        thread.get_reconstruction_result.return_value = _stub_result(
+            needs_review=False, reason="reconstructed_no_diff",
+            bootstrap_source="raw",
+            bootstrap_meta={"blind_source": "current_state",
+                            "sb_amount": 200, "bb_amount": 400},
+        )
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(1)
+        last_text = dash._lbl_latest_advisory.configure.call_args_list[-1][1]["text"]
+        assert "blinds=200/400" in last_text
+        assert "source=current_state" in last_text
+        # mismatch なしなので blind_mismatch=yes は出ない (ノイズ削減)
+        assert "blind_mismatch" not in last_text
+
+    def test_advisory_shows_blinds_with_session_default_source(
+        self, tmp_path: Path,
+    ) -> None:
+        """blind_source=session_default のときも Latest advisory には表示する。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary(
+            hand_id=1, winner_seat=2, pot_total=300,
+            blinds={"sb": 100, "bb": 200},
+        )
+        thread.get_reconstruction_result.return_value = _stub_result(
+            needs_review=False, reason="reconstructed_no_diff",
+            bootstrap_source="raw",
+            bootstrap_meta={"blind_source": "session_default",
+                            "sb_amount": 100, "bb_amount": 200},
+        )
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(1)
+        last_text = dash._lbl_latest_advisory.configure.call_args_list[-1][1]["text"]
+        assert "blinds=100/200" in last_text
+        assert "source=session_default" in last_text
+
+    def test_advisory_shows_blind_mismatch_when_patch_has_blinds_field(
+        self, tmp_path: Path,
+    ) -> None:
+        """patch_proposal.fields に field='blinds' があれば
+        ``blind_mismatch=yes`` が Latest advisory に追加される。
+        """
+        from core.patch_proposal import FieldPatch, HandPatchProposal
+        proposal = HandPatchProposal(
+            hand_id=2, can_patch_automatically=False,
+            fields=[
+                FieldPatch(
+                    field="blinds",
+                    online={"sb": 200, "bb": 400},
+                    offline={"sb": 100, "bb": 200},
+                    note="blind amounts differ",
+                ),
+            ],
+            summary_note="blind mismatch: blind_amount_mismatch",
+        )
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary(
+            hand_id=2, winner_seat=2, pot_total=600,
+            blinds={"sb": 200, "bb": 400},
+        )
+        thread.get_reconstruction_result.return_value = _stub_result(
+            needs_review=True, reason="reconstructed_with_blind_mismatch",
+            bootstrap_source="raw",
+            bootstrap_meta={"blind_source": "session_default",
+                            "sb_amount": 100, "bb_amount": 200},
+            patch_proposal=proposal,
+        )
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(2)
+        last_text = dash._lbl_latest_advisory.configure.call_args_list[-1][1]["text"]
+        # blind_mismatch=yes が出る
+        assert "blind_mismatch=yes" in last_text
+        # patch_fields に blinds が含まれる (Phase 5-A の既存表示)
+        assert "patch_fields=blinds" in last_text
+
+    def test_advisory_degrades_with_missing_blinds_attr(
+        self, tmp_path: Path,
+    ) -> None:
+        """summary に blinds なし / bootstrap_meta に blind_source なしでも
+        例外を投げず ``blinds=?/? (source=unknown)`` で degrade する。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        # blinds 引数を渡さない → default の空 dict (sb/bb 不在 → "?")
+        thread.get_last_summary.return_value = _stub_summary(hand_id=9)
+        thread.get_reconstruction_result.return_value = _stub_result(
+            needs_review=False, reason="reconstructed_no_diff",
+            bootstrap_source="online_summary",
+            bootstrap_meta=None,    # meta 自体が None
+        )
+        dash._integration_thread = thread
+
+        # 例外を投げない
+        dash._apply_hand_finalized(9)
+        last_text = dash._lbl_latest_advisory.configure.call_args_list[-1][1]["text"]
+        assert "blinds=?/?" in last_text
+        assert "source=unknown" in last_text
+
+    def test_advisory_unknown_when_integration_thread_none(
+        self, tmp_path: Path,
+    ) -> None:
+        """_integration_thread が None でも blind segment は ``?/?`` で出力される
+        (skipped status の hand でも degradation 動作する)。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._integration_thread = None
+
+        dash._apply_hand_finalized(1)
+        last_text = dash._lbl_latest_advisory.configure.call_args_list[-1][1]["text"]
+        assert "blinds=?/?" in last_text
+        assert "source=unknown" in last_text
+
+    def test_history_suffix_blinds_shown_only_for_current_state(
+        self, tmp_path: Path,
+    ) -> None:
+        """history 行 suffix: blind_source=current_state のときだけ
+        ``blinds=SB/BB (current_state)`` が末尾に付く。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary(
+            hand_id=1, winner_seat=2, pot_total=600,
+            blinds={"sb": 200, "bb": 400},
+        )
+        thread.get_reconstruction_result.return_value = _stub_result(
+            needs_review=False, reason="reconstructed_no_diff",
+            bootstrap_source="raw",
+            bootstrap_meta={"blind_source": "current_state",
+                            "sb_amount": 200, "bb_amount": 400},
+        )
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(1)
+        history_text = dash._history_box.insert.call_args_list[0][0][1]
+        assert "blinds=200/400 (current_state)" in history_text
+
+    def test_history_suffix_session_default_omits_blinds(
+        self, tmp_path: Path,
+    ) -> None:
+        """history 行: blind_source=session_default では blinds suffix を **省略**
+        (ノイズ削減方針: キャッシュゲームでデフォルト状態は通常運用なので)。
+        Latest advisory には依然出る (上のテスト参照)。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary(
+            hand_id=1, winner_seat=2, pot_total=300,
+            blinds={"sb": 100, "bb": 200},
+        )
+        thread.get_reconstruction_result.return_value = _stub_result(
+            needs_review=False, reason="reconstructed_no_diff",
+            bootstrap_source="raw",
+            bootstrap_meta={"blind_source": "session_default",
+                            "sb_amount": 100, "bb_amount": 200},
+        )
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(1)
+        history_text = dash._history_box.insert.call_args_list[0][0][1]
+        # session_default の場合 history 行に blinds= は出さない
+        assert "blinds=" not in history_text
+        assert "(session_default)" not in history_text
+
+    def test_history_suffix_blind_mismatch_marker(
+        self, tmp_path: Path,
+    ) -> None:
+        """history 行: blind FieldPatch があれば ``(blind_mismatch)`` を末尾に付ける。
+        この情報だけは current_state でなくても表示する (= operator が一覧で
+        review 必要 hand を見分けるため)。
+        """
+        from core.patch_proposal import FieldPatch, HandPatchProposal
+        proposal = HandPatchProposal(
+            hand_id=2, can_patch_automatically=False,
+            fields=[
+                FieldPatch(field="blinds",
+                           online={"sb": 200, "bb": 400},
+                           offline={"sb": 100, "bb": 200}),
+            ],
+            summary_note="blind mismatch",
+        )
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary(
+            hand_id=2, winner_seat=2, pot_total=600,
+            blinds={"sb": 200, "bb": 400},
+        )
+        thread.get_reconstruction_result.return_value = _stub_result(
+            needs_review=True, reason="reconstructed_with_blind_mismatch",
+            bootstrap_source="raw",
+            bootstrap_meta={"blind_source": "session_default",
+                            "sb_amount": 100, "bb_amount": 200},
+            patch_proposal=proposal,
+        )
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(2)
+        history_text = dash._history_box.insert.call_args_list[0][0][1]
+        assert "(blind_mismatch)" in history_text
+
+    def test_blind_helpers_handle_dict_proposal(self, tmp_path: Path) -> None:
+        """JSONL から読まれた dict 形 patch_proposal でも _has_blind_patch が動く
+        (= summarize_reconstruction の duck-typed pattern と同じ寛容性)。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dict_proposal = {
+            "hand_id": 3, "can_patch_automatically": False,
+            "fields": [
+                {"field": "blinds",
+                 "online": {"sb": 200, "bb": 400},
+                 "offline": {"sb": 100, "bb": 200}},
+            ],
+            "summary_note": "blind mismatch",
+        }
+        # dict 形 proposal を直接渡す
+        from types import SimpleNamespace
+        result = SimpleNamespace(
+            needs_review=True, reason="reconstructed_with_blind_mismatch",
+            diff=None, summary=object(),
+            bootstrap_source="raw",
+            bootstrap_meta={"blind_source": "session_default"},
+            patch_proposal=dict_proposal,
+        )
+        # helper 直接テスト
+        assert dash._has_blind_patch(result) is True
+
+    def test_blind_source_text_normalizes_unknown_values(
+        self, tmp_path: Path,
+    ) -> None:
+        """``_blind_source_text`` は known 値以外を ``unknown`` に正規化する。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        from types import SimpleNamespace
+        # 既知値
+        r1 = SimpleNamespace(bootstrap_meta={"blind_source": "current_state"})
+        assert dash._blind_source_text(r1) == "current_state"
+        r2 = SimpleNamespace(bootstrap_meta={"blind_source": "session_default"})
+        assert dash._blind_source_text(r2) == "session_default"
+        # 不明値
+        r3 = SimpleNamespace(bootstrap_meta={"blind_source": "weird_value"})
+        assert dash._blind_source_text(r3) == "unknown"
+        # meta なし
+        r4 = SimpleNamespace(bootstrap_meta=None)
+        assert dash._blind_source_text(r4) == "unknown"
+        # result 自体 None
+        assert dash._blind_source_text(None) == "unknown"
