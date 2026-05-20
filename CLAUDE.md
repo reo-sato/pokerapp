@@ -2015,17 +2015,44 @@ projection にリファクタする可能性は別フェーズで検討。
 - ✅ ``_latest_advisory_hand_id`` で最新 advisory hand_id を追跡し、Apply ボタンが
   正しい hand を指す
 
-**Phase 5-G スコープ外**:
-- **永続化はしない**: apply 結果は in-memory ``_last_summary_by_hand_id`` のみ。
-  ``logs/<session>.json`` (online JSON) / PHH ファイルは書き換えない。
-  Phase 6+ で「patched summary を別 file (例: ``patched_<session>.json``) に
-  落とす」/「review log として append-only に記録する」等の永続化レイヤを
-  検討する想定
-- **``winner_seat`` / ``pot_total`` / ``actions`` は whitelist 外**:
-  - ``winner_seat`` は ``seat_payouts`` の primary winner と整合性を取る
-    derived field。直接 apply すると ``seat_payouts`` と矛盾するリスク
-  - ``pot_total`` は ``seat_payouts.values()`` / ``pots[].amount`` の集計値。
-    同上の理由で whitelist 外
+**Phase 5-G スコープ外 / 既知の注意事項**:
+
+- **永続化はしない (= GUI を閉じると apply 状態が消える)**: apply 結果は
+  in-memory ``_last_summary_by_hand_id`` のみ。``logs/<session>.json`` (online
+  JSON) / PHH ファイルは書き換えない。**運用面の含意**:
+  - operator 視点では「Apply patch を押したのに保存されていない」状態
+    (= プロセス再起動で apply 履歴が消える)
+  - canonical な book of record (= ``logs/<session>.json`` + reconstruct CLI が
+    出す ``reconstruct_<session>.jsonl``) は **apply 前の値** のまま残るので、
+    監査トレイル自体は失われない
+  - 永続化レイヤは Phase 6+ の課題: 例えば
+    * ``logs/patched_<session>.json`` への apply 後 summary の追記
+    * ``logs/review_actions_<session>.jsonl`` のような append-only operator
+      action log (誰がいつ何を apply したか)
+    * apply 状態を session 起動時に restore する読み込み経路
+- **history 行は apply 前のまま残る (= UX 上の一覧 ⇄ 詳細ズレ)**: GUI の
+  ``_history_box`` に既に insert された行は **rewrite されない**。一方、
+  Latest advisory ラベルは ``_apply_hand_finalized(hand_id, append_to_history=
+  False)`` で apply 後に refresh される。結果として:
+  - 一覧 (history) には apply **前** の status / diff が見える
+  - 詳細 (latest advisory) には apply **後** の ``patch_applied=yes`` が見える
+  - この一覧 ⇄ 詳細のズレは Phase 5-G では **意図的に許容**
+    (= history は append-only な monitoring log として扱い、apply は最新行で確認)
+  - 将来 (Phase 6+) の選択肢:
+    * apply 時に history 行を "patched →" prefix で inline 編集する
+    * apply 時に新しい "Hand #N (patched)" 行を追加し新旧両方残す
+    * 別 pane で "applied corrections" 一覧を持つ
+- **``winner_seat`` / ``pot_total`` / ``actions`` は whitelist 外** (Phase 1 の
+  compatibility field 設計と整合):
+  - ``winner_seat`` は **canonical な終局表現ではなく後方互換 (compatibility)
+    field** (Phase 1 から続く方針)。apply で ``seat_payouts`` / ``resolution_type``
+    が更新されても ``winner_seat`` は古いまま残る → **apply 後の in-memory
+    summary 内で legacy field (``winner_seat``) が canonical field
+    (``seat_payouts`` / ``pots``) と一時的に矛盾する可能性** がある。
+    canonical な勝者情報を見たいときは ``seat_payouts`` (= 最大 payout seat) /
+    ``pots[].winning_seats`` を読むこと。``winner_seat`` を信用しない
+  - ``pot_total`` は ``seat_payouts.values()`` / ``pots[].amount`` の集計値で
+    同様の理由で whitelist 外。一貫した pot 情報は ``pots`` から集計する
   - ``actions`` は重い修正で、``pot_after`` / ``stack_after`` の連鎖再計算など
     副作用が大きいため別フェーズ
 - **GameStateManager の live stacks は再計算しない**: apply 後の summary は
