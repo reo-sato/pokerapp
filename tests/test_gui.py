@@ -850,6 +850,210 @@ class TestPhase5GApplyPatchCommand:
         assert ret is not True
 
 
+class TestPhase5HPatchDetailView:
+    """Phase 5-H: ``_cmd_show_patch_details`` と ``_create_patch_detail_window``
+    の連携。Toplevel 実体は MagicMock で差し替える。"""
+
+    def _make_proposal(self):
+        from core.patch_proposal import FieldPatch, HandPatchProposal
+        return HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[
+                FieldPatch(field="resolution_type",
+                            online="fold_win", offline="showdown",
+                            note="resolution_type differs"),
+                FieldPatch(field="winner_seat", online=1, offline=2),
+                FieldPatch(field="seat_payouts",
+                            online={1: 300}, offline={2: 600}),
+            ],
+        )
+
+    def test_no_latest_advisory_warns(self, tmp_path: Path) -> None:
+        """``_latest_advisory_hand_id=None`` → warning ログ + window 生成しない。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = None
+        dash._append_log = MagicMock()
+        dash._create_patch_detail_window = MagicMock()
+
+        dash._cmd_show_patch_details()
+
+        dash._create_patch_detail_window.assert_not_called()
+        msg = dash._append_log.call_args_list[-1][0][0]
+        assert "表示できる" in msg or "advisory hand" in msg
+
+    def test_no_integration_thread_warns(self, tmp_path: Path) -> None:
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._integration_thread = None
+        dash._latest_advisory_hand_id = 1
+        dash._append_log = MagicMock()
+        dash._create_patch_detail_window = MagicMock()
+
+        dash._cmd_show_patch_details()
+
+        dash._create_patch_detail_window.assert_not_called()
+        msg = dash._append_log.call_args_list[-1][0][0]
+        assert "integration thread" in msg
+
+    def test_no_proposal_warns(self, tmp_path: Path) -> None:
+        """result.patch_proposal が None なら window 生成しない。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_proposal=None,
+        )
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = 1
+        dash._append_log = MagicMock()
+        dash._create_patch_detail_window = MagicMock()
+
+        dash._cmd_show_patch_details()
+
+        dash._create_patch_detail_window.assert_not_called()
+        msg = dash._append_log.call_args_list[-1][0][0]
+        assert "patch proposal" in msg
+
+    def test_show_details_calls_window_creator_with_lines(
+        self, tmp_path: Path,
+    ) -> None:
+        """正常系: ``_create_patch_detail_window`` が title + lines list で呼ばれる。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary(hand_id=1)
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_proposal=self._make_proposal(),
+        )
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = 1
+        dash._create_patch_detail_window = MagicMock()
+
+        dash._cmd_show_patch_details()
+
+        dash._create_patch_detail_window.assert_called_once()
+        args, _kwargs = dash._create_patch_detail_window.call_args
+        title, lines = args
+        assert "hand #1" in title.lower() or "#1" in title
+        # lines は list[str] で、各 field のヘッダー行を含む
+        assert isinstance(lines, list)
+        combined = "\n".join(lines)
+        # whitelist field: applies マーカー
+        assert "[applies] resolution_type" in combined
+        assert "[applies] seat_payouts" in combined
+        # 非 whitelist: skip マーカー
+        assert "[skip]" in combined
+        assert "winner_seat" in combined
+        # online / offline 値が表示される
+        assert "fold_win" in combined
+        assert "showdown" in combined
+        # note も表示される
+        assert "differs" in combined
+
+    def test_show_details_calls_summarize_once(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """``summarize_patch_proposal_for_view`` が 1 回だけ呼ばれる
+        (= unintended な double-call が無い)。"""
+        from core import patch_apply as patch_apply_mod
+        from core.patch_apply import FieldDiffView
+
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary()
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_proposal=self._make_proposal(),
+        )
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = 1
+        dash._create_patch_detail_window = MagicMock()
+
+        sentinel = [
+            FieldDiffView(field="resolution_type", online_repr="a",
+                          offline_repr="b", is_applicable=True),
+        ]
+        spy = MagicMock(return_value=sentinel)
+        monkeypatch.setattr(patch_apply_mod, "summarize_patch_proposal_for_view", spy)
+
+        dash._cmd_show_patch_details()
+
+        assert spy.call_count == 1
+
+    def test_empty_views_still_opens_window_with_placeholder(
+        self, tmp_path: Path,
+    ) -> None:
+        """proposal はあるが view が空 (= 全 entry が malformed) → "差分なし"
+        メッセージを乗せた window を生成する。"""
+        from core.patch_proposal import HandPatchProposal
+
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary()
+        # fields 空 → summarize は [] を返す
+        empty_proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False, fields=[],
+        )
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_proposal=empty_proposal,
+        )
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = 1
+        dash._create_patch_detail_window = MagicMock()
+
+        dash._cmd_show_patch_details()
+
+        dash._create_patch_detail_window.assert_called_once()
+        args, _kwargs = dash._create_patch_detail_window.call_args
+        title, lines = args
+        # placeholder 行: "表示可能な diff がありません" 等
+        combined = "\n".join(lines)
+        assert "diff" in combined.lower() or "差分" in combined or "ありません" in combined
+
+    def test_show_details_does_not_call_apply(self, tmp_path: Path) -> None:
+        """Show details は Apply と独立: ``apply_patch_proposal`` は呼ばれない。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary()
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_proposal=self._make_proposal(),
+        )
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = 1
+        dash._create_patch_detail_window = MagicMock()
+
+        dash._cmd_show_patch_details()
+
+        # Show details は read-only (= apply は呼ばない)
+        thread.apply_patch_proposal.assert_not_called()
+
+    def test_show_details_after_apply_includes_patch_applied_header(
+        self, tmp_path: Path,
+    ) -> None:
+        """apply 済み hand (result.patch_applied=True) で detail を開くと、
+        header に ``(patch applied — applied_fields=...)`` が付く。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary()
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_proposal=self._make_proposal(),
+            patch_applied=True,
+            applied_fields=["resolution_type", "seat_payouts"],
+        )
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = 1
+        dash._create_patch_detail_window = MagicMock()
+
+        dash._cmd_show_patch_details()
+
+        args, _kwargs = dash._create_patch_detail_window.call_args
+        _title, lines = args
+        # 最初の行 (= header) に patch applied マーカーが含まれる
+        header = lines[0]
+        assert "patch applied" in header
+        assert "resolution_type" in header
+        assert "seat_payouts" in header
+
+
 class TestPhase5GAdvisoryLabelDisplay:
     """Phase 5-G: ``patch_applied`` / ``applied_fields`` が Latest advisory に表示。"""
 

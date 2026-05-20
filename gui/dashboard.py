@@ -225,6 +225,16 @@ class GUIDashboard:
         )
         self._lbl_latest_advisory.grid(row=2, column=0, padx=8, pady=(0, 4), sticky="w")
 
+        # Phase 5-H: 最新 advisory hand の patch proposal の field 単位 diff を
+        # Toplevel ウィンドウに read-only 表示するボタン。apply は **しない**。
+        self._btn_show_patch_details = ctk.CTkButton(
+            self._history_frame, text="Show details", width=110,
+            command=self._cmd_show_patch_details,
+        )
+        self._btn_show_patch_details.grid(
+            row=2, column=1, padx=(4, 4), pady=(0, 4), sticky="e",
+        )
+
         # Phase 5-G: 最新 advisory hand に patch proposal を適用するボタン。
         # 押下時は ``tkinter.messagebox.askyesno`` で確認ダイアログ。
         # in-memory summary correction のみで、JSON / PHH / GameStateManager には
@@ -233,7 +243,7 @@ class GUIDashboard:
             self._history_frame, text="Apply patch", width=110,
             command=self._cmd_apply_patch,
         )
-        self._btn_apply_patch.grid(row=2, column=1, padx=(4, 8), pady=(0, 4), sticky="e")
+        self._btn_apply_patch.grid(row=2, column=2, padx=(4, 8), pady=(0, 4), sticky="e")
 
         # 下部コントロール (Phase 4-C2 で row 2 → row 3 にずらした)
         ctrl = ctk.CTkFrame(root, corner_radius=0)
@@ -593,6 +603,142 @@ class GUIDashboard:
             self._blinds_bb_entry.configure(placeholder_text=str(bb))
         except AttributeError:
             pass
+
+    def _cmd_show_patch_details(self) -> None:
+        """Phase 5-H: 最新 advisory hand の patch proposal を Toplevel に表示する handler。
+
+        フロー:
+          1. ``_latest_advisory_hand_id`` 無 → 警告ログ → return
+          2. ``_integration_thread`` 無 → 警告ログ → return
+          3. accessor で summary / result を read-only に取り出す
+          4. ``result.patch_proposal`` 無 → 警告ログ → return
+          5. ``summarize_patch_proposal_for_view`` で ``FieldDiffView`` list を作る
+          6. list が空 → "差分なし" の Toplevel を出して return
+             (= proposal が field を持たない / 全 entry が malformed のケース)
+          7. format してテキスト行 list にし、``_create_patch_detail_window`` で
+             Toplevel を生成
+
+        **約束**: read-only。``apply_patch_proposal`` も ``_last_summary_by_hand_id``
+        も触らない (= Apply ボタンと完全独立)。
+        """
+        from core.patch_apply import summarize_patch_proposal_for_view
+
+        hand_id = self._latest_advisory_hand_id
+        thread = self._integration_thread
+        if hand_id is None:
+            self._append_log(
+                "⚠ Show details: 表示できる advisory hand がありません。",
+                tag="review",
+            )
+            return
+        if thread is None:
+            self._append_log(
+                "⚠ Show details: integration thread が未接続です。",
+                tag="review",
+            )
+            return
+        try:
+            summary = thread.get_last_summary(hand_id)
+        except Exception:
+            summary = None
+        try:
+            result = thread.get_reconstruction_result(hand_id)
+        except Exception:
+            result = None
+        proposal = getattr(result, "patch_proposal", None) if result is not None else None
+        if proposal is None:
+            self._append_log(
+                f"⚠ Show details: hand #{hand_id} に patch proposal が"
+                "ありません。",
+                tag="review",
+            )
+            return
+
+        views = summarize_patch_proposal_for_view(summary, proposal)
+        title = f"Patch details — hand #{hand_id}"
+        if not views:
+            # proposal はあるが view 化できる field が 1 つも無い (= 全 entry が
+            # malformed / empty)。"差分なし" の小さな window を出して return。
+            self._create_patch_detail_window(
+                title, [f"hand #{hand_id} には表示可能な diff がありません。"],
+            )
+            return
+
+        lines = self._format_patch_detail_lines(hand_id, views, result=result)
+        self._create_patch_detail_window(title, lines)
+
+    @staticmethod
+    def _format_patch_detail_lines(
+        hand_id: int,
+        views: list,                     # list[FieldDiffView]
+        *,
+        result: object = None,
+    ) -> list[str]:
+        """``FieldDiffView`` のリストを Toplevel 用の表示テキスト行に整形する。
+
+        出力フォーマット (1 field あたり 4–5 行 + 区切り)::
+
+            [applies] resolution_type
+              online:  fold_win
+              offline: showdown
+              note:    resolution_type differs (online=fold_win, offline=showdown)
+
+            [skip]    winner_seat
+              online:  1
+              offline: 2
+
+        ``[applies]`` / ``[skip]`` マーカーで apply 対象かを差別化。
+        result.patch_applied が True の場合はヘッダーに "(patch applied)" を付ける。
+        """
+        header_suffix = ""
+        if result is not None and getattr(result, "patch_applied", False):
+            applied = getattr(result, "applied_fields", None) or []
+            if applied:
+                header_suffix = (
+                    f"  (patch applied — applied_fields=" f"{','.join(applied)})"
+                )
+            else:
+                header_suffix = "  (patch applied)"
+        lines: list[str] = [
+            f"Hand #{hand_id} patch proposal — {len(views)} field(s){header_suffix}",
+            "",
+        ]
+        for v in views:
+            marker = "[applies]" if v.is_applicable else "[skip]   "
+            lines.append(f"{marker} {v.field}")
+            lines.append(f"  online:  {v.online_repr}")
+            lines.append(f"  offline: {v.offline_repr}")
+            if v.note:
+                lines.append(f"  note:    {v.note}")
+            lines.append("")
+        return lines
+
+    def _create_patch_detail_window(
+        self, title: str, lines: list[str],
+    ) -> None:
+        """Phase 5-H: Tkinter Toplevel ウィンドウを生成して text を表示する。
+
+        テストでは ``dash._create_patch_detail_window = MagicMock()`` で差し替えて
+        Toplevel 実体を作らずに ``_cmd_show_patch_details`` の動作を検証する想定。
+        実装は最小限 (= Toplevel + CTkTextbox + lines を insert) に留める。
+        """
+        ctk = self._ctk
+        try:
+            top = ctk.CTkToplevel(self._root)
+            top.title(title)
+            top.geometry("720x520")
+            box = ctk.CTkTextbox(top, font=("Courier", 11), wrap="none")
+            box.pack(fill="both", expand=True, padx=8, pady=8)
+            box.configure(state="normal")
+            for line in lines:
+                box.insert("end", line + "\n")
+            box.configure(state="disabled")
+        except Exception as e:
+            # widget 生成に失敗しても GUI 全体を巻き込まない (= ログだけ残す)
+            self._append_log(
+                f"⚠ Show details: Toplevel 生成に失敗しました: {e}",
+                tag="review",
+            )
 
     def _ask_apply_patch_confirmation(
         self, title: str, message: str,

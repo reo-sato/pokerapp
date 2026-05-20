@@ -16,8 +16,10 @@ import pytest
 from core.hand_log import HandSummary
 from core.patch_apply import (
     PATCH_APPLY_FIELDS,
+    FieldDiffView,
     applicable_patch_fields,
     apply_patch_proposal_to_summary,
+    summarize_patch_proposal_for_view,
 )
 from core.patch_proposal import FieldPatch, HandPatchProposal
 
@@ -329,3 +331,203 @@ class TestWhitelistConstant:
             "showdown_revealed_cards",
             "blinds",
         })
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Phase 5-H: summarize_patch_proposal_for_view
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestSummarizePatchProposalForView:
+    """Phase 5-H: ``summarize_patch_proposal_for_view`` の挙動。"""
+
+    def test_returns_empty_for_none_proposal(self) -> None:
+        assert summarize_patch_proposal_for_view(None, None) == []
+
+    def test_returns_empty_for_proposal_without_fields(self) -> None:
+        proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False, fields=[],
+        )
+        assert summarize_patch_proposal_for_view(None, proposal) == []
+
+    def test_includes_all_fields_with_is_applicable_flag(self) -> None:
+        """whitelist 内 / 外を ``is_applicable`` フラグで判別、順序は維持。"""
+        proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[
+                FieldPatch(field="resolution_type",
+                            online="fold_win", offline="showdown"),
+                FieldPatch(field="winner_seat", online=1, offline=2),
+                FieldPatch(field="seat_payouts",
+                            online={1: 300}, offline={2: 600}),
+                FieldPatch(field="actions",
+                            online=[(1, "fold", 0)], offline=[]),
+            ],
+        )
+        views = summarize_patch_proposal_for_view(None, proposal)
+        # field 順序は proposal.fields の順
+        assert [v.field for v in views] == [
+            "resolution_type", "winner_seat", "seat_payouts", "actions",
+        ]
+        # is_applicable は PATCH_APPLY_FIELDS にあるかで決まる
+        assert views[0].is_applicable is True   # resolution_type
+        assert views[1].is_applicable is False  # winner_seat
+        assert views[2].is_applicable is True   # seat_payouts
+        assert views[3].is_applicable is False  # actions
+
+    def test_value_formatting_for_str(self) -> None:
+        proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[FieldPatch(field="resolution_type",
+                                online="fold_win", offline="showdown")],
+        )
+        views = summarize_patch_proposal_for_view(None, proposal)
+        assert views[0].online_repr == "fold_win"
+        assert views[0].offline_repr == "showdown"
+
+    def test_value_formatting_for_int(self) -> None:
+        proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[FieldPatch(field="winner_seat", online=1, offline=2)],
+        )
+        views = summarize_patch_proposal_for_view(None, proposal)
+        assert views[0].online_repr == "1"
+        assert views[0].offline_repr == "2"
+
+    def test_value_formatting_for_seat_payouts_dict(self) -> None:
+        """int キーの dict (seat_payouts) は昇順 sort で deterministic に整形。"""
+        proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[FieldPatch(
+                field="seat_payouts",
+                online={2: 600, 1: 300},   # 順不同
+                offline={3: 100, 1: 50, 2: 150},
+            )],
+        )
+        views = summarize_patch_proposal_for_view(None, proposal)
+        # int キーは昇順 sort
+        assert views[0].online_repr == "{1: 300, 2: 600}"
+        assert views[0].offline_repr == "{1: 50, 2: 150, 3: 100}"
+
+    def test_value_formatting_for_blinds_dict(self) -> None:
+        """str キーの dict (blinds) は挿入順を維持 (= sb/bb の意味的順序)。"""
+        proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[FieldPatch(
+                field="blinds",
+                online={"sb": 100, "bb": 200},
+                offline={"sb": 200, "bb": 400},
+            )],
+        )
+        views = summarize_patch_proposal_for_view(None, proposal)
+        assert views[0].online_repr == "{sb: 100, bb: 200}"
+        assert views[0].offline_repr == "{sb: 200, bb: 400}"
+
+    def test_value_formatting_for_list(self) -> None:
+        proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[FieldPatch(
+                field="actions",
+                online=[(1, "fold", 0)],
+                offline=[(2, "call", 200), (1, "fold", 0)],
+            )],
+        )
+        views = summarize_patch_proposal_for_view(None, proposal)
+        # list は [v1, v2] 形 (tuple は repr で表示)
+        assert "(1, 'fold', 0)" in views[0].online_repr
+        assert "(2, 'call', 200)" in views[0].offline_repr
+
+    def test_value_formatting_for_none(self) -> None:
+        proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[FieldPatch(field="resolution_type",
+                                online=None, offline="showdown")],
+        )
+        views = summarize_patch_proposal_for_view(None, proposal)
+        # None は em-dash で表示
+        assert views[0].online_repr == "—"
+
+    def test_note_is_propagated_when_present(self) -> None:
+        proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[FieldPatch(
+                field="resolution_type", online="fold_win", offline="showdown",
+                note="resolution_type differs (online=fold_win, offline=showdown)",
+            )],
+        )
+        views = summarize_patch_proposal_for_view(None, proposal)
+        assert views[0].note is not None
+        assert "differs" in views[0].note
+
+    def test_note_none_when_missing(self) -> None:
+        proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[FieldPatch(field="resolution_type",
+                                online="a", offline="b", note=None)],
+        )
+        views = summarize_patch_proposal_for_view(None, proposal)
+        assert views[0].note is None
+
+    def test_dict_form_proposal_works(self) -> None:
+        """JSONL から読み戻した dict 形 proposal でも動く (duck-typed)。"""
+        from types import SimpleNamespace
+        proposal_dict = SimpleNamespace(
+            fields=[
+                {"field": "resolution_type",
+                 "online": "fold_win", "offline": "showdown",
+                 "note": "differs"},
+                {"field": "seat_payouts",
+                 "online": {"1": 300}, "offline": {"2": 600}},
+            ],
+        )
+        views = summarize_patch_proposal_for_view(None, proposal_dict)
+        assert len(views) == 2
+        assert views[0].field == "resolution_type"
+        assert views[0].is_applicable is True
+        assert views[0].note == "differs"
+        # str-keyed dict (JSON round-trip) も整形される
+        assert "'1': 300" in views[1].online_repr or "1: 300" in views[1].online_repr
+
+    def test_malformed_entry_is_skipped(self) -> None:
+        """field 名が無い / 空文字列の entry は skip。残りは表示される。"""
+        from types import SimpleNamespace
+        proposal = SimpleNamespace(
+            fields=[
+                {"field": None, "online": "x", "offline": "y"},      # 壊れ
+                {"field": "", "online": "x", "offline": "y"},         # 空
+                FieldPatch(field="resolution_type",
+                            online="fold_win", offline="showdown"),
+            ],
+        )
+        views = summarize_patch_proposal_for_view(None, proposal)
+        # 正常 entry だけが view に乗る
+        assert len(views) == 1
+        assert views[0].field == "resolution_type"
+
+    def test_summary_argument_is_accepted_but_unused(self) -> None:
+        """``summary`` 引数は将来用なので、何が渡されても挙動が変わらない。"""
+        proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[FieldPatch(field="resolution_type",
+                                online="a", offline="b")],
+        )
+        from types import SimpleNamespace
+        v1 = summarize_patch_proposal_for_view(None, proposal)
+        v2 = summarize_patch_proposal_for_view(
+            SimpleNamespace(resolution_type="x"), proposal,
+        )
+        # 同じ proposal なら summary に関わらず同じ
+        assert [vv.field for vv in v1] == [vv.field for vv in v2]
+        assert v1[0].online_repr == v2[0].online_repr
+        assert v1[0].offline_repr == v2[0].offline_repr
+
+    def test_returns_field_diff_view_instances(self) -> None:
+        """戻り値の型が ``FieldDiffView`` であること。"""
+        proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[FieldPatch(field="seat_payouts",
+                                online={1: 300}, offline={2: 600})],
+        )
+        views = summarize_patch_proposal_for_view(None, proposal)
+        assert len(views) == 1
+        assert isinstance(views[0], FieldDiffView)
