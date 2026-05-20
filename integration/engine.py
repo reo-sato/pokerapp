@@ -315,6 +315,62 @@ class IntegrationThread(threading.Thread):
         """
         return self._last_summary_by_hand_id.get(int(hand_id))
 
+    def apply_patch_proposal(self, hand_id: int) -> bool:
+        """Phase 5-G: finished hand の advisory patch proposal を **in-memory
+        summary に適用** する。
+
+        Args:
+            hand_id: 対象 hand。
+
+        Returns:
+            True: patch が適用された (= ``_last_summary_by_hand_id[hand_id]`` が
+                patched copy で置き換えられ、``result.patch_applied=True`` /
+                ``applied_fields=[...]`` が立った)。
+            False: 対象 hand / proposal / 適用可能 field のいずれかが無く、
+                何もしなかった (safe degrade)。
+
+        **約束**:
+          - ``GameStateManager`` / ``JsonWriter`` / ``PHHExporter`` / live
+            ``BettingState`` には触らない (= 永続化や game state は不変)
+          - apply は **whitelist (``core.patch_apply.PATCH_APPLY_FIELDS``)** のみ
+          - 元の summary は ``apply_patch_proposal_to_summary`` 経由で deepcopy
+            後に上書きされるため、proposal / 元 summary 共に mutate しない
+          - apply 後の patched summary は **in-memory のみ**: session JSON や PHH
+            ファイルは Phase 5-G では書き換えない (= 永続化分離。GUI / 監視
+            ツール向けの review correction として扱う)
+        """
+        from core.patch_apply import (
+            apply_patch_proposal_to_summary,
+            applicable_patch_fields,
+        )
+
+        hid = int(hand_id)
+        summary = self._last_summary_by_hand_id.get(hid)
+        result = self._last_reconstruction_by_hand_id.get(hid)
+        if summary is None or result is None:
+            return False
+        proposal = getattr(result, "patch_proposal", None)
+        if proposal is None:
+            return False
+        applicable = applicable_patch_fields(proposal)
+        if not applicable:
+            return False
+
+        patched_summary = apply_patch_proposal_to_summary(summary, proposal)
+        # in-memory summary を置き換える (= 永続化はしない、元の summary オブジェクト
+        # 自体は ``apply_patch_proposal_to_summary`` 内で deepcopy 出発しているため
+        # 不変)。``_last_summary_by_hand_id[hid] = patched_summary`` の置換だけ。
+        self._last_summary_by_hand_id[hid] = patched_summary
+
+        # advisory フラグを立てる (result は in-memory 所有なので直接 mutate)
+        try:
+            result.patch_applied = True
+            result.applied_fields = list(applicable)
+        except AttributeError:
+            # 旧形 result (フィールド未定義) でも apply 自体は成功扱いにする
+            pass
+        return True
+
     def run(self) -> None:
         logger.info("IntegrationThread started")
         while not self._stop_event.is_set():

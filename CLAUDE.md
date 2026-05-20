@@ -38,7 +38,8 @@ pokerapp/
 │   ├── hand_finalizer.py          ← HandFinalizer.finalize (Phase 2-B 実装済、engine._finalize_hand の主経路)
 │   ├── hand_boundary.py           ← HandBoundaryDetector (Phase 2-C): audio / RFID から hand window を検出
 │   ├── hand_reconstructor.py      ← HandReconstructor (Phase 3 実装済): hand window を BeamEngine + HandFinalizer で再生し online と diff
-│   └── patch_proposal.py          ← Phase 5-A: HandPatchProposal / FieldPatch / compute_patch_proposal (diff → 修正提案、apply はしない)
+│   ├── patch_proposal.py          ← Phase 5-A: HandPatchProposal / FieldPatch / compute_patch_proposal (diff → 修正提案、apply はしない)
+│   └── patch_apply.py             ← Phase 5-G: apply_patch_proposal_to_summary (whitelist field のみ HandSummary に手動 apply、永続化なし)
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -466,6 +467,36 @@ online HandSummary と offline HandSummary' の **diff から修正案 (patch pr
 その dict をそのまま読んで ``  PATCH: <field> online=... offline=...`` 行を組み立てる。
 GUI の ``summarize_reconstruction`` は dataclass / dict 両対応で
 ``ReconstructionBadgeState.patch_fields`` (field 名だけ) を埋める。
+
+### `core/patch_apply.py` (Phase 5-G 実装済)
+
+GUI / API 経由で **patch proposal を ``HandSummary`` に手動 apply** するための
+pure helper。**永続化はしない** (= in-memory の advisory correction のみ)。
+JSON / PHH / GameStateManager / settlement / live BettingState には触らない。
+
+- `PATCH_APPLY_FIELDS = frozenset({"resolution_type", "seat_payouts", "pots",
+  "showdown_revealed_cards", "blinds"})` — Phase 5-G で apply 対象とする
+  settlement 系 + Phase 5-D 由来の blinds 5 field。Phase 5-A の
+  ``PATCHABLE_FIELDS`` とは別概念 (= ``PATCHABLE_FIELDS`` は proposal 生成側、
+  ``PATCH_APPLY_FIELDS`` は apply 側)。``winner_seat`` / ``pot_total`` /
+  ``actions`` は明示的に **whitelist 外** (compatibility field や集計値、
+  ``seat_payouts`` との整合性が崩れるリスクがあるため)
+- `applicable_patch_fields(proposal) → list[str]`: proposal.fields のうち
+  whitelist 内の field 名リスト (`PATCHABLE_FIELDS` 順を保持)
+- `apply_patch_proposal_to_summary(summary, proposal) → HandSummary`:
+  - 元 summary を **deepcopy** して新オブジェクトを返す (= 元は mutate しない)
+  - whitelist 内 field のみ ``offline`` 値を適用
+  - ``seat_payouts`` / ``showdown_revealed_cards`` の dict 形 field は
+    **int key 正規化** (JSON round-trip 後の str key にも対応)
+  - dict 形 proposal (= JSONL から読み戻し) と dataclass 形 proposal の両方を
+    duck-typed に処理
+  - 不正な値 (例: ``seat_payouts.offline`` が dict でない) は skip して他を適用
+
+**約束**: apply 結果は in-memory のみ。``JsonWriter`` で session JSON を
+書き換えることは Phase 5-G では **しない** (= 永続化分離。GUI / 監視ツール
+向けの review correction として扱う)。``IntegrationThread.apply_patch_proposal``
+が ``_last_summary_by_hand_id[hand_id]`` を patched copy で置き換え、対応
+``result.patch_applied=True`` / ``applied_fields=[...]`` を立てる。
 
 ### `core/hand_reconstructor.py` (Phase 3 実装済)
 
@@ -957,7 +988,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 576 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 618 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -987,6 +1018,9 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_gui.py (Phase 5-E 追加) | Latest advisory に `blinds=SB/BB (source=...)` 表示 / `blind_mismatch=yes` (patch_proposal に blinds 含む時) / history 行に current_state のみ blinds suffix / `(blind_mismatch)` marker / dict 形 proposal 互換 / source 正規化 (Phase 5-E, +10 件) |
 | test_gui.py (Phase 5-F 追加) | history Textbox の bounded retention (`_trim_history_lines`: over/under/exactly-at-limit、bad index degrade、`_apply_hand_finalized` から呼ばれる)、evicted hand_id (accessor が None) で `_apply_hand_finalized` が `[SKIPPED]` + `blinds=?/? source=unknown` に degrade (Phase 5-F, +7 件) |
 | test_reconstructor_live_hook.py (Phase 5-F 追加) | `IntegrationThread._evict_old_advisory_entries`: symmetric / asymmetric dicts / under-limit no-op / `_invoke_reconstructor_hook` 経由の自動 eviction / evicted hand_id への get_* accessor が None / `MAX_ADVISORY_HANDS` default sanity (Phase 5-F, +6 件) |
+| test_patch_apply.py | `core.patch_apply.apply_patch_proposal_to_summary` の whitelist 内/外、mutation 防止、int key 正規化、dict 形 proposal、`applicable_patch_fields` filter (Phase 5-G, 22 件) |
+| test_reconstructor_live_hook.py (Phase 5-G 追加) | `IntegrationThread.apply_patch_proposal`: in-memory summary 置き換え / missing hand_id で False / non-whitelist 単独で False / GameStateManager / JsonWriter に触らない / applied_fields list 正確 (Phase 5-G, +7 件) |
+| test_gui.py (Phase 5-G 追加) | `_cmd_apply_patch` 確認 yes/no / 各 abort パス (latest hand_id 無 / thread 無 / proposal 無 / dialog 不可 / apply 例外 / apply False) + Latest advisory に `patch_applied=yes` / `applied_fields=...` 表示 + `append_to_history=False` で insert スキップ (Phase 5-G, +13 件) |
 | test_inspect_reconstruction_cli.py | inspect_reconstruction CLI (label 判定 / --only-needs-review / --fields filter / 壊れた JSONL skip) (Phase 4-C1, 14 件) |
 | test_reconstruction_badges.py | gui.reconstruction_badges 単体 (status / RAW / diff_fields / button_inferred / format_history_line) (Phase 4-C2, 20 件) |
 | test_gui.py (Phase 4-C2 追加) | GUIDashboard.on_hand_finalized / _apply_hand_finalized: queue 経由、advisory accessor 呼び出し、tag 反映 (Phase 4-C2, +8 件) |
@@ -1064,6 +1098,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | Blind mismatch advisory (reconstruct への反映) | ✅ 完了 (Phase 5-D) | `HandReconstructor._apply_blind_mismatch_advisory`: (A) `_blinds_updated_at_runtime=True` だが meta が `session_default` のままの **propagation health check**、(B) `online_summary.blinds` と `bootstrap_meta.sb_amount/bb_amount` の **amount mismatch** を検出。検出時は `needs_review=True`、reason を ``reconstructed_with_blind_mismatch`` に昇格 (settlement diff が既にある場合はそのまま)、`patch_proposal` に `FieldPatch(field="blinds", online=..., offline=...)` を append。proposal が無ければ blind-only proposal を新規作成。`can_patch_automatically=False` (apply は依然しない) |
 | GUI blind 表示 (advisory ラベル + history 行) | ✅ 完了 (Phase 5-E) | `gui/dashboard.py` の helper (`_format_blind_for_advisory` / `_format_blind_suffix_for_history` / `_has_blind_patch` / `_blind_source_text`) で `summary.blinds` / `bootstrap_meta.blind_source` / `patch_proposal.fields` を read-only に参照。Latest advisory に `blinds=SB/BB (source=current_state\|session_default\|unknown)` を常時表示、`blind_mismatch=yes` を Phase 5-D の blind FieldPatch ありの hand のみ表示。history 行 suffix は `current_state` のときだけ `blinds=SB/BB (current_state)` を出す (`session_default` はノイズ削減のため省略)、blind mismatch は `(blind_mismatch)` marker。online JSON / PHH / reconstruct ロジックには触らない |
 | Advisory state の bounded retention | ✅ 完了 (Phase 5-F) | `integration.engine.MAX_ADVISORY_HANDS=500` で `_last_summary_by_hand_id` / `_last_reconstruction_by_hand_id` を eviction (union of hand_ids 最古から)。`_evict_old_advisory_entries` を `_invoke_reconstructor_hook` 末尾 + `_finalize_hand` 末尾の両方から呼んで `_apply_boundaries` 経路もカバー。evicted hand への `get_last_summary` / `get_reconstruction_result` は ``None`` を返すので GUI は Phase 4-C2 / 5-E の degrade パスで `[SKIPPED]` + `blinds=?/? (source=unknown)` 表示。GUI 側も `MAX_HISTORY_LINES=1000` で history Textbox を bounded retention (`_trim_history_lines` を `_apply_hand_finalized` の insert 直後に呼ぶ)。`_completed_hands` (hand window events) は本フェーズの eviction 対象外 (= Phase 6+ 候補) |
+| GUI からの手動 patch apply (in-memory のみ) | ✅ 完了 (Phase 5-G) | `core/patch_apply.py:apply_patch_proposal_to_summary` で whitelist field (`resolution_type` / `seat_payouts` / `pots` / `showdown_revealed_cards` / `blinds`) のみ deepcopy 後上書き → 新 `HandSummary` を返す pure helper。`IntegrationThread.apply_patch_proposal(hand_id) → bool` で in-memory `_last_summary_by_hand_id[hand_id]` を patched copy で置き換え、`result.patch_applied=True` / `applied_fields=[...]` を立てる。GUI 側に "Apply patch" ボタン (`_cmd_apply_patch`) + 確認ダイアログ hook (`_ask_apply_patch_confirmation`)、Latest advisory に `patch_applied=yes` / `applied_fields=...` 表示。`winner_seat` / `pot_total` / `actions` は明示的に whitelist 外。**JSON / PHH / GameStateManager / settlement / live BettingState は一切触らない** (永続化は別フェーズ) |
 | Reconstruct 結果可視化 CLI (read-only) | ✅ 完了 (Phase 4-C1) | `output/inspect_reconstruction.py`: `reconstruct_<session>.jsonl` を読んで `[OK]` / `[REVIEW]` / `[SKIPPED]` ラベル付きで hand 単位サマリを出す。`--only-needs-review` / `--fields A,B` フィルタ対応。online JSON / PHH / live hook 結果には触らない |
 | Patch proposal (差分 → 修正案、apply は無し) | ✅ 完了 (Phase 5-A) | `core/patch_proposal.py`: `HandPatchProposal` / `FieldPatch` / `compute_patch_proposal`。対象 field は resolution_type / seat_payouts / winner_seat / pot_total / showdown_revealed_cards。`HandReconstructionResult.patch_proposal` に乗り、CLI `--show-patches` と GUI ``patch_fields=`` 表示で見える。``can_patch_automatically=False`` (Phase 5-B 以降で apply 判定) |
 | ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
@@ -1424,7 +1459,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 576 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+ + 10 Phase 5-C + 10 Phase 5-D + 10 Phase 5-E + 13 Phase 5-F)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 618 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+ + 10 Phase 5-C + 10 Phase 5-D + 10 Phase 5-E + 13 Phase 5-F + 42 Phase 5-G)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
@@ -1953,6 +1988,50 @@ projection にリファクタする可能性は別フェーズで検討。
   現状は module 定数。``config.json`` から読み込めるようにする余地は将来の
   Phase で対応 (= 短時間 dev test では monkeypatch で十分、production では 500 /
   1000 が妥当な default)
+
+**Phase 5-G 完了済み (GUI からの手動 patch apply、in-memory のみ)**:
+- ✅ ``core/patch_apply.py`` を新設。``apply_patch_proposal_to_summary(summary,
+  proposal)`` が whitelist field のみ deepcopy 後に上書きした **新 HandSummary**
+  を返す pure helper (= 元の summary を mutate しない)。``PATCH_APPLY_FIELDS``:
+  ``resolution_type`` / ``seat_payouts`` / ``pots`` / ``showdown_revealed_cards``
+  / ``blinds`` の 5 field。dict 形 / dataclass 形どちらの proposal にも対応
+- ✅ ``HandReconstructionResult`` に ``patch_applied: bool = False`` と
+  ``applied_fields: list[str]`` を default 付きで追加 (非破壊)
+- ✅ ``IntegrationThread.apply_patch_proposal(hand_id) → bool``: in-memory
+  ``_last_summary_by_hand_id[hand_id]`` を patched copy で置き換え、
+  ``result.patch_applied=True`` / ``applied_fields=[...]`` を立てる。
+  proposal 無 / 適用可能 field 無 / 対象 hand 無 → False。``GameStateManager``
+  / ``JsonWriter`` / ``PHHExporter`` / live ``BettingState`` には触らない
+- ✅ GUI (``gui/dashboard.py``): history frame の Latest advisory 右側に
+  "Apply patch" ボタン (`_btn_apply_patch`、row=2 column=1) を追加。
+  ``_cmd_apply_patch`` ハンドラが ``_ask_apply_patch_confirmation`` (testable hook)
+  で確認ダイアログを出し、OK なら ``IntegrationThread.apply_patch_proposal`` を呼ぶ
+- ✅ apply 成功時: Latest advisory ラベルに ``patch_applied=yes`` と
+  ``applied_fields=...`` を追加表示。``_apply_hand_finalized(hand_id,
+  append_to_history=False)`` で history 行を重複させず label のみ refresh
+- ✅ ``_ask_apply_patch_confirmation`` は ``Optional[bool]`` を返す:
+  ``True`` (OK) / ``False`` (cancel) / ``None`` (dialog 表示不可)。
+  None の場合は safe abort (= apply しない)
+- ✅ ``_latest_advisory_hand_id`` で最新 advisory hand_id を追跡し、Apply ボタンが
+  正しい hand を指す
+
+**Phase 5-G スコープ外**:
+- **永続化はしない**: apply 結果は in-memory ``_last_summary_by_hand_id`` のみ。
+  ``logs/<session>.json`` (online JSON) / PHH ファイルは書き換えない。
+  Phase 6+ で「patched summary を別 file (例: ``patched_<session>.json``) に
+  落とす」/「review log として append-only に記録する」等の永続化レイヤを
+  検討する想定
+- **``winner_seat`` / ``pot_total`` / ``actions`` は whitelist 外**:
+  - ``winner_seat`` は ``seat_payouts`` の primary winner と整合性を取る
+    derived field。直接 apply すると ``seat_payouts`` と矛盾するリスク
+  - ``pot_total`` は ``seat_payouts.values()`` / ``pots[].amount`` の集計値。
+    同上の理由で whitelist 外
+  - ``actions`` は重い修正で、``pot_after`` / ``stack_after`` の連鎖再計算など
+    副作用が大きいため別フェーズ
+- **GameStateManager の live stacks は再計算しない**: apply 後の summary は
+  「修正済みの記録」だが、GameStateManager の stacks (= 次 hand 開始時の
+  buy-in 計算源) には反映されない。これは「過去 hand を retroactive に直すと
+  以降の hand の stacks がズレる」のを避けるための意図的な scope-out
 
 **Phase 5-B+ (Phase 5-B 直後の改善、同フェーズ扱い)**:
 - ✅ **Audio seat hint の出所カテゴリ化**: ``signals.audio_seat_hint_sources``

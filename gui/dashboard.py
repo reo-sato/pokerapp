@@ -105,6 +105,9 @@ class GUIDashboard:
         # IntegrationThread が on_hand_finalized(hand_id) を呼び、main thread の
         # _poll_updates が consume して advisory パネルを更新する。
         self._hand_finalized_queue: queue.Queue[int] = queue.Queue()
+        # Phase 5-G: "Apply patch" ボタンが対象とする最新 advisory hand_id。
+        # ``_apply_hand_finalized`` の末尾で更新される。``_cmd_apply_patch`` から参照。
+        self._latest_advisory_hand_id: Optional[int] = None
         # seat → hole cards 表示用 (スレッド安全のため queue 経由で更新)
         self._hole_cards_display: dict[int, list[str]] = {}
         self._board_cards_display: list[str] = []
@@ -221,6 +224,16 @@ class GUIDashboard:
             text="Latest advisory: —",
         )
         self._lbl_latest_advisory.grid(row=2, column=0, padx=8, pady=(0, 4), sticky="w")
+
+        # Phase 5-G: 最新 advisory hand に patch proposal を適用するボタン。
+        # 押下時は ``tkinter.messagebox.askyesno`` で確認ダイアログ。
+        # in-memory summary correction のみで、JSON / PHH / GameStateManager には
+        # 触らない (= ``IntegrationThread.apply_patch_proposal`` 経由)。
+        self._btn_apply_patch = ctk.CTkButton(
+            self._history_frame, text="Apply patch", width=110,
+            command=self._cmd_apply_patch,
+        )
+        self._btn_apply_patch.grid(row=2, column=1, padx=(4, 8), pady=(0, 4), sticky="e")
 
         # 下部コントロール (Phase 4-C2 で row 2 → row 3 にずらした)
         ctrl = ctk.CTkFrame(root, corner_radius=0)
@@ -581,6 +594,123 @@ class GUIDashboard:
         except AttributeError:
             pass
 
+    def _ask_apply_patch_confirmation(
+        self, title: str, message: str,
+    ) -> Optional[bool]:
+        """Phase 5-G: 確認ダイアログを表示する小さな hook (テストで override 可能)。
+
+        Returns:
+            True:  operator が "はい" を選んだ
+            False: operator が "いいえ" / キャンセルを選んだ
+            None:  ダイアログ自体が表示できなかった (= display 無し環境など)。
+                   呼び出し側は False とは区別して "abort" として扱う。
+
+        実装は ``tkinter.messagebox.askyesno`` を遅延 import で呼ぶだけ。
+        tkinter が無い環境では ``ImportError`` を catch して ``None`` を返す。
+        テストでは ``dash._ask_apply_patch_confirmation = MagicMock(return_value=...)``
+        で差し替えれば dialog 不要に検証できる。
+        """
+        try:
+            from tkinter import messagebox
+            return bool(messagebox.askyesno(title, message))
+        except Exception:
+            return None
+
+    def _cmd_apply_patch(self) -> None:
+        """Phase 5-G: 最新 advisory hand に対して patch proposal を適用するボタンの handler。
+
+        フロー:
+          1. ``_latest_advisory_hand_id`` が無ければログに警告して abort
+          2. ``_integration_thread`` 未接続なら警告して abort
+          3. accessor で patch proposal の有無を確認 (read-only)
+          4. ``_ask_apply_patch_confirmation`` で operator に確認
+             - True  → 5. へ
+             - False → ユーザーキャンセル log → return
+             - None  → ダイアログ表示不可 log → return (= safe default: apply しない)
+          5. confirm OK なら ``IntegrationThread.apply_patch_proposal(hand_id)`` を呼ぶ
+          6. 成功時: ``_apply_hand_finalized(hand_id, append_to_history=False)`` で
+             latest advisory ラベルだけ refresh (history 行は重複させない)
+          7. 失敗 / 例外時はログに warning を出すだけで GUI を壊さない
+
+        **約束**:
+          - apply は in-memory summary correction のみ
+            (= ``IntegrationThread.apply_patch_proposal`` の約束に従う)
+          - confirmation ダイアログが出せない環境では **apply しない** (safe default)
+        """
+        hand_id = self._latest_advisory_hand_id
+        thread = self._integration_thread
+        if hand_id is None:
+            self._append_log(
+                "⚠ Apply patch: 適用対象の advisory hand がありません。",
+                tag="review",
+            )
+            return
+        if thread is None:
+            self._append_log(
+                "⚠ Apply patch: integration thread が未接続です。",
+                tag="review",
+            )
+            return
+        # accessor で proposal の有無を read-only 確認
+        try:
+            result = thread.get_reconstruction_result(hand_id)
+        except Exception:
+            result = None
+        proposal = getattr(result, "patch_proposal", None) if result is not None else None
+        if proposal is None:
+            self._append_log(
+                f"⚠ Apply patch: hand #{hand_id} に patch proposal がありません。",
+                tag="review",
+            )
+            return
+        # 確認ダイアログ (= operator が誤クリックで apply してしまわないように)
+        ok = self._ask_apply_patch_confirmation(
+            "Apply patch",
+            f"hand #{hand_id} に safe patch field を適用しますか?\n"
+            f"(in-memory summary correction のみ、JSON / PHH には触りません)",
+        )
+        if ok is None:
+            # ダイアログ表示不可 (= display 無し環境など) では safe abort
+            self._append_log(
+                "⚠ Apply patch: 確認ダイアログが表示できないため適用を中止しました。",
+                tag="review",
+            )
+            return
+        if not ok:
+            self._append_log(
+                f"Apply patch: hand #{hand_id} の適用をキャンセルしました。",
+                tag="medium",
+            )
+            return
+        # apply 実行 (= IntegrationThread API)
+        try:
+            applied = bool(thread.apply_patch_proposal(hand_id))
+        except Exception as e:
+            self._append_log(
+                f"⚠ Apply patch failed for hand #{hand_id}: {e}",
+                tag="review",
+            )
+            return
+        if applied:
+            # history 行を重複させずに latest advisory ラベルだけ refresh する
+            self._append_log(
+                f"Applied patch to hand #{hand_id}.",
+                tag="medium",
+            )
+            try:
+                self._apply_hand_finalized(hand_id, append_to_history=False)
+            except Exception as e:
+                self._append_log(
+                    f"⚠ Apply patch refresh failed: {e}",
+                    tag="review",
+                )
+        else:
+            self._append_log(
+                f"⚠ Apply patch: hand #{hand_id} に適用可能な whitelist field が"
+                "ありません。",
+                tag="review",
+            )
+
     def _cmd_rebuy(self) -> None:
         try:
             seat = int(self._rebuy_seat_var.get())
@@ -654,7 +784,9 @@ class GUIDashboard:
         else:
             self._append_log(line, tag=tag)
 
-    def _apply_hand_finalized(self, hand_id: int) -> None:
+    def _apply_hand_finalized(
+        self, hand_id: int, *, append_to_history: bool = True,
+    ) -> None:
         """Phase 4-C2: hand 終局時に履歴パネル + 最新 advisory ラベルを更新する。
 
         IntegrationThread の advisory store (``_last_summary_by_hand_id`` /
@@ -665,6 +797,12 @@ class GUIDashboard:
         を Latest advisory ラベルと history 行に表示する。判定は ``summary.blinds`` /
         ``result.bootstrap_meta["blind_source"]`` / ``result.patch_proposal.fields``
         から read-only で行い、reconstruct ロジックには触らない。
+
+        Phase 5-G: ``result.patch_applied`` が True のときは latest advisory に
+        ``patch_applied=yes`` と ``applied_fields=...`` を出す。``_cmd_apply_patch``
+        から refresh 用に呼ぶ際は ``append_to_history=False`` で history 行を
+        重複させないようにする。``_latest_advisory_hand_id`` も更新するため、
+        Apply ボタンが対象とする hand_id を正しく追跡する。
         """
         from gui.reconstruction_badges import (
             format_history_line, summarize_reconstruction,
@@ -699,15 +837,17 @@ class GUIDashboard:
         if blind_suffix:
             line = line + "  " + blind_suffix
 
-        # 履歴パネル: tag は status と同名 (ok / review / skipped) に揃える
-        box = self._history_box
-        box.configure(state="normal")
-        box.insert("end", line + "\n", badge_state.status)
-        # Phase 5-F: history Textbox を MAX_HISTORY_LINES 以下にトリム
-        # (長時間運用での Tk widget メモリ圧回避)。
-        self._trim_history_lines()
-        box.configure(state="disabled")
-        box.see("end")
+        # 履歴パネル: tag は status と同名 (ok / review / skipped) に揃える。
+        # Phase 5-G: ``append_to_history=False`` のときは label のみ refresh する。
+        if append_to_history:
+            box = self._history_box
+            box.configure(state="normal")
+            box.insert("end", line + "\n", badge_state.status)
+            # Phase 5-F: history Textbox を MAX_HISTORY_LINES 以下にトリム
+            # (長時間運用での Tk widget メモリ圧回避)。
+            self._trim_history_lines()
+            box.configure(state="disabled")
+            box.see("end")
 
         # "最新 advisory" ラベルを 1 行で更新
         detail_parts = [
@@ -734,9 +874,21 @@ class GUIDashboard:
         # proposal の online/offline 詳細値は GUI には出さない (CLI --show-patches で見る)。
         if badge_state.patch_fields:
             detail_parts.append(f"patch_fields={','.join(badge_state.patch_fields)}")
+        # Phase 5-G: patch_applied=True のときだけ "patch_applied=yes" を表示
+        # (=no はノイズ削減のため出さない)。applied_fields は実際に適用された
+        # field 名のリスト。
+        if result is not None and getattr(result, "patch_applied", False):
+            detail_parts.append("patch_applied=yes")
+            applied = getattr(result, "applied_fields", None) or []
+            if applied:
+                detail_parts.append(f"applied_fields={','.join(applied)}")
         if badge_state.button_inferred:
             detail_parts.append("(button inferred from raw observations)")
         self._lbl_latest_advisory.configure(text="  |  ".join(detail_parts))
+
+        # Phase 5-G: Apply ボタンが対象とする hand_id を更新。
+        # 次のリフレッシュ (= apply 後の re-call) でも同じ hand を指すように維持。
+        self._latest_advisory_hand_id = int(hand_id)
 
     def _trim_history_lines(self) -> None:
         """Phase 5-F: history Textbox の行数を ``MAX_HISTORY_LINES`` 以下に保つ。

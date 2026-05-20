@@ -154,14 +154,22 @@ def _stub_result(
     bootstrap_source: str = "online_summary",
     bootstrap_meta=None,
     patch_proposal=None,
+    patch_applied: bool = False,
+    applied_fields=None,
 ):
-    """`HandReconstructionResult` の duck-typed stub。"""
+    """`HandReconstructionResult` の duck-typed stub。
+
+    Phase 5-G: ``patch_applied`` / ``applied_fields`` を任意で渡せる。default は
+    False / 空 list なので、既存テストでは無視される動作と等価。
+    """
     from types import SimpleNamespace
     return SimpleNamespace(
         needs_review=needs_review, reason=reason, diff=diff,
         summary=summary if summary is not None else object(),
         bootstrap_source=bootstrap_source, bootstrap_meta=bootstrap_meta,
         patch_proposal=patch_proposal,
+        patch_applied=patch_applied,
+        applied_fields=applied_fields if applied_fields is not None else [],
     )
 
 
@@ -669,6 +677,255 @@ class TestPhase5EBlindAdvisoryDisplay:
         assert dash._blind_source_text(r4) == "unknown"
         # result 自体 None
         assert dash._blind_source_text(None) == "unknown"
+
+
+# ――― Phase 5-G: Apply patch ボタン + patch_applied 表示 ―――
+
+
+class TestPhase5GApplyPatchCommand:
+    """Phase 5-G: ``_cmd_apply_patch`` の動作。"""
+
+    def _make_proposal_with_whitelist_field(self):
+        from core.patch_proposal import FieldPatch, HandPatchProposal
+        return HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[FieldPatch(field="resolution_type",
+                                online="fold_win", offline="showdown")],
+        )
+
+    def test_confirmation_yes_calls_apply(self, tmp_path: Path):
+        """確認ダイアログで OK → IntegrationThread.apply_patch_proposal を呼ぶ。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_proposal=self._make_proposal_with_whitelist_field(),
+        )
+        thread.apply_patch_proposal.return_value = True
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = 1
+        dash._append_log = MagicMock()
+        # 確認ダイアログ hook を override (True を返す = OK)
+        dash._ask_apply_patch_confirmation = MagicMock(return_value=True)
+
+        dash._cmd_apply_patch()
+
+        dash._ask_apply_patch_confirmation.assert_called_once()
+        thread.apply_patch_proposal.assert_called_once_with(1)
+        # success log
+        msgs = [c[0][0] for c in dash._append_log.call_args_list]
+        assert any("Applied patch to hand #1" in m for m in msgs)
+
+    def test_confirmation_no_does_not_apply(self, tmp_path: Path):
+        """確認ダイアログで NO → apply_patch_proposal は呼ばれない。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_proposal=self._make_proposal_with_whitelist_field(),
+        )
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = 1
+        dash._append_log = MagicMock()
+        # 確認ダイアログ hook を override (False を返す = キャンセル)
+        dash._ask_apply_patch_confirmation = MagicMock(return_value=False)
+
+        dash._cmd_apply_patch()
+
+        thread.apply_patch_proposal.assert_not_called()
+        # cancel log
+        msgs = [c[0][0] for c in dash._append_log.call_args_list]
+        assert any("キャンセル" in m for m in msgs)
+
+    def test_no_latest_advisory_warns(self, tmp_path: Path):
+        """_latest_advisory_hand_id=None なら警告ログ + apply 呼ばない。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = None
+        dash._append_log = MagicMock()
+
+        dash._cmd_apply_patch()
+
+        thread.apply_patch_proposal.assert_not_called()
+        msg = dash._append_log.call_args_list[-1][0][0]
+        assert "適用対象" in msg
+
+    def test_no_integration_thread_warns(self, tmp_path: Path):
+        """_integration_thread=None なら警告ログ + apply 呼ばない。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._integration_thread = None
+        dash._latest_advisory_hand_id = 1
+        dash._append_log = MagicMock()
+
+        dash._cmd_apply_patch()
+
+        msg = dash._append_log.call_args_list[-1][0][0]
+        assert "integration thread" in msg
+
+    def test_no_proposal_warns(self, tmp_path: Path):
+        """対象 hand の result.patch_proposal が None なら警告 + apply しない。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_proposal=None,
+        )
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = 1
+        dash._append_log = MagicMock()
+
+        dash._cmd_apply_patch()
+
+        thread.apply_patch_proposal.assert_not_called()
+        msg = dash._append_log.call_args_list[-1][0][0]
+        assert "patch proposal" in msg
+
+    def test_apply_returns_false_warns(self, tmp_path: Path):
+        """confirmation OK でも apply が False を返したら警告ログ (= whitelist field
+        が無いケース)。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_proposal=self._make_proposal_with_whitelist_field(),
+        )
+        thread.apply_patch_proposal.return_value = False
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = 1
+        dash._append_log = MagicMock()
+        dash._ask_apply_patch_confirmation = MagicMock(return_value=True)
+
+        dash._cmd_apply_patch()
+
+        msgs = [c[0][0] for c in dash._append_log.call_args_list]
+        # 失敗ログ
+        assert any("適用可能" in m and "whitelist" in m for m in msgs)
+
+    def test_apply_exception_does_not_crash(self, tmp_path: Path):
+        """apply で例外 → ログに warning だが GUI はクラッシュしない。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_proposal=self._make_proposal_with_whitelist_field(),
+        )
+        thread.apply_patch_proposal.side_effect = RuntimeError("boom")
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = 1
+        dash._append_log = MagicMock()
+        dash._ask_apply_patch_confirmation = MagicMock(return_value=True)
+
+        dash._cmd_apply_patch()
+        # クラッシュせず、warning が出る
+        msg = dash._append_log.call_args_list[-1][0][0]
+        assert "Apply patch failed" in msg
+
+    def test_messagebox_unavailable_aborts_safely(self, tmp_path: Path):
+        """確認ダイアログ hook が None を返す (= dialog 表示不可) 場合は apply しない。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_proposal=self._make_proposal_with_whitelist_field(),
+        )
+        dash._integration_thread = thread
+        dash._latest_advisory_hand_id = 1
+        dash._append_log = MagicMock()
+        # dialog 不可シミュレーション: None を返す
+        dash._ask_apply_patch_confirmation = MagicMock(return_value=None)
+
+        dash._cmd_apply_patch()
+
+        # apply は呼ばれない (safe default)
+        thread.apply_patch_proposal.assert_not_called()
+        msg = dash._append_log.call_args_list[-1][0][0]
+        assert "確認ダイアログ" in msg
+
+    def test_ask_confirmation_returns_none_when_tkinter_missing(
+        self, tmp_path: Path,
+    ):
+        """``_ask_apply_patch_confirmation`` 本体: tkinter が import できない
+        環境では ``None`` を返す (= safe default、apply を中止する印)。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        # test 環境では tkinter が無いか、display が無いので None になる
+        ret = dash._ask_apply_patch_confirmation("title", "msg")
+        # 戻り値は None (dialog 表示不可) or False (確認 NO 想定) のいずれか。
+        # True (= 自動的に OK) になっていないことが安全側の証拠。
+        assert ret is not True
+
+
+class TestPhase5GAdvisoryLabelDisplay:
+    """Phase 5-G: ``patch_applied`` / ``applied_fields`` が Latest advisory に表示。"""
+
+    def test_label_shows_patch_applied_yes(self, tmp_path: Path):
+        """result.patch_applied=True + applied_fields=[...] → label に
+        ``patch_applied=yes`` と ``applied_fields=...`` が含まれる。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary(
+            hand_id=1, winner_seat=2, pot_total=600,
+        )
+        thread.get_reconstruction_result.return_value = _stub_result(
+            needs_review=True, reason="reconstructed_with_diff",
+            bootstrap_source="raw",
+            patch_applied=True,
+            applied_fields=["resolution_type", "seat_payouts"],
+        )
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(1)
+        last_text = dash._lbl_latest_advisory.configure.call_args_list[-1][1]["text"]
+        assert "patch_applied=yes" in last_text
+        assert "applied_fields=resolution_type,seat_payouts" in last_text
+
+    def test_label_omits_patch_applied_when_false(self, tmp_path: Path):
+        """patch_applied=False (default) → label に ``patch_applied`` が出ない。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary()
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_applied=False,
+        )
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(1)
+        last_text = dash._lbl_latest_advisory.configure.call_args_list[-1][1]["text"]
+        assert "patch_applied" not in last_text
+        assert "applied_fields" not in last_text
+
+    def test_apply_hand_finalized_tracks_latest_advisory_id(
+        self, tmp_path: Path,
+    ):
+        """_apply_hand_finalized 後 _latest_advisory_hand_id が更新される
+        (Apply ボタンが正しい hand を指すように)。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary()
+        thread.get_reconstruction_result.return_value = _stub_result()
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(42)
+        assert dash._latest_advisory_hand_id == 42
+
+    def test_apply_hand_finalized_append_to_history_false_skips_insert(
+        self, tmp_path: Path,
+    ):
+        """``append_to_history=False`` で呼ばれた場合は history.insert を呼ばない
+        (= refresh モード)。Latest advisory ラベルは更新する。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary()
+        thread.get_reconstruction_result.return_value = _stub_result(
+            patch_applied=True,
+            applied_fields=["resolution_type"],
+        )
+        dash._integration_thread = thread
+
+        dash._apply_hand_finalized(7, append_to_history=False)
+
+        # history.insert は呼ばれない
+        dash._history_box.insert.assert_not_called()
+        # Latest advisory ラベルは更新される
+        last_text = dash._lbl_latest_advisory.configure.call_args_list[-1][1]["text"]
+        assert "patch_applied=yes" in last_text
 
 
 # ――― Phase 5-F: history Textbox の bounded retention + evicted hand degrade ―――

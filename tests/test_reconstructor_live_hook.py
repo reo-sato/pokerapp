@@ -337,6 +337,195 @@ class TestOnHandFinalizedCallback:
         assert sum(stacks.values()) == 20000
 
 
+class TestPhase5GApplyPatchProposal:
+    """Phase 5-G: ``IntegrationThread.apply_patch_proposal`` の挙動。"""
+
+    def _setup_hand_with_proposal(
+        self, thread, hand_id: int, *, with_field: str = "resolution_type",
+    ):
+        """テスト用に hand_id の summary / result を直接注入する helper。"""
+        from core.hand_log import HandSummary
+        from core.hand_reconstructor import HandReconstructionResult
+        from core.patch_proposal import FieldPatch, HandPatchProposal
+
+        summary = HandSummary(
+            hand_id=hand_id, session_id="t",
+            started_at="", ended_at="",
+            blinds={"sb": 100, "bb": 200},
+            board=[], board_source="",
+            players=[],
+            pot_total=300,
+            winner_seat=1,
+            actions=[],
+            review_required=False,
+            folded_seats=[], all_in_seats=[],
+            resolution_status="final",
+            resolution_type="fold_win",
+            seat_payouts={1: 300},
+        )
+        if with_field == "resolution_type":
+            field_patch = FieldPatch(field="resolution_type",
+                                      online="fold_win", offline="showdown")
+        elif with_field == "winner_seat":
+            field_patch = FieldPatch(field="winner_seat", online=1, offline=2)
+        elif with_field == "seat_payouts":
+            field_patch = FieldPatch(field="seat_payouts",
+                                      online={1: 300}, offline={2: 600})
+        else:
+            field_patch = FieldPatch(field=with_field, online=None, offline=None)
+        proposal = HandPatchProposal(
+            hand_id=hand_id, can_patch_automatically=False,
+            fields=[field_patch],
+        )
+        result = HandReconstructionResult(
+            summary=summary, needs_review=True,
+            reason="reconstructed_with_diff",
+            patch_proposal=proposal,
+        )
+        thread._last_summary_by_hand_id[hand_id] = summary
+        thread._last_reconstruction_by_hand_id[hand_id] = result
+        return summary, result, proposal
+
+    def test_apply_patches_in_memory_summary(self, tmp_path: Path) -> None:
+        """whitelist field がある proposal を持つ hand に apply 成功。
+        ``_last_summary_by_hand_id[hand_id]`` が patched copy に置き換わる。
+        """
+        thread, _aq, _stop, _w, _gs = _build_thread(tmp_path)
+        summary, result, _ = self._setup_hand_with_proposal(thread, hand_id=42)
+
+        ret = thread.apply_patch_proposal(42)
+
+        assert ret is True
+        # in-memory summary が置き換わっている
+        new_summary = thread._last_summary_by_hand_id[42]
+        assert new_summary is not summary
+        assert new_summary.resolution_type == "showdown"
+        # 元 summary は不変
+        assert summary.resolution_type == "fold_win"
+        # result の advisory フラグが立つ
+        assert result.patch_applied is True
+        assert "resolution_type" in result.applied_fields
+
+    def test_apply_returns_false_for_missing_hand_id(self, tmp_path: Path) -> None:
+        """存在しない hand_id で apply は False を返す (例外なし)。"""
+        thread, _aq, _stop, _w, _gs = _build_thread(tmp_path)
+        assert thread.apply_patch_proposal(99999) is False
+
+    def test_apply_returns_false_when_no_proposal(self, tmp_path: Path) -> None:
+        """summary はあるが proposal が None の hand → False。"""
+        from core.hand_log import HandSummary
+        from core.hand_reconstructor import HandReconstructionResult
+
+        thread, _aq, _stop, _w, _gs = _build_thread(tmp_path)
+        thread._last_summary_by_hand_id[7] = HandSummary(
+            hand_id=7, session_id="t", started_at="", ended_at="",
+            blinds={"sb": 100, "bb": 200}, board=[], board_source="",
+            players=[], pot_total=0, winner_seat=0, actions=[],
+            review_required=False, folded_seats=[], all_in_seats=[],
+            resolution_status="final", resolution_type="fold_win",
+            seat_payouts={},
+        )
+        thread._last_reconstruction_by_hand_id[7] = HandReconstructionResult(
+            patch_proposal=None,
+        )
+
+        assert thread.apply_patch_proposal(7) is False
+
+    def test_apply_returns_false_when_only_non_whitelist_fields(
+        self, tmp_path: Path,
+    ) -> None:
+        """proposal はあるが whitelist 外の field しか無い (winner_seat / pot_total
+        など) → False。"""
+        thread, _aq, _stop, _w, _gs = _build_thread(tmp_path)
+        self._setup_hand_with_proposal(
+            thread, hand_id=5, with_field="winner_seat",
+        )
+        assert thread.apply_patch_proposal(5) is False
+        # summary は変わっていない
+        assert thread._last_summary_by_hand_id[5].winner_seat == 1
+
+    def test_apply_does_not_touch_game_state(self, tmp_path: Path) -> None:
+        """apply は ``GameStateManager`` に触らない (= live stack 不変)。"""
+        thread, _aq, _stop, _w, gs = _build_thread(tmp_path)
+        self._setup_hand_with_proposal(thread, hand_id=3)
+        # GameStateManager の snapshot
+        stacks_before = dict(gs.get_stacks())
+
+        ret = thread.apply_patch_proposal(3)
+        assert ret is True
+
+        # stacks は変わらない
+        assert gs.get_stacks() == stacks_before
+
+    def test_apply_does_not_touch_json_writer(self, tmp_path: Path) -> None:
+        """apply は JsonWriter / session JSON に触らない (= 永続化分離)。"""
+        thread, _aq, _stop, writer, _gs = _build_thread(tmp_path, "apply_no_json")
+        self._setup_hand_with_proposal(thread, hand_id=2)
+        # JsonWriter には何も書かれていない (= まだ append されていない初期状態)
+        # apply 後も file 状態が変わらないことを確認
+        json_path = tmp_path / "apply_no_json.json"
+        before_exists = json_path.exists()
+        before_bytes = json_path.read_bytes() if before_exists else None
+
+        ret = thread.apply_patch_proposal(2)
+        assert ret is True
+
+        # JSON ファイルの存在 / 内容が変わらない
+        assert json_path.exists() == before_exists
+        if before_bytes is not None:
+            assert json_path.read_bytes() == before_bytes
+
+    def test_apply_marks_applied_fields_list(self, tmp_path: Path) -> None:
+        """複数 whitelist field を持つ proposal で applied_fields list が正しく
+        立つ。"""
+        from core.hand_log import HandSummary
+        from core.hand_reconstructor import HandReconstructionResult
+        from core.patch_proposal import FieldPatch, HandPatchProposal
+
+        thread, _aq, _stop, _w, _gs = _build_thread(tmp_path)
+        summary = HandSummary(
+            hand_id=10, session_id="t",
+            started_at="", ended_at="",
+            blinds={"sb": 100, "bb": 200},
+            board=[], board_source="",
+            players=[],
+            pot_total=300,
+            winner_seat=1,
+            actions=[],
+            review_required=False,
+            folded_seats=[], all_in_seats=[],
+            resolution_status="final",
+            resolution_type="fold_win",
+            seat_payouts={1: 300},
+        )
+        proposal = HandPatchProposal(
+            hand_id=10, can_patch_automatically=False,
+            fields=[
+                FieldPatch(field="resolution_type",
+                            online="fold_win", offline="showdown"),
+                FieldPatch(field="seat_payouts",
+                            online={1: 300}, offline={2: 600}),
+                # whitelist 外: applied_fields に入らない
+                FieldPatch(field="winner_seat", online=1, offline=2),
+            ],
+        )
+        result = HandReconstructionResult(
+            summary=summary, patch_proposal=proposal,
+        )
+        thread._last_summary_by_hand_id[10] = summary
+        thread._last_reconstruction_by_hand_id[10] = result
+
+        assert thread.apply_patch_proposal(10) is True
+        # whitelist field のみ applied_fields に乗る
+        assert result.applied_fields == ["resolution_type", "seat_payouts"]
+        # 適用結果
+        patched = thread._last_summary_by_hand_id[10]
+        assert patched.resolution_type == "showdown"
+        assert patched.seat_payouts == {2: 600}
+        # winner_seat は無視
+        assert patched.winner_seat == 1
+
+
 class TestAdvisoryEviction:
     """Phase 5-F: ``_last_summary_by_hand_id`` / ``_last_reconstruction_by_hand_id``
     が ``MAX_ADVISORY_HANDS`` 件を超えたら古い hand から evict される。"""

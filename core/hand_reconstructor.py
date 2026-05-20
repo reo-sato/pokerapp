@@ -125,6 +125,13 @@ class HandReconstructionResult:
       patch_proposal:    diff があった hand の修正提案 (Phase 5-A 追加)。
                          ``can_patch_automatically`` は Phase 5-A では常に False。
                          CLI / GUI で提案表示のみに使い、自動 apply はしない。
+      patch_applied:     Phase 5-G で追加。GUI / API 経由で
+                         ``IntegrationThread.apply_patch_proposal`` が呼ばれて
+                         in-memory summary に whitelist field を適用済みなら True。
+                         default False で非破壊。
+      applied_fields:    Phase 5-G で追加。``patch_applied=True`` のときに
+                         実際に適用された field 名のリスト
+                         (= ``core.patch_apply.PATCH_APPLY_FIELDS`` の subset)。
     """
 
     actions: list[ActionRecord] = field(default_factory=list)
@@ -136,6 +143,9 @@ class HandReconstructionResult:
     bootstrap_source: Optional[str] = None
     bootstrap_meta: Optional[dict[str, Any]] = None
     patch_proposal: Optional[HandPatchProposal] = None
+    # Phase 5-G: GUI から apply された場合の advisory フラグ。
+    patch_applied: bool = False
+    applied_fields: list[str] = field(default_factory=list)
 
 
 # ────────────────────────────────────────────────────────────────────────────
