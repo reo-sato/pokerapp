@@ -553,6 +553,8 @@ class TestPhase5BMetaExtensions:
         meta = result.bootstrap_meta
         # Phase 5-B 追加 field
         assert "audio_seat_hints" in meta["signals"]
+        # Phase 5-B+: 出所カテゴリ別の細分化
+        assert "audio_seat_hint_sources" in meta["signals"]
         assert "prev_button" in meta
         assert "button_inferred_from_prev" in meta
         # blinds change TODO 用のフック
@@ -562,8 +564,185 @@ class TestPhase5BMetaExtensions:
         assert meta["button_inferred"] is True
         assert meta["blinds_inferred"] is True
         assert meta["source"] == "raw"
-        assert meta["confidence"] == 0.5
+        # Phase 5-B+: confidence は staged になった (固定 0.5 から脱却)。
+        # この fixture は RFID=2 + winner audio のみ + 初手 (prev=None) なので
+        # boost が一切付かず baseline 0.4 になる。
+        assert meta["confidence"] == 0.4
         assert "rfid_seat_observations" in meta["signals"]
+
+
+class TestPhase5BPlusAudioSourceCategorization:
+    """Phase 5-B+: audio_seat_hint_sources で action / winner / other の出所
+    分類が正しく行われることを検証する。"""
+
+    def test_action_winner_other_categorization(self) -> None:
+        """action / winner / other が混在する events から各カテゴリへ正しく振り分け。"""
+        events = [
+            _audio_rec("new_hand", 1.0),                     # other (new_hand)
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            _audio_rec("fold", 1.3, "シート3 フォールド"),  # action → 3
+            _audio_rec("call", 1.4, "シート1 コール"),     # action → 1 (RFID と overlap)
+            _audio_rec("winner", 1.5, "シート2 ウィナー"), # winner → 2
+        ]
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(events)
+        meta = result.bootstrap_meta
+        srcs = meta["signals"]["audio_seat_hint_sources"]
+        assert srcs["action"] == [1, 3]      # fold(3) + call(1)
+        assert srcs["winner"] == [2]
+        assert srcs["other"]  == []
+        # flat list (backwards compat) は union sorted
+        assert meta["signals"]["audio_seat_hints"] == [1, 2, 3]
+
+    def test_winner_only_audio_keeps_action_empty(self) -> None:
+        """winner mention だけだと action カテゴリは空のまま。
+        Phase 5-B+ では active 推定では union するが、confidence boost には使わない。
+        """
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            _audio_rec("winner", 1.4, "シート2 ウィナー"),
+        ]
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(events)
+        srcs = result.bootstrap_meta["signals"]["audio_seat_hint_sources"]
+        assert srcs["action"] == []
+        assert srcs["winner"] == [2]
+        assert srcs["other"]  == []
+
+
+class TestPhase5BPlusStagedConfidence:
+    """Phase 5-B+: staged confidence (baseline 0.4 + 3 つの +0.1 boost)。"""
+
+    def test_baseline_minimum_signals(self) -> None:
+        """RFID=2 seat, no action-derived audio, no prev_button → baseline 0.4。"""
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            _audio_rec("winner", 1.4, "シート2 ウィナー"),   # winner-derived は boost 対象外
+        ]
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(events)
+        assert result.bootstrap_meta["confidence"] == 0.4
+
+    def test_rfid_three_plus_boost(self) -> None:
+        """RFID >= 3 seat 観測で +0.1 (= 0.5)。"""
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(2, "Ah", 1.1),
+            _rfid_seat_rec(3, "Kh", 1.2),
+            _rfid_seat_rec(5, "Qh", 1.3),
+            _audio_rec("winner", 1.6, "シート3 ウィナー"),    # winner は boost 対象外
+        ]
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(events)
+        assert result.bootstrap_meta["confidence"] == 0.5
+
+    def test_action_audio_overlap_boost(self) -> None:
+        """action-derived audio seat が RFID と overlap → +0.1 (= 0.5)。"""
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            _audio_rec("fold", 1.3, "シート1 フォールド"),   # action → seat 1 が RFID と overlap
+            _audio_rec("winner", 1.4, "シート2 ウィナー"),
+        ]
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(events)
+        assert result.bootstrap_meta["confidence"] == 0.5
+
+    def test_action_audio_without_rfid_overlap_no_boost(self) -> None:
+        """action audio が seat 3 を言及するが RFID には居ない → boost 無し (= 0.4)。
+        Phase 5-B 拡張で active_seats には 3 が入るが、cross-modal は overlap 必須。
+        """
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            _audio_rec("fold", 1.3, "シート3 フォールド"),   # action だが seat 3 は RFID 外
+            _audio_rec("winner", 1.4, "シート2 ウィナー"),
+        ]
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(events)
+        assert result.bootstrap_meta["confidence"] == 0.4
+
+    def test_prev_button_boost(self) -> None:
+        """button_inferred_from_prev → +0.1 (= 0.5)。"""
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        rc._prev_button_seat = 1
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            _audio_rec("winner", 1.4, "シート1 ウィナー"),
+        ]
+        result = rc.reconstruct_from_events(events)
+        meta = result.bootstrap_meta
+        assert meta["button_inferred_from_prev"] is True
+        assert meta["confidence"] == 0.5
+
+    def test_all_three_boosts_max_confidence(self) -> None:
+        """3 boost 全部スタック → 0.7 (max)。"""
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        rc._prev_button_seat = 2     # active=[2,3,5] に含まれる → prev boost
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(2, "Ah", 1.1),
+            _rfid_seat_rec(3, "Kh", 1.2),
+            _rfid_seat_rec(5, "Qh", 1.3),                       # RFID >= 3 → +0.1
+            _audio_rec("fold", 1.4, "シート3 フォールド"),    # action audio overlap → +0.1
+            _audio_rec("winner", 1.5, "シート5 ウィナー"),
+        ]
+        result = rc.reconstruct_from_events(events)
+        meta = result.bootstrap_meta
+        # 0.4 base + 0.1 (RFID>=3) + 0.1 (action overlap) + 0.1 (prev) = 0.7
+        assert meta["confidence"] == 0.7
+        assert meta["button_inferred_from_prev"] is True
+
+
+class TestPhase5BPlusPrevButtonAcrossSkippedHand:
+    """Phase 5-B+: skipped hand を挟んでも _prev_button_seat は **直近 successful**
+    hand の button を保持する (semantics の明文化に対応)。"""
+
+    def test_skipped_hand_does_not_overwrite_prev_button(self) -> None:
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        # 1 hand 目: HU で raw bootstrap 成功 → prev=1 (active=[1,2], min)
+        events1 = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            _audio_rec("winner", 1.4, "シート2 ウィナー"),
+        ]
+        result1 = rc.reconstruct_from_events(events1)
+        assert result1.bootstrap_source == "raw"
+        assert rc._prev_button_seat == 1
+
+        # 2 hand 目: signal 不十分 (RFID 0 + online_summary 無し) → skipped
+        events2 = [
+            _audio_rec("new_hand", 2.0),
+            _audio_rec("winner", 2.4, "シート1 ウィナー"),
+        ]
+        result2 = rc.reconstruct_from_events(events2)
+        assert result2.reason == "reconstruction_skipped"
+        # 重要: skipped でも prev は壊れない (直近 *成功* hand の seed が残る)
+        assert rc._prev_button_seat == 1
+
+        # 3 hand 目: raw 復活 → prev=1 (前々 hand の成功) を seed に左隣を採用
+        events3 = [
+            _audio_rec("new_hand", 3.0),
+            _rfid_seat_rec(1, "Ad", 3.1),
+            _rfid_seat_rec(2, "Kd", 3.2),
+            _audio_rec("winner", 3.4, "シート2 ウィナー"),
+        ]
+        result3 = rc.reconstruct_from_events(events3)
+        assert result3.bootstrap_source == "raw"
+        meta3 = result3.bootstrap_meta
+        assert meta3["prev_button"] == 1
+        assert meta3["button_inferred_from_prev"] is True
+        assert meta3["button_seat"] == 2
 
 
 class TestPhase5BSafetyFallbacks:

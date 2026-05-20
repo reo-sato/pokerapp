@@ -156,6 +156,60 @@ def _extract_seat_from_text(text: str) -> Optional[int]:
         return None
 
 
+# Phase 5-B+: audio seat hint の出所カテゴリ。
+# - "action": fold / call / bet / raise / check / allin など、その seat が hand 中に
+#   行動したことを示す mention。RFID と overlap すれば cross-modal corroboration になる
+# - "winner": 終局の WINNER 発話 (= 既に winner_seat_hint で扱っている終端制約)
+# - "other":  new_hand / showdown / amount_only / 不明 action。active 推定には弱い
+_POKER_ACTION_KEYWORDS_FOR_SEAT_HINT = frozenset({
+    "fold", "call", "bet", "raise", "check", "allin",
+})
+
+
+def _categorize_audio_seat_hint(action: str) -> str:
+    """``AudioEvent.action`` を seat-hint カテゴリにマップする。
+
+    - ``"winner"`` → ``"winner"``
+    - 通常の poker action → ``"action"``
+    - その他 (new_hand / showdown / amount_only / 空 / 不明) → ``"other"``
+    """
+    a = (action or "").lower()
+    if a == "winner":
+        return "winner"
+    if a in _POKER_ACTION_KEYWORDS_FOR_SEAT_HINT:
+        return "action"
+    return "other"
+
+
+def _compute_raw_bootstrap_confidence(
+    *,
+    rfid_count: int,
+    audio_action_overlap: bool,
+    button_inferred_from_prev: bool,
+) -> float:
+    """Phase 5-B+: raw bootstrap の **operational confidence** を staged で返す。
+
+    依然 calibrated probability ではない (= モデルが計算した posterior でも
+    Brier-calibrated な値でもない)。複数 signal が揃えば値が上がる discrete な
+    signal-stacker。値域は ``[0.4, 0.7]``。フル確率化は将来課題。
+
+    内訳:
+      - baseline 0.4: conservative gate (RFID >= 2 seat) を満たした
+      - +0.1 if rfid_count >= 3: multi-seat 観測 (2 seat より信頼度が上)
+      - +0.1 if audio_action_overlap: action-derived audio seat が
+        RFID seat と overlap = cross-modal corroboration
+      - +0.1 if button_inferred_from_prev: button が前 hand の左隣 (history-grounded)
+    """
+    score = 0.4
+    if rfid_count >= 3:
+        score += 0.1
+    if audio_action_overlap:
+        score += 0.1
+    if button_inferred_from_prev:
+        score += 0.1
+    return round(score, 2)   # 0.4 + 0.1 + 0.1 + 0.1 = 0.7 (浮動小数点誤差除去)
+
+
 def _current_street(board: list[str]) -> str:
     n = len([c for c in board if c])
     if n >= 5:
@@ -276,12 +330,19 @@ class HandReconstructor:
         # Phase 4-B: raw-only bootstrap で blinds 額が必要。None なら raw bootstrap 失敗。
         self._default_sb = int(default_sb) if default_sb is not None else None
         self._default_bb = int(default_bb) if default_bb is not None else None
-        # Phase 5-B: 前 hand の button seat (raw / online_summary / initial_state のいずれの
-        # 経路で bootstrap した hand でも、bs.button_seat を記録しておく)。
-        # 次 hand の raw bootstrap で「前 hand の左隣」heuristic に使う。
+        # Phase 5-B: **直近 successfully bootstrapped hand** の button seat を覚える。
+        # 「直前 hand」ではなく「直前 *成功* hand」である点が重要:
+        #   - bootstrap 失敗で skipped になった hand は _prev_button_seat を更新しない
+        #     (= ``reconstruct_from_events`` の早期 return 経由)
+        #   - したがって [成功 hand A → skipped hand B → hand C] の場合、hand C の
+        #     raw bootstrap は **hand A の button** を seed に使う (= hand B が skipped
+        #     でも button history は失われない)
+        # 経路は問わない (raw / online_summary / initial_state のいずれの bootstrap
+        # でも、成功時に bs.button_seat を記録する)。
         # 注意: これは truth ではなく next-hand 推定の seed。online で button が手動
-        # 補正された場合は次 hand で誤推定する可能性がある (= 後段 _compute_diff で
-        # actions ズレが現れて needs_review が立つ前提)。
+        # 補正された場合や、live で seat 構成が大きく変わった場合は次 hand で
+        # 誤推定する可能性がある (= 後段 ``_compute_diff`` で actions ズレが現れて
+        # ``needs_review`` が立つ前提)。
         self._prev_button_seat: Optional[int] = None
 
     # ──────────────────────────────────────────────────────────────────────
@@ -328,10 +389,13 @@ class HandReconstructor:
             )
 
         # Phase 5-B: 次 hand の raw bootstrap で使う prev_button を更新する。
-        # 経路は問わない (initial_state / raw / online_summary のいずれでも bs.button_seat
-        # は確定している)。実際の button は truth ではないので「次 hand 推定の seed」
-        # として扱うのみ。online 側で button が手動補正された場合に推定が外れることは
-        # 想定内 (= 後段の _compute_diff で actions ズレが現れる前提)。
+        # **「直近 successfully bootstrapped hand の seed」** という意味論を維持する
+        # ため、bootstrap 失敗 (bs=None) で抜けた場合は更新せず、ここまで来た成功
+        # ケースだけで上書きする。経路は問わない (raw / online_summary / initial_state
+        # のいずれでも bs.button_seat は確定している)。
+        # 実際の button は truth ではないので「次 hand 推定の seed」として扱うのみ。
+        # online で button が手動補正された場合に推定が外れることは想定内
+        # (= 後段の _compute_diff で actions ズレが現れる前提)。
         try:
             prev_btn = getattr(bs, "button_seat", None)
             if prev_btn is not None:
@@ -614,7 +678,14 @@ class HandReconstructor:
             return None
 
         seats_with_hole_cards: set[int] = set()
-        seats_from_audio: set[int] = set()
+        # Phase 5-B+: audio seat hint を出所別に集計する。
+        # - action: その seat が hand 中に実行動 (fold/call/...) したと音声が示唆 → 強い
+        # - winner: 終局 WINNER 発話の seat → live 推定としては弱い (誤認識耐性)
+        # - other:  new_hand / showdown / amount_only など → 弱い
+        # `audio_seat_hints` (flat) は backwards compat のため union を sorted で残す。
+        audio_action_seats: set[int] = set()
+        audio_winner_seats: set[int] = set()
+        audio_other_seats: set[int] = set()
         for rec in events_sorted:
             if rec.kind == "rfid" and isinstance(rec.event, RFIDEvent):
                 ev_rfid: RFIDEvent = rec.event
@@ -623,14 +694,22 @@ class HandReconstructor:
                 continue
             if rec.kind == "audio" and isinstance(rec.event, AudioEvent):
                 ev_audio: AudioEvent = rec.event
-                # 明示的な event.seat (将来の AudioEvent 拡張に備えた前向き互換)
+                # seat 抽出: 明示属性 (将来拡張) > raw_text 解析。両方無ければ skip。
                 explicit_seat = getattr(ev_audio, "seat", None)
                 if isinstance(explicit_seat, int):
-                    seats_from_audio.add(explicit_seat)
-                # raw_text から「シート N」 / 「seat N」 を抽出
-                text_seat = _extract_seat_from_text(getattr(ev_audio, "raw_text", "") or "")
-                if text_seat is not None:
-                    seats_from_audio.add(int(text_seat))
+                    seat = int(explicit_seat)
+                else:
+                    text_seat = _extract_seat_from_text(getattr(ev_audio, "raw_text", "") or "")
+                    if text_seat is None:
+                        continue
+                    seat = int(text_seat)
+                category = _categorize_audio_seat_hint(getattr(ev_audio, "action", "") or "")
+                if category == "action":
+                    audio_action_seats.add(seat)
+                elif category == "winner":
+                    audio_winner_seats.add(seat)
+                else:
+                    audio_other_seats.add(seat)
 
         # Phase 5-B の conservative gate: RFID は依然 primary signal。
         # Audio ヒントだけで bootstrap には踏み込まない (= 誤検知より skip を優先)。
@@ -639,7 +718,9 @@ class HandReconstructor:
 
         # active_seats = RFID ∪ Audio (Phase 5-B 拡張)。
         # 音声で言及されたが RFID 未観測の seat も参加とみなす (= active を増やす方向)。
-        active_seats = sorted(seats_with_hole_cards | seats_from_audio)
+        # winner/other 含めて union しておく (gate は RFID 主導なので overshoot は限定的)。
+        audio_all_seats = audio_action_seats | audio_winner_seats | audio_other_seats
+        active_seats = sorted(seats_with_hole_cards | audio_all_seats)
 
         # button heuristic:
         #   - prev_button が active set に含まれていれば「ring 上で左隣 (= 次 index)」
@@ -668,6 +749,16 @@ class HandReconstructor:
             logger.exception("Reconstructor: bs.start_hand raw bootstrap failed")
             return None
 
+        # Phase 5-B+: staged operational confidence (依然 calibrated probability ではない)。
+        # action-derived audio が RFID と overlap した時のみ cross-modal boost を入れる
+        # (winner-derived は active 推定としては弱いので confidence boost には含めない)。
+        audio_action_overlap = bool(audio_action_seats & seats_with_hole_cards)
+        confidence = _compute_raw_bootstrap_confidence(
+            rfid_count=len(seats_with_hole_cards),
+            audio_action_overlap=audio_action_overlap,
+            button_inferred_from_prev=button_inferred_from_prev,
+        )
+
         meta: dict[str, Any] = {
             "source": "raw",
             "active_seats": list(active_seats),
@@ -687,15 +778,21 @@ class HandReconstructor:
             "bb_amount": int(self._default_bb),
             "signals": {
                 "rfid_seat_observations": sorted(int(s) for s in seats_with_hole_cards),
-                # Phase 5-B: audio raw_text から抽出した seat 集合 (補助 signal)。
-                # 空 list なら "audio から seat ヒントは得られなかった" の意。
-                "audio_seat_hints": sorted(int(s) for s in seats_from_audio),
+                # Phase 5-B: audio raw_text から抽出した seat 集合 (union, flat list)。
+                # backwards compat: Phase 5-B 初版の consumer はこの flat list を読む。
+                "audio_seat_hints": sorted(int(s) for s in audio_all_seats),
+                # Phase 5-B+: 出所カテゴリ別の細分化。"action" だけが confidence boost
+                # の対象 (winner / other は active 推定として弱い signal)。
+                "audio_seat_hint_sources": {
+                    "action": sorted(int(s) for s in audio_action_seats),
+                    "winner": sorted(int(s) for s in audio_winner_seats),
+                    "other":  sorted(int(s) for s in audio_other_seats),
+                },
             },
-            # `confidence` は fixed heuristic confidence。raw bootstrap が truth では
-            # ないことの印 (= 0.5 weight で扱って下さいというメッセージ) であって、
-            # calibrated probability (posterior / Brier-calibrated 値) ではない。
-            # signal 強度に応じた動的計算は Phase 4-C+ の課題。
-            "confidence": 0.5,
+            # Phase 5-B+: staged operational confidence。calibrated probability ではない
+            # (= モデル posterior でも Brier-calibrated でもない)。
+            # 値域 [0.4, 0.7]、内訳は ``_compute_raw_bootstrap_confidence`` の docstring 参照。
+            "confidence": confidence,
         }
         return bs, meta
 

@@ -492,13 +492,24 @@ diff を出す。**online の HandSummary / JSON / PHH は一切 mutate しな�
    - **active_seats**: ``RFID ∪ audio_seat_hints`` の union を採用。
      audio_seat_hints は ``AudioEvent.raw_text`` から ``シート N`` / ``seat N``
      を抽出した seat 集合 (+ 将来の ``AudioEvent.seat`` 拡張に備えた前向き互換)。
-   - **button heuristic**: ``self._prev_button_seat`` (前 hand で start_hand に
-     渡した button) が現 hand の active set に含まれていれば「ring 上の左隣」を
-     採用 (= ライブの button 進行に一致)。それ以外は ``min(active_seats)`` fallback。
+   - **button heuristic**: ``self._prev_button_seat`` (直近 *successfully*
+     bootstrapped hand で start_hand に渡した button) が現 hand の active set に
+     含まれていれば「ring 上の左隣」を採用 (= ライブの button 進行に一致)。
+     それ以外は ``min(active_seats)`` fallback。skipped hand を挟んでも
+     ``_prev_button_seat`` は壊さない (= 直近 *成功* hand の seed が残る)。
      `bootstrap_meta["button_inferred_from_prev"]` で消費側にどちら経由かを伝える。
    - meta に `signals.audio_seat_hints` / `prev_button` /
      `button_inferred_from_prev` / `sb_amount` / `bb_amount` を追加 (最後の 2 つは
      blinds level 変更検出の将来フック)。
+
+   **Phase 5-B+ の signal refinement**:
+   - audio_seat_hints を ``signals.audio_seat_hint_sources`` で 3 カテゴリに
+     細分化 (``action`` / ``winner`` / ``other``)。flat list は backwards compat
+     のため残置。
+   - ``confidence`` を固定 0.5 から staged operational metric ``[0.4, 0.7]`` に変更
+     (baseline 0.4 + 3 種 boost)。winner / other audio は active union には寄与
+     するが confidence boost には含めない (active 推定としては弱い signal という
+     整理)。詳細は ``_compute_raw_bootstrap_confidence`` の docstring。
 
    **online_summary bootstrap の成立条件**:
    - `online_summary.players[*].stack_start > 0` の seat が 2 以上
@@ -589,7 +600,7 @@ python -m output.reconstruct_session --session logs/<session>.json
 }
 ```
 
-`bootstrap_source="raw"` の場合、`bootstrap_meta` は次の dict (Phase 5-B 拡張):
+`bootstrap_source="raw"` の場合、`bootstrap_meta` は次の dict (Phase 5-B / 5-B+ 拡張):
 ```json
 {
   "source": "raw",
@@ -599,17 +610,37 @@ python -m output.reconstruct_session --session logs/<session>.json
   "button_seat": int,
   "button_inferred": true,               // truth claim ではない (deterministic seed or prev 由来)
   "button_inferred_from_prev": bool,     // Phase 5-B: True なら prev_button の左隣、False なら min(active_seats)
-  "prev_button": int | null,             // Phase 5-B: 前 hand の bs.button_seat (経路問わず記録)
+  "prev_button": int | null,             // Phase 5-B: 直近 *successfully* bootstrapped hand の bs.button_seat
   "blinds_inferred": true,               // SB/BB amount は default_sb/bb 由来
   "sb_amount": int,                      // Phase 5-B: blinds 変更検出フック (将来の mismatch 判定用)
   "bb_amount": int,                      // 同上
   "signals": {
     "rfid_seat_observations": [int, ...],
-    "audio_seat_hints": [int, ...]       // Phase 5-B: AudioEvent.raw_text から抽出した seat
+    "audio_seat_hints": [int, ...],      // Phase 5-B: 全 audio seat ヒントの union (backwards compat の flat list)
+    "audio_seat_hint_sources": {         // Phase 5-B+: 出所カテゴリ別の細分化
+      "action": [int, ...],              //   - 通常 poker action (fold/call/...) で言及された seat (= 強)
+      "winner": [int, ...],              //   - 終局 WINNER 発話の seat (= 弱、confidence boost 対象外)
+      "other":  [int, ...]               //   - new_hand / showdown 等の seat 言及 (= 弱)
+    }
   },
-  "confidence": 0.5                      // fixed heuristic confidence (calibrated probability ではない)
+  "confidence": float                    // Phase 5-B+: staged operational metric。値域 [0.4, 0.7]
+                                         // (calibrated probability ではない、下記 staging 内訳参照)
 }
 ```
+
+**Phase 5-B+ staged `confidence` の内訳** (依然 operational metric、posterior ではない):
+
+| 条件 | 増分 | 累計の典型 |
+|---|---|---|
+| baseline (RFID >= 2 seat の conservative gate を満たした) | +0.4 | 0.4 |
+| RFID >= 3 seat (multi-seat 観測は 2 seat より信頼度が上) | +0.1 | 0.5 |
+| ``audio_seat_hint_sources.action`` が RFID seat と overlap (cross-modal corroboration) | +0.1 | 0.5 / 0.6 |
+| ``button_inferred_from_prev=True`` (history-grounded) | +0.1 | 0.5 / 0.6 / 0.7 |
+
+合計値域は ``[0.4, 0.7]``。**winner / other カテゴリの audio は active_seats union には
+寄与するが、cross-modal boost の対象には入らない** (winner / other は active 推定として
+は弱い signal という Phase 5-B+ の整理)。値の動的計算は ``_compute_raw_bootstrap_confidence``。
+モデル事後確率 (top-1 / top-2 log 差 / Brier-calibrated) への置換は将来課題。
 
 Phase 4-B CLI 動作: session JSON の `blinds.sb` / `blinds.bb` (トップレベル、
 または各 hand `blinds` から fallback) を読み HandReconstructor の default として
@@ -869,7 +900,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 524 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 533 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -893,7 +924,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_hand_boundary.py | HandBoundaryDetector (audio / board cleared / hole appeared) + extract_hand_windows + IntegrationThread 結合 + EvidenceLog round-trip (Phase 2-C, 19 件) |
 | test_hand_reconstructor.py | HandReconstructor (online↔offline diff / fallback / 複数 hand / _compute_diff) + reconstruct_session CLI round-trip (Phase 3, 14 件) |
 | test_reconstructor_live_hook.py | IntegrationThread から advisory reconstruct を呼ぶ live hook (online_summary 注入 / 複数 hand / 例外時 online 不変 / online_summary=None で skipped or raw bootstrap) (Phase 4-A + 4-B, 10 件) |
-| test_hand_reconstructor_bootstrap.py | bootstrap 3 段階優先 (initial_state / raw / online_summary) + skipped + CLI round-trip で `bootstrap_source` 反映 (Phase 4-B, 11 件) + Phase 5-B: Audio 補助 signal / prev_button 左隣 heuristic / meta 拡張 / safety fallback (Phase 5-B, +13 件) |
+| test_hand_reconstructor_bootstrap.py | bootstrap 3 段階優先 (initial_state / raw / online_summary) + skipped + CLI round-trip で `bootstrap_source` 反映 (Phase 4-B, 11 件) + Phase 5-B: Audio 補助 signal / prev_button 左隣 heuristic / meta 拡張 / safety fallback (Phase 5-B, +13 件) + Phase 5-B+: audio_seat_hint_sources 分類 / staged confidence (4 levels) / skipped hand を跨いだ prev_button 保持 (Phase 5-B+, +9 件) |
 | test_inspect_reconstruction_cli.py | inspect_reconstruction CLI (label 判定 / --only-needs-review / --fields filter / 壊れた JSONL skip) (Phase 4-C1, 14 件) |
 | test_reconstruction_badges.py | gui.reconstruction_badges 単体 (status / RAW / diff_fields / button_inferred / format_history_line) (Phase 4-C2, 20 件) |
 | test_gui.py (Phase 4-C2 追加) | GUIDashboard.on_hand_finalized / _apply_hand_finalized: queue 経由、advisory accessor 呼び出し、tag 反映 (Phase 4-C2, +8 件) |
@@ -966,6 +997,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | Live advisory reconstruct hook (IntegrationThread から online_summary 注入) | ✅ 完了 (Phase 4-A) | `integration/engine.py`: `_finalize_hand` 末尾で `_invoke_reconstructor_hook(hand_id, online_summary=summary)` を呼び、結果を `_last_summary_by_hand_id` / `_last_reconstruction_by_hand_id` に保持。online JSON / PHH / GameStateManager は mutate しない |
 | Raw-only bootstrap (online_summary 不要の HandReconstructor 起動) | ✅ 完了 (Phase 4-B) | `HandReconstructor._bootstrap_from_events`: RFID `role="seat"` 観測 + コンストラクタ `default_sb`/`default_bb` で BettingState を起こす。button は最小 seat 番号 (deterministic, `button_inferred=True`)。`HandReconstructionResult.bootstrap_source` / `bootstrap_meta` で診断情報を返す。CLI 出力 / live hook の双方で稼働 |
 | Raw bootstrap signal 拡張 (Audio 補助 + prev_button heuristic) | ✅ 完了 (Phase 5-B) | `_bootstrap_from_events`: RFID は依然 primary (>= 2 seat gate)、Audio raw_text の `シート N` 抽出を補助 signal として active_seats に union。``self._prev_button_seat`` を経路問わず更新し、現 hand の active set に含まれていれば「ring 上の左隣」を button に採用 (`button_inferred_from_prev`)。`bootstrap_meta` に `audio_seat_hints` / `prev_button` / `button_inferred_from_prev` / `sb_amount` / `bb_amount` (blinds 変更検出フック) を追加 |
+| Raw bootstrap signal 細分化 + staged confidence | ✅ 完了 (Phase 5-B+) | `signals.audio_seat_hint_sources` で audio seat hint を ``action`` / ``winner`` / ``other`` の 3 カテゴリに分割 (action のみ confidence boost 対象)。`confidence` を固定 0.5 から ``_compute_raw_bootstrap_confidence`` による staged ``[0.4, 0.7]`` に変更 (baseline 0.4 + RFID>=3 / action overlap / button_inferred_from_prev の 3 boost)。依然 operational metric であって calibrated probability ではない。``_prev_button_seat`` は **直近 successfully bootstrapped hand** の seed を保持 (skipped hand を跨いでも壊さない) |
 | Reconstruct 結果可視化 CLI (read-only) | ✅ 完了 (Phase 4-C1) | `output/inspect_reconstruction.py`: `reconstruct_<session>.jsonl` を読んで `[OK]` / `[REVIEW]` / `[SKIPPED]` ラベル付きで hand 単位サマリを出す。`--only-needs-review` / `--fields A,B` フィルタ対応。online JSON / PHH / live hook 結果には触らない |
 | Patch proposal (差分 → 修正案、apply は無し) | ✅ 完了 (Phase 5-A) | `core/patch_proposal.py`: `HandPatchProposal` / `FieldPatch` / `compute_patch_proposal`。対象 field は resolution_type / seat_payouts / winner_seat / pot_total / showdown_revealed_cards。`HandReconstructionResult.patch_proposal` に乗り、CLI `--show-patches` と GUI ``patch_fields=`` 表示で見える。``can_patch_automatically=False`` (Phase 5-B 以降で apply 判定) |
 | ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
@@ -1326,7 +1358,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 524 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 533 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
@@ -1671,18 +1703,36 @@ retrospective に再評価して **incomplete → final** に昇格させる経�
   ``RFID ∪ audio_seat_hints`` の union を使う (= RFID で観測されなかった seat も
   音声言及があれば active 候補に追加)。``AudioEvent.seat`` 属性が将来追加された
   場合も拾えるよう ``getattr`` で前向き互換も入っている
-- ✅ **prev_button heuristic**: ``HandReconstructor._prev_button_seat`` を経路
-  問わず (raw / online_summary / initial_state) 更新する。次 hand の raw
-  bootstrap で active set に含まれていれば「ring 上の左隣」を button に採用
+- ✅ **prev_button heuristic**: ``HandReconstructor._prev_button_seat`` は
+  **直近 successfully bootstrapped hand** の ``bs.button_seat`` を保持する
+  (= bootstrap 失敗で skipped になった hand は ``_prev_button_seat`` を更新しない)。
+  経路問わず (raw / online_summary / initial_state) 成功時に更新する。次 hand の
+  raw bootstrap で active set に含まれていれば「ring 上の左隣」を button に採用
   (= ライブポーカーの button 左回り進行に一致)。meta の
   ``button_inferred_from_prev`` が ``True`` のときが prev 由来、``False`` なら
-  ``min(active_seats)`` fallback (Phase 4-B 互換)
+  ``min(active_seats)`` fallback (Phase 4-B 互換)。
+  *Skipped hand を跨いだ semantics*: ``[成功 A → skipped B → hand C]`` の場合、
+  hand C の raw bootstrap は **hand A の button** を seed に使う (= button history は
+  失われない)
 - ✅ **conservative gate は据置き**: ``len(rfid_seats) < 2`` は依然失敗扱い。
   Audio ヒントだけで bootstrap には踏み込まない (= 誤検知より skip を優先)
 - ✅ **blinds 変更検出フック**: ``bootstrap_meta["sb_amount"]`` /
   ``bootstrap_meta["bb_amount"]`` に default 値を埋めて、将来 session 中に
   blinds level が上がった場合の検出 / mismatch ハンドリングを Phase 5-C 以降で
   載せやすくする
+
+**Phase 5-B+ (Phase 5-B 直後の改善、同フェーズ扱い)**:
+- ✅ **Audio seat hint の出所カテゴリ化**: ``signals.audio_seat_hint_sources``
+  という dict (``action`` / ``winner`` / ``other``) を meta に追加。winner /
+  other は active_seats union には寄与するが confidence boost の対象外、という
+  Phase 5-B+ の整理を明示。``signals.audio_seat_hints`` (flat list) は backwards
+  compat のためそのまま維持
+- ✅ **staged operational `confidence`**: 固定 0.5 をやめ、
+  ``_compute_raw_bootstrap_confidence`` で signal 強度に応じて
+  ``0.4 / 0.5 / 0.6 / 0.7`` の 4 段階に分けた。baseline 0.4 + 3 種 boost
+  (RFID >= 3 / action audio が RFID と overlap / button_inferred_from_prev)。
+  依然 calibrated probability ではなく、operational な signal-stacker の枠は
+  維持 (= モデル posterior 化は Phase 5-C+ の課題)
 
 **Phase 5-B 以降スコープ外 (Phase 5-C / 6 以降の候補)**:
 - 差分検出時の **自動 patch apply** (現状は ``can_patch_automatically=False`` の
