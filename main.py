@@ -396,6 +396,30 @@ def run_gui() -> None:
     )
     dash.set_integration_thread(integration_thread)
 
+    # Tournament timer (tournament_structure.json があれば有効化)
+    TOURNAMENT_STRUCTURE_PATH = Path("tournament_structure.json")
+    if TOURNAMENT_STRUCTURE_PATH.exists():
+        try:
+            from core.tournament_state import TournamentState
+            from core.tournament_timer import (
+                TournamentTimer,
+                load_structure_from_file,
+            )
+
+            structure = load_structure_from_file(TOURNAMENT_STRUCTURE_PATH)
+            tstate = TournamentState()
+            timer = TournamentTimer(
+                structure=structure,
+                on_level_changed=lambda lv: integration_thread.update_blinds(lv.sb, lv.bb),
+            )
+            dash.set_tournament(structure, timer, tstate)
+            logger.info("Tournament timer loaded: %s (%d levels)",
+                        structure.name, len(structure.levels))
+        except (ValueError, OSError) as e:
+            logger.warning(
+                "tournament_structure.json load failed: %s — timer OFF", e,
+            )
+
     dash.start_threads(
         audio_thread=audio_thread,
         integration_thread=integration_thread,
