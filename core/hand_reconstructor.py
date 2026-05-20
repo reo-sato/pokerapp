@@ -85,7 +85,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from core.events import AudioEvent, RFIDEvent
 from core.hand_finalizer import HandFinalizer
 from core.hand_log import ActionRecord, HandSummary, RevealedHand
-from core.patch_proposal import HandPatchProposal, compute_patch_proposal
+from core.patch_proposal import FieldPatch, HandPatchProposal, compute_patch_proposal
 
 if TYPE_CHECKING:
     from integration.action_inference import BettingState
@@ -613,7 +613,7 @@ class HandReconstructor:
 
         confidence = (consumed_count / audio_count) if audio_count > 0 else None
 
-        return HandReconstructionResult(
+        result = HandReconstructionResult(
             actions=reconstructed_actions,
             summary=summary,
             needs_review=needs_review,
@@ -624,6 +624,13 @@ class HandReconstructor:
             bootstrap_meta=bootstrap_meta,
             patch_proposal=patch_proposal,
         )
+        # Phase 5-D: blind state mismatch を検出して advisory を強化する。
+        # online_summary.blinds と bootstrap_meta.sb_amount/bb_amount のズレ、
+        # および ``update_blinds`` 後も ``blind_source=="session_default"`` のままに
+        # なっている case を検出。検出時は result を mutate (needs_review / reason /
+        # patch_proposal)。online JSON / PHH / settlement には触らない。
+        self._apply_blind_mismatch_advisory(result, online_summary)
+        return result
 
     # ──────────────────────────────────────────────────────────────────────
     # bootstrap
@@ -835,6 +842,124 @@ class HandReconstructor:
             "confidence": confidence,
         }
         return bs, meta
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Phase 5-D: blind mismatch advisory
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _apply_blind_mismatch_advisory(
+        self,
+        result: HandReconstructionResult,
+        online_summary: Optional[HandSummary],
+    ) -> None:
+        """Phase 5-D: blind state の mismatch を検出して ``result`` を mutate する。
+
+        **検出する mismatch パターン**:
+
+        (A) **propagation health check** (= update_blinds が呼ばれたのに meta は
+            session_default のまま):
+              ``self._blinds_updated_at_runtime is True`` かつ
+              ``bootstrap_meta.get("blind_source") == "session_default"``
+              通常の Phase 5-C 配線が正しく動いていれば発生しない。defensive な
+              consistency check として残し、もし fire したら propagation 経路が
+              壊れていることを operator に通知する。
+
+        (B) **amount mismatch** (= reconstructor が古い / 違う blind で raw bootstrap
+            している):
+              ``online_summary.blinds`` (canonical) と ``bootstrap_meta.sb_amount`` /
+              ``["bb_amount"]`` がズレている。典型: blind 変更後に過去 hand を
+              reconstruct し直すと、過去の online は旧 blind で書かれているのに
+              reconstructor は新 blind を使っているのでズレる。
+
+        **検出時の result への反映** (online JSON / PHH には触らない):
+          - ``result.needs_review = True``
+          - ``result.reason`` が ``"reconstructed_no_diff"`` / ``"reconstructed"``
+            なら ``"reconstructed_with_blind_mismatch"`` に昇格
+            (``"reconstructed_with_diff"`` の場合はそのまま、summary_note に追記)
+          - (B) のとき ``result.patch_proposal`` に
+            ``FieldPatch(field="blinds", online=..., offline=...)`` を append
+            (proposal が無ければ blind だけの proposal を新規作成)
+          - ``patch_proposal.summary_note`` に blind mismatch の情報を追記
+
+        いずれの場合も **patch apply はしない** (= Phase 5-A 約束を維持、
+        ``can_patch_automatically=False`` のまま)。
+        """
+        meta = result.bootstrap_meta or {}
+        issues: list[str] = []
+        blind_patch: Optional[FieldPatch] = None
+
+        # ── Pattern (A): propagation health check ───────────────────────────
+        if (
+            self._blinds_updated_at_runtime
+            and meta.get("blind_source") == "session_default"
+        ):
+            issues.append("blinds_session_default_after_update")
+
+        # ── Pattern (B): canonical (online.blinds) と meta amounts のズレ ───
+        meta_sb = meta.get("sb_amount")
+        meta_bb = meta.get("bb_amount")
+        if online_summary is not None and meta_sb is not None and meta_bb is not None:
+            online_blinds = getattr(online_summary, "blinds", None) or {}
+            online_sb_raw = online_blinds.get("sb")
+            online_bb_raw = online_blinds.get("bb")
+            if online_sb_raw is not None and online_bb_raw is not None:
+                try:
+                    online_sb = int(online_sb_raw)
+                    online_bb = int(online_bb_raw)
+                    meta_sb_i = int(meta_sb)
+                    meta_bb_i = int(meta_bb)
+                    if online_sb != meta_sb_i or online_bb != meta_bb_i:
+                        issues.append("blind_amount_mismatch")
+                        blind_patch = FieldPatch(
+                            field="blinds",
+                            online={"sb": online_sb, "bb": online_bb},
+                            offline={"sb": meta_sb_i, "bb": meta_bb_i},
+                            note=(
+                                f"blind amounts differ "
+                                f"(online sb/bb={online_sb}/{online_bb}, "
+                                f"reconstructor sb/bb={meta_sb_i}/{meta_bb_i})"
+                            ),
+                        )
+                except (TypeError, ValueError):
+                    pass
+
+        if not issues:
+            return
+
+        # ── result の advisory を強化 ─────────────────────────────────────
+        result.needs_review = True
+
+        # reason 昇格: 既存 reason が "更なる diff 無し" 系のときだけ
+        # "reconstructed_with_blind_mismatch" に上げる。settlement diff が既にある
+        # 場合 ("reconstructed_with_diff") はそのまま (= summary_note で補足する)。
+        if result.reason in ("reconstructed_no_diff", "reconstructed"):
+            result.reason = "reconstructed_with_blind_mismatch"
+
+        # patch_proposal の summary_note 追記 + (B のとき) blind FieldPatch 追加
+        blind_note = "blind mismatch: " + ", ".join(issues)
+        if result.patch_proposal is None:
+            # 既存 proposal が無い場合: blind mismatch だけの proposal を新規作成
+            # (= operator が "blinds だけ怪しい hand" を見つけられるようにする)
+            hand_id_value = 0
+            if online_summary is not None:
+                try:
+                    hand_id_value = int(getattr(online_summary, "hand_id", 0))
+                except (TypeError, ValueError):
+                    hand_id_value = 0
+            fields_list = [blind_patch] if blind_patch is not None else []
+            result.patch_proposal = HandPatchProposal(
+                hand_id=hand_id_value,
+                can_patch_automatically=False,   # Phase 5-D も apply はしない
+                fields=fields_list,
+                summary_note=blind_note,
+            )
+        else:
+            if blind_patch is not None:
+                result.patch_proposal.fields.append(blind_patch)
+            existing = result.patch_proposal.summary_note or ""
+            result.patch_proposal.summary_note = (
+                f"{existing}; {blind_note}" if existing else blind_note
+            )
 
     def _bootstrap_from_online_summary(
         self,

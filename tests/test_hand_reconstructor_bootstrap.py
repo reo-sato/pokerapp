@@ -19,6 +19,7 @@ from core.event_queue import EventQueue
 from core.events import AudioEvent, RFIDEvent
 from core.game_state import GameStateManager, PlayerState
 from core.hand_log import ActionRecord, HandSummary
+from core.patch_proposal import FieldPatch, HandPatchProposal
 from core.hand_reconstructor import (
     HandReconstructionResult,
     HandReconstructor,
@@ -769,6 +770,250 @@ class TestPhase5CBlindSource:
         assert r2.bootstrap_meta["sb_amount"] == 300
         assert r2.bootstrap_meta["bb_amount"] == 600
         assert r2.bootstrap_meta["blind_source"] == "current_state"
+
+
+class TestPhase5DBlindMismatchAdvisory:
+    """Phase 5-D: blind state mismatch を検出して advisory (needs_review / reason /
+    patch_proposal) を強化するロジックを検証する。
+
+    Pattern (A): propagation health check
+      ``_blinds_updated_at_runtime=True`` だが meta.blind_source ==
+      "session_default" のまま (= 配線が壊れた defensive 検査)
+
+    Pattern (B): amount mismatch
+      ``online_summary.blinds`` と ``bootstrap_meta.sb_amount/bb_amount`` が
+      ズレている (= reconstructor が古い blind で raw bootstrap している)
+    """
+
+    def _result(
+        self,
+        *,
+        bootstrap_meta: dict,
+        reason: str = "reconstructed_no_diff",
+        needs_review: bool = False,
+        patch_proposal=None,
+        diff=None,
+    ):
+        """advisory 投入用の HandReconstructionResult を組み立てる test helper。"""
+        from core.hand_reconstructor import HandReconstructionResult
+        return HandReconstructionResult(
+            actions=[],
+            summary=object(),       # 非 None であれば advisory ロジックは中身を見ない
+            needs_review=needs_review,
+            reason=reason,
+            diff=diff,
+            confidence=None,
+            bootstrap_source="raw",
+            bootstrap_meta=bootstrap_meta,
+            patch_proposal=patch_proposal,
+        )
+
+    # ── (A) propagation health check ───────────────────────────────────────
+
+    def test_no_update_session_default_is_normal(self) -> None:
+        """update_blinds 未呼び出し + meta=session_default は正常 (= 変更なし)。"""
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        assert rc._blinds_updated_at_runtime is False
+        result = self._result(
+            bootstrap_meta={"blind_source": "session_default",
+                            "sb_amount": 100, "bb_amount": 200},
+        )
+        rc._apply_blind_mismatch_advisory(result, online_summary=None)
+        assert result.needs_review is False
+        assert result.reason == "reconstructed_no_diff"
+        assert result.patch_proposal is None
+
+    def test_pattern_a_update_after_session_default_triggers(self) -> None:
+        """update_blinds 呼び済み (_blinds_updated_at_runtime=True) なのに meta が
+        session_default のまま → Pattern A 発火、advisory 強化。
+        """
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        # ``update_blinds`` を呼んで flag を立てた状態をシミュレート
+        rc._blinds_updated_at_runtime = True
+        result = self._result(
+            bootstrap_meta={"blind_source": "session_default",
+                            "sb_amount": 100, "bb_amount": 200},
+        )
+        rc._apply_blind_mismatch_advisory(result, online_summary=None)
+        assert result.needs_review is True
+        # online_summary 無 + 純粋 blind-only issue → reason 昇格
+        assert result.reason == "reconstructed_with_blind_mismatch"
+        # blind-only proposal が作られている
+        assert result.patch_proposal is not None
+        assert "blinds_session_default_after_update" in (
+            result.patch_proposal.summary_note or ""
+        )
+
+    def test_pattern_a_keeps_existing_reason_when_diff_also_present(self) -> None:
+        """既存 reason が "reconstructed_with_diff" (= settlement 差分あり) の場合、
+        reason は昇格させず summary_note だけ追記する。
+        """
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        rc._blinds_updated_at_runtime = True
+        existing_proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[FieldPatch(field="pot_total", online=300, offline=600,
+                                note="total pot differs")],
+            summary_note="pot_total differ; candidate to update settlement fields",
+        )
+        result = self._result(
+            bootstrap_meta={"blind_source": "session_default",
+                            "sb_amount": 100, "bb_amount": 200},
+            reason="reconstructed_with_diff",
+            needs_review=True,
+            patch_proposal=existing_proposal,
+        )
+        rc._apply_blind_mismatch_advisory(result, online_summary=None)
+        # reason はそのまま (settlement diff が canonical な signal)
+        assert result.reason == "reconstructed_with_diff"
+        # 既存 proposal を破壊せず note に blind mismatch を追記
+        note = result.patch_proposal.summary_note
+        assert "pot_total" in note
+        assert "blinds_session_default_after_update" in note
+
+    # ── (B) amount mismatch ──────────────────────────────────────────────
+
+    def test_pattern_b_sb_bb_mismatch_creates_blind_field_patch(self) -> None:
+        """online_summary.blinds と meta.sb_amount/bb_amount のズレ → Pattern B 発火。
+        blind FieldPatch が proposal に含まれる。
+        """
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        # online は新 blind (200/400)、meta は旧 blind (100/200)
+        online = _make_hu_online_summary(hand_id=42, sb=200, bb=400)
+        result = self._result(
+            bootstrap_meta={"blind_source": "session_default",
+                            "sb_amount": 100, "bb_amount": 200},
+        )
+        rc._apply_blind_mismatch_advisory(result, online_summary=online)
+        assert result.needs_review is True
+        assert result.reason == "reconstructed_with_blind_mismatch"
+        assert result.patch_proposal is not None
+        # blind FieldPatch が含まれている
+        blind_fps = [fp for fp in result.patch_proposal.fields if fp.field == "blinds"]
+        assert len(blind_fps) == 1
+        fp = blind_fps[0]
+        assert fp.online == {"sb": 200, "bb": 400}
+        assert fp.offline == {"sb": 100, "bb": 200}
+        assert "differ" in (fp.note or "")
+        # proposal の hand_id は online_summary.hand_id から取られる
+        assert result.patch_proposal.hand_id == 42
+
+    def test_pattern_b_only_bb_differs_still_triggers(self) -> None:
+        """SB が同じで BB だけ違う場合も mismatch として扱う。"""
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        online = _make_hu_online_summary(hand_id=1, sb=100, bb=400)  # SB 同じ、BB 違う
+        result = self._result(
+            bootstrap_meta={"blind_source": "session_default",
+                            "sb_amount": 100, "bb_amount": 200},
+        )
+        rc._apply_blind_mismatch_advisory(result, online_summary=online)
+        assert result.needs_review is True
+        blind_fps = [fp for fp in result.patch_proposal.fields if fp.field == "blinds"]
+        assert blind_fps[0].online == {"sb": 100, "bb": 400}
+        assert blind_fps[0].offline == {"sb": 100, "bb": 200}
+
+    def test_pattern_b_appends_to_existing_proposal(self) -> None:
+        """既存 patch_proposal (pot_total など他 field 入り) に blind FieldPatch を
+        append し、summary_note に blind mismatch を追記する。
+        """
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        online = _make_hu_online_summary(hand_id=1, sb=200, bb=400)
+        existing_proposal = HandPatchProposal(
+            hand_id=1, can_patch_automatically=False,
+            fields=[FieldPatch(field="pot_total", online=600, offline=300,
+                                note="total pot differs")],
+            summary_note="pot_total differ; candidate to update settlement fields",
+        )
+        result = self._result(
+            bootstrap_meta={"blind_source": "session_default",
+                            "sb_amount": 100, "bb_amount": 200},
+            reason="reconstructed_with_diff",
+            needs_review=True,
+            patch_proposal=existing_proposal,
+        )
+        rc._apply_blind_mismatch_advisory(result, online_summary=online)
+        # 既存 field は残る + blind が append される
+        field_names = [fp.field for fp in result.patch_proposal.fields]
+        assert "pot_total" in field_names
+        assert "blinds" in field_names
+        # summary_note は連結される
+        note = result.patch_proposal.summary_note
+        assert "pot_total" in note
+        assert "blind mismatch" in note
+
+    # ── 正常ケース (Phase 5-C+ 互換) ─────────────────────────────────────
+
+    def test_current_state_and_matching_amounts_no_advisory_change(self) -> None:
+        """update_blinds 済 + meta=current_state + amounts 一致 → 何も変えない。"""
+        rc = HandReconstructor(default_sb=200, default_bb=400)
+        rc._blinds_updated_at_runtime = True
+        online = _make_hu_online_summary(hand_id=1, sb=200, bb=400)
+        result = self._result(
+            bootstrap_meta={"blind_source": "current_state",
+                            "sb_amount": 200, "bb_amount": 400},
+        )
+        rc._apply_blind_mismatch_advisory(result, online_summary=online)
+        assert result.needs_review is False
+        assert result.reason == "reconstructed_no_diff"
+        assert result.patch_proposal is None
+
+    def test_no_online_summary_no_meta_amounts_no_pattern_b(self) -> None:
+        """meta に sb/bb amount が無い場合は Pattern B は発火しない。"""
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = self._result(
+            bootstrap_meta={"blind_source": "session_default"},   # amount 無し
+        )
+        rc._apply_blind_mismatch_advisory(result, online_summary=None)
+        # propagation 健全 (flag=False) でかつ amount 無 → 何も変わらない
+        assert result.needs_review is False
+        assert result.patch_proposal is None
+
+    # ── e2e: reconstruct_from_events 経由で advisory が立つ ─────────────
+
+    def test_e2e_amount_mismatch_via_reconstruct_from_events(self) -> None:
+        """``reconstruct_from_events`` 経由で:
+        - default_sb/bb=100/200 で raw bootstrap → meta.sb_amount=100/bb_amount=200
+        - online_summary.blinds={"sb":200,"bb":400} (= 違う blind level)
+        - → Pattern B 検出、blind FieldPatch ぶら下がり、needs_review=True
+        """
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        # online は新 blind 200/400 だが events / reconstructor は旧 100/200 を使う
+        online = _make_hu_online_summary(hand_id=1, sb=200, bb=400)
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            _audio_rec("winner", 1.4, "シート2 ウィナー"),
+        ]
+        result = rc.reconstruct_from_events(events, online_summary=online)
+        # raw bootstrap が成立
+        assert result.bootstrap_source == "raw"
+        # blind mismatch 検出
+        assert result.needs_review is True
+        # patch_proposal が出来ていて blind FieldPatch が入っている
+        assert result.patch_proposal is not None
+        field_names = [fp.field for fp in result.patch_proposal.fields]
+        assert "blinds" in field_names
+        # summary_note に blind mismatch
+        assert "blind mismatch" in (result.patch_proposal.summary_note or "")
+
+    def test_e2e_no_mismatch_keeps_phase5c_behavior(self) -> None:
+        """blinds が一致するケースは Phase 5-C と完全に同じ挙動。"""
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        # online と meta どちらも 100/200
+        online = _make_hu_online_summary(hand_id=1, sb=100, bb=200)
+        events = [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            _audio_rec("winner", 1.4, "シート2 ウィナー"),
+        ]
+        result = rc.reconstruct_from_events(events, online_summary=online)
+        # 差分なしのまま (Phase 5-C 互換)
+        assert result.reason in ("reconstructed_no_diff", "reconstructed_with_diff")
+        # 純粋 blind 起因の advisory は付かない (= "reconstructed_with_blind_mismatch"
+        # にはならない)
+        assert result.reason != "reconstructed_with_blind_mismatch"
 
 
 class TestPhase5BPlusPrevButtonAcrossSkippedHand:

@@ -542,7 +542,7 @@ diff を出す。**online の HandSummary / JSON / PHH は一切 mutate しな�
   - `actions`: 再構成 ActionRecord 列 (SB_POST/BB_POST + beam MAP の player actions)
   - `summary`: offline HandSummary' (bootstrap 失敗時は None)
   - `needs_review`: online との diff があれば True (online_summary 未指定なら False)
-  - `reason`: `"reconstructed_no_diff"` / `"reconstructed_with_diff"` / `"reconstructed"` / `"reconstruction_skipped"`
+  - `reason`: `"reconstructed_no_diff"` / `"reconstructed_with_diff"` / `"reconstructed"` / `"reconstruction_skipped"` / `"reconstructed_with_blind_mismatch"` (Phase 5-D: blind 起因の advisory が立った hand)
   - `diff`: 差分 dict `{field: {"online": ..., "offline": ...}}` (一致 or 比較不能なら None)
   - `confidence`: **operational metric** = consumed_count / audio_count (上記参照、確率ではない)
   - `bootstrap_source` (Phase 4-B): `"initial_state"` / `"raw"` / `"online_summary"` / None
@@ -581,7 +581,7 @@ python -m output.reconstruct_session --session logs/<session>.json
 {
   "hand_id": int,
   "needs_review": bool,
-  "reason": "reconstructed_no_diff" | "reconstructed_with_diff" | "reconstruction_skipped",
+  "reason": "reconstructed_no_diff" | "reconstructed_with_diff" | "reconstruction_skipped" | "reconstructed_with_blind_mismatch",   // Phase 5-D 追加
   "diff": {...} | null,
   "confidence": float | null,
   "bootstrap_source": "initial_state" | "raw" | "online_summary" | null,  // Phase 4-B
@@ -902,7 +902,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 543 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 553 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -926,7 +926,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_hand_boundary.py | HandBoundaryDetector (audio / board cleared / hole appeared) + extract_hand_windows + IntegrationThread 結合 + EvidenceLog round-trip (Phase 2-C, 19 件) |
 | test_hand_reconstructor.py | HandReconstructor (online↔offline diff / fallback / 複数 hand / _compute_diff) + reconstruct_session CLI round-trip (Phase 3, 14 件) |
 | test_reconstructor_live_hook.py | IntegrationThread から advisory reconstruct を呼ぶ live hook (online_summary 注入 / 複数 hand / 例外時 online 不変 / online_summary=None で skipped or raw bootstrap) (Phase 4-A + 4-B, 10 件) |
-| test_hand_reconstructor_bootstrap.py | bootstrap 3 段階優先 (initial_state / raw / online_summary) + skipped + CLI round-trip で `bootstrap_source` 反映 (Phase 4-B, 11 件) + Phase 5-B: Audio 補助 signal / prev_button 左隣 heuristic / meta 拡張 / safety fallback (Phase 5-B, +13 件) + Phase 5-B+: audio_seat_hint_sources 分類 / staged confidence (4 levels) / skipped hand を跨いだ prev_button 保持 (Phase 5-B+, +9 件) + Phase 5-C: HandReconstructor.update_blinds + blind_source field (Phase 5-C, +4 件) |
+| test_hand_reconstructor_bootstrap.py | bootstrap 3 段階優先 (initial_state / raw / online_summary) + skipped + CLI round-trip で `bootstrap_source` 反映 (Phase 4-B, 11 件) + Phase 5-B: Audio 補助 signal / prev_button 左隣 heuristic / meta 拡張 / safety fallback (Phase 5-B, +13 件) + Phase 5-B+: audio_seat_hint_sources 分類 / staged confidence (4 levels) / skipped hand を跨いだ prev_button 保持 (Phase 5-B+, +9 件) + Phase 5-C: HandReconstructor.update_blinds + blind_source field (Phase 5-C, +4 件) + Phase 5-D: blind mismatch advisory (Pattern A propagation health / Pattern B amount mismatch / 既存 proposal への append / e2e) (Phase 5-D, +10 件) |
 | test_reconstructor_live_hook.py (Phase 5-C 追加) | IntegrationThread.update_blinds で canonical state を同期 / 不正値で ValueError / 過去 hand の summary は変更しない (Phase 5-C, +3 件) |
 | test_gui.py (Phase 5-C 追加) | _cmd_update_blinds が IntegrationThread.update_blinds を呼ぶ / 不正値拒否 / thread 未接続時の warning (Phase 5-C, +3 件) |
 | test_inspect_reconstruction_cli.py | inspect_reconstruction CLI (label 判定 / --only-needs-review / --fields filter / 壊れた JSONL skip) (Phase 4-C1, 14 件) |
@@ -1003,6 +1003,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | Raw bootstrap signal 拡張 (Audio 補助 + prev_button heuristic) | ✅ 完了 (Phase 5-B) | `_bootstrap_from_events`: RFID は依然 primary (>= 2 seat gate)、Audio raw_text の `シート N` 抽出を補助 signal として active_seats に union。``self._prev_button_seat`` を経路問わず更新し、現 hand の active set に含まれていれば「ring 上の左隣」を button に採用 (`button_inferred_from_prev`)。`bootstrap_meta` に `audio_seat_hints` / `prev_button` / `button_inferred_from_prev` / `sb_amount` / `bb_amount` (blinds 変更検出フック) を追加 |
 | Raw bootstrap signal 細分化 + staged confidence | ✅ 完了 (Phase 5-B+) | `signals.audio_seat_hint_sources` で audio seat hint を ``action`` / ``winner`` / ``other`` の 3 カテゴリに分割 (action のみ confidence boost 対象)。`confidence` を固定 0.5 から ``_compute_raw_bootstrap_confidence`` による staged ``[0.4, 0.7]`` に変更 (baseline 0.4 + RFID>=3 / action overlap / button_inferred_from_prev の 3 boost)。依然 operational metric であって calibrated probability ではない。``_prev_button_seat`` は **直近 successfully bootstrapped hand** の seed を保持 (skipped hand を跨いでも壊さない) |
 | Blind level 変更の canonical state 同期 | ✅ 完了 (Phase 5-C) | `IntegrationThread.update_blinds(sb, bb)` が **唯一の書き込み口** (canonical)。``GameStateManager._sb/_bb`` と ``HandReconstructor._default_sb/_bb`` は **projection** として canonical を反映 (独立に書き換えない)。GUI に SB/BB 入力 + "Blinds 更新" ボタンを追加 (`_cmd_update_blinds`)。`bootstrap_meta.blind_source` で `"current_state"` (runtime 更新後) / `"session_default"` (初期値のまま) を区別。**次 hand から有効**、現 hand の HandSummary.blinds は不変。音声起源の blind 推定はしない (= GUI 操作起点のみ)。`session_default` を自動 ``needs_review`` の根拠にはしない (キャッシュゲームでノイズが多すぎる) |
+| Blind mismatch advisory (reconstruct への反映) | ✅ 完了 (Phase 5-D) | `HandReconstructor._apply_blind_mismatch_advisory`: (A) `_blinds_updated_at_runtime=True` だが meta が `session_default` のままの **propagation health check**、(B) `online_summary.blinds` と `bootstrap_meta.sb_amount/bb_amount` の **amount mismatch** を検出。検出時は `needs_review=True`、reason を ``reconstructed_with_blind_mismatch`` に昇格 (settlement diff が既にある場合はそのまま)、`patch_proposal` に `FieldPatch(field="blinds", online=..., offline=...)` を append。proposal が無ければ blind-only proposal を新規作成。`can_patch_automatically=False` (apply は依然しない) |
 | Reconstruct 結果可視化 CLI (read-only) | ✅ 完了 (Phase 4-C1) | `output/inspect_reconstruction.py`: `reconstruct_<session>.jsonl` を読んで `[OK]` / `[REVIEW]` / `[SKIPPED]` ラベル付きで hand 単位サマリを出す。`--only-needs-review` / `--fields A,B` フィルタ対応。online JSON / PHH / live hook 結果には触らない |
 | Patch proposal (差分 → 修正案、apply は無し) | ✅ 完了 (Phase 5-A) | `core/patch_proposal.py`: `HandPatchProposal` / `FieldPatch` / `compute_patch_proposal`。対象 field は resolution_type / seat_payouts / winner_seat / pot_total / showdown_revealed_cards。`HandReconstructionResult.patch_proposal` に乗り、CLI `--show-patches` と GUI ``patch_fields=`` 表示で見える。``can_patch_automatically=False`` (Phase 5-B 以降で apply 判定) |
 | ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
@@ -1363,7 +1364,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 543 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+ + 10 Phase 5-C)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 553 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+ + 10 Phase 5-C + 10 Phase 5-D)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
@@ -1793,6 +1794,45 @@ projection にリファクタする可能性は別フェーズで検討。
 - 音声は基本的に騒音が多くて blind 額の信頼できる source ではないため、
   raw_text からの「ブラインド XX YY」のような自然言語パースは Phase 5-C では
   入れない (将来の dealer-callout 認識まで保留)
+
+**Phase 5-D 完了済み (blind mismatch advisory)**:
+- ✅ ``HandReconstructor._apply_blind_mismatch_advisory(result, online_summary)``
+  を新設。``reconstruct_from_events`` の末尾 (patch_proposal 計算後) で呼ばれ、
+  検出したパターンに応じて ``result`` を mutate する (online JSON / PHH /
+  settlement には触らない)。
+- ✅ **Pattern (A) propagation health check**:
+  ``self._blinds_updated_at_runtime is True`` (= ``update_blinds`` が呼ばれた
+  session) なのに ``bootstrap_meta["blind_source"] == "session_default"`` のまま
+  → ``"blinds_session_default_after_update"`` を issue として記録。Phase 5-C
+  の配線が正しく動いていれば発生しない defensive consistency check。
+- ✅ **Pattern (B) amount mismatch**:
+  ``online_summary.blinds.sb/bb`` と ``bootstrap_meta.sb_amount/bb_amount`` が
+  ズレている → ``"blind_amount_mismatch"`` を issue として記録 +
+  ``FieldPatch(field="blinds", online={...}, offline={...},
+  note="blind amounts differ ...")`` を patch_proposal に追加。典型例: blind
+  level 変更後に過去 hand を replay すると過去 online は旧 blind、reconstructor
+  は新 blind を使うので mismatch する。
+- ✅ **advisory への反映** (= ``result`` mutate):
+  - ``needs_review = True``
+  - ``reason``: 既存が ``"reconstructed_no_diff"`` / ``"reconstructed"`` のとき
+    のみ ``"reconstructed_with_blind_mismatch"`` に昇格。``"reconstructed_with_diff"``
+    の場合はそのまま (settlement diff が canonical signal なので)
+  - ``patch_proposal``: 既存 proposal があれば blind FieldPatch を append +
+    ``summary_note`` に ``"blind mismatch: ..."`` を追記。proposal が無い純粋
+    blind-only ケースでは blind FieldPatch (Pattern B 時) + summary_note のみの
+    proposal を新規作成
+  - ``can_patch_automatically=False`` は維持 (Phase 5-A 約束、apply はしない)
+
+**Phase 5-D スコープ外 / 注意事項**:
+- **patch_proposal の自動 apply は依然しない**: blind mismatch を検出しても
+  ``can_patch_automatically=False`` のまま、operator がレビューする前提
+- **blinds は ``PATCHABLE_FIELDS`` に追加しない**: Phase 5-A の対象 field 集合は
+  settlement 系 (resolution_type / seat_payouts / winner_seat / pot_total /
+  showdown_revealed_cards) に絞っており、blinds は ``_compute_diff`` の対象に
+  もなっていない。Phase 5-D の blind FieldPatch は **advisory 専用の特例追加**
+  であって、``compute_patch_proposal`` の責務拡張ではない (= 既存 helper の
+  scope を変えていない)
+- **音声からの blind 値推定はしない** (Phase 5-C と同じ仕様継続)
 
 **Phase 5-B+ (Phase 5-B 直後の改善、同フェーズ扱い)**:
 - ✅ **Audio seat hint の出所カテゴリ化**: ``signals.audio_seat_hint_sources``
