@@ -66,6 +66,17 @@ _CONF_CAMERA_ONLY       = 0.30
 _BOARD_STREET_THRESHOLDS = {3: "flop", 4: "turn", 5: "river"}
 
 
+# Phase 5-F: live advisory state の bounded retention 上限。
+#   `_last_summary_by_hand_id` / `_last_reconstruction_by_hand_id` を hand_id
+#   昇順で eviction し、最新 ``MAX_ADVISORY_HANDS`` 件だけ保持する。
+#   500 hand は典型的なトーナメント 1 日分以上をカバーし、advisory accessor が
+#   degrade に倒れる頻度を実運用上ほぼゼロにする目安。将来 ``config.json`` から
+#   読み込めるようにする余地は TODO (Phase 5-F+ 候補)。
+#   注意: ``_completed_hands`` (hand window events) は別途で、本フェーズでは
+#   eviction の対象外 (CLAUDE.md にスコープ外と明記)。
+MAX_ADVISORY_HANDS: int = 500
+
+
 def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
     """センサー組み合わせから confidence スコアを返す。"""
     if has_rfid and has_audio and has_camera:
@@ -603,7 +614,40 @@ class IntegrationThread(threading.Thread):
             return
         self._last_reconstruction_by_hand_id[hand_id] = result
         self._last_reconstruction = result
+        # Phase 5-F: live advisory state の bounded retention。
+        # 非 audio_winner end の hand (= ``_apply_boundaries`` から直接呼ばれた経路)
+        # でもここを通るので、両 dict が無限に伸びないようここでも eviction する
+        # (``_finalize_hand`` 末尾でも呼ぶが、こちらが先に走るのは安全側に倒した冗長性)。
+        self._evict_old_advisory_entries()
         # TODO Phase 4-B+: needs_review を GUI / logs / 自動 patch 経路へ反映する
+
+    def _evict_old_advisory_entries(self) -> None:
+        """Phase 5-F: ``_last_summary_by_hand_id`` / ``_last_reconstruction_by_hand_id``
+        を hand_id 昇順で eviction し、最新 ``MAX_ADVISORY_HANDS`` 件以下に保つ。
+
+        **対象**: 上記 2 dict の **union** に含まれる hand_id の集合を「保持中の
+        hand」とみなし、その総数が ``MAX_ADVISORY_HANDS`` を超えた場合に最古の
+        ``excess`` 件を両 dict から削除する (``pop(.., None)`` を使うので片方
+        だけに entry がある hand_id でも安全)。
+
+        **スコープ外**:
+          - ``_completed_hands`` (hand window events) は本フェーズでは evict しない
+          - 削除した hand_id への ``get_last_summary`` / ``get_reconstruction_result``
+            は ``dict.get`` 経由で ``None`` を返すので、GUI の Phase 4-C2 / 5-E
+            degrade 経路 (``[SKIPPED]`` / ``blinds=?/? (source=unknown)``) で処理される
+        """
+        all_ids = (
+            self._last_summary_by_hand_id.keys()
+            | self._last_reconstruction_by_hand_id.keys()
+        )
+        size = len(all_ids)
+        if size <= MAX_ADVISORY_HANDS:
+            return
+        excess = size - MAX_ADVISORY_HANDS
+        # hand_id 昇順で先頭 excess 件を削除 (= 最古から捨てる)
+        for hand_id in sorted(all_ids)[:excess]:
+            self._last_summary_by_hand_id.pop(hand_id, None)
+            self._last_reconstruction_by_hand_id.pop(hand_id, None)
 
     # ――― イベントハンドラ ―――
 
@@ -982,6 +1026,11 @@ class IntegrationThread(threading.Thread):
         self._last_summary_by_hand_id[summary.hand_id] = summary
         if summary.hand_id in self._completed_hands:
             self._invoke_reconstructor_hook(summary.hand_id, online_summary=summary)
+        # Phase 5-F: ``_invoke_reconstructor_hook`` が呼ばれなかった経路 (hand_id が
+        # ``_completed_hands`` に無い) でも ``_last_summary_by_hand_id`` だけ伸び続ける
+        # ことがあるので、ここでも eviction を回す (= 安全側の冗長呼び出し、
+        # ``MAX_ADVISORY_HANDS`` 未満では即 return するので O(1))。
+        self._evict_old_advisory_entries()
 
         # Phase 4-C2: GUI / 監視ツールへの通知。advisory が ``_last_reconstruction_by_hand_id``
         # に確定した *後* に発火させる (= コールバックは ``get_reconstruction_result`` で

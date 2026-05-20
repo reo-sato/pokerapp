@@ -337,6 +337,109 @@ class TestOnHandFinalizedCallback:
         assert sum(stacks.values()) == 20000
 
 
+class TestAdvisoryEviction:
+    """Phase 5-F: ``_last_summary_by_hand_id`` / ``_last_reconstruction_by_hand_id``
+    が ``MAX_ADVISORY_HANDS`` 件を超えたら古い hand から evict される。"""
+
+    def test_evict_keeps_latest_n_hands_symmetric(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """両 dict 同じ hand_id を持つ場合: union 5 件 / MAX=3 → {3,4,5} だけ残る。"""
+        monkeypatch.setattr("integration.engine.MAX_ADVISORY_HANDS", 3)
+        thread, _aq, _stop, _w, _gs = _build_thread(tmp_path)
+
+        # 両 dict に hand_id 1..5 を入れる (中身は適当な sentinel)
+        for hid in [1, 2, 3, 4, 5]:
+            thread._last_summary_by_hand_id[hid] = object()
+            thread._last_reconstruction_by_hand_id[hid] = object()
+
+        thread._evict_old_advisory_entries()
+
+        # MAX=3 → excess=2 → 昇順 [1,2] を捨てる
+        assert set(thread._last_summary_by_hand_id.keys()) == {3, 4, 5}
+        assert set(thread._last_reconstruction_by_hand_id.keys()) == {3, 4, 5}
+
+    def test_evict_handles_asymmetric_dicts(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """片方の dict にしか entry が無い hand_id も union 経由で eviction される。"""
+        monkeypatch.setattr("integration.engine.MAX_ADVISORY_HANDS", 3)
+        thread, _aq, _stop, _w, _gs = _build_thread(tmp_path)
+
+        # summary は {1,2,3,4} (4 件)、reconstruction は {2,5} (2 件)。
+        # union={1,2,3,4,5}=5 件。MAX=3 → excess=2 → {1,2} を捨てる。
+        thread._last_summary_by_hand_id = {h: object() for h in [1, 2, 3, 4]}
+        thread._last_reconstruction_by_hand_id = {h: object() for h in [2, 5]}
+
+        thread._evict_old_advisory_entries()
+
+        # summary: 4 件中 {1,2} が消えて {3,4} 残る
+        assert set(thread._last_summary_by_hand_id.keys()) == {3, 4}
+        # reconstruction: 2 件中 {2} が消えて {5} 残る
+        assert set(thread._last_reconstruction_by_hand_id.keys()) == {5}
+
+    def test_evict_noop_under_limit(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """size <= MAX_ADVISORY_HANDS の場合は eviction しない (no-op)。"""
+        monkeypatch.setattr("integration.engine.MAX_ADVISORY_HANDS", 10)
+        thread, _aq, _stop, _w, _gs = _build_thread(tmp_path)
+
+        for hid in [1, 2, 3]:
+            thread._last_summary_by_hand_id[hid] = object()
+            thread._last_reconstruction_by_hand_id[hid] = object()
+
+        thread._evict_old_advisory_entries()
+        assert set(thread._last_summary_by_hand_id.keys()) == {1, 2, 3}
+        assert set(thread._last_reconstruction_by_hand_id.keys()) == {1, 2, 3}
+
+    def test_evict_via_invoke_reconstructor_hook(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """``_invoke_reconstructor_hook`` 経由で連続 5 hand 走らせると最新 3 だけ残る
+        (= eviction が hook の中から自動的に走る)。
+        """
+        monkeypatch.setattr("integration.engine.MAX_ADVISORY_HANDS", 3)
+        thread, _aq, _stop, _w, _gs = _build_thread(tmp_path)
+
+        # 空 window で 5 hand 分の hook を invoke (online_summary=None → skipped 結果)。
+        # 各回で reconstruction dict に entry が積まれていき、eviction が走る。
+        for hid in [1, 2, 3, 4, 5]:
+            thread._completed_hands[hid] = []
+            thread._invoke_reconstructor_hook(hid, online_summary=None)
+
+        remaining = set(thread._last_reconstruction_by_hand_id.keys())
+        assert remaining == {3, 4, 5}
+
+    def test_get_accessors_return_none_for_evicted(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """evicted hand_id への ``get_last_summary`` / ``get_reconstruction_result``
+        は None を返す (= GUI の degrade パスへ送り込む)。
+        """
+        monkeypatch.setattr("integration.engine.MAX_ADVISORY_HANDS", 2)
+        thread, _aq, _stop, _w, _gs = _build_thread(tmp_path)
+
+        for hid in [1, 2, 3]:
+            thread._last_summary_by_hand_id[hid] = object()
+            thread._last_reconstruction_by_hand_id[hid] = object()
+        thread._evict_old_advisory_entries()
+
+        # hand 1 は evict されたので None
+        assert thread.get_last_summary(1) is None
+        assert thread.get_reconstruction_result(1) is None
+        # hand 2, 3 は残っている
+        assert thread.get_last_summary(2) is not None
+        assert thread.get_reconstruction_result(2) is not None
+        assert thread.get_last_summary(3) is not None
+        assert thread.get_reconstruction_result(3) is not None
+
+    def test_default_max_advisory_hands_is_500(self) -> None:
+        """default value のサニティチェック (将来変えるときは意識的に)。"""
+        from integration.engine import MAX_ADVISORY_HANDS
+        assert MAX_ADVISORY_HANDS == 500
+
+
 class TestMultipleHandsTracked:
     def test_two_hands_independently_tracked(self, tmp_path: Path) -> None:
         thread, audio_q, stop, _writer, _gs = _build_thread(tmp_path)

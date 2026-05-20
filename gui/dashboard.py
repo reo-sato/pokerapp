@@ -41,6 +41,12 @@ _CONF_COLOR_HIGH   = "#4CAF50"  # 緑  (>= 0.75)
 _CONF_COLOR_MEDIUM = "#FF9800"  # 橙  (>= 0.5)
 _CONF_COLOR_LOW    = "#F44336"  # 赤  (< 0.5)
 
+# Phase 5-F: history Textbox の行数上限。超えた分は古い行 (= 上端) から削る。
+# IntegrationThread 側の advisory state は MAX_ADVISORY_HANDS=500 で eviction する
+# が、GUI history はざっくりログなので別途上限を設けて長時間運用での Tk widget
+# メモリ圧を回避する (= advisory state とは独立に管理)。
+MAX_HISTORY_LINES: int = 1000
+
 
 _CARD_RE = re.compile(r'[2-9TJQKA][hdcs]', re.IGNORECASE)
 
@@ -697,6 +703,9 @@ class GUIDashboard:
         box = self._history_box
         box.configure(state="normal")
         box.insert("end", line + "\n", badge_state.status)
+        # Phase 5-F: history Textbox を MAX_HISTORY_LINES 以下にトリム
+        # (長時間運用での Tk widget メモリ圧回避)。
+        self._trim_history_lines()
         box.configure(state="disabled")
         box.see("end")
 
@@ -728,6 +737,35 @@ class GUIDashboard:
         if badge_state.button_inferred:
             detail_parts.append("(button inferred from raw observations)")
         self._lbl_latest_advisory.configure(text="  |  ".join(detail_parts))
+
+    def _trim_history_lines(self) -> None:
+        """Phase 5-F: history Textbox の行数を ``MAX_HISTORY_LINES`` 以下に保つ。
+
+        Tk Text widget の ``index("end-1c")`` は ``"<line>.<col>"`` 形式で、
+        N 行 (= N 個の ``"\\n"`` を含む文字列) を insert した後は ``"<N+0>.X"``
+        を返す (= line 番号 == 内容行数)。``MAX_HISTORY_LINES`` を超えた excess
+        行を先頭から削除する。
+
+        呼び出し側の前提:
+          - ``self._history_box.configure(state="normal")`` が既に立てられている
+            (= ``_apply_hand_finalized`` の insert 直後で呼ぶ)
+          - MagicMock など index/delete が呼べない実装でも例外を出さず safe degrade
+        """
+        try:
+            last = self._history_box.index("end-1c")
+            line_no = int(str(last).split(".")[0])
+        except (AttributeError, ValueError, TypeError, IndexError):
+            return
+        if line_no <= MAX_HISTORY_LINES:
+            return
+        excess = line_no - MAX_HISTORY_LINES
+        try:
+            self._history_box.delete("1.0", f"{excess + 1}.0")
+        except Exception:
+            # widget が想定外の状態でも GUI 全体を巻き込まない。
+            # (dashboard.py には専用 logger が無いので silent swallow + 次回 invoke で
+            # 再試行される)
+            pass
 
     # ──────────────────────────────────────────────────────────────────────
     # Phase 5-E: blind advisory helpers (read-only)

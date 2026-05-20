@@ -957,7 +957,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 563 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 576 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -985,6 +985,8 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_reconstructor_live_hook.py (Phase 5-C 追加) | IntegrationThread.update_blinds で canonical state を同期 / 不正値で ValueError / 過去 hand の summary は変更しない (Phase 5-C, +3 件) |
 | test_gui.py (Phase 5-C 追加) | _cmd_update_blinds が IntegrationThread.update_blinds を呼ぶ / 不正値拒否 / thread 未接続時の warning (Phase 5-C, +3 件) |
 | test_gui.py (Phase 5-E 追加) | Latest advisory に `blinds=SB/BB (source=...)` 表示 / `blind_mismatch=yes` (patch_proposal に blinds 含む時) / history 行に current_state のみ blinds suffix / `(blind_mismatch)` marker / dict 形 proposal 互換 / source 正規化 (Phase 5-E, +10 件) |
+| test_gui.py (Phase 5-F 追加) | history Textbox の bounded retention (`_trim_history_lines`: over/under/exactly-at-limit、bad index degrade、`_apply_hand_finalized` から呼ばれる)、evicted hand_id (accessor が None) で `_apply_hand_finalized` が `[SKIPPED]` + `blinds=?/? source=unknown` に degrade (Phase 5-F, +7 件) |
+| test_reconstructor_live_hook.py (Phase 5-F 追加) | `IntegrationThread._evict_old_advisory_entries`: symmetric / asymmetric dicts / under-limit no-op / `_invoke_reconstructor_hook` 経由の自動 eviction / evicted hand_id への get_* accessor が None / `MAX_ADVISORY_HANDS` default sanity (Phase 5-F, +6 件) |
 | test_inspect_reconstruction_cli.py | inspect_reconstruction CLI (label 判定 / --only-needs-review / --fields filter / 壊れた JSONL skip) (Phase 4-C1, 14 件) |
 | test_reconstruction_badges.py | gui.reconstruction_badges 単体 (status / RAW / diff_fields / button_inferred / format_history_line) (Phase 4-C2, 20 件) |
 | test_gui.py (Phase 4-C2 追加) | GUIDashboard.on_hand_finalized / _apply_hand_finalized: queue 経由、advisory accessor 呼び出し、tag 反映 (Phase 4-C2, +8 件) |
@@ -1061,6 +1063,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | Blind level 変更の canonical state 同期 | ✅ 完了 (Phase 5-C) | `IntegrationThread.update_blinds(sb, bb)` が **唯一の書き込み口** (canonical)。``GameStateManager._sb/_bb`` と ``HandReconstructor._default_sb/_bb`` は **projection** として canonical を反映 (独立に書き換えない)。GUI に SB/BB 入力 + "Blinds 更新" ボタンを追加 (`_cmd_update_blinds`)。`bootstrap_meta.blind_source` で `"current_state"` (runtime 更新後) / `"session_default"` (初期値のまま) を区別。**次 hand から有効**、現 hand の HandSummary.blinds は不変。音声起源の blind 推定はしない (= GUI 操作起点のみ)。`session_default` を自動 ``needs_review`` の根拠にはしない (キャッシュゲームでノイズが多すぎる) |
 | Blind mismatch advisory (reconstruct への反映) | ✅ 完了 (Phase 5-D) | `HandReconstructor._apply_blind_mismatch_advisory`: (A) `_blinds_updated_at_runtime=True` だが meta が `session_default` のままの **propagation health check**、(B) `online_summary.blinds` と `bootstrap_meta.sb_amount/bb_amount` の **amount mismatch** を検出。検出時は `needs_review=True`、reason を ``reconstructed_with_blind_mismatch`` に昇格 (settlement diff が既にある場合はそのまま)、`patch_proposal` に `FieldPatch(field="blinds", online=..., offline=...)` を append。proposal が無ければ blind-only proposal を新規作成。`can_patch_automatically=False` (apply は依然しない) |
 | GUI blind 表示 (advisory ラベル + history 行) | ✅ 完了 (Phase 5-E) | `gui/dashboard.py` の helper (`_format_blind_for_advisory` / `_format_blind_suffix_for_history` / `_has_blind_patch` / `_blind_source_text`) で `summary.blinds` / `bootstrap_meta.blind_source` / `patch_proposal.fields` を read-only に参照。Latest advisory に `blinds=SB/BB (source=current_state\|session_default\|unknown)` を常時表示、`blind_mismatch=yes` を Phase 5-D の blind FieldPatch ありの hand のみ表示。history 行 suffix は `current_state` のときだけ `blinds=SB/BB (current_state)` を出す (`session_default` はノイズ削減のため省略)、blind mismatch は `(blind_mismatch)` marker。online JSON / PHH / reconstruct ロジックには触らない |
+| Advisory state の bounded retention | ✅ 完了 (Phase 5-F) | `integration.engine.MAX_ADVISORY_HANDS=500` で `_last_summary_by_hand_id` / `_last_reconstruction_by_hand_id` を eviction (union of hand_ids 最古から)。`_evict_old_advisory_entries` を `_invoke_reconstructor_hook` 末尾 + `_finalize_hand` 末尾の両方から呼んで `_apply_boundaries` 経路もカバー。evicted hand への `get_last_summary` / `get_reconstruction_result` は ``None`` を返すので GUI は Phase 4-C2 / 5-E の degrade パスで `[SKIPPED]` + `blinds=?/? (source=unknown)` 表示。GUI 側も `MAX_HISTORY_LINES=1000` で history Textbox を bounded retention (`_trim_history_lines` を `_apply_hand_finalized` の insert 直後に呼ぶ)。`_completed_hands` (hand window events) は本フェーズの eviction 対象外 (= Phase 6+ 候補) |
 | Reconstruct 結果可視化 CLI (read-only) | ✅ 完了 (Phase 4-C1) | `output/inspect_reconstruction.py`: `reconstruct_<session>.jsonl` を読んで `[OK]` / `[REVIEW]` / `[SKIPPED]` ラベル付きで hand 単位サマリを出す。`--only-needs-review` / `--fields A,B` フィルタ対応。online JSON / PHH / live hook 結果には触らない |
 | Patch proposal (差分 → 修正案、apply は無し) | ✅ 完了 (Phase 5-A) | `core/patch_proposal.py`: `HandPatchProposal` / `FieldPatch` / `compute_patch_proposal`。対象 field は resolution_type / seat_payouts / winner_seat / pot_total / showdown_revealed_cards。`HandReconstructionResult.patch_proposal` に乗り、CLI `--show-patches` と GUI ``patch_fields=`` 表示で見える。``can_patch_automatically=False`` (Phase 5-B 以降で apply 判定) |
 | ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
@@ -1421,7 +1424,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 563 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+ + 10 Phase 5-C + 10 Phase 5-D + 10 Phase 5-E)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 576 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+ + 10 Phase 5-C + 10 Phase 5-D + 10 Phase 5-E + 13 Phase 5-F)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
@@ -1918,6 +1921,38 @@ projection にリファクタする可能性は別フェーズで検討。
   CLI でも同じ表示が欲しくなった場合は badges.py 側に移すか検討
 - 色 / アイコン強調はしない (= テキストレベルの indicator のみ。``[REVIEW]``
   と同じ赤系 tag は既存ロジックで自動付与される)
+
+**Phase 5-F 完了済み (advisory state の bounded retention)**:
+- ✅ ``integration.engine.MAX_ADVISORY_HANDS = 500`` を module 定数として導入。
+  hand_id 単調増加を前提に、両 dict の **union of hand_ids** が上限を超えたら
+  **最古から** evict する設計 (``_evict_old_advisory_entries`` メソッド)
+- ✅ 呼び出し点を 2 ヶ所に: ``_invoke_reconstructor_hook`` 末尾 (=
+  ``_apply_boundaries`` 経由の非 audio_winner end 経路) + ``_finalize_hand`` 末尾
+  (= ``_last_summary_by_hand_id`` だけ更新されて hook が走らない安全網)。
+  両方とも ``MAX_ADVISORY_HANDS`` 未満では即 return するので冗長 call の cost は
+  O(1)。実質 1 hand 1 回しか eviction が走らない
+- ✅ **asymmetric dict** (= 片方の dict にしか entry が無い hand_id) も union 経由で
+  正しく evict される。``pop(.., None)`` を使うので片方欠落でも安全
+- ✅ evicted hand_id への ``get_last_summary`` / ``get_reconstruction_result`` は
+  ``dict.get`` 経由で ``None`` を返し、GUI は Phase 4-C2 (= ``[SKIPPED]``) +
+  Phase 5-E (= ``blinds=?/? (source=unknown)``) の degrade パスに自動で乗る
+- ✅ GUI ``gui/dashboard.py`` に ``MAX_HISTORY_LINES = 1000`` を追加、
+  ``_trim_history_lines`` を ``_apply_hand_finalized`` の ``insert`` 直後に呼ぶ。
+  ``index("end-1c").split(".")[0]`` から行番号を読み、超過分を ``"1.0"`` ～
+  ``f"{excess+1}.0"`` 範囲で削除。bad index / AttributeError 等は silent
+  degrade (例外で GUI を巻き込まない)
+
+**Phase 5-F スコープ外**:
+- **``_completed_hands`` (hand window events) の eviction は対象外**:
+  これは個別 hand あたりの payload が大きく (1 hand 数 KB〜数十 KB)、advisory
+  dict の sentinel-sized entries とは memory 圧の質が違う。``logs/evidence_<session>.jsonl``
+  に raw observations が既に永続化されているので、必要なら canonical からの
+  再構成は可能。``_completed_hands`` 用の eviction policy は Phase 6+ の課題 (= LRU
+  with ``MAX_COMPLETED_HANDS`` 等)
+- **``MAX_ADVISORY_HANDS`` / ``MAX_HISTORY_LINES`` の config 化は将来 TODO**:
+  現状は module 定数。``config.json`` から読み込めるようにする余地は将来の
+  Phase で対応 (= 短時間 dev test では monkeypatch で十分、production では 500 /
+  1000 が妥当な default)
 
 **Phase 5-B+ (Phase 5-B 直後の改善、同フェーズ扱い)**:
 - ✅ **Audio seat hint の出所カテゴリ化**: ``signals.audio_seat_hint_sources``

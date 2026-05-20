@@ -669,3 +669,133 @@ class TestPhase5EBlindAdvisoryDisplay:
         assert dash._blind_source_text(r4) == "unknown"
         # result 自体 None
         assert dash._blind_source_text(None) == "unknown"
+
+
+# ――― Phase 5-F: history Textbox の bounded retention + evicted hand degrade ―――
+
+
+class TestPhase5FHistoryRetention:
+    """history Textbox に行数上限を入れ、evicted hand でも GUI が degrade する。"""
+
+    def test_trim_deletes_when_over_limit(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """``_trim_history_lines``: index 5.0 + MAX=3 → 先頭 2 行を削除する。"""
+        from gui import dashboard as dash_mod
+        monkeypatch.setattr(dash_mod, "MAX_HISTORY_LINES", 3)
+
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._history_box.index = MagicMock(return_value="5.0")
+        dash._history_box.delete = MagicMock()
+
+        dash._trim_history_lines()
+        # excess = 5 - 3 = 2 → "1.0" から "3.0" まで削除
+        dash._history_box.delete.assert_called_once_with("1.0", "3.0")
+
+    def test_trim_noop_when_under_limit(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """line count が MAX_HISTORY_LINES 以下なら delete は呼ばれない。"""
+        from gui import dashboard as dash_mod
+        monkeypatch.setattr(dash_mod, "MAX_HISTORY_LINES", 1000)
+
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._history_box.index = MagicMock(return_value="500.0")
+        dash._history_box.delete = MagicMock()
+
+        dash._trim_history_lines()
+        dash._history_box.delete.assert_not_called()
+
+    def test_trim_noop_when_exactly_at_limit(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """line count == MAX_HISTORY_LINES なら境界上で削除しない。"""
+        from gui import dashboard as dash_mod
+        monkeypatch.setattr(dash_mod, "MAX_HISTORY_LINES", 3)
+
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._history_box.index = MagicMock(return_value="3.0")
+        dash._history_box.delete = MagicMock()
+
+        dash._trim_history_lines()
+        dash._history_box.delete.assert_not_called()
+
+    def test_trim_safe_on_bad_index(self, tmp_path: Path) -> None:
+        """``index()`` が想定外の値を返しても例外を出さない。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._history_box.index = MagicMock(return_value="not-a-line.index")
+        dash._history_box.delete = MagicMock()
+
+        # 例外を出さない
+        dash._trim_history_lines()
+        dash._history_box.delete.assert_not_called()
+
+    def test_trim_safe_on_attribute_error(self, tmp_path: Path) -> None:
+        """``index`` 呼び出し自体が AttributeError でも safe degrade。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._history_box.index = MagicMock(
+            side_effect=AttributeError("no such method"),
+        )
+        dash._history_box.delete = MagicMock()
+
+        dash._trim_history_lines()
+        dash._history_box.delete.assert_not_called()
+
+    def test_apply_hand_finalized_invokes_trim(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """``_apply_hand_finalized`` は insert 直後に ``_trim_history_lines`` を呼ぶ
+        (= 上限を超えた状態が長く残らない)。
+        """
+        from gui import dashboard as dash_mod
+        monkeypatch.setattr(dash_mod, "MAX_HISTORY_LINES", 3)
+
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.get_last_summary.return_value = _stub_summary()
+        thread.get_reconstruction_result.return_value = _stub_result()
+        dash._integration_thread = thread
+        # 5 行ある状態をシミュレート
+        dash._history_box.index = MagicMock(return_value="5.0")
+        dash._history_box.delete = MagicMock()
+
+        dash._apply_hand_finalized(1)
+        # insert 後に trim が走り、超過分が削除される
+        dash._history_box.delete.assert_called_once_with("1.0", "3.0")
+
+
+class TestPhase5FEvictedHandDegrade:
+    """evicted hand_id (= accessor が None を返す) でも GUI が安全 degrade する。"""
+
+    def test_apply_hand_finalized_handles_evicted_hand(
+        self, tmp_path: Path,
+    ) -> None:
+        """両 accessor が None を返す hand_id でも、``_apply_hand_finalized`` は
+        例外を投げず Phase 4-C2 / 5-E の degrade 経路 ([SKIPPED] + blinds=?/?
+        source=unknown) で動く。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        # evicted hand_id: 両 accessor が None を返す
+        thread.get_last_summary.return_value = None
+        thread.get_reconstruction_result.return_value = None
+        dash._integration_thread = thread
+
+        # 例外を出さない
+        dash._apply_hand_finalized(999)
+
+        # 履歴行は [SKIPPED] tag で書かれる (Phase 4-C2 の summary=None 経路)
+        insert_calls = dash._history_box.insert.call_args_list
+        assert len(insert_calls) == 1
+        args, _ = insert_calls[0]
+        assert "#999" in args[1]
+        assert "[SKIPPED]" in args[1]
+        assert args[2] == "skipped"
+
+        # Latest advisory には Phase 5-E の degrade 表示
+        last_text = dash._lbl_latest_advisory.configure.call_args_list[-1][1]["text"]
+        assert "Latest advisory hand #999" in last_text
+        assert "blinds=?/?" in last_text
+        assert "source=unknown" in last_text
+        # mismatch なし (= patch_proposal が無いので)
+        assert "blind_mismatch" not in last_text
