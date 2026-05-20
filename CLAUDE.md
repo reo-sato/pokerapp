@@ -1002,7 +1002,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | Raw-only bootstrap (online_summary 不要の HandReconstructor 起動) | ✅ 完了 (Phase 4-B) | `HandReconstructor._bootstrap_from_events`: RFID `role="seat"` 観測 + コンストラクタ `default_sb`/`default_bb` で BettingState を起こす。button は最小 seat 番号 (deterministic, `button_inferred=True`)。`HandReconstructionResult.bootstrap_source` / `bootstrap_meta` で診断情報を返す。CLI 出力 / live hook の双方で稼働 |
 | Raw bootstrap signal 拡張 (Audio 補助 + prev_button heuristic) | ✅ 完了 (Phase 5-B) | `_bootstrap_from_events`: RFID は依然 primary (>= 2 seat gate)、Audio raw_text の `シート N` 抽出を補助 signal として active_seats に union。``self._prev_button_seat`` を経路問わず更新し、現 hand の active set に含まれていれば「ring 上の左隣」を button に採用 (`button_inferred_from_prev`)。`bootstrap_meta` に `audio_seat_hints` / `prev_button` / `button_inferred_from_prev` / `sb_amount` / `bb_amount` (blinds 変更検出フック) を追加 |
 | Raw bootstrap signal 細分化 + staged confidence | ✅ 完了 (Phase 5-B+) | `signals.audio_seat_hint_sources` で audio seat hint を ``action`` / ``winner`` / ``other`` の 3 カテゴリに分割 (action のみ confidence boost 対象)。`confidence` を固定 0.5 から ``_compute_raw_bootstrap_confidence`` による staged ``[0.4, 0.7]`` に変更 (baseline 0.4 + RFID>=3 / action overlap / button_inferred_from_prev の 3 boost)。依然 operational metric であって calibrated probability ではない。``_prev_button_seat`` は **直近 successfully bootstrapped hand** の seed を保持 (skipped hand を跨いでも壊さない) |
-| Blind level 変更の canonical state 同期 | ✅ 完了 (Phase 5-C) | `IntegrationThread.update_blinds(sb, bb)` で `_sb_amount` / `_bb_amount` / `GameStateManager._sb/_bb` / `HandReconstructor` の runtime blinds を同時更新。GUI に SB/BB 入力 + "Blinds 更新" ボタンを追加 (`_cmd_update_blinds`)。`bootstrap_meta.blind_source` で `"current_state"` (runtime 更新後) / `"session_default"` (初期値のまま) を区別。**次 hand から有効**、現 hand の HandSummary.blinds は不変。音声起源の blind 推定はしない (= GUI 操作起点のみ) |
+| Blind level 変更の canonical state 同期 | ✅ 完了 (Phase 5-C) | `IntegrationThread.update_blinds(sb, bb)` が **唯一の書き込み口** (canonical)。``GameStateManager._sb/_bb`` と ``HandReconstructor._default_sb/_bb`` は **projection** として canonical を反映 (独立に書き換えない)。GUI に SB/BB 入力 + "Blinds 更新" ボタンを追加 (`_cmd_update_blinds`)。`bootstrap_meta.blind_source` で `"current_state"` (runtime 更新後) / `"session_default"` (初期値のまま) を区別。**次 hand から有効**、現 hand の HandSummary.blinds は不変。音声起源の blind 推定はしない (= GUI 操作起点のみ)。`session_default` を自動 ``needs_review`` の根拠にはしない (キャッシュゲームでノイズが多すぎる) |
 | Reconstruct 結果可視化 CLI (read-only) | ✅ 完了 (Phase 4-C1) | `output/inspect_reconstruction.py`: `reconstruct_<session>.jsonl` を読んで `[OK]` / `[REVIEW]` / `[SKIPPED]` ラベル付きで hand 単位サマリを出す。`--only-needs-review` / `--fields A,B` フィルタ対応。online JSON / PHH / live hook 結果には触らない |
 | Patch proposal (差分 → 修正案、apply は無し) | ✅ 完了 (Phase 5-A) | `core/patch_proposal.py`: `HandPatchProposal` / `FieldPatch` / `compute_patch_proposal`。対象 field は resolution_type / seat_payouts / winner_seat / pot_total / showdown_revealed_cards。`HandReconstructionResult.patch_proposal` に乗り、CLI `--show-patches` と GUI ``patch_fields=`` 表示で見える。``can_patch_automatically=False`` (Phase 5-B 以降で apply 判定) |
 | ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
@@ -1748,6 +1748,46 @@ retrospective に再評価して **incomplete → final** に昇格させる経�
   ``HandSummary.blinds`` は変わらない (= 過去 hand を retroactive に書き換えない)。
   テストでこれを保証
 
+**state ownership (canonical / projection の関係)**:
+
+実装上は blind 額を保持する場所が 3 ヶ所あるが、責務は次のように分離する:
+
+- **canonical (single source of truth)**: ``IntegrationThread._sb_amount`` /
+  ``_bb_amount``。``IntegrationThread.update_blinds`` を経由した値だけが格納される
+  唯一の正となる書き込み点。
+- **projection (canonical を反映するだけで独立に書き換えない)**:
+    - ``GameStateManager._sb`` / ``_bb``
+      — ``HandSummary.blinds`` 出力時の参照源
+    - ``HandReconstructor._default_sb`` / ``_default_bb``
+      + ``_blinds_updated_at_runtime`` フラグ
+      — raw bootstrap の blinds amount + ``blind_source`` 判定
+
+``update_blinds`` 以外の経路で ``GameStateManager._sb`` や
+``HandReconstructor._default_sb`` を直接書き換える呼び出しは作らない (= projection
+側を canonical 抜きで動かさない)。将来 ``GameStateManager`` /
+``HandReconstructor`` を「参照時に IntegrationThread から pull する」真の
+projection にリファクタする可能性は別フェーズで検討。
+
+**Phase 5-C スコープ外 / 注意事項 (やらない理由の明文化)**:
+
+- **``blind_source="session_default"`` を ``needs_review`` の根拠にしない**:
+  単純に「session_default のまま hand_id が進んでいたら review」というルールは
+  ノイズが多すぎる:
+    - blind を一度も変更しない session (= 殆どのキャッシュゲーム) では完全に正常
+    - tournament でも、まだ最初の blind level の間はずっと ``"session_default"``
+  なので、``blind_source`` を review trigger に使うなら、別 signal (= blind level
+  変更があったことを示す independent な observation) との ``and`` で初めて意味を
+  持つ。Phase 5-C 時点では ``blind_source`` は **監査用の出所マーカー** に留め、
+  自動 ``needs_review`` 化はしない。
+- **blind 変更の audit trail (= 「いつ誰が変えたか」)** は Phase 5-C スコープ外。
+  現状は変更直後の hand から ``blind_source="current_state"`` になる **edge 検出**
+  しかできない。将来候補:
+    - blind 変更時刻と直後の hand_id 境界を結ぶ ``bootstrap_meta`` field
+      (例: ``"blinds_updated_before_hand_id": N``)
+    - optional な operator action log (GUI 操作の構造化トレース、JSONL append-only)
+  これにより blind level 変更時点を後から特定でき、reconstruction の audit
+  容易性が上がる。
+
 **音声起源の blind 推定は意図的に **しない**** (= 仕様):
 - blind level 変更は **GUI 操作起点のみ** を canonical input とする
 - 音声は基本的に騒音が多くて blind 額の信頼できる source ではないため、
@@ -1767,16 +1807,23 @@ retrospective に再評価して **incomplete → final** に昇格させる経�
   依然 calibrated probability ではなく、operational な signal-stacker の枠は
   維持 (= モデル posterior 化は Phase 5-C+ の課題)
 
-**Phase 5-B 以降スコープ外 (Phase 5-C / 6 以降の候補)**:
+**Phase 5-C 以降スコープ外 (Phase 6 以降の候補)**:
 - 差分検出時の **自動 patch apply** (現状は ``can_patch_automatically=False`` の
   proposal だけ、apply ロジック未実装)
-- raw bootstrap の更なる強化: blinds level 変更検出 (``sb_amount``/``bb_amount``
-  meta フックを使う)、camera dependency、SB_POST/BB_POST の音声明示認識
+- raw bootstrap の更なる強化: camera dependency、SB_POST/BB_POST の音声明示認識
+- blind 変更の **audit trail** (Phase 5-C 注意事項にも記載):
+  「いつ誰が blind を変えたか」を ``bootstrap_meta`` や advisory log に残す。
+  具体的には blind 変更時刻と直後の hand_id 境界、optional な operator action log
+  (GUI 操作の構造化トレース)。現状は ``blind_source`` の edge (= session_default
+  → current_state 遷移) を後から探す形でしか追えない
 - 確率モデル拡張: prior の hand-specific 調整 (例えば過去 N hand の MAP 平均で
   smoothing)、`confidence` を operational metric から **モデル事後確率** (top-1 vs
-  top-2 log 差 / エントロピー / Brier score) に置き換え。`bootstrap_meta.confidence`
-  も現状は固定値 0.5 (raw) なので、signal 強度に応じて動的計算へ
+  top-2 log 差 / エントロピー / Brier score) に置き換え。``bootstrap_meta.confidence``
+  は Phase 5-B+ で staged [0.4, 0.7] になったが calibrated probability ではない
 - 完全 replay 型 ActionRecord (pot_after / stack_after を再構成時の bs から正確に算出)
+- ``GameStateManager`` / ``HandReconstructor`` を真の projection (= 参照時に
+  IntegrationThread を pull する) にリファクタ。現状 Phase 5-C は 3 ヶ所同時更新で
+  整合性を取っているが、長期的には canonical 1 + projection 0 にしたい
 - `_last_reconstruction_by_hand_id` の eviction policy (長時間セッションで増え続ける場合の対策)
 
 **Phase 2-D / 4+ 以降の残タスク**:
