@@ -235,6 +235,45 @@ class IntegrationThread(threading.Thread):
         self._next_button_seat = seat
         logger.info("Next button seat set to %s", seat)
 
+    def update_blinds(self, sb: int, bb: int) -> None:
+        """Phase 5-C: GUI からの blind level 変更を canonical state に反映する。
+
+        ``IntegrationThread`` 内の ``_sb_amount`` / ``_bb_amount``、
+        ``GameStateManager._sb`` / ``_bb``、および ``HandReconstructor`` の
+        runtime blinds を同時更新する (= 次 hand の ``_start_new_hand`` から有効)。
+
+        **次 hand から有効**: 現在進行中の hand は既に ``bs.start_hand`` で固定済の
+        旧 blind 額を保持しているため、その hand の ``HandSummary.blinds`` は
+        変わらない。
+
+        Args:
+            sb: 新しい small blind 金額 (>0)
+            bb: 新しい big blind 金額 (>0)
+
+        不正値は ``ValueError`` を投げる (GUI 側でバリデーションされていない場合の
+        safety net)。
+        """
+        try:
+            sb_i = int(sb)
+            bb_i = int(bb)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"update_blinds: non-int sb/bb: {sb!r}/{bb!r}") from e
+        if sb_i <= 0 or bb_i <= 0:
+            raise ValueError(f"update_blinds: sb/bb must be > 0, got {sb_i}/{bb_i}")
+
+        self._sb_amount = sb_i
+        self._bb_amount = bb_i
+        # GameStateManager 側も同期 (_finalize_hand で blinds={"sb": gs._sb, "bb": gs._bb}
+        # を読む経路があるため)。
+        try:
+            self._game_state._sb = sb_i        # noqa: SLF001
+            self._game_state._bb = bb_i        # noqa: SLF001
+        except AttributeError:
+            pass
+        # HandReconstructor の raw bootstrap も新値を使うように更新。
+        self._hand_reconstructor.update_blinds(sb_i, bb_i)
+        logger.info("Blinds updated: SB=%d BB=%d (effective next hand)", sb_i, bb_i)
+
     @property
     def betting_state(self) -> BettingState:
         """現在のベッティング状態 (GUI ヘッダー表示などに使う)。"""

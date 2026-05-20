@@ -343,6 +343,31 @@ class GUIDashboard:
         ctk.CTkButton(ctrl, text="クリア", width=70, fg_color="#555555",
                       command=self._cmd_clear_board).grid(row=3, column=7, padx=(2, 12), pady=(4, 10))
 
+        # ── Row 4: Blind level 変更 (Phase 5-C) ───────────────────────────────
+        # 次 hand から有効。現在進行中の hand には影響しない (= bs.start_hand で
+        # 旧 blinds が既に固定済み)。
+        ctk.CTkLabel(ctrl, text="Blinds:").grid(row=4, column=0, padx=8, pady=(4, 10))
+
+        ctk.CTkLabel(ctrl, text="SB:").grid(row=4, column=1, padx=(12, 2), pady=(4, 10), sticky="e")
+        # 現在値を placeholder に出す (空欄なら現在値を維持)
+        cur_sb = int(getattr(self._gs, "_sb", 0))
+        cur_bb = int(getattr(self._gs, "_bb", 0))
+        self._blinds_sb_entry = ctk.CTkEntry(
+            ctrl, width=90, placeholder_text=str(cur_sb),
+        )
+        self._blinds_sb_entry.grid(row=4, column=2, padx=2, pady=(4, 10))
+
+        ctk.CTkLabel(ctrl, text="BB:").grid(row=4, column=3, padx=(12, 2), pady=(4, 10), sticky="e")
+        self._blinds_bb_entry = ctk.CTkEntry(
+            ctrl, width=90, placeholder_text=str(cur_bb),
+        )
+        self._blinds_bb_entry.grid(row=4, column=4, padx=2, pady=(4, 10))
+
+        ctk.CTkButton(ctrl, text="Blinds 更新", width=110,
+                      command=self._cmd_update_blinds).grid(
+            row=4, column=5, columnspan=2, padx=(2, 12), pady=(4, 10),
+        )
+
     # ――― コントロールコマンド ―――
 
     def _cmd_new_hand(self) -> None:
@@ -486,6 +511,69 @@ class GUIDashboard:
         self._board_cards_display.clear()
         self._lbl_board.configure(text="ボード: —")
         self._append_log("ボードクリア", tag="medium")
+
+    def _cmd_update_blinds(self) -> None:
+        """Phase 5-C: SB/BB 入力欄から blinds を更新する。
+
+        値は次 hand 開始時から有効。現在進行中の hand の HandSummary には影響しない。
+        IntegrationThread.update_blinds が GameStateManager / HandReconstructor の
+        state も同時に同期する。
+        """
+        try:
+            sb_raw = self._blinds_sb_entry.get().strip()
+            bb_raw = self._blinds_bb_entry.get().strip()
+        except AttributeError:
+            self._append_log("⚠ Blind 入力欄が見つかりません。", tag="review")
+            return
+
+        try:
+            sb = int(sb_raw)
+            bb = int(bb_raw)
+        except ValueError:
+            self._append_log(
+                f"⚠ Blind 入力が不正です (SB={sb_raw!r} BB={bb_raw!r})。",
+                tag="review",
+            )
+            return
+
+        if sb <= 0 or bb <= 0:
+            self._append_log(
+                f"⚠ Blind は正の整数で指定してください (SB={sb} BB={bb})。",
+                tag="review",
+            )
+            return
+        if sb >= bb:
+            self._append_log(
+                f"⚠ SB ({sb}) は BB ({bb}) より小さい必要があります。",
+                tag="review",
+            )
+            return
+
+        if self._integration_thread is None:
+            self._append_log(
+                "⚠ Integration thread 未接続: blind は反映されません。",
+                tag="review",
+            )
+            return
+
+        try:
+            self._integration_thread.update_blinds(sb, bb)
+        except (ValueError, AttributeError) as e:
+            self._append_log(f"⚠ Blind 更新失敗: {e}", tag="review")
+            return
+
+        self._append_log(
+            f"Blinds 更新: SB={sb:,} BB={bb:,} (次ハンドから有効)",
+            tag="medium",
+        )
+        # 入力欄をクリアし、placeholder に現在値を反映する
+        try:
+            self._blinds_sb_entry.delete(0, "end")
+            self._blinds_bb_entry.delete(0, "end")
+            self._blinds_sb_entry.configure(placeholder_text=str(sb))
+            self._blinds_bb_entry.configure(placeholder_text=str(bb))
+        except AttributeError:
+            pass
 
     def _cmd_rebuy(self) -> None:
         try:

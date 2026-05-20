@@ -614,6 +614,8 @@ python -m output.reconstruct_session --session logs/<session>.json
   "blinds_inferred": true,               // SB/BB amount は default_sb/bb 由来
   "sb_amount": int,                      // Phase 5-B: blinds 変更検出フック (将来の mismatch 判定用)
   "bb_amount": int,                      // 同上
+  "blind_source": "current_state" | "session_default",  // Phase 5-C: その hand が
+                                         // GUI 更新後の current state か初期 default かを示す
   "signals": {
     "rfid_seat_observations": [int, ...],
     "audio_seat_hints": [int, ...],      // Phase 5-B: 全 audio seat ヒントの union (backwards compat の flat list)
@@ -900,7 +902,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 533 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 543 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -924,7 +926,9 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_hand_boundary.py | HandBoundaryDetector (audio / board cleared / hole appeared) + extract_hand_windows + IntegrationThread 結合 + EvidenceLog round-trip (Phase 2-C, 19 件) |
 | test_hand_reconstructor.py | HandReconstructor (online↔offline diff / fallback / 複数 hand / _compute_diff) + reconstruct_session CLI round-trip (Phase 3, 14 件) |
 | test_reconstructor_live_hook.py | IntegrationThread から advisory reconstruct を呼ぶ live hook (online_summary 注入 / 複数 hand / 例外時 online 不変 / online_summary=None で skipped or raw bootstrap) (Phase 4-A + 4-B, 10 件) |
-| test_hand_reconstructor_bootstrap.py | bootstrap 3 段階優先 (initial_state / raw / online_summary) + skipped + CLI round-trip で `bootstrap_source` 反映 (Phase 4-B, 11 件) + Phase 5-B: Audio 補助 signal / prev_button 左隣 heuristic / meta 拡張 / safety fallback (Phase 5-B, +13 件) + Phase 5-B+: audio_seat_hint_sources 分類 / staged confidence (4 levels) / skipped hand を跨いだ prev_button 保持 (Phase 5-B+, +9 件) |
+| test_hand_reconstructor_bootstrap.py | bootstrap 3 段階優先 (initial_state / raw / online_summary) + skipped + CLI round-trip で `bootstrap_source` 反映 (Phase 4-B, 11 件) + Phase 5-B: Audio 補助 signal / prev_button 左隣 heuristic / meta 拡張 / safety fallback (Phase 5-B, +13 件) + Phase 5-B+: audio_seat_hint_sources 分類 / staged confidence (4 levels) / skipped hand を跨いだ prev_button 保持 (Phase 5-B+, +9 件) + Phase 5-C: HandReconstructor.update_blinds + blind_source field (Phase 5-C, +4 件) |
+| test_reconstructor_live_hook.py (Phase 5-C 追加) | IntegrationThread.update_blinds で canonical state を同期 / 不正値で ValueError / 過去 hand の summary は変更しない (Phase 5-C, +3 件) |
+| test_gui.py (Phase 5-C 追加) | _cmd_update_blinds が IntegrationThread.update_blinds を呼ぶ / 不正値拒否 / thread 未接続時の warning (Phase 5-C, +3 件) |
 | test_inspect_reconstruction_cli.py | inspect_reconstruction CLI (label 判定 / --only-needs-review / --fields filter / 壊れた JSONL skip) (Phase 4-C1, 14 件) |
 | test_reconstruction_badges.py | gui.reconstruction_badges 単体 (status / RAW / diff_fields / button_inferred / format_history_line) (Phase 4-C2, 20 件) |
 | test_gui.py (Phase 4-C2 追加) | GUIDashboard.on_hand_finalized / _apply_hand_finalized: queue 経由、advisory accessor 呼び出し、tag 反映 (Phase 4-C2, +8 件) |
@@ -998,6 +1002,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | Raw-only bootstrap (online_summary 不要の HandReconstructor 起動) | ✅ 完了 (Phase 4-B) | `HandReconstructor._bootstrap_from_events`: RFID `role="seat"` 観測 + コンストラクタ `default_sb`/`default_bb` で BettingState を起こす。button は最小 seat 番号 (deterministic, `button_inferred=True`)。`HandReconstructionResult.bootstrap_source` / `bootstrap_meta` で診断情報を返す。CLI 出力 / live hook の双方で稼働 |
 | Raw bootstrap signal 拡張 (Audio 補助 + prev_button heuristic) | ✅ 完了 (Phase 5-B) | `_bootstrap_from_events`: RFID は依然 primary (>= 2 seat gate)、Audio raw_text の `シート N` 抽出を補助 signal として active_seats に union。``self._prev_button_seat`` を経路問わず更新し、現 hand の active set に含まれていれば「ring 上の左隣」を button に採用 (`button_inferred_from_prev`)。`bootstrap_meta` に `audio_seat_hints` / `prev_button` / `button_inferred_from_prev` / `sb_amount` / `bb_amount` (blinds 変更検出フック) を追加 |
 | Raw bootstrap signal 細分化 + staged confidence | ✅ 完了 (Phase 5-B+) | `signals.audio_seat_hint_sources` で audio seat hint を ``action`` / ``winner`` / ``other`` の 3 カテゴリに分割 (action のみ confidence boost 対象)。`confidence` を固定 0.5 から ``_compute_raw_bootstrap_confidence`` による staged ``[0.4, 0.7]`` に変更 (baseline 0.4 + RFID>=3 / action overlap / button_inferred_from_prev の 3 boost)。依然 operational metric であって calibrated probability ではない。``_prev_button_seat`` は **直近 successfully bootstrapped hand** の seed を保持 (skipped hand を跨いでも壊さない) |
+| Blind level 変更の canonical state 同期 | ✅ 完了 (Phase 5-C) | `IntegrationThread.update_blinds(sb, bb)` で `_sb_amount` / `_bb_amount` / `GameStateManager._sb/_bb` / `HandReconstructor` の runtime blinds を同時更新。GUI に SB/BB 入力 + "Blinds 更新" ボタンを追加 (`_cmd_update_blinds`)。`bootstrap_meta.blind_source` で `"current_state"` (runtime 更新後) / `"session_default"` (初期値のまま) を区別。**次 hand から有効**、現 hand の HandSummary.blinds は不変。音声起源の blind 推定はしない (= GUI 操作起点のみ) |
 | Reconstruct 結果可視化 CLI (read-only) | ✅ 完了 (Phase 4-C1) | `output/inspect_reconstruction.py`: `reconstruct_<session>.jsonl` を読んで `[OK]` / `[REVIEW]` / `[SKIPPED]` ラベル付きで hand 単位サマリを出す。`--only-needs-review` / `--fields A,B` フィルタ対応。online JSON / PHH / live hook 結果には触らない |
 | Patch proposal (差分 → 修正案、apply は無し) | ✅ 完了 (Phase 5-A) | `core/patch_proposal.py`: `HandPatchProposal` / `FieldPatch` / `compute_patch_proposal`。対象 field は resolution_type / seat_payouts / winner_seat / pot_total / showdown_revealed_cards。`HandReconstructionResult.patch_proposal` に乗り、CLI `--show-patches` と GUI ``patch_fields=`` 表示で見える。``can_patch_automatically=False`` (Phase 5-B 以降で apply 判定) |
 | ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
@@ -1358,7 +1363,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 533 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 543 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+ + 10 Phase 5-C)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
@@ -1720,6 +1725,34 @@ retrospective に再評価して **incomplete → final** に昇格させる経�
   ``bootstrap_meta["bb_amount"]`` に default 値を埋めて、将来 session 中に
   blinds level が上がった場合の検出 / mismatch ハンドリングを Phase 5-C 以降で
   載せやすくする
+
+**Phase 5-C 完了済み (blind level 変更の canonical state 同期)**:
+- ✅ ``IntegrationThread.update_blinds(sb: int, bb: int)`` を追加。GUI 操作起点で
+  以下を **アトミックに同時更新**:
+    - ``self._sb_amount`` / ``self._bb_amount`` (`_finalize_hand` で読む)
+    - ``self._game_state._sb`` / ``self._game_state._bb``
+      (`HandSummary.blinds` 生成時に読む)
+    - ``self._hand_reconstructor`` の runtime blinds (raw bootstrap で読む)
+  不正値 (非数値 / 0 以下) では ``ValueError`` を投げる (= GUI 側で気づける)
+- ✅ ``HandReconstructor.update_blinds(sb, bb)`` setter を追加。内部に
+  ``_blinds_updated_at_runtime`` フラグを持ち、``bootstrap_meta["blind_source"]``
+  に反映:
+    - ``"current_state"``  ← runtime に ``update_blinds`` が呼ばれた後
+    - ``"session_default"`` ← constructor 渡しの初期値のまま
+- ✅ GUI (`gui/dashboard.py`): "Blinds 更新" 行を controls に追加。
+  ``_cmd_update_blinds`` で SB / BB 入力をバリデーションし
+  (非数値・負値・``sb >= bb`` をログで弾く)、``IntegrationThread.update_blinds``
+  を呼ぶ。失敗時もクラッシュしない
+- ✅ **「次 hand から有効」semantics**: 現在進行中の hand は既に
+  ``bs.start_hand`` で旧 blind を固定済みのため、その hand の
+  ``HandSummary.blinds`` は変わらない (= 過去 hand を retroactive に書き換えない)。
+  テストでこれを保証
+
+**音声起源の blind 推定は意図的に **しない**** (= 仕様):
+- blind level 変更は **GUI 操作起点のみ** を canonical input とする
+- 音声は基本的に騒音が多くて blind 額の信頼できる source ではないため、
+  raw_text からの「ブラインド XX YY」のような自然言語パースは Phase 5-C では
+  入れない (将来の dealer-callout 認識まで保留)
 
 **Phase 5-B+ (Phase 5-B 直後の改善、同フェーズ扱い)**:
 - ✅ **Audio seat hint の出所カテゴリ化**: ``signals.audio_seat_hint_sources``

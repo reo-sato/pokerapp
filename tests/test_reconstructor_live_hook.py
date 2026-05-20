@@ -196,6 +196,76 @@ class TestOnlinePathUntouched:
 # ────────────────────────────────────────────────────────────────────────────
 
 
+class TestUpdateBlinds:
+    """Phase 5-C: ``IntegrationThread.update_blinds`` の挙動。"""
+
+    def test_update_blinds_syncs_all_canonical_state(self, tmp_path: Path) -> None:
+        """update_blinds で IntegrationThread / GameStateManager /
+        HandReconstructor の blind state が同時更新される。
+        """
+        thread, _audio_q, _stop, _writer, gs = _build_thread(tmp_path)
+        # 初期値
+        assert thread._sb_amount == 100
+        assert thread._bb_amount == 200
+        assert gs._sb == 100
+        assert gs._bb == 200
+        assert thread._hand_reconstructor._default_sb == 100
+        assert thread._hand_reconstructor._default_bb == 200
+        assert thread._hand_reconstructor._blinds_updated_at_runtime is False
+
+        thread.update_blinds(300, 600)
+
+        # 3 ヶ所すべて同期
+        assert thread._sb_amount == 300
+        assert thread._bb_amount == 600
+        assert gs._sb == 300
+        assert gs._bb == 600
+        assert thread._hand_reconstructor._default_sb == 300
+        assert thread._hand_reconstructor._default_bb == 600
+        # HandReconstructor は runtime updated フラグが立つ
+        assert thread._hand_reconstructor._blinds_updated_at_runtime is True
+
+    def test_update_blinds_raises_on_invalid(self, tmp_path: Path) -> None:
+        """IntegrationThread.update_blinds は不正値で ValueError を投げる
+        (HandReconstructor 側の黙殺と違い、GUI に明示的に伝える)。
+        """
+        thread, _audio_q, _stop, _writer, _gs = _build_thread(tmp_path)
+        with pytest.raises(ValueError):
+            thread.update_blinds(-5, 200)
+        with pytest.raises(ValueError):
+            thread.update_blinds(0, 0)
+        with pytest.raises(ValueError):
+            thread.update_blinds("bogus", 400)  # type: ignore[arg-type]
+        # state は変わらない
+        assert thread._sb_amount == 100
+        assert thread._bb_amount == 200
+
+    def test_update_blinds_does_not_affect_finished_hand_summary(
+        self, tmp_path: Path,
+    ) -> None:
+        """進行中 hand を 1 件回した後 update_blinds しても、その hand の
+        ``HandSummary.blinds`` は旧値のまま (= 過去 hand を書き換えない)。
+        """
+        thread, audio_q, stop, _writer, gs = _build_thread(tmp_path, "phase5c_no_retro")
+        _drive_fold_win_hand(audio_q, time.time())
+
+        thread.start()
+        time.sleep(0.8)
+        stop.set()
+        thread.join(timeout=2.0)
+
+        # hand 1 終局後に blinds を変更
+        old_summary = thread.get_last_summary(1)
+        assert old_summary is not None
+        assert int(old_summary.blinds["sb"]) == 100
+        assert int(old_summary.blinds["bb"]) == 200
+
+        thread.update_blinds(500, 1000)
+        # update 後でも summary は旧値を保持
+        assert int(old_summary.blinds["sb"]) == 100
+        assert int(old_summary.blinds["bb"]) == 200
+
+
 class TestOnHandFinalizedCallback:
     """Phase 4-C2: ``on_hand_finalized`` callback の動作。"""
 

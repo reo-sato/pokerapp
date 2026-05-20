@@ -328,8 +328,14 @@ class HandReconstructor:
         self._prior = prior
         self._finalizer = finalizer or HandFinalizer()
         # Phase 4-B: raw-only bootstrap で blinds 額が必要。None なら raw bootstrap 失敗。
+        # Phase 5-C: ``update_blinds`` が呼ばれたら現在値で上書きする (= session 中の
+        # blind level 変更に追従)。``_blinds_updated_at_runtime`` で「constructor の
+        # default のままか / runtime に更新されたか」を区別し、bootstrap_meta の
+        # ``blind_source`` field に反映する。
         self._default_sb = int(default_sb) if default_sb is not None else None
         self._default_bb = int(default_bb) if default_bb is not None else None
+        self._blinds_updated_at_runtime: bool = False
+
         # Phase 5-B: **直近 successfully bootstrapped hand** の button seat を覚える。
         # 「直前 hand」ではなく「直前 *成功* hand」である点が重要:
         #   - bootstrap 失敗で skipped になった hand は _prev_button_seat を更新しない
@@ -344,6 +350,31 @@ class HandReconstructor:
         # 誤推定する可能性がある (= 後段 ``_compute_diff`` で actions ズレが現れて
         # ``needs_review`` が立つ前提)。
         self._prev_button_seat: Optional[int] = None
+
+    def update_blinds(self, sb: int, bb: int) -> None:
+        """Phase 5-C: session 中の blind level 変更を反映する read/write setter。
+
+        ``IntegrationThread.update_blinds`` から呼ばれることを想定 (= GUI 操作起点)。
+        次回 ``reconstruct_from_events`` から **current_state** の blind として
+        ``bootstrap_meta["blind_source"]`` に記録される。
+
+        Args:
+            sb: 新しい small blind 金額 (>0)
+            bb: 新しい big blind 金額 (>0)
+
+        不正値 (TypeError / 0 以下) は黙殺する (= 呼び側でバリデーション済み想定、
+        ここで例外を投げると IntegrationThread の callback で困るため)。
+        """
+        try:
+            sb_i = int(sb)
+            bb_i = int(bb)
+        except (TypeError, ValueError):
+            return
+        if sb_i <= 0 or bb_i <= 0:
+            return
+        self._default_sb = sb_i
+        self._default_bb = bb_i
+        self._blinds_updated_at_runtime = True
 
     # ──────────────────────────────────────────────────────────────────────
     # public API
@@ -776,6 +807,15 @@ class HandReconstructor:
             # Phase 5-B TODO フック: blinds level 変更検出のため amount を残す。
             "sb_amount": int(self._default_sb),
             "bb_amount": int(self._default_bb),
+            # Phase 5-C: 使った blind の出所。
+            #   "current_state"   = ``update_blinds`` で runtime 更新済の現在 state
+            #   "session_default" = constructor 渡しの初期 default のまま
+            # consumer はこれで「その hand の blinds は古い default か現在 state か」を
+            # 区別できる (blinds level 変更を跨いだ古い hand の再構成 = "session_default"
+            # のまま、変更後の hand = "current_state")。
+            "blind_source": (
+                "current_state" if self._blinds_updated_at_runtime else "session_default"
+            ),
             "signals": {
                 "rfid_seat_observations": sorted(int(s) for s in seats_with_hole_cards),
                 # Phase 5-B: audio raw_text から抽出した seat 集合 (union, flat list)。

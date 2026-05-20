@@ -703,6 +703,74 @@ class TestPhase5BPlusStagedConfidence:
         assert meta["button_inferred_from_prev"] is True
 
 
+class TestPhase5CBlindSource:
+    """Phase 5-C: bootstrap_meta の ``blind_source`` field と
+    ``HandReconstructor.update_blinds`` の挙動を検証する。"""
+
+    def _hu_events(self) -> list:
+        return [
+            _audio_rec("new_hand", 1.0),
+            _rfid_seat_rec(1, "Ah", 1.1),
+            _rfid_seat_rec(2, "Kh", 1.2),
+            _audio_rec("winner", 1.4, "シート2 ウィナー"),
+        ]
+
+    def test_default_blinds_yield_session_default_source(self) -> None:
+        """update_blinds を呼ばない場合、blind_source = "session_default"。"""
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        result = rc.reconstruct_from_events(self._hu_events())
+        assert result.bootstrap_source == "raw"
+        meta = result.bootstrap_meta
+        assert meta["sb_amount"] == 100
+        assert meta["bb_amount"] == 200
+        assert meta["blind_source"] == "session_default"
+
+    def test_update_blinds_marks_current_state(self) -> None:
+        """update_blinds 後の raw bootstrap は blind_source = "current_state"。"""
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        rc.update_blinds(200, 400)
+        result = rc.reconstruct_from_events(self._hu_events())
+        assert result.bootstrap_source == "raw"
+        meta = result.bootstrap_meta
+        assert meta["sb_amount"] == 200
+        assert meta["bb_amount"] == 400
+        assert meta["blind_source"] == "current_state"
+
+    def test_update_blinds_invalid_value_silently_ignored(self) -> None:
+        """update_blinds は不正値を黙殺する (呼び側でバリデーション済み想定)。"""
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        rc.update_blinds(-5, 200)
+        # 不正値は反映されない (= 既存 default が残る)
+        assert rc._default_sb == 100
+        assert rc._default_bb == 200
+        assert rc._blinds_updated_at_runtime is False
+        rc.update_blinds("bogus", 400)  # type: ignore[arg-type]
+        assert rc._blinds_updated_at_runtime is False
+
+    def test_update_blinds_persists_across_multiple_hands(self) -> None:
+        """update_blinds 後、続く複数 hand 全てで current_state が記録される。"""
+        rc = HandReconstructor(default_sb=100, default_bb=200)
+        rc.update_blinds(300, 600)
+
+        # 1 hand 目
+        r1 = rc.reconstruct_from_events(self._hu_events())
+        assert r1.bootstrap_meta["sb_amount"] == 300
+        assert r1.bootstrap_meta["bb_amount"] == 600
+        assert r1.bootstrap_meta["blind_source"] == "current_state"
+
+        # 2 hand 目 (異なる timestamps、別 events)
+        events2 = [
+            _audio_rec("new_hand", 2.0),
+            _rfid_seat_rec(1, "Ad", 2.1),
+            _rfid_seat_rec(2, "Kd", 2.2),
+            _audio_rec("winner", 2.4, "シート1 ウィナー"),
+        ]
+        r2 = rc.reconstruct_from_events(events2)
+        assert r2.bootstrap_meta["sb_amount"] == 300
+        assert r2.bootstrap_meta["bb_amount"] == 600
+        assert r2.bootstrap_meta["blind_source"] == "current_state"
+
+
 class TestPhase5BPlusPrevButtonAcrossSkippedHand:
     """Phase 5-B+: skipped hand を挟んでも _prev_button_seat は **直近 successful**
     hand の button を保持する (semantics の明文化に対応)。"""

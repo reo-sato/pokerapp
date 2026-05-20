@@ -255,6 +255,80 @@ class TestApplyHandFinalized:
         assert "patch_fields=resolution_type,seat_payouts" in last_text
         assert "button inferred" in last_text
 
+    def test_phase5c_cmd_update_blinds_calls_integration_thread(
+        self, tmp_path: Path,
+    ):
+        """Phase 5-C: _cmd_update_blinds が IntegrationThread.update_blinds(sb, bb)
+        を呼ぶ (= GUI → integration → reconstructor の経路)。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        dash._integration_thread = thread
+
+        # 入力欄を mock し、有効な値を返す
+        dash._blinds_sb_entry = MagicMock(
+            get=MagicMock(return_value="300"),
+            delete=MagicMock(),
+            configure=MagicMock(),
+        )
+        dash._blinds_bb_entry = MagicMock(
+            get=MagicMock(return_value="600"),
+            delete=MagicMock(),
+            configure=MagicMock(),
+        )
+        dash._append_log = MagicMock()
+
+        dash._cmd_update_blinds()
+
+        thread.update_blinds.assert_called_once_with(300, 600)
+        # success 時はログに blinds 更新メッセージが出る
+        called_text = dash._append_log.call_args_list[-1][0][0]
+        assert "Blinds 更新" in called_text
+        assert "300" in called_text
+        assert "600" in called_text
+
+    def test_phase5c_cmd_update_blinds_rejects_invalid(self, tmp_path: Path):
+        """Phase 5-C: 不正値 (sb >= bb / 負値 / 非数値) は IntegrationThread を呼ばず
+        ログにエラーを出す。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        dash._integration_thread = thread
+        dash._append_log = MagicMock()
+
+        # ケース 1: 非数値
+        dash._blinds_sb_entry = MagicMock(get=MagicMock(return_value="abc"))
+        dash._blinds_bb_entry = MagicMock(get=MagicMock(return_value="200"))
+        dash._cmd_update_blinds()
+        thread.update_blinds.assert_not_called()
+
+        # ケース 2: 負値
+        dash._blinds_sb_entry = MagicMock(get=MagicMock(return_value="-5"))
+        dash._blinds_bb_entry = MagicMock(get=MagicMock(return_value="200"))
+        dash._cmd_update_blinds()
+        thread.update_blinds.assert_not_called()
+
+        # ケース 3: SB >= BB
+        dash._blinds_sb_entry = MagicMock(get=MagicMock(return_value="400"))
+        dash._blinds_bb_entry = MagicMock(get=MagicMock(return_value="200"))
+        dash._cmd_update_blinds()
+        thread.update_blinds.assert_not_called()
+
+    def test_phase5c_cmd_update_blinds_no_thread_logs_warning(
+        self, tmp_path: Path,
+    ):
+        """Integration thread 未接続なら更新せず警告ログ。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._integration_thread = None
+        dash._append_log = MagicMock()
+
+        dash._blinds_sb_entry = MagicMock(get=MagicMock(return_value="300"))
+        dash._blinds_bb_entry = MagicMock(get=MagicMock(return_value="600"))
+
+        dash._cmd_update_blinds()
+        # warning ログが残る
+        msg = dash._append_log.call_args_list[-1][0][0]
+        assert "Integration thread 未接続" in msg
+
     def test_apply_omits_patch_fields_when_no_proposal(self, tmp_path: Path):
         """Phase 5-A: patch_proposal が None の hand (OK 等) は patch_fields= を出さない。"""
         dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
