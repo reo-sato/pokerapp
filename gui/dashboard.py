@@ -1411,8 +1411,12 @@ class GUIDashboard:
             command=self._cmd_manual_all_in,
         )
         self._btn_manual_all_in.grid(row=2, column=0, padx=2, pady=2)
+        # Phase 5-Ia: Undo は ``_current_actions`` の末尾 record を pop するだけの
+        # **log-only な暫定 undo**。``BettingState`` / ``GameStateManager`` の
+        # ``stack`` / ``pot`` / ``actor_seat`` は巻き戻らない。label と灰色 fg で
+        # この制約を operator に明示する (真の rollback は Phase 5-Ic/Id 将来課題)。
         self._btn_manual_undo = ctk.CTkButton(
-            self._action_pad_frame, text="Undo", width=80,
+            self._action_pad_frame, text="Undo (log only)", width=110,
             fg_color="#555555",
             command=self._cmd_manual_undo,
         )
@@ -1696,6 +1700,14 @@ class GUIDashboard:
         self._invoke_manual_submit(seat, "allin", stack)
 
     def _cmd_manual_undo(self) -> None:
+        """Phase 5-Ia: **log-only な暫定 undo** を実行する。
+
+        ``IntegrationThread.undo_last_manual_action`` は ``_current_actions`` の
+        末尾 record を 1 件 pop するだけで、``BettingState`` / ``GameStateManager``
+        の ``stack`` / ``pot`` / ``actor_seat`` は **巻き戻らない**。GUI 側では
+        成功時にも ``tag="review"`` (赤系) で「巻き戻らない」事実を毎回明示する。
+        真の rollback (replay 経路) は Phase 5-Ic/Id の将来課題。
+        """
         thread = self._integration_thread
         if thread is None:
             self._append_log("⚠ Manual Undo: integration thread 未接続。",
@@ -1707,8 +1719,11 @@ class GUIDashboard:
             self._append_log(f"⚠ Manual Undo failed: {e}", tag="review")
             return
         if ok:
-            self._append_log("Manual Undo: 直前 record を削除しました。",
-                              tag="medium")
+            self._append_log(
+                "⚠ Manual Undo (log only): record だけ削除しました。"
+                " stack / pot / actor seat は巻き戻りません。",
+                tag="review",
+            )
         else:
             self._append_log("Manual Undo: 履歴が空です。", tag="review")
 

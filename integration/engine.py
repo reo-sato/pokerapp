@@ -546,12 +546,21 @@ class IntegrationThread(threading.Thread):
         return record
 
     def undo_last_manual_action(self) -> bool:
-        """Phase 5-Ia: ``_current_actions`` の末尾を 1 件削除する (1 段のみ)。
+        """Phase 5-Ia: ``_current_actions`` の末尾を 1 件削除する
+        **log-only な暫定 undo**。
 
-        **既知の制約**: ``BettingState`` / ``GameStateManager`` の真の rollback は
-        replay が必要 (Phase 5-I 将来課題)。本実装は ``_current_actions`` から
-        record を pop するだけで、stack / pot / actor_seat は **巻き戻らない**。
-        operator が誤入力直後に「ログから消す」用途として割り切る。
+        **重要な既知の制約 (UX 上 operator に明示すべき)**:
+          - これは ``_current_actions`` の record を 1 件 pop するだけで、
+            ``BettingState`` / ``GameStateManager`` の **真の rollback は行わない**。
+          - 結果として ``stack`` / ``pot`` / ``actor_seat`` / ``folded_seats``
+            / ``current_bet`` は **巻き戻らない**。
+          - 用途は「誤入力直後に GUI 表示上の record だけ消す」までと割り切る。
+          - 真の rollback (replay 経路で pot / stack を再計算) は Phase 5-Ic/Id
+            の将来課題。
+
+        GUI 側 (``gui/dashboard.py:_cmd_manual_undo``) は label を
+        ``"Undo (log only)"`` + 灰色 fg、成功 log を ``tag="review"`` (赤系) で
+        出して operator にこの制約を毎回伝える。
 
         Returns:
             True: pop された (= 1 件以上 record があった)
@@ -560,9 +569,9 @@ class IntegrationThread(threading.Thread):
         if not self._current_actions:
             return False
         popped = self._current_actions.pop()
-        logger.info(
-            "Manual undo: removed record seat=%s action=%s amount=%s "
-            "(betting_state NOT rolled back — known limitation)",
+        logger.warning(
+            "Manual log-only undo: removed record seat=%s action=%s amount=%s "
+            "(BettingState / GameStateManager NOT rolled back — Phase 5-Ia known limitation)",
             popped.seat, popped.action, popped.amount,
         )
         return True

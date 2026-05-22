@@ -1405,6 +1405,37 @@ class TestPhase5IManualActionPad:
         dash._cmd_manual_undo()
         thread.undo_last_manual_action.assert_called_once()
 
+    def test_undo_label_indicates_log_only(self, tmp_path: Path):
+        """Phase 5-Ia: undo ボタンの label が 'log only' 暫定 undo であることを示す。
+
+        ``_btn_manual_undo`` 構築呼び出しの ``text`` kwarg を確認する。この label
+        は ``BettingState`` / ``GameStateManager`` の rollback を行わない制約を
+        operator に伝える視覚的契約 (= 真 rollback が入るまで剥がさない)。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        ctk_button_calls = dash._ctk.CTkButton.call_args_list
+        undo_calls = [
+            c for c in ctk_button_calls
+            if "log only" in str(c.kwargs.get("text", ""))
+        ]
+        assert undo_calls, "Undo button should advertise 'log only' in label"
+
+    def test_undo_success_log_uses_review_tag(self, tmp_path: Path):
+        """Phase 5-Ia: undo 成功時の append_log が ``tag="review"`` で警告表示される。
+
+        本文に ``"log only"`` と ``"巻き戻り"`` を含み、operator が「フル undo
+        ではない」ことを毎回認識できる文言になっていることを担保する。
+        """
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = self._attach_thread(dash)
+        thread.undo_last_manual_action.return_value = True
+        dash._append_log = MagicMock()
+        dash._cmd_manual_undo()
+        args, kwargs = dash._append_log.call_args[0], dash._append_log.call_args[1]
+        assert "log only" in args[0]
+        assert "巻き戻り" in args[0]
+        assert kwargs.get("tag") == "review"
+
     def test_undo_without_thread_warns(self, tmp_path: Path):
         dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
         dash._integration_thread = None

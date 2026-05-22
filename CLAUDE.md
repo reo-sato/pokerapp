@@ -2195,6 +2195,21 @@ GUI 側の従来表示 (action ログ、confidence、advisory) には自動で�
 - ✅ ``_poll_updates`` から ``_refresh_manual_action_view()`` を呼んで 3
   ペインを 100ms ごとに更新
 
+**Phase 5-Ia の Undo に関する重要な但し書き (operator 向け)**:
+
+- ``undo_last_manual_action()`` は **log-only な暫定 undo**。
+  ``_current_actions`` の末尾 record を pop するだけで、``BettingState`` /
+  ``GameStateManager`` の ``stack`` / ``pot`` / ``actor_seat`` /
+  ``folded_seats`` / ``current_bet`` は **巻き戻らない**。
+- GUI ボタンは ``"Undo (log only)"`` label + 灰色 (``fg_color="#555555"``) で
+  この制約を視覚的に明示。成功時 ``_append_log`` も ``tag="review"`` (赤系) +
+  ``"⚠ Manual Undo (log only): record だけ削除しました。 stack / pot /
+  actor seat は巻き戻りません。"`` で毎回警告として出す。``logger.warning``
+  にも昇格させた。
+- 真の rollback (replay 経路で pot/stack を再計算) は **Phase 5-Ic/Id の
+  将来課題**。完了時に label を ``"Undo"`` に戻し、警告 log を ``tag="medium"``
+  に格下げする想定。
+
 **Phase 5-Ia スコープ外 / Phase 5-Ic/Id の将来課題**:
 
 - **過去 action の `Replace selected` / `Delete selected` / `Replay from here`
