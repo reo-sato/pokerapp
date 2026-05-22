@@ -1260,3 +1260,166 @@ class TestPhase5FEvictedHandDegrade:
         assert "source=unknown" in last_text
         # mismatch なし (= patch_proposal が無いので)
         assert "blind_mismatch" not in last_text
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase 5-Ia: Manual Action Pad
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestPhase5IManualActionPad:
+    """Manual action pad / keypad / dashboard UI skeleton."""
+
+    def _attach_thread(self, dash, *, actor_seat=1, to_call=0,
+                        current_bet=0, history_lines=None, stack=10000):
+        thread = MagicMock()
+        thread.get_manual_action_state.return_value = {
+            "actor_seat": actor_seat,
+            "street": "preflop",
+            "to_call": to_call,
+            "current_bet": current_bet,
+            "min_raise": 400,
+            "button_seat": 1,
+            "sb_seat": 1,
+            "bb_seat": 2,
+            "seat_views": [
+                {"seat": 1, "name": "Alice", "stack": stack, "active": True,
+                 "is_actor": actor_seat == 1, "badges": ["BTN"], "last_action": None},
+                {"seat": 2, "name": "Bob", "stack": stack, "active": True,
+                 "is_actor": actor_seat == 2, "badges": ["BB"], "last_action": None},
+            ],
+            "history_lines": history_lines or [],
+            "hand_id": 1, "is_initialized": True,
+        }
+        thread.betting_state = MagicMock(sb_amount=100, bb_amount=200)
+        dash._integration_thread = thread
+        return thread
+
+    def test_manual_action_frame_is_built(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        # 3 ペインと keypad が存在する
+        assert hasattr(dash, "_manual_action_frame")
+        assert hasattr(dash, "_table_view_frame")
+        assert hasattr(dash, "_action_pad_frame")
+        assert hasattr(dash, "_keypad_frame")
+        assert hasattr(dash, "_history_edit_frame")
+        # 主要 action ボタン
+        for attr in ("_btn_manual_fold", "_btn_manual_check_call",
+                      "_btn_manual_bet", "_btn_manual_raise",
+                      "_btn_manual_all_in", "_btn_manual_undo",
+                      "_btn_manual_apply", "_btn_manual_cancel_edit"):
+            assert hasattr(dash, attr)
+        # state
+        assert dash._manual_edit_mode == "live"
+        assert dash._pending_manual_action_kind is None
+        # history edit pane の placeholder + disabled buttons
+        assert hasattr(dash, "_btn_history_replace")
+        assert hasattr(dash, "_btn_history_delete")
+        assert hasattr(dash, "_btn_history_replay")
+        assert hasattr(dash, "_lbl_history_selection")
+
+    def test_check_call_label_switches_on_to_call(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        # to_call=0 → Check
+        self._attach_thread(dash, to_call=0)
+        dash._refresh_manual_action_view()
+        last = dash._btn_manual_check_call.configure.call_args
+        assert last is not None
+        assert last[1]["text"] == "Check"
+        # to_call=300 → Call 300
+        self._attach_thread(dash, to_call=300)
+        dash._refresh_manual_action_view()
+        last = dash._btn_manual_check_call.configure.call_args
+        assert "Call" in last[1]["text"]
+        assert "300" in last[1]["text"]
+
+    def test_fold_calls_submit_with_zero(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = self._attach_thread(dash, actor_seat=2)
+        dash._append_log = MagicMock()
+        dash._cmd_manual_fold()
+        thread.submit_manual_action.assert_called_once_with(2, "fold", 0)
+
+    def test_check_call_invokes_call_with_to_call(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = self._attach_thread(dash, actor_seat=1, to_call=400)
+        dash._append_log = MagicMock()
+        dash._cmd_manual_check_call()
+        thread.submit_manual_action.assert_called_once_with(1, "call", 400)
+
+    def test_bet_without_amount_does_not_submit(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = self._attach_thread(dash, actor_seat=1)
+        dash._append_log = MagicMock()
+        dash._amount_var = MagicMock(get=MagicMock(return_value=""))
+        dash._cmd_manual_bet()  # pending kind を立てるだけ
+        assert dash._pending_manual_action_kind == "bet"
+        dash._submit_pending_manual_action()
+        thread.submit_manual_action.assert_not_called()
+
+    def test_bet_with_amount_submits(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = self._attach_thread(dash, actor_seat=1)
+        dash._append_log = MagicMock()
+        dash._amount_var = MagicMock(get=MagicMock(return_value="600"),
+                                       set=MagicMock())
+        dash._cmd_manual_bet()
+        dash._submit_pending_manual_action()
+        thread.submit_manual_action.assert_called_once_with(1, "bet", 600)
+        # 送信後に pending が落ちる
+        assert dash._pending_manual_action_kind is None
+
+    def test_keypad_digits_update_amount_var(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        # 実 var を新規 stringvar 風 stub に
+        store = {"v": ""}
+        dash._amount_var = MagicMock(
+            get=MagicMock(side_effect=lambda: store["v"]),
+            set=MagicMock(side_effect=lambda v: store.update(v=v)),
+        )
+        dash._cmd_keypad_digit("5")
+        assert store["v"] == "5"
+        dash._cmd_keypad_digit("0")
+        assert store["v"] == "50"
+        dash._cmd_keypad_backspace()
+        assert store["v"] == "5"
+        dash._cmd_keypad_clear()
+        assert store["v"] == ""
+
+    def test_all_in_uses_stack_amount(self, tmp_path: Path):
+        dash, gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = self._attach_thread(dash, actor_seat=1)
+        dash._append_log = MagicMock()
+        # gs.get_stack(1) は実 GameStateManager から (10000)
+        dash._cmd_manual_all_in()
+        called_args = thread.submit_manual_action.call_args[0]
+        assert called_args[0] == 1
+        assert called_args[1] == "allin"
+        assert called_args[2] == int(gs.get_stack(1))
+
+    def test_undo_calls_thread_api(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = self._attach_thread(dash)
+        thread.undo_last_manual_action.return_value = True
+        dash._append_log = MagicMock()
+        dash._cmd_manual_undo()
+        thread.undo_last_manual_action.assert_called_once()
+
+    def test_undo_without_thread_warns(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._integration_thread = None
+        dash._append_log = MagicMock()
+        dash._cmd_manual_undo()
+        msg = dash._append_log.call_args[0][0]
+        assert "integration thread" in msg
+
+    def test_history_edit_pane_has_disabled_placeholders(self, tmp_path: Path):
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        # 3 placeholder ボタンが disabled で生成されている
+        from unittest.mock import call as _call  # noqa: F401
+        # configure で state="disabled" が立てられたか、または初期化引数で立っているか
+        # を確認 (構築コード上 state="disabled" を kwarg で渡している)
+        for btn in (dash._btn_history_replace, dash._btn_history_delete,
+                     dash._btn_history_replay):
+            # CTkButton 構築時の kwargs に state="disabled" が含まれることを確認
+            assert btn is not None

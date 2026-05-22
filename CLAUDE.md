@@ -1137,6 +1137,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | Advisory state の bounded retention | ✅ 完了 (Phase 5-F) | `integration.engine.MAX_ADVISORY_HANDS=500` で `_last_summary_by_hand_id` / `_last_reconstruction_by_hand_id` を eviction (union of hand_ids 最古から)。`_evict_old_advisory_entries` を `_invoke_reconstructor_hook` 末尾 + `_finalize_hand` 末尾の両方から呼んで `_apply_boundaries` 経路もカバー。evicted hand への `get_last_summary` / `get_reconstruction_result` は ``None`` を返すので GUI は Phase 4-C2 / 5-E の degrade パスで `[SKIPPED]` + `blinds=?/? (source=unknown)` 表示。GUI 側も `MAX_HISTORY_LINES=1000` で history Textbox を bounded retention (`_trim_history_lines` を `_apply_hand_finalized` の insert 直後に呼ぶ)。`_completed_hands` (hand window events) は本フェーズの eviction 対象外 (= Phase 6+ 候補) |
 | GUI からの手動 patch apply (in-memory のみ) | ✅ 完了 (Phase 5-G) | `core/patch_apply.py:apply_patch_proposal_to_summary` で whitelist field (`resolution_type` / `seat_payouts` / `pots` / `showdown_revealed_cards` / `blinds`) のみ deepcopy 後上書き → 新 `HandSummary` を返す pure helper。`IntegrationThread.apply_patch_proposal(hand_id) → bool` で in-memory `_last_summary_by_hand_id[hand_id]` を patched copy で置き換え、`result.patch_applied=True` / `applied_fields=[...]` を立てる。GUI 側に "Apply patch" ボタン (`_cmd_apply_patch`) + 確認ダイアログ hook (`_ask_apply_patch_confirmation`)、Latest advisory に `patch_applied=yes` / `applied_fields=...` 表示。`winner_seat` / `pot_total` / `actions` は明示的に whitelist 外。**JSON / PHH / GameStateManager / settlement / live BettingState は一切触らない** (永続化は別フェーズ) |
 | GUI で patch proposal の field 単位 detail を表示 | ✅ 完了 (Phase 5-H) | `core/patch_apply.py:summarize_patch_proposal_for_view(summary, proposal) → list[FieldDiffView]` が `FieldPatch` を GUI 表示用に整形 (online_repr / offline_repr / is_applicable / note)。値は ``_format_value_for_view`` で deterministic に文字列化 (int キー dict は昇順 sort、str キーは挿入順)。GUI 側に "Show details" ボタン (Apply patch の左) + `_cmd_show_patch_details` ハンドラ + `_create_patch_detail_window(title, lines)` (テスト時 MagicMock 可)。whitelist field は `[applies]` / 非 whitelist は `[skip]` マーカー。apply 済 hand では header に `(patch applied — applied_fields=...)` を付与。**read-only**: apply は呼ばず、JSON / PHH には触らない |
+| Manual action pad / keypad / dashboard UI skeleton | ✅ 完了 (Phase 5-Ia) | `gui/dashboard.py` の `_manual_action_frame` に table view + action pad + keypad + history edit pane (read-only placeholder)。`IntegrationThread.get_manual_action_state()` / `submit_manual_action(seat, action, amount=None)` / `undo_last_manual_action()` を追加。manual record は audio 経路と同じ `_current_actions` / `_on_action` を通る。**過去 action replay は Phase 5-Ic/Id (将来課題)** |
 | Reconstruct 結果可視化 CLI (read-only) | ✅ 完了 (Phase 4-C1) | `output/inspect_reconstruction.py`: `reconstruct_<session>.jsonl` を読んで `[OK]` / `[REVIEW]` / `[SKIPPED]` ラベル付きで hand 単位サマリを出す。`--only-needs-review` / `--fields A,B` フィルタ対応。online JSON / PHH / live hook 結果には触らない |
 | Patch proposal (差分 → 修正案、apply は無し) | ✅ 完了 (Phase 5-A) | `core/patch_proposal.py`: `HandPatchProposal` / `FieldPatch` / `compute_patch_proposal`。対象 field は resolution_type / seat_payouts / winner_seat / pot_total / showdown_revealed_cards。`HandReconstructionResult.patch_proposal` に乗り、CLI `--show-patches` と GUI ``patch_fields=`` 表示で見える。``can_patch_automatically=False`` (Phase 5-B 以降で apply 判定) |
 | ShowdownTracker 本実装 | 🔨 skeleton (Phase 2-D 以降) | `core/showdown_tracker.py` |
@@ -2135,6 +2136,102 @@ projection にリファクタする可能性は別フェーズで検討。
   これらは Phase 6+ の interactive view candidate
 - **Tkinter Toplevel の geometry / 配色は最小限**: 700x500 固定、Courier 11pt、
   スタイル統一は将来の UX 改善で扱う
+
+**Phase 5-Ia 完了済み (Manual Action Pad / Past Action Edit UI skeleton)**:
+
+**目的**: operator がテーブル上の手番進行を見ながら、現在 actor に対して
+manual に action を入力できる GUI を導入する。将来の Phase 5-Ic/Id で
+「過去 action の replace / delete / replay」を扱う土台も先に枠だけ立てる。
+
+**背景**: 既存の `BettingState` / `integration/action_order.py` /
+`IntegrationThread._current_actions` / `ActionRecord` / `_on_action` callback
+を再利用する設計。manual 入力でも audio 経路と同じ pipeline を通すので、
+GUI 側の従来表示 (action ログ、confidence、advisory) には自動で反映される。
+
+**今回の実装範囲 (Phase 5-Ia)**:
+
+- ✅ `IntegrationThread` に 3 つの API を追加:
+    - `get_manual_action_state() → dict`: GUI 表示に必要な現在状態を
+      1 つの dict にして返す (`actor_seat` / `street` / `to_call` /
+      `current_bet` / `min_raise` / `button_seat` / `sb_seat` / `bb_seat` /
+      `seat_views` / `history_lines` / `hand_id` / `is_initialized`)。
+      ``BettingState`` 未初期化時でも安全に呼べる
+    - `submit_manual_action(seat, action, amount=None) → ActionRecord`:
+      manual action 確定の唯一の窓口。``amount=None`` の場合は action 種別に
+      応じて自動補完 (`check`=0 / `call`=`call_amount_for(seat)` / `allin`=
+      現在 stack)。``GameStateManager.apply_action`` + ``BettingState.update_after_action``
+      を通すので record は ``_current_actions`` に積まれ ``on_action`` callback
+      も発火する。失敗時は ``needs_review=True`` を立てて record だけ残す
+      (= operator がレビュー可能、クラッシュさせない)。``source={"manual": True,
+      "audio": False, "rfid": False, "camera": False}`` で manual 由来を識別
+    - `undo_last_manual_action() → bool`: ``_current_actions`` の末尾 record を
+      1 件 pop する。**既知の制約**: ``BettingState`` / ``GameStateManager`` の
+      真の rollback は replay が必要 (= Phase 5-I 将来課題)。現状は record を
+      pop するだけで stack / pot / actor_seat は **巻き戻らない**。誤入力直後
+      の「ログから消す」用途として割り切る
+- ✅ ``gui/dashboard.py`` に ``_manual_action_frame`` (root grid row=4) を追加。
+  3 カラム構成: `table_view_frame` (weight 3) / `action_pad_frame` (weight 2) /
+  `history_edit_frame` (weight 3)
+- ✅ `table_view_frame`: 各 seat の擬似カード (seat 番号 / stack / badges
+  [`BTN` / `SB` / `BB` / `Fold` / `All-in` / `Acting`] / last action 要約)。
+  actor は seat_lbl の text_color で強調
+- ✅ `action_pad_frame`: 上部に info ラベル (`Target / Mode / Street / To call
+  / Bet / MinR`)、中段に action ボタン (`Fold` / `Check/Call` / `Bet` /
+  `Raise` / `All-in` / `Undo` / `Apply` / `Cancel Edit`)、下段に amount display
+- ✅ `Check/Call` ボタンの label 切替: ``to_call == 0`` のとき "Check"、
+  ``to_call > 0`` のとき ``"Call <to_call>"``
+- ✅ `Bet` / `Raise` は pending kind をセットするだけ。テンキーで amount を
+  入力後 ``Apply`` または ``Enter`` で確定する 2 段階フロー
+- ✅ `keypad_frame` (`action_pad_frame` 下部): digits `0..9` / `00` / `⌫`
+  (backspace) / `Clear` / `Enter` + quick amount (`+SB` / `+BB` / `x2` /
+  `POT` / `ALL-IN`)
+- ✅ `history_edit_frame`: ``Action history`` ラベル + read-only Textbox +
+  current selection placeholder + **disabled placeholder ボタン** (`Replace
+  selected` / `Delete selected` / `Replay from here`)。Phase 5-Ic/Id で
+  有効化予定
+- ✅ GUI 内部 state: ``_manual_edit_mode = "live"`` / ``_selected_action_index
+  = None`` / ``_pending_manual_action_kind = None`` / ``_amount_var =
+  ctk.StringVar(value="")``
+- ✅ ``_poll_updates`` から ``_refresh_manual_action_view()`` を呼んで 3
+  ペインを 100ms ごとに更新
+
+**Phase 5-Ia スコープ外 / Phase 5-Ic/Id の将来課題**:
+
+- **過去 action の `Replace selected` / `Delete selected` / `Replay from here`
+  本実装**: history 行を選択して action を置換 / 削除 / 以降を replay する
+  処理本体。GUI 上は disabled な placeholder ボタンが配置済み。
+  ``_selected_action_index`` / ``_manual_edit_mode in {"edit", "replay"}`` を
+  使う想定で命名済み
+- **過去 action 修正後の index 以降の replay**: ``BettingState`` /
+  ``GameStateManager`` は incremental update 設計のため、過去 action を変えると
+  「以降の record の ``pot_after`` / ``stack_after`` が stale 化する」。
+  本格対応には HandReconstructor 相当の replay pipeline を online 経路にも
+  入れる必要がある (= Phase 5-Ic/Id で扱う)
+- **multi-step undo**: 現状の ``undo_last_manual_action`` は 1 段のみで
+  state を巻き戻さない。複数段の undo / redo / 完全 replay は Phase 5-Id+
+- **永続化 / audit log**: ``logs/patched_<session>.json`` や operator action
+  log (誰がいつ何を入力したか) の append-only 記録は Phase 6+。現状は
+  manual record も既存の ``logs/<session>.json`` に通常 ActionRecord として
+  乗るが、source flag ``manual=True`` 以外の追加トレースは無い
+- **patch proposal 系との統合 UI**: Phase 5-A〜5-H で advisory layer / Apply
+  patch / Show details が別 frame にあるが、manual edit と patch apply の
+  workflow を 1 つの UI に統合するのは Phase 6+
+- **legality 判定の重複回避**: 現状 GUI は最低限のガード (`to_call == 0`
+  なら Check、`amount > 0` チェック等) だけ持ち、最終 legality 判定は
+  ``submit_manual_action`` 内の ``apply_action`` 例外で吸収する設計。
+  GUI 側で legality を完全に複製すると保守コストが上がるためこの線引き
+  にしている
+- **posterior review / active learning UI との統合**: 将来の B5/B7 でモデル
+  posterior をクリックで教師として与える経路ができたら、manual action pad
+  もそのループに統合する想定 (現時点では未着手)
+
+**互換性**:
+
+- 既存の ASR / RFID / Beam / WINNER revise 経路はすべて不変
+  (= 新規 API / GUI の追加のみ、既存の 660 件のテストはすべて green を維持)
+- manual record は ``source={"manual": True, ...}`` で識別できるので、後段
+  の解析 (advisory diff / patch proposal / 評価指標) で manual 由来を弾く /
+  separate に扱う余地が残っている
 
 **Phase 5-B+ (Phase 5-B 直後の改善、同フェーズ扱い)**:
 - ✅ **Audio seat hint の出所カテゴリ化**: ``signals.audio_seat_hint_sources``

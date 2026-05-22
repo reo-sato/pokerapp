@@ -371,6 +371,202 @@ class IntegrationThread(threading.Thread):
             pass
         return True
 
+    # ──────────────────────────────────────────────────────────────────────
+    # Phase 5-Ia: Manual action pad API
+    #
+    # GUI から「テーブル上で actor seat に対して action / amount を直接入力する」
+    # ための窓口。すべて main thread (= GUI thread) から呼ぶ前提の synchronous API。
+    # action 適用本体は既存の audio 経路と同じ ``GameStateManager.apply_action``
+    # + ``BettingState.update_after_action`` を通すことで、blame の道筋を
+    # 統一する (= manual record も `_current_actions` に乗り、`_on_action`
+    # callback で GUI の従来表示にも流れる)。
+    # ──────────────────────────────────────────────────────────────────────
+
+    def get_manual_action_state(self) -> dict:
+        """GUI manual action pad の表示に必要な現在状態を 1 つの dict にして返す。
+
+        返り値は read-only な snapshot (= GUI 側は内容を mutate しない前提)。
+        ``BettingState`` 未初期化時 (= hand 開始前) でも安全に呼べる。
+        """
+        gs = self._game_state
+        bs = self._betting_state
+        stacks = gs.get_stacks()
+        active = set(gs.get_active_seats())
+
+        actor_seat: Optional[int] = None
+        to_call = 0
+        current_bet = 0
+        min_raise = bs.bb_amount or self._bb_amount or 0
+        button_seat = None
+        sb_seat = None
+        bb_seat = None
+        street = gs.street
+        folded: set[int] = set()
+        all_in: set[int] = set()
+        last_action_by_seat: dict[int, dict] = {}
+
+        if bs.is_initialized:
+            actor_seat = bs.actor_seat
+            current_bet = bs.current_bet
+            if actor_seat is not None:
+                to_call = bs.call_amount_for(actor_seat)
+            # min raise の素朴な定義: 前回 raise 増分 (= last_raise_to - prev_bet) を
+            # current_bet に加算するのが正規だが、Phase 5-Ia では「最低でも BB 1 単位」
+            # で簡略化する (= raise 入力 validation の下限ガイド)。
+            min_raise = max(bs.last_raise_to + (bs.bb_amount or 0), current_bet + (bs.bb_amount or 0))
+            button_seat = bs.button_seat
+            sb_seat = bs.sb_seat
+            bb_seat = bs.bb_seat
+            street = bs.street or gs.street
+            folded = set(bs.folded_seats)
+            all_in = set(bs.all_in_seats)
+            for entry in bs.action_history:
+                last_action_by_seat[entry["seat"]] = {
+                    "action": entry["action"], "amount": entry["amount"],
+                }
+
+        seat_views: list[dict] = []
+        for seat in sorted(stacks.keys()):
+            badges: list[str] = []
+            if seat == button_seat:
+                badges.append("BTN")
+            if seat == sb_seat:
+                badges.append("SB")
+            if seat == bb_seat:
+                badges.append("BB")
+            if seat in folded:
+                badges.append("Fold")
+            if seat in all_in:
+                badges.append("All-in")
+            if seat == actor_seat:
+                badges.append("Acting")
+            seat_views.append({
+                "seat": seat,
+                "name": gs.get_player_name(seat),
+                "stack": stacks[seat],
+                "active": seat in active,
+                "is_actor": seat == actor_seat,
+                "badges": badges,
+                "last_action": last_action_by_seat.get(seat),
+            })
+
+        history_lines = [
+            f"seat{r.seat} {r.action} {r.amount}"
+            for r in self._current_actions
+        ]
+
+        return {
+            "actor_seat": actor_seat,
+            "street": street,
+            "to_call": to_call,
+            "current_bet": current_bet,
+            "min_raise": min_raise,
+            "button_seat": button_seat,
+            "sb_seat": sb_seat,
+            "bb_seat": bb_seat,
+            "seat_views": seat_views,
+            "history_lines": history_lines,
+            "hand_id": gs.hand_id,
+            "is_initialized": bs.is_initialized,
+        }
+
+    def submit_manual_action(
+        self,
+        seat: int,
+        action: str,
+        amount: Optional[int] = None,
+    ) -> ActionRecord:
+        """Phase 5-Ia: GUI から manual action を 1 件確定する。
+
+        - ``amount`` が None のときは action 種別から自動補完する
+          (``check``=0, ``call``=call_amount_for(seat), ``allin``=現在 stack)。
+        - 既存の audio 経路と同じく ``gs.apply_action`` + ``betting_state.update_after_action``
+          を通すため、record は ``_current_actions`` に積まれ ``on_action`` callback も
+          発火する。
+        - 不正値 (apply_action 例外) は ``needs_review=True`` で record だけ残す
+          (= GUI は引き続き入力可能、operator がレビュー)。
+        - 戻り値は生成した ``ActionRecord``。
+        """
+        gs = self._game_state
+        bs = self._betting_state
+        seat_i = int(seat)
+        act = action.lower().strip()
+
+        if amount is None:
+            if act == "check":
+                amt = 0
+            elif act == "call":
+                amt = bs.call_amount_for(seat_i) if bs.is_initialized else 0
+            elif act == "allin":
+                amt = int(gs.get_stack(seat_i))
+            else:
+                amt = 0
+        else:
+            amt = int(amount)
+
+        needs_review = False
+        try:
+            gs.apply_action(seat_i, act, amt)
+        except Exception:
+            logger.exception(
+                "submit_manual_action: apply_action failed seat=%d action=%s amount=%s",
+                seat_i, act, amt,
+            )
+            needs_review = True
+        else:
+            if bs.is_initialized:
+                try:
+                    bs.update_after_action(seat_i, act, amt)
+                except Exception:
+                    logger.exception(
+                        "submit_manual_action: betting_state.update_after_action failed",
+                    )
+                    needs_review = True
+
+        record = ActionRecord(
+            hand_id=gs.hand_id,
+            timestamp=_now_iso(),
+            street=gs.street,
+            seat=seat_i,
+            player_name=gs.get_player_name(seat_i),
+            action=act,
+            amount=amt,
+            pot_after=gs.pot,
+            stack_after=gs.get_stack(seat_i),
+            source={"camera": False, "audio": False, "rfid": False, "manual": True},
+            needs_review=needs_review,
+            confidence=1.0,
+        )
+        self._current_actions.append(record)
+        if self._on_action is not None:
+            try:
+                self._on_action(record)
+            except Exception:
+                logger.exception("on_action callback raised (manual submit)")
+        return record
+
+    def undo_last_manual_action(self) -> bool:
+        """Phase 5-Ia: ``_current_actions`` の末尾を 1 件削除する (1 段のみ)。
+
+        **既知の制約**: ``BettingState`` / ``GameStateManager`` の真の rollback は
+        replay が必要 (Phase 5-I 将来課題)。本実装は ``_current_actions`` から
+        record を pop するだけで、stack / pot / actor_seat は **巻き戻らない**。
+        operator が誤入力直後に「ログから消す」用途として割り切る。
+
+        Returns:
+            True: pop された (= 1 件以上 record があった)
+            False: 履歴が空で何もしなかった
+        """
+        if not self._current_actions:
+            return False
+        popped = self._current_actions.pop()
+        logger.info(
+            "Manual undo: removed record seat=%s action=%s amount=%s "
+            "(betting_state NOT rolled back — known limitation)",
+            popped.seat, popped.action, popped.amount,
+        )
+        return True
+
     def run(self) -> None:
         logger.info("IntegrationThread started")
         while not self._stop_event.is_set():

@@ -250,6 +250,12 @@ class GUIDashboard:
         ctrl.grid(row=3, column=0, sticky="ew", padx=0, pady=0)
         self._build_controls(ctrl)
 
+        # Phase 5-Ia: Manual action pad (table view + action pad + history edit)
+        # 既存の controls の下に独立 frame として配置する。row=4 で root に追加。
+        self._manual_action_frame = ctk.CTkFrame(root, corner_radius=0)
+        self._manual_action_frame.grid(row=4, column=0, sticky="ew", padx=0, pady=(2, 0))
+        self._build_manual_action_frame()
+
         # セッション名を表示
         self._lbl_session.configure(text=f"セッション: {self._writer._session_id}")
 
@@ -897,6 +903,11 @@ class GUIDashboard:
             pass
         # ゲーム状態のヘッダーを常に最新化
         self._refresh_header()
+        # Phase 5-Ia: manual action pad の view も refresh
+        try:
+            self._refresh_manual_action_view()
+        except Exception:
+            pass
         if not self._stop_event.is_set():
             self._root.after(100, self._poll_updates)
 
@@ -1300,6 +1311,545 @@ class GUIDashboard:
         self._refresh_header()
         self._root.after(100, self._poll_updates)
         self._root.mainloop()
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Phase 5-Ia: Manual action pad
+    #
+    # operator がテーブル上で actor seat に対して action / amount を直接入力
+    # するための frame。3 カラム: 左 = table view (seat 一覧 + badges)、
+    # 中央 = action pad (Fold / Check-Call / Bet / Raise / All-in / Undo /
+    # Apply / Cancel) + keypad、右 = history edit pane (今回は read-only
+    # placeholder。replace/delete/replay は Phase 5-I 将来課題)。
+    #
+    # 全ての action submit は ``IntegrationThread.submit_manual_action`` 経由。
+    # GUI 側は backend の正本 state を保持しない。
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _build_manual_action_frame(self) -> None:
+        ctk = self._ctk
+        frame = self._manual_action_frame
+        # 3 カラム: table_view (weight 3) | action_pad (weight 2) | history_edit (weight 3)
+        frame.grid_columnconfigure(0, weight=3)
+        frame.grid_columnconfigure(1, weight=2)
+        frame.grid_columnconfigure(2, weight=3)
+
+        # GUI 内部 state (view のみ。正本は IntegrationThread)
+        self._manual_edit_mode = "live"
+        self._selected_action_index: Optional[int] = None
+        self._pending_manual_action_kind: Optional[str] = None
+        self._amount_var = ctk.StringVar(value="")
+
+        # ── column 0: table view ────────────────────────────────────────
+        self._table_view_frame = ctk.CTkFrame(frame, corner_radius=0)
+        self._table_view_frame.grid(row=0, column=0, sticky="nsew", padx=(4, 2), pady=4)
+        self._table_view_title = ctk.CTkLabel(
+            self._table_view_frame, text="テーブル (manual)",
+            anchor="w", font=("", 11, "bold"),
+        )
+        self._table_view_title.grid(row=0, column=0, padx=6, pady=(4, 2), sticky="w")
+        # seat 行は ``_refresh_table_view`` で動的に作る。初期 build 時に 1 度作っておく。
+        self._seat_cards: dict[int, dict] = {}
+        seats = sorted(self._gs.get_stacks().keys())
+        for idx, seat in enumerate(seats, start=1):
+            card_frame = ctk.CTkFrame(self._table_view_frame, corner_radius=4)
+            card_frame.grid(row=idx, column=0, padx=6, pady=2, sticky="ew")
+            seat_lbl = ctk.CTkLabel(card_frame, text=f"席{seat}", anchor="w",
+                                     font=("", 11, "bold"))
+            seat_lbl.grid(row=0, column=0, padx=4, pady=2, sticky="w")
+            stack_lbl = ctk.CTkLabel(card_frame, text="0", anchor="e",
+                                      font=("Courier", 10))
+            stack_lbl.grid(row=0, column=1, padx=4, pady=2, sticky="e")
+            badge_lbl = ctk.CTkLabel(card_frame, text="", anchor="w",
+                                      font=("", 10), text_color="#FFB347")
+            badge_lbl.grid(row=1, column=0, columnspan=2, padx=4, pady=(0, 2),
+                            sticky="w")
+            last_lbl = ctk.CTkLabel(card_frame, text="—", anchor="w",
+                                     font=("Courier", 9), text_color="#AAAAAA")
+            last_lbl.grid(row=2, column=0, columnspan=2, padx=4, pady=(0, 2),
+                           sticky="w")
+            self._seat_cards[seat] = {
+                "frame": card_frame, "seat_lbl": seat_lbl,
+                "stack_lbl": stack_lbl, "badge_lbl": badge_lbl,
+                "last_lbl": last_lbl,
+            }
+
+        # ── column 1: action pad + keypad ───────────────────────────────
+        self._action_pad_frame = ctk.CTkFrame(frame, corner_radius=0)
+        self._action_pad_frame.grid(row=0, column=1, sticky="nsew", padx=2, pady=4)
+
+        self._lbl_action_pad_info = ctk.CTkLabel(
+            self._action_pad_frame,
+            text="Target: — | Mode: Live | Street: — | To call: — | Bet: — | MinR: —",
+            anchor="w", font=("", 10),
+        )
+        self._lbl_action_pad_info.grid(row=0, column=0, columnspan=4,
+                                        padx=6, pady=(4, 2), sticky="w")
+
+        # action buttons (2x4 grid)
+        self._btn_manual_fold = ctk.CTkButton(
+            self._action_pad_frame, text="Fold", width=80,
+            command=self._cmd_manual_fold,
+        )
+        self._btn_manual_fold.grid(row=1, column=0, padx=2, pady=2)
+        self._btn_manual_check_call = ctk.CTkButton(
+            self._action_pad_frame, text="Check", width=80,
+            command=self._cmd_manual_check_call,
+        )
+        self._btn_manual_check_call.grid(row=1, column=1, padx=2, pady=2)
+        self._btn_manual_bet = ctk.CTkButton(
+            self._action_pad_frame, text="Bet", width=80,
+            command=self._cmd_manual_bet,
+        )
+        self._btn_manual_bet.grid(row=1, column=2, padx=2, pady=2)
+        self._btn_manual_raise = ctk.CTkButton(
+            self._action_pad_frame, text="Raise", width=80,
+            command=self._cmd_manual_raise,
+        )
+        self._btn_manual_raise.grid(row=1, column=3, padx=2, pady=2)
+        self._btn_manual_all_in = ctk.CTkButton(
+            self._action_pad_frame, text="All-in", width=80,
+            command=self._cmd_manual_all_in,
+        )
+        self._btn_manual_all_in.grid(row=2, column=0, padx=2, pady=2)
+        self._btn_manual_undo = ctk.CTkButton(
+            self._action_pad_frame, text="Undo", width=80,
+            fg_color="#555555",
+            command=self._cmd_manual_undo,
+        )
+        self._btn_manual_undo.grid(row=2, column=1, padx=2, pady=2)
+        self._btn_manual_apply = ctk.CTkButton(
+            self._action_pad_frame, text="Apply", width=80,
+            command=self._submit_pending_manual_action,
+        )
+        self._btn_manual_apply.grid(row=2, column=2, padx=2, pady=2)
+        # Cancel Edit は将来の Edit/Replay モード切替用 placeholder (今回は何もしない)
+        self._btn_manual_cancel_edit = ctk.CTkButton(
+            self._action_pad_frame, text="Cancel Edit", width=80,
+            fg_color="#555555", state="disabled",
+            command=self._cmd_manual_cancel_edit,
+        )
+        self._btn_manual_cancel_edit.grid(row=2, column=3, padx=2, pady=2)
+
+        # amount display
+        self._lbl_amount_display = ctk.CTkLabel(
+            self._action_pad_frame, textvariable=self._amount_var,
+            anchor="e", font=("Courier", 14, "bold"), text_color="#FFFFFF",
+        )
+        self._lbl_amount_display.grid(row=3, column=0, columnspan=4,
+                                       padx=6, pady=(4, 2), sticky="ew")
+
+        # ── keypad (action_pad_frame 下部) ──────────────────────────────
+        self._keypad_frame = ctk.CTkFrame(self._action_pad_frame, corner_radius=0)
+        self._keypad_frame.grid(row=4, column=0, columnspan=4, padx=4, pady=(2, 4),
+                                  sticky="ew")
+        self._keypad_buttons: dict[str, object] = {}
+        # 1..9
+        for i, digit in enumerate(["1", "2", "3", "4", "5", "6", "7", "8", "9"]):
+            r, c = divmod(i, 3)
+            btn = ctk.CTkButton(
+                self._keypad_frame, text=digit, width=46,
+                command=lambda d=digit: self._cmd_keypad_digit(d),
+            )
+            btn.grid(row=r, column=c, padx=1, pady=1)
+            self._keypad_buttons[digit] = btn
+        # row 3: 00, 0, backspace
+        self._keypad_buttons["00"] = ctk.CTkButton(
+            self._keypad_frame, text="00", width=46,
+            command=lambda: self._cmd_keypad_digit("00"),
+        )
+        self._keypad_buttons["00"].grid(row=3, column=0, padx=1, pady=1)
+        self._keypad_buttons["0"] = ctk.CTkButton(
+            self._keypad_frame, text="0", width=46,
+            command=lambda: self._cmd_keypad_digit("0"),
+        )
+        self._keypad_buttons["0"].grid(row=3, column=1, padx=1, pady=1)
+        self._keypad_buttons["bs"] = ctk.CTkButton(
+            self._keypad_frame, text="⌫", width=46,
+            command=self._cmd_keypad_backspace,
+        )
+        self._keypad_buttons["bs"].grid(row=3, column=2, padx=1, pady=1)
+        # row 4: clear, enter, quick amounts (+BB, x2, POT, ALL-IN, +SB)
+        self._keypad_buttons["clear"] = ctk.CTkButton(
+            self._keypad_frame, text="Clear", width=46, fg_color="#555555",
+            command=self._cmd_keypad_clear,
+        )
+        self._keypad_buttons["clear"].grid(row=4, column=0, padx=1, pady=1)
+        self._keypad_buttons["enter"] = ctk.CTkButton(
+            self._keypad_frame, text="Enter", width=46,
+            command=self._cmd_keypad_enter,
+        )
+        self._keypad_buttons["enter"].grid(row=4, column=1, padx=1, pady=1)
+        self._keypad_buttons["+sb"] = ctk.CTkButton(
+            self._keypad_frame, text="+SB", width=46,
+            command=lambda: self._cmd_keypad_quick("+sb"),
+        )
+        self._keypad_buttons["+sb"].grid(row=5, column=0, padx=1, pady=1)
+        self._keypad_buttons["+bb"] = ctk.CTkButton(
+            self._keypad_frame, text="+BB", width=46,
+            command=lambda: self._cmd_keypad_quick("+bb"),
+        )
+        self._keypad_buttons["+bb"].grid(row=5, column=1, padx=1, pady=1)
+        self._keypad_buttons["x2"] = ctk.CTkButton(
+            self._keypad_frame, text="x2", width=46,
+            command=lambda: self._cmd_keypad_quick("x2"),
+        )
+        self._keypad_buttons["x2"].grid(row=5, column=2, padx=1, pady=1)
+        self._keypad_buttons["pot"] = ctk.CTkButton(
+            self._keypad_frame, text="POT", width=46,
+            command=lambda: self._cmd_keypad_quick("pot"),
+        )
+        self._keypad_buttons["pot"].grid(row=6, column=0, padx=1, pady=1)
+        self._keypad_buttons["allin"] = ctk.CTkButton(
+            self._keypad_frame, text="ALL-IN", width=46,
+            command=lambda: self._cmd_keypad_quick("allin"),
+        )
+        self._keypad_buttons["allin"].grid(row=6, column=1, padx=1, pady=1)
+
+        # ── column 2: history edit pane (Phase 5-I 将来課題のための placeholder)
+        self._history_edit_frame = ctk.CTkFrame(frame, corner_radius=0)
+        self._history_edit_frame.grid(row=0, column=2, sticky="nsew", padx=(2, 4),
+                                        pady=4)
+        self._history_edit_title = ctk.CTkLabel(
+            self._history_edit_frame, text="Action history",
+            anchor="w", font=("", 11, "bold"),
+        )
+        self._history_edit_title.grid(row=0, column=0, columnspan=3, padx=6,
+                                        pady=(4, 2), sticky="w")
+        self._history_edit_box = ctk.CTkTextbox(
+            self._history_edit_frame, state="disabled", wrap="none",
+            font=("Courier", 10), height=120,
+        )
+        self._history_edit_box.grid(row=1, column=0, columnspan=3, padx=6,
+                                      pady=(0, 2), sticky="ew")
+        self._lbl_history_selection = ctk.CTkLabel(
+            self._history_edit_frame,
+            text="(no selection — past edit not yet supported)",
+            anchor="w", font=("", 9), text_color="#888888",
+        )
+        self._lbl_history_selection.grid(row=2, column=0, columnspan=3, padx=6,
+                                            pady=(0, 2), sticky="w")
+        # disabled placeholder buttons (Phase 5-Ic/Id で有効化)
+        self._btn_history_replace = ctk.CTkButton(
+            self._history_edit_frame, text="Replace selected", width=130,
+            state="disabled", fg_color="#555555",
+        )
+        self._btn_history_replace.grid(row=3, column=0, padx=4, pady=(2, 4))
+        self._btn_history_delete = ctk.CTkButton(
+            self._history_edit_frame, text="Delete selected", width=130,
+            state="disabled", fg_color="#555555",
+        )
+        self._btn_history_delete.grid(row=3, column=1, padx=4, pady=(2, 4))
+        self._btn_history_replay = ctk.CTkButton(
+            self._history_edit_frame, text="Replay from here", width=130,
+            state="disabled", fg_color="#555555",
+        )
+        self._btn_history_replay.grid(row=3, column=2, padx=4, pady=(2, 4))
+
+    # ── refresh ─────────────────────────────────────────────────────────
+
+    def _refresh_manual_action_view(self) -> None:
+        """``_poll_updates`` から呼び、IntegrationThread の現在状態で 3 ペインを更新する。"""
+        state = self._fetch_manual_state()
+        self._refresh_table_view(state)
+        self._refresh_action_pad(state)
+        self._refresh_history_edit_view(state)
+
+    def _fetch_manual_state(self) -> dict:
+        thread = self._integration_thread
+        if thread is None:
+            return {
+                "actor_seat": None, "street": "—", "to_call": 0,
+                "current_bet": 0, "min_raise": 0,
+                "button_seat": None, "sb_seat": None, "bb_seat": None,
+                "seat_views": [], "history_lines": [], "hand_id": 0,
+                "is_initialized": False,
+            }
+        try:
+            return thread.get_manual_action_state()  # type: ignore[attr-defined]
+        except Exception:
+            return {
+                "actor_seat": None, "street": "—", "to_call": 0,
+                "current_bet": 0, "min_raise": 0,
+                "button_seat": None, "sb_seat": None, "bb_seat": None,
+                "seat_views": [], "history_lines": [], "hand_id": 0,
+                "is_initialized": False,
+            }
+
+    def _refresh_table_view(self, state: dict) -> None:
+        for view in state.get("seat_views", []):
+            seat = view["seat"]
+            row = self._seat_cards.get(seat)
+            if row is None:
+                continue
+            stack = view.get("stack", 0)
+            try:
+                row["stack_lbl"].configure(text=f"{int(stack):,}")
+            except Exception:
+                pass
+            badges = view.get("badges", []) or []
+            try:
+                row["badge_lbl"].configure(text=" ".join(badges))
+            except Exception:
+                pass
+            last = view.get("last_action")
+            try:
+                if last:
+                    row["last_lbl"].configure(
+                        text=f"{last.get('action')} {last.get('amount')}",
+                    )
+                else:
+                    row["last_lbl"].configure(text="—")
+            except Exception:
+                pass
+            # actor は seat_lbl の色で強調
+            try:
+                if view.get("is_actor"):
+                    row["seat_lbl"].configure(text_color="#FFD54F")
+                else:
+                    row["seat_lbl"].configure(text_color="#CCCCCC")
+            except Exception:
+                pass
+
+    def _refresh_action_pad(self, state: dict) -> None:
+        actor = state.get("actor_seat")
+        to_call = state.get("to_call", 0) or 0
+        current_bet = state.get("current_bet", 0) or 0
+        min_raise = state.get("min_raise", 0) or 0
+        street = state.get("street", "—")
+        info = (
+            f"Target: {actor if actor is not None else '—'}  |  "
+            f"Mode: {self._manual_edit_mode.capitalize()}  |  "
+            f"Street: {street}  |  To call: {to_call}  |  "
+            f"Bet: {current_bet}  |  MinR: {min_raise}"
+        )
+        try:
+            self._lbl_action_pad_info.configure(text=info)
+        except Exception:
+            pass
+        # Check/Call label 切替
+        try:
+            label = "Check" if int(to_call) == 0 else f"Call {int(to_call)}"
+            self._btn_manual_check_call.configure(text=label)
+        except Exception:
+            pass
+
+    def _refresh_history_edit_view(self, state: dict) -> None:
+        try:
+            box = self._history_edit_box
+            box.configure(state="normal")
+            box.delete("1.0", "end")
+            for idx, line in enumerate(state.get("history_lines", []) or []):
+                box.insert("end", f"{idx:02d}  {line}\n")
+            box.configure(state="disabled")
+        except Exception:
+            pass
+
+    # ── action button handlers ─────────────────────────────────────────
+
+    def _resolve_manual_actor(self) -> Optional[int]:
+        state = self._fetch_manual_state()
+        actor = state.get("actor_seat")
+        if isinstance(actor, int):
+            return actor
+        return None
+
+    def _cmd_manual_fold(self) -> None:
+        seat = self._resolve_manual_actor()
+        if seat is None:
+            self._append_log("⚠ Manual Fold: actor seat 不明。", tag="review")
+            return
+        self._invoke_manual_submit(seat, "fold", 0)
+
+    def _cmd_manual_check_call(self) -> None:
+        seat = self._resolve_manual_actor()
+        if seat is None:
+            self._append_log("⚠ Manual Check/Call: actor seat 不明。", tag="review")
+            return
+        state = self._fetch_manual_state()
+        to_call = int(state.get("to_call", 0) or 0)
+        if to_call == 0:
+            self._invoke_manual_submit(seat, "check", 0)
+        else:
+            self._invoke_manual_submit(seat, "call", to_call)
+
+    def _cmd_manual_bet(self) -> None:
+        self._pending_manual_action_kind = "bet"
+        self._append_log("Manual Bet: 金額をテンキーで入力 → Apply", tag="medium")
+
+    def _cmd_manual_raise(self) -> None:
+        self._pending_manual_action_kind = "raise"
+        self._append_log("Manual Raise: 金額をテンキーで入力 → Apply", tag="medium")
+
+    def _cmd_manual_all_in(self) -> None:
+        seat = self._resolve_manual_actor()
+        if seat is None:
+            self._append_log("⚠ Manual All-in: actor seat 不明。", tag="review")
+            return
+        try:
+            stack = int(self._gs.get_stack(seat))
+        except Exception:
+            self._append_log("⚠ Manual All-in: stack 不明。", tag="review")
+            return
+        if stack <= 0:
+            self._append_log(f"⚠ Manual All-in: 席{seat} stack=0", tag="review")
+            return
+        self._invoke_manual_submit(seat, "allin", stack)
+
+    def _cmd_manual_undo(self) -> None:
+        thread = self._integration_thread
+        if thread is None:
+            self._append_log("⚠ Manual Undo: integration thread 未接続。",
+                              tag="review")
+            return
+        try:
+            ok = bool(thread.undo_last_manual_action())  # type: ignore[attr-defined]
+        except Exception as e:
+            self._append_log(f"⚠ Manual Undo failed: {e}", tag="review")
+            return
+        if ok:
+            self._append_log("Manual Undo: 直前 record を削除しました。",
+                              tag="medium")
+        else:
+            self._append_log("Manual Undo: 履歴が空です。", tag="review")
+
+    def _cmd_manual_cancel_edit(self) -> None:
+        # Phase 5-I 将来の Edit/Replay モード切替用。今は pending kind だけ落とす。
+        self._pending_manual_action_kind = None
+        self._amount_var.set("")
+
+    # ── keypad handlers ────────────────────────────────────────────────
+
+    def _cmd_keypad_digit(self, digit: str) -> None:
+        try:
+            cur = self._amount_var.get()
+        except Exception:
+            cur = ""
+        new_val = (cur or "") + str(digit)
+        # 先頭 0 のクリーンアップ (= "0123" 入力を許容しない)
+        new_val = new_val.lstrip("0") or "0"
+        try:
+            self._amount_var.set(new_val)
+        except Exception:
+            pass
+
+    def _cmd_keypad_backspace(self) -> None:
+        try:
+            cur = self._amount_var.get() or ""
+        except Exception:
+            cur = ""
+        self._amount_var.set(cur[:-1])
+
+    def _cmd_keypad_clear(self) -> None:
+        try:
+            self._amount_var.set("")
+        except Exception:
+            pass
+
+    def _cmd_keypad_enter(self) -> None:
+        # Enter = Apply の同義 (= pending action を amount 付きで送信)
+        self._submit_pending_manual_action()
+
+    def _cmd_keypad_quick(self, kind: str) -> None:
+        state = self._fetch_manual_state()
+        sb = state.get("current_bet", 0) or 0  # 仮 fallback
+        bb_amount = 0
+        thread = self._integration_thread
+        if thread is not None:
+            bs = getattr(thread, "betting_state", None)
+            if bs is not None:
+                sb = getattr(bs, "sb_amount", 0) or sb
+                bb_amount = getattr(bs, "bb_amount", 0) or 0
+        try:
+            cur_amount = int(self._amount_var.get() or "0")
+        except ValueError:
+            cur_amount = 0
+        if kind == "+sb":
+            new_val = cur_amount + int(sb)
+        elif kind == "+bb":
+            new_val = cur_amount + int(bb_amount)
+        elif kind == "x2":
+            new_val = cur_amount * 2
+        elif kind == "pot":
+            # 簡略実装: 現在の pot total (= gs.pot) を amount に
+            new_val = int(getattr(self._gs, "pot", 0))
+        elif kind == "allin":
+            actor = self._resolve_manual_actor()
+            if actor is None:
+                return
+            new_val = int(self._gs.get_stack(actor))
+        else:
+            return
+        try:
+            self._amount_var.set(str(max(0, new_val)))
+        except Exception:
+            pass
+
+    # ── submit pending ─────────────────────────────────────────────────
+
+    def _submit_pending_manual_action(self) -> None:
+        kind = self._pending_manual_action_kind
+        if kind not in ("bet", "raise"):
+            self._append_log(
+                "⚠ Apply: Bet または Raise を先に選択してください。",
+                tag="review",
+            )
+            return
+        try:
+            raw = self._amount_var.get() or ""
+        except Exception:
+            raw = ""
+        raw = raw.strip()
+        if not raw:
+            self._append_log(
+                f"⚠ Apply: 金額が未入力です ({kind})。",
+                tag="review",
+            )
+            return
+        try:
+            amount = int(raw)
+        except ValueError:
+            self._append_log(f"⚠ Apply: 金額が不正です: {raw!r}", tag="review")
+            return
+        if amount <= 0:
+            self._append_log(
+                f"⚠ Apply: 金額は正の整数で指定してください: {amount}",
+                tag="review",
+            )
+            return
+        seat = self._resolve_manual_actor()
+        if seat is None:
+            self._append_log("⚠ Apply: actor seat 不明。", tag="review")
+            return
+        self._invoke_manual_submit(seat, kind, amount)
+        # 送信後は pending state をリセット
+        self._pending_manual_action_kind = None
+        try:
+            self._amount_var.set("")
+        except Exception:
+            pass
+
+    def _invoke_manual_submit(
+        self, seat: int, action: str, amount: int,
+    ) -> None:
+        thread = self._integration_thread
+        if thread is None:
+            self._append_log(
+                "⚠ Manual action: integration thread が未接続です。",
+                tag="review",
+            )
+            return
+        try:
+            thread.submit_manual_action(seat, action, amount)  # type: ignore[attr-defined]
+        except Exception as e:
+            self._append_log(
+                f"⚠ Manual action failed (seat={seat} {action} {amount}): {e}",
+                tag="review",
+            )
+            return
+        self._append_log(
+            f"Manual: 席{seat} {action} {amount}",
+            tag="medium",
+        )
 
     def _on_close(self) -> None:
         self._stop_event.set()

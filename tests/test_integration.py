@@ -285,3 +285,111 @@ class TestMultipleActions:
         # 2番目はカメラなし
         assert captured[1].source["camera"] is False
         assert captured[1].confidence == _CONF_AUDIO_ONLY
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase 5-Ia: Manual Action API (get_manual_action_state / submit / undo)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestPhase5IManualAction:
+    """``IntegrationThread.submit_manual_action`` / ``undo_last_manual_action``
+    / ``get_manual_action_state`` の単体動作。スレッドは start しない (= 同期 API)。
+    """
+
+    def _make_thread(self, tmp_path: Path, session: str = "manual_test"):
+        gs = _make_game()
+        audio_q = make_audio_queue()
+        writer = JsonWriter(log_dir=tmp_path, session_id=session)
+        captured: list[ActionRecord] = []
+        thread = IntegrationThread(
+            audio_queue=audio_q,
+            game_state=gs,
+            json_writer=writer,
+            on_action=captured.append,
+            initial_button_seat=1,
+        )
+        # button / blinds を確定して BettingState を起こす
+        thread._start_new_hand()
+        return thread, gs, captured
+
+    def test_submit_manual_action_applies_to_actor(self, tmp_path: Path):
+        thread, gs, captured = self._make_thread(tmp_path)
+        state = thread.get_manual_action_state()
+        actor = state["actor_seat"]
+        assert actor is not None
+        rec = thread.submit_manual_action(actor, "fold", 0)
+        assert rec.seat == actor
+        assert rec.action == "fold"
+        assert rec.source.get("manual") is True
+        # actor が次の seat に進んでいる、または fold が反映されている
+        assert actor in thread.betting_state.folded_seats
+        # on_action callback も発火 (SB_POST/BB_POST + fold で 3 件以上)
+        assert any(c.action == "fold" for c in captured)
+
+    def test_submit_call_auto_fills_to_call_amount(self, tmp_path: Path):
+        thread, gs, captured = self._make_thread(tmp_path)
+        state = thread.get_manual_action_state()
+        actor = state["actor_seat"]
+        to_call = state["to_call"]
+        rec = thread.submit_manual_action(actor, "call", None)
+        assert rec.action == "call"
+        assert rec.amount == to_call
+
+    def test_submit_check_uses_zero(self, tmp_path: Path):
+        thread, gs, captured = self._make_thread(tmp_path)
+        # check は to_call=0 の状況で意味があるが、API としては 0 で確定する
+        actor = thread.betting_state.actor_seat
+        rec = thread.submit_manual_action(actor, "check", None)
+        assert rec.amount == 0
+
+    def test_submit_allin_uses_stack(self, tmp_path: Path):
+        thread, gs, captured = self._make_thread(tmp_path)
+        actor = thread.betting_state.actor_seat
+        stack = gs.get_stack(actor)
+        rec = thread.submit_manual_action(actor, "allin", None)
+        assert rec.action == "allin"
+        assert rec.amount == stack
+
+    def test_undo_pops_last_record(self, tmp_path: Path):
+        thread, gs, captured = self._make_thread(tmp_path)
+        actor = thread.betting_state.actor_seat
+        thread.submit_manual_action(actor, "fold", 0)
+        size_before = len(thread._current_actions)
+        ok = thread.undo_last_manual_action()
+        assert ok is True
+        assert len(thread._current_actions) == size_before - 1
+
+    def test_undo_on_empty_returns_false(self, tmp_path: Path):
+        gs = _make_game()
+        audio_q = make_audio_queue()
+        writer = JsonWriter(log_dir=tmp_path, session_id="undo_empty")
+        thread = IntegrationThread(
+            audio_queue=audio_q, game_state=gs, json_writer=writer,
+        )
+        # current_actions を空に強制
+        thread._current_actions = []
+        assert thread.undo_last_manual_action() is False
+
+    def test_get_manual_action_state_keys(self, tmp_path: Path):
+        thread, gs, captured = self._make_thread(tmp_path)
+        state = thread.get_manual_action_state()
+        for key in ("actor_seat", "street", "to_call", "current_bet",
+                     "min_raise", "button_seat", "sb_seat", "bb_seat",
+                     "seat_views", "history_lines", "hand_id", "is_initialized"):
+            assert key in state
+        assert state["is_initialized"] is True
+        assert isinstance(state["seat_views"], list)
+        # 2 seats
+        assert len(state["seat_views"]) == 2
+
+    def test_get_manual_action_state_before_init(self, tmp_path: Path):
+        gs = _make_game()
+        audio_q = make_audio_queue()
+        writer = JsonWriter(log_dir=tmp_path, session_id="pre_init")
+        thread = IntegrationThread(
+            audio_queue=audio_q, game_state=gs, json_writer=writer,
+        )
+        state = thread.get_manual_action_state()
+        assert state["is_initialized"] is False
+        assert state["actor_seat"] is None
