@@ -61,3 +61,25 @@ class AudioEvent:
     alternatives: list[ASRAlternative] = field(default_factory=list)  # ASR の N-best (Vosk は >=1、Whisper は通常 1)
     word_timestamps: list[WordTiming] = field(default_factory=list)   # top-1 仮説の単語列 (絶対時刻)
     t_end: Optional[float] = None                                      # 発話終了の絶対時刻 (φ_time の入力)
+
+
+@dataclass
+class ManualActionEvent:
+    """GUI 手動入力 (= operator が dropdown / entry で手入力した) 1 アクション。
+
+    AudioEvent と違って **seat 情報を明示的に持つ**。IntegrationThread が音声経路と
+    同じ品質で処理する (= ``BettingState.update_after_action`` を呼んで
+    contribution / actor / current_bet を更新する)。
+
+    Phase 5-I:
+      - audio 経路をバイパスして直接 ``GameStateManager.apply_action`` を叩いていた
+        旧 ``_cmd_manual_action`` を、この event 経由に置き換える
+      - ``EvidenceLog`` / ``HandReconstructor`` (offline replay) には流さない
+        (= 操作者の介入であって観測ではないため、reconstruct のベースラインに
+        混ぜない)。online HandSummary.actions には含まれる
+    """
+
+    seat: int
+    action: str       # "bet" / "call" / "raise" / "check" / "fold" / "allin"
+    amount: int       # 入力値そのまま (0 でも OK、handler 側で to_call 補完する)
+    timestamp: float  # time.time() 起点

@@ -112,6 +112,99 @@ class TestGUIDashboardLogic:
         assert ev.action == "winner"
         assert "シート1" in ev.raw_text
 
+    def test_cmd_manual_action_pushes_to_integration_manual_queue(
+        self, tmp_path: Path,
+    ):
+        """Phase 5-I: 手動アクションは ``ManualActionEvent`` に変換されて
+        ``integration_thread.manual_queue`` に push される (= gs を直叩きしない)。
+        """
+        from core.events import ManualActionEvent
+        dash, gs, audio_q, _stop = _make_mock_dashboard(tmp_path)
+        # integration thread を mock し、manual_queue を捕捉
+        thread = MagicMock()
+        manual_q = MagicMock()
+        thread.manual_queue = manual_q
+        dash._integration_thread = thread
+
+        # 入力値を mock (mock dashboard は seat 1/2 のみなので seat=1 を使う)
+        dash._manual_seat_var = MagicMock(get=MagicMock(return_value="1"))
+        dash._manual_action_var = MagicMock(get=MagicMock(return_value="raise"))
+        dash._manual_amount_entry = MagicMock(
+            get=MagicMock(return_value="600"),
+            delete=MagicMock(),
+        )
+
+        # gs の直叩きが起きないことを担保。raise=600 を直叩きで apply されると
+        # pot に 600 入るはずだが、新実装ではそれが起きない。
+        pot_before = gs.pot
+        stack_before = gs.get_stack(1)
+
+        dash._cmd_manual_action()
+
+        # gs.apply_action は呼ばれていない (= pot / stack は不変のまま)
+        assert gs.pot == pot_before
+        assert gs.get_stack(1) == stack_before
+        # manual_queue に ManualActionEvent が put された
+        manual_q.put.assert_called_once()
+        pushed = manual_q.put.call_args[0][0]
+        assert isinstance(pushed, ManualActionEvent)
+        assert pushed.seat == 1
+        assert pushed.action == "raise"
+        assert pushed.amount == 600
+        # amount entry がクリアされる
+        dash._manual_amount_entry.delete.assert_called_once_with(0, "end")
+
+    def test_cmd_manual_action_no_integration_thread_logs_warning(
+        self, tmp_path: Path,
+    ):
+        """integration thread 未接続なら warning ログ + queue へ push しない。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._integration_thread = None
+        dash._manual_seat_var = MagicMock(get=MagicMock(return_value="1"))
+        dash._manual_action_var = MagicMock(get=MagicMock(return_value="fold"))
+        dash._manual_amount_entry = MagicMock(get=MagicMock(return_value=""))
+        dash._append_log = MagicMock()
+
+        dash._cmd_manual_action()
+
+        # warning log が出る
+        msg = dash._append_log.call_args_list[-1][0][0]
+        assert "integration thread" in msg.lower() or "not connected" in msg.lower()
+
+    def test_cmd_manual_action_invalid_seat_logs_warning(self, tmp_path: Path):
+        """席番号が不正な文字列なら ValueError は出さず warning ログ。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.manual_queue = MagicMock()
+        dash._integration_thread = thread
+        dash._manual_seat_var = MagicMock(get=MagicMock(return_value="not-an-int"))
+        dash._manual_action_var = MagicMock(get=MagicMock(return_value="fold"))
+        dash._manual_amount_entry = MagicMock(get=MagicMock(return_value=""))
+        dash._append_log = MagicMock()
+
+        dash._cmd_manual_action()
+
+        thread.manual_queue.put.assert_not_called()
+        msg = dash._append_log.call_args_list[-1][0][0]
+        assert "席" in msg
+
+    def test_cmd_manual_action_invalid_amount_logs_warning(self, tmp_path: Path):
+        """金額が不正な文字列なら ValueError は出さず warning ログ。"""
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.manual_queue = MagicMock()
+        dash._integration_thread = thread
+        dash._manual_seat_var = MagicMock(get=MagicMock(return_value="1"))
+        dash._manual_action_var = MagicMock(get=MagicMock(return_value="bet"))
+        dash._manual_amount_entry = MagicMock(get=MagicMock(return_value="abc"))
+        dash._append_log = MagicMock()
+
+        dash._cmd_manual_action()
+
+        thread.manual_queue.put.assert_not_called()
+        msg = dash._append_log.call_args_list[-1][0][0]
+        assert "金額" in msg
+
     def test_cmd_rebuy_invalid_amount_does_not_crash(self, tmp_path: Path):
         dash, gs, audio_q, stop = _make_mock_dashboard(tmp_path)
         # entry.get() が空文字列を返す場合

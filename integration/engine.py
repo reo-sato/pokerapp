@@ -33,7 +33,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from core.event_queue import EventQueue
-from core.events import AudioEvent, CameraEvent, RFIDEvent
+from core.events import AudioEvent, CameraEvent, ManualActionEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
 from core.hand_boundary import BoundaryEvent, HandBoundaryDetector
@@ -97,7 +97,7 @@ def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
 
 
 class IntegrationThread(threading.Thread):
-    """audio / camera / RFID の 3 キューを消費してゲーム状態を更新する。"""
+    """audio / camera / RFID / manual の 4 キューを消費してゲーム状態を更新する。"""
 
     def __init__(
         self,
@@ -106,6 +106,7 @@ class IntegrationThread(threading.Thread):
         json_writer: JsonWriter,
         camera_queue: Optional[EventQueue] = None,
         rfid_queue: Optional[EventQueue] = None,
+        manual_queue: Optional[EventQueue] = None,
         on_action: Optional[Callable[[ActionRecord], None]] = None,
         on_action_revised: Optional[Callable[[ActionRecord], None]] = None,
         on_rfid_card: Optional[Callable[[RFIDEvent], None]] = None,
@@ -131,6 +132,11 @@ class IntegrationThread(threading.Thread):
         self._audio_queue = audio_queue
         self._camera_queue = camera_queue
         self._rfid_queue = rfid_queue
+        # Phase 5-I: GUI 手動入力用 queue。None なら内部生成 (= GUI から
+        # ``integration_thread.manual_queue`` プロパティで取得して push する)。
+        self._manual_queue: EventQueue = (
+            manual_queue if manual_queue is not None else queue.Queue()
+        )
         self._game_state = game_state
         self._json_writer = json_writer
         self._on_action = on_action
@@ -290,6 +296,16 @@ class IntegrationThread(threading.Thread):
         """現在のベッティング状態 (GUI ヘッダー表示などに使う)。"""
         return self._betting_state
 
+    @property
+    def manual_queue(self) -> EventQueue:
+        """Phase 5-I: GUI から手動 ``ManualActionEvent`` を push するための queue。
+
+        GUI の ``_cmd_manual_action`` がこれに put すると、本スレッドの
+        ``_drain_manual_queue`` が拾って ``BettingState`` / ``GameStateManager``
+        を音声経路と同等に更新する。
+        """
+        return self._manual_queue
+
     # ──────────────────────────────────────────────────────────────────────
     # Phase 4-C2: advisory accessors (read-only)
     #
@@ -376,6 +392,11 @@ class IntegrationThread(threading.Thread):
         while not self._stop_event.is_set():
             self._drain_camera_queue()
             self._drain_rfid_queue()
+            # Phase 5-I: GUI 手動入力。audio 経由のアクションと同じ品質で処理する
+            # (= BettingState / GameStateManager を更新し、on_action コールバックも
+            # 同経路を辿る)。audio より先に drain することで、operator の手動補正が
+            # 取りこぼされにくくなる。
+            self._drain_manual_queue()
 
             try:
                 event = self._audio_queue.get(timeout=0.1)
@@ -422,6 +443,135 @@ class IntegrationThread(threading.Thread):
                 self._process_rfid_event(ev)
             except queue.Empty:
                 break
+
+    def _drain_manual_queue(self) -> None:
+        """Phase 5-I: GUI 手動入力 ``ManualActionEvent`` をすべて消費する。
+
+        各 event を ``_handle_manual_action_event`` で BettingState /
+        GameStateManager に反映し、``on_action`` コールバックで GUI に表示する。
+        音声経路と違い ``EvidenceLog`` / ``HandReconstructor`` 用の hand window
+        には流さない (= 操作者の介入は observation ではない)。
+        """
+        while True:
+            try:
+                ev = self._manual_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._handle_manual_action_event(ev)
+            except Exception:
+                logger.exception("Error handling manual action event: %s", ev)
+
+    def _handle_manual_action_event(self, event: ManualActionEvent) -> None:
+        """Phase 5-I: GUI 手動入力を音声経路と同等品質で処理する。
+
+        音声経路 (= ``_handle_audio_event``) との違い:
+          - ``EvidenceLog`` / ``HandReconstructor`` の hand window には流さない
+            (= 操作者の介入は observation ではないので reconstruct baseline に
+            混ぜない)
+          - ``BeamEngine.step_audio`` も呼ばない (= 音声観測ではない)
+          - ``infer_action`` ではなく直接 ``action`` / ``amount`` を採用するが、
+            ``call`` 時の to_call 補完と、actor seat 不一致時の review_required
+            付与は行う
+
+        共通する処理:
+          - ``GameStateManager.apply_action`` で stack / pot を更新
+          - ``BettingState.update_after_action`` で contribution / actor_seat /
+            current_bet を更新
+          - ``ActionRecord`` を ``_current_actions`` に積み、``on_action`` を発火
+            (= GUI に表示される)
+        """
+        bs = self._betting_state
+        gs = self._game_state
+        seat = int(event.seat)
+        action = str(event.action or "").lower()
+        amount = int(event.amount or 0)
+        notes: list[str] = []
+        needs_review = False
+
+        # ── actor 検証 (permissive: 違反でも apply するが review を立てる) ──
+        # BettingState が未初期化のときは actor 判定をスキップ (= new_hand 前)
+        if bs.is_initialized and bs.actor_seat is not None and seat != int(bs.actor_seat):
+            needs_review = True
+            notes.append(f"actor mismatch: input seat={seat}, expected={bs.actor_seat}")
+
+        # ── call 時の amount 補完 + 0-call → check 変換 ─────────────
+        if action == "call" and bs.is_initialized:
+            to_call = bs.call_amount_for(seat)
+            if amount <= 0:
+                if to_call <= 0:
+                    # 払うものが無い call → check に置き換える
+                    action = "check"
+                    amount = 0
+                    notes.append("amount=0 with to_call=0 → check")
+                else:
+                    amount = int(to_call)
+                    notes.append(f"call amount auto-filled to_call={to_call}")
+            elif amount < to_call:
+                needs_review = True
+                notes.append(f"call amount {amount} < to_call {to_call}")
+
+        # ── bet / raise の semantics チェック (= review hint のみ、apply はする) ──
+        if bs.is_initialized:
+            if action == "bet" and bs.is_opened:
+                needs_review = True
+                notes.append(
+                    f"action=bet while current_bet={bs.current_bet} (should be raise)"
+                )
+            elif action == "raise" and amount > 0 and amount <= bs.current_bet:
+                needs_review = True
+                notes.append(
+                    f"raise to {amount} <= current_bet {bs.current_bet}"
+                )
+
+        # ── GameStateManager: stack / pot を更新 ─────────────────
+        try:
+            gs.apply_action(seat, action, amount)
+        except Exception as e:
+            logger.warning("Manual action: gs.apply_action failed: %s", e)
+            needs_review = True
+            notes.append(f"gs.apply_action error: {e}")
+
+        # ── BettingState: contribution / actor / current_bet を更新 ──
+        if bs.is_initialized:
+            try:
+                bs.update_after_action(seat, action, amount)
+            except Exception as e:
+                logger.warning("Manual action: bs.update_after_action failed: %s", e)
+                needs_review = True
+                notes.append(f"bs.update_after_action error: {e}")
+
+        # ── ActionRecord を発火 ────────────────────────────────
+        timestamp_iso = _now_iso()
+        try:
+            timestamp_iso = datetime.fromtimestamp(
+                float(event.timestamp)
+            ).isoformat(timespec="milliseconds")
+        except (OSError, OverflowError, ValueError, TypeError):
+            pass
+        record = ActionRecord(
+            hand_id=gs.hand_id,
+            timestamp=timestamp_iso,
+            street=gs.street,
+            seat=seat,
+            player_name=gs.get_player_name(seat),
+            action=action,
+            amount=amount,
+            pot_after=gs.pot,
+            stack_after=gs.get_stack(seat),
+            source={"manual": True, "audio": False, "rfid": False, "camera": False},
+            needs_review=needs_review,
+            confidence=1.0,
+        )
+        self._current_actions.append(record)
+        if self._on_action:
+            try:
+                self._on_action(record)
+            except Exception:
+                logger.exception("on_action callback raised")
+        if notes:
+            logger.info("Manual action notes: %s", "; ".join(notes))
+        logger.debug("Manual ActionRecord: %s", record)
 
     def _process_rfid_event(self, ev: RFIDEvent) -> None:
         """受信した RFIDEvent を役割に応じて振り分ける。"""

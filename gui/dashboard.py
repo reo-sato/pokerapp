@@ -437,7 +437,23 @@ class GUIDashboard:
         ))
 
     def _cmd_manual_action(self) -> None:
-        from core.hand_log import ActionRecord
+        """Phase 5-I: 手動入力を ``ManualActionEvent`` で IntegrationThread に送る。
+
+        IntegrationThread が音声経路と同じ品質で:
+          - ``BettingState`` の contribution / actor_seat / current_bet を更新
+          - ``call`` 時の to_call 補完 (amount=0 入力でも正しく計算される)
+          - actor mismatch を ``needs_review`` で表現
+          - ``GameStateManager.apply_action`` で stack / pot を更新
+          - ``on_action`` コールバックで GUI 表示
+
+        したがってこの GUI 側のハンドラは:
+          - 入力値のパースと validation
+          - ``ManualActionEvent`` のビルド & queue への push
+        だけを担当する。``self._gs.apply_action`` の直叩きは行わない (= 旧設計は
+        BettingState を更新しなかったため turn order / call 0 / street 進行が
+        破綻していた)。
+        """
+        from core.events import ManualActionEvent
 
         try:
             seat = int(self._manual_seat_var.get())
@@ -454,28 +470,24 @@ class GUIDashboard:
             self._append_log(f"⚠ 金額が不正です: {raw!r}", tag="review")
             return
 
-        try:
-            self._gs.apply_action(seat, action, amount)
-            needs_review = False
-        except Exception as e:
-            self._append_log(f"⚠ アクション適用失敗: {e}", tag="review")
-            needs_review = True
+        thread = self._integration_thread
+        if thread is None or not hasattr(thread, "manual_queue"):
+            self._append_log(
+                "⚠ Manual input requires integration thread (not connected).",
+                tag="review",
+            )
+            return
 
-        record = ActionRecord(
-            hand_id=self._gs.hand_id,
-            timestamp=datetime.now().isoformat(timespec="milliseconds"),
-            street=self._gs.street,
-            seat=seat,
-            player_name=self._gs.get_player_name(seat),
-            action=action,
-            amount=amount,
-            pot_after=self._gs.pot,
-            stack_after=self._gs.get_stack(seat),
-            source={"manual": True, "audio": False, "rfid": False, "camera": False},
-            needs_review=needs_review,
-            confidence=1.0,
+        event = ManualActionEvent(
+            seat=seat, action=action, amount=amount, timestamp=time.time(),
         )
-        self._update_queue.put(record)
+        try:
+            thread.manual_queue.put(event)
+        except Exception as e:
+            self._append_log(f"⚠ Manual action queue push failed: {e}", tag="review")
+            return
+
+        # 入力欄をクリア (= 連続入力しやすく)
         self._manual_amount_entry.delete(0, "end")
 
     def _cmd_manual_hole_cards(self) -> None:
