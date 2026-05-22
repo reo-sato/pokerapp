@@ -12,6 +12,68 @@ JSON/PHH 形式でハンドログを出力する。
 
 ---
 
+## Documentation and Traceability Rules
+
+このリポジトリでは **コード変更とドキュメント更新を 1 つの作業単位** として扱う
+(docs-as-code)。各タスクは「コード + テスト + ドキュメント」の三点を同一ブランチ /
+同一 PR で揃えることを必須要件とする。
+
+### ファイル別の役割
+
+| ファイル / ディレクトリ | 役割 | 性質 |
+|---|---|---|
+| `CLAUDE.md` (このファイル) | **現時点の正仕様 (canonical spec)** のみ。何ができるか、何をしないか、コンポーネント責務 | mutable (常に最新を反映、過去経緯は書かない) |
+| `docs/worklog/YYYY-MM-DD-<slug>.md` | 作業ログ。1 ファイル = 1 タスク (= 1 Phase / 1 fix)。何を変更したか、テスト結果、コミットハッシュ | append-only (= 過去ログは編集しない) |
+| `docs/adr/NNNN-<slug>.md` | Architecture Decision Record。1 ファイル = 1 重要な設計判断。Context / Decision / Alternatives / Consequences | immutable (= acceptance 後は編集せず、変更時は新 ADR で supersede) |
+| `docs/issues/NNNN-<slug>.md` | 仕様 vs 実装の不整合 / バグレポート / mismatch log。Status / Symptoms / Root cause / Resolution | mutable until resolved (resolution 後は immutable) |
+| `docs/decision-log.md` | ADR のインデックス。日付 / ADR 番号 / タイトル / status を 1 行ずつ | append-only |
+| `CHANGELOG.md` | エンドユーザー向け変更履歴。Keep a Changelog 形式。Added / Changed / Fixed / Removed | mutable (= [Unreleased] section に都度追記、release 時に version 番号付け) |
+
+### いつ何を追加するか
+
+- **すべてのタスク**: `docs/worklog/` に 1 エントリ + `CHANGELOG.md` の `[Unreleased]` に追記。
+- **重要な設計判断**: `docs/adr/` に 1 ファイル + `docs/decision-log.md` に 1 行追記。
+  "重要" の目安:
+    - 公開 API / データモデルの変更
+    - 既存挙動と互換性が崩れる変更
+    - 複数の選択肢から 1 つを選んだ判断 (= 後から「なぜ B にしなかったか」を知りたい場面)
+    - 横断的な scope-out / scope-in の宣言
+- **テストで期待動作と実装結果の不整合が判明**: `docs/issues/` に 1 ファイル + resolution
+  時に同ファイルを更新。新規バグの再現 / 既知の仕様矛盾 / mismatch を扱う。
+
+### CLAUDE.md に書くもの / 書かないもの
+
+- **書く**: 現時点で動いている設計、責務、API、スコープ外 (= 意図的にやらない事項)。
+- **書かない**: 過去にどう実装したか、何回作り直したか、いつ commit したか、誰が決めたか。
+  これらは worklog / ADR に分離。
+- **Phase 名タグの扱い**: 実装履歴の参照軸として残してよいが、ブロック内容は
+  「現在の挙動」に書き換える (= "✅ 完了済み" 形式の作業報告は worklog 側に置く)。
+
+### 番号付け規約
+
+- `docs/adr/`: 4 桁ゼロパディング (例 `0001-route-manual-input-via-integration-thread.md`)、
+  通し番号。
+- `docs/issues/`: 4 桁ゼロパディング (例 `0001-manual-input-poker-rule-violations.md`)、
+  通し番号 (ADR 番号とは独立)。
+- `docs/worklog/`: `YYYY-MM-DD-<slug>.md` (1 日に複数あれば `-2`, `-3` 等を suffix)。
+
+### タスク完了報告のテンプレート
+
+タスク完了時のチャット報告は次の順序に揃える:
+
+1. 変更ファイル一覧
+2. 期待される機能 (= 仕様 / 要件)
+3. 実装した機能 (= 実際に動いたコードの挙動)
+4. テストで判明した不整合 (= 仕様と実装のズレ、無ければ "なし")
+5. その修正 (= 4 の解決、無ければ "なし")
+6. 追加・更新したテスト
+7. 追加・更新したドキュメント (CLAUDE.md / worklog / ADR / issue / decision-log / CHANGELOG)
+8. 残課題 / スコープ外
+
+コード変更だけで終了せず、必要なドキュメント更新まで完了してから完了報告すること。
+
+---
+
 ## ディレクトリ構成
 
 ```
@@ -25,6 +87,13 @@ pokerapp/
 ├── corrections.json               ← 音声誤認識補正テーブル (例: {"ベッド": "ベット"})
 ├── speech_normalization.json      ← 音声正規化辞書 (action/seat/number aliases)
 ├── requirements.txt
+├── CHANGELOG.md                   ← エンドユーザー向け変更履歴 (Keep a Changelog)
+│
+├── docs/                          ← docs-as-code (CLAUDE.md は正仕様、ここは履歴 / 経緯)
+│   ├── decision-log.md            ← ADR インデックス
+│   ├── adr/                       ← Architecture Decision Records (NNNN-<slug>.md)
+│   ├── issues/                    ← Issue / mismatch log (NNNN-<slug>.md)
+│   └── worklog/                   ← 作業ログ (YYYY-MM-DD-<slug>.md)
 │
 ├── core/
 │   ├── config.py                  ← config.json ロード・保存
@@ -2139,44 +2208,49 @@ projection にリファクタする可能性は別フェーズで検討。
 - **Tkinter Toplevel の geometry / 配色は最小限**: 700x500 固定、Courier 11pt、
   スタイル統一は将来の UX 改善で扱う
 
-**Phase 5-I 完了済み (GUI 手動入力を IntegrationThread 経由に統一)**:
-- ✅ ``core/events.py:ManualActionEvent(seat, action, amount, timestamp)`` を新設。
-  AudioEvent と違って seat 情報を明示的に持つ
-- ✅ ``IntegrationThread`` に ``manual_queue`` (`queue.Queue`) と
-  ``_drain_manual_queue`` / ``_handle_manual_action_event`` を追加。run loop の
-  audio dispatch 前に drain する (= operator 入力を audio より優先)
-- ✅ ``_handle_manual_action_event`` は音声経路 ``_handle_audio_event`` と同等の
-  品質で処理する:
-    - ``GameStateManager.apply_action`` で stack / pot を更新
-    - ``BettingState.update_after_action`` で contribution / actor / current_bet を更新
-    - ``on_action`` コールバックを発火 (= GUI 表示)
-    - actor mismatch / call 0 補完 / bet vs raise 混同を ``needs_review`` で表現
-- ✅ ``gui/dashboard.py:_cmd_manual_action`` を ``manual_queue`` への push 経路に
-  書き換え。``gs.apply_action`` の直叩きをやめた (= 旧バグの根本原因)
-- ✅ **EvidenceLog / BeamEngine / HandReconstructor のベースラインには流さない**:
-  manual events は observation ではなく operator の介入なので、reconstruct の
-  オフライン基準には混ぜない (= online HandSummary.actions には含まれる)
+**Phase 5-I (GUI 手動入力を IntegrationThread 経由に統一) — 現在の挙動**:
 
-**Phase 5-I が修正した旧バグ** (user 報告ログから):
-- 同一 seat が連続で raise → 新実装では actor mismatch で ``needs_review=True``
-- ``call 0`` がそのまま記録 → ``bs.call_amount_for(seat)`` で自動補完
-- ``current_bet=0`` での call 0 → ``check`` に置き換え
-- street が preflop のまま動かない → ``bs.update_after_action`` 経由で
-  contribution / current_bet が正しく追跡される (street 自動進行は board
-  cards / showdown 受信に依存、ここは変更なし)
+GUI の手動入力 (席ドロップダウン + action ボタン + amount entry) は
+``ManualActionEvent → IntegrationThread.manual_queue →
+IntegrationThread._handle_manual_action_event`` の経路を通る。
+``gs.apply_action`` を GUI スレッドから直叩きしない (= 旧経路を撤去済み)。
 
-**Phase 5-I スコープ外**:
-- **手動入力時の actor mismatch は warning のみ (= apply は通す)**: 操作者が
-  「audio が滑った seat の代わりに別 seat の action を補正する」ケースを
-  想定して、strict reject ではなく permissive (= ``needs_review`` で印を付ける)
-  にしている。strict mode は将来オプションで追加可能
-- **street advance のトリガーは変更しない**: board cards (RFID / 手動入力) /
-  ``advance_street`` audio event のみ。manual action からの「全員 call で round
-  終了」判定は audio 経路にも実装されていない (= 既存仕様)
-- **Phase 5-A / 5-G の patch proposal 経路には影響なし**: HandReconstructor /
-  diff / patch_proposal は manual events を見ないので、reconstruct すると
-  「online には manual action があるが offline には無い」差分が出る → これは
-  既存の review 表示で operator が確認できる
+- **``core/events.py:ManualActionEvent(seat, action, amount, timestamp)``**:
+  AudioEvent と違って seat 情報を明示的に持つ。
+- **``IntegrationThread.manual_queue`` (`queue.Queue[ManualActionEvent]`)**:
+  property として公開され、GUI / 外部呼び出し元から put 可能。
+- **``_drain_manual_queue`` は run loop で audio drain の前に走る**
+  (= operator 入力を audio より優先)。
+- **``_handle_manual_action_event`` の責務** (音声経路と同等品質):
+    - actor_seat を ``bs.actor_seat`` と照合。mismatch でも適用は通すが
+      ``needs_review=True`` を立てる (= permissive)。
+    - ``amount=0`` かつ ``bs.call_amount_for(seat) > 0`` なら call として
+      auto-fill。``to_call=0`` かつ ``call 0`` なら check に置き換え。
+    - bet vs raise の整合性 (= ``bs.is_opened`` 下で bet は不整合)
+      を ``needs_review`` で表現。
+    - ``gs.apply_action`` + ``bs.update_after_action`` を呼ぶ。
+    - ``ActionRecord`` (``source={"manual": True, ...}``) を組み立て
+      ``on_action`` コールバックを発火。
+- **EvidenceLog / BeamEngine / ``_track_evidence`` には流さない**:
+  manual events は observation ではなく operator の介入なので、
+  reconstruct のオフライン基準には混ぜない (= online ``HandSummary.actions``
+  には含まれる)。``HandReconstructor`` の diff に "online にだけある manual
+  action" として出てくる挙動は既存の review 表示で operator が確認できる。
+
+**Phase 5-I スコープ外 (= 仕様としてやらない)**:
+- 手動入力時の actor mismatch を strict reject にする (現状は permissive
+  warning のみ)。strict mode は将来オプションで追加可能。
+- street advance のトリガー拡張 (= board cards / ``advance_street`` audio
+  event のみ。manual action からの「全員 call で round 終了」判定は audio
+  経路にも実装されていない既存仕様)。
+- ``patch_proposal`` への manual event の取り込み (= reconstruct と diff
+  する設計の対称性を維持)。
+
+詳細経緯 / 設計判断 / 旧バグの再現条件は以下に分離:
+
+- 設計判断 (Option A vs B vs C): `docs/adr/0001-route-manual-input-via-integration-thread.md`
+- 旧バグの再現条件と root cause: `docs/issues/0001-manual-input-poker-rule-violations.md`
+- 実装ログ: `docs/worklog/2026-05-22-phase-5-I.md`
 
 **Phase 5-B+ (Phase 5-B 直後の改善、同フェーズ扱い)**:
 - ✅ **Audio seat hint の出所カテゴリ化**: ``signals.audio_seat_hint_sources``
