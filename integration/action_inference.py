@@ -56,6 +56,13 @@ class BettingState:
     action_history: list[dict] = field(default_factory=list)
     is_initialized: bool = False  # start_hand が button/blind を確定できたか
 
+    # ── ラウンドクローズ検出用 (Phase 5-K) ─────────────────────────────────
+    # 今ストリートで voluntary action を出した seat 集合。SB_POST / BB_POST は
+    # 「強制 post であって BB option 行使ではない」ため含めない。これにより
+    # preflop で everyone limp 後も BB の option が消化されるまで round close
+    # 扱いにならない。
+    acted_this_street: set[int] = field(default_factory=set)
+
     def get_contrib(self, seat: int) -> int:
         """指定席の今ストリートの投資額を返す。"""
         return self.player_contrib_this_street.get(seat, 0)
@@ -74,6 +81,7 @@ class BettingState:
         self.last_raise_to = 0
         self.last_aggressor = None
         self.player_contrib_this_street.clear()
+        self.acted_this_street.clear()
         if self.button_seat is not None and self.active_seats:
             self.actor_seat = compute_first_actor_postflop(
                 self.button_seat,
@@ -203,6 +211,9 @@ class BettingState:
 
         self.action_history.append({"seat": seat, "action": a, "amount": amount})
 
+        # voluntary action を出した seat として記録 (Phase 5-K: round close 判定用)
+        self.acted_this_street.add(seat)
+
         # actor を次の live seat へ進める (button_seat が既知のときのみ)
         if self.button_seat is not None and self.active_seats:
             self.actor_seat = advance_actor(
@@ -211,6 +222,37 @@ class BettingState:
                 folded_seats=set(self.folded_seats),
                 all_in_seats=set(self.all_in_seats),
             )
+
+    def is_round_closed(self) -> bool:
+        """ベッティングラウンドが closed か (= 全 live 非 all-in seat が
+        contrib==current_bet かつ voluntary action 済) を返す。
+
+        判定条件 (Phase 5-K, all True で closed):
+          1. ``is_initialized=True`` (= hand state machine が走っている)
+          2. ``live = active_seats - folded_seats`` の人数が 2 以上
+             (1 以下は fold_win 待ちなので closed 扱いしない)
+          3. ``must_act = live - all_in_seats`` の全 seat について:
+             a. ``player_contrib_this_street[seat] == current_bet``
+             b. ``seat in acted_this_street`` (= voluntary 行使済み)
+          4. ``must_act`` が空 (= 全員 all-in) の場合は (3) を vacuously True
+             として round closed 扱い
+
+        SB_POST / BB_POST は ``_record_post`` で acted_this_street に **追加されない**
+        ため、preflop everyone-limp ケースでは BB が check するまで closed にならない
+        (= BB option 行使を待つ正しい semantics)。
+        """
+        if not self.is_initialized:
+            return False
+        live = [s for s in self.active_seats if s not in self.folded_seats]
+        if len(live) < 2:
+            return False
+        must_act = [s for s in live if s not in self.all_in_seats]
+        for s in must_act:
+            if self.get_contrib(s) != self.current_bet:
+                return False
+            if s not in self.acted_this_street:
+                return False
+        return True
 
 
 @dataclass

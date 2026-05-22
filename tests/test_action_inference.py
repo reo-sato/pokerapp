@@ -325,3 +325,127 @@ class TestBettingStateIntegration:
         r = infer_action(_amount_only(600, "600"), state, actor_seat=2)
         assert r.action == "bet"
         assert r.reason == "amount_only_opening_bet"
+
+
+# ――― Phase 5-K: ラウンドクローズ検出 ─────────────────────────────────
+
+
+def _bs_initialized_3way(btn: int = 1) -> BettingState:
+    """3-handed の初期化済み BettingState を返す (active=[1,2,3])。"""
+    bs = BettingState()
+    bs.start_hand(button_seat=btn, active_seats=[1, 2, 3], sb_amount=1, bb_amount=2)
+    return bs
+
+
+class TestIsRoundClosed:
+    """BettingState.is_round_closed() の境界条件。"""
+
+    def test_uninitialized_returns_false(self) -> None:
+        bs = BettingState()
+        assert bs.is_round_closed() is False
+
+    def test_only_blinds_posted_not_closed(self) -> None:
+        # SB_POST と BB_POST だけでは acted_this_street が空なので closed にならない
+        bs = _bs_initialized_3way()
+        assert bs.is_round_closed() is False
+
+    def test_preflop_limp_bb_option_pending(self) -> None:
+        # 3-handed: BTN=1 (UTG=BTN in 3-handed), SB=2, BB=3, current_bet=2
+        # BTN(1) limp call to 2, SB(2) limp call to 2 → BB(3) はまだ option 未行使
+        bs = _bs_initialized_3way()
+        bs.update_after_action(1, "call", 2)
+        bs.update_after_action(2, "call", 2)
+        # contrib: 1->2, 2->2, 3->2 (BB_POST 由来) で全員 == current_bet だが
+        # BB(3) は voluntary check していないので acted_this_street に居ない
+        assert 3 not in bs.acted_this_street
+        assert bs.is_round_closed() is False
+
+    def test_preflop_limp_bb_check_closes(self) -> None:
+        bs = _bs_initialized_3way()
+        bs.update_after_action(1, "call", 2)
+        bs.update_after_action(2, "call", 2)
+        bs.update_after_action(3, "check", 0)
+        assert bs.is_round_closed() is True
+
+    def test_preflop_raise_called_round(self) -> None:
+        # raise then everyone calls → all matched, all acted → closed
+        bs = _bs_initialized_3way()
+        bs.update_after_action(1, "raise", 5)
+        bs.update_after_action(2, "call", 5)
+        bs.update_after_action(3, "call", 5)
+        assert bs.is_round_closed() is True
+
+    def test_partial_call_not_closed(self) -> None:
+        # raise + one call but BB still has option (and unmatched)
+        bs = _bs_initialized_3way()
+        bs.update_after_action(1, "raise", 5)
+        bs.update_after_action(2, "call", 5)
+        # seat 3 (BB) hasn't acted, contrib still 2 < 5
+        assert bs.is_round_closed() is False
+
+    def test_one_live_seat_not_closed(self) -> None:
+        # 2 of 3 folded → live = 1 → fold_win 待ちなので closed ではない
+        bs = _bs_initialized_3way()
+        bs.update_after_action(1, "raise", 5)
+        bs.update_after_action(2, "fold", 0)
+        bs.update_after_action(3, "fold", 0)
+        assert bs.is_round_closed() is False
+
+    def test_flop_check_around_closes(self) -> None:
+        # preflop close → flop reset → all check
+        bs = _bs_initialized_3way()
+        bs.update_after_action(1, "call", 2)
+        bs.update_after_action(2, "call", 2)
+        bs.update_after_action(3, "check", 0)
+        bs.reset_for_new_street()
+        bs.street = "flop"
+        # flop: SB(2) → BB(3) → BTN(1) の順
+        bs.update_after_action(2, "check", 0)
+        bs.update_after_action(3, "check", 0)
+        assert bs.is_round_closed() is False  # まだ BTN(1) が check していない
+        bs.update_after_action(1, "check", 0)
+        assert bs.is_round_closed() is True
+
+    def test_flop_bet_call_call_closes(self) -> None:
+        bs = _bs_initialized_3way()
+        bs.update_after_action(1, "call", 2)
+        bs.update_after_action(2, "call", 2)
+        bs.update_after_action(3, "check", 0)
+        bs.reset_for_new_street()
+        bs.street = "flop"
+        bs.update_after_action(2, "bet", 4)
+        bs.update_after_action(3, "call", 4)
+        bs.update_after_action(1, "call", 4)
+        assert bs.is_round_closed() is True
+
+    def test_allin_exempt_from_must_act(self) -> None:
+        # seat1 が all-in、seat2/3 がそれに合わせて call (= 揃った) → closed
+        bs = _bs_initialized_3way()
+        bs.update_after_action(1, "allin", 100)
+        bs.update_after_action(2, "call", 100)
+        bs.update_after_action(3, "call", 100)
+        assert 1 in bs.all_in_seats
+        assert bs.is_round_closed() is True
+
+    def test_reset_for_new_street_clears_acted(self) -> None:
+        bs = _bs_initialized_3way()
+        bs.update_after_action(1, "raise", 5)
+        assert 1 in bs.acted_this_street
+        bs.reset_for_new_street()
+        assert bs.acted_this_street == set()
+
+    def test_reset_for_new_hand_clears_acted(self) -> None:
+        bs = _bs_initialized_3way()
+        bs.update_after_action(1, "raise", 5)
+        bs.update_after_action(2, "call", 5)
+        bs.reset_for_new_hand()
+        assert bs.acted_this_street == set()
+
+    def test_blinds_do_not_count_as_acted(self) -> None:
+        # start_hand で SB_POST / BB_POST が action_history に積まれるが、
+        # acted_this_street には反映されない
+        bs = _bs_initialized_3way()
+        assert bs.sb_seat not in bs.acted_this_street
+        assert bs.bb_seat not in bs.acted_this_street
+        # action_history には 2 件 (SB_POST / BB_POST) 入っている
+        assert len(bs.action_history) == 2

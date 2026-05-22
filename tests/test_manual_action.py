@@ -473,6 +473,224 @@ class TestManualActionStrictReject:
             thread.join(timeout=2.0)
 
 
+class TestRoundCloseAutoAdvance:
+    """Phase 5-K: betting round が閉じたら次ストリートへ自動推移する。
+
+    旧仕様では board cards (RFID) が来ない限り street が進まなかったので、
+    手動入力だけのテスト環境では preflop に貼り付いたまま「同 seat が再 open」
+    などの review が連鎖していた。Phase 5-K で round close 検出を入れて解消。
+    """
+
+    def test_preflop_raise_called_advances_to_flop(self, tmp_path: Path) -> None:
+        """3-handed: raise → call → call で preflop close → flop へ自動推移。
+
+        ユーザー報告ログの再現: 席1 raise / 席2 call / 席3 call の後、次の
+        操作は flop の opening bet として扱われるべき。
+        """
+        thread, audio_q, stop, _w, gs, actions = _build_thread(tmp_path)
+        try:
+            _start_hand_and_wait(thread, audio_q, actions)
+            bs = thread.betting_state
+            assert gs.street == "preflop"
+            # actor=3 (UTG=BTN in 3-handed), current_bet=200 (BB), is_opened=True
+            assert bs.actor_seat == 3
+
+            # 席3 raise to 600
+            thread.manual_queue.put(ManualActionEvent(
+                seat=3, action="raise", amount=600, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 3)
+            assert gs.street == "preflop"   # まだ進まない (SB/BB が未行動)
+            assert bs.actor_seat == 1
+
+            # 席1 (SB) call
+            thread.manual_queue.put(ManualActionEvent(
+                seat=1, action="call", amount=600, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 4)
+            assert gs.street == "preflop"   # まだ BB が残っている
+            assert bs.actor_seat == 2
+
+            # 席2 (BB) call → 全員 contrib=600 で acted、round closed → flop へ
+            thread.manual_queue.put(ManualActionEvent(
+                seat=2, action="call", amount=600, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 5)
+            # Phase 5-K: 自動推移
+            assert gs.street == "flop", f"expected flop, got {gs.street}"
+            assert bs.street == "flop"
+            assert bs.current_bet == 0
+            assert bs.is_opened is False
+            assert bs.acted_this_street == set()
+            # flop の first actor は SB (= seat 1)
+            assert bs.actor_seat == 1
+        finally:
+            stop.set()
+            thread.join(timeout=2.0)
+
+    def test_postflop_opening_bet_after_auto_advance(self, tmp_path: Path) -> None:
+        """Phase 5-K + ユーザー報告: preflop close 後に opening bet が
+        review されない (= 旧バグ「bet vs raise mismatch」が出ない)。
+        """
+        thread, audio_q, stop, _w, gs, actions = _build_thread(tmp_path)
+        try:
+            _start_hand_and_wait(thread, audio_q, actions)
+            bs = thread.betting_state
+
+            # preflop 全 call で flop へ
+            thread.manual_queue.put(ManualActionEvent(
+                seat=3, action="call", amount=200, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 3)
+            thread.manual_queue.put(ManualActionEvent(
+                seat=1, action="call", amount=200, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 4)
+            thread.manual_queue.put(ManualActionEvent(
+                seat=2, action="check", amount=0, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 5)
+            assert gs.street == "flop"
+            assert bs.actor_seat == 1   # SB = first to act postflop
+
+            # flop で seat 1 が bet 1000 → opening bet なので review されない
+            thread.manual_queue.put(ManualActionEvent(
+                seat=1, action="bet", amount=1000, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 6)
+            last = actions[-1]
+            assert last.action == "bet"
+            assert last.amount == 1000
+            assert last.street == "flop"
+            assert last.needs_review is False    # 旧バグ: bet vs raise mismatch
+        finally:
+            stop.set()
+            thread.join(timeout=2.0)
+
+    def test_preflop_does_not_advance_until_bb_acts(self, tmp_path: Path) -> None:
+        """preflop everyone limp の場合、BB option を行使するまで flop へ進まない。"""
+        thread, audio_q, stop, _w, gs, actions = _build_thread(tmp_path)
+        try:
+            _start_hand_and_wait(thread, audio_q, actions)
+            bs = thread.betting_state
+            # 席3 (UTG=BTN) limp
+            thread.manual_queue.put(ManualActionEvent(
+                seat=3, action="call", amount=200, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 3)
+            assert gs.street == "preflop"
+            # 席1 (SB) limp
+            thread.manual_queue.put(ManualActionEvent(
+                seat=1, action="call", amount=200, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 4)
+            # ここで全員 contrib=200 だが BB (seat 2) は voluntary action 未実行
+            # → preflop のまま、actor は BB
+            assert gs.street == "preflop"
+            assert bs.actor_seat == 2
+            assert 2 not in bs.acted_this_street
+        finally:
+            stop.set()
+            thread.join(timeout=2.0)
+
+    def test_fold_to_one_does_not_auto_advance(self, tmp_path: Path) -> None:
+        """live が 1 になったら fold_win 待ちなので street は進めない。"""
+        thread, audio_q, stop, _w, gs, actions = _build_thread(tmp_path)
+        try:
+            _start_hand_and_wait(thread, audio_q, actions)
+            # 席3 raise 600
+            thread.manual_queue.put(ManualActionEvent(
+                seat=3, action="raise", amount=600, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 3)
+            # 席1 fold
+            thread.manual_queue.put(ManualActionEvent(
+                seat=1, action="fold", amount=0, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 4)
+            # 席2 fold → live は seat 3 のみ → fold_win 待ち、street 不変
+            thread.manual_queue.put(ManualActionEvent(
+                seat=2, action="fold", amount=0, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 5)
+            assert gs.street == "preflop"   # 進まない
+        finally:
+            stop.set()
+            thread.join(timeout=2.0)
+
+    def test_multiple_streets_progress(self, tmp_path: Path) -> None:
+        """preflop → flop → turn の 2 段階自動推移を確認する。"""
+        thread, audio_q, stop, _w, gs, actions = _build_thread(tmp_path)
+        try:
+            _start_hand_and_wait(thread, audio_q, actions)
+            bs = thread.betting_state
+
+            # preflop close
+            thread.manual_queue.put(ManualActionEvent(
+                seat=3, action="call", amount=200, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 3)
+            thread.manual_queue.put(ManualActionEvent(
+                seat=1, action="call", amount=200, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 4)
+            thread.manual_queue.put(ManualActionEvent(
+                seat=2, action="check", amount=0, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 5)
+            assert gs.street == "flop"
+            assert bs.actor_seat == 1
+
+            # flop も全員 check で turn へ
+            thread.manual_queue.put(ManualActionEvent(
+                seat=1, action="check", amount=0, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 6)
+            thread.manual_queue.put(ManualActionEvent(
+                seat=2, action="check", amount=0, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 7)
+            thread.manual_queue.put(ManualActionEvent(
+                seat=3, action="check", amount=0, timestamp=time.time(),
+            ))
+            _wait_for_action_count(actions, 8)
+            assert gs.street == "turn"
+        finally:
+            stop.set()
+            thread.join(timeout=2.0)
+
+    def test_river_close_waits_for_showdown(self, tmp_path: Path) -> None:
+        """river close では auto-advance しない (= showdown 待ち)。"""
+        thread, audio_q, stop, _w, gs, actions = _build_thread(tmp_path)
+        try:
+            _start_hand_and_wait(thread, audio_q, actions)
+            # preflop → flop → turn → river まで全 check で進める
+            sequences = [
+                # preflop
+                [(3, "call", 200), (1, "call", 200), (2, "check", 0)],
+                # flop
+                [(1, "check", 0), (2, "check", 0), (3, "check", 0)],
+                # turn
+                [(1, "check", 0), (2, "check", 0), (3, "check", 0)],
+                # river
+                [(1, "check", 0), (2, "check", 0), (3, "check", 0)],
+            ]
+            count = 2   # SB_POST + BB_POST
+            for street_actions in sequences:
+                for seat, action, amount in street_actions:
+                    thread.manual_queue.put(ManualActionEvent(
+                        seat=seat, action=action, amount=amount,
+                        timestamp=time.time(),
+                    ))
+                    count += 1
+                    _wait_for_action_count(actions, count)
+            # river close で止まる (showdown へは行かない)
+            assert gs.street == "river"
+        finally:
+            stop.set()
+            thread.join(timeout=2.0)
+
+
 class TestManualQueueProperty:
     """``IntegrationThread.manual_queue`` プロパティの基本動作。"""
 

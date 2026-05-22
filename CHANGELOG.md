@@ -30,6 +30,17 @@ issue / mismatch log) see `docs/worklog/`, `docs/adr/`, `docs/issues/`.
 
 ### Fixed
 
+- **Phase 5-K** — betting round が閉じてもストリートが自動推移せず、preflop が
+  全 call で揃った後の次アクションが「preflop の再 open」として扱われ
+  `bet vs raise mismatch` の `⚠要確認` を出していた問題を修正。
+  `BettingState.is_round_closed()` を導入し (= 全 live 非 all-in seat が
+  `contrib==current_bet` かつ voluntary action 済み)、`bs.update_after_action`
+  の直後 (audio / manual 両経路) で `IntegrationThread._advance_street_on_round_close`
+  が preflop → flop → turn → river の 1 街 advance を行う。river close は
+  showdown 待ちなので auto-advance しない。SB_POST / BB_POST は
+  `acted_this_street` に含めないので preflop everyone-limp 時に BB の option
+  が消化されるまで closed にならない (= BB option 行使を待つ正しい semantics)。
+  詳細: `docs/worklog/2026-05-22-phase-5-K.md`
 - **Phase 5-I** — GUI 手動入力 (席ドロップダウン + action ボタン + amount entry)
   が `GameStateManager.apply_action` を直叩きしていたため、`BettingState` が
   更新されず以下 5 件のポーカールール違反が通っていた:
@@ -48,6 +59,10 @@ issue / mismatch log) see `docs/worklog/`, `docs/adr/`, `docs/issues/`.
 
 ### Added
 
+- `BettingState.acted_this_street: set[int]` + `is_round_closed()` method +
+  `IntegrationThread._advance_street_on_round_close` (Phase 5-K). voluntary
+  action (= `update_after_action`) でのみ acted_this_street に追加され、
+  blind post は除外される。round close 判定で 1 街自動 advance する。
 - `ManualActionEvent(seat, action, amount, timestamp)` in `core/events.py`
   (Phase 5-I).
 - `ManualActionRejection(seat, attempted_action, attempted_amount,
@@ -57,6 +72,7 @@ issue / mismatch log) see `docs/worklog/`, `docs/adr/`, `docs/issues/`.
 - `IntegrationThread.on_manual_rejected` constructor callback +
   `GUIDashboard.on_manual_rejected` / `_apply_manual_rejection` (Phase 5-J).
 - Tests: Phase 5-I 11 件 + Phase 5-J 11 件 (test_manual_action.py に 7 件、
-  test_gui.py に 4 件)。
+  test_gui.py に 4 件) + Phase 5-K 19 件 (test_action_inference.py に 13 件、
+  test_manual_action.py に 6 件)。
 - Docs-as-code infrastructure: `CHANGELOG.md` + `docs/{worklog,adr,issues,decision-log}`。
 - "Documentation and Traceability Rules" section in `CLAUDE.md`.

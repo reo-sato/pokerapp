@@ -255,6 +255,11 @@ AudioEvent (audio_queue)
          ▼ game_state.apply_action(seat, inferred.action, inferred.amount)
          │
          ▼ betting_state.update_after_action(...)  ← actor_seat も次へ進める
+         │                                            + acted_this_street.add(seat) (Phase 5-K)
+         │
+         ▼ _advance_street_on_round_close()         ← Phase 5-K: round close で
+         │   └─ bs.is_round_closed() True なら preflop→flop→turn→river を 1 街 advance
+         │      (river close は showdown 待ちなので advance しない)
          │
          ▼ camera/RFID コリオブレーション (±2秒ウィンドウ)
          │
@@ -394,10 +399,11 @@ Auto post: seat=4 action=BB_POST amount=200
 
 - `BettingState`: ハンド単位 + ストリート単位の状態を一元保持
   - **ハンド単位**: `button_seat`, `sb_seat`, `bb_seat`, `sb_amount`, `bb_amount`, `actor_seat`, `last_aggressor`, `player_contrib_hand`, `action_history`, `is_initialized`
-  - **ストリート単位**: `current_bet`, `is_opened`, `last_raise_to`, `player_contrib_this_street`, `folded_seats`, `all_in_seats`
+  - **ストリート単位**: `current_bet`, `is_opened`, `last_raise_to`, `player_contrib_this_street`, `folded_seats`, `all_in_seats`, `acted_this_street` (Phase 5-K: voluntary action 済 seat 集合、blind post は含めない)
   - `start_hand(button, active, sb, bb)`: 新ハンド時に SB/BB を自動 post し first actor を確定
-  - `reset_for_new_street()`: contrib リセット + postflop first actor 再計算
-  - `update_after_action(seat, action, amount)`: contrib 更新 + actor を次の live seat へ進行
+  - `reset_for_new_street()`: contrib + acted_this_street リセット + postflop first actor 再計算
+  - `update_after_action(seat, action, amount)`: contrib 更新 + actor を次の live seat へ進行 + acted_this_street に seat 追加
+  - `is_round_closed() -> bool` (Phase 5-K): live - all_in 全 seat が contrib==current_bet かつ acted ならラウンドクローズ。live<2 / 未初期化 は False、must_act が空 (全員 all-in) は vacuously True
   - `call_amount_for(seat)`: 該当 seat がコールするのに必要な追加投入額
 - `InferredAction`: 推定/検証結果 (`action`, `amount`, `confidence`, `needs_review`, `reason`)
 - `infer_action(event, state, actor_seat) → InferredAction`: 中心 API。v6.0+ M2 から内部実装は `infer_action_distribution()` の薄いアダプタ
@@ -1097,7 +1103,7 @@ pytest tests/ --ignore=tests/test_vision.py
 
 | テストファイル | 内容 |
 |---------------|------|
-| test_action_inference.py | BettingState / infer_action() 34 ケース |
+| test_action_inference.py | BettingState / infer_action() 34 ケース + Phase 5-K `TestIsRoundClosed` 13 ケース (uninitialized / blinds-only / BB option pending / raise+call closed / partial call not closed / fold→live=1 not closed / flop check around / allin must_act exempt / reset_for_new_street/hand が acted_this_street をクリア / blind post は acted に含まれない) |
 | test_normalizer.py | SpeechNormalizer / 数値正規化 89 ケース |
 | test_integration.py | IntegrationThread confidence マッチング |
 | test_e2e.py | 全体 E2E シナリオ (フォールド/オールイン) |
@@ -1127,7 +1133,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_gui.py (Phase 5-G 追加) | `_cmd_apply_patch` 確認 yes/no / 各 abort パス (latest hand_id 無 / thread 無 / proposal 無 / dialog 不可 / apply 例外 / apply False) + Latest advisory に `patch_applied=yes` / `applied_fields=...` 表示 + `append_to_history=False` で insert スキップ (Phase 5-G, +13 件) |
 | test_patch_apply.py (Phase 5-H 追加) | `summarize_patch_proposal_for_view` の whitelist flag / 値整形 (str / int / int-key dict 昇順 / str-key dict 挿入順 / list / None) / note 伝搬 / dict 形 proposal / malformed entry skip / `FieldDiffView` 戻り値型 (Phase 5-H, +15 件) |
 | test_gui.py (Phase 5-H 追加) | `_cmd_show_patch_details` の各 abort パス + `_create_patch_detail_window` への引数検証 (whitelist は `[applies]` / 非は `[skip]` / online & offline & note 含む) + apply と独立 + apply 済 header (Phase 5-H, +8 件) |
-| test_manual_action.py | `ManualActionEvent` の IntegrationThread 経由処理: BettingState 更新 / call 0 自動補完 / current_bet=0 で call→check 変換 / user 報告ログの再現シナリオ / `manual_queue` プロパティ (Phase 5-I, 7 件) + Phase 5-J: actor mismatch の strict reject 仕様への切替 (旧 `..._flagged_as_review` を `..._strict_rejected` に更新 + `TestManualActionStrictReject` クラス: record 不変 / BettingState 不変 / GameState 不変 / on_action 不発火 / on_manual_rejected payload / 正規 turn は apply / `bs.is_initialized=False` は判定 skip) (Phase 5-J, +7 件) |
+| test_manual_action.py | `ManualActionEvent` の IntegrationThread 経由処理: BettingState 更新 / call 0 自動補完 / current_bet=0 で call→check 変換 / user 報告ログの再現シナリオ / `manual_queue` プロパティ (Phase 5-I, 7 件) + Phase 5-J: actor mismatch の strict reject 仕様への切替 (旧 `..._flagged_as_review` を `..._strict_rejected` に更新 + `TestManualActionStrictReject` クラス: record 不変 / BettingState 不変 / GameState 不変 / on_action 不発火 / on_manual_rejected payload / 正規 turn は apply / `bs.is_initialized=False` は判定 skip) (Phase 5-J, +7 件) + Phase 5-K: `TestRoundCloseAutoAdvance` クラス (raise+call で preflop close → flop / postflop opening bet が review されない / BB option pending では advance しない / fold で live=1 では advance しない / preflop→flop→turn の連続 / river close は showdown 待ち) (Phase 5-K, +6 件) |
 | test_gui.py (Phase 5-I / 5-J 追加) | `_cmd_manual_action` が `ManualActionEvent` を `integration_thread.manual_queue` に push、`gs.apply_action` を直叩きしない + integration 未接続 / 不正 seat / 不正 amount の警告ログ (Phase 5-I, +4 件) + `on_manual_rejected` のスレッド安全な queue push、`_apply_manual_rejection` の review log 文言 (actor mismatch / 未知 reason)、actor 一致時に reject 文言が出ないこと (Phase 5-J, +4 件) |
 | test_inspect_reconstruction_cli.py | inspect_reconstruction CLI (label 判定 / --only-needs-review / --fields filter / 壊れた JSONL skip) (Phase 4-C1, 14 件) |
 | test_reconstruction_badges.py | gui.reconstruction_badges 単体 (status / RAW / diff_fields / button_inferred / format_history_line) (Phase 4-C2, 20 件) |
@@ -1209,6 +1215,7 @@ pytest tests/ --ignore=tests/test_vision.py
 | GUI からの手動 patch apply (in-memory のみ) | ✅ 完了 (Phase 5-G) | `core/patch_apply.py:apply_patch_proposal_to_summary` で whitelist field (`resolution_type` / `seat_payouts` / `pots` / `showdown_revealed_cards` / `blinds`) のみ deepcopy 後上書き → 新 `HandSummary` を返す pure helper。`IntegrationThread.apply_patch_proposal(hand_id) → bool` で in-memory `_last_summary_by_hand_id[hand_id]` を patched copy で置き換え、`result.patch_applied=True` / `applied_fields=[...]` を立てる。GUI 側に "Apply patch" ボタン (`_cmd_apply_patch`) + 確認ダイアログ hook (`_ask_apply_patch_confirmation`)、Latest advisory に `patch_applied=yes` / `applied_fields=...` 表示。`winner_seat` / `pot_total` / `actions` は明示的に whitelist 外。**JSON / PHH / GameStateManager / settlement / live BettingState は一切触らない** (永続化は別フェーズ) |
 | GUI 手動入力を IntegrationThread 経由に統一 | ✅ 完了 (Phase 5-I + 5-J) | `core/events.py:ManualActionEvent(seat, action, amount, timestamp)` を新設。GUI `_cmd_manual_action` は `gs.apply_action` 直叩きをやめて `IntegrationThread.manual_queue` に push、IntegrationThread の `_handle_manual_action_event` が音声経路と同等品質で処理 (BettingState 更新 / call 0 を to_call で補完 / bet vs raise 整合性)。これにより旧バグ「同一 seat 連続 raise」「call 0 がそのまま記録」「street が preflop のまま」が解消。**actor mismatch は Phase 5-J で strict reject に変更** (= state 不変 + `on_manual_rejected` callback で GUI review log)。**EvidenceLog / BeamEngine / HandReconstructor のベースラインには流さない** (= 操作者の介入は observation ではない) |
 | Manual action actor mismatch を strict reject に変更 | ✅ 完了 (Phase 5-J) | `_handle_manual_action_event` の actor 検証ブロックを permissive review から strict reject に書き換え。`event.seat != bs.actor_seat` のとき `gs.apply_action` / `bs.update_after_action` / `_current_actions` / `on_action` のすべてに触れず早期 return、`logger.warning` + `on_manual_rejected(ManualActionRejection)` callback で通知。GUI 側は `_manual_rejection_queue` 経由で main thread に渡し、`_apply_manual_rejection` が review log に「Manual action rejected: actor mismatch (selected seat=X, current actor=Y, ...)」を出す。**audio 経路の actor mismatch (permissive review) は意図的に無変更**: audio は observation で reconstruct で修正できる前提、manual は意図的入力なので reject が自然 |
+| ストリート自動推移 (round close detection) | ✅ 完了 (Phase 5-K) | `BettingState.acted_this_street: set[int]` + `is_round_closed() -> bool` を追加。voluntary action (= `update_after_action`) でのみ acted_this_street に追加し SB_POST / BB_POST は除外する (= preflop everyone-limp 時に BB option 行使を待つ正しい semantics)。round close 判定は (1) is_initialized, (2) live >= 2, (3) live - all_in 全 seat が contrib==current_bet かつ acted、または must_act が空 (= 全員 all-in)。`IntegrationThread._advance_street_on_round_close` が `bs.update_after_action` 直後 (audio / manual 両経路) で preflop→flop→turn→river の 1 街 advance を実行。**river close は showdown 待ち** (= winner audio / RFID で finalize) なので auto-advance しない。**fold で live=1** は fold_win 待ちなので closed 扱いしない。all-in showdown のマルチ街 escalation は未対応 (= 1 action あたり 1 街のみ) |
 | GUI で patch proposal の field 単位 detail を表示 | ✅ 完了 (Phase 5-H) | `core/patch_apply.py:summarize_patch_proposal_for_view(summary, proposal) → list[FieldDiffView]` が `FieldPatch` を GUI 表示用に整形 (online_repr / offline_repr / is_applicable / note)。値は ``_format_value_for_view`` で deterministic に文字列化 (int キー dict は昇順 sort、str キーは挿入順)。GUI 側に "Show details" ボタン (Apply patch の左) + `_cmd_show_patch_details` ハンドラ + `_create_patch_detail_window(title, lines)` (テスト時 MagicMock 可)。whitelist field は `[applies]` / 非 whitelist は `[skip]` マーカー。apply 済 hand では header に `(patch applied — applied_fields=...)` を付与。**read-only**: apply は呼ばず、JSON / PHH には触らない |
 | Reconstruct 結果可視化 CLI (read-only) | ✅ 完了 (Phase 4-C1) | `output/inspect_reconstruction.py`: `reconstruct_<session>.jsonl` を読んで `[OK]` / `[REVIEW]` / `[SKIPPED]` ラベル付きで hand 単位サマリを出す。`--only-needs-review` / `--fields A,B` フィルタ対応。online JSON / PHH / live hook 結果には触らない |
 | Patch proposal (差分 → 修正案、apply は無し) | ✅ 完了 (Phase 5-A) | `core/patch_proposal.py`: `HandPatchProposal` / `FieldPatch` / `compute_patch_proposal`。対象 field は resolution_type / seat_payouts / winner_seat / pot_total / showdown_revealed_cards。`HandReconstructionResult.patch_proposal` に乗り、CLI `--show-patches` と GUI ``patch_fields=`` 表示で見える。``can_patch_automatically=False`` (Phase 5-B 以降で apply 判定) |
@@ -1570,7 +1577,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 663 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+ + 10 Phase 5-C + 10 Phase 5-D + 10 Phase 5-E + 13 Phase 5-F + 42 Phase 5-G + 23 Phase 5-H + 11 Phase 5-I + 11 Phase 5-J)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 682 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+ + 10 Phase 5-C + 10 Phase 5-D + 10 Phase 5-E + 13 Phase 5-F + 42 Phase 5-G + 23 Phase 5-H + 11 Phase 5-I + 11 Phase 5-J + 19 Phase 5-K)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
@@ -2267,9 +2274,9 @@ IntegrationThread._handle_manual_action_event`` の経路を通る。
   現状は ``logger.warning`` のみで、structured operator action log は将来課題。
 - ``patch_proposal`` への manual event の取り込み (= reconstruct と diff
   する設計の対称性を維持)。
-- street advance のトリガー拡張 (= board cards / ``advance_street`` audio
-  event のみ。manual action からの「全員 call で round 終了」判定は audio
-  経路にも実装されていない既存仕様)。
+- 音声キーワード ("フロップ" / "ターン" / "リバー") による明示的 street 進行
+  (= Phase 5-K で round close 自動検出は入ったが、誤検出救済用の dealer
+  callout 認識は未着手)。
 - manual ``new_hand`` event (= manual-only でハンド開始するための SB/BB
   auto-post trigger)。
 - actor mismatch を config / runtime flag で permissive に戻す機能

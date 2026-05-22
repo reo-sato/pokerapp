@@ -579,6 +579,9 @@ class IntegrationThread(threading.Thread):
                 logger.warning("Manual action: bs.update_after_action failed: %s", e)
                 needs_review = True
                 notes.append(f"bs.update_after_action error: {e}")
+            else:
+                # Phase 5-K: ラウンドが閉じたら次ストリートへ自動推移
+                self._advance_street_on_round_close()
 
         # ── ActionRecord を発火 ────────────────────────────────
         timestamp_iso = _now_iso()
@@ -713,6 +716,53 @@ class IntegrationThread(threading.Thread):
                 "RFID street advance to %s skipped (current=%s)",
                 target_street, gs.street,
             )
+
+    def _advance_street_on_round_close(self) -> None:
+        """ベッティングラウンドが閉じたら次ストリートへ自動推移する (Phase 5-K)。
+
+        ``BettingState.is_round_closed()`` を見て preflop → flop → turn → river
+        の順方向のみ進める。river close は **showdown 待ち** (winner 音声 / RFID で
+        finalize) なので auto-advance しない。
+
+        呼び出し点: 各 ``bs.update_after_action`` の直後 (audio / manual)。
+        ``_try_advance_street_from_rfid`` で既に進んでいた場合 (= RFID board が
+        先に到着していた) は ``gs.advance_street`` が ``ValueError`` を投げるので
+        silently skip。
+
+        all-in showdown のような「複数ストリートを一気に飛ばす」escalation は
+        Phase 5-K では未対応 (= 1 action あたり 1 街進行のみ)。
+        """
+        bs = self._betting_state
+        gs = self._game_state
+        if not bs.is_initialized:
+            return
+        if not bs.is_round_closed():
+            return
+        next_map = {
+            "preflop": ("flop", Street.FLOP),
+            "flop":    ("turn", Street.TURN),
+            "turn":    ("river", Street.RIVER),
+        }
+        target = next_map.get(gs.street)
+        if target is None:
+            # river close は showdown 待ち、auto-advance しない
+            return
+        next_name, next_enum = target
+        try:
+            gs.advance_street(next_enum)
+        except ValueError:
+            logger.debug(
+                "Round-close street advance to %s skipped (current=%s)",
+                next_name, gs.street,
+            )
+            return
+        bs.reset_for_new_street()
+        bs.street = next_name
+        logger.info(
+            "Street auto-advanced to %s by round close detection "
+            "(active=%s folded=%s all_in=%s)",
+            next_name, bs.active_seats, bs.folded_seats, bs.all_in_seats,
+        )
 
     def _expire_buffers(self) -> None:
         cutoff = time.time() - CAMERA_BUFFER_TTL
@@ -956,6 +1006,8 @@ class IntegrationThread(threading.Thread):
             else:
                 needs_review = inferred.needs_review
                 self._betting_state.update_after_action(seat, inferred.action, inferred.amount)
+                # Phase 5-K: ラウンドが閉じたら次ストリートへ自動推移
+                self._advance_street_on_round_close()
             logged_action = inferred.action
             logged_amount = inferred.amount
 
