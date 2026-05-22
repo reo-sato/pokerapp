@@ -1092,7 +1092,7 @@ python audio/speech_normalizer.py
 
 ```
 pytest tests/ --ignore=tests/test_vision.py
-→ 652 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
+→ 663 passed  (test_vision.py は cv2 未インストールのため収集エラー、既知問題)
 ```
 
 | テストファイル | 内容 |
@@ -1127,8 +1127,8 @@ pytest tests/ --ignore=tests/test_vision.py
 | test_gui.py (Phase 5-G 追加) | `_cmd_apply_patch` 確認 yes/no / 各 abort パス (latest hand_id 無 / thread 無 / proposal 無 / dialog 不可 / apply 例外 / apply False) + Latest advisory に `patch_applied=yes` / `applied_fields=...` 表示 + `append_to_history=False` で insert スキップ (Phase 5-G, +13 件) |
 | test_patch_apply.py (Phase 5-H 追加) | `summarize_patch_proposal_for_view` の whitelist flag / 値整形 (str / int / int-key dict 昇順 / str-key dict 挿入順 / list / None) / note 伝搬 / dict 形 proposal / malformed entry skip / `FieldDiffView` 戻り値型 (Phase 5-H, +15 件) |
 | test_gui.py (Phase 5-H 追加) | `_cmd_show_patch_details` の各 abort パス + `_create_patch_detail_window` への引数検証 (whitelist は `[applies]` / 非は `[skip]` / online & offline & note 含む) + apply と独立 + apply 済 header (Phase 5-H, +8 件) |
-| test_manual_action.py | `ManualActionEvent` の IntegrationThread 経由処理: BettingState 更新 / actor mismatch で `needs_review` / call 0 自動補完 / current_bet=0 で call→check 変換 / user 報告ログの再現シナリオ / `manual_queue` プロパティ (Phase 5-I, 7 件) |
-| test_gui.py (Phase 5-I 追加) | `_cmd_manual_action` が `ManualActionEvent` を `integration_thread.manual_queue` に push、`gs.apply_action` を直叩きしない + integration 未接続 / 不正 seat / 不正 amount の警告ログ (Phase 5-I, +4 件) |
+| test_manual_action.py | `ManualActionEvent` の IntegrationThread 経由処理: BettingState 更新 / call 0 自動補完 / current_bet=0 で call→check 変換 / user 報告ログの再現シナリオ / `manual_queue` プロパティ (Phase 5-I, 7 件) + Phase 5-J: actor mismatch の strict reject 仕様への切替 (旧 `..._flagged_as_review` を `..._strict_rejected` に更新 + `TestManualActionStrictReject` クラス: record 不変 / BettingState 不変 / GameState 不変 / on_action 不発火 / on_manual_rejected payload / 正規 turn は apply / `bs.is_initialized=False` は判定 skip) (Phase 5-J, +7 件) |
+| test_gui.py (Phase 5-I / 5-J 追加) | `_cmd_manual_action` が `ManualActionEvent` を `integration_thread.manual_queue` に push、`gs.apply_action` を直叩きしない + integration 未接続 / 不正 seat / 不正 amount の警告ログ (Phase 5-I, +4 件) + `on_manual_rejected` のスレッド安全な queue push、`_apply_manual_rejection` の review log 文言 (actor mismatch / 未知 reason)、actor 一致時に reject 文言が出ないこと (Phase 5-J, +4 件) |
 | test_inspect_reconstruction_cli.py | inspect_reconstruction CLI (label 判定 / --only-needs-review / --fields filter / 壊れた JSONL skip) (Phase 4-C1, 14 件) |
 | test_reconstruction_badges.py | gui.reconstruction_badges 単体 (status / RAW / diff_fields / button_inferred / format_history_line) (Phase 4-C2, 20 件) |
 | test_gui.py (Phase 4-C2 追加) | GUIDashboard.on_hand_finalized / _apply_hand_finalized: queue 経由、advisory accessor 呼び出し、tag 反映 (Phase 4-C2, +8 件) |
@@ -1207,7 +1207,8 @@ pytest tests/ --ignore=tests/test_vision.py
 | GUI blind 表示 (advisory ラベル + history 行) | ✅ 完了 (Phase 5-E) | `gui/dashboard.py` の helper (`_format_blind_for_advisory` / `_format_blind_suffix_for_history` / `_has_blind_patch` / `_blind_source_text`) で `summary.blinds` / `bootstrap_meta.blind_source` / `patch_proposal.fields` を read-only に参照。Latest advisory に `blinds=SB/BB (source=current_state\|session_default\|unknown)` を常時表示、`blind_mismatch=yes` を Phase 5-D の blind FieldPatch ありの hand のみ表示。history 行 suffix は `current_state` のときだけ `blinds=SB/BB (current_state)` を出す (`session_default` はノイズ削減のため省略)、blind mismatch は `(blind_mismatch)` marker。online JSON / PHH / reconstruct ロジックには触らない |
 | Advisory state の bounded retention | ✅ 完了 (Phase 5-F) | `integration.engine.MAX_ADVISORY_HANDS=500` で `_last_summary_by_hand_id` / `_last_reconstruction_by_hand_id` を eviction (union of hand_ids 最古から)。`_evict_old_advisory_entries` を `_invoke_reconstructor_hook` 末尾 + `_finalize_hand` 末尾の両方から呼んで `_apply_boundaries` 経路もカバー。evicted hand への `get_last_summary` / `get_reconstruction_result` は ``None`` を返すので GUI は Phase 4-C2 / 5-E の degrade パスで `[SKIPPED]` + `blinds=?/? (source=unknown)` 表示。GUI 側も `MAX_HISTORY_LINES=1000` で history Textbox を bounded retention (`_trim_history_lines` を `_apply_hand_finalized` の insert 直後に呼ぶ)。`_completed_hands` (hand window events) は本フェーズの eviction 対象外 (= Phase 6+ 候補) |
 | GUI からの手動 patch apply (in-memory のみ) | ✅ 完了 (Phase 5-G) | `core/patch_apply.py:apply_patch_proposal_to_summary` で whitelist field (`resolution_type` / `seat_payouts` / `pots` / `showdown_revealed_cards` / `blinds`) のみ deepcopy 後上書き → 新 `HandSummary` を返す pure helper。`IntegrationThread.apply_patch_proposal(hand_id) → bool` で in-memory `_last_summary_by_hand_id[hand_id]` を patched copy で置き換え、`result.patch_applied=True` / `applied_fields=[...]` を立てる。GUI 側に "Apply patch" ボタン (`_cmd_apply_patch`) + 確認ダイアログ hook (`_ask_apply_patch_confirmation`)、Latest advisory に `patch_applied=yes` / `applied_fields=...` 表示。`winner_seat` / `pot_total` / `actions` は明示的に whitelist 外。**JSON / PHH / GameStateManager / settlement / live BettingState は一切触らない** (永続化は別フェーズ) |
-| GUI 手動入力を IntegrationThread 経由に統一 | ✅ 完了 (Phase 5-I) | `core/events.py:ManualActionEvent(seat, action, amount, timestamp)` を新設。GUI `_cmd_manual_action` は `gs.apply_action` 直叩きをやめて `IntegrationThread.manual_queue` に push、IntegrationThread の `_handle_manual_action_event` が音声経路と同等品質で処理 (BettingState 更新 / call 0 を to_call で補完 / actor mismatch で `needs_review=True`)。これにより旧バグ「同一 seat 連続 raise」「call 0 がそのまま記録」「street が preflop のまま」が解消。**EvidenceLog / BeamEngine / HandReconstructor のベースラインには流さない** (= 操作者の介入は observation ではない) |
+| GUI 手動入力を IntegrationThread 経由に統一 | ✅ 完了 (Phase 5-I + 5-J) | `core/events.py:ManualActionEvent(seat, action, amount, timestamp)` を新設。GUI `_cmd_manual_action` は `gs.apply_action` 直叩きをやめて `IntegrationThread.manual_queue` に push、IntegrationThread の `_handle_manual_action_event` が音声経路と同等品質で処理 (BettingState 更新 / call 0 を to_call で補完 / bet vs raise 整合性)。これにより旧バグ「同一 seat 連続 raise」「call 0 がそのまま記録」「street が preflop のまま」が解消。**actor mismatch は Phase 5-J で strict reject に変更** (= state 不変 + `on_manual_rejected` callback で GUI review log)。**EvidenceLog / BeamEngine / HandReconstructor のベースラインには流さない** (= 操作者の介入は observation ではない) |
+| Manual action actor mismatch を strict reject に変更 | ✅ 完了 (Phase 5-J) | `_handle_manual_action_event` の actor 検証ブロックを permissive review から strict reject に書き換え。`event.seat != bs.actor_seat` のとき `gs.apply_action` / `bs.update_after_action` / `_current_actions` / `on_action` のすべてに触れず早期 return、`logger.warning` + `on_manual_rejected(ManualActionRejection)` callback で通知。GUI 側は `_manual_rejection_queue` 経由で main thread に渡し、`_apply_manual_rejection` が review log に「Manual action rejected: actor mismatch (selected seat=X, current actor=Y, ...)」を出す。**audio 経路の actor mismatch (permissive review) は意図的に無変更**: audio は observation で reconstruct で修正できる前提、manual は意図的入力なので reject が自然 |
 | GUI で patch proposal の field 単位 detail を表示 | ✅ 完了 (Phase 5-H) | `core/patch_apply.py:summarize_patch_proposal_for_view(summary, proposal) → list[FieldDiffView]` が `FieldPatch` を GUI 表示用に整形 (online_repr / offline_repr / is_applicable / note)。値は ``_format_value_for_view`` で deterministic に文字列化 (int キー dict は昇順 sort、str キーは挿入順)。GUI 側に "Show details" ボタン (Apply patch の左) + `_cmd_show_patch_details` ハンドラ + `_create_patch_detail_window(title, lines)` (テスト時 MagicMock 可)。whitelist field は `[applies]` / 非 whitelist は `[skip]` マーカー。apply 済 hand では header に `(patch applied — applied_fields=...)` を付与。**read-only**: apply は呼ばず、JSON / PHH には触らない |
 | Reconstruct 結果可視化 CLI (read-only) | ✅ 完了 (Phase 4-C1) | `output/inspect_reconstruction.py`: `reconstruct_<session>.jsonl` を読んで `[OK]` / `[REVIEW]` / `[SKIPPED]` ラベル付きで hand 単位サマリを出す。`--only-needs-review` / `--fields A,B` フィルタ対応。online JSON / PHH / live hook 結果には触らない |
 | Patch proposal (差分 → 修正案、apply は無し) | ✅ 完了 (Phase 5-A) | `core/patch_proposal.py`: `HandPatchProposal` / `FieldPatch` / `compute_patch_proposal`。対象 field は resolution_type / seat_payouts / winner_seat / pot_total / showdown_revealed_cards。`HandReconstructionResult.patch_proposal` に乗り、CLI `--show-patches` と GUI ``patch_fields=`` 表示で見える。``can_patch_automatically=False`` (Phase 5-B 以降で apply 判定) |
@@ -1569,7 +1570,7 @@ def infer_action_distribution(
 ### 検証コマンド
 
 ```bash
-pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 652 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+ + 10 Phase 5-C + 10 Phase 5-D + 10 Phase 5-E + 13 Phase 5-F + 42 Phase 5-G + 23 Phase 5-H + 11 Phase 5-I)
+pytest tests/ -v --ignore=tests/test_vision.py                                   # 全 suite: 663 件 pass (280 baseline + 66 M1–M3 + 6 Phase 1 + 20 Phase 2-A + 11 Phase 2-B + 19 Phase 2-C + 14 Phase 3 + 10 Phase 4-A + 11 Phase 4-B + 14 Phase 4-C1 + 33 Phase 4-C2 + 27 Phase 5-A + 13 Phase 5-B + 9 Phase 5-B+ + 10 Phase 5-C + 10 Phase 5-D + 10 Phase 5-E + 13 Phase 5-F + 42 Phase 5-G + 23 Phase 5-H + 11 Phase 5-I + 11 Phase 5-J)
 pytest tests/test_observation_model.py tests/test_inference_equivalence.py -v    # M2
 pytest tests/test_beam_search.py tests/test_bayesian_e2e.py -v                   # M3
 pytest tests/test_settlement_models.py -v                                         # Phase 1 + Phase 2-B engine E2E
@@ -2208,7 +2209,7 @@ projection にリファクタする可能性は別フェーズで検討。
 - **Tkinter Toplevel の geometry / 配色は最小限**: 700x500 固定、Courier 11pt、
   スタイル統一は将来の UX 改善で扱う
 
-**Phase 5-I (GUI 手動入力を IntegrationThread 経由に統一) — 現在の挙動**:
+**Phase 5-I / 5-J (GUI 手動入力を IntegrationThread 経由に統一) — 現在の挙動**:
 
 GUI の手動入力 (席ドロップダウン + action ボタン + amount entry) は
 ``ManualActionEvent → IntegrationThread.manual_queue →
@@ -2217,40 +2218,70 @@ IntegrationThread._handle_manual_action_event`` の経路を通る。
 
 - **``core/events.py:ManualActionEvent(seat, action, amount, timestamp)``**:
   AudioEvent と違って seat 情報を明示的に持つ。
+- **``core/events.py:ManualActionRejection(seat, attempted_action,
+  attempted_amount, expected_actor, reason, timestamp)``** (Phase 5-J):
+  manual action が actor mismatch などで reject されたときの payload。
+  ``on_manual_rejected`` callback に渡される。
 - **``IntegrationThread.manual_queue`` (`queue.Queue[ManualActionEvent]`)**:
   property として公開され、GUI / 外部呼び出し元から put 可能。
 - **``_drain_manual_queue`` は run loop で audio drain の前に走る**
   (= operator 入力を audio より優先)。
-- **``_handle_manual_action_event`` の責務** (音声経路と同等品質):
-    - actor_seat を ``bs.actor_seat`` と照合。mismatch でも適用は通すが
-      ``needs_review=True`` を立てる (= permissive)。
-    - ``amount=0`` かつ ``bs.call_amount_for(seat) > 0`` なら call として
-      auto-fill。``to_call=0`` かつ ``call 0`` なら check に置き換え。
-    - bet vs raise の整合性 (= ``bs.is_opened`` 下で bet は不整合)
-      を ``needs_review`` で表現。
-    - ``gs.apply_action`` + ``bs.update_after_action`` を呼ぶ。
-    - ``ActionRecord`` (``source={"manual": True, ...}``) を組み立て
-      ``on_action`` コールバックを発火。
+- **``_handle_manual_action_event`` の責務**:
+    - **actor_seat 検証は strict reject** (Phase 5-J):
+      ``bs.is_initialized`` かつ ``bs.actor_seat is not None`` で
+      ``event.seat != bs.actor_seat`` のとき、``gs.apply_action`` /
+      ``bs.update_after_action`` / ``_current_actions`` / ``on_action`` に
+      触れず早期 return。``logger.warning`` + ``on_manual_rejected
+      (ManualActionRejection(reason="actor_mismatch", ...))`` callback で
+      通知する (= state は変えない)。
+      ``bs.is_initialized=False`` のときは actor 判定スキップ (= 既存仕様継続)。
+    - **以降は actor が一致した正規入力のみが到達**:
+        - ``amount=0`` かつ ``bs.call_amount_for(seat) > 0`` なら call として
+          auto-fill。``to_call=0`` かつ ``call 0`` なら check に置き換え。
+        - bet vs raise の整合性 (= ``bs.is_opened`` 下で bet は不整合)
+          は ``needs_review`` で表現 (= permissive review のまま)。
+        - ``gs.apply_action`` + ``bs.update_after_action`` を呼ぶ。
+        - ``ActionRecord`` (``source={"manual": True, ...}``) を組み立て
+          ``on_action`` コールバックを発火。
 - **EvidenceLog / BeamEngine / ``_track_evidence`` には流さない**:
   manual events は observation ではなく operator の介入なので、
   reconstruct のオフライン基準には混ぜない (= online ``HandSummary.actions``
   には含まれる)。``HandReconstructor`` の diff に "online にだけある manual
   action" として出てくる挙動は既存の review 表示で operator が確認できる。
+- **GUI 側の reject 通知 dispatch** (Phase 5-J):
+  ``IntegrationThread`` → ``GUIDashboard.on_manual_rejected(rejection)``
+  (= スレッド安全に ``_manual_rejection_queue.put``) → main thread の
+  ``_poll_updates`` が drain → ``_apply_manual_rejection`` が
+  ``_append_log(msg, tag="review")`` で表示。文言例:
+  ``"⚠ Manual action rejected: actor mismatch (selected seat=3,
+  current actor=1, action=raise, amount=900)."``
 
-**Phase 5-I スコープ外 (= 仕様としてやらない)**:
-- 手動入力時の actor mismatch を strict reject にする (現状は permissive
-  warning のみ)。strict mode は将来オプションで追加可能。
+**Phase 5-I / 5-J スコープ外 (= 仕様としてやらない)**:
+- **audio 経路の actor mismatch の strict reject 化** (= 意図的に非対称維持。
+  audio は observation で reconstruct で修正できる前提)。Phase 5-J で manual
+  だけ strict reject にした。
+- **manual action の bet vs raise mismatch / call < to_call の strict reject 化**
+  (= こちらは依然 permissive review)。actor 以外の入力ミスは ``needs_review`` で
+  示す既存仕様継続。
+- **reject 履歴の構造化 audit trail** (= 「いつ何回 actor mismatch を試みたか」)。
+  現状は ``logger.warning`` のみで、structured operator action log は将来課題。
+- ``patch_proposal`` への manual event の取り込み (= reconstruct と diff
+  する設計の対称性を維持)。
 - street advance のトリガー拡張 (= board cards / ``advance_street`` audio
   event のみ。manual action からの「全員 call で round 終了」判定は audio
   経路にも実装されていない既存仕様)。
-- ``patch_proposal`` への manual event の取り込み (= reconstruct と diff
-  する設計の対称性を維持)。
+- manual ``new_hand`` event (= manual-only でハンド開始するための SB/BB
+  auto-post trigger)。
+- actor mismatch を config / runtime flag で permissive に戻す機能
+  (= ADR-0002 §"Alternatives considered" Option C で却下)。
 
 詳細経緯 / 設計判断 / 旧バグの再現条件は以下に分離:
 
-- 設計判断 (Option A vs B vs C): `docs/adr/0001-route-manual-input-via-integration-thread.md`
-- 旧バグの再現条件と root cause: `docs/issues/0001-manual-input-poker-rule-violations.md`
-- 実装ログ: `docs/worklog/2026-05-22-phase-5-I.md`
+- Phase 5-I 設計判断 (Option A vs B vs C): `docs/adr/0001-route-manual-input-via-integration-thread.md`
+- Phase 5-J 設計判断 (strict reject vs permissive): `docs/adr/0002-manual-action-actor-mismatch-strict-reject.md`
+- Phase 5-I 旧バグの再現条件と root cause: `docs/issues/0001-manual-input-poker-rule-violations.md`
+- Phase 5-J permissive 挙動が live state を汚した root cause: `docs/issues/0002-manual-action-permissive-warning-too-soft.md`
+- 実装ログ: `docs/worklog/2026-05-22-phase-5-I.md` / `docs/worklog/2026-05-22-phase-5-J.md`
 
 **Phase 5-B+ (Phase 5-B 直後の改善、同フェーズ扱い)**:
 - ✅ **Audio seat hint の出所カテゴリ化**: ``signals.audio_seat_hint_sources``

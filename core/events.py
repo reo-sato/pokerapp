@@ -83,3 +83,24 @@ class ManualActionEvent:
     action: str       # "bet" / "call" / "raise" / "check" / "fold" / "allin"
     amount: int       # 入力値そのまま (0 でも OK、handler 側で to_call 補完する)
     timestamp: float  # time.time() 起点
+
+
+@dataclass
+class ManualActionRejection:
+    """Phase 5-J: manual action が actor mismatch で reject された印。
+
+    IntegrationThread が ``_handle_manual_action_event`` で actor mismatch を検出
+    したとき、``gs.apply_action`` / ``bs.update_after_action`` を呼ばず ``ActionRecord``
+    も積まずに state を変えないまま reject する。GUI に operator 向けの review log
+    を出すためのコールバック (``on_manual_rejected``) にこの dataclass を渡す。
+
+    audio 経路の actor mismatch (= permissive review) には影響しない。
+    """
+
+    seat: int                       # operator が選択した seat
+    attempted_action: str           # 入力された action (lowercase)
+    attempted_amount: int           # 入力された amount
+    expected_actor: Optional[int]   # ``BettingState.actor_seat`` (= 期待されていた actor)
+    reason: str                     # 短い English 識別子 (e.g. "actor_mismatch")
+    timestamp: float                # event.timestamp (= time.time() 起点)
+

@@ -33,7 +33,13 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from core.event_queue import EventQueue
-from core.events import AudioEvent, CameraEvent, ManualActionEvent, RFIDEvent
+from core.events import (
+    AudioEvent,
+    CameraEvent,
+    ManualActionEvent,
+    ManualActionRejection,
+    RFIDEvent,
+)
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
 from core.hand_boundary import BoundaryEvent, HandBoundaryDetector
@@ -111,6 +117,9 @@ class IntegrationThread(threading.Thread):
         on_action_revised: Optional[Callable[[ActionRecord], None]] = None,
         on_rfid_card: Optional[Callable[[RFIDEvent], None]] = None,
         on_hand_finalized: Optional[Callable[[int], None]] = None,
+        on_manual_rejected: Optional[
+            Callable[[ManualActionRejection], None]
+        ] = None,
         stop_event: Optional[threading.Event] = None,
         initial_button_seat: Optional[int] = None,
         sb_amount: Optional[int] = None,
@@ -145,6 +154,10 @@ class IntegrationThread(threading.Thread):
         # Phase 4-C2: hand 終局通知 (advisory 計算後に発火)。GUI / 監視ツールが
         # ``get_reconstruction_result(hand_id)`` を呼んで advisory を読む想定。
         self._on_hand_finalized = on_hand_finalized
+        # Phase 5-J: manual action が actor mismatch などで reject されたとき GUI
+        # に伝えるためのコールバック。スレッド安全に設計すること
+        # (dashboard 側は queue 経由で main thread に渡す)。
+        self._on_manual_rejected = on_manual_rejected
         self._stop_event = stop_event or threading.Event()
 
         # センサーイベントのバッファ
@@ -463,7 +476,7 @@ class IntegrationThread(threading.Thread):
                 logger.exception("Error handling manual action event: %s", ev)
 
     def _handle_manual_action_event(self, event: ManualActionEvent) -> None:
-        """Phase 5-I: GUI 手動入力を音声経路と同等品質で処理する。
+        """Phase 5-I / 5-J: GUI 手動入力を音声経路と同等品質で処理する。
 
         音声経路 (= ``_handle_audio_event``) との違い:
           - ``EvidenceLog`` / ``HandReconstructor`` の hand window には流さない
@@ -471,10 +484,13 @@ class IntegrationThread(threading.Thread):
             混ぜない)
           - ``BeamEngine.step_audio`` も呼ばない (= 音声観測ではない)
           - ``infer_action`` ではなく直接 ``action`` / ``amount`` を採用するが、
-            ``call`` 時の to_call 補完と、actor seat 不一致時の review_required
-            付与は行う
+            ``call`` 時の to_call 補完は行う
+          - **actor mismatch は strict reject** (Phase 5-J): ``gs.apply_action``
+            / ``bs.update_after_action`` を呼ばず ``_current_actions`` も
+            ``on_action`` も触らない。``on_manual_rejected`` callback を発火する
+            (audio 経路は依然 permissive review を継続)
 
-        共通する処理:
+        共通する処理 (= actor match のとき):
           - ``GameStateManager.apply_action`` で stack / pot を更新
           - ``BettingState.update_after_action`` で contribution / actor_seat /
             current_bet を更新
@@ -489,11 +505,34 @@ class IntegrationThread(threading.Thread):
         notes: list[str] = []
         needs_review = False
 
-        # ── actor 検証 (permissive: 違反でも apply するが review を立てる) ──
-        # BettingState が未初期化のときは actor 判定をスキップ (= new_hand 前)
-        if bs.is_initialized and bs.actor_seat is not None and seat != int(bs.actor_seat):
-            needs_review = True
-            notes.append(f"actor mismatch: input seat={seat}, expected={bs.actor_seat}")
+        # ── Phase 5-J: actor 検証 (strict reject) ───────────────────
+        # BettingState が未初期化 / actor_seat None のときは判定スキップ
+        # (= new_hand 前。Phase 5-J で扱いを変えない既存仕様)。
+        if (
+            bs.is_initialized
+            and bs.actor_seat is not None
+            and seat != int(bs.actor_seat)
+        ):
+            expected = int(bs.actor_seat)
+            logger.warning(
+                "Manual action rejected: actor mismatch "
+                "(selected seat=%d, current actor=%d, action=%s, amount=%d)",
+                seat, expected, action, amount,
+            )
+            if self._on_manual_rejected is not None:
+                rejection = ManualActionRejection(
+                    seat=seat,
+                    attempted_action=action,
+                    attempted_amount=amount,
+                    expected_actor=expected,
+                    reason="actor_mismatch",
+                    timestamp=float(event.timestamp),
+                )
+                try:
+                    self._on_manual_rejected(rejection)
+                except Exception:
+                    logger.exception("on_manual_rejected callback raised")
+            return
 
         # ── call 時の amount 補完 + 0-call → check 変換 ─────────────
         if action == "call" and bs.is_initialized:

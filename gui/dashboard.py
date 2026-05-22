@@ -32,6 +32,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
+    from core.events import ManualActionRejection
     from core.game_state import GameStateManager
     from core.hand_log import ActionRecord
     from output.json_writer import JsonWriter
@@ -105,6 +106,10 @@ class GUIDashboard:
         # IntegrationThread が on_hand_finalized(hand_id) を呼び、main thread の
         # _poll_updates が consume して advisory パネルを更新する。
         self._hand_finalized_queue: queue.Queue[int] = queue.Queue()
+        # Phase 5-J: manual action が actor mismatch で reject されたときに
+        # IntegrationThread から push される (= スレッド安全)。main thread の
+        # _poll_updates が consume して review log に表示する。
+        self._manual_rejection_queue: "queue.Queue[ManualActionRejection]" = queue.Queue()
         # Phase 5-G: "Apply patch" ボタンが対象とする最新 advisory hand_id。
         # ``_apply_hand_finalized`` の末尾で更新される。``_cmd_apply_patch`` から参照。
         self._latest_advisory_hand_id: Optional[int] = None
@@ -907,6 +912,13 @@ class GUIDashboard:
                 self._apply_hand_finalized(hand_id)
         except queue.Empty:
             pass
+        # Phase 5-J: manual action reject 通知を処理 (review log に表示)
+        try:
+            while True:
+                rejection = self._manual_rejection_queue.get_nowait()
+                self._apply_manual_rejection(rejection)
+        except queue.Empty:
+            pass
         # ゲーム状態のヘッダーを常に最新化
         self._refresh_header()
         if not self._stop_event.is_set():
@@ -1305,6 +1317,41 @@ class GUIDashboard:
             self._hand_finalized_queue.put(int(hand_id))
         except (TypeError, ValueError):
             pass  # 不正な hand_id は黙って破棄
+
+    def on_manual_rejected(self, rejection: "ManualActionRejection") -> None:
+        """Phase 5-J: IntegrationThread から呼ばれる manual action reject 通知。
+
+        ``_handle_manual_action_event`` で actor mismatch を検出して state を
+        変えずに reject した直後に呼ばれる。スレッド安全のため queue に積み、
+        main thread の ``_poll_updates`` が ``_apply_manual_rejection`` で
+        review log に表示する。
+        """
+        try:
+            self._manual_rejection_queue.put(rejection)
+        except Exception:
+            pass  # queue 例外は黙って破棄 (= GUI を巻き込まない)
+
+    def _apply_manual_rejection(self, rejection: "ManualActionRejection") -> None:
+        """Phase 5-J: manual action reject を review log に表示する (main thread)。
+
+        operator が「自分の入力がなぜ通らなかったか」を即座に把握できるよう
+        actor mismatch の場合は input seat と expected actor を併記する。
+        """
+        if rejection.reason == "actor_mismatch":
+            msg = (
+                f"⚠ Manual action rejected: actor mismatch "
+                f"(selected seat={rejection.seat}, "
+                f"current actor={rejection.expected_actor}, "
+                f"action={rejection.attempted_action}, "
+                f"amount={rejection.attempted_amount})."
+            )
+        else:
+            msg = (
+                f"⚠ Manual action rejected ({rejection.reason}): "
+                f"seat={rejection.seat}, action={rejection.attempted_action}, "
+                f"amount={rejection.attempted_amount}."
+            )
+        self._append_log(msg, tag="review")
 
     def run(self) -> None:
         """mainloop を開始する（ブロッキング）。"""

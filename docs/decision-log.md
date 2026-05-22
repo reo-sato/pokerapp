@@ -9,3 +9,4 @@ ADR (Architecture Decision Records) のインデックス。詳細は
 | Date | ADR | Title | Status |
 |---|---|---|---|
 | 2026-05-22 | [ADR-0001](adr/0001-route-manual-input-via-integration-thread.md) | Route GUI manual input through IntegrationThread (Phase 5-I) | Accepted |
+| 2026-05-22 | [ADR-0002](adr/0002-manual-action-actor-mismatch-strict-reject.md) | Manual action actor mismatch is strict reject (Phase 5-J) | Accepted |

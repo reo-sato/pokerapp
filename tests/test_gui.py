@@ -215,6 +215,110 @@ class TestGUIDashboardLogic:
         # クラッシュせず、_append_log が呼ばれる
         dash._append_log.assert_called_once()
 
+    # ――― Phase 5-J: manual action strict reject の GUI 表示 ―――
+
+    def test_on_manual_rejected_pushes_to_queue(self, tmp_path: Path):
+        """``on_manual_rejected`` はスレッド安全に queue に push するだけ。
+
+        IntegrationThread から呼ばれるので main thread ではなく、
+        ``_apply_manual_rejection`` は触らない。queue に積むだけ。
+        """
+        from core.events import ManualActionRejection
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        rejection = ManualActionRejection(
+            seat=3, attempted_action="raise", attempted_amount=900,
+            expected_actor=1, reason="actor_mismatch", timestamp=0.0,
+        )
+        dash.on_manual_rejected(rejection)
+        # queue に 1 件 push されている
+        pushed = dash._manual_rejection_queue.get_nowait()
+        assert pushed is rejection
+
+    def test_apply_manual_rejection_logs_review_message_with_seats(
+        self, tmp_path: Path,
+    ):
+        """``_apply_manual_rejection`` は review tag で operator 向け文言を出す。
+
+        actor mismatch のときは ``selected seat=X`` と ``current actor=Y`` の
+        両方が文言に含まれる (= operator がすぐ理解できる)。
+        """
+        from core.events import ManualActionRejection
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._append_log = MagicMock()
+        rejection = ManualActionRejection(
+            seat=3, attempted_action="raise", attempted_amount=900,
+            expected_actor=1, reason="actor_mismatch", timestamp=0.0,
+        )
+        dash._apply_manual_rejection(rejection)
+
+        dash._append_log.assert_called_once()
+        msg, kwargs = (
+            dash._append_log.call_args[0][0],
+            dash._append_log.call_args.kwargs,
+        )
+        assert "reject" in msg.lower()
+        assert "actor mismatch" in msg.lower()
+        assert "seat=3" in msg
+        assert "actor=1" in msg
+        assert "raise" in msg
+        assert "900" in msg
+        assert kwargs.get("tag") == "review"
+
+    def test_apply_manual_rejection_unknown_reason_still_logs(
+        self, tmp_path: Path,
+    ):
+        """未知 reason でも silent drop はせず review log を出す。"""
+        from core.events import ManualActionRejection
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        dash._append_log = MagicMock()
+        rejection = ManualActionRejection(
+            seat=2, attempted_action="check", attempted_amount=0,
+            expected_actor=None, reason="future_unknown_reason", timestamp=0.0,
+        )
+        dash._apply_manual_rejection(rejection)
+
+        dash._append_log.assert_called_once()
+        msg, kwargs = (
+            dash._append_log.call_args[0][0],
+            dash._append_log.call_args.kwargs,
+        )
+        assert "reject" in msg.lower()
+        assert "future_unknown_reason" in msg
+        assert kwargs.get("tag") == "review"
+
+    def test_actor_match_manual_submit_does_not_log_reject(
+        self, tmp_path: Path,
+    ):
+        """actor 一致の正規入力では reject log は **出ない**。
+
+        ``_cmd_manual_action`` → queue.put → (IntegrationThread が処理) →
+        on_action が普通の record で発火 (= reject 文言は流れない)。
+        GUI 側の責務は queue に push するだけなので、本テストは「reject 系の
+        副作用が発火しない」ことだけ確認する。
+        """
+        from core.events import ManualActionEvent
+        dash, _gs, _audio_q, _stop = _make_mock_dashboard(tmp_path)
+        thread = MagicMock()
+        thread.manual_queue = MagicMock()
+        dash._integration_thread = thread
+        dash._manual_seat_var = MagicMock(get=MagicMock(return_value="1"))
+        dash._manual_action_var = MagicMock(get=MagicMock(return_value="fold"))
+        dash._manual_amount_entry = MagicMock(
+            get=MagicMock(return_value=""),
+            delete=MagicMock(),
+        )
+        dash._append_log = MagicMock()
+
+        dash._cmd_manual_action()
+
+        # queue に push (= 正規パス)。"reject" を含む warning log は出ていない。
+        thread.manual_queue.put.assert_called_once()
+        pushed = thread.manual_queue.put.call_args[0][0]
+        assert isinstance(pushed, ManualActionEvent)
+        for call_args in dash._append_log.call_args_list:
+            msg = call_args[0][0]
+            assert "reject" not in msg.lower()
+
 
 # ――― Phase 4-C2: hand finalized → advisory パネル更新 ―――
 
