@@ -943,6 +943,97 @@ BettingState + showdown 観測 + board から `HandSummary` を組み立て、`i
 
 ---
 
+## Documentation and Traceability Rules
+
+実装作業では **コードだけでなく docs-as-code の更新も必須** とする。以下のルールは
+今後の全タスクに適用される恒常ルール。
+
+### 1. 基本原則
+
+- Claude Code **must** treat documentation updates as part of implementation,
+  not as optional follow-up work.
+- A task is **not complete** until required documentation updates are finished
+  together with code and tests.
+- `CLAUDE.md` is the **current source of truth** for the present-state
+  behavior/spec. Historical change trails (task-by-task progress, superseded
+  reasoning) **must not** live in `CLAUDE.md`; they belong in worklogs / ADRs /
+  issue logs.
+
+### 2. `CLAUDE.md` 更新ルール
+
+- When behavior, scope, UI, API, ownership boundaries, or implementation status
+  changes, the same task **must** update `CLAUDE.md`.
+- `CLAUDE.md` **must** describe the current state only. **Do not** turn it into
+  a long historical log.
+- Historical detail, superseded reasoning, and task-by-task progress **must**
+  be moved into dedicated documents (worklogs / ADRs / issue logs).
+
+### 3. worklog ルール (`docs/worklog/`)
+
+- For any non-trivial change, a worklog entry under `docs/worklog/` is
+  **required**.
+- Use **one file per task / phase / PR-sized change** (do not append unrelated
+  work into one file).
+- Each worklog entry **must** include at least:
+  - goal
+  - changed files
+  - expected behavior
+  - implemented behavior
+  - test results
+  - mismatches found during testing
+  - fixes applied
+  - remaining gaps / out-of-scope items
+  - related commits
+
+### 4. ADR ルール (`docs/adr/`)
+
+- Architecturally meaningful decisions **must** be captured as a new ADR under
+  `docs/adr/`.
+- ADR-worthy changes include: design policy, ownership boundaries, replay
+  strategy, persistence strategy, state-management strategy, GUI interaction
+  model, and other long-lived decisions.
+- **Do not** rewrite old ADRs to erase history. If direction changes, create a
+  new ADR and mark the old one **superseded** where appropriate.
+
+### 5. issue / mismatch log ルール (`docs/issues/`)
+
+- If testing reveals a mismatch between expected and actual behavior, an issue
+  / mismatch log under `docs/issues/` is **required**.
+- Each issue log **must** include at least:
+  - expected behavior
+  - actual behavior
+  - reproduction
+  - root cause
+  - fix
+  - regression test
+
+### 6. decision log ルール (`docs/decision-log.md`)
+
+- `docs/decision-log.md` **must** be maintained as an index of ADRs, major
+  issues, and cross-links to commits/tests when applicable.
+- New ADRs and major mismatch logs **must** be linked from the decision log.
+
+### 7. changelog ルール (`CHANGELOG.md`)
+
+- For user-visible behavior changes, `CHANGELOG.md` **must** be updated in the
+  same task.
+
+### 8. 完了条件
+
+- **Do not** report a task complete until code, tests, **and** all required
+  documentation updates are done.
+- Final implementation reports **must** include:
+  - changed files
+  - expected functionality
+  - implemented functionality
+  - mismatches found
+  - fixes applied
+  - tests added/updated
+  - documentation updated
+  - remaining out-of-scope items
+
+---
+
 ## 設定ファイル
 
 ### `config_default.json` の構造
