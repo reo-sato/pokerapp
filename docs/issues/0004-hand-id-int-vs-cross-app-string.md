@@ -6,7 +6,7 @@
 
 ## Status
 
-Open
+Resolved（ADR-0006, 2026-05-25）。schema freeze は S2 着手時（ISSUE-0005 が前提）。
 
 ## Severity / Priority
 
@@ -44,20 +44,19 @@ hand logger は単体運用を前提に per-session 連番の int を採用し�
 
 ## Fix
 
-未対応（S2 の `hand_ref` 設計で確定する）。選択肢:
+**決着済（ADR-0006）: 選択肢 A を採用**。
 
-- **A. 複合キーのまま契約化**: cross-app の hand 参照は常に `(session_id, hand_id)` 複合。
-  hand logger の int は変えない。`hand_ref` が複合キーを保持する。
-  - Pros: 既存実装を変えない。Cons: 参照のたびに複合キーを扱う。
-- **B. 文字列 hand_id に正規化**: 境界で `f"{session_id}:{hand_id}"` 等の派生文字列 ID を作る。
-  - Pros: 他 ID（player_id/session_id）と同じく「単一 opaque 文字列」で統一。
-  - Cons: 派生規則を契約に固定する必要。hand logger 内部は int のまま二重表現になる。
-- **C. hand logger 側も globally unique な文字列 hand_id を採番**: 破壊的。既存 JSON ログと
-  PHH エクスポートに影響。
-  - Pros: 最もクリーン。Cons: hand logger 既存挙動・既存ログの互換性に breaking。
+- `hand_id` は **session 内連番 int のまま据え置く**（hand logger 不変）。
+- `hand_id` 単独は global key ではなく、**`(session_id, hand_id)` の複合キーが globally unique**。
+- cross-app の hand 参照は常に `hand_ref`（複合キー保持）を介する。
+- 単一 opaque トークン `f"{session_id}:{hand_id}"` は将来 API 化（S5）の additive 拡張として
+  予約し、S2 では凍結しない。
 
-いずれも shared-ids 契約の breaking change を伴う可能性があるため、S2 着手時に ADR を起こして
-確定する（`versioning-and-freeze.md` の freeze order #3 = session/seat/hand_ref のタイミング）。
+却下: B（派生文字列）は現段階で利点がなく既成事実化を招く / C（hand logger を文字列採番）は
+既存 JSON・PHH に breaking。詳細は ADR-0006 の Alternatives。
+
+draft schema（`schemas/{seat_assignment,hand_ref}.schema.json`, v0.1）で `hand_id: integer` +
+`session_id: string` を複合キーとして表現済み。`1.0` への freeze は ISSUE-0005 決着が前提。
 
 ## Regression Test
 
@@ -76,6 +75,7 @@ hand logger は単体運用を前提に per-session 連番の int を採用し�
 
 ## Related ADRs
 
+- `docs/adr/0006-s2-session-seating-contract-and-hand-id-cross-app-reference.md`（本 issue を Resolve）
 - `docs/adr/0005-contracts-repository-layout-and-freeze-workflow.md`
 - `docs/adr/0003-expand-domain-from-hand-logging-to-session-ledger-and-store-settlement.md`（hand_ref 定義）
 

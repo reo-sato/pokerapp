@@ -25,7 +25,8 @@ _SCHEMAS = _CONTRACTS / "schemas"
 _FIXTURES = _CONTRACTS / "fixtures"
 
 # 1 model = 1 schema = 1 fixtures dir
-_MODELS = ["player"]
+# player: S1 freeze 候補。session / seat_assignment / hand_ref: S2 draft (ADR-0006, 未 freeze)。
+_MODELS = ["player", "session", "seat_assignment", "hand_ref"]
 
 
 def _load(path: Path) -> dict:

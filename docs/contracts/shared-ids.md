@@ -41,9 +41,10 @@
 | cross-app 参照 | ledger app / hand logger は `session_id` 文字列で相互参照する。 |
 
 現状実装（hand logger）: `datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"`（`main.py`）。
-これは opaque 文字列契約は満たすが UUID ではない。**S2 で session レイヤを実装する際に
-採番方式を確定する**（timestamp 文字列を残すか UUID に統一するか）。本 doc は契約として
-「opaque・非空・アプリ内採番・不変」を要求し、具体採番は S2 freeze で確定する。
+これは opaque 文字列契約は満たすが UUID ではない。本 doc は契約として
+「opaque・非空・アプリ内採番・不変」を要求する。**最終採番方式（timestamp 文字列維持 vs
+UUID 統一）は ISSUE-0005 で確定**し、S2 freeze の前提とする。S2 draft の schema は
+`minLength: 1`（形式を UUID に固定しない）に留める（`schemas/session.schema.json`）。
 
 ---
 
@@ -59,11 +60,11 @@
 | cross-app 参照 | `hand_ref` が `{session_id, hand_id, started_at, seat_assignments}` を保持し、ledger 側は
                   これを不変参照として読む（**planned, S2**）。 |
 
-> **既知の不整合（要 reconcile）**: 共有 ID 原則は「cross-app では文字列 opaque」だが、現状の
-> hand logger は `hand_id: int`（per-session 連番, `core/hand_log.py`）。グローバル一意性は
-> `(session_id, hand_id)` 複合でしか満たせない。これを S2 の `hand_ref` 設計で
-> 「複合キーのまま contract 化するか / 文字列 hand_id に正規化するか」確定する。
-> 詳細・選択肢は `docs/issues/0004-hand-id-int-vs-cross-app-string.md` を参照。
+> **reconcile 済（ADR-0006, ISSUE-0004 Resolved）**: `hand_id` は **session 内連番 int のまま据え置く**。
+> `hand_id` 単独は global key ではなく、**`(session_id, hand_id)` の複合キーが globally unique**。
+> cross-app の hand 参照は常に `hand_ref`（複合キー保持）を介する（選択肢 A 採用）。
+> 単一 opaque トークン `f"{session_id}:{hand_id}"` は将来 API 化（S5）の additive 拡張として予約し、
+> S2 では凍結しない。詳細は ADR-0006 / `docs/issues/0004-hand-id-int-vs-cross-app-string.md`。
 
 ---
 
@@ -72,7 +73,7 @@
 | ID | 形式 | 採番責務 | 実装状況 | freeze 状態 |
 |----|------|---------|---------|------------|
 | `player_id` | UUID4 hex (32) | player registry | ✅ S1 実装済 | freeze 候補（S1 で安定） |
-| `session_id` | opaque string（UUID 推奨） | session layer | 🔲 planned (S2) | 未 freeze（S2 で確定） |
-| `hand_id` | int（session 内）/ 複合キー | hand logger | ✅ 実装済（int） | 未 freeze（S2 で cross-app 形を確定） |
+| `session_id` | opaque string（UUID 推奨） | session layer | 🔲 planned (S2) | 未 freeze（採番方式は ISSUE-0005） |
+| `hand_id` | int（session 内）。global は `(session_id, hand_id)` 複合 | hand logger | ✅ 実装済（int） | cross-app 形は ADR-0006 で確定（int 据え置き）。schema freeze は S2 |
 
 凍結手順は `versioning-and-freeze.md` を参照。

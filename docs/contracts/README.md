@@ -24,21 +24,22 @@ core (WS1) / desktop (WS2) / mobile (WS3) は、ここで凍結された契約�
 docs/contracts/
 ├── README.md                   ← このファイル（置き場と運用の入口）
 ├── shared-ids.md               ← player_id / session_id / hand_id の共有 ID 契約
+├── session-seating.md          ← session / seat_assignment / hand_ref 契約（S2 draft, 未 freeze）
 ├── versioning-and-freeze.md    ← freeze / versioning / additive vs breaking / freeze order
 ├── repository-interfaces.md    ← front-end が呼ぶ抽象 repository/service interface 契約（テンプレート）
 ├── error-shapes.md             ← validation / not-found 等の error 形契約
 ├── validation-rules.md         ← schema で表現しきれない業務 validation（core が source of truth）
 ├── schemas/                    ← 1 model = 1 JSON Schema
-│   ├── shared-ids.schema.json  ← 共有 ID の文字列形式 $defs（参照用・documentary）
-│   └── player.schema.json      ← player schema（S1, freeze 候補）
+│   ├── shared-ids.schema.json      ← 共有 ID の文字列形式 $defs（参照用・documentary）
+│   ├── player.schema.json          ← player schema（S1, freeze 候補, v1.0）
+│   ├── session.schema.json         ← session schema（S2 draft, v0.1）
+│   ├── seat_assignment.schema.json ← seat_assignment schema（S2 draft, v0.1）
+│   └── hand_ref.schema.json        ← hand_ref schema（S2 draft, v0.1）
 └── fixtures/                   ← schema に対するサンプル。contract test の oracle
-    └── player/
-        ├── canonical.json
-        ├── valid-minimal.json
-        ├── valid-rich.json
-        ├── invalid-empty-display-name.json
-        ├── invalid-missing-player-id.json
-        └── invalid-extra-field.json
+    ├── player/                 ← canonical / valid-* / invalid-*
+    ├── session/                ← canonical / valid-minimal / invalid-*（S2 draft）
+    ├── seat_assignment/        ← canonical / valid-minimal / invalid-*（S2 draft）
+    └── hand_ref/               ← canonical / valid-minimal / invalid-*（S2 draft）
 ```
 
 ## 運用ルール（要約）

@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+### Docs / Planning (Phase 0b — S2 contracts)
+
+- **S2 contract draft (session / seat_assignment / hand_ref)**: `docs/contracts/` に S2 の
+  契約草案を追加（**未 freeze**, schema version 0.x）。
+  - `session-seating.md`（モデル定義 / hand_id boundary / interface 草案 / freeze 状態・blockers）。
+  - `schemas/session.schema.json` / `seat_assignment.schema.json` / `hand_ref.schema.json` と
+    各 `fixtures/`（canonical / valid-minimal / invalid-*）。
+  - `repository-interfaces.md` に session/seating の interface 草案を追記、`error-shapes.md` に
+    S2 error code（`session_closed` / `seat_taken` / `unknown_player` / `invalid_seat` 等）を additive 追記。
+  - `tests/test_contracts.py` の `_MODELS` に session / seat_assignment / hand_ref を登録（schema↔fixture 整合）。
+- **ADR-0006** (Accepted): S2 session/seating contract boundary と hand_id の cross-app 参照。
+  `hand_id` は session 内連番 int 据え置き、cross-app は `(session_id, hand_id)` 複合キー、
+  参照単位は `hand_ref`（ISSUE-0004 の選択肢 A 採用）。
+- **ISSUE-0004** → **Resolved**（ADR-0006）。**ISSUE-0005**（Open）: S2 freeze の未確定事項
+  （`session_id` 採番方式 / seat_assignment 永続形 / seat change 表現）を登録。
+- **shared-ids.md / versioning-and-freeze.md / README.md / CLAUDE.md**: hand_id reconcile 済・
+  S2 draft 状況・freeze order #3 の状態を更新。
+- **decision-log.md**: ADR-0006 / ISSUE-0005 を登録、ISSUE-0004 を Resolved に更新。
+
 ### Added
 
 - **Player Registry (Phase S1)**: hand logger とは **別画面** の player 管理機能を追加。

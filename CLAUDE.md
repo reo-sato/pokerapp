@@ -26,7 +26,7 @@ pokerapp/
 │   ├── issues/                    ← issue / mismatch log
 │   ├── worklog/                   ← タスク単位の作業ログ
 │   ├── templates/                 ← adr / issue / worklog テンプレート
-│   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures, Phase 0a)
+│   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures; player freeze候補, session/seat/hand_ref は S2 draft)
 │   └── decision-log.md            ← ADR / 主要 issue の索引
 ├── sprc_v4.docx                   ← 仕様書（要件定義）
 ├── claude_v4.docx                 ← 旧仕様書（参考）
@@ -339,6 +339,8 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 2. **player schema**（S1, 凍結済に近い）: `player_id` + `display_name` + `created_at`、
    validation（空文字 / 前後空白 / 完全一致重複）。
 3. **session / seat_assignment / hand_ref schema**（S2）: seat_assignment は hand-based。
+   **draft 済（Phase 0b, ADR-0006）**: `hand_id` は int 据え置き、cross-app は `(session_id, hand_id)`
+   複合キー。freeze は ISSUE-0005（session_id 採番・永続形）決着後。
 4. **ledger_entry / point_ledger_entry schema**（S3）: cash+point 併用、order 明細。
 5. **session_settlement schema**（S4）: net due to store / paid-unpaid。
 6. **repository / service interface 契約**: 各 front-end が呼ぶ抽象 API（mock 差し替え可能な形）。
@@ -392,8 +394,12 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
   決定（`docs/contracts/`）。各 front-end が「契約だけ見て」mock を書ける状態。
   - **Phase 0a 済**: `docs/contracts/` bootstrap、shared IDs / player schema + fixtures、
     freeze/versioning/drift ルール、最小 contract test（`tests/test_contracts.py`）。
-  - **残（Phase 0b〜）**: `session_id` / `hand_id` の cross-app 形確定（ISSUE-0004）、
-    repository interface の具体定義、S2 以降の schema。
+  - **Phase 0b 済（S2 planning）**: `session` / `seat_assignment` / `hand_ref` の **draft** schema +
+    fixtures + `session-seating.md` + repository interface 草案を追加（version 0.x, 未 freeze）。
+    `hand_id` の cross-app 形を **ADR-0006 で確定**（`(session_id, hand_id)` 複合キー、int 据え置き、
+    ISSUE-0004 Resolved）。contract test の `_MODELS` に 3 model を登録。
+  - **残（freeze 前）**: `session_id` 最終採番方式・seat_assignment 永続形・seat change 表現
+    （**ISSUE-0005**）。S2 core 実装と schema `1.0` 昇格。
 
 ### Phase 1 — player registry core + desktop + mobile mock
 
@@ -411,13 +417,16 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 
 - **Goal**: `session` と hand-based `seat_assignment` / `hand_ref` を扱う。
 - **Prerequisites**: player 契約（S1）+ Phase 2 の session/seat schema 凍結。
+- **契約状況**: draft 整備済（Phase 0b, ADR-0006, `docs/contracts/session-seating.md`、3 schema v0.x、
+  fixtures）。freeze は **ISSUE-0005** 決着が前提（未 freeze）。
 - **Parallel tasks**:
   - WS0: session / seat_assignment / hand_ref schema 凍結（seat_assignment は hand-based）。
+    **draft 済**、freeze は ISSUE-0005 後。
   - WS1: session 管理・seat snapshot の repository/service。
   - WS2: desktop の session/seating 別画面。
   - WS3: mobile の session 画面（mock）。
-- **Blockers**: seat_assignment を hand-based にする設計確定（ADR）。hand logger 側 hand_id を
-  `hand_ref` から参照する契約。
+- **Blockers**: seat_assignment を hand-based にする設計確定（**ADR-0006 済**）。hand_id の cross-app 形
+  （**ADR-0006 で `(session_id, hand_id)` 複合キーに確定**）。残: `session_id` 採番・永続形（ISSUE-0005）。
 - **Done criteria**: session 開始/終了と hand 単位 seat snapshot が core で確定し、両 front-end が
   契約越しに表示できる。
 

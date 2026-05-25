@@ -41,5 +41,21 @@ front-end が UI 分岐できるよう、core / repository が返す error を *
 - 新しい error は **code を追加**（additive）。既存 code の意味変更・削除は breaking
   （`versioning-and-freeze.md` §2）。
 - 各 model の固有 error（session / ledger / settlement）は対応 phase の freeze 時に本表へ追記する。
-  例（planned）: `insufficient_points`（point 不足→cash 補完判断, S3）、
-  `entry_fee_requires_cash`（entry fee は cash only, S3）、`already_settled`（S4）。
+
+### session / seating error code（S2 draft, planned）
+
+`session-seating.md` の interface 草案が返す code（additive, 実装は S2 core）:
+
+| code | 意味 | 発生する操作（例） |
+|------|------|------------------|
+| `not_found` | 指定 `session_id` / hand が存在しない（既存 code を再利用） | get / assign / resolve |
+| `already_closed` | closed の session を再度 close / 変更しようとした | close session |
+| `session_closed` | closed の session に seat 割り当てしようとした | assign seat |
+| `seat_taken` | 同一 hand 内で席が既に埋まっている | assign seat |
+| `unknown_player` | 指定 `player_id` が registry に実在しない | assign seat |
+| `invalid_seat` | `seat_no` が範囲外（1..9 外） | assign seat |
+
+### ledger / settlement（planned, S3〜S4）
+
+例: `insufficient_points`（point 不足→cash 補完判断, S3）、
+`entry_fee_requires_cash`（entry fee は cash only, S3）、`already_settled`（S4）。

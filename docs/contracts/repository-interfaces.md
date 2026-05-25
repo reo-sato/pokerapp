@@ -51,11 +51,42 @@ interface PlayerRepository {
 mock は `fixtures/player/*.json` を初期データに読み込み、validation は core と同じ規則
 （`validation-rules.md`）を **再実装せず参照** する形にする（UI 側に business logic を複製しない）。
 
-## session 以降（planned）
+## session / seat_assignment / hand_ref interface（S2 draft, 未 freeze）
+
+詳細・モデル定義は `session-seating.md`（draft）/ ADR-0006。語彙非依存の契約:
+
+| 操作 | 入力 | 出力 | error |
+|------|------|------|-------|
+| create session | `label?` | `Session`（`session_id` 採番済, status=open） | — |
+| list sessions | — | `Session[]`（作成順） | — |
+| get session | `session_id` | `Session` | not-found |
+| close session | `session_id`, `ended_at` | `Session`（status=closed） | not-found / already-closed |
+| assign seat for hand | `session_id`, `hand_id`, `seat_no`, `player_id` | `SeatAssignment` | not-found / session-closed / seat-taken / unknown-player / invalid-seat |
+| list seat assignments by hand | `session_id`, `hand_id` | `SeatAssignment[]` | not-found |
+| resolve seating for hand_ref | `session_id`, `hand_id` | `HandRef`（snapshot 込み） | not-found |
+| current seating | `session_id` | `SeatAssignment[]`（最新 hand から導出） | not-found |
+
+Python 具象（planned, 一例。S2 core 実装時に確定）:
+
+```text
+create_session(label: str | None = None) -> Session
+list_sessions() -> list[Session]
+get_session(session_id: str) -> Session            # raises SessionNotFoundError
+close_session(session_id: str, ended_at: str) -> Session
+assign_seat(session_id: str, hand_id: int, seat_no: int, player_id: str) -> SeatAssignment
+list_seat_assignments(session_id: str, hand_id: int) -> list[SeatAssignment]
+resolve_hand_ref(session_id: str, hand_id: int) -> HandRef
+current_seating(session_id: str) -> list[SeatAssignment]   # 最新 hand から導出
+```
+
+- **業務ルールは core が source of truth**。front-end は結果と error code を表示するだけ。
+- mobile は同 interface の in-memory mock を `fixtures/{session,seat_assignment,hand_ref}/` で先行実装できる。
+- **未 freeze**: 採番方式・永続形・seat change 表現が ISSUE-0005 で確定するまで `1.0` に上げない。
+
+## ledger 以降（planned）
 
 | model | interface | phase |
 |-------|-----------|-------|
-| session / seat_assignment / hand_ref | session 開始・終了、hand 単位 seat snapshot 取得 | S2 |
 | ledger_entry / point_ledger_entry | entry 追加、中間集計（buy-in 合計 / 注文合計）、残高取得 | S3（ISSUE-0001 が gate） |
 | session_settlement | settlement 確定、paid/unpaid 操作 | S4 |
 

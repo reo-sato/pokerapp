@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/session.schema.json",
+  "title": "Session",
+  "version": "0.1",
+  "description": "S2 draft (未 freeze)。1 卓 1 回の運営単位。player membership は持たず seat_assignment (hand-based) から導出する。状態遷移・cross-field (closed なら ended_at 必須) は core が enforce。詳細は docs/contracts/session-seating.md / ADR-0006。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session_id", "started_at", "status"],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "opaque な非空文字列。UUID4 hex 推奨。最終採番方式は ISSUE-0005 で確定。"
+    },
+    "label": {
+      "type": "string",
+      "description": "任意の表示名 (例: 「金曜ナイト #3」)。識別には使わない (session_id が識別キー)。"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "session 開始時刻 (ISO 8601)。"
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "session 終了時刻 (ISO 8601)。open の間は absent。status=closed では存在すべき (cross-field, core が enforce)。"
+    },
+    "blinds": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "参考値。settlement の確定計算には使わない。",
+      "properties": {
+        "sb": {"type": "integer", "minimum": 0},
+        "bb": {"type": "integer", "minimum": 0}
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": ["open", "closed"],
+      "description": "open=進行中 / closed=終了 (session_settlement 確定対象)。状態遷移は core が enforce。"
+    }
+  }
+}
