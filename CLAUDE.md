@@ -50,6 +50,8 @@ pokerapp/
 │   ├── hand_reconstructor.py      ← HandReconstructor (evidence から hand 再構成 + online↔offline diff)
 │   ├── patch_proposal.py          ← 再構成 diff → 修正提案 (advisory, apply はしない)
 │   ├── patch_apply.py             ← whitelist field のみ手動 apply (永続化なし)
+│   ├── tournament_timer.py        ← BlindLevel / TournamentStructure / TournamentTimer
+│   ├── tournament_state.py        ← entries / busts / addons + 派生量 helper
 │   ├── player.py                  ← Player データクラス (S1)
 │   └── player_repository.py       ← PlayerRepository (player CRUD + JSON 永続化, S1)
 │
@@ -81,7 +83,8 @@ pokerapp/
 │   └── inspect_reconstruction.py  ← CLI: 再構成結果の一覧表示
 │
 ├── gui/
-│   ├── dashboard.py               ← GUIDashboard (hand logger 画面, 手動アクションパッド含む)
+│   ├── dashboard.py               ← GUIDashboard (hand logger 画面, 手動アクションパッド + timer 操作)
+│   ├── tournament_display.py      ← TournamentDisplayWindow (会場掲示用 CTkToplevel)
 │   ├── reconstruction_badges.py   ← 再構成結果 → バッジ投影 helper
 │   └── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
 │
@@ -223,6 +226,7 @@ hand logger とは **完全に別画面** の player 管理機能。session / le
 | 手動アクション入力（エンジン経路） | ✅ 実装済 | `ManualActionEvent` + `manual_queue`（ADR-0001/0002, Phase 5-I/J） |
 | pot / side-pot settlement | ✅ 実装済 | `core/settlement.py`, `core/hand_finalizer.py`（ハンド内分配。店精算は別概念） |
 | ベイズ推論 (M1–M3) / hand reconstruction | ✅ 実装済 | `integration/{observation_model,beam_search}.py`, `core/hand_reconstructor.py` |
+| トーナメントタイマー / 会場ディスプレイ | ✅ 実装済 | `core/tournament_timer.py`, `core/tournament_state.py`, `gui/tournament_display.py`（`add-tournament-timer` から統合） |
 | session ledger / point ledger / store settlement | ❌ 未実装 | **future scope（本ファイル下部参照）** |
 
 ---

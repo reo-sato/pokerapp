@@ -25,6 +25,14 @@ hand logger 内部は「実装済み」として CLAUDE.md に統合した。統
 
 ### Added
 
+- **トーナメントタイマー + 会場ディスプレイ** (`add-tournament-timer` から統合): `core/tournament_timer.py`
+  （`BlindLevel` / `TournamentStructure` / `TournamentTimer`, deadline ベース level 進行 +
+  `on_level_changed` callback）、`core/tournament_state.py`（entries/busts/addons + 派生量）、
+  `gui/tournament_display.py`（会場掲示用 `CTkToplevel`）。dashboard に timer 操作 +
+  entry/bust/addon 入力 + ディスプレイ起動を追加。起動時 `tournament_structure.json` があれば
+  timer 構築（不在/不正なら warning で OFF）。level 変化は `IntegrationThread.update_blinds`
+  （canonical, 次 hand から有効）。cherry-pick `4fb02da`（衝突は `gui/dashboard.py` 1 ファイルのみ、
+  patch-details 系と timer 系の別メソッド併存で解決）。timer 関連 48 件追加、全体 **759 passed**。
 - **Web ハンド履歴ビューア** (`new-session` から統合): `viewer/`（静的 HTML/CSS/JS,
   バックエンドなし）の 3 画面（session 一覧 / hand 一覧 / hand 詳細）。
   `output/json_writer.py` がハンド保存ごとに `logs/index.json` を再生成し、viewer が

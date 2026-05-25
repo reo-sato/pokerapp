@@ -1,0 +1,18 @@
+{
+  "name": "Default Tournament",
+  "starting_stack": 20000,
+  "addon_chips": 10000,
+  "late_reg_closes_after_level": 6,
+  "levels": [
+    {"level": 1, "sb": 100,  "bb": 200,  "ante": 0,   "duration_sec": 1200, "is_break": false},
+    {"level": 2, "sb": 200,  "bb": 400,  "ante": 0,   "duration_sec": 1200, "is_break": false},
+    {"level": 3, "sb": 300,  "bb": 600,  "ante": 75,  "duration_sec": 1200, "is_break": false},
+    {"label": "Break", "duration_sec": 600, "is_break": true},
+    {"level": 4, "sb": 400,  "bb": 800,  "ante": 100, "duration_sec": 1200, "is_break": false},
+    {"level": 5, "sb": 500,  "bb": 1000, "ante": 100, "duration_sec": 1200, "is_break": false},
+    {"level": 6, "sb": 600,  "bb": 1200, "ante": 200, "duration_sec": 1200, "is_break": false},
+    {"label": "Break", "duration_sec": 600, "is_break": true},
+    {"level": 7, "sb": 800,  "bb": 1600, "ante": 200, "duration_sec": 1200, "is_break": false},
+    {"level": 8, "sb": 1000, "bb": 2000, "ante": 300, "duration_sec": 1200, "is_break": false}
+  ]
+}

@@ -100,6 +100,12 @@ class GUIDashboard:
         self._stop_event = stop_event or threading.Event()
         self._rfid_receiver = rfid_receiver  # RFIDHTTPReceiver (status プロパティ用)
         self._integration_thread: Optional[object] = None  # set_integration_thread で接続
+        # Tournament timer + state + display window (set_tournament で注入、未設定なら全機能 OFF)
+        self._tournament_timer: Optional[object] = None
+        self._tournament_state: Optional[object] = None
+        self._tournament_structure: Optional[object] = None
+        self._tournament_display: Optional[object] = None
+        self._tournament_state_throttle: int = 0
         self._update_queue: queue.Queue["ActionRecord"] = queue.Queue()
         self._rfid_card_queue: queue.Queue = queue.Queue()
         # Phase 4-C2: hand 終局通知のスレッド安全な受け口。
@@ -401,6 +407,62 @@ class GUIDashboard:
                       command=self._cmd_update_blinds).grid(
             row=4, column=5, columnspan=2, padx=(2, 12), pady=(4, 10),
         )
+
+        # ── Row 5/6: Tournament timer (set_tournament で構築) ─────────────────
+        self._tournament_ctrl_parent = ctrl
+        self._tournament_widgets_built: bool = False
+
+    def _build_tournament_controls(self) -> None:
+        """``set_tournament`` で timer/state が注入された後に呼ぶ。"""
+        if self._tournament_widgets_built:
+            return
+        ctk = self._ctk
+        ctrl = self._tournament_ctrl_parent
+
+        # Row 5: timer
+        ctk.CTkLabel(ctrl, text="Tournament:").grid(row=5, column=0, padx=8, pady=(4, 4))
+        self._lbl_tournament_level = ctk.CTkLabel(ctrl, text="Lv— —/—", anchor="w")
+        self._lbl_tournament_level.grid(row=5, column=1, columnspan=2, padx=2, pady=(4, 4), sticky="w")
+        self._lbl_tournament_time = ctk.CTkLabel(
+            ctrl, text="00:00", font=("", 14, "bold"),
+        )
+        self._lbl_tournament_time.grid(row=5, column=3, padx=8, pady=(4, 4))
+
+        self._btn_timer_start = ctk.CTkButton(
+            ctrl, text="開始", width=70, command=self._cmd_timer_start_resume,
+        )
+        self._btn_timer_start.grid(row=5, column=4, padx=2, pady=(4, 4))
+        ctk.CTkButton(ctrl, text="一時停止", width=80,
+                      command=self._cmd_timer_pause).grid(row=5, column=5, padx=2, pady=(4, 4))
+        ctk.CTkButton(ctrl, text="次Lv", width=70, fg_color="#884444",
+                      command=self._cmd_timer_advance).grid(row=5, column=6, padx=2, pady=(4, 4))
+
+        # Row 6: entries / busts / addons + display window
+        ctk.CTkLabel(ctrl, text="Entry:").grid(row=6, column=0, padx=8, pady=(4, 10))
+        ctk.CTkButton(ctrl, text="+1", width=40,
+                      command=lambda: self._cmd_tournament_state_change("entry", +1)
+                      ).grid(row=6, column=1, padx=1, pady=(4, 10))
+        ctk.CTkButton(ctrl, text="-1", width=40,
+                      command=lambda: self._cmd_tournament_state_change("entry", -1)
+                      ).grid(row=6, column=2, padx=1, pady=(4, 10))
+
+        ctk.CTkLabel(ctrl, text="Bust:").grid(row=6, column=3, padx=(8, 2), pady=(4, 10))
+        ctk.CTkButton(ctrl, text="+1", width=40,
+                      command=lambda: self._cmd_tournament_state_change("bust", +1)
+                      ).grid(row=6, column=4, padx=1, pady=(4, 10))
+        ctk.CTkButton(ctrl, text="-1", width=40,
+                      command=lambda: self._cmd_tournament_state_change("bust", -1)
+                      ).grid(row=6, column=5, padx=1, pady=(4, 10))
+
+        ctk.CTkButton(ctrl, text="Addon+1", width=80,
+                      command=lambda: self._cmd_tournament_state_change("addon", +1)
+                      ).grid(row=6, column=6, padx=2, pady=(4, 10))
+
+        ctk.CTkButton(ctrl, text="ディスプレイ画面を開く", width=160,
+                      command=self._cmd_open_tournament_display
+                      ).grid(row=6, column=7, columnspan=3, padx=(8, 12), pady=(4, 10))
+
+        self._tournament_widgets_built = True
 
     # ――― コントロールコマンド ―――
 
@@ -874,6 +936,101 @@ class GUIDashboard:
                 tag="review",
             )
 
+    # ――― Tournament timer / state コマンド ―――
+
+    def _cmd_timer_start_resume(self) -> None:
+        timer = self._tournament_timer
+        if timer is None:
+            return
+        try:
+            if not timer.is_running() and not timer.is_paused():
+                timer.start()
+                self._append_log("Tournament timer 開始", tag="medium")
+            elif timer.is_paused():
+                timer.resume()
+                self._append_log("Tournament timer 再開", tag="medium")
+        except Exception as e:  # noqa: BLE001
+            self._append_log(f"⚠ Timer 開始失敗: {e}", tag="review")
+
+    def _cmd_timer_pause(self) -> None:
+        timer = self._tournament_timer
+        if timer is None:
+            return
+        try:
+            if timer.is_running():
+                timer.pause()
+                self._append_log("Tournament timer 一時停止", tag="medium")
+        except Exception as e:  # noqa: BLE001
+            self._append_log(f"⚠ Timer 一時停止失敗: {e}", tag="review")
+
+    def _cmd_timer_advance(self) -> None:
+        timer = self._tournament_timer
+        if timer is None:
+            return
+        # 誤クリック防止: confirmation
+        try:
+            from tkinter import messagebox
+            if not messagebox.askyesno(
+                "確認", "次の Level へ即時遷移しますか？",
+            ):
+                return
+        except Exception:  # noqa: BLE001
+            pass  # messagebox 不可なら confirmation スキップ (テスト環境想定)
+        try:
+            timer.advance_level()
+            self._append_log(
+                f"Tournament: Lv{timer.current_level().label} へ進行",
+                tag="medium",
+            )
+            self._refresh_tournament_state_labels()
+            if self._tournament_display is not None:
+                self._tournament_display.update_state(
+                    timer, self._tournament_state, self._tournament_structure,
+                )
+        except Exception as e:  # noqa: BLE001
+            self._append_log(f"⚠ Timer 次Lv 失敗: {e}", tag="review")
+
+    def _cmd_tournament_state_change(self, kind: str, delta: int) -> None:
+        st = self._tournament_state
+        if st is None:
+            return
+        try:
+            if kind == "entry":
+                st.add_entry(delta)
+            elif kind == "bust":
+                st.add_bust(delta)
+            elif kind == "addon":
+                st.add_addon(delta)
+            else:
+                return
+        except Exception as e:  # noqa: BLE001
+            self._append_log(f"⚠ Tournament state 更新失敗: {e}", tag="review")
+            return
+        self._refresh_tournament_state_labels()
+        if self._tournament_display is not None and self._tournament_timer is not None:
+            self._tournament_display.update_state(
+                self._tournament_timer, st, self._tournament_structure,
+            )
+
+    def _cmd_open_tournament_display(self) -> None:
+        if self._tournament_timer is None:
+            self._append_log("⚠ Tournament 未設定です。", tag="review")
+            return
+        if (self._tournament_display is not None
+                and not getattr(self._tournament_display, "is_closed", True)):
+            return  # 既に開いている
+        try:
+            from gui.tournament_display import TournamentDisplayWindow
+            self._tournament_display = TournamentDisplayWindow(self._root, self._ctk)
+            # 初回フル描画
+            self._tournament_display.update_state(
+                self._tournament_timer, self._tournament_state, self._tournament_structure,
+            )
+            self._tournament_display.tick_time(self._tournament_timer)
+            self._append_log("Tournament ディスプレイ画面を開きました", tag="medium")
+        except Exception as e:  # noqa: BLE001
+            self._append_log(f"⚠ ディスプレイ起動失敗: {e}", tag="review")
+
     def _cmd_rebuy(self) -> None:
         try:
             seat = int(self._rebuy_seat_var.get())
@@ -921,6 +1078,29 @@ class GUIDashboard:
             pass
         # ゲーム状態のヘッダーを常に最新化
         self._refresh_header()
+        # Tournament timer (set_tournament で注入されているときのみ)
+        if self._tournament_timer is not None:
+            try:
+                self._tournament_timer.tick()
+                self._refresh_tournament_time_labels()
+                if self._tournament_display is not None and not getattr(
+                    self._tournament_display, "is_closed", False
+                ):
+                    self._tournament_display.tick_time(self._tournament_timer)
+                self._tournament_state_throttle += 1
+                if self._tournament_state_throttle >= 10:
+                    self._tournament_state_throttle = 0
+                    self._refresh_tournament_state_labels()
+                    if self._tournament_display is not None and not getattr(
+                        self._tournament_display, "is_closed", False
+                    ):
+                        self._tournament_display.update_state(
+                            self._tournament_timer,
+                            self._tournament_state,
+                            self._tournament_structure,
+                        )
+            except Exception:  # noqa: BLE001
+                pass
         if not self._stop_event.is_set():
             self._root.after(100, self._poll_updates)
 
@@ -1242,6 +1422,86 @@ class GUIDashboard:
     def set_integration_thread(self, thread: object) -> None:
         """IntegrationThread を後付けで接続する (BTN補正/BettingState表示用)。"""
         self._integration_thread = thread
+
+    def set_tournament(
+        self,
+        structure: object,
+        timer: object,
+        state: object,
+    ) -> None:
+        """Tournament timer / state を後付けで接続する。
+
+        ``main.py`` から ``tournament_structure.json`` が読めた場合のみ呼ばれる。
+        timer の ``on_level_changed`` は既に IntegrationThread.update_blinds に
+        紐付け済 (main.py 側で設定) だが、ここで GUI 側のラベル更新を上乗せ
+        するため、薄いラッパーで再ラップする。
+        """
+        self._tournament_structure = structure
+        self._tournament_timer = timer
+        self._tournament_state = state
+
+        # GUI 側の追加副作用 (ラベル + display 同期) を on_level_changed に
+        # 後付けで wrap する。
+        orig_cb = getattr(timer, "_on_level_changed", None)
+
+        def _wrapped(level: object) -> None:
+            if orig_cb is not None:
+                try:
+                    orig_cb(level)
+                except Exception as e:  # noqa: BLE001
+                    self._append_log(f"⚠ Level change callback 失敗: {e}", tag="review")
+            self._append_log(
+                f"Tournament: Level 切替 → {getattr(level, 'label', '?')} "
+                f"(SB={getattr(level, 'sb', '?')}, BB={getattr(level, 'bb', '?')})",
+                tag="medium",
+            )
+            self._refresh_tournament_state_labels()
+            if self._tournament_display is not None and not getattr(
+                self._tournament_display, "is_closed", False
+            ):
+                self._tournament_display.update_state(
+                    timer, self._tournament_state, self._tournament_structure,
+                )
+
+        try:
+            timer._on_level_changed = _wrapped  # noqa: SLF001
+        except Exception:  # noqa: BLE001
+            pass
+
+        # GUI のコントロール widget を構築
+        try:
+            self._build_tournament_controls()
+            self._refresh_tournament_time_labels()
+            self._refresh_tournament_state_labels()
+        except Exception as e:  # noqa: BLE001
+            self._append_log(f"⚠ Tournament UI 構築失敗: {e}", tag="review")
+
+    def _refresh_tournament_time_labels(self) -> None:
+        timer = self._tournament_timer
+        if timer is None:
+            return
+        try:
+            from gui.tournament_display import format_mmss
+            self._lbl_tournament_time.configure(
+                text=format_mmss(timer.remaining_sec()),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _refresh_tournament_state_labels(self) -> None:
+        timer = self._tournament_timer
+        if timer is None:
+            return
+        try:
+            from gui.tournament_display import format_blinds
+            cur = timer.current_level()
+            if cur.is_break:
+                text = f"BREAK ({cur.label})"
+            else:
+                text = f"Lv{cur.level} {format_blinds(cur.sb, cur.bb, cur.ante)}"
+            self._lbl_tournament_level.configure(text=text)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _sync_manual_seat(self, actor_seat: int) -> None:
         """手動入力の席ドロップダウンを actor_seat に追従させる。

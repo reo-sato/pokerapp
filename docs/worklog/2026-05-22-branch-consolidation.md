@@ -65,6 +65,19 @@ registry-ledger future scope）を核とし、各ブランチの固有価値を 
 - **テスト**: `pytest tests/ --ignore=tests/test_vision.py` → **711 passed**（bayesian 682 +
   registry/contracts/viewer 29）。docs 相互参照すべて解決を確認。
 
+### Step 3 — tournament timer 統合（from `add-tournament-timer`） ✅ 完了
+
+- **方法**: `git cherry-pick -n 4fb02da`。timer コミットは Phase 5-F 上の単一コミットで、main
+  （bayesian 5-K）は 5-F を祖先に持つため大半が auto-merge。**衝突は `gui/dashboard.py` の 1 ブロックのみ**
+  （HEAD=patch-details 系 / 4fb02da=timer 操作系の別メソッド）→ 両方を残して解決。
+  `main.py`（timer 自動ロード）/ `tests/test_gui.py`（timer GUI ロジックテスト）は auto-merge 成功。
+- **新規ファイル**: `core/tournament_timer.py`, `core/tournament_state.py`, `gui/tournament_display.py`,
+  `tournament_structure.json`, `tests/test_tournament_timer.py`, `tests/test_tournament_state.py`。
+- **テスト**: timer 関連 113 passed（timer/state/GUI ロジック）、全体 **759 passed**（回帰なし）。
+- **GUI 視覚確認**: この環境は tkinter（`_tkinter.so`）非搭載のため customtkinter（dashboard /
+  tournament_display / player_registry）の**実描画は不可**。GUI ロジックは mocked customtkinter で検証済。
+  実描画確認はローカル環境（`python main.py` / `--players`）が必要。web viewer は静的のため別途確認可能。
+
 ### 採用しなかった / 破棄
 
 - **manual-action-pad（5-Ia GUI パッド）**: 手動入力はエンジン経路（bayesian 5-I〜）を採用したため不採用。
@@ -88,9 +101,11 @@ registry-ledger future scope）を核とし、各ブランチの固有価値を 
 
 ## Remaining Gaps / Out-of-Scope
 
-- [ ] tournament timer の統合（`add-tournament-timer` の独立モジュール。次の候補）。
+- [x] tournament timer の統合（Step 3 完了, cherry-pick 4fb02da）。
 - [ ] enhance-voice の固有 betting_state を取り込むか再評価（現状は系統A 実装で代替済み）。
-- [ ] viewer / GUI の手動 UI 動作確認（headless のため未実施）。
+- [ ] customtkinter GUI（dashboard / tournament_display / player_registry）の実描画確認 →
+      本環境は tkinter 非搭載のため不可。ローカル環境での確認が必要。
+- [ ] web viewer の視覚確認（静的のため headless でも headless browser で確認可能）。
 - [ ] 不要ブランチの削除（環境が ref 削除不可。ユーザー環境で実施）。
 - [ ] 既定ブランチを main に切替（MCP に設定変更ツールなし。ユーザー環境で実施）。
 

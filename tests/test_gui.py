@@ -1457,3 +1457,237 @@ class TestPhase5FEvictedHandDegrade:
         assert "source=unknown" in last_text
         # mismatch なし (= patch_proposal が無いので)
         assert "blind_mismatch" not in last_text
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tournament timer + display integration (新規)
+# ═══════════════════════════════════════════════════════════════════════════
+
+from core.tournament_state import TournamentState
+from core.tournament_timer import (
+    BlindLevel,
+    TournamentStructure,
+    TournamentTimer,
+)
+
+
+def _make_tournament_structure(with_break: bool = True) -> TournamentStructure:
+    levels = [
+        BlindLevel(level=1, label="Level 1", sb=100, bb=200,
+                   ante=0, duration_sec=60, is_break=False),
+        BlindLevel(level=2, label="Level 2", sb=200, bb=400,
+                   ante=0, duration_sec=60, is_break=False),
+    ]
+    if with_break:
+        levels.append(BlindLevel(
+            level=None, label="Break", sb=None, bb=None,
+            ante=0, duration_sec=30, is_break=True,
+        ))
+        levels.append(BlindLevel(
+            level=3, label="Level 3", sb=300, bb=600,
+            ante=0, duration_sec=60, is_break=False,
+        ))
+    return TournamentStructure(
+        name="t", starting_stack=20000, addon_chips=10000,
+        late_reg_closes_after_level=2, levels=levels,
+    )
+
+
+def _attach_tournament(dash, with_break: bool = True):
+    structure = _make_tournament_structure(with_break)
+    state = TournamentState()
+    # 進行制御用の fake clock を持つ timer
+    holder = {"t": 0.0}
+    def clock():
+        return holder["t"]
+
+    update_blinds_calls: list = []
+    def on_level_changed(lv):
+        update_blinds_calls.append((lv.sb, lv.bb))
+
+    timer = TournamentTimer(structure, on_level_changed=on_level_changed, clock=clock)
+    dash.set_tournament(structure, timer, state)
+    return timer, state, holder, update_blinds_calls
+
+
+class TestTournamentTimerGUIIntegration:
+    def test_set_tournament_builds_widgets(self, tmp_path: Path):
+        dash, *_ = _make_mock_dashboard(tmp_path)
+        _attach_tournament(dash)
+        assert dash._tournament_widgets_built
+        assert dash._tournament_timer is not None
+        assert dash._tournament_state is not None
+        assert dash._tournament_structure is not None
+
+    def test_cmd_timer_start_starts_timer(self, tmp_path: Path):
+        dash, *_ = _make_mock_dashboard(tmp_path)
+        timer, _, _, _ = _attach_tournament(dash)
+        assert not timer.is_running()
+        dash._cmd_timer_start_resume()
+        assert timer.is_running()
+
+    def test_cmd_timer_pause_then_resume(self, tmp_path: Path):
+        dash, *_ = _make_mock_dashboard(tmp_path)
+        timer, _, _, _ = _attach_tournament(dash)
+        dash._cmd_timer_start_resume()
+        dash._cmd_timer_pause()
+        assert timer.is_paused()
+        dash._cmd_timer_start_resume()
+        assert timer.is_running()
+
+    def test_cmd_timer_advance_yes_calls_advance(self, tmp_path: Path):
+        dash, *_ = _make_mock_dashboard(tmp_path)
+        timer, _, _, calls = _attach_tournament(dash, with_break=False)
+        dash._cmd_timer_start_resume()
+        tk = MagicMock()
+        tk.messagebox.askyesno.return_value = True
+        with patch.dict("sys.modules",
+                        {"tkinter": tk, "tkinter.messagebox": tk.messagebox}):
+            dash._cmd_timer_advance()
+        assert timer.current_level().level == 2
+        # update_blinds callback も発火 (wrapper 経由)
+        assert calls == [(200, 400)]
+
+    def test_cmd_timer_advance_no_is_noop(self, tmp_path: Path):
+        dash, *_ = _make_mock_dashboard(tmp_path)
+        timer, _, _, calls = _attach_tournament(dash, with_break=False)
+        dash._cmd_timer_start_resume()
+        tk = MagicMock()
+        tk.messagebox.askyesno.return_value = False
+        with patch.dict("sys.modules",
+                        {"tkinter": tk, "tkinter.messagebox": tk.messagebox}):
+            dash._cmd_timer_advance()
+        assert timer.current_level().level == 1
+        assert calls == []
+
+    def test_entry_bust_addon_buttons(self, tmp_path: Path):
+        dash, *_ = _make_mock_dashboard(tmp_path)
+        _, state, _, _ = _attach_tournament(dash)
+        dash._cmd_tournament_state_change("entry", +1)
+        dash._cmd_tournament_state_change("entry", +1)
+        dash._cmd_tournament_state_change("bust", +1)
+        dash._cmd_tournament_state_change("addon", +1)
+        assert state.entries == 2
+        assert state.busts == 1
+        assert state.addons == 1
+        assert state.players_remaining == 1
+
+    def test_entry_minus_does_not_go_below_zero(self, tmp_path: Path):
+        dash, *_ = _make_mock_dashboard(tmp_path)
+        _, state, _, _ = _attach_tournament(dash)
+        dash._cmd_tournament_state_change("entry", -5)
+        assert state.entries == 0
+
+    def test_level_change_callback_invokes_update_blinds(self, tmp_path: Path):
+        """timer tick で次 level に進むと on_level_changed が発火し、
+        wrapper 経由で外部 callback (update_blinds 経路) が呼ばれる。"""
+        dash, *_ = _make_mock_dashboard(tmp_path)
+        timer, _, clock, calls = _attach_tournament(dash, with_break=False)
+        timer.start()
+        clock["t"] = 60.0
+        timer.tick()
+        assert calls == [(200, 400)]
+
+    def test_break_level_does_not_call_update_blinds(self, tmp_path: Path):
+        dash, *_ = _make_mock_dashboard(tmp_path)
+        timer, _, clock, calls = _attach_tournament(dash, with_break=True)
+        timer.start()
+        # L1 -> L2 fires once (sb=200/bb=400)
+        clock["t"] = 60.0; timer.tick()
+        # L2 -> Break (no fire)
+        clock["t"] = 120.0; timer.tick()
+        assert calls == [(200, 400)]
+        assert timer.current_level().is_break
+        # Break -> L3 fires again
+        clock["t"] = 150.0; timer.tick()
+        assert calls == [(200, 400), (300, 600)]
+
+
+class TestTournamentDisplayWindow:
+    """TournamentDisplayWindow の描画ロジック。CTkToplevel は MagicMock。"""
+
+    def _make_display(self):
+        from gui.tournament_display import TournamentDisplayWindow
+        ctk_mock = MagicMock()
+        # 各 CTkLabel 呼び出しごとに別 mock を返して個別ラベルを区別できるようにする
+        ctk_mock.CTkLabel.side_effect = lambda *a, **k: MagicMock()
+        ctk_mock.CTkFrame.side_effect = lambda *a, **k: MagicMock()
+        toplevel = MagicMock()
+        ctk_mock.CTkToplevel.return_value = toplevel
+        parent = MagicMock()
+        display = TournamentDisplayWindow(parent, ctk_mock)
+        return display, ctk_mock, toplevel
+
+    def test_tick_time_updates_countdown(self):
+        display, _, _ = self._make_display()
+        holder = {"t": 0.0}
+        timer = TournamentTimer(_make_tournament_structure(False),
+                                clock=lambda: holder["t"])
+        timer.start()
+        holder["t"] = 30.0
+        display.tick_time(timer)
+        # countdown ラベルに 00:30 が設定された
+        last_text = display._lbl_countdown.configure.call_args[1]["text"]
+        assert last_text == "00:30"
+
+    def test_update_state_renders_normal_level(self):
+        display, _, _ = self._make_display()
+        timer = TournamentTimer(_make_tournament_structure(True),
+                                clock=lambda: 0.0)
+        state = TournamentState(entries=64, busts=23, addons=7)
+        display.update_state(timer, state, timer.structure)
+
+        # level / blinds / entries / remaining / addons の各ラベルが描画
+        lvl_text = display._lbl_level.configure.call_args[1]["text"]
+        assert "LEVEL 1" in lvl_text
+        blinds_text = display._lbl_blinds.configure.call_args[1]["text"]
+        assert "100" in blinds_text and "200" in blinds_text
+        entries_text = display._lbl_entries.configure.call_args[1]["text"]
+        assert "64" in entries_text
+        remaining_text = display._lbl_remaining.configure.call_args[1]["text"]
+        assert "41" in remaining_text  # 64 - 23
+        addons_text = display._lbl_addons.configure.call_args[1]["text"]
+        assert "7" in addons_text
+
+    def test_update_state_break_shows_previous_blinds(self):
+        display, _, _ = self._make_display()
+        holder = {"t": 0.0}
+        timer = TournamentTimer(_make_tournament_structure(True),
+                                clock=lambda: holder["t"])
+        timer.start()
+        # advance L1 -> L2 -> Break
+        holder["t"] = 60.0; timer.tick()
+        holder["t"] = 120.0; timer.tick()
+        assert timer.current_level().is_break
+
+        state = TournamentState()
+        display.update_state(timer, state, timer.structure)
+        lvl_text = display._lbl_level.configure.call_args[1]["text"]
+        assert lvl_text == "BREAK"
+        blinds_text = display._lbl_blinds.configure.call_args[1]["text"]
+        # 直前 (L2) の blinds 200/400 が併記される
+        assert "200" in blinds_text and "400" in blinds_text
+        assert "remain" in blinds_text.lower()
+
+    def test_update_state_diff_render_skips_unchanged(self):
+        display, _, _ = self._make_display()
+        timer = TournamentTimer(_make_tournament_structure(False),
+                                clock=lambda: 0.0)
+        state = TournamentState(entries=10)
+        display.update_state(timer, state, timer.structure)
+        call_count_1 = display._lbl_level.configure.call_count
+        # 2 回目同じ state で呼んでも level ラベルは再 configure されない (cache hit)
+        display.update_state(timer, state, timer.structure)
+        assert display._lbl_level.configure.call_count == call_count_1
+
+    def test_open_display_calls_update_state_initially(self, tmp_path: Path):
+        dash, *_ = _make_mock_dashboard(tmp_path)
+        _attach_tournament(dash)
+        with patch("gui.tournament_display.TournamentDisplayWindow") as Win:
+            inst = MagicMock()
+            inst.is_closed = False
+            Win.return_value = inst
+            dash._cmd_open_tournament_display()
+            assert dash._tournament_display is inst
+            inst.update_state.assert_called_once()
+            inst.tick_time.assert_called_once()
