@@ -45,33 +45,64 @@ registry-ledger future scope）を核とし、各ブランチの固有価値を 
 
 ### Step 2 以降 — 未着手（要・方針確定）
 
-系統A の hand logger エンジン群（button rotation / Bayesian 推論 / reconstruction / pot settlement /
-manual action pad / tournament timer）は main の hand logger コアと構造的に大きく分岐（+20k 行規模、
-高衝突）。統合方式（main へ merge / bayesian を base に再ベースライン / 低衝突分のみ先行）と、
-手動入力の設計分岐（GUI パッド vs エンジン経由）の決定が必要。ユーザー確認の上で逐次実施する。
+### Step 2 — 系統A hand logger エンジン uplift（bayesian 再ベースライン） ✅ 完了
 
-## Expected vs Implemented（Step 1）
+ユーザー決定: (1) **bayesian-action-estimation を base に再ベースライン**、(2) 設計計画の核は
+**main（contract-first / registry-ledger）**、(3) 手動入力は **bayesian のエンジン経路（5-I〜5-K）**。
 
-- Expected: viewer を低衝突で main に追加し、テスト緑を維持。
-- Implemented: 期待どおり。cherry-pick で衝突なし、155 passed 維持。
+- **方法（非破壊）**: 作業ブランチ `integrate/bayesian-base` を bayesian tip から作成 → base 単体
+  テスト緑（682 passed, pokerkit 導入後）を確認 → main 由来の追加分を層状に適用:
+  - 新規ファイル（衝突なし）: `core/player*.py`, `gui/player_registry.py`, `docs/contracts/**`,
+    `viewer/**`, `tests/test_{player_repository,player_registry_gui,contracts}.py`。
+  - 共有ファイルのマージ: `output/json_writer.py`（viewer の `_refresh_index`）、`main.py`
+    （`--players` + `run_player_registry()`）、`requirements.txt`（`jsonschema`）、`.gitignore`
+    （`players.json`）。
+  - docs 統合: ADR は bayesian 0001/0002 + main 0003/0004/0005 を合成、issue は main 由来を
+    **0003-0006 に renumber**（bayesian 0001/0002 温存）し全クロス参照を更新、CLAUDE.md /
+    CHANGELOG / decision-log をマージ。CLAUDE.md は main の計画を核に hand logger 内部を実装済み反映。
+- **公開**: 公開済み main の force-push を避け、`git merge -s ours origin/main` で旧 main(7fb2ad3) を
+  親に取り込み、main を **fast-forward**（merge commit `f201ca1`）。非破壊・旧 main 復元可。
+- **テスト**: `pytest tests/ --ignore=tests/test_vision.py` → **711 passed**（bayesian 682 +
+  registry/contracts/viewer 29）。docs 相互参照すべて解決を確認。
+
+### 採用しなかった / 破棄
+
+- **manual-action-pad（5-Ia GUI パッド）**: 手動入力はエンジン経路（bayesian 5-I〜）を採用したため不採用。
+- **docs-traceability**: bayesian の subset + プレースホルダ docs（main の実 docs に劣後）→ 破棄。
+- **Dlhng**: Flask/別アーキ全面再実装で main 路線と非互換 → 破棄。
+- **enhance-voice**: 固有 betting_state はあるが系統A trunk に概ね先取られ実質劣後 → 保留（未統合）。
+- **tournament timer**: 未統合（独立モジュール、別途 cherry-pick 可能。次の候補）。
+
+## Expected vs Implemented
+
+- Step 1（viewer）: Expected=低衝突追加でテスト緑維持。Implemented=cherry-pick 衝突なし、155 passed。
+- Step 2（再ベースライン）: Expected=bayesian base に main 追加分を載せテスト緑。Implemented=
+  期待どおり 711 passed、非破壊 forward merge で main 反映。
 
 ## Mismatches Found During Testing
 
-- なし（Step 1）。`_refresh_index` 追加で既存 `test_logger.py` 等に回帰なしを確認。
+- Step 1: なし。
+- Step 2: bayesian base 単体で 15 件失敗 → 原因は `pokerkit` 未インストール（requirements 記載済）。
+  導入後 682 passed。issue renumber 後に docs 相互参照 1 件（`docs/contracts/shared-ids.md` の
+  hand-id 参照が旧番号 0004 のまま）を検出 → contracts 配下も remap し解決。
 
 ## Remaining Gaps / Out-of-Scope
 
-- [ ] Step 2: 系統A hand logger エンジン uplift（統合方式の決定が前提）。
-- [ ] manual 入力の設計分岐（manual-pad GUI vs bayesian エンジン経由）の選択。
-- [ ] tournament timer の統合（系統A base 前提）。
-- [ ] 破棄予定: docs-traceability（dominated）、Dlhng（別アーキ obsolete）。enhance-voice は要再評価。
-- [ ] viewer の手動 UI 動作確認（headless のため未実施）。
+- [ ] tournament timer の統合（`add-tournament-timer` の独立モジュール。次の候補）。
+- [ ] enhance-voice の固有 betting_state を取り込むか再評価（現状は系統A 実装で代替済み）。
+- [ ] viewer / GUI の手動 UI 動作確認（headless のため未実施）。
+- [ ] 不要ブランチの削除（環境が ref 削除不可。ユーザー環境で実施）。
+- [ ] 既定ブランチを main に切替（MCP に設定変更ツールなし。ユーザー環境で実施）。
 
 ## Related Commits
 
-- `874cf79` — feat(viewer): add web-based hand history viewer（cherry-pick of `8314e45`）
+- `874cf79` — feat(viewer): web viewer（cherry-pick of `8314e45`、Step 1）
+- `063bdca` — wip(integrate): layer registry/contracts/viewer onto bayesian base（Step 2）
+- `9972b30` — docs(integrate): merge docs-as-code（Step 2）
+- `f201ca1` — merge: consolidate branches into main（非破壊 forward merge）
 
 ## Related ADRs / Issues
 
-- 既存 ADR-0004 / 0005（contract-first / parallel development）を統合方針の土台とする。
-- 統合方式の決定が architectural に重ければ新規 ADR を起こす。
+- ADR-0001/0002（手動入力エンジン経路 / strict reject）= 採用した手動入力方式の根拠。
+- ADR-0003/0004/0005（domain 拡張 / contract-first / contracts layout）= 設計計画の核。
+- 旧 main(7fb2ad3) は履歴に残存し復元可能。
