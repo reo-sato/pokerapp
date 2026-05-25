@@ -67,6 +67,8 @@ pokerapp/
 │   ├── dashboard.py               ← GUIDashboard (hand logger 画面, customtkinter)
 │   └── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
 │
+├── viewer/                        ← Web ハンド履歴ビューア (静的 HTML/CSS/JS, バックエンドなし)
+│
 ├── tests/                         ← pytest テストスイート
 └── vision/                        ← レガシー（未使用）
 ```
@@ -162,6 +164,7 @@ hand logger とは **完全に別画面** の player 管理機能。session / le
 | PHH エクスポート | ✅ 実装済 | `output/phh_exporter.py` |
 | GUI ダッシュボード | 🔨 部分実装 | `gui/dashboard.py` |
 | **player registry (S1)** | ✅ 実装済 | `core/player.py`, `core/player_repository.py`, `gui/player_registry.py` |
+| **Web ハンド履歴ビューア** | ✅ 実装済 | `viewer/`（静的、`new-session` から統合）。`output/json_writer.py` が `logs/index.json` を生成 |
 | ベッティングステート / actor 推定 | ❌ 未実装 | future phase |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | future phase |
@@ -493,6 +496,7 @@ python main.py                               # GUI モード (hand logger)
 python main.py --players                     # Player Registry 画面 (S1, 別画面)
 pytest tests/ -v --ignore=tests/test_vision.py
 python main.py --export-phh logs/session_xxx.json
+( cd viewer && python -m http.server 8765 )  # Web ハンド履歴ビューア (logs/ を参照)
 ```
 
 ---

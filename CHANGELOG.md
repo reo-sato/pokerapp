@@ -8,6 +8,11 @@
 
 ### Added
 
+- **Web ハンド履歴ビューア (branch consolidation)**: `new-session` ブランチから web viewer を統合。
+  `viewer/`（静的 HTML/CSS/JS, バックエンドなし）の 3 画面（session 一覧 / hand 一覧 /
+  hand 詳細）。`output/json_writer.py` がハンド保存ごとに `logs/index.json` を再生成し、
+  viewer がバックエンドなしで session を列挙できる。`cd viewer && python -m http.server 8765` で起動。
+  cherry-pick `8314e45`（衝突なし・追加のみ、テスト 155 passed 維持）。
 - **Player Registry (Phase S1)**: hand logger とは **別画面** の player 管理機能を追加。
   - `python main.py --players` で Player Registry 画面を起動（hand logger とは別起動）。
   - player の新規作成 / 一覧表示 / display_name リネーム。属性は `player_id`（UUID hex,
