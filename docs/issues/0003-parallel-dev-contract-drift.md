@@ -6,7 +6,7 @@
 
 ## Status
 
-Open
+Open（Phase 0a で部分緩和。残りは Phase 0b〜各 phase の freeze で対処）
 
 ## Severity / Priority
 
@@ -52,23 +52,34 @@ WS3 (mobile mock) が並行実装に入る。契約が単一の source（`docs/c
 
 ## Fix
 
-未対応（Phase 0 で対処）。想定する対策:
+**Phase 0a で部分緩和済**（contracts bootstrap）。実施:
 
-- `docs/contracts/` を新設し、schema とサンプル fixtures を単一 source として置く。
-- 契約変更は ADR / decision-log を伴う明示的プロセスにし、「凍結 = ADR Accepted + fixtures 確定」
-  と定義する。
-- core / front-end の双方に **同じ fixtures に対する契約テスト** を持たせ、drift を CI で検出。
-- mobile mock は契約 fixtures のみを読み、独自データを持たない。
+- `docs/contracts/` を新設し、schema・fixtures・shared IDs・freeze/versioning ルールを単一
+  source として置いた（ADR-0005）。
+- 「凍結 = schema commit + fixtures 揃い + contract test 通過 + 承認 ADR Accepted」と定義した
+  （`docs/contracts/versioning-and-freeze.md`）。
+- `tests/test_contracts.py` で schema↔fixture（valid 通過 / invalid 違反）と code↔contract
+  （core 生成 Player が schema 適合）を検証する最小 drift detection を導入した。
+- breaking change は新 ADR / issue + version bump を要求するルールを明文化した。
+
+**残（Phase 0b〜）**:
+
+- core / front-end の **双方** が同じ fixtures を読む構造（mobile mock の実装は WS3 着手時）。
+- CI に `jsonschema` を含め contract test を必須化する。
 - ISSUE-0001 を S3 着手の gate にする（残高契約凍結まで ledger WS を本実装に入れない）。
+- schema 変更 PR での front-end stub 影響確認の運用徹底。
 
 ## Regression Test
 
-未実装。Phase 0 で契約テスト（fixtures に対する schema/validation 検証）を導入予定。
-導入後は契約変更が全 front-end のテストに波及するようにする。
+- `tests/test_contracts.py`（Phase 0a 追加）: schema 妥当性 / fixtures 整合 / code↔contract。
+  `jsonschema` 未導入環境では skip、導入環境では必ず実行。
+- 将来: 各 model（session / ledger / settlement）の schema・fixtures 追加時に同 test を拡張する。
 
 ## Affected Files
 
-現時点ではなし（計画）。Phase 0 で `docs/contracts/` と契約テストを新設予定。
+- `docs/contracts/**`（新設, Phase 0a）
+- `tests/test_contracts.py`（新設, Phase 0a）
+- `requirements.txt`（`jsonschema` 追加）
 
 ## Related Worklog
 
@@ -76,6 +87,7 @@ WS3 (mobile mock) が並行実装に入る。契約が単一の source（`docs/c
 
 ## Related ADRs
 
+- `docs/adr/0005-contracts-repository-layout-and-freeze-workflow.md`（Phase 0a の緩和実体）
 - `docs/adr/0004-contract-first-parallel-development-shared-ids-and-separate-frontends.md`
 - `docs/adr/0003-expand-domain-from-hand-logging-to-session-ledger-and-store-settlement.md`
 

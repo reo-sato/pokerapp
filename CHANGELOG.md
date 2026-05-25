@@ -19,6 +19,25 @@
 
 ### Docs / Planning
 
+- **Contracts bootstrap (Phase 0a)**: `docs/contracts/` を新設し、contract-first 並行開発の
+  単一 source を凍結。
+  - `README.md` / `shared-ids.md` / `versioning-and-freeze.md` / `repository-interfaces.md` /
+    `error-shapes.md` / `validation-rules.md`。
+  - shared ID 契約: `player_id`（UUID4 hex, S1 確定）/ `session_id`（opaque string, S2 確定）/
+    `hand_id`（現状 int, cross-app は (session_id, hand_id) 複合, S2 reconcile）。
+  - `schemas/player.schema.json` (v1.0) + `schemas/shared-ids.schema.json` と、
+    `fixtures/player/`（canonical / valid / invalid）。
+  - freeze 定義・versioning（additive vs breaking）・drift detection の最小方針を文書化。
+  - `tests/test_contracts.py`（schema 妥当性 / fixtures 整合 / code↔contract）を追加。
+    `requirements.txt` に `jsonschema>=4.0.0` を追加。
+- **ADR-0005** (Accepted): contracts repository layout & freeze workflow（ADR-0004 の具体化）。
+- **Issue 0004** (Open): `hand_id` が int（hand logger）と cross-app 文字列契約で不整合。
+  S2 の `hand_ref` で reconcile。
+- **Issue 0003**: Phase 0a で部分緩和（contracts bootstrap + 最小 contract test）。
+- **decision-log.md**: ADR-0005 / ISSUE-0004 を登録。
+- **CLAUDE.md**: ディレクトリ構成に `docs/contracts/` を追加、Parallel development plan に
+  契約 source 参照と Phase 0a 完了状況を追記。
+
 - **Parallel development plan**: `CLAUDE.md` に `# Parallel development plan` 節を追加。
   4 workstream（WS0 contract / WS1 core / WS2 desktop / WS3 mobile）の依存関係、
   parallelizable / blocker、contract freeze order、mobile が mock で先行できる範囲、

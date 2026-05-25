@@ -26,6 +26,7 @@ pokerapp/
 │   ├── issues/                    ← issue / mismatch log
 │   ├── worklog/                   ← タスク単位の作業ログ
 │   ├── templates/                 ← adr / issue / worklog テンプレート
+│   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures, Phase 0a)
 │   └── decision-log.md            ← ADR / 主要 issue の索引
 ├── sprc_v4.docx                   ← 仕様書（要件定義）
 ├── claude_v4.docx                 ← 旧仕様書（参考）
@@ -291,6 +292,11 @@ parallelizable なタスクと逐次でしかできないタスクを分離す�
 を原則とする。`player_id` / `session_id` / `hand_id` は全 workstream 共有の安定キーであり、
 これらと各モデルの schema を最初に凍結する（§ Cross-app boundary も参照）。
 
+契約の **単一 source は `docs/contracts/`**（Phase 0a で bootstrap 済）。shared ID 契約・
+schema・fixtures・repository interface・error 形・validation・freeze/versioning ルールはすべて
+そこに置く。詳細・凍結手順は `docs/contracts/README.md` と
+`docs/contracts/versioning-and-freeze.md` を参照（ADR-0005）。
+
 > 注: 現時点で実装済なのは hand logger core と S1 player registry のみ。本節の S2 以降・
 > mobile・sync はすべて **planned / future scope**。production code の大規模実装はまだ開始しない。
 
@@ -325,8 +331,11 @@ parallelizable なタスクと逐次でしかできないタスクを分離す�
 
 ## 先に凍結すべき contract（freeze order）
 
+> 置き場と凍結手順は `docs/contracts/`（Phase 0a で bootstrap 済）。以下は順序の要約。
+
 1. **共有 ID 契約**（最優先・全 phase 共通）: `player_id` / `session_id` / `hand_id` は
-   アプリ内採番・文字列・不変。採番責任の所在を WS0 で確定する。
+   アプリ内採番・文字列・不変。採番責任の所在を WS0 で確定する
+   （`docs/contracts/shared-ids.md`。`player_id` は S1 で確定、`session_id` / `hand_id` は S2）。
 2. **player schema**（S1, 凍結済に近い）: `player_id` + `display_name` + `created_at`、
    validation（空文字 / 前後空白 / 完全一致重複）。
 3. **session / seat_assignment / hand_ref schema**（S2）: seat_assignment は hand-based。
@@ -376,11 +385,15 @@ parallelizable なタスクと逐次でしかできないタスクを分離す�
 - **Prerequisites**: なし（最上流）。
 - **Parallel tasks**:
   - WS0: 共有 ID 契約（player_id / session_id / hand_id）と error 形・schema 表現方法
-    （`docs/contracts/` + サンプル fixtures）を定義。
-  - WS0: repository / service interface の契約テンプレートを定義。
+    （`docs/contracts/` + サンプル fixtures）を定義。**Phase 0a (bootstrap) で実施済**。
+  - WS0: repository / service interface の契約テンプレートを定義。**Phase 0a で player を基準例に実施済**。
 - **Blockers**: なし。これ自体が他 phase の blocker。
-- **Done criteria**: 共有 ID 契約が ADR 化され、schema/fixtures の置き場所と更新手順が決定。
-  各 front-end が「契約だけ見て」mock を書ける状態。
+- **Done criteria**: 共有 ID 契約が ADR 化され（ADR-0005）、schema/fixtures の置き場所と更新手順が
+  決定（`docs/contracts/`）。各 front-end が「契約だけ見て」mock を書ける状態。
+  - **Phase 0a 済**: `docs/contracts/` bootstrap、shared IDs / player schema + fixtures、
+    freeze/versioning/drift ルール、最小 contract test（`tests/test_contracts.py`）。
+  - **残（Phase 0b〜）**: `session_id` / `hand_id` の cross-app 形確定（ISSUE-0004）、
+    repository interface の具体定義、S2 以降の schema。
 
 ### Phase 1 — player registry core + desktop + mobile mock
 
