@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "Poker Registry",
+    "slug": "pokerapp-mobile",
+    "version": "0.0.1",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#0f1419"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "local.pokerapp.mobile"
+    },
+    "android": {
+      "package": "local.pokerapp.mobile"
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}

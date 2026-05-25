@@ -68,8 +68,22 @@ pokerapp/
 │   └── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
 │
 ├── tests/                         ← pytest テストスイート
-└── vision/                        ← レガシー（未使用）
+├── vision/                        ← レガシー（未使用）
+└── mobile/                        ← WS3 mobile front-end scaffold (Expo + TS, mock repo prototype)
+    ├── App.tsx / index.ts         ← navigation + RepositoryProvider, Expo root
+    ├── src/models/                ← Player 型 / player_id 採番（contract 由来）
+    ├── src/repositories/          ← PlayerRepository interface + mock + error 形
+    ├── src/validation/            ← display_name 規則（contract mirror）
+    ├── src/fixtures/              ← contract fixtures から copy した seed
+    ├── src/context/               ← RepositoryProvider（DI 境界）
+    ├── src/screens/               ← PlayerList / AddPlayer / RenamePlayer
+    ├── src/components/, theme/    ← 部品 / design tokens
+    └── __tests__/                 ← mock repository / validation テスト (jest)
 ```
+
+> `mobile/` は hand logger の置き換えではなく、shared contract に従う **別 front-end**
+> （WS3）。現時点は **mock repository ベースの prototype**（real backend / sync なし）。
+> 詳細は `mobile/README.md`。
 
 ---
 
@@ -162,6 +176,7 @@ hand logger とは **完全に別画面** の player 管理機能。session / le
 | PHH エクスポート | ✅ 実装済 | `output/phh_exporter.py` |
 | GUI ダッシュボード | 🔨 部分実装 | `gui/dashboard.py` |
 | **player registry (S1)** | ✅ 実装済 | `core/player.py`, `core/player_repository.py`, `gui/player_registry.py` |
+| **mobile scaffold (WS3, player registry)** | 🔨 prototype | `mobile/`（Expo + TS, mock repository ベース。real backend / sync なし） |
 | ベッティングステート / actor 推定 | ❌ 未実装 | future phase |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | future phase |
@@ -402,10 +417,11 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 - **Parallel tasks**:
   - WS1: `core/player.py` + `core/player_repository.py`（**実装済 S1**）。
   - WS2: `gui/player_registry.py` 別画面（**実装済 S1**）。
-  - WS3: mobile player registry screen skeleton + mock repository（**planned**、WS1 を待たない）。
+  - WS3: mobile player registry screen skeleton + mock repository（**prototype 実装済**、`mobile/`）。
 - **Blockers**: player schema / repository interface 契約（Phase 0 / S1 で凍結済）。
 - **Done criteria**: core/desktop は S1 完了済。mobile は mock repo で list/add/rename 画面が
-  動く skeleton ができ、後で実 repo に差し替え可能な境界を持つ。
+  動く skeleton（`mobile/`）ができ、`PlayerRepository` interface 越しに後で実 repo へ差し替え
+  可能な境界を持つ（達成。real backend / codegen / sync は ISSUE-0005 で追跡）。
 
 ### Phase 2 — session and seating
 

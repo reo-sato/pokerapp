@@ -8,6 +8,23 @@
 
 ### Added
 
+- **Mobile scaffold — Player Registry (WS3, prototype)**: iOS / Android 向け別 front-end の
+  たたき台を `mobile/`（Expo + TypeScript）に追加。**hand logger の置き換えではなく**、
+  shared contract（`docs/contracts/`）に従う consumer のひとつ。
+  - 画面: Player list（空状態あり / fixtures 初期表示）/ Add player / Rename player の
+    最小ナビゲーション（React Navigation native-stack）。
+  - UI は `PlayerRepository` interface のみに依存し、in-memory **mock repository** を
+    注入で差し替える（`RepositoryProvider`）。将来 API repository へ無改修移行する境界。
+  - mock の seed は contract fixtures（`docs/contracts/fixtures/player/`）から copy。
+    `player_id` は contract 形式（`^[0-9a-f]{32}$`）で採番。
+  - validation（空文字 / 前後空白のみ / 完全一致重複、case/width は畳まない）と error
+    `code`（`not_found` / `empty_display_name` / `duplicate_display_name` /
+    `validation_error`）は `validation-rules.md` / `error-shapes.md` を mirror。
+    UI は再検査せず repository の error を表示するのみ。
+  - tests: `mobile/__tests__/`（mock repository + validation, jest 17 件）。
+  - **現時点は mock-repository prototype**。real backend / sync / auth / session・ledger・
+    settlement 画面・delete/merge は scope 外（ISSUE-0005）。
+  - 実装: `mobile/`（`src/{models,repositories,validation,fixtures,context,navigation,screens,components,theme}`）。
 - **Player Registry (Phase S1)**: hand logger とは **別画面** の player 管理機能を追加。
   - `python main.py --players` で Player Registry 画面を起動（hand logger とは別起動）。
   - player の新規作成 / 一覧表示 / display_name リネーム。属性は `player_id`（UUID hex,

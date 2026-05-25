@@ -42,3 +42,4 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0002 | display_name の uniqueness 仕様の将来拡張が未確定      | Open   | 2026-05-22 | player registry (S1)     | `docs/issues/0002-display-name-uniqueness-scope.md`        | —                    |
 | ISSUE-0003 | 並行開発の contract drift / 凍結タイミング risk       | Open   | 2026-05-22 | planning (WS0–WS3)       | `docs/issues/0003-parallel-dev-contract-drift.md`          | Phase 0a で部分緩和  |
 | ISSUE-0004 | hand_id が int と cross-app 文字列契約で不整合        | Open   | 2026-05-22 | contracts / shared-ids   | `docs/issues/0004-hand-id-int-vs-cross-app-string.md`      | S2 (hand_ref) で確定 |
+| ISSUE-0005 | mobile scaffold の contract drift / backend / sync   | Open   | 2026-05-25 | mobile (WS3) / contracts | `docs/issues/0005-mobile-scaffold-contract-drift-and-backend.md` | S5 / codegen 方針    |
