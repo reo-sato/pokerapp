@@ -37,3 +37,4 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ID         | Title                                                  | Status | Date       | Area                     | File                                                       | Related Fix / Commit |
 |------------|--------------------------------------------------------|--------|------------|--------------------------|------------------------------------------------------------|----------------------|
 | ISSUE-0001 | point ledger の残高計算と source of truth が未確定     | Open   | 2026-05-22 | spec / future-scope (S3) | `docs/issues/0001-point-balance-source-of-truth.md`        | —                    |
+| ISSUE-0002 | display_name の uniqueness 仕様の将来拡張が未確定      | Open   | 2026-05-22 | player registry (S1)     | `docs/issues/0002-display-name-uniqueness-scope.md`        | —                    |

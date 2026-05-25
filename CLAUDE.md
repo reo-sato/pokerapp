@@ -29,9 +29,10 @@ pokerapp/
 │   └── decision-log.md            ← ADR / 主要 issue の索引
 ├── sprc_v4.docx                   ← 仕様書（要件定義）
 ├── claude_v4.docx                 ← 旧仕様書（参考）
-├── main.py                        ← エントリーポイント (--cli / GUI)
+├── main.py                        ← エントリーポイント (--cli / GUI / --players)
 ├── config_default.json            ← デフォルト設定テンプレート
 ├── rfid_cards.json                ← tag_id → card_code マスタ
+├── players.json                   ← player registry 永続ファイル (.gitignore, S1)
 ├── requirements.txt
 │
 ├── core/
@@ -40,7 +41,9 @@ pokerapp/
 │   ├── event_queue.py             ← EventQueue (スレッド間共有キュー)
 │   ├── events.py                  ← AudioEvent, CameraEvent, RFIDEvent データクラス
 │   ├── game_state.py              ← GameStateManager (スタック/ポット/ターン管理)
-│   └── hand_log.py                ← ActionRecord, HandSummary データクラス
+│   ├── hand_log.py                ← ActionRecord, HandSummary データクラス
+│   ├── player.py                  ← Player データクラス (S1)
+│   └── player_repository.py       ← PlayerRepository (player CRUD + JSON 永続化, S1)
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -60,7 +63,8 @@ pokerapp/
 │   └── phh_exporter.py            ← PHHExporter (PHH 形式エクスポート)
 │
 ├── gui/
-│   └── dashboard.py               ← GUIDashboard (customtkinter)
+│   ├── dashboard.py               ← GUIDashboard (hand logger 画面, customtkinter)
+│   └── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
 │
 ├── tests/                         ← pytest テストスイート
 └── vision/                        ← レガシー（未使用）
@@ -107,6 +111,42 @@ pokerapp/
 
 ---
 
+## Player Registry（S1, 実装済）
+
+hand logger とは **完全に別画面** の player 管理機能。session / ledger / settlement が
+参照する `player_id` を発行する registry の最小実装（CLAUDE.md § Future Scope の S1 を昇格）。
+
+### スコープ（現時点）
+
+- player の **新規作成 / 一覧表示 / display_name のリネーム** ができる。
+- player 属性は `player_id`（UUID hex, 永続・安定）+ `display_name` + `created_at` のみ。
+- 永続化はプロジェクト直下 `players.json`（`{"players": [...]}`、アトミックリネーム書き込み）。
+  アプリ再起動を跨いで `player_id` が安定する。
+- **hand logger とは未接続**。registry は `GameStateManager` / `JsonWriter` 等に依存しない。
+
+### 構成
+
+| 要素 | ファイル | 役割 |
+|------|---------|------|
+| ドメイン | `core/player.py` | `Player` データクラス（to_dict / from_dict） |
+| リポジトリ | `core/player_repository.py` | `PlayerRepository`: create / list / rename + JSON 永続化 + validation |
+| 画面 | `gui/player_registry.py` | `PlayerRegistryWindow`（customtkinter, dashboard とは独立） |
+| 起動 | `main.py --players` | hand logger とは別に registry 画面を開く |
+
+### Validation（`PlayerRepository` が source of truth）
+
+- 空文字・前後空白のみの `display_name` は不可（`EmptyDisplayNameError`）。
+- 完全一致（前後空白除去後）の `display_name` 重複は不可（`DuplicateDisplayNameError`）。
+- rename 時も同じ validation を適用。自分自身との一致は許容（no-op rename 可）。
+- 大文字小文字・全半角の厳密同一視は **今回 scope 外**（将来検討、`docs/issues/0002` 参照）。
+
+### Out of scope（S1 時点）
+
+- player 削除 / merge、`display_name` 以外の属性、hand logger との自動接続。
+- session / seat_assignment / point ledger / settlement / cross-app sync は後続 Phase。
+
+---
+
 ## 実装状況（現時点）
 
 | 機能 | 状態 | 備考 |
@@ -120,11 +160,12 @@ pokerapp/
 | JSON ログ出力 | ✅ 実装済 | `output/json_writer.py` |
 | PHH エクスポート | ✅ 実装済 | `output/phh_exporter.py` |
 | GUI ダッシュボード | 🔨 部分実装 | `gui/dashboard.py` |
+| **player registry (S1)** | ✅ 実装済 | `core/player.py`, `core/player_repository.py`, `gui/player_registry.py` |
 | ベッティングステート / actor 推定 | ❌ 未実装 | future phase |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | future phase |
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
-| player registry / session ledger / store settlement | ❌ 未実装 | **future scope（本ファイル下部参照）** |
+| session ledger / point ledger / store settlement | ❌ 未実装 | **future scope（本ファイル下部参照）** |
 
 ---
 
@@ -141,7 +182,7 @@ pokerapp/
 | レイヤ | 目的 | 状態 |
 |--------|------|------|
 | hand logger | ハンドごとのアクション履歴を JSON/PHH に出力 | ✅ 実装済 |
-| **player registry** | アプリ内で player を新規作成・管理 | 🔲 planned (S1) |
+| **player registry** | アプリ内で player を新規作成・管理 | ✅ 実装済 (S1, § Player Registry 参照) |
 | **session ledger** | session 単位の buy-in / rebuy / add-on / order / adjustment を ledger entry として記録 | 🔲 planned (S3) |
 | **point ledger** | prize point の grant / spend を記録、buy-in 等に充当可能 | 🔲 planned (S3) |
 | **session settlement** | session 終了時に player ごとの「店への net 支払額」と paid/unpaid を確定 | 🔲 planned (S4) |
@@ -159,6 +200,8 @@ hand logger と ledger app は **将来別画面・別アプリ** になるこ�
 - アプリ内で新規作成する
 - 属性: `player_id` (内部 ID), `display_name`
 - 現時点ではそれ以外の属性は持たない（連絡先・実名等は scope 外）
+- **S1 で実装済**（§ Player Registry 参照）。本節は session / ledger / settlement から
+  見た契約上の定義として残す。
 
 ### `session`
 
@@ -227,8 +270,8 @@ hand logger と ledger app は **将来別アプリ化** することを前提�
 
 | Phase | スコープ | 主な成果物 |
 |-------|---------|-----------|
-| **S0** | spec expansion（本タスク） | CLAUDE.md / ADR-0003 / issues / worklog |
-| **S1** | player registry | `player` データモデル、CRUD、display_name のみ |
+| **S0** | spec expansion | CLAUDE.md / ADR-0003 / issues / worklog |
+| **S1** | player registry ✅ 実装済 | `player` データモデル、CRUD、display_name のみ、別画面 |
 | **S2** | session + hand-based seating | `session`, `seat_assignment`, `hand_ref`、hand 開始ごとのスナップショット |
 | **S3** | ledger entries + point ledger | `ledger_entry`, `point_ledger_entry`、cash+point 併用ルール |
 | **S4** | session settlement + paid/unpaid | `session_settlement`、net due to store、paid/unpaid 操作 |
@@ -264,8 +307,9 @@ hand logger と ledger app は **将来別アプリ化** することを前提�
 
 ```bash
 pip install -r requirements.txt
-python main.py --cli                         # CLI モード
-python main.py                               # GUI モード
+python main.py --cli                         # CLI モード (hand logger)
+python main.py                               # GUI モード (hand logger)
+python main.py --players                     # Player Registry 画面 (S1, 別画面)
 pytest tests/ -v --ignore=tests/test_vision.py
 python main.py --export-phh logs/session_xxx.json
 ```
