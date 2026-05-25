@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Poker Hand Viewer</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main id="app" aria-live="polite">
+    <div class="loading">Loading…</div>
+  </main>
+  <footer class="app-footer">
+    <span class="muted">read-only viewer · reads <code>../logs/*.json</code></span>
+    <span class="muted" id="logs-root">logs root: ../logs/</span>
+  </footer>
+
+  <script src="js/app.js"></script>
+  <script src="js/sessions.js"></script>
+  <script src="js/session.js"></script>
+  <script src="js/hand.js"></script>
+  <script>
+    window.addEventListener("DOMContentLoaded", () => {
+      Viewer.start();
+    });
+  </script>
+</body>
+</html>
