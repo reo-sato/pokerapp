@@ -85,13 +85,16 @@ cross-app 参照）は ADR-0006 で確定済み。
 
 ## freeze 状態 / 未確定事項 / blockers
 
-- **本 doc + 3 schema + fixtures + ADR-0006 は draft（未 freeze）**。schema version は `0.x`。
-- **freeze の blocker**:
-  - **ISSUE-0005**: `session_id` 最終採番方式（timestamp 文字列維持 vs UUID 統一）、
-    seat_assignment の永続ストア形（hand logger JSON 内 vs 別ファイル）、mid-session seat change の
-    確定表現。これらが決まるまで session/seat schema を `1.0` に昇格しない。
-  - S2 core 実装（`core/session*.py` 等）が未着手のため `code↔contract` test はまだ無い
-    （player と同等の drift test は実装時に追加）。
-- **据え置き（決定済・S2 では変更しない）**: `hand_id: int`（ADR-0006）。
-- **out of scope（S2 contract 段階）**: ledger / point / settlement（S3〜S4）、sync / API（S5）、
-  desktop/mobile UI 実装、production code。
+- **本 doc + 3 schema + fixtures + ADR-0006 は draft（schema version `0.x`, 未 freeze）**。
+  ただし **S2 core は実装済**（`core/session.py` / `core/session_repository.py`, ADR-0007）。
+  core は draft schema に対して `code↔contract` test 緑
+  （`tests/test_session_repository.py::test_core_session_matches_contract`）。
+- **core 実装で確定（ADR-0007）**: `session_id` は session レイヤが UUID4 hex で採番（hand logger
+  の timestamp session_id とは別 namespace）。seat_assignment は専用ストア `sessions.json` に
+  hand 単位で入れ子保持（hand logger JSON は不変）。
+- **freeze の残 blocker（ISSUE-0005）**: hand logger の hand ↔ session レイヤ hand の
+  reconciliation（`HandSummary` への player_id 接続）、mid-session seat change の運用 UI 要件。
+  これらが決まるまで schema を `1.0` に昇格しない。
+- **据え置き（決定済・S2 では変更しない）**: `hand_id: int`（ADR-0006）。seat_no 範囲 1..9。
+- **out of scope（S2 core 段階）**: ledger / point / settlement（S3〜S4）、sync / API（S5）、
+  desktop/mobile UI 実装、hand logger との自動接続 / migration。

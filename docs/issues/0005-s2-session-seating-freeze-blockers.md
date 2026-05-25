@@ -6,7 +6,25 @@
 
 ## Status
 
-Open
+Open（S2 core 実装で #1 / #2 を core について確定。hand logger 接続側と schema `1.0` freeze は未了）
+
+## Update (2026-05-25, S2 core 実装)
+
+S2 core 実装（`core/session.py` / `core/session_repository.py`, ADR-0007）で以下を確定:
+
+- **#1 `session_id` 採番** → **確定**: session レイヤが UUID4 hex で採番（player_id と同形式）。
+  hand logger の timestamp session_id は据え置き、両者は別 namespace（reconciliation は将来課題）。
+- **#2 `seat_assignment` 永続ストア形** → **確定（core 側）**: hand logger の session JSON では
+  なく専用ストア `sessions.json` に hand 単位で入れ子保持（`HandSummary` は不変）。hand logger 側
+  への player_id 接続は **未着手のまま Open**。
+- **#3 mid-session seat change** → ADR-0006 のとおり「最新 hand との差分で導出」を採用し、専用
+  move イベントは持たない。明示的 seat-change 表現の要否は運用 UI 要件次第で Open。
+- **#4 `seat_no` 範囲** → 1..9 を core で enforce（`InvalidSeatError`）。テーブル最大席数の最終
+  確定は運用要件待ち。
+
+**残（schema `1.0` freeze の blocker）**: hand logger hand ↔ session レイヤ hand の
+reconciliation（同一 hand の意味的接続）、mid-session seat change の運用 UI 要件。これらが
+決着するまで session/seat/hand_ref schema を `1.0` に昇格しない。
 
 ## Severity / Priority
 
@@ -78,10 +96,12 @@ S2 は hand logger（単体運用・seat は名前ベース）に registry 由�
 ## Related Worklog
 
 - `docs/worklog/2026-05-25-s2-contracts-planning.md`
+- `docs/worklog/2026-05-25-s2-session-seating-core.md`（S2 core 実装）
 
 ## Related ADRs
 
 - `docs/adr/0006-s2-session-seating-contract-and-hand-id-cross-app-reference.md`
+- `docs/adr/0007-s2-session-layer-persistence-and-id-issuance.md`（#1/#2 を core で確定）
 
 ## Related Commits
 

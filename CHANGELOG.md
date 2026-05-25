@@ -6,6 +6,32 @@
 
 ## [Unreleased]
 
+### Added (Phase S2 — session + hand-based seating core)
+
+- **Session & Seating core (S2)**: hand logger とは独立した session レイヤと hand-based
+  seating の core 最小実装を追加（contract draft に対する実装。schema は未 freeze のまま）。
+  - `core/session.py`: `Session` / `SeatAssignment` / `HandRef` データクラス。
+  - `core/session_repository.py`: `SessionRepository`。create / list / get / close session、
+    `assign_seat`（hand 単位の seat→player 割り当て）、`list_seat_assignments` /
+    `resolve_seat_map_for_hand` / `resolve_hand_ref` / `current_seating`。
+  - validation / errors: unknown session（`not_found`）/ already_closed / session_closed /
+    seat_taken / **player_already_seated**（新 code）/ unknown_player / invalid_seat。
+    `docs/contracts/error-shapes.md` の session セクションと 1:1。
+  - 永続化: プロジェクト直下 `sessions.json`（アトミックリネーム、`.gitignore` 追加）。
+    seat_assignment は session 配下に hand 単位で入れ子保持（将来 ledger を additive 拡張しやすい配置）。
+  - 識別子: `session_id` は session レイヤが UUID4 hex で採番（hand logger の timestamp
+    session_id とは別 namespace）。`hand_id` は int 据え置き（ADR-0006）。
+  - **hand logger とは未接続**（`HandSummary` への player_id 接続 / reconciliation は S2 scope 外）。
+- **ADR-0007** (Accepted): S2 session layer の永続形と `session_id` 採番方式の決定
+  （独立採番 + 専用ストア = decoupled）。ISSUE-0005 #1 / #2 を core について確定。
+- **ISSUE-0005** 更新: `session_id` 採番（#1）と seat_assignment 永続形（#2）を core について
+  Resolved。hand logger 接続・seat change UI 要件は Open のまま（schema `1.0` freeze の残 blocker）。
+- **Tests**: `tests/test_session_repository.py` を追加（session CRUD / persistence roundtrip /
+  assign 成否 / 各 reject / resolve / code↔contract 整合）。
+- **Docs**: `error-shapes.md`（session error を実装済に更新 + `player_already_seated` 追記）/
+  `repository-interfaces.md` / `session-seating.md`（core 実装済を反映）/ `CLAUDE.md`
+  （§ Session & Seating, 実装状況表, Phase 2 / freeze order）を更新。
+
 ### Docs / Planning (Phase 0b — S2 contracts)
 
 - **S2 contract draft (session / seat_assignment / hand_ref)**: `docs/contracts/` に S2 の

@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 config.json
 players.json
+sessions.json

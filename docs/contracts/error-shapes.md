@@ -42,18 +42,20 @@ front-end が UI 分岐できるよう、core / repository が返す error を *
   （`versioning-and-freeze.md` §2）。
 - 各 model の固有 error（session / ledger / settlement）は対応 phase の freeze 時に本表へ追記する。
 
-### session / seating error code（S2 draft, planned）
+### session / seating error code（S2 core 実装済）
 
-`session-seating.md` の interface 草案が返す code（additive, 実装は S2 core）:
+`core/session_repository.py` が返す code（additive）。Python 例外階層は
+`SessionError`（基底）← 各 code に 1:1 対応する subclass:
 
-| code | 意味 | 発生する操作（例） |
-|------|------|------------------|
-| `not_found` | 指定 `session_id` / hand が存在しない（既存 code を再利用） | get / assign / resolve |
-| `already_closed` | closed の session を再度 close / 変更しようとした | close session |
-| `session_closed` | closed の session に seat 割り当てしようとした | assign seat |
-| `seat_taken` | 同一 hand 内で席が既に埋まっている | assign seat |
-| `unknown_player` | 指定 `player_id` が registry に実在しない | assign seat |
-| `invalid_seat` | `seat_no` が範囲外（1..9 外） | assign seat |
+| code | 意味 | 発生する操作（例） | Python 例外（core） |
+|------|------|------------------|---------------------|
+| `not_found` | 指定 `session_id` / hand が存在しない（既存 code を再利用） | get / assign / resolve | `SessionNotFoundError` |
+| `already_closed` | closed の session を再度 close / 変更しようとした | close session | `SessionAlreadyClosedError` |
+| `session_closed` | closed の session に seat 割り当てしようとした | assign seat | `SessionClosedError` |
+| `seat_taken` | 同一 hand 内で席が既に埋まっている | assign seat | `SeatTakenError` |
+| `player_already_seated` | 同一 hand 内で player が既に別の席に着いている | assign seat | `PlayerAlreadySeatedError` |
+| `unknown_player` | 指定 `player_id` が registry に実在しない | assign seat | `UnknownPlayerError` |
+| `invalid_seat` | `seat_no` が範囲外（1..9 外）/ `hand_id` が不正 | assign seat | `InvalidSeatError` |
 
 ### ledger / settlement（planned, S3〜S4）
 

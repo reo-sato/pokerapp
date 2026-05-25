@@ -26,7 +26,7 @@ pokerapp/
 │   ├── issues/                    ← issue / mismatch log
 │   ├── worklog/                   ← タスク単位の作業ログ
 │   ├── templates/                 ← adr / issue / worklog テンプレート
-│   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures; player freeze候補, session/seat/hand_ref は S2 draft)
+│   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures; player freeze候補, session/seat/hand_ref は S2 core 実装済・schema draft)
 │   └── decision-log.md            ← ADR / 主要 issue の索引
 ├── sprc_v4.docx                   ← 仕様書（要件定義）
 ├── claude_v4.docx                 ← 旧仕様書（参考）
@@ -34,6 +34,7 @@ pokerapp/
 ├── config_default.json            ← デフォルト設定テンプレート
 ├── rfid_cards.json                ← tag_id → card_code マスタ
 ├── players.json                   ← player registry 永続ファイル (.gitignore, S1)
+├── sessions.json                  ← session + hand-based seating 永続ファイル (.gitignore, S2)
 ├── requirements.txt
 │
 ├── core/
@@ -44,7 +45,9 @@ pokerapp/
 │   ├── game_state.py              ← GameStateManager (スタック/ポット/ターン管理)
 │   ├── hand_log.py                ← ActionRecord, HandSummary データクラス
 │   ├── player.py                  ← Player データクラス (S1)
-│   └── player_repository.py       ← PlayerRepository (player CRUD + JSON 永続化, S1)
+│   ├── player_repository.py       ← PlayerRepository (player CRUD + JSON 永続化, S1)
+│   ├── session.py                 ← Session / SeatAssignment / HandRef データクラス (S2)
+│   └── session_repository.py      ← SessionRepository (session + hand-based seating + JSON 永続化, S2)
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -148,6 +151,53 @@ hand logger とは **完全に別画面** の player 管理機能。session / le
 
 ---
 
+## Session & Seating（S2, core 実装済）
+
+player registry の上に重なる **session レイヤ + hand-based seating** の core 最小実装
+（CLAUDE.md § Future Scope の S2 を昇格）。契約は `docs/contracts/session-seating.md`（draft）/
+ADR-0006、実装上の判断は ADR-0007。**hand logger とは未接続**（独立した別ストア・別 namespace）。
+
+### スコープ（現時点）
+
+- `session` の **create / list / get / close** ができる。
+- hand 単位で **seat→player 割り当て**（`assign_seat`）を記録し、`(session_id, hand_id, seat_no)`
+  の競合・同一 hand での player 重複を防ぐ。
+- あるハンドの **seat map / `hand_ref` スナップショット** を解決でき、最新 hand から
+  **現在の seating を導出** できる。
+- 永続化はプロジェクト直下 `sessions.json`（アトミックリネーム書き込み、`.gitignore`）。
+
+### 構成
+
+| 要素 | ファイル | 役割 |
+|------|---------|------|
+| ドメイン | `core/session.py` | `Session` / `SeatAssignment` / `HandRef` データクラス（to_dict / from_dict） |
+| リポジトリ | `core/session_repository.py` | `SessionRepository`: session CRUD + hand-based seating + validation + JSON 永続化 |
+
+### Validation / errors（`SessionRepository` が source of truth）
+
+- unknown session → `SessionNotFoundError`（`not_found`）。
+- closed session への close → `SessionAlreadyClosedError`（`already_closed`）、seat 割り当て →
+  `SessionClosedError`（`session_closed`）。
+- 同一 hand で seat 重複 → `SeatTakenError`（`seat_taken`）、player 重複 →
+  `PlayerAlreadySeatedError`（`player_already_seated`）。
+- unknown player（registry 非実在）→ `UnknownPlayerError`（`unknown_player`）。
+- `seat_no` 範囲外（1..9 外）/ 不正 `hand_id` → `InvalidSeatError`（`invalid_seat`）。
+- error code は `docs/contracts/error-shapes.md` の session セクションと 1:1 対応。
+
+### 識別子・永続形（ADR-0007）
+
+- `session_id` は session レイヤが UUID4 hex で採番（hand logger の timestamp session_id とは別系統）。
+- seat_assignment は `sessions.json` 配下に hand 単位で入れ子保持（hand logger JSON は不変）。
+- mid-session seat change は専用イベントを持たず、最新 hand との差分として導出（ADR-0006）。
+
+### Out of scope（S2 core 時点）
+
+- hand logger（`HandSummary`）との自動接続 / reconciliation、player_id 突き合わせ。
+- ledger / point / settlement（S3〜S4）、desktop / mobile UI、API / sync（S5）。
+- session / seat の削除・merge、advanced seat history UI、schema `1.0` freeze（ISSUE-0005 残項目）。
+
+---
+
 ## 実装状況（現時点）
 
 | 機能 | 状態 | 備考 |
@@ -162,6 +212,7 @@ hand logger とは **完全に別画面** の player 管理機能。session / le
 | PHH エクスポート | ✅ 実装済 | `output/phh_exporter.py` |
 | GUI ダッシュボード | 🔨 部分実装 | `gui/dashboard.py` |
 | **player registry (S1)** | ✅ 実装済 | `core/player.py`, `core/player_repository.py`, `gui/player_registry.py` |
+| **session + hand-based seating (S2) core** | ✅ 実装済 | `core/session.py`, `core/session_repository.py`（hand logger とは未接続, § Session & Seating 参照） |
 | ベッティングステート / actor 推定 | ❌ 未実装 | future phase |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | future phase |
@@ -184,6 +235,7 @@ hand logger とは **完全に別画面** の player 管理機能。session / le
 |--------|------|------|
 | hand logger | ハンドごとのアクション履歴を JSON/PHH に出力 | ✅ 実装済 |
 | **player registry** | アプリ内で player を新規作成・管理 | ✅ 実装済 (S1, § Player Registry 参照) |
+| **session + hand-based seating** | session 管理と hand ごとの seat→player スナップショット (`seat_assignment` / `hand_ref`) | ✅ core 実装済 (S2, § Session & Seating 参照) |
 | **session ledger** | session 単位の buy-in / rebuy / add-on / order / adjustment を ledger entry として記録 | 🔲 planned (S3) |
 | **point ledger** | prize point の grant / spend を記録、buy-in 等に充当可能 | 🔲 planned (S3) |
 | **session settlement** | session 終了時に player ごとの「店への net 支払額」と paid/unpaid を確定 | 🔲 planned (S4) |
@@ -273,7 +325,7 @@ hand logger と ledger app は **将来別アプリ化** することを前提�
 |-------|---------|-----------|
 | **S0** | spec expansion | CLAUDE.md / ADR-0003 / issues / worklog |
 | **S1** | player registry ✅ 実装済 | `player` データモデル、CRUD、display_name のみ、別画面 |
-| **S2** | session + hand-based seating | `session`, `seat_assignment`, `hand_ref`、hand 開始ごとのスナップショット |
+| **S2** | session + hand-based seating ✅ core 実装済 | `session`, `seat_assignment`, `hand_ref`、hand 開始ごとのスナップショット（`core/session*.py`, ADR-0007。schema は draft のまま） |
 | **S3** | ledger entries + point ledger | `ledger_entry`, `point_ledger_entry`、cash+point 併用ルール |
 | **S4** | session settlement + paid/unpaid | `session_settlement`、net due to store、paid/unpaid 操作 |
 | **S5** | cross-app contract / sync boundary | hand logger ↔ ledger app の参照契約、ID 安定性、別プロセス化準備 |
@@ -297,8 +349,9 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 そこに置く。詳細・凍結手順は `docs/contracts/README.md` と
 `docs/contracts/versioning-and-freeze.md` を参照（ADR-0005）。
 
-> 注: 現時点で実装済なのは hand logger core と S1 player registry のみ。本節の S2 以降・
-> mobile・sync はすべて **planned / future scope**。production code の大規模実装はまだ開始しない。
+> 注: 現時点で実装済なのは hand logger core / S1 player registry / **S2 session + seating core**
+> （`core/session*.py`, hand logger とは未接続）。本節の S3 以降・mobile・sync はすべて
+> **planned / future scope**。S2 schema の `1.0` freeze も未了（ISSUE-0005 残項目）。
 
 ## Workstreams
 
@@ -339,8 +392,9 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 2. **player schema**（S1, 凍結済に近い）: `player_id` + `display_name` + `created_at`、
    validation（空文字 / 前後空白 / 完全一致重複）。
 3. **session / seat_assignment / hand_ref schema**（S2）: seat_assignment は hand-based。
-   **draft 済（Phase 0b, ADR-0006）**: `hand_id` は int 据え置き、cross-app は `(session_id, hand_id)`
-   複合キー。freeze は ISSUE-0005（session_id 採番・永続形）決着後。
+   **draft 済（Phase 0b, ADR-0006）+ core 実装済（ADR-0007, `core/session*.py`）**: `hand_id` は
+   int 据え置き、cross-app は `(session_id, hand_id)` 複合キー。`session_id` 採番（UUID4 hex）・
+   永続形（`sessions.json`）は core について確定。schema `1.0` freeze は ISSUE-0005 残項目決着後。
 4. **ledger_entry / point_ledger_entry schema**（S3）: cash+point 併用、order 明細。
 5. **session_settlement schema**（S4）: net due to store / paid-unpaid。
 6. **repository / service interface 契約**: 各 front-end が呼ぶ抽象 API（mock 差し替え可能な形）。
@@ -398,8 +452,11 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
     fixtures + `session-seating.md` + repository interface 草案を追加（version 0.x, 未 freeze）。
     `hand_id` の cross-app 形を **ADR-0006 で確定**（`(session_id, hand_id)` 複合キー、int 据え置き、
     ISSUE-0004 Resolved）。contract test の `_MODELS` に 3 model を登録。
-  - **残（freeze 前）**: `session_id` 最終採番方式・seat_assignment 永続形・seat change 表現
-    （**ISSUE-0005**）。S2 core 実装と schema `1.0` 昇格。
+  - **S2 core 実装済**: `core/session.py` / `core/session_repository.py`（ADR-0007）。`session_id`
+    採番（UUID4 hex）・seat_assignment 永続形（`sessions.json`）を core について確定。code↔contract
+    test 緑（`tests/test_session_repository.py`）。
+  - **残（freeze 前）**: hand logger 接続・mid-session seat change UI 要件（**ISSUE-0005**）と
+    schema `1.0` 昇格。
 
 ### Phase 1 — player registry core + desktop + mobile mock
 
@@ -421,14 +478,16 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
   fixtures）。freeze は **ISSUE-0005** 決着が前提（未 freeze）。
 - **Parallel tasks**:
   - WS0: session / seat_assignment / hand_ref schema 凍結（seat_assignment は hand-based）。
-    **draft 済**、freeze は ISSUE-0005 後。
-  - WS1: session 管理・seat snapshot の repository/service。
-  - WS2: desktop の session/seating 別画面。
-  - WS3: mobile の session 画面（mock）。
+    **draft 済**、freeze は ISSUE-0005 残項目後。
+  - WS1: session 管理・seat snapshot の repository/service。**core 実装済**
+    （`core/session.py` / `core/session_repository.py`, ADR-0007、`tests/test_session_repository.py`）。
+  - WS2: desktop の session/seating 別画面。**未着手**。
+  - WS3: mobile の session 画面（mock）。**未着手**。
 - **Blockers**: seat_assignment を hand-based にする設計確定（**ADR-0006 済**）。hand_id の cross-app 形
-  （**ADR-0006 で `(session_id, hand_id)` 複合キーに確定**）。残: `session_id` 採番・永続形（ISSUE-0005）。
-- **Done criteria**: session 開始/終了と hand 単位 seat snapshot が core で確定し、両 front-end が
-  契約越しに表示できる。
+  （**ADR-0006 で `(session_id, hand_id)` 複合キーに確定**）。`session_id` 採番・永続形は
+  **ADR-0007 で core について確定**。残: hand logger 接続・seat change UI 要件（ISSUE-0005）。
+- **Done criteria**: session 開始/終了と hand 単位 seat snapshot が core で確定（**達成: WS1 core**）。
+  両 front-end の契約越し表示（WS2/WS3）は未着手。schema `1.0` freeze は ISSUE-0005 残項目後。
 
 ### Phase 3 — ledger and points
 

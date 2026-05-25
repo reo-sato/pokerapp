@@ -51,9 +51,10 @@ interface PlayerRepository {
 mock は `fixtures/player/*.json` を初期データに読み込み、validation は core と同じ規則
 （`validation-rules.md`）を **再実装せず参照** する形にする（UI 側に business logic を複製しない）。
 
-## session / seat_assignment / hand_ref interface（S2 draft, 未 freeze）
+## session / seat_assignment / hand_ref interface（S2 core 実装済, schema は draft）
 
-詳細・モデル定義は `session-seating.md`（draft）/ ADR-0006。語彙非依存の契約:
+詳細・モデル定義は `session-seating.md`（draft）/ ADR-0006。core 実装は
+`core/session_repository.py`（ADR-0007）。語彙非依存の契約:
 
 | 操作 | 入力 | 出力 | error |
 |------|------|------|-------|
@@ -66,22 +67,29 @@ mock は `fixtures/player/*.json` を初期データに読み込み、validation
 | resolve seating for hand_ref | `session_id`, `hand_id` | `HandRef`（snapshot 込み） | not-found |
 | current seating | `session_id` | `SeatAssignment[]`（最新 hand から導出） | not-found |
 
-Python 具象（planned, 一例。S2 core 実装時に確定）:
+Python 具象（`core/session_repository.py` と一致）:
 
 ```text
-create_session(label: str | None = None) -> Session
-list_sessions() -> list[Session]
+create_session(label: str | None = None, blinds: dict | None = None) -> Session
+list_sessions() -> list[Session]                   # 作成順
 get_session(session_id: str) -> Session            # raises SessionNotFoundError
-close_session(session_id: str, ended_at: str) -> Session
+close_session(session_id: str, ended_at: str | None = None) -> Session
+                                                   # raises SessionAlreadyClosedError
 assign_seat(session_id: str, hand_id: int, seat_no: int, player_id: str) -> SeatAssignment
-list_seat_assignments(session_id: str, hand_id: int) -> list[SeatAssignment]
+                                                   # raises SessionNotFound / SessionClosed /
+                                                   #   InvalidSeat / UnknownPlayer / SeatTaken /
+                                                   #   PlayerAlreadySeated
+list_seat_assignments(session_id: str, hand_id: int) -> list[SeatAssignment]   # seat_no 昇順
+resolve_seat_map_for_hand(session_id: str, hand_id: int) -> dict[int, str]     # seat_no -> player_id
 resolve_hand_ref(session_id: str, hand_id: int) -> HandRef
 current_seating(session_id: str) -> list[SeatAssignment]   # 最新 hand から導出
 ```
 
 - **業務ルールは core が source of truth**。front-end は結果と error code を表示するだけ。
 - mobile は同 interface の in-memory mock を `fixtures/{session,seat_assignment,hand_ref}/` で先行実装できる。
-- **未 freeze**: 採番方式・永続形・seat change 表現が ISSUE-0005 で確定するまで `1.0` に上げない。
+- **schema は未 freeze**: core は draft schema（0.x）に対して実装済（code↔contract test 緑）。
+  `session_id` 採番方式・永続形は ADR-0007 で core について確定。schema `1.0` への昇格は
+  ISSUE-0005 の残項目（hand logger 接続・seat change UI 要件）決着後。
 
 ## ledger 以降（planned）
 
