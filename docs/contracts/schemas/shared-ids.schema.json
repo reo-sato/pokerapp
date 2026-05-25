@@ -18,7 +18,7 @@
     "hand_id": {
       "type": "integer",
       "minimum": 0,
-      "description": "現状 session 内 unique な連番 int。cross-app では (session_id, hand_id) 複合で globally unique。S2 で reconcile（ISSUE-0004）。"
+      "description": "現状 session 内 unique な連番 int。cross-app では (session_id, hand_id) 複合で globally unique。S2 で reconcile（ISSUE-0006）。"
     }
   }
 }

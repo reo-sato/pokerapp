@@ -56,7 +56,7 @@ mock は `fixtures/player/*.json` を初期データに読み込み、validation
 | model | interface | phase |
 |-------|-----------|-------|
 | session / seat_assignment / hand_ref | session 開始・終了、hand 単位 seat snapshot 取得 | S2 |
-| ledger_entry / point_ledger_entry | entry 追加、中間集計（buy-in 合計 / 注文合計）、残高取得 | S3（ISSUE-0001 が gate） |
+| ledger_entry / point_ledger_entry | entry 追加、中間集計（buy-in 合計 / 注文合計）、残高取得 | S3（ISSUE-0003 が gate） |
 | session_settlement | settlement 確定、paid/unpaid 操作 | S4 |
 
 各 interface は対応 phase の freeze 時に本 doc へ追記する。S5 で local 実装と API client 実装に

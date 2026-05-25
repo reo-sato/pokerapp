@@ -1,6 +1,6 @@
 # Versioning, freeze, and drift detection
 
-contract-first 並行開発で **contract drift**（ISSUE-0003）を防ぐための、freeze / versioning /
+contract-first 並行開発で **contract drift**（ISSUE-0005）を防ぐための、freeze / versioning /
 互換性 / drift detection の運用ルール。
 
 ## 1. freeze の定義
@@ -75,13 +75,13 @@ schema を変更する PR は、同じ PR で以下を更新する（漏れは c
 | 1 | shared IDs（player_id / session_id / hand_id） | 全 phase 共通 | bootstrap 済（player_id 確定、session_id/hand_id は S2 で確定） |
 | 2 | player schema | S1 | freeze 候補（本 bootstrap で schema/fixtures 追加） |
 | 3 | session / seat_assignment / hand_ref | S2 | planned |
-| 4 | ledger_entry / point_ledger_entry | S3 | planned（ISSUE-0001 が gate） |
+| 4 | ledger_entry / point_ledger_entry | S3 | planned（ISSUE-0003 が gate） |
 | 5 | session_settlement | S4 | planned |
 | 6 | repository / service interface, sync | S5 | planned |
 
 ## 7. drift detection（最小方針）
 
-ISSUE-0003 対策の最小実装。
+ISSUE-0005 対策の最小実装。
 
 - **schema↔fixture 整合の自動検証**: `tests/test_contracts.py` が
   - すべての `fixtures/<model>/` を対応 schema に照合し、

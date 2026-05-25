@@ -63,7 +63,7 @@
 > hand logger は `hand_id: int`（per-session 連番, `core/hand_log.py`）。グローバル一意性は
 > `(session_id, hand_id)` 複合でしか満たせない。これを S2 の `hand_ref` 設計で
 > 「複合キーのまま contract 化するか / 文字列 hand_id に正規化するか」確定する。
-> 詳細・選択肢は `docs/issues/0004-hand-id-int-vs-cross-app-string.md` を参照。
+> 詳細・選択肢は `docs/issues/0006-hand-id-int-vs-cross-app-string.md` を参照。
 
 ---
 
