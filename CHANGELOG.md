@@ -17,6 +17,23 @@
   - 実装: `core/player.py`, `core/player_repository.py`, `gui/player_registry.py`。
   - hand logger とは未接続（session / ledger / settlement 接続は後続 Phase）。
 
+### Docs / Planning
+
+- **Parallel development plan**: `CLAUDE.md` に `# Parallel development plan` 節を追加。
+  4 workstream（WS0 contract / WS1 core / WS2 desktop / WS3 mobile）の依存関係、
+  parallelizable / blocker、contract freeze order、mobile が mock で先行できる範囲、
+  desktop / mobile 責務分離、将来 API/sync を入れても壊れにくい境界、phase 0–5 の
+  構造化計画（goal / prerequisites / parallel tasks / blockers / done criteria）を明文化。
+- **ADR-0004** (Accepted): contract-first parallel development / shared IDs
+  (`player_id` / `session_id` / `hand_id`) / separate front-ends の判断。Alternatives
+  （core-first 逐次 / front-end-owned logic / implementation-first 暗黙契約 /
+  mobile = hand logger 移植）を却下。
+- **Issue 0003** (Open): 並行開発の contract drift / 凍結タイミング / mock 乖離の
+  blocking risk を登録（ISSUE-0001 が S3 ledger WS の直接 gate）。
+- **decision-log.md**: ADR Index に ADR-0004、Major Issue Index に ISSUE-0003 を登録。
+- 提案: mobile は **React Native**（iOS / Android 両対応のたたき台、最初は mock repository）を
+  技術選定案とし、初期 screen skeleton は player registry の list / add / rename に限定。
+
 ### Docs / Spec
 
 - **Bootstrap docs-as-code structure**: `docs/adr/`, `docs/issues/`, `docs/worklog/`,

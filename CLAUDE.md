@@ -281,6 +281,174 @@ hand logger と ledger app は **将来別アプリ化** することを前提�
 
 ---
 
+# Parallel development plan
+
+本プロジェクトは今後 **hand logger core** / **desktop 別画面 (registry / ledger UI)** /
+**iOS・Android 別アプリ** を **並行的** に育てる。並行作業を成立させるため、依存関係を整理し、
+parallelizable なタスクと逐次でしかできないタスクを分離する。
+
+本計画は **contract-first**（先に契約を凍結し、各 front-end / core はそれに対して独立実装する）
+を原則とする。`player_id` / `session_id` / `hand_id` は全 workstream 共有の安定キーであり、
+これらと各モデルの schema を最初に凍結する（§ Cross-app boundary も参照）。
+
+> 注: 現時点で実装済なのは hand logger core と S1 player registry のみ。本節の S2 以降・
+> mobile・sync はすべて **planned / future scope**。production code の大規模実装はまだ開始しない。
+
+## Workstreams
+
+| WS | 名称 | 責務 | 主要成果物 | 依存 |
+|----|------|------|-----------|------|
+| **WS0** | contract / spec / schema | 共有 ID・各 domain model の schema・validation 契約・error 形を凍結 | `docs/contracts/*`（planned）, ADR, schema fixtures | なし（全 WS の上流） |
+| **WS1** | core domain / repository / services | `core/` のドメイン・repository・service。永続化と業務ルールの source of truth | `core/*.py`, repository, service, tests | WS0（該当 model の契約凍結後） |
+| **WS2** | desktop separate screen | registry / ledger / settlement の **別画面** UI（既存 hand logger UI は汚さない） | `gui/*.py`（別 window）, GUI ロジックテスト | WS1（同 phase の repository/service） |
+| **WS3** | mobile scaffold (iOS/Android) | 将来の別 front-end。**最初は mock repository** で UI を先行させる | mobile プロジェクト雛形, screen skeleton, mock repo | WS0 のみ（contract）。WS1 完成を待たない |
+
+責務分離の原則:
+
+- **core (WS1) が業務ルールの唯一の source of truth**。desktop / mobile はそれを呼ぶだけで、
+  validation・残高計算・settlement 確定ロジックを各 front-end に複製しない。
+- **desktop (WS2) と mobile (WS3) は対等な front-end**。mobile は hand logger の置き換えではなく
+  「registry / ledger 等を扱う将来の別 front-end」。どちらも同じ contract に対して実装する。
+- **hand logger 既存 UI (`gui/dashboard.py`) は触らない**。registry / ledger は常に別画面。
+
+## 何が parallelizable で、何が blocker か
+
+- **Blocker（逐次・上流）**: WS0 の契約凍結。ある model（player / session / ledger ...）の
+  schema・ID・validation・error 形が凍るまで、その model を扱う WS1/WS2/WS3 は本実装に入れない。
+- **Parallelizable（契約凍結後）**: 同一 model について WS1（core）/ WS2（desktop）/ WS3（mobile mock）
+  は **同時並行** で進められる。front-end は mock / 実 repository を contract 越しに差し替えるだけ。
+- **Cross-phase parallel**: phase N の WS0 契約が凍れば、phase N の実装中に phase N+1 の WS0
+  契約凍結作業を先行できる（契約 WS が常に 1 phase 先行する形）。
+- **Sequencing 制約**: session(S2) は player(S1) を、ledger(S3) は session を、settlement(S4) は
+  ledger/point を参照するため、**契約レベルの依存順序**（S1→S2→S3→S4）は維持する。ただし
+  これは「契約凍結の順序」であって「実装の並行性」を妨げない。
+
+## 先に凍結すべき contract（freeze order）
+
+1. **共有 ID 契約**（最優先・全 phase 共通）: `player_id` / `session_id` / `hand_id` は
+   アプリ内採番・文字列・不変。採番責任の所在を WS0 で確定する。
+2. **player schema**（S1, 凍結済に近い）: `player_id` + `display_name` + `created_at`、
+   validation（空文字 / 前後空白 / 完全一致重複）。
+3. **session / seat_assignment / hand_ref schema**（S2）: seat_assignment は hand-based。
+4. **ledger_entry / point_ledger_entry schema**（S3）: cash+point 併用、order 明細。
+5. **session_settlement schema**（S4）: net due to store / paid-unpaid。
+6. **repository / service interface 契約**: 各 front-end が呼ぶ抽象 API（mock 差し替え可能な形）。
+   これを凍結することで mobile が mock で先行できる。
+
+## mobile が mock で先行できる範囲
+
+- repository interface（WS0 契約）に対する **in-memory / fixture mock** で、player list / add /
+  rename などの画面遷移・状態管理・validation 表示を **WS1 完成前に** 作り込める。
+- mock は WS0 の schema fixtures（サンプル JSON）を読むだけにし、実 persistence を持たない。
+- 後で実 repository（ローカル or API）に差し替えても UI 層が壊れない境界を最初から引く。
+
+## Mobile scaffold 提案（WS3, planned）
+
+- **技術選定案**: **React Native**（iOS / Android 両対応のたたき台）。Expo 起点で
+  プラットフォーム分岐を最小化する。最終決定は Phase 1 着手時に別 worklog で確定する。
+  - 代替案: Flutter（Dart 統一・高描画性能）/ ネイティブ 2 本（最大の自由度・最大コスト）。
+    React Native を初期案とするのは、将来 desktop と TypeScript 系の契約型を共有しやすいため。
+- **最初の screen skeleton 範囲**: player registry のみに限定する。
+  - `PlayerListScreen`（一覧）/ `AddPlayerForm`（新規作成）/ `RenamePlayerForm`（リネーム）。
+  - validation 表示（空文字 / 重複）は **core と同じ contract** に従い、UI 側で再実装しない。
+- **repository は mock 先行**: `PlayerRepository` interface（WS0 契約）に対する in-memory mock を
+  使い、WS1 完成を待たずに画面遷移・状態管理・validation 表示を作る。実 repository（local or
+  API）への差し替えで UI が壊れない境界を最初から引く。
+- **scope 外（たたき台時点）**: 永続化の本実装、hand logger 機能、session / ledger / settlement、
+  実 API / sync。これらは後続 phase。
+
+## 将来 API / sync を入れても壊れにくい境界
+
+- front-end は **repository interface にのみ依存**し、`core/*` の具象 / API client / mock を
+  注入で差し替える。UI は「どこにデータがあるか」を知らない。
+- 採番は常にアプリ内で完結（外部システム前提を作らない）。sync 導入時も ID は不変キーとして残る。
+- 物理配置の移行（同一プロセス → 別プロセス → 別アプリ + API/sync）は S5 で boundary を切り出す。
+  S2〜S4 は同一プロセス前提で進めてよい。
+
+## Phase 別計画
+
+各 phase は WS0（契約）→ WS1/WS2/WS3（並行実装）の順。S1 は実装済、S2 以降は planned。
+
+### Phase 0 — contract freeze
+
+- **Goal**: 共有 ID 契約と「契約の置き場所・凍結プロセス」を確定し、以降の全 phase が
+  contract-first で動ける土台を作る。
+- **Prerequisites**: なし（最上流）。
+- **Parallel tasks**:
+  - WS0: 共有 ID 契約（player_id / session_id / hand_id）と error 形・schema 表現方法
+    （`docs/contracts/` + サンプル fixtures）を定義。
+  - WS0: repository / service interface の契約テンプレートを定義。
+- **Blockers**: なし。これ自体が他 phase の blocker。
+- **Done criteria**: 共有 ID 契約が ADR 化され、schema/fixtures の置き場所と更新手順が決定。
+  各 front-end が「契約だけ見て」mock を書ける状態。
+
+### Phase 1 — player registry core + desktop + mobile mock
+
+- **Goal**: player を core / desktop / mobile(mock) の 3 面で扱えるようにする。
+- **Prerequisites**: Phase 0 の共有 ID 契約 + player schema 凍結。
+- **Parallel tasks**:
+  - WS1: `core/player.py` + `core/player_repository.py`（**実装済 S1**）。
+  - WS2: `gui/player_registry.py` 別画面（**実装済 S1**）。
+  - WS3: mobile player registry screen skeleton + mock repository（**planned**、WS1 を待たない）。
+- **Blockers**: player schema / repository interface 契約（Phase 0 / S1 で凍結済）。
+- **Done criteria**: core/desktop は S1 完了済。mobile は mock repo で list/add/rename 画面が
+  動く skeleton ができ、後で実 repo に差し替え可能な境界を持つ。
+
+### Phase 2 — session and seating
+
+- **Goal**: `session` と hand-based `seat_assignment` / `hand_ref` を扱う。
+- **Prerequisites**: player 契約（S1）+ Phase 2 の session/seat schema 凍結。
+- **Parallel tasks**:
+  - WS0: session / seat_assignment / hand_ref schema 凍結（seat_assignment は hand-based）。
+  - WS1: session 管理・seat snapshot の repository/service。
+  - WS2: desktop の session/seating 別画面。
+  - WS3: mobile の session 画面（mock）。
+- **Blockers**: seat_assignment を hand-based にする設計確定（ADR）。hand logger 側 hand_id を
+  `hand_ref` から参照する契約。
+- **Done criteria**: session 開始/終了と hand 単位 seat snapshot が core で確定し、両 front-end が
+  契約越しに表示できる。
+
+### Phase 3 — ledger and points
+
+- **Goal**: `ledger_entry`（buy_in/rebuy/add_on/order/adjustment）と `point_ledger_entry` を扱う。
+- **Prerequisites**: session 契約（S2）+ ledger/point schema 凍結 + ISSUE-0001（point 残高の
+  source of truth）の決着。
+- **Parallel tasks**:
+  - WS0: ledger_entry / point_ledger_entry schema 凍結（cash+point 併用、order 明細）。
+  - WS1: ledger / point ledger repository/service + 残高計算。
+  - WS2: desktop の ledger 入力・中間集計（buy-in 合計 / 注文合計）別画面。
+  - WS3: mobile の ledger 画面（mock）。
+- **Blockers**: **ISSUE-0001**（残高 source of truth）。これが決まらないと残高計算の API 契約が
+  凍結できず、front-end の中間集計表示が宙に浮く。
+- **Done criteria**: cash+point 併用・point 不足の cash 補完・entry fee cash only が core で
+  enforced、両 front-end が中間集計を表示できる。
+
+### Phase 4 — settlement
+
+- **Goal**: session 終了時に player ごとの `session_settlement`（net due to store / paid-unpaid）を確定。
+- **Prerequisites**: ledger/point 契約（S3）+ settlement schema 凍結。
+- **Parallel tasks**:
+  - WS0: session_settlement schema 凍結（player→店の 1 方向のみ）。
+  - WS1: settlement 確定 service + paid/unpaid 操作。
+  - WS2: desktop の settlement 画面。
+  - WS3: mobile の settlement 表示（mock）。
+- **Blockers**: paid/unpaid の状態遷移と partial paid の要否確定。player-to-player を扱わない前提の固定。
+- **Done criteria**: session 終了で settlement 1 行/ player が確定し、paid/unpaid を操作できる。
+
+### Phase 5 — sync / cross-app contract hardening
+
+- **Goal**: 同一プロセス前提から、別プロセス / 別アプリ + API/sync へ移行できる boundary を切り出す。
+- **Prerequisites**: S1〜S4 の schema が安定し、repository interface が front-end から実証済。
+- **Parallel tasks**:
+  - WS0: cross-app 参照同期方式（pull / push / event）と API contract を確定。
+  - WS1: repository を local 実装と API client 実装に分離（interface は不変）。
+  - WS2 / WS3: front-end を API-backed repository に差し替え（UI 層は無改修が目標）。
+- **Blockers**: 参照同期方式の ADR。ID 不変性の保証。衝突解決方針。
+- **Done criteria**: front-end が repository interface のみに依存したまま、local↔API backend を
+  切り替えられる。ID が backend を跨いで安定。
+
+---
+
 ## コーディング規約
 
 - 型ヒント必須（`from __future__ import annotations` 使用）
