@@ -26,7 +26,12 @@
   },
   "rfid": {
     "enabled": false,
-    "transport": "http",
+    "transport": "serial",
+    "_transport_comment": "serial=ESP32-S3 USB直結(USB-CDC, 既定) / http=ESP32-S3 WiFi / pcsc=USB NFCリーダー直結",
+    "serial_port": "/dev/ttyACM0",
+    "baudrate": 115200,
+    "reconnect_interval_ms": 2000,
+    "_serial_comment": "serial_port は Win='COM3' / mac='/dev/tty.usbmodemXXXX'。pyserial 必須",
     "bind_host": "0.0.0.0",
     "bind_port": 8787,
     "card_master_file": "./rfid_cards.json",

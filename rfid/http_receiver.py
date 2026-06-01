@@ -30,13 +30,15 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
 from core.event_queue import EventQueue
-from core.events import RFIDEvent
-from rfid.card_master import CardMaster, normalize_tag_id
+from rfid.card_master import CardMaster
+# 受信ペイロード → RFIDEvent 変換は transport 共通ロジックに委譲する（DRY, ADR-0007）。
+# _parse_timestamp は後方互換のため event_builder から re-export する。
+from rfid.event_builder import _parse_timestamp, build_rfid_event
 
 logger = logging.getLogger(__name__)
 
@@ -140,58 +142,21 @@ class RFIDHTTPReceiver(threading.Thread):
             logger.warning("RFIDHTTPReceiver: invalid JSON — %s", exc)
             return 400, "invalid JSON"
 
-        reader_id: str = data.get("reader_id", "")
-        tag_id_raw: str = data.get("tag_id", "")
-        timestamp_str: str = data.get("timestamp", "")
-
-        # タグ ID 正規化
-        try:
-            tag_id = normalize_tag_id(tag_id_raw)
-        except Exception:
-            tag_id = tag_id_raw.upper()
-
-        # reader_id 検証
-        reader_cfg = self._reader_configs.get(reader_id)
-        if reader_cfg is None:
-            logger.warning(
-                "RFIDHTTPReceiver: unknown reader_id=%r (tag=%s)", reader_id, tag_id
-            )
-            return 200, "unknown reader_id"   # 200 で返して ESP32-S3 の再送を防ぐ
-
-        # カードルックアップ
-        card = self._card_master.lookup(tag_id)
-        if not card:
-            logger.warning(
-                "RFIDHTTPReceiver: unregistered tag %s (reader=%s) — needs_review",
-                tag_id, reader_id,
-            )
-
-        # タイムスタンプ解析
-        ts = _parse_timestamp(timestamp_str)
-
-        # ロール・席番号・ボードインデックス決定
-        role: str = reader_cfg.get("role", "seat")
-        seat: Optional[int] = reader_cfg.get("seat") if role == "seat" else None
-        board_index: Optional[int] = reader_cfg.get("index") if role == "board" else None
-
-        event = RFIDEvent(
-            tag_id=tag_id,
-            card=card,
-            reader_id=reader_id,
-            role=role,
-            seat=seat,
-            timestamp=ts,
-            raw_tag_id=tag_id_raw,
-            board_index=board_index,
+        event, status = build_rfid_event(
+            data, self._reader_configs, self._card_master
         )
-        self._rfid_queue.put(event)
+        if event is None:
+            # 未知 reader_id 等。200 で返して ESP32-S3 の再送を防ぐ。
+            return 200, status
 
+        self._rfid_queue.put(event)
         self._events_received += 1
         self._last_event_time = time.time()
 
         logger.info(
             "RFIDHTTPReceiver: received reader=%s tag=%s card=%r role=%s seat=%s board_index=%s",
-            reader_id, tag_id, card or "(unknown)", role, seat, board_index,
+            event.reader_id, event.tag_id, event.card or "(unknown)",
+            event.role, event.seat, event.board_index,
         )
         return 200, "ok"
 
@@ -237,20 +202,3 @@ class _RFIDRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: object) -> None:  # noqa: N802
         """デフォルトの print ログを logging に差し替える。"""
         logger.debug("HTTP %s - %s", self.address_string(), fmt % args)
-
-
-# ――― ユーティリティ ―――
-
-def _parse_timestamp(ts_str: str) -> float:
-    """ISO 8601 文字列を UNIX タイムスタンプに変換する。失敗時は現在時刻。"""
-    if not ts_str:
-        return time.time()
-    try:
-        dt = datetime.fromisoformat(ts_str)
-        # タイムゾーン情報がなければローカル時刻として扱う
-        if dt.tzinfo is None:
-            return dt.timestamp()
-        return dt.astimezone(timezone.utc).timestamp()
-    except ValueError:
-        logger.debug("Could not parse timestamp %r, using current time", ts_str)
-        return time.time()

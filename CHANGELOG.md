@@ -9,6 +9,24 @@ issue / mismatch log) see `docs/worklog/`, `docs/adr/`, `docs/issues/`.
 
 ## [Unreleased]
 
+### RFID USB-CDC serial transport (2026-06-01)
+
+ESP32-S3 を USB ケーブルで PC に直結する運用が確定したため、USB-CDC（仮想シリアル）を
+読む新 transport `transport="serial"` を追加し、**既定 transport を `http` → `serial` に
+変更**した（ADR-0007）。`http`（WiFi）/ `pcsc`（USB NFC リーダー）は併存。
+
+- **Added**: `rfid/serial_receiver.py`（`RFIDSerialReceiver`: 改行区切り JSON 受信・
+  自動再接続・非 JSON 行スキップ・status 表示）、`rfid/event_builder.py`
+  （`build_rfid_event`: serial/http が共有する受信ペイロード → RFIDEvent 変換の単一 source）。
+- **Changed**: `config_default.json` 既定 transport を serial に変更し `serial_port` /
+  `baudrate` / `reconnect_interval_ms` を追加。`main.py` に serial 分岐 + GUI status hookup。
+  `rfid/http_receiver.py` を共通ヘルパ呼び出しにリファクタ（**挙動不変**）。
+  `requirements.txt` に `pyserial>=3.5`（serial 時のみ optional）。
+- **Tests**: `tests/test_rfid_serial.py` 追加（正常系 / 非 JSON skip / 未知 reader /
+  未登録 tag / ISO15693 8 byte UID / 自動再接続 / 共通ヘルパ契約）。
+  RFID 系 **59 passed**（http 既存テストも回帰なし）。
+- **Docs**: ADR-0007 追加、ISSUE-0007 の USB-CDC を Resolved 化（dual-support 回帰テスト紐付け）。
+
 ### RFID ハードウェア移行 (2026-06-01)
 
 RFID センサーのハードウェア仕様を **PN532 + ESP32（ESP32-WROOM-32）** から

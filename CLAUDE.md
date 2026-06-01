@@ -62,8 +62,10 @@ pokerapp/
 │   └── speech_normalizer.py       ← SpeechNormalizer (action/seat/number 正規化)
 │
 ├── rfid/
-│   ├── http_receiver.py           ← RFIDHTTPReceiver (ESP32-S3 HTTP POST 受信)
+│   ├── serial_receiver.py         ← RFIDSerialReceiver (ESP32-S3 USB-CDC 直結受信, 既定)
+│   ├── http_receiver.py           ← RFIDHTTPReceiver (ESP32-S3 WiFi HTTP POST 受信)
 │   ├── reader_thread.py           ← RFIDThread (pyscard PC/SC 直接読み取り)
+│   ├── event_builder.py           ← build_rfid_event (受信 payload → RFIDEvent 共通ロジック)
 │   ├── bridge.py                  ← RFID ブリッジユーティリティ
 │   └── card_master.py             ← CardMaster (rfid_cards.json ロード・検索)
 │
@@ -103,8 +105,9 @@ pokerapp/
 | 音声認識（主） | faster-whisper ≥ 1.0 | CPU int8 モード |
 | 音声認識（代替） | Vosk | 軽量・低遅延（`audio.engine="vosk"`） |
 | マイク入力 | PyAudio ≥ 0.2.13 | |
-| RFID (HTTP) | 標準 http.server | ESP32-S3 + PN5180 から HTTP POST 受信（transport 契約はハードウェア非依存, ADR-0006） |
-| RFID (PC/SC) | pyscard ≥ 2.0.7 | transport="pcsc" 時のみ |
+| RFID (serial, 既定) | pyserial ≥ 3.5 | ESP32-S3 USB 直結 (USB-CDC) から改行区切り JSON 受信。`transport="serial"` 時のみ pyserial 必須 (ADR-0007) |
+| RFID (HTTP) | 標準 http.server | ESP32-S3 + PN5180 を WiFi 運用する場合の代替経路。`transport="http"`（transport 契約はハードウェア非依存, ADR-0006） |
+| RFID (PC/SC) | pyscard ≥ 2.0.7 | ACR122U 等 USB NFC リーダー直結。`transport="pcsc"` 時のみ |
 | 役評価 / PHH 出力 | pokerkit ≥ 0.5 | pot settlement の hand rank 評価にも使用 |
 | 数値処理 | numpy ≥ 1.24 | ベイズ観測モデル / beam search |
 | GUI | customtkinter ≥ 5.2 | |
@@ -120,7 +123,7 @@ pokerapp/
 | スレッド | 役割 | キュー |
 |---------|------|--------|
 | AudioThread | マイク入力 → ASR → `parse_action()` → AudioEvent | → audio_queue |
-| RFIDHTTPReceiver / RFIDThread | RFID 受信 → card_master 解決 → RFIDEvent | → rfid_queue |
+| RFIDSerialReceiver / RFIDHTTPReceiver / RFIDThread | RFID 受信 → `build_rfid_event` → RFIDEvent | → rfid_queue |
 | IntegrationThread | キュー消費 → ゲーム状態更新 → ActionRecord 生成 → JSON 書き込み | ← 全キュー |
 | MainThread | GUI 描画のみ | |
 
@@ -209,8 +212,10 @@ hand logger とは **完全に別画面** の player 管理機能。session / le
 | 機能 | 状態 | 備考 |
 |------|------|------|
 | 音声認識 (Whisper) | ✅ 実装済 | `audio/recognizer.py` |
-| RFID HTTP 受信 | ✅ 実装済 | `rfid/http_receiver.py` |
+| RFID serial 受信 (USB-CDC, 既定) | ✅ 実装済 | `rfid/serial_receiver.py`（ESP32-S3 USB 直結, ADR-0007） |
+| RFID HTTP 受信 (WiFi 代替) | ✅ 実装済 | `rfid/http_receiver.py` |
 | RFID PC/SC 受信 | ✅ 実装済 | `rfid/reader_thread.py` |
+| RFID 受信ペイロード共通化 | ✅ 実装済 | `rfid/event_builder.py`（`build_rfid_event`, serial/http 共有） |
 | RFID カード照合 | ✅ 実装済 | `rfid/card_master.py` |
 | ストリート自動遷移 (RFID) | ✅ 実装済 | board 枚数 3/4/5 で遷移 |
 | Confidence 算出 | ✅ 実装済 | センサー組み合わせ行列 |
@@ -541,7 +546,10 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 - 認識エラーでクラッシュしない → `try/except` で捕捉し `needs_review=True` を付与
 - ハンド完了ごとにディスクへ書き込む（バッファリングしない）
 - ログファイルは追記モード（既存セッションデータを上書きしない）
-- ESP32-S3 停止・WiFi 切断時 → `rfid.enabled=false` で RFID なしモード継続動作
+- ESP32-S3 停止・切断時 → `rfid.enabled=false` で RFID なしモード継続動作
+- `transport="serial"`（USB 直結）では ESP32-S3 の再起動・USB 抜き差しに対し
+  `RFIDSerialReceiver` が `reconnect_interval_ms` 間隔で自動再接続（クラッシュしない）。
+  ブートログ等の非 JSON 行は debug ログでスキップする
 
 ---
 

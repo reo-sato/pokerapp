@@ -81,7 +81,7 @@ RFID センサーハードウェアを **PN5180 + ESP32-S3** に移行する。P
       （`rfid/card_master.py:130-148`、長さ非依存実装）。
 - [ ] 8 バイト（ISO15693）UID の normalize 回帰テスト追加（別タスク、ISSUE-0007）。
 - [ ] ISO15693 採用時の UID エンコード（MSB/LSB 順）をファームと突き合わせ（ISSUE-0007）。
-- [ ] USB-CDC transport の要否を運用後に判断（ISSUE-0007）。
+- [x] USB-CDC transport の要否を運用後に判断 → **採用**（USB 直結確定, ADR-0007）。
 
 ## Related Files
 
@@ -101,4 +101,5 @@ RFID センサーハードウェアを **PN5180 + ESP32-S3** に移行する。P
 ## Supersedes / Superseded by
 
 - Supersedes: —
-- Superseded by: —
+- Superseded by: — （本 ADR は有効。Alternative B〔USB-CDC serial, deferred〕は
+  ADR-0007 で Accepted 化された。default transport を http → serial に変更したのも ADR-0007。）

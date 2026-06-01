@@ -187,6 +187,18 @@ def run_cli() -> None:
                 stop_event=stop_event,
             )
             print(f"RFID HTTP受信スレッド起動 ({rfid_cfg.get('bind_host','0.0.0.0')}:{rfid_cfg.get('bind_port',8787)})。")
+        elif transport == "serial":
+            from rfid.serial_receiver import RFIDSerialReceiver
+            rfid_thread = RFIDSerialReceiver(
+                rfid_queue=rfid_q,
+                card_master=card_master,
+                reader_configs=rfid_cfg.get("readers", {}),
+                serial_port=rfid_cfg.get("serial_port", "/dev/ttyACM0"),
+                baudrate=rfid_cfg.get("baudrate", 115200),
+                reconnect_interval_ms=rfid_cfg.get("reconnect_interval_ms", 2000),
+                stop_event=stop_event,
+            )
+            print(f"RFID serial受信スレッド起動 ({rfid_cfg.get('serial_port', '/dev/ttyACM0')} @ {rfid_cfg.get('baudrate', 115200)})。")
         else:
             from rfid.reader_thread import RFIDThread
             rfid_thread = RFIDThread(
@@ -366,6 +378,17 @@ def run_gui() -> None:
                 bind_port=rfid_cfg.get("bind_port", 8787),
                 stop_event=stop_event,
             )
+        elif transport == "serial":
+            from rfid.serial_receiver import RFIDSerialReceiver
+            rfid_thread = RFIDSerialReceiver(
+                rfid_queue=rfid_q,
+                card_master=card_master,
+                reader_configs=rfid_cfg.get("readers", {}),
+                serial_port=rfid_cfg.get("serial_port", "/dev/ttyACM0"),
+                baudrate=rfid_cfg.get("baudrate", 115200),
+                reconnect_interval_ms=rfid_cfg.get("reconnect_interval_ms", 2000),
+                stop_event=stop_event,
+            )
         else:
             from rfid.reader_thread import RFIDThread
             rfid_thread = RFIDThread(
@@ -376,8 +399,8 @@ def run_gui() -> None:
                 stop_event=stop_event,
             )
 
-    # HTTP transport の場合、rfid_receiver を GUI に渡してステータス表示する
-    if rfid_thread is not None and rfid_cfg.get("transport") == "http":
+    # status() を持つ受信スレッド (http / serial) は GUI に渡してステータス表示する
+    if rfid_thread is not None and rfid_cfg.get("transport") in ("http", "serial"):
         dash._rfid_receiver = rfid_thread
 
     integration_thread = IntegrationThread(

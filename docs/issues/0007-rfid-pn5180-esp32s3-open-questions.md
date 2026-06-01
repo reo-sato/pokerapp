@@ -6,7 +6,7 @@
 
 ## Status
 
-Open
+Partially Resolved（USB-CDC transport は実装済 / タグ規格・クロストークは Open）
 
 ## Severity / Priority
 
@@ -32,11 +32,11 @@ RFID ハードウェアを PN5180 + ESP32-S3 に移行する（ADR-0006）にあ
    vicinity タグを使うかは未決定。
 2. **UID エンコード順**: ISO15693 を使う場合、UID の MSB/LSB 順がファーム実装に依存する。
    `tag_id` 文字列がどのバイト順で来るかをファームと突き合わせる必要がある。
-3. **USB-CDC transport**: ESP32-S3 はネイティブ USB-OTG を持つ。固定卓では WiFi より
-   USB-CDC シリアル接続が安定しうるが、現状 Python 側 transport は `"http"` / `"pcsc"` のみ。
-   `"serial"` transport を足すかは未決定（ADR-0006 Alternative B として deferred）。
-4. **クロストーク**: PN5180 の高 RF 出力により隣接席タグの誤検出が起きうる。これは
-   ファーム/アンテナ側責務だが、`reader_id` マッピングの信頼性に影響する。
+3. **USB-CDC transport**: ✅ **Resolved** — USB 直結運用が確定したため `"serial"` transport を
+   実装した（ADR-0007）。`rfid/serial_receiver.py::RFIDSerialReceiver`、既定 transport を
+   `serial` に変更。改行区切り JSON / 自動再接続。
+4. **クロストーク**: 🔲 **Open** — PN5180 の高 RF 出力により隣接席タグの誤検出が起きうる。
+   これはファーム/アンテナ側責務だが、`reader_id` マッピングの信頼性に影響する。
 
 ## Reproduction
 
@@ -49,27 +49,35 @@ RFID ハードウェアを PN5180 + ESP32-S3 に移行する（ADR-0006）にあ
 
 ## Fix
 
-確定方針が出た時点で別タスク化する。現時点では ADR-0006 で「契約不変・UID 長可変・
-dual-support」を固定し、コア実装は変更しない。dual-support を担保する回帰テスト
-（8 バイト ISO15693 UID の `normalize_tag_id`）は follow-up として残す。
+- **USB-CDC transport**: USB 直結確定を受けて `"serial"` transport を実装（ADR-0007）。
+  `rfid/serial_receiver.py` 新設、`rfid/event_builder.py` に受信ロジックを共通化、
+  既定 transport を `serial` に変更。
+- **dual-support**: 8 バイト ISO15693 UID の正規化を回帰テストで担保（下記）。
+- **タグ規格 / UID エンコード順 / クロストーク**: 引き続き Open。規格確定・実機検証は
+  ハードウェア入手後に別タスク化する。
 
 ## Regression Test
 
-- （予定）`tests/test_rfid.py::TestNormalizeTagId::test_iso15693_8byte_uid` — 未実装
+- ✅ `tests/test_rfid_serial.py::TestSerialReceiverRobustness::test_iso15693_8byte_uid_normalized`
+  — ISO15693 8 バイト UID が `RFIDEvent.tag_id` まで正しく正規化される dual-support 回帰テスト。
 
 ## Affected Files
 
+- `rfid/serial_receiver.py`（新規, USB-CDC 受信）
+- `rfid/event_builder.py`（新規, transport 共通ロジック）
 - `rfid/http_receiver.py`
 - `rfid/card_master.py`
-- `config_default.json`（将来 `"serial"` transport を足す場合）
+- `config_default.json`
 
 ## Related Worklog
 
 - `docs/worklog/2026-06-01-rfid-hardware-migration.md`
+- `docs/worklog/2026-06-01-rfid-usb-cdc-serial-transport.md`
 
 ## Related ADRs
 
 - `docs/adr/0006-rfid-hardware-migration-pn5180-esp32s3.md`
+- `docs/adr/0007-rfid-usb-cdc-serial-transport.md`
 
 ## Related Commits
 
