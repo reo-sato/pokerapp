@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted
+**Superseded by ADR-0008**（2026-06-01）。本 ADR の中心判断「HTTP transport を canonical、
+PCSC を legacy」は、作業者が PC/SC 経路の位置づけを誤って想定したことによる誤決定だった。
+正しくは **PC/SC 経路が本筋**で、ESP32-S3 は USB CCID として PN5180 を公開する。詳細は
+ADR-0008。本 ADR は history として残し、書き換えない（docs-as-code 流儀）。
 
 ## Date
 
@@ -120,5 +123,5 @@ CLAUDE.md § 技術スタック / 実装状況 / エラーハンドリング方�
 ## Supersedes / Superseded by
 
 - Supersedes: —
-- Superseded by: —
-- 関連: ISSUE-0006（firmware ↔ Python API 契約）
+- **Superseded by: ADR-0008**（PN5180 + ESP32-S3 via USB CCID — PC/SC is the canonical RFID transport）
+- 関連: ISSUE-0006（本 ADR と同じ前提で起こした issue。ADR-0008 で ISSUE-0007 に倒した）

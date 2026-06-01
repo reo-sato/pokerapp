@@ -6,20 +6,27 @@
 
 ## [Unreleased]
 
-### Docs / Planning (RFID hardware migration)
+### Docs / Planning (RFID hardware migration — PCSC canonical pivot)
 
-- **RFID hardware を PN5180 + ESP32-S3 に移行**する仕様変更の方針を docs-only で記録（コード未改修）。
-  - **ADR-0007** (Accepted): HTTP transport を canonical に固定、PCSC 直結経路（`rfid/reader_thread.py`）
-    は **legacy 降格**（PN5180 では非対応）、`POST /rfid` JSON 契約・`reader_id` 命名・`rfid_cards.json`
-    形式は不変。`tag_id` UID 長は 4/7/8B（ISO 15693 含む）すべて許容方針。
-  - **ISSUE-0006** (Open): firmware ↔ Python の API 契約固定（`tag_id` 書式 / 8B UID 検証 / error
-    レスポンス / heartbeat / WiFi 切断時挙動）を register。
+- **RFID hardware を PN5180 + ESP32-S3 に移行**する仕様変更の方針 ADR を **訂正**:
+  - **ADR-0008** (Accepted, **supersedes ADR-0007**): ESP32-S3 が **USB CCID** として PN5180 ×N を
+    PC/SC multi-slot で公開し、ホスト側は **pyscard 経由の PC/SC を canonical（本筋）** とする。
+    `rfid/reader_thread.py` が第一系統。`rfid/http_receiver.py` は **optional secondary**
+    （debug / remote 用）に降格。`reader_configs` の reader_name ↔ role/seat マッピング契約、
+    `rfid_cards.json` 形式、confidence 行列、`RFIDEvent` は不変。`tag_id` UID 長は 4/7/8B 許容。
+  - **ADR-0007** (**Superseded by ADR-0008**): 旧 ADR は「HTTP を canonical / PCSC を legacy」
+    としていたが、これは作業者の誤想定による誤決定。history として残置。
+  - **ISSUE-0007** (Open): ESP32-S3 USB CCID firmware ↔ host の契約（USB descriptors /
+    reader_name / ATR / pseudo-APDU / 8B UID 取得 / hot-plug 通知）を register。
+  - **ISSUE-0006** (**Superseded by ISSUE-0007**): HTTP API 契約を追跡していた旧 issue は本筋から
+    外れたため Supersede。
   - **CLAUDE.md**: プロジェクト概要 / ディレクトリ構成 / 技術スタック / 実装状況 / エラーハンドリング
-    方針を新ハード（PN5180 + ESP32-S3）に追従。
-  - **decision-log.md**: ADR-0007 / ISSUE-0006 を Index に追加。
-  - フォローアップ（次タスク）: `card_master.normalize_tag_id` の 8B UID テスト、`reader_thread.py`
-    docstring と `config_default.json` コメントへの legacy 注記、`tests/test_rfid_http.py` への
-    8B UID fixture 追加、PCSC 経路完全削除可否の判断。
+    方針を「PC/SC canonical（USB CCID 経由）/ HTTP optional secondary」に flip。
+  - **decision-log.md**: ADR-0008 / ISSUE-0007 を追加、ADR-0007 / ISSUE-0006 を Superseded に更新。
+  - フォローアップ（次タスク）: `rfid/reader_thread.py` / `rfid/bridge.py` docstring と
+    `config_default.json` を PCSC canonical 前提に書き直し、`card_master.normalize_tag_id` の 8B UID
+    テスト追加、`tests/test_rfid.py` に 8B UID PCSC fixture 追加、ESP32-S3 firmware USB CCID
+    descriptor の確定を ISSUE-0007 に貼る。
 
 ### Docs / Planning (Phase 0b — S2 contracts)
 

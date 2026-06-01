@@ -6,7 +6,10 @@
 
 ## Status
 
-Open
+**Superseded by ISSUE-0007**（2026-06-01）。本 issue は ADR-0007（Superseded）の前提
+（HTTP transport が canonical）で起こした。ADR-0008 で **PC/SC 経路が canonical** に方針変更
+されたため、firmware ↔ host の契約対象が HTTP API から USB CCID / PC/SC に移動。後続の
+open question は ISSUE-0007（USB CCID firmware 契約）で追跡する。本 issue は history として残す。
 
 ## Severity / Priority
 
