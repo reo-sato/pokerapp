@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+### Docs / Planning (RFID hardware migration)
+
+- **RFID hardware を PN5180 + ESP32-S3 に移行**する仕様変更の方針を docs-only で記録（コード未改修）。
+  - **ADR-0007** (Accepted): HTTP transport を canonical に固定、PCSC 直結経路（`rfid/reader_thread.py`）
+    は **legacy 降格**（PN5180 では非対応）、`POST /rfid` JSON 契約・`reader_id` 命名・`rfid_cards.json`
+    形式は不変。`tag_id` UID 長は 4/7/8B（ISO 15693 含む）すべて許容方針。
+  - **ISSUE-0006** (Open): firmware ↔ Python の API 契約固定（`tag_id` 書式 / 8B UID 検証 / error
+    レスポンス / heartbeat / WiFi 切断時挙動）を register。
+  - **CLAUDE.md**: プロジェクト概要 / ディレクトリ構成 / 技術スタック / 実装状況 / エラーハンドリング
+    方針を新ハード（PN5180 + ESP32-S3）に追従。
+  - **decision-log.md**: ADR-0007 / ISSUE-0006 を Index に追加。
+  - フォローアップ（次タスク）: `card_master.normalize_tag_id` の 8B UID テスト、`reader_thread.py`
+    docstring と `config_default.json` コメントへの legacy 注記、`tests/test_rfid_http.py` への
+    8B UID fixture 追加、PCSC 経路完全削除可否の判断。
+
 ### Docs / Planning (Phase 0b — S2 contracts)
 
 - **S2 contract draft (session / seat_assignment / hand_ref)**: `docs/contracts/` に S2 の
