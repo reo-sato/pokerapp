@@ -9,6 +9,21 @@ issue / mismatch log) see `docs/worklog/`, `docs/adr/`, `docs/issues/`.
 
 ## [Unreleased]
 
+### RFID ハードウェア移行 (2026-06-01)
+
+RFID センサーのハードウェア仕様を **PN532 + ESP32（ESP32-WROOM-32）** から
+**PN5180 + ESP32-S3** に変更した。Python アプリ側の HTTP JSON transport 契約
+（`reader_id` / `tag_id` / `timestamp`）は **ハードウェア非依存のため不変**とし、
+受信ロジック・カード解決・統合のコードは変更していない（ADR-0006）。
+
+- **Changed**: `CLAUDE.md` / `integration/engine.py` / `rfid/http_receiver.py` の
+  PN532・ESP32(-WROOM-32) 記述を PN5180・ESP32-S3 に整合（docstring とドキュメントのみ、
+  実行ロジック無変更）。
+- **Docs**: ADR-0006（ハード移行 + 契約不変・UID 長可変・ISO14443A/ISO15693 dual-support）、
+  ISSUE-0007（タグ規格未定 / USB-CDC transport 候補 / クロストーク）を追加。
+- `rfid/card_master.py` の `normalize_tag_id` / `bytes_to_tag_id` は UID 長を仮定しない
+  実装のため、ISO14443A（4/7 バイト）・ISO15693（8 バイト）UID の両方をそのまま扱える。
+
 ### Branch consolidation (2026-05-22)
 
 並行開発で分岐していた複数ブランチを単一 `main` に統合した。hand logger コアは

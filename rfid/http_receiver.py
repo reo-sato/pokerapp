@@ -1,9 +1,12 @@
 """rfid/http_receiver.py
 
-ESP32-WROOM-32 から WiFi 経由で送られてくる RFID イベントを
+ESP32-S3 (+ PN5180 NFC フロントエンド) から WiFi 経由で送られてくる RFID イベントを
 HTTP POST で受信して RFIDEvent キューに投入するスレッド。
 
-ESP32 が送る JSON 形式:
+この受信側 JSON 契約はハードウェア非依存であり、NFC チップ / MCU の世代に依存しない
+(ADR-0006)。tag_id の UID 長は可変 (ISO14443A 4/7 バイト・ISO15693 8 バイト両対応)。
+
+ESP32-S3 が送る JSON 形式:
     POST /rfid  Content-Type: application/json
     {
         "reader_id":  "seat_3",
@@ -39,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 class RFIDHTTPReceiver(threading.Thread):
-    """ESP32 からの HTTP POST を受信して RFIDEvent をキューに投入するスレッド。
+    """ESP32-S3 からの HTTP POST を受信して RFIDEvent をキューに投入するスレッド。
 
     スレッド安全: rfid_queue への put() のみ使用。stop() 後に join() 可能。
 
@@ -153,7 +156,7 @@ class RFIDHTTPReceiver(threading.Thread):
             logger.warning(
                 "RFIDHTTPReceiver: unknown reader_id=%r (tag=%s)", reader_id, tag_id
             )
-            return 200, "unknown reader_id"   # 200 で返して ESP32 の再送を防ぐ
+            return 200, "unknown reader_id"   # 200 で返して ESP32-S3 の再送を防ぐ
 
         # カードルックアップ
         card = self._card_master.lookup(tag_id)

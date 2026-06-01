@@ -3,7 +3,7 @@
 ## プロジェクト概要
 
 ライブポーカートーナメントのハンド履歴を自動記録する Python アプリケーション。
-ディーラー口元マイク（faster-whisper 音声認識）と RFID NFC（ESP32 + PN532）の 2 ソースを統合し、
+ディーラー口元マイク（faster-whisper 音声認識）と RFID NFC（ESP32-S3 + PN5180）の 2 ソースを統合し、
 JSON/PHH 形式でハンドログを出力する。
 
 - **対象**: 小規模クラブ・個人配信向け
@@ -62,7 +62,7 @@ pokerapp/
 │   └── speech_normalizer.py       ← SpeechNormalizer (action/seat/number 正規化)
 │
 ├── rfid/
-│   ├── http_receiver.py           ← RFIDHTTPReceiver (ESP32 HTTP POST 受信)
+│   ├── http_receiver.py           ← RFIDHTTPReceiver (ESP32-S3 HTTP POST 受信)
 │   ├── reader_thread.py           ← RFIDThread (pyscard PC/SC 直接読み取り)
 │   ├── bridge.py                  ← RFID ブリッジユーティリティ
 │   └── card_master.py             ← CardMaster (rfid_cards.json ロード・検索)
@@ -103,7 +103,7 @@ pokerapp/
 | 音声認識（主） | faster-whisper ≥ 1.0 | CPU int8 モード |
 | 音声認識（代替） | Vosk | 軽量・低遅延（`audio.engine="vosk"`） |
 | マイク入力 | PyAudio ≥ 0.2.13 | |
-| RFID (HTTP) | 標準 http.server | ESP32 から HTTP POST 受信 |
+| RFID (HTTP) | 標準 http.server | ESP32-S3 + PN5180 から HTTP POST 受信（transport 契約はハードウェア非依存, ADR-0006） |
 | RFID (PC/SC) | pyscard ≥ 2.0.7 | transport="pcsc" 時のみ |
 | 役評価 / PHH 出力 | pokerkit ≥ 0.5 | pot settlement の hand rank 評価にも使用 |
 | 数値処理 | numpy ≥ 1.24 | ベイズ観測モデル / beam search |
@@ -541,7 +541,7 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 - 認識エラーでクラッシュしない → `try/except` で捕捉し `needs_review=True` を付与
 - ハンド完了ごとにディスクへ書き込む（バッファリングしない）
 - ログファイルは追記モード（既存セッションデータを上書きしない）
-- ESP32 停止・WiFi 切断時 → `rfid.enabled=false` で RFID なしモード継続動作
+- ESP32-S3 停止・WiFi 切断時 → `rfid.enabled=false` で RFID なしモード継続動作
 
 ---
 

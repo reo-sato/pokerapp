@@ -1,6 +1,6 @@
 """integration/engine.py
 
-audio / camera / RFID (ESP32 HTTP) の 3 ソースを統合し、confidence スコアを算出する。
+audio / camera / RFID (ESP32-S3 HTTP) の 3 ソースを統合し、confidence スコアを算出する。
 
 ソース優先度: RFID > audio > camera
 
@@ -14,7 +14,7 @@ Confidence 行列:
   camera のみ           : 0.30
   なし                  : 0.00
 
-カード情報 (ESP32 RFID):
+カード情報 (ESP32-S3 RFID):
   role="board" かつ board_index 付きイベント
       → _board_positions[board_index] に格納、ボード枚数でストリート自動推移
   role="seat" かつ card 付きイベント
