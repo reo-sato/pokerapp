@@ -45,3 +45,4 @@
 | ISSUE-0004 | display_name の uniqueness 仕様の将来拡張が未確定                  | Open     | 2026-05-22 | player registry (S1)       | `docs/issues/0004-display-name-uniqueness-scope.md`           | —                     |
 | ISSUE-0005 | 並行開発の contract drift / 凍結タイミング risk                   | Open     | 2026-05-22 | planning (WS0–WS3)         | `docs/issues/0005-parallel-dev-contract-drift.md`             | Phase 0a で部分緩和   |
 | ISSUE-0006 | hand_id が int と cross-app 文字列契約で不整合                    | Open     | 2026-05-22 | contracts / shared-ids     | `docs/issues/0006-hand-id-int-vs-cross-app-string.md`         | S2 (hand_ref) で確定  |
+| ISSUE-0007 | `python -m rfid.register` が参照されているが未実装               | Open     | 2026-06-01 | rfid / docs / tooling      | `docs/issues/0007-rfid-register-tool-missing.md`              | —                     |

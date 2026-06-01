@@ -9,6 +9,16 @@ issue / mismatch log) see `docs/worklog/`, `docs/adr/`, `docs/issues/`.
 
 ## [Unreleased]
 
+### Docs
+
+- **PC/SC RFID 実機テスト手順書を追加** (`docs/testing/rfid-pcsc-hardware-test.md`):
+  PC/SC リーダー（ACR122U 等）を使った RFID 実機テストの end-to-end 手順
+  （依存導入 → リーダー名確認 → カード登録 → `config.json` の PC/SC 設定 →
+  単体スモーク → ハンドロガー起動検証 → トラブルシュート）。HTTP デフォルト設定との
+  差分（`transport`・`readers` の dict/list 差・`name` 必須）と、未登録タグ /
+  デバウンス / street 自動推移の期待挙動を明記。あわせて未実装の
+  `python -m rfid.register`（`rfid_cards.json` の description が案内）を ISSUE-0007 として起票。
+
 ### Branch consolidation (2026-05-22)
 
 並行開発で分岐していた複数ブランチを単一 `main` に統合した。hand logger コアは
