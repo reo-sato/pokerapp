@@ -1,6 +1,6 @@
 # Deterministic record / replay and golden fixtures (design draft)
 
-> **Status: draft / 設計フェーズ**（planning 専用, コード未変更）。本 doc は ADR-0010（hand core の
+> **Status: R1 (record + `reconstruction_event` schema) 実装済 / replayer・golden fixtures は planned**。本 doc は ADR-0010（hand core の
 > contract 化と決定的 record/replay）の **設計詳細**。`reconstruction_event` envelope の inline schema
 > sketch を含む。再構築アルゴリズム本体は `hand-reconstruction.md`（ADR-0009）。
 >

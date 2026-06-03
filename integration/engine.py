@@ -36,6 +36,7 @@ from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
+from output.event_recorder import EventRecorder
 from output.json_writer import JsonWriter
 
 logger = logging.getLogger(__name__)
@@ -88,11 +89,14 @@ class IntegrationThread(threading.Thread):
         on_action: Optional[Callable[[ActionRecord], None]] = None,
         on_rfid_card: Optional[Callable[[RFIDEvent], None]] = None,
         stop_event: Optional[threading.Event] = None,
+        event_recorder: Optional[EventRecorder] = None,
     ) -> None:
         """
         Args:
             on_rfid_card: カード検出時のコールバック (GUI スレッドには渡さず
                           _update_queue 経由で処理すること)。スレッド安全に設計すること。
+            event_recorder: 生イベントを sidecar に記録する recorder (R1, ADR-0010)。
+                            None なら記録しない (= 挙動不変)。解釈前に呼ばれる。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -103,6 +107,7 @@ class IntegrationThread(threading.Thread):
         self._on_action = on_action
         self._on_rfid_card = on_rfid_card
         self._stop_event = stop_event or threading.Event()
+        self._event_recorder = event_recorder
 
         # センサーイベントのバッファ
         self._camera_buffer: list[CameraEvent] = []
@@ -122,6 +127,11 @@ class IntegrationThread(threading.Thread):
     def stop(self) -> None:
         self._stop_event.set()
 
+    def _record(self, event: AudioEvent | CameraEvent | RFIDEvent) -> None:
+        """生イベントを sidecar に記録する (recorder 未設定なら no-op = 挙動不変)。解釈前に呼ぶ。"""
+        if self._event_recorder is not None:
+            self._event_recorder.record(event)
+
     def run(self) -> None:
         logger.info("IntegrationThread started")
         while not self._stop_event.is_set():
@@ -133,6 +143,8 @@ class IntegrationThread(threading.Thread):
             except queue.Empty:
                 self._expire_buffers()
                 continue
+
+            self._record(event)
 
             try:
                 self._handle_audio_event(event)
@@ -150,9 +162,11 @@ class IntegrationThread(threading.Thread):
             return
         while True:
             try:
-                self._camera_buffer.append(self._camera_queue.get_nowait())
+                ev = self._camera_queue.get_nowait()
             except queue.Empty:
                 break
+            self._record(ev)
+            self._camera_buffer.append(ev)
 
     def _drain_rfid_queue(self) -> None:
         if self._rfid_queue is None:
@@ -160,9 +174,10 @@ class IntegrationThread(threading.Thread):
         while True:
             try:
                 ev: RFIDEvent = self._rfid_queue.get_nowait()
-                self._process_rfid_event(ev)
             except queue.Empty:
                 break
+            self._record(ev)
+            self._process_rfid_event(ev)
 
     def _process_rfid_event(self, ev: RFIDEvent) -> None:
         """受信した RFIDEvent を役割に応じて振り分ける。"""

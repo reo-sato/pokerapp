@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+### Added (Phase R1 — event recording sidecar)
+
+- **生センサーイベントの append-only sidecar 記録**（ADR-0010, record-only 先行実装）:
+  `IntegrationThread` が**解釈する前**に各 `AudioEvent` / `RFIDEvent` / `CameraEvent` を
+  `reconstruction_event` envelope（camera frame 除外）として `logs/{session_id}.events.jsonl` へ 1 行追記する。
+  再構築ロジックは不変で、**recorder 未指定（既定）なら挙動完全不変**。
+  - `output/event_recorder.py`（新規）: `EventRecorder` ＋ `event_to_envelope()`。append-only・スレッド安全・
+    I/O 失敗で再構築を止めない。
+  - `integration/engine.py`: `IntegrationThread(event_recorder=...)` を additive 追加。3 つの dequeue 点
+    （audio get / camera drain / rfid drain）で解釈前に `_record()`。default None = 従来動作。
+  - `main.py`: `config.recording.enabled`（既定 false, opt-in）で `EventRecorder` を構築し CLI / GUI 両経路で注入。
+    `config_default.json` に `recording.enabled: false` を追加。
+  - `docs/contracts/schemas/reconstruction_event.schema.json`（v0.1, `additionalProperties:false`）＋
+    `fixtures/reconstruction_event/`（canonical / valid-* / invalid-*）。`tests/test_contracts.py` の `_MODELS` に登録。
+  - tests: `tests/test_event_recorder.py`（envelope / JSONL / code↔contract）、
+    `tests/test_integration_recording.py`（engine→recorder e2e / recorder 未指定で sidecar 無し）。
+    **全 187 passed**（`pytest tests/ -q --ignore=tests/test_vision.py`）。
+  - **ADR-0010** を Accepted に更新（R1 実装済。R4/R5 = hand/action freeze・replayer は planned）。
+
 ### Docs / Planning (Phase R0 — rules-aware reconstruction & contract-first hand core, 設計提案)
 
 - **ハンド再構築エンジンと contract-first hand core の設計提案**（**docs-only, `.py` / schema / fixtures は

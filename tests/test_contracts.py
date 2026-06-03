@@ -26,7 +26,8 @@ _FIXTURES = _CONTRACTS / "fixtures"
 
 # 1 model = 1 schema = 1 fixtures dir
 # player: S1 freeze 候補。session / seat_assignment / hand_ref: S2 draft (ADR-0006, 未 freeze)。
-_MODELS = ["player", "session", "seat_assignment", "hand_ref"]
+# reconstruction_event: R1 (ADR-0010) record/replay の envelope (additionalProperties:false)。
+_MODELS = ["player", "session", "seat_assignment", "hand_ref", "reconstruction_event"]
 
 
 def _load(path: Path) -> dict:

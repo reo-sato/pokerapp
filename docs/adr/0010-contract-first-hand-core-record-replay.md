@@ -3,7 +3,7 @@
 ## Status
 
 <!-- One of: Proposed / Accepted / Superseded / Rejected / Deprecated -->
-Proposed
+Accepted（R1 record-only 実装済。R4/R5 = hand/action contract freeze・replayer は planned）
 
 ## Date
 
@@ -98,8 +98,9 @@ hand core を他層と同じ contract-first 規律に入れ、決定的に repla
 - [ ] **ISSUE-0010**: 何を記録すれば決定的 replay になるか（ASR decode 後 text+conf vs raw audio）と、
       live スレッド順序 ≈ timestamp 順の許容度を確定。
 - [ ] **ISSUE-0011**: `hand` / `action` の `additionalProperties:false` 昇格と必須/optional の確定。
-- [ ] R1（実装, 先行可）: record-only sidecar ＋ `reconstruction_event` schema/fixtures。挙動不変を
-      確認（記録の有無で `logs/*.json` がバイト一致）。
+- [x] R1（実装済, 2026-06-03）: record-only sidecar（`output/event_recorder.py`）＋ `reconstruction_event`
+      schema/fixtures（`tests/test_contracts.py` の `_MODELS` 登録）。`config.recording.enabled` で opt-in、
+      recorder 未指定で挙動不変。tests: `test_event_recorder` / `test_integration_recording` / 全 187 緑。
 - [ ] R4: `hand` / `action` schema 実ファイル化 ＋ `tests/test_contracts.py` の `_MODELS` 登録 ＋
       code↔contract テスト。
 - [ ] `tests/test_reconstruction.py` の golden replay が緑（既知バグ 5 ケース）。

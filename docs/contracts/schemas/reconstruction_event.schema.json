@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/reconstruction_event.schema.json",
+  "title": "ReconstructionEvent",
+  "version": "0.1",
+  "description": "R1 (ADR-0010): 記録される生センサーイベントの envelope。AudioEvent / RFIDEvent / CameraEvent を type で判別する discriminated union。camera frame は除外。seat / confidence は audio の additive (ADR-0009, R3) で optional。詳細は docs/contracts/event-replay.md §3。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "timestamp"],
+  "properties": {
+    "type": {"enum": ["audio", "rfid", "camera"]},
+    "timestamp": {"type": "number", "description": "time.time() 由来の秒。replay の clock 源 (§4)。"},
+    "action": {"type": "string"},
+    "amount": {"type": "integer", "minimum": 0},
+    "raw_text": {"type": "string"},
+    "seat": {"type": ["integer", "null"], "minimum": 1, "maximum": 9},
+    "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Whisper per-segment 信頼度 (ADR-0009 additive)。"},
+    "tag_id": {"type": "string"},
+    "card": {"type": "string"},
+    "reader_id": {"type": "string"},
+    "role": {"enum": ["seat", "board"]},
+    "board_index": {"type": ["integer", "null"], "minimum": 1, "maximum": 5},
+    "raw_tag_id": {"type": ["string", "null"]}
+  },
+  "allOf": [
+    {
+      "if": {"required": ["type"], "properties": {"type": {"const": "audio"}}},
+      "then": {"required": ["action", "amount", "raw_text"]}
+    },
+    {
+      "if": {"required": ["type"], "properties": {"type": {"const": "rfid"}}},
+      "then": {"required": ["tag_id", "card", "reader_id", "role"]}
+    },
+    {
+      "if": {"required": ["type"], "properties": {"type": {"const": "camera"}}},
+      "then": {"required": ["seat"]}
+    }
+  ]
+}

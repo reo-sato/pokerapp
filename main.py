@@ -55,6 +55,19 @@ def _prompt_session_config() -> dict:
     return {"players": players, "sb": sb, "bb": bb, "log_dir": log_dir}
 
 
+def _make_event_recorder(cfg: dict, log_dir: str, session_id: str):
+    """config.recording.enabled が true なら EventRecorder を返す (R1, ADR-0010)。
+
+    デフォルト false = 記録しない (挙動不変)。生イベントを
+    logs/{session_id}.events.jsonl に append-only で記録する sidecar。
+    """
+    if not cfg.get("recording", {}).get("enabled", False):
+        return None
+    from output.event_recorder import EventRecorder
+
+    return EventRecorder(Path(log_dir) / f"{session_id}.events.jsonl")
+
+
 def run_cli() -> None:
     """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。"""
     from core.config import load_config
@@ -153,6 +166,7 @@ def run_cli() -> None:
             print("RFID pyscardスレッド起動。")
         rfid_thread.start()
 
+    event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
         game_state=game_state,
@@ -161,6 +175,7 @@ def run_cli() -> None:
         rfid_queue=rfid_q if rfid_cfg.get("enabled", False) else None,
         on_action=on_action,
         stop_event=stop_event,
+        event_recorder=event_recorder,
     )
     audio_thread.start()
     integration_thread.start()
@@ -325,6 +340,7 @@ def run_gui() -> None:
     if rfid_thread is not None and rfid_cfg.get("transport") == "http":
         dash._rfid_receiver = rfid_thread
 
+    event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
         game_state=game_state,
@@ -334,6 +350,7 @@ def run_gui() -> None:
         on_action=dash.on_action,
         on_rfid_card=dash.on_rfid_card,
         stop_event=stop_event,
+        event_recorder=event_recorder,
     )
 
     dash.start_threads(

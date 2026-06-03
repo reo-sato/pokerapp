@@ -42,5 +42,9 @@
     },
     "_pcsc_transport_comment": "transport='pcsc' の場合は以下を使用 (pyscard 必須)",
     "_pcsc_poll_interval_ms": 100
+  },
+  "recording": {
+    "enabled": false,
+    "_comment": "R1 (ADR-0010): 生センサーイベントを logs/{session_id}.events.jsonl に append-only 記録する sidecar。挙動不変・opt-in。"
   }
 }
