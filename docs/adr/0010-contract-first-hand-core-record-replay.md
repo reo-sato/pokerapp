@@ -1,4 +1,4 @@
-# ADR-0011: hand core の contract 化と決定的 record/replay
+# ADR-0010: hand core の contract 化と決定的 record/replay
 
 ## Status
 
@@ -20,15 +20,15 @@ Proposed
 - `HandSummary` / `ActionRecord`（`core/hand_log.py`）に対応する schema / fixtures が無い。
 - 入力は **ノイジーな realtime センサー列**（マイク ASR ＋ RFID）で、`IntegrationThread` の挙動を
   **オフラインで再現・テストする手段が無い**。実センサー列に対する golden fixture が皆無。
-- 結果として ADR-0009 / ADR-0010 が導入する推定アルゴリズムを、**ground truth に対して反復・回帰固定
-  できない**。融合の重み（ADR-0010）も手置きになる。
+- 結果として ADR-0009 が導入する再構築アルゴリズムを、**ground truth に対して反復・回帰固定できない**。
+  融合の重み（ADR-0009 §8）も手置きになる。
 
 つまり「最新層（session/ledger）は厳密、最重要層（hand core）は organic」という逆転が起きている。
-本 ADR はこの非対称を解消する **アーキテクチャ決定**で、ADR-0009（engine）/ ADR-0010（algorithm）とは
-分離可能（現エンジンのままでも record/replay は導入できる）。
+本 ADR はこの非対称を解消する **アーキテクチャ決定**で、ADR-0009（再構築エンジン）とは分離可能
+（現エンジンのままでも record/replay は導入できる）。
 
 関連: ADR-0004 / ADR-0005（contract-first）/ ADR-0008（hand logger immutability・sidecar 前例）/
-ADR-0009 / ADR-0010（再構築）/ ISSUE-0010（replay 決定性の記録境界）/ ISSUE-0011（hand/action freeze）。
+ADR-0009（再構築エンジン）/ ISSUE-0010（replay 決定性の記録境界）/ ISSUE-0011（hand/action freeze）。
 詳細は `docs/contracts/hand-reconstruction.md`（モデル）/ `docs/contracts/event-replay.md`（harness）。
 
 ## Decision
@@ -40,8 +40,8 @@ hand core を他層と同じ contract-first 規律に入れ、決定的に repla
    1-model-1-schema＋fixtures 規約で定義する。`hand` / `action` は既存 on-disk JSON に対し **additive**
    （ADR-0008 §8.1 の HandSummary draft sketch を出発点にし、別案を作らない）。新 optional フィールドは
    `pots`（main/side）/ per-player `committed`（ADR-0009）、`legal_actions` / `amount_to_call` /
-   `corrected_from` / `actor_source` / `asr_confidence`（ADR-0010, 監査用）。`reconstruction_event` は
-   我々が新設する surface なので **より厳格**（`additionalProperties:false`）に寄せる。
+   `corrected_from` / `actor_source` / `asr_confidence`（ADR-0009 の推定が出力する監査情報）。
+   `reconstruction_event` は我々が新設する surface なので **より厳格**（`additionalProperties:false`）に寄せる。
 2. **append-only event sidecar を記録する。** `IntegrationThread` の入口で、**解釈する前**に各
    `AudioEvent`（raw_text / confidence 含む）/ `RFIDEvent` / `CameraEvent`（`frame` は除外）を
    `reconstruction_event` の JSON Lines として `logs/{session_id}.events.jsonl` に追記する。記録は解釈ゼロ
@@ -57,19 +57,20 @@ hand core を他層と同じ contract-first 規律に入れ、決定的に repla
 4. **golden fixtures を core の oracle にする。** `tests/fixtures/reconstruction/<case>/{events.jsonl,
    expected_hand.json}` を置き、`tests/test_reconstruction.py`（`test_contracts.py` 流）が replayer の
    出力 `HandSummary.to_dict()` を `expected_hand.json` と突き合わせ、`hand` schema で検証する。既知バグを
-   そのまま回帰ケースに採る（ADR-0010 の 5 ケース）。さらに `HandSummary(...).to_dict()` /
+   そのまま回帰ケースに採る（ADR-0009 の 5 ケース）。さらに `HandSummary(...).to_dict()` /
    `ActionRecord(...).to_dict()` が `hand` / `action` schema を通る **code↔contract** テストを
    `test_core_player_matches_contract`（`test_contracts.py:65`）の前例に倣って追加する。
+   `tests/test_contracts.py` の `_MODELS` に `hand` / `action` / `reconstruction_event` を追加する。
 5. **session 層（ADR-0008）と整合する。** ADR-0008 の write-through（`player_id` additive、
    `(session_id, hand_id)` 複合キー）と本決定は直交し合成する。`hand` schema が ADR-0008 の
-   `players[i].player_id` と本 ADR の `pots`/`committed` の **共通の additive 受け皿**になる。event sidecar /
+   `players[i].player_id` と ADR-0009 の `pots`/`committed` の **共通の additive 受け皿**になる。event sidecar /
    replay 出力は `(session_id, hand_id)` でアドレスでき、`logs/*.json` / PHH は immutable のまま（ADR-0008
    §8.4）。
 
 ## Alternatives Considered
 
 - **record/replay ＋ golden fixtures で contract 化（採用）**
-  - Pros: 心臓部に初めて oracle が付き、推定アルゴリズム（ADR-0010）を ground truth で反復・回帰固定できる。
+  - Pros: 心臓部に初めて oracle が付き、推定アルゴリズム（ADR-0009）を ground truth で反復・回帰固定できる。
     記録は非破壊・先行 ship 可能。他層と同じ規律に揃う。
   - Cons: 決定性（注入クロック / timestamp 順 replay）の作り込みが要る（ISSUE-0010）。fixtures 整備コスト。
 - **snapshot テストのみ（実出力をそのまま固定, 不採用）**
@@ -82,7 +83,7 @@ hand core を他層と同じ contract-first 規律に入れ、決定的に repla
 ## Consequences
 
 - Positive
-  - hand core が fixtures-as-oracle 規律に入り、ADR-0010 の融合重みを ground truth で較正可能になる。
+  - hand core が fixtures-as-oracle 規律に入り、ADR-0009 の融合重みを ground truth で較正可能になる。
   - 実セッションの生センサー列を **再現可能なデータ資産**として蓄積できる（不具合の永続再現）。
   - 記録だけ先行導入でき、挙動を変えずに移行を開始できる。
 - Negative / trade-offs
@@ -97,7 +98,7 @@ hand core を他層と同じ contract-first 規律に入れ、決定的に repla
 - [ ] **ISSUE-0010**: 何を記録すれば決定的 replay になるか（ASR decode 後 text+conf vs raw audio）と、
       live スレッド順序 ≈ timestamp 順の許容度を確定。
 - [ ] **ISSUE-0011**: `hand` / `action` の `additionalProperties:false` 昇格と必須/optional の確定。
-- [ ] R1（実装フェーズ, 先行可）: record-only sidecar ＋ `reconstruction_event` schema/fixtures。挙動不変を
+- [ ] R1（実装, 先行可）: record-only sidecar ＋ `reconstruction_event` schema/fixtures。挙動不変を
       確認（記録の有無で `logs/*.json` がバイト一致）。
 - [ ] R4: `hand` / `action` schema 実ファイル化 ＋ `tests/test_contracts.py` の `_MODELS` 登録 ＋
       code↔contract テスト。
@@ -126,5 +127,5 @@ hand core を他層と同じ contract-first 規律に入れ、決定的に repla
 
 - Supersedes: —
 - Superseded by: —
-- 関連: ADR-0009（engine）/ ADR-0010（algorithm）/ ADR-0008（immutability・sidecar 前例）/
+- 関連: ADR-0009（再構築エンジン）/ ADR-0008（immutability・sidecar 前例）/
   ISSUE-0010（replay 決定性）/ ISSUE-0011（hand/action freeze）

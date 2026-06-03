@@ -22,9 +22,9 @@ hand logger の **目的（ノイジーな ASR＋RFID からの正確な再構�
 
 新規（docs のみ）:
 
-- `docs/adr/0009-pokerkit-live-rules-authority.md` — pokerkit.State を live ルール権威に（engine/dependency 決定）。
-- `docs/adr/0010-rules-constrained-estimation-and-fusion.md` — actor 推定 / `apply_corrections` / 派生 confidence。
-- `docs/adr/0011-contract-first-hand-core-record-replay.md` — hand core の contract 化と決定的 record/replay。
+- `docs/adr/0009-pokerkit-live-rules-authority.md` — pokerkit.State を live ルール権威に ＋ 状態推定・融合
+  （actor 推定 / `apply_corrections` / 派生 confidence）を統合（engine ＋ algorithm）。
+- `docs/adr/0010-contract-first-hand-core-record-replay.md` — hand core の contract 化と決定的 record/replay。
 - `docs/contracts/hand-reconstruction.md` — engine/estimator 設計詳細（`PokerEngine` interface / 修復表 /
   `hand`・`action` inline sketch）。
 - `docs/contracts/event-replay.md` — record/replay harness / 決定性 / `reconstruction_event` sketch / golden fixtures。
@@ -35,7 +35,7 @@ hand logger の **目的（ノイジーな ASR＋RFID からの正確な再構�
 
 更新（docs のみ）:
 
-- `docs/decision-log.md` — ADR-0009/0010/0011、ISSUE-0008..0011 を index 登録。
+- `docs/decision-log.md` — ADR-0009/0010、ISSUE-0008..0011 を index 登録。
 - `CHANGELOG.md` — `Unreleased` に Phase R0 設計提案セクションを追加。
 - `CLAUDE.md` — 実装状況表の「actor 推定」「数値正規化」行に設計提案リンクを付与（❌ 未実装は据え置き）、
   Phase candidates に R0–R5（hand core 改善トラック, 提案）行を追加。
@@ -51,14 +51,14 @@ hand logger の **目的（ノイジーな ASR＋RFID からの正確な再構�
 
 ## Implemented Behavior
 
-- 3 ADR（Proposed）+ 2 contract draft + 4 issue（Open）+ traceability 更新を追加。設計の核心:
-  - **ADR-0009**: 現 `GameStateManager` の安定 I/F 背後で `pokerkit.State` へ差し替え（`engine.backend` フラグ）、
-    raw ASR を直接流さず合法手へ射影する「境界での推定」、出力 additive。`pokerkit` が宣言済み・**未 import**
-    である事実と `game_state.py` の Phase 3 TODO を正確に引用。
-  - **ADR-0010**: actor 推定（手番 prior × RFID/audio/camera + **silent-fold 自動合成**）、`apply_corrections`
-    （合法手制約・**call/check を amount_to_call から一意化**・amount スナップ）、派生 confidence
-    （`L×(A,Q)`, 固定テーブル置換）と `needs_review` 条件の明文化。
-  - **ADR-0011**: `hand`/`action`/`reconstruction_event` の contract 化、append-only event sidecar、
+- 2 ADR（Proposed, 当初 engine / algorithm の 2 案を統合し集約）+ 2 contract draft + 4 issue（Open）+
+  traceability 更新を追加。設計の核心:
+  - **ADR-0009**（engine ＋ algorithm を統合）: 現 `GameStateManager` の安定 I/F 背後で `pokerkit.State` へ
+    差し替え（`engine.backend` フラグ）、raw ASR を直接流さず合法手へ射影する「境界での推定」、出力 additive。
+    actor 推定（手番 prior × RFID/audio/camera + **silent-fold 自動合成**）、`apply_corrections`（合法手制約・
+    **call/check を amount_to_call から一意化**・amount スナップ）、派生 confidence（`L×(A,Q)`, 固定テーブル
+    置換）と `needs_review` 条件の明文化。`pokerkit` 宣言済み・**未 import** と Phase 3 TODO を正確に引用。
+  - **ADR-0010**: `hand`/`action`/`reconstruction_event` の contract 化、append-only event sidecar、
     **注入クロック**による決定的 replay、golden fixtures を core の oracle に。ADR-0008 と整合。
 
 ## Test Results
@@ -68,7 +68,7 @@ hand logger の **目的（ノイジーな ASR＋RFID からの正確な再構�
   pytest 導入環境での baseline 確認コマンド: `pytest tests/ -q --ignore=tests/test_vision.py`（変更前後で
   同一結果を期待）。
 - doc 整合（手動 grep, 緑）:
-  - `grep -rln "ADR-0009|ADR-0010|ADR-0011" docs/` / `"ISSUE-0008..0011"` → 新規 ADR/issue/contract doc と
+  - `grep -rln "ADR-0009|ADR-0010" docs/` / `"ISSUE-0008..0011"` → 新規 ADR/issue/contract doc と
     `decision-log.md` で相互参照が解決。
   - 新規 9 ファイル（3 ADR + 2 contract + 4 issue）の存在を確認。
 
@@ -94,8 +94,7 @@ hand logger の **目的（ノイジーな ASR＋RFID からの正確な再構�
 ## Related ADRs
 
 - `docs/adr/0009-pokerkit-live-rules-authority.md`
-- `docs/adr/0010-rules-constrained-estimation-and-fusion.md`
-- `docs/adr/0011-contract-first-hand-core-record-replay.md`
+- `docs/adr/0010-contract-first-hand-core-record-replay.md`
 - 関連: `docs/adr/0008-hand-logger-session-integration-strategy.md`（additive / immutability / sidecar 前例）
 
 ## Related Issues

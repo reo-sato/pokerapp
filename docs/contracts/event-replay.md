@@ -1,15 +1,15 @@
 # Deterministic record / replay and golden fixtures (design draft)
 
-> **Status: draft / 設計フェーズ**（planning 専用, コード未変更）。本 doc は ADR-0011（hand core の
+> **Status: draft / 設計フェーズ**（planning 専用, コード未変更）。本 doc は ADR-0010（hand core の
 > contract 化と決定的 record/replay）の **設計詳細**。`reconstruction_event` envelope の inline schema
-> sketch を含む。再構築アルゴリズム本体は `hand-reconstruction.md`（ADR-0009/0010）。
+> sketch を含む。再構築アルゴリズム本体は `hand-reconstruction.md`（ADR-0009）。
 >
-> 関連: ADR-0011 / ADR-0008（sidecar 非破壊の前例）/ ISSUE-0010（記録境界・決定性）。
+> 関連: ADR-0010 / ADR-0008（sidecar 非破壊の前例）/ ISSUE-0010（記録境界・決定性）。
 
 ## 1. なぜ record/replay か
 
 hand core の入力は **ノイジーな realtime センサー列**（マイク ASR ＋ RFID ＋ camera）で、`IntegrationThread`
-の挙動を**オフラインで再現する手段が無い**。そのため ADR-0009/0010 の推定アルゴリズムを ground truth に対して
+の挙動を**オフラインで再現する手段が無い**。そのため ADR-0009 の推定アルゴリズムを ground truth に対して
 反復・回帰固定できない。生イベントを**契約化して記録**し、それを**決定的に replay**できれば、心臓部に初めて
 fixtures-as-oracle（他層が既に持つ規律）が付く。
 
@@ -49,7 +49,7 @@ fixtures-as-oracle（他層が既に持つ規律）が付く。
          "action":  {"type":"string"},
          "amount":  {"type":"integer","minimum":0},
          "raw_text":{"type":"string"},
-         "seat":    {"type":["integer","null"],"minimum":1,"maximum":9},  // ADR-0010 additive
+         "seat":    {"type":["integer","null"],"minimum":1,"maximum":9},  // ADR-0009 additive
          "confidence":{"type":["number","null"],"minimum":0,"maximum":1}  // Whisper logprob, additive
        }}},
     {"if": {"properties": {"type": {"const": "rfid"}}},
@@ -96,7 +96,7 @@ tests/fixtures/reconstruction/<case>/
 
 `tests/test_reconstruction.py`（`tests/test_contracts.py` 流）が各 case で replayer を回し、出力
 `HandSummary.to_dict()` を `expected_hand.json` と突き合わせ、`hand` schema で検証する。**既知バグをそのまま
-回帰ケース**に採る（ADR-0010 由来）:
+回帰ケース**に採る（ADR-0009 由来）:
 
 | case | 入力の要点 | 期待（現状バグ → 修正後） |
 |---|---|---|
@@ -127,7 +127,7 @@ tests/fixtures/reconstruction/<case>/
 
 ## 8. 参照
 
-- ADR-0011（contract・replay）/ ADR-0009 / ADR-0010（再構築）/ ADR-0008（sidecar 非破壊）
+- ADR-0010（contract・replay）/ ADR-0009（再構築エンジン・推定・融合）/ ADR-0008（sidecar 非破壊）
 - `docs/contracts/hand-reconstruction.md`（推定・融合・`hand`/`action` sketch）
 - `core/events.py`（3 イベント型 = envelope の素, `frame` 除外）/ `integration/engine.py`（記録境界・clock 注入・
   drain 順序）/ `core/hand_log.py`（`HandSummary`/`ActionRecord`）/ `output/json_writer.py`（immutable）

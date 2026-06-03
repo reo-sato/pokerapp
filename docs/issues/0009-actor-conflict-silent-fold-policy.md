@@ -11,7 +11,7 @@ Open
 
 ## Severity / Priority
 
-- Severity: Medium（ADR-0010 の actor 推定の核。誤適用は誤 fold を生むため確定が要る）
+- Severity: Medium（ADR-0009 の actor 推定の核。誤適用は誤 fold を生むため確定が要る）
 - Priority: P2
 
 ## Area
@@ -20,7 +20,7 @@ reconstruct / integration
 
 ## Expected Behavior
 
-ADR-0010 §1 / `docs/contracts/hand-reconstruction.md` §4 の actor 推定で、prior（ルール上の手番）と sensor
+ADR-0009 §6 / `docs/contracts/hand-reconstruction.md` §4 の actor 推定で、prior（ルール上の手番）と sensor
 証拠（RFID seat / 明示発話 seat / camera）が食い違うときの **確定規則・重み・自動 fold 合成の適用条件・
 `needs_review` 閾値**が一意に定まっていること。
 
@@ -48,7 +48,7 @@ silent fold として自動合成する」だが、以下が **未確定**:
 
 実運用の「ディーラーが fold を宣言しない」「out-of-turn」を正しく捉えるには prior を sensor で上書きする
 必要があるが、上書きは誤 fold / 誤帰属のリスクと表裏。安全な適用条件は ground truth（golden fixtures,
-ADR-0011）に対する評価がないと決められない。
+ADR-0010）に対する評価がないと決められない。
 
 ## Fix
 
@@ -60,7 +60,7 @@ ADR-0011）に対する評価がないと決められない。
 
 ## Regression Test
 
-- `tests/test_reconstruction.py` の `silent-fold` / `out-of-turn-rfid` ケース（ADR-0011 §5）で、確定した
+- `tests/test_reconstruction.py` の `silent-fold` / `out-of-turn-rfid` ケース（ADR-0010 §5）で、確定した
   ポリシーの期待出力を pin する。
 
 ## Affected Files
@@ -75,7 +75,7 @@ ADR-0011）に対する評価がないと決められない。
 
 ## Related ADRs
 
-- `docs/adr/0010-rules-constrained-estimation-and-fusion.md`
+- `docs/adr/0009-pokerkit-live-rules-authority.md`
 
 ## Related Commits
 

@@ -1,11 +1,11 @@
 # Hand reconstruction engine — rules-constrained state estimation (design draft)
 
 > **Status: draft / 設計フェーズ**（planning 専用, コード未変更）。本 doc は ADR-0009（pokerkit を live
-> ルール権威に）/ ADR-0010（推定・融合アルゴリズム）の **設計詳細**で、`hand-integration.md` が ADR-0008 の
-> companion であるのと同じ位置づけ。`hand`/`action` の inline schema sketch を含むが **freeze しない**
-> （実ファイル化・freeze は ADR-0011 の R4 / ISSUE-0011）。record/replay は `event-replay.md`（ADR-0011）。
+> ルール権威に ＋ 状態推定・融合）の **設計詳細**で、`hand-integration.md` が ADR-0008 の companion で
+> あるのと同じ位置づけ。`hand`/`action` の inline schema sketch を含むが **freeze しない**（実ファイル化・
+> freeze は ADR-0010 の R4 / ISSUE-0011）。record/replay は `event-replay.md`（ADR-0010）。
 >
-> 関連: ADR-0009 / ADR-0010 / ADR-0011 / ISSUE-0008（pokerkit API）/ ISSUE-0009（actor / silent-fold）。
+> 関連: ADR-0009 / ADR-0010 / ISSUE-0008（pokerkit API）/ ISSUE-0009（actor / silent-fold）。
 
 ## 1. 再構築の再定義（data flow）
 
@@ -20,7 +20,7 @@ camera──► CameraThread──► CameraEvent(seat)                         
                                                                               ▼
                                               IntegrationThread（境界での推定）
                             ┌──────────────────────────────────────────────────────┐
-                            │ 0. record envelope → logs/{sid}.events.jsonl  (ADR-0011)│
+                            │ 0. record envelope → logs/{sid}.events.jsonl  (ADR-0010)│
                             │ 1. legal_ctx = engine.legal_context()                   │
                             │      (actor prior / 合法手 / amount_to_call / min_raise) │
                             │ 2. actor = resolve_actor(ev, legal_ctx, rfid, cam)  §4   │
@@ -71,7 +71,7 @@ pokerkit は player を 0..n-1 の連番で扱い、ドメインは疎な `seat_
 安定全単射**を固定し、hand 内で不変にする。`output/phh_exporter.py:119` の `seat_to_idx`（players_info 順の
 flatten）を**正式な単一実装に格上げ**し、engine と PHH が同じ写像を共有する（PHH の seat 順依存バグも同時に解消）。
 
-## 4. アクター推定アルゴリズム（ADR-0010 §1 の詳細）
+## 4. アクター推定アルゴリズム（ADR-0009 §6 の詳細）
 
 **入力**: prior（engine の `actor_seat`）＋観測（同窓内 RFID seat read / audio 明示 seat / camera seat）。
 audio 明示 seat は `engine.py:433` `_extract_seat_from_text`（現状 winner 専用）を全 action へ一般化して得る。
@@ -103,7 +103,7 @@ fold）で破れる。RFID-at-seat / 明示発話 seat は**現実の直接観�
 確定 actor は従来どおり `ActionRecord.seat` に載る（下流不変）。`AudioEvent` に optional `seat`（default None,
 additive）を足し、recognizer が明示 seat を見つけたら埋める。
 
-## 5. `apply_corrections()` 設計（ADR-0010 §2 の詳細）
+## 5. `apply_corrections()` 設計（ADR-0009 §7 の詳細）
 
 純関数 `apply_corrections(parsed, legal_ctx, whisper_conf) -> Corrected`。`audio/recognizer.py` に置くが
 ゲーム状態を持たず、engine が `legal_ctx` を渡して呼ぶ（recognizer をゲーム状態から疎結合に保つ）。
@@ -131,7 +131,7 @@ additive）を足し、recognizer が明示 seat を見つけたら埋める。
   `needs_review` トリガ（モデルと規則が確信を持って食い違う＝人が見るべき）。Whisper per-segment logprob を
   `AudioEvent.confidence`（additive）として運ぶ（現 `recognizer.py:218` は破棄している）。
 
-## 6. 派生 confidence モデル（ADR-0010 §3 の詳細）
+## 6. 派生 confidence モデル（ADR-0009 §8 の詳細）
 
 固定 8 行テーブル（`engine.py:59` `calc_confidence`）を廃し、**解釈可能な 3 因子の合成**にする:
 
@@ -151,8 +151,9 @@ confidence = clamp(w_L·L · (w_A·A + w_Q·Q), 0, 1)
 
 ## 7. `hand` / `action` の inline schema sketch（freeze しない）
 
-ADR-0008 §8.1 の HandSummary draft sketch を出発点に、ADR-0009/0010 の additive フィールドを足した sketch。
-**実ファイル化・freeze は ISSUE-0011 / R4**。`additionalProperties: true`（既存出力に多数フィールドがあるため）。
+ADR-0008 §8.1 の HandSummary draft sketch を出発点に、ADR-0009 の additive フィールドを足した sketch。
+**実ファイル化・freeze は ISSUE-0011 / ADR-0010 の R4**。`additionalProperties: true`（既存出力に多数
+フィールドがあるため）。
 
 ```jsonc
 // action（= ActionRecord, additive）
@@ -166,7 +167,7 @@ ADR-0008 §8.1 の HandSummary draft sketch を出発点に、ADR-0009/0010 の 
     "source": {"type":"object","properties":{"camera":{"type":"boolean"},
                "audio":{"type":"boolean"},"rfid":{"type":"boolean"}}},
     "confidence": {"type":"number","minimum":0,"maximum":1},
-    // ── additive（ADR-0010, 監査用, optional）──
+    // ── additive（ADR-0009 の推定が出力, 監査用, optional）──
     "legal_actions":  {"type":"array","items":{"type":"string"}},
     "amount_to_call": {"type":"integer","minimum":0},
     "corrected_from": {"type":["string","null"],"description":"修復前の生 ASR action"},
@@ -212,7 +213,7 @@ PHH は無改変（player_id を載せない, ADR-0008 §8.3）。
 
 ## 9. 参照
 
-- ADR-0009（pokerkit live 権威）/ ADR-0010（推定・融合）/ ADR-0011（contract・replay）
+- ADR-0009（pokerkit live 権威 ＋ 推定・融合）/ ADR-0010（contract・record/replay）
 - `docs/contracts/event-replay.md`（record/replay harness, `reconstruction_event`）
 - `docs/contracts/hand-integration.md`（ADR-0008, HandSummary draft sketch の出発点）
 - `core/game_state.py`（差し替え対象の安定 façade）/ `integration/engine.py`（推定の置き場）/

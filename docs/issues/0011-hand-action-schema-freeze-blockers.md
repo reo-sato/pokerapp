@@ -20,7 +20,7 @@ contracts / hand-reconstruction (hand / action)
 
 ## Expected Behavior
 
-ADR-0011 の `hand`（= `HandSummary`）/ `action`（= `ActionRecord`）契約が freeze 済（schema `1.0` +
+ADR-0010 の `hand`（= `HandSummary`）/ `action`（= `ActionRecord`）契約が freeze 済（schema `1.0` +
 fixtures + contract test 緑 + ADR Accepted, `docs/contracts/versioning-and-freeze.md` の freeze 定義）になり、
 core / desktop / mobile / replay が同一契約で本実装に入れる状態。
 
@@ -33,7 +33,7 @@ core / desktop / mobile / replay が同一契約で本実装に入れる状態�
    `board` / `board_source` / `pot_total` / `winner_seat` / `review_required` 等を持ち、`action` も
    `pot_after` / `stack_after` / `source` 等を持つ。`false` で締めるには **既存の全フィールドを契約に
    取り込む**必要があり範囲が大きい（ADR-0008 §8.1 が `true` に留めた理由と同じ）。
-2. **additive 新フィールドの必須/optional 確定**: ADR-0009 の `pots` / `committed`、ADR-0010 の
+2. **additive 新フィールドの必須/optional 確定**: ADR-0009 の `pots` / `committed`、同じく ADR-0009 の
    `legal_actions` / `amount_to_call` / `corrected_from` / `actor_source` / `asr_confidence` をどこまで
    required にするか（legacy / fallback では absent/null）。
 3. **ADR-0008 との統合**: `players[i].player_id`（ADR-0008 additive）と本 ADR の additive を同一 `hand`
@@ -65,7 +65,7 @@ hand core は contract-first 以前から有機的に育っており（多数フ
 ## Regression Test
 
 - freeze 時: `tests/test_contracts.py`（schema↔fixture）+ code↔contract テスト。
-- `tests/test_reconstruction.py`（golden replay の `expected_hand.json` が `hand` schema を通る, ADR-0011 §5）。
+- `tests/test_reconstruction.py`（golden replay の `expected_hand.json` が `hand` schema を通る, ADR-0010 §5）。
 
 ## Affected Files
 
@@ -80,7 +80,7 @@ hand core は contract-first 以前から有機的に育っており（多数フ
 
 ## Related ADRs
 
-- `docs/adr/0011-contract-first-hand-core-record-replay.md`
+- `docs/adr/0010-contract-first-hand-core-record-replay.md`
 - `docs/adr/0008-hand-logger-session-integration-strategy.md`（`players[i].player_id` additive と同居）
 
 ## Related Commits

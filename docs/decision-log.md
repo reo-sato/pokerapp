@@ -31,9 +31,8 @@
 | ADR-0006 | S2 session/seating contract boundary and hand_id cross-app reference               | Accepted | 2026-05-25 | contracts / shared-ids (S2) | `docs/adr/0006-s2-session-seating-contract-and-hand-id-cross-app-reference.md`                    | 関連: ADR-0003 / ISSUE-0004 |
 | ADR-0007 | S2 session layer persistence and session_id issuance                               | Accepted | 2026-05-25 | core / session (S2)         | `docs/adr/0007-s2-session-layer-persistence-and-id-issuance.md`                                   | 関連: ADR-0006 / ISSUE-0005 |
 | ADR-0008 | Hand logger × session/seating integration strategy (Phase 2.x)                     | Accepted | 2026-06-03 | hand logger × session (S2.x) | `docs/adr/0008-hand-logger-session-integration-strategy.md`                                       | 関連: ADR-0006 / ADR-0007 / ISSUE-0005 / 0006 / 0007 |
-| ADR-0009 | pokerkit as the live rules authority for hand reconstruction (engine)               | Proposed | 2026-06-03 | reconstruct / core (engine)  | `docs/adr/0009-pokerkit-live-rules-authority.md`                                                  | 関連: ADR-0010 / ADR-0011 / ISSUE-0008 |
-| ADR-0010 | Rules-constrained state estimation and multi-source fusion                         | Proposed | 2026-06-03 | reconstruct / integration    | `docs/adr/0010-rules-constrained-estimation-and-fusion.md`                                        | 関連: ADR-0009 / ADR-0011 / ISSUE-0009 |
-| ADR-0011 | Contract-first hand core via deterministic record/replay                           | Proposed | 2026-06-03 | reconstruct / contracts      | `docs/adr/0011-contract-first-hand-core-record-replay.md`                                         | 関連: ADR-0008 / ADR-0009 / ADR-0010 / ISSUE-0010 / 0011 |
+| ADR-0009 | Rules-aware hand reconstruction — pokerkit live authority + state estimation & fusion | Proposed | 2026-06-03 | reconstruct / core+integration | `docs/adr/0009-pokerkit-live-rules-authority.md` | 関連: ADR-0010 / ISSUE-0008 / ISSUE-0009 |
+| ADR-0010 | Contract-first hand core via deterministic record/replay | Proposed | 2026-06-03 | reconstruct / contracts | `docs/adr/0010-contract-first-hand-core-record-replay.md` | 関連: ADR-0008 / ADR-0009 / ISSUE-0010 / ISSUE-0011 |
 
 <!--
 Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時点で空番。
@@ -52,6 +51,6 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0006 | Hand 開始時の seat→player_id 選択 UX が未確定        | Open   | 2026-06-03 | hand logger × session / GUI | `docs/issues/0006-seat-selection-ux-at-hand-start.md`      | Phase 2.3 で確定 |
 | ISSUE-0007 | Legacy hand log（timestamp/no player_id）の取り込み方針 | Open | 2026-06-03 | data migration / S2.x       | `docs/issues/0007-legacy-hand-log-migration-policy.md`     | Phase 2.4 着手判断時 |
 | ISSUE-0008 | pokerkit を live engine として incremental 駆動できるか | Open | 2026-06-03 | reconstruct / dependency | `docs/issues/0008-pokerkit-online-feeding-feasibility.md` | ADR-0009 の gate（spike） |
-| ISSUE-0009 | actor 競合解決と silent-fold 合成のポリシー未確定 | Open | 2026-06-03 | reconstruct / integration | `docs/issues/0009-actor-conflict-silent-fold-policy.md` | ADR-0010（R3 で確定） |
-| ISSUE-0010 | 決定的 replay の記録境界とスレッド順序近似 | Open | 2026-06-03 | reconstruct / integration | `docs/issues/0010-replay-determinism-record-boundary.md` | ADR-0011（R1/R4） |
-| ISSUE-0011 | hand / action schema の freeze 未確定事項 | Open | 2026-06-03 | contracts / hand core | `docs/issues/0011-hand-action-schema-freeze-blockers.md` | ADR-0011（R4/R5） |
+| ISSUE-0009 | actor 競合解決と silent-fold 合成のポリシー未確定 | Open | 2026-06-03 | reconstruct / integration | `docs/issues/0009-actor-conflict-silent-fold-policy.md` | ADR-0009（R3 で確定） |
+| ISSUE-0010 | 決定的 replay の記録境界とスレッド順序近似 | Open | 2026-06-03 | reconstruct / integration | `docs/issues/0010-replay-determinism-record-boundary.md` | ADR-0010（R1/R4） |
+| ISSUE-0011 | hand / action schema の freeze 未確定事項 | Open | 2026-06-03 | contracts / hand core | `docs/issues/0011-hand-action-schema-freeze-blockers.md` | ADR-0010（R4/R5） |

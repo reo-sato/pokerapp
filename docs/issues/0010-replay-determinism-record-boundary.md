@@ -11,7 +11,7 @@ Open
 
 ## Severity / Priority
 
-- Severity: Medium（ADR-0011 の record/replay が決定的であるための前提）
+- Severity: Medium（ADR-0010 の record/replay が決定的であるための前提）
 - Priority: P2
 
 ## Area
@@ -20,7 +20,7 @@ reconstruct / integration / docs (contract)
 
 ## Expected Behavior
 
-ADR-0011 / `docs/contracts/event-replay.md` の replay が **決定的**（`replay(record(stream)) == live 結果`）
+ADR-0010 / `docs/contracts/event-replay.md` の replay が **決定的**（`replay(record(stream)) == live 結果`）
 であること。具体的には (a) **何を記録するか**の境界が定まり、(b) live のスレッド/キュー順序を replay が
 再現できる許容度が定まっていること。
 
@@ -76,7 +76,7 @@ realtime パイプラインは本質的に実時計・スレッドスケジュ�
 
 ## Related ADRs
 
-- `docs/adr/0011-contract-first-hand-core-record-replay.md`
+- `docs/adr/0010-contract-first-hand-core-record-replay.md`
 
 ## Related Commits
 

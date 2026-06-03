@@ -64,7 +64,7 @@ ADR-0009 は「既存の宣言済み依存 pokerkit を初めて live で使う�
 
 ## Regression Test
 
-- 確定後: `tests/test_reconstruction.py`（golden replay, ADR-0011）が pokerkit backend で緑。
+- 確定後: `tests/test_reconstruction.py`（golden replay, ADR-0010）が pokerkit backend で緑。
 - `tests/test_game_state.py` が legacy backend で緑のまま（regression 非発生）。
 
 ## Affected Files
