@@ -155,7 +155,9 @@ hand logger とは **完全に別画面** の player 管理機能。session / le
 
 player registry の上に重なる **session レイヤ + hand-based seating** の core 最小実装
 （CLAUDE.md § Future Scope の S2 を昇格）。契約は `docs/contracts/session-seating.md`（draft）/
-ADR-0006、実装上の判断は ADR-0007。**hand logger とは未接続**（独立した別ストア・別 namespace）。
+ADR-0006、実装上の判断は ADR-0007。S2 core 自体は独立した別ストア・別 namespace だが、
+**S2.2 で config-gated に hand logger と write-through 接続済**（§ Session Layer Integration、
+`config.session_layer.enabled`。flag off では従来どおり未接続）。
 
 ### スコープ（現時点）
 
@@ -198,6 +200,45 @@ ADR-0006、実装上の判断は ADR-0007。**hand logger とは未接続**（�
 
 ---
 
+## Session Layer Integration（S2.2, config-gated 実装済）
+
+既存 hand logger world（`HandSummary` / `JsonWriter` / `IntegrationThread` / `PHHExporter`）と
+S2 core（`core/session*.py`）を **config flag で切替可能な write-through** で最小接続する
+（ADR-0008 Pattern A、`docs/contracts/hand-integration.md`）。**PHH はバイト不変**、JSON は
+**additive のみ**。
+
+### config flag
+
+- `config.session_layer.enabled`（`config_default.json`、**default false**）。
+  - **false（既定 / rollback path）**: 従来どおりの hand logger 単独動作。`SessionRepository`
+    を呼ばず、session_id は timestamp 文字列、`HandSummary.players[i]` に `player_id` を付けない。
+  - **true**: 下記 write-through が有効。
+
+### flag on 時の挙動
+
+- session 開始時に `SessionRepository.create_session()` で **UUID4 hex の `session_id`** を採番し、
+  それを `JsonWriter`（ログファイル名）と `HandSummary.session_id` の canonical 値に使う。
+- hand 開始時（`IntegrationThread._start_new_hand`）に現在の seating（`seat_no -> player_id`）を
+  `assign_seat` バッチで session レイヤへ write-through。以降 `resolve_hand_ref` が読める。
+- hand 確定時（`_finalize_hand`）に `HandSummary.players[i].player_id` を **additive** に付与
+  （seating にある seat のみ。pattern `^[0-9a-f]{32}$`）。
+- `assign_seat` 失敗（unknown_player / session_closed 等）は warning に留め、hand logger の進行は
+  止めない（degraded）。
+
+### 不変条件
+
+- **PHH は無改変**（`PHHExporter` は seat/name/stack のみ参照し `player_id` を載せない、ADR-0008）。
+- **JSON hand log は additive のみ**。`player_id` 欠如時はキーごと省略し、旧 reader が壊れない。
+- `IntegrationThread` は `session_repo` / `session_id` / `seating` を **DI** で受け取る（test 可能）。
+
+### Out of scope（S2.2 時点）
+
+- seat 選択 UX（`main.py` の seating wiring は現状空 dict、ISSUE-0006 / Phase 2.3）。
+- legacy log の reconciliation（ISSUE-0007 / Phase 2.4）。
+- HandSummary schema の `1.0` freeze（ISSUE-0005 残項目、draft sketch のまま）。
+
+---
+
 ## 実装状況（現時点）
 
 | 機能 | 状態 | 備考 |
@@ -212,7 +253,8 @@ ADR-0006、実装上の判断は ADR-0007。**hand logger とは未接続**（�
 | PHH エクスポート | ✅ 実装済 | `output/phh_exporter.py` |
 | GUI ダッシュボード | 🔨 部分実装 | `gui/dashboard.py` |
 | **player registry (S1)** | ✅ 実装済 | `core/player.py`, `core/player_repository.py`, `gui/player_registry.py` |
-| **session + hand-based seating (S2) core** | ✅ 実装済 | `core/session.py`, `core/session_repository.py`（hand logger とは未接続, § Session & Seating 参照） |
+| **session + hand-based seating (S2) core** | ✅ 実装済 | `core/session.py`, `core/session_repository.py`（§ Session & Seating 参照） |
+| **session layer integration (S2.2)** | ✅ 実装済（config-gated） | `config.session_layer.enabled`、`integration/engine.py` write-through（§ Session Layer Integration 参照） |
 | ベッティングステート / actor 推定 | ❌ 未実装 | future phase |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | future phase |
@@ -485,10 +527,12 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
   - WS3: mobile の session 画面（mock）。**未着手**。
 - **Blockers**: seat_assignment を hand-based にする設計確定（**ADR-0006 済**）。hand_id の cross-app 形
   （**ADR-0006 で `(session_id, hand_id)` 複合キーに確定**）。`session_id` 採番・永続形は
-  **ADR-0007 で core について確定**。残: hand logger 接続・seat change UI 要件（ISSUE-0005）。
+  **ADR-0007 で core について確定**。hand logger 接続は **S2.2 で config-gated に実装済**。
+  残: seat change UI 要件（ISSUE-0006）と schema `1.0` freeze（ISSUE-0005）。
 - **Done criteria**: session 開始/終了と hand 単位 seat snapshot が core で確定（**達成: WS1 core**）。
-  両 front-end の契約越し表示（WS2/WS3）は未着手。schema `1.0` freeze は ISSUE-0005 残項目後。
-- **Phase 2.x（hand logger 接続, planning 済 / 実装 planned）**: 既存 hand logger world
+  hand logger との write-through 接続は **S2.2 達成（config-gated）**。両 front-end の契約越し
+  表示（WS2/WS3）は未着手。schema `1.0` freeze は ISSUE-0005 残項目後。
+- **Phase 2.x（hand logger 接続）**: 既存 hand logger world
   （`HandSummary` / `JsonWriter` / `PHHExporter` / `IntegrationThread`）と S2 core を **段階接続**する。
   方針は **Pattern A（write-through, additive）**：hand logger が `SessionRepository` に依存し、
   hand 開始時に `assign_seat` バッチを呼ぶ。`HandSummary.players[i]` に `player_id` を additive 追加、
@@ -496,9 +540,11 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
   詳細は **ADR-0008** / `docs/contracts/hand-integration.md`。残 UX は **ISSUE-0006**、legacy log
   取り込みは **ISSUE-0007**。Phase 細分:
   - 2.1: schema sketch + `config.session_layer.enabled` フラグ planned。
-  - 2.2: `main.py` session_id 切替 + `assign_seat` 連携 + `HandSummary.player_id` additive。
-  - 2.3: seat 選択 GUI（registry 連動）。
-  - 2.4: legacy log reconciler（任意, ISSUE-0007）。
+  - 2.2: **✅ 実装済（config-gated）** — `main.py` session_id 切替 + `IntegrationThread._start_new_hand`
+    の `assign_seat` 連携 + `HandSummary.players[i].player_id` additive。flag off で rollback。
+    PHH バイト不変。§ Session Layer Integration / `tests/test_session_integration.py`。
+  - 2.3: seat 選択 GUI（registry 連動）。**未着手**（ISSUE-0006。`main.py` の seating は現状空）。
+  - 2.4: legacy log reconciler（任意, ISSUE-0007）。**未着手**。
 
 ### Phase 3 — ledger and points
 

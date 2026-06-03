@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+### Added (Phase 2.2 — session/seating integration, config-gated)
+
+- **hand logger × S2 session/seating の最小統合**（ADR-0008 Pattern A, write-through）。
+  `config.session_layer.enabled`（既定 false）で切替可能。**PHH はバイト不変、JSON は additive のみ**。
+  - `config_default.json`: `session_layer.enabled`（default false）+ 説明コメントを追加。
+  - `integration/engine.py`: `IntegrationThread` に `session_repo` / `session_id` / `seating` を DI。
+    flag on で hand 開始時に `SessionRepository.assign_seat` バッチ、hand 確定時に
+    `HandSummary.players[i].player_id` を additive 付与、`HandSummary.session_id` を session レイヤの
+    UUID4 hex に切替。`assign_seat` 失敗は warning に留め hand logger を止めない。
+  - `main.py`: `_init_session_layer()` を追加。flag on で `create_session()`（UUID4 採番）→
+    JsonWriter / IntegrationThread に DI。flag off は従来の timestamp session_id（rollback path）。
+  - `core/hand_log.py`: `HandSummary.session_id` / `players[i].player_id` の additive 意味を明記
+    （構造変更なし）。
+  - `tests/test_session_integration.py`（新規）: ON（assign_seat + session_id/player_id 反映）/
+    OFF（SessionRepository 不使用・キー集合互換）/ assign_seat 失敗時の耐障害性。
+  - seat 選択 UX（ISSUE-0006）は未実装のため `main.py` の seating は現状空。HandSummary schema の
+    `1.0` freeze は引き続き保留（ISSUE-0005）。
+
 ### Docs / Planning (Phase S2.x — hand logger × session integration strategy)
 
 - **Hand logger × session/seating integration の戦略 planning**（docs-only, code 未変更）:

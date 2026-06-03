@@ -55,6 +55,35 @@ def _prompt_session_config() -> dict:
     return {"players": players, "sb": sb, "bb": bb, "log_dir": log_dir}
 
 
+def _init_session_layer(cfg: dict, session_cfg: dict):
+    """Phase 2.2 (ADR-0008): config flag に応じて S2 session レイヤを初期化する。
+
+    config.session_layer.enabled が真なら ``SessionRepository.create_session`` で
+    UUID4 hex の session_id を採番し、それを hand logger の canonical session_id に使う。
+    偽なら従来の timestamp session_id を採番し、session レイヤには接続しない（rollback path）。
+
+    Returns:
+        (session_id, session_repo, seating)
+          - session_id: JsonWriter / HandSummary が使う canonical な session_id。
+          - session_repo: 有効時のみ SessionRepository、無効時 None。
+          - seating: ``seat_no -> player_id`` マップ（Phase 2.2 は seat 選択 UX 未実装の
+            ため空。ISSUE-0006 で別途）。
+    """
+    if cfg.get("session_layer", {}).get("enabled", False):
+        from core.session_repository import SessionRepository
+
+        session_repo = SessionRepository()
+        session = session_repo.create_session(
+            blinds={"sb": session_cfg["sb"], "bb": session_cfg["bb"]},
+        )
+        logger.info("Session layer enabled: session_id=%s", session.session_id)
+        # seat→player_id の入力 UX は ISSUE-0006（Phase 2.3）。現状は空 seating。
+        return session.session_id, session_repo, {}
+
+    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
+    return session_id, None, {}
+
+
 def run_cli() -> None:
     """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。"""
     from core.config import load_config
@@ -77,7 +106,7 @@ def run_cli() -> None:
         bb=session_cfg["bb"],
     )
 
-    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
+    session_id, session_repo, seating = _init_session_layer(cfg, session_cfg)
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
 
     audio_q = make_audio_queue()
@@ -161,6 +190,9 @@ def run_cli() -> None:
         rfid_queue=rfid_q if rfid_cfg.get("enabled", False) else None,
         on_action=on_action,
         stop_event=stop_event,
+        session_repo=session_repo,
+        session_id=session_id if session_repo is not None else None,
+        seating=seating,
     )
     audio_thread.start()
     integration_thread.start()
@@ -249,7 +281,7 @@ def run_gui() -> None:
         bb=session_cfg["bb"],
     )
 
-    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
+    session_id, session_repo, seating = _init_session_layer(cfg, session_cfg)
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
 
     audio_q = make_audio_queue()
@@ -334,6 +366,9 @@ def run_gui() -> None:
         on_action=dash.on_action,
         on_rfid_card=dash.on_rfid_card,
         stop_event=stop_event,
+        session_repo=session_repo,
+        session_id=session_id if session_repo is not None else None,
+        seating=seating,
     )
 
     dash.start_threads(

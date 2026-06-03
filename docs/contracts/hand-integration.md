@@ -1,9 +1,10 @@
 # Hand logger × Session/Seating integration (Phase 2.x draft)
 
-> **Status: draft / 設計フェーズ**。本 doc は **planning 専用**（コードは未変更）。
+> **Status: Phase 2.2 実装済（config-gated）**。本 doc は接続戦略の設計 + 実装対応記録。
 > S2 core（`core/session*.py`）と既存 hand logger world（`core/hand_log.py` / `output/json_writer.py` /
-> `output/phh_exporter.py` / `integration/engine.py` / `main.py`）の段階接続方針を確定するための
-> 設計 doc。具体的な実装契約への freeze は ADR-0008 を Accepted にして以降の Phase 2.x で行う。
+> `output/phh_exporter.py` / `integration/engine.py` / `main.py`）の段階接続。Phase 2.2 で
+> write-through（Pattern A）を **config flag `session_layer.enabled` 越しに実装**（§ 7 Phase 2.2）。
+> schema `1.0` freeze は引き続き ISSUE-0005 残項目決着後。
 >
 > 関連: ADR-0006（S2 contract）/ ADR-0007（S2 core 永続形）/ ADR-0008（本接続戦略）/
 > ISSUE-0005（S2 freeze blockers）/ ISSUE-0006（seating UX）/ ISSUE-0007（legacy log migration）。
@@ -169,16 +170,32 @@ IntegrationThread
 - legacy のまま: 既存 main.py / JsonWriter / PHHExporter / GameStateManager / IntegrationThread。
 - rollback: config flag off で完全に従来動作（影響ゼロ）。
 
-### Phase 2.2 — session_id 切替 & hand 開始時の assign_seat
+### Phase 2.2 — session_id 切替 & hand 開始時の assign_seat（✅ 実装済, config-gated）
 
-- 変わるもの:
-  - `main.py` GUI/CLI で session 選択 step を追加（create_session または既存 session 選択）。
-  - `JsonWriter` の session_id を UUID4 hex（session レイヤ採番）に切替（schema は opaque 文字列のまま）。
-  - `IntegrationThread._start_new_hand` で `SessionRepository.assign_seat` のバッチ呼び出し。
-  - `HandSummary.players[i].player_id` を additive に埋め始める。
-- legacy のまま: PHHExporter 不変。logs/*.json の旧 session_id 形式（timestamp）も読み込み可能。
-  GameStateManager は変更不要（player_id は IntegrationThread が seat 単位で別途保持）。
-- rollback: config flag off で従来通り。session_repo を None 注入する DI path で fallback 可能。
+実装コミット（本 Phase 2.2）で完了。実際の実装と設計の対応:
+
+- 変わったもの:
+  - `config_default.json` に `session_layer.enabled`（default false）を追加。
+  - `main.py` に `_init_session_layer()` を追加。flag on のとき `SessionRepository.create_session()`
+    で UUID4 hex を採番し、それを `JsonWriter`（ログファイル名）と canonical session_id に使う。
+    flag off は従来の timestamp session_id（rollback path）。
+  - `IntegrationThread` に `session_repo` / `session_id` / `seating` を **DI** 追加。
+    `_start_new_hand` で `_assign_seats_for_hand`（`SessionRepository.assign_seat` バッチ）。
+  - `HandSummary.players[i].player_id` を additive に付与（seating にある seat のみ）。
+    `HandSummary.session_id` は session レイヤ有効時に UUID4 hex を採用。
+- legacy のまま: **PHHExporter 不変（バイト一致を test で確認）**。logs/*.json の旧 session_id 形式
+  （timestamp）も読み込み可能。`GameStateManager` は変更不要（player_id は IntegrationThread が
+  `seating` として seat 単位で別途保持）。
+- rollback: config flag off で従来通り。`session_repo` を渡さない（None）DI path で fallback。
+- 設計との差分:
+  - **assign_seat 失敗ハンドリング**: 当初 doc は「hand を開始しない / fallback」だったが、実装は
+    **hand を止めず warning に留める（degraded）** を採用。理由は hand logger の UX（録音継続）を
+    最優先するため。失敗 seat は session レイヤに記録されないだけで、hand log 自体は出力される。
+  - **seat 選択 UX は未実装**（ISSUE-0006）。そのため `main.py` の `seating` は現状空 dict であり、
+    flag on でも `main.py` 経由では player_id が実際には付かない（session 作成・session_id 切替・
+    空 assign_seat バッチのみ効く）。`seating` を渡したときの write-through 本体は
+    `tests/test_session_integration.py` で IntegrationThread 単体検証する。
+- test: `tests/test_session_integration.py`（ON / OFF / 耐障害性）。
 
 ### Phase 2.3 — seat selection UI (registry 連動)
 

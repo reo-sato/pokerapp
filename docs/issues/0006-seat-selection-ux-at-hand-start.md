@@ -6,12 +6,26 @@
 
 ## Status
 
-Open
+Open（Phase 2.2 は暫定実装で迂回。seat 選択 UI 本体は引き続き未確定）
 
 ## Severity / Priority
 
 - Severity: Medium（Phase 2.3 の前に確定が必要。Phase 2.1/2.2 の planning は本 issue を待たずに進む）
 - Priority: P2
+
+## Phase 2.2 時点の暫定対応（2026-06-03）
+
+write-through 接続（ADR-0008）は Phase 2.2 で実装済だが、seat 選択 UI は未着手のため:
+
+- `IntegrationThread` は `seating`（`seat_no -> player_id`）を **DI で受け取るだけ**にし、
+  「既知の player_id をそのまま割り当てる」最小形にした（seat 選択ロジックは持たない）。
+- `main.py` の `_init_session_layer()` は flag on でも `seating` を **空 dict** で渡す。よって
+  実運用（`main.py` 経由）では session 作成・session_id 切替・空 assign_seat バッチのみ効き、
+  `HandSummary.players[i].player_id` は実際には付かない。
+- `seating` を与えたときの write-through 本体（assign_seat バッチ → player_id additive）は
+  `tests/test_session_integration.py` で IntegrationThread 単体検証済。
+- carry-forward は「同一 `seating` を毎 hand 再適用」する単純形（hand ごとに独立 snapshot を記録）。
+  差分入力 / sitting_out / その場 player 登録は本 issue（Phase 2.3）で確定する。
 
 ## Area
 

@@ -95,9 +95,11 @@ Phase 2.x の接続戦略として **Pattern A（write-through, additive）** �
 - [x] 接続パターンを doc 化（`docs/contracts/hand-integration.md`）。
 - [x] HandSummary draft schema sketch を doc に置く（schema ファイル化はしない）。
 - [x] ISSUE-0006（seat 選択 UX）/ ISSUE-0007（legacy log 取り込み）を起票。
-- [ ] Phase 2.1: `config.session_layer.enabled` フラグの追加（コード変更必要、別 PR）。
-- [ ] Phase 2.2: `main.py` の session_id 切替 + `IntegrationThread._start_new_hand` の assign_seat 連携
-       + `HandSummary.players[i].player_id` additive。
+- [x] Phase 2.1 / 2.2: `config.session_layer.enabled` フラグ + `main.py` の session_id 切替 +
+       `IntegrationThread._start_new_hand` の assign_seat 連携 + `HandSummary.players[i].player_id`
+       additive（config-gated, PHH バイト不変）。`tests/test_session_integration.py`。
+       実装メモ: assign_seat 失敗は hand を止めず warning（degraded）。seat 選択 UX は ISSUE-0006 へ
+       委譲し `main.py` の seating は当面空（`docs/contracts/hand-integration.md` § 7 Phase 2.2）。
 - [ ] Phase 2.3: seat 選択 GUI（registry 連動）。
 - [ ] Phase 2.4: legacy log reconciler tool（必要に応じて）。
 - [ ] schema `1.0` freeze（ISSUE-0005 残項目決着 + Phase 2.2 動作後）。
