@@ -6,14 +6,44 @@
 
 ## Status
 
-Open（Phase 2.2 は暫定実装で迂回。seat 選択 UI 本体は引き続き未確定）
+Partially Resolved（Phase 2.3 で最小 seat selection UX を実装。高度 UX は引き続き Open）
 
 ## Severity / Priority
 
-- Severity: Medium（Phase 2.3 の前に確定が必要。Phase 2.1/2.2 の planning は本 issue を待たずに進む）
-- Priority: P2
+- Severity: Low（最小 UX は実装済。残るのは sitting_out / 未登録 player 追加 / seat change 履歴 UI 等の拡張）
+- Priority: P3
 
-## Phase 2.2 時点の暫定対応（2026-06-03）
+## Phase 2.3 実装で解決した部分（2026-06-03）
+
+最小 seat selection UX を desktop hand logger に実装した（`gui/seat_assignment.py` /
+`gui/dashboard.py`、ADR-0008 Pattern A の seating 入力経路）:
+
+- **手動 seat selection ダイアログ**: `SeatAssignmentDialog`（モーダル）。seat ごとに player
+  選択コンボボックス（候補 = `PlayerRepository.list_players()` の `display_name`、内部値 =
+  `player_id`）。「（空席）」選択 = その seat を seating に入れない。
+- **carry-forward**: ダイアログ初期値に `IntegrationThread.get_seating()`（直前 hand の seating）を
+  使う。通常は無変更で OK、入れ替え時だけ変更。
+- **最小フロー**: 「新ハンド」ボタンが session レイヤ有効時にダイアログを開き、OK で
+  `IntegrationThread.update_seating()` → 続けて new_hand を流す。「席割り当て」ボタンで hand を
+  開始せず seating だけ編集も可能。
+- **config 連携**: `session_layer.enabled == False` では seat UI ボタンを出さず、「新ハンド」は
+  従来どおり直接 new_hand を流す（UX 不変）。
+- player 候補は **ダイアログを開くたびに registry から最新取得**（起動時キャッシュしない）。
+
+## まだ Open な部分（Phase 2.3 scope 外 → 将来）
+
+- **sitting_out / late entry / temporary leave** 等の seat 状態（現状は「空席」= 割り当てなしの
+  単純 2 値のみ。`SeatAssignment.status` の活用は未実装）。
+- **未登録 player のその場追加**（ダイアログから `create_player` への遷移）。現状は事前に Player
+  Registry 画面で登録が必要。
+- **seat change の履歴 UI**（hand 間差分の可視化）。記録は hand-based snapshot で取れているが
+  閲覧 UI は無い。
+- **重複 player のガード**: 同一 hand で同じ player を 2 席に選ぶと 2 つ目の `assign_seat` が
+  `player_already_seated` で degraded（warning）になる。UI 側の事前バリデーションは未実装。
+- **mobile（WS3）との UX 一貫性**: 同 contract に従う前提だが mobile 実装自体が未着手。
+- **auto-accept / キーボード操作** 等の操作効率化。
+
+## Phase 2.2 時点の暫定対応（2026-06-03, 履歴）
 
 write-through 接続（ADR-0008）は Phase 2.2 で実装済だが、seat 選択 UI は未着手のため:
 

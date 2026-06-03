@@ -68,6 +68,7 @@ pokerapp/
 │
 ├── gui/
 │   ├── dashboard.py               ← GUIDashboard (hand logger 画面, customtkinter)
+│   ├── seat_assignment.py         ← SeatAssignmentDialog (seat→player 選択, S2.3, session レイヤ有効時のみ)
 │   └── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
 │
 ├── tests/                         ← pytest テストスイート
@@ -200,12 +201,12 @@ ADR-0006、実装上の判断は ADR-0007。S2 core 自体は独立した別ス�
 
 ---
 
-## Session Layer Integration（S2.2, config-gated 実装済）
+## Session Layer Integration（S2.2 / S2.3, config-gated 実装済）
 
-既存 hand logger world（`HandSummary` / `JsonWriter` / `IntegrationThread` / `PHHExporter`）と
-S2 core（`core/session*.py`）を **config flag で切替可能な write-through** で最小接続する
-（ADR-0008 Pattern A、`docs/contracts/hand-integration.md`）。**PHH はバイト不変**、JSON は
-**additive のみ**。
+既存 hand logger world（`HandSummary` / `JsonWriter` / `IntegrationThread` / `PHHExporter` /
+`gui/dashboard.py`）と S2 core（`core/session*.py`）を **config flag で切替可能な write-through**
+で最小接続する（ADR-0008 Pattern A、`docs/contracts/hand-integration.md`）。**PHH はバイト不変**、
+JSON は **additive のみ**。S2.2 で write-through、S2.3 で desktop の最小 seat selection UX を追加。
 
 ### config flag
 
@@ -222,19 +223,35 @@ S2 core（`core/session*.py`）を **config flag で切替可能な write-throug
   `assign_seat` バッチで session レイヤへ write-through。以降 `resolve_hand_ref` が読める。
 - hand 確定時（`_finalize_hand`）に `HandSummary.players[i].player_id` を **additive** に付与
   （seating にある seat のみ。pattern `^[0-9a-f]{32}$`）。
-- `assign_seat` 失敗（unknown_player / session_closed 等）は warning に留め、hand logger の進行は
-  止めない（degraded）。
+- `assign_seat` 失敗（unknown_player / session_closed / player_already_seated 等）は warning に留め、
+  hand logger の進行は止めない（degraded）。
+
+### seat selection UX（S2.3, desktop 最小実装）
+
+- session レイヤ有効時のみ desktop dashboard に **seat 割り当て UI** を出す（`gui/seat_assignment.py`
+  の `SeatAssignmentDialog`、モーダル）。flag off では UI を出さず「新ハンド」は従来どおり直接 new_hand。
+- **フロー**: 「新ハンド」押下 → seat ダイアログ（初期値 = 直前 hand の carry-forward）→ OK で
+  `IntegrationThread.update_seating()` → new_hand を流して write-through。キャンセルは seating 不変で
+  hand も開始しない。「席割り当て」ボタンで hand を開始せず seating だけ編集も可能。
+- player 候補は **ダイアログを開くたびに `PlayerRepository.list_players()` を取得**（起動時キャッシュ
+  しない）。表示は `display_name`、内部値は `player_id`。「（空席）」選択 = その seat を割り当てない。
+- seating は `IntegrationThread.update_seating` / `get_seating`（lock 保護）で GUI スレッドと
+  IntegrationThread 間を安全に受け渡す。
 
 ### 不変条件
 
 - **PHH は無改変**（`PHHExporter` は seat/name/stack のみ参照し `player_id` を載せない、ADR-0008）。
 - **JSON hand log は additive のみ**。`player_id` 欠如時はキーごと省略し、旧 reader が壊れない。
 - `IntegrationThread` は `session_repo` / `session_id` / `seating` を **DI** で受け取る（test 可能）。
+- `GUIDashboard` は `player_repo` / `session_layer_enabled` を DI で受け取り、flag off では
+  既存 UX を完全維持する。
 
-### Out of scope（S2.2 時点）
+### Out of scope（S2.3 時点、ISSUE-0006 に残す）
 
-- seat 選択 UX（`main.py` の seating wiring は現状空 dict、ISSUE-0006 / Phase 2.3）。
-- legacy log の reconciliation（ISSUE-0007 / Phase 2.4）。
+- sitting_out / late entry 等の seat 状態（現状は「空席」= 割り当てなしの 2 値のみ）。
+- 未登録 player のその場追加（事前に Player Registry 画面で登録が必要）。
+- seat change 履歴 UI、同一 hand 重複 player の事前バリデーション（現状 degraded warning）。
+- mobile（WS3）側 seat UX、legacy log の reconciliation（ISSUE-0007 / Phase 2.4）。
 - HandSummary schema の `1.0` freeze（ISSUE-0005 残項目、draft sketch のまま）。
 
 ---
@@ -255,6 +272,7 @@ S2 core（`core/session*.py`）を **config flag で切替可能な write-throug
 | **player registry (S1)** | ✅ 実装済 | `core/player.py`, `core/player_repository.py`, `gui/player_registry.py` |
 | **session + hand-based seating (S2) core** | ✅ 実装済 | `core/session.py`, `core/session_repository.py`（§ Session & Seating 参照） |
 | **session layer integration (S2.2)** | ✅ 実装済（config-gated） | `config.session_layer.enabled`、`integration/engine.py` write-through（§ Session Layer Integration 参照） |
+| **seat selection UX (S2.3)** | ✅ 実装済（desktop 最小） | `gui/seat_assignment.py`、`gui/dashboard.py` seat ダイアログ（session レイヤ有効時のみ。§ Session Layer Integration 参照） |
 | ベッティングステート / actor 推定 | ❌ 未実装 | future phase |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | future phase |
@@ -410,7 +428,11 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
   validation・残高計算・settlement 確定ロジックを各 front-end に複製しない。
 - **desktop (WS2) と mobile (WS3) は対等な front-end**。mobile は hand logger の置き換えではなく
   「registry / ledger 等を扱う将来の別 front-end」。どちらも同じ contract に対して実装する。
-- **hand logger 既存 UI (`gui/dashboard.py`) は触らない**。registry / ledger は常に別画面。
+- **registry / ledger / settlement の管理画面は hand logger UI に混ぜない**（常に別画面）。
+  ただし hand logger 自身の責務に属する操作（例: S2.3 の seat→player 割り当て＝その hand の
+  seating を決める操作）は hand logger UI（`gui/dashboard.py` + `gui/seat_assignment.py`）に
+  置いてよい。player の CRUD は引き続き Player Registry 別画面（S1）が持ち、seat UI は registry を
+  **参照するだけ**（player を作らない）。
 
 ## 何が parallelizable で、何が blocker か
 
@@ -523,12 +545,14 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
     **draft 済**、freeze は ISSUE-0005 残項目後。
   - WS1: session 管理・seat snapshot の repository/service。**core 実装済**
     （`core/session.py` / `core/session_repository.py`, ADR-0007、`tests/test_session_repository.py`）。
-  - WS2: desktop の session/seating 別画面。**未着手**。
+  - WS2: desktop の seat selection UX。**S2.3 で最小実装済**（`gui/seat_assignment.py`、hand logger
+    内の seat→player 割り当て）。独立した session 管理別画面は未着手。
   - WS3: mobile の session 画面（mock）。**未着手**。
 - **Blockers**: seat_assignment を hand-based にする設計確定（**ADR-0006 済**）。hand_id の cross-app 形
   （**ADR-0006 で `(session_id, hand_id)` 複合キーに確定**）。`session_id` 採番・永続形は
-  **ADR-0007 で core について確定**。hand logger 接続は **S2.2 で config-gated に実装済**。
-  残: seat change UI 要件（ISSUE-0006）と schema `1.0` freeze（ISSUE-0005）。
+  **ADR-0007 で core について確定**。hand logger 接続は **S2.2 で config-gated に実装済**、seat
+  selection UX は **S2.3 で最小実装済**。残: 高度 seat UX（sitting_out 等, ISSUE-0006）と
+  schema `1.0` freeze（ISSUE-0005）。
 - **Done criteria**: session 開始/終了と hand 単位 seat snapshot が core で確定（**達成: WS1 core**）。
   hand logger との write-through 接続は **S2.2 達成（config-gated）**。両 front-end の契約越し
   表示（WS2/WS3）は未着手。schema `1.0` freeze は ISSUE-0005 残項目後。
@@ -543,7 +567,10 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
   - 2.2: **✅ 実装済（config-gated）** — `main.py` session_id 切替 + `IntegrationThread._start_new_hand`
     の `assign_seat` 連携 + `HandSummary.players[i].player_id` additive。flag off で rollback。
     PHH バイト不変。§ Session Layer Integration / `tests/test_session_integration.py`。
-  - 2.3: seat 選択 GUI（registry 連動）。**未着手**（ISSUE-0006。`main.py` の seating は現状空）。
+  - 2.3: **✅ 実装済（desktop 最小）** — seat 選択 GUI（registry 連動）。`gui/seat_assignment.py`
+    の `SeatAssignmentDialog` + `IntegrationThread.update_seating`/`get_seating`。carry-forward 対応。
+    sitting_out / 未登録 player 追加等は ISSUE-0006 に残す。§ Session Layer Integration /
+    `tests/test_seat_assignment_gui.py`。
   - 2.4: legacy log reconciler（任意, ISSUE-0007）。**未着手**。
 
 ### Phase 3 — ledger and points

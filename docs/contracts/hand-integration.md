@@ -1,9 +1,10 @@
 # Hand logger × Session/Seating integration (Phase 2.x draft)
 
-> **Status: Phase 2.2 実装済（config-gated）**。本 doc は接続戦略の設計 + 実装対応記録。
+> **Status: Phase 2.2 + 2.3 実装済（config-gated）**。本 doc は接続戦略の設計 + 実装対応記録。
 > S2 core（`core/session*.py`）と既存 hand logger world（`core/hand_log.py` / `output/json_writer.py` /
-> `output/phh_exporter.py` / `integration/engine.py` / `main.py`）の段階接続。Phase 2.2 で
-> write-through（Pattern A）を **config flag `session_layer.enabled` 越しに実装**（§ 7 Phase 2.2）。
+> `output/phh_exporter.py` / `integration/engine.py` / `main.py` / `gui/dashboard.py` /
+> `gui/seat_assignment.py`）の段階接続。Phase 2.2 で write-through（Pattern A）を **config flag
+> `session_layer.enabled` 越しに実装**、Phase 2.3 で **最小 seat selection UX**（§ 7 Phase 2.2/2.3）。
 > schema `1.0` freeze は引き続き ISSUE-0005 残項目決着後。
 >
 > 関連: ADR-0006（S2 contract）/ ADR-0007（S2 core 永続形）/ ADR-0008（本接続戦略）/
@@ -197,13 +198,37 @@ IntegrationThread
     `tests/test_session_integration.py` で IntegrationThread 単体検証する。
 - test: `tests/test_session_integration.py`（ON / OFF / 耐障害性）。
 
-### Phase 2.3 — seat selection UI (registry 連動)
+### Phase 2.3 — seat selection UI (registry 連動)（✅ 実装済, 最小スコープ）
 
-- 変わるもの:
-  - `gui/dashboard.py` または別 widget に「seat → player_id」選択 UI（PlayerRepository から選ぶ）。
-  - hand 間の seat change 反映 UX（ISSUE-0006）。
-- legacy のまま: 単独運用フォールバックパス、PHH。
-- rollback: 既存の name 入力 CLI/フォーム継続。
+実装コミット（本 Phase 2.3）で完了。最小 seat selection UX を desktop hand logger に追加した。
+
+- 変わったもの:
+  - `gui/seat_assignment.py`（新規）: `SeatAssignmentDialog`（モーダル）+ `build_seating_map`
+    （seat→display_name → seat→player_id の純粋変換）+ `EMPTY_LABEL`（空席）。
+  - `gui/dashboard.py`: `GUIDashboard` に `player_repo` / `session_layer_enabled` を DI。
+    session レイヤ有効時のみ「席割り当て」ボタンを表示。「新ハンド」ボタンは有効時に seat
+    ダイアログを開き、OK で `IntegrationThread.update_seating()` → new_hand を流す。
+  - `integration/engine.py`: `IntegrationThread.update_seating()` / `get_seating()`（lock 保護の
+    スレッド安全 API）。`_assign_seats_for_hand` / `_finalize_hand` は lock 越しに seating を読む。
+  - `main.py`: `_init_session_layer()` が `PlayerRepository` も生成し（session_repo と共有）、
+    GUI に渡す。初期 seating は空のまま（実行時に GUI で確定）。
+- **seating 入力フロー**:
+  1. operator が「新ハンド」を押す（session レイヤ有効時）。
+  2. seat ダイアログが開く。初期値は `get_seating()`（直前 hand の carry-forward）。
+  3. seat ごとに player を選ぶ（「（空席）」= 割り当てない）。
+  4. OK → `update_seating(seating)` → `_start_new_hand` が `assign_seat` バッチで write-through。
+  5. キャンセル → seating を変えず、その hand も開始しない（write-through もしない）。
+- **carry-forward 仕様**: ダイアログの初期選択は IntegrationThread が保持する直近 seating。
+  毎 hand「OK を押すだけ」で同じ seating が再適用され、各 hand に独立 snapshot が記録される。
+- **player 候補のソース**: ダイアログを開くたびに `PlayerRepository.list_players()` を取得（起動時
+  キャッシュしない）。表示は `display_name`、内部値は `player_id`。
+- legacy のまま: 単独運用フォールバックパス、PHH（無改変）。flag off では seat UI を出さず
+  「新ハンド」は従来どおり直接 new_hand を流す。
+- **制限（ISSUE-0006 に残す）**: sitting_out / late entry 等の seat 状態、未登録 player の
+  その場追加、seat change 履歴 UI、同一 hand 重複 player の事前バリデーション（現状は degraded
+  warning）、mobile UX 一貫性。
+- test: `tests/test_seat_assignment_gui.py`（dialog / dashboard フロー）、
+  `tests/test_session_integration.py`（update_seating / carry-forward / hand 間変更 / flag off）。
 
 ### Phase 2.4（任意）— legacy log reconciler tool
 

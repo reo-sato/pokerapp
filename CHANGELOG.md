@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+### Added (Phase 2.3 — seat selection UX, desktop minimal)
+
+- **desktop hand logger に最小 seat selection UX を追加**（ISSUE-0006 を部分解決、ADR-0008 Pattern A
+  の seating 入力経路）。session レイヤ有効時のみ有効、**flag off では既存 UX を完全維持**。
+  - `gui/seat_assignment.py`（新規）: `SeatAssignmentDialog`（モーダル）+ `build_seating_map`
+    （seat→display_name → seat→player_id の純粋変換）+ `EMPTY_LABEL`（空席）。player 候補は
+    `PlayerRepository.list_players()` の `display_name`（内部値は `player_id`）。
+  - `gui/dashboard.py`: `GUIDashboard` に `player_repo` / `session_layer_enabled` を DI。session
+    レイヤ有効時のみ「席割り当て」ボタンを表示。「新ハンド」は seat ダイアログ（carry-forward 初期値）
+    → OK で `update_seating` → new_hand、キャンセルで hand 開始せず。
+  - `integration/engine.py`: `IntegrationThread.update_seating()` / `get_seating()`（lock 保護の
+    スレッド安全 API）。`_assign_seats_for_hand` / `_finalize_hand` は lock 越しに seating を読む。
+  - `main.py`: `_init_session_layer()` が `PlayerRepository` も生成（session_repo と共有）し GUI に渡す。
+    初期 seating は空のまま、実行時に GUI で確定する。
+  - `tests/test_seat_assignment_gui.py`（新規）: dialog ロジック / dashboard seat フロー（flag on/off,
+    OK/キャンセル）。`tests/test_session_integration.py`: `update_seating` / carry-forward / hand 間
+    seat 変更 / flag off no-op を追加。
+  - 残（ISSUE-0006）: sitting_out / 未登録 player 追加 / seat change 履歴 UI / 同一 hand 重複 player の
+    事前バリデーション / mobile UX。
+
 ### Added (Phase 2.2 — session/seating integration, config-gated)
 
 - **hand logger × S2 session/seating の最小統合**（ADR-0008 Pattern A, write-through）。

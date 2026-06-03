@@ -100,7 +100,10 @@ Phase 2.x の接続戦略として **Pattern A（write-through, additive）** �
        additive（config-gated, PHH バイト不変）。`tests/test_session_integration.py`。
        実装メモ: assign_seat 失敗は hand を止めず warning（degraded）。seat 選択 UX は ISSUE-0006 へ
        委譲し `main.py` の seating は当面空（`docs/contracts/hand-integration.md` § 7 Phase 2.2）。
-- [ ] Phase 2.3: seat 選択 GUI（registry 連動）。
+- [x] Phase 2.3: seat 選択 GUI（registry 連動, desktop 最小）。`gui/seat_assignment.py` の
+       `SeatAssignmentDialog` + `IntegrationThread.update_seating`/`get_seating`（lock 保護）。
+       carry-forward 対応、flag off では seat UI 非表示で既存 UX 維持。
+       `tests/test_seat_assignment_gui.py`。高度 UX（sitting_out / 未登録 player 追加等）は ISSUE-0006。
 - [ ] Phase 2.4: legacy log reconciler tool（必要に応じて）。
 - [ ] schema `1.0` freeze（ISSUE-0005 残項目決着 + Phase 2.2 動作後）。
 

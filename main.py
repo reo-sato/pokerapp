@@ -63,25 +63,30 @@ def _init_session_layer(cfg: dict, session_cfg: dict):
     偽なら従来の timestamp session_id を採番し、session レイヤには接続しない（rollback path）。
 
     Returns:
-        (session_id, session_repo, seating)
+        (session_id, session_repo, player_repo, seating)
           - session_id: JsonWriter / HandSummary が使う canonical な session_id。
           - session_repo: 有効時のみ SessionRepository、無効時 None。
-          - seating: ``seat_no -> player_id`` マップ（Phase 2.2 は seat 選択 UX 未実装の
-            ため空。ISSUE-0006 で別途）。
+          - player_repo: 有効時のみ PlayerRepository（GUI の seat 選択 UI が参照）、無効時 None。
+          - seating: 初期 ``seat_no -> player_id`` マップ。Phase 2.3 では空で開始し、GUI の
+            seat selection UX（`gui/seat_assignment.py`）で実行時に設定する。
     """
     if cfg.get("session_layer", {}).get("enabled", False):
+        from core.player_repository import PlayerRepository
         from core.session_repository import SessionRepository
 
-        session_repo = SessionRepository()
+        # player_repo を共有: session_repo の unknown_player 判定と GUI の player 候補が
+        # 同じ registry を見るようにする。
+        player_repo = PlayerRepository()
+        session_repo = SessionRepository(player_repo=player_repo)
         session = session_repo.create_session(
             blinds={"sb": session_cfg["sb"], "bb": session_cfg["bb"]},
         )
         logger.info("Session layer enabled: session_id=%s", session.session_id)
-        # seat→player_id の入力 UX は ISSUE-0006（Phase 2.3）。現状は空 seating。
-        return session.session_id, session_repo, {}
+        # 初期 seating は空。seat→player_id は GUI の seat selection で hand 開始時に確定する。
+        return session.session_id, session_repo, player_repo, {}
 
     session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
-    return session_id, None, {}
+    return session_id, None, None, {}
 
 
 def run_cli() -> None:
@@ -106,7 +111,8 @@ def run_cli() -> None:
         bb=session_cfg["bb"],
     )
 
-    session_id, session_repo, seating = _init_session_layer(cfg, session_cfg)
+    # CLI モードは seat selection UI を持たない（GUI 専用, Phase 2.3）。player_repo は未使用。
+    session_id, session_repo, _player_repo, seating = _init_session_layer(cfg, session_cfg)
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
 
     audio_q = make_audio_queue()
@@ -281,7 +287,7 @@ def run_gui() -> None:
         bb=session_cfg["bb"],
     )
 
-    session_id, session_repo, seating = _init_session_layer(cfg, session_cfg)
+    session_id, session_repo, player_repo, seating = _init_session_layer(cfg, session_cfg)
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
 
     audio_q = make_audio_queue()
@@ -300,6 +306,8 @@ def run_gui() -> None:
         camera_queue=camera_q,
         stop_event=stop_event,
         rfid_receiver=None,  # rfid_thread 確定後に設定
+        player_repo=player_repo,
+        session_layer_enabled=session_repo is not None,
     )
 
     audio_thread = AudioThread(

@@ -103,8 +103,8 @@ class IntegrationThread(threading.Thread):
                           additive に流す（ADR-0008 Pattern A）。None なら従来の
                           hand logger 単独動作（rollback path）。
             session_id:   session レイヤが採番した UUID4 hex（``session_repo`` と対で渡す）。
-            seating:      ``seat_no -> player_id`` の現在の seating（Phase 2.2 は静的。
-                          seat 選択 UX は ISSUE-0006 で別途）。
+            seating:      ``seat_no -> player_id`` の初期 seating。実行中は GUI から
+                          ``update_seating`` で差し替えられる（Phase 2.3 seat selection UX）。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -119,6 +119,9 @@ class IntegrationThread(threading.Thread):
         # ――― S2 session レイヤ接続 (Phase 2.2, ADR-0008) ―――
         self._session_repo = session_repo
         self._session_id = session_id
+        # seating は GUI スレッド (update_seating) と IntegrationThread
+        # (_assign_seats_for_hand) の双方から触られるため lock で保護する (Phase 2.3)。
+        self._seating_lock = threading.Lock()
         self._seating: dict[int, str] = dict(seating) if seating else {}
         # session_repo と session_id が揃って初めて write-through が有効
         self._session_layer_enabled = (
@@ -142,6 +145,24 @@ class IntegrationThread(threading.Thread):
 
     def stop(self) -> None:
         self._stop_event.set()
+
+    # ――― seating 更新 API (Phase 2.3, GUI から呼ばれる; スレッド安全) ―――
+
+    def update_seating(self, seating: dict[int, str]) -> None:
+        """次以降の hand に適用する seat→player_id マッピングを差し替える。
+
+        GUI スレッド（seat selection UI）から呼ばれる。実際の write-through は
+        次の ``_start_new_hand`` → ``_assign_seats_for_hand`` で行われる。session レイヤ
+        無効時に呼ばれても害はない（write は no-op になる）。
+        """
+        with self._seating_lock:
+            self._seating = dict(seating)
+        logger.info("Seating updated: %d seat(s) assigned", len(seating))
+
+    def get_seating(self) -> dict[int, str]:
+        """現在の seat→player_id マッピングのコピーを返す（carry-forward 初期値用）。"""
+        with self._seating_lock:
+            return dict(self._seating)
 
     def run(self) -> None:
         logger.info("IntegrationThread started")
@@ -402,12 +423,15 @@ class IntegrationThread(threading.Thread):
         """hand 開始時に現在の seating を session レイヤへ write-through する (ADR-0008)。
 
         session レイヤ無効時 / seating 未設定時は no-op（従来の hand logger 単独動作）。
-        ``assign_seat`` 失敗（unknown_player / session_closed 等）は hand logger の
-        進行を止めず、warning に留める（degraded; UX を壊さない）。
+        ``assign_seat`` 失敗（unknown_player / session_closed / player_already_seated 等）は
+        hand logger の進行を止めず、warning に留める（degraded; UX を壊さない）。
         """
-        if not self._session_layer_enabled or not self._seating:
+        if not self._session_layer_enabled:
             return
-        for seat_no, player_id in sorted(self._seating.items()):
+        seating = self.get_seating()
+        if not seating:
+            return
+        for seat_no, player_id in sorted(seating.items()):
             try:
                 self._session_repo.assign_seat(
                     self._session_id, hand_id, seat_no, player_id
@@ -423,6 +447,9 @@ class IntegrationThread(threading.Thread):
         gs.end_hand(winner_seat)
 
         stacks_end = gs.get_stacks()
+        # 同一 hand 内で seating の一貫した snapshot を使う（GUI が途中で
+        # update_seating しても finalize は開始時の write-through と同じ map を見る）。
+        seating = self.get_seating() if self._session_layer_enabled else {}
         players_info = []
         for seat in sorted(stacks_end.keys()):
             hole = self._hole_cards.get(seat, [])
@@ -438,7 +465,7 @@ class IntegrationThread(threading.Thread):
             # Phase 2.2: session レイヤ有効時のみ player_id を additive 追加 (ADR-0008)。
             # legacy / fallback ではキーごと省略し、旧 reader を壊さない。
             if self._session_layer_enabled:
-                player_id = self._seating.get(seat)
+                player_id = seating.get(seat)
                 if player_id is not None:
                     entry["player_id"] = player_id
             players_info.append(entry)
