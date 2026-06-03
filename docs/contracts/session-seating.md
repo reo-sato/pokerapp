@@ -94,7 +94,9 @@ cross-app 参照）は ADR-0006 で確定済み。
   hand 単位で入れ子保持（hand logger JSON は不変）。
 - **freeze の残 blocker（ISSUE-0005）**: hand logger の hand ↔ session レイヤ hand の
   reconciliation（`HandSummary` への player_id 接続）、mid-session seat change の運用 UI 要件。
-  これらが決まるまで schema を `1.0` に昇格しない。
+  これらが決まるまで schema を `1.0` に昇格しない。**接続戦略は ADR-0008（Pattern A,
+  write-through）で確定**し、詳細設計は `docs/contracts/hand-integration.md`（draft）にある。
+  Phase 2.x で段階的に実装する。残 UX 論点は ISSUE-0006、legacy log 取り込みは ISSUE-0007。
 - **据え置き（決定済・S2 では変更しない）**: `hand_id: int`（ADR-0006）。seat_no 範囲 1..9。
 - **out of scope（S2 core 段階）**: ledger / point / settlement（S3〜S4）、sync / API（S5）、
   desktop/mobile UI 実装、hand logger との自動接続 / migration。

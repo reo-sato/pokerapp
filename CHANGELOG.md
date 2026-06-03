@@ -6,6 +6,29 @@
 
 ## [Unreleased]
 
+### Docs / Planning (Phase S2.x — hand logger × session integration strategy)
+
+- **Hand logger × session/seating integration の戦略 planning**（docs-only, code 未変更）:
+  既存 hand logger world（`HandSummary` / `JsonWriter` / `PHHExporter` / `IntegrationThread` /
+  `GameStateManager` / `main.py`）と S2 core（`SessionRepository`）の段階接続方針を確定。
+  - `docs/contracts/hand-integration.md`（新規 draft）: 現状フロー整理 / 接続パターン A・B・C 比較 /
+    推奨アーキテクチャ（Pattern A, write-through）/ player_id・session_id・hand_ref の決定タイミング /
+    Phase 2.0〜2.4 → 3.x の段階 migration / HandSummary draft schema sketch / 互換ルール / open 論点。
+  - `docs/contracts/session-seating.md` 更新: § freeze 状態 に ADR-0008 と hand-integration.md を相互リンク。
+- **ADR-0008** (Accepted): Hand logger × session/seating integration strategy。
+  Pattern A（write-through, additive）を採用。`HandSummary.players[i].player_id` を additive、
+  `session_id` を session レイヤの UUID4 hex に切替（Phase 2.2）、PHH は無改変、`hand_ref` は
+  session レイヤ側に住む、rollback path として `config.session_layer.enabled` フラグ planned、
+  legacy logs/*.json は破壊しない。
+- **ISSUE-0006**（新規 Open）: hand 開始時の seat→player_id 選択 UX が未確定。Phase 2.3 で確定。
+- **ISSUE-0007**（新規 Open）: legacy hand log（timestamp session_id / player_id 無し）の取り込み
+  方針が未確定。Phase 2.4 着手判断時に決める。
+- **CLAUDE.md** 更新: Phase 2 セクションに「Phase 2.x（hand logger 接続, planning 済 / 実装 planned）」
+  サブ節を追加。Pattern A / 細分 phase 2.1〜2.4 を記述。
+- **decision-log.md** 更新: ADR-0008、ISSUE-0006、ISSUE-0007 を index に追加。ISSUE-0005 行に
+  ADR-0008 リンクを追記。
+- **本タスクで `.py` ファイルは変更していない**（planning-only ガード）。
+
 ### Added (Phase S2 — session + hand-based seating core)
 
 - **Session & Seating core (S2)**: hand logger とは独立した session レイヤと hand-based

@@ -488,6 +488,17 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
   **ADR-0007 で core について確定**。残: hand logger 接続・seat change UI 要件（ISSUE-0005）。
 - **Done criteria**: session 開始/終了と hand 単位 seat snapshot が core で確定（**達成: WS1 core**）。
   両 front-end の契約越し表示（WS2/WS3）は未着手。schema `1.0` freeze は ISSUE-0005 残項目後。
+- **Phase 2.x（hand logger 接続, planning 済 / 実装 planned）**: 既存 hand logger world
+  （`HandSummary` / `JsonWriter` / `PHHExporter` / `IntegrationThread`）と S2 core を **段階接続**する。
+  方針は **Pattern A（write-through, additive）**：hand logger が `SessionRepository` に依存し、
+  hand 開始時に `assign_seat` バッチを呼ぶ。`HandSummary.players[i]` に `player_id` を additive 追加、
+  `session_id` を session レイヤの UUID4 hex に切替、PHH は無改変、`hand_ref` は session レイヤ側に住む。
+  詳細は **ADR-0008** / `docs/contracts/hand-integration.md`。残 UX は **ISSUE-0006**、legacy log
+  取り込みは **ISSUE-0007**。Phase 細分:
+  - 2.1: schema sketch + `config.session_layer.enabled` フラグ planned。
+  - 2.2: `main.py` session_id 切替 + `assign_seat` 連携 + `HandSummary.player_id` additive。
+  - 2.3: seat 選択 GUI（registry 連動）。
+  - 2.4: legacy log reconciler（任意, ISSUE-0007）。
 
 ### Phase 3 — ledger and points
 
