@@ -1,0 +1,220 @@
+# Hand reconstruction engine — rules-constrained state estimation (design draft)
+
+> **Status: draft / 設計フェーズ**（planning 専用, コード未変更）。本 doc は ADR-0009（pokerkit を live
+> ルール権威に）/ ADR-0010（推定・融合アルゴリズム）の **設計詳細**で、`hand-integration.md` が ADR-0008 の
+> companion であるのと同じ位置づけ。`hand`/`action` の inline schema sketch を含むが **freeze しない**
+> （実ファイル化・freeze は ADR-0011 の R4 / ISSUE-0011）。record/replay は `event-replay.md`（ADR-0011）。
+>
+> 関連: ADR-0009 / ADR-0010 / ADR-0011 / ISSUE-0008（pokerkit API）/ ISSUE-0009（actor / silent-fold）。
+
+## 1. 再構築の再定義（data flow）
+
+現状は「ASR を parse して append」「RFID を信頼度に足す」という**素通しパイプライン**で、ポーカールールが
+どこにも無い。再構築を **「各時点で合法な状態の中から、センサー証拠が最も支持するものを選ぶ」状態推定**
+として捉え直す。
+
+```
+マイク ──► AudioThread ──► AudioEvent(action, amount, raw_text, conf, seat?) ─┐
+RFID  ──► RFIDThread  ──► RFIDEvent(card, seat?, board_index?)               ─┤
+camera──► CameraThread──► CameraEvent(seat)                                   ─┤
+                                                                              ▼
+                                              IntegrationThread（境界での推定）
+                            ┌──────────────────────────────────────────────────────┐
+                            │ 0. record envelope → logs/{sid}.events.jsonl  (ADR-0011)│
+                            │ 1. legal_ctx = engine.legal_context()                   │
+                            │      (actor prior / 合法手 / amount_to_call / min_raise) │
+                            │ 2. actor = resolve_actor(ev, legal_ctx, rfid, cam)  §4   │
+                            │ 3. corrected = apply_corrections(parse(ev), legal_ctx,   │
+                            │                                  ev.conf)            §5   │
+                            │ 4. legal_op = project_to_legal(corrected, legal_ctx)     │
+                            │ 5. ok = engine.apply(actor, legal_op)  → pokerkit.State  │
+                            │ 6. conf, review = fuse(L=ok, A=…, Q=…)              §6   │
+                            └──────────────────────────────────────────────────────┘
+                                                                              ▼
+                       ActionRecord(seat=actor, action, amount, …, confidence, needs_review)
+                                  HandSummary(… + pots, committed, …)  §7
+                                                                              ▼
+                       json_writer → logs/{sid}.json   PHHExporter → {hand}.phh （additive / 無改変）
+```
+
+**権威の所在**: `pokerkit.State`（ADR-0009）。**ノイズの隔離**: raw ASR は直接 State に入れず、合法手へ
+射影してから入れる（手順 1–5 の「境界での推定」）。State は常に内部整合（side-pot / min-raise）を保つ。
+
+## 2. `PokerEngine` interface 草案（安定境界）
+
+`integration/engine.py` / `main.py` が現在 `GameStateManager` に対して呼ぶ公開 I/F を **そのまま** Protocol 化し、
+`pokerkit.State` 実装と legacy 実装を差し替え可能にする（ADR-0009）。`config.engine.backend` で選択。
+
+| 既存メソッド（不変） | 役割 |
+|---|---|
+| `new_hand() -> int` / `advance_street(Street)` / `end_hand(winner_seat)` | ハンド・ストリート管理 |
+| `apply_action(seat, action, amount)` | アクション適用（内部で turn 進行） |
+| `get_current_player() -> int` / `advance_turn() -> int` | 手番（pokerkit は actor_index 由来） |
+| `hand_id` / `street` / `pot` / `get_stack(s)` / `get_player_name` / `get_active_seats` | 照会 |
+| `update_stack` / `rebuy` | 手動修正 |
+| （`engine.py:409` が読む `_sb` / `_bb`） | blind 参照（property で露出維持） |
+
+| 新規メソッド（additive, 推定が読む） | 役割 |
+|---|---|
+| `legal_context() -> LegalContext` | `{actor_seat, legal_actions:set, amount_to_call:int, min_raise:int, max_raise:int}` |
+| `is_legal_actor(seat) -> bool` | その席が今合法に行動できるか（silent-fold 合成の判定, §4） |
+| `fold_through(until_seat)` | prior〜until の間の席を fold 合成して同期（§4, additive helper） |
+| `pots() -> list[Pot]` | main/side pot（`hand.pots`, §7） |
+| `committed(seat) -> int` | 当該ストリートのコミット額（`apply_corrections` の amount 判定） |
+
+> pokerkit がこれらを incremental に露出できるかは **ISSUE-0008** で spike 検証。露出が薄い項目は engine
+> 実装内の shadow tracker（committed / amount_to_call 等）で補完してよい（interface は不変）。
+
+## 3. seat ↔ pokerkit index 写像
+
+pokerkit は player を 0..n-1 の連番で扱い、ドメインは疎な `seat_no`（1..9）。`new_hand()` で **BTN 基準の
+安定全単射**を固定し、hand 内で不変にする。`output/phh_exporter.py:119` の `seat_to_idx`（players_info 順の
+flatten）を**正式な単一実装に格上げ**し、engine と PHH が同じ写像を共有する（PHH の seat 順依存バグも同時に解消）。
+
+## 4. アクター推定アルゴリズム（ADR-0010 §1 の詳細）
+
+**入力**: prior（engine の `actor_seat`）＋観測（同窓内 RFID seat read / audio 明示 seat / camera seat）。
+audio 明示 seat は `engine.py:433` `_extract_seat_from_text`（現状 winner 専用）を全 action へ一般化して得る。
+
+```
+P  = legal_ctx.actor_seat                      # ルール上の手番（prior, 強い）
+S_rfid = nearest RFID seat read in window      # 物理証拠（最強）   _pop_matching_rfid_event
+S_aud  = seat parsed from raw_text (シートN)     # 明示発話（強）
+S_cam  = camera seat in window                 # 弱い
+
+if すべての存在ソースが席 X で一致:
+    actor = X                                  # 高 agreement（§6 の A=1）
+else:                                          # 不一致
+    actor = first_present([S_rfid, S_aud, S_cam, P])   # 物理/明示 > prior
+    if actor != P:
+        if engine.is_legal_actor(actor):
+            engine.fold_through(until=actor)    # P〜actor 間の席を silent fold 合成
+            #   ↑ ディーラー未宣言の fold（最頻の現実のズレ）を初めて正しく処理
+        else:
+            actor = P                           # ルール上不可能 → prior 維持
+            needs_review = True
+```
+
+**根拠**: prior は「プレイが手番どおり進む」モデル期待で、まさに我々が捕えたいケース（out-of-turn、未宣言
+fold）で破れる。RFID-at-seat / 明示発話 seat は**現実の直接観測**なので prior より優先する。ただし engine が
+「その席は今行動できない」と言うなら（合法手番でない）prior を信じて `needs_review` を立てる。silent-fold の
+合成は誤 fold を作る危険があるため、適用条件・件数上限は **ISSUE-0009** で確定する。
+
+確定 actor は従来どおり `ActionRecord.seat` に載る（下流不変）。`AudioEvent` に optional `seat`（default None,
+additive）を足し、recognizer が明示 seat を見つけたら埋める。
+
+## 5. `apply_corrections()` 設計（ADR-0010 §2 の詳細）
+
+純関数 `apply_corrections(parsed, legal_ctx, whisper_conf) -> Corrected`。`audio/recognizer.py` に置くが
+ゲーム状態を持たず、engine が `legal_ctx` を渡して呼ぶ（recognizer をゲーム状態から疎結合に保つ）。
+
+**修復表**（`amount_to_call = c`, `min_raise = m`, `stack = s`, heard 額 = `a`）:
+
+| ASR action | legal_ctx 条件 | corrected | amount | needs_review |
+|---|---|---|---|---|
+| check | `c == 0` | check | 0 | — |
+| check | `c > 0`（非合法） | call または fold（尤度） | `c` or 0 | 曖昧なら yes |
+| call | `c > 0` | call | **`c`**（heard 無視） | — |
+| call | `c == 0` | check（実質チェック） | 0 | flag |
+| bet | 当ストリート未ベット | bet | `snap(a, [m..s])` | snap 大なら flag |
+| bet | 既にベットあり | **raise** に再マップ | `snap(a, [m..s])` | flag |
+| raise | raise 合法 | raise | `snap(a, [m..s])` | snap 大なら flag |
+| raise | raise 非合法（call のみ） | call | `c` | yes |
+| allin | 常に | bet/raise/call（all-in） | `s` | side-pot 反映 |
+| fold | 常に | fold | 0 | — |
+
+- **call/check の一意化は状態から決定的**（`c>0→call`, `c==0→check`）。JA キーワードの曖昧さに依存しない。
+  これが PHH/JSON で call と check を初めて区別できるようにする核心（現 `phh_exporter.py:174` は両方 "cc"）。
+- **`snap()`**: heard 額を合法レンジへ丸め、さらにブラインド単位の round number へ寄せる
+  （`recognizer.py` の kanji 桁優先ロジックの後段）。レンジ外への大幅 snap は flag。
+- **`whisper_conf`**: 低信頼ほど state からの上書きを許す。**高信頼 ASR が非合法**なときが最強の
+  `needs_review` トリガ（モデルと規則が確信を持って食い違う＝人が見るべき）。Whisper per-segment logprob を
+  `AudioEvent.confidence`（additive）として運ぶ（現 `recognizer.py:218` は破棄している）。
+
+## 6. 派生 confidence モデル（ADR-0010 §3 の詳細）
+
+固定 8 行テーブル（`engine.py:59` `calc_confidence`）を廃し、**解釈可能な 3 因子の合成**にする:
+
+```
+L = 1.0 if pokerkit が action を受理 else penalty        # 合法性ゲート（新・最重要）
+A = （actor と action で一致した「存在ソース」数） / （存在ソース数）   # 合意度（有無 → 一致）
+Q = base_weight(RFID>audio>camera) × whisper_conf          # ソース品質
+confidence = clamp(w_L·L · (w_A·A + w_Q·Q), 0, 1)
+```
+
+- 重みは「全ソース一致・合法」のとき現 `calc_confidence` 値（RFID+audio=0.95 等）に近づくよう較正し、円滑移行。
+- 既存 `calc_confidence` / 照合窓 / board-position 累積は捨てず、`Q` の base_weight と窓内一致判定の**下位入力**
+  として再利用する。
+- **`needs_review = True` 条件**（明文化）: ① pokerkit 拒否（hard 非合法） ② 高信頼 ASR と規則の矛盾
+  ③ actor で prior が sensor を上書き（§4 else 枝） ④ amount を許容超過 snap ⑤ `confidence < review_threshold`
+  （config）。これにより `HandSummary.review_required`（現状「どれか needs_review」だけ）が**監査可能な意味**を持つ。
+
+## 7. `hand` / `action` の inline schema sketch（freeze しない）
+
+ADR-0008 §8.1 の HandSummary draft sketch を出発点に、ADR-0009/0010 の additive フィールドを足した sketch。
+**実ファイル化・freeze は ISSUE-0011 / R4**。`additionalProperties: true`（既存出力に多数フィールドがあるため）。
+
+```jsonc
+// action（= ActionRecord, additive）
+{
+  "title": "Action", "version": "0.x-draft-sketch",
+  "type": "object", "additionalProperties": true,
+  "required": ["hand_id","timestamp","street","seat","player_name","action","amount",
+               "pot_after","stack_after","source","needs_review","confidence"],
+  "properties": {
+    "action": {"enum": ["bet","call","raise","check","fold","allin","showdown","winner","new_hand"]},
+    "source": {"type":"object","properties":{"camera":{"type":"boolean"},
+               "audio":{"type":"boolean"},"rfid":{"type":"boolean"}}},
+    "confidence": {"type":"number","minimum":0,"maximum":1},
+    // ── additive（ADR-0010, 監査用, optional）──
+    "legal_actions":  {"type":"array","items":{"type":"string"}},
+    "amount_to_call": {"type":"integer","minimum":0},
+    "corrected_from": {"type":["string","null"],"description":"修復前の生 ASR action"},
+    "actor_source":   {"type":["string","null"],"enum":["turn","rfid","audio","camera",null]},
+    "asr_confidence": {"type":["number","null"],"minimum":0,"maximum":1}
+  }
+}
+```
+
+```jsonc
+// hand（= HandSummary, ADR-0008 sketch + ADR-0009 additive）
+{
+  "title": "Hand", "version": "0.x-draft-sketch",
+  "type": "object", "additionalProperties": true,
+  "required": ["hand_id","session_id","started_at","ended_at","players","actions"],
+  "properties": {
+    "session_id": {"type":"string","minLength":1},   // ADR-0008: UUID4 hex 推奨, legacy 文字列も valid
+    "players": {"type":"array","items":{"type":"object","additionalProperties":true,
+      "required":["seat","name"],
+      "properties":{
+        "seat":{"type":"integer","minimum":1,"maximum":9},
+        "name":{"type":"string"},
+        "player_id":{"type":["string","null"],"pattern":"^[0-9a-f]{32}$"},  // ADR-0008 additive
+        "committed":{"type":["integer","null"],"minimum":0}                 // ADR-0009 additive
+      }}},
+    // ── additive（ADR-0009）──
+    "pots": {"type":"array","items":{"type":"object",
+             "properties":{"amount":{"type":"integer"},"eligible_seats":{"type":"array"}}}},
+    "actions": {"type":"array"}
+  }
+}
+```
+
+`hand` は ADR-0008 の `players[i].player_id` と本提案の `pots`/`committed` の **共通の additive 受け皿**。
+PHH は無改変（player_id を載せない, ADR-0008 §8.3）。
+
+## 8. open 論点（→ issues）
+
+- **ISSUE-0008**: pokerkit `>=0.5.0` の online API（actor / legal-actions / min-raise / amount-to-call /
+  side-pot の incremental 露出）の実現性。不可なら shadow tracker で補完。**ADR-0009 の gate**。
+- **ISSUE-0009**: §4 の競合解決と silent-fold 自動合成の適用条件・件数上限・`needs_review` 閾値、§6 の重み較正。
+- `apply_corrections` の尤度（check→call/fold の判定）に何を使うか（chip-motion / amount 有無）の確定。
+
+## 9. 参照
+
+- ADR-0009（pokerkit live 権威）/ ADR-0010（推定・融合）/ ADR-0011（contract・replay）
+- `docs/contracts/event-replay.md`（record/replay harness, `reconstruction_event`）
+- `docs/contracts/hand-integration.md`（ADR-0008, HandSummary draft sketch の出発点）
+- `core/game_state.py`（差し替え対象の安定 façade）/ `integration/engine.py`（推定の置き場）/
+  `audio/recognizer.py`（`apply_corrections`）/ `core/events.py`（`AudioEvent.seat?/confidence?`）/
+  `core/hand_log.py`（`hand`/`action` の基）/ `output/phh_exporter.py`（seat→index, call/check, side-pot）

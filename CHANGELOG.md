@@ -6,6 +6,33 @@
 
 ## [Unreleased]
 
+### Docs / Planning (Phase R0 — rules-aware reconstruction & contract-first hand core, 設計提案)
+
+- **ハンド再構築エンジンと contract-first hand core の設計提案**（**docs-only, `.py` / schema / fixtures は
+  未変更**）: 目的（ノイジーな ASR＋RFID からの正確な再構築）と思想（contract-first / fixtures-as-oracle）の
+  両面のギャップに対し、再構築を「ルール制約付き状態推定」として捉え直し、既存依存 pokerkit を live
+  ルール権威に据える方針を提案。
+  - **ADR-0009** (Proposed): `pokerkit.State` を live ルール権威として採用。現 `GameStateManager` の
+    安定 I/F 背後で `engine.backend` フラグ選択、raw ASR を直接流さない「境界での推定」、出力は additive。
+    `pokerkit>=0.5.0` は宣言済みだが**未 import** である事実を明記（`game_state.py` の Phase 3 TODO の具体化）。
+  - **ADR-0010** (Proposed): ルール制約付き状態推定と融合。actor 推定（手番 prior × sensor ＋ silent-fold
+    自動合成）、`apply_corrections()`（合法手制約・call/check の状態一意化・amount スナップ）、派生 confidence
+    （8 行固定テーブルの置換）と `needs_review` 条件の明文化。
+  - **ADR-0011** (Proposed): hand core の contract 化（`hand`/`action`/`reconstruction_event`）と決定的
+    record/replay（append-only event sidecar、注入クロック、golden fixtures を core の oracle に）。ADR-0008
+    と整合し hand-logger immutability を維持。
+  - `docs/contracts/hand-reconstruction.md`（新規 draft）: `PokerEngine` interface 草案 / actor 推定 /
+    `apply_corrections` 修復表 / 派生 confidence / `hand`・`action` の inline schema sketch（freeze せず）。
+  - `docs/contracts/event-replay.md`（新規 draft）: record/replay harness / 決定性条件 / `reconstruction_event`
+    envelope sketch / golden-fixture レイアウトとテスト計画。
+  - **ISSUE-0008**（Open）pokerkit online API 実現性（ADR-0009 の gate）/ **ISSUE-0009**（Open）actor 競合・
+    silent-fold ポリシー / **ISSUE-0010**（Open）replay 決定性の記録境界 / **ISSUE-0011**（Open）hand/action
+    schema freeze blockers（ISSUE-0005 の hand core 版）。
+  - **decision-log.md** に ADR-0009/0010/0011 と ISSUE-0008..0011 を登録。**CLAUDE.md** Future Scope に
+    rules-aware reconstruction の planned/proposed 行を追加。
+  - **実装は別タスク**（提案フェーズ R0）。段階導入順は R1 record-only → R2 pokerkit engine（flag）→
+    R3 actor/corrections/fusion → R4 contracts → R5 freeze + session 統合。
+
 ### Docs / Planning (Phase S2.x — hand logger × session integration strategy)
 
 - **Hand logger × session/seating integration の戦略 planning**（docs-only, code 未変更）:

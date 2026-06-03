@@ -213,9 +213,9 @@ ADR-0006、実装上の判断は ADR-0007。**hand logger とは未接続**（�
 | GUI ダッシュボード | 🔨 部分実装 | `gui/dashboard.py` |
 | **player registry (S1)** | ✅ 実装済 | `core/player.py`, `core/player_repository.py`, `gui/player_registry.py` |
 | **session + hand-based seating (S2) core** | ✅ 実装済 | `core/session.py`, `core/session_repository.py`（hand logger とは未接続, § Session & Seating 参照） |
-| ベッティングステート / actor 推定 | ❌ 未実装 | future phase |
+| ベッティングステート / actor 推定 | ❌ 未実装 | 設計提案 R0: ADR-0009/0010/0011, `docs/contracts/hand-reconstruction.md`（pokerkit を live ルール権威に） |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
-| 音声正規化 / 数値正規化 | ❌ 未実装 | future phase |
+| 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0010） |
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
 | session ledger / point ledger / store settlement | ❌ 未実装 | **future scope（本ファイル下部参照）** |
 
@@ -329,6 +329,7 @@ hand logger と ledger app は **将来別アプリ化** することを前提�
 | **S3** | ledger entries + point ledger | `ledger_entry`, `point_ledger_entry`、cash+point 併用ルール |
 | **S4** | session settlement + paid/unpaid | `session_settlement`、net due to store、paid/unpaid 操作 |
 | **S5** | cross-app contract / sync boundary | hand logger ↔ ledger app の参照契約、ID 安定性、別プロセス化準備 |
+| **R0–R5**（提案） | rules-aware hand reconstruction（**hand core 改善トラック**, S 系列と直交） | pokerkit を live ルール権威に / actor 推定（手番 prior × sensor + silent-fold 合成）/ `apply_corrections`（合法手制約）/ 決定的 record/replay + golden fixtures。**設計提案のみ**（ADR-0009/0010/0011, `docs/contracts/hand-reconstruction.md`・`event-replay.md`）。R1 record-only → R2 pokerkit engine → R3 推定/訂正/融合 → R4 contracts → R5 freeze + session 統合 |
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。
 
