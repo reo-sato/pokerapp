@@ -84,6 +84,12 @@ write-through を採用したため、UI の seat 選択タイミングが整合
 - `docs/adr/0006-s2-session-seating-contract-and-hand-id-cross-app-reference.md`
 - `docs/adr/0007-s2-session-layer-persistence-and-id-issuance.md`
 
+## Related Issues
+
+- `docs/issues/0008-session-viewer-data-source-and-enhancements.md` — WS2-α の read-only viewer は
+  hand 間の seat→player 差分を **表示** できる土台になる。本 issue で seat change の入力 UX が確定
+  したら、viewer 側の差分ハイライト（seat change の可視化）要件と整合させる。
+
 ## Related Commits
 
 - 本 issue と同じコミット（S2.x integration planning）

@@ -6,6 +6,39 @@
 
 ## [Unreleased]
 
+### Added (WS2-α — Session / Seating Viewer, read-only desktop)
+
+- **Session / Seating Viewer**: S2 core の session / hand-based seating を確認する
+  **read-only inspection 画面**を desktop に追加（hand logger / player registry とは別画面）。
+  - `python main.py --sessions` で起動（hand logger 通常起動 `python main.py` / registry
+    `--players` は無改修・従来通り）。
+  - session 一覧（session_id / started_at / status / label / hand 数 / assignment 数の要約）→
+    選択で 概要 / current seating（最新 hand から導出）/ hand ごとの seat assignments を表示。
+  - `player_id` を `PlayerRepository` で `display_name` に解決（不能なら `(unknown)`、`player_id`
+    自体は保持）。
+  - **再読込（refresh）** ボタンで `SessionRepository` / `PlayerRepository` をディスクから読み直す
+    （別プロセスの更新取り込み）。live auto-refresh は持たない。
+  - empty state（session 無し）/ no-data state（seating / hand 無し）を明示表示。
+  - **read-only**: session/seat/player の作成・編集・削除を一切持たない（許容操作は refresh のみ）。
+    業務ルールは core が source of truth、viewer は read API + name 解決 + 表示整形に徹する。
+  - 実装: `gui/session_viewer.py`（`SessionViewerWindow`）、`main.py`（`--sessions` /
+    `run_session_viewer`）。
+- **core read API（additive）**: read-only viewer 用に enumeration / loading を core に追加。
+  - `SessionRepository.list_hand_ids(session_id)`（記録済み hand_id を昇順列挙）。
+  - `SessionRepository.reload()` / `PlayerRepository.reload()`（ディスクから再読込）。
+  - いずれも additive な read 専用 API。既存 API・業務ルール・schema（0.x）は不変。
+- **Tests**: `tests/test_session_viewer_gui.py` を追加（empty state / 一覧要約 / 選択→詳細 /
+  current seating / name 解決 / unknown player 安全表示 / refresh 再読込 / read-only・別構造の確認）。
+  全体 **192 passed**（ベースライン 177 に対し +15、回帰なし）。
+- **Docs**: `CLAUDE.md`（§ Session / Seating Viewer 追加 + 実装状況表 / コマンド / Phase 2 WS2 更新）/
+  `docs/contracts/repository-interfaces.md` / `session-seating.md`（`list hand ids` / `reload` を
+  additive 追記）/ `hand-integration.md`（viewer が inspection 用である旨）/ ISSUE-0008（新規, viewer の
+  data source 依存 + 拡張 open question）/ ISSUE-0006（seat change 可視化の関連注記）/
+  `decision-log.md`（ISSUE-0008 登録）/ worklog（`2026-06-03-session-seating-viewer.md`）。
+- **注（実装状況の明確化）**: hand logger × session の write-through 接続（Phase 2.2/2.3）は
+  **未実装**（ADR-0008 / hand-integration.md は planning のみ）。viewer が表示するデータは現状
+  `SessionRepository` に直接書かれたもの（テスト / 将来の write-through）に限られる（ISSUE-0008）。
+
 ### Docs / Planning (Phase S2.x — hand logger × session integration strategy)
 
 - **Hand logger × session/seating integration の戦略 planning**（docs-only, code 未変更）:

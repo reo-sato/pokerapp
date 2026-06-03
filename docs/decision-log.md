@@ -48,3 +48,4 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0005 | S2 session/seating freeze の未確定事項               | Open   | 2026-05-25 | contracts / session (S2) | `docs/issues/0005-s2-session-seating-freeze-blockers.md`   | ADR-0007（#1/#2 を core で確定）。hand logger 接続は ADR-0008 で戦略確定（実装は Phase 2.x） |
 | ISSUE-0006 | Hand 開始時の seat→player_id 選択 UX が未確定        | Open   | 2026-06-03 | hand logger × session / GUI | `docs/issues/0006-seat-selection-ux-at-hand-start.md`      | Phase 2.3 で確定 |
 | ISSUE-0007 | Legacy hand log（timestamp/no player_id）の取り込み方針 | Open | 2026-06-03 | data migration / S2.x       | `docs/issues/0007-legacy-hand-log-migration-policy.md`     | Phase 2.4 着手判断時 |
+| ISSUE-0008 | Session/Seating Viewer の data source 依存と将来拡張    | Open   | 2026-06-03 | desktop (WS2-α) / GUI       | `docs/issues/0008-session-viewer-data-source-and-enhancements.md` | Phase 2.2 で #1 自然解消見込み |

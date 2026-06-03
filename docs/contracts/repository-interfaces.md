@@ -35,6 +35,7 @@ list_players() -> list[Player]
 get(player_id: str) -> Player                         # raises PlayerNotFoundError
 create_player(display_name: str) -> Player            # raises Empty/DuplicateDisplayNameError
 rename_player(player_id: str, new_display_name: str) -> Player
+reload() -> None                                      # ディスクから再読込（read-only viewer 用, WS2-α 追加）
 ```
 
 mobile mock（planned, TypeScript 一例・契約のみ）:
@@ -63,9 +64,11 @@ mock は `fixtures/player/*.json` を初期データに読み込み、validation
 | get session | `session_id` | `Session` | not-found |
 | close session | `session_id`, `ended_at` | `Session`（status=closed） | not-found / already-closed |
 | assign seat for hand | `session_id`, `hand_id`, `seat_no`, `player_id` | `SeatAssignment` | not-found / session-closed / seat-taken / unknown-player / invalid-seat |
+| list hand ids | `session_id` | `int[]`（記録済み hand_id を昇順） | not-found |
 | list seat assignments by hand | `session_id`, `hand_id` | `SeatAssignment[]` | not-found |
 | resolve seating for hand_ref | `session_id`, `hand_id` | `HandRef`（snapshot 込み） | not-found |
 | current seating | `session_id` | `SeatAssignment[]`（最新 hand から導出） | not-found |
+| reload | — | —（ディスクから再読込, read-only viewer 用 additive） | — |
 
 Python 具象（`core/session_repository.py` と一致）:
 
@@ -79,12 +82,17 @@ assign_seat(session_id: str, hand_id: int, seat_no: int, player_id: str) -> Seat
                                                    # raises SessionNotFound / SessionClosed /
                                                    #   InvalidSeat / UnknownPlayer / SeatTaken /
                                                    #   PlayerAlreadySeated
+list_hand_ids(session_id: str) -> list[int]                # 記録済み hand_id を昇順（WS2-α 追加）
 list_seat_assignments(session_id: str, hand_id: int) -> list[SeatAssignment]   # seat_no 昇順
 resolve_seat_map_for_hand(session_id: str, hand_id: int) -> dict[int, str]     # seat_no -> player_id
 resolve_hand_ref(session_id: str, hand_id: int) -> HandRef
 current_seating(session_id: str) -> list[SeatAssignment]   # 最新 hand から導出
+reload() -> None                                           # ディスクから再読込（read-only viewer 用, WS2-α 追加）
 ```
 
+- `list_hand_ids` / `reload` は WS2-α（read-only Session/Seating Viewer）で additive 追加した
+  **read 専用 API**。enumeration / loading を core に置き、front-end に複製しないための補助。
+  `PlayerRepository` 側にも対称な `reload()` を additive 追加（name 解決の外部更新取り込み用）。
 - **業務ルールは core が source of truth**。front-end は結果と error code を表示するだけ。
 - mobile は同 interface の in-memory mock を `fixtures/{session,seat_assignment,hand_ref}/` で先行実装できる。
 - **schema は未 freeze**: core は draft schema（0.x）に対して実装済（code↔contract test 緑）。

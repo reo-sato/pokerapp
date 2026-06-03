@@ -30,7 +30,7 @@ pokerapp/
 │   └── decision-log.md            ← ADR / 主要 issue の索引
 ├── sprc_v4.docx                   ← 仕様書（要件定義）
 ├── claude_v4.docx                 ← 旧仕様書（参考）
-├── main.py                        ← エントリーポイント (--cli / GUI / --players)
+├── main.py                        ← エントリーポイント (--cli / GUI / --players / --sessions)
 ├── config_default.json            ← デフォルト設定テンプレート
 ├── rfid_cards.json                ← tag_id → card_code マスタ
 ├── players.json                   ← player registry 永続ファイル (.gitignore, S1)
@@ -68,7 +68,8 @@ pokerapp/
 │
 ├── gui/
 │   ├── dashboard.py               ← GUIDashboard (hand logger 画面, customtkinter)
-│   └── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
+│   ├── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
+│   └── session_viewer.py          ← SessionViewerWindow (session/seating read-only inspection 画面, WS2-α, 別画面)
 │
 ├── tests/                         ← pytest テストスイート
 └── vision/                        ← レガシー（未使用）
@@ -198,6 +199,49 @@ ADR-0006、実装上の判断は ADR-0007。**hand logger とは未接続**（�
 
 ---
 
+## Session / Seating Viewer（WS2-α, read-only, 実装済）
+
+S2 core に蓄積された session / hand-based seating を **人間が確認するための read-only
+inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dashboard
+（`gui/dashboard.py`）/ player registry（`gui/player_registry.py`）とは **完全に別画面**。
+
+### スコープ（現時点）
+
+- session 一覧（session_id / started_at / status / label / hand 数 / assignment 数の要約）を見られる。
+- session を選ぶと **概要 / current seating / hand ごとの seat assignments** を見られる。
+- `player_id` を `PlayerRepository` で `display_name` に解決して表示する。解決不能（registry 非実在）
+  なら `(unknown)` を表示し、`player_id` 自体はそのまま残す。
+- **再読込（refresh）** ボタンで `SessionRepository` / `PlayerRepository` をディスクから読み直す
+  （別プロセスの hand logger が `sessions.json` を更新した場合に最新化）。live auto-refresh は持たない。
+- empty state（session 無し）/ no-data state（seating / hand 無し）を明示表示する。
+
+### 構成
+
+| 要素 | ファイル | 役割 |
+|------|---------|------|
+| 画面 | `gui/session_viewer.py` | `SessionViewerWindow`（customtkinter, dashboard / registry とは独立した read-only 画面） |
+| 起動 | `main.py --sessions` | hand logger / registry とは別に viewer 画面を開く |
+| read API | `core/session_repository.py` | `list_sessions` / `get_session` / `current_seating` / `list_hand_ids` / `list_seat_assignments` / `reload`（list_hand_ids・reload は本タスクで additive 追加した read API） |
+| name 解決 | `core/player_repository.py` | `get` / `list_players` / `reload`（reload は additive 追加） |
+
+### read-only の原則
+
+- **編集系操作を一切持たない**（session 作成 / close / seat 割り当て / player rename / 削除 なし）。
+  許容される書き込み相当は **refresh（再読込）のみ**。画面タイトルにも「読み取り専用 / inspection」を明示。
+- 業務ルール（validation・seating 導出）は **core が source of truth**。viewer は read API を呼んで
+  `player_id`→`display_name` 解決と表示整形だけを行い、business logic を複製しない。
+
+### Out of scope（WS2-α 時点）
+
+- session / seat の作成・編集・削除、hand logger からの live push 更新（手動 refresh で代替）。
+- filters / search / CSV export 等の高度機能、mobile（WS3）側 viewer、ledger / point / settlement。
+- legacy log reconciliation tool（ISSUE-0007）。
+- **注**: hand logger × session の write-through 接続（Phase 2.2/2.3）は **未実装**。viewer が表示する
+  データは現状 `SessionRepository` に直接書かれたもの（テスト / 将来の write-through）に限られる
+  （ISSUE-0008 参照）。
+
+---
+
 ## 実装状況（現時点）
 
 | 機能 | 状態 | 備考 |
@@ -213,6 +257,8 @@ ADR-0006、実装上の判断は ADR-0007。**hand logger とは未接続**（�
 | GUI ダッシュボード | 🔨 部分実装 | `gui/dashboard.py` |
 | **player registry (S1)** | ✅ 実装済 | `core/player.py`, `core/player_repository.py`, `gui/player_registry.py` |
 | **session + hand-based seating (S2) core** | ✅ 実装済 | `core/session.py`, `core/session_repository.py`（hand logger とは未接続, § Session & Seating 参照） |
+| **session / seating viewer (WS2-α, read-only)** | ✅ 実装済 | `gui/session_viewer.py`（`main.py --sessions`, § Session / Seating Viewer 参照） |
+| hand logger × session 接続 (Phase 2.2/2.3) | ❌ 未実装 | planning 済（ADR-0008 / hand-integration.md）。write-through 本実装は planned |
 | ベッティングステート / actor 推定 | ❌ 未実装 | future phase |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | future phase |
@@ -481,13 +527,15 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
     **draft 済**、freeze は ISSUE-0005 残項目後。
   - WS1: session 管理・seat snapshot の repository/service。**core 実装済**
     （`core/session.py` / `core/session_repository.py`, ADR-0007、`tests/test_session_repository.py`）。
-  - WS2: desktop の session/seating 別画面。**未着手**。
+  - WS2: desktop の session/seating 別画面。**read-only viewer 実装済（WS2-α）**
+    （`gui/session_viewer.py`, `main.py --sessions`, § Session / Seating Viewer）。編集系 UI は未着手。
   - WS3: mobile の session 画面（mock）。**未着手**。
 - **Blockers**: seat_assignment を hand-based にする設計確定（**ADR-0006 済**）。hand_id の cross-app 形
   （**ADR-0006 で `(session_id, hand_id)` 複合キーに確定**）。`session_id` 採番・永続形は
   **ADR-0007 で core について確定**。残: hand logger 接続・seat change UI 要件（ISSUE-0005）。
 - **Done criteria**: session 開始/終了と hand 単位 seat snapshot が core で確定（**達成: WS1 core**）。
-  両 front-end の契約越し表示（WS2/WS3）は未着手。schema `1.0` freeze は ISSUE-0005 残項目後。
+  desktop は read-only viewer まで実装（WS2-α）、編集系 desktop UI / mobile（WS3）は未着手。
+  schema `1.0` freeze は ISSUE-0005 残項目後。
 - **Phase 2.x（hand logger 接続, planning 済 / 実装 planned）**: 既存 hand logger world
   （`HandSummary` / `JsonWriter` / `PHHExporter` / `IntegrationThread`）と S2 core を **段階接続**する。
   方針は **Pattern A（write-through, additive）**：hand logger が `SessionRepository` に依存し、
@@ -570,6 +618,7 @@ pip install -r requirements.txt
 python main.py --cli                         # CLI モード (hand logger)
 python main.py                               # GUI モード (hand logger)
 python main.py --players                     # Player Registry 画面 (S1, 別画面)
+python main.py --sessions                    # Session / Seating Viewer (WS2-α, read-only, 別画面)
 pytest tests/ -v --ignore=tests/test_vision.py
 python main.py --export-phh logs/session_xxx.json
 ```
