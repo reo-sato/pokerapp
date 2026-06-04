@@ -112,3 +112,20 @@ def test_rebuy_between_hands(pk):
     assert pk.get_stacks()[3] == 15000
     pk.new_hand()
     assert pk.get_stacks()[3] == 15000  # 次ハンドに反映
+
+
+def test_allin_short_stack_calls_all_in():
+    """レイズできないショートスタックの 'allin' は call-all-in として処理され、state が前進する（desync しない）。"""
+    pytest.importorskip("pokerkit")
+    from core.poker_engine import PokerkitGameState
+
+    # seat1(SB) はスタック 150（SB 100 を post 済で 50 behind）。大きな raise に対し call-all-in のみ可。
+    gs = PokerkitGameState(_players((150, 10000, 10000)), 100, 200)
+    gs.new_hand()
+    gs.apply_action(3, "raise", 1000)        # UTG(seat3) raises to 1000
+    assert gs.get_current_player() == 1      # 手番は SB
+    ctx = gs.legal_context()
+    assert "raise" not in ctx.legal_actions  # SB は raise 不可
+    gs.apply_action(1, "allin")              # 旧実装ではここで ValueError → desync。修正後は call-all-in。
+    assert gs.get_stacks()[1] == 0           # SB all-in
+    assert gs.get_current_player() == 2      # 手番は BB（state が正しく前進）

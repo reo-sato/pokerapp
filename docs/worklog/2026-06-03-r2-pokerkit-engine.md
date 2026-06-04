@@ -48,10 +48,10 @@ ISSUE-0008（feasibility spike）を実施して gate を解除する。
 
 ## Test Results
 
-- `python -m pytest tests/ -q --ignore=tests/test_vision.py` → **197 passed**（185 + R1 2 + R2 10）。
+- `python -m pytest tests/ -q --ignore=tests/test_vision.py` → **198 passed**（185 + R1 2 + R2 11）。
 - `tests/test_poker_engine.py`: factory 既定 legacy / actor 順・legal_context / street 自動進行 /
   不正 raise・非手番の ValueError / side-pot（unequal all-in, 900+1400=2300）/ announced-winner award /
-  rebuy 反映 — 全緑。
+  rebuy 反映 / **allin ショートスタック call-all-in** — 全緑。
 - `python -m py_compile main.py core/poker_engine.py` → OK。legacy 既定が pokerkit 無しで構築可も確認。
 
 ## Mismatches Found During Testing
@@ -61,7 +61,11 @@ ISSUE-0008（feasibility spike）を実施して gate を解除する。
 
 ## Fixes Applied
 
-- なし（新規実装）。announced-winner override / 手動 import 遅延 / pot 総額の頑健算出は最初から設計に織り込み。
+- announced-winner override / 手動 import 遅延 / pot 総額の頑健算出は最初から設計に織り込み。
+- **review fix（self-review）**: `apply_action("allin")` を「raise 可なら max raise、不可だが call 可なら
+  call-all-in、いずれも不可なら error」に分離。レイズ不可なショートスタックの「オールイン」で旧実装は
+  `max=None` → `ValueError` → pokerkit state が前進せず以降の actor/pot が desync していた。回帰テスト
+  `test_allin_short_stack_calls_all_in` を追加。
 
 ## Remaining Gaps / Out-of-Scope
 

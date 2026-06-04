@@ -20,8 +20,10 @@
   - **ISSUE-0008（Fixed）**: pokerkit 0.7.4 で必要 API（actor / 合法手 / min-raise / amount_to_call / side-pot の
     incremental 露出、不正額の `ValueError`、`HOLE_DEALING` でカード不要駆動）を spike で実機確認。ADR-0009 の
     gate 解除。**ADR-0009 を Accepted**（R2 engine 実装済 / R3 は planned）。
-  - tests: `tests/test_poker_engine.py`（10: actor 順 / legal_context / street 自動進行 / 不正・非手番拒否 /
-    side-pot / winner award / rebuy）。**全 197 passed**。
+  - tests: `tests/test_poker_engine.py`（11: actor 順 / legal_context / street 自動進行 / 不正・非手番拒否 /
+    side-pot / winner award / rebuy / **allin ショートスタック call-all-in**）。**全 198 passed**。
+  - review fix: `apply_action("allin")` を「raise 可なら max へ raise、不可だが call 可なら call-all-in」に
+    分離（レイズ不可なショートスタックの「オールイン」での pokerkit state desync を防止）。
   - 既知の差（legacy より正確側・preview）: ブラインド自動 post、合法手のみ受理（raw ASR の射影は R3）、
     street は betting 完了で自動進行。**live 既定動作（legacy）は不変**。
 

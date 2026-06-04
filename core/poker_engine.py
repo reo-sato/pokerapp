@@ -180,12 +180,20 @@ class PokerkitGameState:
             if not st.can_check_or_call():
                 raise ValueError("check/call not legal")
             st.check_or_call()
-        elif a in ("bet", "raise", "allin"):
-            target = st.max_completion_betting_or_raising_to_amount if a == "allin" else amount
+        elif a == "allin":
+            # raise 可なら max へ raise。不可だが call 可ならショートスタックの call-all-in。
+            # （両方不可は実質ありえないが安全側で error）。これにより desync を防ぐ。
+            if st.can_complete_bet_or_raise_to():
+                st.complete_bet_or_raise_to(st.max_completion_betting_or_raising_to_amount)
+            elif st.can_check_or_call():
+                st.check_or_call()
+            else:
+                raise ValueError("allin not legal")
+        elif a in ("bet", "raise"):
             # R2: amount は "to" 総額前提（raw ASR からの射影は R3 apply_corrections）。
-            if target is None or not st.can_complete_bet_or_raise_to(target):
-                raise ValueError(f"bet/raise to {target!r} not legal")
-            st.complete_bet_or_raise_to(target)
+            if amount is None or not st.can_complete_bet_or_raise_to(amount):
+                raise ValueError(f"bet/raise to {amount!r} not legal")
+            st.complete_bet_or_raise_to(amount)
         else:
             raise ValueError(f"Unknown action: {action!r} (seat={seat})")
 
