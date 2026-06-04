@@ -258,6 +258,15 @@ class SessionRepository:
             return []
         return sorted(hand["seats"], key=lambda sa: sa.seat_no)
 
+    def list_hand_ids(self, session_id: str) -> list[int]:
+        """session に記録済みの hand_id を昇順で返す（read-only, viewer 用）。
+
+        seat assignment を 1 件以上持つ hand のみが対象（hand logger 連携時は
+        hand 開始の write-through で記録される）。記録が無ければ空 list。
+        """
+        self.get_session(session_id)
+        return sorted(self._hands.get(session_id, {}).keys())
+
     def resolve_seat_map_for_hand(self, session_id: str, hand_id: int) -> dict[int, str]:
         """あるハンドの ``seat_no -> player_id`` マップを返す。"""
         return {

@@ -69,6 +69,7 @@ pokerapp/
 ├── gui/
 │   ├── dashboard.py               ← GUIDashboard (hand logger 画面, customtkinter)
 │   ├── seat_assignment.py         ← SeatAssignmentDialog (seat→player 選択, S2.3, session レイヤ有効時のみ)
+│   ├── session_viewer.py          ← SessionViewerWindow (session/seating の read-only ビューア, WS2-α, 別画面)
 │   └── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
 │
 ├── tests/                         ← pytest テストスイート
@@ -256,6 +257,43 @@ JSON は **additive のみ**。S2.2 で write-through、S2.3 で desktop の最�
 
 ---
 
+## Session / Seating Viewer（WS2-α, read-only 実装済）
+
+S2 core と Phase 2.2 / 2.3 で記録された session / seating を **人間が壊れない形で覗ける
+read-only GUI**（`gui/session_viewer.py` の `SessionViewerWindow`）。hand logger / player
+registry とは **別ウィンドウ**で、**編集機能は一切持たない（inspection 専用）**。
+
+### スコープ（α）
+
+- session 一覧の表示 → 選択 → その session の **概要 / current seating / hand 別 seat assignments** を表示。
+- `player_id` を `PlayerRepository` で `display_name` に解決（未解決は `(unknown)` 表示 + `player_id` も併記）。
+- 手動 **Refresh** ボタンで repository から再読込（auto-refresh はしない）。
+- empty state: session 0 件 →「セッションがありません」、seating 無し →「まだ seat assignment が
+  ありません」を明示（「壊れている」のか「何もない」のかが一目で分かる）。
+
+### 構成 / 起動
+
+| 要素 | ファイル | 役割 |
+|------|---------|------|
+| view model + 画面 | `gui/session_viewer.py` | `SessionDetail` 等の view model（pure）+ `SessionViewerWindow` |
+| 起動(CLI) | `main.py --sessions-viewer` | hand logger とは別に viewer 画面を開く |
+| 起動(GUI) | `gui/dashboard.py` の「Session Viewer」ボタン | session レイヤ有効 + `session_repo` がある時のみ表示。Toplevel で開く |
+
+### 設計上の約束
+
+- **read-only 厳守**: `SessionRepository` / `PlayerRepository` の **read API のみ**使う。保存・採番・
+  validation 等の business ルールは repository 側の責務であり viewer に複製しない。
+- data 整形（`player_id→display_name` 解決、view model 構築）は `gui/session_viewer.py` の
+  **pure 関数**（`resolve_display_name` / `build_session_detail`）に切り出してテスト可能にする。
+- viewer 用に repository へ追加したのは read-only helper `SessionRepository.list_hand_ids()` のみ。
+
+### Out of scope（WS2-α）
+
+- session / seat の作成・編集・削除、filter / search / sort、live auto-refresh、export、
+  mobile / web viewer、ledger / points / settlement 連携（ISSUE-0008 / 後続 Phase）。
+
+---
+
 ## 実装状況（現時点）
 
 | 機能 | 状態 | 備考 |
@@ -273,6 +311,7 @@ JSON は **additive のみ**。S2.2 で write-through、S2.3 で desktop の最�
 | **session + hand-based seating (S2) core** | ✅ 実装済 | `core/session.py`, `core/session_repository.py`（§ Session & Seating 参照） |
 | **session layer integration (S2.2)** | ✅ 実装済（config-gated） | `config.session_layer.enabled`、`integration/engine.py` write-through（§ Session Layer Integration 参照） |
 | **seat selection UX (S2.3)** | ✅ 実装済（desktop 最小） | `gui/seat_assignment.py`、`gui/dashboard.py` seat ダイアログ（session レイヤ有効時のみ。§ Session Layer Integration 参照） |
+| **session / seating viewer (WS2-α)** | ✅ 実装済（desktop, read-only） | `gui/session_viewer.py`（§ Session / Seating Viewer 参照。`main.py --sessions-viewer` / dashboard ボタン） |
 | ベッティングステート / actor 推定 | ❌ 未実装 | future phase |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | future phase |
@@ -643,6 +682,7 @@ pip install -r requirements.txt
 python main.py --cli                         # CLI モード (hand logger)
 python main.py                               # GUI モード (hand logger)
 python main.py --players                     # Player Registry 画面 (S1, 別画面)
+python main.py --sessions-viewer             # Session / Seating Viewer (WS2-α, read-only, 別画面)
 pytest tests/ -v --ignore=tests/test_vision.py
 python main.py --export-phh logs/session_xxx.json
 ```

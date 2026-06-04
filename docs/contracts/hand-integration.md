@@ -116,6 +116,12 @@ IntegrationThread
 | JSON 永続化 | `JsonWriter` | 変更不要（dict 化済みデータが additive に増えるだけ） |
 | PHH 出力 | `PHHExporter` | **変更しない**。player_id は載せない |
 | reader 側 | 将来 ledger / settlement / replay GUI | `HandSummary.players[i].player_id` を主参照、null なら name fallback |
+| inspection | **Session / Seating Viewer (WS2-α, `gui/session_viewer.py`)** | session / current seating / hand 別 seat assignments を **read-only** で表示。`player_id` を `PlayerRepository` で `display_name` 解決（未解決は `(unknown)`）。編集はしない（repository が source of truth） |
+
+> **WS2-α メモ**: write-through（Pattern A）で session レイヤに溜まった seating を人間が確認できる
+> よう、read-only の desktop viewer を追加した。`SessionRepository` の read API（`list_sessions` /
+> `get_session` / `current_seating` / `list_hand_ids` / `list_seat_assignments`）のみを使い、表示用の
+> view model 整形は viewer 側の pure 関数に閉じる。編集・filter・live 更新は scope 外（ISSUE-0008）。
 
 ### legacy log の扱い (ISSUE-0007 参照)
 

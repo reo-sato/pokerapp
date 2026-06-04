@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+### Added (WS2-α — Session / Seating Viewer, desktop read-only)
+
+- **read-only な Session / Seating Viewer を別ウィンドウで追加**（S2 core + Phase 2.2/2.3 で
+  記録された session / seating を人間が覗くための inspection 専用 GUI。編集機能なし）。
+  - `gui/session_viewer.py`（新規）: `SessionViewerWindow` + view model（`SessionDetail` /
+    `SeatRow` / `HandAssignmentRow`）+ pure ヘルパ `resolve_display_name` / `build_session_detail` /
+    `build_name_map`。session 一覧 → 選択 → 概要 / current seating / hand 別 seat assignments を表示。
+    `player_id` を `display_name` に解決（未解決は `(unknown)` + player_id 併記）。手動 Refresh。
+    empty state（session 0 件 / seating 無し）を明示。
+  - `core/session_repository.py`: read-only helper `list_hand_ids(session_id)` を追加（viewer 用）。
+  - `main.py`: `--sessions-viewer` で起動する `run_session_viewer()` を追加。
+  - `gui/dashboard.py`: session レイヤ有効 + `session_repo` 指定時のみ「Session Viewer」ボタンを表示し
+    Toplevel で開く（`session_repo` を optional DI 追加。flag off / 既存 UX は不変）。
+  - `tests/test_session_viewer_gui.py`（新規）: pure ヘルパ / empty state / 自動選択 / seating 解決 /
+    unknown player / refresh 再読込 / read-only 性。
+  - Out of scope（ISSUE-0008）: 作成・編集・削除、filter/search/sort、live auto-refresh、export、
+    mobile/web、ledger 連携。
+
 ### Added (Phase 2.3 — seat selection UX, desktop minimal)
 
 - **desktop hand logger に最小 seat selection UX を追加**（ISSUE-0006 を部分解決、ADR-0008 Pattern A

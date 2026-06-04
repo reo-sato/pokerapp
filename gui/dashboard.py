@@ -68,6 +68,7 @@ class GUIDashboard:
         rfid_receiver: Optional[object] = None,
         player_repo: Optional["PlayerRepository"] = None,
         session_layer_enabled: bool = False,
+        session_repo: Optional[object] = None,
     ) -> None:
         import customtkinter as ctk
 
@@ -80,6 +81,8 @@ class GUIDashboard:
         # Phase 2.3: seat selection UX。session レイヤ有効時のみ seat UI を出す。
         self._player_repo = player_repo
         self._session_layer_enabled = session_layer_enabled and player_repo is not None
+        # WS2-α: read-only Session Viewer を別ウィンドウで開くための参照。
+        self._session_repo = session_repo
         self._integration_thread: Optional[threading.Thread] = None
         self._update_queue: queue.Queue["ActionRecord"] = queue.Queue()
         self._rfid_card_queue: queue.Queue = queue.Queue()
@@ -215,6 +218,11 @@ class GUIDashboard:
             ctk.CTkButton(ctrl, text="席割り当て", width=100,
                           command=self._cmd_seat_assignment).grid(
                               row=1, column=0, padx=8, pady=(0, 8))
+            # WS2-α: read-only viewer を開くボタン（session_repo がある場合のみ）。
+            if self._session_repo is not None:
+                ctk.CTkButton(ctrl, text="Session Viewer", width=120,
+                              command=self._cmd_open_session_viewer).grid(
+                                  row=1, column=1, columnspan=2, padx=8, pady=(0, 8))
 
         # ウィナー確定
         ctk.CTkLabel(ctrl, text="ウィナー:").grid(row=0, column=1, padx=(12, 2))
@@ -261,6 +269,17 @@ class GUIDashboard:
     def _cmd_seat_assignment(self) -> None:
         """席割り当てボタン: hand を開始せず seating だけ編集する。"""
         self._open_seat_dialog(then_start_hand=False)
+
+    def _cmd_open_session_viewer(self) -> None:
+        """WS2-α: read-only Session / Seating Viewer を別ウィンドウで開く。"""
+        if self._session_repo is None or self._player_repo is None:
+            return
+        from gui.session_viewer import SessionViewerWindow
+        SessionViewerWindow(
+            session_repo=self._session_repo,
+            player_repo=self._player_repo,
+            master=self._root,
+        )
 
     def _open_seat_dialog(self, then_start_hand: bool) -> None:
         """seat selection ダイアログを開く（Phase 2.3）。
