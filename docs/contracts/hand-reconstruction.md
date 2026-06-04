@@ -44,6 +44,7 @@ camera──► CameraThread──► CameraEvent(seat)                         
 
 `integration/engine.py` / `main.py` が現在 `GameStateManager` に対して呼ぶ公開 I/F を **そのまま** Protocol 化し、
 `pokerkit.State` 実装と legacy 実装を差し替え可能にする（ADR-0009）。`config.engine.backend` で選択。
+**R2 実装済**: `core/poker_engine.py`（`PokerEngine` Protocol / `PokerkitGameState` / `create_game_state`）, default-off。
 
 | 既存メソッド（不変） | 役割 |
 |---|---|

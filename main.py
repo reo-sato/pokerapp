@@ -68,11 +68,23 @@ def _make_event_recorder(cfg: dict, log_dir: str, session_id: str):
     return EventRecorder(Path(log_dir) / f"{session_id}.events.jsonl")
 
 
+def _make_game_state(cfg: dict, players: list, sb: int, bb: int):
+    """config.engine.backend で game-state 実装を選ぶ (R2, ADR-0009)。
+
+    既定 "legacy" = 従来の `GameStateManager`（挙動不変）。"pokerkit" は preview backend
+    （要 pokerkit, default-off）。
+    """
+    from core.poker_engine import create_game_state
+
+    backend = cfg.get("engine", {}).get("backend", "legacy")
+    return create_game_state(backend, players, sb, bb)
+
+
 def run_cli() -> None:
     """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。"""
     from core.config import load_config
     from core.event_queue import make_audio_queue
-    from core.game_state import GameStateManager, PlayerState
+    from core.game_state import PlayerState
     from audio.recorder import AudioThread
     from integration.engine import IntegrationThread
     from output.json_writer import JsonWriter
@@ -84,11 +96,7 @@ def run_cli() -> None:
         PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
         for p in session_cfg["players"]
     ]
-    game_state = GameStateManager(
-        players=players,
-        sb=session_cfg["sb"],
-        bb=session_cfg["bb"],
-    )
+    game_state = _make_game_state(cfg, players, session_cfg["sb"], session_cfg["bb"])
 
     session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
@@ -238,7 +246,7 @@ def run_gui() -> None:
     """Phase 4 GUIモード: customtkinter ダッシュボードを起動する。"""
     from core.config import load_config
     from core.event_queue import make_audio_queue
-    from core.game_state import GameStateManager, PlayerState
+    from core.game_state import PlayerState
     from audio.recorder import AudioThread
     from integration.engine import IntegrationThread
     from output.json_writer import JsonWriter
@@ -258,11 +266,7 @@ def run_gui() -> None:
         PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
         for p in session_cfg["players"]
     ]
-    game_state = GameStateManager(
-        players=players,
-        sb=session_cfg["sb"],
-        bb=session_cfg["bb"],
-    )
+    game_state = _make_game_state(cfg, players, session_cfg["sb"], session_cfg["bb"])
 
     session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)

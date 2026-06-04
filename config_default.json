@@ -46,5 +46,9 @@
   "recording": {
     "enabled": false,
     "_comment": "R1 (ADR-0010): 生センサーイベントを logs/{session_id}.events.jsonl に append-only 記録する sidecar。挙動不変・opt-in。"
+  },
+  "engine": {
+    "backend": "legacy",
+    "_comment": "R2 (ADR-0009): game-state backend。'legacy' | 'pokerkit'。pokerkit は preview（要 pokerkit, default-off）。"
   }
 }

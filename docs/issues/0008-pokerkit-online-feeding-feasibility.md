@@ -7,7 +7,38 @@
 ## Status
 
 <!-- One of: Open / Investigating / Fixed / WontFix / Duplicate -->
-Open
+Fixed（2026-06-03 spike で feasibility 確認。pokerkit 0.7.4 で必要 API を実機検証。実装は R2）
+
+## Update (2026-06-03, spike 実施)
+
+`pokerkit==0.7.4`（`>=0.5.0` を満たす）で `NoLimitTexasHoldem.create_state(...)` を実機検証し、
+`PokerEngine`（`docs/contracts/hand-reconstruction.md` §2）が必要とする API がすべて揃うことを確認した:
+
+- **actor / 合法手 / 金額**: `state.actor_index`（手番, ポジション順）、`state.can_fold()` /
+  `state.can_check_or_call()` / `state.checking_or_calling_amount`（= amount_to_call）、
+  `state.can_complete_bet_or_raise_to(x)` / `state.min_completion_betting_or_raising_to_amount` /
+  `state.max_completion_betting_or_raising_to_amount`（min/max raise）。
+- **カード不要で betting 駆動可**: `Automation.HOLE_DEALING` でダミーカードを自動配布し、ホールカードを
+  知らなくても betting state machine を回せる（live ではカードは RFID が source。pokerkit のダミーは
+  状態機械駆動専用で hole-card 記録には使わない）。
+- **不正額の拒否**: `complete_bet_or_raise_to(150)`（min 400 未満）→ `ValueError "The amount 150 is
+  below the minimum allowed 400."`。`can_complete_bet_or_raise_to(150)` → False。これを「合法手への
+  射影」と「pokerkit 拒否 = needs_review」に使える（ADR-0009）。
+- **ストリート完了 / hand 終了**: 全員 call で `state.street_index` 自動進行・`actor_index` リセット。
+  fold で 1 人になると `actor_index is None` / `status False` を検出可。
+- **side-pot**: `state.pots`（各 `pot.amount` / `pot.player_indices`）。`CHIPS_PUSHING` / showdown
+  automation 後は自動分配後の値になるため、**分配前にスナップショット**するか当該 automation を外す。
+
+### R2 への設計含意
+
+1. **announced winner の優先**: pokerkit の auto-showdown はダミーカードで誤った勝者を出す。pokerkit
+   backend では showdown/push automation を外し、**アナウンス勝者へ手動 push**（または pot 額のみ採用）する。
+2. **seat↔index 写像**を `new_hand()` で固定（`hand-reconstruction.md` §3）。
+3. **`apply_action` の amount 意味**: 現 GameStateManager は「追加チップ額」、pokerkit は「to 総額」。
+   変換（call=`checking_or_calling_amount`、bet/raise=to 総額へ snap）は R3 `apply_corrections` で行う。
+   R2 の pokerkit backend は default-off（`engine.backend=legacy`）で導入し、live 既定動作は不変。
+
+**結論**: feasibility 確認済み。ADR-0009 の gate を解除。R2 は default-off フラグで安全に着手できる。
 
 ## Severity / Priority
 

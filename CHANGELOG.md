@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+### Added (Phase R2 — pokerkit game-state backend, preview / default-off)
+
+- **pokerkit を live ルール権威にした game-state backend**（ADR-0009, **default-off の preview**）:
+  ノイジー入力からの正確な再構築のため、actor 順（ポジション順）/ 合法手集合 / amount_to_call / min-raise /
+  **side-pot** を pokerkit に委ねる backend を追加。**既定 `legacy` で挙動不変**、`config.engine.backend=pokerkit`
+  で opt-in。
+  - `core/poker_engine.py`（新規）: `PokerEngine` Protocol（legacy/pokerkit 共通 I/F）＋ `PokerkitGameState`
+    ＋ `create_game_state` factory。pokerkit は **遅延 import**（未導入でも legacy は動く）。announced winner を
+    手動 push（pokerkit auto-showdown はダミーカードのため無効化）、side-pot スナップショット、seat↔index 固定。
+  - `main.py`: `_make_game_state(cfg, ...)` で backend 選択（CLI/GUI 両経路）。`config_default.json` に
+    `engine.backend: "legacy"` を追加。
+  - **ISSUE-0008（Fixed）**: pokerkit 0.7.4 で必要 API（actor / 合法手 / min-raise / amount_to_call / side-pot の
+    incremental 露出、不正額の `ValueError`、`HOLE_DEALING` でカード不要駆動）を spike で実機確認。ADR-0009 の
+    gate 解除。**ADR-0009 を Accepted**（R2 engine 実装済 / R3 は planned）。
+  - tests: `tests/test_poker_engine.py`（10: actor 順 / legal_context / street 自動進行 / 不正・非手番拒否 /
+    side-pot / winner award / rebuy）。**全 197 passed**。
+  - 既知の差（legacy より正確側・preview）: ブラインド自動 post、合法手のみ受理（raw ASR の射影は R3）、
+    street は betting 完了で自動進行。**live 既定動作（legacy）は不変**。
+
 ### Added (Phase R1 — event recording sidecar)
 
 - **生センサーイベントの append-only sidecar 記録**（ADR-0010, record-only 先行実装）:

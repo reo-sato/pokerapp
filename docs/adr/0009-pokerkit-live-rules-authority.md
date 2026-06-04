@@ -3,7 +3,7 @@
 ## Status
 
 <!-- One of: Proposed / Accepted / Superseded / Rejected / Deprecated -->
-Proposed
+Accepted（ISSUE-0008 spike 済。R2 pokerkit engine 実装済・default-off。R3 = actor 推定 / apply_corrections / 融合は planned）
 
 ## Date
 
@@ -138,13 +138,16 @@ R2/R3）、過去の決定を反転しない。既存 `calc_confidence` / 照合
 
 ## Validation / Follow-up
 
-- [ ] **ISSUE-0008**: pokerkit `>=0.5.0` の online-feeding API（actor / legal-actions / min-raise /
-      amount-to-call / side-pot の incremental 露出、fold/check-call/raise-to・カード dealing、不正額の例外）を
-      spike で検証。不可なら shadow tracker で補完。**本 ADR Accepted の前提**。
+- [x] **ISSUE-0008**（2026-06-03 spike 済, Fixed）: pokerkit 0.7.4 で actor / legal-actions / min-raise /
+      amount-to-call / side-pot の incremental 露出、不正額の `ValueError`、`HOLE_DEALING` でのカード不要駆動を
+      実機確認。shadow tracker 不要。
 - [ ] **ISSUE-0009**: actor 競合解決と silent-fold 合成の適用条件・件数上限・`needs_review` 閾値・派生
       confidence の重み較正を確定。
-- [ ] R2（実装）: `PokerEngine` Protocol ＋ `PokerkitGameState` を `engine.backend` フラグ下で追加。legacy と
-      R1 capture の replay 差分で同値検証。seat↔index 写像の単体テスト。`tests/test_game_state.py` が legacy で緑。
+- [x] R2（実装済, 2026-06-03）: `core/poker_engine.py`（`PokerEngine` Protocol ＋ `PokerkitGameState` ＋
+      `create_game_state` factory）＋ `config.engine.backend`（既定 legacy）。pokerkit は遅延 import で
+      default-off。announced winner を手動 push、side-pot 取得、seat↔index 固定。
+      `tests/test_poker_engine.py`（actor 順 / legal_context / street 自動進行 / 不正・非手番拒否 / side-pot /
+      winner award / rebuy）緑。全 197 緑。**R2 単体では live 既定動作は不変**（live 接続は R3 で projection）。
 - [ ] R3（実装）: actor 推定 ＋ `apply_corrections` ＋ 派生 confidence。golden-fixture（ADR-0010）で固定:
       「check facing a bet → call/fold」「コール 500 → engine 額」「silent fold → 次 actor 正」
       「unequal all-in → side-pot」「out-of-turn confirmed by RFID」。`apply_corrections` 純関数表テスト、
