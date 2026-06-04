@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/seat_assignment.schema.json",
+  "title": "SeatAssignment",
+  "version": "0.1",
+  "description": "S2 draft (未 freeze)。hand-based の seat→player スナップショット 1 行 (standalone 永続形)。あるハンドのある席に 1 player を割り当てる。空席は行を作らない (partial assignment)。hand_ref.seat_assignments は本形から session_id/hand_id を除いた埋め込み denormalized 形。詳細は docs/contracts/session-seating.md / ADR-0006。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session_id", "hand_id", "seat_no", "player_id"],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "所属 session。"
+    },
+    "hand_id": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "session 内連番 int。(session_id, hand_id) で globally unique (ADR-0006)。hand_id 単独は global key ではない。"
+    },
+    "seat_no": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9,
+      "description": "席番号 (1..9)。テーブルの最大席数に合わせた範囲。"
+    },
+    "player_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "着席 player の player_id (S1 契約)。registry 実在性は core が enforce (unknown_player)。"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "sitting_out"],
+      "description": "任意。着席中 active / 一時離席 sitting_out。absent は active 扱い。"
+    }
+  }
+}

@@ -6,5 +6,6 @@ customtkinter>=5.2.0
 easyocr>=1.7.0
 numpy>=1.24.0
 pytest>=7.0.0
+jsonschema>=4.0.0
 # pyscard は transport="pcsc" 時のみ必要 (transport="http" では不要)
 # pip install pyscard>=2.0.7

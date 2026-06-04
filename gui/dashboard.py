@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 if TYPE_CHECKING:
     from core.game_state import GameStateManager
     from core.hand_log import ActionRecord
+    from core.player_repository import PlayerRepository
     from output.json_writer import JsonWriter
 
 # confidence スコアに応じた色
@@ -65,6 +66,9 @@ class GUIDashboard:
         camera_queue: Optional[queue.Queue] = None,
         stop_event: Optional[threading.Event] = None,
         rfid_receiver: Optional[object] = None,
+        player_repo: Optional["PlayerRepository"] = None,
+        session_layer_enabled: bool = False,
+        session_repo: Optional[object] = None,
     ) -> None:
         import customtkinter as ctk
 
@@ -74,6 +78,12 @@ class GUIDashboard:
         self._camera_queue = camera_queue
         self._stop_event = stop_event or threading.Event()
         self._rfid_receiver = rfid_receiver  # RFIDHTTPReceiver (status プロパティ用)
+        # Phase 2.3: seat selection UX。session レイヤ有効時のみ seat UI を出す。
+        self._player_repo = player_repo
+        self._session_layer_enabled = session_layer_enabled and player_repo is not None
+        # WS2-α: read-only Session Viewer を別ウィンドウで開くための参照。
+        self._session_repo = session_repo
+        self._integration_thread: Optional[threading.Thread] = None
         self._update_queue: queue.Queue["ActionRecord"] = queue.Queue()
         self._rfid_card_queue: queue.Queue = queue.Queue()
         # seat → hole cards 表示用 (スレッド安全のため queue 経由で更新)
@@ -203,6 +213,17 @@ class GUIDashboard:
         ctk.CTkButton(ctrl, text="新ハンド", width=100,
                       command=self._cmd_new_hand).grid(row=0, column=0, padx=8, pady=12)
 
+        # Phase 2.3: session レイヤ有効時のみ seat 割り当てボタンを出す（flag off では非表示）。
+        if self._session_layer_enabled:
+            ctk.CTkButton(ctrl, text="席割り当て", width=100,
+                          command=self._cmd_seat_assignment).grid(
+                              row=1, column=0, padx=8, pady=(0, 8))
+            # WS2-α: read-only viewer を開くボタン（session_repo がある場合のみ）。
+            if self._session_repo is not None:
+                ctk.CTkButton(ctrl, text="Session Viewer", width=120,
+                              command=self._cmd_open_session_viewer).grid(
+                                  row=1, column=1, columnspan=2, padx=8, pady=(0, 8))
+
         # ウィナー確定
         ctk.CTkLabel(ctrl, text="ウィナー:").grid(row=0, column=1, padx=(12, 2))
         seats = [str(s) for s in sorted(self._gs.get_stacks().keys())]
@@ -225,6 +246,14 @@ class GUIDashboard:
     # ――― コントロールコマンド ―――
 
     def _cmd_new_hand(self) -> None:
+        # Phase 2.3: session レイヤ有効時は hand 開始前に seat 割り当てを確認させる。
+        # OK で seating を更新してから new_hand を流す。キャンセルなら hand を開始しない。
+        if self._session_layer_enabled:
+            self._open_seat_dialog(then_start_hand=True)
+        else:
+            self._enqueue_new_hand()
+
+    def _enqueue_new_hand(self) -> None:
         from core.events import AudioEvent
         # ホールカード / ボードカード表示をリセット
         self._hole_cards_display.clear()
@@ -236,6 +265,55 @@ class GUIDashboard:
         self._audio_queue.put(AudioEvent(
             action="new_hand", amount=0, timestamp=time.time(), raw_text="",
         ))
+
+    def _cmd_seat_assignment(self) -> None:
+        """席割り当てボタン: hand を開始せず seating だけ編集する。"""
+        self._open_seat_dialog(then_start_hand=False)
+
+    def _cmd_open_session_viewer(self) -> None:
+        """WS2-α: read-only Session / Seating Viewer を別ウィンドウで開く。"""
+        if self._session_repo is None or self._player_repo is None:
+            return
+        from gui.session_viewer import SessionViewerWindow
+        SessionViewerWindow(
+            session_repo=self._session_repo,
+            player_repo=self._player_repo,
+            master=self._root,
+        )
+
+    def _open_seat_dialog(self, then_start_hand: bool) -> None:
+        """seat selection ダイアログを開く（Phase 2.3）。
+
+        OK 時に IntegrationThread の seating を更新し、``then_start_hand`` なら続けて
+        new_hand を流す。player 候補はダイアログを開くたびに registry から最新取得する。
+        """
+        from gui.seat_assignment import SeatAssignmentDialog
+
+        players = self._player_repo.list_players() if self._player_repo else []
+        current = (
+            self._integration_thread.get_seating()
+            if self._integration_thread is not None
+            else {}
+        )
+        seats = sorted(self._gs.get_stacks().keys())
+
+        def on_confirm(seating: dict[int, str]) -> None:
+            if self._integration_thread is not None:
+                self._integration_thread.update_seating(seating)
+            self._append_log(
+                f"席割り当てを更新しました（{len(seating)}席）。", tag="medium"
+            )
+            if then_start_hand:
+                self._enqueue_new_hand()
+
+        SeatAssignmentDialog(
+            parent=self._root,
+            ctk=self._ctk,
+            players=players,
+            current_seating=current,
+            seats=seats,
+            on_confirm=on_confirm,
+        )
 
     def _cmd_winner(self) -> None:
         from core.events import AudioEvent

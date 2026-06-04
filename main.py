@@ -55,6 +55,40 @@ def _prompt_session_config() -> dict:
     return {"players": players, "sb": sb, "bb": bb, "log_dir": log_dir}
 
 
+def _init_session_layer(cfg: dict, session_cfg: dict):
+    """Phase 2.2 (ADR-0008): config flag に応じて S2 session レイヤを初期化する。
+
+    config.session_layer.enabled が真なら ``SessionRepository.create_session`` で
+    UUID4 hex の session_id を採番し、それを hand logger の canonical session_id に使う。
+    偽なら従来の timestamp session_id を採番し、session レイヤには接続しない（rollback path）。
+
+    Returns:
+        (session_id, session_repo, player_repo, seating)
+          - session_id: JsonWriter / HandSummary が使う canonical な session_id。
+          - session_repo: 有効時のみ SessionRepository、無効時 None。
+          - player_repo: 有効時のみ PlayerRepository（GUI の seat 選択 UI が参照）、無効時 None。
+          - seating: 初期 ``seat_no -> player_id`` マップ。Phase 2.3 では空で開始し、GUI の
+            seat selection UX（`gui/seat_assignment.py`）で実行時に設定する。
+    """
+    if cfg.get("session_layer", {}).get("enabled", False):
+        from core.player_repository import PlayerRepository
+        from core.session_repository import SessionRepository
+
+        # player_repo を共有: session_repo の unknown_player 判定と GUI の player 候補が
+        # 同じ registry を見るようにする。
+        player_repo = PlayerRepository()
+        session_repo = SessionRepository(player_repo=player_repo)
+        session = session_repo.create_session(
+            blinds={"sb": session_cfg["sb"], "bb": session_cfg["bb"]},
+        )
+        logger.info("Session layer enabled: session_id=%s", session.session_id)
+        # 初期 seating は空。seat→player_id は GUI の seat selection で hand 開始時に確定する。
+        return session.session_id, session_repo, player_repo, {}
+
+    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
+    return session_id, None, None, {}
+
+
 def run_cli() -> None:
     """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。"""
     from core.config import load_config
@@ -77,7 +111,8 @@ def run_cli() -> None:
         bb=session_cfg["bb"],
     )
 
-    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
+    # CLI モードは seat selection UI を持たない（GUI 専用, Phase 2.3）。player_repo は未使用。
+    session_id, session_repo, _player_repo, seating = _init_session_layer(cfg, session_cfg)
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
 
     audio_q = make_audio_queue()
@@ -161,6 +196,9 @@ def run_cli() -> None:
         rfid_queue=rfid_q if rfid_cfg.get("enabled", False) else None,
         on_action=on_action,
         stop_event=stop_event,
+        session_repo=session_repo,
+        session_id=session_id if session_repo is not None else None,
+        seating=seating,
     )
     audio_thread.start()
     integration_thread.start()
@@ -249,7 +287,7 @@ def run_gui() -> None:
         bb=session_cfg["bb"],
     )
 
-    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
+    session_id, session_repo, player_repo, seating = _init_session_layer(cfg, session_cfg)
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
 
     audio_q = make_audio_queue()
@@ -268,6 +306,9 @@ def run_gui() -> None:
         camera_queue=camera_q,
         stop_event=stop_event,
         rfid_receiver=None,  # rfid_thread 確定後に設定
+        player_repo=player_repo,
+        session_layer_enabled=session_repo is not None,
+        session_repo=session_repo,
     )
 
     audio_thread = AudioThread(
@@ -334,6 +375,9 @@ def run_gui() -> None:
         on_action=dash.on_action,
         on_rfid_card=dash.on_rfid_card,
         stop_event=stop_event,
+        session_repo=session_repo,
+        session_id=session_id if session_repo is not None else None,
+        seating=seating,
     )
 
     dash.start_threads(
@@ -351,6 +395,40 @@ def run_gui() -> None:
     if camera_thread is not None:
         camera_thread.join(timeout=3)
     print(f"\nセッション終了。ログ保存先: {json_writer.path}")
+
+
+def run_player_registry() -> None:
+    """Phase S1: hand logger とは別画面の Player Registry を起動する。"""
+    from core.player_repository import PlayerRepository
+    from gui.player_registry import PlayerRegistryWindow
+
+    try:
+        import customtkinter  # noqa: F401
+    except ImportError:
+        print("customtkinter が見つかりません。pip install customtkinter でインストールしてください。")
+        sys.exit(1)
+
+    repo = PlayerRepository()
+    win = PlayerRegistryWindow(repository=repo)
+    win.run()
+
+
+def run_session_viewer() -> None:
+    """WS2-α: hand logger とは別画面の Session / Seating Viewer（read-only）を起動する。"""
+    from core.player_repository import PlayerRepository
+    from core.session_repository import SessionRepository
+    from gui.session_viewer import SessionViewerWindow
+
+    try:
+        import customtkinter  # noqa: F401
+    except ImportError:
+        print("customtkinter が見つかりません。pip install customtkinter でインストールしてください。")
+        sys.exit(1)
+
+    player_repo = PlayerRepository()
+    session_repo = SessionRepository(player_repo=player_repo)
+    win = SessionViewerWindow(session_repo=session_repo, player_repo=player_repo)
+    win.run()
 
 
 def export_phh(json_path: str) -> None:
@@ -430,7 +508,25 @@ def main() -> None:
         metavar="SESSION_JSON",
         help="JSON セッションログを PHH ファイル群に変換する（Phase 5）",
     )
+    parser.add_argument(
+        "--players",
+        action="store_true",
+        help="Player Registry 画面を起動する（Phase S1, hand logger とは別画面）",
+    )
+    parser.add_argument(
+        "--sessions-viewer",
+        action="store_true",
+        help="Session / Seating Viewer（read-only）を起動する（WS2-α, hand logger とは別画面）",
+    )
     args = parser.parse_args()
+
+    if args.players:
+        run_player_registry()
+        sys.exit(0)
+
+    if args.sessions_viewer:
+        run_session_viewer()
+        sys.exit(0)
 
     if args.calibrate:
         from core.config import load_config
