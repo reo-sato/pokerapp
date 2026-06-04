@@ -117,7 +117,6 @@ def run_cli() -> None:
 
     audio_q = make_audio_queue()
     stop_event = threading.Event()
-    camera_q = None
 
     def on_action(record):
         print(
@@ -128,7 +127,6 @@ def run_cli() -> None:
         )
 
     audio_cfg = cfg.get("audio", {})
-    cam_cfg = cfg.get("camera", {})
 
     audio_thread = AudioThread(
         audio_queue=audio_q,
@@ -138,23 +136,6 @@ def run_cli() -> None:
         language=audio_cfg.get("language", "ja"),
         stop_event=stop_event,
     )
-    # Phase 2/3: カメラが設定済みの場合のみ CameraThread を起動する
-    # Phase 3: camera_q を IntegrationThread に渡すことで ±2秒マッチングが有効になる
-    camera_thread = None
-    if cam_cfg.get("roi"):
-        from core.event_queue import make_camera_queue
-        from vision.camera import CameraThread
-        camera_q = make_camera_queue()
-        camera_thread = CameraThread(
-            camera_queue=camera_q,
-            device_id=cam_cfg.get("device_id", 0),
-            roi_config=cam_cfg.get("roi", {}),
-            fps=cam_cfg.get("fps", 20),
-            motion_threshold=cam_cfg.get("motion_threshold", 2000),
-            stop_event=stop_event,
-        )
-        camera_thread.start()
-        print("カメラスレッド起動（動体検出 + ±2秒マッチング有効）。")
 
     # Phase 6/7: RFID が有効な場合のみ起動する (transport に応じてスレッドを選択)
     rfid_thread = None
@@ -192,7 +173,6 @@ def run_cli() -> None:
         audio_queue=audio_q,
         game_state=game_state,
         json_writer=json_writer,
-        camera_queue=camera_q,
         rfid_queue=rfid_q if rfid_cfg.get("enabled", False) else None,
         on_action=on_action,
         stop_event=stop_event,
@@ -250,8 +230,6 @@ def run_cli() -> None:
         stop_event.set()
         audio_thread.join(timeout=3)
         integration_thread.join(timeout=3)
-        if camera_thread is not None:
-            camera_thread.join(timeout=3)
         if rfid_thread is not None:
             rfid_thread.join(timeout=3)
         print(f"\nセッション終了。ログ保存先: {json_writer.path}")
@@ -292,18 +270,15 @@ def run_gui() -> None:
 
     audio_q = make_audio_queue()
     stop_event = threading.Event()
-    camera_q = None
     rfid_q = None
 
     audio_cfg = cfg.get("audio", {})
-    cam_cfg = cfg.get("camera", {})
     rfid_cfg = cfg.get("rfid", {})
 
     dash = GUIDashboard(
         game_state=game_state,
         json_writer=json_writer,
         audio_queue=audio_q,
-        camera_queue=camera_q,
         stop_event=stop_event,
         rfid_receiver=None,  # rfid_thread 確定後に設定
         player_repo=player_repo,
@@ -319,21 +294,6 @@ def run_gui() -> None:
         language=audio_cfg.get("language", "ja"),
         stop_event=stop_event,
     )
-
-    camera_thread = None
-    if cam_cfg.get("roi"):
-        from core.event_queue import make_camera_queue
-        from vision.camera import CameraThread
-        camera_q = make_camera_queue()
-        dash._camera_queue = camera_q
-        camera_thread = CameraThread(
-            camera_queue=camera_q,
-            device_id=cam_cfg.get("device_id", 0),
-            roi_config=cam_cfg.get("roi", {}),
-            fps=cam_cfg.get("fps", 20),
-            motion_threshold=cam_cfg.get("motion_threshold", 2000),
-            stop_event=stop_event,
-        )
 
     rfid_thread = None
     if rfid_cfg.get("enabled", False):
@@ -370,7 +330,6 @@ def run_gui() -> None:
         audio_queue=audio_q,
         game_state=game_state,
         json_writer=json_writer,
-        camera_queue=camera_q,
         rfid_queue=rfid_q,
         on_action=dash.on_action,
         on_rfid_card=dash.on_rfid_card,
@@ -383,7 +342,6 @@ def run_gui() -> None:
     dash.start_threads(
         audio_thread=audio_thread,
         integration_thread=integration_thread,
-        camera_thread=camera_thread,
         rfid_thread=rfid_thread,
     )
     dash.run()
@@ -392,8 +350,6 @@ def run_gui() -> None:
     stop_event.set()
     audio_thread.join(timeout=3)
     integration_thread.join(timeout=3)
-    if camera_thread is not None:
-        camera_thread.join(timeout=3)
     print(f"\nセッション終了。ログ保存先: {json_writer.path}")
 
 
@@ -496,12 +452,7 @@ def main() -> None:
     parser.add_argument(
         "--cli",
         action="store_true",
-        help="CLIモードで起動（音声認識のみ、カメラなし）",
-    )
-    parser.add_argument(
-        "--calibrate",
-        action="store_true",
-        help="ROIキャリブレーションモードで起動（Phase 2）",
+        help="CLIモードで起動（音声認識 + RFID、GUI なし）",
     )
     parser.add_argument(
         "--export-phh",
@@ -526,14 +477,6 @@ def main() -> None:
 
     if args.sessions_viewer:
         run_session_viewer()
-        sys.exit(0)
-
-    if args.calibrate:
-        from core.config import load_config
-        from vision.calibration import run_calibration
-        cfg = load_config()
-        device_id = cfg.get("camera", {}).get("device_id", 0)
-        run_calibration(device_id=device_id)
         sys.exit(0)
 
     if args.export_phh:

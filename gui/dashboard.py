@@ -52,7 +52,6 @@ class GUIDashboard:
             game_state=gs,
             json_writer=writer,
             audio_queue=audio_q,
-            camera_queue=camera_q,   # 省略可
             stop_event=stop_event,
         )
         dash.run()  # mainloop 開始（ブロッキング）
@@ -63,7 +62,6 @@ class GUIDashboard:
         game_state: "GameStateManager",
         json_writer: "JsonWriter",
         audio_queue: queue.Queue,
-        camera_queue: Optional[queue.Queue] = None,
         stop_event: Optional[threading.Event] = None,
         rfid_receiver: Optional[object] = None,
         player_repo: Optional["PlayerRepository"] = None,
@@ -75,7 +73,6 @@ class GUIDashboard:
         self._gs = game_state
         self._writer = json_writer
         self._audio_queue = audio_queue
-        self._camera_queue = camera_queue
         self._stop_event = stop_event or threading.Event()
         self._rfid_receiver = rfid_receiver  # RFIDHTTPReceiver (status プロパティ用)
         # Phase 2.3: seat selection UX。session レイヤ有効時のみ seat UI を出す。
@@ -375,8 +372,6 @@ class GUIDashboard:
             src_flags.append("RFID")
         if record.source.get("audio"):
             src_flags.append("音声")
-        if record.source.get("camera"):
-            src_flags.append("カメラ")
         src_str = "+".join(src_flags) if src_flags else "-"
 
         line = (
@@ -446,17 +441,13 @@ class GUIDashboard:
         self,
         audio_thread: threading.Thread,
         integration_thread: threading.Thread,
-        camera_thread: Optional[threading.Thread] = None,
         rfid_thread: Optional[threading.Thread] = None,
     ) -> None:
         """外部で生成したスレッドを受け取って起動する。"""
         self._audio_thread = audio_thread
         self._integration_thread = integration_thread
-        self._camera_thread = camera_thread
         self._rfid_thread = rfid_thread
 
-        if camera_thread is not None:
-            camera_thread.start()
         if rfid_thread is not None:
             rfid_thread.start()
         audio_thread.start()

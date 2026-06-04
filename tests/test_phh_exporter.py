@@ -33,7 +33,7 @@ def _make_action(action: str, amount: int = 0, street: str = "preflop", seat: in
         amount=amount,
         pot_after=amount,
         stack_after=10000 - amount,
-        source={"camera": False, "audio": True, "rfid": False},
+        source={"audio": True, "rfid": False},
         needs_review=False,
         confidence=0.5,
     )

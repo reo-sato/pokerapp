@@ -8,7 +8,8 @@ JSON/PHH 形式でハンドログを出力する。
 
 - **対象**: 小規模クラブ・個人配信向け
 - **仕様書**: `sprc_v4.docx`（本ファイルより詳細な要件定義）
-- **カメラ入力**: `vision/` ディレクトリは廃止予定のレガシーコードであり、メイン処理では使用しない
+- **カメラ入力**: sprc_v4.docx の方針に従い **廃止済み**（`vision/` ディレクトリ・camera 設定・
+  opencv/easyocr 依存・camera confidence をコードから削除。ADR-0009）。現構成は RFID + 音声の 2 ソース
 
 本ドキュメントは **現時点で実装されている仕様** と、**今後のスコープ (future scope)** を明確に分離して記述する。
 未実装機能はすべて「将来スコープ」「planned」「phase candidate」と明示し、既存実装と混在させない。
@@ -41,7 +42,7 @@ pokerapp/
 │   ├── config.py                  ← config.json ロード・保存
 │   ├── constants.py               ← ACTION_KEYWORDS, KANJI_DIGIT/UNIT, WHISPER_PROMPT_JA
 │   ├── event_queue.py             ← EventQueue (スレッド間共有キュー)
-│   ├── events.py                  ← AudioEvent, CameraEvent, RFIDEvent データクラス
+│   ├── events.py                  ← AudioEvent, RFIDEvent データクラス
 │   ├── game_state.py              ← GameStateManager (スタック/ポット/ターン管理)
 │   ├── hand_log.py                ← ActionRecord, HandSummary データクラス
 │   ├── player.py                  ← Player データクラス (S1)
@@ -72,8 +73,7 @@ pokerapp/
 │   ├── session_viewer.py          ← SessionViewerWindow (session/seating の read-only ビューア, WS2-α, 別画面)
 │   └── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
 │
-├── tests/                         ← pytest テストスイート
-└── vision/                        ← レガシー（未使用）
+└── tests/                         ← pytest テストスイート
 ```
 
 ---
@@ -103,17 +103,14 @@ pokerapp/
 | IntegrationThread | キュー消費 → ゲーム状態更新 → ActionRecord 生成 → JSON 書き込み | ← 全キュー |
 | MainThread | GUI 描画のみ | |
 
-### Confidence 行列
+### Confidence 行列（RFID + 音声の 2 ソース、ADR-0009）
 
 | センサー組み合わせ | confidence |
 |------------------|-----------|
-| RFID + audio + camera | 1.00 |
 | RFID + audio | 0.95 |
-| RFID + camera | 0.85 |
 | RFID のみ | 0.70 |
-| audio + camera | 0.80 |
 | audio のみ | 0.50 |
-| camera のみ | 0.30 |
+| なし | 0.00 |
 
 ---
 
@@ -303,7 +300,7 @@ registry とは **別ウィンドウ**で、**編集機能は一切持たない�
 | RFID PC/SC 受信 | ✅ 実装済 | `rfid/reader_thread.py` |
 | RFID カード照合 | ✅ 実装済 | `rfid/card_master.py` |
 | ストリート自動遷移 (RFID) | ✅ 実装済 | board 枚数 3/4/5 で遷移 |
-| Confidence 算出 | ✅ 実装済 | センサー組み合わせ行列 |
+| Confidence 算出 | ✅ 実装済 | RFID + 音声の 2 ソース行列（camera 廃止, ADR-0009） |
 | JSON ログ出力 | ✅ 実装済 | `output/json_writer.py` |
 | PHH エクスポート | ✅ 実装済 | `output/phh_exporter.py` |
 | GUI ダッシュボード | 🔨 部分実装 | `gui/dashboard.py` |
@@ -683,7 +680,7 @@ python main.py --cli                         # CLI モード (hand logger)
 python main.py                               # GUI モード (hand logger)
 python main.py --players                     # Player Registry 画面 (S1, 別画面)
 python main.py --sessions-viewer             # Session / Seating Viewer (WS2-α, read-only, 別画面)
-pytest tests/ -v --ignore=tests/test_vision.py
+pytest tests/ -v
 python main.py --export-phh logs/session_xxx.json
 ```
 

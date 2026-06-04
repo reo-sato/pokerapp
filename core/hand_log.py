@@ -16,9 +16,9 @@ class ActionRecord:
     amount: int
     pot_after: int
     stack_after: int
-    source: dict  # {"camera": bool, "audio": bool, "rfid": bool}
+    source: dict  # {"audio": bool, "rfid": bool}
     needs_review: bool
-    confidence: float = 0.0  # 0.0–1.0 (FR-42: RFID+audio+camera 合意度)
+    confidence: float = 0.0  # 0.0–1.0 (RFID+audio 合意度)
 
     def to_dict(self) -> dict:
         return {
@@ -49,7 +49,7 @@ class HandSummary:
     ended_at: str  # ISO 8601
     blinds: dict  # {"sb": int, "bb": int}
     board: list[str]  # ショーダウン時のボードカード（未確定時は空リスト）
-    board_source: str  # ボード情報のソース: "rfid" | "ocr" | "manual" | ""
+    board_source: str  # ボード情報のソース: "rfid" | "manual" | ""
     # players[i]: {seat, name, hole_cards, stack_start, stack_end, result}
     #   + Phase 2.2 で session レイヤ有効時のみ optional "player_id"(UUID4 hex) を additive 追加。
     #     legacy / fallback ではキーを省略（旧 reader は無視できる, ADR-0008）。

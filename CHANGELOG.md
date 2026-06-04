@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+### Removed (camera / vision — sprc_v4.docx 準拠の廃止, ADR-0009)
+
+- **カメラ入力経路を全面削除**し、RFID + 音声の 2 ソース構成に確定（sprc_v4.docx が
+  「カメラ廃止」を明記。これまで `vision/` は legacy として残置されていた）。**音声 + RFID の
+  挙動・JSON/PHH 出力は不変**（camera は実運用で未接続だったため挙動退行なし）。
+  - 削除: `vision/`（`camera.py` / `motion_detector.py` / `calibration.py`）、`tests/test_vision.py`、
+    `config_default.json` の `camera` ブロック、`requirements.txt` の `opencv-python` / `easyocr`、
+    `main.py --calibrate`（ROI キャリブレーション）。
+  - `core/events.py`: `CameraEvent` データクラスと numpy 依存を削除。`core/event_queue.py`:
+    `make_camera_queue` と `EventItem` の `CameraEvent` を削除。
+  - `integration/engine.py`: confidence 行列を 2 ソースに再構成（`calc_confidence(has_rfid, has_audio)`、
+    RFID+audio=0.95 / RFID=0.70 / audio=0.50 / なし=0.00）。camera バッファ・`_drain_camera_queue` /
+    `_pop_matching_camera_event` を削除し、`CAMERA_BUFFER_TTL` を `BUFFER_TTL` に改名（RFID バッファ
+    失効に流用）。`ActionRecord.source` は `{"audio", "rfid"}`（sprc_v4.docx §6.1 と一致、`camera` キー廃止）。
+  - `main.py` / `gui/dashboard.py`: camera スレッド起動・`camera_queue` DI・「カメラ」ソース表示を削除。
+  - tests: `test_phase7.py` / `test_integration.py` を 2 ソースへ更新（camera 照合テストを除去、
+    audio 単独 confidence を維持）。`test_gui` / `test_logger` / `test_phh_exporter` の source dict から
+    `camera` キーを除去。全 199 テスト green。
+  - **ADR-0009** (Accepted): sprc_v4.docx 準拠で camera/vision を削除する判断。
+
 ### Added (WS2-α — Session / Seating Viewer, desktop read-only)
 
 - **read-only な Session / Seating Viewer を別ウィンドウで追加**（S2 core + Phase 2.2/2.3 で

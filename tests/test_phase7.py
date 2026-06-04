@@ -15,21 +15,17 @@ from pathlib import Path
 
 import pytest
 
-from core.event_queue import make_audio_queue, make_camera_queue, make_rfid_queue
-from core.events import AudioEvent, CameraEvent, RFIDEvent
+from core.event_queue import make_audio_queue, make_rfid_queue
+from core.events import AudioEvent, RFIDEvent
 from core.game_state import GameStateManager, PlayerState
 from core.hand_log import ActionRecord
 from integration.engine import (
     MATCH_WINDOW,
     IntegrationThread,
     calc_confidence,
-    _CONF_AUDIO_CAMERA,
     _CONF_AUDIO_ONLY,
     _CONF_RFID_AUDIO,
-    _CONF_RFID_AUDIO_CAMERA,
-    _CONF_RFID_CAMERA,
     _CONF_RFID_ONLY,
-    _CONF_CAMERA_ONLY,
 )
 from output.json_writer import JsonWriter
 
@@ -37,35 +33,23 @@ from output.json_writer import JsonWriter
 # ――― calc_confidence ―――
 
 class TestCalcConfidence:
-    def test_all_three(self):
-        assert calc_confidence(True, True, True) == _CONF_RFID_AUDIO_CAMERA
-
     def test_rfid_audio(self):
-        assert calc_confidence(True, True, False) == _CONF_RFID_AUDIO
-
-    def test_rfid_camera(self):
-        assert calc_confidence(True, False, True) == _CONF_RFID_CAMERA
+        assert calc_confidence(True, True) == _CONF_RFID_AUDIO
 
     def test_rfid_only(self):
-        assert calc_confidence(True, False, False) == _CONF_RFID_ONLY
-
-    def test_audio_camera(self):
-        assert calc_confidence(False, True, True) == _CONF_AUDIO_CAMERA
+        assert calc_confidence(True, False) == _CONF_RFID_ONLY
 
     def test_audio_only(self):
-        assert calc_confidence(False, True, False) == _CONF_AUDIO_ONLY
-
-    def test_camera_only(self):
-        assert calc_confidence(False, False, True) == _CONF_CAMERA_ONLY
+        assert calc_confidence(False, True) == _CONF_AUDIO_ONLY
 
     def test_none(self):
-        assert calc_confidence(False, False, False) == 0.0
+        assert calc_confidence(False, False) == 0.0
 
-    def test_order_rfid_beats_audio_camera(self):
-        # RFID+audio > audio+camera
-        assert _CONF_RFID_AUDIO > _CONF_AUDIO_CAMERA
-        # RFID+audio+camera = 1.0 (最大)
-        assert _CONF_RFID_AUDIO_CAMERA == 1.0
+    def test_order_rfid_beats_audio(self):
+        # RFID+audio > audio のみ > なし
+        assert _CONF_RFID_AUDIO > _CONF_AUDIO_ONLY > 0.0
+        # RFID のみ > audio のみ（RFID 優先）
+        assert _CONF_RFID_ONLY > _CONF_AUDIO_ONLY
 
 
 # ――― フィクスチャ ―――
@@ -115,39 +99,8 @@ class TestRFIDSeatMatching:
 
         assert len(captured) == 1
         rec = captured[0]
-        assert rec.source == {"camera": False, "audio": True, "rfid": True}
+        assert rec.source == {"audio": True, "rfid": True}
         assert rec.confidence == _CONF_RFID_AUDIO
-
-    def test_rfid_audio_camera_match(self, tmp_path: Path):
-        """RFID + audio + camera → confidence = 1.0."""
-        gs = _make_game()
-        audio_q = make_audio_queue()
-        camera_q = make_camera_queue()
-        rfid_q = make_rfid_queue()
-        writer = JsonWriter(log_dir=tmp_path, session_id="s2")
-        stop = threading.Event()
-        captured: list[ActionRecord] = []
-
-        thread = IntegrationThread(
-            audio_queue=audio_q, game_state=gs, json_writer=writer,
-            camera_queue=camera_q, rfid_queue=rfid_q,
-            on_action=captured.append, stop_event=stop,
-        )
-
-        now = time.time()
-        rfid_q.put(RFIDEvent(
-            tag_id="04:AA", card="Kd", reader_id="reader_0",
-            role="seat", seat=1, timestamp=now - 0.3, raw_tag_id="04:AA",
-        ))
-        camera_q.put(CameraEvent(seat=1, timestamp=now - 0.8))
-        audio_q.put(AudioEvent(action="raise", amount=800, timestamp=now, raw_text="レイズ800"))
-
-        _run_thread(thread, stop)
-
-        assert len(captured) == 1
-        rec = captured[0]
-        assert rec.source == {"camera": True, "audio": True, "rfid": True}
-        assert rec.confidence == _CONF_RFID_AUDIO_CAMERA
 
     def test_rfid_wrong_seat_no_match(self, tmp_path: Path):
         """席番号が異なる RFID イベントはマッチしない。"""

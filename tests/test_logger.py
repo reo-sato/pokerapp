@@ -18,7 +18,7 @@ def test_json_writer_creates_file(tmp_path: Path):
         amount=800,
         pot_after=800,
         stack_after=9200,
-        source={"audio": True, "camera": False, "rfid": False},
+        source={"audio": True, "rfid": False},
         needs_review=False,
         confidence=0.0,
     )

@@ -8,13 +8,6 @@
     "enabled": false,
     "_comment": "Phase 2.2 (ADR-0008): true で S2 session/seating レイヤと write-through 接続する。session_id を UUID4 hex に切替、hand 開始時に assign_seat、HandSummary に player_id を additive 付与。false で従来の hand logger 単独動作（rollback path）。"
   },
-  "camera": {
-    "device_id": 0,
-    "resolution": [1280, 720],
-    "fps": 20,
-    "roi": {},
-    "motion_threshold": 2000
-  },
   "audio": {
     "device_id": 0,
     "sample_rate": 16000,

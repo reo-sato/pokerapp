@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
-
-import numpy as np
 
 
 @dataclass
@@ -18,15 +16,6 @@ class RFIDEvent:
     timestamp: float             # time.time()
     raw_tag_id: str              # デバッグ用の生タグ ID
     board_index: Optional[int] = None  # role="board" 時のボード位置 (1=flop1…5=river)
-
-
-@dataclass
-class CameraEvent:
-    """カメラスレッドが検出したチップ動作イベント。"""
-
-    seat: int
-    timestamp: float  # time.time()
-    frame: Optional[np.ndarray] = field(default=None, repr=False)  # Phase 2 以降で使用
 
 
 @dataclass

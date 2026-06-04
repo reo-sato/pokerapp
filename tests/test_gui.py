@@ -85,7 +85,7 @@ class TestGUIDashboardLogic:
             hand_id=1, timestamp="2026-04-02T12:00:00",
             street="preflop", seat=1, player_name="Alice",
             action="bet", amount=500, pot_after=500, stack_after=9500,
-            source={"camera": False, "audio": True, "rfid": False},
+            source={"audio": True, "rfid": False},
             needs_review=False, confidence=0.5,
         )
         dash.on_action(record)

@@ -1,18 +1,15 @@
 """integration/engine.py
 
-audio / camera / RFID (ESP32 HTTP) の 3 ソースを統合し、confidence スコアを算出する。
+audio / RFID (ESP32 HTTP) の 2 ソースを統合し、confidence スコアを算出する。
+（カメラ入力は sprc_v4.docx で廃止済み。RFID + 音声の 2 ソース構成。）
 
-ソース優先度: RFID > audio > camera
+ソース優先度: RFID > audio
 
 Confidence 行列:
-  RFID + audio + camera : 1.00
-  RFID + audio          : 0.95
-  RFID + camera         : 0.85
-  RFID のみ             : 0.70
-  audio + camera        : 0.80
-  audio のみ            : 0.50
-  camera のみ           : 0.30
-  なし                  : 0.00
+  RFID + audio : 0.95
+  RFID のみ    : 0.70
+  audio のみ   : 0.50
+  なし         : 0.00
 
 カード情報 (ESP32 RFID):
   role="board" かつ board_index 付きイベント
@@ -33,7 +30,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from core.event_queue import EventQueue
-from core.events import AudioEvent, CameraEvent, RFIDEvent
+from core.events import AudioEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
 from core.session_repository import SessionError, SessionRepository
@@ -42,49 +39,36 @@ from output.json_writer import JsonWriter
 logger = logging.getLogger(__name__)
 
 MATCH_WINDOW = 2.0
-CAMERA_BUFFER_TTL = MATCH_WINDOW * 2
+BUFFER_TTL = MATCH_WINDOW * 2
 
-# ――― Confidence スコア定数 ―――
-_CONF_RFID_AUDIO_CAMERA = 1.00
-_CONF_RFID_AUDIO        = 0.95
-_CONF_RFID_CAMERA       = 0.85
-_CONF_RFID_ONLY         = 0.70
-_CONF_AUDIO_CAMERA      = 0.80
-_CONF_AUDIO_ONLY        = 0.50
-_CONF_CAMERA_ONLY       = 0.30
+# ――― Confidence スコア定数（RFID + 音声の 2 ソース）―――
+_CONF_RFID_AUDIO = 0.95
+_CONF_RFID_ONLY  = 0.70
+_CONF_AUDIO_ONLY = 0.50
 
 # board_index → street 推移しきい値 (1-indexed, ≥N 枚でその street)
 _BOARD_STREET_THRESHOLDS = {3: "flop", 4: "turn", 5: "river"}
 
 
-def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
-    """センサー組み合わせから confidence スコアを返す。"""
-    if has_rfid and has_audio and has_camera:
-        return _CONF_RFID_AUDIO_CAMERA
+def calc_confidence(has_rfid: bool, has_audio: bool) -> float:
+    """センサー組み合わせ（RFID + 音声）から confidence スコアを返す。"""
     if has_rfid and has_audio:
         return _CONF_RFID_AUDIO
-    if has_rfid and has_camera:
-        return _CONF_RFID_CAMERA
     if has_rfid:
         return _CONF_RFID_ONLY
-    if has_audio and has_camera:
-        return _CONF_AUDIO_CAMERA
     if has_audio:
         return _CONF_AUDIO_ONLY
-    if has_camera:
-        return _CONF_CAMERA_ONLY
     return 0.0
 
 
 class IntegrationThread(threading.Thread):
-    """audio / camera / RFID の 3 キューを消費してゲーム状態を更新する。"""
+    """audio / RFID の 2 キューを消費してゲーム状態を更新する。"""
 
     def __init__(
         self,
         audio_queue: EventQueue,
         game_state: GameStateManager,
         json_writer: JsonWriter,
-        camera_queue: Optional[EventQueue] = None,
         rfid_queue: Optional[EventQueue] = None,
         on_action: Optional[Callable[[ActionRecord], None]] = None,
         on_rfid_card: Optional[Callable[[RFIDEvent], None]] = None,
@@ -108,7 +92,6 @@ class IntegrationThread(threading.Thread):
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
-        self._camera_queue = camera_queue
         self._rfid_queue = rfid_queue
         self._game_state = game_state
         self._json_writer = json_writer
@@ -129,7 +112,6 @@ class IntegrationThread(threading.Thread):
         )
 
         # センサーイベントのバッファ
-        self._camera_buffer: list[CameraEvent] = []
         self._rfid_seat_buffer: list[RFIDEvent] = []
 
         # ハンド内の一時バッファ
@@ -167,7 +149,6 @@ class IntegrationThread(threading.Thread):
     def run(self) -> None:
         logger.info("IntegrationThread started")
         while not self._stop_event.is_set():
-            self._drain_camera_queue()
             self._drain_rfid_queue()
 
             try:
@@ -186,15 +167,6 @@ class IntegrationThread(threading.Thread):
         logger.info("IntegrationThread stopped")
 
     # ――― バッファ管理 ―――
-
-    def _drain_camera_queue(self) -> None:
-        if self._camera_queue is None:
-            return
-        while True:
-            try:
-                self._camera_buffer.append(self._camera_queue.get_nowait())
-            except queue.Empty:
-                break
 
     def _drain_rfid_queue(self) -> None:
         if self._rfid_queue is None:
@@ -300,20 +272,8 @@ class IntegrationThread(threading.Thread):
             )
 
     def _expire_buffers(self) -> None:
-        cutoff = time.time() - CAMERA_BUFFER_TTL
-        self._camera_buffer = [e for e in self._camera_buffer if e.timestamp >= cutoff]
+        cutoff = time.time() - BUFFER_TTL
         self._rfid_seat_buffer = [e for e in self._rfid_seat_buffer if e.timestamp >= cutoff]
-
-    def _pop_matching_camera_event(self, seat: int, ts: float) -> Optional[CameraEvent]:
-        candidates = [
-            e for e in self._camera_buffer
-            if e.seat == seat and abs(e.timestamp - ts) <= MATCH_WINDOW
-        ]
-        if not candidates:
-            return None
-        best = min(candidates, key=lambda e: abs(e.timestamp - ts))
-        self._camera_buffer.remove(best)
-        return best
 
     def _pop_matching_rfid_event(self, seat: int, ts: float) -> Optional[RFIDEvent]:
         """同席・±MATCH_WINDOW 秒以内の RFID seat イベントを返し除去する。"""
@@ -362,25 +322,18 @@ class IntegrationThread(threading.Thread):
         else:
             needs_review = False
 
-        cam_event  = self._pop_matching_camera_event(seat, event.timestamp)
         rfid_event = self._pop_matching_rfid_event(seat, event.timestamp)
 
-        has_camera = cam_event is not None
-        has_rfid   = rfid_event is not None
+        has_rfid = rfid_event is not None
 
-        source = {"camera": has_camera, "audio": True, "rfid": has_rfid}
-        confidence = calc_confidence(has_rfid=has_rfid, has_audio=True, has_camera=has_camera)
+        source = {"audio": True, "rfid": has_rfid}
+        confidence = calc_confidence(has_rfid=has_rfid, has_audio=True)
 
         if has_rfid:
             logger.debug(
                 "RFID corroboration: seat=%d tag=%s card=%r Δ=%.3fs",
                 seat, rfid_event.tag_id, rfid_event.card,
                 abs(rfid_event.timestamp - event.timestamp),
-            )
-        if has_camera:
-            logger.debug(
-                "Camera corroboration: seat=%d Δ=%.3fs",
-                seat, abs(cam_event.timestamp - event.timestamp),
             )
 
         record = ActionRecord(
