@@ -5,3 +5,10 @@ __pycache__/
 config.json
 players.json
 sessions.json
+
+# packaging / build artifacts (H1)
+*.egg-info/
+*.egg
+build/
+dist/
+.venv/
