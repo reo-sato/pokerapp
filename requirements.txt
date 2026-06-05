@@ -1,11 +1,13 @@
-opencv-python>=4.8.0
-faster-whisper>=1.0.0
-pyaudio>=0.2.13
+# Runtime (core)。pyproject.toml が正（`pip install .`）。本ファイルは `pip install -r` 用の同期コピー。
+# vision 系(opencv-python/easyocr)は廃止予定で製品依存外 → 下のコメント参照（[vision] extra）。
+faster-whisper>=1.0,<2
+pyaudio>=0.2.13,<0.3
 pokerkit>=0.7.0,<0.8.0
-customtkinter>=5.2.0
-easyocr>=1.7.0
-numpy>=1.24.0
-pytest>=7.0.0
-jsonschema>=4.0.0
-# pyscard は transport="pcsc" 時のみ必要 (transport="http" では不要)
-# pip install pyscard>=2.0.7
+customtkinter>=5.2,<6
+numpy>=1.24,<3
+
+# Optional: RFID を PC/SC 直読みする場合のみ（transport="pcsc"）
+#   pip install "pyscard>=2.0.7,<3"
+# Legacy vision（廃止予定・製品依存外、必要時のみ）
+#   pip install "opencv-python>=4.8,<5" "easyocr>=1.7,<2"
+# 開発/テスト依存は requirements-dev.txt

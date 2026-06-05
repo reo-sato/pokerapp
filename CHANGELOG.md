@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+### Added (Phase H part 1 — パッケージング + CI / H1+H4, v1 リリーストラック)
+
+- **パッケージング基盤（pyproject.toml）と CI（GitHub Actions）**（v1 issue #11 / Epic #4, ロードマップ H1/H4）:
+  - `pyproject.toml`（新規, setuptools, `version 1.0.0.dev0`, `requires-python>=3.11`, entry point
+    `pokerapp = main:main`）。依存を **core / `[pcsc]` / `[vision]` / `[dev]`** に分割。
+    **vision 系（opencv-python / easyocr）を core から除外**（廃止予定 → `[vision]` extra）。
+  - 依存に上限を付与（compatible-release pin）: `numpy>=1.24,<3` / `pokerkit>=0.7,<0.8` /
+    `faster-whisper>=1.0,<2` / `pyaudio>=0.2.13,<0.3` / `customtkinter>=5.2,<6`。
+  - `requirements.txt` を core のみ（vision 除外）に整理、`requirements-dev.txt`（テスト依存 = numpy /
+    pokerkit / jsonschema / pytest）を新設。
+  - `.github/workflows/ci.yml`（新規）: push / PR で `pytest tests/ --ignore=tests/test_vision.py` を実行。
+    テストはローカルパッケージを直接 import し、core の重い依存（faster-whisper/pyaudio/customtkinter）は
+    lazy import のため不要。numpy/pokerkit/jsonschema を入れて **skip 0**（importorskip 対象を全て導入）。
+  - `.gitignore` に packaging artifacts（`*.egg-info/` 等）を追加。
+  - 検証: `pip install -e . --no-deps` で package discovery / entry point OK、CI 相当コマンドで
+    **286 passed, 0 skipped**。**PyInstaller ビルド（H2）/ コード署名（H3）/ 実機 E2E は Windows 環境が必要
+    で後続**（ADR-0012 のとおり Phase H の E2E）。
+
 ### Changed (Phase G — pokerkit を live 既定 backend に切替 / v1 リリーストラック R)
 
 - **live 既定 game-state backend を `legacy` → `pokerkit` に切替**（v1 issue #9 / Epic #4, ADR-0012）:

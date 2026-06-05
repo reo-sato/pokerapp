@@ -35,7 +35,10 @@ pokerapp/
 ├── rfid_cards.json                ← tag_id → card_code マスタ
 ├── players.json                   ← player registry 永続ファイル (.gitignore, S1)
 ├── sessions.json                  ← session + hand-based seating 永続ファイル (.gitignore, S2)
-├── requirements.txt
+├── pyproject.toml                 ← パッケージ定義 (core / [pcsc] / [vision] / [dev], entry: pokerapp, H1)
+├── requirements.txt               ← core runtime 同期コピー (vision 除外)
+├── requirements-dev.txt           ← テスト依存 (numpy/pokerkit/jsonschema/pytest, CI が使用)
+├── .github/workflows/ci.yml       ← CI: pytest (skip 0, vision 除外, H4)
 │
 ├── core/
 │   ├── config.py                  ← config.json ロード・保存
@@ -573,11 +576,14 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 ## よく使うコマンド
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt              # core runtime（または pip install .）
+pip install -r requirements-dev.txt          # テスト依存（CI と同じ。skip 0）
+pip install ".[pcsc]"                         # RFID PC/SC を使う場合のみ
 python main.py --cli                         # CLI モード (hand logger)
 python main.py                               # GUI モード (hand logger)
 python main.py --players                     # Player Registry 画面 (S1, 別画面)
-pytest tests/ -v --ignore=tests/test_vision.py
+pytest tests/ -v --ignore=tests/test_vision.py   # CI と同じ（vision レガシー除外）
+python tools/replay_hand.py tests/fixtures/reconstruction/silent-fold  # 決定的 replay (F1)
 python main.py --export-phh logs/session_xxx.json
 ```
 
