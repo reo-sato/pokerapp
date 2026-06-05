@@ -85,6 +85,54 @@ def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
     return 0.0
 
 
+# ――― 派生 confidence (3 因子, ADR-0009 §6, D3) ―――
+# rules-aware 経路専用。legacy は上の固定 8 行 calc_confidence のまま（挙動不変）。
+# 重みは「全ソース一致・合法」で旧テーブルに近づける暫定値。最終較正は golden fixtures / F。
+_CONF_W_A = 0.15            # 合意度 A の重み
+_CONF_W_Q = 0.85           # ソース品質 Q の重み（w_A + w_Q = 1）
+_CONF_L_PENALTY = 0.25     # pokerkit が action を受理しなかったときの合法性ゲート L
+_CONF_BASE = {"rfid": 0.78, "audio": 0.50, "camera": 0.28}  # ソース base 信頼度（RFID>audio>camera）
+# confidence がこの閾値未満なら needs_review（ADR-0009 §6 条件⑤）。将来 config 化。
+# 音声優先運用（v1 は audio のみが必須経路）のため、良好な audio-only は閾値超え＝自動 review しない。
+# camera-only / 低 whisper / 合成 fold は閾値未満＝review。最終較正は golden fixtures / F。
+REVIEW_THRESHOLD = 0.40
+
+
+def derive_confidence(
+    *,
+    apply_ok: bool,
+    whisper_conf: float,
+    audio_agree: bool,
+    rfid_present: bool,
+    rfid_agree: bool,
+    camera_present: bool,
+    camera_agree: bool,
+) -> float:
+    """3 因子（L 合法性 / A 合意度 / Q ソース品質）から confidence を導出する（ADR-0009 §6, D3）。
+
+    - L = 1.0（pokerkit 受理）/ `_CONF_L_PENALTY`（非受理）。最重要の合法性ゲート。
+    - A = 一致した存在ソース数 / 存在ソース数（audio は当該アクションにつき常に存在）。
+    - Q = 一致した存在ソースの base 信頼度の noisy-OR（audio は whisper_conf でスケール）。
+    confidence = clamp(L · (w_A·A + w_Q·Q), 0, 1)。
+    """
+    present = {"rfid": rfid_present, "audio": True, "camera": camera_present}
+    agree = {"rfid": rfid_agree, "audio": audio_agree, "camera": camera_agree}
+
+    L = 1.0 if apply_ok else _CONF_L_PENALTY
+    n_present = sum(present.values())
+    n_agree = sum(1 for s in present if present[s] and agree[s])
+    A = (n_agree / n_present) if n_present else 0.0
+
+    prod = 1.0
+    for s in present:
+        if present[s] and agree[s]:
+            q = _CONF_BASE[s] * (whisper_conf if s == "audio" else 1.0)
+            prod *= (1.0 - q)
+    Q = 1.0 - prod
+
+    return max(0.0, min(1.0, L * (_CONF_W_A * A + _CONF_W_Q * Q)))
+
+
 class IntegrationThread(threading.Thread):
     """audio / camera / RFID の 3 キューを消費してゲーム状態を更新する。"""
 
@@ -487,11 +535,11 @@ class IntegrationThread(threading.Thread):
         logger.debug("ActionRecord (synth-fold): seat=%d (inferred silent fold)", seat)
 
     def _handle_rules_aware_action(self, event: AudioEvent, legal_ctx: LegalContext) -> None:
-        """rules-aware backend（pokerkit）でのアクション処理（ADR-0009 §4/§5）。
+        """rules-aware backend（pokerkit）でのアクション処理（ADR-0009 §4/§5/§6）。
 
         D2b: 物理/明示証拠から actor を推定し（必要なら silent-fold 合成）、apply_corrections で
-        合法手へ射影して適用。合成 fold は fold アクションとして記録（needs_review）。合成・競合・
-        非合法・訂正は needs_review。派生 confidence（D3）は後続。
+        合法手へ射影して適用。合成 fold は fold アクションとして記録。
+        D3: 派生 confidence（3 因子）+ needs_review 5 条件。
         """
         gs = self._game_state
         actor, rfid_event, conflict, synthesized_seats = self._resolve_actor(event, legal_ctx)
@@ -518,9 +566,24 @@ class IntegrationThread(threading.Thread):
         has_camera = cam_event is not None
 
         source = {"camera": has_camera, "audio": True, "rfid": has_rfid}
-        # D2b: confidence は既存 calc_confidence を流用（3 因子融合は D3）。
-        confidence = calc_confidence(has_rfid=has_rfid, has_audio=True, has_camera=has_camera)
-        needs_review = (not apply_ok) or corrected.needs_review or conflict
+        # D3: 3 因子の派生 confidence（ADR-0009 §6）。audio は当該アクションにつき常に存在。
+        # audio が actor と一致するか（明示席がないか同席なら一致）。
+        audio_agree = event.seat is None or event.seat == actor
+        confidence = derive_confidence(
+            apply_ok=apply_ok,
+            whisper_conf=event.confidence if event.confidence is not None else 1.0,
+            audio_agree=audio_agree,
+            rfid_present=rfid_event is not None, rfid_agree=has_rfid,
+            camera_present=has_camera, camera_agree=has_camera,
+        )
+        # D3: needs_review 5 条件（ADR-0009 §6）— ①非合法 ②高信頼 ASR×規則矛盾/④amount snap
+        # （apply_corrections.needs_review が②④を内包）③actor 競合（prior↔sensor）⑤低 confidence。
+        needs_review = (
+            (not apply_ok)
+            or corrected.needs_review
+            or conflict
+            or confidence < REVIEW_THRESHOLD
+        )
 
         record = ActionRecord(
             hand_id=gs.hand_id,

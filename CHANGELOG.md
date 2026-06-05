@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+### Added (Phase D part 5 — 派生 confidence + needs_review 5 条件 / D3, v1 リリーストラック R3。Phase D 完了)
+
+- **解釈可能な 3 因子 confidence + 明示的 needs_review 条件**（v1 issue #7 / Epic #4, ADR-0009 §6,
+  ISSUE-0009）— **rules-aware 経路のみ**（legacy の固定 8 行 `calc_confidence` は不変）:
+  - `integration/engine.py:derive_confidence` を新設: `confidence = clamp(L·(w_A·A + w_Q·Q), 0, 1)`。
+    **L=合法性ゲート**（pokerkit 受理=1.0 / 非受理=`_CONF_L_PENALTY`、最重要）、**A=合意度**（一致した
+    存在ソース / 存在ソース）、**Q=ソース品質**（一致ソースの base 信頼度の noisy-OR、audio は whisper で
+    スケール、RFID>audio>camera）。固定 8 行テーブルを廃し、単調・解釈可能に。
+  - `_handle_rules_aware_action` を D3 化: `derive_confidence` を適用し、**needs_review 5 条件**を明文化
+    （①pokerkit 非合法 ②高信頼 ASR×規則矛盾/④amount snap[=`apply_corrections.needs_review`]
+    ③actor 競合[prior↔sensor] ⑤`confidence < REVIEW_THRESHOLD`）。これで `HandSummary.review_required`
+    が監査可能な意味を持つ。
+  - 重み較正（暫定）: 良好な audio-only は閾値超え＝自動 review しない（v1 は音声優先）。camera-only /
+    低 whisper / 合成 fold は閾値未満＝review。最終較正は golden fixtures / F。
+  - golden fixtures 4 ケースの confidence を再凍結。`call-amount-from-state` は review=False を維持。
+  - tests: `tests/test_phase_d3_confidence.py`（derive_confidence の順位/ゲート/whisper/合意 + 閾値条件⑤、7）。
+    **全 270 passed, 1 skipped**。**これで Phase D（D0/D1/D2a/D2b/D3）完了**（残 R は F3 の side-pot/freeze）。
+
 ### Added (Phase D part 4 — silent-fold 合成 / D2b, v1 リリーストラック R3)
 
 - **silent-fold 合成（未宣言 fold を補い actor を物理/明示証拠へ追従）**（v1 issue #7 / Epic #4,
