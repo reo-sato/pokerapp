@@ -48,7 +48,7 @@
     "_comment": "R1 (ADR-0010): 生センサーイベントを logs/{session_id}.events.jsonl に append-only 記録する sidecar。挙動不変・opt-in。"
   },
   "engine": {
-    "backend": "legacy",
-    "_comment": "R2 (ADR-0009): game-state backend。'legacy' | 'pokerkit'。pokerkit は preview（要 pokerkit, default-off）。"
+    "backend": "pokerkit",
+    "_comment": "game-state backend。'pokerkit'（既定, ルール準拠の再構築 = actor 推定/合法手射影/silent-fold/side-pot, ADR-0009）| 'legacy'（rollback, 素朴 round-robin）。Phase G で既定を pokerkit に切替。"
   }
 }
