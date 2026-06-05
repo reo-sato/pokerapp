@@ -29,6 +29,10 @@ from output.json_writer import JsonWriter
 
 Event = Union[AudioEvent, RFIDEvent, CameraEvent]
 
+# 同一 timestamp での処理順を live `run()` の drain 順（camera→rfid→audio）に合わせる tie-break。
+# これにより同 ts の sensor が audio の corroboration に間に合う（ISSUE-0010 の fidelity）。
+_ORDER: dict[type, int] = {CameraEvent: 0, RFIDEvent: 1, AudioEvent: 2}
+
 
 class _ReplayClock:
     """各イベントの timestamp を「現在時刻」として返す注入用時計。"""
@@ -103,7 +107,7 @@ def replay_events(
         stop_event=threading.Event(),
     )
 
-    for ev in sorted(events, key=lambda e: e.timestamp):
+    for ev in sorted(events, key=lambda e: (e.timestamp, _ORDER[type(e)])):
         clock.now = ev.timestamp
         if isinstance(ev, AudioEvent):
             thread._expire_buffers()          # noqa: SLF001 — live run() と同じ前処理

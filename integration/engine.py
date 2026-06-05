@@ -104,6 +104,7 @@ class IntegrationThread(threading.Thread):
             event_recorder: 生イベントを sidecar に記録する recorder (R1, ADR-0010)。
                             None なら記録しない (= 挙動不変)。解釈前に呼ばれる。
             on_hand: ハンド確定時に HandSummary を渡すコールバック (replay/テスト用、additive)。
+                     on_rfid_card 同様 integration スレッドで発火するためスレッド安全に扱うこと。
             clock: epoch 秒を返す時計 (既定 time.time)。決定的 replay 用に注入する (F1)。
                    ActionRecord/HandSummary の timestamp と buffer 期限はこの時計に従う。
         """
@@ -550,7 +551,6 @@ class IntegrationThread(threading.Thread):
 
 
 # ――― ユーティリティ ―――
-
 
 def _extract_seat_from_text(text: str) -> Optional[int]:
     """テキストから席番号を抽出する。例: "シート3 ウィナー" → 3。"""

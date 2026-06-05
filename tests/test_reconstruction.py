@@ -100,6 +100,34 @@ def test_fixture_events_match_reconstruction_schema():
                 validator.validate(json.loads(line))
 
 
+def test_same_timestamp_sensor_processed_before_audio(tmp_path: Path):
+    """同一 timestamp の RFID(sensor) が audio より先に処理され corroboration に間に合う。
+
+    audio を入力リストで rfid より前に置いても、tie-break (camera→rfid→audio) により sensor が先。
+    tie-break が無いと（安定ソートで audio 先）→ source.rfid=False になり本テストが落ちる。
+    """
+    from core.events import AudioEvent, RFIDEvent
+    from core.game_state import PlayerState
+    from integration.replay import replay_events
+
+    players = [PlayerState(seat=i + 1, name=f"P{i + 1}", stack=10000) for i in range(3)]
+    t = 5000.0
+    events = [
+        AudioEvent("new_hand", 0, t, "新しいハンド"),
+        AudioEvent("call", 0, t + 1, "コール"),  # ← rfid より前に置く
+        RFIDEvent(tag_id="X", card="Ah", reader_id="seat_3", role="seat",
+                  seat=3, timestamp=t + 1, raw_tag_id="X"),  # 同 ts・先頭 actor(=seat 3)
+        AudioEvent("winner", 0, t + 2, "シート1 ウィナー"),
+    ]
+    summaries = replay_events(
+        events, backend="pokerkit", players=players,
+        sb=100, bb=200, session_id="tie-break", out_dir=tmp_path,
+    )
+    call = [a for a in summaries[0].to_dict()["actions"] if a["action"] == "call"][0]
+    assert call["seat"] == 3
+    assert call["source"]["rfid"] is True
+
+
 @pytest.mark.parametrize("case", list(PENDING_CASES))
 @pytest.mark.skip(reason="後続フェーズ（D2b / F3）で fixtures + 実装を追加")
 def test_pending_cases_placeholder(case: str):  # pragma: no cover

@@ -55,7 +55,12 @@ v1-integration から分岐）。
 
 ## Fixes Applied
 
-- なし（新規ハーネス + additive な clock/on_hand 注入）。
+- 新規ハーネス + additive な clock/on_hand 注入（バグ修正ではない）。
+- **コードレビュー follow-up（PR #18）**: `replay_events` の sort を tie-break
+  （`(timestamp, _ORDER[type])`、camera→rfid→audio）に変更。同一 timestamp の sensor が audio の
+  corroboration に間に合うよう live の drain 順に揃える予防修正（現 fixtures は ts 個別で挙動不変、
+  D2b の `out-of-turn-rfid` を de-risk）。`on_hand` docstring にスレッド注意を追記。回帰テスト
+  `test_same_timestamp_sensor_processed_before_audio` を追加。
 
 ## Remaining Gaps / Out-of-Scope（Phase F の残り）
 
