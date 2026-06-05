@@ -106,6 +106,11 @@ additive）を足し、recognizer が明示 seat を見つけたら埋める。
 
 ## 5. `apply_corrections()` 設計（ADR-0009 §7 の詳細）
 
+> **実装状況: Phase D part 1（#7）で実装済** — `audio/recognizer.py` の `apply_corrections(action, amount,
+> ctx, whisper_conf) -> Correction`（純関数・pokerkit 非依存、`tests/test_phase_d_corrections.py`）。
+> 下表の射影と call/check の状態一意化を実装。**engine への結線（actor 推定 = D2）はまだ**＝ライブ挙動不変。
+> blind 単位の round-number 寄せは LegalContext に blind が無いため未実装（clamp のみ、後続拡張）。
+
 純関数 `apply_corrections(parsed, legal_ctx, whisper_conf) -> Corrected`。`audio/recognizer.py` に置くが
 ゲーム状態を持たず、engine が `legal_ctx` を渡して呼ぶ（recognizer をゲーム状態から疎結合に保つ）。
 
@@ -211,6 +216,8 @@ PHH は無改変（player_id を載せない, ADR-0008 §8.3）。
   side-pot の incremental 露出）の実現性。不可なら shadow tracker で補完。**ADR-0009 の gate**。
 - **ISSUE-0009**: §4 の競合解決と silent-fold 自動合成の適用条件・件数上限・`needs_review` 閾値、§6 の重み較正。
 - `apply_corrections` の尤度（check→call/fold の判定）に何を使うか（chip-motion / amount 有無）の確定。
+  **D1 暫定**: ベットに直面した "check" は **call + `needs_review`**（プレイヤーを勝手に外さない側）。
+  chip-motion 等の尤度導入は後続（ISSUE-0009）。
 
 ## 9. 参照
 

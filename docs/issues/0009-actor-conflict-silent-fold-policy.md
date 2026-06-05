@@ -52,11 +52,21 @@ ADR-0010）に対する評価がないと決められない。
 
 ## Fix
 
-未対応（R2/R3 着手時に確定）。確定したら:
+**初期方針を決定（2026-06-05, Phase D 着手・Epic #4 で承認）**:
 
-- 自動 fold 合成の席数上限・`needs_review` 付与条件を `hand-reconstruction.md` §4 に明文化。
-- 派生 confidence 重みと閾値を §6 に明記し、golden fixtures で較正。
-- ソース優先順位（RFID / audio / camera / prior）の最終形を表で固定。
+- **silent-fold 合成の上限 = 1-2 席**。超過は合成せず prior を維持し `needs_review`。
+- **ソース優先順位 = RFID > audio(明示発話) > camera > prior(手番)**。
+- **合成した silent-fold には常に `needs_review` を付与**（推測のため）。
+- 派生 confidence 重み `w_L`/`w_A`/`w_Q` と `review_threshold` の **初期値は暫定**とし、Phase F (#8) の
+  golden fixtures で較正・確定する。
+
+**Phase D part 1（#7, 2026-06-05）実装済**: `apply_corrections`（`audio/recognizer.py`, ADR-0009 §5）。
+合法手への射影・call/check の状態一意化・amount snap・`needs_review` トリガを純関数で実装（pokerkit 非依存・
+ライブ未結線で挙動不変, `tests/test_phase_d_corrections.py`）。`check` がベットに直面した場合の call/fold
+尤度（§8 の open）は **暫定で call + `needs_review`**（プレイヤーを勝手に hand から外さない側）を採用。
+
+**残（Status Open のまま）**: actor 推定の engine 結線・silent-fold 合成（D2）、派生 confidence 融合（D3）、
+重み較正（Phase F の fixtures）。これらの完了と pin で本 issue をクローズする。
 
 ## Regression Test
 
