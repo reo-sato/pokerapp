@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+### Added (Phase I — エンドユーザードキュメント / v1 リリーストラック)
+
+- **非エンジニア向けドキュメント一式**（v1 issue #12 / Epic #4, ロードマップ Phase I）:
+  - `README.md`（新規）: 概要・できること・動作要件・インストール・**クイックスタート**（起動 → 読み上げ例 →
+    出力）・各ガイドへのリンク・プロジェクト状態。
+  - `docs/installation.md`: Python 準備、`pip install`、**PortAudio（pyaudio）の OS 別手順**、初回モデル DL、
+    マイク選択、RFID（HTTP / PC/SC、任意）。
+  - `docs/usage.md`: 起動モード、**読み上げ語彙**（席「シートN」/ アクション ベット・コール・レイズ等 / 金額）、
+    ハンド 1 回の流れ（ハンド開始 → アクション → ウィナー）、言い間違い/言い忘れへの自動補正、出力（JSON / PHH）、
+    **設定リファレンス**（`config.json` 各項目）。
+  - `docs/troubleshooting.md`: 起動不可 / マイク未認識 / 認識精度 / モデル DL / RFID / ルール / `needs_review` /
+    ログ場所 の対処。
+  - `pyproject.toml` に `readme = "README.md"` を追加（パッケージ long description）。
+  - 内容は実装（`config_default.json` / `core/constants.py` の語彙 / `main.py` の CLI / 既定 `pokerkit`）と
+    一致。検証: doc 間リンク解決、`pip install -e .` ビルド OK、テスト **286 passed**。
+  - 残（Phase H, 要 Windows）: ワンクリックインストーラができたら README のインストール節を差し替え。
+
 ### Added (Phase H part 1 — パッケージング + CI / H1+H4, v1 リリーストラック)
 
 - **パッケージング基盤（pyproject.toml）と CI（GitHub Actions）**（v1 issue #11 / Epic #4, ロードマップ H1/H4）:
