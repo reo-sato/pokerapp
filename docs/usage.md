@@ -94,17 +94,18 @@ GUI と `--cli` はどちらも**音声でハンドを記録**します。配信
 
 ## 設定 (`config.json`)
 
-初回起動時に `config_default.json` から `config.json` が作られます。主な項目:
+初回起動時に `config_default.json` から `config.json` が作られます。
+
+> **席数・プレイヤー名・スタック・SB/BB・ログ保存先は起動時に対話入力**します（`config.json` では設定しません）。
+
+`config.json` で設定できる主な項目:
 
 | セクション | キー | 既定 | 説明 |
 |---|---|---|---|
-| `session` | `num_seats` | `6` | テーブルの席数 |
-| | `blinds` | `{sb:100, bb:200}` | スモール/ビッグブラインド |
-| | `log_dir` | `./logs` | ログ出力先 |
 | `audio` | `device_id` | `0` | 入力マイク（システム既定が 0） |
+| | `sample_rate` | `16000` | 録音サンプルレート |
 | | `whisper_model` | `medium` | 認識モデル。`small` 等で軽量化可 |
 | | `language` | `ja` | 認識言語 |
-| | `initial_prompt` | （語彙） | 認識を安定させる初期プロンプト |
 | `rfid` | `enabled` | `false` | RFID を使うか（任意） |
 | | `transport` | `http` | `http`（ESP32）/ `pcsc`（リーダー直結） |
 | | `bind_port` | `8787` | HTTP 受信ポート |
@@ -112,6 +113,7 @@ GUI と `--cli` はどちらも**音声でハンドを記録**します。配信
 | `recording` | `enabled` | `false` | 生イベントの記録（再現・検証用、任意） |
 | `engine` | `backend` | `pokerkit` | ルール準拠の再構築。問題時は `legacy` に戻せる |
 
-> `camera` セクションは**廃止予定（レガシー）**で、通常の記録には使用しません。
+> `camera` セクションは**廃止予定（レガシー）**で使用しません。`session` セクションと `audio.initial_prompt` は
+> 現在のコードでは参照されません（席/ブラインド等は起動時入力、Whisper プロンプトは内蔵語彙を使用）。
 
 困ったときは [トラブルシューティング](troubleshooting.md) を参照してください。

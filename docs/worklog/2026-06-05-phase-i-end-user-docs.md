@@ -45,7 +45,10 @@ v1 リリーストラックの **Phase I**（GitHub issue #12）: 非エンジ�
 
 ## Fixes Applied
 
-- なし（新規ドキュメント）。
+- **レビュー指摘の修正（PR #25）**: `usage.md` の設定表が `config.json` の未使用キーを掲載していた。
+  `config["session"]`（num_seats/blinds/log_dir）は `main.py` が読まず `_prompt_session_config()` で
+  **起動時に対話入力**、`audio.initial_prompt` も未使用で Whisper プロンプトは内蔵 `WHISPER_PROMPT_JA` を使用。
+  設定表からこれらを除き、実際に読まれるキー（`audio.sample_rate` 追加等）に正し、未使用セクションを明記。
 
 ## Remaining Gaps / Out-of-Scope
 
