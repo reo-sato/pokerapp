@@ -53,7 +53,11 @@ write-through を採用したため、UI の seat 選択タイミングが整合
 
 ## Fix
 
-未対応（Phase 2.3 着手時に確定）。決まったら:
+**E1+E2-core（#10, 2026-06-05）で土台は実装済**: `IntegrationThread` が `seat_player_map`（seat→player_id）を
+DI で受け取り、hand 開始で `assign_seat`・確定時に `player_id` を埋め込む write-through が動く
+（`config.session_layer.enabled` 既定 off で挙動不変）。**残るのは「seat→player_id を選ぶ UX」**＝本 issue 本体:
+
+未対応（Phase 2.3 = E3 着手時に確定）。決まったら:
 
 - `gui/dashboard.py` または別 window の widget 仕様を `docs/contracts/hand-integration.md` に追記。
 - carry-forward と sitting_out の振る舞いを `validation-rules.md`（または本 doc）に明記。

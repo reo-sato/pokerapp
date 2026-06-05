@@ -42,6 +42,7 @@ from output.json_writer import JsonWriter
 
 if TYPE_CHECKING:
     from core.engine_types import LegalContext
+    from core.session_repository import SessionRepository
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,8 @@ class IntegrationThread(threading.Thread):
         event_recorder: Optional[EventRecorder] = None,
         on_hand: Optional[Callable[["HandSummary"], None]] = None,
         clock: Optional[Callable[[], float]] = None,
+        session_repo: "Optional[SessionRepository]" = None,
+        seat_player_map: Optional[dict[int, str]] = None,
     ) -> None:
         """
         Args:
@@ -160,6 +163,10 @@ class IntegrationThread(threading.Thread):
                      on_rfid_card 同様 integration スレッドで発火するためスレッド安全に扱うこと。
             clock: epoch 秒を返す時計 (既定 time.time)。決定的 replay 用に注入する (F1)。
                    ActionRecord/HandSummary の timestamp と buffer 期限はこの時計に従う。
+            session_repo: S2.x session レイヤ (ADR-0008 Pattern A)。`seat_player_map` と共に与えると
+                          hand 開始時に assign_seat（write-through）し、HandSummary.players に player_id を
+                          additive 埋め込む。None なら従来動作（session 未接続・挙動不変, rollback path）。
+            seat_player_map: seat_no → player_id（registry の UUID hex）。session_repo と対で有効。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -173,6 +180,10 @@ class IntegrationThread(threading.Thread):
         self._event_recorder = event_recorder
         self._on_hand = on_hand
         self._clock: Callable[[], float] = clock or time.time
+        # S2.x session 統合（ADR-0008 Pattern A, write-through）。両方揃ったときのみ有効。
+        self._session_repo = session_repo
+        self._seat_player_map: dict[int, str] = dict(seat_player_map or {})
+        self._session_layer_active = session_repo is not None and bool(self._seat_player_map)
 
         # センサーイベントのバッファ
         self._camera_buffer: list[CameraEvent] = []
@@ -624,17 +635,45 @@ class IntegrationThread(threading.Thread):
         self._board_source = ""
         self._hole_cards = {}
         self._hand_needs_review = False
+        if self._session_layer_active:
+            self._assign_seats_for_hand(gs.hand_id)
         logger.info("New hand started: hand_id=%d", gs.hand_id)
+
+    def _assign_seats_for_hand(self, hand_id: int) -> None:
+        """S2.x: hand 開始時に seat→player を session レイヤへ write-through する（ADR-0008 §4）。
+
+        個々の assign 失敗（seat/player 重複等）は当該ハンドを止めず log に留める（hand logger の
+        記録継続性を優先）。session_id は JsonWriter の session_id（session レイヤ採番の UUID4 hex）。
+        """
+        session_id = self._json_writer._session_id  # noqa: SLF001
+        for seat_no, player_id in self._seat_player_map.items():
+            try:
+                self._session_repo.assign_seat(session_id, hand_id, seat_no, player_id)
+            except Exception:
+                logger.exception(
+                    "assign_seat failed (session=%s hand=%d seat=%d player=%s)",
+                    session_id, hand_id, seat_no, player_id,
+                )
 
     def _finalize_hand(self, winner_seat: int) -> None:
         gs = self._game_state
         gs.end_hand(winner_seat)
 
+        # S2.x: 当該 hand の seat→player_id を session レイヤから解決（無効なら空 = 従来動作）。
+        seat_player: dict[int, str] = {}
+        if self._session_layer_active:
+            try:
+                seat_player = self._session_repo.resolve_seat_map_for_hand(
+                    self._json_writer._session_id, gs.hand_id  # noqa: SLF001
+                )
+            except Exception:
+                logger.exception("resolve_seat_map_for_hand failed; player_id を省略")
+
         stacks_end = gs.get_stacks()
         players_info = []
         for seat in sorted(stacks_end.keys()):
             hole = self._hole_cards.get(seat, [])
-            players_info.append({
+            info = {
                 "seat":              seat,
                 "name":              gs.get_player_name(seat),
                 "hole_cards":        list(hole) if hole else None,
@@ -642,7 +681,11 @@ class IntegrationThread(threading.Thread):
                 "stack_start":       self._stack_start.get(seat, 0),
                 "stack_end":         stacks_end[seat],
                 "result":            stacks_end[seat] - self._stack_start.get(seat, 0),
-            })
+            }
+            if self._session_layer_active:
+                # additive: session 接続時のみ player_id を載せる（未割当 seat は None）。
+                info["player_id"] = seat_player.get(seat)
+            players_info.append(info)
 
         if self._hole_cards:
             logger.info(
