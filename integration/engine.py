@@ -447,6 +447,9 @@ class IntegrationThread(threading.Thread):
         self._json_writer.append_hand_summary(summary)
         logger.info("Hand %d finalized. Winner: seat %d", gs.hand_id, winner_seat)
         self._current_actions = []
+        # _current_actions と対称にリセットし、stale フラグが次のサマリーへ
+        # 漏れない（new_hand を挟まない再 finalize でも残らない）ようにする。
+        self._hand_needs_review = False
 
 
 # ――― ユーティリティ ―――

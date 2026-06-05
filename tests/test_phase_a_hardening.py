@@ -150,3 +150,19 @@ class TestRFIDUnresolvedCardFlagsReview:
         data = json.loads(writer.path.read_text(encoding="utf-8"))
         assert data["hands"][0]["review_required"] is True
         assert data["hands"][1]["review_required"] is False
+
+    def test_finalize_resets_review_flag(self, tmp_path: Path) -> None:
+        """_finalize_hand はサマリーに反映後フラグをリセットする（_current_actions と対称）。"""
+        gs = _make_game()
+        writer = JsonWriter(log_dir=tmp_path, session_id="s_finalize_reset")
+        thread = IntegrationThread(
+            audio_queue=make_audio_queue(), game_state=gs, json_writer=writer,
+            stop_event=threading.Event(),
+        )
+
+        thread._hand_needs_review = True
+        thread._finalize_hand(1)
+
+        # 確定したサマリーには True が反映され、フラグ自体はリセットされる。
+        assert _written_hand(writer)["review_required"] is True
+        assert thread._hand_needs_review is False
