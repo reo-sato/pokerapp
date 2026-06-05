@@ -7,7 +7,8 @@
 ## Status
 
 <!-- One of: Open / Investigating / Fixed / WontFix / Duplicate -->
-Open
+Resolved（記録境界・clock 源を契約で確定: Phase B+C / #6, 2026-06-05。replayer 実装と
+スレッド順序許容度の実証固定は Phase F / #8 の golden fixtures）
 
 ## Severity / Priority
 
@@ -51,12 +52,18 @@ realtime パイプラインは本質的に実時計・スレッドスケジュ�
 
 ## Fix
 
-未対応（R1/R4 着手時に確定）。方針案（`event-replay.md` §4 に既述）:
+**Phase B+C（#6）で記録境界と clock 源を契約として確定**（`event-replay.md` §4 を「決定」に更新）:
 
-- **既定 = decode 後を記録**（決定的 replay を優先）。raw audio 保存は任意の上位レイヤとして分離。
-- engine に **clock source 注入**（live=実時計 / replay=観測済み最大 ts）。`MATCH_WINDOW` /
-  `CAMERA_BUFFER_TTL` を event time 上で動かす。
-- replay は event を **timestamp 昇順**で同一 drain ロジックへ。許容度を `event-replay.md` に明文化。
+- **記録境界 = ASR decode 後**（`action/amount/raw_text/seat/confidence`）に確定。決定的 replay を
+  優先し、raw audio 保存は任意の上位レイヤとして分離（re-ASR は重く whisper バージョン間で非決定的）。
+  B+C で `AudioEvent.{seat,confidence}` を追加し `event_to_envelope` で露出（`reconstruction_event`
+  schema は既に optional 定義済、code↔contract 緑）。
+- **clock 源 = 観測済み最大 event timestamp**（live=実時計）に確定。
+- **replay は timestamp 昇順**で同一 drain ロジックへ通す方針を `event-replay.md §4` に明文化。
+
+残（Phase F / #8）: engine への clock source 注入（`MATCH_WINDOW`/`CAMERA_BUFFER_TTL` を event time
+で駆動）、`tools/replay_hand.py` 実装、live キュー順序 ≈ timestamp 順の許容度を golden fixtures の
+round-trip 決定性テストで実証固定。
 
 ## Regression Test
 

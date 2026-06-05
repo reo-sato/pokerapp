@@ -121,11 +121,11 @@ class AudioThread(threading.Thread):
     def _process_chunk(self, audio_bytes: bytes) -> None:
         """音声チャンクをテキストに変換し、アクションを検出して queue に送出する。"""
         try:
-            text = self._transcriber.transcribe(audio_bytes)
+            text, confidence = self._transcriber.transcribe_with_confidence(audio_bytes)
             if not text:
                 return
-            logger.debug("Transcribed: %r", text)
-            event = parse_action(text)
+            logger.debug("Transcribed: %r (confidence=%s)", text, confidence)
+            event = parse_action(text, confidence=confidence)
             if event is not None:
                 logger.info("AudioEvent: action=%s amount=%d", event.action, event.amount)
                 self._audio_queue.put(event)

@@ -37,3 +37,6 @@ class AudioEvent:
     amount: int  # 金額なしの場合は 0
     timestamp: float  # time.time()
     raw_text: str
+    # 以下は additive (R3/R4 用)。既存経路は未使用 = 挙動不変。
+    seat: Optional[int] = None        # 明示発話された席番号（"シート3"）。actor 推定/replay 用
+    confidence: Optional[float] = None  # Whisper per-segment 信頼度 [0,1]（派生 confidence の入力）

@@ -26,7 +26,19 @@ def test_audio_envelope():
         "action": "bet",
         "amount": 500,
         "raw_text": "ベット 500",
+        "seat": None,
+        "confidence": None,
     }
+
+
+def test_audio_envelope_with_seat_and_confidence():
+    ev = AudioEvent(
+        action="raise", amount=800, timestamp=1.0, raw_text="シート3 レイズ 800",
+        seat=3, confidence=0.82,
+    )
+    env = event_to_envelope(ev)
+    assert env["seat"] == 3
+    assert env["confidence"] == 0.82
 
 
 def test_rfid_envelope():
@@ -79,6 +91,8 @@ def test_recorded_envelopes_match_schema():
     validator = jsonschema.Draft202012Validator(schema)
     events = [
         AudioEvent(action="bet", amount=200, timestamp=1.0, raw_text="ベット"),
+        AudioEvent(action="raise", amount=800, timestamp=1.5, raw_text="シート3 レイズ 800",
+                   seat=3, confidence=0.82),
         RFIDEvent(
             tag_id="04:AA", card="Kd", reader_id="board_1", role="board",
             seat=None, timestamp=2.0, raw_tag_id="04AA", board_index=1,

@@ -47,6 +47,26 @@ def _strip_seat_references(text: str) -> str:
     return _SEAT_PATTERN.sub("", text)
 
 
+# 明示発話された席番号を抽出する（"シート3" / "seat 3" / 全角数字対応）。
+_SEAT_NO_PATTERN = re.compile(r"(?:シート|seat)\s*([0-9０-９]+)", re.IGNORECASE)
+_FW_TO_ASCII_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+
+
+def _extract_seat_no(text: str) -> Optional[int]:
+    """発話テキストから明示的な席番号 (1..9) を返す。見つからない/範囲外は None。
+
+    actor 推定 (R3) ではなく「明示的に読み上げられた席」だけを拾う additive 仕様。
+    """
+    m = _SEAT_NO_PATTERN.search(text)
+    if not m:
+        return None
+    try:
+        n = int(m.group(1).translate(_FW_TO_ASCII_DIGITS))
+    except ValueError:
+        return None
+    return n if 1 <= n <= 9 else None
+
+
 def _kanji_to_int(kanji: str) -> int:
     """連続した漢数字文字列を整数に変換する。
 
@@ -138,9 +158,11 @@ def parse_amount(text: str) -> int:
     return candidates[0][1]
 
 
-def parse_action(text: str) -> Optional[AudioEvent]:
+def parse_action(text: str, confidence: Optional[float] = None) -> Optional[AudioEvent]:
     """Whisper の認識テキストからアクション種別と金額を抽出して AudioEvent を返す。
     認識できない場合は None を返す。
+
+    confidence: Whisper per-segment 信頼度 [0,1]（呼び出し側が ASR から渡す）。additive。
 
     キーワード選択ルール:
     1. テキスト内で最も左に現れたキーワードを優先する。
@@ -180,6 +202,8 @@ def parse_action(text: str) -> Optional[AudioEvent]:
         amount=amount,
         timestamp=time.time(),
         raw_text=text,
+        seat=_extract_seat_no(text),
+        confidence=confidence,
     )
 
 
@@ -200,16 +224,25 @@ class WhisperTranscriber:
             self._model = None
 
     def transcribe(self, audio_bytes: bytes) -> str:
-        """PCM16 音声バイト列をテキストに変換して返す。
-        変換失敗時は空文字列を返す（クラッシュしない）。
+        """PCM16 音声バイト列をテキストに変換して返す（信頼度を捨てる後方互換版）。"""
+        return self.transcribe_with_confidence(audio_bytes)[0]
 
-        入力は 16kHz モノラル PCM16 固定を前提とする。
-        faster-whisper の transcribe() は numpy 配列の長さから 16kHz を仮定するため、
-        sample_rate は引数として受け取らない。
+    def transcribe_with_confidence(
+        self, audio_bytes: bytes
+    ) -> tuple[str, Optional[float]]:
+        """PCM16 音声バイト列を (テキスト, 信頼度[0,1]) に変換する。
+        変換失敗・モデル未ロード時は ("", None) を返す（クラッシュしない）。
+
+        入力は 16kHz モノラル PCM16 固定を前提とする（faster-whisper は配列長から
+        16kHz を仮定するため sample_rate は受け取らない）。
+        confidence は各 segment の avg_logprob（対数確率）平均を exp で 0..1 に
+        写像したもの。segment が無ければ None。
         """
         if self._model is None:
-            return ""
+            return "", None
         try:
+            import math
+
             import numpy as np
 
             audio_array = (
@@ -220,7 +253,20 @@ class WhisperTranscriber:
                 language=self._language,
                 initial_prompt=WHISPER_PROMPT_JA,
             )
-            return " ".join(seg.text.strip() for seg in segments)
+            texts: list[str] = []
+            logprobs: list[float] = []
+            for seg in segments:
+                texts.append(seg.text.strip())
+                lp = getattr(seg, "avg_logprob", None)
+                if lp is not None:
+                    logprobs.append(lp)
+            text = " ".join(texts)
+            confidence: Optional[float] = None
+            if logprobs:
+                mean_lp = sum(logprobs) / len(logprobs)
+                # avg_logprob は対数確率(≤0)。exp で 0..1 の信頼度へ写像。
+                confidence = max(0.0, min(1.0, math.exp(mean_lp)))
+            return text, confidence
         except Exception:
             logger.exception("Whisper transcription failed")
-            return ""
+            return "", None
