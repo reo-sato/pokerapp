@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+### Added (Phase D part 1 — apply_corrections, v1 リリーストラック R3)
+
+- **合法手への射影 `apply_corrections()` を実装**（v1 issue #7 / Epic #4, ADR-0009 §5）:
+  raw ASR の (action, amount) を `LegalContext`（`legal_context()` 由来）の合法手へ射影する**純関数**
+  （`audio/recognizer.py`、pokerkit 非依存）。
+  - **call/check を状態から決定的に一意化**（`amount_to_call>0→call` / `==0→check`）。JA キーワードの
+    曖昧さに依存せず、PHH/JSON で call と check を初めて区別できる核心。
+  - bet↔raise を当ストリートのベット有無から再マップ、amount を合法レンジへ snap（大幅 snap / 額不明 /
+    非合法は `needs_review`）。`Correction` 結果型（`corrected_from`/`reason`/`asr_confidence` を持つ）。
+  - ベットに直面した "check" は暫定で **call + `needs_review`**（ISSUE-0009、尤度導入は後続）。
+  - **ライブ未結線＝挙動不変**: actor 推定の engine 結線（D2）/ 派生 confidence 融合（D3）/ silent-fold
+    合成は後続 PR（Phase F #8 の golden fixtures と併走）。ISSUE-0009 の初期方針を承認・記録。
+  - tests: `tests/test_phase_d_corrections.py`（18, 修復表を網羅）。
+    **全 222 passed, 10 skipped**（`pytest tests/ -q --ignore=tests/test_vision.py`、skip は pokerkit 未導入分）。
+
 ### Added (Phase B+C — イベント記録基盤, v1 リリーストラック R)
 
 - **`AudioEvent` に `seat` / `confidence` を additive 追加**（v1 issue #6 / Epic #4, R3/R4 の前提）:
