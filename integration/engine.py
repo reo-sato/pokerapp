@@ -664,6 +664,7 @@ class IntegrationThread(threading.Thread):
                 a.amount for a in self._current_actions
                 if a.action in ("bet", "raise", "call", "allin")
             ),
+            pots=gs.pots(),
             winner_seat=winner_seat,
             actions=list(self._current_actions),
             review_required=(
