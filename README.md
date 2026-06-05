@@ -92,6 +92,7 @@ python main.py --export-phh logs/<セッションID>.json
 | [使い方ガイド](docs/usage.md) | 読み上げ語彙、ハンドの記録手順、出力（JSON / PHH） |
 | [トラブルシューティング](docs/troubleshooting.md) | マイク・認識精度・RFID・モデルなどの困りごと |
 | [設定リファレンス](docs/usage.md#設定-configjson) | `config.json` の各項目 |
+| [手動 QA チェックリスト](docs/manual-qa-checklist.md) | 実機なしでのローカル検証手順（テスト / replay / テキスト駆動 / RFID 模擬 / PHH） |
 
 ---
 
