@@ -27,6 +27,7 @@ _SCHEMA = (
     Path(__file__).parent.parent
     / "docs" / "contracts" / "schemas" / "reconstruction_event.schema.json"
 )
+_SCHEMAS_DIR = Path(__file__).parent.parent / "docs" / "contracts" / "schemas"
 
 # 再構築が正しく緑にできるケース（D1/D2a: 射影、D2b: silent-fold 合成、F3: side-pot）。
 GREEN_CASES = [
@@ -128,6 +129,19 @@ def test_same_timestamp_sensor_processed_before_audio(tmp_path: Path):
     call = [a for a in summaries[0].to_dict()["actions"] if a["action"] == "call"][0]
     assert call["seat"] == 3
     assert call["source"]["rfid"] is True
+
+
+@pytest.mark.parametrize("case", GREEN_CASES)
+def test_golden_output_conforms_to_hand_action_schema(case: str, tmp_path: Path):
+    """各 green ケースの再構築出力（非正規化・実 timestamp）が hand / action schema に適合する
+    （ISSUE-0011 freeze の回帰: code↔contract↔golden を結ぶ）。"""
+    jsonschema = pytest.importorskip("jsonschema")
+    hand_v = jsonschema.Draft202012Validator(json.loads((_SCHEMAS_DIR / "hand.schema.json").read_text(encoding="utf-8")))
+    action_v = jsonschema.Draft202012Validator(json.loads((_SCHEMAS_DIR / "action.schema.json").read_text(encoding="utf-8")))
+    hd = replay_fixture(_FIXTURES / case, tmp_path)[0].to_dict()
+    hand_v.validate(hd)
+    for a in hd["actions"]:
+        action_v.validate(a)
 
 
 def test_unequal_allin_main_and_side_pots(tmp_path: Path):

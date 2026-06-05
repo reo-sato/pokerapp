@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### Added (Phase F part 3 — hand / action schema freeze / F3b, v1 リリーストラック R5。ISSUE-0011 Fixed)
+
+- **`hand` / `action` schema を `1.0` で freeze**（v1 issue #8 / Epic #4, ADR-0010 R5, ISSUE-0011）:
+  - `docs/contracts/schemas/{hand,action}.schema.json`（draft 2020-12, `version 1.0`）。ISSUE-0011 の決定で
+    **`additionalProperties: true`** のまま 1.0（`false` 化は後続、範囲膨張防止）。required は安定 core のみ
+    （`action` は常時 12 フィールド、`hand` は cross-app core 6）。`pots`/`player_id`/`committed` 等の
+    additive は optional。
+  - `docs/contracts/fixtures/{hand,action}/`（canonical / valid-minimal / invalid-*）。
+  - `tests/test_contracts.py`: `_MODELS` に `hand`/`action` 登録（schema↔fixture）+ `test_core_hand_action_match_contract`
+    （`HandSummary.to_dict()` / `ActionRecord.to_dict()` の **code↔contract** drift 検知）。
+  - `tests/test_reconstruction.py`: `test_golden_output_conforms_to_hand_action_schema`（golden 5 ケースの
+    **実再構築出力が schema 適合** — code↔contract↔golden を結ぶ）。
+  - **全 282 passed, 0 skipped**。**ISSUE-0011 Fixed**。残 F3: PHH の call/check 区別（F3c）。
+
 ### Added (Phase F part 2 — side-pot 連携 + golden 5 ケース全緑 / F3a, v1 リリーストラック R5)
 
 - **`HandSummary.pots`（main/side pot スナップショット）を additive 追加**（v1 issue #8 / Epic #4,

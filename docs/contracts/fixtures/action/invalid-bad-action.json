@@ -1,0 +1,14 @@
+{
+  "hand_id": 1,
+  "timestamp": "2026-06-05T04:00:00.000",
+  "street": "preflop",
+  "seat": 3,
+  "player_name": "P3",
+  "action": "jump",
+  "amount": 0,
+  "pot_after": 0,
+  "stack_after": 0,
+  "source": {"camera": false, "audio": true, "rfid": false},
+  "needs_review": false,
+  "confidence": 0.5
+}

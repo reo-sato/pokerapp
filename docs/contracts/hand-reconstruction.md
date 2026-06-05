@@ -171,11 +171,16 @@ confidence = clamp(w_L·L · (w_A·A + w_Q·Q), 0, 1)
   ③ actor で prior が sensor を上書き（§4 else 枝） ④ amount を許容超過 snap ⑤ `confidence < review_threshold`
   （config）。これにより `HandSummary.review_required`（現状「どれか needs_review」だけ）が**監査可能な意味**を持つ。
 
-## 7. `hand` / `action` の inline schema sketch（freeze しない）
+## 7. `hand` / `action` schema（**freeze 済, F3b / ISSUE-0011 Fixed**）
+
+> **実装状況: F3b（#8）で `1.0` freeze 済** — 実ファイル `docs/contracts/schemas/{hand,action}.schema.json`
+> （`additionalProperties:true` で 1.0、ISSUE-0011 の決定）。`test_contracts.py` の `_MODELS` に登録し、
+> code↔contract（`test_core_hand_action_match_contract`）+ golden→schema
+> （`test_golden_output_conforms_to_hand_action_schema`）で drift 検知。required は安定 core のみ（`pots` /
+> `player_id` / `committed` 等の additive は optional）。以下は設計時の sketch（実ファイルが正）。
 
 ADR-0008 §8.1 の HandSummary draft sketch を出発点に、ADR-0009 の additive フィールドを足した sketch。
-**実ファイル化・freeze は ISSUE-0011 / ADR-0010 の R4**。`additionalProperties: true`（既存出力に多数
-フィールドがあるため）。
+`additionalProperties: true`（既存出力に多数フィールドがあるため）。
 
 ```jsonc
 // action（= ActionRecord, additive）

@@ -54,4 +54,4 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0008 | pokerkit を live engine として incremental 駆動できるか | Fixed | 2026-06-03 | reconstruct / dependency | `docs/issues/0008-pokerkit-online-feeding-feasibility.md` | spike で feasibility 確認 (pokerkit 0.7.4)。実装は R2 |
 | ISSUE-0009 | actor 競合解決と silent-fold 合成のポリシー未確定 | Open | 2026-06-03 | reconstruct / integration | `docs/issues/0009-actor-conflict-silent-fold-policy.md` | ADR-0009（R3 で確定） |
 | ISSUE-0010 | 決定的 replay の記録境界とスレッド順序近似 | Resolved | 2026-06-03 | reconstruct / integration | `docs/issues/0010-replay-determinism-record-boundary.md` | Phase B+C #6（記録境界・clock 源を確定 + AudioEvent.{seat,confidence} 露出）。replayer/許容度は Phase F #8 |
-| ISSUE-0011 | hand / action schema の freeze 未確定事項 | Open | 2026-06-03 | contracts / hand core | `docs/issues/0011-hand-action-schema-freeze-blockers.md` | ADR-0010（R4/R5） |
+| ISSUE-0011 | hand / action schema の freeze 未確定事項 | Fixed | 2026-06-05 | contracts / hand core | `docs/issues/0011-hand-action-schema-freeze-blockers.md` | Phase F3b #8（hand/action を `1.0` freeze, additionalProperties:true。`_MODELS` 登録 + code↔contract + golden→schema） |

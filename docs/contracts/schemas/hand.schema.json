@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/hand.schema.json",
+  "title": "Hand",
+  "version": "1.0",
+  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["hand_id", "session_id", "started_at", "ended_at", "players", "actions"],
+  "properties": {
+    "hand_id": {"type": "integer", "minimum": 0},
+    "session_id": {"type": "string", "minLength": 1, "description": "ADR-0008: UUID4 hex 推奨, legacy timestamp 文字列も valid"},
+    "started_at": {"type": "string"},
+    "ended_at": {"type": "string"},
+    "blinds": {
+      "type": "object",
+      "properties": {"sb": {"type": "integer", "minimum": 0}, "bb": {"type": "integer", "minimum": 0}}
+    },
+    "board": {"type": "array", "items": {"type": "string"}},
+    "board_source": {"type": "string", "enum": ["rfid", "ocr", "manual", ""]},
+    "players": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["seat", "name"],
+        "properties": {
+          "seat": {"type": "integer", "minimum": 1, "maximum": 9},
+          "name": {"type": "string"},
+          "player_id": {"type": ["string", "null"], "pattern": "^[0-9a-f]{32}$", "description": "ADR-0008 additive（S2.x 接続後）"},
+          "committed": {"type": ["integer", "null"], "minimum": 0, "description": "ADR-0009 additive"}
+        }
+      }
+    },
+    "pot_total": {"type": "integer", "minimum": 0},
+    "pots": {
+      "type": "array",
+      "description": "ADR-0009 additive。main/side pot（rules-aware のみ、legacy は []）。",
+      "items": {
+        "type": "object",
+        "required": ["amount", "eligible_seats"],
+        "properties": {
+          "amount": {"type": "integer", "minimum": 0},
+          "eligible_seats": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 9}}
+        }
+      }
+    },
+    "winner_seat": {"type": "integer"},
+    "actions": {"type": "array"},
+    "review_required": {"type": "boolean"}
+  }
+}
