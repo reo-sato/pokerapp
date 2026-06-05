@@ -12,13 +12,14 @@
   Epic #4, ADR-0009 §1/§5）:
   - `integration/engine.py`: `_handle_audio_event` のベッティング処理を `gs.legal_context()` で分岐。
     **rules-aware（pokerkit、空でない legal_context）= `_handle_rules_aware_action`**（`apply_corrections`
-    で合法手へ射影し ActionRecord に反映、`_resolve_actor` で明示発話席 / 窓内 RFID 席が手番(prior)と
+    で合法手へ射影し ActionRecord に反映、`_resolve_actor` で明示発話席(`event.seat`)が手番(prior)と
     食い違えば `needs_review`）。**legacy（空 legal_context）= `_handle_legacy_action`（従来コードを
     そのまま分離・挙動不変）**。
-  - これにより pokerkit backend で **call/check の状態一意化・非合法 action の修復・out-of-turn 検出**が
-    ライブで効く（既定 legacy は不変）。
-  - **silent-fold 合成（`fold_through` 結線で prior を上書き）と派生 confidence（D3）は後続増分**
-    （誤 fold リスクが高く Phase F #8 の golden fixtures で検証）。D2a は prior 固定 + 競合 flag に留める。
+  - これにより pokerkit backend で **call/check の状態一意化・非合法 action の修復・明示席の out-of-turn
+    検出**がライブで効く（既定 legacy は不変）。
+  - **silent-fold 合成（`fold_through` 結線で prior を上書き）・RFID/camera を含む多源 actor 解決・派生
+    confidence（D3）は後続増分 D2b**（誤 fold リスクと滞留しうる RFID 読みの消費設計のため Phase F #8 の
+    golden fixtures で検証）。D2a は prior 固定 + 明示席（イベント単位・滞留しない）の競合 flag に留める。
   - tests: `tests/test_phase_d2_wiring.py`（pokerkit 5: 射影/競合/legacy 分岐）。pokerkit 0.7.4 実走で
     **248 passed**（legacy 既存テストは `_handle_legacy_action` 経由で不変通過）。
 

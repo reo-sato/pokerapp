@@ -24,7 +24,8 @@ fixtures と併走する後続に回す。統合ブランチ `v1-integration`、
   - import: `apply_corrections`（runtime）, `LegalContext`（TYPE_CHECKING）。
   - `_handle_audio_event`: ベッティング処理を rules-aware / legacy へ分岐。
   - `_handle_legacy_action`（新）: 旧ベッティング処理を**逐語的に分離**（挙動不変）。
-  - `_resolve_actor`（新）: prior 固定 + 競合検出（D2a。silent-fold 合成はまだ）。
+  - `_resolve_actor`（新）: prior 固定 + 明示発話席(`event.seat`)の競合検出（D2a。silent-fold 合成・
+    RFID/camera 多源解決はまだ）。
   - `_handle_rules_aware_action`（新）: `apply_corrections` 適用 → `apply_action(prior, ...)` →
     ActionRecord（corrected action/amount, needs_review = 非合法 | corrected | 競合）。
 - `tests/test_phase_d2_wiring.py`（新規, 5）。
@@ -54,7 +55,12 @@ fixtures と併走する後続に回す。統合ブランチ `v1-integration`、
 
 ## Fixes Applied
 
-- なし（新規結線 + 既存処理の逐語分離）。
+- 新規結線 + 既存処理の逐語分離。
+- **コードレビュー指摘の修正（PR #17）**: `_resolve_actor` の競合判定から `_rfid_seat_buffer` 走査を除去。
+  当該バッファは actor 一致分しか pop されず、非 actor 席の滞留 RFID 読みが窓内（TTL ≈4s）に残って後続
+  アクションを連続して `needs_review` 誤検出していた。D2a では滞留しないイベント単位の `event.seat` のみを
+  競合源とし、RFID/camera を含む多源 actor 解決（消費設計込み）は D2b（Phase F fixtures）へ移送。
+  既存 D2a テストは `event.seat` ベースのため不変通過。
 
 ## Remaining Gaps / Out-of-Scope（Phase D の残り）
 

@@ -400,20 +400,16 @@ class IntegrationThread(threading.Thread):
         logger.debug("ActionRecord: %s", record)
 
     def _resolve_actor(self, event: AudioEvent, legal_ctx: LegalContext) -> tuple[int, bool]:
-        """D2a: actor を engine の合法手番(prior)に固定し、明示発話席 / 窓内 RFID 席が prior と
+        """D2a: actor を engine の合法手番(prior)に固定し、明示発話席(event.seat)が prior と
         食い違えば競合（out-of-turn / 未宣言 fold の兆候）として needs_review を立てる。
 
-        prior を sensor で上書きする silent-fold 合成（fold_through）は後続増分（誤 fold リスクが
-        高く Phase F の golden fixtures で検証するため）。
+        prior を sensor で上書きする silent-fold 合成（fold_through）と、RFID/camera を含む多源
+        actor 解決は後続増分 D2b（誤 fold リスクが高く、滞留しうる RFID 読みの消費設計と併せて
+        Phase F の golden fixtures で検証するため）。D2a は滞留しないイベント単位の明示席のみを
+        競合源とする（窓内バッファ走査は再 pop されず複数アクションを連続誤検出するため使わない）。
         """
         prior = legal_ctx.actor_seat
-        sensed: set[int] = set()
-        if event.seat is not None:
-            sensed.add(event.seat)
-        for e in self._rfid_seat_buffer:
-            if e.seat is not None and abs(e.timestamp - event.timestamp) <= MATCH_WINDOW:
-                sensed.add(e.seat)
-        conflict = any(s != prior for s in sensed)
+        conflict = event.seat is not None and event.seat != prior
         return prior, conflict
 
     def _handle_rules_aware_action(self, event: AudioEvent, legal_ctx: LegalContext) -> None:
