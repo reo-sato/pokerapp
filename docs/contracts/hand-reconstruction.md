@@ -76,6 +76,14 @@ flatten）を**正式な単一実装に格上げ**し、engine と PHH が同じ
 
 ## 4. アクター推定アルゴリズム（ADR-0009 §6 の詳細）
 
+> **実装状況: D2a（#7）で「検出」まで結線済** — `integration/engine.py` の `_handle_rules_aware_action` /
+> `_resolve_actor` が rules-aware backend で `apply_corrections` をライブ適用し、明示発話席(`event.seat`)が
+> prior と食い違えば `needs_review`。**actor は prior 固定**（silent-fold 合成 = `fold_through` での prior
+> 上書きは未結線）。下記擬似コードの `fold_through` 分岐・RFID/camera を含む多源 actor 解決（D2b）と派生
+> confidence（D3）は誤 fold リスクと滞留しうる RFID 読みの消費設計のため **Phase F #8 の golden fixtures で
+> 検証**しながら結線する（D2a は滞留しないイベント単位の明示席のみを競合源とする）。legacy は空
+> legal_context で従来経路。
+
 **入力**: prior（engine の `actor_seat`）＋観測（同窓内 RFID seat read / audio 明示 seat / camera seat）。
 audio 明示 seat は `engine.py:433` `_extract_seat_from_text`（現状 winner 専用）を全 action へ一般化して得る。
 

@@ -30,14 +30,18 @@ import queue
 import threading
 import time
 from datetime import datetime
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
+from audio.recognizer import apply_corrections
 from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
 from output.event_recorder import EventRecorder
 from output.json_writer import JsonWriter
+
+if TYPE_CHECKING:
+    from core.engine_types import LegalContext
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +335,18 @@ class IntegrationThread(threading.Thread):
             self._finalize_hand(winner_seat)
             return
 
+        # ベッティングアクション。rules-aware backend（pokerkit）は境界で actor 推定 + 合法手
+        # 射影、legacy（空 legal_context）は従来経路で挙動不変（ADR-0009 §1）。
+        legal_ctx = gs.legal_context()
+        if legal_ctx.legal_actions:
+            self._handle_rules_aware_action(event, legal_ctx)
+        else:
+            self._handle_legacy_action(event)
+
+    def _handle_legacy_action(self, event: AudioEvent) -> None:
+        """rules-aware でない backend（legacy）の従来アクション処理（挙動不変）。"""
+        action = event.action
+        gs = self._game_state
         seat = gs.get_current_player()
 
         try:
@@ -382,6 +398,74 @@ class IntegrationThread(threading.Thread):
             self._on_action(record)
 
         logger.debug("ActionRecord: %s", record)
+
+    def _resolve_actor(self, event: AudioEvent, legal_ctx: LegalContext) -> tuple[int, bool]:
+        """D2a: actor を engine の合法手番(prior)に固定し、明示発話席(event.seat)が prior と
+        食い違えば競合（out-of-turn / 未宣言 fold の兆候）として needs_review を立てる。
+
+        prior を sensor で上書きする silent-fold 合成（fold_through）と、RFID/camera を含む多源
+        actor 解決は後続増分 D2b（誤 fold リスクが高く、滞留しうる RFID 読みの消費設計と併せて
+        Phase F の golden fixtures で検証するため）。D2a は滞留しないイベント単位の明示席のみを
+        競合源とする（窓内バッファ走査は再 pop されず複数アクションを連続誤検出するため使わない）。
+        """
+        prior = legal_ctx.actor_seat
+        conflict = event.seat is not None and event.seat != prior
+        return prior, conflict
+
+    def _handle_rules_aware_action(self, event: AudioEvent, legal_ctx: LegalContext) -> None:
+        """rules-aware backend（pokerkit）でのアクション処理（ADR-0009 §5: 合法手への射影）。
+
+        D2a: apply_corrections をライブ適用し actor 競合を検出（prior に固定）。silent-fold 合成と
+        派生 confidence（D3）は後続。
+        """
+        gs = self._game_state
+        actor, actor_conflict = self._resolve_actor(event, legal_ctx)
+        corrected = apply_corrections(event.action, event.amount, legal_ctx, event.confidence)
+
+        try:
+            gs.apply_action(actor, corrected.action, corrected.amount)
+            apply_ok = True
+        except ValueError:
+            logger.exception(
+                "rules-aware apply_action failed (seat=%s action=%s amount=%s)",
+                actor, corrected.action, corrected.amount,
+            )
+            apply_ok = False
+
+        cam_event  = self._pop_matching_camera_event(actor, event.timestamp)
+        rfid_event = self._pop_matching_rfid_event(actor, event.timestamp)
+        has_camera = cam_event is not None
+        has_rfid   = rfid_event is not None
+
+        source = {"camera": has_camera, "audio": True, "rfid": has_rfid}
+        # D2a: confidence は既存 calc_confidence を流用（3 因子融合は D3）。
+        confidence = calc_confidence(has_rfid=has_rfid, has_audio=True, has_camera=has_camera)
+        needs_review = (not apply_ok) or corrected.needs_review or actor_conflict
+
+        record = ActionRecord(
+            hand_id=gs.hand_id,
+            timestamp=_now_iso(),
+            street=gs.street,
+            seat=actor,
+            player_name=gs.get_player_name(actor),
+            action=corrected.action,
+            amount=corrected.amount,
+            pot_after=gs.pot,
+            stack_after=gs.get_stack(actor),
+            source=source,
+            needs_review=needs_review,
+            confidence=confidence,
+        )
+        self._current_actions.append(record)
+
+        if self._on_action:
+            self._on_action(record)
+
+        logger.debug(
+            "ActionRecord (rules-aware): seat=%d action=%s amount=%d corrected_from=%s reason=%s review=%s",
+            actor, corrected.action, corrected.amount,
+            corrected.corrected_from, corrected.reason, needs_review,
+        )
 
     # ――― ハンド開始 / 終了 ―――
 
