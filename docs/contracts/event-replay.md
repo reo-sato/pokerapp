@@ -81,10 +81,12 @@ fixtures-as-oracle（他層が既に持つ規律）が付く。
 3. **RNG / 隠れグローバルに依存しない**。カードは RFID 由来か未知 `????`。乱数で配らない（pokerkit State も
    action 列で完全決定）。
 
-> **記録境界の open question（ISSUE-0010）**: 決定的にするには **ASR decode 後の `action/amount/raw_text/
-> confidence` を記録**するのが素直（Whisper を再実行しないので決定的）。ただしこれは ASR モデル自体の
-> 改善を offline で測れない。raw audio を別途保存すれば re-ASR できるが重く、whisper バージョン間で
-> 非決定的。本提案は **decode 後を記録（決定的 replay）を既定**とし、raw audio 保存は任意の上位レイヤとする。
+> **記録境界の決定（ISSUE-0010, Resolved）**: 記録境界は **ASR decode 後の `action/amount/raw_text/
+> seat/confidence` を記録**することに確定（Whisper を再実行しないので決定的）。raw audio 保存は
+> re-ASR できるが重く whisper バージョン間で非決定的なため既定にせず、任意の上位レイヤとして分離する。
+> clock 源は **観測済み最大 event timestamp**（live=実時計）に確定。live のキュー順序 ≈ timestamp 昇順
+> の乖離許容度は golden fixtures（§5, Phase F / #8）で round-trip 決定性として実証固定する。
+> **B+C（#6）で `AudioEvent.{seat,confidence}` を envelope に露出済み**（clock 注入と replayer は R4/#8）。
 
 ## 5. golden fixtures（core の oracle）
 
@@ -121,7 +123,7 @@ tests/fixtures/reconstruction/<case>/
 
 ## 7. open 論点（→ issues）
 
-- **ISSUE-0010**: 記録境界（decode 後 vs raw audio）と、live スレッド順序 ≈ timestamp 順の許容度。
+- **ISSUE-0010** (Resolved, §4): 記録境界 = decode 後（`seat`/`confidence` 含む）・clock 源 = 観測済み最大 ts に確定。スレッド順序 ≈ timestamp 順の許容度は golden fixtures（Phase F / #8）で実証固定。
 - **ISSUE-0011**: `hand` / `action` の `additionalProperties:false` 昇格と必須/optional 確定（`reconstruction_event`
   は本 doc で `false` 寄り）。
 

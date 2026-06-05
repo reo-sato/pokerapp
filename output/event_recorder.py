@@ -38,6 +38,8 @@ def event_to_envelope(event: RecordableEvent) -> dict:
             "action": event.action,
             "amount": event.amount,
             "raw_text": event.raw_text,
+            "seat": event.seat,              # additive (R3/R4)。未設定なら null。
+            "confidence": event.confidence,  # additive (Whisper 信頼度)。未設定なら null。
         }
     if isinstance(event, RFIDEvent):
         return {

@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+### Added (Phase B+C — イベント記録基盤, v1 リリーストラック R)
+
+- **`AudioEvent` に `seat` / `confidence` を additive 追加**（v1 issue #6 / Epic #4, R3/R4 の前提）:
+  - `core/events.py`: `AudioEvent.seat`（明示発話席）/ `AudioEvent.confidence`（Whisper 信頼度 [0,1]）を
+    optional 追加。既存経路は未使用 = **挙動不変**。
+  - `audio/recognizer.py`: `WhisperTranscriber.transcribe_with_confidence()` を追加（segment の
+    `avg_logprob` 平均を `exp` で 0..1 に写像）。`transcribe()` は委譲。`parse_action(text, confidence=)`
+    で confidence を受け、`_extract_seat_no()` で明示席（"シート3"/"seat 3"/全角）を populate。
+  - `audio/recorder.py`: `_process_chunk` を `transcribe_with_confidence` 経由に変更し confidence を伝搬。
+  - `output/event_recorder.py`: `event_to_envelope` の audio 分岐に `seat`/`confidence` を additive 露出
+    （`reconstruction_event` schema は既に optional 定義済、code↔contract 緑）。
+- **ISSUE-0010（記録境界・決定性）を Resolved**: 記録境界 = ASR decode 後（`seat`/`confidence` 含む）、
+  clock 源 = 観測済み最大 event timestamp に確定。`docs/contracts/event-replay.md §4` を「決定」に更新。
+  clock 注入・replayer・スレッド順序許容度の実証固定は Phase F（#8）の golden fixtures に委譲。
+- tests: `tests/test_phase_bc_events.py`（10）+ `tests/test_event_recorder.py` 拡張。
+  **全 204 passed, 10 skipped**（`pytest tests/ -q --ignore=tests/test_vision.py`、skip は pokerkit 未導入分）。
+
 ### Fixed (Phase A — コア堅牢化, v1 リリーストラック)
 
 - **RFID カード未解決時にハンドを要レビュー化**（v1 issue #5 / Epic #4）: board / seat RFID
