@@ -594,6 +594,9 @@ python main.py --players                     # Player Registry 画面 (S1, 別�
 pytest tests/ -v --ignore=tests/test_vision.py   # CI と同じ（vision レガシー除外）
 python tools/replay_hand.py tests/fixtures/reconstruction/silent-fold  # 決定的 replay (F1)
 python main.py --export-phh logs/session_xxx.json
+# ローカル QA（実機なし。docs/manual-qa-checklist.md 参照）
+printf 'ハンド開始\nチェック\nシート1 ウィナー\n' | python tools/play_hand_text.py - --seats 3  # mic 不要のテキスト駆動再構築
+python tools/simulate_rfid.py register-demo && python tools/simulate_rfid.py board Ah Kd Qs  # 実機なし RFID 注入
 ```
 
 ---

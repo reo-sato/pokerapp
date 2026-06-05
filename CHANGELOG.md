@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+### Added (ローカル QA tooling — 実機・Windows なしの検証手段)
+
+- **実機（RFID/Windows）なしで v1 を検証する**チェックリスト + 模擬ツール:
+  - `docs/manual-qa-checklist.md`（新規）: インストール / テスト / replay / テキスト駆動 / 音声 E2E /
+    RFID 模擬 / PHH / config トグル / GUI の 9 項目を「コマンド / 期待 / 見る点」で記載。各項目に
+    要ハード（🖥️/🎤）か不要（💻）かを明示。
+  - `tools/simulate_rfid.py`（新規）: 起動中アプリの `POST /rfid` に偽イベントを注入する CLI
+    （`send` / `seat` / `board` / `status` / `register-demo`）。物理タグ無しでもカードが解決できるよう
+    `register-demo` で合成デッキ（決定的 tag→card）を `rfid_cards.json` に登録。stdlib `urllib` のみ。
+  - `tools/play_hand_text.py`（新規）: マイク / Whisper モデルなしで、テキスト（ディーラー読み上げ相当）を
+    `parse_action` → `integration/replay.py:replay_events` に流し、rules-aware 再構築（合法手射影 /
+    silent-fold / side-pot / 派生 confidence）→ `logs/<session>.json` まで丸ごと駆動する。
+  - tests: `tests/test_tools_simulate_rfid.py`（合成タグ・register-demo・実 receiver への POST→queue）/
+    `tests/test_tools_play_hand_text.py`（parse/skip/timestamp・legacy 確定&再現性・pokerkit smoke）。
+    **全 311 passed, 0 skipped**。既存挙動は不変（additive な追加のみ）。
+
 ### Added (Phase E part 1 — hand logger × session 統合 write-through / E1+E2-core, v1 リリーストラック S2.x)
 
 - **hand logger を S2 session レイヤに write-through 接続**（v1 issue #10 / Epic #4, ADR-0008 Pattern A）:
