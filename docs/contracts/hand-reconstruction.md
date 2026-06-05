@@ -150,7 +150,12 @@ additive）を足し、recognizer が明示 seat を見つけたら埋める。
 
 ## 6. 派生 confidence モデル（ADR-0009 §8 の詳細）
 
-固定 8 行テーブル（`engine.py:59` `calc_confidence`）を廃し、**解釈可能な 3 因子の合成**にする:
+> **実装状況: D3（#7）実装済** — `integration/engine.py:derive_confidence`（3 因子 L/A/Q）を rules-aware
+> 経路に結線（legacy の固定 8 行 `calc_confidence` は不変）。needs_review 5 条件も `_handle_rules_aware_action`
+> で明文化（⑤ `REVIEW_THRESHOLD`）。重み（`_CONF_W_A/_CONF_W_Q/_CONF_BASE/_CONF_L_PENALTY/REVIEW_THRESHOLD`）
+> は暫定で、golden fixtures / Phase F で較正。これで **Phase D 完了**（残 R: F3 の side-pot/freeze）。
+
+固定 8 行テーブル（`engine.py` `calc_confidence`）を rules-aware では廃し、**解釈可能な 3 因子の合成**にする:
 
 ```
 L = 1.0 if pokerkit が action を受理 else penalty        # 合法性ゲート（新・最重要）

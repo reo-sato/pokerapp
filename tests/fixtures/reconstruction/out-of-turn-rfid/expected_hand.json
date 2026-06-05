@@ -77,7 +77,7 @@
         "rfid": true
       },
       "needs_review": true,
-      "confidence": 0.95
+      "confidence": 0.888
     }
   ],
   "review_required": true

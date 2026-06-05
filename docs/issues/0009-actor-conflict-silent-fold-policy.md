@@ -75,8 +75,13 @@ ADR-0010）に対する評価がないと決められない。
 として記録（`confidence=0.3`・常に `needs_review`）。golden fixtures `silent-fold` / `out-of-turn-rfid`
 （`tests/test_reconstruction.py`）で pin 済。
 
-**残（Status Open のまま）**: camera 源、派生 confidence 融合（D3、合成 fold の 0.3 含む重み較正）。
-これらの完了と pokerkit pin で本 issue をクローズする。
+**Phase D part 5（#7 D3, 2026-06-05）実装済**: 派生 confidence（`integration/engine.py:derive_confidence`、
+3 因子 L 合法性 / A 合意 / Q 品質、rules-aware 経路のみ。legacy 固定表は不変）と **needs_review 5 条件**
+（①非合法 ②高信頼 ASR×規則矛盾 ③actor 競合 ④amount snap ⑤`confidence < REVIEW_THRESHOLD`）を明文化・結線。
+golden fixtures 4 ケースで pin（`tests/test_phase_d3_confidence.py` + `test_reconstruction.py`）。
+
+**残（Status Open のまま）**: 重み（`_CONF_*`/`REVIEW_THRESHOLD`/`SILENT_FOLD_CAP`/合成 fold 0.3）の**最終較正**
+（Phase F の golden fixtures 拡充時）、camera 源の actor 寄与。これらの確定と pokerkit pin で本 issue をクローズする。
 
 ## Regression Test
 
