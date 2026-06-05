@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pokerapp"
 version = "1.0.0.dev0"
 description = "ライブポーカーのハンド履歴を音声(faster-whisper)＋RFID(ESP32/PN532)から自動記録し JSON/PHH 出力するアプリ"
+readme = "README.md"
 requires-python = ">=3.11"
 
 # ── core runtime（製品が動くのに必須）──

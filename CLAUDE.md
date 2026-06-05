@@ -19,6 +19,7 @@ JSON/PHH 形式でハンドログを出力する。
 
 ```
 pokerapp/
+├── README.md                      ← エンドユーザー向け概要・クイックスタート (Phase I)
 ├── CLAUDE.md                      ← このファイル（現状仕様 + future scope）
 ├── CHANGELOG.md                   ← ユーザー可視変更ログ
 ├── docs/
@@ -27,6 +28,9 @@ pokerapp/
 │   ├── worklog/                   ← タスク単位の作業ログ
 │   ├── templates/                 ← adr / issue / worklog テンプレート
 │   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures; player + hand/action freeze済, session/seat/hand_ref は S2 core 実装済・schema draft)
+│   ├── installation.md            ← エンドユーザー: インストール手順 (Phase I)
+│   ├── usage.md                   ← エンドユーザー: 使い方・読み上げ語彙・設定 (Phase I)
+│   ├── troubleshooting.md         ← エンドユーザー: 困りごと対処 (Phase I)
 │   └── decision-log.md            ← ADR / 主要 issue の索引
 ├── sprc_v4.docx                   ← 仕様書（要件定義）
 ├── claude_v4.docx                 ← 旧仕様書（参考）
