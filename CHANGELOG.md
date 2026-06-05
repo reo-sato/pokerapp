@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+### Added (Phase F part 1 — 決定的 replay ハーネス + 最初の golden fixtures / F1, v1 リリーストラック R4)
+
+- **決定的 replay ハーネス**（v1 issue #8 / Epic #4, ADR-0011）:
+  - `integration/replay.py`（`load_events` / `replay_events` / `replay_fixture`）+ CLI `tools/replay_hand.py`。
+    記録済み `events.jsonl`（R1 sidecar）を live と同じ `IntegrationThread` の per-event 処理に **timestamp
+    昇順**で通し `HandSummary` を再構築する。
+  - `integration/engine.py` に **clock 注入**（`IntegrationThread(clock=..., on_hand=...)`、additive）。
+    `_now_iso` を `datetime.fromtimestamp(self._clock())` に、`_expire_buffers` を `self._clock()` に変更。
+    **既定 `time.time` で live は完全不変**。
+  - **golden fixtures**: `tests/fixtures/reconstruction/<case>/{setup.json, events.jsonl, expected_hand.json}`。
+    D1/D2a で既に正しく再構築できる **2 ケースを緑で固定**: `check-facing-bet`（非合法 check→call+review）/
+    `call-amount-from-state`（heard 9999 無視→engine の call 額 200）。残り 3 ケース（`silent-fold` /
+    `out-of-turn-rfid`=D2b、`unequal-allin`=F3）は実装と同じ増分で追加（skip で明示）。
+  - **round-trip 決定性**（DoD #3）: 同一 events.jsonl を 2 回 replay → 完全一致を `tests/test_reconstruction.py`
+    で検証。fixtures は `reconstruction_event` schema 適合も確認。
+  - tests: `tests/test_reconstruction.py`（7 + pending 3 skip）。**全 255 passed, 3 skipped**（clock 既定で
+    既存テスト回帰なし）。
+
 ### Added (Phase D part 3 — rules-aware ライブ結線 / D2a, v1 リリーストラック R3)
 
 - **rules-aware 経路（pokerkit）に `apply_corrections` をライブ結線 + actor 競合検出**（v1 issue #7 /

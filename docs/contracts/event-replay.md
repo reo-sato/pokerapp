@@ -68,7 +68,15 @@ fixtures-as-oracle（他層が既に持つ規律）が付く。
 
 ## 4. replay（決定的 re-runner）と決定性の条件
 
-`tools/replay_hand.py`（planned）が `*.events.jsonl` を読み、live と **同一の**再構築ロジックへイベントを
+> **実装状況: F1（#8）で実装済** — `integration/replay.py`（`load_events` / `replay_events` /
+> `replay_fixture`）+ CLI `tools/replay_hand.py`。clock は `IntegrationThread(clock=...)` で注入
+> （既定 `time.time` で live 不変、`engine.py` の `_now_iso` は `datetime.fromtimestamp(self._clock())`）。
+> 設計判断（**ADR-0011**）: threaded `run()` は回さず、**timestamp 昇順の同期 driver** が
+> `_handle_audio_event` / `_process_rfid_event` / camera buffer / `_expire_buffers` を再利用する。
+> 注意（timezone）: `datetime.fromtimestamp` は local tz のため、golden 比較は wall-clock 由来
+> （`started_at`/`ended_at`/`actions[].timestamp`）を正規化して machine 非依存にする（§5）。
+
+`integration/replay.py` が `*.events.jsonl` を読み、live と **同一の**再構築ロジックへイベントを
 注入して `HandSummary` を再生成する。`replay(record(stream)) == live 結果` を保証するための条件:
 
 1. **timestamp は event 由来**。engine に **clock source を注入**する:
@@ -92,21 +100,26 @@ fixtures-as-oracle（他層が既に持つ規律）が付く。
 
 ```
 tests/fixtures/reconstruction/<case>/
+  ├── setup.json          ← backend / blinds / players（replay 初期状態。F1 で追加）
   ├── events.jsonl        ← reconstruction_event 列（§3 schema 準拠）
-  └── expected_hand.json  ← 期待 HandSummary.to_dict()（hand schema, hand-reconstruction.md §7 で検証）
+  └── expected_hand.json  ← 期待 HandSummary.to_dict() を正規化（timestamp 除去・confidence 丸め）
 ```
 
-`tests/test_reconstruction.py`（`tests/test_contracts.py` 流）が各 case で replayer を回し、出力
-`HandSummary.to_dict()` を `expected_hand.json` と突き合わせ、`hand` schema で検証する。**既知バグをそのまま
-回帰ケース**に採る（ADR-0009 由来）:
+`tests/test_reconstruction.py`（`tests/test_contracts.py` 流）が各 case で `replay_fixture` を回し、出力
+`HandSummary.to_dict()` を `expected_hand.json` と突き合わせる（+ round-trip 決定性 = 同一入力 2 回 replay
+の完全一致）。**既知バグをそのまま回帰ケース**に採る（ADR-0009 由来）。**status は F1 時点**:
 
-| case | 入力の要点 | 期待（現状バグ → 修正後） |
-|---|---|---|
-| `check-facing-bet` | ベットに直面して "チェック" | check 非合法 → call/fold へ修復（§ apply_corrections） |
-| `call-amount-from-state` | "コール 500"（実 call 額 300） | heard 500 無視 → engine の 300 |
-| `silent-fold` | 手番をまたいで次席が行動 | ラウンドロビン誤帰属 → 間の席を fold 合成し actor 正 |
-| `unequal-allin` | スタック差のある all-in | 素朴総和 pot → main/side pot 正 |
-| `out-of-turn-rfid` | RFID seat が prior と不一致 | prior 固定 → 物理証拠優先で actor 訂正 |
+| case | 入力の要点 | 期待（バグ → 修正後） | status |
+|---|---|---|---|
+| `check-facing-bet` | ベットに直面して "チェック" | check 非合法 → call へ修復 + needs_review | ✅ F1（緑） |
+| `call-amount-from-state` | "コール 9999"（実 call 額 200） | heard 無視 → engine の 200 | ✅ F1（緑） |
+| `silent-fold` | 手番をまたいで次席が行動 | ラウンドロビン誤帰属 → 間の席を fold 合成し actor 正 | ⏳ D2b |
+| `out-of-turn-rfid` | RFID seat が prior と不一致 | prior 固定 → 物理証拠優先で actor 訂正 | ⏳ D2b |
+| `unequal-allin` | スタック差のある all-in | 素朴総和 pot → main/side pot 正 | ⏳ F3 |
+
+> F1 は **D1/D2a で既に正しく再構築できる 2 ケースを緑で固定**し、残り 3 ケースは実装と同じ増分
+> （D2b / F3）で fixtures を authoring する（投機的 expected を先に作らない）。`test_reconstruction.py` の
+> `PENDING_CASES` に skip で明示。
 
 さらに **code↔contract** テスト: `HandSummary(...).to_dict()` / `ActionRecord(...).to_dict()` が
 `hand` / `action` schema を通ること（`test_contracts.py:65` `test_core_player_matches_contract` の前例）。

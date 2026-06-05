@@ -215,7 +215,9 @@ ADR-0006、実装上の判断は ADR-0007。**hand logger とは未接続**（�
 | **session + hand-based seating (S2) core** | ✅ 実装済 | `core/session.py`, `core/session_repository.py`（hand logger とは未接続, § Session & Seating 参照） |
 | **event 記録 sidecar (R1)** | ✅ 実装済 | `output/event_recorder.py`（opt-in `recording.enabled`, 挙動不変, ADR-0010, `reconstruction_event` schema） |
 | **pokerkit game-state backend (R2)** | ✅ 実装済 (preview) | `core/poker_engine.py`（`engine.backend=pokerkit`, default-off, ADR-0009。actor/合法手/side-pot 権威。live 既定は legacy で不変） |
-| ベッティングステート / actor 推定 | ❌ 未実装 | 設計提案 R0: ADR-0009/0010, `docs/contracts/hand-reconstruction.md`（pokerkit を live ルール権威に） |
+| **rules-aware ライブ結線 (R3 D1/D2a)** | ✅ 実装済 (preview) | `audio/recognizer.py:apply_corrections`（合法手射影）+ `integration/engine.py:_handle_rules_aware_action`（pokerkit 経路で合法手射影・明示席 conflict 検出）。legacy 既定は不変。silent-fold 合成(D2b)/派生 confidence(D3) は後続 |
+| **決定的 replay harness (R4 F1)** | ✅ 実装済 | `integration/replay.py` + `tools/replay_hand.py`（clock 注入で決定的、ADR-0011）。golden fixtures: `tests/fixtures/reconstruction/`（green 2 + pending 3）。round-trip 決定性 = `tests/test_reconstruction.py` |
+| ベッティングステート / silent-fold 合成 / 派生 confidence | 🔨 一部 | D1/D2a 済（上記）。残 R3: silent-fold 合成(D2b)・派生 confidence(D3)。較正は F2/F3 の golden fixtures（ADR-0009/0010/0011, `docs/contracts/hand-reconstruction.md`） |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0009） |
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
