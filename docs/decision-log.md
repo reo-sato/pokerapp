@@ -34,6 +34,7 @@
 | ADR-0009 | Rules-aware hand reconstruction — pokerkit live authority + state estimation & fusion | Accepted | 2026-06-03 | reconstruct / core+integration | `docs/adr/0009-pokerkit-live-rules-authority.md` | R2 engine 実装済(default-off)。R3 planned。関連: ADR-0010 / ISSUE-0008(Fixed) / ISSUE-0009 |
 | ADR-0010 | Contract-first hand core via deterministic record/replay | Accepted | 2026-06-03 | reconstruct / contracts | `docs/adr/0010-contract-first-hand-core-record-replay.md` | 関連: ADR-0008 / ADR-0009 / ISSUE-0010 / ISSUE-0011 |
 | ADR-0011 | Deterministic replay harness (sync timestamp-ordered driver + clock injection) | Accepted | 2026-06-05 | reconstruct / replay (F1) | `docs/adr/0011-deterministic-replay-harness.md` | 関連: ADR-0010 / ADR-0009 / ISSUE-0010 |
+| ADR-0012 | pokerkit を live 既定 backend に切替（legacy は rollback, pokerkit pin） | Accepted | 2026-06-05 | reconstruct / engine (G) | `docs/adr/0012-pokerkit-live-default.md` | 関連: ADR-0009。実機 E2E は Phase H |
 
 <!--
 Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時点で空番。

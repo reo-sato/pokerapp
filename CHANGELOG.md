@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+### Changed (Phase G — pokerkit を live 既定 backend に切替 / v1 リリーストラック R)
+
+- **live 既定 game-state backend を `legacy` → `pokerkit` に切替**（v1 issue #9 / Epic #4, ADR-0012）:
+  - `config_default.json`: `engine.backend = "pokerkit"`。新規インストール（config.json 不在 →
+    config_default をコピー）は **rules-aware 再構築**（actor 推定 / 合法手射影 / silent-fold / side-pot /
+    派生 confidence）が既定で効く。
+  - `requirements.txt`: `pokerkit>=0.7.0,<0.8.0` に pin（golden fixtures が pokerkit 0.7.x 挙動で凍結のため）。
+  - **`legacy` は rollback として維持**（`engine.backend="legacy"` で従来 `GameStateManager`、挙動不変）。
+    既存 config.json は legacy のまま（破壊的変更にしない）。
+  - 切替の必要条件 = golden fixtures 5 ケース全緑（達成済）。**実機 E2E（音声→JSON/PHH）は Phase H**。
+  - tests: `tests/test_phase_g_default.py`（既定 pokerkit / legacy rollback / 構築）。**全 286 passed, 0 skipped**
+    （テストは明示 backend 構築のため既定切替の影響なし = 回帰なし）。
+
+### Clarified (Phase F — F3c: PHH の check/call は標準どおり統一)
+
+- **PHH の `check`/`call` は標準トークン `cc`（check-or-call）で統一が正**と確認（ロードマップ F3c の「区別」は
+  PHH 非標準で pokerkit が parse 不能になるため**変更しない**）。`output/phh_exporter.py` に意図コメントを追加。
+  check/call の区別は JSON ログの `action` フィールドに保持される（情報欠落なし）。
+
 ### Added (Phase F part 3 — hand / action schema freeze / F3b, v1 リリーストラック R5。ISSUE-0011 Fixed)
 
 - **`hand` / `action` schema を `1.0` で freeze**（v1 issue #8 / Epic #4, ADR-0010 R5, ISSUE-0011）:
