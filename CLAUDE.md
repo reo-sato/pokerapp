@@ -158,7 +158,11 @@ hand logger とは **完全に別画面** の player 管理機能。session / le
 
 player registry の上に重なる **session レイヤ + hand-based seating** の core 最小実装
 （CLAUDE.md § Future Scope の S2 を昇格）。契約は `docs/contracts/session-seating.md`（draft）/
-ADR-0006、実装上の判断は ADR-0007。**hand logger とは未接続**（独立した別ストア・別 namespace）。
+ADR-0006、実装上の判断は ADR-0007。**hand logger とは config フラグ `session_layer.enabled`（既定 off）で
+write-through 接続可**（E1+E2-core, ADR-0008 Pattern A: `IntegrationThread` に `session_repo`/`seat_player_map`
+を DI し、hand 開始で `assign_seat`・確定時に `HandSummary.players[i].player_id` を additive 埋め込み）。
+**off では従来どおり独立**（別ストア・別 namespace、player_id キーも付けない）。seat 選択 GUI / main.py 結線は
+後続（E3, ISSUE-0006）。
 
 ### スコープ（現時点）
 
@@ -215,7 +219,8 @@ ADR-0006、実装上の判断は ADR-0007。**hand logger とは未接続**（�
 | PHH エクスポート | ✅ 実装済 | `output/phh_exporter.py` |
 | GUI ダッシュボード | 🔨 部分実装 | `gui/dashboard.py` |
 | **player registry (S1)** | ✅ 実装済 | `core/player.py`, `core/player_repository.py`, `gui/player_registry.py` |
-| **session + hand-based seating (S2) core** | ✅ 実装済 | `core/session.py`, `core/session_repository.py`（hand logger とは未接続, § Session & Seating 参照） |
+| **session + hand-based seating (S2) core** | ✅ 実装済 | `core/session.py`, `core/session_repository.py`（§ Session & Seating 参照） |
+| **hand logger × session 統合 (S2.x E1+E2-core)** | ✅ 実装済 (preview) | `integration/engine.py`（`session_repo`/`seat_player_map` DI、`assign_seat` write-through + `player_id` additive 埋め込み、`session_layer.enabled` 既定 off で挙動不変, ADR-0008）。seat 選択 GUI / main.py 結線は後続（E3, ISSUE-0006） |
 | **event 記録 sidecar (R1)** | ✅ 実装済 | `output/event_recorder.py`（opt-in `recording.enabled`, 挙動不変, ADR-0010, `reconstruction_event` schema） |
 | **pokerkit game-state backend (R2) + live 既定切替 (G)** | ✅ 実装済 | `core/poker_engine.py`（`engine.backend`, ADR-0009/0012。actor/合法手/side-pot 権威）。**Phase G で live 既定を `pokerkit` に切替**（`config_default.json`、`requirements.txt` で `pokerkit>=0.7,<0.8` pin）。`legacy` は config で rollback 可。実機 E2E は Phase H |
 | **rules-aware ライブ結線 + silent-fold 合成 (R3 D1/D2a/D2b)** | ✅ 実装済 (preview) | `audio/recognizer.py:apply_corrections`（合法手射影）+ `integration/engine.py:_handle_rules_aware_action`/`_resolve_actor`（合法手射影・actor 推定[RFID>明示席]・`fold_through` で silent-fold 合成 cap=2/atomic・合成 fold 記録）。legacy 既定は不変。派生 confidence(D3) は後続 |

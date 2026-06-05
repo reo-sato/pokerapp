@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+### Added (Phase E part 1 — hand logger × session 統合 write-through / E1+E2-core, v1 リリーストラック S2.x)
+
+- **hand logger を S2 session レイヤに write-through 接続**（v1 issue #10 / Epic #4, ADR-0008 Pattern A）:
+  - `config_default.json`: `session_layer.enabled`（既定 `false`）を追加。
+  - `integration/engine.py:IntegrationThread`: `session_repo` / `seat_player_map`（seat→player_id）を
+    **additive な DI** で受け取る（両方揃ったときのみ有効＝`_session_layer_active`）。
+    - `_start_new_hand`: 有効時に `SessionRepository.assign_seat` を hand 単位でバッチ呼び出し
+      （write-through）。個々の失敗は当該ハンドを止めず log に留める。
+    - `_finalize_hand`: `resolve_seat_map_for_hand` で当該 hand の seat→player_id を解決し、
+      **`HandSummary.players[i].player_id` を additive 埋め込み**（接続時のみキー追加、未割当 seat は None）。
+  - **非接続時は従来どおり**（`session_repo`/`seat_player_map` 無し → `player_id` キーを足さない＝byte 互換、
+    rollback path）。`GameStateManager` / `JsonWriter` / `PHHExporter` は不変（PHH に player_id は載せない）。
+  - 出力は F3b で freeze した `hand` schema（`players[i].player_id` は UUID hex pattern・optional）に適合。
+  - tests: `tests/test_phase_e_session_integration.py`（接続: assign_seat 永続 + player_id 埋め込み +
+    schema 適合 / 非接続: キー不在）。**全 289 passed, 0 skipped**。
+  - 残（後続）: `main.py` の session 選択 step（E2 UX）と **seat→player_id 選択 GUI**（E3, `gui/dashboard.py`,
+    ISSUE-0006）。本増分は core 結線（DI + write-through）に留め、live 有効化 UX は分離。
+
 ### Added (Phase H part 1 — パッケージング + CI / H1+H4, v1 リリーストラック)
 
 - **パッケージング基盤（pyproject.toml）と CI（GitHub Actions）**（v1 issue #11 / Epic #4, ロードマップ H1/H4）:
