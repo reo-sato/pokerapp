@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from core.constants import STREET_ORDER
+from core.engine_types import LegalContext
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,29 @@ class GameStateManager:
 
     def get_active_seats(self) -> list[int]:
         return list(self._active_seats)
+
+    # ――― rules-aware 境界（additive stub, ADR-0009 §2）―――
+    # legacy はポーカールール状態機械を持たないため rules-aware ではない。
+    # IntegrationThread は空の legal_context を以て legacy 経路（従来挙動）へ分岐する。
+
+    def legal_context(self) -> LegalContext:
+        """legacy は合法手プリオールを持たない（空コンテキスト = rules-aware でない印）。"""
+        return LegalContext(
+            actor_seat=None, legal_actions=frozenset(),
+            amount_to_call=0, min_raise=0, max_raise=0,
+        )
+
+    def is_legal_actor(self, seat: int) -> bool:
+        return bool(self._active_seats) and seat == self.get_current_player()
+
+    def fold_through(self, until_seat: int) -> None:
+        raise NotImplementedError("fold_through is not supported by the legacy backend")
+
+    def pots(self) -> list[dict]:
+        return []  # legacy はサイドポットを扱わない
+
+    def committed(self, seat: int) -> int:
+        return 0  # legacy はストリート別コミット額を追跡しない
 
     # ――― 手動修正 ―――
 

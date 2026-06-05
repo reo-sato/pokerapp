@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+### Added (Phase D part 2 — engine 境界の rules-aware メソッド / D0, v1 リリーストラック R3)
+
+- **`PokerEngine` 境界に rules-aware の additive メソッドを追加**（v1 issue #7 / Epic #4, ADR-0009 §2）:
+  `legal_context` / `is_legal_actor` / `pots` / `committed` / **`fold_through`** を Protocol に追加し、
+  両 backend で conform させた。
+  - `core/poker_engine.py`: `PokerkitGameState.fold_through(until_seat)` を**新規実装**（現 actor から
+    until_seat 手前までを silent fold 合成 = ディーラー未宣言 fold の表現。到達不能は ValueError。
+    上限は呼び出し側=actor 推定が距離で判断, ISSUE-0009）。`legal_context`/`pots`/`committed` は R2 で実装済。
+  - `core/engine_types.py`（新規）: `LegalContext` を中立モジュールへ移設（循環 import 回避）。
+    `core.poker_engine.LegalContext` として後方互換に再エクスポート。
+  - `core/game_state.py`（legacy）: rules-aware でない stub を追加（空 `legal_context` = legacy 印 /
+    `fold_through` は `NotImplementedError` / `pots`=[] / `committed`=0）。IntegrationThread は空 context を
+    以て legacy 経路（従来挙動）へ分岐する設計（結線は D2）。
+  - **ライブ未結線＝挙動不変**。actor 推定の結線（D2）は後続 PR。
+  - tests: `tests/test_phase_d0_engine.py`（pokerkit 部は importorskip、legacy stub は常時実行）。
+    pokerkit 0.7.4 を導入して実走 **243 passed**（未導入時は pokerkit 部 skip）。
+
 ### Added (Phase D part 1 — apply_corrections, v1 リリーストラック R3)
 
 - **合法手への射影 `apply_corrections()` を実装**（v1 issue #7 / Epic #4, ADR-0009 §5）:

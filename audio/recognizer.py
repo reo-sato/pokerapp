@@ -16,7 +16,7 @@ from core.constants import (
 from core.events import AudioEvent
 
 if TYPE_CHECKING:
-    from core.poker_engine import LegalContext
+    from core.engine_types import LegalContext
 
 logger = logging.getLogger(__name__)
 

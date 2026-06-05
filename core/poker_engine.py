@@ -16,24 +16,16 @@ GameStateManager と差し替え可能にする PokerEngine Protocol / factory�
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Optional, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from core.constants import STREET_ORDER
+from core.engine_types import LegalContext
 from core.game_state import GameStateManager, PlayerState, Street
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class LegalContext:
-    """ある時点の合法手プリオール（推定・訂正が読む, ADR-0009）。"""
-
-    actor_seat: Optional[int]
-    legal_actions: frozenset[str]   # subset of {"fold","check","call","bet","raise","allin"}
-    amount_to_call: int
-    min_raise: int                  # "to" total（raise 不可なら 0）
-    max_raise: int                  # "to" total（= all-in 額。raise 不可なら 0）
+# LegalContext は core.engine_types に移設（循環 import 回避）。後方互換のため再エクスポート。
+__all__ = ["LegalContext", "PokerEngine", "PokerkitGameState", "create_game_state"]
 
 
 @runtime_checkable
@@ -51,6 +43,13 @@ class PokerEngine(Protocol):
     def get_active_seats(self) -> list[int]: ...
     def update_stack(self, seat: int, new_stack: int) -> None: ...
     def rebuy(self, seat: int, amount: int) -> None: ...
+
+    # additive（R3 推定/訂正が読む, ADR-0009 §2）。legacy は rules-aware でない stub を返す。
+    def legal_context(self) -> LegalContext: ...
+    def is_legal_actor(self, seat: int) -> bool: ...
+    def fold_through(self, until_seat: int) -> None: ...
+    def pots(self) -> list[dict]: ...
+    def committed(self, seat: int) -> int: ...
 
     @property
     def hand_id(self) -> int: ...
@@ -233,6 +232,33 @@ class PokerkitGameState:
             and st.actor_index is not None
             and self._idx_to_seat.get(st.actor_index) == seat
         )
+
+    def fold_through(self, until_seat: int) -> None:
+        """現 actor から until_seat の手前までの席を silent fold 合成して同期する（ADR-0009 §4）。
+
+        ディーラー未宣言の fold（最頻のズレ）を、物理/明示証拠が指す actor へ追いつくために
+        中間席を fold して表現する。until_seat に到達できない（途中で手番が消える/ fold 不可）
+        場合は ValueError（呼び出し側は prior 維持 + needs_review）。合成席数の上限は呼び出し側
+        （actor 推定, ISSUE-0009）が距離で判断する。
+        """
+        st = self._state
+        if st is None or not self._hand_active:
+            raise ValueError("No active hand")
+        if until_seat not in self._players:
+            raise ValueError(f"Unknown seat: {until_seat}")
+        guard = 0
+        while True:
+            if st.actor_index is None:
+                raise ValueError("Hand ended before reaching until_seat")
+            cur = self._idx_to_seat[st.actor_index]
+            if cur == until_seat:
+                return
+            if not st.can_fold():
+                raise ValueError(f"Cannot fold seat {cur} to reach {until_seat}")
+            st.fold()
+            guard += 1
+            if guard > len(self._seats):
+                raise ValueError("fold_through exceeded table size (no convergence)")
 
     def pots(self) -> list[dict]:
         """最後の end_hand 時点の main/side pot スナップショット（HandSummary.pots 用）。"""
