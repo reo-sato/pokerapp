@@ -94,6 +94,8 @@ class IntegrationThread(threading.Thread):
         on_rfid_card: Optional[Callable[[RFIDEvent], None]] = None,
         stop_event: Optional[threading.Event] = None,
         event_recorder: Optional[EventRecorder] = None,
+        on_hand: Optional[Callable[["HandSummary"], None]] = None,
+        clock: Optional[Callable[[], float]] = None,
     ) -> None:
         """
         Args:
@@ -101,6 +103,9 @@ class IntegrationThread(threading.Thread):
                           _update_queue 経由で処理すること)。スレッド安全に設計すること。
             event_recorder: 生イベントを sidecar に記録する recorder (R1, ADR-0010)。
                             None なら記録しない (= 挙動不変)。解釈前に呼ばれる。
+            on_hand: ハンド確定時に HandSummary を渡すコールバック (replay/テスト用、additive)。
+            clock: epoch 秒を返す時計 (既定 time.time)。決定的 replay 用に注入する (F1)。
+                   ActionRecord/HandSummary の timestamp と buffer 期限はこの時計に従う。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -112,6 +117,8 @@ class IntegrationThread(threading.Thread):
         self._on_rfid_card = on_rfid_card
         self._stop_event = stop_event or threading.Event()
         self._event_recorder = event_recorder
+        self._on_hand = on_hand
+        self._clock: Callable[[], float] = clock or time.time
 
         # センサーイベントのバッファ
         self._camera_buffer: list[CameraEvent] = []
@@ -119,7 +126,7 @@ class IntegrationThread(threading.Thread):
 
         # ハンド内の一時バッファ
         self._current_actions: list[ActionRecord] = []
-        self._hand_started_at: str = _now_iso()
+        self._hand_started_at: str = self._now_iso()
         self._stack_start: dict[int, int] = {}
 
         # RFID カード情報
@@ -282,8 +289,12 @@ class IntegrationThread(threading.Thread):
                 target_street, gs.street,
             )
 
+    def _now_iso(self) -> str:
+        """注入された時計 (既定 time.time) を ISO 文字列に。決定的 replay の clock 源 (F1)。"""
+        return datetime.fromtimestamp(self._clock()).isoformat(timespec="milliseconds")
+
     def _expire_buffers(self) -> None:
-        cutoff = time.time() - CAMERA_BUFFER_TTL
+        cutoff = self._clock() - CAMERA_BUFFER_TTL
         self._camera_buffer = [e for e in self._camera_buffer if e.timestamp >= cutoff]
         self._rfid_seat_buffer = [e for e in self._rfid_seat_buffer if e.timestamp >= cutoff]
 
@@ -380,7 +391,7 @@ class IntegrationThread(threading.Thread):
 
         record = ActionRecord(
             hand_id=gs.hand_id,
-            timestamp=_now_iso(),
+            timestamp=self._now_iso(),
             street=gs.street,
             seat=seat,
             player_name=gs.get_player_name(seat),
@@ -444,7 +455,7 @@ class IntegrationThread(threading.Thread):
 
         record = ActionRecord(
             hand_id=gs.hand_id,
-            timestamp=_now_iso(),
+            timestamp=self._now_iso(),
             street=gs.street,
             seat=actor,
             player_name=gs.get_player_name(actor),
@@ -473,7 +484,7 @@ class IntegrationThread(threading.Thread):
         gs = self._game_state
         gs.new_hand()
         self._current_actions = []
-        self._hand_started_at = _now_iso()
+        self._hand_started_at = self._now_iso()
         self._stack_start = gs.get_stacks()
         self._board_cards = []
         self._board_positions = {}
@@ -511,7 +522,7 @@ class IntegrationThread(threading.Thread):
             hand_id=gs.hand_id,
             session_id=self._json_writer._session_id,
             started_at=self._hand_started_at,
-            ended_at=_now_iso(),
+            ended_at=self._now_iso(),
             blinds={"sb": gs._sb, "bb": gs._bb},  # noqa: SLF001
             board=list(self._board_cards),
             board_source=self._board_source,
@@ -529,6 +540,8 @@ class IntegrationThread(threading.Thread):
         )
 
         self._json_writer.append_hand_summary(summary)
+        if self._on_hand:
+            self._on_hand(summary)
         logger.info("Hand %d finalized. Winner: seat %d", gs.hand_id, winner_seat)
         self._current_actions = []
         # _current_actions と対称にリセットし、stale フラグが次のサマリーへ
@@ -537,9 +550,6 @@ class IntegrationThread(threading.Thread):
 
 
 # ――― ユーティリティ ―――
-
-def _now_iso() -> str:
-    return datetime.now().isoformat(timespec="milliseconds")
 
 
 def _extract_seat_from_text(text: str) -> Optional[int]:
