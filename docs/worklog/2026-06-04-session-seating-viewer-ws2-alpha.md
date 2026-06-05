@@ -85,7 +85,7 @@ None observed.
 - mock customtkinter 下で `winfo_children()` が iterable でない問題 → detail widget を
   `self._detail_widgets` で明示追跡して破棄する方式に変更（実装時に対処、テスト緑）。
 
-## 今後の拡張余地（ISSUE-0008 に退避）
+## 今後の拡張余地（ISSUE-0012 に退避）
 
 - [ ] filter / search / sort、live auto-refresh、hand assignments の集約表示、export。
 - [ ] mobile / web viewer（WS3）、ledger / points / settlement との統合 view。
@@ -96,7 +96,7 @@ None observed.
 
 ## Related Issues
 
-- `docs/issues/0008-session-viewer-enhancements.md`（新規, viewer 拡張の risk register）。
+- `docs/issues/0012-session-viewer-enhancements.md`（新規, viewer 拡張の risk register）。
 - ISSUE-0006 / 0007（seat UX / legacy log、本タスクでは不変）。
 
 ## Related Commits

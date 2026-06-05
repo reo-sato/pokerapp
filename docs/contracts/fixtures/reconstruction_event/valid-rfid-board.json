@@ -1,0 +1,11 @@
+{
+  "type": "rfid",
+  "timestamp": 1717400003.0,
+  "tag_id": "04:11:22:33:44:55",
+  "card": "Kc",
+  "reader_id": "board_1",
+  "role": "board",
+  "seat": null,
+  "board_index": 1,
+  "raw_tag_id": "041122334455"
+}

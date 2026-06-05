@@ -6,7 +6,7 @@
 
 ## [Unreleased]
 
-### Removed (camera / vision — sprc_v4.docx 準拠の廃止, ADR-0009)
+### Removed (camera / vision — sprc_v4.docx 準拠の廃止, ADR-0011)
 
 - **カメラ入力経路を全面削除**し、RFID + 音声の 2 ソース構成に確定（sprc_v4.docx が
   「カメラ廃止」を明記。これまで `vision/` は legacy として残置されていた）。**音声 + RFID の
@@ -24,7 +24,7 @@
   - tests: `test_phase7.py` / `test_integration.py` を 2 ソースへ更新（camera 照合テストを除去、
     audio 単独 confidence を維持）。`test_gui` / `test_logger` / `test_phh_exporter` の source dict から
     `camera` キーを除去。全 199 テスト green。
-  - **ADR-0009** (Accepted): sprc_v4.docx 準拠で camera/vision を削除する判断。
+  - **ADR-0011** (Accepted): sprc_v4.docx 準拠で camera/vision を削除する判断。
 
 ### Added (WS2-α — Session / Seating Viewer, desktop read-only)
 
@@ -41,7 +41,7 @@
     Toplevel で開く（`session_repo` を optional DI 追加。flag off / 既存 UX は不変）。
   - `tests/test_session_viewer_gui.py`（新規）: pure ヘルパ / empty state / 自動選択 / seating 解決 /
     unknown player / refresh 再読込 / read-only 性。
-  - Out of scope（ISSUE-0008）: 作成・編集・削除、filter/search/sort、live auto-refresh、export、
+  - Out of scope（ISSUE-0012）: 作成・編集・削除、filter/search/sort、live auto-refresh、export、
     mobile/web、ledger 連携。
 
 ### Added (Phase 2.3 — seat selection UX, desktop minimal)
@@ -81,6 +81,73 @@
     OFF（SessionRepository 不使用・キー集合互換）/ assign_seat 失敗時の耐障害性。
   - seat 選択 UX（ISSUE-0006）は未実装のため `main.py` の seating は現状空。HandSummary schema の
     `1.0` freeze は引き続き保留（ISSUE-0005）。
+
+### Added (Phase R2 — pokerkit game-state backend, preview / default-off)
+
+- **pokerkit を live ルール権威にした game-state backend**（ADR-0009, **default-off の preview**）:
+  ノイジー入力からの正確な再構築のため、actor 順（ポジション順）/ 合法手集合 / amount_to_call / min-raise /
+  **side-pot** を pokerkit に委ねる backend を追加。**既定 `legacy` で挙動不変**、`config.engine.backend=pokerkit`
+  で opt-in。
+  - `core/poker_engine.py`（新規）: `PokerEngine` Protocol（legacy/pokerkit 共通 I/F）＋ `PokerkitGameState`
+    ＋ `create_game_state` factory。pokerkit は **遅延 import**（未導入でも legacy は動く）。announced winner を
+    手動 push（pokerkit auto-showdown はダミーカードのため無効化）、side-pot スナップショット、seat↔index 固定。
+  - `main.py`: `_make_game_state(cfg, ...)` で backend 選択（CLI/GUI 両経路）。`config_default.json` に
+    `engine.backend: "legacy"` を追加。
+  - **ISSUE-0008（Fixed）**: pokerkit 0.7.4 で必要 API（actor / 合法手 / min-raise / amount_to_call / side-pot の
+    incremental 露出、不正額の `ValueError`、`HOLE_DEALING` でカード不要駆動）を spike で実機確認。ADR-0009 の
+    gate 解除。**ADR-0009 を Accepted**（R2 engine 実装済 / R3 は planned）。
+  - tests: `tests/test_poker_engine.py`（11: actor 順 / legal_context / street 自動進行 / 不正・非手番拒否 /
+    side-pot / winner award / rebuy / **allin ショートスタック call-all-in**）。**全 198 passed**。
+  - review fix: `apply_action("allin")` を「raise 可なら max へ raise、不可だが call 可なら call-all-in」に
+    分離（レイズ不可なショートスタックの「オールイン」での pokerkit state desync を防止）。
+  - 既知の差（legacy より正確側・preview）: ブラインド自動 post、合法手のみ受理（raw ASR の射影は R3）、
+    street は betting 完了で自動進行。**live 既定動作（legacy）は不変**。
+
+### Added (Phase R1 — event recording sidecar)
+
+- **生センサーイベントの append-only sidecar 記録**（ADR-0010, record-only 先行実装）:
+  `IntegrationThread` が**解釈する前**に各 `AudioEvent` / `RFIDEvent` / `CameraEvent` を
+  `reconstruction_event` envelope（camera frame 除外）として `logs/{session_id}.events.jsonl` へ 1 行追記する。
+  再構築ロジックは不変で、**recorder 未指定（既定）なら挙動完全不変**。
+  - `output/event_recorder.py`（新規）: `EventRecorder` ＋ `event_to_envelope()`。append-only・スレッド安全・
+    I/O 失敗で再構築を止めない。
+  - `integration/engine.py`: `IntegrationThread(event_recorder=...)` を additive 追加。3 つの dequeue 点
+    （audio get / camera drain / rfid drain）で解釈前に `_record()`。default None = 従来動作。
+  - `main.py`: `config.recording.enabled`（既定 false, opt-in）で `EventRecorder` を構築し CLI / GUI 両経路で注入。
+    `config_default.json` に `recording.enabled: false` を追加。
+  - `docs/contracts/schemas/reconstruction_event.schema.json`（v0.1, `additionalProperties:false`）＋
+    `fixtures/reconstruction_event/`（canonical / valid-* / invalid-*）。`tests/test_contracts.py` の `_MODELS` に登録。
+  - tests: `tests/test_event_recorder.py`（envelope / JSONL / code↔contract）、
+    `tests/test_integration_recording.py`（engine→recorder e2e / recorder 未指定で sidecar 無し）。
+    **全 187 passed**（`pytest tests/ -q --ignore=tests/test_vision.py`）。
+  - **ADR-0010** を Accepted に更新（R1 実装済。R4/R5 = hand/action freeze・replayer は planned）。
+
+### Docs / Planning (Phase R0 — rules-aware reconstruction & contract-first hand core, 設計提案)
+
+- **ハンド再構築エンジンと contract-first hand core の設計提案**（**docs-only, `.py` / schema / fixtures は
+  未変更**）: 目的（ノイジーな ASR＋RFID からの正確な再構築）と思想（contract-first / fixtures-as-oracle）の
+  両面のギャップに対し、再構築を「ルール制約付き状態推定」として捉え直し、既存依存 pokerkit を live
+  ルール権威に据える方針を提案。
+  - **ADR-0009** (Proposed): `pokerkit.State` を live ルール権威として採用し、その合法手制約で再構築する
+    （ルール制約付き状態推定）。現 `GameStateManager` の安定 I/F 背後で `engine.backend` フラグ選択、raw ASR を
+    直接流さない「境界での推定」、出力は additive。actor 推定（手番 prior × sensor ＋ silent-fold 自動合成）、
+    `apply_corrections()`（合法手制約・call/check の状態一意化・amount スナップ）、派生 confidence（8 行固定
+    テーブルの置換）と `needs_review` 条件の明文化。`pokerkit>=0.5.0` は宣言済みだが**未 import** である事実を
+    明記（`game_state.py` の Phase 3 TODO の具体化）。当初の engine / algorithm 2 案を 1 ADR に統合。
+  - **ADR-0010** (Proposed): hand core の contract 化（`hand`/`action`/`reconstruction_event`）と決定的
+    record/replay（append-only event sidecar、注入クロック、golden fixtures を core の oracle に）。ADR-0008
+    と整合し hand-logger immutability を維持。
+  - `docs/contracts/hand-reconstruction.md`（新規 draft）: `PokerEngine` interface 草案 / actor 推定 /
+    `apply_corrections` 修復表 / 派生 confidence / `hand`・`action` の inline schema sketch（freeze せず）。
+  - `docs/contracts/event-replay.md`（新規 draft）: record/replay harness / 決定性条件 / `reconstruction_event`
+    envelope sketch / golden-fixture レイアウトとテスト計画。
+  - **ISSUE-0008**（Open）pokerkit online API 実現性（ADR-0009 の gate）/ **ISSUE-0009**（Open）actor 競合・
+    silent-fold ポリシー / **ISSUE-0010**（Open）replay 決定性の記録境界 / **ISSUE-0011**（Open）hand/action
+    schema freeze blockers（ISSUE-0005 の hand core 版）。
+  - **decision-log.md** に ADR-0009/0010 と ISSUE-0008..0011 を登録。**CLAUDE.md** Future Scope に
+    rules-aware reconstruction の planned/proposed 行を追加。
+  - **実装は別タスク**（提案フェーズ R0）。段階導入順は R1 record-only → R2 pokerkit engine（flag）→
+    R3 actor/corrections/fusion → R4 contracts → R5 freeze + session 統合。
 
 ### Docs / Planning (Phase S2.x — hand logger × session integration strategy)
 

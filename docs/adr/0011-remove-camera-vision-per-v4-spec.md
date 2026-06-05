@@ -1,4 +1,4 @@
-# ADR-0009: Remove camera / vision input per sprc_v4.docx (2-source: RFID + audio)
+# ADR-0011: Remove camera / vision input per sprc_v4.docx (2-source: RFID + audio)
 
 ## Status
 

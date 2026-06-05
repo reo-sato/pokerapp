@@ -1,0 +1,9 @@
+{
+  "type": "audio",
+  "timestamp": 1717400000.512,
+  "action": "bet",
+  "amount": 500,
+  "raw_text": "シート3 ベット 500",
+  "seat": 3,
+  "confidence": 0.82
+}

@@ -34,6 +34,7 @@ from core.events import AudioEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
 from core.session_repository import SessionError, SessionRepository
+from output.event_recorder import EventRecorder
 from output.json_writer import JsonWriter
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ class IntegrationThread(threading.Thread):
         session_repo: Optional[SessionRepository] = None,
         session_id: Optional[str] = None,
         seating: Optional[dict[int, str]] = None,
+        event_recorder: Optional[EventRecorder] = None,
     ) -> None:
         """
         Args:
@@ -89,6 +91,8 @@ class IntegrationThread(threading.Thread):
             session_id:   session レイヤが採番した UUID4 hex（``session_repo`` と対で渡す）。
             seating:      ``seat_no -> player_id`` の初期 seating。実行中は GUI から
                           ``update_seating`` で差し替えられる（Phase 2.3 seat selection UX）。
+            event_recorder: 生イベントを sidecar に記録する recorder (R1, ADR-0010)。
+                            None なら記録しない (= 挙動不変)。解釈前に呼ばれる。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -98,6 +102,7 @@ class IntegrationThread(threading.Thread):
         self._on_action = on_action
         self._on_rfid_card = on_rfid_card
         self._stop_event = stop_event or threading.Event()
+        self._event_recorder = event_recorder
 
         # ――― S2 session レイヤ接続 (Phase 2.2, ADR-0008) ―――
         self._session_repo = session_repo
@@ -146,6 +151,11 @@ class IntegrationThread(threading.Thread):
         with self._seating_lock:
             return dict(self._seating)
 
+    def _record(self, event: AudioEvent | RFIDEvent) -> None:
+        """生イベントを sidecar に記録する (recorder 未設定なら no-op = 挙動不変)。解釈前に呼ぶ。"""
+        if self._event_recorder is not None:
+            self._event_recorder.record(event)
+
     def run(self) -> None:
         logger.info("IntegrationThread started")
         while not self._stop_event.is_set():
@@ -156,6 +166,8 @@ class IntegrationThread(threading.Thread):
             except queue.Empty:
                 self._expire_buffers()
                 continue
+
+            self._record(event)
 
             try:
                 self._handle_audio_event(event)
@@ -174,9 +186,10 @@ class IntegrationThread(threading.Thread):
         while True:
             try:
                 ev: RFIDEvent = self._rfid_queue.get_nowait()
-                self._process_rfid_event(ev)
             except queue.Empty:
                 break
+            self._record(ev)
+            self._process_rfid_event(ev)
 
     def _process_rfid_event(self, ev: RFIDEvent) -> None:
         """受信した RFIDEvent を役割に応じて振り分ける。"""

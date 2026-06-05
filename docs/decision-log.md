@@ -31,7 +31,9 @@
 | ADR-0006 | S2 session/seating contract boundary and hand_id cross-app reference               | Accepted | 2026-05-25 | contracts / shared-ids (S2) | `docs/adr/0006-s2-session-seating-contract-and-hand-id-cross-app-reference.md`                    | 関連: ADR-0003 / ISSUE-0004 |
 | ADR-0007 | S2 session layer persistence and session_id issuance                               | Accepted | 2026-05-25 | core / session (S2)         | `docs/adr/0007-s2-session-layer-persistence-and-id-issuance.md`                                   | 関連: ADR-0006 / ISSUE-0005 |
 | ADR-0008 | Hand logger × session/seating integration strategy (Phase 2.x)                     | Accepted | 2026-06-03 | hand logger × session (S2.x) | `docs/adr/0008-hand-logger-session-integration-strategy.md`                                       | 関連: ADR-0006 / ADR-0007 / ISSUE-0005 / 0006 / 0007 |
-| ADR-0009 | Remove camera / vision input per sprc_v4.docx (2-source: RFID + audio)              | Accepted | 2026-06-04 | hand logger / vision removal | `docs/adr/0009-remove-camera-vision-per-v4-spec.md`                                               | 関連: ADR-0003 / sprc_v4.docx |
+| ADR-0009 | Rules-aware hand reconstruction — pokerkit live authority + state estimation & fusion | Accepted | 2026-06-03 | reconstruct / core+integration | `docs/adr/0009-pokerkit-live-rules-authority.md` | R2 engine 実装済(default-off)。R3 planned。関連: ADR-0010 / ISSUE-0008(Fixed) / ISSUE-0009 |
+| ADR-0010 | Contract-first hand core via deterministic record/replay | Accepted | 2026-06-03 | reconstruct / contracts | `docs/adr/0010-contract-first-hand-core-record-replay.md` | 関連: ADR-0008 / ADR-0009 / ISSUE-0010 / ISSUE-0011 |
+| ADR-0011 | Remove camera / vision input per sprc_v4.docx (2-source: RFID + audio)              | Accepted | 2026-06-04 | hand logger / vision removal | `docs/adr/0011-remove-camera-vision-per-v4-spec.md`                                               | 関連: ADR-0003 / sprc_v4.docx |
 
 <!--
 Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時点で空番。
@@ -49,4 +51,8 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0005 | S2 session/seating freeze の未確定事項               | Open   | 2026-05-25 | contracts / session (S2) | `docs/issues/0005-s2-session-seating-freeze-blockers.md`   | ADR-0007（#1/#2 を core で確定）。hand logger 接続は ADR-0008 / Phase 2.2 で config-gated 実装済（freeze は引き続き保留） |
 | ISSUE-0006 | Hand 開始時の seat→player_id 選択 UX が未確定        | Partially Resolved | 2026-06-03 | hand logger × session / GUI | `docs/issues/0006-seat-selection-ux-at-hand-start.md`      | Phase 2.3 で最小 seat UX 実装（`gui/seat_assignment.py`）。高度 UX（sitting_out 等）は残 Open |
 | ISSUE-0007 | Legacy hand log（timestamp/no player_id）の取り込み方針 | Open | 2026-06-03 | data migration / S2.x       | `docs/issues/0007-legacy-hand-log-migration-policy.md`     | Phase 2.4 着手判断時 |
-| ISSUE-0008 | Session / Seating Viewer の拡張（filter / live / export 等） | Open | 2026-06-04 | desktop GUI (WS2) / inspection | `docs/issues/0008-session-viewer-enhancements.md`          | WS2-α で read-only 最小版を実装。拡張は保留 |
+| ISSUE-0008 | pokerkit を live engine として incremental 駆動できるか | Fixed | 2026-06-03 | reconstruct / dependency | `docs/issues/0008-pokerkit-online-feeding-feasibility.md` | spike で feasibility 確認 (pokerkit 0.7.4)。実装は R2 |
+| ISSUE-0009 | actor 競合解決と silent-fold 合成のポリシー未確定 | Open | 2026-06-03 | reconstruct / integration | `docs/issues/0009-actor-conflict-silent-fold-policy.md` | ADR-0009（R3 で確定） |
+| ISSUE-0010 | 決定的 replay の記録境界とスレッド順序近似 | Open | 2026-06-03 | reconstruct / integration | `docs/issues/0010-replay-determinism-record-boundary.md` | ADR-0010（R1/R4） |
+| ISSUE-0011 | hand / action schema の freeze 未確定事項 | Open | 2026-06-03 | contracts / hand core | `docs/issues/0011-hand-action-schema-freeze-blockers.md` | ADR-0010（R4/R5） |
+| ISSUE-0012 | Session / Seating Viewer の拡張（filter / live / export 等） | Open | 2026-06-04 | desktop GUI (WS2) / inspection | `docs/issues/0012-session-viewer-enhancements.md`          | WS2-α で read-only 最小版を実装。拡張は保留 |

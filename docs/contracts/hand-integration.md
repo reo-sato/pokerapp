@@ -121,7 +121,7 @@ IntegrationThread
 > **WS2-α メモ**: write-through（Pattern A）で session レイヤに溜まった seating を人間が確認できる
 > よう、read-only の desktop viewer を追加した。`SessionRepository` の read API（`list_sessions` /
 > `get_session` / `current_seating` / `list_hand_ids` / `list_seat_assignments`）のみを使い、表示用の
-> view model 整形は viewer 側の pure 関数に閉じる。編集・filter・live 更新は scope 外（ISSUE-0008）。
+> view model 整形は viewer 側の pure 関数に閉じる。編集・filter・live 更新は scope 外（ISSUE-0012）。
 
 ### legacy log の扱い (ISSUE-0007 参照)
 

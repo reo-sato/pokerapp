@@ -9,7 +9,7 @@ JSON/PHH 形式でハンドログを出力する。
 - **対象**: 小規模クラブ・個人配信向け
 - **仕様書**: `sprc_v4.docx`（本ファイルより詳細な要件定義）
 - **カメラ入力**: sprc_v4.docx の方針に従い **廃止済み**（`vision/` ディレクトリ・camera 設定・
-  opencv/easyocr 依存・camera confidence をコードから削除。ADR-0009）。現構成は RFID + 音声の 2 ソース
+  opencv/easyocr 依存・camera confidence をコードから削除。ADR-0011）。現構成は RFID + 音声の 2 ソース
 
 本ドキュメントは **現時点で実装されている仕様** と、**今後のスコープ (future scope)** を明確に分離して記述する。
 未実装機能はすべて「将来スコープ」「planned」「phase candidate」と明示し、既存実装と混在させない。
@@ -48,7 +48,8 @@ pokerapp/
 │   ├── player.py                  ← Player データクラス (S1)
 │   ├── player_repository.py       ← PlayerRepository (player CRUD + JSON 永続化, S1)
 │   ├── session.py                 ← Session / SeatAssignment / HandRef データクラス (S2)
-│   └── session_repository.py      ← SessionRepository (session + hand-based seating + JSON 永続化, S2)
+│   ├── session_repository.py      ← SessionRepository (session + hand-based seating + JSON 永続化, S2)
+│   └── poker_engine.py            ← pokerkit game-state backend (R2, preview / default-off, ADR-0009)
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -65,7 +66,8 @@ pokerapp/
 │
 ├── output/
 │   ├── json_writer.py             ← セッション JSON ログ書き込み
-│   └── phh_exporter.py            ← PHHExporter (PHH 形式エクスポート)
+│   ├── phh_exporter.py            ← PHHExporter (PHH 形式エクスポート)
+│   └── event_recorder.py          ← EventRecorder (生イベント sidecar 記録, R1, opt-in, ADR-0010)
 │
 ├── gui/
 │   ├── dashboard.py               ← GUIDashboard (hand logger 画面, customtkinter)
@@ -103,7 +105,7 @@ pokerapp/
 | IntegrationThread | キュー消費 → ゲーム状態更新 → ActionRecord 生成 → JSON 書き込み | ← 全キュー |
 | MainThread | GUI 描画のみ | |
 
-### Confidence 行列（RFID + 音声の 2 ソース、ADR-0009）
+### Confidence 行列（RFID + 音声の 2 ソース、ADR-0011）
 
 | センサー組み合わせ | confidence |
 |------------------|-----------|
@@ -287,7 +289,7 @@ registry とは **別ウィンドウ**で、**編集機能は一切持たない�
 ### Out of scope（WS2-α）
 
 - session / seat の作成・編集・削除、filter / search / sort、live auto-refresh、export、
-  mobile / web viewer、ledger / points / settlement 連携（ISSUE-0008 / 後続 Phase）。
+  mobile / web viewer、ledger / points / settlement 連携（ISSUE-0012 / 後続 Phase）。
 
 ---
 
@@ -300,7 +302,7 @@ registry とは **別ウィンドウ**で、**編集機能は一切持たない�
 | RFID PC/SC 受信 | ✅ 実装済 | `rfid/reader_thread.py` |
 | RFID カード照合 | ✅ 実装済 | `rfid/card_master.py` |
 | ストリート自動遷移 (RFID) | ✅ 実装済 | board 枚数 3/4/5 で遷移 |
-| Confidence 算出 | ✅ 実装済 | RFID + 音声の 2 ソース行列（camera 廃止, ADR-0009） |
+| Confidence 算出 | ✅ 実装済 | RFID + 音声の 2 ソース行列（camera 廃止, ADR-0011） |
 | JSON ログ出力 | ✅ 実装済 | `output/json_writer.py` |
 | PHH エクスポート | ✅ 実装済 | `output/phh_exporter.py` |
 | GUI ダッシュボード | 🔨 部分実装 | `gui/dashboard.py` |
@@ -309,9 +311,11 @@ registry とは **別ウィンドウ**で、**編集機能は一切持たない�
 | **session layer integration (S2.2)** | ✅ 実装済（config-gated） | `config.session_layer.enabled`、`integration/engine.py` write-through（§ Session Layer Integration 参照） |
 | **seat selection UX (S2.3)** | ✅ 実装済（desktop 最小） | `gui/seat_assignment.py`、`gui/dashboard.py` seat ダイアログ（session レイヤ有効時のみ。§ Session Layer Integration 参照） |
 | **session / seating viewer (WS2-α)** | ✅ 実装済（desktop, read-only） | `gui/session_viewer.py`（§ Session / Seating Viewer 参照。`main.py --sessions-viewer` / dashboard ボタン） |
-| ベッティングステート / actor 推定 | ❌ 未実装 | future phase |
+| **event 記録 sidecar (R1)** | ✅ 実装済 | `output/event_recorder.py`（opt-in `recording.enabled`, 挙動不変, ADR-0010, `reconstruction_event` schema） |
+| **pokerkit game-state backend (R2)** | ✅ 実装済 (preview) | `core/poker_engine.py`（`engine.backend=pokerkit`, default-off, ADR-0009。actor/合法手/side-pot 権威。live 既定は legacy で不変） |
+| ベッティングステート / actor 推定 | ❌ 未実装 | 設計提案 R0: ADR-0009/0010, `docs/contracts/hand-reconstruction.md`（pokerkit を live ルール権威に） |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
-| 音声正規化 / 数値正規化 | ❌ 未実装 | future phase |
+| 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0009） |
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
 | session ledger / point ledger / store settlement | ❌ 未実装 | **future scope（本ファイル下部参照）** |
 
@@ -425,6 +429,7 @@ hand logger と ledger app は **将来別アプリ化** することを前提�
 | **S3** | ledger entries + point ledger | `ledger_entry`, `point_ledger_entry`、cash+point 併用ルール |
 | **S4** | session settlement + paid/unpaid | `session_settlement`、net due to store、paid/unpaid 操作 |
 | **S5** | cross-app contract / sync boundary | hand logger ↔ ledger app の参照契約、ID 安定性、別プロセス化準備 |
+| **R0–R5**（R1/R2 実装済 / 他は提案） | rules-aware hand reconstruction（**hand core 改善トラック**, S 系列と直交） | pokerkit を live ルール権威に / actor 推定（手番 prior × sensor + silent-fold 合成）/ `apply_corrections`（合法手制約）/ 決定的 record/replay + golden fixtures。ADR-0009（R2 engine 実装済, default-off）/ ADR-0010（R1 実装済）。**R1 record-only ✅** → **R2 pokerkit engine ✅(default-off)** → R3 推定/訂正/融合 → R4 contracts → R5 freeze + session 統合 |
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。
 

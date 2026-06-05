@@ -1,0 +1,10 @@
+{
+  "type": "rfid",
+  "timestamp": 1717400004.0,
+  "tag_id": "04:AA",
+  "card": "Ah",
+  "reader_id": "seat_2",
+  "role": "seat",
+  "seat": 2,
+  "bogus": true
+}

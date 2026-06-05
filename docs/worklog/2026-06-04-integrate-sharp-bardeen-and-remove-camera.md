@@ -8,7 +8,7 @@
 
 `claude/dazzling-brown-COUkU`（v4 設計ベース）へ作業の進んだ `claude/sharp-bardeen-dYeA6`
 を統合し、続けて本ブランチの v4 設計（sprc_v4.docx）に合わせて温存されていた camera/vision を
-削除する。2 部構成: (1) ブランチ統合、(2) v4 準拠の camera 削除（ADR-0009）。
+削除する。2 部構成: (1) ブランチ統合、(2) v4 準拠の camera 削除（ADR-0011）。
 
 ## Goal
 
@@ -29,7 +29,7 @@
     templates）/ `core/player*.py` / `core/session*.py` / `gui/{player_registry,seat_assignment,session_viewer}.py`
     / `integration/engine.py` ・ `main.py` ・ `core/hand_log.py` の config-gated 追記 / 各 tests。
 
-### Part 2: camera/vision 削除（ADR-0009）
+### Part 2: camera/vision 削除（ADR-0011）
 
 - 削除: `vision/{__init__,camera,motion_detector,calibration}.py`、`tests/test_vision.py`。
 - `core/events.py` — `CameraEvent` データクラスと numpy 依存・未使用 `field` import を削除。
@@ -48,7 +48,7 @@
   `test_integration.py`（audio 単独 confidence へ全面書き換え）、
   `test_gui.py` / `test_logger.py` / `test_phh_exporter.py`（source dict から camera キー除去）。
 - docs — `CLAUDE.md`（概要 / confidence 行列 / ディレクトリ / 実装状況 / commands）、`CHANGELOG.md`、
-  `docs/adr/0009-remove-camera-vision-per-v4-spec.md`（新規）、`docs/decision-log.md`（ADR-0009 登録）。
+  `docs/adr/0011-remove-camera-vision-per-v4-spec.md`（新規）、`docs/decision-log.md`（ADR-0011 登録）。
 
 ## Expected Behavior
 
@@ -98,7 +98,7 @@ None observed. py_compile・grep・pytest いずれも期待どおり。
 
 ## Related ADRs
 
-- `docs/adr/0009-remove-camera-vision-per-v4-spec.md` — camera/vision 削除の判断（本タスク）。
+- `docs/adr/0011-remove-camera-vision-per-v4-spec.md` — camera/vision 削除の判断（本タスク）。
 - `docs/adr/0003-...md` — hand logger を base とした domain 拡張（統合した sharp-bardeen 側）。
 - `docs/adr/0008-...md` — hand logger × session の config-gated 統合（統合で取り込み）。
 
@@ -109,4 +109,4 @@ None observed. py_compile・grep・pytest いずれも期待どおり。
 ## Related Commits
 
 - `<merge-commit>` — merge: integrate sharp-bardeen onto v4 base。
-- `<removal-commit>` — refactor: remove camera/vision per sprc_v4.docx (ADR-0009)。
+- `<removal-commit>` — refactor: remove camera/vision per sprc_v4.docx (ADR-0011)。

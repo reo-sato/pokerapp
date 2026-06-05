@@ -1,4 +1,4 @@
-# Issue 0008: Session / Seating Viewer の拡張（WS2-α の外に出した論点）
+# Issue 0012: Session / Seating Viewer の拡張（WS2-α の外に出した論点）
 
 ## Date
 

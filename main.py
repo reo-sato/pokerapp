@@ -89,11 +89,36 @@ def _init_session_layer(cfg: dict, session_cfg: dict):
     return session_id, None, None, {}
 
 
+def _make_event_recorder(cfg: dict, log_dir: str, session_id: str):
+    """config.recording.enabled が true なら EventRecorder を返す (R1, ADR-0010)。
+
+    デフォルト false = 記録しない (挙動不変)。生イベントを
+    logs/{session_id}.events.jsonl に append-only で記録する sidecar。
+    """
+    if not cfg.get("recording", {}).get("enabled", False):
+        return None
+    from output.event_recorder import EventRecorder
+
+    return EventRecorder(Path(log_dir) / f"{session_id}.events.jsonl")
+
+
+def _make_game_state(cfg: dict, players: list, sb: int, bb: int):
+    """config.engine.backend で game-state 実装を選ぶ (R2, ADR-0009)。
+
+    既定 "legacy" = 従来の `GameStateManager`（挙動不変）。"pokerkit" は preview backend
+    （要 pokerkit, default-off）。
+    """
+    from core.poker_engine import create_game_state
+
+    backend = cfg.get("engine", {}).get("backend", "legacy")
+    return create_game_state(backend, players, sb, bb)
+
+
 def run_cli() -> None:
     """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。"""
     from core.config import load_config
     from core.event_queue import make_audio_queue
-    from core.game_state import GameStateManager, PlayerState
+    from core.game_state import PlayerState
     from audio.recorder import AudioThread
     from integration.engine import IntegrationThread
     from output.json_writer import JsonWriter
@@ -105,11 +130,7 @@ def run_cli() -> None:
         PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
         for p in session_cfg["players"]
     ]
-    game_state = GameStateManager(
-        players=players,
-        sb=session_cfg["sb"],
-        bb=session_cfg["bb"],
-    )
+    game_state = _make_game_state(cfg, players, session_cfg["sb"], session_cfg["bb"])
 
     # CLI モードは seat selection UI を持たない（GUI 専用, Phase 2.3）。player_repo は未使用。
     session_id, session_repo, _player_repo, seating = _init_session_layer(cfg, session_cfg)
@@ -169,6 +190,7 @@ def run_cli() -> None:
             print("RFID pyscardスレッド起動。")
         rfid_thread.start()
 
+    event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
         game_state=game_state,
@@ -179,6 +201,7 @@ def run_cli() -> None:
         session_repo=session_repo,
         session_id=session_id if session_repo is not None else None,
         seating=seating,
+        event_recorder=event_recorder,
     )
     audio_thread.start()
     integration_thread.start()
@@ -239,7 +262,7 @@ def run_gui() -> None:
     """Phase 4 GUIモード: customtkinter ダッシュボードを起動する。"""
     from core.config import load_config
     from core.event_queue import make_audio_queue
-    from core.game_state import GameStateManager, PlayerState
+    from core.game_state import PlayerState
     from audio.recorder import AudioThread
     from integration.engine import IntegrationThread
     from output.json_writer import JsonWriter
@@ -259,11 +282,7 @@ def run_gui() -> None:
         PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
         for p in session_cfg["players"]
     ]
-    game_state = GameStateManager(
-        players=players,
-        sb=session_cfg["sb"],
-        bb=session_cfg["bb"],
-    )
+    game_state = _make_game_state(cfg, players, session_cfg["sb"], session_cfg["bb"])
 
     session_id, session_repo, player_repo, seating = _init_session_layer(cfg, session_cfg)
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
@@ -326,6 +345,7 @@ def run_gui() -> None:
     if rfid_thread is not None and rfid_cfg.get("transport") == "http":
         dash._rfid_receiver = rfid_thread
 
+    event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
         game_state=game_state,
@@ -337,6 +357,7 @@ def run_gui() -> None:
         session_repo=session_repo,
         session_id=session_id if session_repo is not None else None,
         seating=seating,
+        event_recorder=event_recorder,
     )
 
     dash.start_threads(
