@@ -115,12 +115,13 @@ tests/fixtures/reconstruction/<case>/
 | `call-amount-from-state` | "コール 9999"（実 call 額 200） | heard 無視 → engine の 200 | ✅ F1（緑） |
 | `silent-fold` | 手番をまたいで次席(明示発話席)が行動 | ラウンドロビン誤帰属 → 間の席を fold 合成し actor 正 | ✅ D2b（緑） |
 | `out-of-turn-rfid` | RFID seat が prior と不一致 | prior 固定 → RFID 優先で actor 訂正・fold 合成 | ✅ D2b（緑） |
-| `unequal-allin` | スタック差のある all-in | 素朴総和 pot → main/side pot 正 | ⏳ F3 |
+| `unequal-allin` | スタック差のある all-in | 素朴総和 pot → main/side pot 正 | ✅ F3a（緑） |
 
-> F1 で 2 ケース（射影系）、**D2b で 2 ケース（silent-fold 合成系）を緑化**。合成 fold は fold アクション
-> として記録し（`confidence=0.3`・常に `needs_review`）、actor は RFID seat 読み > 明示発話席の優先順位で
-> 補正、`fold_through` は cap=2・atomic（ISSUE-0009）。残り `unequal-allin` は F3（side-pot 連携）後。
-> `test_reconstruction.py` の `PENDING_CASES` に skip で明示。
+> F1 で 2 ケース（射影系）、D2b で 2 ケース（silent-fold 合成系）、**F3a で `unequal-allin`（side-pot）を
+> 緑化＝既知バグ 5 ケース全緑（DoD #2）**。`HandSummary.pots`（main/side pot、`end_hand` 時に pokerkit から
+> 算出、legacy は `[]`）を additive 追加。合成 fold は fold アクションとして記録（`confidence=0.3`・常に
+> `needs_review`）、actor は RFID seat 読み > 明示発話席の優先順位で補正、`fold_through` は cap=2・atomic
+> （ISSUE-0009）。残 F3: `hand`/`action` schema freeze（ISSUE-0011）、PHH の call/check 区別。
 
 さらに **code↔contract** テスト: `HandSummary(...).to_dict()` / `ActionRecord(...).to_dict()` が
 `hand` / `action` schema を通ること（`test_contracts.py:65` `test_core_player_matches_contract` の前例）。

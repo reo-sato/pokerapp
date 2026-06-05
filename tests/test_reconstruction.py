@@ -28,18 +28,17 @@ _SCHEMA = (
     / "docs" / "contracts" / "schemas" / "reconstruction_event.schema.json"
 )
 
-# 再構築が正しく緑にできるケース（D1/D2a: 射影、D2b: silent-fold 合成）。
+# 再構築が正しく緑にできるケース（D1/D2a: 射影、D2b: silent-fold 合成、F3: side-pot）。
 GREEN_CASES = [
     "check-facing-bet",      # D1/D2a: 非合法 check → call + review
     "call-amount-from-state",  # D1/D2a: heard 額無視 → state の call 額
     "silent-fold",           # D2b: 明示席へ向け中間席を fold 合成（audio 駆動）
     "out-of-turn-rfid",      # D2b: RFID seat で prior を上書きし fold 合成（RFID 駆動）
+    "unequal-allin",         # F3: スタック差 all-in → main/side pot を HandSummary.pots に
 ]
 
 # 後続フェーズで追加するケース（実装と同じ増分で fixtures を authoring する）。
-PENDING_CASES = {
-    "unequal-allin": "F3: side-pot を HandSummary に連携",
-}
+PENDING_CASES: dict[str, str] = {}
 
 
 def _normalize(d: dict) -> dict:
@@ -131,7 +130,17 @@ def test_same_timestamp_sensor_processed_before_audio(tmp_path: Path):
     assert call["source"]["rfid"] is True
 
 
-@pytest.mark.parametrize("case", list(PENDING_CASES))
-@pytest.mark.skip(reason="後続フェーズ（D2b / F3）で fixtures + 実装を追加")
-def test_pending_cases_placeholder(case: str):  # pragma: no cover
-    pass
+def test_unequal_allin_main_and_side_pots(tmp_path: Path):
+    """F3: スタック差 all-in で HandSummary.pots に main/side pot が入る。"""
+    summaries = replay_fixture(_FIXTURES / "unequal-allin", tmp_path)
+    pots = summaries[0].to_dict()["pots"]
+    assert len(pots) == 2
+    main, side = pots
+    assert main["amount"] == 3000 and main["eligible_seats"] == [1, 2, 3]   # 全員 eligible
+    assert side["amount"] == 4000 and side["eligible_seats"] == [2, 3]       # 短スタック除外
+    assert sum(p["amount"] for p in pots) == 7000
+
+
+def test_pending_cases_all_green():
+    """既知バグ 5 ケースが全て GREEN（pending なし）。"""
+    assert PENDING_CASES == {}

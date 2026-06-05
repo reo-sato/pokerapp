@@ -1,0 +1,5 @@
+{"type": "audio", "timestamp": 5000.0, "action": "new_hand", "amount": 0, "raw_text": "新しいハンド", "seat": null, "confidence": null}
+{"type": "audio", "timestamp": 5001.0, "action": "allin", "amount": 0, "raw_text": "シート3 オールイン", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 5002.0, "action": "call", "amount": 0, "raw_text": "コール", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 5003.0, "action": "call", "amount": 0, "raw_text": "コール", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 5004.0, "action": "winner", "amount": 0, "raw_text": "シート2 ウィナー", "seat": null, "confidence": null}

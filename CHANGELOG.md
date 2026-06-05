@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+### Added (Phase F part 2 — side-pot 連携 + golden 5 ケース全緑 / F3a, v1 リリーストラック R5)
+
+- **`HandSummary.pots`（main/side pot スナップショット）を additive 追加**（v1 issue #8 / Epic #4,
+  ADR-0009 §3, ロードマップ A3 吸収）:
+  - `core/hand_log.py`: `HandSummary.pots: list`（既定 `[]`、`to_dict` に含む）。
+    `[{"amount": int, "eligible_seats": [int,...]}, ...]`。
+  - `integration/engine.py:_finalize_hand`: `pots=gs.pots()` を埋め込み（rules-aware backend が
+    `end_hand` 時に pokerkit から算出、legacy は `[]`）。挙動は additive（既存フィールド不変）。
+  - **golden fixtures `unequal-allin` を緑化**: スタック差 all-in（1000/3000/3000）→ main pot
+    `3000 [1,2,3]` + side pot `4000 [2,3]`。`tests/test_reconstruction.py` の GREEN_CASES に昇格。
+  - **既知バグ 5 ケースが全緑**（check-facing-bet / call-amount-from-state / silent-fold /
+    out-of-turn-rfid / unequal-allin）。**DoD #2 達成**。`pots` 追加に伴い既存 4 fixtures を再凍結
+    （hand 終了が manual winner のため pots=[]、挙動不変）。
+  - tests: `tests/test_reconstruction.py`（`unequal_allin_main_and_side_pots` + 全緑確認）。
+    **全 274 passed, 0 skipped**（legacy は `pots=[]` で additive、回帰なし）。
+  - 残 F3: `hand`/`action` schema freeze（ISSUE-0011, `_MODELS` 登録）、PHH の call/check 区別。
+
 ### Added (Phase D part 5 — 派生 confidence + needs_review 5 条件 / D3, v1 リリーストラック R3。Phase D 完了)
 
 - **解釈可能な 3 因子 confidence + 明示的 needs_review 条件**（v1 issue #7 / Epic #4, ADR-0009 §6,
