@@ -65,17 +65,19 @@ class TestRulesAwareWiring:
         assert rec.action == "call"
         assert rec.needs_review is True
 
-    def test_explicit_seat_conflict_flags_review(self, tmp_path: Path):
+    def test_explicit_seat_triggers_silent_fold_synthesis(self, tmp_path: Path):
+        # D2b: 明示発話席が prior の 1 つ先（cap 内）なら間の席を silent fold 合成し actor を移す。
+        # 3-handed 手番順は [3, 1, ...]：prior=seat3、明示=seat1 → seat3 を fold 合成し seat1 が actor。
         gs = _pk(3)
         t, cap = _thread(gs, tmp_path, "pk3")
-        actor = gs.get_current_player()
-        other = next(s for s in (1, 2, 3) if s != actor)
-        t._handle_audio_event(
-            AudioEvent("call", 0, time.time(), f"シート{other} コール", seat=other)
-        )
-        rec = cap[-1]
-        assert rec.seat == actor          # D2a: prior に固定（合成しない）
-        assert rec.needs_review is True    # 競合検出
+        prior = gs.get_current_player()  # seat 3
+        t._handle_audio_event(AudioEvent("call", 0, time.time(), "シート1 コール", seat=1))
+        folds = [r for r in cap if r.action == "fold"]
+        assert [r.seat for r in folds] == [prior]   # prior の silent fold を合成
+        assert all(r.needs_review for r in folds)    # 合成 fold は要レビュー
+        main = cap[-1]
+        assert main.seat == 1 and main.action == "call"
+        assert main.needs_review is True             # 競合（合成）→ review
 
     def test_explicit_seat_match_no_conflict(self, tmp_path: Path):
         gs = _pk(3)

@@ -28,13 +28,16 @@ _SCHEMA = (
     / "docs" / "contracts" / "schemas" / "reconstruction_event.schema.json"
 )
 
-# D1/D2a で既に緑にできるケース。
-GREEN_CASES = ["check-facing-bet", "call-amount-from-state"]
+# 再構築が正しく緑にできるケース（D1/D2a: 射影、D2b: silent-fold 合成）。
+GREEN_CASES = [
+    "check-facing-bet",      # D1/D2a: 非合法 check → call + review
+    "call-amount-from-state",  # D1/D2a: heard 額無視 → state の call 額
+    "silent-fold",           # D2b: 明示席へ向け中間席を fold 合成（audio 駆動）
+    "out-of-turn-rfid",      # D2b: RFID seat で prior を上書きし fold 合成（RFID 駆動）
+]
 
 # 後続フェーズで追加するケース（実装と同じ増分で fixtures を authoring する）。
 PENDING_CASES = {
-    "silent-fold": "D2b: fold_through 合成で未宣言 fold を補う",
-    "out-of-turn-rfid": "D2b: RFID seat で prior を上書き（合法なら fold 合成）",
     "unequal-allin": "F3: side-pot を HandSummary に連携",
 }
 

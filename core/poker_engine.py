@@ -15,8 +15,9 @@ GameStateManager と差し替え可能にする PokerEngine Protocol / factory�
 """
 from __future__ import annotations
 
+import copy
 import logging
-from typing import Protocol, runtime_checkable
+from typing import Optional, Protocol, runtime_checkable
 
 from core.constants import STREET_ORDER
 from core.engine_types import LegalContext
@@ -47,7 +48,7 @@ class PokerEngine(Protocol):
     # additive（R3 推定/訂正が読む, ADR-0009 §2）。legacy は rules-aware でない stub を返す。
     def legal_context(self) -> LegalContext: ...
     def is_legal_actor(self, seat: int) -> bool: ...
-    def fold_through(self, until_seat: int) -> None: ...
+    def fold_through(self, until_seat: int, max_folds: Optional[int] = None) -> list[int]: ...
     def pots(self) -> list[dict]: ...
     def committed(self, seat: int) -> int: ...
 
@@ -233,32 +234,43 @@ class PokerkitGameState:
             and self._idx_to_seat.get(st.actor_index) == seat
         )
 
-    def fold_through(self, until_seat: int) -> None:
-        """現 actor から until_seat の手前までの席を silent fold 合成して同期する（ADR-0009 §4）。
+    def fold_through(self, until_seat: int, max_folds: Optional[int] = None) -> list[int]:
+        """現 actor から until_seat が手番になるまで中間席を silent fold 合成し、folded した席列を返す（ADR-0009 §4）。
 
-        ディーラー未宣言の fold（最頻のズレ）を、物理/明示証拠が指す actor へ追いつくために
-        中間席を fold して表現する。until_seat に到達できない（途中で手番が消える/ fold 不可）
-        場合は ValueError（呼び出し側は prior 維持 + needs_review）。合成席数の上限は呼び出し側
-        （actor 推定, ISSUE-0009）が距離で判断する。
+        ディーラー未宣言の fold（最頻のズレ）を、物理/明示証拠が指す actor へ追いつくために中間席を
+        fold して表現する。`max_folds` を超える / until_seat に到達できない（途中で手番が消える・fold
+        不可）場合は ValueError を投げ、**状態は呼び出し前に巻き戻す（atomic）**（呼び出し側は prior
+        維持 + needs_review）。誤 fold が以降の手番を壊さないための atomicity と、過剰合成を防ぐ
+        `max_folds`（ISSUE-0009: 既定の上限は呼び出し側 actor 推定が渡す）が D2b の安全装置。
         """
         st = self._state
         if st is None or not self._hand_active:
             raise ValueError("No active hand")
         if until_seat not in self._players:
             raise ValueError(f"Unknown seat: {until_seat}")
-        guard = 0
-        while True:
-            if st.actor_index is None:
-                raise ValueError("Hand ended before reaching until_seat")
-            cur = self._idx_to_seat[st.actor_index]
-            if cur == until_seat:
-                return
-            if not st.can_fold():
-                raise ValueError(f"Cannot fold seat {cur} to reach {until_seat}")
-            st.fold()
-            guard += 1
-            if guard > len(self._seats):
-                raise ValueError("fold_through exceeded table size (no convergence)")
+
+        snapshot = copy.deepcopy(st)  # 失敗時の atomic 巻き戻し用
+        folded: list[int] = []
+        try:
+            while True:
+                if st.actor_index is None:
+                    raise ValueError("Hand ended before reaching until_seat")
+                cur = self._idx_to_seat[st.actor_index]
+                if cur == until_seat:
+                    return folded
+                if max_folds is not None and len(folded) >= max_folds:
+                    raise ValueError(
+                        f"fold_through exceeds max_folds={max_folds} reaching seat {until_seat}"
+                    )
+                if not st.can_fold():
+                    raise ValueError(f"Cannot fold seat {cur} to reach {until_seat}")
+                st.fold()
+                folded.append(cur)
+                if len(folded) > len(self._seats):
+                    raise ValueError("fold_through exceeded table size (no convergence)")
+        except ValueError:
+            self._state = snapshot  # 中途半端な fold を残さない
+            raise
 
     def pots(self) -> list[dict]:
         """最後の end_hand 時点の main/side pot スナップショット（HandSummary.pots 用）。"""

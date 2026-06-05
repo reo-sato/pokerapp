@@ -113,13 +113,14 @@ tests/fixtures/reconstruction/<case>/
 |---|---|---|---|
 | `check-facing-bet` | ベットに直面して "チェック" | check 非合法 → call へ修復 + needs_review | ✅ F1（緑） |
 | `call-amount-from-state` | "コール 9999"（実 call 額 200） | heard 無視 → engine の 200 | ✅ F1（緑） |
-| `silent-fold` | 手番をまたいで次席が行動 | ラウンドロビン誤帰属 → 間の席を fold 合成し actor 正 | ⏳ D2b |
-| `out-of-turn-rfid` | RFID seat が prior と不一致 | prior 固定 → 物理証拠優先で actor 訂正 | ⏳ D2b |
+| `silent-fold` | 手番をまたいで次席(明示発話席)が行動 | ラウンドロビン誤帰属 → 間の席を fold 合成し actor 正 | ✅ D2b（緑） |
+| `out-of-turn-rfid` | RFID seat が prior と不一致 | prior 固定 → RFID 優先で actor 訂正・fold 合成 | ✅ D2b（緑） |
 | `unequal-allin` | スタック差のある all-in | 素朴総和 pot → main/side pot 正 | ⏳ F3 |
 
-> F1 は **D1/D2a で既に正しく再構築できる 2 ケースを緑で固定**し、残り 3 ケースは実装と同じ増分
-> （D2b / F3）で fixtures を authoring する（投機的 expected を先に作らない）。`test_reconstruction.py` の
-> `PENDING_CASES` に skip で明示。
+> F1 で 2 ケース（射影系）、**D2b で 2 ケース（silent-fold 合成系）を緑化**。合成 fold は fold アクション
+> として記録し（`confidence=0.3`・常に `needs_review`）、actor は RFID seat 読み > 明示発話席の優先順位で
+> 補正、`fold_through` は cap=2・atomic（ISSUE-0009）。残り `unequal-allin` は F3（side-pot 連携）後。
+> `test_reconstruction.py` の `PENDING_CASES` に skip で明示。
 
 さらに **code↔contract** テスト: `HandSummary(...).to_dict()` / `ActionRecord(...).to_dict()` が
 `hand` / `action` schema を通ること（`test_contracts.py:65` `test_core_player_matches_contract` の前例）。

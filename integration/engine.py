@@ -48,6 +48,11 @@ logger = logging.getLogger(__name__)
 MATCH_WINDOW = 2.0
 CAMERA_BUFFER_TTL = MATCH_WINDOW * 2
 
+# silent-fold 合成で許す最大席数（ISSUE-0009）。超過は合成せず prior 維持 + needs_review。
+SILENT_FOLD_CAP = 2
+# 合成した silent-fold の confidence（sensor 観測なしの推定。較正は D3/F2）。常に needs_review。
+SYNTH_FOLD_CONFIDENCE = 0.3
+
 # ――― Confidence スコア定数 ―――
 _CONF_RFID_AUDIO_CAMERA = 1.00
 _CONF_RFID_AUDIO        = 0.95
@@ -411,27 +416,90 @@ class IntegrationThread(threading.Thread):
 
         logger.debug("ActionRecord: %s", record)
 
-    def _resolve_actor(self, event: AudioEvent, legal_ctx: LegalContext) -> tuple[int, bool]:
-        """D2a: actor を engine の合法手番(prior)に固定し、明示発話席(event.seat)が prior と
-        食い違えば競合（out-of-turn / 未宣言 fold の兆候）として needs_review を立てる。
+    def _pop_nearest_rfid_seat(self, ts: float) -> Optional[RFIDEvent]:
+        """窓内で最も近い RFID seat イベントを席に関わらず 1 件取り出す（D2b actor 解決用）。
 
-        prior を sensor で上書きする silent-fold 合成（fold_through）と、RFID/camera を含む多源
-        actor 解決は後続増分 D2b（誤 fold リスクが高く、滞留しうる RFID 読みの消費設計と併せて
-        Phase F の golden fixtures で検証するため）。D2a は滞留しないイベント単位の明示席のみを
-        競合源とする（窓内バッファ走査は再 pop されず複数アクションを連続誤検出するため使わない）。
+        prior と異なる席を指しうるため `_pop_matching_rfid_event`（同席限定）とは別。取り出して
+        消費することで、actor 推定に使った読みが後続アクションへ滞留・連続誤検出しない。
+        """
+        candidates = [
+            e for e in self._rfid_seat_buffer
+            if e.seat is not None and abs(e.timestamp - ts) <= MATCH_WINDOW
+        ]
+        if not candidates:
+            return None
+        best = min(candidates, key=lambda e: abs(e.timestamp - ts))
+        self._rfid_seat_buffer.remove(best)
+        return best
+
+    def _resolve_actor(
+        self, event: AudioEvent, legal_ctx: LegalContext
+    ) -> tuple[int, Optional[RFIDEvent], bool, list[int]]:
+        """物理/明示証拠から actor を推定する（ADR-0009 §4, ISSUE-0009）。
+
+        prior = engine の合法手番。優先順位 **RFID seat 読み > 明示発話席(event.seat)** で sensed を
+        決め、sensed が prior と異なれば silent-fold 合成（`fold_through`, cap=SILENT_FOLD_CAP・atomic）で
+        sensed まで手番を進める。合成成功なら actor=sensed、cap 超過/到達不可なら prior 維持（合成せず）。
+        いずれの競合（sensed≠prior）も needs_review。actor 推定に使った RFID 読みは消費して返す
+        （滞留防止 + corroboration 判定に再利用）。
+
+        Returns: (actor, 消費した RFID seat 読み or None, conflict, 合成 fold した席列)
         """
         prior = legal_ctx.actor_seat
-        conflict = event.seat is not None and event.seat != prior
-        return prior, conflict
+        rfid_ev = self._pop_nearest_rfid_seat(event.timestamp)
+        sensed = rfid_ev.seat if rfid_ev is not None else event.seat
+
+        if sensed is None or sensed == prior:
+            return prior, rfid_ev, False, []
+
+        # sensed != prior: 物理/明示証拠が別席 → silent-fold 合成を試みる（cap 内・atomic）。
+        try:
+            folded = self._game_state.fold_through(sensed, max_folds=SILENT_FOLD_CAP)
+        except (ValueError, NotImplementedError):
+            logger.warning(
+                "silent-fold 合成不可: prior=%s sensed=%s (cap=%d 超過/到達不可) → prior 維持 + review",
+                prior, sensed, SILENT_FOLD_CAP,
+            )
+            return prior, rfid_ev, True, []
+        logger.info("silent-fold 合成: prior=%s → actor=%s (folded=%s)", prior, sensed, folded)
+        return sensed, rfid_ev, True, folded
+
+    def _append_synth_fold(self, seat: int) -> None:
+        """合成した silent-fold を fold アクションとして記録する（推定なので常に needs_review）。"""
+        gs = self._game_state
+        record = ActionRecord(
+            hand_id=gs.hand_id,
+            timestamp=self._now_iso(),
+            street=gs.street,
+            seat=seat,
+            player_name=gs.get_player_name(seat),
+            action="fold",
+            amount=0,
+            pot_after=gs.pot,
+            stack_after=gs.get_stack(seat),
+            source={"camera": False, "audio": False, "rfid": False},
+            needs_review=True,
+            confidence=SYNTH_FOLD_CONFIDENCE,
+        )
+        self._current_actions.append(record)
+        if self._on_action:
+            self._on_action(record)
+        logger.debug("ActionRecord (synth-fold): seat=%d (inferred silent fold)", seat)
 
     def _handle_rules_aware_action(self, event: AudioEvent, legal_ctx: LegalContext) -> None:
-        """rules-aware backend（pokerkit）でのアクション処理（ADR-0009 §5: 合法手への射影）。
+        """rules-aware backend（pokerkit）でのアクション処理（ADR-0009 §4/§5）。
 
-        D2a: apply_corrections をライブ適用し actor 競合を検出（prior に固定）。silent-fold 合成と
-        派生 confidence（D3）は後続。
+        D2b: 物理/明示証拠から actor を推定し（必要なら silent-fold 合成）、apply_corrections で
+        合法手へ射影して適用。合成 fold は fold アクションとして記録（needs_review）。合成・競合・
+        非合法・訂正は needs_review。派生 confidence（D3）は後続。
         """
         gs = self._game_state
-        actor, actor_conflict = self._resolve_actor(event, legal_ctx)
+        actor, rfid_event, conflict, synthesized_seats = self._resolve_actor(event, legal_ctx)
+
+        # 合成した silent-fold を先に記録（手番順: 中間席の fold → 当該 actor のアクション）。
+        for fseat in synthesized_seats:
+            self._append_synth_fold(fseat)
+
         corrected = apply_corrections(event.action, event.amount, legal_ctx, event.confidence)
 
         try:
@@ -444,15 +512,15 @@ class IntegrationThread(threading.Thread):
             )
             apply_ok = False
 
-        cam_event  = self._pop_matching_camera_event(actor, event.timestamp)
-        rfid_event = self._pop_matching_rfid_event(actor, event.timestamp)
+        cam_event = self._pop_matching_camera_event(actor, event.timestamp)
+        # actor 推定に使った RFID 読みが最終 actor と一致すれば corroboration（消費済み）。
+        has_rfid = rfid_event is not None and rfid_event.seat == actor
         has_camera = cam_event is not None
-        has_rfid   = rfid_event is not None
 
         source = {"camera": has_camera, "audio": True, "rfid": has_rfid}
-        # D2a: confidence は既存 calc_confidence を流用（3 因子融合は D3）。
+        # D2b: confidence は既存 calc_confidence を流用（3 因子融合は D3）。
         confidence = calc_confidence(has_rfid=has_rfid, has_audio=True, has_camera=has_camera)
-        needs_review = (not apply_ok) or corrected.needs_review or actor_conflict
+        needs_review = (not apply_ok) or corrected.needs_review or conflict
 
         record = ActionRecord(
             hand_id=gs.hand_id,
@@ -474,8 +542,9 @@ class IntegrationThread(threading.Thread):
             self._on_action(record)
 
         logger.debug(
-            "ActionRecord (rules-aware): seat=%d action=%s amount=%d corrected_from=%s reason=%s review=%s",
-            actor, corrected.action, corrected.amount,
+            "ActionRecord (rules-aware): seat=%d action=%s amount=%d synth=%s conflict=%s "
+            "corrected_from=%s reason=%s review=%s",
+            actor, corrected.action, corrected.amount, synthesized_seats, conflict,
             corrected.corrected_from, corrected.reason, needs_review,
         )
 

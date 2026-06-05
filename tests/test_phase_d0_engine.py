@@ -63,6 +63,49 @@ class TestFoldThrough:
         with pytest.raises(ValueError):
             gs.fold_through(1)
 
+    def _action_order(self, gs):
+        """非破壊で手番順を発見する（deepcopy 上で fold していく）。"""
+        import copy
+        st = copy.deepcopy(gs._state)
+        seq = [gs.get_current_player()]
+        for _ in range(len(gs.get_active_seats())):
+            st.fold()
+            if st.actor_index is None:
+                break
+            seq.append(gs._idx_to_seat[st.actor_index])
+        return seq
+
+    def test_returns_folded_seats(self):
+        """D2b: fold_through は合成 fold した席列を順序どおり返す。"""
+        gs = _pk(4)
+        gs.new_hand()
+        seq = self._action_order(gs)
+        folded = gs.fold_through(seq[2], max_folds=2)  # 2 席先まで
+        assert folded == seq[:2]
+        assert gs.get_current_player() == seq[2]
+
+    def test_max_folds_cap_is_atomic(self):
+        """D2b: cap 超過は ValueError かつ状態を巻き戻す（誤 fold を残さない）。"""
+        gs = _pk(4)
+        gs.new_hand()
+        a0 = gs.get_current_player()
+        seq = self._action_order(gs)
+        with pytest.raises(ValueError):
+            gs.fold_through(seq[2], max_folds=1)  # 2 fold 必要・cap 1
+        # atomic: actor も active 席数も不変
+        assert gs.get_current_player() == a0
+        assert len(gs.get_active_seats()) == 4
+
+    def test_unreachable_seat_is_atomic(self):
+        """D2b: 到達不可（unknown seat）でも状態は不変。"""
+        gs = _pk(4)
+        gs.new_hand()
+        a0 = gs.get_current_player()
+        with pytest.raises(ValueError):
+            gs.fold_through(99)
+        assert gs.get_current_player() == a0
+        assert len(gs.get_active_seats()) == 4
+
 
 class TestLegalContextPokerkit:
     def test_preflop_actor_has_legal_actions(self):
