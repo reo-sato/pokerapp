@@ -27,7 +27,11 @@ _FIXTURES = _CONTRACTS / "fixtures"
 # 1 model = 1 schema = 1 fixtures dir
 # player: S1 freeze 候補。session / seat_assignment / hand_ref: S2 draft (ADR-0006, 未 freeze)。
 # reconstruction_event: R1 (ADR-0010) record/replay の envelope (additionalProperties:false)。
-_MODELS = ["player", "session", "seat_assignment", "hand_ref", "reconstruction_event"]
+# hand / action: hand core (ADR-0010 R5, ISSUE-0011)。additionalProperties:true で 1.0。
+_MODELS = [
+    "player", "session", "seat_assignment", "hand_ref", "reconstruction_event",
+    "hand", "action",
+]
 
 
 def _load(path: Path) -> dict:
@@ -72,3 +76,31 @@ def test_core_player_matches_contract(tmp_path: Path):
 
     schema = _load(_SCHEMAS / "player.schema.json")
     jsonschema.Draft202012Validator(schema).validate(player.to_dict())
+
+
+def test_core_hand_action_match_contract():
+    """core が生成する HandSummary / ActionRecord が hand / action schema に適合する
+    (code↔contract drift, ISSUE-0011 freeze)。"""
+    from core.hand_log import ActionRecord, HandSummary
+
+    action = ActionRecord(
+        hand_id=1, timestamp="2026-06-05T04:00:00.000", street="preflop",
+        seat=3, player_name="P3", action="call", amount=200,
+        pot_after=500, stack_after=9800,
+        source={"camera": False, "audio": True, "rfid": True},
+        needs_review=True, confidence=0.9,
+    )
+    action_schema = _load(_SCHEMAS / "action.schema.json")
+    jsonschema.Draft202012Validator(action_schema).validate(action.to_dict())
+
+    summary = HandSummary(
+        hand_id=1, session_id="0123456789abcdef0123456789abcdef",
+        started_at="2026-06-05T04:00:00.000", ended_at="2026-06-05T04:00:10.000",
+        blinds={"sb": 100, "bb": 200}, board=[], board_source="",
+        players=[{"seat": 1, "name": "P1", "hole_cards": None, "hole_cards_source": "",
+                  "stack_start": 1000, "stack_end": 100, "result": -900}],
+        pot_total=6700, winner_seat=2, actions=[action], review_required=True,
+        pots=[{"amount": 3000, "eligible_seats": [1, 2, 3]}],
+    )
+    hand_schema = _load(_SCHEMAS / "hand.schema.json")
+    jsonschema.Draft202012Validator(hand_schema).validate(summary.to_dict())

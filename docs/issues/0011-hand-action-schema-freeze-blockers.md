@@ -7,7 +7,7 @@
 ## Status
 
 <!-- One of: Open / Investigating / Fixed / WontFix / Duplicate -->
-Open
+Fixed（2026-06-05, Phase F3b / #8。`hand` / `action` を `1.0` で freeze）
 
 ## Severity / Priority
 
@@ -54,13 +54,24 @@ hand core は contract-first 以前から有機的に育っており（多数フ
 
 ## Fix
 
-未対応（R4/R5 着手時に確定）。確定したら:
+**Fixed（2026-06-05, Phase F3b / #8）。確定事項**:
 
-- `schemas/hand.schema.json` / `schemas/action.schema.json` を実ファイル化し `version` を付与。
-- `fixtures/hand/` / `fixtures/action/`（canonical / valid-minimal / invalid-*）を整備。
-- `tests/test_contracts.py` の `_MODELS` に登録し、`HandSummary.to_dict()` / `ActionRecord.to_dict()` の
-  **code↔contract** テストを追加（`test_core_player_matches_contract` 前例）。
-- `additionalProperties` 方針・required 集合を確定して `1.0` へ昇格。
+1. **`additionalProperties` 方針**: ロードマップ推奨どおり **`true` のまま `1.0`** に昇格（`false` 化は
+   後続、範囲膨張防止）。既存の多数フィールドを全列挙せず、安定 core を required に絞る。
+2. **required 集合**:
+   - `action`: 常時出力の 12 フィールド（`hand_id`/`timestamp`/`street`/`seat`/`player_name`/`action`/
+     `amount`/`pot_after`/`stack_after`/`source`/`needs_review`/`confidence`）。additive 推定
+     （`legal_actions`/`corrected_from`/`actor_source`/`asr_confidence` 等）は optional。
+   - `hand`: cross-app 安定 core 6（`hand_id`/`session_id`/`started_at`/`ended_at`/`players`/`actions`）。
+     `pots`（ADR-0009 additive）/ `player_id`（ADR-0008 additive）/ `committed` 等は **optional**
+     （legacy/fallback で absent/null 可）。
+3. **ADR-0008 統合**: `players[i].player_id`（UUID4 hex pattern, nullable）を `hand` schema に optional で
+   同居。S2.x 接続後も additive で互換。
+
+実装: `docs/contracts/schemas/{hand,action}.schema.json`（`version 1.0`）、
+`docs/contracts/fixtures/{hand,action}/`（canonical / valid-minimal / invalid-*）、`test_contracts.py` の
+`_MODELS` に登録 + `test_core_hand_action_match_contract`（code↔contract）、`test_reconstruction.py` の
+`test_golden_output_conforms_to_hand_action_schema`（golden 5 ケースの実出力が schema 適合）。
 
 ## Regression Test
 
