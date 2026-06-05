@@ -124,6 +124,10 @@ class IntegrationThread(threading.Thread):
         self._board_source: str = ""
         self._hole_cards: dict[int, list[str]] = {}  # seat → [card1, card2]
 
+        # RFID カードがマスター未解決のままハンドが進んだ場合、ハンド全体を
+        # 要レビューにする（個々の ActionRecord では捕捉できないため）。
+        self._hand_needs_review: bool = False
+
     def stop(self) -> None:
         self._stop_event.set()
 
@@ -193,6 +197,7 @@ class IntegrationThread(threading.Thread):
                 "Board RFID event has no card (tag=%s reader=%s) — needs_review",
                 ev.tag_id, ev.reader_id,
             )
+            self._hand_needs_review = True
             return
 
         if ev.board_index is not None:
@@ -239,6 +244,7 @@ class IntegrationThread(threading.Thread):
                 "Seat RFID event has no card (tag=%s reader=%s seat=%s) — needs_review",
                 ev.tag_id, ev.reader_id, ev.seat,
             )
+            self._hand_needs_review = True
 
         # アクション照合バッファに追加
         self._rfid_seat_buffer.append(ev)
@@ -389,6 +395,7 @@ class IntegrationThread(threading.Thread):
         self._board_positions = {}
         self._board_source = ""
         self._hole_cards = {}
+        self._hand_needs_review = False
         logger.info("New hand started: hand_id=%d", gs.hand_id)
 
     def _finalize_hand(self, winner_seat: int) -> None:
@@ -431,12 +438,18 @@ class IntegrationThread(threading.Thread):
             ),
             winner_seat=winner_seat,
             actions=list(self._current_actions),
-            review_required=any(a.needs_review for a in self._current_actions),
+            review_required=(
+                self._hand_needs_review
+                or any(a.needs_review for a in self._current_actions)
+            ),
         )
 
         self._json_writer.append_hand_summary(summary)
         logger.info("Hand %d finalized. Winner: seat %d", gs.hand_id, winner_seat)
         self._current_actions = []
+        # _current_actions と対称にリセットし、stale フラグが次のサマリーへ
+        # 漏れない（new_hand を挟まない再 finalize でも残らない）ようにする。
+        self._hand_needs_review = False
 
 
 # ――― ユーティリティ ―――

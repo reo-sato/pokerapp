@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### Fixed (Phase A — コア堅牢化, v1 リリーストラック)
+
+- **RFID カード未解決時にハンドを要レビュー化**（v1 issue #5 / Epic #4）: board / seat RFID
+  イベントの `card` がカードマスター未解決（空文字）のままハンドが進んだ場合、その
+  `HandSummary.review_required` を `True` にするようにした。従来は `logger.warning` のみで
+  ハンドサマリーに反映されず、オペレーターが検出失敗に気付けなかった。
+  - `integration/engine.py`: `IntegrationThread._hand_needs_review` フラグを additive 追加。
+    card 未解決の board/seat 分岐で立て、`_start_new_hand` でリセット、`_finalize_hand` の
+    `review_required` に OR 合成。解決済みカードでは立たない（誤検知ガード）。
+  - tests: `tests/test_phase_a_hardening.py`（4）。**全 192 passed, 10 skipped**
+    （`pytest tests/ -q --ignore=tests/test_vision.py`、skip は pokerkit 未導入分）。
+  - 検証: faster-whisper 未導入時の起動は `audio/recognizer.py` の遅延 import（`__init__` の
+    `try/except ImportError`）で既にクラッシュしないことを確認（コード変更不要）。
+
 ### Added (Phase R2 — pokerkit game-state backend, preview / default-off)
 
 - **pokerkit を live ルール権威にした game-state backend**（ADR-0009, **default-off の preview**）:
