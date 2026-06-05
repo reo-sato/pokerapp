@@ -65,8 +65,18 @@ ADR-0010）に対する評価がないと決められない。
 ライブ未結線で挙動不変, `tests/test_phase_d_corrections.py`）。`check` がベットに直面した場合の call/fold
 尤度（§8 の open）は **暫定で call + `needs_review`**（プレイヤーを勝手に hand から外さない側）を採用。
 
-**残（Status Open のまま）**: actor 推定の engine 結線・silent-fold 合成（D2）、派生 confidence 融合（D3）、
-重み較正（Phase F の fixtures）。これらの完了と pin で本 issue をクローズする。
+**Phase D part 3（#7 D2a, 2026-06-05）実装済**: `apply_corrections` をライブ結線し明示発話席の競合を
+検出（`integration/engine.py:_handle_rules_aware_action`、actor は prior 固定）。
+
+**Phase D part 4（#7 D2b, 2026-06-05）実装済**: 上記初期方針どおり **silent-fold 合成**を結線。
+`fold_through(sensed, max_folds=SILENT_FOLD_CAP=2)` を **atomic**（`copy.deepcopy` snapshot/restore で
+誤 fold を残さない）に強化し、`_resolve_actor` が優先順位 **RFID > 明示発話席** で actor を推定。prior と
+異なれば中間席を fold 合成（cap 超過/到達不可は prior 維持 + `needs_review`）、合成 fold は fold アクション
+として記録（`confidence=0.3`・常に `needs_review`）。golden fixtures `silent-fold` / `out-of-turn-rfid`
+（`tests/test_reconstruction.py`）で pin 済。
+
+**残（Status Open のまま）**: camera 源、派生 confidence 融合（D3、合成 fold の 0.3 含む重み較正）。
+これらの完了と pokerkit pin で本 issue をクローズする。
 
 ## Regression Test
 

@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+### Added (Phase D part 4 — silent-fold 合成 / D2b, v1 リリーストラック R3)
+
+- **silent-fold 合成（未宣言 fold を補い actor を物理/明示証拠へ追従）**（v1 issue #7 / Epic #4,
+  ADR-0009 §4, ISSUE-0009）:
+  - `core/poker_engine.py:fold_through` を **atomic + cap 対応**に強化: `max_folds` 超過/到達不可は
+    `ValueError` で **状態を巻き戻す**（`copy.deepcopy` snapshot/restore、誤 fold を残さない）。
+    合成した席列（`list[int]`）を返す。
+  - `integration/engine.py:_resolve_actor` を D2b 化: 優先順位 **RFID seat 読み > 明示発話席** で
+    sensed を決め、prior と異なれば `fold_through(sensed, max_folds=SILENT_FOLD_CAP=2)` で silent-fold
+    合成。cap 超過/到達不可は prior 維持。合成 fold は `_append_synth_fold` で **fold アクションとして
+    記録**（`confidence=0.3`、常に `needs_review`）。actor 推定に使った RFID 読みは消費（滞留防止）し、
+    最終 actor と一致すれば corroboration に再利用。競合（sensed≠prior）は `needs_review`。
+  - **golden fixtures 2 ケースが緑化**: `silent-fold`（audio 駆動）/ `out-of-turn-rfid`（RFID 駆動、
+    actor を RFID 席へ補正し corroboration 成立）。`tests/test_reconstruction.py` の GREEN_CASES に昇格。
+  - tests: `tests/test_phase_d0_engine.py`（fold_through の返り値/cap/atomic 3 追加）、
+    `tests/test_phase_d2_wiring.py`（明示席 → silent-fold 合成に更新）、reconstruction 2 ケース。
+    **全 263 passed, 1 skipped**（残 `unequal-allin`=F3）。legacy 既定は不変。
+  - 残: 派生 confidence（D3、合成 fold の 0.3 較正含む）。
+
 ### Added (Phase F part 1 — 決定的 replay ハーネス + 最初の golden fixtures / F1, v1 リリーストラック R4)
 
 - **決定的 replay ハーネス**（v1 issue #8 / Epic #4, ADR-0011）:

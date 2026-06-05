@@ -220,7 +220,7 @@ class GameStateManager:
     def is_legal_actor(self, seat: int) -> bool:
         return bool(self._active_seats) and seat == self.get_current_player()
 
-    def fold_through(self, until_seat: int) -> None:
+    def fold_through(self, until_seat: int, max_folds: int | None = None) -> list[int]:
         raise NotImplementedError("fold_through is not supported by the legacy backend")
 
     def pots(self) -> list[dict]:
