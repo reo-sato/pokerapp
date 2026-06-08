@@ -50,7 +50,7 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0003 | 並行開発の contract drift / 凍結タイミング risk       | Open   | 2026-05-22 | planning (WS0–WS3)       | `docs/issues/0003-parallel-dev-contract-drift.md`          | Phase 0a で部分緩和  |
 | ISSUE-0004 | hand_id が int と cross-app 文字列契約で不整合        | Resolved | 2026-05-22 | contracts / shared-ids   | `docs/issues/0004-hand-id-int-vs-cross-app-string.md`      | ADR-0006（複合キー採用） |
 | ISSUE-0005 | S2 session/seating freeze の未確定事項               | Open   | 2026-05-25 | contracts / session (S2) | `docs/issues/0005-s2-session-seating-freeze-blockers.md`   | ADR-0007（#1/#2 を core で確定）。hand logger 接続は ADR-0008 で戦略確定（実装は Phase 2.x） |
-| ISSUE-0006 | Hand 開始時の seat→player_id 選択 UX が未確定        | Open   | 2026-06-03 | hand logger × session / GUI | `docs/issues/0006-seat-selection-ux-at-hand-start.md`      | Phase 2.3 で確定 |
+| ISSUE-0006 | Hand 開始時の seat→player_id 選択 UX が未確定        | Resolved | 2026-06-07 | hand logger × session / GUI | `docs/issues/0006-seat-selection-ux-at-hand-start.md`      | E3 で UX 確定＋実装（座席設定ダイアログ／開始時設定＋carry-forward／その場 create／空席 skip） |
 | ISSUE-0007 | Legacy hand log（timestamp/no player_id）の取り込み方針 | Open | 2026-06-03 | data migration / S2.x       | `docs/issues/0007-legacy-hand-log-migration-policy.md`     | Phase 2.4 着手判断時 |
 | ISSUE-0008 | pokerkit を live engine として incremental 駆動できるか | Fixed | 2026-06-03 | reconstruct / dependency | `docs/issues/0008-pokerkit-online-feeding-feasibility.md` | spike で feasibility 確認 (pokerkit 0.7.4)。実装は R2 |
 | ISSUE-0009 | actor 競合解決と silent-fold 合成のポリシー未確定 | Open | 2026-06-03 | reconstruct / integration | `docs/issues/0009-actor-conflict-silent-fold-policy.md` | ADR-0009（R3 で確定） |

@@ -6,7 +6,7 @@
 
 ## Status
 
-Open
+Resolved（2026-06-07, E3 で UX 確定＋実装）
 
 ## Severity / Priority
 
@@ -57,19 +57,39 @@ write-through を採用したため、UI の seat 選択タイミングが整合
 DI で受け取り、hand 開始で `assign_seat`・確定時に `player_id` を埋め込む write-through が動く
 （`config.session_layer.enabled` 既定 off で挙動不変）。**残るのは「seat→player_id を選ぶ UX」**＝本 issue 本体:
 
-未対応（Phase 2.3 = E3 着手時に確定）。決まったら:
+### Decision（E3, 2026-06-07 — user 確認済）
 
-- `gui/dashboard.py` または別 window の widget 仕様を `docs/contracts/hand-integration.md` に追記。
-- carry-forward と sitting_out の振る舞いを `validation-rules.md`（または本 doc）に明記。
-- 必要なら seat-change を表すサブ contract（追加 schema or note）を起こす。
+6 つの open question への確定回答:
+
+1. **初回 seating の入力 UX** → モーダルダイアログ（`gui/seat_selection.py:SeatSelectionDialog`）。
+   席ごとに `CTkOptionMenu` で `PlayerRepository.list_players()` から選ぶ。dashboard の「座席設定」
+   ボタン／起動時 promote で開く（別 Toplevel、Player Registry 画面の前例に倣う）。
+2. **carry-forward** → **採用**。直前に確定した map をデフォルト表示し、毎ハンドの確認は出さない。
+   設定は session 中 carry-forward される（cadence = 開始時に一度＋必要時のみ編集）。
+3. **seat change の入力方法** → 「変更がある時だけ『座席設定』ボタンで再オープンして編集」。
+   常時全 seat 再確認は採らない（UX 軽量・誤入力は client 側 unique 検証で防ぐ）。
+4. **sitting_out** → **skip**（空席は `assign_seat` しない）。explicit `status=sitting_out` は将来
+   スコープ（`SeatAssignment.status` は既に additive 対応）。
+5. **未登録 player** → **その場作成**を許す（ダイアログ内 `create_player`、Empty/Duplicate は inline 表示）。
+6. **dashboard との両立** → dashboard 上に「座席設定」ボタン（session レイヤ接続時のみ）→ 別 Toplevel
+   モーダル。既存 hand logger UI（name 表示）は不変。
+
+### 実装（E3, 2026-06-07）
+
+- `gui/seat_selection.py`（新規, モーダル + 純ロジック関数）/ `gui/dashboard.py`（ボタン + 起動時 promote）/
+  `integration/engine.py:set_seat_player_map`（map 更新 + `_session_layer_active` 再評価）/
+  `main.py run_gui`（`session_layer.enabled` で repo/session 構築・UUID4 session_id・`session_repo` DI）。
+- 既定 off では従来動作（ボタン非表示・timestamp session_id・PHH 不変, rollback）。
+- carry-forward / 空席 skip は client 側純関数で表現し、サブ contract（schema 追加）は不要だった。
 
 ## Regression Test
 
-- 現状ではテスト対象なし（UI 仕様）。確定後は GUI ロジックテストで:
-  - 初回 seating → assign_seat バッチが正しい引数で呼ばれる
-  - carry-forward モードで差分のみ assign される
-  - unknown_player / seat_taken エラーが UI に正しく表示される
-  を追加する。
+- `tests/test_seat_selection.py`: ダイアログの純ロジック（customtkinter 非依存）—
+  carry-forward 解決 / 同一 player 二重割当の検出 / 空席除外の map 構築。
+- `tests/test_engine_session_setter.py`: `set_seat_player_map` で `_session_layer_active` が
+  再評価され、setter 経由でも assign_seat 永続 + `player_id` 埋め込みが成立 / 空 map・repo 無しで無効。
+- `tests/test_phase_e_session_integration.py`: 接続/非接続の write-through 振る舞い（E1+E2-core から継続）。
+- GUI 本体（customtkinter Toplevel）は CI 非導入のため自動テスト対象外。手動 QA は worklog に記載。
 
 ## Affected Files
 
