@@ -250,6 +250,11 @@ class SessionRepository:
         )
         return assignment
 
+    def list_hand_ids(self, session_id: str) -> list[int]:
+        """seat assignment が記録されている hand_id を昇順で返す（M1 viewer read model 用, ADR-0013）。"""
+        self.get_session(session_id)
+        return sorted(self._hands.get(session_id, {}))
+
     def list_seat_assignments(self, session_id: str, hand_id: int) -> list[SeatAssignment]:
         """あるハンドの seat assignment を seat_no 昇順で返す（空ハンドは空 list）。"""
         self.get_session(session_id)

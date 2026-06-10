@@ -79,6 +79,7 @@ assign_seat(session_id: str, hand_id: int, seat_no: int, player_id: str) -> Seat
                                                    # raises SessionNotFound / SessionClosed /
                                                    #   InvalidSeat / UnknownPlayer / SeatTaken /
                                                    #   PlayerAlreadySeated
+list_hand_ids(session_id: str) -> list[int]        # 記録済 hand_id 昇順 (M1 additive, ADR-0013)
 list_seat_assignments(session_id: str, hand_id: int) -> list[SeatAssignment]   # seat_no 昇順
 resolve_seat_map_for_hand(session_id: str, hand_id: int) -> dict[int, str]     # seat_no -> player_id
 resolve_hand_ref(session_id: str, hand_id: int) -> HandRef

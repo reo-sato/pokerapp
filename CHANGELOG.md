@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+### Added (Phase M1 — player 向け読み取り専用 viewer API, ADR-0013)
+
+- **viewer API**（`api/` 新パッケージ）: プレイヤーが自分の session / ハンド履歴を参照するための
+  読み取り専用 HTTP API。`python main.py --viewer-api` で起動（要 `pip install ".[api]"` =
+  fastapi/uvicorn、optional extra）。契約は `docs/contracts/viewer-api.md`（draft 0.x）+
+  `player_session_summary` schema/fixtures。
+  - endpoints: `/api/health` / `/api/players[...]` / `/api/players/{id}/sessions` /
+    `/api/players/{id}/sessions/{sid}/hands` / `/api/sessions/{sid}/hands/{hid}`（全 GET）。
+  - 「player のハンド」は `sessions.json` の seat_assignment 起点で hand log を join
+    （hand log 側 `player_id` は best-effort。E3/ISSUE-0006 前は空を返し、着地後に自動で実データが流れる）。
+  - `viewer_api` config 追加（`bind_host` 既定 `127.0.0.1`。無認証のため LAN 公開は明示変更,
+    ISSUE-0013）。404 は `{"code": "not_found", "message": ...}`（error-shapes.md 準拠）。
+  - `SessionRepository.list_hand_ids()` を additive 追加。
+  - 方針決定: **player 向け desktop viewer は作らない**（API-first）。WS3 mobile 技術選定を
+    **Expo（web export を LAN+QR 配布で先行）** に確定（ADR-0013、ADR-0004 を補完）。
+
 ### Fixed / Changed (review hardening — 全体レビューで検出した堅牢化, ISSUE-0012)
 
 - **rebuy / 新ハンドの状態変更を IntegrationThread に一元化**（ISSUE-0012 Fixed）:

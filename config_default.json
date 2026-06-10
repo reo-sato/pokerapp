@@ -55,5 +55,11 @@
   "session_layer": {
     "enabled": false,
     "_comment": "S2.x (ADR-0008): hand logger を session レイヤ(seat→player_id の write-through)に接続。既定 false で従来動作（rollback）。有効化には seat→player 選択 UI が前提（Phase 2.3, ISSUE-0006）で main.py 結線は後続。"
+  },
+  "viewer_api": {
+    "enabled": false,
+    "bind_host": "127.0.0.1",
+    "_bind_host_comment": "M1 (ADR-0013): player 向け読み取り専用 viewer API。無認証のため LAN 公開（スマホからの参照）は PC の LAN IP に明示変更し、信頼できるネットワークでのみ使用すること（ISSUE-0013）。起動は python main.py --viewer-api（要 pip install '.[api]'）。",
+    "bind_port": 8788
   }
 }

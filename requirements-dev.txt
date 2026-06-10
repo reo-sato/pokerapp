@@ -1,8 +1,11 @@
 # 開発/テスト依存（CI が install）。テストはローカルパッケージ(core/ 等)を直接 import するため
 # 実行時 core（faster-whisper/pyaudio/customtkinter）は不要。numpy は core/events.py が module-level
-# import するため必須。pokerkit / jsonschema はテストの importorskip 対象（CI で skip 0 にするため導入）。
+# import するため必須。pokerkit / jsonschema / fastapi / httpx はテストの importorskip 対象
+# （CI で skip 0 にするため導入。fastapi+httpx は viewer API テスト用, M1/ADR-0013）。
 numpy>=1.24,<3
 pokerkit>=0.7.0,<0.8.0
 jsonschema>=4.0,<5
+fastapi>=0.110,<1
+httpx>=0.27,<1
 pytest>=7.0
 ruff>=0.4,<1

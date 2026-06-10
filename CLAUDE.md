@@ -34,14 +34,14 @@ pokerapp/
 │   └── decision-log.md            ← ADR / 主要 issue の索引
 ├── sprc_v4.docx                   ← 仕様書（要件定義）
 ├── claude_v4.docx                 ← 旧仕様書（参考）
-├── main.py                        ← エントリーポイント (--cli / GUI / --players)
+├── main.py                        ← エントリーポイント (--cli / GUI / --players / --viewer-api)
 ├── config_default.json            ← デフォルト設定テンプレート
 ├── rfid_cards.json                ← tag_id → card_code マスタ
 ├── players.json                   ← player registry 永続ファイル (.gitignore, S1)
 ├── sessions.json                  ← session + hand-based seating 永続ファイル (.gitignore, S2)
-├── pyproject.toml                 ← パッケージ定義 (core / [pcsc] / [vision] / [dev], entry: pokerapp, H1)
+├── pyproject.toml                 ← パッケージ定義 (core / [pcsc] / [vision] / [api] / [dev], entry: pokerapp, H1)
 ├── requirements.txt               ← core runtime 同期コピー (vision 除外)
-├── requirements-dev.txt           ← テスト依存 (numpy/pokerkit/jsonschema/pytest, CI が使用)
+├── requirements-dev.txt           ← テスト依存 (numpy/pokerkit/jsonschema/fastapi/httpx/pytest, CI が使用)
 ├── .github/workflows/ci.yml       ← CI: pytest (skip 0, vision 除外, H4)
 │
 ├── core/
@@ -73,6 +73,10 @@ pokerapp/
 │   ├── json_writer.py             ← セッション JSON ログ書き込み
 │   └── phh_exporter.py            ← PHHExporter (PHH 形式エクスポート)
 │
+├── api/
+│   ├── read_models.py             ← viewer read model (seat_assignment 起点 join, fastapi 非依存, M1)
+│   └── server.py                  ← viewer API server (FastAPI app factory + uvicorn, M1, ADR-0013)
+│
 ├── gui/
 │   ├── dashboard.py               ← GUIDashboard (hand logger 画面, customtkinter)
 │   └── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
@@ -93,6 +97,7 @@ pokerapp/
 | RFID (PC/SC) | pyscard ≥ 2.0.7 | transport="pcsc" 時のみ |
 | PHH 出力 | pokerkit ≥ 0.5 | |
 | GUI | customtkinter ≥ 5.2 | |
+| viewer API | fastapi ≥ 0.110 + uvicorn ≥ 0.29 | optional extra `[api]`（M1, ADR-0013） |
 | テスト | pytest ≥ 7.0 | |
 
 ---
@@ -209,6 +214,41 @@ write-through 接続可**（E1+E2-core, ADR-0008 Pattern A: `IntegrationThread` 
 
 ---
 
+## Viewer API（M1, 実装済）
+
+プレイヤーが自分のスマホ（将来は Expo client, M2）から自分の session / ハンド履歴を参照するための
+**読み取り専用 HTTP API**（ADR-0013。S5 cross-app boundary の read-only サブセットの前倒し）。
+**player 向け desktop viewer は作らない**（desktop = スタッフ操作用に限定）。
+
+### スコープ（現時点）
+
+- `python main.py --viewer-api` で起動（要 `pip install ".[api]"` = fastapi/uvicorn）。GET のみ。
+- endpoints: `/api/health`, `/api/players`, `/api/players/{id}`, `/api/players/{id}/sessions`,
+  `/api/players/{id}/sessions/{sid}/hands`, `/api/sessions/{sid}/hands/{hid}`。
+  契約は `docs/contracts/viewer-api.md`（draft 0.x）+ `player_session_summary` schema/fixtures。
+- **read model 規則**: 「player のハンド」は `sessions.json` の seat_assignment 起点で
+  hand log（`logs/{session_id}.json`）を `(session_id, hand_id)` join。hand log 側 `player_id` は
+  best-effort。E3（ISSUE-0006）前は gracefully-empty（実データは M3 = E3 着地後に流れる）。
+- error は `{"code": "not_found", "message": ...}`（`error-shapes.md` 準拠、404）。
+- config: `viewer_api.bind_host` 既定 `127.0.0.1`（無認証。スマホからの LAN 参照は明示変更、
+  ISSUE-0013 プライバシーモデル参照）/ `bind_port` 既定 8788。
+
+### 構成
+
+| 要素 | ファイル | 役割 |
+|------|---------|------|
+| read model | `api/read_models.py` | fastapi 非依存の純関数（join / summary 集計） |
+| server | `api/server.py` | `create_app(player_repo, session_repo, log_dir)` DI + error handler + CORS(GET) |
+| 起動 | `main.py --viewer-api` | config を読み foreground で uvicorn 起動 |
+
+### Out of scope（M1 時点）
+
+- write 系（ドリンク注文 = M5、ledger = M4/S3）、認証 / per-player アクセス制御（ISSUE-0013）。
+- GUI プロセスへの組み込み起動（`viewer_api.enabled` は将来の in-process 起動用 placeholder）。
+- Expo mobile client は M2（`mobile/`）。
+
+---
+
 ## 実装状況（現時点）
 
 | 機能 | 状態 | 備考 |
@@ -232,6 +272,7 @@ write-through 接続可**（E1+E2-core, ADR-0008 Pattern A: `IntegrationThread` 
 | **派生 confidence + side-pot (R3 D3 / R5 F3a)** | ✅ 実装済 (preview) | `integration/engine.py:derive_confidence`（3 因子 L/A/Q、rules-aware 経路のみ。legacy 固定表は不変）+ needs_review 5 条件。`HandSummary.pots`（main/side、legacy は `[]`）。**Phase D 完了** |
 | **hand/action schema freeze (R5 F3b)** | ✅ 実装済 | `docs/contracts/schemas/{hand,action}.schema.json`（`1.0`, additionalProperties:true, ISSUE-0011 Fixed）+ `_MODELS` 登録 + code↔contract + golden→schema テスト |
 | **PHH call/check (F3c)** | ✅ 確認済（変更不要） | PHH 標準では check/call は同一トークン `cc`（check-or-call）。区別は非標準で pokerkit が parse 不能になるため統一が正。check/call の別は JSON ログ側で保持（`output/phh_exporter.py` にコメント） |
+| **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（§ Viewer API 参照, ADR-0013。読み取り専用、`[api]` extra）。Expo mobile client は M2 planned |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0009） |
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
@@ -257,7 +298,7 @@ write-through 接続可**（E1+E2-core, ADR-0008 Pattern A: `IntegrationThread` 
 | **session ledger** | session 単位の buy-in / rebuy / add-on / order / adjustment を ledger entry として記録 | 🔲 planned (S3) |
 | **point ledger** | prize point の grant / spend を記録、buy-in 等に充当可能 | 🔲 planned (S3) |
 | **session settlement** | session 終了時に player ごとの「店への net 支払額」と paid/unpaid を確定 | 🔲 planned (S4) |
-| **cross-app boundary** | hand logger と ledger app の相互参照契約 (player_id / session_id / hand_id) | 🔲 planned (S5) |
+| **cross-app boundary** | hand logger と ledger app の相互参照契約 (player_id / session_id / hand_id) | 🔲 planned (S5)。ただし **read-only viewer API は M1 で前倒し実装済**（ADR-0013, § Viewer API） |
 
 hand logger と ledger app は **将来別画面・別アプリ** になることを前提に設計する。
 両者は共通 ID で相互参照する（§ Cross-app boundary 参照）。
@@ -379,7 +420,7 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 | **WS0** | contract / spec / schema | 共有 ID・各 domain model の schema・validation 契約・error 形を凍結 | `docs/contracts/*`（planned）, ADR, schema fixtures | なし（全 WS の上流） |
 | **WS1** | core domain / repository / services | `core/` のドメイン・repository・service。永続化と業務ルールの source of truth | `core/*.py`, repository, service, tests | WS0（該当 model の契約凍結後） |
 | **WS2** | desktop separate screen | registry / ledger / settlement の **別画面** UI（既存 hand logger UI は汚さない） | `gui/*.py`（別 window）, GUI ロジックテスト | WS1（同 phase の repository/service） |
-| **WS3** | mobile scaffold (iOS/Android) | 将来の別 front-end。**最初は mock repository** で UI を先行させる | mobile プロジェクト雛形, screen skeleton, mock repo | WS0 のみ（contract）。WS1 完成を待たない |
+| **WS3** | mobile scaffold (iOS/Android) | 将来の別 front-end。**最初は mock repository** で UI を先行させる。技術は **Expo (React Native, web export 先行) に確定**（ADR-0013） | mobile プロジェクト雛形 (`mobile/`, M2 planned), screen skeleton, mock repo | WS0 のみ（contract）。WS1 完成を待たない |
 
 責務分離の原則:
 
@@ -426,12 +467,12 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 - mock は WS0 の schema fixtures（サンプル JSON）を読むだけにし、実 persistence を持たない。
 - 後で実 repository（ローカル or API）に差し替えても UI 層が壊れない境界を最初から引く。
 
-## Mobile scaffold 提案（WS3, planned）
+## Mobile scaffold 提案（WS3, M2 planned）
 
-- **技術選定案**: **React Native**（iOS / Android 両対応のたたき台）。Expo 起点で
-  プラットフォーム分岐を最小化する。最終決定は Phase 1 着手時に別 worklog で確定する。
-  - 代替案: Flutter（Dart 統一・高描画性能）/ ネイティブ 2 本（最大の自由度・最大コスト）。
-    React Native を初期案とするのは、将来 desktop と TypeScript 系の契約型を共有しやすいため。
+- **技術選定（確定, ADR-0013）**: **Expo（React Native, TypeScript）**。配布は当面
+  `expo export --platform web` の Web ビルドを運営 PC から LAN 配信（QR コード）し、
+  App Store / Play Store 配布（ネイティブビルド）は同一コードベースの将来オプションとする。
+  - 検討した代替案: Flutter / ネイティブ 2 本 / 素の React PWA（ADR-0013 参照）。
 - **最初の screen skeleton 範囲**: player registry のみに限定する。
   - `PlayerListScreen`（一覧）/ `AddPlayerForm`（新規作成）/ `RenamePlayerForm`（リネーム）。
   - validation 表示（空文字 / 重複）は **core と同じ contract** に従い、UI 側で再実装しない。
@@ -549,6 +590,8 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 ### Phase 5 — sync / cross-app contract hardening
 
 - **Goal**: 同一プロセス前提から、別プロセス / 別アプリ + API/sync へ移行できる boundary を切り出す。
+- **前倒し済（M1, ADR-0013）**: read-only サブセット（viewer API, `api/`）は実装済（§ Viewer API）。
+  本 phase の残りは write 系 API / sync / repository の API client 分離。
 - **Prerequisites**: S1〜S4 の schema が安定し、repository interface が front-end から実証済。
 - **Parallel tasks**:
   - WS0: cross-app 参照同期方式（pull / push / event）と API contract を確定。
@@ -594,9 +637,11 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 pip install -r requirements.txt              # core runtime（または pip install .）
 pip install -r requirements-dev.txt          # テスト依存（CI と同じ。skip 0）
 pip install ".[pcsc]"                         # RFID PC/SC を使う場合のみ
+pip install ".[api]"                          # viewer API を使う場合のみ (M1)
 python main.py --cli                         # CLI モード (hand logger)
 python main.py                               # GUI モード (hand logger)
 python main.py --players                     # Player Registry 画面 (S1, 別画面)
+python main.py --viewer-api                  # player 向け読み取り専用 viewer API (M1, ADR-0013)
 pytest tests/ -v --ignore=tests/test_vision.py   # CI と同じ（vision レガシー除外）
 python tools/replay_hand.py tests/fixtures/reconstruction/silent-fold  # 決定的 replay (F1)
 python main.py --export-phh logs/session_xxx.json

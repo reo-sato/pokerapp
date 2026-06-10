@@ -35,6 +35,7 @@
 | ADR-0010 | Contract-first hand core via deterministic record/replay | Accepted | 2026-06-03 | reconstruct / contracts | `docs/adr/0010-contract-first-hand-core-record-replay.md` | 関連: ADR-0008 / ADR-0009 / ISSUE-0010 / ISSUE-0011 |
 | ADR-0011 | Deterministic replay harness (sync timestamp-ordered driver + clock injection) | Accepted | 2026-06-05 | reconstruct / replay (F1) | `docs/adr/0011-deterministic-replay-harness.md` | 関連: ADR-0010 / ADR-0009 / ISSUE-0010 |
 | ADR-0012 | pokerkit を live 既定 backend に切替（legacy は rollback, pokerkit pin） | Accepted | 2026-06-05 | reconstruct / engine (G) | `docs/adr/0012-pokerkit-live-default.md` | 関連: ADR-0009。実機 E2E は Phase H |
+| ADR-0013 | Player 向け参照は API-first（viewer API 前倒し）+ Expo web export 先行 | Accepted | 2026-06-10 | viewer API / mobile (M1) | `docs/adr/0013-player-facing-viewer-api-first-architecture.md` | 補完: ADR-0004（WS3 技術選定を確定）。関連: ADR-0008 / ISSUE-0006 / ISSUE-0013 |
 
 <!--
 Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時点で空番。
@@ -57,3 +58,4 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0010 | 決定的 replay の記録境界とスレッド順序近似 | Resolved | 2026-06-03 | reconstruct / integration | `docs/issues/0010-replay-determinism-record-boundary.md` | Phase B+C #6（記録境界・clock 源を確定 + AudioEvent.{seat,confidence} 露出）。replayer/許容度は Phase F #8 |
 | ISSUE-0011 | hand / action schema の freeze 未確定事項 | Fixed | 2026-06-05 | contracts / hand core | `docs/issues/0011-hand-action-schema-freeze-blockers.md` | Phase F3b #8（hand/action を `1.0` freeze, additionalProperties:true。`_MODELS` 登録 + code↔contract + golden→schema） |
 | ISSUE-0012 | GUI/CLI スレッドが GameStateManager を直接変更しレース | Fixed | 2026-06-08 | threading / GUI / CLI | `docs/issues/0012-gui-thread-rebuy-race.md` | review hardening（rebuy/new_hand を queue 経由に一元化 + 回帰テスト） |
+| ISSUE-0013 | player viewer のプライバシーモデル（本人確認 / 閲覧範囲）が未確定 | Open | 2026-06-10 | viewer API / mobile (M1) | `docs/issues/0013-player-viewer-privacy-model.md` | M5（注文 write path）着手前に決着 |

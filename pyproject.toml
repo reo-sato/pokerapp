@@ -24,15 +24,17 @@ dependencies = [
 pcsc = ["pyscard>=2.0.7,<3"]
 # 廃止予定の vision/ レガシー（製品依存外。必要時のみ）
 vision = ["opencv-python>=4.8,<5", "easyocr>=1.7,<2"]
-# 開発/テスト/契約検証（CI が使用。実行時 core には不要）
-dev = ["pytest>=7.0", "jsonschema>=4.0,<5"]
+# player 向け読み取り専用 viewer API を起動する場合のみ（M1, ADR-0013）
+api = ["fastapi>=0.110,<1", "uvicorn>=0.29,<1"]
+# 開発/テスト/契約検証（CI が使用。実行時 core には不要。httpx は fastapi TestClient 用）
+dev = ["pytest>=7.0", "jsonschema>=4.0,<5", "httpx>=0.27,<1"]
 
 [project.scripts]
 pokerapp = "main:main"
 
 [tool.setuptools]
 # vision / tests / tools / docs は配布パッケージから除外
-packages = ["core", "audio", "rfid", "integration", "output", "gui"]
+packages = ["core", "audio", "rfid", "integration", "output", "gui", "api"]
 py-modules = ["main"]
 
 [tool.ruff]

@@ -28,9 +28,10 @@ _FIXTURES = _CONTRACTS / "fixtures"
 # player: S1 freeze 候補。session / seat_assignment / hand_ref: S2 draft (ADR-0006, 未 freeze)。
 # reconstruction_event: R1 (ADR-0010) record/replay の envelope (additionalProperties:false)。
 # hand / action: hand core (ADR-0010 R5, ISSUE-0011)。additionalProperties:true で 1.0。
+# player_session_summary: M1 viewer API の read model envelope (ADR-0013, draft 0.x)。
 _MODELS = [
     "player", "session", "seat_assignment", "hand_ref", "reconstruction_event",
-    "hand", "action",
+    "hand", "action", "player_session_summary",
 ]
 
 
