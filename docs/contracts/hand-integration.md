@@ -107,8 +107,8 @@ IntegrationThread
 
 | 段階 | 主体 | 何をするか |
 |------|------|----------|
-| session 開始時 | operator + GUI（S2.x で追加, または CLI 暫定） | `seat → player_id` を選ぶ。`PlayerRepository.list_players()` の選択肢から選ぶ。確定後 `SessionRepository.assign_seat`（hand 0 = "seating only" or 1 hand目開始時にバッチ呼び出し） |
-| hand 開始時 | `IntegrationThread._start_new_hand` | 直前 hand の seat_map を carry-forward。seat change がある場合のみ差分 UI で更新（ISSUE-0006） |
+| session 開始時 | operator + GUI（**E3 実装済**: 起動時に座席設定ダイアログを一度表示） | `seat → player_id` を選ぶ（`PlayerRepository.list_players()` から選択／未登録はその場 `create_player`／空席は skip）。確定 map を `IntegrationThread.set_seat_player_map` に渡す（次 hand 開始で `assign_seat` バッチ） |
+| hand 開始時 | `IntegrationThread._start_new_hand` | 直前 hand の seat_map を **carry-forward**（毎ハンドは確認しない）。変更時のみ「座席設定」ボタンで再オープンして編集（E3, ISSUE-0006 決定） |
 | action 記録時 | `IntegrationThread._record_action` | 変更なし。`ActionRecord.player_name` のまま（action は seat-keyed なので player_id を持たせる必要はない。必要なら別 view で join） |
 | hand 確定時 | `IntegrationThread._finalize_hand` | `HandSummary.players[i].player_id = current_seating[seat]` を additive に埋める |
 | JSON 永続化 | `JsonWriter` | 変更不要（dict 化済みデータが additive に増えるだけ） |
@@ -180,13 +180,20 @@ IntegrationThread
   GameStateManager は変更不要（player_id は IntegrationThread が seat 単位で別途保持）。
 - rollback: config flag off で従来通り。session_repo を None 注入する DI path で fallback 可能。
 
-### Phase 2.3 — seat selection UI (registry 連動)
+### Phase 2.3 — seat selection UI (registry 連動)（実装済 — E3, 2026-06-07, ISSUE-0006 Resolved）
 
-- 変わるもの:
-  - `gui/dashboard.py` または別 widget に「seat → player_id」選択 UI（PlayerRepository から選ぶ）。
-  - hand 間の seat change 反映 UX（ISSUE-0006）。
-- legacy のまま: 単独運用フォールバックパス、PHH。
-- rollback: 既存の name 入力 CLI/フォーム継続。
+- 実装:
+  - `gui/seat_selection.py`（新規）: `SeatSelectionDialog`（モーダル Toplevel）。席ごとに
+    `PlayerRepository.list_players()` から選択／未登録はその場 `create_player`／空席は skip。
+    map 構築・重複検証・carry-forward 解決は module-level 純関数（customtkinter 非依存・testable）。
+  - `gui/dashboard.py`: session レイヤ接続時のみ「座席設定」ボタンを表示。起動時に一度ダイアログを
+    promote し、以後は必要時のみ再オープン（毎ハンドは出さず carry-forward）。OK で
+    `IntegrationThread.set_seat_player_map` に反映（次 hand から有効）。
+  - `integration/engine.py`: `set_seat_player_map()` を追加（map 更新 + `_session_layer_active` 再評価）。
+  - `main.py run_gui`: `session_layer.enabled=true` で `PlayerRepository`/`SessionRepository` を構築、
+    `create_session` の UUID4 hex を `JsonWriter` に使用、`session_repo` を `IntegrationThread` に DI。
+- legacy のまま: 既定 off では従来動作（timestamp session_id、ボタン非表示、PHH 不変）。
+- rollback: `session_layer.enabled=false`。
 
 ### Phase 2.4（任意）— legacy log reconciler tool
 

@@ -22,6 +22,22 @@
     `tests/test_tools_play_hand_text.py`（parse/skip/timestamp・legacy 確定&再現性・pokerkit smoke）。
     **全 311 passed, 0 skipped**。既存挙動は不変（additive な追加のみ）。
 
+### Added (Phase E part 2 — seat→player 選択 GUI + session レイヤ live 有効化 / E3, v1 リリーストラック S2.x, ISSUE-0006 Resolved)
+
+- **座席設定ダイアログで hand logger を session レイヤに接続できるようにした**（v1 issue #10 / Epic #4,
+  ADR-0008 Pattern A の live 有効化, ISSUE-0006 Resolved）:
+  - `gui/seat_selection.py`（新規）: `SeatSelectionDialog`（customtkinter モーダル）。席ごとに
+    登録 player を割り当て／**未登録はその場で作成**／空席は割り当てない。map 構築・重複検証・
+    carry-forward 解決は GUI 非依存の純関数に分離（CI で unit test、skip 0 維持）。
+  - `gui/dashboard.py`: `session_layer.enabled` 時のみ「座席設定」ボタンを表示し、起動時に一度
+    seating を促す。確定後は **carry-forward**（毎ハンドは出さない）、変更時のみボタンで再編集。
+  - `integration/engine.py`: `IntegrationThread.set_seat_player_map()` を追加（map 更新＋接続の有効/無効を再評価）。
+  - `main.py`（GUI モード）: `session_layer.enabled=true` で `PlayerRepository`/`SessionRepository` を構築し、
+    `create_session` の **UUID4 hex を session_id** に採用、`session_repo` を `IntegrationThread` に DI。
+  - **既定 off では完全に従来動作**（ボタン非表示・timestamp session_id・PHH 不変, rollback path）。
+  - tests: `tests/test_seat_selection.py`（純ロジック）/ `tests/test_engine_session_setter.py`（setter 経由の
+    write-through・有効/無効再評価）。**全 302 passed, 0 skipped**。
+
 ### Added (Phase E part 1 — hand logger × session 統合 write-through / E1+E2-core, v1 リリーストラック S2.x)
 
 - **hand logger を S2 session レイヤに write-through 接続**（v1 issue #10 / Epic #4, ADR-0008 Pattern A）:
