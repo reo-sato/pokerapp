@@ -75,7 +75,7 @@ schema を変更する PR は、同じ PR で以下を更新する（漏れは c
 | 1 | shared IDs（player_id / session_id / hand_id） | 全 phase 共通 | bootstrap 済（player_id 確定、hand_id は ADR-0006 で確定、session_id 採番は ISSUE-0005） |
 | 2 | player schema | S1 | freeze 候補（本 bootstrap で schema/fixtures 追加） |
 | 3 | session / seat_assignment / hand_ref | S2 | **draft（schema/fixtures/ADR-0006 追加, version 0.x）**。freeze は ISSUE-0005 決着 + S2 core 実装後 |
-| 4 | ledger_entry / point_ledger_entry | S3 | planned（ISSUE-0001 が gate） |
+| 4 | ledger_entry / point_ledger_entry | S3 | **draft（schema/fixtures/ADR-0013 追加, version 0.x）**。ISSUE-0001 は ADR-0013 で決着、core 実装済。freeze は上流 session schema freeze（ISSUE-0005）後 |
 | 5 | session_settlement | S4 | planned |
 | 6 | repository / service interface, sync | S5 | planned |
 

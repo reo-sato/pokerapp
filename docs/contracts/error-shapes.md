@@ -57,7 +57,27 @@ front-end が UI 分岐できるよう、core / repository が返す error を *
 | `unknown_player` | 指定 `player_id` が registry に実在しない | assign seat | `UnknownPlayerError` |
 | `invalid_seat` | `seat_no` が範囲外（1..9 外）/ `hand_id` が不正 | assign seat | `InvalidSeatError` |
 
-### ledger / settlement（planned, S3〜S4）
+### ledger / point ledger error code（S3 core 実装済）
 
-例: `insufficient_points`（point 不足→cash 補完判断, S3）、
-`entry_fee_requires_cash`（entry fee は cash only, S3）、`already_settled`（S4）。
+`core/ledger_repository.py` が返す code（additive）。Python 例外階層は
+`LedgerError`（基底）← 各 code に 1:1 対応する subclass。session / player 系の検査は
+既存例外を**再利用**する（`not_found` = `SessionNotFoundError`、`session_closed` =
+`SessionClosedError`（意味を「closed session への entry 追加」にも additive 拡張）、
+`unknown_player` = `UnknownPlayerError`）:
+
+| code | 意味 | 発生する操作（例） | Python 例外（core） |
+|------|------|------------------|---------------------|
+| `not_found` | 指定 `session_id` が存在しない（既存 code を再利用） | add entry / session totals | `SessionNotFoundError` |
+| `session_closed` | closed の session に entry を追加しようとした（再利用） | add entry | `SessionClosedError` |
+| `unknown_player` | 指定 `player_id` が registry に実在しない（再利用） | add entry / grant / balance | `UnknownPlayerError` |
+| `invalid_kind` | ledger kind が定義外 | add entry | `InvalidKindError` |
+| `invalid_reason` | grant reason が grant 系定義外 | grant points | `InvalidReasonError` |
+| `invalid_amount` | 金額不正（負 point / 合計 0 / point 不可 kind への point / 非整数 等） | add entry / grant / adjust / plan payment | `InvalidAmountError` |
+| `invalid_order_detail` | order 明細不正・合計不一致・order 以外への明細 | add entry | `InvalidOrderDetailError` |
+| `entry_fee_requires_cash` | entry fee に point を充当しようとした（業務ルール 1） | add entry | `EntryFeeRequiresCashError` |
+| `insufficient_points` | point 残高不足（spend / 負残高化する adjustment） | add entry / adjust points | `InsufficientPointsError` |
+| `duplicate_grant` | grant の `idempotency_key` が既存と重複 | grant points | `DuplicateGrantError` |
+
+### settlement（planned, S4）
+
+例: `already_settled`（S4）。

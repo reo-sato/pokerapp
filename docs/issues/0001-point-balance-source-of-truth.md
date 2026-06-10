@@ -6,7 +6,7 @@
 
 ## Status
 
-Open
+Resolved（2026-06-10, ADR-0013: A 案 = point_ledger_entry の fold を採用。S3 core 実装済）
 
 ## Severity / Priority
 
@@ -58,33 +58,49 @@ S0（spec expansion）時点では point ledger の物理レイアウト（DB / 
 
 ## Fix
 
-未確定。S3 着手時に専用 ADR を起こし、以下を決める:
+**ADR-0013 で決着（S3 core 実装済）**:
 
-- 残高計算の正規アルゴリズム（fold vs cached）。
-- `current_point_balance` を物理化するか（する場合は再計算ジョブの設計）。
-- session を跨ぐ point の繰越方式と、冪等性キーの定義。
-- session 中間集計で「確定値ではない」ことの UI 表現（speculative/preview ラベル等）。
+- 残高計算の正規アルゴリズムは **fold（A 案）**: `point_balance(player_id)` =
+  当該 player の `point_ledger_entry.delta_points` の総和。計算者は core
+  （`LedgerRepository`）のみで、front-end は結果を表示するだけ（Reproduction 論点 1）。
+- `current_point_balance` は **物理化しない**（B 案棄却: 全件メモリロード方式では
+  二重書き込みの整合リスクだけが残る。将来必要なら derived cache を additive に追加）。
+- 残高は **player に global**（session を跨ぐ）。繰越 entry 不要（C 案棄却）。
+  同一 session 内の `result_credit` → buy-in 充当の同居は **可**（fold は記録順,
+  Reproduction 論点 3）。
+- 冪等性は grant 系の任意 `idempotency_key` の一意性で担保（重複 → `duplicate_grant`,
+  Reproduction 論点 4）。
+- session 中間集計（`session_totals`）は **途中値・非確定**（確定は S4 settlement,
+  Reproduction 論点 2）。UI 上の preview 表現は WS2/WS3 着手時に確定する。
+- 付随決定: point 不足は strict reject（`insufficient_points`）+ `plan_payment` による
+  cash 補完分割、spend 系 point entry は core が ledger entry から同時生成、
+  永続化は専用 `ledger.json`。詳細は ADR-0013 / `docs/contracts/ledger-points.md`。
 
 ## Regression Test
 
-未実装。S3 実装時に以下を追加する想定:
+実装済（`tests/test_point_ledger.py`）:
 
-- `tests/test_point_ledger.py::test_balance_matches_fold_of_entries` — cached/fold 整合性
-- `tests/test_point_ledger.py::test_insufficient_points_falls_back_to_cash` — cash 補完
-- `tests/test_point_ledger.py::test_entry_fee_rejects_points` — entry fee は cash only
-- `tests/test_point_ledger.py::test_grant_idempotency` — manual/campaign grant の重複防止
+- `test_balance_matches_fold_of_entries` — 残高 = fold の一致
+- `test_insufficient_points_falls_back_to_cash` — strict reject + `plan_payment` の cash 補完
+- `test_entry_fee_rejects_points` — entry fee は cash only
+- `test_grant_idempotency` — manual/campaign grant の重複防止
+- `test_grant_and_spend_in_same_session` — 同一 session 内 grant→spend 同居（論点 3）
 
 ## Affected Files
 
-現時点ではなし（spec only）。S3 で `core/point_ledger.py`（planned）を作成予定。
+- `core/ledger.py` / `core/ledger_repository.py`（`core/point_ledger.py` 構想は
+  ledger と point を 1 repository に統合する形に変更）
+- `docs/contracts/ledger-points.md` / `docs/contracts/schemas/{ledger_entry,point_ledger_entry}.schema.json`
 
 ## Related Worklog
 
 - `docs/worklog/2026-05-22-spec-expand-session-ledger-scope.md`
+- `docs/worklog/2026-06-10-s3-ledger-points-core.md`（決着・実装）
 
 ## Related ADRs
 
 - `docs/adr/0003-expand-domain-from-hand-logging-to-session-ledger-and-store-settlement.md`
+- `docs/adr/0013-s3-point-balance-fold-and-ledger-persistence.md`（決着）
 
 ## Related Commits
 
