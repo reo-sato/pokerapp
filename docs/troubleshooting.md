@@ -52,6 +52,8 @@
 - `config.json` の `rfid.enabled` が `true` か確認。
 - **HTTP 方式**: ESP32 が本アプリの `http://<PCのIP>:8787/`（既定ポート `8787`）へ POST できているか、
   PC のファイアウォールでポートが塞がれていないか確認。
+  `rfid.bind_host` が既定の `127.0.0.1` のままだと**同一 PC 内からしか受信できません**。
+  ESP32 から受ける場合は PC の LAN IP に変更してください（[インストールガイド §5](installation.md#5-rfid-を使う場合任意)）。
 - **PC/SC 方式**: `pip install ".[pcsc]"` を実行し、`rfid.transport` を `"pcsc"` にしているか確認。
 - カードが「未知」になる場合は `rfid_cards.json`（タグ→カード対応表）に登録漏れがないか確認。
 - RFID は**任意**です。うまくいかなくても `rfid.enabled` を `false` にすれば音声のみで記録できます。

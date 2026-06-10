@@ -17,7 +17,6 @@ import socket
 import threading
 import time
 import urllib.request
-from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -342,3 +341,42 @@ class TestRFIDHTTPReceiverMultiple:
         for _ in range(3):
             events.append(rfid_q.get(timeout=1.0))
         assert len(events) == 3
+
+
+# ――― ペイロード上限テスト (review hardening) ―――
+
+class TestPayloadLimits:
+    """巨大/不正な Content-Length による OOM・ハンドラ例外を防ぐガード。"""
+
+    def test_oversized_body_rejected_with_413(self, receiver_fixture):
+        receiver, rfid_q, port = receiver_fixture
+        big = b"x" * (20 * 1024)  # MAX_CONTENT_LENGTH (16KB) 超
+        try:
+            _post(port, "/rfid", big)
+            assert False, "413 expected"
+        except urllib.error.HTTPError as e:
+            assert e.code == 413
+        assert rfid_q.empty()
+
+    def test_invalid_content_length_header_rejected_with_400(self, receiver_fixture):
+        receiver, rfid_q, port = receiver_fixture
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        try:
+            conn.putrequest("POST", "/rfid")
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Length", "not-a-number")
+            conn.endheaders()
+            resp = conn.getresponse()
+            assert resp.status == 400
+        finally:
+            conn.close()
+        assert rfid_q.empty()
+
+    def test_normal_payload_still_accepted(self, receiver_fixture):
+        receiver, rfid_q, port = receiver_fixture
+        status, body = _post(port, "/rfid", {
+            "reader_id": "seat_1", "tag_id": "04AABBCC", "timestamp": "",
+        })
+        assert status == 200
+        assert rfid_q.get(timeout=1.0).seat == 1

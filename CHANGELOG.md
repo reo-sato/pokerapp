@@ -6,6 +6,33 @@
 
 ## [Unreleased]
 
+### Fixed / Changed (review hardening — 全体レビューで検出した堅牢化, ISSUE-0012)
+
+- **rebuy / 新ハンドの状態変更を IntegrationThread に一元化**（ISSUE-0012 Fixed）:
+  - GUI の「リバイ」と CLI の `n` / `r` コマンドが `GameStateManager` を **GUI/入力スレッドから直接
+    変更していたレース**（規約「スレッド間通信は queue のみ」違反）を解消。winner と同様に
+    `AudioEvent`（`action="rebuy"` / `"new_hand"`）を queue に積み、IntegrationThread が適用する。
+  - rebuy は `on_action` 通知レコードとして GUI/CLI に返る（スタック表示更新）。
+    **`HandSummary.actions` には積まれない**（ポーカーアクションではないため。回帰テストで固定）。
+  - 副次修正: CLI `n` が `game_state.new_hand()` 直呼びだったためハンドバッファ
+    （actions / stack_start / board / hole_cards）が**リセットされていなかった**不具合も解消
+    （queue 経由で `_start_new_hand` を通るようになった）。
+- **RFID HTTP 受信の堅牢化**:
+  - `rfid.bind_host` 既定を `0.0.0.0` → **`127.0.0.1`** に変更（受信は無認証のため安全側へ。
+    ESP32 から受ける場合は LAN IP に変更 — `docs/installation.md` §5 / `docs/usage.md` 設定表 /
+    `docs/troubleshooting.md` に手順を追記）。
+  - `Content-Length` に **上限 16KB** を導入（巨大 POST による OOM 防止、超過は 413）。
+    不正な `Content-Length` ヘッダは 400（従来はハンドラ例外）。
+- **pokerkit 未導入時の起動クラッシュを解消**: `create_game_state("pokerkit")` が ImportError 時に
+  warning を出して **legacy backend へ自動フォールバック**（既定 backend が pokerkit のため、
+  未導入環境でも音声記録は継続できる。rules-aware 機能は無効）。
+- **テスト/CI**:
+  - 新規: `tests/test_engine_rebuy.py`（5）/ `tests/test_poker_engine_fallback.py`（2）/
+    `tests/test_recognizer_amounts.py`（31 — `parse_amount`/漢数字/席除去のエッジを直接固定）/
+    `tests/test_rfid_http.py` にペイロード上限テスト（3）。**全 330 passed, 0 skipped**。
+  - CI に **ruff**（実バグ系 `F`/`E9` の最小ゲート、`pyproject.toml` 設定、vision 除外）を追加。
+    既存コードの未使用 import 17 件を除去。
+
 ### Added (Phase E part 1 — hand logger × session 統合 write-through / E1+E2-core, v1 リリーストラック S2.x)
 
 - **hand logger を S2 session レイヤに write-through 接続**（v1 issue #10 / Epic #4, ADR-0008 Pattern A）:

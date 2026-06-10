@@ -23,5 +23,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Lint (ruff — 実バグ系 F/E9 の最小ゲート, 設定は pyproject.toml)
+        run: ruff check .
+
       - name: Run tests (vision レガシーは除外、skip 0 が前提)
         run: pytest tests/ -v --ignore=tests/test_vision.py

@@ -579,6 +579,12 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 - ハンド完了ごとにディスクへ書き込む（バッファリングしない）
 - ログファイルは追記モード（既存セッションデータを上書きしない）
 - ESP32 停止・WiFi 切断時 → `rfid.enabled=false` で RFID なしモード継続動作
+- pokerkit 未導入で `engine.backend="pokerkit"`（既定）→ warning を出して legacy backend に
+  自動フォールバック（起動は落とさない。rules-aware 機能は無効）
+- ゲーム状態の変更は IntegrationThread に一元化する。GUI/CLI の操作（新ハンド/ウィナー/リバイ）は
+  `AudioEvent` として queue に積む（`GameStateManager` はロックを持たないため直接変更禁止, ISSUE-0012）
+- RFID HTTP 受信は `bind_host` 既定 `127.0.0.1`（無認証のため。LAN 受信は明示的に変更）+
+  `Content-Length` 上限 16KB（413）
 
 ---
 
