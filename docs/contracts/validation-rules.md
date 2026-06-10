@@ -24,18 +24,30 @@ JSON Schema は **構造**（型・required・形式）を検査するが、業�
 - 読み込み時の leniency: 永続ファイル読込で `created_at` 欠損は許容（空文字で補完）。これは
   **ロード堅牢性の実装詳細**であり、正規の永続形（schema canonical）では `created_at` は required。
 
-## 将来 model（planned）
+## ledger / points / settlement（S3 設計確定 / core 実装 planned — ADR-0011）
 
-対応 phase の freeze 時に本 doc へ追記する。代表例:
+方針は ADR-0011 / `ledger-overview.md` で確定。**core 実装は S3.1（ISSUE-0012）**。core 実装後に本節の
+「planned」を外す。core（`LedgerRepository`, planned）が source of truth:
 
-- **ledger_entry / point_ledger_entry（S3）**:
-  - entry fee は **cash only**（point 不可）。
-  - buy-in / rebuy / add-on / order は cash + point 併用可。
-  - point 不足分は cash で補完（残高 < 必要点数の差分を cash 計上）。
-  - 残高の source of truth は **未確定**（ISSUE-0001）。確定するまで残高 API 契約は freeze しない。
-- **session_settlement（S4）**:
-  - settlement は常に「player → 店」の 1 方向。player 間精算は扱わない。
-  - payment_status は `paid` / `unpaid`（partial は現状扱わない）。
+- **append-only**: `ledger_entry` / `point_ledger_entry` は mutate / delete しない。訂正は新規 reversal
+  （`reverses_entry_id`）/ adjustment / 相殺 spend で表す。
+- **point 残高 = fold**: 残高は `point_ledger_entry.delta_points` の総和（ISSUE-0001 選択肢 A）。cached
+  カラムを権威にしない（cache は将来 fold から導出）。
+- **残高非負 + cash 補完**: 残高を割り込む spend は拒否（`insufficient_points`）。不足分は cash 計上（rule 3）。
+- **ledger↔point 整合**: `ledger_entry.point_amount > 0` には `delta_points = −point_amount`・
+  `related_ledger_entry_id` 設定済の `spend_*` point entry が **ちょうど 1 件** 対応する。
+- **entry fee は cash only**（`kind=entry_fee` ⇒ `point_amount == 0`, rule 1）。buy-in / rebuy / add-on /
+  order は cash + point 併用可（rule 2）。
+- **非ゼロ移動**: 通常 entry は `cash_amount,point_amount ≥ 0` かつ `cash_amount+point_amount > 0`。
+  `delta_points ≠ 0`。adjustment / reversal のみ符号付き可。
+- **参照整合**: `player_id` は registry 実在、`session_id` / `hand_id`（指定時）は session レイヤ実在、
+  `entry_id` 一意。
+- **grant 冪等性**: `idempotency_key` 指定時、同キーの manual/campaign grant 重複を拒否（`duplicate_grant`）。
+- **settlement**:
+  - 常に「player → 店」の 1 方向。player 間精算は扱わない（rule 5）。
+  - **derived materialized view**: `net_due_to_store = 符号付き Σ cash_amount`（当該 session・player）。
+    closed session のみ確定（`session_not_closed` / `already_settled`）。
+  - `payment_status` は `paid` / `unpaid`（partial は扱わない, rule 4）。確定後の唯一の可変フィールド。
 
 ## schema で表現する / しないの境界（指針）
 

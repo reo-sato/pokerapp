@@ -25,6 +25,8 @@ docs/contracts/
 ├── README.md                   ← このファイル（置き場と運用の入口）
 ├── shared-ids.md               ← player_id / session_id / hand_id の共有 ID 契約
 ├── session-seating.md          ← session / seat_assignment / hand_ref 契約（S2 draft, 未 freeze）
+├── ledger-overview.md          ← ledger / point / settlement ドメイン + invariants 契約（S3 draft, 未 freeze）
+├── ledger-schema.md            ← ledger / point / settlement の擬似 JSON Schema 草案（S3 draft）
 ├── versioning-and-freeze.md    ← freeze / versioning / additive vs breaking / freeze order
 ├── repository-interfaces.md    ← front-end が呼ぶ抽象 repository/service interface 契約（テンプレート）
 ├── error-shapes.md             ← validation / not-found 等の error 形契約
@@ -62,8 +64,8 @@ docs/contracts/
 1. shared IDs（最優先・全 phase 共通）
 2. player（S1）
 3. session / seat_assignment / hand_ref（S2）
-4. ledger_entry / point_ledger_entry（S3）
-5. session_settlement（S4）
+4. ledger_entry / point_ledger_entry（S3, **draft** — `ledger-overview.md` / `ledger-schema.md` / ADR-0011）
+5. session_settlement（S4, draft — ADR-0011, S3.3 で derived view 先行）
 6. repository / service interface、sync（S5）
 
 ## 将来拡張余地

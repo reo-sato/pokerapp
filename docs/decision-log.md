@@ -33,6 +33,7 @@
 | ADR-0008 | Hand logger × session/seating integration strategy (Phase 2.x)                     | Accepted | 2026-06-03 | hand logger × session (S2.x) | `docs/adr/0008-hand-logger-session-integration-strategy.md`                                       | 関連: ADR-0006 / ADR-0007 / ISSUE-0005 / 0006 / 0007 |
 | ADR-0009 | Rules-aware hand reconstruction — pokerkit live authority + state estimation & fusion | Accepted | 2026-06-03 | reconstruct / core+integration | `docs/adr/0009-pokerkit-live-rules-authority.md` | R2 engine 実装済(default-off)。R3 planned。関連: ADR-0010 / ISSUE-0008(Fixed) / ISSUE-0009 |
 | ADR-0010 | Contract-first hand core via deterministic record/replay | Accepted | 2026-06-03 | reconstruct / contracts | `docs/adr/0010-contract-first-hand-core-record-replay.md` | 関連: ADR-0008 / ADR-0009 / ISSUE-0010 / ISSUE-0011 |
+| ADR-0011 | Ledger / points / settlement design direction (S3) | Accepted | 2026-06-10 | contracts / core (S3) | `docs/adr/0011-ledger-points-settlement-design-direction.md` | 関連: ADR-0003 / ADR-0007（`sessions[].ledger[]` 案を refine）/ ISSUE-0001 |
 
 <!--
 Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時点で空番。
@@ -43,7 +44,7 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 
 | ID         | Title                                                  | Status | Date       | Area                     | File                                                       | Related Fix / Commit |
 |------------|--------------------------------------------------------|--------|------------|--------------------------|------------------------------------------------------------|----------------------|
-| ISSUE-0001 | point ledger の残高計算と source of truth が未確定     | Open   | 2026-05-22 | spec / future-scope (S3) | `docs/issues/0001-point-balance-source-of-truth.md`        | —                    |
+| ISSUE-0001 | point ledger の残高計算と source of truth が未確定     | Open   | 2026-05-22 | spec / future-scope (S3) | `docs/issues/0001-point-balance-source-of-truth.md`        | ADR-0011（残高=fold で方針確定。残 sub は S3.1/S3.2） |
 | ISSUE-0002 | display_name の uniqueness 仕様の将来拡張が未確定      | Open   | 2026-05-22 | player registry (S1)     | `docs/issues/0002-display-name-uniqueness-scope.md`        | —                    |
 | ISSUE-0003 | 並行開発の contract drift / 凍結タイミング risk       | Open   | 2026-05-22 | planning (WS0–WS3)       | `docs/issues/0003-parallel-dev-contract-drift.md`          | Phase 0a で部分緩和  |
 | ISSUE-0004 | hand_id が int と cross-app 文字列契約で不整合        | Resolved | 2026-05-22 | contracts / shared-ids   | `docs/issues/0004-hand-id-int-vs-cross-app-string.md`      | ADR-0006（複合キー採用） |
@@ -54,3 +55,6 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0009 | actor 競合解決と silent-fold 合成のポリシー未確定 | Open | 2026-06-03 | reconstruct / integration | `docs/issues/0009-actor-conflict-silent-fold-policy.md` | ADR-0009（R3 で確定） |
 | ISSUE-0010 | 決定的 replay の記録境界とスレッド順序近似 | Open | 2026-06-03 | reconstruct / integration | `docs/issues/0010-replay-determinism-record-boundary.md` | ADR-0010（R1/R4） |
 | ISSUE-0011 | hand / action schema の freeze 未確定事項 | Open | 2026-06-03 | contracts / hand core | `docs/issues/0011-hand-action-schema-freeze-blockers.md` | ADR-0010（R4/R5） |
+| ISSUE-0012 | S3.1 ledger / points core schema + repository 実装 | Open | 2026-06-10 | core / contracts (S3.1) | `docs/issues/0012-ledger-core-implementation.md` | ADR-0011（実装タスク） |
+| ISSUE-0013 | S3.2 desktop ledger viewer / editor（別画面） | Open | 2026-06-10 | gui / desktop (S3.2) | `docs/issues/0013-ledger-desktop-viewer.md` | ADR-0011（実装タスク） |
+| ISSUE-0014 | S3.3 settlement 確定 + paid/unpaid + CSV export | Open | 2026-06-10 | core / export (S3.3) | `docs/issues/0014-settlement-export.md` | ADR-0011（実装タスク） |

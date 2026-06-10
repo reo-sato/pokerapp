@@ -6,7 +6,28 @@
 
 ## Status
 
-Open
+Open（方針確定: ADR-0011 で残高 = **fold**（選択肢 A）採用。残サブ問題（idempotency_key 運用 /
+speculative 表示）は S3.1（ISSUE-0012）/ S3.2（ISSUE-0013）でクローズ）
+
+## Update (2026-06-10, S3 planning / ADR-0011)
+
+S3 planning（`docs/adr/0011-ledger-points-settlement-design-direction.md`,
+`docs/contracts/ledger-overview.md`）で本 issue の中心問題を確定:
+
+- **残高計算 = `point_ledger_entry.delta_points` の fold**（選択肢 **A** 採用）。cached カラム（B）/
+  session 繰越テーブル（C）は **権威にしない**。cache は将来 fold からの導出として最適化で足してよいが、
+  fold が source of truth。`ledger_entry.point_amount` は point_ledger_entry のミラー（整合は core enforce）。
+- **Q1（誰が残高を計算するか）** → core（`LedgerRepository.point_balance`）が fold で算出。front-end は
+  表示のみ。
+- **Q2（中間集計は確定値か途中値か）** → open session の集計は **speculative（途中値）**。確定は session
+  close 時の settlement 生成（`commit_settlement`）。UI で区別表示（S3.2, ISSUE-0013）。
+- **Q3（同一 session で grant→spend 同居）** → 可。`point_ledger_entry` は時系列 append-only で、
+  spend は同 session 内の grant 後残高を fold で参照する。
+- **Q4（grant 冪等性）** → `point_ledger_entry.idempotency_key`（optional）で manual/campaign grant の
+  重複を防ぐ（`duplicate_grant`）。運用詳細は S3.1（ISSUE-0012）。
+
+残（freeze 前）: idempotency_key の採番運用、speculative の UI 表現の最終形。これらは S3.1/S3.2 issue で
+クローズし、ledger schema の `1.0` freeze 前提とする。
 
 ## Severity / Priority
 
@@ -85,6 +106,7 @@ S0（spec expansion）時点では point ledger の物理レイアウト（DB / 
 ## Related ADRs
 
 - `docs/adr/0003-expand-domain-from-hand-logging-to-session-ledger-and-store-settlement.md`
+- `docs/adr/0011-ledger-points-settlement-design-direction.md`（残高 = fold で方針確定）
 
 ## Related Commits
 

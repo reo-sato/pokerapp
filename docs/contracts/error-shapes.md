@@ -57,7 +57,23 @@ front-end が UI 分岐できるよう、core / repository が返す error を *
 | `unknown_player` | 指定 `player_id` が registry に実在しない | assign seat | `UnknownPlayerError` |
 | `invalid_seat` | `seat_no` が範囲外（1..9 外）/ `hand_id` が不正 | assign seat | `InvalidSeatError` |
 
-### ledger / settlement（planned, S3〜S4）
+### ledger / points / settlement error code（S3 draft, planned）
 
-例: `insufficient_points`（point 不足→cash 補完判断, S3）、
-`entry_fee_requires_cash`（entry fee は cash only, S3）、`already_settled`（S4）。
+ADR-0011 / `ledger-overview.md` で確定した方針に対応する code（**実装は S3.1, ISSUE-0012**）。
+Python 例外階層は `LedgerError`（基底）← 各 code に 1:1 対応する subclass を想定。共通
+`not_found` / `unknown_player` は再利用。
+
+| code | 意味 | 発生する操作（例） | Python 例外（planned, core） |
+|------|------|------------------|------------------------------|
+| `not_found` | 指定 `entry_id` / `session_id` が存在しない（既存 code 再利用） | reverse / list / settlement | `LedgerNotFoundError` |
+| `unknown_player` | 指定 `player_id` が registry に実在しない（既存 code 再利用） | add entry / grant | `UnknownPlayerError` |
+| `invalid_amount` | 金額が不正（非ゼロ移動違反 / 符号制約違反 / order 明細不正） | add entry / grant | `InvalidAmountError` |
+| `entry_fee_requires_cash` | `kind=entry_fee` に point を充当しようとした（cash only, rule 1） | add entry | `EntryFeeRequiresCashError` |
+| `insufficient_points` | spend が残高を割り込む（不足分は cash 補完, rule 3） | add entry（point 充当） | `InsufficientPointsError` |
+| `duplicate_grant` | 同一 `idempotency_key` の grant が既に存在（冪等性, ISSUE-0001 Q4） | grant points | `DuplicateGrantError` |
+| `session_not_closed` | open session を settlement 確定しようとした（closed のみ確定） | commit settlement | `SessionNotClosedError` |
+| `already_settled` | 確定済 settlement を再確定しようとした | commit settlement | `AlreadySettledError` |
+
+> 上表は ADR-0011 確定の **方針**。実装（例外クラス・厳密文言）は S3.1 で確定し、その時点で本表の
+> 「planned」を外す。`payment_status` の `unpaid↔paid` 操作は訂正として許容（error にしない）。
+> settlement schema の `1.0` freeze は #5（S4）。

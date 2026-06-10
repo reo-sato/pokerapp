@@ -6,6 +6,32 @@
 
 ## [Unreleased]
 
+### Docs / Planning (Phase S3 — ledger / points / settlement layer 設計)
+
+- **ledger / points / settlement layer の設計 + contracts draft 確定**（**docs-only, `.py` / 実 schema /
+  fixtures / `ledger.json` は未変更**）: session world（S2）の上に「お金 / ポイント / 精算」を載せる
+  方針を確定。狙いは「home game host が混乱しないレベルの帳簿」で、複式簿記・決済連携・税務は scope 外。
+  PHH / hand logger JSON は read-only、chips（chip 単位）と cash（整数円）は別単位で自動換算しない。
+  - **ADR-0011** (Accepted): 抽象度（軽量帳簿, not double-entry）/ **2 台帳**（`ledger_entry` =
+    cash+point イベント / `point_ledger_entry` = 残高の権威台帳）+ derived `session_settlement` /
+    **整数円** / **別ストア `ledger.json`**（ADR-0007 の `sessions[].ledger[]` 案を refine）/
+    **point 残高 = fold**（ISSUE-0001 決着）/ **append-only + reversal** で訂正 / **manual-first** /
+    `kind` に `entry_fee` を additive 追加。alternatives A–G を記録。
+  - `docs/contracts/ledger-overview.md`（新規 draft）: 3 エンティティ / フィールド / **9 invariants** /
+    session・hand・player との関係 / repository interface 草案 / error code / migration 方針 / freeze 状態。
+  - `docs/contracts/ledger-schema.md`（新規 draft）: `ledger_entry` / `point_ledger_entry` /
+    `session_settlement` の擬似 JSON Schema（v0.1）/ versioning / ID 参照 / `ledger.json` 形 / 拡張余地。
+  - **ISSUE-0001**（Open, 方針確定）: point 残高 source of truth を **fold**（選択肢 A）に決着。
+    残サブ問題（idempotency_key 運用 / speculative 表示）は S3.1/S3.2 へ。
+  - **ISSUE-0012**（新規 Open）S3.1 core schema + repository / **ISSUE-0013**（新規 Open）S3.2 desktop
+    ledger viewer・editor（別画面）/ **ISSUE-0014**（新規 Open）S3.3 settlement 確定 + CSV export。
+  - **ISSUE-0005** 更新: ledger freeze（#4/#5）は session freeze（#3）の後（依存順）を追記。
+  - `docs/contracts/error-shapes.md` / `validation-rules.md` / `versioning-and-freeze.md`（freeze order
+    #4/#5）/ `README.md` を ledger 用に additive 更新。**decision-log.md** に ADR-0011 / ISSUE-0012〜0014 を
+    登録、ISSUE-0001 行を更新。**CLAUDE.md**（実装状況表 / Future Scope / Phase 3 / freeze order）を
+    「設計確定（ADR-0011）/ 実装 planned」に更新。
+  - **実装は別タスク**（S3.1 → S3.2 → S3.3）。本タスクで `.py` は変更していない（planning-only ガード）。
+
 ### Added (Phase R2 — pokerkit game-state backend, preview / default-off)
 
 - **pokerkit を live ルール権威にした game-state backend**（ADR-0009, **default-off の preview**）:
