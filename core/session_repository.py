@@ -167,6 +167,16 @@ class SessionRepository:
             if tmp_path.exists():
                 tmp_path.unlink(missing_ok=True)
 
+    def reload(self) -> None:
+        """ディスクから session / seating を再読込する（read-only viewer 用）。
+
+        別プロセス（hand logger 等）が `sessions.json` を更新した場合に最新状態を取り込む。
+        業務ルールには影響しない、純粋な再読込のみ（`_player_repo` は別途 reload する）。
+        """
+        self._sessions.clear()
+        self._hands.clear()
+        self._load()
+
     # ――― session CRUD ―――
 
     def create_session(self, label: str | None = None, blinds: dict | None = None) -> Session:
@@ -249,6 +259,15 @@ class SessionRepository:
             seat_no, player_id, session_id, hand_id,
         )
         return assignment
+
+    def list_hand_ids(self, session_id: str) -> list[int]:
+        """ある session に記録済みの hand_id を昇順で返す（hand が無ければ空 list）。
+
+        read-only viewer が「hand ごとの seat assignment」を列挙するための enumerator。
+        unknown session は `not_found`（兄弟 read API と同じ）。
+        """
+        self.get_session(session_id)
+        return sorted(self._hands.get(session_id, {}).keys())
 
     def list_seat_assignments(self, session_id: str, hand_id: int) -> list[SeatAssignment]:
         """あるハンドの seat assignment を seat_no 昇順で返す（空ハンドは空 list）。"""

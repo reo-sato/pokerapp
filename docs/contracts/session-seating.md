@@ -69,9 +69,14 @@ cross-app 参照）は ADR-0006 で確定済み。
 | get session | `session_id` | `Session` | `not_found` |
 | close session | `session_id`, `ended_at` | `Session`（status=closed） | `not_found` / `already_closed` |
 | assign seat for hand | `session_id`, `hand_id`, `seat_no`, `player_id` | `SeatAssignment` | `not_found` / `session_closed` / `seat_taken` / `unknown_player` / `invalid_seat` |
+| list hand ids | `session_id` | `int[]`（記録済み hand_id を昇順） | `not_found` |
 | list seat assignments by hand | `session_id`, `hand_id` | `SeatAssignment[]` | `not_found` |
 | resolve seating for hand_ref | `session_id`, `hand_id` | `HandRef`（snapshot 込み） | `not_found` |
 | current seating | `session_id` | `SeatAssignment[]`（最新 hand から導出） | `not_found` |
+
+> `list hand ids` は read-only viewer（WS2-α）が hand を列挙するための read 専用 enumerator
+> （additive）。`reload`（ディスク再読込）も同様に viewer 用に additive 追加。詳細は
+> `repository-interfaces.md`。schema 自体は不変（0.x のまま）。
 
 - **業務ルールは core が source of truth**。front-end は結果と error code を表示するだけ
   （`validation-rules.md` / `error-shapes.md`）。

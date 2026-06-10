@@ -113,7 +113,7 @@ IntegrationThread
 | hand 確定時 | `IntegrationThread._finalize_hand` | `HandSummary.players[i].player_id = current_seating[seat]` を additive に埋める |
 | JSON 永続化 | `JsonWriter` | 変更不要（dict 化済みデータが additive に増えるだけ） |
 | PHH 出力 | `PHHExporter` | **変更しない**。player_id は載せない |
-| reader 側 | 将来 ledger / settlement / replay GUI | `HandSummary.players[i].player_id` を主参照、null なら name fallback |
+| reader 側 | 将来 ledger / settlement / replay GUI、**WS2-α の read-only Session/Seating Viewer** | `HandSummary.players[i].player_id` を主参照、null なら name fallback。viewer は `SessionRepository` 側（`current_seating` / `list_hand_ids` / `list_seat_assignments`）を読んで seat→player を表示し、`player_id`→`display_name` を解決（不能なら `(unknown)`） |
 
 ### legacy log の扱い (ISSUE-0007 参照)
 
@@ -289,6 +289,10 @@ IntegrationThread
 - **ISSUE-0007**（新規）: legacy log の reconciliation 必要性と方針。
 - **ISSUE-0005**（継続）: schema `1.0` freeze は本 doc + ADR-0008 Accepted + Phase 2.2 実装 + ISSUE-0006
   決着が揃ってから。
+- **ISSUE-0013**（新規, 旧 0008 から採番替え）: WS2-α の read-only Session/Seating Viewer（`gui/session_viewer.py`,
+  `main.py --sessions`）は実装済だが、本 doc の **write-through（Phase 2.2/2.3）が未実装**のため、
+  viewer に実データを供給する本番経路がまだ無い。viewer は inspection 専用（編集機能なし）で、
+  Phase 2.2 で write-through が入れば自然に実データが流れ込む。
 
 ## 10. 参照
 

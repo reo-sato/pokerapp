@@ -90,6 +90,15 @@ class PlayerRepository:
             if tmp_path.exists():
                 tmp_path.unlink(missing_ok=True)
 
+    def reload(self) -> None:
+        """ディスクから再読込する（read-only viewer が外部更新を取り込む用）。
+
+        別プロセス（hand logger 等）が `players.json` を更新した場合に最新状態を取り込む。
+        validation などの業務ルールには影響しない、純粋な再読込のみ。
+        """
+        self._players.clear()
+        self._load()
+
     # ――― validation ―――
 
     def _validate_name(self, raw: str | None, exclude_id: str | None) -> str:

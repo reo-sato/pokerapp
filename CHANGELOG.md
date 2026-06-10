@@ -388,6 +388,40 @@
   - **実装は別タスク**（提案フェーズ R0）。段階導入順は R1 record-only → R2 pokerkit engine（flag）→
     R3 actor/corrections/fusion → R4 contracts → R5 freeze + session 統合。
 
+### Added (WS2-α — Session / Seating Viewer, read-only desktop)
+
+- **Session / Seating Viewer**: S2 core の session / hand-based seating を確認する
+  **read-only inspection 画面**を desktop に追加（hand logger / player registry とは別画面）。
+  - `python main.py --sessions` で起動（hand logger 通常起動 `python main.py` / registry
+    `--players` は無改修・従来通り）。
+  - session 一覧（session_id / started_at / status / label / hand 数 / assignment 数の要約）→
+    選択で 概要 / current seating（最新 hand から導出）/ hand ごとの seat assignments を表示。
+  - `player_id` を `PlayerRepository` で `display_name` に解決（不能なら `(unknown)`、`player_id`
+    自体は保持）。
+  - **再読込（refresh）** ボタンで `SessionRepository` / `PlayerRepository` をディスクから読み直す
+    （別プロセスの更新取り込み）。live auto-refresh は持たない。
+  - empty state（session 無し）/ no-data state（seating / hand 無し）を明示表示。
+  - **read-only**: session/seat/player の作成・編集・削除を一切持たない（許容操作は refresh のみ）。
+    業務ルールは core が source of truth、viewer は read API + name 解決 + 表示整形に徹する。
+  - 実装: `gui/session_viewer.py`（`SessionViewerWindow`）、`main.py`（`--sessions` /
+    `run_session_viewer`）。
+- **core read API（additive）**: read-only viewer 用に enumeration / loading を core に追加。
+  - `SessionRepository.list_hand_ids(session_id)`（記録済み hand_id を昇順列挙）。
+  - `SessionRepository.reload()` / `PlayerRepository.reload()`（ディスクから再読込）。
+  - いずれも additive な read 専用 API。既存 API・業務ルール・schema（0.x）は不変。
+- **Tests**: `tests/test_session_viewer_gui.py` を追加（empty state / 一覧要約 / 選択→詳細 /
+  current seating / name 解決 / unknown player 安全表示 / refresh 再読込 / read-only・別構造の確認）。
+  全体 **192 passed**（ベースライン 177 に対し +15、回帰なし）。
+- **Docs**: `CLAUDE.md`（§ Session / Seating Viewer 追加 + 実装状況表 / コマンド / Phase 2 WS2 更新）/
+  `docs/contracts/repository-interfaces.md` / `session-seating.md`（`list hand ids` / `reload` を
+  additive 追記）/ `hand-integration.md`（viewer が inspection 用である旨）/ ISSUE-0013（新規, viewer の
+  data source 依存 + 拡張 open question。**旧番号 0008 から採番替え** — verify-v1 統合時に
+  pokerkit feasibility の ISSUE-0008 と衝突したため）/ ISSUE-0006（seat change 可視化の関連注記）/
+  `decision-log.md`（ISSUE-0013 登録）/ worklog（`2026-06-03-session-seating-viewer.md`）。
+- **注（統合時更新）**: 元ブランチ時点では write-through 未実装だったが、verify-v1 統合時点では
+  **E1〜E3 で実装済**（`session_layer.enabled`）。有効時は live の hand logger が書いた seating も
+  viewer で確認できる（ISSUE-0013）。
+
 ### Docs / Planning (Phase S2.x — hand logger × session integration strategy)
 
 - **Hand logger × session/seating integration の戦略 planning**（docs-only, code 未変更）:
