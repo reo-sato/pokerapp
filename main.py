@@ -268,7 +268,21 @@ def run_gui() -> None:
     ]
     game_state = _make_game_state(cfg, players, session_cfg["sb"], session_cfg["bb"])
 
-    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
+    # E3 (ADR-0008 / ISSUE-0006): session レイヤ接続。既定 off では従来どおり timestamp session_id。
+    session_layer_enabled = cfg.get("session_layer", {}).get("enabled", False)
+    player_repo = None
+    session_repo = None
+    if session_layer_enabled:
+        from core.player_repository import PlayerRepository
+        from core.session_repository import SessionRepository
+        player_repo = PlayerRepository()
+        session_repo = SessionRepository(player_repo=player_repo)
+        session = session_repo.create_session(
+            label=datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        )
+        session_id = session.session_id  # session レイヤ採番の UUID4 hex
+    else:
+        session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
 
     audio_q = make_audio_queue()
@@ -287,6 +301,8 @@ def run_gui() -> None:
         camera_queue=camera_q,
         stop_event=stop_event,
         rfid_receiver=None,  # rfid_thread 確定後に設定
+        player_repo=player_repo,
+        session_layer_enabled=session_layer_enabled,
     )
 
     audio_thread = AudioThread(
@@ -355,6 +371,7 @@ def run_gui() -> None:
         on_rfid_card=dash.on_rfid_card,
         stop_event=stop_event,
         event_recorder=event_recorder,
+        session_repo=session_repo,
     )
 
     dash.start_threads(

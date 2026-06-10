@@ -207,6 +207,18 @@ class IntegrationThread(threading.Thread):
     def stop(self) -> None:
         self._stop_event.set()
 
+    def set_seat_player_map(self, seat_player_map: Optional[dict[int, str]]) -> None:
+        """seat→player_id を更新し session レイヤの有効/無効を再評価する(E3, ADR-0008)。
+
+        GUI(座席設定ダイアログ)が構築後に seating を確定/変更するための setter。
+        ハンド境界(新ハンドを put する前)に GUI スレッドから呼ぶこと。`session_repo` 未注入なら
+        map を持っても接続を有効化しない(rollback path 維持)。
+        """
+        self._seat_player_map = dict(seat_player_map or {})
+        self._session_layer_active = (
+            self._session_repo is not None and bool(self._seat_player_map)
+        )
+
     def _record(self, event: AudioEvent | CameraEvent | RFIDEvent) -> None:
         """生イベントを sidecar に記録する (recorder 未設定なら no-op = 挙動不変)。解釈前に呼ぶ。"""
         if self._event_recorder is not None:
