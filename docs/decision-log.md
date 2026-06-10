@@ -36,6 +36,8 @@
 | ADR-0011 | Deterministic replay harness (sync timestamp-ordered driver + clock injection) | Accepted | 2026-06-05 | reconstruct / replay (F1) | `docs/adr/0011-deterministic-replay-harness.md` | 関連: ADR-0010 / ADR-0009 / ISSUE-0010 |
 | ADR-0012 | pokerkit を live 既定 backend に切替（legacy は rollback, pokerkit pin） | Accepted | 2026-06-05 | reconstruct / engine (G) | `docs/adr/0012-pokerkit-live-default.md` | 関連: ADR-0009。実機 E2E は Phase H |
 | ADR-0013 | S3 point 残高 = point ledger の fold + ledger 永続化方式 | Accepted | 2026-06-10 | core / ledger・points (S3) | `docs/adr/0013-s3-point-balance-fold-and-ledger-persistence.md` | 関連: ADR-0003 / ADR-0007 / ISSUE-0001（決着） |
+| ADR-0014 | Migrate RFID hardware to PN5180 + ESP32-S3 and make HTTP the canonical transport   | **Superseded** | 2026-06-01 | rfid / hardware migration   | `docs/adr/0014-migrate-rfid-to-pn5180-esp32s3-and-canonical-http-transport.md`                    | 旧番号 0007 から採番替え。**Superseded by ADR-0015**   |
+| ADR-0015 | PN5180 + ESP32-S3 via USB CCID — PC/SC is the canonical RFID transport             | Accepted | 2026-06-01 | rfid / hardware migration   | `docs/adr/0015-pn5180-esp32s3-usb-ccid-pcsc-canonical.md`                                         | 旧番号 0008 から採番替え。Supersedes ADR-0014 / 関連: ISSUE-0015 |
 
 <!--
 Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時点で空番。
@@ -59,3 +61,5 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0011 | hand / action schema の freeze 未確定事項 | Fixed | 2026-06-05 | contracts / hand core | `docs/issues/0011-hand-action-schema-freeze-blockers.md` | Phase F3b #8（hand/action を `1.0` freeze, additionalProperties:true。`_MODELS` 登録 + code↔contract + golden→schema） |
 | ISSUE-0012 | GUI/CLI スレッドが GameStateManager を直接変更しレース | Fixed | 2026-06-08 | threading / GUI / CLI | `docs/issues/0012-gui-thread-rebuy-race.md` | review hardening（rebuy/new_hand を queue 経由に一元化 + 回帰テスト） |
 | ISSUE-0013 | Session/Seating Viewer の data source 依存と将来拡張    | Open   | 2026-06-03 | desktop (WS2-α) / GUI       | `docs/issues/0013-session-viewer-data-source-and-enhancements.md` | 旧 0008 から採番替え（verify-v1 統合時の ID 衝突解消）。E1〜E3 実装で #1 は概ね解消 |
+| ISSUE-0014 | PN5180 + ESP32-S3 firmware ↔ Python の HTTP API 契約 | **Superseded** | 2026-06-01 | rfid / firmware boundary | `docs/issues/0014-pn5180-firmware-http-contract.md`        | 旧番号 0006 から採番替え。Superseded by ISSUE-0015 |
+| ISSUE-0015 | ESP32-S3 (PN5180) USB CCID firmware contract         | Open   | 2026-06-01 | rfid / firmware boundary | `docs/issues/0015-pn5180-usb-ccid-firmware-contract.md`    | 旧番号 0007 から採番替え。ADR-0015 follow-up   |

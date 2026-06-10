@@ -3,7 +3,7 @@
 ## プロジェクト概要
 
 ライブポーカートーナメントのハンド履歴を自動記録する Python アプリケーション。
-ディーラー口元マイク（faster-whisper 音声認識）と RFID NFC（ESP32 + PN532）の 2 ソースを統合し、
+ディーラー口元マイク（faster-whisper 音声認識）と RFID NFC（**ESP32-S3 + PN5180**, USB CCID で PC/SC 公開, ADR-0015）の 2 ソースを統合し、
 JSON/PHH 形式でハンドログを出力する。
 
 - **対象**: 小規模クラブ・個人配信向け
@@ -64,8 +64,8 @@ pokerapp/
 │   └── recognizer.py              ← parse_action(), parse_amount(), apply_corrections()
 │
 ├── rfid/
-│   ├── http_receiver.py           ← RFIDHTTPReceiver (ESP32 HTTP POST 受信)
-│   ├── reader_thread.py           ← RFIDThread (pyscard PC/SC 直接読み取り)
+│   ├── reader_thread.py           ← RFIDThread (pyscard PC/SC, canonical: PN5180+ESP32-S3 を USB CCID で公開, ADR-0015)
+│   ├── http_receiver.py           ← RFIDHTTPReceiver (HTTP POST 受信, optional secondary: debug/remote 用, ADR-0015)
 │   ├── bridge.py                  ← RFID ブリッジユーティリティ
 │   └── card_master.py             ← CardMaster (rfid_cards.json ロード・検索)
 │
@@ -94,8 +94,10 @@ pokerapp/
 |------|------------|------|
 | 音声認識 | faster-whisper ≥ 1.0 | CPU int8 モード |
 | マイク入力 | PyAudio ≥ 0.2.13 | |
-| RFID (HTTP) | 標準 http.server | ESP32 から HTTP POST 受信 |
-| RFID (PC/SC) | pyscard ≥ 2.0.7 | transport="pcsc" 時のみ |
+| RFID reader IC | **PN5180** | ISO 15693 (UID 8B) + 14443 A/B 対応。ADR-0015 で採用 |
+| RFID MCU | **ESP32-S3** | native USB で **USB CCID class** を実装し PN5180 ×N を PC/SC multi-slot として公開。ADR-0015 |
+| RFID (PC/SC, **canonical**) | pyscard ≥ 2.0.7 | OS 標準 PC/SC スタック越しに pyscard が reader_name で列挙。第一系統（ADR-0015） |
+| RFID (HTTP, **optional secondary**) | 標準 http.server | debug / remote / 分散設置の限定用途で残置（ADR-0015） |
 | PHH 出力 | pokerkit ≥ 0.5 | |
 | GUI | customtkinter ≥ 5.2 | |
 | テスト | pytest ≥ 7.0 | |
@@ -311,8 +313,9 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | 機能 | 状態 | 備考 |
 |------|------|------|
 | 音声認識 (Whisper) | ✅ 実装済 | `audio/recognizer.py` |
-| RFID HTTP 受信 | ✅ 実装済 | `rfid/http_receiver.py` |
-| RFID PC/SC 受信 | ✅ 実装済 | `rfid/reader_thread.py` |
+| RFID PC/SC 受信 | ✅ 実装済 (canonical) | `rfid/reader_thread.py`（ESP32-S3 USB CCID 経由で PN5180 公開, ADR-0015） |
+| RFID HTTP 受信 | ✅ 実装済 (optional secondary) | `rfid/http_receiver.py`（debug/remote 用, ADR-0015） |
+| ESP32-S3 USB CCID firmware ↔ Python 契約固定 | 🔲 planned | ISSUE-0007（USB descriptor / reader_name / ATR / 8B UID 等） |
 | RFID カード照合 | ✅ 実装済 | `rfid/card_master.py` |
 | ストリート自動遷移 (RFID) | ✅ 実装済 | board 枚数 3/4/5 で遷移 |
 | Confidence 算出 | ✅ 実装済 | センサー組み合わせ行列 |
@@ -695,7 +698,8 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 - 認識エラーでクラッシュしない → `try/except` で捕捉し `needs_review=True` を付与
 - ハンド完了ごとにディスクへ書き込む（バッファリングしない）
 - ログファイルは追記モード（既存セッションデータを上書きしない）
-- ESP32 停止・WiFi 切断時 → `rfid.enabled=false` で RFID なしモード継続動作
+- ESP32 停止・WiFi 切断時（HTTP, optional secondary）/ ESP32-S3 USB 切断・USB CCID 再列挙時
+  （PC/SC, canonical 移行後）→ `rfid.enabled=false` で RFID なしモード継続動作（詳細挙動は ISSUE-0015）
 - pokerkit 未導入で `engine.backend="pokerkit"`（既定）→ warning を出して legacy backend に
   自動フォールバック（起動は落とさない。rules-aware 機能は無効）
 - ゲーム状態の変更は IntegrationThread に一元化する。GUI/CLI の操作（新ハンド/ウィナー/リバイ）は

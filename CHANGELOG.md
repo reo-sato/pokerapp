@@ -470,6 +470,29 @@
 - **Docs**: `error-shapes.md`（session error を実装済に更新 + `player_already_seated` 追記）/
   `repository-interfaces.md` / `session-seating.md`（core 実装済を反映）/ `CLAUDE.md`
   （§ Session & Seating, 実装状況表, Phase 2 / freeze order）を更新。
+### Docs / Planning (RFID hardware migration — PCSC canonical pivot)
+
+> 注: 本セクションの ADR/ISSUE は verify-v1 統合時に **0007/0008→0014/0015（ADR）、0006/0007→0014/0015（ISSUE）に採番替え**（既存 ID との衝突解消）。
+
+- **RFID hardware を PN5180 + ESP32-S3 に移行**する仕様変更の方針 ADR を **訂正**:
+  - **ADR-0015** (Accepted, **supersedes ADR-0014**): ESP32-S3 が **USB CCID** として PN5180 ×N を
+    PC/SC multi-slot で公開し、ホスト側は **pyscard 経由の PC/SC を canonical（本筋）** とする。
+    `rfid/reader_thread.py` が第一系統。`rfid/http_receiver.py` は **optional secondary**
+    （debug / remote 用）に降格。`reader_configs` の reader_name ↔ role/seat マッピング契約、
+    `rfid_cards.json` 形式、confidence 行列、`RFIDEvent` は不変。`tag_id` UID 長は 4/7/8B 許容。
+  - **ADR-0014** (**Superseded by ADR-0015**): 旧 ADR は「HTTP を canonical / PCSC を legacy」
+    としていたが、これは作業者の誤想定による誤決定。history として残置。
+  - **ISSUE-0015** (Open): ESP32-S3 USB CCID firmware ↔ host の契約（USB descriptors /
+    reader_name / ATR / pseudo-APDU / 8B UID 取得 / hot-plug 通知）を register。
+  - **ISSUE-0014** (**Superseded by ISSUE-0015**): HTTP API 契約を追跡していた旧 issue は本筋から
+    外れたため Supersede。
+  - **CLAUDE.md**: プロジェクト概要 / ディレクトリ構成 / 技術スタック / 実装状況 / エラーハンドリング
+    方針を「PC/SC canonical（USB CCID 経由）/ HTTP optional secondary」に flip。
+  - **decision-log.md**: ADR-0015 / ISSUE-0015 を追加、ADR-0014 / ISSUE-0014 を Superseded に更新。
+  - フォローアップ（次タスク）: `rfid/reader_thread.py` / `rfid/bridge.py` docstring と
+    `config_default.json` を PCSC canonical 前提に書き直し、`card_master.normalize_tag_id` の 8B UID
+    テスト追加、`tests/test_rfid.py` に 8B UID PCSC fixture 追加、ESP32-S3 firmware USB CCID
+    descriptor の確定を ISSUE-0015 に貼る。
 
 ### Docs / Planning (Phase 0b — S2 contracts)
 
