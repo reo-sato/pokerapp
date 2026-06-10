@@ -36,7 +36,7 @@ from core.player_repository import (
 )
 
 if TYPE_CHECKING:
-    from core.player import Player
+    pass
 
 logger = logging.getLogger(__name__)
 

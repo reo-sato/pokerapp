@@ -108,6 +108,7 @@ GUI と `--cli` はどちらも**音声でハンドを記録**します。配信
 | | `language` | `ja` | 認識言語 |
 | `rfid` | `enabled` | `false` | RFID を使うか（任意） |
 | | `transport` | `http` | `http`（ESP32）/ `pcsc`（リーダー直結） |
+| | `bind_host` | `127.0.0.1` | HTTP 受信アドレス。ESP32 から受ける場合は PC の LAN IP に変更（無認証のため信頼できるネットワークのみ） |
 | | `bind_port` | `8787` | HTTP 受信ポート |
 | | `card_master_file` | `./rfid_cards.json` | タグ→カード対応表 |
 | `recording` | `enabled` | `false` | 生イベントの記録（再現・検証用、任意） |

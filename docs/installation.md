@@ -59,9 +59,12 @@ RFID は**任意**です。使わない場合は何もしなくて構いませ�
 ### HTTP 方式（ESP32 + PN532、推奨）
 
 1. `config.json` の `rfid.enabled` を `true` に。
-2. ESP32 側から、読み取り結果を本アプリの `http://<PCのIP>:8787/`（既定ポート `8787`）へ POST するよう設定。
-3. `rfid.readers` で各リーダー（`seat_1`…`seat_9` / `board_1`…`board_5`）の役割を確認・調整。
-4. カード対応表 `rfid_cards.json`（`tag_id` → カード）を用意。
+2. `rfid.bind_host` を PC の LAN IP（例 `192.168.1.20`）に変更。
+   既定の `127.0.0.1` は同一 PC 内からのみ受信します（安全側の既定）。
+   受信は認証なしのため、LAN 公開（LAN IP / `0.0.0.0`）は店舗の信頼できる Wi-Fi でのみ行ってください。
+3. ESP32 側から、読み取り結果を本アプリの `http://<PCのIP>:8787/`（既定ポート `8787`）へ POST するよう設定。
+4. `rfid.readers` で各リーダー（`seat_1`…`seat_9` / `board_1`…`board_5`）の役割を確認・調整。
+5. カード対応表 `rfid_cards.json`（`tag_id` → カード）を用意。
 
 ### PC/SC 方式（カードリーダー直結）
 

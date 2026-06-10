@@ -5,3 +5,4 @@ numpy>=1.24,<3
 pokerkit>=0.7.0,<0.8.0
 jsonschema>=4.0,<5
 pytest>=7.0
+ruff>=0.4,<1

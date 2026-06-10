@@ -69,8 +69,18 @@ def create_game_state(
     - それ以外（既定 "legacy"）: 既存 `GameStateManager`
     """
     if backend == "pokerkit":
-        logger.info("Using pokerkit game-state backend (preview)")
-        return PokerkitGameState(players, sb, bb)
+        try:
+            engine = PokerkitGameState(players, sb, bb)
+        except ImportError:
+            # 既定 backend が pokerkit (Phase G) のため、未導入環境でも起動だけは
+            # 落とさない。rules-aware 機能（actor 推定/合法手射影等）は無効になる。
+            logger.warning(
+                "pokerkit が import できないため legacy backend にフォールバックします"
+                "（`pip install pokerkit` で rules-aware を有効化）"
+            )
+            return GameStateManager(players, sb, bb)
+        logger.info("Using pokerkit game-state backend")
+        return engine
     return GameStateManager(players, sb, bb)
 
 

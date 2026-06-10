@@ -411,6 +411,10 @@ class IntegrationThread(threading.Thread):
             self._finalize_hand(winner_seat)
             return
 
+        if action == "rebuy":
+            self._handle_rebuy(event)
+            return
+
         # ベッティングアクション。rules-aware backend（pokerkit）は境界で actor 推定 + 合法手
         # 射影、legacy（空 legal_context）は従来経路で挙動不変（ADR-0009 §1）。
         legal_ctx = gs.legal_context()
@@ -418,6 +422,40 @@ class IntegrationThread(threading.Thread):
             self._handle_rules_aware_action(event, legal_ctx)
         else:
             self._handle_legacy_action(event)
+
+    def _handle_rebuy(self, event: AudioEvent) -> None:
+        """GUI/CLI から queue 経由で届いた rebuy を integration スレッドで適用する。
+
+        GameStateManager / PokerkitGameState はロックを持たないため、状態変更は本スレッドに
+        一元化する（規約「スレッド間通信は queue のみ」）。リバイはポーカーアクションではない
+        ため HandSummary.actions には積まず、on_action への通知レコードのみ発行する
+        （GUI/CLI はこれを受けてスタック表示を更新する）。
+        """
+        gs = self._game_state
+        seat = event.seat if event.seat is not None else _extract_seat_from_text(event.raw_text)
+        if seat is None:
+            logger.warning("rebuy event without seat: %r", event.raw_text)
+            return
+        try:
+            gs.rebuy(seat, event.amount)
+        except ValueError:
+            logger.exception("rebuy failed (seat=%s amount=%s)", seat, event.amount)
+            return
+        if self._on_action:
+            self._on_action(ActionRecord(
+                hand_id=gs.hand_id,
+                timestamp=self._now_iso(),
+                street=gs.street,
+                seat=seat,
+                player_name=gs.get_player_name(seat),
+                action="rebuy",
+                amount=event.amount,
+                pot_after=gs.pot,
+                stack_after=gs.get_stack(seat),
+                source={"camera": False, "audio": False, "rfid": False},
+                needs_review=False,
+                confidence=1.0,
+            ))
 
     def _handle_legacy_action(self, event: AudioEvent) -> None:
         """rules-aware でない backend（legacy）の従来アクション処理（挙動不変）。"""
