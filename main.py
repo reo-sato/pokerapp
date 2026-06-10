@@ -157,11 +157,11 @@ def run_cli() -> None:
                 rfid_queue=rfid_q,
                 card_master=card_master,
                 reader_configs=rfid_cfg.get("readers", {}),
-                bind_host=rfid_cfg.get("bind_host", "0.0.0.0"),
+                bind_host=rfid_cfg.get("bind_host", "127.0.0.1"),
                 bind_port=rfid_cfg.get("bind_port", 8787),
                 stop_event=stop_event,
             )
-            print(f"RFID HTTP受信スレッド起動 ({rfid_cfg.get('bind_host','0.0.0.0')}:{rfid_cfg.get('bind_port',8787)})。")
+            print(f"RFID HTTP受信スレッド起動 ({rfid_cfg.get('bind_host','127.0.0.1')}:{rfid_cfg.get('bind_port',8787)})。")
         else:
             from rfid.reader_thread import RFIDThread
             rfid_thread = RFIDThread(
@@ -192,6 +192,11 @@ def run_cli() -> None:
     print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー  [r <席> <金額>]=リバイ")
     print("ディーラーがアナウンスすると自動検出されます。\n")
 
+    # GameStateManager はロックを持たないため、状態変更コマンド (n/w/r) はすべて
+    # audio_q 経由で IntegrationThread に処理させる（直接呼ぶと apply_action とレースする）。
+    from core.events import AudioEvent
+    import time as _time
+
     try:
         while True:
             line = input("> ").strip()
@@ -203,17 +208,17 @@ def run_cli() -> None:
             if cmd == "q":
                 break
             elif cmd == "n":
-                game_state.new_hand()
-                print(f"新ハンド開始: hand_id={game_state.hand_id}")
+                audio_q.put(AudioEvent(
+                    action="new_hand", amount=0, timestamp=_time.time(), raw_text="",
+                ))
+                print("新ハンド開始を送信しました。")
             elif cmd == "w" and len(parts) >= 2:
                 try:
                     seat = int(parts[1])
-                    from core.events import AudioEvent
-                    import time
                     audio_q.put(AudioEvent(
                         action="winner",
                         amount=0,
-                        timestamp=time.time(),
+                        timestamp=_time.time(),
                         raw_text=f"シート{seat} ウィナー",
                     ))
                 except ValueError:
@@ -222,9 +227,12 @@ def run_cli() -> None:
                 try:
                     seat = int(parts[1])
                     amount = int(parts[2])
-                    game_state.rebuy(seat, amount)
-                    print(f"リバイ: 席{seat} +{amount} → スタック {game_state.get_stack(seat)}")
-                except (ValueError, Exception) as e:
+                    audio_q.put(AudioEvent(
+                        action="rebuy", amount=amount, timestamp=_time.time(),
+                        raw_text=f"シート{seat} リバイ {amount}", seat=seat,
+                    ))
+                    print(f"リバイを送信しました: 席{seat} +{amount}（反映はアクション表示で確認）")
+                except ValueError as e:
                     print(f"エラー: {e}")
             else:
                 print("不明なコマンドです。q / n / w <席> / r <席> <金額>")
@@ -342,7 +350,7 @@ def run_gui() -> None:
                 rfid_queue=rfid_q,
                 card_master=card_master,
                 reader_configs=rfid_cfg.get("readers", {}),
-                bind_host=rfid_cfg.get("bind_host", "0.0.0.0"),
+                bind_host=rfid_cfg.get("bind_host", "127.0.0.1"),
                 bind_port=rfid_cfg.get("bind_port", 8787),
                 stop_event=stop_event,
             )

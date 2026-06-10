@@ -24,15 +24,28 @@ JSON Schema は **構造**（型・required・形式）を検査するが、業�
 - 読み込み時の leniency: 永続ファイル読込で `created_at` 欠損は許容（空文字で補完）。これは
   **ロード堅牢性の実装詳細**であり、正規の永続形（schema canonical）では `created_at` は required。
 
+## ledger_entry / point_ledger_entry（S3, 実装済 — `core/ledger_repository.py` が source of truth）
+
+詳細は `ledger-points.md` / ADR-0013。要点:
+
+- **entry fee は cash only**（`point_amount > 0` → `entry_fee_requires_cash`）。
+- **buy_in / rebuy / add_on / order は cash + point 併用可**。`adjustment` / `entry_fee` への
+  point は不可（point 補正は `adjust_points`）。
+- **point 不足分は cash で補完**: 分割計算は core の `plan_payment` が行う（front-end は
+  再実装しない）。`add_entry` 自体は残高超過を `insufficient_points` で strict に拒否する。
+- **残高の source of truth は point_ledger_entry の fold**（ISSUE-0001 決着 = ADR-0013）。
+  残高は player に global・常に 0 以上。cached 残高カラムは持たない。
+- **spend 系 point entry は core が同時生成**（`related_ledger_entry_id` back-link）。
+- **grant の冪等性**: 任意の `idempotency_key` の一意性で担保（重複 → `duplicate_grant`）。
+- **order 明細**: `kind=order` のみ必須。`unit_amount * quantity == cash_amount + point_amount`。
+- **金額の符号**: `point_amount >= 0` 常時。`cash_amount` は `adjustment` のみ負値可（非 0）。
+  他 kind は `cash_amount >= 0` かつ合計正。
+- **entry 追加は open session のみ**（closed → `session_closed`）。
+
 ## 将来 model（planned）
 
 対応 phase の freeze 時に本 doc へ追記する。代表例:
 
-- **ledger_entry / point_ledger_entry（S3）**:
-  - entry fee は **cash only**（point 不可）。
-  - buy-in / rebuy / add-on / order は cash + point 併用可。
-  - point 不足分は cash で補完（残高 < 必要点数の差分を cash 計上）。
-  - 残高の source of truth は **未確定**（ISSUE-0001）。確定するまで残高 API 契約は freeze しない。
 - **session_settlement（S4）**:
   - settlement は常に「player → 店」の 1 方向。player 間精算は扱わない。
   - payment_status は `paid` / `unpaid`（partial は現状扱わない）。

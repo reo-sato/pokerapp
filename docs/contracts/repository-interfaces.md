@@ -91,11 +91,46 @@ current_seating(session_id: str) -> list[SeatAssignment]   # 最新 hand から�
   `session_id` 採番方式・永続形は ADR-0007 で core について確定。schema `1.0` への昇格は
   ISSUE-0005 の残項目（hand logger 接続・seat change UI 要件）決着後。
 
-## ledger 以降（planned）
+## ledger_entry / point_ledger_entry interface（S3 core 実装済, schema は draft）
+
+詳細・モデル定義は `ledger-points.md` / ADR-0013（ISSUE-0001 決着）。core 実装は
+`core/ledger_repository.py`。語彙非依存の契約:
+
+| 操作 | 入力 | 出力 | error |
+|------|------|------|-------|
+| add ledger entry | `session_id`, `player_id`, `kind`, `cash_amount`, `point_amount`, `note?`, `order?` | `LedgerEntry`（point 充当時は spend entry を core が同時生成） | not-found / session-closed / unknown-player / invalid-kind / invalid-amount / invalid-order-detail / entry-fee-requires-cash / insufficient-points |
+| list ledger entries | `session_id?`, `player_id?` | `LedgerEntry[]`（記録順） | — |
+| session totals（中間集計・途中値） | `session_id` | player_id → buy-in 合計 / 注文合計 | not-found |
+| point balance | `player_id` | int（fold 結果） | unknown-player |
+| grant points | `player_id`, `points`, `reason`, `idempotency_key?`, `note?` | `PointLedgerEntry` | unknown-player / invalid-reason / invalid-amount / duplicate-grant |
+| adjust points | `player_id`, `delta_points`, `note?` | `PointLedgerEntry` | unknown-player / invalid-amount / insufficient-points |
+| list point entries | `player_id?` | `PointLedgerEntry[]`（記録順） | — |
+| plan payment（cash 補完） | `player_id`, `total_amount`, `use_points?` | `(cash_amount, point_amount)` | unknown-player / invalid-amount |
+
+Python 具象（`core/ledger_repository.py` と一致）:
+
+```text
+add_entry(session_id, player_id, kind, cash_amount=0, point_amount=0,
+          note=None, order=None) -> LedgerEntry
+list_entries(session_id=None, player_id=None) -> list[LedgerEntry]
+session_totals(session_id) -> dict[player_id, {"buy_in_total": int, "order_total": int}]
+point_balance(player_id) -> int
+grant_points(player_id, points, reason, idempotency_key=None, note=None) -> PointLedgerEntry
+adjust_points(player_id, delta_points, note=None) -> PointLedgerEntry
+list_point_entries(player_id=None) -> list[PointLedgerEntry]
+plan_payment(player_id, total_amount, use_points=True) -> tuple[int, int]
+```
+
+- **残高計算と cash 補完の分割は core のみが行う**（front-end は `point_balance` /
+  `plan_payment` の結果を表示・転記するだけ）。
+- mobile は同 interface の in-memory mock を `fixtures/{ledger_entry,point_ledger_entry}/` で
+  先行実装できる。
+- **schema は未 freeze**（draft 0.1）。`1.0` 昇格は上流 session schema freeze（ISSUE-0005）後。
+
+## settlement 以降（planned）
 
 | model | interface | phase |
 |-------|-----------|-------|
-| ledger_entry / point_ledger_entry | entry 追加、中間集計（buy-in 合計 / 注文合計）、残高取得 | S3（ISSUE-0001 が gate） |
 | session_settlement | settlement 確定、paid/unpaid 操作 | S4 |
 
 各 interface は対応 phase の freeze 時に本 doc へ追記する。S5 で local 実装と API client 実装に

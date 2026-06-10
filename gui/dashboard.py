@@ -22,7 +22,7 @@ import queue
 import threading
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from core.game_state import GameStateManager
@@ -261,18 +261,23 @@ class GUIDashboard:
         ))
 
     def _cmd_rebuy(self) -> None:
+        from core.events import AudioEvent
         try:
             seat = int(self._rebuy_seat_var.get())
             amount = int(self._rebuy_amount_entry.get().strip())
         except ValueError:
             self._append_log("⚠ リバイ入力が不正です。", tag="review")
             return
-        try:
-            self._gs.rebuy(seat, amount)
-            self._refresh_player_row(seat)
-            self._append_log(f"リバイ: 席{seat} +{amount:,}", tag="medium")
-        except Exception as e:
-            self._append_log(f"⚠ リバイ失敗: {e}", tag="review")
+        if amount <= 0:
+            self._append_log("⚠ リバイ金額は正の整数で入力してください。", tag="review")
+            return
+        # GameStateManager はロックを持たないため、状態変更は IntegrationThread に一元化する
+        # （winner/new_hand と同じ queue 経由。適用結果は on_action の rebuy レコードで返り、
+        # _poll_updates がスタック表示とログを更新する）。
+        self._audio_queue.put(AudioEvent(
+            action="rebuy", amount=amount, timestamp=time.time(),
+            raw_text=f"シート{seat} リバイ {amount}", seat=seat,
+        ))
 
     def _cmd_edit_seats(self) -> None:
         """座席→プレイヤーの割り当てを編集する(E3, ISSUE-0006)。

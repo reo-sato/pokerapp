@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Optional
 
 from core.constants import (
     ACTION_KEYWORDS,
-    KANJI_ALL,
     KANJI_DIGIT,
     KANJI_UNIT,
     WHISPER_PROMPT_JA,

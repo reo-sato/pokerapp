@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/ledger_entry.schema.json",
+  "title": "LedgerEntry",
+  "version": "0.1",
+  "description": "S3 draft (未 freeze)。session 中の金銭イベント 1 件。cash と point の併用を 1 行で表す (業務ルール 2)。kind 別の金額制約 (entry fee cash only / adjustment のみ負 cash 可 / point 残高検証 / order 合計整合) は core が enforce。詳細は docs/contracts/ledger-points.md / ADR-0013。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entry_id", "session_id", "player_id", "kind", "occurred_at", "cash_amount", "point_amount"],
+  "properties": {
+    "entry_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "opaque な非空文字列。ledger レイヤが採番する (UUID4 hex 推奨, ADR-0013)。"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "紐づく session (S2 session レイヤの session_id)。"
+    },
+    "player_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "対象 player (S1 registry の player_id)。"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["buy_in", "rebuy", "add_on", "order", "adjustment", "entry_fee"],
+      "description": "金銭イベント種別。entry_fee は cash only (業務ルール 1, core が enforce)。"
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "発生時刻 (ISO 8601)。"
+    },
+    "cash_amount": {
+      "type": "integer",
+      "description": "cash 計上額。adjustment 以外は 0 以上 (cross-field, core が enforce)。"
+    },
+    "point_amount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "point 充当額。buy_in/rebuy/add_on/order のみ正値可 (業務ルール 2)。残高検証と spend 系 point_ledger_entry の同時生成は core が行う。"
+    },
+    "note": {
+      "type": "string",
+      "description": "任意メモ。"
+    },
+    "order": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item_name", "unit_amount", "quantity"],
+      "description": "kind=order のみ必須の明細。unit_amount * quantity = cash_amount + point_amount (cross-field, core が enforce)。",
+      "properties": {
+        "item_name": {"type": "string", "minLength": 1},
+        "unit_amount": {"type": "integer", "minimum": 0},
+        "quantity": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

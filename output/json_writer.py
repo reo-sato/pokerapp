@@ -5,7 +5,7 @@ import logging
 import os
 from pathlib import Path
 
-from core.hand_log import ActionRecord, HandSummary
+from core.hand_log import HandSummary
 
 logger = logging.getLogger(__name__)
 

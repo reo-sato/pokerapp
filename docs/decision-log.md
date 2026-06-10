@@ -35,6 +35,7 @@
 | ADR-0010 | Contract-first hand core via deterministic record/replay | Accepted | 2026-06-03 | reconstruct / contracts | `docs/adr/0010-contract-first-hand-core-record-replay.md` | 関連: ADR-0008 / ADR-0009 / ISSUE-0010 / ISSUE-0011 |
 | ADR-0011 | Deterministic replay harness (sync timestamp-ordered driver + clock injection) | Accepted | 2026-06-05 | reconstruct / replay (F1) | `docs/adr/0011-deterministic-replay-harness.md` | 関連: ADR-0010 / ADR-0009 / ISSUE-0010 |
 | ADR-0012 | pokerkit を live 既定 backend に切替（legacy は rollback, pokerkit pin） | Accepted | 2026-06-05 | reconstruct / engine (G) | `docs/adr/0012-pokerkit-live-default.md` | 関連: ADR-0009。実機 E2E は Phase H |
+| ADR-0013 | S3 point 残高 = point ledger の fold + ledger 永続化方式 | Accepted | 2026-06-10 | core / ledger・points (S3) | `docs/adr/0013-s3-point-balance-fold-and-ledger-persistence.md` | 関連: ADR-0003 / ADR-0007 / ISSUE-0001（決着） |
 
 <!--
 Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時点で空番。
@@ -45,7 +46,7 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 
 | ID         | Title                                                  | Status | Date       | Area                     | File                                                       | Related Fix / Commit |
 |------------|--------------------------------------------------------|--------|------------|--------------------------|------------------------------------------------------------|----------------------|
-| ISSUE-0001 | point ledger の残高計算と source of truth が未確定     | Open   | 2026-05-22 | spec / future-scope (S3) | `docs/issues/0001-point-balance-source-of-truth.md`        | —                    |
+| ISSUE-0001 | point ledger の残高計算と source of truth が未確定     | Resolved | 2026-05-22 | core / ledger (S3)     | `docs/issues/0001-point-balance-source-of-truth.md`        | ADR-0013（fold 採用）+ S3 core 実装 + `tests/test_point_ledger.py` |
 | ISSUE-0002 | display_name の uniqueness 仕様の将来拡張が未確定      | Open   | 2026-05-22 | player registry (S1)     | `docs/issues/0002-display-name-uniqueness-scope.md`        | —                    |
 | ISSUE-0003 | 並行開発の contract drift / 凍結タイミング risk       | Open   | 2026-05-22 | planning (WS0–WS3)       | `docs/issues/0003-parallel-dev-contract-drift.md`          | Phase 0a で部分緩和  |
 | ISSUE-0004 | hand_id が int と cross-app 文字列契約で不整合        | Resolved | 2026-05-22 | contracts / shared-ids   | `docs/issues/0004-hand-id-int-vs-cross-app-string.md`      | ADR-0006（複合キー採用） |
@@ -56,3 +57,4 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0009 | actor 競合解決と silent-fold 合成のポリシー未確定 | Open | 2026-06-03 | reconstruct / integration | `docs/issues/0009-actor-conflict-silent-fold-policy.md` | ADR-0009（R3 で確定） |
 | ISSUE-0010 | 決定的 replay の記録境界とスレッド順序近似 | Resolved | 2026-06-03 | reconstruct / integration | `docs/issues/0010-replay-determinism-record-boundary.md` | Phase B+C #6（記録境界・clock 源を確定 + AudioEvent.{seat,confidence} 露出）。replayer/許容度は Phase F #8 |
 | ISSUE-0011 | hand / action schema の freeze 未確定事項 | Fixed | 2026-06-05 | contracts / hand core | `docs/issues/0011-hand-action-schema-freeze-blockers.md` | Phase F3b #8（hand/action を `1.0` freeze, additionalProperties:true。`_MODELS` 登録 + code↔contract + golden→schema） |
+| ISSUE-0012 | GUI/CLI スレッドが GameStateManager を直接変更しレース | Fixed | 2026-06-08 | threading / GUI / CLI | `docs/issues/0012-gui-thread-rebuy-race.md` | review hardening（rebuy/new_hand を queue 経由に一元化 + 回帰テスト） |

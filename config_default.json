@@ -21,7 +21,8 @@
   "rfid": {
     "enabled": false,
     "transport": "http",
-    "bind_host": "0.0.0.0",
+    "bind_host": "127.0.0.1",
+    "_bind_host_comment": "ESP32 等 LAN 上の機器から受信する場合は PC の LAN IP（または 0.0.0.0）に変更する。受信は無認証のため、0.0.0.0 は信頼できるネットワークでのみ使用すること。",
     "bind_port": 8787,
     "card_master_file": "./rfid_cards.json",
     "readers": {

@@ -34,3 +34,13 @@ pokerapp = "main:main"
 # vision / tests / tools / docs は配布パッケージから除外
 packages = ["core", "audio", "rfid", "integration", "output", "gui"]
 py-modules = ["main"]
+
+[tool.ruff]
+target-version = "py311"
+# vision/ はレガシー（CI のテスト対象からも除外済み）
+extend-exclude = ["vision"]
+
+[tool.ruff.lint]
+# 最小ゲート: 実バグ系のみ（pyflakes F + 構文エラー E9）。
+# スタイル系 (E/W ほか) は別タスクで段階導入する。
+select = ["F", "E9"]
