@@ -28,9 +28,10 @@ _FIXTURES = _CONTRACTS / "fixtures"
 # player: S1 freeze 候補。session / seat_assignment / hand_ref: S2 draft (ADR-0006, 未 freeze)。
 # reconstruction_event: R1 (ADR-0010) record/replay の envelope (additionalProperties:false)。
 # hand / action: hand core (ADR-0010 R5, ISSUE-0011)。additionalProperties:true で 1.0。
+# ledger_entry / point_ledger_entry: S3 draft (ADR-0013, 未 freeze)。
 _MODELS = [
     "player", "session", "seat_assignment", "hand_ref", "reconstruction_event",
-    "hand", "action",
+    "hand", "action", "ledger_entry", "point_ledger_entry",
 ]
 
 
@@ -76,6 +77,37 @@ def test_core_player_matches_contract(tmp_path: Path):
 
     schema = _load(_SCHEMAS / "player.schema.json")
     jsonschema.Draft202012Validator(schema).validate(player.to_dict())
+
+
+def test_core_ledger_matches_contract(tmp_path: Path):
+    """core が生成する LedgerEntry / PointLedgerEntry が schema に適合する
+    (code↔contract drift, S3 draft)。"""
+    from core.ledger_repository import LedgerRepository
+    from core.player_repository import PlayerRepository
+    from core.session_repository import SessionRepository
+
+    players = PlayerRepository(path=tmp_path / "players.json")
+    alice = players.create_player("Alice")
+    sessions = SessionRepository(path=tmp_path / "sessions.json", player_repo=players)
+    session = sessions.create_session()
+    repo = LedgerRepository(
+        path=tmp_path / "ledger.json", session_repo=sessions, player_repo=players
+    )
+
+    grant = repo.grant_points(alice.player_id, 3000, "manual_grant", idempotency_key="g1")
+    entry = repo.add_entry(
+        session.session_id, alice.player_id, "order",
+        cash_amount=200, point_amount=1000,
+        order={"item_name": "ジントニック", "unit_amount": 600, "quantity": 2},
+    )
+    spend = repo.list_point_entries(alice.player_id)[-1]
+
+    ledger_schema = _load(_SCHEMAS / "ledger_entry.schema.json")
+    jsonschema.Draft202012Validator(ledger_schema).validate(entry.to_dict())
+    point_schema = _load(_SCHEMAS / "point_ledger_entry.schema.json")
+    validator = jsonschema.Draft202012Validator(point_schema)
+    validator.validate(grant.to_dict())
+    validator.validate(spend.to_dict())
 
 
 def test_core_hand_action_match_contract():

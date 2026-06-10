@@ -1,0 +1,10 @@
+{
+  "entry_id": "3c4d5e6f708192a3b4c5d6e7f8091a2b",
+  "session_id": "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+  "player_id": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+  "kind": "rebuy",
+  "occurred_at": "2026-06-10T21:00:00",
+  "cash_amount": 7000,
+  "point_amount": 3000,
+  "note": "point 不足分 cash 補完"
+}

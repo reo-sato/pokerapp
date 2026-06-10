@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+### Added (Phase S3 — session ledger + point ledger core, ADR-0013)
+
+- **session ledger / point ledger の core 実装**（CLAUDE.md § Ledger & Points, hand logger / GUI とは未接続）:
+  - `core/ledger.py` + `core/ledger_repository.py`: 金銭イベント記録（`buy_in` / `rebuy` /
+    `add_on` / `order` / `adjustment` / `entry_fee`、cash+point 併用可、order 明細 enforce）、
+    point grant（冪等性キー対応）/ 補正 / 残高取得、session 中間集計（buy-in 合計 / 注文合計、
+    途中値）。永続化は `ledger.json`（アトミックリネーム, `.gitignore`）。
+  - **ISSUE-0001 Resolved（ADR-0013）**: point 残高の source of truth は
+    **point_ledger_entry の fold**（cached 残高なし・player に global・常に 0 以上）。
+    point 不足は strict reject + `plan_payment` による cash 補完分割（業務ルール 3）。
+    entry fee は cash only（業務ルール 1）。spend 系 point entry は core が同時生成。
+  - **契約 draft（S3, v0.1 未 freeze）**: `docs/contracts/ledger-points.md` +
+    `schemas/{ledger_entry,point_ledger_entry}.schema.json` + fixtures。
+    `error-shapes.md` / `validation-rules.md` / `repository-interfaces.md` に S3 セクション追加。
+  - テスト: `tests/test_ledger_repository.py`（13）+ `tests/test_point_ledger.py`（5,
+    ISSUE-0001 予告の回帰 4 本を含む）+ contract `_MODELS` 2 model 追加 + code↔contract。
+    全 349 passed / ruff 緑。
+
 ### Fixed / Changed (review hardening — 全体レビューで検出した堅牢化, ISSUE-0012)
 
 - **rebuy / 新ハンドの状態変更を IntegrationThread に一元化**（ISSUE-0012 Fixed）:
