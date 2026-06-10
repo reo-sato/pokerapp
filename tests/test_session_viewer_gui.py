@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from core.player_repository import PlayerRepository
 from core.session_repository import SessionRepository
