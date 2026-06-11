@@ -12,6 +12,7 @@ interface Props {
   session: PlayerSessionSummary;
   onSelect: (hand: HandSummary) => void;
   onBack: () => void;
+  onOpenLedger: () => void;
 }
 
 /** hand.players から自分の行を探す。player_id は additive (E3 前は absent) なので name に fallback。 */
@@ -23,7 +24,7 @@ export function findOwnRow(hand: HandSummary, player: Player) {
 }
 
 export function MyHandsScreen({
-  repository, player, session, onSelect, onBack,
+  repository, player, session, onSelect, onBack, onOpenLedger,
 }: Props): React.JSX.Element {
   const { data, loading, errorCode, errorMessage } = useAsync(
     () => repository.listPlayerHands(player.player_id, session.session_id),
@@ -35,6 +36,9 @@ export function MyHandsScreen({
       <BackLink onPress={onBack} label="セッション一覧" />
       <Text style={styles.title}>{session.label ?? session.started_at}</Text>
       <Text style={styles.subtitle}>{player.display_name} が参加したハンド</Text>
+      <Pressable onPress={onOpenLedger}>
+        <Text style={styles.back}>会計を見る（バイイン・注文） →</Text>
+      </Pressable>
       {loading ? (
         <Loading />
       ) : errorCode ? (

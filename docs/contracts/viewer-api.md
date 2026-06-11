@@ -29,6 +29,7 @@ player 向け参照 front-end（WS3, Expo）が消費する **読み取り専用
 | GET | `/api/players/{player_id}/sessions` | `{"sessions": [player_session_summary, ...]}`（player が 1 hand 以上着席した session のみ。`player_session_summary.schema.json` v0.x） | 404 `not_found`（unknown player） |
 | GET | `/api/players/{player_id}/sessions/{session_id}/hands` | `{"hands": [hand, ...]}`（player が着席していた hand の HandSummary。hand = `hand.schema.json` v1.0。hand_id 昇順） | 404 `not_found`（unknown player / unknown session） |
 | GET | `/api/sessions/{session_id}/hands/{hand_id}` | hand（HandSummary 全体） | 404 `not_found`（log 不在 / hand 不在） |
+| GET | `/api/players/{player_id}/sessions/{session_id}/ledger` | `{"entries": [ledger_entry, ...], "summary": {buy_in_total, order_total, adjustment_total, total_due}}`（M4/S3a additive。ledger_entry = `ledger_entry.schema.json` v0.x、summary は `ledger.md` の中間集計 = 確定値ではない） | 404 `not_found`（unknown player / unknown session） |
 
 備考:
 

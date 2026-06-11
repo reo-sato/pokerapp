@@ -92,11 +92,35 @@ current_seating(session_id: str) -> list[SeatAssignment]   # 最新 hand から�
   `session_id` 採番方式・永続形は ADR-0007 で core について確定。schema `1.0` への昇格は
   ISSUE-0005 の残項目（hand logger 接続・seat change UI 要件）決着後。
 
-## ledger 以降（planned）
+## ledger repository interface（S3a cash-only, 実装済 — ADR-0014）
+
+詳細・model 定義は `ledger.md`（draft）。core 実装は `core/ledger_repository.py`。語彙非依存の契約:
+
+| 操作 | 入力 | 出力 | error |
+|------|------|------|-------|
+| add entry | `session_id`, `player_id`, `kind`, `cash_amount`, `point_amount?`, `note?`, order 明細? | `LedgerEntry`（`entry_id` 採番済） | not-found / session-closed / unknown-player / invalid-kind / invalid-amount / points-not-supported |
+| list entries | `session_id`, `player_id?` | `LedgerEntry[]`（追記順） | not-found |
+| session player summary | `session_id`, `player_id` | 中間集計（`ledger.md` 参照） | not-found / unknown-player |
+
+Python 具象（`core/ledger_repository.py` と一致）:
+
+```text
+add_entry(session_id: str, player_id: str, kind: str, cash_amount: int,
+          point_amount: int = 0, note: str | None = None,
+          item_name: str | None = None, unit_amount: int | None = None,
+          quantity: int | None = None) -> LedgerEntry
+list_entries(session_id: str, player_id: str | None = None) -> list[LedgerEntry]
+session_player_summary(session_id: str, player_id: str) -> dict
+```
+
+- write はスタッフ desktop（`--ledger`）のみ。mobile は viewer API 経由の read-only（M5 で
+  order-request write を別途契約化）。
+
+## point ledger / settlement（planned）
 
 | model | interface | phase |
 |-------|-----------|-------|
-| ledger_entry / point_ledger_entry | entry 追加、中間集計（buy-in 合計 / 注文合計）、残高取得 | S3（ISSUE-0001 が gate） |
+| point_ledger_entry | point 増減、残高取得、cash+point 併用 | S3b/M6（ISSUE-0001 が gate） |
 | session_settlement | settlement 確定、paid/unpaid 操作 | S4 |
 
 各 interface は対応 phase の freeze 時に本 doc へ追記する。S5 で local 実装と API client 実装に

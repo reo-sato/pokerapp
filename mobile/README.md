@@ -7,7 +7,8 @@ Expo（React Native, TypeScript）。当面は **web export を運営 PC から 
 ## 画面
 
 PlayerSelect（自分の名前を選ぶ）→ MySessions → MyHands → HandDetail
-（board / 自分のホールカード / アクション列 / 収支）
+（board / 自分のホールカード / アクション列 / 収支）。
+MyHands からは **会計**（MyLedger: バイイン・注文の明細と中間集計, M4/S3a, read-only）にも遷移できる。
 
 ## repository 注入（contract-first）
 

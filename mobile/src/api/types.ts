@@ -78,6 +78,38 @@ export interface HandSummary {
   review_required?: boolean;
 }
 
+export interface OrderDetail {
+  item_name: string;
+  unit_amount: number;
+  quantity: number;
+}
+
+/** schemas/ledger_entry.schema.json (0.x, S3a cash-only — ADR-0014)。 */
+export interface LedgerEntry {
+  entry_id: string;
+  session_id: string;
+  player_id: string;
+  kind: "buy_in" | "rebuy" | "add_on" | "order" | "adjustment";
+  occurred_at: string;
+  cash_amount: number;
+  point_amount: number; // S3a では常に 0
+  note?: string;
+  order?: OrderDetail;
+}
+
+/** ledger.md の中間集計（確定値ではない。確定は S4 settlement）。 */
+export interface LedgerSummary {
+  buy_in_total: number;
+  order_total: number;
+  adjustment_total: number;
+  total_due: number;
+}
+
+export interface PlayerSessionLedger {
+  entries: LedgerEntry[];
+  summary: LedgerSummary;
+}
+
 /** error-shapes.md の論理形。分岐は code、表示は message。 */
 export interface ApiError {
   code: string;

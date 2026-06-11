@@ -29,9 +29,10 @@ _FIXTURES = _CONTRACTS / "fixtures"
 # reconstruction_event: R1 (ADR-0010) record/replay の envelope (additionalProperties:false)。
 # hand / action: hand core (ADR-0010 R5, ISSUE-0011)。additionalProperties:true で 1.0。
 # player_session_summary: M1 viewer API の read model envelope (ADR-0013, draft 0.x)。
+# ledger_entry: S3a cash-only ledger (ADR-0014, draft 0.x)。
 _MODELS = [
     "player", "session", "seat_assignment", "hand_ref", "reconstruction_event",
-    "hand", "action", "player_session_summary",
+    "hand", "action", "player_session_summary", "ledger_entry",
 ]
 
 

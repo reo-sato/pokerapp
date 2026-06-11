@@ -517,6 +517,26 @@ def run_player_registry() -> None:
     win.run()
 
 
+def run_ledger() -> None:
+    """Phase S3a (M4, ADR-0014): スタッフ用 会計入力画面を起動する（hand logger とは別画面）。"""
+    from core.ledger_repository import LedgerRepository
+    from core.player_repository import PlayerRepository
+    from core.session_repository import SessionRepository
+    from gui.ledger_entry import LedgerEntryWindow
+
+    try:
+        import customtkinter  # noqa: F401
+    except ImportError:
+        print("customtkinter が見つかりません。pip install customtkinter でインストールしてください。")
+        sys.exit(1)
+
+    player_repo = PlayerRepository()
+    session_repo = SessionRepository(player_repo=player_repo)
+    ledger_repo = LedgerRepository(session_repo=session_repo)
+    win = LedgerEntryWindow(ledger_repo, session_repo, player_repo)
+    win.run()
+
+
 def run_viewer_api() -> None:
     """Phase M1: player 向け読み取り専用 viewer API を起動する (ADR-0013)。"""
     from core.config import load_config
@@ -623,10 +643,19 @@ def main() -> None:
         action="store_true",
         help="player 向け読み取り専用 viewer API を起動する（Phase M1, 要 pip install '.[api]'）",
     )
+    parser.add_argument(
+        "--ledger",
+        action="store_true",
+        help="スタッフ用 会計入力画面を起動する（Phase M4/S3a, hand logger とは別画面）",
+    )
     args = parser.parse_args()
 
     if args.players:
         run_player_registry()
+        sys.exit(0)
+
+    if args.ledger:
+        run_ledger()
         sys.exit(0)
 
     if args.viewer_api:

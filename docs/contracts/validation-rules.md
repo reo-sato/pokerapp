@@ -24,13 +24,29 @@ JSON Schema は **構造**（型・required・形式）を検査するが、業�
 - 読み込み時の leniency: 永続ファイル読込で `created_at` 欠損は許容（空文字で補完）。これは
   **ロード堅牢性の実装詳細**であり、正規の永続形（schema canonical）では `created_at` は required。
 
+## ledger_entry（S3a cash-only, 実装済 — `core/ledger_repository.py` が source of truth, ADR-0014）
+
+- **session は実在かつ open**: unknown は `not_found`、closed への追加は `session_closed`
+  （close 後の訂正は S4 settlement の責務）。
+- **player は registry に実在**（`unknown_player`）。
+- **kind は 5 種別のみ**: `buy_in` / `rebuy` / `add_on` / `order` / `adjustment`（`invalid_kind`）。
+- **kind 別の金額規則**（違反は `invalid_amount`）:
+  - `buy_in` / `rebuy` / `add_on`: `cash_amount > 0`。
+  - `order`: order 明細必須（`item_name` 非空 / `unit_amount ≥ 0` / `quantity ≥ 1`）かつ
+    `cash_amount == unit_amount × quantity`。order 以外の kind に order 明細は不可。
+  - `adjustment`: `cash_amount != 0`（負 = 返金・値引き可）。
+- **S3a は cash-only**: `point_amount != 0` は `points_not_supported`（M6 で解放, ISSUE-0001 gate）。
+- **中間集計は確定値ではない**（業務ルール 7）: `buy_in_total`（buy_in+rebuy+add_on）/
+  `order_total` / `adjustment_total` / `total_due`（3 つの和）。確定は S4 settlement。
+- **entry の編集・削除は無い**（append-only。訂正は `adjustment` を追記する）。
+
 ## 将来 model（planned）
 
 対応 phase の freeze 時に本 doc へ追記する。代表例:
 
-- **ledger_entry / point_ledger_entry（S3）**:
+- **point_ledger_entry（S3b/M6）**:
   - entry fee は **cash only**（point 不可）。
-  - buy-in / rebuy / add-on / order は cash + point 併用可。
+  - buy-in / rebuy / add-on / order は cash + point 併用可（S3a では point 不可, ADR-0014）。
   - point 不足分は cash で補完（残高 < 必要点数の差分を cash 計上）。
   - 残高の source of truth は **未確定**（ISSUE-0001）。確定するまで残高 API 契約は freeze しない。
 - **session_settlement（S4）**:

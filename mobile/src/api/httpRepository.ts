@@ -5,7 +5,12 @@
  * 非 2xx は body の {code, message} を ViewerApiError として throw する。
  */
 import type { ViewerRepository } from "./repository";
-import type { HandSummary, Player, PlayerSessionSummary } from "./types";
+import type {
+  HandSummary,
+  Player,
+  PlayerSessionLedger,
+  PlayerSessionSummary,
+} from "./types";
 import { ViewerApiError } from "./types";
 
 export class HttpRepository implements ViewerRepository {
@@ -56,5 +61,11 @@ export class HttpRepository implements ViewerRepository {
 
   getHand(sessionId: string, handId: number): Promise<HandSummary> {
     return this.get(`/api/sessions/${encodeURIComponent(sessionId)}/hands/${handId}`);
+  }
+
+  getPlayerLedger(playerId: string, sessionId: string): Promise<PlayerSessionLedger> {
+    return this.get(
+      `/api/players/${encodeURIComponent(playerId)}/sessions/${encodeURIComponent(sessionId)}/ledger`,
+    );
   }
 }

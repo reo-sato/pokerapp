@@ -19,6 +19,7 @@ import type { ViewerRepository } from "./src/api/repository";
 import type { Player, PlayerSessionSummary } from "./src/api/types";
 import { HandDetailScreen } from "./src/screens/HandDetailScreen";
 import { MyHandsScreen } from "./src/screens/MyHandsScreen";
+import { MyLedgerScreen } from "./src/screens/MyLedgerScreen";
 import { MySessionsScreen } from "./src/screens/MySessionsScreen";
 import { PlayerSelectScreen } from "./src/screens/PlayerSelectScreen";
 import { styles } from "./src/screens/common";
@@ -27,7 +28,8 @@ type Route =
   | { name: "players" }
   | { name: "sessions"; player: Player }
   | { name: "hands"; player: Player; session: PlayerSessionSummary }
-  | { name: "hand"; player: Player; session: PlayerSessionSummary; handId: number };
+  | { name: "hand"; player: Player; session: PlayerSessionSummary; handId: number }
+  | { name: "ledger"; player: Player; session: PlayerSessionSummary };
 
 export default function App(): React.JSX.Element {
   const repository: ViewerRepository = useMemo(() => {
@@ -65,6 +67,19 @@ export default function App(): React.JSX.Element {
             })
           }
           onBack={() => setRoute({ name: "sessions", player: route.player })}
+          onOpenLedger={() =>
+            setRoute({ name: "ledger", player: route.player, session: route.session })
+          }
+        />
+      )}
+      {route.name === "ledger" && (
+        <MyLedgerScreen
+          repository={repository}
+          player={route.player}
+          session={route.session}
+          onBack={() =>
+            setRoute({ name: "hands", player: route.player, session: route.session })
+          }
         />
       )}
       {route.name === "hand" && (

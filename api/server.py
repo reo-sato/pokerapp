@@ -22,9 +22,11 @@ from fastapi.responses import JSONResponse
 from api.read_models import (
     HandNotFoundError,
     get_hand,
+    get_player_session_ledger,
     list_player_hands,
     list_player_sessions,
 )
+from core.ledger_repository import LedgerRepository
 from core.player_repository import PlayerNotFoundError, PlayerRepository
 from core.session_repository import SessionNotFoundError, SessionRepository
 
@@ -42,8 +44,14 @@ def create_app(
     player_repo: PlayerRepository,
     session_repo: SessionRepository,
     log_dir: str | Path,
+    ledger_repo: LedgerRepository | None = None,
 ) -> FastAPI:
-    """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。"""
+    """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
+
+    ledger_repo 省略時は session_repo を共有する既定 `ledger.json` を構築する（M4, ADR-0014）。
+    """
+    if ledger_repo is None:
+        ledger_repo = LedgerRepository(session_repo=session_repo)
     app = FastAPI(title="pokerapp viewer API", version=_app_version())
 
     # M1 は read-only GET のみのため全 origin を許可（Expo web client 用, viewer-api.md）。
@@ -86,6 +94,11 @@ def create_app(
     def hand(session_id: str, hand_id: int) -> dict:
         return get_hand(session_id, hand_id, log_dir)
 
+    @app.get("/api/players/{player_id}/sessions/{session_id}/ledger")
+    def player_ledger(player_id: str, session_id: str) -> dict:
+        player_repo.get(player_id)
+        return get_player_session_ledger(player_id, session_id, ledger_repo)
+
     return app
 
 
@@ -100,7 +113,8 @@ def run_server(cfg: dict) -> None:
 
     player_repo = PlayerRepository()
     session_repo = SessionRepository(player_repo=player_repo)
-    app = create_app(player_repo, session_repo, log_dir)
+    ledger_repo = LedgerRepository(session_repo=session_repo)
+    app = create_app(player_repo, session_repo, log_dir, ledger_repo=ledger_repo)
 
     logger.info("Starting viewer API on %s:%s (log_dir=%s)", bind_host, bind_port, log_dir)
     uvicorn.run(app, host=bind_host, port=bind_port)

@@ -5,7 +5,12 @@
  * ID は contract fixtures の canonical 値を再利用している。実 persistence は持たない
  * (CLAUDE.md § mobile が mock で先行できる範囲)。
  */
-import type { HandSummary, Player, PlayerSessionSummary } from "../api/types";
+import type {
+  HandSummary,
+  LedgerEntry,
+  Player,
+  PlayerSessionSummary,
+} from "../api/types";
 
 export const ALICE_ID = "0a1b2c3d4e5f60718293a4b5c6d7e8f9";
 export const BOB_ID = "00000000000000000000000000000001";
@@ -101,4 +106,55 @@ export const handsBySession: Record<string, HandSummary[]> = {
 export const seatedHandIds: Record<string, Record<string, number[]>> = {
   [ALICE_ID]: { [SESSION_ID]: [1, 2] },
   [BOB_ID]: { [SESSION_ID]: [1] },
+};
+
+/** ledger entries (S3a cash-only, ADR-0014)。player → session → entries。 */
+export const ledgerEntries: Record<string, Record<string, LedgerEntry[]>> = {
+  [ALICE_ID]: {
+    [SESSION_ID]: [
+      {
+        entry_id: "1f2e3d4c5b6a79880917263544536271",
+        session_id: SESSION_ID,
+        player_id: ALICE_ID,
+        kind: "buy_in",
+        occurred_at: "2026-05-25T20:05:00",
+        cash_amount: 10000,
+        point_amount: 0,
+      },
+      {
+        entry_id: "1f2e3d4c5b6a79880917263544536272",
+        session_id: SESSION_ID,
+        player_id: ALICE_ID,
+        kind: "order",
+        occurred_at: "2026-05-25T21:30:00",
+        cash_amount: 1500,
+        point_amount: 0,
+        note: "ジントニック x3",
+        order: { item_name: "ジントニック", unit_amount: 500, quantity: 3 },
+      },
+      {
+        entry_id: "1f2e3d4c5b6a79880917263544536273",
+        session_id: SESSION_ID,
+        player_id: ALICE_ID,
+        kind: "adjustment",
+        occurred_at: "2026-05-25T23:00:00",
+        cash_amount: -500,
+        point_amount: 0,
+        note: "返金",
+      },
+    ],
+  },
+  [BOB_ID]: {
+    [SESSION_ID]: [
+      {
+        entry_id: "1f2e3d4c5b6a79880917263544536274",
+        session_id: SESSION_ID,
+        player_id: BOB_ID,
+        kind: "buy_in",
+        occurred_at: "2026-05-25T20:10:00",
+        cash_amount: 20000,
+        point_amount: 0,
+      },
+    ],
+  },
 };

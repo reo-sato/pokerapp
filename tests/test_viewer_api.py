@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from api.server import create_app  # noqa: E402
 from core.hand_log import HandSummary  # noqa: E402
+from core.ledger_repository import LedgerRepository  # noqa: E402
 from core.player_repository import PlayerRepository  # noqa: E402
 from core.session_repository import SessionRepository  # noqa: E402
 
@@ -71,7 +72,13 @@ def env(tmp_path: Path) -> dict:
         json.dumps(log, ensure_ascii=False), encoding="utf-8"
     )
 
-    client = TestClient(create_app(players, sessions, log_dir))
+    ledger = LedgerRepository(path=tmp_path / "ledger.json", session_repo=sessions)
+    ledger.add_entry(s.session_id, alice.player_id, "buy_in", 10000)
+    ledger.add_entry(s.session_id, alice.player_id, "order", 1500,
+                     item_name="ジントニック", unit_amount=500, quantity=3)
+    ledger.add_entry(s.session_id, bob.player_id, "buy_in", 20000)
+
+    client = TestClient(create_app(players, sessions, log_dir, ledger_repo=ledger))
     return {"client": client, "alice": alice, "bob": bob, "session": s}
 
 
@@ -127,11 +134,31 @@ def test_get_hand_match_contract(env: dict):
     _validate(res.json(), "hand")
 
 
+def test_player_ledger_entries_and_summary(env: dict):
+    """M4/S3a (ADR-0014): 会計参照 endpoint。entries は schema 適合、summary は中間集計。"""
+    sid = env["session"].session_id
+    res = env["client"].get(f"/api/players/{env['alice'].player_id}/sessions/{sid}/ledger")
+    assert res.status_code == 200
+    body = res.json()
+    assert [e["kind"] for e in body["entries"]] == ["buy_in", "order"]
+    for e in body["entries"]:
+        _validate(e, "ledger_entry")
+    assert body["summary"] == {
+        "buy_in_total": 10000, "order_total": 1500,
+        "adjustment_total": 0, "total_due": 11500,
+    }
+    # bob は自分の entry だけ見える
+    res = env["client"].get(f"/api/players/{env['bob'].player_id}/sessions/{sid}/ledger")
+    assert res.json()["summary"]["total_due"] == 20000
+
+
 @pytest.mark.parametrize("path", [
     "/api/players/{missing_pid}",
     "/api/players/{missing_pid}/sessions",
     "/api/players/{missing_pid}/sessions/{sid}/hands",
     "/api/players/{alice_pid}/sessions/{missing_sid}/hands",
+    "/api/players/{missing_pid}/sessions/{sid}/ledger",
+    "/api/players/{alice_pid}/sessions/{missing_sid}/ledger",
     "/api/sessions/{sid}/hands/999",
     "/api/sessions/{missing_sid}/hands/1",
 ])

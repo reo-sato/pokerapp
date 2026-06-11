@@ -57,7 +57,21 @@ front-end が UI 分岐できるよう、core / repository が返す error を *
 | `unknown_player` | 指定 `player_id` が registry に実在しない | assign seat | `UnknownPlayerError` |
 | `invalid_seat` | `seat_no` が範囲外（1..9 外）/ `hand_id` が不正 | assign seat | `InvalidSeatError` |
 
-### ledger / settlement（planned, S3〜S4）
+### ledger error code（S3a cash-only 実装済, ADR-0014）
 
-例: `insufficient_points`（point 不足→cash 補完判断, S3）、
-`entry_fee_requires_cash`（entry fee は cash only, S3）、`already_settled`（S4）。
+`core/ledger_repository.py` が返す code（additive）。Python 例外階層は
+`LedgerError`（基底）← 各 code に 1:1 対応する subclass:
+
+| code | 意味 | 発生する操作（例） | Python 例外（core） |
+|------|------|------------------|---------------------|
+| `not_found` | 指定 `session_id` が存在しない（既存 code を再利用） | add / list / summary | `SessionNotFoundError`（session 側を透過） |
+| `session_closed` | closed の session に entry を追加しようとした（既存 code を再利用） | add entry | `LedgerSessionClosedError` |
+| `unknown_player` | `player_id` が registry に実在しない（既存 code を再利用） | add / summary | `LedgerUnknownPlayerError` |
+| `invalid_kind` | kind が 5 種別以外 | add entry | `InvalidKindError` |
+| `invalid_amount` | kind 別の金額規則違反（buy_in/rebuy/add_on ≤0、order の単価×数量不一致 等） | add entry | `InvalidAmountError` |
+| `points_not_supported` | S3a で `point_amount != 0`（point は M6 で解放） | add entry | `PointsNotSupportedError` |
+
+### ledger / settlement（planned, S3b〜S4）
+
+例: `insufficient_points`（point 不足→cash 補完判断, S3b/M6）、
+`entry_fee_requires_cash`（entry fee は cash only, S3b/M6）、`already_settled`（S4）。

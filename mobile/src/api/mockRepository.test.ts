@@ -54,6 +54,23 @@ test("listPlayerHands rejects unknown session with not_found", async () => {
   });
 });
 
+test("getPlayerLedger returns entries and summary consistent with core rules", async () => {
+  const repo = new MockRepository();
+  const alice = await repo.getPlayerLedger(ALICE_ID, SESSION_ID);
+  assert.deepEqual(alice.entries.map((e) => e.kind), ["buy_in", "order", "adjustment"]);
+  assert.deepEqual(alice.summary, {
+    buy_in_total: 10000,
+    order_total: 1500,
+    adjustment_total: -500,
+    total_due: 11000,
+  });
+  await assert.rejects(repo.getPlayerLedger(ALICE_ID, "deadbeef"), (err: unknown) => {
+    assert.ok(err instanceof ViewerApiError);
+    assert.equal(err.code, "not_found");
+    return true;
+  });
+});
+
 test("getHand returns hand or rejects with not_found", async () => {
   const repo = new MockRepository();
   const hand = await repo.getHand(SESSION_ID, 1);

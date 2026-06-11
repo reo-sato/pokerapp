@@ -5,7 +5,12 @@
  * UI はこの interface のみに依存し、mock (fixtures) と HTTP 実装を注入で差し替える。
  * not_found 等は ViewerApiError (code 分岐) で reject する。
  */
-import type { HandSummary, Player, PlayerSessionSummary } from "./types";
+import type {
+  HandSummary,
+  Player,
+  PlayerSessionLedger,
+  PlayerSessionSummary,
+} from "./types";
 
 export interface ViewerRepository {
   health(): Promise<{ status: string; version: string }>;
@@ -14,4 +19,6 @@ export interface ViewerRepository {
   listPlayerSessions(playerId: string): Promise<PlayerSessionSummary[]>;
   listPlayerHands(playerId: string, sessionId: string): Promise<HandSummary[]>;
   getHand(sessionId: string, handId: number): Promise<HandSummary>;
+  /** M4/S3a (ADR-0014): 自分の会計参照（entries + 中間集計, read-only）。 */
+  getPlayerLedger(playerId: string, sessionId: string): Promise<PlayerSessionLedger>;
 }

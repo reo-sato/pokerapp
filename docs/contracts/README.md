@@ -26,6 +26,7 @@ docs/contracts/
 ├── shared-ids.md               ← player_id / session_id / hand_id の共有 ID 契約
 ├── session-seating.md          ← session / seat_assignment / hand_ref 契約（S2 draft, 未 freeze）
 ├── viewer-api.md               ← M1 viewer API 契約（read-only HTTP, draft 0.x, ADR-0013）
+├── ledger.md                   ← S3a cash-only ledger 契約（draft 0.x, ADR-0014）
 ├── versioning-and-freeze.md    ← freeze / versioning / additive vs breaking / freeze order
 ├── repository-interfaces.md    ← front-end が呼ぶ抽象 repository/service interface 契約（テンプレート）
 ├── error-shapes.md             ← validation / not-found 等の error 形契約

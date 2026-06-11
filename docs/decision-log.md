@@ -36,6 +36,7 @@
 | ADR-0011 | Deterministic replay harness (sync timestamp-ordered driver + clock injection) | Accepted | 2026-06-05 | reconstruct / replay (F1) | `docs/adr/0011-deterministic-replay-harness.md` | 関連: ADR-0010 / ADR-0009 / ISSUE-0010 |
 | ADR-0012 | pokerkit を live 既定 backend に切替（legacy は rollback, pokerkit pin） | Accepted | 2026-06-05 | reconstruct / engine (G) | `docs/adr/0012-pokerkit-live-default.md` | 関連: ADR-0009。実機 E2E は Phase H |
 | ADR-0013 | Player 向け参照は API-first（viewer API 前倒し）+ Expo web export 先行 | Accepted | 2026-06-10 | viewer API / mobile (M1) | `docs/adr/0013-player-facing-viewer-api-first-architecture.md` | 補完: ADR-0004（WS3 技術選定を確定）。関連: ADR-0008 / ISSUE-0006 / ISSUE-0013 |
+| ADR-0014 | S3a — ledger を cash-only で先行導入（point ledger は M6 に分離） | Accepted | 2026-06-11 | ledger (S3a / M4) | `docs/adr/0014-s3a-cash-only-ledger-first.md` | ADR-0003 の S3 を分割。関連: ISSUE-0001（M6 gate のまま）/ ISSUE-0013 |
 
 <!--
 Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時点で空番。

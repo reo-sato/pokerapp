@@ -5,6 +5,7 @@ __pycache__/
 config.json
 players.json
 sessions.json
+ledger.json
 
 # packaging / build artifacts (H1)
 *.egg-info/

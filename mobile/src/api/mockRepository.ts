@@ -7,7 +7,13 @@
  * 同じ ViewerRepository interface を満たす。
  */
 import type { ViewerRepository } from "./repository";
-import type { HandSummary, Player, PlayerSessionSummary } from "./types";
+import type {
+  HandSummary,
+  LedgerEntry,
+  Player,
+  PlayerSessionLedger,
+  PlayerSessionSummary,
+} from "./types";
 import { ViewerApiError } from "./types";
 import * as fx from "../mocks/fixtures";
 
@@ -51,5 +57,28 @@ export class MockRepository implements ViewerRepository {
       throw notFound(`hand_id=${handId} は session_id=${sessionId} に存在しません。`);
     }
     return hand;
+  }
+
+  async getPlayerLedger(playerId: string, sessionId: string): Promise<PlayerSessionLedger> {
+    await this.getPlayer(playerId);
+    if (fx.seatedHandIds[playerId]?.[sessionId] === undefined) {
+      throw notFound(`session_id=${sessionId} は存在しません。`);
+    }
+    const entries: LedgerEntry[] = fx.ledgerEntries[playerId]?.[sessionId] ?? [];
+    // 中間集計は core (validation-rules.md) と同じ定義。mock はデータから素朴に畳む。
+    const sum = (kinds: LedgerEntry["kind"][]) =>
+      entries.filter((e) => kinds.includes(e.kind)).reduce((a, e) => a + e.cash_amount, 0);
+    const buyIn = sum(["buy_in", "rebuy", "add_on"]);
+    const order = sum(["order"]);
+    const adjustment = sum(["adjustment"]);
+    return {
+      entries,
+      summary: {
+        buy_in_total: buyIn,
+        order_total: order,
+        adjustment_total: adjustment,
+        total_due: buyIn + order + adjustment,
+      },
+    };
   }
 }

@@ -15,6 +15,7 @@ import json
 import logging
 from pathlib import Path
 
+from core.ledger_repository import LedgerRepository
 from core.session_repository import SessionRepository
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,20 @@ def list_player_hands(
         return []
     hands = [h for h in log.get("hands", []) if h.get("hand_id") in seated_hand_ids]
     return sorted(hands, key=lambda h: h["hand_id"])
+
+
+def get_player_session_ledger(
+    player_id: str, session_id: str, ledger_repo: LedgerRepository
+) -> dict:
+    """player の session 会計参照（M4/S3a, ADR-0014）: entries + 中間集計。
+
+    summary は確定値ではない（確定は S4 settlement, ledger.md）。
+    unknown session は SessionNotFoundError（ledger_repo 経由で透過）。
+    """
+    return {
+        "entries": [e.to_dict() for e in ledger_repo.list_entries(session_id, player_id)],
+        "summary": ledger_repo.session_player_summary(session_id, player_id),
+    }
 
 
 def get_hand(session_id: str, hand_id: int, log_dir: str | Path) -> dict:

@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+### Added (Phase M4 = S3a — cash-only ledger と会計参照, ADR-0014)
+
+- **会計記録（cash-only ledger）**: buy-in / rebuy / add-on / 注文 / 調整を session 単位で記録
+  （`core/ledger.py` / `core/ledger_repository.py`、`ledger.json` 永続化・append-only）。
+  S3 を S3a（cash-only, 本実装）と S3b（point 連携, ISSUE-0001 決着後）に分割し、
+  **point 残高問題にブロックされずに会計機能を先行**。`point_amount != 0` は
+  `points_not_supported` で reject。
+  - kind 別 validation（buy-in 系は正の金額 / 注文は単価×数量一致 / 調整は負も可・0 不可）、
+    open session 必須、unknown player 拒否（`error-shapes.md` に code 追記）。
+  - 契約: `docs/contracts/ledger.md` + `ledger_entry.schema.json`（draft 0.x）+ fixtures
+    （`_MODELS` 登録）。
+- **スタッフ用 会計入力画面**: `python main.py --ledger`（`gui/ledger_entry.py`、別画面）。
+  open session 選択 → player/種別/金額（注文は品名・単価・数量から自動計算）を入力し、
+  player ごとの中間集計（バイイン合計 / 注文合計 / 調整 / 合計 — 確定値ではない）と履歴を表示。
+- **会計の閲覧**: viewer API に `GET /api/players/{id}/sessions/{sid}/ledger`（entries + summary）
+  を additive 追加。mobile viewer に「会計」画面を追加（MyHands から遷移, read-only）。
+- docs: ADR-0014 / ledger.md / validation-rules.md / repository-interfaces.md / usage.md
+  「会計入力」/ CLAUDE.md § Ledger。
+
 ### Added (Phase M3 = E3 — seat 選択結線と席設定, ISSUE-0006 Fixed)
 
 - **`session_layer.enabled=true` で hand logger がプレイヤー紐付きで動くようになった**

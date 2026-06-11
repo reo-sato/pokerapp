@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/ledger_entry.schema.json",
+  "title": "LedgerEntry",
+  "version": "0.1",
+  "description": "S3a draft (未 freeze, ADR-0014)。session 中の金銭イベント 1 件。S3a は cash-only: point_amount は業務 validation が 0 以外を reject する (points_not_supported)。schema では 0 を強制しない (M6 での解放を additive にするため)。kind 別の金額規則・open session 要件は core が source of truth (validation-rules.md)。詳細は docs/contracts/ledger.md。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entry_id", "session_id", "player_id", "kind", "occurred_at", "cash_amount", "point_amount"],
+  "properties": {
+    "entry_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "UUID4 hex (32 文字)。アプリ内採番・不変。"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "player_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["buy_in", "rebuy", "add_on", "order", "adjustment"]
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "cash_amount": {
+      "type": "integer",
+      "description": "現金額。adjustment のみ負を許容（kind 別規則は core が enforce）。"
+    },
+    "point_amount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "point 充当額。S3a では業務 validation が 0 以外を reject。"
+    },
+    "note": {
+      "type": "string"
+    },
+    "order": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item_name", "unit_amount", "quantity"],
+      "description": "kind=order のときのみ存在（cross-field は core + 下の if/then が enforce）。",
+      "properties": {
+        "item_name": {"type": "string", "minLength": 1},
+        "unit_amount": {"type": "integer", "minimum": 0},
+        "quantity": {"type": "integer", "minimum": 1}
+      }
+    }
+  },
+  "if": {"properties": {"kind": {"const": "order"}}},
+  "then": {"required": ["order"]},
+  "else": {"not": {"required": ["order"]}}
+}
