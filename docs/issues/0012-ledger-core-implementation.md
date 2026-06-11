@@ -6,7 +6,26 @@
 
 ## Status
 
-Open
+Fixed（S3.1 core 実装済。schema version は `0.x` のまま = 未 freeze）
+
+## Update (2026-06-10, S3.1 実装)
+
+ADR-0011 の方針に沿って S3.1 core を実装した:
+
+- 実 schema: `docs/contracts/schemas/{ledger_entry,point_ledger_entry,session_settlement}.schema.json`
+  （v0.1）+ `fixtures/`（canonical / valid-* / invalid-*）。`tests/test_contracts.py::_MODELS` に 3 model 登録。
+- domain: `core/ledger.py`（`LedgerEntry` / `PointLedgerEntry` / `SessionSettlement`）。
+- repository: `core/ledger_repository.py`（`LedgerRepository`）。add_entry / reverse_entry / list_entries /
+  grant_points / point_balance / list_point_entries / compute_settlement / commit_settlement /
+  list_settlements / set_payment_status。別ストア `ledger.json`（アトミックリネーム、`.gitignore`）。
+- invariants（core enforce）: append-only / 残高=fold / 残高非負 + cash 補完 / ledger↔point 整合 /
+  entry fee cash only / 非ゼロ移動 / settlement derived・player→店・closed 限定確定。
+- errors: `error-shapes.md` の ledger セクションと 1:1（`LedgerError` 階層）。
+- tests: `tests/test_ledger_repository.py`（23）+ contract（ledger 3 model）= **緑**
+  （`pytest tests/test_ledger_repository.py tests/test_contracts.py` → 33 passed）。
+
+残（freeze 前 / 後続）: idempotency_key の運用詳細・speculative の UI 表現（S3.2, ISSUE-0013）、
+ledger schema の `1.0` freeze（session freeze #3 後）。settlement の CSV export は S3.3（ISSUE-0014）。
 
 ## Severity / Priority
 

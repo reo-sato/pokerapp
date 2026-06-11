@@ -128,9 +128,9 @@ adjustment entry で表す（後述 § invariants）。`player_id` / `session_id
    確定。`payment_status ∈ {paid, unpaid}`（partial なし）。player 間精算は持たない（rule 5）。
 9. **PHH/hand-log 不変 + 単位分離**: ledger は `(session_id, hand_id)` を read のみ。chips ≠ 円、S3 で換算しない。
 
-## repository / service interface 草案（S3, planned）
+## repository / service interface（S3.1, core 実装済）
 
-語彙非依存の契約（`repository-interfaces.md` に同期予定）。具象シグネチャは一例（S3.1 で確定）。
+語彙非依存の契約。**core 実装済**（`core/ledger_repository.py`, S3.1）。下表のシグネチャに準拠する。
 
 | 操作 | 入力 | 出力 | error（`error-shapes.md`） |
 |------|------|------|------|
@@ -145,8 +145,8 @@ adjustment entry で表す（後述 § invariants）。`player_id` / `session_id
 
 - **業務ルールは core が source of truth**。front-end は結果と error code を表示するだけ
   （`validation-rules.md` / `error-shapes.md`）。
-- desktop は同 interface に対して `fixtures/{ledger_entry,point_ledger_entry,session_settlement}/` で
-  先行実装できる（S3.1 で fixtures 整備）。
+- desktop は同 interface に対して `fixtures/{ledger_entry,point_ledger_entry,session_settlement}/`（S3.1 で
+  整備済）で先行実装できる（S3.2, ISSUE-0013）。
 
 ## error code（`error-shapes.md` の ledger セクションに追記済）
 
@@ -168,9 +168,10 @@ adjustment entry で表す（後述 § invariants）。`player_id` / `session_id
 
 ## freeze 状態 / 未確定事項 / blockers
 
-- **本 doc + `ledger-schema.md`（擬似 schema）+ ADR-0011 は draft（未 freeze）**。実 schema
-  （`schemas/*.schema.json`）・fixtures・`tests/test_contracts.py` 登録・core repository は
-  **S3.1（ISSUE-0012）で追加**する。
+- **本 doc + `ledger-schema.md` + ADR-0011 + 実 schema/fixtures + core repository は実装済（S3.1, ISSUE-0012）**
+  だが schema version は `0.x`（**未 freeze**）。追加済: `schemas/{ledger_entry,point_ledger_entry,session_settlement}.schema.json`
+  + `fixtures/`（canonical / valid-* / invalid-*）+ `tests/test_contracts.py` 登録 + `core/ledger.py` /
+  `core/ledger_repository.py` + `tests/test_ledger_repository.py`（code↔contract test 緑）。
 - **決定済（ADR-0011）**: 2 台帳モデル（ledger_entry + point_ledger_entry）/ 整数円・整数点 /
   別ストア `ledger.json` / 残高 = fold / reversal による訂正 / manual-first。
 - **freeze の残 blocker**: ISSUE-0001 の残サブ問題（idempotency_key 運用、speculative の UI 表現）、

@@ -5,3 +5,4 @@ __pycache__/
 config.json
 players.json
 sessions.json
+ledger.json

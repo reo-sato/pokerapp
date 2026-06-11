@@ -6,6 +6,39 @@
 
 ## [Unreleased]
 
+### Added (Phase S3.1 — ledger / points / settlement core)
+
+- **Ledger / Points / Settlement core (S3.1)**: ADR-0011 の方針に沿って、session world とは独立した
+  ledger レイヤの core 最小実装を追加（hand logger / PHH は read-only・未接続。schema は draft `0.x`）。
+  - `core/ledger.py`: `LedgerEntry` / `PointLedgerEntry` / `SessionSettlement` データクラス。
+  - `core/ledger_repository.py`: `LedgerRepository`。add_entry / reverse_entry / list_entries /
+    grant_points / point_balance / list_point_entries / compute_settlement / commit_settlement /
+    list_settlements / set_payment_status。
+  - 業務ルール（core が source of truth）: **append-only**（訂正は reversal）/ **point 残高 = fold**
+    （ISSUE-0001 決着）/ 残高非負 + cash 補完 / **ledger↔point 整合** / **entry fee は cash only** /
+    非ゼロ移動 / settlement は derived・player→店・closed 限定確定（paid/unpaid, partial なし）。
+  - 金額は **整数円**（chips とは別単位・自動換算なし）、point は整数点。
+  - validation / errors: `entry_fee_requires_cash` / `insufficient_points` / `invalid_amount` /
+    `duplicate_grant` / `session_not_closed` / `already_settled` / `not_found` / `unknown_player`
+    （`LedgerError` 階層、`docs/contracts/error-shapes.md` の ledger セクションと 1:1）。
+  - 永続化: プロジェクト直下 `ledger.json`（アトミックリネーム、`.gitignore` 追加）。
+    `{schema_version, ledger_entries, point_ledger_entries, settlements}`。
+  - 識別子: `entry_id` は ledger レイヤが UUID4 hex で採番。`session_id` は session レイヤ（S2）の
+    UUID を参照（hand logger とは別 namespace）。
+  - contracts: 実 `docs/contracts/schemas/{ledger_entry,point_ledger_entry,session_settlement}.schema.json`
+    （v0.1, `additionalProperties:false`）+ `fixtures/`（canonical / valid-* / invalid-*）。
+    `tests/test_contracts.py::_MODELS` に 3 model 登録。
+  - tests: `tests/test_ledger_repository.py`（23: add / 符号・kind validation / order 明細 /
+    残高=fold / 残高不足 / entry fee cash only / grant 冪等性 / ledger↔point 整合 / append-only reversal /
+    settlement net_due / closed 限定確定 / paid-unpaid / persistence roundtrip / code↔contract）。
+    **`pytest tests/test_player_repository.py tests/test_session_repository.py tests/test_ledger_repository.py tests/test_contracts.py` → 69 passed**。
+  - **ISSUE-0012** を Fixed に更新（S3.1 core 実装済、schema 0.x 未 freeze）。**ADR-0011** の S3.1 follow-up
+    を完了。**CLAUDE.md**（§ Ledger / Points / Settlement, 実装状況表, Future Scope, Phase 3, ディレクトリ）/
+    `docs/contracts/`（overview / schema / error-shapes / validation-rules / versioning / README）を
+    「core 実装済」に更新。
+  - 残: desktop viewer（S3.2, ISSUE-0013）/ settlement CSV export（S3.3, ISSUE-0014）/ schema `1.0`
+    freeze（session freeze 後）。
+
 ### Docs / Planning (Phase S3 — ledger / points / settlement layer 設計)
 
 - **ledger / points / settlement layer の設計 + contracts draft 確定**（**docs-only, `.py` / 実 schema /

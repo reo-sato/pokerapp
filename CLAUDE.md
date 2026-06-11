@@ -26,7 +26,7 @@ pokerapp/
 │   ├── issues/                    ← issue / mismatch log
 │   ├── worklog/                   ← タスク単位の作業ログ
 │   ├── templates/                 ← adr / issue / worklog テンプレート
-│   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures; player freeze候補, session/seat/hand_ref は S2 core 実装済・schema draft, ledger/point/settlement は S3 設計 draft・ADR-0011)
+│   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures; player freeze候補, session/seat/hand_ref は S2 core 実装済・schema draft, ledger/point/settlement は S3.1 core 実装済・schema draft・ADR-0011)
 │   └── decision-log.md            ← ADR / 主要 issue の索引
 ├── sprc_v4.docx                   ← 仕様書（要件定義）
 ├── claude_v4.docx                 ← 旧仕様書（参考）
@@ -35,6 +35,7 @@ pokerapp/
 ├── rfid_cards.json                ← tag_id → card_code マスタ
 ├── players.json                   ← player registry 永続ファイル (.gitignore, S1)
 ├── sessions.json                  ← session + hand-based seating 永続ファイル (.gitignore, S2)
+├── ledger.json                    ← ledger + point + settlement 永続ファイル (.gitignore, S3)
 ├── requirements.txt
 │
 ├── core/
@@ -47,7 +48,9 @@ pokerapp/
 │   ├── player.py                  ← Player データクラス (S1)
 │   ├── player_repository.py       ← PlayerRepository (player CRUD + JSON 永続化, S1)
 │   ├── session.py                 ← Session / SeatAssignment / HandRef データクラス (S2)
-│   └── session_repository.py      ← SessionRepository (session + hand-based seating + JSON 永続化, S2)
+│   ├── session_repository.py      ← SessionRepository (session + hand-based seating + JSON 永続化, S2)
+│   ├── ledger.py                  ← LedgerEntry / PointLedgerEntry / SessionSettlement データクラス (S3)
+│   └── ledger_repository.py       ← LedgerRepository (ledger + point + settlement + JSON 永続化, S3)
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -198,6 +201,60 @@ ADR-0006、実装上の判断は ADR-0007。**hand logger とは未接続**（�
 
 ---
 
+## Ledger / Points / Settlement（S3.1, core 実装済）
+
+session world（S2）の上に重なる **ledger（金銭イベント）/ points（店内ポイント残高）/ settlement
+（session 締めの精算）** の core 最小実装（CLAUDE.md § Future Scope の S3 を昇格）。狙いは「home game
+host が混乱しないレベルの帳簿」で **複式簿記ではない**。契約は `docs/contracts/ledger-overview.md` /
+`ledger-schema.md`（draft）、設計判断は ADR-0011。**hand logger とは未接続**（別ストア・別 namespace、
+PHH は read-only）。
+
+### スコープ（現時点）
+
+- **ledger entry** の add / reverse / list ができる（`buy_in` / `rebuy` / `add_on` / `order` /
+  `entry_fee` / `adjustment`、cash + point 併用）。
+- **point** の grant / 残高照会（残高 = `point_ledger_entry` の fold が source of truth, ISSUE-0001）/
+  spend（buy-in 等への充当、不足は cash 補完）ができる。
+- **settlement** を session ごとに導出（中間集計 = speculative）し、closed session で確定（commit）、
+  paid/unpaid を操作できる（常に player→店、partial なし）。
+- 金額は **整数円**（chips とは別単位・自動換算なし）、point は整数点。
+- 永続化はプロジェクト直下 `ledger.json`（アトミックリネーム、`.gitignore`）。append-only。
+
+### 構成
+
+| 要素 | ファイル | 役割 |
+|------|---------|------|
+| ドメイン | `core/ledger.py` | `LedgerEntry` / `PointLedgerEntry` / `SessionSettlement`（to_dict / from_dict） |
+| リポジトリ | `core/ledger_repository.py` | `LedgerRepository`: ledger/point/settlement の CRUD + 業務ルール + JSON 永続化 |
+
+### Validation / errors（`LedgerRepository` が source of truth）
+
+- entry fee に point 充当 → `EntryFeeRequiresCashError`（`entry_fee_requires_cash`）。
+- spend が残高超過 → `InsufficientPointsError`（`insufficient_points`）。
+- 金額・符号・order 明細・reversal 要求が不正 → `InvalidAmountError`（`invalid_amount`）。
+- 同一 idempotency_key の grant 重複 → `DuplicateGrantError`（`duplicate_grant`）。
+- open session の確定 → `SessionNotClosedError`（`session_not_closed`）、確定済再確定 →
+  `AlreadySettledError`（`already_settled`）。
+- unknown player → `UnknownPlayerError`（`unknown_player`）、unknown entry/session/settlement →
+  `LedgerNotFoundError`（`not_found`）。enum 外の kind/reason/status は `ValueError`。
+- error code は `docs/contracts/error-shapes.md` の ledger セクションと 1:1 対応。
+
+### 不変条件・識別子・永続形（ADR-0011）
+
+- **append-only**：entry は mutate/delete せず、訂正は reversal（`reverses_entry_id`）で表す。
+- **point 残高 = fold**、残高は負にならない、**ledger↔point 整合**（`point_amount!=0` の entry に
+  `delta=-point_amount` の point entry 1 件）。
+- `entry_id` は ledger レイヤが UUID4 hex で採番。`session_id` は session レイヤ（S2）の UUID を参照。
+- 別ストア `ledger.json`（ADR-0007 の `sessions[].ledger[]` 案を refine）。
+
+### Out of scope（S3.1 時点）
+
+- desktop ledger viewer/editor（S3.2, ISSUE-0013）、settlement CSV export（S3.3, ISSUE-0014）。
+- hand logger（`HandSummary`）との自動接続 / auto entry 生成、chip↔円換算、rake/fee。
+- settlement schema の `1.0` freeze（S4）、mobile UI、cross-app sync（S5）。
+
+---
+
 ## 実装状況（現時点）
 
 | 機能 | 状態 | 備考 |
@@ -219,7 +276,8 @@ ADR-0006、実装上の判断は ADR-0007。**hand logger とは未接続**（�
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0009） |
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
-| session ledger / point ledger / store settlement | ❌ 未実装 | **設計確定（S3 planning, ADR-0011 + `docs/contracts/ledger-overview.md` / `ledger-schema.md`）。実装 planned（S3.1〜S3.3: ISSUE-0012〜0014）。future scope 参照** |
+| **ledger / point / settlement core (S3.1)** | ✅ 実装済 | `core/ledger.py`, `core/ledger_repository.py`（別ストア `ledger.json`, ADR-0011。hand logger とは未接続。§ Ledger / Points / Settlement 参照） |
+| ledger desktop viewer (S3.2) / settlement CSV export (S3.3) | ❌ 未実装 | planned（ISSUE-0013 / ISSUE-0014） |
 
 ---
 
@@ -238,9 +296,9 @@ ADR-0006、実装上の判断は ADR-0007。**hand logger とは未接続**（�
 | hand logger | ハンドごとのアクション履歴を JSON/PHH に出力 | ✅ 実装済 |
 | **player registry** | アプリ内で player を新規作成・管理 | ✅ 実装済 (S1, § Player Registry 参照) |
 | **session + hand-based seating** | session 管理と hand ごとの seat→player スナップショット (`seat_assignment` / `hand_ref`) | ✅ core 実装済 (S2, § Session & Seating 参照) |
-| **session ledger** | session 単位の buy-in / rebuy / add-on / order / entry_fee / adjustment を ledger entry として記録 | 🔲 設計確定 (S3, ADR-0011)・実装 planned (S3.1) |
-| **point ledger** | prize point の grant / spend を記録、buy-in 等に充当可能。残高 = fold（ISSUE-0001 決着） | 🔲 設計確定 (S3, ADR-0011)・実装 planned (S3.1) |
-| **session settlement** | session 終了時に player ごとの「店への net 支払額」と paid/unpaid を確定 | 🔲 設計確定 (S3, ADR-0011)・実装 planned (S3.3, schema freeze は S4) |
+| **session ledger** | session 単位の buy-in / rebuy / add-on / order / entry_fee / adjustment を ledger entry として記録 | ✅ core 実装済 (S3.1, ADR-0011, § Ledger / Points / Settlement 参照) |
+| **point ledger** | prize point の grant / spend を記録、buy-in 等に充当可能。残高 = fold（ISSUE-0001 決着） | ✅ core 実装済 (S3.1) |
+| **session settlement** | session 終了時に player ごとの「店への net 支払額」と paid/unpaid を確定 | ✅ core 実装済 (S3.1: compute/commit/paid-unpaid)・desktop/export は S3.2/S3.3・schema `1.0` freeze は S4 |
 | **cross-app boundary** | hand logger と ledger app の相互参照契約 (player_id / session_id / hand_id) | 🔲 planned (S5) |
 
 hand logger と ledger app は **将来別画面・別アプリ** になることを前提に設計する。
@@ -250,7 +308,8 @@ hand logger と ledger app は **将来別画面・別アプリ** になるこ�
 
 未実装。以下の概念モデルを今後 Phase 単位で実装する。
 
-> **S3（ledger / point / settlement）の設計は ADR-0011 で確定済**（実装は planned）。要点: **2 台帳**
+> **S3（ledger / point / settlement）の設計は ADR-0011 で確定・core 実装済（S3.1, § Ledger / Points /
+> Settlement 参照）**。要点: **2 台帳**
 > （`ledger_entry` = cash+point イベント / `point_ledger_entry` = 残高の権威台帳）+ derived
 > `session_settlement`、**整数円**（chips とは別単位・自動換算なし）、**別ストア `ledger.json`**、
 > **point 残高 = fold**（ISSUE-0001 決着）、**append-only + reversal で訂正**、**manual-first**、
@@ -339,7 +398,7 @@ hand logger と ledger app は **将来別アプリ化** することを前提�
 | **S0** | spec expansion | CLAUDE.md / ADR-0003 / issues / worklog |
 | **S1** | player registry ✅ 実装済 | `player` データモデル、CRUD、display_name のみ、別画面 |
 | **S2** | session + hand-based seating ✅ core 実装済 | `session`, `seat_assignment`, `hand_ref`、hand 開始ごとのスナップショット（`core/session*.py`, ADR-0007。schema は draft のまま） |
-| **S3** | ledger entries + point ledger（**設計確定 ADR-0011** / 実装 planned） | `ledger_entry`, `point_ledger_entry`、cash+point 併用、整数円、別ストア `ledger.json`、残高=fold。実装細分: **S3.1** core schema+repository（ISSUE-0012）/ **S3.2** desktop ledger viewer・editor 別画面（ISSUE-0013）/ **S3.3** settlement 確定+CSV export（ISSUE-0014） |
+| **S3** | ledger entries + point ledger（**ADR-0011 / S3.1 core 実装済**） | `ledger_entry`, `point_ledger_entry`, `session_settlement`、cash+point 併用、整数円、別ストア `ledger.json`、残高=fold。実装細分: **S3.1 ✅ core schema+repository**（ISSUE-0012）/ **S3.2** desktop ledger viewer・editor 別画面（ISSUE-0013）/ **S3.3** settlement export CSV（ISSUE-0014） |
 | **S4** | session settlement + paid/unpaid | `session_settlement`、net due to store、paid/unpaid 操作（設計は ADR-0011 で確定。S3.3 で derived view 先行、schema freeze は S4） |
 | **S5** | cross-app contract / sync boundary | hand logger ↔ ledger app の参照契約、ID 安定性、別プロセス化準備 |
 | **R0–R5**（R1/R2 実装済 / 他は提案） | rules-aware hand reconstruction（**hand core 改善トラック**, S 系列と直交） | pokerkit を live ルール権威に / actor 推定（手番 prior × sensor + silent-fold 合成）/ `apply_corrections`（合法手制約）/ 決定的 record/replay + golden fixtures。ADR-0009（R2 engine 実装済, default-off）/ ADR-0010（R1 実装済）。**R1 record-only ✅** → **R2 pokerkit engine ✅(default-off)** → R3 推定/訂正/融合 → R4 contracts → R5 freeze + session 統合 |
@@ -527,20 +586,22 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 - **Prerequisites**: session 契約（S2）+ ledger/point schema 凍結。ISSUE-0001（point 残高の
   source of truth）は **ADR-0011 で fold に決着**（残サブ問題のみ S3.1/S3.2）。
 - **Parallel tasks**:
-  - WS0: ledger_entry / point_ledger_entry / session_settlement schema を draft（**済**）→ 実
-    `schemas/*.schema.json` + fixtures（S3.1）→ freeze（session freeze 後）。
-  - WS1: ledger / point ledger repository/service + 残高 fold + settlement 確定（**S3.1 / S3.3**）。
-  - WS2: desktop の ledger 入力・中間集計（buy-in 合計 / 注文合計）別画面（**S3.2**）。
+  - WS0: ledger_entry / point_ledger_entry / session_settlement schema（**実 `schemas/*.schema.json` +
+    fixtures 実装済, S3.1, version 0.x**）→ freeze（session freeze 後）。
+  - WS1: ledger / point ledger repository/service + 残高 fold + settlement 確定（**S3.1 実装済**：
+    `core/ledger*.py`、settlement compute/commit/paid-unpaid も含む）。
+  - WS2: desktop の ledger 入力・中間集計（buy-in 合計 / 注文合計）別画面（**S3.2, 未着手**）。
   - WS3: mobile の ledger 画面（mock）。
 - **Blockers**: ledger schema freeze は session schema freeze（#3, ISSUE-0005）の後（依存順）。
   残高 source of truth（ISSUE-0001）は決着済で blocker から外れた。
 - **Done criteria**: cash+point 併用・point 不足の cash 補完・entry fee cash only・append-only 訂正・
-  残高 fold が core で enforced、両 front-end が中間集計（speculative）を表示できる。
-- **Phase 3.x（実装細分, planned）**:
-  - 3.1（ISSUE-0012）: 実 schema/fixtures + `tests/test_contracts.py` 登録 + `core/ledger.py` /
-    `core/ledger_repository.py` + `ledger.json` + `.gitignore` + invariants/validation + code↔contract test。
+  残高 fold が core で enforced（**達成: WS1 core, S3.1**）。両 front-end の中間集計（speculative）表示は未着手。
+- **Phase 3.x（実装細分）**:
+  - 3.1（ISSUE-0012, **✅ 実装済**）: 実 schema/fixtures + `tests/test_contracts.py` 登録 + `core/ledger.py` /
+    `core/ledger_repository.py` + `ledger.json` + `.gitignore` + invariants/validation + code↔contract test
+    （`tests/test_ledger_repository.py`）。
   - 3.2（ISSUE-0013）: desktop ledger viewer/editor（別画面, `gui/dashboard.py` は触らない）。
-  - 3.3（ISSUE-0014）: settlement 確定 + paid/unpaid + CSV export（settlement schema freeze は S4）。
+  - 3.3（ISSUE-0014）: settlement export CSV（settlement schema `1.0` freeze は S4）。
 
 ### Phase 4 — settlement
 

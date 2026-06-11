@@ -138,9 +138,10 @@ S3 の ledger / points / settlement を、以下の **軽量・append-only な 2
 - [x] ISSUE-0001 を更新（残高 = fold の方針確定、残サブ問題を S3.1/S3.2 へ）。
 - [x] ISSUE-0012（S3.1 core）/ ISSUE-0013（S3.2 desktop viewer）/ ISSUE-0014（S3.3 settlement export）を起票。
 - [x] `versioning-and-freeze.md` freeze order #4/#5、`README.md`、CLAUDE.md、decision-log を更新。
-- [ ] **S3.1**: 実 `schemas/{ledger_entry,point_ledger_entry,session_settlement}.schema.json` + fixtures +
-  `tests/test_contracts.py::_MODELS` 登録、`core/ledger.py` + `core/ledger_repository.py`、`ledger.json` +
-  `.gitignore`、invariants/validation、code↔contract test（ISSUE-0012）。
+- [x] **S3.1（実装済）**: 実 `schemas/{ledger_entry,point_ledger_entry,session_settlement}.schema.json` +
+  fixtures + `tests/test_contracts.py::_MODELS` 登録、`core/ledger.py` + `core/ledger_repository.py`、
+  `ledger.json` + `.gitignore`、invariants/validation、code↔contract test
+  （`tests/test_ledger_repository.py`, ISSUE-0012）。
 - [ ] **S3.2**: desktop ledger viewer/editor（別画面, `gui/dashboard.py` は触らない）（ISSUE-0013）。
 - [ ] **S3.3**: settlement compute + paid/unpaid + CSV export（ISSUE-0014）。
 - [ ] ledger schema を `1.0` へ freeze（ISSUE-0001 残項目 + session freeze 後）。

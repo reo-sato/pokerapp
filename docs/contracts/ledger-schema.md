@@ -1,10 +1,10 @@
 # Ledger / points / settlement — JSON schema draft (S3)
 
 > **Status: draft / 未 freeze**（freeze order #4 ledger / #5 settlement）。本 doc は
-> `ledger_entry` / `point_ledger_entry` / `session_settlement` の **擬似 JSON Schema**
-> （JSON Schema draft 2020-12 形式）。実 schema ファイル（`schemas/*.schema.json`）+ fixtures +
-> `tests/test_contracts.py` 登録は **S3.1（ISSUE-0012）で追加**する。設計は
-> `ledger-overview.md` / ADR-0011 を参照。
+> `ledger_entry` / `point_ledger_entry` / `session_settlement` の擬似 JSON Schema（記述用）。
+> **実 schema は実装済**: `schemas/{ledger_entry,point_ledger_entry,session_settlement}.schema.json`
+> + `fixtures/` + `tests/test_contracts.py` 登録（S3.1, ISSUE-0012）。本 doc の擬似 schema は実 schema と
+> 整合する（差分が出たら実 schema が正）。設計は `ledger-overview.md` / ADR-0011 を参照。
 
 ## versioning 方針
 

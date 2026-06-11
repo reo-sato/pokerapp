@@ -36,12 +36,18 @@ docs/contracts/
 │   ├── player.schema.json          ← player schema（S1, freeze 候補, v1.0）
 │   ├── session.schema.json         ← session schema（S2 draft, v0.1）
 │   ├── seat_assignment.schema.json ← seat_assignment schema（S2 draft, v0.1）
-│   └── hand_ref.schema.json        ← hand_ref schema（S2 draft, v0.1）
+│   ├── hand_ref.schema.json        ← hand_ref schema（S2 draft, v0.1）
+│   ├── ledger_entry.schema.json    ← ledger_entry schema（S3 draft, v0.1, core 実装済）
+│   ├── point_ledger_entry.schema.json ← point_ledger_entry schema（S3 draft, v0.1, core 実装済）
+│   └── session_settlement.schema.json ← session_settlement schema（S3 draft, v0.1, core 実装済）
 └── fixtures/                   ← schema に対するサンプル。contract test の oracle
     ├── player/                 ← canonical / valid-* / invalid-*
     ├── session/                ← canonical / valid-minimal / invalid-*（S2 draft）
     ├── seat_assignment/        ← canonical / valid-minimal / invalid-*（S2 draft）
-    └── hand_ref/               ← canonical / valid-minimal / invalid-*（S2 draft）
+    ├── hand_ref/               ← canonical / valid-minimal / invalid-*（S2 draft）
+    ├── ledger_entry/           ← canonical / valid-* / invalid-*（S3 draft）
+    ├── point_ledger_entry/     ← canonical / valid-minimal / invalid-*（S3 draft）
+    └── session_settlement/     ← canonical / valid-minimal / invalid-*（S3 draft）
 ```
 
 ## 運用ルール（要約）

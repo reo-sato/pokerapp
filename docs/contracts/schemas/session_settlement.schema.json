@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/session_settlement.schema.json",
+  "title": "SessionSettlement",
+  "version": "0.1",
+  "description": "S3/S4 draft (未 freeze)。session 締めの (session, player) 1 行。entries の fold (materialized view) を close 時に確定。常に player→店の 1 方向。net_due_to_store = 符号付き Σ cash_amount。schema 1.0 freeze は S4。詳細は docs/contracts/ledger-overview.md / ADR-0011。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session_id", "player_id", "cash_in_total", "point_spent_total", "order_total", "entry_fee", "point_credited_total", "net_due_to_store", "payment_status", "settled_at"],
+  "properties": {
+    "session_id": {"type": "string", "minLength": 1, "description": "対象 session。"},
+    "player_id": {"type": "string", "pattern": "^[0-9a-f]{32}$", "description": "対象 player。"},
+    "cash_in_total": {"type": "integer", "description": "buy_in+rebuy+add_on の cash 合計 (整数円)。"},
+    "point_spent_total": {"type": "integer", "minimum": 0, "description": "当該 session の spend ポイント合計 (>=0)。"},
+    "order_total": {"type": "integer", "description": "order の cash 合計 (整数円)。"},
+    "entry_fee": {"type": "integer", "description": "entry_fee の cash 合計 (整数円, cash only)。"},
+    "point_credited_total": {"type": "integer", "minimum": 0, "description": "当該 session で付与された result_credit/campaign の合計 (>=0)。"},
+    "net_due_to_store": {"type": "integer", "description": "店への net 支払額 (符号付き Σ cash_amount, 整数円)。point は加算しない。"},
+    "payment_status": {"type": "string", "enum": ["paid", "unpaid"], "description": "支払状態。partial は扱わない。確定後の唯一の可変フィールド。"},
+    "settled_at": {"type": "string", "format": "date-time", "description": "確定時刻 (ISO 8601)。"}
+  }
+}

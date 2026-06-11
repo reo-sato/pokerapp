@@ -24,10 +24,10 @@ JSON Schema は **構造**（型・required・形式）を検査するが、業�
 - 読み込み時の leniency: 永続ファイル読込で `created_at` 欠損は許容（空文字で補完）。これは
   **ロード堅牢性の実装詳細**であり、正規の永続形（schema canonical）では `created_at` は required。
 
-## ledger / points / settlement（S3 設計確定 / core 実装 planned — ADR-0011）
+## ledger / points / settlement（S3.1 core 実装済 — ADR-0011）
 
-方針は ADR-0011 / `ledger-overview.md` で確定。**core 実装は S3.1（ISSUE-0012）**。core 実装後に本節の
-「planned」を外す。core（`LedgerRepository`, planned）が source of truth:
+方針は ADR-0011 / `ledger-overview.md` で確定し、**core 実装済**（`core/ledger_repository.py`, S3.1）。
+`LedgerRepository` が source of truth で、以下を enforce する（`tests/test_ledger_repository.py` で固定）:
 
 - **append-only**: `ledger_entry` / `point_ledger_entry` は mutate / delete しない。訂正は新規 reversal
   （`reverses_entry_id`）/ adjustment / 相殺 spend で表す。
