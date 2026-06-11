@@ -1,8 +1,8 @@
 {
-  "entry_id": "5e6f708192a3b4c5d6e7f8091a2b3c4d",
   "session_id": "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+  "player_id": "00000000000000000000000000000001",
   "kind": "buy_in",
   "occurred_at": "2026-06-10T19:05:00",
-  "cash_amount": 10000,
+  "cash_amount": 3000,
   "point_amount": 0
 }

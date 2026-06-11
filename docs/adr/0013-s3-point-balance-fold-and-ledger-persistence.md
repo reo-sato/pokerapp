@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted
+Superseded by ADR-0016
+
+> verify-v1 への S3 統合マージ時に、ledger / points / settlement の実装・契約を **ADR-0016** に
+> 一本化した。本 ADR の中核判断（**point 残高 = point ledger の fold**、別ストア永続化）は ADR-0016 に
+> 踏襲されており、撤回ではない。コード（`core/ledger*.py`）と契約 doc は ADR-0016 の版が source of truth。
 
 ## Date
 
@@ -122,4 +126,5 @@ order への point 充当上限を決める値であり、UI 表示・entry vali
 ## Supersedes / Superseded by
 
 - Supersedes: —（ISSUE-0001 を Resolved にする決定）
-- Superseded by: —
+- Superseded by: ADR-0016（S3 ledger/points/settlement 統合実装。fold 採用を踏襲し、session_settlement /
+  desktop viewer / CSV export を追加。verify-v1 マージで code を一本化）

@@ -3,30 +3,30 @@
   "$id": "https://pokerapp.local/contracts/ledger_entry.schema.json",
   "title": "LedgerEntry",
   "version": "0.1",
-  "description": "S3 draft (未 freeze)。session 中の金銭イベント 1 件。cash と point の併用を 1 行で表す (業務ルール 2)。kind 別の金額制約 (entry fee cash only / adjustment のみ負 cash 可 / point 残高検証 / order 合計整合) は core が enforce。詳細は docs/contracts/ledger-points.md / ADR-0013。",
+  "description": "S3 draft (未 freeze)。金銭/価値イベント 1 件。append-only。cash+point 併用可。符号制約 (通常 kind は非負・非ゼロ移動, entry_fee は point 0, adjustment/reversal は符号付き)・残高非負・ledger↔point 整合は core が enforce。詳細は docs/contracts/ledger-overview.md / ledger-schema.md / ADR-0016。",
   "type": "object",
   "additionalProperties": false,
   "required": ["entry_id", "session_id", "player_id", "kind", "occurred_at", "cash_amount", "point_amount"],
   "properties": {
     "entry_id": {
       "type": "string",
-      "minLength": 1,
-      "description": "opaque な非空文字列。ledger レイヤが採番する (UUID4 hex 推奨, ADR-0013)。"
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "UUID4 hex (32 文字, lowercase)。ledger レイヤが採番。一意。"
     },
     "session_id": {
       "type": "string",
       "minLength": 1,
-      "description": "紐づく session (S2 session レイヤの session_id)。"
+      "description": "所属 session の session_id (opaque 非空, S2)。金銭イベントは session スコープ。"
     },
     "player_id": {
       "type": "string",
-      "minLength": 1,
-      "description": "対象 player (S1 registry の player_id)。"
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "registry の player_id。実在は core が enforce (unknown_player)。"
     },
     "kind": {
       "type": "string",
-      "enum": ["buy_in", "rebuy", "add_on", "order", "adjustment", "entry_fee"],
-      "description": "金銭イベント種別。entry_fee は cash only (業務ルール 1, core が enforce)。"
+      "enum": ["buy_in", "rebuy", "add_on", "order", "entry_fee", "adjustment"],
+      "description": "イベント種別。entry_fee は cash only (point_amount=0, core)。adjustment / reversal (reverses_entry_id) は符号付き訂正。"
     },
     "occurred_at": {
       "type": "string",
@@ -35,26 +35,35 @@
     },
     "cash_amount": {
       "type": "integer",
-      "description": "cash 計上額。adjustment 以外は 0 以上 (cross-field, core が enforce)。"
+      "description": "cash 分 (整数円, 1=¥1)。通常 kind は >=0、adjustment/reversal は符号付き可 (core が per-kind enforce)。"
     },
     "point_amount": {
       "type": "integer",
-      "minimum": 0,
-      "description": "point 充当額。buy_in/rebuy/add_on/order のみ正値可 (業務ルール 2)。残高検証と spend 系 point_ledger_entry の同時生成は core が行う。"
+      "description": "point 充当分 (整数点)。通常 spend は >=0、reversal は負。!=0 のとき linked point_ledger_entry が delta_points=-point_amount で 1 件 (core)。entry_fee では 0。"
     },
     "note": {
       "type": "string",
-      "description": "任意メモ。"
+      "description": "任意の備考 (手入力メモ / reversal の説明)。"
+    },
+    "hand_id": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "任意。将来 per-hand rake/fee 用フック ((session_id, hand_id) 複合参照)。S3 では未使用。"
+    },
+    "reverses_entry_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "任意。reversal のとき相殺対象の entry_id。金額は対象の符号反転 (core)。"
     },
     "order": {
       "type": "object",
       "additionalProperties": false,
+      "description": "kind=order のときのみ。注文明細。",
       "required": ["item_name", "unit_amount", "quantity"],
-      "description": "kind=order のみ必須の明細。unit_amount * quantity = cash_amount + point_amount (cross-field, core が enforce)。",
       "properties": {
-        "item_name": {"type": "string", "minLength": 1},
-        "unit_amount": {"type": "integer", "minimum": 0},
-        "quantity": {"type": "integer", "minimum": 1}
+        "item_name": {"type": "string", "minLength": 1, "description": "品目名。"},
+        "unit_amount": {"type": "integer", "minimum": 0, "description": "単価 (整数円)。"},
+        "quantity": {"type": "integer", "minimum": 1, "description": "数量。"}
       }
     }
   }

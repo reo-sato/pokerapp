@@ -28,10 +28,10 @@ _FIXTURES = _CONTRACTS / "fixtures"
 # player: S1 freeze 候補。session / seat_assignment / hand_ref: S2 draft (ADR-0006, 未 freeze)。
 # reconstruction_event: R1 (ADR-0010) record/replay の envelope (additionalProperties:false)。
 # hand / action: hand core (ADR-0010 R5, ISSUE-0011)。additionalProperties:true で 1.0。
-# ledger_entry / point_ledger_entry: S3 draft (ADR-0013, 未 freeze)。
+# ledger_entry / point_ledger_entry / session_settlement: S3 draft (ADR-0016, 未 freeze)。
 _MODELS = [
     "player", "session", "seat_assignment", "hand_ref", "reconstruction_event",
-    "hand", "action", "ledger_entry", "point_ledger_entry",
+    "hand", "action", "ledger_entry", "point_ledger_entry", "session_settlement",
 ]
 
 

@@ -57,27 +57,22 @@ front-end が UI 分岐できるよう、core / repository が返す error を *
 | `unknown_player` | 指定 `player_id` が registry に実在しない | assign seat | `UnknownPlayerError` |
 | `invalid_seat` | `seat_no` が範囲外（1..9 外）/ `hand_id` が不正 | assign seat | `InvalidSeatError` |
 
-### ledger / point ledger error code（S3 core 実装済）
+### ledger / points / settlement error code（S3 core 実装済 — ADR-0016）
 
-`core/ledger_repository.py` が返す code（additive）。Python 例外階層は
-`LedgerError`（基底）← 各 code に 1:1 対応する subclass。session / player 系の検査は
-既存例外を**再利用**する（`not_found` = `SessionNotFoundError`、`session_closed` =
-`SessionClosedError`（意味を「closed session への entry 追加」にも additive 拡張）、
-`unknown_player` = `UnknownPlayerError`）:
+`core/ledger_repository.py` が返す code。Python 例外階層は `LedgerError`（基底）← 各 code に
+1:1 対応する subclass。共通 `not_found` / `unknown_player` の意味を再利用する（ledger 専用の例外クラスで投げる）:
 
 | code | 意味 | 発生する操作（例） | Python 例外（core） |
 |------|------|------------------|---------------------|
-| `not_found` | 指定 `session_id` が存在しない（既存 code を再利用） | add entry / session totals | `SessionNotFoundError` |
-| `session_closed` | closed の session に entry を追加しようとした（再利用） | add entry | `SessionClosedError` |
-| `unknown_player` | 指定 `player_id` が registry に実在しない（再利用） | add entry / grant / balance | `UnknownPlayerError` |
-| `invalid_kind` | ledger kind が定義外 | add entry | `InvalidKindError` |
-| `invalid_reason` | grant reason が grant 系定義外 | grant points | `InvalidReasonError` |
-| `invalid_amount` | 金額不正（負 point / 合計 0 / point 不可 kind への point / 非整数 等） | add entry / grant / adjust / plan payment | `InvalidAmountError` |
-| `invalid_order_detail` | order 明細不正・合計不一致・order 以外への明細 | add entry | `InvalidOrderDetailError` |
-| `entry_fee_requires_cash` | entry fee に point を充当しようとした（業務ルール 1） | add entry | `EntryFeeRequiresCashError` |
-| `insufficient_points` | point 残高不足（spend / 負残高化する adjustment） | add entry / adjust points | `InsufficientPointsError` |
-| `duplicate_grant` | grant の `idempotency_key` が既存と重複 | grant points | `DuplicateGrantError` |
+| `not_found` | 指定 `entry_id` / `session_id` / settlement が存在しない | reverse / list / settlement | `LedgerNotFoundError` |
+| `unknown_player` | 指定 `player_id` が registry に実在しない | add entry / grant | `UnknownPlayerError` |
+| `invalid_amount` | 金額・符号・order 明細・reversal 要求が不正 | add entry / grant | `InvalidAmountError` |
+| `entry_fee_requires_cash` | `kind=entry_fee` に point を充当しようとした（cash only, rule 1） | add entry | `EntryFeeRequiresCashError` |
+| `insufficient_points` | spend が point 残高を割り込む（不足分は cash 補完, rule 3） | add entry（point 充当） | `InsufficientPointsError` |
+| `duplicate_grant` | 同一 `idempotency_key` の grant が既に存在 | grant points | `DuplicateGrantError` |
+| `session_not_closed` | open session を settlement 確定しようとした | commit settlement | `SessionNotClosedError` |
+| `already_settled` | 確定済 settlement を再確定しようとした | commit settlement | `AlreadySettledError` |
 
-### settlement（planned, S4）
-
-例: `already_settled`（S4）。
+> `payment_status` の `unpaid↔paid` 操作は訂正として許容（error にしない）。kind / reason / status の
+> enum 外指定は呼び出し側のバグとして `ValueError`（front-end は固定 enum から渡すため通常到達しない）。
+> settlement schema の `1.0` freeze は #5（S4）。

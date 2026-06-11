@@ -35,9 +35,10 @@
 | ADR-0010 | Contract-first hand core via deterministic record/replay | Accepted | 2026-06-03 | reconstruct / contracts | `docs/adr/0010-contract-first-hand-core-record-replay.md` | 関連: ADR-0008 / ADR-0009 / ISSUE-0010 / ISSUE-0011 |
 | ADR-0011 | Deterministic replay harness (sync timestamp-ordered driver + clock injection) | Accepted | 2026-06-05 | reconstruct / replay (F1) | `docs/adr/0011-deterministic-replay-harness.md` | 関連: ADR-0010 / ADR-0009 / ISSUE-0010 |
 | ADR-0012 | pokerkit を live 既定 backend に切替（legacy は rollback, pokerkit pin） | Accepted | 2026-06-05 | reconstruct / engine (G) | `docs/adr/0012-pokerkit-live-default.md` | 関連: ADR-0009。実機 E2E は Phase H |
-| ADR-0013 | S3 point 残高 = point ledger の fold + ledger 永続化方式 | Accepted | 2026-06-10 | core / ledger・points (S3) | `docs/adr/0013-s3-point-balance-fold-and-ledger-persistence.md` | 関連: ADR-0003 / ADR-0007 / ISSUE-0001（決着） |
+| ADR-0013 | S3 point 残高 = point ledger の fold + ledger 永続化方式 | **Superseded** | 2026-06-10 | core / ledger・points (S3) | `docs/adr/0013-s3-point-balance-fold-and-ledger-persistence.md` | fold 採用は ADR-0016 に踏襲。**Superseded by ADR-0016**（verify-v1 マージで実装一本化）/ 関連: ISSUE-0001 |
 | ADR-0014 | Migrate RFID hardware to PN5180 + ESP32-S3 and make HTTP the canonical transport   | **Superseded** | 2026-06-01 | rfid / hardware migration   | `docs/adr/0014-migrate-rfid-to-pn5180-esp32s3-and-canonical-http-transport.md`                    | 旧番号 0007 から採番替え。**Superseded by ADR-0015**   |
 | ADR-0015 | PN5180 + ESP32-S3 via USB CCID — PC/SC is the canonical RFID transport             | Accepted | 2026-06-01 | rfid / hardware migration   | `docs/adr/0015-pn5180-esp32s3-usb-ccid-pcsc-canonical.md`                                         | 旧番号 0008 から採番替え。Supersedes ADR-0014 / 関連: ISSUE-0015 |
+| ADR-0016 | Ledger / points / settlement design direction (S3) | Accepted | 2026-06-10 | contracts / core (S3) | `docs/adr/0016-ledger-points-settlement-design-direction.md` | **Supersedes ADR-0013**（fold 踏襲 + session_settlement / desktop viewer / CSV export 追加）/ 関連: ADR-0003 / ADR-0007 / ISSUE-0001 |
 
 <!--
 Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時点で空番。
@@ -48,7 +49,7 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 
 | ID         | Title                                                  | Status | Date       | Area                     | File                                                       | Related Fix / Commit |
 |------------|--------------------------------------------------------|--------|------------|--------------------------|------------------------------------------------------------|----------------------|
-| ISSUE-0001 | point ledger の残高計算と source of truth が未確定     | Resolved | 2026-05-22 | core / ledger (S3)     | `docs/issues/0001-point-balance-source-of-truth.md`        | ADR-0013（fold 採用）+ S3 core 実装 + `tests/test_point_ledger.py` |
+| ISSUE-0001 | point ledger の残高計算と source of truth が未確定     | Resolved | 2026-05-22 | core / ledger (S3)     | `docs/issues/0001-point-balance-source-of-truth.md`        | ADR-0013→**ADR-0016**（fold 採用）+ S3 core 実装 + `tests/test_ledger_repository.py` |
 | ISSUE-0002 | display_name の uniqueness 仕様の将来拡張が未確定      | Open   | 2026-05-22 | player registry (S1)     | `docs/issues/0002-display-name-uniqueness-scope.md`        | —                    |
 | ISSUE-0003 | 並行開発の contract drift / 凍結タイミング risk       | Open   | 2026-05-22 | planning (WS0–WS3)       | `docs/issues/0003-parallel-dev-contract-drift.md`          | Phase 0a で部分緩和  |
 | ISSUE-0004 | hand_id が int と cross-app 文字列契約で不整合        | Resolved | 2026-05-22 | contracts / shared-ids   | `docs/issues/0004-hand-id-int-vs-cross-app-string.md`      | ADR-0006（複合キー採用） |
@@ -63,3 +64,6 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0013 | Session/Seating Viewer の data source 依存と将来拡張    | Open   | 2026-06-03 | desktop (WS2-α) / GUI       | `docs/issues/0013-session-viewer-data-source-and-enhancements.md` | 旧 0008 から採番替え（verify-v1 統合時の ID 衝突解消）。E1〜E3 実装で #1 は概ね解消 |
 | ISSUE-0014 | PN5180 + ESP32-S3 firmware ↔ Python の HTTP API 契約 | **Superseded** | 2026-06-01 | rfid / firmware boundary | `docs/issues/0014-pn5180-firmware-http-contract.md`        | 旧番号 0006 から採番替え。Superseded by ISSUE-0015 |
 | ISSUE-0015 | ESP32-S3 (PN5180) USB CCID firmware contract         | Open   | 2026-06-01 | rfid / firmware boundary | `docs/issues/0015-pn5180-usb-ccid-firmware-contract.md`    | 旧番号 0007 から採番替え。ADR-0015 follow-up   |
+| ISSUE-0016 | S3.1 ledger / points core schema + repository 実装   | Fixed  | 2026-06-10 | core / contracts (S3.1)  | `docs/issues/0016-ledger-core-implementation.md`           | S3.1 実装済（`core/ledger*.py`, schema/fixtures, tests 緑）。ADR-0016。旧 ISSUE-0012（verify-v1 統合で採番替え） |
+| ISSUE-0017 | S3.2 desktop ledger viewer / editor（別画面）         | Fixed  | 2026-06-10 | gui / desktop (S3.2)     | `docs/issues/0017-ledger-desktop-viewer.md`                | S3.2 実装済（`gui/ledger_view.py`, `main.py --ledger`）。ADR-0016。旧 ISSUE-0013（採番替え） |
+| ISSUE-0018 | S3.3 settlement 確定 + paid/unpaid + CSV export      | Fixed  | 2026-06-10 | core / export (S3.3)     | `docs/issues/0018-settlement-export.md`                    | S3.3 実装済（`output/ledger_csv_exporter.py`, `main.py --export-ledger`）。ADR-0016。旧 ISSUE-0014（採番替え） |

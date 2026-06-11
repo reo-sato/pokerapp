@@ -74,23 +74,24 @@ S0（spec expansion）時点では point ledger の物理レイアウト（DB / 
   Reproduction 論点 2）。UI 上の preview 表現は WS2/WS3 着手時に確定する。
 - 付随決定: point 不足は strict reject（`insufficient_points`）+ `plan_payment` による
   cash 補完分割、spend 系 point entry は core が ledger entry から同時生成、
-  永続化は専用 `ledger.json`。詳細は ADR-0013 / `docs/contracts/ledger-points.md`。
+  永続化は専用 `ledger.json`。詳細は ADR-0013 / `docs/contracts/ledger-overview.md`。
 
 ## Regression Test
 
-実装済（`tests/test_point_ledger.py`）:
+実装済（`tests/test_ledger_repository.py`。ADR-0016 統合後の test 名）:
 
-- `test_balance_matches_fold_of_entries` — 残高 = fold の一致
-- `test_insufficient_points_falls_back_to_cash` — strict reject + `plan_payment` の cash 補完
+- `test_point_balance_matches_fold_of_entries` — 残高 = fold の一致
+- `test_insufficient_points_rejected` — 残高不足は reject（不足分は呼び出し側が cash で補完。
+  `plan_payment` の自動分割は ADR-0016 では非採用）
 - `test_entry_fee_rejects_points` — entry fee は cash only
 - `test_grant_idempotency` — manual/campaign grant の重複防止
-- `test_grant_and_spend_in_same_session` — 同一 session 内 grant→spend 同居（論点 3）
+- 同一 session 内 grant→spend 同居は時系列 fold で表現（論点 3）
 
 ## Affected Files
 
 - `core/ledger.py` / `core/ledger_repository.py`（`core/point_ledger.py` 構想は
   ledger と point を 1 repository に統合する形に変更）
-- `docs/contracts/ledger-points.md` / `docs/contracts/schemas/{ledger_entry,point_ledger_entry}.schema.json`
+- `docs/contracts/ledger-overview.md` / `docs/contracts/schemas/{ledger_entry,point_ledger_entry}.schema.json`
 
 ## Related Worklog
 
@@ -100,7 +101,8 @@ S0（spec expansion）時点では point ledger の物理レイアウト（DB / 
 ## Related ADRs
 
 - `docs/adr/0003-expand-domain-from-hand-logging-to-session-ledger-and-store-settlement.md`
-- `docs/adr/0013-s3-point-balance-fold-and-ledger-persistence.md`（決着）
+- `docs/adr/0013-s3-point-balance-fold-and-ledger-persistence.md`（fold 決着, **Superseded by ADR-0016**）
+- `docs/adr/0016-ledger-points-settlement-design-direction.md`（S3 統合・design-of-record。fold を踏襲し settlement / desktop / CSV export を追加）
 
 ## Related Commits
 

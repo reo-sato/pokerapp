@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+### Changed / Added (S3 ledger 統合 — verify-v1 へのマージで実装を一本化, ADR-0016)
+
+- **S3 ledger / points / settlement を ADR-0016 の実装へ一本化**（verify-v1 が持っていた
+  ADR-0013 の core-only ledger を統合・置換）。fold による残高（ISSUE-0001）は踏襲し、
+  **session_settlement / desktop viewer / CSV export** を追加。
+  - 追加: `core/ledger.py` に `SessionSettlement`、`core/ledger_repository.py` に settlement
+    （compute / commit / paid-unpaid）+ reversal（append-only 訂正）。
+  - 追加: `gui/ledger_view.py`（`main.py --ledger`, S3.2 desktop viewer/editor, 別画面）、
+    `output/ledger_csv_exporter.py`（`main.py --export-ledger`, S3.3 settlement/cashflow CSV, utf-8-sig）。
+  - 契約: `docs/contracts/ledger-overview.md` / `ledger-schema.md` + `session_settlement.schema.json`
+    + fixtures。`tests/test_contracts.py::_MODELS` に `session_settlement` を追加。
+  - **ADR-0016**（新規, Accepted）が **ADR-0013 を Supersede**（fold 踏襲 + settlement/desktop/export）。
+    番号衝突回避のため採番替え: 旧 ISSUE-0012/0013/0014（ledger）→ **0016/0017/0018**。
+  - 削除: verify-v1 の `docs/contracts/ledger-points.md` / `tests/test_point_ledger.py`（ADR-0016 の
+    `ledger-overview.md` / `test_ledger_repository.py` に統合）。error 階層は ADR-0016 版に統一
+    （`InvalidAmountError` 等。旧 `InvalidKindError` / `plan_payment` / `adjust_points` は非採用）。
+  - tests: `tests/test_ledger_repository.py`（23）/ `test_ledger_view_gui.py`（16）/
+    `test_ledger_csv_exporter.py`（7）+ contract。dependency-free subset **96 passed**。
+
 ### Added (ローカル QA tooling — 実機・Windows なしの検証手段)
 
 - **実機（RFID/Windows）なしで v1 を検証する**チェックリスト + 模擬ツール:
@@ -49,7 +68,7 @@
     **point_ledger_entry の fold**（cached 残高なし・player に global・常に 0 以上）。
     point 不足は strict reject + `plan_payment` による cash 補完分割（業務ルール 3）。
     entry fee は cash only（業務ルール 1）。spend 系 point entry は core が同時生成。
-  - **契約 draft（S3, v0.1 未 freeze）**: `docs/contracts/ledger-points.md` +
+  - **契約 draft（S3, v0.1 未 freeze）**: `docs/contracts/ledger-overview.md` +
     `schemas/{ledger_entry,point_ledger_entry}.schema.json` + fixtures。
     `error-shapes.md` / `validation-rules.md` / `repository-interfaces.md` に S3 セクション追加。
   - テスト: `tests/test_ledger_repository.py`（13）+ `tests/test_point_ledger.py`（5,

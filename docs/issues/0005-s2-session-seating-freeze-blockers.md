@@ -111,3 +111,9 @@ S2 は hand logger（単体運用・seat は名前ベース）に registry 由�
 
 draft 段階の risk register。Open のまま保持し、S2 着手時に各項目を順次クローズする。
 hand_id の cross-app 形は ISSUE-0004（ADR-0006 で Resolved）で別途決着済み。
+
+**下流依存（S3, 2026-06-10 追記）**: ledger / settlement schema は session schema（freeze order #3）の
+上に乗るため、その `1.0` freeze（#4 ledger / #5 settlement）は **本 issue の session freeze 後**に行う
+（依存順, `versioning-and-freeze.md` § freeze order）。S3 の設計・契約 draft 自体は session freeze を
+待たず進められる（ADR-0011, `docs/contracts/ledger-overview.md`）。`session_id` を ledger 側でも
+session レイヤ UUID に揃える点は ADR-0007 / ADR-0011 で確定済み。

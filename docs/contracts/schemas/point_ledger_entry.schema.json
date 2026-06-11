@@ -3,34 +3,29 @@
   "$id": "https://pokerapp.local/contracts/point_ledger_entry.schema.json",
   "title": "PointLedgerEntry",
   "version": "0.1",
-  "description": "S3 draft (未 freeze)。prize point の増減 1 件。player 残高 = 当該 player の delta_points の fold が source of truth (ADR-0013, ISSUE-0001 決着)。reason と符号の整合 (grant 系は正 / spend 系は負)・残高非負・冪等性は core が enforce。詳細は docs/contracts/ledger-points.md。",
+  "description": "S3 draft (未 freeze)。ポイント増減 1 件。append-only。player の point 残高はこの台帳の delta_points の fold が source of truth (ISSUE-0001)。spend_* は delta<0 で related_ledger_entry_id 必須、grant は delta>0。残高非負は core が enforce。詳細は docs/contracts/ledger-overview.md / ADR-0016。",
   "type": "object",
   "additionalProperties": false,
   "required": ["entry_id", "player_id", "delta_points", "reason", "occurred_at"],
   "properties": {
     "entry_id": {
       "type": "string",
-      "minLength": 1,
-      "description": "opaque な非空文字列。ledger レイヤが採番する (UUID4 hex 推奨)。"
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "UUID4 hex。ledger レイヤが採番。一意。"
     },
     "player_id": {
       "type": "string",
-      "minLength": 1,
-      "description": "対象 player (S1 registry の player_id)。"
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "registry の player_id。"
     },
     "delta_points": {
       "type": "integer",
-      "not": {"const": 0},
-      "description": "増減 (非 0)。grant 系は正 / spend 系は負 / adjustment は両方向 (reason との符号整合は core が enforce)。"
+      "description": "符号付き増減 (!=0, core)。grant は >0、spend_* は <0。残高は負にならない (core)。"
     },
     "reason": {
       "type": "string",
-      "enum": [
-        "manual_grant", "result_credit", "campaign_grant",
-        "spend_on_buyin", "spend_on_rebuy", "spend_on_addon", "spend_on_order",
-        "adjustment"
-      ],
-      "description": "増減理由。spend 系 entry は point 充当付き ledger_entry から core が同時生成する (front-end は直接書かない)。"
+      "enum": ["manual_grant", "result_credit", "campaign_grant", "spend_on_buyin", "spend_on_rebuy", "spend_on_addon", "spend_on_order", "adjustment"],
+      "description": "増減理由。spend_* は related_ledger_entry_id 必須 (core)。"
     },
     "occurred_at": {
       "type": "string",
@@ -39,17 +34,18 @@
     },
     "related_ledger_entry_id": {
       "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "任意。spend_* / reversal-refund のとき、関係する ledger_entry の entry_id。"
+    },
+    "session_id": {
+      "type": "string",
       "minLength": 1,
-      "description": "spend 系で、起点の ledger_entry への back-link。"
+      "description": "任意。session スコープの grant/credit/spend に紐づける (settlement 集計用)。"
     },
     "idempotency_key": {
       "type": "string",
       "minLength": 1,
-      "description": "grant 系の重複防止キー (任意)。一意性は core が enforce (duplicate_grant)。"
-    },
-    "note": {
-      "type": "string",
-      "description": "任意メモ。"
+      "description": "任意。manual_grant / campaign_grant の重複防止キー (ISSUE-0001 Q4)。"
     }
   }
 }

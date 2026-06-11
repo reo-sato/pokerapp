@@ -99,34 +99,39 @@ reload() -> None                                           # ディスクから�
   `session_id` 採番方式・永続形は ADR-0007 で core について確定。schema `1.0` への昇格は
   ISSUE-0005 の残項目（hand logger 接続・seat change UI 要件）決着後。
 
-## ledger_entry / point_ledger_entry interface（S3 core 実装済, schema は draft）
+## ledger / points / settlement interface（S3 core 実装済, schema は draft — ADR-0016）
 
-詳細・モデル定義は `ledger-points.md` / ADR-0013（ISSUE-0001 決着）。core 実装は
-`core/ledger_repository.py`。語彙非依存の契約:
+詳細・モデル定義は `ledger-overview.md` / `ledger-schema.md` / ADR-0016（ISSUE-0001 決着 = fold）。
+core 実装は `core/ledger_repository.py`。語彙非依存の契約:
 
 | 操作 | 入力 | 出力 | error |
 |------|------|------|-------|
-| add ledger entry | `session_id`, `player_id`, `kind`, `cash_amount`, `point_amount`, `note?`, `order?` | `LedgerEntry`（point 充当時は spend entry を core が同時生成） | not-found / session-closed / unknown-player / invalid-kind / invalid-amount / invalid-order-detail / entry-fee-requires-cash / insufficient-points |
+| add ledger entry | `session_id`, `player_id`, `kind`, `cash_amount`, `point_amount`, `note?`, `hand_id?`, `order?` | `LedgerEntry`（point 充当時は spend entry を core が同時生成） | not-found / unknown-player / invalid-amount / entry-fee-requires-cash / insufficient-points |
+| reverse entry | `entry_id` | `LedgerEntry`（reversal, append-only 訂正） | not-found / invalid-amount |
 | list ledger entries | `session_id?`, `player_id?` | `LedgerEntry[]`（記録順） | — |
-| session totals（中間集計・途中値） | `session_id` | player_id → buy-in 合計 / 注文合計 | not-found |
+| grant points | `player_id`, `delta_points`, `reason`, `session_id?`, `idempotency_key?` | `PointLedgerEntry` | unknown-player / invalid-amount / duplicate-grant |
 | point balance | `player_id` | int（fold 結果） | unknown-player |
-| grant points | `player_id`, `points`, `reason`, `idempotency_key?`, `note?` | `PointLedgerEntry` | unknown-player / invalid-reason / invalid-amount / duplicate-grant |
-| adjust points | `player_id`, `delta_points`, `note?` | `PointLedgerEntry` | unknown-player / invalid-amount / insufficient-points |
-| list point entries | `player_id?` | `PointLedgerEntry[]`（記録順） | — |
-| plan payment（cash 補完） | `player_id`, `total_amount`, `use_points?` | `(cash_amount, point_amount)` | unknown-player / invalid-amount |
+| list point entries | `player_id?`, `session_id?` | `PointLedgerEntry[]`（記録順） | — |
+| compute settlement（中間集計・speculative） | `session_id` | `SessionSettlement[]` | not-found |
+| commit settlement | `session_id` | `SessionSettlement[]`（確定） | not-found / session-not-closed / already-settled |
+| set payment status | `session_id`, `player_id`, `paid|unpaid` | `SessionSettlement` | not-found |
 
 Python 具象（`core/ledger_repository.py` と一致）:
 
 ```text
 add_entry(session_id, player_id, kind, cash_amount=0, point_amount=0,
-          note=None, order=None) -> LedgerEntry
+          note=None, hand_id=None, order=None, occurred_at=None) -> LedgerEntry
+reverse_entry(entry_id, occurred_at=None) -> LedgerEntry
 list_entries(session_id=None, player_id=None) -> list[LedgerEntry]
-session_totals(session_id) -> dict[player_id, {"buy_in_total": int, "order_total": int}]
+grant_points(player_id, delta_points, reason="manual_grant", session_id=None,
+             idempotency_key=None, occurred_at=None) -> PointLedgerEntry
 point_balance(player_id) -> int
-grant_points(player_id, points, reason, idempotency_key=None, note=None) -> PointLedgerEntry
-adjust_points(player_id, delta_points, note=None) -> PointLedgerEntry
-list_point_entries(player_id=None) -> list[PointLedgerEntry]
-plan_payment(player_id, total_amount, use_points=True) -> tuple[int, int]
+list_point_entries(player_id=None, session_id=None) -> list[PointLedgerEntry]
+compute_settlement(session_id) -> list[SessionSettlement]
+commit_settlement(session_id) -> list[SessionSettlement]
+list_settlements(session_id) -> list[SessionSettlement]
+all_settlements() -> list[SessionSettlement]
+set_payment_status(session_id, player_id, status) -> SessionSettlement
 ```
 
 - **残高計算と cash 補完の分割は core のみが行う**（front-end は `point_balance` /
