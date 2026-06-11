@@ -410,6 +410,28 @@ def run_ledger_view() -> None:
     win.run()
 
 
+def export_ledger(out_dir: str) -> None:
+    """Phase S3.3: 確定済 settlement と cashflow（ledger entry）を CSV にエクスポートする。"""
+    from core.ledger_repository import LedgerRepository
+    from core.player_repository import PlayerRepository
+    from core.session_repository import SessionRepository
+    from output.ledger_csv_exporter import LedgerCsvExporter
+
+    players = PlayerRepository()
+    sessions = SessionRepository(player_repo=players)
+    ledger = LedgerRepository(session_repo=sessions, player_repo=players)
+    names = {p.player_id: p.display_name for p in players.list_players()}
+
+    exporter = LedgerCsvExporter()
+    out = Path(out_dir)
+    settlements = ledger.all_settlements()
+    entries = ledger.list_entries()
+    s_path = exporter.export_settlements(settlements, out / "settlements.csv", player_names=names)
+    c_path = exporter.export_entries(entries, out / "ledger_cashflow.csv", player_names=names)
+    print(f"settlement {len(settlements)} 件を出力: {s_path}")
+    print(f"cashflow {len(entries)} 件を出力: {c_path}")
+
+
 def export_phh(json_path: str) -> None:
     """JSON セッションログを PHH ファイル群にエクスポートする。"""
     import json
@@ -497,6 +519,13 @@ def main() -> None:
         action="store_true",
         help="Ledger Viewer / Editor 画面を起動する（Phase S3.2, hand logger とは別画面）",
     )
+    parser.add_argument(
+        "--export-ledger",
+        metavar="OUT_DIR",
+        nargs="?",
+        const="logs/ledger_export",
+        help="settlement / cashflow を CSV にエクスポートする（Phase S3.3, 既定 logs/ledger_export）",
+    )
     args = parser.parse_args()
 
     if args.players:
@@ -505,6 +534,10 @@ def main() -> None:
 
     if args.ledger:
         run_ledger_view()
+        sys.exit(0)
+
+    if args.export_ledger:
+        export_ledger(args.export_ledger)
         sys.exit(0)
 
     if args.calibrate:

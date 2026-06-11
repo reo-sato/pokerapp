@@ -67,7 +67,8 @@ pokerapp/
 │
 ├── output/
 │   ├── json_writer.py             ← セッション JSON ログ書き込み
-│   └── phh_exporter.py            ← PHHExporter (PHH 形式エクスポート)
+│   ├── phh_exporter.py            ← PHHExporter (PHH 形式エクスポート)
+│   └── ledger_csv_exporter.py     ← LedgerCsvExporter (settlement / cashflow CSV, S3.3)
 │
 ├── gui/
 │   ├── dashboard.py               ← GUIDashboard (hand logger 画面, customtkinter)
@@ -218,6 +219,7 @@ PHH は read-only）。
   spend（buy-in 等への充当、不足は cash 補完）ができる。
 - **settlement** を session ごとに導出（中間集計 = speculative）し、closed session で確定（commit）、
   paid/unpaid を操作できる（常に player→店、partial なし）。
+- **CSV export**（S3.3）: settlement / cashflow（ledger entry）を Excel 向け utf-8-sig CSV に出力できる。
 - 金額は **整数円**（chips とは別単位・自動換算なし）、point は整数点。
 - 永続化はプロジェクト直下 `ledger.json`（アトミックリネーム、`.gitignore`）。append-only。
 
@@ -229,6 +231,7 @@ PHH は read-only）。
 | リポジトリ | `core/ledger_repository.py` | `LedgerRepository`: ledger/point/settlement の CRUD + 業務ルール + JSON 永続化 |
 | 画面 (S3.2) | `gui/ledger_view.py` | `LedgerViewWindow`（entry 追加/取消・point 付与・中間集計 speculative 表示, dashboard とは独立） |
 | 起動 (S3.2) | `main.py --ledger` | hand logger とは別に ledger 画面を開く |
+| export (S3.3) | `output/ledger_csv_exporter.py` | `LedgerCsvExporter`: settlement / cashflow を CSV 出力（utf-8-sig, `main.py --export-ledger`） |
 
 ### Validation / errors（`LedgerRepository` が source of truth）
 
@@ -252,8 +255,8 @@ PHH は read-only）。
 
 ### Out of scope（現時点）
 
-- settlement CSV export（S3.3, ISSUE-0014）、settlement の GUI からの確定（commit）。
-- hand logger（`HandSummary`）との自動接続 / auto entry 生成、chip↔円換算、rake/fee。
+- settlement の GUI からの確定（commit）/ export（現状は CLI のみ）、auto ledger 生成。
+- hand logger（`HandSummary`）との自動接続、chip↔円換算、rake/fee。
 - settlement schema の `1.0` freeze（S4）、mobile UI、cross-app sync（S5）。
 
 ---
@@ -281,7 +284,7 @@ PHH は read-only）。
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
 | **ledger / point / settlement core (S3.1)** | ✅ 実装済 | `core/ledger.py`, `core/ledger_repository.py`（別ストア `ledger.json`, ADR-0011。hand logger とは未接続。§ Ledger / Points / Settlement 参照） |
 | **ledger desktop viewer (S3.2)** | ✅ 実装済 | `gui/ledger_view.py`（`main.py --ledger`, 別画面, `gui/dashboard.py` 不可侵。entry 追加/取消・point 付与・中間集計 speculative 表示） |
-| settlement CSV export (S3.3) | ❌ 未実装 | planned（ISSUE-0014） |
+| **settlement / cashflow CSV export (S3.3)** | ✅ 実装済 | `output/ledger_csv_exporter.py`（`main.py --export-ledger`, utf-8-sig。settlement / cashflow を CSV 出力） |
 
 ---
 
@@ -302,7 +305,7 @@ PHH は read-only）。
 | **session + hand-based seating** | session 管理と hand ごとの seat→player スナップショット (`seat_assignment` / `hand_ref`) | ✅ core 実装済 (S2, § Session & Seating 参照) |
 | **session ledger** | session 単位の buy-in / rebuy / add-on / order / entry_fee / adjustment を ledger entry として記録 | ✅ core 実装済 (S3.1, ADR-0011, § Ledger / Points / Settlement 参照) |
 | **point ledger** | prize point の grant / spend を記録、buy-in 等に充当可能。残高 = fold（ISSUE-0001 決着） | ✅ core 実装済 (S3.1) |
-| **session settlement** | session 終了時に player ごとの「店への net 支払額」と paid/unpaid を確定 | ✅ core 実装済 (S3.1: compute/commit/paid-unpaid)・desktop 中間集計 (S3.2)・CSV export は S3.3・schema `1.0` freeze は S4 |
+| **session settlement** | session 終了時に player ごとの「店への net 支払額」と paid/unpaid を確定 | ✅ core 実装済 (S3.1: compute/commit/paid-unpaid)・desktop 中間集計 (S3.2)・CSV export (S3.3)・schema `1.0` freeze は S4 |
 | **cross-app boundary** | hand logger と ledger app の相互参照契約 (player_id / session_id / hand_id) | 🔲 planned (S5) |
 
 hand logger と ledger app は **将来別画面・別アプリ** になることを前提に設計する。
@@ -402,7 +405,7 @@ hand logger と ledger app は **将来別アプリ化** することを前提�
 | **S0** | spec expansion | CLAUDE.md / ADR-0003 / issues / worklog |
 | **S1** | player registry ✅ 実装済 | `player` データモデル、CRUD、display_name のみ、別画面 |
 | **S2** | session + hand-based seating ✅ core 実装済 | `session`, `seat_assignment`, `hand_ref`、hand 開始ごとのスナップショット（`core/session*.py`, ADR-0007。schema は draft のまま） |
-| **S3** | ledger entries + point ledger（**ADR-0011 / S3.1 core 実装済**） | `ledger_entry`, `point_ledger_entry`, `session_settlement`、cash+point 併用、整数円、別ストア `ledger.json`、残高=fold。実装細分: **S3.1 ✅ core schema+repository**（ISSUE-0012）/ **S3.2 ✅ desktop ledger viewer・editor 別画面**（ISSUE-0013）/ **S3.3** settlement export CSV（ISSUE-0014） |
+| **S3** | ledger entries + point ledger（**ADR-0011 / S3.1 core 実装済**） | `ledger_entry`, `point_ledger_entry`, `session_settlement`、cash+point 併用、整数円、別ストア `ledger.json`、残高=fold。実装細分: **S3.1 ✅ core schema+repository**（ISSUE-0012）/ **S3.2 ✅ desktop ledger viewer・editor 別画面**（ISSUE-0013）/ **S3.3 ✅ settlement/cashflow CSV export**（ISSUE-0014） |
 | **S4** | session settlement + paid/unpaid | `session_settlement`、net due to store、paid/unpaid 操作（設計は ADR-0011 で確定。S3.3 で derived view 先行、schema freeze は S4） |
 | **S5** | cross-app contract / sync boundary | hand logger ↔ ledger app の参照契約、ID 安定性、別プロセス化準備 |
 | **R0–R5**（R1/R2 実装済 / 他は提案） | rules-aware hand reconstruction（**hand core 改善トラック**, S 系列と直交） | pokerkit を live ルール権威に / actor 推定（手番 prior × sensor + silent-fold 合成）/ `apply_corrections`（合法手制約）/ 決定的 record/replay + golden fixtures。ADR-0009（R2 engine 実装済, default-off）/ ADR-0010（R1 実装済）。**R1 record-only ✅** → **R2 pokerkit engine ✅(default-off)** → R3 推定/訂正/融合 → R4 contracts → R5 freeze + session 統合 |
@@ -607,7 +610,8 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
     （`tests/test_ledger_repository.py`）。
   - 3.2（ISSUE-0013, **✅ 実装済**）: desktop ledger viewer/editor（`gui/ledger_view.py`, `main.py --ledger`,
     別画面で `gui/dashboard.py` は触らない、`tests/test_ledger_view_gui.py`）。
-  - 3.3（ISSUE-0014）: settlement export CSV（settlement schema `1.0` freeze は S4）。
+  - 3.3（ISSUE-0014, **✅ 実装済**）: settlement / cashflow CSV export（`output/ledger_csv_exporter.py`,
+    `main.py --export-ledger`, utf-8-sig。settlement schema `1.0` freeze は S4）。
 
 ### Phase 4 — settlement
 
@@ -665,6 +669,7 @@ python main.py --cli                         # CLI モード (hand logger)
 python main.py                               # GUI モード (hand logger)
 python main.py --players                     # Player Registry 画面 (S1, 別画面)
 python main.py --ledger                       # Ledger Viewer/Editor 画面 (S3.2, 別画面)
+python main.py --export-ledger logs/ledger_export  # settlement / cashflow CSV 出力 (S3.3)
 pytest tests/ -v --ignore=tests/test_vision.py
 python main.py --export-phh logs/session_xxx.json
 ```

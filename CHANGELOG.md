@@ -6,6 +6,28 @@
 
 ## [Unreleased]
 
+### Added (Phase S3.3 — settlement / cashflow CSV export)
+
+- **Ledger CSV export (S3.3)**: settlement（session 締めの精算）と cashflow（ledger entry）を
+  家計簿 / Excel で再集計できる CSV に出力する（ISSUE-0014）。settlement の確定（compute/commit/
+  paid-unpaid）は S3.1 で実装済のため、本フェーズの net-new は export。
+  - `output/ledger_csv_exporter.py`（`LedgerCsvExporter`）: `export_settlements` / `export_entries`。
+    純粋な書き出し（データ + 出力先を受け取る、repo/GUI 非依存。`phh_exporter.py` と同じ思想）。
+    Excel で日本語が文字化けしないよう **utf-8-sig（BOM 付き）** で書く。
+    - settlements.csv: session_id / player_id / player_name / cash_in_total / point_spent_total /
+      order_total / entry_fee / point_credited_total / **net_due_to_store** / payment_status /
+      settled_at（player→店の 1 方向、相手方向の列を持たない）。
+    - ledger_cashflow.csv: occurred_at / session_id / player_id / player_name / kind / cash_amount /
+      point_amount / note / reverses_entry_id / entry_id（reversal も 1 行）。
+  - `core/ledger_repository.py`: 横断集計用に `all_settlements()` を additive 追加。
+  - `main.py`: `export_ledger()` + `--export-ledger [OUT_DIR]`（既定 `logs/ledger_export`）。
+    `config_default.json` は不変。
+  - tests: `tests/test_ledger_csv_exporter.py`（7: 列/net_due 合計一致・player→店・payment_status 反映・
+    reversal を含む cashflow・player_name 補完・空 export・日本語 note round-trip）。
+    **`pytest tests/test_ledger_csv_exporter.py tests/test_ledger_repository.py tests/test_ledger_view_gui.py tests/test_contracts.py` → 56 passed**。
+  - **ISSUE-0014** を Fixed に更新（settlement schema `1.0` freeze は S4 に残す）。**CLAUDE.md**（実装状況表・
+    § Ledger 構成/スコープ・ディレクトリ・Phase 3・よく使うコマンド）/ **decision-log** を更新。
+
 ### Added (Phase S3.2 — desktop ledger viewer / editor)
 
 - **Ledger Viewer / Editor (S3.2)**: hand logger とは **別画面** の ledger 入力・閲覧 GUI を追加

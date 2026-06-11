@@ -57,4 +57,4 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0011 | hand / action schema の freeze 未確定事項 | Open | 2026-06-03 | contracts / hand core | `docs/issues/0011-hand-action-schema-freeze-blockers.md` | ADR-0010（R4/R5） |
 | ISSUE-0012 | S3.1 ledger / points core schema + repository 実装 | Fixed | 2026-06-10 | core / contracts (S3.1) | `docs/issues/0012-ledger-core-implementation.md` | S3.1 実装済（`core/ledger*.py`, schema/fixtures, tests 緑）。schema 0.x 未 freeze |
 | ISSUE-0013 | S3.2 desktop ledger viewer / editor（別画面） | Fixed | 2026-06-10 | gui / desktop (S3.2) | `docs/issues/0013-ledger-desktop-viewer.md` | S3.2 実装済（`gui/ledger_view.py`, `main.py --ledger`, tests 緑） |
-| ISSUE-0014 | S3.3 settlement 確定 + paid/unpaid + CSV export | Open | 2026-06-10 | core / export (S3.3) | `docs/issues/0014-settlement-export.md` | ADR-0011（実装タスク） |
+| ISSUE-0014 | S3.3 settlement 確定 + paid/unpaid + CSV export | Fixed | 2026-06-10 | core / export (S3.3) | `docs/issues/0014-settlement-export.md` | S3.3 実装済（`output/ledger_csv_exporter.py`, `main.py --export-ledger`, tests 緑）。schema freeze は S4 |

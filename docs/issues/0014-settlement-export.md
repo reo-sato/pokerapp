@@ -6,7 +6,27 @@
 
 ## Status
 
-Open
+Fixed（S3.3 実装済。settlement schema の `1.0` freeze は S4 に残す）
+
+## Update (2026-06-10, S3.3 実装)
+
+settlement の確定（compute/commit/paid-unpaid）は S3.1 で `LedgerRepository` に実装済のため、
+S3.3 の net-new は **CSV export** を実装した:
+
+- `output/ledger_csv_exporter.py`（`LedgerCsvExporter`）: `export_settlements` / `export_entries`。
+  純粋な書き出し（データ + 出力先を受け取る、repo/GUI 非依存。`phh_exporter.py` と同じ思想）。
+  Excel 向けに **utf-8-sig（BOM 付き）** で書き、日本語が文字化けしない。
+  - settlements.csv 列: session_id / player_id / player_name / cash_in_total / point_spent_total /
+    order_total / entry_fee / point_credited_total / **net_due_to_store** / payment_status / settled_at
+    （player→店の 1 方向。相手方向の列を持たない）。
+  - ledger_cashflow.csv 列: occurred_at / session_id / player_id / player_name / kind / cash_amount /
+    point_amount / note / reverses_entry_id / entry_id（reversal も 1 行。家計簿/Excel 再集計用）。
+- `core/ledger_repository.py`: 横断集計用に `all_settlements()` を追加。
+- `main.py`: `export_ledger()` + `--export-ledger [OUT_DIR]`（既定 `logs/ledger_export`）。
+- tests: `tests/test_ledger_csv_exporter.py`（7: 列/合計一致・player→店・payment_status 反映・
+  reversal 含む cashflow・player_name 補完・空 export・日本語 note round-trip）。
+
+残: settlement schema の `1.0` freeze（S4）、GUI からの commit/export（任意, 将来）。
 
 ## Severity / Priority
 

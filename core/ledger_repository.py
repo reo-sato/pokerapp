@@ -487,6 +487,10 @@ class LedgerRepository:
         """確定済 settlement 行を返す（未確定なら空 list）。"""
         return [s for (s_id, _pid), s in self._settlements.items() if s_id == session_id]
 
+    def all_settlements(self) -> list[SessionSettlement]:
+        """全 session の確定済 settlement 行を返す（CSV export 等の横断集計用）。"""
+        return list(self._settlements.values())
+
     def set_payment_status(
         self, session_id: str, player_id: str, status: str
     ) -> SessionSettlement:
