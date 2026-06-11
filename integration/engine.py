@@ -183,7 +183,9 @@ class IntegrationThread(threading.Thread):
         # S2.x session 統合（ADR-0008 Pattern A, write-through）。両方揃ったときのみ有効。
         self._session_repo = session_repo
         self._seat_player_map: dict[int, str] = dict(seat_player_map or {})
-        self._session_layer_active = session_repo is not None and bool(self._seat_player_map)
+        # E3 (ISSUE-0006): seat_assign イベントで届いた変更は次ハンド開始時に適用する
+        # （mid-hand の帰属/名前の揺れを防ぐ）。seat_no → player_id（"" = 割当解除）。
+        self._pending_seat_changes: dict[int, str] = {}
 
         # センサーイベントのバッファ
         self._camera_buffer: list[CameraEvent] = []
@@ -203,6 +205,11 @@ class IntegrationThread(threading.Thread):
         # RFID カードがマスター未解決のままハンドが進んだ場合、ハンド全体を
         # 要レビューにする（個々の ActionRecord では捕捉できないため）。
         self._hand_needs_review: bool = False
+
+    @property
+    def _session_layer_active(self) -> bool:
+        # property 化 (E3): seat_assign で map が後から埋まる/空になるケースに追従する。
+        return self._session_repo is not None and bool(self._seat_player_map)
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -415,6 +422,10 @@ class IntegrationThread(threading.Thread):
             self._handle_rebuy(event)
             return
 
+        if action == "seat_assign":
+            self._handle_seat_assign(event)
+            return
+
         # ベッティングアクション。rules-aware backend（pokerkit）は境界で actor 推定 + 合法手
         # 射影、legacy（空 legal_context）は従来経路で挙動不変（ADR-0009 §1）。
         legal_ctx = gs.legal_context()
@@ -456,6 +467,40 @@ class IntegrationThread(threading.Thread):
                 needs_review=False,
                 confidence=1.0,
             ))
+
+    def _handle_seat_assign(self, event: AudioEvent) -> None:
+        """GUI から queue 経由で届いた seat→player 変更を受け付ける (E3, ISSUE-0006)。
+
+        `event.seat` = 対象席、`event.raw_text` = player_id（空文字 = 割当解除）。
+        mid-hand の帰属/名前の揺れを防ぐため即時適用せず、次ハンド開始時に
+        `_apply_pending_seat_changes` でまとめて反映する（rebuy と同じ queue 一元化規約）。
+        """
+        if self._session_repo is None:
+            logger.warning("seat_assign received but session layer is disabled; ignored")
+            return
+        if event.seat is None:
+            logger.warning("seat_assign event without seat: %r", event.raw_text)
+            return
+        self._pending_seat_changes[event.seat] = (event.raw_text or "").strip()
+        logger.info(
+            "seat_assign queued (seat=%d player=%s); 次ハンドから反映",
+            event.seat, self._pending_seat_changes[event.seat] or "<unassign>",
+        )
+
+    def _apply_pending_seat_changes(self) -> None:
+        """保留中の seat→player 変更を seat_player_map と表示名に反映する（hand 開始時）。"""
+        for seat_no, player_id in self._pending_seat_changes.items():
+            if not player_id:
+                self._seat_player_map.pop(seat_no, None)
+                continue
+            self._seat_player_map[seat_no] = player_id
+            try:
+                player = self._session_repo.get_player(player_id)
+                self._game_state.set_player_name(seat_no, player.display_name)
+            except Exception:
+                # 名前解決失敗でも player_id の帰属は維持する（記録継続性を優先）
+                logger.exception("seat_assign: 表示名の解決に失敗 (player_id=%s)", player_id)
+        self._pending_seat_changes.clear()
 
     def _handle_legacy_action(self, event: AudioEvent) -> None:
         """rules-aware でない backend（legacy）の従来アクション処理（挙動不変）。"""
@@ -664,6 +709,8 @@ class IntegrationThread(threading.Thread):
 
     def _start_new_hand(self) -> None:
         gs = self._game_state
+        if self._pending_seat_changes:
+            self._apply_pending_seat_changes()
         gs.new_hand()
         self._current_actions = []
         self._hand_started_at = self._now_iso()

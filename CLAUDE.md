@@ -172,8 +172,11 @@ player registry の上に重なる **session レイヤ + hand-based seating** �
 ADR-0006、実装上の判断は ADR-0007。**hand logger とは config フラグ `session_layer.enabled`（既定 off）で
 write-through 接続可**（E1+E2-core, ADR-0008 Pattern A: `IntegrationThread` に `session_repo`/`seat_player_map`
 を DI し、hand 開始で `assign_seat`・確定時に `HandSummary.players[i].player_id` を additive 埋め込み）。
-**off では従来どおり独立**（別ストア・別 namespace、player_id キーも付けない）。seat 選択 GUI / main.py 結線は
-後続（E3, ISSUE-0006）。
+**off では従来どおり独立**（別ストア・別 namespace、player_id キーも付けない）。**seat 選択 GUI /
+main.py 結線は M3 (= E3) で実装済**（ISSUE-0006 Fixed）: on にするとセッション設定プロンプトで
+registry から seat→player を選択（`n` でその場登録、空 Enter で割当なし）、session は UUID4 hex で
+作成され（label/blinds 付き、終了時 close を y/N 確認）、dashboard「席設定」で mid-session の
+seat change を差分入力できる（`seat_assign` queue イベント → 次ハンド開始時に帰属と表示名へ反映）。
 
 ### スコープ（現時点）
 
@@ -230,7 +233,8 @@ write-through 接続可**（E1+E2-core, ADR-0008 Pattern A: `IntegrationThread` 
   契約は `docs/contracts/viewer-api.md`（draft 0.x）+ `player_session_summary` schema/fixtures。
 - **read model 規則**: 「player のハンド」は `sessions.json` の seat_assignment 起点で
   hand log（`logs/{session_id}.json`）を `(session_id, hand_id)` join。hand log 側 `player_id` は
-  best-effort。E3（ISSUE-0006）前は gracefully-empty（実データは M3 = E3 着地後に流れる）。
+  best-effort。`session_layer.enabled` が off の間は gracefully-empty（M3 = E3 実装済のため、
+  on にすれば実データが流れる）。
 - error は `{"code": "not_found", "message": ...}`（`error-shapes.md` 準拠、404）。
 - config: `viewer_api.bind_host` 既定 `127.0.0.1`（無認証。スマホからの LAN 参照は明示変更、
   ISSUE-0013 プライバシーモデル参照）/ `bind_port` 既定 8788。
@@ -266,7 +270,7 @@ write-through 接続可**（E1+E2-core, ADR-0008 Pattern A: `IntegrationThread` 
 | GUI ダッシュボード | 🔨 部分実装 | `gui/dashboard.py` |
 | **player registry (S1)** | ✅ 実装済 | `core/player.py`, `core/player_repository.py`, `gui/player_registry.py` |
 | **session + hand-based seating (S2) core** | ✅ 実装済 | `core/session.py`, `core/session_repository.py`（§ Session & Seating 参照） |
-| **hand logger × session 統合 (S2.x E1+E2-core)** | ✅ 実装済 (preview) | `integration/engine.py`（`session_repo`/`seat_player_map` DI、`assign_seat` write-through + `player_id` additive 埋め込み、`session_layer.enabled` 既定 off で挙動不変, ADR-0008）。seat 選択 GUI / main.py 結線は後続（E3, ISSUE-0006） |
+| **hand logger × session 統合 (S2.x E1+E2-core + M3=E3)** | ✅ 実装済 | `integration/engine.py`（`session_repo`/`seat_player_map` DI、`assign_seat` write-through + `player_id` additive 埋め込み, ADR-0008）+ **M3: main.py 結線**（seat→player 選択プロンプト・UUID session_id・終了時 close 確認）+ **dashboard「席設定」**（`seat_assign` queue イベントで mid-session seat change、次ハンド反映, ISSUE-0006 Fixed）。`session_layer.enabled` 既定 off は維持（実機 E2E = Phase H 後に再検討） |
 | **event 記録 sidecar (R1)** | ✅ 実装済 | `output/event_recorder.py`（opt-in `recording.enabled`, 挙動不変, ADR-0010, `reconstruction_event` schema） |
 | **pokerkit game-state backend (R2) + live 既定切替 (G)** | ✅ 実装済 | `core/poker_engine.py`（`engine.backend`, ADR-0009/0012。actor/合法手/side-pot 権威）。**Phase G で live 既定を `pokerkit` に切替**（`config_default.json`、`requirements.txt` で `pokerkit>=0.7,<0.8` pin）。`legacy` は config で rollback 可。実機 E2E は Phase H |
 | **rules-aware ライブ結線 + silent-fold 合成 (R3 D1/D2a/D2b)** | ✅ 実装済 (preview) | `audio/recognizer.py:apply_corrections`（合法手射影）+ `integration/engine.py:_handle_rules_aware_action`/`_resolve_actor`（合法手射影・actor 推定[RFID>明示席]・`fold_through` で silent-fold 合成 cap=2/atomic・合成 fold 記録）。legacy 既定は不変。派生 confidence(D3) は後続 |
@@ -275,7 +279,7 @@ write-through 接続可**（E1+E2-core, ADR-0008 Pattern A: `IntegrationThread` 
 | **hand/action schema freeze (R5 F3b)** | ✅ 実装済 | `docs/contracts/schemas/{hand,action}.schema.json`（`1.0`, additionalProperties:true, ISSUE-0011 Fixed）+ `_MODELS` 登録 + code↔contract + golden→schema テスト |
 | **PHH call/check (F3c)** | ✅ 確認済（変更不要） | PHH 標準では check/call は同一トークン `cc`（check-or-call）。区別は非標準で pokerkit が parse 不能になるため統一が正。check/call の別は JSON ログ側で保持（`output/phh_exporter.py` にコメント） |
 | **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（§ Viewer API 参照, ADR-0013。読み取り専用、`[api]` extra） |
-| **mobile viewer scaffold (M2)** | ✅ 実装済 | `mobile/`（Expo/RN + TypeScript。PlayerSelect→MySessions→MyHands→HandDetail、`ViewerRepository` interface に mock / HTTP 実装を注入、`EXPO_PUBLIC_API_URL` で切替。配布は web export を LAN 配信, ADR-0013）。実データ表示は E3（M3）後 |
+| **mobile viewer scaffold (M2)** | ✅ 実装済 | `mobile/`（Expo/RN + TypeScript。PlayerSelect→MySessions→MyHands→HandDetail、`ViewerRepository` interface に mock / HTTP 実装を注入、`EXPO_PUBLIC_API_URL` で切替。配布は web export を LAN 配信, ADR-0013）。実データは `session_layer.enabled=true` で流れる（M3 実装済） |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0009） |
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
@@ -552,17 +556,19 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
   **ADR-0007 で core について確定**。残: hand logger 接続・seat change UI 要件（ISSUE-0005）。
 - **Done criteria**: session 開始/終了と hand 単位 seat snapshot が core で確定（**達成: WS1 core**）。
   両 front-end の契約越し表示（WS2/WS3）は未着手。schema `1.0` freeze は ISSUE-0005 残項目後。
-- **Phase 2.x（hand logger 接続, planning 済 / 実装 planned）**: 既存 hand logger world
+- **Phase 2.x（hand logger 接続, 2.1〜2.3 実装済）**: 既存 hand logger world
   （`HandSummary` / `JsonWriter` / `PHHExporter` / `IntegrationThread`）と S2 core を **段階接続**する。
   方針は **Pattern A（write-through, additive）**：hand logger が `SessionRepository` に依存し、
   hand 開始時に `assign_seat` バッチを呼ぶ。`HandSummary.players[i]` に `player_id` を additive 追加、
   `session_id` を session レイヤの UUID4 hex に切替、PHH は無改変、`hand_ref` は session レイヤ側に住む。
-  詳細は **ADR-0008** / `docs/contracts/hand-integration.md`。残 UX は **ISSUE-0006**、legacy log
-  取り込みは **ISSUE-0007**。Phase 細分:
-  - 2.1: schema sketch + `config.session_layer.enabled` フラグ planned。
-  - 2.2: `main.py` session_id 切替 + `assign_seat` 連携 + `HandSummary.player_id` additive。
-  - 2.3: seat 選択 GUI（registry 連動）。
-  - 2.4: legacy log reconciler（任意, ISSUE-0007）。
+  詳細は **ADR-0008** / `docs/contracts/hand-integration.md`。legacy log 取り込みは **ISSUE-0007**。
+  Phase 細分:
+  - 2.1: schema sketch + `config.session_layer.enabled` フラグ ✅（E1+E2-core）。
+  - 2.2: `main.py` session_id 切替 + `assign_seat` 連携 + `HandSummary.player_id` additive
+    ✅（engine = E1+E2-core、main.py 結線 = M3）。
+  - 2.3: seat 選択 GUI（registry 連動）✅（M3 = E3, ISSUE-0006 Fixed。プロンプト選択 +
+    dashboard「席設定」+ `seat_assign` queue イベントで次ハンド反映）。
+  - 2.4: legacy log reconciler（任意, ISSUE-0007）— 未着手。
 
 ### Phase 3 — ledger and points
 

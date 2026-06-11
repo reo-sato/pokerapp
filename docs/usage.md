@@ -6,6 +6,7 @@
 python main.py            # GUI（ハンドロガー画面）
 python main.py --cli      # CLI（音声のみ・画面なし）
 python main.py --players  # プレイヤー登録画面（別画面）
+python main.py --viewer-api  # プレイヤー向け閲覧 API（要 pip install ".[api]"）
 python main.py --export-phh logs/<セッションID>.json   # JSON → PHH 変換
 ```
 
@@ -92,6 +93,25 @@ GUI と `--cli` はどちらも**音声でハンドを記録**します。配信
 
 ---
 
+## プレイヤー紐付けと閲覧（任意, `session_layer`）
+
+`config.json` で `session_layer.enabled` を `true` にすると、ハンドが**登録プレイヤーに紐付いて**
+記録され、プレイヤーが自分のスマホから履歴を見られるようになります。
+
+1. **起動時**: セッション設定で席ごとに登録プレイヤーを**番号で選択**します
+   （`n` = その場で新規登録、空 Enter = 紐付けなし）。続けてセッションラベル（例: 金曜ナイト #3）を
+   入力できます。
+2. **席替え・入退店**: GUI の **「席設定」** ボタンでプレイヤーを選び直します（**次のハンドから**
+   反映されます。同じプレイヤーを 2 席に置くことはできません）。
+3. **終了時**: セッションを close するか聞かれます（close すると閲覧側に「終了」と表示されます）。
+4. **閲覧**: `python main.py --viewer-api` を起動すると、プレイヤーは自分のセッション・ハンド履歴を
+   参照できます（スマホからの参照は `viewer_api.bind_host` を PC の LAN IP に変更。無認証のため
+   信頼できる店内ネットワークのみ）。
+
+オフ（既定）のままなら従来どおりの記録動作で、何も変わりません。
+
+---
+
 ## 設定 (`config.json`)
 
 初回起動時に `config_default.json` から `config.json` が作られます。
@@ -113,8 +133,13 @@ GUI と `--cli` はどちらも**音声でハンドを記録**します。配信
 | | `card_master_file` | `./rfid_cards.json` | タグ→カード対応表 |
 | `recording` | `enabled` | `false` | 生イベントの記録（再現・検証用、任意） |
 | `engine` | `backend` | `pokerkit` | ルール準拠の再構築。問題時は `legacy` に戻せる |
+| `session_layer` | `enabled` | `false` | ハンドを登録プレイヤーに紐付ける（§ プレイヤー紐付けと閲覧） |
+| `viewer_api` | `bind_host` | `127.0.0.1` | 閲覧 API のアドレス。スマホから見るなら PC の LAN IP に変更（無認証のため信頼できるネットワークのみ） |
+| | `bind_port` | `8788` | 閲覧 API のポート |
+| `session` | `log_dir` | `./logs` | 閲覧 API が読むハンドログの場所（記録側は起動時入力。**両方を同じ場所にすること**） |
 
-> `camera` セクションは**廃止予定（レガシー）**で使用しません。`session` セクションと `audio.initial_prompt` は
-> 現在のコードでは参照されません（席/ブラインド等は起動時入力、Whisper プロンプトは内蔵語彙を使用）。
+> `camera` セクションは**廃止予定（レガシー）**で使用しません。`session` の `num_seats`/`blinds` と
+> `audio.initial_prompt` は現在のコードでは参照されません（席/ブラインド等は起動時入力、
+> Whisper プロンプトは内蔵語彙を使用）。
 
 困ったときは [トラブルシューティング](troubleshooting.md) を参照してください。

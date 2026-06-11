@@ -203,6 +203,12 @@ class GameStateManager:
             raise ValueError(f"Unknown seat: {seat}")
         return self._players[seat].name
 
+    def set_player_name(self, seat: int, name: str) -> None:
+        """席の表示名を更新する (E3 seat change 用, additive)。ルール状態には影響しない。"""
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        self._players[seat].name = name
+
     def get_active_seats(self) -> list[int]:
         return list(self._active_seats)
 

@@ -250,6 +250,13 @@ class SessionRepository:
         )
         return assignment
 
+    def get_player(self, player_id: str):
+        """registry の player を返す（E3: GUI/engine の display_name 解決用, additive）。
+
+        raises: `PlayerNotFoundError`（player_repository 由来, code: not_found）。
+        """
+        return self._player_repo.get(player_id)
+
     def list_hand_ids(self, session_id: str) -> list[int]:
         """seat assignment が記録されている hand_id を昇順で返す（M1 viewer read model 用, ADR-0013）。"""
         self.get_session(session_id)

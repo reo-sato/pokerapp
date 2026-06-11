@@ -54,7 +54,7 @@
   },
   "session_layer": {
     "enabled": false,
-    "_comment": "S2.x (ADR-0008): hand logger を session レイヤ(seat→player_id の write-through)に接続。既定 false で従来動作（rollback）。有効化には seat→player 選択 UI が前提（Phase 2.3, ISSUE-0006）で main.py 結線は後続。"
+    "_comment": "S2.x/E3 (ADR-0008, ISSUE-0006): hand logger を session レイヤ(seat→player_id の write-through)に接続。true でセッション設定時に registry から seat→player を選択し、UUID session_id で記録（viewer API が参照可能になる）。GUI の「席設定」で mid-session 変更可（次ハンドから反映）。既定 false = 従来動作（実機 E2E = Phase H 完了までは opt-in, rollback path）。"
   },
   "viewer_api": {
     "enabled": false,

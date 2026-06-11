@@ -180,13 +180,33 @@ IntegrationThread
   GameStateManager は変更不要（player_id は IntegrationThread が seat 単位で別途保持）。
 - rollback: config flag off で従来通り。session_repo を None 注入する DI path で fallback 可能。
 
-### Phase 2.3 — seat selection UI (registry 連動)
+### Phase 2.3 — seat selection UI (registry 連動)【実装済 M3 = E3, 2026-06-11】
 
 - 変わるもの:
   - `gui/dashboard.py` または別 widget に「seat → player_id」選択 UI（PlayerRepository から選ぶ）。
   - hand 間の seat change 反映 UX（ISSUE-0006）。
 - legacy のまま: 単独運用フォールバックパス、PHH。
 - rollback: 既存の name 入力 CLI/フォーム継続。
+
+#### seat 選択 UX 仕様（E3 確定, ISSUE-0006 Fixed）
+
+- **初回 seating**: `main.py:_prompt_session_config(player_repo)` がセッション設定プロンプトで
+  席ごとに registry の番号選択を行う（CLI/GUI 共通の terminal step）。`n` = その場で
+  `create_player`（スレッド起動前のため registry 書き込み安全）、空 Enter = 割当なし
+  （自由入力名・player_id なし）。選択 player の `display_name` がその席の表示名になる。
+- **session 作成**: session レイヤ有効時は `create_session(label?, blinds)` の UUID4 hex を
+  `JsonWriter` の session_id に使う（ADR-0008 §2）。終了時に close するか y/N で確認
+  （close は viewer の status に反映）。
+- **carry-forward**: 確定した seat map は次の変更まで全 hand に自動適用（毎 hand の再確認なし）。
+- **seat change（差分入力）**: dashboard「席設定」ボタン → modal ダイアログで選び直し →
+  変更席のみ `AudioEvent(action="seat_assign", seat, raw_text=player_id)` を queue 投入
+  （rebuy と同じ一元化規約, ISSUE-0012）。`raw_text=""` は割当解除。IntegrationThread は
+  `_pending_seat_changes` に保留し **次ハンド開始時** に `seat_player_map` と表示名
+  （`set_player_name`）へ反映する（mid-hand の帰属・名前の揺れを防ぐ）。
+  同一 player の複数席割当はダイアログ側で拒否（`player_already_seated` と同じ規則）。
+- **sitting_out**: 割当解除のみ（explicit `status=sitting_out` は後続）。
+- **記録系イベントとの関係**: `seat_assign` は `reconstruction_event` schema（`action` は自由文字列）
+  の範囲内で sidecar に記録され、replay でも同じタイミングで map に反映される。
 
 ### Phase 2.4（任意）— legacy log reconciler tool
 

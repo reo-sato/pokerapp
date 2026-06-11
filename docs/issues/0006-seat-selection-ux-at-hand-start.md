@@ -6,7 +6,7 @@
 
 ## Status
 
-Open
+Fixed（M3 = E3, 2026-06-11。決定内容は § Fix 参照）
 
 ## Severity / Priority
 
@@ -55,21 +55,36 @@ write-through を採用したため、UI の seat 選択タイミングが整合
 
 **E1+E2-core（#10, 2026-06-05）で土台は実装済**: `IntegrationThread` が `seat_player_map`（seat→player_id）を
 DI で受け取り、hand 開始で `assign_seat`・確定時に `player_id` を埋め込む write-through が動く
-（`config.session_layer.enabled` 既定 off で挙動不変）。**残るのは「seat→player_id を選ぶ UX」**＝本 issue 本体:
+（`config.session_layer.enabled` 既定 off で挙動不変）。
 
-未対応（Phase 2.3 = E3 着手時に確定）。決まったら:
+**M3 (= E3, 2026-06-11) で UX を確定・実装**（open question への回答番号は § Actual Behavior 対応）:
 
-- `gui/dashboard.py` または別 window の widget 仕様を `docs/contracts/hand-integration.md` に追記。
-- carry-forward と sitting_out の振る舞いを `validation-rules.md`（または本 doc）に明記。
-- 必要なら seat-change を表すサブ contract（追加 schema or note）を起こす。
+1. **初回 seating**: セッション設定プロンプト（CLI/GUI 共通, `main.py:_prompt_session_config`）で
+   席ごとに registry の番号選択。`n` = その場で `create_player`、空 Enter = 割当なし
+   （自由入力名のみ・player_id なし）。選択 player の `display_name` が席の表示名になる。
+2. **carry-forward**: 確定した seat map は次の変更まで **全 hand に自動適用**（毎 hand 確認なし。
+   engine の `seat_player_map` がそのまま次 hand の `assign_seat` バッチに使われる）。
+3. **seat change**: 「変更がある場合だけ差分入力」を採用。GUI dashboard の「席設定」ボタン →
+   ダイアログで選び直し → 差分のみ `seat_assign` イベント（`AudioEvent(action="seat_assign",
+   seat, raw_text=player_id)`）として queue 投入（ISSUE-0012 の rebuy と同じ一元化規約）。
+   IntegrationThread が **次ハンド開始時** に map と表示名（`set_player_name`）へ反映する
+   （mid-hand の帰属・名前の揺れを防ぐ）。CLI は初回 seating のみ（mid-session 変更は GUI）。
+4. **sitting_out**: 割当解除（map から除外 = `raw_text=""`）のみ。explicit `status=sitting_out` は後続。
+5. **未登録 player**: セッション開始前プロンプトでは新規登録可。mid-session ダイアログは既存
+   player のみ（registry への書き込みはスレッド起動前に限定）。
+6. **dashboard 統合**: 別 window ではなく dashboard 内ボタン + modal ダイアログ。
+
+仕様の住み処: `docs/contracts/hand-integration.md` § seat 選択 UX（E3）。
 
 ## Regression Test
 
-- 現状ではテスト対象なし（UI 仕様）。確定後は GUI ロジックテストで:
-  - 初回 seating → assign_seat バッチが正しい引数で呼ばれる
-  - carry-forward モードで差分のみ assign される
-  - unknown_player / seat_taken エラーが UI に正しく表示される
-  を追加する。
+- `tests/test_phase_m3_seat_selection.py`:
+  - `TestSeatAssignEvent` — seat_assign が次ハンドから map/表示名に反映・割当解除・
+    空 map からの後追い有効化・session レイヤ off では無視
+  - `TestPromptSeatPlayers` — registry 選択 / 新規登録 / 割当なし / 重複割当拒否
+  - `TestViewerEndToEnd` — write-through 出力が viewer read model で読める（M3 の目的）
+  - `TestMaybeCloseSession` — 終了時 close の y/N
+- GUI ダイアログ本体（customtkinter）は手動スモーク（worklog 参照）。
 
 ## Affected Files
 

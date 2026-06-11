@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+### Added (Phase M3 = E3 — seat 選択結線と席設定, ISSUE-0006 Fixed)
+
+- **`session_layer.enabled=true` で hand logger がプレイヤー紐付きで動くようになった**
+  （ADR-0008 Phase 2.2/2.3 完了。既定 `false` は維持 = 挙動不変、実機 E2E 後に既定切替を再検討）:
+  - セッション設定プロンプトで席ごとに registry のプレイヤーを番号選択（`n` = その場で新規登録、
+    空 Enter = 紐付けなし）。選択プレイヤーの表示名が席名になる。
+  - session は UUID4 hex で作成（ラベル/blinds 付き）され、`logs/<session_id>.json` の
+    session_id が session レイヤと一致 → **viewer API / mobile に実データが流れる**。
+  - 終了時に session を close するか y/N 確認（close は viewer の表示に反映）。
+  - GUI dashboard に **「席設定」** ボタン追加: mid-session の席替え・入退店を差分入力し、
+    `seat_assign` イベント（queue 経由, ISSUE-0012 と同じ一元化規約）で**次ハンドから**
+    帰属（player_id）と表示名に反映。割当解除可・同一プレイヤーの複数席は拒否。
+  - additive API: `GameState.set_player_name` / `SessionRepository.get_player`。
+- docs: ISSUE-0006 を Fixed 化（UX 決定を記録）、`hand-integration.md` に E3 仕様、
+  `usage.md` に「プレイヤー紐付けと閲覧」手順と config 表更新。
+
 ### Added (Phase M2 — Poker Hand Viewer mobile scaffold, ADR-0013)
 
 - **`mobile/` 新規**（Expo / React Native / TypeScript, WS3）: プレイヤーが自分のスマホで

@@ -14,8 +14,48 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _prompt_session_config() -> dict:
-    """CLIで席数・プレイヤー名・スタック・ブラインドを入力する。"""
+def _prompt_seat_player(seat: int, player_repo, assigned: dict[int, str]):
+    """席 1 つ分の registry player 選択 (E3, ISSUE-0006)。Player か None を返す。
+
+    入力: 番号 = registry から選択 / "n" = その場で新規登録 / 空 Enter = 割当なし。
+    同一 player の重複割当はここで弾く（SessionRepository の player_already_seated と同じ規則）。
+    """
+    from core.player_repository import (
+        DuplicateDisplayNameError,
+        EmptyDisplayNameError,
+    )
+
+    while True:
+        raw = input(f"席{seat} player (番号 / n=新規登録 / 空Enterで割当なし): ").strip()
+        if not raw:
+            return None
+        if raw.lower() == "n":
+            new_name = input("  新規 player の表示名: ").strip()
+            try:
+                player = player_repo.create_player(new_name)
+            except (EmptyDisplayNameError, DuplicateDisplayNameError) as e:
+                print(f"  登録できません: {e}")
+                continue
+            print(f"  登録しました: {player.display_name}")
+            return player
+        try:
+            idx = int(raw)
+            player = player_repo.list_players()[idx - 1]
+        except (ValueError, IndexError):
+            print("  一覧の番号 / n / 空Enter のいずれかを入力してください。")
+            continue
+        if player.player_id in assigned.values():
+            print(f"  {player.display_name} は既に別の席に割り当て済みです。")
+            continue
+        return player
+
+
+def _prompt_session_config(player_repo=None) -> dict:
+    """CLIで席数・プレイヤー名・スタック・ブラインドを入力する。
+
+    player_repo を渡すと (config.session_layer.enabled, E3) 各席の名前入力の代わりに
+    registry の player 選択を行い、戻り値に seat_no → player_id の "seat_players" を含める。
+    """
     print("=== ポーカーハンドロガー セッション設定 ===")
 
     while True:
@@ -27,9 +67,27 @@ def _prompt_session_config() -> dict:
             pass
         print("2〜9 の整数を入力してください。")
 
+    seat_players: dict[int, str] = {}
+    if player_repo is not None:
+        registered = player_repo.list_players()
+        print("--- player registry ---")
+        if registered:
+            for i, p in enumerate(registered, start=1):
+                print(f"  {i}: {p.display_name}")
+        else:
+            print("  (未登録。各席で n を入力すると新規登録できます)")
+
     players = []
     for i in range(1, num_seats + 1):
-        name = input(f"席{i} プレイヤー名: ").strip() or f"Player{i}"
+        if player_repo is not None:
+            player = _prompt_seat_player(i, player_repo, seat_players)
+            if player is not None:
+                seat_players[i] = player.player_id
+                name = player.display_name
+            else:
+                name = input(f"席{i} プレイヤー名: ").strip() or f"Player{i}"
+        else:
+            name = input(f"席{i} プレイヤー名: ").strip() or f"Player{i}"
         while True:
             try:
                 stack = int(input(f"席{i} 初期スタック: ").strip())
@@ -52,7 +110,50 @@ def _prompt_session_config() -> dict:
 
     log_dir = input("ログ保存先 (空Enterで ./logs): ").strip() or "./logs"
 
-    return {"players": players, "sb": sb, "bb": bb, "log_dir": log_dir}
+    return {
+        "players": players, "sb": sb, "bb": bb, "log_dir": log_dir,
+        "seat_players": seat_players,
+    }
+
+
+def _make_session_layer(cfg: dict):
+    """config.session_layer.enabled が true なら (player_repo, session_repo) を返す (E3, ADR-0008)。
+
+    既定 false = (None, None) で従来動作（timestamp session_id・player_id なし, rollback path）。
+    """
+    if not cfg.get("session_layer", {}).get("enabled", False):
+        return None, None
+    from core.player_repository import PlayerRepository
+    from core.session_repository import SessionRepository
+
+    player_repo = PlayerRepository()
+    return player_repo, SessionRepository(player_repo=player_repo)
+
+
+def _create_layer_session(session_repo, sb: int, bb: int) -> str:
+    """session レイヤに session を作成し UUID session_id を返す（ADR-0008 §2: canonical 採番）。"""
+    label = input("セッションラベル (空Enterでなし): ").strip() or None
+    session = session_repo.create_session(label=label, blinds={"sb": sb, "bb": bb})
+    print(f"セッション作成: {session.session_id}" + (f" ({label})" if label else ""))
+    return session.session_id
+
+
+def _maybe_close_session(session_repo, session_id: str) -> None:
+    """セッション終了時に close するか確認する（close すると viewer の status に反映）。"""
+    if session_repo is None:
+        return
+    from core.session_repository import SessionError
+
+    try:
+        ans = input("セッションを終了 (close) しますか? [y/N]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        return
+    if ans == "y":
+        try:
+            session_repo.close_session(session_id)
+            print("セッションを close しました。")
+        except SessionError as e:
+            print(f"close できませんでした: {e}")
 
 
 def _make_event_recorder(cfg: dict, log_dir: str, session_id: str):
@@ -90,7 +191,8 @@ def run_cli() -> None:
     from output.json_writer import JsonWriter
 
     cfg = load_config()
-    session_cfg = _prompt_session_config()
+    player_repo, session_repo = _make_session_layer(cfg)
+    session_cfg = _prompt_session_config(player_repo=player_repo)
 
     players = [
         PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
@@ -98,7 +200,11 @@ def run_cli() -> None:
     ]
     game_state = _make_game_state(cfg, players, session_cfg["sb"], session_cfg["bb"])
 
-    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
+    # E3 (ADR-0008 §2): session レイヤ有効時は UUID session_id を canonical にする
+    if session_repo is not None:
+        session_id = _create_layer_session(session_repo, session_cfg["sb"], session_cfg["bb"])
+    else:
+        session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
 
     audio_q = make_audio_queue()
@@ -184,6 +290,8 @@ def run_cli() -> None:
         on_action=on_action,
         stop_event=stop_event,
         event_recorder=event_recorder,
+        session_repo=session_repo,
+        seat_player_map=session_cfg.get("seat_players"),
     )
     audio_thread.start()
     integration_thread.start()
@@ -248,6 +356,7 @@ def run_cli() -> None:
         if rfid_thread is not None:
             rfid_thread.join(timeout=3)
         print(f"\nセッション終了。ログ保存先: {json_writer.path}")
+        _maybe_close_session(session_repo, session_id)
 
 
 def run_gui() -> None:
@@ -268,7 +377,8 @@ def run_gui() -> None:
         sys.exit(1)
 
     cfg = load_config()
-    session_cfg = _prompt_session_config()
+    player_repo, session_repo = _make_session_layer(cfg)
+    session_cfg = _prompt_session_config(player_repo=player_repo)
 
     players = [
         PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
@@ -276,7 +386,11 @@ def run_gui() -> None:
     ]
     game_state = _make_game_state(cfg, players, session_cfg["sb"], session_cfg["bb"])
 
-    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
+    # E3 (ADR-0008 §2): session レイヤ有効時は UUID session_id を canonical にする
+    if session_repo is not None:
+        session_id = _create_layer_session(session_repo, session_cfg["sb"], session_cfg["bb"])
+    else:
+        session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
 
     audio_q = make_audio_queue()
@@ -295,6 +409,8 @@ def run_gui() -> None:
         camera_queue=camera_q,
         stop_event=stop_event,
         rfid_receiver=None,  # rfid_thread 確定後に設定
+        player_repo=player_repo,
+        seat_player_map=session_cfg.get("seat_players"),
     )
 
     audio_thread = AudioThread(
@@ -363,6 +479,8 @@ def run_gui() -> None:
         on_rfid_card=dash.on_rfid_card,
         stop_event=stop_event,
         event_recorder=event_recorder,
+        session_repo=session_repo,
+        seat_player_map=session_cfg.get("seat_players"),
     )
 
     dash.start_threads(
@@ -380,6 +498,7 @@ def run_gui() -> None:
     if camera_thread is not None:
         camera_thread.join(timeout=3)
     print(f"\nセッション終了。ログ保存先: {json_writer.path}")
+    _maybe_close_session(session_repo, session_id)
 
 
 def run_player_registry() -> None:

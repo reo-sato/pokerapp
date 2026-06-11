@@ -65,7 +65,16 @@ class GUIDashboard:
         camera_queue: Optional[queue.Queue] = None,
         stop_event: Optional[threading.Event] = None,
         rfid_receiver: Optional[object] = None,
+        player_repo: Optional[object] = None,
+        seat_player_map: Optional[dict[int, str]] = None,
     ) -> None:
+        """
+        Args:
+            player_repo: PlayerRepository (E3, ISSUE-0006)。session レイヤ有効時に渡すと
+                         「席設定」ボタンで seat→player を変更できる（registry は読み取りのみ）。
+            seat_player_map: 起動時の seat_no → player_id（表示初期値。真の適用は
+                             IntegrationThread 側の map、変更は seat_assign イベント経由）。
+        """
         import customtkinter as ctk
 
         self._gs = game_state
@@ -74,6 +83,8 @@ class GUIDashboard:
         self._camera_queue = camera_queue
         self._stop_event = stop_event or threading.Event()
         self._rfid_receiver = rfid_receiver  # RFIDHTTPReceiver (status プロパティ用)
+        self._player_repo = player_repo
+        self._seat_player_map: dict[int, str] = dict(seat_player_map or {})
         self._update_queue: queue.Queue["ActionRecord"] = queue.Queue()
         self._rfid_card_queue: queue.Queue = queue.Queue()
         # seat → hole cards 表示用 (スレッド安全のため queue 経由で更新)
@@ -222,6 +233,11 @@ class GUIDashboard:
         ctk.CTkButton(ctrl, text="適用", width=70,
                       command=self._cmd_rebuy).grid(row=0, column=7, padx=(2, 12))
 
+        # 席設定 (E3, ISSUE-0006): session レイヤ有効時のみ
+        if self._player_repo is not None:
+            ctk.CTkButton(ctrl, text="席設定", width=80,
+                          command=self._cmd_seat_setup).grid(row=0, column=8, padx=(2, 12))
+
     # ――― コントロールコマンド ―――
 
     def _cmd_new_hand(self) -> None:
@@ -266,6 +282,72 @@ class GUIDashboard:
             action="rebuy", amount=amount, timestamp=time.time(),
             raw_text=f"シート{seat} リバイ {amount}", seat=seat,
         ))
+
+    _UNASSIGNED = "—（割当なし）"
+
+    def _cmd_seat_setup(self) -> None:
+        """seat→player 変更ダイアログ (E3, ISSUE-0006)。
+
+        変更は seat_assign イベント（rebuy と同じ queue 経由, ISSUE-0012 規約）で
+        IntegrationThread に送り、次ハンド開始時に適用される。registry への書き込みはしない。
+        """
+        ctk = self._ctk
+        players = self._player_repo.list_players()
+        name_to_id = {p.display_name: p.player_id for p in players}
+        id_to_name = {p.player_id: p.display_name for p in players}
+        options = [self._UNASSIGNED] + sorted(name_to_id)
+
+        dlg = ctk.CTkToplevel(self._root)
+        dlg.title("席設定（次ハンドから反映）")
+        dlg.transient(self._root)
+        dlg.grab_set()
+
+        seat_vars: dict[int, object] = {}
+        for row, seat in enumerate(sorted(self._gs.get_stacks().keys())):
+            ctk.CTkLabel(dlg, text=f"席{seat}").grid(row=row, column=0, padx=12, pady=4, sticky="w")
+            current = id_to_name.get(self._seat_player_map.get(seat, ""), self._UNASSIGNED)
+            var = ctk.StringVar(value=current)
+            ctk.CTkOptionMenu(dlg, variable=var, values=options, width=200).grid(
+                row=row, column=1, padx=12, pady=4)
+            seat_vars[seat] = var
+
+        msg_lbl = ctk.CTkLabel(dlg, text="", text_color="#FF9800")
+        msg_lbl.grid(row=len(seat_vars), column=0, columnspan=2, padx=12, pady=(4, 0))
+
+        def apply() -> None:
+            new_map: dict[int, str] = {}
+            for seat, var in seat_vars.items():
+                name = var.get()
+                if name != self._UNASSIGNED:
+                    new_map[seat] = name_to_id[name]
+            if len(set(new_map.values())) != len(new_map):
+                msg_lbl.configure(text="同じ player を複数の席に割り当てることはできません。")
+                return
+            self._send_seat_changes(new_map)
+            dlg.destroy()
+
+        ctk.CTkButton(dlg, text="適用（次ハンドから）", command=apply).grid(
+            row=len(seat_vars) + 1, column=0, padx=12, pady=12)
+        ctk.CTkButton(dlg, text="キャンセル", fg_color="#555555",
+                      command=dlg.destroy).grid(row=len(seat_vars) + 1, column=1, padx=12, pady=12)
+
+    def _send_seat_changes(self, new_map: dict[int, str]) -> None:
+        """現在の表示用 map との差分だけを seat_assign イベントとして送る。"""
+        from core.events import AudioEvent
+
+        changed = 0
+        for seat in sorted(set(self._seat_player_map) | set(new_map)):
+            new_pid = new_map.get(seat, "")
+            if self._seat_player_map.get(seat, "") == new_pid:
+                continue
+            self._audio_queue.put(AudioEvent(
+                action="seat_assign", amount=0, timestamp=time.time(),
+                raw_text=new_pid, seat=seat,
+            ))
+            changed += 1
+        self._seat_player_map = dict(new_map)
+        if changed:
+            self._append_log(f"席設定を {changed} 席分更新しました（次ハンドから反映）。", tag="medium")
 
     # ――― UI 更新（メインスレッド側） ―――
 
@@ -356,7 +438,8 @@ class GUIDashboard:
         color = "#CCCCCC" if active else "#888888"
         row["stack_lbl"].configure(text=f"{stack:,}", text_color=color)
         row["status_lbl"].configure(text="○" if active else "×", text_color=color)
-        row["name_lbl"].configure(text_color=color)
+        # 席設定 (seat_assign) で表示名が変わるため text も更新する (E3)
+        row["name_lbl"].configure(text=self._gs.get_player_name(seat), text_color=color)
 
     def _append_log(self, text: str, tag: str = "") -> None:
         box = self._log_box
