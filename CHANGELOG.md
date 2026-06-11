@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### Added (Phase M2 — Poker Hand Viewer mobile scaffold, ADR-0013)
+
+- **`mobile/` 新規**（Expo / React Native / TypeScript, WS3）: プレイヤーが自分のスマホで
+  ハンド履歴を参照する viewer の scaffold。
+  - 画面: PlayerSelect（name-pick, ISSUE-0013）→ MySessions → MyHands → HandDetail
+    （board / 自分のホールカード / アクション列 / 収支）。
+  - UI は `ViewerRepository` interface のみに依存（contract-first, ADR-0004）。
+    `MockRepository`（fixtures 相当）⇔ `HttpRepository`（M1 viewer API）を
+    `EXPO_PUBLIC_API_URL` で注入切替。
+  - 配布は `npm run export:web`（`expo export --platform web`）の静的ビルドを LAN 配信。
+  - 検証: `npm run typecheck` / `npm test`（mock の契約挙動 6 件）/ web export 成功。
+
 ### Added (Phase M1 — player 向け読み取り専用 viewer API, ADR-0013)
 
 - **viewer API**（`api/` 新パッケージ）: プレイヤーが自分の session / ハンド履歴を参照するための

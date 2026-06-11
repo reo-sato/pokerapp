@@ -81,6 +81,8 @@ pokerapp/
 │   ├── dashboard.py               ← GUIDashboard (hand logger 画面, customtkinter)
 │   └── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
 │
+├── mobile/                        ← Poker Hand Viewer (Expo/RN, M2, ADR-0013。mock/HTTP repository 切替, web export 配布)
+│
 ├── tests/                         ← pytest テストスイート
 └── vision/                        ← レガシー（未使用）
 ```
@@ -245,7 +247,7 @@ write-through 接続可**（E1+E2-core, ADR-0008 Pattern A: `IntegrationThread` 
 
 - write 系（ドリンク注文 = M5、ledger = M4/S3）、認証 / per-player アクセス制御（ISSUE-0013）。
 - GUI プロセスへの組み込み起動（`viewer_api.enabled` は将来の in-process 起動用 placeholder）。
-- Expo mobile client は M2（`mobile/`）。
+- Expo mobile client は **M2 で実装済**（`mobile/`、実装状況表参照）。
 
 ---
 
@@ -272,7 +274,8 @@ write-through 接続可**（E1+E2-core, ADR-0008 Pattern A: `IntegrationThread` 
 | **派生 confidence + side-pot (R3 D3 / R5 F3a)** | ✅ 実装済 (preview) | `integration/engine.py:derive_confidence`（3 因子 L/A/Q、rules-aware 経路のみ。legacy 固定表は不変）+ needs_review 5 条件。`HandSummary.pots`（main/side、legacy は `[]`）。**Phase D 完了** |
 | **hand/action schema freeze (R5 F3b)** | ✅ 実装済 | `docs/contracts/schemas/{hand,action}.schema.json`（`1.0`, additionalProperties:true, ISSUE-0011 Fixed）+ `_MODELS` 登録 + code↔contract + golden→schema テスト |
 | **PHH call/check (F3c)** | ✅ 確認済（変更不要） | PHH 標準では check/call は同一トークン `cc`（check-or-call）。区別は非標準で pokerkit が parse 不能になるため統一が正。check/call の別は JSON ログ側で保持（`output/phh_exporter.py` にコメント） |
-| **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（§ Viewer API 参照, ADR-0013。読み取り専用、`[api]` extra）。Expo mobile client は M2 planned |
+| **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（§ Viewer API 参照, ADR-0013。読み取り専用、`[api]` extra） |
+| **mobile viewer scaffold (M2)** | ✅ 実装済 | `mobile/`（Expo/RN + TypeScript。PlayerSelect→MySessions→MyHands→HandDetail、`ViewerRepository` interface に mock / HTTP 実装を注入、`EXPO_PUBLIC_API_URL` で切替。配布は web export を LAN 配信, ADR-0013）。実データ表示は E3（M3）後 |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0009） |
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
@@ -420,7 +423,7 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 | **WS0** | contract / spec / schema | 共有 ID・各 domain model の schema・validation 契約・error 形を凍結 | `docs/contracts/*`（planned）, ADR, schema fixtures | なし（全 WS の上流） |
 | **WS1** | core domain / repository / services | `core/` のドメイン・repository・service。永続化と業務ルールの source of truth | `core/*.py`, repository, service, tests | WS0（該当 model の契約凍結後） |
 | **WS2** | desktop separate screen | registry / ledger / settlement の **別画面** UI（既存 hand logger UI は汚さない） | `gui/*.py`（別 window）, GUI ロジックテスト | WS1（同 phase の repository/service） |
-| **WS3** | mobile scaffold (iOS/Android) | 将来の別 front-end。**最初は mock repository** で UI を先行させる。技術は **Expo (React Native, web export 先行) に確定**（ADR-0013） | mobile プロジェクト雛形 (`mobile/`, M2 planned), screen skeleton, mock repo | WS0 のみ（contract）。WS1 完成を待たない |
+| **WS3** | mobile scaffold (iOS/Android) | 将来の別 front-end。**最初は mock repository** で UI を先行させる。技術は **Expo (React Native, web export 先行) に確定**（ADR-0013） | mobile プロジェクト雛形 (`mobile/`, **M2 実装済** = viewer 画面 + mock/HTTP repository), 後続: registry / ledger 画面 | WS0 のみ（contract）。WS1 完成を待たない |
 
 責務分離の原則:
 
@@ -467,20 +470,21 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 - mock は WS0 の schema fixtures（サンプル JSON）を読むだけにし、実 persistence を持たない。
 - 後で実 repository（ローカル or API）に差し替えても UI 層が壊れない境界を最初から引く。
 
-## Mobile scaffold 提案（WS3, M2 planned）
+## Mobile scaffold（WS3, M2 実装済）
 
 - **技術選定（確定, ADR-0013）**: **Expo（React Native, TypeScript）**。配布は当面
   `expo export --platform web` の Web ビルドを運営 PC から LAN 配信（QR コード）し、
   App Store / Play Store 配布（ネイティブビルド）は同一コードベースの将来オプションとする。
   - 検討した代替案: Flutter / ネイティブ 2 本 / 素の React PWA（ADR-0013 参照）。
-- **最初の screen skeleton 範囲**: player registry のみに限定する。
-  - `PlayerListScreen`（一覧）/ `AddPlayerForm`（新規作成）/ `RenamePlayerForm`（リネーム）。
-  - validation 表示（空文字 / 重複）は **core と同じ contract** に従い、UI 側で再実装しない。
-- **repository は mock 先行**: `PlayerRepository` interface（WS0 契約）に対する in-memory mock を
-  使い、WS1 完成を待たずに画面遷移・状態管理・validation 表示を作る。実 repository（local or
-  API）への差し替えで UI が壊れない境界を最初から引く。
-- **scope 外（たたき台時点）**: 永続化の本実装、hand logger 機能、session / ledger / settlement、
-  実 API / sync。これらは後続 phase。
+- **M2 実装済の範囲**（`mobile/`、詳細は `mobile/README.md`）: viewer 画面
+  `PlayerSelect` → `MySessions` → `MyHands` → `HandDetail`。
+  - UI は `ViewerRepository` interface（`viewer-api.md` 契約に対応）のみに依存し、
+    `MockRepository`（fixtures 相当の in-memory）と `HttpRepository`（M1 viewer API）を
+    `EXPO_PUBLIC_API_URL` で注入切替。型は contracts から転記（validation は複製しない）。
+  - navigation は依存を増やさない最小 stack（useState）。テストは mock repository の契約挙動
+    （`npm test` = node:test）+ `npm run typecheck`。
+- **scope 外（M2 時点）**: player registry の編集画面（list/add/rename — 当初案。viewer を
+  優先したため後続）、永続化、注文 / ledger / settlement 画面、push 通知、認証（ISSUE-0013）。
 
 ## 将来 API / sync を入れても壊れにくい境界
 
