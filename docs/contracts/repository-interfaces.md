@@ -116,6 +116,31 @@ session_player_summary(session_id: str, player_id: str) -> dict
 - write はスタッフ desktop（`--ledger`）のみ。mobile は viewer API 経由の read-only（M5 で
   order-request write を別途契約化）。
 
+## order request repository interface（M5, 実装済 — ADR-0015）
+
+詳細は `ledger.md` § 注文リクエスト。core 実装は `core/order_request_repository.py`
+（**thread-safe**: in-process API スレッドと GUI スレッドが同居するため lock を持つ）。
+
+| 操作 | 入力 | 出力 | error |
+|------|------|------|-------|
+| create request | `session_id`, `player_id`, `item_name`, `quantity`, `note?` | `OrderRequest`（status=pending） | not-found / session-closed / unknown-player / invalid-quantity |
+| list requests | `session_id`, `player_id?`, `status?` | `OrderRequest[]`（requested_at 順） | not-found |
+| confirm request | `request_id`, `unit_amount`, `ledger_repo` | 更新後 `OrderRequest`（confirmed, `ledger_entry_id` 設定済）+ ledger_entry 追記 | not-found / already-resolved / ledger 側 error 透過 |
+| reject request | `request_id` | 更新後 `OrderRequest`（rejected） | not-found / already-resolved |
+
+```text
+create_request(session_id: str, player_id: str, item_name: str, quantity: int,
+               note: str | None = None) -> OrderRequest
+list_requests(session_id: str, player_id: str | None = None,
+              status: str | None = None) -> list[OrderRequest]
+confirm_request(request_id: str, unit_amount: int,
+                ledger_repo: LedgerRepository) -> OrderRequest
+reject_request(request_id: str) -> OrderRequest
+```
+
+- menu 照合（`unknown_item`）は API 境界の責務（menu.json は config 由来のため）。
+- 読み込みは reload-on-read（mtime 検知）で別プロセスの write に追従する（read-only consumer 用）。
+
 ## point ledger / settlement（planned）
 
 | model | interface | phase |

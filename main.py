@@ -518,8 +518,16 @@ def run_player_registry() -> None:
 
 
 def run_ledger() -> None:
-    """Phase S3a (M4, ADR-0014): スタッフ用 会計入力画面を起動する（hand logger とは別画面）。"""
+    """Phase S3a/M5 (ADR-0014/0015): スタッフ用 会計入力画面を起動する（hand logger とは別画面）。
+
+    `config.viewer_api.enabled = true` なら viewer API を **in-process** で抱えて起動し、
+    player スマホからの注文リクエスト受付（write）が有効になる（単一プロセス所有,
+    ADR-0015 §3。単独 `--viewer-api` は read-only のまま）。
+    """
+    from core.config import load_config
     from core.ledger_repository import LedgerRepository
+    from core.menu import MenuMaster
+    from core.order_request_repository import OrderRequestRepository
     from core.player_repository import PlayerRepository
     from core.session_repository import SessionRepository
     from gui.ledger_entry import LedgerEntryWindow
@@ -530,11 +538,47 @@ def run_ledger() -> None:
         print("customtkinter が見つかりません。pip install customtkinter でインストールしてください。")
         sys.exit(1)
 
+    cfg = load_config()
     player_repo = PlayerRepository()
     session_repo = SessionRepository(player_repo=player_repo)
     ledger_repo = LedgerRepository(session_repo=session_repo)
-    win = LedgerEntryWindow(ledger_repo, session_repo, player_repo)
+    order_repo = OrderRequestRepository(session_repo=session_repo)
+    menu = MenuMaster()
+
+    api_server = None
+    api_thread = None
+    api_cfg = cfg.get("viewer_api", {})
+    if api_cfg.get("enabled", False):
+        try:
+            import uvicorn
+            from api.server import create_app
+        except ImportError:
+            print("viewer_api.enabled=true ですが fastapi/uvicorn が未導入のため "
+                  "API なしで起動します（pip install \".[api]\"）。")
+        else:
+            bind_host = api_cfg.get("bind_host", "127.0.0.1")
+            bind_port = api_cfg.get("bind_port", 8788)
+            app = create_app(
+                player_repo, session_repo,
+                cfg.get("session", {}).get("log_dir", "./logs"),
+                ledger_repo=ledger_repo, order_repo=order_repo, menu=menu,
+                orders_writable=True,
+            )
+            api_server = uvicorn.Server(uvicorn.Config(
+                app, host=bind_host, port=bind_port, log_level="warning"))
+            api_thread = threading.Thread(
+                target=api_server.run, daemon=True, name="ViewerAPIThread")
+            api_thread.start()
+            print(f"viewer API を組み込み起動しました: http://{bind_host}:{bind_port} "
+                  "（注文リクエスト受付 有効）")
+
+    win = LedgerEntryWindow(ledger_repo, session_repo, player_repo,
+                            order_repo=order_repo, menu=menu)
     win.run()
+
+    if api_server is not None:
+        api_server.should_exit = True
+        api_thread.join(timeout=3)
 
 
 def run_viewer_api() -> None:

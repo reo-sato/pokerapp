@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+### Added (Phase M5 — スマホからのドリンク注文, ADR-0015 / ISSUE-0013 Fixed)
+
+- **注文リクエスト write path**: プレイヤーがスマホ（mobile viewer）からドリンクを注文できる。
+  - **staff-in-the-loop**: 注文は `order_request`（pending）として記録されるだけで、
+    **スタッフが `--ledger` 画面の「注文リクエスト」欄で確定するまで会計には載らない**
+    （確定で `ledger_entry` kind=order が作られリンク。却下も可）。
+  - **menu master**: `menu.json`（コミット済みサンプル、店側で編集）。プレイヤーはメニューから
+    選択（メニュー外は `unknown_item`）、確定時の単価は menu から prefill（スタッフ上書き可）。
+  - **in-process API**: `viewer_api.enabled=true` で `--ledger` が viewer API を組み込み起動し
+    注文受付が有効になる（単一プロセス所有。単独 `--viewer-api` は read-only のままで
+    注文 POST は 503 `orders_unavailable`）。
+  - viewer API: `GET /api/menu` / `GET・POST /api/players/{id}/sessions/{sid}/order-requests`。
+    mobile: 会計画面 →「ドリンクを注文する」（数量選択・送信・注文状況）。
+  - **ISSUE-0013 を v1 決着**: 本人確認は name-pick のまま（注文はスタッフ確定・提供時の対面で
+    検証される。PIN は将来 additive に再評価）。
+  - core: `OrderRequest` / `OrderRequestRepository`（thread-safe + reload-on-read,
+    `order_requests.json`）/ `MenuMaster`。contract: `order_request.schema.json`（draft 0.1）
+    + fixtures + error code（`invalid_quantity` / `unknown_item` / `already_resolved` /
+    `orders_unavailable`）。
+
 ### Added (Phase M4 = S3a — cash-only ledger と会計参照, ADR-0014)
 
 - **会計記録（cash-only ledger）**: buy-in / rebuy / add-on / 注文 / 調整を session 単位で記録

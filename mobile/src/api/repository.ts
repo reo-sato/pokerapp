@@ -7,6 +7,9 @@
  */
 import type {
   HandSummary,
+  MenuItem,
+  OrderRequest,
+  OrderRequestBody,
   Player,
   PlayerSessionLedger,
   PlayerSessionSummary,
@@ -21,4 +24,13 @@ export interface ViewerRepository {
   getHand(sessionId: string, handId: number): Promise<HandSummary>;
   /** M4/S3a (ADR-0014): 自分の会計参照（entries + 中間集計, read-only）。 */
   getPlayerLedger(playerId: string, sessionId: string): Promise<PlayerSessionLedger>;
+  /** M5 (ADR-0015): 注文メニュー / 自分のリクエスト一覧 / 注文リクエスト送信。
+      送信は pending を作るだけで、会計への記帳はスタッフ確定後。 */
+  getMenu(): Promise<MenuItem[]>;
+  listOrderRequests(playerId: string, sessionId: string): Promise<OrderRequest[]>;
+  createOrderRequest(
+    playerId: string,
+    sessionId: string,
+    body: OrderRequestBody,
+  ): Promise<OrderRequest>;
 }

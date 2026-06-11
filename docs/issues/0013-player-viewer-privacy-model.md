@@ -6,7 +6,7 @@
 
 ## Status
 
-Open
+Fixed（v1 = name-pick で確定。M5 / ADR-0015, 2026-06-11。詳細は § Fix）
 
 ## Severity / Priority
 
@@ -46,11 +46,20 @@ player のハンド履歴は LAN 内の誰でも取得できる。
 
 ## Fix
 
-未定。M5（注文 write path）着手前に決着させ、必要なら ADR 化する。
+**v1 = name-pick で確定**（user 決定 2026-06-11, ADR-0015 §1）:
+
+- 参照・注文とも認証なしの name-pick を維持。LAN 限定（`viewer_api.bind_host` 既定
+  `127.0.0.1`、公開は明示 opt-in）という前提も維持。
+- 注文（write, M5）は **スタッフ確定を挟む**（ADR-0015 §2 staff-in-the-loop）ため、
+  なりすまし・誤帰属の注文はスタッフ確定時とドリンク提供時の対面で発覚・却下できる。
+  ledger に直接書かれることはない。
+- PIN（注文時のみ / 全面）は**導入しない**。問題が顕在化した場合に additive に再評価する
+  （registry への PIN 属性追加 + write 時のみ要求、で後付け可能な設計を維持）。
 
 ## Regression Test
 
-—（決着後に追加）
+- `tests/test_viewer_api.py`: 注文 POST が pending request を作るだけで ledger に書かれない
+  こと、read-only モード（単独 `--viewer-api`）では write が 503 になることを固定。
 
 ## Affected Files
 

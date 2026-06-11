@@ -45,12 +45,29 @@ viewer API の response にも同形で載る）:
 | list entries | `session_id`, `player_id?` | `ledger_entry[]`（追記順） | not-found |
 | session player summary | `session_id`, `player_id` | 中間集計（上記） | not-found / unknown-player |
 
-## write の所在（S3a）
+## write の所在（S3a + M5）
 
-- **スタッフの desktop 別画面のみ**（`python main.py --ledger`）。player のスマホからの
-  注文 write は M5（order-request フロー、ISSUE-0013 決着後）。
-- viewer API は read-only の参照のみ（`GET /api/players/{id}/sessions/{sid}/ledger`,
-  viewer-api.md）。
+- **ledger への write はスタッフの desktop 別画面のみ**（`python main.py --ledger`）。
+- viewer API の参照は read-only（`GET /api/players/{id}/sessions/{sid}/ledger`, viewer-api.md）。
+- player のスマホからの注文は **order_request 経由**（M5, 下記）。ledger への直接 write は無い。
+
+## 注文リクエスト（M5, ADR-0015 — staff-in-the-loop）
+
+- model: `order_request`（`schemas/order_request.schema.json` 0.x draft）。
+  `request_id` / `session_id` / `player_id` / `item_name` / `quantity`(1..99) / `note?` /
+  `status`（pending → confirmed | rejected のみ。再変更は `already_resolved`）/
+  `requested_at` / `resolved_at?` / `ledger_entry_id?`（confirmed のみ）。
+- フロー: player が POST（viewer-api.md）→ pending として `order_requests.json` に記録 →
+  スタッフが `--ledger` 画面の「注文リクエスト」欄で **確定**（このとき初めて
+  `ledger_entry`(kind=order) が作られ `ledger_entry_id` がリンク）or **却下**。
+- **menu master**: `menu.json` = `{"items": [{"item_name", "unit_amount"}]}`（コミット済み
+  サンプルを店側で編集、rfid_cards.json と同運用）。player はメニューから選択
+  （menu 外は `unknown_item`）。確定時の単価は menu から prefill（スタッフ上書き可 =
+  価格の最終決定権はスタッフ）。
+- **単一プロセス所有**（ADR-0015 §3）: `order_requests.json` への write は viewer API を
+  in-process で抱えた `--ledger` プロセスのみ。単独 `--viewer-api` は read-only
+  （POST は 503 `orders_unavailable`、GET は reload-on-read で追従）。
+- repository interface は `repository-interfaces.md` § order request 参照。
 
 ## 拡張ルール
 

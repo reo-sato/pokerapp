@@ -7,6 +7,9 @@
 import type { ViewerRepository } from "./repository";
 import type {
   HandSummary,
+  MenuItem,
+  OrderRequest,
+  OrderRequestBody,
   Player,
   PlayerSessionLedger,
   PlayerSessionSummary,
@@ -22,6 +25,22 @@ export class HttpRepository implements ViewerRepository {
 
   private async get<T>(path: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`);
+    const body = await res.json();
+    if (!res.ok) {
+      throw new ViewerApiError({
+        code: body?.code ?? "unknown_error",
+        message: body?.message ?? `HTTP ${res.status}`,
+      });
+    }
+    return body as T;
+  }
+
+  private async post<T>(path: string, payload: unknown): Promise<T> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
     const body = await res.json();
     if (!res.ok) {
       throw new ViewerApiError({
@@ -66,6 +85,29 @@ export class HttpRepository implements ViewerRepository {
   getPlayerLedger(playerId: string, sessionId: string): Promise<PlayerSessionLedger> {
     return this.get(
       `/api/players/${encodeURIComponent(playerId)}/sessions/${encodeURIComponent(sessionId)}/ledger`,
+    );
+  }
+
+  async getMenu(): Promise<MenuItem[]> {
+    const body = await this.get<{ items: MenuItem[] }>("/api/menu");
+    return body.items;
+  }
+
+  async listOrderRequests(playerId: string, sessionId: string): Promise<OrderRequest[]> {
+    const body = await this.get<{ requests: OrderRequest[] }>(
+      `/api/players/${encodeURIComponent(playerId)}/sessions/${encodeURIComponent(sessionId)}/order-requests`,
+    );
+    return body.requests;
+  }
+
+  createOrderRequest(
+    playerId: string,
+    sessionId: string,
+    body: OrderRequestBody,
+  ): Promise<OrderRequest> {
+    return this.post(
+      `/api/players/${encodeURIComponent(playerId)}/sessions/${encodeURIComponent(sessionId)}/order-requests`,
+      body,
     );
   }
 }

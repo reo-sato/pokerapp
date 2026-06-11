@@ -71,6 +71,39 @@ test("getPlayerLedger returns entries and summary consistent with core rules", a
   });
 });
 
+test("order requests: create pending, list own, validate menu and quantity", async () => {
+  const repo = new MockRepository();
+  assert.ok((await repo.getMenu()).length > 0);
+
+  const req = await repo.createOrderRequest(ALICE_ID, SESSION_ID, {
+    item_name: "ビール",
+    quantity: 2,
+  });
+  assert.equal(req.status, "pending");
+  assert.equal(req.ledger_entry_id, undefined);
+
+  const mine = await repo.listOrderRequests(ALICE_ID, SESSION_ID);
+  assert.deepEqual(mine.map((r) => r.item_name), ["ビール"]);
+  assert.deepEqual(await repo.listOrderRequests(BOB_ID, SESSION_ID), []);
+
+  await assert.rejects(
+    repo.createOrderRequest(ALICE_ID, SESSION_ID, { item_name: "存在しない品", quantity: 1 }),
+    (err: unknown) => {
+      assert.ok(err instanceof ViewerApiError);
+      assert.equal(err.code, "unknown_item");
+      return true;
+    },
+  );
+  await assert.rejects(
+    repo.createOrderRequest(ALICE_ID, SESSION_ID, { item_name: "ビール", quantity: 0 }),
+    (err: unknown) => {
+      assert.ok(err instanceof ViewerApiError);
+      assert.equal(err.code, "invalid_quantity");
+      return true;
+    },
+  );
+});
+
 test("getHand returns hand or rejects with not_found", async () => {
   const repo = new MockRepository();
   const hand = await repo.getHand(SESSION_ID, 1);

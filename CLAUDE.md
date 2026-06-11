@@ -40,6 +40,8 @@ pokerapp/
 ├── players.json                   ← player registry 永続ファイル (.gitignore, S1)
 ├── sessions.json                  ← session + hand-based seating 永続ファイル (.gitignore, S2)
 ├── ledger.json                    ← ledger entry 永続ファイル (.gitignore, S3a/M4)
+├── order_requests.json            ← 注文リクエスト永続ファイル (.gitignore, M5)
+├── menu.json                      ← 注文メニューマスタ (コミット済みサンプル, 店側で編集, M5)
 ├── pyproject.toml                 ← パッケージ定義 (core / [pcsc] / [vision] / [api] / [dev], entry: pokerapp, H1)
 ├── requirements.txt               ← core runtime 同期コピー (vision 除外)
 ├── requirements-dev.txt           ← テスト依存 (numpy/pokerkit/jsonschema/fastapi/httpx/pytest, CI が使用)
@@ -57,7 +59,10 @@ pokerapp/
 │   ├── session.py                 ← Session / SeatAssignment / HandRef データクラス (S2)
 │   ├── session_repository.py      ← SessionRepository (session + hand-based seating + JSON 永続化, S2)
 │   ├── ledger.py                  ← LedgerEntry / OrderDetail データクラス (S3a, M4)
-│   └── ledger_repository.py       ← LedgerRepository (cash-only ledger + 中間集計 + JSON 永続化, S3a)
+│   ├── ledger_repository.py       ← LedgerRepository (cash-only ledger + 中間集計 + JSON 永続化, S3a)
+│   ├── order_request.py           ← OrderRequest データクラス (M5)
+│   ├── order_request_repository.py ← OrderRequestRepository (注文リクエスト, thread-safe + reload-on-read, M5)
+│   └── menu.py                    ← MenuMaster (menu.json ロード・検索, M5)
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -231,9 +236,13 @@ seat change を差分入力できる（`seat_assign` queue イベント → 次�
 
 ### スコープ（現時点）
 
-- `python main.py --viewer-api` で起動（要 `pip install ".[api]"` = fastapi/uvicorn）。GET のみ。
+- 起動は 2 形態（要 `pip install ".[api]"` = fastapi/uvicorn）:
+  - `python main.py --viewer-api` = **read-only**（注文 POST は 503 `orders_unavailable`）。
+  - `python main.py --ledger`（`viewer_api.enabled=true`）= 会計画面に **in-process 組み込み**で
+    注文 write が有効（単一プロセス所有, M5/ADR-0015）。
 - endpoints: `/api/health`, `/api/players`, `/api/players/{id}`, `/api/players/{id}/sessions`,
-  `/api/players/{id}/sessions/{sid}/hands`, `/api/sessions/{sid}/hands/{hid}`。
+  `/api/players/{id}/sessions/{sid}/hands`, `/api/sessions/{sid}/hands/{hid}`,
+  `/api/menu`（M5）, `/api/players/{id}/sessions/{sid}/order-requests`（GET/POST, M5）。
   契約は `docs/contracts/viewer-api.md`（draft 0.x）+ `player_session_summary` schema/fixtures。
 - **read model 規則**: 「player のハンド」は `sessions.json` の seat_assignment 起点で
   hand log（`logs/{session_id}.json`）を `(session_id, hand_id)` join。hand log 側 `player_id` は
@@ -251,11 +260,11 @@ seat change を差分入力できる（`seat_assign` queue イベント → 次�
 | server | `api/server.py` | `create_app(player_repo, session_repo, log_dir)` DI + error handler + CORS(GET) |
 | 起動 | `main.py --viewer-api` | config を読み foreground で uvicorn 起動 |
 
-### Out of scope（M1 時点）
+### Out of scope（viewer API 時点）
 
-- write 系（ドリンク注文 = M5。**会計の read-only 参照は M4 で追加済** — § Ledger 参照）、
-  認証 / per-player アクセス制御（ISSUE-0013）。
-- GUI プロセスへの組み込み起動（`viewer_api.enabled` は将来の in-process 起動用 placeholder）。
+- ledger への直接 write（注文も order_request 経由でスタッフ確定が必須 — § Ledger 参照）。
+- 認証 / per-player アクセス制御（**v1 = name-pick で確定**, ISSUE-0013 Fixed / ADR-0015。
+  PIN は問題が顕在化した場合に additive に再評価）。
 - Expo mobile client は **M2 で実装済**（`mobile/`、実装状況表参照）。
 
 ---
@@ -282,10 +291,24 @@ session 中の金銭イベント（buy-in / rebuy / add-on / 注文 / 調整）�
 - **参照**: viewer API `GET /api/players/{id}/sessions/{sid}/ledger`（entries + summary）+
   mobile「会計」画面（MyHands から遷移, read-only）。
 
-### Out of scope（S3a 時点）
+### 注文リクエスト（M5, 実装済 — ADR-0015）
+
+- player はスマホから **order_request**（pending）を POST する。**ledger には書かれず**、
+  スタッフが `--ledger` 画面の「注文リクエスト」欄で**確定**したときに `ledger_entry`
+  （kind=order）が作られ `ledger_entry_id` がリンクされる（却下も可。staff-in-the-loop）。
+- **menu master**: `menu.json`（コミット済みサンプル、店側で編集）。player はメニューから選択
+  （menu 外は `unknown_item`）、確定時の単価は menu から prefill（スタッフ上書き可）。
+- **単一プロセス所有**: `order_requests.json` の write は viewer API を in-process で抱えた
+  `--ledger` プロセスのみ（`viewer_api.enabled=true` で組み込み起動）。単独 `--viewer-api` は
+  read-only（POST 503）。`OrderRequestRepository` は thread-safe（lock）+ reload-on-read。
+- 本人確認は **name-pick（v1 確定, ISSUE-0013 Fixed）**: なりすまし注文はスタッフ確定・
+  提供時の対面で発覚できる。
+- mobile: 会計画面 →「ドリンクを注文する」→ メニュー選択・数量・送信 + 注文状況一覧。
+
+### Out of scope（S3a/M5 時点）
 
 - point 払い・point ledger・残高（S3b/M6, ISSUE-0001 gate）、settlement / paid-unpaid（S4）。
-- player スマホからの注文 write（M5, ISSUE-0013 決着後）。entry の編集・削除（訂正は adjustment）。
+- entry の編集・削除（訂正は adjustment）。注文リクエストの player 側キャンセル（スタッフ却下で代替）。
 
 ---
 
@@ -315,6 +338,7 @@ session 中の金銭イベント（buy-in / rebuy / add-on / 注文 / 調整）�
 | **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（§ Viewer API 参照, ADR-0013。読み取り専用、`[api]` extra） |
 | **mobile viewer scaffold (M2)** | ✅ 実装済 | `mobile/`（Expo/RN + TypeScript。PlayerSelect→MySessions→MyHands→HandDetail（+ M4: 会計画面）、`ViewerRepository` interface に mock / HTTP 実装を注入、`EXPO_PUBLIC_API_URL` で切替。配布は web export を LAN 配信, ADR-0013）。実データは `session_layer.enabled=true` で流れる（M3 実装済） |
 | **cash-only ledger (S3a/M4)** | ✅ 実装済 | `core/ledger.py` / `core/ledger_repository.py` / `gui/ledger_entry.py`（`--ledger`）+ viewer API `/ledger` endpoint + mobile 会計画面（§ Ledger 参照, ADR-0014。point は S3b/M6） |
+| **注文リクエスト write path (M5)** | ✅ 実装済 | `core/order_request*.py` / `core/menu.py` + viewer API `/menu`・`/order-requests`（GET/POST）+ `--ledger` の「注文リクエスト」欄（確定/却下）+ mobile 注文画面（§ Ledger 注文リクエスト参照, ADR-0015。staff-in-the-loop / in-process API / name-pick 確定 = ISSUE-0013 Fixed） |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0009） |
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |

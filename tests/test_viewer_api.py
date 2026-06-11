@@ -27,6 +27,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from api.server import create_app  # noqa: E402
 from core.hand_log import HandSummary  # noqa: E402
 from core.ledger_repository import LedgerRepository  # noqa: E402
+from core.menu import MenuMaster  # noqa: E402
+from core.order_request_repository import OrderRequestRepository  # noqa: E402
 from core.player_repository import PlayerRepository  # noqa: E402
 from core.session_repository import SessionRepository  # noqa: E402
 
@@ -78,8 +80,25 @@ def env(tmp_path: Path) -> dict:
                      item_name="ジントニック", unit_amount=500, quantity=3)
     ledger.add_entry(s.session_id, bob.player_id, "buy_in", 20000)
 
-    client = TestClient(create_app(players, sessions, log_dir, ledger_repo=ledger))
-    return {"client": client, "alice": alice, "bob": bob, "session": s}
+    # M5: menu master + order repo（orders_writable=True = --ledger 組み込み相当）
+    menu_path = tmp_path / "menu.json"
+    menu_path.write_text(json.dumps({"items": [
+        {"item_name": "ビール", "unit_amount": 700},
+        {"item_name": "コーラ", "unit_amount": 400},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    menu = MenuMaster(path=menu_path)
+    orders = OrderRequestRepository(path=tmp_path / "order_requests.json",
+                                    session_repo=sessions)
+
+    client = TestClient(create_app(
+        players, sessions, log_dir, ledger_repo=ledger,
+        order_repo=orders, menu=menu, orders_writable=True))
+    readonly_client = TestClient(create_app(
+        players, sessions, log_dir, ledger_repo=ledger,
+        order_repo=orders, menu=menu, orders_writable=False))
+    return {"client": client, "readonly_client": readonly_client,
+            "alice": alice, "bob": bob, "session": s,
+            "sessions": sessions, "ledger": ledger, "orders": orders}
 
 
 def test_health(env: dict):
@@ -150,6 +169,78 @@ def test_player_ledger_entries_and_summary(env: dict):
     # bob は自分の entry だけ見える
     res = env["client"].get(f"/api/players/{env['bob'].player_id}/sessions/{sid}/ledger")
     assert res.json()["summary"]["total_due"] == 20000
+
+
+class TestOrderRequests:
+    """M5 (ADR-0015): 注文リクエスト write path。"""
+
+    def test_menu(self, env: dict):
+        res = env["client"].get("/api/menu")
+        assert res.status_code == 200
+        assert [i["item_name"] for i in res.json()["items"]] == ["ビール", "コーラ"]
+
+    def test_post_creates_pending_without_ledger_write(self, env: dict):
+        sid, pid = env["session"].session_id, env["alice"].player_id
+        before = len(env["ledger"].list_entries(sid))
+        res = env["client"].post(
+            f"/api/players/{pid}/sessions/{sid}/order-requests",
+            json={"item_name": "ビール", "quantity": 2, "note": "冷えたの"})
+        assert res.status_code == 201
+        body = res.json()
+        assert body["status"] == "pending"
+        _validate(body, "order_request")
+        # ledger には書かれない（staff-in-the-loop, ISSUE-0013 の回帰固定）
+        assert len(env["ledger"].list_entries(sid)) == before
+
+        # 自分の一覧に出る / 他人には出ない
+        res = env["client"].get(f"/api/players/{pid}/sessions/{sid}/order-requests")
+        assert [r["item_name"] for r in res.json()["requests"]] == ["ビール"]
+        res = env["client"].get(
+            f"/api/players/{env['bob'].player_id}/sessions/{sid}/order-requests")
+        assert res.json()["requests"] == []
+
+    @pytest.mark.parametrize("body,status,code", [
+        ({"item_name": "存在しない品", "quantity": 1}, 400, "unknown_item"),
+        ({"item_name": "ビール", "quantity": 0}, 400, "invalid_quantity"),
+    ])
+    def test_post_rejections(self, env: dict, body: dict, status: int, code: str):
+        sid, pid = env["session"].session_id, env["alice"].player_id
+        res = env["client"].post(
+            f"/api/players/{pid}/sessions/{sid}/order-requests", json=body)
+        assert (res.status_code, res.json()["code"]) == (status, code)
+
+    def test_post_closed_session_409(self, env: dict):
+        sid, pid = env["session"].session_id, env["alice"].player_id
+        env["sessions"].close_session(sid)
+        res = env["client"].post(
+            f"/api/players/{pid}/sessions/{sid}/order-requests",
+            json={"item_name": "ビール", "quantity": 1})
+        assert (res.status_code, res.json()["code"]) == (409, "session_closed")
+
+    def test_post_readonly_mode_503(self, env: dict):
+        """単独 --viewer-api（orders_writable=False）では注文 write を受けない（ADR-0015 §3）。"""
+        sid, pid = env["session"].session_id, env["alice"].player_id
+        res = env["readonly_client"].post(
+            f"/api/players/{pid}/sessions/{sid}/order-requests",
+            json={"item_name": "ビール", "quantity": 1})
+        assert (res.status_code, res.json()["code"]) == (503, "orders_unavailable")
+
+    def test_confirm_then_visible_in_ledger_endpoint(self, env: dict):
+        """確定後: status=confirmed が GET に出て、ledger 参照にも entry が現れる。"""
+        sid, pid = env["session"].session_id, env["alice"].player_id
+        res = env["client"].post(
+            f"/api/players/{pid}/sessions/{sid}/order-requests",
+            json={"item_name": "コーラ", "quantity": 2})
+        rid = res.json()["request_id"]
+        env["orders"].confirm_request(rid, 400, env["ledger"])  # スタッフ操作相当
+
+        res = env["client"].get(f"/api/players/{pid}/sessions/{sid}/order-requests")
+        req = next(r for r in res.json()["requests"] if r["request_id"] == rid)
+        assert req["status"] == "confirmed" and req["ledger_entry_id"]
+        _validate(req, "order_request")
+
+        res = env["client"].get(f"/api/players/{pid}/sessions/{sid}/ledger")
+        assert any(e["entry_id"] == req["ledger_entry_id"] for e in res.json()["entries"])
 
 
 @pytest.mark.parametrize("path", [

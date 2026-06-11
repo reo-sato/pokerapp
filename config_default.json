@@ -58,8 +58,9 @@
   },
   "viewer_api": {
     "enabled": false,
+    "_enabled_comment": "M5 (ADR-0015): true にすると --ledger（スタッフ会計画面）が viewer API を in-process で抱えて起動し、スマホからの注文リクエスト受付（write）が有効になる。単独起動 python main.py --viewer-api は本フラグに依らず常に read-only（注文 POST は 503）。",
     "bind_host": "127.0.0.1",
-    "_bind_host_comment": "M1 (ADR-0013): player 向け読み取り専用 viewer API。無認証のため LAN 公開（スマホからの参照）は PC の LAN IP に明示変更し、信頼できるネットワークでのみ使用すること（ISSUE-0013）。起動は python main.py --viewer-api（要 pip install '.[api]'）。",
+    "_bind_host_comment": "M1 (ADR-0013): player 向け viewer API。無認証のため LAN 公開（スマホからの参照）は PC の LAN IP に明示変更し、信頼できるネットワークでのみ使用すること（本人確認は name-pick, ISSUE-0013/ADR-0015）。",
     "bind_port": 8788
   }
 }

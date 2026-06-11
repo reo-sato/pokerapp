@@ -30,9 +30,10 @@ _FIXTURES = _CONTRACTS / "fixtures"
 # hand / action: hand core (ADR-0010 R5, ISSUE-0011)。additionalProperties:true で 1.0。
 # player_session_summary: M1 viewer API の read model envelope (ADR-0013, draft 0.x)。
 # ledger_entry: S3a cash-only ledger (ADR-0014, draft 0.x)。
+# order_request: M5 注文リクエスト (ADR-0015, draft 0.x)。
 _MODELS = [
     "player", "session", "seat_assignment", "hand_ref", "reconstruction_event",
-    "hand", "action", "player_session_summary", "ledger_entry",
+    "hand", "action", "player_session_summary", "ledger_entry", "order_request",
 ]
 
 

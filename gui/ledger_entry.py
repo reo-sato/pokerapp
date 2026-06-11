@@ -60,12 +60,24 @@ class LedgerEntryWindow:
         session_repo: SessionRepository,
         player_repo: PlayerRepository,
         master: Optional[object] = None,
+        order_repo: Optional[object] = None,
+        menu: Optional[object] = None,
     ) -> None:
+        """
+        Args:
+            order_repo: OrderRequestRepository (M5, ADR-0015)。渡すと「注文リクエスト」欄が
+                        現れ、pending を確定（ledger 記帳）/ 却下できる。in-process viewer API
+                        スレッドと共有されるため thread-safe（repository 側 lock）。
+            menu: MenuMaster。確定時の単価 prefill に使う（スタッフ上書き可）。
+        """
         import customtkinter as ctk
 
         self._ledger = ledger_repo
         self._sessions = session_repo
         self._players = player_repo
+        self._orders = order_repo
+        self._menu = menu
+        self._request_rows: dict[str, object] = {}  # request_id → row frame
         # 表示ラベル → ID の対応（OptionMenu はラベルで選ぶ）
         self._session_by_label: dict[str, str] = {}
         self._player_by_label: dict[str, str] = {}
@@ -84,6 +96,8 @@ class LedgerEntryWindow:
 
         self._build_ui()
         self._refresh_sessions()
+        if self._orders is not None:
+            self._poll_requests()
 
     # ――― UI 構築 ―――
 
@@ -153,12 +167,24 @@ class LedgerEntryWindow:
         ctk.CTkButton(entry_frame, text="追加", width=100, command=self._cmd_add).grid(
             row=2, column=7, sticky="e", padx=4, pady=(2, 8))
 
+        # 注文リクエスト欄 (M5)。order_repo がある場合のみ
+        if self._orders is not None:
+            self._requests_frame = ctk.CTkScrollableFrame(
+                root, label_text="注文リクエスト（pending — スマホから受信）", height=120)
+            self._requests_frame.grid(row=3, column=0, sticky="ew", padx=12, pady=4)
+            self._requests_frame.grid_columnconfigure(0, weight=1)
+            root.grid_rowconfigure(3, weight=0)
+            root.grid_rowconfigure(4, weight=1)
+            board_row, status_row = 4, 5
+        else:
+            board_row, status_row = 3, 4
+
         # 集計 + 履歴
         self._board = ctk.CTkTextbox(root, state="disabled", wrap="none", font=("Courier", 12))
-        self._board.grid(row=3, column=0, sticky="nsew", padx=12, pady=4)
+        self._board.grid(row=board_row, column=0, sticky="nsew", padx=12, pady=4)
 
         self._status_label = ctk.CTkLabel(root, text="", anchor="w")
-        self._status_label.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 12))
+        self._status_label.grid(row=status_row, column=0, sticky="ew", padx=12, pady=(0, 12))
 
     # ――― 表示更新 ―――
 
@@ -227,6 +253,95 @@ class LedgerEntryWindow:
                     f"{_KIND_LABELS.get(e.kind, e.kind):<6} {e.cash_amount:>8,}{detail}{note}\n",
                 )
         box.configure(state="disabled")
+
+    # ――― 注文リクエスト (M5) ―――
+
+    def _poll_requests(self) -> None:
+        """2 秒ごとに選択 session の pending リクエストを取り直して欄を更新する。
+
+        repository は thread-safe（in-process API スレッドが create する）。
+        """
+        try:
+            self._rebuild_request_rows()
+        except Exception:
+            logger.exception("注文リクエスト欄の更新に失敗")
+        self._root.after(2000, self._poll_requests)
+
+    def _pending_requests(self) -> list:
+        session_id = self._session_by_label.get(self._session_var.get())
+        if session_id is None:
+            return []
+        try:
+            return self._orders.list_requests(session_id, status="pending")
+        except SessionNotFoundError:
+            return []
+
+    def _rebuild_request_rows(self) -> None:
+        ctk = self._ctk
+        pending = self._pending_requests()
+        ids = [r.request_id for r in pending]
+        if ids == list(self._request_rows):
+            return  # 変化なし（入力中の単価 entry を壊さない）
+        for row in self._request_rows.values():
+            try:
+                row.destroy()
+            except Exception:
+                pass
+        self._request_rows.clear()
+
+        id_to_name = {pid: name for name, pid in self._player_by_label.items()}
+        for row_idx, req in enumerate(pending):
+            row = ctk.CTkFrame(self._requests_frame, fg_color="transparent")
+            row.grid(row=row_idx, column=0, sticky="ew", pady=1)
+            row.grid_columnconfigure(0, weight=1)
+            note = f"（{req.note}）" if req.note else ""
+            label = (f"{req.requested_at}  {id_to_name.get(req.player_id, req.player_id)}  "
+                     f"{req.item_name} ×{req.quantity} {note}")
+            ctk.CTkLabel(row, text=label, anchor="w").grid(row=0, column=0, sticky="w", padx=4)
+            unit_entry = ctk.CTkEntry(row, width=70, placeholder_text="単価")
+            prefill = self._menu.unit_amount(req.item_name) if self._menu is not None else None
+            if prefill is not None:
+                unit_entry.insert(0, str(prefill))
+            unit_entry.grid(row=0, column=1, padx=2)
+            ctk.CTkButton(
+                row, text="確定", width=60,
+                command=lambda rid=req.request_id, e=unit_entry: self._cmd_confirm_request(rid, e),
+            ).grid(row=0, column=2, padx=2)
+            ctk.CTkButton(
+                row, text="却下", width=60, fg_color="#774444",
+                command=lambda rid=req.request_id: self._cmd_reject_request(rid),
+            ).grid(row=0, column=3, padx=(2, 4))
+            self._request_rows[req.request_id] = row
+
+    def _cmd_confirm_request(self, request_id: str, unit_entry: object) -> None:
+        """pending を確定し ledger に記帳する（単価はスタッフが最終決定, ADR-0015 §4）。"""
+        from core.order_request_repository import OrderRequestError
+
+        try:
+            unit_amount = int(unit_entry.get().strip())
+        except ValueError:
+            self._set_status("単価は整数で入力してください。", error=True)
+            return
+        try:
+            req = self._orders.confirm_request(request_id, unit_amount, self._ledger)
+        except (OrderRequestError, LedgerError, SessionNotFoundError) as e:
+            self._set_status(str(e), error=True)
+            return
+        self._rebuild_request_rows()
+        self._refresh_board()
+        self._set_status(f"注文を確定しました: {req.item_name} ×{req.quantity} = "
+                         f"{unit_amount * req.quantity:,}")
+
+    def _cmd_reject_request(self, request_id: str) -> None:
+        from core.order_request_repository import OrderRequestError
+
+        try:
+            self._orders.reject_request(request_id)
+        except OrderRequestError as e:
+            self._set_status(str(e), error=True)
+            return
+        self._rebuild_request_rows()
+        self._set_status("注文を却下しました。")
 
     # ――― コマンド ―――
 

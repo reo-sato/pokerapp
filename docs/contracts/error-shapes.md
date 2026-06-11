@@ -71,6 +71,20 @@ front-end が UI 分岐できるよう、core / repository が返す error を *
 | `invalid_amount` | kind 別の金額規則違反（buy_in/rebuy/add_on ≤0、order の単価×数量不一致 等） | add entry | `InvalidAmountError` |
 | `points_not_supported` | S3a で `point_amount != 0`（point は M6 で解放） | add entry | `PointsNotSupportedError` |
 
+### order_request error code（M5 実装済, ADR-0015）
+
+`core/order_request_repository.py` / viewer API 境界が返す code（additive）:
+
+| code | 意味 | 発生する操作（例） | 発生層 |
+|------|------|------------------|--------|
+| `not_found` | 指定 `request_id` / session / player が存在しない（既存 code を再利用） | get / confirm / reject | core |
+| `session_closed` | closed の session に注文しようとした（既存 code を再利用） | create request | core（`OrderSessionClosedError`） |
+| `unknown_player` | `player_id` が registry に実在しない（既存 code を再利用） | create request | core（`OrderUnknownPlayerError`） |
+| `invalid_quantity` | quantity が 1..99 外 / item_name が空・過長 | create request | core（`InvalidOrderRequestError`） |
+| `unknown_item` | item_name が menu master に存在しない | create request (POST) | **API 境界**（menu は config 由来のため） |
+| `already_resolved` | confirmed / rejected 済みの request を再度 confirm / reject | confirm / reject | core（`AlreadyResolvedError`） |
+| `orders_unavailable` | 注文 write が無効（単独 `--viewer-api` の read-only モード等） | POST (HTTP 503) | API 境界 |
+
 ### ledger / settlement（planned, S3b〜S4）
 
 例: `insufficient_points`（point 不足→cash 補完判断, S3b/M6）、

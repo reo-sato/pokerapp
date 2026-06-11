@@ -110,6 +110,32 @@ export interface PlayerSessionLedger {
   summary: LedgerSummary;
 }
 
+/** GET /api/menu の要素 (menu.json master, M5)。 */
+export interface MenuItem {
+  item_name: string;
+  unit_amount: number;
+}
+
+/** schemas/order_request.schema.json (0.x, M5 — ADR-0015)。 */
+export interface OrderRequest {
+  request_id: string;
+  session_id: string;
+  player_id: string;
+  item_name: string;
+  quantity: number;
+  note?: string;
+  status: "pending" | "confirmed" | "rejected";
+  requested_at: string;
+  resolved_at?: string;
+  ledger_entry_id?: string;
+}
+
+export interface OrderRequestBody {
+  item_name: string;
+  quantity: number;
+  note?: string;
+}
+
 /** error-shapes.md の論理形。分岐は code、表示は message。 */
 export interface ApiError {
   code: string;

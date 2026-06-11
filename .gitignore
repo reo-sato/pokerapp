@@ -6,6 +6,7 @@ config.json
 players.json
 sessions.json
 ledger.json
+order_requests.json
 
 # packaging / build artifacts (H1)
 *.egg-info/

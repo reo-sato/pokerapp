@@ -37,6 +37,7 @@
 | ADR-0012 | pokerkit を live 既定 backend に切替（legacy は rollback, pokerkit pin） | Accepted | 2026-06-05 | reconstruct / engine (G) | `docs/adr/0012-pokerkit-live-default.md` | 関連: ADR-0009。実機 E2E は Phase H |
 | ADR-0013 | Player 向け参照は API-first（viewer API 前倒し）+ Expo web export 先行 | Accepted | 2026-06-10 | viewer API / mobile (M1) | `docs/adr/0013-player-facing-viewer-api-first-architecture.md` | 補完: ADR-0004（WS3 技術選定を確定）。関連: ADR-0008 / ISSUE-0006 / ISSUE-0013 |
 | ADR-0014 | S3a — ledger を cash-only で先行導入（point ledger は M6 に分離） | Accepted | 2026-06-11 | ledger (S3a / M4) | `docs/adr/0014-s3a-cash-only-ledger-first.md` | ADR-0003 の S3 を分割。関連: ISSUE-0001（M6 gate のまま）/ ISSUE-0013 |
+| ADR-0015 | M5 — 注文リクエスト write path（staff-in-the-loop / in-process API / menu master / name-pick 確定） | Accepted | 2026-06-11 | orders / viewer API (M5) | `docs/adr/0015-m5-order-request-write-path.md` | ISSUE-0013 を v1 決着。関連: ADR-0013 / ADR-0014 |
 
 <!--
 Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時点で空番。
@@ -59,4 +60,4 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0010 | 決定的 replay の記録境界とスレッド順序近似 | Resolved | 2026-06-03 | reconstruct / integration | `docs/issues/0010-replay-determinism-record-boundary.md` | Phase B+C #6（記録境界・clock 源を確定 + AudioEvent.{seat,confidence} 露出）。replayer/許容度は Phase F #8 |
 | ISSUE-0011 | hand / action schema の freeze 未確定事項 | Fixed | 2026-06-05 | contracts / hand core | `docs/issues/0011-hand-action-schema-freeze-blockers.md` | Phase F3b #8（hand/action を `1.0` freeze, additionalProperties:true。`_MODELS` 登録 + code↔contract + golden→schema） |
 | ISSUE-0012 | GUI/CLI スレッドが GameStateManager を直接変更しレース | Fixed | 2026-06-08 | threading / GUI / CLI | `docs/issues/0012-gui-thread-rebuy-race.md` | review hardening（rebuy/new_hand を queue 経由に一元化 + 回帰テスト） |
-| ISSUE-0013 | player viewer のプライバシーモデル（本人確認 / 閲覧範囲）が未確定 | Open | 2026-06-10 | viewer API / mobile (M1) | `docs/issues/0013-player-viewer-privacy-model.md` | M5（注文 write path）着手前に決着 |
+| ISSUE-0013 | player viewer のプライバシーモデル（本人確認 / 閲覧範囲）が未確定 | Fixed | 2026-06-10 | viewer API / mobile (M1) | `docs/issues/0013-player-viewer-privacy-model.md` | M5 (ADR-0015): v1 = name-pick で確定（注文はスタッフ確定を挟む）。PIN は将来再評価 |

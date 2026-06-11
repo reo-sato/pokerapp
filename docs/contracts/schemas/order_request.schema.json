@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/order_request.schema.json",
+  "title": "OrderRequest",
+  "version": "0.1",
+  "description": "M5 draft (未 freeze, ADR-0015)。player からの注文リクエスト。ledger には書かれず、スタッフ確定 (confirm) で ledger_entry (kind=order) が作られ ledger_entry_id がリンクされる。状態遷移 pending → confirmed | rejected は core が enforce。menu 照合 (unknown_item) は API 境界。詳細は docs/contracts/ledger.md § 注文リクエスト。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "session_id", "player_id", "item_name", "quantity", "status", "requested_at"],
+  "properties": {
+    "request_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "UUID4 hex (32 文字)。アプリ内採番・不変。"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "player_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "item_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "quantity": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 99
+    },
+    "note": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "confirmed", "rejected"]
+    },
+    "requested_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "resolved_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "confirmed / rejected になった時刻。pending では absent (core が enforce)。"
+    },
+    "ledger_entry_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "confirm で作られた ledger_entry への参照。confirmed のみ (core が enforce)。"
+    }
+  }
+}

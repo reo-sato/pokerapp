@@ -18,6 +18,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from api.read_models import (
     HandNotFoundError,
@@ -27,6 +28,15 @@ from api.read_models import (
     list_player_sessions,
 )
 from core.ledger_repository import LedgerRepository
+from core.menu import MenuMaster
+from core.order_request_repository import (
+    AlreadyResolvedError,
+    InvalidOrderRequestError,
+    OrderRequestNotFoundError,
+    OrderRequestRepository,
+    OrderSessionClosedError,
+    OrderUnknownPlayerError,
+)
 from core.player_repository import PlayerNotFoundError, PlayerRepository
 from core.session_repository import SessionNotFoundError, SessionRepository
 
@@ -40,18 +50,35 @@ def _app_version() -> str:
         return "unknown"
 
 
+class _OrderRequestBody(BaseModel):
+    """POST /order-requests の body（viewer-api.md）。"""
+
+    item_name: str
+    quantity: int
+    note: str | None = None
+
+
 def create_app(
     player_repo: PlayerRepository,
     session_repo: SessionRepository,
     log_dir: str | Path,
     ledger_repo: LedgerRepository | None = None,
+    order_repo: OrderRequestRepository | None = None,
+    menu: MenuMaster | None = None,
+    orders_writable: bool = False,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
-    ledger_repo 省略時は session_repo を共有する既定 `ledger.json` を構築する（M4, ADR-0014）。
+    ledger_repo / order_repo / menu 省略時は既定ファイルから構築する（M4/M5, ADR-0014/0015）。
+    orders_writable=False（単独 --viewer-api の read-only モード）では注文 POST を
+    503 `orders_unavailable` で拒否する（単一プロセス所有, ADR-0015 §3）。
     """
     if ledger_repo is None:
         ledger_repo = LedgerRepository(session_repo=session_repo)
+    if order_repo is None:
+        order_repo = OrderRequestRepository(session_repo=session_repo)
+    if menu is None:
+        menu = MenuMaster()
     app = FastAPI(title="pokerapp viewer API", version=_app_version())
 
     # M1 は read-only GET のみのため全 origin を許可（Expo web client 用, viewer-api.md）。
@@ -65,8 +92,24 @@ def create_app(
     @app.exception_handler(PlayerNotFoundError)
     @app.exception_handler(SessionNotFoundError)
     @app.exception_handler(HandNotFoundError)
+    @app.exception_handler(OrderRequestNotFoundError)
     async def _not_found_handler(request: Request, exc: Exception) -> JSONResponse:
         return JSONResponse(status_code=404, content={"code": "not_found", "message": str(exc)})
+
+    # order_request 系の error → HTTP code 対応（viewer-api.md / error-shapes.md）
+    _ORDER_ERROR_MAP: list[tuple[type, int, str]] = [
+        (OrderUnknownPlayerError, 404, "unknown_player"),
+        (OrderSessionClosedError, 409, "session_closed"),
+        (AlreadyResolvedError, 409, "already_resolved"),
+        (InvalidOrderRequestError, 400, "invalid_quantity"),
+    ]
+    for exc_type, http_status, code in _ORDER_ERROR_MAP:
+        def _make_handler(http_status: int = http_status, code: str = code):
+            async def _handler(request: Request, exc: Exception) -> JSONResponse:
+                return JSONResponse(status_code=http_status,
+                                    content={"code": code, "message": str(exc)})
+            return _handler
+        app.add_exception_handler(exc_type, _make_handler())
 
     @app.get("/api/health")
     def health() -> dict:
@@ -98,6 +141,42 @@ def create_app(
     def player_ledger(player_id: str, session_id: str) -> dict:
         player_repo.get(player_id)
         return get_player_session_ledger(player_id, session_id, ledger_repo)
+
+    @app.get("/api/menu")
+    def get_menu() -> dict:
+        return {"items": menu.list_items()}
+
+    @app.get("/api/players/{player_id}/sessions/{session_id}/order-requests")
+    def list_order_requests(player_id: str, session_id: str) -> dict:
+        player_repo.get(player_id)
+        return {
+            "requests": [
+                r.to_dict()
+                for r in order_repo.list_requests(session_id, player_id=player_id)
+            ]
+        }
+
+    @app.post("/api/players/{player_id}/sessions/{session_id}/order-requests",
+              status_code=201, response_model=None)
+    def create_order_request(
+        player_id: str, session_id: str, body: _OrderRequestBody
+    ) -> "JSONResponse | dict":
+        """注文リクエストを受け付ける（pending。ledger には書かない — ADR-0015 §2）。"""
+        if not orders_writable:
+            return JSONResponse(status_code=503, content={
+                "code": "orders_unavailable",
+                "message": "注文の受付はスタッフ会計画面（--ledger）の起動中のみ可能です。",
+            })
+        player_repo.get(player_id)
+        if menu.unit_amount(body.item_name) is None:
+            return JSONResponse(status_code=400, content={
+                "code": "unknown_item",
+                "message": f"item_name={body.item_name!r} はメニューにありません。",
+            })
+        request = order_repo.create_request(
+            session_id, player_id, body.item_name, body.quantity, note=body.note,
+        )
+        return request.to_dict()
 
     return app
 

@@ -1,5 +1,5 @@
 import React from "react";
-import { ScrollView, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, View } from "react-native";
 
 import type { ViewerRepository } from "../api/repository";
 import type { LedgerEntry, Player, PlayerSessionSummary } from "../api/types";
@@ -11,6 +11,7 @@ interface Props {
   player: Player;
   session: PlayerSessionSummary;
   onBack: () => void;
+  onOpenOrder: () => void;
 }
 
 const KIND_LABELS: Record<LedgerEntry["kind"], string> = {
@@ -22,7 +23,9 @@ const KIND_LABELS: Record<LedgerEntry["kind"], string> = {
 };
 
 /** 自分の会計参照 (M4/S3a, read-only)。summary は中間集計で確定値ではない。 */
-export function MyLedgerScreen({ repository, player, session, onBack }: Props): React.JSX.Element {
+export function MyLedgerScreen({
+  repository, player, session, onBack, onOpenOrder,
+}: Props): React.JSX.Element {
   const { data, loading, errorCode, errorMessage } = useAsync(
     () => repository.getPlayerLedger(player.player_id, session.session_id),
     [repository, player.player_id, session.session_id],
@@ -35,6 +38,9 @@ export function MyLedgerScreen({ repository, player, session, onBack }: Props): 
       <Text style={styles.subtitle}>
         {session.label ?? session.started_at} ・ 中間集計（確定値ではありません）
       </Text>
+      <Pressable onPress={onOpenOrder}>
+        <Text style={styles.back}>ドリンクを注文する →</Text>
+      </Pressable>
       {loading ? (
         <Loading />
       ) : errorCode || !data ? (

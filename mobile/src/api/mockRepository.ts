@@ -10,6 +10,9 @@ import type { ViewerRepository } from "./repository";
 import type {
   HandSummary,
   LedgerEntry,
+  MenuItem,
+  OrderRequest,
+  OrderRequestBody,
   Player,
   PlayerSessionLedger,
   PlayerSessionSummary,
@@ -22,6 +25,10 @@ function notFound(message: string): ViewerApiError {
 }
 
 export class MockRepository implements ViewerRepository {
+  // 注文リクエストは mock 内の in-memory 状態（pending のまま。確定はスタッフ desktop の責務）
+  private orderRequests: OrderRequest[] = [];
+  private orderSeq = 0;
+
   async health(): Promise<{ status: string; version: string }> {
     return { status: "ok", version: "mock" };
   }
@@ -80,5 +87,49 @@ export class MockRepository implements ViewerRepository {
         total_due: buyIn + order + adjustment,
       },
     };
+  }
+
+  async getMenu(): Promise<MenuItem[]> {
+    return fx.menuItems;
+  }
+
+  async listOrderRequests(playerId: string, sessionId: string): Promise<OrderRequest[]> {
+    await this.getPlayer(playerId);
+    return this.orderRequests.filter(
+      (r) => r.player_id === playerId && r.session_id === sessionId,
+    );
+  }
+
+  async createOrderRequest(
+    playerId: string,
+    sessionId: string,
+    body: OrderRequestBody,
+  ): Promise<OrderRequest> {
+    await this.getPlayer(playerId);
+    if (!fx.menuItems.some((i) => i.item_name === body.item_name)) {
+      throw new ViewerApiError({
+        code: "unknown_item",
+        message: `item_name=${body.item_name} はメニューにありません。`,
+      });
+    }
+    if (!Number.isInteger(body.quantity) || body.quantity < 1 || body.quantity > 99) {
+      throw new ViewerApiError({
+        code: "invalid_quantity",
+        message: "quantity は 1..99 の整数が必要です。",
+      });
+    }
+    this.orderSeq += 1;
+    const request: OrderRequest = {
+      request_id: this.orderSeq.toString(16).padStart(32, "0"),
+      session_id: sessionId,
+      player_id: playerId,
+      item_name: body.item_name,
+      quantity: body.quantity,
+      note: body.note,
+      status: "pending",
+      requested_at: new Date().toISOString().slice(0, 19),
+    };
+    this.orderRequests.push(request);
+    return request;
   }
 }

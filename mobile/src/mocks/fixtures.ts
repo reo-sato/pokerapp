@@ -8,6 +8,7 @@
 import type {
   HandSummary,
   LedgerEntry,
+  MenuItem,
   Player,
   PlayerSessionSummary,
 } from "../api/types";
@@ -107,6 +108,14 @@ export const seatedHandIds: Record<string, Record<string, number[]>> = {
   [ALICE_ID]: { [SESSION_ID]: [1, 2] },
   [BOB_ID]: { [SESSION_ID]: [1] },
 };
+
+/** 注文メニュー (menu.json master 相当, M5)。 */
+export const menuItems: MenuItem[] = [
+  { item_name: "ビール", unit_amount: 700 },
+  { item_name: "ジントニック", unit_amount: 800 },
+  { item_name: "ウーロン茶", unit_amount: 400 },
+  { item_name: "コーラ", unit_amount: 400 },
+];
 
 /** ledger entries (S3a cash-only, ADR-0014)。player → session → entries。 */
 export const ledgerEntries: Record<string, Record<string, LedgerEntry[]>> = {

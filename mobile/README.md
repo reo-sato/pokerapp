@@ -8,7 +8,10 @@ Expo（React Native, TypeScript）。当面は **web export を運営 PC から 
 
 PlayerSelect（自分の名前を選ぶ）→ MySessions → MyHands → HandDetail
 （board / 自分のホールカード / アクション列 / 収支）。
-MyHands からは **会計**（MyLedger: バイイン・注文の明細と中間集計, M4/S3a, read-only）にも遷移できる。
+MyHands からは **会計**（MyLedger: バイイン・注文の明細と中間集計, M4/S3a, read-only）、
+会計からは **ドリンク注文**（Order: メニュー選択 → リクエスト送信 → 注文状況, M5）に遷移できる。
+注文はスタッフ確定（`--ledger` 画面）まで会計に載らない（ADR-0015 staff-in-the-loop）。
+注文の受付には運営側が `viewer_api.enabled=true` で `--ledger` を起動している必要がある。
 
 ## repository 注入（contract-first）
 
