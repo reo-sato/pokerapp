@@ -6,7 +6,22 @@
 
 ## Status
 
-Open
+Fixed（S3.2 実装済）
+
+## Update (2026-06-10, S3.2 実装)
+
+`LedgerRepository`（S3.1）越しの desktop 別画面を実装した:
+
+- `gui/ledger_view.py`（`LedgerViewWindow`）: `gui/player_registry.py` と同じ独立画面パターン
+  （customtkinter は `__init__` で遅延 import、hand logger 依存なし）。`gui/dashboard.py` は不可侵。
+- 機能: session 選択 → roster（S2 seating 先読み, 無ければ registry 全 player に fallback）→ player 選択 →
+  ledger entry 追加（buy_in/rebuy/add_on/order/entry_fee/adjustment, cash+point）/ point 付与 /
+  entry 取消（reversal, append-only）/ point 残高（fold）表示 / **中間集計（compute_settlement, speculative
+  として明示）**。
+- validation は core の error（型 = code）を捕捉し `_set_status` で表示（再実装しない）。
+- 起動: `main.py --ledger`（`run_ledger_view()`）。
+- tests: `tests/test_ledger_view_gui.py`（16, customtkinter モック）。settlement commit / CSV export は
+  scope 外（S3.3, ISSUE-0014）。
 
 ## Severity / Priority
 

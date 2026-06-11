@@ -390,6 +390,26 @@ def run_player_registry() -> None:
     win.run()
 
 
+def run_ledger_view() -> None:
+    """Phase S3.2: hand logger とは別画面の Ledger Viewer / Editor を起動する。"""
+    from core.ledger_repository import LedgerRepository
+    from core.player_repository import PlayerRepository
+    from core.session_repository import SessionRepository
+    from gui.ledger_view import LedgerViewWindow
+
+    try:
+        import customtkinter  # noqa: F401
+    except ImportError:
+        print("customtkinter が見つかりません。pip install customtkinter でインストールしてください。")
+        sys.exit(1)
+
+    players = PlayerRepository()
+    sessions = SessionRepository(player_repo=players)
+    ledger = LedgerRepository(session_repo=sessions, player_repo=players)
+    win = LedgerViewWindow(ledger_repo=ledger, session_repo=sessions, player_repo=players)
+    win.run()
+
+
 def export_phh(json_path: str) -> None:
     """JSON セッションログを PHH ファイル群にエクスポートする。"""
     import json
@@ -472,10 +492,19 @@ def main() -> None:
         action="store_true",
         help="Player Registry 画面を起動する（Phase S1, hand logger とは別画面）",
     )
+    parser.add_argument(
+        "--ledger",
+        action="store_true",
+        help="Ledger Viewer / Editor 画面を起動する（Phase S3.2, hand logger とは別画面）",
+    )
     args = parser.parse_args()
 
     if args.players:
         run_player_registry()
+        sys.exit(0)
+
+    if args.ledger:
+        run_ledger_view()
         sys.exit(0)
 
     if args.calibrate:

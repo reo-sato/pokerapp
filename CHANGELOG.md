@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+### Added (Phase S3.2 — desktop ledger viewer / editor)
+
+- **Ledger Viewer / Editor (S3.2)**: hand logger とは **別画面** の ledger 入力・閲覧 GUI を追加
+  （`gui/dashboard.py` は不可侵、`gui/player_registry.py` と同じ独立画面パターン）。
+  - `gui/ledger_view.py`（`LedgerViewWindow`）: customtkinter は `__init__` で遅延 import
+    （tkinter 無しでもロジックをテスト可能）。`LedgerRepository`（+ session/player repository）のみに依存。
+  - 機能: session 選択 → **roster（S2 seating 先読み**, 無ければ registry 全 player に fallback）→
+    player 選択 → ledger entry 追加（buy_in/rebuy/add_on/order/entry_fee/adjustment, cash+point）/
+    point 付与（manual_grant）/ entry 取消（**reversal, append-only**）/ point 残高（fold）表示 /
+    **中間集計（compute_settlement）を speculative として明示表示**。
+  - validation は core の error（型 = code）を捕捉して `_set_status` で表示（再実装しない）。
+    settlement の確定（commit）/ CSV export は本画面の scope 外（S3.3, ISSUE-0014）。
+  - `main.py`: `run_ledger_view()` + `--ledger` フラグを追加（CLI 起動）。`config_default.json` は不変。
+  - tests: `tests/test_ledger_view_gui.py`（16, customtkinter モック。add/grant/reverse・roster 先読み・
+    validation 表示・hand logger 非依存）。**`pytest tests/test_ledger_view_gui.py tests/test_ledger_repository.py tests/test_contracts.py` → 49 passed**。
+  - **ISSUE-0013** を Fixed に更新。**CLAUDE.md**（§ Ledger / Points / Settlement 構成・実装状況表・
+    ディレクトリ・Phase 3・よく使うコマンド）/ **decision-log** を更新。
+
 ### Added (Phase S3.1 — ledger / points / settlement core)
 
 - **Ledger / Points / Settlement core (S3.1)**: ADR-0011 の方針に沿って、session world とは独立した
