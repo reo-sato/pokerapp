@@ -78,10 +78,10 @@ schema を変更する PR は、同じ PR で以下を更新する（漏れは c
 | 4 | ledger_entry / point_ledger_entry | S3 | **frozen `1.0`（ADR-0019。設計は ADR-0016、残高 fold = ISSUE-0001 Resolved）** |
 | 5 | session_settlement | S4(schema) | **frozen `1.0`（ADR-0019。core/CSV/API は ADR-0016 実装済。partial-paid 等は additive 拡張）** |
 | 5b | order_request / player_session_summary | viewer (M1/M5) | **frozen `1.0`（ADR-0019。ADR-0017/0018）** |
-| 6 | repository / service interface, sync | S5 | planned（read-only HTTP boundary は M1 viewer API で前倒し実現） |
+| 6 | repository / service interface | S5 | **frozen（ADR-0020）**。read boundary は二言語で実証（mobile `ViewerRepository` + Python `ViewerApiClient`）。write/sync 拡張は後続 ADR |
 
-> hand / action schema も `1.0` frozen（ISSUE-0011）。**残る draft は無い**（freeze order #6 の
-> interface/sync 契約のみ planned）。
+> hand / action schema も `1.0` frozen（ISSUE-0011）。**全 domain schema + repository interface が
+> frozen**。残るのは write/sync 拡張（双方向同期, S5 後続）のみ。
 
 ## 7. drift detection（最小方針）
 

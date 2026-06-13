@@ -84,7 +84,8 @@ pokerapp/
 │
 ├── api/
 │   ├── read_models.py             ← viewer read model (seat_assignment 起点 join + settlement 由来 summary, fastapi 非依存, M1)
-│   └── server.py                  ← viewer API server (FastAPI app factory + uvicorn, M1, ADR-0017)
+│   ├── server.py                  ← viewer API server (FastAPI app factory + uvicorn, M1, ADR-0017)
+│   └── client.py                  ← ViewerApiClient (viewer API の Python client = local↔API 分離点, S5, ADR-0020)
 │
 ├── gui/
 │   ├── dashboard.py               ← GUIDashboard (hand logger 画面, customtkinter; E3 で座席設定ボタン追加)
@@ -410,7 +411,8 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
 | schema `1.0` freeze (S4) | ✅ 実装済 | 全 model（session/seat/hand_ref・ledger/point・settlement・order_request/player_session_summary）を `1.0` freeze（ADR-0019, ISSUE-0005 Resolved）。code↔contract test 全 model カバー |
 | 実機 E2E (Phase H) / PN5180 firmware 契約 (ISSUE-0014/0015) | 🔲 planned | クリーン環境の通し確認 + USB CCID firmware↔Python 契約凍結（§ ロードマップ 残作業） |
-| cross-app sync / write 拡張 (S5) | 🔲 planned | viewer API は read-only(M1) まで。write/sync・repository の API client 分離は未実装 |
+| **cross-app boundary (S5 read)** | ✅ 実装済 | repository interface frozen（ADR-0020）+ `api/client.py:ViewerApiClient`（Python の local↔API 分離点）+ round-trip test。read boundary を二言語で実証（mobile + Python） |
+| cross-app write/sync 拡張 (S5 後続) | 🔲 planned | 注文以外の write を HTTP に出す / 双方向同期（認証 = ISSUE-0019 PIN 再評価・衝突解決が前提、別 ADR） |
 
 ---
 
@@ -538,7 +540,7 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
 | **S2** | session + hand-based seating（`core/session*.py`, ADR-0006/0007） | ✅ core 実装済 + **schema `1.0` frozen**（ADR-0019, ISSUE-0005 Resolved） |
 | **S3** | ledger + point ledger + settlement core + desktop viewer + CSV export（`core/ledger*.py`, `gui/ledger_view.py`, `output/ledger_csv_exporter.py`, ADR-0016, ISSUE-0001 Resolved） | ✅ 実装済 + **schema `1.0` frozen**（ADR-0019） |
 | **S4** | schema `1.0` freeze（session/seat/hand_ref + ledger/point + settlement + viewer/order model） | ✅ **実装済**（ADR-0019, ISSUE-0005 Resolved）。残: partial-paid 等の settlement 拡張（additive） |
-| **S5** | cross-app contract / sync boundary（local↔API client 分離） | 🟡 **一部前倒し**（read-only の viewer API = M1 が S5 の read サブセットを実現。write/sync は未実装） |
+| **S5** | cross-app contract / sync boundary（local↔API client 分離） | 🟡 **read boundary 実装済**（ADR-0020: repository interface frozen + viewer API（M1）+ Python `ViewerApiClient` + mobile mock/HTTP。on-demand pull / 単一書き手）。**残**: write/sync 拡張（双方向同期, 後続 ADR） |
 
 ### player 向け参照トラック M（viewer API / mobile / 注文）
 
@@ -564,8 +566,9 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    `--ledger`（viewer_api.enabled）+ スマホ注文の通し確認。
 3. **PN5180 / ESP32-S3 firmware ↔ Python 契約固定**（ISSUE-0014 / 0015）: USB descriptor / reader_name /
    ATR / 8B UID の凍結。
-4. **S5 cross-app sync**: viewer API への write/sync 拡張、repository の local↔API client 分離、
-   別プロセス/別アプリ化の boundary 切り出し。
+4. ~~**S5 cross-app boundary（read）**~~ → **✅ 完了（ADR-0020）**: repository interface frozen +
+   `api/client.py:ViewerApiClient` + round-trip test。**残**: write/sync 拡張（注文以外の write を
+   HTTP に出す / 双方向同期。認証 = ISSUE-0019 PIN 再評価・衝突解決方針が前提、別 ADR）。
 5. **settlement 拡張**: partial-paid、settlement の GUI からの確定（commit）、auto ledger 生成。
 6. **R 系の後続**: 派生 confidence の重み較正（golden fixtures 由来）、camera 源の統合。
 7. **プライバシー再評価（ISSUE-0019）**: name-pick で問題が顕在化したら PIN を additive 導入。
@@ -785,18 +788,17 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 ### Phase 5 — sync / cross-app contract hardening
 
 - **Goal**: 同一プロセス前提から、別プロセス / 別アプリ + API/sync へ移行できる boundary を切り出す。
-- **前倒し済**: **read-only の HTTP boundary は M1 viewer API（`api/`, ADR-0017）で実現**
-  （player_id/session_id/hand_id 越しに hand/ledger を read。mobile は repository interface に
-  mock/HTTP を注入して UI 無改修で切替済 = ADR-0004 の境界を実証）。
-- **残**: write/sync（注文以外の双方向同期）、repository の local↔API client 分離、別プロセス化。
-- **Prerequisites**: S1〜S4 の schema が安定し、repository interface が front-end から実証済。
-- **Parallel tasks**:
-  - WS0: cross-app 参照同期方式（pull / push / event）と API contract を確定。
-  - WS1: repository を local 実装と API client 実装に分離（interface は不変）。
-  - WS2 / WS3: front-end を API-backed repository に差し替え（UI 層は無改修が目標）。
-- **Blockers**: 参照同期方式の ADR。ID 不変性の保証。衝突解決方針。
-- **Done criteria**: front-end が repository interface のみに依存したまま、local↔API backend を
-  切り替えられる。ID が backend を跨いで安定。
+- **read boundary 実装済（ADR-0020）**:
+  - WS0: repository / service interface 契約を **frozen**（freeze order #6, `repository-interfaces.md`）。
+    同期方式は **on-demand pull**（push/event/双方向 auto-sync は持たない）、衝突は **単一書き手 +
+    reload-on-read** で回避。ID は app 内採番 UUID で backend 非依存に安定。
+  - WS1: viewer API の **Python client を分離**（`api/client.py:ViewerApiClient` = mobile `HttpRepository`
+    の Python 版）。API↔client の round-trip 契約 test（`tests/test_viewer_api_client.py`）で drift 検知。
+  - WS3: mobile は `ViewerRepository` に mock/HTTP を注入して UI 無改修で切替済（M2）。
+  - **Done criteria 達成**（read）: front-end が interface のみに依存したまま local↔API を切替できる
+    （mobile = TS、Python = `ViewerApiClient`）。ID が backend を跨いで安定。
+- **残（後続 ADR）**: write/sync 拡張（注文以外の write を HTTP に出す / 双方向同期）。認証
+  （ISSUE-0019 の PIN 再評価）・衝突解決方針が前提。desktop の API client 化は任意（現状 local 直結で十分）。
 
 ---
 

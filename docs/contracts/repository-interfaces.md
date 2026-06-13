@@ -1,11 +1,13 @@
-# Repository / service interface contract
+# Repository / service interface contract（frozen, S5 / ADR-0020）
 
-front-end（desktop WS2 / mobile WS3）は **repository interface にのみ依存** し、その具象
-（core の local 実装 / in-memory mock / 将来の API client）を注入で差し替える。UI は
-「データがどこにあるか」を知らない（CLAUDE.md § 将来 API / sync を入れても壊れにくい境界）。
+> **Status: frozen**（freeze order #6, ADR-0020, 2026-06-13）。下の player / session-seating /
+> ledger-points-settlement / viewer read model / order-request の interface を S5 の安定契約とする
+> （対応 schema は ADR-0019 で `1.0`）。追加メソッドは additive、シグネチャの削除・変更は ADR を要する。
 
-本 doc は interface の **契約テンプレート**。各 model の interface は phase ごとに確定する。
-ここでは player（S1, 実装済）を基準例として示し、session 以降は planned とする。
+front-end（desktop WS2 / mobile WS3 / Python client）は **repository interface にのみ依存** し、その
+具象（core の local 実装 / in-memory mock / API client）を注入で差し替える。UI は「データがどこに
+あるか」を知らない。この境界は **二言語で実証済み**: mobile は `ViewerRepository`（TS）に mock/HTTP を
+注入（M2）、Python は `api/client.py:ViewerApiClient` が viewer API を読む（S5, ADR-0020）。
 
 ## 原則
 
@@ -95,9 +97,7 @@ reload() -> None                                           # ディスクから�
   `PlayerRepository` 側にも対称な `reload()` を additive 追加（name 解決の外部更新取り込み用）。
 - **業務ルールは core が source of truth**。front-end は結果と error code を表示するだけ。
 - mobile は同 interface の in-memory mock を `fixtures/{session,seat_assignment,hand_ref}/` で先行実装できる。
-- **schema は未 freeze**: core は draft schema（0.x）に対して実装済（code↔contract test 緑）。
-  `session_id` 採番方式・永続形は ADR-0007 で core について確定。schema `1.0` への昇格は
-  ISSUE-0005 の残項目（hand logger 接続・seat change UI 要件）決着後。
+- **schema は `1.0` frozen**（ADR-0019, ISSUE-0005 Resolved）。`session_id` 採番方式・永続形は ADR-0007。
 
 ## ledger / points / settlement interface（S3 core 実装済, schema は draft — ADR-0016）
 
@@ -138,7 +138,7 @@ set_payment_status(session_id, player_id, status) -> SessionSettlement
   `plan_payment` の結果を表示・転記するだけ）。
 - mobile は同 interface の in-memory mock を `fixtures/{ledger_entry,point_ledger_entry}/` で
   先行実装できる。
-- **schema は未 freeze**（draft 0.1）。`1.0` 昇格は上流 session schema freeze（ISSUE-0005）後。
+- **schema は `1.0` frozen**（ADR-0019）。
 
 ## viewer read model interface（M1 実装済 — ADR-0017）
 
@@ -165,11 +165,22 @@ set_payment_status(session_id, player_id, status) -> SessionSettlement
 
 menu 照合（`unknown_item`）と read-only モード（`orders_unavailable`）は viewer API 境界が扱う。
 
-## settlement 以降（planned）
+## viewer API client（S5 実装済 — ADR-0020）
 
-| model | interface | phase |
-|-------|-----------|-------|
-| session_settlement | settlement 確定、paid/unpaid 操作 | S4 |
+`api/client.py:ViewerApiClient`（mobile `HttpRepository` の Python 版）。viewer API の read
+endpoints（+ 注文 GET/POST）を HTTP で呼び、非 2xx を error-shape の `code` を載せた
+`ViewerApiError` に変換する。メソッドは viewer read model / order-request interface と対称
+（`list_players` / `get_player` / `list_player_sessions` / `list_player_hands` / `get_hand` /
+`get_player_session_ledger` / `get_menu` / `list_order_requests` / `create_order_request`）。
 
-各 interface は対応 phase の freeze 時に本 doc へ追記する。S5 で local 実装と API client 実装に
-分離する（interface は不変のまま backend を差し替える）。
+- **同期方式 = on-demand pull**（v1）。push / event / 双方向 auto-sync は持たない（ADR-0020）。
+- **衝突回避 = 単一書き手 + reload-on-read**（注文 = staff-confirm の所有プロセスのみ write）。
+- **ID 不変性**: player_id/session_id は app 内採番・不変・backend 非依存（local も API client も同じ ID）。
+- round-trip 契約 test: `tests/test_viewer_api_client.py`（API↔client の drift 検知）。
+
+## 残（planned）
+
+| 対象 | 内容 | phase |
+|------|------|-------|
+| write/sync 拡張 | 注文以外の write を HTTP に出す / 双方向同期（認証・衝突解決が前提） | S5 後続（ADR 要） |
+| desktop の API client 化 | desktop GUI を API-backed repository に差し替え | 任意（現状は local 直結で十分） |

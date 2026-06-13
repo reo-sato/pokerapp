@@ -42,6 +42,7 @@
 | ADR-0017 | Player 向け参照は API-first（viewer API 前倒し）+ Expo（web export 先行） | Accepted | 2026-06-10 | viewer API / mobile (M1) | `docs/adr/0017-player-facing-viewer-api-first-architecture.md` | serene ADR-0013 から採番替え（verify-v1 統合）。補完: ADR-0004。関連: ADR-0008 / ADR-0016 / ISSUE-0019 |
 | ADR-0018 | M5 — 注文リクエスト write path（staff-in-the-loop / in-process API / menu master / name-pick 確定） | Accepted | 2026-06-11 | orders / viewer API (M5) | `docs/adr/0018-m5-order-request-write-path.md` | serene ADR-0015 から採番替え（verify-v1 統合）。ISSUE-0019 を v1 決着。関連: ADR-0017 / ADR-0016（ledger） |
 | ADR-0019 | S2 / S3 / viewer model の schema を `1.0` に freeze（統合後） | Accepted | 2026-06-13 | contracts / freeze | `docs/adr/0019-schema-1_0-freeze-post-integration.md` | session/seat/hand_ref + ledger/point/settlement + order_request/player_session_summary を 1.0 化。ISSUE-0005 Resolved。関連: ADR-0006/0007/0016/0017/0018 |
+| ADR-0020 | S5 — cross-app boundary（repository interface 凍結 + Python API client） | Accepted | 2026-06-13 | contracts / boundary (S5) | `docs/adr/0020-s5-cross-app-boundary-repository-interface-and-api-client.md` | repository interface frozen（freeze order #6）+ `api/client.py:ViewerApiClient` + round-trip test。on-demand pull / 単一書き手。write/sync 拡張は後続。関連: ADR-0004/0017/0018/0019 |
 
 <!--
 Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時点で空番。

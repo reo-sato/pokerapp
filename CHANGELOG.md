@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### Added (S5 — cross-app boundary: repository interface 凍結 + Python API client, ADR-0020)
+
+- **repository / service interface 契約を frozen**（freeze order #6）。player / session-seating /
+  ledger-points-settlement / viewer read model / order-request の interface を S5 の安定契約に。
+- **viewer API の Python client**（`api/client.py:ViewerApiClient`）= mobile `HttpRepository` の Python 版。
+  viewer API の read endpoints（+ 注文 GET/POST）を呼び、非 2xx を error-shape の `code` を持つ
+  `ViewerApiError` に変換。これで read boundary を二言語（TS / Python）で実証。
+- **round-trip 契約 test**（`tests/test_viewer_api_client.py`）: API↔client を in-process（TestClient
+  transport）で round-trip し境界の drift を検知。`[api]` extra に `httpx` 追加。
+- 同期方式 = **on-demand pull**（push/event/双方向 auto-sync なし）、衝突は **単一書き手 +
+  reload-on-read** で回避、ID は app 内採番 UUID で backend 非依存。write/sync 拡張は後続 ADR。
+
 ### Contracts (schema `1.0` freeze — S2/S3/viewer, ADR-0019)
 
 - session / seat_assignment / hand_ref（S2）+ ledger_entry / point_ledger_entry（S3）+
