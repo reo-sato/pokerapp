@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+### Added (S4 — settlement partial-paid, ADR-0023)
+
+- 精算に **一部支払い（partial-paid）** を追加。`SessionSettlement` に累計受領額 `paid_amount`
+  （>=0, 既定 0, additive）を持ち、`payment_status` を `net_due_to_store` から導出する
+  （`paid`/`unpaid`/新規 `partial`。過払いは `paid` に丸め）。
+- core: `LedgerRepository.record_payment(session, player, paid_amount)`。既存 `set_payment_status`
+  は paid=全額 / unpaid=0 の shortcut として維持（partial は record_payment 必須）。
+- staff write API に `PUT /api/staff/sessions/{sid}/players/{pid}/payment`（body `{paid_amount}`）+
+  `ViewerApiClient.record_payment`。player の ledger summary に `paid_amount` を additive 追加。
+- GUI: `--ledger` 精算パネルに受領額入力 + 「支払額記録」ボタン。
+- mobile: `MyLedgerScreen` が **支払済み / 一部支払い (受領/請求 円) / 未払い** を表示。
+- schema: `session_settlement.schema.json` を `1.0`→`1.1`（optional `paid_amount` + enum 値 `partial`
+  追加 = additive）。`from_dict` は `paid_amount` 欠落時に payment_status から後方互換に推定。
+- tests: `test_contracts`（partial 行 + fixture）/ `test_ledger_view_gui::TestSettlement`（partial/full/
+  negative）/ `test_viewer_api_staff`（record_payment 正常・not_found・invalid）/ mobile mock。
+
 ### Added (S4 — mobile での精算状況表示, ADR-0016/0017)
 
 - player の会計参照（viewer API `/api/players/{id}/sessions/{sid}/ledger` の summary）に

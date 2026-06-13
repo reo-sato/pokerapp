@@ -282,8 +282,9 @@ session world（S2）の上に重なる **ledger（金銭イベント）/ points
 
 ### Out of scope（現時点）
 
-- auto ledger 生成、partial paid（settlement の GUI からの確定 commit + paid/unpaid 切替は
-  S4 GUI で実装済 — `gui/ledger_view.py` の精算パネル）。
+- auto ledger 生成（settlement の GUI からの確定 commit + paid/unpaid + partial-paid 切替は
+  S4 GUI で実装済 — `gui/ledger_view.py` の精算パネル）。**partial-paid は実装済**（`paid_amount`
+  additive + `payment_status` 導出, ADR-0023）。
 - hand logger（`HandSummary`）との自動接続、chip↔円換算、rake/fee。
 - settlement schema の `1.0` freeze（S4）、cross-app sync（S5）。
 
@@ -414,7 +415,8 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **session / seating viewer (WS2-α, read-only)** | ✅ 実装済 | `gui/session_viewer.py`（`main.py --sessions`, § Session / Seating Viewer 参照） |
 | **ledger / point / settlement core (S3.1)** | ✅ 実装済 | `core/ledger.py`, `core/ledger_repository.py`（§ Ledger / Points / Settlement 参照, ADR-0016, ISSUE-0001 Resolved） |
 | **ledger desktop viewer (S3.2)** | ✅ 実装済 | `gui/ledger_view.py`（`main.py --ledger`, 別画面, dashboard 不可侵） |
-| **settlement 確定 GUI (S4)** | ✅ 実装済 | `gui/ledger_view.py` 精算パネル: closed session の `commit_settlement` + 確定済 settlement の paid/unpaid 切替（`set_payment_status`）。partial-paid は未対応 |
+| **settlement 確定 GUI (S4)** | ✅ 実装済 | `gui/ledger_view.py` 精算パネル: closed session の `commit_settlement` + 確定済 settlement の paid/unpaid 切替（`set_payment_status`）+ **受領額入力で partial-paid 記録**（`record_payment`, ADR-0023） |
+| **settlement partial-paid (S4)** | ✅ 実装済 | `SessionSettlement.paid_amount`（additive, 既定 0）+ `payment_status` 導出（paid/unpaid/partial, ADR-0023）。core `record_payment` / staff API `PUT .../payment` / `ViewerApiClient.record_payment` / GUI 受領額入力 / mobile 一部支払い表示。schema `1.0`→`1.1`（optional field + enum 値, additive） |
 | **settlement / cashflow CSV export (S3.3)** | ✅ 実装済 | `output/ledger_csv_exporter.py`（`main.py --export-ledger`, utf-8-sig） |
 | **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（`main.py --viewer-api`, read-only GET, `[api]` extra, ADR-0017。ledger summary は `compute_settlement` 由来 = ADR-0016） |
 | **mobile viewer (M2)** | ✅ 実装済 | `mobile/`（Expo/RN。PlayerSelect→MySessions→MyHands→HandDetail + 会計（**精算状況: 確定/未確定・支払済み/未払い** 表示, S4）+ 注文画面。`ViewerRepository` に mock/HTTP 注入, `EXPO_PUBLIC_API_URL` 切替, ADR-0017） |
@@ -525,13 +527,15 @@ settlement / cross-app / viewer から参照される **契約上の定義** と
 
 今後の実装でも守るべき業務ルール。**ルール 1〜8 はいずれも S3 core で enforce 済**
 （`core/ledger_repository.py` の ledger / point / settlement、§ Ledger / Points / Settlement 参照）。
-schema は `1.0` frozen（ADR-0019）。残るのは partial paid（ルール 4 の将来拡張, additive）のみ。
+schema は `1.0` frozen（ADR-0019）。partial-paid（ルール 4）も **実装済**（schema `1.1`, ADR-0023）。
 
 1. **entry fee は cash only**。point では支払えない。
 2. **buy-in / rebuy / add-on / order** は cash + point の **併用可**。
    - 1 件の ledger_entry は `cash_amount + point_amount` の両方を持ち得る。
 3. **point 不足分は cash で補完**。point 残高 < 必要点数の場合、不足分は cash として ledger に記録する。
-4. **paid/unpaid** は「店への支払いが完了したか」だけを表す状態。partial paid は現時点では扱わない（将来検討）。
+4. **paid/unpaid/partial** は店への支払い状況を表す。**partial-paid 対応済**（ADR-0023）: 累計受領額
+   `paid_amount`（>=0, additive）を真実とし、`payment_status` を `net_due_to_store` から導出する
+   （`net<=0`→paid / `paid<=0`→unpaid / `paid>=net`→paid / `0<paid<net`→partial。過払いは paid に丸め）。
 5. **player-to-player settlement は扱わない**。session settlement は常に「player → 店」のみ。
 6. **point 増加経路** は `manual_grant` / `result_credit` / `campaign_grant` の 3 種類を想定する。
 7. **session 中間集計** では player ごとに「buy-in 合計」「注文合計」を表示できる必要がある（確定値ではない／途中スナップショット）。
@@ -563,7 +567,7 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
 | **S1** | player registry（`core/player*.py`, `gui/player_registry.py`） | ✅ 実装済 |
 | **S2** | session + hand-based seating（`core/session*.py`, ADR-0006/0007） | ✅ core 実装済 + **schema `1.0` frozen**（ADR-0019, ISSUE-0005 Resolved） |
 | **S3** | ledger + point ledger + settlement core + desktop viewer + CSV export（`core/ledger*.py`, `gui/ledger_view.py`, `output/ledger_csv_exporter.py`, ADR-0016, ISSUE-0001 Resolved） | ✅ 実装済 + **schema `1.0` frozen**（ADR-0019） |
-| **S4** | schema `1.0` freeze（session/seat/hand_ref + ledger/point + settlement + viewer/order model） | ✅ **実装済**（ADR-0019, ISSUE-0005 Resolved）。残: partial-paid 等の settlement 拡張（additive） |
+| **S4** | schema `1.0` freeze（session/seat/hand_ref + ledger/point + settlement + viewer/order model）+ settlement partial-paid | ✅ **実装済**（ADR-0019, ISSUE-0005 Resolved）。**partial-paid 実装済**（ADR-0023, settlement schema `1.1`）。残: auto ledger 生成（additive） |
 | **S5** | cross-app contract / sync boundary（local↔API client 分離） | 🟡 **read + staff write boundary 実装済**（ADR-0020: repository interface frozen + viewer API（M1）+ Python `ViewerApiClient` + mobile mock/HTTP。ADR-0021: スタッフ会計 write を `/api/staff/...` に staff shared token で公開 + `LedgerRepository` thread-safe 化。on-demand pull / 単一書き手）。ADR-0022: 双方向 sync = state-based merge（`core/sync.py` 可換・冪等の UUID union + 単調解決）+ `/api/staff/sync/{snapshot,merge}` で **複数書き手 + 収束マージ**に拡張。**残**: player rename 伝播・hand log の file-level union・auto-trigger, player PIN（後続 ADR） |
 
 ### player 向け参照トラック M（viewer API / mobile / 注文）
@@ -597,8 +601,9 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    可換・冪等の UUID union + 単調解決）+ `/api/staff/sync/{snapshot,merge}`（ADR-0022, 複数書き手 +
    収束マージ）。**残**: player rename 伝播（`updated_at` additive）・hand log の file-level union・
    定期 auto-trigger、player per-player アクセス制御（ISSUE-0019 PIN 再評価、別 ADR）。
-5. **settlement 拡張**: partial-paid、auto ledger 生成（settlement の GUI からの確定 commit +
-   paid/unpaid 切替は S4 GUI で実装済 = `gui/ledger_view.py` 精算パネル）。
+5. **settlement 拡張**: auto ledger 生成（**partial-paid は実装済** = ADR-0023, `record_payment` /
+   settlement schema `1.1`。確定 commit + paid/unpaid/partial 切替も S4 GUI で実装済 =
+   `gui/ledger_view.py` 精算パネル）。
 6. **R 系の後続**: 派生 confidence の重み較正（golden fixtures 由来）、camera 源の統合。
 7. **プライバシー再評価（ISSUE-0019）**: name-pick で問題が顕在化したら PIN を additive 導入。
 8. **未実装の単機能**: Vosk 代替 ASR、ディーラーボタン自動回転 / SB-BB 自動 post。
@@ -801,7 +806,7 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 - **Done criteria**: cash+point 併用・point 不足の cash 補完・entry fee cash only が core で
   enforced（**達成: WS1 core**）。両 front-end の中間集計表示も実装済（desktop=S3.2 / mobile=M2）。**達成**。
 
-### Phase 4 — settlement（core 実装済 / schema freeze 残）
+### Phase 4 — settlement（core + partial-paid 実装済 / schema `1.1`）
 
 - **Goal**: session 終了時に player ごとの `session_settlement`（net due to store / paid-unpaid）を確定。
 - **状態**: settlement core（compute / commit / paid-unpaid）と CSV export は **S3.1/S3.3 で実装済**
@@ -809,12 +814,17 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
   `output/ledger_csv_exporter.py`, `main.py --export-ledger`）。mobile/API では `compute_settlement`
   由来の中間集計を read 表示（M1/M2）。
 - **実装済**:
-  - WS0: session_settlement schema `1.0` 凍結（ADR-0019）。
-  - WS2: settlement の **GUI からの確定（commit）+ paid/unpaid 切替**（`gui/ledger_view.py` 精算パネル,
-    `tests/test_ledger_view_gui.py::TestSettlement`）。
-  - WS3: mobile が自分の精算状況（確定/未確定・paid/unpaid）を表示（`MyLedgerScreen`、
-    viewer API の player ledger summary に `settled`/`payment_status`/`settled_at` を additive）。
-- **残**: partial paid 対応、auto ledger 生成。
+  - WS0: session_settlement schema `1.0` 凍結（ADR-0019）→ **partial-paid で `1.1`**（ADR-0023,
+    optional `paid_amount` + enum `partial` 追加 = additive）。
+  - WS1: **partial-paid core**（`paid_amount` additive・`payment_status` 単一導出・`record_payment`・
+    `from_dict` 後方互換推定, ADR-0023）。
+  - WS2: settlement の **GUI からの確定（commit）+ paid/unpaid/partial 切替**（`gui/ledger_view.py`
+    精算パネル: paid/unpaid トグル + 受領額入力 `record_payment`,
+    `tests/test_ledger_view_gui.py::TestSettlement`）。staff API `PUT .../payment` +
+    `ViewerApiClient.record_payment`。
+  - WS3: mobile が自分の精算状況（確定/未確定・支払済み/一部支払い/未払い）を表示（`MyLedgerScreen`、
+    viewer API の player ledger summary に `settled`/`payment_status`/`settled_at`/`paid_amount` を additive）。
+- **残**: auto ledger 生成。
 
 ### Phase 5 — sync / cross-app contract hardening
 

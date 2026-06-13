@@ -34,7 +34,7 @@ player 向け参照 front-end（WS3, Expo）が消費する **読み取り専用
 | GET | `/api/players/{player_id}/sessions` | `{"sessions": [player_session_summary, ...]}`（player が 1 hand 以上着席した session のみ。`player_session_summary.schema.json` v0.x） | 404 `not_found`（unknown player） |
 | GET | `/api/players/{player_id}/sessions/{session_id}/hands` | `{"hands": [hand, ...]}`（player が着席していた hand の HandSummary。hand = `hand.schema.json` v1.0。hand_id 昇順） | 404 `not_found`（unknown player / unknown session） |
 | GET | `/api/sessions/{session_id}/hands/{hand_id}` | hand（HandSummary 全体） | 404 `not_found`（log 不在 / hand 不在） |
-| GET | `/api/players/{player_id}/sessions/{session_id}/ledger` | `{"entries": [ledger_entry, ...], "summary": {cash_in_total, order_total, entry_fee, point_spent_total, point_credited_total, net_due_to_store, settled, payment_status, settled_at}}`（ledger_entry = `ledger_entry.schema.json` v0.x。totals は `SessionSettlement` を当該 player に絞った値。`settled`(bool)/`payment_status`/`settled_at` は確定状態 = `list_settlements` 由来で、未確定なら settled=false・payment_status=null。S4 mobile 表示用 additive） | 404 `not_found`（unknown player / unknown session） |
+| GET | `/api/players/{player_id}/sessions/{session_id}/ledger` | `{"entries": [ledger_entry, ...], "summary": {cash_in_total, order_total, entry_fee, point_spent_total, point_credited_total, net_due_to_store, settled, payment_status, settled_at, paid_amount}}`（ledger_entry = `ledger_entry.schema.json` v0.x。totals は `SessionSettlement` を当該 player に絞った値。`settled`(bool)/`payment_status`/`settled_at` は確定状態 = `list_settlements` 由来で、未確定なら settled=false・payment_status=null。`payment_status` は `partial` を取り得る・`paid_amount`(累計受領額, 未確定は 0) も additive（ADR-0023）。S4 mobile 表示用 additive） | 404 `not_found`（unknown player / unknown session） |
 | GET | `/api/menu` | `{"items": [{"item_name", "unit_amount"}, ...]}`（menu.json master, M5。空なら `[]`） | — |
 | GET | `/api/players/{player_id}/sessions/{session_id}/order-requests` | `{"requests": [order_request, ...]}`（自分のもののみ、requested_at 順。`order_request.schema.json` v0.x） | 404 `not_found` |
 | POST | `/api/players/{player_id}/sessions/{session_id}/order-requests` | body `{"item_name", "quantity", "note"?}` → 201 + 作成された order_request（status=pending。**ledger には書かれない** — スタッフ確定で初めて記帳, ADR-0018） | 404 `not_found` / 400 `invalid_quantity` / 400 `unknown_item`（menu 外） / 409 `session_closed` / 503 `orders_unavailable`（read-only モード） |
@@ -89,7 +89,8 @@ player はスマホから **order_request**（`order_request.schema.json` v0.x�
 | GET  | `/api/staff/sessions/{session_id}/order-requests?status=` | no | — | `{"requests": [order_request, ...]}`（全 player の queue。status query 任意） |
 | POST | `/api/staff/sessions/{session_id}/ledger-entries` | yes | `{player_id, kind, cash_amount?, point_amount?, note?, hand_id?, order?}` | 201 `ledger_entry` |
 | POST | `/api/staff/sessions/{session_id}/settlement/commit` | yes | — | `{"settlements": [...]}` |
-| PUT  | `/api/staff/sessions/{session_id}/players/{player_id}/payment-status` | yes | `{status: "paid"\|"unpaid"}` | 更新後 `session_settlement` |
+| PUT  | `/api/staff/sessions/{session_id}/players/{player_id}/payment-status` | yes | `{status: "paid"\|"unpaid"}` | 更新後 `session_settlement`（shortcut。paid=全額受領 / unpaid=受領 0。partial は不可） |
+| PUT  | `/api/staff/sessions/{session_id}/players/{player_id}/payment` | yes | `{paid_amount}`（>=0, 累計受領額） | 更新後 `session_settlement`（partial-paid, ADR-0023。`payment_status` を導出） |
 | POST | `/api/staff/order-requests/{request_id}/confirm` | yes | `{unit_amount}` | 更新後 `order_request`（ledger order entry をリンク） |
 | POST | `/api/staff/order-requests/{request_id}/reject` | yes | — | 更新後 `order_request` |
 

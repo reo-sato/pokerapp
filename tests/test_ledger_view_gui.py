@@ -255,6 +255,42 @@ class TestSettlement:
         win._cmd_set_payment(alice, "paid")  # 未確定 → LedgerNotFoundError
         assert win._set_status.call_args.kwargs.get("error") is True
 
+    def _committed_session(self, tmp_path: Path):
+        win, ledger, sessions, players = _make_window(tmp_path)
+        alice = _pid(players, "Alice")
+        s = sessions.create_session()
+        ledger.add_entry(s.session_id, alice, "buy_in", cash_amount=10000)
+        sessions.close_session(s.session_id)
+        win._session_id = s.session_id
+        win._cmd_commit_settlement()
+        return win, ledger, sessions, alice, s
+
+    def test_record_partial_payment(self, tmp_path: Path):
+        win, ledger, sessions, alice, s = self._committed_session(tmp_path)
+        entry = MagicMock(get=MagicMock(return_value="4000"))  # 0 < 4000 < 10000
+        win._cmd_record_payment(alice, entry)
+        row = ledger.list_settlements(s.session_id)[0]
+        assert row.payment_status == "partial"
+        assert row.paid_amount == 4000
+        assert win._set_status.call_args.kwargs.get("error", False) is False
+
+    def test_record_full_payment(self, tmp_path: Path):
+        win, ledger, sessions, alice, s = self._committed_session(tmp_path)
+        entry = MagicMock(get=MagicMock(return_value="10000"))  # == net
+        win._cmd_record_payment(alice, entry)
+        row = ledger.list_settlements(s.session_id)[0]
+        assert row.payment_status == "paid"
+        assert row.paid_amount == 10000
+        assert win._set_status.call_args.kwargs.get("error", False) is False
+
+    def test_record_negative_payment_shows_error(self, tmp_path: Path):
+        win, ledger, sessions, alice, s = self._committed_session(tmp_path)
+        entry = MagicMock(get=MagicMock(return_value="-100"))
+        win._cmd_record_payment(alice, entry)
+        assert win._set_status.call_args.kwargs.get("error") is True
+        # 不正入力では状態は変わらない（既定 unpaid のまま）。
+        assert ledger.list_settlements(s.session_id)[0].payment_status == "unpaid"
+
 
 class TestSeparateFromHandLogger:
     """ledger viewer が hand logger dashboard と別構造であることの最低限の確認。"""

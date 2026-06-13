@@ -96,6 +96,23 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _derive_payment_status(net_due_to_store: int, paid_amount: int) -> str:
+    """paid_amount と net_due_to_store から payment_status を導出する（ADR-0023, 単一導出点）。
+
+    - net<=0 → "paid"（徴収不要。過払い paid>=net もここに含まれ "paid" に丸める）。
+    - paid_amount<=0 → "unpaid"。
+    - paid_amount>=net → "paid"（全額・過払い）。
+    - それ以外（0<paid<net）→ "partial"。
+    """
+    if net_due_to_store <= 0:
+        return "paid"
+    if paid_amount <= 0:
+        return "unpaid"
+    if paid_amount >= net_due_to_store:
+        return "paid"
+    return "partial"
+
+
 def _locked(method):
     """`self._lock`（RLock）で公開メソッドの本体を囲む（thread-safety, S5/ADR-0021）。
 
@@ -501,6 +518,7 @@ class LedgerRepository:
                     net_due_to_store=net_due,
                     payment_status=existing.payment_status if existing else "unpaid",
                     settled_at=existing.settled_at if existing else _now_iso(),
+                    paid_amount=existing.paid_amount if existing else 0,
                 )
             )
         return rows
@@ -529,7 +547,9 @@ class LedgerRepository:
         now = _now_iso()
         committed: list[SessionSettlement] = []
         for row in self._derive_settlement_rows(session_id):
-            row.payment_status = "unpaid"
+            row.paid_amount = 0
+            # net<=0 の player は徴収不要 → "paid"、他は "unpaid"（ADR-0023）。
+            row.payment_status = _derive_payment_status(row.net_due_to_store, 0)
             row.settled_at = now
             self._settlements[(session_id, row.player_id)] = row
             committed.append(row)
@@ -548,17 +568,52 @@ class LedgerRepository:
         return list(self._settlements.values())
 
     @_locked
-    def set_payment_status(
-        self, session_id: str, player_id: str, status: str
+    def record_payment(
+        self, session_id: str, player_id: str, paid_amount: int
     ) -> SessionSettlement:
-        """確定済 settlement の支払状態を変更する（paid/unpaid, partial なし）。"""
-        if status not in ("paid", "unpaid"):
-            raise ValueError(f"payment_status が不正です: {status!r}")
+        """確定済 settlement に受領額を記録する（partial-paid 対応, ADR-0023）。
+
+        paid_amount は「これまでに受け取った累計額」（差分ではなく絶対値）。payment_status は
+        net_due_to_store との関係から導出する（paid / unpaid / partial）。負値は
+        InvalidAmountError、未確定は LedgerNotFoundError。
+        """
+        if not isinstance(paid_amount, int) or isinstance(paid_amount, bool) or paid_amount < 0:
+            raise InvalidAmountError("paid_amount は 0 以上の整数である必要があります。")
         settlement = self._settlements.get((session_id, player_id))
         if settlement is None:
             raise LedgerNotFoundError(
                 f"settlement(session={session_id}, player={player_id}) は確定されていません。"
             )
-        settlement.payment_status = status
+        settlement.paid_amount = paid_amount
+        settlement.payment_status = _derive_payment_status(
+            settlement.net_due_to_store, paid_amount
+        )
         self._flush()
         return settlement
+
+    @_locked
+    def set_payment_status(
+        self, session_id: str, player_id: str, status: str
+    ) -> SessionSettlement:
+        """確定済 settlement の支払状態を切り替える shortcut（後方互換, ADR-0023）。
+
+        "paid" → 全額受領（record_payment(net_due_to_store)）、"unpaid" → 受領 0
+        （record_payment(0)）として記録する。"partial" は金額が必要なため status 経由では
+        扱えず ValueError（record_payment を使う）。導出は record_payment に一元化する。
+        """
+        if status == "paid":
+            settlement = self._settlements.get((session_id, player_id))
+            if settlement is None:
+                raise LedgerNotFoundError(
+                    f"settlement(session={session_id}, player={player_id}) は確定されていません。"
+                )
+            # net<=0（徴収不要）でも paid_amount は非負である必要があるため 0 で record する
+            # （_derive_payment_status は net<=0 を "paid" に丸める）。
+            return self.record_payment(
+                session_id, player_id, max(settlement.net_due_to_store, 0)
+            )
+        if status == "unpaid":
+            return self.record_payment(session_id, player_id, 0)
+        raise ValueError(
+            f"payment_status が不正です: {status!r}（partial は record_payment を使ってください）"
+        )

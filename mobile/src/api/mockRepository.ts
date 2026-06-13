@@ -89,6 +89,7 @@ export class MockRepository implements ViewerRepository {
         settled: false, // mock は未確定（確定フローはスタッフ desktop）
         payment_status: null,
         settled_at: null,
+        paid_amount: 0,
       },
     };
   }

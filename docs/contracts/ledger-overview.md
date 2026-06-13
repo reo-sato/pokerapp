@@ -1,7 +1,8 @@
 # Ledger / points / settlement contract (S3, frozen `1.0`)
 
 > **Status: frozen `1.0`**（ADR-0019, 2026-06-13。freeze order #4 ledger / #5 settlement）。
-> `schemas/{ledger_entry,point_ledger_entry,session_settlement}.schema.json` は version `1.0`。
+> `schemas/{ledger_entry,point_ledger_entry}.schema.json` は version `1.0`、
+> `session_settlement.schema.json` は **`1.1`**（partial-paid を additive 追加, ADR-0023）。
 > core + desktop（`gui/ledger_view.py`）+ CSV export + viewer API が実装済みで code↔contract test 緑
 > （`tests/test_contracts.py::test_core_ledger_matches_contract` / `::test_core_settlement_matches_contract`）。
 > 残高 = fold は **ISSUE-0001 Resolved**（ADR-0016）。以後の変更は additive-only
@@ -77,8 +78,16 @@ adjustment entry で表す（後述 § invariants）。`player_id` / `session_id
 ### 3. `session_settlement`（session 締めの精算結果）
 
 - **属性**: `session_id` / `player_id` / `cash_in_total` / `point_spent_total` / `order_total` /
-  `entry_fee` / `point_credited_total` / `net_due_to_store` / `payment_status`（`paid`|`unpaid`）/
-  `settled_at`（すべて CLAUDE.md § Domain model 準拠）。金額は円（int）、point は点（int）。
+  `entry_fee` / `point_credited_total` / `net_due_to_store` /
+  `payment_status`（`paid`|`unpaid`|`partial`）/ `settled_at` /
+  `paid_amount`（累計受領額, >=0, 既定 0, optional。schema 1.1 / ADR-0023）。
+  金額は円（int）、point は点（int）。
+- **partial-paid（schema 1.1, ADR-0023, additive）**: `paid_amount` が真実、`payment_status` は
+  `net_due_to_store` との関係から導出（`net<=0`→paid / `paid<=0`→unpaid / `paid>=net`→paid /
+  `0<paid<net`→partial。過払いは paid に丸め）。`record_payment` で受領額を記録、`set_payment_status`
+  は paid=全額 / unpaid=0 の shortcut。`from_dict` は `paid_amount` 欠落時に payment_status から
+  後方互換に推定（既存 `ledger.json` 確定行を壊さない）。1.0 freeze から MINOR bump（optional field +
+  enum 値追加 = additive, `versioning-and-freeze.md` §2）。
 - **derived materialized view**: entries の fold。session close 時に `(session, player)` ごと
   1 行を確定・凍結する。中間集計（open 中）は同じ計算式の **途中値（speculative）** であり、
   確定値ではない（UI で区別表示。ISSUE-0001 Q2）。

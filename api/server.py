@@ -87,6 +87,12 @@ class _StaffPaymentStatusBody(BaseModel):
     status: str
 
 
+class _StaffPaymentBody(BaseModel):
+    """PUT .../payment の body（partial-paid 対応, ADR-0023）。"""
+
+    paid_amount: int
+
+
 class _StaffConfirmOrderBody(BaseModel):
     """POST /api/staff/order-requests/{id}/confirm の body。"""
 
@@ -347,6 +353,22 @@ def create_app(
         except ValueError as e:  # invalid status
             return JSONResponse(status_code=400,
                                 content={"code": "invalid_amount", "message": str(e)})
+        return settlement.to_dict()
+
+    @app.put("/api/staff/sessions/{session_id}/players/{player_id}/payment",
+             response_model=None)
+    def staff_record_payment(
+        session_id: str, player_id: str, request: Request,
+        body: _StaffPaymentBody,
+    ) -> "JSONResponse | dict":
+        """受領額 paid_amount を記録し payment_status を導出する（partial-paid, ADR-0023）。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            settlement = ledger_repo.record_payment(session_id, player_id, body.paid_amount)
+        except LedgerError as e:
+            return _map_ledger_error(e)
         return settlement.to_dict()
 
     @app.post("/api/staff/order-requests/{request_id}/confirm", response_model=None)

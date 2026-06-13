@@ -193,6 +193,47 @@ def test_staff_payment_status_not_found(env: dict):
     assert (ei.value.code, ei.value.status_code) == ("not_found", 404)
 
 
+def test_staff_record_partial_payment(env: dict):
+    # ADR-0023: 受領額 API で partial-paid を記録できる。
+    staff, session, alice = env["staff_client"], env["session"], env["alice"]
+    sessions = env["sessions"]
+    staff.add_ledger_entry(session.session_id, alice.player_id, "buy_in", cash_amount=10000)
+    sessions.close_session(session.session_id)
+    staff.commit_settlement(session.session_id)
+
+    partial = staff.record_payment(session.session_id, alice.player_id, 4000)
+    assert partial["payment_status"] == "partial"
+    assert partial["paid_amount"] == 4000
+
+    full = staff.record_payment(session.session_id, alice.player_id, 10000)
+    assert full["payment_status"] == "paid"
+    assert full["paid_amount"] == 10000
+
+    # player ledger summary に paid_amount / partial が反映される。
+    staff.record_payment(session.session_id, alice.player_id, 4000)
+    led = env["player_client"].get_player_session_ledger(alice.player_id, session.session_id)
+    assert led["summary"]["paid_amount"] == 4000
+    assert led["summary"]["payment_status"] == "partial"
+
+
+def test_staff_record_payment_not_found(env: dict):
+    staff, session, alice = env["staff_client"], env["session"], env["alice"]
+    with pytest.raises(ViewerApiError) as ei:
+        staff.record_payment(session.session_id, alice.player_id, 100)
+    assert (ei.value.code, ei.value.status_code) == ("not_found", 404)
+
+
+def test_staff_record_negative_payment_invalid(env: dict):
+    staff, session, alice = env["staff_client"], env["session"], env["alice"]
+    sessions = env["sessions"]
+    staff.add_ledger_entry(session.session_id, alice.player_id, "buy_in", cash_amount=10000)
+    sessions.close_session(session.session_id)
+    staff.commit_settlement(session.session_id)
+    with pytest.raises(ViewerApiError) as ei:
+        staff.record_payment(session.session_id, alice.player_id, -100)
+    assert (ei.value.code, ei.value.status_code) == ("invalid_amount", 400)
+
+
 def test_staff_confirm_unknown_request_not_found(env: dict):
     with pytest.raises(ViewerApiError) as ei:
         env["staff_client"].confirm_order("f" * 32, 700)

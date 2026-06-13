@@ -146,8 +146,10 @@ class PointLedgerEntry:
 class SessionSettlement:
     """session 締めの (session, player) 1 行。entries の derived materialized view。
 
-    ``net_due_to_store`` = 当該 session・player の ``cash_amount`` の符号付き総和。常に
-    player→店 の 1 方向。``payment_status`` のみ確定後に可変。
+    ``net_due_to_store`` = 当該 session・player の ``cash_amount`` の符号付き総和（確定時に凍結
+    された請求額。不変）。常に player→店 の 1 方向。``paid_amount``（これまでに受け取った金額,
+    既定 0, ADR-0023）と ``net_due_to_store`` から ``payment_status``（paid / unpaid / partial）が
+    導出される。``paid_amount`` / ``payment_status`` のみ確定後に可変。
     """
 
     session_id: str
@@ -160,6 +162,7 @@ class SessionSettlement:
     net_due_to_store: int
     payment_status: str
     settled_at: str
+    paid_amount: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -173,10 +176,17 @@ class SessionSettlement:
             "net_due_to_store": self.net_due_to_store,
             "payment_status": self.payment_status,
             "settled_at": self.settled_at,
+            "paid_amount": self.paid_amount,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "SessionSettlement":
+        # paid_amount は ADR-0023 で additive 追加。欠落時（既存 ledger.json の確定済行）は
+        # payment_status から後方互換に推定する: paid → net_due_to_store（全額受領）、他 → 0。
+        if "paid_amount" in d:
+            paid_amount = d["paid_amount"]
+        else:
+            paid_amount = d["net_due_to_store"] if d["payment_status"] == "paid" else 0
         return cls(
             session_id=d["session_id"],
             player_id=d["player_id"],
@@ -188,4 +198,5 @@ class SessionSettlement:
             net_due_to_store=d["net_due_to_store"],
             payment_status=d["payment_status"],
             settled_at=d["settled_at"],
+            paid_amount=paid_amount,
         )

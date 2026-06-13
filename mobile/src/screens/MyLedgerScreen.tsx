@@ -66,8 +66,16 @@ export function MyLedgerScreen({
             <Text style={styles.cardMeta}>
               精算状況:{" "}
               {data.summary.settled ? (
-                <Text style={data.summary.payment_status === "paid" ? styles.pos : styles.neg}>
-                  確定済（{data.summary.payment_status === "paid" ? "支払済み" : "未払い"}）
+                <Text
+                  style={data.summary.payment_status === "paid" ? styles.pos : styles.neg}
+                >
+                  {data.summary.payment_status === "paid"
+                    ? "確定済（支払済み）"
+                    : data.summary.payment_status === "partial"
+                      ? `確定済（一部支払い ${(
+                          data.summary.paid_amount ?? 0
+                        ).toLocaleString()}/${data.summary.net_due_to_store.toLocaleString()} 円）`
+                      : "確定済（未払い）"}
                 </Text>
               ) : (
                 "未確定（暫定）"

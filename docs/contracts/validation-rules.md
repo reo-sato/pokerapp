@@ -46,7 +46,12 @@ JSON Schema は **構造**（型・required・形式）を検査するが、業�
 - **entry 追加は session 実在を要求**（open/closed の制約は設けない。確定済 settlement への反映は S4）。
 - **settlement**: 常に「player → 店」の 1 方向（player 間精算は扱わない）。derived materialized view で
   `net_due_to_store = 符号付き Σ cash_amount`。closed session のみ確定（`session_not_closed` /
-  `already_settled`）。`payment_status` は `paid` / `unpaid`（partial は扱わない）。
+  `already_settled`）。`payment_status` は `paid` / `unpaid` / `partial`（ADR-0023）。確定後は
+  `paid_amount`（累計受領額, >=0, 既定 0）と `payment_status` のみ可変で、status は単一導出関数で決まる:
+  `net<=0`→`paid`（徴収不要・過払いも paid に丸め）、`paid_amount<=0`→`unpaid`、
+  `paid_amount>=net`→`paid`、`0<paid<net`→`partial`。`record_payment(session,player,paid)` で受領額を
+  記録（負値は `invalid_amount`、未確定は `not_found`）。`set_payment_status` は paid=全額 / unpaid=0 の
+  shortcut（partial は record_payment 必須）。
 
 ## order_request（M5 実装済 — `core/order_request_repository.py` が source of truth, ADR-0018）
 

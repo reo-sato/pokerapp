@@ -157,6 +157,12 @@ def test_core_settlement_matches_contract(tmp_path: Path):
     for s in settlements:
         validator.validate(s.to_dict())
 
+    # ADR-0023: partial-paid を record_payment した行も schema 1.1 に適合する。
+    partial = repo.record_payment(session.session_id, alice.player_id, 4000)
+    assert partial.payment_status == "partial"
+    assert partial.paid_amount == 4000
+    validator.validate(partial.to_dict())
+
 
 def test_core_hand_action_match_contract():
     """core が生成する HandSummary / ActionRecord が hand / action schema に適合する

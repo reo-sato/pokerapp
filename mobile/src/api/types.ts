@@ -112,8 +112,9 @@ export interface LedgerSummary {
   net_due_to_store: number; // 全 kind の cash_amount 合計（店への net 支払い）
   // S4: 精算の確定状態（committed のときのみ payment_status/settled_at が意味を持つ）。
   settled: boolean;
-  payment_status?: string | null; // "paid" | "unpaid"（settled=true のとき）
+  payment_status?: string | null; // "paid" | "unpaid" | "partial"（settled=true のとき, ADR-0023）
   settled_at?: string | null;
+  paid_amount?: number; // 受領累計額（partial-paid, ADR-0023。未確定は 0）
 }
 
 export interface PlayerSessionLedger {

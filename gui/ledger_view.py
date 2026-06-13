@@ -484,9 +484,10 @@ class LedgerViewWindow:
             row = ctk.CTkFrame(self._settlement_frame, fg_color="transparent")
             row.grid(row=idx, column=0, sticky="ew", pady=1)
             row.grid_columnconfigure(0, weight=1)
+            row.grid_columnconfigure(1, weight=0)
             line = (
                 f"{self._player_name(s.player_id)}: net {s.net_due_to_store} 円 "
-                f"[{s.payment_status}]"
+                f"（受領 {s.paid_amount} 円）[{s.payment_status}]"
             )
             kwargs = {"text_color": _STATUS_OK_COLOR} if s.payment_status == "paid" else {}
             ctk.CTkLabel(row, text=line, anchor="w", **kwargs).grid(
@@ -497,6 +498,15 @@ class LedgerViewWindow:
                 row, text=f"{new_status} にする", width=110,
                 command=lambda pid=s.player_id, st=new_status: self._cmd_set_payment(pid, st),
             ).grid(row=0, column=1, padx=4)
+            # partial-paid: 受領額を直接記録する（ADR-0023）。
+            amount_entry = ctk.CTkEntry(row, width=80, placeholder_text="受領額")
+            amount_entry.grid(row=0, column=2, padx=4)
+            ctk.CTkButton(
+                row, text="支払額記録", width=90,
+                command=lambda pid=s.player_id, ent=amount_entry: self._cmd_record_payment(
+                    pid, ent
+                ),
+            ).grid(row=0, column=3, padx=4)
             self._settlement_rows.append(row)
 
     def _cmd_commit_settlement(self) -> None:
@@ -522,6 +532,25 @@ class LedgerViewWindow:
             return
         self._refresh()
         self._set_status(f"支払状態を {status} に更新しました。")
+
+    def _cmd_record_payment(self, player_id: str, amount_entry) -> None:
+        """受領額を記録し payment_status を導出する（partial-paid, ADR-0023）。"""
+        if not self._session_id:
+            self._set_status("セッションを選択してください。", error=True)
+            return
+        amount = self._parse_amount(amount_entry.get())
+        if amount is None or amount < 0:
+            self._set_status("受領額は 0 以上の整数で入力してください。", error=True)
+            return
+        try:
+            settlement = self._ledger.record_payment(self._session_id, player_id, amount)
+        except _LEDGER_ERRORS as e:
+            self._set_status(str(e), error=True)
+            return
+        self._refresh()
+        self._set_status(
+            f"受領額を記録しました: {amount} 円 [{settlement.payment_status}]"
+        )
 
     # ――― 注文リクエスト（M5, ADR-0018）―――
 

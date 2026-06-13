@@ -68,6 +68,7 @@ test("getPlayerLedger returns entries and summary consistent with core rules", a
     settled: false,
     payment_status: null,
     settled_at: null,
+    paid_amount: 0,
   });
   await assert.rejects(repo.getPlayerLedger(ALICE_ID, "deadbeef"), (err: unknown) => {
     assert.ok(err instanceof ViewerApiError);

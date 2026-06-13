@@ -7,6 +7,6 @@
   "entry_fee": 500,
   "point_credited_total": 3000,
   "net_due_to_store": 9500,
-  "payment_status": "partial",
+  "payment_status": "refunded",
   "settled_at": "2026-06-10T23:30:00"
 }

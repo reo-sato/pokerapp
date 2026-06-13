@@ -116,8 +116,11 @@ def get_player_session_ledger(
         "net_due_to_store": base.net_due_to_store if base else 0,
         # 確定状態（committed のときのみ意味を持つ。未確定は settled=false）。
         "settled": committed is not None,
+        # payment_status は committed 行由来で partial を取り得る（ADR-0023）。
         "payment_status": committed.payment_status if committed else None,
         "settled_at": committed.settled_at if committed else None,
+        # 受領累計額（committed のみ意味を持つ。未確定は 0, ADR-0023）。
+        "paid_amount": committed.paid_amount if committed else 0,
     }
     return {
         "entries": [e.to_dict() for e in ledger_repo.list_entries(session_id, player_id)],

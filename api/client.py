@@ -188,6 +188,16 @@ class ViewerApiClient:
             json={"status": status}, headers=self._staff_headers(),
         )
 
+    def record_payment(
+        self, session_id: str, player_id: str, paid_amount: int
+    ) -> dict:
+        """受領額を記録し partial/paid/unpaid を導出する（ADR-0023）。"""
+        return self._request(
+            "PUT",
+            f"/api/staff/sessions/{session_id}/players/{player_id}/payment",
+            json={"paid_amount": paid_amount}, headers=self._staff_headers(),
+        )
+
     def confirm_order(self, request_id: str, unit_amount: int) -> dict:
         return self._request(
             "POST", f"/api/staff/order-requests/{request_id}/confirm",
