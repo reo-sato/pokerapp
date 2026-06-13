@@ -27,6 +27,7 @@ docs/contracts/
 ├── session-seating.md          ← session / seat_assignment / hand_ref 契約（S2 draft, 未 freeze）
 ├── ledger-overview.md          ← ledger / point / settlement ドメイン + invariants 契約（S3 draft, ADR-0016）
 ├── ledger-schema.md            ← ledger / point / settlement の擬似 JSON Schema 草案（S3 draft）
+├── viewer-api.md               ← player 向け read-only viewer API + 注文リクエスト契約（M1/M5 draft, ADR-0017/0018）
 ├── versioning-and-freeze.md    ← freeze / versioning / additive vs breaking / freeze order
 ├── repository-interfaces.md    ← front-end が呼ぶ抽象 repository/service interface 契約（テンプレート）
 ├── error-shapes.md             ← validation / not-found 等の error 形契約
@@ -39,7 +40,9 @@ docs/contracts/
 │   ├── hand_ref.schema.json        ← hand_ref schema（S2 draft, v0.1）
 │   ├── ledger_entry.schema.json        ← ledger_entry schema（S3 draft, v0.1）
 │   ├── point_ledger_entry.schema.json  ← point_ledger_entry schema（S3 draft, v0.1）
-│   └── session_settlement.schema.json  ← session_settlement schema（S3 draft, v0.1）
+│   ├── session_settlement.schema.json  ← session_settlement schema（S3 draft, v0.1）
+│   ├── player_session_summary.schema.json ← viewer read model（M1 draft, v0.1, ADR-0017）
+│   └── order_request.schema.json       ← order_request schema（M5 draft, v0.1, ADR-0018）
 └── fixtures/                   ← schema に対するサンプル。contract test の oracle
     ├── player/                 ← canonical / valid-* / invalid-*
     ├── session/                ← canonical / valid-minimal / invalid-*（S2 draft）
@@ -47,7 +50,9 @@ docs/contracts/
     ├── hand_ref/               ← canonical / valid-minimal / invalid-*（S2 draft）
     ├── ledger_entry/           ← canonical / valid-* / invalid-*（S3 draft）
     ├── point_ledger_entry/     ← canonical / valid-* / invalid-*（S3 draft）
-    └── session_settlement/     ← canonical / valid-minimal / invalid-*（S3 draft）
+    ├── session_settlement/     ← canonical / valid-minimal / invalid-*（S3 draft）
+    ├── player_session_summary/ ← canonical / valid-minimal / invalid-*（M1 draft）
+    └── order_request/          ← canonical / valid-minimal / invalid-*（M5 draft）
 ```
 
 ## 運用ルール（要約）

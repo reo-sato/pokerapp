@@ -39,6 +39,8 @@
 | ADR-0014 | Migrate RFID hardware to PN5180 + ESP32-S3 and make HTTP the canonical transport   | **Superseded** | 2026-06-01 | rfid / hardware migration   | `docs/adr/0014-migrate-rfid-to-pn5180-esp32s3-and-canonical-http-transport.md`                    | 旧番号 0007 から採番替え。**Superseded by ADR-0015**   |
 | ADR-0015 | PN5180 + ESP32-S3 via USB CCID — PC/SC is the canonical RFID transport             | Accepted | 2026-06-01 | rfid / hardware migration   | `docs/adr/0015-pn5180-esp32s3-usb-ccid-pcsc-canonical.md`                                         | 旧番号 0008 から採番替え。Supersedes ADR-0014 / 関連: ISSUE-0015 |
 | ADR-0016 | Ledger / points / settlement design direction (S3) | Accepted | 2026-06-10 | contracts / core (S3) | `docs/adr/0016-ledger-points-settlement-design-direction.md` | **Supersedes ADR-0013**（fold 踏襲 + session_settlement / desktop viewer / CSV export 追加）/ 関連: ADR-0003 / ADR-0007 / ISSUE-0001 |
+| ADR-0017 | Player 向け参照は API-first（viewer API 前倒し）+ Expo（web export 先行） | Accepted | 2026-06-10 | viewer API / mobile (M1) | `docs/adr/0017-player-facing-viewer-api-first-architecture.md` | serene ADR-0013 から採番替え（verify-v1 統合）。補完: ADR-0004。関連: ADR-0008 / ADR-0016 / ISSUE-0019 |
+| ADR-0018 | M5 — 注文リクエスト write path（staff-in-the-loop / in-process API / menu master / name-pick 確定） | Accepted | 2026-06-11 | orders / viewer API (M5) | `docs/adr/0018-m5-order-request-write-path.md` | serene ADR-0015 から採番替え（verify-v1 統合）。ISSUE-0019 を v1 決着。関連: ADR-0017 / ADR-0016（ledger） |
 
 <!--
 Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時点で空番。
@@ -67,3 +69,4 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0016 | S3.1 ledger / points core schema + repository 実装   | Fixed  | 2026-06-10 | core / contracts (S3.1)  | `docs/issues/0016-ledger-core-implementation.md`           | S3.1 実装済（`core/ledger*.py`, schema/fixtures, tests 緑）。ADR-0016。旧 ISSUE-0012（verify-v1 統合で採番替え） |
 | ISSUE-0017 | S3.2 desktop ledger viewer / editor（別画面）         | Fixed  | 2026-06-10 | gui / desktop (S3.2)     | `docs/issues/0017-ledger-desktop-viewer.md`                | S3.2 実装済（`gui/ledger_view.py`, `main.py --ledger`）。ADR-0016。旧 ISSUE-0013（採番替え） |
 | ISSUE-0018 | S3.3 settlement 確定 + paid/unpaid + CSV export      | Fixed  | 2026-06-10 | core / export (S3.3)     | `docs/issues/0018-settlement-export.md`                    | S3.3 実装済（`output/ledger_csv_exporter.py`, `main.py --export-ledger`）。ADR-0016。旧 ISSUE-0014（採番替え） |
+| ISSUE-0019 | player viewer のプライバシーモデル（本人確認 / 閲覧範囲） | Fixed  | 2026-06-10 | viewer API / mobile (M1/M5) | `docs/issues/0019-player-viewer-privacy-model.md`          | serene ISSUE-0013 から採番替え（verify-v1 統合）。M5 (ADR-0018): v1 = name-pick で確定（注文はスタッフ確定を挟む）。PIN は将来再評価 |

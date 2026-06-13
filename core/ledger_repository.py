@@ -108,7 +108,14 @@ class LedgerRepository:
         player_repo: PlayerRepository | None = None,
     ) -> None:
         self._path = Path(path) if path is not None else _DEFAULT_LEDGER_DB
-        self._player_repo = player_repo if player_repo is not None else PlayerRepository()
+        # player 実在判定は session レイヤと同じ registry を共有する（名前空間ずれ防止）。
+        # player_repo 明示 > session_repo の player_repo > 既定 registry の優先順。
+        if player_repo is not None:
+            self._player_repo = player_repo
+        elif session_repo is not None:
+            self._player_repo = session_repo.player_repo
+        else:
+            self._player_repo = PlayerRepository()
         self._session_repo = (
             session_repo
             if session_repo is not None

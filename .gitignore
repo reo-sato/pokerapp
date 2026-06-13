@@ -6,6 +6,12 @@ config.json
 players.json
 sessions.json
 ledger.json
+order_requests.json
+
+# Expo / node (mobile, M2)
+mobile/node_modules/
+mobile/.expo/
+mobile/dist/
 
 # packaging / build artifacts (H1)
 *.egg-info/

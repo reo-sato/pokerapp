@@ -6,6 +6,27 @@
 
 ## [Unreleased]
 
+### Added (player 向け viewer API + mobile + 注文リクエスト — verify-v1 ledger に統合, ADR-0017/0018)
+
+- **player 向け読み取り専用 viewer API**（M1, `api/`, `[api]` extra）。`python main.py --viewer-api`
+  で foreground 起動（注文 POST は 503 `orders_unavailable`）。endpoints: health / players /
+  player sessions / hands / hand detail / **ledger 参照** / **menu** / **order-requests (GET/POST)**。
+  ledger summary は verify-v1 ledger（ADR-0016）の `compute_settlement` を当該 player に絞った
+  settlement 由来（`cash_in_total / order_total / entry_fee / point_spent_total /
+  point_credited_total / net_due_to_store`）。契約は `docs/contracts/viewer-api.md`（draft 0.x）。
+- **mobile viewer**（M2, `mobile/`, Expo/RN）。PlayerSelect→MySessions→MyHands→HandDetail + 会計 +
+  注文画面。`ViewerRepository` interface に mock / HTTP 実装を `EXPO_PUBLIC_API_URL` で注入切替。
+- **注文リクエスト write path**（M5, `core/order_request*.py` / `core/menu.py` / `menu.json`）。
+  player はスマホから order_request（pending）を POST し、スタッフが `--ledger` 画面の確定/却下
+  パネルで確定すると `ledger_entry`（kind=order）が作られリンクされる（staff-in-the-loop）。
+  `--ledger` は `config.viewer_api.enabled=true` で viewer API を in-process 起動し注文受付を有効化
+  （単一プロセス所有）。closed session への確定は order-request 層が 409 `session_closed` で弾く。
+- config: `viewer_api`（enabled / bind_host 既定 127.0.0.1 / bind_port 既定 8788）。
+  `.gitignore`: `order_requests.json`（`menu.json` はコミット済みサンプル）。
+- ADR/ISSUE: serene ブランチからの統合で **ADR-0013→ADR-0017** / **ADR-0015→ADR-0018** /
+  **ISSUE-0013→ISSUE-0019** に採番替え（serene の cash-only ledger ADR-0014 は不採用、verify-v1 の
+  ADR-0016 が置換）。詳細は `docs/worklog/2026-06-13-integrate-viewer-onto-verify-v1.md`。
+
 ### Changed / Added (S3 ledger 統合 — verify-v1 へのマージで実装を一本化, ADR-0016)
 
 - **S3 ledger / points / settlement を ADR-0016 の実装へ一本化**（verify-v1 が持っていた

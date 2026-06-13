@@ -55,5 +55,12 @@
   "session_layer": {
     "enabled": false,
     "_comment": "S2.x (ADR-0008): hand logger を session レイヤ(seat→player_id の write-through)に接続。既定 false で従来動作（rollback）。true で GUI 起動時に session を作成し、座席設定ダイアログ（Phase E3, ISSUE-0006）で seat→player を割り当てる。"
+  },
+  "viewer_api": {
+    "enabled": false,
+    "bind_host": "127.0.0.1",
+    "_bind_host_comment": "player スマホから LAN 参照する場合は PC の LAN IP（または 0.0.0.0）に変更する。無認証のため信頼できるネットワークでのみ（ISSUE-0019 プライバシーモデル）。",
+    "bind_port": 8788,
+    "_comment": "M1/M5 (ADR-0017/0018): player 向け read-only viewer API。'python main.py --viewer-api' で単独起動（注文 POST は 503）。enabled=true で 'python main.py --ledger' が API を in-process 起動し注文リクエスト受付（write）を有効にする（単一プロセス所有）。要 [api] extra。"
   }
 }

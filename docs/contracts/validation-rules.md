@@ -48,6 +48,21 @@ JSON Schema は **構造**（型・required・形式）を検査するが、業�
   `net_due_to_store = 符号付き Σ cash_amount`。closed session のみ確定（`session_not_closed` /
   `already_settled`）。`payment_status` は `paid` / `unpaid`（partial は扱わない）。
 
+## order_request（M5 実装済 — `core/order_request_repository.py` が source of truth, ADR-0018）
+
+- **create**: open session 必須（closed は `session_closed`）／実在 player 必須（`unknown_player`）／
+  `quantity` は 1..99 の整数（`invalid_quantity`）／`item_name` は 1..100 文字・空白のみ不可／
+  `note` は 200 文字以内。作成時点では **ledger には書かない**（status=pending）。
+- **menu 照合**（`unknown_item`）は viewer API 境界（`menu.json` master）。core は menu を知らない。
+- **confirm**（スタッフ操作）: pending のみ（再解決は `already_resolved`）。closed session への確定は
+  不可（`session_closed`。verify-v1 ledger は closed を拒否しないため order-request 層で守る）。
+  `ledger_repo.add_entry(kind="order", cash_amount=unit_amount×quantity, order={item_name, unit_amount,
+  quantity})` を起こしてから status を confirmed にし `ledger_entry_id` をリンクする（ledger 追記が
+  失敗したら pending のまま）。
+- **reject**（スタッフ操作）: pending のみ。ledger には何も書かない。
+- **read-only モード**（単独 `--viewer-api`, orders_writable=False）では POST を `orders_unavailable`
+  （503）で拒否（単一プロセス所有, ADR-0018 §3）。
+
 ## 将来 model（planned）
 
 対応 phase の freeze 時に本 doc へ追記する（session_settlement schema の `1.0` freeze は S4）。

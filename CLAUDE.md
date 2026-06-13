@@ -27,22 +27,24 @@ pokerapp/
 │   ├── issues/                    ← issue / mismatch log
 │   ├── worklog/                   ← タスク単位の作業ログ
 │   ├── templates/                 ← adr / issue / worklog テンプレート
-│   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures; player + hand/action freeze済, session/seat/hand_ref は S2 core 実装済・schema draft, ledger/point/settlement は S3 実装済・schema draft・ADR-0016)
+│   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures; player + hand/action freeze済, session/seat/hand_ref は S2 core 実装済・schema draft, ledger/point/settlement は S3 実装済・schema draft・ADR-0016, viewer/order は M1/M5 実装済・schema draft・ADR-0017/0018)
 │   ├── installation.md            ← エンドユーザー: インストール手順 (Phase I)
 │   ├── usage.md                   ← エンドユーザー: 使い方・読み上げ語彙・設定 (Phase I)
 │   ├── troubleshooting.md         ← エンドユーザー: 困りごと対処 (Phase I)
 │   └── decision-log.md            ← ADR / 主要 issue の索引
 ├── sprc_v4.docx                   ← 仕様書（要件定義）
 ├── claude_v4.docx                 ← 旧仕様書（参考）
-├── main.py                        ← エントリーポイント (--cli / GUI / --players / --sessions / --ledger / --export-ledger)
+├── main.py                        ← エントリーポイント (--cli / GUI / --players / --sessions / --ledger / --export-ledger / --viewer-api)
 ├── config_default.json            ← デフォルト設定テンプレート
 ├── rfid_cards.json                ← tag_id → card_code マスタ
 ├── players.json                   ← player registry 永続ファイル (.gitignore, S1)
 ├── sessions.json                  ← session + hand-based seating 永続ファイル (.gitignore, S2)
 ├── ledger.json                    ← session ledger + point ledger 永続ファイル (.gitignore, S3)
-├── pyproject.toml                 ← パッケージ定義 (core / [pcsc] / [vision] / [dev], entry: pokerapp, H1)
+├── order_requests.json            ← 注文リクエスト永続ファイル (.gitignore, M5)
+├── menu.json                      ← 注文メニューマスタ (コミット済みサンプル, 店側で編集, M5)
+├── pyproject.toml                 ← パッケージ定義 (core / [pcsc] / [vision] / [api] / [dev], entry: pokerapp, H1)
 ├── requirements.txt               ← core runtime 同期コピー (vision 除外)
-├── requirements-dev.txt           ← テスト依存 (numpy/pokerkit/jsonschema/pytest, CI が使用)
+├── requirements-dev.txt           ← テスト依存 (numpy/pokerkit/jsonschema/fastapi/httpx/pytest, CI が使用)
 ├── .github/workflows/ci.yml       ← CI: pytest (skip 0, vision 除外, H4)
 │
 ├── core/
@@ -57,7 +59,10 @@ pokerapp/
 │   ├── session.py                 ← Session / SeatAssignment / HandRef データクラス (S2)
 │   ├── session_repository.py      ← SessionRepository (session + hand-based seating + JSON 永続化, S2)
 │   ├── ledger.py                  ← LedgerEntry / PointLedgerEntry / SessionSettlement データクラス (S3)
-│   └── ledger_repository.py       ← LedgerRepository (ledger + point + settlement + JSON 永続化, S3)
+│   ├── ledger_repository.py       ← LedgerRepository (ledger + point + settlement + JSON 永続化, S3)
+│   ├── order_request.py           ← OrderRequest データクラス (M5)
+│   ├── order_request_repository.py ← OrderRequestRepository (注文リクエスト, thread-safe + reload-on-read, M5)
+│   └── menu.py                    ← MenuMaster (menu.json ロード・検索, M5)
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -77,12 +82,18 @@ pokerapp/
 │   ├── phh_exporter.py            ← PHHExporter (PHH 形式エクスポート)
 │   └── ledger_csv_exporter.py     ← LedgerCsvExporter (settlement / cashflow CSV, S3.3)
 │
+├── api/
+│   ├── read_models.py             ← viewer read model (seat_assignment 起点 join + settlement 由来 summary, fastapi 非依存, M1)
+│   └── server.py                  ← viewer API server (FastAPI app factory + uvicorn, M1, ADR-0017)
+│
 ├── gui/
 │   ├── dashboard.py               ← GUIDashboard (hand logger 画面, customtkinter; E3 で座席設定ボタン追加)
 │   ├── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
 │   ├── seat_selection.py          ← SeatSelectionDialog (seat→player_id 選択モーダル, S2.x E3)
 │   ├── session_viewer.py          ← SessionViewerWindow (session/seating read-only inspection 画面, WS2-α, 別画面)
-│   └── ledger_view.py             ← LedgerViewWindow (ledger viewer/editor 画面, S3.2, dashboard とは別画面)
+│   └── ledger_view.py             ← LedgerViewWindow (ledger viewer/editor + 注文確定/却下パネル, S3.2 + M5, dashboard とは別画面)
+│
+├── mobile/                        ← Poker Hand Viewer (Expo/RN, M2, ADR-0017。mock/HTTP repository 切替, web export 配布)
 │
 ├── tests/                         ← pytest テストスイート
 └── vision/                        ← レガシー（未使用）
@@ -271,7 +282,51 @@ session world（S2）の上に重なる **ledger（金銭イベント）/ points
 
 - settlement の GUI からの確定（commit）、auto ledger 生成、partial paid。
 - hand logger（`HandSummary`）との自動接続、chip↔円換算、rake/fee。
-- settlement schema の `1.0` freeze（S4）、mobile UI、cross-app sync（S5）。
+- settlement schema の `1.0` freeze（S4）、cross-app sync（S5）。
+
+---
+
+## Viewer API / mobile / 注文リクエスト（M1/M2/M5, 実装済）
+
+player が自分のスマホ（mobile, M2）から自分の session / ハンド履歴 / 会計を参照し、ドリンク注文
+（M5）まで行える **player 向け front-end** と、それを支える **読み取り専用 viewer API**（M1,
+ADR-0017）。**player 向け desktop viewer は作らない**（desktop = スタッフ操作専用）。
+
+### viewer API（M1, `api/`, ADR-0017）
+
+- 起動は 2 形態（要 `pip install ".[api]"` = fastapi/uvicorn）:
+  - `python main.py --viewer-api` = **read-only**（注文 POST は 503 `orders_unavailable`）。
+  - `python main.py --ledger`（`viewer_api.enabled=true`）= 会計画面に **in-process 組み込み**で
+    注文 write が有効（単一プロセス所有, ADR-0018）。
+- endpoints: `/api/health`, `/api/players`, `/api/players/{id}`, `/api/players/{id}/sessions`,
+  `.../sessions/{sid}/hands`, `/api/sessions/{sid}/hands/{hid}`, `.../sessions/{sid}/ledger`,
+  `/api/menu`, `.../sessions/{sid}/order-requests`（GET/POST）。契約は
+  `docs/contracts/viewer-api.md`（draft 0.x）+ `player_session_summary` / `order_request` schema。
+- **read model**: 「player のハンド」は `sessions.json` の seat_assignment 起点で hand log を
+  `(session_id, hand_id)` join。ledger summary は verify-v1 ledger の `compute_settlement` を
+  当該 player に絞った settlement 由来（`cash_in_total / order_total / entry_fee /
+  point_spent_total / point_credited_total / net_due_to_store`, ADR-0016）。
+- error は `{"code", "message"}`（`error-shapes.md` 準拠）。config: `viewer_api.bind_host` 既定
+  `127.0.0.1`（無認証。LAN 参照は明示変更, ISSUE-0019）/ `bind_port` 既定 8788。
+
+### 注文リクエスト（M5, `core/order_request*.py` / `core/menu.py`, ADR-0018）
+
+- player はスマホから **order_request**（pending）を POST する。**ledger には書かれず**、
+  スタッフが `--ledger` 画面の確定/却下パネルで**確定**したときに `ledger_entry`（kind=order,
+  cash_amount=unit×qty, `order={item_name, unit_amount, quantity}`）が作られ `ledger_entry_id` が
+  リンクされる（staff-in-the-loop）。
+- **menu master**: `menu.json`（コミット済みサンプル、店側で編集）。menu 外は `unknown_item`、
+  確定時の単価は menu から prefill（スタッフ上書き可）。
+- **単一プロセス所有**: `order_requests.json` の write は viewer API を in-process で抱えた
+  `--ledger` プロセスのみ。単独 `--viewer-api` は read-only（POST 503）。
+  `OrderRequestRepository` は thread-safe（lock）+ reload-on-read。
+- **closed session への確定**は `OrderRequestRepository.confirm_request` が `session_closed`（409）で
+  弾く（verify-v1 ledger は closed を拒否しないため、注文確定の closed 不変条件はこの層が担う）。
+
+### Out of scope（現時点）
+
+- 認証 / per-player アクセス制御（v1 = name-pick で確定, ISSUE-0019 Fixed）。
+- ledger への直接 write（注文も staff 確定が必須）。order_request schema の `1.0` freeze。
 
 ---
 
@@ -338,6 +393,9 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **ledger / point / settlement core (S3.1)** | ✅ 実装済 | `core/ledger.py`, `core/ledger_repository.py`（§ Ledger / Points / Settlement 参照, ADR-0016, ISSUE-0001 Resolved） |
 | **ledger desktop viewer (S3.2)** | ✅ 実装済 | `gui/ledger_view.py`（`main.py --ledger`, 別画面, dashboard 不可侵） |
 | **settlement / cashflow CSV export (S3.3)** | ✅ 実装済 | `output/ledger_csv_exporter.py`（`main.py --export-ledger`, utf-8-sig） |
+| **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（`main.py --viewer-api`, read-only GET, `[api]` extra, ADR-0017。ledger summary は `compute_settlement` 由来 = ADR-0016） |
+| **mobile viewer (M2)** | ✅ 実装済 | `mobile/`（Expo/RN。PlayerSelect→MySessions→MyHands→HandDetail + 会計 + 注文画面。`ViewerRepository` に mock/HTTP 注入, `EXPO_PUBLIC_API_URL` 切替, ADR-0017） |
+| **注文リクエスト write path (M5)** | ✅ 実装済 | `core/order_request*.py` / `core/menu.py` + viewer API `/menu`・`/order-requests`（GET/POST）+ `gui/ledger_view.py` の確定/却下パネル（§ 注文リクエスト参照, ADR-0018。staff-in-the-loop / in-process API / name-pick = ISSUE-0019 Fixed） |
 | **hand logger × session 統合 (S2.x E1+E2-core)** | ✅ 実装済 | `integration/engine.py`（`session_repo`/`seat_player_map` DI、`assign_seat` write-through + `player_id` additive 埋め込み、`session_layer.enabled` 既定 off で挙動不変, ADR-0008） |
 | **seat→player 選択 GUI + live 有効化 (S2.x E3)** | ✅ 実装済 | `gui/seat_selection.py`（`SeatSelectionDialog`: モーダル, 席ごと割当 / 未登録その場 create / 空席 skip / carry-forward）+ `gui/dashboard.py`「座席設定」ボタン + `integration/engine.py:set_seat_player_map` + `main.py` 結線（UUID4 session_id）。既定 off で挙動不変, ISSUE-0006 Resolved |
 | **event 記録 sidecar (R1)** | ✅ 実装済 | `output/event_recorder.py`（opt-in `recording.enabled`, 挙動不変, ADR-0010, `reconstruction_event` schema） |
@@ -727,12 +785,14 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 pip install -r requirements.txt              # core runtime（または pip install .）
 pip install -r requirements-dev.txt          # テスト依存（CI と同じ。skip 0）
 pip install ".[pcsc]"                         # RFID PC/SC を使う場合のみ
+pip install ".[api]"                         # viewer API を使う場合のみ (M1)
 python main.py --cli                         # CLI モード (hand logger)
 python main.py                               # GUI モード (hand logger)
 python main.py --players                     # Player Registry 画面 (S1, 別画面)
 python main.py --sessions                    # Session / Seating Viewer (WS2-α, read-only, 別画面)
-python main.py --ledger                      # Ledger Viewer/Editor 画面 (S3.2, 別画面)
+python main.py --ledger                      # Ledger Viewer/Editor + 注文確定 画面 (S3.2/M5, 別画面)
 python main.py --export-ledger logs/ledger_export  # settlement / cashflow CSV 出力 (S3.3)
+python main.py --viewer-api                  # player 向け読み取り専用 viewer API (M1, ADR-0017)
 pytest tests/ -v --ignore=tests/test_vision.py   # CI と同じ（vision レガシー除外）
 python tools/replay_hand.py tests/fixtures/reconstruction/silent-fold  # 決定的 replay (F1)
 python main.py --export-phh logs/session_xxx.json

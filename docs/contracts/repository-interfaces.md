@@ -140,6 +140,31 @@ set_payment_status(session_id, player_id, status) -> SessionSettlement
   先行実装できる。
 - **schema は未 freeze**（draft 0.1）。`1.0` 昇格は上流 session schema freeze（ISSUE-0005）後。
 
+## viewer read model interface（M1 実装済 — ADR-0017）
+
+`api/read_models.py`（fastapi 非依存の純関数）。front-end（mobile）は同じ意味論の
+`ViewerRepository` interface（`mobile/src/api/repository.ts`）越しに mock / HTTP を差し替える:
+
+| 関数 | 返すもの | 備考 |
+|------|----------|------|
+| `list_player_sessions(player_id, session_repo)` | `[player_session_summary, ...]` | 着席 hand>0 の session のみ |
+| `list_player_hands(player_id, session_id, session_repo, log_dir)` | `[hand, ...]` | seat_assignment 起点で hand log を join |
+| `get_player_session_ledger(player_id, session_id, ledger_repo)` | `{entries, summary}` | summary は verify-v1 `compute_settlement` を当該 player に絞った settlement 由来（ADR-0016, cash_in_total / order_total / entry_fee / point_spent_total / point_credited_total / net_due_to_store） |
+| `get_hand(session_id, hand_id, log_dir)` | `hand` | legacy session_id でも log があれば返す |
+
+## order-request interface（M5 実装済 — ADR-0018）
+
+`core/order_request_repository.py`（thread-safe + reload-on-read）が source of truth:
+
+| 操作 | シグネチャ（要約） | 不変条件 |
+|------|---------------------|----------|
+| create | `create_request(session_id, player_id, item_name, quantity, note?) -> OrderRequest` | open session / 実在 player / quantity 1..99。ledger には書かない（pending） |
+| confirm | `confirm_request(request_id, unit_amount, ledger_repo) -> OrderRequest` | pending のみ。`ledger_repo.add_entry(kind="order", cash_amount=unit×qty, order={...})` を起こしリンク。closed session は不可 |
+| reject | `reject_request(request_id) -> OrderRequest` | pending のみ。ledger には何も書かない |
+| list | `list_requests(session_id, player_id?, status?) -> [OrderRequest]` | requested_at 順 |
+
+menu 照合（`unknown_item`）と read-only モード（`orders_unavailable`）は viewer API 境界が扱う。
+
 ## settlement 以降（planned）
 
 | model | interface | phase |
