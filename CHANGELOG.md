@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Fixed (sync の settlement マージを partial-paid 対応に, ADR-0024)
+
+- `core/sync.py` の settlement マージを **`paid_amount` の monotonic max** に変更（旧: paid>unpaid の
+  2 値 + settled_at 早い方）。partial-paid（ADR-0023）で、受領額の大きい `partial` が settled_at の
+  早い `unpaid`(paid_amount=0) に上書きされ得た収束バグを解消。`payment_status` は max 後の
+  paid_amount から導出。可換・冪等は維持（`tests/test_sync.py` に収束テスト追加）。
+  現行の単一書き手 + on-demand pull 既定では実害のなかった latent issue の予防修正。
+
 ### Added (S4 — settlement partial-paid, ADR-0023)
 
 - 精算に **一部支払い（partial-paid）** を追加。`SessionSettlement` に累計受領額 `paid_amount`

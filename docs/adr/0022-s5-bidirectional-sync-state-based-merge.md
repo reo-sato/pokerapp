@@ -46,7 +46,8 @@ session/seating/hand を、キャッシャー卓の PC が ledger/settlement を
      異なる稀な衝突（confirmed vs rejected）→ **confirmed 優先**（会計影響があり ledger entry が存在する）。
      両 confirmed は resolved_at の早い方。
    - **settlements**（key `(session_id, player_id)`）: committed（settled_at 非 null）が uncommitted に
-     勝つ。両 committed なら **paid が unpaid に勝つ**（支払いは取り消されない単調性）、settled_at は早い方、
+     勝つ。両 committed の解決は **`paid_amount` の monotonic max**（partial-paid 対応で
+     ADR-0024 が本節を更新。旧記述: paid が unpaid に勝つ）、settled_at は早い方、
      金額等は committed 側の値を保持。
    - **sessions**（key `session_id`）: union。`status` は **closed が open に勝つ**、`ended_at` は closed 側。
      `label`/`blinds` は local 優先（peer のみにあれば採用）。入れ子 `hands`（key hand_id）は union、

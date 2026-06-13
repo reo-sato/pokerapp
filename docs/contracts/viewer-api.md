@@ -145,7 +145,7 @@ viewer_api.enabled）のみ** が受理（read-only は 503 `orders_unavailable`
   一方終端・他方 pending → 終端採用。両終端で異なる（confirmed vs rejected）→ **confirmed 優先**。
   両 confirmed → `resolved_at` 早い方。
 - **settlements**（key `(session_id, player_id)`）: committed > uncommitted。両 committed なら
-  paid > unpaid、`settled_at` 早い方の値を保持。
+  **paid_amount の max**（partial-paid 対応, ADR-0024。payment_status は導出）、`settled_at` 早い方の値を保持。
 - **sessions**（key `session_id`）: union。`status` closed > open（`ended_at` は closed 側）、
   `label`/`blinds` local 優先。入れ子 `hands`（key hand_id）union、`seats`（key seat_no）union
   で同一 seat_no 衝突は local 優先。

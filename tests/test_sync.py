@@ -58,12 +58,19 @@ def _order(rid: str, status: str = "pending", requested: str = "t0",
 
 
 def _settlement(sid: str, pid: str, settled: str | None = None,
-                payment: str = "unpaid", net: int = 100) -> dict:
+                net: int = 100, paid: int = 0) -> dict:
+    # payment_status は paid_amount / net から導出（core ADR-0023 と同一規則で自己整合に）。
+    if net <= 0 or paid >= net:
+        status = "paid"
+    elif paid <= 0:
+        status = "unpaid"
+    else:
+        status = "partial"
     return {
         "session_id": sid, "player_id": pid, "cash_in_total": net,
         "point_spent_total": 0, "order_total": 0, "entry_fee": 0,
         "point_credited_total": 0, "net_due_to_store": net,
-        "payment_status": payment, "settled_at": settled or "",
+        "paid_amount": paid, "payment_status": status, "settled_at": settled or "",
     }
 
 
@@ -145,24 +152,45 @@ def test_order_both_confirmed_earlier_resolved_wins():
 
 def test_settlement_committed_beats_uncommitted():
     local = [_settlement("s1", "p1")]  # uncommitted (settled_at="")
-    remote = [_settlement("s1", "p1", settled="t5", payment="unpaid")]
+    remote = [_settlement("s1", "p1", settled="t5")]
     merged = merge_settlements(local, remote)
     assert merged[0]["settled_at"] == "t5"
     assert merge_settlements(remote, local)[0]["settled_at"] == "t5"
 
 
-def test_settlement_paid_beats_unpaid():
-    local = [_settlement("s1", "p1", settled="t5", payment="unpaid")]
-    remote = [_settlement("s1", "p1", settled="t6", payment="paid")]
-    merged = merge_settlements(local, remote)
-    assert merged[0]["payment_status"] == "paid"
-    assert merge_settlements(remote, local)[0]["payment_status"] == "paid"
+def test_settlement_max_paid_amount_wins():
+    """両 committed は paid_amount の max を採り payment_status を導出する（ADR-0024）。"""
+    local = [_settlement("s1", "p1", settled="t5", net=10000, paid=3000)]   # partial
+    remote = [_settlement("s1", "p1", settled="t6", net=10000, paid=10000)]  # paid
+    merged = merge_settlements(local, remote)[0]
+    assert merged["paid_amount"] == 10000
+    assert merged["payment_status"] == "paid"
+    # 可換
+    rev = merge_settlements(remote, local)[0]
+    assert (rev["paid_amount"], rev["payment_status"]) == (10000, "paid")
 
 
-def test_settlement_both_committed_same_status_keeps_earliest():
-    local = [_settlement("s1", "p1", settled="t9", payment="unpaid")]
-    remote = [_settlement("s1", "p1", settled="t1", payment="unpaid")]
+def test_settlement_partial_not_overwritten_by_unpaid():
+    """ADR-0024 の核心: partial（高い paid_amount）が、早い settled_at の unpaid に上書きされない。"""
+    partial = [_settlement("s1", "p1", settled="t9", net=10000, paid=4000)]  # partial
+    unpaid = [_settlement("s1", "p1", settled="t1", net=10000, paid=0)]      # unpaid, 早い
+    for merged in (merge_settlements(partial, unpaid), merge_settlements(unpaid, partial)):
+        assert merged[0]["paid_amount"] == 4000
+        assert merged[0]["payment_status"] == "partial"
+
+
+def test_settlement_merge_idempotent():
+    rows = [_settlement("s1", "p1", settled="t1", net=10000, paid=4000)]
+    once = merge_settlements(rows, rows)
+    assert merge_settlements(once, rows) == once
+    assert once[0] == rows[0]  # 自己整合な record は merge(A,A)=A
+
+
+def test_settlement_both_committed_same_paid_keeps_earliest():
+    local = [_settlement("s1", "p1", settled="t9", net=100, paid=0)]
+    remote = [_settlement("s1", "p1", settled="t1", net=100, paid=0)]
     assert merge_settlements(local, remote)[0]["settled_at"] == "t1"
+    assert merge_settlements(remote, local)[0]["settled_at"] == "t1"
 
 
 # ――― session closed>open + 入れ子 ―――
@@ -255,7 +283,7 @@ def _snap_B() -> dict:
                                      "2": {"started_at": "t2", "seats": [_seat(1, "b")]}})],
         "ledger_entries": [_entry("e2", "t2")],
         "point_entries": [_point("pe2", "t2")],
-        "settlements": [_settlement("s1", "a", settled="t5", payment="paid")],
+        "settlements": [_settlement("s1", "a", settled="t5", net=100, paid=100)],
         "order_requests": [_order("r1", "confirmed", resolved="t5", ledger_entry_id="le1"),
                            _order("r2", "pending")],
     }

@@ -73,9 +73,8 @@ None observed. なお既存 fixture `invalid-bad-status.json` は `payment_statu
 ## Remaining Gaps / Out-of-Scope
 
 - [ ] auto ledger 生成（settlement 拡張の別項目）。
-- [ ] `core/sync.py` の settlement merge は paid>unpaid の単調解決。partial は両者の中間に位置するが
-      paid_amount を比較キーに含めていない。複数書き手で partial を同期する運用が出たら sync 規則の
-      additive 見直しが要る（本タスクでは sync.py は無変更）。
+- [x] `core/sync.py` の settlement merge を paid_amount monotonic max に更新（**ADR-0024 で対応済**、
+      別 commit）。partial が早い unpaid に上書きされない収束ルールにした。
 
 ## Related ADRs
 

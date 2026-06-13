@@ -134,30 +134,36 @@ def _settlement_committed(s: dict) -> bool:
     return bool(s.get("settled_at"))
 
 
-def _resolve_settlement(a: dict, b: dict) -> dict:
-    """同一 (session_id, player_id) の settlement を単調ルールで畳む（ADR-0022）。
+def _stable_key(s: dict) -> str:
+    """内容に基づく決定的な tiebreak キー（順序非依存の収束のため）。"""
+    return json.dumps(s, sort_keys=True, ensure_ascii=False)
 
-    committed（settled_at 非 null）が uncommitted に勝つ。両 committed なら paid が unpaid に
-    勝つ（支払いは取り消されない単調性）、settled_at は早い方、金額等は採用側の値を保持。
-    可換になるよう順序非依存に決める。
+
+def _resolve_settlement(a: dict, b: dict) -> dict:
+    """同一 (session_id, player_id) の settlement を収束ルールで畳む（ADR-0022 / ADR-0024）。
+
+    committed（settled_at 非 null）が uncommitted に勝つ。両 committed なら **paid_amount の
+    monotonic max** を採り（受領額は累積で取り消されない単調性, ADR-0023）、`payment_status` は
+    そこから導出する（partial も含め一貫）。frozen な totals / settled_at は決定的に選んだ base
+    （settled_at 最早、同値は内容で安定 tiebreak）から採る。max + 決定的 base なので可換・冪等。
     """
+    from core.ledger_repository import _derive_payment_status  # 単一導出点（ADR-0023）
+
     ca, cb = _settlement_committed(a), _settlement_committed(b)
     if ca != cb:
         return a if ca else b
     if not ca:
-        # 両方 uncommitted → どちらでも同等（local=a）。
-        return a
-    # 両方 committed。
-    pa = a.get("payment_status") == "paid"
-    pb = b.get("payment_status") == "paid"
-    if pa != pb:
-        return a if pa else b
-    # payment_status が同じ → settled_at の早い方（同値なら local=a）。
-    sa = a.get("settled_at") or ""
-    sb = b.get("settled_at") or ""
-    if sa != sb:
-        return a if sa < sb else b
-    return a
+        # 両方 uncommitted（通常 snapshot には現れない）→ 決定的に選ぶ。
+        return a if _stable_key(a) <= _stable_key(b) else b
+    # 両方 committed: base = settled_at 最早（同値は内容で安定 tiebreak）。
+    base = a if ((a.get("settled_at") or ""), _stable_key(a)) <= (
+        (b.get("settled_at") or ""), _stable_key(b)
+    ) else b
+    paid = max(int(a.get("paid_amount", 0)), int(b.get("paid_amount", 0)))
+    merged = dict(base)
+    merged["paid_amount"] = paid
+    merged["payment_status"] = _derive_payment_status(int(base.get("net_due_to_store", 0)), paid)
+    return merged
 
 
 def merge_settlements(local: list[dict], remote: list[dict]) -> list[dict]:
