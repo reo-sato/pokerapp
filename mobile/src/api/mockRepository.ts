@@ -86,6 +86,9 @@ export class MockRepository implements ViewerRepository {
         point_spent_total: sumPoint(["buy_in", "rebuy", "add_on", "order"]),
         point_credited_total: 0, // mock は point grant を持たない
         net_due_to_store: entries.reduce((a, e) => a + e.cash_amount, 0),
+        settled: false, // mock は未確定（確定フローはスタッフ desktop）
+        payment_status: null,
+        settled_at: null,
       },
     };
   }

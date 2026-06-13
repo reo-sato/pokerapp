@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### Added (S4 — mobile での精算状況表示, ADR-0016/0017)
+
+- player の会計参照（viewer API `/api/players/{id}/sessions/{sid}/ledger` の summary）に
+  **確定状態を additive 追加**: `settled`(bool) / `payment_status`（paid|unpaid）/ `settled_at`。
+  確定判定は `list_settlements`（確定行）由来（compute_settlement の settled_at は speculative でも
+  埋まるため使わない）。
+- mobile `MyLedgerScreen` が **精算状況**（未確定（暫定）/ 確定済（支払済み・未払い））を表示。
+  プレイヤーが自分のスマホで自分の精算結果を確認できる。
+- tests: `test_viewer_api.py::test_player_ledger_settled_status` + mobile mock/typecheck 更新。
+
 ### Added (S4 — settlement 確定 GUI, ADR-0016)
 
 - スタッフ用 ledger 画面（`gui/ledger_view.py`, `main.py --ledger`）に **精算パネル**を追加。

@@ -150,7 +150,7 @@ set_payment_status(session_id, player_id, status) -> SessionSettlement
 |------|----------|------|
 | `list_player_sessions(player_id, session_repo)` | `[player_session_summary, ...]` | 着席 hand>0 の session のみ |
 | `list_player_hands(player_id, session_id, session_repo, log_dir)` | `[hand, ...]` | seat_assignment 起点で hand log を join |
-| `get_player_session_ledger(player_id, session_id, ledger_repo)` | `{entries, summary}` | summary は verify-v1 `compute_settlement` を当該 player に絞った settlement 由来（ADR-0016, cash_in_total / order_total / entry_fee / point_spent_total / point_credited_total / net_due_to_store） |
+| `get_player_session_ledger(player_id, session_id, ledger_repo)` | `{entries, summary}` | summary の totals は `compute_settlement` 由来（cash_in_total / order_total / entry_fee / point_spent_total / point_credited_total / net_due_to_store）+ 確定状態 `settled`/`payment_status`/`settled_at`（`list_settlements` 由来, S4 mobile） |
 | `get_hand(session_id, hand_id, log_dir)` | `hand` | legacy session_id でも log があれば返す |
 
 ## order-request interface（M5 実装済 — ADR-0018）

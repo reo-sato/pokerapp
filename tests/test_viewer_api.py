@@ -163,13 +163,33 @@ def test_player_ledger_entries_and_summary(env: dict):
     assert [e["kind"] for e in body["entries"]] == ["buy_in", "order"]
     for e in body["entries"]:
         _validate(e, "ledger_entry")
-    assert body["summary"] == {
+    # settled=false（未確定）+ totals。settled/payment_status/settled_at は additive（S4 mobile）。
+    assert body["summary"]["settled"] is False
+    assert body["summary"]["payment_status"] is None
+    assert {k: body["summary"][k] for k in (
+        "cash_in_total", "order_total", "entry_fee",
+        "point_spent_total", "point_credited_total", "net_due_to_store")} == {
         "cash_in_total": 10000, "order_total": 1500, "entry_fee": 0,
         "point_spent_total": 0, "point_credited_total": 0, "net_due_to_store": 11500,
     }
     # bob は自分の entry だけ見える
     res = env["client"].get(f"/api/players/{env['bob'].player_id}/sessions/{sid}/ledger")
     assert res.json()["summary"]["net_due_to_store"] == 20000
+
+
+def test_player_ledger_settled_status(env: dict):
+    """session を close→commit→paid すると、player の summary に確定状態が反映される（S4 mobile）。"""
+    sid, pid = env["session"].session_id, env["alice"].player_id
+    env["sessions"].close_session(sid)
+    env["ledger"].commit_settlement(sid)
+    env["ledger"].set_payment_status(sid, pid, "paid")
+
+    summary = env["client"].get(
+        f"/api/players/{pid}/sessions/{sid}/ledger").json()["summary"]
+    assert summary["settled"] is True
+    assert summary["payment_status"] == "paid"
+    assert summary["settled_at"]
+    assert summary["net_due_to_store"] == 11500
 
 
 class TestOrderRequests:

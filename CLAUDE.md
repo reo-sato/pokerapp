@@ -417,7 +417,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **settlement 確定 GUI (S4)** | ✅ 実装済 | `gui/ledger_view.py` 精算パネル: closed session の `commit_settlement` + 確定済 settlement の paid/unpaid 切替（`set_payment_status`）。partial-paid は未対応 |
 | **settlement / cashflow CSV export (S3.3)** | ✅ 実装済 | `output/ledger_csv_exporter.py`（`main.py --export-ledger`, utf-8-sig） |
 | **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（`main.py --viewer-api`, read-only GET, `[api]` extra, ADR-0017。ledger summary は `compute_settlement` 由来 = ADR-0016） |
-| **mobile viewer (M2)** | ✅ 実装済 | `mobile/`（Expo/RN。PlayerSelect→MySessions→MyHands→HandDetail + 会計 + 注文画面。`ViewerRepository` に mock/HTTP 注入, `EXPO_PUBLIC_API_URL` 切替, ADR-0017） |
+| **mobile viewer (M2)** | ✅ 実装済 | `mobile/`（Expo/RN。PlayerSelect→MySessions→MyHands→HandDetail + 会計（**精算状況: 確定/未確定・支払済み/未払い** 表示, S4）+ 注文画面。`ViewerRepository` に mock/HTTP 注入, `EXPO_PUBLIC_API_URL` 切替, ADR-0017） |
 | **注文リクエスト write path (M5)** | ✅ 実装済 | `core/order_request*.py` / `core/menu.py` + viewer API `/menu`・`/order-requests`（GET/POST）+ `gui/ledger_view.py` の確定/却下パネル（§ 注文リクエスト参照, ADR-0018。staff-in-the-loop / in-process API / name-pick = ISSUE-0019 Fixed） |
 | **hand logger × session 統合 (S2.x E1+E2-core)** | ✅ 実装済 | `integration/engine.py`（`session_repo`/`seat_player_map` DI、`assign_seat` write-through + `player_id` additive 埋め込み、`session_layer.enabled` 既定 off で挙動不変, ADR-0008） |
 | **seat→player 選択 GUI + live 有効化 (S2.x E3)** | ✅ 実装済 | `gui/seat_selection.py`（`SeatSelectionDialog`: モーダル, 席ごと割当 / 未登録その場 create / 空席 skip / carry-forward）+ `gui/dashboard.py`「座席設定」ボタン + `integration/engine.py:set_seat_player_map` + `main.py` 結線（UUID4 session_id）。既定 off で挙動不変, ISSUE-0006 Resolved |
@@ -812,7 +812,9 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
   - WS0: session_settlement schema `1.0` 凍結（ADR-0019）。
   - WS2: settlement の **GUI からの確定（commit）+ paid/unpaid 切替**（`gui/ledger_view.py` 精算パネル,
     `tests/test_ledger_view_gui.py::TestSettlement`）。
-- **残**: WS3 mobile の settlement 表示、partial paid 対応、auto ledger 生成。
+  - WS3: mobile が自分の精算状況（確定/未確定・paid/unpaid）を表示（`MyLedgerScreen`、
+    viewer API の player ledger summary に `settled`/`payment_status`/`settled_at` を additive）。
+- **残**: partial paid 対応、auto ledger 生成。
 
 ### Phase 5 — sync / cross-app contract hardening
 

@@ -89,33 +89,36 @@ def get_player_session_ledger(
 ) -> dict:
     """player の session 会計参照（viewer API, ADR-0017）: entries + 中間集計。
 
-    summary は verify-v1 ledger（ADR-0016）の settlement 由来の中間集計（speculative）。
-    `compute_settlement` を当該 player に絞って導出する（確定は S4 settlement）。
+    summary は verify-v1 ledger（ADR-0016）の settlement 由来の中間集計。totals は
+    `compute_settlement` を当該 player に絞った値。確定状態は `list_settlements`（確定行のみ）で
+    判定し、`settled` / `payment_status` / `settled_at` を additive に載せる（S4 mobile 表示）。
     field は SessionSettlement の名前に揃える（cash_in_total / order_total / entry_fee /
     point_spent_total / point_credited_total / net_due_to_store）。
+    **注**: speculative 行は `settled_at` が常に埋まる（wall-clock）ため、確定/未確定の判定は
+    `list_settlements` を使う（compute_settlement の settled_at では判定しない）。
     unknown session は SessionNotFoundError（ledger_repo 経由で透過）。
     """
-    rows = ledger_repo.compute_settlement(session_id)
-    row = next((r for r in rows if r.player_id == player_id), None)
-    summary = (
-        {
-            "cash_in_total": row.cash_in_total,
-            "order_total": row.order_total,
-            "entry_fee": row.entry_fee,
-            "point_spent_total": row.point_spent_total,
-            "point_credited_total": row.point_credited_total,
-            "net_due_to_store": row.net_due_to_store,
-        }
-        if row is not None
-        else {
-            "cash_in_total": 0,
-            "order_total": 0,
-            "entry_fee": 0,
-            "point_spent_total": 0,
-            "point_credited_total": 0,
-            "net_due_to_store": 0,
-        }
+    spec = next(
+        (r for r in ledger_repo.compute_settlement(session_id) if r.player_id == player_id),
+        None,
     )
+    committed = next(
+        (s for s in ledger_repo.list_settlements(session_id) if s.player_id == player_id),
+        None,
+    )
+    base = committed or spec
+    summary = {
+        "cash_in_total": base.cash_in_total if base else 0,
+        "order_total": base.order_total if base else 0,
+        "entry_fee": base.entry_fee if base else 0,
+        "point_spent_total": base.point_spent_total if base else 0,
+        "point_credited_total": base.point_credited_total if base else 0,
+        "net_due_to_store": base.net_due_to_store if base else 0,
+        # 確定状態（committed のときのみ意味を持つ。未確定は settled=false）。
+        "settled": committed is not None,
+        "payment_status": committed.payment_status if committed else None,
+        "settled_at": committed.settled_at if committed else None,
+    }
     return {
         "entries": [e.to_dict() for e in ledger_repo.list_entries(session_id, player_id)],
         "summary": summary,

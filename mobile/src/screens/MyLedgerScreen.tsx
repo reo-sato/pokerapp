@@ -49,7 +49,10 @@ export function MyLedgerScreen({
       ) : (
         <ScrollView>
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>合計（店への支払い見込み）: {data.summary.net_due_to_store.toLocaleString()}</Text>
+            <Text style={styles.cardTitle}>
+              {data.summary.settled ? "精算額（確定）" : "合計（店への支払い見込み）"}:{" "}
+              {data.summary.net_due_to_store.toLocaleString()}
+            </Text>
             <Text style={styles.cardMeta}>
               バイイン {data.summary.cash_in_total.toLocaleString()} ・ 注文{" "}
               {data.summary.order_total.toLocaleString()} ・ 参加費{" "}
@@ -60,6 +63,16 @@ export function MyLedgerScreen({
                 使用ポイント {data.summary.point_spent_total.toLocaleString()}
               </Text>
             ) : null}
+            <Text style={styles.cardMeta}>
+              精算状況:{" "}
+              {data.summary.settled ? (
+                <Text style={data.summary.payment_status === "paid" ? styles.pos : styles.neg}>
+                  確定済（{data.summary.payment_status === "paid" ? "支払済み" : "未払い"}）
+                </Text>
+              ) : (
+                "未確定（暫定）"
+              )}
+            </Text>
           </View>
 
           <View style={styles.card}>

@@ -110,6 +110,10 @@ export interface LedgerSummary {
   point_spent_total: number; // 使用 point 合計
   point_credited_total: number; // 付与 point 合計
   net_due_to_store: number; // 全 kind の cash_amount 合計（店への net 支払い）
+  // S4: 精算の確定状態（committed のときのみ payment_status/settled_at が意味を持つ）。
+  settled: boolean;
+  payment_status?: string | null; // "paid" | "unpaid"（settled=true のとき）
+  settled_at?: string | null;
 }
 
 export interface PlayerSessionLedger {

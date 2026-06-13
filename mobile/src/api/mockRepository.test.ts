@@ -65,6 +65,9 @@ test("getPlayerLedger returns entries and summary consistent with core rules", a
     point_spent_total: 0,
     point_credited_total: 0,
     net_due_to_store: 11000,
+    settled: false,
+    payment_status: null,
+    settled_at: null,
   });
   await assert.rejects(repo.getPlayerLedger(ALICE_ID, "deadbeef"), (err: unknown) => {
     assert.ok(err instanceof ViewerApiError);
