@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### Added (S4 — settlement 確定 GUI, ADR-0016)
+
+- スタッフ用 ledger 画面（`gui/ledger_view.py`, `main.py --ledger`）に **精算パネル**を追加。
+  closed session を **確定（commit_settlement）** し、確定済 settlement の **paid/unpaid を player
+  ごとに切替**（set_payment_status）できる。これまで CLI/CSV export 経由だった settlement 確定が
+  GUI から行えるようになった。open session の確定は core が `session_not_closed`、二重確定は
+  `already_settled` を返し、画面に表示する。partial-paid は未対応（paid/unpaid のみ）。
+- `tests/test_ledger_view_gui.py::TestSettlement`（6 件）でコマンドロジックを固定。
+
 ### Added (S5 — 双方向 sync（state-based merge）, ADR-0022)
 
 - **双方向 sync**（`core/sync.py`）: 複数の運営ノード（LAN）が全ストアのレプリカを

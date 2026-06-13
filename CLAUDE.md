@@ -93,7 +93,7 @@ pokerapp/
 │   ├── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
 │   ├── seat_selection.py          ← SeatSelectionDialog (seat→player_id 選択モーダル, S2.x E3)
 │   ├── session_viewer.py          ← SessionViewerWindow (session/seating read-only inspection 画面, WS2-α, 別画面)
-│   └── ledger_view.py             ← LedgerViewWindow (ledger viewer/editor + 注文確定/却下パネル, S3.2 + M5, dashboard とは別画面)
+│   └── ledger_view.py             ← LedgerViewWindow (ledger viewer/editor + 精算確定/paid-unpaid パネル + 注文確定/却下パネル, S3.2 + S4 + M5, dashboard とは別画面)
 │
 ├── mobile/                        ← Poker Hand Viewer (Expo/RN, M2, ADR-0017。mock/HTTP repository 切替, web export 配布)
 │
@@ -282,7 +282,8 @@ session world（S2）の上に重なる **ledger（金銭イベント）/ points
 
 ### Out of scope（現時点）
 
-- settlement の GUI からの確定（commit）、auto ledger 生成、partial paid。
+- auto ledger 生成、partial paid（settlement の GUI からの確定 commit + paid/unpaid 切替は
+  S4 GUI で実装済 — `gui/ledger_view.py` の精算パネル）。
 - hand logger（`HandSummary`）との自動接続、chip↔円換算、rake/fee。
 - settlement schema の `1.0` freeze（S4）、cross-app sync（S5）。
 
@@ -413,6 +414,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **session / seating viewer (WS2-α, read-only)** | ✅ 実装済 | `gui/session_viewer.py`（`main.py --sessions`, § Session / Seating Viewer 参照） |
 | **ledger / point / settlement core (S3.1)** | ✅ 実装済 | `core/ledger.py`, `core/ledger_repository.py`（§ Ledger / Points / Settlement 参照, ADR-0016, ISSUE-0001 Resolved） |
 | **ledger desktop viewer (S3.2)** | ✅ 実装済 | `gui/ledger_view.py`（`main.py --ledger`, 別画面, dashboard 不可侵） |
+| **settlement 確定 GUI (S4)** | ✅ 実装済 | `gui/ledger_view.py` 精算パネル: closed session の `commit_settlement` + 確定済 settlement の paid/unpaid 切替（`set_payment_status`）。partial-paid は未対応 |
 | **settlement / cashflow CSV export (S3.3)** | ✅ 実装済 | `output/ledger_csv_exporter.py`（`main.py --export-ledger`, utf-8-sig） |
 | **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（`main.py --viewer-api`, read-only GET, `[api]` extra, ADR-0017。ledger summary は `compute_settlement` 由来 = ADR-0016） |
 | **mobile viewer (M2)** | ✅ 実装済 | `mobile/`（Expo/RN。PlayerSelect→MySessions→MyHands→HandDetail + 会計 + 注文画面。`ViewerRepository` に mock/HTTP 注入, `EXPO_PUBLIC_API_URL` 切替, ADR-0017） |
@@ -595,7 +597,8 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    可換・冪等の UUID union + 単調解決）+ `/api/staff/sync/{snapshot,merge}`（ADR-0022, 複数書き手 +
    収束マージ）。**残**: player rename 伝播（`updated_at` additive）・hand log の file-level union・
    定期 auto-trigger、player per-player アクセス制御（ISSUE-0019 PIN 再評価、別 ADR）。
-5. **settlement 拡張**: partial-paid、settlement の GUI からの確定（commit）、auto ledger 生成。
+5. **settlement 拡張**: partial-paid、auto ledger 生成（settlement の GUI からの確定 commit +
+   paid/unpaid 切替は S4 GUI で実装済 = `gui/ledger_view.py` 精算パネル）。
 6. **R 系の後続**: 派生 confidence の重み較正（golden fixtures 由来）、camera 源の統合。
 7. **プライバシー再評価（ISSUE-0019）**: name-pick で問題が顕在化したら PIN を additive 導入。
 8. **未実装の単機能**: Vosk 代替 ASR、ディーラーボタン自動回転 / SB-BB 自動 post。
@@ -805,11 +808,11 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
   （`core/ledger_repository.py:compute_settlement`/`commit_settlement`/`set_payment_status`,
   `output/ledger_csv_exporter.py`, `main.py --export-ledger`）。mobile/API では `compute_settlement`
   由来の中間集計を read 表示（M1/M2）。
-- **残（= S4 本体）**:
-  - WS0: session_settlement schema の `1.0` 凍結（player→店の 1 方向のみ。上流 session/ledger freeze 後）。
-  - WS2: settlement の **GUI からの確定（commit）** UI（現状 CLI/export 経由）。partial paid 対応。
-  - WS3: mobile の settlement 表示。
-- **Blockers**: partial paid の要否確定。上流 schema freeze（ISSUE-0005）。
+- **実装済**:
+  - WS0: session_settlement schema `1.0` 凍結（ADR-0019）。
+  - WS2: settlement の **GUI からの確定（commit）+ paid/unpaid 切替**（`gui/ledger_view.py` 精算パネル,
+    `tests/test_ledger_view_gui.py::TestSettlement`）。
+- **残**: WS3 mobile の settlement 表示、partial paid 対応、auto ledger 生成。
 
 ### Phase 5 — sync / cross-app contract hardening
 

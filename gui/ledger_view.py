@@ -13,9 +13,12 @@ hand logger の dashboard (`gui/dashboard.py`) とは **完全に別画面**。�
     を表示する。中間集計は **暫定（speculative）** であることを明示する。
   - entry の訂正は **reversal**（append-only）で行う（直接編集・削除はしない）。
   - point を付与する（manual_grant）。
+  - **session 締めの精算確定（commit）と paid/unpaid 切替**（S4 GUI, ADR-0016）。closed session で
+    `commit_settlement` し、確定済 settlement の支払状態を player ごとに切り替える。
   - validation は core / repository の error を表示するだけ（再実装しない）。
 
-settlement の確定（commit）/ CSV export は本画面の scope 外（S3.3, ISSUE-0018）。
+CSV export は本画面の scope 外（S3.3, ISSUE-0018, `main.py --export-ledger`）。partial-paid は未対応
+（settlement は paid/unpaid のみ）。
 
 レイアウト:
   ┌────────────────────────────────────────────┐
@@ -115,6 +118,7 @@ class LedgerViewWindow:
         self._player_by_label: dict[str, str] = {}
         self._entry_rows: dict[str, object] = {}
         self._summary_rows: list[object] = []
+        self._settlement_rows: list[object] = []
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -195,18 +199,26 @@ class LedgerViewWindow:
         self._summary_frame.grid(row=3, column=0, sticky="nsew", padx=12, pady=4)
         self._summary_frame.grid_columnconfigure(0, weight=1)
 
+        # S4: 精算確定（commit）+ paid/unpaid 切替。
+        root.grid_rowconfigure(4, weight=1)
+        self._settlement_frame = ctk.CTkScrollableFrame(
+            root, label_text="精算（確定 commit / 支払状態 paid・unpaid）"
+        )
+        self._settlement_frame.grid(row=4, column=0, sticky="nsew", padx=12, pady=4)
+        self._settlement_frame.grid_columnconfigure(0, weight=1)
+
         # M5: 注文リクエスト（pending）確定/却下。order_repo が注入されたときのみ表示。
         if self._order_repo is not None:
-            root.grid_rowconfigure(4, weight=1)
+            root.grid_rowconfigure(5, weight=1)
             self._order_frame = ctk.CTkScrollableFrame(
                 root, label_text="注文リクエスト（pending — 確定で order entry を作成）"
             )
-            self._order_frame.grid(row=4, column=0, sticky="nsew", padx=12, pady=4)
+            self._order_frame.grid(row=5, column=0, sticky="nsew", padx=12, pady=4)
             self._order_frame.grid_columnconfigure(0, weight=1)
-            status_row = 5
+            status_row = 6
         else:
             self._order_frame = None
-            status_row = 4
+            status_row = 5
 
         self._status_label = ctk.CTkLabel(root, text="", anchor="w")
         self._status_label.grid(row=status_row, column=0, sticky="ew", padx=12, pady=(0, 12))
@@ -379,6 +391,7 @@ class LedgerViewWindow:
     def _refresh(self) -> None:
         self._refresh_entry_list()
         self._refresh_summary()
+        self._refresh_settlement()
         self._refresh_order_requests()
 
     def _refresh_entry_list(self) -> None:
@@ -442,6 +455,73 @@ class LedgerViewWindow:
         )
         total.grid(row=len(rows), column=0, sticky="w", padx=4, pady=(6, 1))
         self._summary_rows.append(total)
+
+    # ――― 精算確定 / paid-unpaid（S4, ADR-0016）―――
+
+    def _refresh_settlement(self) -> None:
+        """確定（commit）ボタンと、確定済 settlement（paid/unpaid 切替）を表示する。"""
+        ctk = self._ctk
+        for widget in self._settlement_rows:
+            try:
+                widget.destroy()
+            except Exception:
+                pass
+        self._settlement_rows.clear()
+        if not self._session_id:
+            return
+        # commit ボタン（closed session のみ確定可。open は core が SessionNotClosedError）。
+        btn = ctk.CTkButton(
+            self._settlement_frame, text="このセッションを精算確定（commit）",
+            command=self._cmd_commit_settlement,
+        )
+        btn.grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        self._settlement_rows.append(btn)
+        try:
+            committed = self._ledger.list_settlements(self._session_id)
+        except LedgerNotFoundError:
+            committed = []
+        for idx, s in enumerate(committed, start=1):
+            row = ctk.CTkFrame(self._settlement_frame, fg_color="transparent")
+            row.grid(row=idx, column=0, sticky="ew", pady=1)
+            row.grid_columnconfigure(0, weight=1)
+            line = (
+                f"{self._player_name(s.player_id)}: net {s.net_due_to_store} 円 "
+                f"[{s.payment_status}]"
+            )
+            kwargs = {"text_color": _STATUS_OK_COLOR} if s.payment_status == "paid" else {}
+            ctk.CTkLabel(row, text=line, anchor="w", **kwargs).grid(
+                row=0, column=0, sticky="w", padx=4
+            )
+            new_status = "unpaid" if s.payment_status == "paid" else "paid"
+            ctk.CTkButton(
+                row, text=f"{new_status} にする", width=110,
+                command=lambda pid=s.player_id, st=new_status: self._cmd_set_payment(pid, st),
+            ).grid(row=0, column=1, padx=4)
+            self._settlement_rows.append(row)
+
+    def _cmd_commit_settlement(self) -> None:
+        if not self._session_id:
+            self._set_status("セッションを選択してください。", error=True)
+            return
+        try:
+            rows = self._ledger.commit_settlement(self._session_id)
+        except _LEDGER_ERRORS as e:  # session_not_closed / already_settled / not_found
+            self._set_status(str(e), error=True)
+            return
+        self._refresh()
+        self._set_status(f"精算を確定しました（{len(rows)} 名）。")
+
+    def _cmd_set_payment(self, player_id: str, status: str) -> None:
+        if not self._session_id:
+            self._set_status("セッションを選択してください。", error=True)
+            return
+        try:
+            self._ledger.set_payment_status(self._session_id, player_id, status)
+        except _LEDGER_ERRORS as e:
+            self._set_status(str(e), error=True)
+            return
+        self._refresh()
+        self._set_status(f"支払状態を {status} に更新しました。")
 
     # ――― 注文リクエスト（M5, ADR-0018）―――
 

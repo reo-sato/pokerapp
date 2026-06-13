@@ -187,6 +187,75 @@ class TestRosterAndSelection:
         assert win._selected_player_id == alice
 
 
+class TestSettlement:
+    """S4: 精算確定（commit）+ paid/unpaid 切替の GUI ロジック（ADR-0016）。"""
+
+    def test_commit_requires_session(self, tmp_path: Path):
+        win, ledger, sessions, players = _make_window(tmp_path)
+        win._session_id = None
+        win._cmd_commit_settlement()
+        assert win._set_status.call_args.kwargs.get("error") is True
+
+    def test_commit_open_session_shows_core_error(self, tmp_path: Path):
+        win, ledger, sessions, players = _make_window(tmp_path)
+        alice = _pid(players, "Alice")
+        s = sessions.create_session()  # open
+        ledger.add_entry(s.session_id, alice, "buy_in", cash_amount=5000)
+        win._session_id = s.session_id
+        win._cmd_commit_settlement()
+        # open session の確定は SessionNotClosedError → error 表示、確定行は作られない
+        assert win._set_status.call_args.kwargs.get("error") is True
+        assert ledger.list_settlements(s.session_id) == []
+
+    def test_commit_closed_session_creates_settlements(self, tmp_path: Path):
+        win, ledger, sessions, players = _make_window(tmp_path)
+        alice = _pid(players, "Alice")
+        s = sessions.create_session()
+        ledger.add_entry(s.session_id, alice, "buy_in", cash_amount=5000)
+        sessions.close_session(s.session_id)
+        win._session_id = s.session_id
+        win._cmd_commit_settlement()
+
+        committed = ledger.list_settlements(s.session_id)
+        assert [c.player_id for c in committed] == [alice]
+        assert committed[0].payment_status == "unpaid"
+        assert win._set_status.call_args.kwargs.get("error", False) is False
+
+    def test_commit_twice_shows_already_settled(self, tmp_path: Path):
+        win, ledger, sessions, players = _make_window(tmp_path)
+        alice = _pid(players, "Alice")
+        s = sessions.create_session()
+        ledger.add_entry(s.session_id, alice, "buy_in", cash_amount=5000)
+        sessions.close_session(s.session_id)
+        win._session_id = s.session_id
+        win._cmd_commit_settlement()
+        win._cmd_commit_settlement()  # 2 回目 → AlreadySettledError
+        assert win._set_status.call_args.kwargs.get("error") is True
+
+    def test_set_payment_toggles_paid_unpaid(self, tmp_path: Path):
+        win, ledger, sessions, players = _make_window(tmp_path)
+        alice = _pid(players, "Alice")
+        s = sessions.create_session()
+        ledger.add_entry(s.session_id, alice, "buy_in", cash_amount=5000)
+        sessions.close_session(s.session_id)
+        win._session_id = s.session_id
+        win._cmd_commit_settlement()
+
+        win._cmd_set_payment(alice, "paid")
+        assert ledger.list_settlements(s.session_id)[0].payment_status == "paid"
+        win._cmd_set_payment(alice, "unpaid")
+        assert ledger.list_settlements(s.session_id)[0].payment_status == "unpaid"
+        assert win._set_status.call_args.kwargs.get("error", False) is False
+
+    def test_set_payment_before_commit_shows_error(self, tmp_path: Path):
+        win, ledger, sessions, players = _make_window(tmp_path)
+        alice = _pid(players, "Alice")
+        s = sessions.create_session()
+        win._session_id = s.session_id
+        win._cmd_set_payment(alice, "paid")  # 未確定 → LedgerNotFoundError
+        assert win._set_status.call_args.kwargs.get("error") is True
+
+
 class TestSeparateFromHandLogger:
     """ledger viewer が hand logger dashboard と別構造であることの最低限の確認。"""
 
