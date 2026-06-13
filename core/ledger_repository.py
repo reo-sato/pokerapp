@@ -148,6 +148,11 @@ class LedgerRepository:
         self._settlements: dict[tuple[str, str], SessionSettlement] = {}
         self._load()
 
+    @property
+    def path(self) -> Path:
+        """この repository の永続ファイルパス（sync が snapshot/merge 対象を特定する用）。"""
+        return self._path
+
     # ――― 永続化 ―――
 
     def _load(self) -> None:
@@ -195,6 +200,19 @@ class LedgerRepository:
             logger.exception("Failed to write ledger DB: %s", self._path)
             if tmp_path.exists():
                 tmp_path.unlink(missing_ok=True)
+
+    @_locked
+    def reload(self) -> None:
+        """ディスクから ledger / point / settlement を再読込する（sync 後の最新化用, ADR-0022）。
+
+        file-level merge（`core/sync.py`）が `ledger.json` を書き換えた後、live プロセスの
+        in-memory 状態を最新化するために呼ぶ。in-memory list/dict をリセットして `_load` し直す
+        だけで、業務ルールには影響しない。
+        """
+        self._entries.clear()
+        self._point_entries.clear()
+        self._settlements.clear()
+        self._load()
 
     # ――― 参照整合ヘルパ ―――
 

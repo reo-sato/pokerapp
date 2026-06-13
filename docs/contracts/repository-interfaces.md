@@ -194,6 +194,22 @@ write は **write 所有プロセス（`--ledger`）のみ**（単独 `--viewer-
 認可 error は `unauthorized`(401) / `staff_writes_disabled`(403)。round-trip 契約 test:
 `tests/test_viewer_api_staff.py`。
 
+### sync メソッド（S5 — ADR-0022）
+
+state-based merge による双方向 sync（`core/sync.py` 純粋関数 + `/api/staff/sync/...`）。staff client に additive:
+
+- `pull_sync_snapshot()` → peer ノードの全レコード snapshot（GET `/api/staff/sync/snapshot`）。
+- `push_sync_merge(snapshot)` → snapshot を merge させ summary を受け取る（POST `/api/staff/sync/merge`）。
+- `sync_bidirectional(peer)` → pull+merge を双方向に行い 2 ノードを収束させる。
+
+リポジトリ側の additive 拡張（merge を支える）:
+
+- 全 repository（Player / Session / Ledger / OrderRequest）に **read-only `path` property**
+  （自分の永続ファイルパス）を追加。`create_app` が snapshot/merge 対象を特定するのに使う。
+- `LedgerRepository` / `OrderRequestRepository` に **public `reload()`**（in-memory を捨てて
+  ディスクから読み直す）を追加（`Player`/`Session` は既存）。file-level merge 後に live プロセスが
+  in-memory を最新化するために呼ぶ。業務ロジックは不変。round-trip test: `tests/test_viewer_api_sync.py`。
+
 ## 残（planned）
 
 | 対象 | 内容 | phase |

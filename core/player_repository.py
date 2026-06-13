@@ -57,6 +57,11 @@ class PlayerRepository:
         self._players: dict[str, Player] = {}
         self._load()
 
+    @property
+    def path(self) -> Path:
+        """この repository の永続ファイルパス（sync が snapshot/merge 対象を特定する用）。"""
+        return self._path
+
     # ――― 永続化 ―――
 
     def _load(self) -> None:

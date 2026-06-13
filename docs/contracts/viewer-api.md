@@ -102,6 +102,59 @@ ledger / settlement の error は `error-shapes.md` の ledger セクション�
 `invalid_quantity`(400) / `not_found`(404)。新規 code は認可の **`unauthorized`(401)** /
 **`staff_writes_disabled`(403)**、write 所有外は既存 `orders_unavailable`(503) を再利用。
 
+## sync API（ADR-0022）
+
+複数の運営ノード（LAN）が全ストアのレプリカを **state-based merge** で相互最新化するための
+staff-only エンドポイント。同期は **on-demand pull + peer-to-peer merge**（中央権威なし・
+auto-sync なし）。マージは `core/sync.py` の純粋関数で **可換・結合・冪等**（UUID union + 単調
+フィールド解決）なので、どのノードがどの順で何度マージしても同じ状態に収束する。
+
+### endpoints
+
+| method | path | write | body | 返り値 |
+|--------|------|-------|------|--------|
+| GET  | `/api/staff/sync/snapshot` | no | — | このノードの全レコード snapshot（下記 shape） |
+| POST | `/api/staff/sync/merge` | yes | peer snapshot dict | merge summary（new-or-changed カウント） |
+
+認可は staff write API と同じ（`Authorization: Bearer <viewer_api.staff_token>`）。`snapshot`
+は read（read-only `--viewer-api` でも可）、`merge` は **write 所有プロセス（`--ledger`,
+viewer_api.enabled）のみ** が受理（read-only は 503 `orders_unavailable`、単一書き手 → 収束マージ
+への移行点）。token 未設定 → 403 `staff_writes_disabled` / 不一致 → 401 `unauthorized`。
+
+### snapshot shape
+
+```json
+{
+  "players":        [player, ...],
+  "sessions":       [session（full nested = hands/seats 込み）, ...],
+  "ledger_entries": [ledger_entry, ...],
+  "point_entries":  [point_ledger_entry, ...],
+  "settlements":    [session_settlement, ...],
+  "order_requests": [order_request, ...]
+}
+```
+
+各レコードは対応モデルの `to_dict` 形そのまま（snapshot は別ノードの同型ストアにそのまま merge できる）。
+
+### merge semantics（per-store, ADR-0022 §Decision.2）
+
+- **players**（key `player_id`）: create-only union。既存 id は local 保持（rename は v1 非伝播）。
+- **ledger_entries / point_entries**（key `entry_id`）: union（append-only ⇒ 衝突なし）。
+- **order_requests**（key `request_id`）: union + status 解決。pending < {confirmed, rejected}。
+  一方終端・他方 pending → 終端採用。両終端で異なる（confirmed vs rejected）→ **confirmed 優先**。
+  両 confirmed → `resolved_at` 早い方。
+- **settlements**（key `(session_id, player_id)`）: committed > uncommitted。両 committed なら
+  paid > unpaid、`settled_at` 早い方の値を保持。
+- **sessions**（key `session_id`）: union。`status` closed > open（`ended_at` は closed 側）、
+  `label`/`blinds` local 優先。入れ子 `hands`（key hand_id）union、`seats`（key seat_no）union
+  で同一 seat_no 衝突は local 優先。
+- **merge summary**: `{"players_added", "sessions_added", "ledger_entries_added",
+  "point_entries_added", "settlements_added", "order_requests_added"}`（new-or-changed のカウント）。
+
+Python client: `ViewerApiClient.pull_sync_snapshot()` / `push_sync_merge(snapshot)` /
+`sync_bidirectional(peer)`（pull+merge を双方向に行い 2 ノードを収束させる）。収束 round-trip test
+= `tests/test_sync.py`（純粋）/ `tests/test_viewer_api_sync.py`（HTTP 2 ノード）。
+
 ## error 形
 
 `error-shapes.md` の論理形をそのまま HTTP body にする（分岐は `code`、表示は `message`）:

@@ -199,3 +199,28 @@ class ViewerApiClient:
             "POST", f"/api/staff/order-requests/{request_id}/reject",
             headers=self._staff_headers(),
         )
+
+    # ――― sync API（ADR-0022。state-based merge。staff-token gate）―――
+
+    def pull_sync_snapshot(self) -> dict:
+        """peer ノードの全レコード snapshot を取得する（GET /api/staff/sync/snapshot）。"""
+        return self._request(
+            "GET", "/api/staff/sync/snapshot", headers=self._staff_headers(),
+        )
+
+    def push_sync_merge(self, snapshot: dict) -> dict:
+        """snapshot を peer ノードに送って merge させ、summary を受け取る（POST .../merge）。"""
+        return self._request(
+            "POST", "/api/staff/sync/merge", json=snapshot,
+            headers=self._staff_headers(),
+        )
+
+    def sync_bidirectional(self, peer: "ViewerApiClient") -> dict:
+        """self と peer を双方向に収束させる（ADR-0022）。
+
+        peer の snapshot を self に merge し、self の snapshot を peer に merge する。merge は
+        可換・冪等なので、両ノードが同じ union 状態に収束する。
+        """
+        into_self = self.push_sync_merge(peer.pull_sync_snapshot())
+        into_peer = peer.push_sync_merge(self.pull_sync_snapshot())
+        return {"into_self": into_self, "into_peer": into_peer}

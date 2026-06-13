@@ -92,6 +92,20 @@ class OrderRequestRepository:
         self._loaded_mtime: float | None = None
         self._reload()
 
+    @property
+    def path(self) -> Path:
+        """この repository の永続ファイルパス（sync が snapshot/merge 対象を特定する用）。"""
+        return self._path
+
+    def reload(self) -> None:
+        """ディスクから注文リクエストを再読込する（sync 後の最新化用, ADR-0022）。
+
+        file-level merge（`core/sync.py`）が `order_requests.json` を書き換えた後、live プロセスの
+        in-memory 状態を最新化するために呼ぶ。既存の reload-on-read 機構（`_reload`）に委譲する。
+        """
+        with self._lock:
+            self._reload()
+
     # ――― 永続化 ―――
 
     def _reload(self) -> None:

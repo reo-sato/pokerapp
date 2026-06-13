@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+### Added (S5 — 双方向 sync（state-based merge）, ADR-0022)
+
+- **双方向 sync**（`core/sync.py`）: 複数の運営ノード（LAN）が全ストアのレプリカを
+  **state-based merge** で相互最新化できる。マージは純粋関数で **可換・結合・冪等**
+  （UUID union + 単調フィールド解決）なので、どのノードがどの順で何度マージしても同じ状態に収束する。
+- **per-store マージルール**（ADR-0022）: players=create-only union（local 優先・rename 非伝播）/
+  ledger・point=union（append-only, 衝突なし）/ order_request=union + status 解決（pending<終端、
+  confirmed が rejected に優先、両 confirmed は resolved_at 早い方）/ settlement=committed>uncommitted・
+  paid>unpaid の単調解決 / session=closed>open + 入れ子 hands/seats union（seat 衝突は local 優先）。
+- **sync API**（staff-token gate）: `GET /api/staff/sync/snapshot`（自ノード全レコード, read-only でも可）/
+  `POST /api/staff/sync/merge`（peer snapshot を取り込み, write 所有プロセスのみ。read-only は 503）。
+- **Python client**: `ViewerApiClient.pull_sync_snapshot()` / `push_sync_merge(snapshot)` /
+  `sync_bidirectional(peer)`（2 ノードを収束させる helper）。
+- **repository additive**: 全 repo に read-only `path` property、`LedgerRepository` /
+  `OrderRequestRepository` に public `reload()`（file-level merge 後の in-memory 最新化）。業務ロジックは不変。
+- 収束テスト: `tests/test_sync.py`（純粋: 冪等 / 可換 / merge(merge(A,B),B)=merge(A,B) + file-level round-trip）
+  / `tests/test_viewer_api_sync.py`（HTTP 2 ノード round-trip + 認可）。
+- ADR-0022 は ADR-0020 の「単一書き手 / 双方向 auto-sync 先送り」を **更新**（複数書き手 + 収束マージ）。
+
 ### Added (S5 write 拡張 — スタッフ会計 write API（staff shared token 認証）, ADR-0021)
 
 - **staff 会計 write API**（`api/server.py` の `/api/staff/...`）: 別端末のスタッフが会計をリモート

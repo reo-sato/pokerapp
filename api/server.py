@@ -49,6 +49,7 @@ from core.order_request_repository import (
 )
 from core.player_repository import PlayerNotFoundError, PlayerRepository
 from core.session_repository import SessionNotFoundError, SessionRepository
+from core.sync import build_snapshot, merge_snapshot_into
 
 logger = logging.getLogger(__name__)
 
@@ -369,6 +370,43 @@ def create_app(
         if err is not None:
             return err
         return order_repo.reject_request(request_id).to_dict()
+
+    # ――― sync API（ADR-0022。staff-token gate, state-based merge）―――
+
+    def _sync_paths() -> dict[str, "Path"]:
+        """このノードの各ストアファイルパス（repo の path property 由来）。"""
+        return {
+            "players_path": player_repo.path,
+            "sessions_path": session_repo.path,
+            "ledger_path": ledger_repo.path,
+            "orders_path": order_repo.path,
+        }
+
+    @app.get("/api/staff/sync/snapshot", response_model=None)
+    def staff_sync_snapshot(request: Request) -> "JSONResponse | dict":
+        """このノードの全レコード snapshot を返す（peer が取り込む。read-only でも可）。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        return build_snapshot(**_sync_paths())
+
+    @app.post("/api/staff/sync/merge", response_model=None)
+    async def staff_sync_merge(request: Request) -> "JSONResponse | dict":
+        """peer snapshot を取り込み（state-based merge）、repo を reload して summary を返す。
+
+        write 所有プロセス（orders_writable）のみ受理（read-only は 503）。
+        """
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        peer = await request.json()
+        summary = merge_snapshot_into(**_sync_paths(), peer=peer)
+        # file-level merge 後、live プロセスの in-memory を最新化する（ADR-0022）。
+        player_repo.reload()
+        session_repo.reload()
+        ledger_repo.reload()
+        order_repo.reload()
+        return summary
 
     return app
 
