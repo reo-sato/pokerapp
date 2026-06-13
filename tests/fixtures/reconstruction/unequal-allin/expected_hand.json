@@ -1,0 +1,117 @@
+{
+  "hand_id": 1,
+  "session_id": "fixture-unequal-allin",
+  "started_at": null,
+  "ended_at": null,
+  "blinds": {
+    "sb": 100,
+    "bb": 200
+  },
+  "board": [],
+  "board_source": "",
+  "players": [
+    {
+      "seat": 1,
+      "name": "P1",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 900,
+      "stack_end": 0,
+      "result": -900
+    },
+    {
+      "seat": 2,
+      "name": "P2",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 2800,
+      "stack_end": 7000,
+      "result": 4200
+    },
+    {
+      "seat": 3,
+      "name": "P3",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 3000,
+      "stack_end": 0,
+      "result": -3000
+    }
+  ],
+  "pot_total": 6700,
+  "pots": [
+    {
+      "amount": 3000,
+      "eligible_seats": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "amount": 4000,
+      "eligible_seats": [
+        2,
+        3
+      ]
+    }
+  ],
+  "winner_seat": 2,
+  "actions": [
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "preflop",
+      "seat": 3,
+      "player_name": "P3",
+      "action": "allin",
+      "amount": 3000,
+      "pot_after": 3300,
+      "stack_after": 0,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": false,
+      "confidence": 0.532
+    },
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "preflop",
+      "seat": 1,
+      "player_name": "P1",
+      "action": "call",
+      "amount": 900,
+      "pot_after": 4200,
+      "stack_after": 0,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": false,
+      "confidence": 0.532
+    },
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "preflop",
+      "seat": 2,
+      "player_name": "P2",
+      "action": "call",
+      "amount": 2800,
+      "pot_after": 7000,
+      "stack_after": 0,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": false,
+      "confidence": 0.532
+    }
+  ],
+  "review_required": false
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/player.schema.json",
+  "title": "Player",
+  "version": "1.0",
+  "description": "player registry の player 永続形 (S1)。属性は player_id + display_name + created_at のみ。業務 validation (重複・前後空白のみ) は core が source of truth (docs/contracts/validation-rules.md)。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["player_id", "display_name", "created_at"],
+  "properties": {
+    "player_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "UUID4 hex (32 文字, lowercase)。アプリ内採番・不変。"
+    },
+    "display_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "表示名。schema は空文字のみ弾く。前後空白のみ・完全一致重複は core が弾く。"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "作成時刻 (ISO 8601)。"
+    }
+  }
+}

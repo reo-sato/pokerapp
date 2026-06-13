@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pokerapp"
+version = "1.0.0.dev0"
+description = "ライブポーカーのハンド履歴を音声(faster-whisper)＋RFID(ESP32/PN532)から自動記録し JSON/PHH 出力するアプリ"
+readme = "README.md"
+requires-python = ">=3.11"
+
+# ── core runtime（製品が動くのに必須）──
+# vision 系(opencv-python/easyocr)は廃止予定のため core から除外（[vision] extra に分離）。
+dependencies = [
+    "numpy>=1.24,<3",
+    "pokerkit>=0.7.0,<0.8.0",
+    "faster-whisper>=1.0,<2",
+    "pyaudio>=0.2.13,<0.3",
+    "customtkinter>=5.2,<6",
+]
+
+[project.optional-dependencies]
+# RFID を PC/SC で直接読む場合のみ（transport="pcsc"）
+pcsc = ["pyscard>=2.0.7,<3"]
+# 廃止予定の vision/ レガシー（製品依存外。必要時のみ）
+vision = ["opencv-python>=4.8,<5", "easyocr>=1.7,<2"]
+# player 向け read-only viewer API（M1, ADR-0017。必要時のみ）
+api = ["fastapi>=0.110,<1", "uvicorn>=0.29,<1"]
+# 開発/テスト/契約検証（CI が使用。実行時 core には不要）
+dev = ["pytest>=7.0", "jsonschema>=4.0,<5", "fastapi>=0.110,<1", "httpx>=0.27,<1"]
+
+[project.scripts]
+pokerapp = "main:main"
+
+[tool.setuptools]
+# vision / tests / tools / docs は配布パッケージから除外
+packages = ["core", "audio", "rfid", "integration", "output", "gui"]
+py-modules = ["main"]
+
+[tool.ruff]
+target-version = "py311"
+# vision/ はレガシー（CI のテスト対象からも除外済み）
+extend-exclude = ["vision"]
+
+[tool.ruff.lint]
+# 最小ゲート: 実バグ系のみ（pyflakes F + 構文エラー E9）。
+# スタイル系 (E/W ほか) は別タスクで段階導入する。
+select = ["F", "E9"]

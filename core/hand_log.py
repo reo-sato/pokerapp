@@ -53,6 +53,9 @@ class HandSummary:
     winner_seat: int
     actions: list[ActionRecord]
     review_required: bool  # いずれかのアクションに needs_review=True があれば True
+    # main/side pot スナップショット [{"amount": int, "eligible_seats": [int,...]}]。
+    # rules-aware backend が end_hand 時に算出（legacy は []）。additive（F3 / R5）。
+    pots: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -65,6 +68,7 @@ class HandSummary:
             "board_source": self.board_source,
             "players": self.players,
             "pot_total": self.pot_total,
+            "pots": self.pots,
             "winner_seat": self.winner_seat,
             "actions": [a.to_dict() for a in self.actions],
             "review_required": self.review_required,

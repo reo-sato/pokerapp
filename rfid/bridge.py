@@ -85,7 +85,6 @@ class PCSCBridge:
         if not self._connected or self._reader is None:
             return None
         try:
-            from smartcard.Exceptions import NoCardException
 
             conn = self._reader.createConnection()
             conn.connect()

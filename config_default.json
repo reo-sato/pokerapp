@@ -21,7 +21,8 @@
   "rfid": {
     "enabled": false,
     "transport": "http",
-    "bind_host": "0.0.0.0",
+    "bind_host": "127.0.0.1",
+    "_bind_host_comment": "ESP32 等 LAN 上の機器から受信する場合は PC の LAN IP（または 0.0.0.0）に変更する。受信は無認証のため、0.0.0.0 は信頼できるネットワークでのみ使用すること。",
     "bind_port": 8787,
     "card_master_file": "./rfid_cards.json",
     "readers": {
@@ -42,5 +43,24 @@
     },
     "_pcsc_transport_comment": "transport='pcsc' の場合は以下を使用 (pyscard 必須)",
     "_pcsc_poll_interval_ms": 100
+  },
+  "recording": {
+    "enabled": false,
+    "_comment": "R1 (ADR-0010): 生センサーイベントを logs/{session_id}.events.jsonl に append-only 記録する sidecar。挙動不変・opt-in。"
+  },
+  "engine": {
+    "backend": "pokerkit",
+    "_comment": "game-state backend。'pokerkit'（既定, ルール準拠の再構築 = actor 推定/合法手射影/silent-fold/side-pot, ADR-0009）| 'legacy'（rollback, 素朴 round-robin）。Phase G で既定を pokerkit に切替。"
+  },
+  "session_layer": {
+    "enabled": false,
+    "_comment": "S2.x (ADR-0008): hand logger を session レイヤ(seat→player_id の write-through)に接続。既定 false で従来動作（rollback）。true で GUI 起動時に session を作成し、座席設定ダイアログ（Phase E3, ISSUE-0006）で seat→player を割り当てる。"
+  },
+  "viewer_api": {
+    "enabled": false,
+    "bind_host": "127.0.0.1",
+    "_bind_host_comment": "player スマホから LAN 参照する場合は PC の LAN IP（または 0.0.0.0）に変更する。無認証のため信頼できるネットワークでのみ（ISSUE-0019 プライバシーモデル）。",
+    "bind_port": 8788,
+    "_comment": "M1/M5 (ADR-0017/0018): player 向け read-only viewer API。'python main.py --viewer-api' で単独起動（注文 POST は 503）。enabled=true で 'python main.py --ledger' が API を in-process 起動し注文リクエスト受付（write）を有効にする（単一プロセス所有）。要 [api] extra。"
   }
 }

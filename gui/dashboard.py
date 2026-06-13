@@ -22,7 +22,7 @@ import queue
 import threading
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from core.game_state import GameStateManager
@@ -65,6 +65,8 @@ class GUIDashboard:
         camera_queue: Optional[queue.Queue] = None,
         stop_event: Optional[threading.Event] = None,
         rfid_receiver: Optional[object] = None,
+        player_repo: Optional[object] = None,
+        session_layer_enabled: bool = False,
     ) -> None:
         import customtkinter as ctk
 
@@ -74,6 +76,11 @@ class GUIDashboard:
         self._camera_queue = camera_queue
         self._stop_event = stop_event or threading.Event()
         self._rfid_receiver = rfid_receiver  # RFIDHTTPReceiver (status プロパティ用)
+        # E3 (ISSUE-0006): session レイヤ接続時のみ seat 選択 UI を有効化する。
+        self._player_repo = player_repo
+        self._session_layer_enabled = session_layer_enabled
+        self._seat_player_map: dict[int, str] = {}
+        self._integration_thread: Optional[threading.Thread] = None
         self._update_queue: queue.Queue["ActionRecord"] = queue.Queue()
         self._rfid_card_queue: queue.Queue = queue.Queue()
         # seat → hole cards 表示用 (スレッド安全のため queue 経由で更新)
@@ -222,6 +229,11 @@ class GUIDashboard:
         ctk.CTkButton(ctrl, text="適用", width=70,
                       command=self._cmd_rebuy).grid(row=0, column=7, padx=(2, 12))
 
+        # E3: session レイヤ接続時のみ「座席設定/変更」ボタンを出す(既定 off では非表示)。
+        if self._session_layer_enabled:
+            ctk.CTkButton(ctrl, text="座席設定", width=90,
+                          command=self._cmd_edit_seats).grid(row=0, column=8, padx=(2, 12))
+
     # ――― コントロールコマンド ―――
 
     def _cmd_new_hand(self) -> None:
@@ -249,18 +261,47 @@ class GUIDashboard:
         ))
 
     def _cmd_rebuy(self) -> None:
+        from core.events import AudioEvent
         try:
             seat = int(self._rebuy_seat_var.get())
             amount = int(self._rebuy_amount_entry.get().strip())
         except ValueError:
             self._append_log("⚠ リバイ入力が不正です。", tag="review")
             return
-        try:
-            self._gs.rebuy(seat, amount)
-            self._refresh_player_row(seat)
-            self._append_log(f"リバイ: 席{seat} +{amount:,}", tag="medium")
-        except Exception as e:
-            self._append_log(f"⚠ リバイ失敗: {e}", tag="review")
+        if amount <= 0:
+            self._append_log("⚠ リバイ金額は正の整数で入力してください。", tag="review")
+            return
+        # GameStateManager はロックを持たないため、状態変更は IntegrationThread に一元化する
+        # （winner/new_hand と同じ queue 経由。適用結果は on_action の rebuy レコードで返り、
+        # _poll_updates がスタック表示とログを更新する）。
+        self._audio_queue.put(AudioEvent(
+            action="rebuy", amount=amount, timestamp=time.time(),
+            raw_text=f"シート{seat} リバイ {amount}", seat=seat,
+        ))
+
+    def _cmd_edit_seats(self) -> None:
+        """座席→プレイヤーの割り当てを編集する(E3, ISSUE-0006)。
+
+        OK で確定した seat_player_map を IntegrationThread に反映する(次ハンドから有効)。
+        毎ハンドは出さず、ここで設定した seating を carry-forward する。
+        """
+        if self._player_repo is None:
+            return
+        from gui.seat_selection import SeatSelectionDialog
+        dialog = SeatSelectionDialog(
+            master=self._root,
+            game_state=self._gs,
+            player_repo=self._player_repo,
+            initial_map=self._seat_player_map,
+        )
+        result = dialog.get_result()
+        if result is None:
+            return
+        self._seat_player_map = result
+        thread = self._integration_thread
+        if thread is not None and hasattr(thread, "set_seat_player_map"):
+            thread.set_seat_player_map(result)
+        self._append_log(f"座席設定を更新しました（{len(result)} 席割当）。", tag="medium")
 
     # ――― UI 更新（メインスレッド側） ―――
 
@@ -397,6 +438,9 @@ class GUIDashboard:
         self._append_log("セッション開始。ディーラーのアナウンスを待っています...", tag="medium")
         self._refresh_header()
         self._root.after(100, self._poll_updates)
+        # E3: session レイヤ接続時は開始時に一度だけ座席設定を促す(ISSUE-0006)。
+        if self._session_layer_enabled and not self._seat_player_map:
+            self._root.after(200, self._cmd_edit_seats)
         self._root.mainloop()
 
     def _on_close(self) -> None:

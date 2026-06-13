@@ -3,16 +3,19 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Optional
 
 from core.constants import (
     ACTION_KEYWORDS,
-    KANJI_ALL,
     KANJI_DIGIT,
     KANJI_UNIT,
     WHISPER_PROMPT_JA,
 )
 from core.events import AudioEvent
+
+if TYPE_CHECKING:
+    from core.engine_types import LegalContext
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,26 @@ def _strip_seat_references(text: str) -> str:
     例: "シート1 レイズ 800" → " レイズ 800"
     """
     return _SEAT_PATTERN.sub("", text)
+
+
+# 明示発話された席番号を抽出する（"シート3" / "seat 3" / 全角数字対応）。
+_SEAT_NO_PATTERN = re.compile(r"(?:シート|seat)\s*([0-9０-９]+)", re.IGNORECASE)
+_FW_TO_ASCII_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+
+
+def _extract_seat_no(text: str) -> Optional[int]:
+    """発話テキストから明示的な席番号 (1..9) を返す。見つからない/範囲外は None。
+
+    actor 推定 (R3) ではなく「明示的に読み上げられた席」だけを拾う additive 仕様。
+    """
+    m = _SEAT_NO_PATTERN.search(text)
+    if not m:
+        return None
+    try:
+        n = int(m.group(1).translate(_FW_TO_ASCII_DIGITS))
+    except ValueError:
+        return None
+    return n if 1 <= n <= 9 else None
 
 
 def _kanji_to_int(kanji: str) -> int:
@@ -138,9 +161,11 @@ def parse_amount(text: str) -> int:
     return candidates[0][1]
 
 
-def parse_action(text: str) -> Optional[AudioEvent]:
+def parse_action(text: str, confidence: Optional[float] = None) -> Optional[AudioEvent]:
     """Whisper の認識テキストからアクション種別と金額を抽出して AudioEvent を返す。
     認識できない場合は None を返す。
+
+    confidence: Whisper per-segment 信頼度 [0,1]（呼び出し側が ASR から渡す）。additive。
 
     キーワード選択ルール:
     1. テキスト内で最も左に現れたキーワードを優先する。
@@ -180,6 +205,8 @@ def parse_action(text: str) -> Optional[AudioEvent]:
         amount=amount,
         timestamp=time.time(),
         raw_text=text,
+        seat=_extract_seat_no(text),
+        confidence=confidence,
     )
 
 
@@ -200,16 +227,25 @@ class WhisperTranscriber:
             self._model = None
 
     def transcribe(self, audio_bytes: bytes) -> str:
-        """PCM16 音声バイト列をテキストに変換して返す。
-        変換失敗時は空文字列を返す（クラッシュしない）。
+        """PCM16 音声バイト列をテキストに変換して返す（信頼度を捨てる後方互換版）。"""
+        return self.transcribe_with_confidence(audio_bytes)[0]
 
-        入力は 16kHz モノラル PCM16 固定を前提とする。
-        faster-whisper の transcribe() は numpy 配列の長さから 16kHz を仮定するため、
-        sample_rate は引数として受け取らない。
+    def transcribe_with_confidence(
+        self, audio_bytes: bytes
+    ) -> tuple[str, Optional[float]]:
+        """PCM16 音声バイト列を (テキスト, 信頼度[0,1]) に変換する。
+        変換失敗・モデル未ロード時は ("", None) を返す（クラッシュしない）。
+
+        入力は 16kHz モノラル PCM16 固定を前提とする（faster-whisper は配列長から
+        16kHz を仮定するため sample_rate は受け取らない）。
+        confidence は各 segment の avg_logprob（対数確率）平均を exp で 0..1 に
+        写像したもの。segment が無ければ None。
         """
         if self._model is None:
-            return ""
+            return "", None
         try:
+            import math
+
             import numpy as np
 
             audio_array = (
@@ -220,7 +256,132 @@ class WhisperTranscriber:
                 language=self._language,
                 initial_prompt=WHISPER_PROMPT_JA,
             )
-            return " ".join(seg.text.strip() for seg in segments)
+            texts: list[str] = []
+            logprobs: list[float] = []
+            for seg in segments:
+                texts.append(seg.text.strip())
+                lp = getattr(seg, "avg_logprob", None)
+                if lp is not None:
+                    logprobs.append(lp)
+            text = " ".join(texts)
+            confidence: Optional[float] = None
+            if logprobs:
+                mean_lp = sum(logprobs) / len(logprobs)
+                # avg_logprob は対数確率(≤0)。exp で 0..1 の信頼度へ写像。
+                confidence = max(0.0, min(1.0, math.exp(mean_lp)))
+            return text, confidence
         except Exception:
             logger.exception("Whisper transcription failed")
-            return ""
+            return "", None
+
+
+# ――― R3: 合法手への射影（apply_corrections, ADR-0009 §5）―――
+
+_BETTING_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin"})
+
+
+@dataclass
+class Correction:
+    """apply_corrections の結果（合法手へ射影済みのアクション）。"""
+
+    action: str                          # 射影後アクション
+    amount: int                          # bet/raise は "to" 総額、call は call 額、他 0
+    needs_review: bool
+    corrected_from: Optional[str] = None  # 修復前の生 ASR action（変化なしなら None）
+    reason: str = ""                      # 監査用の短い理由
+    asr_confidence: Optional[float] = None  # 入力 Whisper 信頼度を下流へ持ち越す
+
+
+def _snap_to_legal(a: int, lo: int, hi: int) -> tuple[int, int]:
+    """heard 額 a を合法レンジ [lo, hi] に丸め、(snapped, gap) を返す。gap は移動量(絶対値)。
+
+    ブラインド単位の round-number 寄せ（§5）は LegalContext に blind 情報が無いため D1 では
+    行わず、決定的な clamp のみ。round 寄せは後続（blind を渡せる形に拡張時）。
+    """
+    if hi <= 0:  # raise/bet レンジ無し（呼び出し側で弾く前提だが安全側）
+        return max(a, 0), 0
+    if a < lo:
+        return lo, lo - a
+    if a > hi:
+        return hi, a - hi
+    return a, 0
+
+
+def apply_corrections(
+    action: str,
+    amount: int,
+    ctx: "LegalContext",
+    whisper_conf: Optional[float] = None,
+) -> Correction:
+    """raw ASR (action, amount) を legal_ctx の合法手へ射影する純関数（ADR-0009 §5）。
+
+    ゲーム状態を持たず、engine が `legal_context()` を渡して呼ぶ（recognizer を状態から疎結合に保つ）。
+    **call/check は状態から決定的に一意化**する（heard キーワードの曖昧さに依存しない）= PHH/JSON で
+    call と check を初めて区別できる核心。修復表は `docs/contracts/hand-reconstruction.md §5`。
+
+    Args:
+        action/amount: parse_action 由来の生 ASR。
+        ctx: `legal_context()`（actor_seat / legal_actions / amount_to_call=c / min_raise=m(to) / max_raise=s(to)）。
+        whisper_conf: ASR 信頼度。D1 では結果へ持ち越すのみ（融合は D3 §6）。
+    """
+    def mk(act: str, amt: int, review: bool,
+           corrected_from: Optional[str] = None, reason: str = "") -> Correction:
+        return Correction(act, amt, review, corrected_from, reason, whisper_conf)
+
+    a = action.lower()
+    # 制御アクション/未知（new_hand/winner/showdown 等）は射影対象外。そのまま通す。
+    if a not in _BETTING_ACTIONS:
+        return mk(action, amount, False)
+
+    legal = ctx.legal_actions
+    # 合法手プリオールが無い（手番でない/ハンド終了）→ 検証不能、flag。
+    if not legal:
+        return mk(a, amount, True, reason="no_legal_context")
+
+    c = ctx.amount_to_call
+    m = ctx.min_raise        # "to" 総額（raise/bet 不可なら 0）
+    s = ctx.max_raise        # all-in "to" 総額（raise/bet 不可なら 0）
+
+    if a == "fold":
+        return mk("fold", 0, False)
+
+    if a == "allin":
+        # engine.apply_action("allin") が max-raise / call-all-in を再解釈する。to 総額を埋める。
+        return mk("allin", s if s > 0 else c, False)
+
+    if a in ("check", "call"):
+        if c == 0:
+            # チェック可。"call" と言っていても実質チェック（call 不要）。
+            review = a == "call"
+            return mk("check", 0, review,
+                      corrected_from="call" if review else None,
+                      reason="heard_call_but_check" if review else "")
+        # c > 0
+        if a == "call":
+            return mk("call", c, False)  # heard 額は無視し engine の call 額を採用
+        # heard "check" だが call 額あり → 非合法。call/fold へ（曖昧）。
+        # call vs fold の尤度（chip-motion 等）は ISSUE-0009 / §8。保守的に call + review
+        # （プレイヤーを勝手に hand から外さない側を既定）。
+        if "call" in legal:
+            return mk("call", c, True, corrected_from="check", reason="check_facing_bet")
+        return mk("fold", 0, True, corrected_from="check", reason="check_illegal_fold")
+
+    # bet / raise
+    can_raise = "raise" in legal or "bet" in legal
+    if not can_raise:
+        if "call" in legal:
+            return mk("call", c, True, corrected_from=a, reason=f"{a}_illegal_to_call")
+        return mk("fold", 0, True, corrected_from=a, reason=f"{a}_illegal_to_fold")
+
+    # legal_context は当ストリートに bet があれば "raise"、無ければ "bet" を出す（排他）。
+    # heard が状態と食い違えば state 側へ再マップ（bet↔raise を決定的に正す）。
+    target = "raise" if "raise" in legal else "bet"
+    corrected_from = a if target != a else None
+    amt, gap = _snap_to_legal(amount, m, s)
+    if amount <= 0:
+        review, reason = True, "no_amount_heard"
+    elif gap > m:  # min-raise を超える移動 = 大幅 snap
+        review, reason = True, "amount_snapped"
+    else:
+        review, reason = False, (f"{a}_to_{target}" if corrected_from else "")
+    return mk(target, amt, review, corrected_from=corrected_from, reason=reason)
