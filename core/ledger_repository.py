@@ -25,9 +25,11 @@ enforce する主な不変条件（`ledger-overview.md` § invariants）:
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -94,6 +96,22 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _locked(method):
+    """`self._lock`（RLock）で公開メソッドの本体を囲む（thread-safety, S5/ADR-0021）。
+
+    `--ledger` プロセスでは GUI スレッドと viewer API スレッドが同じ `LedgerRepository` を
+    mutate しうる（HTTP スタッフ会計 write）。RLock は再入可能なので、ロック済みメソッドが
+    他のロック済みメソッドを呼んでもデッドロックしない。
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class LedgerRepository:
     """ledger entry / point ledger / settlement の永続ストア。
 
@@ -121,6 +139,9 @@ class LedgerRepository:
             if session_repo is not None
             else SessionRepository(player_repo=self._player_repo)
         )
+        # GUI スレッドと in-process viewer API スレッドが同居する `--ledger` プロセスで
+        # 共有状態を保護する（RLock = 再入可能。ADR-0021）。
+        self._lock = threading.RLock()
         self._entries: list[LedgerEntry] = []
         self._point_entries: list[PointLedgerEntry] = []
         # (session_id, player_id) -> SessionSettlement
@@ -229,11 +250,13 @@ class LedgerRepository:
         self._point_entries.append(entry)
         return entry
 
+    @_locked
     def point_balance(self, player_id: str) -> int:
         """player の point 残高 = point_ledger_entry の delta_points の fold（source of truth）。"""
         self._require_player(player_id)
         return sum(p.delta_points for p in self._point_entries if p.player_id == player_id)
 
+    @_locked
     def grant_points(
         self,
         player_id: str,
@@ -268,6 +291,7 @@ class LedgerRepository:
         logger.info("Granted %d points to %s (%s)", delta_points, player_id, reason)
         return entry
 
+    @_locked
     def list_point_entries(
         self, player_id: str | None = None, session_id: str | None = None
     ) -> list[PointLedgerEntry]:
@@ -281,6 +305,7 @@ class LedgerRepository:
 
     # ――― ledger entry ―――
 
+    @_locked
     def add_entry(
         self,
         session_id: str,
@@ -368,6 +393,7 @@ class LedgerRepository:
         )
         return entry
 
+    @_locked
     def reverse_entry(self, entry_id: str, occurred_at: str | None = None) -> LedgerEntry:
         """既存 entry を相殺する reversal を append する（append-only 訂正）。
 
@@ -408,6 +434,7 @@ class LedgerRepository:
         logger.info("Reversed entry %s with %s", orig.entry_id, reversal.entry_id)
         return reversal
 
+    @_locked
     def list_entries(
         self, session_id: str | None = None, player_id: str | None = None
     ) -> list[LedgerEntry]:
@@ -460,6 +487,7 @@ class LedgerRepository:
             )
         return rows
 
+    @_locked
     def compute_settlement(self, session_id: str) -> list[SessionSettlement]:
         """session の player ごと settlement を導出する（speculative。確定はしない）。
 
@@ -469,6 +497,7 @@ class LedgerRepository:
         self._require_session(session_id)
         return self._derive_settlement_rows(session_id)
 
+    @_locked
     def commit_settlement(self, session_id: str) -> list[SessionSettlement]:
         """closed session の settlement を確定（凍結）する。
 
@@ -490,14 +519,17 @@ class LedgerRepository:
         logger.info("Committed settlement for session %s (%d rows)", session_id, len(committed))
         return committed
 
+    @_locked
     def list_settlements(self, session_id: str) -> list[SessionSettlement]:
         """確定済 settlement 行を返す（未確定なら空 list）。"""
         return [s for (s_id, _pid), s in self._settlements.items() if s_id == session_id]
 
+    @_locked
     def all_settlements(self) -> list[SessionSettlement]:
         """全 session の確定済 settlement 行を返す（CSV export 等の横断集計用）。"""
         return list(self._settlements.values())
 
+    @_locked
     def set_payment_status(
         self, session_id: str, player_id: str, status: str
     ) -> SessionSettlement:

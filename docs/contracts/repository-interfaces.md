@@ -1,8 +1,9 @@
 # Repository / service interface contract（frozen, S5 / ADR-0020）
 
-> **Status: frozen**（freeze order #6, ADR-0020, 2026-06-13）。下の player / session-seating /
-> ledger-points-settlement / viewer read model / order-request の interface を S5 の安定契約とする
-> （対応 schema は ADR-0019 で `1.0`）。追加メソッドは additive、シグネチャの削除・変更は ADR を要する。
+> **Status: frozen**（freeze order #6, ADR-0020, 2026-06-13。staff write メソッドは additive 追加,
+> ADR-0021）。下の player / session-seating / ledger-points-settlement / viewer read model /
+> order-request の interface を S5 の安定契約とする（対応 schema は ADR-0019 で `1.0`）。
+> 追加メソッドは additive、シグネチャの削除・変更は ADR を要する。
 
 front-end（desktop WS2 / mobile WS3 / Python client）は **repository interface にのみ依存** し、その
 具象（core の local 実装 / in-memory mock / API client）を注入で差し替える。UI は「データがどこに
@@ -178,9 +179,25 @@ endpoints（+ 注文 GET/POST）を HTTP で呼び、非 2xx を error-shape の
 - **ID 不変性**: player_id/session_id は app 内採番・不変・backend 非依存（local も API client も同じ ID）。
 - round-trip 契約 test: `tests/test_viewer_api_client.py`（API↔client の drift 検知）。
 
+### staff write メソッド（S5 — ADR-0021）
+
+`ViewerApiClient(base_url, client=None, staff_token=None)`。`staff_token` を渡すと staff メソッドが
+`Authorization: Bearer <token>` を付与する（player read / 注文 POST は無認証のまま）。staff メソッドは
+ledger / settlement / order-request interface（local 実装）と対称:
+
+- `compute_settlement(session_id)` / `list_session_order_requests(session_id, status=None)`（staff read）。
+- `add_ledger_entry(session_id, player_id, kind, cash_amount=0, point_amount=0, note=None, hand_id=None, order=None)`。
+- `commit_settlement(session_id)` / `set_payment_status(session_id, player_id, status)`。
+- `confirm_order(request_id, unit_amount)` / `reject_order(request_id)`。
+
+write は **write 所有プロセス（`--ledger`）のみ**（単独 `--viewer-api` では 503 `orders_unavailable`）。
+認可 error は `unauthorized`(401) / `staff_writes_disabled`(403)。round-trip 契約 test:
+`tests/test_viewer_api_staff.py`。
+
 ## 残（planned）
 
 | 対象 | 内容 | phase |
 |------|------|-------|
-| write/sync 拡張 | 注文以外の write を HTTP に出す / 双方向同期（認証・衝突解決が前提） | S5 後続（ADR 要） |
+| 双方向 sync / 衝突解決 | 複数書き手・push/event・auto-sync（単一書き手では不要） | S5 後続（ADR 要） |
+| player per-player アクセス制御 | read の PIN 等（staff write は ADR-0021 の token で解決済み） | ISSUE-0019（顕在化時） |
 | desktop の API client 化 | desktop GUI を API-backed repository に差し替え | 任意（現状は local 直結で十分） |

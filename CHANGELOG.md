@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+### Added (S5 write 拡張 — スタッフ会計 write API（staff shared token 認証）, ADR-0021)
+
+- **staff 会計 write API**（`api/server.py` の `/api/staff/...`）: 別端末のスタッフが会計をリモート
+  操作できる。ledger entry 追加 / settlement 確定 / payment status paid-unpaid / 注文確定・却下 +
+  staff read（settlement 中間集計 / 全 player の注文 queue）。
+- **認証 = staff shared token**: config `viewer_api.staff_token` を設定すると有効。
+  `Authorization: Bearer <token>`。token 未設定 → 403 `staff_writes_disabled` / 不一致 → 401
+  `unauthorized`。**player read / 注文 POST は従来どおり無認証**（name-pick, ISSUE-0019）。
+- **単一書き手維持**: staff *write* は write 所有プロセス（`--ledger`, viewer_api.enabled）のみ。
+  単独 `--viewer-api`（read-only）では 503 `orders_unavailable`（staff read は token があれば可）。
+- **`LedgerRepository` を thread-safe 化**（`threading.RLock` + `_locked` デコレータ）: `--ledger`
+  プロセスで GUI スレッドと in-process API スレッドが同じ ledger を mutate するレースを排除
+  （業務ロジックは不変。RLock 再入で inter-method 呼び出し安全。lock ordering は order→ledger 一方向）。
+- **Python client**: `api/client.py:ViewerApiClient(staff_token=...)` に staff メソッド群を additive 追加。
+  round-trip + 認可 test = `tests/test_viewer_api_staff.py`。
+- 新 error code: `unauthorized`(401) / `staff_writes_disabled`(403)（`error-shapes.md`）。
+
 ### Added (S5 — cross-app boundary: repository interface 凍結 + Python API client, ADR-0020)
 
 - **repository / service interface 契約を frozen**（freeze order #6）。player / session-seating /

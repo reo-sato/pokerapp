@@ -480,6 +480,7 @@ def run_ledger_view() -> None:
                 cfg.get("session", {}).get("log_dir", "./logs"),
                 ledger_repo=ledger, order_repo=order_repo, menu=menu,
                 orders_writable=True,
+                staff_token=api_cfg.get("staff_token") or None,
             )
             api_server = uvicorn.Server(uvicorn.Config(
                 app, host=bind_host, port=bind_port, log_level="warning"))

@@ -65,6 +65,43 @@ player はスマホから **order_request**（`order_request.schema.json` v0.x�
   closed を拒否しないため、注文確定の closed ガードは order-request 層が担う）。
 - 状態遷移は pending → confirmed | rejected のみ（再解決は 409 `already_resolved`）。
 
+## staff write API（ADR-0021）
+
+別端末のスタッフが会計をリモート操作するための **staff 専用** エンドポイント群。player API
+（name-pick / 無認証）とは分離し、`/api/staff/` 配下に置く。**すべて staff shared token 必須**。
+
+### 認証（staff shared token）
+
+- config `viewer_api.staff_token` を設定すると有効。リクエストは
+  `Authorization: Bearer <staff_token>` を付ける。
+- token 未設定（空）→ **403 `staff_writes_disabled`**（運用で有効化していない）。
+- token 欠落 / 不一致 → **401 `unauthorized`**。
+- write 系（need_write）は **write 所有プロセス（`--ledger`, `viewer_api.enabled=true`）のみ**。
+  単独 `--viewer-api`（read-only）では write は **503 `orders_unavailable`**（単一書き手, ADR-0020）。
+  staff *read*（settlement / 注文 queue）は token があれば read-only プロセスでも可。
+- **player read / 注文 POST は従来どおり無認証**（name-pick, ISSUE-0019）。本節は staff write のみ。
+
+### endpoints
+
+| method | path | write | body | 返り値 |
+|--------|------|-------|------|--------|
+| GET  | `/api/staff/sessions/{session_id}/settlement` | no | — | `{"settlements": [session_settlement, ...]}`（compute_settlement, speculative） |
+| GET  | `/api/staff/sessions/{session_id}/order-requests?status=` | no | — | `{"requests": [order_request, ...]}`（全 player の queue。status query 任意） |
+| POST | `/api/staff/sessions/{session_id}/ledger-entries` | yes | `{player_id, kind, cash_amount?, point_amount?, note?, hand_id?, order?}` | 201 `ledger_entry` |
+| POST | `/api/staff/sessions/{session_id}/settlement/commit` | yes | — | `{"settlements": [...]}` |
+| PUT  | `/api/staff/sessions/{session_id}/players/{player_id}/payment-status` | yes | `{status: "paid"\|"unpaid"}` | 更新後 `session_settlement` |
+| POST | `/api/staff/order-requests/{request_id}/confirm` | yes | `{unit_amount}` | 更新後 `order_request`（ledger order entry をリンク） |
+| POST | `/api/staff/order-requests/{request_id}/reject` | yes | — | 更新後 `order_request` |
+
+### error code（再利用 + 新規）
+
+ledger / settlement の error は `error-shapes.md` の ledger セクションを **再利用**:
+`not_found`(404) / `unknown_player`(404) / `invalid_amount`(400) / `entry_fee_requires_cash`(400) /
+`insufficient_points`(400) / `session_not_closed`(409) / `already_settled`(409)。
+注文確定・却下は order セクションの `session_closed`(409) / `already_resolved`(409) /
+`invalid_quantity`(400) / `not_found`(404)。新規 code は認可の **`unauthorized`(401)** /
+**`staff_writes_disabled`(403)**、write 所有外は既存 `orders_unavailable`(503) を再利用。
+
 ## error 形
 
 `error-shapes.md` の論理形をそのまま HTTP body にする（分岐は `code`、表示は `message`）:

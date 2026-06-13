@@ -27,7 +27,17 @@ from api.read_models import (
     list_player_hands,
     list_player_sessions,
 )
-from core.ledger_repository import LedgerNotFoundError, LedgerRepository
+from core.ledger_repository import (
+    AlreadySettledError,
+    EntryFeeRequiresCashError,
+    InsufficientPointsError,
+    InvalidAmountError,
+    LedgerError,
+    LedgerNotFoundError,
+    LedgerRepository,
+    SessionNotClosedError,
+    UnknownPlayerError as LedgerUnknownPlayerError,
+)
 from core.menu import MenuMaster
 from core.order_request_repository import (
     AlreadyResolvedError,
@@ -58,6 +68,52 @@ class _OrderRequestBody(BaseModel):
     note: str | None = None
 
 
+class _StaffLedgerEntryBody(BaseModel):
+    """POST /api/staff/.../ledger-entries の body（staff write API, ADR-0021）。"""
+
+    player_id: str
+    kind: str
+    cash_amount: int = 0
+    point_amount: int = 0
+    note: str | None = None
+    hand_id: int | None = None
+    order: dict | None = None
+
+
+class _StaffPaymentStatusBody(BaseModel):
+    """PUT .../payment-status の body。"""
+
+    status: str
+
+
+class _StaffConfirmOrderBody(BaseModel):
+    """POST /api/staff/order-requests/{id}/confirm の body。"""
+
+    unit_amount: int
+
+
+# ledger / settlement の error → (HTTP status, error code)。staff write で再利用する
+# （error-shapes.md の ledger セクションと 1:1, ADR-0021）。具体例外を先に並べる。
+_LEDGER_ERROR_MAP: list[tuple[type, int, str]] = [
+    (LedgerNotFoundError, 404, "not_found"),
+    (LedgerUnknownPlayerError, 404, "unknown_player"),
+    (EntryFeeRequiresCashError, 400, "entry_fee_requires_cash"),
+    (InsufficientPointsError, 400, "insufficient_points"),
+    (InvalidAmountError, 400, "invalid_amount"),
+    (SessionNotClosedError, 409, "session_not_closed"),
+    (AlreadySettledError, 409, "already_settled"),
+]
+
+
+def _map_ledger_error(exc: LedgerError) -> JSONResponse:
+    for exc_type, http_status, code in _LEDGER_ERROR_MAP:
+        if isinstance(exc, exc_type):
+            return JSONResponse(status_code=http_status,
+                                content={"code": code, "message": str(exc)})
+    # 基底 LedgerError（未分類）は invalid_amount 扱いにフォールバック。
+    return JSONResponse(status_code=400, content={"code": "invalid_amount", "message": str(exc)})
+
+
 def create_app(
     player_repo: PlayerRepository,
     session_repo: SessionRepository,
@@ -66,12 +122,18 @@ def create_app(
     order_repo: OrderRequestRepository | None = None,
     menu: MenuMaster | None = None,
     orders_writable: bool = False,
+    staff_token: str | None = None,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
     ledger_repo / order_repo / menu 省略時は既定ファイルから構築する（ledger=ADR-0016,
     orders=ADR-0018）。orders_writable=False（単独 --viewer-api の read-only モード）では
     注文 POST を 503 `orders_unavailable` で拒否する（単一プロセス所有, ADR-0018 §3）。
+
+    staff_token を設定すると `/api/staff/...` のスタッフ会計エンドポイントが
+    `Authorization: Bearer <token>` で有効になる（ADR-0021）。falsy なら staff write は
+    403 `staff_writes_disabled`。staff write（need_write）は orders_writable を所有する
+    プロセスのみ（単一書き手, ADR-0020）。
     """
     if ledger_repo is None:
         ledger_repo = LedgerRepository(session_repo=session_repo, player_repo=player_repo)
@@ -179,6 +241,135 @@ def create_app(
         )
         return request.to_dict()
 
+    # ――― staff write API（ADR-0021。Bearer token 認証 + 単一書き手）―――
+
+    def _staff_guard(request: Request, *, need_write: bool) -> "JSONResponse | None":
+        """スタッフ会計エンドポイントの認可ガード（ADR-0021）。
+
+        - staff_token 未設定 → 403 staff_writes_disabled（運用で有効化していない）。
+        - Authorization: Bearer <token> が無い/不一致 → 401 unauthorized。
+        - need_write かつ orders_writable=False → 503 orders_unavailable
+          （このプロセスは write を所有しない。単一書き手, ADR-0020）。
+        - OK なら None。
+        """
+        if not staff_token:
+            return JSONResponse(status_code=403, content={
+                "code": "staff_writes_disabled",
+                "message": "スタッフ会計 API は無効です（viewer_api.staff_token 未設定）。",
+            })
+        auth = request.headers.get("authorization", "")
+        expected = f"Bearer {staff_token}"
+        if auth != expected:
+            return JSONResponse(status_code=401, content={
+                "code": "unauthorized",
+                "message": "スタッフトークンが無効です（Authorization: Bearer <token>）。",
+            })
+        if need_write and not orders_writable:
+            return JSONResponse(status_code=503, content={
+                "code": "orders_unavailable",
+                "message": "会計 write はスタッフ会計画面（--ledger）の起動中のみ可能です。",
+            })
+        return None
+
+    @app.get("/api/staff/sessions/{session_id}/settlement", response_model=None)
+    def staff_settlement(session_id: str, request: Request) -> "JSONResponse | dict":
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        try:
+            rows = ledger_repo.compute_settlement(session_id)
+        except LedgerError as e:
+            return _map_ledger_error(e)
+        return {"settlements": [s.to_dict() for s in rows]}
+
+    @app.get("/api/staff/sessions/{session_id}/order-requests", response_model=None)
+    def staff_order_requests(
+        session_id: str, request: Request, status: str | None = None
+    ) -> "JSONResponse | dict":
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        return {
+            "requests": [
+                r.to_dict()
+                for r in order_repo.list_requests(session_id, status=status)
+            ]
+        }
+
+    @app.post("/api/staff/sessions/{session_id}/ledger-entries",
+              status_code=201, response_model=None)
+    def staff_add_ledger_entry(
+        session_id: str, request: Request, body: _StaffLedgerEntryBody
+    ) -> "JSONResponse | dict":
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            entry = ledger_repo.add_entry(
+                session_id, body.player_id, body.kind,
+                cash_amount=body.cash_amount, point_amount=body.point_amount,
+                note=body.note, hand_id=body.hand_id, order=body.order,
+            )
+        except LedgerError as e:
+            return _map_ledger_error(e)
+        except ValueError as e:  # invalid kind
+            return JSONResponse(status_code=400,
+                                content={"code": "invalid_amount", "message": str(e)})
+        return JSONResponse(status_code=201, content=entry.to_dict())
+
+    @app.post("/api/staff/sessions/{session_id}/settlement/commit", response_model=None)
+    def staff_commit_settlement(
+        session_id: str, request: Request
+    ) -> "JSONResponse | dict":
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            rows = ledger_repo.commit_settlement(session_id)
+        except LedgerError as e:
+            return _map_ledger_error(e)
+        return {"settlements": [s.to_dict() for s in rows]}
+
+    @app.put("/api/staff/sessions/{session_id}/players/{player_id}/payment-status",
+             response_model=None)
+    def staff_set_payment_status(
+        session_id: str, player_id: str, request: Request,
+        body: _StaffPaymentStatusBody,
+    ) -> "JSONResponse | dict":
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            settlement = ledger_repo.set_payment_status(session_id, player_id, body.status)
+        except LedgerError as e:
+            return _map_ledger_error(e)
+        except ValueError as e:  # invalid status
+            return JSONResponse(status_code=400,
+                                content={"code": "invalid_amount", "message": str(e)})
+        return settlement.to_dict()
+
+    @app.post("/api/staff/order-requests/{request_id}/confirm", response_model=None)
+    def staff_confirm_order(
+        request_id: str, request: Request, body: _StaffConfirmOrderBody
+    ) -> "JSONResponse | dict":
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            req = order_repo.confirm_request(request_id, body.unit_amount, ledger_repo)
+        except LedgerError as e:  # ledger 側 validation（invalid_amount 等）を透過
+            return _map_ledger_error(e)
+        return req.to_dict()
+
+    @app.post("/api/staff/order-requests/{request_id}/reject", response_model=None)
+    def staff_reject_order(
+        request_id: str, request: Request
+    ) -> "JSONResponse | dict":
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        return order_repo.reject_request(request_id).to_dict()
+
     return app
 
 
@@ -194,7 +385,10 @@ def run_server(cfg: dict) -> None:
     player_repo = PlayerRepository()
     session_repo = SessionRepository(player_repo=player_repo)
     ledger_repo = LedgerRepository(session_repo=session_repo)
-    app = create_app(player_repo, session_repo, log_dir, ledger_repo=ledger_repo)
+    # standalone --viewer-api は read-only（orders_writable=False）。staff_token があれば
+    # staff *read*（settlement / order queue）は可能、staff *write* は 503（ADR-0021）。
+    app = create_app(player_repo, session_repo, log_dir, ledger_repo=ledger_repo,
+                     staff_token=api_cfg.get("staff_token") or None)
 
     logger.info("Starting viewer API on %s:%s (log_dir=%s)", bind_host, bind_port, log_dir)
     uvicorn.run(app, host=bind_host, port=bind_port)

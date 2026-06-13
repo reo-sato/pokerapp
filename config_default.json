@@ -61,6 +61,8 @@
     "bind_host": "127.0.0.1",
     "_bind_host_comment": "player スマホから LAN 参照する場合は PC の LAN IP（または 0.0.0.0）に変更する。無認証のため信頼できるネットワークでのみ（ISSUE-0019 プライバシーモデル）。",
     "bind_port": 8788,
-    "_comment": "M1/M5 (ADR-0017/0018): player 向け read-only viewer API。'python main.py --viewer-api' で単独起動（注文 POST は 503）。enabled=true で 'python main.py --ledger' が API を in-process 起動し注文リクエスト受付（write）を有効にする（単一プロセス所有）。要 [api] extra。"
+    "_comment": "M1/M5 (ADR-0017/0018): player 向け read-only viewer API。'python main.py --viewer-api' で単独起動（注文 POST は 503）。enabled=true で 'python main.py --ledger' が API を in-process 起動し注文リクエスト受付（write）を有効にする（単一プロセス所有）。要 [api] extra。",
+    "staff_token": "",
+    "_staff_token_comment": "S5 staff write API (ADR-0021): 空ならスタッフ write 無効（403 staff_writes_disabled）。値を設定すると Authorization: Bearer <token> で会計 write（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下）を許可（別端末のスタッフ運用）。staff write は --ledger（write 所有プロセス）でのみ有効。無認証ではないが LAN 限定前提は維持（player read / 注文 POST は従来どおり name-pick / 無認証）。"
   }
 }

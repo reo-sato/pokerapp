@@ -46,6 +46,7 @@ class ViewerApiClient:
         self,
         base_url: str = "http://127.0.0.1:8788",
         client: "Optional[httpx.Client]" = None,
+        staff_token: str | None = None,
     ) -> None:
         if client is not None:
             self._client = client
@@ -55,6 +56,8 @@ class ViewerApiClient:
 
             self._client = httpx.Client(base_url=base_url.rstrip("/"))
             self._owns_client = True
+        # staff write API（ADR-0021）用の Bearer token。staff_* メソッドのみで付与する。
+        self._staff_token = staff_token
 
     def close(self) -> None:
         if self._owns_client:
@@ -68,8 +71,11 @@ class ViewerApiClient:
 
     # ――― 内部 ―――
 
-    def _request(self, method: str, path: str, json: Any = None) -> Any:
-        resp = self._client.request(method, path, json=json)
+    def _request(
+        self, method: str, path: str, json: Any = None,
+        headers: "Optional[dict[str, str]]" = None,
+    ) -> Any:
+        resp = self._client.request(method, path, json=json, headers=headers)
         try:
             body = resp.json()
         except ValueError:
@@ -126,4 +132,70 @@ class ViewerApiClient:
         return self._request(
             "POST", f"/api/players/{player_id}/sessions/{session_id}/order-requests",
             json=payload,
+        )
+
+    # ――― staff write API（ADR-0021。Bearer token。会計 write は所有プロセスのみ）―――
+
+    def _staff_headers(self) -> dict[str, str]:
+        if not self._staff_token:
+            return {}
+        return {"Authorization": f"Bearer {self._staff_token}"}
+
+    def compute_settlement(self, session_id: str) -> list[dict]:
+        return self._request(
+            "GET", f"/api/staff/sessions/{session_id}/settlement",
+            headers=self._staff_headers(),
+        )["settlements"]
+
+    def list_session_order_requests(
+        self, session_id: str, status: str | None = None
+    ) -> list[dict]:
+        path = f"/api/staff/sessions/{session_id}/order-requests"
+        if status is not None:
+            path += f"?status={status}"
+        return self._request("GET", path, headers=self._staff_headers())["requests"]
+
+    def add_ledger_entry(
+        self, session_id: str, player_id: str, kind: str,
+        cash_amount: int = 0, point_amount: int = 0, note: str | None = None,
+        hand_id: int | None = None, order: dict | None = None,
+    ) -> dict:
+        payload: dict = {
+            "player_id": player_id, "kind": kind,
+            "cash_amount": cash_amount, "point_amount": point_amount,
+        }
+        if note is not None:
+            payload["note"] = note
+        if hand_id is not None:
+            payload["hand_id"] = hand_id
+        if order is not None:
+            payload["order"] = order
+        return self._request(
+            "POST", f"/api/staff/sessions/{session_id}/ledger-entries",
+            json=payload, headers=self._staff_headers(),
+        )
+
+    def commit_settlement(self, session_id: str) -> list[dict]:
+        return self._request(
+            "POST", f"/api/staff/sessions/{session_id}/settlement/commit",
+            headers=self._staff_headers(),
+        )["settlements"]
+
+    def set_payment_status(self, session_id: str, player_id: str, status: str) -> dict:
+        return self._request(
+            "PUT",
+            f"/api/staff/sessions/{session_id}/players/{player_id}/payment-status",
+            json={"status": status}, headers=self._staff_headers(),
+        )
+
+    def confirm_order(self, request_id: str, unit_amount: int) -> dict:
+        return self._request(
+            "POST", f"/api/staff/order-requests/{request_id}/confirm",
+            json={"unit_amount": unit_amount}, headers=self._staff_headers(),
+        )
+
+    def reject_order(self, request_id: str) -> dict:
+        return self._request(
+            "POST", f"/api/staff/order-requests/{request_id}/reject",
+            headers=self._staff_headers(),
         )

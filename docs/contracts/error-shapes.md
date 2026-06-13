@@ -91,4 +91,18 @@ viewer API は menu 照合（`unknown_item`）と read-only モード（`orders_
 | `invalid_quantity` | quantity 範囲外（1..99 外）/ item_name 空・過長 / note 過長 | create request | `InvalidOrderRequestError` | 400 |
 | `unknown_item` | menu に無い品名（menu 照合は API 境界） | POST order-request | API 境界（menu master） | 400 |
 | `already_resolved` | confirmed / rejected 済の request を再解決しようとした | confirm / reject request | `AlreadyResolvedError` | 409 |
-| `orders_unavailable` | read-only モード（単独 `--viewer-api`）で注文 write を受けた | POST order-request | API 境界（orders_writable=False） | 503 |
+| `orders_unavailable` | read-only モード（単独 `--viewer-api`）で注文 write を受けた | POST order-request / staff write | API 境界（orders_writable=False） | 503 |
+
+### staff write API error code（S5 — ADR-0021）
+
+スタッフ会計 write API（`/api/staff/...`）の認可で使う code（additive）。ledger / settlement の
+実エラーは上の **ledger / points / settlement** セクションの code をそのまま再利用し、注文確定・却下は
+**viewer API / order-request** セクションの code を再利用する（本節は認可固有の 2 code のみ）:
+
+| code | 意味 | 発生する操作（例） | 由来 | HTTP |
+|------|------|------------------|------|------|
+| `unauthorized` | `Authorization: Bearer <token>` が欠落 / staff_token と不一致 | `/api/staff/...` 全般 | API 境界（`_staff_guard`） | 401 |
+| `staff_writes_disabled` | `viewer_api.staff_token` 未設定（staff API が運用で無効） | `/api/staff/...` 全般 | API 境界（`_staff_guard`） | 403 |
+
+- staff write を write 非所有プロセス（単独 `--viewer-api`）が受けた場合は既存
+  `orders_unavailable`(503) を再利用する（単一書き手, ADR-0020）。

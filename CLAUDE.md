@@ -310,6 +310,24 @@ ADR-0017）。**player 向け desktop viewer は作らない**（desktop = ス�
 - error は `{"code", "message"}`（`error-shapes.md` 準拠）。config: `viewer_api.bind_host` 既定
   `127.0.0.1`（無認証。LAN 参照は明示変更, ISSUE-0019）/ `bind_port` 既定 8788。
 
+### staff write API（S5, `api/server.py` の `/api/staff/...`, ADR-0021）
+
+別端末のスタッフが会計をリモート操作するための **staff 専用 write API**。**staff shared token**
+（config `viewer_api.staff_token` を `Authorization: Bearer <token>` で送る）で認可する
+（player read / 注文 POST は無認証のまま）。
+
+- endpoints（すべて token 必須）: `GET /api/staff/sessions/{sid}/settlement`（中間集計）/
+  `GET .../order-requests?status=`（全 player の注文 queue）/ `POST .../ledger-entries`（ledger 追加）/
+  `POST .../settlement/commit` / `PUT .../players/{pid}/payment-status` /
+  `POST /api/staff/order-requests/{rid}/confirm` / `POST .../{rid}/reject`。契約は
+  `docs/contracts/viewer-api.md` の staff write 節。
+- **認可**: token 未設定 → 403 `staff_writes_disabled` / token 不一致 → 401 `unauthorized`。
+  write 系は **write 所有プロセス（`--ledger`, viewer_api.enabled）のみ**、単独 `--viewer-api` は
+  503 `orders_unavailable`（単一書き手, ADR-0020）。staff read は token があれば read-only でも可。
+- ledger / settlement / order の実 error code は `error-shapes.md` を再利用。`LedgerRepository` は
+  RLock で thread-safe（`--ledger` の GUI スレッド × API スレッドの同時 mutate を保護）。Python client は
+  `api/client.py:ViewerApiClient(staff_token=...)` の staff メソッド群。
+
 ### 注文リクエスト（M5, `core/order_request*.py` / `core/menu.py`, ADR-0018）
 
 - player はスマホから **order_request**（pending）を POST する。**ledger には書かれず**、
@@ -326,8 +344,9 @@ ADR-0017）。**player 向け desktop viewer は作らない**（desktop = ス�
 
 ### Out of scope（現時点）
 
-- 認証 / per-player アクセス制御（v1 = name-pick で確定, ISSUE-0019 Fixed）。
-- ledger への直接 write（注文も staff 確定が必須）。order_request schema の `1.0` freeze。
+- **player** read の per-player アクセス制御（v1 = name-pick で確定, ISSUE-0019 Fixed。PIN は将来）。
+  スタッフ会計 write の認可は **staff shared token で解決済み**（ADR-0021, 上の staff write API 節）。
+- player からの ledger への直接 write（注文も staff 確定が必須）。order_request schema の `1.0` freeze。
 
 ---
 
@@ -412,7 +431,8 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | schema `1.0` freeze (S4) | ✅ 実装済 | 全 model（session/seat/hand_ref・ledger/point・settlement・order_request/player_session_summary）を `1.0` freeze（ADR-0019, ISSUE-0005 Resolved）。code↔contract test 全 model カバー |
 | 実機 E2E (Phase H) / PN5180 firmware 契約 (ISSUE-0014/0015) | 🔲 planned | クリーン環境の通し確認 + USB CCID firmware↔Python 契約凍結（§ ロードマップ 残作業） |
 | **cross-app boundary (S5 read)** | ✅ 実装済 | repository interface frozen（ADR-0020）+ `api/client.py:ViewerApiClient`（Python の local↔API 分離点）+ round-trip test。read boundary を二言語で実証（mobile + Python） |
-| cross-app write/sync 拡張 (S5 後続) | 🔲 planned | 注文以外の write を HTTP に出す / 双方向同期（認証 = ISSUE-0019 PIN 再評価・衝突解決が前提、別 ADR） |
+| **staff 会計 write API (S5 write)** | ✅ 実装済 | `api/server.py` の `/api/staff/...`（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下 + staff read）を **staff shared token**（`Authorization: Bearer <viewer_api.staff_token>`）で公開（ADR-0021）。`LedgerRepository` を RLock で thread-safe 化。単一書き手維持（read-only は 503）。`ViewerApiClient(staff_token=...)` の staff メソッド + `tests/test_viewer_api_staff.py` |
+| cross-app sync 拡張 (S5 後続) | 🔲 planned | 双方向同期 / 複数書き手・衝突解決（単一書き手では不要）。player per-player アクセス制御 = ISSUE-0019 PIN 再評価（別 ADR） |
 
 ---
 
@@ -540,7 +560,7 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
 | **S2** | session + hand-based seating（`core/session*.py`, ADR-0006/0007） | ✅ core 実装済 + **schema `1.0` frozen**（ADR-0019, ISSUE-0005 Resolved） |
 | **S3** | ledger + point ledger + settlement core + desktop viewer + CSV export（`core/ledger*.py`, `gui/ledger_view.py`, `output/ledger_csv_exporter.py`, ADR-0016, ISSUE-0001 Resolved） | ✅ 実装済 + **schema `1.0` frozen**（ADR-0019） |
 | **S4** | schema `1.0` freeze（session/seat/hand_ref + ledger/point + settlement + viewer/order model） | ✅ **実装済**（ADR-0019, ISSUE-0005 Resolved）。残: partial-paid 等の settlement 拡張（additive） |
-| **S5** | cross-app contract / sync boundary（local↔API client 分離） | 🟡 **read boundary 実装済**（ADR-0020: repository interface frozen + viewer API（M1）+ Python `ViewerApiClient` + mobile mock/HTTP。on-demand pull / 単一書き手）。**残**: write/sync 拡張（双方向同期, 後続 ADR） |
+| **S5** | cross-app contract / sync boundary（local↔API client 分離） | 🟡 **read + staff write boundary 実装済**（ADR-0020: repository interface frozen + viewer API（M1）+ Python `ViewerApiClient` + mobile mock/HTTP。ADR-0021: スタッフ会計 write を `/api/staff/...` に staff shared token で公開 + `LedgerRepository` thread-safe 化。on-demand pull / 単一書き手）。**残**: 双方向同期・複数書き手の衝突解決, player PIN（後続 ADR） |
 
 ### player 向け参照トラック M（viewer API / mobile / 注文）
 
@@ -566,9 +586,11 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    `--ledger`（viewer_api.enabled）+ スマホ注文の通し確認。
 3. **PN5180 / ESP32-S3 firmware ↔ Python 契約固定**（ISSUE-0014 / 0015）: USB descriptor / reader_name /
    ATR / 8B UID の凍結。
-4. ~~**S5 cross-app boundary（read）**~~ → **✅ 完了（ADR-0020）**: repository interface frozen +
-   `api/client.py:ViewerApiClient` + round-trip test。**残**: write/sync 拡張（注文以外の write を
-   HTTP に出す / 双方向同期。認証 = ISSUE-0019 PIN 再評価・衝突解決方針が前提、別 ADR）。
+4. ~~**S5 cross-app boundary（read + staff write）**~~ → **✅ 完了（ADR-0020 / ADR-0021）**:
+   read = repository interface frozen + `api/client.py:ViewerApiClient` + round-trip test。
+   write = スタッフ会計 write を `/api/staff/...` に staff shared token で公開 +
+   `LedgerRepository` thread-safe 化（ADR-0021）。**残**: 双方向同期・複数書き手の衝突解決
+   （単一書き手では不要）、player per-player アクセス制御（ISSUE-0019 PIN 再評価、別 ADR）。
 5. **settlement 拡張**: partial-paid、settlement の GUI からの確定（commit）、auto ledger 生成。
 6. **R 系の後続**: 派生 confidence の重み較正（golden fixtures 由来）、camera 源の統合。
 7. **プライバシー再評価（ISSUE-0019）**: name-pick で問題が顕在化したら PIN を additive 導入。

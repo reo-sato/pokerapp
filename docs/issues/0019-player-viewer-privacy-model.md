@@ -82,6 +82,16 @@ player のハンド履歴は LAN 内の誰でも取得できる。
 read-only の間（M1〜M4）は実害が「閲覧」に限られるため LAN 限定で許容する判断。
 write（注文）導入時に再評価が必須。
 
+## Update（2026-06-13, ADR-0021）
+
+S5 write 拡張で **スタッフ会計 write を HTTP に出す**にあたり、認可を **staff shared token** で解決した
+（`Authorization: Bearer <viewer_api.staff_token>`, ADR-0021）。これは「会計をするのは店側スタッフだけ」
+という信頼境界に合致し、per-player の認証は不要。**player read / 注文 POST は本 issue のとおり
+name-pick / 無認証のまま**（staff token は player 体験に影響しない）。
+
+残: **player ごとの read アクセス制御（PIN 等）** は依然として将来課題。name-pick で問題（他人の会計
+閲覧）が顕在化したら additive に PIN を導入する（別 ADR）。staff write の認可は本件では解決済み。
+
 ## Renumber note（2026-06-13）
 
 serene ブランチでは ISSUE-0013 として起票されたが、verify-v1 には別内容の ISSUE-0013
