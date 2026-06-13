@@ -29,9 +29,12 @@ _FIXTURES = _CONTRACTS / "fixtures"
 # reconstruction_event: R1 (ADR-0010) record/replay の envelope (additionalProperties:false)。
 # hand / action: hand core (ADR-0010 R5, ISSUE-0011)。additionalProperties:true で 1.0。
 # ledger_entry / point_ledger_entry / session_settlement: S3 draft (ADR-0016, 未 freeze)。
+# player_session_summary: viewer API read model draft (ADR-0017, 未 freeze)。
+# order_request: 注文リクエスト write path draft (ADR-0018, 未 freeze)。
 _MODELS = [
     "player", "session", "seat_assignment", "hand_ref", "reconstruction_event",
     "hand", "action", "ledger_entry", "point_ledger_entry", "session_settlement",
+    "player_session_summary", "order_request",
 ]
 
 

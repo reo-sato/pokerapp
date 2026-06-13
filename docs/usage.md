@@ -6,6 +6,8 @@
 python main.py            # GUI（ハンドロガー画面）
 python main.py --cli      # CLI（音声のみ・画面なし）
 python main.py --players  # プレイヤー登録画面（別画面）
+python main.py --ledger   # 会計（台帳）入力 + 注文確定画面（別画面）
+python main.py --viewer-api  # プレイヤー向け読み取り専用 viewer API（要 [api] extra）
 python main.py --export-phh logs/<セッションID>.json   # JSON → PHH 変換
 ```
 
@@ -89,6 +91,28 @@ GUI と `--cli` はどちらも**音声でハンドを記録**します。配信
 
 `python main.py --players` でプレイヤーの登録・一覧・名前変更ができます（ハンドロガーとは別画面）。
 セッションや会計機能の土台ですが、ハンド記録自体には必須ではありません。
+
+---
+
+## プレイヤー向け参照（viewer API / スマホ）
+
+`pip install ".[api]"` のうえ `python main.py --viewer-api` を実行すると、プレイヤーが自分の
+スマホから自分の session / ハンド履歴 / 会計を参照できる**読み取り専用 API** が起動します
+（既定 `127.0.0.1:8788`、無認証）。スマホから LAN 越しに見せる場合は `config.json` の
+`viewer_api.bind_host` を PC の LAN IP（または `0.0.0.0`）に変更してください。**信頼できる
+ネットワークでのみ**使用してください。mobile アプリ（`mobile/`, Expo）はこの API に接続します。
+
+`--viewer-api` 単独は read-only で、注文は受け付けません（503）。
+
+## ドリンク注文（任意）
+
+注文受付を有効にするには、`config.json` で `viewer_api.enabled` を `true` にして
+**`python main.py --ledger`**（会計画面）を起動します。会計画面が viewer API を同じプロセス内で
+立ち上げ、プレイヤーはスマホのメニュー（`menu.json`、店側で編集）から注文を送れます。
+
+注文は即座に台帳に記帳されません。スタッフが会計画面の「注文リクエスト」欄で**確定**すると、
+単価（メニューから自動入力・上書き可）× 数量で台帳に order として記帳されます。誤った注文は
+**却下**できます（台帳には何も書かれません）。注文を受け付けられるのは会計画面を開いている間だけです。
 
 ---
 

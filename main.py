@@ -435,8 +435,16 @@ def run_session_viewer() -> None:
 
 
 def run_ledger_view() -> None:
-    """Phase S3.2: hand logger とは別画面の Ledger Viewer / Editor を起動する。"""
+    """Phase S3.2: hand logger とは別画面の Ledger Viewer / Editor を起動する。
+
+    `config.viewer_api.enabled = true` なら viewer API を **in-process** で抱えて起動し、
+    player スマホからの注文リクエスト受付（write）が有効になる（単一プロセス所有,
+    ADR-0018 §3。単独 `--viewer-api` は read-only のまま）。
+    """
+    from core.config import load_config
     from core.ledger_repository import LedgerRepository
+    from core.menu import MenuMaster
+    from core.order_request_repository import OrderRequestRepository
     from core.player_repository import PlayerRepository
     from core.session_repository import SessionRepository
     from gui.ledger_view import LedgerViewWindow
@@ -447,11 +455,68 @@ def run_ledger_view() -> None:
         print("customtkinter が見つかりません。pip install customtkinter でインストールしてください。")
         sys.exit(1)
 
+    cfg = load_config()
     players = PlayerRepository()
     sessions = SessionRepository(player_repo=players)
     ledger = LedgerRepository(session_repo=sessions, player_repo=players)
-    win = LedgerViewWindow(ledger_repo=ledger, session_repo=sessions, player_repo=players)
+    order_repo = OrderRequestRepository(session_repo=sessions, player_repo=players)
+    menu = MenuMaster()
+
+    api_server = None
+    api_thread = None
+    api_cfg = cfg.get("viewer_api", {})
+    if api_cfg.get("enabled", False):
+        try:
+            import uvicorn
+            from api.server import create_app
+        except ImportError:
+            print("viewer_api.enabled=true ですが fastapi/uvicorn が未導入のため "
+                  "API なしで起動します（pip install \".[api]\"）。")
+        else:
+            bind_host = api_cfg.get("bind_host", "127.0.0.1")
+            bind_port = api_cfg.get("bind_port", 8788)
+            app = create_app(
+                players, sessions,
+                cfg.get("session", {}).get("log_dir", "./logs"),
+                ledger_repo=ledger, order_repo=order_repo, menu=menu,
+                orders_writable=True,
+            )
+            api_server = uvicorn.Server(uvicorn.Config(
+                app, host=bind_host, port=bind_port, log_level="warning"))
+            api_thread = threading.Thread(
+                target=api_server.run, daemon=True, name="ViewerAPIThread")
+            api_thread.start()
+            print(f"viewer API を組み込み起動しました: http://{bind_host}:{bind_port} "
+                  "（注文リクエスト受付 有効）")
+
+    win = LedgerViewWindow(
+        ledger_repo=ledger, session_repo=sessions, player_repo=players,
+        order_repo=order_repo, menu=menu,
+    )
     win.run()
+
+    if api_server is not None:
+        api_server.should_exit = True
+        api_thread.join(timeout=3)
+
+
+def run_viewer_api() -> None:
+    """Phase M1: player 向け読み取り専用 viewer API を起動する (ADR-0017)。"""
+    from core.config import load_config
+
+    try:
+        from api.server import run_server
+    except ImportError:
+        print("fastapi / uvicorn が見つかりません。pip install \".[api]\" でインストールしてください。")
+        sys.exit(1)
+
+    cfg = load_config()
+    api_cfg = cfg.get("viewer_api", {})
+    print(
+        f"Viewer API を起動します: http://{api_cfg.get('bind_host', '127.0.0.1')}:"
+        f"{api_cfg.get('bind_port', 8788)}/api/health (Ctrl+C で終了)"
+    )
+    run_server(cfg)
 
 
 def export_ledger(out_dir: str) -> None:
@@ -575,6 +640,11 @@ def main() -> None:
         const="logs/ledger_export",
         help="settlement / cashflow を CSV にエクスポートする（Phase S3.3, 既定 logs/ledger_export）",
     )
+    parser.add_argument(
+        "--viewer-api",
+        action="store_true",
+        help="player 向け読み取り専用 viewer API を起動する（Phase M1, ADR-0017, 要 [api] extra）",
+    )
     args = parser.parse_args()
 
     if args.players:
@@ -587,6 +657,10 @@ def main() -> None:
 
     if args.export_ledger:
         export_ledger(args.export_ledger)
+        sys.exit(0)
+
+    if args.viewer_api:
+        run_viewer_api()
         sys.exit(0)
 
     if args.sessions:

@@ -76,3 +76,19 @@ front-end が UI 分岐できるよう、core / repository が返す error を *
 > `payment_status` の `unpaid↔paid` 操作は訂正として許容（error にしない）。kind / reason / status の
 > enum 外指定は呼び出し側のバグとして `ValueError`（front-end は固定 enum から渡すため通常到達しない）。
 > settlement schema の `1.0` freeze は #5（S4）。
+
+### viewer API / order-request error code（M1/M5 — ADR-0017/0018）
+
+viewer API（`api/server.py`）+ 注文リクエスト core（`core/order_request_repository.py`）が返す
+code（additive）。Python 例外階層は `OrderRequestError`（基底）← 各 code に対応する subclass。
+viewer API は menu 照合（`unknown_item`）と read-only モード（`orders_unavailable`）を境界で扱う:
+
+| code | 意味 | 発生する操作（例） | Python 例外 / 由来 | HTTP |
+|------|------|------------------|---------------------|------|
+| `not_found` | unknown player / session / hand / request（既存 code を再利用） | 各 GET / confirm | `*NotFoundError` | 404 |
+| `unknown_player` | 指定 `player_id` が registry に実在しない | create request | `OrderUnknownPlayerError` | 404 |
+| `session_closed` | closed session に注文 / 確定しようとした | create / confirm request | `OrderSessionClosedError` | 409 |
+| `invalid_quantity` | quantity 範囲外（1..99 外）/ item_name 空・過長 / note 過長 | create request | `InvalidOrderRequestError` | 400 |
+| `unknown_item` | menu に無い品名（menu 照合は API 境界） | POST order-request | API 境界（menu master） | 400 |
+| `already_resolved` | confirmed / rejected 済の request を再解決しようとした | confirm / reject request | `AlreadyResolvedError` | 409 |
+| `orders_unavailable` | read-only モード（単独 `--viewer-api`）で注文 write を受けた | POST order-request | API 境界（orders_writable=False） | 503 |

@@ -102,6 +102,14 @@ class SessionRepository:
         self._hands: dict[str, dict[int, dict]] = {}
         self._load()
 
+    @property
+    def player_repo(self) -> PlayerRepository:
+        """この session repository が player 実在判定に使う registry。
+
+        ledger / order-request repository が同じ player 名前空間を共有するために参照する。
+        """
+        return self._player_repo
+
     # ――― 永続化 ―――
 
     def _load(self) -> None:
