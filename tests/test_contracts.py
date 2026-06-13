@@ -113,6 +113,51 @@ def test_core_ledger_matches_contract(tmp_path: Path):
     validator.validate(spend.to_dict())
 
 
+def test_core_session_matches_contract(tmp_path: Path):
+    """core が生成する Session / SeatAssignment / HandRef が schema に適合する
+    (code↔contract drift, S2 1.0 freeze, ADR-0019)。"""
+    from core.player_repository import PlayerRepository
+    from core.session_repository import SessionRepository
+
+    players = PlayerRepository(path=tmp_path / "players.json")
+    alice = players.create_player("Alice")
+    sessions = SessionRepository(path=tmp_path / "sessions.json", player_repo=players)
+    session = sessions.create_session(label="Friday #1", blinds={"sb": 100, "bb": 200})
+    assignment = sessions.assign_seat(session.session_id, 1, 3, alice.player_id)
+    hand_ref = sessions.resolve_hand_ref(session.session_id, 1)
+
+    session_schema = _load(_SCHEMAS / "session.schema.json")
+    jsonschema.Draft202012Validator(session_schema).validate(session.to_dict())
+    seat_schema = _load(_SCHEMAS / "seat_assignment.schema.json")
+    jsonschema.Draft202012Validator(seat_schema).validate(assignment.to_dict())
+    hand_ref_schema = _load(_SCHEMAS / "hand_ref.schema.json")
+    jsonschema.Draft202012Validator(hand_ref_schema).validate(hand_ref.to_dict())
+
+
+def test_core_settlement_matches_contract(tmp_path: Path):
+    """core が生成する SessionSettlement が schema に適合する
+    (code↔contract drift, S4 schema 1.0 freeze, ADR-0019)。"""
+    from core.ledger_repository import LedgerRepository
+    from core.player_repository import PlayerRepository
+    from core.session_repository import SessionRepository
+
+    players = PlayerRepository(path=tmp_path / "players.json")
+    alice = players.create_player("Alice")
+    sessions = SessionRepository(path=tmp_path / "sessions.json", player_repo=players)
+    session = sessions.create_session()
+    repo = LedgerRepository(
+        path=tmp_path / "ledger.json", session_repo=sessions, player_repo=players
+    )
+    repo.add_entry(session.session_id, alice.player_id, "buy_in", cash_amount=10000)
+    sessions.close_session(session.session_id)
+    settlements = repo.commit_settlement(session.session_id)  # settled_at を埋める
+
+    schema = _load(_SCHEMAS / "session_settlement.schema.json")
+    validator = jsonschema.Draft202012Validator(schema)
+    for s in settlements:
+        validator.validate(s.to_dict())
+
+
 def test_core_hand_action_match_contract():
     """core が生成する HandSummary / ActionRecord が hand / action schema に適合する
     (code↔contract drift, ISSUE-0011 freeze)。"""

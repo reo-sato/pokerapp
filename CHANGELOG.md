@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+### Contracts (schema `1.0` freeze — S2/S3/viewer, ADR-0019)
+
+- session / seat_assignment / hand_ref（S2）+ ledger_entry / point_ledger_entry（S3）+
+  session_settlement（S4）+ order_request / player_session_summary（viewer）の schema を
+  draft `0.x` → **`1.0` freeze**。統合後に全 consumer（core/desktop/mobile/API）が安定したため。
+  以後 additive-only（breaking は新 ADR + MAJOR bump）。
+- 上流 blocker の **ISSUE-0005 を Resolved**（hand logger 接続=E1/E2、seat change UI=E3 で解消）。
+- 全 model に code↔contract drift gate を整備（`test_core_session_matches_contract` /
+  `test_core_settlement_matches_contract` 追加、ledger/viewer は既存）。**残る draft は無し**
+  （freeze order #6 = interface/sync 契約のみ planned）。
+
 ### Docs (ロードマップ整理 — 統合後)
 
 - `CLAUDE.md` の Future Scope / Phase 計画を 3 トラック（S=会計 / M=player 向け / R=hand core）

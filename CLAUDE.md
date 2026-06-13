@@ -27,7 +27,7 @@ pokerapp/
 │   ├── issues/                    ← issue / mismatch log
 │   ├── worklog/                   ← タスク単位の作業ログ
 │   ├── templates/                 ← adr / issue / worklog テンプレート
-│   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures; player + hand/action freeze済, session/seat/hand_ref は S2 core 実装済・schema draft, ledger/point/settlement は S3 実装済・schema draft・ADR-0016, viewer/order は M1/M5 実装済・schema draft・ADR-0017/0018)
+│   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures; **全 model schema `1.0` frozen** — player/hand/action + session/seat/hand_ref(S2) + ledger/point/settlement(S3) + order_request/player_session_summary(viewer), ADR-0019。残 draft は interface/sync(S5) のみ)
 │   ├── installation.md            ← エンドユーザー: インストール手順 (Phase I)
 │   ├── usage.md                   ← エンドユーザー: 使い方・読み上げ語彙・設定 (Phase I)
 │   ├── troubleshooting.md         ← エンドユーザー: 困りごと対処 (Phase I)
@@ -301,7 +301,7 @@ ADR-0017）。**player 向け desktop viewer は作らない**（desktop = ス�
 - endpoints: `/api/health`, `/api/players`, `/api/players/{id}`, `/api/players/{id}/sessions`,
   `.../sessions/{sid}/hands`, `/api/sessions/{sid}/hands/{hid}`, `.../sessions/{sid}/ledger`,
   `/api/menu`, `.../sessions/{sid}/order-requests`（GET/POST）。契約は
-  `docs/contracts/viewer-api.md`（draft 0.x）+ `player_session_summary` / `order_request` schema。
+  `docs/contracts/viewer-api.md` + `player_session_summary` / `order_request` schema（`1.0` frozen, ADR-0019）。
 - **read model**: 「player のハンド」は `sessions.json` の seat_assignment 起点で hand log を
   `(session_id, hand_id)` join。ledger summary は verify-v1 ledger の `compute_settlement` を
   当該 player に絞った settlement 由来（`cash_in_total / order_total / entry_fee /
@@ -408,7 +408,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0009） |
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
-| schema `1.0` freeze (S4) | ❌ 未実装 | session/seat/hand_ref・ledger/point・settlement・order_request/player_session_summary の core/UI は実装済。schema `1.0` freeze のみ S4（ISSUE-0005 が上流 blocker、§ ロードマップ） |
+| schema `1.0` freeze (S4) | ✅ 実装済 | 全 model（session/seat/hand_ref・ledger/point・settlement・order_request/player_session_summary）を `1.0` freeze（ADR-0019, ISSUE-0005 Resolved）。code↔contract test 全 model カバー |
 | 実機 E2E (Phase H) / PN5180 firmware 契約 (ISSUE-0014/0015) | 🔲 planned | クリーン環境の通し確認 + USB CCID firmware↔Python 契約凍結（§ ロードマップ 残作業） |
 | cross-app sync / write 拡張 (S5) | 🔲 planned | viewer API は read-only(M1) まで。write/sync・repository の API client 分離は未実装 |
 
@@ -434,7 +434,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **session + hand-based seating** | session 管理と hand ごとの seat→player スナップショット (`seat_assignment` / `hand_ref`) | ✅ core 実装済 (S2, § Session & Seating 参照) |
 | **session ledger** | session 単位の buy-in / rebuy / add-on / order / adjustment / entry_fee を ledger entry として記録 | ✅ core 実装済 (S3, § Ledger / Points / Settlement 参照) |
 | **point ledger** | prize point の grant / spend を記録、buy-in 等に充当可能 | ✅ core 実装済 (S3, § Ledger / Points / Settlement 参照) |
-| **session settlement** | session 終了時に player ごとの「店への net 支払額」と paid/unpaid を確定 | ✅ core 実装済 (S3.1: compute/commit/paid-unpaid)・CSV export (S3.3)・schema `1.0` freeze は S4 |
+| **session settlement** | session 終了時に player ごとの「店への net 支払額」と paid/unpaid を確定 | ✅ core 実装済 (S3.1: compute/commit/paid-unpaid)・CSV export (S3.3)・schema `1.0` frozen (ADR-0019) |
 | **cross-app boundary** | hand logger と ledger app の相互参照契約 (player_id / session_id / hand_id) | 🟡 read-only API は M1 で前倒し実現（`api/`, ADR-0017）。write/sync は planned (S5) |
 
 hand logger と ledger app は **将来別画面・別アプリ** になることを前提に設計する。
@@ -442,7 +442,7 @@ hand logger と ledger app は **将来別画面・別アプリ** になるこ�
 
 ## Domain model（契約定義）
 
-以下の概念モデルは **S1〜S3 で core 実装済**（schema は draft 0.x、`1.0` freeze は S4）。本節は
+以下の概念モデルは **S1〜S3 で core 実装済**、schema は **`1.0` frozen（ADR-0019）**。本節は
 settlement / cross-app / viewer から参照される **契約上の定義** として残す（各実装の詳細は上のセクション）。
 
 ### `player`
@@ -499,7 +499,7 @@ settlement / cross-app / viewer から参照される **契約上の定義** と
 
 今後の実装でも守るべき業務ルール。**ルール 1〜8 はいずれも S3 core で enforce 済**
 （`core/ledger_repository.py` の ledger / point / settlement、§ Ledger / Points / Settlement 参照）。
-残るのは partial paid（ルール 4 の将来拡張）と schema `1.0` freeze（S4）のみ。
+schema は `1.0` frozen（ADR-0019）。残るのは partial paid（ルール 4 の将来拡張, additive）のみ。
 
 1. **entry fee は cash only**。point では支払えない。
 2. **buy-in / rebuy / add-on / order** は cash + point の **併用可**。
@@ -535,9 +535,9 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
 |-------|---------|------|
 | **S0** | spec expansion（CLAUDE.md / ADR-0003 / issues） | ✅ |
 | **S1** | player registry（`core/player*.py`, `gui/player_registry.py`） | ✅ 実装済 |
-| **S2** | session + hand-based seating（`core/session*.py`, ADR-0006/0007） | ✅ core 実装済（schema は draft 0.x） |
-| **S3** | ledger + point ledger + settlement core + desktop viewer + CSV export（`core/ledger*.py`, `gui/ledger_view.py`, `output/ledger_csv_exporter.py`, ADR-0016, ISSUE-0001 Resolved） | ✅ 実装済（schema は draft 0.x） |
-| **S4** | schema `1.0` freeze（session/seat/hand_ref + ledger/point + settlement + viewer/order model）/ partial-paid 等の settlement 拡張 | 🔲 **未実装**（上流 ISSUE-0005 が freeze blocker） |
+| **S2** | session + hand-based seating（`core/session*.py`, ADR-0006/0007） | ✅ core 実装済 + **schema `1.0` frozen**（ADR-0019, ISSUE-0005 Resolved） |
+| **S3** | ledger + point ledger + settlement core + desktop viewer + CSV export（`core/ledger*.py`, `gui/ledger_view.py`, `output/ledger_csv_exporter.py`, ADR-0016, ISSUE-0001 Resolved） | ✅ 実装済 + **schema `1.0` frozen**（ADR-0019） |
+| **S4** | schema `1.0` freeze（session/seat/hand_ref + ledger/point + settlement + viewer/order model） | ✅ **実装済**（ADR-0019, ISSUE-0005 Resolved）。残: partial-paid 等の settlement 拡張（additive） |
 | **S5** | cross-app contract / sync boundary（local↔API client 分離） | 🟡 **一部前倒し**（read-only の viewer API = M1 が S5 の read サブセットを実現。write/sync は未実装） |
 
 ### player 向け参照トラック M（viewer API / mobile / 注文）
@@ -558,10 +558,9 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
 
 ### 残作業（次にやること）
 
-1. **schema `1.0` freeze（S4 / 最優先）**: session / seat_assignment / hand_ref（ISSUE-0005 が blocker）→
-   ledger_entry / point_ledger_entry → session_settlement → viewer の order_request / player_session_summary。
-   freeze は依存順（S2 → S3 → settlement → viewer model）。
-2. **実機 E2E（Phase H）**: クリーン環境で 音声→JSON/PHH の 1 ハンド通し + PN5180 RFID 実機 +
+1. ~~**schema `1.0` freeze（S4）**~~ → **✅ 完了（ADR-0019, ISSUE-0005 Resolved）**: 全 model を `1.0` freeze。
+   次の最優先は下の #2（実機 E2E）。
+2. **実機 E2E（Phase H / 最優先）**: クリーン環境で 音声→JSON/PHH の 1 ハンド通し + PN5180 RFID 実機 +
    `--ledger`（viewer_api.enabled）+ スマホ注文の通し確認。
 3. **PN5180 / ESP32-S3 firmware ↔ Python 契約固定**（ISSUE-0014 / 0015）: USB descriptor / reader_name /
    ATR / 8B UID の凍結。

@@ -1,10 +1,11 @@
-# Ledger / points / settlement contract (S3 draft)
+# Ledger / points / settlement contract (S3, frozen `1.0`)
 
-> **Status: draft / 未 freeze**（freeze order #4 ledger / #5 settlement）。本 doc と
-> `ledger-schema.md` の擬似 schema は **S3 の契約草案**。実装済を意味しない。freeze は S3 着手時に
-> ADR-0016 Accepted + 実 schema/fixtures + contract test 緑 + ISSUE-0001 残項目決着をもって行う
-> （`versioning-and-freeze.md` の freeze 定義）。草案段階の schema version は `0.x`。
-> 設計判断は **ADR-0016**、残高 source of truth は **ISSUE-0001** を参照。
+> **Status: frozen `1.0`**（ADR-0019, 2026-06-13。freeze order #4 ledger / #5 settlement）。
+> `schemas/{ledger_entry,point_ledger_entry,session_settlement}.schema.json` は version `1.0`。
+> core + desktop（`gui/ledger_view.py`）+ CSV export + viewer API が実装済みで code↔contract test 緑
+> （`tests/test_contracts.py::test_core_ledger_matches_contract` / `::test_core_settlement_matches_contract`）。
+> 残高 = fold は **ISSUE-0001 Resolved**（ADR-0016）。以後の変更は additive-only
+> （`versioning-and-freeze.md` §2）。設計判断は **ADR-0016**。
 
 S3 は session world（S2）の上に **ledger（金銭イベント）/ points（店内ポイント残高）/
 settlement（session 締めの精算）** を重ねる。狙いは「home game host が混乱しないレベルの帳簿」で

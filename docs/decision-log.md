@@ -41,6 +41,7 @@
 | ADR-0016 | Ledger / points / settlement design direction (S3) | Accepted | 2026-06-10 | contracts / core (S3) | `docs/adr/0016-ledger-points-settlement-design-direction.md` | **Supersedes ADR-0013**（fold 踏襲 + session_settlement / desktop viewer / CSV export 追加）/ 関連: ADR-0003 / ADR-0007 / ISSUE-0001 |
 | ADR-0017 | Player 向け参照は API-first（viewer API 前倒し）+ Expo（web export 先行） | Accepted | 2026-06-10 | viewer API / mobile (M1) | `docs/adr/0017-player-facing-viewer-api-first-architecture.md` | serene ADR-0013 から採番替え（verify-v1 統合）。補完: ADR-0004。関連: ADR-0008 / ADR-0016 / ISSUE-0019 |
 | ADR-0018 | M5 — 注文リクエスト write path（staff-in-the-loop / in-process API / menu master / name-pick 確定） | Accepted | 2026-06-11 | orders / viewer API (M5) | `docs/adr/0018-m5-order-request-write-path.md` | serene ADR-0015 から採番替え（verify-v1 統合）。ISSUE-0019 を v1 決着。関連: ADR-0017 / ADR-0016（ledger） |
+| ADR-0019 | S2 / S3 / viewer model の schema を `1.0` に freeze（統合後） | Accepted | 2026-06-13 | contracts / freeze | `docs/adr/0019-schema-1_0-freeze-post-integration.md` | session/seat/hand_ref + ledger/point/settlement + order_request/player_session_summary を 1.0 化。ISSUE-0005 Resolved。関連: ADR-0006/0007/0016/0017/0018 |
 
 <!--
 Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時点で空番。
@@ -55,7 +56,7 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0002 | display_name の uniqueness 仕様の将来拡張が未確定      | Open   | 2026-05-22 | player registry (S1)     | `docs/issues/0002-display-name-uniqueness-scope.md`        | —                    |
 | ISSUE-0003 | 並行開発の contract drift / 凍結タイミング risk       | Open   | 2026-05-22 | planning (WS0–WS3)       | `docs/issues/0003-parallel-dev-contract-drift.md`          | Phase 0a で部分緩和  |
 | ISSUE-0004 | hand_id が int と cross-app 文字列契約で不整合        | Resolved | 2026-05-22 | contracts / shared-ids   | `docs/issues/0004-hand-id-int-vs-cross-app-string.md`      | ADR-0006（複合キー採用） |
-| ISSUE-0005 | S2 session/seating freeze の未確定事項               | Open   | 2026-05-25 | contracts / session (S2) | `docs/issues/0005-s2-session-seating-freeze-blockers.md`   | ADR-0007（#1/#2 を core で確定）。hand logger 接続は ADR-0008 で戦略確定（実装は Phase 2.x） |
+| ISSUE-0005 | S2 session/seating freeze の未確定事項               | Resolved | 2026-05-25 | contracts / session (S2) | `docs/issues/0005-s2-session-seating-freeze-blockers.md`   | 残 blocker は E1/E2/E3 で解消 → **ADR-0019 で schema `1.0` freeze**（2026-06-13） |
 | ISSUE-0006 | Hand 開始時の seat→player_id 選択 UX が未確定        | Resolved | 2026-06-07 | hand logger × session / GUI | `docs/issues/0006-seat-selection-ux-at-hand-start.md`      | E3 で UX 確定＋実装（座席設定ダイアログ／開始時設定＋carry-forward／その場 create／空席 skip） |
 | ISSUE-0007 | Legacy hand log（timestamp/no player_id）の取り込み方針 | Open | 2026-06-03 | data migration / S2.x       | `docs/issues/0007-legacy-hand-log-migration-policy.md`     | Phase 2.4 着手判断時 |
 | ISSUE-0008 | pokerkit を live engine として incremental 駆動できるか | Fixed | 2026-06-03 | reconstruct / dependency | `docs/issues/0008-pokerkit-online-feeding-feasibility.md` | spike で feasibility 確認 (pokerkit 0.7.4)。実装は R2 |

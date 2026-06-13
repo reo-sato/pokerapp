@@ -6,7 +6,23 @@
 
 ## Status
 
-Open（S2 core 実装で #1 / #2 を core について確定。hand logger 接続側と schema `1.0` freeze は未了）
+Resolved（2026-06-13, ADR-0019 で schema `1.0` freeze）
+
+## Resolution (2026-06-13, ADR-0019)
+
+残 blocker（hand logger ↔ session hand の reconciliation、mid-session seat change の運用 UI 要件）は
+統合後に解消済み:
+
+- **hand logger 接続**: E1+E2-core（ADR-0008 write-through、`HandSummary.players[].player_id` additive、
+  `session_id` を session レイヤ UUID4 hex に切替）+ E3（`main.py` 結線、`config.session_layer.enabled`）。
+- **mid-session seat change UI**: E3（`gui/seat_selection.py` + carry-forward）。明示 move イベントは
+  持たず最新 hand との差分で導出（ADR-0006）で確定。
+- #1 session_id（UUID4 hex, ADR-0007）/ #2 seat_assignment 永続形（`sessions.json`）/ #4 seat_no（1..9）も
+  core 確定済み。
+
+→ session / seat_assignment / hand_ref schema を `1.0` に freeze（ADR-0019）。code↔contract test
+（`tests/test_contracts.py::test_core_session_matches_contract`）追加。下流 S3/settlement/viewer も
+同 ADR で同時 freeze。
 
 ## Update (2026-05-25, S2 core 実装)
 

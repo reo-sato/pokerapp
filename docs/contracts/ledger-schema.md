@@ -1,9 +1,9 @@
-# Ledger / points / settlement — JSON schema draft (S3)
+# Ledger / points / settlement — JSON schema (S3, frozen `1.0`)
 
-> **Status: draft / 未 freeze**（freeze order #4 ledger / #5 settlement）。本 doc は
+> **Status: frozen `1.0`**（ADR-0019, 2026-06-13。freeze order #4 ledger / #5 settlement）。本 doc は
 > `ledger_entry` / `point_ledger_entry` / `session_settlement` の擬似 JSON Schema（記述用）。
-> **実 schema は実装済**: `schemas/{ledger_entry,point_ledger_entry,session_settlement}.schema.json`
-> + `fixtures/` + `tests/test_contracts.py` 登録（S3.1, ISSUE-0016）。本 doc の擬似 schema は実 schema と
+> **実 schema は version `1.0`**: `schemas/{ledger_entry,point_ledger_entry,session_settlement}.schema.json`
+> + `fixtures/` + `tests/test_contracts.py`（S3.1, ISSUE-0016）。本 doc の擬似 schema は実 schema と
 > 整合する（差分が出たら実 schema が正）。設計は `ledger-overview.md` / ADR-0016 を参照。
 
 ## versioning 方針

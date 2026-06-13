@@ -1,9 +1,9 @@
-# Session / seat_assignment / hand_ref contract (S2 draft)
+# Session / seat_assignment / hand_ref contract (S2, frozen `1.0`)
 
-> **Status: draft / 未 freeze**（freeze order #3）。本 doc と `schemas/{session,seat_assignment,hand_ref}.schema.json`
-> + `fixtures/` は **S2 の契約草案**。実装済を意味しない。freeze は S2 着手時に ADR-0006 Accepted +
-> contract test 緑 + fixtures 完備 + ISSUE-0005 決着をもって行う（`versioning-and-freeze.md` の freeze 定義）。
-> 草案段階の schema version は `0.x`。freeze 時に `1.0` へ昇格する。
+> **Status: frozen `1.0`**（ADR-0019, 2026-06-13。freeze order #3）。`schemas/{session,seat_assignment,hand_ref}.schema.json`
+> は version `1.0`。ISSUE-0005 の残 blocker（hand logger 接続・seat change UI）は E1/E2/E3 で解消済み。
+> code↔contract test（`tests/test_contracts.py::test_core_session_matches_contract`）+ fixtures 完備 +
+> ADR-0006/0007/0019 Accepted。以後の変更は additive-only（`versioning-and-freeze.md` §2）。
 
 S2 は hand logger に対して **session レイヤ** と **hand-based seating** を重ねる。core /
 desktop / mobile が同じ契約を参照できるよう、ここで境界を凍結する。重い識別子判断（hand の
@@ -88,20 +88,19 @@ cross-app 参照）は ADR-0006 で確定済み。
 `canonical` / `valid-minimal` / `invalid-*` を追加済み。`tests/test_contracts.py` の `_MODELS`
 に 3 model を登録し、schema↔fixture 整合（valid 通過 / invalid 違反）を検証する。
 
-## freeze 状態 / 未確定事項 / blockers
+## freeze 状態
 
-- **本 doc + 3 schema + fixtures + ADR-0006 は draft（schema version `0.x`, 未 freeze）**。
-  ただし **S2 core は実装済**（`core/session.py` / `core/session_repository.py`, ADR-0007）。
-  core は draft schema に対して `code↔contract` test 緑
-  （`tests/test_session_repository.py::test_core_session_matches_contract`）。
+- **frozen `1.0`（ADR-0019, 2026-06-13）**: 3 schema は version `1.0`。core は
+  `code↔contract` test 緑（`tests/test_contracts.py::test_core_session_matches_contract`）。
+  以後の変更は additive-only（`versioning-and-freeze.md` §2、breaking は新 ADR + MAJOR bump）。
 - **core 実装で確定（ADR-0007）**: `session_id` は session レイヤが UUID4 hex で採番（hand logger
   の timestamp session_id とは別 namespace）。seat_assignment は専用ストア `sessions.json` に
   hand 単位で入れ子保持（hand logger JSON は不変）。
-- **freeze の残 blocker（ISSUE-0005）**: hand logger の hand ↔ session レイヤ hand の
-  reconciliation（`HandSummary` への player_id 接続）、mid-session seat change の運用 UI 要件。
-  これらが決まるまで schema を `1.0` に昇格しない。**接続戦略は ADR-0008（Pattern A,
-  write-through）で確定**し、詳細設計は `docs/contracts/hand-integration.md`（draft）にある。
-  Phase 2.x で段階的に実装する。残 UX 論点は ISSUE-0006、legacy log 取り込みは ISSUE-0007。
-- **据え置き（決定済・S2 では変更しない）**: `hand_id: int`（ADR-0006）。seat_no 範囲 1..9。
+- **freeze blocker（ISSUE-0005）は解消済み**: hand logger ↔ session hand の reconciliation は
+  E1+E2-core（ADR-0008 Pattern A write-through、`HandSummary.players[].player_id` additive、
+  `docs/contracts/hand-integration.md`）、mid-session seat change UI は E3
+  （`gui/seat_selection.py` + carry-forward、最新 hand 差分で導出）で実装済み。
+  legacy log 取り込みは ISSUE-0007（任意・未着手）。
+- **据え置き（決定済）**: `hand_id: int`（ADR-0006）。seat_no 範囲 1..9。
 - **out of scope（S2 core 段階）**: ledger / point / settlement（S3〜S4）、sync / API（S5）、
   desktop/mobile UI 実装、hand logger との自動接続 / migration。

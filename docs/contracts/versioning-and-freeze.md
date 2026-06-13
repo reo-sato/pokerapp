@@ -72,12 +72,16 @@ schema を変更する PR は、同じ PR で以下を更新する（漏れは c
 
 | # | 契約 | phase | 状態 |
 |---|------|-------|------|
-| 1 | shared IDs（player_id / session_id / hand_id） | 全 phase 共通 | bootstrap 済（player_id 確定、hand_id は ADR-0006 で確定、session_id 採番は ISSUE-0005） |
-| 2 | player schema | S1 | freeze 候補（本 bootstrap で schema/fixtures 追加） |
-| 3 | session / seat_assignment / hand_ref | S2 | **draft（schema/fixtures/ADR-0006 追加, version 0.x）**。freeze は ISSUE-0005 決着 + S2 core 実装後 |
-| 4 | ledger_entry / point_ledger_entry / session_settlement | S3 | **draft（ADR-0016, schema/fixtures/core/desktop/export 実装済, version 0.x）**。ISSUE-0001 は fold で決着（ADR-0013→ADR-0016）。freeze は上流 session schema freeze（ISSUE-0005）後 |
-| 5 | session_settlement（schema freeze）| S4 | draft（ADR-0016, schema/fixtures/core 実装済）。S3.3 で derived view + CSV export を先行、`1.0` freeze は S4 |
-| 6 | repository / service interface, sync | S5 | planned |
+| 1 | shared IDs（player_id / session_id / hand_id） | 全 phase 共通 | bootstrap 済（player_id 確定、hand_id は ADR-0006、session_id は UUID4 hex = ADR-0007 で確定） |
+| 2 | player schema | S1 | **frozen `1.0`** |
+| 3 | session / seat_assignment / hand_ref | S2 | **frozen `1.0`（ADR-0019, ISSUE-0005 Resolved）** |
+| 4 | ledger_entry / point_ledger_entry | S3 | **frozen `1.0`（ADR-0019。設計は ADR-0016、残高 fold = ISSUE-0001 Resolved）** |
+| 5 | session_settlement | S4(schema) | **frozen `1.0`（ADR-0019。core/CSV/API は ADR-0016 実装済。partial-paid 等は additive 拡張）** |
+| 5b | order_request / player_session_summary | viewer (M1/M5) | **frozen `1.0`（ADR-0019。ADR-0017/0018）** |
+| 6 | repository / service interface, sync | S5 | planned（read-only HTTP boundary は M1 viewer API で前倒し実現） |
+
+> hand / action schema も `1.0` frozen（ISSUE-0011）。**残る draft は無い**（freeze order #6 の
+> interface/sync 契約のみ planned）。
 
 ## 7. drift detection（最小方針）
 
