@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Docs (ロードマップ整理 — 統合後)
+
+- `CLAUDE.md` の Future Scope / Phase 計画を 3 トラック（S=会計 / M=player 向け / R=hand core）
+  統合後の実態に整理。「ロードマップ（3 トラック統合後）」表と「残作業」一覧を新設し、M4 破棄・
+  M6/M7 の S3 合流・採番替え（ADR-0017/0018・ISSUE-0019）・settlement core 済/freeze 残を明記。
+  陳腐化記述（「すべて未実装」「mobile/ledger 未着手」、存在しないテスト参照）を修正
+  （`docs/worklog/2026-06-13-roadmap-consolidation-post-merge.md`）。
+
 ### Added (player 向け viewer API + mobile + 注文リクエスト — verify-v1 ledger に統合, ADR-0017/0018)
 
 - **player 向け読み取り専用 viewer API**（M1, `api/`, `[api]` extra）。`python main.py --viewer-api`

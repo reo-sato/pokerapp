@@ -408,14 +408,19 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0009） |
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
-| settlement schema `1.0` freeze (S4) | ❌ 未実装 | settlement の core/CSV export は S3 実装済（§ Ledger / Points / Settlement）。schema `1.0` freeze のみ S4（future scope） |
+| schema `1.0` freeze (S4) | ❌ 未実装 | session/seat/hand_ref・ledger/point・settlement・order_request/player_session_summary の core/UI は実装済。schema `1.0` freeze のみ S4（ISSUE-0005 が上流 blocker、§ ロードマップ） |
+| 実機 E2E (Phase H) / PN5180 firmware 契約 (ISSUE-0014/0015) | 🔲 planned | クリーン環境の通し確認 + USB CCID firmware↔Python 契約凍結（§ ロードマップ 残作業） |
+| cross-app sync / write 拡張 (S5) | 🔲 planned | viewer API は read-only(M1) まで。write/sync・repository の API client 分離は未実装 |
 
 ---
 
 # Future Scope
 
-ここから下は **すべて未実装** であり、現時点では設計検討・仕様確定段階。  
-コード・テスト・データモデルは存在しない。Phase ごとに段階導入する。
+> **状態（verify-v1 統合後）**: S 系（会計）・M 系（player 向け参照）・R 系（hand core）の 3 トラックは
+> **大半が実装済**で 1 リポジトリに合流済み（§ 実装状況 / 下の「ロードマップ」表）。
+> 本セクションは (1) 既実装機能の **契約上の定義**（settlement / cross-app から参照される model 定義）と、
+> (2) **残作業**（schema `1.0` freeze・cross-app sync・実機 E2E 等）を分けて記述する。
+> 「未実装」と明記された項目のみが未着手で、それ以外は上のセクションへ昇格済み。
 
 ## Product scope / future architecture
 
@@ -430,14 +435,15 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **session ledger** | session 単位の buy-in / rebuy / add-on / order / adjustment / entry_fee を ledger entry として記録 | ✅ core 実装済 (S3, § Ledger / Points / Settlement 参照) |
 | **point ledger** | prize point の grant / spend を記録、buy-in 等に充当可能 | ✅ core 実装済 (S3, § Ledger / Points / Settlement 参照) |
 | **session settlement** | session 終了時に player ごとの「店への net 支払額」と paid/unpaid を確定 | ✅ core 実装済 (S3.1: compute/commit/paid-unpaid)・CSV export (S3.3)・schema `1.0` freeze は S4 |
-| **cross-app boundary** | hand logger と ledger app の相互参照契約 (player_id / session_id / hand_id) | 🔲 planned (S5) |
+| **cross-app boundary** | hand logger と ledger app の相互参照契約 (player_id / session_id / hand_id) | 🟡 read-only API は M1 で前倒し実現（`api/`, ADR-0017）。write/sync は planned (S5) |
 
 hand logger と ledger app は **将来別画面・別アプリ** になることを前提に設計する。
 両者は共通 ID で相互参照する（§ Cross-app boundary 参照）。
 
-## Domain model（future scope）
+## Domain model（契約定義）
 
-未実装。以下の概念モデルを今後 Phase 単位で実装する。
+以下の概念モデルは **S1〜S3 で core 実装済**（schema は draft 0.x、`1.0` freeze は S4）。本節は
+settlement / cross-app / viewer から参照される **契約上の定義** として残す（各実装の詳細は上のセクション）。
 
 ### `player`
 
@@ -491,8 +497,9 @@ hand logger と ledger app は **将来別画面・別アプリ** になるこ�
 
 ## Business rules
 
-今後の実装でも守るべき業務ルール。ルール 1〜3・6・7 は **S3 core で enforce 済**
-（`core/ledger_repository.py`, § Ledger / Points / Settlement 参照）。4・5・8 は S4 settlement で実装する。
+今後の実装でも守るべき業務ルール。**ルール 1〜8 はいずれも S3 core で enforce 済**
+（`core/ledger_repository.py` の ledger / point / settlement、§ Ledger / Points / Settlement 参照）。
+残るのは partial paid（ルール 4 の将来拡張）と schema `1.0` freeze（S4）のみ。
 
 1. **entry fee は cash only**。point では支払えない。
 2. **buy-in / rebuy / add-on / order** は cash + point の **併用可**。
@@ -515,17 +522,55 @@ hand logger と ledger app は **将来別アプリ化** することを前提�
 - いずれの ID 採番もアプリ内で完結すること（外部システム前提を作らない）。
 - 物理的な配置（同一プロセス / 別プロセス / 別アプリ）は phase ごとに段階移行する。S2〜S4 では同一プロセス、S5 で boundary を切り出す。
 
-## Phase candidates（future scope）
+## ロードマップ（3 トラック統合後）
 
-| Phase | スコープ | 主な成果物 |
-|-------|---------|-----------|
-| **S0** | spec expansion | CLAUDE.md / ADR-0003 / issues / worklog |
-| **S1** | player registry ✅ 実装済 | `player` データモデル、CRUD、display_name のみ、別画面 |
-| **S2** | session + hand-based seating ✅ core 実装済 | `session`, `seat_assignment`, `hand_ref`、hand 開始ごとのスナップショット（`core/session*.py`, ADR-0007。schema は draft のまま） |
-| **S3** | ledger entries + point ledger ✅ core 実装済 | `ledger_entry`, `point_ledger_entry`、cash+point 併用ルール、残高 fold（`core/ledger*.py`, ADR-0016, ISSUE-0001 Resolved。schema は draft のまま） |
-| **S4** | session settlement + paid/unpaid | `session_settlement`、net due to store、paid/unpaid 操作 |
-| **S5** | cross-app contract / sync boundary | hand logger ↔ ledger app の参照契約、ID 安定性、別プロセス化準備 |
-| **R0–R5 + G**（実装済） | rules-aware hand reconstruction（**hand core 改善トラック**, S 系列と直交） | pokerkit を live ルール権威に / actor 推定（手番 prior × sensor + silent-fold 合成）/ `apply_corrections`（合法手制約）/ 決定的 record/replay + golden fixtures + schema freeze + **live 既定切替**。ADR-0009/0010/0011/0012。**R1 record ✅ → R2 engine ✅ → R3 推定/訂正/融合(D1/D2a/D2b/D3) ✅ → R4 replay ✅ → R5 freeze+side-pot ✅ → G 既定=pokerkit ✅**。残: 実機 E2E（H）、重み較正、camera 源 |
+verify-v1 統合（2026-06-13, merge commit）で、会計トラック（S）と player 向け参照トラック（M）が
+合流した。**M4（serene の cash-only ledger）は破棄**し S3 の cash+point ledger に一本化、
+**M6（point）/ M7（settlement）は S3 で実装済**に合流、採番は serene ADR-0013/0015→**ADR-0017/0018**、
+ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
+
+### 会計トラック S（session / ledger / settlement）
+
+| Phase | スコープ | 状態 |
+|-------|---------|------|
+| **S0** | spec expansion（CLAUDE.md / ADR-0003 / issues） | ✅ |
+| **S1** | player registry（`core/player*.py`, `gui/player_registry.py`） | ✅ 実装済 |
+| **S2** | session + hand-based seating（`core/session*.py`, ADR-0006/0007） | ✅ core 実装済（schema は draft 0.x） |
+| **S3** | ledger + point ledger + settlement core + desktop viewer + CSV export（`core/ledger*.py`, `gui/ledger_view.py`, `output/ledger_csv_exporter.py`, ADR-0016, ISSUE-0001 Resolved） | ✅ 実装済（schema は draft 0.x） |
+| **S4** | schema `1.0` freeze（session/seat/hand_ref + ledger/point + settlement + viewer/order model）/ partial-paid 等の settlement 拡張 | 🔲 **未実装**（上流 ISSUE-0005 が freeze blocker） |
+| **S5** | cross-app contract / sync boundary（local↔API client 分離） | 🟡 **一部前倒し**（read-only の viewer API = M1 が S5 の read サブセットを実現。write/sync は未実装） |
+
+### player 向け参照トラック M（viewer API / mobile / 注文）
+
+| Phase | スコープ | 状態 |
+|-------|---------|------|
+| **M1** | read-only viewer API（`api/`, ADR-0017） | ✅ 実装済 |
+| **M2** | mobile viewer（`mobile/`, Expo/RN, ADR-0017） | ✅ 実装済 |
+| **M3** | seat 選択 GUI 結線（= S2.x E3, ISSUE-0006 Resolved） | ✅ 実装済（verify-v1 の `gui/seat_selection.py`） |
+| ~~M4~~ | ~~cash-only ledger 先行~~ | ❌ **破棄**（S3 に一本化, 統合時） |
+| ~~M6 / M7~~ | ~~point 連携 / settlement~~ | ✅ **S3 で実装済に合流** |
+
+### hand core トラック R（rules-aware reconstruction, S/M と直交）
+
+| Phase | スコープ | 状態 |
+|-------|---------|------|
+| **R0–R5 + G** | pokerkit を live ルール権威に / actor 推定 + silent-fold 合成 / `apply_corrections` / 決定的 record/replay + golden fixtures + hand/action schema freeze + live 既定切替（ADR-0009/0010/0011/0012） | ✅ 実装済（R1→R2→R3(D1/D2a/D2b/D3)→R4→R5→G 完了） |
+
+### 残作業（次にやること）
+
+1. **schema `1.0` freeze（S4 / 最優先）**: session / seat_assignment / hand_ref（ISSUE-0005 が blocker）→
+   ledger_entry / point_ledger_entry → session_settlement → viewer の order_request / player_session_summary。
+   freeze は依存順（S2 → S3 → settlement → viewer model）。
+2. **実機 E2E（Phase H）**: クリーン環境で 音声→JSON/PHH の 1 ハンド通し + PN5180 RFID 実機 +
+   `--ledger`（viewer_api.enabled）+ スマホ注文の通し確認。
+3. **PN5180 / ESP32-S3 firmware ↔ Python 契約固定**（ISSUE-0014 / 0015）: USB descriptor / reader_name /
+   ATR / 8B UID の凍結。
+4. **S5 cross-app sync**: viewer API への write/sync 拡張、repository の local↔API client 分離、
+   別プロセス/別アプリ化の boundary 切り出し。
+5. **settlement 拡張**: partial-paid、settlement の GUI からの確定（commit）、auto ledger 生成。
+6. **R 系の後続**: 派生 confidence の重み較正（golden fixtures 由来）、camera 源の統合。
+7. **プライバシー再評価（ISSUE-0019）**: name-pick で問題が顕在化したら PIN を additive 導入。
+8. **未実装の単機能**: Vosk 代替 ASR、ディーラーボタン自動回転 / SB-BB 自動 post。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。
 
@@ -684,12 +729,12 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
     （`core/session.py` / `core/session_repository.py`, ADR-0007、`tests/test_session_repository.py`）。
   - WS2: desktop の session/seating 別画面。**read-only viewer 実装済（WS2-α）**
     （`gui/session_viewer.py`, `main.py --sessions`, § Session / Seating Viewer）。編集系 UI は未着手。
-  - WS3: mobile の session 画面（mock）。**未着手**。
+  - WS3: mobile の session 画面。**実装済**（`mobile/` の MySessions/MyHands = M2、viewer API 経由 read-only）。
 - **Blockers**: seat_assignment を hand-based にする設計確定（**ADR-0006 済**）。hand_id の cross-app 形
   （**ADR-0006 で `(session_id, hand_id)` 複合キーに確定**）。`session_id` 採番・永続形は
   **ADR-0007 で core について確定**。残: hand logger 接続・seat change UI 要件（ISSUE-0005）。
 - **Done criteria**: session 開始/終了と hand 単位 seat snapshot が core で確定（**達成: WS1 core**）。
-  desktop は read-only viewer まで実装（WS2-α）、編集系 desktop UI / mobile（WS3）は未着手。
+  desktop は read-only viewer まで実装（WS2-α、編集系 desktop UI は未着手）、mobile は M2 で実装済。
   schema `1.0` freeze は ISSUE-0005 残項目後。
 - **Phase 2.x（hand logger 接続, planning 済 / 実装 planned）**: 既存 hand logger world
   （`HandSummary` / `JsonWriter` / `PHHExporter` / `IntegrationThread`）と S2 core を **段階接続**する。
@@ -716,29 +761,35 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
   - WS0: ledger_entry / point_ledger_entry schema（cash+point 併用、order 明細）。**draft 済**。
   - WS1: ledger / point ledger repository/service + 残高計算。**core 実装済**
     （`core/ledger.py` / `core/ledger_repository.py`, ADR-0016、
-    `tests/test_ledger_repository.py` / `tests/test_point_ledger.py`）。
-  - WS2: desktop の ledger 入力・中間集計（buy-in 合計 / 注文合計）別画面。**未着手**。
-  - WS3: mobile の ledger 画面（mock）。**未着手**。
+    `tests/test_ledger_repository.py`、point/settlement 含む）。
+  - WS2: desktop の ledger 入力・中間集計（buy-in 合計 / 注文合計）別画面。**実装済**
+    （`gui/ledger_view.py`, `main.py --ledger`, S3.2）。
+  - WS3: mobile の ledger 画面。**実装済**（`mobile/` の会計画面 = M2、viewer API 経由 read-only）。
 - **Blockers**: ~~ISSUE-0001（残高 source of truth）~~ → **ADR-0016 で決着**
   （残高 = point ledger の fold、計算者は core のみ、grant 冪等性は idempotency_key）。
 - **Done criteria**: cash+point 併用・point 不足の cash 補完・entry fee cash only が core で
-  enforced（**達成: WS1 core**）。両 front-end の中間集計表示（WS2/WS3）は未着手。
+  enforced（**達成: WS1 core**）。両 front-end の中間集計表示も実装済（desktop=S3.2 / mobile=M2）。**達成**。
 
-### Phase 4 — settlement
+### Phase 4 — settlement（core 実装済 / schema freeze 残）
 
 - **Goal**: session 終了時に player ごとの `session_settlement`（net due to store / paid-unpaid）を確定。
-- **Prerequisites**: ledger/point 契約（S3）+ settlement schema 凍結。
-- **Parallel tasks**:
-  - WS0: session_settlement schema 凍結（player→店の 1 方向のみ）。
-  - WS1: settlement 確定 service + paid/unpaid 操作。
-  - WS2: desktop の settlement 画面。
-  - WS3: mobile の settlement 表示（mock）。
-- **Blockers**: paid/unpaid の状態遷移と partial paid の要否確定。player-to-player を扱わない前提の固定。
-- **Done criteria**: session 終了で settlement 1 行/ player が確定し、paid/unpaid を操作できる。
+- **状態**: settlement core（compute / commit / paid-unpaid）と CSV export は **S3.1/S3.3 で実装済**
+  （`core/ledger_repository.py:compute_settlement`/`commit_settlement`/`set_payment_status`,
+  `output/ledger_csv_exporter.py`, `main.py --export-ledger`）。mobile/API では `compute_settlement`
+  由来の中間集計を read 表示（M1/M2）。
+- **残（= S4 本体）**:
+  - WS0: session_settlement schema の `1.0` 凍結（player→店の 1 方向のみ。上流 session/ledger freeze 後）。
+  - WS2: settlement の **GUI からの確定（commit）** UI（現状 CLI/export 経由）。partial paid 対応。
+  - WS3: mobile の settlement 表示。
+- **Blockers**: partial paid の要否確定。上流 schema freeze（ISSUE-0005）。
 
 ### Phase 5 — sync / cross-app contract hardening
 
 - **Goal**: 同一プロセス前提から、別プロセス / 別アプリ + API/sync へ移行できる boundary を切り出す。
+- **前倒し済**: **read-only の HTTP boundary は M1 viewer API（`api/`, ADR-0017）で実現**
+  （player_id/session_id/hand_id 越しに hand/ledger を read。mobile は repository interface に
+  mock/HTTP を注入して UI 無改修で切替済 = ADR-0004 の境界を実証）。
+- **残**: write/sync（注文以外の双方向同期）、repository の local↔API client 分離、別プロセス化。
 - **Prerequisites**: S1〜S4 の schema が安定し、repository interface が front-end から実証済。
 - **Parallel tasks**:
   - WS0: cross-app 参照同期方式（pull / push / event）と API contract を確定。
