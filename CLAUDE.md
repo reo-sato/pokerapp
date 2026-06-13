@@ -347,7 +347,8 @@ ADR-0017）。**player 向け desktop viewer は作らない**（desktop = ス�
 
 ### Out of scope（現時点）
 
-- **player** read の per-player アクセス制御（v1 = name-pick で確定, ISSUE-0019 Fixed。PIN は将来）。
+- **player** read の per-player アクセス制御（v1 = name-pick で確定, ISSUE-0019 Fixed）。本人確認の
+  進化方針は **ADR-0025**（L0 name-pick → L1 PIN → L2 外部 IdP（LINE/Google OIDC））。実装は後続。
   スタッフ会計 write の認可は **staff shared token で解決済み**（ADR-0021, 上の staff write API 節）。
 - player からの ledger への直接 write（注文も staff 確定が必須）。order_request schema の `1.0` freeze。
 
@@ -605,7 +606,10 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    settlement schema `1.1`。確定 commit + paid/unpaid/partial 切替も S4 GUI で実装済 =
    `gui/ledger_view.py` 精算パネル）。
 6. **R 系の後続**: 派生 confidence の重み較正（golden fixtures 由来）、camera 源の統合。
-7. **プライバシー再評価（ISSUE-0019）**: name-pick で問題が顕在化したら PIN を additive 導入。
+7. **player 本人確認の進化（ADR-0025）**: player_id を内部不変キーに保ち、認証を additive レイヤで
+   重ねる — L0 name-pick（済）→ **L1 per-player PIN**（LAN, players.json に `pin_hash` additive）→
+   **L2 外部 IdP（LINE / Google OIDC, `auth_identity` バインディング, hosted モード = 別 ADR）**。
+   将来プレイヤーが LINE/Google でサインアップできる土台。実装は需要が固まってから。
 8. **未実装の単機能**: Vosk 代替 ASR、ディーラーボタン自動回転 / SB-BB 自動 post。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。

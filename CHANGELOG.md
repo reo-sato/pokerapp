@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### Docs (player アイデンティティ / 認証の進化方針, ADR-0025)
+
+- 将来「プレイヤーが LINE / Google でサインアップ」できる要件に向け、識別と認証を分離する方針を記録。
+  `player_id` を内部不変キーに保ち、認証を additive レイヤで重ねる（L0 name-pick → L1 per-player PIN →
+  L2 外部 IdP = `auth_identity` バインディング）。外部 IdP は LAN-only 前提を変える hosted モード
+  （別 ADR）。**方針記録のみ・実装は後続**。ISSUE-0019 / CLAUDE.md 残作業を更新。
+
 ### Fixed (sync の settlement マージを partial-paid 対応に, ADR-0024)
 
 - `core/sync.py` の settlement マージを **`paid_amount` の monotonic max** に変更（旧: paid>unpaid の

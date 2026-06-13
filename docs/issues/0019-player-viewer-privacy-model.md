@@ -89,8 +89,10 @@ S5 write 拡張で **スタッフ会計 write を HTTP に出す**にあたり�
 という信頼境界に合致し、per-player の認証は不要。**player read / 注文 POST は本 issue のとおり
 name-pick / 無認証のまま**（staff token は player 体験に影響しない）。
 
-残: **player ごとの read アクセス制御（PIN 等）** は依然として将来課題。name-pick で問題（他人の会計
-閲覧）が顕在化したら additive に PIN を導入する（別 ADR）。staff write の認可は本件では解決済み。
+残: **player ごとの本人確認**は将来課題。**進化方針は ADR-0025 で確定**（player_id を内部不変キーに
+保ち、認証を additive レイヤで重ねる: L0 name-pick → L1 per-player PIN → L2 外部 IdP（LINE / Google
+OIDC、`auth_identity` バインディング）。外部 IdP は LAN-only 前提を変える hosted モードとして別 ADR）。
+name-pick で問題が顕在化したら L1 PIN を additive 導入する。staff write の認可は本件で解決済み。
 
 ## Renumber note（2026-06-13）
 
