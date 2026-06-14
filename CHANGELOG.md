@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### Docs (player 認証 L1 PIN / L2 外部 IdP の詳細設計, ADR-0027 / ADR-0028)
+
+- ADR-0025 の方針（name-pick → PIN → 外部 IdP）のうち **L1 / L2 を実装可能な詳細設計まで具体化**
+  （**設計記録のみ・コードなし**）。
+- **L1 per-player PIN（ADR-0027）**: PIN を node-local `player_credentials.json`（PBKDF2 + per-player
+  lockout、read API / sync 非対象）に分離（ADR-0025 の「players.json に pin_hash」素描を漏洩・伝播・schema
+  リスクから精緻化）。検証後に stateless 署名トークンを発行し **player principal 解決レイヤ**で self-write を
+  認可。config `viewer_api.player_auth` 既定 `off` で完全後方互換（name-pick 維持）。
+- **L2 外部 IdP（ADR-0028）**: `(provider, subject) → player_id` の `auth_identity`（多対一、player_id は
+  外部 sub から導出しない）。OIDC Authorization Code フロー（サーバ側 JWKS 検証）→ L1 と同形の player
+  トークン発行。hosted モードで LAN 会場モードと player_id + sync 共存。PII 最小化（sub のみ保存、IdP
+  トークン非保存）。**前提**: 運用面 ADR（hosting/secret/PII/法令）+ player merge フロー。
+- ISSUE-0019 / `docs/decision-log.md` / CLAUDE.md 残作業を更新。
+
 ### Added (buy-in 金額プリセット = staff メニュー選択, ADR-0026)
 
 - buy-in 記帳時に **スタッフが店設定の金額プリセット（整数円）から選んで** ledger に記録できるよう

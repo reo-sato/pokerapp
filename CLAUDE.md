@@ -609,10 +609,14 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    schema `1.1`）、確定 commit + paid/unpaid/partial 切替（S4 GUI 精算パネル）、buy-in 金額プリセット
    （ADR-0026, `config.ledger.buyin_presets` + `--ledger` ボタン + staff API）。
 6. **R 系の後続**: 派生 confidence の重み較正（golden fixtures 由来）、camera 源の統合。
-7. **player 本人確認の進化（ADR-0025）**: player_id を内部不変キーに保ち、認証を additive レイヤで
-   重ねる — L0 name-pick（済）→ **L1 per-player PIN**（LAN, players.json に `pin_hash` additive）→
-   **L2 外部 IdP（LINE / Google OIDC, `auth_identity` バインディング, hosted モード = 別 ADR）**。
-   将来プレイヤーが LINE/Google でサインアップできる土台。実装は需要が固まってから。
+7. **player 本人確認の進化（ADR-0025 方針 / ADR-0027・0028 詳細設計）**: player_id を内部不変キーに保ち、
+   認証を additive レイヤで重ねる — L0 name-pick（済）→ **L1 per-player PIN**（**設計済 ADR-0027**:
+   node-local `player_credentials.json`（PBKDF2 + lockout、read API / sync 非対象）+ stateless 署名トークン +
+   player principal 解決レイヤ。config `viewer_api.player_auth` 既定 off で後方互換）→ **L2 外部 IdP**
+   （**設計済 ADR-0028**: LINE / Google OIDC、`(provider, subject)→player_id` の `auth_identity`（多対一・
+   player_id は外部 sub から導出しない）、hosted モードで LAN モードと player_id + sync 共存、PII 最小化。
+   **前提**: 運用 ADR + player merge）。**両 ADR とも設計のみ・コードなし**。実装は需要が固まってから L1 から
+   additive 導入。将来プレイヤーが LINE/Google でサインアップできる土台。
 8. **未実装の単機能**: Vosk 代替 ASR、ディーラーボタン自動回転 / SB-BB 自動 post。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。
