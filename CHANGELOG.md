@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### Changed (派生 confidence の重み較正を確定・回帰ロック, ADR-0033)
+
+- rules-aware 経路の派生 confidence（`derive_confidence`）の重みを「暫定」から **較正済み**に確定。
+  ラベルデータが無いため数値フィッティングではなく、golden fixtures の archetype + 境界グリッドが含意する
+  **較正プロパティ P1〜P8**（bounds / whisper 単調 / source ordering / rfid>camera 補強 / 不一致ペナルティ /
+  合法性ゲートが閾値未満 / 閾値が audio 品質を分離 / synth-fold は常に review）で正当化。
+- **数値は据え置き**（プロパティを満たすため churn しない）。`tools/calibrate_confidence.py`（較正ハーネス =
+  サーフェス表示 + プロパティ検証、違反で exit 1）+ `tests/test_confidence_calibration.py`（CI で drift 検知）。
+  `integration/engine.py` の「暫定/最終較正は F」コメントを ADR-0033 参照に更新。挙動・出力は不変。
+
 ### Added (sync 後続: rename 伝播 / hand log union / 定期 auto-trigger, ADR-0032)
 
 - 双方向 sync（ADR-0022）を additive 拡張（既定挙動不変）:

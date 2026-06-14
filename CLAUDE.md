@@ -441,6 +441,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **rules-aware ライブ結線 + silent-fold 合成 (R3 D1/D2a/D2b)** | ✅ 実装済 (preview) | `audio/recognizer.py:apply_corrections`（合法手射影）+ `integration/engine.py:_handle_rules_aware_action`/`_resolve_actor`（合法手射影・actor 推定[RFID>明示席]・`fold_through` で silent-fold 合成 cap=2/atomic・合成 fold 記録）。legacy 既定は不変。派生 confidence(D3) は後続 |
 | **決定的 replay harness + golden fixtures (R4 F1/F3a)** | ✅ 実装済 | `integration/replay.py` + `tools/replay_hand.py`（clock 注入で決定的、ADR-0011）。golden fixtures: `tests/fixtures/reconstruction/`（**green 5: 射影 2 + 合成 2 + side-pot 1**、DoD #2 達成）。round-trip 決定性 = `tests/test_reconstruction.py` |
 | **派生 confidence + side-pot (R3 D3 / R5 F3a)** | ✅ 実装済 (preview) | `integration/engine.py:derive_confidence`（3 因子 L/A/Q、rules-aware 経路のみ。legacy 固定表は不変）+ needs_review 5 条件。`HandSummary.pots`（main/side、legacy は `[]`）。**Phase D 完了** |
+| **派生 confidence 重み較正 (R5/F2)** | ✅ 実装済 | ADR-0033: 重み（暫定）を golden fixtures archetype + 境界グリッド由来の較正プロパティ P1〜P8（順序単調性 / 閾値分離 / 合法性ゲート / synth-fold）で正当化・回帰ロック。数値据え置き。`tools/calibrate_confidence.py`（ハーネス）+ `tests/test_confidence_calibration.py`。「暫定」表記を解除 |
 | **hand/action schema freeze (R5 F3b)** | ✅ 実装済 | `docs/contracts/schemas/{hand,action}.schema.json`（`1.0`, additionalProperties:true, ISSUE-0011 Fixed）+ `_MODELS` 登録 + code↔contract + golden→schema テスト |
 | **PHH call/check (F3c)** | ✅ 確認済（変更不要） | PHH 標準では check/call は同一トークン `cc`（check-or-call）。区別は非標準で pokerkit が parse 不能になるため統一が正。check/call の別は JSON ログ側で保持（`output/phh_exporter.py` にコメント） |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
@@ -621,7 +622,8 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
 5. **settlement / ledger 拡張**（**実装済**）: partial-paid（ADR-0023, `record_payment` / settlement
    schema `1.1`）、確定 commit + paid/unpaid/partial 切替（S4 GUI 精算パネル）、buy-in 金額プリセット
    （ADR-0026, `config.ledger.buyin_presets` + `--ledger` ボタン + staff API）。
-6. **R 系の後続**: 派生 confidence の重み較正（golden fixtures 由来）、camera 源の統合。
+6. **R 系の後続**: 派生 confidence の重み較正は **実装済（ADR-0033, property-based + 回帰ロック）**。
+   残: 実運用 review ログが貯まってからの数値較正、camera 源の統合。
 7. **player 本人確認の進化（ADR-0025 方針 / ADR-0027・0028）**: player_id を内部不変キーに保ち、
    認証を additive レイヤで重ねる — L0 name-pick（済）→ **L1 per-player PIN = ✅ 実装済（ADR-0027）**:
    node-local `player_credentials.json`（PBKDF2 + lockout、read API / sync 非対象）+ `core/auth_token.py` の
@@ -921,6 +923,7 @@ python main.py --export-ledger logs/ledger_export  # settlement / cashflow CSV �
 python main.py --viewer-api                  # player 向け読み取り専用 viewer API (M1, ADR-0017)
 pytest tests/ -v --ignore=tests/test_vision.py   # CI と同じ（vision レガシー除外）
 python tools/replay_hand.py tests/fixtures/reconstruction/silent-fold  # 決定的 replay (F1)
+python tools/calibrate_confidence.py            # 派生 confidence 較正サーフェス + P1〜P8 検証 (ADR-0033)
 python main.py --export-phh logs/session_xxx.json
 # ローカル QA（実機なし。docs/manual-qa-checklist.md 参照）
 printf 'ハンド開始\nチェック\nシート1 ウィナー\n' | python tools/play_hand_text.py - --seats 3  # mic 不要のテキスト駆動再構築

@@ -51,7 +51,8 @@ CAMERA_BUFFER_TTL = MATCH_WINDOW * 2
 
 # silent-fold 合成で許す最大席数（ISSUE-0009）。超過は合成せず prior 維持 + needs_review。
 SILENT_FOLD_CAP = 2
-# 合成した silent-fold の confidence（sensor 観測なしの推定。較正は D3/F2）。常に needs_review。
+# 合成した silent-fold の confidence（sensor 観測なしの推定。常に needs_review）。
+# REVIEW_THRESHOLD 未満であることを較正で固定（ADR-0033 P8, tools/calibrate_confidence.py）。
 SYNTH_FOLD_CONFIDENCE = 0.3
 
 # ――― Confidence スコア定数 ―――
@@ -88,14 +89,16 @@ def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
 
 # ――― 派生 confidence (3 因子, ADR-0009 §6, D3) ―――
 # rules-aware 経路専用。legacy は上の固定 8 行 calc_confidence のまま（挙動不変）。
-# 重みは「全ソース一致・合法」で旧テーブルに近づける暫定値。最終較正は golden fixtures / F。
+# 重みは **較正済み**（ADR-0033）。golden fixtures の archetype + 境界グリッドに対し較正プロパティ
+# P1〜P8（順序単調性・閾値分離・合法性ゲート等）を満たすことを `tools/calibrate_confidence.py` /
+# `tests/test_confidence_calibration.py` で回帰ロックする。変更時は同ハーネスで再検証すること。
 _CONF_W_A = 0.15            # 合意度 A の重み
 _CONF_W_Q = 0.85           # ソース品質 Q の重み（w_A + w_Q = 1）
 _CONF_L_PENALTY = 0.25     # pokerkit が action を受理しなかったときの合法性ゲート L
 _CONF_BASE = {"rfid": 0.78, "audio": 0.50, "camera": 0.28}  # ソース base 信頼度（RFID>audio>camera）
 # confidence がこの閾値未満なら needs_review（ADR-0009 §6 条件⑤）。将来 config 化。
-# 音声優先運用（v1 は audio のみが必須経路）のため、良好な audio-only は閾値超え＝自動 review しない。
-# camera-only / 低 whisper / 合成 fold は閾値未満＝review。最終較正は golden fixtures / F。
+# 音声優先運用（v1 は audio のみが必須経路）のため、良好な audio-only(whisper>=0.6) は閾値超え＝自動
+# review しない。低 whisper / 合成 fold は閾値未満＝review（較正 P7/P8, ADR-0033）。
 REVIEW_THRESHOLD = 0.40
 
 
