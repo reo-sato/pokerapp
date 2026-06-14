@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### Added (mobile に本人認証 UI を反映: L1 PIN / L2 サインアップ, ADR-0027/0031)
+
+- mobile（Expo/RN）に **PIN ログイン（L1）** と **LINE/Google サインアップ（L2）** の UI を追加
+  （`mobile/src/screens/AuthScreen.tsx`）。PlayerSelect 画面に各 player の「🔒 PIN でログイン」と
+  「LINE / Google でサインアップ」導線を追加。**既定の name-pick は不変**（`player_auth=off` の会場は
+  従来どおり選ぶだけ）。
+- `ViewerRepository` に `login` / `oidcExchange` / `currentPrincipal` / `clearAuth` を additive 追加し、
+  mock / HTTP の両実装で principal トークンを保持、**注文 POST（self-write）に `Authorization: Bearer`** を
+  付与する。error code（invalid_pin / pin_locked / pin_too_short / player_auth_disabled / unknown_provider /
+  invalid_idp_code）を UI メッセージにマッピング。
+- mobile `Player` 型を schema `1.2` に追従（optional `updated_at` / `merged_into` / `merged_at`）。
+- 実 IdP の認可コード取得（SDK / web redirect）は実環境タスク（ADR-0031 D5）。
+  検証: `npm run typecheck` + `npm test`（11 passed, 内 3 件が auth）+ `expo export --platform web` 成功。
+
 ### Changed (派生 confidence の重み較正を確定・回帰ロック, ADR-0033)
 
 - rules-aware 経路の派生 confidence（`derive_confidence`）の重みを「暫定」から **較正済み**に確定。

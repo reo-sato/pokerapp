@@ -6,6 +6,7 @@
  * not_found 等は ViewerApiError (code 分岐) で reject する。
  */
 import type {
+  AuthSession,
   HandSummary,
   MenuItem,
   OrderRequest,
@@ -19,6 +20,18 @@ export interface ViewerRepository {
   health(): Promise<{ status: string; version: string }>;
   listPlayers(): Promise<Player[]>;
   getPlayer(playerId: string): Promise<Player>;
+  /**
+   * 本人認証レイヤ (player_auth=off の既定では name-pick のまま不要)。
+   * - login: L1 PIN (ADR-0027)。invalid_pin / pin_locked / player_auth_disabled で reject。
+   * - oidcExchange: L2 外部 IdP (ADR-0031)。認可コードを交換。unknown_provider / invalid_idp_code。
+   * 成功時はトークンを保持し、以後の self-write (createOrderRequest) に付与する。
+   */
+  login(playerId: string, pin: string): Promise<AuthSession>;
+  oidcExchange(provider: string, code: string): Promise<AuthSession>;
+  /** 現在の principal (ログイン済み player_id) / 未ログインは null。 */
+  currentPrincipal(): string | null;
+  /** トークンを破棄する (ログアウト / player 切替時)。 */
+  clearAuth(): void;
   listPlayerSessions(playerId: string): Promise<PlayerSessionSummary[]>;
   listPlayerHands(playerId: string, sessionId: string): Promise<HandSummary[]>;
   getHand(sessionId: string, handId: number): Promise<HandSummary>;

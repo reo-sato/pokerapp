@@ -110,6 +110,56 @@ test("order requests: create pending, list own, validate menu and quantity", asy
   );
 });
 
+test("login: correct PIN authenticates, wrong PIN rejects, short PIN rejects (L1, ADR-0027)", async () => {
+  const repo = new MockRepository();
+  assert.equal(repo.currentPrincipal(), null);
+  const session = await repo.login(ALICE_ID, "1234");
+  assert.equal(session.player_id, ALICE_ID);
+  assert.ok(session.token);
+  assert.equal(repo.currentPrincipal(), ALICE_ID);
+
+  await assert.rejects(repo.login(ALICE_ID, "9999"), (err: unknown) => {
+    assert.ok(err instanceof ViewerApiError);
+    assert.equal(err.code, "invalid_pin");
+    return true;
+  });
+  await assert.rejects(repo.login(ALICE_ID, "12"), (err: unknown) => {
+    assert.ok(err instanceof ViewerApiError);
+    assert.equal(err.code, "pin_too_short");
+    return true;
+  });
+  repo.clearAuth();
+  assert.equal(repo.currentPrincipal(), null);
+});
+
+test("login rejects unknown player with not_found", async () => {
+  const repo = new MockRepository();
+  await assert.rejects(repo.login(MISSING_ID, "1234"), (err: unknown) => {
+    assert.ok(err instanceof ViewerApiError);
+    assert.equal(err.code, "not_found");
+    return true;
+  });
+});
+
+test("oidcExchange: creates player on first signup, resolves same on re-exchange (L2, ADR-0031)", async () => {
+  const repo = new MockRepository();
+  const first = await repo.oidcExchange("line", "demo-good");
+  assert.ok(first.token);
+  // サインアップした player は getPlayer / listPlayers から参照できる。
+  const player = await repo.getPlayer(first.player_id);
+  assert.match(player.display_name, /line/);
+  assert.ok((await repo.listPlayers()).some((p) => p.player_id === first.player_id));
+  // 再交換は同一 player に解決（auth_identity 相当）。
+  const again = await repo.oidcExchange("line", "demo-good");
+  assert.equal(again.player_id, first.player_id);
+
+  await assert.rejects(repo.oidcExchange("line", "bad-code"), (err: unknown) => {
+    assert.ok(err instanceof ViewerApiError);
+    assert.equal(err.code, "invalid_idp_code");
+    return true;
+  });
+});
+
 test("getHand returns hand or rejects with not_found", async () => {
   const repo = new MockRepository();
   const hand = await repo.getHand(SESSION_ID, 1);

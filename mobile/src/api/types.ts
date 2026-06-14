@@ -1,7 +1,7 @@
 /**
  * docs/contracts/ の schema から転記した viewer API の型 (M2, ADR-0017)。
  *
- * - Player:               schemas/player.schema.json (1.0)
+ * - Player:               schemas/player.schema.json (1.2: updated_at / merged_into additive)
  * - PlayerSessionSummary: schemas/player_session_summary.schema.json (0.x)
  * - HandSummary/Action:   schemas/hand.schema.json / action.schema.json (1.0)
  * - ApiError:             docs/contracts/error-shapes.md
@@ -13,6 +13,9 @@ export interface Player {
   player_id: string; // UUID4 hex (32 文字)
   display_name: string;
   created_at: string; // ISO 8601
+  updated_at?: string; // 1.2 additive (ADR-0032): rename 伝播の LWW キー
+  merged_into?: string; // 1.1 additive (ADR-0030): merge 済み tombstone の survivor
+  merged_at?: string;
 }
 
 export interface Blinds {
@@ -153,6 +156,17 @@ export interface ApiError {
   code: string;
   message: string;
   field?: string;
+}
+
+/**
+ * player principal トークン (L1 PIN = ADR-0027 / L2 外部 IdP = ADR-0031)。
+ * POST /api/auth/login または POST /api/auth/{provider}/exchange の応答。
+ * 取得後は repository が保持し、self-write (注文 POST) に Bearer で付与する。
+ */
+export interface AuthSession {
+  token: string;
+  player_id: string; // merge 済みなら survivor の player_id (canonical, ADR-0030)
+  expires_at: number; // unix 秒
 }
 
 export class ViewerApiError extends Error {

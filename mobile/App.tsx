@@ -17,6 +17,7 @@ import { HttpRepository } from "./src/api/httpRepository";
 import { MockRepository } from "./src/api/mockRepository";
 import type { ViewerRepository } from "./src/api/repository";
 import type { Player, PlayerSessionSummary } from "./src/api/types";
+import { AuthScreen } from "./src/screens/AuthScreen";
 import { HandDetailScreen } from "./src/screens/HandDetailScreen";
 import { MyHandsScreen } from "./src/screens/MyHandsScreen";
 import { MyLedgerScreen } from "./src/screens/MyLedgerScreen";
@@ -27,6 +28,7 @@ import { styles } from "./src/screens/common";
 
 type Route =
   | { name: "players" }
+  | { name: "auth"; mode: "pin" | "oidc"; player?: Player }
   | { name: "sessions"; player: Player }
   | { name: "hands"; player: Player; session: PlayerSessionSummary }
   | { name: "hand"; player: Player; session: PlayerSessionSummary; handId: number }
@@ -48,6 +50,17 @@ export default function App(): React.JSX.Element {
         <PlayerSelectScreen
           repository={repository}
           onSelect={(player) => setRoute({ name: "sessions", player })}
+          onLogin={(player) => setRoute({ name: "auth", mode: "pin", player })}
+          onSignup={() => setRoute({ name: "auth", mode: "oidc" })}
+        />
+      )}
+      {route.name === "auth" && (
+        <AuthScreen
+          repository={repository}
+          mode={route.mode}
+          player={route.player}
+          onAuthed={(player) => setRoute({ name: "sessions", player })}
+          onBack={() => setRoute({ name: "players" })}
         />
       )}
       {route.name === "sessions" && (

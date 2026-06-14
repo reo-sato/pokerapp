@@ -8,6 +8,7 @@
  */
 import type { ViewerRepository } from "./repository";
 import type {
+  AuthSession,
   HandSummary,
   LedgerEntry,
   MenuItem,
@@ -24,23 +25,71 @@ function notFound(message: string): ViewerApiError {
   return new ViewerApiError({ code: "not_found", message });
 }
 
+// mock のデモ用 credential（UI 動作確認用。実認証は core / viewer API）。
+const MOCK_PIN = "1234";
+const MOCK_OIDC_CODE = "demo-good";
+
 export class MockRepository implements ViewerRepository {
   // 注文リクエストは mock 内の in-memory 状態（pending のまま。確定はスタッフ desktop の責務）
   private orderRequests: OrderRequest[] = [];
   private orderSeq = 0;
+  // 本人認証 (L1/L2) の in-memory 状態。OIDC サインアップで作った player も保持する。
+  private principal: string | null = null;
+  private signedUp: Player[] = [];
 
   async health(): Promise<{ status: string; version: string }> {
     return { status: "ok", version: "mock" };
   }
 
   async listPlayers(): Promise<Player[]> {
-    return fx.players;
+    return [...fx.players, ...this.signedUp];
   }
 
   async getPlayer(playerId: string): Promise<Player> {
-    const player = fx.players.find((p) => p.player_id === playerId);
+    const player =
+      fx.players.find((p) => p.player_id === playerId) ??
+      this.signedUp.find((p) => p.player_id === playerId);
     if (!player) throw notFound(`player_id=${playerId} は存在しません。`);
     return player;
+  }
+
+  async login(playerId: string, pin: string): Promise<AuthSession> {
+    await this.getPlayer(playerId); // not_found
+    if ((pin ?? "").length < 4) {
+      throw new ViewerApiError({ code: "pin_too_short", message: "PIN は 4 桁以上必要です。" });
+    }
+    if (pin !== MOCK_PIN) {
+      throw new ViewerApiError({ code: "invalid_pin", message: "PIN が違います。" });
+    }
+    this.principal = playerId;
+    return { token: `mock-token-${playerId}`, player_id: playerId, expires_at: 0 };
+  }
+
+  async oidcExchange(provider: string, code: string): Promise<AuthSession> {
+    if (code !== MOCK_OIDC_CODE) {
+      throw new ViewerApiError({ code: "invalid_idp_code", message: "認可コードが無効です。" });
+    }
+    // 初回 link 相当: (provider) ごとに 1 player を作る（再交換は同一 player に解決）。
+    const playerId = `face${provider.slice(0, 4).padEnd(4, "0")}`.padEnd(32, "0").slice(0, 32);
+    let player = this.signedUp.find((p) => p.player_id === playerId);
+    if (!player) {
+      const now = new Date().toISOString().slice(0, 19);
+      player = {
+        player_id: playerId, display_name: `${provider} ユーザー`,
+        created_at: now, updated_at: now,
+      };
+      this.signedUp.push(player);
+    }
+    this.principal = player.player_id;
+    return { token: `mock-token-${player.player_id}`, player_id: player.player_id, expires_at: 0 };
+  }
+
+  currentPrincipal(): string | null {
+    return this.principal;
+  }
+
+  clearAuth(): void {
+    this.principal = null;
   }
 
   async listPlayerSessions(playerId: string): Promise<PlayerSessionSummary[]> {

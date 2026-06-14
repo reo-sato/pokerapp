@@ -6,6 +6,7 @@
  */
 import type { ViewerRepository } from "./repository";
 import type {
+  AuthSession,
   HandSummary,
   MenuItem,
   OrderRequest,
@@ -18,6 +19,9 @@ import { ViewerApiError } from "./types";
 
 export class HttpRepository implements ViewerRepository {
   private readonly baseUrl: string;
+  // player principal トークン (L1/L2)。self-write (注文 POST) に Bearer で付与する。
+  private playerToken: string | null = null;
+  private principal: string | null = null;
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -35,10 +39,14 @@ export class HttpRepository implements ViewerRepository {
     return body as T;
   }
 
-  private async post<T>(path: string, payload: unknown): Promise<T> {
+  private async post<T>(path: string, payload: unknown, withAuth = false): Promise<T> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (withAuth && this.playerToken) {
+      headers.Authorization = `Bearer ${this.playerToken}`;
+    }
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(payload),
     });
     const body = await res.json();
@@ -62,6 +70,33 @@ export class HttpRepository implements ViewerRepository {
 
   getPlayer(playerId: string): Promise<Player> {
     return this.get(`/api/players/${encodeURIComponent(playerId)}`);
+  }
+
+  async login(playerId: string, pin: string): Promise<AuthSession> {
+    const session = await this.post<AuthSession>(
+      "/api/auth/login", { player_id: playerId, pin }, false,
+    );
+    this.playerToken = session.token;
+    this.principal = session.player_id;
+    return session;
+  }
+
+  async oidcExchange(provider: string, code: string): Promise<AuthSession> {
+    const session = await this.post<AuthSession>(
+      `/api/auth/${encodeURIComponent(provider)}/exchange`, { code }, false,
+    );
+    this.playerToken = session.token;
+    this.principal = session.player_id;
+    return session;
+  }
+
+  currentPrincipal(): string | null {
+    return this.principal;
+  }
+
+  clearAuth(): void {
+    this.playerToken = null;
+    this.principal = null;
   }
 
   async listPlayerSessions(playerId: string): Promise<PlayerSessionSummary[]> {
@@ -105,9 +140,11 @@ export class HttpRepository implements ViewerRepository {
     sessionId: string,
     body: OrderRequestBody,
   ): Promise<OrderRequest> {
+    // self-write: principal トークンがあれば付与する (player_auth=optional/required, ADR-0027/0031)。
     return this.post(
       `/api/players/${encodeURIComponent(playerId)}/sessions/${encodeURIComponent(sessionId)}/order-requests`,
       body,
+      true,
     );
   }
 }
