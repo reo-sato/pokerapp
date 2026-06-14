@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### Docs (player merge の設計, ADR-0030)
+
+- 同一人物の複数 `player_id` を統合する **player merge** を設計（**設計のみ・コードなし**。L2 の前提 +
+  LAN 単独の重複掃除）。
+- merge = absorbed player に **`merged_into`（alias/tombstone）** を付ける方式。**既存の ledger / session /
+  order / hand-log は一切 rewrite しない** → **append-only（ADR-0016）・収束 sync（ADR-0022）・player_id
+  不変（ADR-0004）を保ち、可逆**。`resolve_canonical` で player をキーにする全 read（settlement 集計 /
+  viewer per-player / seating 導出 / order フィルタ / login principal）を survivor に解決する。
+- survivor はスタッフが明示（既定提案 = 会計履歴を持つ古い方 = 通常は会場 player）。staff API + registry GUI。
+  `player` schema は `1.0`→`1.1`（optional `merged_into`/`merged_at` の additive）。残: 実装。
+  decision-log / CLAUDE.md を更新。
+
 ### Docs (L2 hosted モードの運用設計, ADR-0029)
 
 - ADR-0028（L2 外部 IdP）の前提となる運用面を確定（**運用設計のみ・コードなし**）。
