@@ -28,7 +28,9 @@ from api.read_models import (
     list_player_hands,
     list_player_sessions,
 )
+from core.auth_identity_repository import AuthIdentityRepository
 from core.auth_token import issue_player_token, verify_player_token
+from core.oidc import OidcError, OidcProvider, resolve_player_for_claim
 from core.ledger_repository import (
     AlreadySettledError,
     EntryFeeRequiresCashError,
@@ -131,6 +133,13 @@ class _StaffMergeBody(BaseModel):
     absorbed_id: str
 
 
+class _OidcExchangeBody(BaseModel):
+    """POST /api/auth/{provider}/exchange の body（L2, ADR-0031 D4）。"""
+
+    code: str
+    nonce: str | None = None
+
+
 # ledger / settlement の error → (HTTP status, error code)。staff write で再利用する
 # （error-shapes.md の ledger セクションと 1:1, ADR-0021）。具体例外を先に並べる。
 _LEDGER_ERROR_MAP: list[tuple[type, int, str]] = [
@@ -168,6 +177,8 @@ def create_app(
     player_token_secret: str | None = None,
     player_token_ttl_sec: int = 43_200,
     pin_self_enroll: bool = False,
+    oidc_providers: "dict[str, OidcProvider] | None" = None,
+    identity_repo: AuthIdentityRepository | None = None,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -193,6 +204,9 @@ def create_app(
         menu = MenuMaster()
     if credential_repo is None:
         credential_repo = PlayerCredentialRepository()
+    if identity_repo is None:
+        identity_repo = AuthIdentityRepository()
+    _oidc_providers = oidc_providers or {}
     # player トークン署名鍵。未設定なら ephemeral（再起動でトークン失効, ADR-0027 D3）。
     _player_secret = player_token_secret or secrets.token_hex(32)
     app = FastAPI(title="pokerapp viewer API", version=_app_version())
@@ -322,6 +336,29 @@ def create_app(
         canonical = player_repo.resolve_canonical(body.player_id)
         token, exp = issue_player_token(canonical, _player_secret, player_token_ttl_sec)
         return {"token": token, "expires_at": exp, "player_id": canonical}
+
+    @app.post("/api/auth/{provider}/exchange", response_model=None)
+    def auth_oidc_exchange(
+        provider: str, body: _OidcExchangeBody
+    ) -> "JSONResponse | dict":
+        """外部 IdP の認可コードを交換し、player principal トークンを発行する（L2, ADR-0031 D4）。
+
+        provider 未登録（実 IdP 未構築 / LAN 既定）なら 404 unknown_provider で挙動不変。
+        """
+        oidc = _oidc_providers.get(provider)
+        if oidc is None:
+            return JSONResponse(status_code=404, content={
+                "code": "unknown_provider",
+                "message": f"provider={provider!r} は構成されていません。",
+            })
+        try:
+            claim = oidc.verify_code(body.code, nonce=body.nonce)
+        except OidcError as e:
+            return JSONResponse(status_code=401,
+                                content={"code": "invalid_idp_code", "message": str(e)})
+        pid = resolve_player_for_claim(claim, identity_repo, player_repo)
+        token, exp = issue_player_token(pid, _player_secret, player_token_ttl_sec)
+        return {"token": token, "expires_at": exp, "player_id": pid}
 
     @app.post("/api/players/{player_id}/pin", response_model=None)
     def set_player_pin(

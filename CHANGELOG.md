@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### Added (L2 外部 IdP の実 IdP 非依存コア, ADR-0031)
+
+- L2（LINE/Google サインアップ）のうち **実 IdP の HTTP を伴わないコアを実装**（実機/実 IdP なしで
+  E2E までテスト）。LAN 既定（provider 未構成）では **挙動不変**。
+- **`auth_identity`**（`(provider, subject) → player_id` の node-local バインディング、多対一、
+  **read API / sync 非対象**）+ **OIDC provider 抽象**（`OidcProvider` / `FakeOidcProvider` /
+  `VerifiedClaim`）+ **claim→principal 解決**（`resolve_player_for_claim`: 既存は `resolve_canonical`
+  で survivor 解決、初回は新規 player 作成 + link。player_id は IdP sub から導出しない）。
+- **`POST /api/auth/{provider}/exchange`**（mobile app-driven の認可コード交換 → L1 と同形の principal
+  トークン発行。provider 未構成は 404 `unknown_provider`、検証失敗は 401 `invalid_idp_code`）+
+  `ViewerApiClient.oidc_exchange`。merge（ADR-0030）後は survivor principal に解決。
+- **残（実環境タスク）**: 実 LINE/Google provider の HTTP（token 交換 / JWKS 検証）、hosted デプロイ
+  （ADR-0029）、web redirect/callback 変種。
+
 ### Added (player merge, ADR-0030)
 
 - 同一人物の複数 `player_id` を統合する **player merge** を実装（L2 の前提 + LAN 単独の重複掃除）。

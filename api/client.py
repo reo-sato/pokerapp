@@ -137,6 +137,15 @@ class ViewerApiClient:
         self._player_token = body.get("token")
         return body
 
+    def oidc_exchange(self, provider: str, code: str, nonce: str | None = None) -> dict:
+        """外部 IdP の認可コードを交換し、principal トークンを取得・保持する（L2, ADR-0031）。"""
+        payload: dict = {"code": code}
+        if nonce is not None:
+            payload["nonce"] = nonce
+        body = self._request("POST", f"/api/auth/{provider}/exchange", json=payload)
+        self._player_token = body.get("token")
+        return body
+
     def set_pin(
         self, player_id: str, pin: str, current_pin: str | None = None
     ) -> dict:

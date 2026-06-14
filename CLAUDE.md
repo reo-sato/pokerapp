@@ -42,6 +42,7 @@ pokerapp/
 ├── ledger.json                    ← session ledger + point ledger 永続ファイル (.gitignore, S3)
 ├── order_requests.json            ← 注文リクエスト永続ファイル (.gitignore, M5)
 ├── player_credentials.json        ← player PIN credential 永続ファイル (.gitignore, node-local, L1 PIN ADR-0027)
+├── auth_identity.json             ← 外部 IdP ↔ player_id バインディング (.gitignore, node-local, L2 ADR-0031)
 ├── menu.json                      ← 注文メニューマスタ (コミット済みサンプル, 店側で編集, M5)
 ├── pyproject.toml                 ← パッケージ定義 (core / [pcsc] / [vision] / [api] / [dev], entry: pokerapp, H1)
 ├── requirements.txt               ← core runtime 同期コピー (vision 除外)
@@ -66,7 +67,10 @@ pokerapp/
 │   ├── menu.py                    ← MenuMaster (menu.json ロード・検索, M5)
 │   ├── sync.py                    ← state-based merge 純粋関数 + snapshot I/O (S5 双方向 sync, ADR-0022/0024)
 │   ├── auth_token.py              ← player principal の stateless 署名トークン (L1 PIN, ADR-0027)
-│   └── player_credential_repository.py ← PlayerCredentialRepository (PIN ハッシュ PBKDF2 + lockout, node-local, ADR-0027)
+│   ├── player_credential_repository.py ← PlayerCredentialRepository (PIN ハッシュ PBKDF2 + lockout, node-local, ADR-0027)
+│   ├── auth_identity.py           ← AuthIdentity ((provider,sub)→player_id, L2, ADR-0031)
+│   ├── auth_identity_repository.py ← AuthIdentityRepository (node-local, sync 非対象, L2, ADR-0031)
+│   └── oidc.py                    ← OidcProvider 抽象 + FakeOidcProvider + resolve_player_for_claim (L2, ADR-0031)
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -447,7 +451,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **staff 会計 write API (S5 write)** | ✅ 実装済 | `api/server.py` の `/api/staff/...`（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下 + staff read）を **staff shared token**（`Authorization: Bearer <viewer_api.staff_token>`）で公開（ADR-0021）。`LedgerRepository` を RLock で thread-safe 化。単一書き手維持（read-only は 503）。`ViewerApiClient(staff_token=...)` の staff メソッド + `tests/test_viewer_api_staff.py` |
 | **双方向 sync (S5 — state-based merge)** | ✅ 実装済 | `core/sync.py`（純粋マージ: UUID union + 単調解決で可換・結合・冪等 ⇒ 収束, ADR-0022。settlement は **paid_amount monotonic max** で partial-paid 対応, ADR-0024）+ `GET/POST /api/staff/sync/{snapshot,merge}`（staff-token gate, write 所有のみ merge 受理）+ `ViewerApiClient.{pull_sync_snapshot,push_sync_merge,sync_bidirectional}`。全 repo に `path` property、`LedgerRepository`/`OrderRequestRepository` に `reload()` を additive。ADR-0020 の単一書き手前提を更新（複数書き手 + 収束マージ）。`tests/test_sync.py` / `tests/test_viewer_api_sync.py` |
 | **player 本人認証 L1 PIN** | ✅ 実装済 | `core/auth_token.py`（stateless 署名トークン）+ `core/player_credential_repository.py`（PBKDF2 + lockout、node-local `player_credentials.json`、read API / sync 非対象）+ `api/server.py` の principal レイヤ（`_resolve_player_principal`/`_require_player`）+ `POST /api/auth/login`・`/api/players/{id}/pin`。config `viewer_api.player_auth`（off/optional/required, 既定 **off で後方互換**）。`ViewerApiClient.{login,set_pin}`。staff token と直交（ADR-0027）。`tests/test_auth_token.py` / `test_player_credential_repository.py` / `test_viewer_api_auth.py` |
-| **player 本人認証 L2 外部 IdP** | 🔲 planned (設計済) | 詳細設計 = ADR-0028（LINE/Google OIDC、`auth_identity`、hosted モード）+ 運用設計 = ADR-0029（会場 source-of-truth + cloud は player ミラー / マネージド PaaS / LINE+Google / PII 最小 APPI）。前提の player merge は **実装済（ADR-0030）**。OIDC コード本体が未着手 |
+| **player 本人認証 L2 外部 IdP（コア）** | 🟡 一部実装済 | 詳細設計 ADR-0028 / 運用 ADR-0029 / 前提 merge ADR-0030（実装済）。**実 IdP 非依存コアは実装済（ADR-0031）**: `core/auth_identity*.py`（node-local, sync 非対象）+ `core/oidc.py`（provider 抽象 + `FakeOidcProvider` + `resolve_player_for_claim`）+ `POST /api/auth/{provider}/exchange`（app-driven, 既定 off）+ `ViewerApiClient.oidc_exchange`。principal は ADR-0027 トークンで L1 と合流、merge 後は canonical。`tests/test_{auth_identity_repository,oidc,viewer_api_oidc}.py`。**残**: 実 LINE/Google HTTP（token/JWKS）+ hosted（ADR-0029）= 実環境タスク |
 | **player merge** | ✅ 実装済 | ADR-0030: `merged_into` の alias/tombstone（履歴 rewrite なし、append-only/収束 sync/player_id 不変を保つ・可逆）。`PlayerRepository.merge_players`/`resolve_canonical`/`equivalence_class`/`unmerge` + 全 player-keyed read（settlement 集計 / point / entry / order / viewer / login principal）を canonicalize + `core/sync.py:_resolve_player`（monotonic + tiebreak）+ staff API `POST /api/staff/players/merge` + registry GUI。schema `player` `1.0`→`1.1`。`tests/test_player_merge.py` 他 |
 | cross-app sync 拡張 (S5 後続) | 🔲 planned | player rename 伝播（`updated_at` additive）/ hand log の file-level union / 定期 auto-trigger |
 
@@ -624,9 +628,11 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    `(provider, subject)→player_id` の `auth_identity`（多対一・player_id は外部 sub から導出しない）。運用は
    **会場 source-of-truth + cloud は player ミラー**（cloud は会計を originate せず signup/閲覧/注文+sync のみ
    公開）/ マネージド PaaS / LINE+Google / secret は PaaS env / PII 最小（APPI, sub のみ）/ cloud は会計 write
-   無効・CORS 絞り（ADR-0029）。前提の **player merge は実装済（ADR-0030, alias/tombstone + read-time
-   canonicalization）**。将来プレイヤーが LINE/Google でサインアップできる土台。L2 実装の残: env override /
-   cloud モード config / レート制限 / OIDC コード本体（ADR-0028）。
+   無効・CORS 絞り（ADR-0029）。前提の **player merge は実装済（ADR-0030）**。**L2 の実 IdP 非依存コアも
+   実装済（ADR-0031, `core/auth_identity*.py` + `core/oidc.py` + `POST /api/auth/{provider}/exchange`,
+   既定 off）**。将来プレイヤーが LINE/Google でサインアップできる土台。**残（実環境タスク）**: 実
+   LINE/Google provider の HTTP（token 交換 / JWKS）、hosted デプロイ（env override / cloud モード config /
+   CORS 絞り / レート制限）、web redirect 変種。
 8. **未実装の単機能**: Vosk 代替 ASR、ディーラーボタン自動回転 / SB-BB 自動 post。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。

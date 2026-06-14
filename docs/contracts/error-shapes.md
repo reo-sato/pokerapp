@@ -134,3 +134,14 @@ staff merge（`POST /api/staff/players/merge`）で使う code（additive）。`
 | code | 意味 | 発生する操作 | Python 例外 | HTTP |
 |------|------|------------|-------------|------|
 | `invalid_merge` | 自己 merge / サイクルになる merge | merge | `PlayerMergeError` | 400 |
+
+### L2 外部 IdP error code（ADR-0031）
+
+`POST /api/auth/{provider}/exchange`（外部 IdP の認可コード交換）で使う code（additive）。実 provider の
+HTTP 実装は実環境タスクだが、エラー契約はここで固定する:
+
+| code | 意味 | 発生する操作 | 由来 | HTTP |
+|------|------|------------|------|------|
+| `unknown_provider` | provider 未構成（実 IdP 未構築 / LAN 既定で OIDC 無効） | exchange | API 境界 | 404 |
+| `invalid_idp_code` | 認可コードの検証失敗（期限切れ / 改竄 / 未登録） | exchange | `OidcError` | 401 |
+| `identity_conflict` | 同一 (provider, subject) を別 player に link しようとした | link（内部） | `AuthIdentityConflictError` | 409 |
