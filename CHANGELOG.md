@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### Docs (L2 hosted モードの運用設計, ADR-0029)
+
+- ADR-0028（L2 外部 IdP）の前提となる運用面を確定（**運用設計のみ・コードなし**）。
+- **トポロジー = 会場 source-of-truth + cloud は player ミラー**: 会計/ハンド/session は会場 PC が真実、
+  cloud は read ミラー + player のサインアップ（L2）/ 閲覧 / 注文リクエスト（pending）+ sync のみ公開し、
+  **会計を originate しない**。cloud 侵害時も会計の真実は会場側で保全、ネット断時は会場が LAN 単独継続。
+- **ホスティング = マネージド PaaS**（TLS/デプロイ/secret 内蔵、運用負荷最小）。永続は persistent volume
+  or 将来 DB backed（interface frozen で差し替え可）。**IdP = LINE + Google 両方**を登録。
+- secret は PaaS env（`player_token_secret` は cloud では固定）/ **PII 最小（APPI, sub のみ保存、IdP
+  トークン非保存）** / cloud は会計 write エンドポイント無効・CORS を hosted origin に絞り・レート制限・
+  ログ PII マスキング。**残**: player merge（scope 外）。ADR-0028 §D7・decision-log・CLAUDE.md を更新。
+
 ### Added (player 本人認証 L1 per-player PIN, ADR-0027)
 
 - player が自分のスマホからの **self-write（注文 POST 等）を PIN ログインで本人認証**できるレイヤを

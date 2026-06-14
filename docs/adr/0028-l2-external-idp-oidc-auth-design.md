@@ -101,13 +101,14 @@ L2 が触れる前提（ADR-0025 §4）:
 
 ### D7. 運用面は実装時 ADR が前提（本 ADR は設計まで）
 
-L2 着手時に **別 ADR**（hosting/ops）で確定する事項:
+L2 着手時に **別 ADR**（hosting/ops）で確定する事項 → **ADR-0029 で確定済み**（運用設計）:
 
-- ホスティング形態（どこにデプロイ・TLS 終端・公開ドメイン・callback URL）、シークレット管理基盤、
-  IdP アプリ登録（client_id/secret/redirect_uri 申請）、レート制限 / WAF、ログの PII マスキング、
-  GDPR/個人情報保護法のデータ保持・削除要件。
+- ホスティング形態（**マネージド PaaS**）、シークレット管理（**PaaS env / secret store**）、
+  IdP アプリ登録（**LINE + Google**）、レート制限 / ログ PII マスキング、APPI のデータ保持・削除要件。
+- トポロジー = **会場 source-of-truth + cloud は player ミラー**（cloud は会計を originate せず、
+  player signup / 閲覧 / 注文 + sync のみ公開、ADR-0029 D1/D6）。
 - 本 ADR は **アプリ内設計**（auth_identity モデル / OIDC フロー / principal 合流 / PII 最小化方針）を確定し、
-  運用詳細を実装時 ADR に委譲する。
+  運用詳細は **ADR-0029** が担う。
 
 ## Alternatives Considered
 
@@ -159,4 +160,4 @@ L2 着手時に **別 ADR**（hosting/ops）で確定する事項:
 
 - Supersedes: —（ADR-0025 L2 を詳細化。関連: ADR-0025 / ADR-0027（principal レイヤ共通）/ ADR-0004
   （player_id 不変）/ ADR-0022（sync は player_id で収束）/ ISSUE-0019）
-- Superseded by: —（運用面は L2 実装時の ops ADR で確定 = 本 ADR の前提）
+- Superseded by: —（運用面は **ADR-0029**（hosted 運用設計）で確定 = 本 ADR の前提）

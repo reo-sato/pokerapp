@@ -446,7 +446,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **staff 会計 write API (S5 write)** | ✅ 実装済 | `api/server.py` の `/api/staff/...`（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下 + staff read）を **staff shared token**（`Authorization: Bearer <viewer_api.staff_token>`）で公開（ADR-0021）。`LedgerRepository` を RLock で thread-safe 化。単一書き手維持（read-only は 503）。`ViewerApiClient(staff_token=...)` の staff メソッド + `tests/test_viewer_api_staff.py` |
 | **双方向 sync (S5 — state-based merge)** | ✅ 実装済 | `core/sync.py`（純粋マージ: UUID union + 単調解決で可換・結合・冪等 ⇒ 収束, ADR-0022。settlement は **paid_amount monotonic max** で partial-paid 対応, ADR-0024）+ `GET/POST /api/staff/sync/{snapshot,merge}`（staff-token gate, write 所有のみ merge 受理）+ `ViewerApiClient.{pull_sync_snapshot,push_sync_merge,sync_bidirectional}`。全 repo に `path` property、`LedgerRepository`/`OrderRequestRepository` に `reload()` を additive。ADR-0020 の単一書き手前提を更新（複数書き手 + 収束マージ）。`tests/test_sync.py` / `tests/test_viewer_api_sync.py` |
 | **player 本人認証 L1 PIN** | ✅ 実装済 | `core/auth_token.py`（stateless 署名トークン）+ `core/player_credential_repository.py`（PBKDF2 + lockout、node-local `player_credentials.json`、read API / sync 非対象）+ `api/server.py` の principal レイヤ（`_resolve_player_principal`/`_require_player`）+ `POST /api/auth/login`・`/api/players/{id}/pin`。config `viewer_api.player_auth`（off/optional/required, 既定 **off で後方互換**）。`ViewerApiClient.{login,set_pin}`。staff token と直交（ADR-0027）。`tests/test_auth_token.py` / `test_player_credential_repository.py` / `test_viewer_api_auth.py` |
-| **player 本人認証 L2 外部 IdP** | 🔲 planned (設計済) | 詳細設計 = ADR-0028（LINE/Google OIDC、`auth_identity`、hosted モード）。前提: 運用 ADR + player merge。コード未着手 |
+| **player 本人認証 L2 外部 IdP** | 🔲 planned (設計済) | 詳細設計 = ADR-0028（LINE/Google OIDC、`auth_identity`、hosted モード）+ 運用設計 = ADR-0029（会場 source-of-truth + cloud は player ミラー / マネージド PaaS / LINE+Google / PII 最小 APPI）。前提（残）: player merge。コード未着手 |
 | cross-app sync 拡張 (S5 後続) | 🔲 planned | player rename 伝播（`updated_at` additive）/ hand log の file-level union / 定期 auto-trigger |
 
 ---
@@ -618,10 +618,12 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    認証を additive レイヤで重ねる — L0 name-pick（済）→ **L1 per-player PIN = ✅ 実装済（ADR-0027）**:
    node-local `player_credentials.json`（PBKDF2 + lockout、read API / sync 非対象）+ `core/auth_token.py` の
    stateless 署名トークン + player principal 解決レイヤ。config `viewer_api.player_auth` 既定 off で後方互換。
-   → **L2 外部 IdP = 🔲 設計済・未実装（ADR-0028）**: LINE / Google OIDC、`(provider, subject)→player_id` の
-   `auth_identity`（多対一・player_id は外部 sub から導出しない）、hosted モードで LAN モードと
-   player_id + sync 共存、PII 最小化。**前提**: 運用 ADR + player merge（scope 外）。将来プレイヤーが
-   LINE/Google でサインアップできる土台。L2 の残: read の本人保護・GUI からの PIN 設定 UI（L1 follow-up）。
+   → **L2 外部 IdP = 🔲 設計済・未実装（ADR-0028 詳細設計 + ADR-0029 運用設計）**: LINE / Google OIDC、
+   `(provider, subject)→player_id` の `auth_identity`（多対一・player_id は外部 sub から導出しない）。運用は
+   **会場 source-of-truth + cloud は player ミラー**（cloud は会計を originate せず signup/閲覧/注文+sync のみ
+   公開）/ マネージド PaaS / LINE+Google / secret は PaaS env / PII 最小（APPI, sub のみ）/ cloud は会計 write
+   無効・CORS 絞り（ADR-0029）。**前提（残）**: player merge（scope 外）。将来プレイヤーが LINE/Google で
+   サインアップできる土台。L2 実装の残: env override / cloud モード config / レート制限 / OIDC コード本体。
 8. **未実装の単機能**: Vosk 代替 ASR、ディーラーボタン自動回転 / SB-BB 自動 post。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。
