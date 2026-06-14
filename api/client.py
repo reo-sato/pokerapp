@@ -47,6 +47,7 @@ class ViewerApiClient:
         base_url: str = "http://127.0.0.1:8788",
         client: "Optional[httpx.Client]" = None,
         staff_token: str | None = None,
+        player_token: str | None = None,
     ) -> None:
         if client is not None:
             self._client = client
@@ -58,6 +59,8 @@ class ViewerApiClient:
             self._owns_client = True
         # staff write API（ADR-0021）用の Bearer token。staff_* メソッドのみで付与する。
         self._staff_token = staff_token
+        # player principal token（L1 PIN, ADR-0027）。login() で取得・更新し、self-write に付与。
+        self._player_token = player_token
 
     def close(self) -> None:
         if self._owns_client:
@@ -120,6 +123,32 @@ class ViewerApiClient:
             f"/api/players/{player_id}/sessions/{session_id}/order-requests"
         )["requests"]
 
+    # ――― player 認証（L1 PIN, ADR-0027）―――
+
+    def _player_headers(self) -> dict[str, str]:
+        if not self._player_token:
+            return {}
+        return {"Authorization": f"Bearer {self._player_token}"}
+
+    def login(self, player_id: str, pin: str) -> dict:
+        """PIN でログインし、principal トークンを取得・保持する（POST /api/auth/login）。"""
+        body = self._request("POST", "/api/auth/login",
+                             json={"player_id": player_id, "pin": pin})
+        self._player_token = body.get("token")
+        return body
+
+    def set_pin(
+        self, player_id: str, pin: str, current_pin: str | None = None
+    ) -> dict:
+        """PIN を設定/変更する。staff token があれば staff reset として送る（ADR-0027 D6）。"""
+        payload: dict = {"pin": pin}
+        if current_pin is not None:
+            payload["current_pin"] = current_pin
+        return self._request(
+            "POST", f"/api/players/{player_id}/pin",
+            json=payload, headers=self._staff_headers(),
+        )
+
     # ――― 注文 write（所有プロセスのみ受理。read-only は 503 orders_unavailable）―――
 
     def create_order_request(
@@ -131,7 +160,7 @@ class ViewerApiClient:
             payload["note"] = note
         return self._request(
             "POST", f"/api/players/{player_id}/sessions/{session_id}/order-requests",
-            json=payload,
+            json=payload, headers=self._player_headers(),
         )
 
     # ――― staff write API（ADR-0021。Bearer token。会計 write は所有プロセスのみ）―――

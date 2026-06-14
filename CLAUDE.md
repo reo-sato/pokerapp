@@ -41,6 +41,7 @@ pokerapp/
 ├── sessions.json                  ← session + hand-based seating 永続ファイル (.gitignore, S2)
 ├── ledger.json                    ← session ledger + point ledger 永続ファイル (.gitignore, S3)
 ├── order_requests.json            ← 注文リクエスト永続ファイル (.gitignore, M5)
+├── player_credentials.json        ← player PIN credential 永続ファイル (.gitignore, node-local, L1 PIN ADR-0027)
 ├── menu.json                      ← 注文メニューマスタ (コミット済みサンプル, 店側で編集, M5)
 ├── pyproject.toml                 ← パッケージ定義 (core / [pcsc] / [vision] / [api] / [dev], entry: pokerapp, H1)
 ├── requirements.txt               ← core runtime 同期コピー (vision 除外)
@@ -63,7 +64,9 @@ pokerapp/
 │   ├── order_request.py           ← OrderRequest データクラス (M5)
 │   ├── order_request_repository.py ← OrderRequestRepository (注文リクエスト, thread-safe + reload-on-read, M5)
 │   ├── menu.py                    ← MenuMaster (menu.json ロード・検索, M5)
-│   └── sync.py                    ← state-based merge 純粋関数 + snapshot I/O (S5 双方向 sync, ADR-0022/0024)
+│   ├── sync.py                    ← state-based merge 純粋関数 + snapshot I/O (S5 双方向 sync, ADR-0022/0024)
+│   ├── auth_token.py              ← player principal の stateless 署名トークン (L1 PIN, ADR-0027)
+│   └── player_credential_repository.py ← PlayerCredentialRepository (PIN ハッシュ PBKDF2 + lockout, node-local, ADR-0027)
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -442,7 +445,9 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **cross-app boundary (S5 read)** | ✅ 実装済 | repository interface frozen（ADR-0020）+ `api/client.py:ViewerApiClient`（Python の local↔API 分離点）+ round-trip test。read boundary を二言語で実証（mobile + Python） |
 | **staff 会計 write API (S5 write)** | ✅ 実装済 | `api/server.py` の `/api/staff/...`（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下 + staff read）を **staff shared token**（`Authorization: Bearer <viewer_api.staff_token>`）で公開（ADR-0021）。`LedgerRepository` を RLock で thread-safe 化。単一書き手維持（read-only は 503）。`ViewerApiClient(staff_token=...)` の staff メソッド + `tests/test_viewer_api_staff.py` |
 | **双方向 sync (S5 — state-based merge)** | ✅ 実装済 | `core/sync.py`（純粋マージ: UUID union + 単調解決で可換・結合・冪等 ⇒ 収束, ADR-0022。settlement は **paid_amount monotonic max** で partial-paid 対応, ADR-0024）+ `GET/POST /api/staff/sync/{snapshot,merge}`（staff-token gate, write 所有のみ merge 受理）+ `ViewerApiClient.{pull_sync_snapshot,push_sync_merge,sync_bidirectional}`。全 repo に `path` property、`LedgerRepository`/`OrderRequestRepository` に `reload()` を additive。ADR-0020 の単一書き手前提を更新（複数書き手 + 収束マージ）。`tests/test_sync.py` / `tests/test_viewer_api_sync.py` |
-| cross-app sync 拡張 (S5 後続) | 🔲 planned | player rename 伝播（`updated_at` additive）/ hand log の file-level union / 定期 auto-trigger。player per-player アクセス制御 = ISSUE-0019 PIN 再評価（別 ADR） |
+| **player 本人認証 L1 PIN** | ✅ 実装済 | `core/auth_token.py`（stateless 署名トークン）+ `core/player_credential_repository.py`（PBKDF2 + lockout、node-local `player_credentials.json`、read API / sync 非対象）+ `api/server.py` の principal レイヤ（`_resolve_player_principal`/`_require_player`）+ `POST /api/auth/login`・`/api/players/{id}/pin`。config `viewer_api.player_auth`（off/optional/required, 既定 **off で後方互換**）。`ViewerApiClient.{login,set_pin}`。staff token と直交（ADR-0027）。`tests/test_auth_token.py` / `test_player_credential_repository.py` / `test_viewer_api_auth.py` |
+| **player 本人認証 L2 外部 IdP** | 🔲 planned (設計済) | 詳細設計 = ADR-0028（LINE/Google OIDC、`auth_identity`、hosted モード）。前提: 運用 ADR + player merge。コード未着手 |
+| cross-app sync 拡張 (S5 後続) | 🔲 planned | player rename 伝播（`updated_at` additive）/ hand log の file-level union / 定期 auto-trigger |
 
 ---
 
@@ -609,14 +614,14 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    schema `1.1`）、確定 commit + paid/unpaid/partial 切替（S4 GUI 精算パネル）、buy-in 金額プリセット
    （ADR-0026, `config.ledger.buyin_presets` + `--ledger` ボタン + staff API）。
 6. **R 系の後続**: 派生 confidence の重み較正（golden fixtures 由来）、camera 源の統合。
-7. **player 本人確認の進化（ADR-0025 方針 / ADR-0027・0028 詳細設計）**: player_id を内部不変キーに保ち、
-   認証を additive レイヤで重ねる — L0 name-pick（済）→ **L1 per-player PIN**（**設計済 ADR-0027**:
-   node-local `player_credentials.json`（PBKDF2 + lockout、read API / sync 非対象）+ stateless 署名トークン +
-   player principal 解決レイヤ。config `viewer_api.player_auth` 既定 off で後方互換）→ **L2 外部 IdP**
-   （**設計済 ADR-0028**: LINE / Google OIDC、`(provider, subject)→player_id` の `auth_identity`（多対一・
-   player_id は外部 sub から導出しない）、hosted モードで LAN モードと player_id + sync 共存、PII 最小化。
-   **前提**: 運用 ADR + player merge）。**両 ADR とも設計のみ・コードなし**。実装は需要が固まってから L1 から
-   additive 導入。将来プレイヤーが LINE/Google でサインアップできる土台。
+7. **player 本人確認の進化（ADR-0025 方針 / ADR-0027・0028）**: player_id を内部不変キーに保ち、
+   認証を additive レイヤで重ねる — L0 name-pick（済）→ **L1 per-player PIN = ✅ 実装済（ADR-0027）**:
+   node-local `player_credentials.json`（PBKDF2 + lockout、read API / sync 非対象）+ `core/auth_token.py` の
+   stateless 署名トークン + player principal 解決レイヤ。config `viewer_api.player_auth` 既定 off で後方互換。
+   → **L2 外部 IdP = 🔲 設計済・未実装（ADR-0028）**: LINE / Google OIDC、`(provider, subject)→player_id` の
+   `auth_identity`（多対一・player_id は外部 sub から導出しない）、hosted モードで LAN モードと
+   player_id + sync 共存、PII 最小化。**前提**: 運用 ADR + player merge（scope 外）。将来プレイヤーが
+   LINE/Google でサインアップできる土台。L2 の残: read の本人保護・GUI からの PIN 設定 UI（L1 follow-up）。
 8. **未実装の単機能**: Vosk 代替 ASR、ディーラーボタン自動回転 / SB-BB 自動 post。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。

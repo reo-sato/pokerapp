@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+### Added (player 本人認証 L1 per-player PIN, ADR-0027)
+
+- player が自分のスマホからの **self-write（注文 POST 等）を PIN ログインで本人認証**できるレイヤを
+  追加（既定 `viewer_api.player_auth=off` で **挙動不変** = 従来の name-pick）。`optional`（PIN 登録済
+  player の write のみトークン要求）/ `required`（全 player write に要求）で有効化。staff token（ADR-0021）
+  とは直交。
+- `POST /api/auth/login`（PIN→stateless 署名トークン）/ `POST /api/players/{id}/pin`（初回=staff or
+  self-enroll、変更=現 PIN or staff reset）。注文 POST に principal ガード（401 `unauthorized` /
+  403 `forbidden`）を additive 追加。`ViewerApiClient.login` / `set_pin`。
+- PIN は **node-local `player_credentials.json`**（PBKDF2-HMAC-SHA256 + per-player lockout、平文非保持）に
+  分離 — **viewer API の read response にも sync snapshot にも含めない**（players.json / player schema /
+  sync は不変）。LAN 限定前提を維持。
+- 新 error code（`error-shapes.md`）: `player_auth_disabled` 403 / `invalid_pin` 401 / `pin_locked` 429 /
+  `pin_too_short` 400 / `forbidden` 403。
+
 ### Docs (player 認証 L1 PIN / L2 外部 IdP の詳細設計, ADR-0027 / ADR-0028)
 
 - ADR-0025 の方針（name-pick → PIN → 外部 IdP）のうち **L1 / L2 を実装可能な詳細設計まで具体化**

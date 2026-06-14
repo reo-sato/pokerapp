@@ -469,7 +469,7 @@ def run_ledger_view() -> None:
     if api_cfg.get("enabled", False):
         try:
             import uvicorn
-            from api.server import create_app
+            from api.server import auth_kwargs_from_config, create_app
         except ImportError:
             print("viewer_api.enabled=true ですが fastapi/uvicorn が未導入のため "
                   "API なしで起動します（pip install \".[api]\"）。")
@@ -483,6 +483,7 @@ def run_ledger_view() -> None:
                 orders_writable=True,
                 staff_token=api_cfg.get("staff_token") or None,
                 buyin_presets=buyin_presets,
+                **auth_kwargs_from_config(api_cfg),  # L1 PIN, ADR-0027
             )
             api_server = uvicorn.Server(uvicorn.Config(
                 app, host=bind_host, port=bind_port, log_level="warning"))

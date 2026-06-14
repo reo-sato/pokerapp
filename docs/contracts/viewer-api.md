@@ -65,6 +65,31 @@ player はスマホから **order_request**（`order_request.schema.json` v0.x�
   closed を拒否しないため、注文確定の closed ガードは order-request 層が担う）。
 - 状態遷移は pending → confirmed | rejected のみ（再解決は 409 `already_resolved`）。
 
+## player 認証 / L1 PIN（ADR-0027）
+
+player 本人の self-write（注文 POST 等）を **PIN ログイン**で本人認証する additive レイヤ。
+既定は **`viewer_api.player_auth=off`**（= v1 の name-pick / 無認証, ISSUE-0019）で**挙動不変**。
+`optional` / `required` で有効化する。staff token（ADR-0021）とは**直交**（staff = 店側、PIN = player 本人）。
+
+- **principal トークン**: PIN 検証成功で stateless 署名トークン（`v1.<player_id>.<exp>.<hmac>`,
+  `core/auth_token.py`）を発行。client は self-write 時に `Authorization: Bearer <player token>` で送る。
+  サーバはこれを player_id に解決し（`_resolve_player_principal`）、「principal == path の player_id」を要求。
+- **モード**: `optional`=PIN 登録済 player の write のみトークン要求（未登録は name-pick 継続）/
+  `required`=全 player write にトークン要求。**read は対象外**（トークン不要）。
+- **PIN 保存**: node-local `player_credentials.json`（PBKDF2 + per-player lockout）。**read API / sync
+  非対象**（player schema・players.json・sync snapshot は不変）。
+
+### endpoints
+
+| Method | Path | auth | body | 200 response |
+|--------|------|------|------|--------------|
+| POST | `/api/auth/login` | no（PIN 自体が credential） | `{"player_id", "pin"}` | `{"token", "expires_at", "player_id"}`。失敗 401 `invalid_pin` / lockout 429 `pin_locked` / off 403 `player_auth_disabled` / unknown 404 `not_found` |
+| POST | `/api/players/{player_id}/pin` | 初回: staff token **or** `pin_self_enroll`。変更: 現 PIN **or** staff token | `{"pin", "current_pin"?}` | `{"player_id", "pin_set": true}`。401 `unauthorized` / 400 `pin_too_short` / 403 `player_auth_disabled` |
+
+`optional`/`required` 有効時、注文 POST（上表）の error に **401 `unauthorized`（トークン欠落）/
+403 `forbidden`（principal != path player_id）** が追加される。code は `error-shapes.md` の
+「player 認証 / L1 PIN」節と 1:1。
+
 ## staff write API（ADR-0021）
 
 別端末のスタッフが会計をリモート操作するための **staff 専用** エンドポイント群。player API

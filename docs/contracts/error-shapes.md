@@ -106,3 +106,22 @@ viewer API は menu 照合（`unknown_item`）と read-only モード（`orders_
 
 - staff write を write 非所有プロセス（単独 `--viewer-api`）が受けた場合は既存
   `orders_unavailable`(503) を再利用する（単一書き手, ADR-0020）。
+
+### player 認証 / L1 PIN error code（ADR-0027）
+
+player 本人の PIN ログイン（`POST /api/auth/login`）/ PIN 設定（`POST /api/players/{id}/pin`）/
+self-write の principal ガードで使う code（additive）。`unauthorized`(401) / `not_found`(404) は既存
+code を再利用する。principal 解決は API 境界（`_resolve_player_principal` / `_require_player`）と
+`core/player_credential_repository.py`（lockout）が source:
+
+| code | 意味 | 発生する操作（例） | 由来 | HTTP |
+|------|------|------------------|------|------|
+| `player_auth_disabled` | `viewer_api.player_auth=off`（player 認証が運用で無効） | login / pin 設定 | API 境界 | 403 |
+| `invalid_pin` | PIN が不一致 | login | API 境界（`verify_pin`=False） | 401 |
+| `pin_locked` | 連続失敗で lockout 中（`pin_max_attempts` 超過） | login / pin 変更時の現 PIN 照合 | `PinLockedError` | 429 |
+| `pin_too_short` | PIN が `pin_min_length` 未満 | pin 設定 | `PinTooShortError` | 400 |
+| `unauthorized` | 本人トークン欠落 / 初回設定に staff token 必要 / 現 PIN 不正（既存 code を再利用） | self-write / pin 設定 | API 境界 | 401 |
+| `forbidden` | 本人トークンの player_id が path の player_id と不一致 | self-write | API 境界（principal != path） | 403 |
+
+- `player_auth` 別の挙動: `off`=name-pick（gate なし, 後方互換）/ `optional`=PIN 登録済 player の
+  write のみ要求 / `required`=全 player write に本人トークン要求。read は対象外（本人トークン不要）。

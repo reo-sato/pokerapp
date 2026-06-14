@@ -63,7 +63,18 @@
     "bind_port": 8788,
     "_comment": "M1/M5 (ADR-0017/0018): player 向け read-only viewer API。'python main.py --viewer-api' で単独起動（注文 POST は 503）。enabled=true で 'python main.py --ledger' が API を in-process 起動し注文リクエスト受付（write）を有効にする（単一プロセス所有）。要 [api] extra。",
     "staff_token": "",
-    "_staff_token_comment": "S5 staff write API (ADR-0021): 空ならスタッフ write 無効（403 staff_writes_disabled）。値を設定すると Authorization: Bearer <token> で会計 write（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下）を許可（別端末のスタッフ運用）。staff write は --ledger（write 所有プロセス）でのみ有効。無認証ではないが LAN 限定前提は維持（player read / 注文 POST は従来どおり name-pick / 無認証）。"
+    "_staff_token_comment": "S5 staff write API (ADR-0021): 空ならスタッフ write 無効（403 staff_writes_disabled）。値を設定すると Authorization: Bearer <token> で会計 write（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下）を許可（別端末のスタッフ運用）。staff write は --ledger（write 所有プロセス）でのみ有効。無認証ではないが LAN 限定前提は維持（player read / 注文 POST は従来どおり name-pick / 無認証）。",
+    "player_auth": "off",
+    "_player_auth_comment": "L1 PIN (ADR-0027): 'off'（既定 = name-pick, 後方互換）| 'optional'（PIN 登録済 player の write のみ本人トークン要求、未登録は name-pick）| 'required'（全 player write に本人トークン要求）。POST /api/auth/login で PIN→トークン取得し Authorization: Bearer で送る。LAN 限定前提は維持。read は対象外。",
+    "player_token_secret": "",
+    "_player_token_secret_comment": "player トークンの署名鍵。空なら起動ごとに ephemeral 生成（再起動でトークン失効）。複数プロセス/再起動を跨いで有効にしたい場合のみ固定値を設定。",
+    "player_token_ttl_sec": 43200,
+    "pin_self_enroll": false,
+    "_pin_self_enroll_comment": "true なら player 自身が初回 PIN を設定できる。false（既定）はスタッフ（staff_token）のみ初回設定。変更は現 PIN または staff_token で可。",
+    "pin_min_length": 4,
+    "pin_max_attempts": 5,
+    "pin_lockout_sec": 300,
+    "_pin_lockout_comment": "PIN は低エントロピー前提。pin_max_attempts 回連続失敗で pin_lockout_sec 秒 lockout（429 pin_locked）。主防御は LAN 限定。"
   },
   "ledger": {
     "buyin_presets": [10000, 20000, 30000],

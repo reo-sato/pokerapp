@@ -110,6 +110,14 @@ ADR-0025 の方針（L0→L1→L2）のうち **L1（per-player PIN）と L2（�
 
 着手順・実装は引き続き別タスク。name-pick で問題が顕在化したら L1 から additive 導入する。
 
+## Update（2026-06-14, ADR-0027 実装済）
+
+**L1 per-player PIN を実装した**（ADR-0027）。`viewer_api.player_auth`（既定 `off` = name-pick で挙動不変）を
+`optional`/`required` にすると、player self-write（注文 POST 等）を PIN ログイン由来の stateless 署名
+トークンで本人認証する。PIN は node-local `player_credentials.json`（PBKDF2 + lockout）に分離し read API /
+sync には出さない。staff write の token（ADR-0021）とは直交。**read の per-player 保護**と GUI からの PIN
+設定 UI は follow-up、L2（外部 IdP）は ADR-0028 設計済・未実装（運用 ADR + player merge が前提）。
+
 ## Renumber note（2026-06-13）
 
 serene ブランチでは ISSUE-0013 として起票されたが、verify-v1 には別内容の ISSUE-0013

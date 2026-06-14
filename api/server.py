@@ -12,6 +12,7 @@ bind 既定は 127.0.0.1（無認証のため。LAN 公開は config で明示�
 from __future__ import annotations
 
 import logging
+import secrets
 from importlib import metadata
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from api.read_models import (
     list_player_hands,
     list_player_sessions,
 )
+from core.auth_token import issue_player_token, verify_player_token
 from core.ledger_repository import (
     AlreadySettledError,
     EntryFeeRequiresCashError,
@@ -46,6 +48,11 @@ from core.order_request_repository import (
     OrderRequestRepository,
     OrderSessionClosedError,
     OrderUnknownPlayerError,
+)
+from core.player_credential_repository import (
+    PinLockedError,
+    PinTooShortError,
+    PlayerCredentialRepository,
 )
 from core.player_repository import PlayerNotFoundError, PlayerRepository
 from core.session_repository import SessionNotFoundError, SessionRepository
@@ -99,6 +106,20 @@ class _StaffConfirmOrderBody(BaseModel):
     unit_amount: int
 
 
+class _LoginBody(BaseModel):
+    """POST /api/auth/login の body（L1 PIN, ADR-0027）。"""
+
+    player_id: str
+    pin: str
+
+
+class _SetPinBody(BaseModel):
+    """POST /api/players/{id}/pin の body。current_pin は変更時の本人確認用。"""
+
+    pin: str
+    current_pin: str | None = None
+
+
 # ledger / settlement の error → (HTTP status, error code)。staff write で再利用する
 # （error-shapes.md の ledger セクションと 1:1, ADR-0021）。具体例外を先に並べる。
 _LEDGER_ERROR_MAP: list[tuple[type, int, str]] = [
@@ -131,6 +152,11 @@ def create_app(
     orders_writable: bool = False,
     staff_token: str | None = None,
     buyin_presets: "list[int] | None" = None,
+    credential_repo: PlayerCredentialRepository | None = None,
+    player_auth: str = "off",
+    player_token_secret: str | None = None,
+    player_token_ttl_sec: int = 43_200,
+    pin_self_enroll: bool = False,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -142,6 +168,11 @@ def create_app(
     `Authorization: Bearer <token>` で有効になる（ADR-0021）。falsy なら staff write は
     403 `staff_writes_disabled`。staff write（need_write）は orders_writable を所有する
     プロセスのみ（単一書き手, ADR-0020）。
+
+    player_auth（L1 PIN, ADR-0027）: 'off'（既定 = name-pick, 後方互換）/ 'optional'
+    （PIN 登録済 player の write のみ本人トークンを要求）/ 'required'（全 player write に
+    本人トークンを要求）。PIN 検証成功で stateless 署名トークン（player_token_secret、
+    未設定なら起動ごとに ephemeral 生成）を発行し、self-write の principal を解決する。
     """
     if ledger_repo is None:
         ledger_repo = LedgerRepository(session_repo=session_repo, player_repo=player_repo)
@@ -149,6 +180,10 @@ def create_app(
         order_repo = OrderRequestRepository(session_repo=session_repo, player_repo=player_repo)
     if menu is None:
         menu = MenuMaster()
+    if credential_repo is None:
+        credential_repo = PlayerCredentialRepository()
+    # player トークン署名鍵。未設定なら ephemeral（再起動でトークン失効, ADR-0027 D3）。
+    _player_secret = player_token_secret or secrets.token_hex(32)
     app = FastAPI(title="pokerapp viewer API", version=_app_version())
 
     # M1 は read-only GET のみのため全 origin を許可（Expo web client 用, viewer-api.md）。
@@ -217,6 +252,105 @@ def create_app(
     def get_menu() -> dict:
         return {"items": menu.list_items()}
 
+    # ――― player 認証（L1 PIN, ADR-0027。principal 解決レイヤ）―――
+
+    def _resolve_player_principal(request: Request) -> "str | None":
+        """Authorization: Bearer <player token> を player_id に解決（無効なら None）。
+
+        staff token は player token として検証に通らない（別形式・別 secret）ため、両者は
+        安全に共存する。
+        """
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            return None
+        return verify_player_token(auth[len("Bearer "):], _player_secret)
+
+    def _require_player(request: Request, player_id: str) -> "JSONResponse | None":
+        """player self-write の principal ガード（player_auth に従う, ADR-0027 D4）。
+
+        - off                       : 常に許可（name-pick, 後方互換）。
+        - optional + PIN 未登録      : 許可（その player は従来どおり name-pick）。
+        - それ以外                   : 本人トークン必須。principal != path player_id は 403。
+        """
+        if player_auth == "off":
+            return None
+        if player_auth == "optional" and not credential_repo.has_pin(player_id):
+            return None
+        principal = _resolve_player_principal(request)
+        if principal is None:
+            return JSONResponse(status_code=401, content={
+                "code": "unauthorized",
+                "message": "ログインが必要です（POST /api/auth/login で取得したトークンを Bearer で送る）。",
+            })
+        if principal != player_id:
+            return JSONResponse(status_code=403, content={
+                "code": "forbidden",
+                "message": "他の player としては操作できません。",
+            })
+        return None
+
+    @app.post("/api/auth/login", response_model=None)
+    def auth_login(body: _LoginBody) -> "JSONResponse | dict":
+        """PIN を検証し、成功なら player principal トークンを発行する。"""
+        if player_auth == "off":
+            return JSONResponse(status_code=403, content={
+                "code": "player_auth_disabled",
+                "message": "player 認証は無効です（viewer_api.player_auth=off）。",
+            })
+        player_repo.get(body.player_id)  # unknown player → 404 not_found
+        try:
+            ok = credential_repo.verify_pin(body.player_id, body.pin)
+        except PinLockedError as e:
+            return JSONResponse(status_code=429,
+                                content={"code": "pin_locked", "message": str(e)})
+        if not ok:
+            return JSONResponse(status_code=401,
+                                content={"code": "invalid_pin", "message": "PIN が違います。"})
+        token, exp = issue_player_token(body.player_id, _player_secret, player_token_ttl_sec)
+        return {"token": token, "expires_at": exp, "player_id": body.player_id}
+
+    @app.post("/api/players/{player_id}/pin", response_model=None)
+    def set_player_pin(
+        player_id: str, request: Request, body: _SetPinBody
+    ) -> "JSONResponse | dict":
+        """PIN を設定/変更する。
+
+        - 初回設定: staff token、または `pin_self_enroll=true`（player 自身）で許可。
+        - 変更: 現 PIN 一致、または staff token（reset）で許可。
+        """
+        if player_auth == "off":
+            return JSONResponse(status_code=403, content={
+                "code": "player_auth_disabled",
+                "message": "player 認証は無効です（viewer_api.player_auth=off）。",
+            })
+        player_repo.get(player_id)  # unknown player → 404 not_found
+        is_staff = bool(staff_token) and \
+            request.headers.get("authorization", "") == f"Bearer {staff_token}"
+        if credential_repo.has_pin(player_id):
+            if not is_staff:
+                try:
+                    valid = bool(body.current_pin) and \
+                        credential_repo.verify_pin(player_id, body.current_pin)
+                except PinLockedError as e:
+                    return JSONResponse(status_code=429,
+                                        content={"code": "pin_locked", "message": str(e)})
+                if not valid:
+                    return JSONResponse(status_code=401, content={
+                        "code": "unauthorized",
+                        "message": "現在の PIN（または staff token）が必要です。",
+                    })
+        elif not is_staff and not pin_self_enroll:
+            return JSONResponse(status_code=401, content={
+                "code": "unauthorized",
+                "message": "初回 PIN 設定には staff token が必要です（pin_self_enroll=false）。",
+            })
+        try:
+            credential_repo.set_pin(player_id, body.pin)
+        except PinTooShortError as e:
+            return JSONResponse(status_code=400,
+                                content={"code": "pin_too_short", "message": str(e)})
+        return {"player_id": player_id, "pin_set": True}
+
     @app.get("/api/players/{player_id}/sessions/{session_id}/order-requests")
     def list_order_requests(player_id: str, session_id: str) -> dict:
         player_repo.get(player_id)
@@ -230,7 +364,7 @@ def create_app(
     @app.post("/api/players/{player_id}/sessions/{session_id}/order-requests",
               status_code=201, response_model=None)
     def create_order_request(
-        player_id: str, session_id: str, body: _OrderRequestBody
+        player_id: str, session_id: str, request: Request, body: _OrderRequestBody
     ) -> "JSONResponse | dict":
         """注文リクエストを受け付ける（pending。ledger には書かない — ADR-0018 §2）。"""
         if not orders_writable:
@@ -238,6 +372,9 @@ def create_app(
                 "code": "orders_unavailable",
                 "message": "注文の受付はスタッフ会計画面（--ledger）の起動中のみ可能です。",
             })
+        auth_err = _require_player(request, player_id)
+        if auth_err is not None:
+            return auth_err
         player_repo.get(player_id)
         if menu.unit_amount(body.item_name) is None:
             return JSONResponse(status_code=400, content={
@@ -444,6 +581,26 @@ def create_app(
     return app
 
 
+def auth_kwargs_from_config(api_cfg: dict) -> dict:
+    """`viewer_api` config から L1 PIN 認証（ADR-0027）の create_app kwargs を組み立てる。
+
+    main.py の `--ledger`（in-process）と `--viewer-api`（standalone）で共通に使い、
+    挙動が分岐しないようにする。既定は player_auth='off'（name-pick, 後方互換）。
+    """
+    return {
+        "player_auth": api_cfg.get("player_auth", "off"),
+        "player_token_secret": api_cfg.get("player_token_secret") or None,
+        "player_token_ttl_sec": int(api_cfg.get("player_token_ttl_sec", 43_200)),
+        "pin_self_enroll": bool(api_cfg.get("pin_self_enroll", False)),
+        "credential_repo": PlayerCredentialRepository(
+            iterations=int(api_cfg.get("pin_iterations", 210_000)),
+            min_length=int(api_cfg.get("pin_min_length", 4)),
+            max_attempts=int(api_cfg.get("pin_max_attempts", 5)),
+            lockout_sec=int(api_cfg.get("pin_lockout_sec", 300)),
+        ),
+    }
+
+
 def run_server(cfg: dict) -> None:
     """config に従って viewer API を foreground で起動する（main.py --viewer-api）。"""
     import uvicorn
@@ -458,8 +615,10 @@ def run_server(cfg: dict) -> None:
     ledger_repo = LedgerRepository(session_repo=session_repo)
     # standalone --viewer-api は read-only（orders_writable=False）。staff_token があれば
     # staff *read*（settlement / order queue）は可能、staff *write* は 503（ADR-0021）。
+    # player_auth が有効でも write（注文 POST）は 503 が先に返るが、login / PIN 設定は可能。
     app = create_app(player_repo, session_repo, log_dir, ledger_repo=ledger_repo,
-                     staff_token=api_cfg.get("staff_token") or None)
+                     staff_token=api_cfg.get("staff_token") or None,
+                     **auth_kwargs_from_config(api_cfg))
 
     logger.info("Starting viewer API on %s:%s (log_dir=%s)", bind_host, bind_port, log_dir)
     uvicorn.run(app, host=bind_host, port=bind_port)

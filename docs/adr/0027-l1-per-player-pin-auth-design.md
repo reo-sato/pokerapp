@@ -2,8 +2,9 @@
 
 ## Status
 
-Proposed（**設計のみ**。本 ADR は ADR-0025 の L1 を実装可能なレベルまで具体化する設計記録で、
-コードは含まない。実装着手は別タスク）
+Accepted（**実装済 2026-06-14**。設計どおり `core/auth_token.py` /
+`core/player_credential_repository.py` + `api/server.py` の principal レイヤ + config + client +
+テストを実装。既定 `player_auth="off"` で後方互換）
 
 ## Date
 
@@ -141,26 +142,33 @@ resolve_player_principal(request) -> str | None   # 認証済みなら player_id
 
 ## Validation / Follow-up
 
-- [ ] `core/player_credential_repository.py`（PBKDF2 + lockout + アトミック永続）。
-- [ ] principal 解決ユーティリティ（HMAC トークン発行/検証）+ `api/server.py` の write エンドポイント結線。
-- [ ] config 既定（`player_auth="off"`）で全既存テスト不変を確認（後方互換の回帰テスト）。
-- [ ] auth エンドポイント + lockout + principal 不一致の単体/結合テスト。
-- [ ] `error-shapes.md` auth セクション + `docs/contracts/` の auth 契約（実装時に追加）。
+- [x] `core/player_credential_repository.py`（PBKDF2 + lockout + アトミック永続）。
+- [x] principal 解決ユーティリティ（`core/auth_token.py` の HMAC トークン発行/検証）+ `api/server.py` の
+  `_resolve_player_principal` / `_require_player` + 注文 POST 結線 + `/api/auth/login` / `/api/players/{id}/pin`。
+- [x] config 既定（`player_auth="off"`）で全既存テスト不変を確認（557 passed、後方互換）。
+- [x] auth エンドポイント + lockout + principal 不一致の単体/結合テスト
+  （`tests/test_auth_token.py` / `tests/test_player_credential_repository.py` / `tests/test_viewer_api_auth.py`）。
+- [x] `error-shapes.md` auth セクション + `viewer-api.md` の auth endpoints。
+- [ ] （follow-up）read の本人保護（現状 read は対象外）、player 削除時の credential 連動削除、
+  GUI からの PIN 設定 UI。
 
 ## Related Files
 
-- 新規: `core/player_credential_repository.py`, `player_credentials.json`（.gitignore）
-- 変更（実装時）: `api/server.py`（principal 解決 + write 結線）, `config_default.json`, `api/client.py`,
-  `docs/contracts/error-shapes.md`
+- 新規: `core/auth_token.py`, `core/player_credential_repository.py`,
+  `player_credentials.json`（.gitignore）, `tests/test_auth_token.py`,
+  `tests/test_player_credential_repository.py`, `tests/test_viewer_api_auth.py`
+- 変更: `api/server.py`（principal 解決 + login/pin + 注文 POST gate + `auth_kwargs_from_config`）,
+  `api/client.py`（`login` / `set_pin` / player token）, `config_default.json`, `main.py`（結線）,
+  `docs/contracts/error-shapes.md` / `docs/contracts/viewer-api.md`
 - 不変: `core/player.py` / `players.json` / player schema（`1.0` frozen）/ `core/sync.py`（snapshot 4 パス）
 
 ## Related Tests
 
-- 実装時に追加（principal / lockout / 後方互換）。
+- `tests/test_auth_token.py` / `tests/test_player_credential_repository.py` / `tests/test_viewer_api_auth.py`
 
 ## Related Commits
 
-- 本 ADR と同じ commit（設計記録のみ、コードなし）
+- 本 ADR の実装 commit（2026-06-14）
 
 ## Supersedes / Superseded by
 
