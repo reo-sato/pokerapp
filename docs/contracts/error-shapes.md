@@ -125,3 +125,12 @@ code を再利用する。principal 解決は API 境界（`_resolve_player_prin
 
 - `player_auth` 別の挙動: `off`=name-pick（gate なし, 後方互換）/ `optional`=PIN 登録済 player の
   write のみ要求 / `required`=全 player write に本人トークン要求。read は対象外（本人トークン不要）。
+
+### player merge error code（ADR-0030）
+
+staff merge（`POST /api/staff/players/merge`）で使う code（additive）。`not_found`(404) は既存 code を
+再利用（unknown survivor / absorbed）:
+
+| code | 意味 | 発生する操作 | Python 例外 | HTTP |
+|------|------|------------|-------------|------|
+| `invalid_merge` | 自己 merge / サイクルになる merge | merge | `PlayerMergeError` | 400 |

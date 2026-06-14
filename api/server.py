@@ -54,7 +54,11 @@ from core.player_credential_repository import (
     PinTooShortError,
     PlayerCredentialRepository,
 )
-from core.player_repository import PlayerNotFoundError, PlayerRepository
+from core.player_repository import (
+    PlayerMergeError,
+    PlayerNotFoundError,
+    PlayerRepository,
+)
 from core.session_repository import SessionNotFoundError, SessionRepository
 from core.sync import build_snapshot, merge_snapshot_into
 
@@ -118,6 +122,13 @@ class _SetPinBody(BaseModel):
 
     pin: str
     current_pin: str | None = None
+
+
+class _StaffMergeBody(BaseModel):
+    """POST /api/staff/players/merge の body（player merge, ADR-0030）。"""
+
+    survivor_id: str
+    absorbed_id: str
 
 
 # ledger / settlement の error → (HTTP status, error code)。staff write で再利用する
@@ -282,7 +293,8 @@ def create_app(
                 "code": "unauthorized",
                 "message": "ログインが必要です（POST /api/auth/login で取得したトークンを Bearer で送る）。",
             })
-        if principal != player_id:
+        # merge 済みでも同一人物なら可（survivor/absorbed は canonical で同一視, ADR-0030）。
+        if player_repo.resolve_canonical(principal) != player_repo.resolve_canonical(player_id):
             return JSONResponse(status_code=403, content={
                 "code": "forbidden",
                 "message": "他の player としては操作できません。",
@@ -306,8 +318,10 @@ def create_app(
         if not ok:
             return JSONResponse(status_code=401,
                                 content={"code": "invalid_pin", "message": "PIN が違います。"})
-        token, exp = issue_player_token(body.player_id, _player_secret, player_token_ttl_sec)
-        return {"token": token, "expires_at": exp, "player_id": body.player_id}
+        # principal は canonical（merge 済みなら survivor）で発行する（ADR-0030 D2）。
+        canonical = player_repo.resolve_canonical(body.player_id)
+        token, exp = issue_player_token(canonical, _player_secret, player_token_ttl_sec)
+        return {"token": token, "expires_at": exp, "player_id": canonical}
 
     @app.post("/api/players/{player_id}/pin", response_model=None)
     def set_player_pin(
@@ -425,6 +439,29 @@ def create_app(
         if err is not None:
             return err
         return {"presets": list(_buyin_presets)}
+
+    @app.post("/api/staff/players/merge", response_model=None)
+    def staff_merge_players(
+        request: Request, body: _StaffMergeBody
+    ) -> "JSONResponse | dict":
+        """player merge（absorbed を survivor に統合, ADR-0030）。registry を書くので write 所有のみ。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            absorbed = player_repo.merge_players(body.survivor_id, body.absorbed_id)
+        except PlayerNotFoundError as e:
+            return JSONResponse(status_code=404,
+                                content={"code": "not_found", "message": str(e)})
+        except PlayerMergeError as e:
+            return JSONResponse(status_code=400,
+                                content={"code": "invalid_merge", "message": str(e)})
+        return {
+            "survivor_id": player_repo.resolve_canonical(body.survivor_id),
+            "absorbed_id": body.absorbed_id,
+            "merged_into": absorbed.merged_into,
+            "merged_at": absorbed.merged_at,
+        }
 
     @app.get("/api/staff/sessions/{session_id}/settlement", response_model=None)
     def staff_settlement(session_id: str, request: Request) -> "JSONResponse | dict":

@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pokerapp.local/contracts/player.schema.json",
   "title": "Player",
-  "version": "1.0",
-  "description": "player registry の player 永続形 (S1)。属性は player_id + display_name + created_at のみ。業務 validation (重複・前後空白のみ) は core が source of truth (docs/contracts/validation-rules.md)。",
+  "version": "1.1",
+  "description": "player registry の player 永続形 (S1)。属性は player_id + display_name + created_at。1.1 で player merge の optional な merged_into / merged_at を additive 追加 (ADR-0030, alias/tombstone)。業務 validation (重複・前後空白のみ・merge ルール) は core が source of truth (docs/contracts/validation-rules.md)。",
   "type": "object",
   "additionalProperties": false,
   "required": ["player_id", "display_name", "created_at"],
@@ -22,6 +22,16 @@
       "type": "string",
       "format": "date-time",
       "description": "作成時刻 (ISO 8601)。"
+    },
+    "merged_into": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "1.1 additive (ADR-0030)。この player が merge で吸収された場合の survivor player_id。未 merge の player は本フィールドを持たない (tombstone マーカー)。read は resolve_canonical で survivor に解決する。"
+    },
+    "merged_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "1.1 additive (ADR-0030)。merge された時刻 (ISO 8601)。merged_into とセットで付く。"
     }
   }
 }

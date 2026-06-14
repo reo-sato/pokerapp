@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Optional
 from core.player_repository import (
     DuplicateDisplayNameError,
     EmptyDisplayNameError,
+    PlayerMergeError,
     PlayerNotFoundError,
     PlayerRepository,
 )
@@ -64,6 +65,7 @@ class PlayerRegistryWindow:
 
         self._repo = repository
         self._selected_id: Optional[str] = None
+        self._merge_survivor_id: Optional[str] = None  # player merge の統合先（ADR-0030）
         self._player_rows: dict[str, object] = {}
 
         ctk.set_appearance_mode("dark")
@@ -121,9 +123,23 @@ class PlayerRegistryWindow:
             row=1, column=2, padx=(4, 8), pady=8
         )
 
+        # player merge row（ADR-0030: 同一人物の重複 player を統合する。staff 操作）
+        merge_frame = ctk.CTkFrame(root)
+        merge_frame.grid(row=4, column=0, sticky="ew", padx=12, pady=4)
+        merge_frame.grid_columnconfigure(0, weight=1)
+        self._merge_label = ctk.CTkLabel(merge_frame, text="統合先: —", anchor="w")
+        self._merge_label.grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 0))
+        ctk.CTkButton(
+            merge_frame, text="選択を統合先に設定", width=140,
+            command=self._cmd_set_merge_survivor,
+        ).grid(row=1, column=0, sticky="w", padx=(8, 4), pady=8)
+        ctk.CTkButton(
+            merge_frame, text="選択を統合先へ統合", width=140, command=self._cmd_merge,
+        ).grid(row=1, column=1, padx=(4, 8), pady=8)
+
         # ステータス / validation メッセージ
         self._status_label = ctk.CTkLabel(root, text="", anchor="w")
-        self._status_label.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 12))
+        self._status_label.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 12))
 
     def _refresh_player_list(self) -> None:
         ctk = self._ctk
@@ -198,6 +214,40 @@ class PlayerRegistryWindow:
         self._selected_label.configure(text=f"選択中: {player.display_name}")
         self._refresh_player_list()
         self._set_status(f"リネームしました: {player.display_name}")
+
+    def _cmd_set_merge_survivor(self) -> None:
+        if not self._selected_id:
+            self._set_status("統合先にする player を選択してください。", error=True)
+            return
+        try:
+            survivor = self._repo.get(self._selected_id)
+        except PlayerNotFoundError:
+            self._set_status("選択した player が見つかりません。", error=True)
+            return
+        self._merge_survivor_id = self._selected_id
+        self._merge_label.configure(text=f"統合先: {survivor.display_name}")
+        self._set_status(f"統合先に設定: {survivor.display_name}")
+
+    def _cmd_merge(self) -> None:
+        """選択中（統合元 = absorbed）を統合先（survivor）に統合する（ADR-0030）。"""
+        if not self._merge_survivor_id:
+            self._set_status("先に統合先を設定してください。", error=True)
+            return
+        if not self._selected_id:
+            self._set_status("統合する player を選択してください。", error=True)
+            return
+        try:
+            self._repo.merge_players(self._merge_survivor_id, self._selected_id)
+        except PlayerMergeError as e:
+            self._set_status(str(e), error=True)
+            return
+        except PlayerNotFoundError:
+            self._set_status("選択した player が見つかりません。", error=True)
+            return
+        self._selected_id = None
+        self._selected_label.configure(text="選択中: —")
+        self._refresh_player_list()
+        self._set_status("統合しました（read は統合先に解決されます）。")
 
     # ――― 起動 ―――
 

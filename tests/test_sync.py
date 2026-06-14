@@ -103,6 +103,30 @@ def test_players_create_only_union_keeps_local_rename():
     assert [p["player_id"] for p in merged] == ["a", "b"]  # (created_at, player_id) 順
 
 
+def _merged_player(pid: str, name: str, created: str, into: str) -> dict:
+    return {**_player(pid, name, created), "merged_into": into, "merged_at": "tm"}
+
+
+def test_player_merge_propagates_monotonically():
+    # ADR-0030 D5: 片方だけ merged なら merged 版が両方向で勝つ（収束）。
+    unmerged = [_player("a", "A", "t1")]
+    merged = [_merged_player("a", "A", "t1", "b")]
+    fwd = {p["player_id"]: p for p in merge_players(unmerged, merged)}
+    rev = {p["player_id"]: p for p in merge_players(merged, unmerged)}
+    assert fwd["a"]["merged_into"] == "b"
+    assert rev["a"]["merged_into"] == "b"
+
+
+def test_player_merge_conflict_deterministic_tiebreak():
+    # 両ノードが a を別 survivor に merge → survivor 最小で全ノード収束。
+    into_c = [_merged_player("a", "A", "t1", "c")]
+    into_b = [_merged_player("a", "A", "t1", "b")]
+    fwd = {p["player_id"]: p for p in merge_players(into_c, into_b)}
+    rev = {p["player_id"]: p for p in merge_players(into_b, into_c)}
+    assert fwd["a"]["merged_into"] == "b"  # min("b","c")
+    assert rev["a"]["merged_into"] == "b"  # 可換
+
+
 # ――― ledger / point ―――
 
 

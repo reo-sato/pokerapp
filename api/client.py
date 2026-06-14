@@ -176,6 +176,14 @@ class ViewerApiClient:
             "GET", "/api/staff/buyin-presets", headers=self._staff_headers(),
         )["presets"]
 
+    def merge_players(self, survivor_id: str, absorbed_id: str) -> dict:
+        """absorbed を survivor に統合する（player merge, ADR-0030, staff token）。"""
+        return self._request(
+            "POST", "/api/staff/players/merge",
+            json={"survivor_id": survivor_id, "absorbed_id": absorbed_id},
+            headers=self._staff_headers(),
+        )
+
     def compute_settlement(self, session_id: str) -> list[dict]:
         return self._request(
             "GET", f"/api/staff/sessions/{session_id}/settlement",

@@ -35,20 +35,38 @@ def _index_by(records: list[dict], key: str) -> dict:
     return {r[key]: r for r in records}
 
 
-# ――― players（key player_id, create-only union, local 優先）―――
+# ――― players（key player_id, create-only union + merge 単調解決）―――
+
+
+def _resolve_player(a: dict, b: dict) -> dict:
+    """同一 player_id の 2 レコードを畳む（ADR-0022 + player merge の単調解決, ADR-0030 D5）。
+
+    `merged_into`（tombstone マーカー）は monotonic に伝播させる: 片方だけ merged ならその merged
+    版が勝つ。両方 merged で survivor が異なる衝突は、決定的 tiebreak（survivor player_id 最小）で
+    全ノード収束させる。非 merge フィールド（rename 等）は従来どおり local(=a) を保持。
+    """
+    a_into, b_into = a.get("merged_into"), b.get("merged_into")
+    if a_into == b_into:
+        return a  # 両方未 merge / 同一 survivor → 既存どおり local 優先
+    if a_into is None:
+        return b  # b だけ merged → merged 版が勝つ（monotonic）
+    if b_into is None:
+        return a  # a だけ merged
+    # 両方 merged で survivor が異なる → 決定的 tiebreak（survivor 最小）で収束。
+    return a if a_into <= b_into else b
 
 
 def merge_players(local: list[dict], remote: list[dict]) -> list[dict]:
-    """player を player_id で union する（create-only）。
+    """player を player_id で union する（create-only + merge 単調解決, ADR-0030 D5）。
 
-    既存 id は **local** レコードを保持（rename は v1 では伝播しない, ADR-0022）。新規 remote id
-    のみ追加する。決定的順序: ``(created_at, player_id)``。
+    新規 remote id を追加し、既存 id は `_resolve_player` で畳む（`merged_into` は単調伝播、
+    その他は local 優先 = rename は v1 では伝播しない, ADR-0022）。決定的順序:
+    ``(created_at, player_id)``。
     """
     merged = dict(_index_by(local, "player_id"))
     for r in remote:
         pid = r["player_id"]
-        if pid not in merged:
-            merged[pid] = r
+        merged[pid] = _resolve_player(merged[pid], r) if pid in merged else r
     return sorted(merged.values(), key=lambda p: (p.get("created_at", ""), p["player_id"]))
 
 

@@ -2,8 +2,8 @@
 
 ## Status
 
-Proposed（**設計のみ**。コードは含まない。L2（ADR-0028/0029）の前提となる player merge を実装可能な
-レベルまで設計する記録。実装着手は別タスク。スキーマは additive 変更を伴うが本 ADR では未適用）
+Accepted（**実装済 2026-06-14**。alias/tombstone + read-time canonicalization を core / API / GUI /
+sync に実装。player schema `1.0`→`1.1` を適用。既存挙動は不変＝580 passed）
 
 ## Date
 
@@ -125,19 +125,24 @@ Proposed（**設計のみ**。コードは含まない。L2（ADR-0028/0029）�
 - Neutral: `player` schema に optional `merged_into` / `merged_at` を additive 追加（**`1.0`→`1.1`**、
   settlement の partial-paid `1.1` と同じ frozen 規則内の additive, ADR-0019/0023 先例）。
 
-## Validation / Follow-up（実装着手リスト）
+## Validation / Follow-up（実装結果）
 
-- [ ] `player` schema additive bump（`1.0`→`1.1`, optional `merged_into`/`merged_at`）+ fixtures +
-  code↔contract test 更新。
-- [ ] core: `PlayerRepository.merge_players(survivor, absorbed)` + `resolve_canonical`（チェーン/サイクル
-  ガード）+ list/get の tombstone 扱い。
-- [ ] 各 read 境界の canonicalize（settlement 集計 / viewer per-player / seating 導出 / order フィルタ /
-  login principal）。
-- [ ] sync の player 解決に merge conflict tiebreak（決定的）を additive。
-- [ ] staff API `POST /api/staff/players/merge` + `ViewerApiClient.merge_players` + desktop registry GUI。
-- [ ] tests: merge / unmerge / canonical チェーン / settlement の合算 / login-through-merge /
-  sync 収束（2 ノードが同一 / 異なる survivor）。
-- [ ] （L2 連結）merge 後に LINE/Google ログインが survivor principal を返すこと。
+- [x] `player` schema additive bump（`1.0`→`1.1`, optional `merged_into`/`merged_at`）+ `valid-merged`
+  fixture + code↔contract test 緑。`Player.to_dict` は未 merge では従来の形を保つ。
+- [x] core: `PlayerRepository.merge_players` / `resolve_canonical`（チェーン/サイクル/深度ガード）/
+  `equivalence_class` / `unmerge` / `list_players(include_merged=False)` で tombstone を隠す。
+- [x] 各 read 境界の canonicalize: settlement 集計（`_derive_settlement_rows`）/ point 残高 /
+  `list_entries` フィルタ / order `list_requests` フィルタ / viewer per-player read（`api/read_models`）/
+  login principal + `_require_player`（`api/server.py`）。
+- [x] sync の player 解決に merge conflict tiebreak（`core/sync.py:_resolve_player`、monotonic +
+  survivor 最小）。
+- [x] staff API `POST /api/staff/players/merge` + `ViewerApiClient.merge_players` + registry GUI
+  （統合先設定→統合）。
+- [x] tests: `tests/test_player_merge.py`（core + cross-repo）/ `tests/test_viewer_api_merge.py`
+  （staff + viewer + login-through-merge）/ `tests/test_player_registry_gui.py::TestMergePlayers` /
+  `tests/test_sync.py`（monotonic 伝播 + tiebreak 収束）。
+- [~] 歴史的 seat スナップショットの「同一 hand 2 席」表示（D6）は read-time の歴史的アーティファクトとして
+  許容（自動解決しない）。`current_seating` の表示 canonicalize は未対応（staff 検査画面のみ・低影響, follow-up）。
 
 ## Related Files
 
@@ -149,11 +154,12 @@ Proposed（**設計のみ**。コードは含まない。L2（ADR-0028/0029）�
 
 ## Related Tests
 
-- 実装時に追加（上記 Validation）。
+- `tests/test_player_merge.py` / `tests/test_viewer_api_merge.py` /
+  `tests/test_player_registry_gui.py::TestMergePlayers` / `tests/test_sync.py`（player merge 節）
 
 ## Related Commits
 
-- 本 ADR と同じ commit（設計記録のみ、コードなし）
+- 本 ADR の設計 + 実装 commit（2026-06-14）
 
 ## Supersedes / Superseded by
 

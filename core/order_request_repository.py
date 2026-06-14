@@ -220,14 +220,18 @@ class OrderRequestRepository:
         player_id: str | None = None,
         status: str | None = None,
     ) -> list[OrderRequest]:
-        """session の request を requested_at（追記）順で返す。"""
+        """session の request を requested_at（追記）順で返す。
+
+        player_id filter は merge を考慮し、survivor の equivalence class で突合する（ADR-0030 D2）。
+        """
         with self._lock:
             self._maybe_reload()
             self._session_repo.get_session(session_id)  # not_found を透過
+            cls = self._player_repo.equivalence_class(player_id) if player_id is not None else None
             return [
                 r for r in self._requests
                 if r.session_id == session_id
-                and (player_id is None or r.player_id == player_id)
+                and (cls is None or r.player_id in cls)
                 and (status is None or r.status == status)
             ]
 

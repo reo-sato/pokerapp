@@ -56,7 +56,7 @@ pokerapp/
 │   ├── game_state.py              ← GameStateManager (スタック/ポット/ターン管理)
 │   ├── hand_log.py                ← ActionRecord, HandSummary データクラス
 │   ├── player.py                  ← Player データクラス (S1)
-│   ├── player_repository.py       ← PlayerRepository (player CRUD + JSON 永続化, S1)
+│   ├── player_repository.py       ← PlayerRepository (player CRUD + merge/canonical + JSON 永続化, S1/ADR-0030)
 │   ├── session.py                 ← Session / SeatAssignment / HandRef データクラス (S2)
 │   ├── session_repository.py      ← SessionRepository (session + hand-based seating + JSON 永続化, S2)
 │   ├── ledger.py                  ← LedgerEntry / PointLedgerEntry / SessionSettlement データクラス (S3)
@@ -178,8 +178,8 @@ hand logger とは **完全に別画面** の player 管理機能。session / le
 
 ### Out of scope（S1 時点）
 
-- player 削除、`display_name` 以外の属性、hand logger との自動接続。（player merge は **設計済 =
-  ADR-0030**, alias/tombstone。実装は後続）
+- player 削除、`display_name` 以外の属性、hand logger との自動接続。（player merge は **実装済 =
+  ADR-0030**, alias/tombstone + read-time canonicalization）
 - session / seat_assignment / point ledger / settlement / cross-app sync は後続 Phase。
 
 ---
@@ -447,8 +447,8 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **staff 会計 write API (S5 write)** | ✅ 実装済 | `api/server.py` の `/api/staff/...`（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下 + staff read）を **staff shared token**（`Authorization: Bearer <viewer_api.staff_token>`）で公開（ADR-0021）。`LedgerRepository` を RLock で thread-safe 化。単一書き手維持（read-only は 503）。`ViewerApiClient(staff_token=...)` の staff メソッド + `tests/test_viewer_api_staff.py` |
 | **双方向 sync (S5 — state-based merge)** | ✅ 実装済 | `core/sync.py`（純粋マージ: UUID union + 単調解決で可換・結合・冪等 ⇒ 収束, ADR-0022。settlement は **paid_amount monotonic max** で partial-paid 対応, ADR-0024）+ `GET/POST /api/staff/sync/{snapshot,merge}`（staff-token gate, write 所有のみ merge 受理）+ `ViewerApiClient.{pull_sync_snapshot,push_sync_merge,sync_bidirectional}`。全 repo に `path` property、`LedgerRepository`/`OrderRequestRepository` に `reload()` を additive。ADR-0020 の単一書き手前提を更新（複数書き手 + 収束マージ）。`tests/test_sync.py` / `tests/test_viewer_api_sync.py` |
 | **player 本人認証 L1 PIN** | ✅ 実装済 | `core/auth_token.py`（stateless 署名トークン）+ `core/player_credential_repository.py`（PBKDF2 + lockout、node-local `player_credentials.json`、read API / sync 非対象）+ `api/server.py` の principal レイヤ（`_resolve_player_principal`/`_require_player`）+ `POST /api/auth/login`・`/api/players/{id}/pin`。config `viewer_api.player_auth`（off/optional/required, 既定 **off で後方互換**）。`ViewerApiClient.{login,set_pin}`。staff token と直交（ADR-0027）。`tests/test_auth_token.py` / `test_player_credential_repository.py` / `test_viewer_api_auth.py` |
-| **player 本人認証 L2 外部 IdP** | 🔲 planned (設計済) | 詳細設計 = ADR-0028（LINE/Google OIDC、`auth_identity`、hosted モード）+ 運用設計 = ADR-0029（会場 source-of-truth + cloud は player ミラー / マネージド PaaS / LINE+Google / PII 最小 APPI）。前提 = player merge も **設計済 = ADR-0030**（alias/tombstone）。コード未着手 |
-| **player merge** | 🔲 planned (設計済) | 設計 = ADR-0030: `merged_into` の alias/tombstone（履歴 rewrite なし、append-only/収束 sync/player_id 不変を保つ・可逆）+ `resolve_canonical` で全 player-keyed read を survivor に解決。schema `1.0`→`1.1` additive。L2 の前提 + LAN 重複掃除にも使える。コード未着手 |
+| **player 本人認証 L2 外部 IdP** | 🔲 planned (設計済) | 詳細設計 = ADR-0028（LINE/Google OIDC、`auth_identity`、hosted モード）+ 運用設計 = ADR-0029（会場 source-of-truth + cloud は player ミラー / マネージド PaaS / LINE+Google / PII 最小 APPI）。前提の player merge は **実装済（ADR-0030）**。OIDC コード本体が未着手 |
+| **player merge** | ✅ 実装済 | ADR-0030: `merged_into` の alias/tombstone（履歴 rewrite なし、append-only/収束 sync/player_id 不変を保つ・可逆）。`PlayerRepository.merge_players`/`resolve_canonical`/`equivalence_class`/`unmerge` + 全 player-keyed read（settlement 集計 / point / entry / order / viewer / login principal）を canonicalize + `core/sync.py:_resolve_player`（monotonic + tiebreak）+ staff API `POST /api/staff/players/merge` + registry GUI。schema `player` `1.0`→`1.1`。`tests/test_player_merge.py` 他 |
 | cross-app sync 拡張 (S5 後続) | 🔲 planned | player rename 伝播（`updated_at` additive）/ hand log の file-level union / 定期 auto-trigger |
 
 ---
@@ -624,9 +624,9 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    `(provider, subject)→player_id` の `auth_identity`（多対一・player_id は外部 sub から導出しない）。運用は
    **会場 source-of-truth + cloud は player ミラー**（cloud は会計を originate せず signup/閲覧/注文+sync のみ
    公開）/ マネージド PaaS / LINE+Google / secret は PaaS env / PII 最小（APPI, sub のみ）/ cloud は会計 write
-   無効・CORS 絞り（ADR-0029）。前提の **player merge も設計済（ADR-0030, alias/tombstone + read-time
-   canonicalization）**。将来プレイヤーが LINE/Google でサインアップできる土台。L2 実装の残: player merge
-   実装 → env override / cloud モード config / レート制限 / OIDC コード本体。
+   無効・CORS 絞り（ADR-0029）。前提の **player merge は実装済（ADR-0030, alias/tombstone + read-time
+   canonicalization）**。将来プレイヤーが LINE/Google でサインアップできる土台。L2 実装の残: env override /
+   cloud モード config / レート制限 / OIDC コード本体（ADR-0028）。
 8. **未実装の単機能**: Vosk 代替 ASR、ディーラーボタン自動回転 / SB-BB 自動 post。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。

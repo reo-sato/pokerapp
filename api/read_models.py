@@ -43,13 +43,16 @@ def list_player_sessions(player_id: str, session_repo: SessionRepository) -> lis
 
     形は docs/contracts/schemas/player_session_summary.schema.json (0.x)。
     """
+    # merge を考慮し、survivor + 全 absorbed の equivalence class で seat 突合する（ADR-0030 D2）。
+    cls = session_repo.player_repo.equivalence_class(player_id)
     summaries: list[dict] = []
     for session in session_repo.list_sessions():
         hands_played = sum(
             1
             for hand_id in session_repo.list_hand_ids(session.session_id)
-            if player_id
-            in session_repo.resolve_seat_map_for_hand(session.session_id, hand_id).values()
+            if cls & set(
+                session_repo.resolve_seat_map_for_hand(session.session_id, hand_id).values()
+            )
         )
         if hands_played == 0:
             continue
@@ -70,10 +73,11 @@ def list_player_hands(
     seat assignment はあるが hand log に対応 hand が無いものは除外する。
     unknown session は SessionNotFoundError（session_repo 経由）。
     """
+    cls = session_repo.player_repo.equivalence_class(player_id)
     seated_hand_ids = {
         hand_id
         for hand_id in session_repo.list_hand_ids(session_id)
-        if player_id in session_repo.resolve_seat_map_for_hand(session_id, hand_id).values()
+        if cls & set(session_repo.resolve_seat_map_for_hand(session_id, hand_id).values())
     }
     if not seated_hand_ids:
         return []
@@ -98,12 +102,14 @@ def get_player_session_ledger(
     `list_settlements` を使う（compute_settlement の settled_at では判定しない）。
     unknown session は SessionNotFoundError（ledger_repo 経由で透過）。
     """
+    # settlement 行は survivor の canonical id でキーされる（ADR-0030 D2）ので query も解決する。
+    canon = ledger_repo.player_repo.resolve_canonical(player_id)
     spec = next(
-        (r for r in ledger_repo.compute_settlement(session_id) if r.player_id == player_id),
+        (r for r in ledger_repo.compute_settlement(session_id) if r.player_id == canon),
         None,
     )
     committed = next(
-        (s for s in ledger_repo.list_settlements(session_id) if s.player_id == player_id),
+        (s for s in ledger_repo.list_settlements(session_id) if s.player_id == canon),
         None,
     )
     base = committed or spec

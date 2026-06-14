@@ -45,6 +45,10 @@ class PlayerNotFoundError(PlayerValidationError):
     """指定された player_id が存在しない。"""
 
 
+class PlayerMergeError(PlayerValidationError):
+    """player merge の不正（自己 merge / サイクル等, ADR-0030）。code=invalid_merge。"""
+
+
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -125,17 +129,94 @@ class PlayerRepository:
 
     # ――― CRUD ―――
 
-    def list_players(self) -> list[Player]:
-        """全 player を作成時刻 → display_name 順で返す。"""
-        return sorted(
-            self._players.values(),
-            key=lambda p: (p.created_at, p.display_name),
-        )
+    def list_players(self, include_merged: bool = False) -> list[Player]:
+        """player を作成時刻 → display_name 順で返す。
+
+        既定では merge で吸収された tombstone（`merged_into!=None`）を除外する（ADR-0030）。
+        `include_merged=True` で tombstone も含める（merge 管理 UI 用）。
+        """
+        players = self._players.values()
+        if not include_merged:
+            players = [p for p in players if p.merged_into is None]
+        return sorted(players, key=lambda p: (p.created_at, p.display_name))
 
     def get(self, player_id: str) -> Player:
         if player_id not in self._players:
             raise PlayerNotFoundError(f"player_id={player_id} は存在しません。")
         return self._players[player_id]
+
+    # ――― player merge（ADR-0030: alias / tombstone + read-time canonicalization）―――
+
+    def resolve_canonical(self, player_id: str) -> str:
+        """merge チェーンを辿って survivor の player_id を返す（ADR-0030）。
+
+        未 merge / 未知 ID はそのまま返す（read は lenient）。サイクル・過大深度はガードして
+        現時点の解決先を返す（クラッシュさせない）。
+        """
+        seen: set[str] = set()
+        current = player_id
+        for _ in range(64):
+            p = self._players.get(current)
+            if p is None or p.merged_into is None:
+                return current
+            if current in seen:
+                logger.warning("merge cycle detected resolving %s", player_id)
+                return current
+            seen.add(current)
+            current = p.merged_into
+        logger.warning("merge chain too deep resolving %s", player_id)
+        return current
+
+    def equivalence_class(self, player_id: str) -> set[str]:
+        """`player_id` と同一 canonical に解決される全 player_id 集合（survivor + 全 absorbed）。
+
+        歴史的レコード（seat_assignment / ledger 等）が absorbed の旧 ID で残っていても、read 側が
+        この集合で突合すれば survivor の視点で漏れなく拾える（ADR-0030 D2）。
+        """
+        canonical = self.resolve_canonical(player_id)
+        cls = {canonical, player_id}
+        for pid in self._players:
+            if self.resolve_canonical(pid) == canonical:
+                cls.add(pid)
+        return cls
+
+    def merge_players(self, survivor_id: str, absorbed_id: str) -> Player:
+        """`absorbed_id` を `survivor_id` に統合する（alias/tombstone, ADR-0030）。
+
+        履歴は書き換えず、absorbed に `merged_into=survivor` を付けるのみ（read で canonicalize）。
+        survivor 自身が tombstone のときはその canonical を実 survivor にする。自己 merge /
+        サイクルは PlayerMergeError。同一 survivor への再 merge は冪等。
+        """
+        if survivor_id not in self._players:
+            raise PlayerNotFoundError(f"survivor player_id={survivor_id} は存在しません。")
+        if absorbed_id not in self._players:
+            raise PlayerNotFoundError(f"absorbed player_id={absorbed_id} は存在しません。")
+        if survivor_id == absorbed_id:
+            raise PlayerMergeError("survivor と absorbed が同一 player_id です。")
+        canonical_survivor = self.resolve_canonical(survivor_id)
+        if canonical_survivor == absorbed_id:
+            raise PlayerMergeError(
+                "absorbed が survivor の canonical です（merge でサイクルになります）。"
+            )
+        absorbed = self._players[absorbed_id]
+        if absorbed.merged_into == canonical_survivor:
+            return absorbed  # 冪等（既に同一 survivor へ統合済み）
+        absorbed.merged_into = canonical_survivor
+        absorbed.merged_at = _now_iso()
+        self._flush()
+        logger.info("Merged player %s into %s", absorbed_id, canonical_survivor)
+        return absorbed
+
+    def unmerge(self, player_id: str) -> Player:
+        """merge を取り消す（`merged_into` を除去, ADR-0030 D4。破壊していないので可逆）。"""
+        if player_id not in self._players:
+            raise PlayerNotFoundError(f"player_id={player_id} は存在しません。")
+        player = self._players[player_id]
+        player.merged_into = None
+        player.merged_at = None
+        self._flush()
+        logger.info("Unmerged player %s", player_id)
+        return player
 
     def create_player(self, display_name: str) -> Player:
         name = self._validate_name(display_name, exclude_id=None)

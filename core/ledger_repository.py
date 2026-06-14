@@ -170,6 +170,15 @@ class LedgerRepository:
         """この repository の永続ファイルパス（sync が snapshot/merge 対象を特定する用）。"""
         return self._path
 
+    @property
+    def player_repo(self) -> PlayerRepository:
+        """canonicalize（player merge, ADR-0030）に使う registry。"""
+        return self._player_repo
+
+    def _canonical(self, player_id: str) -> str:
+        """merge 済みなら survivor の player_id に解決する（ADR-0030 D2）。"""
+        return self._player_repo.resolve_canonical(player_id)
+
     # ――― 永続化 ―――
 
     def _load(self) -> None:
@@ -287,9 +296,13 @@ class LedgerRepository:
 
     @_locked
     def point_balance(self, player_id: str) -> int:
-        """player の point 残高 = point_ledger_entry の delta_points の fold（source of truth）。"""
+        """player の point 残高 = point_ledger_entry の delta_points の fold（source of truth）。
+
+        merge 済みなら survivor の equivalence class 全体を合算する（ADR-0030 D2）。
+        """
         self._require_player(player_id)
-        return sum(p.delta_points for p in self._point_entries if p.player_id == player_id)
+        cls = self._player_repo.equivalence_class(player_id)
+        return sum(p.delta_points for p in self._point_entries if p.player_id in cls)
 
     @_locked
     def grant_points(
@@ -478,22 +491,33 @@ class LedgerRepository:
         if session_id is not None:
             result = [e for e in result if e.session_id == session_id]
         if player_id is not None:
-            result = [e for e in result if e.player_id == player_id]
+            # merge 済みの旧 ID で記帳された entry も survivor 視点で拾う（ADR-0030 D2）。
+            cls = self._player_repo.equivalence_class(player_id)
+            result = [e for e in result if e.player_id in cls]
         return list(result)
 
     # ――― settlement ―――
 
     def _derive_settlement_rows(self, session_id: str) -> list[SessionSettlement]:
-        players: set[str] = {e.player_id for e in self._entries if e.session_id == session_id}
-        players |= {p.player_id for p in self._point_entries if p.session_id == session_id}
+        # merge 済み player は survivor の canonical id でグルーピングし、同一人物の複数 ID 分を
+        # 1 行に合算する（ADR-0030 D2。historical な entry.player_id は書き換えない）。
+        players: set[str] = {
+            self._canonical(e.player_id) for e in self._entries if e.session_id == session_id
+        }
+        players |= {
+            self._canonical(p.player_id)
+            for p in self._point_entries if p.session_id == session_id
+        }
 
         rows: list[SessionSettlement] = []
         for pid in sorted(players):
             entries_p = [
-                e for e in self._entries if e.session_id == session_id and e.player_id == pid
+                e for e in self._entries
+                if e.session_id == session_id and self._canonical(e.player_id) == pid
             ]
             points_p = [
-                p for p in self._point_entries if p.session_id == session_id and p.player_id == pid
+                p for p in self._point_entries
+                if p.session_id == session_id and self._canonical(p.player_id) == pid
             ]
             cash_in_total = sum(e.cash_amount for e in entries_p if e.kind in _CASH_IN_KINDS)
             order_total = sum(e.cash_amount for e in entries_p if e.kind == "order")

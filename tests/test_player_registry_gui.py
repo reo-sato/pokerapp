@@ -107,6 +107,44 @@ class TestRenamePlayer:
         assert win._selected_id == a.player_id
 
 
+class TestMergePlayers:
+    """ADR-0030: registry GUI から player merge を行う（統合先設定 → 統合）。"""
+
+    def test_merge_marks_tombstone_and_hides(self, tmp_path: Path):
+        win, repo = _make_window(tmp_path)
+        survivor = repo.create_player("Bob (venue)")
+        absorbed = repo.create_player("Bob (cloud)")
+        # survivor を選択 → 統合先に設定
+        win._select_player(survivor.player_id)
+        win._cmd_set_merge_survivor()
+        assert win._merge_survivor_id == survivor.player_id
+        # absorbed を選択 → 統合
+        win._select_player(absorbed.player_id)
+        win._cmd_merge()
+
+        assert repo.resolve_canonical(absorbed.player_id) == survivor.player_id
+        assert {p.player_id for p in repo.list_players()} == {survivor.player_id}
+        assert win._set_status.call_args.kwargs.get("error", False) is False
+
+    def test_merge_without_survivor_shows_validation(self, tmp_path: Path):
+        win, repo = _make_window(tmp_path)
+        a = repo.create_player("A")
+        win._select_player(a.player_id)
+        win._cmd_merge()  # 統合先未設定
+        assert win._set_status.call_args.kwargs.get("error") is True
+        assert not repo.get(a.player_id).is_merged
+
+    def test_merge_self_shows_validation(self, tmp_path: Path):
+        win, repo = _make_window(tmp_path)
+        a = repo.create_player("A")
+        win._select_player(a.player_id)
+        win._cmd_set_merge_survivor()
+        win._select_player(a.player_id)  # survivor と同一を統合元に
+        win._cmd_merge()
+        assert win._set_status.call_args.kwargs.get("error") is True
+        assert not repo.get(a.player_id).is_merged
+
+
 class TestSeparateFromHandLogger:
     """player registry が hand logger dashboard と別構造であることの最低限の確認。"""
 
