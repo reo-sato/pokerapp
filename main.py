@@ -164,10 +164,15 @@ def run_cli() -> None:
             print(f"RFID HTTP受信スレッド起動 ({rfid_cfg.get('bind_host','127.0.0.1')}:{rfid_cfg.get('bind_port',8787)})。")
         else:
             from rfid.reader_thread import RFIDThread
+            # canonical PC/SC は pcsc_readers (list) を使う。readers (dict) は HTTP 用なので
+            # list でない場合は空にフォールバックする（ADR-0034 / rfid-usb-ccid.md §4）。
+            pcsc_readers = rfid_cfg.get("pcsc_readers", rfid_cfg.get("readers", []))
+            if not isinstance(pcsc_readers, list):
+                pcsc_readers = []
             rfid_thread = RFIDThread(
                 rfid_queue=rfid_q,
                 card_master=card_master,
-                reader_configs=rfid_cfg.get("readers", []),
+                reader_configs=pcsc_readers,
                 poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
                 stop_event=stop_event,
             )

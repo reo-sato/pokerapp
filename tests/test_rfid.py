@@ -52,6 +52,28 @@ class TestBytesToTagId:
         assert bytes_to_tag_id(b"") == ""
 
 
+class TestIso15693Uid8Byte:
+    """ADR-0034 / rfid-usb-ccid.md §7: ISO 15693 の 8 バイト UID を長さ非依存で扱う。"""
+
+    _UID8 = b"\x04\xAB\xCD\xEF\x12\x34\x56\x78"
+    _NORM8 = "04:AB:CD:EF:12:34:56:78"
+
+    def test_bytes_to_tag_id_8byte(self):
+        assert bytes_to_tag_id(self._UID8) == self._NORM8
+
+    def test_normalize_roundtrip_8byte(self):
+        # colon-hex / 連結 hex / 小文字 いずれも同一正規形に収束する。
+        assert normalize_tag_id(self._NORM8) == self._NORM8
+        assert normalize_tag_id("04abcdef12345678") == self._NORM8
+        assert normalize_tag_id("04:ab:cd:ef:12:34:56:78") == self._NORM8
+
+    def test_card_master_lookup_8byte(self, tmp_path: Path):
+        cm = CardMaster(tmp_path / "cards.json")
+        cm.register("04abcdef12345678", "Ah")
+        assert cm.lookup(self._NORM8) == "Ah"
+        assert cm.lookup_bytes(self._UID8) == "Ah"
+
+
 # ――― CardMaster ―――
 
 class TestCardMasterRegisterLookup:
@@ -292,3 +314,30 @@ class TestRFIDThread:
         thread.start()
         thread.join(timeout=2)
         assert not thread.is_alive()
+
+    def test_board_role_maps_to_event(self, tmp_path: Path):
+        """ADR-0034 §4: role=board の reader_config が RFIDEvent.role=board になる。"""
+        configs = [{"name": "reader_B", "role": "board", "index": 1}]
+        sequences = {"reader_B": [None, "04:11:22"]}
+        thread, rfid_q, stop = _make_rfid_thread(tmp_path, sequences, configs)
+        thread.start()
+        time.sleep(0.15)
+        stop.set()
+        thread.join(timeout=2)
+        ev: RFIDEvent = rfid_q.get_nowait()
+        assert ev.role == "board"
+        assert ev.seat is None
+
+    def test_8byte_iso15693_uid_flows_to_event(self, tmp_path: Path):
+        """ADR-0034 §7: 8B UID (ISO 15693) が RFIDEvent.tag_id まで長さ非依存で流れる。"""
+        configs = [{"name": "reader_C", "role": "seat", "seat": 3}]
+        uid8 = "04:AB:CD:EF:12:34:56:78"
+        sequences = {"reader_C": [None, uid8, uid8]}
+        thread, rfid_q, stop = _make_rfid_thread(tmp_path, sequences, configs)
+        thread.start()
+        time.sleep(0.15)
+        stop.set()
+        thread.join(timeout=2)
+        ev: RFIDEvent = rfid_q.get_nowait()
+        assert ev.tag_id == uid8
+        assert ev.seat == 3

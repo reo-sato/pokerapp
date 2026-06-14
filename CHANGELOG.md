@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### Added (RFID USB CCID firmware↔host 契約の凍結, ADR-0034 / ISSUE-0015 Fixed)
+
+- PN5180 + ESP32-S3 の **USB CCID firmware ↔ host (PC/SC) 契約**を `docs/contracts/rfid-usb-ccid.md`
+  **v1.0** として凍結（USB descriptor / reader_name 安定規約 / slot↔役割は host config が source of truth /
+  ATR は host が ATR-agnostic / Get UID pseudo-APDU `FF CA 00 00 00` / UID 4-7-8B 正規化 / hot-plug は
+  PC/SC polling / multi-platform / freeze 規則）。実機なしで境界を確定（ISSUE-0015 Fixed）。
+- config に **`rfid.pcsc_readers`（list, PN5180+ESP32-S3 想定）** サンプルを追加し、HTTP 用 `readers`（dict）と
+  キー分離。`main.py` の pcsc 経路を `pcsc_readers` 優先に変更し、**dict 誤設定での latent crash を解消**。
+- **8B UID（ISO 15693）回帰**: `tests/test_rfid.py` に `bytes_to_tag_id`/`normalize_tag_id` roundtrip +
+  `CardMaster` lookup + `MockPCSCBridge → RFIDThread → RFIDEvent` + board(role/index) マッピング。
+- 残（実環境）: firmware の VID/PID・実 reader_name を確定して契約 §2/§4 に追記。
+
 ### Added (mobile に本人認証 UI を反映: L1 PIN / L2 サインアップ, ADR-0027/0031)
 
 - mobile（Expo/RN）に **PIN ログイン（L1）** と **LINE/Google サインアップ（L2）** の UI を追加

@@ -41,8 +41,14 @@
       "board_4": {"role": "board", "index": 4},
       "board_5": {"role": "board", "index": 5}
     },
-    "_pcsc_transport_comment": "transport='pcsc' の場合は以下を使用 (pyscard 必須)",
-    "_pcsc_poll_interval_ms": 100
+    "_pcsc_transport_comment": "transport='pcsc' の場合は下の pcsc_readers (list) を使う (pyscard 必須, canonical ADR-0015)。readers (dict, 上) は transport='http' 用。",
+    "_pcsc_poll_interval_ms": 100,
+    "pcsc_readers": [
+      {"name": "PN5180-CCID [Interface 0]", "role": "seat",  "seat": 1},
+      {"name": "PN5180-CCID [Interface 1]", "role": "seat",  "seat": 2},
+      {"name": "PN5180-CCID [Interface 5]", "role": "board", "index": 1}
+    ],
+    "_pcsc_readers_comment": "ADR-0034 / docs/contracts/rfid-usb-ccid.md: PN5180 + ESP32-S3 USB CCID を PC/SC で読む canonical 経路の reader 設定 (list)。name は OS が描画する reader_name と完全一致させる (OS により文字列が異なる。`python -c \"from smartcard.System import readers; print([str(r) for r in readers()])\"` で実値を確認)。role/seat が RFIDEvent への対応の source of truth。サンプルは実機接続後に実 reader_name へ置換すること。"
   },
   "recording": {
     "enabled": false,

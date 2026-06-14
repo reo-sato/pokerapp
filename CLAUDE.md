@@ -416,7 +416,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | 音声認識 (Whisper) | ✅ 実装済 | `audio/recognizer.py` |
 | RFID PC/SC 受信 | ✅ 実装済 (canonical) | `rfid/reader_thread.py`（ESP32-S3 USB CCID 経由で PN5180 公開, ADR-0015） |
 | RFID HTTP 受信 | ✅ 実装済 (optional secondary) | `rfid/http_receiver.py`（debug/remote 用, ADR-0015） |
-| ESP32-S3 USB CCID firmware ↔ Python 契約固定 | 🔲 planned | ISSUE-0007（USB descriptor / reader_name / ATR / 8B UID 等） |
+| ESP32-S3 USB CCID firmware ↔ Python 契約固定 | ✅ 実装済 (契約 freeze) | `docs/contracts/rfid-usb-ccid.md` v1.0（ADR-0034, ISSUE-0015 Fixed）: USB descriptor / reader_name 安定規約 / slot↔役割（host config が source of truth）/ ATR-agnostic / Get UID `FF CA 00 00 00` / UID 4-7-8B 正規化 / hot-plug。config `pcsc_readers`(list) 分離。firmware の VID/PID・実 reader_name は実機実装時に追記 |
 | RFID カード照合 | ✅ 実装済 | `rfid/card_master.py` |
 | ストリート自動遷移 (RFID) | ✅ 実装済 | board 枚数 3/4/5 で遷移 |
 | Confidence 算出 | ✅ 実装済 | センサー組み合わせ行列 |
@@ -449,7 +449,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0009） |
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
 | schema `1.0` freeze (S4) | ✅ 実装済 | 全 model（session/seat/hand_ref・ledger/point・settlement・order_request/player_session_summary）を `1.0` freeze（ADR-0019, ISSUE-0005 Resolved）。code↔contract test 全 model カバー |
-| 実機 E2E (Phase H) / PN5180 firmware 契約 (ISSUE-0014/0015) | 🔲 planned | クリーン環境の通し確認 + USB CCID firmware↔Python 契約凍結（§ ロードマップ 残作業） |
+| 実機 E2E (Phase H) | 🔲 planned | クリーン環境の通し確認（§ ロードマップ 残作業）。**PN5180 firmware 契約は凍結済（ADR-0034, ISSUE-0015 Fixed）**= `docs/contracts/rfid-usb-ccid.md` v1.0 |
 | **cross-app boundary (S5 read)** | ✅ 実装済 | repository interface frozen（ADR-0020）+ `api/client.py:ViewerApiClient`（Python の local↔API 分離点）+ round-trip test。read boundary を二言語で実証（mobile + Python） |
 | **staff 会計 write API (S5 write)** | ✅ 実装済 | `api/server.py` の `/api/staff/...`（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下 + staff read）を **staff shared token**（`Authorization: Bearer <viewer_api.staff_token>`）で公開（ADR-0021）。`LedgerRepository` を RLock で thread-safe 化。単一書き手維持（read-only は 503）。`ViewerApiClient(staff_token=...)` の staff メソッド + `tests/test_viewer_api_staff.py` |
 | **双方向 sync (S5 — state-based merge)** | ✅ 実装済 | `core/sync.py`（純粋マージ: UUID union + 単調解決で可換・結合・冪等 ⇒ 収束, ADR-0022。settlement は **paid_amount monotonic max** で partial-paid 対応, ADR-0024）+ `GET/POST /api/staff/sync/{snapshot,merge}`（staff-token gate, write 所有のみ merge 受理）+ `ViewerApiClient.{pull_sync_snapshot,push_sync_merge,sync_bidirectional}`。全 repo に `path` property、`LedgerRepository`/`OrderRequestRepository` に `reload()` を additive。ADR-0020 の単一書き手前提を更新（複数書き手 + 収束マージ）。`tests/test_sync.py` / `tests/test_viewer_api_sync.py` |
@@ -610,8 +610,9 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    次の最優先は下の #2（実機 E2E）。
 2. **実機 E2E（Phase H / 最優先）**: クリーン環境で 音声→JSON/PHH の 1 ハンド通し + PN5180 RFID 実機 +
    `--ledger`（viewer_api.enabled）+ スマホ注文の通し確認。
-3. **PN5180 / ESP32-S3 firmware ↔ Python 契約固定**（ISSUE-0014 / 0015）: USB descriptor / reader_name /
-   ATR / 8B UID の凍結。
+3. ~~**PN5180 / ESP32-S3 firmware ↔ Python 契約固定**（ISSUE-0015）~~ → **✅ 完了（ADR-0034, ISSUE-0015
+   Fixed）**: `docs/contracts/rfid-usb-ccid.md` v1.0 で USB descriptor / reader_name 規約 / ATR / Get UID /
+   UID 4-7-8B を凍結。**残（実環境）**: firmware の VID/PID・実 reader_name を確定して契約 §2/§4 に追記。
 4. ~~**S5 cross-app boundary（read + staff write + 双方向 sync）**~~ → **✅ 完了（ADR-0020 / 0021 / 0022）**:
    read = repository interface frozen + `api/client.py:ViewerApiClient` + round-trip test。
    write = スタッフ会計 write を `/api/staff/...` に staff shared token で公開 +

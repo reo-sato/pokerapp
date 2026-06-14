@@ -6,7 +6,8 @@
 
 ## Status
 
-Open
+Fixed（2026-06-14, ADR-0034。契約を `docs/contracts/rfid-usb-ccid.md` v1.0 として凍結 + host 準拠 +
+回帰テスト。firmware の確定値（VID/PID・実 reader_name）は実機実装時に契約 §2/§4 へ追記。§ Fix 参照）
 
 ## Severity / Priority
 
@@ -65,14 +66,17 @@ descriptor / reader_name / ATR / pseudo-APDU セット** などホスト側が�
 
 ## Fix
 
-未対応。ADR-0015 の follow-up として順次クローズ:
+**Fixed（2026-06-14, ADR-0034）**: 契約を凍結し host を準拠させた:
 
-- firmware 側の USB descriptors / slot 構成 / reader_name 規則を確定して本 issue に貼る。
-- `reader_configs` のサンプルを `config_default.json` に追加し、コメントで「PN5180 + ESP32-S3
-  USB CCID 想定」と明示。
-- `tests/test_rfid.py` に 8B UID（ISO 15693）の PCSC bridge fixture を追加。
-- `card_master.normalize_tag_id` の 8B 入力 roundtrip テストを追加。
-- 将来: PC/SC reader_name 命名規約 / pseudo-APDU セットの `docs/contracts/` 化を検討。
+- **契約凍結**: `docs/contracts/rfid-usb-ccid.md` v1.0 — USB CCID class / VID-PID / reader_name 安定規約 /
+  slot↔役割（host config が source of truth）/ ATR（host は ATR-agnostic）/ pseudo-APDU（Get UID
+  `FF CA 00 00 00` のみ）/ UID 4-7-8B 正規化 / hot-plug（PC/SC polling）/ multi-platform / freeze 規則。
+- **config**: `config_default.json` に `pcsc_readers`（**list**, PN5180 + ESP32-S3 想定）サンプル + コメント
+  追加。HTTP 用 `readers`（dict）とキー分離。`main.py` の pcsc 経路を `pcsc_readers` 優先に変更し、dict 誤設定
+  での latent crash（dict を list として iterate）を解消。
+- **8B UID 回帰**: `tests/test_rfid.py` に 8B UID（ISO 15693）の `bytes_to_tag_id`/`normalize_tag_id`
+  roundtrip + `CardMaster` lookup + `MockPCSCBridge → RFIDThread → RFIDEvent` + board(role/index) マッピング。
+- **残（実環境）**: firmware の VID/PID・実 reader_name を確定して契約 §2/§4 に追記。live hot-add は future。
 
 ## Regression Test
 
