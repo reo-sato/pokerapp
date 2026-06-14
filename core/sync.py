@@ -38,30 +38,50 @@ def _index_by(records: list[dict], key: str) -> dict:
 # ――― players（key player_id, create-only union + merge 単調解決）―――
 
 
-def _resolve_player(a: dict, b: dict) -> dict:
-    """同一 player_id の 2 レコードを畳む（ADR-0022 + player merge の単調解決, ADR-0030 D5）。
+def _resolve_merged_into(x: "str | None", y: "str | None") -> "str | None":
+    """`merged_into` を単調解決する（ADR-0030 D5）: merged が勝つ、両 merged は survivor 最小。"""
+    if x == y:
+        return x
+    if x is None:
+        return y
+    if y is None:
+        return x
+    return min(x, y)
 
-    `merged_into`（tombstone マーカー）は monotonic に伝播させる: 片方だけ merged ならその merged
-    版が勝つ。両方 merged で survivor が異なる衝突は、決定的 tiebreak（survivor player_id 最小）で
-    全ノード収束させる。非 merge フィールド（rename 等）は従来どおり local(=a) を保持。
+
+def _resolve_player(a: dict, b: dict) -> dict:
+    """同一 player_id の 2 レコードを畳む（ADR-0022 + rename 伝播 ADR-0032 + merge ADR-0030 D5）。
+
+    - display 系（display_name / created_at）は **`updated_at` の last-writer-wins**（rename 伝播）。
+      同値は内容の安定 tiebreak。
+    - `merged_into`（tombstone）は **monotonic**（merged が勝つ、両 merged は survivor 最小）。
+    - `updated_at` は max。
+
+    display LWW と merge monotonic は直交フィールドとして合成するので、可換・冪等で収束する。
+    （注: unmerge は monotonic 規則により sync では伝播しない = 局所操作, ADR-0030 D4）。
     """
-    a_into, b_into = a.get("merged_into"), b.get("merged_into")
-    if a_into == b_into:
-        return a  # 両方未 merge / 同一 survivor → 既存どおり local 優先
-    if a_into is None:
-        return b  # b だけ merged → merged 版が勝つ（monotonic）
-    if b_into is None:
-        return a  # a だけ merged
-    # 両方 merged で survivor が異なる → 決定的 tiebreak（survivor 最小）で収束。
-    return a if a_into <= b_into else b
+    a_upd, b_upd = a.get("updated_at", ""), b.get("updated_at", "")
+    base = a if (a_upd, _stable_key(a)) >= (b_upd, _stable_key(b)) else b
+    result: dict = {
+        "player_id": a["player_id"],
+        "display_name": base["display_name"],
+        "created_at": base.get("created_at", ""),
+        "updated_at": max(a_upd, b_upd),
+    }
+    into = _resolve_merged_into(a.get("merged_into"), b.get("merged_into"))
+    if into is not None:
+        result["merged_into"] = into
+        result["merged_at"] = (
+            a.get("merged_at") if a.get("merged_into") == into else b.get("merged_at")
+        )
+    return result
 
 
 def merge_players(local: list[dict], remote: list[dict]) -> list[dict]:
-    """player を player_id で union する（create-only + merge 単調解決, ADR-0030 D5）。
+    """player を player_id で union する（create-only + rename LWW + merge 単調解決）。
 
-    新規 remote id を追加し、既存 id は `_resolve_player` で畳む（`merged_into` は単調伝播、
-    その他は local 優先 = rename は v1 では伝播しない, ADR-0022）。決定的順序:
-    ``(created_at, player_id)``。
+    新規 remote id を追加し、既存 id は `_resolve_player` で畳む（display は `updated_at` LWW で
+    rename 伝播、`merged_into` は単調伝播, ADR-0032/0030）。決定的順序: ``(created_at, player_id)``。
     """
     merged = dict(_index_by(local, "player_id"))
     for r in remote:
@@ -306,6 +326,42 @@ def merge_sessions(local: list[dict], remote: list[dict]) -> list[dict]:
     return sorted(by_id.values(), key=lambda s: s["session_id"])
 
 
+# ――― hand logs（file-per-session, key (session_id, hand_id), append-only union, ADR-0032）―――
+
+
+def merge_hand_logs(
+    local: dict[str, dict], remote: dict[str, dict]
+) -> dict[str, dict]:
+    """session_id -> {session_id, hands:[...]} を union する。
+
+    hands は `hand_id` で append-only union（同一 id は同一内容 ⇒ 先勝ちで衝突なし）。
+    決定的順序: hand_id 昇順（None は末尾）。可換・冪等。
+    """
+    out: dict[str, dict] = {}
+    for sid in set(local) | set(remote):
+        ldoc = local.get(sid) or {}
+        rdoc = remote.get(sid) or {}
+        by_hand: dict = {}
+        for h in list(ldoc.get("hands", [])) + list(rdoc.get("hands", [])):
+            by_hand.setdefault(h.get("hand_id"), h)
+        ordered = sorted(by_hand.keys(), key=lambda k: (k is None, k))
+        out[sid] = {"session_id": sid, "hands": [by_hand[k] for k in ordered]}
+    return out
+
+
+def _read_hand_logs(log_dir: "str | Path | None") -> dict[str, dict]:
+    """`logs/{session_id}.json`（"hands" を持つ JSON）を session_id -> doc に読む。"""
+    logs: dict[str, dict] = {}
+    if log_dir is None:
+        return logs
+    for p in Path(log_dir).glob("*.json"):
+        doc = _read_json(p)
+        if "hands" in doc:
+            sid = doc.get("session_id") or p.stem
+            logs[sid] = {"session_id": sid, "hands": list(doc.get("hands", []))}
+    return logs
+
+
 # ――― snapshot I/O 境界 ―――
 
 
@@ -336,10 +392,12 @@ def build_snapshot(
     sessions_path: str | Path,
     ledger_path: str | Path,
     orders_path: str | Path,
+    log_dir: "str | Path | None" = None,
 ) -> dict:
     """このノードの全ストアを読み、ピアに渡す snapshot dict を作る（missing → 空 list）。
 
-    session レコードは full nested 形（``hands`` 込み）のまま入れる。
+    session レコードは full nested 形（``hands`` 込み）のまま入れる。`log_dir` を渡すと
+    hand log（`logs/{session_id}.json`）も file-level union 用に含める（ADR-0032）。
     """
     players = _read_json(players_path).get("players", [])
     sessions = _read_json(sessions_path).get("sessions", [])
@@ -352,6 +410,7 @@ def build_snapshot(
         "point_entries": list(ledger.get("point_ledger_entries", [])),
         "settlements": list(ledger.get("settlements", [])),
         "order_requests": list(orders),
+        "hand_logs": _read_hand_logs(log_dir),
     }
 
 
@@ -372,6 +431,7 @@ def merge_snapshot_into(
     sessions_path: str | Path,
     ledger_path: str | Path,
     orders_path: str | Path,
+    log_dir: "str | Path | None" = None,
     peer: dict,
 ) -> dict:
     """ピア snapshot をこのノードの各ストアファイルに merge し、アトミックに書き戻す。
@@ -431,6 +491,17 @@ def merge_snapshot_into(
     new_orders_doc["requests"] = merged_orders
     _atomic_write(orders_path, new_orders_doc)
 
+    # hand logs（file-per-session の append-only union, ADR-0032）
+    hand_logs_added = 0
+    if log_dir is not None:
+        local_logs = _read_hand_logs(log_dir)
+        merged_logs = merge_hand_logs(local_logs, peer.get("hand_logs", {}))
+        for sid, doc in merged_logs.items():
+            before = local_logs.get(sid, {}).get("hands", [])
+            if doc["hands"] != before:
+                hand_logs_added += max(0, len(doc["hands"]) - len(before))
+                _atomic_write(Path(log_dir) / f"{sid}.json", doc)
+
     return {
         "players_added": players_added,
         "sessions_added": sessions_added,
@@ -438,4 +509,5 @@ def merge_snapshot_into(
         "point_entries_added": points_added,
         "settlements_added": settlements_added,
         "order_requests_added": orders_added,
+        "hand_logs_added": hand_logs_added,
     }

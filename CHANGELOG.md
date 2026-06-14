@@ -6,6 +6,19 @@
 
 ## [Unreleased]
 
+### Added (sync 後続: rename 伝播 / hand log union / 定期 auto-trigger, ADR-0032)
+
+- 双方向 sync（ADR-0022）を additive 拡張（既定挙動不変）:
+  - **player rename 伝播**: `Player.updated_at`（schema `1.1`→`1.2` additive、rename で更新）を加え、sync の
+    `_resolve_player` を **display=`updated_at` last-writer-wins × `merged_into`=monotonic** に。別端末での改名が
+    両ノードに収束する（旧: local 優先で非伝播）。
+  - **hand log の file-level union**: `logs/{session_id}.json` を sync 対象に追加（`merge_hand_logs` =
+    `hand_id` の append-only union、`build_snapshot`/`merge_snapshot_into` に optional `log_dir`、
+    `/api/staff/sync/{snapshot,merge}` で同期）。
+  - **定期 auto-trigger**: `core/sync_scheduler.py:SyncScheduler`（clock 注入で決定的、callback 例外耐性）+
+    config `viewer_api.sync_auto_interval_sec`（既定 0 = off）。常駐スレッド結線は運用タスク（ADR-0029 会場主導）。
+- いずれも可換・冪等・収束を維持。`unmerge` は monotonic 規則により sync 非伝播（局所操作, 既知制約）。
+
 ### Added (L2 外部 IdP の実 IdP 非依存コア, ADR-0031)
 
 - L2（LINE/Google サインアップ）のうち **実 IdP の HTTP を伴わないコアを実装**（実機/実 IdP なしで

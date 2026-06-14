@@ -26,6 +26,7 @@ class Player:
     player_id: str
     display_name: str
     created_at: str
+    updated_at: str | None = None
     merged_into: str | None = None
     merged_at: str | None = None
 
@@ -39,8 +40,10 @@ class Player:
             "player_id": self.player_id,
             "display_name": self.display_name,
             "created_at": self.created_at,
+            # updated_at は rename 伝播（sync LWW, ADR-0032）の比較キー。未設定は created_at。
+            "updated_at": self.updated_at or self.created_at,
         }
-        # 未 merge の player は merge フィールドを持たない（schema 1.1 optional, 形を従来どおりに保つ）。
+        # 未 merge の player は merge フィールドを持たない（schema optional, 形を従来どおりに保つ）。
         if self.merged_into is not None:
             d["merged_into"] = self.merged_into
             d["merged_at"] = self.merged_at or ""
@@ -52,6 +55,7 @@ class Player:
             player_id=d["player_id"],
             display_name=d["display_name"],
             created_at=d.get("created_at", ""),
+            updated_at=d.get("updated_at") or d.get("created_at", ""),
             merged_into=d.get("merged_into"),
             merged_at=d.get("merged_at"),
         )

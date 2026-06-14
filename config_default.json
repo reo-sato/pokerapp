@@ -74,7 +74,9 @@
     "pin_min_length": 4,
     "pin_max_attempts": 5,
     "pin_lockout_sec": 300,
-    "_pin_lockout_comment": "PIN は低エントロピー前提。pin_max_attempts 回連続失敗で pin_lockout_sec 秒 lockout（429 pin_locked）。主防御は LAN 限定。"
+    "_pin_lockout_comment": "PIN は低エントロピー前提。pin_max_attempts 回連続失敗で pin_lockout_sec 秒 lockout（429 pin_locked）。主防御は LAN 限定。",
+    "sync_auto_interval_sec": 0,
+    "_sync_auto_interval_comment": "ADR-0032: 双方向 sync の定期 auto-trigger 間隔（秒）。0=無効（既定=on-demand pull のまま）。>0 で SyncScheduler が peer と定期同期（会場主導, ADR-0029）。"
   },
   "ledger": {
     "buyin_presets": [10000, 20000, 30000],

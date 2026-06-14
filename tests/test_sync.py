@@ -14,6 +14,7 @@ from pathlib import Path
 
 from core.sync import (
     build_snapshot,
+    merge_hand_logs,
     merge_ledger_entries,
     merge_order_requests,
     merge_players,
@@ -26,8 +27,11 @@ from core.sync import (
 # ――― fixtures（小さいレコード列）―――
 
 
-def _player(pid: str, name: str, created: str) -> dict:
-    return {"player_id": pid, "display_name": name, "created_at": created}
+def _player(pid: str, name: str, created: str, updated: str | None = None) -> dict:
+    return {
+        "player_id": pid, "display_name": name, "created_at": created,
+        "updated_at": updated if updated is not None else created,
+    }
 
 
 def _entry(eid: str, occurred: str, kind: str = "buy_in", cash: int = 100) -> dict:
@@ -93,14 +97,27 @@ def _session(sid: str, status: str = "open", started: str = "t0",
 # ――― players ―――
 
 
-def test_players_create_only_union_keeps_local_rename():
-    local = [_player("a", "Alice-local", "t1")]
-    remote = [_player("a", "Alice-remote", "t1"), _player("b", "Bob", "t2")]
+def test_players_rename_propagates_by_updated_at():
+    # ADR-0032: rename は updated_at の later-wins（LWW）で伝播する。
+    local = [_player("a", "Alice", "t1", "t1")]
+    remote = [_player("a", "Alice-renamed", "t1", "t2"), _player("b", "Bob", "t2")]
     merged = merge_players(local, remote)
     by_id = {p["player_id"]: p for p in merged}
-    assert by_id["a"]["display_name"] == "Alice-local"  # local 優先（rename 非伝播）
+    assert by_id["a"]["display_name"] == "Alice-renamed"  # 新しい updated_at が勝つ
+    assert by_id["a"]["updated_at"] == "t2"
     assert by_id["b"]["display_name"] == "Bob"  # 新規は追加
     assert [p["player_id"] for p in merged] == ["a", "b"]  # (created_at, player_id) 順
+    # 逆向きでも同じ結果（可換）。
+    rev = {p["player_id"]: p for p in merge_players(remote, local)}
+    assert rev["a"]["display_name"] == "Alice-renamed"
+
+
+def test_players_rename_older_does_not_overwrite_newer():
+    # 古い updated_at は新しい表示名を上書きしない。
+    local = [_player("a", "Alice-new", "t1", "t5")]
+    remote = [_player("a", "Alice-old", "t1", "t2")]
+    assert merge_players(local, remote)[0]["display_name"] == "Alice-new"
+    assert merge_players(remote, local)[0]["display_name"] == "Alice-new"
 
 
 def _merged_player(pid: str, name: str, created: str, into: str) -> dict:
@@ -400,3 +417,57 @@ def test_repeated_merge_is_stable(tmp_path: Path):
     summary = merge_snapshot_into(**paths_a, peer=snap_b)
     assert _read_all(paths_a) == first
     assert all(v == 0 for v in summary.values()), "再 merge で new-or-changed は 0 のはず"
+
+
+# ――― hand logs（file-level union, ADR-0032）―――
+
+
+def _hand(hid: int) -> dict:
+    return {"hand_id": hid, "players": []}
+
+
+def test_merge_hand_logs_union_by_hand_id():
+    local = {"s1": {"session_id": "s1", "hands": [_hand(1), _hand(2)]}}
+    remote = {"s1": {"session_id": "s1", "hands": [_hand(2), _hand(3)]},
+              "s2": {"session_id": "s2", "hands": [_hand(1)]}}
+    merged = merge_hand_logs(local, remote)
+    assert [h["hand_id"] for h in merged["s1"]["hands"]] == [1, 2, 3]  # union, 昇順
+    assert "s2" in merged  # remote のみの session も union
+    # 可換・冪等
+    rev = merge_hand_logs(remote, local)
+    assert rev["s1"]["hands"] == merged["s1"]["hands"]
+    assert merge_hand_logs(merged, merged) == merged
+
+
+def test_hand_logs_propagate_through_snapshot(tmp_path: Path):
+    # node A は s1 の hand1、node B は s1 の hand2 + s2 を持つ → 双方向 sync で両者が全 hand に収束。
+    def _stores(d: Path) -> dict:
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "players.json").write_text(json.dumps({"players": []}), encoding="utf-8")
+        (d / "sessions.json").write_text(json.dumps({"sessions": []}), encoding="utf-8")
+        (d / "ledger.json").write_text(json.dumps({}), encoding="utf-8")
+        (d / "orders.json").write_text(json.dumps({"requests": []}), encoding="utf-8")
+        logs = d / "logs"
+        logs.mkdir(exist_ok=True)
+        return {
+            "players_path": d / "players.json", "sessions_path": d / "sessions.json",
+            "ledger_path": d / "ledger.json", "orders_path": d / "orders.json",
+            "log_dir": logs,
+        }
+
+    a = _stores(tmp_path / "A")
+    b = _stores(tmp_path / "B")
+    (a["log_dir"] / "s1.json").write_text(
+        json.dumps({"session_id": "s1", "hands": [_hand(1)]}), encoding="utf-8")
+    (b["log_dir"] / "s1.json").write_text(
+        json.dumps({"session_id": "s1", "hands": [_hand(2)]}), encoding="utf-8")
+    (b["log_dir"] / "s2.json").write_text(
+        json.dumps({"session_id": "s2", "hands": [_hand(1)]}), encoding="utf-8")
+
+    snap_b = build_snapshot(**b)
+    summary = merge_snapshot_into(**a, peer=snap_b)
+    assert summary["hand_logs_added"] == 2  # s1 の hand2 + s2 の hand1
+
+    s1 = json.loads((a["log_dir"] / "s1.json").read_text())
+    assert [h["hand_id"] for h in s1["hands"]] == [1, 2]
+    assert (a["log_dir"] / "s2.json").exists()

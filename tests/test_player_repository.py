@@ -28,8 +28,16 @@ def _repo(tmp_path: Path) -> PlayerRepository:
 
 class TestPlayerModel:
     def test_to_from_dict_roundtrip(self):
-        p = Player(player_id="abc", display_name="Alice", created_at="2026-05-22T10:00:00")
+        p = Player(player_id="abc", display_name="Alice", created_at="2026-05-22T10:00:00",
+                   updated_at="2026-05-22T10:00:00")
         assert Player.from_dict(p.to_dict()) == p
+
+    def test_to_dict_defaults_updated_at_to_created_at(self):
+        # updated_at 未設定の Player でも to_dict は updated_at を created_at で埋める（ADR-0032）。
+        p = Player(player_id="abc", display_name="Alice", created_at="2026-05-22T10:00:00")
+        d = p.to_dict()
+        assert d["updated_at"] == "2026-05-22T10:00:00"
+        assert Player.from_dict(d).updated_at == "2026-05-22T10:00:00"
 
     def test_from_dict_tolerates_missing_created_at(self):
         p = Player.from_dict({"player_id": "x", "display_name": "Bob"})

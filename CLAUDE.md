@@ -65,7 +65,8 @@ pokerapp/
 │   ├── order_request.py           ← OrderRequest データクラス (M5)
 │   ├── order_request_repository.py ← OrderRequestRepository (注文リクエスト, thread-safe + reload-on-read, M5)
 │   ├── menu.py                    ← MenuMaster (menu.json ロード・検索, M5)
-│   ├── sync.py                    ← state-based merge 純粋関数 + snapshot I/O (S5 双方向 sync, ADR-0022/0024)
+│   ├── sync.py                    ← state-based merge 純粋関数 + snapshot I/O (S5 双方向 sync, ADR-0022/0024/0032)
+│   ├── sync_scheduler.py          ← SyncScheduler (sync 定期 auto-trigger, clock 注入, ADR-0032)
 │   ├── auth_token.py              ← player principal の stateless 署名トークン (L1 PIN, ADR-0027)
 │   ├── player_credential_repository.py ← PlayerCredentialRepository (PIN ハッシュ PBKDF2 + lockout, node-local, ADR-0027)
 │   ├── auth_identity.py           ← AuthIdentity ((provider,sub)→player_id, L2, ADR-0031)
@@ -453,7 +454,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **player 本人認証 L1 PIN** | ✅ 実装済 | `core/auth_token.py`（stateless 署名トークン）+ `core/player_credential_repository.py`（PBKDF2 + lockout、node-local `player_credentials.json`、read API / sync 非対象）+ `api/server.py` の principal レイヤ（`_resolve_player_principal`/`_require_player`）+ `POST /api/auth/login`・`/api/players/{id}/pin`。config `viewer_api.player_auth`（off/optional/required, 既定 **off で後方互換**）。`ViewerApiClient.{login,set_pin}`。staff token と直交（ADR-0027）。`tests/test_auth_token.py` / `test_player_credential_repository.py` / `test_viewer_api_auth.py` |
 | **player 本人認証 L2 外部 IdP（コア）** | 🟡 一部実装済 | 詳細設計 ADR-0028 / 運用 ADR-0029 / 前提 merge ADR-0030（実装済）。**実 IdP 非依存コアは実装済（ADR-0031）**: `core/auth_identity*.py`（node-local, sync 非対象）+ `core/oidc.py`（provider 抽象 + `FakeOidcProvider` + `resolve_player_for_claim`）+ `POST /api/auth/{provider}/exchange`（app-driven, 既定 off）+ `ViewerApiClient.oidc_exchange`。principal は ADR-0027 トークンで L1 と合流、merge 後は canonical。`tests/test_{auth_identity_repository,oidc,viewer_api_oidc}.py`。**残**: 実 LINE/Google HTTP（token/JWKS）+ hosted（ADR-0029）= 実環境タスク |
 | **player merge** | ✅ 実装済 | ADR-0030: `merged_into` の alias/tombstone（履歴 rewrite なし、append-only/収束 sync/player_id 不変を保つ・可逆）。`PlayerRepository.merge_players`/`resolve_canonical`/`equivalence_class`/`unmerge` + 全 player-keyed read（settlement 集計 / point / entry / order / viewer / login principal）を canonicalize + `core/sync.py:_resolve_player`（monotonic + tiebreak）+ staff API `POST /api/staff/players/merge` + registry GUI。schema `player` `1.0`→`1.1`。`tests/test_player_merge.py` 他 |
-| cross-app sync 拡張 (S5 後続) | 🔲 planned | player rename 伝播（`updated_at` additive）/ hand log の file-level union / 定期 auto-trigger |
+| **cross-app sync 拡張 (S5 後続)** | ✅ 実装済 | ADR-0032: player rename 伝播（`updated_at` LWW, schema `1.2`）/ hand log の file-level union（`merge_hand_logs` + snapshot `log_dir`）/ 定期 auto-trigger（`core/sync_scheduler.py`, config `sync_auto_interval_sec` 既定 0）。`_resolve_player` は display=LWW × `merged_into`=monotonic。`tests/test_sync*.py`。**残**: auto-trigger の常駐スレッド結線（運用タスク, ADR-0029 会場主導） |
 
 ---
 
@@ -614,8 +615,9 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    write = スタッフ会計 write を `/api/staff/...` に staff shared token で公開 +
    `LedgerRepository` thread-safe 化（ADR-0021）。双方向 sync = state-based merge（`core/sync.py`,
    可換・冪等の UUID union + 単調解決）+ `/api/staff/sync/{snapshot,merge}`（ADR-0022, 複数書き手 +
-   収束マージ）。**残**: player rename 伝播（`updated_at` additive）・hand log の file-level union・
-   定期 auto-trigger、player per-player アクセス制御（ISSUE-0019 PIN 再評価、別 ADR）。
+   収束マージ）。sync 後続も **実装済（ADR-0032）**: player rename 伝播（`updated_at` LWW）・hand log の
+   file-level union・定期 auto-trigger（`SyncScheduler`）。player per-player アクセス制御は **L1 PIN 実装済
+   （ADR-0027）**。**残**: auto-trigger の常駐スレッド結線（運用タスク）。
 5. **settlement / ledger 拡張**（**実装済**）: partial-paid（ADR-0023, `record_payment` / settlement
    schema `1.1`）、確定 commit + paid/unpaid/partial 切替（S4 GUI 精算パネル）、buy-in 金額プリセット
    （ADR-0026, `config.ledger.buyin_presets` + `--ledger` ボタン + staff API）。

@@ -138,3 +138,35 @@ def test_readonly_process_rejects_merge(tmp_path: Path):
         client.push_sync_merge(snap)
     assert (ei.value.code, ei.value.status_code) == ("orders_unavailable", 503)
     client.close()
+
+
+def test_rename_propagates_through_sync(tmp_path: Path):
+    # ADR-0032: node A の rename が双方向 sync で node B に伝播する。
+    a = _build_node(tmp_path / "A")
+    b = _build_node(tmp_path / "B")
+    alice = a["players"].create_player("Alice")
+    a["client"].sync_bidirectional(b["client"])
+    # B に Alice が来ている。
+    assert any(p["display_name"] == "Alice" for p in b["client"].list_players())
+    # A で rename → 再 sync → B に伝播。
+    a["players"].rename_player(alice.player_id, "Alicia")
+    a["client"].sync_bidirectional(b["client"])
+    b_names = {p["player_id"]: p["display_name"] for p in b["client"].list_players()}
+    assert b_names[alice.player_id] == "Alicia"
+
+
+def test_hand_logs_propagate_through_sync(tmp_path: Path):
+    # ADR-0032: hand log（logs/{sid}.json）の file-level union が sync で収束する。
+    a = _build_node(tmp_path / "A")
+    b = _build_node(tmp_path / "B")
+    (Path(a["sessions"].path).parent / "logs" / f"{_SID}.json").write_text(
+        json.dumps({"session_id": _SID, "hands": [{"hand_id": 1, "players": []}]}),
+        encoding="utf-8")
+    (Path(b["sessions"].path).parent / "logs" / f"{_SID}.json").write_text(
+        json.dumps({"session_id": _SID, "hands": [{"hand_id": 2, "players": []}]}),
+        encoding="utf-8")
+    a["client"].sync_bidirectional(b["client"])
+    # 両ノードが hand 1,2 の両方を返す（get_hand 経由）。
+    for node in (a, b):
+        assert node["client"].get_hand(_SID, 1)["hand_id"] == 1
+        assert node["client"].get_hand(_SID, 2)["hand_id"] == 2

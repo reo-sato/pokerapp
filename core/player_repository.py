@@ -221,7 +221,9 @@ class PlayerRepository:
     def create_player(self, display_name: str) -> Player:
         name = self._validate_name(display_name, exclude_id=None)
         player_id = uuid.uuid4().hex
-        player = Player(player_id=player_id, display_name=name, created_at=_now_iso())
+        now = _now_iso()
+        player = Player(player_id=player_id, display_name=name,
+                        created_at=now, updated_at=now)
         self._players[player_id] = player
         self._flush()
         logger.info("Created player %s (%s)", player_id, name)
@@ -233,6 +235,8 @@ class PlayerRepository:
         name = self._validate_name(new_display_name, exclude_id=player_id)
         player = self._players[player_id]
         player.display_name = name
+        # rename を sync 伝播させるため updated_at を更新する（LWW, ADR-0032）。
+        player.updated_at = _now_iso()
         self._flush()
         logger.info("Renamed player %s to %s", player_id, name)
         return player

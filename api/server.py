@@ -618,12 +618,13 @@ def create_app(
     # ――― sync API（ADR-0022。staff-token gate, state-based merge）―――
 
     def _sync_paths() -> dict[str, "Path"]:
-        """このノードの各ストアファイルパス（repo の path property 由来）。"""
+        """このノードの各ストアファイルパス（repo の path property 由来）+ hand log dir。"""
         return {
             "players_path": player_repo.path,
             "sessions_path": session_repo.path,
             "ledger_path": ledger_repo.path,
             "orders_path": order_repo.path,
+            "log_dir": Path(log_dir),  # hand log file-level union（ADR-0032）
         }
 
     @app.get("/api/staff/sync/snapshot", response_model=None)
