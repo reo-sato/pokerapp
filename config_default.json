@@ -64,5 +64,9 @@
     "_comment": "M1/M5 (ADR-0017/0018): player 向け read-only viewer API。'python main.py --viewer-api' で単独起動（注文 POST は 503）。enabled=true で 'python main.py --ledger' が API を in-process 起動し注文リクエスト受付（write）を有効にする（単一プロセス所有）。要 [api] extra。",
     "staff_token": "",
     "_staff_token_comment": "S5 staff write API (ADR-0021): 空ならスタッフ write 無効（403 staff_writes_disabled）。値を設定すると Authorization: Bearer <token> で会計 write（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下）を許可（別端末のスタッフ運用）。staff write は --ledger（write 所有プロセス）でのみ有効。無認証ではないが LAN 限定前提は維持（player read / 注文 POST は従来どおり name-pick / 無認証）。"
+  },
+  "ledger": {
+    "buyin_presets": [10000, 20000, 30000],
+    "_buyin_presets_comment": "ADR-0026: buy-in 記帳時にスタッフが選ぶ金額プリセット（整数円）。--ledger 画面でボタン表示、staff API GET /api/staff/buyin-presets でも取得。店が編集する。chips とは別単位・自動換算なし。"
   }
 }

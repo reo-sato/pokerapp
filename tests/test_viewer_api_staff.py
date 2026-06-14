@@ -60,7 +60,7 @@ def _build(tmp_path: Path, *, orders_writable: bool, staff_token: str | None) ->
 
     app = create_app(players, sessions, log_dir, ledger_repo=ledger,
                      order_repo=orders, menu=menu, orders_writable=orders_writable,
-                     staff_token=staff_token)
+                     staff_token=staff_token, buyin_presets=[10000, 20000])
     http = TestClient(app)
     # player order POST 用の no-auth client + staff write 用の token client。
     player_client = ViewerApiClient(client=http)
@@ -124,6 +124,16 @@ def test_staff_write_full_flow(env: dict):
     # compute_settlement が paid を反映
     after = staff.compute_settlement(session.session_id)
     assert next(r for r in after if r["player_id"] == alice.player_id)["payment_status"] == "paid"
+
+
+def test_staff_buyin_presets(env: dict):
+    """ADR-0026: buy-in 金額プリセットを staff token で取得できる。"""
+    assert env["staff_client"].get_buyin_presets() == [10000, 20000]
+    # token 無しは 401
+    no_token = ViewerApiClient(client=env["staff_client"]._client)
+    with pytest.raises(ViewerApiError) as ei:
+        no_token.get_buyin_presets()
+    assert ei.value.code == "unauthorized"
 
 
 def test_no_token_is_unauthorized(env: dict):

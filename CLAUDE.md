@@ -93,7 +93,7 @@ pokerapp/
 │   ├── player_registry.py         ← PlayerRegistryWindow (player registry 画面, S1, dashboard とは別画面)
 │   ├── seat_selection.py          ← SeatSelectionDialog (seat→player_id 選択モーダル, S2.x E3)
 │   ├── session_viewer.py          ← SessionViewerWindow (session/seating read-only inspection 画面, WS2-α, 別画面)
-│   └── ledger_view.py             ← LedgerViewWindow (ledger viewer/editor + 精算確定/paid-unpaid パネル + 注文確定/却下パネル, S3.2 + S4 + M5, dashboard とは別画面)
+│   └── ledger_view.py             ← LedgerViewWindow (ledger viewer/editor + 精算確定/paid-unpaid + 注文確定/却下 + buy-in 金額プリセット, S3.2 + S4 + M5 + ADR-0026, dashboard とは別画面)
 │
 ├── mobile/                        ← Poker Hand Viewer (Expo/RN, M2, ADR-0017。mock/HTTP repository 切替, web export 配布)
 │
@@ -282,10 +282,13 @@ session world（S2）の上に重なる **ledger（金銭イベント）/ points
 
 ### Out of scope（現時点）
 
-- auto ledger 生成（settlement の GUI からの確定 commit + paid/unpaid + partial-paid 切替は
-  S4 GUI で実装済 — `gui/ledger_view.py` の精算パネル）。**partial-paid は実装済**（`paid_amount`
+- **buy-in 金額プリセット**（ADR-0026, スタッフが `--ledger` 画面のボタン or staff API
+  `GET /api/staff/buyin-presets` で店設定の整数円プリセットを選び、kind=buy_in の cash を prefill）
+  と settlement の GUI からの確定 commit + paid/unpaid + partial-paid 切替は **実装済**
+  （`gui/ledger_view.py` の精算/buy-in パネル）。**partial-paid は実装済**（`paid_amount`
   additive + `payment_status` 導出, ADR-0023）。
-- hand logger（`HandSummary`）との自動接続、chip↔円換算、rake/fee。
+- hand 結果からの **自動 ledger 生成**（chip→円換算を伴うもの）は **作らない**（chips は別単位・
+  自動換算なし, ADR-0016/0026）。hand logger（`HandSummary`）との自動接続、chip↔円換算、rake/fee。
 - settlement schema の `1.0` freeze（S4）、cross-app sync（S5）。
 
 ---
@@ -568,7 +571,7 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
 | **S1** | player registry（`core/player*.py`, `gui/player_registry.py`） | ✅ 実装済 |
 | **S2** | session + hand-based seating（`core/session*.py`, ADR-0006/0007） | ✅ core 実装済 + **schema `1.0` frozen**（ADR-0019, ISSUE-0005 Resolved） |
 | **S3** | ledger + point ledger + settlement core + desktop viewer + CSV export（`core/ledger*.py`, `gui/ledger_view.py`, `output/ledger_csv_exporter.py`, ADR-0016, ISSUE-0001 Resolved） | ✅ 実装済 + **schema `1.0` frozen**（ADR-0019） |
-| **S4** | schema `1.0` freeze（session/seat/hand_ref + ledger/point + settlement + viewer/order model）+ settlement partial-paid | ✅ **実装済**（ADR-0019, ISSUE-0005 Resolved）。**partial-paid 実装済**（ADR-0023, settlement schema `1.1`）。残: auto ledger 生成（additive） |
+| **S4** | schema `1.0` freeze（session/seat/hand_ref + ledger/point + settlement + viewer/order model）+ settlement partial-paid | ✅ **実装済**（ADR-0019, ISSUE-0005 Resolved）。**partial-paid 実装済**（ADR-0023, settlement schema `1.1`）。auto ledger = buy-in 金額プリセット（ADR-0026） |
 | **S5** | cross-app contract / sync boundary（local↔API client 分離） | 🟡 **read + staff write boundary 実装済**（ADR-0020: repository interface frozen + viewer API（M1）+ Python `ViewerApiClient` + mobile mock/HTTP。ADR-0021: スタッフ会計 write を `/api/staff/...` に staff shared token で公開 + `LedgerRepository` thread-safe 化。on-demand pull / 単一書き手）。ADR-0022: 双方向 sync = state-based merge（`core/sync.py` 可換・冪等の UUID union + 単調解決）+ `/api/staff/sync/{snapshot,merge}` で **複数書き手 + 収束マージ**に拡張。**残**: player rename 伝播・hand log の file-level union・auto-trigger, player PIN（後続 ADR） |
 
 ### player 向け参照トラック M（viewer API / mobile / 注文）
@@ -602,9 +605,9 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    可換・冪等の UUID union + 単調解決）+ `/api/staff/sync/{snapshot,merge}`（ADR-0022, 複数書き手 +
    収束マージ）。**残**: player rename 伝播（`updated_at` additive）・hand log の file-level union・
    定期 auto-trigger、player per-player アクセス制御（ISSUE-0019 PIN 再評価、別 ADR）。
-5. **settlement 拡張**: auto ledger 生成（**partial-paid は実装済** = ADR-0023, `record_payment` /
-   settlement schema `1.1`。確定 commit + paid/unpaid/partial 切替も S4 GUI で実装済 =
-   `gui/ledger_view.py` 精算パネル）。
+5. **settlement / ledger 拡張**（**実装済**）: partial-paid（ADR-0023, `record_payment` / settlement
+   schema `1.1`）、確定 commit + paid/unpaid/partial 切替（S4 GUI 精算パネル）、buy-in 金額プリセット
+   （ADR-0026, `config.ledger.buyin_presets` + `--ledger` ボタン + staff API）。
 6. **R 系の後続**: 派生 confidence の重み較正（golden fixtures 由来）、camera 源の統合。
 7. **player 本人確認の進化（ADR-0025）**: player_id を内部不変キーに保ち、認証を additive レイヤで
    重ねる — L0 name-pick（済）→ **L1 per-player PIN**（LAN, players.json に `pin_hash` additive）→
@@ -828,7 +831,11 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
     `ViewerApiClient.record_payment`。
   - WS3: mobile が自分の精算状況（確定/未確定・支払済み/一部支払い/未払い）を表示（`MyLedgerScreen`、
     viewer API の player ledger summary に `settled`/`payment_status`/`settled_at`/`paid_amount` を additive）。
-- **残**: auto ledger 生成。
+  - **buy-in 金額プリセット（ADR-0026）**: スタッフが buy-in 記帳時に店設定の整数円プリセットから
+    金額を選んで prefill（`config.ledger.buyin_presets` / GUI ボタン / staff API
+    `GET /api/staff/buyin-presets`）。schema / 業務ルール変更なし・additive。これが「auto ledger
+    生成」の最終形（hand 結果からの chip→円換算は ADR-0016/0026 で **作らない**）。
+- **残**: なし（auto ledger 生成は ADR-0026 で buy-in プリセットとして決着）。
 
 ### Phase 5 — sync / cross-app contract hardening
 

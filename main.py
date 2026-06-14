@@ -461,6 +461,7 @@ def run_ledger_view() -> None:
     ledger = LedgerRepository(session_repo=sessions, player_repo=players)
     order_repo = OrderRequestRepository(session_repo=sessions, player_repo=players)
     menu = MenuMaster()
+    buyin_presets = cfg.get("ledger", {}).get("buyin_presets", []) or []  # ADR-0026
 
     api_server = None
     api_thread = None
@@ -481,6 +482,7 @@ def run_ledger_view() -> None:
                 ledger_repo=ledger, order_repo=order_repo, menu=menu,
                 orders_writable=True,
                 staff_token=api_cfg.get("staff_token") or None,
+                buyin_presets=buyin_presets,
             )
             api_server = uvicorn.Server(uvicorn.Config(
                 app, host=bind_host, port=bind_port, log_level="warning"))
@@ -492,7 +494,7 @@ def run_ledger_view() -> None:
 
     win = LedgerViewWindow(
         ledger_repo=ledger, session_repo=sessions, player_repo=players,
-        order_repo=order_repo, menu=menu,
+        order_repo=order_repo, menu=menu, buyin_presets=buyin_presets,
     )
     win.run()
 

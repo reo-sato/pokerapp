@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### Added (buy-in 金額プリセット = staff メニュー選択, ADR-0026)
+
+- buy-in 記帳時に **スタッフが店設定の金額プリセット（整数円）から選んで** ledger に記録できるよう
+  にした（「auto ledger 生成」の最終形）。`config.ledger.buyin_presets`（既定 `[10000, 20000, 30000]`,
+  店が編集）を `--ledger` 画面のボタンとして表示し、押すと kind=buy_in + cash を prefill（確定は
+  従来どおり「エントリ追加」）。staff API `GET /api/staff/buyin-presets`（staff token 必須）/
+  `ViewerApiClient.get_buyin_presets()` でも取得できる。
+- **schema / 業務ルール変更なし・additive**。hand 結果からの自動 ledger 生成（chip→円換算を伴うもの）
+  は引き続き **作らない**（chips は別単位・自動換算なし, ADR-0016/0026）。
+
 ### Docs (player アイデンティティ / 認証の進化方針, ADR-0025)
 
 - 将来「プレイヤーが LINE / Google でサインアップ」できる要件に向け、識別と認証を分離する方針を記録。

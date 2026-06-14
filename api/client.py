@@ -141,6 +141,12 @@ class ViewerApiClient:
             return {}
         return {"Authorization": f"Bearer {self._staff_token}"}
 
+    def get_buyin_presets(self) -> list[int]:
+        """buy-in 金額プリセットを取得する（ADR-0026, staff token）。"""
+        return self._request(
+            "GET", "/api/staff/buyin-presets", headers=self._staff_headers(),
+        )["presets"]
+
     def compute_settlement(self, session_id: str) -> list[dict]:
         return self._request(
             "GET", f"/api/staff/sessions/{session_id}/settlement",

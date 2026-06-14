@@ -16,7 +16,7 @@ from core.player_repository import PlayerRepository
 from core.session_repository import SessionRepository
 
 
-def _make_window(tmp_path: Path):
+def _make_window(tmp_path: Path, buyin_presets=None):
     players = PlayerRepository(path=tmp_path / "players.json")
     players.create_player("Alice")
     players.create_player("Bob")
@@ -37,7 +37,8 @@ def _make_window(tmp_path: Path):
 
     with patch.dict("sys.modules", {"customtkinter": ctk_mock}):
         from gui.ledger_view import LedgerViewWindow
-        win = LedgerViewWindow(ledger_repo=ledger, session_repo=sessions, player_repo=players)
+        win = LedgerViewWindow(ledger_repo=ledger, session_repo=sessions, player_repo=players,
+                               buyin_presets=buyin_presets)
 
     win._set_status = MagicMock()
     return win, ledger, sessions, players
@@ -290,6 +291,34 @@ class TestSettlement:
         assert win._set_status.call_args.kwargs.get("error") is True
         # 不正入力では状態は変わらない（既定 unpaid のまま）。
         assert ledger.list_settlements(s.session_id)[0].payment_status == "unpaid"
+
+
+class TestBuyinPresets:
+    """ADR-0026: buy-in 金額プリセット。クリックで kind=buy_in + cash をセット。"""
+
+    def test_presets_normalized(self, tmp_path: Path):
+        win, *_ = _make_window(tmp_path, buyin_presets=[10000, 0, -5, 20000])
+        assert win._buyin_presets == [10000, 20000]  # 0/負は除外
+
+    def test_pick_preset_sets_kind_and_cash(self, tmp_path: Path):
+        win, ledger, sessions, players = _make_window(tmp_path, buyin_presets=[10000])
+        win._kind_menu = MagicMock()
+        win._cash_entry = MagicMock()
+        win._cmd_pick_buyin_preset(10000)
+        win._kind_menu.set.assert_called_once_with("buy_in")
+        win._cash_entry.insert.assert_called_once_with(0, "10000")
+        assert win._set_status.call_args.kwargs.get("error", False) is False
+
+    def test_pick_then_add_creates_buyin(self, tmp_path: Path):
+        win, ledger, sessions, players = _make_window(tmp_path, buyin_presets=[10000])
+        s = sessions.create_session()
+        win._session_id = s.session_id
+        win._selected_player_id = _pid(players, "Alice")
+        # プリセット選択後の状態（kind=buy_in, cash=10000）を form mock で再現して追加
+        _set_form(win, kind="buy_in", cash="10000")
+        win._cmd_add_entry()
+        entries = ledger.list_entries(session_id=s.session_id)
+        assert [(e.kind, e.cash_amount) for e in entries] == [("buy_in", 10000)]
 
 
 class TestSeparateFromHandLogger:

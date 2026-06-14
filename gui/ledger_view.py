@@ -101,6 +101,7 @@ class LedgerViewWindow:
         master: Optional[object] = None,
         order_repo: "OrderRequestRepository | None" = None,
         menu: "MenuMaster | None" = None,
+        buyin_presets: "Optional[list[int]]" = None,
     ) -> None:
         import customtkinter as ctk
 
@@ -110,6 +111,8 @@ class LedgerViewWindow:
         # M5 (ADR-0018): 注文リクエスト確定/却下パネル。order_repo/menu が無ければ非表示。
         self._order_repo = order_repo
         self._menu = menu
+        # ADR-0026: buy-in 金額プリセット（メニュー）。空なら金額ボタンを出さない。
+        self._buyin_presets: list[int] = [int(a) for a in (buyin_presets or []) if int(a) > 0]
         self._order_rows: list[object] = []
 
         self._session_id: Optional[str] = None
@@ -180,8 +183,19 @@ class LedgerViewWindow:
             row=0, column=4, padx=4
         )
 
+        # ADR-0026: buy-in 金額プリセット。クリックで kind=buy_in + cash をセット（記帳は「エントリ追加」）。
+        if self._buyin_presets:
+            preset_row = ctk.CTkFrame(form, fg_color="transparent")
+            preset_row.grid(row=3, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 2))
+            ctk.CTkLabel(preset_row, text="buy-in 金額").grid(row=0, column=0, padx=4)
+            for i, amount in enumerate(self._buyin_presets):
+                ctk.CTkButton(
+                    preset_row, text=f"{amount:,}", width=80,
+                    command=lambda a=amount: self._cmd_pick_buyin_preset(a),
+                ).grid(row=0, column=i + 1, padx=2)
+
         grant_row = ctk.CTkFrame(form, fg_color="transparent")
-        grant_row.grid(row=3, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 4))
+        grant_row.grid(row=4, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 4))
         ctk.CTkLabel(grant_row, text="ポイント付与").grid(row=0, column=0, padx=4)
         self._grant_entry = ctk.CTkEntry(grant_row, width=90, placeholder_text="point")
         self._grant_entry.grid(row=0, column=1, padx=4)
@@ -320,6 +334,20 @@ class LedgerViewWindow:
         self._balance_label.configure(text=f"残高: {balance} pt")
 
     # ――― コマンド ―――
+
+    def _cmd_pick_buyin_preset(self, amount: int) -> None:
+        """buy-in 金額プリセットを選択: kind=buy_in + cash 欄に金額をセット（ADR-0026）。
+
+        記帳自体は従来どおり「エントリ追加」で確定する（player 選択・最終確認はスタッフ）。
+        """
+        try:
+            self._kind_menu.set("buy_in")
+            self._cash_entry.delete(0, "end")
+            self._cash_entry.insert(0, str(amount))
+        except Exception:
+            logger.exception("buy-in プリセットのセットに失敗")
+            return
+        self._set_status(f"buy-in {amount:,} 円をセットしました（「エントリ追加」で確定）。")
 
     def _cmd_add_entry(self) -> None:
         if not self._session_id:

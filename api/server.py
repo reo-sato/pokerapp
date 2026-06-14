@@ -130,6 +130,7 @@ def create_app(
     menu: MenuMaster | None = None,
     orders_writable: bool = False,
     staff_token: str | None = None,
+    buyin_presets: "list[int] | None" = None,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -277,6 +278,16 @@ def create_app(
                 "message": "会計 write はスタッフ会計画面（--ledger）の起動中のみ可能です。",
             })
         return None
+
+    _buyin_presets = [int(a) for a in (buyin_presets or []) if int(a) > 0]
+
+    @app.get("/api/staff/buyin-presets", response_model=None)
+    def staff_buyin_presets(request: Request) -> "JSONResponse | dict":
+        """buy-in 金額プリセット（config 由来, ADR-0026）。別端末スタッフ UI のメニュー用。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        return {"presets": list(_buyin_presets)}
 
     @app.get("/api/staff/sessions/{session_id}/settlement", response_model=None)
     def staff_settlement(session_id: str, request: Request) -> "JSONResponse | dict":
