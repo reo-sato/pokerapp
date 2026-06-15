@@ -18,6 +18,7 @@ import { MockRepository } from "./src/api/mockRepository";
 import type { ViewerRepository } from "./src/api/repository";
 import type { Player, PlayerSessionSummary } from "./src/api/types";
 import { AuthScreen } from "./src/screens/AuthScreen";
+import { CorrectionScreen } from "./src/screens/CorrectionScreen";
 import { HandDetailScreen } from "./src/screens/HandDetailScreen";
 import { MyHandsScreen } from "./src/screens/MyHandsScreen";
 import { MyLedgerScreen } from "./src/screens/MyLedgerScreen";
@@ -32,13 +33,16 @@ type Route =
   | { name: "sessions"; player: Player }
   | { name: "hands"; player: Player; session: PlayerSessionSummary }
   | { name: "hand"; player: Player; session: PlayerSessionSummary; handId: number }
+  | { name: "correct"; player: Player; session: PlayerSessionSummary; handId: number }
   | { name: "ledger"; player: Player; session: PlayerSessionSummary }
   | { name: "order"; player: Player; session: PlayerSessionSummary };
 
 export default function App(): React.JSX.Element {
   const repository: ViewerRepository = useMemo(() => {
     const apiUrl = process.env.EXPO_PUBLIC_API_URL;
-    return apiUrl ? new HttpRepository(apiUrl) : new MockRepository();
+    // staff 端末（iPad 訂正等）は EXPO_PUBLIC_STAFF_TOKEN を設定すると staff write が有効になる。
+    const staffToken = process.env.EXPO_PUBLIC_STAFF_TOKEN ?? null;
+    return apiUrl ? new HttpRepository(apiUrl, staffToken) : new MockRepository();
   }, []);
 
   const [route, setRoute] = useState<Route>({ name: "players" });
@@ -118,6 +122,23 @@ export default function App(): React.JSX.Element {
           handId={route.handId}
           onBack={() =>
             setRoute({ name: "hands", player: route.player, session: route.session })
+          }
+          onCorrect={() =>
+            setRoute({
+              name: "correct", player: route.player, session: route.session, handId: route.handId,
+            })
+          }
+        />
+      )}
+      {route.name === "correct" && (
+        <CorrectionScreen
+          repository={repository}
+          session={route.session}
+          handId={route.handId}
+          onBack={() =>
+            setRoute({
+              name: "hand", player: route.player, session: route.session, handId: route.handId,
+            })
           }
         />
       )}

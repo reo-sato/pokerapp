@@ -18,8 +18,11 @@
   404 `not_found`）。viewer の `GET .../hands/{hid}` と player hands 一覧が**訂正済みビュー**を返す。
   `ViewerApiClient.add_hand_correction`。
 - mobile: `ViewerRepository.addHandCorrection`（mock/HTTP, staff token）+ 型（`HandCorrection`/Input）+ mock の
-  overlay 適用（getHand/listPlayerHands）+ mock test。typecheck + 13 tests green。
-- **残**: iPad 訂正 UI 画面（反復実装）/ PHH export へのオーバーレイ適用。
+  overlay 適用（getHand/listPlayerHands）+ mock test。
+- **iPad 訂正画面** `mobile/src/screens/CorrectionScreen.tsx`: HandDetail から導線、アクションごとに種別
+  （check/call/bet/raise/fold/all_in）/ 金額を編集 → staff 訂正送信 → 訂正済みビュー即再読込。
+  `EXPO_PUBLIC_STAFF_TOKEN` で staff write 有効化。typecheck + 13 tests + web export green。
+- **残**: PHH export へのオーバーレイ適用 / 訂正取消 / board・hole の訂正。
 
 ### Added (アミューズメント・ガードレール: 負 adjustment = 返金/訂正のみ・監査, ADR-0035 / B9)
 

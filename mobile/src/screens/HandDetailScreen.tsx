@@ -1,5 +1,5 @@
 import React from "react";
-import { ScrollView, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, View } from "react-native";
 
 import type { ViewerRepository } from "../api/repository";
 import type { Player, PlayerSessionSummary } from "../api/types";
@@ -13,10 +13,12 @@ interface Props {
   session: PlayerSessionSummary;
   handId: number;
   onBack: () => void;
+  /** B4 (ADR-0036): スタッフ訂正画面へ（iPad）。省略時は訂正導線を出さない。 */
+  onCorrect?: () => void;
 }
 
 export function HandDetailScreen({
-  repository, player, session, handId, onBack,
+  repository, player, session, handId, onBack, onCorrect,
 }: Props): React.JSX.Element {
   const { data: hand, loading, errorCode, errorMessage } = useAsync(
     () => repository.getHand(session.session_id, handId),
@@ -84,10 +86,18 @@ export function HandDetailScreen({
                   [{a.street}] 席{a.seat} {a.player_name} {a.action}
                   {a.amount ? ` ${a.amount}` : ""} ・ pot {a.pot_after}
                   {a.needs_review ? " ・ 要確認" : ""}
+                  {(a as unknown as Record<string, unknown>).corrected ? " ・ 訂正済" : ""}
                 </Text>
               ))
             )}
           </View>
+
+          {onCorrect ? (
+            <Pressable style={styles.card} onPress={onCorrect}>
+              <Text style={[styles.cardTitle, { color: "#5ab0f0" }]}>✎ このハンドを訂正（スタッフ）</Text>
+              <Text style={styles.cardMeta}>誤認識のアクション種別・金額を訂正します</Text>
+            </Pressable>
+          ) : null}
         </ScrollView>
       )}
     </View>

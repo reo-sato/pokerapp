@@ -52,9 +52,17 @@ v1.0 ローンチレビュー B4。音声は自動記録のまま、誤認識の
 - API E2E テストで `Session.path` を誤参照 → `log_dir` を env に持たせて修正（コードではなくテストの誤り）。
 - mobile typecheck で `ActionRecord as Record<...>` が型エラー → `as unknown as Record<...>` に修正。
 
+## 追記（2026-06-15）: iPad 訂正画面 実装
+
+- `mobile/src/screens/CorrectionScreen.tsx`: HandDetail の「✎ このハンドを訂正（スタッフ）」導線から開く。
+  アクションごとに種別（check/call/bet/raise/fold/all_in）chip + 金額入力 → `addHandCorrection` で
+  staff 訂正 → `reloadKey` で訂正済みビュー（overlay）を即再読込。`corrected`/`要確認` バッジ表示。
+- `App.tsx`: `correct` route 追加 + `HandDetailScreen.onCorrect` 結線。staff token は
+  `EXPO_PUBLIC_STAFF_TOKEN`（HttpRepository(baseUrl, staffToken)）。
+- 検証: `npm run typecheck` clean / `npm test` 13 / `expo export --platform web` 成功。
+
 ## Remaining Gaps / 残課題
 
-- **iPad 訂正 UI 画面**（mobile, 反復実装）。data path（repo/型/overlay）は整備済み。
 - **PHH export へのオーバーレイ適用**（現状 export は元記録のまま）。
 - 訂正の取り消し（unwind）、board/hole/seat 帰属の訂正。
 - B8（実機 Phase H E2E, 来週）/ B5・hosted（SaaS フェーズ）。
