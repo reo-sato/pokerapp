@@ -29,13 +29,14 @@ hand JSON ではなく本 repository 専用ストア（既定 `sessions.json`）
 """
 from __future__ import annotations
 
-import json
+import functools
 import logging
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 
-from core.atomic_io import atomic_write_json
+from core.atomic_io import atomic_write_json, read_json_file
 from core.player_repository import PlayerNotFoundError, PlayerRepository
 from core.session import HandRef, SeatAssignment, Session
 
@@ -83,6 +84,21 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _locked(method):
+    """`self._lock`（RLock）で公開メソッドを囲む（thread-safety, B7）。
+
+    session_layer 有効時、IntegrationThread の write-through（assign_seat）と GUI スレッドの read が
+    同じ SessionRepository に同時アクセスしうる。RLock は再入可能（相互呼び出しでデッドロックしない）。
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class SessionRepository:
     """session と hand-based seat assignment の永続ストア。
 
@@ -95,6 +111,7 @@ class SessionRepository:
         path: str | Path | None = None,
         player_repo: PlayerRepository | None = None,
     ) -> None:
+        self._lock = threading.RLock()
         self._path = Path(path) if path is not None else _DEFAULT_SESSION_DB
         self._player_repo = player_repo if player_repo is not None else PlayerRepository()
         self._sessions: dict[str, Session] = {}
@@ -118,13 +135,8 @@ class SessionRepository:
     # ――― 永続化 ―――
 
     def _load(self) -> None:
-        if not self._path.exists():
-            return
-        try:
-            with self._path.open(encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Could not load session DB (%s), starting empty.", e)
+        data = read_json_file(self._path)  # 破損は退避して None（B7）
+        if data is None:
             return
         for raw in data.get("sessions", []):
             try:
@@ -174,6 +186,7 @@ class SessionRepository:
         except OSError:
             logger.exception("Failed to write session DB: %s", self._path)
 
+    @_locked
     def reload(self) -> None:
         """ディスクから session / seating を再読込する（read-only viewer 用）。
 
@@ -186,6 +199,7 @@ class SessionRepository:
 
     # ――― session CRUD ―――
 
+    @_locked
     def create_session(self, label: str | None = None, blinds: dict | None = None) -> Session:
         session_id = uuid.uuid4().hex
         session = Session(
@@ -201,16 +215,19 @@ class SessionRepository:
         logger.info("Created session %s (%s)", session_id, label or "")
         return session
 
+    @_locked
     def list_sessions(self) -> list[Session]:
         """全 session を作成順で返す。"""
         return list(self._sessions.values())
 
+    @_locked
     def get_session(self, session_id: str) -> Session:
         session = self._sessions.get(session_id)
         if session is None:
             raise SessionNotFoundError(f"session_id={session_id} は存在しません。")
         return session
 
+    @_locked
     def close_session(self, session_id: str, ended_at: str | None = None) -> Session:
         session = self.get_session(session_id)
         if session.status == "closed":
@@ -223,6 +240,7 @@ class SessionRepository:
 
     # ――― hand-based seating ―――
 
+    @_locked
     def assign_seat(
         self, session_id: str, hand_id: int, seat_no: int, player_id: str
     ) -> SeatAssignment:
@@ -267,6 +285,7 @@ class SessionRepository:
         )
         return assignment
 
+    @_locked
     def list_hand_ids(self, session_id: str) -> list[int]:
         """ある session に記録済みの hand_id を昇順で返す（hand が無ければ空 list）。
 
@@ -276,6 +295,7 @@ class SessionRepository:
         self.get_session(session_id)
         return sorted(self._hands.get(session_id, {}).keys())
 
+    @_locked
     def list_seat_assignments(self, session_id: str, hand_id: int) -> list[SeatAssignment]:
         """あるハンドの seat assignment を seat_no 昇順で返す（空ハンドは空 list）。"""
         self.get_session(session_id)
@@ -284,6 +304,7 @@ class SessionRepository:
             return []
         return sorted(hand["seats"], key=lambda sa: sa.seat_no)
 
+    @_locked
     def resolve_seat_map_for_hand(self, session_id: str, hand_id: int) -> dict[int, str]:
         """あるハンドの ``seat_no -> player_id`` マップを返す。"""
         return {
@@ -291,6 +312,7 @@ class SessionRepository:
             for sa in self.list_seat_assignments(session_id, hand_id)
         }
 
+    @_locked
     def resolve_hand_ref(self, session_id: str, hand_id: int) -> HandRef:
         """あるハンドの cross-app 参照 ``HandRef``（snapshot 込み）を返す。
 
@@ -310,6 +332,7 @@ class SessionRepository:
             seat_assignments=[sa.to_embedded() for sa in seats],
         )
 
+    @_locked
     def current_seating(self, session_id: str) -> list[SeatAssignment]:
         """最新 hand から現在の seating を導出する（hand が無ければ空 list）。"""
         self.get_session(session_id)

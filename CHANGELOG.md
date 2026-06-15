@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Fixed / Added (v1.0 ローンチレビューの小粒修正: B7 データ堅牢性)
+
+- **B7 破損検出 + 並行安全**: (1) `core/atomic_io.read_json_file` が JSON 破損時にファイルを脇に退避
+  （`*.corrupt-<ts>`）+ ERROR ログ → 次の書き込みで唯一のコピーを上書き消失させない（B2 バックアップと
+  併せ手復旧可能に）。players/sessions/ledger/order の `_load` を移行。(2) ledger の不正レコード skip 件数を
+  ERROR で集約表示（会計欠損の黙殺を可視化）。(3) `PlayerRepository` / `SessionRepository` に RLock
+  （`session_layer.enabled` 時の IntegrationThread × GUI スレッドの同時アクセス対策。ledger/order は既に lock 済）。
+
 ### Fixed / Added (v1.0 ローンチレビューの小粒修正: B1/B2/B3/B6)
 
 - **B1 セッション締め→精算の導線**（P0）: `close_session` はコアにあったが GUI/CLI/API から呼べず、

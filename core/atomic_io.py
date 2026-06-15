@@ -11,9 +11,45 @@ temp ファイルへ書き込み → flush + fsync（電源断でも内容ロス
 from __future__ import annotations
 
 import json
+import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+def read_json_file(path: "str | Path", *, quarantine: bool = True) -> "dict | None":
+    """JSON を読む（B7）。存在しない → None。
+
+    **破損（JSONDecodeError）時は、そのファイルを脇に退避（quarantine）してから None を返す**
+    （次の書き込みで唯一のコピーを上書き消失させないため。B2 バックアップと併せて手復旧可能にする）。
+    退避先は `<name>.corrupt-<timestamp>`。OSError（一時的 IO 等）は退避せず None。
+    """
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        with p.open(encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        if quarantine:
+            _quarantine(p)
+        logger.error("Corrupt JSON could not be parsed: %s（空で起動します。手復旧してください）", p)
+        return None
+    except OSError as e:
+        logger.warning("Could not read %s (%s)", p, e)
+        return None
+
+
+def _quarantine(p: Path) -> None:
+    try:
+        dest = p.with_name(f"{p.name}.corrupt-{datetime.now():%Y%m%d-%H%M%S}")
+        os.replace(p, dest)
+        logger.error("破損ファイルを退避しました: %s → %s", p, dest)
+    except OSError:
+        logger.exception("Failed to quarantine corrupt file %s", p)
 
 
 def atomic_write_json(path: "str | Path", data: Any, *, indent: int = 2) -> None:

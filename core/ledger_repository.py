@@ -26,14 +26,13 @@ enforce する主な不変条件（`ledger-overview.md` § invariants）:
 from __future__ import annotations
 
 import functools
-import json
 import logging
 import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 
-from core.atomic_io import atomic_write_json
+from core.atomic_io import atomic_write_json, read_json_file
 from core.ledger import LedgerEntry, PointLedgerEntry, SessionSettlement
 from core.player_repository import PlayerNotFoundError, PlayerRepository
 from core.session_repository import SessionNotFoundError, SessionRepository
@@ -182,31 +181,36 @@ class LedgerRepository:
     # ――― 永続化 ―――
 
     def _load(self) -> None:
-        if not self._path.exists():
+        data = read_json_file(self._path)  # 破損は退避して None（B7）
+        if data is None:
             return
-        try:
-            with self._path.open(encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Could not load ledger DB (%s), starting empty.", e)
-            return
+        skipped = 0
         for raw in data.get("ledger_entries", []):
             try:
                 self._entries.append(LedgerEntry.from_dict(raw))
             except (KeyError, TypeError):
                 logger.warning("Skipping malformed ledger entry: %r", raw)
+                skipped += 1
         for raw in data.get("point_ledger_entries", []):
             try:
                 self._point_entries.append(PointLedgerEntry.from_dict(raw))
             except (KeyError, TypeError):
                 logger.warning("Skipping malformed point ledger entry: %r", raw)
+                skipped += 1
         for raw in data.get("settlements", []):
             try:
                 s = SessionSettlement.from_dict(raw)
             except (KeyError, TypeError):
                 logger.warning("Skipping malformed settlement: %r", raw)
+                skipped += 1
                 continue
             self._settlements[(s.session_id, s.player_id)] = s
+        # 壊れたエントリの黙殺は会計欠損につながるため、件数を ERROR で目立たせる（B7）。
+        if skipped:
+            logger.error(
+                "ledger DB から %d 件の不正レコードをスキップしました（会計欠損の可能性）: %s",
+                skipped, self._path,
+            )
 
     def _flush(self) -> None:
         """アトミック + fsync で書き込む（ADR-0034/B2）。失敗してもクラッシュしない。"""

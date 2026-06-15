@@ -15,13 +15,14 @@ Phase S1: player の永続化と CRUD（create / list / rename）を担うリポ
 """
 from __future__ import annotations
 
-import json
+import functools
 import logging
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 
-from core.atomic_io import atomic_write_json
+from core.atomic_io import atomic_write_json, read_json_file
 from core.player import Player
 
 logger = logging.getLogger(__name__)
@@ -53,10 +54,26 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _locked(method):
+    """`self._lock`（RLock）で公開メソッドを囲む（thread-safety, B7）。
+
+    session_layer 有効時は IntegrationThread（assign 経由で player 参照）と GUI スレッドが同じ
+    repository に同時アクセスしうる。RLock は再入可能なので相互呼び出しでデッドロックしない。
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class PlayerRepository:
     """player の永続ストア。アプリ再起動を跨いで player_id が安定する。"""
 
     def __init__(self, path: str | Path | None = None) -> None:
+        self._lock = threading.RLock()
         self._path = Path(path) if path is not None else _DEFAULT_PLAYER_DB
         self._players: dict[str, Player] = {}
         self._load()
@@ -69,13 +86,8 @@ class PlayerRepository:
     # ――― 永続化 ―――
 
     def _load(self) -> None:
-        if not self._path.exists():
-            return
-        try:
-            with self._path.open(encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Could not load player DB (%s), starting empty.", e)
+        data = read_json_file(self._path)  # 破損は退避して None（B7）
+        if data is None:
             return
         for raw in data.get("players", []):
             try:
@@ -93,6 +105,7 @@ class PlayerRepository:
         except OSError:
             logger.exception("Failed to write player DB: %s", self._path)
 
+    @_locked
     def reload(self) -> None:
         """ディスクから再読込する（read-only viewer が外部更新を取り込む用）。
 
@@ -123,6 +136,7 @@ class PlayerRepository:
 
     # ――― CRUD ―――
 
+    @_locked
     def list_players(self, include_merged: bool = False) -> list[Player]:
         """player を作成時刻 → display_name 順で返す。
 
@@ -134,6 +148,7 @@ class PlayerRepository:
             players = [p for p in players if p.merged_into is None]
         return sorted(players, key=lambda p: (p.created_at, p.display_name))
 
+    @_locked
     def get(self, player_id: str) -> Player:
         if player_id not in self._players:
             raise PlayerNotFoundError(f"player_id={player_id} は存在しません。")
@@ -141,6 +156,7 @@ class PlayerRepository:
 
     # ――― player merge（ADR-0030: alias / tombstone + read-time canonicalization）―――
 
+    @_locked
     def resolve_canonical(self, player_id: str) -> str:
         """merge チェーンを辿って survivor の player_id を返す（ADR-0030）。
 
@@ -161,6 +177,7 @@ class PlayerRepository:
         logger.warning("merge chain too deep resolving %s", player_id)
         return current
 
+    @_locked
     def equivalence_class(self, player_id: str) -> set[str]:
         """`player_id` と同一 canonical に解決される全 player_id 集合（survivor + 全 absorbed）。
 
@@ -174,6 +191,7 @@ class PlayerRepository:
                 cls.add(pid)
         return cls
 
+    @_locked
     def merge_players(self, survivor_id: str, absorbed_id: str) -> Player:
         """`absorbed_id` を `survivor_id` に統合する（alias/tombstone, ADR-0030）。
 
@@ -201,6 +219,7 @@ class PlayerRepository:
         logger.info("Merged player %s into %s", absorbed_id, canonical_survivor)
         return absorbed
 
+    @_locked
     def unmerge(self, player_id: str) -> Player:
         """merge を取り消す（`merged_into` を除去, ADR-0030 D4。破壊していないので可逆）。"""
         if player_id not in self._players:
@@ -212,6 +231,7 @@ class PlayerRepository:
         logger.info("Unmerged player %s", player_id)
         return player
 
+    @_locked
     def create_player(self, display_name: str) -> Player:
         name = self._validate_name(display_name, exclude_id=None)
         player_id = uuid.uuid4().hex
@@ -223,6 +243,7 @@ class PlayerRepository:
         logger.info("Created player %s (%s)", player_id, name)
         return player
 
+    @_locked
     def rename_player(self, player_id: str, new_display_name: str) -> Player:
         if player_id not in self._players:
             raise PlayerNotFoundError(f"player_id={player_id} は存在しません。")

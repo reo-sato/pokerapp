@@ -14,14 +14,13 @@ Phase M5 (ADR-0018): 注文リクエストの永続化 + 状態遷移。
 """
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 
-from core.atomic_io import atomic_write_json
+from core.atomic_io import atomic_write_json, read_json_file
 from core.ledger_repository import LedgerRepository
 from core.order_request import OrderRequest
 from core.player_repository import PlayerNotFoundError, PlayerRepository
@@ -114,11 +113,11 @@ class OrderRequestRepository:
             return
         try:
             mtime = self._path.stat().st_mtime
-            with self._path.open(encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Could not load order request DB (%s), keeping current state.", e)
+        except OSError:
             return
+        data = read_json_file(self._path)  # 破損は退避して None（B7）
+        if data is None:
+            return  # 破損/読めない → 現状維持（破損は退避済み）
         requests: list[OrderRequest] = []
         for raw in data.get("requests", []):
             try:
