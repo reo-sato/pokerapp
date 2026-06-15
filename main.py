@@ -656,6 +656,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # 起動時バックアップ（B2 / v1.0 ローンチレビュー）。会計データ消失の最大リスク対策。
+    # best-effort: 失敗してもアプリ起動は止めない。config.backup.on_startup=false で無効化可。
+    try:
+        from core.backup import backup_data_files
+        from core.config import load_config
+        _bcfg = load_config().get("backup", {})
+        if _bcfg.get("on_startup", True):
+            backup_data_files(dest_dir=_bcfg.get("dir", "./backups"),
+                              keep=int(_bcfg.get("keep", 30)))
+    except Exception:
+        logger.warning("起動時バックアップに失敗しました（続行します）", exc_info=True)
+
     if args.players:
         run_player_registry()
         sys.exit(0)

@@ -9,6 +9,7 @@ ledger.json
 order_requests.json
 player_credentials.json
 auth_identity.json
+backups/
 
 # Expo / node (mobile, M2)
 mobile/node_modules/

@@ -84,6 +84,12 @@
     "sync_auto_interval_sec": 0,
     "_sync_auto_interval_comment": "ADR-0032: 双方向 sync の定期 auto-trigger 間隔（秒）。0=無効（既定=on-demand pull のまま）。>0 で SyncScheduler が peer と定期同期（会場主導, ADR-0029）。"
   },
+  "backup": {
+    "on_startup": true,
+    "dir": "./backups",
+    "keep": 30,
+    "_comment": "B2 (v1.0 ローンチレビュー): 起動ごとにデータ JSON（players/sessions/ledger/order_requests/credentials/auth_identity/rfid_cards）を backups/<timestamp>/ にコピーし keep 世代まで保持。会計データ消失の最大リスク対策。日次の定期実行は cron / タスクスケジューラで `python tools/backup_data.py` を推奨。on_startup=false で無効化。"
+  },
   "ledger": {
     "buyin_presets": [10000, 20000, 30000],
     "_buyin_presets_comment": "ADR-0026: buy-in 記帳時にスタッフが選ぶ金額プリセット（整数円）。--ledger 画面でボタン表示、staff API GET /api/staff/buyin-presets でも取得。店が編集する。chips とは別単位・自動換算なし。"
