@@ -316,8 +316,12 @@ class TestRFIDThread:
         assert not thread.is_alive()
 
     def test_board_role_maps_to_event(self, tmp_path: Path):
-        """ADR-0034 §4: role=board の reader_config が RFIDEvent.role=board になる。"""
-        configs = [{"name": "reader_B", "role": "board", "index": 1}]
+        """ADR-0034 §4 / B3 修正: role=board が RFIDEvent.role=board + board_index を運ぶ。
+
+        board_index は engine の street 自動遷移の分岐条件（engine.py:294）。PC/SC 経路でこれが
+        欠落していたため board street が進まなかった（B3 latent bug）。回帰固定する。
+        """
+        configs = [{"name": "reader_B", "role": "board", "index": 3}]
         sequences = {"reader_B": [None, "04:11:22"]}
         thread, rfid_q, stop = _make_rfid_thread(tmp_path, sequences, configs)
         thread.start()
@@ -327,6 +331,20 @@ class TestRFIDThread:
         ev: RFIDEvent = rfid_q.get_nowait()
         assert ev.role == "board"
         assert ev.seat is None
+        assert ev.board_index == 3  # B3: PC/SC 経路でも board_index が流れること
+
+    def test_seat_role_has_no_board_index(self, tmp_path: Path):
+        """role=seat では board_index は None（B3 修正で seat に誤って付かないこと）。"""
+        configs = [{"name": "reader_S", "role": "seat", "seat": 2}]
+        sequences = {"reader_S": [None, "04:99"]}
+        thread, rfid_q, stop = _make_rfid_thread(tmp_path, sequences, configs)
+        thread.start()
+        time.sleep(0.15)
+        stop.set()
+        thread.join(timeout=2)
+        ev: RFIDEvent = rfid_q.get_nowait()
+        assert ev.seat == 2
+        assert ev.board_index is None
 
     def test_8byte_iso15693_uid_flows_to_event(self, tmp_path: Path):
         """ADR-0034 §7: 8B UID (ISO 15693) が RFIDEvent.tag_id まで長さ非依存で流れる。"""

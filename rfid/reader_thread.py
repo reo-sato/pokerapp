@@ -123,6 +123,9 @@ class RFIDThread(threading.Thread):
         card = self._card_master.lookup(uid)
         role = cfg.get("role", "seat")
         seat = cfg.get("seat") if role == "seat" else None
+        # board_index は board street 自動遷移に必須（engine が board_index!=None を分岐条件にする,
+        # engine.py:294）。http_receiver と同じく cfg["index"] から設定する（ADR-0034, B3 修正）。
+        board_index = cfg.get("index") if role == "board" else None
 
         event = RFIDEvent(
             tag_id=uid,
@@ -132,9 +135,10 @@ class RFIDThread(threading.Thread):
             seat=seat,
             timestamp=time.time(),
             raw_tag_id=uid,
+            board_index=board_index,
         )
         self._queue.put(event)
         logger.debug(
-            "RFIDEvent: reader=%s role=%s seat=%s tag=%s card=%r",
-            reader_id, role, seat, uid, card,
+            "RFIDEvent: reader=%s role=%s seat=%s board_index=%s tag=%s card=%r",
+            reader_id, role, seat, board_index, uid, card,
         )

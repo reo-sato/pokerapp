@@ -52,24 +52,39 @@ python main.py --cli
 - どの番号がどのマイクか分からない場合は
   [トラブルシューティング: マイクが認識されない](troubleshooting.md#マイクが認識されない録音されない)を参照。
 
-## 5. RFID を使う場合（任意）
+## 5. RFID を使う場合
 
-RFID は**任意**です。使わない場合は何もしなくて構いません（`rfid.enabled` は既定 `false`）。
+RFID カード自動認識は店舗運用での中核機能です。**正式（canonical）構成は PC/SC 方式**
+（PN5180 NFC リーダー + ESP32-S3 を USB CCID で PC に接続。ADR-0015 / ADR-0034、契約は
+`docs/contracts/rfid-usb-ccid.md`）。HTTP 方式は debug / 遠隔の補助用途です。
+RFID を使わない場合は `rfid.enabled` を `false`（既定）のままで構いません。
 
-### HTTP 方式（ESP32 + PN532、推奨）
+### PC/SC 方式（PN5180 + ESP32-S3 USB CCID、**正式・推奨**）
 
-1. `config.json` の `rfid.enabled` を `true` に。
-2. `rfid.bind_host` を PC の LAN IP（例 `192.168.1.20`）に変更。
-   既定の `127.0.0.1` は同一 PC 内からのみ受信します（安全側の既定）。
-   受信は認証なしのため、LAN 公開（LAN IP / `0.0.0.0`）は店舗の信頼できる Wi-Fi でのみ行ってください。
-3. ESP32 側から、読み取り結果を本アプリの `http://<PCのIP>:8787/`（既定ポート `8787`）へ POST するよう設定。
-4. `rfid.readers` で各リーダー（`seat_1`…`seat_9` / `board_1`…`board_5`）の役割を確認・調整。
-5. カード対応表 `rfid_cards.json`（`tag_id` → カード）を用意。
+1. 追加インストール: `pip install ".[pcsc]"`（`pyscard` が入ります）。OS 側に PC/SC スタックが必要です
+   （Linux: `sudo apt-get install pcscd libpcsclite-dev` + `pcscd` 起動／macOS・Windows は標準で PC/SC あり）。
+2. ESP32-S3 firmware（PN5180 を USB CCID で公開）を接続し、OS が各リーダーを認識していることを確認:
+   ```bash
+   python -c "from smartcard.System import readers; print([str(r) for r in readers()])"
+   ```
+   ここに出る **reader_name 文字列を完全一致で** `config.json` の `rfid.pcsc_readers[].name` に記入します
+   （OS により文字列が異なります。契約 `docs/contracts/rfid-usb-ccid.md` §4/§8）。
+3. `config.json` の `rfid.transport` を `"pcsc"`、`rfid.enabled` を `true` に。
+4. `rfid.pcsc_readers`（**list**）で各リーダーの役割を設定:
+   `{"name": "<実 reader_name>", "role": "seat", "seat": 1}` / `{"name": "...", "role": "board", "index": 1}`
+   （`seat` 1..9 / board は `index` 1..5）。
+5. カード対応表 `rfid_cards.json`（`tag_id` → カード）を用意（物理カード ↔ UID の登録）。
 
-### PC/SC 方式（カードリーダー直結）
+### HTTP 方式（ESP32 + PN532、補助 / debug 用）
 
-1. 追加インストール: `pip install ".[pcsc]"`（`pyscard` が入ります）。
-2. `config.json` の `rfid.transport` を `"pcsc"` に、`rfid.enabled` を `true` に。
+1. `config.json` の `rfid.enabled` を `true`、`rfid.transport` を `"http"` に。
+2. `rfid.bind_host` を PC の LAN IP（例 `192.168.1.20`）に変更。既定の `127.0.0.1` は同一 PC 内のみ受信。
+   受信は**認証なし**のため、LAN 公開（LAN IP / `0.0.0.0`）は店舗の信頼できる Wi-Fi でのみ行ってください。
+3. ESP32 側から読み取り結果を `http://<PCのIP>:8787/`（既定 `8787`）へ POST。
+4. `rfid.readers`（**dict**, `seat_1`…`seat_9` / `board_1`…`board_5`）で役割を設定。
+
+> **注**: PC/SC は `pcsc_readers`（list）、HTTP は `readers`（dict）と設定キーが異なります。
+> 混同しないでください（ADR-0034）。
 
 詳細な設定項目は [設定リファレンス](usage.md#設定-configjson) を参照してください。
 
