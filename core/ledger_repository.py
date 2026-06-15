@@ -397,6 +397,13 @@ class LedgerRepository:
                 )
             if cash_amount == 0:
                 raise InvalidAmountError("adjustment は非ゼロの cash である必要があります。")
+            # アミューズメント・ガードレール（B9 / ADR-0035）: 負の adjustment は唯一の「店→player」
+            # 方向（返金・誤記訂正）。賞金分配に転用させないため、理由 note を必須にする。
+            if cash_amount < 0 and not (note or "").strip():
+                raise InvalidAmountError(
+                    "負の adjustment（返金・誤記訂正）には理由を note に記録してください"
+                    "（賞金・負け分の現金分配には使用しないこと）。"
+                )
         else:  # buy_in / rebuy / add_on / order
             if cash_amount < 0 or point_amount < 0:
                 raise InvalidAmountError("通常 entry の金額は非負である必要があります。")
@@ -437,6 +444,14 @@ class LedgerRepository:
             "Ledger entry %s: %s cash=%d point=%d (session=%s player=%s)",
             entry.entry_id, kind, cash_amount, point_amount, session_id, player_id,
         )
+        # アミューズメント監査（B9 / ADR-0035）: 唯一の「店→player」方向（負 adjustment）を
+        # 監査ログに残す。賞金分配でないこと（返金・誤記訂正のみ）を運用で検証できるようにする。
+        if kind == "adjustment" and cash_amount < 0:
+            logger.warning(
+                "AUDIT 負 adjustment（返金/誤記訂正・賞金分配ではない）: entry=%s session=%s "
+                "player=%s cash=%d note=%r",
+                entry.entry_id, session_id, player_id, cash_amount, note,
+            )
         return entry
 
     @_locked

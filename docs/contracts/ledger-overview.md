@@ -45,6 +45,10 @@ adjustment entry で表す（後述 § invariants）。`player_id` / `session_id
 - **kind**: `buy_in` / `rebuy` / `add_on` / `order` / `entry_fee` / `adjustment`。
   - CLAUDE.md の future-scope enum に `entry_fee` を **additive 追加**（business rule 1「entry fee は
     cash only」を 1 台帳で扱うため）。`adjustment` は訂正・手動補正用。
+  - **アミューズメント・ガードレール（ADR-0035）**: 会計は **player → 店の 1 方向**で payout/cash-out
+    kind を持たない。唯一の「店 → player」方向は `adjustment` の **負 cash**（返金・誤記訂正）であり、
+    **理由 `note` 必須 + 監査ログ**化されている。**賞金・負け分の現金分配には使用しないこと**（賭博該当を
+    避けるアミューズメント運用の線引き）。point は換金不可（cash 化経路なし）。
 - **cash + point 併用**: 1 件の buy_in/rebuy/add_on/order は `cash_amount` と `point_amount` の
   両方を持ち得る（business rule 2）。point で払った分は `point_amount` に、cash 分は `cash_amount` に入る。
 - **cross-field**（schema 外, core が enforce）:

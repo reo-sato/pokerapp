@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Added (アミューズメント・ガードレール: 負 adjustment = 返金/訂正のみ・監査, ADR-0035 / B9)
+
+- 会計の唯一の「店 → player」方向（`adjustment` の負 cash）に **理由 `note` を必須**化し、**監査
+  warning ログ**を出すようにした。賞金・負け分の現金分配への転用を防ぎ、player→店 の 1 方向会計
+  （アミューズメント前提・賭博該当回避）を運用規律だけでなくコードでも補強。正の adjustment（誤記訂正の
+  追加）は note 任意のまま。point は換金不可を維持。schema / error code 変更なし（`invalid_amount` 再利用）。
+  ledger 契約・ADR-0035 に明文化。
+
 ### Fixed / Added (v1.0 ローンチレビューの小粒修正: B7 データ堅牢性)
 
 - **B7 破損検出 + 並行安全**: (1) `core/atomic_io.read_json_file` が JSON 破損時にファイルを脇に退避

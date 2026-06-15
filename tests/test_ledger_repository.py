@@ -203,6 +203,20 @@ def test_reverse_unknown_entry_rejected(ledger: LedgerRepository):
 
 # ――― settlement ―――
 
+def test_negative_adjustment_requires_note(ledger: LedgerRepository, sessions: SessionRepository, players: PlayerRepository):
+    """B9/ADR-0035: 負の adjustment（店→player 方向）は理由 note 必須（アミューズ・ガードレール）。"""
+    alice = _pid(players, "Alice")
+    s = sessions.create_session()
+    with pytest.raises(InvalidAmountError):
+        ledger.add_entry(s.session_id, alice, "adjustment", cash_amount=-500)  # note なし
+    with pytest.raises(InvalidAmountError):
+        ledger.add_entry(s.session_id, alice, "adjustment", cash_amount=-500, note="   ")  # 空白のみ
+    # 理由つきは OK。正の adjustment（誤記訂正の追加）は note なしでも可。
+    assert ledger.add_entry(s.session_id, alice, "adjustment", cash_amount=-500,
+                            note="飲食ミス返金").cash_amount == -500
+    assert ledger.add_entry(s.session_id, alice, "adjustment", cash_amount=300).cash_amount == 300
+
+
 def test_settlement_net_due_signed_sum_cash(ledger: LedgerRepository, sessions: SessionRepository, players: PlayerRepository):
     alice = _pid(players, "Alice")
     s = sessions.create_session()
@@ -210,7 +224,7 @@ def test_settlement_net_due_signed_sum_cash(ledger: LedgerRepository, sessions: 
     ledger.add_entry(s.session_id, alice, "rebuy", cash_amount=3000)
     ledger.add_entry(s.session_id, alice, "order", cash_amount=1000)
     ledger.add_entry(s.session_id, alice, "entry_fee", cash_amount=500)
-    ledger.add_entry(s.session_id, alice, "adjustment", cash_amount=-200)
+    ledger.add_entry(s.session_id, alice, "adjustment", cash_amount=-200, note="レジ誤記訂正")
 
     rows = ledger.compute_settlement(s.session_id)
     assert len(rows) == 1
