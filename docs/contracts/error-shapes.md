@@ -145,3 +145,12 @@ HTTP 実装は実環境タスクだが、エラー契約はここで固定する
 | `unknown_provider` | provider 未構成（実 IdP 未構築 / LAN 既定で OIDC 無効） | exchange | API 境界 | 404 |
 | `invalid_idp_code` | 認可コードの検証失敗（期限切れ / 改竄 / 未登録） | exchange | `OidcError` | 401 |
 | `identity_conflict` | 同一 (provider, subject) を別 player に link しようとした | link（内部） | `AuthIdentityConflictError` | 409 |
+
+### ハンド訂正 error code（ADR-0036）
+
+`POST /api/staff/sessions/{sid}/hands/{hid}/corrections`（staff write）で使う code（additive）。
+`not_found`(404, unknown hand) は既存再利用:
+
+| code | 意味 | 由来 | HTTP |
+|------|------|------|------|
+| `invalid_correction` | field/value/action_index が不正（範囲外 index・未知 field・型不正） | `HandCorrectionError` / API 境界 | 400 |

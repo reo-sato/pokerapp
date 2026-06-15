@@ -30,6 +30,10 @@ from api.read_models import (
 )
 from core.auth_identity_repository import AuthIdentityRepository
 from core.auth_token import issue_player_token, verify_player_token
+from core.hand_correction_repository import (
+    HandCorrectionError,
+    HandCorrectionRepository,
+)
 from core.oidc import OidcError, OidcProvider, resolve_player_for_claim
 from core.ledger_repository import (
     AlreadySettledError,
@@ -144,6 +148,16 @@ class _OidcExchangeBody(BaseModel):
     nonce: str | None = None
 
 
+class _HandCorrectionBody(BaseModel):
+    """POST /api/staff/.../hands/{hid}/corrections の body（ハンド訂正, ADR-0036）。"""
+
+    field: str
+    new_value: object = None
+    action_index: int | None = None
+    corrected_by: str | None = None
+    note: str | None = None
+
+
 # ledger / settlement の error → (HTTP status, error code)。staff write で再利用する
 # （error-shapes.md の ledger セクションと 1:1, ADR-0021）。具体例外を先に並べる。
 _LEDGER_ERROR_MAP: list[tuple[type, int, str]] = [
@@ -183,6 +197,7 @@ def create_app(
     pin_self_enroll: bool = False,
     oidc_providers: "dict[str, OidcProvider] | None" = None,
     identity_repo: AuthIdentityRepository | None = None,
+    correction_repo: HandCorrectionRepository | None = None,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -210,6 +225,8 @@ def create_app(
         credential_repo = PlayerCredentialRepository()
     if identity_repo is None:
         identity_repo = AuthIdentityRepository()
+    if correction_repo is None:
+        correction_repo = HandCorrectionRepository()
     _oidc_providers = oidc_providers or {}
     # player トークン署名鍵。未設定なら ephemeral（再起動でトークン失効, ADR-0027 D3）。
     _player_secret = player_token_secret or secrets.token_hex(32)
@@ -266,11 +283,12 @@ def create_app(
     @app.get("/api/players/{player_id}/sessions/{session_id}/hands")
     def player_hands(player_id: str, session_id: str) -> dict:
         player_repo.get(player_id)
-        return {"hands": list_player_hands(player_id, session_id, session_repo, log_dir)}
+        return {"hands": list_player_hands(
+            player_id, session_id, session_repo, log_dir, correction_repo)}
 
     @app.get("/api/sessions/{session_id}/hands/{hand_id}")
     def hand(session_id: str, hand_id: int) -> dict:
-        return get_hand(session_id, hand_id, log_dir)
+        return get_hand(session_id, hand_id, log_dir, correction_repo)
 
     @app.get("/api/players/{player_id}/sessions/{session_id}/ledger")
     def player_ledger(player_id: str, session_id: str) -> dict:
@@ -503,6 +521,38 @@ def create_app(
             "merged_into": absorbed.merged_into,
             "merged_at": absorbed.merged_at,
         }
+
+    @app.post("/api/staff/sessions/{session_id}/hands/{hand_id}/corrections",
+              response_model=None)
+    def staff_add_hand_correction(
+        session_id: str, hand_id: int, request: Request, body: _HandCorrectionBody
+    ) -> "JSONResponse | dict":
+        """ハンド訂正を 1 件追記する（append-only オーバーレイ, ADR-0036）。staff write。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            hand = get_hand(session_id, hand_id, log_dir)  # 存在 + 範囲チェック用（元 hand）
+        except HandNotFoundError as e:
+            return JSONResponse(status_code=404,
+                                content={"code": "not_found", "message": str(e)})
+        if body.action_index is not None:
+            actions = hand.get("actions") or []
+            if not (0 <= body.action_index < len(actions)):
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_correction",
+                    "message": f"action_index={body.action_index} が範囲外です（0..{len(actions) - 1}）。",
+                })
+        try:
+            c = correction_repo.add_correction(
+                session_id, hand_id, body.field, body.new_value,
+                action_index=body.action_index,
+                corrected_by=body.corrected_by or "staff", note=body.note,
+            )
+        except HandCorrectionError as e:
+            return JSONResponse(status_code=400,
+                                content={"code": "invalid_correction", "message": str(e)})
+        return c.to_dict()
 
     @app.get("/api/staff/sessions/{session_id}/settlement", response_model=None)
     def staff_settlement(session_id: str, request: Request) -> "JSONResponse | dict":

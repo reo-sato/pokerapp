@@ -227,6 +227,24 @@ class ViewerApiClient:
             json=payload, headers=self._staff_headers(),
         )
 
+    def add_hand_correction(
+        self, session_id: str, hand_id: int, field: str, new_value: object,
+        action_index: int | None = None, corrected_by: str | None = None,
+        note: str | None = None,
+    ) -> dict:
+        """ハンド訂正を 1 件追記する（ADR-0036, staff token）。"""
+        payload: dict = {"field": field, "new_value": new_value}
+        if action_index is not None:
+            payload["action_index"] = action_index
+        if corrected_by is not None:
+            payload["corrected_by"] = corrected_by
+        if note is not None:
+            payload["note"] = note
+        return self._request(
+            "POST", f"/api/staff/sessions/{session_id}/hands/{hand_id}/corrections",
+            json=payload, headers=self._staff_headers(),
+        )
+
     def close_session(self, session_id: str) -> dict:
         """session を close する（精算確定の前提, B1, staff token）。"""
         return self._request(

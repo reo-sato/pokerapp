@@ -7,6 +7,8 @@
 import type { ViewerRepository } from "./repository";
 import type {
   AuthSession,
+  HandCorrection,
+  HandCorrectionInput,
   HandSummary,
   MenuItem,
   OrderRequest,
@@ -22,9 +24,16 @@ export class HttpRepository implements ViewerRepository {
   // player principal トークン (L1/L2)。self-write (注文 POST) に Bearer で付与する。
   private playerToken: string | null = null;
   private principal: string | null = null;
+  // staff token (ADR-0021)。staff write（ハンド訂正等, B4/ADR-0036）に Bearer で付与する。
+  private staffToken: string | null;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, staffToken: string | null = null) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.staffToken = staffToken;
+  }
+
+  setStaffToken(token: string | null): void {
+    this.staffToken = token;
   }
 
   private async get<T>(path: string): Promise<T> {
@@ -39,9 +48,13 @@ export class HttpRepository implements ViewerRepository {
     return body as T;
   }
 
-  private async post<T>(path: string, payload: unknown, withAuth = false): Promise<T> {
+  private async post<T>(
+    path: string, payload: unknown, withAuth = false, staffAuth = false,
+  ): Promise<T> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (withAuth && this.playerToken) {
+    if (staffAuth && this.staffToken) {
+      headers.Authorization = `Bearer ${this.staffToken}`;
+    } else if (withAuth && this.playerToken) {
       headers.Authorization = `Bearer ${this.playerToken}`;
     }
     const res = await fetch(`${this.baseUrl}${path}`, {
@@ -144,6 +157,20 @@ export class HttpRepository implements ViewerRepository {
     return this.post(
       `/api/players/${encodeURIComponent(playerId)}/sessions/${encodeURIComponent(sessionId)}/order-requests`,
       body,
+      true,
+    );
+  }
+
+  addHandCorrection(
+    sessionId: string,
+    handId: number,
+    input: HandCorrectionInput,
+  ): Promise<HandCorrection> {
+    // staff write（ハンド訂正, ADR-0036）。staff token を Bearer で送る。
+    return this.post(
+      `/api/staff/sessions/${encodeURIComponent(sessionId)}/hands/${handId}/corrections`,
+      input,
+      false,
       true,
     );
   }

@@ -160,6 +160,44 @@ test("oidcExchange: creates player on first signup, resolves same on re-exchange
   });
 });
 
+test("addHandCorrection overlays corrected view on getHand/listPlayerHands (B4)", async () => {
+  const repo = new MockRepository();
+  const before = await repo.getHand(SESSION_ID, 1);
+  const idx = before.actions.findIndex((a) => a.needs_review) >= 0
+    ? before.actions.findIndex((a) => a.needs_review) : 0;
+  const origAction = before.actions[idx].action;
+
+  const c = await repo.addHandCorrection(SESSION_ID, 1, {
+    field: "action", new_value: "bet", action_index: idx, note: "誤認識",
+  });
+  assert.equal(c.field, "action");
+  assert.equal(c.new_value, "bet");
+
+  const after = await repo.getHand(SESSION_ID, 1);
+  assert.equal(after.actions[idx].action, "bet");
+  // 元値保持 + corrected + needs_review 解除（overlay）。
+  const a = after.actions[idx] as unknown as Record<string, unknown>;
+  assert.equal((a._original as Record<string, unknown>).action, origAction);
+  assert.equal(a.corrected, true);
+  assert.equal(after.actions[idx].needs_review, false);
+
+  // listPlayerHands にも overlay が乗る。
+  const hands = await repo.listPlayerHands(ALICE_ID, SESSION_ID);
+  assert.equal(hands[0].actions[idx].action, "bet");
+});
+
+test("addHandCorrection rejects invalid field with invalid_correction", async () => {
+  const repo = new MockRepository();
+  await assert.rejects(
+    repo.addHandCorrection(SESSION_ID, 1, { field: "winner_seat", new_value: 2, action_index: 0 }),
+    (err: unknown) => {
+      assert.ok(err instanceof ViewerApiError);
+      assert.equal(err.code, "invalid_correction");
+      return true;
+    },
+  );
+});
+
 test("getHand returns hand or rejects with not_found", async () => {
   const repo = new MockRepository();
   const hand = await repo.getHand(SESSION_ID, 1);

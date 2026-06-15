@@ -15,6 +15,8 @@ import json
 import logging
 from pathlib import Path
 
+from core.hand_correction import apply_hand_corrections
+from core.hand_correction_repository import HandCorrectionRepository
 from core.ledger_repository import LedgerRepository
 from core.session_repository import SessionRepository
 
@@ -67,10 +69,12 @@ def list_player_hands(
     session_id: str,
     session_repo: SessionRepository,
     log_dir: str | Path,
+    correction_repo: "HandCorrectionRepository | None" = None,
 ) -> list[dict]:
     """player が着席していた hand の HandSummary dict を hand_id 昇順で返す。
 
     seat assignment はあるが hand log に対応 hand が無いものは除外する。
+    `correction_repo` があれば訂正オーバーレイを適用した訂正済みビューを返す（ADR-0036）。
     unknown session は SessionNotFoundError（session_repo 経由）。
     """
     cls = session_repo.player_repo.equivalence_class(player_id)
@@ -85,7 +89,13 @@ def list_player_hands(
     if log is None:
         return []
     hands = [h for h in log.get("hands", []) if h.get("hand_id") in seated_hand_ids]
-    return sorted(hands, key=lambda h: h["hand_id"])
+    hands = sorted(hands, key=lambda h: h["hand_id"])
+    if correction_repo is not None:
+        hands = [
+            apply_hand_corrections(h, correction_repo.list_for_hand(session_id, h["hand_id"]))
+            for h in hands
+        ]
+    return hands
 
 
 def get_player_session_ledger(
@@ -134,9 +144,13 @@ def get_player_session_ledger(
     }
 
 
-def get_hand(session_id: str, hand_id: int, log_dir: str | Path) -> dict:
+def get_hand(
+    session_id: str, hand_id: int, log_dir: str | Path,
+    correction_repo: "HandCorrectionRepository | None" = None,
+) -> dict:
     """hand log から HandSummary dict を 1 件返す。
 
+    `correction_repo` があれば訂正オーバーレイを適用した訂正済みビューを返す（ADR-0036）。
     session レイヤ未登録の legacy session_id（timestamp 形式）でも log が存在すれば返す
     （viewer-api.md 備考）。不在は HandNotFoundError（code: not_found）。
     """
@@ -144,6 +158,10 @@ def get_hand(session_id: str, hand_id: int, log_dir: str | Path) -> dict:
     if log is not None:
         for hand in log.get("hands", []):
             if hand.get("hand_id") == hand_id:
+                if correction_repo is not None:
+                    return apply_hand_corrections(
+                        hand, correction_repo.list_for_hand(session_id, hand_id)
+                    )
                 return hand
     raise HandNotFoundError(
         f"hand_id={hand_id} は session_id={session_id} の hand log に存在しません。"

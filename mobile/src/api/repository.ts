@@ -7,6 +7,8 @@
  */
 import type {
   AuthSession,
+  HandCorrection,
+  HandCorrectionInput,
   HandSummary,
   MenuItem,
   OrderRequest,
@@ -46,4 +48,11 @@ export interface ViewerRepository {
     sessionId: string,
     body: OrderRequestBody,
   ): Promise<OrderRequest>;
+  /** B4 (ADR-0036): ハンド訂正を追記する（staff 操作 = iPad）。append-only オーバーレイ。
+      getHand / listPlayerHands は訂正済みビューを返す。staff token 必須。 */
+  addHandCorrection(
+    sessionId: string,
+    handId: number,
+    input: HandCorrectionInput,
+  ): Promise<HandCorrection>;
 }

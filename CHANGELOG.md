@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+### Added (ハンド訂正 = append-only オーバーレイ / iPad staff 訂正, ADR-0036 / B4)
+
+- 音声自動記録の誤認識を、**元 hand log を mutate せず append-only な訂正レコードで重ねる**仕組みを追加
+  （write-once だった hand log に訂正手段が無かった B4 を解消。元の ASR 記録は監査・再学習のため保持）。
+- core: `HandCorrection` + `HandCorrectionRepository`（`hand_corrections.json`, atomic+fsync, node-local）+
+  `apply_hand_corrections`（read 時オーバーレイ: 対象 `(session_id, hand_id, action_index)`、field=action/
+  amount/winner_seat、元値を `_original` 保持・`corrected` 付与・`needs_review` 解除・hand に `_corrections`
+  監査痕）。
+- API: `POST /api/staff/sessions/{sid}/hands/{hid}/corrections`（staff write, 400 `invalid_correction` /
+  404 `not_found`）。viewer の `GET .../hands/{hid}` と player hands 一覧が**訂正済みビュー**を返す。
+  `ViewerApiClient.add_hand_correction`。
+- mobile: `ViewerRepository.addHandCorrection`（mock/HTTP, staff token）+ 型（`HandCorrection`/Input）+ mock の
+  overlay 適用（getHand/listPlayerHands）+ mock test。typecheck + 13 tests green。
+- **残**: iPad 訂正 UI 画面（反復実装）/ PHH export へのオーバーレイ適用。
+
 ### Added (アミューズメント・ガードレール: 負 adjustment = 返金/訂正のみ・監査, ADR-0035 / B9)
 
 - 会計の唯一の「店 → player」方向（`adjustment` の負 cash）に **理由 `note` を必須**化し、**監査

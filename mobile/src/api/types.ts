@@ -151,6 +151,28 @@ export interface OrderRequestBody {
   note?: string;
 }
 
+/** ハンド訂正レコード (ADR-0036)。append-only オーバーレイ。 */
+export interface HandCorrection {
+  correction_id: string;
+  session_id: string;
+  hand_id: number;
+  action_index: number | null; // null = hand レベル (winner_seat 等)
+  field: string; // "action" | "amount" | "winner_seat"
+  new_value: string | number;
+  corrected_by: string;
+  corrected_at: string;
+  note?: string;
+}
+
+/** ハンド訂正の入力 (staff 操作 = iPad アプリ, ADR-0036)。 */
+export interface HandCorrectionInput {
+  field: string; // "action" | "amount"（action_index あり） | "winner_seat"（hand レベル）
+  new_value: string | number;
+  action_index?: number | null;
+  corrected_by?: string;
+  note?: string;
+}
+
 /** error-shapes.md の論理形。分岐は code、表示は message。 */
 export interface ApiError {
   code: string;

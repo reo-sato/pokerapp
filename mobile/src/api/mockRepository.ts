@@ -9,6 +9,8 @@
 import type { ViewerRepository } from "./repository";
 import type {
   AuthSession,
+  HandCorrection,
+  HandCorrectionInput,
   HandSummary,
   LedgerEntry,
   MenuItem,
@@ -33,6 +35,9 @@ export class MockRepository implements ViewerRepository {
   // 注文リクエストは mock 内の in-memory 状態（pending のまま。確定はスタッフ desktop の責務）
   private orderRequests: OrderRequest[] = [];
   private orderSeq = 0;
+  // ハンド訂正 (B4/ADR-0036) の in-memory 状態。getHand/listPlayerHands で overlay 適用。
+  private corrections: HandCorrection[] = [];
+  private corrSeq = 0;
   // 本人認証 (L1/L2) の in-memory 状態。OIDC サインアップで作った player も保持する。
   private principal: string | null = null;
   private signedUp: Player[] = [];
@@ -104,7 +109,9 @@ export class MockRepository implements ViewerRepository {
       throw notFound(`session_id=${sessionId} は存在しません。`);
     }
     const hands = fx.handsBySession[sessionId] ?? [];
-    return hands.filter((h) => seated.includes(h.hand_id));
+    return hands
+      .filter((h) => seated.includes(h.hand_id))
+      .map((h) => this.applyCorrections(sessionId, h));
   }
 
   async getHand(sessionId: string, handId: number): Promise<HandSummary> {
@@ -112,7 +119,7 @@ export class MockRepository implements ViewerRepository {
     if (!hand) {
       throw notFound(`hand_id=${handId} は session_id=${sessionId} に存在しません。`);
     }
-    return hand;
+    return this.applyCorrections(sessionId, hand);
   }
 
   async getPlayerLedger(playerId: string, sessionId: string): Promise<PlayerSessionLedger> {
@@ -185,5 +192,62 @@ export class MockRepository implements ViewerRepository {
     };
     this.orderRequests.push(request);
     return request;
+  }
+
+  async addHandCorrection(
+    sessionId: string,
+    handId: number,
+    input: HandCorrectionInput,
+  ): Promise<HandCorrection> {
+    const idx = input.action_index ?? null;
+    const actionFields = ["action", "amount"];
+    const handFields = ["winner_seat"];
+    const ok = idx === null ? handFields.includes(input.field) : actionFields.includes(input.field);
+    if (!ok) {
+      throw new ViewerApiError({
+        code: "invalid_correction",
+        message: `field=${input.field} はこの対象では訂正できません。`,
+      });
+    }
+    this.corrSeq += 1;
+    const correction: HandCorrection = {
+      correction_id: this.corrSeq.toString(16).padStart(32, "0"),
+      session_id: sessionId,
+      hand_id: handId,
+      action_index: idx,
+      field: input.field,
+      new_value: input.new_value,
+      corrected_by: input.corrected_by ?? "staff",
+      corrected_at: new Date().toISOString().slice(0, 19),
+      note: input.note,
+    };
+    this.corrections.push(correction);
+    return correction;
+  }
+
+  /** 元ハンドに訂正を重ねた訂正済みビューを返す（ADR-0036, python 版の overlay と対称）。 */
+  private applyCorrections(sessionId: string, hand: HandSummary): HandSummary {
+    const cs = this.corrections
+      .filter((c) => c.session_id === sessionId && c.hand_id === hand.hand_id)
+      .sort((a, b) => (a.corrected_at + a.correction_id).localeCompare(b.corrected_at + b.correction_id));
+    if (cs.length === 0) return hand;
+    const h = JSON.parse(JSON.stringify(hand)) as HandSummary & Record<string, unknown>;
+    for (const c of cs) {
+      if (c.action_index === null) {
+        (h as Record<string, unknown>)[c.field] = c.new_value;
+        continue;
+      }
+      const actions = h.actions ?? [];
+      if (c.action_index < 0 || c.action_index >= actions.length) continue;
+      const a = actions[c.action_index] as unknown as Record<string, unknown>;
+      const orig = (a._original as Record<string, unknown>) ?? {};
+      if (!(c.field in orig)) orig[c.field] = a[c.field];
+      a._original = orig;
+      a[c.field] = c.new_value;
+      a.corrected = true;
+      a.needs_review = false;
+    }
+    if (!(h.actions ?? []).some((a) => a.needs_review)) h.review_required = false;
+    return h;
   }
 }

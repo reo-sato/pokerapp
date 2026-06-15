@@ -71,7 +71,11 @@ pokerapp/
 │   ├── player_credential_repository.py ← PlayerCredentialRepository (PIN ハッシュ PBKDF2 + lockout, node-local, ADR-0027)
 │   ├── auth_identity.py           ← AuthIdentity ((provider,sub)→player_id, L2, ADR-0031)
 │   ├── auth_identity_repository.py ← AuthIdentityRepository (node-local, sync 非対象, L2, ADR-0031)
-│   └── oidc.py                    ← OidcProvider 抽象 + FakeOidcProvider + resolve_player_for_claim (L2, ADR-0031)
+│   ├── oidc.py                    ← OidcProvider 抽象 + FakeOidcProvider + resolve_player_for_claim (L2, ADR-0031)
+│   ├── atomic_io.py               ← atomic_write_json(fsync) + read_json_file(破損退避) (B2/B7)
+│   ├── backup.py                  ← データ JSON のバックアップ (B2)
+│   ├── hand_correction.py         ← HandCorrection + apply_hand_corrections オーバーレイ (B4, ADR-0036)
+│   └── hand_correction_repository.py ← ハンド訂正 append-only ストア (B4, ADR-0036)
 │
 ├── audio/
 │   ├── recorder.py                ← AudioThread (PyAudio + faster-whisper)
@@ -433,6 +437,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **settlement / cashflow CSV export (S3.3)** | ✅ 実装済 | `output/ledger_csv_exporter.py`（`main.py --export-ledger`, utf-8-sig） |
 | **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（`main.py --viewer-api`, read-only GET, `[api]` extra, ADR-0017。ledger summary は `compute_settlement` 由来 = ADR-0016） |
 | **mobile viewer (M2)** | ✅ 実装済 | `mobile/`（Expo/RN。PlayerSelect→MySessions→MyHands→HandDetail + 会計（**精算状況: 確定/未確定・支払済み/未払い** 表示, S4）+ 注文画面。`ViewerRepository` に mock/HTTP 注入, `EXPO_PUBLIC_API_URL` 切替, ADR-0017） |
+| **ハンド訂正 (B4, ADR-0036)** | ✅ 実装済 (data path) | 音声自動記録の誤認識を append-only オーバーレイで訂正。`core/hand_correction*.py`（store + `apply_hand_corrections`: 元値 `_original` 保持・`corrected`・needs_review 解除・監査痕、元 hand log は不変）+ viewer get_hand/list_player_hands に適用 + staff API `POST .../hands/{hid}/corrections` + `ViewerApiClient.add_hand_correction` + mobile `addHandCorrection`(mock/HTTP)。**残**: iPad 訂正画面 / PHH overlay |
 | **mobile 本人認証 UI (L1/L2)** | ✅ 実装済 (preview) | `mobile/src/screens/AuthScreen.tsx`（PIN ログイン = L1/ADR-0027、LINE/Google サインアップ = L2/ADR-0031）+ `ViewerRepository.{login,oidcExchange,currentPrincipal,clearAuth}`（mock/HTTP 両実装）+ 注文 POST に Bearer トークン付与。PlayerSelect に「PIN でログイン」「サインアップ」導線。既定 name-pick は不変。実 IdP の認可コード取得（SDK/redirect）は実環境タスク。typecheck + 11 mock tests + web export green |
 | **注文リクエスト write path (M5)** | ✅ 実装済 | `core/order_request*.py` / `core/menu.py` + viewer API `/menu`・`/order-requests`（GET/POST）+ `gui/ledger_view.py` の確定/却下パネル（§ 注文リクエスト参照, ADR-0018。staff-in-the-loop / in-process API / name-pick = ISSUE-0019 Fixed） |
 | **hand logger × session 統合 (S2.x E1+E2-core)** | ✅ 実装済 | `integration/engine.py`（`session_repo`/`seat_player_map` DI、`assign_seat` write-through + `player_id` additive 埋め込み、`session_layer.enabled` 既定 off で挙動不変, ADR-0008） |
