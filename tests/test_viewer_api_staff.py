@@ -136,6 +136,28 @@ def test_staff_buyin_presets(env: dict):
     assert ei.value.code == "unauthorized"
 
 
+def test_staff_close_session_then_commit(env: dict):
+    """B1: staff API で session を close → settlement commit が到達可能になる。"""
+    staff, session, alice = env["staff_client"], env["session"], env["alice"]
+    staff.add_ledger_entry(session.session_id, alice.player_id, "buy_in", cash_amount=10000)
+    with pytest.raises(ViewerApiError) as ei:
+        staff.commit_settlement(session.session_id)  # open のままでは不可
+    assert ei.value.code == "session_not_closed"
+    closed = staff.close_session(session.session_id)
+    assert closed["status"] == "closed"
+    committed = staff.commit_settlement(session.session_id)
+    assert any(r["player_id"] == alice.player_id for r in committed)
+    with pytest.raises(ViewerApiError) as ei:
+        staff.close_session(session.session_id)  # 2 回目は 409
+    assert (ei.value.code, ei.value.status_code) == ("already_closed", 409)
+
+
+def test_staff_close_unknown_session_not_found(env: dict):
+    with pytest.raises(ViewerApiError) as ei:
+        env["staff_client"].close_session("nonexistent-session")
+    assert (ei.value.code, ei.value.status_code) == ("not_found", 404)
+
+
 def test_no_token_is_unauthorized(env: dict):
     # token を持たない client（staff_token=None）で staff endpoint を叩く → 401
     no_token = ViewerApiClient(client=env["staff_client"]._client)

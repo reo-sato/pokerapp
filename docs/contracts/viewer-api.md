@@ -112,6 +112,7 @@ player 本人の self-write（注文 POST 等）を **PIN ログイン**で本�
 |--------|------|-------|------|--------|
 | GET  | `/api/staff/buyin-presets` | no | — | `{"presets": [int, ...]}`（config `ledger.buyin_presets` 由来。buy-in 金額メニュー, ADR-0026） |
 | POST | `/api/staff/players/merge` | yes | `{"survivor_id", "absorbed_id"}` | absorbed を survivor に統合（player merge, ADR-0030）。`{"survivor_id", "absorbed_id", "merged_into", "merged_at"}`。404 `not_found` / 400 `invalid_merge`（自己 merge / サイクル）。registry 書き込みのため write 所有プロセスのみ |
+| POST | `/api/staff/sessions/{session_id}/close` | yes | — | session を close（精算確定の前提, B1）。closed session を返す。404 `not_found` / 409 `already_closed`。reopen は提供しない |
 | GET  | `/api/staff/sessions/{session_id}/settlement` | no | — | `{"settlements": [session_settlement, ...]}`（compute_settlement, speculative） |
 | GET  | `/api/staff/sessions/{session_id}/order-requests?status=` | no | — | `{"requests": [order_request, ...]}`（全 player の queue。status query 任意） |
 | POST | `/api/staff/sessions/{session_id}/ledger-entries` | yes | `{player_id, kind, cash_amount?, point_amount?, note?, hand_id?, order?}` | 201 `ledger_entry` |

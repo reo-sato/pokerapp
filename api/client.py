@@ -227,6 +227,13 @@ class ViewerApiClient:
             json=payload, headers=self._staff_headers(),
         )
 
+    def close_session(self, session_id: str) -> dict:
+        """session を close する（精算確定の前提, B1, staff token）。"""
+        return self._request(
+            "POST", f"/api/staff/sessions/{session_id}/close",
+            headers=self._staff_headers(),
+        )
+
     def commit_settlement(self, session_id: str) -> list[dict]:
         return self._request(
             "POST", f"/api/staff/sessions/{session_id}/settlement/commit",

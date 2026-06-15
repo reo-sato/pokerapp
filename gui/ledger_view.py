@@ -54,7 +54,7 @@ from core.ledger_repository import (
     SessionNotClosedError,
     UnknownPlayerError,
 )
-from core.session_repository import SessionNotFoundError
+from core.session_repository import SessionAlreadyClosedError, SessionNotFoundError
 
 if TYPE_CHECKING:
     from core.menu import MenuMaster
@@ -122,6 +122,8 @@ class LedgerViewWindow:
         self._entry_rows: dict[str, object] = {}
         self._summary_rows: list[object] = []
         self._settlement_rows: list[object] = []
+        # session close は GUI から reopen できないため 2 クリック確認する（B1）。
+        self._pending_close: Optional[str] = None
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -308,6 +310,7 @@ class LedgerViewWindow:
 
     def _select_session(self, session_id: Optional[str]) -> None:
         self._session_id = session_id
+        self._pending_close = None  # セッション切替で close 確認待ちを解除（B1）
         status = "—"
         if session_id is not None:
             try:
@@ -497,18 +500,34 @@ class LedgerViewWindow:
         self._settlement_rows.clear()
         if not self._session_id:
             return
+        # セッション終了（close）ボタン（B1）。close しないと commit_settlement は
+        # SessionNotClosedError になる＝精算に到達できない。open のときのみ表示。
+        try:
+            is_open = self._session_repo.get_session(self._session_id).status == "open"
+        except SessionNotFoundError:
+            is_open = False
+        if is_open:
+            pending = self._pending_close == self._session_id
+            close_btn = ctk.CTkButton(
+                self._settlement_frame,
+                text="もう一度押すと終了します" if pending else "このセッションを終了（close）",
+                fg_color="#b04a2a" if pending else None,
+                command=self._cmd_close_session,
+            )
+            close_btn.grid(row=0, column=0, sticky="w", padx=4, pady=2)
+            self._settlement_rows.append(close_btn)
         # commit ボタン（closed session のみ確定可。open は core が SessionNotClosedError）。
         btn = ctk.CTkButton(
             self._settlement_frame, text="このセッションを精算確定（commit）",
             command=self._cmd_commit_settlement,
         )
-        btn.grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        btn.grid(row=1, column=0, sticky="w", padx=4, pady=2)
         self._settlement_rows.append(btn)
         try:
             committed = self._ledger.list_settlements(self._session_id)
         except LedgerNotFoundError:
             committed = []
-        for idx, s in enumerate(committed, start=1):
+        for idx, s in enumerate(committed, start=2):
             row = ctk.CTkFrame(self._settlement_frame, fg_color="transparent")
             row.grid(row=idx, column=0, sticky="ew", pady=1)
             row.grid_columnconfigure(0, weight=1)
@@ -536,6 +555,30 @@ class LedgerViewWindow:
                 ),
             ).grid(row=0, column=3, padx=4)
             self._settlement_rows.append(row)
+
+    def _cmd_close_session(self) -> None:
+        """セッションを終了（close）して精算確定を可能にする（B1）。reopen 不可のため 2 クリック確認。"""
+        if not self._session_id:
+            self._set_status("セッションを選択してください。", error=True)
+            return
+        if self._pending_close != self._session_id:
+            # 1 回目: 確認待ちにして再描画（ボタン文言が変わる）。
+            self._pending_close = self._session_id
+            self._refresh_settlement()
+            self._set_status("終了すると再開できません。もう一度「終了」を押すと確定します。", error=True)
+            return
+        self._pending_close = None
+        try:
+            self._session_repo.close_session(self._session_id)
+        except SessionAlreadyClosedError:
+            self._set_status("このセッションは既に終了しています。", error=True)
+            self._refresh()
+            return
+        except SessionNotFoundError:
+            self._set_status("セッションが見つかりません。", error=True)
+            return
+        self._refresh()
+        self._set_status("セッションを終了しました。精算確定（commit）が可能です。")
 
     def _cmd_commit_settlement(self) -> None:
         if not self._session_id:

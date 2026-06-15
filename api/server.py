@@ -61,7 +61,11 @@ from core.player_repository import (
     PlayerNotFoundError,
     PlayerRepository,
 )
-from core.session_repository import SessionNotFoundError, SessionRepository
+from core.session_repository import (
+    SessionAlreadyClosedError,
+    SessionNotFoundError,
+    SessionRepository,
+)
 from core.sync import build_snapshot, merge_snapshot_into
 
 logger = logging.getLogger(__name__)
@@ -545,6 +549,24 @@ def create_app(
             return JSONResponse(status_code=400,
                                 content={"code": "invalid_amount", "message": str(e)})
         return JSONResponse(status_code=201, content=entry.to_dict())
+
+    @app.post("/api/staff/sessions/{session_id}/close", response_model=None)
+    def staff_close_session(
+        session_id: str, request: Request
+    ) -> "JSONResponse | dict":
+        """session を close する（精算確定の前提, B1）。reopen は提供しない。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            session = session_repo.close_session(session_id)
+        except SessionNotFoundError as e:
+            return JSONResponse(status_code=404,
+                                content={"code": "not_found", "message": str(e)})
+        except SessionAlreadyClosedError as e:
+            return JSONResponse(status_code=409,
+                                content={"code": "already_closed", "message": str(e)})
+        return session.to_dict()
 
     @app.post("/api/staff/sessions/{session_id}/settlement/commit", response_model=None)
     def staff_commit_settlement(

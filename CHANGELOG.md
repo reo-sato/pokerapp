@@ -6,6 +6,19 @@
 
 ## [Unreleased]
 
+### Fixed / Added (v1.0 ローンチレビューの小粒修正: B1/B2/B3/B6)
+
+- **B1 セッション締め→精算の導線**（P0）: `close_session` はコアにあったが GUI/CLI/API から呼べず、
+  closed 前提の `commit_settlement`（精算確定）に到達不能だった。`gui/ledger_view.py` の精算パネルに
+  「セッション終了（close）」ボタン（reopen 不可のため 2 クリック確認）+ staff API
+  `POST /api/staff/sessions/{id}/close`（409 `already_closed`）+ `ViewerApiClient.close_session` を追加。
+- **B2 データバックアップ**（Crit）: 会計データ消失（単一 JSON）対策。`core/backup.py` + `tools/backup_data.py`
+  + 起動時自動バックアップ（`config.backup`, 既定 on）。
+- **B3 RFID PC/SC の street 自動遷移バグ**: `RFIDThread` が `board_index` を未設定で、PC/SC 経路の
+  board street 自動遷移が機能していなかった。来週の実機テストに向け修正 + 回帰テスト。
+- **B6 install docs**: `installation.md` を PC/SC（PN5180+ESP32-S3 USB CCID）canonical に更新
+  （HTTP/PN532 は補助に降格）。pcsc_readers(list) 設定手順・実 reader_name 採取を明記。
+
 ### Added (RFID USB CCID firmware↔host 契約の凍結, ADR-0034 / ISSUE-0015 Fixed)
 
 - PN5180 + ESP32-S3 の **USB CCID firmware ↔ host (PC/SC) 契約**を `docs/contracts/rfid-usb-ccid.md`
