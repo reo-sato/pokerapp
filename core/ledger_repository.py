@@ -28,12 +28,12 @@ from __future__ import annotations
 import functools
 import json
 import logging
-import os
 import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 
+from core.atomic_io import atomic_write_json
 from core.ledger import LedgerEntry, PointLedgerEntry, SessionSettlement
 from core.player_repository import PlayerNotFoundError, PlayerRepository
 from core.session_repository import SessionNotFoundError, SessionRepository
@@ -209,9 +209,7 @@ class LedgerRepository:
             self._settlements[(s.session_id, s.player_id)] = s
 
     def _flush(self) -> None:
-        """アトミックリネームで書き込む。失敗してもクラッシュしない。"""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(".tmp")
+        """アトミック + fsync で書き込む（ADR-0034/B2）。失敗してもクラッシュしない。"""
         data = {
             "schema_version": _SCHEMA_VERSION,
             "ledger_entries": [e.to_dict() for e in self._entries],
@@ -219,13 +217,9 @@ class LedgerRepository:
             "settlements": [s.to_dict() for s in self._settlements.values()],
         }
         try:
-            with tmp_path.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._path)
+            atomic_write_json(self._path, data)
         except OSError:
             logger.exception("Failed to write ledger DB: %s", self._path)
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
 
     @_locked
     def reload(self) -> None:

@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from pathlib import Path
+
+from core.atomic_io import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -109,19 +110,15 @@ class CardMaster:
             logger.error("Failed to load card master: %s", e)
 
     def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
+        data = {
+            "description": "RFID tag to poker card mapping. "
+                           "Register each physical card with its NFC tag UID.",
+            "cards": self._mapping,
+        }
         try:
-            data = {
-                "description": "RFID tag to poker card mapping. "
-                               "Register each physical card with its NFC tag UID.",
-                "cards": self._mapping,
-            }
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp, self._path)
+            atomic_write_json(self._path, data)
         except OSError:
             logger.exception("Failed to save card master to %s", self._path)
-            tmp.unlink(missing_ok=True)
 
 
 # ――― タグ ID ユーティリティ ―――

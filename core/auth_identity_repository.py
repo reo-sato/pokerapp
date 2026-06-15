@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
 
+from core.atomic_io import atomic_write_json
 from core.auth_identity import AuthIdentity
 
 logger = logging.getLogger(__name__)
@@ -65,17 +65,10 @@ class AuthIdentityRepository:
             self._by_key[identity.key] = identity
 
     def _flush(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(".tmp")
-        data = {"identities": [i.to_dict() for i in self._by_key.values()]}
         try:
-            with tmp_path.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._path)
+            atomic_write_json(self._path, {"identities": [i.to_dict() for i in self._by_key.values()]})
         except OSError:
             logger.exception("Failed to write auth_identity DB: %s", self._path)
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
 
     def reload(self) -> None:
         self._by_key.clear()

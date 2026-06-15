@@ -12,8 +12,11 @@
   closed 前提の `commit_settlement`（精算確定）に到達不能だった。`gui/ledger_view.py` の精算パネルに
   「セッション終了（close）」ボタン（reopen 不可のため 2 クリック確認）+ staff API
   `POST /api/staff/sessions/{id}/close`（409 `already_closed`）+ `ViewerApiClient.close_session` を追加。
-- **B2 データバックアップ**（Crit）: 会計データ消失（単一 JSON）対策。`core/backup.py` + `tools/backup_data.py`
-  + 起動時自動バックアップ（`config.backup`, 既定 on）。
+- **B2 データバックアップ + fsync**（Crit）: 会計データ消失（単一 JSON）対策。`core/backup.py` +
+  `tools/backup_data.py` + 起動時自動バックアップ（`config.backup`, 既定 on）。加えて全永続書き込みを
+  共有ヘルパ `core/atomic_io.py:atomic_write_json`（temp→flush→**fsync**→os.replace）に集約し、電源断でも
+  書き込み内容がロスしないようにした（9 writer = players/sessions/ledger/orders/credentials/auth_identity/
+  hand log/sync/card_master を移行）。
 - **B3 RFID PC/SC の street 自動遷移バグ**: `RFIDThread` が `board_index` を未設定で、PC/SC 経路の
   board street 自動遷移が機能していなかった。来週の実機テストに向け修正 + 回帰テスト。
 - **B6 install docs**: `installation.md` を PC/SC（PN5180+ESP32-S3 USB CCID）canonical に更新

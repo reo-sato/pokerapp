@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 
+from core.atomic_io import atomic_write_json
 from core.ledger_repository import LedgerRepository
 from core.order_request import OrderRequest
 from core.player_repository import PlayerNotFoundError, PlayerRepository
@@ -138,20 +138,11 @@ class OrderRequestRepository:
             self._reload()
 
     def _flush(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(".tmp")
         try:
-            with tmp_path.open("w", encoding="utf-8") as f:
-                json.dump(
-                    {"requests": [r.to_dict() for r in self._requests]},
-                    f, ensure_ascii=False, indent=2,
-                )
-            os.replace(tmp_path, self._path)
+            atomic_write_json(self._path, {"requests": [r.to_dict() for r in self._requests]})
             self._loaded_mtime = self._path.stat().st_mtime
         except OSError:
             logger.exception("Failed to write order request DB: %s", self._path)
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
 
     # ――― 操作 ―――
 

@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import uuid
 from datetime import datetime
 from pathlib import Path
 
+from core.atomic_io import atomic_write_json
 from core.player import Player
 
 logger = logging.getLogger(__name__)
@@ -86,18 +86,12 @@ class PlayerRepository:
             self._players[player.player_id] = player
 
     def _flush(self) -> None:
-        """JsonWriter と同じくアトミックリネームで書き込む。失敗してもクラッシュしない。"""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(".tmp")
+        """アトミック + fsync で書き込む（ADR-0034/B2）。失敗してもクラッシュしない。"""
         data = {"players": [p.to_dict() for p in self._players.values()]}
         try:
-            with tmp_path.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._path)
+            atomic_write_json(self._path, data)
         except OSError:
             logger.exception("Failed to write player DB: %s", self._path)
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
 
     def reload(self) -> None:
         """ディスクから再読込する（read-only viewer が外部更新を取り込む用）。

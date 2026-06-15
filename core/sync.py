@@ -22,8 +22,9 @@ ADR-0022 §Decision.2 の per-store ルールに従い、UUID union + 単調フ�
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
+
+from core.atomic_io import atomic_write_json
 
 # ――― 終端 status の優先度（order_request）―――
 # pending < {confirmed, rejected}。両終端で異なれば confirmed を優先（会計影響あり）。
@@ -377,13 +378,8 @@ def _read_json(path: str | Path) -> dict:
 
 
 def _atomic_write(path: str | Path, data: dict) -> None:
-    """各 repository と同じアトミックリネーム（tmp + os.replace）で書き込む。"""
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, p)
+    """アトミック + fsync で書き込む（共有ヘルパ, ADR-0034/B2）。"""
+    atomic_write_json(path, data)
 
 
 def build_snapshot(
