@@ -141,14 +141,16 @@ UI は `staff/src/api/repository.ts` の `StaffRepository` interface のみに�
 
 ## Validation / Follow-up
 
-本 ADR は **設計のみ・コード変更なし**。実装着手時の DoD:
+本 ADR は設計を確定し、**会計/注文の scaffold は実装着手済**（2026-06-16）。DoD:
 
-- [ ] `staff/` scaffold（Expo/RN）+ `StaffRepository` interface + `MockStaffRepository` で
+- [x] `staff/` scaffold（Expo/RN）+ `StaffRepository` interface + `MockStaffRepository` で
       Login → SessionList → TableView（会計/注文タブ）が mock で動く。
-- [ ] `HttpStaffRepository` が `--ledger`（`viewer_api.enabled` + `staff_token`）に接続し会計/注文を
-      round-trip（typecheck + mock tests green, `mobile/` と同基準）。
+      typecheck + 7 mock tests + web export green（`staff/`）。
+- [x] `HttpStaffRepository` が `--ledger`（`viewer_api.enabled` + `staff_token`）の staff API
+      （会計/注文 endpoint）に対応（`EXPO_PUBLIC_API_URL` 切替, `mobile/` と同基準）。
+      `listSessions`（`GET /api/staff/sessions`）のみ未実装で `not_implemented`（ADR-0036 §B 待ち）。
 - [ ] 座席タブ / ハンドロガータブは ADR-0036 の API 追加後に有効化。
-- [ ] 不足 staff API の設計 = **ADR-0036**、open question / risk = **ISSUE-0020**。
+- [x] 不足 staff API の設計 = **ADR-0036**、open question / risk = **ISSUE-0020**。
 
 ## Related Files
 

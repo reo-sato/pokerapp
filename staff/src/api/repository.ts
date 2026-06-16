@@ -1,0 +1,81 @@
+/**
+ * StaffRepository: staff API 契約 (api/server.py `/api/staff/...`, ADR-0021 / 0035 / 0036) に
+ * 対応する front-end 抽象。UI はこの interface のみに依存し、mock (fixtures) と HTTP 実装を
+ * 注入で差し替える (contract-first, ADR-0035 §6)。
+ *
+ * scope = 会計 (Ledger/精算) + 注文リクエスト捌き（ADR-0035 の最優先 2 機能。staff API が実装済）。
+ * 座席 / ハンドロガー遠隔制御は ADR-0036（API 追加）後に additive 拡張する。
+ *
+ * 認可は staff shared token（`Authorization: Bearer <viewer_api.staff_token>`, ADR-0021）。
+ * token 未設定/不一致は staff_writes_disabled(403) / unauthorized(401)、read-only プロセスへの
+ * write は orders_unavailable(503) で reject する（StaffApiError の code で分岐）。
+ */
+import type {
+  LedgerEntry,
+  MenuItem,
+  OrderRequest,
+  Player,
+  SessionSettlement,
+  StaffLedgerEntryBody,
+  StaffSession,
+} from "./types";
+
+export interface StaffRepository {
+  // ――― 認可（staff shared token を保持・付与する） ―――
+  /** staff token をセットする（端末ログイン）。 */
+  setToken(token: string): void;
+  /** 現在の token（未設定は null）。 */
+  getToken(): string | null;
+  /** token を破棄する（ログアウト）。 */
+  clearToken(): void;
+
+  // ――― 接続 / 認可確認 ―――
+  /** API 死活。token 不要。 */
+  health(): Promise<{ status: string; version: string }>;
+  /**
+   * token の有効性を確認する（任意の staff read を叩く）。
+   * unauthorized / staff_writes_disabled で reject。ログイン画面で使う。
+   */
+  verifyToken(): Promise<void>;
+
+  // ――― セッション（卓選択） ―――
+  /**
+   * 全 session 一覧（staff の卓選択用）。
+   * HTTP は GET /api/staff/sessions（ADR-0036 §B, 未実装）→ 実装まで not_implemented。
+   */
+  listSessions(): Promise<StaffSession[]>;
+  /** registry の全 player（会計エントリの player 選択用）。 */
+  listPlayers(): Promise<Player[]>;
+
+  // ――― 会計（Ledger / 精算）―――
+  /** buy-in 金額プリセット（config 由来, ADR-0026）。 */
+  getBuyinPresets(): Promise<number[]>;
+  /** session の中間集計（compute_settlement, 暫定 = speculative）。 */
+  getSettlement(sessionId: string): Promise<SessionSettlement[]>;
+  /** ledger entry を追加する（buy_in/rebuy/add_on/order/entry_fee/adjustment, cash+point）。 */
+  addLedgerEntry(sessionId: string, body: StaffLedgerEntryBody): Promise<LedgerEntry>;
+  /** session を精算確定する（closed session のみ。確定済 settlement 行を返す）。 */
+  commitSettlement(sessionId: string): Promise<SessionSettlement[]>;
+  /** 確定済 settlement の支払状態を paid/unpaid に切り替える。 */
+  setPaymentStatus(
+    sessionId: string,
+    playerId: string,
+    status: "paid" | "unpaid",
+  ): Promise<SessionSettlement>;
+  /** 受領額を記録し payment_status を導出する（partial-paid, ADR-0023）。 */
+  recordPayment(
+    sessionId: string,
+    playerId: string,
+    paidAmount: number,
+  ): Promise<SessionSettlement>;
+
+  // ――― 注文リクエスト捌き（M5 / ADR-0018）―――
+  /** 注文メニュー（menu.json master）。確定時の単価 prefill に使う。 */
+  getMenu(): Promise<MenuItem[]>;
+  /** session の注文 queue（全 player。status で絞り込み可）。 */
+  listOrderRequests(sessionId: string, status?: string): Promise<OrderRequest[]>;
+  /** 注文を確定する（単価を確定し order ledger entry を起こす）。 */
+  confirmOrder(requestId: string, unitAmount: number): Promise<OrderRequest>;
+  /** 注文を却下する。 */
+  rejectOrder(requestId: string): Promise<OrderRequest>;
+}

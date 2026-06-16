@@ -1,0 +1,29 @@
+{
+  "name": "pokerapp-staff",
+  "version": "0.1.0",
+  "main": "index.ts",
+  "dependencies": {
+    "expo": "~56.0.9",
+    "expo-status-bar": "~56.0.4",
+    "react": "19.2.3",
+    "react-dom": "^19.2.3",
+    "react-native": "0.85.3",
+    "react-native-web": "^0.21.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "@types/react": "~19.2.2",
+    "tsx": "^4.22.4",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/api/mockRepository.test.ts",
+    "export:web": "expo export --platform web"
+  },
+  "private": true
+}

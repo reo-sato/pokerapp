@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+### Added (店舗用 staff iPad アプリ — 会計/注文 scaffold, ADR-0035 / WS4)
+
+- **新規 `staff/` アプリ**（Expo/RN, TypeScript。player 用 `mobile/` とは別アプリ）を追加。スタッフが
+  iPad/web から **会計（Ledger/精算）と注文リクエスト捌き**を操作できる scaffold。画面は
+  **Login（staff token）→ SessionList → TableView（会計タブ / 注文タブ）**。
+  - **会計タブ**: ledger エントリ追加（buy_in/rebuy/add_on/order/entry_fee/adjustment, cash+point）、
+    **buy-in 金額プリセット**（ADR-0026）、**中間集計（暫定）**、closed session の**精算確定（commit）**と
+    **支払状態（paid/unpaid/partial）+ 受領額記録**（ADR-0023）。
+  - **注文タブ**: pending 注文の**確定**（単価確定 → order ledger entry, staff-in-the-loop / ADR-0018）と
+    **却下**。確定単価は menu master から prefill。
+- **contract-first**（ADR-0035 §6）: UI は `StaffRepository` interface のみに依存し、`MockStaffRepository`
+  （既定 = fixtures、token `demo-staff-token`）/ `HttpStaffRepository`（staff API `/api/staff/...` を fetch、
+  `EXPO_PUBLIC_API_URL` 切替、`Authorization: Bearer <staff_token>`）を注入で差し替える。typecheck +
+  7 mock 契約テスト + web export green。
+- **残（後続）**: 座席タブ・ハンドタブと HTTP の `listSessions`（`GET /api/staff/sessions`）は **ADR-0036**
+  の staff API 追加が前提（現状 `not_implemented`）。open question は ISSUE-0020。
+
 ### Added (店舗用 staff iPad アプリの設計, ADR-0035 / ADR-0036 / ISSUE-0020 — 設計のみ・コードなし)
 
 - 店舗（スタッフ）操作の UX 改修に向け、**新規 staff iPad アプリ**の設計ドキュメントを追加。現状の
