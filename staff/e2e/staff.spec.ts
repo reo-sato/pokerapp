@@ -76,6 +76,19 @@ test("seating tab: shows current seating and assigns next hand", async ({ page }
   await expect(page.getByText(/に割り当てました/)).toBeVisible();
 });
 
+test("hand tab: send new-hand and winner control commands", async ({ page }) => {
+  await login(page);
+  await openTable(page);
+
+  await page.getByText("ハンド").click();
+  await page.getByText("新ハンド開始").click();
+  await expect(page.getByText(/送信しました: 新ハンド/)).toBeVisible();
+
+  await page.getByPlaceholder("席1-9").fill("3");
+  await page.getByText("ウィナー確定").click();
+  await expect(page.getByText(/送信しました: ウィナー 席3/)).toBeVisible();
+});
+
 test("create a new session from the list", async ({ page }) => {
   await login(page);
   await page.getByPlaceholder("例: 土曜ナイト #5").fill("E2E 卓");

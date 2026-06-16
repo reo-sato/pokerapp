@@ -142,6 +142,12 @@ player 本人の self-write（注文 POST 等）を **PIN ログイン**で本�
 | POST | `/api/staff/players` | yes | `{display_name}` | 201 `player`。400 `empty_display_name` / `duplicate_display_name` |
 | PUT  | `/api/staff/players/{player_id}` | yes | `{display_name}` | 更新後 `player`。404 `not_found` / 400 `empty_display_name` / `duplicate_display_name` |
 
+#### hand logger 遠隔制御（ADR-0037 §C）
+
+| method | path | write | body | 返り値 |
+|--------|------|-------|------|--------|
+| POST | `/api/staff/sessions/{session_id}/control` | yes | `{type: "new_hand"\|"winner"\|"rebuy", seat?, amount?}` | 201 `control_command` = `{command_id, type, args, created_at}`（`logs/{session_id}.control.jsonl` に append。適用は hand logger プロセスの consumer = `hand_control.enabled`）。400 `invalid_control`（type 不正 / winner に seat 無し / rebuy に seat・正の amount 無し） |
+
 ### error code（再利用 + 新規）
 
 ledger / settlement の error は `error-shapes.md` の ledger セクションを **再利用**:
@@ -151,8 +157,9 @@ ledger / settlement の error は `error-shapes.md` の ledger セクション�
 `invalid_quantity`(400) / `not_found`(404)。session / 座席（ADR-0036 §B）は session セクションの
 `not_found`(404) / `already_closed`(409) / `session_closed`(409) / `seat_taken`(409) /
 `player_already_seated`(409) / `unknown_player`(404) / `invalid_seat`(400)、player registry は
-`empty_display_name`(400) / `duplicate_display_name`(400) を再利用。新規 code は認可の
-**`unauthorized`(401)** / **`staff_writes_disabled`(403)**、write 所有外は既存 `orders_unavailable`(503)。
+`empty_display_name`(400) / `duplicate_display_name`(400) を再利用。hand logger 遠隔制御（ADR-0037 §C）は
+新規 **`invalid_control`(400)**（control コマンドの形式不正）。認可の **`unauthorized`(401)** /
+**`staff_writes_disabled`(403)**、write 所有外は既存 `orders_unavailable`(503)。
 
 ## sync API（ADR-0022）
 

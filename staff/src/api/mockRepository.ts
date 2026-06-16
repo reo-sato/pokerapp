@@ -9,6 +9,8 @@
  */
 import type { StaffRepository } from "./repository";
 import {
+  type ControlCommand,
+  type HandControlInput,
   type LedgerEntry,
   type LedgerKind,
   type MenuItem,
@@ -516,5 +518,34 @@ export class MockStaffRepository implements StaffRepository {
     req.status = "rejected";
     req.resolved_at = new Date().toISOString();
     return clone(req);
+  }
+
+  async sendControl(sessionId: string, input: HandControlInput): Promise<ControlCommand> {
+    this.requireAuth();
+    this.requireSession(sessionId);
+    const args: { seat?: number; amount?: number } = {};
+    if (input.type === "winner") {
+      if (!Number.isInteger(input.seat)) {
+        throw new StaffApiError({ code: "invalid_control", message: "winner には seat が必要です。" });
+      }
+      args.seat = input.seat;
+    } else if (input.type === "rebuy") {
+      if (!Number.isInteger(input.seat) || !Number.isInteger(input.amount) || (input.amount ?? 0) <= 0) {
+        throw new StaffApiError({
+          code: "invalid_control",
+          message: "rebuy には seat と正の amount が必要です。",
+        });
+      }
+      args.seat = input.seat;
+      args.amount = input.amount;
+    } else if (input.type !== "new_hand") {
+      throw new StaffApiError({ code: "invalid_control", message: `未対応の control: ${input.type}` });
+    }
+    return {
+      command_id: this.nextHex32(),
+      type: input.type,
+      args,
+      created_at: new Date().toISOString(),
+    };
   }
 }

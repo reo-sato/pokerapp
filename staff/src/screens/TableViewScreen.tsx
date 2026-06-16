@@ -5,13 +5,14 @@ import type { StaffRepository } from "../api/repository";
 import type { Player, StaffSession } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
 import { BackLink, colors, styles } from "./common";
+import { HandTab } from "./HandTab";
 import { LedgerTab } from "./LedgerTab";
 import { OrdersTab } from "./OrdersTab";
 import { SeatingTab } from "./SeatingTab";
 
 export type NameResolver = (playerId: string) => string;
 
-type Tab = "ledger" | "orders" | "seating";
+type Tab = "ledger" | "orders" | "seating" | "hand";
 
 /**
  * 卓ビュー（ADR-0035 §5）: 1 つの session について会計 / 注文をタブで統合する。
@@ -62,6 +63,7 @@ export function TableViewScreen(props: {
           onPress={() => setTab("orders")}
         />
         <TabButton label="座席" active={tab === "seating"} onPress={() => setTab("seating")} />
+        <TabButton label="ハンド" active={tab === "hand"} onPress={() => setTab("hand")} />
       </View>
 
       {tab === "ledger" ? (
@@ -73,7 +75,7 @@ export function TableViewScreen(props: {
           resolveName={resolveName}
           onChanged={pendingState.reload}
         />
-      ) : (
+      ) : tab === "seating" ? (
         <SeatingTab
           repository={repository}
           session={session}
@@ -81,6 +83,8 @@ export function TableViewScreen(props: {
           resolveName={resolveName}
           reloadPlayers={playersState.reload}
         />
+      ) : (
+        <HandTab repository={repository} session={session} />
       )}
     </View>
   );

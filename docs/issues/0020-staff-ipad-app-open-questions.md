@@ -33,14 +33,14 @@ ADR-0035（staff iPad アプリ）/ ADR-0036（staff API 拡張）に沿って�
 
 ## Open Questions（要決着）
 
-1. **hand logger 遠隔制御のプロセス境界（最重要, ADR-0036 §C）**:
-   hand logger（録音 = `main.py` GUI/CLI）と staff API（`--ledger`）は別プロセス。新ハンド/ウィナー/
-   リバイを iPad から送る経路を、
-   (a) append-only control queue（`logs/{session_id}.control.jsonl` を hand logger が tail）、
-   (b) hand logger 自前の control 受信に proxy、
-   (c) 当面 read-only（PC オペレータが手動）、
-   のどれにするか。録音主体は PC 維持（ADR-0035 §4）・hand logger 状態の二重書き込み回避が制約。
-   → spike で (a) の実現性（tail の遅延 / command 冪等 / プロセス死活）を検証して決定。
+1. **hand logger 遠隔制御のプロセス境界（最重要, ADR-0036 §C）** — **✅ Resolved（ADR-0037）**:
+   選択肢 (a) **append-only control queue**（`logs/{session_id}.control.jsonl` を hand logger が tail）を
+   採用・実装。staff API が append、hand logger プロセスの `ControlConsumerThread` が末尾シーク + 
+   `command_id` 重複排除で新規のみを `AudioEvent` に翻訳し IntegrationThread に渡す（状態変更経路を
+   増やさない, ISSUE-0012）。既定 off（`hand_control.enabled`）+ GUI + `session_layer.enabled` が前提。
+   録音は PC 維持（ADR-0035 §4）。`core/control_queue.py` / `integration/control_consumer.py` /
+   `POST /api/staff/sessions/{sid}/control` / staff app ハンドタブ。**残**: ハンド履歴 read（staff 用
+   hands-list endpoint）と実機での反映遅延・死活の確認。
 
 2. **session ⇔ hand logger の結線**: staff app から作った session（ADR-0036 §B の `POST
    /api/staff/sessions`）を、録音中の hand logger が **どの session_id で書くか**。現状 hand logger は

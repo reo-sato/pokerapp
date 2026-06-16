@@ -133,6 +133,23 @@ export interface OrderRequest {
   ledger_entry_id?: string;
 }
 
+/** hand logger 遠隔制御コマンド（control queue, ADR-0037）。 */
+export type HandControlType = "new_hand" | "winner" | "rebuy";
+
+export interface HandControlInput {
+  type: HandControlType;
+  seat?: number;
+  amount?: number;
+}
+
+/** POST /api/staff/sessions/{sid}/control の応答（append された 1 コマンド）。 */
+export interface ControlCommand {
+  command_id: string;
+  type: string;
+  args: { seat?: number; amount?: number };
+  created_at: string;
+}
+
 /** error-shapes.md の論理形。分岐は code、表示は message。 */
 export interface ApiError {
   code: string;

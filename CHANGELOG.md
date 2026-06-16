@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+### Added (hand logger 遠隔制御 + staff アプリ ハンドタブ, ADR-0037 / WS4 §C)
+
+- **hand logger を staff iPad から遠隔操作**できるようにした（**新ハンド / ウィナー / リバイ**）。録音
+  （音声/RFID）は録音 PC 常駐のまま、iPad は **append-only control queue** にコマンドを積むだけ。適用は
+  hand logger プロセスが行う（状態変更経路は IntegrationThread に一元化, ISSUE-0012 遵守）。
+  - `core/control_queue.py`（`ControlCommandLog`: `logs/{session_id}.control.jsonl` への append/offset 読み）
+    + `integration/control_consumer.py`（`ControlConsumerThread`: 末尾シーク + command_id 重複排除で新規のみ
+    `AudioEvent` に翻訳）。
+  - `POST /api/staff/sessions/{session_id}/control` + `ViewerApiClient.send_control`。新 error `invalid_control`(400)。
+  - `main.py --`（GUI）に consumer を結線。config `hand_control.enabled`（既定 **false**）+ GUI +
+    `session_layer.enabled` のときのみ起動 → **既定では挙動不変**。
+  - staff アプリに **ハンドタブ**（`staff/src/screens/HandTab.tsx`）。`StaffRepository.sendControl`（mock/HTTP）。
+- テスト: `tests/test_control_queue.py`（append/offset/idempotent/translate/consumer 末尾シーク）+
+  staff API control テスト（Python 634 passed）、staff アプリ typecheck + 13 mock tests + E2E 6 件
+  （ハンドタブの送信フロー追加）。
+- **残**: ハンド履歴の staff read（hands-list endpoint）と実機での反映遅延/死活確認は後続（ISSUE-0020）。
+
 ### Added (staff アプリ ブラウザ E2E, Playwright / WS4)
 
 - **staff アプリの UI を Playwright E2E で検証**（`staff/e2e/staff.spec.ts`, 5 tests）。web export

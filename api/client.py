@@ -353,6 +353,23 @@ class ViewerApiClient:
             json={"display_name": display_name}, headers=self._staff_headers(),
         )
 
+    # ――― hand logger 遠隔制御（control queue, ADR-0037 §C）―――
+
+    def send_control(
+        self, session_id: str, type: str,
+        seat: int | None = None, amount: int | None = None,
+    ) -> dict:
+        """hand logger に制御コマンド（new_hand / winner / rebuy）を送る。"""
+        payload: dict = {"type": type}
+        if seat is not None:
+            payload["seat"] = seat
+        if amount is not None:
+            payload["amount"] = amount
+        return self._request(
+            "POST", f"/api/staff/sessions/{session_id}/control",
+            json=payload, headers=self._staff_headers(),
+        )
+
     # ――― sync API（ADR-0022。state-based merge。staff-token gate）―――
 
     def pull_sync_snapshot(self) -> dict:

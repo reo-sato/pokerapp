@@ -393,6 +393,25 @@ def run_gui() -> None:
         camera_thread=camera_thread,
         rfid_thread=rfid_thread,
     )
+
+    # WS4 §C (ADR-0037): staff iPad からの hand logger 遠隔制御。既定 off で挙動不変。
+    # session_layer 有効時のみ（session_id が sessions.json にあり staff が卓を選べる）。
+    control_thread = None
+    if cfg.get("hand_control", {}).get("enabled", False) and session_layer_enabled:
+        from core.control_queue import ControlCommandLog
+        from integration.control_consumer import ControlConsumerThread
+        control_log = ControlCommandLog(
+            Path(session_cfg["log_dir"]) / f"{session_id}.control.jsonl"
+        )
+        control_thread = ControlConsumerThread(
+            control_log=control_log,
+            audio_queue=audio_q,
+            stop_event=stop_event,
+            poll_interval_ms=cfg.get("hand_control", {}).get("poll_interval_ms", 200),
+        )
+        control_thread.start()
+        print(f"hand 遠隔制御を有効化しました: {control_log.path}（staff iPad から操作可）")
+
     dash.run()
 
     # mainloop 終了後のクリーンアップ
@@ -401,6 +420,8 @@ def run_gui() -> None:
     integration_thread.join(timeout=3)
     if camera_thread is not None:
         camera_thread.join(timeout=3)
+    if control_thread is not None:
+        control_thread.join(timeout=3)
     print(f"\nセッション終了。ログ保存先: {json_writer.path}")
 
 

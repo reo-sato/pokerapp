@@ -11,6 +11,8 @@
  */
 import type { StaffRepository } from "./repository";
 import {
+  type ControlCommand,
+  type HandControlInput,
   type LedgerEntry,
   type MenuItem,
   type OrderRequest,
@@ -219,5 +221,12 @@ export class HttpStaffRepository implements StaffRepository {
 
   rejectOrder(requestId: string): Promise<OrderRequest> {
     return this.send("POST", `/api/staff/order-requests/${E(requestId)}/reject`);
+  }
+
+  sendControl(sessionId: string, input: HandControlInput): Promise<ControlCommand> {
+    const payload: { type: string; seat?: number; amount?: number } = { type: input.type };
+    if (input.seat !== undefined) payload.seat = input.seat;
+    if (input.amount !== undefined) payload.amount = input.amount;
+    return this.send("POST", `/api/staff/sessions/${E(sessionId)}/control`, payload);
   }
 }

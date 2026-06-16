@@ -11,6 +11,8 @@
  * write は orders_unavailable(503) で reject する（StaffApiError の code で分岐）。
  */
 import type {
+  ControlCommand,
+  HandControlInput,
   LedgerEntry,
   MenuItem,
   OrderRequest,
@@ -104,4 +106,11 @@ export interface StaffRepository {
   confirmOrder(requestId: string, unitAmount: number): Promise<OrderRequest>;
   /** 注文を却下する。 */
   rejectOrder(requestId: string): Promise<OrderRequest>;
+
+  // ――― ハンド（hand logger 遠隔制御, ADR-0037 §C）―――
+  /**
+   * hand logger に制御コマンド（新ハンド / ウィナー / リバイ）を送る。録音は PC 常駐のまま、
+   * iPad はコマンドを control queue に積むだけ（適用は hand logger プロセス）。
+   */
+  sendControl(sessionId: string, input: HandControlInput): Promise<ControlCommand>;
 }

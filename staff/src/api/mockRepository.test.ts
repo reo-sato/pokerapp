@@ -239,6 +239,33 @@ test("player lifecycle: create, rename, duplicate, not_found", async () => {
   });
 });
 
+test("sendControl: validates type/args and returns a command (ADR-0037)", async () => {
+  const repo = authed();
+  const s = await repo.createSession("Control");
+  const nh = await repo.sendControl(s.session_id, { type: "new_hand" });
+  assert.equal(nh.type, "new_hand");
+  assert.ok(nh.command_id);
+
+  const win = await repo.sendControl(s.session_id, { type: "winner", seat: 3 });
+  assert.deepEqual(win.args, { seat: 3 });
+  const rb = await repo.sendControl(s.session_id, { type: "rebuy", seat: 1, amount: 5000 });
+  assert.deepEqual(rb.args, { seat: 1, amount: 5000 });
+
+  await assert.rejects(repo.sendControl(s.session_id, { type: "winner" }), (err: unknown) => {
+    assert.ok(err instanceof StaffApiError);
+    assert.equal(err.code, "invalid_control");
+    return true;
+  });
+  await assert.rejects(
+    repo.sendControl(s.session_id, { type: "rebuy", seat: 1, amount: 0 }),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "invalid_control");
+      return true;
+    },
+  );
+});
+
 test("seating: assign batch into next hand, read current, conflict/closed codes", async () => {
   const repo = authed();
   const s = await repo.createSession("Seat test");

@@ -205,6 +205,36 @@ def test_seat_assignment_and_errors(env: dict):
     assert ei.value.code == "session_closed"
 
 
+# ――― §C: hand logger 遠隔制御（control queue）―――
+
+def test_hand_control_appends_commands(env: dict, tmp_path: Path):
+    from core.control_queue import ControlCommandLog
+
+    staff = env["staff"]
+    s = staff.create_session(label="Control")
+    sid = s["session_id"]
+
+    cmd = staff.send_control(sid, "new_hand")
+    assert cmd["type"] == "new_hand" and cmd["command_id"]
+    staff.send_control(sid, "winner", seat=3)
+    staff.send_control(sid, "rebuy", seat=1, amount=5000)
+
+    # control queue ファイルに 3 件 append されている（hand logger が tail する対象）。
+    log = ControlCommandLog(tmp_path / "logs" / f"{sid}.control.jsonl")
+    cmds, _ = log.read_from(0)
+    assert [c.type for c in cmds] == ["new_hand", "winner", "rebuy"]
+    assert cmds[1].args == {"seat": 3}
+    assert cmds[2].args == {"seat": 1, "amount": 5000}
+
+    # 不正 control は invalid_control
+    with pytest.raises(ViewerApiError) as ei:
+        staff.send_control(sid, "winner")  # seat 無し
+    assert ei.value.code == "invalid_control"
+    with pytest.raises(ViewerApiError) as ei:
+        staff.send_control(sid, "nope")
+    assert ei.value.code == "invalid_control"
+
+
 # ――― 認可 ―――
 
 def test_authz_for_new_endpoints(tmp_path: Path):

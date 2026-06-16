@@ -62,6 +62,11 @@
     "enabled": false,
     "_comment": "S2.x (ADR-0008): hand logger を session レイヤ(seat→player_id の write-through)に接続。既定 false で従来動作（rollback）。true で GUI 起動時に session を作成し、座席設定ダイアログ（Phase E3, ISSUE-0006）で seat→player を割り当てる。"
   },
+  "hand_control": {
+    "enabled": false,
+    "poll_interval_ms": 200,
+    "_comment": "WS4 §C (ADR-0037): staff iPad からの hand logger 遠隔制御（新ハンド/ウィナー/リバイ）を受け付ける。既定 false で挙動不変。true かつ GUI モード + session_layer.enabled のとき、logs/{session_id}.control.jsonl を tail して AudioEvent に翻訳し IntegrationThread に渡す。録音は PC 常駐のまま・iPad は制御コマンド送信のみ。"
+  },
   "viewer_api": {
     "enabled": false,
     "bind_host": "127.0.0.1",

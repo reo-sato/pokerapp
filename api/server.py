@@ -30,6 +30,7 @@ from api.read_models import (
 )
 from core.auth_identity_repository import AuthIdentityRepository
 from core.auth_token import issue_player_token, verify_player_token
+from core.control_queue import VALID_CONTROL_TYPES, ControlCommandLog
 from core.oidc import OidcError, OidcProvider, resolve_player_for_claim
 from core.ledger_repository import (
     AlreadySettledError,
@@ -187,6 +188,14 @@ class _StaffSeatAssignBody(BaseModel):
     """
 
     assignments: list[_SeatAssignItem]
+
+
+class _StaffControlBody(BaseModel):
+    """POST /api/staff/sessions/{sid}/control の body（hand logger 遠隔制御, ADR-0037）。"""
+
+    type: str
+    seat: int | None = None
+    amount: int | None = None
 
 
 class _OidcExchangeBody(BaseModel):
@@ -855,6 +864,43 @@ def create_app(
         except PlayerValidationError as e:
             return _map_player_error(e)
         return p.to_dict()
+
+    # ――― hand logger 遠隔制御（control queue, ADR-0037 §C）―――
+
+    @app.post("/api/staff/sessions/{session_id}/control", status_code=201,
+              response_model=None)
+    def staff_hand_control(
+        session_id: str, request: Request, body: _StaffControlBody
+    ) -> "JSONResponse | dict":
+        """hand logger に制御コマンド（new_hand / winner / rebuy）を append する。
+
+        適用は hand logger プロセス（`hand_control.enabled` で起動した consumer）が行う。
+        ここでは control queue に 1 行積むだけ（fire-and-forget）。
+        """
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        if body.type not in VALID_CONTROL_TYPES:
+            return JSONResponse(status_code=400, content={
+                "code": "invalid_control",
+                "message": f"未対応の control type です: {body.type!r}",
+            })
+        args: dict = {}
+        if body.type == "winner":
+            if not isinstance(body.seat, int):
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_control", "message": "winner には seat が必要です。"})
+            args["seat"] = body.seat
+        elif body.type == "rebuy":
+            if not isinstance(body.seat, int) or not isinstance(body.amount, int) or body.amount <= 0:
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_control",
+                    "message": "rebuy には seat と正の amount が必要です。"})
+            args["seat"] = body.seat
+            args["amount"] = body.amount
+        control_log = ControlCommandLog(Path(log_dir) / f"{session_id}.control.jsonl")
+        command = control_log.append(body.type, args)
+        return JSONResponse(status_code=201, content=command.to_dict())
 
     # ――― sync API（ADR-0022。staff-token gate, state-based merge）―――
 
