@@ -7,10 +7,11 @@ import { useAsync } from "../hooks/useAsync";
 import { BackLink, colors, styles } from "./common";
 import { LedgerTab } from "./LedgerTab";
 import { OrdersTab } from "./OrdersTab";
+import { SeatingTab } from "./SeatingTab";
 
 export type NameResolver = (playerId: string) => string;
 
-type Tab = "ledger" | "orders";
+type Tab = "ledger" | "orders" | "seating";
 
 /**
  * 卓ビュー（ADR-0035 §5）: 1 つの session について会計 / 注文をタブで統合する。
@@ -53,23 +54,32 @@ export function TableViewScreen(props: {
         </Text>
       </View>
 
-      <View style={[styles.row, { marginTop: 8, marginBottom: 12 }]}>
+      <View style={[styles.row, { marginTop: 8, marginBottom: 12, flexWrap: "wrap" }]}>
         <TabButton label="会計" active={tab === "ledger"} onPress={() => setTab("ledger")} />
         <TabButton
           label={pendingCount > 0 ? `注文 (${pendingCount})` : "注文"}
           active={tab === "orders"}
           onPress={() => setTab("orders")}
         />
+        <TabButton label="座席" active={tab === "seating"} onPress={() => setTab("seating")} />
       </View>
 
       {tab === "ledger" ? (
         <LedgerTab repository={repository} session={session} players={players} resolveName={resolveName} />
-      ) : (
+      ) : tab === "orders" ? (
         <OrdersTab
           repository={repository}
           session={session}
           resolveName={resolveName}
           onChanged={pendingState.reload}
+        />
+      ) : (
+        <SeatingTab
+          repository={repository}
+          session={session}
+          players={players}
+          resolveName={resolveName}
+          reloadPlayers={playersState.reload}
         />
       )}
     </View>

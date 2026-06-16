@@ -14,9 +14,12 @@ import {
   type MenuItem,
   type OrderRequest,
   type Player,
+  type SeatAssignInput,
+  type SeatAssignment,
   type SessionSettlement,
   StaffApiError,
   type StaffLedgerEntryBody,
+  type StaffSeating,
   type StaffSession,
 } from "./types";
 import {
@@ -25,9 +28,13 @@ import {
   menuItems,
   orderRequests,
   players,
+  seatAssignments,
   sessions,
   VALID_STAFF_TOKEN,
 } from "../mocks/fixtures";
+
+const MIN_SEAT = 1;
+const MAX_SEAT = 9;
 
 const LEDGER_KINDS: LedgerKind[] = [
   "buy_in",
@@ -60,6 +67,8 @@ export class MockStaffRepository implements StaffRepository {
   private readonly menu: MenuItem[];
   private readonly ledger: Record<string, LedgerEntry[]>;
   private readonly orders: Record<string, OrderRequest[]>;
+  private readonly seating: Record<string, SeatAssignment[]>;
+  private readonly grants: Record<string, number> = {};
   // 確定済 settlement（session_id → player_id → row）。commit でのみ生成。
   private readonly committed: Record<string, Record<string, SessionSettlement>> = {};
 
@@ -70,6 +79,7 @@ export class MockStaffRepository implements StaffRepository {
     this.menu = clone(menuItems);
     this.ledger = clone(ledgerEntries);
     this.orders = clone(orderRequests);
+    this.seating = clone(seatAssignments);
   }
 
   // ――― 認可 ―――
@@ -102,6 +112,26 @@ export class MockStaffRepository implements StaffRepository {
     return `${prefix}${String(this.seq).padStart(30, "0")}`;
   }
 
+  /** UUID4 hex 風の 32 文字 id（session_id / player_id 採番用, ADR-0007）。 */
+  private nextHex32(): string {
+    this.seq += 1;
+    return this.seq.toString(16).padStart(32, "0");
+  }
+
+  private trimmedName(raw: string): string {
+    const name = (raw ?? "").trim();
+    if (name === "") {
+      throw new StaffApiError({ code: "empty_display_name", message: "表示名を入力してください。" });
+    }
+    if (this.players.some((p) => p.display_name === name)) {
+      throw new StaffApiError({
+        code: "duplicate_display_name",
+        message: `display_name「${name}」は既に存在します。`,
+      });
+    }
+    return name;
+  }
+
   private requireSession(sessionId: string): StaffSession {
     const s = this.sessions.find((x) => x.session_id === sessionId);
     if (!s) {
@@ -127,9 +157,117 @@ export class MockStaffRepository implements StaffRepository {
     return clone(this.sessions);
   }
 
+  async createSession(
+    label?: string,
+    blinds?: { sb?: number; bb?: number },
+  ): Promise<StaffSession> {
+    this.requireAuth();
+    const session: StaffSession = {
+      session_id: this.nextHex32(),
+      started_at: new Date().toISOString(),
+      status: "open",
+      ...(label ? { label } : {}),
+      ...(blinds ? { blinds } : {}),
+    };
+    this.sessions.unshift(session);
+    this.seating[session.session_id] = [];
+    this.ledger[session.session_id] = [];
+    this.orders[session.session_id] = [];
+    return clone(session);
+  }
+
+  async closeSession(sessionId: string): Promise<StaffSession> {
+    this.requireAuth();
+    const s = this.requireSession(sessionId);
+    if (s.status === "closed") {
+      throw new StaffApiError({ code: "already_closed", message: "既に closed です。" });
+    }
+    s.status = "closed";
+    s.ended_at = new Date().toISOString();
+    return clone(s);
+  }
+
   async listPlayers(): Promise<Player[]> {
     this.requireAuth();
     return clone(this.players);
+  }
+
+  async createPlayer(displayName: string): Promise<Player> {
+    this.requireAuth();
+    const name = this.trimmedName(displayName);
+    const player: Player = {
+      player_id: this.nextHex32(),
+      display_name: name,
+      created_at: new Date().toISOString(),
+    };
+    this.players.push(player);
+    return clone(player);
+  }
+
+  async renamePlayer(playerId: string, displayName: string): Promise<Player> {
+    this.requireAuth();
+    const player = this.players.find((p) => p.player_id === playerId);
+    if (!player) {
+      throw new StaffApiError({ code: "not_found", message: "player が見つかりません。" });
+    }
+    const name = (displayName ?? "").trim();
+    if (name === "") {
+      throw new StaffApiError({ code: "empty_display_name", message: "表示名を入力してください。" });
+    }
+    if (this.players.some((p) => p.player_id !== playerId && p.display_name === name)) {
+      throw new StaffApiError({
+        code: "duplicate_display_name",
+        message: `display_name「${name}」は既に存在します。`,
+      });
+    }
+    player.display_name = name;
+    return clone(player);
+  }
+
+  async getSeating(sessionId: string): Promise<StaffSeating> {
+    this.requireAuth();
+    this.requireSession(sessionId);
+    const all = this.seating[sessionId] ?? [];
+    const handIds = [...new Set(all.map((a) => a.hand_id))].sort((a, b) => a - b);
+    const latest = handIds.length ? handIds[handIds.length - 1] : null;
+    const seating = latest === null ? [] : all.filter((a) => a.hand_id === latest);
+    return clone({ seating, hand_ids: handIds });
+  }
+
+  async assignSeats(
+    sessionId: string,
+    handId: number,
+    assignments: SeatAssignInput[],
+  ): Promise<SeatAssignment[]> {
+    this.requireAuth();
+    const session = this.requireSession(sessionId);
+    if (session.status === "closed") {
+      throw new StaffApiError({ code: "session_closed", message: "closed session には割り当てできません。" });
+    }
+    const all = (this.seating[sessionId] ??= []);
+    const handSeats = all.filter((a) => a.hand_id === handId);
+    const added: SeatAssignment[] = [];
+    for (const a of assignments) {
+      if (!Number.isInteger(a.seat_no) || a.seat_no < MIN_SEAT || a.seat_no > MAX_SEAT) {
+        throw new StaffApiError({ code: "invalid_seat", message: `seat_no=${a.seat_no} は範囲外です。` });
+      }
+      if (!this.players.some((p) => p.player_id === a.player_id)) {
+        throw new StaffApiError({ code: "unknown_player", message: "player が registry に存在しません。" });
+      }
+      const taken = [...handSeats, ...added];
+      if (taken.some((x) => x.seat_no === a.seat_no)) {
+        throw new StaffApiError({ code: "seat_taken", message: `seat_no=${a.seat_no} は埋まっています。` });
+      }
+      if (taken.some((x) => x.player_id === a.player_id)) {
+        throw new StaffApiError({
+          code: "player_already_seated",
+          message: "同じ player を複数の席に割り当てられません。",
+        });
+      }
+      added.push({ session_id: sessionId, hand_id: handId, seat_no: a.seat_no, player_id: a.player_id });
+    }
+    all.push(...added);
+    return clone(added);
   }
 
   // ――― 会計 ―――
@@ -219,6 +357,39 @@ export class MockStaffRepository implements StaffRepository {
     };
     (this.ledger[sessionId] ??= []).push(entry);
     return clone(entry);
+  }
+
+  async reverseEntry(entryId: string): Promise<LedgerEntry> {
+    this.requireAuth();
+    for (const [sessionId, entries] of Object.entries(this.ledger)) {
+      const original = entries.find((e) => e.entry_id === entryId);
+      if (original) {
+        const reversal: LedgerEntry = {
+          entry_id: this.nextId("e"),
+          session_id: sessionId,
+          player_id: original.player_id,
+          kind: original.kind,
+          occurred_at: new Date().toISOString(),
+          cash_amount: -original.cash_amount,
+          point_amount: -original.point_amount,
+          reverses_entry_id: entryId,
+        };
+        entries.push(reversal);
+        return clone(reversal);
+      }
+    }
+    throw new StaffApiError({ code: "not_found", message: "entry が見つかりません。" });
+  }
+
+  async grantPoints(playerId: string, deltaPoints: number): Promise<void> {
+    this.requireAuth();
+    if (!this.players.some((p) => p.player_id === playerId)) {
+      throw new StaffApiError({ code: "unknown_player", message: "player が registry に存在しません。" });
+    }
+    if (!Number.isInteger(deltaPoints) || deltaPoints <= 0) {
+      throw new StaffApiError({ code: "invalid_amount", message: "付与は正の整数 point です。" });
+    }
+    this.grants[playerId] = (this.grants[playerId] ?? 0) + deltaPoints;
   }
 
   async commitSettlement(sessionId: string): Promise<SessionSettlement[]> {

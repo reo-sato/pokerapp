@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+### Added (staff API 拡張 §A/§B + staff アプリ座席タブ, ADR-0036 / WS4)
+
+- **staff API を additive 拡張**（`/api/staff/...`, staff token 認可・単一書き手維持, ADR-0036）:
+  - **§A 会計**: `POST .../ledger-entries/{entry_id}/reverse`（reversal）、
+    `POST .../players/{player_id}/point-grants`（ポイント付与）。
+  - **§B session/座席/player ライフサイクル**: `GET/POST /api/staff/sessions`、`.../close`、
+    `.../seating`（現在 seating + hand_id 一覧）、`PUT .../hands/{hand_id}/seats`（seat→player batch）、
+    `GET/POST /api/staff/players`、`PUT /api/staff/players/{player_id}`（rename）。
+  - error code は `error-shapes.md`（ledger / session / player）を **1:1 再利用**（新規 code なし）。
+    `ViewerApiClient`（Python）に対応 staff メソッドを additive 追加。
+- **CORS の `allow_methods` を GET→GET/POST/PUT に拡張**: web クライアント（staff アプリ / mobile 注文 POST）が
+  別 origin から write できるように（LAN 限定 + token 認可前提）。
+- **staff アプリに座席タブ + session 作成/close を追加**（`staff/`, ADR-0035 §5）: 現在 seating 表示・
+  次 hand への seat→player 割当・その場 player 作成、SessionList から session 作成/close、会計タブに
+  ポイント付与。`HttpStaffRepository.listSessions` 等を実装済 API に接続（`not_implemented` 解消）。
+- テスト: `tests/test_viewer_api_staff_lifecycle.py`（§A/§B round-trip + error code + 認可、Python 629 passed）、
+  staff アプリ typecheck + 12 mock tests + web export green。
+
 ### Added (店舗用 staff iPad アプリ — 会計/注文 scaffold, ADR-0035 / WS4)
 
 - **新規 `staff/` アプリ**（Expo/RN, TypeScript。player 用 `mobile/` とは別アプリ）を追加。スタッフが

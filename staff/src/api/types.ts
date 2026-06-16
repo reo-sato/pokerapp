@@ -39,6 +39,27 @@ export interface StaffSession {
   status: "open" | "closed";
 }
 
+/** core/session.py SeatAssignment.to_dict（hand-based seating, ADR-0006/0007）。 */
+export interface SeatAssignment {
+  session_id: string;
+  hand_id: number;
+  seat_no: number;
+  player_id: string;
+  status?: string;
+}
+
+/** GET /api/staff/sessions/{sid}/seating の応答（ADR-0036 §B）。 */
+export interface StaffSeating {
+  seating: SeatAssignment[];
+  hand_ids: number[];
+}
+
+/** PUT .../hands/{hid}/seats の 1 割り当て（ADR-0036 §B）。 */
+export interface SeatAssignInput {
+  seat_no: number;
+  player_id: string;
+}
+
 export interface OrderDetail {
   item_name: string;
   unit_amount: number;

@@ -121,14 +121,37 @@ player 本人の self-write（注文 POST 等）を **PIN ログイン**で本�
 | POST | `/api/staff/order-requests/{request_id}/confirm` | yes | `{unit_amount}` | 更新後 `order_request`（ledger order entry をリンク） |
 | POST | `/api/staff/order-requests/{request_id}/reject` | yes | — | 更新後 `order_request` |
 
+#### 会計の不足分（ADR-0036 §A）
+
+| method | path | write | body | 返り値 |
+|--------|------|-------|------|--------|
+| POST | `/api/staff/ledger-entries/{entry_id}/reverse` | yes | — | reversal の `ledger_entry`（append-only。`reverses_entry_id` 付き）。404 `not_found` / 400 `invalid_amount` |
+| POST | `/api/staff/players/{player_id}/point-grants` | yes | `{delta_points, reason?, session_id?, idempotency_key?}` | `point_ledger_entry`。404 `unknown_player` / 400 `invalid_amount` / 409 `duplicate_grant` |
+
+#### session / 座席 / player ライフサイクル（ADR-0036 §B）
+
+| method | path | write | body | 返り値 |
+|--------|------|-------|------|--------|
+| GET  | `/api/staff/sessions` | no | — | `{"sessions": [session, ...]}`（全 session, staff 卓選択用） |
+| POST | `/api/staff/sessions` | yes | `{label?, blinds?}` | 201 `session`（UUID4 採番, ADR-0007） |
+| POST | `/api/staff/sessions/{session_id}/close` | yes | — | 更新後 `session`。404 `not_found` / 409 `already_closed` |
+| GET  | `/api/staff/sessions/{session_id}/seating` | no | — | `{"seating": [seat_assignment, ...], "hand_ids": [int, ...]}`（最新 hand 由来の現在 seating + 記録済 hand_id） |
+| PUT  | `/api/staff/sessions/{session_id}/hands/{hand_id}/seats` | yes | `{assignments: [{seat_no, player_id}, ...]}` | `{"assignments": [seat_assignment, ...]}`（append。conflict は session error） |
+| GET  | `/api/staff/players` | no | — | `{"players": [player, ...]}`（canonical, ADR-0030） |
+| POST | `/api/staff/players` | yes | `{display_name}` | 201 `player`。400 `empty_display_name` / `duplicate_display_name` |
+| PUT  | `/api/staff/players/{player_id}` | yes | `{display_name}` | 更新後 `player`。404 `not_found` / 400 `empty_display_name` / `duplicate_display_name` |
+
 ### error code（再利用 + 新規）
 
 ledger / settlement の error は `error-shapes.md` の ledger セクションを **再利用**:
 `not_found`(404) / `unknown_player`(404) / `invalid_amount`(400) / `entry_fee_requires_cash`(400) /
-`insufficient_points`(400) / `session_not_closed`(409) / `already_settled`(409)。
+`insufficient_points`(400) / `duplicate_grant`(409) / `session_not_closed`(409) / `already_settled`(409)。
 注文確定・却下は order セクションの `session_closed`(409) / `already_resolved`(409) /
-`invalid_quantity`(400) / `not_found`(404)。新規 code は認可の **`unauthorized`(401)** /
-**`staff_writes_disabled`(403)**、write 所有外は既存 `orders_unavailable`(503) を再利用。
+`invalid_quantity`(400) / `not_found`(404)。session / 座席（ADR-0036 §B）は session セクションの
+`not_found`(404) / `already_closed`(409) / `session_closed`(409) / `seat_taken`(409) /
+`player_already_seated`(409) / `unknown_player`(404) / `invalid_seat`(400)、player registry は
+`empty_display_name`(400) / `duplicate_display_name`(400) を再利用。新規 code は認可の
+**`unauthorized`(401)** / **`staff_writes_disabled`(403)**、write 所有外は既存 `orders_unavailable`(503)。
 
 ## sync API（ADR-0022）
 

@@ -15,9 +15,12 @@ import {
   type MenuItem,
   type OrderRequest,
   type Player,
+  type SeatAssignInput,
+  type SeatAssignment,
   type SessionSettlement,
   StaffApiError,
   type StaffLedgerEntryBody,
+  type StaffSeating,
   type StaffSession,
 } from "./types";
 
@@ -85,18 +88,49 @@ export class HttpStaffRepository implements StaffRepository {
   }
 
   async listSessions(): Promise<StaffSession[]> {
-    // GET /api/staff/sessions は ADR-0036 §B で追加予定（現状 API に未実装）。
-    throw new StaffApiError({
-      code: "not_implemented",
-      message: "session 一覧の staff API（GET /api/staff/sessions）は未実装です（ADR-0036 §B）。",
-    });
+    const body = await this.get<{ sessions: StaffSession[] }>("/api/staff/sessions");
+    return body.sessions;
+  }
+
+  createSession(label?: string, blinds?: { sb?: number; bb?: number }): Promise<StaffSession> {
+    const payload: { label?: string; blinds?: { sb?: number; bb?: number } } = {};
+    if (label) payload.label = label;
+    if (blinds) payload.blinds = blinds;
+    return this.send("POST", "/api/staff/sessions", payload);
+  }
+
+  closeSession(sessionId: string): Promise<StaffSession> {
+    return this.send("POST", `/api/staff/sessions/${E(sessionId)}/close`);
   }
 
   async listPlayers(): Promise<Player[]> {
-    // 現状は player read API（GET /api/players, 無認証）を流用する。ADR-0036 §B で
-    // GET /api/staff/players に寄せる予定。
-    const body = await this.get<{ players: Player[] }>("/api/players", false);
+    const body = await this.get<{ players: Player[] }>("/api/staff/players");
     return body.players;
+  }
+
+  createPlayer(displayName: string): Promise<Player> {
+    return this.send("POST", "/api/staff/players", { display_name: displayName });
+  }
+
+  renamePlayer(playerId: string, displayName: string): Promise<Player> {
+    return this.send("PUT", `/api/staff/players/${E(playerId)}`, { display_name: displayName });
+  }
+
+  getSeating(sessionId: string): Promise<StaffSeating> {
+    return this.get(`/api/staff/sessions/${E(sessionId)}/seating`);
+  }
+
+  async assignSeats(
+    sessionId: string,
+    handId: number,
+    assignments: SeatAssignInput[],
+  ): Promise<SeatAssignment[]> {
+    const body = await this.send<{ assignments: SeatAssignment[] }>(
+      "PUT",
+      `/api/staff/sessions/${E(sessionId)}/hands/${handId}/seats`,
+      { assignments },
+    );
+    return body.assignments;
   }
 
   async getBuyinPresets(): Promise<number[]> {
@@ -113,6 +147,16 @@ export class HttpStaffRepository implements StaffRepository {
 
   addLedgerEntry(sessionId: string, body: StaffLedgerEntryBody): Promise<LedgerEntry> {
     return this.send("POST", `/api/staff/sessions/${E(sessionId)}/ledger-entries`, body);
+  }
+
+  reverseEntry(entryId: string): Promise<LedgerEntry> {
+    return this.send("POST", `/api/staff/ledger-entries/${E(entryId)}/reverse`);
+  }
+
+  async grantPoints(playerId: string, deltaPoints: number): Promise<void> {
+    await this.send("POST", `/api/staff/players/${E(playerId)}/point-grants`, {
+      delta_points: deltaPoints,
+    });
   }
 
   async commitSettlement(sessionId: string): Promise<SessionSettlement[]> {

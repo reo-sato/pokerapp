@@ -148,3 +148,140 @@ test("orders: confirm creates order entry, reject resolves; codes for bad input"
     return true;
   });
 });
+
+// ――― ADR-0036 §A: reversal / point grant ―――
+
+test("reverseEntry negates cash and flows into settlement; unknown is not_found", async () => {
+  const repo = authed();
+  const entry = await repo.addLedgerEntry(OPEN_SESSION_ID, {
+    player_id: ALICE_ID,
+    kind: "rebuy",
+    cash_amount: 3000,
+  });
+  const before = (await repo.getSettlement(OPEN_SESSION_ID)).find((r) => r.player_id === ALICE_ID);
+  const rev = await repo.reverseEntry(entry.entry_id);
+  assert.equal(rev.reverses_entry_id, entry.entry_id);
+  assert.equal(rev.cash_amount, -3000);
+  const after = (await repo.getSettlement(OPEN_SESSION_ID)).find((r) => r.player_id === ALICE_ID);
+  assert.equal((before?.net_due_to_store ?? 0) - 3000, after?.net_due_to_store);
+
+  await assert.rejects(repo.reverseEntry("nope"), (err: unknown) => {
+    assert.ok(err instanceof StaffApiError);
+    assert.equal(err.code, "not_found");
+    return true;
+  });
+});
+
+test("grantPoints validates player and positive amount", async () => {
+  const repo = authed();
+  await repo.grantPoints(ALICE_ID, 500);
+  await assert.rejects(repo.grantPoints("f".repeat(32), 100), (err: unknown) => {
+    assert.ok(err instanceof StaffApiError);
+    assert.equal(err.code, "unknown_player");
+    return true;
+  });
+  await assert.rejects(repo.grantPoints(ALICE_ID, 0), (err: unknown) => {
+    assert.ok(err instanceof StaffApiError);
+    assert.equal(err.code, "invalid_amount");
+    return true;
+  });
+});
+
+// ――― ADR-0036 §B: session / player / seating ―――
+
+test("session lifecycle: create, list, close, already_closed", async () => {
+  const repo = authed();
+  const before = (await repo.listSessions()).length;
+  const created = await repo.createSession("土曜 #9", { sb: 100, bb: 200 });
+  assert.equal(created.status, "open");
+  assert.equal(created.label, "土曜 #9");
+  assert.equal((await repo.listSessions()).length, before + 1);
+
+  const closed = await repo.closeSession(created.session_id);
+  assert.equal(closed.status, "closed");
+  assert.ok(closed.ended_at);
+  await assert.rejects(repo.closeSession(created.session_id), (err: unknown) => {
+    assert.ok(err instanceof StaffApiError);
+    assert.equal(err.code, "already_closed");
+    return true;
+  });
+});
+
+test("player lifecycle: create, rename, duplicate, not_found", async () => {
+  const repo = authed();
+  const p = await repo.createPlayer("Dave");
+  assert.equal(p.display_name, "Dave");
+  const renamed = await repo.renamePlayer(p.player_id, "Dave2");
+  assert.equal(renamed.display_name, "Dave2");
+
+  await assert.rejects(repo.createPlayer("  "), (err: unknown) => {
+    assert.ok(err instanceof StaffApiError);
+    assert.equal(err.code, "empty_display_name");
+    return true;
+  });
+  await assert.rejects(repo.createPlayer("Alice"), (err: unknown) => {
+    assert.ok(err instanceof StaffApiError);
+    assert.equal(err.code, "duplicate_display_name");
+    return true;
+  });
+  await assert.rejects(repo.renamePlayer("f".repeat(32), "X"), (err: unknown) => {
+    assert.ok(err instanceof StaffApiError);
+    assert.equal(err.code, "not_found");
+    return true;
+  });
+});
+
+test("seating: assign batch into next hand, read current, conflict/closed codes", async () => {
+  const repo = authed();
+  const s = await repo.createSession("Seat test");
+  const alice = await repo.createPlayer("S-Alice");
+  const bob = await repo.createPlayer("S-Bob");
+
+  const added = await repo.assignSeats(s.session_id, 1, [
+    { seat_no: 1, player_id: alice.player_id },
+    { seat_no: 2, player_id: bob.player_id },
+  ]);
+  assert.deepEqual(added.map((a) => a.seat_no), [1, 2]);
+
+  const seating = await repo.getSeating(s.session_id);
+  assert.deepEqual(seating.hand_ids, [1]);
+  assert.equal(seating.seating.length, 2);
+
+  await assert.rejects(
+    repo.assignSeats(s.session_id, 2, [
+      { seat_no: 1, player_id: alice.player_id },
+      { seat_no: 1, player_id: bob.player_id },
+    ]),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "seat_taken");
+      return true;
+    },
+  );
+  await assert.rejects(
+    repo.assignSeats(s.session_id, 3, [{ seat_no: 99, player_id: alice.player_id }]),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "invalid_seat");
+      return true;
+    },
+  );
+  await assert.rejects(
+    repo.assignSeats(s.session_id, 4, [{ seat_no: 1, player_id: "f".repeat(32) }]),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "unknown_player");
+      return true;
+    },
+  );
+
+  await repo.closeSession(s.session_id);
+  await assert.rejects(
+    repo.assignSeats(s.session_id, 5, [{ seat_no: 3, player_id: alice.player_id }]),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "session_closed");
+      return true;
+    },
+  );
+});

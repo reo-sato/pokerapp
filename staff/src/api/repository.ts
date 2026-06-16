@@ -15,8 +15,11 @@ import type {
   MenuItem,
   OrderRequest,
   Player,
+  SeatAssignInput,
+  SeatAssignment,
   SessionSettlement,
   StaffLedgerEntryBody,
+  StaffSeating,
   StaffSession,
 } from "./types";
 
@@ -38,14 +41,31 @@ export interface StaffRepository {
    */
   verifyToken(): Promise<void>;
 
-  // ――― セッション（卓選択） ―――
-  /**
-   * 全 session 一覧（staff の卓選択用）。
-   * HTTP は GET /api/staff/sessions（ADR-0036 §B, 未実装）→ 実装まで not_implemented。
-   */
+  // ――― セッション（卓選択 / ライフサイクル, ADR-0036 §B）―――
+  /** 全 session 一覧（staff の卓選択用, GET /api/staff/sessions）。 */
   listSessions(): Promise<StaffSession[]>;
-  /** registry の全 player（会計エントリの player 選択用）。 */
+  /** session を作成する（UUID4 採番, ADR-0007）。 */
+  createSession(label?: string, blinds?: { sb?: number; bb?: number }): Promise<StaffSession>;
+  /** session を close する（精算確定の前提）。 */
+  closeSession(sessionId: string): Promise<StaffSession>;
+
+  // ――― player（registry, ADR-0036 §B）―――
+  /** registry の全 player（会計エントリ / 座席割当の player 選択用）。 */
   listPlayers(): Promise<Player[]>;
+  /** player を作成する（座席タブのその場登録）。 */
+  createPlayer(displayName: string): Promise<Player>;
+  /** player の display_name をリネームする。 */
+  renamePlayer(playerId: string, displayName: string): Promise<Player>;
+
+  // ――― 座席（hand-based seating, ADR-0036 §B）―――
+  /** 現在の seating（最新 hand 由来）+ 記録済 hand_id 一覧。 */
+  getSeating(sessionId: string): Promise<StaffSeating>;
+  /** 指定 hand に seat→player を割り当てる（append。conflict は error）。 */
+  assignSeats(
+    sessionId: string,
+    handId: number,
+    assignments: SeatAssignInput[],
+  ): Promise<SeatAssignment[]>;
 
   // ――― 会計（Ledger / 精算）―――
   /** buy-in 金額プリセット（config 由来, ADR-0026）。 */
@@ -54,6 +74,10 @@ export interface StaffRepository {
   getSettlement(sessionId: string): Promise<SessionSettlement[]>;
   /** ledger entry を追加する（buy_in/rebuy/add_on/order/entry_fee/adjustment, cash+point）。 */
   addLedgerEntry(sessionId: string, body: StaffLedgerEntryBody): Promise<LedgerEntry>;
+  /** ledger entry を reversal で取り消す（append-only, ADR-0036 §A）。 */
+  reverseEntry(entryId: string): Promise<LedgerEntry>;
+  /** point を付与する（manual_grant, ADR-0036 §A）。 */
+  grantPoints(playerId: string, deltaPoints: number): Promise<void>;
   /** session を精算確定する（closed session のみ。確定済 settlement 行を返す）。 */
   commitSettlement(sessionId: string): Promise<SessionSettlement[]>;
   /** 確定済 settlement の支払状態を paid/unpaid に切り替える。 */

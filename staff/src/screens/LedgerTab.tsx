@@ -41,6 +41,7 @@ export function LedgerTab(props: {
   const [cash, setCash] = useState("");
   const [point, setPoint] = useState("");
   const [note, setNote] = useState("");
+  const [grant, setGrant] = useState("");
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
   // 確定済 settlement（commit の戻り値を保持。GET committed API は ADR-0036 で追加予定）。
@@ -77,6 +78,25 @@ export function LedgerTab(props: {
       setNote("");
       settlement.reload();
       setMsg({ text: `記録しました: ${entry.kind} ${yen(entry.cash_amount)}`, ok: true });
+    } catch (err: unknown) {
+      setMsg({ text: err instanceof StaffApiError ? err.message : String(err), ok: false });
+    }
+  };
+
+  const onGrantPoints = async (): Promise<void> => {
+    if (!playerId) {
+      setMsg({ text: "プレイヤーを選択してください。", ok: false });
+      return;
+    }
+    const n = parseAmount(grant);
+    if (n === null || n <= 0) {
+      setMsg({ text: "付与ポイントは正の整数で入力してください。", ok: false });
+      return;
+    }
+    try {
+      await repository.grantPoints(playerId, n);
+      setGrant("");
+      setMsg({ text: `ポイントを付与しました: +${n} pt`, ok: true });
     } catch (err: unknown) {
       setMsg({ text: err instanceof StaffApiError ? err.message : String(err), ok: false });
     }
@@ -174,6 +194,11 @@ export function LedgerTab(props: {
           <Field label="メモ" value={note} onChangeText={setNote} placeholder="任意" />
         </View>
         <Button label="エントリ追加" onPress={onAddEntry} style={{ marginTop: 12 }} />
+        <View style={[styles.row, { marginTop: 10 }]}>
+          <Field label="ポイント付与" value={grant} onChangeText={setGrant} keyboardType="number-pad" placeholder="point" />
+          <View style={{ width: 8 }} />
+          <Button label="付与" onPress={onGrantPoints} kind="neutral" style={{ alignSelf: "flex-end" }} />
+        </View>
         {msg ? (
           <Text style={[styles.status, { color: msg.ok ? colors.ok : colors.neg }]}>{msg.text}</Text>
         ) : null}

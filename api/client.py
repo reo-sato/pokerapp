@@ -262,6 +262,90 @@ class ViewerApiClient:
             headers=self._staff_headers(),
         )
 
+    # ――― 会計の不足分（reversal / point grant, ADR-0036 §A）―――
+
+    def reverse_entry(self, entry_id: str) -> dict:
+        """ledger entry を reversal で取り消す（append-only）。"""
+        return self._request(
+            "POST", f"/api/staff/ledger-entries/{entry_id}/reverse",
+            headers=self._staff_headers(),
+        )
+
+    def grant_points(
+        self, player_id: str, delta_points: int, reason: str = "manual_grant",
+        session_id: str | None = None, idempotency_key: str | None = None,
+    ) -> dict:
+        """point を付与する（manual_grant 等）。"""
+        payload: dict = {"delta_points": delta_points, "reason": reason}
+        if session_id is not None:
+            payload["session_id"] = session_id
+        if idempotency_key is not None:
+            payload["idempotency_key"] = idempotency_key
+        return self._request(
+            "POST", f"/api/staff/players/{player_id}/point-grants",
+            json=payload, headers=self._staff_headers(),
+        )
+
+    # ――― session / 座席 / player ライフサイクル（ADR-0036 §B）―――
+
+    def list_sessions(self) -> list[dict]:
+        """全 session 一覧（staff 卓選択用）。"""
+        return self._request(
+            "GET", "/api/staff/sessions", headers=self._staff_headers(),
+        )["sessions"]
+
+    def create_session(
+        self, label: str | None = None, blinds: dict | None = None
+    ) -> dict:
+        payload: dict = {}
+        if label is not None:
+            payload["label"] = label
+        if blinds is not None:
+            payload["blinds"] = blinds
+        return self._request(
+            "POST", "/api/staff/sessions", json=payload, headers=self._staff_headers(),
+        )
+
+    def close_session(self, session_id: str) -> dict:
+        return self._request(
+            "POST", f"/api/staff/sessions/{session_id}/close",
+            headers=self._staff_headers(),
+        )
+
+    def get_seating(self, session_id: str) -> dict:
+        """現在の seating + 記録済 hand_id 一覧。"""
+        return self._request(
+            "GET", f"/api/staff/sessions/{session_id}/seating",
+            headers=self._staff_headers(),
+        )
+
+    def assign_seats(
+        self, session_id: str, hand_id: int, assignments: list[dict]
+    ) -> list[dict]:
+        """指定 hand に seat→player を割り当てる（assignments=[{seat_no, player_id}, ...]）。"""
+        return self._request(
+            "PUT", f"/api/staff/sessions/{session_id}/hands/{hand_id}/seats",
+            json={"assignments": assignments}, headers=self._staff_headers(),
+        )["assignments"]
+
+    def staff_list_players(self) -> list[dict]:
+        """registry の全 player（staff token）。"""
+        return self._request(
+            "GET", "/api/staff/players", headers=self._staff_headers(),
+        )["players"]
+
+    def create_player(self, display_name: str) -> dict:
+        return self._request(
+            "POST", "/api/staff/players", json={"display_name": display_name},
+            headers=self._staff_headers(),
+        )
+
+    def rename_player(self, player_id: str, display_name: str) -> dict:
+        return self._request(
+            "PUT", f"/api/staff/players/{player_id}",
+            json={"display_name": display_name}, headers=self._staff_headers(),
+        )
+
     # ――― sync API（ADR-0022。state-based merge。staff-token gate）―――
 
     def pull_sync_snapshot(self) -> dict:

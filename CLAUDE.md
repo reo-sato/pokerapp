@@ -452,7 +452,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | 実機 E2E (Phase H) | 🔲 planned | クリーン環境の通し確認（§ ロードマップ 残作業）。**PN5180 firmware 契約は凍結済（ADR-0034, ISSUE-0015 Fixed）**= `docs/contracts/rfid-usb-ccid.md` v1.0 |
 | **cross-app boundary (S5 read)** | ✅ 実装済 | repository interface frozen（ADR-0020）+ `api/client.py:ViewerApiClient`（Python の local↔API 分離点）+ round-trip test。read boundary を二言語で実証（mobile + Python） |
 | **staff 会計 write API (S5 write)** | ✅ 実装済 | `api/server.py` の `/api/staff/...`（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下 + staff read）を **staff shared token**（`Authorization: Bearer <viewer_api.staff_token>`）で公開（ADR-0021）。`LedgerRepository` を RLock で thread-safe 化。単一書き手維持（read-only は 503）。`ViewerApiClient(staff_token=...)` の staff メソッド + `tests/test_viewer_api_staff.py` |
-| **staff iPad app（会計/注文 scaffold, WS4）** | 🟡 一部実装済 (preview) | `staff/`（Expo/RN, player `mobile/` とは別アプリ, ADR-0035）。**会計タブ**（エントリ追加 / buy-in プリセット / 中間集計 / 精算確定・paid-unpaid-partial）+ **注文タブ**（pending 確定→order entry / 却下）を staff API（`/api/staff/...`, ADR-0021）上に実装。`StaffRepository` interface + `MockStaffRepository`（既定, token=`demo-staff-token`）/ `HttpStaffRepository`（`EXPO_PUBLIC_API_URL` 切替）。Login → SessionList → TableView。typecheck + 7 mock tests + web export green。**残**: 座席/ハンドタブ（不足 API = ADR-0036）、HTTP `listSessions`（`GET /api/staff/sessions`, ADR-0036 §B 待ち = `not_implemented`）、open question = ISSUE-0020 |
+| **staff iPad app（会計/注文/座席, WS4）** | 🟡 一部実装済 (preview) | `staff/`（Expo/RN, player `mobile/` とは別アプリ, ADR-0035）。**会計タブ**（エントリ追加 / buy-in プリセット / ポイント付与 / 中間集計 / 精算確定・paid-unpaid-partial）+ **注文タブ**（pending 確定→order entry / 却下）+ **座席タブ**（現在 seating 表示 / 次 hand への seat→player 割当 / その場 player 作成）+ **SessionList**（session 作成・close）を staff API（`/api/staff/...`, ADR-0021/0036）上に実装。`StaffRepository` interface + `MockStaffRepository`（既定, token=`demo-staff-token`）/ `HttpStaffRepository`（`EXPO_PUBLIC_API_URL` 切替）。typecheck + 12 mock tests + web export green。**残**: ハンドタブ（hand logger 遠隔制御 = ADR-0036 §C / ISSUE-0020）、ledger reversal UI（entry 一覧 read API 後続）、open question = ISSUE-0020 |
 | **双方向 sync (S5 — state-based merge)** | ✅ 実装済 | `core/sync.py`（純粋マージ: UUID union + 単調解決で可換・結合・冪等 ⇒ 収束, ADR-0022。settlement は **paid_amount monotonic max** で partial-paid 対応, ADR-0024）+ `GET/POST /api/staff/sync/{snapshot,merge}`（staff-token gate, write 所有のみ merge 受理）+ `ViewerApiClient.{pull_sync_snapshot,push_sync_merge,sync_bidirectional}`。全 repo に `path` property、`LedgerRepository`/`OrderRequestRepository` に `reload()` を additive。ADR-0020 の単一書き手前提を更新（複数書き手 + 収束マージ）。`tests/test_sync.py` / `tests/test_viewer_api_sync.py` |
 | **player 本人認証 L1 PIN** | ✅ 実装済 | `core/auth_token.py`（stateless 署名トークン）+ `core/player_credential_repository.py`（PBKDF2 + lockout、node-local `player_credentials.json`、read API / sync 非対象）+ `api/server.py` の principal レイヤ（`_resolve_player_principal`/`_require_player`）+ `POST /api/auth/login`・`/api/players/{id}/pin`。config `viewer_api.player_auth`（off/optional/required, 既定 **off で後方互換**）。`ViewerApiClient.{login,set_pin}`。staff token と直交（ADR-0027）。`tests/test_auth_token.py` / `test_player_credential_repository.py` / `test_viewer_api_auth.py` |
 | **player 本人認証 L2 外部 IdP（コア）** | 🟡 一部実装済 | 詳細設計 ADR-0028 / 運用 ADR-0029 / 前提 merge ADR-0030（実装済）。**実 IdP 非依存コアは実装済（ADR-0031）**: `core/auth_identity*.py`（node-local, sync 非対象）+ `core/oidc.py`（provider 抽象 + `FakeOidcProvider` + `resolve_player_for_claim`）+ `POST /api/auth/{provider}/exchange`（app-driven, 既定 off）+ `ViewerApiClient.oidc_exchange`。principal は ADR-0027 トークンで L1 と合流、merge 後は canonical。`tests/test_{auth_identity_repository,oidc,viewer_api_oidc}.py`。**残**: 実 LINE/Google HTTP（token/JWKS）+ hosted（ADR-0029）= 実環境タスク |
@@ -678,13 +678,14 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 
 > **WS4 = 店舗用 staff iPad アプリ（ADR-0035/0036, ISSUE-0020）**: 現状の店舗操作は desktop customtkinter
 > （`gui/` の 5 画面・`main.py` の別プロセス起動）+ staff write API（`/api/staff/...`, ADR-0021）に分散。
-> これを **1 つの Expo/RN staff アプリ**（`staff/`, 卓単位タブ統合 = 会計✅ / 注文✅ / 座席[要 API] /
-> ハンド[要 API]）に畳む。認可は staff shared token、**録音（音声/RFID）は PC 常駐のまま・iPad は操作**
-> （ADR-0035 §4）。**会計/注文タブの scaffold は実装済**（`staff/`, mock/HTTP repository 注入・Login →
-> SessionList → TableView、typecheck + 7 mock tests + web export green）。**残**: 座席/ハンドタブ（不足 API =
-> ADR-0036）と HTTP `listSessions`（`GET /api/staff/sessions`, ADR-0036 §B 待ちで現状 `not_implemented`）。
-> desktop GUI は当面並存（破壊しない）。未決事項は ISSUE-0020。実装順は 会計/注文（済）→ session/座席 →
-> hand logger 制御 を推奨。
+> これを **1 つの Expo/RN staff アプリ**（`staff/`, 卓単位タブ統合 = 会計✅ / 注文✅ / 座席✅ /
+> ハンド[要 API §C]）に畳む。認可は staff shared token、**録音（音声/RFID）は PC 常駐のまま・iPad は操作**
+> （ADR-0035 §4）。**会計/注文/座席タブ + session 作成/close は実装済**（`staff/`, mock/HTTP repository
+> 注入・Login → SessionList → TableView、typecheck + 12 mock tests + web export green）。staff API は
+> **ADR-0036 §A/§B 実装済**（reversal/grant + session/座席/player ライフサイクル, `api/server.py` +
+> `api/client.py` + `tests/test_viewer_api_staff_lifecycle.py`、629 passed）。**残**: ハンドタブ（hand
+> logger 遠隔制御 = ADR-0036 §C / ISSUE-0020）、ledger reversal の UI（entry 一覧 read API が後続）。
+> desktop GUI は当面並存（破壊しない）。未決事項は ISSUE-0020。
 
 責務分離の原則:
 

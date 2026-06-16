@@ -5,7 +5,14 @@
  * player_id / session_id は contract fixtures（mobile/ と共有）の canonical 値を再利用する。
  * 実 persistence は持たない（mock で UI を先行させる, CLAUDE.md WS 原則）。
  */
-import type { LedgerEntry, MenuItem, OrderRequest, Player, StaffSession } from "../api/types";
+import type {
+  LedgerEntry,
+  MenuItem,
+  OrderRequest,
+  Player,
+  SeatAssignment,
+  StaffSession,
+} from "../api/types";
 
 /** mock の有効 staff token（HTTP では config viewer_api.staff_token に相当）。 */
 export const VALID_STAFF_TOKEN = "demo-staff-token";
@@ -105,6 +112,15 @@ export const ledgerEntries: Record<string, LedgerEntry[]> = {
       order: { item_name: "ジントニック", unit_amount: 500, quantity: 3 },
     },
   ],
+};
+
+/** hand-based seating（session → 全 hand の seat assignment）。 */
+export const seatAssignments: Record<string, SeatAssignment[]> = {
+  [OPEN_SESSION_ID]: [
+    { session_id: OPEN_SESSION_ID, hand_id: 1, seat_no: 1, player_id: ALICE_ID },
+    { session_id: OPEN_SESSION_ID, hand_id: 1, seat_no: 2, player_id: BOB_ID },
+  ],
+  [CLOSED_SESSION_ID]: [],
 };
 
 /** 注文リクエスト（session → requests）。pending をスタッフが確定/却下する。 */

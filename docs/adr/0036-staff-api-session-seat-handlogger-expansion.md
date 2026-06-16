@@ -113,14 +113,20 @@ write-through と整合。`hand_id` は cross-app 複合キー `(session_id, han
 
 ## Validation / Follow-up
 
-本 ADR は **設計のみ・コード変更なし**。実装時の DoD:
+A/B は **実装済**（2026-06-16）。C は引き続き設計のみ（ISSUE-0020）。DoD:
 
-- [ ] A: `POST .../ledger-entries/{eid}/reverse` + `.../players/{pid}/point-grants` + staff client +
-      `tests/test_viewer_api_staff.py` 追加（error code 再利用を検証）。
-- [ ] B: session create/close / list, player create/rename/list, seat batch PUT + tests
-      （session-seating error の 1:1 再利用を検証）。座席タブ（ADR-0035）を有効化。
+- [x] A: `POST .../ledger-entries/{eid}/reverse` + `.../players/{pid}/point-grants` + staff client
+      （`api/client.py`）+ `tests/test_viewer_api_staff_lifecycle.py`（error code 再利用を検証）。
+- [x] B: `GET/POST /api/staff/sessions`・`.../close`・`.../seating`・seat batch PUT、
+      `GET/POST /api/staff/players`・`PUT .../players/{pid}` + tests（session-seating error の 1:1 再利用）。
+      staff app 座席タブ（`staff/src/screens/SeatingTab.tsx`）を有効化。
 - [ ] C: ISSUE-0020 で control-command 方式を spike → 別 worklog/必要なら追補 ADR で確定後に実装。
-- [ ] `docs/contracts/viewer-api.md` の staff write 節に A/B を追記（freeze 規則に従う）。
+- [x] `docs/contracts/viewer-api.md` の staff write 節に A/B を追記。
+- [x] CORS の `allow_methods` を GET/POST/PUT に拡張（web staff client の cross-origin write 用。
+      LAN 限定 + token 認可前提。mobile 注文 POST も恩恵）。
+- 補足: seat batch PUT は **append**（指定 hand に追記、conflict は error）。完全な idempotent-replace
+      には core の「hand seating クリア」メソッドが要るため後続（ISSUE-0020）。ledger reversal は API/
+      client/test 済だが staff app UI は「session の entry 一覧」read API が無く未提供（後続）。
 
 ## Related Files
 
