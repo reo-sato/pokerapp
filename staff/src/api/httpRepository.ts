@@ -149,6 +149,13 @@ export class HttpStaffRepository implements StaffRepository {
     return this.send("POST", `/api/staff/sessions/${E(sessionId)}/ledger-entries`, body);
   }
 
+  async listLedgerEntries(sessionId: string): Promise<LedgerEntry[]> {
+    const body = await this.get<{ entries: LedgerEntry[] }>(
+      `/api/staff/sessions/${E(sessionId)}/ledger-entries`,
+    );
+    return body.entries;
+  }
+
   reverseEntry(entryId: string): Promise<LedgerEntry> {
     return this.send("POST", `/api/staff/ledger-entries/${E(entryId)}/reverse`);
   }

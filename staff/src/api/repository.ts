@@ -74,6 +74,8 @@ export interface StaffRepository {
   getSettlement(sessionId: string): Promise<SessionSettlement[]>;
   /** ledger entry を追加する（buy_in/rebuy/add_on/order/entry_fee/adjustment, cash+point）。 */
   addLedgerEntry(sessionId: string, body: StaffLedgerEntryBody): Promise<LedgerEntry>;
+  /** session の ledger entry 一覧（reversal UI 用 read, ADR-0036 §A）。 */
+  listLedgerEntries(sessionId: string): Promise<LedgerEntry[]>;
   /** ledger entry を reversal で取り消す（append-only, ADR-0036 §A）。 */
   reverseEntry(entryId: string): Promise<LedgerEntry>;
   /** point を付与する（manual_grant, ADR-0036 §A）。 */

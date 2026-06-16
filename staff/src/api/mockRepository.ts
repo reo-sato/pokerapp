@@ -359,6 +359,12 @@ export class MockStaffRepository implements StaffRepository {
     return clone(entry);
   }
 
+  async listLedgerEntries(sessionId: string): Promise<LedgerEntry[]> {
+    this.requireAuth();
+    // API の list_entries は lenient（unknown session でも空 list）。
+    return clone(this.ledger[sessionId] ?? []);
+  }
+
   async reverseEntry(entryId: string): Promise<LedgerEntry> {
     this.requireAuth();
     for (const [sessionId, entries] of Object.entries(this.ledger)) {

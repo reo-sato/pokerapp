@@ -64,10 +64,17 @@ def test_reverse_entry(env: dict):
     spec = staff.compute_settlement(s.session_id)
     assert next(r for r in spec if r["player_id"] == alice.player_id)["net_due_to_store"] == 10000
 
+    # reversal UI 用の entry 一覧 read
+    entries = staff.list_session_ledger_entries(s.session_id)
+    assert [e["entry_id"] for e in entries] == [entry["entry_id"]]
+
     rev = staff.reverse_entry(entry["entry_id"])
     assert rev["reverses_entry_id"] == entry["entry_id"]
     spec = staff.compute_settlement(s.session_id)
     assert next(r for r in spec if r["player_id"] == alice.player_id)["net_due_to_store"] == 0
+    # 一覧に reversal が増える
+    entries = staff.list_session_ledger_entries(s.session_id)
+    assert len(entries) == 2 and any(e.get("reverses_entry_id") == entry["entry_id"] for e in entries)
 
     with pytest.raises(ViewerApiError) as ei:
         staff.reverse_entry("nonexistent")

@@ -158,10 +158,18 @@ test("reverseEntry negates cash and flows into settlement; unknown is not_found"
     kind: "rebuy",
     cash_amount: 3000,
   });
+  // entry 一覧に追加分が見える（reversal UI の read）。
+  const listed = await repo.listLedgerEntries(OPEN_SESSION_ID);
+  assert.ok(listed.some((e) => e.entry_id === entry.entry_id));
+
   const before = (await repo.getSettlement(OPEN_SESSION_ID)).find((r) => r.player_id === ALICE_ID);
   const rev = await repo.reverseEntry(entry.entry_id);
   assert.equal(rev.reverses_entry_id, entry.entry_id);
   assert.equal(rev.cash_amount, -3000);
+
+  // reversal が一覧に増える。
+  const afterList = await repo.listLedgerEntries(OPEN_SESSION_ID);
+  assert.ok(afterList.some((e) => e.reverses_entry_id === entry.entry_id));
   const after = (await repo.getSettlement(OPEN_SESSION_ID)).find((r) => r.player_id === ALICE_ID);
   assert.equal((before?.net_due_to_store ?? 0) - 3000, after?.net_due_to_store);
 

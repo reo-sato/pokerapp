@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+### Added (staff アプリ ledger reversal UI + entry 一覧 read API, ADR-0036 §A / WS4)
+
+- **`GET /api/staff/sessions/{session_id}/ledger-entries`** を追加（session の ledger entry 一覧。
+  reversal UI が取消対象を選ぶための staff read。lenient = unknown session は空 list）+
+  `ViewerApiClient.list_session_ledger_entries`。
+- **staff アプリの会計タブに「エントリ一覧 + 取消(reversal)」UI** を追加。各 entry を表示し、reversal で
+  ない entry に「取消」ボタンを出す（取消は append-only な reversal を記録し、中間集計に反映）。
+  `StaffRepository.listLedgerEntries` を mock/HTTP に追加。
+- テスト: `tests/test_viewer_api_staff_lifecycle.py` に list+reverse の往復を追加（Python green）、
+  staff アプリ typecheck + 12 mock tests + web export green。
+
 ### Added (staff API 拡張 §A/§B + staff アプリ座席タブ, ADR-0036 / WS4)
 
 - **staff API を additive 拡張**（`/api/staff/...`, staff token 認可・単一書き手維持, ADR-0036）:

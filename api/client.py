@@ -264,6 +264,13 @@ class ViewerApiClient:
 
     # ――― 会計の不足分（reversal / point grant, ADR-0036 §A）―――
 
+    def list_session_ledger_entries(self, session_id: str) -> list[dict]:
+        """session の ledger entry 一覧（reversal UI 用 read）。"""
+        return self._request(
+            "GET", f"/api/staff/sessions/{session_id}/ledger-entries",
+            headers=self._staff_headers(),
+        )["entries"]
+
     def reverse_entry(self, entry_id: str) -> dict:
         """ledger entry を reversal で取り消す（append-only）。"""
         return self._request(

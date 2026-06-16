@@ -125,6 +125,7 @@ player 本人の self-write（注文 POST 等）を **PIN ログイン**で本�
 
 | method | path | write | body | 返り値 |
 |--------|------|-------|------|--------|
+| GET  | `/api/staff/sessions/{session_id}/ledger-entries` | no | — | `{"entries": [ledger_entry, ...]}`（挿入順。reversal UI が取消対象を選ぶ read。lenient: unknown session は空 list） |
 | POST | `/api/staff/ledger-entries/{entry_id}/reverse` | yes | — | reversal の `ledger_entry`（append-only。`reverses_entry_id` 付き）。404 `not_found` / 400 `invalid_amount` |
 | POST | `/api/staff/players/{player_id}/point-grants` | yes | `{delta_points, reason?, session_id?, idempotency_key?}` | `point_ledger_entry`。404 `unknown_player` / 400 `invalid_amount` / 409 `duplicate_grant` |
 

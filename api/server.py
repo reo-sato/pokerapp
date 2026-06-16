@@ -714,6 +714,16 @@ def create_app(
 
     # ――― 会計の不足分（reversal / point grant, ADR-0036 §A）―――
 
+    @app.get("/api/staff/sessions/{session_id}/ledger-entries", response_model=None)
+    def staff_list_ledger_entries(
+        session_id: str, request: Request
+    ) -> "JSONResponse | dict":
+        """session の ledger entry 一覧（reversal UI が取消対象を選ぶための read）。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        return {"entries": [e.to_dict() for e in ledger_repo.list_entries(session_id)]}
+
     @app.post("/api/staff/ledger-entries/{entry_id}/reverse", response_model=None)
     def staff_reverse_entry(entry_id: str, request: Request) -> "JSONResponse | dict":
         """ledger entry を reversal で取り消す（append-only, ADR-0016）。"""

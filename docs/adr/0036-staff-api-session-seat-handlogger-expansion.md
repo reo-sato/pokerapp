@@ -115,8 +115,10 @@ write-through と整合。`hand_id` は cross-app 複合キー `(session_id, han
 
 A/B は **実装済**（2026-06-16）。C は引き続き設計のみ（ISSUE-0020）。DoD:
 
-- [x] A: `POST .../ledger-entries/{eid}/reverse` + `.../players/{pid}/point-grants` + staff client
+- [x] A: `POST .../ledger-entries/{eid}/reverse` + `.../players/{pid}/point-grants` +
+      `GET .../sessions/{sid}/ledger-entries`（reversal UI が取消対象を選ぶ read）+ staff client
       （`api/client.py`）+ `tests/test_viewer_api_staff_lifecycle.py`（error code 再利用を検証）。
+      staff app の会計タブに **entry 一覧 + 取消（reversal）UI** を実装。
 - [x] B: `GET/POST /api/staff/sessions`・`.../close`・`.../seating`・seat batch PUT、
       `GET/POST /api/staff/players`・`PUT .../players/{pid}` + tests（session-seating error の 1:1 再利用）。
       staff app 座席タブ（`staff/src/screens/SeatingTab.tsx`）を有効化。
@@ -125,8 +127,8 @@ A/B は **実装済**（2026-06-16）。C は引き続き設計のみ（ISSUE-00
 - [x] CORS の `allow_methods` を GET/POST/PUT に拡張（web staff client の cross-origin write 用。
       LAN 限定 + token 認可前提。mobile 注文 POST も恩恵）。
 - 補足: seat batch PUT は **append**（指定 hand に追記、conflict は error）。完全な idempotent-replace
-      には core の「hand seating クリア」メソッドが要るため後続（ISSUE-0020）。ledger reversal は API/
-      client/test 済だが staff app UI は「session の entry 一覧」read API が無く未提供（後続）。
+      には core の「hand seating クリア」メソッドが要るため後続（ISSUE-0020）。ledger reversal は
+      `GET .../ledger-entries`（list）の追加で staff app UI まで実装済。
 
 ## Related Files
 

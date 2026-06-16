@@ -34,6 +34,10 @@ export function LedgerTab(props: {
     () => repository.getSettlement(session.session_id),
     [repository, session.session_id],
   );
+  const entries = useAsync(
+    () => repository.listLedgerEntries(session.session_id),
+    [repository, session.session_id],
+  );
   const presets = useAsync(() => repository.getBuyinPresets(), [repository]);
 
   const [playerId, setPlayerId] = useState<string | null>(null);
@@ -77,6 +81,7 @@ export function LedgerTab(props: {
       setPoint("");
       setNote("");
       settlement.reload();
+      entries.reload();
       setMsg({ text: `記録しました: ${entry.kind} ${yen(entry.cash_amount)}`, ok: true });
     } catch (err: unknown) {
       setMsg({ text: err instanceof StaffApiError ? err.message : String(err), ok: false });
@@ -97,6 +102,17 @@ export function LedgerTab(props: {
       await repository.grantPoints(playerId, n);
       setGrant("");
       setMsg({ text: `ポイントを付与しました: +${n} pt`, ok: true });
+    } catch (err: unknown) {
+      setMsg({ text: err instanceof StaffApiError ? err.message : String(err), ok: false });
+    }
+  };
+
+  const onReverse = async (entryId: string): Promise<void> => {
+    try {
+      await repository.reverseEntry(entryId);
+      settlement.reload();
+      entries.reload();
+      setMsg({ text: "取り消しました（reversal を追加）。", ok: true });
     } catch (err: unknown) {
       setMsg({ text: err instanceof StaffApiError ? err.message : String(err), ok: false });
     }
@@ -202,6 +218,44 @@ export function LedgerTab(props: {
         {msg ? (
           <Text style={[styles.status, { color: msg.ok ? colors.ok : colors.neg }]}>{msg.text}</Text>
         ) : null}
+      </View>
+
+      {/* ――― エントリ一覧（取消 = reversal）――― */}
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>エントリ一覧</Text>
+        <Text style={styles.cardMeta}>取消は reversal（append-only）で記録します。</Text>
+        {entries.loading ? (
+          <Loading />
+        ) : entries.errorCode ? (
+          <ErrorView code={entries.errorCode} message={entries.errorMessage} onRetry={entries.reload} />
+        ) : !entries.data || entries.data.length === 0 ? (
+          <Text style={styles.empty}>エントリはありません。</Text>
+        ) : (
+          entries.data.map((e) => {
+            const isReversal = e.reverses_entry_id != null;
+            return (
+              <View
+                key={e.entry_id}
+                style={[styles.row, { justifyContent: "space-between", marginTop: 8 }]}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: isReversal ? colors.muted : colors.text }}>
+                    {isReversal ? "↩ " : ""}
+                    {e.occurred_at.slice(11, 19)}　{resolveName(e.player_id)}　{e.kind}
+                  </Text>
+                  <Text style={styles.cardMeta}>
+                    {yen(e.cash_amount)}
+                    {e.point_amount ? ` / ${e.point_amount}pt` : ""}
+                    {e.note ? `　「${e.note}」` : ""}
+                  </Text>
+                </View>
+                {isReversal ? null : (
+                  <Button label="取消" kind="ghost" onPress={() => onReverse(e.entry_id)} />
+                )}
+              </View>
+            );
+          })
+        )}
       </View>
 
       {/* ――― 中間集計（暫定）――― */}
