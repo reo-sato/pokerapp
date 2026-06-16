@@ -673,6 +673,14 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
 | **WS1** | core domain / repository / services | `core/` のドメイン・repository・service。永続化と業務ルールの source of truth | `core/*.py`, repository, service, tests | WS0（該当 model の契約凍結後） |
 | **WS2** | desktop separate screen | registry / ledger / settlement の **別画面** UI（既存 hand logger UI は汚さない） | `gui/*.py`（別 window）, GUI ロジックテスト | WS1（同 phase の repository/service） |
 | **WS3** | mobile scaffold (iOS/Android) | 将来の別 front-end。**最初は mock repository** で UI を先行させる | mobile プロジェクト雛形, screen skeleton, mock repo | WS0 のみ（contract）。WS1 完成を待たない |
+| **WS4** | **staff iPad app（planned, 設計済）** | 店舗操作（会計/注文/座席/ハンド）を **スタッフ専用タッチ front-end** に統合（player `mobile/` とは別アプリ・Expo/RN・iPad/web）。staff API 上に実装 | `staff/*`（新規）, `StaffRepository`(mock/HTTP), staff API 拡張 | WS0（staff API 契約）。会計/注文は実装済 API で先行可、座席/ハンド制御は API 追加（ADR-0036）待ち |
+
+> **WS4 = 店舗用 staff iPad アプリ（設計のみ・コードなし, ADR-0035/0036, ISSUE-0020）**: 現状の店舗操作は
+> desktop customtkinter（`gui/` の 5 画面・`main.py` の別プロセス起動）+ staff write API（`/api/staff/...`,
+> ADR-0021）に分散。これを **1 つの Expo/RN staff アプリ**（卓単位タブ統合 = 会計✅ / 注文✅ / 座席[要 API] /
+> ハンド[要 API]）に畳む。認可は staff shared token、**録音（音声/RFID）は PC 常駐のまま・iPad は操作**
+> （ADR-0035 §4）。不足 API（session/座席ライフサイクル・hand logger 遠隔制御）は ADR-0036、未決事項は
+> ISSUE-0020。desktop GUI は当面並存（破壊しない）。実装順は 会計/注文 → session/座席 → hand logger 制御 を推奨。
 
 責務分離の原則:
 

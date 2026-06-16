@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### Added (店舗用 staff iPad アプリの設計, ADR-0035 / ADR-0036 / ISSUE-0020 — 設計のみ・コードなし)
+
+- 店舗（スタッフ）操作の UX 改修に向け、**新規 staff iPad アプリ**の設計ドキュメントを追加。現状の
+  店舗操作（desktop customtkinter の 5 画面・`main.py` の別プロセス起動 + staff write API）を整理し、
+  **player 用 `mobile/` とは別の Expo/RN staff アプリ**（iPad/web、卓単位タブ統合 = 会計/注文/座席/ハンド、
+  staff shared token 認可、録音は PC 常駐・iPad は操作）に統合する方針を **ADR-0035** に確定。
+- 不足する staff API の設計を **ADR-0036**（A: 会計の reversal/grant、B: session/座席/player ライフサイクル、
+  C: hand logger 遠隔制御=プロセス境界のため後続）として追加。schema 変更・新 error code なし（既存再利用）。
+- 設計フェーズの未決事項を **ISSUE-0020**（risk register）に集約（hand logger 遠隔制御の方式 / iPad 作成
+  session と録音 hand logger の結線 / staff token 配布・回転 / 並行・オフライン UX / desktop と staff app の
+  責務分界）。`CLAUDE.md` の Parallel development plan に **WS4（staff iPad app）** を planned で追加。
+
 ### Added (RFID USB CCID firmware↔host 契約の凍結, ADR-0034 / ISSUE-0015 Fixed)
 
 - PN5180 + ESP32-S3 の **USB CCID firmware ↔ host (PC/SC) 契約**を `docs/contracts/rfid-usb-ccid.md`
