@@ -35,12 +35,28 @@ UI は `src/api/repository.ts` の `StaffRepository` interface のみに依存�
 ## 開発
 
 ```bash
-npm install
+npm install                  # peer 競合があれば: npm install --legacy-peer-deps
 npm run typecheck            # tsc --noEmit
 npm test                     # MockStaffRepository の契約挙動テスト (node:test)
 npm start                    # Expo dev server (mock データ、token=demo-staff-token)
 EXPO_PUBLIC_API_URL=http://<運営PCのLAN IP>:8788 npm start   # 実 staff API 接続
 ```
+
+### E2E（ブラウザ, Playwright）
+
+web export（`dist/`）+ MockRepository をヘッドレス Chromium で開き、**ログイン→会計（追加/取消）→
+注文確定→座席割当→セッション作成**の実フローをタップ駆動で検証する（`e2e/staff.spec.ts`）。staff アプリの
+配布形態（web export を iPad Safari で開く）に最も近い自動テスト。
+
+```bash
+npm run e2e:install          # 初回のみ: Chromium を取得（要ネットワーク）
+npm run e2e                  # export:web → 静的配信(e2e/serve.mjs) → playwright test
+```
+
+- API は不要（MockRepository, token=`demo-staff-token`）。`playwright.config.ts` の webServer が
+  `dist/` を 4173 で配信する。
+- 実機タッチ/レイアウト/ソフトキーボードの最終確認は**手動 QA**（iPad Safari に web export を LAN 配信、
+  または Expo Go）で行う（Linux CI に iOS シミュレータは無いため）。
 
 運営 PC 側では会計 write を所有するプロセスを起動しておく（単独 `--viewer-api` は read-only で
 write が 503）:

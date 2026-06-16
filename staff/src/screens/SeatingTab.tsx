@@ -144,6 +144,7 @@ export function SeatingTab(props: {
                 value={seatInput}
                 onChangeText={setSeatInput}
                 keyboardType="number-pad"
+                placeholder="席1-9"
               />
               <View style={{ width: 8 }} />
               <Button label="席に追加" onPress={onAddStaged} kind="neutral" style={{ alignSelf: "flex-end" }} />

@@ -202,16 +202,16 @@ export function LedgerTab(props: {
           </>
         ) : null}
         <View style={[styles.row, { marginTop: 4 }]}>
-          <Field label="cash (円)" value={cash} onChangeText={setCash} keyboardType="number-pad" />
+          <Field label="cash (円)" value={cash} onChangeText={setCash} keyboardType="number-pad" placeholder="cash(円)" />
           <View style={{ width: 8 }} />
-          <Field label="point" value={point} onChangeText={setPoint} keyboardType="number-pad" />
+          <Field label="point" value={point} onChangeText={setPoint} keyboardType="number-pad" placeholder="point(任意)" />
         </View>
         <View style={{ marginTop: 8 }}>
           <Field label="メモ" value={note} onChangeText={setNote} placeholder="任意" />
         </View>
         <Button label="エントリ追加" onPress={onAddEntry} style={{ marginTop: 12 }} />
         <View style={[styles.row, { marginTop: 10 }]}>
-          <Field label="ポイント付与" value={grant} onChangeText={setGrant} keyboardType="number-pad" placeholder="point" />
+          <Field label="ポイント付与" value={grant} onChangeText={setGrant} keyboardType="number-pad" placeholder="付与pt" />
           <View style={{ width: 8 }} />
           <Button label="付与" onPress={onGrantPoints} kind="neutral" style={{ alignSelf: "flex-end" }} />
         </View>

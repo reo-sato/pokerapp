@@ -149,8 +149,12 @@ UI は `staff/src/api/repository.ts` の `StaffRepository` interface のみに�
 - [x] `HttpStaffRepository` が `--ledger`（`viewer_api.enabled` + `staff_token`）の staff API
       （会計/注文 endpoint）に対応（`EXPO_PUBLIC_API_URL` 切替, `mobile/` と同基準）。
       `listSessions`（`GET /api/staff/sessions`）のみ未実装で `not_implemented`（ADR-0036 §B 待ち）。
-- [ ] 座席タブ / ハンドロガータブは ADR-0036 の API 追加後に有効化。
+- [x] 座席タブは ADR-0036 §B 実装後に有効化済。ハンドロガータブは ADR-0036 §C 待ち。
 - [x] 不足 staff API の設計 = **ADR-0036**、open question / risk = **ISSUE-0020**。
+- [x] UI テスト = **ブラウザ E2E（Playwright）**: web export + MockRepository をヘッドレス Chromium で
+      開き、ログイン→会計（追加/取消）→注文確定→座席割当→session 作成を検証（`staff/e2e/staff.spec.ts`,
+      5 tests）。iPad 配布（web）経路に最も近い自動テスト。**実機タッチ/レイアウトは手動 QA**（Linux CI に
+      iOS シミュレータ無し）。browser 取得（`playwright install`）はネットワーク要。
 
 ## Related Files
 

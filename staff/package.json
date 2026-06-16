@@ -11,6 +11,7 @@
     "react-native-web": "^0.21.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.49.0",
     "@types/node": "^25.9.3",
     "@types/react": "~19.2.2",
     "tsx": "^4.22.4",
@@ -23,7 +24,9 @@
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/api/mockRepository.test.ts",
-    "export:web": "expo export --platform web"
+    "export:web": "expo export --platform web",
+    "e2e": "npm run export:web && playwright test",
+    "e2e:install": "playwright install chromium"
   },
   "private": true
 }

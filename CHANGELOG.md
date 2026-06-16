@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### Added (staff アプリ ブラウザ E2E, Playwright / WS4)
+
+- **staff アプリの UI を Playwright E2E で検証**（`staff/e2e/staff.spec.ts`, 5 tests）。web export
+  （`dist/`）+ MockRepository をヘッドレス Chromium で開き、**ログイン→会計（エントリ追加/取消）→
+  注文確定→座席割当→セッション作成**の実フローをタップ駆動でテストする。staff アプリの配布形態
+  （web export を iPad Safari で開く）に最も近い自動テスト。
+- `staff/playwright.config.ts`（iPad 相当 viewport + touch、webServer で `dist/` を配信）+ 依存なしの
+  静的サーバー `staff/e2e/serve.mjs` + `npm run e2e`（export:web → 配信 → test）/ `e2e:install`。
+  入力欄に E2E 用の placeholder を追補（cash/point/付与pt/席1-9）。
+- 実機タッチ/レイアウト/ソフトキーボードの最終確認は**手動 QA**（iPad Safari / Expo Go）で行う方針
+  （Linux CI に iOS シミュレータ無し）。`playwright install` は browser 取得にネットワークが要る。
+
 ### Added (staff アプリ ledger reversal UI + entry 一覧 read API, ADR-0036 §A / WS4)
 
 - **`GET /api/staff/sessions/{session_id}/ledger-entries`** を追加（session の ledger entry 一覧。
