@@ -55,6 +55,92 @@
   board street 自動遷移が機能していなかった。来週の実機テストに向け修正 + 回帰テスト。
 - **B6 install docs**: `installation.md` を PC/SC（PN5180+ESP32-S3 USB CCID）canonical に更新
   （HTTP/PN532 は補助に降格）。pcsc_readers(list) 設定手順・実 reader_name 採取を明記。
+### Added (hand logger 遠隔制御 + staff アプリ ハンドタブ, ADR-0039 / WS4 §C)
+
+- **hand logger を staff iPad から遠隔操作**できるようにした（**新ハンド / ウィナー / リバイ**）。録音
+  （音声/RFID）は録音 PC 常駐のまま、iPad は **append-only control queue** にコマンドを積むだけ。適用は
+  hand logger プロセスが行う（状態変更経路は IntegrationThread に一元化, ISSUE-0012 遵守）。
+  - `core/control_queue.py`（`ControlCommandLog`: `logs/{session_id}.control.jsonl` への append/offset 読み）
+    + `integration/control_consumer.py`（`ControlConsumerThread`: 末尾シーク + command_id 重複排除で新規のみ
+    `AudioEvent` に翻訳）。
+  - `POST /api/staff/sessions/{session_id}/control` + `ViewerApiClient.send_control`。新 error `invalid_control`(400)。
+  - `main.py --`（GUI）に consumer を結線。config `hand_control.enabled`（既定 **false**）+ GUI +
+    `session_layer.enabled` のときのみ起動 → **既定では挙動不変**。
+  - staff アプリに **ハンドタブ**（`staff/src/screens/HandTab.tsx`）。`StaffRepository.sendControl`（mock/HTTP）。
+- テスト: `tests/test_control_queue.py`（append/offset/idempotent/translate/consumer 末尾シーク）+
+  staff API control テスト（Python 634 passed）、staff アプリ typecheck + 13 mock tests + E2E 6 件
+  （ハンドタブの送信フロー追加）。
+- **残**: ハンド履歴の staff read（hands-list endpoint）と実機での反映遅延/死活確認は後続（ISSUE-0020）。
+
+### Added (staff アプリ ブラウザ E2E, Playwright / WS4)
+
+- **staff アプリの UI を Playwright E2E で検証**（`staff/e2e/staff.spec.ts`, 5 tests）。web export
+  （`dist/`）+ MockRepository をヘッドレス Chromium で開き、**ログイン→会計（エントリ追加/取消）→
+  注文確定→座席割当→セッション作成**の実フローをタップ駆動でテストする。staff アプリの配布形態
+  （web export を iPad Safari で開く）に最も近い自動テスト。
+- `staff/playwright.config.ts`（iPad 相当 viewport + touch、webServer で `dist/` を配信）+ 依存なしの
+  静的サーバー `staff/e2e/serve.mjs` + `npm run e2e`（export:web → 配信 → test）/ `e2e:install`。
+  入力欄に E2E 用の placeholder を追補（cash/point/付与pt/席1-9）。
+- 実機タッチ/レイアウト/ソフトキーボードの最終確認は**手動 QA**（iPad Safari / Expo Go）で行う方針
+  （Linux CI に iOS シミュレータ無し）。`playwright install` は browser 取得にネットワークが要る。
+
+### Added (staff アプリ ledger reversal UI + entry 一覧 read API, ADR-0038 §A / WS4)
+
+- **`GET /api/staff/sessions/{session_id}/ledger-entries`** を追加（session の ledger entry 一覧。
+  reversal UI が取消対象を選ぶための staff read。lenient = unknown session は空 list）+
+  `ViewerApiClient.list_session_ledger_entries`。
+- **staff アプリの会計タブに「エントリ一覧 + 取消(reversal)」UI** を追加。各 entry を表示し、reversal で
+  ない entry に「取消」ボタンを出す（取消は append-only な reversal を記録し、中間集計に反映）。
+  `StaffRepository.listLedgerEntries` を mock/HTTP に追加。
+- テスト: `tests/test_viewer_api_staff_lifecycle.py` に list+reverse の往復を追加（Python green）、
+  staff アプリ typecheck + 12 mock tests + web export green。
+
+### Added (staff API 拡張 §A/§B + staff アプリ座席タブ, ADR-0038 / WS4)
+
+- **staff API を additive 拡張**（`/api/staff/...`, staff token 認可・単一書き手維持, ADR-0038）:
+  - **§A 会計**: `POST .../ledger-entries/{entry_id}/reverse`（reversal）、
+    `POST .../players/{player_id}/point-grants`（ポイント付与）。
+  - **§B session/座席/player ライフサイクル**: `GET/POST /api/staff/sessions`、`.../close`、
+    `.../seating`（現在 seating + hand_id 一覧）、`PUT .../hands/{hand_id}/seats`（seat→player batch）、
+    `GET/POST /api/staff/players`、`PUT /api/staff/players/{player_id}`（rename）。
+  - error code は `error-shapes.md`（ledger / session / player）を **1:1 再利用**（新規 code なし）。
+    `ViewerApiClient`（Python）に対応 staff メソッドを additive 追加。
+- **CORS の `allow_methods` を GET→GET/POST/PUT に拡張**: web クライアント（staff アプリ / mobile 注文 POST）が
+  別 origin から write できるように（LAN 限定 + token 認可前提）。
+- **staff アプリに座席タブ + session 作成/close を追加**（`staff/`, ADR-0037 §5）: 現在 seating 表示・
+  次 hand への seat→player 割当・その場 player 作成、SessionList から session 作成/close、会計タブに
+  ポイント付与。`HttpStaffRepository.listSessions` 等を実装済 API に接続（`not_implemented` 解消）。
+- テスト: `tests/test_viewer_api_staff_lifecycle.py`（§A/§B round-trip + error code + 認可、Python 629 passed）、
+  staff アプリ typecheck + 12 mock tests + web export green。
+
+### Added (店舗用 staff iPad アプリ — 会計/注文 scaffold, ADR-0037 / WS4)
+
+- **新規 `staff/` アプリ**（Expo/RN, TypeScript。player 用 `mobile/` とは別アプリ）を追加。スタッフが
+  iPad/web から **会計（Ledger/精算）と注文リクエスト捌き**を操作できる scaffold。画面は
+  **Login（staff token）→ SessionList → TableView（会計タブ / 注文タブ）**。
+  - **会計タブ**: ledger エントリ追加（buy_in/rebuy/add_on/order/entry_fee/adjustment, cash+point）、
+    **buy-in 金額プリセット**（ADR-0026）、**中間集計（暫定）**、closed session の**精算確定（commit）**と
+    **支払状態（paid/unpaid/partial）+ 受領額記録**（ADR-0023）。
+  - **注文タブ**: pending 注文の**確定**（単価確定 → order ledger entry, staff-in-the-loop / ADR-0018）と
+    **却下**。確定単価は menu master から prefill。
+- **contract-first**（ADR-0037 §6）: UI は `StaffRepository` interface のみに依存し、`MockStaffRepository`
+  （既定 = fixtures、token `demo-staff-token`）/ `HttpStaffRepository`（staff API `/api/staff/...` を fetch、
+  `EXPO_PUBLIC_API_URL` 切替、`Authorization: Bearer <staff_token>`）を注入で差し替える。typecheck +
+  7 mock 契約テスト + web export green。
+- **残（後続）**: 座席タブ・ハンドタブと HTTP の `listSessions`（`GET /api/staff/sessions`）は **ADR-0038**
+  の staff API 追加が前提（現状 `not_implemented`）。open question は ISSUE-0020。
+
+### Added (店舗用 staff iPad アプリの設計, ADR-0037 / ADR-0038 / ISSUE-0020 — 設計のみ・コードなし)
+
+- 店舗（スタッフ）操作の UX 改修に向け、**新規 staff iPad アプリ**の設計ドキュメントを追加。現状の
+  店舗操作（desktop customtkinter の 5 画面・`main.py` の別プロセス起動 + staff write API）を整理し、
+  **player 用 `mobile/` とは別の Expo/RN staff アプリ**（iPad/web、卓単位タブ統合 = 会計/注文/座席/ハンド、
+  staff shared token 認可、録音は PC 常駐・iPad は操作）に統合する方針を **ADR-0037** に確定。
+- 不足する staff API の設計を **ADR-0038**（A: 会計の reversal/grant、B: session/座席/player ライフサイクル、
+  C: hand logger 遠隔制御=プロセス境界のため後続）として追加。schema 変更・新 error code なし（既存再利用）。
+- 設計フェーズの未決事項を **ISSUE-0020**（risk register）に集約（hand logger 遠隔制御の方式 / iPad 作成
+  session と録音 hand logger の結線 / staff token 配布・回転 / 並行・オフライン UX / desktop と staff app の
+  責務分界）。`CLAUDE.md` の Parallel development plan に **WS4（staff iPad app）** を planned で追加。
 
 ### Added (RFID USB CCID firmware↔host 契約の凍結, ADR-0034 / ISSUE-0015 Fixed)
 

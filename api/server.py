@@ -30,6 +30,7 @@ from api.read_models import (
 )
 from core.auth_identity_repository import AuthIdentityRepository
 from core.auth_token import issue_player_token, verify_player_token
+from core.control_queue import VALID_CONTROL_TYPES, ControlCommandLog
 from core.hand_correction_repository import (
     HandCorrectionError,
     HandCorrectionRepository,
@@ -37,6 +38,7 @@ from core.hand_correction_repository import (
 from core.oidc import OidcError, OidcProvider, resolve_player_for_claim
 from core.ledger_repository import (
     AlreadySettledError,
+    DuplicateGrantError,
     EntryFeeRequiresCashError,
     InsufficientPointsError,
     InvalidAmountError,
@@ -61,14 +63,23 @@ from core.player_credential_repository import (
     PlayerCredentialRepository,
 )
 from core.player_repository import (
+    DuplicateDisplayNameError,
+    EmptyDisplayNameError,
     PlayerMergeError,
     PlayerNotFoundError,
     PlayerRepository,
+    PlayerValidationError,
 )
 from core.session_repository import (
+    InvalidSeatError,
+    PlayerAlreadySeatedError,
+    SeatTakenError,
     SessionAlreadyClosedError,
+    SessionClosedError,
+    SessionError,
     SessionNotFoundError,
     SessionRepository,
+    UnknownPlayerError as SessionUnknownPlayerError,
 )
 from core.sync import build_snapshot, merge_snapshot_into
 
@@ -141,6 +152,56 @@ class _StaffMergeBody(BaseModel):
     absorbed_id: str
 
 
+class _StaffPointGrantBody(BaseModel):
+    """POST /api/staff/players/{id}/point-grants の body（ADR-0038 §A）。"""
+
+    delta_points: int
+    reason: str = "manual_grant"
+    session_id: str | None = None
+    idempotency_key: str | None = None
+
+
+class _StaffSessionCreateBody(BaseModel):
+    """POST /api/staff/sessions の body（ADR-0038 §B）。"""
+
+    label: str | None = None
+    blinds: dict | None = None
+
+
+class _StaffPlayerCreateBody(BaseModel):
+    """POST /api/staff/players の body（ADR-0038 §B）。"""
+
+    display_name: str
+
+
+class _StaffPlayerRenameBody(BaseModel):
+    """PUT /api/staff/players/{id} の body（ADR-0038 §B）。"""
+
+    display_name: str
+
+
+class _SeatAssignItem(BaseModel):
+    seat_no: int
+    player_id: str
+
+
+class _StaffSeatAssignBody(BaseModel):
+    """PUT /api/staff/sessions/{sid}/hands/{hid}/seats の body（ADR-0038 §B）。
+
+    指定 hand に seat→player を割り当てる（append。conflict は error）。
+    """
+
+    assignments: list[_SeatAssignItem]
+
+
+class _StaffControlBody(BaseModel):
+    """POST /api/staff/sessions/{sid}/control の body（hand logger 遠隔制御, ADR-0039）。"""
+
+    type: str
+    seat: int | None = None
+    amount: int | None = None
+
+
 class _OidcExchangeBody(BaseModel):
     """POST /api/auth/{provider}/exchange の body（L2, ADR-0031 D4）。"""
 
@@ -165,6 +226,7 @@ _LEDGER_ERROR_MAP: list[tuple[type, int, str]] = [
     (LedgerUnknownPlayerError, 404, "unknown_player"),
     (EntryFeeRequiresCashError, 400, "entry_fee_requires_cash"),
     (InsufficientPointsError, 400, "insufficient_points"),
+    (DuplicateGrantError, 409, "duplicate_grant"),
     (InvalidAmountError, 400, "invalid_amount"),
     (SessionNotClosedError, 409, "session_not_closed"),
     (AlreadySettledError, 409, "already_settled"),
@@ -177,6 +239,45 @@ def _map_ledger_error(exc: LedgerError) -> JSONResponse:
             return JSONResponse(status_code=http_status,
                                 content={"code": code, "message": str(exc)})
     # 基底 LedgerError（未分類）は invalid_amount 扱いにフォールバック。
+    return JSONResponse(status_code=400, content={"code": "invalid_amount", "message": str(exc)})
+
+
+# session/seat の error → (HTTP status, error code)（error-shapes.md の session セクションと 1:1,
+# ADR-0038 §B）。SessionNotFoundError は基底 SessionError の subclass なので先頭で拾う。
+_SESSION_ERROR_MAP: list[tuple[type, int, str]] = [
+    (SessionNotFoundError, 404, "not_found"),
+    (SessionAlreadyClosedError, 409, "already_closed"),
+    (SessionClosedError, 409, "session_closed"),
+    (SeatTakenError, 409, "seat_taken"),
+    (PlayerAlreadySeatedError, 409, "player_already_seated"),
+    (SessionUnknownPlayerError, 404, "unknown_player"),
+    (InvalidSeatError, 400, "invalid_seat"),
+]
+
+
+def _map_session_error(exc: SessionError) -> JSONResponse:
+    for exc_type, http_status, code in _SESSION_ERROR_MAP:
+        if isinstance(exc, exc_type):
+            return JSONResponse(status_code=http_status,
+                                content={"code": code, "message": str(exc)})
+    return JSONResponse(status_code=400, content={"code": "invalid_seat", "message": str(exc)})
+
+
+# player registry の error → (HTTP status, error code)（ADR-0038 §B）。PlayerNotFoundError も
+# PlayerValidationError の subclass なので、ここで not_found に明示マップする。
+_PLAYER_ERROR_MAP: list[tuple[type, int, str]] = [
+    (PlayerNotFoundError, 404, "not_found"),
+    (EmptyDisplayNameError, 400, "empty_display_name"),
+    (DuplicateDisplayNameError, 400, "duplicate_display_name"),
+    (PlayerMergeError, 400, "invalid_merge"),
+]
+
+
+def _map_player_error(exc: PlayerValidationError) -> JSONResponse:
+    for exc_type, http_status, code in _PLAYER_ERROR_MAP:
+        if isinstance(exc, exc_type):
+            return JSONResponse(status_code=http_status,
+                                content={"code": code, "message": str(exc)})
     return JSONResponse(status_code=400, content={"code": "invalid_amount", "message": str(exc)})
 
 
@@ -232,11 +333,12 @@ def create_app(
     _player_secret = player_token_secret or secrets.token_hex(32)
     app = FastAPI(title="pokerapp viewer API", version=_app_version())
 
-    # M1 は read-only GET のみのため全 origin を許可（Expo web client 用, viewer-api.md）。
+    # Expo web client（mobile/ 注文 POST・staff/ 会計 write）が別 origin から叩けるよう、
+    # 書き込みメソッドも許可する（LAN 限定 + token 認可前提, ADR-0021/0038）。
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST", "PUT"],
         allow_headers=["*"],
     )
 
@@ -686,6 +788,187 @@ def create_app(
         if err is not None:
             return err
         return order_repo.reject_request(request_id).to_dict()
+
+    # ――― 会計の不足分（reversal / point grant, ADR-0038 §A）―――
+
+    @app.get("/api/staff/sessions/{session_id}/ledger-entries", response_model=None)
+    def staff_list_ledger_entries(
+        session_id: str, request: Request
+    ) -> "JSONResponse | dict":
+        """session の ledger entry 一覧（reversal UI が取消対象を選ぶための read）。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        return {"entries": [e.to_dict() for e in ledger_repo.list_entries(session_id)]}
+
+    @app.post("/api/staff/ledger-entries/{entry_id}/reverse", response_model=None)
+    def staff_reverse_entry(entry_id: str, request: Request) -> "JSONResponse | dict":
+        """ledger entry を reversal で取り消す（append-only, ADR-0016）。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            entry = ledger_repo.reverse_entry(entry_id)
+        except LedgerError as e:
+            return _map_ledger_error(e)
+        return entry.to_dict()
+
+    @app.post("/api/staff/players/{player_id}/point-grants", response_model=None)
+    def staff_grant_points(
+        player_id: str, request: Request, body: _StaffPointGrantBody
+    ) -> "JSONResponse | dict":
+        """point を付与する（manual_grant / result_credit / campaign_grant, ADR-0016）。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            entry = ledger_repo.grant_points(
+                player_id, body.delta_points,
+                reason=body.reason or "manual_grant",
+                session_id=body.session_id, idempotency_key=body.idempotency_key,
+            )
+        except LedgerError as e:
+            return _map_ledger_error(e)
+        except ValueError as e:  # 不正な reason
+            return JSONResponse(status_code=400,
+                                content={"code": "invalid_amount", "message": str(e)})
+        return entry.to_dict()
+
+    # ――― session / 座席 / player ライフサイクル（ADR-0038 §B）―――
+
+    @app.get("/api/staff/sessions", response_model=None)
+    def staff_list_sessions(request: Request) -> "JSONResponse | dict":
+        """全 session 一覧（staff の卓選択用）。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        return {"sessions": [s.to_dict() for s in session_repo.list_sessions()]}
+
+    @app.post("/api/staff/sessions", status_code=201, response_model=None)
+    def staff_create_session(
+        request: Request, body: _StaffSessionCreateBody
+    ) -> "JSONResponse | dict":
+        """session を作成する（UUID4 採番, ADR-0007）。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        s = session_repo.create_session(label=body.label, blinds=body.blinds)
+        return JSONResponse(status_code=201, content=s.to_dict())
+
+    @app.post("/api/staff/sessions/{session_id}/close", response_model=None)
+    def staff_close_session(session_id: str, request: Request) -> "JSONResponse | dict":
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            s = session_repo.close_session(session_id)
+        except SessionError as e:
+            return _map_session_error(e)
+        return s.to_dict()
+
+    @app.get("/api/staff/sessions/{session_id}/seating", response_model=None)
+    def staff_seating(session_id: str, request: Request) -> "JSONResponse | dict":
+        """現在の seating（最新 hand から導出）+ 記録済 hand_id 一覧。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        try:
+            seating = session_repo.current_seating(session_id)
+            hand_ids = session_repo.list_hand_ids(session_id)
+        except SessionError as e:
+            return _map_session_error(e)
+        return {
+            "seating": [sa.to_dict() for sa in seating],
+            "hand_ids": hand_ids,
+        }
+
+    @app.put("/api/staff/sessions/{session_id}/hands/{hand_id}/seats", response_model=None)
+    def staff_assign_seats(
+        session_id: str, hand_id: int, request: Request, body: _StaffSeatAssignBody
+    ) -> "JSONResponse | dict":
+        """指定 hand に seat→player を割り当てる（append。conflict は session error）。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        results: list[dict] = []
+        try:
+            for a in body.assignments:
+                sa = session_repo.assign_seat(session_id, hand_id, a.seat_no, a.player_id)
+                results.append(sa.to_dict())
+        except SessionError as e:
+            return _map_session_error(e)
+        return {"assignments": results}
+
+    @app.get("/api/staff/players", response_model=None)
+    def staff_list_players(request: Request) -> "JSONResponse | dict":
+        """registry の全 player（canonical, ADR-0030）。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        return {"players": [p.to_dict() for p in player_repo.list_players()]}
+
+    @app.post("/api/staff/players", status_code=201, response_model=None)
+    def staff_create_player(
+        request: Request, body: _StaffPlayerCreateBody
+    ) -> "JSONResponse | dict":
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            p = player_repo.create_player(body.display_name)
+        except PlayerValidationError as e:
+            return _map_player_error(e)
+        return JSONResponse(status_code=201, content=p.to_dict())
+
+    @app.put("/api/staff/players/{player_id}", response_model=None)
+    def staff_rename_player(
+        player_id: str, request: Request, body: _StaffPlayerRenameBody
+    ) -> "JSONResponse | dict":
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            p = player_repo.rename_player(player_id, body.display_name)
+        except PlayerValidationError as e:
+            return _map_player_error(e)
+        return p.to_dict()
+
+    # ――― hand logger 遠隔制御（control queue, ADR-0039 §C）―――
+
+    @app.post("/api/staff/sessions/{session_id}/control", status_code=201,
+              response_model=None)
+    def staff_hand_control(
+        session_id: str, request: Request, body: _StaffControlBody
+    ) -> "JSONResponse | dict":
+        """hand logger に制御コマンド（new_hand / winner / rebuy）を append する。
+
+        適用は hand logger プロセス（`hand_control.enabled` で起動した consumer）が行う。
+        ここでは control queue に 1 行積むだけ（fire-and-forget）。
+        """
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        if body.type not in VALID_CONTROL_TYPES:
+            return JSONResponse(status_code=400, content={
+                "code": "invalid_control",
+                "message": f"未対応の control type です: {body.type!r}",
+            })
+        args: dict = {}
+        if body.type == "winner":
+            if not isinstance(body.seat, int):
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_control", "message": "winner には seat が必要です。"})
+            args["seat"] = body.seat
+        elif body.type == "rebuy":
+            if not isinstance(body.seat, int) or not isinstance(body.amount, int) or body.amount <= 0:
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_control",
+                    "message": "rebuy には seat と正の amount が必要です。"})
+            args["seat"] = body.seat
+            args["amount"] = body.amount
+        control_log = ControlCommandLog(Path(log_dir) / f"{session_id}.control.jsonl")
+        command = control_log.append(body.type, args)
+        return JSONResponse(status_code=201, content=command.to_dict())
 
     # ――― sync API（ADR-0022。staff-token gate, state-based merge）―――
 
