@@ -9,3 +9,8 @@ idf_component_register(
     # esp_tinyusb（USB スタック）と jef-sure/pn5180（NFC reader）は idf_component.yml で取得。
     REQUIRES esp_tinyusb
 )
+
+# usbd_app_driver_get_cb は TinyUSB が weak 宣言のみ + 同一 TU から呼ぶため、main の strong 定義が
+# link 順で無視され「未定義 → 0」に解決されることがある（→ CCID クラス未登録 = Windows Code 10）。
+# -u（--undefined）で我々の定義を強制リンクし、weak 参照を我々の関数へ束縛させる。
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--undefined=usbd_app_driver_get_cb")
