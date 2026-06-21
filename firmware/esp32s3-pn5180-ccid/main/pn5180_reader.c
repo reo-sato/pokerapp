@@ -147,19 +147,29 @@ bool pn5180_reader_init(void) {
     gpio_set_level(nss, 1);  // deselect
     mux_select(PN5180_READERS[0].mux_ch);
 
-    gpio_set_level(rst, 0);                      // RST 押す
+    // 内部 pull-up を当てた状態で読むのが要点:
+    //  - PN5180 が生きていて出力駆動していれば、その値（High/Low）が読める
+    //  - PN5180 が無反応(Hi-Z)なら pull-up に引かれて常に High に見える
+    // → 「pull-up なのに Low に見える」= ちゃんと PN5180 が Low に引いている = チップ生存
+    // 　「pull-up でも 0/1 が変わらない」= 配線/MUX/電源 で PN5180 まで届いていない
+    gpio_set_pull_mode(BUSY_PIN, GPIO_PULLUP_ONLY);
+
+    gpio_set_level(rst, 0);                      // RST 押す（PN5180 リセット中 BUSY=High 期待）
     esp_rom_delay_us(2000);
     int busy_during_rst = gpio_get_level(BUSY_PIN);
     gpio_set_level(rst, 1);                      // RST 離す
     esp_rom_delay_us(50);
     int busy_just_after = gpio_get_level(BUSY_PIN);
     vTaskDelay(pdMS_TO_TICKS(10));               // PN5180 ブート待ち
-    int busy_after_boot = gpio_get_level(BUSY_PIN);
+    int busy_after_boot = gpio_get_level(BUSY_PIN);  // ブート完了で BUSY=Low 期待
 
-    ESP_LOGW(TAG, "RST診断: BUSY during_rst=%d  just_after=%d  after_10ms=%d (idle期待=Low)",
+    ESP_LOGW(TAG, "RST診断(pull-up有): BUSY during_rst=%d  just_after=%d  after_10ms=%d",
              busy_during_rst, busy_just_after, busy_after_boot);
-    ESP_LOGW(TAG, "  期待: during_rst=1(High) → after_boot=0(Low). 変化が無い=RST(GPIO%d) or 電源未到達",
-             rst);
+    ESP_LOGW(TAG, "  正常な PN5180: during_rst=1(High) → after_boot=0(Low,チップが Low に引く)");
+    ESP_LOGW(TAG, "  全部 0 = pull-up が負けるほど強く Low → MUX が常時 Low 駆動 / GND 短絡 を疑う");
+    ESP_LOGW(TAG, "  全部 1 = チップ無反応(Hi-Z) → PN5180 が電源/RST/物理接続不良");
+
+    gpio_set_pull_mode(BUSY_PIN, GPIO_FLOATING);  // driver に clean な状態を渡す
 
     // SPI バスは全 reader 共有（pn5180_spi_init の引数順は host, SCK, MISO, MOSI, freq）。
     pn5180_spi_t *spi = pn5180_spi_init(PN5180_SPI_HOST, PN5180_PIN_SCK,
