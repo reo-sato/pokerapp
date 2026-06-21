@@ -77,6 +77,9 @@ descriptor / reader_name / ATR / pseudo-APDU セット** などホスト側が�
 - **8B UID 回帰**: `tests/test_rfid.py` に 8B UID（ISO 15693）の `bytes_to_tag_id`/`normalize_tag_id`
   roundtrip + `CardMaster` lookup + `MockPCSCBridge → RFIDThread → RFIDEvent` + board(role/index) マッピング。
 - **残（実環境）**: firmware の VID/PID・実 reader_name を確定して契約 §2/§4 に追記。live hot-add は future。
+  - bring-up 診断 `tools/probe_pcsc.py`（`list` で実 reader_name を確認 → `check`/`watch` で §3-8 を検査）+
+    手順 `docs/hardware-qa-checklist.md` を用意済（2026-06-21）。確定した実 reader_name / VID/PID はこの
+    `list` 出力から契約へ転記する。
 
 ## Regression Test
 

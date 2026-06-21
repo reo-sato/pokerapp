@@ -454,7 +454,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0009） |
 | ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
 | schema `1.0` freeze (S4) | ✅ 実装済 | 全 model（session/seat/hand_ref・ledger/point・settlement・order_request/player_session_summary）を `1.0` freeze（ADR-0019, ISSUE-0005 Resolved）。code↔contract test 全 model カバー |
-| 実機 E2E (Phase H) | 🔲 planned | クリーン環境の通し確認（§ ロードマップ 残作業）。**PN5180 firmware 契約は凍結済（ADR-0034, ISSUE-0015 Fixed）**= `docs/contracts/rfid-usb-ccid.md` v1.0 |
+| 実機 E2E (Phase H) | 🔲 planned (bring-up 診断は実装済) | クリーン環境の通し確認（§ ロードマップ 残作業）。**PN5180 firmware 契約は凍結済（ADR-0034, ISSUE-0015 Fixed）**= `docs/contracts/rfid-usb-ccid.md` v1.0。**実機 RFID の bring-up 診断ツール + 手順は実装済**: `tools/probe_pcsc.py`（list/check/watch, 契約 §3-8 を production の `PCSCBridge`/`RFIDThread` で検査）+ `docs/hardware-qa-checklist.md`。**残**: 実機を繋いだ通し QA、firmware の VID/PID・実 reader_name 確定 |
 | **cross-app boundary (S5 read)** | ✅ 実装済 | repository interface frozen（ADR-0020）+ `api/client.py:ViewerApiClient`（Python の local↔API 分離点）+ round-trip test。read boundary を二言語で実証（mobile + Python） |
 | **staff 会計 write API (S5 write)** | ✅ 実装済 | `api/server.py` の `/api/staff/...`（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下 + staff read）を **staff shared token**（`Authorization: Bearer <viewer_api.staff_token>`）で公開（ADR-0021）。`LedgerRepository` を RLock で thread-safe 化。単一書き手維持（read-only は 503）。`ViewerApiClient(staff_token=...)` の staff メソッド + `tests/test_viewer_api_staff.py` |
 | **staff iPad app（会計/注文/座席/ハンド, WS4）** | 🟡 一部実装済 (preview) | `staff/`（Expo/RN, player `mobile/` とは別アプリ, ADR-0037）。**会計タブ**（エントリ追加 / buy-in プリセット / ポイント付与 / 中間集計 / 精算確定・paid-unpaid-partial / エントリ一覧 + 取消(reversal)）+ **注文タブ**（pending 確定→order entry / 却下）+ **座席タブ**（現在 seating / 次 hand への seat→player 割当 / その場 player 作成）+ **ハンドタブ**（hand logger 遠隔制御 = 新ハンド/ウィナー/リバイ, ADR-0039）+ **SessionList**（session 作成・close）を staff API（`/api/staff/...`, ADR-0021/0038/0039）上に実装。`StaffRepository`（mock/HTTP）。typecheck + 13 mock tests + web export + **Playwright E2E 6 件**（`staff/e2e/`, headless Chromium。browser 取得はネットワーク要）。**残**: ハンド履歴 read（staff hands-list endpoint）、実機タッチの手動 QA、open question = ISSUE-0020 |
@@ -616,7 +616,9 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
 1. ~~**schema `1.0` freeze（S4）**~~ → **✅ 完了（ADR-0019, ISSUE-0005 Resolved）**: 全 model を `1.0` freeze。
    次の最優先は下の #2（実機 E2E）。
 2. **実機 E2E（Phase H / 最優先）**: クリーン環境で 音声→JSON/PHH の 1 ハンド通し + PN5180 RFID 実機 +
-   `--ledger`（viewer_api.enabled）+ スマホ注文の通し確認。
+   `--ledger`（viewer_api.enabled）+ スマホ注文の通し確認。**RFID 実機の bring-up は診断ツール
+   `tools/probe_pcsc.py`（list/check/watch）+ 手順 `docs/hardware-qa-checklist.md` を用意済**
+   （契約 §3-8 を production と同じ `PCSCBridge`/`RFIDThread` で検査）。残は実機を繋いだ通し確認。
 3. ~~**PN5180 / ESP32-S3 firmware ↔ Python 契約固定**（ISSUE-0015）~~ → **✅ 完了（ADR-0034, ISSUE-0015
    Fixed）**: `docs/contracts/rfid-usb-ccid.md` v1.0 で USB descriptor / reader_name 規約 / ATR / Get UID /
    UID 4-7-8B を凍結。**残（実環境）**: firmware の VID/PID・実 reader_name を確定して契約 §2/§4 に追記。
@@ -949,7 +951,11 @@ python tools/calibrate_confidence.py            # 派生 confidence 較正サー
 python main.py --export-phh logs/session_xxx.json
 # ローカル QA（実機なし。docs/manual-qa-checklist.md 参照）
 printf 'ハンド開始\nチェック\nシート1 ウィナー\n' | python tools/play_hand_text.py - --seats 3  # mic 不要のテキスト駆動再構築
-python tools/simulate_rfid.py register-demo && python tools/simulate_rfid.py board Ah Kd Qs  # 実機なし RFID 注入
+python tools/simulate_rfid.py register-demo && python tools/simulate_rfid.py board Ah Kd Qs  # 実機なし RFID 注入 (HTTP)
+# 実機 RFID QA（PC/SC canonical。docs/hardware-qa-checklist.md 参照, 要 pip install ".[pcsc]"）
+python tools/probe_pcsc.py list    # reader_name 列挙 + config 突き合わせ (契約 §3-4)
+python tools/probe_pcsc.py check   # config lint + connect 検査 (§5, カード不要)
+python tools/probe_pcsc.py watch --seconds 30  # 実 RFIDThread でタップ確認 (UID/役割/hot-plug, §6-8)
 ```
 
 ---

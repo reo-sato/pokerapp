@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+### Added (実機 RFID bring-up 診断ツール + 手順, Phase H / ADR-0015/0034)
+
+- 実機の **ESP32-S3 + PN5180（USB CCID → PC/SC, canonical）** を `docs/contracts/rfid-usb-ccid.md` v1.0 の
+  MUST に対して検査する診断 CLI **`tools/probe_pcsc.py`** を追加。`simulate_rfid.py`（HTTP 模擬・実機なし）と
+  対になる「実機側」 bring-up ツール。production と同じ `rfid.bridge.PCSCBridge` / `rfid.reader_thread.RFIDThread`
+  を叩くため、ここで OK なら hand logger でも OK。
+  - `list`: 接続中 reader_name を列挙し `config.rfid.pcsc_readers` と**等値**突き合わせ（matched/MISSING/
+    unconfigured, 契約 §3-4/§8）。
+  - `check`: config lint（role/seat/index・重複・name 欠落）+ 各 reader connect 検査（§4-5, カード不要）。
+  - `watch`: 実 RFIDThread を起動し、タップごとに role/seat/board_index・正規化 UID（4/7/8B 判定）・card 解決を
+    表示（§6-8: Get UID / UID 正規化 / デバウンス hot-plug）。pyscard 未導入時は導線付きで gate。
+- **手順書** `docs/hardware-qa-checklist.md`（Phase H 実機 QA, 契約 §↔手順の受け入れ基準表つき）を追加。
+  `manual-qa-checklist.md`（実機なし）の対。
+- `CLAUDE.md` のコマンド集 / Phase H 行 / 残作業 #2 を更新。
+- テスト: `tests/test_tools_probe_pcsc.py`（35 件。純粋ロジック + DI シーム + コマンド層を pyscard/実機なしで
+  検証）。**残**: 実機を繋いだ通し QA、firmware の VID/PID・実 reader_name 確定（契約 §2/§4 追記, ISSUE-0015）。
+
 ### Added (ハンド訂正 = append-only オーバーレイ / iPad staff 訂正, ADR-0036 / B4)
 
 - 音声自動記録の誤認識を、**元 hand log を mutate せず append-only な訂正レコードで重ねる**仕組みを追加
