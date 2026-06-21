@@ -75,7 +75,8 @@ firmware が手元に無くても、(1) 境界契約の凍結、(2) host 側の�
 - [x] `config_default.json` に `pcsc_readers` サンプル + コメント。`main.py` pcsc 経路を `pcsc_readers` 優先に。
 - [x] `tests/test_rfid.py`: 8B UID roundtrip / 8B `MockPCSCBridge→RFIDThread→RFIDEvent` / board マッピング。
 - [x] ISSUE-0015 を Fixed に更新（契約リンク）。ISSUE-0014（HTTP 契約）は Superseded のまま。
-- [ ] （実環境）firmware の VID/PID・実 reader_name 確定 → 契約 §2/§4 追記。live hot-add（future）。
+- [x] （実環境）firmware の VID/PID・実 reader_name 確定 → 契約 §2/§4 追記（2026-06-22 実機 bring-up
+      で確定: VID=0x303A PID=0x8B5D、`PokerRFID PN5180-CCID 0` Windows）。live hot-add（future）。
 
 ## Related Files
 

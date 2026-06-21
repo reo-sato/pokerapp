@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+### Fixed / Added (ESP32-S3 USB CCID firmware 実機 bring-up + 契約に実機確定値転記, ADR-0034 / ISSUE-0015)
+
+- 前日 scaffold した `firmware/esp32s3-pn5180-ccid/` を **実機で起動**。Windows PC/SC に
+  `PokerRFID PN5180-CCID 0` として列挙、Status=OK、`tools/probe_pcsc.py list` で見える状態に。
+  契約 `docs/contracts/rfid-usb-ccid.md` §2/§4 を実機確定値で更新（VID=0x303A PID=0x8B5D、
+  manufacturer="PokerRFID"、product="PN5180-CCID"、Windows reader_name = `PokerRFID PN5180-CCID 0`）。
+  **ISSUE-0015 の最後の残作業（実 VID/PID/reader_name 確定）を完了**。ADR-0034 Follow-up を Done に。
+- 途中で必要だった非自明な修正:
+  - **依存名 fix**: `jef-sure/pn5180` ^0.1.0（`esp32-component-pn5180` は GitHub repo 名で
+    registry 名と別、`version solving failed` の原因）+ include をハイフン区切り名 +
+    `nfc_uids_array_t.uids_count` / `nfc_uid_t.uid_length` に修正。
+  - **USB-Serial/JTAG セカンダリコンソール無効化**: `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y`。
+    セカンダリコンソールが TinyUSB(USB-OTG) と内蔵 USB PHY を奪い合い CCID 起動失敗（Windows Code 10）。
+  - **`ccid_force_link()` の追加**: TinyUSB は `usbd_app_driver_get_cb` を weak スタブ（0 drivers）で
+    持つ。我々の strong 定義は `ccid_device.c`（別 TU）にあり、ESP-IDF は main を whole-archive
+    しないため `ccid_device.o` が抽出されず weak スタブ採用 → CCID クラス未登録 = Code 10。
+    `main.c → ccid_force_link()` で TU 強制リンク。
+- 残: PN5180 SPI 配線→`app_config.h` ピン反映→`probe_pcsc watch` で実カード UID 読み取り（§6/§7）。
+
 ### Added (ESP32-S3 + PN5180 USB CCID firmware scaffold, 本番 RFID / ADR-0015/0034)
 
 - 本番 RFID（canonical USB CCID → PC/SC）の **ESP-IDF firmware scaffold** を `firmware/esp32s3-pn5180-ccid/`

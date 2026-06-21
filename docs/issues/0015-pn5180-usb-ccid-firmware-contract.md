@@ -85,6 +85,13 @@ descriptor / reader_name / ATR / pseudo-APDU セット** などホスト側が�
   - 本番 firmware の **ESP-IDF scaffold** `firmware/esp32s3-pn5180-ccid/` を追加（2026-06-21）。USB CCID
     記述子 + CCID メッセージ処理（ATR/Get UID）+ TinyUSB カスタムクラス + PN5180 読取り。実機ビルド/
     フラッシュ/USB 検証と VID/PID・実 reader_name 確定が残（§2/§4 転記の前段がコード化された）。
+  - **実機 bring-up 完了（2026-06-22）**: ESP-IDF v5.3.5 + esp_tinyusb 1.7.6 + tinyusb 0.19.0 + jef-sure/pn5180 0.1.1
+    でビルド→フラッシュ→Windows PC/SC で `PokerRFID PN5180-CCID 0` として列挙、Status OK、
+    `tools/probe_pcsc.py list` で見える。契約 §2/§4 に確定値（VID=0x303A PID=0x8B5D、reader_name）を追記済。
+    途中で必要だった非自明な修正: (1) `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y`（USB-Serial/JTAG が
+    USB-OTG と内蔵 PHY を競合）、(2) `ccid_force_link()` を main.c から呼ぶ（ESP-IDF が main を
+    whole-archive せず、別 TU の `usbd_app_driver_get_cb` strong 定義がリンクされず TinyUSB の
+    weak スタブが使われていた = Windows Code 10 の原因）。**残**: PN5180 SPI 配線→`watch` で実カード UID（§6/§7）。
 
 ## Regression Test
 

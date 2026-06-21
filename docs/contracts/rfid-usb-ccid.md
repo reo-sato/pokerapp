@@ -32,10 +32,10 @@ HTTP 経路（`rfid/http_receiver.py`, ADR-0015 で optional secondary）は本�
   での RFID 公開はしない（PC/SC スタックに自然に乗せるため）。
 - **VID/PID**: 製作時に確定し、確定値を本節に追記する **MUST**（host は VID/PID を直接見ず reader_name で
   マッチするが、衝突回避・ドライバ選択のため固定する）。テスト用途で実 VID を持たない場合も PID は固定。
-  - 例（確定後に記入）: `VID=0x____ PID=0x____`。
+  - **確定値（2026-06-22, 実機 bring-up）**: `VID=0x303A PID=0x8B5D`（Espressif VID、PID は本プロジェクト固定）。
 - **manufacturer / product 文字列**: 固定 **MUST**。product 文字列は host の reader_name に現れ、config の
   マッチ対象になるため **安定**（ファーム更新で変えない）**MUST**。
-  - 推奨: manufacturer=`PokerRFID`、product=`PN5180-CCID`（OS が slot 接尾辞を付与 → §3）。
+  - **確定値**: `manufacturer=PokerRFID`、`product=PN5180-CCID`（Windows PC/SC は `<manufacturer> <product> <slot index>` の体裁で描画 → §4 reader_name 参照）。
 - **serial 文字列**: device 単位で安定 **SHOULD**（複数台運用時の識別。reader_name に現れうる）。
 
 ## 3. CCID multi-slot と reader_name（firmware MUST / host MUST）
@@ -56,9 +56,9 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 "rfid": {
   "transport": "pcsc",
   "pcsc_readers": [
-    {"name": "PN5180-CCID [Interface 0]", "role": "seat",  "seat": 1},
-    {"name": "PN5180-CCID [Interface 1]", "role": "seat",  "seat": 2},
-    {"name": "PN5180-CCID [Interface 5]", "role": "board", "index": 1}
+    {"name": "PokerRFID PN5180-CCID 0", "role": "seat",  "seat": 1},
+    {"name": "PokerRFID PN5180-CCID 1", "role": "seat",  "seat": 2},
+    {"name": "PokerRFID PN5180-CCID 5", "role": "board", "index": 1}
   ]
 }
 ```
@@ -67,6 +67,8 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
   "index": 1..5 (role=board, 任意)}`。
 - `name` は **OS が描画する reader_name と完全一致** **MUST**（host は前方一致でなく等値で照合,
   `rfid/bridge.py:PCSCBridge.connect`）。OS により文字列が異なるため、運用 OS の実値を入れる（§8）。
+- **確定値（Windows, 2026-06-22 実機）**: 1 slot 構成で `PokerRFID PN5180-CCID 0`（manufacturer + product + slot index, 半角空白区切り）。
+  Linux/macOS の体裁は別なので、運用 OS で `probe_pcsc list` を実行して実 reader_name を確認すること。
 - 役割→`RFIDEvent.role`/`.seat` は host config が **唯一の source of truth**。firmware は slot 順序のみ保証。
 - HTTP 経路の `config.rfid.readers`（**dict**, `{reader_id: {role,seat}}`）とは **別キー**であり混同しない
   **MUST**（list=pcsc / dict=http）。
