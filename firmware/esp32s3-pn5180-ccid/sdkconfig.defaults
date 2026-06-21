@@ -1,22 +1,18 @@
-# ESP32-S3 + TinyUSB(CCID) 既定 sdkconfig。idf.py reconfigure で反映される。
-# 実機・IDF バージョンに応じて menuconfig で調整すること。
-
+# ESP32-S3 + TinyUSB(CCID) 既定 sdkconfig。idf.py reconfigure で反映。
 CONFIG_IDF_TARGET="esp32s3"
 
-# --- USB: native USB-OTG を TinyUSB で使う（CP2102N の UART 側ではない！ §0） ---
-CONFIG_TINYUSB_ENABLED=y
-# アプリ独自クラス(CCID)を usbd_app_driver_get_cb() で登録するため、組込みクラスは無効でよい。
-CONFIG_TINYUSB_CDC_ENABLED=n
-CONFIG_TINYUSB_MSC_ENABLED=n
-CONFIG_TINYUSB_HID_ENABLED=n
-# TinyUSB のタスク/ログ
-CONFIG_TINYUSB_NO_DEFAULT_TASK=n
-
-# USB を native(internal PHY) に固定（外部 PHY を使わない）。
-CONFIG_USB_OTG_SUPPORTED=y
+# --- コンソール（重要）---
+# ESP32-S3 既定の「USB-Serial/JTAG セカンダリコンソール」は TinyUSB(USB-OTG)と同じ内蔵 USB PHY を
+# 奪い合い、CCID デバイスが起動失敗(Error)する原因になる。よって:
+#   - プライマリコンソール = UART0（= CP2102N 側。ログ ESP_LOGI はここに出る）
+#   - セカンダリ(USB-Serial/JTAG) = 無効
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
 # --- FreeRTOS / ログ ---
 CONFIG_FREERTOS_HZ=1000
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
-# --- フラッシュ/PSRAM はモジュールに合わせて menuconfig で（既定は触らない） ---
+# 注: TinyUSB は esp_tinyusb 依存 + tinyusb_driver_install() で有効。CONFIG_TINYUSB_* は不要
+#     （旧 Kconfig 名。設定しても unknown symbol 警告になるだけ）。
+# 注: フラッシュ/PSRAM はモジュールに合わせて menuconfig で（既定は触らない）。
