@@ -9,10 +9,17 @@ CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
+# --- PSRAM / Flash（重要・MUX 衝突回避）---
+# 実機 ESP32-S3-WROOM-1 N8R8 等は 8MB Embedded PSRAM 搭載。CONFIG_SPIRAM=y で octal PSRAM
+# が有効化されると GPIO 33-37 が PSRAM コントローラに奪われ、MUX_PIN_S0(=GPIO37) が制御不能に
+# なって CD74HC4067 のチャネル選択が壊れる（BUSY が読めない症状）。GPIO37 を GPIO として
+# 使うため PSRAM を完全無効化する。
+CONFIG_SPIRAM=n
+CONFIG_ESPTOOLPY_OCT_FLASH=n
+
 # --- FreeRTOS / ログ ---
 CONFIG_FREERTOS_HZ=1000
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 # 注: TinyUSB は esp_tinyusb 依存 + tinyusb_driver_install() で有効。CONFIG_TINYUSB_* は不要
 #     （旧 Kconfig 名。設定しても unknown symbol 警告になるだけ）。
-# 注: フラッシュ/PSRAM はモジュールに合わせて menuconfig で（既定は触らない）。

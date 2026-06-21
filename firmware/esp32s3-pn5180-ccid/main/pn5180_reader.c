@@ -61,7 +61,9 @@ static void mux_select(int ch) {
     gpio_set_level(MUX_PIN_S1, (ch >> 1) & 1);
     gpio_set_level(MUX_PIN_S2, (ch >> 2) & 1);
     gpio_set_level(MUX_PIN_S3, (ch >> 3) & 1);
-    esp_rom_delay_us(5);  // MUX 切替の settle
+    // 5μs では gpio_set_level 4連発の APB cycle 反映 + MUX settle + 入力サンプリングが
+    // 不足し古い ch の BUSY を誤読する恐れ。50μs に拡大（poll 100ms なので無視できる）。
+    esp_rom_delay_us(50);
 #else
     (void)ch;
 #endif
@@ -135,7 +137,12 @@ bool pn5180_reader_init(void) {
     mux_init();
     diag_busy_pin();  // テスター無しで BUSY ピンの素性を診断（ログに出す）
     diag_mux_scan();  // 全 ch 走査で MUX 不通 か reader 個別 かを切り分け
-    gpio_set_pull_mode(BUSY_PIN, GPIO_FLOATING);  // 診断で付けた内部 pull を解除（ドライバに clean な状態を渡す）
+    // MUX(CD74HC4067)のSIG出力はアナログスイッチ経由で駆動が弱め。FLOATING だと ESP32-S3 の
+    // 入力バッファが弱駆動を読み損ねて常時 High/Low に張り付くことがある。pull-up を当てると
+    // High が安定し、PN5180 が BUSY を Low に引いた瞬間にだけ Low に落ちる（push-pull と
+    // 内部 pull-up の併用は干渉しない）。
+    gpio_set_direction(BUSY_PIN, GPIO_MODE_INPUT);  // 方向を明示（IDF 実装依存を避ける）
+    gpio_set_pull_mode(BUSY_PIN, GPIO_PULLUP_ONLY);
 
     // ── RST/NSS 駆動 → BUSY 応答の手動診断 ──
     // PN5180 は RST=Low(>10us)→High→数 ms 後 BUSY=Low(idle)。SPI 無しでこれが起こるかを観る。
@@ -169,7 +176,7 @@ bool pn5180_reader_init(void) {
     ESP_LOGW(TAG, "  全部 0 = pull-up が負けるほど強く Low → MUX が常時 Low 駆動 / GND 短絡 を疑う");
     ESP_LOGW(TAG, "  全部 1 = チップ無反応(Hi-Z) → PN5180 が電源/RST/物理接続不良");
 
-    gpio_set_pull_mode(BUSY_PIN, GPIO_FLOATING);  // driver に clean な状態を渡す
+    gpio_set_pull_mode(BUSY_PIN, GPIO_PULLUP_ONLY);  // MUX 弱駆動でも level 確定（driver にも有効）
 
     // SPI バスは全 reader 共有（pn5180_spi_init の引数順は host, SCK, MISO, MOSI, freq）。
     pn5180_spi_t *spi = pn5180_spi_init(PN5180_SPI_HOST, PN5180_PIN_SCK,
@@ -187,6 +194,28 @@ bool pn5180_reader_init(void) {
 
         // busy = BUSY_PIN（MUX SIG or 直結, 共有）, rst = 共有, nss = reader 個別。
         s_readers[i].dev = pn5180_init(spi, cfg->nss, BUSY_PIN, PN5180_PIN_RST);
+        if (!s_readers[i].dev && i == 0) {
+            // ── NSS スイープ（フォールバック診断）──
+            // 通常 init 失敗。ch=cfg->mux_ch に生きているチップに対し、どの NSS GPIO が SPI で
+            // 話せるかを総当りで探す。配線/マッピングが想定と違う場合の救済。
+            ESP_LOGW(TAG, "NSS スイープ開始: ch%d のチップを呼ぶ NSS を総当り探索", cfg->mux_ch);
+            static const int nss_candidates[] = {1, 2, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18};
+            const int n_cands = sizeof(nss_candidates) / sizeof(nss_candidates[0]);
+            for (int k = 0; k < n_cands; k++) {
+                int try_nss = nss_candidates[k];
+                if (try_nss == cfg->nss) continue;  // 既に試した
+                ESP_LOGW(TAG, "  [%d/%d] NSS=GPIO%d を試行...", k + 1, n_cands, try_nss);
+                pn5180_t *probe = pn5180_init(spi, try_nss, BUSY_PIN, PN5180_PIN_RST);
+                if (probe) {
+                    ESP_LOGW(TAG, "  ✅ 成功! ch%d の生きたチップは NSS=GPIO%d に対応",
+                             cfg->mux_ch, try_nss);
+                    ESP_LOGW(TAG, "     → app_config.h で PN5180_READERS[0]={.nss=%d, .mux_ch=%d} に修正してください",
+                             try_nss, cfg->mux_ch);
+                    s_readers[i].dev = probe;
+                    break;
+                }
+            }
+        }
         if (!s_readers[i].dev) {
             ESP_LOGE(TAG, "pn5180_init reader %d failed (nss=%d busy=%d rst=%d mux_ch=%d via_mux=%d)",
                      i, cfg->nss, BUSY_PIN, PN5180_PIN_RST, cfg->mux_ch, PN5180_BUSY_VIA_MUX);
