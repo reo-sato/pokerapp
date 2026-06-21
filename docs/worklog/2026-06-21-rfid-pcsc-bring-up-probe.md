@@ -71,9 +71,24 @@ None observed.
 
 - なし（新規追加のみ。既存挙動は不変 = RFID 既存テスト 22 件含む全 701 緑）。
 
+## Follow-up (同日, 実機切り分けの結果)
+
+operator の実機（ESP32-S3 + PN5180）で bring-up を試行し、次が判明:
+
+- 実機は当初 **CP2102N USB-UART ブリッジ**側に接続 → COM ポート扱いで CCID にならず（`probe_pcsc` 対象外）。
+- native USB 側に挿し替えると `USB JTAG/serial debug unit` + `USB シリアル デバイス (COMx)` として列挙されたが、
+  依然 **USB CCID（スマートカード読み取り装置）としては出ない**。
+- firmware は **テスト用「カード読み取りで LED 点灯」のみ**で、PC へデータを送らない（CCID 未実装）。
+- operator の本番方針は **USB CCID（canonical）**。⇒ 不足は firmware であり、host 側は完成済み。
+
+これを受け、**firmware 実装者向け MUST チェックリスト `docs/rfid-ccid-firmware-checklist.md` を追加**
+（契約 v1.0 を ESP32-S3 実装手順に落とし、各項目を `probe_pcsc` 出力で受け入れ確認）。
+CHANGELOG / CLAUDE.md（firmware 契約行）/ 契約 Related / hardware-qa-checklist / ISSUE-0015 から相互リンク。
+
 ## Remaining Gaps / Out-of-Scope
 
-- [ ] 実機を繋いだ通し QA（`docs/hardware-qa-checklist.md` 手順1-7）= operator 環境。
+- [ ] **本番 USB CCID firmware の実装**（別 repo, `docs/rfid-ccid-firmware-checklist.md` 準拠）= operator/firmware 環境。
+- [ ] 実機を繋いだ通し QA（`docs/hardware-qa-checklist.md` 手順1-7）= CCID firmware 完成後。
 - [ ] firmware の VID/PID・実 reader_name を `list` 出力から確定し、契約 §2/§4 に追記（ISSUE-0015 残）。
 - [ ] live hot-add（稼働中の reader 追加追従）は契約上も future（v1.0 は起動時 connect のみ）。
 - [ ] `watch` の ATR バイト列の直接表示は未実装（host は ATR 非依存 = §5、connect 成立で代替）。

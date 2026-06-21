@@ -80,6 +80,8 @@ descriptor / reader_name / ATR / pseudo-APDU セット** などホスト側が�
   - bring-up 診断 `tools/probe_pcsc.py`（`list` で実 reader_name を確認 → `check`/`watch` で §3-8 を検査）+
     手順 `docs/hardware-qa-checklist.md` を用意済（2026-06-21）。確定した実 reader_name / VID/PID はこの
     `list` 出力から契約へ転記する。
+  - firmware 実装者向けの MUST チェックリスト `docs/rfid-ccid-firmware-checklist.md` を用意済（2026-06-21）。
+    実機にはテスト用 LED firmware のみ確認 → 本番 USB CCID firmware の実装仕様を契約から落とし込み。
 
 ## Regression Test
 

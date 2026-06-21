@@ -420,7 +420,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | 音声認識 (Whisper) | ✅ 実装済 | `audio/recognizer.py` |
 | RFID PC/SC 受信 | ✅ 実装済 (canonical) | `rfid/reader_thread.py`（ESP32-S3 USB CCID 経由で PN5180 公開, ADR-0015） |
 | RFID HTTP 受信 | ✅ 実装済 (optional secondary) | `rfid/http_receiver.py`（debug/remote 用, ADR-0015） |
-| ESP32-S3 USB CCID firmware ↔ Python 契約固定 | ✅ 実装済 (契約 freeze) | `docs/contracts/rfid-usb-ccid.md` v1.0（ADR-0034, ISSUE-0015 Fixed）: USB descriptor / reader_name 安定規約 / slot↔役割（host config が source of truth）/ ATR-agnostic / Get UID `FF CA 00 00 00` / UID 4-7-8B 正規化 / hot-plug。config `pcsc_readers`(list) 分離。firmware の VID/PID・実 reader_name は実機実装時に追記 |
+| ESP32-S3 USB CCID firmware ↔ Python 契約固定 | ✅ 実装済 (契約 freeze) | `docs/contracts/rfid-usb-ccid.md` v1.0（ADR-0034, ISSUE-0015 Fixed）: USB descriptor / reader_name 安定規約 / slot↔役割（host config が source of truth）/ ATR-agnostic / Get UID `FF CA 00 00 00` / UID 4-7-8B 正規化 / hot-plug。config `pcsc_readers`(list) 分離。firmware 実装者向け MUST チェックリスト = `docs/rfid-ccid-firmware-checklist.md`（各項目を `probe_pcsc` で受け入れ確認）。firmware の VID/PID・実 reader_name は実機実装時に追記 |
 | RFID カード照合 | ✅ 実装済 | `rfid/card_master.py` |
 | ストリート自動遷移 (RFID) | ✅ 実装済 | board 枚数 3/4/5 で遷移 |
 | Confidence 算出 | ✅ 実装済 | センサー組み合わせ行列 |

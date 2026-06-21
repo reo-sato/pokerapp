@@ -19,6 +19,10 @@
     表示（§6-8: Get UID / UID 正規化 / デバウンス hot-plug）。pyscard 未導入時は導線付きで gate。
 - **手順書** `docs/hardware-qa-checklist.md`（Phase H 実機 QA, 契約 §↔手順の受け入れ基準表つき）を追加。
   `manual-qa-checklist.md`（実機なし）の対。
+- **firmware 実装チェックリスト** `docs/rfid-ccid-firmware-checklist.md` を追加（本番 USB CCID 経路）。
+  契約 v1.0 の MUST（native USB / USB CCID class / ATR / Get UID `FF CA 00 00 00` / UID 4-7-8B 生バイト /
+  hot-plug）を ESP32-S3 firmware 実装手順に落とし、各項目を `probe_pcsc` の出力で受け入れ確認できる形に。
+  「LED 点灯のみのテスト firmware → 本番 USB CCID firmware」への橋渡し。
 - `CLAUDE.md` のコマンド集 / Phase H 行 / 残作業 #2 を更新。
 - テスト: `tests/test_tools_probe_pcsc.py`（35 件。純粋ロジック + DI シーム + コマンド層を pyscard/実機なしで
   検証）。**残**: 実機を繋いだ通し QA、firmware の VID/PID・実 reader_name 確定（契約 §2/§4 追記, ISSUE-0015）。

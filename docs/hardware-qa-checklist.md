@@ -8,6 +8,8 @@ RFID 経路を `docs/contracts/rfid-usb-ccid.md` **v1.0** の MUST に対して 
 - 診断には [`tools/probe_pcsc.py`](../tools/probe_pcsc.py) を使う（production と同じ
   `rfid.bridge.PCSCBridge` / `rfid.reader_thread.RFIDThread` を叩くため、ここで OK なら hand logger でも OK）。
 - 契約の正準は `docs/contracts/rfid-usb-ccid.md`。本書は手順、契約は規約。食い違いは契約が優先。
+- **firmware を書く人向け**の MUST 実装チェックリストは [`rfid-ccid-firmware-checklist.md`](rfid-ccid-firmware-checklist.md)
+  （本書のホスト側検査と対。sensor が USB CCID として PC に出る firmware が前提）。
 
 ---
 

@@ -123,6 +123,8 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 
 ## Related
 
+- **`docs/rfid-ccid-firmware-checklist.md`** — 本契約の MUST を ESP32-S3 firmware 実装手順に落とした
+  implementer's guide（各項目を `tools/probe_pcsc.py` で受け入れ確認）。
 - ADR-0015（PC/SC canonical）/ ADR-0034（本契約 freeze）/ ISSUE-0015（本契約の出所）
 - `rfid/bridge.py`（Get UID / UID 正規化）/ `rfid/reader_thread.py`（pcsc_readers / polling / debounce）
 - `rfid/card_master.py`（`normalize_tag_id` / `bytes_to_tag_id`）/ `tests/test_rfid.py`
