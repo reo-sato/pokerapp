@@ -49,10 +49,21 @@ idf.py build
 idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB-Serial/JTAG)でも可
 ```
 
+## アーキテクチャ（実機: 13台 PN5180 + CD74HC4067 MUX）
+
+- SCK/MOSI/MISO/RST は **13 台共通**（直結）、**NSS は reader 個別**。
+- **BUSY 13 本は CD74HC4067（16ch アナログ MUX）に集約**。S0-S3 で 1 本を選んで SIG に出し、
+  ESP32 は SIG(`PN5180_PIN_BUSY_SIG`)を読む。`pn5180_reader.c` が **各 reader 処理の直前に MUX channel を
+  切替**（`mux_select`）してから jef-sure ドライバを呼ぶ（ドライバは MUX 非依存、busy=SIG GPIO を渡すだけ）。
+- MUX EN=GND（常時有効）、MUX VCC=**3.3V**（5V 禁止）。SPI は **5MHz**（7MHz 以上で不安定）。
+- **bring-up は `CCID_SLOT_COUNT=1` で 1 台検証 → 動いたら 13 に上げる**（`app_config.h` の
+  `PN5180_READERS` は 13 台分定義済み）。
+
 ## 実機で必ず埋める箇所（TODO）
 
-1. **`app_config.h`**: `CCID_SLOT_COUNT` / SPI ピン（ESP32-S3 で有効な GPIO。USB の 19/20、
-   strapping 0/3/45/46、flash・PSRAM ピンを避ける）/ slot ごとの NSS・BUSY・RST / `USB_VID`/`USB_PID`。
+1. **`app_config.h`**: `CCID_SLOT_COUNT`（1→13）/ 共有 SPI・RST・MUX SIG ピン / MUX S0-S3 /
+   `PN5180_READERS` の NSS・mux_ch（reader→MUX channel 対応）/ `USB_VID`/`USB_PID`。
+   ESP32-S3 で USB の 19/20、strapping 0/3/45/46、NeoPixel 38、（PSRAM 有効時の 35-37）を避ける。
 2. **`pn5180_reader.c`**: `jef-sure` コンポーネントの実 API（ヘッダ名・`nfc_uids_array_t` /
    `nfc_uid_t` のフィールド名、`pn5180_15693_init` の modulation 値）に合わせる。`get_all_uids` の
    戻り値構造体を実 README/examples で確認。

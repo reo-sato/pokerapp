@@ -1,51 +1,70 @@
-// app_config.h — 実機に合わせて編集する設定（ピン / slot 数 / USB ID）。
+// app_config.h — 実機（13台 PN5180 + CD74HC4067 MUX で BUSY 集約）の設定。
 //
-// 契約: docs/contracts/rfid-usb-ccid.md v1.0 / docs/rfid-ccid-firmware-checklist.md
-// host 側は reader_name / VID-PID を等値照合するだけなので、ここを確定して契約 §2/§4 へ転記する。
+// アーキテクチャ（実機）:
+//   - SCK/MOSI/MISO/RST は 13 台共通（直結）。NSS は reader 個別。
+//   - BUSY 13 本は CD74HC4067（16ch アナログ MUX）に入り、S0-S3 で 1 本を選んで SIG に集約。
+//     ESP32 は SIG(=PN5180_PIN_BUSY_SIG) を読む。各 reader を処理する前に MUX channel を切替える
+//     （pn5180_reader.c の mux_select）。
+//   - 契約 docs/contracts/rfid-usb-ccid.md v1.0 / docs/rfid-ccid-firmware-checklist.md。
 #pragma once
 
 #include <stdint.h>
 #include "driver/spi_master.h"
 
-// ───────── CCID slot 数（= PN5180 の台数）─────────
-// MVP は 1 から。動いたら増やす（host config の pcsc_readers 件数と一致させる, 契約 §3）。
+// ───────── CCID slot 数（= 有効化する PN5180 台数）─────────
+// まず 1 台で MUX+SPI 経路を検証 → 動いたら 13 に上げる（PN5180_READERS は 13 台分定義済み）。
 #define CCID_SLOT_COUNT 1
 
-// ───────── USB 識別子（契約 §2: 固定 MUST）─────────
-// TODO(実機): 製作時に VID/PID を確定し、契約 §2 に転記する。
-//   ※ 0x303A は Espressif の VID。製品では自社/取得 VID を使う。PID はテスト用に固定でよい。
+// ───────── USB 識別子（実機確定値, 契約 §2）─────────
 #define USB_VID 0x303A
-#define USB_PID 0x8B5D  // 任意・固定。他デバイスと衝突しない値に。
-
-// reader_name に現れる product 文字列（ファーム更新で変えない MUST, §2）。
-// OS は "<product> [Interface N] ..." の体裁で描画 → host config の pcsc_readers[].name に等値で入る。
+#define USB_PID 0x8B5D
 #define USB_MANUFACTURER_STR "PokerRFID"
 #define USB_PRODUCT_STR      "PN5180-CCID"
-#define USB_SERIAL_STR       "PKR-0001"  // device 単位で安定 (SHOULD, §2)
+#define USB_SERIAL_STR       "PKR-0001"
 
-// ───────── PN5180 SPI（全 slot 共有バス）─────────
-// ESP32-S3 用の安全な GPIO 例。USB(19/20) / strapping(0,3,45,46) / flash・PSRAM ピンを避けること。
-// TODO(実機): 実配線に合わせて変更。
+// ───────── PN5180 SPI（全 reader 共有バス）─────────
 #define PN5180_SPI_HOST   SPI2_HOST
 #define PN5180_PIN_SCK    12
 #define PN5180_PIN_MOSI   11
 #define PN5180_PIN_MISO   13
-#define PN5180_SPI_HZ     7000000  // 7 MHz（jef-sure 例に準拠）
+#define PN5180_SPI_HZ     5000000   // 5MHz（PN5180 は 7MHz 以上で不安定, 実機知見）
 
-// ───────── PN5180 個別ピン（slot ごとに NSS/BUSY/RST）─────────
-// CCID_SLOT_COUNT と同じ要素数にする。slot index はそのまま CCID slot 番号 = host の reader_name 接尾辞。
+// ───────── PN5180 共有制御線 ─────────
+#define PN5180_PIN_RST    14        // RST は 13 台共通（実機配線）
+
+// ───────── BUSY は CD74HC4067 MUX 経由（13 本 → 1 本に集約）─────────
+// jef-sure ドライバには busy = PN5180_PIN_BUSY_SIG を渡し、各 reader の処理前に MUX channel を
+// 切り替えて「選択中 reader の BUSY」を SIG に出す。
+#define PN5180_PIN_BUSY_SIG 47      // MUX SIG → ESP32 入力（選択中 reader の BUSY）
+#define MUX_PIN_S0  37              // ※ 38(NeoPixel) 回避で 37（PSRAM 無効前提なら使用可）
+#define MUX_PIN_S1  39
+#define MUX_PIN_S2  40
+#define MUX_PIN_S3  41
+// MUX EN は GND 直結（常時有効）= ハード側。MUX VCC = 3.3V（5V 禁止）。
+
+// ───────── 各 reader の NSS と、BUSY が繋がる MUX channel ─────────
 typedef struct {
-    int nss;   // chip select (active low)
-    int busy;  // busy line
-    int rst;   // hardware reset (active low)
-} pn5180_pins_t;
+    int nss;      // chip select (active low)
+    int mux_ch;   // この reader の BUSY が入っている MUX channel (0..15)
+} pn5180_reader_cfg_t;
 
-// TODO(実機): slot ごとの NSS/BUSY/RST を実配線に。複数台なら NSS/BUSY/RST を slot 数だけ用意。
-static const pn5180_pins_t PN5180_SLOT_PINS[CCID_SLOT_COUNT] = {
-    {.nss = 10, .busy = 14, .rst = 9},  // slot 0
-    // {.nss = ?, .busy = ?, .rst = ?},  // slot 1 ...
+// 13 台分（先頭 CCID_SLOT_COUNT 個だけ有効化）。reader #N の BUSY = MUX channel (N-1) と仮定。
+// ※ 物理 BUSY→MUX channel の対応が違う場合は mux_ch を実配線に合わせる。
+static const pn5180_reader_cfg_t PN5180_READERS[] = {
+    {.nss = 1,  .mux_ch = 0},   // #1
+    {.nss = 2,  .mux_ch = 1},   // #2
+    {.nss = 4,  .mux_ch = 2},   // #3
+    {.nss = 5,  .mux_ch = 3},   // #4
+    {.nss = 6,  .mux_ch = 4},   // #5
+    {.nss = 7,  .mux_ch = 5},   // #6
+    {.nss = 8,  .mux_ch = 6},   // #7
+    {.nss = 9,  .mux_ch = 7},   // #8
+    {.nss = 10, .mux_ch = 8},   // #9
+    {.nss = 15, .mux_ch = 9},   // #10
+    {.nss = 16, .mux_ch = 10},  // #11
+    {.nss = 17, .mux_ch = 11},  // #12
+    {.nss = 18, .mux_ch = 12},  // #13
 };
 
 // ───────── ポーリング間隔 ─────────
-// host(RFIDThread)も polling+debounce するので、ここは RF 読取り間隔の目安。
 #define CARD_POLL_INTERVAL_MS 100
