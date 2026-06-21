@@ -21,6 +21,13 @@
 
 static const char *TAG = "pn5180";
 
+// BUSY を MUX 経由で読むか直結で読むか（app_config.h の切り分けフラグ）。
+#if PN5180_BUSY_VIA_MUX
+#  define BUSY_PIN PN5180_PIN_BUSY_SIG
+#else
+#  define BUSY_PIN PN5180_PIN_BUSY_DIRECT
+#endif
+
 typedef struct {
     pn5180_t *dev;
     pn5180_proto_t *iso14443;
@@ -32,8 +39,9 @@ static slot_reader_t s_readers[CCID_SLOT_COUNT];
 static pn5180_card_t s_cache[CCID_SLOT_COUNT];
 static SemaphoreHandle_t s_lock;
 
-// ── CD74HC4067 MUX ──
+// ── CD74HC4067 MUX（PN5180_BUSY_VIA_MUX=0 のときは no-op）──
 static void mux_init(void) {
+#if PN5180_BUSY_VIA_MUX
     gpio_config_t io = {
         .pin_bit_mask = (1ULL << MUX_PIN_S0) | (1ULL << MUX_PIN_S1) |
                         (1ULL << MUX_PIN_S2) | (1ULL << MUX_PIN_S3),
@@ -43,15 +51,20 @@ static void mux_init(void) {
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&io);
+#endif
 }
 
 // channel を選択（選択中 reader の BUSY が SIG=PN5180_PIN_BUSY_SIG に出る）。
 static void mux_select(int ch) {
+#if PN5180_BUSY_VIA_MUX
     gpio_set_level(MUX_PIN_S0, (ch >> 0) & 1);
     gpio_set_level(MUX_PIN_S1, (ch >> 1) & 1);
     gpio_set_level(MUX_PIN_S2, (ch >> 2) & 1);
     gpio_set_level(MUX_PIN_S3, (ch >> 3) & 1);
     esp_rom_delay_us(5);  // MUX 切替の settle
+#else
+    (void)ch;
+#endif
 }
 
 bool pn5180_reader_init(void) {
@@ -74,11 +87,11 @@ bool pn5180_reader_init(void) {
         s_readers[i].mux_ch = cfg->mux_ch;
         mux_select(cfg->mux_ch);  // この reader の BUSY を SIG に出してから init
 
-        // busy = MUX SIG（共有）, rst = 共有, nss = reader 個別。
-        s_readers[i].dev = pn5180_init(spi, cfg->nss, PN5180_PIN_BUSY_SIG, PN5180_PIN_RST);
+        // busy = BUSY_PIN（MUX SIG or 直結, 共有）, rst = 共有, nss = reader 個別。
+        s_readers[i].dev = pn5180_init(spi, cfg->nss, BUSY_PIN, PN5180_PIN_RST);
         if (!s_readers[i].dev) {
-            ESP_LOGE(TAG, "pn5180_init reader %d failed (nss=%d busy_sig=%d rst=%d mux_ch=%d)",
-                     i, cfg->nss, PN5180_PIN_BUSY_SIG, PN5180_PIN_RST, cfg->mux_ch);
+            ESP_LOGE(TAG, "pn5180_init reader %d failed (nss=%d busy=%d rst=%d mux_ch=%d via_mux=%d)",
+                     i, cfg->nss, BUSY_PIN, PN5180_PIN_RST, cfg->mux_ch, PN5180_BUSY_VIA_MUX);
             return false;
         }
         s_readers[i].iso14443 = pn5180_14443_init(s_readers[i].dev);
