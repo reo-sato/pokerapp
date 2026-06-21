@@ -104,12 +104,37 @@ static void diag_busy_pin(void) {
              busy, PN5180_BUSY_VIA_MUX, pu, pd, verdict);
 }
 
+// ── MUX 全 channel 走査（テスター不要）──
+// 16 ch を順に選択し SIG(pull-up) を読む。'0'=Low駆動(信号有=その ch に通電中の reader),
+// '1'=floating/High。全 '1' なら MUX 不通（EN/VCC/SIG）or 全 reader 未通電。一部 '0' なら
+// MUX は生きており、'1' の ch だけ reader 未接続/未通電。
+static void diag_mux_scan(void) {
+#if PN5180_BUSY_VIA_MUX
+    const int busy = PN5180_PIN_BUSY_SIG;
+    gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << busy, .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&cfg);
+    char buf[20];
+    for (int ch = 0; ch < 16; ch++) {
+        mux_select(ch);
+        esp_rom_delay_us(200);
+        buf[ch] = gpio_get_level(busy) ? '1' : '0';
+    }
+    buf[16] = '\0';
+    ESP_LOGW(TAG, "MUX scan ch0..15 (pull-up): %s  [0=Low駆動(信号有) 1=floating]", buf);
+#endif
+}
+
 bool pn5180_reader_init(void) {
     s_lock = xSemaphoreCreateMutex();
     if (!s_lock) return false;
     memset(s_cache, 0, sizeof(s_cache));
     mux_init();
     diag_busy_pin();  // テスター無しで BUSY ピンの素性を診断（ログに出す）
+    diag_mux_scan();  // 全 ch 走査で MUX 不通 か reader 個別 かを切り分け
 
     // SPI バスは全 reader 共有（pn5180_spi_init の引数順は host, SCK, MISO, MOSI, freq）。
     pn5180_spi_t *spi = pn5180_spi_init(PN5180_SPI_HOST, PN5180_PIN_SCK,
