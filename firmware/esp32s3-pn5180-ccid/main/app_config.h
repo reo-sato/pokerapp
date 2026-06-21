@@ -57,7 +57,12 @@ typedef struct {
 
 // 13 台分（先頭 CCID_SLOT_COUNT 個だけ有効化）。reader #N の BUSY = MUX channel (N-1) と仮定。
 // ※ 物理 BUSY→MUX channel の対応が違う場合は mux_ch を実配線に合わせる。
+//
+// 【bring-up 順序】CCID_SLOT_COUNT=1 のとき [0] のリーダーで検証する。実機の MUX scan で
+// 通電中のリーダーが ch12(=#13) と判明したため #13 を先頭に置く。動いたら配列順を元に戻し
+// CCID_SLOT_COUNT=13 に上げる。
 static const pn5180_reader_cfg_t PN5180_READERS[] = {
+    {.nss = 18, .mux_ch = 12},  // [0]=#13（bring-up 検証中、現在通電中）
     {.nss = 1,  .mux_ch = 0},   // #1
     {.nss = 2,  .mux_ch = 1},   // #2
     {.nss = 4,  .mux_ch = 2},   // #3
@@ -70,7 +75,6 @@ static const pn5180_reader_cfg_t PN5180_READERS[] = {
     {.nss = 15, .mux_ch = 9},   // #10
     {.nss = 16, .mux_ch = 10},  // #11
     {.nss = 17, .mux_ch = 11},  // #12
-    {.nss = 18, .mux_ch = 12},  // #13
 };
 
 // ───────── ポーリング間隔 ─────────
