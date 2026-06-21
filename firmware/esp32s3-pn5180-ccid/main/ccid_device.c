@@ -131,3 +131,7 @@ usbd_class_driver_t const *usbd_app_driver_get_cb(uint8_t *driver_count) {
     *driver_count = 1;
     return &s_ccid_driver;
 }
+
+// main.c から呼ばれることで本 TU を強制リンクし、上の strong な usbd_app_driver_get_cb を
+// 有効化する（ESP-IDF は main を whole-archive しないため。詳細は ccid_device.h のコメント）。
+void ccid_force_link(void) {}

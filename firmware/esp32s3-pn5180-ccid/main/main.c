@@ -10,6 +10,7 @@
 
 #include "app_config.h"
 #include "usb_descriptors.h"
+#include "ccid_device.h"
 #include "pn5180_reader.h"
 
 static const char *TAG = "main";
@@ -23,6 +24,10 @@ static void card_poll_task(void *arg) {
 }
 
 void app_main(void) {
+    // CCID クラスドライバ(ccid_device.o)を強制リンクして usbd_app_driver_get_cb を有効化する
+    // （これが無いと別ファイルの強定義がリンクされず TinyUSB の weak スタブが使われる = Code 10）。
+    ccid_force_link();
+
     ESP_LOGI(TAG, "PN5180 USB CCID reader: %d slot(s), product='%s'",
              CCID_SLOT_COUNT, USB_PRODUCT_STR);
 
