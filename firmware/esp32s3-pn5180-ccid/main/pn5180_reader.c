@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
+#include "driver/spi_master.h"
 #include "esp_rom_sys.h"
 #include "esp_log.h"
 
@@ -195,25 +196,62 @@ bool pn5180_reader_init(void) {
         // busy = BUSY_PIN（MUX SIG or 直結, 共有）, rst = 共有, nss = reader 個別。
         s_readers[i].dev = pn5180_init(spi, cfg->nss, BUSY_PIN, PN5180_PIN_RST);
         if (!s_readers[i].dev && i == 0) {
-            // ── NSS スイープ（フォールバック診断）──
-            // 通常 init 失敗。ch=cfg->mux_ch に生きているチップに対し、どの NSS GPIO が SPI で
-            // 話せるかを総当りで探す。配線/マッピングが想定と違う場合の救済。
-            ESP_LOGW(TAG, "NSS スイープ開始: ch%d のチップを呼ぶ NSS を総当り探索", cfg->mux_ch);
+            // ── 低レベル NSS スキャン（pn5180_init を再呼出しせず、add/remove で安全に）──
+            // 通常 init 失敗時、ch=cfg->mux_ch に生きているチップに対し、どの NSS GPIO が
+            // SPI 応答するかを spi_bus_add_device + 1byte 送信 + BUSY 監視 + remove で総当り。
+            // pn5180_init は内部で spi_bus_add_device するため複数回呼ぶと leak/crash する。
+            ESP_LOGW(TAG, "NSS スキャン: ch%d のチップが応答する NSS を低レベル SPI で探索", cfg->mux_ch);
             static const int nss_candidates[] = {1, 2, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18};
             const int n_cands = sizeof(nss_candidates) / sizeof(nss_candidates[0]);
+            mux_select(cfg->mux_ch);
+            int found_nss = -1;
             for (int k = 0; k < n_cands; k++) {
                 int try_nss = nss_candidates[k];
-                if (try_nss == cfg->nss) continue;  // 既に試した
-                ESP_LOGW(TAG, "  [%d/%d] NSS=GPIO%d を試行...", k + 1, n_cands, try_nss);
-                pn5180_t *probe = pn5180_init(spi, try_nss, BUSY_PIN, PN5180_PIN_RST);
-                if (probe) {
-                    ESP_LOGW(TAG, "  ✅ 成功! ch%d の生きたチップは NSS=GPIO%d に対応",
-                             cfg->mux_ch, try_nss);
-                    ESP_LOGW(TAG, "     → app_config.h で PN5180_READERS[0]={.nss=%d, .mux_ch=%d} に修正してください",
-                             try_nss, cfg->mux_ch);
-                    s_readers[i].dev = probe;
-                    break;
+                if (try_nss == cfg->nss) continue;
+                // 共有 RST を一度叩いて PN5180 をリセット状態にする
+                gpio_set_direction(PN5180_PIN_RST, GPIO_MODE_OUTPUT);
+                gpio_set_level(PN5180_PIN_RST, 0);
+                esp_rom_delay_us(1000);
+                gpio_set_level(PN5180_PIN_RST, 1);
+                vTaskDelay(pdMS_TO_TICKS(5));  // ブート待ち
+
+                spi_device_interface_config_t devcfg = {
+                    .clock_speed_hz = 1000000,
+                    .mode = 0,
+                    .spics_io_num = try_nss,
+                    .queue_size = 1,
+                };
+                spi_device_handle_t dev = NULL;
+                if (spi_bus_add_device(PN5180_SPI_HOST, &devcfg, &dev) != ESP_OK) {
+                    ESP_LOGW(TAG, "  [%d/%d] add_device(NSS=GPIO%d) 失敗", k + 1, n_cands, try_nss);
+                    continue;
                 }
+                // PN5180 の READ_REGISTER コマンド (0x04) + 1 byte reg addr。
+                // 正しい NSS のチップに当たれば SPI を受理して BUSY を High に立てる。
+                uint8_t tx[2] = {0x04, 0x00};
+                spi_transaction_t t = { .length = 16, .tx_buffer = tx };
+                spi_device_polling_transmit(dev, &t);
+                // BUSY 監視: 数百 μs 以内に High に立つか
+                bool went_high = false;
+                for (int j = 0; j < 500; j++) {
+                    if (gpio_get_level(BUSY_PIN)) { went_high = true; break; }
+                    esp_rom_delay_us(2);
+                }
+                spi_bus_remove_device(dev);
+                ESP_LOGW(TAG, "  [%d/%d] NSS=GPIO%d -> BUSY 反応: %s",
+                         k + 1, n_cands, try_nss, went_high ? "YES ✅" : "no");
+                if (went_high) { found_nss = try_nss; break; }
+            }
+            if (found_nss > 0) {
+                ESP_LOGW(TAG, "✅ ch%d のチップは NSS=GPIO%d で応答。本番 init に渡す",
+                         cfg->mux_ch, found_nss);
+                ESP_LOGW(TAG, "   → app_config.h で PN5180_READERS[0]={.nss=%d, .mux_ch=%d} に修正してください",
+                         found_nss, cfg->mux_ch);
+                s_readers[i].dev = pn5180_init(spi, found_nss, BUSY_PIN, PN5180_PIN_RST);
+            } else {
+                ESP_LOGE(TAG, "❌ NSS スキャン: 全 %d 候補で BUSY 反応なし", n_cands);
+                ESP_LOGE(TAG, "   → SPI 配線(SCK=%d/MOSI=%d/MISO=%d) or RST(GPIO%d) or PN5180 自体の問題",
+                         PN5180_PIN_SCK, PN5180_PIN_MOSI, PN5180_PIN_MISO, PN5180_PIN_RST);
             }
         }
         if (!s_readers[i].dev) {
