@@ -10,9 +10,14 @@
 //
 // host(rfid/bridge.py)が依存するのは「XfrBlock に FF CA 00 00 00 → UID + 90 00」だけ（§6）。
 #include <string.h>
+#include "esp_log.h"
 #include "ccid_slot.h"
 #include "app_config.h"
 #include "pn5180_reader.h"
+
+// bring-up 診断: host(pyscard)が実際に送ってくる CCID コマンドと、こちらの応答を UART に出す。
+// CONFIG_ESP_CONSOLE_UART_DEFAULT=y なので CP2102N 側に出る（native USB は CCID 専有）。
+static const char *TAG = "ccid-msg";
 
 // ── CCID message types ──
 #define PC_TO_RDR_ICC_POWER_ON   0x62
@@ -112,10 +117,13 @@ size_t ccid_process_message(const uint8_t *in, size_t in_len,
     switch (type) {
     case PC_TO_RDR_ICC_POWER_ON: {
         if (st == ICC_ABSENT) {
-            // カード無し → 失敗 + ICC_MUTE(0xFE)
+            // カード無し → 失敗 + ICC_MUTE(0xFE)。host は毎 poll でここを叩くため DEBUG（既定非表示）。
+            ESP_LOGD(TAG, "IccPowerOn slot=%u: カード無し(ABSENT) → MUTE", (unsigned)slot);
             return put_header(out, RDR_TO_PC_DATA_BLOCK, 0, slot, seq,
                               (uint8_t)(CMD_FAILED | ICC_ABSENT), 0xFE, 0x00);
         }
+        ESP_LOGI(TAG, "IccPowerOn slot=%u: present → ATR(%uB) 返却（connect 成立）",
+                 (unsigned)slot, (unsigned)sizeof(ATR));
         size_t n = put_header(out, RDR_TO_PC_DATA_BLOCK, sizeof(ATR), slot, seq,
                               CMD_OK | ICC_PRESENT_ACTIVE, 0x00, 0x00);
         if (n + sizeof(ATR) <= out_max) {
@@ -135,6 +143,15 @@ size_t ccid_process_message(const uint8_t *in, size_t in_len,
     case PC_TO_RDR_XFR_BLOCK: {
         uint8_t resp[64];
         size_t rn = handle_apdu(slot, data, data_len, resp, sizeof(resp));
+        // APDU 先頭（Get UID なら FF CA 00 00 00）と、返した SW を出す。
+        // 期待: apdu=FF CA 00 00 00 → resp_len=uid+2, sw=90 00。sw=6A 81 ならカード無し判定。
+        ESP_LOGI(TAG,
+                 "XfrBlock slot=%u apdu_len=%u apdu=%02X %02X %02X %02X %02X → resp_len=%u sw=%02X %02X",
+                 (unsigned)slot, (unsigned)data_len,
+                 data_len > 0 ? data[0] : 0, data_len > 1 ? data[1] : 0,
+                 data_len > 2 ? data[2] : 0, data_len > 3 ? data[3] : 0,
+                 data_len > 4 ? data[4] : 0, (unsigned)rn,
+                 rn >= 2 ? resp[rn - 2] : 0, rn >= 1 ? resp[rn - 1] : 0);
         size_t n = put_header(out, RDR_TO_PC_DATA_BLOCK, (uint32_t)rn, slot, seq,
                               CMD_OK | (st == ICC_ABSENT ? ICC_ABSENT : ICC_PRESENT_ACTIVE),
                               0x00, 0x00);

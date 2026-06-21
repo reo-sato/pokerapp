@@ -327,24 +327,42 @@ static bool read_uid_from_proto(pn5180_proto_t *proto, uint8_t *uid, uint8_t *ui
     return found;
 }
 
+// カード presence の保持サイクル数（debounce）。ISO15693 の inventory は単発で取りこぼすことが
+// あり、保持が無いと host(pyscard)の IccPowerOn がちょうど取りこぼしポーリングに当たった瞬間に
+// connect 失敗し、UID が一切取れない（probe_pcsc watch が 0 件になる主因）。一度検出したら
+// この回数だけは present を維持し、連続 miss が超えたときだけ離脱と判定する。
+#define PRESENCE_HOLD_MISSES 3
+static int s_miss[CCID_SLOT_COUNT];
+
 void pn5180_reader_poll_once(void) {
     for (int i = 0; i < CCID_SLOT_COUNT; i++) {
         mux_select(s_readers[i].mux_ch);  // この reader の BUSY を SIG に
 
-        pn5180_card_t c = {0};
         uint8_t uid[16];
         uint8_t len = 0;
 
         // ISO15693（8B）→ だめなら ISO14443A（4/7B）の順。
-        if (read_uid_from_proto(s_readers[i].iso15693, uid, &len) ||
-            read_uid_from_proto(s_readers[i].iso14443, uid, &len)) {
+        bool detected = read_uid_from_proto(s_readers[i].iso15693, uid, &len) ||
+                        read_uid_from_proto(s_readers[i].iso14443, uid, &len);
+
+        bool was_present = s_cache[i].present;
+        pn5180_card_t c = {0};
+        if (detected) {
             c.present = true;
             c.uid_len = len;
             memcpy(c.uid, uid, len);
+            s_miss[i] = 0;
+        } else if (was_present && s_miss[i] < PRESENCE_HOLD_MISSES) {
+            // 取りこぼし: 直近の present + UID を数サイクル保持（host の connect 失敗を防ぐ）。
+            c = s_cache[i];
+            s_miss[i]++;
+        } else {
+            // 連続 miss が hold を超えた → カード離脱と判定。
+            c.present = false;
+            s_miss[i] = 0;
         }
 
         // 状態が変化した時だけログ（毎ポーリングのスパムを避ける）。カード読み取りの可視化。
-        bool was_present = s_cache[i].present;
         if (c.present && !was_present) {
             char hex[3 * 16 + 1];
             int p = 0;
