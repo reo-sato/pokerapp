@@ -7,6 +7,7 @@
 // ⚠ 適合ポイント: jef-sure/pn5180 の実 API（ヘッダ名 / nfc_uids_array_t / nfc_uid_t）。
 //    参照: https://github.com/jef-sure/esp32-component-pn5180 の examples。
 #include <string.h>
+#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
@@ -336,6 +337,19 @@ void pn5180_reader_poll_once(void) {
             c.present = true;
             c.uid_len = len;
             memcpy(c.uid, uid, len);
+        }
+
+        // 状態が変化した時だけログ（毎ポーリングのスパムを避ける）。カード読み取りの可視化。
+        bool was_present = s_cache[i].present;
+        if (c.present && !was_present) {
+            char hex[3 * 16 + 1];
+            int p = 0;
+            for (int b = 0; b < c.uid_len && b < 16; b++) {
+                p += snprintf(hex + p, sizeof(hex) - p, "%02X%s", c.uid[b], b + 1 < c.uid_len ? ":" : "");
+            }
+            ESP_LOGI(TAG, "🎴 カード検出! reader %d: UID=%s (%dB)", i, hex, c.uid_len);
+        } else if (!c.present && was_present) {
+            ESP_LOGI(TAG, "   カード離脱 reader %d", i);
         }
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
