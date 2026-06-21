@@ -200,6 +200,29 @@ bool pn5180_reader_init(void) {
             // 通常 init 失敗時、ch=cfg->mux_ch に生きているチップに対し、どの NSS GPIO が
             // SPI 応答するかを spi_bus_add_device + 1byte 送信 + BUSY 監視 + remove で総当り。
             // pn5180_init は内部で spi_bus_add_device するため複数回呼ぶと leak/crash する。
+            // ── SPI 配線の生存確認（NSS 関係なし、SCK/MOSI/MISO 経路の通電チェック）──
+            // PN5180 が SPI を全く受け付けない場合、まず SPI バス自体が壊れていないか確かめる。
+            // MISO を内部 pull-up し、SPI 送信中に MISO レベルが揺らぐかで線が生きているかを推定。
+            ESP_LOGW(TAG, "SPI 配線生存確認 (SCK=%d MOSI=%d MISO=%d):",
+                     PN5180_PIN_SCK, PN5180_PIN_MOSI, PN5180_PIN_MISO);
+            gpio_set_pull_mode(PN5180_PIN_MISO, GPIO_PULLUP_ONLY);
+            int miso_before = gpio_get_level(PN5180_PIN_MISO);
+            ESP_LOGW(TAG, "  MISO (pull-up時, SPI 通信前): %d (1=line idle/floating, 0=chip が Low に引いている)",
+                     miso_before);
+
+            // ── BUSY 直接サンプリング（生存確認）──
+            // ch12 を選択して BUSY の生波形を 200μs サンプリングし、何 % の時間で High だったかを見る。
+            // PN5180 が完全に死んでいるなら 0% (常時 Low)、生きていて活動中なら数十% 変動。
+            mux_select(cfg->mux_ch);
+            gpio_set_pull_mode(BUSY_PIN, GPIO_PULLUP_ONLY);
+            int high_count = 0;
+            for (int j = 0; j < 200; j++) {
+                if (gpio_get_level(BUSY_PIN)) high_count++;
+                esp_rom_delay_us(1);
+            }
+            ESP_LOGW(TAG, "  BUSY サンプル (200μs/pull-up): High=%d%%  (0%%=常時Low/100%%=常時High が問題)",
+                     high_count / 2);
+
             ESP_LOGW(TAG, "NSS スキャン: ch%d のチップが応答する NSS を低レベル SPI で探索", cfg->mux_ch);
             static const int nss_candidates[] = {1, 2, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18};
             const int n_cands = sizeof(nss_candidates) / sizeof(nss_candidates[0]);
@@ -207,7 +230,8 @@ bool pn5180_reader_init(void) {
             int found_nss = -1;
             for (int k = 0; k < n_cands; k++) {
                 int try_nss = nss_candidates[k];
-                if (try_nss == cfg->nss) continue;
+                // 以前は cfg->nss をスキップしていたが、SPI 側の問題で通常 init が失敗した可能性が
+                // あるため、全候補を毎回試す（GPIO18 含む）。
                 // 共有 RST を一度叩いて PN5180 をリセット状態にする
                 gpio_set_direction(PN5180_PIN_RST, GPIO_MODE_OUTPUT);
                 gpio_set_level(PN5180_PIN_RST, 0);
@@ -226,10 +250,13 @@ bool pn5180_reader_init(void) {
                     ESP_LOGW(TAG, "  [%d/%d] add_device(NSS=GPIO%d) 失敗", k + 1, n_cands, try_nss);
                     continue;
                 }
-                // PN5180 の READ_REGISTER コマンド (0x04) + 1 byte reg addr。
-                // 正しい NSS のチップに当たれば SPI を受理して BUSY を High に立てる。
-                uint8_t tx[2] = {0x04, 0x00};
-                spi_transaction_t t = { .length = 16, .tx_buffer = tx };
+                // PN5180 の READ_REGISTER コマンド (0x04) + 1 byte reg addr + 4 byte dummy read。
+                // 正しい NSS のチップに当たれば SPI を受理して BUSY を High に立て、後続に応答する。
+                uint8_t tx[6] = {0x04, 0x00, 0x00, 0x00, 0x00, 0x00};
+                uint8_t rx[6] = {0};
+                spi_transaction_t t = {
+                    .length = 48, .tx_buffer = tx, .rx_buffer = rx,
+                };
                 spi_device_polling_transmit(dev, &t);
                 // BUSY 監視: 数百 μs 以内に High に立つか
                 bool went_high = false;
@@ -238,8 +265,13 @@ bool pn5180_reader_init(void) {
                     esp_rom_delay_us(2);
                 }
                 spi_bus_remove_device(dev);
-                ESP_LOGW(TAG, "  [%d/%d] NSS=GPIO%d -> BUSY 反応: %s",
-                         k + 1, n_cands, try_nss, went_high ? "YES ✅" : "no");
+                // MISO に非ゼロが返ってきていれば、SPI 経路は生きていてチップが何か出している。
+                bool miso_active = (rx[2] != 0 || rx[3] != 0 || rx[4] != 0 || rx[5] != 0);
+                ESP_LOGW(TAG, "  [%d/%d] NSS=GPIO%d -> BUSY:%s  MISO:%02X %02X %02X %02X %s",
+                         k + 1, n_cands, try_nss,
+                         went_high ? "YES" : "no ",
+                         rx[2], rx[3], rx[4], rx[5],
+                         miso_active ? "(non-zero!)" : "");
                 if (went_high) { found_nss = try_nss; break; }
             }
             if (found_nss > 0) {
