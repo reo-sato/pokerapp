@@ -6,7 +6,7 @@ ESP32-S3（PN5180 ×N）firmware と host Python（pyscard / PC/SC, `rfid/bridge
 `rfid/reader_thread.py`）は別々に実装される。drift を防ぐため、host が依存する **USB descriptor /
 reader_name / ATR / pseudo-APDU / UID / hot-plug** の境界を本書で固定する（ISSUE-0015）。
 
-HTTP 経路（`rfid/http_receiver.py`, ADR-0015 で optional secondary）は本契約の対象外（debug/remote 用）。
+HTTP 経路（`rfid/http_receiver.py`, ADR-0015 で **deprecated 2026-06-22 / v2 計画書**）は本契約の対象外（debug/CI 互換のためコード残置、production 使用不可）。
 
 凡例: **MUST** = 準拠必須 / **SHOULD** = 推奨 / **MAY** = 任意。「host」= Python、「firmware」= ESP32-S3。
 
@@ -25,6 +25,8 @@ HTTP 経路（`rfid/http_receiver.py`, ADR-0015 で optional secondary）は本�
 
 - firmware は PN5180 ×N を **1 つの USB CCID composite device の N slot** として host PC/SC に公開する。
 - host は OS 標準 PC/SC スタック越しに **pyscard** で各 slot（reader_name）を列挙・読み取る。WiFi/HTTP 不要。
+- **v2 計画書 (2026-06-22) 確定**: production の slot 数 **N = 13**（席 1..8 = 8 slot + ボード 1..5 = 5 slot）。
+  本契約のサンプルは N=13 を前提に記述（reader_name 例: `PokerRFID PN5180-CCID 0..12`）。
 
 ## 2. USB descriptors（firmware MUST）
 
@@ -63,8 +65,8 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 }
 ```
 
-- 各要素 = `{"name": <PC/SC reader_name 完全一致文字列>, "role": "seat"|"board", "seat": 1..9 (role=seat),
-  "index": 1..5 (role=board, 任意)}`。
+- 各要素 = `{"name": <PC/SC reader_name 完全一致文字列>, "role": "seat"|"board", "seat": 1..8 (role=seat,
+  v2 計画書 2026-06-22 確定), "index": 1..5 (role=board, 任意)}`。
 - `name` は **OS が描画する reader_name と完全一致** **MUST**（host は前方一致でなく等値で照合,
   `rfid/bridge.py:PCSCBridge.connect`）。OS により文字列が異なるため、運用 OS の実値を入れる（§8）。
 - **確定値（Windows, 2026-06-22 実機）**: 1 slot 構成で `PokerRFID PN5180-CCID 0`（manufacturer + product + slot index, 半角空白区切り）。

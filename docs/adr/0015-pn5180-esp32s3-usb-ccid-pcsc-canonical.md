@@ -141,3 +141,23 @@ forces:
 - **Supersedes: ADR-0014**（HTTP canonical の判断は誤りだった）
 - Superseded by: —
 - 関連: ISSUE-0015（USB CCID firmware 契約）、ISSUE-0014（本 ADR で Superseded）
+
+---
+
+## v2 確定事項 追記 (2026-06-22)
+
+別口で進めている firmware 担当との意識合わせの結果、現場ハードウェア構成の正典として
+「ポーカーテーブル RFID システム計画書 v2 (2026-06-22)」が確定した。本 ADR の判断は維持しつつ、
+以下を additive に確定する。
+
+- **HTTP 経路の位置付け**: 本 ADR で「optional secondary」としていた HTTP 経路は v2 計画書で
+  **deprecated**（production 使用不可）に降格。`rfid/http_receiver.py` のコードは debug / CI 互換のため
+  当面残置するが、新規環境では `rfid.transport="http"` / `readers` dict 構成を使用しない。
+- **物理構成**: PN5180 リーダー **13 台**（席 1..8 = 8 台 + ボード 1..5 = 5 台）を ESP32-S3 制御基板
+  1 枚に集約し、ESP32-S3 の **native USB-OTG ポート**経由で 1 本の USB ケーブルで PC に直結する。
+  UART ブリッジ IC（CP2102N / CH340 等）経由は COM ポート化のため CCID 認識不可。
+- **HTTP-related config**: `rfid.transport="http"` および `config_default.json` の `readers` dict は
+  新規環境では使用しない（残置はテスト互換のため）。canonical は常に `pcsc_readers` (list)。
+
+詳細な GPIO 配線（NSS×13 / SPI / MUX）は ADR-0034 末尾 + `firmware/esp32s3-pn5180-ccid/app_config.h`
+を参照。

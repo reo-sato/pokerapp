@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### Docs (RFID 計画書 v2 反映, 2026-06-22)
+
+- 友人（firmware 担当）と意識合わせした「ポーカーテーブル RFID システム計画書 v2 (2026-06-22)」を
+  正典として、CLAUDE.md / ADR-0015 / ADR-0034 / `docs/contracts/rfid-usb-ccid.md` /
+  `docs/rfid-ccid-firmware-checklist.md` を反映。確定事項:
+  - **席数 1..8**（リーダー総数 **13台** = 席 8 + ボード 5）。
+  - **HTTP 経路 deprecated**: ADR-0015 で「optional secondary」としていた `rfid/http_receiver.py` を
+    v2 計画書で production 廃止宣言。コードは debug/CI 互換のため残置、新規環境で使用しない。
+  - **物理配線 GPIO 確定**: NSS×13・SPI（SCK=12/MOSI=11/MISO=13/RST=14）・MUX（SIG=47/S0=37/S1=39/
+    S2=40/S3=41）。⚠️ MUX SIG は当初 21、S0 は当初 38 から変更されている。
+  - 既知の課題 (BUSY timeout / 13台干渉) と落とし穴 (UART ブリッジ NG / 13台同時 RF ON NG) を docs に集約。
+- コード/config 側の 1..8 化（`core/session_repository.py` `_MAX_SEAT_NO` 等）、`config_default.json` の
+  `pcsc_readers` 13 entry サンプル化、HTTP receiver の最終処遇は別タスクで実施（残課題）。
+
 ### Fixed / Added (ESP32-S3 USB CCID firmware 実機 bring-up + 契約に実機確定値転記, ADR-0034 / ISSUE-0015)
 
 - 前日 scaffold した `firmware/esp32s3-pn5180-ccid/` を **実機で起動**。Windows PC/SC に

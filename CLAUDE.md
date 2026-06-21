@@ -3,7 +3,7 @@
 ## プロジェクト概要
 
 ライブポーカートーナメントのハンド履歴を自動記録する Python アプリケーション。
-ディーラー口元マイク（faster-whisper 音声認識）と RFID NFC（**ESP32-S3 + PN5180**, USB CCID で PC/SC 公開, ADR-0015）の 2 ソースを統合し、
+ディーラー口元マイク（faster-whisper 音声認識）と RFID NFC（**ESP32-S3 + PN5180 ×13台（席 8 + ボード 5）**, USB CCID で PC/SC 公開, ADR-0015 / v2 計画書 2026-06-22）の 2 ソースを統合し、
 JSON/PHH 形式でハンドログを出力する。
 
 - **対象**: 小規模クラブ・個人配信向け
@@ -83,7 +83,7 @@ pokerapp/
 │
 ├── rfid/
 │   ├── reader_thread.py           ← RFIDThread (pyscard PC/SC, canonical: PN5180+ESP32-S3 を USB CCID で公開, ADR-0015)
-│   ├── http_receiver.py           ← RFIDHTTPReceiver (HTTP POST 受信, optional secondary: debug/remote 用, ADR-0015)
+│   ├── http_receiver.py           ← RFIDHTTPReceiver (HTTP POST 受信, **deprecated 2026-06-22 / v2**: production 使用不可、debug/CI 互換のためコードは残置, ADR-0015)
 │   ├── bridge.py                  ← RFID ブリッジユーティリティ
 │   └── card_master.py             ← CardMaster (rfid_cards.json ロード・検索)
 │
@@ -124,9 +124,9 @@ pokerapp/
 | 音声認識 | faster-whisper ≥ 1.0 | CPU int8 モード |
 | マイク入力 | PyAudio ≥ 0.2.13 | |
 | RFID reader IC | **PN5180** | ISO 15693 (UID 8B) + 14443 A/B 対応。ADR-0015 で採用 |
-| RFID MCU | **ESP32-S3** | native USB で **USB CCID class** を実装し PN5180 ×N を PC/SC multi-slot として公開。ADR-0015 |
-| RFID (PC/SC, **canonical**) | pyscard ≥ 2.0.7 | OS 標準 PC/SC スタック越しに pyscard が reader_name で列挙。第一系統（ADR-0015） |
-| RFID (HTTP, **optional secondary**) | 標準 http.server | debug / remote / 分散設置の限定用途で残置（ADR-0015） |
+| RFID MCU | **ESP32-S3** | native USB（UART ブリッジ不可）で **USB CCID class** を実装し PN5180 ×13 を PC/SC multi-slot として公開。ADR-0015 / v2 計画書 |
+| RFID (PC/SC, **canonical**) | pyscard ≥ 2.0.7 | OS 標準 PC/SC スタック越しに pyscard が reader_name で列挙。第一系統（ADR-0015）。**13 slot = 席 8 + ボード 5**（v2 計画書 §1） |
+| RFID (HTTP, **deprecated 2026-06-22**) | 標準 http.server | v2 計画書で production 廃止宣言。debug / CI 互換のみコード残置、**production 構成では使用しない**（ADR-0015） |
 | PHH 出力 | pokerkit ≥ 0.5 | |
 | GUI | customtkinter ≥ 5.2 | |
 | テスト | pytest ≥ 7.0 | |
@@ -229,7 +229,7 @@ write-through 接続可**（E1+E2-core, ADR-0008 Pattern A: `IntegrationThread` 
 - 同一 hand で seat 重複 → `SeatTakenError`（`seat_taken`）、player 重複 →
   `PlayerAlreadySeatedError`（`player_already_seated`）。
 - unknown player（registry 非実在）→ `UnknownPlayerError`（`unknown_player`）。
-- `seat_no` 範囲外（1..9 外）/ 不正 `hand_id` → `InvalidSeatError`（`invalid_seat`）。
+- `seat_no` 範囲外（**v2 計画書 = 1..8**。コード側 `core/session_repository.py` `_MAX_SEAT_NO` 等の 1..8 化は残作業）/ 不正 `hand_id` → `InvalidSeatError`（`invalid_seat`）。
 - error code は `docs/contracts/error-shapes.md` の session セクションと 1:1 対応。
 
 ### 識別子・永続形（ADR-0007）
@@ -421,8 +421,8 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 |------|------|------|
 | 音声認識 (Whisper) | ✅ 実装済 | `audio/recognizer.py` |
 | RFID PC/SC 受信 | ✅ 実装済 (canonical) | `rfid/reader_thread.py`（ESP32-S3 USB CCID 経由で PN5180 公開, ADR-0015） |
-| RFID HTTP 受信 | ✅ 実装済 (optional secondary) | `rfid/http_receiver.py`（debug/remote 用, ADR-0015） |
-| ESP32-S3 USB CCID firmware ↔ Python 契約固定 | ✅ 実装済 (契約 freeze + 実機確定値追記) | `docs/contracts/rfid-usb-ccid.md` v1.0（ADR-0034, ISSUE-0015 Fixed）: USB descriptor / reader_name 安定規約 / slot↔役割（host config が source of truth）/ ATR-agnostic / Get UID `FF CA 00 00 00` / UID 4-7-8B 正規化 / hot-plug。config `pcsc_readers`(list) 分離。firmware 実装者向け MUST チェックリスト = `docs/rfid-ccid-firmware-checklist.md`（各項目を `probe_pcsc` で受け入れ確認）。**実機確定値（2026-06-22）**: VID=0x303A PID=0x8B5D、manufacturer="PokerRFID"、product="PN5180-CCID"、Windows reader_name = `PokerRFID PN5180-CCID 0` |
+| RFID HTTP 受信 | 🟡 deprecated 2026-06-22 (v2) | `rfid/http_receiver.py`（v2 計画書で production 廃止宣言。debug/CI 互換のためコード残置, ADR-0015） |
+| ESP32-S3 USB CCID firmware ↔ Python 契約固定 | ✅ 実装済 (契約 freeze + 実機確定値追記) | `docs/contracts/rfid-usb-ccid.md` v1.0（ADR-0034, ISSUE-0015 Fixed）: USB descriptor / reader_name 安定規約 / slot↔役割（host config が source of truth）/ ATR-agnostic / Get UID `FF CA 00 00 00` / UID 4-7-8B 正規化 / hot-plug。config `pcsc_readers`(list) 分離。firmware 実装者向け MUST チェックリスト = `docs/rfid-ccid-firmware-checklist.md`（各項目を `probe_pcsc` で受け入れ確認）。**実機確定値（2026-06-22）**: VID=0x303A PID=0x8B5D、manufacturer="PokerRFID"、product="PN5180-CCID"、Windows reader_name = `PokerRFID PN5180-CCID 0..12`。**v2 計画書 (2026-06-22) で最終確定**: slot 数 = **13**（席 8 + ボード 5）、slot 順序は firmware が再起動/再列挙を跨いで安定、slot↔役割は host config (`pcsc_readers`) が唯一の source of truth。**物理配線確定**: NSS GPIO 席 1..8 = 1/2/4/5/6/7/8/9, ボード 1..5 = 10/15/16/17/18 / SPI SCK=12, MOSI=11, MISO=13, RST=14 / MUX SIG=47 (⚠️ 当初 21 → フローティング問題で 47 に変更), S0=37 (⚠️ 当初 38 → NeoPixel 衝突で 37 に変更), S1=39, S2=40, S3=41。13台同時 RF ON 禁止（時分割スキャン必須）、UART ブリッジ (CP2102N/CH340) 経由 NG（ESP32-S3 native USB ポート必須） |
 | ESP32-S3 USB CCID firmware 実装 | ✅ USB CCID 起動済 (PN5180 配線は残) | `firmware/esp32s3-pn5180-ccid/`（ESP-IDF）: USB CCID 記述子（class 0x0B, bulk IN/OUT）+ CCID メッセージ処理（ATR / Get UID `FF CA 00 00 00`→UID+90 00, §5/§6/§7）+ TinyUSB カスタムクラス登録（`ccid_force_link()` で別ファイル定義の weak 上書きを保証）+ PN5180 読取り（`jef-sure/pn5180`）。**2026-06-22 実機 bring-up**: Windows PC/SC で `PokerRFID PN5180-CCID 0` として列挙、Status OK、`probe_pcsc list` で見える＝契約 §2/§3 クリア。**残**: PN5180 SPI 配線→`app_config.h` ピン反映→`watch` で実カード UID 読み取り（§6/§7）、`check` PASS（§5）の通し確認 |
 | RFID カード照合 | ✅ 実装済 | `rfid/card_master.py` |
 | ストリート自動遷移 (RFID) | ✅ 実装済 | board 枚数 3/4/5 で遷移 |
@@ -622,9 +622,13 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    `--ledger`（viewer_api.enabled）+ スマホ注文の通し確認。**RFID 実機の bring-up は診断ツール
    `tools/probe_pcsc.py`（list/check/watch）+ 手順 `docs/hardware-qa-checklist.md` を用意済**
    （契約 §3-8 を production と同じ `PCSCBridge`/`RFIDThread` で検査）。残は実機を繋いだ通し確認。
+   **v2 計画書 (2026-06-22) で報告された既知の課題**: (a) CCID firmware の BUSY timeout デバッグ中、
+   (b) 13台密接配置でのリーダー間干渉（必要ならフェライトシート貼付対応）。
 3. ~~**PN5180 / ESP32-S3 firmware ↔ Python 契約固定**（ISSUE-0015）~~ → **✅ 完了（ADR-0034, ISSUE-0015
    Fixed）**: `docs/contracts/rfid-usb-ccid.md` v1.0 で USB descriptor / reader_name 規約 / ATR / Get UID /
-   UID 4-7-8B を凍結。**残（実環境）**: firmware の VID/PID・実 reader_name を確定して契約 §2/§4 に追記。
+   UID 4-7-8B を凍結。**v2 計画書 (2026-06-22) で最終確定**: 13 reader 構成（席 8 + ボード 5）、物理配線
+   GPIO（NSS×13 / SPI / MUX, 詳細は § 実装状況 RFID 行）、HTTP 経路 deprecated。VID/PID/reader_name は
+   ADR-0034 で凍結済。
 4. ~~**S5 cross-app boundary（read + staff write + 双方向 sync）**~~ → **✅ 完了（ADR-0020 / 0021 / 0022）**:
    read = repository interface frozen + `api/client.py:ViewerApiClient` + round-trip test。
    write = スタッフ会計 write を `/api/staff/...` に staff shared token で公開 +

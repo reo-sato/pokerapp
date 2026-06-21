@@ -9,6 +9,8 @@ ESP32-S3（PN5180 ×N）firmware を **USB CCID smart card reader** として ho
   polling/debounce、`rfid/card_master.py` の UID 正規化、回帰 `tests/test_rfid.py`）。**本チェックリストを
   満たせば host 無改修で `probe_pcsc` と hand logger が通る**。
 - 各項目に **受け入れ確認**（`tools/probe_pcsc.py` の出力）を併記。詳細手順は `docs/hardware-qa-checklist.md`。
+- **v2 計画書 (2026-06-22) 確定**: production の **slot 数 = 13**（席 1..8 = 8 + ボード 1..5 = 5）。
+  本書のサンプル `N` はこの 13 を想定する。
 
 > 現状（2026-06）: 実機にはテスト用の「カード読み取りで LED 点灯」firmware のみ。PC へは何も送らないため
 > host からは見えない。本チェックリストは、その先の **本番 USB CCID firmware** を実装するための仕様。
@@ -128,3 +130,26 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
 - host 実装: `rfid/bridge.py`（Get UID `FF CA 00 00 00` / SW 90 00 / UID 正規化）/ `rfid/reader_thread.py`
   （slot polling / debounce / board_index）/ `rfid/card_master.py`（`normalize_tag_id` / `bytes_to_tag_id`）
 - 診断/手順: `tools/probe_pcsc.py` / `docs/hardware-qa-checklist.md`
+
+---
+
+## v2 計画書 (2026-06-22) — よくある落とし穴
+
+別口で進めている firmware 担当との意識合わせを反映した v2 計画書で確定した、実装時に外しやすい
+ポイント。本書 §0〜§10 と重複する内容もあるが、再強調する。
+
+- [ ] **UART ブリッジ経由は CCID 認識不可**: CP2102N / CH340 経由は COM ポート（CDC）化し、PC/SC に
+      乗らない。ESP32-S3 の **native USB-OTG ポート** を必ず使う（§0 再掲）。
+- [ ] **interface class は CCID (0x0B) のみ**: HID / CDC / vendor class で公開しない。
+- [ ] **UID は生バイトのまま返す**: firmware で文字列化・コロン挿入をしない。`04:AB:..` 形式への
+      正規化は host 側 `rfid/card_master.py:normalize_tag_id` の責務（§4 再掲）。
+- [ ] **13 台同時 RF ON 禁止**: リーダー相互干渉により読み取り失敗する。**時分割スキャン必須**
+      （同時 RF ON は 1 台のみ）。
+- [ ] **MUX SIG / S0 の GPIO 変更**: v1 設計の SIG=GPIO 21 / S0=GPIO 38 から、v2 では
+      **SIG=GPIO 47**（フローティング問題対策）/ **S0=GPIO 37**（NeoPixel 衝突対策）に変更されている。
+      古いコード・配線図を参照していないか必ず確認すること。
+- [ ] **slot↔役割 (seat/board) は firmware に埋め込まない**: 役割名は host config (`pcsc_readers`) が
+      唯一の source of truth。firmware は slot 順序（reader_name 末尾の slot index）が再起動・再列挙を
+      跨いで安定することのみ保証する（§2 再掲）。
+- [ ] **物理配線の真実**: NSS 13 個 / SPI / MUX の GPIO 表は ADR-0034 末尾追記、および
+      `firmware/esp32s3-pn5180-ccid/app_config.h` を参照（実装の source of truth）。

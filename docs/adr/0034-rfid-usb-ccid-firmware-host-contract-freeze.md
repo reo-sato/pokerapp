@@ -95,3 +95,44 @@ firmware が手元に無くても、(1) 境界契約の凍結、(2) host 側の�
 
 - Supersedes: —（ADR-0015 の follow-up = ISSUE-0015 を解決。関連: ADR-0015 / ISSUE-0015 / ISSUE-0014(Superseded)）
 - Superseded by: —
+
+---
+
+## v2 確定事項 追記 (2026-06-22)
+
+firmware 担当との意識合わせの結果、「ポーカーテーブル RFID システム計画書 v2 (2026-06-22)」を
+正典として下記を additive に確定する。本 ADR の契約（USB descriptor / reader_name 規約 / ATR /
+Get UID / UID 4-7-8B 正規化 / hot-plug / host config = source of truth）は v1.0 のまま維持。
+
+### slot 数
+
+- **slot 数 = 13**（席 1..8 = 8 + ボード 1..5 = 5）。ADR-0015 v2 追記と一致。
+- slot 順序は firmware が再起動・再列挙を跨いで安定させる（reader_name 末尾の slot index 安定）。
+- slot↔役割（seat_N / board_N）の対応は **host config (`pcsc_readers`) が唯一の source of truth**。
+
+### 物理配線（実装の真実は `firmware/esp32s3-pn5180-ccid/app_config.h`）
+
+- **NSS GPIO（13 個、PN5180 個別 CS）**:
+  - 席 1..8 = GPIO 1 / 2 / 4 / 5 / 6 / 7 / 8 / 9
+  - ボード 1..5 = GPIO 10 / 15 / 16 / 17 / 18
+- **SPI 共有信号**: SCK=12 / MOSI=11 / MISO=13 / RST=14（PN5180 共通）。SPI clock ≤ 5 MHz、Mode 0、MSB first。
+- **MUX (CD74HC4067, BUSY 集約)**: SIG=**47** / S0=**37** / S1=39 / S2=40 / S3=41 / VCC=3.3V（5V 厳禁）/ EN=GND。
+  - ⚠️ MUX SIG は当初設計 GPIO 21 → フローティング問題で **47** に変更。
+  - ⚠️ MUX S0 は当初設計 GPIO 38 → NeoPixel 衝突で **37** に変更。
+  - MUX チャンネル C0..C12 が PN5180 #1..#13 の BUSY に対応。
+
+### 既知の落とし穴
+
+- **UART ブリッジ経由不可**: CP2102N / CH340 経由は COM ポート化、PC/SC に出ない。ESP32-S3 の
+  native USB-OTG ポートを必ず使う。
+- **interface class は CCID (0x0B) のみ**: HID / CDC / vendor class で公開しない。
+- **UID は生バイトのまま返す**: firmware で文字列化・コロン挿入をしない。正規化（`04:AB:..` 形式）は
+  host 側 `normalize_tag_id` の責務。
+- **13台同時 RF ON 禁止**: リーダー相互干渉のため時分割スキャン必須（同時に RF ON は 1 台のみ）。
+- **MUX SIG / S0 GPIO 変更**: v1 設計の 21 / 38 を参照しているコード・ドキュメントが残っていないか
+  要確認（v2 = 47 / 37 が正）。
+
+### 既知の課題（実機 bring-up 残）
+
+- (a) CCID firmware の BUSY timeout デバッグ中（v2 計画書 §6）。
+- (b) 13 台密接配置 / ボード 5 枚密接配置でのリーダー間干渉の実機テスト（必要ならフェライトシート貼付）。
