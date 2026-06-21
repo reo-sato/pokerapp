@@ -133,8 +133,8 @@ def lint_pcsc_readers(pcsc_readers: list[dict]) -> list[str]:
             problems.append(f"{label}: role は 'seat' | 'board'（実際: {role!r}）。")
         elif role == "seat":
             seat = cfg.get("seat")
-            if not isinstance(seat, int) or not 1 <= seat <= 9:
-                problems.append(f"{label}: role=seat には seat 1..9 が必要（実際: {seat!r}）。")
+            if not isinstance(seat, int) or not 1 <= seat <= 8:
+                problems.append(f"{label}: role=seat には seat 1..8 が必要（実際: {seat!r}）。")
             elif seat in seen_seats:
                 problems.append(
                     f"{label}: seat {seat} が {seen_seats[seat]} と重複。"

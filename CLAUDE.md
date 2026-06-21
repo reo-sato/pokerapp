@@ -31,6 +31,7 @@ pokerapp/
 │   ├── installation.md            ← エンドユーザー: インストール手順 (Phase I)
 │   ├── usage.md                   ← エンドユーザー: 使い方・読み上げ語彙・設定 (Phase I)
 │   ├── troubleshooting.md         ← エンドユーザー: 困りごと対処 (Phase I)
+│   ├── hardware/                  ← 物理層 source of truth (PN5180×13 配線 / GPIO / 電源, v2 計画書 2026-06-22)
 │   └── decision-log.md            ← ADR / 主要 issue の索引
 ├── sprc_v4.docx                   ← 仕様書（要件定義）
 ├── claude_v4.docx                 ← 旧仕様書（参考）
@@ -229,7 +230,7 @@ write-through 接続可**（E1+E2-core, ADR-0008 Pattern A: `IntegrationThread` 
 - 同一 hand で seat 重複 → `SeatTakenError`（`seat_taken`）、player 重複 →
   `PlayerAlreadySeatedError`（`player_already_seated`）。
 - unknown player（registry 非実在）→ `UnknownPlayerError`（`unknown_player`）。
-- `seat_no` 範囲外（**v2 計画書 = 1..8**。コード側 `core/session_repository.py` `_MAX_SEAT_NO` 等の 1..8 化は残作業）/ 不正 `hand_id` → `InvalidSeatError`（`invalid_seat`）。
+- `seat_no` 範囲外（1..8 外、v2 計画書 2026-06-22）/ 不正 `hand_id` → `InvalidSeatError`（`invalid_seat`）。
 - error code は `docs/contracts/error-shapes.md` の session セクションと 1:1 対応。
 
 ### 識別子・永続形（ADR-0007）

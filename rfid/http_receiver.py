@@ -12,7 +12,7 @@ ESP32 が送る JSON 形式:
     }
 
 reader_id は config の rfid.readers dict のキーと一致させる:
-    "seat_1" … "seat_9" : 座席カードリーダー (role="seat")
+    "seat_1" … "seat_8" : 座席カードリーダー (role="seat", v2 計画書 2026-06-22 = 席数 8)
     "board_1" … "board_5": ボードカードリーダー (role="board")
 
 board_index の意味:

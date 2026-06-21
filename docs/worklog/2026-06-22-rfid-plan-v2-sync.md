@@ -60,18 +60,32 @@ None observed (docs-only; behavior unchanged).
 
 N/A.
 
+## Follow-up (同日, `request_to_friend_v2.md` 反映)
+
+friend からの review v2 を受けて以下を追加実施:
+
+- **コード/config 側 seat 1..8 化を完了**: `core/session_repository.py` (`_MAX_SEAT_NO=8`),
+  `audio/recognizer.py:70`, `tools/probe_pcsc.py:136`, `tools/simulate_rfid.py:155`, `main.py:24`,
+  `rfid/http_receiver.py` docstring, `tests/test_tools_probe_pcsc.py` ("seat 1..8" 期待値) を更新。
+  `pytest tests/ -v --ignore=tests/test_vision.py` → 701 passed。
+- **`config_default.json` 整理**: `transport` 既定 `"http"` → `"pcsc"`、`seat_9` 削除、
+  `pcsc_readers` を 13 entry（`PokerRFID PN5180-CCID 0..12` 体裁）に拡張、`_pcsc_poll_interval_ms` を
+  `poll_interval_ms` にリネーム（先頭 `_` はコメント扱いで実は無効だった既知問題）。
+- **`docs/hardware/pn5180-esp32s3-wiring.md`** 新規作成（v2 計画書 §2 を移植、MUX 変更履歴含む）。
+- **`docs/rfid-ccid-firmware-checklist.md`** に §8（RF 時分割）と §9（トラブルシューティング = `probe_pcsc`
+  失敗パターン切り分け / GPIO 落とし穴）を追加。先に書いた末尾「v2 落とし穴」セクションは §8/§9 に統合した。
+- **ADR-0015 末尾に「HTTP 経路は frozen — 新機能追加なし」追補**。
+
 ## Remaining Gaps / Out-of-Scope
 
-- [ ] **コード/config 側の seat 1..8 化**: `core/session_repository.py` `_MAX_SEAT_NO`,
-      `audio/recognizer.py:70`, `tools/probe_pcsc.py:136`, `tools/simulate_rfid.py:155`, `main.py:24`,
-      `config_default.json` の `readers` / `pcsc_readers` から `seat_9` を除去。
-- [ ] **`config_default.json` の `pcsc_readers` を 13 entry サンプル**（seat_1..8 + board_1..5）に拡張。
-- [ ] **HTTP receiver コードの最終処遇**: v2 で deprecated 宣言した `rfid/http_receiver.py` /
-      `tools/simulate_rfid.py` の残置期限を ADR で再評価。
+- [ ] **HTTP receiver コードの最終削除タイミング**: 本タスクで frozen 宣言済。実削除は別 ADR で評価。
 - [ ] **実機 E2E**: BUSY timeout デバッグ + 13台密接配置のリーダー間干渉テスト + 必要ならフェライト
       シート対策（v2 計画書 §6 / §7）。
 - [ ] **`firmware/esp32s3-pn5180-ccid/README.md`** の更新（13 リーダー前提・確定 GPIO 表の参照）は
       firmware 担当タスクとして残す。
+- [ ] **`rfid_cards.json` サンプル充実**: friend §4.6。本タスクでは未対応。
+- [ ] **契約 v1.0 → v1.1 minor bump**: friend §7 #6（seat 1..8 / HTTP frozen / reader_name 確定体裁 /
+      BUSY 待ち手順を反映）。schema を触らない範囲なら追加 ADR で評価。
 
 ## Related ADRs
 

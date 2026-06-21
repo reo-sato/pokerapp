@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+### Code / Config / Docs (RFID 計画書 v2 反映 follow-up, 2026-06-22)
+
+- friend からの review (`request_to_friend_v2.md`) を反映した第 2 弾:
+  - **seat 範囲を 1..8 に narrow**: `core/session_repository.py` (`_MAX_SEAT_NO=8`), `audio/recognizer.py`,
+    `main.py` CLI prompt, `tools/probe_pcsc.py` lint, `tools/simulate_rfid.py` CLI, `rfid/http_receiver.py`
+    docstring, `tests/test_tools_probe_pcsc.py` の "seat 1..9" 期待値を更新。701 passed.
+  - **`config_default.json`**:
+    - `rfid.transport` 既定値 `"http"` → `"pcsc"`（canonical へ揃える）
+    - `readers` dict から `seat_9` を削除（v2 = 席数 8）+ deprecated 注記
+    - `pcsc_readers` サンプルを 3 件 → **13 件**（slot 0..12 = seat 1..8 + board 1..5）に拡張、
+      `name` 体裁を確定値 `PokerRFID PN5180-CCID 0..12` に統一
+    - `_pcsc_poll_interval_ms` → `poll_interval_ms`（先頭 `_` はコメント扱いで無効だった、ISSUE 既知）
+  - **新規 `docs/hardware/pn5180-esp32s3-wiring.md`**: PN5180×13 物理層 source of truth。NSS GPIO 表 /
+    SPI / MUX（SIG=47 / S0=37 への変更履歴含む）/ JST XH pinout / 電源 / 既知の課題（BUSY timeout /
+    干渉）を集約。
+  - **`docs/rfid-ccid-firmware-checklist.md`**: §8「RF 時分割スキャン」+ §9「トラブルシューティング」
+    を追加（`probe_pcsc list/check/watch` の各失敗パターン切り分け、GPIO 落とし穴）。
+  - ADR-0015 末尾に「HTTP 経路は frozen — 新機能追加なし」を追補。
+
 ### Docs (RFID 計画書 v2 反映, 2026-06-22)
 
 - 友人（firmware 担当）と意識合わせした「ポーカーテーブル RFID システム計画書 v2 (2026-06-22)」を

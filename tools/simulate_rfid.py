@@ -152,8 +152,8 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
 
 def _cmd_seat(args: argparse.Namespace) -> int:
-    if not 1 <= args.seat <= 9:
-        print("[error] seat は 1..9", file=sys.stderr)
+    if not 1 <= args.seat <= 8:
+        print("[error] seat は 1..8", file=sys.stderr)
         return 2
     reader_id = f"seat_{args.seat}"
     print(f"seat_{args.seat} へホールカード {len(args.cards)} 枚:")

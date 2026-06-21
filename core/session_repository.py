@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_SESSION_DB = Path(__file__).parent.parent / "sessions.json"
 
 _MIN_SEAT_NO = 1
-_MAX_SEAT_NO = 9
+_MAX_SEAT_NO = 8  # v2 計画書 (2026-06-22): リーダー総数 13 = 席 8 + ボード 5
 
 
 class SessionError(Exception):
@@ -77,7 +77,7 @@ class UnknownPlayerError(SessionError):
 
 
 class InvalidSeatError(SessionError):
-    """seat_no が範囲外（1..9 外）（error code: invalid_seat）。"""
+    """seat_no が範囲外（1..8 外、v2 計画書 2026-06-22）（error code: invalid_seat）。"""
 
 
 def _now_iso() -> str:

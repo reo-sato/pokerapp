@@ -20,12 +20,12 @@ def _prompt_session_config() -> dict:
 
     while True:
         try:
-            num_seats = int(input("席数 (2〜9): ").strip())
-            if 2 <= num_seats <= 9:
+            num_seats = int(input("席数 (2〜8): ").strip())
+            if 2 <= num_seats <= 8:
                 break
         except ValueError:
             pass
-        print("2〜9 の整数を入力してください。")
+        print("2〜8 の整数を入力してください。")
 
     players = []
     for i in range(1, num_seats + 1):

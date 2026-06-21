@@ -125,7 +125,7 @@ class TestLint:
 
     def test_seat_out_of_range(self):
         cfgs = [{"name": "R0", "role": "seat", "seat": 0}]
-        assert any("seat 1..9" in p for p in lint_pcsc_readers(cfgs))
+        assert any("seat 1..8" in p for p in lint_pcsc_readers(cfgs))
 
     def test_missing_name(self):
         cfgs = [{"role": "seat", "seat": 1}]

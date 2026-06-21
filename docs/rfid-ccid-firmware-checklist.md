@@ -101,6 +101,71 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
 - [ ] product 文字列を版ごとに変える（→ reader_name が動いて config が壊れる）。
 - [ ] 役割（seat/board）を reader_name に埋めて host に解釈させる（→ 役割は host config が source of truth）。
 
+## 8. RF 時分割スキャン（PN5180 multi-reader 必須）
+
+PN5180 ×13 を 1 基板に集約すると、**複数台が同時に RF ON すると相互干渉**してカード検出ができなく
+なる。物理仕様の詳細は `docs/hardware/pn5180-esp32s3-wiring.md` §5、本節は firmware 実装観点の MUST。
+
+- [ ] **同時に RF ON するのは常に 1 台のみ MUST**。複数 PN5180 を並行してフィールド励起してはいけない。
+- [ ] CCID slot からの読み取り要求は **時分割で順番に処理** MUST。1 ループあたりの目安:
+      MUX 切替 → NSS LOW → LOAD_RF_CONFIG → RF_ON → INVENTORY → RF_OFF → NSS HIGH（5〜10 ms/台）。
+- [ ] **SPI clock ≤ 5 MHz** MUST（7 MHz 以上で PN5180 の挙動が不安定になる実測例あり）。Mode 0、MSB first。
+- [ ] BUSY 取得時は **MUX 切替 → 数 μs 待機 → SIG 読み** MUST（settling 不足だと前 slot の残値を拾う）。
+- [ ] PN5180 BUSY は **High=Busy / Low=Ready**（PN532 と逆論理）。読み方を間違えると永久 timeout する。
+- [ ] 13 台 1 サイクルの目安は 65〜130 ms。CCID PC_to_RDR_IccPowerOn のタイムアウトに収まる範囲で
+      slot 間スケジューリングする。
+
+**受け入れ**: `probe_pcsc watch` 実行中、複数 slot を順次タップしても全て正しく UID が出る。
+「他 slot にカードを置いている間、自 slot が読めなくなる」事象が出ないこと。
+
+## 9. トラブルシューティング（実機 bring-up 用）
+
+bring-up 段階の典型症状と切り分け手順。物理層の真実は `docs/hardware/pn5180-esp32s3-wiring.md`、
+特に GPIO 表（§3）と変更履歴（§7）を必ず突き合わせる。
+
+### 9.1 `probe_pcsc list` で 0 件
+
+- USB descriptor が **CCID class (`bInterfaceClass=0x0B`)** になっていない（HID / CDC / vendor は不可）。
+- ESP32-S3 の **native USB-OTG ポート以外**（UART ブリッジ側 = CP2102N/CH340）に USB ケーブルを
+  挿していないか。COM ポート（CDC）に出ているなら PC/SC からは見えない。
+- OS デバイスマネージャ（Windows）／`pcscd -fd`（Linux）でデバイス列挙を確認。
+
+### 9.2 `probe_pcsc list` の件数が slot 数より少ない
+
+- firmware の slot 数定義（`CCID_SLOT_COUNT`）と OS が見ている slot 数が不一致。
+- USB string descriptor の長さ超過で OS が一部 slot を弾いている可能性。
+
+### 9.3 `probe_pcsc check` で個別 slot が FAIL（ATR 返らず）
+
+- 時分割スキャンの **BUSY 待ちが終わらず**、CCID `PC_to_RDR_IccPowerOn` にタイムアウト応答できていない。
+- まず `app_config.h` の **MUX_SIG=GPIO 47** / **MUX_S0=GPIO 37** が反映されているか確認:
+  - 旧設計値 **MUX_SIG=21**（strapping pin によるフローティング問題）/ **MUX_S0=38**（NeoPixel 衝突）が
+    残っていないかコード grep。
+  - 配線図・実装で GPIO 47/37 にジャンパが行っているか実機確認。
+- BUSY の論理を **High=Busy / Low=Ready** で扱えているか（PN532 と逆）。
+- NSS タイミング / SPI clock（≤5 MHz）を再確認。
+
+### 9.4 `probe_pcsc watch` で UID が出ない / `(0B)` 表示（UID 0 バイト）
+
+- PN5180 から空 UID が返っている = **BUSY を正しく待てていない**可能性が高い。§9.3 の手順を再度。
+- INVENTORY コマンドのレスポンス取得タイミング、SPI mode、NSS HIGH→LOW のセットアップ時間を確認。
+
+### 9.5 `probe_pcsc check` で reader_name が見つからない
+
+- `config.rfid.pcsc_readers[].name` の文字列が OS の実 reader_name と **等値**でない（前方一致しない）。
+- **前後空白 / 全角空白**が混入していないか（コピペ時の典型）。`probe_pcsc list` の出力をそのまま貼る。
+- OS で reader_name 体裁が異なる（Windows: `PokerRFID PN5180-CCID 0` / Linux pcscd: `PokerRFID PN5180-CCID 00 00`
+  系 / macOS: 別体裁）。運用 OS の実値で config を書き換える。
+
+### 9.6 既知の GPIO 落とし穴（ESP32-S3 DevKitC-1 v1.0）
+
+- **GPIO 19 / 20**: native USB D-/D+。USB-OTG 使用時は他用途禁止。
+- **GPIO 26-32**: 内蔵 PSRAM / Flash 接続。使用禁止。
+- **GPIO 21**: strapping pin（起動時フローティング）。MUX SIG には不可 → **47** に移行済。
+- **GPIO 38**: DevKitC-1 v1.0 の NeoPixel (WS2812) 専用 → **37** に移行済。
+
+詳細は `docs/hardware/pn5180-esp32s3-wiring.md` §3.4 / §7（変更履歴）参照。
+
 ---
 
 ## 受け入れマトリクス（契約 § ↔ probe_pcsc ↔ 期待）
@@ -130,26 +195,4 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
 - host 実装: `rfid/bridge.py`（Get UID `FF CA 00 00 00` / SW 90 00 / UID 正規化）/ `rfid/reader_thread.py`
   （slot polling / debounce / board_index）/ `rfid/card_master.py`（`normalize_tag_id` / `bytes_to_tag_id`）
 - 診断/手順: `tools/probe_pcsc.py` / `docs/hardware-qa-checklist.md`
-
----
-
-## v2 計画書 (2026-06-22) — よくある落とし穴
-
-別口で進めている firmware 担当との意識合わせを反映した v2 計画書で確定した、実装時に外しやすい
-ポイント。本書 §0〜§10 と重複する内容もあるが、再強調する。
-
-- [ ] **UART ブリッジ経由は CCID 認識不可**: CP2102N / CH340 経由は COM ポート（CDC）化し、PC/SC に
-      乗らない。ESP32-S3 の **native USB-OTG ポート** を必ず使う（§0 再掲）。
-- [ ] **interface class は CCID (0x0B) のみ**: HID / CDC / vendor class で公開しない。
-- [ ] **UID は生バイトのまま返す**: firmware で文字列化・コロン挿入をしない。`04:AB:..` 形式への
-      正規化は host 側 `rfid/card_master.py:normalize_tag_id` の責務（§4 再掲）。
-- [ ] **13 台同時 RF ON 禁止**: リーダー相互干渉により読み取り失敗する。**時分割スキャン必須**
-      （同時 RF ON は 1 台のみ）。
-- [ ] **MUX SIG / S0 の GPIO 変更**: v1 設計の SIG=GPIO 21 / S0=GPIO 38 から、v2 では
-      **SIG=GPIO 47**（フローティング問題対策）/ **S0=GPIO 37**（NeoPixel 衝突対策）に変更されている。
-      古いコード・配線図を参照していないか必ず確認すること。
-- [ ] **slot↔役割 (seat/board) は firmware に埋め込まない**: 役割名は host config (`pcsc_readers`) が
-      唯一の source of truth。firmware は slot 順序（reader_name 末尾の slot index）が再起動・再列挙を
-      跨いで安定することのみ保証する（§2 再掲）。
-- [ ] **物理配線の真実**: NSS 13 個 / SPI / MUX の GPIO 表は ADR-0034 末尾追記、および
-      `firmware/esp32s3-pn5180-ccid/app_config.h` を参照（実装の source of truth）。
+- 物理層: `docs/hardware/pn5180-esp32s3-wiring.md`（GPIO 表 / 変更履歴 / RF 時分割 / 電源 / コネクタ pinout）

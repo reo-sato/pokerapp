@@ -161,3 +161,12 @@ forces:
 
 詳細な GPIO 配線（NSS×13 / SPI / MUX）は ADR-0034 末尾 + `firmware/esp32s3-pn5180-ccid/app_config.h`
 を参照。
+
+### 追補 (2026-06-22 後): HTTP 経路は frozen — 新機能追加なし
+
+`rfid/http_receiver.py` + `config.rfid.transport="http"` / `readers` dict は **frozen**：
+
+- バグ修正・既存テスト互換のための変更のみ受け付ける。
+- 新機能（新 endpoint / 新 event field / 新 reader_id 拡張等）は追加しない。
+- 削除タイミングは別 ADR で再評価する（本 ADR では「残置」とした）。
+- 物理層の真実は `docs/hardware/pn5180-esp32s3-wiring.md` に source of truth を確定。

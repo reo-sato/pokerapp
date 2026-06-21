@@ -67,7 +67,7 @@ def _extract_seat_no(text: str) -> Optional[int]:
         n = int(m.group(1).translate(_FW_TO_ASCII_DIGITS))
     except ValueError:
         return None
-    return n if 1 <= n <= 9 else None
+    return n if 1 <= n <= 8 else None  # v2 計画書 (2026-06-22): 席数 8
 
 
 def _kanji_to_int(kanji: str) -> int:
