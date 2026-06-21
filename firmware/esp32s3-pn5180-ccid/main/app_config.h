@@ -46,7 +46,7 @@
 // 1 = MUX 経由（本番。上の BUSY_SIG / MUX_* を使う）。
 // 0 = 直結（MUX をバイパス。reader #1 の BUSY を PN5180_PIN_BUSY_DIRECT に直接配線して検証）。
 //     → これで「MUX が原因」か「PN5180/SPI/RST/電源 が原因」かを切り分けられる。
-#define PN5180_BUSY_VIA_MUX     1
+#define PN5180_BUSY_VIA_MUX     0
 #define PN5180_PIN_BUSY_DIRECT  21  // bypass 時に reader #1 BUSY を直結する空き GPIO
 
 // ───────── 各 reader の NSS と、BUSY が繋がる MUX channel ─────────
