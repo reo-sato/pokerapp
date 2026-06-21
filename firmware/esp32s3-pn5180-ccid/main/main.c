@@ -31,11 +31,6 @@ void app_main(void) {
     ESP_LOGI(TAG, "PN5180 USB CCID reader: %d slot(s), product='%s'",
              CCID_SLOT_COUNT, USB_PRODUCT_STR);
 
-    // CCID デバッグ中は PN5180 のエラー洪水を抑える（配線が確定したらこの 3 行を外す）。
-    esp_log_level_set("PN5180", ESP_LOG_NONE);
-    esp_log_level_set("pn5180-14443", ESP_LOG_NONE);
-    esp_log_level_set("pn5180-15693", ESP_LOG_NONE);
-
     // ── USB(CCID) 起動 ──
     // ⚠ 版依存: esp_tinyusb の tinyusb_config_t のフィールド名はバージョンで変わる
     //    （configuration_descriptor / fs_configuration_descriptor など）。ビルドエラー時は

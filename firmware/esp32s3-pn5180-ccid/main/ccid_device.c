@@ -81,7 +81,7 @@ static bool ccid_control_xfer_cb(uint8_t rhport, uint8_t stage,
     if (stage != CONTROL_STAGE_SETUP) {
         return true;
     }
-    ESP_LOGI(TAG, "ccid_control class req=0x%02x", req->bRequest);
+    ESP_LOGD(TAG, "ccid_control class req=0x%02x", req->bRequest);
     switch (req->bRequest) {
     case 0x01:  // ABORT
         return tud_control_status(rhport, req);
@@ -96,7 +96,7 @@ static bool ccid_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result,
     if (ep_addr == s_ccid.ep_out) {
         // コマンド受信完了 → 処理してレスポンスを bulk-IN で返す。
         // 注: 64byte 超のチェイン受信は未対応（Get UID/Status は小さいので可）。TODO で拡張。
-        ESP_LOGI(TAG, "ccid_xfer OUT %u bytes, msgtype=0x%02x",
+        ESP_LOGD(TAG, "ccid_xfer OUT %u bytes, msgtype=0x%02x",
                  (unsigned)xferred_bytes, xferred_bytes > 0 ? s_ccid.out_buf[0] : 0);
         size_t rlen = ccid_process_message(s_ccid.out_buf, xferred_bytes,
                                            s_ccid.in_buf, sizeof(s_ccid.in_buf));
