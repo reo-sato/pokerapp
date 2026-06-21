@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### Added (ESP32-S3 + PN5180 USB CCID firmware scaffold, 本番 RFID / ADR-0015/0034)
+
+- 本番 RFID（canonical USB CCID → PC/SC）の **ESP-IDF firmware scaffold** を `firmware/esp32s3-pn5180-ccid/`
+  に追加。host 側（`rfid/`, `tools/probe_pcsc.py`）は完成済みのため、これを焼けば `probe_pcsc` で受け入れ確認できる。
+- 内容: USB CCID 記述子（class 0x0B / bulk IN-OUT, §2）+ CCID メッセージ処理（IccPowerOn→ATR §5 /
+  XfrBlock の `FF CA 00 00 00`→UID+90 00 §6 / UID 4-7-8B 生バイト §7 / GetSlotStatus §8）+ TinyUSB
+  カスタムクラス登録（`usbd_app_driver_get_cb`）+ PN5180 読取り（`jef-sure/esp32-component-pn5180`）+
+  カード状態キャッシュ（USB と RF を分離）。framework 非依存の中核は `ccid_slot.c`。
+- USB/esp_tinyusb/PN5180 の版・実機依存箇所は `TODO(実機)` と README に明示（ピン / VID-PID /
+  `usbd_class_driver_t` 構成 / `tinyusb_config_t` フィールド / 構造体フィールド）。ビルド/フラッシュ/USB 検証は
+  実機タスク。CCID クラスの手法は RevK 記事 / `polhenarejos/pico-openpgp` を参照。
+- ドキュメント: `firmware/.../README.md`（ビルド手順 + 契約 §↔ファイル対応 + host 受け入れ）、`CLAUDE.md`
+  ディレクトリ構成 + 実装状況行、ISSUE-0015 残作業に scaffold を追記。
+
 ### Added (実機 RFID bring-up 診断ツール + 手順, Phase H / ADR-0015/0034)
 
 - 実機の **ESP32-S3 + PN5180（USB CCID → PC/SC, canonical）** を `docs/contracts/rfid-usb-ccid.md` v1.0 の

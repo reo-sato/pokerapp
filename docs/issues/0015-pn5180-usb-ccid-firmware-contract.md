@@ -82,6 +82,9 @@ descriptor / reader_name / ATR / pseudo-APDU セット** などホスト側が�
     `list` 出力から契約へ転記する。
   - firmware 実装者向けの MUST チェックリスト `docs/rfid-ccid-firmware-checklist.md` を用意済（2026-06-21）。
     実機にはテスト用 LED firmware のみ確認 → 本番 USB CCID firmware の実装仕様を契約から落とし込み。
+  - 本番 firmware の **ESP-IDF scaffold** `firmware/esp32s3-pn5180-ccid/` を追加（2026-06-21）。USB CCID
+    記述子 + CCID メッセージ処理（ATR/Get UID）+ TinyUSB カスタムクラス + PN5180 読取り。実機ビルド/
+    フラッシュ/USB 検証と VID/PID・実 reader_name 確定が残（§2/§4 転記の前段がコード化された）。
 
 ## Regression Test
 
