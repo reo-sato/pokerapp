@@ -67,11 +67,49 @@ static void mux_select(int ch) {
 #endif
 }
 
+// ── BUSY ピン診断（テスター不要）──
+// 内部プルアップ/プルダウンを切替えて読み、ピンが「フローティング(信号来てない)」か
+// 「駆動されている(信号来てる)」かを判定する。PN5180 は電源投入後 idle で BUSY=Low のはず。
+static void diag_busy_pin(void) {
+    mux_select(PN5180_READERS[0].mux_ch);  // reader #1 の BUSY を SIG に（via_mux 時）
+    const int busy = BUSY_PIN;
+
+    gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << busy,
+        .mode = GPIO_MODE_INPUT,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    gpio_config(&cfg);
+    esp_rom_delay_us(300);
+    int pu = gpio_get_level(busy);
+
+    cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+    cfg.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    gpio_config(&cfg);
+    esp_rom_delay_us(300);
+    int pd = gpio_get_level(busy);
+
+    const char *verdict;
+    if (pu == 1 && pd == 0)
+        verdict = "FLOATING=信号が来ていない（MUX EN/VCC/SIG配線/ch対応 を疑う）";
+    else if (pu == 0 && pd == 0)
+        verdict = "LOW駆動=Lowに固定（PN5180 BUSY idle かも→MUXは届いている公算）";
+    else if (pu == 1 && pd == 1)
+        verdict = "HIGH駆動=Highに固定（常時busy/結線ミス/短絡 を疑う）";
+    else
+        verdict = "不定";
+    ESP_LOGW(TAG, "BUSY診断: pin=%d via_mux=%d pull-up読み=%d pull-down読み=%d => %s",
+             busy, PN5180_BUSY_VIA_MUX, pu, pd, verdict);
+}
+
 bool pn5180_reader_init(void) {
     s_lock = xSemaphoreCreateMutex();
     if (!s_lock) return false;
     memset(s_cache, 0, sizeof(s_cache));
     mux_init();
+    diag_busy_pin();  // テスター無しで BUSY ピンの素性を診断（ログに出す）
 
     // SPI バスは全 reader 共有（pn5180_spi_init の引数順は host, SCK, MISO, MOSI, freq）。
     pn5180_spi_t *spi = pn5180_spi_init(PN5180_SPI_HOST, PN5180_PIN_SCK,
