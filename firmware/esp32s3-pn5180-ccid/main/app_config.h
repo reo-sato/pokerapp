@@ -27,7 +27,7 @@
 #define PN5180_PIN_SCK    12
 #define PN5180_PIN_MOSI   11
 #define PN5180_PIN_MISO   13
-#define PN5180_SPI_HZ     5000000   // 5MHz（PN5180 は 7MHz 以上で不安定, 実機知見）
+#define PN5180_SPI_HZ     1000000   // bring-up は 1MHz まで落として SI 余裕を取る。動いたら 5MHz 復帰
 
 // ───────── PN5180 共有制御線 ─────────
 #define PN5180_PIN_RST    14        // RST は 13 台共通（実機配線）

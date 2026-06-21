@@ -137,6 +137,30 @@ bool pn5180_reader_init(void) {
     diag_mux_scan();  // 全 ch 走査で MUX 不通 か reader 個別 かを切り分け
     gpio_set_pull_mode(BUSY_PIN, GPIO_FLOATING);  // 診断で付けた内部 pull を解除（ドライバに clean な状態を渡す）
 
+    // ── RST/NSS 駆動 → BUSY 応答の手動診断 ──
+    // PN5180 は RST=Low(>10us)→High→数 ms 後 BUSY=Low(idle)。SPI 無しでこれが起こるかを観る。
+    // RST が物理的に届いているなら、Low→High の前後で BUSY が High↘Low と変化するはず。
+    const int rst = PN5180_PIN_RST;
+    const int nss = PN5180_READERS[0].nss;
+    gpio_set_direction(rst, GPIO_MODE_OUTPUT);
+    gpio_set_direction(nss, GPIO_MODE_OUTPUT);
+    gpio_set_level(nss, 1);  // deselect
+    mux_select(PN5180_READERS[0].mux_ch);
+
+    gpio_set_level(rst, 0);                      // RST 押す
+    esp_rom_delay_us(2000);
+    int busy_during_rst = gpio_get_level(BUSY_PIN);
+    gpio_set_level(rst, 1);                      // RST 離す
+    esp_rom_delay_us(50);
+    int busy_just_after = gpio_get_level(BUSY_PIN);
+    vTaskDelay(pdMS_TO_TICKS(10));               // PN5180 ブート待ち
+    int busy_after_boot = gpio_get_level(BUSY_PIN);
+
+    ESP_LOGW(TAG, "RST診断: BUSY during_rst=%d  just_after=%d  after_10ms=%d (idle期待=Low)",
+             busy_during_rst, busy_just_after, busy_after_boot);
+    ESP_LOGW(TAG, "  期待: during_rst=1(High) → after_boot=0(Low). 変化が無い=RST(GPIO%d) or 電源未到達",
+             rst);
+
     // SPI バスは全 reader 共有（pn5180_spi_init の引数順は host, SCK, MISO, MOSI, freq）。
     pn5180_spi_t *spi = pn5180_spi_init(PN5180_SPI_HOST, PN5180_PIN_SCK,
                                         PN5180_PIN_MISO, PN5180_PIN_MOSI,
