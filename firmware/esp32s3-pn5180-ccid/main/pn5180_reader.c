@@ -12,10 +12,10 @@
 #include "app_config.h"
 #include "pn5180_reader.h"
 
-// TODO(実機): コンポーネントの実ヘッダに合わせる。
+// jef-sure/pn5180 のヘッダ（ハイフン区切り）。
 #include "pn5180.h"          // pn5180_spi_init / pn5180_init / pn5180_t / pn5180_proto_t
-// #include "pn5180_14443.h"
-// #include "pn5180_15693.h"
+#include "pn5180-14443.h"    // pn5180_14443_init
+#include "pn5180-15693.h"    // pn5180_15693_init
 
 static const char *TAG = "pn5180";
 
@@ -69,13 +69,16 @@ static bool read_uid_from_proto(pn5180_proto_t *proto, uint8_t *uid, uint8_t *ui
     if (!uids) return false;
 
     bool found = false;
-    // TODO(実機): 例では uids->count / uids->uids[i].uid / .size を想定。実フィールドに合わせる。
-    if (uids->count > 0) {
-        uint8_t n = uids->uids[0].size;
+    // nfc_uids_array_t { nfc_uid_t *uids; int uids_count; }
+    // nfc_uid_t { uint8_t uid[]; int uid_length; int subtype; }
+    if (uids->uids_count > 0) {
+        int n = uids->uids[0].uid_length;
         if (n > 16) n = 16;
-        memcpy(uid, uids->uids[0].uid, n);
-        *uid_len = n;
-        found = true;
+        if (n > 0) {
+            memcpy(uid, uids->uids[0].uid, n);
+            *uid_len = (uint8_t)n;
+            found = true;
+        }
     }
     free(uids);  // README: heap 配列は free 必須
     return found;
