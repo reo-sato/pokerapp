@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "poker-hand-logger"
+version = "2.0.0"
+description = "ポーカーハンドロガー — 音声認識・カメラ動体検出・RFID でポーカーのハンド履歴を自動記録する"
+requires-python = ">=3.10"
+authors = [{ name = "reo-sato" }]
+keywords = ["poker", "hand-history", "speech-recognition", "rfid", "nfc", "pcsc"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Games/Entertainment",
+    # PyPI への誤公開を防ぐ（社内/個人用プロジェクト）
+    "Private :: Do Not Upload",
+]
+
+# 実行時の必須依存。requirements.txt と同期させること。
+dependencies = [
+    "opencv-python>=4.8.0",
+    "faster-whisper>=1.0.0",
+    "pyaudio>=0.2.13",
+    "pokerkit>=0.5.0",
+    "customtkinter>=5.2.0",
+    "easyocr>=1.7.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+# transport="pcsc" で NFC リーダー(PC/SC)を直接読む場合のみ必要。
+# transport="http" (ESP32 等) のみを使う場合は不要。
+#   pip install -e .[pcsc]
+pcsc = ["pyscard>=2.0.7"]
+# 開発・テスト用。
+#   pip install -e .[dev]
+dev = ["pytest>=7.0.0"]
+
+[project.scripts]
+poker-hand-logger = "main:main"
+
+[tool.setuptools]
+# フラットレイアウト: ルート直下の main.py をトップレベルモジュールとして含める。
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+# アプリ本体のパッケージのみを対象にし、tests/scripts は配布物に含めない。
+include = [
+    "audio*",
+    "core*",
+    "gui*",
+    "integration*",
+    "output*",
+    "rfid*",
+    "vision*",
+]
+exclude = ["tests*", "scripts*"]
