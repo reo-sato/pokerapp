@@ -135,6 +135,7 @@ bool pn5180_reader_init(void) {
     mux_init();
     diag_busy_pin();  // テスター無しで BUSY ピンの素性を診断（ログに出す）
     diag_mux_scan();  // 全 ch 走査で MUX 不通 か reader 個別 かを切り分け
+    gpio_set_pull_mode(BUSY_PIN, GPIO_FLOATING);  // 診断で付けた内部 pull を解除（ドライバに clean な状態を渡す）
 
     // SPI バスは全 reader 共有（pn5180_spi_init の引数順は host, SCK, MISO, MOSI, freq）。
     pn5180_spi_t *spi = pn5180_spi_init(PN5180_SPI_HOST, PN5180_PIN_SCK,
