@@ -301,15 +301,19 @@ bool pn5180_reader_init(void) {
 }
 
 // 1 つの proto から最初の UID を取り出す。取れたら true。
+// 注: get_all_uids() は内部で setupRF + inventory を行う（pn5180-15693.c:687）。
+//     ここで別途 setup_rf を呼ぶと二重設定でカード状態が乱れるため、get_all_uids のみ呼ぶ。
 static bool read_uid_from_proto(pn5180_proto_t *proto, uint8_t *uid, uint8_t *uid_len) {
-    if (!proto || !proto->setup_rf || !proto->get_all_uids) return false;
-    proto->setup_rf(proto);
+    if (!proto || !proto->get_all_uids) return false;
     nfc_uids_array_t *uids = proto->get_all_uids(proto);
     if (!uids) return false;
+    // 一時診断: get_all_uids が非 NULL を返した = 何か見つけた。count と uid_length を出す。
+    ESP_LOGI(TAG, "get_all_uids 戻り: count=%d uid_length=%d",
+             uids->uids_count, uids->uids_count > 0 ? uids->uids[0].uid_length : -1);
 
     bool found = false;
-    // nfc_uids_array_t { nfc_uid_t *uids; int uids_count; }
-    // nfc_uid_t { uint8_t uid[]; int uid_length; int subtype; }
+    // nfc_uids_array_t { int uids_count; nfc_uid_t uids[]; }
+    // nfc_uid_t { int8_t uid_length; ...; uint8_t uid[10]; }
     if (uids->uids_count > 0) {
         int n = uids->uids[0].uid_length;
         if (n > 16) n = 16;
