@@ -1,4 +1,11 @@
 {
   "description": "RFID tag to poker card mapping. Register each physical card with its NFC tag UID. Use 'python -m rfid.register' to register cards interactively.",
+  "_example_format_comment": "tag_id は大文字 + コロン区切り 16 進（rfid/card_master.py:normalize_tag_id が正規化）。card は 'Ah'/'Kd' などの 2 文字短縮表記、または 'Jk' / 'JK'（ジョーカー）。下記 _example_entries は形式サンプル（架空 UID。CardMaster は読み込み時に無視）。実機登録は `probe_pcsc watch` で表示された UID を `cards` に追記する。",
+  "_example_entries": {
+    "04:AB:CD:EF:12:34:56:78": "Ah",
+    "04:AB:CD:EF:12:34:56:79": "Kd",
+    "E0:04:01:50:12:34:56:7A": "Qs",
+    "E0:04:01:50:12:34:56:7B": "Jk"
+  },
   "cards": {}
 }

@@ -76,6 +76,23 @@ friend からの review v2 を受けて以下を追加実施:
   失敗パターン切り分け / GPIO 落とし穴）を追加。先に書いた末尾「v2 落とし穴」セクションは §8/§9 に統合した。
 - **ADR-0015 末尾に「HTTP 経路は frozen — 新機能追加なし」追補**。
 
+## Follow-up 2 (同日, friend §2.4/§4.4/§4.6/§7 #6)
+
+friend v2 review の残項目（UID バイト順 / 役割語彙 / サンプル / 契約 minor bump）を反映:
+
+- **契約 `docs/contracts/rfid-usb-ccid.md` を v1.0 → v1.1 additive minor bump**:
+  - §7 に **UID MSB-first MUST**（firmware 要件）を追加。LSB-first の PN5180 生レスポンスは
+    firmware で reverse して MSB-first にする。これがないと `probe_pcsc watch` 表示と
+    `rfid_cards.json` 登録のバイト順が逆転して照合外れになる。
+  - §9 役割語彙を `seat_1..8` に更新（v2 計画書合意）。
+- `docs/rfid-ccid-firmware-checklist.md` §5 にも MSB-first MUST を明記。
+- `rfid_cards.json` に `_example_format_comment` + `_example_entries`（架空 UID 4 件）を追加。
+  CardMaster は `cards` 以外を読まないので load 挙動は不変。
+- ADR-0034 末尾に **「v1.1 minor bump 追補」節**: additive である理由（schema/APDU 不変、v1.0
+  firmware が偶然 MSB-first で返していれば依然 valid、LSB-first 実装は元から bring-up で隠れバグ
+  だった）を明示。v1.0 freeze 宣言は維持。
+- `pytest tests/ -v --ignore=tests/test_vision.py` → 701 passed（docs / サンプル変更のみ）。
+
 ## Remaining Gaps / Out-of-Scope
 
 - [ ] **HTTP receiver コードの最終削除タイミング**: 本タスクで frozen 宣言済。実削除は別 ADR で評価。

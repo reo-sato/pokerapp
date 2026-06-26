@@ -78,8 +78,13 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
 - [ ] **UID は生バイトで返す**（4 / 7 / **8** バイト。8B = ISO 15693）。
       **ASCII 整形やコロン挿入を firmware でしない** — host が `bytes_to_tag_id` で
       大文字コロン区切り（例 `04:AB:CD:EF:12:34:56:78`）に正規化する。
-- [ ] PN5180 が返す UID の **バイト順**を確認（必要なら firmware で正す）。host の `rfid_cards.json` 登録と
-      同じ並びになっていること（登録時に `probe_pcsc watch` の表示 UID をそのまま使えば一致する）。
+- [ ] **UID は MSB-first（上位バイトを先頭）で返す MUST** （契約 v1.1 §7）。PN5180 / ICODE SLIX の
+      生 INVENTORY レスポンスは **LSB-first** で返る実装が一般的なので、firmware で **reverse して
+      MSB-first にする**。これを揃えないと、`probe_pcsc watch` の表示と `rfid_cards.json` 登録の
+      バイト順が逆転して照合が外れる。host 側は受け取った順をそのまま hex 化するだけ
+      （`rfid/bridge.py:bytes_to_tag_id`）。
+- [ ] host の `rfid_cards.json` 登録と同じ並びになっていること（登録時に `probe_pcsc watch` の表示
+      UID をそのまま使えば一致する）。
 
 **受け入れ**: `probe_pcsc watch` の表示が `(8B)` 等で、`⚠ 非契約長` が出ない。登録済みカードは card 名が出る。
 

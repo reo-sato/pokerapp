@@ -136,3 +136,34 @@ Get UID / UID 4-7-8B 正規化 / hot-plug / host config = source of truth）は 
 
 - (a) CCID firmware の BUSY timeout デバッグ中（v2 計画書 §6）。
 - (b) 13 台密接配置 / ボード 5 枚密接配置でのリーダー間干渉の実機テスト（必要ならフェライトシート貼付）。
+
+---
+
+## v1.1 minor bump 追補 (2026-06-22)
+
+friend からの v2 review (`request_to_friend_v2.md`) §2.4 / §4.4 / §7 #6 を受けて、契約
+`docs/contracts/rfid-usb-ccid.md` を **v1.0 → v1.1** に additive minor bump する。
+
+### 変更点
+
+- **§7 に UID MSB-first MUST を追加**: PN5180 等の生 INVENTORY レスポンスは LSB-first で返る実装が
+  一般的で、firmware が並びを正さないと `probe_pcsc watch` 表示と `rfid_cards.json` 登録 UID の
+  バイト順が逆転して照合が外れる。v1.0 では「raw bytes を返す」とだけ規定して暗黙仕様だった部分を
+  明文化。新規 firmware 実装はこの MUST に従う。
+- **§9 役割語彙を `seat_1..8`** に更新（v2 計画書 = 席数 8 合意）。`board_1..5` は不変。
+
+### v1.0 → v1.1 が **additive** である理由
+
+- schema / APDU 仕様 (`FF CA 00 00 00` / SW `90 00`) / ATR の扱い / hot-plug 仕様は不変。
+- UID バイト順 MUST は v1.0 でも MSB-first を前提に host (`bytes_to_tag_id`) が動いていたので、
+  v1.0 firmware が偶然 MSB-first で返していれば v1.1 でも依然 valid。LSB-first だった実装は **元から
+  壊れていた**（登録時と運用時のバイト順が一致しない隠れバグ）ので、v1.1 でこれを明文化することで
+  bring-up 段階での切り分けが早くなる。
+- 役割語彙の 1..8 化は contract 上の「reader 役割 vocabulary」のみで、`RFIDEvent` の型や confidence
+  行列には影響しない（既存テスト 701 件 green）。
+
+### v1.0 freeze 宣言との関係
+
+ADR-0034 本文の v1.0 freeze 宣言は維持する。v1.1 は **additive** で v1.0 firmware を破壊しない。
+将来さらに additive な MUST 追加が出る場合は v1.2 / v1.3 と minor bump を続け、breaking change の
+ときのみ v2.0 + 新 ADR を起こす。

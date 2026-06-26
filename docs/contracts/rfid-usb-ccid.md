@@ -1,6 +1,10 @@
 # RFID USB CCID firmware ↔ host (PC/SC) contract
 
-**version: 1.0 (frozen, ADR-0034)** ／ canonical RFID transport（ADR-0015）の firmware↔Python 境界。
+**version: 1.1 (frozen, ADR-0034 + 2026-06-22 追補)** ／ canonical RFID transport（ADR-0015）の firmware↔Python 境界。
+
+> v1.1 (2026-06-22, additive): §7 に UID **MSB-first MUST** を追加（バイト順の流派による表記割れ防止）。
+> §9 役割語彙を `seat_1..8` に更新（v2 計画書 = 席数 8）。v1.0 firmware は依然 valid（バイト順の
+> 暗黙仕様だった部分を明文化）だが、新規実装は v1.1 準拠 SHOULD。
 
 ESP32-S3（PN5180 ×N）firmware と host Python（pyscard / PC/SC, `rfid/bridge.py` /
 `rfid/reader_thread.py`）は別々に実装される。drift を防ぐため、host が依存する **USB descriptor /
@@ -93,9 +97,17 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 - v1.0 で host が依存する pseudo-APDU は **Get UID のみ**。ATS/historical bytes（`FF CA 01 00 00`）等は
   **本契約の対象外**（additive に v1.1+ で追加可能）。
 
-## 7. UID 長と正規化（host MUST）
+## 7. UID 長とバイト順・正規化（firmware MUST / host MUST）
 
 - UID は **4 / 7 / 8 バイト**を取り得る（4=Mifare Classic、7=Type A 7-byte、**8=ISO 15693**）。
+- **バイト順（v1.1 追加, firmware MUST）**: UID は **MSB-first（上位バイトを先頭）** で返す **MUST**。
+  - 根拠: PN5180 などのリーダー IC は ISO/IEC 15693 の生レスポンスを **LSB-first** で返す実装が一般的で、
+    firmware が並びを正さないと「`probe_pcsc watch` で表示される UID」と「`rfid_cards.json` に
+    手登録した UID」のバイト順が逆転し、照合が外れる。
+  - 期待: ICODE SLIX の UID `E0 04 01 50 12 34 56 78`（MSB-first）であれば firmware は **そのまま**
+    8 バイトを返す。LSB-first 生レスポンスを受け取ったときは firmware で reverse して MSB-first にする。
+  - host (`rfid/bridge.py:bytes_to_tag_id`) は受け取った順をそのまま hex 化するだけなので、ここを
+    firmware で固定しないと登録ツールと運用 UID の表記が一致しなくなる。
 - host は UID を **長さ非依存**で扱い、`bytes_to_tag_id` / `normalize_tag_id` で **大文字コロン区切り 16 進**に
   正規化する **MUST**（例: 8B `04 AB CD EF 12 34 56 78` → `04:AB:CD:EF:12:34:56:78`）。`rfid_cards.json` の
   tag_id も同正規化で照合する。
@@ -116,8 +128,9 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 
 ## 9. host 不変条件（hardware 非依存・既存契約）
 
-- `RFIDEvent`（`core/events.py`）/ confidence 行列 / reader 役割語彙（`seat_1..9` / `board_1..5`）は
-  hardware 非依存で **不変**。本契約が変わっても上流（integration / confidence）は影響を受けない。
+- `RFIDEvent`（`core/events.py`）/ confidence 行列 / reader 役割語彙（`seat_1..8` / `board_1..5`, v1.1 で
+  v2 計画書合意に整合）は hardware 非依存で **不変**。本契約が変わっても上流（integration /
+  confidence）は影響を受けない。
 
 ## 10. versioning / freeze
 

@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### Docs (RFID 計画書 v2 反映 follow-up 2, 2026-06-22 — friend §2.4/§4.4/§4.6/§7 #6)
+
+- friend `request_to_friend_v2.md` の残項目を反映:
+  - **`docs/contracts/rfid-usb-ccid.md` を v1.0 → v1.1 minor bump**（additive、ADR-0034 追補）。
+  - §7 に **UID MSB-first MUST を firmware 要件として追加**: PN5180 等の生 INVENTORY が LSB-first
+    で返る場合 firmware が reverse して MSB-first にする MUST。
+    これがないと `probe_pcsc watch` 表示と `rfid_cards.json` 登録のバイト順が逆転する。
+    `docs/rfid-ccid-firmware-checklist.md` §5 にも MSB-first を明記。
+  - §9 役割語彙を `seat_1..9` → **`seat_1..8`** に更新（v2 計画書整合）。
+  - `rfid_cards.json` に `_example_format_comment` + `_example_entries`（架空 UID 4 件）を追加。
+    CardMaster は `cards` 以外を読まないので無害、運用者が形式を学べる。
+
 ### Code / Config / Docs (RFID 計画書 v2 反映 follow-up, 2026-06-22)
 
 - friend からの review (`request_to_friend_v2.md`) を反映した第 2 弾:
