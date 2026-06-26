@@ -12,8 +12,11 @@
 import type { StaffRepository } from "./repository";
 import {
   type ControlCommand,
+  type GroundTruthEditPayload,
+  type GroundTruthHand,
   type HandControlInput,
   type LedgerEntry,
+  type MeasurementRow,
   type MenuItem,
   type OrderRequest,
   type Player,
@@ -228,5 +231,43 @@ export class HttpStaffRepository implements StaffRepository {
     if (input.seat !== undefined) payload.seat = input.seat;
     if (input.amount !== undefined) payload.amount = input.amount;
     return this.send("POST", `/api/staff/sessions/${E(sessionId)}/control`, payload);
+  }
+
+  // ――― Phase A 計測 / ground truth（ADR-0043）―――
+
+  async listMeasurementRows(sessionId: string): Promise<MeasurementRow[]> {
+    const body = await this.get<{ rows: MeasurementRow[] }>(
+      `/api/staff/sessions/${E(sessionId)}/measurement-rows`,
+    );
+    return body.rows;
+  }
+
+  passThroughGroundTruth(
+    sessionId: string,
+    handId: number,
+    annotator = "staff",
+  ): Promise<GroundTruthHand> {
+    return this.send(
+      "PUT",
+      `/api/staff/sessions/${E(sessionId)}/ground-truth/${handId}`,
+      { source: "captured-passthrough", annotator },
+    );
+  }
+
+  submitGroundTruthEdit(
+    sessionId: string,
+    handId: number,
+    payload: GroundTruthEditPayload,
+    annotator = "staff",
+  ): Promise<GroundTruthHand> {
+    return this.send(
+      "PUT",
+      `/api/staff/sessions/${E(sessionId)}/ground-truth/${handId}`,
+      { source: "manual-edit", annotator, hand: payload },
+    );
+  }
+
+  getGroundTruth(sessionId: string, handId: number): Promise<GroundTruthHand> {
+    return this.get(`/api/staff/sessions/${E(sessionId)}/ground-truth/${handId}`);
   }
 }

@@ -150,6 +150,53 @@ export interface ControlCommand {
   created_at: string;
 }
 
+/**
+ * GET /api/staff/sessions/{sid}/measurement-rows の 1 行（Phase A 計測 UI, ADR-0043）。
+ * UI は per row の `has_needs_review` で「✓ 流す」を無効化する（C-2 ガード）。
+ */
+export interface MeasurementRow {
+  hand_id: number;
+  winner_seat: number | null;
+  winner_result: number | null; // winner の chip won（players[i].result）
+  review_required: boolean;
+  has_needs_review: boolean;
+  ground_truth: MeasurementGroundTruth | null;
+}
+
+/** measurement row 内の GT メタ情報（GT 未記録なら null）。 */
+export interface MeasurementGroundTruth {
+  annotator: string;
+  annotated_at: string;
+  source: "captured-passthrough" | "manual-edit";
+}
+
+/**
+ * ground truth hand 本体 + per-hand metadata（ADR-0043, measurement-plan §2.2）。
+ * additive: 元 schema に annotator / annotated_at / source を載せている。
+ */
+export interface GroundTruthHand {
+  hand_id: number;
+  annotator: string;
+  annotated_at: string;
+  source: "captured-passthrough" | "manual-edit";
+  board?: string[];
+  actions?: Array<{ street?: string; seat?: number; action: string; amount?: number }>;
+  players?: Array<{ seat: number; hole_cards?: string[] | null; showed_down?: boolean }>;
+  winner_seat?: number | null;
+  notes?: string;
+  [key: string]: unknown;
+}
+
+/** PUT .../ground-truth/{hid} の body（manual-edit 経路）。 */
+export interface GroundTruthEditPayload {
+  hand_id: number;
+  board?: string[];
+  actions?: Array<{ street?: string; seat?: number; action: string; amount?: number }>;
+  players?: Array<{ seat: number; hole_cards?: string[] | null; showed_down?: boolean }>;
+  winner_seat?: number | null;
+  notes?: string;
+}
+
 /** error-shapes.md の論理形。分岐は code、表示は message。 */
 export interface ApiError {
   code: string;

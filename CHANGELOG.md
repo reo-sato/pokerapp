@@ -6,6 +6,65 @@
 
 ## [Unreleased]
 
+### Added (Phase A ground truth 入力 UX = staff iPad app の計測タブ, ADR-0043)
+
+- Phase A 捕捉精度を計測するための **ground truth 入力 UX** を staff iPad app に追加。
+  観戦・録画担当スタッフが、ハンド直後に計測タブで一覧 triage する設計（B+T2+M2+P1）。
+- core: `core/ground_truth.py` (`GroundTruthHand` dataclass + `validate_source` +
+  `hand_has_needs_review`) + `core/ground_truth_repository.py`（LWW、per-session ファイル
+  `logs/{sid}.ground_truth.json`、atomic+fsync）。tests 13 件。
+- API: `GET /api/staff/sessions/{sid}/measurement-rows`（一覧）/ `PUT
+  /api/staff/sessions/{sid}/ground-truth/{hid}`（upsert）/ `GET .../ground-truth/{hid}`
+  （個別）。staff token + write 所有プロセスのみ。`ViewerApiClient` に
+  `list_measurement_rows` / `pass_through_ground_truth` / `submit_ground_truth_edit` /
+  `get_ground_truth`。tests 12 件。
+- **C-2 ガード** (ADR-0043 §3): `review_required` or 任意 `action.needs_review=True` を
+  含むハンドは「✓ 流す」を 400 `invalid_amount` で reject（強制 drill-in）。訂正適用後
+  needs_review が解除されたハンドは流せる（訂正適用は `get_hand()` 経由, ADR-0036）。
+- staff app: `staff/src/screens/MeasurementTab.tsx`（一覧 + per-row 「✓ 流す」「✏ 修正」+
+  「表示中の全件を流す」一括 + `needs_review` フィルタチップ + 5 秒 polling + 編集モーダル）。
+  `StaffRepository` 拡張（mock + HTTP）、type/fixture 追加、typecheck + 20 mock tests 緑。
+- docs: `docs/dogfood/measurement-plan.md` §2.2 / §2.3 / §2.4 を実装に揃えて更新。
+
+### Added (Phase A 捕捉精度の計測ハーネス / docs/dogfood/measurement-plan.md)
+
+- ハンドレビュー × GTO solver 統合（提案 rev.1 §6）の前提条件 = **Phase A（捕捉精度 95%）** の
+  合否を客観計測するためのドキュメントとツールを追加。
+- `docs/dogfood/measurement-plan.md`（rev.1）: Phase A 合否を **3 軸 ≥ 95%**（hand_coverage /
+  action_accuracy / board_accuracy）に確定。診断軸（種別/金額の内訳・hole card・winner_seat）も定義。
+  ground truth ファイル形式 `logs/{session_id}.ground_truth.json` を固定。dogfood 規模 N=5〜10 / 8 週、
+  Phase B KPI 暫定閾値（提案 rev.1 から正式化）。
+- `tools/measure_capture_accuracy.py`: `logs/{sid}.json` × `logs/{sid}.ground_truth.json` を
+  突き合わせ、3 軸 + 診断軸を算出する CLI。訂正（ADR-0036）は **既定で適用**。
+  `--raw` で訂正前の素地、`--json` で構造化出力、`--threshold` で閾値変更、exit code 0/1/2 で
+  pass/fail/input error。
+- `tests/test_measure_capture_accuracy.py`: 20 件（perfect match / missed / phantom /
+  action type-amount 分離 / board 順序非敏感 / hole=None 非カウント / 訂正適用 / pass-gate /
+  CLI smoke 3 件）。
+- CLAUDE.md「よく使うコマンド」節に CLI を 1 行追加。
+- ADR / コード変更なし。本ハーネスは Phase A 通過判定 = M1（solver 実装）着手 Go/No-Go の基盤。
+
+### Added (ADR drafts: ハンドレビュー × GTO solver 統合の前提 ADR 3 件, Proposed)
+
+- 提案 `docs/proposals/2026-06-26-hand-review-integration.md` rev.1 §4.6 で約束した
+  3 件の前提 ADR を起票（**設計のみ、コード実装なし**）。
+- ADR-0040: solver cache persistence — SQLite (`solver_cache.sqlite`, node-local)、`spot_key`
+  (SHA256) で O(1) lookup、`solver_version` で世代分離、sync / backup どちらも非対象。
+- ADR-0041: vendored solver binary shipping — git に同梱せず `tools/install_solver.py` で
+  上流から SHA256 検証付き install-time download、AGPL §Convey 境界を踏まない。
+- ADR-0042: external solver subprocess invocation — `subprocess.run` 単一ホットパス、5 例外分類、
+  stderr truncate、`ThreadPoolExecutor(max_workers=1)` + atexit で process leak 防止。
+
+### Added (ハンドレビュー × GTO solver 統合提案 rev.1 / docs/proposals/)
+
+- ライブハンドに GTO ソルバー（TexasSolver）の解を重ねる **単発レビュー機能**の統合方針を提案。
+  自店ドッグフード前提・SaaS 非対象。`docs/proposals/2026-06-26-hand-review-integration.md`。
+- コードベース照合レビュー（Must 6 + Should 4）を rev.1 で取り込み: 入力源を
+  `api/read_models.py:get_hand()`（B4 訂正適用済）に固定、ポジション/hole_cards null/pots
+  backend 依存のデータ実体ギャップ明示、`gui/` 既存規約整合、ADR-0040/0041/0042 起票約束、
+  Pio 差分 3 アーキタイプ手動 QA を M1 へ前倒し、dogfood N=5〜10 / 8 週 + KPI 暫定閾値内包。
+- M1 実装着手は **Phase A 95% 通過後**。本 PR 系列はドキュメント整備のみ、コード実装なし。
+
 ### Added (ハンド訂正 = append-only オーバーレイ / iPad staff 訂正, ADR-0036 / B4)
 
 - 音声自動記録の誤認識を、**元 hand log を mutate せず append-only な訂正レコードで重ねる**仕組みを追加

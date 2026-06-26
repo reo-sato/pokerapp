@@ -438,6 +438,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（`main.py --viewer-api`, read-only GET, `[api]` extra, ADR-0017。ledger summary は `compute_settlement` 由来 = ADR-0016） |
 | **mobile viewer (M2)** | ✅ 実装済 | `mobile/`（Expo/RN。PlayerSelect→MySessions→MyHands→HandDetail + 会計（**精算状況: 確定/未確定・支払済み/未払い** 表示, S4）+ 注文画面。`ViewerRepository` に mock/HTTP 注入, `EXPO_PUBLIC_API_URL` 切替, ADR-0017） |
 | **ハンド訂正 (B4, ADR-0036)** | ✅ 実装済 | 音声自動記録の誤認識を append-only オーバーレイで訂正。`core/hand_correction*.py`（store + `apply_hand_corrections`: 元値 `_original` 保持・`corrected`・needs_review 解除・監査痕、元 hand log は不変）+ viewer get_hand/list_player_hands に適用 + staff API `POST .../hands/{hid}/corrections` + `ViewerApiClient.add_hand_correction` + mobile `addHandCorrection` + **iPad 訂正画面 `mobile/src/screens/CorrectionScreen.tsx`**（HandDetail から導線、`EXPO_PUBLIC_STAFF_TOKEN` で staff write。typecheck + web export green）。**残**: PHH overlay / 訂正取消 / board・hole 訂正 |
+| **Phase A ground truth 入力 UX (ADR-0043)** | ✅ 実装済 | `core/ground_truth*.py`（LWW per-session）+ staff API (`GET /measurement-rows`, `PUT/GET /ground-truth/{hid}`, staff token + write 所有) + `staff/src/screens/MeasurementTab.tsx`（一覧 triage + 「✓ 流す」/ 「✏ 修正」+ 一括 + 5 秒 polling）。**C-2 ガード**: `review_required` or 任意 `action.needs_review=True` を含むハンドは「✓ 流す」を 400 で reject（強制 drill-in）。訂正適用は `get_hand()` 経由（ADR-0036）。tests 32 件（core 13 + API 12 + mock 7）。measurement-plan §2.3 と整合 |
 | **mobile 本人認証 UI (L1/L2)** | ✅ 実装済 (preview) | `mobile/src/screens/AuthScreen.tsx`（PIN ログイン = L1/ADR-0027、LINE/Google サインアップ = L2/ADR-0031）+ `ViewerRepository.{login,oidcExchange,currentPrincipal,clearAuth}`（mock/HTTP 両実装）+ 注文 POST に Bearer トークン付与。PlayerSelect に「PIN でログイン」「サインアップ」導線。既定 name-pick は不変。実 IdP の認可コード取得（SDK/redirect）は実環境タスク。typecheck + 11 mock tests + web export green |
 | **注文リクエスト write path (M5)** | ✅ 実装済 | `core/order_request*.py` / `core/menu.py` + viewer API `/menu`・`/order-requests`（GET/POST）+ `gui/ledger_view.py` の確定/却下パネル（§ 注文リクエスト参照, ADR-0018。staff-in-the-loop / in-process API / name-pick = ISSUE-0019 Fixed） |
 | **hand logger × session 統合 (S2.x E1+E2-core)** | ✅ 実装済 | `integration/engine.py`（`session_repo`/`seat_player_map` DI、`assign_seat` write-through + `player_id` additive 埋め込み、`session_layer.enabled` 既定 off で挙動不変, ADR-0008） |
@@ -946,6 +947,7 @@ python main.py --viewer-api                  # player 向け読み取り専用 v
 pytest tests/ -v --ignore=tests/test_vision.py   # CI と同じ（vision レガシー除外）
 python tools/replay_hand.py tests/fixtures/reconstruction/silent-fold  # 決定的 replay (F1)
 python tools/calibrate_confidence.py            # 派生 confidence 較正サーフェス + P1〜P8 検証 (ADR-0033)
+python tools/measure_capture_accuracy.py --session logs/<sid>.json --ground-truth logs/<sid>.ground_truth.json  # Phase A 捕捉精度計測 (docs/dogfood/measurement-plan.md)
 python main.py --export-phh logs/session_xxx.json
 # ローカル QA（実機なし。docs/manual-qa-checklist.md 参照）
 printf 'ハンド開始\nチェック\nシート1 ウィナー\n' | python tools/play_hand_text.py - --seats 3  # mic 不要のテキスト駆動再構築

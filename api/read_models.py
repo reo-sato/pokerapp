@@ -15,6 +15,8 @@ import json
 import logging
 from pathlib import Path
 
+from core.ground_truth import hand_has_needs_review
+from core.ground_truth_repository import GroundTruthRepository
 from core.hand_correction import apply_hand_corrections
 from core.hand_correction_repository import HandCorrectionRepository
 from core.ledger_repository import LedgerRepository
@@ -166,3 +168,58 @@ def get_hand(
     raise HandNotFoundError(
         f"hand_id={hand_id} は session_id={session_id} の hand log に存在しません。"
     )
+
+
+def list_measurement_rows(
+    session_id: str,
+    log_dir: str | Path,
+    ground_truth_repo: GroundTruthRepository,
+    correction_repo: "HandCorrectionRepository | None" = None,
+) -> list[dict]:
+    """ADR-0043: 計測タブの一覧行を返す。
+
+    各 captured hand について `hand_id` / `winner_seat` / `winner_result` /
+    `review_required` / `has_needs_review` / `ground_truth`（既存の GT メタ or None）を
+    返す。captured 値は訂正オーバーレイ適用後（ADR-0036）。session 不在 / log 不在は空 list。
+    """
+    log = _load_hand_log(log_dir, session_id)
+    if log is None:
+        return []
+    rows: list[dict] = []
+    for raw in sorted(log.get("hands") or [], key=lambda h: h.get("hand_id", 0)):
+        hand_id = raw.get("hand_id")
+        if not isinstance(hand_id, int):
+            continue
+        if correction_repo is not None:
+            hand = apply_hand_corrections(
+                raw, correction_repo.list_for_hand(session_id, hand_id)
+            )
+        else:
+            hand = raw
+        winner_seat = hand.get("winner_seat")
+        winner_result: "int | None" = None
+        if winner_seat is not None:
+            for p in hand.get("players") or []:
+                if p.get("seat") == winner_seat:
+                    result = p.get("result")
+                    if isinstance(result, int):
+                        winner_result = result
+                    break
+        gt = ground_truth_repo.get(session_id, hand_id)
+        rows.append({
+            "hand_id": hand_id,
+            "winner_seat": winner_seat,
+            "winner_result": winner_result,
+            "review_required": bool(hand.get("review_required")),
+            "has_needs_review": hand_has_needs_review(hand),
+            "ground_truth": (
+                {
+                    "annotator": gt.annotator,
+                    "annotated_at": gt.annotated_at,
+                    "source": gt.source,
+                }
+                if gt is not None
+                else None
+            ),
+        })
+    return rows
