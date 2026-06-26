@@ -963,16 +963,6 @@ def create_app(
         s = session_repo.create_session(label=body.label, blinds=body.blinds)
         return JSONResponse(status_code=201, content=s.to_dict())
 
-    @app.post("/api/staff/sessions/{session_id}/close", response_model=None)
-    def staff_close_session(session_id: str, request: Request) -> "JSONResponse | dict":
-        err = _staff_guard(request, need_write=True)
-        if err is not None:
-            return err
-        try:
-            s = session_repo.close_session(session_id)
-        except SessionError as e:
-            return _map_session_error(e)
-        return s.to_dict()
 
     @app.get("/api/staff/sessions/{session_id}/seating", response_model=None)
     def staff_seating(session_id: str, request: Request) -> "JSONResponse | dict":

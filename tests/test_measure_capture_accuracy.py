@@ -12,7 +12,6 @@ from pathlib import Path
 
 from core.hand_correction import HandCorrection
 from tools.measure_capture_accuracy import (
-    SessionAccuracy,
     load_corrections_for_session,
     measure_hand,
     measure_session,

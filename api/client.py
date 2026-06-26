@@ -375,12 +375,6 @@ class ViewerApiClient:
             "POST", "/api/staff/sessions", json=payload, headers=self._staff_headers(),
         )
 
-    def close_session(self, session_id: str) -> dict:
-        return self._request(
-            "POST", f"/api/staff/sessions/{session_id}/close",
-            headers=self._staff_headers(),
-        )
-
     def get_seating(self, session_id: str) -> dict:
         """現在の seating + 記録済 hand_id 一覧。"""
         return self._request(
