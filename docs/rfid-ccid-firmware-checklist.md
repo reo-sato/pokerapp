@@ -118,6 +118,12 @@ PN5180 ×13 を 1 基板に集約すると、**複数台が同時に RF ON す�
 **受け入れ**: `probe_pcsc watch` 実行中、複数 slot を順次タップしても全て正しく UID が出る。
 「他 slot にカードを置いている間、自 slot が読めなくなる」事象が出ないこと。
 
+> **host 側 polling は意図的に single-threaded sequential**（`rfid/reader_thread.py` の単一スレッドが
+> 13 slot を順番に `Get UID`）。時分割は firmware-internal の責務で、host は CCID transfer を
+> 順番に出すだけでよい。**将来 host を slot 並列化で高速化しない**こと: OS PC/SC（pcscd/WinSCard）は
+> CCID transfer を設計上 serialize するため並列化しても firmware への到達順は変わらず、無駄な
+> connect/disconnect と firmware の BUSY 待ちプレッシャーを増やすだけになる。
+
 ## 9. トラブルシューティング（実機 bring-up 用）
 
 bring-up 段階の典型症状と切り分け手順。物理層の真実は `docs/hardware/pn5180-esp32s3-wiring.md`、

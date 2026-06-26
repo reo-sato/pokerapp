@@ -162,6 +162,11 @@ loop (各 slot のポーリング要求を host から受けたとき):
 - 13 台 1 サイクル 65〜130 ms
 - カード認識 → host 到達レイテンシ ≤ 250 ms
 
+> **host との責任分離**: 時分割は **firmware-internal の責務**（CCID slot ごとの `XfrBlock` 要求を
+> 内部で MUX→NSS→RF_ON→INVENTORY→RF_OFF と順番に処理する）。host (`rfid/reader_thread.py`) は
+> 単一スレッドで slot を順番に Get UID するだけ。OS PC/SC が CCID transfer を serialize するため
+> **host を slot 並列化で高速化しない**（並列化しても firmware への到達順は変わらず無意味）。
+
 ## 6. 電源設計
 
 - AC アダプタ 5V 4A → 端子台 → 制御基板 +5V レール
