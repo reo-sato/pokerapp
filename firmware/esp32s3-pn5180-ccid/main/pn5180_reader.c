@@ -334,6 +334,20 @@ static bool read_uid_from_proto(pn5180_proto_t *proto, uint8_t *uid, uint8_t *ui
 #define PRESENCE_HOLD_MISSES 3
 static int s_miss[CCID_SLOT_COUNT];
 
+// 契約 v1.1 §7 (rfid-usb-ccid.md): UID は **MSB-first** で返す MUST。
+// PN5180 + jef-sure ドライバの ISO/IEC 15693 INVENTORY 生レスポンスは **LSB-first**（PN5180 が
+// LE で読み戻す。実機 ICODE SLIX で `0D B7 2A 1C 53 01 04 E0` ＝末尾が `04 E0` で逆順）。
+// これを正さないと `rfid_cards.json`（MSB-first 期待）と照合が外れる。host の `bytes_to_tag_id`
+// は受信バイトをそのまま hex 化するだけなので、ここで反転する。
+// ISO14443A の UID は元から MSB-first（manufacturer code が先頭）なので反転しない。
+static void reverse_bytes(uint8_t *p, size_t n) {
+    for (size_t a = 0, b = n - 1; a < b; a++, b--) {
+        uint8_t t = p[a];
+        p[a] = p[b];
+        p[b] = t;
+    }
+}
+
 void pn5180_reader_poll_once(void) {
     for (int i = 0; i < CCID_SLOT_COUNT; i++) {
         mux_select(s_readers[i].mux_ch);  // この reader の BUSY を SIG に
@@ -342,8 +356,20 @@ void pn5180_reader_poll_once(void) {
         uint8_t len = 0;
 
         // ISO15693（8B）→ だめなら ISO14443A（4/7B）の順。
-        bool detected = read_uid_from_proto(s_readers[i].iso15693, uid, &len) ||
-                        read_uid_from_proto(s_readers[i].iso14443, uid, &len);
+        // proto を分けて試すのは、ISO15693 のときだけ MSB-first に反転するため。
+        bool detected = false;
+        bool from_iso15693 = false;
+        if (read_uid_from_proto(s_readers[i].iso15693, uid, &len)) {
+            detected = true;
+            from_iso15693 = true;
+        } else if (read_uid_from_proto(s_readers[i].iso14443, uid, &len)) {
+            detected = true;
+        }
+
+        // 契約 v1.1 §7: ISO15693 の生バイトは LSB-first なので MSB-first に反転する。
+        if (detected && from_iso15693 && len > 1) {
+            reverse_bytes(uid, len);
+        }
 
         bool was_present = s_cache[i].present;
         pn5180_card_t c = {0};
