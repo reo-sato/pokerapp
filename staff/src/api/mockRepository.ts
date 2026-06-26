@@ -10,9 +10,12 @@
 import type { StaffRepository } from "./repository";
 import {
   type ControlCommand,
+  type GroundTruthEditPayload,
+  type GroundTruthHand,
   type HandControlInput,
   type LedgerEntry,
   type LedgerKind,
+  type MeasurementRow,
   type MenuItem,
   type OrderRequest,
   type Player,
@@ -27,6 +30,7 @@ import {
 import {
   buyinPresets,
   ledgerEntries,
+  measurementRows,
   menuItems,
   orderRequests,
   players,
@@ -73,6 +77,9 @@ export class MockStaffRepository implements StaffRepository {
   private readonly grants: Record<string, number> = {};
   // 確定済 settlement（session_id → player_id → row）。commit でのみ生成。
   private readonly committed: Record<string, Record<string, SessionSettlement>> = {};
+  // Phase A 計測 (ADR-0043): 一覧 row と GT 蓄積（hand_id → GT）。
+  private readonly measurement: Record<string, MeasurementRow[]>;
+  private readonly groundTruth: Record<string, Record<number, GroundTruthHand>> = {};
 
   constructor() {
     this.sessions = clone(sessions);
@@ -82,6 +89,7 @@ export class MockStaffRepository implements StaffRepository {
     this.ledger = clone(ledgerEntries);
     this.orders = clone(orderRequests);
     this.seating = clone(seatAssignments);
+    this.measurement = clone(measurementRows);
   }
 
   // ――― 認可 ―――
@@ -518,6 +526,108 @@ export class MockStaffRepository implements StaffRepository {
     req.status = "rejected";
     req.resolved_at = new Date().toISOString();
     return clone(req);
+  }
+
+  // ――― Phase A 計測 / ground truth（ADR-0043）―――
+
+  async listMeasurementRows(sessionId: string): Promise<MeasurementRow[]> {
+    this.requireAuth();
+    this.requireSession(sessionId);
+    return clone(this.measurement[sessionId] ?? []);
+  }
+
+  async passThroughGroundTruth(
+    sessionId: string,
+    handId: number,
+    annotator = "staff",
+  ): Promise<GroundTruthHand> {
+    this.requireAuth();
+    this.requireSession(sessionId);
+    const row = this.findRow(sessionId, handId);
+    // C-2 ガード（ADR-0043 §3）。
+    if (row.has_needs_review) {
+      throw new StaffApiError({
+        code: "invalid_amount",
+        message: "needs_review を含むハンドは「✓ 流す」できません（ADR-0043 §3）。",
+      });
+    }
+    const entry: GroundTruthHand = {
+      hand_id: handId,
+      annotator: annotator || "staff",
+      annotated_at: new Date().toISOString(),
+      source: "captured-passthrough",
+      // mock では captured 本体を持たないため、row の要約だけ反映する。
+      winner_seat: row.winner_seat,
+    };
+    this.storeGT(sessionId, entry);
+    return clone(entry);
+  }
+
+  async submitGroundTruthEdit(
+    sessionId: string,
+    handId: number,
+    payload: GroundTruthEditPayload,
+    annotator = "staff",
+  ): Promise<GroundTruthHand> {
+    this.requireAuth();
+    this.requireSession(sessionId);
+    this.findRow(sessionId, handId);
+    if (!payload || typeof payload !== "object") {
+      throw new StaffApiError({
+        code: "invalid_amount",
+        message: "source=manual-edit には hand が必要です。",
+      });
+    }
+    const entry: GroundTruthHand = {
+      ...payload,
+      hand_id: handId,
+      annotator: annotator || "staff",
+      annotated_at: new Date().toISOString(),
+      source: "manual-edit",
+    };
+    this.storeGT(sessionId, entry);
+    return clone(entry);
+  }
+
+  async getGroundTruth(sessionId: string, handId: number): Promise<GroundTruthHand> {
+    this.requireAuth();
+    this.requireSession(sessionId);
+    const bag = this.groundTruth[sessionId] ?? {};
+    const entry = bag[handId];
+    if (!entry) {
+      throw new StaffApiError({
+        code: "not_found",
+        message: `hand_id=${handId} に ground truth がありません。`,
+      });
+    }
+    return clone(entry);
+  }
+
+  private findRow(sessionId: string, handId: number): MeasurementRow {
+    const rows = this.measurement[sessionId] ?? [];
+    const row = rows.find((r) => r.hand_id === handId);
+    if (!row) {
+      throw new StaffApiError({
+        code: "not_found",
+        message: `hand_id=${handId} は session_id=${sessionId} の hand log に存在しません。`,
+      });
+    }
+    return row;
+  }
+
+  private storeGT(sessionId: string, entry: GroundTruthHand): void {
+    const bag = this.groundTruth[sessionId] ?? {};
+    bag[entry.hand_id] = entry;
+    this.groundTruth[sessionId] = bag;
+    const rows = this.measurement[sessionId] ?? [];
+    const row = rows.find((r) => r.hand_id === entry.hand_id);
+    if (row) {
+      row.ground_truth = {
+        annotator: entry.annotator,
+        annotated_at: entry.annotated_at,
+        source: entry.source,
+      };
+    }
   }
 
   async sendControl(sessionId: string, input: HandControlInput): Promise<ControlCommand> {

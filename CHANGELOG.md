@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+### Added (Phase A ground truth 入力 UX = staff iPad app の計測タブ, ADR-0043)
+
+- Phase A 捕捉精度を計測するための **ground truth 入力 UX** を staff iPad app に追加。
+  観戦・録画担当スタッフが、ハンド直後に計測タブで一覧 triage する設計（B+T2+M2+P1）。
+- core: `core/ground_truth.py` (`GroundTruthHand` dataclass + `validate_source` +
+  `hand_has_needs_review`) + `core/ground_truth_repository.py`（LWW、per-session ファイル
+  `logs/{sid}.ground_truth.json`、atomic+fsync）。tests 13 件。
+- API: `GET /api/staff/sessions/{sid}/measurement-rows`（一覧）/ `PUT
+  /api/staff/sessions/{sid}/ground-truth/{hid}`（upsert）/ `GET .../ground-truth/{hid}`
+  （個別）。staff token + write 所有プロセスのみ。`ViewerApiClient` に
+  `list_measurement_rows` / `pass_through_ground_truth` / `submit_ground_truth_edit` /
+  `get_ground_truth`。tests 12 件。
+- **C-2 ガード** (ADR-0043 §3): `review_required` or 任意 `action.needs_review=True` を
+  含むハンドは「✓ 流す」を 400 `invalid_amount` で reject（強制 drill-in）。訂正適用後
+  needs_review が解除されたハンドは流せる（訂正適用は `get_hand()` 経由, ADR-0036）。
+- staff app: `staff/src/screens/MeasurementTab.tsx`（一覧 + per-row 「✓ 流す」「✏ 修正」+
+  「表示中の全件を流す」一括 + `needs_review` フィルタチップ + 5 秒 polling + 編集モーダル）。
+  `StaffRepository` 拡張（mock + HTTP）、type/fixture 追加、typecheck + 20 mock tests 緑。
+- docs: `docs/dogfood/measurement-plan.md` §2.2 / §2.3 / §2.4 を実装に揃えて更新。
+
 ### Added (Phase A 捕捉精度の計測ハーネス / docs/dogfood/measurement-plan.md)
 
 - ハンドレビュー × GTO solver 統合（提案 rev.1 §6）の前提条件 = **Phase A（捕捉精度 95%）** の

@@ -320,3 +320,108 @@ test("seating: assign batch into next hand, read current, conflict/closed codes"
     },
   );
 });
+
+// ――― Phase A 計測 / ground truth（ADR-0043）―――
+
+test("measurement rows reflect needs_review flag and ground_truth=null initially", async () => {
+  const repo = authed();
+  const rows = await repo.listMeasurementRows(OPEN_SESSION_ID);
+  assert.ok(rows.length >= 3);
+  assert.equal(rows[0].ground_truth, null);
+  const flagged = rows.find((r) => r.has_needs_review);
+  assert.ok(flagged, "fixture には needs_review=true の行があるはず");
+  assert.equal(flagged?.ground_truth, null);
+});
+
+test("passThroughGroundTruth on clean row writes captured-passthrough GT and flips the row", async () => {
+  const repo = authed();
+  const before = await repo.listMeasurementRows(OPEN_SESSION_ID);
+  const target = before.find((r) => !r.has_needs_review && r.ground_truth === null);
+  assert.ok(target);
+  const entry = await repo.passThroughGroundTruth(
+    OPEN_SESSION_ID, target!.hand_id, "staff1",
+  );
+  assert.equal(entry.source, "captured-passthrough");
+  assert.equal(entry.annotator, "staff1");
+
+  const after = await repo.listMeasurementRows(OPEN_SESSION_ID);
+  const updated = after.find((r) => r.hand_id === target!.hand_id);
+  assert.equal(updated?.ground_truth?.source, "captured-passthrough");
+});
+
+test("passThroughGroundTruth is blocked by C-2 guard for needs_review hands", async () => {
+  const repo = authed();
+  const rows = await repo.listMeasurementRows(OPEN_SESSION_ID);
+  const flagged = rows.find((r) => r.has_needs_review);
+  assert.ok(flagged);
+  await assert.rejects(
+    repo.passThroughGroundTruth(OPEN_SESSION_ID, flagged!.hand_id),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "invalid_amount");
+      return true;
+    },
+  );
+});
+
+test("submitGroundTruthEdit writes manual-edit GT and LWW overwrites passthrough", async () => {
+  const repo = authed();
+  const rows = await repo.listMeasurementRows(OPEN_SESSION_ID);
+  const target = rows.find((r) => !r.has_needs_review);
+  assert.ok(target);
+
+  await repo.passThroughGroundTruth(OPEN_SESSION_ID, target!.hand_id, "staff1");
+  const entry = await repo.submitGroundTruthEdit(
+    OPEN_SESSION_ID, target!.hand_id,
+    { hand_id: target!.hand_id, winner_seat: 9, notes: "video で確認" },
+    "staff2",
+  );
+  assert.equal(entry.source, "manual-edit");
+  assert.equal(entry.annotator, "staff2");
+  assert.equal(entry.winner_seat, 9);
+
+  const after = await repo.getGroundTruth(OPEN_SESSION_ID, target!.hand_id);
+  assert.equal(after.source, "manual-edit");
+  assert.equal(after.annotator, "staff2");
+});
+
+test("getGroundTruth returns not_found for unrecorded hand", async () => {
+  const repo = authed();
+  const rows = await repo.listMeasurementRows(OPEN_SESSION_ID);
+  const target = rows.find((r) => r.ground_truth === null);
+  assert.ok(target);
+  await assert.rejects(
+    repo.getGroundTruth(OPEN_SESSION_ID, target!.hand_id),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "not_found");
+      return true;
+    },
+  );
+});
+
+test("measurement methods require a valid staff token", async () => {
+  const repo = new MockStaffRepository();
+  await assert.rejects(repo.listMeasurementRows(OPEN_SESSION_ID), (err: unknown) => {
+    assert.ok(err instanceof StaffApiError);
+    assert.equal(err.code, "unauthorized");
+    return true;
+  });
+  await assert.rejects(repo.passThroughGroundTruth(OPEN_SESSION_ID, 1), (err: unknown) => {
+    assert.ok(err instanceof StaffApiError);
+    assert.equal(err.code, "unauthorized");
+    return true;
+  });
+});
+
+test("measurement passThrough rejects unknown hand_id with not_found", async () => {
+  const repo = authed();
+  await assert.rejects(
+    repo.passThroughGroundTruth(OPEN_SESSION_ID, 9999),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "not_found");
+      return true;
+    },
+  );
+});

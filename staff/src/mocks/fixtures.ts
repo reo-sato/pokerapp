@@ -7,6 +7,7 @@
  */
 import type {
   LedgerEntry,
+  MeasurementRow,
   MenuItem,
   OrderRequest,
   Player,
@@ -119,6 +120,41 @@ export const seatAssignments: Record<string, SeatAssignment[]> = {
   [OPEN_SESSION_ID]: [
     { session_id: OPEN_SESSION_ID, hand_id: 1, seat_no: 1, player_id: ALICE_ID },
     { session_id: OPEN_SESSION_ID, hand_id: 1, seat_no: 2, player_id: BOB_ID },
+  ],
+  [CLOSED_SESSION_ID]: [],
+};
+
+/**
+ * 計測タブの初期 row（ADR-0043）。実 captured hand log は持たないので、
+ * 「✓ 流す」/ 「✏ 修正」の UX を駆動できる最低限の値だけ用意する。
+ * 1 件は needs_review=true（C-2 ガード検証用）。
+ */
+export const measurementRows: Record<string, MeasurementRow[]> = {
+  [OPEN_SESSION_ID]: [
+    {
+      hand_id: 1,
+      winner_seat: 1,
+      winner_result: 1500,
+      review_required: false,
+      has_needs_review: false,
+      ground_truth: null,
+    },
+    {
+      hand_id: 2,
+      winner_seat: 2,
+      winner_result: 800,
+      review_required: true,
+      has_needs_review: true,
+      ground_truth: null,
+    },
+    {
+      hand_id: 3,
+      winner_seat: 1,
+      winner_result: 400,
+      review_required: false,
+      has_needs_review: false,
+      ground_truth: null,
+    },
   ],
   [CLOSED_SESSION_ID]: [],
 };

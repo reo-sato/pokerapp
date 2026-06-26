@@ -85,17 +85,25 @@ board_accuracy = (最終 board が gt と完全一致した hand 数) / (ground 
 
 **配置**: `logs/{session_id}.ground_truth.json`（プロジェクト直下 `logs/` 配下、`.gitignore`、node-local）
 
-**スキーマ（必要十分な最小形）**:
+**スキーマ（必要十分な最小形 + ADR-0043 で additive 拡張）**:
+
+session-level の `annotator` / `annotated_at` は「ファイル最終 writer の足跡」（LWW で更新）。
+per-hand に **annotator / annotated_at / source（`captured-passthrough` or `manual-edit`）** を additive
+追加する（ADR-0043, `additionalProperties:true` 方針）。`tools/measure_capture_accuracy.py` は per-hand
+metadata を無視して board/actions/players/winner_seat だけ読む。
 
 ```json
 {
   "session_id": "<UUID4 hex>",
   "annotator": "<staff identifier, free-form>",
   "annotated_at": "<ISO 8601 UTC>",
-  "source": "manual | manual-with-video | other",
+  "source": "manual",
   "hands": [
     {
       "hand_id": 1,
+      "annotator": "staff1",
+      "annotated_at": "2026-06-26T20:15:00Z",
+      "source": "captured-passthrough",
       "board": ["As", "Kc", "Qd", "5h", "2s"],
       "actions": [
         {"street": "preflop", "seat": 2, "action": "raise", "amount": 200},
@@ -127,23 +135,34 @@ board_accuracy = (最終 board が gt と完全一致した hand 数) / (ground 
 - `winner_seat` はショーダウン到達時のみ記録、未到達なら省略 OK
 - `notes` は人手メモ、計測に影響しない
 
-### 2.3 アノテーション手順
+### 2.3 アノテーション手順（ADR-0043 で確定 = staff iPad app の計測タブ）
 
-1. **ライブセッション中**にスタッフが手書き or 表計算ソフトで記録（録画があれば後から照合）
-2. **セッション終了直後**に `logs/{session_id}.ground_truth.json` を作成（記憶が新鮮なうちに）
-3. 録画と突き合わせて少なくとも 1 回見直す
-4. **2 人目のスタッフ**（可能なら）にもクロスチェックさせる。一致しない場合は notes に分岐を記録
+**運用前提**: 観戦・録画担当スタッフ（卓を回さない 1 名）が、ハンド直後（T2）に **staff iPad app**
+（`staff/`）の「計測」タブで作業する。録画機材は任意。
+
+1. **ライブセッション中**: 計測タブを開く。新ハンドが終わると一覧に row が追加される（5 秒 polling）
+2. 各 row で **winner_seat + winner の chip won + `needs_review` バッジ**を目視照合:
+   - 妥当 → **「✓ 流す」** をタップ（GT = 訂正適用後の captured） — 1 タップで完了
+   - 違和感 → **「✏ 修正」** をタップ → モーダルで winner_seat / board / notes を override
+   - action 単位の誤認識 → 既存の **ハンド訂正画面（mobile/ の CorrectionScreen, ADR-0036）** で訂正
+     → 計測タブに戻り「✓ 流す」（訂正適用後は needs_review=False）
+3. **C-2 ガード**（ADR-0043 §3）: `has_needs_review=True` の row は「✓ 流す」が無効化される。
+   強制 drill-in（訂正 → 流す、または直接「✏ 修正」）
+4. キュー追い越し時: 一覧フッタの **「表示中の N 件を流す」一括ボタン** で連続消化
 5. 計測ツール `tools/measure_capture_accuracy.py --session logs/<sid>.json
-   --ground-truth logs/<sid>.ground_truth.json` を走らせ、結果を保存
+   --ground-truth logs/<sid>.ground_truth.json` を週次で走らせ、結果を保存
 
 ### 2.4 ground truth 自体の品質
 
 ground truth 自体が間違っていると Phase A の判定が壊れる。以下で品質を担保する:
 
-- 録画必須化（少なくとも最初の 2 週は録画を残し、ground truth の根拠とする）
+- **「✓ 流す」のバイアス**: GT = 捕捉値なので当該ハンドの action_accuracy が trivially 100% になる
+  リスク。annotator は winner + chip won を必ず目視照合する運用ルールで補強。dogfood 早期で
+  「流す」率が極端に高い場合は、後続 ADR でランダム M% 強制 drill-in を追加検討
+- 録画は任意（T2 はハンド直後で記憶新鮮、録画なしで運用可）。録画がある場合は週次に
+  サンプルで照合
 - 不確実な action は `notes` に明記し、計測結果の解釈時に重みづけする
-- ground truth 修正の append-only 化: 元の `ground_truth.json` を mutate せず、
-  `logs/{session_id}.ground_truth.fixup.json` を別に置いて差分管理（実運用で煩雑なら統合する）
+- **永続化は LWW**（ADR-0043 §4）: 同じ `(session_id, hand_id)` の再送信は最新で上書き
 
 ---
 

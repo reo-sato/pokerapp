@@ -12,8 +12,11 @@
  */
 import type {
   ControlCommand,
+  GroundTruthEditPayload,
+  GroundTruthHand,
   HandControlInput,
   LedgerEntry,
+  MeasurementRow,
   MenuItem,
   OrderRequest,
   Player,
@@ -113,4 +116,23 @@ export interface StaffRepository {
    * iPad はコマンドを control queue に積むだけ（適用は hand logger プロセス）。
    */
   sendControl(sessionId: string, input: HandControlInput): Promise<ControlCommand>;
+
+  // ――― Phase A 計測 / ground truth（ADR-0043）―――
+  /** 計測タブの一覧行（hand_id / winner / chip won / needs_review / GT 状態）。 */
+  listMeasurementRows(sessionId: string): Promise<MeasurementRow[]>;
+  /** 「✓ 流す」: GT = 訂正適用後の captured。needs_review 入りは invalid_amount(400)。 */
+  passThroughGroundTruth(
+    sessionId: string,
+    handId: number,
+    annotator?: string,
+  ): Promise<GroundTruthHand>;
+  /** 「✏ 修正」: annotator が編集した hand を GT として LWW 上書きする。 */
+  submitGroundTruthEdit(
+    sessionId: string,
+    handId: number,
+    payload: GroundTruthEditPayload,
+    annotator?: string,
+  ): Promise<GroundTruthHand>;
+  /** 1 件の GT を返す（detail 画面の prefill 用）。未記録は not_found(404)。 */
+  getGroundTruth(sessionId: string, handId: number): Promise<GroundTruthHand>;
 }
