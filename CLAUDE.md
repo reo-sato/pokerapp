@@ -946,6 +946,7 @@ python main.py --viewer-api                  # player 向け読み取り専用 v
 pytest tests/ -v --ignore=tests/test_vision.py   # CI と同じ（vision レガシー除外）
 python tools/replay_hand.py tests/fixtures/reconstruction/silent-fold  # 決定的 replay (F1)
 python tools/calibrate_confidence.py            # 派生 confidence 較正サーフェス + P1〜P8 検証 (ADR-0033)
+python tools/measure_capture_accuracy.py --session logs/<sid>.json --ground-truth logs/<sid>.ground_truth.json  # Phase A 捕捉精度計測 (docs/dogfood/measurement-plan.md)
 python main.py --export-phh logs/session_xxx.json
 # ローカル QA（実機なし。docs/manual-qa-checklist.md 参照）
 printf 'ハンド開始\nチェック\nシート1 ウィナー\n' | python tools/play_hand_text.py - --seats 3  # mic 不要のテキスト駆動再構築
