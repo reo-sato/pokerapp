@@ -112,6 +112,12 @@ export class HttpRepository implements ViewerRepository {
     return session;
   }
 
+  async setPin(playerId: string, pin: string, currentPin?: string): Promise<void> {
+    const payload: { pin: string; current_pin?: string } = { pin };
+    if (currentPin) payload.current_pin = currentPin;
+    await this.post(`/api/players/${encodeURIComponent(playerId)}/pin`, payload);
+  }
+
   currentPrincipal(): string | null {
     return this.principal;
   }

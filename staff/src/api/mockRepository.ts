@@ -500,6 +500,30 @@ export class MockStaffRepository implements StaffRepository {
     return clone(this.menu);
   }
 
+  async updateMenu(items: MenuItem[]): Promise<MenuItem[]> {
+    this.requireAuth();
+    // core/menu.py:_normalize_items の近似（ADR-0046 D1）。
+    const seen = new Set<string>();
+    const normalized: MenuItem[] = [];
+    for (const raw of items) {
+      const name = (raw.item_name ?? "").trim();
+      if (!name || name.length > 100 || seen.has(name)) {
+        throw new StaffApiError({ code: "invalid_menu", message: `不正な item_name: ${raw.item_name}` });
+      }
+      if (!Number.isInteger(raw.unit_amount) || raw.unit_amount < 0) {
+        throw new StaffApiError({ code: "invalid_menu", message: `不正な unit_amount: ${raw.unit_amount}` });
+      }
+      seen.add(name);
+      normalized.push({
+        item_name: name,
+        unit_amount: raw.unit_amount,
+        ...(raw.sold_out ? { sold_out: true } : {}),
+      });
+    }
+    this.menu.splice(0, this.menu.length, ...normalized);
+    return clone(this.menu);
+  }
+
   async listOrderRequests(sessionId: string, status?: string): Promise<OrderRequest[]> {
     this.requireAuth();
     this.requireSession(sessionId);

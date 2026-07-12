@@ -28,9 +28,10 @@ export function SessionListScreen(props: {
   repository: StaffRepository;
   onSelect: (session: StaffSession) => void;
   onOpenPlayers: () => void;
+  onOpenMenu: () => void;
   onLogout: () => void;
 }): React.JSX.Element {
-  const { repository, onSelect, onOpenPlayers, onLogout } = props;
+  const { repository, onSelect, onOpenPlayers, onOpenMenu, onLogout } = props;
   const state = useAsync(() => repository.listSessions(), [repository]);
   const [label, setLabel] = useState("");
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
@@ -95,6 +96,9 @@ export function SessionListScreen(props: {
         <View style={styles.row}>
           <Pressable onPress={onOpenPlayers} style={{ marginRight: 16 }}>
             <Text style={styles.back}>プレイヤー管理</Text>
+          </Pressable>
+          <Pressable onPress={onOpenMenu} style={{ marginRight: 16 }}>
+            <Text style={styles.back}>メニュー管理</Text>
           </Pressable>
           <Pressable onPress={onLogout}>
             <Text style={styles.back}>ログアウト</Text>

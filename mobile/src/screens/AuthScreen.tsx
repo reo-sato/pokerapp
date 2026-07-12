@@ -40,6 +40,31 @@ export function AuthScreen({ repository, mode, player, onAuthed, onBack }: Props
   const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // PIN 自己設定（ADR-0027 D6）: 初回 = pin_self_enroll の会場で本人が設定、変更 = 現 PIN 必須。
+  const [settingPin, setSettingPin] = useState(false);
+  const [newPin, setNewPin] = useState("");
+  const [currentPin, setCurrentPin] = useState("");
+
+  const handleSetPin = async () => {
+    if (!player) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await repository.setPin(player.player_id, newPin, currentPin || undefined);
+      // 設定できたらそのままログインして戻る。
+      await repository.login(player.player_id, newPin);
+      onAuthed(player);
+    } catch (err) {
+      const m = messageFor(err);
+      setError(
+        m.code === "unauthorized"
+          ? "PIN の変更には現在の PIN が必要です（忘れた場合はスタッフへ）。"
+          : m.text,
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handlePinLogin = async () => {
     if (!player) return;
@@ -72,7 +97,46 @@ export function AuthScreen({ repository, mode, player, onAuthed, onBack }: Props
   return (
     <View style={styles.screen}>
       <BackLink onPress={onBack} />
-      {mode === "pin" ? (
+      {mode === "pin" && settingPin ? (
+        <>
+          <Text style={styles.title}>PIN の設定 / 変更</Text>
+          <Text style={styles.subtitle}>
+            {player?.display_name} の PIN を設定します（4 桁以上。変更時は現在の PIN が必要）
+          </Text>
+          <TextInput
+            style={local.input}
+            value={newPin}
+            onChangeText={setNewPin}
+            placeholder="新しい PIN"
+            placeholderTextColor="#5a646e"
+            keyboardType="number-pad"
+            secureTextEntry
+            editable={!busy}
+          />
+          <TextInput
+            style={local.input}
+            value={currentPin}
+            onChangeText={setCurrentPin}
+            placeholder="現在の PIN（初回設定では空のまま）"
+            placeholderTextColor="#5a646e"
+            keyboardType="number-pad"
+            secureTextEntry
+            editable={!busy}
+          />
+          <Pressable
+            style={[local.button, busy && local.buttonDisabled]}
+            disabled={busy}
+            onPress={handleSetPin}
+          >
+            <Text style={local.buttonText}>{busy ? "設定中…" : "設定してログイン"}</Text>
+          </Pressable>
+          <Pressable onPress={() => setSettingPin(false)} disabled={busy}>
+            <Text style={[styles.back, { textAlign: "center", marginTop: 8 }]}>
+              PIN ログインに戻る
+            </Text>
+          </Pressable>
+        </>
+      ) : mode === "pin" ? (
         <>
           <Text style={styles.title}>PIN ログイン</Text>
           <Text style={styles.subtitle}>{player?.display_name} として本人確認します</Text>
@@ -92,6 +156,11 @@ export function AuthScreen({ repository, mode, player, onAuthed, onBack }: Props
             onPress={handlePinLogin}
           >
             <Text style={local.buttonText}>{busy ? "確認中…" : "ログイン"}</Text>
+          </Pressable>
+          <Pressable onPress={() => setSettingPin(true)} disabled={busy}>
+            <Text style={[styles.back, { textAlign: "center", marginTop: 8 }]}>
+              PIN を設定 / 変更する
+            </Text>
           </Pressable>
         </>
       ) : (

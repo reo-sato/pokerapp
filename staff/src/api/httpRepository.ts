@@ -221,6 +221,11 @@ export class HttpStaffRepository implements StaffRepository {
     return body.items;
   }
 
+  async updateMenu(items: MenuItem[]): Promise<MenuItem[]> {
+    const body = await this.send<{ items: MenuItem[] }>("PUT", "/api/staff/menu", { items });
+    return body.items;
+  }
+
   async listOrderRequests(sessionId: string, status?: string): Promise<OrderRequest[]> {
     const q = status ? `?status=${E(status)}` : "";
     const body = await this.get<{ requests: OrderRequest[] }>(

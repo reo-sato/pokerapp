@@ -69,6 +69,15 @@ class RFIDThread(threading.Thread):
 
         # デバウンス用: reader_id → 最後に検出した UID (None = カードなし)
         self._last_uid: dict[str, Optional[str]] = {}
+        # 死活表示（dashboard が読む。dict ごと差し替える = GIL で atomic、lock 不要）:
+        #   state: starting | running | no_readers | stopped
+        #   connected/configured: 接続できた/設定された reader 数 / last_event_at: unix 秒
+        self.health: dict = {
+            "state": "starting",
+            "connected": 0,
+            "configured": len(reader_configs),
+            "last_event_at": None,
+        }
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -91,7 +100,19 @@ class RFIDThread(threading.Thread):
 
         if not bridges:
             logger.warning("No RFID readers connected. RFIDThread exiting.")
+            self.health = {
+                "state": "no_readers",
+                "connected": 0,
+                "configured": len(self._reader_configs),
+                "last_event_at": None,
+            }
             return
+        self.health = {
+            "state": "running",
+            "connected": len(bridges),
+            "configured": len(self._reader_configs),
+            "last_event_at": None,
+        }
 
         try:
             while not self._stop_event.is_set():
@@ -101,6 +122,7 @@ class RFIDThread(threading.Thread):
         finally:
             for reader_id, (bridge, _) in bridges.items():
                 bridge.close()
+            self.health = {**self.health, "state": "stopped"}
             logger.info("RFIDThread stopped")
 
     def _poll_reader(self, bridge: object, cfg: dict, reader_id: str) -> None:
@@ -138,6 +160,7 @@ class RFIDThread(threading.Thread):
             board_index=board_index,
         )
         self._queue.put(event)
+        self.health = {**self.health, "last_event_at": time.time()}
         logger.debug(
             "RFIDEvent: reader=%s role=%s seat=%s board_index=%s tag=%s card=%r",
             reader_id, role, seat, board_index, uid, card,

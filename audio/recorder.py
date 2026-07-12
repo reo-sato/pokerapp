@@ -18,6 +18,9 @@ _MAX_BUFFER_SECONDS = 5.0
 # バッファフラッシュの最小秒数（短すぎる音声チャンクは無視）
 _MIN_BUFFER_SECONDS = 0.3
 
+# 死活表示のレベル正規化に使う RMS 上限（これ以上は 1.0 に飽和。発話時の実測オーダー）
+_HEALTH_LEVEL_FULL_RMS = 8000.0
+
 
 def _calc_rms(data: bytes) -> float:
     """PCM16 バイト列の RMS を計算する。"""
@@ -52,6 +55,10 @@ class AudioThread(threading.Thread):
         self._sample_rate = sample_rate
         self._stop_event = stop_event or threading.Event()
         self._transcriber = WhisperTranscriber(model_size=model_size, language=language)
+        # 死活表示（dashboard が読む。dict ごと差し替える = GIL で atomic、lock 不要）:
+        #   state: starting | running | unavailable(pyaudio 無し) | error | stopped
+        #   level: 直近チャンクの RMS を 0..1 に正規化 / last_chunk_at: unix 秒
+        self.health: dict = {"state": "starting", "level": 0.0, "last_chunk_at": None}
 
     def stop(self) -> None:
         """スレッドの停止を要求する。"""
@@ -62,19 +69,28 @@ class AudioThread(threading.Thread):
             import pyaudio  # type: ignore[import]
         except ImportError:
             logger.warning("pyaudio not installed. AudioThread will not capture audio.")
+            self.health = {"state": "unavailable", "level": 0.0, "last_chunk_at": None}
             return
 
         pa = pyaudio.PyAudio()
         chunk_size = 1024
-        stream = pa.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=self._sample_rate,
-            input=True,
-            input_device_index=self._device_id,
-            frames_per_buffer=chunk_size,
-        )
+        try:
+            stream = pa.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=self._sample_rate,
+                input=True,
+                input_device_index=self._device_id,
+                frames_per_buffer=chunk_size,
+            )
+        except OSError as e:
+            # デバイス不在/占有。クラッシュさせず死活表示に出す（エラーハンドリング方針）。
+            logger.error("Could not open audio input device %d: %s", self._device_id, e)
+            self.health = {"state": "error", "level": 0.0, "last_chunk_at": None}
+            pa.terminate()
+            return
         logger.info("AudioThread started (device_id=%d, rate=%d)", self._device_id, self._sample_rate)
+        self.health = {"state": "running", "level": 0.0, "last_chunk_at": None}
 
         buffer: list[bytes] = []
         buffer_start_time: float = time.time()
@@ -90,6 +106,11 @@ class AudioThread(threading.Thread):
                     continue
 
                 rms = _calc_rms(data)
+                self.health = {
+                    "state": "running",
+                    "level": min(1.0, rms / _HEALTH_LEVEL_FULL_RMS),
+                    "last_chunk_at": time.time(),
+                }
                 buffer.append(data)
                 elapsed = time.time() - buffer_start_time
 
@@ -115,6 +136,7 @@ class AudioThread(threading.Thread):
             stream.stop_stream()
             stream.close()
             pa.terminate()
+            self.health = {"state": "stopped", "level": 0.0, "last_chunk_at": None}
             logger.info("AudioThread stopped")
 
     def _process_chunk(self, audio_bytes: bytes) -> None:

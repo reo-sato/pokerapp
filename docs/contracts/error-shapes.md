@@ -90,6 +90,8 @@ viewer API は menu 照合（`unknown_item`）と read-only モード（`orders_
 | `session_closed` | closed session に注文 / 確定しようとした | create / confirm request | `OrderSessionClosedError` | 409 |
 | `invalid_quantity` | quantity 範囲外（1..99 外）/ item_name 空・過長 / note 過長 | create request | `InvalidOrderRequestError` | 400 |
 | `unknown_item` | menu に無い品名（menu 照合は API 境界） | POST order-request | API 境界（menu master） | 400 |
+| `item_sold_out` | 品切れ（`sold_out=true`）の品名（ADR-0046） | POST order-request | API 境界（menu master） | 400 |
+| `invalid_menu` | menu item の validation 違反（name 空・過長・重複 / unit_amount 負・非整数 / sold_out 非 bool） | PUT /api/staff/menu | `MenuValidationError` | 400 |
 | `already_resolved` | 終端（confirmed / rejected / cancelled）済の request を再解決しようとした | confirm / reject / cancel request | `AlreadyResolvedError` | 409 |
 | `orders_unavailable` | read-only モード（単独 `--viewer-api`）で注文 write を受けた | POST order-request / staff write | API 境界（orders_writable=False） | 503 |
 
