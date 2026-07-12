@@ -35,9 +35,9 @@ player 向け参照 front-end（WS3, Expo）が消費する **読み取り専用
 | GET | `/api/players/{player_id}/sessions/{session_id}/hands` | `{"hands": [hand, ...]}`（player が着席していた hand の HandSummary。hand = `hand.schema.json` v1.0。hand_id 昇順） | 404 `not_found`（unknown player / unknown session） |
 | GET | `/api/sessions/{session_id}/hands/{hand_id}` | hand（HandSummary 全体） | 404 `not_found`（log 不在 / hand 不在） |
 | GET | `/api/players/{player_id}/sessions/{session_id}/ledger` | `{"entries": [ledger_entry, ...], "summary": {cash_in_total, order_total, entry_fee, point_spent_total, point_credited_total, net_due_to_store, settled, payment_status, settled_at, paid_amount}}`（ledger_entry = `ledger_entry.schema.json` v0.x。totals は `SessionSettlement` を当該 player に絞った値。`settled`(bool)/`payment_status`/`settled_at` は確定状態 = `list_settlements` 由来で、未確定なら settled=false・payment_status=null。`payment_status` は `partial` を取り得る・`paid_amount`(累計受領額, 未確定は 0) も additive（ADR-0023）。S4 mobile 表示用 additive） | 404 `not_found`（unknown player / unknown session） |
-| GET | `/api/menu` | `{"items": [{"item_name", "unit_amount"}, ...]}`（menu.json master, M5。空なら `[]`） | — |
+| GET | `/api/menu` | `{"items": [{"item_name", "unit_amount", "sold_out"?}, ...]}`（menu.json master, M5。`sold_out` は additive = ADR-0046。空なら `[]`） | — |
 | GET | `/api/players/{player_id}/sessions/{session_id}/order-requests` | `{"requests": [order_request, ...]}`（自分のもののみ、requested_at 順。`order_request.schema.json` v0.x） | 404 `not_found` |
-| POST | `/api/players/{player_id}/sessions/{session_id}/order-requests` | body `{"item_name", "quantity", "note"?}` → 201 + 作成された order_request（status=pending。**ledger には書かれない** — スタッフ確定で初めて記帳, ADR-0018） | 404 `not_found` / 400 `invalid_quantity` / 400 `unknown_item`（menu 外） / 409 `session_closed` / 503 `orders_unavailable`（read-only モード） |
+| POST | `/api/players/{player_id}/sessions/{session_id}/order-requests` | body `{"item_name", "quantity", "note"?}` → 201 + 作成された order_request（status=pending。**ledger には書かれない** — スタッフ確定で初めて記帳, ADR-0018） | 404 `not_found` / 400 `invalid_quantity` / 400 `unknown_item`（menu 外） / 400 `item_sold_out`（品切れ, ADR-0046） / 409 `session_closed` / 503 `orders_unavailable`（read-only モード） |
 | POST | `/api/players/{player_id}/sessions/{session_id}/order-requests/{request_id}/cancel` | **本人が pending の注文を取り下げる**（ADR-0045。status=cancelled, ledger には何も書かない）→ 更新後 order_request。認可姿勢は注文 POST と同一（player_auth on なら principal 必須） | 404 `not_found`（unknown / **他人の request**（存在を漏らさない）/ session 不一致） / 409 `already_resolved`（終端済み） / 503 `orders_unavailable` |
 
 備考:
@@ -113,6 +113,7 @@ player 本人の self-write（注文 POST 等）を **PIN ログイン**で本�
 
 | method | path | write | body | 返り値 |
 |--------|------|-------|------|--------|
+| PUT  | `/api/staff/menu` | yes | `{"items": [{item_name, unit_amount, sold_out?}, ...]}` | menu master の全量置換（価格改定・品切れ, ADR-0046。last-write-wins・sync 非対象）→ 保存後 `{"items": [...]}`。400 `invalid_menu` |
 | GET  | `/api/staff/buyin-presets` | no | — | `{"presets": [int, ...]}`（config `ledger.buyin_presets` 由来。buy-in 金額メニュー, ADR-0026） |
 | POST | `/api/staff/players/merge` | yes | `{"survivor_id", "absorbed_id"}` | absorbed を survivor に統合（player merge, ADR-0030）。`{"survivor_id", "absorbed_id", "merged_into", "merged_at"}`。404 `not_found` / 400 `invalid_merge`（自己 merge / サイクル）。registry 書き込みのため write 所有プロセスのみ |
 | POST | `/api/staff/sessions/{session_id}/close` | yes | — | session を close（精算確定の前提, B1）。closed session を返す。404 `not_found` / 409 `already_closed`。reopen は提供しない |

@@ -553,3 +553,43 @@ test("mergePlayers marks tombstone and hides absorbed from canonical list (ADR-0
     },
   );
 });
+
+test("updateMenu replaces items, validates, and requires staff token (ADR-0046)", async () => {
+  const repo = authed();
+  const saved = await repo.updateMenu([
+    { item_name: " ビール ", unit_amount: 800, sold_out: true },
+    { item_name: "ハイボール", unit_amount: 600 },
+  ]);
+  assert.deepEqual(saved, [
+    { item_name: "ビール", unit_amount: 800, sold_out: true },
+    { item_name: "ハイボール", unit_amount: 600 },
+  ]);
+  assert.deepEqual(await repo.getMenu(), saved);
+
+  await assert.rejects(
+    repo.updateMenu([{ item_name: "", unit_amount: 100 }]),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "invalid_menu");
+      return true;
+    },
+  );
+  await assert.rejects(
+    repo.updateMenu([
+      { item_name: "a", unit_amount: 100 },
+      { item_name: "a", unit_amount: 200 },
+    ]),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "invalid_menu");
+      return true;
+    },
+  );
+
+  const noAuth = new MockStaffRepository();
+  await assert.rejects(noAuth.updateMenu([]), (err: unknown) => {
+    assert.ok(err instanceof StaffApiError);
+    assert.equal(err.code, "unauthorized");
+    return true;
+  });
+});

@@ -190,6 +190,13 @@ class ViewerApiClient:
             return {}
         return {"Authorization": f"Bearer {self._staff_token}"}
 
+    def update_menu(self, items: list[dict]) -> list[dict]:
+        """menu master を全量置換する（価格改定・品切れ, ADR-0046, staff token + write 所有）。"""
+        return self._request(
+            "PUT", "/api/staff/menu", json={"items": items},
+            headers=self._staff_headers(),
+        )["items"]
+
     def get_buyin_presets(self) -> list[int]:
         """buy-in 金額プリセットを取得する（ADR-0026, staff token）。"""
         return self._request(

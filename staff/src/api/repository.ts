@@ -114,6 +114,11 @@ export interface StaffRepository {
   // ――― 注文リクエスト捌き（M5 / ADR-0018）―――
   /** 注文メニュー（menu.json master）。確定時の単価 prefill に使う。 */
   getMenu(): Promise<MenuItem[]>;
+  /**
+   * menu master を全量置換する（価格改定・品切れ, ADR-0046。last-write-wins）。
+   * validation 違反は invalid_menu(400)。
+   */
+  updateMenu(items: MenuItem[]): Promise<MenuItem[]>;
   /** session の注文 queue（全 player。status で絞り込み可）。 */
   listOrderRequests(sessionId: string, status?: string): Promise<OrderRequest[]>;
   /** 注文を確定する（単価を確定し order ledger entry を起こす）。 */

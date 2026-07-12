@@ -113,10 +113,11 @@ export interface SessionSettlement {
   paid_amount: number; // 受領累計（partial-paid, ADR-0023）
 }
 
-/** GET /api/menu の要素 (menu.json master, M5)。 */
+/** GET /api/menu の要素 (menu.json master, M5。sold_out は additive = ADR-0046)。 */
 export interface MenuItem {
   item_name: string;
   unit_amount: number;
+  sold_out?: boolean;
 }
 
 /** schemas/order_request.schema.json (0.x, M5 — ADR-0018)。 */

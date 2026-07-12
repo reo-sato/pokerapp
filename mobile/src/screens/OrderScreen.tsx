@@ -115,27 +115,30 @@ export function OrderScreen({ repository, player, session, onBack }: Props): Rea
             <Text style={styles.empty}>メニューが登録されていません。</Text>
           ) : (
             (menuState.data ?? []).map((item) => (
-              <View key={item.item_name} style={styles.card}>
+              <View key={item.item_name} style={[styles.card, item.sold_out && { opacity: 0.55 }]}>
                 <Text style={styles.cardTitle}>
                   {item.item_name}
                   <Text style={styles.cardMeta}>  {item.unit_amount.toLocaleString()} / 個</Text>
+                  {item.sold_out ? <Text style={styles.neg}>  品切れ</Text> : null}
                 </Text>
-                <View style={{ flexDirection: "row", alignItems: "center", marginTop: 8 }}>
-                  <Pressable onPress={() => bumpQty(item, -1)}>
-                    <Text style={styles.back}>−</Text>
-                  </Pressable>
-                  <Text style={[styles.cardTitle, { marginHorizontal: 12 }]}>{qtyOf(item)}</Text>
-                  <Pressable onPress={() => bumpQty(item, +1)}>
-                    <Text style={styles.back}>＋</Text>
-                  </Pressable>
-                  <Pressable
-                    disabled={sending}
-                    onPress={() => submit(item)}
-                    style={{ marginLeft: "auto" }}
-                  >
-                    <Text style={styles.back}>{sending ? "送信中…" : "注文する →"}</Text>
-                  </Pressable>
-                </View>
+                {item.sold_out ? null : (
+                  <View style={{ flexDirection: "row", alignItems: "center", marginTop: 8 }}>
+                    <Pressable onPress={() => bumpQty(item, -1)}>
+                      <Text style={styles.back}>−</Text>
+                    </Pressable>
+                    <Text style={[styles.cardTitle, { marginHorizontal: 12 }]}>{qtyOf(item)}</Text>
+                    <Pressable onPress={() => bumpQty(item, +1)}>
+                      <Text style={styles.back}>＋</Text>
+                    </Pressable>
+                    <Pressable
+                      disabled={sending}
+                      onPress={() => submit(item)}
+                      style={{ marginLeft: "auto" }}
+                    >
+                      <Text style={styles.back}>{sending ? "送信中…" : "注文する →"}</Text>
+                    </Pressable>
+                  </View>
+                )}
               </View>
             ))
           )}

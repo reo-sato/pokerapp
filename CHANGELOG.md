@@ -6,6 +6,30 @@
 
 ## [Unreleased]
 
+### Added (menu 編集 = ADR-0046 / 価格改定・品切れを staff アプリから)
+
+- **メニュー管理画面**（staff アプリ `MenuScreen`）: 価格編集・品切れトグル・追加/削除 →
+  「保存」で全量置換（last-write-wins）。`MenuMaster` を thread-safe な read-write +
+  reload-on-read 化（`set_items` + atomic write。単独 `--viewer-api` も編集に追従）。
+- `sold_out` フラグ（additive。false は永続形に書かず既存 `menu.json` 互換）。
+  `GET /api/menu` に露出し、**mobile 注文画面は品切れ表示 + 注文不可**、
+  注文 POST は 400 `item_sold_out` で reject。
+- `PUT /api/staff/menu`（staff write）+ `ViewerApiClient.update_menu` +
+  `StaffRepository.updateMenu`。新 error: `invalid_menu` / `item_sold_out`。
+  menu は sync（ADR-0022）非対象のまま（店設定）。tests: core+API 14 / staff mock 1 / mobile mock 1。
+
+### Added (mobile PIN 自己設定 / staff 座席コピー / desktop 録音死活表示)
+
+- **PIN の自己設定/変更**（mobile AuthScreen, ADR-0027 D6）: PIN ログイン画面の
+  「PIN を設定 / 変更する」から。初回は pin_self_enroll の会場で本人設定、変更は現 PIN 必須。
+  設定後は自動ログイン。`ViewerRepository.setPin`（http/mock）。
+- **座席の明示解除**（staff 座席タブ）: 「現在の座席をコピー」→ 行単位の「取消」で外して
+  次 hand へ割り当て — 退席を次 hand の seat map に明示的に反映できる。
+- **録音系の死活表示**（desktop dashboard ヘッダー）: マイク入力レベルバー（3 秒無入力で
+  警告）と RFID リーダー接続数（N/M）。`AudioThread.health` / `RFIDThread.health`
+  （dict 差し替え = atomic、監視のみで business logic なし）。音声デバイスを開けない場合も
+  クラッシュせず表示に出す。tests 3 件（fake bridge / pyaudio 不在を強制）。
+
 ### Added (注文キャンセル = ADR-0045 / status `cancelled`, schema 1.0→1.1)
 
 - **player 本人による pending 注文の取り下げ**。core `OrderRequestRepository.cancel_request`

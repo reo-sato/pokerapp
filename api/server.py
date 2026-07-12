@@ -58,7 +58,7 @@ from core.ledger_repository import (
     SessionNotClosedError,
     UnknownPlayerError as LedgerUnknownPlayerError,
 )
-from core.menu import MenuMaster
+from core.menu import MenuMaster, MenuValidationError
 from core.order_request_repository import (
     AlreadyResolvedError,
     InvalidOrderRequestError,
@@ -109,6 +109,12 @@ class _OrderRequestBody(BaseModel):
     item_name: str
     quantity: int
     note: str | None = None
+
+
+class _MenuBody(BaseModel):
+    """PUT /api/staff/menu の body（menu 全量置換, ADR-0046）。validation は core。"""
+
+    items: list[dict]
 
 
 class _StaffLedgerEntryBody(BaseModel):
@@ -582,6 +588,11 @@ def create_app(
                 "code": "unknown_item",
                 "message": f"item_name={body.item_name!r} はメニューにありません。",
             })
+        if menu.is_sold_out(body.item_name):
+            return JSONResponse(status_code=400, content={
+                "code": "item_sold_out",
+                "message": f"{body.item_name} は品切れです。",
+            })
         request = order_repo.create_request(
             session_id, player_id, body.item_name, body.quantity, note=body.note,
         )
@@ -638,6 +649,19 @@ def create_app(
         return None
 
     _buyin_presets = [int(a) for a in (buyin_presets or []) if int(a) > 0]
+
+    @app.put("/api/staff/menu", response_model=None)
+    def staff_update_menu(request: Request, body: _MenuBody) -> "JSONResponse | dict":
+        """menu master を全量置換する（価格改定・品切れ, ADR-0046 D3）。staff write。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            items = menu.set_items(body.items)
+        except MenuValidationError as e:
+            return JSONResponse(status_code=400,
+                                content={"code": "invalid_menu", "message": str(e)})
+        return {"items": items}
 
     @app.get("/api/staff/buyin-presets", response_model=None)
     def staff_buyin_presets(request: Request) -> "JSONResponse | dict":

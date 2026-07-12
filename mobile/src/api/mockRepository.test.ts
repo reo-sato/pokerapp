@@ -247,3 +247,43 @@ test("cancelOrderRequest cancels own pending order and rejects resolved/foreign 
     },
   );
 });
+
+test("createOrderRequest rejects sold_out item with item_sold_out (ADR-0046)", async () => {
+  const repo = new MockRepository();
+  await assert.rejects(
+    repo.createOrderRequest(ALICE_ID, SESSION_ID, { item_name: "枝豆", quantity: 1 }),
+    (err: unknown) => {
+      assert.ok(err instanceof ViewerApiError);
+      assert.equal(err.code, "item_sold_out");
+      return true;
+    },
+  );
+});
+
+test("setPin: first-time self-enroll, change requires current PIN, login uses new PIN (ADR-0027)", async () => {
+  const repo = new MockRepository();
+  // 初回設定（pin_self_enroll 相当）→ 新 PIN でログインできる。
+  await repo.setPin(ALICE_ID, "5678");
+  const session = await repo.login(ALICE_ID, "5678");
+  assert.equal(session.player_id, ALICE_ID);
+  // 既定 PIN では入れなくなる。
+  await assert.rejects(repo.login(ALICE_ID, "1234"), (err: unknown) => {
+    assert.ok(err instanceof ViewerApiError);
+    assert.equal(err.code, "invalid_pin");
+    return true;
+  });
+  // 変更は現 PIN 必須。
+  await assert.rejects(repo.setPin(ALICE_ID, "9999"), (err: unknown) => {
+    assert.ok(err instanceof ViewerApiError);
+    assert.equal(err.code, "unauthorized");
+    return true;
+  });
+  await repo.setPin(ALICE_ID, "9999", "5678");
+  await repo.login(ALICE_ID, "9999");
+  // 短すぎる PIN は pin_too_short。
+  await assert.rejects(repo.setPin(ALICE_ID, "12", "9999"), (err: unknown) => {
+    assert.ok(err instanceof ViewerApiError);
+    assert.equal(err.code, "pin_too_short");
+    return true;
+  });
+});

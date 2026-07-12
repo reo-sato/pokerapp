@@ -42,6 +42,8 @@ export class MockRepository implements ViewerRepository {
   // 本人認証 (L1/L2) の in-memory 状態。OIDC サインアップで作った player も保持する。
   private principal: string | null = null;
   private signedUp: Player[] = [];
+  // 自己設定した PIN（player_id → pin）。未設定の player は MOCK_PIN でログインできる。
+  private pins = new Map<string, string>();
 
   constructor() {
     // 保存済みログインを復元する（HttpRepository と同じ意味論。mock token は期限なし）。
@@ -70,7 +72,7 @@ export class MockRepository implements ViewerRepository {
     if ((pin ?? "").length < 4) {
       throw new ViewerApiError({ code: "pin_too_short", message: "PIN は 4 桁以上必要です。" });
     }
-    if (pin !== MOCK_PIN) {
+    if (pin !== (this.pins.get(playerId) ?? MOCK_PIN)) {
       throw new ViewerApiError({ code: "invalid_pin", message: "PIN が違います。" });
     }
     this.principal = playerId;
@@ -100,6 +102,22 @@ export class MockRepository implements ViewerRepository {
     };
     saveStoredAuth(session);
     return session;
+  }
+
+  async setPin(playerId: string, pin: string, currentPin?: string): Promise<void> {
+    await this.getPlayer(playerId); // not_found
+    if ((pin ?? "").length < 4) {
+      throw new ViewerApiError({ code: "pin_too_short", message: "PIN は 4 桁以上必要です。" });
+    }
+    // 変更は現 PIN 一致が必要（server の set_player_pin と同じ意味論。初回 = pin_self_enroll 相当）。
+    const existing = this.pins.get(playerId);
+    if (existing !== undefined && currentPin !== existing) {
+      throw new ViewerApiError({
+        code: "unauthorized",
+        message: "現在の PIN（または staff token）が必要です。",
+      });
+    }
+    this.pins.set(playerId, pin);
   }
 
   currentPrincipal(): string | null {
@@ -181,10 +199,17 @@ export class MockRepository implements ViewerRepository {
     body: OrderRequestBody,
   ): Promise<OrderRequest> {
     await this.getPlayer(playerId);
-    if (!fx.menuItems.some((i) => i.item_name === body.item_name)) {
+    const menuItem = fx.menuItems.find((i) => i.item_name === body.item_name);
+    if (!menuItem) {
       throw new ViewerApiError({
         code: "unknown_item",
         message: `item_name=${body.item_name} はメニューにありません。`,
+      });
+    }
+    if (menuItem.sold_out) {
+      throw new ViewerApiError({
+        code: "item_sold_out",
+        message: `${body.item_name} は品切れです。`,
       });
     }
     if (!Number.isInteger(body.quantity) || body.quantity < 1 || body.quantity > 99) {
