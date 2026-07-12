@@ -28,6 +28,7 @@ from api.read_models import (
     list_measurement_rows,
     list_player_hands,
     list_player_sessions,
+    list_session_hands,
 )
 from core.auth_identity_repository import AuthIdentityRepository
 from core.auth_token import issue_player_token, verify_player_token
@@ -680,6 +681,20 @@ def create_app(
             return JSONResponse(status_code=400,
                                 content={"code": "invalid_correction", "message": str(e)})
         return c.to_dict()
+
+    @app.get("/api/staff/sessions/{session_id}/hands", response_model=None)
+    def staff_session_hands(
+        session_id: str, request: Request
+    ) -> "JSONResponse | dict":
+        """session の全 hand（訂正適用済, hand_id 昇順）。staff read（ADR-0044）。
+
+        ハンドリプレイ UI の staff 導線用。player read と違い seat 縛りなしで卓の
+        全ハンドを返す。log 不在は空 list。
+        """
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        return {"hands": list_session_hands(session_id, log_dir, correction_repo)}
 
     # ――― Phase A 計測: ground truth（ADR-0043）―――
 

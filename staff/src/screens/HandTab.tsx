@@ -1,15 +1,19 @@
 import React, { useState } from "react";
-import { ScrollView, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, View } from "react-native";
 
 import type { StaffRepository } from "../api/repository";
-import type { HandControlInput, StaffSession } from "../api/types";
+import type { HandControlInput, HandSummary, StaffSession } from "../api/types";
 import { StaffApiError } from "../api/types";
-import { Button, colors, Field, styles } from "./common";
+import { useAsync } from "../hooks/useAsync";
+import { HandReplay } from "../shared/hand_replay/HandReplay";
+import { Button, colors, ErrorView, Field, Loading, styles } from "./common";
 
 /**
- * ハンドタブ（ADR-0039 §C）: hand logger に「新ハンド / ウィナー / リバイ」を遠隔送信する。
- * 録音（音声/RFID）は録音 PC で継続。iPad はコマンドを control queue に積むだけで、適用は
- * hand logger プロセス（`hand_control.enabled`）が行う。反映には数百ms の遅延がある。
+ * ハンドタブ:
+ * - 遠隔制御（ADR-0039 §C）: hand logger に「新ハンド / ウィナー / リバイ」を送信する。
+ *   録音（音声/RFID）は録音 PC で継続。iPad はコマンドを control queue に積むだけ。
+ * - ハンド履歴（ADR-0044）: 卓の全ハンド（訂正適用済）を一覧し、タップで
+ *   ストリート単位リプレイ（共有コンポーネント）を開く。
  */
 export function HandTab(props: {
   repository: StaffRepository;
@@ -20,6 +24,12 @@ export function HandTab(props: {
   const [amount, setAmount] = useState("");
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [sent, setSent] = useState<string[]>([]);
+  const [selected, setSelected] = useState<HandSummary | null>(null);
+
+  const handsState = useAsync(
+    () => repository.listSessionHands(session.session_id),
+    [repository, session.session_id],
+  );
 
   const send = async (input: HandControlInput, label: string): Promise<void> => {
     try {
@@ -58,6 +68,24 @@ export function HandTab(props: {
     }
     void send({ type: "rebuy", seat: s, amount: a }, `リバイ 席${s} +${a}`);
   };
+
+  // ハンド選択中はリプレイ detail を表示（一覧へは戻るリンク）。
+  if (selected) {
+    return (
+      <ScrollView>
+        <Pressable onPress={() => setSelected(null)}>
+          <Text style={styles.back}>← ハンド履歴</Text>
+        </Pressable>
+        <Text style={styles.cardTitle}>Hand #{selected.hand_id}</Text>
+        <Text style={[styles.cardMeta, { marginBottom: 10 }]}>
+          {selected.started_at}
+          {selected.review_required ? " ・ 要確認あり" : ""}
+        </Text>
+        <HandReplay hand={selected} />
+        <View style={{ height: 40 }} />
+      </ScrollView>
+    );
+  }
 
   return (
     <ScrollView keyboardShouldPersistTaps="handled">
@@ -103,6 +131,52 @@ export function HandTab(props: {
           ))}
         </View>
       ) : null}
+
+      {/* ハンド履歴（ADR-0044）: タップでストリート単位リプレイへ */}
+      <View style={styles.card}>
+        <View style={[styles.row, { justifyContent: "space-between" }]}>
+          <Text style={styles.cardTitle}>ハンド履歴</Text>
+          <Button label="再読込" onPress={handsState.reload} kind="ghost" />
+        </View>
+        {handsState.loading ? (
+          <Loading />
+        ) : handsState.errorCode ? (
+          <ErrorView
+            code={handsState.errorCode}
+            message={handsState.errorMessage}
+            onRetry={handsState.reload}
+          />
+        ) : (handsState.data ?? []).length === 0 ? (
+          <Text style={styles.cardMeta}>
+            ハンドログがまだありません（記録が始まると表示されます）。
+          </Text>
+        ) : (
+          (handsState.data ?? []).map((h) => (
+            <Pressable
+              key={h.hand_id}
+              style={{
+                paddingVertical: 10,
+                borderBottomWidth: 1,
+                borderBottomColor: colors.border,
+              }}
+              onPress={() => setSelected(h)}
+            >
+              <Text style={{ color: colors.text, fontSize: 14, fontWeight: "600" }}>
+                Hand #{h.hand_id}
+                {h.winner_seat != null ? `  🏆 席${h.winner_seat}` : ""}
+                {h.review_required ? (
+                  <Text style={{ color: colors.warn }}>  要確認</Text>
+                ) : null}
+              </Text>
+              <Text style={styles.cardMeta}>
+                {h.started_at}
+                {h.board?.length ? ` ・ board ${h.board.join(" ")}` : ""}
+                {h.pot_total != null ? ` ・ pot ${h.pot_total}` : ""}
+              </Text>
+            </Pressable>
+          ))
+        )}
+      </View>
       <View style={{ height: 40 }} />
     </ScrollView>
   );

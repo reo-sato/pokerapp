@@ -4,6 +4,7 @@ import { Pressable, ScrollView, Text, View } from "react-native";
 import type { ViewerRepository } from "../api/repository";
 import type { Player, PlayerSessionSummary } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
+import { HandReplay } from "../shared/hand_replay/HandReplay";
 import { BackLink, ErrorView, Loading, formatResult, styles } from "./common";
 import { findOwnRow } from "./MyHandsScreen";
 
@@ -37,60 +38,15 @@ export function HandDetailScreen({
         <ScrollView>
           <Text style={styles.subtitle}>
             {hand.started_at}
-            {hand.blinds?.sb != null ? ` ・ blinds ${hand.blinds.sb}/${hand.blinds.bb}` : ""}
-          </Text>
-
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>
-              Board: {hand.board?.length ? hand.board.join(" ") : "—"}
-            </Text>
-            <Text style={styles.cardMeta}>
-              pot {hand.pot_total ?? "—"}
-              {hand.winner_seat != null ? ` ・ winner 席${hand.winner_seat}` : ""}
-            </Text>
             {(() => {
               const own = findOwnRow(hand, player);
-              if (!own) return null;
-              return (
-                <Text style={styles.cardMeta}>
-                  自分: 席{own.seat}
-                  {own.hole_cards?.length ? ` ・ ${own.hole_cards.join(" ")}` : ""}
-                  {" ・ 収支 "}
-                  <Text style={own.result >= 0 ? styles.pos : styles.neg}>
-                    {formatResult(own.result)}
-                  </Text>
-                </Text>
-              );
+              if (!own) return "";
+              return ` ・ 自分: 席${own.seat} 収支 ${formatResult(own.result)}`;
             })()}
-          </View>
+          </Text>
 
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>プレイヤー</Text>
-            {hand.players.map((p) => (
-              <Text key={p.seat} style={styles.cardMeta}>
-                席{p.seat} {p.name} stack {p.stack_start}→{p.stack_end}{" "}
-                <Text style={p.result >= 0 ? styles.pos : styles.neg}>
-                  {formatResult(p.result)}
-                </Text>
-              </Text>
-            ))}
-          </View>
-
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>アクション</Text>
-            {hand.actions.length === 0 ? (
-              <Text style={styles.cardMeta}>記録なし</Text>
-            ) : (
-              hand.actions.map((a, i) => (
-                <Text key={i} style={styles.cardMeta}>
-                  [{a.street}] 席{a.seat} {a.player_name} {a.action}
-                  {a.amount ? ` ${a.amount}` : ""} ・ pot {a.pot_after}
-                  {a.needs_review ? " ・ 要確認" : ""}
-                  {(a as unknown as Record<string, unknown>).corrected ? " ・ 訂正済" : ""}
-                </Text>
-              ))
-            )}
-          </View>
+          {/* ストリート単位リプレイ（共有コンポーネント, ADR-0044。訂正適用済みビュー） */}
+          <HandReplay hand={hand} />
 
           {onCorrect ? (
             <Pressable style={styles.card} onPress={onCorrect}>
@@ -98,6 +54,7 @@ export function HandDetailScreen({
               <Text style={styles.cardMeta}>誤認識のアクション種別・金額を訂正します</Text>
             </Pressable>
           ) : null}
+          <View style={{ height: 40 }} />
         </ScrollView>
       )}
     </View>

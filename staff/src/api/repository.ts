@@ -15,6 +15,7 @@ import type {
   GroundTruthEditPayload,
   GroundTruthHand,
   HandControlInput,
+  HandSummary,
   LedgerEntry,
   MeasurementRow,
   MenuItem,
@@ -116,6 +117,13 @@ export interface StaffRepository {
    * iPad はコマンドを control queue に積むだけ（適用は hand logger プロセス）。
    */
   sendControl(sessionId: string, input: HandControlInput): Promise<ControlCommand>;
+
+  // ――― ハンド履歴 read（ADR-0044）―――
+  /**
+   * session の全 hand（訂正オーバーレイ適用済, hand_id 昇順）。ハンドリプレイ UI の導線。
+   * player read と違い seat 縛りなし。log 不在 / unknown session は空 list（lenient）。
+   */
+  listSessionHands(sessionId: string): Promise<HandSummary[]>;
 
   // ――― Phase A 計測 / ground truth（ADR-0043）―――
   /** 計測タブの一覧行（hand_id / winner / chip won / needs_review / GT 状態）。 */

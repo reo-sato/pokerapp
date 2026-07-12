@@ -6,6 +6,36 @@
 
 ## [Unreleased]
 
+### Added (ハンドリプレイ UI = mobile/staff 共有コンポーネント + staff ハンド履歴 read, ADR-0044)
+
+- **GGPoker ハンドヒストリー風のストリート単位リプレイ UI** を player 用 mobile と staff 用
+  iPad の両アプリに追加。プリフロップ〜リバーをセクション表示し、各ストリートの board
+  スライス（3/4/5 枚, 4 色スート表示）/ 開始時ポット / アクション列（needs_review・訂正済
+  バッジ付き）と、参加者行（ホールカードは**記録がある席は全員分表示**・スタック推移・収支）、
+  結果（勝者 / メイン・サイドポット）を表示する。
+- **共有方式（ADR-0044 D1）**: 正本 `shared/hand_replay/`（`handReplayModel.ts` 純関数 +
+  `HandReplay.tsx` + tests 8 件）→ `scripts/sync_shared_ui.py` で両アプリの
+  `src/shared/hand_replay/` へバイト同一コピー。drift は `tests/test_shared_ui_sync.py`
+  （CI）が検知する。monorepo 化はしない（両アプリは self-contained のまま）。
+- mobile: `HandDetailScreen` のテキスト行表示をリプレイ表示に置換（自分の収支表示・
+  スタッフ訂正導線 = ADR-0036 は維持）。typecheck + 21 tests + web export 緑。
+- staff: ハンドタブに**ハンド履歴一覧**（Hand #ID / 勝者 / board / pot / 要確認バッジ +
+  再読込）→ タップでリプレイ drill-in。typecheck + 30 tests + web export +
+  **Playwright E2E 7 件**（リプレイ E2E を追加）緑。
+- API: `GET /api/staff/sessions/{sid}/hands`（staff read = token 必須, **訂正オーバーレイ
+  適用済み** hand_id 昇順, log 不在は空 list）+ `api/read_models.py:list_session_hands` +
+  `ViewerApiClient.list_session_hands`。tests 4 件。CLAUDE.md WS4 残作業の
+  「ハンド履歴 read（staff hands-list endpoint）」が解消。
+
+### Fixed (staff アプリの既存不具合 2 件)
+
+- `staff/package-lock.json` の **react-dom 19.2.7 ↔ react 19.2.3 の不整合**を 19.2.3 に
+  そろえた（web export が React error #527 で起動不能・`npm ci` が ERESOLVE で失敗していた）。
+- `staff/e2e/staff.spec.ts` の **曖昧 locator / 実メッセージと不一致の正規表現**を修正
+  （「ログイン」「確定」「取消」「エントリ追加」の strict mode 衝突、
+  `/に割り当てました/` が実メッセージ「hand #N に M 席を割り当てました。」に不一致）。
+  修正後 E2E 7 件すべて green（preinstalled Chromium で実行確認）。
+
 ### Added (Phase A ground truth 入力 UX = staff iPad app の計測タブ, ADR-0043)
 
 - Phase A 捕捉精度を計測するための **ground truth 入力 UX** を staff iPad app に追加。

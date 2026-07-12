@@ -6,6 +6,8 @@
  * 実 persistence は持たない（mock で UI を先行させる, CLAUDE.md WS 原則）。
  */
 import type {
+  ActionRecord,
+  HandSummary,
   LedgerEntry,
   MeasurementRow,
   MenuItem,
@@ -154,6 +156,115 @@ export const measurementRows: Record<string, MeasurementRow[]> = {
       review_required: false,
       has_needs_review: false,
       ground_truth: null,
+    },
+  ],
+  [CLOSED_SESSION_ID]: [],
+};
+
+function action(
+  handId: number,
+  street: string,
+  seat: number,
+  name: string,
+  act: string,
+  amount: number,
+  potAfter: number,
+  needsReview = false,
+): ActionRecord {
+  return {
+    hand_id: handId,
+    timestamp: "2026-06-16T20:00:00",
+    street,
+    seat,
+    player_name: name,
+    action: act,
+    amount,
+    pot_after: potAfter,
+    stack_after: 10000,
+    source: { camera: false, audio: true, rfid: false },
+    needs_review: needsReview,
+    confidence: needsReview ? 0.5 : 0.9,
+  };
+}
+
+/**
+ * ハンド履歴（session → 訂正適用済 HandSummary, ADR-0044）。
+ * measurementRows（下）と同じ 3 ハンド構成（winner / needs_review を一致させる）。
+ */
+export const sessionHands: Record<string, HandSummary[]> = {
+  [OPEN_SESSION_ID]: [
+    {
+      hand_id: 1,
+      session_id: OPEN_SESSION_ID,
+      started_at: "2026-06-16T19:30:00",
+      ended_at: "2026-06-16T19:33:00",
+      blinds: { sb: 100, bb: 200 },
+      board: ["As", "Kc", "Qd", "5h", "2s"],
+      players: [
+        { seat: 1, name: "Alice", player_id: ALICE_ID, hole_cards: ["Ah", "Ad"],
+          stack_start: 10000, stack_end: 11500, result: 1500 },
+        { seat: 2, name: "Bob", player_id: BOB_ID, hole_cards: ["Ks", "Kd"],
+          stack_start: 10000, stack_end: 8500, result: -1500 },
+      ],
+      pot_total: 3000,
+      pots: [{ amount: 3000, eligible_seats: [1, 2] }],
+      winner_seat: 1,
+      actions: [
+        action(1, "preflop", 1, "Alice", "raise", 600, 900),
+        action(1, "preflop", 2, "Bob", "call", 400, 1300),
+        action(1, "flop", 2, "Bob", "check", 0, 1300),
+        action(1, "flop", 1, "Alice", "bet", 700, 2000),
+        action(1, "flop", 2, "Bob", "call", 700, 2700),
+        action(1, "turn", 2, "Bob", "check", 0, 2700),
+        action(1, "turn", 1, "Alice", "check", 0, 2700),
+        action(1, "river", 2, "Bob", "check", 0, 2700),
+        action(1, "river", 1, "Alice", "bet", 150, 2850),
+        action(1, "river", 2, "Bob", "call", 150, 3000),
+      ],
+    },
+    {
+      hand_id: 2,
+      session_id: OPEN_SESSION_ID,
+      started_at: "2026-06-16T19:35:00",
+      ended_at: "2026-06-16T19:37:00",
+      blinds: { sb: 100, bb: 200 },
+      board: ["7h", "8h", "9c"],
+      players: [
+        { seat: 1, name: "Alice", player_id: ALICE_ID, hole_cards: null,
+          stack_start: 11500, stack_end: 10700, result: -800 },
+        { seat: 2, name: "Bob", player_id: BOB_ID, hole_cards: null,
+          stack_start: 8500, stack_end: 9300, result: 800 },
+      ],
+      pot_total: 1600,
+      winner_seat: 2,
+      review_required: true,
+      actions: [
+        action(2, "preflop", 2, "Bob", "raise", 500, 800, true),
+        action(2, "preflop", 1, "Alice", "call", 300, 1100),
+        action(2, "flop", 1, "Alice", "check", 0, 1100),
+        action(2, "flop", 2, "Bob", "bet", 500, 1600),
+        action(2, "flop", 1, "Alice", "fold", 0, 1600),
+      ],
+    },
+    {
+      hand_id: 3,
+      session_id: OPEN_SESSION_ID,
+      started_at: "2026-06-16T19:40:00",
+      ended_at: "2026-06-16T19:41:00",
+      blinds: { sb: 100, bb: 200 },
+      board: [],
+      players: [
+        { seat: 1, name: "Alice", player_id: ALICE_ID, hole_cards: null,
+          stack_start: 10700, stack_end: 11100, result: 400 },
+        { seat: 2, name: "Bob", player_id: BOB_ID, hole_cards: null,
+          stack_start: 9300, stack_end: 8900, result: -400 },
+      ],
+      pot_total: 800,
+      winner_seat: 1,
+      actions: [
+        action(3, "preflop", 1, "Alice", "raise", 400, 700),
+        action(3, "preflop", 2, "Bob", "fold", 0, 700),
+      ],
     },
   ],
   [CLOSED_SESSION_ID]: [],
