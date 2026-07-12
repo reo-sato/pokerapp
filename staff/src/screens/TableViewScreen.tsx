@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 
 import type { StaffRepository } from "../api/repository";
@@ -39,6 +39,14 @@ export function TableViewScreen(props: {
     [repository, session.session_id],
   );
   const pendingCount = pendingState.data?.length ?? 0;
+
+  // 新着注文への気づき: open 卓ではバッジを 5 秒 polling で自動更新する（計測タブと同間隔）。
+  const reloadPending = pendingState.reload;
+  useEffect(() => {
+    if (session.status !== "open") return;
+    const id = setInterval(() => reloadPending(), 5000);
+    return () => clearInterval(id);
+  }, [session.status, reloadPending]);
 
   return (
     <View style={styles.screen}>

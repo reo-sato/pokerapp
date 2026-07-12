@@ -33,7 +33,9 @@ export function useAsync<T>(
 
   useEffect(() => {
     let cancelled = false;
-    setState({ data: null, loading: true, errorCode: null, errorMessage: null });
+    // 再取得中も直前の data を保持する（polling でバッジ/一覧がちらつかない。
+    // 初回は data=null なので従来どおり Loading になる）。
+    setState((prev) => ({ data: prev.data, loading: true, errorCode: null, errorMessage: null }));
     fn().then(
       (data) => {
         if (!cancelled) setState({ data, loading: false, errorCode: null, errorMessage: null });

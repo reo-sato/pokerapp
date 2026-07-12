@@ -6,6 +6,59 @@
 
 ## [Unreleased]
 
+### Added (注文キャンセル = ADR-0045 / status `cancelled`, schema 1.0→1.1)
+
+- **player 本人による pending 注文の取り下げ**。core `OrderRequestRepository.cancel_request`
+  （equivalence class で本人判定・他人の request は**存在を漏らさず not_found**・pending のみ・
+  ledger 影響なし・closed session の残骸も取り下げ可）。
+- API `POST /api/players/{pid}/sessions/{sid}/order-requests/{rid}/cancel`（認可は注文 POST と
+  同一 = write 所有プロセスのみ + player_auth on なら principal 必須）+
+  `ViewerApiClient.cancel_order_request`。新 error code なし（not_found / already_resolved 再利用）。
+- sync の status 解決を `confirmed > rejected > cancelled > pending` に拡張（ADR-0022 additive。
+  player キャンセル × スタッフ確定の衝突は**確定が勝つ** — ledger entry が既に存在するため）。
+- mobile 注文画面: pending 行に「キャンセル」導線 + status 表示に「キャンセル済み」。
+  staff の pending queue からは自動的に消える。
+- `order_request.schema.json` `1.0`→`1.1`（enum 値の additive 追加, ADR-0023 と同パターン）。
+  tests: core 7 + API 3 + sync 1 + mobile mock 1。
+
+### Added (staff 運用機能 = 営業日サマリ / プレイヤー管理 / ライブ polling 拡大)
+
+- **営業日サマリ**: SessionList に「本日の集計」— 当日開始の全卓の中間集計
+  （compute_settlement）をクライアント側で合算し、卓ごとの net と合計（バイイン/注文/参加費
+  内訳）を表示。締め作業の目安（確定値ではない旨を明示）。API 変更なし。
+- **プレイヤー管理画面**（`PlayersScreen`）: 一覧 / 新規作成 / リネーム / **重複統合
+  （merge, ADR-0030）** を iPad から操作。`StaffRepository.mergePlayers`（HTTP = 既存
+  `POST /api/staff/players/merge` 再利用 / mock は tombstone 近似）。
+- **ライブ polling の拡大**: ハンド履歴（ハンドタブ）と座席（座席タブ）も open 卓では
+  5 秒 polling で自動反映（注文バッジと同機構。staged 編集状態には触れない）。
+
+### Added (mobile ハンド共有/書き出し — Phase B「書き出し」導線)
+
+- HandDetail に「📤 このハンドを共有 / コピー」。`shared/hand_replay/handReplayText.ts`
+  （純関数 `buildHandText`: リプレイと同じストリート分割・ボードスライス・ポット境界で
+  プレーンテキスト化。訂正適用済みビューを書き出す）+ OS 共有シート
+  （`Share.share`）→ 非対応環境はクリップボードに fallback。TS tests 2 件（両アプリで実行）。
+
+### Added (実運用 UI 補強 = mobile 再読込/永続化 + staff 注文バッジ polling + staff 訂正パネル)
+
+- **mobile 手動再読込**: 全画面（PlayerSelect / MySessions / MyHands / HandDetail / MyLedger /
+  Order のメニュー）に「↻ 再読込」リンクとエラー時の「↻ 再試行」を追加。`useAsync` に
+  `reload` を追加（staff 版と同等）。「注文が確定されたか」「新しいハンドが増えたか」を
+  画面を出直さずに確認できる。
+- **mobile 永続化**: 選択した player（`phv.player`）とログイントークン（`phv.auth`,
+  期限切れは読み出し時に破棄）を保存し、ブラウザ再読込後も名前選択・ログインをスキップ。
+  保存先は `src/storage.ts`（web = localStorage / native = in-memory fallback、
+  AsyncStorage への差し替え点を 1 ファイルに限定）。tests 4 件。
+- **staff 注文バッジ自動更新**: open 卓では pending 注文バッジを 5 秒 polling で自動更新
+  （計測タブと同間隔）。`staff/src/hooks/useAsync.ts` を再取得中 stale data 保持に変更し、
+  polling でバッジ・計測一覧がちらつかなくなった。
+- **staff アプリ内のハンド訂正導線（B4/ADR-0036）**: ハンドタブのリプレイ詳細に
+  `HandCorrectionPanel` を追加。アクション種別/金額（action_index 付き）と勝者席を
+  append-only オーバーレイで訂正し、訂正→hands read 再読込でリプレイに即反映。
+  needs_review 解除で計測タブの C-2 ガードも解除される（mock も同意味論）。
+  `StaffRepository.addHandCorrection`（HTTP = 既存 staff API 再利用 / mock）。
+  mock tests +4（計 34）、Playwright E2E +1（計 8）。
+
 ### Added (ハンドリプレイ UI = mobile/staff 共有コンポーネント + staff ハンド履歴 read, ADR-0044)
 
 - **GGPoker ハンドヒストリー風のストリート単位リプレイ UI** を player 用 mobile と staff 用

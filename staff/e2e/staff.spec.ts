@@ -115,6 +115,26 @@ test("hand tab: open hand history and replay a hand street by street", async ({ 
   await expect(page.getByText(/Hand #3/)).toBeVisible();
 });
 
+test("hand tab: correct a misrecognized action from the replay detail (B4)", async ({ page }) => {
+  await login(page);
+  await openTable(page);
+
+  // fixture Hand #2 は要確認（action[0] needs_review）。
+  await page.getByText("ハンド", { exact: true }).click();
+  await page.getByText(/Hand #2/).click();
+  await expect(page.getByText("✎ このハンドを訂正")).toBeVisible();
+
+  // 先頭アクション（preflop raise 500, 要確認）を bet に訂正する。
+  await page.getByText("訂正する").first().click();
+  await page.getByText("bet", { exact: true }).click();
+  await page.getByText("訂正を保存").click();
+  await expect(page.getByText(/訂正しました（1 件）/)).toBeVisible();
+
+  // 訂正適用済みビューが再読込され、リプレイ側に訂正済バッジ + bet が出る。
+  await expect(page.getByText("訂正済").first()).toBeVisible();
+  await expect(page.getByText("ベット", { exact: true }).first()).toBeVisible();
+});
+
 test("create a new session from the list", async ({ page }) => {
   await login(page);
   await page.getByPlaceholder("例: 土曜ナイト #5").fill("E2E 卓");

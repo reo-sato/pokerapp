@@ -587,6 +587,26 @@ def create_app(
         )
         return request.to_dict()
 
+    @app.post(
+        "/api/players/{player_id}/sessions/{session_id}/order-requests/{request_id}/cancel",
+        response_model=None,
+    )
+    def cancel_order_request(
+        player_id: str, session_id: str, request_id: str, request: Request
+    ) -> "JSONResponse | dict":
+        """player 本人が pending の注文を取り下げる（ADR-0045。認可姿勢は注文 POST と同一）。"""
+        if not orders_writable:
+            return JSONResponse(status_code=503, content={
+                "code": "orders_unavailable",
+                "message": "注文の操作はスタッフ会計画面（--ledger）の起動中のみ可能です。",
+            })
+        auth_err = _require_player(request, player_id)
+        if auth_err is not None:
+            return auth_err
+        player_repo.get(player_id)
+        updated = order_repo.cancel_request(request_id, player_id, session_id=session_id)
+        return updated.to_dict()
+
     # ――― staff write API（ADR-0021。Bearer token 認証 + 単一書き手）―――
 
     def _staff_guard(request: Request, *, need_write: bool) -> "JSONResponse | None":

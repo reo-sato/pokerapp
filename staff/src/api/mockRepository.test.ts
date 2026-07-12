@@ -446,3 +446,110 @@ test("listSessionHands requires a valid staff token", async () => {
     return true;
   });
 });
+
+test("addHandCorrection overlays action, clears needs_review, unlocks C-2 (ADR-0036)", async () => {
+  const repo = authed();
+  // fixture hand 2 は action[0] が needs_review。訂正で解除される。
+  const c = await repo.addHandCorrection(OPEN_SESSION_ID, 2, {
+    field: "action", new_value: "bet", action_index: 0,
+  });
+  assert.equal(c.field, "action");
+  assert.equal(c.action_index, 0);
+
+  const hands = await repo.listSessionHands(OPEN_SESSION_ID);
+  const h2 = hands.find((h) => h.hand_id === 2);
+  assert.ok(h2);
+  const a0 = h2.actions[0] as unknown as Record<string, unknown>;
+  assert.equal(a0.action, "bet");
+  assert.equal(a0.corrected, true);
+  assert.equal(a0.needs_review, false);
+  assert.deepEqual((a0._original as Record<string, unknown>).action, "raise");
+  // 未解決 needs_review が無くなったので hand レベルも解除（core と同じ導出）。
+  assert.equal(h2.review_required, false);
+  // 計測タブの row も同期し、「✓ 流す」（C-2 ガード）が解除される。
+  const rows = await repo.listMeasurementRows(OPEN_SESSION_ID);
+  const row2 = rows.find((r) => r.hand_id === 2);
+  assert.equal(row2?.has_needs_review, false);
+});
+
+test("addHandCorrection corrects winner_seat at hand level", async () => {
+  const repo = authed();
+  const c = await repo.addHandCorrection(OPEN_SESSION_ID, 1, {
+    field: "winner_seat", new_value: 2,
+  });
+  assert.equal(c.action_index, null);
+  const hands = await repo.listSessionHands(OPEN_SESSION_ID);
+  assert.equal(hands.find((h) => h.hand_id === 1)?.winner_seat, 2);
+});
+
+test("addHandCorrection rejects bad input with invalid_correction / not_found", async () => {
+  const repo = authed();
+  await assert.rejects(
+    repo.addHandCorrection(OPEN_SESSION_ID, 1, { field: "action", new_value: "bet", action_index: 99 }),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "invalid_correction");
+      return true;
+    },
+  );
+  await assert.rejects(
+    repo.addHandCorrection(OPEN_SESSION_ID, 1, { field: "board", new_value: "As" }),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "invalid_correction");
+      return true;
+    },
+  );
+  await assert.rejects(
+    repo.addHandCorrection(OPEN_SESSION_ID, 9999, { field: "winner_seat", new_value: 1 }),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "not_found");
+      return true;
+    },
+  );
+});
+
+test("addHandCorrection requires a valid staff token", async () => {
+  const repo = new MockStaffRepository();
+  await assert.rejects(
+    repo.addHandCorrection(OPEN_SESSION_ID, 1, { field: "winner_seat", new_value: 1 }),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "unauthorized");
+      return true;
+    },
+  );
+});
+
+test("mergePlayers marks tombstone and hides absorbed from canonical list (ADR-0030)", async () => {
+  const repo = authed();
+  const before = await repo.listPlayers();
+  const survivor = before[0];
+  const absorbed = before[1];
+
+  const result = await repo.mergePlayers(survivor.player_id, absorbed.player_id);
+  assert.equal(result.survivor_id, survivor.player_id);
+
+  const after = await repo.listPlayers();
+  assert.ok(!after.some((p) => p.player_id === absorbed.player_id));
+  assert.ok(after.some((p) => p.player_id === survivor.player_id));
+
+  // 自己 merge は invalid_merge、既に統合済みの相手は not_found。
+  await assert.rejects(
+    repo.mergePlayers(survivor.player_id, survivor.player_id),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "invalid_merge");
+      return true;
+    },
+  );
+  await assert.rejects(
+    repo.mergePlayers(survivor.player_id, absorbed.player_id),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "not_found");
+      return true;
+    },
+  );
+});

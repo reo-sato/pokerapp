@@ -15,6 +15,8 @@ import {
   type GroundTruthEditPayload,
   type GroundTruthHand,
   type HandControlInput,
+  type HandCorrection,
+  type HandCorrectionInput,
   type HandSummary,
   type LedgerEntry,
   type MeasurementRow,
@@ -120,6 +122,16 @@ export class HttpStaffRepository implements StaffRepository {
 
   renamePlayer(playerId: string, displayName: string): Promise<Player> {
     return this.send("PUT", `/api/staff/players/${E(playerId)}`, { display_name: displayName });
+  }
+
+  mergePlayers(
+    survivorId: string,
+    absorbedId: string,
+  ): Promise<{ survivor_id: string; absorbed_id: string }> {
+    return this.send("POST", "/api/staff/players/merge", {
+      survivor_id: survivorId,
+      absorbed_id: absorbedId,
+    });
   }
 
   getSeating(sessionId: string): Promise<StaffSeating> {
@@ -241,6 +253,25 @@ export class HttpStaffRepository implements StaffRepository {
       `/api/staff/sessions/${E(sessionId)}/hands`,
     );
     return body.hands;
+  }
+
+  addHandCorrection(
+    sessionId: string,
+    handId: number,
+    input: HandCorrectionInput,
+  ): Promise<HandCorrection> {
+    const payload: Record<string, unknown> = {
+      field: input.field,
+      new_value: input.new_value,
+    };
+    if (input.action_index !== undefined) payload.action_index = input.action_index;
+    if (input.corrected_by) payload.corrected_by = input.corrected_by;
+    if (input.note) payload.note = input.note;
+    return this.send(
+      "POST",
+      `/api/staff/sessions/${E(sessionId)}/hands/${handId}/corrections`,
+      payload,
+    );
   }
 
   // ――― Phase A 計測 / ground truth（ADR-0043）―――

@@ -172,6 +172,17 @@ class ViewerApiClient:
             json=payload, headers=self._player_headers(),
         )
 
+    def cancel_order_request(
+        self, player_id: str, session_id: str, request_id: str
+    ) -> dict:
+        """pending の注文を本人が取り下げる（ADR-0045。認可姿勢は注文 POST と同一）。"""
+        return self._request(
+            "POST",
+            f"/api/players/{player_id}/sessions/{session_id}"
+            f"/order-requests/{request_id}/cancel",
+            headers=self._player_headers(),
+        )
+
     # ――― staff write API（ADR-0021。Bearer token。会計 write は所有プロセスのみ）―――
 
     def _staff_headers(self) -> dict[str, str]:

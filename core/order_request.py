@@ -12,14 +12,14 @@ from dataclasses import dataclass
 
 @dataclass
 class OrderRequest:
-    """注文リクエスト 1 件（pending → confirmed | rejected）。"""
+    """注文リクエスト 1 件（pending → confirmed | rejected | cancelled, ADR-0045）。"""
 
     request_id: str        # UUID4 hex (32 文字)。アプリ内採番・不変
     session_id: str
     player_id: str         # registry の UUID4 hex
     item_name: str
     quantity: int          # 1..99
-    status: str            # "pending" | "confirmed" | "rejected"
+    status: str            # "pending" | "confirmed" | "rejected" | "cancelled"
     requested_at: str      # ISO 8601
     note: str | None = None
     resolved_at: str | None = None       # confirmed / rejected 時のみ

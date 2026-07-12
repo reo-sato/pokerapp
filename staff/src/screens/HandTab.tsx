@@ -1,11 +1,12 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 
 import type { StaffRepository } from "../api/repository";
-import type { HandControlInput, HandSummary, StaffSession } from "../api/types";
+import type { HandControlInput, StaffSession } from "../api/types";
 import { StaffApiError } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
 import { HandReplay } from "../shared/hand_replay/HandReplay";
+import { HandCorrectionPanel } from "./HandCorrectionPanel";
 import { Button, colors, ErrorView, Field, Loading, styles } from "./common";
 
 /**
@@ -13,7 +14,7 @@ import { Button, colors, ErrorView, Field, Loading, styles } from "./common";
  * - 遠隔制御（ADR-0039 §C）: hand logger に「新ハンド / ウィナー / リバイ」を送信する。
  *   録音（音声/RFID）は録音 PC で継続。iPad はコマンドを control queue に積むだけ。
  * - ハンド履歴（ADR-0044）: 卓の全ハンド（訂正適用済）を一覧し、タップで
- *   ストリート単位リプレイ（共有コンポーネント）を開く。
+ *   ストリート単位リプレイ（共有コンポーネント）+ 訂正パネル（B4/ADR-0036）を開く。
  */
 export function HandTab(props: {
   repository: StaffRepository;
@@ -24,12 +25,26 @@ export function HandTab(props: {
   const [amount, setAmount] = useState("");
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [sent, setSent] = useState<string[]>([]);
-  const [selected, setSelected] = useState<HandSummary | null>(null);
+  // 選択は hand_id で保持し、本体は常に handsState（訂正適用済ビュー）から引く。
+  // 訂正 → reload で detail が最新の訂正済みビューに更新される。
+  const [selectedId, setSelectedId] = useState<number | null>(null);
 
   const handsState = useAsync(
     () => repository.listSessionHands(session.session_id),
     [repository, session.session_id],
   );
+  const selected =
+    selectedId === null
+      ? null
+      : (handsState.data ?? []).find((h) => h.hand_id === selectedId) ?? null;
+
+  // ライブ卓では新ハンドの追記を 5 秒 polling で自動反映する（useAsync は stale data 保持）。
+  const reloadHands = handsState.reload;
+  useEffect(() => {
+    if (session.status !== "open") return;
+    const id = setInterval(() => reloadHands(), 5000);
+    return () => clearInterval(id);
+  }, [session.status, reloadHands]);
 
   const send = async (input: HandControlInput, label: string): Promise<void> => {
     try {
@@ -69,11 +84,11 @@ export function HandTab(props: {
     void send({ type: "rebuy", seat: s, amount: a }, `リバイ 席${s} +${a}`);
   };
 
-  // ハンド選択中はリプレイ detail を表示（一覧へは戻るリンク）。
+  // ハンド選択中はリプレイ detail + 訂正パネルを表示（一覧へは戻るリンク）。
   if (selected) {
     return (
-      <ScrollView>
-        <Pressable onPress={() => setSelected(null)}>
+      <ScrollView keyboardShouldPersistTaps="handled">
+        <Pressable onPress={() => setSelectedId(null)}>
           <Text style={styles.back}>← ハンド履歴</Text>
         </Pressable>
         <Text style={styles.cardTitle}>Hand #{selected.hand_id}</Text>
@@ -82,6 +97,12 @@ export function HandTab(props: {
           {selected.review_required ? " ・ 要確認あり" : ""}
         </Text>
         <HandReplay hand={selected} />
+        <HandCorrectionPanel
+          repository={repository}
+          sessionId={session.session_id}
+          hand={selected}
+          onCorrected={handsState.reload}
+        />
         <View style={{ height: 40 }} />
       </ScrollView>
     );
@@ -159,7 +180,7 @@ export function HandTab(props: {
                 borderBottomWidth: 1,
                 borderBottomColor: colors.border,
               }}
-              onPress={() => setSelected(h)}
+              onPress={() => setSelectedId(h.hand_id)}
             >
               <Text style={{ color: colors.text, fontSize: 14, fontWeight: "600" }}>
                 Hand #{h.hand_id}

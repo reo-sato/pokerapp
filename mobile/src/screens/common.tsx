@@ -34,7 +34,11 @@ export function Loading(): React.JSX.Element {
   );
 }
 
-export function ErrorView(props: { code: string | null; message: string | null }): React.JSX.Element {
+export function ErrorView(props: {
+  code: string | null;
+  message: string | null;
+  onRetry?: () => void;
+}): React.JSX.Element {
   // 分岐は code（error-shapes.md）。message は表示用。
   const text =
     props.code === "not_found"
@@ -45,7 +49,21 @@ export function ErrorView(props: { code: string | null; message: string | null }
   return (
     <View style={styles.center}>
       <Text style={styles.error}>{text}</Text>
+      {props.onRetry ? (
+        <Pressable onPress={props.onRetry} style={{ marginTop: 16 }}>
+          <Text style={styles.back}>↻ 再試行</Text>
+        </Pressable>
+      ) : null}
     </View>
+  );
+}
+
+/** 一覧/詳細の手動更新リンク（web export では RefreshControl が効かないため常設する）。 */
+export function ReloadLink(props: { onPress: () => void }): React.JSX.Element {
+  return (
+    <Pressable onPress={props.onPress} accessibilityRole="button">
+      <Text style={[styles.back, { marginBottom: 0 }]}>↻ 再読込</Text>
+    </Pressable>
   );
 }
 

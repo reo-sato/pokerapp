@@ -127,7 +127,7 @@ export interface OrderRequest {
   item_name: string;
   quantity: number;
   note?: string;
-  status: "pending" | "confirmed" | "rejected";
+  status: "pending" | "confirmed" | "rejected" | "cancelled"; // cancelled = 本人取り下げ (1.1, ADR-0045)
   requested_at: string;
   resolved_at?: string;
   ledger_entry_id?: string;
@@ -182,6 +182,28 @@ export interface HandSummary {
   winner_seat?: number;
   actions: ActionRecord[];
   review_required?: boolean;
+}
+
+/** ハンド訂正レコード (ADR-0036)。append-only オーバーレイ。 */
+export interface HandCorrection {
+  correction_id: string;
+  session_id: string;
+  hand_id: number;
+  action_index: number | null; // null = hand レベル (winner_seat 等)
+  field: string; // "action" | "amount" | "winner_seat"
+  new_value: string | number;
+  corrected_by: string;
+  corrected_at: string;
+  note?: string;
+}
+
+/** ハンド訂正の入力 (staff 操作, ADR-0036)。 */
+export interface HandCorrectionInput {
+  field: string; // "action" | "amount"（action_index あり） | "winner_seat"（hand レベル）
+  new_value: string | number;
+  action_index?: number | null;
+  corrected_by?: string;
+  note?: string;
 }
 
 /** hand logger 遠隔制御コマンド（control queue, ADR-0039）。 */

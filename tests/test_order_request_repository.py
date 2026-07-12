@@ -159,3 +159,81 @@ class TestListPersistenceAndContract:
         validator.validate(r.to_dict())
         validator.validate(
             env["orders"].confirm_request(r.request_id, 700, env["ledger"]).to_dict())
+
+
+class TestCancelRequest:
+    """ADR-0045: player 本人による pending 注文の取り下げ。"""
+
+    def test_cancel_pending_writes_nothing(self, env):
+        sid, pid = env["session"].session_id, env["alice"].player_id
+        r = env["orders"].create_request(sid, pid, "ビール", 1)
+        cancelled = env["orders"].cancel_request(r.request_id, pid, session_id=sid)
+        assert cancelled.status == "cancelled"
+        assert cancelled.resolved_at is not None
+        assert cancelled.ledger_entry_id is None
+        assert env["ledger"].list_entries(sid) == []
+        # pending queue（スタッフ確定画面）からは消える。
+        assert env["orders"].list_requests(sid, status="pending") == []
+
+    def test_cancel_by_other_player_is_not_found(self, env):
+        """他人の request は存在を漏らさず not_found（ADR-0045 D2）。"""
+        sid = env["session"].session_id
+        bob = env["players"].create_player("Bob")
+        r = env["orders"].create_request(sid, env["alice"].player_id, "ビール", 1)
+        with pytest.raises(OrderRequestNotFoundError):
+            env["orders"].cancel_request(r.request_id, bob.player_id, session_id=sid)
+        # 変化していない。
+        assert env["orders"].get(r.request_id).status == "pending"
+
+    def test_cancel_session_mismatch_is_not_found(self, env):
+        sid, pid = env["session"].session_id, env["alice"].player_id
+        other = env["sessions"].create_session(label="other")
+        r = env["orders"].create_request(sid, pid, "ビール", 1)
+        with pytest.raises(OrderRequestNotFoundError):
+            env["orders"].cancel_request(
+                r.request_id, pid, session_id=other.session_id)
+
+    def test_cancel_resolved_is_already_resolved(self, env):
+        sid, pid = env["session"].session_id, env["alice"].player_id
+        r = env["orders"].create_request(sid, pid, "ビール", 1)
+        env["orders"].confirm_request(r.request_id, 700, env["ledger"])
+        with pytest.raises(AlreadyResolvedError):
+            env["orders"].cancel_request(r.request_id, pid, session_id=sid)
+        # 逆方向: cancelled 済みは confirm / reject できない（先勝ち）。
+        r2 = env["orders"].create_request(sid, pid, "コーラ", 1)
+        env["orders"].cancel_request(r2.request_id, pid, session_id=sid)
+        with pytest.raises(AlreadyResolvedError):
+            env["orders"].confirm_request(r2.request_id, 400, env["ledger"])
+        with pytest.raises(AlreadyResolvedError):
+            env["orders"].reject_request(r2.request_id)
+
+    def test_cancel_allowed_in_closed_session(self, env):
+        """closed session の pending は取り下げ可（会計に影響しない残骸掃除, ADR-0045 D2）。"""
+        sid, pid = env["session"].session_id, env["alice"].player_id
+        r = env["orders"].create_request(sid, pid, "ビール", 1)
+        env["sessions"].close_session(sid)
+        cancelled = env["orders"].cancel_request(r.request_id, pid, session_id=sid)
+        assert cancelled.status == "cancelled"
+
+    def test_cancel_resolves_merged_player(self, env):
+        """merge 済み player は equivalence class で本人判定する（ADR-0030 D2）。"""
+        sid = env["session"].session_id
+        bob = env["players"].create_player("Bob2")
+        r = env["orders"].create_request(sid, bob.player_id, "ビール", 1)
+        # bob を alice に統合 → alice（survivor）としてキャンセルできる。
+        env["players"].merge_players(env["alice"].player_id, bob.player_id)
+        cancelled = env["orders"].cancel_request(
+            r.request_id, env["alice"].player_id, session_id=sid)
+        assert cancelled.status == "cancelled"
+
+    def test_cancelled_matches_contract_schema(self, env):
+        import json
+
+        import jsonschema
+
+        sid, pid = env["session"].session_id, env["alice"].player_id
+        r = env["orders"].create_request(sid, pid, "ビール", 1)
+        cancelled = env["orders"].cancel_request(r.request_id, pid, session_id=sid)
+        schema = json.loads(
+            (_SCHEMAS / "order_request.schema.json").read_text(encoding="utf-8"))
+        jsonschema.Draft202012Validator(schema).validate(cancelled.to_dict())

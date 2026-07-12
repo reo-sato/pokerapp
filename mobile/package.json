@@ -22,7 +22,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/api/mockRepository.test.ts src/shared/hand_replay/handReplayModel.test.ts",
+    "test": "tsx --test src/api/mockRepository.test.ts src/storage.test.ts src/shared/hand_replay/handReplayModel.test.ts src/shared/hand_replay/handReplayText.test.ts",
     "export:web": "expo export --platform web"
   },
   "private": true

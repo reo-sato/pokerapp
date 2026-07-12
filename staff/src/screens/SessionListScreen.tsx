@@ -5,18 +5,67 @@ import type { StaffRepository } from "../api/repository";
 import type { StaffSession } from "../api/types";
 import { StaffApiError } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
-import { BackLink, Button, colors, ErrorView, Field, Loading, styles } from "./common";
+import { BackLink, Button, colors, ErrorView, Field, Loading, styles, yen } from "./common";
 
-/** session（卓）一覧 + 作成 / close。選ぶと会計・注文・座席を扱う TableView に遷移する。 */
+/** 営業日サマリ 1 卓分（compute_settlement のクライアント側集計, 中間値）。 */
+interface DaySessionRow {
+  session: StaffSession;
+  players: number;
+  cashIn: number;
+  orders: number;
+  entryFees: number;
+  net: number;
+}
+
+/** 端末ローカル日付の YYYY-MM-DD（started_at は naive local ISO なので prefix 比較でよい）。 */
+function localDateKey(d: Date): string {
+  const p = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** session（卓）一覧 + 作成 / close + 本日の集計。選ぶと会計・注文・座席を扱う TableView に遷移する。 */
 export function SessionListScreen(props: {
   repository: StaffRepository;
   onSelect: (session: StaffSession) => void;
+  onOpenPlayers: () => void;
   onLogout: () => void;
 }): React.JSX.Element {
-  const { repository, onSelect, onLogout } = props;
+  const { repository, onSelect, onOpenPlayers, onLogout } = props;
   const state = useAsync(() => repository.listSessions(), [repository]);
   const [label, setLabel] = useState("");
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const [dayRows, setDayRows] = useState<DaySessionRow[] | null>(null);
+  const [dayBusy, setDayBusy] = useState(false);
+  const [dayError, setDayError] = useState<string | null>(null);
+
+  // 本日の集計: 当日開始の全 session の中間集計（compute_settlement）をクライアント側で合算する。
+  // 締め作業の目安であり確定値ではない（確定は各卓の精算 commit）。
+  const computeDaySummary = async (): Promise<void> => {
+    setDayBusy(true);
+    setDayError(null);
+    try {
+      const sessions = state.data ?? (await repository.listSessions());
+      const today = localDateKey(new Date());
+      const todays = sessions.filter((s) => s.started_at.slice(0, 10) === today);
+      const rows: DaySessionRow[] = [];
+      for (const s of todays) {
+        const settlements = await repository.getSettlement(s.session_id);
+        rows.push({
+          session: s,
+          players: settlements.length,
+          cashIn: settlements.reduce((a, r) => a + r.cash_in_total, 0),
+          orders: settlements.reduce((a, r) => a + r.order_total, 0),
+          entryFees: settlements.reduce((a, r) => a + r.entry_fee, 0),
+          net: settlements.reduce((a, r) => a + r.net_due_to_store, 0),
+        });
+      }
+      setDayRows(rows);
+    } catch (err) {
+      setDayError(err instanceof StaffApiError ? err.message : String(err));
+    } finally {
+      setDayBusy(false);
+    }
+  };
 
   const onCreate = async (): Promise<void> => {
     try {
@@ -43,11 +92,56 @@ export function SessionListScreen(props: {
     <View style={styles.screen}>
       <View style={[styles.row, { justifyContent: "space-between" }]}>
         <Text style={styles.title}>セッション一覧</Text>
-        <Pressable onPress={onLogout}>
-          <Text style={styles.back}>ログアウト</Text>
-        </Pressable>
+        <View style={styles.row}>
+          <Pressable onPress={onOpenPlayers} style={{ marginRight: 16 }}>
+            <Text style={styles.back}>プレイヤー管理</Text>
+          </Pressable>
+          <Pressable onPress={onLogout}>
+            <Text style={styles.back}>ログアウト</Text>
+          </Pressable>
+        </View>
       </View>
       <Text style={styles.subtitle}>卓を選んで会計・注文・座席を操作します。</Text>
+
+      {/* 本日の集計（締め作業の目安。確定は各卓の精算 commit） */}
+      <View style={styles.card}>
+        <View style={[styles.row, { justifyContent: "space-between" }]}>
+          <Text style={styles.cardTitle}>本日の集計</Text>
+          <Button
+            label={dayBusy ? "計算中…" : dayRows === null ? "計算する" : "再計算"}
+            kind="neutral"
+            onPress={() => void computeDaySummary()}
+            disabled={dayBusy}
+          />
+        </View>
+        {dayError ? (
+          <Text style={[styles.status, { color: colors.neg }]}>{dayError}</Text>
+        ) : dayRows === null ? (
+          <Text style={styles.cardMeta}>
+            当日開始の全卓の中間集計を合算します（確定値ではありません）。
+          </Text>
+        ) : dayRows.length === 0 ? (
+          <Text style={styles.cardMeta}>本日開始のセッションはありません。</Text>
+        ) : (
+          <View>
+            {dayRows.map((r) => (
+              <Text key={r.session.session_id} style={styles.cardMeta}>
+                {r.session.label ?? r.session.session_id.slice(0, 8)}
+                {r.session.status === "open" ? "（進行中）" : "（closed）"} ・ {r.players} 名 ・
+                net {yen(r.net)}
+              </Text>
+            ))}
+            <Text style={[styles.cardTitle, { marginTop: 8 }]}>
+              合計 {yen(dayRows.reduce((a, r) => a + r.net, 0))}
+            </Text>
+            <Text style={styles.cardMeta}>
+              バイイン {yen(dayRows.reduce((a, r) => a + r.cashIn, 0))} ・ 注文{" "}
+              {yen(dayRows.reduce((a, r) => a + r.orders, 0))} ・ 参加費{" "}
+              {yen(dayRows.reduce((a, r) => a + r.entryFees, 0))}
+            </Text>
+          </View>
+        )}
+      </View>
 
       <View style={[styles.card]}>
         <View style={styles.row}>

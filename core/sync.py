@@ -27,8 +27,10 @@ from pathlib import Path
 from core.atomic_io import atomic_write_json
 
 # ――― 終端 status の優先度（order_request）―――
-# pending < {confirmed, rejected}。両終端で異なれば confirmed を優先（会計影響あり）。
-_ORDER_STATUS_RANK = {"pending": 0, "rejected": 1, "confirmed": 2}
+# pending < {cancelled, rejected, confirmed}。両終端で異なれば confirmed を優先（会計影響あり,
+# ADR-0045: player キャンセル × スタッフ確定の衝突は確定が勝つ）。cancelled vs rejected は
+# どちらも ledger 無しの終端で実質同義 — 決定性のため rejected（スタッフ操作）を上位にする。
+_ORDER_STATUS_RANK = {"pending": 0, "cancelled": 1, "rejected": 2, "confirmed": 3}
 
 
 def _index_by(records: list[dict], key: str) -> dict:
