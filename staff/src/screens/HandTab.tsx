@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 
 import type { StaffRepository } from "../api/repository";
@@ -37,6 +37,14 @@ export function HandTab(props: {
     selectedId === null
       ? null
       : (handsState.data ?? []).find((h) => h.hand_id === selectedId) ?? null;
+
+  // ライブ卓では新ハンドの追記を 5 秒 polling で自動反映する（useAsync は stale data 保持）。
+  const reloadHands = handsState.reload;
+  useEffect(() => {
+    if (session.status !== "open") return;
+    const id = setInterval(() => reloadHands(), 5000);
+    return () => clearInterval(id);
+  }, [session.status, reloadHands]);
 
   const send = async (input: HandControlInput, label: string): Promise<void> => {
     try {

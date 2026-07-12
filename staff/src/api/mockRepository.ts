@@ -207,7 +207,8 @@ export class MockStaffRepository implements StaffRepository {
 
   async listPlayers(): Promise<Player[]> {
     this.requireAuth();
-    return clone(this.players);
+    // server の staff players read は canonical（merge 済み tombstone を出さない, ADR-0030）。
+    return clone(this.players.filter((p) => !p.merged_into));
   }
 
   async createPlayer(displayName: string): Promise<Player> {
@@ -240,6 +241,25 @@ export class MockStaffRepository implements StaffRepository {
     }
     player.display_name = name;
     return clone(player);
+  }
+
+  async mergePlayers(
+    survivorId: string,
+    absorbedId: string,
+  ): Promise<{ survivor_id: string; absorbed_id: string }> {
+    this.requireAuth();
+    if (survivorId === absorbedId) {
+      throw new StaffApiError({ code: "invalid_merge", message: "自分自身とは merge できません。" });
+    }
+    const survivor = this.players.find((p) => p.player_id === survivorId && !p.merged_into);
+    const absorbed = this.players.find((p) => p.player_id === absorbedId && !p.merged_into);
+    if (!survivor || !absorbed) {
+      throw new StaffApiError({ code: "not_found", message: "player が見つかりません。" });
+    }
+    // alias/tombstone（ADR-0030）: absorbed に merged_into を付けるだけ（履歴 rewrite なし）。
+    absorbed.merged_into = survivorId;
+    absorbed.merged_at = new Date().toISOString();
+    return { survivor_id: survivorId, absorbed_id: absorbedId };
   }
 
   async getSeating(sessionId: string): Promise<StaffSeating> {

@@ -124,6 +124,16 @@ export class HttpStaffRepository implements StaffRepository {
     return this.send("PUT", `/api/staff/players/${E(playerId)}`, { display_name: displayName });
   }
 
+  mergePlayers(
+    survivorId: string,
+    absorbedId: string,
+  ): Promise<{ survivor_id: string; absorbed_id: string }> {
+    return this.send("POST", "/api/staff/players/merge", {
+      survivor_id: survivorId,
+      absorbed_id: absorbedId,
+    });
+  }
+
   getSeating(sessionId: string): Promise<StaffSeating> {
     return this.get(`/api/staff/sessions/${E(sessionId)}/seating`);
   }

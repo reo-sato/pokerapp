@@ -6,6 +6,39 @@
 
 ## [Unreleased]
 
+### Added (注文キャンセル = ADR-0045 / status `cancelled`, schema 1.0→1.1)
+
+- **player 本人による pending 注文の取り下げ**。core `OrderRequestRepository.cancel_request`
+  （equivalence class で本人判定・他人の request は**存在を漏らさず not_found**・pending のみ・
+  ledger 影響なし・closed session の残骸も取り下げ可）。
+- API `POST /api/players/{pid}/sessions/{sid}/order-requests/{rid}/cancel`（認可は注文 POST と
+  同一 = write 所有プロセスのみ + player_auth on なら principal 必須）+
+  `ViewerApiClient.cancel_order_request`。新 error code なし（not_found / already_resolved 再利用）。
+- sync の status 解決を `confirmed > rejected > cancelled > pending` に拡張（ADR-0022 additive。
+  player キャンセル × スタッフ確定の衝突は**確定が勝つ** — ledger entry が既に存在するため）。
+- mobile 注文画面: pending 行に「キャンセル」導線 + status 表示に「キャンセル済み」。
+  staff の pending queue からは自動的に消える。
+- `order_request.schema.json` `1.0`→`1.1`（enum 値の additive 追加, ADR-0023 と同パターン）。
+  tests: core 7 + API 3 + sync 1 + mobile mock 1。
+
+### Added (staff 運用機能 = 営業日サマリ / プレイヤー管理 / ライブ polling 拡大)
+
+- **営業日サマリ**: SessionList に「本日の集計」— 当日開始の全卓の中間集計
+  （compute_settlement）をクライアント側で合算し、卓ごとの net と合計（バイイン/注文/参加費
+  内訳）を表示。締め作業の目安（確定値ではない旨を明示）。API 変更なし。
+- **プレイヤー管理画面**（`PlayersScreen`）: 一覧 / 新規作成 / リネーム / **重複統合
+  （merge, ADR-0030）** を iPad から操作。`StaffRepository.mergePlayers`（HTTP = 既存
+  `POST /api/staff/players/merge` 再利用 / mock は tombstone 近似）。
+- **ライブ polling の拡大**: ハンド履歴（ハンドタブ）と座席（座席タブ）も open 卓では
+  5 秒 polling で自動反映（注文バッジと同機構。staged 編集状態には触れない）。
+
+### Added (mobile ハンド共有/書き出し — Phase B「書き出し」導線)
+
+- HandDetail に「📤 このハンドを共有 / コピー」。`shared/hand_replay/handReplayText.ts`
+  （純関数 `buildHandText`: リプレイと同じストリート分割・ボードスライス・ポット境界で
+  プレーンテキスト化。訂正適用済みビューを書き出す）+ OS 共有シート
+  （`Share.share`）→ 非対応環境はクリップボードに fallback。TS tests 2 件（両アプリで実行）。
+
 ### Added (実運用 UI 補強 = mobile 再読込/永続化 + staff 注文バッジ polling + staff 訂正パネル)
 
 - **mobile 手動再読込**: 全画面（PlayerSelect / MySessions / MyHands / HandDetail / MyLedger /

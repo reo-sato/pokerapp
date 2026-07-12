@@ -127,7 +127,7 @@ export interface OrderRequest {
   item_name: string;
   quantity: number;
   note?: string;
-  status: "pending" | "confirmed" | "rejected";
+  status: "pending" | "confirmed" | "rejected" | "cancelled"; // cancelled = 本人取り下げ (1.1, ADR-0045)
   requested_at: string;
   resolved_at?: string;
   ledger_entry_id?: string;

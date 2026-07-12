@@ -208,6 +208,30 @@ export class MockRepository implements ViewerRepository {
     return request;
   }
 
+  async cancelOrderRequest(
+    playerId: string,
+    sessionId: string,
+    requestId: string,
+  ): Promise<OrderRequest> {
+    await this.getPlayer(playerId);
+    const request = this.orderRequests.find(
+      (r) =>
+        r.request_id === requestId &&
+        r.player_id === playerId && // 他人の request は存在を漏らさず not_found (ADR-0045)
+        r.session_id === sessionId,
+    );
+    if (!request) throw notFound(`request_id=${requestId} は存在しません。`);
+    if (request.status !== "pending") {
+      throw new ViewerApiError({
+        code: "already_resolved",
+        message: `request_id=${requestId} は既に ${request.status} です。`,
+      });
+    }
+    request.status = "cancelled";
+    request.resolved_at = new Date().toISOString().slice(0, 19);
+    return request;
+  }
+
   async addHandCorrection(
     sessionId: string,
     handId: number,

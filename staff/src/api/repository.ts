@@ -64,6 +64,14 @@ export interface StaffRepository {
   createPlayer(displayName: string): Promise<Player>;
   /** player の display_name をリネームする。 */
   renamePlayer(playerId: string, displayName: string): Promise<Player>;
+  /**
+   * absorbed を survivor に統合する（player merge, ADR-0030。alias/tombstone・可逆）。
+   * 自己 merge / サイクルは invalid_merge、実在しない player は not_found。
+   */
+  mergePlayers(
+    survivorId: string,
+    absorbedId: string,
+  ): Promise<{ survivor_id: string; absorbed_id: string }>;
 
   // ――― 座席（hand-based seating, ADR-0038 §B）―――
   /** 現在の seating（最新 hand 由来）+ 記録済 hand_id 一覧。 */

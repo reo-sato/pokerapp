@@ -171,6 +171,19 @@ export class HttpRepository implements ViewerRepository {
     );
   }
 
+  cancelOrderRequest(
+    playerId: string,
+    sessionId: string,
+    requestId: string,
+  ): Promise<OrderRequest> {
+    // self-write（注文 POST と同じ認可姿勢, ADR-0045）。
+    return this.post(
+      `/api/players/${encodeURIComponent(playerId)}/sessions/${encodeURIComponent(sessionId)}/order-requests/${encodeURIComponent(requestId)}/cancel`,
+      {},
+      true,
+    );
+  }
+
   addHandCorrection(
     sessionId: string,
     handId: number,

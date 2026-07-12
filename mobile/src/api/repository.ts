@@ -48,6 +48,13 @@ export interface ViewerRepository {
     sessionId: string,
     body: OrderRequestBody,
   ): Promise<OrderRequest>;
+  /** ADR-0045: 本人が pending の注文を取り下げる（status=cancelled, ledger 影響なし）。
+      他人の request は not_found、終端済みは already_resolved で reject。 */
+  cancelOrderRequest(
+    playerId: string,
+    sessionId: string,
+    requestId: string,
+  ): Promise<OrderRequest>;
   /** B4 (ADR-0036): ハンド訂正を追記する（staff 操作 = iPad）。append-only オーバーレイ。
       getHand / listPlayerHands は訂正済みビューを返す。staff token 必須。 */
   addHandCorrection(

@@ -521,3 +521,35 @@ test("addHandCorrection requires a valid staff token", async () => {
     },
   );
 });
+
+test("mergePlayers marks tombstone and hides absorbed from canonical list (ADR-0030)", async () => {
+  const repo = authed();
+  const before = await repo.listPlayers();
+  const survivor = before[0];
+  const absorbed = before[1];
+
+  const result = await repo.mergePlayers(survivor.player_id, absorbed.player_id);
+  assert.equal(result.survivor_id, survivor.player_id);
+
+  const after = await repo.listPlayers();
+  assert.ok(!after.some((p) => p.player_id === absorbed.player_id));
+  assert.ok(after.some((p) => p.player_id === survivor.player_id));
+
+  // 自己 merge は invalid_merge、既に統合済みの相手は not_found。
+  await assert.rejects(
+    repo.mergePlayers(survivor.player_id, survivor.player_id),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "invalid_merge");
+      return true;
+    },
+  );
+  await assert.rejects(
+    repo.mergePlayers(survivor.player_id, absorbed.player_id),
+    (err: unknown) => {
+      assert.ok(err instanceof StaffApiError);
+      assert.equal(err.code, "not_found");
+      return true;
+    },
+  );
+});

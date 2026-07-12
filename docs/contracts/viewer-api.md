@@ -38,6 +38,7 @@ player 向け参照 front-end（WS3, Expo）が消費する **読み取り専用
 | GET | `/api/menu` | `{"items": [{"item_name", "unit_amount"}, ...]}`（menu.json master, M5。空なら `[]`） | — |
 | GET | `/api/players/{player_id}/sessions/{session_id}/order-requests` | `{"requests": [order_request, ...]}`（自分のもののみ、requested_at 順。`order_request.schema.json` v0.x） | 404 `not_found` |
 | POST | `/api/players/{player_id}/sessions/{session_id}/order-requests` | body `{"item_name", "quantity", "note"?}` → 201 + 作成された order_request（status=pending。**ledger には書かれない** — スタッフ確定で初めて記帳, ADR-0018） | 404 `not_found` / 400 `invalid_quantity` / 400 `unknown_item`（menu 外） / 409 `session_closed` / 503 `orders_unavailable`（read-only モード） |
+| POST | `/api/players/{player_id}/sessions/{session_id}/order-requests/{request_id}/cancel` | **本人が pending の注文を取り下げる**（ADR-0045。status=cancelled, ledger には何も書かない）→ 更新後 order_request。認可姿勢は注文 POST と同一（player_auth on なら principal 必須） | 404 `not_found`（unknown / **他人の request**（存在を漏らさない）/ session 不一致） / 409 `already_resolved`（終端済み） / 503 `orders_unavailable` |
 
 備考:
 
@@ -49,11 +50,13 @@ player 向け参照 front-end（WS3, Expo）が消費する **読み取り専用
 
 ## 注文リクエスト（M5, ADR-0018）
 
-player はスマホから **order_request**（`order_request.schema.json` v0.x）を POST する。これは
+player はスマホから **order_request**（`order_request.schema.json` v1.1）を POST する。これは
 **ledger には書かれず** pending として記録されるだけで、スタッフが会計画面（`--ledger`）で
 **確定 (confirm)** したときに初めて `ledger_entry`（kind=order, verify-v1 ledger）が作られ、
-`order_request.ledger_entry_id` がリンクされる（staff-in-the-loop）。却下 (reject) は ledger に
-何も書かない。
+`order_request.ledger_entry_id` がリンクされる（staff-in-the-loop）。却下 (reject) と
+**本人キャンセル (cancel, ADR-0045)** は ledger に何も書かない。状態遷移は
+pending → confirmed | rejected | **cancelled**（1.1 additive）。sync の衝突解決は
+confirmed > rejected > cancelled > pending（player キャンセル × スタッフ確定は確定が勝つ）。
 
 - **menu master**: `menu.json`（コミット済みサンプル、店側で編集）。POST 時に menu 外の品名は
   400 `unknown_item`。確定時の単価は menu から prefill（スタッフ上書き可）で、ledger entry の

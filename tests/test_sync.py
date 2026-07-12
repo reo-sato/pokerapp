@@ -471,3 +471,31 @@ def test_hand_logs_propagate_through_snapshot(tmp_path: Path):
     s1 = json.loads((a["log_dir"] / "s1.json").read_text())
     assert [h["hand_id"] for h in s1["hands"]] == [1, 2]
     assert (a["log_dir"] / "s2.json").exists()
+
+
+def test_order_merge_cancelled_rank(tmp_path):
+    """ADR-0045: cancelled の衝突解決 = confirmed > rejected > cancelled > pending。可換。"""
+    from core.sync import merge_order_requests
+
+    def req(status: str, **extra) -> dict:
+        return {
+            "request_id": "a" * 32, "session_id": "s" * 32, "player_id": "p" * 32,
+            "item_name": "ビール", "quantity": 1, "status": status,
+            "requested_at": "2026-07-12T20:00:00", **extra,
+        }
+
+    cancelled = req("cancelled", resolved_at="2026-07-12T20:01:00")
+    confirmed = req("confirmed", resolved_at="2026-07-12T20:02:00",
+                    ledger_entry_id="e" * 32)
+    rejected = req("rejected", resolved_at="2026-07-12T20:03:00")
+    pending = req("pending")
+
+    # player キャンセル × スタッフ確定 → 確定が勝つ（会計影響を優先, 可換）。
+    assert merge_order_requests([cancelled], [confirmed])[0]["status"] == "confirmed"
+    assert merge_order_requests([confirmed], [cancelled])[0]["status"] == "confirmed"
+    # cancelled × rejected → rejected（決定性のためスタッフ操作を上位）。
+    assert merge_order_requests([cancelled], [rejected])[0]["status"] == "rejected"
+    assert merge_order_requests([rejected], [cancelled])[0]["status"] == "rejected"
+    # pending × cancelled → cancelled（終端が勝つ）。
+    assert merge_order_requests([pending], [cancelled])[0]["status"] == "cancelled"
+    assert merge_order_requests([cancelled], [pending])[0]["status"] == "cancelled"

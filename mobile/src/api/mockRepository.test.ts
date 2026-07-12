@@ -213,3 +213,37 @@ test("getHand returns hand or rejects with not_found", async () => {
     return true;
   });
 });
+
+test("cancelOrderRequest cancels own pending order and rejects resolved/foreign (ADR-0045)", async () => {
+  const repo = new MockRepository();
+  const created = await repo.createOrderRequest(ALICE_ID, SESSION_ID, {
+    item_name: "ビール", quantity: 1,
+  });
+
+  const cancelled = await repo.cancelOrderRequest(ALICE_ID, SESSION_ID, created.request_id);
+  assert.equal(cancelled.status, "cancelled");
+  assert.ok(cancelled.resolved_at);
+
+  // 再キャンセルは already_resolved。
+  await assert.rejects(
+    repo.cancelOrderRequest(ALICE_ID, SESSION_ID, created.request_id),
+    (err: unknown) => {
+      assert.ok(err instanceof ViewerApiError);
+      assert.equal(err.code, "already_resolved");
+      return true;
+    },
+  );
+
+  // 他人の request は存在を漏らさず not_found。
+  const another = await repo.createOrderRequest(ALICE_ID, SESSION_ID, {
+    item_name: "コーラ", quantity: 1,
+  });
+  await assert.rejects(
+    repo.cancelOrderRequest(BOB_ID, SESSION_ID, another.request_id),
+    (err: unknown) => {
+      assert.ok(err instanceof ViewerApiError);
+      assert.equal(err.code, "not_found");
+      return true;
+    },
+  );
+});
