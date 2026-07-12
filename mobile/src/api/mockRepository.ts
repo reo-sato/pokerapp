@@ -21,6 +21,7 @@ import type {
   PlayerSessionSummary,
 } from "./types";
 import { ViewerApiError } from "./types";
+import { clearStoredAuth, loadStoredAuth, saveStoredAuth } from "./authStorage";
 import * as fx from "../mocks/fixtures";
 
 function notFound(message: string): ViewerApiError {
@@ -41,6 +42,12 @@ export class MockRepository implements ViewerRepository {
   // 本人認証 (L1/L2) の in-memory 状態。OIDC サインアップで作った player も保持する。
   private principal: string | null = null;
   private signedUp: Player[] = [];
+
+  constructor() {
+    // 保存済みログインを復元する（HttpRepository と同じ意味論。mock token は期限なし）。
+    const stored = loadStoredAuth();
+    if (stored) this.principal = stored.player_id;
+  }
 
   async health(): Promise<{ status: string; version: string }> {
     return { status: "ok", version: "mock" };
@@ -67,7 +74,9 @@ export class MockRepository implements ViewerRepository {
       throw new ViewerApiError({ code: "invalid_pin", message: "PIN が違います。" });
     }
     this.principal = playerId;
-    return { token: `mock-token-${playerId}`, player_id: playerId, expires_at: 0 };
+    const session = { token: `mock-token-${playerId}`, player_id: playerId, expires_at: 0 };
+    saveStoredAuth(session);
+    return session;
   }
 
   async oidcExchange(provider: string, code: string): Promise<AuthSession> {
@@ -86,7 +95,11 @@ export class MockRepository implements ViewerRepository {
       this.signedUp.push(player);
     }
     this.principal = player.player_id;
-    return { token: `mock-token-${player.player_id}`, player_id: player.player_id, expires_at: 0 };
+    const session = {
+      token: `mock-token-${player.player_id}`, player_id: player.player_id, expires_at: 0,
+    };
+    saveStoredAuth(session);
+    return session;
   }
 
   currentPrincipal(): string | null {
@@ -95,6 +108,7 @@ export class MockRepository implements ViewerRepository {
 
   clearAuth(): void {
     this.principal = null;
+    clearStoredAuth();
   }
 
   async listPlayerSessions(playerId: string): Promise<PlayerSessionSummary[]> {

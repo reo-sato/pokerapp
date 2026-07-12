@@ -4,7 +4,7 @@ import { FlatList, Pressable, Text, View } from "react-native";
 import type { ViewerRepository } from "../api/repository";
 import type { HandSummary, Player, PlayerSessionSummary } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
-import { BackLink, ErrorView, Loading, formatResult, styles } from "./common";
+import { BackLink, ErrorView, Loading, ReloadLink, formatResult, styles } from "./common";
 
 interface Props {
   repository: ViewerRepository;
@@ -26,14 +26,17 @@ export function findOwnRow(hand: HandSummary, player: Player) {
 export function MyHandsScreen({
   repository, player, session, onSelect, onBack, onOpenLedger,
 }: Props): React.JSX.Element {
-  const { data, loading, errorCode, errorMessage } = useAsync(
+  const { data, loading, errorCode, errorMessage, reload } = useAsync(
     () => repository.listPlayerHands(player.player_id, session.session_id),
     [repository, player.player_id, session.session_id],
   );
 
   return (
     <View style={styles.screen}>
-      <BackLink onPress={onBack} label="セッション一覧" />
+      <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+        <BackLink onPress={onBack} label="セッション一覧" />
+        <ReloadLink onPress={reload} />
+      </View>
       <Text style={styles.title}>{session.label ?? session.started_at}</Text>
       <Text style={styles.subtitle}>{player.display_name} が参加したハンド</Text>
       <Pressable onPress={onOpenLedger}>
@@ -42,7 +45,7 @@ export function MyHandsScreen({
       {loading ? (
         <Loading />
       ) : errorCode ? (
-        <ErrorView code={errorCode} message={errorMessage} />
+        <ErrorView code={errorCode} message={errorMessage} onRetry={reload} />
       ) : (
         <FlatList
           data={data ?? []}

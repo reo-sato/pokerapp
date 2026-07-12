@@ -4,7 +4,7 @@ import { Pressable, ScrollView, Text, View } from "react-native";
 import type { ViewerRepository } from "../api/repository";
 import type { LedgerEntry, Player, PlayerSessionSummary } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
-import { BackLink, ErrorView, Loading, formatResult, styles } from "./common";
+import { BackLink, ErrorView, Loading, ReloadLink, formatResult, styles } from "./common";
 
 interface Props {
   repository: ViewerRepository;
@@ -27,14 +27,17 @@ const KIND_LABELS: Record<LedgerEntry["kind"], string> = {
 export function MyLedgerScreen({
   repository, player, session, onBack, onOpenOrder,
 }: Props): React.JSX.Element {
-  const { data, loading, errorCode, errorMessage } = useAsync(
+  const { data, loading, errorCode, errorMessage, reload } = useAsync(
     () => repository.getPlayerLedger(player.player_id, session.session_id),
     [repository, player.player_id, session.session_id],
   );
 
   return (
     <View style={styles.screen}>
-      <BackLink onPress={onBack} label="ハンド一覧" />
+      <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+        <BackLink onPress={onBack} label="ハンド一覧" />
+        <ReloadLink onPress={reload} />
+      </View>
       <Text style={styles.title}>{player.display_name} の会計</Text>
       <Text style={styles.subtitle}>
         {session.label ?? session.started_at} ・ 中間集計（確定値ではありません）
@@ -45,7 +48,7 @@ export function MyLedgerScreen({
       {loading ? (
         <Loading />
       ) : errorCode || !data ? (
-        <ErrorView code={errorCode} message={errorMessage} />
+        <ErrorView code={errorCode} message={errorMessage} onRetry={reload} />
       ) : (
         <ScrollView>
           <View style={styles.card}>

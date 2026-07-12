@@ -77,7 +77,7 @@ export function OrderScreen({ repository, player, session, onBack }: Props): Rea
       {menuState.loading ? (
         <Loading />
       ) : menuState.errorCode ? (
-        <ErrorView code={menuState.errorCode} message={menuState.errorMessage} />
+        <ErrorView code={menuState.errorCode} message={menuState.errorMessage} onRetry={menuState.reload} />
       ) : (
         <ScrollView>
           {message ? (

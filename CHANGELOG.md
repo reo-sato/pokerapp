@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+### Added (実運用 UI 補強 = mobile 再読込/永続化 + staff 注文バッジ polling + staff 訂正パネル)
+
+- **mobile 手動再読込**: 全画面（PlayerSelect / MySessions / MyHands / HandDetail / MyLedger /
+  Order のメニュー）に「↻ 再読込」リンクとエラー時の「↻ 再試行」を追加。`useAsync` に
+  `reload` を追加（staff 版と同等）。「注文が確定されたか」「新しいハンドが増えたか」を
+  画面を出直さずに確認できる。
+- **mobile 永続化**: 選択した player（`phv.player`）とログイントークン（`phv.auth`,
+  期限切れは読み出し時に破棄）を保存し、ブラウザ再読込後も名前選択・ログインをスキップ。
+  保存先は `src/storage.ts`（web = localStorage / native = in-memory fallback、
+  AsyncStorage への差し替え点を 1 ファイルに限定）。tests 4 件。
+- **staff 注文バッジ自動更新**: open 卓では pending 注文バッジを 5 秒 polling で自動更新
+  （計測タブと同間隔）。`staff/src/hooks/useAsync.ts` を再取得中 stale data 保持に変更し、
+  polling でバッジ・計測一覧がちらつかなくなった。
+- **staff アプリ内のハンド訂正導線（B4/ADR-0036）**: ハンドタブのリプレイ詳細に
+  `HandCorrectionPanel` を追加。アクション種別/金額（action_index 付き）と勝者席を
+  append-only オーバーレイで訂正し、訂正→hands read 再読込でリプレイに即反映。
+  needs_review 解除で計測タブの C-2 ガードも解除される（mock も同意味論）。
+  `StaffRepository.addHandCorrection`（HTTP = 既存 staff API 再利用 / mock）。
+  mock tests +4（計 34）、Playwright E2E +1（計 8）。
+
 ### Added (ハンドリプレイ UI = mobile/staff 共有コンポーネント + staff ハンド履歴 read, ADR-0044)
 
 - **GGPoker ハンドヒストリー風のストリート単位リプレイ UI** を player 用 mobile と staff 用

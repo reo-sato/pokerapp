@@ -5,7 +5,7 @@ import type { ViewerRepository } from "../api/repository";
 import type { Player, PlayerSessionSummary } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
 import { HandReplay } from "../shared/hand_replay/HandReplay";
-import { BackLink, ErrorView, Loading, formatResult, styles } from "./common";
+import { BackLink, ErrorView, Loading, ReloadLink, formatResult, styles } from "./common";
 import { findOwnRow } from "./MyHandsScreen";
 
 interface Props {
@@ -21,19 +21,22 @@ interface Props {
 export function HandDetailScreen({
   repository, player, session, handId, onBack, onCorrect,
 }: Props): React.JSX.Element {
-  const { data: hand, loading, errorCode, errorMessage } = useAsync(
+  const { data: hand, loading, errorCode, errorMessage, reload } = useAsync(
     () => repository.getHand(session.session_id, handId),
     [repository, session.session_id, handId],
   );
 
   return (
     <View style={styles.screen}>
-      <BackLink onPress={onBack} label="ハンド一覧" />
+      <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+        <BackLink onPress={onBack} label="ハンド一覧" />
+        <ReloadLink onPress={reload} />
+      </View>
       <Text style={styles.title}>Hand #{handId}</Text>
       {loading ? (
         <Loading />
       ) : errorCode || !hand ? (
-        <ErrorView code={errorCode} message={errorMessage} />
+        <ErrorView code={errorCode} message={errorMessage} onRetry={reload} />
       ) : (
         <ScrollView>
           <Text style={styles.subtitle}>

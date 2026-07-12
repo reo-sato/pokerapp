@@ -15,6 +15,8 @@ import type {
   GroundTruthEditPayload,
   GroundTruthHand,
   HandControlInput,
+  HandCorrection,
+  HandCorrectionInput,
   HandSummary,
   LedgerEntry,
   MeasurementRow,
@@ -124,6 +126,16 @@ export interface StaffRepository {
    * player read と違い seat 縛りなし。log 不在 / unknown session は空 list（lenient）。
    */
   listSessionHands(sessionId: string): Promise<HandSummary[]>;
+  /**
+   * ハンド訂正を 1 件追記する（B4/ADR-0036, append-only オーバーレイ）。
+   * field = action/amount（action_index 必須）または winner_seat（hand レベル）。
+   * listSessionHands は訂正適用済みビューを返すので、訂正 → 再読込で即反映される。
+   */
+  addHandCorrection(
+    sessionId: string,
+    handId: number,
+    input: HandCorrectionInput,
+  ): Promise<HandCorrection>;
 
   // ――― Phase A 計測 / ground truth（ADR-0043）―――
   /** 計測タブの一覧行（hand_id / winner / chip won / needs_review / GT 状態）。 */

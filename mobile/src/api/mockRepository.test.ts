@@ -5,13 +5,17 @@
  * not_found code での reject (error-shapes.md と同じ分岐キー)。
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { beforeEach, test } from "node:test";
 
 import { MockRepository } from "./mockRepository";
 import { ViewerApiError } from "./types";
 import { ALICE_ID, BOB_ID, SESSION_ID } from "../mocks/fixtures";
+import { clearMemoryStorageForTest } from "../storage";
 
 const MISSING_ID = "f".repeat(32);
+
+// 認証の永続化（authStorage）がテスト間でリークしないように毎回クリアする。
+beforeEach(() => clearMemoryStorageForTest());
 
 test("listPlayers returns fixture players", async () => {
   const repo = new MockRepository();
