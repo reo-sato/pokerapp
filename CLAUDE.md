@@ -28,6 +28,7 @@ pokerapp/
 │   ├── worklog/                   ← タスク単位の作業ログ
 │   ├── templates/                 ← adr / issue / worklog テンプレート
 │   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures; **全 model schema `1.0` frozen** — player/hand/action + session/seat/hand_ref(S2) + ledger/point/settlement(S3) + order_request/player_session_summary(viewer), ADR-0019。残 draft は interface/sync(S5) のみ)
+│   ├── ui-feature-inventory.md    ← UI 実運用機能の棚卸し台帳（◎/○/△ 優先度 + 着手状態。◎○ は 2026-07-12 全消化、残は △ 群）
 │   ├── installation.md            ← エンドユーザー: インストール手順 (Phase I)
 │   ├── usage.md                   ← エンドユーザー: 使い方・読み上げ語彙・設定 (Phase I)
 │   ├── troubleshooting.md         ← エンドユーザー: 困りごと対処 (Phase I)
@@ -655,6 +656,10 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    LINE/Google provider の HTTP（token 交換 / JWKS）、hosted デプロイ（env override / cloud モード config /
    CORS 絞り / レート制限）、web redirect 変種。
 8. **未実装の単機能**: Vosk 代替 ASR、ディーラーボタン自動回転 / SB-BB 自動 post。
+9. **UI 実運用機能の棚卸し台帳**: `docs/ui-feature-inventory.md`（1 卓 dogfood 前提で全 UI を
+   ◎/○/△ に優先度づけ。**◎・○ は実装済**（ADR-0044/0045/0046 ほか, 2026-07-12）。残は △ 群 =
+   プッシュ通知・通算成績・player 検索・オフラインキュー・多言語等で、ネイティブ配布・外販期に
+   優先度を再評価する。新しい機能候補は本台帳に追記して管理する）。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。
 

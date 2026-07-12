@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### Docs (UI 実運用機能の棚卸し台帳を計画文書に転記)
+
+- `docs/ui-feature-inventory.md` を新設: 全 UI（mobile / staff iPad / desktop）の実運用機能を
+  ◎/○/△ の優先度と着手状態で管理する台帳。チャット上で行った棚卸し（前提: 1 卓 + iPad 1 台
+  dogfood / ネイティブ配布視野 / desktop 維持最小）を転記し、◎・○ 全消化（ADR-0044/0045/0046）と
+  残 △ 群を反映。CLAUDE.md の Future Scope 残作業 #9 から参照。
+
 ### Added (menu 編集 = ADR-0046 / 価格改定・品切れを staff アプリから)
 
 - **メニュー管理画面**（staff アプリ `MenuScreen`）: 価格編集・品切れトグル・追加/削除 →
