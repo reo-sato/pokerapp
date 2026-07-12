@@ -133,6 +133,57 @@ export interface OrderRequest {
   ledger_entry_id?: string;
 }
 
+/** schemas/action.schema.json (1.0)。staff hands read（ADR-0044）用。 */
+export interface ActionRecord {
+  hand_id: number;
+  timestamp: string;
+  street: string; // "preflop" | "flop" | "turn" | "river"
+  seat: number;
+  player_name: string;
+  action: string; // "check" | "call" | "bet" | "raise" | "fold" | "allin" | ...
+  amount: number;
+  pot_after: number;
+  stack_after: number;
+  source: { camera: boolean; audio: boolean; rfid: boolean };
+  needs_review: boolean;
+  confidence: number;
+  corrected?: boolean; // 訂正オーバーレイ痕 (ADR-0036, additive)
+}
+
+export interface HandPlayer {
+  seat: number;
+  name: string;
+  player_id?: string | null;
+  hole_cards?: string[] | null;
+  hole_cards_source?: string;
+  stack_start: number;
+  stack_end: number;
+  result: number;
+  committed?: number;
+}
+
+export interface Pot {
+  amount: number;
+  eligible_seats: number[];
+}
+
+/** schemas/hand.schema.json (1.0)。GET /api/staff/sessions/{sid}/hands の要素（訂正適用済）。 */
+export interface HandSummary {
+  hand_id: number;
+  session_id: string;
+  started_at: string;
+  ended_at: string;
+  blinds?: Blinds;
+  board?: string[];
+  board_source?: string;
+  players: HandPlayer[];
+  pot_total?: number;
+  pots?: Pot[];
+  winner_seat?: number;
+  actions: ActionRecord[];
+  review_required?: boolean;
+}
+
 /** hand logger 遠隔制御コマンド（control queue, ADR-0039）。 */
 export type HandControlType = "new_hand" | "winner" | "rebuy";
 

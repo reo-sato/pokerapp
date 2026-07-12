@@ -146,6 +146,33 @@ def get_player_session_ledger(
     }
 
 
+def list_session_hands(
+    session_id: str,
+    log_dir: str | Path,
+    correction_repo: "HandCorrectionRepository | None" = None,
+) -> list[dict]:
+    """session の全 hand の HandSummary dict を hand_id 昇順で返す（staff read, ADR-0044）。
+
+    player read（list_player_hands）と違い seat assignment とは join しない —
+    staff は卓の全ハンドを見る。`correction_repo` があれば訂正オーバーレイを適用した
+    訂正済みビューを返す（ADR-0036）。log 不在 / session 不在は空 list（gracefully-empty,
+    list_measurement_rows と同じ）。
+    """
+    log = _load_hand_log(log_dir, session_id)
+    if log is None:
+        return []
+    hands = [
+        h for h in log.get("hands") or [] if isinstance(h.get("hand_id"), int)
+    ]
+    hands = sorted(hands, key=lambda h: h["hand_id"])
+    if correction_repo is not None:
+        hands = [
+            apply_hand_corrections(h, correction_repo.list_for_hand(session_id, h["hand_id"]))
+            for h in hands
+        ]
+    return hands
+
+
 def get_hand(
     session_id: str, hand_id: int, log_dir: str | Path,
     correction_repo: "HandCorrectionRepository | None" = None,

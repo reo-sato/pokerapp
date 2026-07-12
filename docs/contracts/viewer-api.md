@@ -144,6 +144,12 @@ player 本人の self-write（注文 POST 等）を **PIN ログイン**で本�
 | POST | `/api/staff/players` | yes | `{display_name}` | 201 `player`。400 `empty_display_name` / `duplicate_display_name` |
 | PUT  | `/api/staff/players/{player_id}` | yes | `{display_name}` | 更新後 `player`。404 `not_found` / 400 `empty_display_name` / `duplicate_display_name` |
 
+#### ハンド履歴 read（ADR-0044）
+
+| method | path | write | body | 返り値 |
+|--------|------|-------|------|--------|
+| GET  | `/api/staff/sessions/{session_id}/hands` | no | — | `{"hands": [hand_summary, ...]}`（hand_id 昇順・**訂正オーバーレイ適用済み** = ADR-0036。player read と違い seat 縛りなしで卓の全ハンド。lenient: log 不在 / unknown session は空 list）。ハンドリプレイ UI（staff アプリ ハンドタブ）の導線 |
+
 #### hand logger 遠隔制御（ADR-0039 §C）
 
 | method | path | write | body | 返り値 |

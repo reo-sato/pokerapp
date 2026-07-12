@@ -425,3 +425,24 @@ test("measurement passThrough rejects unknown hand_id with not_found", async () 
     },
   );
 });
+
+test("listSessionHands returns corrected hands sorted by hand_id (ADR-0044)", async () => {
+  const repo = authed();
+  const hands = await repo.listSessionHands(OPEN_SESSION_ID);
+  assert.deepEqual(hands.map((h) => h.hand_id), [1, 2, 3]);
+  assert.equal(hands[0].winner_seat, 1);
+  assert.deepEqual(hands[0].players[0].hole_cards, ["Ah", "Ad"]);
+  assert.equal(hands[1].review_required, true);
+  // lenient: log の無い session / unknown session は空 list（server と同じ）。
+  assert.deepEqual(await repo.listSessionHands(CLOSED_SESSION_ID), []);
+  assert.deepEqual(await repo.listSessionHands("f".repeat(32)), []);
+});
+
+test("listSessionHands requires a valid staff token", async () => {
+  const repo = new MockStaffRepository();
+  await assert.rejects(repo.listSessionHands(OPEN_SESSION_ID), (err: unknown) => {
+    assert.ok(err instanceof StaffApiError);
+    assert.equal(err.code, "unauthorized");
+    return true;
+  });
+});

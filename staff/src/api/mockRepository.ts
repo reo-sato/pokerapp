@@ -13,6 +13,7 @@ import {
   type GroundTruthEditPayload,
   type GroundTruthHand,
   type HandControlInput,
+  type HandSummary,
   type LedgerEntry,
   type LedgerKind,
   type MeasurementRow,
@@ -35,6 +36,7 @@ import {
   orderRequests,
   players,
   seatAssignments,
+  sessionHands,
   sessions,
   VALID_STAFF_TOKEN,
 } from "../mocks/fixtures";
@@ -77,6 +79,8 @@ export class MockStaffRepository implements StaffRepository {
   private readonly grants: Record<string, number> = {};
   // 確定済 settlement（session_id → player_id → row）。commit でのみ生成。
   private readonly committed: Record<string, Record<string, SessionSettlement>> = {};
+  // ハンド履歴 (ADR-0044): 訂正適用済 HandSummary（リプレイ UI 用 read）。
+  private readonly hands: Record<string, HandSummary[]>;
   // Phase A 計測 (ADR-0043): 一覧 row と GT 蓄積（hand_id → GT）。
   private readonly measurement: Record<string, MeasurementRow[]>;
   private readonly groundTruth: Record<string, Record<number, GroundTruthHand>> = {};
@@ -89,6 +93,7 @@ export class MockStaffRepository implements StaffRepository {
     this.ledger = clone(ledgerEntries);
     this.orders = clone(orderRequests);
     this.seating = clone(seatAssignments);
+    this.hands = clone(sessionHands);
     this.measurement = clone(measurementRows);
   }
 
@@ -526,6 +531,15 @@ export class MockStaffRepository implements StaffRepository {
     req.status = "rejected";
     req.resolved_at = new Date().toISOString();
     return clone(req);
+  }
+
+  // ――― ハンド履歴 read（ADR-0044）―――
+
+  async listSessionHands(sessionId: string): Promise<HandSummary[]> {
+    this.requireAuth();
+    // server の list_session_hands は lenient（log 不在 / unknown session は空 list）。
+    const hands = this.hands[sessionId] ?? [];
+    return clone([...hands].sort((a, b) => a.hand_id - b.hand_id));
   }
 
   // ――― Phase A 計測 / ground truth（ADR-0043）―――

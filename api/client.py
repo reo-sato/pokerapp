@@ -245,6 +245,13 @@ class ViewerApiClient:
             json=payload, headers=self._staff_headers(),
         )
 
+    def list_session_hands(self, session_id: str) -> list[dict]:
+        """session の全 hand（訂正適用済, hand_id 昇順）。staff read（ADR-0044）。"""
+        return self._request(
+            "GET", f"/api/staff/sessions/{session_id}/hands",
+            headers=self._staff_headers(),
+        )["hands"]
+
     # ――― Phase A 計測 / ground truth（ADR-0043, staff token）―――
 
     def list_measurement_rows(self, session_id: str) -> list[dict]:

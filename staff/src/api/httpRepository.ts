@@ -15,6 +15,7 @@ import {
   type GroundTruthEditPayload,
   type GroundTruthHand,
   type HandControlInput,
+  type HandSummary,
   type LedgerEntry,
   type MeasurementRow,
   type MenuItem,
@@ -231,6 +232,15 @@ export class HttpStaffRepository implements StaffRepository {
     if (input.seat !== undefined) payload.seat = input.seat;
     if (input.amount !== undefined) payload.amount = input.amount;
     return this.send("POST", `/api/staff/sessions/${E(sessionId)}/control`, payload);
+  }
+
+  // ――― ハンド履歴 read（ADR-0044）―――
+
+  async listSessionHands(sessionId: string): Promise<HandSummary[]> {
+    const body = await this.get<{ hands: HandSummary[] }>(
+      `/api/staff/sessions/${E(sessionId)}/hands`,
+    );
+    return body.hands;
   }
 
   // ――― Phase A 計測 / ground truth（ADR-0043）―――
