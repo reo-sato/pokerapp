@@ -136,6 +136,17 @@ tests/fixtures/reconstruction/<case>/
 - `hand` schema が ADR-0008 の `players[i].player_id` と ADR-0009 の `pots`/`committed` の共通受け皿
   （`hand-reconstruction.md` §7）。
 
+## 6.5 golden fixtures の pin 規約（ADR-0047）
+
+- **現行実装の出力をそのまま expected に pin しない。** 再 pin / 新規 pin の前に、pot・result・
+  stack_start/end・winner・review 理由を**手計算で検証**すること（ADR-0047 の差分表が前例:
+  S5/S6 の誤値が 5 fixtures に pin されたまま「緑」であり続けた）。
+- pin 値を変更する場合は、旧値→新値の差分表と原因を ADR / worklog に記録する。
+- envelope `reconstruction_event` は **0.2**（ADR-0047/0048, additive）: audio に
+  `utterance_start_ts`（発話開始時刻 = 照合窓の始端）と `parse_flags`（`ambiguous_amount` /
+  `multi_action_keywords`）。既定値のとき recorder は省略して書くため、旧 replay 実装でも読める。
+  旧 events.jsonl は新実装で欠損 fallback（従来窓 / flag なし）により無変更で再生できる。
+
 ## 7. open 論点（→ issues）
 
 - **ISSUE-0010** (Resolved, §4): 記録境界 = decode 後（`seat`/`confidence` 含む）・clock 源 = 観測済み最大 ts に確定。スレッド順序 ≈ timestamp 順の許容度は golden fixtures（Phase F / #8）で実証固定。

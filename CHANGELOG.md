@@ -6,6 +6,59 @@
 
 ## [Unreleased]
 
+### Changed (アクション履歴復元の正当性修正バッチ = ADR-0047/0048/0049/0050)
+
+Phase A KPI（hand coverage / action 一致率 / board 一致率 ≥95%）に向け、needs_review が付かず
+GT 照合まで発見できなかった「静かな誤り」経路とバグを一括修正。pokerkit 権威・legacy rollback
+path・schema additive 原則は不変。詳細は ADR-0047〜0050 / worklog
+`2026-08-19-reconstruction-hardening-batch.md`。
+
+- **金額パース（S1）**: 「2千」「5百」「2千5百」「1.5万」「1.5K」を正しく読む（従来「2千」は
+  2 と誤読され min-raise に無警告 clamp）。「4万2」「四万二」は 42000 と解釈しつつ
+  `ambiguous_amount` flag → needs_review。
+- **席番号（S2）**: 「シート 3」（空白）「seat ３」（全角）「シート三」（漢数字）の席表現を
+  strip / 抽出とも統一処理（席番号が金額として誤読される経路を全廃。実装は recognizer に単一化）。
+- **raise 額の解釈（S3/S4/V4）**: 「to 解釈では非合法だが追加額(by)解釈なら合法」の raise に
+  `raise_to_vs_by_ambiguous` flag。金額 snap の review 閾値を同次元比較（移動量 >= bb）に修正。
+  bb 倍数への round 寄せ（合法レンジ内のみ, `rounded_to_bb`）。
+- **エンジンバグ（B1-B5）**: fold 合成後の stale legal_context 再利用を修正（記録額が実コミット
+  額とズレていた）/ ハンド外イベント・処理中例外は必ず「適用不能レコード」として可視化
+  （無音消失の全廃, live↔replay 同一セマンティクス）/ winner 席不明時の fallback 連鎖
+  （単独 active 席 → 最後のアグレッサー + review）+ 空 junk summary 抑止。
+- **会計値（S5/S6）**: `players[].result` のブラインド分ズレを修正（stack_start をブラインド
+  post 前に取得）。`pot_total` を engine の pot スナップショット権威に（従来は "to" 総額の
+  多重加算 + ブラインド抜け）。golden fixtures の誤 pin を手計算検証の上で訂正（差分表 = ADR-0047）。
+- **監査（G2）**: ActionRecord に `actor_source` / `corrected_from` / `reason` /
+  `asr_confidence` / `apply_ok` を実配線（action schema 1.0→1.1 additive）。needs_review の
+  理由がレコード単体から逆引き可能に（Phase A の切り分け表が運用可能に）。
+- **計測（G6）**: `tools/measure_capture_accuracy.py` をシーケンスアライメント比較に
+  （誤合成 fold 1 件で action_accuracy が崩壊しない。挿入/欠落 = 各 1 誤り）。GT 規約を
+  measurement-plan に明文化。
+- **confidence 欠測（B3, ADR-0033 追記）**: whisper 信頼度欠測（None）の満点補完をやめ
+  保守的既定 0.5 に（audio-only 欠測は review 側）。較正プロパティ P9 追加。
+  `tools/play_hand_text.py` は意図的入力として confidence=1.0 を明示。
+- **制御語ガード（G1, ADR-0049）**: `engine.control_conf_threshold`（既定 0 = off）で低信頼の
+  ハンド開始/ウィナー/ショーダウンを保留レコード化。進行中ハンドへの new_hand は記録を捨てず
+  異常確定（review 付き）してから開始。
+- **actor 証拠健全性（G3/G4）**: fold 済み席の RFID 読みを actor 証拠に採用しない。cap 超過で
+  破棄した証拠を監査 reason に記録。高信頼 ASR（>=0.85）が射影で action を変えられた場合は review。
+- **時刻整合（T1-T3, ADR-0048）**: `AudioEvent.utterance_start_ts` additive + センサー照合窓を
+  発話区間ベース両側窓に（ASR デコード遅延で RFID/camera 照合を取りこぼさない）。buffer 保持
+  12 秒に拡大。ActionRecord/HandSummary の時刻を event 時刻由来に統一（live/replay 同義）。
+  旧 events.jsonl は無変更で再生可（後方互換テストあり）。
+- **recorder 再構築（T4, ADR-0049）**: 推論を worker スレッドに分離（キャプチャ非ブロック）、
+  有音ゲート（無音を推論に送らない = プロンプトオウム返し対策）、発話開始時刻の記録、
+  フラッシュ判定をサンプル数ベースに、Whisper プロンプトを自然文化、no_speech_prob で
+  confidence 減衰。テスト seam を設け recorder 初のユニットテスト。
+- **split pot（S7, ADR-0050）**: 「シート3 シート5 チョップ」で pot を等分
+  （`end_hand_split`、端数は先頭勝者、必ず review）。`HandSummary.pot_awards`
+  （hand schema 1.0→1.1 additive、単独勝者は absent = 後方互換）。
+- **golden fixtures 5→13**: postflop-street-transition / full-ring-6max / multi-hand-session /
+  rfid-vs-spoken-seat-conflict / camera-corroboration / low-whisper-confidence /
+  cap-exceeded-negative / split-pot-chop を追加。「現行出力をそのまま pin しない（手計算検証
+  必須）」を event-replay.md §6.5 に規約化。
+- tests: 836 passed（+112: 新規 `tests/test_reconstruction_hardening.py` 63 ほか）。
+
 ### Docs (UI 実運用機能の棚卸し台帳を計画文書に転記)
 
 - `docs/ui-feature-inventory.md` を新設: 全 UI（mobile / staff iPad / desktop）の実運用機能を

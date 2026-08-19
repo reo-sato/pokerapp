@@ -1,0 +1,227 @@
+[
+  {
+    "hand_id": 1,
+    "session_id": "multi-hand-session",
+    "started_at": null,
+    "ended_at": null,
+    "blinds": {
+      "sb": 100,
+      "bb": 200
+    },
+    "board": [],
+    "board_source": "",
+    "players": [
+      {
+        "seat": 1,
+        "name": "P1",
+        "hole_cards": null,
+        "hole_cards_source": "",
+        "stack_start": 10000,
+        "stack_end": 9900,
+        "result": -100
+      },
+      {
+        "seat": 2,
+        "name": "P2",
+        "hole_cards": null,
+        "hole_cards_source": "",
+        "stack_start": 10000,
+        "stack_end": 10100,
+        "result": 100
+      },
+      {
+        "seat": 3,
+        "name": "P3",
+        "hole_cards": null,
+        "hole_cards_source": "",
+        "stack_start": 10000,
+        "stack_end": 10000,
+        "result": 0
+      }
+    ],
+    "pot_total": 300,
+    "pots": [
+      {
+        "amount": 100,
+        "eligible_seats": [
+          2
+        ]
+      },
+      {
+        "amount": 200,
+        "eligible_seats": [
+          2
+        ]
+      }
+    ],
+    "winner_seat": 2,
+    "actions": [
+      {
+        "hand_id": 1,
+        "timestamp": null,
+        "street": "preflop",
+        "seat": 3,
+        "player_name": "P3",
+        "action": "fold",
+        "amount": 0,
+        "pot_after": 300,
+        "stack_after": 10000,
+        "source": {
+          "camera": false,
+          "audio": true,
+          "rfid": false
+        },
+        "needs_review": false,
+        "confidence": 0.532,
+        "actor_source": "engine_prior",
+        "asr_confidence": 0.9,
+        "apply_ok": true
+      },
+      {
+        "hand_id": 1,
+        "timestamp": null,
+        "street": "showdown",
+        "seat": 1,
+        "player_name": "P1",
+        "action": "fold",
+        "amount": 0,
+        "pot_after": 300,
+        "stack_after": 9900,
+        "source": {
+          "camera": false,
+          "audio": true,
+          "rfid": false
+        },
+        "needs_review": false,
+        "confidence": 0.532,
+        "actor_source": "engine_prior",
+        "asr_confidence": 0.9,
+        "apply_ok": true
+      }
+    ],
+    "review_required": false
+  },
+  {
+    "hand_id": 2,
+    "session_id": "multi-hand-session",
+    "started_at": null,
+    "ended_at": null,
+    "blinds": {
+      "sb": 100,
+      "bb": 200
+    },
+    "board": [],
+    "board_source": "",
+    "players": [
+      {
+        "seat": 1,
+        "name": "P1",
+        "hole_cards": null,
+        "hole_cards_source": "",
+        "stack_start": 9900,
+        "stack_end": 9800,
+        "result": -100
+      },
+      {
+        "seat": 2,
+        "name": "P2",
+        "hole_cards": null,
+        "hole_cards_source": "",
+        "stack_start": 10100,
+        "stack_end": 9900,
+        "result": -200
+      },
+      {
+        "seat": 3,
+        "name": "P3",
+        "hole_cards": null,
+        "hole_cards_source": "",
+        "stack_start": 10000,
+        "stack_end": 10300,
+        "result": 300
+      }
+    ],
+    "pot_total": 900,
+    "pots": [
+      {
+        "amount": 300,
+        "eligible_seats": [
+          3
+        ]
+      },
+      {
+        "amount": 600,
+        "eligible_seats": [
+          3
+        ]
+      }
+    ],
+    "winner_seat": 3,
+    "actions": [
+      {
+        "hand_id": 2,
+        "timestamp": null,
+        "street": "preflop",
+        "seat": 3,
+        "player_name": "P3",
+        "action": "raise",
+        "amount": 600,
+        "pot_after": 900,
+        "stack_after": 9400,
+        "source": {
+          "camera": false,
+          "audio": true,
+          "rfid": false
+        },
+        "needs_review": false,
+        "confidence": 0.532,
+        "actor_source": "engine_prior",
+        "asr_confidence": 0.9,
+        "apply_ok": true
+      },
+      {
+        "hand_id": 2,
+        "timestamp": null,
+        "street": "preflop",
+        "seat": 1,
+        "player_name": "P1",
+        "action": "fold",
+        "amount": 0,
+        "pot_after": 900,
+        "stack_after": 9800,
+        "source": {
+          "camera": false,
+          "audio": true,
+          "rfid": false
+        },
+        "needs_review": false,
+        "confidence": 0.532,
+        "actor_source": "engine_prior",
+        "asr_confidence": 0.9,
+        "apply_ok": true
+      },
+      {
+        "hand_id": 2,
+        "timestamp": null,
+        "street": "showdown",
+        "seat": 2,
+        "player_name": "P2",
+        "action": "fold",
+        "amount": 0,
+        "pot_after": 900,
+        "stack_after": 9900,
+        "source": {
+          "camera": false,
+          "audio": true,
+          "rfid": false
+        },
+        "needs_review": false,
+        "confidence": 0.532,
+        "actor_source": "engine_prior",
+        "asr_confidence": 0.9,
+        "apply_ok": true
+      }
+    ],
+    "review_required": false
+  }
+]

@@ -16,7 +16,8 @@
     "sample_rate": 16000,
     "whisper_model": "medium",
     "language": "ja",
-    "initial_prompt": "ベット コール レイズ チェック フォールド オールイン ショーダウン ウィナー ハンド開始"
+    "initial_prompt": "ポーカーのディーラーがアクションを読み上げています。シート3 レイズ 2千、コール、チェック、フォールド、オールイン、ショーダウン、ウィナー、ハンド開始、チョップ などの言葉が含まれます。",
+    "_initial_prompt_comment": "参考値（実際の initial_prompt は core/constants.py の WHISPER_PROMPT_JA）。キーワードの箇条列挙はオウム返し型ハルシネーションの温床になるため自然文にする（ADR-C T4）。"
   },
   "rfid": {
     "enabled": false,
@@ -56,7 +57,9 @@
   },
   "engine": {
     "backend": "pokerkit",
-    "_comment": "game-state backend。'pokerkit'（既定, ルール準拠の再構築 = actor 推定/合法手射影/silent-fold/side-pot, ADR-0009）| 'legacy'（rollback, 素朴 round-robin）。Phase G で既定を pokerkit に切替。"
+    "_comment": "game-state backend。'pokerkit'（既定, ルール準拠の再構築 = actor 推定/合法手射影/silent-fold/side-pot, ADR-0009）| 'legacy'（rollback, 素朴 round-robin）。Phase G で既定を pokerkit に切替。",
+    "control_conf_threshold": 0.0,
+    "_control_conf_threshold_comment": "ADR-C (G1): 制御語（ハンド開始/ウィナー/ショーダウン）を受理する Whisper 信頼度の下限。0.0（既定）= 無効。>0 で閾値未満の制御語は状態を動かさず保留レコード（needs_review）としてのみ通知する（ハルシネーション由来の偽 new_hand/winner 対策）。"
   },
   "session_layer": {
     "enabled": false,

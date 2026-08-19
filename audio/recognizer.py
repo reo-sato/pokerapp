@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -25,20 +26,27 @@ logger = logging.getLogger(__name__)
 # 連続漢数字トークンにマッチする正規表現
 _KANJI_PATTERN = re.compile(r"[一二三四五六七八九〇十百千万]+")
 
-# 算用数字 + 単位パターン（左から右に順番に試行）
-# 1万2千, 1万, 5K, 1,200, 800 の順に試行
-_MIXED_MAN_SEN = re.compile(r"(\d[\d,]*)万(\d+)千")  # 1万2千
-_MAN_ONLY      = re.compile(r"(\d[\d,]*)万")          # 3万
-_K_UNIT        = re.compile(r"(\d[\d,]*)[Kk]")        # 5K
-_DIGIT_ONLY    = re.compile(r"\d[\d,]*")              # 800 / 1,200
+# 算用数字 + 単位パターン（すべての候補を収集し、最左・同位置なら大きい値を採用）。
+# パースは NFKC 正規化済みテキストに対して行う（全角数字・全角ピリオドは半角化済み）。
+_MIXED_MAN_SEN = re.compile(r"(\d[\d,]*)万(\d+)千")            # 1万2千
+_MAN_DECIMAL   = re.compile(r"(\d[\d,]*)\.(\d+)万")            # 1.5万 (ADR-A S1)
+_MAN_TRAILING  = re.compile(r"(\d[\d,]*)万(\d)(?![\d,.千百十万Kk])")  # 4万2 (曖昧, ADR-A S1)
+_MAN_ONLY      = re.compile(r"(\d[\d,]*)万")                   # 3万
+_SEN_HYAKU     = re.compile(r"(\d+)千(\d+)百")                 # 2千5百 (ADR-A S1)
+_SEN_ONLY      = re.compile(r"(\d+)千")                        # 2千 (ADR-A S1: 従来 2 と誤読)
+_HYAKU_ONLY    = re.compile(r"(\d+)百")                        # 5百 (ADR-A S1)
+_K_DECIMAL     = re.compile(r"(\d[\d,]*)\.(\d+)[Kk]")          # 1.5K (ADR-A S1)
+_K_UNIT        = re.compile(r"(\d[\d,]*)[Kk]")                 # 5K
+_DIGIT_ONLY    = re.compile(r"\d[\d,]*")                       # 800 / 1,200
 
 
-# 席番号表現（金額パースの前に除去する）
-# 例: "シート1", "シート２", "seat 3"
+# 席番号表現。strip（金額パース前の除去）と抽出の両方が同一パターンを共有する
+# （ADR-A S2: 従来は strip 側が「シート 3」(空白) / 漢数字席を取りこぼし、席番号が金額に流入した）。
 _SEAT_PATTERN = re.compile(
-    r"(?:シート[0-9０-９一二三四五六七八九十]+|seat\s*[0-9]+)",
+    r"(?:シート|seat)\s*([0-9０-９]+|[一二三四五六七八九])",
     re.IGNORECASE,
 )
+_FW_TO_ASCII_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 
 
 def _strip_seat_references(text: str) -> str:
@@ -50,9 +58,14 @@ def _strip_seat_references(text: str) -> str:
     return _SEAT_PATTERN.sub("", text)
 
 
-# 明示発話された席番号を抽出する（"シート3" / "seat 3" / 全角数字対応）。
-_SEAT_NO_PATTERN = re.compile(r"(?:シート|seat)\s*([0-9０-９]+)", re.IGNORECASE)
-_FW_TO_ASCII_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+def _seat_token_to_int(token: str) -> Optional[int]:
+    """席番号トークン（半角/全角数字 or 漢数字 1 桁）を int に変換する。"""
+    if token in KANJI_DIGIT:
+        return KANJI_DIGIT[token]
+    try:
+        return int(token.translate(_FW_TO_ASCII_DIGITS))
+    except ValueError:
+        return None
 
 
 def _extract_seat_no(text: str) -> Optional[int]:
@@ -60,14 +73,24 @@ def _extract_seat_no(text: str) -> Optional[int]:
 
     actor 推定 (R3) ではなく「明示的に読み上げられた席」だけを拾う additive 仕様。
     """
-    m = _SEAT_NO_PATTERN.search(text)
+    m = _SEAT_PATTERN.search(text)
     if not m:
         return None
-    try:
-        n = int(m.group(1).translate(_FW_TO_ASCII_DIGITS))
-    except ValueError:
-        return None
-    return n if 1 <= n <= 9 else None
+    n = _seat_token_to_int(m.group(1))
+    return n if n is not None and 1 <= n <= 9 else None
+
+
+def _extract_all_seat_nos(text: str) -> list[int]:
+    """発話テキストから明示的な席番号 (1..9) を出現順に全部返す（重複除去, ADR-D S7）。
+
+    "シート3 シート5 チョップ" のような split-pot 読み上げで複数勝者席を拾う。
+    """
+    seats: list[int] = []
+    for m in _SEAT_PATTERN.finditer(text):
+        n = _seat_token_to_int(m.group(1))
+        if n is not None and 1 <= n <= 9 and n not in seats:
+            seats.append(n)
+    return seats
 
 
 def _kanji_to_int(kanji: str) -> int:
@@ -110,103 +133,172 @@ def _kanji_to_int(kanji: str) -> int:
     return result
 
 
-def parse_amount(text: str) -> int:
-    """テキストを左から右に走査し、最初にマッチした金額表現を int で返す。
-    見つからなければ 0 を返す。
+def _kanji_amount(kanji: str) -> tuple[int, bool]:
+    """漢数字トークンを (金額, 曖昧フラグ) に変換する。
+
+    「四万二」のような「万 + 単位なし 1 桁」は口頭で 42000 の省略形
+    （四万二(千)）である可能性が高いが 40002 とも読めるため、
+    千単位解釈を採用しつつ ambiguous=True を返す（ADR-A S1）。
+    """
+    if "万" in kanji:
+        idx = kanji.index("万")
+        right = kanji[idx + 1 :]
+        if len(right) == 1 and right in KANJI_DIGIT and KANJI_DIGIT[right] > 0:
+            left_val = _kanji_to_int(kanji[:idx]) or 1
+            return left_val * 10000 + KANJI_DIGIT[right] * 1000, True
+    return _kanji_to_int(kanji), False
+
+
+@dataclass(frozen=True)
+class AmountParse:
+    """parse_amount_ex の結果。ambiguous=True は「N万M」型の桁省略が疑われる読み。"""
+
+    value: int
+    ambiguous: bool = False
+
+
+def parse_amount_ex(text: str) -> AmountParse:
+    """テキストを左から右に走査し、最初にマッチした金額表現を返す（ADR-A S1）。
+    見つからなければ value=0。
 
     走査ポリシー:
-    - 連続漢数字トークン ([一二三四五六七八九〇十百千万]+) は _kanji_to_int で処理する
-    - それ以外（算用数字+単位 / K / カンマ区切り）は regex で処理する
-    - テキストを左から右に走査し、最初にマッチした表現を採用する
+    - 連続漢数字トークン ([一二三四五六七八九〇十百千万]+) は _kanji_amount で処理する
+    - それ以外（算用数字+単位 / 小数 / K / カンマ区切り）は regex で処理する
+    - 全パターンの候補を収集し、最左のものを採用する。同じ開始位置に複数マッチした
+      場合は値が大きい方を優先する（"2千" では 2000 > 2 なので単位付き解釈が勝つ =
+      従来「2千」を 2 と誤読して静かに clamp されていた経路の修正）
+    - 「4万2」のような単位省略は 42000 と解釈しつつ ambiguous=True を立てる
+      （呼び出し側が needs_review を付ける）
     """
-    # 全パターンの候補を (開始位置, 変換値) として収集し、最左のものを返す
-    candidates: list[tuple[int, int]] = []
+    candidates: list[tuple[int, int, bool]] = []  # (start, value, ambiguous)
 
-    # 連続漢数字トークン
     for m in _KANJI_PATTERN.finditer(text):
-        val = _kanji_to_int(m.group())
+        val, amb = _kanji_amount(m.group())
         if val > 0:
-            candidates.append((m.start(), val))
+            candidates.append((m.start(), val, amb))
 
-    # 1万2千
     for m in _MIXED_MAN_SEN.finditer(text):
         man = int(m.group(1).replace(",", ""))
         sen = int(m.group(2))
-        candidates.append((m.start(), man * 10000 + sen * 1000))
+        candidates.append((m.start(), man * 10000 + sen * 1000, False))
 
-    # 3万（1万2千にマッチしなかった箇所）
+    for m in _MAN_DECIMAL.finditer(text):
+        man = int(m.group(1).replace(",", ""))
+        frac = int(m.group(2)) / (10 ** len(m.group(2)))
+        candidates.append((m.start(), int(round((man + frac) * 10000)), False))
+
+    for m in _MAN_TRAILING.finditer(text):
+        man = int(m.group(1).replace(",", ""))
+        tail = int(m.group(2))
+        if tail > 0:
+            candidates.append((m.start(), man * 10000 + tail * 1000, True))
+
     for m in _MAN_ONLY.finditer(text):
-        # 1万2千 として既にマッチしている範囲はスキップしない（最左判定で自然に解決）
-        val = int(m.group(1).replace(",", "")) * 10000
-        candidates.append((m.start(), val))
+        candidates.append((m.start(), int(m.group(1).replace(",", "")) * 10000, False))
 
-    # 5K
+    for m in _SEN_HYAKU.finditer(text):
+        candidates.append(
+            (m.start(), int(m.group(1)) * 1000 + int(m.group(2)) * 100, False)
+        )
+
+    for m in _SEN_ONLY.finditer(text):
+        candidates.append((m.start(), int(m.group(1)) * 1000, False))
+
+    for m in _HYAKU_ONLY.finditer(text):
+        candidates.append((m.start(), int(m.group(1)) * 100, False))
+
+    for m in _K_DECIMAL.finditer(text):
+        base = int(m.group(1).replace(",", ""))
+        frac = int(m.group(2)) / (10 ** len(m.group(2)))
+        candidates.append((m.start(), int(round((base + frac) * 1000)), False))
+
     for m in _K_UNIT.finditer(text):
-        val = int(m.group(1).replace(",", "")) * 1000
-        candidates.append((m.start(), val))
+        candidates.append((m.start(), int(m.group(1).replace(",", "")) * 1000, False))
 
-    # 算用数字のみ（カンマ区切り含む）
     for m in _DIGIT_ONLY.finditer(text):
-        val = int(m.group().replace(",", ""))
-        candidates.append((m.start(), val))
+        candidates.append((m.start(), int(m.group().replace(",", "")), False))
 
     if not candidates:
-        return 0
+        return AmountParse(0)
 
-    # 最左（開始位置が最小）のものを採用。
-    # 同じ位置に複数のパターンがマッチした場合は値が大きい方を優先する。
-    # （例: "1万" と "1" が同位置にマッチするとき、より具体的な表現である
-    #   "1万"=10000 を採用するため）
+    # 最左（開始位置が最小）→ 同位置なら値が大きい方（より具体的な単位付き解釈）を採用。
     candidates.sort(key=lambda x: (x[0], -x[1]))
-    return candidates[0][1]
+    start, value, ambiguous = candidates[0]
+    return AmountParse(value, ambiguous)
 
 
-def parse_action(text: str, confidence: Optional[float] = None) -> Optional[AudioEvent]:
+def parse_amount(text: str) -> int:
+    """後方互換ラッパー: 金額のみを返す（曖昧フラグは parse_amount_ex を使う）。"""
+    return parse_amount_ex(text).value
+
+
+def parse_action(
+    text: str,
+    confidence: Optional[float] = None,
+    utterance_start_ts: Optional[float] = None,
+) -> Optional[AudioEvent]:
     """Whisper の認識テキストからアクション種別と金額を抽出して AudioEvent を返す。
     認識できない場合は None を返す。
 
     confidence: Whisper per-segment 信頼度 [0,1]（呼び出し側が ASR から渡す）。additive。
+    utterance_start_ts: 発話キャプチャの開始時刻（recorder が渡す, ADR-B T1）。additive。
 
     キーワード選択ルール:
     1. テキスト内で最も左に現れたキーワードを優先する。
     2. 同じ開始位置に複数のキーワードがマッチした場合は、より長いキーワードを優先する。
        （例: "all in" と "all" が同位置にマッチ → "all in" を採用）
+    3. 採用キーワードの span と重ならない位置に**別アクション**のキーワードがあれば
+       parse_flags に "multi_action_keywords" を立てる（V1: 先頭のみ採用 + 要レビュー。
+       "スリーベット" 内の "ベット" のような包含マッチは flag しない）。
     """
-    lower = text.lower()
+    # 全角数字・全角英字・半角カナ等を正規化してからパースする（raw_text は原文を保持）。
+    norm = unicodedata.normalize("NFKC", text)
+    lower = norm.lower()
 
-    found_action: Optional[str] = None
-    found_pos = len(text)
-    found_kw_len = 0  # タイブレーク用: 同じ位置なら長い方を優先
-
+    matches: list[tuple[int, int, str]] = []  # (pos, kw_len, action)
     for keyword, action in ACTION_KEYWORDS.items():
-        pos = lower.find(keyword.lower())
-        if pos == -1:
-            continue
-        kw_len = len(keyword)
-        # 最左優先。同位置なら長いキーワードを優先（より具体的な表現を採用するため）
-        if pos < found_pos or (pos == found_pos and kw_len > found_kw_len):
-            found_pos = pos
-            found_action = action
-            found_kw_len = kw_len
+        kw = keyword.lower()
+        start = 0
+        while True:
+            pos = lower.find(kw, start)
+            if pos == -1:
+                break
+            matches.append((pos, len(kw), action))
+            start = pos + 1
 
-    if found_action is None:
+    if not matches:
         logger.debug("No action keyword found in: %r", text)
         return None
 
+    # 最左優先。同位置なら長いキーワードを優先（より具体的な表現を採用するため）
+    matches.sort(key=lambda t: (t[0], -t[1]))
+    found_pos, found_len, found_action = matches[0]
+    span_end = found_pos + found_len
+
+    flags: list[str] = []
+    for pos, kw_len, action in matches[1:]:
+        if action == found_action:
+            continue
+        if pos < span_end and pos + kw_len > found_pos:
+            continue  # 採用キーワードと重なる包含マッチ（例: スリーベット ⊃ ベット）
+        flags.append("multi_action_keywords")
+        break
+
     # 席番号表現（シート1 / seat 3 等）を除去してから金額を抽出する。
     # 除去しないと parse_amount() が席番号の数字を最初の金額候補として拾ってしまう。
-    # call/check/fold の金額: Phase 1 では parse_amount() の結果をそのまま使う簡易仕様。
-    # （例: "コール 500" → amount=500、"チェック" → amount=0）
-    # 精緻化する場合は action ごとに金額の妥当性検証を追加すること。
-    amount = parse_amount(_strip_seat_references(text))
+    amount = parse_amount_ex(_strip_seat_references(norm))
+    if amount.ambiguous:
+        flags.append("ambiguous_amount")
 
     return AudioEvent(
         action=found_action,
-        amount=amount,
+        amount=amount.value,
         timestamp=time.time(),
         raw_text=text,
-        seat=_extract_seat_no(text),
+        seat=_extract_seat_no(norm),
         confidence=confidence,
+        parse_flags=tuple(flags),
+        utterance_start_ts=utterance_start_ts,
     )
 
 
@@ -238,8 +330,10 @@ class WhisperTranscriber:
 
         入力は 16kHz モノラル PCM16 固定を前提とする（faster-whisper は配列長から
         16kHz を仮定するため sample_rate は受け取らない）。
-        confidence は各 segment の avg_logprob（対数確率）平均を exp で 0..1 に
-        写像したもの。segment が無ければ None。
+        confidence は各 segment の avg_logprob（対数確率）平均を exp で 0..1 に写像し、
+        no_speech_prob が高い segment はその分減衰させたもの（ADR-C T4:
+        プロンプト由来のオウム返しハルシネーションは無音区間で no_speech_prob が
+        高く出るため、制御語ガードの入力として意味を持つ）。segment が無ければ None。
         """
         if self._model is None:
             return "", None
@@ -258,17 +352,24 @@ class WhisperTranscriber:
             )
             texts: list[str] = []
             logprobs: list[float] = []
+            no_speech: list[float] = []
             for seg in segments:
                 texts.append(seg.text.strip())
                 lp = getattr(seg, "avg_logprob", None)
                 if lp is not None:
                     logprobs.append(lp)
+                nsp = getattr(seg, "no_speech_prob", None)
+                if nsp is not None:
+                    no_speech.append(nsp)
             text = " ".join(texts)
             confidence: Optional[float] = None
             if logprobs:
                 mean_lp = sum(logprobs) / len(logprobs)
                 # avg_logprob は対数確率(≤0)。exp で 0..1 の信頼度へ写像。
                 confidence = max(0.0, min(1.0, math.exp(mean_lp)))
+                if no_speech:
+                    mean_nsp = sum(no_speech) / len(no_speech)
+                    confidence *= max(0.0, 1.0 - mean_nsp)
             return text, confidence
         except Exception:
             logger.exception("Whisper transcription failed")
@@ -279,6 +380,10 @@ class WhisperTranscriber:
 
 _BETTING_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin"})
 
+# ADR-0009 §6 条件② / ADR-C G4: この信頼度以上の ASR が状態と食い違って射影された場合、
+# 状態側（ストリート遷移漏れ等）を疑って needs_review を付ける。
+HIGH_CONF_ASR = 0.85
+
 
 @dataclass
 class Correction:
@@ -288,16 +393,12 @@ class Correction:
     amount: int                          # bet/raise は "to" 総額、call は call 額、他 0
     needs_review: bool
     corrected_from: Optional[str] = None  # 修復前の生 ASR action（変化なしなら None）
-    reason: str = ""                      # 監査用の短い理由
+    reason: str = ""                      # 監査用の短い理由（複数は "+" 区切り）
     asr_confidence: Optional[float] = None  # 入力 Whisper 信頼度を下流へ持ち越す
 
 
 def _snap_to_legal(a: int, lo: int, hi: int) -> tuple[int, int]:
-    """heard 額 a を合法レンジ [lo, hi] に丸め、(snapped, gap) を返す。gap は移動量(絶対値)。
-
-    ブラインド単位の round-number 寄せ（§5）は LegalContext に blind 情報が無いため D1 では
-    行わず、決定的な clamp のみ。round 寄せは後続（blind を渡せる形に拡張時）。
-    """
+    """heard 額 a を合法レンジ [lo, hi] に丸め、(snapped, gap) を返す。gap は移動量(絶対値)。"""
     if hi <= 0:  # raise/bet レンジ無し（呼び出し側で弾く前提だが安全側）
         return max(a, 0), 0
     if a < lo:
@@ -319,10 +420,22 @@ def apply_corrections(
     **call/check は状態から決定的に一意化**する（heard キーワードの曖昧さに依存しない）= PHH/JSON で
     call と check を初めて区別できる核心。修復表は `docs/contracts/hand-reconstruction.md §5`。
 
+    ADR-A/C での強化:
+    - S4: 金額 snap の review 閾値を同次元比較（gap >= bb）に修正（従来の gap > min_raise_to は
+      「2千→2 誤読 → min へ clamp」を無警告で通していた）。bb 不明（=0）は従来閾値に fallback。
+    - S3: heard 額が to 解釈では非合法だが「追加額(by)解釈」なら合法という場合、
+      by 読み上げの可能性を reason="raise_to_vs_by_ambiguous" で明示（採用は従来どおり to 解釈 + snap）。
+      両解釈とも合法な通常レイズは慣例（to 読み上げ）を信頼し flag しない。
+    - V4: heard 額が bb の倍数でない場合、bb 倍数への丸めが合法レンジ内なら丸める
+      （reason="rounded_to_bb"。ASR の端数誤認識対策）。
+    - G4: 高信頼 ASR（>= HIGH_CONF_ASR）なのに action が射影で変わった場合は review
+      （状態側の疑い, ADR-0009 §6 条件②）。
+
     Args:
         action/amount: parse_action 由来の生 ASR。
-        ctx: `legal_context()`（actor_seat / legal_actions / amount_to_call=c / min_raise=m(to) / max_raise=s(to)）。
-        whisper_conf: ASR 信頼度。D1 では結果へ持ち越すのみ（融合は D3 §6）。
+        ctx: `legal_context()`（actor_seat / legal_actions / amount_to_call=c / min_raise=m(to) /
+             max_raise=s(to) / bb / committed）。
+        whisper_conf: ASR 信頼度。結果へ持ち越し、G4 の高信頼判定にも使う。
     """
     def mk(act: str, amt: int, review: bool,
            corrected_from: Optional[str] = None, reason: str = "") -> Correction:
@@ -341,6 +454,7 @@ def apply_corrections(
     c = ctx.amount_to_call
     m = ctx.min_raise        # "to" 総額（raise/bet 不可なら 0）
     s = ctx.max_raise        # all-in "to" 総額（raise/bet 不可なら 0）
+    bb = ctx.bb
 
     if a == "fold":
         return mk("fold", 0, False)
@@ -377,11 +491,43 @@ def apply_corrections(
     # heard が状態と食い違えば state 側へ再マップ（bet↔raise を決定的に正す）。
     target = "raise" if "raise" in legal else "bet"
     corrected_from = a if target != a else None
-    amt, gap = _snap_to_legal(amount, m, s)
+    reasons: list[str] = []
+    review = False
+
+    if corrected_from:
+        reasons.append(f"{a}_to_{target}")
+        if whisper_conf is not None and whisper_conf >= HIGH_CONF_ASR:
+            # G4: 高信頼 ASR が状態と矛盾 → ストリート遷移漏れ等、状態側の疑い。
+            review = True
+            reasons.append("high_conf_asr_projection")
+
     if amount <= 0:
-        review, reason = True, "no_amount_heard"
-    elif gap > m:  # min-raise を超える移動 = 大幅 snap
-        review, reason = True, "amount_snapped"
-    else:
-        review, reason = False, (f"{a}_to_{target}" if corrected_from else "")
-    return mk(target, amt, review, corrected_from=corrected_from, reason=reason)
+        snapped, _ = _snap_to_legal(0, m, s)
+        reasons.append("no_amount_heard")
+        return mk(target, snapped, True, corrected_from, "+".join(reasons))
+
+    val = amount
+
+    # S3: raise の to/by 曖昧性。to 解釈が非合法（min 未満）だが「追加額」解釈
+    # （現最高額 committed+c に heard を上乗せ）なら合法 → by 読み上げの可能性を flag。
+    if target == "raise" and val < m:
+        by_total = ctx.committed + c + val
+        if m <= by_total <= s:
+            review = True
+            reasons.append("raise_to_vs_by_ambiguous")
+
+    # V4: bb 倍数への round 寄せ（合法レンジ内に収まる場合のみ）。
+    if bb > 0 and val % bb != 0:
+        rounded = int(round(val / bb)) * bb
+        if m <= rounded <= s:
+            reasons.append("rounded_to_bb")
+            val = rounded
+
+    snapped, gap = _snap_to_legal(val, m, s)
+    if gap > 0:
+        reasons.append("amount_snapped")
+        # S4: 同次元比較。snap 移動量が bb 以上なら「聞き取りが大きく外れた」として review。
+        if (gap >= bb) if bb > 0 else (gap > m):
+            review = True
+
+    return mk(target, snapped, review, corrected_from, "+".join(reasons))

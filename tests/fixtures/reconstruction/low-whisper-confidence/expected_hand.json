@@ -1,0 +1,77 @@
+{
+  "hand_id": 1,
+  "session_id": "low-whisper-confidence",
+  "started_at": null,
+  "ended_at": null,
+  "blinds": {
+    "sb": 100,
+    "bb": 200
+  },
+  "board": [],
+  "board_source": "",
+  "players": [
+    {
+      "seat": 1,
+      "name": "P1",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 10400,
+      "result": 400
+    },
+    {
+      "seat": 2,
+      "name": "P2",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 9800,
+      "result": -200
+    },
+    {
+      "seat": 3,
+      "name": "P3",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 9800,
+      "result": -200
+    }
+  ],
+  "pot_total": 500,
+  "pots": [
+    {
+      "amount": 500,
+      "eligible_seats": [
+        1,
+        2,
+        3
+      ]
+    }
+  ],
+  "winner_seat": 1,
+  "actions": [
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "preflop",
+      "seat": 3,
+      "player_name": "P3",
+      "action": "call",
+      "amount": 200,
+      "pot_after": 500,
+      "stack_after": 9800,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": true,
+      "confidence": 0.277,
+      "actor_source": "engine_prior",
+      "asr_confidence": 0.3,
+      "apply_ok": true
+    }
+  ],
+  "review_required": true
+}

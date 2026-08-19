@@ -1,0 +1,9 @@
+{"type": "audio", "timestamp": 3000.0, "action": "new_hand", "amount": 0, "raw_text": "ハンド開始", "seat": null, "confidence": null}
+{"type": "audio", "timestamp": 3001.0, "action": "fold", "amount": 0, "raw_text": "フォールド", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 3002.0, "action": "fold", "amount": 0, "raw_text": "フォールド", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 3003.0, "action": "winner", "amount": 0, "raw_text": "シート2 ウィナー", "seat": null, "confidence": null}
+{"type": "audio", "timestamp": 3010.0, "action": "new_hand", "amount": 0, "raw_text": "ハンド開始", "seat": null, "confidence": null}
+{"type": "audio", "timestamp": 3011.0, "action": "raise", "amount": 600, "raw_text": "レイズ 600", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 3012.0, "action": "fold", "amount": 0, "raw_text": "フォールド", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 3013.0, "action": "fold", "amount": 0, "raw_text": "フォールド", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 3014.0, "action": "winner", "amount": 0, "raw_text": "シート3 ウィナー", "seat": null, "confidence": null}

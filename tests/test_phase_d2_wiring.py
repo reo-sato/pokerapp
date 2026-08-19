@@ -49,12 +49,17 @@ class TestRulesAwareWiring:
         gs = _pk(3)
         t, cap = _thread(gs, tmp_path, "pk1")
         actor = gs.get_current_player()
-        t._handle_audio_event(AudioEvent("call", 9999, time.time(), "コール"))
+        # 信頼度は明示（None は欠測 = 保守的既定で review になる, ADR-0033 追記 B3）
+        t._handle_audio_event(AudioEvent("call", 9999, time.time(), "コール", confidence=0.9))
         rec = cap[-1]
         assert rec.seat == actor
         assert rec.action == "call"
         assert rec.amount != 9999 and rec.amount > 0   # heard 無視・状態の call 額
         assert rec.needs_review is False
+        # G2 (ADR-A): 監査フィールドが配線されている
+        assert rec.actor_source == "engine_prior"
+        assert rec.apply_ok is True
+        assert rec.asr_confidence == 0.9
 
     def test_check_facing_bet_becomes_call_review(self, tmp_path: Path):
         gs = _pk(3)
@@ -84,11 +89,13 @@ class TestRulesAwareWiring:
         t, cap = _thread(gs, tmp_path, "pk4")
         actor = gs.get_current_player()
         t._handle_audio_event(
-            AudioEvent("call", 0, time.time(), f"シート{actor} コール", seat=actor)
+            AudioEvent("call", 0, time.time(), f"シート{actor} コール", seat=actor,
+                       confidence=0.9)
         )
         rec = cap[-1]
         assert rec.seat == actor
         assert rec.needs_review is False
+        assert rec.actor_source == "spoken_seat"  # G2 (ADR-A)
 
 
 class TestLegacyRoutingUnchanged:

@@ -1,0 +1,11 @@
+{"type": "audio", "timestamp": 3000.0, "action": "new_hand", "amount": 0, "raw_text": "ハンド開始", "seat": null, "confidence": null}
+{"type": "audio", "timestamp": 3001.0, "action": "call", "amount": 0, "raw_text": "コール", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 3002.0, "action": "call", "amount": 0, "raw_text": "コール", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 3003.0, "action": "check", "amount": 0, "raw_text": "チェック", "seat": null, "confidence": 0.9}
+{"type": "rfid", "timestamp": 3004.0, "tag_id": "B1", "card": "Ah", "reader_id": "board_1", "role": "board", "seat": null, "board_index": 1, "raw_tag_id": "B1"}
+{"type": "rfid", "timestamp": 3004.5, "tag_id": "B2", "card": "Kd", "reader_id": "board_2", "role": "board", "seat": null, "board_index": 2, "raw_tag_id": "B2"}
+{"type": "rfid", "timestamp": 3005.0, "tag_id": "B3", "card": "Qs", "reader_id": "board_3", "role": "board", "seat": null, "board_index": 3, "raw_tag_id": "B3"}
+{"type": "audio", "timestamp": 3006.0, "action": "bet", "amount": 400, "raw_text": "ベット 400", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 3007.0, "action": "fold", "amount": 0, "raw_text": "フォールド", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 3008.0, "action": "fold", "amount": 0, "raw_text": "フォールド", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 3009.0, "action": "winner", "amount": 0, "raw_text": "シート1 ウィナー", "seat": null, "confidence": null}

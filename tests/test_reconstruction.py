@@ -29,13 +29,22 @@ _SCHEMA = (
 )
 _SCHEMAS_DIR = Path(__file__).parent.parent / "docs" / "contracts" / "schemas"
 
-# 再構築が正しく緑にできるケース（D1/D2a: 射影、D2b: silent-fold 合成、F3: side-pot）。
+# 再構築が正しく緑にできるケース（D1/D2a: 射影、D2b: silent-fold 合成、F3: side-pot、
+# ADR-A/B/C/D: 復元正当性バッチで 5→13 に拡充）。
 GREEN_CASES = [
     "check-facing-bet",      # D1/D2a: 非合法 check → call + review
     "call-amount-from-state",  # D1/D2a: heard 額無視 → state の call 額
     "silent-fold",           # D2b: 明示席へ向け中間席を fold 合成（audio 駆動）
     "out-of-turn-rfid",      # D2b: RFID seat で prior を上書きし fold 合成（RFID 駆動）
     "unequal-allin",         # F3: スタック差 all-in → main/side pot を HandSummary.pots に
+    "postflop-street-transition",  # RFID board でストリート遷移 + postflop アクション
+    "full-ring-6max",        # 6 人卓の fold 回し + explicit seat raise
+    "multi-hand-session",    # 2 ハンド連続（stack_start がブラインド post 前 = S5 の跨ぎ検証）
+    "rfid-vs-spoken-seat-conflict",  # RFID > 明示発話席 の優先順位（ADR-0009 §4）
+    "camera-corroboration",  # camera 照合で confidence 向上
+    "low-whisper-confidence",  # 低信頼 ASR → REVIEW_THRESHOLD 未満で needs_review
+    "cap-exceeded-negative",   # SILENT_FOLD_CAP 超過 → prior 維持 + review（負例）
+    "split-pot-chop",        # ADR-D S7: チョップ → pot_awards + 等分
 ]
 
 # 後続フェーズで追加するケース（実装と同じ増分で fixtures を authoring する）。
@@ -57,10 +66,12 @@ def _normalize(d: dict) -> dict:
 @pytest.mark.parametrize("case", GREEN_CASES)
 def test_golden_replay_matches_expected(case: str, tmp_path: Path):
     summaries = replay_fixture(_FIXTURES / case, tmp_path)
-    assert len(summaries) == 1, f"{case}: 1 ハンド確定を期待"
-    actual = _normalize(summaries[0].to_dict())
     expected = json.loads((_FIXTURES / case / "expected_hand.json").read_text(encoding="utf-8"))
-    assert actual == expected
+    if isinstance(expected, list):  # multi-hand fixture（例: multi-hand-session）
+        assert [_normalize(s.to_dict()) for s in summaries] == expected
+    else:
+        assert len(summaries) == 1, f"{case}: 1 ハンド確定を期待"
+        assert _normalize(summaries[0].to_dict()) == expected
 
 
 @pytest.mark.parametrize("case", GREEN_CASES)
@@ -68,7 +79,7 @@ def test_round_trip_determinism(case: str, tmp_path: Path):
     """同一 events.jsonl を 2 回 replay → 完全一致（timestamp 込み、DoD #3）。"""
     s1 = replay_fixture(_FIXTURES / case, tmp_path)
     s2 = replay_fixture(_FIXTURES / case, tmp_path)
-    assert s1[0].to_dict() == s2[0].to_dict()
+    assert [s.to_dict() for s in s1] == [s.to_dict() for s in s2]
 
 
 def test_check_facing_bet_corrected_to_call():
@@ -138,10 +149,11 @@ def test_golden_output_conforms_to_hand_action_schema(case: str, tmp_path: Path)
     jsonschema = pytest.importorskip("jsonschema")
     hand_v = jsonschema.Draft202012Validator(json.loads((_SCHEMAS_DIR / "hand.schema.json").read_text(encoding="utf-8")))
     action_v = jsonschema.Draft202012Validator(json.loads((_SCHEMAS_DIR / "action.schema.json").read_text(encoding="utf-8")))
-    hd = replay_fixture(_FIXTURES / case, tmp_path)[0].to_dict()
-    hand_v.validate(hd)
-    for a in hd["actions"]:
-        action_v.validate(a)
+    for summary in replay_fixture(_FIXTURES / case, tmp_path):
+        hd = summary.to_dict()
+        hand_v.validate(hd)
+        for a in hd["actions"]:
+            action_v.validate(a)
 
 
 def test_unequal_allin_main_and_side_pots(tmp_path: Path):

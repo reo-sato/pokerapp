@@ -137,22 +137,66 @@ def _seat_to_hole_cards(players: list[dict]) -> dict[int, list[str]]:
     return out
 
 
+def _action_key(a: dict) -> tuple[str, Any, str]:
+    """アライメント用キー。(street, seat, action 種別)。金額は含めない（金額誤りで
+    アライメントが崩れないように）。"""
+    action_type = _normalize_action_type(a.get("action"))
+    return (str(a.get("street") or "").strip().lower(), a.get("seat"), action_type)
+
+
+def _align_actions(
+    gt_actions: list[dict], cap_actions: list[dict]
+) -> tuple[list[tuple[dict, dict]], int, int]:
+    """GT と captured のアクション列をシーケンスアライメントする（ADR-A G6）。
+
+    従来の index 厳密比較は、誤合成 fold 1 件の挿入で以降の全アクションがズレて
+    action_accuracy が崩壊した。difflib.SequenceMatcher（キー = (street, seat, action)）で
+    最長一致を取り、挿入（phantom, 例: 誤合成 fold）/欠落（missed）は**各 1 誤り**として数える。
+
+    Returns: (対応づいたペア列, GT 側の未対応数(delete), captured 側の未対応数(insert))
+    """
+    import difflib
+
+    gt_keys = [_action_key(a) for a in gt_actions]
+    cap_keys = [_action_key(a) for a in cap_actions]
+    sm = difflib.SequenceMatcher(a=gt_keys, b=cap_keys, autojunk=False)
+
+    pairs: list[tuple[dict, dict]] = []
+    n_delete = 0
+    n_insert = 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            pairs.extend(zip(gt_actions[i1:i2], cap_actions[j1:j2]))
+        elif tag == "replace":
+            # 双方に何かある区間は位置対応で比較（type/amount の個別誤りとして数える）。
+            n = min(i2 - i1, j2 - j1)
+            pairs.extend(zip(gt_actions[i1:i1 + n], cap_actions[j1:j1 + n]))
+            n_delete += (i2 - i1) - n
+            n_insert += (j2 - j1) - n
+        elif tag == "delete":
+            n_delete += i2 - i1
+        elif tag == "insert":
+            n_insert += j2 - j1
+    return pairs, n_delete, n_insert
+
+
 def measure_hand(
     gt_hand: dict, captured_hand: dict | None
 ) -> HandAccuracy:
-    """1 ハンド分の精度を計算。captured_hand=None は missed として扱う。"""
+    """1 ハンド分の精度を計算。captured_hand=None は missed として扱う。
+
+    アクション列は index 厳密比較ではなくシーケンスアライメント（ADR-A G6）。
+    分母 = GT アクション数 + captured 側の余剰（insert）数。
+    """
     gt_actions = gt_hand.get("actions") or []
     cap_actions = (captured_hand or {}).get("actions") or []
-    action_total = max(len(gt_actions), len(cap_actions))
+    pairs, _n_delete, n_insert = _align_actions(gt_actions, cap_actions)
+    action_total = len(gt_actions) + n_insert
 
     type_correct = 0
     amount_correct = 0
     both_correct = 0
-    for i in range(action_total):
-        gt_a = gt_actions[i] if i < len(gt_actions) else None
-        cap_a = cap_actions[i] if i < len(cap_actions) else None
-        if gt_a is None or cap_a is None:
-            continue
+    for gt_a, cap_a in pairs:
         gt_type = _normalize_action_type(gt_a.get("action"))
         cap_type = _normalize_action_type(cap_a.get("action"))
         gt_amount = _normalize_amount(gt_a.get("amount"), gt_type)
