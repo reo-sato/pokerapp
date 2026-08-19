@@ -36,6 +36,7 @@ class PokerEngine(Protocol):
     def new_hand(self) -> int: ...
     def advance_street(self, street: Street) -> None: ...
     def end_hand(self, winner_seat: int) -> None: ...
+    def end_hand_split(self, winner_seats: list[int]) -> dict[int, int]: ...
     def apply_action(self, seat: int, action: str, amount: int = 0) -> None: ...
     def get_current_player(self) -> int: ...
     def get_stacks(self) -> dict[int, int]: ...
@@ -157,12 +158,9 @@ class PokerkitGameState:
         st = self._state
         if st is None:
             raise RuntimeError("end_hand called without an active hand")
-        # side-pot スナップショット（HandSummary 用 additive 情報）
-        self._final_pots = [
-            {"amount": p.amount, "eligible_seats": [self._idx_to_seat[i] for i in p.player_indices]}
-            for p in st.pots
-        ]
         pot_total = sum(self._hand_start_stacks) - sum(st.stacks)
+        # side-pot スナップショット（HandSummary 用 additive 情報）
+        self._final_pots = self._snapshot_pots(pot_total)
         for s in self._seats:
             self._stacks[s] = st.stacks[self._seat_to_idx[s]]
         self._stacks[winner_seat] += pot_total
@@ -171,6 +169,34 @@ class PokerkitGameState:
             "Hand %d ended (pokerkit). Seat %d wins pot %d. New stack: %d",
             self._hand_id, winner_seat, pot_total, self._stacks[winner_seat],
         )
+
+    def end_hand_split(self, winner_seats: list[int]) -> dict[int, int]:
+        """announced chop（split pot, ADR-D S7）: pot を勝者間で等分して push する。
+
+        端数チップは読み上げ順の先頭勝者に寄せる（実運用の odd-chip ルールは店により
+        異なるため、決定的な単純規則に固定して監査可能にする）。seat→授与額を返す。
+        """
+        if not winner_seats:
+            raise ValueError("winner_seats must not be empty")
+        for seat in winner_seats:
+            if seat not in self._players:
+                raise ValueError(f"Unknown seat: {seat}")
+        st = self._state
+        if st is None:
+            raise RuntimeError("end_hand_split called without an active hand")
+        pot_total = sum(self._hand_start_stacks) - sum(st.stacks)
+        self._final_pots = self._snapshot_pots(pot_total)
+        for s in self._seats:
+            self._stacks[s] = st.stacks[self._seat_to_idx[s]]
+        share, remainder = divmod(pot_total, len(winner_seats))
+        awards: dict[int, int] = {}
+        for i, seat in enumerate(winner_seats):
+            amount = share + (remainder if i == 0 else 0)
+            awards[seat] = awards.get(seat, 0) + amount
+            self._stacks[seat] += amount
+        self._hand_active = False
+        logger.info("Hand %d ended (pokerkit, chop). Awards: %s", self._hand_id, awards)
+        return awards
 
     # ――― アクション適用 ―――
 
@@ -234,6 +260,8 @@ class PokerkitGameState:
             amount_to_call=st.checking_or_calling_amount,
             min_raise=st.min_completion_betting_or_raising_to_amount or 0,
             max_raise=st.max_completion_betting_or_raising_to_amount or 0,
+            bb=self._bb,
+            committed=st.bets[st.actor_index] if st.actor_index < len(st.bets) else 0,
         )
 
     def is_legal_actor(self, seat: int) -> bool:
@@ -281,6 +309,28 @@ class PokerkitGameState:
         except ValueError:
             self._state = snapshot  # 中途半端な fold を残さない
             raise
+
+    def _snapshot_pots(self, pot_total: int) -> list[dict]:
+        """end_hand(_split) 時点の main/side pot スナップショットを作る。
+
+        betting round 途中で winner が宣言された場合（全員 fold 等）、pokerkit は bet 未回収で
+        `st.pots` が空/過少になる。その場合は実コミット総額（pot_total = 開始スタック合計 −
+        現スタック合計）を単一 pot として合成する（ADR-A S6: pot_total の権威は常に engine）。
+        """
+        st = self._state
+        pots = [
+            {"amount": p.amount, "eligible_seats": [self._idx_to_seat[i] for i in p.player_indices]}
+            for p in st.pots
+        ]
+        collected = sum(p["amount"] for p in pots)
+        if pot_total > 0 and collected < pot_total:
+            eligible = [s for s in self._seats if st.statuses[self._seat_to_idx[s]]]
+            if pots:
+                # 回収済み pot + 未回収 bet の残差を最後の pot 相当として追記。
+                pots.append({"amount": pot_total - collected, "eligible_seats": eligible})
+            else:
+                pots = [{"amount": pot_total, "eligible_seats": eligible}]
+        return pots
 
     def pots(self) -> list[dict]:
         """最後の end_hand 時点の main/side pot スナップショット（HandSummary.pots 用）。"""

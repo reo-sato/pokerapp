@@ -400,3 +400,49 @@ def test_measure_hand_missed_returns_zero_actions():
     assert result.action_correct == 0
     assert result.action_total == len(gt["actions"])
     assert result.board_match is False
+
+
+# --- G6 (ADR-A): シーケンスアライメント ---
+
+def test_g6_single_synth_fold_insert_does_not_collapse_accuracy():
+    """誤合成 fold 1 件の挿入で以降の全アクションがズレて崩壊しない（ADR-A G6）。
+
+    従来の index 厳密比較では、captured 側の先頭に fold が 1 件挿入されると
+    GT の全アクションと位置がズレて action_accuracy ≈ 0 になった。
+    アライメント後は「挿入 1 件だけが誤り」= 4/5 になる。
+    """
+    gt = _gt_hand(actions=[
+        {"street": "preflop", "seat": 2, "action": "raise", "amount": 200},
+        {"street": "preflop", "seat": 4, "action": "call", "amount": 200},
+        {"street": "flop", "seat": 4, "action": "check", "amount": 0},
+        {"street": "flop", "seat": 2, "action": "bet", "amount": 300},
+    ])
+    captured = _captured_hand(gt)
+    captured["actions"].insert(0, {
+        "action": "fold", "amount": 0, "street": "preflop", "seat": 6,
+        "needs_review": True, "confidence": 0.3,
+        "source": {"audio": False, "rfid": False, "camera": False},
+        "pot_after": 0, "stack_after": 0,
+        "timestamp": "2026-06-26T10:00:00Z",
+        "hand_id": 1, "player_name": "P6",
+    })
+
+    result = measure_session(_session([captured]), _gt_session([gt]))
+
+    # 分母 = GT 4 + 挿入 1 = 5、正解 = 対応づいた 4。
+    assert result.action_accuracy == 4 / 5
+
+
+def test_g6_missed_action_counts_once():
+    """GT にあるが captured に無いアクション（delete）は 1 誤りとして数え、後続はズレない。"""
+    gt = _gt_hand(actions=[
+        {"street": "preflop", "seat": 2, "action": "raise", "amount": 200},
+        {"street": "preflop", "seat": 4, "action": "call", "amount": 200},
+        {"street": "flop", "seat": 4, "action": "check", "amount": 0},
+    ])
+    captured = _captured_hand(gt)
+    del captured["actions"][1]  # call を取りこぼし
+
+    result = measure_session(_session([captured]), _gt_session([gt]))
+
+    assert result.action_accuracy == 2 / 3

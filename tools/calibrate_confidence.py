@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from integration.engine import (  # noqa: E402
+    MISSING_WHISPER_CONF,
     REVIEW_THRESHOLD,
     SYNTH_FOLD_CONFIDENCE,
     derive_confidence,
@@ -96,6 +97,14 @@ def check_properties() -> list[tuple[str, bool, str]]:
     # P8: 合成 silent-fold は常に閾値未満（sensor 観測なしの推定 ⇒ 必ず review）。
     add("P8 synth-fold below threshold", SYNTH_FOLD_CONFIDENCE < REVIEW_THRESHOLD,
         f"synth={SYNTH_FOLD_CONFIDENCE} < threshold={REVIEW_THRESHOLD}")
+
+    # P9: 欠測 whisper（None → MISSING_WHISPER_CONF 補完, ADR-0033 追記 B3）は満点より
+    # 厳密に低く、audio-only では review 側に落ちる（「情報が無いほど上がる」逆転の禁止）。
+    missing = _conf(whisper_conf=MISSING_WHISPER_CONF)
+    add("P9 missing-conf conservative",
+        missing < _conf(whisper_conf=1.0) and missing < REVIEW_THRESHOLD,
+        f"missing({MISSING_WHISPER_CONF})={missing:.3f} < full={_conf(whisper_conf=1.0):.3f}, "
+        f"threshold={REVIEW_THRESHOLD}")
 
     return results
 

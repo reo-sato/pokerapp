@@ -1,0 +1,129 @@
+{
+  "hand_id": 1,
+  "session_id": "split-pot-chop",
+  "started_at": null,
+  "ended_at": null,
+  "blinds": {
+    "sb": 100,
+    "bb": 200
+  },
+  "board": [],
+  "board_source": "",
+  "players": [
+    {
+      "seat": 1,
+      "name": "P1",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 10100,
+      "result": 100
+    },
+    {
+      "seat": 2,
+      "name": "P2",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 10100,
+      "result": 100
+    },
+    {
+      "seat": 3,
+      "name": "P3",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 9800,
+      "result": -200
+    }
+  ],
+  "pot_total": 600,
+  "pots": [
+    {
+      "amount": 600,
+      "eligible_seats": [
+        1,
+        2,
+        3
+      ]
+    }
+  ],
+  "winner_seat": 1,
+  "actions": [
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "preflop",
+      "seat": 3,
+      "player_name": "P3",
+      "action": "call",
+      "amount": 200,
+      "pot_after": 500,
+      "stack_after": 9800,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": false,
+      "confidence": 0.532,
+      "actor_source": "engine_prior",
+      "asr_confidence": 0.9,
+      "apply_ok": true
+    },
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "preflop",
+      "seat": 1,
+      "player_name": "P1",
+      "action": "call",
+      "amount": 100,
+      "pot_after": 600,
+      "stack_after": 9800,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": false,
+      "confidence": 0.532,
+      "actor_source": "engine_prior",
+      "asr_confidence": 0.9,
+      "apply_ok": true
+    },
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "flop",
+      "seat": 2,
+      "player_name": "P2",
+      "action": "check",
+      "amount": 0,
+      "pot_after": 600,
+      "stack_after": 9800,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": false,
+      "confidence": 0.532,
+      "actor_source": "engine_prior",
+      "asr_confidence": 0.9,
+      "apply_ok": true
+    }
+  ],
+  "review_required": true,
+  "pot_awards": [
+    {
+      "seat": 1,
+      "amount": 300
+    },
+    {
+      "seat": 2,
+      "amount": 300
+    }
+  ]
+}

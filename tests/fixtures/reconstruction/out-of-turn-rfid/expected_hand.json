@@ -17,18 +17,18 @@
         "Ah"
       ],
       "hole_cards_source": "rfid",
-      "stack_start": 9900,
+      "stack_start": 10000,
       "stack_end": 10200,
-      "result": 300
+      "result": 200
     },
     {
       "seat": 2,
       "name": "P2",
       "hole_cards": null,
       "hole_cards_source": "",
-      "stack_start": 9800,
+      "stack_start": 10000,
       "stack_end": 9800,
-      "result": 0
+      "result": -200
     },
     {
       "seat": 3,
@@ -40,8 +40,16 @@
       "result": 0
     }
   ],
-  "pot_total": 200,
-  "pots": [],
+  "pot_total": 400,
+  "pots": [
+    {
+      "amount": 400,
+      "eligible_seats": [
+        1,
+        2
+      ]
+    }
+  ],
   "winner_seat": 1,
   "actions": [
     {
@@ -60,7 +68,10 @@
         "rfid": false
       },
       "needs_review": true,
-      "confidence": 0.3
+      "confidence": 0.3,
+      "actor_source": "engine_prior",
+      "reason": "synth_silent_fold",
+      "apply_ok": true
     },
     {
       "hand_id": 1,
@@ -69,7 +80,7 @@
       "seat": 1,
       "player_name": "P1",
       "action": "call",
-      "amount": 200,
+      "amount": 100,
       "pot_after": 400,
       "stack_after": 9800,
       "source": {
@@ -78,7 +89,11 @@
         "rfid": true
       },
       "needs_review": true,
-      "confidence": 0.888
+      "confidence": 0.888,
+      "actor_source": "rfid",
+      "reason": "actor_sensed_over_prior",
+      "asr_confidence": 0.8,
+      "apply_ok": true
     }
   ],
   "review_required": true

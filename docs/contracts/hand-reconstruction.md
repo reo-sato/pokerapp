@@ -119,8 +119,15 @@ additive）を足し、recognizer が明示 seat を見つけたら埋める。
 
 > **実装状況: Phase D part 1（#7）で実装済** — `audio/recognizer.py` の `apply_corrections(action, amount,
 > ctx, whisper_conf) -> Correction`（純関数・pokerkit 非依存、`tests/test_phase_d_corrections.py`）。
-> 下表の射影と call/check の状態一意化を実装。**engine への結線（actor 推定 = D2）はまだ**＝ライブ挙動不変。
-> blind 単位の round-number 寄せは LegalContext に blind が無いため未実装（clamp のみ、後続拡張）。
+> 下表の射影と call/check の状態一意化を実装。engine への結線（actor 推定 = D2）も実装済。
+>
+> **ADR-0047/0049 での強化（2026-08-19, `tests/test_reconstruction_hardening.py`）**:
+> `LegalContext` に `bb` / `committed` を additive 追加し、
+> ① 金額 snap の review 閾値を同次元比較 **`gap >= bb`** に（bb=0 は従来 `gap > m` fallback）
+> ② **bb 倍数への round 寄せ**（合法レンジ内のみ, `reason="rounded_to_bb"`）
+> ③ raise の **to/by 曖昧性**（to 解釈が非合法だが by 解釈なら合法 → `raise_to_vs_by_ambiguous` + review）
+> ④ **高信頼 ASR（>= HIGH_CONF_ASR=0.85）× 射影で action 変化 → review**（`high_conf_asr_projection`）。
+> reason は "+" 区切りで複合し、ActionRecord.reason に配線される（G2）。
 
 純関数 `apply_corrections(parsed, legal_ctx, whisper_conf) -> Corrected`。`audio/recognizer.py` に置くが
 ゲーム状態を持たず、engine が `legal_ctx` を渡して呼ぶ（recognizer をゲーム状態から疎結合に保つ）。

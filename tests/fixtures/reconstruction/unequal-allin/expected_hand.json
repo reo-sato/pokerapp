@@ -15,18 +15,18 @@
       "name": "P1",
       "hole_cards": null,
       "hole_cards_source": "",
-      "stack_start": 900,
+      "stack_start": 1000,
       "stack_end": 0,
-      "result": -900
+      "result": -1000
     },
     {
       "seat": 2,
       "name": "P2",
       "hole_cards": null,
       "hole_cards_source": "",
-      "stack_start": 2800,
+      "stack_start": 3000,
       "stack_end": 7000,
-      "result": 4200
+      "result": 4000
     },
     {
       "seat": 3,
@@ -38,7 +38,7 @@
       "result": -3000
     }
   ],
-  "pot_total": 6700,
+  "pot_total": 7000,
   "pots": [
     {
       "amount": 3000,
@@ -74,7 +74,10 @@
         "rfid": false
       },
       "needs_review": false,
-      "confidence": 0.532
+      "confidence": 0.532,
+      "actor_source": "engine_prior",
+      "asr_confidence": 0.9,
+      "apply_ok": true
     },
     {
       "hand_id": 1,
@@ -92,7 +95,10 @@
         "rfid": false
       },
       "needs_review": false,
-      "confidence": 0.532
+      "confidence": 0.532,
+      "actor_source": "engine_prior",
+      "asr_confidence": 0.9,
+      "apply_ok": true
     },
     {
       "hand_id": 1,
@@ -110,7 +116,10 @@
         "rfid": false
       },
       "needs_review": false,
-      "confidence": 0.532
+      "confidence": 0.532,
+      "actor_source": "engine_prior",
+      "asr_confidence": 0.9,
+      "apply_ok": true
     }
   ],
   "review_required": false

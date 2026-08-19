@@ -1,0 +1,38 @@
+{
+  "backend": "pokerkit",
+  "sb": 100,
+  "bb": 200,
+  "session_id": "cap-exceeded-negative",
+  "players": [
+    {
+      "seat": 1,
+      "name": "P1",
+      "stack": 10000
+    },
+    {
+      "seat": 2,
+      "name": "P2",
+      "stack": 10000
+    },
+    {
+      "seat": 3,
+      "name": "P3",
+      "stack": 10000
+    },
+    {
+      "seat": 4,
+      "name": "P4",
+      "stack": 10000
+    },
+    {
+      "seat": 5,
+      "name": "P5",
+      "stack": 10000
+    },
+    {
+      "seat": 6,
+      "name": "P6",
+      "stack": 10000
+    }
+  ]
+}

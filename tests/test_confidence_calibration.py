@@ -25,7 +25,7 @@ def _conf(**overrides):
 
 @pytest.mark.parametrize("name,ok,detail", check_properties())
 def test_calibration_property_holds(name: str, ok: bool, detail: str):
-    """較正プロパティ P1〜P8 が成立する（ADR-0033）。"""
+    """較正プロパティ P1〜P9 が成立する（ADR-0033 + B3 追記）。"""
     assert ok, f"{name} violated: {detail}"
 
 
@@ -48,3 +48,14 @@ def test_review_threshold_is_between_synth_and_good_audio():
     """REVIEW_THRESHOLD は synth-fold(0.3) と良好 audio-only の間に位置する（分離点）。"""
     from integration.engine import SYNTH_FOLD_CONFIDENCE
     assert SYNTH_FOLD_CONFIDENCE < REVIEW_THRESHOLD <= _conf(whisper_conf=0.6)
+
+
+def test_p9_missing_conf_is_conservative():
+    """B3 (ADR-0033 追記): whisper 欠測（None）は満点補完しない。
+
+    欠測既定 MISSING_WHISPER_CONF は audio-only で REVIEW_THRESHOLD 未満 = 欠測 audio
+    単独のアクションは必ず review 側に倒れる。"""
+    from integration.engine import MISSING_WHISPER_CONF
+    missing = _conf(whisper_conf=MISSING_WHISPER_CONF)
+    assert missing < _conf(whisper_conf=1.0)
+    assert missing < REVIEW_THRESHOLD

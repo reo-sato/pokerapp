@@ -28,6 +28,7 @@ pokerapp/
 │   ├── worklog/                   ← タスク単位の作業ログ
 │   ├── templates/                 ← adr / issue / worklog テンプレート
 │   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures; **全 model schema `1.0` frozen** — player/hand/action + session/seat/hand_ref(S2) + ledger/point/settlement(S3) + order_request/player_session_summary(viewer), ADR-0019。残 draft は interface/sync(S5) のみ)
+│   ├── ui-feature-inventory.md    ← UI 実運用機能の棚卸し台帳（◎/○/△ 優先度 + 着手状態。◎○ は 2026-07-12 全消化、残は △ 群）
 │   ├── installation.md            ← エンドユーザー: インストール手順 (Phase I)
 │   ├── usage.md                   ← エンドユーザー: 使い方・読み上げ語彙・設定 (Phase I)
 │   ├── troubleshooting.md         ← エンドユーザー: 困りごと対処 (Phase I)
@@ -452,10 +453,11 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **seat→player 選択 GUI + live 有効化 (S2.x E3)** | ✅ 実装済 | `gui/seat_selection.py`（`SeatSelectionDialog`: モーダル, 席ごと割当 / 未登録その場 create / 空席 skip / carry-forward）+ `gui/dashboard.py`「座席設定」ボタン + `integration/engine.py:set_seat_player_map` + `main.py` 結線（UUID4 session_id）。既定 off で挙動不変, ISSUE-0006 Resolved |
 | **event 記録 sidecar (R1)** | ✅ 実装済 | `output/event_recorder.py`（opt-in `recording.enabled`, 挙動不変, ADR-0010, `reconstruction_event` schema） |
 | **pokerkit game-state backend (R2) + live 既定切替 (G)** | ✅ 実装済 | `core/poker_engine.py`（`engine.backend`, ADR-0009/0012。actor/合法手/side-pot 権威）。**Phase G で live 既定を `pokerkit` に切替**（`config_default.json`、`requirements.txt` で `pokerkit>=0.7,<0.8` pin）。`legacy` は config で rollback 可。実機 E2E は Phase H |
-| **rules-aware ライブ結線 + silent-fold 合成 (R3 D1/D2a/D2b)** | ✅ 実装済 (preview) | `audio/recognizer.py:apply_corrections`（合法手射影）+ `integration/engine.py:_handle_rules_aware_action`/`_resolve_actor`（合法手射影・actor 推定[RFID>明示席]・`fold_through` で silent-fold 合成 cap=2/atomic・合成 fold 記録）。legacy 既定は不変。派生 confidence(D3) は後続 |
-| **決定的 replay harness + golden fixtures (R4 F1/F3a)** | ✅ 実装済 | `integration/replay.py` + `tools/replay_hand.py`（clock 注入で決定的、ADR-0011）。golden fixtures: `tests/fixtures/reconstruction/`（**green 5: 射影 2 + 合成 2 + side-pot 1**、DoD #2 達成）。round-trip 決定性 = `tests/test_reconstruction.py` |
-| **派生 confidence + side-pot (R3 D3 / R5 F3a)** | ✅ 実装済 (preview) | `integration/engine.py:derive_confidence`（3 因子 L/A/Q、rules-aware 経路のみ。legacy 固定表は不変）+ needs_review 5 条件。`HandSummary.pots`（main/side、legacy は `[]`）。**Phase D 完了** |
-| **派生 confidence 重み較正 (R5/F2)** | ✅ 実装済 | ADR-0033: 重み（暫定）を golden fixtures archetype + 境界グリッド由来の較正プロパティ P1〜P8（順序単調性 / 閾値分離 / 合法性ゲート / synth-fold）で正当化・回帰ロック。数値据え置き。`tools/calibrate_confidence.py`（ハーネス）+ `tests/test_confidence_calibration.py`。「暫定」表記を解除 |
+| **rules-aware ライブ結線 + silent-fold 合成 (R3 D1/D2a/D2b)** | ✅ 実装済 (preview) | `audio/recognizer.py:apply_corrections`（合法手射影）+ `integration/engine.py:_handle_rules_aware_action`/`_resolve_actor`（合法手射影・actor 推定[RFID>明示席]・`fold_through` で silent-fold 合成 cap=2/atomic・合成 fold 記録）。legacy 既定は不変 |
+| **復元の正当性修正バッチ (ADR-0047〜0050)** | ✅ 実装済 | 「静かな誤り」経路の全廃: 金額パース拡充+曖昧 flag（2千/N百/小数万/「4万2」= `ambiguous_amount`）/ 席表現 strip・抽出の統一（空白・全角・漢数字）/ raise to-by 曖昧性・snap review 同次元化（gap>=bb）・bb 丸め / fold 合成後の stale legal_ctx 再取得 / ハンド外イベントの unresolved レコード化（無音消失全廃, live↔replay 同一例外セマンティクス）/ winner fallback 連鎖 + 空 summary 抑止 / `result` のブラインドずれ修正（stack_start = post 前）/ `pot_total` を engine 権威に / **監査フィールド実配線**（actor_source/corrected_from/reason/asr_confidence/apply_ok, action schema `1.1`）/ 計測のシーケンスアライメント（G6, 誤合成 fold 1 件で崩壊しない）/ whisper 欠測=0.5（P9）/ **制御語ガード**（config `engine.control_conf_threshold` 既定 0=off + mid-hand new_hand 異常確定）/ fold 済み席 RFID の actor 証拠除外 / 発話区間ベース照合窓（`utterance_start_ts`, envelope `0.2`, 旧記録後方互換）/ **recorder 再構築**（推論 worker 分離・有音ゲート・自然文プロンプト）/ **split pot**（チョップ→`end_hand_split` 等分 + `HandSummary.pot_awards`, hand schema `1.1`）。tests: `tests/test_reconstruction_hardening.py` |
+| **決定的 replay harness + golden fixtures (R4 F1/F3a)** | ✅ 実装済 | `integration/replay.py` + `tools/replay_hand.py`（clock 注入で決定的、ADR-0011）。golden fixtures: `tests/fixtures/reconstruction/`（**green 13**: 射影 2 + 合成 2 + side-pot 1 + ADR-0047 で 8 追加 = postflop 遷移 / 6max / multi-hand / RFID×明示席 / camera / 低信頼 / cap 負例 / chop）。round-trip 決定性 = `tests/test_reconstruction.py`。**pin は手計算検証必須**（event-replay.md §6.5） |
+| **派生 confidence + side-pot (R3 D3 / R5 F3a)** | ✅ 実装済 (preview) | `integration/engine.py:derive_confidence`（3 因子 L/A/Q、rules-aware 経路のみ。legacy 固定表は不変）+ needs_review 条件（パース曖昧 flag 含む）。`HandSummary.pots`（main/side、legacy は `[]`。未回収 bet は残差合成で `sum(pots)=実ポット`）。whisper 欠測は `MISSING_WHISPER_CONF=0.5`（満点補完廃止, ADR-0033 追記） |
+| **派生 confidence 重み較正 (R5/F2)** | ✅ 実装済 | ADR-0033: 重み（暫定）を golden fixtures archetype + 境界グリッド由来の較正プロパティ **P1〜P9**（順序単調性 / 閾値分離 / 合法性ゲート / synth-fold / 欠測保守性）で正当化・回帰ロック。数値据え置き。`tools/calibrate_confidence.py`（ハーネス）+ `tests/test_confidence_calibration.py`。「暫定」表記を解除 |
 | **hand/action schema freeze (R5 F3b)** | ✅ 実装済 | `docs/contracts/schemas/{hand,action}.schema.json`（`1.0`, additionalProperties:true, ISSUE-0011 Fixed）+ `_MODELS` 登録 + code↔contract + golden→schema テスト |
 | **PHH call/check (F3c)** | ✅ 確認済（変更不要） | PHH 標準では check/call は同一トークン `cc`（check-or-call）。区別は非標準で pokerkit が parse 不能になるため統一が正。check/call の別は JSON ログ側で保持（`output/phh_exporter.py` にコメント） |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
@@ -640,7 +642,12 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    schema `1.1`）、確定 commit + paid/unpaid/partial 切替（S4 GUI 精算パネル）、buy-in 金額プリセット
    （ADR-0026, `config.ledger.buyin_presets` + `--ledger` ボタン + staff API）。
 6. **R 系の後続**: 派生 confidence の重み較正は **実装済（ADR-0033, property-based + 回帰ロック）**。
-   残: 実運用 review ログが貯まってからの数値較正、camera 源の統合。
+   **復元の正当性修正バッチも実装済（ADR-0047〜0050, 2026-08-19）**: 静かな誤り経路（金額/席パース・
+   stale ctx・イベント消失・result/pot_total）・監査配線・制御語ガード・時刻整合・recorder 再構築・
+   split pot・計測アライメント・fixtures 5→13。
+   残: 実運用 review ログが貯まってからの数値較正（+ `engine.control_conf_threshold` の実運用値決め）、
+   camera 源の統合、V2 複数アクション発話の本実装（実機の発話パターン実測後）、side pot 個別勝者
+   （ADR-0050 future scope）。
 7. **player 本人確認の進化（ADR-0025 方針 / ADR-0027・0028）**: player_id を内部不変キーに保ち、
    認証を additive レイヤで重ねる — L0 name-pick（済）→ **L1 per-player PIN = ✅ 実装済（ADR-0027）**:
    node-local `player_credentials.json`（PBKDF2 + lockout、read API / sync 非対象）+ `core/auth_token.py` の
@@ -655,6 +662,10 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    LINE/Google provider の HTTP（token 交換 / JWKS）、hosted デプロイ（env override / cloud モード config /
    CORS 絞り / レート制限）、web redirect 変種。
 8. **未実装の単機能**: Vosk 代替 ASR、ディーラーボタン自動回転 / SB-BB 自動 post。
+9. **UI 実運用機能の棚卸し台帳**: `docs/ui-feature-inventory.md`（1 卓 dogfood 前提で全 UI を
+   ◎/○/△ に優先度づけ。**◎・○ は実装済**（ADR-0044/0045/0046 ほか, 2026-07-12）。残は △ 群 =
+   プッシュ通知・通算成績・player 検索・オフラインキュー・多言語等で、ネイティブ配布・外販期に
+   優先度を再評価する。新しい機能候補は本台帳に追記して管理する）。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。
 

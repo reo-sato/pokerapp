@@ -102,3 +102,16 @@ confidence が満たすべきプロパティを **較正スペック**として�
 
 - Supersedes: —（ADR-0009 §6 の confidence 設計の「最終較正」を確定。関連: ADR-0009/0011/0012）
 - Superseded by: —
+
+## 追記（2026-08-19, ADR-0047 B3）: whisper 欠測セマンティクス + P9
+
+`derive_confidence` への `whisper_conf` 欠測（`AudioEvent.confidence=None`）は従来 **1.0（満点）
+補完**しており、「情報が無いほど confidence が上がる」逆転があった（欠測 audio-only が 0.575 で
+非 review、実測 0.5 の audio-only が review という不整合）。`integration/engine.py` の
+`MISSING_WHISPER_CONF = 0.5` に変更し、欠測 audio-only は REVIEW_THRESHOLD 未満 = review 側に倒す。
+
+- 較正プロパティ **P9** を追加: `conf(missing) < conf(1.0)` かつ `conf(missing) < REVIEW_THRESHOLD`
+  （`tools/calibrate_confidence.py` / `tests/test_confidence_calibration.py` で回帰ロック）。
+- 意図的な非 ASR 入力（`tools/play_hand_text.py` のテキスト駆動）は `confidence=1.0` を明示する契約。
+  GUI/CLI/control queue 由来の制御イベント（new_hand/winner/rebuy）は betting 経路を通らないため影響なし。
+- 重み・閾値ほか他の数値は不変（P1〜P8 は据え置きで全 PASS）。

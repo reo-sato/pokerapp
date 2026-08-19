@@ -1,0 +1,108 @@
+{
+  "hand_id": 1,
+  "session_id": "cap-exceeded-negative",
+  "started_at": null,
+  "ended_at": null,
+  "blinds": {
+    "sb": 100,
+    "bb": 200
+  },
+  "board": [],
+  "board_source": "",
+  "players": [
+    {
+      "seat": 1,
+      "name": "P1",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 9900,
+      "result": -100
+    },
+    {
+      "seat": 2,
+      "name": "P2",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 9800,
+      "result": -200
+    },
+    {
+      "seat": 3,
+      "name": "P3",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 10300,
+      "result": 300
+    },
+    {
+      "seat": 4,
+      "name": "P4",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 10000,
+      "result": 0
+    },
+    {
+      "seat": 5,
+      "name": "P5",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 10000,
+      "result": 0
+    },
+    {
+      "seat": 6,
+      "name": "P6",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 10000,
+      "result": 0
+    }
+  ],
+  "pot_total": 900,
+  "pots": [
+    {
+      "amount": 900,
+      "eligible_seats": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ]
+    }
+  ],
+  "winner_seat": 3,
+  "actions": [
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "preflop",
+      "seat": 3,
+      "player_name": "P3",
+      "action": "raise",
+      "amount": 600,
+      "pot_after": 900,
+      "stack_after": 9400,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": true,
+      "confidence": 0.0,
+      "actor_source": "engine_prior",
+      "reason": "actor_conflict_capped(sensed=6)",
+      "asr_confidence": 0.9,
+      "apply_ok": true
+    }
+  ],
+  "review_required": true
+}

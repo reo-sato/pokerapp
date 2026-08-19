@@ -189,6 +189,7 @@ def run_cli() -> None:
         on_action=on_action,
         stop_event=stop_event,
         event_recorder=event_recorder,
+        control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
     )
     audio_thread.start()
     integration_thread.start()
@@ -385,6 +386,7 @@ def run_gui() -> None:
         stop_event=stop_event,
         event_recorder=event_recorder,
         session_repo=session_repo,
+        control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
     )
 
     dash.start_threads(

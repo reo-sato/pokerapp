@@ -1,0 +1,6 @@
+{"type": "audio", "timestamp": 3000.0, "action": "new_hand", "amount": 0, "raw_text": "ハンド開始", "seat": null, "confidence": null}
+{"type": "rfid", "timestamp": 3001.0, "tag_id": "S3", "card": "As", "reader_id": "seat_3", "role": "seat", "seat": 3, "raw_tag_id": "S3"}
+{"type": "audio", "timestamp": 3001.2, "action": "call", "amount": 0, "raw_text": "シート1 コール", "seat": 1, "confidence": 0.9}
+{"type": "audio", "timestamp": 3002.0, "action": "fold", "amount": 0, "raw_text": "フォールド", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 3003.0, "action": "check", "amount": 0, "raw_text": "チェック", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 3004.0, "action": "winner", "amount": 0, "raw_text": "シート3 ウィナー", "seat": null, "confidence": null}

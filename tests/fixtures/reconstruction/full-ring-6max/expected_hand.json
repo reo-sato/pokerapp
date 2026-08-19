@@ -1,0 +1,208 @@
+{
+  "hand_id": 1,
+  "session_id": "full-ring-6max",
+  "started_at": null,
+  "ended_at": null,
+  "blinds": {
+    "sb": 100,
+    "bb": 200
+  },
+  "board": [],
+  "board_source": "",
+  "players": [
+    {
+      "seat": 1,
+      "name": "P1",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 9900,
+      "result": -100
+    },
+    {
+      "seat": 2,
+      "name": "P2",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 9400,
+      "result": -600
+    },
+    {
+      "seat": 3,
+      "name": "P3",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 10000,
+      "result": 0
+    },
+    {
+      "seat": 4,
+      "name": "P4",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 10000,
+      "result": 0
+    },
+    {
+      "seat": 5,
+      "name": "P5",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 10000,
+      "result": 0
+    },
+    {
+      "seat": 6,
+      "name": "P6",
+      "hole_cards": null,
+      "hole_cards_source": "",
+      "stack_start": 10000,
+      "stack_end": 10700,
+      "result": 700
+    }
+  ],
+  "pot_total": 1300,
+  "pots": [
+    {
+      "amount": 1300,
+      "eligible_seats": [
+        2,
+        6
+      ]
+    }
+  ],
+  "winner_seat": 6,
+  "actions": [
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "preflop",
+      "seat": 3,
+      "player_name": "P3",
+      "action": "fold",
+      "amount": 0,
+      "pot_after": 300,
+      "stack_after": 10000,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": false,
+      "confidence": 0.532,
+      "actor_source": "engine_prior",
+      "asr_confidence": 0.9,
+      "apply_ok": true
+    },
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "preflop",
+      "seat": 4,
+      "player_name": "P4",
+      "action": "fold",
+      "amount": 0,
+      "pot_after": 300,
+      "stack_after": 10000,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": false,
+      "confidence": 0.532,
+      "actor_source": "engine_prior",
+      "asr_confidence": 0.9,
+      "apply_ok": true
+    },
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "preflop",
+      "seat": 5,
+      "player_name": "P5",
+      "action": "fold",
+      "amount": 0,
+      "pot_after": 300,
+      "stack_after": 10000,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": false,
+      "confidence": 0.532,
+      "actor_source": "engine_prior",
+      "asr_confidence": 0.9,
+      "apply_ok": true
+    },
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "preflop",
+      "seat": 6,
+      "player_name": "P6",
+      "action": "raise",
+      "amount": 600,
+      "pot_after": 900,
+      "stack_after": 9400,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": false,
+      "confidence": 0.532,
+      "actor_source": "spoken_seat",
+      "asr_confidence": 0.9,
+      "apply_ok": true
+    },
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "preflop",
+      "seat": 1,
+      "player_name": "P1",
+      "action": "fold",
+      "amount": 0,
+      "pot_after": 900,
+      "stack_after": 9900,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": false,
+      "confidence": 0.532,
+      "actor_source": "engine_prior",
+      "asr_confidence": 0.9,
+      "apply_ok": true
+    },
+    {
+      "hand_id": 1,
+      "timestamp": null,
+      "street": "flop",
+      "seat": 2,
+      "player_name": "P2",
+      "action": "call",
+      "amount": 400,
+      "pot_after": 1300,
+      "stack_after": 9400,
+      "source": {
+        "camera": false,
+        "audio": true,
+        "rfid": false
+      },
+      "needs_review": false,
+      "confidence": 0.532,
+      "actor_source": "engine_prior",
+      "asr_confidence": 0.9,
+      "apply_ok": true
+    }
+  ],
+  "review_required": false
+}

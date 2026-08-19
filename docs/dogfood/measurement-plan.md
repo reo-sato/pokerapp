@@ -40,12 +40,19 @@ hand_coverage = (ground truth に存在しかつ logs に存在する hand_id �
 
 ```
 action_accuracy = Σ (各 hand の正しい action 数)
-                / Σ (各 hand の max(gt_action 数, logged_action 数))
+                / Σ (各 hand の gt_action 数 + logged 側の余剰（挿入）数)
 ```
 
 - 1 action の「正しい」= **action 種別が一致** かつ **amount が一致**（fold / check は amount=0 で一致扱い）
-- **max() を分母にする** ことで、抜け（gt にあるのに logs にない）と過剰（logs にあるが gt にない）の両方を罰する
-- 順序敏感: i 番目の action は i 番目の gt action とだけ比較する
+- **シーケンスアライメントで比較する**（ADR-0047 G6）: `difflib.SequenceMatcher`（キー =
+  `(street, seat, action)`）で GT と logged を最長一致アライメントし、対応づいたペアだけを比較する。
+  - 挿入（logged にだけある。例: 誤合成 silent-fold）= **1 誤り**（分母に加算）
+  - 欠落（GT にだけある。取りこぼし）= **1 誤り**（対応ペアなし = 不正解のまま分母に残る）
+  - 旧定義（index 厳密比較 + max() 分母）は、挿入/欠落 1 件で以降の全アクションがズレて
+    1 誤りが N 誤りに化けるため廃止（実力を過小報告する）。
+- **GT 規約**: GT は実世界で起きた**全アクション**（宣言されなかった実際の fold を含む）を記録する。
+  正しく合成された silent-fold は GT の実 fold とアライメントされて一致し、誤合成 fold だけが
+  挿入 1 件として罰される。
 
 補助指標（Phase A 通過判定には使わないが、診断のために計測する）:
 - `action_type_accuracy` = 種別だけ一致した割合
