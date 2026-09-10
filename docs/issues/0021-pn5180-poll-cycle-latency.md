@@ -144,6 +144,12 @@ jef-sure/pn5180（v0.1.x）の `proto->get_all_uids()` が **堅牢性優先の�
 - **presence hold を UID 単位に**（`s_uid_miss[slot][k]`）。検出集合と前回集合をマージし、
   欠けた UID だけを `PRESENCE_HOLD_MISSES`(3) サイクル保持する。
 - `PN5180_FAST_MAX_PROBES` 12 → **16**（root 再 probe と最後の「応答なし」確認ぶん）。
+- **実機フィードバック 2（commit 8e737f4 + bc9051b）**: 3 枚重ねで `3 枚` が出て 20 秒放置の再発火も
+  0 件になったが、**3 枚載せた 1 周が ≈170 ms**（カード無し 15 ms）= probe 上限 16 回まで毎回空回り。
+  原因は Stay Quiet の**送信完了待ち上限 3 ms がフレーム長（12 byte ≈ 3.7 ms @26.48 kbps）より短く**、
+  次の INVENTORY の `pn5180_sendData` が idle 遷移で送信中のフレームを打ち切っていたこと（タグに届かない
+  = quiet 不成立 → 毎ラウンド同じ 3 枚を DFS で見つけ直す）。上限を 10 ms に、送信後 500 µs（t1）空ける。
+  併せて `poll 統計` に `probe 最大 N 回/reader` を追加（quiet 不発の検出用）。
 - Stay Quiet が効かない札（規格外 / 送信失敗）で probe 上限まで空回りしないよう、
   **新しい UID が増えなかったラウンドが 2 回続いたら打ち切る**。
 

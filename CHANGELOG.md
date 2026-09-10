@@ -27,6 +27,16 @@
   docs: ISSUE-0021（実機結果 + 追加 Root Cause + Regression Check）、firmware README、
   firmware checklist §8、worklog `docs/worklog/2026-09-10-pn5180-stay-quiet-per-uid-hold.md`。
 
+### Fixed (firmware: Stay Quiet の送信完了待ちが短すぎてタグに届かない, ISSUE-0021, 2026-09-10)
+
+- 実機（1 slot, 3 枚重ね）で `3 枚` は読めるが 1 周が ≈170 ms（カード無し 15 ms）だった。Stay Quiet
+  フレーム（12 byte）は 26.48 kbps で送信に ≈3.7 ms かかるのに、送信完了待ちの上限が 3 ms で、次の
+  INVENTORY の `pn5180_sendData`（idle→transceive）が**送信中のフレームを打ち切っていた**ため quiet が
+  効かず、毎 poll probe 上限（16 回）まで空回りしていた。上限を 10 ms にし、タグの処理時間（t1）ぶん
+  500 µs 空けてから次の要求を送る。
+- `poll 統計` に `probe 最大 N 回/reader` を追加（Stay Quiet 不発や衝突の空回りをログで見えるように）。
+  期待: カード無し 1 / 1 枚 2 / 2 枚 3〜5 / 3 枚 4〜8。16 に張り付くなら quiet が効いていない。
+
 ### Changed (firmware: 起動時 MUX scan の前に共有 RST を 1 回叩く, 2026-09-10)
 
 - `pn5180_reader_init` は MUX 全 ch 走査の**前に**共有 RST を pulse して全 PN5180 を idle（BUSY=Low）に

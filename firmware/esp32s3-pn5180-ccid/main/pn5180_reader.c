@@ -677,14 +677,19 @@ static void fast_stay_quiet_15693(pn5180_t *dev, const uint8_t *uid_lsb_first) {
     pn5180_enable_crc(dev);
     if (!pn5180_sendData(dev, buf, (int)sizeof(buf), 0)) return;
 
-    // 送信完了だけ短く待つ（上限 3ms）。次の pn5180_sendData が idle→transceive を張り直すので、
-    // 待ち切れなくても致命ではない。RX を待たないのは応答が無いコマンドだから。
-    const int64_t deadline = esp_timer_get_time() + 3000;
+    // 送信完了（TX_IRQ）を待つ。フレームは 12 byte（10 + CRC 2）× 8 bit / 26.48 kbps ≈ 3.7 ms
+    // かかるので上限は 10 ms。**待ち切れずに次の pn5180_sendData（idle→transceive）へ進むと、送信中の
+    // フレームが途中で打ち切られてタグに Stay Quiet が届かない**（実機 2026-09-10: 上限 3 ms だった
+    // とき、3 枚重ねで quiet が効かず毎 poll probe 上限 16 回まで空回り → 1 周 ≈170 ms）。
+    // RX は待たない（応答の無いコマンド）。
+    const int64_t deadline = esp_timer_get_time() + 10000;
     for (;;) {
         if (pn5180_getIRQStatus(dev) & TX_IRQ_STAT) break;
         if (esp_timer_get_time() > deadline) break;
         esp_rom_delay_us(100);
     }
+    // タグ側の処理時間（ISO/IEC 15693-3 の t1 ≈ 320 µs）を空けてから次の要求を送る。
+    esp_rom_delay_us(500);
 }
 
 // 見つけた UID を集合に積む（重複は無視、満杯も無視）。
@@ -696,6 +701,10 @@ static void fast_add_uid(uint8_t uids[][16], uint8_t *count, const uint8_t *uid)
     memcpy(uids[*count], uid, 8);
     (*count)++;
 }
+
+// 直近に読んだ reader 1 台の probe（INVENTORY 送信）回数。poll 統計で「1 周の最大」を出すために持つ
+// （Stay Quiet が効かず probe 上限まで空回りしているか、をログで見えるようにする）。
+static int s_fast_last_probes;
 
 // ── 高速 inventory 本体（Stay Quiet + mask ベースの anti-collision DFS）──
 // RF はこの関数の間ずっと ON（reader ごと 1 回だけ立てる）。**最後に必ず RF off**（quiet 解除）。
@@ -798,6 +807,7 @@ static uint8_t fast_inventory_15693(slot_reader_t *r, uint8_t uids[][16], uint8_
     // poll 側の rf_off_after_read() と二重になり得るが、ドライバの setRF_off は RF_STATUS が
     // 既に off なら即 true を返すので無害。
     pn5180_setRF_off(dev);
+    s_fast_last_probes = probes;
     return count;
 }
 #endif  // PN5180_FAST_INVENTORY
@@ -988,6 +998,7 @@ static int64_t s_stats_max_us;
 static int64_t s_stats_sum_us;
 static int64_t s_stats_worst_us;         // 窓内で最も遅かった 1 reader の所要時間
 static int s_stats_worst_idx;
+static int s_stats_max_probes;           // 窓内で reader 1 台が使った probe 回数の最大（fast 経路）
 static int s_stats_cycles;
 #endif
 
@@ -997,6 +1008,7 @@ void pn5180_reader_poll_once(void) {
     int64_t cycle_worst_us = -1;
     int cycle_worst_idx = -1;
     int ready_slots = 0;
+    int cycle_max_probes = 0;  // この周で最も probe を使った reader の回数（fast 経路のみ。0 = ドライバ経路）
 #endif
 
     for (int i = 0; i < CCID_SLOT_COUNT; i++) {
@@ -1023,6 +1035,9 @@ void pn5180_reader_poll_once(void) {
         // 自前の mask DFS（ISO15693 専用。PN5180_TRY_ISO14443 はこの経路では無視）。
         count = fast_inventory_15693(&s_readers[i], uids, &len);
         from_iso15693 = (count > 0);
+#if POLL_STATS_INTERVAL_MS > 0
+        if (s_fast_last_probes > cycle_max_probes) cycle_max_probes = s_fast_last_probes;
+#endif
 #else
         // ISO15693（8B）→（PN5180_TRY_ISO14443=1 のときだけ）ISO14443A（4/7B）の順。
         // proto を分けて試すのは、ISO15693 のときだけ MSB-first に反転するため。
@@ -1090,6 +1105,7 @@ void pn5180_reader_poll_once(void) {
         s_stats_sum_us = 0;
         s_stats_worst_us = -1;
         s_stats_worst_idx = -1;
+        s_stats_max_probes = 0;
     }
     if (cycle_us < s_stats_min_us) s_stats_min_us = cycle_us;
     if (cycle_us > s_stats_max_us) s_stats_max_us = cycle_us;
@@ -1099,6 +1115,7 @@ void pn5180_reader_poll_once(void) {
     }
     s_stats_sum_us += cycle_us;
     s_stats_cycles++;
+    if (cycle_max_probes > s_stats_max_probes) s_stats_max_probes = cycle_max_probes;
 
     const int64_t now_us = esp_timer_get_time();
     if (s_stats_window_start_us == 0) s_stats_window_start_us = now_us;  // 初回だけ窓を開始
@@ -1106,12 +1123,12 @@ void pn5180_reader_poll_once(void) {
         const int64_t avg_us = s_stats_sum_us / s_stats_cycles;  // cycles >= 1
         ESP_LOGI(TAG,
                  "poll 統計(直近 %d 周): 1 周 min/avg/max = %lld/%lld/%lld ms, "
-                 "最長 reader #%d (slot %d) = %lld ms, ready %d slot",
+                 "最長 reader #%d (slot %d) = %lld ms, probe 最大 %d 回/reader, ready %d slot",
                  s_stats_cycles,
                  (long long)(s_stats_min_us / 1000), (long long)(avg_us / 1000),
                  (long long)(s_stats_max_us / 1000),
                  s_stats_worst_idx + 1, s_stats_worst_idx,
-                 (long long)(s_stats_worst_us / 1000), ready_slots);
+                 (long long)(s_stats_worst_us / 1000), s_stats_max_probes, ready_slots);
         s_stats_cycles = 0;             // 次の窓へ（min/max/sum は次の 1 周で初期化）
         s_stats_window_start_us = now_us;
     }
