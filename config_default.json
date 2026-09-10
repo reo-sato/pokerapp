@@ -44,11 +44,20 @@
     "_pcsc_transport_comment": "transport='pcsc' の場合は下の pcsc_readers (list) を使う (pyscard 必須, canonical ADR-0015)。readers (dict, 上) は transport='http' 用。",
     "_pcsc_poll_interval_ms": 100,
     "pcsc_readers": [
-      {"name": "PN5180-CCID [Interface 0]", "role": "seat",  "seat": 1},
-      {"name": "PN5180-CCID [Interface 1]", "role": "seat",  "seat": 2},
-      {"name": "PN5180-CCID [Interface 5]", "role": "board", "index": 1}
+      {"name": "PokerRFID PN5180-CCID 0",  "role": "seat",  "seat": 1},
+      {"name": "PokerRFID PN5180-CCID 1",  "role": "seat",  "seat": 2},
+      {"name": "PokerRFID PN5180-CCID 2",  "role": "seat",  "seat": 3},
+      {"name": "PokerRFID PN5180-CCID 3",  "role": "seat",  "seat": 4},
+      {"name": "PokerRFID PN5180-CCID 4",  "role": "seat",  "seat": 5},
+      {"name": "PokerRFID PN5180-CCID 5",  "role": "seat",  "seat": 6},
+      {"name": "PokerRFID PN5180-CCID 6",  "role": "seat",  "seat": 7},
+      {"name": "PokerRFID PN5180-CCID 7",  "role": "seat",  "seat": 8},
+      {"name": "PokerRFID PN5180-CCID 8",  "role": "board", "index": 1, "cards": 3},
+      {"name": "PokerRFID PN5180-CCID 9",  "role": "board", "index": 4},
+      {"name": "PokerRFID PN5180-CCID 10", "role": "board", "index": 5}
     ],
-    "_pcsc_readers_comment": "ADR-0034 / docs/contracts/rfid-usb-ccid.md: PN5180 + ESP32-S3 USB CCID を PC/SC で読む canonical 経路の reader 設定 (list)。name は OS が描画する reader_name と完全一致させる (OS により文字列が異なる。`python -c \"from smartcard.System import readers; print([str(r) for r in readers()])\"` で実値を確認)。role/seat が RFIDEvent への対応の source of truth。サンプルは実機接続後に実 reader_name へ置換すること。"
+    "_pcsc_readers_comment": "ADR-0034 / docs/contracts/rfid-usb-ccid.md v1.1: PN5180 + ESP32-S3 USB CCID を PC/SC で読む canonical 経路の reader 設定 (list)。本番構成は 11 slot = 席 8 台 (slot 0..7 = seat 1..8) + board 3 台 (slot 8..10 = flop 3 枚重ね / turn / river)。name は OS が描画する reader_name と完全一致させる (上のサンプルは Windows の実機確定値。他 OS は文字列が異なるので `python tools/probe_pcsc.py list` で実値を確認して置換する)。role/seat/index が RFIDEvent への対応の source of truth。",
+    "_pcsc_cards_comment": "role=board の cards (任意, 既定 1) = その reader に重ねて置く枚数。ボード位置は index から index+cards-1 を占有し、検出順に index+offset を割り当てる (外して戻すと同じ位置に戻る)。席 reader は 2 枚重ねでも設定不要 (hole card は位置を持たない)。"
   },
   "recording": {
     "enabled": false,

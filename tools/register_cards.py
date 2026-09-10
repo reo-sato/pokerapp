@@ -11,6 +11,8 @@
   途中で止めても同じコマンドで続きから再開できる。
 - 誤タップ防御: 別 code で登録済みの UID は警告して登録しない（直したければ `unregister`）。
   期待 code で登録済みの UID は「済」として次へ（冪等）。置きっぱなしでは次に進まない（離すまで待つ）。
+  **複数枚が重なって載っている間は登録しない**（`⚠ N 枚検出` を出して待つ。契約 v1.1 §6 で 1 slot に
+  複数 UID が載りうるため、登録は必ず 1 枚ずつ）。
 
 サブコマンド:
   run         タップ駆動で登録（既定: deck 1 / suit-rank 順 / ジョーカー 2 枚）
@@ -39,7 +41,7 @@ from typing import Callable, Optional
 # repo ルートを import パスに追加（スクリプト直接実行のため）。
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from rfid.bridge import PCSCBridge  # noqa: E402
+from rfid.bridge import PCSCBridge, bridge_read_uids  # noqa: E402
 from rfid.card_master import VALID_CARDS, CardMaster, normalize_tag_id  # noqa: E402
 from tools.probe_pcsc import get_pcsc_readers, load_rfid_config, pyscard_available  # noqa: E402
 
@@ -137,8 +139,9 @@ def run_registration(
 ) -> RegisterResult:
     """codes の順に「置く→登録→離す」を繰り返す（テスト可能な純粋ループ）。
 
-    bridge は connect 済みの PCSCBridge 互換（`read_uid() -> str|None`）。
-    置きっぱなしのカードは 1 回だけ処理し、None（離脱）を読むまで次を受け付けない。
+    bridge は connect 済みの PCSCBridge 互換（`read_uids() -> list[str]`。旧 `read_uid()` のみでも可）。
+    置きっぱなしのカードは 1 回だけ処理し、カード無し（離脱）を読むまで次を受け付けない。
+    **複数枚が重なっている間は登録しない**（どの UID を登録すべきか決められないため, 契約 v1.1 §6）。
     max_polls は上限（テスト/安全弁）。None なら codes が尽きるまで。
     """
     result = RegisterResult()
@@ -146,6 +149,7 @@ def run_registration(
     total = len(codes)
     polls = 0
     need_release = False
+    multi_warned = 0   # 直近に警告した枚数（状態が変わったときだけ出す）
 
     def prompt() -> None:
         if queue:
@@ -157,7 +161,16 @@ def run_registration(
         if max_polls is not None and polls >= max_polls:
             break
         polls += 1
-        uid = bridge.read_uid()
+        uids = bridge_read_uids(bridge)
+        if len(uids) > 1:
+            # 重ね置き: 登録対象が一意に決まらないので、1 枚になるまで待つ
+            if multi_warned != len(uids):
+                sink(f"  ⚠ {len(uids)} 枚検出 — 1 枚だけ置いてください")
+                multi_warned = len(uids)
+            sleep(poll_interval)
+            continue
+        multi_warned = 0
+        uid = uids[0] if uids else None
         if uid is None:
             if need_release:
                 need_release = False

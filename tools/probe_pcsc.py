@@ -9,9 +9,10 @@ PC/SC スタック越しに、production と同じ `rfid.bridge.PCSCBridge` / `r
 を使って次を確認する:
 
   - §3-4 reader_name 列挙と `config.rfid.pcsc_readers` の一致（前方一致でなく等値）
-  - §4   config の lint（role/seat/index・重複・キー欠落）
+  - §4   config の lint（role/seat/index/cards・重複・位置の重なり・キー欠落）
   - §5   各 slot への connect 成功（host は ATR 非依存。connect が通れば OS PC/SC が ATR 受理）
-  - §6-7 Get UID（FF CA 00 00 00）応答の UID を 4/7/8 バイト長非依存で正規化
+  - §6-7 Get UID（FF CA 00 00 00）応答の UID を 4/7/8 バイト長非依存で正規化。16/24/32B は
+         重ね置き（8B UID × 枚数の連結, v1.1）として分割
   - §8   デバウンス / hot-plug（タップ→離す→再タップで再発火）を実イベントで観察
 
 要 `pip install ".[pcsc]"`（pyscard）。Linux は `pcscd` 稼働が前提。reader_name は OS 依存なので
@@ -46,7 +47,7 @@ from typing import Callable, Optional
 # repo ルートを import パスに追加（スクリプト直接実行のため）。
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from rfid.bridge import PCSCBridge, list_readers  # noqa: E402
+from rfid.bridge import PCSCBridge, list_readers, split_uid_response  # noqa: E402
 from rfid.card_master import CardMaster, normalize_tag_id  # noqa: E402
 
 # 契約 §7: host が想定する UID バイト長（4=Mifare Classic / 7=Type A / 8=ISO 15693）。
@@ -122,6 +123,7 @@ def lint_pcsc_readers(pcsc_readers: list[dict]) -> list[str]:
 
     seen_names: set[str] = set()
     seen_seats: dict[int, str] = {}
+    seen_positions: dict[int, str] = {}   # board 位置 1..5 → 使っている label（重なり検出）
     for i, cfg in enumerate(pcsc_readers):
         label = f"pcsc_readers[{i}]"
         name = cfg.get("name")
@@ -150,6 +152,48 @@ def lint_pcsc_readers(pcsc_readers: list[dict]) -> list[str]:
             # index は任意だが、ある場合は 1..5（board street 自動遷移の位置）。
             if index is not None and (not isinstance(index, int) or not 1 <= index <= 5):
                 problems.append(f"{label}: role=board の index は 1..5（実際: {index!r}）。")
+            problems.extend(_lint_board_cards(cfg, label, index, seen_positions))
+    return problems
+
+
+def _lint_board_cards(
+    cfg: dict, label: str, index: object, seen_positions: dict[int, str],
+) -> list[str]:
+    """board reader の `cards`（重ね置き枚数, 契約 v1.1 §4）と占有位置を検査する。
+
+    `cards` は任意（既定 1）。cards>1 は先頭位置 `index` が必須で、占有範囲は
+    `[index, index+cards-1]`。範囲が 1..5 を超える / 他の board reader と重なるのは NG。
+    """
+    problems: list[str] = []
+    cards = cfg.get("cards")
+    if cards is not None and (
+        not isinstance(cards, int) or isinstance(cards, bool) or not 1 <= cards <= 5
+    ):
+        problems.append(f"{label}: role=board の cards は 1..5（実際: {cards!r}）。")
+        cards = None
+    span = cards if isinstance(cards, int) else 1
+
+    if span > 1 and index is None:
+        problems.append(
+            f"{label}: cards={span} には index が必要（重ね置きの先頭ボード位置, §4）。"
+        )
+    if not isinstance(index, int) or isinstance(index, bool) or not 1 <= index <= 5:
+        return problems
+
+    last = index + span - 1
+    if last > 5:
+        problems.append(
+            f"{label}: index({index}) + cards({span}) - 1 = {last} が board 位置 1..5 を超えます。"
+        )
+        last = 5
+    conflicts = [p for p in range(index, last + 1) if p in seen_positions]
+    if conflicts:
+        others = sorted({seen_positions[p] for p in conflicts})
+        problems.append(
+            f"{label}: board 位置 {conflicts} が {', '.join(others)} と重複しています。"
+        )
+    for pos in range(index, last + 1):
+        seen_positions.setdefault(pos, label)
     return problems
 
 
@@ -178,14 +222,35 @@ def analyze_uid(uid: Optional[str]) -> UidInfo:
 
 
 def reader_label(cfg: dict) -> str:
-    """config 1 件を human-readable な役割ラベルにする（例 'seat 1' / 'board 3'）。"""
+    """config 1 件を human-readable な役割ラベルにする（例 'seat 1' / 'board 3' / 'board 1-3'）。
+
+    `cards`>1（重ね置き, 契約 v1.1 §4）の board reader は占有範囲を `board 1-3` の形で示す。
+    """
     role = cfg.get("role", "?")
     if role == "seat":
         return f"seat {cfg.get('seat', '?')}"
     if role == "board":
         idx = cfg.get("index")
-        return f"board {idx}" if idx is not None else "board"
+        if idx is None:
+            return "board"
+        cards = cfg.get("cards")
+        if isinstance(cards, int) and not isinstance(cards, bool) and cards > 1:
+            return f"board {idx}-{idx + cards - 1}"
+        return f"board {idx}"
     return role
+
+
+def format_uid_payload(data: "list[int] | bytes") -> str:
+    """Get UID 応答のデータ部を raw 表示用に整形する（契約 v1.1 §6）。
+
+    16/24/32 バイト（8B UID × 2..4 枚 = 重ね置き）は `UID×k = A, B` の形で分割表示、
+    それ以外は従来どおり空白区切り 16 進をそのまま出す。
+    """
+    raw = bytes(bytearray(data))
+    uids = split_uid_response(raw)
+    if len(uids) > 1:
+        return f"UID×{len(uids)} = {', '.join(uids)}"
+    return " ".join(f"{b:02X}" for b in raw)
 
 
 @dataclass
@@ -369,7 +434,8 @@ def _cmd_watch(args: argparse.Namespace, *, bridge_factory: BridgeFactory = PCSC
 
     print(f"watch 開始: {args.seconds:.0f} 秒間、各 reader を順にタップしてください "
           f"(poll={poll}ms, Ctrl-C で中断)")
-    print("各 slot にカードを置く→離す→再度置く で、role/seat と hot-plug 再発火を確認できます。\n")
+    print("各 slot にカードを置く→離す→再度置く で、role/seat と hot-plug 再発火を確認できます。")
+    print("重ね置き（席 2 枚 / flop 3 枚）は枚数ぶん行が出ます（board は index+offset の位置）。\n")
     try:
         seen = run_watch(
             pcsc_readers, card_master,
@@ -504,7 +570,7 @@ def _cmd_raw(args: argparse.Namespace) -> int:
                 atr_s = toHexString(conn.getATR())
                 data, sw1, sw2 = conn.transmit(list(GET_UID_APDU))
                 conn.disconnect()
-                res = (f"connect OK ATR={atr_s} → Get UID: {toHexString(data)} "
+                res = (f"connect OK ATR={atr_s} → Get UID: {format_uid_payload(data)} "
                        f"SW={sw1:02X}{sw2:02X}")
             except KeyboardInterrupt:
                 raise

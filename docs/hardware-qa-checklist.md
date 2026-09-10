@@ -1,7 +1,8 @@
 # 実機 RFID QA チェックリスト（PC/SC canonical, Phase H）
 
 実機の **ESP32-S3 + PN5180（USB CCID → PC/SC, canonical, ADR-0015/0034）** を接続して、
-RFID 経路を `docs/contracts/rfid-usb-ccid.md` **v1.0** の MUST に対して bring-up 確認する手順。
+RFID 経路を `docs/contracts/rfid-usb-ccid.md` **v1.1** の MUST に対して bring-up 確認する手順
+（v1.1 = 1 reader に複数枚重ね置き: 席 2 枚 / flop 3 枚。本番構成は 11 slot = 席 8 + board 3）。
 
 - 実機なしの確認は [`manual-qa-checklist.md`](manual-qa-checklist.md)（音声のみ必須経路 + 項目6 の
   HTTP 模擬）を参照。本書は **実機が要る項目**（🖥️）に特化する。
@@ -51,11 +52,18 @@ python tools/probe_pcsc.py list
   "poll_interval_ms": 100,
   "card_master_file": "./rfid_cards.json",
   "pcsc_readers": [
-    {"name": "<手順1の実 reader_name>", "role": "seat",  "seat": 1},
-    {"name": "<別 slot の実 reader_name>", "role": "board", "index": 1}
+    {"name": "<slot 0 の実 reader_name>",  "role": "seat",  "seat": 1},
+    // … slot 1..6 = seat 2..7 …
+    {"name": "<slot 7 の実 reader_name>",  "role": "seat",  "seat": 8},
+    {"name": "<slot 8 の実 reader_name>",  "role": "board", "index": 1, "cards": 3},  // flop 3 枚重ね
+    {"name": "<slot 9 の実 reader_name>",  "role": "board", "index": 4},              // turn
+    {"name": "<slot 10 の実 reader_name>", "role": "board", "index": 5}               // river
   ]
 }
 ```
+
+本番は **11 slot**（席 8 + board 3）。board は 1 reader = 1 枚ではなく、flop の 3 枚を 1 台に重ねて置く
+（`cards`, 契約 v1.1 §4）。席 reader は 2 枚重ねでも `cards` を書かない（hole card は位置を持たない）。
 
 ```bash
 python tools/probe_pcsc.py check
@@ -63,7 +71,9 @@ python tools/probe_pcsc.py check
 
 - **期待**: `config lint` が `✓`、各 reader が `✓ PASS`、最後に `PASS ✅`。
 - **見る点**:
-  - lint は name 欠落 / 重複・role 不正・seat 1..9 外・seat 重複・board index 1..5 外を検出する（§4）。
+  - lint は name 欠落 / 重複・role 不正・seat 1..9 外・seat 重複・board index 1..5 外に加え、
+    **`cards` 1..5 外 / `cards>1` なのに index 無し / `index+cards-1` が 5 超 / board 位置の重なり**
+    を検出する（§4, v1.1）。
   - connect PASS = OS PC/SC が slot の **ATR を受理**して `SCardConnect` 成功（host は ATR 非依存, §5）。
     FAIL は name 不一致が最多 → 手順1の文字列を再確認。
   - **注**: `poll_interval_ms` はキーに先頭 `_` を付けない（`_pcsc_poll_interval_ms` はコメント扱いで無効）。
@@ -92,9 +102,13 @@ python tools/register_cards.py unregister <UID>      # 置き間違えの修正
 python tools/probe_pcsc.py watch --seconds 30
 ```
 
-各 slot で「**置く → 離す → もう一度置く**」を行う。
+各 slot で「**置く → 離す → もう一度置く**」を行う。**重ね置き**（席に 2 枚 / board1 に 3 枚）も試す。
 
 - **期待**: タップごとに `seat N` / `board K` のラベル + 正規化 UID + バイト長 + 解決カードが 1 行出る。
+  - **席に hole card 2 枚を重ねて置く → 2 行**（同じ `seat N`、UID が別）。
+  - **board1 に flop 3 枚を重ねて置く → `board 1` / `board 2` / `board 3` の 3 行**（位置は検出順に
+    割り当て。1 枚だけ外して戻すと**同じ位置**でもう一度出る。契約 v1.1 §4/§6/§8）。
+  - `cards` を超える枚数を載せると WARN が出て `board` ラベル（位置なし）になる。
 - **見る点**:
   - **役割マッピング**（§4）: 物理リーダー位置と `seat`/`board` ラベルが一致するか。ズレていれば
     `pcsc_readers` の name↔slot 対応を直す（firmware は slot 順序のみ保証、役割は host config が source of truth）。
@@ -131,17 +145,17 @@ python main.py --cli           # 起動ログに "RFID pyscardスレッド起動
 
 ---
 
-## 受け入れ基準（契約 v1.0 ↔ 本手順）
+## 受け入れ基準（契約 v1.1 ↔ 本手順）
 
 | 契約 § | 項目 | 確認手段 |
 |--------|------|---------|
 | §2 | USB CCID class / VID-PID / product 文字列固定 | 手順0（OS 認識）+ 手順1（reader_name に product） |
-| §3 | 1 PN5180 = 1 slot / reader_name 安定 | 手順1（再起動跨ぎ） |
-| §4 | reader_name↔役割（host config が正準・等値照合） | 手順2 `check`（lint）+ 手順4（役割一致） |
+| §3 | 1 PN5180 = 1 slot / reader_name 安定 / 11 slot 構成 | 手順1（再起動跨ぎ・slot 数） |
+| §4 | reader_name↔役割・`cards` と board 位置（host config が正準・等値照合） | 手順2 `check`（lint）+ 手順4（役割/位置一致） |
 | §5 | PC/SC 互換 ATR で connect 成立 | 手順2 `check`（PASS） |
-| §6 | Get UID `FF CA 00 00 00` | 手順4 `watch`（毎タップ UID） |
-| §7 | UID 4/7/8B 正規化 | 手順3/4（`(8B)` 表示・`⚠` 無し） |
-| §8 | hot-plug / 切断耐性 / multi-platform | 手順4（再発火）+ 手順6（USB 抜き）+ 手順7 |
+| §6 | Get UID `FF CA 00 00 00` / 複数枚は 8B × k 連結 | 手順4 `watch`（毎タップ UID・重ね置きで枚数ぶん行）+ `raw`（`UID×k = …`） |
+| §7 | UID 4/7/8B 正規化 / MSB-first（`E0:04:…`） | 手順3/4（`(8B)` 表示・`⚠` 無し・先頭 `E0:04`） |
+| §8 | UID 単位デバウンス / hot-plug / 切断耐性 / multi-platform | 手順4（1 枚だけ外して戻すとその UID だけ再発火）+ 手順6（USB 抜き）+ 手順7 |
 
 すべて PASS かつ board street 自動遷移（手順5）まで確認できれば、RFID 実機経路の bring-up 完了。
 

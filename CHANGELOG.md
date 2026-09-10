@@ -6,6 +6,28 @@
 
 ## [Unreleased]
 
+### Added (RFID: 1 リーダーに複数枚を重ねて置ける — 席 2 枚 / フロップ 3 枚, 契約 v1.1, 2026-09-10)
+
+- **重ね置き対応（host）**: 1 つの reader に複数カードが載ったとき、Get UID 応答が **8B UID × 枚数の連結**
+  で返る（firmware, 最大 4 枚）。host は応答長 16/24/32 のときだけ 8 バイトずつ分割し
+  （`rfid/bridge.py:split_uid_response` / `PCSCBridge.read_uids`）、**UID 単位のデバウンス**（reader ごとの
+  UID 集合の差分）で増えた UID ごとに `RFIDEvent` を 1 件出す。置きっぱなしは再発火せず、1 枚だけ外して
+  戻すとその UID だけ再発火する。1 枚運用の挙動は従来と同一。
+- **board の `cards`（位置割り当て）**: `config.rfid.pcsc_readers[]` に任意の `cards`（1..5, 既定 1）。
+  board reader は `[index, index+cards-1]` を占有し、検出順に `board_index = index + offset` を割り当てる
+  （外して戻すと同じ位置に戻る。`cards` 超過は WARN + 位置なし）。ボードの street 自動遷移（3/4/5 枚）は不変。
+- **本番 11 slot を既定サンプルに**: `config_default.json` の `pcsc_readers` を席 8 台
+  （`PokerRFID PN5180-CCID 0..7` = seat 1..8）+ board 3 台（`8` = flop 3 枚重ね / `9` = turn / `10` = river）に。
+- **tools**: `probe_pcsc check` の lint が `cards`（1..5 / `cards>1` は index 必須 / `index+cards-1` が 5 超 /
+  board 位置の重なり）を検出、`watch` は `board 1-3` 表記、`raw` は複数 UID を `UID×k = A, B, C` で表示。
+  `register_cards run` は**複数枚が載っている間は登録せず** `⚠ N 枚検出 — 1 枚だけ置いてください` で待つ。
+- **契約 `docs/contracts/rfid-usb-ccid.md` を v1.1 に（additive over 1.0 frozen）**: §3 本番 11 slot /
+  §4 `cards` と位置割り当て / §6 複数 UID 連結 / §7 UID は MSB-first（firmware が ISO15693 の LSB-first を反転）/
+  §8 UID 単位デバウンス / §10 v1.1 の内容。v1.0 の要求は不変（後方互換）。docs: hardware QA チェックリスト
+  （11 件 config 例・重ね置きの期待値）、installation、worklog `docs/worklog/2026-09-10-rfid-multi-card-host.md`。
+- **firmware 側の対応**（anti-collision の mask DFS + Get UID 連結 + 高速 inventory, ISSUE-0021）は
+  別途実装。**実機未検証**（重ね置きの通し確認は Phase H の残作業）。
+
 ### Added (firmware: PN5180 複数 reader（最大 13 台）への拡張準備, 2026-09-10)
 
 - **RF 時分割**: 各 reader の inventory 直後に `pn5180_setRF_off()` を呼び、**同時に RF 磁界を張るのは

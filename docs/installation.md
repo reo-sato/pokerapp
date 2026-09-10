@@ -73,6 +73,12 @@ RFID を使わない場合は `rfid.enabled` を `false`（既定）のままで
 4. `rfid.pcsc_readers`（**list**）で各リーダーの役割を設定:
    `{"name": "<実 reader_name>", "role": "seat", "seat": 1}` / `{"name": "...", "role": "board", "index": 1}`
    （`seat` 1..9 / board は `index` 1..5）。
+   本番構成は **11 台**（席 8 台 + board 3 台）。カードは**重ねて置けます**（席 = ホールカード 2 枚、
+   board の 1 台目 = フロップ 3 枚）。重ねる board リーダーには枚数 `cards` を付けます:
+   `{"name": "...", "role": "board", "index": 1, "cards": 3}`（フロップ）/ `index: 4`（ターン）/
+   `index: 5`（リバー）。席リーダーは 2 枚重ねでも `cards` は不要です（契約
+   `docs/contracts/rfid-usb-ccid.md` v1.1 §4）。設定の妥当性は
+   `python tools/probe_pcsc.py check` で確認できます。
 5. カード対応表 `rfid_cards.json`（`tag_id` → カード）を用意（物理カード ↔ UID の登録）。
 
 ### HTTP 方式（ESP32 + PN532、補助 / debug 用）

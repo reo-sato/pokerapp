@@ -120,6 +120,25 @@ class TestRunRegistration:
         assert cm.lookup("AA") == "Ah" and cm.lookup("BB") == "Ah"
         assert reg.pending_codes(cm.all_entries(), ["Ah"], deck=2) == []
 
+    def test_multiple_cards_are_not_registered_until_single(self, tmp_path):
+        """重ね置き（契約 v1.1 §6）の間は登録せず警告し、1 枚になったら従来どおり登録する。"""
+        cm = _master(tmp_path)
+        bridge = MockPCSCBridge("R", [["AA", "BB"], ["AA", "BB"], "AA", None])
+        out: list[str] = []
+        res = reg.run_registration(bridge, cm, ["Ah"], deck=1,
+                                   sink=out.append, sleep=lambda _s: None, max_polls=10)
+        assert res.registered == 1 and res.remaining == []
+        assert cm.lookup("AA") == "Ah" and cm.lookup("BB") == ""
+        warns = [ln for ln in out if "枚検出" in ln]
+        assert len(warns) == 1 and "2 枚検出" in warns[0]   # 状態が変わったときだけ 1 回
+
+    def test_multiple_cards_only_never_registers(self, tmp_path):
+        cm = _master(tmp_path)
+        bridge = MockPCSCBridge("R", [["AA", "BB", "CC"]])
+        res = reg.run_registration(bridge, cm, ["Ah"], deck=1,
+                                   sink=lambda _l: None, sleep=lambda _s: None, max_polls=5)
+        assert res.registered == 0 and res.remaining == ["Ah"] and len(cm) == 0
+
     def test_max_polls_stops_loop_with_remaining(self, tmp_path):
         cm = _master(tmp_path)
         bridge = MockPCSCBridge("R", [None])
@@ -170,3 +189,16 @@ class TestCli:
         cm = CardMaster(cards)
         assert cm.lookup("AA") == "Ah" and cm.lookup("BB") == "Kd"
         assert "登録 2 枚" in capsys.readouterr().out
+
+    def test_run_with_stacked_cards_then_single(self, tmp_path, monkeypatch, capsys):
+        """CLI 経路でも重ね置きは登録せず、1 枚になってから登録される（v1.1 §6）。"""
+        monkeypatch.setattr(reg, "pyscard_available", lambda: True)
+        cards = tmp_path / "cards.json"
+        a = reg.build_parser().parse_args(
+            ["--cards-file", str(cards), "run", "--only", "Ah", "--reader", "R", "--poll-interval", "0"])
+        factory = lambda name: MockPCSCBridge(name, [["AA", "BB"], "AA", None])  # noqa: E731
+        rc = reg._cmd_run(a, bridge_factory=factory)
+        out = capsys.readouterr().out
+        assert rc == 0 and "2 枚検出" in out and "登録 1 枚" in out
+        cm = CardMaster(cards)
+        assert cm.lookup("AA") == "Ah" and cm.lookup("BB") == ""

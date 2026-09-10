@@ -135,6 +135,53 @@ class TestLint:
         cfgs = [{"name": "R0", "role": "board", "index": 6}]
         assert any("index" in p for p in lint_pcsc_readers(cfgs))
 
+    def test_production_11_slot_layout_passes(self):
+        """本番構成: 席 8 + board 3（flop 3 枚重ね / turn / river）が lint を通る（v1.1 §4）。"""
+        cfgs = [{"name": f"R{i}", "role": "seat", "seat": i + 1} for i in range(8)]
+        cfgs += [
+            {"name": "R8", "role": "board", "index": 1, "cards": 3},
+            {"name": "R9", "role": "board", "index": 4},
+            {"name": "R10", "role": "board", "index": 5},
+        ]
+        assert lint_pcsc_readers(cfgs) == []
+
+
+class TestLintBoardCards:
+    """`cards`（重ね置き枚数, 任意・既定 1）の検査（契約 v1.1 §4）。"""
+
+    def test_cards_one_is_ok_without_index(self):
+        assert lint_pcsc_readers([{"name": "R0", "role": "board", "cards": 1}]) == []
+
+    def test_cards_must_be_int_1_to_5(self):
+        for bad in (0, 6, "3", 1.5):
+            problems = lint_pcsc_readers([{"name": "R0", "role": "board", "index": 1, "cards": bad}])
+            assert any("cards" in p for p in problems), bad
+
+    def test_cards_gt_one_requires_index(self):
+        problems = lint_pcsc_readers([{"name": "R0", "role": "board", "cards": 3}])
+        assert any("index が必要" in p for p in problems)
+
+    def test_span_beyond_board_position_5_flagged(self):
+        # index=4 + cards=3 → 4..6 は river(5) を超える。
+        problems = lint_pcsc_readers([{"name": "R0", "role": "board", "index": 4, "cards": 3}])
+        assert any("1..5 を超え" in p for p in problems)
+
+    def test_overlapping_board_positions_flagged(self):
+        cfgs = [
+            {"name": "R0", "role": "board", "index": 1, "cards": 3},   # 1..3
+            {"name": "R1", "role": "board", "index": 3},               # 3 が重なる
+        ]
+        problems = lint_pcsc_readers(cfgs)
+        assert any("重複" in p and "board 位置" in p for p in problems)
+
+    def test_non_overlapping_positions_pass(self):
+        cfgs = [
+            {"name": "R0", "role": "board", "index": 1, "cards": 3},
+            {"name": "R1", "role": "board", "index": 4},
+            {"name": "R2", "role": "board", "index": 5},
+        ]
+        assert lint_pcsc_readers(cfgs) == []
+
 
 # ――― analyze_uid (§7) ―――
 
@@ -176,6 +223,34 @@ class TestReaderLabel:
 
     def test_board_without_index(self):
         assert reader_label({"role": "board"}) == "board"
+
+    def test_board_with_cards_shows_range(self):
+        # 重ね置き reader は占有範囲を示す（flop 3 枚 = board 1-3, 契約 v1.1 §4）。
+        assert reader_label({"role": "board", "index": 1, "cards": 3}) == "board 1-3"
+
+    def test_board_with_cards_one_is_plain(self):
+        assert reader_label({"role": "board", "index": 4, "cards": 1}) == "board 4"
+
+
+# ――― format_uid_payload (raw, §6 v1.1) ―――
+
+class TestFormatUidPayload:
+    _A = [0xE0, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]
+    _B = [0xE0, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02]
+
+    def test_single_uid_is_plain_hex(self):
+        assert probe.format_uid_payload(self._A) == "E0 04 00 00 00 00 00 01"
+
+    def test_two_stacked_uids_are_split(self):
+        line = probe.format_uid_payload(self._A + self._B)
+        assert line == "UID×2 = E0:04:00:00:00:00:00:01, E0:04:00:00:00:00:00:02"
+
+    def test_three_stacked_uids(self):
+        assert probe.format_uid_payload(self._A + self._B + self._A).startswith("UID×3 = ")
+
+    def test_short_uid_and_empty(self):
+        assert probe.format_uid_payload([0x04, 0xAB, 0xCD, 0xEF]) == "04 AB CD EF"
+        assert probe.format_uid_payload([]) == ""
 
 
 # ――― probe_connect (§5, DI で実機不要) ―――
