@@ -20,14 +20,16 @@ static void card_poll_task(void *arg) {
     (void)arg;
     for (;;) {
         pn5180_reader_poll_once();
-        // カード挿抜を host へ通知（interrupt-IN, RDR_to_PC_NotifySlotChange）。
-        // これが無いと Windows(usbccid) はカード挿入を知らず IccPowerOn を送ってこない
-        // （実機で watch 0 件）。送信できた時だけ「通知済み」を確定し、失敗なら次周で再送。
+#if CCID_USE_INTERRUPT_EP
+        // カード挿抜を host へ通知（interrupt-IN, RDR_to_PC_NotifySlotChange）。送信できた時だけ
+        // 「通知済み」を確定し、失敗なら次周で再送。既定は OFF（usb_descriptors.h 参照:
+        // Windows が通知を無視して present を登録しなかった実績あり。host は polling で足りる）。
         uint8_t msg[CCID_EP_INT_SIZE];
         size_t n = ccid_slot_build_notify(msg, sizeof(msg));
         if (n > 0 && ccid_notify_slot_change(msg, n)) {
             ccid_slot_notify_committed();
         }
+#endif
         vTaskDelay(pdMS_TO_TICKS(CARD_POLL_INTERVAL_MS));
     }
 }

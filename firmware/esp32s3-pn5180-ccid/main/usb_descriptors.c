@@ -20,9 +20,10 @@ static const tusb_desc_device_t s_device_desc = {
     .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor           = USB_VID,
     .idProduct          = USB_PID,
-    // Windows は VID/PID/REV で記述子をキャッシュする。interrupt EP 追加（0x0101）のように
-    // 記述子構成を変えたら REV を上げて再読込させる（reader_name には影響しない, 契約 §2/§3）。
-    .bcdDevice          = 0x0101,
+    // Windows は VID/PID/REV で記述子をキャッシュする。EP 構成を変えたら REV を上げて
+    // 再読込させる（reader_name には影響しない, 契約 §2/§3）。
+    //   0x0100: 2 EP / 0x0101: interrupt EP 追加 / 0x0102: interrupt EP を既定 OFF に戻す
+    .bcdDevice          = 0x0102,
     .iManufacturer      = 0x01,
     .iProduct           = 0x02,
     .iSerialNumber      = 0x03,
@@ -61,10 +62,11 @@ const tusb_desc_device_t *ccid_device_descriptor(void) {
     CCID_SLOT_COUNT /* bMaxCCIDBusySlots */
 
 // ───────── Configuration Descriptor ─────────
-// config(9) + interface(9) + CCID func(54) + EP out(7) + EP in(7) + EP int(7) = 93
-// interrupt-IN は CCID 仕様上 optional だが、無いと Windows(usbccid) がカード挿入を知る
-// 手段が polling 頼みになり、実機では IccPowerOn が一切来なかった（probe_pcsc watch 0 件）。
-#define CCID_CONFIG_TOTAL_LEN (9 + 9 + 54 + 7 + 7 + 7)
+// config(9) + interface(9) + CCID func(54) + EP 7 byte × CCID_NUM_ENDPOINTS
+//   = 86（bulk OUT/IN のみ, 既定） / 93（+ interrupt IN, CCID_USE_INTERRUPT_EP=1）
+// interrupt-IN は CCID 仕様上 optional。無い場合 Windows(usbccid) は GetSlotStatus を polling
+// してカード有無を追う（host 側 RFIDThread も polling なので十分）。詳細は usb_descriptors.h。
+#define CCID_CONFIG_TOTAL_LEN (9 + 9 + 54 + 7 * CCID_NUM_ENDPOINTS)
 
 static const uint8_t s_config_desc[] = {
     // Configuration descriptor
@@ -80,7 +82,7 @@ static const uint8_t s_config_desc[] = {
     0x09, TUSB_DESC_INTERFACE,
     ITF_NUM_CCID,     // bInterfaceNumber
     0x00,             // bAlternateSetting
-    0x03,             // bNumEndpoints = bulk OUT + bulk IN + interrupt IN
+    CCID_NUM_ENDPOINTS, // bNumEndpoints = bulk OUT + bulk IN（+ interrupt IN は CCID_USE_INTERRUPT_EP）
     TUSB_CLASS_SMART_CARD, // bInterfaceClass = 0x0B（CCID）
     0x00,             // bInterfaceSubClass
     0x00,             // bInterfaceProtocol
@@ -95,9 +97,11 @@ static const uint8_t s_config_desc[] = {
     // Endpoint: bulk IN
     0x07, TUSB_DESC_ENDPOINT, EPNUM_CCID_IN, TUSB_XFER_BULK,
     U16_TO_U8S_LE(CCID_EP_SIZE), 0x00,
+#if CCID_USE_INTERRUPT_EP
     // Endpoint: interrupt IN（RDR_to_PC_NotifySlotChange: カード挿抜通知）
     0x07, TUSB_DESC_ENDPOINT, EPNUM_CCID_INT, TUSB_XFER_INTERRUPT,
     U16_TO_U8S_LE(CCID_EP_INT_SIZE), CCID_EP_INT_INTERVAL,
+#endif
 };
 
 const uint8_t *ccid_configuration_descriptor(void) {

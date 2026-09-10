@@ -49,9 +49,9 @@ static uint16_t ccid_open(uint8_t rhport, tusb_desc_interface_t const *itf,
     // CCID(0x0B) のインターフェースだけ受け持つ。
     TU_VERIFY(itf->bInterfaceClass == TUSB_CLASS_SMART_CARD, 0);
 
-    // interface(9) + CCID func(54) + EP ×3（bulk OUT / bulk IN / interrupt IN）
+    // interface(9) + CCID func(54) + EP × CCID_NUM_ENDPOINTS（bulk OUT / bulk IN [/ interrupt IN]）
     uint16_t const drv_len = sizeof(tusb_desc_interface_t) + 54 /* CCID func */ +
-                             3 * sizeof(tusb_desc_endpoint_t);
+                             CCID_NUM_ENDPOINTS * sizeof(tusb_desc_endpoint_t);
     TU_VERIFY(max_len >= drv_len, 0);
 
     s_ccid.rhport = rhport;
@@ -61,8 +61,8 @@ static uint16_t ccid_open(uint8_t rhport, tusb_desc_interface_t const *itf,
     if (tu_desc_type(p) == CCID_DESC_TYPE_SMART_CARD) {
         p = tu_desc_next(p);
     }
-    // EP を 3 本開く（種別で振り分け: bulk OUT / bulk IN / interrupt IN）
-    for (int i = 0; i < 3 && tu_desc_type(p) == TUSB_DESC_ENDPOINT; i++) {
+    // EP を開く（種別で振り分け: bulk OUT / bulk IN / interrupt IN は CCID_USE_INTERRUPT_EP 時のみ）
+    for (int i = 0; i < CCID_NUM_ENDPOINTS && tu_desc_type(p) == TUSB_DESC_ENDPOINT; i++) {
         tusb_desc_endpoint_t const *ep = (tusb_desc_endpoint_t const *)p;
         TU_ASSERT(usbd_edpt_open(rhport, ep), 0);
         if (ep->bmAttributes.xfer == TUSB_XFER_INTERRUPT) {

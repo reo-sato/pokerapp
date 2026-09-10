@@ -17,6 +17,15 @@
 #define CCID_EP_INT_SIZE     8     // NotifySlotChange は 1 + ceil(2*slots/8) byte（13 slot でも 5B）
 #define CCID_EP_INT_INTERVAL 0x10  // interrupt polling 間隔（FS: ms 単位, 16ms）
 
+// interrupt-IN（RDR_to_PC_NotifySlotChange）を記述子に載せるか。
+//   0 = 載せない（既定）。Windows(usbccid) は GetSlotStatus の polling でカード有無を追う。
+//   1 = 載せる。実機（2026-09-10）では Windows が NotifySlotChange(50 03) を読み取るのに
+//       present を登録せず（SCardGetStatusChange=EMPTY / connect=0x80100069）、IccPowerOn が
+//       一切来なかった。host(RFIDThread) は 100ms polling で非同期通知を使わないため、
+//       interrupt は機能的に不要。原因追及のときだけ 1 にする（通知機構のコードは残してある）。
+#define CCID_USE_INTERRUPT_EP 0
+#define CCID_NUM_ENDPOINTS (2 + CCID_USE_INTERRUPT_EP)
+
 // CCID class descriptor 型番（USB CCID 1.1）。
 #define CCID_DESC_TYPE_SMART_CARD 0x21
 
