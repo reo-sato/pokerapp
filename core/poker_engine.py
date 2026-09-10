@@ -5,7 +5,8 @@ GameStateManager と差し替え可能にする PokerEngine Protocol / factory�
 
 設計（ISSUE-0008 spike 済 / docs/contracts/hand-reconstruction.md §2-3）:
 
-- **default は legacy**（`config.engine.backend`）。pokerkit backend は **default-off の preview**。
+- **default は pokerkit**（`config.engine.backend`, Phase G で切替済 = ADR-0012）。`legacy` は
+  config で選べる rollback path（未導入環境では warning + legacy 自動フォールバック）。
 - pokerkit はダミーカードを自動配布して betting state machine を駆動する
   （カードは RFID が source。pokerkit のダミーは hole-card 記録には使わない）。
 - **announced winner を優先**するため showdown / push automation は外し、`end_hand` で手動 push。

@@ -135,8 +135,8 @@ all_settlements() -> list[SessionSettlement]
 set_payment_status(session_id, player_id, status) -> SessionSettlement
 ```
 
-- **残高計算と cash 補完の分割は core のみが行う**（front-end は `point_balance` /
-  `plan_payment` の結果を表示・転記するだけ）。
+- **残高計算と cash 補完の分割は core のみが行う**（front-end は `point_balance` の結果を
+  表示し、point 不足分の cash を明示して渡すだけ。自動分割 `plan_payment` は ADR-0016 で非採用）。
 - mobile は同 interface の in-memory mock を `fixtures/{ledger_entry,point_ledger_entry}/` で
   先行実装できる。
 - **schema は `1.0` frozen**（ADR-0019）。

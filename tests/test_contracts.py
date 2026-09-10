@@ -25,12 +25,10 @@ _SCHEMAS = _CONTRACTS / "schemas"
 _FIXTURES = _CONTRACTS / "fixtures"
 
 # 1 model = 1 schema = 1 fixtures dir
-# player: S1 freeze 候補。session / seat_assignment / hand_ref: S2 draft (ADR-0006, 未 freeze)。
-# reconstruction_event: R1 (ADR-0010) record/replay の envelope (additionalProperties:false)。
-# hand / action: hand core (ADR-0010 R5, ISSUE-0011)。additionalProperties:true で 1.0。
-# ledger_entry / point_ledger_entry / session_settlement: S3 draft (ADR-0016, 未 freeze)。
-# player_session_summary: viewer API read model draft (ADR-0017, 未 freeze)。
-# order_request: 注文リクエスト write path draft (ADR-0018, 未 freeze)。
+# 全 model schema は 1.0 で freeze 済み（ADR-0019, additive-only）。現行 version は
+# player 1.2 (ADR-0030/0032) / hand・action 1.1 (ADR-0047/0050) / session_settlement 1.1
+# (ADR-0023) / order_request 1.1 (ADR-0045) / reconstruction_event 0.2 (envelope, model 系列外,
+# additionalProperties:false, ADR-0010/0048)。
 _MODELS = [
     "player", "session", "seat_assignment", "hand_ref", "reconstruction_event",
     "hand", "action", "ledger_entry", "point_ledger_entry", "session_settlement",

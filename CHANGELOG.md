@@ -6,6 +6,30 @@
 
 ## [Unreleased]
 
+### Fixed / Docs (CHANGELOG ↔ 実装の全量整合監査と指摘修正)
+
+CHANGELOG 全 77 セクションを実装・テスト・git 履歴と突き合わせる全量監査を実施
+（不整合 0 / 軽微 10 + 付随 2。worklog `2026-09-10-changelog-audit-fixes.md`）。
+機能・挙動・数値レベルの食い違いは無し。検出した軽微指摘を修正:
+
+- **staff Playwright 設定の実効化**: 「iPad 相当 viewport + touch」が project 側の
+  `...devices["Desktop Chrome"]` に上書きされ実効していなかったのを修正
+  （`staff/playwright.config.ts`: device preset の後に viewport 1180×820 + hasTouch を再指定）。
+- **mobile Order 画面のメニューに ↻ 再読込リンク追加**（`OrderScreen.tsx`。「全画面に ↻」の
+  記載どおりに揃えた。従来はエラー時再試行と注文状況の更新のみ）。
+- **settlement 支払系テストのクラス所属を復元**: B1（セッション締め導線）で `TestCloseSession`
+  配下に紛れた paid/unpaid トグル + partial/full/negative の 5 テストを本来の `TestSettlement` へ
+  移動（`tests/test_ledger_view_gui.py`, 挙動・件数不変）。
+- **docs drift**: README / pyproject の RFID 記述を canonical（PN5180 + ESP32-S3, USB CCID /
+  PC/SC = ADR-0015）に更新（旧 ESP32+PN532 表記のまま残っていた）。`core/poker_engine.py`
+  冒頭 docstring の「default は legacy」を Phase G 以降の実態に更新。
+  `repository-interfaces.md` の非採用 `plan_payment` 言及、`tests/test_contracts.py` の
+  「未 freeze」陳腐化コメントを実態（ADR-0019 で 1.0 freeze 済み）に更新。
+- **CHANGELOG 自体の誤記訂正**: ADR-0039 エントリのフラグ名欠落表記、ADR-0013 エントリの
+  遡及書き換え済みファイル名（`ledger-points.md` 当時 + 統合時削除の注記に復元）、
+  Phase H エントリの requirements-dev 実内容、F3a エントリへの `_hand_needs_review`
+  finalize リセットの補記（当時の記載漏れ）。
+
 ### Changed (アクション履歴復元の正当性修正バッチ = ADR-0047/0048/0049/0050)
 
 Phase A KPI（hand coverage / action 一致率 / board 一致率 ≥95%）に向け、needs_review が付かず
@@ -290,7 +314,7 @@ path・schema additive 原則は不変。詳細は ADR-0047〜0050 / worklog
     + `integration/control_consumer.py`（`ControlConsumerThread`: 末尾シーク + command_id 重複排除で新規のみ
     `AudioEvent` に翻訳）。
   - `POST /api/staff/sessions/{session_id}/control` + `ViewerApiClient.send_control`。新 error `invalid_control`(400)。
-  - `main.py --`（GUI）に consumer を結線。config `hand_control.enabled`（既定 **false**）+ GUI +
+  - `main.py`（GUI モード `run_gui`）に consumer を結線。config `hand_control.enabled`（既定 **false**）+ GUI +
     `session_layer.enabled` のときのみ起動 → **既定では挙動不変**。
   - staff アプリに **ハンドタブ**（`staff/src/screens/HandTab.tsx`）。`StaffRepository.sendControl`（mock/HTTP）。
 - テスト: `tests/test_control_queue.py`（append/offset/idempotent/translate/consumer 末尾シーク）+
@@ -697,7 +721,8 @@ path・schema additive 原則は不変。詳細は ADR-0047〜0050 / worklog
     **point_ledger_entry の fold**（cached 残高なし・player に global・常に 0 以上）。
     point 不足は strict reject + `plan_payment` による cash 補完分割（業務ルール 3）。
     entry fee は cash only（業務ルール 1）。spend 系 point entry は core が同時生成。
-  - **契約 draft（S3, v0.1 未 freeze）**: `docs/contracts/ledger-overview.md` +
+  - **契約 draft（S3, v0.1 未 freeze）**: `docs/contracts/ledger-points.md`（当時。verify-v1 統合で
+    `ledger-overview.md` へ統合・削除 = 上の ADR-0016 統合エントリ参照）+
     `schemas/{ledger_entry,point_ledger_entry}.schema.json` + fixtures。
     `error-shapes.md` / `validation-rules.md` / `repository-interfaces.md` に S3 セクション追加。
   - テスト: `tests/test_ledger_repository.py`（13）+ `tests/test_point_ledger.py`（5,
@@ -775,7 +800,8 @@ path・schema additive 原則は不変。詳細は ADR-0047〜0050 / worklog
   - 依存に上限を付与（compatible-release pin）: `numpy>=1.24,<3` / `pokerkit>=0.7,<0.8` /
     `faster-whisper>=1.0,<2` / `pyaudio>=0.2.13,<0.3` / `customtkinter>=5.2,<6`。
   - `requirements.txt` を core のみ（vision 除外）に整理、`requirements-dev.txt`（テスト依存 = numpy /
-    pokerkit / jsonschema / pytest）を新設。
+    pokerkit / jsonschema / pytest。後続で M1 viewer API テスト用の fastapi/httpx と CI lint 用の
+    ruff を追加）を新設。
   - `.github/workflows/ci.yml`（新規）: push / PR で `pytest tests/ --ignore=tests/test_vision.py` を実行。
     テストはローカルパッケージを直接 import し、core の重い依存（faster-whisper/pyaudio/customtkinter）は
     lazy import のため不要。numpy/pokerkit/jsonschema を入れて **skip 0**（importorskip 対象を全て導入）。
@@ -830,6 +856,9 @@ path・schema additive 原則は不変。詳細は ADR-0047〜0050 / worklog
   - **既知バグ 5 ケースが全緑**（check-facing-bet / call-amount-from-state / silent-fold /
     out-of-turn-rfid / unequal-allin）。**DoD #2 達成**。`pots` 追加に伴い既存 4 fixtures を再凍結
     （hand 終了が manual winner のため pots=[]、挙動不変）。
+  - `_hand_needs_review` を `_finalize_hand` でもリセット（`_current_actions` と対称。new_hand を
+    挟まない再 finalize で stale review フラグが次サマリーへ漏れない堅牢化 + 回帰テスト
+    `test_finalize_resets_review_flag`。同コミットの追記漏れを 2026-09-10 監査で補記）。
   - tests: `tests/test_reconstruction.py`（`unequal_allin_main_and_side_pots` + 全緑確認）。
     **全 274 passed, 0 skipped**（legacy は `pots=[]` で additive、回帰なし）。
   - 残 F3: `hand`/`action` schema freeze（ISSUE-0011, `_MODELS` 登録）、PHH の call/check 区別。
