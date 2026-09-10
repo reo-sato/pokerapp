@@ -2,23 +2,34 @@
 
 Phase 6: RFID モジュールのテスト。
 - CardMaster: lookup, register, normalize, bytes_to_tag_id, load/save
-- PCSCBridge: MockPCSCBridge の基本動作 / 複数 UID 応答の分割（契約 v1.1 §6）
+- PCSCBridge: MockPCSCBridge の基本動作 / 複数 UID 応答の分割（契約 v1.1 §6）/
+  物理 reader index = Get UID の P2・接続の持続・共有接続（契約 v1.2 §6/§8, ADR-0041）
 - RFIDThread: デバウンス（UID 集合）、RFIDEvent 投入、ロール/席番号マッピング、
-  board の重ね置き位置割り当て（契約 v1.1 §4）
+  board の重ね置き位置割り当て（契約 v1.1 §4）、config の `reader` を bridge factory に渡す
 """
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import queue
+import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
 
 from core.events import RFIDEvent
-from rfid.bridge import MockPCSCBridge, PCSCBridge, bridge_read_uids, split_uid_response
+from rfid.bridge import (
+    MockPCSCBridge,
+    PCSCBridge,
+    bridge_read_uids,
+    call_bridge_factory,
+    query_reader_count,
+    split_uid_response,
+)
 from rfid.card_master import CardMaster, bytes_to_tag_id, normalize_tag_id
 from rfid.reader_thread import RFIDThread
 
@@ -222,35 +233,53 @@ class TestSplitUidResponse:
 
 
 class _FakeConnection:
-    def __init__(self, data: bytes, sw: tuple[int, int]) -> None:
-        self._data, self._sw = data, sw
+    def __init__(self, reader: "_FakeReader") -> None:
+        self._reader = reader
 
     def connect(self) -> None:
-        pass
+        self._reader.connects += 1
 
     def transmit(self, apdu):
-        assert apdu == [0xFF, 0xCA, 0x00, 0x00, 0x00]   # 契約 §6 Get UID
-        return list(self._data), self._sw[0], self._sw[1]
+        self._reader.apdus.append(list(apdu))
+        if self._reader.exc is not None:
+            raise self._reader.exc
+        return list(self._reader.data), self._reader.sw[0], self._reader.sw[1]
 
     def disconnect(self) -> None:
-        pass
+        self._reader.disconnects += 1
 
 
 class _FakeReader:
-    def __init__(self, data: bytes, sw: tuple[int, int] = (0x90, 0x00), exc: Exception | None = None):
-        self._data, self._sw, self._exc = data, sw, exc
+    """pyscard の reader オブジェクト代用（connect/transmit 回数を数える）。"""
+
+    def __init__(self, data: bytes = b"", sw: tuple[int, int] = (0x90, 0x00),
+                 exc: Exception | None = None, name: str = "fake reader"):
+        self.data, self.sw, self.exc = data, sw, exc
+        self.name = name
+        self.apdus: list[list[int]] = []
+        self.connects = 0
+        self.disconnects = 0
+
+    def __str__(self) -> str:
+        return self.name
 
     def createConnection(self):
-        if self._exc is not None:
-            raise self._exc
-        return _FakeConnection(self._data, self._sw)
+        return _FakeConnection(self)
+
+
+_fake_reader_names = itertools.count()
 
 
 def _connected_bridge(data: bytes, sw: tuple[int, int] = (0x90, 0x00),
-                      exc: Exception | None = None) -> PCSCBridge:
-    """pyscard 無しで PCSCBridge の transmit 経路を通すための接続済み bridge。"""
-    bridge = PCSCBridge("fake reader")
-    bridge._reader = _FakeReader(data, sw, exc)   # noqa: SLF001 (テスト用シーム)
+                      exc: Exception | None = None, reader_index: int = 0,
+                      reader: "_FakeReader | None" = None) -> PCSCBridge:
+    """pyscard 無しで PCSCBridge の transmit 経路を通すための接続済み bridge。
+
+    共有接続（reader_name → 1 接続）はモジュール状態なので、テストごとに一意な名前を使う。
+    """
+    name = reader.name if reader is not None else f"fake reader {next(_fake_reader_names)}"
+    bridge = PCSCBridge(name, reader_index=reader_index)
+    bridge._reader = reader if reader is not None else _FakeReader(data, sw, exc, name)  # noqa: SLF001
     bridge._connected = True                      # noqa: SLF001
     return bridge
 
@@ -280,6 +309,143 @@ class TestPCSCBridgeReadUids:
     def test_read_uid_is_first_or_none(self):
         assert _connected_bridge(self._A + self._B).read_uid() == "E0:04:00:00:00:00:00:01"
         assert _connected_bridge(b"", sw=(0x6A, 0x81)).read_uid() is None
+
+
+# ――― 物理 reader index（Get UID の P2）と接続の持続（契約 v1.2 §6/§8, ADR-0041） ―――
+
+class TestPCSCBridgeReaderIndex:
+    """Windows は CCID slot を 1 つしか出さないので、物理リーダーは P2 で選ぶ。"""
+
+    _A = b"\xE0\x04\x00\x00\x00\x00\x00\x01"
+
+    def test_apdu_carries_reader_index_as_p2(self):
+        reader = _FakeReader(self._A, name="shared reader p2")
+        bridge = _connected_bridge(b"", reader=reader, reader_index=7)
+        assert bridge.read_uids() == ["E0:04:00:00:00:00:00:01"]
+        assert reader.apdus == [[0xFF, 0xCA, 0x00, 0x07, 0x00]]
+        bridge.close()
+
+    def test_default_index_is_v10_compatible_apdu(self):
+        reader = _FakeReader(self._A, name="shared reader p2 default")
+        bridge = _connected_bridge(b"", reader=reader)
+        bridge.read_uids()
+        assert reader.apdus == [[0xFF, 0xCA, 0x00, 0x00, 0x00]]   # v1.0/1.1 と同一
+        bridge.close()
+
+    def test_reader_index_must_be_int_in_range(self):
+        for bad in (-1, 255, 300, "3", 1.5, True):
+            with pytest.raises(ValueError):
+                PCSCBridge("r", reader_index=bad)   # type: ignore[arg-type]
+
+    def test_connection_is_reused_across_polls(self):
+        """ADR-0040/0041: slot は常時 present なので接続を持続し、2 回目は connect しない。"""
+        reader = _FakeReader(self._A, name="persistent reader")
+        bridge = _connected_bridge(b"", reader=reader)
+        bridge.read_uids()
+        bridge.read_uids()
+        bridge.read_uids()
+        assert reader.connects == 1
+        assert len(reader.apdus) == 3
+        assert reader.disconnects == 0
+        bridge.close()
+        assert reader.disconnects == 1     # close で切断
+
+    def test_reconnects_after_exception(self):
+        reader = _FakeReader(self._A, name="flaky reader")
+        bridge = _connected_bridge(b"", reader=reader)
+        assert bridge.read_uids() == ["E0:04:00:00:00:00:00:01"]
+        reader.exc = RuntimeError("USB gone")
+        assert bridge.read_uids() == []            # 失敗は空リスト（クラッシュしない）
+        reader.exc = None
+        assert bridge.read_uids() == ["E0:04:00:00:00:00:00:01"]
+        assert reader.connects == 2                # 例外で捨てた接続を張り直した
+        bridge.close()
+
+    def test_shared_connection_per_reader_name(self):
+        """同じ reader_name の複数 bridge は PC/SC 接続を 1 本だけ張る（11 台 = 1 接続）。"""
+        reader = _FakeReader(self._A, name="one name many readers")
+        bridges = [
+            _connected_bridge(b"", reader=reader, reader_index=k) for k in range(3)
+        ]
+        for b in bridges:
+            b.read_uids()
+        assert reader.connects == 1
+        assert [a[3] for a in reader.apdus] == [0, 1, 2]    # P2 だけが違う
+        for b in bridges[:-1]:
+            b.close()
+        assert reader.disconnects == 0      # まだ参照が残っている
+        bridges[-1].close()
+        assert reader.disconnects == 1      # 最後の 1 本で切断
+
+    def test_sw_6a86_returns_empty_and_warns_once(self, caplog: pytest.LogCaptureFixture):
+        reader = _FakeReader(b"", sw=(0x6A, 0x86), name="out of range reader")
+        bridge = _connected_bridge(b"", reader=reader, reader_index=5)
+        with caplog.at_level(logging.WARNING, logger="rfid.bridge"):
+            assert bridge.read_uids() == []
+            assert bridge.read_uids() == []
+        warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warns) == 1 and "6A86" in warns[0].getMessage()
+        bridge.close()
+
+    def test_probe_returns_sw(self):
+        bridge = _connected_bridge(b"", sw=(0x6A, 0x81))
+        assert bridge.probe() == (0x6A, 0x81)
+        bridge.close()
+        assert PCSCBridge("not connected").probe() is None
+
+
+class TestQueryReaderCount:
+    """`FF CA 00 FF 00` による物理 reader 台数の問い合わせ（契約 v1.2 §6）。"""
+
+    @staticmethod
+    def _install_fake_pyscard(monkeypatch, reader) -> None:
+        system = types.ModuleType("smartcard.System")
+        system.readers = lambda: [reader]           # type: ignore[attr-defined]
+        root = types.ModuleType("smartcard")
+        root.System = system                        # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "smartcard", root)
+        monkeypatch.setitem(sys.modules, "smartcard.System", system)
+
+    def test_returns_count_from_firmware(self, monkeypatch):
+        reader = _FakeReader(bytes([11]), name="counting reader")
+        self._install_fake_pyscard(monkeypatch, reader)
+        assert query_reader_count("counting reader") == 11
+        assert reader.apdus == [[0xFF, 0xCA, 0x00, 0xFF, 0x00]]
+        assert reader.disconnects == 1              # 問い合わせ後に接続を解放する
+
+    def test_none_when_firmware_does_not_support(self, monkeypatch):
+        # 旧 v1.1 firmware は 6A 81 / 6D 00 を返す。
+        reader = _FakeReader(b"", sw=(0x6D, 0x00), name="old firmware")
+        self._install_fake_pyscard(monkeypatch, reader)
+        assert query_reader_count("old firmware") is None
+
+    def test_none_when_reader_absent_or_pyscard_missing(self, monkeypatch):
+        reader = _FakeReader(bytes([2]), name="present reader")
+        self._install_fake_pyscard(monkeypatch, reader)
+        assert query_reader_count("some other reader") is None
+
+    def test_none_on_exception(self, monkeypatch):
+        reader = _FakeReader(bytes([2]), exc=RuntimeError("boom"), name="boom reader")
+        self._install_fake_pyscard(monkeypatch, reader)
+        assert query_reader_count("boom reader") is None
+
+
+class TestCallBridgeFactory:
+    """新旧 factory シグネチャの互換（`(name, index)` / 旧 `(name)`）。"""
+
+    def test_two_arg_factory_receives_index(self):
+        seen: list[tuple[str, int]] = []
+        bridge = call_bridge_factory(lambda name, index: seen.append((name, index)), "R", 3)
+        assert seen == [("R", 3)] and bridge is None
+
+    def test_one_arg_factory_falls_back(self):
+        seen: list[str] = []
+        call_bridge_factory(lambda name: seen.append(name), "R", 3)
+        assert seen == ["R"]
+
+    def test_mock_bridge_accepts_reader_index(self):
+        b = MockPCSCBridge("R", ["04:AA"], 4)
+        assert b.reader_index == 4 and b.read_uid() == "04:AA"
 
 
 class TestBridgeReadUidsShim:
@@ -494,6 +660,47 @@ class TestRFIDThread:
         ev: RFIDEvent = rfid_q.get_nowait()
         assert ev.tag_id == uid8
         assert ev.seat == 3
+
+    def test_reader_index_is_passed_to_factory(self, tmp_path: Path):
+        """config の `reader`（Get UID の P2, 契約 v1.2 §6）が bridge factory に渡る。"""
+        from core.event_queue import make_rfid_queue
+        seen: list[tuple[str, int]] = []
+
+        def factory(reader_name: str, reader_index: int):
+            seen.append((reader_name, reader_index))
+            return MockPCSCBridge(reader_name, [None], reader_index)
+
+        stop = threading.Event()
+        thread = RFIDThread(
+            rfid_queue=make_rfid_queue(),
+            card_master=CardMaster(tmp_path / "cards.json"),
+            reader_configs=[
+                {"name": "CCID 0", "reader": 0, "role": "seat", "seat": 1},
+                {"name": "CCID 0", "reader": 8, "role": "board", "index": 1, "cards": 3},
+                {"name": "CCID 0", "role": "seat", "seat": 2},            # reader 省略 = 0
+                {"name": "CCID 0", "reader": "x", "role": "seat", "seat": 3},  # 不正 → 0
+            ],
+            poll_interval_ms=10,
+            stop_event=stop,
+            bridge_factory=factory,
+        )
+        thread.start()
+        time.sleep(0.05)
+        stop.set()
+        thread.join(timeout=2)
+        assert seen == [("CCID 0", 0), ("CCID 0", 8), ("CCID 0", 0), ("CCID 0", 0)]
+
+    def test_legacy_one_arg_factory_still_works(self, tmp_path: Path):
+        """旧シグネチャ `factory(reader_name)` の注入も従来どおり動く（互換）。"""
+        configs = [{"name": "reader_A", "reader": 5, "role": "seat", "seat": 1}]
+        sequences = {"reader_A": [None, "04:AA"]}
+        thread, rfid_q, stop = _make_rfid_thread(tmp_path, sequences, configs)
+        thread.start()
+        time.sleep(0.15)
+        stop.set()
+        thread.join(timeout=2)
+        ev: RFIDEvent = rfid_q.get_nowait()
+        assert ev.tag_id == "04:AA" and ev.seat == 1
 
     def test_two_stacked_seat_cards_fire_two_events(self, tmp_path: Path):
         """席 reader に hole card 2 枚を重ねて置く → 同じ seat で 2 event（契約 v1.1 §6）。"""

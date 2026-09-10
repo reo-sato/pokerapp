@@ -24,10 +24,14 @@
   python tools/register_cards.py run --deck 2 --order rank-suit
   python tools/register_cards.py run --deck 1 --only Ah,Kd,Qs      # 抜けた分だけ
   python tools/register_cards.py run --deck 1 --start-at Ah         # 途中の code から
+  python tools/register_cards.py run --reader "seat 1"              # 使う物理リーダーを選ぶ
   python tools/register_cards.py list --deck 2
   python tools/register_cards.py unregister E0:04:01:53:1C:2A:B2:6C
 
-要 `pip install ".[pcsc]"`（pyscard）。reader は config の `pcsc_readers` 先頭（接続中のもの）を使う。
+要 `pip install ".[pcsc]"`（pyscard）。**登録に使う物理リーダーは `--reader` で config の
+`pcsc_readers` の要素を選ぶ**（index か `seat 1` / `board 1` のラベル。既定は先頭要素）。
+契約 v1.2（ADR-0041）では PC/SC の reader 名は 1 つだけで、物理リーダー N 台は Get UID の
+P2（config の `reader`）で選ぶため、reader_name だけでは 1 台を指定できない。
 """
 from __future__ import annotations
 
@@ -41,9 +45,15 @@ from typing import Callable, Optional
 # repo ルートを import パスに追加（スクリプト直接実行のため）。
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from rfid.bridge import PCSCBridge, bridge_read_uids  # noqa: E402
+from rfid.bridge import PCSCBridge, bridge_read_uids, call_bridge_factory  # noqa: E402
 from rfid.card_master import VALID_CARDS, CardMaster, normalize_tag_id  # noqa: E402
-from tools.probe_pcsc import get_pcsc_readers, load_rfid_config, pyscard_available  # noqa: E402
+from tools.probe_pcsc import (  # noqa: E402
+    cfg_reader_index,
+    get_pcsc_readers,
+    load_rfid_config,
+    pyscard_available,
+    reader_label,
+)
 
 # 新品デッキの並び（A→K）。スート順は ♠♥♦♣。
 RANKS = "A23456789TJQK"
@@ -116,6 +126,48 @@ def format_status(entries: dict[str, str], order: list[str], deck: int) -> list[
     if outside:
         lines.append(f"  （順序外の code も登録あり: {' '.join(outside)}）")
     return lines
+
+
+def reader_choices(pcsc_readers: list[dict]) -> list[str]:
+    """`--reader` に指定できる候補の表示行（index / ラベル / reader_name）。"""
+    return [
+        f"{i}: {reader_label(cfg):<14} ← {cfg.get('name')!r}"
+        for i, cfg in enumerate(pcsc_readers)
+    ]
+
+
+def select_reader(pcsc_readers: list[dict], selector: Optional[str] = None) -> dict:
+    """`--reader` の指定から config 要素を 1 つ選ぶ（契約 v1.2 §4 / ADR-0041）。
+
+    selector は **config の index**（"0"）か **役割ラベル**（"seat 1" / "board 1" / "board 1-3"、
+    `[r3]` 付きも可・大小/空白ゆるめ）。None / 空なら先頭要素。選べなければ ValueError。
+    """
+    if not pcsc_readers:
+        raise ValueError("config.rfid.pcsc_readers が空です（`probe_pcsc list` で reader を確認）")
+    if selector is None or not str(selector).strip():
+        return pcsc_readers[0]
+
+    raw = str(selector).strip()
+    if raw.isdigit():
+        i = int(raw)
+        if not 0 <= i < len(pcsc_readers):
+            raise ValueError(
+                f"--reader {raw} は範囲外（0..{len(pcsc_readers) - 1}）:\n  "
+                + "\n  ".join(reader_choices(pcsc_readers))
+            )
+        return pcsc_readers[i]
+
+    want = " ".join(raw.lower().split())
+    for cfg in pcsc_readers:
+        labels = {reader_label(cfg).lower(), reader_label({**cfg, "reader": None}).lower()}
+        if cfg.get("role") == "board" and cfg.get("index") is not None:
+            labels.add(f"board {cfg['index']}")     # cards>1 の "board 1-3" を "board 1" でも選べる
+        if want in labels:
+            return cfg
+    raise ValueError(
+        f"--reader {selector!r} に一致する pcsc_readers 要素がありません:\n  "
+        + "\n  ".join(reader_choices(pcsc_readers))
+    )
 
 
 @dataclass
@@ -234,7 +286,7 @@ def _resolve_order(args: argparse.Namespace) -> list[str]:
     return order
 
 
-def _cmd_run(args: argparse.Namespace, *, bridge_factory: Callable[[str], object] = PCSCBridge) -> int:
+def _cmd_run(args: argparse.Namespace, *, bridge_factory: Callable[..., object] = PCSCBridge) -> int:
     if not _require_pyscard():
         return 2
     try:
@@ -244,19 +296,27 @@ def _cmd_run(args: argparse.Namespace, *, bridge_factory: Callable[[str], object
         return 2
 
     rfid_cfg = load_rfid_config(args.config)
-    reader_name = args.reader
-    if not reader_name:
+    pcsc_readers = get_pcsc_readers(rfid_cfg)
+    try:
+        target = select_reader(pcsc_readers, args.reader)
+    except ValueError as e:
+        # config が空なら接続中の reader を 1 台だけ拾う（bring-up 直後の救済）。
         from rfid.bridge import list_readers
-        present = set(list_readers())
-        configured = [c.get("name", "") for c in get_pcsc_readers(rfid_cfg)]
-        reader_name = next((n for n in configured if n in present), None) or (sorted(present)[0] if present else "")
+        present = sorted(list_readers())
+        if pcsc_readers or not present:
+            print(f"[error] {e}", file=sys.stderr)
+            return 2
+        target = {"name": present[0], "reader": 0}
+    reader_name = target.get("name", "")
+    reader_index = cfg_reader_index(target)
     if not reader_name:
         print("[error] reader が見つかりません（`probe_pcsc list` で確認）", file=sys.stderr)
         return 1
 
     master = CardMaster(_cards_file(args))
     codes = pending_codes(master.all_entries(), order, args.deck)
-    print(f"reader: {reader_name!r} / cards: {master._path} / deck {args.deck} / 順序 {args.order}"
+    print(f"reader: {reader_label(target)} ← {reader_name!r} (物理リーダー {reader_index}) / "
+          f"cards: {master._path} / deck {args.deck} / 順序 {args.order}"
           f"{' (--only)' if args.only else ''}")
     if not codes:
         print(f"deck {args.deck} は対象 {len(order)} 種すべて登録済みです。`list` で確認できます。")
@@ -264,9 +324,10 @@ def _cmd_run(args: argparse.Namespace, *, bridge_factory: Callable[[str], object
     print(f"未登録 {len(codes)} 枚: {' '.join(codes[:8])}{' …' if len(codes) > 8 else ''}")
     print("1 枚ずつ置く→登録→離す。Ctrl-C で中断（登録済み分は保存済み。同じコマンドで再開）。\n")
 
-    bridge = bridge_factory(reader_name)
+    bridge = call_bridge_factory(bridge_factory, reader_name, reader_index)
     if not bridge.connect():
-        print(f"[error] reader {reader_name!r} に接続できません", file=sys.stderr)
+        print(f"[error] reader {reader_name!r} (物理リーダー {reader_index}) に接続できません",
+              file=sys.stderr)
         return 1
     try:
         result = run_registration(bridge, master, codes, deck=args.deck,
@@ -325,7 +386,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="タップ駆動で登録")
     add_order_args(p_run)
-    p_run.add_argument("--reader", default=None, help="reader_name（既定: config の pcsc_readers 先頭で接続中のもの）")
+    p_run.add_argument(
+        "--reader", default=None,
+        help="使う物理リーダー: config.rfid.pcsc_readers の index（例 0）か役割ラベル"
+             "（例 'seat 1' / 'board 1'）。既定は先頭要素（契約 v1.2 §4）",
+    )
     p_run.add_argument("--poll-interval", type=float, default=0.1, help="polling 間隔 秒（既定 0.1）")
     p_run.set_defaults(func=_cmd_run)
 

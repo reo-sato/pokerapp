@@ -63,22 +63,28 @@ RFID を使わない場合は `rfid.enabled` を `false`（既定）のままで
 
 1. 追加インストール: `pip install ".[pcsc]"`（`pyscard` が入ります）。OS 側に PC/SC スタックが必要です
    （Linux: `sudo apt-get install pcscd libpcsclite-dev` + `pcscd` 起動／macOS・Windows は標準で PC/SC あり）。
-2. ESP32-S3 firmware（PN5180 を USB CCID で公開）を接続し、OS が各リーダーを認識していることを確認:
+2. ESP32-S3 firmware（PN5180 を USB CCID で公開）を接続し、OS がリーダーを認識していることを確認:
    ```bash
-   python -c "from smartcard.System import readers; print([str(r) for r in readers()])"
+   python tools/probe_pcsc.py list
    ```
    ここに出る **reader_name 文字列を完全一致で** `config.json` の `rfid.pcsc_readers[].name` に記入します
    （OS により文字列が異なります。契約 `docs/contracts/rfid-usb-ccid.md` §4/§8）。
+   **リーダー名は 1 個だけ出るのが正常です**（PN5180 が 11 台でも 1 個。Windows の CCID ドライバの
+   制限により、物理リーダーは名前ではなく次項の `reader` 番号で選びます。契約 v1.2 / ADR-0041）。
+   同じ行に `physical readers: N` として firmware が公開している台数が出ます。
 3. `config.json` の `rfid.transport` を `"pcsc"`、`rfid.enabled` を `true` に。
 4. `rfid.pcsc_readers`（**list**）で各リーダーの役割を設定:
-   `{"name": "<実 reader_name>", "role": "seat", "seat": 1}` / `{"name": "...", "role": "board", "index": 1}`
-   （`seat` 1..9 / board は `index` 1..5）。
-   本番構成は **11 台**（席 8 台 + board 3 台）。カードは**重ねて置けます**（席 = ホールカード 2 枚、
-   board の 1 台目 = フロップ 3 枚）。重ねる board リーダーには枚数 `cards` を付けます:
-   `{"name": "...", "role": "board", "index": 1, "cards": 3}`（フロップ）/ `index: 4`（ターン）/
-   `index: 5`（リバー）。席リーダーは 2 枚重ねでも `cards` は不要です（契約
-   `docs/contracts/rfid-usb-ccid.md` v1.1 §4）。設定の妥当性は
-   `python tools/probe_pcsc.py check` で確認できます。
+   `{"name": "<実 reader_name>", "reader": 0, "role": "seat", "seat": 1}` /
+   `{"name": "<同じ実 reader_name>", "reader": 8, "role": "board", "index": 1, "cards": 3}`
+   （`reader` = 物理リーダー番号 0 起点 / `seat` 1..9 / board は `index` 1..5）。
+   本番構成は **物理 11 台**（席 8 台 = `reader` 0..7 + board 3 台 = `reader` 8..10）で、
+   **`name` は全要素で同じ文字列**、`reader` だけが違います（`(name, reader)` の組が一意）。
+   カードは**重ねて置けます**（席 = ホールカード 2 枚、board の 1 台目 = フロップ 3 枚）。
+   重ねる board リーダーには枚数 `cards` を付けます: `"index": 1, "cards": 3`（フロップ）/
+   `"index": 4`（ターン）/ `"index": 5`（リバー）。席リーダーは 2 枚重ねでも `cards` は不要です
+   （契約 `docs/contracts/rfid-usb-ccid.md` v1.1 §4 / v1.2 §4）。設定の妥当性は
+   `python tools/probe_pcsc.py check` で確認できます（`reader` が firmware の台数を超えていると
+   `SW=6A86` で FAIL）。同梱の `config_default.json` に 11 台ぶんのサンプルがあります。
 5. カード対応表 `rfid_cards.json`（`tag_id` → カード）を用意（物理カード ↔ UID の登録）。
 
 ### HTTP 方式（ESP32 + PN532、補助 / debug 用）

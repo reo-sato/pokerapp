@@ -6,6 +6,56 @@
 
 ## [Unreleased]
 
+### Changed (RFID: 物理リーダーは Get UID の P2 で選ぶ — 契約 **v1.2** / host, ADR-0041 / ISSUE-0022, 2026-09-10)
+
+- **背景**: Windows の Microsoft 汎用 CCID ドライバは **1 インターフェース 1 slot** しか公開せず、
+  firmware を 2 slot（`bMaxSlotIndex=1`）にしても PC/SC には `PokerRFID PN5180-CCID 0` しか現れない
+  （実機で確定, ISSUE-0022）。slot ごとに USB インターフェースを分ける回避策も ESP32-S3 の
+  endpoint 数（6 本）で最大 5 台までで、本番 11 台（席 8 + board 3）に届かない。
+- **設計変更（ADR-0041 / 契約 v1.2）**: **CCID slot は常に 1 つ**（PC/SC の reader 名も 1 つ）にし、
+  **物理リーダー k は Get UID の P2 で選ぶ**（`FF CA 00 <k> 00`。範囲外は `6A 86`、台数問い合わせは
+  `FF CA 00 FF 00` → `<N>` + `90 00`）。`k=0` は従来の `FF CA 00 00 00` と同一なので **1 台構成の
+  挙動は不変**。v1.1 までの「slot ごとに reader 名を分ける」規約は廃止。
+- **設定（要更新）**: `config.rfid.pcsc_readers[]` に **`reader`（物理リーダー番号 0 起点・任意・
+  既定 0）** を追加。本番 11 台は **`name` を全要素で同じ**にして `reader` を 0..10 にする
+  （`config_default.json` のサンプルを更新）。一意性は `name` から **`(name, reader)`** へ。
+  既存の 1 台構成 config（`reader` 無し）はそのまま動く。
+- **host**: PC/SC 接続を **reader 名ごとに 1 本持続**し、そこに N 個の Get UID を流すようになった
+  （poll ごとの connect/disconnect が消えて 11 台でも軽い。失敗時は接続を捨てて次 poll で再接続）。
+  `reader` が firmware の台数を超えていると WARN（`6A 86`）を 1 回出して空扱い。
+- **ツール**: `probe_pcsc list` が `physical readers: N` と台数超過の警告を表示 /
+  `probe_pcsc check` が connect + Get UID の SW で PASS/FAIL（`6A86` は「範囲外」で FAIL）/
+  `probe_pcsc watch` のラベルが `seat 1 [r0]` / `probe_pcsc raw --reader <k>`（reader 名は `--name` に移動）/
+  `register_cards run --reader "seat 1"` で config 要素（= 物理リーダー）を選べる。
+- **Fixed**: GUI モード（`python main.py`）で `transport="pcsc"` のとき `RFIDThread` に HTTP 用の
+  `readers`(dict) を渡していて RFID スレッドが起動しなかった（CLI 経路のみ ADR-0034 で修正済だった）。
+- docs: 契約 `docs/contracts/rfid-usb-ccid.md` **v1.2**、ADR-0041、ISSUE-0022、
+  `docs/hardware-qa-checklist.md`（手順 1/2/3/4 + 受け入れ基準）、`docs/installation.md`、
+  worklog `docs/worklog/2026-09-10-rfid-reader-index-p2-host.md`。823 passed。
+  **残**: firmware 側の P2 実装と、実機 2 台 → 11 台の通し QA。
+
+### Changed (firmware: 重ね置きの読み取りを高速化 — 衝突位置 DFS + 確認 probe 間引き + ノイズ再試行, ISSUE-0021, 2026-09-10)
+
+- **3 枚重ねの 1 周が ≈150 ms → 目標 ≤ 60 ms（1 slot）**。実機で 3 枚重ねの probe が 14 回に
+  なっていた（UID を LSB-first で見ると 2 枚の下位 5 bit が同一で、mask を 1 bit ずつ伸ばす
+  anti-collision が「札のいない枝」を毎回 RX タイムアウトぶん待っていた）。`RX_STATUS` の
+  **衝突ビット位置まで mask を一気に伸ばす**ようにして 3 枚 = 6 probe / 2 枚 = 4 probe に短縮。
+  衝突位置が取れない・辻褄が合わない場合は従来の 1 bit 伸ばしに自動フォールバックする
+  （基準は実機未確認のため。起動後 reader ごと 3 回だけ判定ログを INFO で出す）。
+- **札が動かない間は「もう居ない」確認の問い合わせを間引く**（`PN5180_FAST_CONFIRM_EVERY=5`、
+  0 で従来動作）。11 台すべてに札が載っていると確認だけで ≈90 ms/周かかるため。カードの
+  増減があった周は従来どおり必ず確認する。
+- **カードを動かしている最中に 1 周が 160 ms まで伸びる問題を修正**。磁界の縁での壊れた受信
+  （衝突フラグ無しの CRC エラー）を「複数枚」と解釈して探索を上限まで広げていた（1 枚しか
+  載せていないのに問い合わせ 16 回 = 上限）。壊れた受信は **同じ条件で 1 回だけ再問い合わせし、
+  それでも駄目なら「無し」** として扱う。
+- 応答待ちの上限を 10 → 8 ms に（実応答は ≈5.5 ms）。`poll 統計` に
+  `coll_pos fallback N` / `ノイズ再試行 N` を追加（実機での効き具合を見るため）。
+- 取得できる UID・枚数・順序と host 契約（v1.1 §6/§7）は変更なし。**実機未検証**
+  （スタブ 128 構成コンパイル + register-level simulator で確認）。
+  docs: ISSUE-0021（実機フィードバック 3 + Regression Check）、firmware README、
+  firmware checklist §8、worklog `docs/worklog/2026-09-10-pn5180-collpos-dfs.md`。
+
 ### Fixed (firmware: 重ね置きの 3 枚目が読めない / 枚数がちらつく — Stay Quiet 再 probe + UID 単位 hold, ISSUE-0021, 2026-09-10)
 
 - **3 枚重ねが読めるように（capture effect 対策）**: 実機で 2 枚が同時応答しても PN5180 が衝突を

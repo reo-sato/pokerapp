@@ -1,8 +1,12 @@
 # 実機 RFID QA チェックリスト（PC/SC canonical, Phase H）
 
-実機の **ESP32-S3 + PN5180（USB CCID → PC/SC, canonical, ADR-0015/0034）** を接続して、
-RFID 経路を `docs/contracts/rfid-usb-ccid.md` **v1.1** の MUST に対して bring-up 確認する手順
-（v1.1 = 1 reader に複数枚重ね置き: 席 2 枚 / flop 3 枚。本番構成は 11 slot = 席 8 + board 3）。
+実機の **ESP32-S3 + PN5180（USB CCID → PC/SC, canonical, ADR-0015/0034/0041）** を接続して、
+RFID 経路を `docs/contracts/rfid-usb-ccid.md` **v1.2** の MUST に対して bring-up 確認する手順。
+
+- **v1.2（ADR-0041）**: PC/SC の reader（CCID slot）は **1 つだけ**で、物理リーダー 11 台
+  （席 8 + board 3）は **Get UID の P2**（config の `reader` 0..10）で選ぶ。よって手順 1 で見える
+  reader_name は **1 個が正常**。
+- **v1.1**: 1 台のリーダーに複数枚重ね置き（席 2 枚 / flop 3 枚）。
 
 - 実機なしの確認は [`manual-qa-checklist.md`](manual-qa-checklist.md)（音声のみ必須経路 + 項目6 の
   HTTP 模擬）を参照。本書は **実機が要る項目**（🖥️）に特化する。
@@ -26,18 +30,23 @@ pip install ".[pcsc]"          # pyscard（PC/SC canonical 経路に必須）
 - **見る点**: ESP32-S3 を USB 接続し、OS が **USB CCID（Smart Card）class** として認識していること
   （HID/シリアルではない, 契約 §2）。Linux は `lsusb` に CCID デバイス、`pcsc_scan` でも可。
 
-## 1. reader 列挙と reader_name 確定（契約 §3-4 / §8）🖥️
+## 1. reader 列挙と reader_name 確定 + 物理リーダー台数（契約 §3-4 / §6 / §8）🖥️
 
 ```bash
 python tools/probe_pcsc.py list
 ```
 
-- **期待**: 接続中の PC/SC reader_name が slot 数だけ並ぶ（PN5180 1 個 = 1 slot, 契約 §3）。
-  下段に config との突き合わせ（`matched` / `MISSING` / `unconfigured`）が出る。
+- **期待**: 接続中の PC/SC reader_name が **1 個だけ**並ぶ（v1.2: CCID slot は 1 つ, 契約 §3 / ADR-0041。
+  物理リーダーが 11 台でも reader 名は 1 個）。その行に `physical readers: N`（firmware が
+  `FF CA 00 FF 00` に返した台数）が出る。下段に config との突き合わせ
+  （`matched` / `MISSING` / `unconfigured`）が `(name, reader)` 単位で並ぶ。
 - **見る点**:
   - reader_name は OS 依存の文字列。**ここに出た文字列を 1 文字違わず** `config.rfid.pcsc_readers[].name`
-    に等値で入れる（前方一致しない, 契約 §4）。
-  - 再起動 / USB 再挿入を跨いで **安定部分（product 文字列 + slot index）が変わらない**こと（§3/§8）。
+    に等値で入れる（前方一致しない, 契約 §4）。**11 件すべて同じ文字列**になる。
+  - `physical readers: N` が実際に繋いだ台数と一致すること。`(v1.1 firmware: 台数問い合わせ非対応)` と
+    出る場合は firmware が v1.2 未対応（動作はするが台数チェックができない）。
+  - `⚠ reader k は firmware の台数 N を超えている` が出たら config の `reader` を直す（§6, `6A 86` 相当）。
+  - 再起動 / USB 再挿入を跨いで **安定部分（product 文字列）が変わらない**こと（§3/§8）。
   - product 文字列の推奨は `PN5180-CCID`（§2）。**確定した VID/PID・実 reader_name は契約 §2/§4 に追記**
     する（ISSUE-0015 の実環境残作業）。
 
@@ -52,30 +61,36 @@ python tools/probe_pcsc.py list
   "poll_interval_ms": 100,
   "card_master_file": "./rfid_cards.json",
   "pcsc_readers": [
-    {"name": "<slot 0 の実 reader_name>",  "role": "seat",  "seat": 1},
-    // … slot 1..6 = seat 2..7 …
-    {"name": "<slot 7 の実 reader_name>",  "role": "seat",  "seat": 8},
-    {"name": "<slot 8 の実 reader_name>",  "role": "board", "index": 1, "cards": 3},  // flop 3 枚重ね
-    {"name": "<slot 9 の実 reader_name>",  "role": "board", "index": 4},              // turn
-    {"name": "<slot 10 の実 reader_name>", "role": "board", "index": 5}               // river
+    {"name": "<手順1 の実 reader_name>", "reader": 0,  "role": "seat",  "seat": 1},
+    // … reader 1..6 = seat 2..7（name は全要素で同じ文字列）…
+    {"name": "<手順1 の実 reader_name>", "reader": 7,  "role": "seat",  "seat": 8},
+    {"name": "<手順1 の実 reader_name>", "reader": 8,  "role": "board", "index": 1, "cards": 3},  // flop 3 枚重ね
+    {"name": "<手順1 の実 reader_name>", "reader": 9,  "role": "board", "index": 4},              // turn
+    {"name": "<手順1 の実 reader_name>", "reader": 10, "role": "board", "index": 5}               // river
   ]
 }
 ```
 
-本番は **11 slot**（席 8 + board 3）。board は 1 reader = 1 枚ではなく、flop の 3 枚を 1 台に重ねて置く
-（`cards`, 契約 v1.1 §4）。席 reader は 2 枚重ねでも `cards` を書かない（hole card は位置を持たない）。
+本番は **物理 11 台**（席 8 + board 3）で、**reader 名は 1 つ**・`reader`（Get UID の P2）で台を選ぶ
+（契約 v1.2 §4 / ADR-0041）。board は 1 台 = 1 枚ではなく、flop の 3 枚を 1 台に重ねて置く
+（`cards`, 契約 v1.1 §4）。席リーダーは 2 枚重ねでも `cards` を書かない（hole card は位置を持たない）。
 
 ```bash
 python tools/probe_pcsc.py check
 ```
 
-- **期待**: `config lint` が `✓`、各 reader が `✓ PASS`、最後に `PASS ✅`。
+- **期待**: `config lint` が `✓`、各 reader が `✓ PASS  seat N [rK] … Get UID OK（カード無し）`、
+  最後に `PASS ✅`。
 - **見る点**:
-  - lint は name 欠落 / 重複・role 不正・seat 1..9 外・seat 重複・board index 1..5 外に加え、
-    **`cards` 1..5 外 / `cards>1` なのに index 無し / `index+cards-1` が 5 超 / board 位置の重なり**
-    を検出する（§4, v1.1）。
-  - connect PASS = OS PC/SC が slot の **ATR を受理**して `SCardConnect` 成功（host は ATR 非依存, §5）。
-    FAIL は name 不一致が最多 → 手順1の文字列を再確認。
+  - lint は name 欠落・role 不正・seat 1..9 外・seat 重複・board index 1..5 外・**`reader` 0..254 外**・
+    **`(name, reader)` の重複**に加え、**`cards` 1..5 外 / `cards>1` なのに index 無し /
+    `index+cards-1` が 5 超 / board 位置の重なり**を検出する（§4, v1.1/v1.2）。
+    **`name` の重複は v1.2 では正常**（reader 名は 1 つなので全要素で同じ）。
+  - PASS = OS PC/SC が **ATR を受理**して `SCardConnect` 成功（host は ATR 非依存, §5）+
+    `FF CA 00 <k> 00` に `90 00`（カードあり）か `6A 81`（カード無し）が返る。
+  - `✗ FAIL … reader K は firmware の範囲外 (SW=6A86)` → config の `reader` が firmware の台数を
+    超えている（手順1 の `physical readers: N` と突き合わせる, §6）。
+  - connect FAIL は name 不一致が最多 → 手順1の文字列を再確認。
   - **注**: `poll_interval_ms` はキーに先頭 `_` を付けない（`_pcsc_poll_interval_ms` はコメント扱いで無効）。
 
 ## 3. カード UID の登録（`rfid_cards.json`）🖥️
@@ -88,6 +103,8 @@ python tools/register_cards.py run --deck 1          # 1 デッキ目: ♠A..K �
 python tools/register_cards.py run --deck 2          # 2 デッキ目（同じ code に別 UID を追加）
 python tools/register_cards.py list --deck 2         # 不足 code の確認（再開はもう一度 run）
 python tools/register_cards.py unregister <UID>      # 置き間違えの修正
+# 登録に使う物理リーダーは --reader で選ぶ（config の index か 'seat 1' / 'board 1'。既定は先頭要素）
+python tools/register_cards.py run --deck 1 --reader "seat 1"
 # 新品デッキの並びが違うときは --order rank-suit / --only Ah,Kd / --start-at Kd で順序を合わせる
 ```
 
@@ -102,17 +119,21 @@ python tools/register_cards.py unregister <UID>      # 置き間違えの修正
 python tools/probe_pcsc.py watch --seconds 30
 ```
 
-各 slot で「**置く → 離す → もう一度置く**」を行う。**重ね置き**（席に 2 枚 / board1 に 3 枚）も試す。
+各リーダーで「**置く → 離す → もう一度置く**」を行う。**重ね置き**（席に 2 枚 / board1 に 3 枚）も試す。
 
-- **期待**: タップごとに `seat N` / `board K` のラベル + 正規化 UID + バイト長 + 解決カードが 1 行出る。
-  - **席に hole card 2 枚を重ねて置く → 2 行**（同じ `seat N`、UID が別）。
+- **期待**: タップごとに `seat N [rK]` / `board M [rK]` のラベル + 正規化 UID + バイト長 + 解決カードが
+  1 行出る（`[rK]` = config の `reader` = 物理リーダー index, v1.2 §6）。
+  - **席に hole card 2 枚を重ねて置く → 2 行**（同じ `seat N [rK]`、UID が別）。
   - **board1 に flop 3 枚を重ねて置く → `board 1` / `board 2` / `board 3` の 3 行**（位置は検出順に
     割り当て。1 枚だけ外して戻すと**同じ位置**でもう一度出る。契約 v1.1 §4/§6/§8）。
   - `cards` を超える枚数を載せると WARN が出て `board` ラベル（位置なし）になる。
 - **見る点**:
-  - **役割マッピング**（§4）: 物理リーダー位置と `seat`/`board` ラベルが一致するか。ズレていれば
-    `pcsc_readers` の name↔slot 対応を直す（firmware は slot 順序のみ保証、役割は host config が source of truth）。
-  - **Get UID**（§6）: タップで毎回 UID が取れる（`FF CA 00 00 00` → UID + `SW=90 00`）。
+  - **役割マッピング**（§4）: 物理リーダーの置き場所と `seat`/`board` ラベル（と `[rK]`）が一致するか。
+    ズレていれば `pcsc_readers` の `reader`（P2）↔役割の対応を直す（firmware は P2 の順序のみ保証、
+    役割は host config が source of truth）。**11 台では 1 台ずつ順にタップして `[rK]` を照合する**のが
+    最短（k を 1 つ間違えると席がまるごと入れ替わる）。
+  - **Get UID**（§6）: タップで毎回 UID が取れる（`FF CA 00 <k> 00` → UID + `SW=90 00`）。
+    特定の台だけ 0 件なら `python tools/probe_pcsc.py raw --reader <k>` でその台を直接叩いて切り分ける。
   - **デバウンス / hot-plug**（§8）: 置きっぱなしは 1 回だけ発火、離して再度置くと再発火する。
   - 登録済みカードは card 列に `Ah` 等、未登録は `(未登録)`（hand logger では `needs_review` 経路）。
 
@@ -145,22 +166,25 @@ python main.py --cli           # 起動ログに "RFID pyscardスレッド起動
 
 ---
 
-## 受け入れ基準（契約 v1.1 ↔ 本手順）
+## 受け入れ基準（契約 v1.2 ↔ 本手順）
 
 | 契約 § | 項目 | 確認手段 |
 |--------|------|---------|
-| §2 | USB CCID class / VID-PID / product 文字列固定 | 手順0（OS 認識）+ 手順1（reader_name に product） |
-| §3 | 1 PN5180 = 1 slot / reader_name 安定 / 11 slot 構成 | 手順1（再起動跨ぎ・slot 数） |
-| §4 | reader_name↔役割・`cards` と board 位置（host config が正準・等値照合） | 手順2 `check`（lint）+ 手順4（役割/位置一致） |
+| §2 | USB CCID class / VID-PID / product 文字列固定 / slot 数 1 固定 | 手順0（OS 認識）+ 手順1（reader_name に product・1 個） |
+| §3 | CCID slot は 1 つ / reader_name 安定 / 物理 11 台は P2 で選ぶ | 手順1（reader 1 個 + `physical readers: N`・再起動跨ぎ） |
+| §4 | `(name, reader)`↔役割・`cards` と board 位置（host config が正準・等値照合） | 手順2 `check`（lint）+ 手順4（`[rK]` と役割/位置一致） |
 | §5 | PC/SC 互換 ATR で connect 成立 | 手順2 `check`（PASS） |
-| §6 | Get UID `FF CA 00 00 00` / 複数枚は 8B × k 連結 | 手順4 `watch`（毎タップ UID・重ね置きで枚数ぶん行）+ `raw`（`UID×k = …`） |
+| §6 | Get UID `FF CA 00 <k> 00` / 範囲外 `6A 86` / 台数 `FF CA 00 FF 00` / 複数枚は 8B × k 連結 | 手順1（台数）+ 手順2（SW 判定）+ 手順4 `watch` + `raw --reader k`（`UID×k = …`） |
 | §7 | UID 4/7/8B 正規化 / MSB-first（`E0:04:…`） | 手順3/4（`(8B)` 表示・`⚠` 無し・先頭 `E0:04`） |
-| §8 | UID 単位デバウンス / hot-plug / 切断耐性 / multi-platform | 手順4（1 枚だけ外して戻すとその UID だけ再発火）+ 手順6（USB 抜き）+ 手順7 |
+| §8 | 1 接続持続 / UID 単位デバウンス / hot-plug / 切断耐性 / multi-platform | 手順4（1 枚だけ外して戻すとその UID だけ再発火）+ 手順6（USB 抜き）+ 手順7 |
 
 すべて PASS かつ board street 自動遷移（手順5）まで確認できれば、RFID 実機経路の bring-up 完了。
 
-## 実環境で確定して契約へ追記すべき項目（ISSUE-0015 残）
+## 実環境で確定して契約へ追記すべき項目（ISSUE-0015 / ISSUE-0022 残）
 
-- firmware の **VID/PID** と各 slot の **実 reader_name** を確定し、`docs/contracts/rfid-usb-ccid.md`
-  §2/§4 に追記する（host コードは変更不要 = 契約安定）。
-- live hot-add（稼働中の reader 追加追従）は future（本 v1.0 は起動時 connect のみ）。
+- firmware の **VID/PID** と **実 reader_name** は §2/§4 に追記済（2026-06-22 実機, Windows）。
+- **物理リーダーの段階検証（ISSUE-0022 / ADR-0041）**: 1 台 → **2 台**（`reader` 0/1 で `[r0]`/`[r1]` が
+  出るか）→ **11 台**（席 8 + board 3）の順に手順1-5 を回す。11 台では poll 1 周（1 接続 × 11 APDU）の
+  所要時間を計測し、`poll_interval_ms` を決める（ISSUE-0021）。
+- live hot-add（稼働中の reader 追加追従）は future（起動時 connect のみ。v1.2 の持続接続は
+  transmit 失敗時に張り直すので、同名 reader への replug は復帰しうる）。

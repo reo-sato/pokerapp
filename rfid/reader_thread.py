@@ -9,20 +9,23 @@ Phase 6: RFID リーダーをポーリングして RFIDEvent を rfid_queue に�
 - デバウンス: リーダーごとに前回の UID 集合を保持し、**新しく増えた UID だけ** RFIDEvent を
   1 件ずつ投入する。置きっぱなしは再発火しない。外れた UID は状態更新のみ（イベントなし）で、
   外して再度置けば同じ UID がもう一度発火する（契約 §8 を UID 単位に拡張）。
-- reader_configs: [{"name": "...", "role": "seat", "seat": 1}, ...] の形式。
+- reader_configs: [{"name": "...", "reader": 0, "role": "seat", "seat": 1}, ...] の形式。
+  `reader`（任意・既定 0）は **物理リーダーの index**（Get UID の P2, 契約 v1.2 §6 / ADR-0041）。
+  Windows の汎用 CCID ドライバは 1 インターフェース 1 slot しか公開しないため、PC/SC reader
+  （`name`）は 1 つで、物理リーダー N 台は `reader` で選ぶ。`(name, reader)` の組で一意。
   role="board" は `index`（ボード位置 1..5, 任意）と `cards`（そのリーダーに重ねる枚数, 任意・既定 1）
   を持つ。複数枚の board reader では検出順に `index + offset` を割り当てる（契約 v1.1 §4）。
 
-設定例 (config.json, 本番 11 slot = 席 8 + board 3):
+設定例 (config.json, 本番 11 台 = 席 8 + board 3。reader 名は 1 つだけ):
     "rfid": {
       "enabled": true,
       "transport": "pcsc",
       "poll_interval_ms": 100,
       "pcsc_readers": [
-        {"name": "PokerRFID PN5180-CCID 0", "role": "seat", "seat": 1},
-        {"name": "PokerRFID PN5180-CCID 8", "role": "board", "index": 1, "cards": 3},
-        {"name": "PokerRFID PN5180-CCID 9", "role": "board", "index": 4},
-        {"name": "PokerRFID PN5180-CCID 10", "role": "board", "index": 5}
+        {"name": "PokerRFID PN5180-CCID 0", "reader": 0,  "role": "seat", "seat": 1},
+        {"name": "PokerRFID PN5180-CCID 0", "reader": 8,  "role": "board", "index": 1, "cards": 3},
+        {"name": "PokerRFID PN5180-CCID 0", "reader": 9,  "role": "board", "index": 4},
+        {"name": "PokerRFID PN5180-CCID 0", "reader": 10, "role": "board", "index": 5}
       ],
       "card_master_file": "./rfid_cards.json"
     }
@@ -36,10 +39,25 @@ from typing import Optional
 
 from core.event_queue import EventQueue
 from core.events import RFIDEvent
-from rfid.bridge import PCSCBridge, bridge_read_uids
+from rfid.bridge import MAX_READER_INDEX, PCSCBridge, bridge_read_uids, call_bridge_factory
 from rfid.card_master import CardMaster
 
 logger = logging.getLogger(__name__)
+
+
+def _reader_index_of(cfg: dict, position: int) -> int:
+    """config 要素の物理 reader index（Get UID の P2, 契約 v1.2 §6）。既定 0。
+
+    不正値（int でない / 範囲外）は WARN して 0 にフォールバックする（起動は落とさない）。
+    """
+    value = cfg.get("reader", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_READER_INDEX:
+        logger.warning(
+            "Invalid 'reader' %r on pcsc_readers[%d] — 0 として扱います（0..%d, 契約 v1.2 §4）",
+            value, position, MAX_READER_INDEX,
+        )
+        return 0
+    return value
 
 
 class RFIDThread(threading.Thread):
@@ -59,11 +77,13 @@ class RFIDThread(threading.Thread):
             rfid_queue:       RFIDEvent を投入するキュー。
             card_master:      タグ ID → カード文字列 の対応表。
             reader_configs:   リーダー設定リスト。各要素は:
-                              {"name": str, "role": "seat"|"board", "seat": int (roleが"seat"の場合),
+                              {"name": str, "reader": int (任意・既定 0 = Get UID の P2, 契約 v1.2 §6),
+                               "role": "seat"|"board", "seat": int (roleが"seat"の場合),
                                "index": int (role="board", 任意), "cards": int (role="board", 任意・既定 1)}
             poll_interval_ms: ポーリング間隔 (ミリ秒)。
             stop_event:       セット時にスレッドを停止する。
-            bridge_factory:   テスト用ブリッジファクトリ (reader_name: str) -> bridge。
+            bridge_factory:   テスト用ブリッジファクトリ (reader_name: str, reader_index: int) -> bridge。
+                              旧シグネチャ (reader_name) -> bridge も互換で受け付ける。
                               省略時は PCSCBridge を使用。
         """
         super().__init__(daemon=True, name="RFIDThread")
@@ -91,16 +111,21 @@ class RFIDThread(threading.Thread):
         bridges: dict[str, object] = {}
         for i, cfg in enumerate(self._reader_configs):
             reader_name = cfg.get("name", "")
+            reader_index = _reader_index_of(cfg, i)
             reader_id = f"reader_{i}"
-            bridge = self._bridge_factory(reader_name)
+            bridge = call_bridge_factory(self._bridge_factory, reader_name, reader_index)
             if bridge.connect():
                 bridges[reader_id] = (bridge, cfg)
                 self._last_uids[reader_id] = set()
                 self._board_offsets[reader_id] = {}
                 self._board_offset_memory[reader_id] = {}
-                logger.info("RFID reader ready: %s (%s)", reader_name, reader_id)
+                logger.info(
+                    "RFID reader ready: %s (reader %d, %s)", reader_name, reader_index, reader_id,
+                )
             else:
-                logger.warning("Could not connect to RFID reader: %s", reader_name)
+                logger.warning(
+                    "Could not connect to RFID reader: %s (reader %d)", reader_name, reader_index,
+                )
 
         if not bridges:
             logger.warning("No RFID readers connected. RFIDThread exiting.")
