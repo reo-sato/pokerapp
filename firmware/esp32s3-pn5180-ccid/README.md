@@ -113,6 +113,17 @@ idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB
   quiet は RF off で解除されるので、**fast 経路は inventory の最後に必ず `pn5180_setRF_off()`**
   を呼ぶ（`PN5180_RF_OFF_BETWEEN_READERS=0` でも）。カード無しは 1 probe のまま、
   カードが載っている reader は「もう居ない」確認 probe のぶん +1（1 枚 2 / 2 枚 3〜4 / 3 枚 4）。
+- **衝突位置（`RX_COLL_POS`）で mask を一気に伸ばす**（実機フィードバック 3, ISSUE-0021）: 実機の
+  3 枚重ねで **probe 14 / 1 周 150 ms** になった（UID を LSB-first で見ると 2 枚の下位 5 bit が同一で、
+  1 bit ずつ伸ばす DFS が空の兄弟枝を RX timeout ぶん舐める）。`RX_STATUS` の衝突ビット位置
+  （UID bit = `coll_pos - 16`）と衝突前の受信データで **prefix ごと mask を伸ばす**と 3 枚 = 6 probe、
+  2 枚 = 4 probe。取れない / 不整合なら 1 bit 伸ばしに fallback（起動後 slot ごと 3 回だけ
+  `coll_pos=… → 採用/fallback` を INFO で出す。基準は実機未確認）。
+- **定常状態は確認 probe を間引く**（`PN5180_FAST_CONFIRM_EVERY=5`, 0 で従来動作）: 1 ラウンド目の
+  集合が前回と同じなら「もう居ない」確認 root を 5 poll に 1 回だけにする（11 台に札が載ると確認
+  だけで ≈90 ms/周）。**衝突フラグ無しの壊れた受信（磁界の縁のノイズ）は分割せず同じ node を 1 回だけ
+  再 probe** し、駄目なら「無し」扱い（実機で 1 枚なのに probe が上限 16 に張り付いた原因）。
+  `PN5180_FAST_RX_TIMEOUT_MS` は 10 → 8 ms（応答は ≈5.5 ms で来る）。
 - **presence hold は UID 単位**（`PRESENCE_HOLD_MISSES=3`）: 旧実装は「検出 0 枚のときだけ前回
   集合を保持」だったため、2 枚中 1 枚を 1 回取りこぼすと host へ「1 枚」が即座に伝わり、実機で
   2↔1 のちらつき（`watch` の再発火）になった。現在は UID ごとに miss を数え、**欠けた 1 枚だけ**を

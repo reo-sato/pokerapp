@@ -138,7 +138,8 @@ static const pn5180_reader_cfg_t PN5180_READERS[] = {
 
 // ───────── 高速 inventory（自前の mask anti-collision, ISSUE-0021）─────────
 // 1 = pn5180_reader.c の自前経路（既定）。ISO15693 INVENTORY を **1 slot（1 応答）** で送り、
-//     衝突したときだけ mask を 1 bit ずつ伸ばす DFS で複数枚を分離する。RF ON は reader ごと 1 回。
+//     衝突したときだけ mask を伸ばす DFS で複数枚を分離する（衝突位置 RX_COLL_POS が取れれば
+//     **そこまで一気に**伸ばす = 空の兄弟枝を probe しない）。RF ON は reader ごと 1 回。
 //     見つけた札には **STAY QUIET** を送って黙らせ、root(mask 0) を再 probe して残りを拾う
 //     （実機で 2 枚同時応答を PN5180 が衝突と見なさず強い方だけ復号する = capture effect が
 //     起きたため。quiet は RF off で解除されるので inventory の最後に必ず RF を落とす）。
@@ -170,10 +171,12 @@ static const pn5180_reader_cfg_t PN5180_READERS[] = {
 //   PN5180_15693_26KASK10 にして A/B する（読めなくなったら RX 設定の不一致が原因）。
 #define PN5180_FAST_RF_CONFIG PN5180_15693_26KASK100
 
-// INVENTORY 1 回あたりの応答待ちの上限。ISO15693 の応答は t1(≈320µs) + 10 byte @26.48kbps ≈ 4ms
-// で来るので 10ms で十分。カード無しの reader はこの時間だけ待って「無し」と判定する
-// （= 1 周の下限を決める値。probe 1 回 ≈ この値）。
-#define PN5180_FAST_RX_TIMEOUT_MS 10
+// INVENTORY 1 回あたりの応答待ちの上限。**カード無しの reader はこの時間ぶん待ってから「無し」と
+// 判定する = 1 周の下限を決める値**（probe 1 回 ≈ この値）。
+// 内訳: `pn5180_sendData` は送信開始で戻るので、要求フレーム（3〜11 byte + CRC ≈ 1.5 ms
+// @26.48 kbps）の送信 → タグの処理 t1(≈0.32 ms) → 応答 12 byte(≈3.7 ms) で **≈ 5.5 ms 後**に
+// RX_IRQ が立つ。10 → 8 ms（余裕 ≈2.5 ms）に詰めて、11 台ぶんの空振り待ちを削る（ISSUE-0021）。
+#define PN5180_FAST_RX_TIMEOUT_MS 8
 
 // RF ON 後、タグが給電されて応答できるようになるまでの待ち（ISO/IEC 15693-3: VCD は磁界確立から
 // 1ms 待ってから要求を送る）。reader ごと DFS の最初に 1 回だけ。
@@ -188,8 +191,19 @@ static const pn5180_reader_cfg_t PN5180_READERS[] = {
 
 // 1 reader / 1 poll あたりの INVENTORY 送信回数の上限（= その reader の所要時間の上限）。
 // DFS は衝突するたびに枝を 2 本に割るので、上限が無いとノイズで 1 台が数百 ms を食う。
-// 目安（Stay Quiet + root 再 probe 込み。1 枚見つけるたびに黙らせて root からやり直すため、
-// 最後に必ず「応答なし」の確認 probe が 1 回入る）:
-//   カード無し 1 回 / 1 枚 2 回 / 2 枚 3〜5 回 / 3 枚 4〜8 回。
+// 目安（Stay Quiet + root 再 probe + 衝突位置 DFS 込み。1 枚見つけるたびに黙らせて root から
+// やり直すため、最後に「応答なし」の確認 probe が 1 回入る = 実装 B で間引く対象）:
+//   カード無し 1 回 / 1 枚 2 回 / 2 枚 4 回 / 3 枚 6 回（定常状態は確認を省いて 1 回少ない）。
+// 壊れた受信（衝突フラグ無しの CRC/protocol error）は分割せず **同じ node を 1 回だけ再 probe**
+// するので、ノイズが続いても 2 probe/node で NONE に倒れる（実機 73ecd29 で 1 枚なのに上限 16 に
+// 張り付いた原因はこれを分割していたこと。ISSUE-0021 実機フィードバック 3）。
 // 打ち切っても取れた分だけ返し、残りは次の poll（と UID 単位 hold）が拾う。
 #define PN5180_FAST_MAX_PROBES 16
+
+// 定常状態（前回とまったく同じ札が載っている）で「もう居ない」確認 probe を何 poll に 1 回
+// 行うか（0 = 毎回 = 従来の挙動）。DFS の最後は必ず root を再 probe して「応答なし」で終わるが、
+// これは **カードが載っている reader 1 台につき RX timeout 1 回ぶん**（≈8 ms）かかる。11 台に
+// 札が載っていると確認だけで ≈90 ms/周になるため、集合が変わらない間は間引く。
+// 副作用: capture effect で隠れた札の発見が最大 (この値) poll 遅れる
+// （11 台 × ≈0.3 s × 5 ≈ 1.5 s 以内）。集合が変化した poll・前回 0 枚・カード無しでは必ず確認する。
+#define PN5180_FAST_CONFIRM_EVERY 5

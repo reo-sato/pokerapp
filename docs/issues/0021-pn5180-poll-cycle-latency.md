@@ -167,6 +167,66 @@ jef-sure/pn5180（v0.1.x）の `proto->get_all_uids()` が **堅牢性優先の�
 変わらず 1 probe）。11 slot 全部にカードを置いた最悪ケースが 300 ms を超えるようなら、
 `PN5180_FAST_RX_TIMEOUT_MS`（10 ms。実応答は ≈ 4 ms で来る）を先に詰める。
 
+## 実機フィードバック 3（2026-09-10, commit `73ecd29` を 1 slot で実行）
+
+### 実測
+
+| 状態 | probe 最大 | 1 周 |
+|------|-----------|------|
+| カード無し | 1 | **15 ms** |
+| 2 枚重ね | 5 | max 64 ms |
+| **3 枚重ね** | **14** | **≈150 ms** |
+| 1 枚を載せて動かす（`CCID_SLOT_COUNT=2` / ready 1 slot） | **16（上限）** | min/avg/max = 6/72/160 ms |
+
+Stay Quiet 自体は効いている（2 ラウンド目の root が NONE で終わる）。3 枚・ちらつきの不具合は解消。
+
+### Root Cause 4: 下位ビットが揃った UID で 1 bit DFS が空枝を舐める
+
+3 枚（`…1A:41:1D:2E` / `…1A:41:35:B3` / `…1D:CB:00:CE`）の UID を **LSB-first** で見ると先頭バイトが
+`2E` / `B3` / `CE` で、`2E` と `CE` は **下位 5 bit が同一**（bit0..4 = 0,1,1,1,0）。1 bit ずつ mask を
+伸ばす DFS では衝突が 6 段続き、各段で「札のいない兄弟枝」を `PN5180_FAST_RX_TIMEOUT_MS`(10 ms)
+いっぱい待つ。内訳（手計算が実測と一致）:
+**root 1 + 衝突 6 + 空枝 NONE 5 + UID 3 + 確認 NONE 1 = 14 probe**。
+空枝 5 × 10 ms と衝突 6 段が丸ごと無駄。
+
+### Root Cause 5: 磁界の縁のノイズを「衝突」に倒して DFS を上限まで展開していた
+
+1 枚しか載せていないのに probe が上限 16 に張り付く。`fast_probe_15693` が
+**「バイトはあるが CRC/protocol error（衝突フラグ**無し**）」を PROBE_COLLISION に倒していた**ため、
+カードが磁界の縁にあるとノイズ受信のたびに 2 分木が上限まで広がる（**ノイズは子枝でもノイズ**なので
+分割しても消えない）。実機では本物の同時応答は衝突フラグが立つ（2 枚・3 枚とも分離できている）。
+
+### 対処（本タスク）
+
+- **A. `RX_COLL_POS` で衝突位置まで mask を一気に伸ばす**。`RX_STATUS` の bits 25:19 は受信フレーム内で
+  最初に衝突したビット位置。ISO15693 の応答は `flags(8) DSFID(8) UID(64, LSB-first)` なので
+  **UID bit i = フレーム bit 16+i**。衝突ビットより前は正しく受信できているので `pn5180_readData` で
+  読み、その prefix を mask にして子を `(prefix|1<<pos, pos+1)` / `(prefix, pos+1)` の 2 本にする
+  （**どちらにも必ず札がいる** = 空枝 probe が消える）。
+  取れない（衝突が flags/DSFID 内 / 受信バイト不足 / readData 失敗 / cur.mask と不整合）ときは
+  **従来の 1 bit 伸ばしに fallback**。基準（フレーム先頭か UID 先頭か）が実機で違っても、
+  Stay Quiet + root 再 probe ループが取りこぼしを回収するので**正しさは落ちず効率だけが落ちる**。
+- **B. 定常状態は「もう居ない」確認 probe を間引く**（`PN5180_FAST_CONFIRM_EVERY=5`, 0 で従来動作）。
+  1 ラウンド目で見つけた集合が前回 cache と同一なら、5 poll に 1 回だけ確認 root を送る。
+  11 台に札が載っていると確認だけで ≈90 ms/周かかるため。集合が変化した poll・前回 0 枚・
+  カード無しでは必ず確認する（capture で隠れた札の発見は最大 5 poll ≈ 1.5 s 遅れる）。
+- **C. `PN5180_FAST_RX_TIMEOUT_MS` 10 → 8 ms**。応答は要求送信(≈1.5 ms) + t1(0.32 ms) +
+  12 byte(≈3.7 ms) ≈ 5.5 ms で来る（`pn5180_sendData` は送信開始で戻る）ので余裕 2.5 ms。
+- **D. ノイズは分割せず「同じ node を 1 回だけ再 probe」**（`PROBE_NOISE`）。再試行でも壊れていれば
+  **NONE 扱い**（DFS を広げない）。稀に「衝突フラグ無しで 2 枚が重なる」ケースがあっても、次の poll +
+  UID 単位 hold + B の再確認で回収する。probe は 1 node あたり最大 2 回で有界。
+
+改訂後の probe 数（simulator 実測、実機と同じ 3 枚の UID）:
+
+| 状態 | probe 数 | 概算 |
+|------|---------|------|
+| カード無し | 1 | ≈ 8 ms |
+| 1 枚 | 2（定常 1） | ≈ 16 ms |
+| 2 枚 | 4（定常 3） | ≈ 32 ms |
+| 3 枚（下位 5bit 同一を含む） | **6**（定常 5）※従来 14 | ≈ 48 ms |
+| ノイズが続く（1 枚） | 2〜3 | ≈ 24 ms |
+| coll_pos 無効（fallback） | 14 | ≈ 112 ms |
+
 ## Regression Check
 
 **実機で** `idf.py monitor` の `poll 統計` を見る（自動テスト不可 = 実 RF が要る）:
@@ -176,6 +236,11 @@ jef-sure/pn5180（v0.1.x）の `proto->get_all_uids()` が **堅牢性優先の�
 - `python tools/probe_pcsc.py raw` で、席に 2 枚重ねたときの Get UID 応答が **18 byte**（16 + SW）、
   flop 3 枚で **26 byte**。`watch` で 1 slot から UID が枚数ぶん出る（host v1.1 の分割込み）。
 - **3 枚重ねで UART に `🎴 reader N: 3 枚 [...]` が出る**（`1 枚`↔`2 枚` を往復しない）。
+- **3 枚重ねで `probe 最大 ≤ 8` かつ 1 周 ≤ 60 ms（1 slot）**（実機フィードバック 3 の A/B/C）。
+  超えるなら `poll 統計` の `coll_pos fallback` が増えているはず = RX_COLL_POS の基準が想定と違う
+  （起動直後の `reader N: coll_pos=… → 採用/fallback` INFO 3 行で生値を確認する）。
+- **11 slot 全部に札を載せて 1 周 ≤ 300 ms**（席 2 枚 × 8 + board 3/1/1）。
+- **1 枚だけ載せて動かしても `probe 最大` が 16 に張り付かない**（`ノイズ再試行 N` が増えるだけ）。
 - **ちらつきが無い**: 2 枚 / 3 枚を置いたまま 20 秒放置して、`probe_pcsc watch` の**再発火が 0 件**
   （UART の `🎴 reader N: … 枚` も置いた瞬間の 1 行だけ。`(hold n)` が付く行が時々出るのは正常
   = 1 枚取りこぼしを UID 単位で吸収したという意味）。
@@ -209,10 +274,13 @@ jef-sure/pn5180（v0.1.x）の `proto->get_all_uids()` が **堅牢性優先の�
    0x0E→0x8E = 53 kbps RX なので、標準 INVENTORY（high data rate = 26.48 kbps 応答）を受けられるのは
    **0x0D/0x8D の組だけ**。よって fast 経路の既定は `PN5180_15693_26KASK100`。実機で届きが悪ければ
    `PN5180_15693_26KASK10` に切り替えて A/B（読めなくなるなら RX 不一致が原因）。
-4. **DFS の probe 数削減（未実装）**: RX_STATUS の `RX_COLL_POS`（bits 25:19 = 最初に衝突した
-   ビット位置）を使えば、1 bit ずつではなく衝突位置まで mask を一気に伸ばせる。UID の下位
-   ビットが揃った組み合わせの最悪ケース（16 probe）を数 probe に短縮できるが、bit 位置の
-   基準（フレーム先頭からか UID 先頭からか）を実機で確かめる必要があるので今回は見送り。
+4. ~~**DFS の probe 数削減（未実装）**~~ → **実装済（実機フィードバック 3 の対処 A）**: `RX_COLL_POS`
+   （bits 25:19）で衝突位置まで mask を一気に伸ばす。**bit 位置の基準（フレーム先頭 / UID 先頭）は
+   実機未確認**なので、`coll_pos >= 16` かつ受信バイトが衝突ビットに届いていることを検証し、
+   満たさなければ従来の 1 bit 伸ばしに fallback する。基準が想定と違っても Stay Quiet + root
+   再 probe が取りこぼしを回収する（効率だけが落ちる）。実機では起動後 slot ごと 3 回だけ出る
+   `reader N: coll_pos=%u（UID bit %d）, 受信 %u byte, cur.len=%u → 採用/fallback` と、
+   `poll 統計` の `coll_pos fallback N` で基準を確定する。
 5. **重ね置き 3 枚が電力不足で応答しない可能性（firmware では解決できない）**: Stay Quiet を
    入れても 3 枚目が出ない場合、capture ではなく**給電不足**（アンテナに密着した 2 枚が磁束を
    食い、3 枚目が動作電圧に届かない）が原因になり得る。その場合は `PN5180_FAST_FIELD_SETTLE_US`
@@ -223,6 +291,7 @@ jef-sure/pn5180（v0.1.x）の `proto->get_all_uids()` が **堅牢性優先の�
 
 ## Related Worklog
 
+- `docs/worklog/2026-09-10-pn5180-collpos-dfs.md`（実機フィードバック 3 の対処 A/B/C/D）
 - `docs/worklog/2026-09-10-pn5180-stay-quiet-per-uid-hold.md`（本節「実機結果」の対処）
 - `docs/worklog/2026-09-10-pn5180-fast-inventory.md`
 - `docs/worklog/2026-09-10-multi-reader-firmware-prep.md`（前段: RF 時分割 / 未通電 skip / poll 統計）

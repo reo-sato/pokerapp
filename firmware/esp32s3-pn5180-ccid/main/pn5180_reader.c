@@ -37,6 +37,16 @@ static const char *TAG = "pn5180";
 #define ISO15693_CMD_INVENTORY       0x01
 #define ISO15693_CMD_STAY_QUIET      0x02  // 宛先タグを黙らせる（応答なし。RF off で解除）
 
+// RX_STATUS(0x13) の衝突位置フィールド（bits 25:19 = 受信フレーム内で最初に衝突したビット位置
+// 0..127）。ドライバの public ヘッダに入っているが、版によっては無いことがあるので保険で定義する
+// （値は PN5180 データシート。ヘッダ側にあればそちらが優先される）。
+#ifndef RX_COLL_POS_START
+#  define RX_COLL_POS_START 19
+#endif
+#ifndef RX_COLL_POS_MASK
+#  define RX_COLL_POS_MASK 0x7F
+#endif
+
 // fast 経路の間だけ pn5180_t.timeout_ms を絞る値。ドライバ既定は 500ms で、これは
 // **SPI の BUSY 待ち・transceive 状態待ち・RF off 待ちすべての上限**なので、1 台の不調が
 // 1 周を 0.5 秒伸ばしてしまう（11 台なら 5.5 秒）。ドライバ自身も get_all_uids の間だけ
@@ -594,16 +604,53 @@ static uint8_t read_uids_from_proto(pn5180_proto_t *proto, uint8_t uids[][16], u
 typedef enum {
     PROBE_NONE = 0,   // 応答なし（この mask に合致するカードは無い）
     PROBE_UID,        // ちょうど 1 枚が応答した → uid_out に LSB-first の 8 byte
-    PROBE_COLLISION,  // 複数枚が同時に応答した → mask を 1 bit 伸ばして分割する
+    PROBE_COLLISION,  // 衝突フラグあり = 複数枚が同時に応答した → mask を伸ばして分割する
+    PROBE_NOISE,      // 衝突フラグ無しで壊れた受信（磁界の縁のノイズ）→ 同じ node を 1 回だけ再 probe
 } probe_result_t;
+
+// ── PROBE_COLLISION のときに拾う「衝突位置」情報（ISSUE-0021 実装 A）──
+// ISO15693 の応答フレームは flags(8bit) DSFID(8bit) UID(64bit, **LSB-first**) なので
+// **UID の bit i = フレームの bit 16+i**。衝突ビットより手前のビットは正しく受信できているため、
+// mask を 1 bit ずつ伸ばさずに **衝突位置まで一気に伸ばせる**（空の兄弟枝を probe しなくなる）。
+typedef struct {
+    uint8_t pos;        // UID 内の衝突ビット位置（= RX_COLL_POS - 16）。**0xFF = 無効**
+    uint8_t uid[8];     // 衝突ビットより前の UID 先頭部分（LSB-first、それ以降のビットは 0）
+    uint16_t raw_pos;   // RX_COLL_POS の生値（ログ用。基準がフレーム先頭かを実機で見るため）
+    uint16_t rx_bytes;  // 受信バイト数（ログ用）
+} fast_coll_t;
+
+// 衝突した応答から RX_COLL_POS と「衝突ビットより前の UID 先頭部分」を取り出す。
+// 取り出せない（衝突が flags/DSFID 内 / 受信バイトが衝突ビットに届いていない / readData 失敗）
+// ときは `coll->pos` を 0xFF のままにし、呼び側は従来どおり 1 bit だけ mask を伸ばす。
+static void fast_fill_coll(pn5180_t *dev, uint32_t rs, uint32_t n, fast_coll_t *coll) {
+    const uint32_t raw = (rs >> RX_COLL_POS_START) & RX_COLL_POS_MASK;
+    coll->raw_pos = (uint16_t)raw;
+    coll->rx_bytes = (uint16_t)n;
+    if (raw < 16 || (raw - 16) >= 64) return;  // UID の外（flags/DSFID）で衝突 = 分割には使えない
+    const uint32_t pos = raw - 16;
+    // rx[0]=flags, rx[1]=DSFID, rx[2+]=UID。衝突ビットを含むバイトまで受信できていること。
+    if (n < 2 + pos / 8 + 1) return;
+    const uint32_t rd = (n > 10) ? 10 : n;  // 部分バイトも RX_STATUS の byte 数に含まれる
+    uint8_t rx[10];
+    if (!pn5180_readData(dev, (int)rd, rx)) return;
+    memcpy(coll->uid, rx + 2, rd - 2);  // n >= 3 なので rd-2 は 1..8
+    coll->pos = (uint8_t)pos;
+}
 
 // ISO15693 INVENTORY を 1 回だけ送り、応答を 3 値で返す（ドライバの総当たりをしない）。
 // フレーム: flags(0x26 = high rate | inventory | 1 slot), INVENTORY(0x01), mask_len,
 //           mask 値（ceil(mask_len/8) byte, **LSB-first**）
 // mask は「UID の下位 mask_len ビット」と比較される。ISO15693 は UID を LSB から送るので、
 // mask bit i = 受信生バイト rx[2] の bit0 から数えて i 番目のビット。
+// coll（非 NULL）には PROBE_COLLISION のときだけ衝突位置情報を書く（無効なら pos=0xFF）。
 static probe_result_t fast_probe_15693(pn5180_t *dev, uint64_t mask, uint8_t mask_len,
-                                       uint8_t *uid_out) {
+                                       uint8_t *uid_out, fast_coll_t *coll) {
+    if (coll) {
+        coll->pos = 0xFF;
+        coll->raw_pos = 0;
+        coll->rx_bytes = 0;
+        memset(coll->uid, 0, sizeof(coll->uid));
+    }
     const uint8_t nbytes = (uint8_t)((mask_len + 7) / 8);  // mask_len<=64 なので <=8
     uint8_t buf[3 + 8];
     buf[0] = ISO15693_FLAG_DATA_RATE_HIGH | ISO15693_FLAG_INVENTORY | ISO15693_FLAG_SLOT_ONE;
@@ -639,19 +686,28 @@ static probe_result_t fast_probe_15693(pn5180_t *dev, uint64_t mask, uint8_t mas
     // **衝突フラグが立っていれば受信バイト数に依らず分割する**。SOF で衝突すると
     // 「collision=1 / 受信 0 byte」で返ることがあり、下の n==0 を先に見ると衝突を
     // 「カード無し」に倒してしまう（= 重ね置きが永久に分離できない）。
-    if (collision) return PROBE_COLLISION;
+    if (collision) {
+        // 衝突位置まで mask を伸ばすための情報を取る（RX_COLL_POS が有効なときだけ）。
+        if (coll) fast_fill_coll(dev, rs, n, coll);
+        return PROBE_COLLISION;
+    }
 
     // 受信バイト 0 で protocol/integrity error だけ = 応答の実体が無いノイズ（ドライバも
     // 0 byte + protocol error を noise と呼んでいる）→「カード無し」。
     if (n == 0) return PROBE_NONE;
 
     // 応答は flags(1) + DSFID(1) + UID(8) = 10 byte（CRC は PN5180 が検証して外す）。
-    // 10 byte 以外 / **バイトはあるが CRC・protocol error** は、いずれも「複数枚の応答が
-    // 重なった」可能性があるので mask を伸ばして分割する側に倒す。
-    // （CRC 崩れを「無し」に倒すと、2 枚の応答が衝突フラグ無しで重なり続ける限り両方とも
-    //   永久に読めない。ノイズだった場合は子 2 枝が NONE で終わり 2 probe 損するだけ。）
+    // 10 byte 以外 / **バイトはあるが CRC・protocol error** = 壊れた受信。**衝突フラグが
+    // 立っていない**ので分割はしない（PROBE_NOISE = 呼び側が同じ node を 1 回だけ再 probe する）。
+    //
+    // ⚠ 以前はこれも COLLISION に倒していたが、実機（2026-09-10, commit 73ecd29, 1 枚だけ載せて
+    //   カードを動かす）で **probe 最大 16 = 上限**・1 周 max 160 ms になった。カードが磁界の縁に
+    //   あるとノイズ受信が続き、DFS が 2 分木を上限まで展開する（**ノイズは子枝でもノイズ**なので
+    //   分割しても消えない）ため。本物の同時応答は実機では衝突フラグが立つ（2 枚・3 枚とも読めて
+    //   いる）。稀に「フラグ無しで 2 枚が重なる」ケースがあっても、次の poll + UID 単位 hold +
+    //   PN5180_FAST_CONFIRM_EVERY の再確認で回収する。
     if (n != 10 || (rs & (RX_PROTOCOL_ERROR | RX_DATA_INTEGRITY_ERROR))) {
-        return PROBE_COLLISION;
+        return PROBE_NOISE;
     }
 
     uint8_t rx[10];
@@ -705,6 +761,105 @@ static void fast_add_uid(uint8_t uids[][16], uint8_t *count, const uint8_t *uid)
 // 直近に読んだ reader 1 台の probe（INVENTORY 送信）回数。poll 統計で「1 周の最大」を出すために持つ
 // （Stay Quiet が効かず probe 上限まで空回りしているか、をログで見えるようにする）。
 static int s_fast_last_probes;
+// 直近に読んだ reader 1 台で「RX_COLL_POS を使えず 1 bit 伸ばしに落ちた」回数（poll 統計用）。
+static int s_fast_last_fallbacks;
+// 直近に読んだ reader 1 台で「壊れた受信を同じ node で再 probe した」回数（poll 統計用）。
+static int s_fast_last_noise_retries;
+// slot ごとの coll_pos ログ出力回数（最初の 3 回だけ INFO、以降 DEBUG）。
+static uint8_t s_collpos_logs[CCID_SLOT_COUNT];
+// slot ごとの「確認 probe を省略した連続回数」（実装 B）。
+static uint8_t s_confirm_skips[CCID_SLOT_COUNT];
+
+typedef struct {
+    uint64_t mask;
+    uint8_t len;
+} dfs_node_t;
+
+// ── 衝突した枝を 2 分割して DFS スタックに積む（戻り値 = 新しい sp）──
+// RX_COLL_POS が有効なら **衝突位置 pos まで mask を一気に伸ばす**（実装 A）。pos より手前の
+// ビットは全応答で一致しているので、子は `(prefix|1<<pos, pos+1)` と `(prefix, pos+1)` の 2 つ
+// で、**どちらにも必ず札がいる**（＝空の兄弟枝を RX timeout いっぱい待つ probe が消える）。
+// 無効・不整合なら従来どおり 1 bit だけ伸ばす。
+static int fast_push_children(int slot, dfs_node_t *stack, int sp, const dfs_node_t *cur,
+                              const fast_coll_t *coll) {
+    if (sp + 2 > (int)FAST_DFS_STACK) return sp;  // 溢れ防止（probe 上限があるので通常来ない）
+
+    uint64_t mask = cur->mask;
+    uint8_t len = cur->len;
+    bool adopted = false;
+    if (coll->pos != 0xFF && coll->pos >= cur->len && coll->pos < 64) {
+        // 受信できた UID 先頭部分の bit[0..pos) を prefix にする（bit i = uid[i/8] の bit i%8）。
+        uint64_t prefix = 0;
+        for (uint8_t b = 0; b < coll->pos; b++) {
+            prefix |= (uint64_t)((coll->uid[b / 8] >> (b % 8)) & 1U) << b;
+        }
+        // 既知ビット（cur.mask の下位 cur.len bit）と一致するはず。ズレたら信用せず fallback。
+        const uint64_t known = (cur->len == 0) ? 0ULL : (~0ULL >> (64 - cur->len));
+        if (((prefix ^ cur->mask) & known) == 0) {
+            mask = prefix;
+            len = coll->pos;
+            adopted = true;
+        }
+    }
+
+    // 実機で RX_COLL_POS の基準（フレーム先頭 or UID 先頭）を確認できるよう、slot ごと最初の
+    // 3 回だけ INFO で出す（毎 poll 出すと UART が埋まるので以降は DEBUG）。
+    const int uid_bit = (coll->pos == 0xFF) ? -1 : (int)coll->pos;
+    const char *verdict = adopted ? "採用" : "fallback(1bit)";
+    if (slot >= 0 && slot < CCID_SLOT_COUNT && s_collpos_logs[slot] < 3) {
+        s_collpos_logs[slot]++;
+        ESP_LOGI(TAG, "reader %d: coll_pos=%u（UID bit %d）, 受信 %u byte, cur.len=%u → %s",
+                 slot, (unsigned)coll->raw_pos, uid_bit, (unsigned)coll->rx_bytes,
+                 (unsigned)cur->len, verdict);
+    } else {
+        ESP_LOGD(TAG, "reader %d: coll_pos=%u（UID bit %d）, 受信 %u byte, cur.len=%u → %s",
+                 slot, (unsigned)coll->raw_pos, uid_bit, (unsigned)coll->rx_bytes,
+                 (unsigned)cur->len, verdict);
+    }
+    if (!adopted) s_fast_last_fallbacks++;
+
+    if (len >= 64) return sp;  // 64 bit すべて一致 = 同一 UID が 2 枚（これ以上は割れない）
+    stack[sp].mask = mask | (1ULL << len);
+    stack[sp].len = (uint8_t)(len + 1);
+    sp++;
+    stack[sp].mask = mask;
+    stack[sp].len = (uint8_t)(len + 1);
+    sp++;
+    return sp;
+}
+
+// ── probe 1 回 + ノイズ時の 1 回だけの再試行 ──
+// 「衝突フラグ無しで壊れた受信」（PROBE_NOISE）は分割しても消えないので、**同じ node をその場で
+// 1 回だけ再 probe** し、それでも壊れていたら NONE 扱いにする（DFS を広げない）。
+// `*probes` は実際に送った INVENTORY の回数だけ増える（= PN5180_FAST_MAX_PROBES が時間の上限）。
+static probe_result_t fast_probe_retry(pn5180_t *dev, uint64_t mask, uint8_t mask_len,
+                                       uint8_t *uid_out, fast_coll_t *coll, int *probes) {
+    (*probes)++;
+    probe_result_t rc = fast_probe_15693(dev, mask, mask_len, uid_out, coll);
+    if (rc != PROBE_NOISE) return rc;
+    (*probes)++;
+    s_fast_last_noise_retries++;
+    rc = fast_probe_15693(dev, mask, mask_len, uid_out, coll);
+    return (rc == PROBE_NOISE) ? PROBE_NONE : rc;
+}
+
+// 1 ラウンド目で見つけた集合が前回 cache と同じか（実装 B の判定）。
+// prev は **MSB-first**（反転・ソート済みで hold 中の UID も含む）、det は probe が返した
+// **LSB-first** の生バイト。hold 中の札が混ざっていれば「同じではない」= 確認 probe を省かない。
+static bool fast_same_as_prev(const pn5180_card_t *prev, const uint8_t det[][16], uint8_t count) {
+    if (count == 0 || !prev->present || prev->count != count || prev->uid_len != 8) return false;
+    for (uint8_t k = 0; k < count; k++) {
+        bool found = false;
+        for (uint8_t j = 0; j < prev->count && !found; j++) {
+            found = true;
+            for (uint8_t b = 0; b < 8; b++) {
+                if (prev->uids[j][b] != det[k][7 - b]) { found = false; break; }
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
 
 // ── 高速 inventory 本体（Stay Quiet + mask ベースの anti-collision DFS）──
 // RF はこの関数の間ずっと ON（reader ごと 1 回だけ立てる）。**最後に必ず RF off**（quiet 解除）。
@@ -717,9 +872,16 @@ static int s_fast_last_probes;
 // するが、実機では 2 枚が同時応答しても PN5180 が衝突を検出せず強い方だけを正しく復号する
 // （capture effect）。この枝は PROBE_UID で終わってしまい、弱い方は DFS では現れない。
 // 見つけた札を黙らせてから root をやり直すと、隠れていた札が応答してくる。
-static uint8_t fast_inventory_15693(slot_reader_t *r, uint8_t uids[][16], uint8_t *uid_len) {
+//
+// 定常状態（前回と同じ札が載ったまま）では最後の「もう居ない」確認 probe を
+// PN5180_FAST_CONFIRM_EVERY 回に 1 回だけにする（実装 B）。11 台に札が載っていると確認だけで
+// RX timeout × 11 ≈ 90 ms/周かかるため。capture で隠れた札は最大 CONFIRM_EVERY poll 後に見つかる。
+static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_card_t *prev,
+                                    uint8_t uids[][16], uint8_t *uid_len) {
     pn5180_t *dev = r->dev;
     *uid_len = 8;
+    s_fast_last_fallbacks = 0;
+    s_fast_last_noise_retries = 0;
     if (!r->rf_loaded) {
         if (!pn5180_loadRFConfig(dev, PN5180_FAST_RF_CONFIG)) return 0;
         r->rf_loaded = true;
@@ -727,59 +889,53 @@ static uint8_t fast_inventory_15693(slot_reader_t *r, uint8_t uids[][16], uint8_
     if (!pn5180_setRF_on(dev)) return 0;  // is_rf_on はドライバが持つので二重 ON にはならない
     esp_rom_delay_us(PN5180_FAST_FIELD_SETTLE_US);
 
-    typedef struct {
-        uint64_t mask;
-        uint8_t len;
-    } dfs_node_t;
     dfs_node_t stack[FAST_DFS_STACK];
 
     uint8_t count = 0;
     int probes = 0;
+    int rounds = 0;
     int stale_rounds = 0;  // 新しい UID が 1 枚も増えなかったラウンドの連続数
     uint8_t uid[8];
+    fast_coll_t coll;
     while (probes < PN5180_FAST_MAX_PROBES && count < PN5180_MAX_CARDS_PER_READER) {
         const uint8_t before = count;
-        probes++;
-        const probe_result_t root = fast_probe_15693(dev, 0, 0, uid);
+        rounds++;
+        const probe_result_t root = fast_probe_retry(dev, 0, 0, uid, &coll, &probes);
         if (root == PROBE_NONE) break;  // 誰も応答しない = 残りは居ない（正常終了）
         if (root == PROBE_UID) {
             fast_add_uid(uids, &count, uid);
             fast_stay_quiet_15693(dev, uid);  // dup でも送る（黙らせ損ねの再送になる）
         } else {
-            // 衝突: root の 2 子（bit0 = 0 / 1）から mask DFS。
-            int sp = 0;
-            stack[sp].mask = 1ULL;
-            stack[sp].len = 1;
-            sp++;
-            stack[sp].mask = 0ULL;
-            stack[sp].len = 1;
-            sp++;
+            // 衝突: root（mask 0 / len 0）を分割して mask DFS。RX_COLL_POS が使えれば
+            // 衝突位置まで一気に伸びる（使えなければ bit0 で 2 分割 = 従来どおり）。
+            const dfs_node_t root_node = {.mask = 0, .len = 0};
+            int sp = fast_push_children(slot, stack, 0, &root_node, &coll);
             while (sp > 0 && probes < PN5180_FAST_MAX_PROBES &&
                    count < PN5180_MAX_CARDS_PER_READER) {
                 const dfs_node_t cur = stack[--sp];
-                probes++;
-                switch (fast_probe_15693(dev, cur.mask, cur.len, uid)) {
+                switch (fast_probe_retry(dev, cur.mask, cur.len, uid, &coll, &probes)) {
                 case PROBE_UID:
                     fast_add_uid(uids, &count, uid);
                     fast_stay_quiet_15693(dev, uid);
                     break;
                 case PROBE_COLLISION:
-                    // mask を 1 bit 伸ばして 2 分割（bit cur.len が 0 の枝 / 1 の枝）。
-                    if (cur.len < 64 && sp + 2 <= (int)FAST_DFS_STACK) {
-                        stack[sp].mask = cur.mask | (1ULL << cur.len);
-                        stack[sp].len = (uint8_t)(cur.len + 1);
-                        sp++;
-                        stack[sp].mask = cur.mask;
-                        stack[sp].len = (uint8_t)(cur.len + 1);
-                        sp++;
-                    }
+                    sp = fast_push_children(slot, stack, sp, &cur, &coll);
                     break;
+                case PROBE_NOISE:  // fast_probe_retry が NONE に畳むのでここには来ない
                 case PROBE_NONE:
                 default:
                     break;
                 }
             }
         }
+        // ── 定常状態なら「もう居ない」確認 probe（次ラウンドの root）を間引く（実装 B）──
+        // 1 ラウンド目で前回 cache と同じ集合が揃ったときだけ。集合が変わった / 前回 0 枚 /
+        // 2 ラウンド目以降（= capture で隠れた札を掘っている最中）は必ず確認する。
+        if (PN5180_FAST_CONFIRM_EVERY > 0 && rounds == 1 &&
+            fast_same_as_prev(prev, (const uint8_t (*)[16])uids, count)) {
+            if (++s_confirm_skips[slot] < PN5180_FAST_CONFIRM_EVERY) break;
+        }
+        s_confirm_skips[slot] = 0;  // 集合が変わった / N 回目 = 確認する（カウンタを畳む）
         // ラウンドで 1 枚も増えなかった = Stay Quiet が効いていない（黙らない札 / 送信失敗）。
         // 同じ探索を繰り返しても進まないので、1 回だけ再試行して打ち切る（probe 上限まで
         // 空回りすると reader 1 台で 80ms 以上を食う）。増えたなら再試行回数をリセット。
@@ -999,6 +1155,8 @@ static int64_t s_stats_sum_us;
 static int64_t s_stats_worst_us;         // 窓内で最も遅かった 1 reader の所要時間
 static int s_stats_worst_idx;
 static int s_stats_max_probes;           // 窓内で reader 1 台が使った probe 回数の最大（fast 経路）
+static int s_stats_fallbacks;            // 窓内の coll_pos fallback 回数（fast 経路）
+static int s_stats_noise_retries;        // 窓内のノイズ再試行回数（fast 経路）
 static int s_stats_cycles;
 #endif
 
@@ -1009,6 +1167,8 @@ void pn5180_reader_poll_once(void) {
     int cycle_worst_idx = -1;
     int ready_slots = 0;
     int cycle_max_probes = 0;  // この周で最も probe を使った reader の回数（fast 経路のみ。0 = ドライバ経路）
+    int cycle_fallbacks = 0;      // この周で RX_COLL_POS を使えず 1 bit 伸ばしに落ちた回数
+    int cycle_noise_retries = 0;  // この周で壊れた受信を再 probe した回数
 #endif
 
     for (int i = 0; i < CCID_SLOT_COUNT; i++) {
@@ -1026,6 +1186,10 @@ void pn5180_reader_poll_once(void) {
         uint8_t count = 0;
         bool from_iso15693 = false;
 
+        // 前回集合（書き手はこの poll task だけなので lock 不要）。下の merge_presence と、
+        // fast 経路の「確認 probe 間引き」（実装 B）の両方が使うので inventory の前に取る。
+        const pn5180_card_t prev = s_cache[i];
+
         // ドライバ既定の timeout_ms=500 は SPI BUSY 待ち / transceive 状態待ち / RF off 待ちの
         // すべてに効くため、1 台の不調が 1 周を 0.5 秒伸ばす。読み取りの間だけ短くする
         // （ドライバの get_all_uids も内部で 40ms に落としている）。
@@ -1033,10 +1197,12 @@ void pn5180_reader_poll_once(void) {
 #if PN5180_FAST_INVENTORY
         s_readers[i].dev->timeout_ms = PN5180_FAST_OP_TIMEOUT_MS;
         // 自前の mask DFS（ISO15693 専用。PN5180_TRY_ISO14443 はこの経路では無視）。
-        count = fast_inventory_15693(&s_readers[i], uids, &len);
+        count = fast_inventory_15693(i, &s_readers[i], &prev, uids, &len);
         from_iso15693 = (count > 0);
 #if POLL_STATS_INTERVAL_MS > 0
         if (s_fast_last_probes > cycle_max_probes) cycle_max_probes = s_fast_last_probes;
+        cycle_fallbacks += s_fast_last_fallbacks;
+        cycle_noise_retries += s_fast_last_noise_retries;
 #endif
 #else
         // ISO15693（8B）→（PN5180_TRY_ISO14443=1 のときだけ）ISO14443A（4/7B）の順。
@@ -1064,7 +1230,6 @@ void pn5180_reader_poll_once(void) {
         sort_uids(uids, NULL, count, len);
 
         // 前回集合と UID 単位でマージ（欠けた 1 枚だけを数サイクル hold する）。
-        const pn5180_card_t prev = s_cache[i];  // 書き手はこの poll task だけなので lock 不要
         pn5180_card_t c;
         const uint8_t held = merge_presence(i, &prev, (const uint8_t (*)[16])uids, count, len, &c);
 
@@ -1106,6 +1271,8 @@ void pn5180_reader_poll_once(void) {
         s_stats_worst_us = -1;
         s_stats_worst_idx = -1;
         s_stats_max_probes = 0;
+        s_stats_fallbacks = 0;
+        s_stats_noise_retries = 0;
     }
     if (cycle_us < s_stats_min_us) s_stats_min_us = cycle_us;
     if (cycle_us > s_stats_max_us) s_stats_max_us = cycle_us;
@@ -1116,6 +1283,8 @@ void pn5180_reader_poll_once(void) {
     s_stats_sum_us += cycle_us;
     s_stats_cycles++;
     if (cycle_max_probes > s_stats_max_probes) s_stats_max_probes = cycle_max_probes;
+    s_stats_fallbacks += cycle_fallbacks;
+    s_stats_noise_retries += cycle_noise_retries;
 
     const int64_t now_us = esp_timer_get_time();
     if (s_stats_window_start_us == 0) s_stats_window_start_us = now_us;  // 初回だけ窓を開始
@@ -1123,12 +1292,14 @@ void pn5180_reader_poll_once(void) {
         const int64_t avg_us = s_stats_sum_us / s_stats_cycles;  // cycles >= 1
         ESP_LOGI(TAG,
                  "poll 統計(直近 %d 周): 1 周 min/avg/max = %lld/%lld/%lld ms, "
-                 "最長 reader #%d (slot %d) = %lld ms, probe 最大 %d 回/reader, ready %d slot",
+                 "最長 reader #%d (slot %d) = %lld ms, probe 最大 %d 回/reader, "
+                 "coll_pos fallback %d, ノイズ再試行 %d, ready %d slot",
                  s_stats_cycles,
                  (long long)(s_stats_min_us / 1000), (long long)(avg_us / 1000),
                  (long long)(s_stats_max_us / 1000),
                  s_stats_worst_idx + 1, s_stats_worst_idx,
-                 (long long)(s_stats_worst_us / 1000), s_stats_max_probes, ready_slots);
+                 (long long)(s_stats_worst_us / 1000), s_stats_max_probes,
+                 s_stats_fallbacks, s_stats_noise_retries, ready_slots);
         s_stats_cycles = 0;             // 次の窓へ（min/max/sum は次の 1 周で初期化）
         s_stats_window_start_us = now_us;
     }
