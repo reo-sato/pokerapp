@@ -58,8 +58,13 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
       **storage-card proxy ATR** 互換、または vendor ATR）。これで OS の `SCardConnect` が成功する。
 - [ ] ATR は card-type ごとに **安定**（同一カード種別で毎回同じ, SHOULD）。
 - [ ] **host は ATR の中身を解釈しない**（forward-compat）。connect さえ成立すればよい。凝らなくてよい。
+- [ ] **IccPowerOn には常に ATR を返す**（物理カード無しでも）。Windows は bind 直後に IccPowerOn ×3 を送り、
+      `ICC_MUTE` を返すと再列挙まで「無応答（0x80100066）」を latch する（ADR-0040）。
+- [ ] `Parameters` 応答は `bProtocolNum` と整合させる（T=1 は 7 byte / T=0 は 5 byte）。
+- [ ] ATR 受理後に Windows が送る探索 APDU（`00 A4 04 00 …` / `00 CA 7F 68 00`）には `6D 00` でよい。
 
-**受け入れ**: `probe_pcsc check` で当該 slot が `✓ PASS`（connect 成立）。
+**受け入れ**: `probe_pcsc raw` で `[OS状態] PRESENT`（`MUTE` が付かない）+ `[connect] connect OK ATR=…`
+（`check` は reader 名の確認のみで ATR は検査しない）。
 
 ## 4. Get UID pseudo-APDU（契約 §6 — host が依存する唯一の APDU）
 
@@ -83,8 +88,11 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
 
 ## 6. card present/removed・hot-plug・切断（契約 §8）
 
-- [ ] CCID の **card-present 状態を正しく報告**する。カード無しで Get UID が `90 00`+UID を返さないこと
+- [ ] CCID の slot 状態は **常時 present** でよい（推奨・Windows では必須, ADR-0040）。カード有無は
+      **Get UID の SW だけ**で伝え、カード無しで `90 00`+UID を返さないこと
       （host は UID の有無で検出。デバウンスは host 側 = 同一 UID 連続は 1 回、外す→再タップで再発火）。
+- [ ] **interrupt-IN endpoint は載せない**（Windows が `NotifySlotChange` を無視した実績。host は polling）。
+      EP 構成を変えたら `bcdDevice` を上げる（Windows の記述子キャッシュ）。
 - [ ] **USB 再列挙 / replug** で reader_name の安定部分が変わらないこと。
 - [ ] **切断時**（USB 抜け等）に host がクラッシュしないのは host 側で担保済み（「RFID なしモード」継続）。
       firmware 側は再接続で正しく再列挙できればよい。live hot-add（稼働中の reader 追加追従）は v1.0 対象外。
@@ -107,10 +115,10 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
 |--------|---------|-------------|------|
 | §2 | USB CCID class / VID-PID / product | `probe_pcsc list` | reader_name に product、件数 = slot 数 |
 | §3-4 | slot↔reader_name 安定・役割は host | `probe_pcsc list`（再起動） | matched、名前不変 |
-| §5 | ATR で connect 成立 | `probe_pcsc check` | 各 slot `✓ PASS` |
-| §6 | Get UID `FF CA 00 00 00`→UID+9000 | `probe_pcsc watch` | タップで UID 表示 |
-| §7 | UID 4/7/8B 生バイト | `probe_pcsc watch` | `(8B)`、`⚠` 無し、card 解決 |
-| §8 | present/removed・hot-plug | `probe_pcsc watch` / 抜き差し | 再タップで再発火、再列挙で復帰 |
+| §5 | ATR で connect 成立（power-on 常時成功） | `probe_pcsc raw` | `[OS状態] PRESENT`（MUTE 無し）+ `connect OK ATR=…` |
+| §6 | Get UID `FF CA 00 00 00`→UID+9000 | `probe_pcsc raw` → `watch` | raw: カード無し `SW=6A81`／置いて `SW=9000`+UID。watch: タップで UID 表示 |
+| §7 | UID 4/7/8B 生バイト（MSB-first） | `probe_pcsc watch` | `(8B)`、先頭 `E0:04`（ICODE）、`⚠` 無し、card 解決 |
+| §8 | present/removed・hot-plug（SW で伝達） | `probe_pcsc watch` / 抜き差し | 再タップで再発火、再列挙で復帰 |
 
 全項目 PASS → `python main.py --cli`（`rfid.transport="pcsc"`）で board 3/4/5 枚の street 自動遷移まで
 確認（`docs/hardware-qa-checklist.md` 手順5）。これで本番 USB CCID 経路の bring-up 完了。

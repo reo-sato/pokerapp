@@ -55,24 +55,35 @@ idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB
 - **BUSY 13 本は CD74HC4067（16ch アナログ MUX）に集約**。S0-S3 で 1 本を選んで SIG に出し、
   ESP32 は SIG(`PN5180_PIN_BUSY_SIG`)を読む。`pn5180_reader.c` が **各 reader 処理の直前に MUX channel を
   切替**（`mux_select`）してから jef-sure ドライバを呼ぶ（ドライバは MUX 非依存、busy=SIG GPIO を渡すだけ）。
-- MUX EN=GND（常時有効）、MUX VCC=**3.3V**（5V 禁止）。SPI は **5MHz**（7MHz 以上で不安定）。
+- MUX EN=GND（常時有効）、MUX VCC=**3.3V**（5V 禁止）。SPI は **5MHz**（7MHz 以上で不安定。bring-up 中は
+  `PN5180_SPI_HZ=1MHz` に落としてあるので 13 台化のときに戻す）。
 - **bring-up は `CCID_SLOT_COUNT=1` で 1 台検証 → 動いたら 13 に上げる**（`app_config.h` の
-  `PN5180_READERS` は 13 台分定義済み）。
+  `PN5180_READERS` は 13 台分定義済み）。1 台検証中は起動時の **MUX 全 ch 走査で通電中の ch を自動選択**
+  するので、どのコネクタに挿しても再ビルド不要（`pn5180_reader.c: select_bringup_reader`）。
+- **CCID slot は仮想カード常時挿入（ADR-0040）**: `IccPowerOn` には常に固定 ATR を返し、カード有無は
+  Get UID の SW（あり `90 00`+UID / なし `6A 81`）だけで伝える。Windows(usbccid) は interrupt-IN の挿抜通知を
+  無視し、無ければ polling もせず bind 時の IccPowerOn しか送らないため（実機で確定）。interrupt-IN は
+  `CCID_USE_INTERRUPT_EP=0` で記述子から外してある（EP 構成を変えたら `bcdDevice` を上げる）。
+- UID は **MSB-first** で返す（PN5180 の ISO15693 生レスポンスは LSB-first なので反転。契約 §7）。
+  ISO14443A の試行は `PN5180_TRY_ISO14443=0`（本番カードは ICODE SLIX のみ）。
 
-## 実機で必ず埋める箇所（TODO）
+## 実機で確定済み（2026-09-10）と残 TODO
 
-1. **`app_config.h`**: `CCID_SLOT_COUNT`（1→13）/ 共有 SPI・RST・MUX SIG ピン / MUX S0-S3 /
-   `PN5180_READERS` の NSS・mux_ch（reader→MUX channel 対応）/ `USB_VID`/`USB_PID`。
-   ESP32-S3 で USB の 19/20、strapping 0/3/45/46、NeoPixel 38、（PSRAM 有効時の 35-37）を避ける。
-2. **`pn5180_reader.c`**: `jef-sure` コンポーネントの実 API（ヘッダ名・`nfc_uids_array_t` /
-   `nfc_uid_t` のフィールド名、`pn5180_15693_init` の modulation 値）に合わせる。`get_all_uids` の
-   戻り値構造体を実 README/examples で確認。
-3. **`ccid_device.c`**: `usbd_class_driver_t` の構成（`name` は `CFG_TUSB_DEBUG>=2` のみ、`deinit`
-   の有無、`sof` 署名）を、使用中の tinyusb `device/usbd_pvt.h` に合わせる。
-4. **`main.c`**: `tinyusb_config_t` のフィールド名（`configuration_descriptor` /
-   `fs_configuration_descriptor` 等）を使用中の esp_tinyusb に合わせる。
-5. **`ccid_slot.c` の ATR / `usb_descriptors.c` の CCID functional descriptor**: そのままで host が
-   connect できるはずだが、Windows が CCID として bind しない場合は usbview で記述子を確認し調整。
+確定済み（1 slot で契約 §5–§8 を host の `probe_pcsc raw` / `watch` で確認, worklog
+`docs/worklog/2026-09-10-rfid-ccid-end-to-end-bringup.md`）:
+
+- ピン割当は `app_config.h` = `docs/hardware/pn5180-esp32s3-wiring.md` §3（NSS #1..#13 = 1/2/4/5/6/7/8/9/10/15/16/17/18、
+  SCK/MOSI/MISO/RST = 12/11/13/14、MUX SIG/S0-S3 = 47/37/39/40/41）。PSRAM は `CONFIG_SPIRAM=n`（GPIO37 を使うため）。
+- `jef-sure/pn5180` 0.1.1 の実 API（`pn5180-14443.h` / `pn5180-15693.h`、`nfc_uids_array_t.uids_count`、
+  `nfc_uid_t.uid_length`）、tinyusb 0.19 / esp_tinyusb 1.7.6 の struct 構成、ATR
+  `3B 8F 80 01 80 4F 0C A0 00 00 03 06 03 00 01 00 00 00 00 6A`（Windows が受理）。
+- USB: VID 0x303A / PID 0x8B5D / `PokerRFID PN5180-CCID <slot>` / bcdDevice 0x0102 / bulk OUT+IN のみ。
+
+残 TODO:
+
+1. `CCID_SLOT_COUNT` 1→13、`PN5180_SPI_HZ` 1MHz→5MHz、RF 時分割（同時 RF ON は 1 台のみ、
+   `docs/rfid-ccid-firmware-checklist.md` §8）。
+2. 診断ログの整理（bring-up 用の MUX/BUSY/RST 診断は起動時 1 回なので残してよい）。
 
 ## host 側での受け入れ確認（pokerapp 側, 別マシン or 同じ PC）
 

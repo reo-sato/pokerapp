@@ -6,6 +6,27 @@
 
 ## [Unreleased]
 
+### Added / Fixed (RFID 実機: PN5180 読取り → PC/SC 越し UID 到達まで通し, ADR-0040, 2026-09-10)
+
+- **実機 1 slot で契約 §5–§8 を本番 host コードで確認**: `tools/probe_pcsc.py watch` で
+  `seat 1 UID=E0:04:…(8B)` が置く→離す→置くで 2 回発火。`raw` で `PRESENT` + カード無し `SW=6A81` /
+  置いて `SW=9000`+UID。
+- **firmware（`firmware/esp32s3-pn5180-ccid/`）**:
+  - 通電中の MUX ch から reader を自動選択（1 台検証でコネクタを差し替えても再ビルド不要）。NSS スキャナの
+    偽陽性と、失敗時の 2 回目 `pn5180_init` による再起動ループを修正。
+  - ISO15693 UID を **MSB-first** に（契約 v1.1 §7 相当。`E0:04:…` 先頭）。presence debounce。
+    ISO14443A の試行を既定 OFF（poll ~800ms→~300ms、ログ静音化）。
+  - **CCID slot を仮想カード常時挿入に（ADR-0040）**: Windows usbccid は interrupt 通知を無視し、無ければ
+    polling もせず bind 時の IccPowerOn しか送らないため、IccPowerOn に常に ATR を返しカード有無は
+    Get UID の SW だけで伝える。interrupt-IN は `CCID_USE_INTERRUPT_EP=0`。bmICCStatus を 3 値化、
+    Parameters を T=1 7 byte に、`bcdDevice` 0x0102。CCID コマンドを UART に診断ログ。
+- **host**: `core/events.py` の numpy を `TYPE_CHECKING` ガードに（RFID 経路は pyscard だけで動く）。
+  `probe_pcsc raw` サブコマンド（pyscard 直叩き: OS の slot 状態 + connect/Get UID の例外を hresult 付きで
+  表示、`watch` 0 件の切り分け）。tests 41 passed。
+- docs: ADR-0040、契約 §2/§5/§8 追記、firmware checklist §3/§6/受け入れ表、worklog
+  `docs/worklog/2026-09-10-rfid-ccid-end-to-end-bringup.md`（Store 版 `python` スタブ / py -3.13 + pyscard
+  wheel の環境メモ含む）。
+
 ### Fixed / Added (ESP32-S3 USB CCID firmware 実機 bring-up + 契約に実機確定値転記, ADR-0034 / ISSUE-0015)
 
 - 前日 scaffold した `firmware/esp32s3-pn5180-ccid/` を **実機で起動**。Windows PC/SC に

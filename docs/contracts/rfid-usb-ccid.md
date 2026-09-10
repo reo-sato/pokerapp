@@ -37,6 +37,11 @@ HTTP 経路（`rfid/http_receiver.py`, ADR-0015 で optional secondary）は本�
   マッチ対象になるため **安定**（ファーム更新で変えない）**MUST**。
   - **確定値**: `manufacturer=PokerRFID`、`product=PN5180-CCID`（Windows PC/SC は `<manufacturer> <product> <slot index>` の体裁で描画 → §4 reader_name 参照）。
 - **serial 文字列**: device 単位で安定 **SHOULD**（複数台運用時の識別。reader_name に現れうる）。
+- **endpoint 構成（2026-09-10 実機で確定, ADR-0040）**: bulk OUT + bulk IN の **2 本のみ**とし、
+  interrupt-IN（`RDR_to_PC_NotifySlotChange`）は載せない **SHOULD**。Windows(usbccid) は interrupt-IN が
+  あると通知を読み取っても slot 状態に反映せず、無くても `GetSlotStatus` を polling しない（カード有無は
+  §8 の方式で伝える）。記述子の EP 構成を変えるときは `bcdDevice` を上げる（Windows は VID/PID/REV で
+  記述子をキャッシュする。現在 `0x0102`）。
 
 ## 3. CCID multi-slot と reader_name（firmware MUST / host MUST）
 
@@ -81,6 +86,14 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 - ATR は card-type ごとに **安定** **SHOULD**（同一カード種別で毎回同じ）。
 - **host は UID 読み取りに特定 ATR バイトを前提にしない**（forward-compat）**MUST**。host は connect 成功後に
   §6 の Get UID pseudo-APDU のみで UID を取得する（`rfid/bridge.py` は ATR を解釈しない）。
+- **power-on は常に成功させる（firmware MUST, 2026-09-10 追記, ADR-0040）**: Windows(usbccid) は bind 直後に
+  `PC_to_RDR_IccPowerOn` を送り、`ICC_MUTE` を返すとカードを「無応答（`0x80100066`）」として latch し
+  再列挙まで再試行しない。よって firmware は物理カードの有無に関わらず IccPowerOn に固定 ATR を返す
+  （slot は常時 present, §8）。ATR 受理後に OS がカード種別探索の APDU（`00 A4 04 00 …` SELECT AID /
+  `00 CA 7F 68 00` GET DATA 等）を送ることがあるが、`6D 00`（INS 未対応）で応答してよい。
+  `Parameters` 応答は `bProtocolNum` と整合させる（T=1 は 7 byte / T=0 は 5 byte）。
+  - **確定 ATR（実機で受理）**: `3B 8F 80 01 80 4F 0C A0 00 00 03 06 03 00 01 00 00 00 00 6A`
+    （PC/SC v2.01 Part 3 storage-card proxy, T=0/T=1, TCK 整合）。
 
 ## 6. pseudo-APDU（firmware MUST / host 実装済）
 
@@ -101,8 +114,11 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 ## 8. hot-plug / 再列挙 / multi-platform
 
 - **card present/removed**: host は各 slot を `poll_interval_ms`（既定 100ms）で polling し、UID の有無で
-  検出する（`RFIDThread`。同一 UID 連続はデバウンスで 1 回, 外れ→再タッチで再発火）。firmware は CCID の
-  card-present 状態を正しく報告する **MUST**（カード無しで Get UID が `90 00`+UID を返さない）。
+  検出する（`RFIDThread`。同一 UID 連続はデバウンスで 1 回, 外れ→再タッチで再発火）。**カード有無は
+  Get UID の SW だけで伝える**（あり: UID + `90 00` / なし: `6A 81` 等）**MUST**。host は CCID の slot 状態
+  （bmICCStatus / NotifySlotChange）に依存しないため、firmware は slot を **常時 present** として公開してよい
+  （**推奨・Windows では必須**, ADR-0040: 物理有無を slot 状態に反映すると Windows が bind 時に MUTE を
+  latch する）。**カード無しで Get UID が `90 00`+UID を返さない**ことが唯一の不変条件 **MUST**。
 - **USB 再列挙 / replug**: reader_name の安定部分（§3）が変わらない **MUST**。host の live 再列挙対応
   （実行中の reader 追加・名称変化の追従）は **本 v1.0 では起動時 connect のみ**（live hot-add は future,
   ISSUE 追跡）。
