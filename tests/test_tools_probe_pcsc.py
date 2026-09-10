@@ -316,7 +316,48 @@ class TestCommandsWithPyscardStubbed:
 
     def test_commands_gate_without_pyscard(self, tmp_path, monkeypatch):
         monkeypatch.setattr(probe, "pyscard_available", lambda: False)
-        args = argparse.Namespace(config=None, seconds=0.1)
+        args = argparse.Namespace(config=None, seconds=0.1, interval=0.1, reader=None)
         assert probe._cmd_list(args) == 2
         assert probe._cmd_check(args) == 2
         assert probe._cmd_watch(args) == 2
+        assert probe._cmd_raw(args) == 2
+
+
+class TestRawHelpers:
+    """raw サブコマンドの純粋ヘルパ（pyscard 不要で検証できる部分）。"""
+
+    TABLE = [("PRESENT", 0x20), ("EMPTY", 0x10), ("MUTE", 0x200), ("INUSE", 0x100)]
+
+    def test_decode_state_joins_flag_names(self):
+        assert probe.decode_reader_state(0x20 | 0x100, self.TABLE) == "PRESENT|INUSE"
+
+    def test_decode_state_unknown_bits_fall_back_to_hex(self):
+        assert probe.decode_reader_state(0x8000, self.TABLE) == "0x8000"
+
+    def test_format_scard_error_includes_hresult_as_unsigned_hex(self):
+        class Boom(Exception):
+            hresult = -2146435060  # = 0x8010000C SCARD_E_NO_SMARTCARD（Windows は負値で返す）
+
+        text = probe.format_scard_error(Boom("no card"))
+        assert text.startswith("Boom: no card")
+        assert "hresult=0x8010000c" in text
+
+    def test_format_scard_error_without_hresult(self):
+        assert probe.format_scard_error(ValueError("x")) == "ValueError: x"
+
+    def test_scard_state_table_is_empty_without_pyscard(self, monkeypatch):
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *a, **kw):
+            if name == "smartcard" or name.startswith("smartcard."):
+                raise ImportError(name)
+            return real_import(name, *a, **kw)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        assert probe.scard_state_table() == []
+
+    def test_raw_subcommand_registered(self):
+        args = probe.build_parser().parse_args(["raw", "--seconds", "5", "--interval", "0.2"])
+        assert args.command == "raw" and args.seconds == 5.0 and args.interval == 0.2
+        assert args.func is probe._cmd_raw

@@ -959,6 +959,7 @@ python tools/simulate_rfid.py register-demo && python tools/simulate_rfid.py boa
 python tools/probe_pcsc.py list    # reader_name 列挙 + config 突き合わせ (契約 §3-4)
 python tools/probe_pcsc.py check   # config lint + connect 検査 (§5, カード不要)
 python tools/probe_pcsc.py watch --seconds 30  # 実 RFIDThread でタップ確認 (UID/役割/hot-plug, §6-8)
+python tools/probe_pcsc.py raw --seconds 20    # pyscard 直叩き: OS のスロット状態 + connect/Get UID の例外(hresult) を表示 (watch 0 件の切り分け)
 ```
 
 ---

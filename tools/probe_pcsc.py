@@ -21,11 +21,15 @@ PC/SC スタック越しに、production と同じ `rfid.bridge.PCSCBridge` / `r
   list    接続中の reader_name を列挙し、config との一致（matched/missing/unconfigured）を表示
   check   config を lint し、各 reader に connect して PASS/FAIL を表示（カード不要の静的検査）
   watch   実 RFIDThread を起動し、タップごとに RFIDEvent（role/seat/board_index/card/UID 長）を表示
+  raw     pyscard を直接叩く低レベル診断: OS が見ているスロット状態（PRESENT/EMPTY/MUTE…）と、
+          connect → Get UID の結果 or 例外（hresult 付き）を時系列表示。`watch` が 0 件のとき
+          「OS がカードを認識していない」「power-on で失敗」「ATR/プロトコル」を切り分ける
 
 使用例:
   python tools/probe_pcsc.py list
   python tools/probe_pcsc.py check
   python tools/probe_pcsc.py watch --seconds 30
+  python tools/probe_pcsc.py raw --seconds 20
 """
 from __future__ import annotations
 
@@ -381,6 +385,145 @@ def _cmd_watch(args: argparse.Namespace, *, bridge_factory: BridgeFactory = PCSC
     return 0
 
 
+# ――― raw 診断（pyscard 直叩き）―――
+
+# 契約 §6 の Get UID pseudo-APDU（rfid/bridge.py と同値。bridge は private なのでここで持つ）。
+GET_UID_APDU = [0xFF, 0xCA, 0x00, 0x00, 0x00]
+
+# SCardGetStatusChange の dwEventState ビット名。値は pyscard の smartcard.scard 定数から取る
+# （scard_state_table）。テストは明示テーブルを渡すので pyscard 不要。
+_SCARD_STATE_NAMES = (
+    "PRESENT", "EMPTY", "MUTE", "UNPOWERED", "INUSE", "EXCLUSIVE",
+    "UNAVAILABLE", "ATRMATCH", "UNKNOWN", "IGNORE",
+)
+
+
+def scard_state_table() -> list[tuple[str, int]]:
+    """pyscard の SCARD_STATE_* 定数から (名前, ビット) テーブルを作る（無い定数は飛ばす）。"""
+    try:
+        from smartcard import scard
+    except Exception:
+        return []
+    table: list[tuple[str, int]] = []
+    for name in _SCARD_STATE_NAMES:
+        val = getattr(scard, f"SCARD_STATE_{name}", None)
+        if isinstance(val, int) and val:
+            table.append((name, val))
+    return table
+
+
+def decode_reader_state(event_state: int, table: list[tuple[str, int]]) -> str:
+    """dwEventState をフラグ名の '|' 連結にする（該当なしなら 16 進）。CHANGED は呼び側で落とす。"""
+    names = [name for name, bit in table if event_state & bit]
+    return "|".join(names) if names else f"0x{event_state:x}"
+
+
+def format_scard_error(exc: BaseException) -> str:
+    """pyscard 例外を 'クラス名: メッセージ [hresult=0x........]' に整形する。
+
+    hresult の代表値（Windows/pcsc-lite 共通）:
+      0x8010000C SCARD_E_NO_SMARTCARD      … OS がスロットを空と判断（firmware の挿抜通知/状態が届いていない）
+      0x80100066 SCARD_W_UNRESPONSIVE_CARD … power-on(IccPowerOn) したが応答なし
+      0x80100067 SCARD_W_UNPOWERED_CARD    … カードが通電されていない
+      0x8010000F SCARD_E_PROTO_MISMATCH    … ATR のプロトコルと要求が不一致
+      0x8010000B SCARD_E_SHARING_VIOLATION … 他プロセスが reader を占有
+    """
+    hr = getattr(exc, "hresult", None)
+    text = f"{type(exc).__name__}: {exc}"
+    if isinstance(hr, int) and hr != -1:
+        text += f" hresult=0x{hr & 0xFFFFFFFF:08x}"
+    return text
+
+
+def _cmd_raw(args: argparse.Namespace) -> int:
+    """pyscard を直接叩き、OS のスロット状態と connect/Get UID の結果・例外を時系列で表示する。
+
+    RFIDThread / PCSCBridge を経由しない（PCSCBridge.read_uid は例外を debug ログに落として
+    None を返すため、watch が 0 件のときの「理由」が見えない）。ここでは:
+      - SCardGetStatusChange(timeout=0) で OS（WinSCard/pcscd）が見ているスロット状態を表示。
+        PRESENT なら OS はカードを認識している。EMPTY のままなら firmware の挿抜通知/状態が
+        OS に届いていない（→ firmware 側の interrupt / GetSlotStatus を疑う）。
+      - createConnection().connect() → FF CA 00 00 00 を試し、例外はクラス・メッセージ・hresult
+        を表示（意味は format_scard_error の docstring）。
+    状態や結果が変わった行だけ出す（スパム回避）。
+    """
+    if not _require_pyscard():
+        return 2
+    from smartcard import scard
+    from smartcard.System import readers as sc_readers
+    from smartcard.util import toHexString
+
+    present = [str(r) for r in sc_readers()]
+    if not present:
+        print("[error] PC/SC reader が 0 件です（`list` を確認）", file=sys.stderr)
+        return 1
+    name = args.reader
+    if not name:
+        configured = [c.get("name", "") for c in get_pcsc_readers(load_rfid_config(args.config))]
+        name = next((n for n in configured if n in present), present[0])
+    reader_obj = next((r for r in sc_readers() if str(r) == name), None)
+    if reader_obj is None:
+        print(f"[error] reader {name!r} が見つかりません。接続中: {present}", file=sys.stderr)
+        return 1
+
+    table = scard_state_table()
+    changed_bit = getattr(scard, "SCARD_STATE_CHANGED", 0)
+    hresult, hcontext = scard.SCardEstablishContext(scard.SCARD_SCOPE_USER)
+    if hresult != scard.SCARD_S_SUCCESS:
+        print(f"[error] SCardEstablishContext: 0x{hresult & 0xFFFFFFFF:08x} "
+              f"{scard.SCardGetErrorMessage(hresult)}", file=sys.stderr)
+        return 1
+
+    print(f"raw 開始: reader={name!r} を {args.seconds:.0f} 秒間 {args.interval:.1f}s 間隔で診断。"
+          "カードを 1 枚置いて数秒キープしてください（Ctrl-C で中断）。")
+    print("  [OS状態]  = SCardGetStatusChange が返すスロット状態（OS がカードを認識しているか）")
+    print("  [connect] = SCardConnect → Get UID(FF CA 00 00 00) の結果 or 例外\n")
+    last_state: Optional[str] = None
+    last_result: Optional[str] = None
+    t0 = time.monotonic()
+    try:
+        while time.monotonic() - t0 < args.seconds:
+            t = time.monotonic() - t0
+            hr, states = scard.SCardGetStatusChange(
+                hcontext, 0, [(name, scard.SCARD_STATE_UNAWARE)])
+            if hr == scard.SCARD_S_SUCCESS and states:
+                _, ev, atr = states[0]
+                st = decode_reader_state(ev & ~changed_bit, table)
+                if atr:
+                    st += f" ATR={toHexString(list(atr))}"
+            else:
+                st = (f"SCardGetStatusChange 失敗 0x{hr & 0xFFFFFFFF:08x} "
+                      f"{scard.SCardGetErrorMessage(hr)}")
+            if st != last_state:
+                print(f"[{t:5.1f}s] [OS状態]  {st}")
+                last_state = st
+
+            try:
+                conn = reader_obj.createConnection()
+                conn.connect()
+                atr_s = toHexString(conn.getATR())
+                data, sw1, sw2 = conn.transmit(list(GET_UID_APDU))
+                conn.disconnect()
+                res = (f"connect OK ATR={atr_s} → Get UID: {toHexString(data)} "
+                       f"SW={sw1:02X}{sw2:02X}")
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:  # 例外の種類そのものが診断対象
+                res = format_scard_error(e)
+                hr_e = getattr(e, "hresult", None)
+                if isinstance(hr_e, int) and hr_e != -1:
+                    res += f" ({scard.SCardGetErrorMessage(hr_e)})"
+            if res != last_result:
+                print(f"[{t:5.1f}s] [connect] {res}")
+                last_result = res
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("\n中断しました。")
+    finally:
+        scard.SCardReleaseContext(hcontext)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="実機 RFID（PC/SC canonical, ADR-0015/0034）の bring-up 診断",
@@ -400,6 +543,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch = sub.add_parser("watch", help="実 RFIDThread でタップを待ち受け表示（hot-plug 確認）")
     p_watch.add_argument("--seconds", type=float, default=30.0, help="待ち受け秒数（既定 30）")
     p_watch.set_defaults(func=_cmd_watch)
+
+    p_raw = sub.add_parser(
+        "raw", help="pyscard 直叩き診断: OS のスロット状態 + connect/Get UID の結果・例外（watch 0 件の切り分け）")
+    p_raw.add_argument("--seconds", type=float, default=20.0, help="診断秒数（既定 20）")
+    p_raw.add_argument("--interval", type=float, default=0.3, help="試行間隔 秒（既定 0.3）")
+    p_raw.add_argument("--reader", default=None,
+                       help="対象 reader_name（既定: config の先頭で接続中のもの、無ければ最初の reader）")
+    p_raw.set_defaults(func=_cmd_raw)
 
     return parser
 
