@@ -102,8 +102,21 @@ idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB
   0.2〜0.9 秒かかり（実機 `poll 統計`）、11 台には載らない。自前経路では
   **RF ON → 1ms → INVENTORY（1 slot, high rate）→ 応答待ち ≤10ms → RF OFF** に絞り、
   **衝突したときだけ mask を 1 bit ずつ伸ばす DFS** で重ね置きを分離する
-  （`PN5180_MAX_CARDS_PER_READER=4` / probe 上限 `PN5180_FAST_MAX_PROBES=12`）。
-  カード無し 1 probe ≈ 10ms、2 枚 ≈ 3 probe、3 枚 ≈ 5 probe。`=0` でドライバ経路に戻せる（A/B）。
+  （`PN5180_MAX_CARDS_PER_READER=4` / probe 上限 `PN5180_FAST_MAX_PROBES=16`）。
+  → **実機 1 slot で 1 周 15 ms**（カード無し。従来 176〜890 ms）を確認、1 枚 / 2 枚重ねも OK
+  （2026-09-10）。`=0` でドライバ経路に戻せる（A/B）。
+- **Stay Quiet + root 再 probe（capture effect 対策, ISSUE-0021 実機フィードバック）**:
+  実機で **2 枚が同時応答しても PN5180 が衝突を検出せず強い方だけを復号する**ことがあり
+  （capture effect）、その枝は 1 枚で確定してしまうので弱い札が DFS でも現れない
+  （3 枚重ねで `3 枚` が一度も出なかった）。そこで見つけた札ごとに **STAY QUIET**（`0x22 02` +
+  UID 8B、応答なし）を送って黙らせ、**root(mask 0) を再 probe** して残りを拾う。
+  quiet は RF off で解除されるので、**fast 経路は inventory の最後に必ず `pn5180_setRF_off()`**
+  を呼ぶ（`PN5180_RF_OFF_BETWEEN_READERS=0` でも）。カード無しは 1 probe のまま、
+  カードが載っている reader は「もう居ない」確認 probe のぶん +1（1 枚 2 / 2 枚 3〜4 / 3 枚 4）。
+- **presence hold は UID 単位**（`PRESENCE_HOLD_MISSES=3`）: 旧実装は「検出 0 枚のときだけ前回
+  集合を保持」だったため、2 枚中 1 枚を 1 回取りこぼすと host へ「1 枚」が即座に伝わり、実機で
+  2↔1 のちらつき（`watch` の再発火）になった。現在は UID ごとに miss を数え、**欠けた 1 枚だけ**を
+  3 サイクル保持する。hold 中の枚数は UART のログ末尾に `(hold n)` で出る。
 - **1 slot に複数カード**（席 = hole card 2 枚 / board1 = flop 3 枚）: `pn5180_card_t` が UID の
   配列を持ち、CCID の Get UID は **UID を 8 byte ごとに連結**して返す
   （`count × 8B + 90 00`、UID 昇順。1 枚なら従来と同一バイト列、0 枚は `6A 81`）。

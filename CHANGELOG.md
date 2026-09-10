@@ -6,6 +6,37 @@
 
 ## [Unreleased]
 
+### Fixed (firmware: 重ね置きの 3 枚目が読めない / 枚数がちらつく — Stay Quiet 再 probe + UID 単位 hold, ISSUE-0021, 2026-09-10)
+
+- **3 枚重ねが読めるように（capture effect 対策）**: 実機で 2 枚が同時応答しても PN5180 が衝突を
+  検出せず**強い方だけを復号**することがあり、その枝が 1 枚で確定するため弱い札が anti-collision の
+  探索に現れなかった（3 枚重ねで `3 枚` が一度も出ない）。firmware の高速 inventory を、
+  **見つけた札に STAY QUIET を送って黙らせ、root を再 probe して残りを拾う**ループに変更した。
+  quiet は RF off で解除されるため、fast 経路は inventory の最後に必ず RF を落とす。
+- **枚数のちらつきを解消**: カード保持（debounce）を **UID 単位**にした。従来は「検出 0 枚のときだけ
+  前回の集合を保持」だったため、2 枚中 1 枚を 1 回取りこぼすと host に「1 枚」が即座に伝わり、
+  2↔1 が数百 ms 周期で往復して同じ札が何度も再発火していた。今は**欠けた 1 枚だけ**を 3 サイクル
+  保持する（UART ログ末尾に `(hold n)`）。
+- **衝突判定の取りこぼしを修正**: 「衝突フラグあり・受信 0 byte」で返る衝突を「カード無し」と
+  判定していたため、重ね置きの分割が起きないことがあった。**衝突フラグを受信バイト数より先に**
+  見るようにした。
+- 併せて `PN5180_FAST_MAX_PROBES` を 12 → 16（root 再 probe ぶん）、Stay Quiet が効かない札で
+  probe 上限まで空回りしないよう「新しい UID が増えないラウンドが続いたら打ち切る」を追加。
+- **実機 1 slot の実測**: カード無しで **1 周 15 ms**（従来 176〜890 ms）、1 枚 / 2 枚重ねは読み取り OK。
+  上記の 3 枚重ね・ちらつきの改善は **実機確認中**（host / 契約 v1.1 側の変更は無し）。
+  docs: ISSUE-0021（実機結果 + 追加 Root Cause + Regression Check）、firmware README、
+  firmware checklist §8、worklog `docs/worklog/2026-09-10-pn5180-stay-quiet-per-uid-hold.md`。
+
+### Changed (firmware: init 失敗時の NSS 診断を BUSY 非依存に, 2026-09-10)
+
+- PN5180 の初期化に失敗したときの NSS スキャンが、**BUSY が High（floating/stuck）だと SPI を
+  一度も送らずに終了**していたため、「PN5180 が死んでいる」のか「BUSY/MUX 経路だけが壊れている」
+  のかを切り分けられなかった（実機で発生）。BUSY ハンドシェイクの代わりに固定待ち 1 ms を使い、
+  **どの候補にも必ず READ_EEPROM（firmware version）を送って応答を `FW=xx xx` で表示**するようにした。
+  応答があれば「PN5180 は生きている → BUSY/MUX 経路（MUX VCC/EN/SIG・その ch の BUSY 線）を疑う」、
+  全候補が `FF FF`/`00 00` なら「電源/RST/SPI 配線」と結論をログに出す。候補は配線表
+  `PN5180_READERS` の 13 本すべて（ハードコード配列を廃止）。起動時の診断ログのみの変更。
+
 ### Added (RFID: 1 リーダーに複数枚を重ねて置ける — 席 2 枚 / フロップ 3 枚, 契約 v1.1, 2026-09-10)
 
 - **重ね置き対応（host）**: 1 つの reader に複数カードが載ったとき、Get UID 応答が **8B UID × 枚数の連結**

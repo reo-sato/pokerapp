@@ -139,6 +139,9 @@ static const pn5180_reader_cfg_t PN5180_READERS[] = {
 // ───────── 高速 inventory（自前の mask anti-collision, ISSUE-0021）─────────
 // 1 = pn5180_reader.c の自前経路（既定）。ISO15693 INVENTORY を **1 slot（1 応答）** で送り、
 //     衝突したときだけ mask を 1 bit ずつ伸ばす DFS で複数枚を分離する。RF ON は reader ごと 1 回。
+//     見つけた札には **STAY QUIET** を送って黙らせ、root(mask 0) を再 probe して残りを拾う
+//     （実機で 2 枚同時応答を PN5180 が衝突と見なさず強い方だけ復号する = capture effect が
+//     起きたため。quiet は RF off で解除されるので inventory の最後に必ず RF を落とす）。
 // 0 = ドライバの proto->get_all_uids()（堅牢だが遅い）。A/B 比較・切り分け用。
 //
 // 【なぜ自前経路が要るか（実測）】
@@ -185,6 +188,8 @@ static const pn5180_reader_cfg_t PN5180_READERS[] = {
 
 // 1 reader / 1 poll あたりの INVENTORY 送信回数の上限（= その reader の所要時間の上限）。
 // DFS は衝突するたびに枝を 2 本に割るので、上限が無いとノイズで 1 台が数百 ms を食う。
-// 目安: カード無し 1 回 / 2 枚 4〜6 回 / 3 枚 6〜9 回。打ち切っても取れた分だけ返し、
-// 残りは次の poll（と host 側 debounce）が拾う。
-#define PN5180_FAST_MAX_PROBES 12
+// 目安（Stay Quiet + root 再 probe 込み。1 枚見つけるたびに黙らせて root からやり直すため、
+// 最後に必ず「応答なし」の確認 probe が 1 回入る）:
+//   カード無し 1 回 / 1 枚 2 回 / 2 枚 3〜5 回 / 3 枚 4〜8 回。
+// 打ち切っても取れた分だけ返し、残りは次の poll（と UID 単位 hold）が拾う。
+#define PN5180_FAST_MAX_PROBES 16

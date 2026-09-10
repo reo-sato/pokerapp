@@ -32,7 +32,10 @@ static const char *TAG = "pn5180";
 #define ISO15693_FLAG_DATA_RATE_HIGH 0x02  // 応答を high data rate(26.48kbps) で返させる
 #define ISO15693_FLAG_INVENTORY      0x04  // inventory フラグ（bit5 の意味が slot 数に変わる）
 #define ISO15693_FLAG_SLOT_ONE       0x20  // 1 slot（応答は 1 枚だけ。16 slot は使わない）
+// bit5 は inventory=0 のとき Address_flag（UID 8B を続けて 1 枚だけに宛てる）になる。
+#define ISO15693_FLAG_ADDRESS        0x20
 #define ISO15693_CMD_INVENTORY       0x01
+#define ISO15693_CMD_STAY_QUIET      0x02  // 宛先タグを黙らせる（応答なし。RF off で解除）
 
 // fast 経路の間だけ pn5180_t.timeout_ms を絞る値。ドライバ既定は 500ms で、これは
 // **SPI の BUSY 待ち・transceive 状態待ち・RF off 待ちすべての上限**なので、1 台の不調が
@@ -40,8 +43,8 @@ static const char *TAG = "pn5180";
 // 40ms に落としているので、それに合わせる（scan 後に元へ戻す）。
 #define PN5180_FAST_OP_TIMEOUT_MS 40
 
-// DFS スタックの深さ。1 回の probe で pop 1 / push 最大 2 = 正味 +1 なので、
-// probe 上限 + 2 あれば溢れない。
+// DFS スタックの深さ。DFS は root の 2 子から始まり、1 回の probe で pop 1 / push 最大 2 =
+// 正味 +1 なので、probe 上限 + 2 あれば溢れない（push 前に空き 2 を確認もしている）。
 #define FAST_DFS_STACK (PN5180_FAST_MAX_PROBES + 2)
 #endif
 
@@ -284,14 +287,22 @@ static void diag_after_init_failure(const pn5180_reader_cfg_t *cfg) {
              high_count / 2);
 
     // NSS スキャン: ch=cfg->mux_ch のチップに対し、どの NSS GPIO が SPI 応答するかを
-    // spi_bus_add_device + READ_REGISTER 1 発 + BUSY 監視 + remove で総当り。
+    // spi_bus_add_device + READ_EEPROM 1 発 + BUSY 監視 + remove で総当り（候補は配線表の 13 本）。
+    //
+    // **BUSY が壊れていても必ず SPI を送る**のが要点。実機で「MUX 全 ch floating / RST 診断
+    // 1,1,1 / NSS スキャンは全候補『送信前から BUSY=High』で SPI を一度も送らず終了」という
+    // 状態になり、PN5180 が死んでいるのか BUSY(MUX)経路だけが壊れているのか切り分けられなかった。
+    // BUSY ハンドシェイクの代わりに **固定待ち 1ms** を置き、EEPROM の firmware version を
+    // 読んで MISO に意味のある値が返るかで「チップ生存」を判定する。
     ESP_LOGW(TAG, "NSS スキャン: ch%d のチップが応答する NSS を低レベル SPI で探索（診断のみ、再 init なし）",
              cfg->mux_ch);
-    static const int nss_candidates[] = {1, 2, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18};
-    const int n_cands = sizeof(nss_candidates) / sizeof(nss_candidates[0]);
-    int found_nss = -1;
+    ESP_LOGW(TAG, "  READ_EEPROM(0x07) addr=0x12(FIRMWARE_VERSION) len=2 を送信 → 受信 2 byte を FW= で表示");
+    const int n_cands = (int)(sizeof(PN5180_READERS) / sizeof(PN5180_READERS[0]));
+    int found_nss = -1;      // BUSY が Low→High に動いた候補（最も強い証拠）
+    int spi_alive_nss = -1;  // BUSY は不明だが MISO に意味のある値が返った候補
+    uint8_t spi_alive_fw[2] = {0, 0};
     for (int k = 0; k < n_cands; k++) {
-        const int try_nss = nss_candidates[k];
+        const int try_nss = PN5180_READERS[k].nss;
         // 共有 RST を叩いてリセット → ブート完了（BUSY=Low）を待つ。
         gpio_set_direction(PN5180_PIN_RST, GPIO_MODE_OUTPUT);
         gpio_set_level(PN5180_PIN_RST, 0);
@@ -300,14 +311,10 @@ static void diag_after_init_failure(const pn5180_reader_cfg_t *cfg) {
         vTaskDelay(pdMS_TO_TICKS(10));
         mux_select(cfg->mux_ch);
 
-        // 偽陽性対策: 送信前に BUSY が Low(idle) であることを要求する。既に High なら
-        // floating/stuck で「送信で High に立った」と区別できない（実機で ch12 が浮いていて
-        // 最初の候補 GPIO1 を誤検出し、その NSS で再 init → クラッシュした）。
-        if (gpio_get_level(BUSY_PIN)) {
-            ESP_LOGW(TAG, "  [%d/%d] NSS=GPIO%d -> 送信前から BUSY=High（floating/stuck: 判定不能）",
-                     k + 1, n_cands, try_nss);
-            continue;
-        }
+        // 送信前の BUSY。High（floating/stuck）なら「送信で High に立った」と区別できないので、
+        // この候補では BUSY 判定を諦める（= 誤検出して再 init しない。実機で ch12 が浮いていて
+        // GPIO1 を誤検出しクラッシュした反省）。SPI 自体は送る。
+        const int busy_before = gpio_get_level(BUSY_PIN);
 
         spi_device_interface_config_t devcfg = {
             .clock_speed_hz = 1000000,
@@ -320,25 +327,45 @@ static void diag_after_init_failure(const pn5180_reader_cfg_t *cfg) {
             ESP_LOGW(TAG, "  [%d/%d] add_device(NSS=GPIO%d) 失敗", k + 1, n_cands, try_nss);
             continue;
         }
-        // READ_REGISTER (0x04) + reg addr + 4 byte dummy。正しい NSS のチップなら BUSY が High に立つ。
-        uint8_t tx[6] = {0x04, 0x00, 0x00, 0x00, 0x00, 0x00};
-        uint8_t rx[6] = {0};
-        spi_transaction_t t = {.length = 48, .tx_buffer = tx, .rx_buffer = rx};
-        spi_device_polling_transmit(dev, &t);
+
+        // PN5180 の SPI は 2 フェーズ:「送信 = NSS↓ コマンド NSS↑」→「受信 = NSS↓ 読み出し NSS↑」。
+        // hardware CS では 1 トランザクション = 1 フェーズなので 2 回に分ける。
+        // 送信フェーズ: READ_EEPROM(0x07) + addr 0x12(FIRMWARE_VERSION) + len 2。
+        uint8_t tx_cmd[3] = {0x07, 0x12, 0x02};
+        spi_transaction_t t_cmd = {.length = 8 * sizeof(tx_cmd), .tx_buffer = tx_cmd};
+        spi_device_polling_transmit(dev, &t_cmd);
+
+        // 固定待ち 1ms（BUSY ハンドシェイクの代わり）。ついでに BUSY の立ち上がりも観る
+        // （送信前が Low だった候補だけ意味がある）。
         bool went_high = false;
         for (int j = 0; j < 500; j++) {
-            if (gpio_get_level(BUSY_PIN)) { went_high = true; break; }
+            if (!busy_before && gpio_get_level(BUSY_PIN)) went_high = true;
             esp_rom_delay_us(2);
         }
+
+        // 受信フェーズ: 2 byte 読み出し（PN5180 は MOSI を無視して MISO に載せる）。
+        uint8_t tx_dummy[2] = {0xFF, 0xFF};
+        uint8_t fw[2] = {0xFF, 0xFF};
+        spi_transaction_t t_rd = {.length = 16, .tx_buffer = tx_dummy, .rx_buffer = fw};
+        spi_device_polling_transmit(dev, &t_rd);
+        esp_rom_delay_us(1000);
         spi_bus_remove_device(dev);
-        // MISO 全 FF は pull-up で浮いている値（応答ではない）。
-        const bool miso_floating = (rx[2] == 0xFF && rx[3] == 0xFF && rx[4] == 0xFF && rx[5] == 0xFF);
-        const bool miso_active = !miso_floating && (rx[2] | rx[3] | rx[4] | rx[5]) != 0;
-        ESP_LOGW(TAG, "  [%d/%d] NSS=GPIO%d -> BUSY Low→High:%s  MISO:%02X %02X %02X %02X %s",
-                 k + 1, n_cands, try_nss, went_high ? "YES" : "no ",
-                 rx[2], rx[3], rx[4], rx[5],
-                 miso_active ? "(応答あり)" : miso_floating ? "(FF=floating)" : "");
-        if (went_high) { found_nss = try_nss; break; }
+
+        // 全 FF = pull-up で浮いている / 全 00 = Low 固定。どちらも「応答ではない」。
+        const bool miso_floating = (fw[0] == 0xFF && fw[1] == 0xFF);
+        const bool miso_zero = (fw[0] == 0x00 && fw[1] == 0x00);
+        const bool miso_active = !miso_floating && !miso_zero;
+        ESP_LOGW(TAG, "  [%d/%d] NSS=GPIO%d (ch%d) -> 送信前BUSY=%d  BUSY Low→High:%s  FW=%02X %02X %s",
+                 k + 1, n_cands, try_nss, PN5180_READERS[k].mux_ch, busy_before,
+                 busy_before ? "判定不能" : (went_high ? "YES" : "no "),
+                 fw[0], fw[1],
+                 miso_active ? "(SPI 応答あり)" : miso_floating ? "(FF=floating)" : "(00=Low 固定)");
+        if (miso_active && spi_alive_nss < 0) {
+            spi_alive_nss = try_nss;
+            spi_alive_fw[0] = fw[0];
+            spi_alive_fw[1] = fw[1];
+        }
+        if (!busy_before && went_high) { found_nss = try_nss; break; }
     }
     if (found_nss > 0) {
         ESP_LOGW(TAG, "✅ ch%d のチップは NSS=GPIO%d で応答（設定は GPIO%d）",
@@ -350,10 +377,20 @@ static void diag_after_init_failure(const pn5180_reader_cfg_t *cfg) {
             ESP_LOGW(TAG, "   → NSS は設定どおり応答。RST(GPIO%d)/電源/SPI 配線 or PN5180 個体を疑う",
                      PN5180_PIN_RST);
         }
+    } else if (spi_alive_nss > 0) {
+        // BUSY は動かなかったが SPI には答えた = チップは生きていて BUSY 経路だけが死んでいる。
+        ESP_LOGW(TAG, "✅ SPI 応答あり (NSS=GPIO%d, FW=%02X %02X) = **PN5180 は生きている**",
+                 spi_alive_nss, spi_alive_fw[0], spi_alive_fw[1]);
+        ESP_LOGW(TAG, "   → BUSY/MUX 経路を疑う: MUX VCC(3.3V)/EN(GND)/SIG(GPIO%d) の配線、"
+                      "ch%d の BUSY 線、PN5180_BUSY_VIA_MUX=%d の設定",
+                 PN5180_PIN_BUSY_SIG, cfg->mux_ch, PN5180_BUSY_VIA_MUX);
+        ESP_LOGW(TAG, "   → 切り分け: PN5180_BUSY_VIA_MUX=0 + reader #1 の BUSY を GPIO%d に直結して再ビルド",
+                 PN5180_PIN_BUSY_DIRECT);
     } else {
-        ESP_LOGE(TAG, "❌ NSS スキャン: 全 %d 候補で反応なし", n_cands);
-        ESP_LOGE(TAG, "   → SPI 配線(SCK=%d/MOSI=%d/MISO=%d) or RST(GPIO%d) or PN5180/電源 の問題",
-                 PN5180_PIN_SCK, PN5180_PIN_MOSI, PN5180_PIN_MISO, PN5180_PIN_RST);
+        ESP_LOGE(TAG, "❌ NSS スキャン: 全 %d 候補で SPI 無応答（FF FF / 00 00 のみ）", n_cands);
+        ESP_LOGE(TAG, "   → PN5180 の電源(3.3V/5V)・RST(GPIO%d)・SPI 配線(SCK=%d/MOSI=%d/MISO=%d) を疑う"
+                      "（BUSY/MUX ではなくチップに届いていない）",
+                 PN5180_PIN_RST, PN5180_PIN_SCK, PN5180_PIN_MOSI, PN5180_PIN_MISO);
     }
 }
 
@@ -589,16 +626,21 @@ static probe_result_t fast_probe_15693(pn5180_t *dev, uint64_t mask, uint8_t mas
     const uint32_t n = (rs >> RX_BYTES_RECEIVED_START) & RX_BYTES_RECEIVED_MASK;
     const bool collision = (rs & RX_COLLISION_DETECTED) != 0;
 
+    // **衝突フラグが立っていれば受信バイト数に依らず分割する**。SOF で衝突すると
+    // 「collision=1 / 受信 0 byte」で返ることがあり、下の n==0 を先に見ると衝突を
+    // 「カード無し」に倒してしまう（= 重ね置きが永久に分離できない）。
+    if (collision) return PROBE_COLLISION;
+
     // 受信バイト 0 で protocol/integrity error だけ = 応答の実体が無いノイズ（ドライバも
     // 0 byte + protocol error を noise と呼んでいる）→「カード無し」。
     if (n == 0) return PROBE_NONE;
 
     // 応答は flags(1) + DSFID(1) + UID(8) = 10 byte（CRC は PN5180 が検証して外す）。
-    // 衝突フラグ / 10 byte 以外 / **バイトはあるが CRC・protocol error** は、いずれも
-    // 「複数枚の応答が重なった」可能性があるので mask を伸ばして分割する側に倒す。
+    // 10 byte 以外 / **バイトはあるが CRC・protocol error** は、いずれも「複数枚の応答が
+    // 重なった」可能性があるので mask を伸ばして分割する側に倒す。
     // （CRC 崩れを「無し」に倒すと、2 枚の応答が衝突フラグ無しで重なり続ける限り両方とも
     //   永久に読めない。ノイズだった場合は子 2 枝が NONE で終わり 2 probe 損するだけ。）
-    if (collision || n != 10 || (rs & (RX_PROTOCOL_ERROR | RX_DATA_INTEGRITY_ERROR))) {
+    if (n != 10 || (rs & (RX_PROTOCOL_ERROR | RX_DATA_INTEGRITY_ERROR))) {
         return PROBE_COLLISION;
     }
 
@@ -609,13 +651,56 @@ static probe_result_t fast_probe_15693(pn5180_t *dev, uint64_t mask, uint8_t mas
     return PROBE_UID;
 }
 
-// ── 高速 inventory 本体（mask ベースの anti-collision DFS）──
-// RF はこの関数の間ずっと ON（reader ごと 1 回だけ立てる）。off は呼び側の rf_off_after_read。
+// ── 見つけたタグを黙らせる（STAY QUIET, ISO/IEC 15693-3 §10.3）──
+// フレーム: flags(0x22 = high rate | Address_flag), STAY_QUIET(0x02), UID 8 byte（**LSB-first** =
+// probe で受信した生バイト順のまま）。**応答は無い**ので RX は待たない。
+// これを送らないと、2 枚同時応答を PN5180 が衝突と認識せず強い方だけ復号する（capture effect）
+// ケースで、弱い方が永久に分離できない（実機 2026-09-10: 3 枚重ねで 3 枚目が一度も出なかった）。
+// quiet 状態は **RF を切ると解除**される（呼び側が inventory の最後に必ず RF off する）。
+// 失敗はログを出さずに無視する（黙らせ損ねたタグは次の probe でまた応答し、再送される）。
+static void fast_stay_quiet_15693(pn5180_t *dev, const uint8_t *uid_lsb_first) {
+    uint8_t buf[2 + 8];
+    buf[0] = ISO15693_FLAG_DATA_RATE_HIGH | ISO15693_FLAG_ADDRESS;
+    buf[1] = ISO15693_CMD_STAY_QUIET;
+    memcpy(buf + 2, uid_lsb_first, 8);
+
+    pn5180_enable_crc(dev);
+    if (!pn5180_sendData(dev, buf, (int)sizeof(buf), 0)) return;
+
+    // 送信完了だけ短く待つ（上限 3ms）。次の pn5180_sendData が idle→transceive を張り直すので、
+    // 待ち切れなくても致命ではない。RX を待たないのは応答が無いコマンドだから。
+    const int64_t deadline = esp_timer_get_time() + 3000;
+    for (;;) {
+        if (pn5180_getIRQStatus(dev) & TX_IRQ_STAT) break;
+        if (esp_timer_get_time() > deadline) break;
+        esp_rom_delay_us(100);
+    }
+}
+
+// 見つけた UID を集合に積む（重複は無視、満杯も無視）。
+static void fast_add_uid(uint8_t uids[][16], uint8_t *count, const uint8_t *uid) {
+    for (uint8_t k = 0; k < *count; k++) {
+        if (memcmp(uids[k], uid, 8) == 0) return;
+    }
+    if (*count >= PN5180_MAX_CARDS_PER_READER) return;
+    memcpy(uids[*count], uid, 8);
+    (*count)++;
+}
+
+// ── 高速 inventory 本体（Stay Quiet + mask ベースの anti-collision DFS）──
+// RF はこの関数の間ずっと ON（reader ごと 1 回だけ立てる）。**最後に必ず RF off**（quiet 解除）。
 // 戻り値 = 見つかった枚数（0..PN5180_MAX_CARDS_PER_READER）。uids は **LSB-first のまま**。
-// ドライバのように Stay Quiet は送らない: 1 slot inventory は mask に合致する枚数が 1 枚の
-// ときだけ応答が成立するので、枝分かれだけで全枚数を列挙できる（quiet の後始末も不要）。
+//
+// ループ構造:
+//   root(mask 0) を probe → 応答なし = 全部拾った / 1 枚 = 記録して Stay Quiet /
+//   衝突 = mask DFS で分離（見つけるたび Stay Quiet）→ DFS が尽きたら **root を再 probe**。
+// 再 probe が要る理由: 1 slot inventory は本来「mask に合致するのが 1 枚のときだけ応答が成立」
+// するが、実機では 2 枚が同時応答しても PN5180 が衝突を検出せず強い方だけを正しく復号する
+// （capture effect）。この枝は PROBE_UID で終わってしまい、弱い方は DFS では現れない。
+// 見つけた札を黙らせてから root をやり直すと、隠れていた札が応答してくる。
 static uint8_t fast_inventory_15693(slot_reader_t *r, uint8_t uids[][16], uint8_t *uid_len) {
     pn5180_t *dev = r->dev;
+    *uid_len = 8;
     if (!r->rf_loaded) {
         if (!pn5180_loadRFConfig(dev, PN5180_FAST_RF_CONFIG)) return 0;
         r->rf_loaded = true;
@@ -628,51 +713,81 @@ static uint8_t fast_inventory_15693(slot_reader_t *r, uint8_t uids[][16], uint8_
         uint8_t len;
     } dfs_node_t;
     dfs_node_t stack[FAST_DFS_STACK];
-    int sp = 0;
-    stack[sp].mask = 0;
-    stack[sp].len = 0;
-    sp++;
 
     uint8_t count = 0;
     int probes = 0;
-    while (sp > 0 && probes < PN5180_FAST_MAX_PROBES && count < PN5180_MAX_CARDS_PER_READER) {
-        const dfs_node_t cur = stack[--sp];
+    int stale_rounds = 0;  // 新しい UID が 1 枚も増えなかったラウンドの連続数
+    uint8_t uid[8];
+    while (probes < PN5180_FAST_MAX_PROBES && count < PN5180_MAX_CARDS_PER_READER) {
+        const uint8_t before = count;
         probes++;
-        uint8_t uid[8];
-        switch (fast_probe_15693(dev, cur.mask, cur.len, uid)) {
-        case PROBE_UID: {
-            bool dup = false;
-            for (uint8_t k = 0; k < count; k++) {
-                if (memcmp(uids[k], uid, 8) == 0) { dup = true; break; }
+        const probe_result_t root = fast_probe_15693(dev, 0, 0, uid);
+        if (root == PROBE_NONE) break;  // 誰も応答しない = 残りは居ない（正常終了）
+        if (root == PROBE_UID) {
+            fast_add_uid(uids, &count, uid);
+            fast_stay_quiet_15693(dev, uid);  // dup でも送る（黙らせ損ねの再送になる）
+        } else {
+            // 衝突: root の 2 子（bit0 = 0 / 1）から mask DFS。
+            int sp = 0;
+            stack[sp].mask = 1ULL;
+            stack[sp].len = 1;
+            sp++;
+            stack[sp].mask = 0ULL;
+            stack[sp].len = 1;
+            sp++;
+            while (sp > 0 && probes < PN5180_FAST_MAX_PROBES &&
+                   count < PN5180_MAX_CARDS_PER_READER) {
+                const dfs_node_t cur = stack[--sp];
+                probes++;
+                switch (fast_probe_15693(dev, cur.mask, cur.len, uid)) {
+                case PROBE_UID:
+                    fast_add_uid(uids, &count, uid);
+                    fast_stay_quiet_15693(dev, uid);
+                    break;
+                case PROBE_COLLISION:
+                    // mask を 1 bit 伸ばして 2 分割（bit cur.len が 0 の枝 / 1 の枝）。
+                    if (cur.len < 64 && sp + 2 <= (int)FAST_DFS_STACK) {
+                        stack[sp].mask = cur.mask | (1ULL << cur.len);
+                        stack[sp].len = (uint8_t)(cur.len + 1);
+                        sp++;
+                        stack[sp].mask = cur.mask;
+                        stack[sp].len = (uint8_t)(cur.len + 1);
+                        sp++;
+                    }
+                    break;
+                case PROBE_NONE:
+                default:
+                    break;
+                }
             }
-            if (!dup) {
-                memcpy(uids[count], uid, 8);
-                count++;
-            }
-            break;
         }
-        case PROBE_COLLISION:
-            // mask を 1 bit 伸ばして 2 分割（bit cur.len が 0 の枝 / 1 の枝）。
-            if (cur.len < 64 && sp + 2 <= (int)FAST_DFS_STACK) {
-                stack[sp].mask = cur.mask | (1ULL << cur.len);
-                stack[sp].len = (uint8_t)(cur.len + 1);
-                sp++;
-                stack[sp].mask = cur.mask;
-                stack[sp].len = (uint8_t)(cur.len + 1);
-                sp++;
+        // ラウンドで 1 枚も増えなかった = Stay Quiet が効いていない（黙らない札 / 送信失敗）。
+        // 同じ探索を繰り返しても進まないので、1 回だけ再試行して打ち切る（probe 上限まで
+        // 空回りすると reader 1 台で 80ms 以上を食う）。増えたなら再試行回数をリセット。
+        if (count == before) {
+            if (++stale_rounds >= 2) {
+                ESP_LOGD(TAG, "fast inventory: Stay Quiet が効かず進捗なし（%u 枚で打ち切り）",
+                         (unsigned)count);
+                break;
             }
-            break;
-        case PROBE_NONE:
-        default:
-            break;
+        } else {
+            stale_rounds = 0;
         }
+        // 次のラウンドで root を再 probe（capture で隠れていた札を拾う）。
     }
-    if (probes >= PN5180_FAST_MAX_PROBES && sp > 0) {
+    if (probes >= PN5180_FAST_MAX_PROBES && count < PN5180_MAX_CARDS_PER_READER) {
         // 打ち切り（ノイズ or 想定より多い枚数）。取れた分だけ返し、残りは次の poll に任せる。
-        ESP_LOGD(TAG, "fast inventory: probe 上限 %d に到達（未探索 %d 枝, %u 枚取得）",
-                 PN5180_FAST_MAX_PROBES, sp, (unsigned)count);
+        ESP_LOGD(TAG, "fast inventory: probe 上限 %d に到達（%u 枚取得、未探索が残っている可能性）",
+                 PN5180_FAST_MAX_PROBES, (unsigned)count);
     }
-    *uid_len = 8;
+
+    // ── quiet 解除のため必ず RF を落とす ──
+    // Stay Quiet で黙った札は磁界が消えるまで黙ったまま（ISO/IEC 15693-3: quiet state は RF off で
+    // reset）。次の poll でまた全枚数を数えるには、この reader を読み終えた時点で必ず off が要る。
+    // よって PN5180_RF_OFF_BETWEEN_READERS=0（RF 時分割 off = A/B 用）でも fast 経路は off する。
+    // poll 側の rf_off_after_read() と二重になり得るが、ドライバの setRF_off は RF_STATUS が
+    // 既に off なら即 true を返すので無害。
+    pn5180_setRF_off(dev);
     return count;
 }
 #endif  // PN5180_FAST_INVENTORY
@@ -681,8 +796,16 @@ static uint8_t fast_inventory_15693(slot_reader_t *r, uint8_t uids[][16], uint8_
 // あり、保持が無いと host(pyscard)の IccPowerOn がちょうど取りこぼしポーリングに当たった瞬間に
 // connect 失敗し、UID が一切取れない（probe_pcsc watch が 0 件になる主因）。一度検出したら
 // この回数だけは present を維持し、連続 miss が超えたときだけ離脱と判定する。
+//
+// hold は **UID 単位**（slot 単位ではない）。slot 単位だと「検出 0 枚のときだけ前回集合を保つ」
+// ことしかできず、2 枚中 1 枚を 1 回取りこぼしただけで集合が丸ごと 1 枚に置き換わる。実機
+// （2026-09-10, 2 枚重ね）で host に届く枚数が 2↔1 と数百 ms 周期で揺れ、`watch` が同じ札を
+// 何度も再発火した。UID ごとに miss を数えれば、欠けた 1 枚だけを数サイクル保持できる。
 #define PRESENCE_HOLD_MISSES 3
-static int s_miss[CCID_SLOT_COUNT];
+// s_cache[i].uids[k] と添字が対応する連続 miss 数（0 = 今回検出）。
+static uint8_t s_uid_miss[CCID_SLOT_COUNT][PN5180_MAX_CARDS_PER_READER];
+// 「検出枚数 > PN5180_MAX_CARDS_PER_READER」の WARN を slot ごと 1 回に絞るフラグ。
+static bool s_overflow_warned[CCID_SLOT_COUNT];
 
 // 契約 v1.1 §7 (rfid-usb-ccid.md): UID は **MSB-first** で返す MUST。
 // PN5180 + jef-sure ドライバの ISO/IEC 15693 INVENTORY 生レスポンスは **LSB-first**（PN5180 が
@@ -702,16 +825,20 @@ static void reverse_bytes(uint8_t *p, size_t n) {
 // DFS の探索順や AGC 順のままだと、同じ 2 枚でも poll ごとに並びが入れ替わり得る。CCID の
 // Get UID は UID を連結して返すので、並びが揺れると host 側が「別の組み合わせ」と誤認する。
 // 枚数は最大 PN5180_MAX_CARDS_PER_READER（=4）なので挿入ソートで十分。
-static void sort_uids(uint8_t uids[][16], uint8_t count, uint8_t uid_len) {
+// miss が非 NULL なら miss[] も同じ置換で並べ替える（UID 単位 hold のカウンタを連れて動かす）。
+static void sort_uids(uint8_t uids[][16], uint8_t *miss, uint8_t count, uint8_t uid_len) {
     for (uint8_t a = 1; a < count; a++) {
         uint8_t tmp[16];
         memcpy(tmp, uids[a], sizeof(tmp));
+        const uint8_t tmp_miss = miss ? miss[a] : 0;
         int b = (int)a - 1;
         while (b >= 0 && memcmp(uids[b], tmp, uid_len) > 0) {
             memcpy(uids[b + 1], uids[b], sizeof(tmp));
+            if (miss) miss[b + 1] = miss[b];
             b--;
         }
         memcpy(uids[b + 1], tmp, sizeof(tmp));
+        if (miss) miss[b + 1] = tmp_miss;
     }
 }
 
@@ -738,6 +865,89 @@ static void format_uids(const pn5180_card_t *c, char *buf, size_t buf_size) {
                                   c->uids[k][b], (b + 1 < c->uid_len) ? ":" : "");
         }
     }
+}
+
+// ── 検出集合と前回集合を UID 単位でマージする（presence hold）──
+// prev（前回 cache）と det（今回の検出、反転・ソート済み）を突き合わせ、
+//   - prev にあり det にもある UID → miss=0 で残す
+//   - prev にあり det に無い UID   → miss++。PRESENCE_HOLD_MISSES 未満なら残す（hold）
+//   - det にあり prev に無い UID   → miss=0 で追加（満杯なら hold 中の最古を追い出す）
+// を行い、結果を out に書く。戻り値 = hold している（今回検出されなかった）枚数。
+// s_uid_miss[slot] は out の並びに合わせて書き換える。
+static uint8_t merge_presence(int slot, const pn5180_card_t *prev,
+                              const uint8_t det[][16], uint8_t det_count, uint8_t det_len,
+                              pn5180_card_t *out) {
+    uint8_t *miss = s_uid_miss[slot];
+    uint8_t nu[PN5180_MAX_CARDS_PER_READER][16];
+    uint8_t nm[PN5180_MAX_CARDS_PER_READER];
+    uint8_t n = 0;
+    uint8_t held = 0;
+
+    // UID 長が変わった（15693 8B ↔ 14443 4/7B）ときは cache が長さを 1 つしか持てないので、
+    // 前回集合は引き継がずに今回の検出だけにする。
+    const bool keep_prev = (prev->count == 0) || (det_count == 0) || (prev->uid_len == det_len);
+    const uint8_t len = det_count ? det_len : prev->uid_len;
+
+    if (keep_prev) {
+        for (uint8_t k = 0; k < prev->count; k++) {
+            bool seen = false;
+            for (uint8_t j = 0; j < det_count; j++) {
+                if (memcmp(det[j], prev->uids[k], len) == 0) { seen = true; break; }
+            }
+            uint8_t m = 0;
+            if (!seen) {
+                m = (uint8_t)(miss[k] + 1);
+                if (m >= PRESENCE_HOLD_MISSES) continue;  // hold 切れ = この 1 枚だけ離脱
+                held++;
+            }
+            memcpy(nu[n], prev->uids[k], sizeof(nu[n]));
+            nm[n] = m;
+            n++;
+        }
+    }
+
+    for (uint8_t j = 0; j < det_count; j++) {
+        bool dup = false;
+        for (uint8_t k = 0; k < n; k++) {
+            if (memcmp(nu[k], det[j], len) == 0) { dup = true; break; }
+        }
+        if (dup) continue;
+        if (n < PN5180_MAX_CARDS_PER_READER) {
+            memcpy(nu[n], det[j], sizeof(nu[n]));
+            nm[n] = 0;
+            n++;
+            continue;
+        }
+        // 満杯: hold 中（miss>0）で最も古いものを追い出して「今ある札」を優先する。
+        int victim = -1;
+        uint8_t worst = 0;
+        for (uint8_t k = 0; k < n; k++) {
+            if (nm[k] > worst) { worst = nm[k]; victim = (int)k; }
+        }
+        if (victim < 0) {
+            // 全部が「今回検出」= 重ね置きが上限を超えている（運用/設定の問題）。
+            if (!s_overflow_warned[slot]) {
+                s_overflow_warned[slot] = true;
+                ESP_LOGW(TAG, "reader %d: 検出 %u 枚が上限 %d 枚を超過 — 超過分は無視"
+                              "（PN5180_MAX_CARDS_PER_READER を見直す）",
+                         slot, (unsigned)det_count, PN5180_MAX_CARDS_PER_READER);
+            }
+            continue;
+        }
+        memcpy(nu[victim], det[j], sizeof(nu[victim]));
+        nm[victim] = 0;
+        held--;  // 追い出したのは hold 中の 1 枚
+    }
+
+    sort_uids(nu, nm, n, len);
+
+    memset(out, 0, sizeof(*out));
+    out->present = (n > 0);
+    out->count = n;
+    out->uid_len = n ? len : 0;
+    for (uint8_t k = 0; k < n; k++) memcpy(out->uids[k], nu[k], sizeof(out->uids[k]));
+    for (uint8_t k = 0; k < PN5180_MAX_CARDS_PER_READER; k++) miss[k] = (k < n) ? nm[k] : 0;
+    return held;
 }
 
 #if PN5180_RF_OFF_BETWEEN_READERS
@@ -826,25 +1036,12 @@ void pn5180_reader_poll_once(void) {
             for (uint8_t k = 0; k < count; k++) reverse_bytes(uids[k], len);
         }
         // 反転後に並びを正規化（同じ組み合わせなら毎回同じ順序 = host の差分判定が安定する）。
-        sort_uids(uids, count, len);
+        sort_uids(uids, NULL, count, len);
 
+        // 前回集合と UID 単位でマージ（欠けた 1 枚だけを数サイクル hold する）。
         const pn5180_card_t prev = s_cache[i];  // 書き手はこの poll task だけなので lock 不要
-        pn5180_card_t c = {0};
-        if (count > 0) {
-            c.present = true;
-            c.count = count;
-            c.uid_len = len;
-            for (uint8_t k = 0; k < count; k++) memcpy(c.uids[k], uids[k], len);
-            s_miss[i] = 0;
-        } else if (prev.present && s_miss[i] < PRESENCE_HOLD_MISSES) {
-            // 取りこぼし: 直近の present + UID 集合を数サイクル保持（host の connect 失敗を防ぐ）。
-            c = prev;
-            s_miss[i]++;
-        } else {
-            // 連続 miss が hold を超えた → カード離脱と判定。
-            c.present = false;
-            s_miss[i] = 0;
-        }
+        pn5180_card_t c;
+        const uint8_t held = merge_presence(i, &prev, (const uint8_t (*)[16])uids, count, len, &c);
 
         // カード集合が変化した時だけログ（毎ポーリングのスパムを避ける）。枚数や UID の
         // 差し替え（1 枚 → 2 枚、flop の追加など）も「変化」として出す。
@@ -852,8 +1049,11 @@ void pn5180_reader_poll_once(void) {
             if (c.present) {
                 char list[PN5180_MAX_CARDS_PER_READER * (3 * 16 + 2) + 1];
                 format_uids(&c, list, sizeof(list));
-                ESP_LOGI(TAG, "🎴 reader %d: %u 枚 [%s] (%uB/枚)",
-                         i, (unsigned)c.count, list, (unsigned)c.uid_len);
+                char hold_note[16];
+                hold_note[0] = '\0';
+                if (held) snprintf(hold_note, sizeof(hold_note), " (hold %u)", (unsigned)held);
+                ESP_LOGI(TAG, "🎴 reader %d: %u 枚 [%s] (%uB/枚)%s",
+                         i, (unsigned)c.count, list, (unsigned)c.uid_len, hold_note);
             } else {
                 ESP_LOGI(TAG, "   カード離脱 reader %d", i);
             }

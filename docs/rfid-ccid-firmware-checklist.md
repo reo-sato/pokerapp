@@ -120,8 +120,22 @@ board2 = turn / board3 = river）に増やすときの追加要件。配線ハ�
       （RF ON → 1ms → INVENTORY 1 回 → 応答待ち ≤10ms → RF OFF）を使い、**衝突したときだけ**
       mask を 1 bit 伸ばして分割する。RF 設定は**起動時に 1 回だけ**ロードする
       （`pn5180_init` が共有 RST を pulse するので、**全 reader の init 後**にまとめてロードする）。
+- [ ] **見つけた札に STAY QUIET を送り root を再 probe する（capture effect 対策）**。1 slot
+      inventory は「mask に合致するのが 1 枚のときだけ応答が成立する」前提だが、実機では
+      **2 枚が同時応答しても衝突を検出せず強い方だけを復号する**ことがあり、その枝は 1 枚で
+      確定して弱い札が DFS に現れない（実機 2026-09-10: 3 枚重ねで `3 枚` が一度も出なかった）。
+      UID を 1 枚見つけるたびに STAY QUIET（`flags=0x22` / `cmd=0x02` / UID 8B **LSB-first**、
+      応答なし）で黙らせ、**root(mask 0) を再 probe** して「応答なし」が返るまで繰り返す。
+      quiet は **RF off で解除**されるので、**inventory の最後に必ず RF を落とす**こと
+      （落とし忘れると次の poll で 0 枚になる。RF 時分割を無効にしていても fast 経路は off する）。
+      黙らない札で probe 上限まで空回りしないよう、**新しい UID が増えないラウンドが続いたら
+      打ち切る**。
+- [ ] **presence hold（debounce）は UID 単位**にする。slot 単位（「検出 0 枚のときだけ前回集合を
+      保持」）だと、2 枚中 1 枚を 1 回取りこぼしただけで集合が丸ごと置換され、host に届く枚数が
+      2↔1 と揺れる（実機 2026-09-10: `probe_pcsc watch` が同じ札を 20 秒で 5 回再発火）。
+      UID ごとに連続 miss を数え、**欠けた 1 枚だけ**を数サイクル保持して落とす。
 - [ ] **重ね置き（1 reader に複数カード）を全部読む**。席 = hole card 2 枚、board1 = flop 3 枚。
-      mask ベースの anti-collision（1 slot inventory + mask 分割 DFS）で列挙し、
+      mask ベースの anti-collision（1 slot inventory + mask 分割 DFS + 上の STAY QUIET）で列挙し、
       **Get UID は UID を uid_len byte ごとに連結**して返す（`count × 8B + 90 00`。1 枚なら
       従来と同一バイト列、0 枚は `6A 81`）。並びは memcmp 昇順に正規化する（host の差分判定用）。
       応答は bulk EP の 64 byte に収めること（8B × 4 枚 + SW = 34 byte まで）。
@@ -147,10 +161,11 @@ board2 = turn / board3 = river）に増やすときの追加要件。配線ハ�
 **受け入れ**: 各段階で `probe_pcsc list` の reader 件数 = slot 数。`probe_pcsc watch` で **各 slot** が
 「置く→離す→置く」で再発火し、slot↔物理リーダーの対応が config の `pcsc_readers` 順どおり。
 firmware の UART に出る `poll 統計(直近 N 周): 1 周 min/avg/max = …` で 1 周の実測時間を確認し、
-**11 slot で 1 周 ≤ 300 ms**（1 slot なら ≤ 20 ms）であること。超えるなら
+**11 slot で 1 周 ≤ 300 ms**（1 slot なら ≤ 20 ms。**実機 2026-09-10 = 15 ms**）であること。超えるなら
 `PN5180_FAST_MAX_PROBES` / `PN5180_FAST_RX_TIMEOUT_MS` / `CARD_POLL_INTERVAL_MS` を見直す
 （`PRESENCE_HOLD_MISSES` は**サイクル数**なので、1 周が伸びるとカード離脱の判定時間も同じ比率で伸びる）。
-重ね置きは UART の `🎴 reader N: 2 枚 […]` で枚数を確認する。
+重ね置きは UART の `🎴 reader N: 2 枚 […]` / `3 枚 […]` で枚数を確認し、**置いたまま 20 秒放置して
+`probe_pcsc watch` の再発火が 0 件**であること（枚数が揺れていないこと）。
 
 ---
 

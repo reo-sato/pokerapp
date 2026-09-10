@@ -98,14 +98,81 @@ jef-sure/pn5180（v0.1.x）の `proto->get_all_uids()` が **堅牢性優先の�
 
 → 11 slot がすべて空なら 1 周 ≈ 110〜150 ms、実運用（席に 2 枚 + board）で ≈ 200〜300 ms。
 
+（上表は Stay Quiet 導入前の見積り。実機結果と改訂後の probe 数は次節を参照。）
+
+## 実機結果（2026-09-10, commit `2ebe914` を 1 slot で実行）
+
+### 良かった点
+
+- `poll 統計`: **カード無しで 1 周 15 ms**（従来 176〜890 ms）。**目標達成**。
+- 1 枚: 安定して読める。
+- 2 枚重ね: 読める（`2 枚 [E0:04:01:53:1A:41:10:9D, E0:04:01:53:1D:CA:FC:10]`）。
+- host 側（`probe_pcsc raw` / `watch`）の連結分割・UID 単位 event 化は正しく動作。
+
+### 残った不具合
+
+1. **2 枚重ねが 2↔1 でちらつく**（数百 ms 周期）。常に `1D:CA:FC:10` 側が残り、`1A:41:10:9D` 側が
+   欠ける。host の `watch` では欠けた札が 20 秒で **5 回再発火**した。
+2. **3 枚重ねで `3 枚` が一度も出ない**（`1 枚` ↔ `2 枚` のみ。2 枚のときは常に同じ 2 枚）。
+
+### 追加の Root Cause
+
+1. **ちらつき = presence hold が slot 単位だった**。`pn5180_reader_poll_once` の debounce は
+   「検出 **0 枚**のときだけ前回集合を hold」する作りで、**検出 count>0 なら集合を丸ごと置換**して
+   いた。2 枚中 1 枚を 1 回取りこぼした瞬間に host へ「1 枚」が伝わり、次の poll でまた 2 枚に戻る。
+2. **3 枚目が出ない = capture effect**。1 slot inventory は本来「mask に合致するのが 1 枚のときだけ
+   応答が成立」する前提だが、実機では 2 枚が同時応答しても PN5180 が衝突を検出せず**強い方だけを
+   正しく復号**することがある（近接した重ね置きでは受信電力差が大きい）。その枝は `PROBE_UID` で
+   終わるため、弱い札は mask DFS でも永久に現れない。ISO/IEC 15693 の標準解は
+   **見つけた札に STAY QUIET を送って黙らせ、root(mask 0) を再 probe して残りを拾う**ことで、
+   jef-sure ドライバの `get_all_uids()` も UID を読むたび `pn5180_iso15693_stay_quiet` を送っている。
+3. **（simulator で追加発見）衝突が「カード無し」に倒れていた**。`fast_probe_15693` は
+   `RX_STATUS` の受信バイト数 `n` を先に見て `n == 0` を PROBE_NONE にしていたため、
+   **SOF で衝突して「collision=1 / 受信 0 byte」で返るケース**を「カード無し」と判定していた。
+   register-level simulator に commit `2ebe914` のコードをリンクして走らせると、2/3/5 枚のどれでも
+   probe 1 回で終わり分割が一度も起きなかった。実機で 2 枚が読めていたのは、衝突が
+   「バイトはあるが CRC/protocol error」の形で返る回があったため（そちらは分割側に倒していた）。
+
+### 対処（本タスク）
+
+- **Stay Quiet + root 再 probe ループ**（`fast_stay_quiet_15693` / `fast_inventory_15693`）。
+  見つけた UID ごとに STAY QUIET（`flags=0x22`, `cmd=0x02`, UID 8B LSB-first、応答なし）を送り、
+  DFS が尽きたら root を再 probe する。「応答なし」が返った時点で全枚数を拾い終わり。
+  quiet は RF off で解除されるので、**fast 経路は最後に必ず `pn5180_setRF_off()`** を呼ぶ
+  （`PN5180_RF_OFF_BETWEEN_READERS=0` でも）。
+- **衝突フラグを受信バイト数より先に見る**（上記 3 の修正）。
+- **presence hold を UID 単位に**（`s_uid_miss[slot][k]`）。検出集合と前回集合をマージし、
+  欠けた UID だけを `PRESENCE_HOLD_MISSES`(3) サイクル保持する。
+- `PN5180_FAST_MAX_PROBES` 12 → **16**（root 再 probe と最後の「応答なし」確認ぶん）。
+- Stay Quiet が効かない札（規格外 / 送信失敗）で probe 上限まで空回りしないよう、
+  **新しい UID が増えなかったラウンドが 2 回続いたら打ち切る**。
+
+改訂後の probe 数（simulator 実測、quiet が効く場合）:
+
+| 状態 | probe 数 | 概算 |
+|------|---------|------|
+| カード無し | 1 | ≈ 10 ms（RX timeout いっぱい） |
+| 1 枚 | 2 | ≈ 16 ms（UID 1 + 確認の「応答なし」1） |
+| 2 枚 | 3〜4 | ≈ 22〜28 ms |
+| 3 枚（flop） | 4 | ≈ 28 ms |
+| Stay Quiet が効かない札 1 枚 | 3（打ち切り） | ≈ 22 ms |
+
+**確認 probe のぶん、カードが載っている reader は 1 台あたり +10 ms 程度増える**（空の reader は
+変わらず 1 probe）。11 slot 全部にカードを置いた最悪ケースが 300 ms を超えるようなら、
+`PN5180_FAST_RX_TIMEOUT_MS`（10 ms。実応答は ≈ 4 ms で来る）を先に詰める。
+
 ## Regression Check
 
 **実機で** `idf.py monitor` の `poll 統計` を見る（自動テスト不可 = 実 RF が要る）:
 
-- `CCID_SLOT_COUNT=1`（カード無し）: **1 周 ≤ 20 ms**。
+- `CCID_SLOT_COUNT=1`（カード無し）: **1 周 ≤ 20 ms**（2026-09-10 実機で 15 ms 達成）。
 - `CCID_SLOT_COUNT=11`（実運用の配置）: **1 周 ≤ 300 ms**（上限 0.5 s）。
 - `python tools/probe_pcsc.py raw` で、席に 2 枚重ねたときの Get UID 応答が **18 byte**（16 + SW）、
   flop 3 枚で **26 byte**。`watch` で 1 slot から UID が枚数ぶん出る（host v1.1 の分割込み）。
+- **3 枚重ねで UART に `🎴 reader N: 3 枚 [...]` が出る**（`1 枚`↔`2 枚` を往復しない）。
+- **ちらつきが無い**: 2 枚 / 3 枚を置いたまま 20 秒放置して、`probe_pcsc watch` の**再発火が 0 件**
+  （UART の `🎴 reader N: … 枚` も置いた瞬間の 1 行だけ。`(hold n)` が付く行が時々出るのは正常
+  = 1 枚取りこぼしを UID 単位で吸収したという意味）。
 
 ホスト側の自動テストは無い（firmware 側の実装のため）。firmware ロジックは
 `docs/worklog/2026-09-10-pn5180-fast-inventory.md` に書いた register-level simulator
@@ -138,11 +205,19 @@ jef-sure/pn5180（v0.1.x）の `proto->get_all_uids()` が **堅牢性優先の�
    `PN5180_15693_26KASK10` に切り替えて A/B（読めなくなるなら RX 不一致が原因）。
 4. **DFS の probe 数削減（未実装）**: RX_STATUS の `RX_COLL_POS`（bits 25:19 = 最初に衝突した
    ビット位置）を使えば、1 bit ずつではなく衝突位置まで mask を一気に伸ばせる。UID の下位
-   ビットが揃った組み合わせの最悪ケース（12 probe）を数 probe に短縮できるが、bit 位置の
+   ビットが揃った組み合わせの最悪ケース（16 probe）を数 probe に短縮できるが、bit 位置の
    基準（フレーム先頭からか UID 先頭からか）を実機で確かめる必要があるので今回は見送り。
+5. **重ね置き 3 枚が電力不足で応答しない可能性（firmware では解決できない）**: Stay Quiet を
+   入れても 3 枚目が出ない場合、capture ではなく**給電不足**（アンテナに密着した 2 枚が磁束を
+   食い、3 枚目が動作電圧に届かない）が原因になり得る。その場合は `PN5180_FAST_FIELD_SETTLE_US`
+   を伸ばす / `PN5180_FAST_RF_CONFIG` を ASK10 に振る / カードを少しずらす（完全に重ねない）/
+   アンテナ側の出力を上げる、という物理側の対処になる。切り分け: 3 枚のうち任意の 2 枚だけを
+   置くと必ず 2 枚とも読めるなら電力不足ではなく分離の問題、どの組み合わせでも 3 枚目だけが
+   出ないなら電力不足を疑う。
 
 ## Related Worklog
 
+- `docs/worklog/2026-09-10-pn5180-stay-quiet-per-uid-hold.md`（本節「実機結果」の対処）
 - `docs/worklog/2026-09-10-pn5180-fast-inventory.md`
 - `docs/worklog/2026-09-10-multi-reader-firmware-prep.md`（前段: RF 時分割 / 未通電 skip / poll 統計）
 
@@ -161,5 +236,7 @@ jef-sure/pn5180（v0.1.x）の `proto->get_all_uids()` が **堅牢性優先の�
 
 `get_all_uids` は UID を読むたびに **Stay Quiet** をタグに送る（`pn5180_iso15693_stay_quiet`）。
 quiet 状態は RF を切ると解除されるので、`PN5180_RF_OFF_BETWEEN_READERS=1` でたまたま成立していた。
-fast 経路は Stay Quiet を送らない（1 slot inventory の mask 分割だけで全枚数を列挙できるため、
-後始末が不要で RF ON/OFF の順序にも依存しない）。
+fast 経路は当初「1 slot inventory の mask 分割だけで全枚数を列挙できる」と考えて Stay Quiet を
+送っていなかったが、**実機の capture effect でこの前提が崩れた**（上の「実機結果」節）。
+現在は fast 経路もドライバと同じく Stay Quiet を送り、そのぶん **inventory の最後に必ず RF off**
+して quiet を解除する（`PN5180_RF_OFF_BETWEEN_READERS` の値に依らない）。
