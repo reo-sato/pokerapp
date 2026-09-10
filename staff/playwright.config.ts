@@ -18,13 +18,19 @@ export default defineConfig({
   reporter: process.env.CI ? "line" : "list",
   use: {
     baseURL: `http://127.0.0.1:${PORT}`,
-    // iPad 相当のビューポート（landscape）。touch を有効化。
-    viewport: { width: 1180, height: 820 },
-    hasTouch: true,
     trace: "on-first-retry",
   },
   projects: [
-    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    {
+      name: "chromium",
+      // iPad 相当のビューポート（landscape）+ touch。device preset の後に置かないと
+      // Desktop Chrome の viewport(1280×720)/hasTouch(false) に上書きされて実効しない。
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1180, height: 820 },
+        hasTouch: true,
+      },
+    },
   ],
   webServer: {
     command: `node e2e/serve.mjs ${PORT}`,

@@ -5,7 +5,7 @@ import type { ViewerRepository } from "../api/repository";
 import type { MenuItem, OrderRequest, Player, PlayerSessionSummary } from "../api/types";
 import { ViewerApiError } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
-import { BackLink, ErrorView, Loading, styles } from "./common";
+import { BackLink, ErrorView, Loading, ReloadLink, styles } from "./common";
 
 interface Props {
   repository: ViewerRepository;
@@ -99,6 +99,7 @@ export function OrderScreen({ repository, player, session, onBack }: Props): Rea
       <Text style={styles.subtitle}>
         {player.display_name} ・ {session.label ?? session.started_at} ・ スタッフ確定後に会計へ反映
       </Text>
+      <ReloadLink onPress={menuState.reload} />
       {menuState.loading ? (
         <Loading />
       ) : menuState.errorCode ? (
