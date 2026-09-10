@@ -142,8 +142,12 @@ size_t ccid_process_message(const uint8_t *in, size_t in_len,
     switch (type) {
     case PC_TO_RDR_ICC_POWER_ON: {
         if (st == ICC_ABSENT) {
-            // カード無し → 失敗 + ICC_MUTE(0xFE)。host は毎 poll でここを叩くため DEBUG（既定非表示）。
-            ESP_LOGD(TAG, "IccPowerOn slot=%u: カード無し(ABSENT) → MUTE", (unsigned)slot);
+            // カード無し → 失敗 + ICC_MUTE(0xFE)。host(Windows) はこれを「カード無応答
+            // (SCARD_W_UNRESPONSIVE_CARD 0x80100066)」として latch し、次の抜き差しまで再試行しない。
+            // cache が absent の瞬間に power-on が来る競合を見える化するため WARN で出す
+            // （polling 方式では host は present を見てから power-on するので、通常ここには来ない）。
+            ESP_LOGW(TAG, "IccPowerOn slot=%u: cache=ABSENT → ICC_MUTE(0xFE) 返却（host は無応答カード扱い）",
+                     (unsigned)slot);
             return put_header(out, RDR_TO_PC_DATA_BLOCK, 0, slot, seq,
                               (uint8_t)(CMD_FAILED | ICC_ABSENT), 0xFE, 0x00);
         }
@@ -205,19 +209,33 @@ size_t ccid_process_message(const uint8_t *in, size_t in_len,
     case PC_TO_RDR_GET_PARAMS:
     case PC_TO_RDR_SET_PARAMS:
     case PC_TO_RDR_RESET_PARAMS: {
-        // 最小の T=1 Parameters を返す（5 byte abProtocolDataStructure）。
-        static const uint8_t params[5] = {0x11, 0x10, 0x00, 0x15, 0x00};
-        size_t n = put_header(out, RDR_TO_PC_PARAMETERS, sizeof(params), slot, seq,
-                              CMD_OK | st, 0x00, 0x01 /* bProtocolNum=T=1 */);
-        if (n + sizeof(params) <= out_max) {
-            memcpy(out + n, params, sizeof(params));
-            return n + sizeof(params);
+        // abProtocolDataStructure は T=0 なら 5 byte、T=1 なら 7 byte（CCID 1.1 §6.1.7 / §6.2.3）。
+        // 以前は bProtocolNum=1 と言いつつ 5 byte（T=0 の形）を返していた不整合があり、host が
+        // ATR 受理後の Parameters 交換でカードを無効扱いする経路になり得た。
+        // SetParameters は host 指定の bProtocolNum（ヘッダ byte7）に合わせ、Get/Reset は T=1 を返す。
+        static const uint8_t t0_params[5] = {0x11, 0x00, 0x00, 0x0A, 0x00};
+        static const uint8_t t1_params[7] = {0x11, 0x10, 0x00, 0x45, 0x00, 0xFE, 0x00};
+        const uint8_t proto = (type == PC_TO_RDR_SET_PARAMS) ? in[7] : 0x01;
+        const bool is_t0 = (proto == 0x00);
+        const uint8_t *params = is_t0 ? t0_params : t1_params;
+        const size_t plen = is_t0 ? sizeof(t0_params) : sizeof(t1_params);
+        ESP_LOGI(TAG, "%s slot=%u → bProtocolNum=%u (%uB)",
+                 type == PC_TO_RDR_SET_PARAMS ? "SetParameters"
+                 : type == PC_TO_RDR_GET_PARAMS ? "GetParameters" : "ResetParameters",
+                 (unsigned)slot, (unsigned)(is_t0 ? 0 : 1), (unsigned)plen);
+        size_t n = put_header(out, RDR_TO_PC_PARAMETERS, (uint32_t)plen, slot, seq,
+                              CMD_OK | st, 0x00, is_t0 ? 0x00 : 0x01 /* bProtocolNum */);
+        if (n + plen <= out_max) {
+            memcpy(out + n, params, plen);
+            return n + plen;
         }
         return n;
     }
 
     default:
-        // 未対応コマンド → command failed
+        // 未対応コマンド → command failed（host が何を送ってきたかは見えるようにする）
+        ESP_LOGI(TAG, "未対応 CCID コマンド type=0x%02X slot=%u → command failed",
+                 type, (unsigned)slot);
         return put_header(out, RDR_TO_PC_SLOT_STATUS, 0, slot, seq,
                           (uint8_t)(CMD_FAILED | st), 0x00, 0x00);
     }
