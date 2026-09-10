@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
-import numpy as np
+# numpy は CameraEvent.frame の型注釈だけで使う。`from __future__ import annotations` により
+# 注釈は実行時評価されない文字列なので、実行時に numpy を import する必要はない。TYPE_CHECKING
+# ガードに入れることで、RFID canonical 経路（rfid.reader_thread / tools/probe_pcsc.py watch）が
+# numpy 未導入の最小環境（pyscard だけ）でも動く。numpy が要るのは camera(legacy)/audio 経路のみ。
+if TYPE_CHECKING:
+    import numpy as np
 
 
 @dataclass
