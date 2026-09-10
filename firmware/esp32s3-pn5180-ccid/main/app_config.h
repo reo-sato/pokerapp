@@ -81,6 +81,17 @@ static const pn5180_reader_cfg_t PN5180_READERS[] = {
 // ───────── ポーリング間隔 ─────────
 #define CARD_POLL_INTERVAL_MS 100
 
+// ───────── CCID slot の「カード有無」の見せ方 ─────────
+// 1 = 仮想カード常時挿入（既定）。slot を常に present として IccPowerOn に必ず ATR を返し、物理
+//     カードの有無は Get UID の SW だけで伝える（あり: UID + 90 00 / なし: 6A 81）。
+//     理由: Windows(usbccid) のカード有無追跡が当てにならなかった（実機 2026-09-10: interrupt
+//     通知は無視され、polling でも一度 MUTE(0x80100066) を latch すると slot 状態が更新されず
+//     power-on を再試行しない）。host(rfid/bridge.py) は SW≠90 00 を「カード無し」と扱い、
+//     RFIDThread が None↔UID の遷移で debounce する（契約 §6/§8）ので、OS のスロット状態機械に
+//     依存せずに hot-plug が成立する。
+// 0 = 物理カードの有無をそのまま slot 状態に反映（pcsc-lite など polling が信頼できる環境向け）。
+#define CCID_VIRTUAL_CARD_ALWAYS_PRESENT 1
+
 // ───────── 試行するカード規格 ─────────
 // 本番カードは ICODE SLIX（ISO 15693, 8B UID）のみ。ISO 14443A も毎 poll で試すと、カード無しの
 // 間 REQA/anticollision のタイムアウト（数百 ms）で poll が 1 周 ~800ms に落ち、ログも

@@ -62,13 +62,18 @@ static bool slot_present(uint8_t slot) {
     return slot < CCID_SLOT_COUNT && pn5180_reader_get_card(slot, &c) && c.present;
 }
 
-// slot の現在状態（pn5180_reader が更新したキャッシュ + powered）。
+// slot の「host に見せる」状態。
+// CCID_VIRTUAL_CARD_ALWAYS_PRESENT=1（既定）: 物理カードの有無に関係なく常に present。
+//   物理カードの有無は Get UID の SW（90 00 / 6A 81）だけで伝える（app_config.h 参照）。
+// =0: pn5180_reader のキャッシュをそのまま反映（absent なら powered もクリア）。
 static uint8_t icc_status(uint8_t slot) {
     if (slot >= CCID_SLOT_COUNT) return ICC_ABSENT;
+#if !CCID_VIRTUAL_CARD_ALWAYS_PRESENT
     if (!slot_present(slot)) {
         s_powered[slot] = false;
         return ICC_ABSENT;
     }
+#endif
     return s_powered[slot] ? ICC_PRESENT_ACTIVE : ICC_PRESENT_INACTIVE;
 }
 
@@ -251,8 +256,13 @@ size_t ccid_slot_build_notify(uint8_t *out, size_t out_max) {
     out[0] = RDR_TO_PC_NOTIFY_SLOT_CHANGE;
     bool changed = false;
     for (uint8_t s = 0; s < CCID_SLOT_COUNT; s++) {
+#if CCID_VIRTUAL_CARD_ALWAYS_PRESENT
+        const bool present = true;            // GetSlotStatus と同じ「常時挿入」を通知する
+        (void)slot_present;
+#else
         const bool present = slot_present(s);
         if (!present) s_powered[s] = false;  // 離脱したら通電状態も解除
+#endif
         s_snapshot_present[s] = present;
         uint8_t bits = present ? 0x01 : 0x00;
         if (present != s_notified_present[s]) {
