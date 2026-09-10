@@ -13,6 +13,16 @@
 
 // ───────── CCID slot 数（= 有効化する PN5180 台数）─────────
 // まず 1 台で MUX+SPI 経路を検証 → 動いたら 13 に上げる（PN5180_READERS は 13 台分定義済み）。
+//
+// 【段階手順（1 変数ずつ動かす）】
+//   1) CCID_SLOT_COUNT=1（bring-up）: 通電中の MUX ch から reader を自動選択（どのコネクタでも可）。
+//   2) CCID_SLOT_COUNT=2: ch0/ch1 = reader #1/#2 を配線して 2 台同時。ここで RF 時分割
+//      （PN5180_RF_OFF_BETWEEN_READERS）と slot↔物理の対応が効いているかを見る。
+//   3) CCID_SLOT_COUNT=13: 全台。=2 以上では自動選択をせず PN5180_READERS の配列順 = slot 順。
+//   各段階で host 側 `python tools/probe_pcsc.py list` の reader 件数 = slot 数、`watch` で
+//   「どの slot にかざすとどの席/board が出るか」を確認する（役割は host config が source of truth）。
+//   PN5180_SPI_HZ の 1MHz→5MHz は **13 台が 1MHz で安定してから** 単独で上げる（同時に変えない）。
+// slot 数を変えたら usb_descriptors.c の bcdDevice も連動して変わる（Windows の記述子キャッシュ対策）。
 #define CCID_SLOT_COUNT 1
 
 // ───────── USB 識別子（実機確定値, 契約 §2）─────────
@@ -79,7 +89,26 @@ static const pn5180_reader_cfg_t PN5180_READERS[] = {
 };
 
 // ───────── ポーリング間隔 ─────────
+// 1 周（全 slot を 1 回ずつ読む）の後に待つ時間。13 台では 1 周そのものが長くなるので、実測
+// （下の POLL_STATS_INTERVAL_MS で出る「poll 統計」ログ）を見て調整する。PRESENCE_HOLD_MISSES
+// （pn5180_reader.c）は **サイクル数** なので、1 周が伸びるとカード離脱の判定時間も同じ比率で伸びる。
 #define CARD_POLL_INTERVAL_MS 100
+
+// ───────── poll 周期の計測ログ ─────────
+// この間隔（ms）ごとに「1 周の min/avg/max・最長 reader・ready slot 数」を INFO で出して統計を
+// リセットする。13 台化したときに 1 周が何 ms かかるか（= カード検出の遅れ）を実測するための計測。
+// 0 で無効（計測コードごと除外）。
+#define POLL_STATS_INTERVAL_MS 10000
+
+// ───────── RF 時分割（同時に磁界を張るのは 1 台だけ）─────────
+// 1 = 各 reader の inventory 直後に pn5180_setRF_off() を呼ぶ（既定）。
+//   理由: jef-sure ドライバの get_all_uids() は内部で setupRF → inventory を行うが **RF を ON の
+//   まま戻る**。13 台を順に読むと全台の磁界が同時 ON になり、(a) 隣接アンテナ同士の干渉で
+//   inventory が不安定になる、(b) 電流が台数ぶん積み上がる（USB バスパワーでは危険）。
+//   ドライバ README も "Toggle RF off/on between scans … allow 5.1 ms for tags to return to IDLE"
+//   を推奨している（次にその reader を読むのは 1 周後 = CARD_POLL_INTERVAL_MS 以上あとなので足りる）。
+// 0 = 従来挙動（RF は ON のまま）。1 台構成での A/B 比較・切り分け用。
+#define PN5180_RF_OFF_BETWEEN_READERS 1
 
 // ───────── CCID slot の「カード有無」の見せ方 ─────────
 // 1 = 仮想カード常時挿入（既定）。slot を常に present として IccPowerOn に必ず ATR を返し、物理

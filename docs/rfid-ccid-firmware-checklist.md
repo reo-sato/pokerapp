@@ -107,6 +107,33 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
 - [ ] product 文字列を版ごとに変える（→ reader_name が動いて config が壊れる）。
 - [ ] 役割（seat/board）を reader_name に埋めて host に解釈させる（→ 役割は host config が source of truth）。
 
+## 8. 複数 slot（13 台）
+
+1 台の bring-up が済んだあと、PN5180 を 13 台（席 8 + board 5）に増やすときの追加要件。
+
+- [ ] **RF 時分割: 同時に磁界を張るのは 1 台だけ**。各 reader の inventory 直後に RF を off にする
+      （firmware: `PN5180_RF_OFF_BETWEEN_READERS=1` → `pn5180_setRF_off()`）。jef-sure ドライバの
+      `get_all_uids()` は **RF を ON のまま戻る**ため、明示的に切らないと 13 台の磁界が同時に立ち、
+      隣接アンテナの干渉と電流の積み上がりを招く（ドライバ README も scan 間の off/on を推奨）。
+- [ ] **未通電 reader は起動時の MUX scan で skip**する。BUSY が floating の ch は `pn5180_init` を
+      **呼ばずに**飛ばし、残りの台で起動する（その slot は host から見えるが Get UID は常に `6A 81`）。
+- [ ] **通電しているのに `pn5180_init` が失敗したら全 reader 停止**でよい（1 台だけ skip しない）。
+      ドライバの失敗経路は **全 reader 共有の SPI device** を解放するため、続行しても他の台が壊れる。
+      個別 reader への `pn5180_deinit()` も同じ理由で呼ばない。
+- [ ] **`bcdDevice` を slot 数に連動**させる（firmware は `0x0200 | slot 数`）。slot 数の変更は
+      CCID functional descriptor の `bMaxSlotIndex` の変更 = 記述子の変更であり、Windows は
+      VID/PID/REV で記述子をキャッシュするため REV を変えないと反映されない（§1/契約 §2）。
+- [ ] **`bMaxCCIDBusySlots = 1`**（slot 数に連動させない）。実装は bulk OUT を 1 コマンドずつ処理し、
+      複数 slot を並行実行しない。
+- [ ] **段階 bring-up 1 → 2 → 13**。各段階でビルド・書き込みし、host 側の受け入れを通してから次へ。
+      SPI クロック（1MHz→5MHz）を上げるのは **13 台が動いてから**、単独で。
+
+**受け入れ**: 各段階で `probe_pcsc list` の reader 件数 = slot 数。`probe_pcsc watch` で **各 slot** が
+「置く→離す→置く」で再発火し、slot↔物理リーダーの対応が config の `pcsc_readers` 順どおり。
+firmware の UART に出る `poll 統計(直近 N 周): 1 周 min/avg/max = …` で 1 周の実測時間を確認し、
+必要なら `CARD_POLL_INTERVAL_MS` を調整する（`PRESENCE_HOLD_MISSES` は**サイクル数**なので、
+1 周が伸びるとカード離脱の判定時間も同じ比率で伸びる）。
+
 ---
 
 ## 受け入れマトリクス（契約 § ↔ probe_pcsc ↔ 期待）
@@ -115,6 +142,7 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
 |--------|---------|-------------|------|
 | §2 | USB CCID class / VID-PID / product | `probe_pcsc list` | reader_name に product、件数 = slot 数 |
 | §3-4 | slot↔reader_name 安定・役割は host | `probe_pcsc list`（再起動） | matched、名前不変 |
+| §3（複数 slot, §8） | slot 数 = firmware の `CCID_SLOT_COUNT` | `probe_pcsc list` | reader 件数 = slot 数（1→2→13 の各段階で） |
 | §5 | ATR で connect 成立（power-on 常時成功） | `probe_pcsc raw` | `[OS状態] PRESENT`（MUTE 無し）+ `connect OK ATR=…` |
 | §6 | Get UID `FF CA 00 00 00`→UID+9000 | `probe_pcsc raw` → `watch` | raw: カード無し `SW=6A81`／置いて `SW=9000`+UID。watch: タップで UID 表示 |
 | §7 | UID 4/7/8B 生バイト（MSB-first） | `probe_pcsc watch` | `(8B)`、先頭 `E0:04`（ICODE）、`⚠` 無し、card 解決 |

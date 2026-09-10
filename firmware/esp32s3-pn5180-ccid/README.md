@@ -77,13 +77,39 @@ idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB
 - `jef-sure/pn5180` 0.1.1 の実 API（`pn5180-14443.h` / `pn5180-15693.h`、`nfc_uids_array_t.uids_count`、
   `nfc_uid_t.uid_length`）、tinyusb 0.19 / esp_tinyusb 1.7.6 の struct 構成、ATR
   `3B 8F 80 01 80 4F 0C A0 00 00 03 06 03 00 01 00 00 00 00 6A`（Windows が受理）。
-- USB: VID 0x303A / PID 0x8B5D / `PokerRFID PN5180-CCID <slot>` / bcdDevice 0x0102 / bulk OUT+IN のみ。
+- USB: VID 0x303A / PID 0x8B5D / `PokerRFID PN5180-CCID <slot>` / bulk OUT+IN のみ。bcdDevice は実機確認時
+  0x0102 → 現在は slot 数連動 `0x0200 | CCID_SLOT_COUNT`（1 slot = 0x0201。下記）。
+
+複数 reader 化の準備は **実装済（実機未検証, 2026-09-10, worklog
+`docs/worklog/2026-09-10-multi-reader-firmware-prep.md`）**:
+
+- **RF 時分割**（`PN5180_RF_OFF_BETWEEN_READERS=1`）: 各 reader の inventory 直後に `pn5180_setRF_off()`。
+  ドライバの `get_all_uids()` は RF を ON のまま戻るため、切らないと 13 台の磁界が同時に立つ。
+- **未通電 reader の skip**: 起動時の MUX scan で floating の ch は `pn5180_init` を呼ばずに飛ばし、
+  残りで起動する（`PN5180 ready: N/13 slot（skip: …）`）。設定 ch と通電 ch の食い違いは
+  「配線チェック」ログで列挙。
+- **poll 周期の計測**（`POLL_STATS_INTERVAL_MS=10000`）: 10 秒ごとに 1 周の min/avg/max と最長 reader。
+- **`bcdDevice` を slot 数に連動**（`0x0200 | CCID_SLOT_COUNT`）+ `bMaxCCIDBusySlots=1`。
 
 残 TODO:
 
-1. `CCID_SLOT_COUNT` 1→13、`PN5180_SPI_HZ` 1MHz→5MHz、RF 時分割（同時 RF ON は 1 台のみ、
-   `docs/rfid-ccid-firmware-checklist.md` §8）。
-2. 診断ログの整理（bring-up 用の MUX/BUSY/RST 診断は起動時 1 回なので残してよい）。
+1. **13 台の実機検証**（段階 1→2→13。下記「13 台化の段階手順」）。上記 4 点はいずれも机上実装で
+   **実機未検証**。
+2. `PN5180_SPI_HZ` 1MHz→5MHz（**13 台が 1MHz で安定してから**、単独で変更）。
+3. 診断ログの整理（bring-up 用の MUX/BUSY/RST 診断は起動時 1 回なので残してよい）。
+
+### 13 台化の段階手順
+
+1. `CCID_SLOT_COUNT=1` … 現状（bring-up 済）。通電 ch から自動選択。
+2. `CCID_SLOT_COUNT=2` … ch0/ch1 に reader #1/#2 を配線 → ビルド・書き込み。起動ログの
+   「配線 OK / 配線チェック」「PN5180 ready: 2/2 slot」を確認 → host で `probe_pcsc list` が **2 件**、
+   `watch` で slot 0/1 それぞれが発火するか。
+3. `CCID_SLOT_COUNT=13` … 全台。`probe_pcsc list` が **13 件**、`watch` で全 slot、`poll 統計` ログで
+   1 周の実測 ms（必要なら `CARD_POLL_INTERVAL_MS` を調整）。
+4. 最後に `PN5180_SPI_HZ` を 5MHz へ（1 変数だけ変える）。
+
+slot 数を変えると `bcdDevice` が変わる（Windows の記述子キャッシュ対策）ので、Windows 側で古い
+記述子が残ることはない。
 
 ## host 側での受け入れ確認（pokerapp 側, 別マシン or 同じ PC）
 
@@ -120,7 +146,11 @@ python tools/probe_pcsc.py watch     # カードをかざすと UID 表示 → �
 - CCID コマンドの 64byte 超チェイン受信は未対応（Get UID/Status は小さいので可。`ccid_device.c` TODO）。
 - live hot-add（稼働中の USB 再列挙追従）は契約上も v1.0 対象外。
 - ATR / dwFeatures は一般的な非接触リーダー値。host は ATR 非依存だが Windows の bind 検証は実機で。
-- マルチ slot は配線・ピン拡張が前提（`app_config.h` の `PN5180_SLOT_PINS` を slot 数ぶん用意）。
+- マルチ slot は配線・ピン拡張が前提（`app_config.h` の `PN5180_READERS` を slot 数ぶん用意）。
+- **ドライバ制約（重要）**: `pn5180_spi_init()` が add する SPI device は **全 reader で 1 本の共有**で、
+  `pn5180_init()` の失敗経路はその共有ハンドルを `spi_bus_remove_device` で解放する。したがって
+  「失敗した 1 台だけ skip して続行」は不可能（= 通電している reader の init 失敗は全台停止）。
+  個別 reader に `pn5180_deinit()` を呼ぶのも同じ理由で禁止。未通電の台は **init を呼ぶ前に** skip する。
 
 ## 参考
 

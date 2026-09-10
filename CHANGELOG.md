@@ -6,6 +6,31 @@
 
 ## [Unreleased]
 
+### Added (firmware: PN5180 複数 reader（最大 13 台）への拡張準備, 2026-09-10)
+
+- **RF 時分割**: 各 reader の inventory 直後に `pn5180_setRF_off()` を呼び、**同時に RF 磁界を張るのは
+  1 台だけ**にした（`PN5180_RF_OFF_BETWEEN_READERS`, 既定 1）。ドライバの `get_all_uids()` は RF を ON の
+  まま戻るため、13 台では干渉と電流の積み上がりになる。
+- **未通電 reader の skip（部分成功）**: `CCID_SLOT_COUNT > 1` のとき、起動時の MUX scan で floating の
+  ch は `pn5180_init` を呼ばずに飛ばし、残りの台で起動する（`PN5180 ready: N/M slot（skip: …）`）。
+  併せて **配線チェック**ログ（設定 ch なのに floating / 通電しているのに設定範囲外 を列挙、
+  全一致なら `配線 OK`）と、`CCID_SLOT_COUNT` ≤ 配線表要素数の静的アサート。
+- **poll 周期の計測ログ**: 10 秒ごとに 1 周の min/avg/max と最長 reader を出力（`POLL_STATS_INTERVAL_MS`,
+  0 で無効）。13 台化したときのカード検出の遅れを実測するため。
+- docs: firmware checklist に **§8 複数 slot（13 台）** + 受け入れ表の行、firmware README に
+  「13 台化の段階手順」とドライバ制約（`pn5180_init` 失敗 = 共有 SPI 解放 = 全 reader 停止）、
+  契約 `rfid-usb-ccid.md` §2 に 1 文 additive（version 1.0 据え置き）、worklog
+  `docs/worklog/2026-09-10-multi-reader-firmware-prep.md`。
+
+### Changed (firmware: USB 記述子)
+
+- **`bcdDevice` を slot 数に連動**（`0x0200 | CCID_SLOT_COUNT` → 1 slot = `0x0201`、13 slot = `0x020D`）。
+  slot 数の変更は `bMaxSlotIndex` の変更 = 記述子の変更であり、Windows は VID/PID/REV で記述子を
+  キャッシュするため、REV を変えないと反映されない。
+- **`bMaxCCIDBusySlots` を `1` 固定**（従来は slot 数に連動）。実装は bulk OUT を 1 コマンドずつ処理し、
+  複数 slot を並行実行しないため。
+- 出荷値の `CCID_SLOT_COUNT` は **1 のまま**（実機 1 slot の挙動は不変）。上記はいずれも **実機未検証**。
+
 ### Added / Fixed (RFID 実機: PN5180 読取り → PC/SC 越し UID 到達まで通し, ADR-0040, 2026-09-10)
 
 - **実機 1 slot で契約 §5–§8 を本番 host コードで確認**: `tools/probe_pcsc.py watch` で

@@ -20,10 +20,14 @@ static const tusb_desc_device_t s_device_desc = {
     .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor           = USB_VID,
     .idProduct          = USB_PID,
-    // Windows は VID/PID/REV で記述子をキャッシュする。EP 構成を変えたら REV を上げて
-    // 再読込させる（reader_name には影響しない, 契約 §2/§3）。
-    //   0x0100: 2 EP / 0x0101: interrupt EP 追加 / 0x0102: interrupt EP を既定 OFF に戻す
-    .bcdDevice          = 0x0102,
+    // Windows は VID/PID/REV で記述子をキャッシュする。記述子を変えたら REV を上げて再読込させる
+    // （reader_name には影響しない, 契約 §2/§3）。**slot 数の変更も記述子の変更**
+    // （CCID functional descriptor の bMaxSlotIndex = CCID_SLOT_COUNT-1）なので、REV を
+    // slot 数に連動させて「slot 数を変えたら必ず REV が変わる」ようにする。
+    //   0x0201 = 1 slot / 0x0202 = 2 slot / … / 0x020D = 13 slot
+    //   EP 構成など slot 数以外を変えたときは上位バイトを 0x03 に上げる（0x0300 | slot 数）。
+    //   履歴: 0x0100 = 2 EP / 0x0101 = interrupt EP 追加 / 0x0102 = interrupt EP を既定 OFF に戻す
+    .bcdDevice          = (0x0200 | CCID_SLOT_COUNT),
     .iManufacturer      = 0x01,
     .iProduct           = 0x02,
     .iSerialNumber      = 0x03,
@@ -37,6 +41,10 @@ const tusb_desc_device_t *ccid_device_descriptor(void) {
 // ───────── CCID functional descriptor（54 byte, USB CCID 1.1 §5.1）─────────
 // dwFeatures は Short-APDU level exchange を含む値（ACR122U 由来 0x000204BA）。
 // host は XfrBlock で pseudo-APDU `FF CA 00 00 00` を送り、データ+SW を期待する（§6）。
+// bMaxSlotIndex は CCID_SLOT_COUNT-1（= slot 数を変えると記述子が変わる → bcdDevice を連動させる）。
+// bMaxCCIDBusySlots は **1 固定**: ccid_device.c は bulk OUT を 1 コマンドずつ処理する（単一バッファ、
+// 応答を送り終えてから次を受信）ので、slot 数に連動させると「同時に N slot 走らせられる」と host に
+// 嘘をつくことになる。
 #define CCID_FUNC_DESC                                                       \
     0x36,        /* bLength = 54 */                                          \
     0x21,        /* bDescriptorType = CCID */                                \
@@ -59,7 +67,7 @@ const tusb_desc_device_t *ccid_device_descriptor(void) {
     0xFF,        /* bClassEnvelope = echo */                                 \
     0x00, 0x00,  /* wLcdLayout = なし */                                     \
     0x00,        /* bPINSupport = なし */                                     \
-    CCID_SLOT_COUNT /* bMaxCCIDBusySlots */
+    0x01         /* bMaxCCIDBusySlots = 1（実装は 1 コマンドずつ処理。上のコメント参照） */
 
 // ───────── Configuration Descriptor ─────────
 // config(9) + interface(9) + CCID func(54) + EP 7 byte × CCID_NUM_ENDPOINTS

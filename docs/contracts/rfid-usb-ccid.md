@@ -41,7 +41,9 @@ HTTP 経路（`rfid/http_receiver.py`, ADR-0015 で optional secondary）は本�
   interrupt-IN（`RDR_to_PC_NotifySlotChange`）は載せない **SHOULD**。Windows(usbccid) は interrupt-IN が
   あると通知を読み取っても slot 状態に反映せず、無くても `GetSlotStatus` を polling しない（カード有無は
   §8 の方式で伝える）。記述子の EP 構成を変えるときは `bcdDevice` を上げる（Windows は VID/PID/REV で
-  記述子をキャッシュする。現在 `0x0102`）。
+  記述子をキャッシュする。現在 `0x0102`）。**slot 数（CCID functional descriptor の `bMaxSlotIndex`）の
+  変更も記述子の変更**なので、同じく `bcdDevice` を変える **MUST**（firmware は取り違えを防ぐため
+  `0x0200 | slot 数` に連動させている = 1 slot なら `0x0201`、13 slot なら `0x020D`）。
 
 ## 3. CCID multi-slot と reader_name（firmware MUST / host MUST）
 
