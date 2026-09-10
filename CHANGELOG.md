@@ -27,6 +27,13 @@
   docs: ISSUE-0021（実機結果 + 追加 Root Cause + Regression Check）、firmware README、
   firmware checklist §8、worklog `docs/worklog/2026-09-10-pn5180-stay-quiet-per-uid-hold.md`。
 
+### Changed (firmware: 起動時 MUX scan の前に共有 RST を 1 回叩く, 2026-09-10)
+
+- `pn5180_reader_init` は MUX 全 ch 走査の**前に**共有 RST を pulse して全 PN5180 を idle（BUSY=Low）に
+  揃えるようにした。電源投入直後や前回稼働の途中状態では BUSY が High のままのチップがあり、そのまま
+  走査すると通電中の ch を floating と誤読して bring-up の自動選択（`select_bringup_reader`）が外れる
+  （実機で ch0 に挿した reader が scan では全 `1` になり、設定既定が ch0 だったため偶然 init できていた）。
+
 ### Changed (firmware: init 失敗時の NSS 診断を BUSY 非依存に, 2026-09-10)
 
 - PN5180 の初期化に失敗したときの NSS スキャンが、**BUSY が High（floating/stuck）だと SPI を

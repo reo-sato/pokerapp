@@ -400,6 +400,16 @@ bool pn5180_reader_init(void) {
     memset(s_cache, 0, sizeof(s_cache));
     mux_init();
 
+    // ── scan の前に共有 RST を 1 回叩いて全 PN5180 を idle(BUSY=Low) に揃える ──
+    // 電源投入直後や前回稼働の途中状態では BUSY が High のままのチップがあり、そのまま scan すると
+    // 通電中なのに '1'(floating 扱い) と読んで自動選択を外す（実機 2026-09-10: ch0 に挿した reader が
+    // scan では全 '1' で、設定既定が ch0 だったから偶然 init できた）。reset → 10ms でブート完了。
+    gpio_set_direction(PN5180_PIN_RST, GPIO_MODE_OUTPUT);
+    gpio_set_level(PN5180_PIN_RST, 0);
+    esp_rom_delay_us(2000);
+    gpio_set_level(PN5180_PIN_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
     // ── MUX 全 ch 走査（MUX 不通 か reader 個別 かの切り分け）→ bring-up は通電 ch から自動選択 ──
     char scan[17];
     const uint16_t low_mask = mux_scan_low_mask(scan);
