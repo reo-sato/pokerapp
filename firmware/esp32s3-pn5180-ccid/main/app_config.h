@@ -55,26 +55,27 @@ typedef struct {
     int mux_ch;   // この reader の BUSY が入っている MUX channel (0..15)
 } pn5180_reader_cfg_t;
 
-// 13 台分（先頭 CCID_SLOT_COUNT 個だけ有効化）。reader #N の BUSY = MUX channel (N-1) と仮定。
-// ※ 物理 BUSY→MUX channel の対応が違う場合は mux_ch を実配線に合わせる。
+// 13 台分（先頭 CCID_SLOT_COUNT 個だけ有効化）。配列順 = CCID slot 順（slot 0..12 = #1..#13 =
+// config_default.json の pcsc_readers 順: 席 1..8, ボード 1..5）。reader #N の BUSY = MUX channel
+// (N-1)（docs/hardware/pn5180-esp32s3-wiring.md §3 と一致）。物理対応が違う場合は実配線に合わせる。
 //
-// 【bring-up 順序】CCID_SLOT_COUNT=1 のとき [0] のリーダーで検証する。実機の MUX scan で
-// 通電中のリーダーが ch12(=#13) と判明したため #13 を先頭に置く。動いたら配列順を元に戻し
-// CCID_SLOT_COUNT=13 に上げる。
+// 【bring-up（CCID_SLOT_COUNT=1）】pn5180_reader.c が起動時の MUX scan で「通電中の ch」を見つけ、
+// その ch の reader（nss）を自動選択して init する。1 台だけ繋ぐ検証で、どのコネクタに挿しても
+// 再ビルド不要（実機で ch12 → ch7 に変わって init 失敗した反省）。全 ch floating なら [0] を使う。
 static const pn5180_reader_cfg_t PN5180_READERS[] = {
-    {.nss = 18, .mux_ch = 12},  // [0]=#13（bring-up 検証中、現在通電中）
-    {.nss = 1,  .mux_ch = 0},   // #1
-    {.nss = 2,  .mux_ch = 1},   // #2
-    {.nss = 4,  .mux_ch = 2},   // #3
-    {.nss = 5,  .mux_ch = 3},   // #4
-    {.nss = 6,  .mux_ch = 4},   // #5
-    {.nss = 7,  .mux_ch = 5},   // #6
-    {.nss = 8,  .mux_ch = 6},   // #7
-    {.nss = 9,  .mux_ch = 7},   // #8
-    {.nss = 10, .mux_ch = 8},   // #9
-    {.nss = 15, .mux_ch = 9},   // #10
-    {.nss = 16, .mux_ch = 10},  // #11
-    {.nss = 17, .mux_ch = 11},  // #12
+    {.nss = 1,  .mux_ch = 0},   // #1  席 1
+    {.nss = 2,  .mux_ch = 1},   // #2  席 2
+    {.nss = 4,  .mux_ch = 2},   // #3  席 3
+    {.nss = 5,  .mux_ch = 3},   // #4  席 4
+    {.nss = 6,  .mux_ch = 4},   // #5  席 5
+    {.nss = 7,  .mux_ch = 5},   // #6  席 6
+    {.nss = 8,  .mux_ch = 6},   // #7  席 7
+    {.nss = 9,  .mux_ch = 7},   // #8  席 8
+    {.nss = 10, .mux_ch = 8},   // #9  ボード 1
+    {.nss = 15, .mux_ch = 9},   // #10 ボード 2
+    {.nss = 16, .mux_ch = 10},  // #11 ボード 3
+    {.nss = 17, .mux_ch = 11},  // #12 ボード 4
+    {.nss = 18, .mux_ch = 12},  // #13 ボード 5
 };
 
 // ───────── ポーリング間隔 ─────────
