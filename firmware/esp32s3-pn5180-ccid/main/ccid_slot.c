@@ -157,8 +157,16 @@ size_t ccid_process_message(const uint8_t *in, size_t in_len,
                               (uint8_t)(CMD_FAILED | ICC_ABSENT), 0xFE, 0x00);
         }
         s_powered[slot] = true;
-        ESP_LOGI(TAG, "IccPowerOn slot=%u: present → ATR(%uB) 返却（connect 成立）",
-                 (unsigned)slot, (unsigned)sizeof(ATR));
+        // pyscard の disconnect 既定（unpower）だと host の poll ごとに PowerOn/Off が来るため、
+        // 初回だけ INFO（bind 直後に host が power-on したことの確認用）、以降は DEBUG。
+        static bool s_first_poweron_logged = false;
+        if (!s_first_poweron_logged) {
+            ESP_LOGI(TAG, "IccPowerOn slot=%u: host が power-on（初回）→ ATR(%uB) 返却。以降は DEBUG",
+                     (unsigned)slot, (unsigned)sizeof(ATR));
+            s_first_poweron_logged = true;
+        } else {
+            ESP_LOGD(TAG, "IccPowerOn slot=%u → ATR(%uB)", (unsigned)slot, (unsigned)sizeof(ATR));
+        }
         size_t n = put_header(out, RDR_TO_PC_DATA_BLOCK, sizeof(ATR), slot, seq,
                               CMD_OK | ICC_PRESENT_ACTIVE, 0x00, 0x00);
         if (n + sizeof(ATR) <= out_max) {
@@ -192,9 +200,9 @@ size_t ccid_process_message(const uint8_t *in, size_t in_len,
     case PC_TO_RDR_XFR_BLOCK: {
         uint8_t resp[64];
         size_t rn = handle_apdu(slot, data, data_len, resp, sizeof(resp));
-        // APDU 先頭（Get UID なら FF CA 00 00 00）と、返した SW を出す。
+        // APDU 先頭（Get UID なら FF CA 00 00 00）と、返した SW を出す（host の poll ごとに来るので DEBUG）。
         // 期待: apdu=FF CA 00 00 00 → resp_len=uid+2, sw=90 00。sw=6A 81 ならカード無し判定。
-        ESP_LOGI(TAG,
+        ESP_LOGD(TAG,
                  "XfrBlock slot=%u apdu_len=%u apdu=%02X %02X %02X %02X %02X → resp_len=%u sw=%02X %02X",
                  (unsigned)slot, (unsigned)data_len,
                  data_len > 0 ? data[0] : 0, data_len > 1 ? data[1] : 0,
@@ -224,7 +232,7 @@ size_t ccid_process_message(const uint8_t *in, size_t in_len,
         const bool is_t0 = (proto == 0x00);
         const uint8_t *params = is_t0 ? t0_params : t1_params;
         const size_t plen = is_t0 ? sizeof(t0_params) : sizeof(t1_params);
-        ESP_LOGI(TAG, "%s slot=%u → bProtocolNum=%u (%uB)",
+        ESP_LOGD(TAG, "%s slot=%u → bProtocolNum=%u (%uB)",
                  type == PC_TO_RDR_SET_PARAMS ? "SetParameters"
                  : type == PC_TO_RDR_GET_PARAMS ? "GetParameters" : "ResetParameters",
                  (unsigned)slot, (unsigned)(is_t0 ? 0 : 1), (unsigned)plen);

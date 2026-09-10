@@ -372,8 +372,8 @@ static bool read_uid_from_proto(pn5180_proto_t *proto, uint8_t *uid, uint8_t *ui
     if (!proto || !proto->get_all_uids) return false;
     nfc_uids_array_t *uids = proto->get_all_uids(proto);
     if (!uids) return false;
-    // 一時診断: get_all_uids が非 NULL を返した = 何か見つけた。count と uid_length を出す。
-    ESP_LOGI(TAG, "get_all_uids 戻り: count=%d uid_length=%d",
+    // get_all_uids が非 NULL を返した = 何か見つけた。毎 poll 出るので DEBUG（検出/離脱は poll 側が INFO）。
+    ESP_LOGD(TAG, "get_all_uids 戻り: count=%d uid_length=%d",
              uids->uids_count, uids->uids_count > 0 ? uids->uids[0].uid_length : -1);
 
     bool found = false;

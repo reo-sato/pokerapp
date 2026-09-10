@@ -59,6 +59,12 @@ void app_main(void) {
     ESP_LOGI(TAG, "TinyUSB(CCID) installed");
 
     // ── PN5180 起動 + ポーリング ──
+    // jef-sure ドライバは inventory 成功のたびに "Tag Found!" 等を INFO で出す（13 slot × 10Hz だと
+    // UART が詰まり poll が遅れる）。カード検出/離脱は pn5180_reader.c が遷移時だけ INFO で出すので、
+    // ドライバ側のタグは WARN 以上に絞る（タイムアウト等のエラーは残る）。
+    esp_log_level_set("pn5180-15693", ESP_LOG_WARN);
+    esp_log_level_set("pn5180-14443", ESP_LOG_WARN);
+    esp_log_level_set("PN5180", ESP_LOG_WARN);
     if (!pn5180_reader_init()) {
         ESP_LOGE(TAG, "PN5180 init failed — 配線/ピン(app_config.h)を確認");
         // USB は上げたままにして host が reader を列挙できる状態は保つ（カードは読めない）。
