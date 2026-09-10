@@ -70,18 +70,21 @@ python tools/probe_pcsc.py check
 
 ## 3. カード UID の登録（`rfid_cards.json`）🖥️
 
-物理カードの UID を読んで `tag_id → card_code` を登録する。未登録の UID は手順4の `watch` に
-`card=(未登録)` + 正規化済み UID として出るので、その文字列を控えて登録する:
+物理カードの UID を読んで `tag_id → card_code` を登録する。**タップ駆動の登録ツール**を使う
+（「次に置くカード」が表示され、置くと登録、離すと次へ。1 枚ごとに保存されるので途中で止めてよい）:
 
 ```bash
-python tools/probe_pcsc.py watch --seconds 60   # 各カードを 1 枚ずつタップ → UID を控える
-# 控えた UID を rfid_cards.json に追記（例）:
-#   "cards": { "04:AB:CD:EF:12:34:56:78": "Ah", ... }
+python tools/register_cards.py run --deck 1          # 1 デッキ目: ♠A..K ♥ ♦ ♣ + ジョーカー 2 枚の順
+python tools/register_cards.py run --deck 2          # 2 デッキ目（同じ code に別 UID を追加）
+python tools/register_cards.py list --deck 2         # 不足 code の確認（再開はもう一度 run）
+python tools/register_cards.py unregister <UID>      # 置き間違えの修正
+# 新品デッキの並びが違うときは --order rank-suit / --only Ah,Kd / --start-at Kd で順序を合わせる
 ```
 
-- **期待**: タップごとに正規化 UID（`AA:BB:...`）が表示される。
-- **見る点**: ISO 15693 は **8 バイト**（`(8B)` 表示）。`⚠ 非契約長` が出る UID は 4/7/8B 以外
-  （配線・カード種別を疑う, §7）。`rfid_cards.json` の tag_id も同じ正規化（大文字コロン区切り）で書く。
+- **期待**: `✓ [ 1/54] As ← E0:04:…` のように 1 枚ずつ登録され、最後に `deck 1: 54/54 済 ✅ 完了`。
+- **見る点**: ISO 15693 は **8 バイト**、先頭 `E0:04`（ICODE）。別 code で登録済みの UID を置くと `⚠` で
+  拒否される（置き間違い防止）。手で書く場合も tag_id は大文字コロン区切り（`normalize_tag_id`）。
+  未登録の UID は手順4の `watch` に `card=(未登録)` として出る。
 
 ## 4. ライブ・タップ確認（UID / 役割 / hot-plug, 契約 §6-8）🖥️
 

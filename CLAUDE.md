@@ -960,6 +960,7 @@ python tools/probe_pcsc.py list    # reader_name 列挙 + config 突き合わせ
 python tools/probe_pcsc.py check   # config lint + connect 検査 (§5, カード不要)
 python tools/probe_pcsc.py watch --seconds 30  # 実 RFIDThread でタップ確認 (UID/役割/hot-plug, §6-8)
 python tools/probe_pcsc.py raw --seconds 20    # pyscard 直叩き: OS のスロット状態 + connect/Get UID の例外(hresult) を表示 (watch 0 件の切り分け)
+python tools/register_cards.py run --deck 1    # 実カード UID を rfid_cards.json に登録 (タップ駆動, 2 デッキ目は --deck 2, 中断/再開可, list/unregister あり)
 ```
 
 ---

@@ -128,7 +128,9 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
 1. `probe_pcsc list` の実 reader_name を `config.json` の `rfid.pcsc_readers[].name` に等値で記入し、
    `transport` を `"pcsc"` にする。
 2. 確定した **VID/PID・実 reader_name** を契約 `docs/contracts/rfid-usb-ccid.md` §2/§4 に追記（ISSUE-0015）。
-3. 物理カードを `probe_pcsc watch` で読み、表示 UID を `rfid_cards.json`（tag_id→card）に登録。
+3. 物理カードを `python tools/register_cards.py run --deck 1`（タップ駆動: 次に置くカードを表示 → 置く →
+   登録 → 離す）で `rfid_cards.json`（tag_id→card）に登録。2 デッキ目は `--deck 2`。中断/再開可、
+   `list` で不足 code を確認、`unregister <UID>` で修正。
 
 ## 関連
 

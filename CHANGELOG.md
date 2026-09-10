@@ -26,6 +26,10 @@
 - docs: ADR-0040、契約 §2/§5/§8 追記、firmware checklist §3/§6/受け入れ表、worklog
   `docs/worklog/2026-09-10-rfid-ccid-end-to-end-bringup.md`（Store 版 `python` スタブ / py -3.13 + pyscard
   wheel の環境メモ含む）。
+- **カード登録ツール `tools/register_cards.py`**（`run` / `list` / `unregister`）: 次に置くカードを表示 →
+  置くと UID を `rfid_cards.json` に登録 → 離すまで待つ、をタップ駆動で繰り返す。`--deck N` で 2 デッキ目
+  （同じ code に別 UID）、中断/再開可、別 code 登録済み UID は拒否、`--order suit-rank|rank-suit` /
+  `--only` / `--start-at`。`rfid_cards.json` の説明にあった存在しない `python -m rfid.register` を差し替え。
 
 ### Fixed / Added (ESP32-S3 USB CCID firmware 実機 bring-up + 契約に実機確定値転記, ADR-0034 / ISSUE-0015)
 
