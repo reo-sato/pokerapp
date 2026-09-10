@@ -7,10 +7,16 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "app_config.h"  // PN5180_MAX_CARDS_PER_READER
+
+// 1 slot のカード状態。**1 reader に複数枚が重なって置かれる**（席 = hole card 2 枚、
+// board1 = flop 3 枚）ので UID は配列で持つ。順序は memcmp 昇順に正規化されており、
+// 同じ組み合わせなら毎 poll 同じ並びになる（host の差分判定を安定させるため）。
 typedef struct {
-    bool present;        // カードが場にあるか
-    uint8_t uid[16];     // 生 UID（4/7/8B, 契約 §7）
-    uint8_t uid_len;     // UID バイト長
+    bool present;        // 1 枚以上あるか（count > 0）
+    uint8_t count;       // 検出枚数（0..PN5180_MAX_CARDS_PER_READER）
+    uint8_t uid_len;     // UID バイト長（全 UID 共通。ISO15693 = 8, 契約 §7）
+    uint8_t uids[PN5180_MAX_CARDS_PER_READER][16];  // 生 UID（MSB-first, 4/7/8B）
 } pn5180_card_t;
 
 // 全 slot の PN5180 を初期化（SPI バス + 各 reader）。成功で true。

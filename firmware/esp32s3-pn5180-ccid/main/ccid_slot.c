@@ -11,6 +11,8 @@
 //   0x50 NotifySlotChange（interrupt-IN, カード挿抜）… ccid_slot_build_notify で組み立て
 //
 // host(rfid/bridge.py)が依存するのは「XfrBlock に FF CA 00 00 00 → UID + 90 00」だけ（§6）。
+// ⚠ 重ね置き対応: 1 slot に複数枚あるときは UID を uid_len byte ごとに連結して返す
+//    （例: 8B × 2 枚 = 16 byte + 90 00）。host 側は応答長から枚数を割り出して分割する必要がある。
 #include <string.h>
 #include "esp_log.h"
 #include "ccid_slot.h"
@@ -110,13 +112,27 @@ static size_t handle_apdu(uint8_t slot, const uint8_t *apdu, size_t apdu_len,
     bool is_get_uid = apdu_len >= 4 && apdu[0] == 0xFF && apdu[1] == 0xCA &&
                       apdu[2] == 0x00 && apdu[3] == 0x00;
     if (is_get_uid) {
+        // 1 reader に複数枚が重なって置かれる（席 = hole card 2 枚 / board1 = flop 3 枚）ため、
+        // **UID を uid_len byte ごとに連結**して返す（count × uid_len + SW 90 00）。1 枚なら
+        // 従来と完全に同じバイト列。並びは pn5180_reader.c が UID 昇順に正規化済み。
+        // 契約 rfid-usb-ccid.md **v1.1 §6**（8B × k ≤ 4）。host は応答長が 16/24/32 のときだけ
+        // 8B ずつ分割する（rfid/bridge.py:split_uid_response）。
+        // ⚠ したがって重ね置きは **ISO 15693(8B) 専用**。ISO 14443A の 4/7B を複数枚置くと
+        //   host が分割できない（4B×2 = 8B が単一 UID に見える）。本番カードは ICODE SLIX のみ、
+        //   かつ fast 経路は 15693 専用なので実害は無い。
+        // 応答長は 4 枚でも 4*8+2 = 34 byte（bulk EP 64 / in_buf 10+64 に収まる）。
         pn5180_card_t c;
-        if (pn5180_reader_get_card(slot, &c) && c.present && c.uid_len > 0 &&
-            (size_t)c.uid_len + 2 <= resp_max) {
-            memcpy(resp, c.uid, c.uid_len);     // UID（生バイト MSB-first, 4/7/8B, §7）
-            resp[c.uid_len] = 0x90;             // SW1
-            resp[c.uid_len + 1] = 0x00;         // SW2 = 90 00（成功）
-            return (size_t)c.uid_len + 2;
+        if (pn5180_reader_get_card(slot, &c) && c.present && c.uid_len > 0 && c.count > 0) {
+            const size_t n = (size_t)c.count * (size_t)c.uid_len;
+            if (n + 2 <= resp_max) {
+                for (uint8_t k = 0; k < c.count; k++) {
+                    // UID（生バイト MSB-first, 4/7/8B, §7）
+                    memcpy(resp + (size_t)k * c.uid_len, c.uids[k], c.uid_len);
+                }
+                resp[n] = 0x90;                 // SW1
+                resp[n + 1] = 0x00;             // SW2 = 90 00（成功）
+                return n + 2;
+            }
         }
         // カード無し/読取り失敗 → 6A 81（host は 非90 00 を None 扱い, §6）
         resp[0] = 0x6A;

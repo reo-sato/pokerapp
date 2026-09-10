@@ -107,13 +107,29 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
 - [ ] product 文字列を版ごとに変える（→ reader_name が動いて config が壊れる）。
 - [ ] 役割（seat/board）を reader_name に埋めて host に解釈させる（→ 役割は host config が source of truth）。
 
-## 8. 複数 slot（13 台）
+## 8. 複数 slot（本番 11 台）
 
-1 台の bring-up が済んだあと、PN5180 を 13 台（席 8 + board 5）に増やすときの追加要件。
+1 台の bring-up が済んだあと、PN5180 を **11 台**（席 8 + board 3: board1 = flop 3 枚重ね /
+board2 = turn / board3 = river）に増やすときの追加要件。配線ハーネスと firmware の配線表は
+13 台ぶんあるが、本番で有効化するのは先頭 11。
 
+- [ ] **1 reader あたりの inventory は 1 回に絞る**（ISSUE-0021）。ドライバの `get_all_uids()` は
+      RF 設定 2 種（ASK10/ASK100）× データレート 2 種（high/low）を毎回総当たりし、しかも
+      high rate で見つかっても break しないため **1 台で 0.2〜0.9 秒**かかる（実機実測）。
+      11 台では 1 周 2〜10 秒になり使えない。firmware は `PN5180_FAST_INVENTORY=1` の自前経路
+      （RF ON → 1ms → INVENTORY 1 回 → 応答待ち ≤10ms → RF OFF）を使い、**衝突したときだけ**
+      mask を 1 bit 伸ばして分割する。RF 設定は**起動時に 1 回だけ**ロードする
+      （`pn5180_init` が共有 RST を pulse するので、**全 reader の init 後**にまとめてロードする）。
+- [ ] **重ね置き（1 reader に複数カード）を全部読む**。席 = hole card 2 枚、board1 = flop 3 枚。
+      mask ベースの anti-collision（1 slot inventory + mask 分割 DFS）で列挙し、
+      **Get UID は UID を uid_len byte ごとに連結**して返す（`count × 8B + 90 00`。1 枚なら
+      従来と同一バイト列、0 枚は `6A 81`）。並びは memcmp 昇順に正規化する（host の差分判定用）。
+      応答は bulk EP の 64 byte に収めること（8B × 4 枚 + SW = 34 byte まで）。
+      契約 **v1.1 §6**（MUST）に準拠。host の分割は `rfid/bridge.py:split_uid_response`
+      （応答長 **16/24/32 のときだけ** 8B 分割 = ISO 14443A の 4/7B と衝突させないため）。
 - [ ] **RF 時分割: 同時に磁界を張るのは 1 台だけ**。各 reader の inventory 直後に RF を off にする
       （firmware: `PN5180_RF_OFF_BETWEEN_READERS=1` → `pn5180_setRF_off()`）。jef-sure ドライバの
-      `get_all_uids()` は **RF を ON のまま戻る**ため、明示的に切らないと 13 台の磁界が同時に立ち、
+      `get_all_uids()` は **RF を ON のまま戻る**ため、明示的に切らないと 11 台の磁界が同時に立ち、
       隣接アンテナの干渉と電流の積み上がりを招く（ドライバ README も scan 間の off/on を推奨）。
 - [ ] **未通電 reader は起動時の MUX scan で skip**する。BUSY が floating の ch は `pn5180_init` を
       **呼ばずに**飛ばし、残りの台で起動する（その slot は host から見えるが Get UID は常に `6A 81`）。
@@ -125,14 +141,16 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
       VID/PID/REV で記述子をキャッシュするため REV を変えないと反映されない（§1/契約 §2）。
 - [ ] **`bMaxCCIDBusySlots = 1`**（slot 数に連動させない）。実装は bulk OUT を 1 コマンドずつ処理し、
       複数 slot を並行実行しない。
-- [ ] **段階 bring-up 1 → 2 → 13**。各段階でビルド・書き込みし、host 側の受け入れを通してから次へ。
-      SPI クロック（1MHz→5MHz）を上げるのは **13 台が動いてから**、単独で。
+- [ ] **段階 bring-up 1 → 2 → 11**。各段階でビルド・書き込みし、host 側の受け入れを通してから次へ。
+      SPI クロック（1MHz→5MHz）を上げるのは **11 台が動いてから**、単独で。
 
 **受け入れ**: 各段階で `probe_pcsc list` の reader 件数 = slot 数。`probe_pcsc watch` で **各 slot** が
 「置く→離す→置く」で再発火し、slot↔物理リーダーの対応が config の `pcsc_readers` 順どおり。
 firmware の UART に出る `poll 統計(直近 N 周): 1 周 min/avg/max = …` で 1 周の実測時間を確認し、
-必要なら `CARD_POLL_INTERVAL_MS` を調整する（`PRESENCE_HOLD_MISSES` は**サイクル数**なので、
-1 周が伸びるとカード離脱の判定時間も同じ比率で伸びる）。
+**11 slot で 1 周 ≤ 300 ms**（1 slot なら ≤ 20 ms）であること。超えるなら
+`PN5180_FAST_MAX_PROBES` / `PN5180_FAST_RX_TIMEOUT_MS` / `CARD_POLL_INTERVAL_MS` を見直す
+（`PRESENCE_HOLD_MISSES` は**サイクル数**なので、1 周が伸びるとカード離脱の判定時間も同じ比率で伸びる）。
+重ね置きは UART の `🎴 reader N: 2 枚 […]` で枚数を確認する。
 
 ---
 
@@ -142,10 +160,12 @@ firmware の UART に出る `poll 統計(直近 N 周): 1 周 min/avg/max = …`
 |--------|---------|-------------|------|
 | §2 | USB CCID class / VID-PID / product | `probe_pcsc list` | reader_name に product、件数 = slot 数 |
 | §3-4 | slot↔reader_name 安定・役割は host | `probe_pcsc list`（再起動） | matched、名前不変 |
-| §3（複数 slot, §8） | slot 数 = firmware の `CCID_SLOT_COUNT` | `probe_pcsc list` | reader 件数 = slot 数（1→2→13 の各段階で） |
+| §3（複数 slot, §8） | slot 数 = firmware の `CCID_SLOT_COUNT` | `probe_pcsc list` | reader 件数 = slot 数（1→2→11 の各段階で） |
+| §8（poll 周期, ISSUE-0021） | 1 reader 1 回の inventory | firmware UART の `poll 統計` | 1 周 ≤ 300 ms（11 slot）/ ≤ 20 ms（1 slot） |
 | §5 | ATR で connect 成立（power-on 常時成功） | `probe_pcsc raw` | `[OS状態] PRESENT`（MUTE 無し）+ `connect OK ATR=…` |
 | §6 | Get UID `FF CA 00 00 00`→UID+9000 | `probe_pcsc raw` → `watch` | raw: カード無し `SW=6A81`／置いて `SW=9000`+UID。watch: タップで UID 表示 |
 | §7 | UID 4/7/8B 生バイト（MSB-first） | `probe_pcsc watch` | `(8B)`、先頭 `E0:04`（ICODE）、`⚠` 無し、card 解決 |
+| §6/§7（重ね置き v1.1, ISSUE-0021） | 複数枚は UID 昇順で連結（`count × 8B + 90 00`） | `probe_pcsc raw`（応答長）→ `watch` | raw: 席 2 枚 = 18 byte / flop 3 枚 = 26 byte。watch: 1 slot から UID が枚数ぶん出る |
 | §8 | present/removed・hot-plug（SW で伝達） | `probe_pcsc watch` / 抜き差し | 再タップで再発火、再列挙で復帰 |
 
 全項目 PASS → `python main.py --cli`（`rfid.transport="pcsc"`）で board 3/4/5 枚の street 自動遷移まで

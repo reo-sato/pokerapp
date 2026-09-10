@@ -8,6 +8,7 @@
 //    参照: https://github.com/jef-sure/esp32-component-pn5180 の examples。
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>          // free（ドライバ経路の get_all_uids が返す heap 配列の解放）
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
@@ -23,6 +24,26 @@
 #include "pn5180-15693.h"    // pn5180_15693_init
 
 static const char *TAG = "pn5180";
+
+#if PN5180_FAST_INVENTORY
+// ── ISO/IEC 15693 のフラグ / コマンド ──
+// ドライバの public ヘッダには出ていない（src/pn5180-15693.c の file-local）ので自前定義する。
+// 値は ISO/IEC 15693-3 とドライバ内部の定義に一致。
+#define ISO15693_FLAG_DATA_RATE_HIGH 0x02  // 応答を high data rate(26.48kbps) で返させる
+#define ISO15693_FLAG_INVENTORY      0x04  // inventory フラグ（bit5 の意味が slot 数に変わる）
+#define ISO15693_FLAG_SLOT_ONE       0x20  // 1 slot（応答は 1 枚だけ。16 slot は使わない）
+#define ISO15693_CMD_INVENTORY       0x01
+
+// fast 経路の間だけ pn5180_t.timeout_ms を絞る値。ドライバ既定は 500ms で、これは
+// **SPI の BUSY 待ち・transceive 状態待ち・RF off 待ちすべての上限**なので、1 台の不調が
+// 1 周を 0.5 秒伸ばしてしまう（11 台なら 5.5 秒）。ドライバ自身も get_all_uids の間だけ
+// 40ms に落としているので、それに合わせる（scan 後に元へ戻す）。
+#define PN5180_FAST_OP_TIMEOUT_MS 40
+
+// DFS スタックの深さ。1 回の probe で pop 1 / push 最大 2 = 正味 +1 なので、
+// probe 上限 + 2 あれば溢れない。
+#define FAST_DFS_STACK (PN5180_FAST_MAX_PROBES + 2)
+#endif
 
 // BUSY を MUX 経由で読むか直結で読むか（app_config.h の切り分けフラグ）。
 #if PN5180_BUSY_VIA_MUX
@@ -42,6 +63,7 @@ typedef struct {
     pn5180_proto_t *iso14443;
     pn5180_proto_t *iso15693;
     int mux_ch;
+    bool rf_loaded;              // fast 経路: LOAD_RF_CONFIG 済み（false なら poll で再試行）
 } slot_reader_t;
 
 static slot_reader_t s_readers[CCID_SLOT_COUNT];
@@ -448,8 +470,9 @@ bool pn5180_reader_init(void) {
             return false;
         }
         s_readers[i].iso14443 = pn5180_14443_init(s_readers[i].dev);
-        // TODO(実機): 第2引数 modulation はコンポーネント enum に合わせる（0=既定想定）。
-        s_readers[i].iso15693 = pn5180_15693_init(s_readers[i].dev, 0);
+        // 第2引数は pn5180_15693_rf_config_t（pn5180->rf_config の初期値になるだけで、
+        // ドライバ経路では get_all_uids が毎回上書きする）。fast 経路と同じ値を入れておく。
+        s_readers[i].iso15693 = pn5180_15693_init(s_readers[i].dev, PN5180_FAST_RF_CONFIG);
         ready_count++;
         ESP_LOGI(TAG, "PN5180 reader %d ready (nss=%d mux_ch=%d)", i, cfg->nss, cfg->mux_ch);
     }
@@ -458,37 +481,201 @@ bool pn5180_reader_init(void) {
         ESP_LOGE(TAG, "PN5180 ready 0 台（全 slot が未通電/未接続）— 電源・MUX・配線を確認");
         return false;
     }
+
+#if PN5180_FAST_INVENTORY
+    // ── fast 経路の RF 設定を全 reader にロード（init ループの「後」で行うのが要点）──
+    // pn5180_init() は内部で **共有 RST を pulse する**ので、reader k の init 中に reader k+1 の
+    // チップもリセットされ、レジスタ（= LOAD_RF_CONFIG の内容）が消える。init ループの中で
+    // ロードしても後続の init で無効になるため、全台の init が終わってから別ループでロードする。
+    // 以降 RF を on/off しても設定は残る（リセットしない限り）。
+    for (int i = 0; i < CCID_SLOT_COUNT; i++) {
+        if (!s_readers[i].dev) continue;
+        mux_select(s_readers[i].mux_ch);
+        s_readers[i].rf_loaded = pn5180_loadRFConfig(s_readers[i].dev, PN5180_FAST_RF_CONFIG);
+        if (!s_readers[i].rf_loaded) {
+            // init 自体は成功しているので slot は生かしたまま、poll 側で毎回ロードを再試行する。
+            ESP_LOGE(TAG, "reader %d: LOAD_RF_CONFIG(0x%02X) 失敗 — poll で再試行する",
+                     i, (unsigned)PN5180_FAST_RF_CONFIG);
+        }
+    }
+    ESP_LOGI(TAG, "fast inventory 有効 (RF config=0x%02X, RX timeout=%d ms, max %d 枚/probe 上限 %d)",
+             (unsigned)PN5180_FAST_RF_CONFIG, PN5180_FAST_RX_TIMEOUT_MS,
+             PN5180_MAX_CARDS_PER_READER, PN5180_FAST_MAX_PROBES);
+#endif
+
     ESP_LOGI(TAG, "PN5180 ready: %d/%d slot%s%s%s", ready_count, CCID_SLOT_COUNT,
              skipped[0] ? "（skip: " : "", skipped, skipped[0] ? "）" : "");
     return true;
 }
 
-// 1 つの proto から最初の UID を取り出す。取れたら true。
-// 注: get_all_uids() は内部で setupRF + inventory を行う（pn5180-15693.c:687）。
-//     ここで別途 setup_rf を呼ぶと二重設定でカード状態が乱れるため、get_all_uids のみ呼ぶ。
-static bool read_uid_from_proto(pn5180_proto_t *proto, uint8_t *uid, uint8_t *uid_len) {
-    if (!proto || !proto->get_all_uids) return false;
-    nfc_uids_array_t *uids = proto->get_all_uids(proto);
-    if (!uids) return false;
+#if !PN5180_FAST_INVENTORY
+// 1 つの proto から UID を **最大 PN5180_MAX_CARDS_PER_READER 枚** 取り出す。戻り値 = 枚数。
+// 注: get_all_uids() は内部で setupRF + inventory を行う。ここで別途 setup_rf を呼ぶと
+//     二重設定でカード状態が乱れるため、get_all_uids のみ呼ぶ。
+// cache は uid_len を 1 つしか持たない（重ね置きは同種カード前提）ので、先頭と長さが違う
+// エントリは捨てる。
+static uint8_t read_uids_from_proto(pn5180_proto_t *proto, uint8_t uids[][16], uint8_t *uid_len) {
+    if (!proto || !proto->get_all_uids) return 0;
+    nfc_uids_array_t *arr = proto->get_all_uids(proto);
+    if (!arr) return 0;
     // get_all_uids が非 NULL を返した = 何か見つけた。毎 poll 出るので DEBUG（検出/離脱は poll 側が INFO）。
     ESP_LOGD(TAG, "get_all_uids 戻り: count=%d uid_length=%d",
-             uids->uids_count, uids->uids_count > 0 ? uids->uids[0].uid_length : -1);
+             arr->uids_count, arr->uids_count > 0 ? arr->uids[0].uid_length : -1);
 
-    bool found = false;
     // nfc_uids_array_t { int uids_count; nfc_uid_t uids[]; }
     // nfc_uid_t { int8_t uid_length; ...; uint8_t uid[10]; }
-    if (uids->uids_count > 0) {
-        int n = uids->uids[0].uid_length;
+    uint8_t count = 0;
+    for (int k = 0; k < arr->uids_count && count < PN5180_MAX_CARDS_PER_READER; k++) {
+        int n = arr->uids[k].uid_length;
         if (n > 16) n = 16;
-        if (n > 0) {
-            memcpy(uid, uids->uids[0].uid, n);
+        if (n <= 0) continue;
+        if (count == 0) {
             *uid_len = (uint8_t)n;
-            found = true;
+        } else if ((uint8_t)n != *uid_len) {
+            continue;
+        }
+        memcpy(uids[count], arr->uids[k].uid, (size_t)n);
+        count++;
+    }
+    free(arr);  // README: heap 配列は free 必須
+    return count;
+}
+#endif  // !PN5180_FAST_INVENTORY
+
+#if PN5180_FAST_INVENTORY
+// ── 1 回の INVENTORY probe（mask 付き）の結果 ──
+typedef enum {
+    PROBE_NONE = 0,   // 応答なし（この mask に合致するカードは無い）
+    PROBE_UID,        // ちょうど 1 枚が応答した → uid_out に LSB-first の 8 byte
+    PROBE_COLLISION,  // 複数枚が同時に応答した → mask を 1 bit 伸ばして分割する
+} probe_result_t;
+
+// ISO15693 INVENTORY を 1 回だけ送り、応答を 3 値で返す（ドライバの総当たりをしない）。
+// フレーム: flags(0x26 = high rate | inventory | 1 slot), INVENTORY(0x01), mask_len,
+//           mask 値（ceil(mask_len/8) byte, **LSB-first**）
+// mask は「UID の下位 mask_len ビット」と比較される。ISO15693 は UID を LSB から送るので、
+// mask bit i = 受信生バイト rx[2] の bit0 から数えて i 番目のビット。
+static probe_result_t fast_probe_15693(pn5180_t *dev, uint64_t mask, uint8_t mask_len,
+                                       uint8_t *uid_out) {
+    const uint8_t nbytes = (uint8_t)((mask_len + 7) / 8);  // mask_len<=64 なので <=8
+    uint8_t buf[3 + 8];
+    buf[0] = ISO15693_FLAG_DATA_RATE_HIGH | ISO15693_FLAG_INVENTORY | ISO15693_FLAG_SLOT_ONE;
+    buf[1] = ISO15693_CMD_INVENTORY;
+    buf[2] = mask_len;
+    for (uint8_t i = 0; i < nbytes; i++) {
+        buf[3 + i] = (uint8_t)((mask >> (8 * i)) & 0xFF);
+    }
+
+    // ドライバも送信のたびに CRC を有効化している（LOAD_RF_CONFIG や idle 遷移で落ちても
+    // 拾えるように）。レジスタ 2 本の write なので費用は小さい。
+    pn5180_enable_crc(dev);
+    // idle → transceive 遷移と全 IRQ clear は pn5180_sendData の内部で行われる。
+    if (!pn5180_sendData(dev, buf, 3 + nbytes, 0)) return PROBE_NONE;
+
+    // 応答待ち（自前ループ）。pn5180_wait_for_irq() は timeout のたびに ESP_LOGE を出すので
+    // 使えない（カード無しの reader が毎 poll ログを吐いて UART が埋まる）。
+    uint32_t irq = 0;
+    const int64_t deadline = esp_timer_get_time() + (int64_t)PN5180_FAST_RX_TIMEOUT_MS * 1000;
+    for (;;) {
+        irq = pn5180_getIRQStatus(dev);
+        if (irq & (RX_IRQ_STAT | TIMER2_IRQ_STAT | GENERAL_ERROR_IRQ_STAT)) break;
+        if (esp_timer_get_time() > deadline) break;
+        esp_rom_delay_us(100);
+    }
+    if (!(irq & RX_IRQ_STAT)) return PROBE_NONE;  // 無応答 / RX timeout(TIMER2) / general error
+
+    uint32_t rs = 0;
+    if (!pn5180_readRegister(dev, RX_STATUS, &rs)) return PROBE_NONE;
+    const uint32_t n = (rs >> RX_BYTES_RECEIVED_START) & RX_BYTES_RECEIVED_MASK;
+    const bool collision = (rs & RX_COLLISION_DETECTED) != 0;
+
+    // 受信バイト 0 で protocol/integrity error だけ = 応答の実体が無いノイズ（ドライバも
+    // 0 byte + protocol error を noise と呼んでいる）→「カード無し」。
+    if (n == 0) return PROBE_NONE;
+
+    // 応答は flags(1) + DSFID(1) + UID(8) = 10 byte（CRC は PN5180 が検証して外す）。
+    // 衝突フラグ / 10 byte 以外 / **バイトはあるが CRC・protocol error** は、いずれも
+    // 「複数枚の応答が重なった」可能性があるので mask を伸ばして分割する側に倒す。
+    // （CRC 崩れを「無し」に倒すと、2 枚の応答が衝突フラグ無しで重なり続ける限り両方とも
+    //   永久に読めない。ノイズだった場合は子 2 枝が NONE で終わり 2 probe 損するだけ。）
+    if (collision || n != 10 || (rs & (RX_PROTOCOL_ERROR | RX_DATA_INTEGRITY_ERROR))) {
+        return PROBE_COLLISION;
+    }
+
+    uint8_t rx[10];
+    if (!pn5180_readData(dev, 10, rx)) return PROBE_NONE;
+    if (rx[0] & 0x01) return PROBE_NONE;  // ISO15693 応答 flags bit0 = Error_flag
+    memcpy(uid_out, rx + 2, 8);           // LSB-first のまま返す（反転は呼び側 = poll）
+    return PROBE_UID;
+}
+
+// ── 高速 inventory 本体（mask ベースの anti-collision DFS）──
+// RF はこの関数の間ずっと ON（reader ごと 1 回だけ立てる）。off は呼び側の rf_off_after_read。
+// 戻り値 = 見つかった枚数（0..PN5180_MAX_CARDS_PER_READER）。uids は **LSB-first のまま**。
+// ドライバのように Stay Quiet は送らない: 1 slot inventory は mask に合致する枚数が 1 枚の
+// ときだけ応答が成立するので、枝分かれだけで全枚数を列挙できる（quiet の後始末も不要）。
+static uint8_t fast_inventory_15693(slot_reader_t *r, uint8_t uids[][16], uint8_t *uid_len) {
+    pn5180_t *dev = r->dev;
+    if (!r->rf_loaded) {
+        if (!pn5180_loadRFConfig(dev, PN5180_FAST_RF_CONFIG)) return 0;
+        r->rf_loaded = true;
+    }
+    if (!pn5180_setRF_on(dev)) return 0;  // is_rf_on はドライバが持つので二重 ON にはならない
+    esp_rom_delay_us(PN5180_FAST_FIELD_SETTLE_US);
+
+    typedef struct {
+        uint64_t mask;
+        uint8_t len;
+    } dfs_node_t;
+    dfs_node_t stack[FAST_DFS_STACK];
+    int sp = 0;
+    stack[sp].mask = 0;
+    stack[sp].len = 0;
+    sp++;
+
+    uint8_t count = 0;
+    int probes = 0;
+    while (sp > 0 && probes < PN5180_FAST_MAX_PROBES && count < PN5180_MAX_CARDS_PER_READER) {
+        const dfs_node_t cur = stack[--sp];
+        probes++;
+        uint8_t uid[8];
+        switch (fast_probe_15693(dev, cur.mask, cur.len, uid)) {
+        case PROBE_UID: {
+            bool dup = false;
+            for (uint8_t k = 0; k < count; k++) {
+                if (memcmp(uids[k], uid, 8) == 0) { dup = true; break; }
+            }
+            if (!dup) {
+                memcpy(uids[count], uid, 8);
+                count++;
+            }
+            break;
+        }
+        case PROBE_COLLISION:
+            // mask を 1 bit 伸ばして 2 分割（bit cur.len が 0 の枝 / 1 の枝）。
+            if (cur.len < 64 && sp + 2 <= (int)FAST_DFS_STACK) {
+                stack[sp].mask = cur.mask | (1ULL << cur.len);
+                stack[sp].len = (uint8_t)(cur.len + 1);
+                sp++;
+                stack[sp].mask = cur.mask;
+                stack[sp].len = (uint8_t)(cur.len + 1);
+                sp++;
+            }
+            break;
+        case PROBE_NONE:
+        default:
+            break;
         }
     }
-    free(uids);  // README: heap 配列は free 必須
-    return found;
+    if (probes >= PN5180_FAST_MAX_PROBES && sp > 0) {
+        // 打ち切り（ノイズ or 想定より多い枚数）。取れた分だけ返し、残りは次の poll に任せる。
+        ESP_LOGD(TAG, "fast inventory: probe 上限 %d に到達（未探索 %d 枝, %u 枚取得）",
+                 PN5180_FAST_MAX_PROBES, sp, (unsigned)count);
+    }
+    *uid_len = 8;
+    return count;
 }
+#endif  // PN5180_FAST_INVENTORY
 
 // カード presence の保持サイクル数（debounce）。ISO15693 の inventory は単発で取りこぼすことが
 // あり、保持が無いと host(pyscard)の IccPowerOn がちょうど取りこぼしポーリングに当たった瞬間に
@@ -511,9 +698,51 @@ static void reverse_bytes(uint8_t *p, size_t n) {
     }
 }
 
+// ── 検出した UID 群の並びを正規化（memcmp 昇順）──
+// DFS の探索順や AGC 順のままだと、同じ 2 枚でも poll ごとに並びが入れ替わり得る。CCID の
+// Get UID は UID を連結して返すので、並びが揺れると host 側が「別の組み合わせ」と誤認する。
+// 枚数は最大 PN5180_MAX_CARDS_PER_READER（=4）なので挿入ソートで十分。
+static void sort_uids(uint8_t uids[][16], uint8_t count, uint8_t uid_len) {
+    for (uint8_t a = 1; a < count; a++) {
+        uint8_t tmp[16];
+        memcpy(tmp, uids[a], sizeof(tmp));
+        int b = (int)a - 1;
+        while (b >= 0 && memcmp(uids[b], tmp, uid_len) > 0) {
+            memcpy(uids[b + 1], uids[b], sizeof(tmp));
+            b--;
+        }
+        memcpy(uids[b + 1], tmp, sizeof(tmp));
+    }
+}
+
+// キャッシュ 2 つが「同じカード集合」か（枚数・長さ・UID がすべて一致）。ログの発火判定に使う。
+static bool cards_equal(const pn5180_card_t *a, const pn5180_card_t *b) {
+    if (a->present != b->present || a->count != b->count || a->uid_len != b->uid_len) return false;
+    for (uint8_t k = 0; k < a->count; k++) {
+        if (memcmp(a->uids[k], b->uids[k], a->uid_len) != 0) return false;
+    }
+    return true;
+}
+
+// UID 集合を "E0:04:…, E0:04:…" の 1 行に整形する（ログ用）。
+static void format_uids(const pn5180_card_t *c, char *buf, size_t buf_size) {
+    size_t p = 0;
+    buf[0] = '\0';
+    for (uint8_t k = 0; k < c->count; k++) {
+        if (k > 0 && p + 2 < buf_size) {
+            p += (size_t)snprintf(buf + p, buf_size - p, ", ");
+        }
+        for (uint8_t b = 0; b < c->uid_len && b < 16; b++) {
+            if (p + 4 >= buf_size) return;  // 溢れたら打ち切り（snprintf の戻り値を足さない）
+            p += (size_t)snprintf(buf + p, buf_size - p, "%02X%s",
+                                  c->uids[k][b], (b + 1 < c->uid_len) ? ":" : "");
+        }
+    }
+}
+
 #if PN5180_RF_OFF_BETWEEN_READERS
 // ── RF 時分割: inventory 直後に磁界を落とす（同時 RF ON は 1 台だけ）──
-// ドライバの get_all_uids() は RF を ON のまま戻るため、明示的に切らないと 13 台ぶんの磁界が
+// ドライバの get_all_uids() は RF を ON のまま戻るため、明示的に切らないと 11 台ぶんの磁界が
 // 重なる（干渉 + 電流）。理由の詳細は app_config.h の PN5180_RF_OFF_BETWEEN_READERS。
 // 失敗（SPI/BUSY 不調）は毎 poll 出すと UART を埋めるので reader ごと最初の 3 回だけ WARN。
 static uint8_t s_rf_off_fail[CCID_SLOT_COUNT];
@@ -560,43 +789,56 @@ void pn5180_reader_poll_once(void) {
 #endif
         mux_select(s_readers[i].mux_ch);  // この reader の BUSY を SIG に
 
-        uint8_t uid[16];
+        uint8_t uids[PN5180_MAX_CARDS_PER_READER][16];
         uint8_t len = 0;
+        uint8_t count = 0;
+        bool from_iso15693 = false;
 
+        // ドライバ既定の timeout_ms=500 は SPI BUSY 待ち / transceive 状態待ち / RF off 待ちの
+        // すべてに効くため、1 台の不調が 1 周を 0.5 秒伸ばす。読み取りの間だけ短くする
+        // （ドライバの get_all_uids も内部で 40ms に落としている）。
+        const int64_t saved_timeout_ms = s_readers[i].dev->timeout_ms;
+#if PN5180_FAST_INVENTORY
+        s_readers[i].dev->timeout_ms = PN5180_FAST_OP_TIMEOUT_MS;
+        // 自前の mask DFS（ISO15693 専用。PN5180_TRY_ISO14443 はこの経路では無視）。
+        count = fast_inventory_15693(&s_readers[i], uids, &len);
+        from_iso15693 = (count > 0);
+#else
         // ISO15693（8B）→（PN5180_TRY_ISO14443=1 のときだけ）ISO14443A（4/7B）の順。
         // proto を分けて試すのは、ISO15693 のときだけ MSB-first に反転するため。
-        bool detected = false;
-        bool from_iso15693 = false;
-        if (read_uid_from_proto(s_readers[i].iso15693, uid, &len)) {
-            detected = true;
-            from_iso15693 = true;
-        }
+        count = read_uids_from_proto(s_readers[i].iso15693, uids, &len);
+        from_iso15693 = (count > 0);
 #if PN5180_TRY_ISO14443
-        else if (read_uid_from_proto(s_readers[i].iso14443, uid, &len)) {
-            detected = true;
+        if (count == 0) {
+            count = read_uids_from_proto(s_readers[i].iso14443, uids, &len);
         }
+#endif
 #endif
 
 #if PN5180_RF_OFF_BETWEEN_READERS
         // inventory 直後に磁界を落とす（次の reader を読む前に = 同時 RF ON は 1 台だけ）。
         rf_off_after_read(i);
 #endif
+        s_readers[i].dev->timeout_ms = saved_timeout_ms;
 
         // 契約 v1.1 §7: ISO15693 の生バイトは LSB-first なので MSB-first に反転する。
-        if (detected && from_iso15693 && len > 1) {
-            reverse_bytes(uid, len);
+        if (from_iso15693 && len > 1) {
+            for (uint8_t k = 0; k < count; k++) reverse_bytes(uids[k], len);
         }
+        // 反転後に並びを正規化（同じ組み合わせなら毎回同じ順序 = host の差分判定が安定する）。
+        sort_uids(uids, count, len);
 
-        bool was_present = s_cache[i].present;
+        const pn5180_card_t prev = s_cache[i];  // 書き手はこの poll task だけなので lock 不要
         pn5180_card_t c = {0};
-        if (detected) {
+        if (count > 0) {
             c.present = true;
+            c.count = count;
             c.uid_len = len;
-            memcpy(c.uid, uid, len);
+            for (uint8_t k = 0; k < count; k++) memcpy(c.uids[k], uids[k], len);
             s_miss[i] = 0;
-        } else if (was_present && s_miss[i] < PRESENCE_HOLD_MISSES) {
-            // 取りこぼし: 直近の present + UID を数サイクル保持（host の connect 失敗を防ぐ）。
-            c = s_cache[i];
+        } else if (prev.present && s_miss[i] < PRESENCE_HOLD_MISSES) {
+            // 取りこぼし: 直近の present + UID 集合を数サイクル保持（host の connect 失敗を防ぐ）。
+            c = prev;
             s_miss[i]++;
         } else {
             // 連続 miss が hold を超えた → カード離脱と判定。
@@ -604,16 +846,17 @@ void pn5180_reader_poll_once(void) {
             s_miss[i] = 0;
         }
 
-        // 状態が変化した時だけログ（毎ポーリングのスパムを避ける）。カード読み取りの可視化。
-        if (c.present && !was_present) {
-            char hex[3 * 16 + 1];
-            int p = 0;
-            for (int b = 0; b < c.uid_len && b < 16; b++) {
-                p += snprintf(hex + p, sizeof(hex) - p, "%02X%s", c.uid[b], b + 1 < c.uid_len ? ":" : "");
+        // カード集合が変化した時だけログ（毎ポーリングのスパムを避ける）。枚数や UID の
+        // 差し替え（1 枚 → 2 枚、flop の追加など）も「変化」として出す。
+        if (!cards_equal(&prev, &c)) {
+            if (c.present) {
+                char list[PN5180_MAX_CARDS_PER_READER * (3 * 16 + 2) + 1];
+                format_uids(&c, list, sizeof(list));
+                ESP_LOGI(TAG, "🎴 reader %d: %u 枚 [%s] (%uB/枚)",
+                         i, (unsigned)c.count, list, (unsigned)c.uid_len);
+            } else {
+                ESP_LOGI(TAG, "   カード離脱 reader %d", i);
             }
-            ESP_LOGI(TAG, "🎴 カード検出! reader %d: UID=%s (%dB)", i, hex, c.uid_len);
-        } else if (!c.present && was_present) {
-            ESP_LOGI(TAG, "   カード離脱 reader %d", i);
         }
 
         xSemaphoreTake(s_lock, portMAX_DELAY);
