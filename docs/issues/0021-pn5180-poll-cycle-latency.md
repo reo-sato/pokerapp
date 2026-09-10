@@ -17,10 +17,15 @@ Fixed（firmware 実装済 / **実機未検証**）
 
 rfid / firmware（`firmware/esp32s3-pn5180-ccid/main/pn5180_reader.c`）
 
+> **用語（2026-09-10 更新, ADR-0041 / 契約 v1.2）**: 本 issue の「slot」は **物理 reader（index）** を
+> 指す。USB 上の CCID slot は常に 1 つで、物理リーダーは Get UID の P2（reader index）で選ぶように
+> 変わった（Windows の汎用 CCID ドライバが 1 slot しか公開しないため）。firmware の台数設定も
+> `CCID_SLOT_COUNT` → **`PN5180_READER_COUNT`** に分離済み。
+
 ## Expected Behavior
 
 - 1 reader あたりの inventory は **カード無しで数十 ms 以内**（目標 ≤ 15 ms）。
-- 本番 **11 slot**（席 8 + board 3）で **1 周 ≤ 0.5 s**（できれば ≈ 200 ms）。
+- 本番 **11 reader**（席 8 + board 3）で **1 周 ≤ 0.5 s**（できれば ≈ 200 ms）。
   `CARD_POLL_INTERVAL_MS`（既定 100ms）と合わせて、カードを置いてから host（`RFIDThread`）が
   UID を得るまでの遅れが実用の範囲に収まること。
 - `PRESENCE_HOLD_MISSES`（3）は**サイクル数**なので、1 周が伸びるとカード離脱の判定時間も

@@ -4,7 +4,8 @@ ESP32-S3（native USB）に PN5180 ×N を載せ、PC へ **USB CCID smart card 
 ESP-IDF firmware。host 側の pokerapp（`rfid/reader_thread.py` 等）が PC/SC 経由で UID を読み、
 `tools/probe_pcsc.py` でそのまま検証できる。
 
-- **契約（正準）**: [`../../docs/contracts/rfid-usb-ccid.md`](../../docs/contracts/rfid-usb-ccid.md) v1.0
+- **契約（正準）**: [`../../docs/contracts/rfid-usb-ccid.md`](../../docs/contracts/rfid-usb-ccid.md) **v1.2**
+  （v1.2 = CCID slot は 1 つ / 物理リーダーは Get UID の P2, ADR-0041。v1.1 = 重ね置きの UID 連結）
 - **実装チェックリスト**: [`../../docs/rfid-ccid-firmware-checklist.md`](../../docs/rfid-ccid-firmware-checklist.md)
 - **host 側検証手順**: [`../../docs/hardware-qa-checklist.md`](../../docs/hardware-qa-checklist.md)
 
@@ -21,7 +22,7 @@ firmware/esp32s3-pn5180-ccid/
 ├── CMakeLists.txt              ESP-IDF プロジェクト
 ├── sdkconfig.defaults         TinyUSB/USB-OTG を有効化
 └── main/
-    ├── app_config.h           ★ 実機設定（slot 数 / SPI ピン / VID-PID / product 文字列）
+    ├── app_config.h           ★ 実機設定（reader 台数 / SPI ピン / VID-PID / product 文字列）
     ├── usb_descriptors.[ch]    CCID の USB 記述子（class 0x0B, bulk IN/OUT, §2）
     ├── ccid_device.[ch]        TinyUSB カスタムクラスとして CCID を登録（bulk plumbing）
     ├── ccid_slot.[ch]          ★ CCID メッセージ処理（ATR §5 / Get UID §6 / UID §7）= 契約の核
@@ -37,20 +38,31 @@ firmware/esp32s3-pn5180-ccid/
 - ESP-IDF v5.1 以降（`idf.py`）。`esp_tinyusb` と `jef-sure/esp32-component-pn5180` は
   `main/idf_component.yml` で自動取得。
 - ESP32-S3 ボード（**native USB ポート**を PC に接続。CP2102N の UART 側ではない＝§0）。
-- PN5180 ×N（SPI 接続。NSS/BUSY/RST は slot ごと、SCK/MOSI/MISO は共有）。
+- PN5180 ×N（SPI 接続。NSS/BUSY は reader ごと、SCK/MOSI/MISO/RST は共有）。
 
 ## ビルド & フラッシュ
 
 ```bash
 cd firmware/esp32s3-pn5180-ccid
 idf.py set-target esp32s3
-# 実機に合わせて main/app_config.h（ピン/slot/VID-PID）を編集
+# 実機に合わせて main/app_config.h（ピン / PN5180_READER_COUNT / VID-PID）を編集
 idf.py build
 idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB-Serial/JTAG)でも可
 ```
 
-## アーキテクチャ（実機: 本番 11 slot / 配線は 13 台ぶん + CD74HC4067 MUX）
+## アーキテクチャ（実機: 本番 11 reader / CCID slot は 1 つ / 配線は 13 台ぶん + CD74HC4067 MUX）
 
+- **CCID slot は常に 1 つ、物理リーダーは Get UID の P2 で選ぶ**（契約 **v1.2 §6** / ADR-0041）。
+  Windows の汎用 CCID ドライバは **1 インターフェースにつき 1 slot しか reader として公開しない**
+  （実機 2026-09-10: `CCID_SLOT_COUNT=2` で焼いても `PokerRFID PN5180-CCID 1` は `Reader not found`）。
+  slot ごとに USB インターフェースを分ける手も ESP32-S3 の USB endpoint 6 本（双方向 5 + IN 1）では
+  最大 5 台までで 11 台に届かない。よって `CCID_SLOT_COUNT=1` 固定とし、
+  **`FF CA 00 <k> 00`（k = 物理 reader index 0..N-1）** で 1 台ずつ読む。台数問い合わせは
+  **`FF CA 00 FF 00` → `<N> 90 00`**、範囲外の k は **`6A 86`**。k=0 は v1.0/1.1 と同一バイト列。
+  host 側は `config.rfid.pcsc_readers[].reader`（index）で席/board の役割に対応づける
+  （reader_name は 1 つだけなので、役割の区別は index で行う）。
+- **物理 reader 台数は `PN5180_READER_COUNT`**（既定 11）。`CCID_SLOT_COUNT` は USB 上の slot 数で
+  常に 1（両者は別物）。
 - **本番は 11 reader**: 席 1..8（各 hole card **2 枚重ね**）+ board1（flop **3 枚重ね**）/
   board2（turn 1 枚）/ board3（river 1 枚）。配線ハーネスと `PN5180_READERS` は 13 台ぶん
   用意してあり、先頭 11 を使う（#12/#13 は予備）。
@@ -60,7 +72,7 @@ idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB
   切替**（`mux_select`）してから jef-sure ドライバを呼ぶ（ドライバは MUX 非依存、busy=SIG GPIO を渡すだけ）。
 - MUX EN=GND（常時有効）、MUX VCC=**3.3V**（5V 禁止）。SPI は **5MHz**（7MHz 以上で不安定。bring-up 中は
   `PN5180_SPI_HZ=1MHz` に落としてあるので 11 台化のときに戻す）。
-- **bring-up は `CCID_SLOT_COUNT=1` で 1 台検証 → 動いたら 11 に上げる**（`app_config.h` の
+- **bring-up は `PN5180_READER_COUNT=1` で 1 台検証 → 動いたら 11 に上げる**（`app_config.h` の
   `PN5180_READERS` は 13 台分定義済み）。1 台検証中は起動時の **MUX 全 ch 走査で通電中の ch を自動選択**
   するので、どのコネクタに挿しても再ビルド不要（`pn5180_reader.c: select_bringup_reader`）。
 - **CCID slot は仮想カード常時挿入（ADR-0040）**: `IccPowerOn` には常に固定 ATR を返し、カード有無は
@@ -68,7 +80,7 @@ idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB
   無視し、無ければ polling もせず bind 時の IccPowerOn しか送らないため（実機で確定）。interrupt-IN は
   `CCID_USE_INTERRUPT_EP=0` で記述子から外してある（EP 構成を変えたら `bcdDevice` を上げる）。
 - UID は **MSB-first** で返す（PN5180 の ISO15693 生レスポンスは LSB-first なので反転。契約 §7）。
-  1 slot に複数枚あるときは **UID を 8B ごと連結**（`count × 8B + 90 00`）。並びは memcmp 昇順に
+  1 reader に複数枚あるときは **UID を 8B ごと連結**（`count × 8B + 90 00`）。並びは memcmp 昇順に
   正規化してあるので、同じ組み合わせなら毎回同じバイト列になる。
   ISO14443A の試行は `PN5180_TRY_ISO14443=0`（本番カードは ICODE SLIX のみ。
   `PN5180_FAST_INVENTORY=1` の経路では 14443 は試さない）。
@@ -83,8 +95,9 @@ idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB
 - `jef-sure/pn5180` 0.1.1 の実 API（`pn5180-14443.h` / `pn5180-15693.h`、`nfc_uids_array_t.uids_count`、
   `nfc_uid_t.uid_length`）、tinyusb 0.19 / esp_tinyusb 1.7.6 の struct 構成、ATR
   `3B 8F 80 01 80 4F 0C A0 00 00 03 06 03 00 01 00 00 00 00 6A`（Windows が受理）。
-- USB: VID 0x303A / PID 0x8B5D / `PokerRFID PN5180-CCID <slot>` / bulk OUT+IN のみ。bcdDevice は実機確認時
-  0x0102 → 現在は slot 数連動 `0x0200 | CCID_SLOT_COUNT`（1 slot = 0x0201。下記）。
+- USB: VID 0x303A / PID 0x8B5D / reader_name は **`PokerRFID PN5180-CCID 0` の 1 つだけ**（v1.2）/
+  bulk OUT+IN のみ。bcdDevice は実機確認時 0x0102 → 現在は `0x0200 | CCID_SLOT_COUNT` = **0x0201 固定**
+  （slot は常に 1 なので、物理 reader を増やしても記述子は変わらない）。
 
 複数 reader 化の準備は **実装済（実機未検証, 2026-09-10, worklog
 `docs/worklog/2026-09-10-multi-reader-firmware-prep.md` /
@@ -93,10 +106,12 @@ idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB
 - **RF 時分割**（`PN5180_RF_OFF_BETWEEN_READERS=1`）: 各 reader の inventory 直後に `pn5180_setRF_off()`。
   ドライバの `get_all_uids()` は RF を ON のまま戻るため、切らないと 11 台の磁界が同時に立つ。
 - **未通電 reader の skip**: 起動時の MUX scan で floating の ch は `pn5180_init` を呼ばずに飛ばし、
-  残りで起動する（`PN5180 ready: N/11 slot（skip: …）`）。設定 ch と通電 ch の食い違いは
+  残りで起動する（`PN5180 ready: N/11 reader（skip: …）`）。skip した index は常に `6A 81`。
+  1 台も上がらなければ NSS スキャン診断を出す。設定 ch と通電 ch の食い違いは
   「配線チェック」ログで列挙。
 - **poll 周期の計測**（`POLL_STATS_INTERVAL_MS=10000`）: 10 秒ごとに 1 周の min/avg/max と最長 reader。
-- **`bcdDevice` を slot 数に連動**（`0x0200 | CCID_SLOT_COUNT`）+ `bMaxCCIDBusySlots=1`。
+- **`bcdDevice` = `0x0200 | CCID_SLOT_COUNT` = 0x0201 固定**（slot は 1）+ `bMaxCCIDBusySlots=1`。
+  記述子（EP 構成 / functional descriptor）を変えたときだけ上位バイトを上げる。
 - **高速 inventory + 重ね置き anti-collision**（`PN5180_FAST_INVENTORY=1`, **ISSUE-0021**）:
   ドライバの `get_all_uids()` は RF 設定 2 種 × データレート 2 種を毎回総当たりするため 1 台で
   0.2〜0.9 秒かかり（実機 `poll 統計`）、11 台には載らない。自前経路では
@@ -144,21 +159,24 @@ idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB
 
 ### 11 台化の段階手順
 
-本番は **11 slot**（席 8 + board 3。board1 = flop 3 枚重ね / board2 = turn / board3 = river）。
-配線表 `PN5180_READERS` は 13 台分あるが、使うのは先頭 11。
+本番は **11 reader**（席 8 + board 3。board1 = flop 3 枚重ね / board2 = turn / board3 = river）。
+配線表 `PN5180_READERS` は 13 台分あるが、使うのは先頭 11。変えるのは **`PN5180_READER_COUNT`**
+（`CCID_SLOT_COUNT` は常に 1 のまま = USB 記述子も不変）。
 
-1. `CCID_SLOT_COUNT=1` … 現状（bring-up 済）。通電 ch から自動選択。
-2. `CCID_SLOT_COUNT=2` … ch0/ch1 に reader #1/#2 を配線 → ビルド・書き込み。起動ログの
-   「配線 OK / 配線チェック」「PN5180 ready: 2/2 slot」を確認 → host で `probe_pcsc list` が **2 件**、
-   `watch` で slot 0/1 それぞれが発火するか。
-3. `CCID_SLOT_COUNT=11` … 本番全台。`probe_pcsc list` が **11 件**、`watch` で全 slot、
+1. `PN5180_READER_COUNT=1` … bring-up 済。通電 ch から自動選択。
+2. `PN5180_READER_COUNT=2` 以上 … 自動選択せず **配列順 = reader index 順**。起動ログの
+   「配線 OK / 配線チェック」「PN5180 ready: N/M reader」を確認 → host で
+   `probe_pcsc list` の **`physical readers: N`**（= `FF CA 00 FF 00` の応答）と、
+   `watch` で **index ごと**に発火するかを見る。未通電 index は常に `6A 81`。
+3. `PN5180_READER_COUNT=11` … 本番全台。`physical readers: 11`、`watch` で全 index、
    `poll 統計` ログで **1 周 ≤ 300 ms** を確認（超えるなら `PN5180_FAST_MAX_PROBES` /
    `PN5180_FAST_RX_TIMEOUT_MS` / `CARD_POLL_INTERVAL_MS` を見直す）。
    併せて席に 2 枚・board1 に 3 枚を重ねて `🎴 reader N: 2 枚 […]` が出るか。
+   （実機の現状は ch0 と ch10 に 1 台ずつ = index 0 と 10。11 にすれば両方使われる。）
 4. 最後に `PN5180_SPI_HZ` を 5MHz へ（1 変数だけ変える）。
 
-slot 数を変えると `bcdDevice` が変わる（Windows の記述子キャッシュ対策）ので、Windows 側で古い
-記述子が残ることはない。
+**台数を変えても USB 記述子は変わらない**（slot は常に 1）ので、Windows の記述子キャッシュを
+気にする必要はない。記述子そのものを変えたときだけ `bcdDevice` を上げる。
 
 ## host 側での受け入れ確認（pokerapp 側, 別マシン or 同じ PC）
 
@@ -184,9 +202,9 @@ python tools/probe_pcsc.py watch     # カードをかざすと UID 表示 → �
 | 契約 § | 実装 | host 確認 |
 |--------|------|-----------|
 | §2 USB CCID class / VID-PID / product | `usb_descriptors.c`, `app_config.h` | `probe_pcsc list` |
-| §3-4 slot↔reader_name | `usb_descriptors.c`（EP/IF）, host config | `probe_pcsc list` |
+| §3-4 reader_name（1 つ）↔ 物理 reader index | `usb_descriptors.c`（EP/IF）, host config の `reader` | `probe_pcsc list` |
 | §5 ATR | `ccid_slot.c`（`ATR[]` + IccPowerOn） | `probe_pcsc check` |
-| §6 Get UID `FF CA 00 00 00` | `ccid_slot.c`（`handle_apdu`） | `probe_pcsc watch` |
+| §6 Get UID `FF CA 00 <k> 00` / 台数 `FF CA 00 FF 00` | `ccid_slot.c`（`handle_apdu`） | `probe_pcsc list` / `watch` |
 | §7 UID 4/7/8B 生バイト（重ね置きは連結） | `pn5180_reader.c` → `ccid_slot.c` | `probe_pcsc watch` |
 | §8 present/removed・hot-plug | `pn5180_reader.c`（poll）+ host debounce | `probe_pcsc watch` |
 
@@ -201,7 +219,9 @@ python tools/probe_pcsc.py watch     # カードをかざすと UID 表示 → �
   は 4（= 34 byte）まで。7 枚超に増やすならチェイン送信の実装が要る。
 - live hot-add（稼働中の USB 再列挙追従）は契約上も v1.0 対象外。
 - ATR / dwFeatures は一般的な非接触リーダー値。host は ATR 非依存だが Windows の bind 検証は実機で。
-- マルチ slot は配線・ピン拡張が前提（`app_config.h` の `PN5180_READERS` を slot 数ぶん用意）。
+- 複数 reader は配線・ピン拡張が前提（`app_config.h` の `PN5180_READERS` を台数ぶん用意）。
+- **CCID multi-slot は使えない**（Windows の汎用ドライバが 1 slot しか公開しない, ADR-0041）。
+  pcsc-lite など multi-slot を扱える環境でも、契約 v1.2 は P2 方式で統一する。
 - **ドライバ制約（重要）**: `pn5180_spi_init()` が add する SPI device は **全 reader で 1 本の共有**で、
   `pn5180_init()` の失敗経路はその共有ハンドルを `spi_bus_remove_device` で解放する。したがって
   「失敗した 1 台だけ skip して続行」は不可能（= 通電している reader の init 失敗は全台停止）。

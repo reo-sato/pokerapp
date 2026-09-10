@@ -83,11 +83,13 @@ pseudo-APDU の P2 で選ぶ**。
 - `tools/probe_pcsc.py` / `tools/register_cards.py`
 - `config_default.json`
 - `docs/contracts/rfid-usb-ccid.md`（v1.1 → v1.2）
-- `firmware/esp32s3-pn5180-ccid/`（別タスク: P2 選択 + 台数問い合わせ）
+- `firmware/esp32s3-pn5180-ccid/`（firmware 側: `CCID_SLOT_COUNT=1` 固定 + `PN5180_READER_COUNT`（既定 11）+
+  `handle_apdu` の P2 選択 / `6A 86` / 台数問い合わせ。スタブ 128 構成 + simulator で確認、**実機未検証**）
 
 ## Related Worklog
 
-- `docs/worklog/2026-09-10-rfid-reader-index-p2-host.md`
+- `docs/worklog/2026-09-10-rfid-reader-index-p2-host.md`（host 側）
+- `docs/worklog/2026-09-10-pn5180-reader-index-p2-firmware.md`（firmware 側）
 
 ## Related ADRs
 

@@ -10,8 +10,11 @@
 // reader→host の非同期通知:
 //   0x50 NotifySlotChange（interrupt-IN, カード挿抜）… ccid_slot_build_notify で組み立て
 //
-// host(rfid/bridge.py)が依存するのは「XfrBlock に FF CA 00 00 00 → UID + 90 00」だけ（§6）。
-// ⚠ 重ね置き対応: 1 slot に複数枚あるときは UID を uid_len byte ごとに連結して返す
+// host(rfid/bridge.py)が依存するのは「XfrBlock に FF CA 00 <k> 00 → UID + 90 00」だけ（§6）。
+// ⚠ **CCID slot は常に 1 つ**（Windows の汎用 CCID ドライバは 1 インターフェース 1 slot しか
+//    公開しない）。11 台の物理リーダーは **P2 = reader index k** で選ぶ（契約 v1.2 / ADR-0041）。
+//    台数問い合わせは `FF CA 00 FF 00` → `<N> 90 00`、範囲外の k は `6A 86`。
+// ⚠ 重ね置き対応: 1 reader に複数枚あるときは UID を uid_len byte ごとに連結して返す
 //    （例: 8B × 2 枚 = 16 byte + 90 00）。host 側は応答長から枚数を割り出して分割する必要がある。
 #include <string.h>
 #include "esp_log.h"
@@ -59,9 +62,16 @@ static bool s_powered[CCID_SLOT_COUNT];            // IccPowerOn 済み（PowerO
 static bool s_notified_present[CCID_SLOT_COUNT];   // 最後に host へ通知（commit）した present
 static bool s_snapshot_present[CCID_SLOT_COUNT];   // build_notify 時点の present（commit で反映）
 
+// CCID slot（常に 1 つ）の present。物理 reader は N 台あるので **1 台でもカードがあれば
+// present** とする（契約 v1.2 / ADR-0041: どの reader にあるかは Get UID の P2 で問い合わせる）。
+// CCID_VIRTUAL_CARD_ALWAYS_PRESENT=1（既定, ADR-0040）ではこの関数は使われない。
 static bool slot_present(uint8_t slot) {
-    pn5180_card_t c;
-    return slot < CCID_SLOT_COUNT && pn5180_reader_get_card(slot, &c) && c.present;
+    if (slot >= CCID_SLOT_COUNT) return false;
+    for (uint8_t k = 0; k < PN5180_READER_COUNT; k++) {
+        pn5180_card_t c;
+        if (pn5180_reader_get_card(k, &c) && c.present) return true;
+    }
+    return false;
 }
 
 // slot の「host に見せる」状態。
@@ -105,13 +115,42 @@ static size_t put_header(uint8_t *out, uint8_t type, uint32_t data_len,
 }
 
 // XfrBlock 内の APDU を処理して応答(データ+SW)を resp に書き、長さを返す。
-// Get UID(FF CA 00 00 00)のみ実装。他は未対応 SW を返す。
-static size_t handle_apdu(uint8_t slot, const uint8_t *apdu, size_t apdu_len,
+// Get UID(FF CA 00 <k> 00)のみ実装。他は未対応 SW を返す。
+//
+// ── 契約 v1.2 §6 / ADR-0041: **物理 reader は P2 (=apdu[3]) で選ぶ** ──
+// Windows の汎用 CCID ドライバは 1 インターフェースにつき 1 slot しか公開しないので、CCID slot は
+// 常に 1 つ（CCID_SLOT_COUNT=1）にして、11 台の物理リーダーは pseudo-APDU の P2 で指定する。
+//   FF CA 00 <k> 00  (k = 0..PN5180_READER_COUNT-1) → reader k の UID 連結 + 90 00 / 無しは 6A 81
+//   FF CA 00 FF 00                                  → <N>(1 byte = 物理 reader 数) + 90 00
+//   k >= PN5180_READER_COUNT                        → 6A 86（P1/P2 不正）
+// k=0 は v1.0/1.1 の `FF CA 00 00 00` と同一バイト列（後方互換）。
+static size_t handle_apdu(const uint8_t *apdu, size_t apdu_len,
                           uint8_t *resp, size_t resp_max) {
-    // Get UID: CLA=FF INS=CA P1=00 P2=00 Le=00（末尾 Le は省略され 4 byte のこともある）
-    bool is_get_uid = apdu_len >= 4 && apdu[0] == 0xFF && apdu[1] == 0xCA &&
-                      apdu[2] == 0x00 && apdu[3] == 0x00;
+    // Get UID: CLA=FF INS=CA P1=00 P2=<reader index>（末尾 Le は省略され 4 byte のこともある）
+    const bool is_get_uid = apdu_len >= 4 && apdu[0] == 0xFF && apdu[1] == 0xCA &&
+                            apdu[2] == 0x00;
     if (is_get_uid) {
+        const uint8_t k = apdu[3];
+
+        // 台数問い合わせ（P2=0xFF）: host が config の reader index を検証できるようにする。
+        if (k == 0xFF) {
+            if (resp_max >= 3) {
+                resp[0] = (uint8_t)PN5180_READER_COUNT;
+                resp[1] = 0x90;
+                resp[2] = 0x00;
+                return 3;
+            }
+            resp[0] = 0x6A;
+            resp[1] = 0x81;
+            return 2;
+        }
+        // 範囲外の reader index → 6A 86（config の reader が firmware の台数を超えている）。
+        if (k >= PN5180_READER_COUNT) {
+            resp[0] = 0x6A;
+            resp[1] = 0x86;
+            return 2;
+        }
+
         // 1 reader に複数枚が重なって置かれる（席 = hole card 2 枚 / board1 = flop 3 枚）ため、
         // **UID を uid_len byte ごとに連結**して返す（count × uid_len + SW 90 00）。1 枚なら
         // 従来と完全に同じバイト列。並びは pn5180_reader.c が UID 昇順に正規化済み。
@@ -122,12 +161,12 @@ static size_t handle_apdu(uint8_t slot, const uint8_t *apdu, size_t apdu_len,
         //   かつ fast 経路は 15693 専用なので実害は無い。
         // 応答長は 4 枚でも 4*8+2 = 34 byte（bulk EP 64 / in_buf 10+64 に収まる）。
         pn5180_card_t c;
-        if (pn5180_reader_get_card(slot, &c) && c.present && c.uid_len > 0 && c.count > 0) {
+        if (pn5180_reader_get_card(k, &c) && c.present && c.uid_len > 0 && c.count > 0) {
             const size_t n = (size_t)c.count * (size_t)c.uid_len;
             if (n + 2 <= resp_max) {
-                for (uint8_t k = 0; k < c.count; k++) {
+                for (uint8_t j = 0; j < c.count; j++) {
                     // UID（生バイト MSB-first, 4/7/8B, §7）
-                    memcpy(resp + (size_t)k * c.uid_len, c.uids[k], c.uid_len);
+                    memcpy(resp + (size_t)j * c.uid_len, c.uids[j], c.uid_len);
                 }
                 resp[n] = 0x90;                 // SW1
                 resp[n + 1] = 0x00;             // SW2 = 90 00（成功）
@@ -215,9 +254,10 @@ size_t ccid_process_message(const uint8_t *in, size_t in_len,
     }
     case PC_TO_RDR_XFR_BLOCK: {
         uint8_t resp[64];
-        size_t rn = handle_apdu(slot, data, data_len, resp, sizeof(resp));
-        // APDU 先頭（Get UID なら FF CA 00 00 00）と、返した SW を出す（host の poll ごとに来るので DEBUG）。
-        // 期待: apdu=FF CA 00 00 00 → resp_len=uid+2, sw=90 00。sw=6A 81 ならカード無し判定。
+        size_t rn = handle_apdu(data, data_len, resp, sizeof(resp));
+        // APDU 先頭（Get UID なら FF CA 00 <reader index> 00）と、返した SW を出す
+        // （host の poll ごとに来るので DEBUG）。期待: resp_len=uid+2, sw=90 00。
+        // sw=6A 81 はカード無し、6A 86 は reader index が範囲外（契約 v1.2 §6）。
         ESP_LOGD(TAG,
                  "XfrBlock slot=%u apdu_len=%u apdu=%02X %02X %02X %02X %02X → resp_len=%u sw=%02X %02X",
                  (unsigned)slot, (unsigned)data_len,

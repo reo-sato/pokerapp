@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+### Changed (firmware: CCID slot を 1 つに固定し、物理リーダーを Get UID の P2 で選ぶ — 契約 **v1.2** / firmware 側, ADR-0041 / ISSUE-0022, 2026-09-10)
+
+- **firmware 側の v1.2 実装**（host 側は次の項）: `CCID_SLOT_COUNT` は **1 固定**（`bMaxSlotIndex=0`、
+  `bcdDevice=0x0201`。物理 reader 台数を変えても USB 記述子は変わらないので Windows の記述子
+  キャッシュ問題が起きない）、物理 reader 台数は新設の **`PN5180_READER_COUNT`（既定 11）**。
+  Get UID は **`FF CA 00 <k> 00` の P2 = reader index k** で reader k の UID（複数枚は 8B 連結・
+  昇順）+ `90 00`、無しは `6A 81`、**`k >= 台数` は `6A 86`**、**`FF CA 00 FF 00` は `<N> 90 00`**。
+  `k=0` は従来と同一バイト列（1 台構成の挙動は不変）。
+- **起動ログ**: `1 CCID slot, 11 physical reader(s)` / `PN5180 ready: N/11 reader（skip: …）`。
+  未通電で skip した index は範囲内なので常に `6A 81`（`6A 86` は config の番号が台数を超えたときだけ）。
+  1 台も上がらないときも NSS スキャン診断（BUSY 非依存）を出すようにした（複数 reader 構成では
+  全台が MUX scan で skip され、従来は診断が出なかった）。
+- **coll_pos の安全弁**: 衝突位置を採用した分割で **3 ラウンド連続** 札 0 枚なら `RX_COLL_POS` の
+  基準ズレとみなし、以後は 1 bit ずつ伸ばす DFS に固定（WARN 1 回、取れる UID は同じで遅くなるだけ）。
+  1 回だけの空振り（hole card 2 枚を同時に持ち上げた過渡）では発動しない。
+- docs: firmware README / `docs/rfid-ccid-firmware-checklist.md`（§2/§4/§8 を v1.2 に）/
+  ISSUE-0021 の用語注記 / worklog `docs/worklog/2026-09-10-pn5180-reader-index-p2-firmware.md`。
+  スタブ 128 構成で警告 0 + register-level simulator（APDU 応答 4 種 + 安全弁）で確認。**実機未検証**
+  （次: 焼いて `probe_pcsc list` の `physical readers: 11`、`watch` で index 0 と 10 が別々に発火）。
+
 ### Changed (RFID: 物理リーダーは Get UID の P2 で選ぶ — 契約 **v1.2** / host, ADR-0041 / ISSUE-0022, 2026-09-10)
 
 - **背景**: Windows の Microsoft 汎用 CCID ドライバは **1 インターフェース 1 slot** しか公開せず、
@@ -32,7 +52,7 @@
 - docs: 契約 `docs/contracts/rfid-usb-ccid.md` **v1.2**、ADR-0041、ISSUE-0022、
   `docs/hardware-qa-checklist.md`（手順 1/2/3/4 + 受け入れ基準）、`docs/installation.md`、
   worklog `docs/worklog/2026-09-10-rfid-reader-index-p2-host.md`。823 passed。
-  **残**: firmware 側の P2 実装と、実機 2 台 → 11 台の通し QA。
+  **残**: 実機 2 台 → 11 台の通し QA（firmware 側の P2 実装は上の項）。
 
 ### Changed (firmware: 重ね置きの読み取りを高速化 — 衝突位置 DFS + 確認 probe 間引き + ノイズ再試行, ISSUE-0021, 2026-09-10)
 

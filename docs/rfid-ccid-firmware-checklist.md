@@ -3,7 +3,7 @@
 ESP32-S3（PN5180 ×N）firmware を **USB CCID smart card reader** として host PC に公開し、
 本アプリ（hand logger）が PC/SC 経由で UID を読めるようにするための **firmware 実装者向け**チェックリスト。
 
-- **正準（normative）は契約** `docs/contracts/rfid-usb-ccid.md` **v1.0**（ADR-0015/0034）。本書はそれを
+- **正準（normative）は契約** `docs/contracts/rfid-usb-ccid.md` **v1.2**（ADR-0015/0034/0041）。本書はそれを
   firmware 実装の手順に落とした **implementer's guide**。MUST/SHOULD の意味は契約に従う（食い違いは契約優先）。
 - **ホスト側（Python / pyscard）は実装・テスト済み**（`rfid/bridge.py` の Get UID、`rfid/reader_thread.py` の
   polling/debounce、`rfid/card_master.py` の UID 正規化、回帰 `tests/test_rfid.py`）。**本チェックリストを
@@ -25,7 +25,8 @@ ESP32-S3（PN5180 ×N）firmware を **USB CCID smart card reader** として ho
 - [ ] 実装は **TinyUSB の CCID class**（または同等の USB CCID 実装）を土台にするのが現実的。
 
 **受け入れ**: Windows「デバイスマネージャー → スマートカード読み取り装置」に出る。
-`python tools/probe_pcsc.py list` に reader_name が slot 数だけ並ぶ（CDC=COMポートには出ない）。
+`python tools/probe_pcsc.py list` に reader_name が **1 件**出る（CDC=COMポートには出ない）。
+物理リーダーの台数は `physical readers: N` で確認する（§2/§4）。
 
 ## 1. USB descriptors（契約 §2）
 
@@ -34,27 +35,34 @@ ESP32-S3（PN5180 ×N）firmware を **USB CCID smart card reader** として ho
 - [ ] **VID/PID を固定**する（製作時に確定）。テスト用に実 VID が無くても PID は固定。
 - [ ] **manufacturer / product 文字列を固定**。`product` は host の reader_name に現れ config の照合対象に
       なるため、**ファーム更新でも変えない**。
-      - 推奨: `manufacturer = "PokerRFID"`, `product = "PN5180-CCID"`（OS が slot 接尾辞を付与 → §2）。
+      - 実機確定値: `manufacturer = "PokerRFID"`, `product = "PN5180-CCID"`（OS が slot 接尾辞 ` 0` を付与
+        → Windows の reader_name は `PokerRFID PN5180-CCID 0` の 1 件だけ。§2）。
 - [ ] **serial 文字列**は device 単位で安定（複数台運用の識別、SHOULD）。
 
 **受け入れ**: `probe_pcsc list` の reader_name に product 文字列（例 `PN5180-CCID [Interface 0]`）が出る。
 **確定したら**: 実 **VID/PID** と **実 reader_name** を契約 `rfid-usb-ccid.md` §2/§4 に追記（ISSUE-0015 残作業）。
 
-## 2. CCID multi-slot と reader_name（契約 §3）
+## 2. CCID slot は 1 つ / 物理リーダーは Get UID の P2（契約 v1.2 §3, ADR-0041）
 
-- [ ] **PN5180 1 個 = CCID 1 slot**。slot 数 N を host の `pcsc_readers` 件数と一致させる。
-- [ ] 各 slot の **reader_name は slot ごとに一意**で、**再列挙・再起動を跨いで安定部分（product + slot index）が
-      不変**。OS は `<product> [<iface/slot>] …` の体裁で描画（OS 依存）。
-- [ ] **slot 順序を firmware 内で固定**（slot 0,1,2… が常に同じ物理リーダー）。
-- [ ] **役割（seat/board）は firmware で決めない**。reader_name↔役割の対応は **host config（`pcsc_readers`）が
-      唯一の source of truth**。firmware は slot 順序の安定だけを保証する。
+- [ ] **CCID slot は 1 つだけ**（`bMaxSlotIndex = 0`）。**CCID multi-slot は使わない**。
+      Windows の汎用 CCID ドライバ（usbccid）は **1 インターフェースにつき 1 slot しか reader として
+      公開しない**（実機 2026-09-10: 2 slot で焼いても `PokerRFID PN5180-CCID 1` は `Reader not found`）。
+      slot ごとに USB インターフェースを分ける回避策も、ESP32-S3 の USB endpoint が 6 本
+      （双方向 5 + IN 1）なので **最大 5 台**にしかならず本番 11 台に届かない。
+- [ ] **物理リーダーは Get UID の P2（reader index k）で選ぶ**（§4）。firmware は
+      **index 順序を固定**する（index 0,1,2… が常に同じ物理リーダー = 配線表の並び）。
+- [ ] **台数 N を `FF CA 00 FF 00` で答える**（host が config の index を検証できるように）。
+- [ ] reader_name は **1 つだけ**（`<product> 0` 等）で、再列挙・再起動を跨いで**不変**。
+- [ ] **役割（seat/board）は firmware で決めない**。index↔役割の対応は **host config
+      （`pcsc_readers[].reader`）が唯一の source of truth**。firmware は index 順序の安定だけを保証する。
 
-**受け入れ**: `probe_pcsc list` の reader 件数 = slot 数。再起動して名前が変わらない。
-host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**で記入（前方一致しない）。
+**受け入れ**: `probe_pcsc list` の reader 件数は **1**、`physical readers: N` が firmware の台数と一致。
+再起動して名前が変わらない。host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**で、
+`reader` に **物理 reader index** を記入する。
 
 ## 3. ATR（契約 §5）
 
-- [ ] 各 slot は **PC/SC 互換の ATR** を返す（ISO 15693 等の非接触カードは PC/SC v2.01 Part 3 の
+- [ ] （唯一の）slot は **PC/SC 互換の ATR** を返す（ISO 15693 等の非接触カードは PC/SC v2.01 Part 3 の
       **storage-card proxy ATR** 互換、または vendor ATR）。これで OS の `SCardConnect` が成功する。
 - [ ] ATR は card-type ごとに **安定**（同一カード種別で毎回同じ, SHOULD）。
 - [ ] **host は ATR の中身を解釈しない**（forward-compat）。connect さえ成立すればよい。凝らなくてよい。
@@ -66,15 +74,21 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
 **受け入れ**: `probe_pcsc raw` で `[OS状態] PRESENT`（`MUTE` が付かない）+ `[connect] connect OK ATR=…`
 （`check` は reader 名の確認のみで ATR は検査しない）。
 
-## 4. Get UID pseudo-APDU（契約 §6 — host が依存する唯一の APDU）
+## 4. Get UID pseudo-APDU（契約 v1.2 §6 — host が依存する唯一の APDU）
 
-- [ ] host は **`FF CA 00 00 00`**（PC/SC Get Data: UID）を送る。これに対し slot は
-      **`<UID バイト列> + SW(90 00)`** を返す。
-- [ ] **カード不在・読み取り失敗時**は `90 00` 以外（例 `6A 81` / `63 00`）を返す。
-      host は非 `90 00` を「UID なし（None）」として扱う（`rfid/bridge.py`: `if (sw1,sw2)!=(0x90,0x00): return None`）。
-- [ ] v1.0 で host が要求するのは **Get UID のみ**。ATS/historical（`FF CA 01 00 00`）等は不要（将来 additive）。
+- [ ] host は **`FF CA 00 <k> 00`**（PC/SC Get Data: UID、**P2 = 物理 reader index k**）を送る。
+      これに対し **reader k** の UID を **`<UID バイト列> + SW(90 00)`** で返す
+      （複数枚は 8B 連結 = §7 / v1.1 §6、UID 昇順）。
+      **`k = 0` は v1.0/1.1 の `FF CA 00 00 00` と同一バイト列**（後方互換）。
+- [ ] **カード不在・読み取り失敗時**は `90 00` 以外（`6A 81`）を返す。
+      host は非 `90 00` を「UID なし（None）」として扱う（`rfid/bridge.py`）。
+- [ ] **`k >= 台数` は `6A 86`**（P1/P2 不正）。host の config で `reader` を書き間違えたことが分かる。
+- [ ] **`FF CA 00 FF 00` は台数問い合わせ**: `<N>`（1 byte = 物理 reader 数）+ `90 00` を返す。
+- [ ] 未通電で skip した index も **範囲内なら `6A 81`**（`6A 86` ではない）。
+- [ ] host が要求するのはこの 2 つのみ。ATS/historical（`FF CA 01 00 00`）等は不要（将来 additive）。
 
-**受け入れ**: `probe_pcsc watch` 実行中にカードをかざすと、その slot の行に UID が表示される。
+**受け入れ**: `probe_pcsc list` に `physical readers: N`。`watch` 実行中にカードをかざすと、
+その **reader index** の行に UID が表示される。範囲外 index は `6A 86` で弾かれる。
 
 ## 5. UID 長と正規化（契約 §7）
 
@@ -107,11 +121,12 @@ host 側は `config.rfid.pcsc_readers[].name` に実 reader_name を**等値**�
 - [ ] product 文字列を版ごとに変える（→ reader_name が動いて config が壊れる）。
 - [ ] 役割（seat/board）を reader_name に埋めて host に解釈させる（→ 役割は host config が source of truth）。
 
-## 8. 複数 slot（本番 11 台）
+## 8. 複数 reader（本番 11 台。CCID slot は 1 つのまま）
 
 1 台の bring-up が済んだあと、PN5180 を **11 台**（席 8 + board 3: board1 = flop 3 枚重ね /
 board2 = turn / board3 = river）に増やすときの追加要件。配線ハーネスと firmware の配線表は
-13 台ぶんあるが、本番で有効化するのは先頭 11。
+13 台ぶんあるが、本番で有効化するのは先頭 11。**増やすのは物理 reader 台数だけ**で、
+USB 上の CCID slot は 1 つのまま（§2 / ADR-0041）＝ **USB 記述子は変わらない**。
 
 - [ ] **1 reader あたりの inventory は 1 回に絞る**（ISSUE-0021）。ドライバの `get_all_uids()` は
       RF 設定 2 種（ASK10/ASK100）× データレート 2 種（high/low）を毎回総当たりし、しかも
@@ -157,20 +172,22 @@ board2 = turn / board3 = river）に増やすときの追加要件。配線ハ�
       `get_all_uids()` は **RF を ON のまま戻る**ため、明示的に切らないと 11 台の磁界が同時に立ち、
       隣接アンテナの干渉と電流の積み上がりを招く（ドライバ README も scan 間の off/on を推奨）。
 - [ ] **未通電 reader は起動時の MUX scan で skip**する。BUSY が floating の ch は `pn5180_init` を
-      **呼ばずに**飛ばし、残りの台で起動する（その slot は host から見えるが Get UID は常に `6A 81`）。
+      **呼ばずに**飛ばし、残りの台で起動する（その index は範囲内なので Get UID は常に `6A 81`）。
+      1 台も起動できなければ NSS スキャン診断（BUSY 非依存）を出す。
 - [ ] **通電しているのに `pn5180_init` が失敗したら全 reader 停止**でよい（1 台だけ skip しない）。
       ドライバの失敗経路は **全 reader 共有の SPI device** を解放するため、続行しても他の台が壊れる。
       個別 reader への `pn5180_deinit()` も同じ理由で呼ばない。
-- [ ] **`bcdDevice` を slot 数に連動**させる（firmware は `0x0200 | slot 数`）。slot 数の変更は
-      CCID functional descriptor の `bMaxSlotIndex` の変更 = 記述子の変更であり、Windows は
-      VID/PID/REV で記述子をキャッシュするため REV を変えないと反映されない（§1/契約 §2）。
+- [ ] **`bcdDevice` は `0x0200 | CCID slot 数` = 0x0201 固定**（slot は常に 1）。物理 reader 台数を
+      増やしても記述子は変わらないので REV も据え置き。**記述子そのもの（EP 構成 / functional
+      descriptor）を変えたときだけ REV を上げる**（Windows は VID/PID/REV で記述子をキャッシュする, §1/契約 §2）。
 - [ ] **`bMaxCCIDBusySlots = 1`**（slot 数に連動させない）。実装は bulk OUT を 1 コマンドずつ処理し、
       複数 slot を並行実行しない。
-- [ ] **段階 bring-up 1 → 2 → 11**。各段階でビルド・書き込みし、host 側の受け入れを通してから次へ。
-      SPI クロック（1MHz→5MHz）を上げるのは **11 台が動いてから**、単独で。
+- [ ] **段階 bring-up 1 → 2 → 11**（firmware の `PN5180_READER_COUNT`）。各段階でビルド・書き込みし、
+      host 側の受け入れを通してから次へ。SPI クロック（1MHz→5MHz）を上げるのは **11 台が動いてから**、単独で。
 
-**受け入れ**: 各段階で `probe_pcsc list` の reader 件数 = slot 数。`probe_pcsc watch` で **各 slot** が
-「置く→離す→置く」で再発火し、slot↔物理リーダーの対応が config の `pcsc_readers` 順どおり。
+**受け入れ**: 各段階で `probe_pcsc list` の **`physical readers: N`** が firmware の台数と一致
+（PC/SC の reader 件数は常に 1）。`probe_pcsc watch` で **各 reader index** が
+「置く→離す→置く」で再発火し、index↔物理リーダーの対応が config の `pcsc_readers[].reader` どおり。
 firmware の UART に出る `poll 統計(直近 N 周): 1 周 min/avg/max = …` で 1 周の実測時間を確認し、
 **11 slot で 1 周 ≤ 300 ms**（1 slot なら ≤ 20 ms。**実機 2026-09-10 = 15 ms**）であること。超えるなら
 `PN5180_FAST_MAX_PROBES` / `PN5180_FAST_RX_TIMEOUT_MS` / `CARD_POLL_INTERVAL_MS` を見直す
@@ -185,9 +202,9 @@ firmware の UART に出る `poll 統計(直近 N 周): 1 周 min/avg/max = …`
 | 契約 § | 実装項目 | 確認コマンド | 期待 |
 |--------|---------|-------------|------|
 | §2 | USB CCID class / VID-PID / product | `probe_pcsc list` | reader_name に product、件数 = slot 数 |
-| §3-4 | slot↔reader_name 安定・役割は host | `probe_pcsc list`（再起動） | matched、名前不変 |
-| §3（複数 slot, §8） | slot 数 = firmware の `CCID_SLOT_COUNT` | `probe_pcsc list` | reader 件数 = slot 数（1→2→11 の各段階で） |
-| §8（poll 周期, ISSUE-0021） | 1 reader 1 回の inventory | firmware UART の `poll 統計` | 1 周 ≤ 300 ms（11 slot）/ ≤ 20 ms（1 slot） |
+| §3-4 | reader_name（1 件）安定・役割は host config の `reader` index | `probe_pcsc list`（再起動） | matched、名前不変 |
+| §3（複数 reader, §8） | 台数 = firmware の `PN5180_READER_COUNT` | `probe_pcsc list` | reader 件数は 1 / `physical readers: N`（1→2→11 の各段階で） |
+| §8（poll 周期, ISSUE-0021） | 1 reader 1 回の inventory | firmware UART の `poll 統計` | 1 周 ≤ 300 ms（11 reader）/ ≤ 20 ms（1 reader） |
 | §5 | ATR で connect 成立（power-on 常時成功） | `probe_pcsc raw` | `[OS状態] PRESENT`（MUTE 無し）+ `connect OK ATR=…` |
 | §6 | Get UID `FF CA 00 00 00`→UID+9000 | `probe_pcsc raw` → `watch` | raw: カード無し `SW=6A81`／置いて `SW=9000`+UID。watch: タップで UID 表示 |
 | §7 | UID 4/7/8B 生バイト（MSB-first） | `probe_pcsc watch` | `(8B)`、先頭 `E0:04`（ICODE）、`⚠` 無し、card 解決 |

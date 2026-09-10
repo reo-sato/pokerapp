@@ -21,12 +21,15 @@ static const tusb_desc_device_t s_device_desc = {
     .idVendor           = USB_VID,
     .idProduct          = USB_PID,
     // Windows は VID/PID/REV で記述子をキャッシュする。記述子を変えたら REV を上げて再読込させる
-    // （reader_name には影響しない, 契約 §2/§3）。**slot 数の変更も記述子の変更**
-    // （CCID functional descriptor の bMaxSlotIndex = CCID_SLOT_COUNT-1）なので、REV を
-    // slot 数に連動させて「slot 数を変えたら必ず REV が変わる」ようにする。
-    //   0x0201 = 1 slot / 0x0202 = 2 slot / … / 0x020D = 13 slot
-    //   EP 構成など slot 数以外を変えたときは上位バイトを 0x03 に上げる（0x0300 | slot 数）。
+    // （reader_name には影響しない, 契約 §2/§3）。
+    // **slot は常に 1**（ADR-0041 / 契約 v1.2: Windows の汎用 CCID ドライバは 1 インターフェース
+    // 1 slot しか公開しないので、物理リーダーは Get UID の P2 で選ぶ）。よって記述子は
+    // 物理 reader 台数（PN5180_READER_COUNT）を変えても **変わらない** = REV も 0x0201 のまま。
+    //   0x0201 = 1 slot（現行・固定）
+    //   **記述子を変えたとき（EP 構成・functional descriptor など）は上位バイトを上げる**
+    //   （0x0300 | slot 数）。
     //   履歴: 0x0100 = 2 EP / 0x0101 = interrupt EP 追加 / 0x0102 = interrupt EP を既定 OFF に戻す
+    //         / 0x0201.. = slot 数連動（v1.2 で slot 固定になり実質 0x0201 のみ）
     .bcdDevice          = (0x0200 | CCID_SLOT_COUNT),
     .iManufacturer      = 0x01,
     .iProduct           = 0x02,
@@ -41,7 +44,8 @@ const tusb_desc_device_t *ccid_device_descriptor(void) {
 // ───────── CCID functional descriptor（54 byte, USB CCID 1.1 §5.1）─────────
 // dwFeatures は Short-APDU level exchange を含む値（ACR122U 由来 0x000204BA）。
 // host は XfrBlock で pseudo-APDU `FF CA 00 00 00` を送り、データ+SW を期待する（§6）。
-// bMaxSlotIndex は CCID_SLOT_COUNT-1（= slot 数を変えると記述子が変わる → bcdDevice を連動させる）。
+// bMaxSlotIndex は CCID_SLOT_COUNT-1 = **0 固定**（slot は常に 1。物理リーダーは Get UID の
+// P2 = reader index で選ぶ, 契約 v1.2 §6 / ADR-0041）。ここを変えたら bcdDevice も上げること。
 // bMaxCCIDBusySlots は **1 固定**: ccid_device.c は bulk OUT を 1 コマンドずつ処理する（単一バッファ、
 // 応答を送り終えてから次を受信）ので、slot 数に連動させると「同時に N slot 走らせられる」と host に
 // 嘘をつくことになる。

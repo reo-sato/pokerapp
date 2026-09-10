@@ -1,8 +1,9 @@
 // main.c — USB CCID デバイス + PN5180 ポーリングを起動する。
 //
 // 構成: esp_tinyusb が native USB(§0) を CCID として公開し、ccid_device.c の app driver が
-// bulk を捌く。別タスクで PN5180 を周期ポーリングして slot ごとのカード状態を更新する
+// bulk を捌く。別タスクで PN5180 を周期ポーリングして **物理 reader ごと**のカード状態を更新する
 // （USB と RF を分離。host の RFIDThread も同様に polling/debounce する）。
+// CCID slot は 1 つだけで、物理リーダー N 台は Get UID の P2 で選ぶ（契約 v1.2 / ADR-0041）。
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -39,8 +40,10 @@ void app_main(void) {
     // （これが無いと別ファイルの強定義がリンクされず TinyUSB の weak スタブが使われる = Code 10）。
     ccid_force_link();
 
-    ESP_LOGI(TAG, "PN5180 USB CCID reader: %d slot(s), product='%s'",
-             CCID_SLOT_COUNT, USB_PRODUCT_STR);
+    // slot は常に 1（Windows の汎用 CCID ドライバの制限, ADR-0041）。物理リーダーは Get UID の
+    // P2（reader index 0..N-1）で選ぶ。台数は `FF CA 00 FF 00` で host から問い合わせできる。
+    ESP_LOGI(TAG, "PN5180 USB CCID reader: %d CCID slot, %d physical reader(s), product='%s'",
+             CCID_SLOT_COUNT, PN5180_READER_COUNT, USB_PRODUCT_STR);
 
     // ── USB(CCID) 起動 ──
     // ⚠ 版依存: esp_tinyusb の tinyusb_config_t のフィールド名はバージョンで変わる
@@ -59,7 +62,7 @@ void app_main(void) {
     ESP_LOGI(TAG, "TinyUSB(CCID) installed");
 
     // ── PN5180 起動 + ポーリング ──
-    // jef-sure ドライバは inventory 成功のたびに "Tag Found!" 等を INFO で出す（13 slot × 10Hz だと
+    // jef-sure ドライバは inventory 成功のたびに "Tag Found!" 等を INFO で出す（11 reader × 10Hz だと
     // UART が詰まり poll が遅れる）。カード検出/離脱は pn5180_reader.c が遷移時だけ INFO で出すので、
     // ドライバ側のタグは WARN 以上に絞る（タイムアウト等のエラーは残る）。
     esp_log_level_set("pn5180-15693", ESP_LOG_WARN);

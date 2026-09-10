@@ -5,31 +5,46 @@
 //   - BUSY 13 本は CD74HC4067（16ch アナログ MUX）に入り、S0-S3 で 1 本を選んで SIG に集約。
 //     ESP32 は SIG(=PN5180_PIN_BUSY_SIG) を読む。各 reader を処理する前に MUX channel を切替える
 //     （pn5180_reader.c の mux_select）。
-//   - 契約 docs/contracts/rfid-usb-ccid.md v1.0 / docs/rfid-ccid-firmware-checklist.md。
+//   - 契約 docs/contracts/rfid-usb-ccid.md v1.2（CCID slot は 1 つ / 物理 reader は Get UID の
+//     P2 = reader index, ADR-0041） / docs/rfid-ccid-firmware-checklist.md。
 #pragma once
 
 #include <stdint.h>
 #include "driver/spi_master.h"
 
-// ───────── CCID slot 数（= 有効化する PN5180 台数）─────────
+// ───────── USB 上の CCID slot 数 ─────────
+// **常に 1**（ADR-0041 / 契約 v1.2）。Windows の汎用 CCID ドライバ（usbccid）は
+// **1 インターフェースにつき 1 slot しか reader として公開しない**（実機 2026-09-10:
+// `CCID_SLOT_COUNT=2` で書き込んでも `PokerRFID PN5180-CCID 1` は `Reader not found`）。
+// slot ごとに USB インターフェースを分ける回避策は ESP32-S3 の USB endpoint が 6 本
+// （双方向 5 + IN 1）なので最大 5 台にしかならず、本番 11 台に届かない。
+// → **物理リーダーは CCID slot ではなく Get UID の P2（reader index）で選ぶ**。台数は下の
+//    PN5180_READER_COUNT。記述子（bMaxSlotIndex / bcdDevice）はこの値のまま固定。
+#define CCID_SLOT_COUNT 1
+
+// ───────── 物理 PN5180 の台数（= 配線表 PN5180_READERS の先頭何台を使うか）─────────
 // **本番は 11 台**（席 8 + board 3）。board は 1 台 1 枚ではなく「重ね置き」で運用する:
 //   board1 = flop 3 枚重ね / board2 = turn 1 枚 / board3 = river 1 枚。
 // 席 reader も hole card 2 枚重ね。したがって **1 reader で複数カードを読む**必要があり、
 // inventory は anti-collision（mask DFS, 下の PN5180_MAX_CARDS_PER_READER）で行う。
 // 配線表 PN5180_READERS は 13 台分あるが、本番で使うのは **先頭 11**（#12/#13 は予備）。
 //
-// まず 1 台で MUX+SPI 経路を検証 → 動いたら 11 に上げる。
+// host からは `FF CA 00 <k> 00`（k = 0..PN5180_READER_COUNT-1）で 1 台ずつ読む（契約 v1.2 §6）。
+// 台数は `FF CA 00 FF 00` で問い合わせできる。host 側は config の
+// `rfid.pcsc_readers[].reader`（index）で席/board の役割に対応づける。
 //
 // 【段階手順（1 変数ずつ動かす）】
-//   1) CCID_SLOT_COUNT=1（bring-up）: 通電中の MUX ch から reader を自動選択（どのコネクタでも可）。
-//   2) CCID_SLOT_COUNT=2: ch0/ch1 = reader #1/#2 を配線して 2 台同時。ここで RF 時分割
-//      （PN5180_RF_OFF_BETWEEN_READERS）と slot↔物理の対応が効いているかを見る。
-//   3) CCID_SLOT_COUNT=11: 本番全台。=2 以上では自動選択をせず PN5180_READERS の配列順 = slot 順。
-//   各段階で host 側 `python tools/probe_pcsc.py list` の reader 件数 = slot 数、`watch` で
-//   「どの slot にかざすとどの席/board が出るか」を確認する（役割は host config が source of truth）。
-//   PN5180_SPI_HZ の 1MHz→5MHz は **11 台が 1MHz で安定してから** 単独で上げる（同時に変えない）。
-// slot 数を変えたら usb_descriptors.c の bcdDevice も連動して変わる（Windows の記述子キャッシュ対策）。
-#define CCID_SLOT_COUNT 1
+//   1) PN5180_READER_COUNT=1（bring-up）: 通電中の MUX ch から reader を自動選択（どのコネクタでも可）。
+//   2) PN5180_READER_COUNT=2 以上: 自動選択せず **配列順 = reader index 順**。未通電（BUSY が
+//      floating）の reader は起動時の MUX scan で skip され、その index は常にカード無し
+//      （`6A 81`）になる。ここで RF 時分割（PN5180_RF_OFF_BETWEEN_READERS）を確認する。
+//   3) PN5180_READER_COUNT=11: 本番全台。
+//   実機の現状（2026-09-10）は ch0 と ch10 に 1 台ずつ = **index 0 と 10** なので、11 にすれば
+//   両方が使われる（残り 9 index は未通電 skip）。
+//   各段階で host 側 `python tools/probe_pcsc.py list` の `physical readers: N`、`watch` で
+//   「どの reader index にかざすとどの席/board が出るか」を確認する（役割は host config が
+//   source of truth）。PN5180_SPI_HZ の 1MHz→5MHz は **11 台が 1MHz で安定してから** 単独で上げる。
+#define PN5180_READER_COUNT 11
 
 // ───────── USB 識別子（実機確定値, 契約 §2）─────────
 #define USB_VID 0x303A
@@ -71,13 +86,14 @@ typedef struct {
     int mux_ch;   // この reader の BUSY が入っている MUX channel (0..15)
 } pn5180_reader_cfg_t;
 
-// 13 台分（先頭 CCID_SLOT_COUNT 個だけ有効化）。配列順 = CCID slot 順（slot 0.. = #1.. =
-// host config の pcsc_readers 順）。**本番は先頭 11**（slot 0..7 = 席 1..8、slot 8/9/10 =
-// board1 flop 3 枚 / board2 turn / board3 river）。#12/#13 は予備で通常未使用。
+// 13 台分（先頭 PN5180_READER_COUNT 個だけ有効化）。配列順 = **物理 reader index 順**
+// （index 0.. = #1.. = Get UID の P2 = host config の `rfid.pcsc_readers[].reader`）。
+// **本番は先頭 11**（index 0..7 = 席 1..8、index 8/9/10 = board1 flop 3 枚 / board2 turn /
+// board3 river）。#12/#13 は予備で通常未使用。
 // reader #N の BUSY = MUX channel (N-1)（docs/hardware/pn5180-esp32s3-wiring.md §3 と一致）。
 // 物理対応が違う場合は実配線に合わせる。
 //
-// 【bring-up（CCID_SLOT_COUNT=1）】pn5180_reader.c が起動時の MUX scan で「通電中の ch」を見つけ、
+// 【bring-up（PN5180_READER_COUNT=1）】pn5180_reader.c が起動時の MUX scan で「通電中の ch」を見つけ、
 // その ch の reader（nss）を自動選択して init する。1 台だけ繋ぐ検証で、どのコネクタに挿しても
 // 再ビルド不要（実機で ch12 → ch7 に変わって init 失敗した反省）。全 ch floating なら [0] を使う。
 static const pn5180_reader_cfg_t PN5180_READERS[] = {
@@ -91,19 +107,19 @@ static const pn5180_reader_cfg_t PN5180_READERS[] = {
     {.nss = 9,  .mux_ch = 7},   // #8  席 8
     {.nss = 10, .mux_ch = 8},   // #9  ボード 1（flop 3 枚重ね）
     {.nss = 15, .mux_ch = 9},   // #10 ボード 2（turn 1 枚）
-    {.nss = 16, .mux_ch = 10},  // #11 ボード 3（river 1 枚）— 本番はここまで（11 slot）
+    {.nss = 16, .mux_ch = 10},  // #11 ボード 3（river 1 枚）— 本番はここまで（11 reader）
     {.nss = 17, .mux_ch = 11},  // #12 予備
     {.nss = 18, .mux_ch = 12},  // #13 予備
 };
 
 // ───────── ポーリング間隔 ─────────
-// 1 周（全 slot を 1 回ずつ読む）の後に待つ時間。11 台では 1 周そのものが長くなるので、実測
+// 1 周（全 reader を 1 回ずつ読む）の後に待つ時間。11 台では 1 周そのものが長くなるので、実測
 // （下の POLL_STATS_INTERVAL_MS で出る「poll 統計」ログ）を見て調整する。PRESENCE_HOLD_MISSES
 // （pn5180_reader.c）は **サイクル数** なので、1 周が伸びるとカード離脱の判定時間も同じ比率で伸びる。
 #define CARD_POLL_INTERVAL_MS 100
 
 // ───────── poll 周期の計測ログ ─────────
-// この間隔（ms）ごとに「1 周の min/avg/max・最長 reader・ready slot 数」を INFO で出して統計を
+// この間隔（ms）ごとに「1 周の min/avg/max・最長 reader・ready reader 数」を INFO で出して統計を
 // リセットする。11 台化したときに 1 周が何 ms かかるか（= カード検出の遅れ）を実測するための計測。
 // 0 で無効（計測コードごと除外）。
 #define POLL_STATS_INTERVAL_MS 10000

@@ -65,22 +65,23 @@ static const char *TAG = "pn5180";
 #  define BUSY_PIN PN5180_PIN_BUSY_DIRECT
 #endif
 
-// slot 数は配線表 PN5180_READERS の要素数を超えられない（超えると配列外参照）。
+// 物理 reader 数は配線表 PN5180_READERS の要素数を超えられない（超えると配列外参照）。
+// USB 上の CCID slot は常に 1（ADR-0041）で、物理 reader は Get UID の P2 index で選ぶ。
 // メッセージは ASCII 固定（gcc の診断が非 ASCII を 8 進エスケープして読めなくなるため）。
-_Static_assert(CCID_SLOT_COUNT >= 1 &&
-                   CCID_SLOT_COUNT <= (int)(sizeof(PN5180_READERS) / sizeof(PN5180_READERS[0])),
-               "CCID_SLOT_COUNT must be 1..N of PN5180_READERS: extend the wiring table in app_config.h first");
+_Static_assert(PN5180_READER_COUNT >= 1 &&
+                   PN5180_READER_COUNT <= (int)(sizeof(PN5180_READERS) / sizeof(PN5180_READERS[0])),
+               "PN5180_READER_COUNT must be 1..N of PN5180_READERS: extend the wiring table in app_config.h first");
 
 typedef struct {
-    pn5180_t *dev;               // NULL = 未通電などで init を飛ばした slot（常にカード無し扱い）
+    pn5180_t *dev;               // NULL = 未通電などで init を飛ばした reader（常にカード無し扱い）
     pn5180_proto_t *iso14443;
     pn5180_proto_t *iso15693;
     int mux_ch;
     bool rf_loaded;              // fast 経路: LOAD_RF_CONFIG 済み（false なら poll で再試行）
 } slot_reader_t;
 
-static slot_reader_t s_readers[CCID_SLOT_COUNT];
-static pn5180_card_t s_cache[CCID_SLOT_COUNT];
+static slot_reader_t s_readers[PN5180_READER_COUNT];
+static pn5180_card_t s_cache[PN5180_READER_COUNT];
 static SemaphoreHandle_t s_lock;
 
 // ── CD74HC4067 MUX（PN5180_BUSY_VIA_MUX=0 のときは no-op）──
@@ -180,7 +181,7 @@ static uint16_t mux_scan_low_mask(char *buf) {
     return mask;
 }
 
-#if CCID_SLOT_COUNT == 1
+#if PN5180_READER_COUNT == 1
 // ── bring-up 用: 通電中の ch から使う reader を自動選択 ──
 // 1 台だけ繋いで検証するとき、どのコネクタ（= MUX ch）に挿さっているかは日によって変わる
 // （実機で ch12 → ch7 に変わり、設定固定だと init 失敗 → 再ビルドが必要だった）。MUX scan で
@@ -188,7 +189,7 @@ static uint16_t mux_scan_low_mask(char *buf) {
 //   - 設定 [0] の ch が通電中ならそのまま。
 //   - 通電 ch が別にあればそれ（複数なら最小番号）。
 //   - 全 floating なら [0] にフォールバック（init は失敗するが診断ログは出る）。
-// 本番（CCID_SLOT_COUNT=13）ではテーブル順 = slot 順なので自動選択はしない。
+// 本番（PN5180_READER_COUNT=11）ではテーブル順 = reader index 順なので自動選択はしない。
 static const pn5180_reader_cfg_t *select_bringup_reader(uint16_t low_mask,
                                                         const pn5180_reader_cfg_t *fallback) {
     const int n = sizeof(PN5180_READERS) / sizeof(PN5180_READERS[0]);
@@ -218,12 +219,12 @@ static const pn5180_reader_cfg_t *select_bringup_reader(uint16_t low_mask,
 }
 #endif
 
-#if CCID_SLOT_COUNT > 1
-// ── 配線チェック（複数 slot 時、init の前に 1 回）──
-// MUX scan の「通電マスク」と app_config.h の設定（PN5180_READERS[0..CCID_SLOT_COUNT-1].mux_ch）を
-// 突き合わせ、食い違いをログに出す。実機で「挿し忘れ / コネクタ違い / slot 数不足」を即座に見分ける。
+#if PN5180_READER_COUNT > 1
+// ── 配線チェック（複数 reader 時、init の前に 1 回）──
+// MUX scan の「通電マスク」と app_config.h の設定（PN5180_READERS[0..PN5180_READER_COUNT-1].mux_ch）を
+// 突き合わせ、食い違いをログに出す。実機で「挿し忘れ / コネクタ違い / 台数不足」を即座に見分ける。
 //   (1) 設定 ch なのに floating   → その reader は未通電/未接続。init を飛ばして skip する。
-//   (2) 通電しているのに設定範囲外 → 繋いだのに CCID_SLOT_COUNT が足りない、または配線表とのズレ。
+//   (2) 通電しているのに設定範囲外 → 繋いだのに PN5180_READER_COUNT が足りない、または配線表とのズレ。
 static void diag_wiring_map(uint16_t low_mask) {
     const int n_table = (int)(sizeof(PN5180_READERS) / sizeof(PN5180_READERS[0]));
     uint16_t cfg_mask = 0;
@@ -231,7 +232,7 @@ static void diag_wiring_map(uint16_t low_mask) {
     // (1) 設定した ch のうち floating のもの。
     char missing[128];
     missing[0] = '\0';
-    for (int i = 0; i < CCID_SLOT_COUNT; i++) {
+    for (int i = 0; i < PN5180_READER_COUNT; i++) {
         const int ch = PN5180_READERS[i].mux_ch;
         cfg_mask |= (uint16_t)(1u << ch);
         if (low_mask & (uint16_t)(1u << ch)) continue;
@@ -240,7 +241,7 @@ static void diag_wiring_map(uint16_t low_mask) {
                  used ? ", " : "", i + 1, ch);
     }
     if (missing[0]) {
-        ESP_LOGW(TAG, "配線チェック: 設定 ch なのに floating（未通電/未接続）= %s → この slot は skip",
+        ESP_LOGW(TAG, "配線チェック: 設定 ch なのに floating（未通電/未接続）= %s → この reader は skip",
                  missing);
     }
 
@@ -262,12 +263,12 @@ static void diag_wiring_map(uint16_t low_mask) {
         }
     }
     if (extra[0]) {
-        ESP_LOGW(TAG, "配線チェック: 通電しているが設定範囲外の ch = %s → CCID_SLOT_COUNT(%d) を増やすか配線表を確認",
-                 extra, CCID_SLOT_COUNT);
+        ESP_LOGW(TAG, "配線チェック: 通電しているが設定範囲外の ch = %s → PN5180_READER_COUNT(%d) を増やすか配線表を確認",
+                 extra, PN5180_READER_COUNT);
     }
 
     if (!missing[0] && !extra[0]) {
-        ESP_LOGI(TAG, "配線 OK: 設定 %d ch すべて通電（設定範囲外の通電 ch も無し）", CCID_SLOT_COUNT);
+        ESP_LOGI(TAG, "配線 OK: 設定 %d ch すべて通電（設定範囲外の通電 ch も無し）", PN5180_READER_COUNT);
     }
 }
 #endif
@@ -424,10 +425,10 @@ bool pn5180_reader_init(void) {
     char scan[17];
     const uint16_t low_mask = mux_scan_low_mask(scan);
     const pn5180_reader_cfg_t *cfg0 = &PN5180_READERS[0];
-#if CCID_SLOT_COUNT == 1
+#if PN5180_READER_COUNT == 1
     cfg0 = select_bringup_reader(low_mask, cfg0);
 #endif
-    // CCID_SLOT_COUNT > 1 では自動選択せず配列順 = slot 順。low_mask は下の配線チェックと
+    // PN5180_READER_COUNT > 1 では自動選択せず配列順 = reader index 順。low_mask は下の配線チェックと
     // 「未通電 reader の skip」で使う。
 
     diag_busy_pin(cfg0->mux_ch);  // 対象 reader の BUSY ピンの素性を診断（ログに出す）
@@ -481,7 +482,7 @@ bool pn5180_reader_init(void) {
         return false;
     }
 
-#if CCID_SLOT_COUNT > 1
+#if PN5180_READER_COUNT > 1
     diag_wiring_map(low_mask);  // 設定 ch と通電 ch の食い違いを先に見せる
 #endif
 
@@ -489,21 +490,21 @@ bool pn5180_reader_init(void) {
     char skipped[128];  // 未通電で飛ばした reader の一覧（起動要約に出す）
     skipped[0] = '\0';
 
-    for (int i = 0; i < CCID_SLOT_COUNT; i++) {
-        // [0] は bring-up 自動選択の結果（本番 CCID_SLOT_COUNT=13 では = PN5180_READERS[0]）。
+    for (int i = 0; i < PN5180_READER_COUNT; i++) {
+        // [0] は bring-up 自動選択の結果（本番 PN5180_READER_COUNT=11 では = PN5180_READERS[0]）。
         const pn5180_reader_cfg_t *cfg = (i == 0) ? cfg0 : &PN5180_READERS[i];
         s_readers[i].mux_ch = cfg->mux_ch;
         s_readers[i].dev = NULL;
 
-#if CCID_SLOT_COUNT > 1
+#if PN5180_READER_COUNT > 1
         // 未通電/未接続（BUSY が floating）の reader は pn5180_init を呼ばずに飛ばす。
         // 呼んでしまうと失敗経路のドライバ deinit が **共有 SPI device を解放** し、他の生きている
-        // reader まで巻き添えで死ぬ（後述）。飛ばした slot は dev=NULL のまま = 常にカード無し。
+        // reader まで巻き添えで死ぬ（後述）。飛ばした reader は dev=NULL のまま = 常にカード無し。
         if (!(low_mask & (uint16_t)(1u << cfg->mux_ch))) {
             ESP_LOGW(TAG,
-                     "reader #%d (slot %d, nss=GPIO%d, ch%d) は未通電/未接続 → skip"
-                     "（host には slot は見えるが Get UID は常に SW=6A81）",
-                     i + 1, i, cfg->nss, cfg->mux_ch);
+                     "reader #%d (index %d, nss=GPIO%d, ch%d) は未通電/未接続 → skip"
+                     "（host の Get UID P2=%d は常に SW=6A81）",
+                     i + 1, i, cfg->nss, cfg->mux_ch, i);
             const size_t used = strlen(skipped);
             snprintf(skipped + used, sizeof(skipped) - used, "%s#%d", used ? ", " : "", i + 1);
             continue;
@@ -535,7 +536,11 @@ bool pn5180_reader_init(void) {
     }
 
     if (ready_count == 0) {
-        ESP_LOGE(TAG, "PN5180 ready 0 台（全 slot が未通電/未接続）— 電源・MUX・配線を確認");
+        ESP_LOGE(TAG, "PN5180 ready 0 台（全 reader が未通電/未接続）— 電源・MUX・配線を確認");
+        // 深掘り診断（BUSY 非依存の NSS スキャン）を出す。PN5180_READER_COUNT > 1 では全 reader が
+        // MUX scan で skip されて pn5180_init を 1 度も呼ばないため、ここで呼ばないと
+        // 「チップが死んでいるのか BUSY/MUX 経路だけが壊れているのか」を切り分けられない。
+        diag_after_init_failure(cfg0);
         return false;
     }
 
@@ -545,12 +550,12 @@ bool pn5180_reader_init(void) {
     // チップもリセットされ、レジスタ（= LOAD_RF_CONFIG の内容）が消える。init ループの中で
     // ロードしても後続の init で無効になるため、全台の init が終わってから別ループでロードする。
     // 以降 RF を on/off しても設定は残る（リセットしない限り）。
-    for (int i = 0; i < CCID_SLOT_COUNT; i++) {
+    for (int i = 0; i < PN5180_READER_COUNT; i++) {
         if (!s_readers[i].dev) continue;
         mux_select(s_readers[i].mux_ch);
         s_readers[i].rf_loaded = pn5180_loadRFConfig(s_readers[i].dev, PN5180_FAST_RF_CONFIG);
         if (!s_readers[i].rf_loaded) {
-            // init 自体は成功しているので slot は生かしたまま、poll 側で毎回ロードを再試行する。
+            // init 自体は成功しているので reader は生かしたまま、poll 側で毎回ロードを再試行する。
             ESP_LOGE(TAG, "reader %d: LOAD_RF_CONFIG(0x%02X) 失敗 — poll で再試行する",
                      i, (unsigned)PN5180_FAST_RF_CONFIG);
         }
@@ -560,7 +565,7 @@ bool pn5180_reader_init(void) {
              PN5180_MAX_CARDS_PER_READER, PN5180_FAST_MAX_PROBES);
 #endif
 
-    ESP_LOGI(TAG, "PN5180 ready: %d/%d slot%s%s%s", ready_count, CCID_SLOT_COUNT,
+    ESP_LOGI(TAG, "PN5180 ready: %d/%d reader%s%s%s", ready_count, PN5180_READER_COUNT,
              skipped[0] ? "（skip: " : "", skipped, skipped[0] ? "）" : "");
     return true;
 }
@@ -765,10 +770,24 @@ static int s_fast_last_probes;
 static int s_fast_last_fallbacks;
 // 直近に読んだ reader 1 台で「壊れた受信を同じ node で再 probe した」回数（poll 統計用）。
 static int s_fast_last_noise_retries;
-// slot ごとの coll_pos ログ出力回数（最初の 3 回だけ INFO、以降 DEBUG）。
-static uint8_t s_collpos_logs[CCID_SLOT_COUNT];
-// slot ごとの「確認 probe を省略した連続回数」（実装 B）。
-static uint8_t s_confirm_skips[CCID_SLOT_COUNT];
+// reader ごとの coll_pos ログ出力回数（最初の 3 回だけ INFO、以降 DEBUG）。
+static uint8_t s_collpos_logs[PN5180_READER_COUNT];
+// 安全弁: RX_COLL_POS の基準が想定と違うと分かったら以後は 1 bit 伸ばしに固定する（全 reader 共通）。
+//
+// 「採用した分割で札が 1 枚も応答しなかった」ラウンドが **この回数だけ連続**したときに無効化する。
+// 1 回で切ると誤発火する: hole card 2 枚を同時に持ち上げる過渡では、root probe の時点では
+// まだ場にあって COLLISION → 子枝を probe する頃には 2 枚とも場外 → 両子枝 NONE、という並びが
+// 普通に起こる（基準は正しいのに 0 枚になる）。連続回数で見れば過渡は 1〜2 で途切れ、
+// 基準が本当に違う場合だけ連続して積み上がる。`PRESENCE_HOLD_MISSES` と同じく「連続回数」判定。
+#define PN5180_COLLPOS_DISABLE_STREAK 3
+static bool s_collpos_disabled;
+// 「採用分割あり かつ 0 枚」だったラウンドの連続数（採用して札が取れたら 0 に戻す）。
+static uint8_t s_collpos_empty_streak;
+// 現ラウンドで「衝突位置を採用した分割」を何回したか + 最後に採用した生値（安全弁の判定・ログ用）。
+static int s_fast_round_adopted;
+static uint16_t s_fast_round_adopt_raw;
+// reader ごとの「確認 probe を省略した連続回数」（実装 B）。
+static uint8_t s_confirm_skips[PN5180_READER_COUNT];
 
 typedef struct {
     uint64_t mask;
@@ -787,7 +806,7 @@ static int fast_push_children(int slot, dfs_node_t *stack, int sp, const dfs_nod
     uint64_t mask = cur->mask;
     uint8_t len = cur->len;
     bool adopted = false;
-    if (coll->pos != 0xFF && coll->pos >= cur->len && coll->pos < 64) {
+    if (!s_collpos_disabled && coll->pos != 0xFF && coll->pos >= cur->len && coll->pos < 64) {
         // 受信できた UID 先頭部分の bit[0..pos) を prefix にする（bit i = uid[i/8] の bit i%8）。
         uint64_t prefix = 0;
         for (uint8_t b = 0; b < coll->pos; b++) {
@@ -799,14 +818,16 @@ static int fast_push_children(int slot, dfs_node_t *stack, int sp, const dfs_nod
             mask = prefix;
             len = coll->pos;
             adopted = true;
+            s_fast_round_adopted++;
+            s_fast_round_adopt_raw = coll->raw_pos;
         }
     }
 
-    // 実機で RX_COLL_POS の基準（フレーム先頭 or UID 先頭）を確認できるよう、slot ごと最初の
+    // 実機で RX_COLL_POS の基準（フレーム先頭 or UID 先頭）を確認できるよう、reader ごと最初の
     // 3 回だけ INFO で出す（毎 poll 出すと UART が埋まるので以降は DEBUG）。
     const int uid_bit = (coll->pos == 0xFF) ? -1 : (int)coll->pos;
     const char *verdict = adopted ? "採用" : "fallback(1bit)";
-    if (slot >= 0 && slot < CCID_SLOT_COUNT && s_collpos_logs[slot] < 3) {
+    if (slot >= 0 && slot < PN5180_READER_COUNT && s_collpos_logs[slot] < 3) {
         s_collpos_logs[slot]++;
         ESP_LOGI(TAG, "reader %d: coll_pos=%u（UID bit %d）, 受信 %u byte, cur.len=%u → %s",
                  slot, (unsigned)coll->raw_pos, uid_bit, (unsigned)coll->rx_bytes,
@@ -899,10 +920,13 @@ static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_car
     fast_coll_t coll;
     while (probes < PN5180_FAST_MAX_PROBES && count < PN5180_MAX_CARDS_PER_READER) {
         const uint8_t before = count;
+        int round_uids = 0;  // このラウンドで応答した札の数（重複込み。安全弁の判定用）
         rounds++;
+        s_fast_round_adopted = 0;
         const probe_result_t root = fast_probe_retry(dev, 0, 0, uid, &coll, &probes);
         if (root == PROBE_NONE) break;  // 誰も応答しない = 残りは居ない（正常終了）
         if (root == PROBE_UID) {
+            round_uids++;
             fast_add_uid(uids, &count, uid);
             fast_stay_quiet_15693(dev, uid);  // dup でも送る（黙らせ損ねの再送になる）
         } else {
@@ -915,6 +939,7 @@ static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_car
                 const dfs_node_t cur = stack[--sp];
                 switch (fast_probe_retry(dev, cur.mask, cur.len, uid, &coll, &probes)) {
                 case PROBE_UID:
+                    round_uids++;
                     fast_add_uid(uids, &count, uid);
                     fast_stay_quiet_15693(dev, uid);
                     break;
@@ -928,6 +953,25 @@ static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_car
                 }
             }
         }
+        // ── coll_pos の安全弁 ──
+        // 「衝突位置を採用して分割したのに、そのラウンドで札が 1 枚も応答しなかった」= 分けた
+        // 両子枝が空。RX_COLL_POS の基準（フレーム先頭 or UID 先頭）が想定と違う疑いがあるが、
+        // 札を持ち上げる過渡でも 1 回だけなら起こるので、**PN5180_COLLPOS_DISABLE_STREAK 回
+        // 連続**したときだけ以後 1 bit 伸ばしに固定する（遅くなるが正しさは保てる）。WARN は 1 回。
+        if (s_fast_round_adopted > 0 && !s_collpos_disabled) {
+            if (round_uids > 0) {
+                s_collpos_empty_streak = 0;  // 採用した分割で札が取れた = 基準は合っている
+            } else if (++s_collpos_empty_streak >= PN5180_COLLPOS_DISABLE_STREAK) {
+                s_collpos_disabled = true;
+                ESP_LOGW(TAG,
+                         "reader %d: coll_pos を採用した分割で札が取れないラウンドが %u 回連続"
+                         "（最後の coll_pos=%u）→ coll_pos を無効化（以後は 1 bit ずつ伸ばす DFS）。"
+                         "RX_COLL_POS の基準を確認",
+                         slot, (unsigned)s_collpos_empty_streak,
+                         (unsigned)s_fast_round_adopt_raw);
+            }
+        }
+
         // ── 定常状態なら「もう居ない」確認 probe（次ラウンドの root）を間引く（実装 B）──
         // 1 ラウンド目で前回 cache と同じ集合が揃ったときだけ。集合が変わった / 前回 0 枚 /
         // 2 ラウンド目以降（= capture で隠れた札を掘っている最中）は必ず確認する。
@@ -973,15 +1017,15 @@ static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_car
 // connect 失敗し、UID が一切取れない（probe_pcsc watch が 0 件になる主因）。一度検出したら
 // この回数だけは present を維持し、連続 miss が超えたときだけ離脱と判定する。
 //
-// hold は **UID 単位**（slot 単位ではない）。slot 単位だと「検出 0 枚のときだけ前回集合を保つ」
+// hold は **UID 単位**（reader 単位ではない）。reader 単位だと「検出 0 枚のときだけ前回集合を保つ」
 // ことしかできず、2 枚中 1 枚を 1 回取りこぼしただけで集合が丸ごと 1 枚に置き換わる。実機
 // （2026-09-10, 2 枚重ね）で host に届く枚数が 2↔1 と数百 ms 周期で揺れ、`watch` が同じ札を
 // 何度も再発火した。UID ごとに miss を数えれば、欠けた 1 枚だけを数サイクル保持できる。
 #define PRESENCE_HOLD_MISSES 3
 // s_cache[i].uids[k] と添字が対応する連続 miss 数（0 = 今回検出）。
-static uint8_t s_uid_miss[CCID_SLOT_COUNT][PN5180_MAX_CARDS_PER_READER];
-// 「検出枚数 > PN5180_MAX_CARDS_PER_READER」の WARN を slot ごと 1 回に絞るフラグ。
-static bool s_overflow_warned[CCID_SLOT_COUNT];
+static uint8_t s_uid_miss[PN5180_READER_COUNT][PN5180_MAX_CARDS_PER_READER];
+// 「検出枚数 > PN5180_MAX_CARDS_PER_READER」の WARN を reader ごと 1 回に絞るフラグ。
+static bool s_overflow_warned[PN5180_READER_COUNT];
 
 // 契約 v1.1 §7 (rfid-usb-ccid.md): UID は **MSB-first** で返す MUST。
 // PN5180 + jef-sure ドライバの ISO/IEC 15693 INVENTORY 生レスポンスは **LSB-first**（PN5180 が
@@ -1131,7 +1175,7 @@ static uint8_t merge_presence(int slot, const pn5180_card_t *prev,
 // ドライバの get_all_uids() は RF を ON のまま戻るため、明示的に切らないと 11 台ぶんの磁界が
 // 重なる（干渉 + 電流）。理由の詳細は app_config.h の PN5180_RF_OFF_BETWEEN_READERS。
 // 失敗（SPI/BUSY 不調）は毎 poll 出すと UART を埋めるので reader ごと最初の 3 回だけ WARN。
-static uint8_t s_rf_off_fail[CCID_SLOT_COUNT];
+static uint8_t s_rf_off_fail[PN5180_READER_COUNT];
 
 static void rf_off_after_read(int i) {
     if (pn5180_setRF_off(s_readers[i].dev)) return;
@@ -1165,19 +1209,19 @@ void pn5180_reader_poll_once(void) {
     const int64_t cycle_start_us = esp_timer_get_time();
     int64_t cycle_worst_us = -1;
     int cycle_worst_idx = -1;
-    int ready_slots = 0;
+    int ready_readers = 0;
     int cycle_max_probes = 0;  // この周で最も probe を使った reader の回数（fast 経路のみ。0 = ドライバ経路）
     int cycle_fallbacks = 0;      // この周で RX_COLL_POS を使えず 1 bit 伸ばしに落ちた回数
     int cycle_noise_retries = 0;  // この周で壊れた受信を再 probe した回数
 #endif
 
-    for (int i = 0; i < CCID_SLOT_COUNT; i++) {
-        // 未通電で init を飛ばした slot（dev=NULL）は触らない。cache は present=false のままなので
-        // host には「カード無し（Get UID → 6A 81）」に見える。
+    for (int i = 0; i < PN5180_READER_COUNT; i++) {
+        // 未通電で init を飛ばした reader（dev=NULL）は触らない。cache は present=false のままなので
+        // host には「カード無し（Get UID P2=i → 6A 81）」に見える。
         if (!s_readers[i].dev) continue;
 #if POLL_STATS_INTERVAL_MS > 0
         const int64_t reader_start_us = esp_timer_get_time();
-        ready_slots++;
+        ready_readers++;
 #endif
         mux_select(s_readers[i].mux_ch);  // この reader の BUSY を SIG に
 
@@ -1292,24 +1336,24 @@ void pn5180_reader_poll_once(void) {
         const int64_t avg_us = s_stats_sum_us / s_stats_cycles;  // cycles >= 1
         ESP_LOGI(TAG,
                  "poll 統計(直近 %d 周): 1 周 min/avg/max = %lld/%lld/%lld ms, "
-                 "最長 reader #%d (slot %d) = %lld ms, probe 最大 %d 回/reader, "
-                 "coll_pos fallback %d, ノイズ再試行 %d, ready %d slot",
+                 "最長 reader #%d (index %d) = %lld ms, probe 最大 %d 回/reader, "
+                 "coll_pos fallback %d, ノイズ再試行 %d, ready %d reader",
                  s_stats_cycles,
                  (long long)(s_stats_min_us / 1000), (long long)(avg_us / 1000),
                  (long long)(s_stats_max_us / 1000),
                  s_stats_worst_idx + 1, s_stats_worst_idx,
                  (long long)(s_stats_worst_us / 1000), s_stats_max_probes,
-                 s_stats_fallbacks, s_stats_noise_retries, ready_slots);
+                 s_stats_fallbacks, s_stats_noise_retries, ready_readers);
         s_stats_cycles = 0;             // 次の窓へ（min/max/sum は次の 1 周で初期化）
         s_stats_window_start_us = now_us;
     }
 #endif
 }
 
-bool pn5180_reader_get_card(uint8_t slot, pn5180_card_t *out) {
-    if (slot >= CCID_SLOT_COUNT || !out) return false;
+bool pn5180_reader_get_card(uint8_t reader_index, pn5180_card_t *out) {
+    if (reader_index >= PN5180_READER_COUNT || !out) return false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    *out = s_cache[slot];
+    *out = s_cache[reader_index];
     xSemaphoreGive(s_lock);
     return true;
 }
