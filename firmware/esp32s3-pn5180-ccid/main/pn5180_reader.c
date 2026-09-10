@@ -420,16 +420,19 @@ void pn5180_reader_poll_once(void) {
         uint8_t uid[16];
         uint8_t len = 0;
 
-        // ISO15693（8B）→ だめなら ISO14443A（4/7B）の順。
+        // ISO15693（8B）→（PN5180_TRY_ISO14443=1 のときだけ）ISO14443A（4/7B）の順。
         // proto を分けて試すのは、ISO15693 のときだけ MSB-first に反転するため。
         bool detected = false;
         bool from_iso15693 = false;
         if (read_uid_from_proto(s_readers[i].iso15693, uid, &len)) {
             detected = true;
             from_iso15693 = true;
-        } else if (read_uid_from_proto(s_readers[i].iso14443, uid, &len)) {
+        }
+#if PN5180_TRY_ISO14443
+        else if (read_uid_from_proto(s_readers[i].iso14443, uid, &len)) {
             detected = true;
         }
+#endif
 
         // 契約 v1.1 §7: ISO15693 の生バイトは LSB-first なので MSB-first に反転する。
         if (detected && from_iso15693 && len > 1) {

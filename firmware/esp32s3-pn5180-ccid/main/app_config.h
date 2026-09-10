@@ -80,3 +80,10 @@ static const pn5180_reader_cfg_t PN5180_READERS[] = {
 
 // ───────── ポーリング間隔 ─────────
 #define CARD_POLL_INTERVAL_MS 100
+
+// ───────── 試行するカード規格 ─────────
+// 本番カードは ICODE SLIX（ISO 15693, 8B UID）のみ。ISO 14443A も毎 poll で試すと、カード無しの
+// 間 REQA/anticollision のタイムアウト（数百 ms）で poll が 1 周 ~800ms に落ち、ログも
+// `Timeout waiting for anticollision` で埋まる（実機 2026-09-10）。Mifare 等 14443A を使う検証の
+// ときだけ 1 にする。
+#define PN5180_TRY_ISO14443 0

@@ -5,7 +5,8 @@
 //    使用中の tinyusb の device/usbd_pvt.h に合わせて struct 初期化子を調整する。
 //    手法は RevK の記事と pico-openpgp を参照（vendor_device.c を CCID(0x0B)化）。
 //
-// メッセージ処理は ccid_slot.c (ccid_process_message) に委譲し、ここは bulk の出し入れに徹する。
+// メッセージ処理は ccid_slot.c (ccid_process_message) に委譲し、ここは bulk の出し入れと
+// interrupt-IN（RDR_to_PC_NotifySlotChange = カード挿抜通知）の送出に徹する。
 #include <string.h>
 #include "esp_log.h"
 #include "ccid_device.h"
@@ -15,10 +16,13 @@
 static const char *TAG = "ccid";
 
 typedef struct {
+    uint8_t rhport;
     uint8_t ep_out;
     uint8_t ep_in;
-    uint8_t out_buf[CCID_EP_SIZE];   // host→device コマンド受信
-    uint8_t in_buf[10 + 64];         // device→host レスポンス（ヘッダ + ATR/UID）
+    uint8_t ep_int;                     // interrupt IN（挿抜通知）。0 = 未 open
+    uint8_t out_buf[CCID_EP_SIZE];      // host→device コマンド受信
+    uint8_t in_buf[10 + 64];            // device→host レスポンス（ヘッダ + ATR/UID）
+    uint8_t int_buf[CCID_EP_INT_SIZE];  // NotifySlotChange（送信完了まで保持）
 } ccid_state_t;
 
 static ccid_state_t s_ccid;
@@ -26,6 +30,7 @@ static ccid_state_t s_ccid;
 // ── ドライバコールバック ──
 static void ccid_init(void) {
     memset(&s_ccid, 0, sizeof(s_ccid));
+    ccid_slot_reset_notify();
     ESP_LOGI(TAG, "ccid_init (app driver registered)");
 }
 
@@ -36,6 +41,7 @@ static bool ccid_deinit(void) {
 static void ccid_reset(uint8_t rhport) {
     (void)rhport;
     memset(&s_ccid, 0, sizeof(s_ccid));
+    ccid_slot_reset_notify();  // 再列挙後は挿抜状態を改めて host へ通知させる
 }
 
 static uint16_t ccid_open(uint8_t rhport, tusb_desc_interface_t const *itf,
@@ -43,32 +49,37 @@ static uint16_t ccid_open(uint8_t rhport, tusb_desc_interface_t const *itf,
     // CCID(0x0B) のインターフェースだけ受け持つ。
     TU_VERIFY(itf->bInterfaceClass == TUSB_CLASS_SMART_CARD, 0);
 
+    // interface(9) + CCID func(54) + EP ×3（bulk OUT / bulk IN / interrupt IN）
     uint16_t const drv_len = sizeof(tusb_desc_interface_t) + 54 /* CCID func */ +
-                             2 * sizeof(tusb_desc_endpoint_t);
+                             3 * sizeof(tusb_desc_endpoint_t);
     TU_VERIFY(max_len >= drv_len, 0);
 
+    s_ccid.rhport = rhport;
     uint8_t const *p = (uint8_t const *)itf;
     p = tu_desc_next(p);  // interface を飛ばす
     // CCID functional descriptor(0x21) を飛ばす
     if (tu_desc_type(p) == CCID_DESC_TYPE_SMART_CARD) {
         p = tu_desc_next(p);
     }
-    // bulk EP を 2 本開く
-    for (int i = 0; i < 2; i++) {
+    // EP を 3 本開く（種別で振り分け: bulk OUT / bulk IN / interrupt IN）
+    for (int i = 0; i < 3 && tu_desc_type(p) == TUSB_DESC_ENDPOINT; i++) {
         tusb_desc_endpoint_t const *ep = (tusb_desc_endpoint_t const *)p;
         TU_ASSERT(usbd_edpt_open(rhport, ep), 0);
-        if (tu_edpt_dir(ep->bEndpointAddress) == TUSB_DIR_OUT) {
+        if (ep->bmAttributes.xfer == TUSB_XFER_INTERRUPT) {
+            s_ccid.ep_int = ep->bEndpointAddress;
+        } else if (tu_edpt_dir(ep->bEndpointAddress) == TUSB_DIR_OUT) {
             s_ccid.ep_out = ep->bEndpointAddress;
         } else {
             s_ccid.ep_in = ep->bEndpointAddress;
         }
         p = tu_desc_next(p);
     }
+    TU_VERIFY(s_ccid.ep_out != 0 && s_ccid.ep_in != 0, 0);
 
     // 最初のコマンド受信を仕掛ける
     TU_ASSERT(usbd_edpt_xfer(rhport, s_ccid.ep_out, s_ccid.out_buf, CCID_EP_SIZE), 0);
-    ESP_LOGI(TAG, "ccid_open ok: ep_out=0x%02x ep_in=0x%02x len=%u",
-             s_ccid.ep_out, s_ccid.ep_in, (unsigned)drv_len);
+    ESP_LOGI(TAG, "ccid_open ok: ep_out=0x%02x ep_in=0x%02x ep_int=0x%02x len=%u",
+             s_ccid.ep_out, s_ccid.ep_in, s_ccid.ep_int, (unsigned)drv_len);
     return drv_len;
 }
 
@@ -109,7 +120,26 @@ static bool ccid_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result,
     } else if (ep_addr == s_ccid.ep_in) {
         // レスポンス送信完了 → 次のコマンドを受信待ち。
         usbd_edpt_xfer(rhport, s_ccid.ep_out, s_ccid.out_buf, CCID_EP_SIZE);
+    } else if (ep_addr == s_ccid.ep_int) {
+        // 挿抜通知が host に読まれた。TinyUSB が claim を解放するので何もしない。
+        ESP_LOGD(TAG, "NotifySlotChange 送信完了 (%u bytes)", (unsigned)xferred_bytes);
     }
+    return true;
+}
+
+// ── 挿抜通知（任意タスクから呼ばれる）──
+bool ccid_notify_slot_change(const uint8_t *msg, size_t len) {
+    if (!msg || len == 0 || len > sizeof(s_ccid.int_buf)) return false;
+    if (!tud_ready() || s_ccid.ep_int == 0) return false;
+    // 前回の通知がまだ host に読まれていなければ claim に失敗する → 呼び側が次の poll で再試行。
+    if (!usbd_edpt_claim(s_ccid.rhport, s_ccid.ep_int)) return false;
+    memcpy(s_ccid.int_buf, msg, len);
+    if (!usbd_edpt_xfer(s_ccid.rhport, s_ccid.ep_int, s_ccid.int_buf, (uint16_t)len)) {
+        usbd_edpt_release(s_ccid.rhport, s_ccid.ep_int);
+        return false;
+    }
+    ESP_LOGI(TAG, "NotifySlotChange → host: %02X %02X（slot0: bit0=present bit1=changed）",
+             msg[0], len > 1 ? msg[1] : 0);
     return true;
 }
 

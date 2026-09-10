@@ -20,7 +20,9 @@ static const tusb_desc_device_t s_device_desc = {
     .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
     .idVendor           = USB_VID,
     .idProduct          = USB_PID,
-    .bcdDevice          = 0x0100,
+    // Windows は VID/PID/REV で記述子をキャッシュする。interrupt EP 追加（0x0101）のように
+    // 記述子構成を変えたら REV を上げて再読込させる（reader_name には影響しない, 契約 §2/§3）。
+    .bcdDevice          = 0x0101,
     .iManufacturer      = 0x01,
     .iProduct           = 0x02,
     .iSerialNumber      = 0x03,
@@ -59,8 +61,10 @@ const tusb_desc_device_t *ccid_device_descriptor(void) {
     CCID_SLOT_COUNT /* bMaxCCIDBusySlots */
 
 // ───────── Configuration Descriptor ─────────
-// config(9) + interface(9) + CCID func(54) + EP out(7) + EP in(7) = 86
-#define CCID_CONFIG_TOTAL_LEN (9 + 9 + 54 + 7 + 7)
+// config(9) + interface(9) + CCID func(54) + EP out(7) + EP in(7) + EP int(7) = 93
+// interrupt-IN は CCID 仕様上 optional だが、無いと Windows(usbccid) がカード挿入を知る
+// 手段が polling 頼みになり、実機では IccPowerOn が一切来なかった（probe_pcsc watch 0 件）。
+#define CCID_CONFIG_TOTAL_LEN (9 + 9 + 54 + 7 + 7 + 7)
 
 static const uint8_t s_config_desc[] = {
     // Configuration descriptor
@@ -76,7 +80,7 @@ static const uint8_t s_config_desc[] = {
     0x09, TUSB_DESC_INTERFACE,
     ITF_NUM_CCID,     // bInterfaceNumber
     0x00,             // bAlternateSetting
-    0x02,             // bNumEndpoints = bulk IN + bulk OUT
+    0x03,             // bNumEndpoints = bulk OUT + bulk IN + interrupt IN
     TUSB_CLASS_SMART_CARD, // bInterfaceClass = 0x0B（CCID）
     0x00,             // bInterfaceSubClass
     0x00,             // bInterfaceProtocol
@@ -91,6 +95,9 @@ static const uint8_t s_config_desc[] = {
     // Endpoint: bulk IN
     0x07, TUSB_DESC_ENDPOINT, EPNUM_CCID_IN, TUSB_XFER_BULK,
     U16_TO_U8S_LE(CCID_EP_SIZE), 0x00,
+    // Endpoint: interrupt IN（RDR_to_PC_NotifySlotChange: カード挿抜通知）
+    0x07, TUSB_DESC_ENDPOINT, EPNUM_CCID_INT, TUSB_XFER_INTERRUPT,
+    U16_TO_U8S_LE(CCID_EP_INT_SIZE), CCID_EP_INT_INTERVAL,
 };
 
 const uint8_t *ccid_configuration_descriptor(void) {

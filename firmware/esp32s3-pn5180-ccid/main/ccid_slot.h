@@ -12,3 +12,14 @@
 // in/out は別バッファ前提。out_max は最低 (10 + ATR/UID 長) を確保すること。
 size_t ccid_process_message(const uint8_t *in, size_t in_len,
                             uint8_t *out, size_t out_max);
+
+// ── カード挿抜通知（RDR_to_PC_NotifySlotChange 0x50, interrupt-IN）──
+// poll の後に呼ぶ。前回 commit した present 状態と比べて変化した slot があれば、out に
+// 0x50 + bmSlotICCState（slot ごと 2bit: bit0=present, bit1=changed）を組み立てて長さを返す
+// （変化なしなら 0）。送信に成功したら ccid_slot_notify_committed() で「通知済み」を確定する。
+// 送信失敗時は呼ばない → 次の poll で同じ差分を再送する。
+size_t ccid_slot_build_notify(uint8_t *out, size_t out_max);
+void ccid_slot_notify_committed(void);
+
+// USB reset / 再列挙時に呼ぶ: 通知済み状態と powered をクリアし、挿抜を改めて通知させる。
+void ccid_slot_reset_notify(void);

@@ -12,7 +12,10 @@
 
 #define EPNUM_CCID_OUT  0x01  // host → device（CCID コマンド）
 #define EPNUM_CCID_IN   0x81  // device → host（CCID レスポンス）
+#define EPNUM_CCID_INT  0x82  // device → host（RDR_to_PC_NotifySlotChange = カード挿抜通知）
 #define CCID_EP_SIZE    64    // full-speed bulk
+#define CCID_EP_INT_SIZE     8     // NotifySlotChange は 1 + ceil(2*slots/8) byte（13 slot でも 5B）
+#define CCID_EP_INT_INTERVAL 0x10  // interrupt polling 間隔（FS: ms 単位, 16ms）
 
 // CCID class descriptor 型番（USB CCID 1.1）。
 #define CCID_DESC_TYPE_SMART_CARD 0x21
