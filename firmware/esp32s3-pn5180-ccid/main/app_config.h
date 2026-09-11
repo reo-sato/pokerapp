@@ -43,7 +43,8 @@
 //   両方が使われる（残り 9 index は未通電 skip）。
 //   各段階で host 側 `python tools/probe_pcsc.py list` の `physical readers: N`、`watch` で
 //   「どの reader index にかざすとどの席/board が出るか」を確認する（役割は host config が
-//   source of truth）。PN5180_SPI_HZ の 1MHz→5MHz は **11 台が 1MHz で安定してから** 単独で上げる。
+//   source of truth）。**11 台とも 1 MHz で安定を確認済（2026-09-11）**。PN5180_SPI_HZ は
+//   1 MHz 据え置きで確定（理由は下の定義のコメント / ISSUE-0021 Open Questions 5）。
 #define PN5180_READER_COUNT 11
 
 // ───────── USB 識別子（実機確定値, 契約 §2）─────────
@@ -58,7 +59,11 @@
 #define PN5180_PIN_SCK    12
 #define PN5180_PIN_MOSI   11
 #define PN5180_PIN_MISO   13
-#define PN5180_SPI_HZ     1000000   // bring-up は 1MHz まで落として SI 余裕を取る。動いたら 5MHz 復帰
+// 1 MHz 据え置きで確定（ISSUE-0021 Open Questions 5, 2026-09-11）。5 MHz にしても 1 周は
+// ≈ 10〜20 ms（3〜7%）しか縮まらないのに対し、この配線は 13 コネクタ中 2 本で BUSY 導通不良が
+// 出ている（ISSUE-0023）= 信号品質に実績のある弱さがある。間欠的な SPI 化けは「本番中に
+// ランダムに読めない」最悪の形で出るので、余裕を取る方を選ぶ。
+#define PN5180_SPI_HZ     1000000
 
 // ───────── PN5180 共有制御線 ─────────
 #define PN5180_PIN_RST    14        // RST は 13 台共通（実機配線）

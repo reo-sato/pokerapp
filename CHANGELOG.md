@@ -53,7 +53,15 @@
 - スタブ 59 構成 警告 0（`CONFIRM_EVERY` 0/1/2/3/6 を含む）+ simulator（**位相ずらし: 1 周の完全確認は
   `ceil(11/6)=2` 台以下 / 6 周で全 reader がちょうど 1 回ずつ** / 定常 = 簡略 (N-1) + 完全確認 1 /
   狙い撃ちは全部 `mask_len=32` / 復帰は N poll 以内 / 既存シナリオ 失敗 0）+ pytest 823 passed。
-  **位相ずらしと N=6 は実機未検証**。worklog `docs/worklog/2026-09-11-pn5180-targeted-probe.md`。
+- **実機で目標達成（`83ad762`, 11 台 ready・満載 22 枚）: 1 周 min/avg/max = 272/297〜301/331 ms**
+  （位相ずらし前は 238/324/**495**）。min/max の差が **257 → 36〜59 ms**（1〜2 台ぶん）に縮み、
+  `簡略 266/319` = 完全確認 **1.83 台/周**（= 11/6 ちょうど）で配分も設計どおり。`coll_pos fallback` 0、
+  狙い撃ち 97〜98% 命中。**目標 ≤ 300 ms を平均で達成**（hard bound 0.5 s に 34% の余裕）。
+  札を置いた瞬間だけ過渡で max 720 ms / probe 8（root probe + DFS で衝突を解く）。**ISSUE-0021 Fixed**。
+- **`PN5180_SPI_HZ` は 1 MHz 据え置きで確定**（従来コメントの「11 台が安定したら 5 MHz」を撤回）。
+  5 MHz の効果は 1 周 3〜7% に対し、この配線は 13 コネクタ中 2 本で BUSY 導通不良が出ている
+  （ISSUE-0023）= 間欠的な SPI 化けの方が高リスク（本番中にランダムに読めない形で出る）。
+  worklog `docs/worklog/2026-09-11-pn5180-targeted-probe.md`。
 
 ### Fixed (firmware: 1 台の init 失敗で全 reader が止まらないように — 全 NSS High 固定 + 再試行 + 個別 skip, ISSUE-0023, 2026-09-11)
 
