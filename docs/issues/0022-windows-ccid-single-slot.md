@@ -6,7 +6,10 @@
 
 ## Status
 
-Fixed（設計変更 = ADR-0041 / 契約 v1.2。**実機は 1 台で確認済、2→11 台は確認中**）
+Fixed（設計変更 = ADR-0041 / 契約 v1.2。**実機 2026-09-11（firmware `0e93de4`, 10 台 ready）で host 側を
+通しで確認**: `probe_pcsc list` = reader 1 件 + `physical readers: 11` + 11 件 matched / `check` = 11 行 PASS
+（未通電 index は `6A81` で PASS）/ `watch` = 席 8 台 × 2 枚 + board で 22 タッチ、`seat N [rK]` の対応が
+config どおり。残 1 台はコネクタ #11（ch10）の未通電 = ISSUE-0023）
 
 ## Severity / Priority
 

@@ -27,6 +27,10 @@
 - **配線表を実機の挿し方に振替**（`app_config.h` `PN5180_READERS`）: コネクタ #4（ch3）は BUSY 不通なので
   飛ばし、#1,#2,#3,#5,…,#12 の若い順 = index 0..10（席 1..8 / board1..3）。#4 の行は予備に。
   起動要約の skip 一覧に `chN` を併記（`skip: #10(ch10)`）。host config は不変。
+- **実機確認（2026-09-11, `0e93de4`）**: `PN5180 ready: 10/11 reader（skip: #10(ch10)）`（コネクタ #11 のみ
+  未通電、切り分け中）。**host 側の契約 v1.2 経路を初めて多台数で通し確認**: `probe_pcsc list` =
+  `physical readers: 11` + 11 件 matched / `check` = 11 行 PASS / `watch` = 席 8 台 × 2 枚 + board で
+  22 タッチ、`seat 4 [r3]` も振替どおり（ISSUE-0022）。
 
 ### Changed (firmware: CCID slot を 1 つに固定し、物理リーダーを Get UID の P2 で選ぶ — 契約 **v1.2** / firmware 側, ADR-0041 / ISSUE-0022, 2026-09-10)
 
