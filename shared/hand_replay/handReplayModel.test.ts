@@ -4,17 +4,23 @@
  * **正本は `shared/hand_replay/`** — 編集後は `python scripts/sync_shared_ui.py` で再配布。
  *
  * 検査対象: ストリート分割 / board スライス (3/4/5) / ポット境界 (potStart = 前 street の
- * 最終 pot_after) / all-in ランアウト (アクション無し street の表示) / カードパース。
+ * 最終 pot_after) / all-in ランアウト (アクション無し street の表示) / カードパース /
+ * 席リング配置と短縮金額表記 (テーブル UI, ADR-0051)。
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
   actionLabel,
+  ALL_STREETS,
   buildReplayModel,
+  compactActionLabel,
   formatChips,
+  formatChipsCompact,
   formatSigned,
+  formatSignedCompact,
   parseCard,
+  seatRingLayout,
   type ReplayHand,
 } from "./handReplayModel";
 
@@ -132,4 +138,54 @@ test("labels and formatters", () => {
   assert.equal(formatSigned(800), "+800");
   assert.equal(formatSigned(-1600), "-1,600");
   assert.equal(formatSigned(0), "±0");
+});
+
+test("seatRingLayout puts the first seat at bottom center and walks clockwise", () => {
+  const slots = seatRingLayout(4);
+  assert.equal(slots.length, 4);
+  // 先頭は下中央（見ている人の手前）。
+  assert.deepEqual(slots[0], { top: 88, left: 50 });
+  // 下 → 左 → 上 → 右 の順（画面座標なので top が小さいほど上）。
+  assert.deepEqual(slots[1], { top: 50, left: 15 });
+  assert.deepEqual(slots[2], { top: 12, left: 50 });
+  assert.deepEqual(slots[3], { top: 50, left: 85 });
+});
+
+test("seatRingLayout keeps every seat inside the container for 2..9 seats", () => {
+  for (let n = 2; n <= 9; n += 1) {
+    const slots = seatRingLayout(n);
+    assert.equal(slots.length, n);
+    for (const slot of slots) {
+      // 中心が 12%..88% に収まっていれば、チップ半分をずらしても外へ出ない。
+      assert.ok(slot.top >= 12 && slot.top <= 88, `top out of range: ${slot.top} (n=${n})`);
+      assert.ok(slot.left >= 15 && slot.left <= 85, `left out of range: ${slot.left} (n=${n})`);
+    }
+  }
+  // 不正な席数は空（描画側で落ちない）。
+  assert.deepEqual(seatRingLayout(0), []);
+  assert.deepEqual(seatRingLayout(-1), []);
+});
+
+test("ALL_STREETS is the fixed four-column order", () => {
+  assert.deepEqual([...ALL_STREETS], ["preflop", "flop", "turn", "river"]);
+});
+
+test("compact formatters shorten amounts for narrow columns", () => {
+  assert.equal(formatChipsCompact(600), "600");
+  assert.equal(formatChipsCompact(1000), "1k");
+  assert.equal(formatChipsCompact(1500), "1.5k");
+  assert.equal(formatChipsCompact(12200), "12.2k");
+  assert.equal(formatChipsCompact(120000), "120k");
+  assert.equal(formatSignedCompact(8200), "+8.2k");
+  assert.equal(formatSignedCompact(-600), "-600");
+  assert.equal(formatSignedCompact(0), "±0");
+});
+
+test("compactActionLabel uses the narrow poker vernacular for the 4 columns", () => {
+  assert.equal(compactActionLabel("raise"), "Raise");
+  assert.equal(compactActionLabel("allin"), "All-in");
+  assert.equal(compactActionLabel("all_in"), "All-in");
+  assert.equal(compactActionLabel("limp?"), "limp?"); // 未知は raw のまま
+  // 日本語ラベル（共有テキスト・詳細表示側）は据え置き。
+  assert.equal(actionLabel("allin"), "オールイン");
 });

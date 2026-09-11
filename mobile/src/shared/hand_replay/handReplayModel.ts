@@ -71,7 +71,9 @@ export interface ReplayModel {
   pots: ReplayPot[];
 }
 
-const STREETS = ["preflop", "flop", "turn", "river"] as const;
+/** schema 上のストリート順。テーブル UI が 4 列を固定で描くために公開する。 */
+export const ALL_STREETS = ["preflop", "flop", "turn", "river"] as const;
+const STREETS = ALL_STREETS;
 
 /** street ごとに見えている board 枚数 (プリフロップ 0 / フロップ 3 / ターン 4 / リバー 5)。 */
 const BOARD_VISIBLE: Record<string, number> = {
@@ -186,5 +188,79 @@ export function formatChips(n: number): string {
 export function formatSigned(n: number): string {
   if (n > 0) return `+${formatChips(n)}`;
   if (n < 0) return `-${formatChips(Math.abs(n))}`;
+  return "±0";
+}
+
+/**
+ * 狭い列に収めるための短縮アクション表記（ADR-0051）。
+ *
+ * 日本語ラベル（`actionLabel`）は 1 文字が広く、4 列レイアウトでは金額と並ぶと見切れる。
+ * 列の中だけはポーカーの原語表記を使う（卓上で通じる語彙そのままで、かつ幅が半分以下）。
+ * 未知の action は raw のまま返す（silent failure を作らない）。
+ */
+export const COMPACT_ACTION_LABELS: Record<string, string> = {
+  fold: "Fold",
+  check: "Check",
+  call: "Call",
+  bet: "Bet",
+  raise: "Raise",
+  allin: "All-in",
+  all_in: "All-in",
+  blind: "Blind",
+};
+
+export function compactActionLabel(action: string): string {
+  return COMPACT_ACTION_LABELS[action] ?? action;
+}
+
+/** テーブル外周に置く 1 席の位置（親コンテナに対する中心の %）。 */
+export interface SeatSlot {
+  top: number;
+  left: number;
+}
+
+const RING_RX = 35; // 横半径 (%)
+const RING_RY = 38; // 縦半径 (%)
+
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
+}
+
+/**
+ * 席をテーブル外周（楕円）に等間隔で配置する（ADR-0051）。
+ *
+ * 先頭の席を**下中央**（見ている人の手前）に置き、そこから時計回り
+ * （下 → 左 → 上 → 右）に並べる。返すのは席チップの**中心**位置なので、
+ * 描画側はチップの半分だけ負の margin でずらす。
+ *
+ * ボタン位置はデータに無いため（ADR-0044 D3 で推定は scope 外）、並びは
+ * **席番号順**であってポジション順ではない。
+ */
+export function seatRingLayout(count: number): SeatSlot[] {
+  if (!Number.isFinite(count) || count <= 0) return [];
+  const slots: SeatSlot[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const rad = ((90 + (360 / count) * i) * Math.PI) / 180;
+    slots.push({
+      top: round1(50 + RING_RY * Math.sin(rad)),
+      left: round1(50 + RING_RX * Math.cos(rad)),
+    });
+  }
+  return slots;
+}
+
+/** 狭い列に収めるための短縮金額表記 (600 / 1.5k / 12.2k / 120k)。 */
+export function formatChipsCompact(n: number): string {
+  if (!Number.isFinite(n)) return "0";
+  if (Math.abs(n) < 1000) return formatChips(n);
+  const k = n / 1000;
+  const text = k.toFixed(Math.abs(k) < 100 ? 1 : 0).replace(/\.0$/, "");
+  return `${text}k`;
+}
+
+/** 収支の短縮表記 (+8.2k / -600 / ±0)。 */
+export function formatSignedCompact(n: number): string {
+  if (n > 0) return `+${formatChipsCompact(n)}`;
+  if (n < 0) return `-${formatChipsCompact(Math.abs(n))}`;
   return "±0";
 }

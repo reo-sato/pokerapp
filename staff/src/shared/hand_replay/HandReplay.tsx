@@ -1,27 +1,39 @@
 /**
- * ハンドリプレイ view (ADR-0044) — GGPoker ハンドヒストリー風のストリート単位表示。
+ * ハンドリプレイ view (ADR-0051) — GGPoker のハンドログ風「1 画面」表示。
  *
  * **正本は `shared/hand_replay/` — コピー先 (mobile/staff の src/shared/hand_replay/) を
  * 直接編集しないこと。** 編集後は `python scripts/sync_shared_ui.py` で再配布する。
  *
+ * 画面を上下に二分する:
+ *   上半分 = テーブル図（席を外周にリング配置 + 中央にボードとポット。**最終状態で固定**）
+ *   下半分 = プリフロップ / フロップ / ターン / リバーの **4 列**にアクションを並べる
+ *
+ * スマホ縦 1 画面にスクロールなしで収めるため、自身は ScrollView を持たず `flex: 1` で
+ * 親の高さを埋める（埋め込み側が高さを与える）。列が溢れた極端なハンドだけ、列の中だけが
+ * スクロールする（画面自体はスクロールしない）。
+ *
  * mobile / staff 両アプリから使うため、各アプリの common.tsx / types.ts に依存しない
- * 自己完結コンポーネント (両アプリ共通のダークトーンに合わせた自前スタイル)。
- * ロジックは handReplayModel.ts の純関数に置き、ここは描画のみ。
+ * 自己完結コンポーネント。ロジックは handReplayModel.ts の純関数に置き、ここは描画のみ。
  */
 import React from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 
 import {
-  actionLabel,
+  ALL_STREETS,
   buildReplayModel,
+  compactActionLabel,
   formatChips,
-  formatSigned,
+  formatChipsCompact,
+  formatSignedCompact,
   parseCard,
+  seatRingLayout,
+  STREET_LABELS,
   SUIT_COLORS,
   SUIT_SYMBOLS,
   type ReplayAction,
   type ReplayHand,
   type ReplayPlayer,
+  type StreetSection,
 } from "./handReplayModel";
 
 const c = {
@@ -35,25 +47,33 @@ const c = {
   warn: "#ffb74d",
   accent: "#5ab0f0",
   cardFace: "#f4f1e8",
+  // テーブルのフェルト。ダーク基調から浮かない程度に彩度を落とした深緑。
+  felt: "#14332a",
+  feltEdge: "#2b5a49",
+  seatFill: "#151a1f",
 };
 
+const SEAT_W = 78;
+const SEAT_H = 58;
+
 /** 1 枚のカードチップ ("As" 等)。不正形式は raw 文字列で灰色表示。 */
-export function CardChip(props: { card: string; size?: "sm" | "md" }): React.JSX.Element {
+export function CardChip(props: { card: string; size?: "xs" | "sm" | "md" }): React.JSX.Element {
+  const size = props.size ?? "md";
+  const box = [s.cardChip, size === "sm" && s.cardChipSm, size === "xs" && s.cardChipXs];
+  const label = [s.cardChipText, size === "sm" && s.cardChipTextSm, size === "xs" && s.cardChipTextXs];
   const parsed = parseCard(props.card);
-  const sm = props.size === "sm";
   if (!parsed) {
     return (
-      <View style={[s.cardChip, sm && s.cardChipSm, { backgroundColor: c.cardAlt }]}>
-        <Text style={[s.cardChipText, sm && s.cardChipTextSm, { color: c.muted }]}>
+      <View style={[...box, { backgroundColor: c.cardAlt }]}>
+        <Text style={[...label, { color: c.muted }]} numberOfLines={1}>
           {props.card}
         </Text>
       </View>
     );
   }
-  const color = SUIT_COLORS[parsed.suit];
   return (
-    <View style={[s.cardChip, sm && s.cardChipSm]}>
-      <Text style={[s.cardChipText, sm && s.cardChipTextSm, { color }]}>
+    <View style={box}>
+      <Text style={[...label, { color: SUIT_COLORS[parsed.suit] }]} numberOfLines={1}>
         {parsed.rank}
         {SUIT_SYMBOLS[parsed.suit]}
       </Text>
@@ -66,70 +86,122 @@ function HiddenCards(): React.JSX.Element {
   return (
     <View style={s.cardRow}>
       {[0, 1].map((i) => (
-        <View key={i} style={[s.cardChip, s.cardChipSm, s.cardBack]}>
-          <Text style={[s.cardChipTextSm, { color: c.muted }]}>?</Text>
+        <View key={i} style={[s.cardChip, s.cardChipXs, s.cardBack]}>
+          <Text style={[s.cardChipTextXs, { color: c.muted }]}>?</Text>
         </View>
       ))}
     </View>
   );
 }
 
-function SeatRow(props: { player: ReplayPlayer; isWinner: boolean }): React.JSX.Element {
+/** テーブル外周に置く 1 席。勝者は縁を光らせ、fold 済み（収支のみ）でも並びは崩さない。 */
+function SeatChip(props: {
+  player: ReplayPlayer;
+  isWinner: boolean;
+  top: number;
+  left: number;
+}): React.JSX.Element {
   const { player, isWinner } = props;
   const result = player.result;
   return (
-    <View style={s.seatRow}>
-      <Text style={s.seatNo}>席{player.seat}</Text>
-      <Text style={s.seatName} numberOfLines={1}>
-        {isWinner ? "🏆 " : ""}
-        {player.name}
+    <View
+      style={[
+        s.seat,
+        isWinner && s.seatWinner,
+        { top: `${props.top}%`, left: `${props.left}%` },
+      ]}
+    >
+      <Text style={[s.seatName, isWinner && { color: c.pos }]} numberOfLines={1}>
+        {isWinner ? "🏆" : ""}
+        {player.seat} {player.name}
       </Text>
       {player.hole_cards?.length ? (
         <View style={s.cardRow}>
           {player.hole_cards.map((card, i) => (
-            <CardChip key={i} card={card} size="sm" />
+            <CardChip key={i} card={card} size="xs" />
           ))}
         </View>
       ) : (
         <HiddenCards />
       )}
-      <View style={s.seatRight}>
-        {player.stack_start != null && player.stack_end != null ? (
-          <Text style={s.metaText}>
-            {formatChips(player.stack_start)} → {formatChips(player.stack_end)}
-          </Text>
-        ) : null}
-        {result != null ? (
-          <Text style={[s.resultText, { color: result >= 0 ? c.pos : c.neg }]}>
-            {formatSigned(result)}
-          </Text>
-        ) : null}
-      </View>
+      {result != null ? (
+        <Text style={[s.seatResult, { color: result >= 0 ? c.pos : c.neg }]} numberOfLines={1}>
+          {formatSignedCompact(result)}
+        </Text>
+      ) : player.stack_end != null ? (
+        <Text style={s.seatResult} numberOfLines={1}>
+          {formatChipsCompact(player.stack_end)}
+        </Text>
+      ) : null}
     </View>
   );
 }
 
-function ActionRow(props: {
-  action: ReplayAction;
-  resolveName: (seat: number) => string;
-}): React.JSX.Element {
+/** 4 列の 1 行。要確認 / 訂正済は左の色ストライプ + 記号で幅を使わずに示す。 */
+function ActionLine(props: { action: ReplayAction }): React.JSX.Element {
   const a = props.action;
-  const name = a.player_name || props.resolveName(a.seat);
+  const stripe = a.needs_review ? c.warn : a.corrected ? c.accent : "transparent";
   return (
-    <View style={s.actionRow}>
-      <Text style={s.actionSeat}>席{a.seat}</Text>
-      <Text style={s.actionText} numberOfLines={1}>
-        <Text style={{ color: c.text }}>{name} </Text>
-        <Text style={{ color: c.accent, fontWeight: "700" }}>{actionLabel(a.action)}</Text>
-        {a.amount ? <Text style={{ color: c.text }}> {formatChips(a.amount)}</Text> : null}
+    <View style={[s.actionLine, { borderLeftColor: stripe }]}>
+      <Text style={s.actionSeat}>{a.seat}</Text>
+      <Text style={s.actionLabel} numberOfLines={1}>
+        {compactActionLabel(a.action)}
       </Text>
-      {a.needs_review ? <Text style={[s.badge, { color: c.warn }]}>要確認</Text> : null}
-      {a.corrected ? <Text style={[s.badge, { color: c.accent }]}>訂正済</Text> : null}
-      {a.pot_after != null ? (
-        <Text style={s.metaText}>pot {formatChips(a.pot_after)}</Text>
+      {a.amount ? (
+        <Text style={s.actionAmount} numberOfLines={1}>
+          {formatChipsCompact(a.amount)}
+        </Text>
       ) : null}
+      {a.needs_review ? <Text style={[s.mark, { color: c.warn }]}>!</Text> : null}
+      {a.corrected ? <Text style={[s.mark, { color: c.accent }]}>✎</Text> : null}
     </View>
   );
+}
+
+/** ストリート 1 列。そのストリートで**新しく開いた**ボードだけを見出しに出す。 */
+function StreetColumn(props: {
+  street: string;
+  section?: StreetSection;
+  newCards: string[];
+}): React.JSX.Element {
+  const { section, newCards } = props;
+  const actions = section?.actions ?? [];
+  return (
+    <View style={s.column}>
+      <View style={s.columnHead}>
+        <Text style={s.columnTitle} numberOfLines={1}>
+          {STREET_LABELS[props.street] ?? props.street}
+        </Text>
+        <View style={s.columnCards}>
+          {newCards.map((card, i) => (
+            <CardChip key={i} card={card} size="xs" />
+          ))}
+        </View>
+        <Text style={s.columnPot} numberOfLines={1}>
+          {section ? `pot ${formatChipsCompact(section.potEnd)}` : "—"}
+        </Text>
+      </View>
+      <ScrollView
+        style={s.columnBody}
+        contentContainerStyle={s.columnBodyContent}
+        showsVerticalScrollIndicator={false}
+      >
+        {actions.length === 0 ? (
+          <Text style={s.columnEmpty}>—</Text>
+        ) : (
+          actions.map((a, i) => <ActionLine key={i} action={a} />)
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+/** street ごとに「新しく開いたボード」を切り出す (flop=3 枚 / turn=1 枚 / river=1 枚)。 */
+function newCardsFor(street: string, board: string[]): string[] {
+  if (street === "flop") return board.slice(0, 3);
+  if (street === "turn") return board.slice(3, 4);
+  if (street === "river") return board.slice(4, 5);
+  return [];
 }
 
 /**
@@ -138,68 +210,77 @@ function ActionRow(props: {
  */
 export function HandReplay(props: { hand: ReplayHand }): React.JSX.Element {
   const model = buildReplayModel(props.hand);
-  const nameBySeat = new Map(model.seats.map((p) => [p.seat, p.name]));
-  const resolveName = (seat: number): string => nameBySeat.get(seat) ?? `席${seat}`;
-  const winner = model.winnerSeat != null ? nameBySeat.get(model.winnerSeat) : undefined;
+  const board = props.hand.board ?? [];
+  const slots = seatRingLayout(model.seats.length);
+  const sectionByStreet = new Map(model.streets.map((st) => [st.street, st]));
+  const winnerName =
+    model.winnerSeat != null
+      ? model.seats.find((p) => p.seat === model.winnerSeat)?.name
+      : undefined;
+  const sidePots = model.pots.length > 1 ? model.pots : [];
 
   return (
-    <View>
-      {/* 参加者 (ホールカードは記録がある席は全員分表示 — ADR-0044 D3) */}
-      <View style={s.section}>
-        {model.blinds?.sb != null ? (
-          <Text style={s.metaText}>
-            ブラインド {formatChips(model.blinds.sb)}/{formatChips(model.blinds.bb ?? 0)}
+    <View style={s.root}>
+      {/* 上半分: テーブル図（最終状態） */}
+      <View style={s.table}>
+        <View style={s.felt} />
+
+        <View style={s.center} pointerEvents="none">
+          {board.length > 0 ? (
+            <View style={s.cardRow}>
+              {board.map((card, i) => (
+                <CardChip key={i} card={card} />
+              ))}
+            </View>
+          ) : (
+            <Text style={s.centerMuted}>ボード記録なし</Text>
+          )}
+          <Text style={s.pot}>
+            {model.potTotal != null ? `ポット ${formatChips(model.potTotal)}` : "ポット —"}
           </Text>
-        ) : null}
-        {model.seats.map((p) => (
-          <SeatRow key={p.seat} player={p} isWinner={p.seat === model.winnerSeat} />
+          {sidePots.length > 0 ? (
+            <Text style={s.centerMuted} numberOfLines={1}>
+              {sidePots
+                .map((pot, i) =>
+                  i === 0
+                    ? `メイン ${formatChipsCompact(pot.amount)}`
+                    : `サイド${i} ${formatChipsCompact(pot.amount)}`,
+                )
+                .join(" ・ ")}
+            </Text>
+          ) : null}
+          {model.winnerSeat != null ? (
+            <Text style={s.winner} numberOfLines={1}>
+              🏆 席{model.winnerSeat} {winnerName ?? ""}
+            </Text>
+          ) : null}
+          {model.blinds?.sb != null ? (
+            <Text style={s.blinds}>
+              {formatChips(model.blinds.sb)}/{formatChips(model.blinds.bb ?? 0)}
+            </Text>
+          ) : null}
+        </View>
+
+        {model.seats.map((p, i) => (
+          <SeatChip
+            key={p.seat}
+            player={p}
+            isWinner={p.seat === model.winnerSeat}
+            top={slots[i]?.top ?? 50}
+            left={slots[i]?.left ?? 50}
+          />
         ))}
       </View>
 
-      {/* ストリート単位のセクション */}
-      {model.streets.map((st) => (
-        <View key={st.street} style={s.section}>
-          <View style={s.streetHeader}>
-            <Text style={s.streetLabel}>{st.label}</Text>
-            {st.board.length > 0 ? (
-              <View style={s.cardRow}>
-                {st.board.map((card, i) => (
-                  <CardChip key={i} card={card} />
-                ))}
-              </View>
-            ) : null}
-            <Text style={[s.metaText, s.streetPot]}>ポット {formatChips(st.potStart)}</Text>
-          </View>
-          {st.actions.length === 0 ? (
-            <Text style={s.metaText}>（アクションなし）</Text>
-          ) : (
-            st.actions.map((a, i) => <ActionRow key={i} action={a} resolveName={resolveName} />)
-          )}
-        </View>
-      ))}
-
-      {/* 結果 */}
-      <View style={s.section}>
-        <View style={s.streetHeader}>
-          <Text style={s.streetLabel}>結果</Text>
-          {model.potTotal != null ? (
-            <Text style={[s.metaText, s.streetPot]}>ポット合計 {formatChips(model.potTotal)}</Text>
-          ) : null}
-        </View>
-        {model.winnerSeat != null ? (
-          <Text style={s.resultLine}>
-            🏆 席{model.winnerSeat} {winner ?? ""}
-          </Text>
-        ) : (
-          <Text style={s.metaText}>勝者記録なし</Text>
-        )}
-        {model.pots.map((pot, i) => (
-          <Text key={i} style={s.metaText}>
-            {i === 0 ? "メインポット" : `サイドポット${i}`} {formatChips(pot.amount)}
-            {pot.eligible_seats?.length
-              ? ` ・ 対象 ${pot.eligible_seats.map((n) => `席${n}`).join(" ")}`
-              : ""}
-          </Text>
+      {/* 下半分: 4 ストリートを 4 列で */}
+      <View style={s.streets}>
+        {ALL_STREETS.map((street) => (
+          <StreetColumn
+            key={street}
+            street={street}
+            section={sectionByStreet.get(street)}
+            newCards={newCardsFor(street, board)}
+          />
         ))}
       </View>
     </View>
@@ -207,49 +288,103 @@ export function HandReplay(props: { hand: ReplayHand }): React.JSX.Element {
 }
 
 const s = StyleSheet.create({
-  section: {
-    backgroundColor: c.card,
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 10,
+  root: { flex: 1 },
+
+  // ――― テーブル図 ―――
+  table: { flex: 1, minHeight: 250, position: "relative" },
+  felt: {
+    position: "absolute",
+    left: "15%",
+    right: "15%",
+    top: "12%",
+    bottom: "12%",
+    borderRadius: 999,
+    backgroundColor: c.felt,
+    borderWidth: 2,
+    borderColor: c.feltEdge,
   },
-  streetHeader: {
-    flexDirection: "row",
+  center: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
     alignItems: "center",
-    flexWrap: "wrap",
-    marginBottom: 6,
+    justifyContent: "center",
   },
-  streetLabel: { color: c.text, fontSize: 15, fontWeight: "700", marginRight: 10 },
-  streetPot: { marginLeft: "auto" },
+  centerMuted: { color: c.muted, fontSize: 11, marginTop: 2 },
+  pot: { color: c.text, fontSize: 14, fontWeight: "700", marginTop: 6 },
+  winner: { color: c.pos, fontSize: 12, fontWeight: "700", marginTop: 2 },
+  blinds: { color: c.muted, fontSize: 10, marginTop: 2 },
+
+  seat: {
+    position: "absolute",
+    width: SEAT_W,
+    height: SEAT_H,
+    marginLeft: -SEAT_W / 2,
+    marginTop: -SEAT_H / 2,
+    backgroundColor: c.seatFill,
+    borderWidth: 1,
+    borderColor: c.border,
+    borderRadius: 8,
+    paddingVertical: 3,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  seatWinner: { borderColor: c.pos },
+  seatName: { color: c.text, fontSize: 11, fontWeight: "600", maxWidth: SEAT_W - 8 },
+  seatResult: { color: c.muted, fontSize: 10, fontWeight: "700", marginTop: 1 },
+
+  // ――― カード ―――
   cardRow: { flexDirection: "row", alignItems: "center" },
   cardChip: {
     backgroundColor: c.cardFace,
     borderRadius: 4,
     paddingHorizontal: 5,
     paddingVertical: 2,
-    marginRight: 4,
-    minWidth: 30,
+    marginHorizontal: 1,
+    minWidth: 28,
     alignItems: "center",
   },
-  cardChipSm: { paddingHorizontal: 3, paddingVertical: 1, minWidth: 26 },
+  cardChipSm: { paddingHorizontal: 3, paddingVertical: 1, minWidth: 24 },
+  cardChipXs: { paddingHorizontal: 2, paddingVertical: 0, minWidth: 21 },
   cardBack: { backgroundColor: c.cardAlt, borderWidth: 1, borderColor: c.border },
-  cardChipText: { fontSize: 15, fontWeight: "700" },
+  cardChipText: { fontSize: 14, fontWeight: "700" },
   cardChipTextSm: { fontSize: 12, fontWeight: "700" },
-  seatRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 4,
+  cardChipTextXs: { fontSize: 10, fontWeight: "700" },
+
+  // ――― 4 列 ―――
+  streets: { flex: 1, flexDirection: "row", marginTop: 6 },
+  column: {
+    flex: 1,
+    backgroundColor: c.card,
+    borderRadius: 8,
+    marginHorizontal: 2,
+    paddingHorizontal: 4,
+    paddingTop: 5,
+    paddingBottom: 3,
+  },
+  columnHead: {
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: c.border,
+    paddingBottom: 4,
+    marginBottom: 3,
   },
-  seatNo: { color: c.muted, fontSize: 12, width: 34 },
-  seatName: { color: c.text, fontSize: 14, fontWeight: "600", flexShrink: 1, marginRight: 8 },
-  seatRight: { marginLeft: "auto", alignItems: "flex-end" },
-  actionRow: { flexDirection: "row", alignItems: "center", paddingVertical: 3 },
-  actionSeat: { color: c.muted, fontSize: 12, width: 34 },
-  actionText: { fontSize: 14, flexShrink: 1, marginRight: 8 },
-  badge: { fontSize: 11, fontWeight: "700", marginRight: 8 },
-  metaText: { color: c.muted, fontSize: 12 },
-  resultText: { fontSize: 13, fontWeight: "700" },
-  resultLine: { color: c.text, fontSize: 14, fontWeight: "600", marginBottom: 4 },
+  columnTitle: { color: c.text, fontSize: 11, fontWeight: "700" },
+  columnCards: { flexDirection: "row", alignItems: "center", minHeight: 14, marginTop: 3 },
+  columnPot: { color: c.muted, fontSize: 10, marginTop: 2 },
+  columnBody: { flex: 1 },
+  columnBodyContent: { paddingBottom: 2 },
+  columnEmpty: { color: c.border, fontSize: 11, marginTop: 2 },
+  actionLine: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 2,
+    paddingLeft: 3,
+    borderLeftWidth: 2,
+  },
+  actionSeat: { color: c.muted, fontSize: 10, width: 11 },
+  actionLabel: { color: c.text, fontSize: 10, flexShrink: 1 },
+  actionAmount: { color: c.accent, fontSize: 10, fontWeight: "700", marginLeft: 3 },
+  mark: { fontSize: 10, fontWeight: "700", marginLeft: 2 },
 });

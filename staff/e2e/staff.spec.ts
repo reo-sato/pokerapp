@@ -100,12 +100,13 @@ test("hand tab: open hand history and replay a hand street by street", async ({ 
   await expect(page.getByText("ハンド履歴")).toBeVisible();
   await expect(page.getByText(/Hand #1/)).toBeVisible();
 
-  // Hand #1 を開くとストリート単位リプレイ（共有コンポーネント）が表示される。
+  // Hand #1 を開くとテーブル図 + 4 ストリート列が表示される（ADR-0051）。
   await page.getByText(/Hand #1/).click();
   await expect(page.getByText("プリフロップ")).toBeVisible();
   await expect(page.getByText("フロップ", { exact: true })).toBeVisible();
   await expect(page.getByText("リバー", { exact: true })).toBeVisible();
-  await expect(page.getByText("結果", { exact: true })).toBeVisible();
+  // テーブル中央に最終ポットが出る。
+  await expect(page.getByText(/^ポット /)).toBeVisible();
   // 記録があるホールカードは全員分表示（Alice AhAd / Bob KsKd, ADR-0044 D3）。
   await expect(page.getByText("A♥")).toBeVisible();
   await expect(page.getByText("K♠")).toBeVisible();
@@ -130,9 +131,9 @@ test("hand tab: correct a misrecognized action from the replay detail (B4)", asy
   await page.getByText("訂正を保存").click();
   await expect(page.getByText(/訂正しました（1 件）/)).toBeVisible();
 
-  // 訂正適用済みビューが再読込され、リプレイ側に訂正済バッジ + bet が出る。
-  await expect(page.getByText("訂正済").first()).toBeVisible();
-  await expect(page.getByText("ベット", { exact: true }).first()).toBeVisible();
+  // 訂正適用済みビューが再読込され、リプレイ列に訂正済マーク(✎) + Bet が出る（ADR-0051）。
+  await expect(page.getByText("✎", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Bet", { exact: true }).first()).toBeVisible();
 });
 
 test("create a new session from the list", async ({ page }) => {

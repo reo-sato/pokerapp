@@ -6,6 +6,34 @@
 
 ## [Unreleased]
 
+### Changed (ハンドリプレイ UI を 1 画面のテーブル表示に刷新 = ADR-0051)
+
+GGPoker のハンドログを参考に、**スマホ縦 1 画面・スクロールなし**でハンド全体を俯瞰できる
+表示に置き換えた（従来の縦スクロール表示は廃止）。mobile / staff 両アプリに搭載。
+
+- **上半分 = テーブル図**: 席をテーブル外周にリング配置（先頭の席が手前 = 下中央、以降は時計回り）。
+  各席に席番号・名前・ホールカード（記録がある席は全員分、無い席は裏向き）・収支。勝者は緑の枠と 🏆。
+  中央にボード 5 枚・ポット合計・サイドポット内訳・勝者・ブラインド。**最終状態で固定**
+  （列タップでの連動・自動再生は持たない）。
+- **下半分 = 4 列**: プリフロップ / フロップ / ターン / リバーを常に 4 列で表示。列見出しは
+  その街で**新しく開いたボード**（flop 3 枚 / turn 1 枚 / river 1 枚）と街終了時ポット。
+  アクションが無い街も列は残る。
+- **狭い列の表記**: 列の中だけポーカーの原語表記（Fold / Check / Call / Bet / Raise / All-in）と
+  短縮金額（600 / 1.5k / 12.2k / 120k）を使う。日本語ラベルは**共有テキスト書き出しでは不変**。
+- **要確認 / 訂正済**は文字バッジをやめ、行左の色ストライプ + 1 文字記号（`!` / `✎`）に。
+- 席の配置・短縮表記は純関数（`seatRingLayout` / `compactActionLabel` / `formatChipsCompact` /
+  `formatSignedCompact`）に切り出し、`handReplayModel.test.ts` で回帰ロック（+5 テスト）。
+- **ボタン位置（BTN）は表示しない**: データに存在せず、推定は silent failure 源として
+  scope 外のまま（ADR-0044 D3 の判断を維持）。並びは席番号順であってポジション順ではない。
+- 埋め込み側: mobile ハンド詳細は ScrollView を撤去（ヘッダ 1 行 + リプレイ + フッタ小ボタン）、
+  staff ハンドタブは drill-in に固定高を与え、訂正パネルはその下に配置。
+- ADR-0044 は **D3（表示形式）のみ supersede**。D1（`shared/hand_replay/` 正本 + copy-sync +
+  drift test）/ D2（依存は RN primitive のみ）/ staff hands read API は不変。
+- 検証: 400×860 の実測で 3 アーキタイプ（4 ストリート / 要確認+訂正済 / サイドポット）とも
+  **1 画面に収まりスクロールなし**。mobile 35 / staff 43 tests + typecheck green、
+  Playwright E2E 8 passed（新 UI 文言に追随）、pytest 836 passed、ruff clean。
+
+
 ### Fixed / Docs (CHANGELOG ↔ 実装の全量整合監査と指摘修正)
 
 CHANGELOG 全 77 セクションを実装・テスト・git 履歴と突き合わせる全量監査を実施

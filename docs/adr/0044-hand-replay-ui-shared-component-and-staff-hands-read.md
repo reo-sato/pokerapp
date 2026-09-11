@@ -1,6 +1,7 @@
 # ADR-0044: ハンドリプレイ UI — mobile/staff 共有コンポーネント（copy-sync 方式）+ staff hands read
 
-- **Status**: Accepted
+- **Status**: Accepted（**D3 の表示形式のみ ADR-0051 が supersede** — 1 画面のテーブル図 +
+  4 ストリート列に刷新。D1 copy-sync / D2 依存最小 / staff hands read は不変）
 - **Date**: 2026-07-12
 - **Related**: ADR-0017（viewer API / mobile）/ ADR-0021（staff shared token）/ ADR-0036（ハンド訂正
   オーバーレイ）/ ADR-0037（staff iPad app）/ ADR-0038（staff API 拡張）/

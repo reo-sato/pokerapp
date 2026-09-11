@@ -96,7 +96,12 @@ export function HandTab(props: {
           {selected.started_at}
           {selected.review_required ? " ・ 要確認あり" : ""}
         </Text>
-        <HandReplay hand={selected} />
+        {/* リプレイは flex:1 で親の高さを埋める（ADR-0051）。ScrollView の中では
+            高さが決まらないので、iPad 1 画面に収まる固定高を与える。訂正パネルは
+            その下にスクロールで到達する（staff 専用ツール）。 */}
+        <View style={{ height: 560 }}>
+          <HandReplay hand={selected} />
+        </View>
         <HandCorrectionPanel
           repository={repository}
           sessionId={session.session_id}
