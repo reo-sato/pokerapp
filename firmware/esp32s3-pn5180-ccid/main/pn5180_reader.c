@@ -1038,6 +1038,10 @@ static uint64_t fast_mask_from_msb_uid(const uint8_t *msb) {
 static int s_fast_targeted_probes;
 static int s_fast_targeted_hits;
 
+// 直近に読んだ reader 1 台が「簡略サイクル」だったか（1 = 狙い撃ちだけで終えた。poll 統計用）。
+static int s_fast_last_cheap;
+
+#if !PN5180_FAST_TARGETED_PROBE
 // 1 ラウンド目で見つけた集合が前回 cache と同じか（実装 B の判定）。
 // prev は **MSB-first**（反転・ソート済みで hold 中の UID も含む）、det は probe が返した
 // **LSB-first** の生バイト。hold 中の札が混ざっていれば「同じではない」= 確認 probe を省かない。
@@ -1055,6 +1059,7 @@ static bool fast_same_as_prev(const pn5180_card_t *prev, const uint8_t det[][16]
     }
     return true;
 }
+#endif  // !PN5180_FAST_TARGETED_PROBE
 
 // ── 高速 inventory 本体（Stay Quiet + mask ベースの anti-collision DFS）──
 // RF はこの関数の間ずっと ON（reader ごと 1 回だけ立てる）。**最後に必ず RF off**（quiet 解除）。
@@ -1080,6 +1085,7 @@ static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_car
     s_fast_targeted_probes = 0;
     s_fast_targeted_hits = 0;
     s_fast_rx_wait_max_us = 0;
+    s_fast_last_cheap = 0;
     if (!r->rf_loaded) {
         if (!pn5180_loadRFConfig(dev, PN5180_FAST_RF_CONFIG)) return 0;
         r->rf_loaded = true;
@@ -1098,9 +1104,22 @@ static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_car
 
 #if PN5180_FAST_TARGETED_PROBE
     // ── 前段: 前回見えていた UID を「完全一致 mask」で直接呼ぶ（衝突しない・即答）──
-    // 載ったままの札はここで確定し Stay Quiet されるので、下の root probe には
-    // **新しい札だけ**が残る（= 定常状態では root が 1 回 NONE を返して終わる）。
-    // 外れた札（もう無い UID）は RX timeout ぶん待つが、UID 単位 hold で数 poll で消える。
+    // 載ったままの札はここで確定する。外れた札（もう無い UID）は RX timeout ぶん待つが、
+    // UID 単位 hold で数 poll で消える。
+    //
+    // **簡略サイクル（cheap）**: 前回 1 枚以上あった reader では、CONFIRM_EVERY 回に
+    // (CONFIRM_EVERY-1) 回を「狙い撃ちだけで終わる」サイクルにする。Stay Quiet も root probe も
+    // 送らない（Stay Quiet は **root probe で新しい札だけを見るための下準備**なので、root を
+    // 送らないなら不要）。実機 2026-09-11 の内訳（reader 1 台・2 枚）:
+    //   狙い撃ち 7.4 ms × 2 + Stay Quiet 4.2 ms × 2 + root(空) 9.5 ms ≈ 35 ms
+    //   → 簡略サイクルは 2 枚で ≈ 17 ms（半分以下）。
+    // 代償: **既に札がある reader に増えた札**の発見が最大 CONFIRM_EVERY poll 遅れる。
+    // 空の reader（prev 0 枚）はこの経路に入らないので、**配られた瞬間は毎 poll 検出できる**
+    // （席の 1 枚目 / flop / turn / river はすべて空の reader に載るので影響を受けない。
+    //  影響するのは「席の 2 枚目」だけで、ディーラーが 2 周目を配る間隔より十分速い）。
+    const bool cheap = (PN5180_FAST_CONFIRM_EVERY > 0) && prev->present && prev->uid_len == 8 &&
+                       prev->count > 0 &&
+                       (s_confirm_skips[slot] + 1 < PN5180_FAST_CONFIRM_EVERY);
     if (prev->present && prev->uid_len == 8) {
         for (uint8_t k = 0; k < prev->count && count < PN5180_MAX_CARDS_PER_READER &&
                             probes < PN5180_FAST_MAX_PROBES; k++) {
@@ -1115,9 +1134,19 @@ static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_car
             s_fast_targeted_hits++;
             fast_add_uid(uids, &count, uid);
             // root probe で「新しい札」だけを見るために、確定した札は黙らせる。
-            fast_stay_quiet_15693(dev, uid);
+            // 簡略サイクルは root を送らないので Stay Quiet も要らない（完全一致 mask の probe は
+            // 他の札が応答しないので、黙らせなくても狙い撃ち自体は成立する）。
+            if (!cheap) fast_stay_quiet_15693(dev, uid);
         }
     }
+    if (cheap) {
+        s_confirm_skips[slot]++;
+        s_fast_last_cheap = 1;
+        pn5180_setRF_off(dev);  // quiet 解除（送っていないが RF は落とす）
+        s_fast_last_probes = probes;
+        return count;
+    }
+    s_confirm_skips[slot] = 0;  // このサイクルは root まで確認する（カウンタを畳む）
 #endif
 
     while (probes < PN5180_FAST_MAX_PROBES && count < PN5180_MAX_CARDS_PER_READER) {
@@ -1174,14 +1203,18 @@ static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_car
             }
         }
 
+#if !PN5180_FAST_TARGETED_PROBE
         // ── 定常状態なら「もう居ない」確認 probe（次ラウンドの root）を間引く（実装 B）──
         // 1 ラウンド目で前回 cache と同じ集合が揃ったときだけ。集合が変わった / 前回 0 枚 /
         // 2 ラウンド目以降（= capture で隠れた札を掘っている最中）は必ず確認する。
+        // **実装 C（狙い撃ち）が有効なときはこちらを使わない**: 間引きの判定は前段（狙い撃ち）で
+        // 行い、Stay Quiet と root probe をまとめて省く（そちらが安く効く）。
         if (PN5180_FAST_CONFIRM_EVERY > 0 && rounds == 1 &&
             fast_same_as_prev(prev, (const uint8_t (*)[16])uids, count)) {
             if (++s_confirm_skips[slot] < PN5180_FAST_CONFIRM_EVERY) break;
         }
         s_confirm_skips[slot] = 0;  // 集合が変わった / N 回目 = 確認する（カウンタを畳む）
+#endif
         // ラウンドで 1 枚も増えなかった = Stay Quiet が効いていない（黙らない札 / 送信失敗）。
         // 同じ探索を繰り返しても進まないので、1 回だけ再試行して打ち切る（probe 上限まで
         // 空回りすると reader 1 台で 80ms 以上を食う）。増えたなら再試行回数をリセット。
@@ -1406,6 +1439,7 @@ static int s_stats_noise_retries;        // 窓内のノイズ再試行回数（
 static int s_stats_targeted_probes;      // 窓内の狙い撃ち probe 数（fast 経路）
 static int s_stats_targeted_hits;        // 窓内の狙い撃ち命中数（fast 経路）
 static int s_stats_rx_wait_max_us;       // 窓内で「応答が返った probe」の最長待ち（µs, fast 経路）
+static int s_stats_cheap_readers;        // 窓内の簡略サイクル数（reader 単位, fast 経路）
 static int s_stats_cycles;
 #endif
 
@@ -1421,6 +1455,7 @@ void pn5180_reader_poll_once(void) {
     int cycle_targeted_probes = 0;  // この周の狙い撃ち probe 数（前回 UID の完全一致 probe）
     int cycle_targeted_hits = 0;    // うち当たった数（= 載ったままだった札）
     int cycle_rx_wait_max_us = 0;   // この周で「応答が返った probe」の最長待ち時間（µs）
+    int cycle_cheap_readers = 0;    // この周で「簡略サイクル」（狙い撃ちだけ）で終えた reader 数
 #endif
 
     for (int i = 0; i < PN5180_READER_COUNT; i++) {
@@ -1457,6 +1492,7 @@ void pn5180_reader_poll_once(void) {
         cycle_noise_retries += s_fast_last_noise_retries;
         cycle_targeted_probes += s_fast_targeted_probes;
         cycle_targeted_hits += s_fast_targeted_hits;
+        cycle_cheap_readers += s_fast_last_cheap;
         if (s_fast_rx_wait_max_us > cycle_rx_wait_max_us) cycle_rx_wait_max_us = s_fast_rx_wait_max_us;
 #endif
 #else
@@ -1531,6 +1567,7 @@ void pn5180_reader_poll_once(void) {
         s_stats_targeted_probes = 0;
         s_stats_targeted_hits = 0;
         s_stats_rx_wait_max_us = 0;
+        s_stats_cheap_readers = 0;
     }
     if (cycle_us < s_stats_min_us) s_stats_min_us = cycle_us;
     if (cycle_us > s_stats_max_us) s_stats_max_us = cycle_us;
@@ -1545,6 +1582,7 @@ void pn5180_reader_poll_once(void) {
     s_stats_noise_retries += cycle_noise_retries;
     s_stats_targeted_probes += cycle_targeted_probes;
     s_stats_targeted_hits += cycle_targeted_hits;
+    s_stats_cheap_readers += cycle_cheap_readers;
     if (cycle_rx_wait_max_us > s_stats_rx_wait_max_us) s_stats_rx_wait_max_us = cycle_rx_wait_max_us;
 
     const int64_t now_us = esp_timer_get_time();
@@ -1554,7 +1592,7 @@ void pn5180_reader_poll_once(void) {
         ESP_LOGI(TAG,
                  "poll 統計(直近 %d 周): 1 周 min/avg/max = %lld/%lld/%lld ms, "
                  "最長 reader #%d (index %d) = %lld ms, probe 最大 %d 回/reader, "
-                 "狙い撃ち %d/%d 命中, 応答待ち最長 %d.%01d ms, "
+                 "狙い撃ち %d/%d 命中, 簡略 %d/%d reader周, 応答待ち最長 %d.%01d ms, "
                  "coll_pos fallback %d, ノイズ再試行 %d, ready %d reader",
                  s_stats_cycles,
                  (long long)(s_stats_min_us / 1000), (long long)(avg_us / 1000),
@@ -1562,6 +1600,7 @@ void pn5180_reader_poll_once(void) {
                  s_stats_worst_idx + 1, s_stats_worst_idx,
                  (long long)(s_stats_worst_us / 1000), s_stats_max_probes,
                  s_stats_targeted_hits, s_stats_targeted_probes,
+                 s_stats_cheap_readers, s_stats_cycles * ready_readers,
                  s_stats_rx_wait_max_us / 1000, (s_stats_rx_wait_max_us % 1000) / 100,
                  s_stats_fallbacks, s_stats_noise_retries, ready_readers);
         s_stats_cycles = 0;             // 次の窓へ（min/max/sum は次の 1 周で初期化）

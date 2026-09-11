@@ -128,6 +128,34 @@ poll 統計: 1 周 min/avg/max = 529/538/550 ms, probe 最大 6, coll_pos fallba
 - [ ] `coll_pos` 機構は実機では常に fallback になるので、実質死んでいる。害は無い（ログのみ）が、
       整理するかは 11 台の実測が落ち着いてから判断する。
 
+## 追記（同日）: 実機の効果測定と「簡略サイクル」の追加
+
+実機（`047ee1e`, 10 台 ready, 満載 18 枚）: **538 → 433 ms**。狙い撃ちは意図どおり動作
+（**命中 340/342 = 99.4%** / `coll_pos fallback` 255 → **0** / `probe 最大` 6 → **3**）。
+**`応答待ち最長 7.4 ms`** が取れ、32 bit mask の見積り（6.66 ms）+ IRQ ポーリング粒度で説明できる値
+＝ フレーム長連動の上限が正しかったことの裏取りになった。
+
+ただし目標 ≤ 300 ms には未達。内訳（reader 1 台・2 枚）は
+狙い撃ち 7.4×2 + **Stay Quiet 4.2×2 + root(空) 9.5** + RF ほか ≈ 43 ms で、
+**Stay Quiet と root probe が 4 割**（10 台 18 枚で 171 ms/周）。
+
+→ **簡略サイクル**を追加した。Stay Quiet は「root probe で新しい札だけを見るための下準備」なので、
+root を送らないサイクルでは不要。狙い撃ちが使える reader では `PN5180_FAST_CONFIRM_EVERY` 回に
+(N-1) 回を **狙い撃ちだけで終える**（Stay Quiet も root も送らない）。
+
+- `PN5180_FAST_CONFIRM_EVERY` 5 → **3**（簡略が安く効くようになったので、発見遅れを短くする方に振った）。
+- `CARD_POLL_INTERVAL_MS` 100 → **50**。
+- 実装 B の旧「確認 probe 間引き」は `#if !PN5180_FAST_TARGETED_PROBE` に退避（判定の持ち主を 1 つにする。
+  `fast_same_as_prev` も同じガード内へ）。
+- 統計に **`簡略 N/M reader周`** を追加。
+- 見積り: 簡略 ≈ 262 ms / 完全確認 ≈ 433 ms → 平均 ≈ **320 ms**（N=3）。N=5 なら ≈ 296 ms。
+- **代償**: 既に札がある reader に増えた札の発見が最大 N poll 遅れる。**空の reader は簡略に入らない**
+  ので、席の 1 枚目 / flop / turn / river は毎 poll 検出。遅れるのは「席の 2 枚目」だけ。
+- simulator の期待値を更新: 定常 3 枚 = **簡略 2 回（3 probe）+ 完全確認 1 回（4 probe）**、
+  hold 切れで落ちた札の復帰は「**N poll 以内**」に変更（= 設計どおりのトレードオフを assert）。
+- 併せて **配線表を再振替**（ISSUE-0023）: BUSY 不通の #4(ch3) / #11(ch10) を予備に降格し、
+  board2 = #12(ch11) / board3 = #13(ch12) に。`sim_initretry` の index↔nss 期待値も更新。
+
 ## Related ADRs
 
 - ADR-0041（1 slot + P2 で 11 台）/ ADR-0040（slot 常時 present）

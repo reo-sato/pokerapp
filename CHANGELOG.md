@@ -24,8 +24,21 @@
   ため、capture で隠れた札が最大 5 poll 遅れる副作用が消える）。
 - poll 統計に **`狙い撃ち H/P 命中`** と **`応答待ち最長 x.x ms`**（応答が返った probe のみ）を追加。
   後者は RX timeout を詰めるための計器。
-- スタブ 48 構成 警告 0 + simulator（定常 = 狙い撃ち 3 + root 1 の 4 probe / 3 probe すべて
-  `mask_len=32` / 既存シナリオ 失敗 0）。**実機未検証**。
+- **実機効果（`047ee1e`, 10 台・満載 18 枚）: 538 → 433 ms**。狙い撃ち **命中 340/342（99.4%）**、
+  `coll_pos fallback` 255 → **0**、`probe 最大` 6 → **3**、`応答待ち最長 7.4 ms`（フレーム長連動の
+  上限が正しかったことの裏取り）。
+- **簡略サイクル**を追加（目標 ≤ 300 ms への詰め）: Stay Quiet は「root probe で新しい札だけを見るための
+  下準備」なので、root を送らないサイクルでは不要。狙い撃ちが使える reader では
+  `PN5180_FAST_CONFIRM_EVERY` 回に (N-1) 回を **狙い撃ちだけで終える**（2 枚なら ≈ 43 → 17 ms）。
+  `PN5180_FAST_CONFIRM_EVERY` 5 → **3**、`CARD_POLL_INTERVAL_MS` 100 → **50**。
+  統計に **`簡略 N/M reader周`** を追加。見積り 平均 ≈ 320 ms（N=3）。
+  **代償**: 既に札がある reader に増えた札の発見が最大 N poll 遅れる。**空の reader は簡略に入らない**
+  ので、席の 1 枚目 / flop / turn / river は毎 poll 検出（遅れるのは「席の 2 枚目」だけ）。
+- **配線表を再振替**（ISSUE-0023）: BUSY 不通の コネクタ #4(ch3) / #11(ch10) を予備に降格し、
+  **board2 = #12(ch11) / board3 = #13(ch12)**。席 1..8 と board1 は変更なし。host config は不変。
+  修理しない方針（ハーネスの BUSY 圧着に系統的な弱さがあるため）。
+- スタブ 48 構成 警告 0 + simulator（定常 = 簡略 2 + 完全確認 1 / 狙い撃ちは全部 `mask_len=32` /
+  復帰は N poll 以内 / 既存シナリオ 失敗 0）+ pytest 823 passed。**簡略サイクルは実機未検証**。
   worklog `docs/worklog/2026-09-11-pn5180-targeted-probe.md`。
 
 ### Fixed (firmware: 1 台の init 失敗で全 reader が止まらないように — 全 NSS High 固定 + 再試行 + 個別 skip, ISSUE-0023, 2026-09-11)
