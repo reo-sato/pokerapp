@@ -6,6 +6,28 @@
 
 ## [Unreleased]
 
+### Changed (firmware: 定常状態の inventory を「前回 UID の狙い撃ち probe」に — 満載 1 周 538 ms の対策, ISSUE-0021, 2026-09-11)
+
+- **実機で満載（8 席 × 2 枚 + board）の 1 周が 538 ms**（目標 ≤ 300 ms）。原因は **`RX_COLL_POS` が
+  実機では一度も使えない**こと: ISO15693 は UID を LSB-first で送るので衝突は必ず UID 先頭バイトで
+  起き、そのとき PN5180 が返す受信は 1 byte（flags だけ）で prefix を作れない（`coll_pos fallback` が
+  10 秒で 255 回 = 全滅）。1 bit DFS は衝突位置より手前で割るので **必ず片方の子枝が空**になり、
+  その probe が RX timeout(8 ms) を丸ごと待っていた。
+- **狙い撃ち probe**（`PN5180_FAST_TARGETED_PROBE`, 既定 on）: 前回見えていた UID を
+  **`mask_len=32` の完全一致 inventory** で 1 枚ずつ直接呼ぶ。合致する札は最大 1 枚なので
+  **衝突が起きず即答**。当たった札は Stay Quiet し、続く root probe には新しい札だけを残す。
+  定常状態は **N+1 probe**（N = 載っている枚数）に固定され、DFS と空枝の timeout が消える。
+- **応答待ちの上限をフレーム長に連動**（`tx_us + PN5180_FAST_RX_TIMEOUT_MS`）。26.48 kbps で 1 byte
+  ≈ 0.30 ms なので、mask を伸ばした probe に固定値を使うと応答の直前で打ち切る（= 狙い撃ちが常に
+  外れる罠）。`PN5180_FAST_RX_TIMEOUT_MS` の意味は「応答ぶんの予算」に変わった。
+- **新しい札の検出は毎 poll に戻る**（`PN5180_FAST_CONFIRM_EVERY` の間引きが定常状態では発動しなくなる
+  ため、capture で隠れた札が最大 5 poll 遅れる副作用が消える）。
+- poll 統計に **`狙い撃ち H/P 命中`** と **`応答待ち最長 x.x ms`**（応答が返った probe のみ）を追加。
+  後者は RX timeout を詰めるための計器。
+- スタブ 48 構成 警告 0 + simulator（定常 = 狙い撃ち 3 + root 1 の 4 probe / 3 probe すべて
+  `mask_len=32` / 既存シナリオ 失敗 0）。**実機未検証**。
+  worklog `docs/worklog/2026-09-11-pn5180-targeted-probe.md`。
+
 ### Fixed (firmware: 1 台の init 失敗で全 reader が止まらないように — 全 NSS High 固定 + 再試行 + 個別 skip, ISSUE-0023, 2026-09-11)
 
 - **実機 10 台接続で reader 0 の `pn5180_init` が firmware version 読み取り失敗**（応答 `FF FF`）になり、

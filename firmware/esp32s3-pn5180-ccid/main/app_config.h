@@ -229,3 +229,25 @@ static const pn5180_reader_cfg_t PN5180_READERS[] = {
 // 副作用: capture effect で隠れた札の発見が最大 (この値) poll 遅れる
 // （11 台 × ≈0.3 s × 5 ≈ 1.5 s 以内）。集合が変化した poll・前回 0 枚・カード無しでは必ず確認する。
 #define PN5180_FAST_CONFIRM_EVERY 5
+
+// ───────── 定常状態の「狙い撃ち probe」（1 = 有効, ISSUE-0021 実機フィードバック 6）─────────
+// 前回見えていた UID を **mask_len=64 の完全一致 inventory** で 1 枚ずつ直接呼ぶ。合致する札は
+// 最大 1 枚なので **衝突が起きず**、載ったままの札は即答する（RX timeout を待たない）。
+// 見つけた札は Stay Quiet して、残り（= 新しい札）だけを従来の root probe + DFS に任せる。
+//
+// 【なぜ必要か】実機 2026-09-11（8 席 × 2 枚 + board）で 1 周 **538 ms**（目標 ≤300 ms）。
+// 原因は `RX_COLL_POS` が **実機では常に使えない**こと: ISO15693 は UID を LSB-first で送るので
+// 衝突は必ず UID 先頭バイト（`coll_pos` 16〜19 = UID bit 0〜3）で起き、そのとき PN5180 が返す
+// 受信は **1 byte（flags だけ）** なので prefix を作れず、毎回 1 bit 伸ばしの DFS に落ちる
+// （`coll_pos fallback` が 10 秒で 255 回）。1 bit DFS は「衝突位置より手前で割る」ので
+// **必ず片方が空枝**になり、その probe が RX timeout(≈8 ms) を丸ごと待つ。
+// 狙い撃ちなら 2 枚の席は「2 probe（即答）+ 2 Stay Quiet + root 1 回」で済む。
+#define PN5180_FAST_TARGETED_PROBE 1
+
+// 狙い撃ち probe の mask ビット数（8 の倍数, 8..64）。
+// **32 が既定**: ISO15693 は UID を LSB-first で送るので下位 32 bit = MSB-first の末尾 4 byte =
+// ICODE SLIX の**シリアル 4 byte 全部**にあたり、別の札と衝突する確率は実用上ゼロ。
+// 64 にすると mask が 8 byte になりフレームが 13 byte ≈ 3.9 ms（26.48 kbps）まで伸びて、
+// 1 probe の所要時間が増える（応答待ちの上限はフレーム長に連動させてあるので誤打ち切りは
+// しないが、単純に遅くなる）。万一 prefix が衝突しても root probe + DFS が拾うので安全。
+#define PN5180_FAST_TARGETED_MASK_BITS 32

@@ -759,6 +759,11 @@ typedef struct {
 // 衝突した応答から RX_COLL_POS と「衝突ビットより前の UID 先頭部分」を取り出す。
 // 取り出せない（衝突が flags/DSFID 内 / 受信バイトが衝突ビットに届いていない / readData 失敗）
 // ときは `coll->pos` を 0xFF のままにし、呼び側は従来どおり 1 bit だけ mask を伸ばす。
+// 1 周のうち「応答が返ってきた probe の待ち時間」の最大値（µs, poll 統計用）。
+// PN5180_FAST_RX_TIMEOUT_MS を下げる余地は「実機で応答が来るまでの最長」が分からないと決められない
+// ので実測する。無応答の probe は timeout いっぱいなので数えない（ISSUE-0021）。
+static int s_fast_rx_wait_max_us;
+
 static void fast_fill_coll(pn5180_t *dev, uint32_t rs, uint32_t n, fast_coll_t *coll) {
     const uint32_t raw = (rs >> RX_COLL_POS_START) & RX_COLL_POS_MASK;
     coll->raw_pos = (uint16_t)raw;
@@ -806,7 +811,14 @@ static probe_result_t fast_probe_15693(pn5180_t *dev, uint64_t mask, uint8_t mas
     // 応答待ち（自前ループ）。pn5180_wait_for_irq() は timeout のたびに ESP_LOGE を出すので
     // 使えない（カード無しの reader が毎 poll ログを吐いて UART が埋まる）。
     uint32_t irq = 0;
-    const int64_t deadline = esp_timer_get_time() + (int64_t)PN5180_FAST_RX_TIMEOUT_MS * 1000;
+    const int64_t wait_start = esp_timer_get_time();
+    // 上限 = **フレームの送信時間** + PN5180_FAST_RX_TIMEOUT_MS（応答ぶんの予算）。
+    // 送信が終わるまで応答は来ないので、mask を長くした probe に固定値を使うと応答前に打ち切る。
+    // 26.48 kbps・1 byte ≈ 0.30 ms なので、mask 0 の 5 byte(3+CRC2) ≈ 1.5 ms に対し
+    // mask 64 bit の 13 byte ≈ 3.9 ms。**狙い撃ち probe が常に外れる**という罠になるため連動させる
+    // （Stay Quiet 側も同じ 26.48 kbps でフレーム時間を見積もっている, ISSUE-0021）。
+    const int tx_us = (int)((3 + nbytes + 2) * 8 * 1000000 / 26480);  // +2 = CRC
+    const int64_t deadline = wait_start + tx_us + (int64_t)PN5180_FAST_RX_TIMEOUT_MS * 1000;
     for (;;) {
         irq = pn5180_getIRQStatus(dev);
         if (irq & (RX_IRQ_STAT | TIMER2_IRQ_STAT | GENERAL_ERROR_IRQ_STAT)) break;
@@ -814,6 +826,13 @@ static probe_result_t fast_probe_15693(pn5180_t *dev, uint64_t mask, uint8_t mas
         esp_rom_delay_us(100);
     }
     if (!(irq & RX_IRQ_STAT)) return PROBE_NONE;  // 無応答 / RX timeout(TIMER2) / general error
+    // **応答が来たときの待ち時間**を記録する（poll 統計に出す）。PN5180_FAST_RX_TIMEOUT_MS を
+    // どこまで下げられるかは「実機で応答が来るまでの最長」が分からないと決められない。
+    // 無応答（上の return）は timeout いっぱいなので測る意味がなく、除外する。
+    {
+        const int64_t waited = esp_timer_get_time() - wait_start;
+        if (waited > s_fast_rx_wait_max_us) s_fast_rx_wait_max_us = (int)waited;
+    }
 
     uint32_t rs = 0;
     if (!pn5180_readRegister(dev, RX_STATUS, &rs)) return PROBE_NONE;
@@ -996,6 +1015,29 @@ static probe_result_t fast_probe_retry(pn5180_t *dev, uint64_t mask, uint8_t mas
     return (rc == PROBE_NOISE) ? PROBE_NONE : rc;
 }
 
+#if PN5180_FAST_TARGETED_PROBE
+// mask は byte 単位で送るので 8 の倍数。0 は「狙い撃ちでない」= 意味がないので 8 以上。
+// メッセージは ASCII 固定（gcc の診断が非 ASCII を 8 進エスケープして読めなくなるため）。
+_Static_assert(PN5180_FAST_TARGETED_MASK_BITS >= 8 && PN5180_FAST_TARGETED_MASK_BITS <= 64 &&
+                   PN5180_FAST_TARGETED_MASK_BITS % 8 == 0,
+               "PN5180_FAST_TARGETED_MASK_BITS must be a multiple of 8 in 8..64");
+
+// MSB-first の UID から inventory の mask 値（uint64, 下位 PN5180_FAST_TARGETED_MASK_BITS bit）を作る。
+// mask bit i は「生（LSB-first）バイト列の bit i」= raw[i/8] の bit i%8。ISO15693 は UID を
+// LSB から送るので raw[j] = MSB-first の [7-j]（`fast_same_as_prev` の比較と同じ対応）。
+// 32 bit なら raw[0..3] = MSB-first の [7..4] = ICODE の**シリアル 4 byte 全部**を含む。
+static uint64_t fast_mask_from_msb_uid(const uint8_t *msb) {
+    const int nb = PN5180_FAST_TARGETED_MASK_BITS / 8;
+    uint64_t m = 0;
+    for (int j = 0; j < nb; j++) m |= (uint64_t)msb[7 - j] << (8 * j);
+    return m;
+}
+#endif
+
+// 直近に読んだ reader 1 台の狙い撃ち probe 数 / 当たった数（poll 統計用。無効時は常に 0）。
+static int s_fast_targeted_probes;
+static int s_fast_targeted_hits;
+
 // 1 ラウンド目で見つけた集合が前回 cache と同じか（実装 B の判定）。
 // prev は **MSB-first**（反転・ソート済みで hold 中の UID も含む）、det は probe が返した
 // **LSB-first** の生バイト。hold 中の札が混ざっていれば「同じではない」= 確認 probe を省かない。
@@ -1035,6 +1077,9 @@ static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_car
     *uid_len = 8;
     s_fast_last_fallbacks = 0;
     s_fast_last_noise_retries = 0;
+    s_fast_targeted_probes = 0;
+    s_fast_targeted_hits = 0;
+    s_fast_rx_wait_max_us = 0;
     if (!r->rf_loaded) {
         if (!pn5180_loadRFConfig(dev, PN5180_FAST_RF_CONFIG)) return 0;
         r->rf_loaded = true;
@@ -1050,6 +1095,31 @@ static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_car
     int stale_rounds = 0;  // 新しい UID が 1 枚も増えなかったラウンドの連続数
     uint8_t uid[8];
     fast_coll_t coll;
+
+#if PN5180_FAST_TARGETED_PROBE
+    // ── 前段: 前回見えていた UID を「完全一致 mask」で直接呼ぶ（衝突しない・即答）──
+    // 載ったままの札はここで確定し Stay Quiet されるので、下の root probe には
+    // **新しい札だけ**が残る（= 定常状態では root が 1 回 NONE を返して終わる）。
+    // 外れた札（もう無い UID）は RX timeout ぶん待つが、UID 単位 hold で数 poll で消える。
+    if (prev->present && prev->uid_len == 8) {
+        for (uint8_t k = 0; k < prev->count && count < PN5180_MAX_CARDS_PER_READER &&
+                            probes < PN5180_FAST_MAX_PROBES; k++) {
+            s_fast_targeted_probes++;
+            const uint64_t m = fast_mask_from_msb_uid(prev->uids[k]);
+            if (fast_probe_retry(dev, m, PN5180_FAST_TARGETED_MASK_BITS, uid, &coll, &probes)
+                != PROBE_UID) {
+                // 外れ（もう無い）/ 衝突（この prefix を共有する別の札も居る）。どちらも
+                // 下の root probe + DFS に任せる（衝突した札はそこで分離される）。
+                continue;
+            }
+            s_fast_targeted_hits++;
+            fast_add_uid(uids, &count, uid);
+            // root probe で「新しい札」だけを見るために、確定した札は黙らせる。
+            fast_stay_quiet_15693(dev, uid);
+        }
+    }
+#endif
+
     while (probes < PN5180_FAST_MAX_PROBES && count < PN5180_MAX_CARDS_PER_READER) {
         const uint8_t before = count;
         int round_uids = 0;  // このラウンドで応答した札の数（重複込み。安全弁の判定用）
@@ -1333,6 +1403,9 @@ static int s_stats_worst_idx;
 static int s_stats_max_probes;           // 窓内で reader 1 台が使った probe 回数の最大（fast 経路）
 static int s_stats_fallbacks;            // 窓内の coll_pos fallback 回数（fast 経路）
 static int s_stats_noise_retries;        // 窓内のノイズ再試行回数（fast 経路）
+static int s_stats_targeted_probes;      // 窓内の狙い撃ち probe 数（fast 経路）
+static int s_stats_targeted_hits;        // 窓内の狙い撃ち命中数（fast 経路）
+static int s_stats_rx_wait_max_us;       // 窓内で「応答が返った probe」の最長待ち（µs, fast 経路）
 static int s_stats_cycles;
 #endif
 
@@ -1345,6 +1418,9 @@ void pn5180_reader_poll_once(void) {
     int cycle_max_probes = 0;  // この周で最も probe を使った reader の回数（fast 経路のみ。0 = ドライバ経路）
     int cycle_fallbacks = 0;      // この周で RX_COLL_POS を使えず 1 bit 伸ばしに落ちた回数
     int cycle_noise_retries = 0;  // この周で壊れた受信を再 probe した回数
+    int cycle_targeted_probes = 0;  // この周の狙い撃ち probe 数（前回 UID の完全一致 probe）
+    int cycle_targeted_hits = 0;    // うち当たった数（= 載ったままだった札）
+    int cycle_rx_wait_max_us = 0;   // この周で「応答が返った probe」の最長待ち時間（µs）
 #endif
 
     for (int i = 0; i < PN5180_READER_COUNT; i++) {
@@ -1379,6 +1455,9 @@ void pn5180_reader_poll_once(void) {
         if (s_fast_last_probes > cycle_max_probes) cycle_max_probes = s_fast_last_probes;
         cycle_fallbacks += s_fast_last_fallbacks;
         cycle_noise_retries += s_fast_last_noise_retries;
+        cycle_targeted_probes += s_fast_targeted_probes;
+        cycle_targeted_hits += s_fast_targeted_hits;
+        if (s_fast_rx_wait_max_us > cycle_rx_wait_max_us) cycle_rx_wait_max_us = s_fast_rx_wait_max_us;
 #endif
 #else
         // ISO15693（8B）→（PN5180_TRY_ISO14443=1 のときだけ）ISO14443A（4/7B）の順。
@@ -1449,6 +1528,9 @@ void pn5180_reader_poll_once(void) {
         s_stats_max_probes = 0;
         s_stats_fallbacks = 0;
         s_stats_noise_retries = 0;
+        s_stats_targeted_probes = 0;
+        s_stats_targeted_hits = 0;
+        s_stats_rx_wait_max_us = 0;
     }
     if (cycle_us < s_stats_min_us) s_stats_min_us = cycle_us;
     if (cycle_us > s_stats_max_us) s_stats_max_us = cycle_us;
@@ -1461,6 +1543,9 @@ void pn5180_reader_poll_once(void) {
     if (cycle_max_probes > s_stats_max_probes) s_stats_max_probes = cycle_max_probes;
     s_stats_fallbacks += cycle_fallbacks;
     s_stats_noise_retries += cycle_noise_retries;
+    s_stats_targeted_probes += cycle_targeted_probes;
+    s_stats_targeted_hits += cycle_targeted_hits;
+    if (cycle_rx_wait_max_us > s_stats_rx_wait_max_us) s_stats_rx_wait_max_us = cycle_rx_wait_max_us;
 
     const int64_t now_us = esp_timer_get_time();
     if (s_stats_window_start_us == 0) s_stats_window_start_us = now_us;  // 初回だけ窓を開始
@@ -1469,12 +1554,15 @@ void pn5180_reader_poll_once(void) {
         ESP_LOGI(TAG,
                  "poll 統計(直近 %d 周): 1 周 min/avg/max = %lld/%lld/%lld ms, "
                  "最長 reader #%d (index %d) = %lld ms, probe 最大 %d 回/reader, "
+                 "狙い撃ち %d/%d 命中, 応答待ち最長 %d.%01d ms, "
                  "coll_pos fallback %d, ノイズ再試行 %d, ready %d reader",
                  s_stats_cycles,
                  (long long)(s_stats_min_us / 1000), (long long)(avg_us / 1000),
                  (long long)(s_stats_max_us / 1000),
                  s_stats_worst_idx + 1, s_stats_worst_idx,
                  (long long)(s_stats_worst_us / 1000), s_stats_max_probes,
+                 s_stats_targeted_hits, s_stats_targeted_probes,
+                 s_stats_rx_wait_max_us / 1000, (s_stats_rx_wait_max_us % 1000) / 100,
                  s_stats_fallbacks, s_stats_noise_retries, ready_readers);
         s_stats_cycles = 0;             // 次の窓へ（min/max/sum は次の 1 周で初期化）
         s_stats_window_start_us = now_us;

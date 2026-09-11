@@ -266,6 +266,55 @@ Stay Quiet 自体は効いている（2 ラウンド目の root が NONE で終�
   `PN5180_FAST_RX_TIMEOUT_MS`（8→5〜6）→ `PN5180_FAST_CONFIRM_EVERY`（5→10）→
   `CARD_POLL_INTERVAL_MS`（100→50 or 0。周期は縮むが RF デューティと電流は上がる）。
 
+## 実機フィードバック 6（2026-09-11, `405f218` を 10 台 ready + 満載で実行）= 目標未達
+
+```
+poll 統計: 1 周 min/avg/max = 529/538/550 ms, 最長 reader 69 ms, probe 最大 6,
+           coll_pos fallback 255, ノイズ再試行 0, ready 10 reader
+reader 0: coll_pos=17（UID bit -1）, 受信 1 byte, cur.len=0 → fallback(1bit)
+```
+
+8 席 × 2 枚 + board を載せると **1 周 538 ms**（目標 ≤ 300 ms / 上限 0.5 s も超える）。
+
+### Root Cause 6: `RX_COLL_POS` は実機では一度も使えない（= 常に 1 bit DFS）
+
+- ISO15693 は UID を **LSB-first** で送るので、変化の大きいシリアル下位バイトが最初に流れ、
+  衝突は必ず **UID 先頭バイト**（`coll_pos` 16〜19 = UID bit 0〜3）で起きる。
+- そのとき PN5180 が返す受信は **1 byte（flags だけ）**。`fast_fill_coll` は衝突ビットを含むバイトまで
+  受信できていることを要求する（`if (n < 2 + pos/8 + 1) return;`）ので、**必ず `pos=0xFF`**
+  （ログの `UID bit -1`）になり 1 bit 伸ばしに落ちる。`coll_pos fallback` が 10 秒で 255 回 = 全滅。
+- 1 bit DFS は「**衝突位置より手前**で割る」ため、衝突が bit 1 以降だと **必ず片方の子枝が空**になり、
+  その probe が RX timeout（8 ms）を丸ごと待つ。残った枝はまた衝突するので bit 0,1,2… と刻む。
+  実測 probe 6 / reader 53 ms はこの形。**実装 A（coll_pos DFS）は実機では効いていなかった。**
+
+### 対処（実装 C = 狙い撃ち probe, `PN5180_FAST_TARGETED_PROBE`）
+
+前回 cache の UID を **`mask_len=32` の完全一致 inventory** で 1 枚ずつ直接呼ぶ。合致する札は
+最大 1 枚なので **衝突が起きず即答**する。当たった札は Stay Quiet して、続く root probe には
+**新しい札だけ**を残す（定常状態は root 1 回 NONE で終了）。
+
+| 状況 | probe | 内訳 |
+|---|---|---|
+| 定常（N 枚が載ったまま） | **N+1** | 狙い撃ち N（即答）+ root 1（NONE） |
+| 1 枚増えた | N+2 | 狙い撃ち N + root(新 UID) + root(NONE) |
+| 全部新規（空 → 載る） | 従来と同じ | cache が空なので前段は走らず root + DFS |
+
+**併せて応答待ちの上限をフレーム長に連動**させた（`tx_us + PN5180_FAST_RX_TIMEOUT_MS`）。26.48 kbps で
+1 byte ≈ 0.30 ms なので mask 64 bit のフレームは 13 byte ≈ 3.9 ms かかり、固定 8 ms では応答
+（tx+t1+rx ≈ 7.9 ms）の直前で打ち切る = **狙い撃ちが常に外れる罠**だった。mask を 32 bit にしたのも
+同じ理由（フレーム 9 byte ≈ 2.7 ms、応答到着 6.7 ms、上限 10.7 ms で 4 ms の余裕）。
+32 bit は MSB-first 末尾 4 byte = **ICODE のシリアル 4 byte 全部**なので実用上一意。
+
+`PN5180_FAST_CONFIRM_EVERY`（確認 probe の間引き）は定常状態では発動しなくなる（root が 1 ラウンド目で
+NONE を返して break するため）。結果 **新しい札の検出が毎 poll に戻る**（間引きの副作用が消える）。
+
+### 追加した計器
+
+`poll 統計` に **`狙い撃ち H/P 命中`**（H = 当たった数 = 載ったままだった札）と
+**`応答待ち最長 x.x ms`**（**応答が返った probe だけ**の最長待ち）を追加。後者は
+`PN5180_FAST_RX_TIMEOUT_MS` をどこまで下げられるかを実測で決めるための計器
+（無応答 probe は timeout いっぱいなので測る意味が無く、除外している）。
+
 ## Regression Check
 
 **実機で** `idf.py monitor` の `poll 統計` を見る（自動テスト不可 = 実 RF が要る）:
