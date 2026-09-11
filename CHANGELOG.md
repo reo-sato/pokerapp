@@ -19,7 +19,11 @@
   RST ピン/配線）」、init 失敗診断で SPI 応答ありかつ RST 診断 0 なら同じ疑いを明示。
 - docs: ISSUE-0023（新規, Open）/ worklog `docs/worklog/2026-09-11-pn5180-init-resilience.md` /
   firmware README・checklist §8 の「1 台失敗 = 全台停止」記述を更新。スタブ 32 構成 警告 0 +
-  simulator（再試行・skip・NSS High・SPI 作り直し）12 項目 ✅。**実機未検証**。
+  simulator（再試行・skip・NSS High・SPI 作り直し）12 項目 ✅。
+- **実機確認（2026-09-11, `076b844`）**: 同じ 10 台接続で reader 0 が 1 発目で init 成功（再試行なし）、
+  `PN5180 ready: 9/11 reader（skip: #4, #11）`、9 台すべてでカード検出。**多台数の初実測 = 9 台で
+  1 周 124〜139 ms**（1 台 ≈ 14 ms、11 台なら ≈ 155 ms。ISSUE-0021 実機フィードバック 4）。
+  `RST診断(ch0)` の `during_rst=0` は残る（reader 0 は動作、ISSUE-0023 Open）。
 
 ### Changed (firmware: CCID slot を 1 つに固定し、物理リーダーを Get UID の P2 で選ぶ — 契約 **v1.2** / firmware 側, ADR-0041 / ISSUE-0022, 2026-09-10)
 

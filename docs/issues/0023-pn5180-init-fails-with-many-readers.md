@@ -6,8 +6,10 @@
 
 ## Status
 
-Open（firmware 側の緩和策は実装済 = 全 NSS High 固定 + init 再試行 1 回 + 失敗 reader の個別 skip。
-**根本原因は実機で未確定**。次回の起動ログで切り分ける）
+Open（緩和策 = 全 NSS High 固定 + init 再試行 1 回 + 失敗 reader の個別 skip は **実機で有効を確認**
+（2026-09-11, `076b844`）: 同じ 10 台接続のまま reader 0 が **1 発目で init 成功**（再試行なし）、
+`PN5180 ready: 9/11 reader（skip: #4, #11）`、9 台すべてでカード検出。残: `RST診断(ch0)` が依然
+`during_rst=0`（reader 0 は動作しているので当面は実害なし、下の「実機結果」参照））
 
 ## Component
 
@@ -77,6 +79,30 @@ NSS スキャン: [1/13] NSS=GPIO1 (ch0) -> 送信前BUSY=0  BUSY Low→High:YES
   1 台も ready でないときに 1 回だけ。
 - RST 診断に「during_rst=0 かつ after=0 → RST 不通の可能性」の判定文、init 失敗診断に
   「SPI には応答するのに RST 診断が 0 → コネクタの RST ピン/配線」の判定文を追加。
+
+## 実機結果（2026-09-11, `076b844`, 接続は前回と同じ 10 台）
+
+```
+MUX scan ch0..15 (pull-up): 0001000000101111        ← 前回と同じ
+RST診断(ch0, pull-up有): BUSY during_rst=0  just_after=0  after_10ms=0   ← 依然 0
+  → during_rst=0 かつ after=0: RST がこの chip に届いていない可能性 …（新しい判定文）
+配線チェック: 設定 ch なのに floating = #4(ch3), #11(ch10) → skip / 範囲外 = ch11(=#12)
+PN5180 reader 0 ready (nss=1 mux_ch=0)              ← 再試行 WARN なし = 1 発目で成功
+PN5180 reader 1 … reader 9 ready（#4/#11 は未通電 skip）
+PN5180 ready: 9/11 reader（skip: #4, #11）
+🎴 reader 0/1/2/4/5/6/7/8/9: 1 枚 [E0:04:01:53:1A:41:83:4C]  ← 同じ札を 9 台に順に置いて全部検出・離脱
+poll 統計(直近 46 周): 1 周 min/avg/max = 124/125/139 ms, 最長 reader 28 ms, probe 最大 2, ready 9 reader
+```
+
+- 前回失敗した reader 0 が **再試行なしで init 成功**した。前回との差分は firmware の緩和策のみ
+  （配線・台数は同じ）なので、**仮説 1（init していない chip の NSS floating による MISO 衝突）が
+  最有力**。仮説 2 の「1 発目だけ噛み合わない」なら再試行 WARN が出ているはず。
+- `RST診断(ch0)` は依然 `0 0 0` = reader 0 の chip はリセットに反応していない。ただし init・
+  inventory とも正常なので当面は実害なし。RST 不通のままだと chip がハングしたときに電源断でしか
+  復帰できないので、後で **reader を #1 と #2 で入れ替えて診断値が入れ替わるか**（コネクタか個体か）
+  を見る。
+- 9 台で 1 周 ≈ 125 ms（カード無し〜1 枚）= 1 台 ≈ 14 ms。11 台なら ≈ 155 ms、全席に札を載せた
+  実運用で ≈ 250〜300 ms の見込み（ISSUE-0021 の目標 ≤ 300 ms の上限付近。要実測）。
 
 ## 次に実機で確認すること（切り分け）
 
