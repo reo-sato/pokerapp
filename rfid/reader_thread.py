@@ -218,19 +218,39 @@ class RFIDThread(threading.Thread):
     # ――― board の位置割り当て（契約 v1.3 §4: board reader 全台で 1 つの論理ボード） ―――
 
     def _sync_board_presence(self) -> None:
-        """board reader 全台の UID 和集合に合わせて、割り当て済みの位置を整理する。
+        """board reader 全台の UID 和集合に合わせて、いま載っている UID を更新する。
 
-        - 和集合から消えた UID の位置を解放する（**どの台からも見えなくなったときだけ**）。
-        - 和集合が空 = ボードに 1 枚も無い → 位置の記憶もクリアする（ハンドの切れ目）。
+        **位置（`_board_index_memory`）はここでは捨てない**。engine 側の board は「カードが
+        外れても縮まない」ので、RFID だけがボードが空になった時点で番号を振り直すと、
+        置き直したときに engine の古い札と混ざって同じ札が 2 か所に出る（ISSUE-0026）。
+        位置のリセットは **新ハンド（`reset_board_positions`）だけ**を同期点にする。
+
+        `_board_index_by_uid`（= いま盤上にある UID）は和集合に追従させる。**どの台からも
+        見えなくなったときだけ**解放するので、隣接リーダーの重なりで片方から消えても保たれる。
         """
         union: set[str] = set()
         for uids in self._board_uids.values():
             union |= uids
         for uid in [u for u in self._board_index_by_uid if u not in union]:
             del self._board_index_by_uid[uid]
-        if not union and self._board_index_memory:
-            self._board_index_memory.clear()
-            logger.debug("ボードが空になりました — board 位置の記憶をクリア")
+
+    def reset_board_positions(self) -> None:
+        """ボード位置の割り当てを捨てて次のハンドに備える（新ハンドの同期点, ISSUE-0026）。
+
+        `IntegrationThread` の `on_new_hand` フックから呼ばれる。board reader のデバウンス状態も
+        落とすので、**ハンド開始時に盤上に残っているカードは改めて 1 番から検出し直す**
+        （engine 側も `_board_positions` を空にするため、両者が必ず同じ状態から始まる）。
+
+        poll スレッドとは別スレッド（IntegrationThread）から呼ばれるが、dict/set の
+        差し替えは GIL 下で原子的で、poll 側は「見えている UID との差分」で動くため、
+        取りこぼしは次の poll で回復する（ロックは持たない = poll を止めない）。
+        """
+        self._board_index_by_uid = {}
+        self._board_index_memory = {}
+        for reader_id in list(self._board_uids):
+            self._board_uids[reader_id] = set()
+            self._last_uids[reader_id] = set()
+        logger.info("新ハンド: board の位置割り当てをリセットしました")
 
     def _assign_board_index(self, uid: str) -> Optional[int]:
         """新規 board UID に **ボード全体での位置**（1..5）を割り当てる。

@@ -155,6 +155,7 @@ class IntegrationThread(threading.Thread):
         clock: Optional[Callable[[], float]] = None,
         session_repo: "Optional[SessionRepository]" = None,
         seat_player_map: Optional[dict[int, str]] = None,
+        on_new_hand: Optional[Callable[[], None]] = None,
     ) -> None:
         """
         Args:
@@ -170,6 +171,10 @@ class IntegrationThread(threading.Thread):
                           hand 開始時に assign_seat（write-through）し、HandSummary.players に player_id を
                           additive 埋め込む。None なら従来動作（session 未接続・挙動不変, rollback path）。
             seat_player_map: seat_no → player_id（registry の UUID hex）。session_repo と対で有効。
+            on_new_hand: 新ハンド開始時に呼ぶフック（additive, 既定 None = 従来動作）。
+                         RFID の board 位置を **engine と同じタイミングでリセット**するために使う
+                         （`RFIDThread.reset_board_positions`, ISSUE-0026）。integration スレッドで
+                         発火するのでスレッド安全に実装すること。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -187,6 +192,7 @@ class IntegrationThread(threading.Thread):
         self._session_repo = session_repo
         self._seat_player_map: dict[int, str] = dict(seat_player_map or {})
         self._session_layer_active = session_repo is not None and bool(self._seat_player_map)
+        self._on_new_hand = on_new_hand
 
         # センサーイベントのバッファ
         self._camera_buffer: list[CameraEvent] = []
@@ -281,6 +287,24 @@ class IntegrationThread(threading.Thread):
         else:
             self._handle_seat_rfid(ev)
 
+    def _warn_duplicate_board_cards(self) -> None:
+        """ボードに同じカードが 2 枚以上ある = 物理的にあり得ない（1 組のデッキ）。
+
+        起こり得る原因は **`rfid_cards.json` の重複登録**（同じカード名に 2 つの UID）か
+        誤読み。どちらもハンドログが壊れるので WARN + needs_review を立てる（ISSUE-0026）。
+        枚数判定によるストリート自動遷移も水増しされるため、黙って進めない。
+        """
+        dupes = sorted({c for c in self._board_cards if self._board_cards.count(c) > 1})
+        if not dupes:
+            return
+        logger.warning(
+            "ボードに同じカードが複数あります: %s（board=%s）— 1 組のデッキではあり得ません。"
+            "rfid_cards.json の重複登録を疑ってください（`python tools/register_cards.py list`）。"
+            "needs_review を立てます",
+            ", ".join(dupes), self._board_cards,
+        )
+        self._hand_needs_review = True
+
     def _handle_board_rfid(self, ev: RFIDEvent) -> None:
         """ボードカードの RFID イベントを処理する。"""
         if not ev.card:
@@ -298,18 +322,22 @@ class IntegrationThread(threading.Thread):
                 self._board_positions[i]
                 for i in sorted(self._board_positions)
             ]
+            # tag を出すのは、同じカード名が別 UID で 2 枚登録されている（= rfid_cards.json の
+            # 重複登録）ケースを名前だけのログから切り分けられないため（ISSUE-0026）。
             logger.info(
-                "Board card [pos=%d]: %s — board so far: %s",
-                ev.board_index, ev.card, self._board_cards,
+                "Board card [pos=%d]: %s (tag=%s) — board so far: %s",
+                ev.board_index, ev.card, ev.tag_id, self._board_cards,
             )
+            self._warn_duplicate_board_cards()
             self._try_advance_street_from_rfid()
         else:
             # board_index なし: 末尾に追記
             self._board_cards.append(ev.card)
             logger.info(
-                "Board card (no index): %s — board so far: %s",
-                ev.card, self._board_cards,
+                "Board card (no index): %s (tag=%s) — board so far: %s",
+                ev.card, ev.tag_id, self._board_cards,
             )
+            self._warn_duplicate_board_cards()
 
         if not self._board_source:
             self._board_source = "rfid"
@@ -688,6 +716,14 @@ class IntegrationThread(threading.Thread):
         self._board_source = ""
         self._hole_cards = {}
         self._hand_needs_review = False
+        if self._on_new_hand is not None:
+            # RFID の board 位置を engine と同じタイミングでリセットする（ISSUE-0026）。
+            # engine 側の board は「カードが外れても縮まない」ので、RFID だけが独自に位置を
+            # 振り直すと両者がずれて同じ札が 2 か所に出る。ハンドの切れ目を唯一の同期点にする。
+            try:
+                self._on_new_hand()
+            except Exception:  # noqa: BLE001 — フックの失敗でハンドを止めない
+                logger.exception("on_new_hand hook failed — ハンドは続行します")
         if self._session_layer_active:
             self._assign_seats_for_hand(gs.hand_id)
         logger.info("New hand started: hand_id=%d", gs.hand_id)

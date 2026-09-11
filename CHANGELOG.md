@@ -6,6 +6,27 @@
 
 ## [Unreleased]
 
+### Fixed (RFID: ボードを下げて置き直すと位置が engine とずれ、同じ札が 2 か所に出る, ISSUE-0026, 2026-09-11)
+
+- ISSUE-0025 修正後の実機通しで、`[pos=2]: Qc` の再発火は同じ位置に収まった一方、
+  **異なる位置に同じカード名**が並んだ（`['Kc','Qc','Jc','Jc']` / `['Kc','Qc','Qc','Jc']`）。
+- 原因は **engine の board は縮まないのに RFID の位置空間はボードが空になるとリセットされていた**
+  こと。ボードを一度全部下げて別の順で置き直すと RFID は 1 番から振り直し、engine には前の札が
+  残るため同じ札が並び、位置 4 まで埋まれば turn も誤発火する。5 枚が同時に一瞬読めなかった場合も
+  同じ経路に入る。
+- **位置のリセットは「新ハンド」だけを同期点にした**（engine が `_board_positions` を空にするのと
+  同じ場所で `RFIDThread.reset_board_positions()` を呼ぶ）。ボードが空になっても番号は振り直さず、
+  置き直したカードは記憶から元の位置に戻る。新ハンドでは board reader のデバウンスも落とすので、
+  盤上に残っているカードは改めて 1 番から検出し直す。
+- `IntegrationThread(on_new_hand=...)` を additive 追加（既定 None = 従来動作）。`main.py` の
+  `--cli` / GUI 両方で結線。フックの例外はハンドを止めない。
+- **診断を 2 つ追加**: engine の board ログに **`tag=`（UID）** を出す（「同じ札が 2 か所」が
+  同一 UID か `rfid_cards.json` の重複登録かをログだけで判定できるようにする）+ **ボードに同じ
+  カードが 2 枚以上あれば WARN + `needs_review`**（1 組のデッキでは物理的にあり得ない）。
+- 契約 v1.3 §4 を更新（記憶クリアの条件を「ボードが空」→「新ハンド」に、重複カードの SHOULD を追加）。
+  回帰テスト 2 本（`test_empty_board_keeps_positions_until_new_hand` /
+  `test_reset_board_positions_starts_from_one_again`）、832 passed。
+
 ### Fixed (RFID: 同じ札に別の board 位置が再割り当てされ turn が誤発火する, ISSUE-0025, 2026-09-11)
 
 - ADR-0042 の初回実機通し（11 台, flop を左 1 枚 + 真ん中 2 枚）で、**同じ札が 2 つの位置を占め**、

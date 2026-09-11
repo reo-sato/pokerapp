@@ -883,15 +883,6 @@ class TestBoardGroupPositions:
         assert events[0].board_index is None
         assert any("5 枚を超え" in r.getMessage() for r in caplog.records)
 
-    def test_empty_board_resets_positions_for_next_hand(self, tmp_path: Path):
-        """ボードが 0 枚になったら位置記憶をクリア = 次のハンドは 1 枚目から数え直す。"""
-        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA", "04:BB", "04:CC"]))
-        assert [e.board_index for e in p.poll()] == [1, 2, 3]
-        p.bridge.uids = []                     # ハンド終了でボードを片付ける
-        assert p.poll() == []
-        p.bridge.uids = ["04:CC"]              # 次のハンドで前ハンドの 3 枚目だった札を先に置く
-        assert [e.board_index for e in p.poll()] == [1]
-
     def test_positions_are_shared_across_board_readers(self, tmp_path: Path):
         """**本命**: flop が複数台に散っても 1..3、turn/river がどの台でも 4/5 になる。"""
         from core.event_queue import make_rfid_queue
@@ -931,7 +922,7 @@ class TestBoardGroupPositions:
         # river: 右の台に載せて 5
         bridges[2].uids = ["04:R1"]
         assert [(e.reader_id, e.board_index) for e in poll_all()] == [("reader_2", 5)]
-        # 全台から下げる → 次のハンドは 1 から
+        # 全台から下げたあと、未知の札を置けば空き最小 = 1（既知の札は位置を覚えている）
         for b in bridges:
             b.uids = []
         assert poll_all() == []
@@ -981,7 +972,7 @@ class TestBoardGroupPositions:
         bridges[1].uids = ["04:F1", "04:F2", "04:F3", "04:T1"]
         assert [e.board_index for e in poll_all()] == [4]
 
-        # 全台から消えて初めて解放 + 記憶クリア → 次のハンドは 1 から
+        # 全台から消えて初めて解放（位置記憶は残る = ISSUE-0026）。未知の札は空き最小 = 1。
         bridges[1].uids = []
         assert poll_all() == []
         bridges[0].uids = ["04:N1"]
@@ -1017,6 +1008,38 @@ class TestBoardGroupPositions:
         assert poll_all() == []
         board_bridge.uids = ["04:B1", "04:B2"]                    # board に 1 枚足す
         assert [e.board_index for e in poll_all()] == [2]         # 1 は保持されたまま
+
+    def test_empty_board_keeps_positions_until_new_hand(self, tmp_path: Path):
+        """ISSUE-0026: ボードが空になっても位置は捨てない（engine の board は縮まないため）。
+
+        ボードを一度下げて **別の順に置き直す** と、RFID だけが 1 から振り直すと engine の
+        古い札と混ざって同じ札が 2 か所に出る。位置のリセットは新ハンドだけを同期点にする。
+        """
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA", "04:BB", "04:CC"]))
+        assert [e.board_index for e in p.poll()] == [1, 2, 3]
+        p.bridge.uids = []                      # ボードを全部下げる
+        assert p.poll() == []
+        # 別の順で置き直しても、それぞれ元の位置に戻る（1 から振り直さない）
+        p.bridge.uids = ["04:CC", "04:BB", "04:AA"]
+        assert sorted(
+            (e.tag_id, e.board_index) for e in p.poll()
+        ) == [("04:AA", 1), ("04:BB", 2), ("04:CC", 3)]
+
+    def test_reset_board_positions_starts_from_one_again(self, tmp_path: Path):
+        """新ハンド（`reset_board_positions`）で位置と board 側デバウンスを捨てる。
+
+        盤上にカードが残ったまま新ハンドに入っても、改めて 1 番から検出し直す
+        （engine も `_board_positions` を空にするので両者が同じ状態から始まる）。
+        """
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA", "04:BB"]))
+        assert [e.board_index for e in p.poll()] == [1, 2]
+        p.thread.reset_board_positions()
+        # 盤上はそのままでも、デバウンスが落ちているので再検出され 1 から振り直す
+        assert [(e.tag_id, e.board_index) for e in p.poll()] == [("04:AA", 1), ("04:BB", 2)]
+        # 置き直す順が違えば番号も入れ替わる（= 記憶を持ち越していない）
+        p.thread.reset_board_positions()
+        p.bridge.uids = ["04:BB", "04:AA"]
+        assert [(e.tag_id, e.board_index) for e in p.poll()] == [("04:BB", 1), ("04:AA", 2)]
 
     def test_obsolete_index_and_cards_are_ignored(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,

@@ -197,6 +197,10 @@ def run_cli() -> None:
         rfid_thread.start()
 
     event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
+    # 新ハンドで RFID の board 位置もリセットする（engine の board と同じ同期点。
+    # 片方だけが番号を振り直すと同じ札が 2 か所に出る, ISSUE-0026）。
+    on_new_hand = getattr(rfid_thread, "reset_board_positions", None) if rfid_thread else None
+
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
         game_state=game_state,
@@ -206,6 +210,7 @@ def run_cli() -> None:
         on_action=on_action,
         stop_event=stop_event,
         event_recorder=event_recorder,
+        on_new_hand=on_new_hand,
     )
     if audio_thread is not None:
         audio_thread.start()
@@ -407,6 +412,10 @@ def run_gui() -> None:
         dash._rfid_receiver = rfid_thread
 
     event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
+    # 新ハンドで RFID の board 位置もリセットする（engine の board と同じ同期点。
+    # 片方だけが番号を振り直すと同じ札が 2 か所に出る, ISSUE-0026）。
+    on_new_hand = getattr(rfid_thread, "reset_board_positions", None) if rfid_thread else None
+
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
         game_state=game_state,
@@ -418,6 +427,7 @@ def run_gui() -> None:
         stop_event=stop_event,
         event_recorder=event_recorder,
         session_repo=session_repo,
+        on_new_hand=on_new_hand,
     )
 
     dash.start_threads(

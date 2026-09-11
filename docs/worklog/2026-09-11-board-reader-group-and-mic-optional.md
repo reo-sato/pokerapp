@@ -139,6 +139,49 @@
 （デバウンスは reader 単位）はずなのに、位置割り当て側でその経路を考慮していなかった。
 UID をキーにする設計を選んだ以上、**同一 UID の再入は冪等**でなければならない。
 
+## 追記 2（同日）: 位置リセットの同期点を新ハンドに（ISSUE-0026）+ 実機ログからの所見
+
+`da17e7a`（ISSUE-0025 修正）で「同じ UID の再発火が同じ位置になる」ことは実機で確認できた
+（`[pos=2]: Qc` が 4 回、すべて 2 番）。しかし **異なる位置に同じカード名**が残った:
+
+```
+[pos=3]: Jc → [pos=4]: Jc   board ['Kc','Qc','Jc','Jc']
+[pos=2]: Qc → [pos=3]: Qc   board ['Kc','Qc','Qc','Jc']
+```
+
+原因は **engine の board は縮まない**（`_handle_board_rfid` は埋めるだけ・外れてもイベント無し =
+ハンド確定までボードを保持する設計）のに、**RFID 側はボードが空になった時点で位置を振り直して
+いた**こと。ボードを一度下げて別の順で置き直すと両者がずれる。詳細は ISSUE-0026。
+
+修正: **位置リセットは新ハンドだけを同期点にする**。
+
+- `RFIDThread.reset_board_positions()`（新規 public）: 位置・記憶・board reader のデバウンスを落とす。
+- `IntegrationThread(on_new_hand=...)`（additive, 既定 None）を `_start_new_hand` の
+  `_board_positions = {}` と同じ場所で呼ぶ。フックの例外はハンドを止めない。
+- `main.py` の `--cli` / GUI 双方で結線（HTTP receiver にこのメソッドは無いので `getattr` で任意扱い）。
+- `_sync_board_presence` は記憶を捨てず、いま盤上にある UID だけ和集合に追従（ISSUE-0025 の修正は維持）。
+
+診断も 2 つ追加した（本 issue の切り分けが名前だけのログでは不可能だったため）:
+
+- board ログに **`tag=`（UID）** を出す → 「同じ札が 2 か所」が同一 UID か
+  `rfid_cards.json` の重複登録（同じカード名に 2 UID）かをログだけで判定できる。
+- **ボードに同じカードが 2 枚以上で WARN + `needs_review`**（1 組のデッキでは物理的にあり得ない）。
+
+旧テスト `test_empty_board_resets_positions_for_next_hand` は本 issue で挙動を変えたので削除し、
+`test_empty_board_keeps_positions_until_new_hand` / `test_reset_board_positions_starts_from_one_again`
+に置き換えた。832 passed。
+
+### 実機ログからのその他の所見（本タスクでは未対応）
+
+- **pokerkit が未導入**と見られる: JSON の `"pots": []` と全 action の `confidence: 0.5`
+  （= legacy の固定表「audio のみ」）。`engine.backend="pokerkit"` は既定だが未導入だと warning を
+  出して legacy にフォールバックする（CLAUDE.md エラーハンドリング方針）。この状態では
+  **actor 推定 / 合法手射影 / silent-fold 合成 / side-pot / 派生 confidence が全部無効**。
+  → `pip install pokerkit` を Phase H の残作業に追記。
+- `b 5` と打って認識されなかった（ヘルプどおり `ベット 5` は通る）。英字・ローマ字の別名は未実装。
+- turn で `席1 bet 5` → `席2 bet 10` と記録された（本来は raise）。legacy backend は読み上げを
+  そのまま記録するため。rules-aware backend なら合法手射影で矯正される見込み。
+
 ## Related
 
 - ISSUE-0024 / ADR-0042 / 契約 `rfid-usb-ccid.md` v1.3
