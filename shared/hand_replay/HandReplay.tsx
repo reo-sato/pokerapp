@@ -19,6 +19,7 @@ import React from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 
 import {
+  actionColor,
   ALL_STREETS,
   buildReplayModel,
   compactActionLabel,
@@ -156,25 +157,38 @@ function SeatChip(props: {
   );
 }
 
-/** 4 列の 1 行。要確認 / 訂正済は左の色ストライプ + 記号で幅を使わずに示す。 */
-function ActionLine(props: { action: ReplayAction; isSelf: boolean }): React.JSX.Element {
+/**
+ * 4 列の 1 行。列幅が狭い (約 88px) ので **2 段**に分ける:
+ *   1 段目 = 席番号 + プレーヤー名（誰のアクションか）
+ *   2 段目 = アクション名（**種別ごとの色** = ADR-0051 追記 D8）+ 短縮金額
+ * 要確認 / 訂正済は左の色ストライプ + 記号で幅を使わずに示す。
+ */
+function ActionLine(props: {
+  action: ReplayAction;
+  isSelf: boolean;
+  name: string;
+}): React.JSX.Element {
   const a = props.action;
   const stripe = a.needs_review ? c.warn : a.corrected ? c.accent : "transparent";
   return (
     <View
       style={[s.actionLine, props.isSelf && s.actionLineSelf, { borderLeftColor: stripe }]}
     >
-      <Text style={s.actionSeat}>{a.seat}</Text>
-      <Text style={s.actionLabel} numberOfLines={1}>
-        {compactActionLabel(a.action)}
+      <Text style={[s.actionWho, props.isSelf && { color: c.selfEdge }]} numberOfLines={1}>
+        {a.seat} {props.name}
       </Text>
-      {a.amount ? (
-        <Text style={s.actionAmount} numberOfLines={1}>
-          {formatChipsCompact(a.amount)}
+      <View style={s.actionMain}>
+        <Text style={[s.actionLabel, { color: actionColor(a.action) }]} numberOfLines={1}>
+          {compactActionLabel(a.action)}
         </Text>
-      ) : null}
-      {a.needs_review ? <Text style={[s.mark, { color: c.warn }]}>!</Text> : null}
-      {a.corrected ? <Text style={[s.mark, { color: c.accent }]}>✎</Text> : null}
+        {a.amount ? (
+          <Text style={s.actionAmount} numberOfLines={1}>
+            {formatChipsCompact(a.amount)}
+          </Text>
+        ) : null}
+        {a.needs_review ? <Text style={[s.mark, { color: c.warn }]}>!</Text> : null}
+        {a.corrected ? <Text style={[s.mark, { color: c.accent }]}>✎</Text> : null}
+      </View>
     </View>
   );
 }
@@ -185,6 +199,7 @@ function StreetColumn(props: {
   section?: StreetSection;
   newCards: string[];
   selfSeat?: number;
+  nameOf: (action: ReplayAction) => string;
 }): React.JSX.Element {
   const { section, newCards } = props;
   // プリフロップの fold は出さない（降りた席はテーブル図側で減光して示す）。
@@ -213,7 +228,12 @@ function StreetColumn(props: {
           <Text style={s.columnEmpty}>—</Text>
         ) : (
           actions.map((a, i) => (
-            <ActionLine key={i} action={a} isSelf={a.seat === props.selfSeat} />
+            <ActionLine
+              key={i}
+              action={a}
+              isSelf={a.seat === props.selfSeat}
+              name={props.nameOf(a)}
+            />
           ))
         )}
       </ScrollView>
@@ -243,6 +263,10 @@ export function HandReplay(props: {
   const foldedPreflop = new Set(preflopFoldedSeats(props.hand.actions ?? []));
   const slots = seatRingLayout(model.seats.length);
   const sectionByStreet = new Map(model.streets.map((st) => [st.street, st]));
+  // アクションに player_name が無い記録もあるので、席→参加者名で補う（最後は「席N」）。
+  const nameBySeat = new Map(model.seats.map((p) => [p.seat, p.name]));
+  const nameOf = (a: ReplayAction): string =>
+    a.player_name ?? nameBySeat.get(a.seat) ?? `席${a.seat}`;
   const winnerName =
     model.winnerSeat != null
       ? model.seats.find((p) => p.seat === model.winnerSeat)?.name
@@ -313,6 +337,7 @@ export function HandReplay(props: {
             section={sectionByStreet.get(street)}
             newCards={newCardsFor(street, board)}
             selfSeat={props.selfSeat}
+            nameOf={nameOf}
           />
         ))}
       </View>
@@ -411,15 +436,15 @@ const s = StyleSheet.create({
   columnBodyContent: { paddingBottom: 2 },
   columnEmpty: { color: c.border, fontSize: 11, marginTop: 2 },
   actionLine: {
-    flexDirection: "row",
-    alignItems: "center",
     paddingVertical: 2,
     paddingLeft: 3,
+    marginBottom: 2,
     borderLeftWidth: 2,
   },
   actionLineSelf: { backgroundColor: c.selfRow, borderRadius: 3 },
-  actionSeat: { color: c.muted, fontSize: 10, width: 11 },
-  actionLabel: { color: c.text, fontSize: 10, flexShrink: 1 },
-  actionAmount: { color: c.accent, fontSize: 10, fontWeight: "700", marginLeft: 3 },
+  actionMain: { flexDirection: "row", alignItems: "center" },
+  actionWho: { color: c.muted, fontSize: 9 },
+  actionLabel: { fontSize: 10, fontWeight: "700", flexShrink: 1 },
+  actionAmount: { color: c.text, fontSize: 10, fontWeight: "700", marginLeft: 3 },
   mark: { fontSize: 10, fontWeight: "700", marginLeft: 2 },
 });

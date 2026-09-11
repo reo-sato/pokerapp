@@ -213,6 +213,29 @@ export function compactActionLabel(action: string): string {
   return COMPACT_ACTION_LABELS[action] ?? action;
 }
 
+/**
+ * アクション種別の表示色（ADR-0051 追記 D8）。
+ *
+ * ポーカーの攻撃性の並びをそのまま色に写す: 降りた=灰 → パッシブ(check)=鋼 →
+ * 追従(call)=青 → 主導(bet)=緑 → 攻撃(raise)=橙 → 最大(all-in)=赤。
+ * 色だけに意味を載せないよう、種別名の文字自体は常に併記する。
+ */
+export const ACTION_COLORS: Record<string, string> = {
+  fold: "#6b7680",
+  check: "#8ba3b8",
+  call: "#5ab0f0",
+  bet: "#7fd48a",
+  raise: "#ffa35c",
+  allin: "#ff5f6d",
+  all_in: "#ff5f6d",
+  blind: "#8a949e",
+};
+
+/** 未知の action は通常のテキスト色（描画側の `c.text` と同値）にフォールバックする。 */
+export function actionColor(action: string): string {
+  return ACTION_COLORS[action] ?? "#f2f5f7";
+}
+
 /** テーブル外周に置く 1 席の位置（親コンテナに対する中心の %）。 */
 export interface SeatSlot {
   top: number;

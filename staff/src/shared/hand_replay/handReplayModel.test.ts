@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  actionColor,
   actionLabel,
   ALL_STREETS,
   buildReplayModel,
@@ -236,4 +237,12 @@ test("hiding preflop folds does not change the pot the column shows", () => {
     visibleColumnActions("preflop", preflop.actions).map((a) => a.action),
     ["raise", "call"],
   );
+});
+
+test("actionColor maps each action to its own hue and falls back for unknown", () => {
+  const colors = ["fold", "check", "call", "bet", "raise", "allin"].map(actionColor);
+  // 6 種別がすべて異なる色（色で種別が読み分けられる）。
+  assert.equal(new Set(colors).size, 6);
+  assert.equal(actionColor("all_in"), actionColor("allin"));
+  assert.equal(actionColor("limp?"), "#f2f5f7"); // 未知は通常テキスト色
 });
