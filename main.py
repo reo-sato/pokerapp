@@ -68,6 +68,28 @@ def _make_event_recorder(cfg: dict, log_dir: str, session_id: str):
     return EventRecorder(Path(log_dir) / f"{session_id}.events.jsonl")
 
 
+def _make_audio_thread(cfg: dict, audio_queue, stop_event):
+    """config.audio.enabled が true（既定）なら AudioThread を返す。false なら None。
+
+    false はマイクを繋がない実機テスト（RFID のカード読み取りだけを見る / ダミーアクションを
+    キーボードで投入する）用。アクションは CLI の入力ループが読み上げ文を `parse_action` に
+    通して AudioEvent にするので、音声と同じ語彙・同じ経路で進行できる。
+    """
+    audio_cfg = cfg.get("audio", {})
+    if not audio_cfg.get("enabled", True):
+        return None
+    from audio.recorder import AudioThread
+
+    return AudioThread(
+        audio_queue=audio_queue,
+        device_id=audio_cfg.get("device_id", 0),
+        sample_rate=audio_cfg.get("sample_rate", 16000),
+        model_size=audio_cfg.get("whisper_model", "medium"),
+        language=audio_cfg.get("language", "ja"),
+        stop_event=stop_event,
+    )
+
+
 def _make_game_state(cfg: dict, players: list, sb: int, bb: int):
     """config.engine.backend で game-state 実装を選ぶ (R2, ADR-0009)。
 
@@ -85,7 +107,6 @@ def run_cli() -> None:
     from core.config import load_config
     from core.event_queue import make_audio_queue
     from core.game_state import PlayerState
-    from audio.recorder import AudioThread
     from integration.engine import IntegrationThread
     from output.json_writer import JsonWriter
 
@@ -116,14 +137,10 @@ def run_cli() -> None:
     audio_cfg = cfg.get("audio", {})
     cam_cfg = cfg.get("camera", {})
 
-    audio_thread = AudioThread(
-        audio_queue=audio_q,
-        device_id=audio_cfg.get("device_id", 0),
-        sample_rate=audio_cfg.get("sample_rate", 16000),
-        model_size=audio_cfg.get("whisper_model", "medium"),
-        language=audio_cfg.get("language", "ja"),
-        stop_event=stop_event,
-    )
+    audio_thread = _make_audio_thread(cfg, audio_q, stop_event)
+    if audio_thread is None:
+        print("音声入力は無効です (audio.enabled=false)。"
+              "アクションはキーボードから読み上げ文で投入してください。")
     # Phase 2/3: カメラが設定済みの場合のみ CameraThread を起動する
     # Phase 3: camera_q を IntegrationThread に渡すことで ±2秒マッチングが有効になる
     camera_thread = None
@@ -190,15 +207,19 @@ def run_cli() -> None:
         stop_event=stop_event,
         event_recorder=event_recorder,
     )
-    audio_thread.start()
+    if audio_thread is not None:
+        audio_thread.start()
     integration_thread.start()
 
     print(f"\nセッション開始。ログ: {json_writer.path}")
     print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー  [r <席> <金額>]=リバイ")
+    print("上記以外の入力は読み上げ文として解釈します"
+          "（例: チェック / シート3 コール / ベット 500）。マイクが無くてもこれで進行できます。")
     print("ディーラーがアナウンスすると自動検出されます。\n")
 
     # GameStateManager はロックを持たないため、状態変更コマンド (n/w/r) はすべて
     # audio_q 経由で IntegrationThread に処理させる（直接呼ぶと apply_action とレースする）。
+    from audio.recognizer import parse_action
     from core.events import AudioEvent
     import time as _time
 
@@ -240,13 +261,25 @@ def run_cli() -> None:
                 except ValueError as e:
                     print(f"エラー: {e}")
             else:
-                print("不明なコマンドです。q / n / w <席> / r <席> <金額>")
+                # 上のコマンド以外は **ディーラーのアナウンスとして解釈**する（マイク無しで
+                # アクションを投入する経路。音声と同じ `parse_action` を通すので語彙は共通 =
+                # 二重管理にならない）。例: 「チェック」「シート3 コール」「ベット 500」。
+                ev = parse_action(line)
+                if ev is None:
+                    print("認識できません。コマンド: q / n / w <席> / r <席> <金額>、"
+                          "または読み上げ文（例: チェック / シート3 コール / ベット 500）")
+                else:
+                    audio_q.put(ev)
+                    print(f"  → {ev.action}"
+                          + (f" {ev.amount}" if ev.amount else "")
+                          + (f" (席{ev.seat})" if ev.seat else ""))
 
     except (KeyboardInterrupt, EOFError):
         pass
     finally:
         stop_event.set()
-        audio_thread.join(timeout=3)
+        if audio_thread is not None:
+            audio_thread.join(timeout=3)
         integration_thread.join(timeout=3)
         if camera_thread is not None:
             camera_thread.join(timeout=3)
@@ -260,7 +293,6 @@ def run_gui() -> None:
     from core.config import load_config
     from core.event_queue import make_audio_queue
     from core.game_state import PlayerState
-    from audio.recorder import AudioThread
     from integration.engine import IntegrationThread
     from output.json_writer import JsonWriter
     from gui.dashboard import GUIDashboard
@@ -318,14 +350,10 @@ def run_gui() -> None:
         session_layer_enabled=session_layer_enabled,
     )
 
-    audio_thread = AudioThread(
-        audio_queue=audio_q,
-        device_id=audio_cfg.get("device_id", 0),
-        sample_rate=audio_cfg.get("sample_rate", 16000),
-        model_size=audio_cfg.get("whisper_model", "medium"),
-        language=audio_cfg.get("language", "ja"),
-        stop_event=stop_event,
-    )
+    audio_thread = _make_audio_thread(cfg, audio_q, stop_event)
+    if audio_thread is None:
+        print("音声入力は無効です (audio.enabled=false)。"
+              "アクションはキーボードから読み上げ文で投入してください。")
 
     camera_thread = None
     if cam_cfg.get("roi"):
@@ -421,7 +449,8 @@ def run_gui() -> None:
 
     # mainloop 終了後のクリーンアップ
     stop_event.set()
-    audio_thread.join(timeout=3)
+    if audio_thread is not None:
+        audio_thread.join(timeout=3)
     integration_thread.join(timeout=3)
     if camera_thread is not None:
         camera_thread.join(timeout=3)

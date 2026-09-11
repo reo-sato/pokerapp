@@ -98,8 +98,9 @@ class TestLint:
     def test_valid_passes(self):
         cfgs = [
             {"name": "R0", "role": "seat", "seat": 1},
-            {"name": "R1", "role": "board", "index": 1},
-            {"name": "R2", "role": "board"},  # index 任意
+            {"name": "R1", "role": "board"},
+            {"name": "R2", "role": "board"},
+            {"name": "R3", "role": "board"},
         ]
         assert lint_pcsc_readers(cfgs) == []
 
@@ -165,9 +166,9 @@ class TestLint:
         name = "PokerRFID PN5180-CCID 0"
         cfgs = [{"name": name, "reader": i, "role": "seat", "seat": i + 1} for i in range(8)]
         cfgs += [
-            {"name": name, "reader": 8, "role": "board", "index": 1, "cards": 3},
-            {"name": name, "reader": 9, "role": "board", "index": 4},
-            {"name": name, "reader": 10, "role": "board", "index": 5},
+            {"name": name, "reader": 8, "role": "board"},
+            {"name": name, "reader": 9, "role": "board"},
+            {"name": name, "reader": 10, "role": "board"},
         ]
         assert lint_pcsc_readers(cfgs) == []
 
@@ -181,41 +182,52 @@ class TestLint:
         assert len({c["name"] for c in cfgs}) == 1     # reader 名は 1 つだけ（ADR-0041）
 
 
-class TestLintBoardCards:
-    """`cards`（重ね置き枚数, 任意・既定 1）の検査（契約 v1.1 §4）。"""
+class TestLintBoardGroup:
+    """board reader 群の検査（契約 v1.3 §4 / ADR-0042: 位置は config に書かない）。"""
 
-    def test_cards_one_is_ok_without_index(self):
-        assert lint_pcsc_readers([{"name": "R0", "role": "board", "cards": 1}]) == []
-
-    def test_cards_must_be_int_1_to_5(self):
-        for bad in (0, 6, "3", 1.5):
-            problems = lint_pcsc_readers([{"name": "R0", "role": "board", "index": 1, "cards": bad}])
-            assert any("cards" in p for p in problems), bad
-
-    def test_cards_gt_one_requires_index(self):
-        problems = lint_pcsc_readers([{"name": "R0", "role": "board", "cards": 3}])
-        assert any("index が必要" in p for p in problems)
-
-    def test_span_beyond_board_position_5_flagged(self):
-        # index=4 + cards=3 → 4..6 は river(5) を超える。
-        problems = lint_pcsc_readers([{"name": "R0", "role": "board", "index": 4, "cards": 3}])
-        assert any("1..5 を超え" in p for p in problems)
-
-    def test_overlapping_board_positions_flagged(self):
+    def test_board_without_position_fields_passes(self):
         cfgs = [
-            {"name": "R0", "role": "board", "index": 1, "cards": 3},   # 1..3
-            {"name": "R1", "role": "board", "index": 3},               # 3 が重なる
-        ]
-        problems = lint_pcsc_readers(cfgs)
-        assert any("重複" in p and "board 位置" in p for p in problems)
-
-    def test_non_overlapping_positions_pass(self):
-        cfgs = [
-            {"name": "R0", "role": "board", "index": 1, "cards": 3},
-            {"name": "R1", "role": "board", "index": 4},
-            {"name": "R2", "role": "board", "index": 5},
+            {"name": "R0", "role": "board"},
+            {"name": "R1", "role": "board"},
+            {"name": "R2", "role": "board"},
         ]
         assert lint_pcsc_readers(cfgs) == []
+
+    def test_obsolete_index_flagged(self):
+        problems = lint_pcsc_readers([
+            {"name": "R0", "role": "board", "index": 1},
+            {"name": "R1", "role": "board"},
+        ])
+        assert any("index" in p and "廃止" in p for p in problems)
+
+    def test_obsolete_cards_flagged(self):
+        problems = lint_pcsc_readers([
+            {"name": "R0", "role": "board", "cards": 3},
+            {"name": "R1", "role": "board"},
+        ])
+        assert any("cards" in p and "廃止" in p for p in problems)
+
+    def test_both_obsolete_fields_reported_in_one_line(self):
+        problems = [
+            p for p in lint_pcsc_readers([
+                {"name": "R0", "role": "board", "index": 1, "cards": 3},
+                {"name": "R1", "role": "board"},
+            ]) if "廃止" in p
+        ]
+        assert len(problems) == 1
+        assert "index / cards" in problems[0]
+
+    def test_single_board_reader_warns_about_five_cards(self):
+        """board reader 1 台では 5 枚を重ねることになり給電不足で読めない可能性が高い。"""
+        problems = lint_pcsc_readers([
+            {"name": "R0", "role": "seat", "seat": 1},
+            {"name": "R1", "role": "board"},
+        ])
+        assert any("board reader が 1 台" in p for p in problems)
+
+    def test_no_board_reader_is_not_flagged(self):
+        """board なし（席だけ）の構成は lint 対象外（RFID でボードを読まない運用）。"""
+        assert lint_pcsc_readers([{"name": "R0", "role": "seat", "seat": 1}]) == []
 
 
 # ――― analyze_uid (§7) ―――
@@ -253,23 +265,21 @@ class TestReaderLabel:
     def test_seat(self):
         assert reader_label({"role": "seat", "seat": 3}) == "seat 3"
 
-    def test_board_with_index(self):
-        assert reader_label({"role": "board", "index": 2}) == "board 2"
-
-    def test_board_without_index(self):
+    def test_config_board_has_no_position_in_label(self):
+        # config 由来の board reader は位置を持たない（位置は検出順で決まる, v1.3 §4）。
         assert reader_label({"role": "board"}) == "board"
 
-    def test_board_with_cards_shows_range(self):
-        # 重ね置き reader は占有範囲を示す（flop 3 枚 = board 1-3, 契約 v1.1 §4）。
-        assert reader_label({"role": "board", "index": 1, "cards": 3}) == "board 1-3"
-
-    def test_board_with_cards_one_is_plain(self):
-        assert reader_label({"role": "board", "index": 4, "cards": 1}) == "board 4"
+    def test_event_board_index_is_shown(self):
+        # format_event が RFIDEvent.board_index を `index` として渡す経路。実際に割り当てられた
+        # 位置を表示する（config に書く位置ではない）。
+        assert reader_label({"role": "board", "index": 2}) == "board 2"
+        assert reader_label({"role": "board", "index": 5, "reader": 10}) == "board 5 [r10]"
 
     def test_reader_index_suffix_only_when_specified(self):
         # v1.2: 物理リーダー index は `[r3]` で添える。未指定なら従来表示のまま。
         assert reader_label({"role": "seat", "seat": 1, "reader": 3}) == "seat 1 [r3]"
-        assert reader_label({"role": "board", "index": 1, "cards": 3, "reader": 8}) == "board 1-3 [r8]"
+        assert reader_label({"role": "board", "reader": 8}) == "board [r8]"
+        assert reader_label({"role": "board", "index": 3, "reader": 8}) == "board 3 [r8]"
         assert reader_label({"role": "seat", "seat": 1, "reader": 0}) == "seat 1 [r0]"
         assert reader_label({"role": "seat", "seat": 1, "reader": None}) == "seat 1"
 
@@ -445,7 +455,7 @@ class TestRunWatch:
         cm = CardMaster(tmp_path / "cards.json")
         cfgs = [
             {"name": "CCID 0", "reader": 0, "role": "seat", "seat": 1},
-            {"name": "CCID 0", "reader": 8, "role": "board", "index": 1, "cards": 3},
+            {"name": "CCID 0", "reader": 8, "role": "board"},
         ]
         captured: list[str] = []
         run_watch(
@@ -524,7 +534,9 @@ class TestCommandsWithPyscardStubbed:
         monkeypatch.setattr(probe, "pyscard_available", lambda: True)
         cfg = _write_config(tmp_path, [
             {"name": "R0", "role": "seat", "seat": 1},
-            {"name": "R1", "role": "board", "index": 1},
+            {"name": "R1", "role": "board"},
+            {"name": "R2", "role": "board"},
+            {"name": "R3", "role": "board"},
         ])
         args = argparse.Namespace(config=str(cfg))
         rc = probe._cmd_check(args, bridge_factory=lambda name: MockPCSCBridge(name))

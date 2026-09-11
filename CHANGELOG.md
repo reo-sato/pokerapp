@@ -6,6 +6,40 @@
 
 ## [Unreleased]
 
+### Fixed (RFID: board reader を「ストリート専用」と取り違えていた — 全台で 1 つの論理ボードに, ISSUE-0024 / ADR-0042, 2026-09-11)
+
+- **契約 v1.1/v1.2 は board reader を「1 台 = 1 ストリート専用」**（`index` = 先頭ボード位置 +
+  `cards` = その台に重ねる枚数、flop は 1 台に 3 枚重ね）として設計していた。**実機はボード領域に
+  board reader が並んでいるだけ**で、どの台がどのカードを受けるかは置き方次第（flop の 2・3 枚目は
+  真ん中の台の方が読みやすい）。実際に turn の台へ 2 枚目を置くと `cards=1 を超えるカード` WARN で
+  `board_index=None` になり、flop を 3 台に散らすと位置が 1, 4, 5 に飛んでいた。
+- **board reader 全台を 1 つの論理ボードとして扱う**ようにした（契約 **v1.3 §4**）。
+  `RFIDEvent.board_index`（1..5）は **全台を通した検出順** = ディーラーが配った順で決まり、
+  **どの台が読んだかに依存しない**。flop を「左 1 枚 + 真ん中 2 枚」で置いても 1,2,3、turn/river が
+  どの台でも 4/5 になる。board reader 5 台（1 台 1 枚）の構成も同じ規則で動く。
+- **ボードが 0 枚になったら位置記憶をクリア**（= ハンドの切れ目。次の flop 1 枚目が前ハンドの位置を
+  継がない）。1 枚だけ浮かせて戻す間は他の札が残るので**並びは変わらない**（従来の耐性を維持）。
+- **config の `index` / `cards` は廃止**（board は `role: "board"` だけ）。残っていても無視するが、
+  **起動時に WARN + `probe_pcsc check` の lint で指摘**する（「設定したのに効かない」を黙って作らない）。
+  board reader は **左から右の順に並べて書く**（同一 poll で台をまたいだぶんの位置順が記載順で決まる）。
+- lint は「位置の重なり」検査を廃止し、代わりに **board reader 1 台だけの構成を警告**する
+  （5 枚を 1 台に重ねることになり給電不足で読めない可能性が高い）。
+- **既知の制約**: 1 台に同時に載った複数枚の左右順は保証しない（UID 順）。street 遷移は枚数判定・
+  PHH は flop をまとめて出力なので実害は JSON ログの並びのみ。
+- **firmware は無改修**（UID を返すだけで役割・位置を知らない = v1.0 からの不変条件）。
+  回帰テスト `tests/test_rfid.py::TestBoardGroupPositions`、829 passed。
+
+### Added (マイク無しで hand logger を回せるように — `audio.enabled` + CLI のダミーアクション, 2026-09-11)
+
+- config **`audio.enabled`（既定 true）** を追加。false で **AudioThread を起動しない**
+  （`main.py:_make_audio_thread`）。マイク未接続の実機テストで、RFID のカード読み取りだけを先に
+  確認したいときに使う。従来どおり（キー無し / true）の挙動は不変。
+- `--cli` の入力ループが **未知の行を「ディーラーの読み上げ文」として解釈**するようになった。
+  例: `チェック` / `シート3 コール` / `ベット 500`。音声と同じ `parse_action` を通すので語彙は共通で、
+  CLI 側に独自パーサを持たない。認識できない行は使い方を表示するだけ（queue には積まない）。
+  既存コマンド `q` / `n` / `w <席>` / `r <席> <金額>` は不変。
+- 併せて `gui/dashboard.py:start_threads` の `audio_thread` を `Optional` に。
+
 ### Changed (firmware: 定常状態の inventory を「前回 UID の狙い撃ち probe」に — 満載 1 周 538 ms の対策, ISSUE-0021, 2026-09-11)
 
 - **実機で満載（8 席 × 2 枚 + board）の 1 周が 538 ms**（目標 ≤ 300 ms）。原因は **`RX_COLL_POS` が

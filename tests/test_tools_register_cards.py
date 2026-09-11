@@ -19,7 +19,7 @@ from rfid.card_master import CardMaster
 _READERS = [
     {"name": "CCID 0", "reader": 0, "role": "seat", "seat": 1},
     {"name": "CCID 0", "reader": 1, "role": "seat", "seat": 2},
-    {"name": "CCID 0", "reader": 8, "role": "board", "index": 1, "cards": 3},
+    {"name": "CCID 0", "reader": 8, "role": "board"},
 ]
 
 
@@ -104,14 +104,14 @@ class TestSelectReader:
     def test_select_by_role_label(self):
         assert reg.select_reader(_READERS, "seat 2") is _READERS[1]
         assert reg.select_reader(_READERS, "SEAT  2") is _READERS[1]
-        assert reg.select_reader(_READERS, "board 1") is _READERS[2]       # cards>1 の先頭位置
-        assert reg.select_reader(_READERS, "board 1-3") is _READERS[2]
+        # board reader は位置を持たない（位置は検出順で決まる, 契約 v1.3 §4 / ADR-0042）。
+        assert reg.select_reader(_READERS, "board") is _READERS[2]
         assert reg.select_reader(_READERS, "seat 1 [r0]") is _READERS[0]
 
     def test_unknown_selector_lists_choices(self):
         with pytest.raises(ValueError) as e:
             reg.select_reader(_READERS, "seat 9")
-        assert "seat 1" in str(e.value) and "board 1-3" in str(e.value)
+        assert "seat 1" in str(e.value) and "board" in str(e.value)
 
     def test_index_out_of_range(self):
         with pytest.raises(ValueError):
@@ -250,7 +250,7 @@ class TestCli:
         cfg = _write_config(tmp_path)
         a = reg.build_parser().parse_args(
             ["--config", str(cfg), "--cards-file", str(cards), "run",
-             "--only", "Ah", "--reader", "board 1", "--poll-interval", "0"])
+             "--only", "Ah", "--reader", "board", "--poll-interval", "0"])
         seen: list[tuple[str, int]] = []
 
         def factory(name: str, index: int):
@@ -260,7 +260,7 @@ class TestCli:
         rc = reg._cmd_run(a, bridge_factory=factory)
         out = capsys.readouterr().out
         assert rc == 0 and seen == [("CCID 0", 8)]
-        assert "board 1-3 [r8]" in out and "物理リーダー 8" in out
+        assert "board [r8]" in out and "物理リーダー 8" in out
         assert CardMaster(cards).lookup("AA") == "Ah"
 
     def test_run_defaults_to_first_config_element(self, tmp_path, monkeypatch, capsys):

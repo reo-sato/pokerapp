@@ -622,7 +622,7 @@ class TestRFIDThread:
         board_index は engine の street 自動遷移の分岐条件（engine.py:294）。PC/SC 経路でこれが
         欠落していたため board street が進まなかった（B3 latent bug）。回帰固定する。
         """
-        configs = [{"name": "reader_B", "role": "board", "index": 3}]
+        configs = [{"name": "reader_B", "role": "board"}]
         sequences = {"reader_B": [None, "04:11:22"]}
         thread, rfid_q, stop = _make_rfid_thread(tmp_path, sequences, configs)
         thread.start()
@@ -632,7 +632,9 @@ class TestRFIDThread:
         ev: RFIDEvent = rfid_q.get_nowait()
         assert ev.role == "board"
         assert ev.seat is None
-        assert ev.board_index == 3  # B3: PC/SC 経路でも board_index が流れること
+        # B3: PC/SC 経路でも board_index が流れること。位置は config ではなく検出順
+        # （ボード 1 枚目 = 1, 契約 v1.3 §4 / ADR-0042）。
+        assert ev.board_index == 1
 
     def test_seat_role_has_no_board_index(self, tmp_path: Path):
         """role=seat では board_index は None（B3 修正で seat に誤って付かないこと）。"""
@@ -826,20 +828,24 @@ class TestStackedDebounce:
         assert [e.tag_id for e in p.poll()] == ["04:AA"]
 
 
-class TestBoardStackPositions:
-    """board reader の `cards` = 重ね置き枚数 → `index + offset` の位置割り当て。"""
+class TestBoardGroupPositions:
+    """board reader **全台で 1 つの論理ボード**を共有し、検出順に 1..5 を振る（v1.3 §4 / ADR-0042）。
 
-    FLOP = {"name": "B1", "role": "board", "index": 1, "cards": 3}
+    物理配置は「ボード領域に board reader が並んでいるだけ」で、flop 3 枚が 3 台に散ることも
+    真ん中の 1 台に 2 枚載ることもある。位置は reader ごとの固定 offset ではなく配った順で決まる。
+    """
+
+    BOARD = {"name": "B1", "role": "board"}
 
     def test_flop_three_cards_get_positions_1_2_3(self, tmp_path: Path):
-        p = _Poller(tmp_path, self.FLOP, _ScriptedBridge(["04:AA", "04:BB", "04:CC"]))
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA", "04:BB", "04:CC"]))
         events = p.poll()
         assert [e.board_index for e in events] == [1, 2, 3]
-        assert len({e.board_index for e in events}) == 3
         assert all(e.role == "board" and e.seat is None for e in events)
 
-    def test_incremental_placement_fills_lowest_free_offset(self, tmp_path: Path):
-        p = _Poller(tmp_path, self.FLOP, _ScriptedBridge(["04:AA"]))
+    def test_incremental_placement_counts_up(self, tmp_path: Path):
+        """1 台に 1 枚ずつ足す（= flop を 1 枚ずつ並べる）と 1→2→3。"""
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA"]))
         assert [e.board_index for e in p.poll()] == [1]
         p.bridge.uids = ["04:AA", "04:BB"]
         assert [e.board_index for e in p.poll()] == [2]
@@ -847,44 +853,99 @@ class TestBoardStackPositions:
         assert [e.board_index for e in p.poll()] == [3]
 
     def test_removed_card_returns_to_same_position(self, tmp_path: Path):
-        p = _Poller(tmp_path, self.FLOP, _ScriptedBridge(["04:AA", "04:BB", "04:CC"]))
+        """1 枚だけ浮かせて戻してもボードの並びが変わらない（他の札が残っている = 同ハンド）。"""
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA", "04:BB", "04:CC"]))
         p.poll()
-        p.bridge.uids = ["04:AA", "04:CC"]     # 真ん中（offset 1）を外す
+        p.bridge.uids = ["04:AA", "04:CC"]     # 真ん中（位置 2）を外す
         assert p.poll() == []
         p.bridge.uids = ["04:AA", "04:BB", "04:CC"]
         assert [e.board_index for e in p.poll()] == [2]   # 同じ位置に戻る
 
     def test_freed_position_is_reusable_by_another_card(self, tmp_path: Path):
-        p = _Poller(tmp_path, self.FLOP, _ScriptedBridge(["04:AA", "04:BB"]))
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA", "04:BB"]))
         p.poll()
-        p.bridge.uids = ["04:BB"]              # offset 0 が空く
+        p.bridge.uids = ["04:BB"]              # 位置 1 が空く（ボードは空にならない）
         p.poll()
         p.bridge.uids = ["04:BB", "04:DD"]
         assert [e.board_index for e in p.poll()] == [1]
 
-    def test_fourth_card_over_capacity_warns_and_has_no_index(
+    def test_sixth_card_over_board_capacity_warns_and_has_no_index(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ):
-        p = _Poller(tmp_path, self.FLOP, _ScriptedBridge(["04:AA", "04:BB", "04:CC"]))
-        p.poll()
-        p.bridge.uids = ["04:AA", "04:BB", "04:CC", "04:DD"]
+        """ボードは 5 枚まで。6 枚目は WARN + board_index=None（engine は末尾に追記）。"""
+        uids = ["04:A1", "04:A2", "04:A3", "04:A4", "04:A5"]
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(list(uids)))
+        assert [e.board_index for e in p.poll()] == [1, 2, 3, 4, 5]
+        p.bridge.uids = uids + ["04:A6"]
         with caplog.at_level(logging.WARNING, logger="rfid.reader_thread"):
             events = p.poll()
-        assert [e.tag_id for e in events] == ["04:DD"]
-        assert events[0].board_index is None            # engine の「末尾に追記」経路へ
-        assert any("cards=3" in r.getMessage() for r in caplog.records)
+        assert [e.tag_id for e in events] == ["04:A6"]
+        assert events[0].board_index is None
+        assert any("5 枚を超え" in r.getMessage() for r in caplog.records)
 
-    def test_single_card_board_reader_uses_index_as_is(self, tmp_path: Path):
-        cfg = {"name": "B2", "role": "board", "index": 4}     # cards 省略 = 1
+    def test_empty_board_resets_positions_for_next_hand(self, tmp_path: Path):
+        """ボードが 0 枚になったら位置記憶をクリア = 次のハンドは 1 枚目から数え直す。"""
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA", "04:BB", "04:CC"]))
+        assert [e.board_index for e in p.poll()] == [1, 2, 3]
+        p.bridge.uids = []                     # ハンド終了でボードを片付ける
+        assert p.poll() == []
+        p.bridge.uids = ["04:CC"]              # 次のハンドで前ハンドの 3 枚目だった札を先に置く
+        assert [e.board_index for e in p.poll()] == [1]
+
+    def test_positions_are_shared_across_board_readers(self, tmp_path: Path):
+        """**本命**: flop が複数台に散っても 1..3、turn/river がどの台でも 4/5 になる。"""
+        from core.event_queue import make_rfid_queue
+
+        configs = [
+            {"name": "L", "role": "board"},
+            {"name": "M", "role": "board"},
+            {"name": "R", "role": "board"},
+        ]
+        bridges = [_ScriptedBridge([]) for _ in configs]
+        queue = make_rfid_queue()
+        thread = RFIDThread(
+            rfid_queue=queue,
+            card_master=CardMaster(tmp_path / "cards.json"),
+            reader_configs=configs,
+            poll_interval_ms=10,
+            stop_event=threading.Event(),
+        )
+
+        def poll_all() -> list[RFIDEvent]:
+            for i, (b, cfg) in enumerate(zip(bridges, configs)):
+                thread._poll_reader(b, cfg, f"reader_{i}")  # noqa: SLF001
+            out = []
+            while not queue.empty():
+                out.append(queue.get_nowait())
+            return out
+
+        # flop: 左に 1 枚、真ん中に 2 枚（実機で読みやすい置き方）
+        bridges[0].uids = ["04:F1"]
+        bridges[1].uids = ["04:F2", "04:F3"]
+        assert [(e.reader_id, e.board_index) for e in poll_all()] == [
+            ("reader_0", 1), ("reader_1", 2), ("reader_1", 3),
+        ]
+        # turn: 真ん中に 3 枚目として載せても 4
+        bridges[1].uids = ["04:F2", "04:F3", "04:T1"]
+        assert [(e.reader_id, e.board_index) for e in poll_all()] == [("reader_1", 4)]
+        # river: 右の台に載せて 5
+        bridges[2].uids = ["04:R1"]
+        assert [(e.reader_id, e.board_index) for e in poll_all()] == [("reader_2", 5)]
+        # 全台から下げる → 次のハンドは 1 から
+        for b in bridges:
+            b.uids = []
+        assert poll_all() == []
+        bridges[2].uids = ["04:N1"]
+        assert [e.board_index for e in poll_all()] == [1]
+
+    def test_obsolete_index_and_cards_are_ignored(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ):
+        """旧 config の index / cards は無視（位置は検出順）。起動時の WARN は run() が出す。"""
+        cfg = {"name": "B2", "role": "board", "index": 4, "cards": 3}
         p = _Poller(tmp_path, cfg, _ScriptedBridge(["04:11"]))
-        assert [e.board_index for e in p.poll()] == [4]
-
-    def test_board_reader_without_index_keeps_none(self, tmp_path: Path):
-        cfg = {"name": "B3", "role": "board"}
-        p = _Poller(tmp_path, cfg, _ScriptedBridge(["04:AA", "04:BB"]))
-        assert [e.board_index for e in p.poll()] == [None, None]
-
-    def test_invalid_cards_value_falls_back_to_one(self, tmp_path: Path):
-        cfg = {"name": "B4", "role": "board", "index": 2, "cards": 0}
-        p = _Poller(tmp_path, cfg, _ScriptedBridge(["04:AA", "04:BB"]))
-        assert [e.board_index for e in p.poll()] == [2, None]
+        assert [e.board_index for e in p.poll()] == [1]
+        with caplog.at_level(logging.WARNING, logger="rfid.reader_thread"):
+            p.thread._warn_obsolete_board_fields(cfg, "reader_0")  # noqa: SLF001
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("index / cards" in m and "廃止" in m for m in msgs)

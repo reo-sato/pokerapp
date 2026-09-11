@@ -11,7 +11,7 @@ PC/SC スタック越しに、production と同じ `rfid.bridge.PCSCBridge` / `r
   - §3-4 reader_name 列挙と `config.rfid.pcsc_readers` の一致（前方一致でなく等値）。
          **CCID slot = 1**（Windows 制限, ADR-0041）なので reader_name は 1 つで、物理リーダーは
          config の `reader`（Get UID の P2）で選ぶ。突き合わせは `(name, reader)` 単位。
-  - §4   config の lint（role/seat/index/cards/reader・重複・位置の重なり・キー欠落）
+  - §4   config の lint（role/seat/reader・重複・キー欠落・board の廃止フィールド/台数）
   - §5   各 reader への connect 成功（host は ATR 非依存。connect が通れば OS PC/SC が ATR 受理）
   - §6-7 Get UID（FF CA 00 <k> 00）応答の UID を 4/7/8 バイト長非依存で正規化。16/24/32B は
          重ね置き（8B UID × 枚数の連結, v1.1）として分割。`FF CA 00 FF 00` で台数 N を問い合わせ
@@ -149,7 +149,7 @@ def lint_pcsc_readers(pcsc_readers: list[dict]) -> list[str]:
 
     seen_targets: dict[tuple[str, int], str] = {}   # (name, reader) → 使っている label
     seen_seats: dict[int, str] = {}
-    seen_positions: dict[int, str] = {}   # board 位置 1..5 → 使っている label（重なり検出）
+    board_labels: list[str] = []          # role=board の label（台数チェック用, 契約 v1.3 §4）
     for i, cfg in enumerate(pcsc_readers):
         label = f"pcsc_readers[{i}]"
         name = cfg.get("name")
@@ -192,53 +192,45 @@ def lint_pcsc_readers(pcsc_readers: list[dict]) -> list[str]:
             else:
                 seen_seats[seat] = label
         elif role == "board":
-            index = cfg.get("index")
-            # index は任意だが、ある場合は 1..5（board street 自動遷移の位置）。
-            if index is not None and (not isinstance(index, int) or not 1 <= index <= 5):
-                problems.append(f"{label}: role=board の index は 1..5（実際: {index!r}）。")
-            problems.extend(_lint_board_cards(cfg, label, index, seen_positions))
+            problems.extend(_lint_board_obsolete_fields(cfg, label))
+            board_labels.append(label)
+
+    problems.extend(_lint_board_group(board_labels))
     return problems
 
 
-def _lint_board_cards(
-    cfg: dict, label: str, index: object, seen_positions: dict[int, str],
-) -> list[str]:
-    """board reader の `cards`（重ね置き枚数, 契約 v1.1 §4）と占有位置を検査する。
+def _lint_board_obsolete_fields(cfg: dict, label: str) -> list[str]:
+    """board reader に残った旧フィールド（`index` / `cards`）を指摘する（契約 v1.3 §4）。
 
-    `cards` は任意（既定 1）。cards>1 は先頭位置 `index` が必須で、占有範囲は
-    `[index, index+cards-1]`。範囲が 1..5 を超える / 他の board reader と重なるのは NG。
+    v1.1/v1.2 は「1 台 = 1 ストリート専用（flop は 1 台に 3 枚重ね）」前提で位置を config に
+    書かせていたが、実機は board reader が並んでいるだけで前提が成立しない
+    （ISSUE-0024 / ADR-0042）。現在は全台を 1 つの論理ボードとして検出順に 1..5 を振るため、
+    両フィールドは無視される = 残っていると「設定したのに効かない」誤解のもとになる。
     """
-    problems: list[str] = []
-    cards = cfg.get("cards")
-    if cards is not None and (
-        not isinstance(cards, int) or isinstance(cards, bool) or not 1 <= cards <= 5
-    ):
-        problems.append(f"{label}: role=board の cards は 1..5（実際: {cards!r}）。")
-        cards = None
-    span = cards if isinstance(cards, int) else 1
+    stale = [k for k in ("index", "cards") if k in cfg]
+    if not stale:
+        return []
+    return [
+        f"{label}: role=board の {' / '.join(stale)} は廃止（無視されます, ADR-0042）。"
+        "ボード位置は board reader 全台を通した検出順で決まるので、config から削除してください。"
+    ]
 
-    if span > 1 and index is None:
-        problems.append(
-            f"{label}: cards={span} には index が必要（重ね置きの先頭ボード位置, §4）。"
-        )
-    if not isinstance(index, int) or isinstance(index, bool) or not 1 <= index <= 5:
-        return problems
 
-    last = index + span - 1
-    if last > 5:
-        problems.append(
-            f"{label}: index({index}) + cards({span}) - 1 = {last} が board 位置 1..5 を超えます。"
-        )
-        last = 5
-    conflicts = [p for p in range(index, last + 1) if p in seen_positions]
-    if conflicts:
-        others = sorted({seen_positions[p] for p in conflicts})
-        problems.append(
-            f"{label}: board 位置 {conflicts} が {', '.join(others)} と重複しています。"
-        )
-    for pos in range(index, last + 1):
-        seen_positions.setdefault(pos, label)
-    return problems
+def _lint_board_group(board_labels: list[str]) -> list[str]:
+    """board reader 群そのものの妥当性（台数）を検査する（契約 v1.3 §4）。
+
+    全台で 1 つの論理ボード（最大 5 枚）を共有するので、位置の重なりという概念は無い。
+    代わりに「5 枚を物理的に載せられるか」が問題になる: 1 台あたり 3 枚程度が実用上限なので、
+    board reader が 1 台だけだと 5 枚は載らない。
+    """
+    if not board_labels:
+        return []
+    if len(board_labels) == 1:
+        return [
+            f"{board_labels[0]}: board reader が 1 台だけです。コミュニティカードは 5 枚なので "
+            "1 台に 5 枚を重ねることになり、給電不足で読めない可能性が高い（推奨 3 台以上）。"
+        ]
+    return []
 
 
 @dataclass
@@ -283,13 +275,11 @@ def _role_label(cfg: dict) -> str:
     if role == "seat":
         return f"seat {cfg.get('seat', '?')}"
     if role == "board":
+        # `index` は **RFIDEvent の board_index**（実際に割り当てられた位置）が入る経路でのみ来る。
+        # config 由来の board reader は位置を持たない（位置は検出順で決まる, 契約 v1.3 §4）ので
+        # ラベルは役割だけになる。
         idx = cfg.get("index")
-        if idx is None:
-            return "board"
-        cards = cfg.get("cards")
-        if isinstance(cards, int) and not isinstance(cards, bool) and cards > 1:
-            return f"board {idx}-{idx + cards - 1}"
-        return f"board {idx}"
+        return "board" if idx is None else f"board {idx}"
     return role
 
 

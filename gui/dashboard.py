@@ -407,12 +407,15 @@ class GUIDashboard:
 
     def start_threads(
         self,
-        audio_thread: threading.Thread,
+        audio_thread: Optional[threading.Thread],
         integration_thread: threading.Thread,
         camera_thread: Optional[threading.Thread] = None,
         rfid_thread: Optional[threading.Thread] = None,
     ) -> None:
-        """外部で生成したスレッドを受け取って起動する。"""
+        """外部で生成したスレッドを受け取って起動する。
+
+        `audio_thread=None` は音声入力なし（config `audio.enabled=false`）。
+        """
         self._audio_thread = audio_thread
         self._integration_thread = integration_thread
         self._camera_thread = camera_thread
@@ -422,7 +425,8 @@ class GUIDashboard:
             camera_thread.start()
         if rfid_thread is not None:
             rfid_thread.start()
-        audio_thread.start()
+        if audio_thread is not None:
+            audio_thread.start()
         integration_thread.start()
 
     def on_action(self, record: "ActionRecord") -> None:

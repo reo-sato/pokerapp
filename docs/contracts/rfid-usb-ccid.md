@@ -1,11 +1,15 @@
 # RFID USB CCID firmware ↔ host (PC/SC) contract
 
-**version: 1.2 (ADR-0041。1.0 frozen 起点、1.1 は additive)** ／ canonical RFID transport（ADR-0015）の
-firmware↔Python 境界。v1.1 の追加点（1 reader 複数枚の Get UID 連結 / board の `cards` /
-UID MSB-first）と **v1.2 の変更点（CCID slot は 1 つだけ / 物理リーダーは Get UID の P2 で選ぶ /
-台数問い合わせ）** は §10 を参照。v1.2 は **「slot ごとに reader 名を分ける」規約を廃止**する
-（Windows の汎用 CCID ドライバが 1 インターフェース 1 slot しか公開しないため。ISSUE-0022 / ADR-0041）。
-Get UID の `P2=0`・UID 正規化・デバウンスは v1.0/1.1 と同一なので、**1 台構成の挙動は不変**。
+**version: 1.3 (ADR-0042。1.0 frozen 起点、1.1 は additive)** ／ canonical RFID transport（ADR-0015）の
+firmware↔Python 境界。v1.1 の追加点（1 reader 複数枚の Get UID 連結 / UID MSB-first）、
+**v1.2 の変更点（CCID slot は 1 つだけ / 物理リーダーは Get UID の P2 で選ぶ / 台数問い合わせ）**、
+**v1.3 の変更点（board reader 全台で 1 つの論理ボードを共有し、位置は検出順で決める =
+board の `index` / `cards` を廃止）** は §10 を参照。v1.2 は「slot ごとに reader 名を分ける」規約を
+廃止し（Windows の汎用 CCID ドライバが 1 インターフェース 1 slot しか公開しないため。ISSUE-0022 /
+ADR-0041）、v1.3 は「board reader = ストリート専用」という前提を廃止する（実機は board reader が
+並んでいるだけで、どの台がどのストリートを受けるかは置き方次第。ISSUE-0024 / ADR-0042）。
+**firmware 側の要求は v1.0 から一つも変わっていない**（firmware は UID を返すだけで役割・位置を
+知らない）。Get UID の `P2=0`・UID 正規化・デバウンスも v1.0/1.1 と同一なので **1 台構成の挙動は不変**。
 
 ESP32-S3（PN5180 ×N）firmware と host Python（pyscard / PC/SC, `rfid/bridge.py` /
 `rfid/reader_thread.py`）は別々に実装される。drift を防ぐため、host が依存する **USB descriptor /
@@ -65,8 +69,9 @@ HTTP 経路（`rfid/http_receiver.py`, ADR-0015 で optional secondary）は本�
 - **物理リーダー k（0..N-1）は Get UID pseudo-APDU の P2 で選ぶ** **MUST**（§6）。
   k の割り当ては firmware 内で固定 **MUST**（k=0,1,2,… が常に同じ物理リーダー）。
   - **本番構成（物理 11 台, v1.2）**: `k=0..7` = seat 1..8（各席に hole card **2 枚重ね**）、
-    `k=8..10` = board reader 1..3（**8 = flop 3 枚重ね / 9 = turn / 10 = river**）。
-    board は「1 リーダー = 1 枚」ではなく **1 リーダーに重ねた枚数ぶん**を載せる（§4 `cards`）。
+    `k=8..10` = **board reader 3 台**（ボード領域に左から右に並べる。**ストリート専用ではない** =
+    どの台がどのカードを受けるかは置き方次第, v1.3 §4）。board は「1 リーダー = 1 枚」ではなく
+    **1 リーダーに載った枚数ぶん**を読む（§6 の連結応答）。
   - ただし **役割の正準は host config**（§4）であり、firmware は k の順序の安定のみ保証する。
 - reader_name（1 個）は **再列挙・再起動を跨いで安定** **MUST**。OS が
   `<manufacturer> <product> <slot index>` 等の形式で描画する（OS 依存, §8）が、
@@ -84,30 +89,39 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
   "pcsc_readers": [
     {"name": "PokerRFID PN5180-CCID 0", "reader": 0,  "role": "seat",  "seat": 1},
     // … reader 1..7 = seat 2..8（name はすべて同じ = CCID slot は 1 つ, §3）…
-    {"name": "PokerRFID PN5180-CCID 0", "reader": 8,  "role": "board", "index": 1, "cards": 3},  // flop 3 枚重ね
-    {"name": "PokerRFID PN5180-CCID 0", "reader": 9,  "role": "board", "index": 4},              // turn
-    {"name": "PokerRFID PN5180-CCID 0", "reader": 10, "role": "board", "index": 5}               // river
+    // board は **左から右の順に並べて書く**。位置は config に書かない（検出順で決まる, v1.3）
+    {"name": "PokerRFID PN5180-CCID 0", "reader": 8,  "role": "board"},
+    {"name": "PokerRFID PN5180-CCID 0", "reader": 9,  "role": "board"},
+    {"name": "PokerRFID PN5180-CCID 0", "reader": 10, "role": "board"}
   ]
 }
 ```
 
 - 各要素 = `{"name": <PC/SC reader_name 完全一致文字列>, "reader": 0..254 (任意・既定 0),
-  "role": "seat"|"board", "seat": 1..9 (role=seat),
-  "index": 1..5 (role=board, 任意), "cards": 1..5 (role=board, 任意・既定 1)}`。
+  "role": "seat"|"board", "seat": 1..9 (role=seat)}`。**role=board に位置指定は無い**（v1.3）。
 - **`reader`（v1.2 追加）** = **物理リーダー index**（= Get UID の P2, §6）。省略時 0 なので、
   1 台構成の v1.0/1.1 の config はそのまま動く。**`(name, reader)` の組が一意**であること **MUST**
   （v1.1 までの「`name` が一意」は廃止 — reader 名は 1 つだけになったため `name` は重複するのが正常）。
   255（`0xFF`）は台数問い合わせ用に予約（§6）。`probe_pcsc check` が範囲・重複を検出する。
-- **`cards`（v1.1 additive）** = その board reader に**重ねて置く枚数**。占有するボード位置は
-  `[index, index + cards - 1]`（例 `index=1, cards=3` → flop の 1..3）。`cards > 1` は `index` 必須
-  **MUST**、範囲が 1..5 を超える / 他の board reader と重なる設定は不正（`probe_pcsc check` が検出）。
-- **位置割り当て規則（host, v1.1）**: 同一 reader 上の各 UID に offset 0..cards-1 を与え、
-  `RFIDEvent.board_index = index + offset` とする。offset は **検出順に最小の空きを割り当て**、
-  UID が外れたら解放する。**一度外して同じ UID を戻すと同じ offset に戻る**（誤って抜いた flop の
-  カードを戻しても board の並びが変わらない）。空きが無い（`cards` 超過）ときは WARN + `board_index=None`
-  （engine は末尾に追記）。`index` の無い board reader は従来どおり `board_index=None`。
-- 席 reader は位置を持たない（hole card は順不同）ので `cards` を書かない。2 枚重ねでも
-  `RFIDEvent` が UID ごとに 1 件ずつ出るだけで、engine が `seat` ごとに最大 2 枚蓄積する。
+- **board は全台で 1 つの論理ボード（v1.3, ADR-0042）**。物理配置は「ボード領域に board reader が
+  N 台並んでいるだけ」で、どの台がどのストリートを受けるかは **置き方次第**（flop 3 枚が 3 台に
+  散ることも、真ん中の 1 台に 2 枚載ることもある）。よって位置は reader 単位に固定できない。
+- **位置割り当て規則（host, v1.3）**: `RFIDEvent.board_index`（1..5）は **board reader 全台を
+  通した検出順** = ディーラーが配った順。新規 UID には空き位置の最小を与え、UID が外れたら解放する。
+  **一度外して同じ UID を戻すと同じ位置に戻る**（誤って抜いた flop のカードを戻しても board の
+  並びが変わらない）。**ボードが 0 枚になったら位置記憶をクリア** **MUST**（= ハンドの切れ目。
+  次の flop 1 枚目が前ハンドの位置を継がない）。5 枚（flop 3 + turn + river）を超えたら
+  WARN + `board_index=None`（engine は末尾に追記）。
+- **board reader は左から右の順に config へ並べて書く** **SHOULD**。同じ poll で台をまたいで
+  2 枚以上増えたときの位置順が記載順で決まる（host の poll ループが config 順に回る）。
+  **1 台に同時に載った複数枚の左右順は保証しない**（UID 順）= 既知の制約。street 遷移は枚数判定・
+  PHH は flop をまとめて出力なので実害は JSON ログの並びのみ（ISSUE-0024）。
+- **旧 `index` / `cards`（v1.1/v1.2）は廃止**。残っていても host は**無視**し、起動時に WARN する
+  **MUST**（`probe_pcsc check` の lint でも指摘）。「設定したのに効かない」状態を黙って作らない。
+- **board reader 1 台だけの構成は警告**する（5 枚を 1 台に重ねることになり給電不足で読めない
+  可能性が高い。推奨 3 台以上, ISSUE-0021 OQ6）。
+- 席 reader は位置を持たない（hole card は順不同）。2 枚重ねでも `RFIDEvent` が UID ごとに 1 件ずつ
+  出るだけで、engine が `seat` ごとに最大 2 枚蓄積する。
 - `name` は **OS が描画する reader_name と完全一致** **MUST**（host は前方一致でなく等値で照合,
   `rfid/bridge.py:PCSCBridge.connect`）。OS により文字列が異なるため、運用 OS の実値を入れる（§8）。
 - **確定値（Windows, 2026-06-22 実機）**: `PokerRFID PN5180-CCID 0`（manufacturer + product + slot index,
@@ -218,6 +232,25 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 - 本契約は **v1.0 frozen**（ADR-0034）。後方互換な追加（新 pseudo-APDU、ATR 種別追加、live hot-add）は
   **minor bump**（1.1, 1.2…）。reader_name 規約・Get UID・UID 正規化の **意味変更は breaking（major）**。
 - firmware の確定値（VID/PID、実 reader_name）は確定し次第 §2/§4 に追記する（host コードは変更不要 = 契約安定）。
+- **v1.3（2026-09-11, ADR-0042 / ISSUE-0024）** — **board reader 全台で 1 つの論理ボードを共有し、
+  位置は検出順で決める**。v1.1 §4 は board reader を「ストリート専用」とし、`index`（先頭ボード位置）
+  \+ `cards`（その台に重ねる枚数）を config に書かせていたが、**実機の配置はボード領域に board reader が
+  並んでいるだけ**で、どの台がどのカードを受けるかは置き方次第（flop の 2・3 枚目は真ん中の台の方が
+  読みやすい）。前提が成立しないため v1.1 の位置モデルを差し替える。**firmware の要求は一つも変わらない**
+  （firmware は UID を返すだけで役割・位置を知らない）:
+  1. **board に位置指定は無い**（§4）: config は `role: "board"` だけ。旧 `index` / `cards` は
+     **廃止**し、残っていても host は無視して WARN する MUST。
+  2. **`board_index` は board reader 全台を通した検出順**（§4）= 配った順で 1..5。空き最小を与え、
+     外して戻せば同じ位置、**ボードが 0 枚になったら記憶をクリア** MUST（ハンドの切れ目）。
+     5 枚超過は WARN + `board_index=None`。
+  3. **board reader は左から右の順に config へ並べる** SHOULD（同一 poll で台をまたいだぶんの
+     位置順が記載順で決まる）。**1 台に同時に載った複数枚の左右順は保証しない**（既知の制約）。
+  4. **lint の変更**（§4）: 「位置の重なり」検査を廃止（概念が消えた）、代わりに **board reader
+     1 台だけの構成**を警告（5 枚を 1 台に重ねる = 給電不足の懸念, ISSUE-0021 OQ6）。
+  - host 実装: `rfid/reader_thread.py`（`_board_index_by_uid` をスレッドで 1 つ持つ /
+    `_warn_obsolete_board_fields`）/ `tools/probe_pcsc.py`（lint 差し替え・config ラベルは位置なし・
+    event ラベルは実位置）/ `config_default.json`（board 3 件から `index`/`cards` を削除）。
+    回帰テスト: `tests/test_rfid.py::TestBoardGroupPositions`。
 - **v1.2（2026-09-10, ADR-0041 / ISSUE-0022）** — **CCID slot は 1 つだけ、物理リーダーは Get UID の
   P2 で選ぶ**。Windows の Microsoft 汎用 CCID ドライバが 1 インターフェース 1 slot しか公開しないことが
   実機で確定したため（`bMaxSlotIndex=1` にしても `… 1` は "Reader not found"）、multi-slot による

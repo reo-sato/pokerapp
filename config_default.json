@@ -12,6 +12,8 @@
     "motion_threshold": 2000
   },
   "audio": {
+    "enabled": true,
+    "_enabled_comment": "false でマイク入力 (AudioThread) を起動しない。RFID のカード読み取りだけを実機で見たいとき / マイク未接続のときに使う。--cli では上記以外の入力行を読み上げ文として parse_action に通すので、アクションはキーボードから投入できる (音声と同じ語彙・同じ経路)。",
     "device_id": 0,
     "sample_rate": 16000,
     "whisper_model": "medium",
@@ -52,12 +54,12 @@
       {"name": "PokerRFID PN5180-CCID 0", "reader": 5,  "role": "seat",  "seat": 6},
       {"name": "PokerRFID PN5180-CCID 0", "reader": 6,  "role": "seat",  "seat": 7},
       {"name": "PokerRFID PN5180-CCID 0", "reader": 7,  "role": "seat",  "seat": 8},
-      {"name": "PokerRFID PN5180-CCID 0", "reader": 8,  "role": "board", "index": 1, "cards": 3},
-      {"name": "PokerRFID PN5180-CCID 0", "reader": 9,  "role": "board", "index": 4},
-      {"name": "PokerRFID PN5180-CCID 0", "reader": 10, "role": "board", "index": 5}
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 8,  "role": "board"},
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 9,  "role": "board"},
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 10, "role": "board"}
     ],
-    "_pcsc_readers_comment": "ADR-0034/0041 / docs/contracts/rfid-usb-ccid.md v1.2: PN5180 + ESP32-S3 USB CCID を PC/SC で読む canonical 経路の reader 設定 (list)。本番構成は 11 台 = 席 8 台 (reader 0..7 = seat 1..8) + board 3 台 (reader 8..10 = flop 3 枚重ね / turn / river)。Windows は 1 インターフェース 1 slot しか出さないため **reader 名は 1 つだけ**で、物理リーダーは `reader`（Get UID の P2, 0 起点）で選ぶ (契約 v1.2 / ADR-0041)。name は OS が描画する reader_name と完全一致させる (上のサンプルは Windows の実機確定値。他 OS は文字列が異なるので `python tools/probe_pcsc.py list` で実値を確認して置換する)。`(name, reader)` の組が一意であること。role/seat/index が RFIDEvent への対応の source of truth。",
-    "_pcsc_cards_comment": "role=board の cards (任意, 既定 1) = その reader に重ねて置く枚数。ボード位置は index から index+cards-1 を占有し、検出順に index+offset を割り当てる (外して戻すと同じ位置に戻る)。席 reader は 2 枚重ねでも設定不要 (hole card は位置を持たない)。"
+    "_pcsc_readers_comment": "ADR-0034/0041 / docs/contracts/rfid-usb-ccid.md v1.2: PN5180 + ESP32-S3 USB CCID を PC/SC で読む canonical 経路の reader 設定 (list)。本番構成は 11 台 = 席 8 台 (reader 0..7 = seat 1..8) + board 3 台 (reader 8..10 = ボード領域に並べる。ストリート専用ではない)。Windows は 1 インターフェース 1 slot しか出さないため **reader 名は 1 つだけ**で、物理リーダーは `reader`（Get UID の P2, 0 起点）で選ぶ (契約 v1.2 / ADR-0041)。name は OS が描画する reader_name と完全一致させる (上のサンプルは Windows の実機確定値。他 OS は文字列が異なるので `python tools/probe_pcsc.py list` で実値を確認して置換する)。`(name, reader)` の組が一意であること。role/seat/index が RFIDEvent への対応の source of truth。",
+    "_pcsc_board_comment": "ADR-0042 / 契約 v1.3 §4: role=board は **役割だけ**を書く (位置指定なし)。ボード領域には board reader が並んでいるだけで、どの台がどのストリートを受けるかは置き方次第 (flop 3 枚が 3 台に散ることも、真ん中の 1 台に 2 枚載ることもある)。よって board reader 全台を 1 つの論理ボードとして扱い、board_index (1..5) は全台を通した検出順 = 配った順で決める。board reader は **左から右の順に並べて書く** (同じ poll で 2 枚以上増えたときの位置順が記載順で決まる)。旧 config の index / cards は廃止 (あれば WARN して無視)。席 reader は 2 枚重ねでも設定不要 (hole card は位置を持たない)。"
   },
   "recording": {
     "enabled": false,
