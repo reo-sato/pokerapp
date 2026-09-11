@@ -134,11 +134,21 @@ idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB
   （UID bit = `coll_pos - 16`）と衝突前の受信データで **prefix ごと mask を伸ばす**と 3 枚 = 6 probe、
   2 枚 = 4 probe。取れない / 不整合なら 1 bit 伸ばしに fallback（起動後 slot ごと 3 回だけ
   `coll_pos=… → 採用/fallback` を INFO で出す。基準は実機未確認）。
-- **定常状態は確認 probe を間引く**（`PN5180_FAST_CONFIRM_EVERY=5`, 0 で従来動作）: 1 ラウンド目の
-  集合が前回と同じなら「もう居ない」確認 root を 5 poll に 1 回だけにする（11 台に札が載ると確認
-  だけで ≈90 ms/周）。**衝突フラグ無しの壊れた受信（磁界の縁のノイズ）は分割せず同じ node を 1 回だけ
+- **定常状態は「前回 UID の狙い撃ち probe」**（`PN5180_FAST_TARGETED_PROBE=1`, 実機フィードバック 6）:
+  前回見えていた UID を `mask_len=32` の完全一致 inventory で 1 枚ずつ呼ぶ（合致は最大 1 枚 =
+  衝突せず即答）。実機で `RX_COLL_POS` が一度も使えず 1 bit DFS の空枝が RX timeout を舐めていたため
+  （満載 1 周 538 ms）、衝突しない経路に振った → 433 ms。
+- **簡略サイクル + 位相ずらし**（`PN5180_FAST_CONFIRM_EVERY=6`, 0 で毎周完全確認）: 狙い撃ちが当たる
+  reader では N 回に (N-1) 回を **狙い撃ちだけで終える**（Stay Quiet も root probe も送らない。
+  Stay Quiet は root で新しい札だけを見るための下準備なので root を送らないなら不要）。
+  完全確認する周は **`(poll 周回 + reader index) % N == 0`** の reader だけ = 1 周に `ceil(11/N)` 台。
+  位相を揃えると（旧実装）**ハンドの切れ目で全 reader が 0 枚になって再同期**し、1 周が
+  238 ms と 495 ms に振れる。**空の reader は簡略に入らない**ので席の 1 枚目 / flop の 1 枚目 /
+  turn / river は毎周検出、遅れるのは「既に札がある reader に増えた札」だけ（上限 N 周 ≈ 1.7 s）。
+- **衝突フラグ無しの壊れた受信（磁界の縁のノイズ）は分割せず同じ node を 1 回だけ
   再 probe** し、駄目なら「無し」扱い（実機で 1 枚なのに probe が上限 16 に張り付いた原因）。
-  `PN5180_FAST_RX_TIMEOUT_MS` は 10 → 8 ms（応答は ≈5.5 ms で来る）。
+  `PN5180_FAST_RX_TIMEOUT_MS` は 8 ms で、意味は「**応答ぶんの予算**」（上限 = フレーム送信時間 +
+  この値。26.48 kbps では mask を伸ばすと送信が伸びるため、固定値だと応答の直前で打ち切る）。
 - **presence hold は UID 単位**（`PRESENCE_HOLD_MISSES=3`）: 旧実装は「検出 0 枚のときだけ前回
   集合を保持」だったため、2 枚中 1 枚を 1 回取りこぼすと host へ「1 枚」が即座に伝わり、実機で
   2↔1 のちらつき（`watch` の再発火）になった。現在は UID ごとに miss を数え、**欠けた 1 枚だけ**を

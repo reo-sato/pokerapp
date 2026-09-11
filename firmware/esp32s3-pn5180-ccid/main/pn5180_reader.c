@@ -937,8 +937,15 @@ static uint8_t s_collpos_empty_streak;
 // 現ラウンドで「衝突位置を採用した分割」を何回したか + 最後に採用した生値（安全弁の判定・ログ用）。
 static int s_fast_round_adopted;
 static uint16_t s_fast_round_adopt_raw;
+#if PN5180_FAST_TARGETED_PROBE
+// poll 1 周ごとに +1 する自由走行カウンタ。簡略サイクル（実装 C）の位相を reader ごとにずらす
+// ために使う（下の fast_inventory_15693 参照）。1 周の途中で変わってはいけないので、
+// 更新は pn5180_reader_poll_once() の **末尾** の 1 箇所だけ。
+static uint32_t s_poll_cycle;
+#else
 // reader ごとの「確認 probe を省略した連続回数」（実装 B）。
 static uint8_t s_confirm_skips[PN5180_READER_COUNT];
+#endif
 
 typedef struct {
     uint64_t mask;
@@ -1117,9 +1124,20 @@ static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_car
     // 空の reader（prev 0 枚）はこの経路に入らないので、**配られた瞬間は毎 poll 検出できる**
     // （席の 1 枚目 / flop / turn / river はすべて空の reader に載るので影響を受けない。
     //  影響するのは「席の 2 枚目」だけで、ディーラーが 2 周目を配る間隔より十分速い）。
+    //
+    // **位相を reader ごとにずらす**（ISSUE-0021 実機フィードバック 8）。完全確認を行う周は
+    // `(poll 周回 + slot) % CONFIRM_EVERY == 0` の reader だけ = 1 周あたり ceil(N_reader/N) 台。
+    // 「連続スキップ回数」で判定していた版は **全 reader が同じ周で完全確認に入る**（lockstep）
+    // ため、その 1 周だけが突出した（実機: min 238 / avg 324 / **max 495 ms**。
+    // 検算 (2×238+495)/3 = 323.7 = 実測 avg）。lockstep になるのは「ハンドの切れ目で全 reader が
+    // 0 枚になり、カウンタが揃って 0 に畳まれる」ため — 初期値をずらすだけでは毎ハンド再同期する。
+    // 自由走行カウンタなら 0 枚を跨いでも位相が崩れない（周期はどの reader も厳密に CONFIRM_EVERY）。
+    // 除数は 0 を避ける（CONFIRM_EVERY==0 は左の条件で false になるが `% 0` は定数畳み込みで
+    // 警告になるため）。
+#define FAST_CONFIRM_MOD ((PN5180_FAST_CONFIRM_EVERY > 0) ? PN5180_FAST_CONFIRM_EVERY : 1)
     const bool cheap = (PN5180_FAST_CONFIRM_EVERY > 0) && prev->present && prev->uid_len == 8 &&
                        prev->count > 0 &&
-                       (s_confirm_skips[slot] + 1 < PN5180_FAST_CONFIRM_EVERY);
+                       ((s_poll_cycle + (uint32_t)slot) % FAST_CONFIRM_MOD) != 0;
     if (prev->present && prev->uid_len == 8) {
         for (uint8_t k = 0; k < prev->count && count < PN5180_MAX_CARDS_PER_READER &&
                             probes < PN5180_FAST_MAX_PROBES; k++) {
@@ -1140,13 +1158,13 @@ static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_car
         }
     }
     if (cheap) {
-        s_confirm_skips[slot]++;
         s_fast_last_cheap = 1;
         pn5180_setRF_off(dev);  // quiet 解除（送っていないが RF は落とす）
         s_fast_last_probes = probes;
         return count;
     }
-    s_confirm_skips[slot] = 0;  // このサイクルは root まで確認する（カウンタを畳む）
+    // ここから下は完全確認サイクル（root probe + DFS）。位相は自由走行カウンタが決めるので
+    // 畳むカウンタは無い。
 #endif
 
     while (probes < PN5180_FAST_MAX_PROBES && count < PN5180_MAX_CARDS_PER_READER) {
@@ -1606,6 +1624,13 @@ void pn5180_reader_poll_once(void) {
         s_stats_cycles = 0;             // 次の窓へ（min/max/sum は次の 1 周で初期化）
         s_stats_window_start_us = now_us;
     }
+#endif
+
+#if PN5180_FAST_INVENTORY && PN5180_FAST_TARGETED_PROBE
+    // 簡略サイクルの位相カウンタ。**1 周の末尾で 1 回だけ**進める（周の途中で変わると
+    // reader 間で位相の割り当てがずれる）。uint32 の wrap は CONFIRM_EVERY が 2^32 を割らない
+    // 限り位相が 1 段ずれるだけで、周期・被覆は崩れない（≈ 50 ms 周期で 6.8 年に 1 回）。
+    s_poll_cycle++;
 #endif
 }
 
