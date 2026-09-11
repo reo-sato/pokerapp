@@ -561,7 +561,9 @@ bool pn5180_reader_init(void) {
                      "（host の Get UID P2=%d は常に SW=6A81）",
                      i + 1, i, cfg->nss, cfg->mux_ch, i);
             const size_t used = strlen(skipped);
-            snprintf(skipped + used, sizeof(skipped) - used, "%s#%d", used ? ", " : "", i + 1);
+            // `#k` = index+1（席番号 / board）、`chN` = コネクタ（配線表は #4 を飛ばしているので別物）。
+            snprintf(skipped + used, sizeof(skipped) - used, "%s#%d(ch%d)", used ? ", " : "", i + 1,
+                     cfg->mux_ch);
             continue;
         }
 #endif
@@ -601,7 +603,8 @@ bool pn5180_reader_init(void) {
                 diag_after_init_failure(cfg);
             }
             const size_t used = strlen(skipped);
-            snprintf(skipped + used, sizeof(skipped) - used, "%s#%d(init失敗)", used ? ", " : "", i + 1);
+            snprintf(skipped + used, sizeof(skipped) - used, "%s#%d(ch%d,init失敗)", used ? ", " : "",
+                     i + 1, cfg->mux_ch);
             continue;
         }
         s_readers[i].iso14443 = pn5180_14443_init(s_readers[i].dev);

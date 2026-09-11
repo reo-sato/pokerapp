@@ -24,6 +24,9 @@
   `PN5180 ready: 9/11 reader（skip: #4, #11）`、9 台すべてでカード検出。**多台数の初実測 = 9 台で
   1 周 124〜139 ms**（1 台 ≈ 14 ms、11 台なら ≈ 155 ms。ISSUE-0021 実機フィードバック 4）。
   `RST診断(ch0)` の `during_rst=0` は残る（reader 0 は動作、ISSUE-0023 Open）。
+- **配線表を実機の挿し方に振替**（`app_config.h` `PN5180_READERS`）: コネクタ #4（ch3）は BUSY 不通なので
+  飛ばし、#1,#2,#3,#5,…,#12 の若い順 = index 0..10（席 1..8 / board1..3）。#4 の行は予備に。
+  起動要約の skip 一覧に `chN` を併記（`skip: #10(ch10)`）。host config は不変。
 
 ### Changed (firmware: CCID slot を 1 つに固定し、物理リーダーを Get UID の P2 で選ぶ — 契約 **v1.2** / firmware 側, ADR-0041 / ISSUE-0022, 2026-09-10)
 

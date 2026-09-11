@@ -87,29 +87,35 @@ typedef struct {
 } pn5180_reader_cfg_t;
 
 // 13 台分（先頭 PN5180_READER_COUNT 個だけ有効化）。配列順 = **物理 reader index 順**
-// （index 0.. = #1.. = Get UID の P2 = host config の `rfid.pcsc_readers[].reader`）。
+// （index 0.. = Get UID の P2 = host config の `rfid.pcsc_readers[].reader`）。
 // **本番は先頭 11**（index 0..7 = 席 1..8、index 8/9/10 = board1 flop 3 枚 / board2 turn /
-// board3 river）。#12/#13 は予備で通常未使用。
-// reader #N の BUSY = MUX channel (N-1)（docs/hardware/pn5180-esp32s3-wiring.md §3 と一致）。
-// 物理対応が違う場合は実配線に合わせる。
+// board3 river）。残り 2 行は予備で通常未使用。
+//
+// 各行の (nss, mux_ch) の組が **ハーネスのコネクタ**を表す（コネクタ #N = nss/mux_ch は
+// docs/hardware/pn5180-esp32s3-wiring.md §3: #1=(1,ch0) #2=(2,ch1) #3=(4,ch2) #4=(5,ch3) #5=(6,ch4)
+// #6=(7,ch5) #7=(8,ch6) #8=(9,ch7) #9=(10,ch8) #10=(15,ch9) #11=(16,ch10) #12=(17,ch11) #13=(18,ch12)）。
+// **実機配線（2026-09-11）**: コネクタ #4（ch3）は BUSY 経路が不通（ISSUE-0023）なので飛ばし、
+// reader を #1,#2,#3,#5,…,#12 の若い順に挿している。配列は **その物理順**に並べてあり、
+// index 3（席 4）以降がコネクタ 1 つぶんずれる。ログの `reader #k` は index+1（= 席番号 / board）、
+// `chN` がコネクタの識別子。配線を変えたらこの表を実配線に合わせる。
 //
 // 【bring-up（PN5180_READER_COUNT=1）】pn5180_reader.c が起動時の MUX scan で「通電中の ch」を見つけ、
 // その ch の reader（nss）を自動選択して init する。1 台だけ繋ぐ検証で、どのコネクタに挿しても
 // 再ビルド不要（実機で ch12 → ch7 に変わって init 失敗した反省）。全 ch floating なら [0] を使う。
 static const pn5180_reader_cfg_t PN5180_READERS[] = {
-    {.nss = 1,  .mux_ch = 0},   // #1  席 1
-    {.nss = 2,  .mux_ch = 1},   // #2  席 2
-    {.nss = 4,  .mux_ch = 2},   // #3  席 3
-    {.nss = 5,  .mux_ch = 3},   // #4  席 4
-    {.nss = 6,  .mux_ch = 4},   // #5  席 5
-    {.nss = 7,  .mux_ch = 5},   // #6  席 6
-    {.nss = 8,  .mux_ch = 6},   // #7  席 7
-    {.nss = 9,  .mux_ch = 7},   // #8  席 8
-    {.nss = 10, .mux_ch = 8},   // #9  ボード 1（flop 3 枚重ね）
-    {.nss = 15, .mux_ch = 9},   // #10 ボード 2（turn 1 枚）
-    {.nss = 16, .mux_ch = 10},  // #11 ボード 3（river 1 枚）— 本番はここまで（11 reader）
-    {.nss = 17, .mux_ch = 11},  // #12 予備
-    {.nss = 18, .mux_ch = 12},  // #13 予備
+    {.nss = 1,  .mux_ch = 0},   // index 0  席 1      = コネクタ #1
+    {.nss = 2,  .mux_ch = 1},   // index 1  席 2      = コネクタ #2
+    {.nss = 4,  .mux_ch = 2},   // index 2  席 3      = コネクタ #3
+    {.nss = 6,  .mux_ch = 4},   // index 3  席 4      = コネクタ #5（#4=ch3 は BUSY 不通で飛ばす）
+    {.nss = 7,  .mux_ch = 5},   // index 4  席 5      = コネクタ #6
+    {.nss = 8,  .mux_ch = 6},   // index 5  席 6      = コネクタ #7
+    {.nss = 9,  .mux_ch = 7},   // index 6  席 7      = コネクタ #8
+    {.nss = 10, .mux_ch = 8},   // index 7  席 8      = コネクタ #9
+    {.nss = 15, .mux_ch = 9},   // index 8  ボード 1  = コネクタ #10（flop 3 枚重ね）
+    {.nss = 16, .mux_ch = 10},  // index 9  ボード 2  = コネクタ #11（turn 1 枚）
+    {.nss = 17, .mux_ch = 11},  // index 10 ボード 3  = コネクタ #12（river 1 枚）— 本番はここまで（11 reader）
+    {.nss = 5,  .mux_ch = 3},   // index 11 予備      = コネクタ #4（BUSY 経路不通, ISSUE-0023。修理後に戻す）
+    {.nss = 18, .mux_ch = 12},  // index 12 予備      = コネクタ #13
 };
 
 // ───────── ポーリング間隔 ─────────

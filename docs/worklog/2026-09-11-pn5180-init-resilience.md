@@ -96,6 +96,19 @@ register-level simulator で検証）。
 - [ ] 根本原因の確定（NSS floating 衝突 / RST 不通 / 電源）。確定したら ISSUE-0023 を更新。
 - [ ] 予備 #12（ch11）に挿さっている reader の扱い（#11 に挿し替え or 配線表の入れ替え）。
 
+## 追記（同日）: 実機確認と配線表の振替
+
+- `076b844` を同じ 10 台接続で起動 → reader 0 は **再試行なしで init 成功**、`PN5180 ready: 9/11
+  reader（skip: #4, #11）`、9 台すべてでカード検出・離脱、1 周 124〜139 ms（ISSUE-0021 実機フィードバック 4）。
+  NSS floating 衝突（仮説 1）が最有力。`RST診断(ch0)` の `during_rst=0` は残る（動作はする）。
+- 実機の挿し方は「コネクタ #4（ch3, BUSY 不通）だけ飛ばして若い順」= #1,#2,#3,#5,…,#12 の 11 本
+  （#13=ch12 は空き）。これに合わせて `app_config.h` の `PN5180_READERS` を **物理順に振替**:
+  index 3（席 4）以降がコネクタ 1 つぶんずれ、index 10（board3）= コネクタ #12（ch11）。
+  コネクタ #4 の行（nss 5 / ch3）は予備に下げた。各行の (nss, mux_ch) の組は変えていない
+  （組がコネクタを表す）。ログの `#k` は index+1、`chN` がコネクタ。起動要約の skip 一覧に `chN` を併記
+  （`skip: #10(ch10)` / `#4(ch4,init失敗)`）。
+- simulator `sim_initretry.c` を振替後の表に合わせて更新（index 10 = ch11 を init する / ready 9）。
+
 ## Related ADRs
 
 - ADR-0041（1 slot + P2 で 11 台）
