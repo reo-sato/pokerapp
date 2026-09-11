@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+### Fixed (RFID: 同じ札に別の board 位置が再割り当てされ turn が誤発火する, ISSUE-0025, 2026-09-11)
+
+- ADR-0042 の初回実機通し（11 台, flop を左 1 枚 + 真ん中 2 枚）で、**同じ札が 2 つの位置を占め**、
+  flop を置いただけで turn に進んだ: `[pos=2]: 5c` の直後に `[pos=4]: 5c`、`6c` も 3 番 → 2 番へ。
+- 原因は 2 つ。(a) **既に位置を持つ UID を再割り当てしていた**（自分が占めている位置が「使用中」に
+  含まれるため、毎回新しい位置を取り直していた）。(b) **位置の解放が reader 単位**だった。
+- 前提として、**隣接リーダーの磁界が重なると 1 枚を 2 台が読む**ためデバウンス（reader 単位）は
+  同じ UID で 2 回発火する。これ自体は正常で、位置が同じなら engine が同じスロットを上書きするだけ。
+- 修正: **既に位置を持つ UID には常に同じ位置を返す**（1 枚 = 1 位置）+ **位置の解放は全 board
+  reader の UID 和集合で判定**する（和集合が空になって初めて解放し、記憶もクリア）。席 reader の
+  抜き差しは board の位置に影響しない。契約 v1.3 §4 に 2 つの MUST を追記。
+- 回帰テスト `tests/test_rfid.py::TestBoardGroupPositions::test_same_card_seen_by_two_readers_keeps_one_position`
+  （**2 つの修正それぞれを外すと落ちる**ことを確認）+ `test_seat_reader_removal_does_not_clear_board_memory`。
+  831 passed。
+
 ### Fixed (RFID: board reader を「ストリート専用」と取り違えていた — 全台で 1 つの論理ボードに, ISSUE-0024 / ADR-0042, 2026-09-11)
 
 - **契約 v1.1/v1.2 は board reader を「1 台 = 1 ストリート専用」**（`index` = 先頭ボード位置 +

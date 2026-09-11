@@ -111,6 +111,9 @@ class RFIDThread(threading.Thread):
         # 同上の記憶: 一度外れた UID が「前と同じ位置」に戻れるように覚えておく。
         # ボードが 0 枚になった時点でクリアする（= ハンドの切れ目）。
         self._board_index_memory: dict[str, int] = {}
+        # board reader ごとの「いま載っている UID 集合」。位置の解放判定は **和集合**で行う
+        # （隣接リーダーの磁界が重なって 1 枚を 2 台が読む場合があるため, ISSUE-0025）。
+        self._board_uids: dict[str, set[str]] = {}
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -169,9 +172,15 @@ class RFIDThread(threading.Thread):
 
         removed = prev - current
         if removed:
-            # カードが外れた → 位置を解放するだけ（イベント不要。以前の位置は記憶に残す）
-            self._release_board_indexes(removed)
+            # カードが外れた（イベント不要。board の位置は下の presence 同期が解放する）
             logger.debug("Card(s) removed from %s: %s", reader_id, sorted(removed))
+
+        if cfg.get("role") == "board":
+            # board の位置は **全 board reader の UID 和集合**で管理する（契約 v1.3 §4）。
+            # reader ごとに解放すると、隣接リーダーの磁界が重なって 1 枚を 2 台が読んでいる場合に
+            # 「片方から消えただけ」で位置を失い、次の検出で別の位置を取ってしまう（ISSUE-0025）。
+            self._board_uids[reader_id] = current
+            self._sync_board_presence()
 
         # 新規タッチ検出（読み取り順を保ったまま、増えた UID ごとに 1 event）
         seen: set[str] = set()
@@ -208,6 +217,21 @@ class RFIDThread(threading.Thread):
 
     # ――― board の位置割り当て（契約 v1.3 §4: board reader 全台で 1 つの論理ボード） ―――
 
+    def _sync_board_presence(self) -> None:
+        """board reader 全台の UID 和集合に合わせて、割り当て済みの位置を整理する。
+
+        - 和集合から消えた UID の位置を解放する（**どの台からも見えなくなったときだけ**）。
+        - 和集合が空 = ボードに 1 枚も無い → 位置の記憶もクリアする（ハンドの切れ目）。
+        """
+        union: set[str] = set()
+        for uids in self._board_uids.values():
+            union |= uids
+        for uid in [u for u in self._board_index_by_uid if u not in union]:
+            del self._board_index_by_uid[uid]
+        if not union and self._board_index_memory:
+            self._board_index_memory.clear()
+            logger.debug("ボードが空になりました — board 位置の記憶をクリア")
+
     def _assign_board_index(self, uid: str) -> Optional[int]:
         """新規 board UID に **ボード全体での位置**（1..5）を割り当てる。
 
@@ -216,12 +240,18 @@ class RFIDThread(threading.Thread):
         2 枚載ることもある）。よって位置は reader ごとの固定 offset ではなく
         **全 board reader を通した検出順**（= ディーラーが配った順）で決める。
 
-        - 空き位置のうち最小を与える。前回と同じ UID には**覚えていた位置**を優先して返す
-          （1 枚だけ浮かせて戻してもボードの並びが変わらない）。
+        - **既に位置を持っている UID はその位置を返す**（再割り当てしない）。隣接リーダーの
+          磁界が重なって 1 枚を 2 台が読むと同じ UID で 2 回発火するが、位置は 1 つに保たれ、
+          engine は同じスロットを上書きするだけになる（ISSUE-0025）。
+        - 新規 UID には空き位置の最小を与える。以前ここに居た UID には**覚えていた位置**を
+          優先して返す（1 枚だけ浮かせて戻してもボードの並びが変わらない）。
         - 5 枚を超えたら WARN + None（engine は末尾に追記する）。
-        - **ボードが 0 枚になったら記憶をクリア**する（= ハンドの切れ目。次の flop 1 枚目が
-          前ハンドの位置を引き継がないようにする）。
+        - 位置の解放と記憶のクリアは `_sync_board_presence`（全 board reader の和集合）が行う。
         """
+        existing = self._board_index_by_uid.get(uid)
+        if existing is not None:
+            return existing
+
         taken = set(self._board_index_by_uid.values())
 
         index = self._board_index_memory.get(uid)
@@ -238,15 +268,6 @@ class RFIDThread(threading.Thread):
         self._board_index_by_uid[uid] = index
         self._board_index_memory[uid] = index
         return index
-
-    def _release_board_indexes(self, removed: set[str]) -> None:
-        """外れた UID のボード位置を解放する（memory には残すので戻せば同じ位置）。"""
-        for uid in removed:
-            self._board_index_by_uid.pop(uid, None)
-        if not self._board_index_by_uid and self._board_index_memory:
-            # ボードが空 = ハンドの切れ目。次のハンドは 1 枚目から数え直す。
-            self._board_index_memory.clear()
-            logger.debug("ボードが空になりました — board 位置の記憶をクリア")
 
     def _warn_obsolete_board_fields(self, cfg: dict, reader_id: str) -> None:
         """旧 config（board reader ごとの `index` / `cards`）を使っていたら一度だけ警告する。

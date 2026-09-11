@@ -938,6 +938,86 @@ class TestBoardGroupPositions:
         bridges[2].uids = ["04:N1"]
         assert [e.board_index for e in poll_all()] == [1]
 
+    def test_same_card_seen_by_two_readers_keeps_one_position(self, tmp_path: Path):
+        """ISSUE-0025: 隣接リーダーの磁界が重なって 1 枚を 2 台が読んでも位置は 1 つ。
+
+        実機 2026-09-11: flop の 5c が `[pos=2]` の直後に `[pos=4]` を取り、turn が誤発火した。
+        原因は (a) 既に位置を持つ UID を再割り当てしていた (b) 位置の解放が reader 単位だった。
+        """
+        from core.event_queue import make_rfid_queue
+
+        configs = [{"name": "L", "role": "board"}, {"name": "M", "role": "board"}]
+        bridges = [_ScriptedBridge([]) for _ in configs]
+        queue = make_rfid_queue()
+        thread = RFIDThread(
+            rfid_queue=queue,
+            card_master=CardMaster(tmp_path / "cards.json"),
+            reader_configs=configs,
+            poll_interval_ms=10,
+            stop_event=threading.Event(),
+        )
+
+        def poll_all() -> list[RFIDEvent]:
+            for i, (b, cfg) in enumerate(zip(bridges, configs)):
+                thread._poll_reader(b, cfg, f"reader_{i}")  # noqa: SLF001
+            out = []
+            while not queue.empty():
+                out.append(queue.get_nowait())
+            return out
+
+        # flop 3 枚: 左に 1 枚、真ん中に 2 枚
+        bridges[0].uids = ["04:F1"]
+        bridges[1].uids = ["04:F2", "04:F3"]
+        assert [e.board_index for e in poll_all()] == [1, 2, 3]
+
+        # 真ん中の台も 04:F1 を拾い始めた（磁界の重なり）→ 同じ位置 1 で再発火するだけ
+        bridges[1].uids = ["04:F1", "04:F2", "04:F3"]
+        assert [(e.reader_id, e.board_index) for e in poll_all()] == [("reader_1", 1)]
+
+        # 左の台から 04:F1 が消えても、真ん中がまだ見ているので位置 1 は解放されない
+        bridges[0].uids = []
+        assert poll_all() == []
+        # → 次の新しい札は 4 番（1..3 が埋まったまま）= turn として正しく進む
+        bridges[1].uids = ["04:F1", "04:F2", "04:F3", "04:T1"]
+        assert [e.board_index for e in poll_all()] == [4]
+
+        # 全台から消えて初めて解放 + 記憶クリア → 次のハンドは 1 から
+        bridges[1].uids = []
+        assert poll_all() == []
+        bridges[0].uids = ["04:N1"]
+        assert [e.board_index for e in poll_all()] == [1]
+
+    def test_seat_reader_removal_does_not_clear_board_memory(self, tmp_path: Path):
+        """席のカードが外れても board の位置記憶に影響しない（role で分岐していること）。"""
+        from core.event_queue import make_rfid_queue
+
+        board_cfg = {"name": "B", "role": "board"}
+        seat_cfg = {"name": "S", "role": "seat", "seat": 1}
+        board_bridge = _ScriptedBridge(["04:B1"])
+        seat_bridge = _ScriptedBridge(["04:S1"])
+        queue = make_rfid_queue()
+        thread = RFIDThread(
+            rfid_queue=queue,
+            card_master=CardMaster(tmp_path / "cards.json"),
+            reader_configs=[board_cfg, seat_cfg],
+            poll_interval_ms=10,
+            stop_event=threading.Event(),
+        )
+
+        def poll_all() -> list[RFIDEvent]:
+            thread._poll_reader(board_bridge, board_cfg, "reader_0")   # noqa: SLF001
+            thread._poll_reader(seat_bridge, seat_cfg, "reader_1")     # noqa: SLF001
+            out = []
+            while not queue.empty():
+                out.append(queue.get_nowait())
+            return out
+
+        assert [e.board_index for e in poll_all()] == [1, None]   # board 1 枚 + 席 1 枚
+        seat_bridge.uids = []                                     # 席のカードだけ外す
+        assert poll_all() == []
+        board_bridge.uids = ["04:B1", "04:B2"]                    # board に 1 枚足す
+        assert [e.board_index for e in poll_all()] == [2]         # 1 は保持されたまま
+
     def test_obsolete_index_and_cards_are_ignored(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ):
