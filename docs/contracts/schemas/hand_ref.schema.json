@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/hand_ref.schema.json",
+  "title": "HandRef",
+  "version": "1.0",
+  "description": "S2。1.0 freeze 済 (ADR-0019)。ledger app が hand logger の 1 ハンドを参照する不変軽量参照。cross-app の hand 参照単位 (ADR-0006)。(session_id, hand_id) が複合一意キー。seat_assignments は hand 開始時点の seat→player スナップショット。詳細は docs/contracts/session-seating.md。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session_id", "hand_id", "started_at", "seat_assignments"],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "hand_id": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "seat_assignments": {
+      "type": "array",
+      "description": "このハンド開始時点の seat→player スナップショット (denormalized)。空配列可 (全席空)。standalone seat_assignment から session_id/hand_id を除いた形。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["seat_no", "player_id"],
+        "properties": {
+          "seat_no": {"type": "integer", "minimum": 1, "maximum": 9},
+          "player_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+          "status": {"type": "string", "enum": ["active", "sitting_out"]}
+        }
+      }
+    }
+  }
+}

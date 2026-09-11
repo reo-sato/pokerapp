@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
-import numpy as np
+# numpy は CameraEvent.frame の型注釈だけで使う。`from __future__ import annotations` により
+# 注釈は実行時評価されない文字列なので、実行時に numpy を import する必要はない。TYPE_CHECKING
+# ガードに入れることで、RFID canonical 経路（rfid.reader_thread / tools/probe_pcsc.py watch）が
+# numpy 未導入の最小環境（pyscard だけ）でも動く。numpy が要るのは camera(legacy)/audio 経路のみ。
+if TYPE_CHECKING:
+    import numpy as np
 
 
 @dataclass
@@ -37,3 +42,6 @@ class AudioEvent:
     amount: int  # 金額なしの場合は 0
     timestamp: float  # time.time()
     raw_text: str
+    # 以下は additive (R3/R4 用)。既存経路は未使用 = 挙動不変。
+    seat: Optional[int] = None        # 明示発話された席番号（"シート3"）。actor 推定/replay 用
+    confidence: Optional[float] = None  # Whisper per-segment 信頼度 [0,1]（派生 confidence の入力）

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/player_session_summary.schema.json",
+  "title": "PlayerSessionSummary",
+  "version": "1.0",
+  "description": "M1 viewer API (ADR-0017)。1.0 freeze 済 (ADR-0019)。GET /api/players/{player_id}/sessions の要素。session (0.x) のフィールド + hands_played (その player が着席した hand 数) の read-only envelope。domain model ではなく viewer 用 read model。詳細は docs/contracts/viewer-api.md。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session_id", "started_at", "status", "hands_played"],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "session.schema.json と同じ opaque 非空文字列。"
+    },
+    "label": {
+      "type": "string",
+      "description": "任意の表示名 (session.schema.json と同じ)。"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "open の間は absent (session.schema.json と同じ)。"
+    },
+    "blinds": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sb": {"type": "integer", "minimum": 0},
+        "bb": {"type": "integer", "minimum": 0}
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": ["open", "closed"]
+    },
+    "hands_played": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "対象 player が着席した hand 数。0 hand の session はこの一覧に現れない (viewer-api.md)。"
+    }
+  }
+}

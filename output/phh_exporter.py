@@ -169,6 +169,9 @@ def _record_to_phh(record: ActionRecord, player_idx: int) -> Optional[str]:
 
     if action in ("bet", "raise", "allin"):
         return f"{p} cbr {record.amount}"
+    # PHH 標準では check と call は同一トークン "cc"（check-or-call）。両者を別表記にすると
+    # 非標準になり pokerkit が parse 不能になるため、意図的に統一する（check/call の区別は
+    # JSON ログの action フィールドに保持。ロードマップ F3c の「区別」は PHH では不要と確認）。
     if action == "call":
         return f"{p} cc"
     if action == "check":

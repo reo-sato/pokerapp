@@ -12,6 +12,8 @@
     "motion_threshold": 2000
   },
   "audio": {
+    "enabled": true,
+    "_enabled_comment": "false でマイク入力 (AudioThread) を起動しない。RFID のカード読み取りだけを実機で見たいとき / マイク未接続のときに使う。--cli では上記以外の入力行を読み上げ文として parse_action に通すので、アクションはキーボードから投入できる (音声と同じ語彙・同じ経路)。",
     "device_id": 0,
     "sample_rate": 16000,
     "whisper_model": "medium",
@@ -21,7 +23,8 @@
   "rfid": {
     "enabled": false,
     "transport": "http",
-    "bind_host": "0.0.0.0",
+    "bind_host": "127.0.0.1",
+    "_bind_host_comment": "ESP32 等 LAN 上の機器から受信する場合は PC の LAN IP（または 0.0.0.0）に変更する。受信は無認証のため、0.0.0.0 は信頼できるネットワークでのみ使用すること。",
     "bind_port": 8787,
     "card_master_file": "./rfid_cards.json",
     "readers": {
@@ -40,7 +43,71 @@
       "board_4": {"role": "board", "index": 4},
       "board_5": {"role": "board", "index": 5}
     },
-    "_pcsc_transport_comment": "transport='pcsc' の場合は以下を使用 (pyscard 必須)",
-    "_pcsc_poll_interval_ms": 100
+    "_pcsc_transport_comment": "transport='pcsc' の場合は下の pcsc_readers (list) を使う (pyscard 必須, canonical ADR-0015)。readers (dict, 上) は transport='http' 用。物理リーダーは name ではなく `reader` (Get UID の P2) で選ぶ (契約 v1.2 / ADR-0041)。",
+    "_pcsc_poll_interval_ms": 100,
+    "pcsc_readers": [
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 0,  "role": "seat",  "seat": 1},
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 1,  "role": "seat",  "seat": 2},
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 2,  "role": "seat",  "seat": 3},
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 3,  "role": "seat",  "seat": 4},
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 4,  "role": "seat",  "seat": 5},
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 5,  "role": "seat",  "seat": 6},
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 6,  "role": "seat",  "seat": 7},
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 7,  "role": "seat",  "seat": 8},
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 8,  "role": "board"},
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 9,  "role": "board"},
+      {"name": "PokerRFID PN5180-CCID 0", "reader": 10, "role": "board"}
+    ],
+    "_pcsc_readers_comment": "ADR-0034/0041 / docs/contracts/rfid-usb-ccid.md v1.2: PN5180 + ESP32-S3 USB CCID を PC/SC で読む canonical 経路の reader 設定 (list)。本番構成は 11 台 = 席 8 台 (reader 0..7 = seat 1..8) + board 3 台 (reader 8..10 = ボード領域に並べる。ストリート専用ではない)。Windows は 1 インターフェース 1 slot しか出さないため **reader 名は 1 つだけ**で、物理リーダーは `reader`（Get UID の P2, 0 起点）で選ぶ (契約 v1.2 / ADR-0041)。name は OS が描画する reader_name と完全一致させる (上のサンプルは Windows の実機確定値。他 OS は文字列が異なるので `python tools/probe_pcsc.py list` で実値を確認して置換する)。`(name, reader)` の組が一意であること。role/seat/index が RFIDEvent への対応の source of truth。",
+    "_pcsc_board_comment": "ADR-0042 / 契約 v1.3 §4: role=board は **役割だけ**を書く (位置指定なし)。ボード領域には board reader が並んでいるだけで、どの台がどのストリートを受けるかは置き方次第 (flop 3 枚が 3 台に散ることも、真ん中の 1 台に 2 枚載ることもある)。よって board reader 全台を 1 つの論理ボードとして扱い、board_index (1..5) は全台を通した検出順 = 配った順で決める。board reader は **左から右の順に並べて書く** (同じ poll で 2 枚以上増えたときの位置順が記載順で決まる)。旧 config の index / cards は廃止 (あれば WARN して無視)。席 reader は 2 枚重ねでも設定不要 (hole card は位置を持たない)。"
+  },
+  "recording": {
+    "enabled": false,
+    "_comment": "R1 (ADR-0010): 生センサーイベントを logs/{session_id}.events.jsonl に append-only 記録する sidecar。挙動不変・opt-in。"
+  },
+  "engine": {
+    "backend": "pokerkit",
+    "_comment": "game-state backend。'pokerkit'（既定, ルール準拠の再構築 = actor 推定/合法手射影/silent-fold/side-pot, ADR-0009）| 'legacy'（rollback, 素朴 round-robin）。Phase G で既定を pokerkit に切替。"
+  },
+  "session_layer": {
+    "enabled": false,
+    "_comment": "S2.x (ADR-0008): hand logger を session レイヤ(seat→player_id の write-through)に接続。既定 false で従来動作（rollback）。true で GUI 起動時に session を作成し、座席設定ダイアログ（Phase E3, ISSUE-0006）で seat→player を割り当てる。"
+  },
+  "hand_control": {
+    "enabled": false,
+    "poll_interval_ms": 200,
+    "_comment": "WS4 §C (ADR-0039): staff iPad からの hand logger 遠隔制御（新ハンド/ウィナー/リバイ）を受け付ける。既定 false で挙動不変。true かつ GUI モード + session_layer.enabled のとき、logs/{session_id}.control.jsonl を tail して AudioEvent に翻訳し IntegrationThread に渡す。録音は PC 常駐のまま・iPad は制御コマンド送信のみ。"
+  },
+  "viewer_api": {
+    "enabled": false,
+    "bind_host": "127.0.0.1",
+    "_bind_host_comment": "player スマホから LAN 参照する場合は PC の LAN IP（または 0.0.0.0）に変更する。無認証のため信頼できるネットワークでのみ（ISSUE-0019 プライバシーモデル）。",
+    "bind_port": 8788,
+    "_comment": "M1/M5 (ADR-0017/0018): player 向け read-only viewer API。'python main.py --viewer-api' で単独起動（注文 POST は 503）。enabled=true で 'python main.py --ledger' が API を in-process 起動し注文リクエスト受付（write）を有効にする（単一プロセス所有）。要 [api] extra。",
+    "staff_token": "",
+    "_staff_token_comment": "S5 staff write API (ADR-0021): 空ならスタッフ write 無効（403 staff_writes_disabled）。値を設定すると Authorization: Bearer <token> で会計 write（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下）を許可（別端末のスタッフ運用）。staff write は --ledger（write 所有プロセス）でのみ有効。無認証ではないが LAN 限定前提は維持（player read / 注文 POST は従来どおり name-pick / 無認証）。",
+    "player_auth": "off",
+    "_player_auth_comment": "L1 PIN (ADR-0027): 'off'（既定 = name-pick, 後方互換）| 'optional'（PIN 登録済 player の write のみ本人トークン要求、未登録は name-pick）| 'required'（全 player write に本人トークン要求）。POST /api/auth/login で PIN→トークン取得し Authorization: Bearer で送る。LAN 限定前提は維持。read は対象外。",
+    "player_token_secret": "",
+    "_player_token_secret_comment": "player トークンの署名鍵。空なら起動ごとに ephemeral 生成（再起動でトークン失効）。複数プロセス/再起動を跨いで有効にしたい場合のみ固定値を設定。",
+    "player_token_ttl_sec": 43200,
+    "pin_self_enroll": false,
+    "_pin_self_enroll_comment": "true なら player 自身が初回 PIN を設定できる。false（既定）はスタッフ（staff_token）のみ初回設定。変更は現 PIN または staff_token で可。",
+    "pin_min_length": 4,
+    "pin_max_attempts": 5,
+    "pin_lockout_sec": 300,
+    "_pin_lockout_comment": "PIN は低エントロピー前提。pin_max_attempts 回連続失敗で pin_lockout_sec 秒 lockout（429 pin_locked）。主防御は LAN 限定。",
+    "sync_auto_interval_sec": 0,
+    "_sync_auto_interval_comment": "ADR-0032: 双方向 sync の定期 auto-trigger 間隔（秒）。0=無効（既定=on-demand pull のまま）。>0 で SyncScheduler が peer と定期同期（会場主導, ADR-0029）。"
+  },
+  "backup": {
+    "on_startup": true,
+    "dir": "./backups",
+    "keep": 30,
+    "_comment": "B2 (v1.0 ローンチレビュー): 起動ごとにデータ JSON（players/sessions/ledger/order_requests/credentials/auth_identity/rfid_cards）を backups/<timestamp>/ にコピーし keep 世代まで保持。会計データ消失の最大リスク対策。日次の定期実行は cron / タスクスケジューラで `python tools/backup_data.py` を推奨。on_startup=false で無効化。"
+  },
+  "ledger": {
+    "buyin_presets": [10000, 20000, 30000],
+    "_buyin_presets_comment": "ADR-0026: buy-in 記帳時にスタッフが選ぶ金額プリセット（整数円）。--ledger 画面でボタン表示、staff API GET /api/staff/buyin-presets でも取得。店が編集する。chips とは別単位・自動換算なし。"
   }
 }

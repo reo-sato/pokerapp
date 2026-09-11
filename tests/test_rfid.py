@@ -2,21 +2,34 @@
 
 Phase 6: RFID モジュールのテスト。
 - CardMaster: lookup, register, normalize, bytes_to_tag_id, load/save
-- PCSCBridge: MockPCSCBridge の基本動作
-- RFIDThread: デバウンス、RFIDEvent 投入、ロール/席番号マッピング
+- PCSCBridge: MockPCSCBridge の基本動作 / 複数 UID 応答の分割（契約 v1.1 §6）/
+  物理 reader index = Get UID の P2・接続の持続・共有接続（契約 v1.2 §6/§8, ADR-0041）
+- RFIDThread: デバウンス（UID 集合）、RFIDEvent 投入、ロール/席番号マッピング、
+  board の重ね置き位置割り当て（契約 v1.1 §4）、config の `reader` を bridge factory に渡す
 """
 from __future__ import annotations
 
+import itertools
 import json
+import logging
 import queue
+import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
 
 from core.events import RFIDEvent
-from rfid.bridge import MockPCSCBridge
+from rfid.bridge import (
+    MockPCSCBridge,
+    PCSCBridge,
+    bridge_read_uids,
+    call_bridge_factory,
+    query_reader_count,
+    split_uid_response,
+)
 from rfid.card_master import CardMaster, bytes_to_tag_id, normalize_tag_id
 from rfid.reader_thread import RFIDThread
 
@@ -50,6 +63,28 @@ class TestBytesToTagId:
 
     def test_empty(self):
         assert bytes_to_tag_id(b"") == ""
+
+
+class TestIso15693Uid8Byte:
+    """ADR-0034 / rfid-usb-ccid.md §7: ISO 15693 の 8 バイト UID を長さ非依存で扱う。"""
+
+    _UID8 = b"\x04\xAB\xCD\xEF\x12\x34\x56\x78"
+    _NORM8 = "04:AB:CD:EF:12:34:56:78"
+
+    def test_bytes_to_tag_id_8byte(self):
+        assert bytes_to_tag_id(self._UID8) == self._NORM8
+
+    def test_normalize_roundtrip_8byte(self):
+        # colon-hex / 連結 hex / 小文字 いずれも同一正規形に収束する。
+        assert normalize_tag_id(self._NORM8) == self._NORM8
+        assert normalize_tag_id("04abcdef12345678") == self._NORM8
+        assert normalize_tag_id("04:ab:cd:ef:12:34:56:78") == self._NORM8
+
+    def test_card_master_lookup_8byte(self, tmp_path: Path):
+        cm = CardMaster(tmp_path / "cards.json")
+        cm.register("04abcdef12345678", "Ah")
+        assert cm.lookup(self._NORM8) == "Ah"
+        assert cm.lookup_bytes(self._UID8) == "Ah"
 
 
 # ――― CardMaster ―――
@@ -141,6 +176,294 @@ class TestMockPCSCBridge:
     def test_empty_sequence_returns_none(self):
         bridge = MockPCSCBridge("r", uid_sequence=[])
         assert bridge.read_uid() is None
+
+    def test_read_uids_normalizes_str_none_and_list(self):
+        """uid_sequence の要素は str / None / list[str] のいずれでもよい（v1.1 重ね置き）。"""
+        bridge = MockPCSCBridge("r", uid_sequence=["04:AA", None, ["04:BB", "04:CC"]])
+        assert bridge.read_uids() == ["04:AA"]
+        assert bridge.read_uids() == []
+        assert bridge.read_uids() == ["04:BB", "04:CC"]
+        # 末尾クランプ後も list を返し続ける
+        assert bridge.read_uids() == ["04:BB", "04:CC"]
+
+    def test_read_uid_returns_first_of_stack(self):
+        bridge = MockPCSCBridge("r", uid_sequence=[["04:BB", "04:CC"]])
+        assert bridge.read_uid() == "04:BB"
+
+    def test_read_uids_empty_sequence(self):
+        assert MockPCSCBridge("r").read_uids() == []
+
+
+# ――― 複数 UID 応答の分割（契約 v1.1 §6） ―――
+
+class TestSplitUidResponse:
+    """1 slot に複数枚（席 2 枚 / flop 3 枚）: 8B UID を枚数ぶん連結した応答を分割する。"""
+
+    _A = b"\xE0\x04\x00\x00\x00\x00\x00\x01"
+    _B = b"\xE0\x04\x00\x00\x00\x00\x00\x02"
+    _C = b"\xE0\x04\x00\x00\x00\x00\x00\x03"
+
+    def test_single_8byte(self):
+        assert split_uid_response(self._A) == ["E0:04:00:00:00:00:00:01"]
+
+    def test_two_cards_16byte(self):
+        assert split_uid_response(self._A + self._B) == [
+            "E0:04:00:00:00:00:00:01", "E0:04:00:00:00:00:00:02",
+        ]
+
+    def test_three_cards_24byte(self):
+        uids = split_uid_response(self._A + self._B + self._C)
+        assert len(uids) == 3 and uids[2] == "E0:04:00:00:00:00:00:03"
+
+    def test_four_cards_32byte(self):
+        assert len(split_uid_response(self._A + self._B + self._C + self._A)) == 4
+
+    def test_4_and_7_byte_stay_single(self):
+        # ISO 14443A は連結しない（従来どおり単一 UID）。
+        assert split_uid_response(b"\x04\xAB\xCD\xEF") == ["04:AB:CD:EF"]
+        assert split_uid_response(b"\x04\x11\x22\x33\x44\x55\x66") == ["04:11:22:33:44:55:66"]
+
+    def test_other_lengths_stay_single(self):
+        # 6B や 12B は「複数枚」の長さではないので単一 UID 扱い（分割しない）。
+        assert split_uid_response(b"\x01\x02\x03\x04\x05\x06") == ["01:02:03:04:05:06"]
+        assert len(split_uid_response(bytes(12))) == 1
+
+    def test_empty(self):
+        assert split_uid_response(b"") == []
+
+
+class _FakeConnection:
+    def __init__(self, reader: "_FakeReader") -> None:
+        self._reader = reader
+
+    def connect(self) -> None:
+        self._reader.connects += 1
+
+    def transmit(self, apdu):
+        self._reader.apdus.append(list(apdu))
+        if self._reader.exc is not None:
+            raise self._reader.exc
+        return list(self._reader.data), self._reader.sw[0], self._reader.sw[1]
+
+    def disconnect(self) -> None:
+        self._reader.disconnects += 1
+
+
+class _FakeReader:
+    """pyscard の reader オブジェクト代用（connect/transmit 回数を数える）。"""
+
+    def __init__(self, data: bytes = b"", sw: tuple[int, int] = (0x90, 0x00),
+                 exc: Exception | None = None, name: str = "fake reader"):
+        self.data, self.sw, self.exc = data, sw, exc
+        self.name = name
+        self.apdus: list[list[int]] = []
+        self.connects = 0
+        self.disconnects = 0
+
+    def __str__(self) -> str:
+        return self.name
+
+    def createConnection(self):
+        return _FakeConnection(self)
+
+
+_fake_reader_names = itertools.count()
+
+
+def _connected_bridge(data: bytes, sw: tuple[int, int] = (0x90, 0x00),
+                      exc: Exception | None = None, reader_index: int = 0,
+                      reader: "_FakeReader | None" = None) -> PCSCBridge:
+    """pyscard 無しで PCSCBridge の transmit 経路を通すための接続済み bridge。
+
+    共有接続（reader_name → 1 接続）はモジュール状態なので、テストごとに一意な名前を使う。
+    """
+    name = reader.name if reader is not None else f"fake reader {next(_fake_reader_names)}"
+    bridge = PCSCBridge(name, reader_index=reader_index)
+    bridge._reader = reader if reader is not None else _FakeReader(data, sw, exc, name)  # noqa: SLF001
+    bridge._connected = True                      # noqa: SLF001
+    return bridge
+
+
+class TestPCSCBridgeReadUids:
+    _A = b"\xE0\x04\x00\x00\x00\x00\x00\x01"
+    _B = b"\xE0\x04\x00\x00\x00\x00\x00\x02"
+
+    def test_two_stacked_cards(self):
+        assert _connected_bridge(self._A + self._B).read_uids() == [
+            "E0:04:00:00:00:00:00:01", "E0:04:00:00:00:00:00:02",
+        ]
+
+    def test_single_card(self):
+        assert _connected_bridge(self._A).read_uids() == ["E0:04:00:00:00:00:00:01"]
+
+    def test_non_ok_sw_returns_empty(self):
+        # カード無し = 6A 81（契約 §6/§8）。
+        assert _connected_bridge(b"", sw=(0x6A, 0x81)).read_uids() == []
+
+    def test_exception_returns_empty(self):
+        assert _connected_bridge(self._A, exc=RuntimeError("no card")).read_uids() == []
+
+    def test_not_connected_returns_empty(self):
+        assert PCSCBridge("nope").read_uids() == []
+
+    def test_read_uid_is_first_or_none(self):
+        assert _connected_bridge(self._A + self._B).read_uid() == "E0:04:00:00:00:00:00:01"
+        assert _connected_bridge(b"", sw=(0x6A, 0x81)).read_uid() is None
+
+
+# ――― 物理 reader index（Get UID の P2）と接続の持続（契約 v1.2 §6/§8, ADR-0041） ―――
+
+class TestPCSCBridgeReaderIndex:
+    """Windows は CCID slot を 1 つしか出さないので、物理リーダーは P2 で選ぶ。"""
+
+    _A = b"\xE0\x04\x00\x00\x00\x00\x00\x01"
+
+    def test_apdu_carries_reader_index_as_p2(self):
+        reader = _FakeReader(self._A, name="shared reader p2")
+        bridge = _connected_bridge(b"", reader=reader, reader_index=7)
+        assert bridge.read_uids() == ["E0:04:00:00:00:00:00:01"]
+        assert reader.apdus == [[0xFF, 0xCA, 0x00, 0x07, 0x00]]
+        bridge.close()
+
+    def test_default_index_is_v10_compatible_apdu(self):
+        reader = _FakeReader(self._A, name="shared reader p2 default")
+        bridge = _connected_bridge(b"", reader=reader)
+        bridge.read_uids()
+        assert reader.apdus == [[0xFF, 0xCA, 0x00, 0x00, 0x00]]   # v1.0/1.1 と同一
+        bridge.close()
+
+    def test_reader_index_must_be_int_in_range(self):
+        for bad in (-1, 255, 300, "3", 1.5, True):
+            with pytest.raises(ValueError):
+                PCSCBridge("r", reader_index=bad)   # type: ignore[arg-type]
+
+    def test_connection_is_reused_across_polls(self):
+        """ADR-0040/0041: slot は常時 present なので接続を持続し、2 回目は connect しない。"""
+        reader = _FakeReader(self._A, name="persistent reader")
+        bridge = _connected_bridge(b"", reader=reader)
+        bridge.read_uids()
+        bridge.read_uids()
+        bridge.read_uids()
+        assert reader.connects == 1
+        assert len(reader.apdus) == 3
+        assert reader.disconnects == 0
+        bridge.close()
+        assert reader.disconnects == 1     # close で切断
+
+    def test_reconnects_after_exception(self):
+        reader = _FakeReader(self._A, name="flaky reader")
+        bridge = _connected_bridge(b"", reader=reader)
+        assert bridge.read_uids() == ["E0:04:00:00:00:00:00:01"]
+        reader.exc = RuntimeError("USB gone")
+        assert bridge.read_uids() == []            # 失敗は空リスト（クラッシュしない）
+        reader.exc = None
+        assert bridge.read_uids() == ["E0:04:00:00:00:00:00:01"]
+        assert reader.connects == 2                # 例外で捨てた接続を張り直した
+        bridge.close()
+
+    def test_shared_connection_per_reader_name(self):
+        """同じ reader_name の複数 bridge は PC/SC 接続を 1 本だけ張る（11 台 = 1 接続）。"""
+        reader = _FakeReader(self._A, name="one name many readers")
+        bridges = [
+            _connected_bridge(b"", reader=reader, reader_index=k) for k in range(3)
+        ]
+        for b in bridges:
+            b.read_uids()
+        assert reader.connects == 1
+        assert [a[3] for a in reader.apdus] == [0, 1, 2]    # P2 だけが違う
+        for b in bridges[:-1]:
+            b.close()
+        assert reader.disconnects == 0      # まだ参照が残っている
+        bridges[-1].close()
+        assert reader.disconnects == 1      # 最後の 1 本で切断
+
+    def test_sw_6a86_returns_empty_and_warns_once(self, caplog: pytest.LogCaptureFixture):
+        reader = _FakeReader(b"", sw=(0x6A, 0x86), name="out of range reader")
+        bridge = _connected_bridge(b"", reader=reader, reader_index=5)
+        with caplog.at_level(logging.WARNING, logger="rfid.bridge"):
+            assert bridge.read_uids() == []
+            assert bridge.read_uids() == []
+        warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warns) == 1 and "6A86" in warns[0].getMessage()
+        bridge.close()
+
+    def test_probe_returns_sw(self):
+        bridge = _connected_bridge(b"", sw=(0x6A, 0x81))
+        assert bridge.probe() == (0x6A, 0x81)
+        bridge.close()
+        assert PCSCBridge("not connected").probe() is None
+
+
+class TestQueryReaderCount:
+    """`FF CA 00 FF 00` による物理 reader 台数の問い合わせ（契約 v1.2 §6）。"""
+
+    @staticmethod
+    def _install_fake_pyscard(monkeypatch, reader) -> None:
+        system = types.ModuleType("smartcard.System")
+        system.readers = lambda: [reader]           # type: ignore[attr-defined]
+        root = types.ModuleType("smartcard")
+        root.System = system                        # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "smartcard", root)
+        monkeypatch.setitem(sys.modules, "smartcard.System", system)
+
+    def test_returns_count_from_firmware(self, monkeypatch):
+        reader = _FakeReader(bytes([11]), name="counting reader")
+        self._install_fake_pyscard(monkeypatch, reader)
+        assert query_reader_count("counting reader") == 11
+        assert reader.apdus == [[0xFF, 0xCA, 0x00, 0xFF, 0x00]]
+        assert reader.disconnects == 1              # 問い合わせ後に接続を解放する
+
+    def test_none_when_firmware_does_not_support(self, monkeypatch):
+        # 旧 v1.1 firmware は 6A 81 / 6D 00 を返す。
+        reader = _FakeReader(b"", sw=(0x6D, 0x00), name="old firmware")
+        self._install_fake_pyscard(monkeypatch, reader)
+        assert query_reader_count("old firmware") is None
+
+    def test_none_when_reader_absent_or_pyscard_missing(self, monkeypatch):
+        reader = _FakeReader(bytes([2]), name="present reader")
+        self._install_fake_pyscard(monkeypatch, reader)
+        assert query_reader_count("some other reader") is None
+
+    def test_none_on_exception(self, monkeypatch):
+        reader = _FakeReader(bytes([2]), exc=RuntimeError("boom"), name="boom reader")
+        self._install_fake_pyscard(monkeypatch, reader)
+        assert query_reader_count("boom reader") is None
+
+
+class TestCallBridgeFactory:
+    """新旧 factory シグネチャの互換（`(name, index)` / 旧 `(name)`）。"""
+
+    def test_two_arg_factory_receives_index(self):
+        seen: list[tuple[str, int]] = []
+        bridge = call_bridge_factory(lambda name, index: seen.append((name, index)), "R", 3)
+        assert seen == [("R", 3)] and bridge is None
+
+    def test_one_arg_factory_falls_back(self):
+        seen: list[str] = []
+        call_bridge_factory(lambda name: seen.append(name), "R", 3)
+        assert seen == ["R"]
+
+    def test_mock_bridge_accepts_reader_index(self):
+        b = MockPCSCBridge("R", ["04:AA"], 4)
+        assert b.reader_index == 4 and b.read_uid() == "04:AA"
+
+
+class TestBridgeReadUidsShim:
+    """旧 bridge（`read_uid` のみ）互換シム。"""
+
+    class _LegacyBridge:
+        def __init__(self, uid=None):
+            self.uid = uid
+
+        def read_uid(self):
+            return self.uid
+
+    def test_legacy_bridge_is_listified(self):
+        assert bridge_read_uids(self._LegacyBridge("04:AA")) == ["04:AA"]
+        assert bridge_read_uids(self._LegacyBridge(None)) == []
+
+    def test_new_bridge_uses_read_uids(self):
+        assert bridge_read_uids(MockPCSCBridge("r", [["04:AA", "04:BB"]])) == ["04:AA", "04:BB"]
 
 
 # ――― RFIDThread ―――
@@ -292,3 +615,337 @@ class TestRFIDThread:
         thread.start()
         thread.join(timeout=2)
         assert not thread.is_alive()
+
+    def test_board_role_maps_to_event(self, tmp_path: Path):
+        """ADR-0034 §4 / B3 修正: role=board が RFIDEvent.role=board + board_index を運ぶ。
+
+        board_index は engine の street 自動遷移の分岐条件（engine.py:294）。PC/SC 経路でこれが
+        欠落していたため board street が進まなかった（B3 latent bug）。回帰固定する。
+        """
+        configs = [{"name": "reader_B", "role": "board"}]
+        sequences = {"reader_B": [None, "04:11:22"]}
+        thread, rfid_q, stop = _make_rfid_thread(tmp_path, sequences, configs)
+        thread.start()
+        time.sleep(0.15)
+        stop.set()
+        thread.join(timeout=2)
+        ev: RFIDEvent = rfid_q.get_nowait()
+        assert ev.role == "board"
+        assert ev.seat is None
+        # B3: PC/SC 経路でも board_index が流れること。位置は config ではなく検出順
+        # （ボード 1 枚目 = 1, 契約 v1.3 §4 / ADR-0042）。
+        assert ev.board_index == 1
+
+    def test_seat_role_has_no_board_index(self, tmp_path: Path):
+        """role=seat では board_index は None（B3 修正で seat に誤って付かないこと）。"""
+        configs = [{"name": "reader_S", "role": "seat", "seat": 2}]
+        sequences = {"reader_S": [None, "04:99"]}
+        thread, rfid_q, stop = _make_rfid_thread(tmp_path, sequences, configs)
+        thread.start()
+        time.sleep(0.15)
+        stop.set()
+        thread.join(timeout=2)
+        ev: RFIDEvent = rfid_q.get_nowait()
+        assert ev.seat == 2
+        assert ev.board_index is None
+
+    def test_8byte_iso15693_uid_flows_to_event(self, tmp_path: Path):
+        """ADR-0034 §7: 8B UID (ISO 15693) が RFIDEvent.tag_id まで長さ非依存で流れる。"""
+        configs = [{"name": "reader_C", "role": "seat", "seat": 3}]
+        uid8 = "04:AB:CD:EF:12:34:56:78"
+        sequences = {"reader_C": [None, uid8, uid8]}
+        thread, rfid_q, stop = _make_rfid_thread(tmp_path, sequences, configs)
+        thread.start()
+        time.sleep(0.15)
+        stop.set()
+        thread.join(timeout=2)
+        ev: RFIDEvent = rfid_q.get_nowait()
+        assert ev.tag_id == uid8
+        assert ev.seat == 3
+
+    def test_reader_index_is_passed_to_factory(self, tmp_path: Path):
+        """config の `reader`（Get UID の P2, 契約 v1.2 §6）が bridge factory に渡る。"""
+        from core.event_queue import make_rfid_queue
+        seen: list[tuple[str, int]] = []
+
+        def factory(reader_name: str, reader_index: int):
+            seen.append((reader_name, reader_index))
+            return MockPCSCBridge(reader_name, [None], reader_index)
+
+        stop = threading.Event()
+        thread = RFIDThread(
+            rfid_queue=make_rfid_queue(),
+            card_master=CardMaster(tmp_path / "cards.json"),
+            reader_configs=[
+                {"name": "CCID 0", "reader": 0, "role": "seat", "seat": 1},
+                {"name": "CCID 0", "reader": 8, "role": "board", "index": 1, "cards": 3},
+                {"name": "CCID 0", "role": "seat", "seat": 2},            # reader 省略 = 0
+                {"name": "CCID 0", "reader": "x", "role": "seat", "seat": 3},  # 不正 → 0
+            ],
+            poll_interval_ms=10,
+            stop_event=stop,
+            bridge_factory=factory,
+        )
+        thread.start()
+        time.sleep(0.05)
+        stop.set()
+        thread.join(timeout=2)
+        assert seen == [("CCID 0", 0), ("CCID 0", 8), ("CCID 0", 0), ("CCID 0", 0)]
+
+    def test_legacy_one_arg_factory_still_works(self, tmp_path: Path):
+        """旧シグネチャ `factory(reader_name)` の注入も従来どおり動く（互換）。"""
+        configs = [{"name": "reader_A", "reader": 5, "role": "seat", "seat": 1}]
+        sequences = {"reader_A": [None, "04:AA"]}
+        thread, rfid_q, stop = _make_rfid_thread(tmp_path, sequences, configs)
+        thread.start()
+        time.sleep(0.15)
+        stop.set()
+        thread.join(timeout=2)
+        ev: RFIDEvent = rfid_q.get_nowait()
+        assert ev.tag_id == "04:AA" and ev.seat == 1
+
+    def test_two_stacked_seat_cards_fire_two_events(self, tmp_path: Path):
+        """席 reader に hole card 2 枚を重ねて置く → 同じ seat で 2 event（契約 v1.1 §6）。"""
+        configs = [{"name": "reader_A", "role": "seat", "seat": 4}]
+        sequences = {"reader_A": [None, ["04:AA", "04:BB"], ["04:AA", "04:BB"]]}
+        thread, rfid_q, stop = _make_rfid_thread(tmp_path, sequences, configs)
+        thread.start()
+        time.sleep(0.15)
+        stop.set()
+        thread.join(timeout=2)
+
+        events = []
+        while not rfid_q.empty():
+            events.append(rfid_q.get_nowait())
+        assert [e.tag_id for e in events] == ["04:AA", "04:BB"]
+        assert {e.seat for e in events} == {4}
+        assert all(e.board_index is None for e in events)
+
+
+# ――― 重ね置き: UID 集合デバウンス + board 位置割り当て（契約 v1.1 §4/§6/§8） ―――
+
+class _ScriptedBridge:
+    """`read_uids()` が返す UID 集合をテストから直接操作できる bridge。"""
+
+    def __init__(self, uids: list[str] | None = None) -> None:
+        self.uids = list(uids or [])
+
+    def connect(self) -> bool:
+        return True
+
+    def read_uids(self) -> list[str]:
+        return list(self.uids)
+
+    def close(self) -> None:
+        pass
+
+
+class _LegacySingleBridge:
+    """`read_uid()` しか持たない旧 bridge（互換経路の確認用）。"""
+
+    def __init__(self, uid: str | None = None) -> None:
+        self.uid = uid
+
+    def connect(self) -> bool:
+        return True
+
+    def read_uid(self):
+        return self.uid
+
+    def close(self) -> None:
+        pass
+
+
+class _Poller:
+    """RFIDThread を起動せず `_poll_reader` を手動で回す決定的ドライバ。"""
+
+    def __init__(self, tmp_path: Path, cfg: dict, bridge, card_master: CardMaster | None = None):
+        from core.event_queue import make_rfid_queue
+        self.queue = make_rfid_queue()
+        self.cfg = cfg
+        self.bridge = bridge
+        self.thread = RFIDThread(
+            rfid_queue=self.queue,
+            card_master=card_master or CardMaster(tmp_path / "cards.json"),
+            reader_configs=[cfg],
+            poll_interval_ms=10,
+            stop_event=threading.Event(),
+        )
+
+    def poll(self) -> list[RFIDEvent]:
+        """1 回ポーリングし、そこで発火した event を返す。"""
+        self.thread._poll_reader(self.bridge, self.cfg, "reader_0")  # noqa: SLF001
+        events = []
+        while not self.queue.empty():
+            events.append(self.queue.get_nowait())
+        return events
+
+
+class TestStackedDebounce:
+    def test_two_cards_at_once_then_no_repeat(self, tmp_path: Path):
+        p = _Poller(tmp_path, {"name": "R", "role": "seat", "seat": 1},
+                    _ScriptedBridge(["04:AA", "04:BB"]))
+        assert [e.tag_id for e in p.poll()] == ["04:AA", "04:BB"]
+        assert p.poll() == []          # 置きっぱなしは再発火しない
+        assert p.poll() == []
+
+    def test_second_card_added_later_fires_only_new_uid(self, tmp_path: Path):
+        p = _Poller(tmp_path, {"name": "R", "role": "seat", "seat": 1},
+                    _ScriptedBridge(["04:AA"]))
+        assert [e.tag_id for e in p.poll()] == ["04:AA"]
+        p.bridge.uids = ["04:AA", "04:BB"]
+        assert [e.tag_id for e in p.poll()] == ["04:BB"]
+
+    def test_removing_one_card_emits_nothing_and_retouch_refires_only_it(self, tmp_path: Path):
+        p = _Poller(tmp_path, {"name": "R", "role": "seat", "seat": 1},
+                    _ScriptedBridge(["04:AA", "04:BB"]))
+        p.poll()
+        p.bridge.uids = ["04:AA"]
+        assert p.poll() == []          # 外れた UID では event を出さない（状態更新のみ）
+        p.bridge.uids = ["04:AA", "04:BB"]
+        assert [e.tag_id for e in p.poll()] == ["04:BB"]   # 戻した UID だけ再発火
+
+    def test_all_removed_then_all_returned_refires_both(self, tmp_path: Path):
+        p = _Poller(tmp_path, {"name": "R", "role": "seat", "seat": 1},
+                    _ScriptedBridge(["04:AA", "04:BB"]))
+        p.poll()
+        p.bridge.uids = []
+        assert p.poll() == []
+        p.bridge.uids = ["04:AA", "04:BB"]
+        assert len(p.poll()) == 2
+
+    def test_legacy_bridge_without_read_uids(self, tmp_path: Path):
+        """旧 bridge（read_uid のみ）でも従来どおり 1 枚デバウンスで動く。"""
+        bridge = _LegacySingleBridge(None)
+        p = _Poller(tmp_path, {"name": "R", "role": "seat", "seat": 2}, bridge)
+        assert p.poll() == []
+        bridge.uid = "04:AA"
+        assert [e.tag_id for e in p.poll()] == ["04:AA"]
+        assert p.poll() == []
+        bridge.uid = None
+        assert p.poll() == []
+        bridge.uid = "04:AA"
+        assert [e.tag_id for e in p.poll()] == ["04:AA"]
+
+
+class TestBoardGroupPositions:
+    """board reader **全台で 1 つの論理ボード**を共有し、検出順に 1..5 を振る（v1.3 §4 / ADR-0042）。
+
+    物理配置は「ボード領域に board reader が並んでいるだけ」で、flop 3 枚が 3 台に散ることも
+    真ん中の 1 台に 2 枚載ることもある。位置は reader ごとの固定 offset ではなく配った順で決まる。
+    """
+
+    BOARD = {"name": "B1", "role": "board"}
+
+    def test_flop_three_cards_get_positions_1_2_3(self, tmp_path: Path):
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA", "04:BB", "04:CC"]))
+        events = p.poll()
+        assert [e.board_index for e in events] == [1, 2, 3]
+        assert all(e.role == "board" and e.seat is None for e in events)
+
+    def test_incremental_placement_counts_up(self, tmp_path: Path):
+        """1 台に 1 枚ずつ足す（= flop を 1 枚ずつ並べる）と 1→2→3。"""
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA"]))
+        assert [e.board_index for e in p.poll()] == [1]
+        p.bridge.uids = ["04:AA", "04:BB"]
+        assert [e.board_index for e in p.poll()] == [2]
+        p.bridge.uids = ["04:AA", "04:BB", "04:CC"]
+        assert [e.board_index for e in p.poll()] == [3]
+
+    def test_removed_card_returns_to_same_position(self, tmp_path: Path):
+        """1 枚だけ浮かせて戻してもボードの並びが変わらない（他の札が残っている = 同ハンド）。"""
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA", "04:BB", "04:CC"]))
+        p.poll()
+        p.bridge.uids = ["04:AA", "04:CC"]     # 真ん中（位置 2）を外す
+        assert p.poll() == []
+        p.bridge.uids = ["04:AA", "04:BB", "04:CC"]
+        assert [e.board_index for e in p.poll()] == [2]   # 同じ位置に戻る
+
+    def test_freed_position_is_reusable_by_another_card(self, tmp_path: Path):
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA", "04:BB"]))
+        p.poll()
+        p.bridge.uids = ["04:BB"]              # 位置 1 が空く（ボードは空にならない）
+        p.poll()
+        p.bridge.uids = ["04:BB", "04:DD"]
+        assert [e.board_index for e in p.poll()] == [1]
+
+    def test_sixth_card_over_board_capacity_warns_and_has_no_index(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ):
+        """ボードは 5 枚まで。6 枚目は WARN + board_index=None（engine は末尾に追記）。"""
+        uids = ["04:A1", "04:A2", "04:A3", "04:A4", "04:A5"]
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(list(uids)))
+        assert [e.board_index for e in p.poll()] == [1, 2, 3, 4, 5]
+        p.bridge.uids = uids + ["04:A6"]
+        with caplog.at_level(logging.WARNING, logger="rfid.reader_thread"):
+            events = p.poll()
+        assert [e.tag_id for e in events] == ["04:A6"]
+        assert events[0].board_index is None
+        assert any("5 枚を超え" in r.getMessage() for r in caplog.records)
+
+    def test_empty_board_resets_positions_for_next_hand(self, tmp_path: Path):
+        """ボードが 0 枚になったら位置記憶をクリア = 次のハンドは 1 枚目から数え直す。"""
+        p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA", "04:BB", "04:CC"]))
+        assert [e.board_index for e in p.poll()] == [1, 2, 3]
+        p.bridge.uids = []                     # ハンド終了でボードを片付ける
+        assert p.poll() == []
+        p.bridge.uids = ["04:CC"]              # 次のハンドで前ハンドの 3 枚目だった札を先に置く
+        assert [e.board_index for e in p.poll()] == [1]
+
+    def test_positions_are_shared_across_board_readers(self, tmp_path: Path):
+        """**本命**: flop が複数台に散っても 1..3、turn/river がどの台でも 4/5 になる。"""
+        from core.event_queue import make_rfid_queue
+
+        configs = [
+            {"name": "L", "role": "board"},
+            {"name": "M", "role": "board"},
+            {"name": "R", "role": "board"},
+        ]
+        bridges = [_ScriptedBridge([]) for _ in configs]
+        queue = make_rfid_queue()
+        thread = RFIDThread(
+            rfid_queue=queue,
+            card_master=CardMaster(tmp_path / "cards.json"),
+            reader_configs=configs,
+            poll_interval_ms=10,
+            stop_event=threading.Event(),
+        )
+
+        def poll_all() -> list[RFIDEvent]:
+            for i, (b, cfg) in enumerate(zip(bridges, configs)):
+                thread._poll_reader(b, cfg, f"reader_{i}")  # noqa: SLF001
+            out = []
+            while not queue.empty():
+                out.append(queue.get_nowait())
+            return out
+
+        # flop: 左に 1 枚、真ん中に 2 枚（実機で読みやすい置き方）
+        bridges[0].uids = ["04:F1"]
+        bridges[1].uids = ["04:F2", "04:F3"]
+        assert [(e.reader_id, e.board_index) for e in poll_all()] == [
+            ("reader_0", 1), ("reader_1", 2), ("reader_1", 3),
+        ]
+        # turn: 真ん中に 3 枚目として載せても 4
+        bridges[1].uids = ["04:F2", "04:F3", "04:T1"]
+        assert [(e.reader_id, e.board_index) for e in poll_all()] == [("reader_1", 4)]
+        # river: 右の台に載せて 5
+        bridges[2].uids = ["04:R1"]
+        assert [(e.reader_id, e.board_index) for e in poll_all()] == [("reader_2", 5)]
+        # 全台から下げる → 次のハンドは 1 から
+        for b in bridges:
+            b.uids = []
+        assert poll_all() == []
+        bridges[2].uids = ["04:N1"]
+        assert [e.board_index for e in poll_all()] == [1]
+
+    def test_obsolete_index_and_cards_are_ignored(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ):
+        """旧 config の index / cards は無視（位置は検出順）。起動時の WARN は run() が出す。"""
+        cfg = {"name": "B2", "role": "board", "index": 4, "cards": 3}
+        p = _Poller(tmp_path, cfg, _ScriptedBridge(["04:11"]))
+        assert [e.board_index for e in p.poll()] == [1]
+        with caplog.at_level(logging.WARNING, logger="rfid.reader_thread"):
+            p.thread._warn_obsolete_board_fields(cfg, "reader_0")  # noqa: SLF001
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("index / cards" in m and "廃止" in m for m in msgs)

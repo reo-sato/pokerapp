@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 
-from core.hand_log import ActionRecord, HandSummary
+from core.atomic_io import atomic_write_json
+from core.hand_log import HandSummary
 
 logger = logging.getLogger(__name__)
 
@@ -52,16 +52,10 @@ class JsonWriter:
 
     def _flush(self) -> None:
         """データをディスクへ書き込む。書き込み失敗時もクラッシュしない。"""
-        tmp_path = self._path.with_suffix(".tmp")
         try:
-            with tmp_path.open("w", encoding="utf-8") as f:
-                json.dump(self._data, f, ensure_ascii=False, indent=2)
-            # アトミックなリネームで壊れたファイルを防ぐ
-            os.replace(tmp_path, self._path)
+            atomic_write_json(self._path, self._data)
         except OSError:
             logger.exception("Failed to write log file: %s", self._path)
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
 
     @property
     def path(self) -> Path:
