@@ -109,6 +109,25 @@ register-level simulator で検証）。
   （`skip: #10(ch10)` / `#4(ch4,init失敗)`）。
 - simulator `sim_initretry.c` を振替後の表に合わせて更新（index 10 = ch11 を init する / ready 9）。
 
+## 追記 2（同日）: 11 台目の切り分けと chip 生存確認の自動化
+
+- 振替後の起動は `PN5180 ready: 10/11 reader（skip: #10(ch10)）`。host 側も `probe_pcsc list`
+  （`physical readers: 11` + 11 件 matched）/ `check` 11 PASS / `watch` 22 タッチで契約 v1.2 経路を通し確認
+  （ISSUE-0022）。
+- **reader を コネクタ #11(ch10) ↔ #12(ch11) で入れ替えたら floating も ch10→ch11 に移動** =
+  コネクタは両方正常で **reader 1 台の故障**と確定（位置依存なら floating は ch10 に残る）。
+- そこから先（電源 or BUSY 線）を手で当てるしかなかったので **firmware に自動診断を追加**:
+  - `spi_probe_nss(nss, mux_ch, fw_out, …)` = NSS スキャンの 1 候補ぶん（RST pulse → mux_select →
+    device 一時 add → `READ_EEPROM(0x12)` → 固定待ち 1ms → 2 byte 受信 → remove）を切り出した共用関数。
+    `diag_after_init_failure` もこれを使う（重複を解消）。
+  - `diag_skipped_reader(idx, cfg)` = skip した reader ごとに 1 回呼び、`FW=xx xx`（chip 生存 →
+    **BUSY 線のみ不通**）/ `FW=FF FF`（SPI 無応答 → **電源/GND・SPI 線・chip 個体**）を WARN で出す。
+  - 呼ぶ位置は **init ループの後・RF config ロードの前**（probe が共有 RST を叩くため。RF config は
+    その後のループでロードされるので消えない）。
+- simulator に `spics_io_num` 別の device add 回数を記録し、「skip した reader（未通電 / init 失敗）に
+  生存確認を 1 回送る」「範囲外の予備には送らない」を assert に追加（`sim_initretry.c`, 16 項目 ✅）。
+  スタブ 32 構成 警告 0、`sim_capture`（fast/driver 両経路）/ `sim_multi` / `sim_diag` / `sim` 失敗 0。
+
 ## Related ADRs
 
 - ADR-0041（1 slot + P2 で 11 台）

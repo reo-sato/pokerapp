@@ -121,6 +121,40 @@ PN5180 ready: 10/11 reader（skip: #10(ch10)）
   移る（= reader）かを見る。
 - `RST診断(ch0)` は依然 `0 0 0`（reader 0 は動作）。
 
+### 入れ替え試験の結果 = **reader 1 台の故障で確定**（同日）
+
+reader を コネクタ #11（ch10）↔ #12（ch11）で入れ替えて再起動:
+
+```
+配線チェック: 設定 ch なのに floating（未通電/未接続）= #11(ch11) → この reader は skip
+PN5180 reader 9 ready (nss=16 mux_ch=10)      ← 入れ替え前は floating だった ch10 が ready
+reader #11 (index 10, nss=GPIO17, ch11) は未通電/未接続 → skip
+PN5180 ready: 10/11 reader（skip: #11(ch11)）
+```
+
+- **floating が reader に付いて移動した**（ch10 → ch11）。コネクタ #11 / #12 はどちらも正常で、
+  **その reader 1 台（電源 or BUSY 線 or chip）が故障**している。位置依存（ハーネス末端の電圧降下など）なら
+  floating は ch10 に残るはずで、そうならなかった。
+- 残る切り分けは「電源が来ていない」vs「BUSY 線だけ切れている」。手で当たるしかなかったので
+  **firmware に自動診断を追加**（下の Fix 2）。
+
+## Fix 2: skip した reader の chip 生存確認（BUSY 非依存, 同日追加）
+
+起動時、BUSY が floating で skip した reader（および init 失敗で skip した reader）ごとに、
+共有 SPI とは別の device を一時 add して `READ_EEPROM(FIRMWARE_VERSION)` を 1 発送り、MISO の応答で
+chip の生死を判定して WARN に出す（`spi_probe_nss` / `diag_skipped_reader`）。
+
+```
+reader #11 (ch11) の chip 生存確認: FW=0C 03 = **chip は生きている** → BUSY 線だけが不通（…）
+reader #11 (ch11) の chip 生存確認: FW=FF FF = SPI 無応答 → この reader の電源(3.3V/5V)/GND か SPI 線…
+```
+
+- `FW=xx xx`（FF FF / 00 00 以外）→ chip は生きている = **BUSY 線 1 本の不通**（その reader の BUSY ピン /
+  圧着 / コネクタの BUSY を当たる）。
+- `FW=FF FF` → SPI 無応答 = **電源/GND か SPI 線か chip 個体**。
+- 呼ぶのは **init ループの後・RF config ロードの前**（この probe は共有 RST を叩くのでレジスタが消える）。
+- NSS スキャン（`diag_after_init_failure`）の 1 候補ぶんの処理を `spi_probe_nss` に切り出して共用。
+
 ## 配線表の振替（2026-09-11, 実機の挿し方に合わせる）
 
 実機は「コネクタ #4（ch3, BUSY 不通）だけ飛ばして若い順」に 11 台を挿している（#1,#2,#3,#5,…,#12。
@@ -130,6 +164,9 @@ PN5180 ready: 10/11 reader（skip: #10(ch10)）
 host config（`reader` 0..10 = 席 1..8 / board1..3）は不変。修理後に #4 を戻す場合はこの表を元に戻す。
 
 ## 次に実機で確認すること（切り分け）
+
+0. **11 台目**: 新しい起動ログの `reader #11 (ch11) の chip 生存確認: FW=…` を見る。
+   `FW=0C 03` 等なら BUSY 線 1 本の不通（圧着し直し）、`FF FF` なら電源/GND か chip 個体（交換）。
 
 1. 新 firmware で起動 → `PN5180 ready: N/11 reader（skip: …）` の N と、reader 0 が
    「再試行で init 成功」か「再試行も失敗 → skip」か。

@@ -276,6 +276,95 @@ static void diag_wiring_map(uint16_t low_mask) {
 }
 #endif
 
+// ── 1 本の NSS に低レベル SPI で READ_EEPROM(FIRMWARE_VERSION) を送る（BUSY 非依存）──
+// 共有 SPI とは別に device を一時 add/remove する。BUSY ハンドシェイクの代わりに **固定待ち 1ms** を
+// 置き、MISO に意味のある値（`FF FF`=floating / `00 00`=Low 固定 のいずれでもない）が返るかで
+// 「chip が生きているか」を判定する。BUSY が壊れていても必ず SPI を送るのが要点。
+// 共有 RST を叩くので **全 chip がリセットされる** → 呼ぶのは「init ループの後・RF config ロードの前」
+// （または init 失敗直後）に限る。
+// 戻り値: MISO に意味のある値が返った（= chip 生存）。fw_out に受信 2 byte。
+static bool spi_probe_nss(int nss, int mux_ch, uint8_t fw_out[2],
+                          int *busy_before_out, bool *went_high_out) {
+    gpio_set_direction(PN5180_PIN_RST, GPIO_MODE_OUTPUT);
+    gpio_set_level(PN5180_PIN_RST, 0);
+    esp_rom_delay_us(1000);
+    gpio_set_level(PN5180_PIN_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    mux_select(mux_ch);
+
+    // 送信前の BUSY。High（floating/stuck）なら「送信で High に立った」と区別できないので、
+    // その場合は BUSY 判定を諦める（= 誤検出して再 init しない。実機で ch12 が浮いていて
+    // GPIO1 を誤検出しクラッシュした反省）。SPI 自体は送る。
+    const int busy_before = gpio_get_level(BUSY_PIN);
+    bool went_high = false;
+    fw_out[0] = 0xFF;
+    fw_out[1] = 0xFF;
+
+    spi_device_interface_config_t devcfg = {
+        .clock_speed_hz = 1000000,
+        .mode = 0,
+        .spics_io_num = nss,
+        .queue_size = 1,
+    };
+    spi_device_handle_t dev = NULL;
+    if (spi_bus_add_device(PN5180_SPI_HOST, &devcfg, &dev) != ESP_OK) {
+        if (busy_before_out) *busy_before_out = busy_before;
+        if (went_high_out) *went_high_out = false;
+        return false;
+    }
+
+    // PN5180 の SPI は 2 フェーズ:「送信 = NSS↓ コマンド NSS↑」→「受信 = NSS↓ 読み出し NSS↑」。
+    // hardware CS では 1 トランザクション = 1 フェーズなので 2 回に分ける。
+    // 送信フェーズ: READ_EEPROM(0x07) + addr 0x12(FIRMWARE_VERSION) + len 2。
+    uint8_t tx_cmd[3] = {0x07, 0x12, 0x02};
+    spi_transaction_t t_cmd = {.length = 8 * sizeof(tx_cmd), .tx_buffer = tx_cmd};
+    spi_device_polling_transmit(dev, &t_cmd);
+
+    // 固定待ち 1ms（BUSY ハンドシェイクの代わり）。ついでに BUSY の立ち上がりも観る
+    // （送信前が Low だった場合だけ意味がある）。
+    for (int j = 0; j < 500; j++) {
+        if (!busy_before && gpio_get_level(BUSY_PIN)) went_high = true;
+        esp_rom_delay_us(2);
+    }
+
+    // 受信フェーズ: 2 byte 読み出し（PN5180 は MOSI を無視して MISO に載せる）。
+    uint8_t tx_dummy[2] = {0xFF, 0xFF};
+    spi_transaction_t t_rd = {.length = 16, .tx_buffer = tx_dummy, .rx_buffer = fw_out};
+    spi_device_polling_transmit(dev, &t_rd);
+    esp_rom_delay_us(1000);
+    spi_bus_remove_device(dev);
+
+    if (busy_before_out) *busy_before_out = busy_before;
+    if (went_high_out) *went_high_out = went_high;
+    // 全 FF = pull-up で浮いている / 全 00 = Low 固定。どちらも「応答ではない」。
+    const bool miso_floating = (fw_out[0] == 0xFF && fw_out[1] == 0xFF);
+    const bool miso_zero = (fw_out[0] == 0x00 && fw_out[1] == 0x00);
+    return !miso_floating && !miso_zero;
+}
+
+// ── skip した reader の chip 生存確認（BUSY 非依存, ISSUE-0023）──
+// BUSY が floating で skip した reader について「**電源が来ていない**のか **BUSY 線だけが切れている**のか」
+// を切り分ける。実機 2026-09-11 で reader を別コネクタに挿し替えたら floating が付いてきた
+// （= reader 側の故障）が、そこから先（電源か BUSY 線か）は手で当たるしかなかったので自動化する。
+// 呼ぶのは init ループの後・RF config ロードの前（spi_probe_nss が共有 RST を叩くため）。
+static void diag_skipped_reader(int idx, const pn5180_reader_cfg_t *cfg) {
+    uint8_t fw[2];
+    int busy_before = 0;
+    bool went_high = false;
+    const bool alive = spi_probe_nss(cfg->nss, cfg->mux_ch, fw, &busy_before, &went_high);
+    if (alive) {
+        ESP_LOGW(TAG,
+                 "reader #%d (ch%d) の chip 生存確認: FW=%02X %02X = **chip は生きている** → "
+                 "BUSY 線だけが不通（この reader の BUSY ピン/圧着/コネクタ ch%d の BUSY を確認）",
+                 idx + 1, cfg->mux_ch, fw[0], fw[1], cfg->mux_ch);
+    } else {
+        ESP_LOGW(TAG,
+                 "reader #%d (ch%d) の chip 生存確認: FW=%02X %02X = SPI 無応答 → "
+                 "この reader の電源(3.3V/5V)/GND か SPI 線(SCK/MOSI/MISO)/chip 個体を疑う",
+                 idx + 1, cfg->mux_ch, fw[0], fw[1]);
+    }
+}
+
 // ── init 失敗時の診断（ログのみ。pn5180_init は再呼出ししない）──
 // 以前はここで見つけた NSS で pn5180_init を 2 回目に呼んでいたが、2 回目も失敗すると
 // ドライバ内の deinit → spi_bus_remove_device で assert（xQueue NULL）→ 再起動ループになり
@@ -317,58 +406,12 @@ static void diag_after_init_failure(const pn5180_reader_cfg_t *cfg) {
     uint8_t spi_alive_fw[2] = {0, 0};
     for (int k = 0; k < n_cands; k++) {
         const int try_nss = PN5180_READERS[k].nss;
-        // 共有 RST を叩いてリセット → ブート完了（BUSY=Low）を待つ。
-        gpio_set_direction(PN5180_PIN_RST, GPIO_MODE_OUTPUT);
-        gpio_set_level(PN5180_PIN_RST, 0);
-        esp_rom_delay_us(1000);
-        gpio_set_level(PN5180_PIN_RST, 1);
-        vTaskDelay(pdMS_TO_TICKS(10));
-        mux_select(cfg->mux_ch);
-
-        // 送信前の BUSY。High（floating/stuck）なら「送信で High に立った」と区別できないので、
-        // この候補では BUSY 判定を諦める（= 誤検出して再 init しない。実機で ch12 が浮いていて
-        // GPIO1 を誤検出しクラッシュした反省）。SPI 自体は送る。
-        const int busy_before = gpio_get_level(BUSY_PIN);
-
-        spi_device_interface_config_t devcfg = {
-            .clock_speed_hz = 1000000,
-            .mode = 0,
-            .spics_io_num = try_nss,
-            .queue_size = 1,
-        };
-        spi_device_handle_t dev = NULL;
-        if (spi_bus_add_device(PN5180_SPI_HOST, &devcfg, &dev) != ESP_OK) {
-            ESP_LOGW(TAG, "  [%d/%d] add_device(NSS=GPIO%d) 失敗", k + 1, n_cands, try_nss);
-            continue;
-        }
-
-        // PN5180 の SPI は 2 フェーズ:「送信 = NSS↓ コマンド NSS↑」→「受信 = NSS↓ 読み出し NSS↑」。
-        // hardware CS では 1 トランザクション = 1 フェーズなので 2 回に分ける。
-        // 送信フェーズ: READ_EEPROM(0x07) + addr 0x12(FIRMWARE_VERSION) + len 2。
-        uint8_t tx_cmd[3] = {0x07, 0x12, 0x02};
-        spi_transaction_t t_cmd = {.length = 8 * sizeof(tx_cmd), .tx_buffer = tx_cmd};
-        spi_device_polling_transmit(dev, &t_cmd);
-
-        // 固定待ち 1ms（BUSY ハンドシェイクの代わり）。ついでに BUSY の立ち上がりも観る
-        // （送信前が Low だった候補だけ意味がある）。
+        uint8_t fw[2];
+        int busy_before = 0;
         bool went_high = false;
-        for (int j = 0; j < 500; j++) {
-            if (!busy_before && gpio_get_level(BUSY_PIN)) went_high = true;
-            esp_rom_delay_us(2);
-        }
-
-        // 受信フェーズ: 2 byte 読み出し（PN5180 は MOSI を無視して MISO に載せる）。
-        uint8_t tx_dummy[2] = {0xFF, 0xFF};
-        uint8_t fw[2] = {0xFF, 0xFF};
-        spi_transaction_t t_rd = {.length = 16, .tx_buffer = tx_dummy, .rx_buffer = fw};
-        spi_device_polling_transmit(dev, &t_rd);
-        esp_rom_delay_us(1000);
-        spi_bus_remove_device(dev);
-
-        // 全 FF = pull-up で浮いている / 全 00 = Low 固定。どちらも「応答ではない」。
+        // 対象 chip の ch を選んだまま、候補 NSS で SPI を 1 発送る（BUSY 非依存）。
+        const bool miso_active = spi_probe_nss(try_nss, cfg->mux_ch, fw, &busy_before, &went_high);
         const bool miso_floating = (fw[0] == 0xFF && fw[1] == 0xFF);
-        const bool miso_zero = (fw[0] == 0x00 && fw[1] == 0x00);
-        const bool miso_active = !miso_floating && !miso_zero;
         ESP_LOGW(TAG, "  [%d/%d] NSS=GPIO%d (ch%d) -> 送信前BUSY=%d  BUSY Low→High:%s  FW=%02X %02X %s",
                  k + 1, n_cands, try_nss, PN5180_READERS[k].mux_ch, busy_before,
                  busy_before ? "判定不能" : (went_high ? "YES" : "no "),
@@ -622,6 +665,15 @@ bool pn5180_reader_init(void) {
         // 「チップが死んでいるのか BUSY/MUX 経路だけが壊れているのか」を切り分けられない。
         if (!init_diag_done) diag_after_init_failure(cfg0);
         return false;
+    }
+
+    // ── skip した reader の chip 生存確認（ISSUE-0023）──
+    // 「電源が来ていない」のか「BUSY 線だけが切れている」のかを起動ログで切り分けられるようにする。
+    // **RF config ロードの前**に置くのが要点（spi_probe_nss は共有 RST を叩くのでレジスタが消える）。
+    for (int i = 0; i < PN5180_READER_COUNT; i++) {
+        if (s_readers[i].dev) continue;
+        const pn5180_reader_cfg_t *cfg = (i == 0) ? cfg0 : &PN5180_READERS[i];
+        diag_skipped_reader(i, cfg);
     }
 
 #if PN5180_FAST_INVENTORY

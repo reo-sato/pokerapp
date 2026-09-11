@@ -174,6 +174,9 @@ USB 上の CCID slot は 1 つのまま（§2 / ADR-0041）＝ **USB 記述子�
 - [ ] **未通電 reader は起動時の MUX scan で skip**する。BUSY が floating の ch は `pn5180_init` を
       **呼ばずに**飛ばし、残りの台で起動する（その index は範囲内なので Get UID は常に `6A 81`）。
       1 台も起動できなければ NSS スキャン診断（BUSY 非依存）を出す。
+- [ ] **skip した reader ごとに chip 生存確認**（BUSY 非依存の SPI 1 発 = `READ_EEPROM(FIRMWARE_VERSION)`）を
+      起動ログに出す。`FW=xx xx` なら **BUSY 線だけが不通**、`FW=FF FF` なら **電源/GND・SPI 線・chip 個体**
+      と切り分けられる（ISSUE-0023。実機で「reader 1 台の故障」まで絞れた後、手で当たる箇所を減らすため）。
 - [ ] **通電しているのに `pn5180_init` が失敗した reader は、共有 SPI を作り直して 1 回だけ再試行し、
       それでも失敗したらその reader だけ skip して他は続行**する（ISSUE-0023）。ドライバの失敗経路は
       **全 reader 共有の SPI device を外し `pn5180_spi_t` も free する**ため、作り直さずに続行すると
