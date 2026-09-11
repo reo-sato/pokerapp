@@ -85,7 +85,7 @@ export function HandDetailScreen({
       ) : (
         <>
           {/* テーブル + 4 ストリート列（共有コンポーネント, ADR-0051。訂正適用済みビュー） */}
-          <HandReplay hand={hand} />
+          <HandReplay hand={hand} selfSeat={own?.seat} />
 
           {/* フッタ: 画面を食わないよう横並びの小ボタンにする */}
           <View style={{ flexDirection: "row", alignItems: "center", paddingVertical: 10 }}>

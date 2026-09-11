@@ -26,6 +26,7 @@ import {
   formatChipsCompact,
   formatSignedCompact,
   parseCard,
+  preflopFoldedSeats,
   seatRingLayout,
   STREET_LABELS,
   SUIT_COLORS,
@@ -34,6 +35,7 @@ import {
   type ReplayHand,
   type ReplayPlayer,
   type StreetSection,
+  visibleColumnActions,
 } from "./handReplayModel";
 
 const c = {
@@ -51,7 +53,14 @@ const c = {
   felt: "#14332a",
   feltEdge: "#2b5a49",
   seatFill: "#151a1f",
+  // 本人の強調。ダーク基調になじむ琥珀（彩度を上げるとホールカードの可読性が落ちる）。
+  selfFill: "#3a2e12",
+  selfEdge: "#c9a227",
+  selfRow: "#2b2415",
 };
+
+/** プリフロップで降りた席の減光率（ADR-0051 追記）。 */
+const FOLDED_OPACITY = 0.4;
 
 const SEAT_W = 78;
 const SEAT_H = 58;
@@ -94,20 +103,30 @@ function HiddenCards(): React.JSX.Element {
   );
 }
 
-/** テーブル外周に置く 1 席。勝者は縁を光らせ、fold 済み（収支のみ）でも並びは崩さない。 */
+/**
+ * テーブル外周に置く 1 席。
+ *
+ * - 勝者は縁を緑にして 🏆 と緑の名前を添える
+ * - **本人**（`isSelf`）は地を琥珀に。勝者でもあるときは地は琥珀のまま縁だけ勝者の緑を優先する
+ * - **プリフロップで降りた席**（`dimmed`）はチップごと減光してハンドから沈める
+ */
 function SeatChip(props: {
   player: ReplayPlayer;
   isWinner: boolean;
+  isSelf: boolean;
+  dimmed: boolean;
   top: number;
   left: number;
 }): React.JSX.Element {
-  const { player, isWinner } = props;
+  const { player, isWinner, isSelf, dimmed } = props;
   const result = player.result;
   return (
     <View
       style={[
         s.seat,
+        isSelf && s.seatSelf,
         isWinner && s.seatWinner,
+        dimmed && { opacity: FOLDED_OPACITY },
         { top: `${props.top}%`, left: `${props.left}%` },
       ]}
     >
@@ -138,11 +157,13 @@ function SeatChip(props: {
 }
 
 /** 4 列の 1 行。要確認 / 訂正済は左の色ストライプ + 記号で幅を使わずに示す。 */
-function ActionLine(props: { action: ReplayAction }): React.JSX.Element {
+function ActionLine(props: { action: ReplayAction; isSelf: boolean }): React.JSX.Element {
   const a = props.action;
   const stripe = a.needs_review ? c.warn : a.corrected ? c.accent : "transparent";
   return (
-    <View style={[s.actionLine, { borderLeftColor: stripe }]}>
+    <View
+      style={[s.actionLine, props.isSelf && s.actionLineSelf, { borderLeftColor: stripe }]}
+    >
       <Text style={s.actionSeat}>{a.seat}</Text>
       <Text style={s.actionLabel} numberOfLines={1}>
         {compactActionLabel(a.action)}
@@ -163,9 +184,11 @@ function StreetColumn(props: {
   street: string;
   section?: StreetSection;
   newCards: string[];
+  selfSeat?: number;
 }): React.JSX.Element {
   const { section, newCards } = props;
-  const actions = section?.actions ?? [];
+  // プリフロップの fold は出さない（降りた席はテーブル図側で減光して示す）。
+  const actions = visibleColumnActions(props.street, section?.actions ?? []);
   return (
     <View style={s.column}>
       <View style={s.columnHead}>
@@ -189,7 +212,9 @@ function StreetColumn(props: {
         {actions.length === 0 ? (
           <Text style={s.columnEmpty}>—</Text>
         ) : (
-          actions.map((a, i) => <ActionLine key={i} action={a} />)
+          actions.map((a, i) => (
+            <ActionLine key={i} action={a} isSelf={a.seat === props.selfSeat} />
+          ))
         )}
       </ScrollView>
     </View>
@@ -208,9 +233,14 @@ function newCardsFor(street: string, board: string[]): string[] {
  * ハンドリプレイ本体。`hand` は viewer API / staff API の HandSummary dict をそのまま渡せる
  * (訂正オーバーレイ適用済みビューを渡すこと — ADR-0036)。
  */
-export function HandReplay(props: { hand: ReplayHand }): React.JSX.Element {
+export function HandReplay(props: {
+  hand: ReplayHand;
+  /** 見ている本人の席（mobile のみ。staff は「本人」が居ないので未指定 = 強調なし）。 */
+  selfSeat?: number;
+}): React.JSX.Element {
   const model = buildReplayModel(props.hand);
   const board = props.hand.board ?? [];
+  const foldedPreflop = new Set(preflopFoldedSeats(props.hand.actions ?? []));
   const slots = seatRingLayout(model.seats.length);
   const sectionByStreet = new Map(model.streets.map((st) => [st.street, st]));
   const winnerName =
@@ -266,6 +296,8 @@ export function HandReplay(props: { hand: ReplayHand }): React.JSX.Element {
             key={p.seat}
             player={p}
             isWinner={p.seat === model.winnerSeat}
+            isSelf={p.seat === props.selfSeat}
+            dimmed={foldedPreflop.has(p.seat)}
             top={slots[i]?.top ?? 50}
             left={slots[i]?.left ?? 50}
           />
@@ -280,6 +312,7 @@ export function HandReplay(props: { hand: ReplayHand }): React.JSX.Element {
             street={street}
             section={sectionByStreet.get(street)}
             newCards={newCardsFor(street, board)}
+            selfSeat={props.selfSeat}
           />
         ))}
       </View>
@@ -332,6 +365,7 @@ const s = StyleSheet.create({
     justifyContent: "center",
   },
   seatWinner: { borderColor: c.pos },
+  seatSelf: { backgroundColor: c.selfFill, borderColor: c.selfEdge },
   seatName: { color: c.text, fontSize: 11, fontWeight: "600", maxWidth: SEAT_W - 8 },
   seatResult: { color: c.muted, fontSize: 10, fontWeight: "700", marginTop: 1 },
 
@@ -383,6 +417,7 @@ const s = StyleSheet.create({
     paddingLeft: 3,
     borderLeftWidth: 2,
   },
+  actionLineSelf: { backgroundColor: c.selfRow, borderRadius: 3 },
   actionSeat: { color: c.muted, fontSize: 10, width: 11 },
   actionLabel: { color: c.text, fontSize: 10, flexShrink: 1 },
   actionAmount: { color: c.accent, fontSize: 10, fontWeight: "700", marginLeft: 3 },

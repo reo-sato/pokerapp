@@ -249,6 +249,33 @@ export function seatRingLayout(count: number): SeatSlot[] {
   return slots;
 }
 
+/**
+ * プリフロップで fold した席（ADR-0051 追記）。
+ *
+ * そのハンドに実質関与していない席を UI で沈めるための判定。ポストフロップの fold は
+ * 含めない（フロップまで参加した席は通常表示）。
+ */
+export function preflopFoldedSeats(actions: ReplayAction[]): number[] {
+  const seats = new Set<number>();
+  for (const a of actions ?? []) {
+    if (a.street === "preflop" && a.action === "fold") seats.add(a.seat);
+  }
+  return [...seats].sort((x, y) => x - y);
+}
+
+/**
+ * 列に描くアクション（ADR-0051 追記）。プリフロップの fold は出さない。
+ *
+ * 大半の席が fold するプリフロップ列で実質的な攻防が埋もれるため。降りた席はテーブル図側で
+ * 減光して示す。**描画専用のフィルタ**で、ポット計算（`buildReplayModel`）も
+ * テキスト書き出し（`handReplayText.ts`）も全アクションを見たままなので数値は変わらない。
+ */
+export function visibleColumnActions(street: string, actions: ReplayAction[]): ReplayAction[] {
+  const all = actions ?? [];
+  if (street !== "preflop") return all;
+  return all.filter((a) => a.action !== "fold");
+}
+
 /** 狭い列に収めるための短縮金額表記 (600 / 1.5k / 12.2k / 120k)。 */
 export function formatChipsCompact(n: number): string {
   if (!Number.isFinite(n)) return "0";

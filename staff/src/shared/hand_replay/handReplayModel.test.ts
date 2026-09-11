@@ -20,7 +20,9 @@ import {
   formatSigned,
   formatSignedCompact,
   parseCard,
+  preflopFoldedSeats,
   seatRingLayout,
+  visibleColumnActions,
   type ReplayHand,
 } from "./handReplayModel";
 
@@ -188,4 +190,50 @@ test("compactActionLabel uses the narrow poker vernacular for the 4 columns", ()
   assert.equal(compactActionLabel("limp?"), "limp?"); // 未知は raw のまま
   // 日本語ラベル（共有テキスト・詳細表示側）は据え置き。
   assert.equal(actionLabel("allin"), "オールイン");
+});
+
+test("preflopFoldedSeats lists only seats that folded preflop", () => {
+  const actions = [
+    { street: "preflop", seat: 3, action: "fold" },
+    { street: "preflop", seat: 4, action: "raise", amount: 600 },
+    { street: "preflop", seat: 1, action: "call", amount: 600 },
+    { street: "flop", seat: 4, action: "fold" }, // ポストフロップ fold は対象外
+  ];
+  assert.deepEqual(preflopFoldedSeats(actions), [3]);
+  assert.deepEqual(preflopFoldedSeats([]), []);
+});
+
+test("visibleColumnActions hides folds in the preflop column only", () => {
+  const preflop = [
+    { street: "preflop", seat: 3, action: "fold" },
+    { street: "preflop", seat: 4, action: "raise", amount: 600 },
+  ];
+  assert.deepEqual(
+    visibleColumnActions("preflop", preflop).map((a) => a.seat),
+    [4],
+  );
+  // 他ストリートは素通し（フロップ以降の fold は残す）。
+  const flop = [
+    { street: "flop", seat: 4, action: "fold" },
+    { street: "flop", seat: 1, action: "call", amount: 1000 },
+  ];
+  assert.deepEqual(visibleColumnActions("flop", flop), flop);
+});
+
+test("hiding preflop folds does not change the pot the column shows", () => {
+  // 描画専用フィルタなので、fold を隠しても potEnd は全アクション由来のまま。
+  const hand = makeHand({
+    actions: [
+      { street: "preflop", seat: 3, action: "fold", amount: 0, pot_after: 300 },
+      { street: "preflop", seat: 1, action: "raise", amount: 600, pot_after: 900 },
+      { street: "preflop", seat: 2, action: "call", amount: 600, pot_after: 1500 },
+    ],
+  });
+  const preflop = buildReplayModel(hand).streets.find((st) => st.street === "preflop");
+  assert.ok(preflop);
+  assert.equal(preflop.potEnd, 1500);
+  assert.deepEqual(
+    visibleColumnActions("preflop", preflop.actions).map((a) => a.action),
+    ["raise", "call"],
+  );
 });
