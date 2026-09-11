@@ -127,6 +127,11 @@ register-level simulator で検証）。
 - simulator に `spics_io_num` 別の device add 回数を記録し、「skip した reader（未通電 / init 失敗）に
   生存確認を 1 回送る」「範囲外の予備には送らない」を assert に追加（`sim_initretry.c`, 16 項目 ✅）。
   スタブ 32 構成 警告 0、`sim_capture`（fast/driver 両経路）/ `sim_multi` / `sim_diag` / `sim` 失敗 0。
+- **実機（`405f218`）で診断が機能**: ch10 に新品 reader を挿した状態で
+  `reader #10 (ch10) の chip 生存確認: FW=00 04 = chip は生きている → BUSY 線だけが不通`。
+  電源と SPI は届いており、不通は BUSY 1 本に絞れた。残りの切り分け（コネクタ/ハーネス か reader の
+  BUSY ピン）は空き ch12 に挿して `MUX scan` の ch12 の桁を見る = 再ビルド不要（ISSUE-0023）。
+- 併せて **10 台の poll 実測**を取得（カード無し 1 周 138 ms = 1 台 ≈ 13.8 ms）。ISSUE-0021 に追記。
 
 ## Related ADRs
 

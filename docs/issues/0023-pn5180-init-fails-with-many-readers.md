@@ -155,6 +155,29 @@ reader #11 (ch11) の chip 生存確認: FW=FF FF = SPI 無応答 → この rea
 - 呼ぶのは **init ループの後・RF config ロードの前**（この probe は共有 RST を叩くのでレジスタが消える）。
 - NSS スキャン（`diag_after_init_failure`）の 1 候補ぶんの処理を `spi_probe_nss` に切り出して共用。
 
+### chip 生存確認の実機結果（`405f218`, ch10 に **新品の reader** を挿した状態）
+
+```
+MUX scan ch0..15 (pull-up): 0001000000101111        ← ch3（空き）/ ch10 / ch12(空き) が floating
+配線チェック: 設定 ch なのに floating（未通電/未接続）= #10(ch10) → この reader は skip
+PN5180 reader 0..8 ready / reader 10 ready (nss=17 mux_ch=11)
+reader #10 (ch10) の chip 生存確認: FW=00 04 = **chip は生きている** → BUSY 線だけが不通
+PN5180 ready: 10/11 reader（skip: #10(ch10)）
+```
+
+- **電源と SPI は届いている**（chip が `FW=00 04` を返した）。不通は **BUSY 線 1 本だけ**に絞れた。
+  診断そのものは意図どおり動作（ISSUE-0023 Fix 2 の実機確認）。
+- ただし ch10 は **入れ替え試験のときには ready になっていた**（good reader を挿したとき）。今回は
+  新品 reader で floating。つまり ch10 の BUSY 経路は **間欠**か、reader 側の BUSY ピンが座っていない。
+  ハーネスは既にコネクタ #4（ch3）でも BUSY が死んでいるので、**圧着不良が複数箇所にある**可能性がある。
+- **次の切り分け（再ビルド不要）**: ch10 の reader を **空きコネクタ #13（ch12）に挿して再起動**し、
+  起動ログの `MUX scan ch0..15` の **ch12 の桁**を見る。
+  - ch12 が `0`（= Low 駆動）→ その reader の BUSY は正常 → **ch10 のコネクタ / ハーネスの BUSY** が不良。
+    `配線チェック: 通電しているが設定範囲外の ch = ch12` も出る。
+  - ch12 が `1`（floating のまま）→ **その reader の BUSY ピン / 座り**が不良（新品でも当たりを引いた、
+    またはコネクタに挿し込み切れていない）。
+  `PN5180_READER_COUNT` の範囲外でも MUX scan は 16 ch 全部を見るので、この判定には再ビルドが要らない。
+
 ## 配線表の振替（2026-09-11, 実機の挿し方に合わせる）
 
 実機は「コネクタ #4（ch3, BUSY 不通）だけ飛ばして若い順」に 11 台を挿している（#1,#2,#3,#5,…,#12。
@@ -165,8 +188,9 @@ host config（`reader` 0..10 = 席 1..8 / board1..3）は不変。修理後に #
 
 ## 次に実機で確認すること（切り分け）
 
-0. **11 台目**: 新しい起動ログの `reader #11 (ch11) の chip 生存確認: FW=…` を見る。
-   `FW=0C 03` 等なら BUSY 線 1 本の不通（圧着し直し）、`FF FF` なら電源/GND か chip 個体（交換）。
+0. **11 台目**: → **`FW=00 04` = chip 生存、BUSY 線のみ不通**と判明（上の「chip 生存確認の実機結果」）。
+   残りは「ch10 のコネクタ/ハーネス」vs「reader の BUSY ピン」で、空き ch12 に挿して MUX scan の
+   ch12 の桁を見れば決まる（同節の「次の切り分け」）。
 
 1. 新 firmware で起動 → `PN5180 ready: N/11 reader（skip: …）` の N と、reader 0 が
    「再試行で init 成功」か「再試行も失敗 → skip」か。

@@ -34,7 +34,14 @@
   手で当たるしかなかったため自動化した。NSS スキャンの 1 候補ぶんを `spi_probe_nss` に切り出して共用。
 - **実機確認（2026-09-11, `0e93de4`）**: `PN5180 ready: 10/11 reader（skip: #10(ch10)）`（コネクタ #11 のみ
   未通電）。**reader を #11↔#12 で入れ替えると floating も ch10→ch11 に移動** = コネクタは両方正常で
-  **reader 1 台の故障**と確定（ISSUE-0023）。**host 側の契約 v1.2 経路を初めて多台数で通し確認**: `probe_pcsc list` =
+  **reader 1 台の故障**と確定（ISSUE-0023）。
+- **chip 生存確認の実機結果（`405f218`, ch10 に新品 reader）**: `FW=00 04 = chip は生きている →
+  BUSY 線だけが不通`。電源と SPI は届いており **不通は BUSY 1 本**に絞れた（診断は意図どおり動作）。
+  残りは「ch10 のコネクタ/ハーネス」vs「reader の BUSY ピン」で、空き ch12 に挿して MUX scan の
+  ch12 の桁を見れば決まる（再ビルド不要）。
+- **10 台の poll 実測**: カード無しで **1 周 138 ms**（1 台 ≈ 13.8 ms、11 台なら ≈ 152 ms）。1 周は
+  スキャン時間のみで `CARD_POLL_INTERVAL_MS`(100ms) は別途加算。1 台ぶんの内 ≈ 8 ms は
+  `PN5180_FAST_RX_TIMEOUT_MS`（ISSUE-0021 実機フィードバック 5）。**host 側の契約 v1.2 経路を初めて多台数で通し確認**: `probe_pcsc list` =
   `physical readers: 11` + 11 件 matched / `check` = 11 行 PASS / `watch` = 席 8 台 × 2 枚 + board で
   22 タッチ、`seat 4 [r3]` も振替どおり（ISSUE-0022）。
 
