@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+### Fixed (firmware: 1 台の init 失敗で全 reader が止まらないように — 全 NSS High 固定 + 再試行 + 個別 skip, ISSUE-0023, 2026-09-11)
+
+- **実機 10 台接続で reader 0 の `pn5180_init` が firmware version 読み取り失敗**（応答 `FF FF`）になり、
+  ドライバの失敗経路が共有 SPI を壊して全 reader が停止した（直後の診断では同じ chip が `FW=00 04` で
+  応答 = chip は生きている。RST 診断は `during_rst=0` で前日の `1` と違う。根本原因は実機で未確定）。
+- **全 NSS を init 前に output High で固定**（配線表 13 本すべて、範囲外の予備も）。init していない
+  chip の NSS が floating で「選択された」と解釈し MISO を駆動する衝突経路を塞ぐ。
+- **init 失敗時は共有 SPI を作り直して 1 回だけ再試行**し、それでも失敗した reader は **skip して他は続行**
+  （`PN5180 ready: N/11 reader（skip: #5(init失敗), …）`）。以前は 1 台失敗 = 全台停止だった。
+- 診断: RST 診断が `during_rst=0 かつ after=0` なら「RST がこの chip に届いていない可能性（コネクタの
+  RST ピン/配線）」、init 失敗診断で SPI 応答ありかつ RST 診断 0 なら同じ疑いを明示。
+- docs: ISSUE-0023（新規, Open）/ worklog `docs/worklog/2026-09-11-pn5180-init-resilience.md` /
+  firmware README・checklist §8 の「1 台失敗 = 全台停止」記述を更新。スタブ 32 構成 警告 0 +
+  simulator（再試行・skip・NSS High・SPI 作り直し）12 項目 ✅。**実機未検証**。
+
 ### Changed (firmware: CCID slot を 1 つに固定し、物理リーダーを Get UID の P2 で選ぶ — 契約 **v1.2** / firmware 側, ADR-0041 / ISSUE-0022, 2026-09-10)
 
 - **firmware 側の v1.2 実装**（host 側は次の項）: `CCID_SLOT_COUNT` は **1 固定**（`bMaxSlotIndex=0`、

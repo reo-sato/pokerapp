@@ -83,6 +83,9 @@ typedef struct {
 static slot_reader_t s_readers[PN5180_READER_COUNT];
 static pn5180_card_t s_cache[PN5180_READER_COUNT];
 static SemaphoreHandle_t s_lock;
+// 起動時の RST 診断（reader 0）で「RST 中に BUSY=High」が観測できたか。false なら RST がその chip に
+// 届いていない疑い（init 失敗診断の判定文に使う, ISSUE-0023）。
+static bool s_rst_seen_high;
 
 // ── CD74HC4067 MUX（PN5180_BUSY_VIA_MUX=0 のときは no-op）──
 static void mux_init(void) {
@@ -387,6 +390,12 @@ static void diag_after_init_failure(const pn5180_reader_cfg_t *cfg) {
         } else {
             ESP_LOGW(TAG, "   → NSS は設定どおり応答。RST(GPIO%d)/電源/SPI 配線 or PN5180 個体を疑う",
                      PN5180_PIN_RST);
+            if (!s_rst_seen_high) {
+                // chip は SPI に答える（生きている）のに RST 中に BUSY が High にならなかった =
+                // RST がこの chip に届いていない可能性が高い（コネクタの RST ピン / 配線, ISSUE-0023）。
+                ESP_LOGW(TAG, "   → RST 診断(reader 0) が during_rst=0: chip がリセットに反応していない。"
+                              "この reader のコネクタの RST ピン/配線の不通を疑う（ISSUE-0023）");
+            }
         }
     } else if (spi_alive_nss > 0) {
         // BUSY は動かなかったが SPI には答えた = チップは生きていて BUSY 経路だけが死んでいる。
@@ -405,11 +414,49 @@ static void diag_after_init_failure(const pn5180_reader_cfg_t *cfg) {
     }
 }
 
+// ── 配線表の全 NSS（13 本）を High に固定する（init の前に 1 回）──
+// SPI バスは全 reader 共有なので、通電しているのに init していない chip の NSS が floating だと、
+// その chip が「選択された」と解釈して MISO を駆動し、init 中の reader の応答と衝突し得る。
+// 該当するのは (a) まだ init 順が来ていない reader、(b) 未通電判定で skip した reader、
+// (c) 配線表にあるが PN5180_READER_COUNT の範囲外の予備（#12/#13）に挿された reader。
+// 実機 2026-09-11（10 台接続、#12 にも 1 台）で reader 0 の FIRMWARE_VERSION 読みが FF FF になり
+// init 失敗した（ISSUE-0023）。原因の確定はしていないが、NSS を全部 High にしておけば
+// この経路の衝突は起きないので、範囲外の予備も含めて先に deselect する。
+static void nss_deselect_all(void) {
+    const int n = (int)(sizeof(PN5180_READERS) / sizeof(PN5180_READERS[0]));
+    for (int i = 0; i < n; i++) {
+        gpio_set_direction(PN5180_READERS[i].nss, GPIO_MODE_OUTPUT);
+        gpio_set_level(PN5180_READERS[i].nss, 1);
+    }
+}
+
+// ── 失敗した pn5180_init の後始末: 共有 SPI を作り直す ──
+// ドライバの失敗経路 pn5180_deinit(ret, false) は **共有 SPI device を外し、pn5180_spi_t も free**
+// する（バス自体は残る）。そのままでは、すでに ready の reader（dev->spi が dangling）も
+// 次の reader も使えない。バスを解放して pn5180_spi_init をやり直し、ready 済み reader の
+// dev->spi を新しい構造体に差し替える（pn5180_t は公開 struct）。これで
+// 「失敗した 1 台だけ skip して他は続行」が可能になる。
+static pn5180_spi_t *spi_recreate_after_init_failure(void) {
+    spi_bus_free(PN5180_SPI_HOST);  // 共有 device は deinit が外し済みなので解放できる
+    pn5180_spi_t *spi = pn5180_spi_init(PN5180_SPI_HOST, PN5180_PIN_SCK,
+                                        PN5180_PIN_MISO, PN5180_PIN_MOSI,
+                                        PN5180_SPI_HZ);
+    if (!spi) {
+        ESP_LOGE(TAG, "共有 SPI の作り直しに失敗（spi_bus_initialize / add_device）");
+        return NULL;
+    }
+    for (int j = 0; j < PN5180_READER_COUNT; j++) {
+        if (s_readers[j].dev) s_readers[j].dev->spi = spi;
+    }
+    return spi;
+}
+
 bool pn5180_reader_init(void) {
     s_lock = xSemaphoreCreateMutex();
     if (!s_lock) return false;
     memset(s_cache, 0, sizeof(s_cache));
     mux_init();
+    nss_deselect_all();  // 全 chip を deselect してから SPI/RST に触る（ISSUE-0023）
 
     // ── scan の前に共有 RST を 1 回叩いて全 PN5180 を idle(BUSY=Low) に揃える ──
     // 電源投入直後や前回稼働の途中状態では BUSY が High のままのチップがあり、そのまま scan すると
@@ -470,6 +517,13 @@ bool pn5180_reader_init(void) {
     ESP_LOGW(TAG, "  正常な PN5180: during_rst=1(High) → after_boot=0(Low,チップが Low に引く)");
     ESP_LOGW(TAG, "  全部 0 = pull-up が負けるほど強く Low → MUX が常時 Low 駆動 / GND 短絡 を疑う");
     ESP_LOGW(TAG, "  全部 1 = チップ無反応(Hi-Z) → PN5180 が電源/RST/物理接続不良");
+    s_rst_seen_high = (busy_during_rst == 1);
+    if (busy_during_rst == 0 && busy_after_boot == 0) {
+        // BUSY が Low に引かれている（chip は通電）のに RST 中に High にならない = RST が届いていない
+        // 可能性。後の NSS スキャンで「BUSY Low→High:YES」なら chip 自体は生きている（ISSUE-0023）。
+        ESP_LOGW(TAG, "  → during_rst=0 かつ after=0: RST がこの chip に届いていない可能性"
+                      "（コネクタの RST ピン/配線）。SPI に応答するなら chip は生きている（ISSUE-0023）");
+    }
 
     gpio_set_pull_mode(BUSY_PIN, GPIO_PULLUP_ONLY);  // MUX 弱駆動でも level 確定（driver にも有効）
 
@@ -487,8 +541,9 @@ bool pn5180_reader_init(void) {
 #endif
 
     int ready_count = 0;
-    char skipped[128];  // 未通電で飛ばした reader の一覧（起動要約に出す）
+    char skipped[160];  // 未通電 / init 失敗で飛ばした reader の一覧（起動要約に出す）
     skipped[0] = '\0';
+    bool init_diag_done = false;  // 深掘り診断は起動につき 1 回だけ
 
     for (int i = 0; i < PN5180_READER_COUNT; i++) {
         // [0] は bring-up 自動選択の結果（本番 PN5180_READER_COUNT=11 では = PN5180_READERS[0]）。
@@ -516,16 +571,38 @@ bool pn5180_reader_init(void) {
         // busy = BUSY_PIN（MUX SIG or 直結, 共有）, rst = 共有, nss = reader 個別。
         s_readers[i].dev = pn5180_init(spi, cfg->nss, BUSY_PIN, PN5180_PIN_RST);
         if (!s_readers[i].dev) {
-            // 通電しているのに応答しない = 配線/NSS ミス・個体不良の類。
-            ESP_LOGE(TAG, "pn5180_init reader %d failed (nss=%d busy=%d rst=%d mux_ch=%d via_mux=%d)",
+            // 通電しているのに応答しない = 配線/NSS ミス・個体不良・RST 不通の類。
+            // ドライバの失敗経路は共有 SPI（device + pn5180_spi_t）を壊すので、作り直してから
+            // **1 回だけ再試行**する。RST が届いていない reader は ESP32 の再起動を跨いで前回の
+            // 途中状態（応答待ち）のまま残り、最初の 1 発だけ噛み合わないことがある
+            // （実機 2026-09-11: init の 1 発目は FF FF、直後の診断の READ_EEPROM には応答, ISSUE-0023）。
+            ESP_LOGW(TAG, "pn5180_init reader %d failed (nss=%d busy=%d rst=%d mux_ch=%d via_mux=%d)"
+                          " → 共有 SPI を作り直して 1 回だけ再試行",
                      i, cfg->nss, BUSY_PIN, PN5180_PIN_RST, cfg->mux_ch, PN5180_BUSY_VIA_MUX);
-            ESP_LOGE(TAG, "  → ドライバの失敗経路が pn5180_deinit で **共有 SPI device** を解放したため、"
-                          "以降の reader 初期化も poll も不可 → 全 reader 停止（この 1 台だけ skip はできない）");
-            // まだ 1 台も ready でないときだけ深掘り診断（NSS スキャン等）を出す。
-            if (ready_count == 0) diag_after_init_failure(cfg);
-            // pn5180_init は再呼出ししない（失敗時のドライバ deinit で assert → 再起動ループ）。
-            // USB CCID は main.c が上げたままにするので host からは reader が見え続ける。
-            return false;
+            spi = spi_recreate_after_init_failure();
+            if (!spi) return false;
+            vTaskDelay(pdMS_TO_TICKS(20));
+            mux_select(cfg->mux_ch);
+            s_readers[i].dev = pn5180_init(spi, cfg->nss, BUSY_PIN, PN5180_PIN_RST);
+        }
+        if (!s_readers[i].dev) {
+            // 再試行も失敗: この reader だけ skip して他は続行する（dev=NULL = 常にカード無し）。
+            // 共有 SPI をもう一度作り直さないと ready 済み reader と後続 reader が使えない。
+            ESP_LOGE(TAG, "pn5180_init reader %d は再試行も失敗 → この reader は skip"
+                          "（host の Get UID P2=%d は常に SW=6A81）。他の reader は続行",
+                     i, i);
+            spi = spi_recreate_after_init_failure();
+            if (!spi) return false;
+            // 深掘り診断（NSS スキャン等）は「まだ 1 台も ready でない」ときに 1 回だけ出す
+            // （全台失敗のときに 11 回出して UART を埋めない）。診断は RST を叩き、自前の SPI device
+            // を add/remove するだけなので、作り直した共有 SPI には影響しない。
+            if (ready_count == 0 && !init_diag_done) {
+                init_diag_done = true;
+                diag_after_init_failure(cfg);
+            }
+            const size_t used = strlen(skipped);
+            snprintf(skipped + used, sizeof(skipped) - used, "%s#%d(init失敗)", used ? ", " : "", i + 1);
+            continue;
         }
         s_readers[i].iso14443 = pn5180_14443_init(s_readers[i].dev);
         // 第2引数は pn5180_15693_rf_config_t（pn5180->rf_config の初期値になるだけで、
@@ -536,11 +613,11 @@ bool pn5180_reader_init(void) {
     }
 
     if (ready_count == 0) {
-        ESP_LOGE(TAG, "PN5180 ready 0 台（全 reader が未通電/未接続）— 電源・MUX・配線を確認");
+        ESP_LOGE(TAG, "PN5180 ready 0 台（全 reader が未通電/未接続/init 失敗）— 電源・MUX・配線を確認");
         // 深掘り診断（BUSY 非依存の NSS スキャン）を出す。PN5180_READER_COUNT > 1 では全 reader が
-        // MUX scan で skip されて pn5180_init を 1 度も呼ばないため、ここで呼ばないと
+        // MUX scan で skip されて pn5180_init を 1 度も呼ばないことがあり、ここで呼ばないと
         // 「チップが死んでいるのか BUSY/MUX 経路だけが壊れているのか」を切り分けられない。
-        diag_after_init_failure(cfg0);
+        if (!init_diag_done) diag_after_init_failure(cfg0);
         return false;
     }
 

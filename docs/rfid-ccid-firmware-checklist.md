@@ -174,9 +174,12 @@ USB 上の CCID slot は 1 つのまま（§2 / ADR-0041）＝ **USB 記述子�
 - [ ] **未通電 reader は起動時の MUX scan で skip**する。BUSY が floating の ch は `pn5180_init` を
       **呼ばずに**飛ばし、残りの台で起動する（その index は範囲内なので Get UID は常に `6A 81`）。
       1 台も起動できなければ NSS スキャン診断（BUSY 非依存）を出す。
-- [ ] **通電しているのに `pn5180_init` が失敗したら全 reader 停止**でよい（1 台だけ skip しない）。
-      ドライバの失敗経路は **全 reader 共有の SPI device** を解放するため、続行しても他の台が壊れる。
-      個別 reader への `pn5180_deinit()` も同じ理由で呼ばない。
+- [ ] **通電しているのに `pn5180_init` が失敗した reader は、共有 SPI を作り直して 1 回だけ再試行し、
+      それでも失敗したらその reader だけ skip して他は続行**する（ISSUE-0023）。ドライバの失敗経路は
+      **全 reader 共有の SPI device を外し `pn5180_spi_t` も free する**ため、作り直さずに続行すると
+      他の台が壊れる。個別 reader への `pn5180_deinit()` も同じ理由で呼ばない。
+- [ ] **init 前に配線表の全 NSS（範囲外の予備も）を output High にする**。init していない chip の NSS が
+      floating だと、その chip が MISO を駆動して init 中の reader の応答と衝突し得る（ISSUE-0023）。
 - [ ] **`bcdDevice` は `0x0200 | CCID slot 数` = 0x0201 固定**（slot は常に 1）。物理 reader 台数を
       増やしても記述子は変わらないので REV も据え置き。**記述子そのもの（EP 構成 / functional
       descriptor）を変えたときだけ REV を上げる**（Windows は VID/PID/REV で記述子をキャッシュする, §1/契約 §2）。

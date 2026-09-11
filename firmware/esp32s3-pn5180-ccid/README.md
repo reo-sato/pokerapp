@@ -223,9 +223,12 @@ python tools/probe_pcsc.py watch     # カードをかざすと UID 表示 → �
 - **CCID multi-slot は使えない**（Windows の汎用ドライバが 1 slot しか公開しない, ADR-0041）。
   pcsc-lite など multi-slot を扱える環境でも、契約 v1.2 は P2 方式で統一する。
 - **ドライバ制約（重要）**: `pn5180_spi_init()` が add する SPI device は **全 reader で 1 本の共有**で、
-  `pn5180_init()` の失敗経路はその共有ハンドルを `spi_bus_remove_device` で解放する。したがって
-  「失敗した 1 台だけ skip して続行」は不可能（= 通電している reader の init 失敗は全台停止）。
-  個別 reader に `pn5180_deinit()` を呼ぶのも同じ理由で禁止。未通電の台は **init を呼ぶ前に** skip する。
+  `pn5180_init()` の失敗経路はその共有ハンドルを `spi_bus_remove_device` で解放し **`pn5180_spi_t` も
+  free する**。firmware は失敗のたびに `spi_bus_free` → `pn5180_spi_init` で共有 SPI を作り直し、ready 済み
+  reader の `dev->spi` を差し替えてから **1 回だけ再試行**し、それでも失敗した reader は **skip して他は続行**
+  する（ISSUE-0023, `PN5180 ready: N/11 reader（skip: #5(init失敗), …）`）。個別 reader に `pn5180_deinit()` を
+  呼ぶのは同じ理由で禁止。未通電の台は **init を呼ぶ前に** skip する。init 前に配線表 13 本の NSS を
+  すべて output High にして、init していない chip が MISO を駆動する経路を塞いでいる。
 
 ## 参考
 
