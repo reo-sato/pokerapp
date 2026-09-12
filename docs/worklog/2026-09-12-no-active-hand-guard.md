@@ -1,4 +1,4 @@
-# 2026-09-12 — 実機通しで出た 2 件: ハンドが無いときのアクション（ISSUE-0028）/ ストリートのずれ（ISSUE-0029）
+# 2026-09-12 — 実機通しで出た 3 件: ハンドが無いときのアクション（ISSUE-0028）/ ストリートのずれ（ISSUE-0029）/ 全角コマンド（ISSUE-0030）
 
 ## Goal
 
@@ -19,7 +19,9 @@
 | `docs/contracts/versioning-and-freeze.md` | action schema の版表記を更新 |
 | `tests/test_no_active_hand_guard.py` | 新規（10 ケース） |
 | `tests/test_action_street_label.py` | 新規（3 ケース, ISSUE-0029） |
-| `docs/issues/0028-no-active-hand-action-crashes.md` / `0029-action-street-off-by-one.md` | 新規 |
+| `main.py` | （ISSUE-0030）`_normalize_cli_command`: コマンド照合用に全角 ASCII / 全角スペースを半角へ |
+| `tests/test_main_audio_optional.py` | （ISSUE-0030）`TestCliCommandNormalization` 4 ケース追加 |
+| `docs/issues/0028-*.md` / `0029-*.md` / `0030-*.md` | 新規 |
 | `CLAUDE.md` / `CHANGELOG.md` / `docs/decision-log.md` | エラーハンドリング方針 / Phase H 実機状況 / 索引 |
 
 ## Expected vs implemented
@@ -75,11 +77,34 @@
 - 「同じ席が 2 回続く」自体は **pokerkit の正しい heads-up 手番順**だった（BB がプリフロップを
   チェックで閉じ、ポストフロップも BB が先）。表示がずれていただけ。
 
+## 追加で見つかった: 全角コマンド（ISSUE-0030）
+
+修正後の実機通しで `ｎ` が弾かれた。`--cli` は読み上げ文と同じ入力欄でコマンドを打つので、
+日本語 IME のままだと全角になる。**コマンド照合用にだけ**全角 ASCII / 全角スペースを半角へ
+寄せた（`main._normalize_cli_command`）。読み上げ文は正規化前の行を `parse_action` に渡すので
+`raw_text` は入力そのまま。ISSUE-0027 と同じ「表を増やさず入力側を正規化する」方針。
+
+## 実機での検証（2026-09-12, 修正後）
+
+11 reader / pokerkit backend / `audio.enabled=false` で 1 ハンド通し、**保存 JSON を検証**:
+
+| 確認項目 | 結果 |
+|---------|------|
+| `n` 前のアクション | WARN のみ（traceback なし）= ISSUE-0028 Fixed |
+| `street` | preflop×2 / flop×3 / turn×3 / river×2 = 実際の進行と一致 = ISSUE-0029 Fixed |
+| `pots` | `{"amount":44,"eligible_seats":[1,2]}`（legacy の `[]` ではない = pokerkit 経路が生きている） |
+| `confidence` | 一律 `0.575` = 派生値（keyboard 投入は合法 + audio のみ・裏付けなしなので同値。legacy 固定 `0.5` ではない） |
+| 金額なしの `ベット` | 最小ベットに snap + `needs_review=True`（`apply_corrections` の設計どおり） |
+| board 位置 | 再発火が全部同じ位置に収まる = ISSUE-0025/0026 Fixed |
+
+残った観察（修正不要）: 1 台で同じ札の再検出が繰り返し出る（結合の弱い台の間欠読み）。位置は
+append-only で固定なので記録は無害だが、ログが賑やかになる。ログ水準を下げるかは別タスク。
+
 ## Test results
 
 ```
 python -m pytest tests/ -q --ignore=tests/test_vision.py
-848 passed, 2 warnings      # 835 → 845（ISSUE-0028 +10）→ 848（ISSUE-0029 +3）
+852 passed, 2 warnings   # 835 → 845（ISSUE-0028 +10）→ 848（ISSUE-0029 +3）→ 852（ISSUE-0030 +4）
 ```
 
 ISSUE-0029 の回帰 2 件は fix を戻すと落ちることを確認済み（`git stash` で検証）。

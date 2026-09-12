@@ -13,6 +13,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 全角 ASCII（U+FF01..U+FF5E）→ 半角 + 全角スペース → 半角スペース。日本語 IME のまま
+# `ｎ` と打ってもコマンドとして通るようにする（ISSUE-0030）。読み上げ文の経路は通さない
+# （`raw_text` は入力そのまま。全角数字は `parse_amount` が既に解釈する）。
+_FULLWIDTH_TO_ASCII = str.maketrans(
+    {chr(c): chr(c - 0xFEE0) for c in range(0xFF01, 0xFF5F)} | {"　": " "}
+)
+
+
+def _normalize_cli_command(line: str) -> str:
+    """CLI コマンド照合用に全角英数字・全角スペースを半角へ寄せる。"""
+    return line.translate(_FULLWIDTH_TO_ASCII)
+
 
 def _prompt_session_config() -> dict:
     """CLIで席数・プレイヤー名・スタック・ブラインドを入力する。"""
@@ -233,7 +245,7 @@ def run_cli() -> None:
             line = input("> ").strip()
             if not line:
                 continue
-            parts = line.split()
+            parts = _normalize_cli_command(line).split()
             cmd = parts[0].lower()
 
             if cmd == "q":

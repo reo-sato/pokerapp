@@ -94,3 +94,23 @@ class TestDummyActionVocabulary:
     def test_unparsable_returns_none(self):
         """認識できない行は None → CLI は使い方を表示して queue には積まない。"""
         assert parse_action("こんばんは") is None
+
+
+class TestCliCommandNormalization:
+    """ISSUE-0030: 日本語 IME のまま打った全角コマンド（`ｎ` / `ｑ` / `ｗ　１`）も通す。"""
+
+    def test_fullwidth_letters_become_halfwidth(self):
+        assert main._normalize_cli_command("ｎ") == "n"          # noqa: SLF001
+        assert main._normalize_cli_command("ｑ") == "q"          # noqa: SLF001
+        assert main._normalize_cli_command("Ｎ").lower() == "n"  # noqa: SLF001
+
+    def test_fullwidth_space_and_digits(self):
+        assert main._normalize_cli_command("ｗ　１") == "w 1"      # noqa: SLF001
+        assert main._normalize_cli_command("ｒ　１　５００") == "r 1 500"  # noqa: SLF001
+
+    def test_halfwidth_is_unchanged(self):
+        assert main._normalize_cli_command("w 1") == "w 1"       # noqa: SLF001
+
+    def test_japanese_text_is_untouched(self):
+        """読み上げ文はこの写像の対象外（カナ・漢字は範囲外なので素通り）。"""
+        assert main._normalize_cli_command("シート3 コール") == "シート3 コール"  # noqa: SLF001
