@@ -943,7 +943,8 @@ pip install ".[pcsc]"                         # RFID PC/SC を使う場合のみ
 pip install ".[api]"                         # viewer API を使う場合のみ (M1)
 python main.py --cli                         # CLI モード (hand logger)。マイク無しで回すには config の audio.enabled=false
 #   --cli の入力: q=終了 / n=新ハンド / w <席>=ウィナー / r <席> <金額>=リバイ。
-#   それ以外の行は読み上げ文として parse_action に通る（例: チェック / シート3 コール / ベット 500）
+#   それ以外の行は読み上げ文として parse_action に通る（例: チェック / シート3 コール / ベット 500）。
+#   ひらがなも可（照合前にカタカナへ正規化, ISSUE-0027。ASR の書き起こし揺れにも効く）
 python main.py                               # GUI モード (hand logger)
 python main.py --players                     # Player Registry 画面 (S1, 別画面)
 python main.py --sessions                    # Session / Seating Viewer (WS2-α, read-only, 別画面)

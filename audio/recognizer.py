@@ -33,6 +33,20 @@ _K_UNIT        = re.compile(r"(\d[\d,]*)[Kk]")        # 5K
 _DIGIT_ONLY    = re.compile(r"\d[\d,]*")              # 800 / 1,200
 
 
+# ひらがな → カタカナ（`ACTION_KEYWORDS` / 席表現はカタカナ + 英字で書かれているため, ISSUE-0027）。
+# ASR が「ちぇっく」と書き起こす場合と、CLI で IME 変換せずに「ちぇっく」と打った場合の両方を拾う。
+# U+3041..U+3096（ぁ..ゖ）を +0x60 してカタカナ帯に移す 1:1 写像なので **文字位置が保たれる**
+# （parse_action は正規化後の位置で最左キーワードを選び、金額/席は元テキストから取る）。
+_HIRAGANA_TO_KATAKANA = str.maketrans(
+    {chr(c): chr(c + 0x60) for c in range(0x3041, 0x3097)}
+)
+
+
+def _to_katakana(text: str) -> str:
+    """ひらがなをカタカナに正規化する（長さ・文字位置は不変）。"""
+    return text.translate(_HIRAGANA_TO_KATAKANA)
+
+
 # 席番号表現（金額パースの前に除去する）
 # 例: "シート1", "シート２", "seat 3"
 _SEAT_PATTERN = re.compile(
@@ -47,7 +61,7 @@ def _strip_seat_references(text: str) -> str:
     parse_amount() が席番号の数字を金額として誤認識することを防ぐ。
     例: "シート1 レイズ 800" → " レイズ 800"
     """
-    return _SEAT_PATTERN.sub("", text)
+    return _SEAT_PATTERN.sub("", _to_katakana(text))
 
 
 # 明示発話された席番号を抽出する（"シート3" / "seat 3" / 全角数字対応）。
@@ -60,7 +74,7 @@ def _extract_seat_no(text: str) -> Optional[int]:
 
     actor 推定 (R3) ではなく「明示的に読み上げられた席」だけを拾う additive 仕様。
     """
-    m = _SEAT_NO_PATTERN.search(text)
+    m = _SEAT_NO_PATTERN.search(_to_katakana(text))
     if not m:
         return None
     try:
@@ -171,8 +185,11 @@ def parse_action(text: str, confidence: Optional[float] = None) -> Optional[Audi
     1. テキスト内で最も左に現れたキーワードを優先する。
     2. 同じ開始位置に複数のキーワードがマッチした場合は、より長いキーワードを優先する。
        （例: "all in" と "all" が同位置にマッチ → "all in" を採用）
+    3. **ひらがなはカタカナに正規化**してから照合する（`ACTION_KEYWORDS` はカタカナ + 英字）。
+       ASR が「ちぇっく」と書き起こす場合と、CLI で IME 変換せずに打った場合の両方を拾う
+       （ISSUE-0027）。`raw_text` は元のテキストをそのまま残す。
     """
-    lower = text.lower()
+    lower = _to_katakana(text).lower()
 
     found_action: Optional[str] = None
     found_pos = len(text)

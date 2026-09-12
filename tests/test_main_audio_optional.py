@@ -63,6 +63,34 @@ class TestDummyActionVocabulary:
         ev = parse_action("シート3 コール")
         assert ev is not None and ev.action == "call" and ev.seat == 3
 
+    def test_hiragana_is_normalized_to_katakana(self):
+        """ISSUE-0027: IME 変換しないまま打った「ちぇっく」も拾う（ASR の書き起こし揺れも同様）。"""
+        for text, action in [
+            ("ちぇっく", "check"),
+            ("こーる", "call"),
+            ("ふぉーるど", "fold"),
+            ("れいず", "raise"),
+            ("おーるいん", "allin"),
+            ("うぃなー", "winner"),
+            ("はんど開始", "new_hand"),
+        ]:
+            ev = parse_action(text)
+            assert ev is not None and ev.action == action, text
+
+    def test_hiragana_keeps_amount_and_seat(self):
+        ev = parse_action("べっと 500")
+        assert ev is not None and ev.action == "bet" and ev.amount == 500
+        ev = parse_action("しーと3 こーる")
+        assert ev is not None and ev.action == "call" and ev.seat == 3
+        # 席番号は金額として拾わない（正規化しても除去が効くこと）
+        ev = parse_action("しーと1 れいず 800")
+        assert ev is not None and ev.action == "raise" and ev.seat == 1 and ev.amount == 800
+
+    def test_raw_text_keeps_original_form(self):
+        """`raw_text` は正規化前のまま（ログ・監査で実際の入力が分かるように）。"""
+        ev = parse_action("ちぇっく")
+        assert ev is not None and ev.raw_text == "ちぇっく"
+
     def test_unparsable_returns_none(self):
         """認識できない行は None → CLI は使い方を表示して queue には積まない。"""
         assert parse_action("こんばんは") is None
