@@ -40,7 +40,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from core.event_queue import EventQueue
 from core.events import RFIDEvent
@@ -79,6 +79,7 @@ class RFIDThread(threading.Thread):
         poll_interval_ms: int = 100,
         stop_event: Optional[threading.Event] = None,
         bridge_factory: Optional[object] = None,
+        clock: Optional[Callable[[], float]] = None,
     ) -> None:
         """
         Args:
@@ -94,6 +95,7 @@ class RFIDThread(threading.Thread):
             bridge_factory:   テスト用ブリッジファクトリ (reader_name: str, reader_index: int) -> bridge。
                               旧シグネチャ (reader_name) -> bridge も互換で受け付ける。
                               省略時は PCSCBridge を使用。
+            clock:            epoch 秒を返す時計（既定 time.time）。マック観測時刻の源（ADR-0044）。
         """
         super().__init__(daemon=True, name="RFIDThread")
         self._queue = rfid_queue
@@ -102,6 +104,7 @@ class RFIDThread(threading.Thread):
         self._poll_interval = poll_interval_ms / 1000.0
         self._stop_event = stop_event or threading.Event()
         self._bridge_factory = bridge_factory or PCSCBridge
+        self._clock: Callable[[], float] = clock or time.time
 
         # デバウンス用: reader_id → 現在載っている UID の集合（空 = カードなし）
         self._last_uids: dict[str, set[str]] = {}
@@ -115,6 +118,10 @@ class RFIDThread(threading.Thread):
         self._board_reader_ids: set[str] = set()
         # seat → reader_id（席のカード訂正でデバウンスを落とす対象。poll 時に学習する）。
         self._seat_reader_ids: dict[int, set[str]] = {}
+        # seat → **カードが席から消えた時刻**（epoch）。戻ってきたら消す（ADR-0044）。
+        # fold を「判定」するためではなく、合成 fold に**実時刻を与える**ために使う
+        # （プレイヤーはカードを持ち上げて見ることがあるので、不在そのものは fold を意味しない）。
+        self._seat_absent_since: dict[int, float] = {}
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -182,6 +189,7 @@ class RFIDThread(threading.Thread):
             self._board_reader_ids.add(reader_id)
         elif isinstance(cfg.get("seat"), int):
             self._seat_reader_ids.setdefault(cfg["seat"], set()).add(reader_id)
+            self._track_seat_presence(cfg["seat"])
 
         # 新規タッチ検出（読み取り順を保ったまま、増えた UID ごとに 1 event）
         seen: set[str] = set()
@@ -234,6 +242,38 @@ class RFIDThread(threading.Thread):
             self._last_uids[reader_id] = set()
         logger.info("新ハンド: board の位置割り当てをリセットしました")
 
+    # ――― マック観測（ADR-0044: 合成 fold に実時刻を与えるためだけに使う） ―――
+
+    def _track_seat_presence(self, seat: int) -> None:
+        """席のカードが「全部消えた」時刻を覚え、戻ってきたら忘れる。
+
+        **fold の判定には使わない**。プレイヤーはカードを持ち上げて見る・手に持つので、
+        不在それ自体は fold を意味しない。使い道は engine が合成する silent-fold に
+        「実際に札が席から離れた時刻」を与えること（音声の時系列と突き合わせて再生するため）。
+        """
+        present = any(self._last_uids.get(rid) for rid in self._seat_reader_ids.get(seat, ()))
+        if present:
+            self._seat_absent_since.pop(seat, None)
+        elif seat not in self._seat_absent_since:
+            # 「消えた最初の瞬間」を採る（確認は engine 側。後から上書きしない）。
+            self._seat_absent_since[seat] = self._clock()
+
+    def seat_cards_absent_since(self, seat: int) -> Optional[float]:
+        """その席のカードが消えたまま戻っていない場合、消えた時刻（epoch）。無ければ None。"""
+        return self._seat_absent_since.get(seat)
+
+    def reset_for_new_hand(self) -> None:
+        """新ハンドの同期点（board 位置 + マック観測をまとめて捨てる）。
+
+        ハンド終了時はディーラーが全席のカードを回収するので、観測を持ち越すと次のハンドの
+        合成 fold に前のハンドの時刻が付く。`on_new_hand` フックはこちらを呼ぶ。
+        """
+        self.reset_board_positions()
+        self._seat_absent_since = {}
+        for reader_ids in self._seat_reader_ids.values():
+            for reader_id in reader_ids:
+                self._last_uids[reader_id] = set()
+
     # ――― ミスディール訂正（ADR-0043: 明示コマンドで 1 枚だけ載せ替える） ―――
 
     def forget_board_position(self, index: int) -> Optional[str]:
@@ -277,6 +317,7 @@ class RFIDThread(threading.Thread):
             return
         for reader_id in reader_ids:
             self._last_uids[reader_id] = set()
+        self._seat_absent_since.pop(seat, None)   # 訂正後の観測をやり直す（ADR-0044）
         logger.info("席 %d のカードを読み直します — 正しいカードを置き直してください", seat)
 
     def _assign_board_index(self, uid: str) -> Optional[int]:

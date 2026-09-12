@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pokerapp.local/contracts/hand.schema.json",
   "title": "Hand",
-  "version": "1.0",
-  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。",
+  "version": "1.1",
+  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。1.1 = board_timeline を optional 追加（ボード各枚の配布時刻。ADR-0044, additive）。",
   "type": "object",
   "additionalProperties": true,
   "required": ["hand_id", "session_id", "started_at", "ended_at", "players", "actions"],
@@ -18,6 +18,20 @@
     },
     "board": {"type": "array", "items": {"type": "string"}},
     "board_source": {"type": "string", "enum": ["rfid", "ocr", "manual", ""]},
+    "board_timeline": {
+      "type": "array",
+      "description": "ボード各枚の**配布時刻**（RFID が最初に検出した時刻）。index 昇順。ターン/リバーの配布時刻はベッティングラウンドの区切りとしてアクションの時刻に対応するため記録する（ADR-0044）。フロップは 3 枚の最小値がラウンド開始で、フロップ内の順序自体は意味を持たない。RFID 以外のソース・時刻未取得では空配列。",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["index", "card", "dealt_at"],
+        "properties": {
+          "index": {"type": "integer", "minimum": 1, "maximum": 5},
+          "card": {"type": "string", "minLength": 1},
+          "dealt_at": {"type": "string", "minLength": 1, "description": "ISO 8601。replay では注入 clock 由来。"}
+        }
+      }
+    },
     "players": {
       "type": "array",
       "items": {

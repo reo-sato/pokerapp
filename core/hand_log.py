@@ -56,6 +56,12 @@ class HandSummary:
     # main/side pot スナップショット [{"amount": int, "eligible_seats": [int,...]}]。
     # rules-aware backend が end_hand 時に算出（legacy は []）。additive（F3 / R5）。
     pots: list = field(default_factory=list)
+    # ボード各枚の **配布時刻**（RFID が最初にそのカードを検出した時刻）。
+    # [{"index": 1..5, "card": "Qc", "dealt_at": ISO8601}]。index 昇順。
+    # ターン/リバーの配布時刻はベッティングラウンドの区切りとして**アクションの時刻と対応**するため
+    # 記録する（音声の時系列とハンド履歴を突き合わせて再生するため, ADR-0044）。
+    # フロップは 3 枚の最小値がラウンドの開始。RFID 以外のソースでは空リスト。additive。
+    board_timeline: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -66,6 +72,7 @@ class HandSummary:
             "blinds": self.blinds,
             "board": self.board,
             "board_source": self.board_source,
+            "board_timeline": self.board_timeline,
             "players": self.players,
             "pot_total": self.pot_total,
             "pots": self.pots,

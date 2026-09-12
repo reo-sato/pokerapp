@@ -233,8 +233,13 @@ def run_cli() -> None:
     event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
     # 新ハンドで RFID の board 位置もリセットする（engine の board と同じ同期点。
     # 片方だけが番号を振り直すと同じ札が 2 か所に出る, ISSUE-0026）。
-    on_new_hand = getattr(rfid_thread, "reset_board_positions", None) if rfid_thread else None
+    # 新ハンドは board 位置 + マック観測をまとめてリセットする（ADR-0026 / ADR-0044）。
+    on_new_hand = (
+        getattr(rfid_thread, "reset_for_new_hand", None)
+        or getattr(rfid_thread, "reset_board_positions", None)
+    ) if rfid_thread else None
     on_card_correction = _make_card_correction_hook(rfid_thread)
+    seat_absent_since = getattr(rfid_thread, "seat_cards_absent_since", None) if rfid_thread else None
 
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
@@ -247,6 +252,7 @@ def run_cli() -> None:
         event_recorder=event_recorder,
         on_new_hand=on_new_hand,
         on_card_correction=on_card_correction,
+        seat_cards_absent_since=seat_absent_since,
     )
     if audio_thread is not None:
         audio_thread.start()
@@ -470,8 +476,13 @@ def run_gui() -> None:
     event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
     # 新ハンドで RFID の board 位置もリセットする（engine の board と同じ同期点。
     # 片方だけが番号を振り直すと同じ札が 2 か所に出る, ISSUE-0026）。
-    on_new_hand = getattr(rfid_thread, "reset_board_positions", None) if rfid_thread else None
+    # 新ハンドは board 位置 + マック観測をまとめてリセットする（ADR-0026 / ADR-0044）。
+    on_new_hand = (
+        getattr(rfid_thread, "reset_for_new_hand", None)
+        or getattr(rfid_thread, "reset_board_positions", None)
+    ) if rfid_thread else None
     on_card_correction = _make_card_correction_hook(rfid_thread)
+    seat_absent_since = getattr(rfid_thread, "seat_cards_absent_since", None) if rfid_thread else None
 
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
@@ -486,6 +497,7 @@ def run_gui() -> None:
         session_repo=session_repo,
         on_new_hand=on_new_hand,
         on_card_correction=on_card_correction,
+        seat_cards_absent_since=seat_absent_since,
     )
 
     dash.start_threads(
