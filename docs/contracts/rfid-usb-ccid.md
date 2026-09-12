@@ -1,10 +1,11 @@
 # RFID USB CCID firmware ↔ host (PC/SC) contract
 
-**version: 1.3 (ADR-0042。1.0 frozen 起点、1.1 は additive)** ／ canonical RFID transport（ADR-0015）の
+**version: 1.4 (ADR-0043。1.0 frozen 起点、以降は additive)** ／ canonical RFID transport（ADR-0015）の
 firmware↔Python 境界。v1.1 の追加点（1 reader 複数枚の Get UID 連結 / UID MSB-first）、
 **v1.2 の変更点（CCID slot は 1 つだけ / 物理リーダーは Get UID の P2 で選ぶ / 台数問い合わせ）**、
 **v1.3 の変更点（board reader 全台で 1 つの論理ボードを共有し、位置は検出順で決める =
-board の `index` / `cards` を廃止）** は §10 を参照。v1.2 は「slot ごとに reader 名を分ける」規約を
+board の `index` / `cards` を廃止）**、**v1.4 の追加点（ミスディール訂正 = 明示コマンドでの位置解放）**
+は §10 を参照。v1.2 は「slot ごとに reader 名を分ける」規約を
 廃止し（Windows の汎用 CCID ドライバが 1 インターフェース 1 slot しか公開しないため。ISSUE-0022 /
 ADR-0041）、v1.3 は「board reader = ストリート専用」という前提を廃止する（実機は board reader が
 並んでいるだけで、どの台がどのストリートを受けるかは置き方次第。ISSUE-0024 / ADR-0042）。
@@ -122,9 +123,16 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
   解放すると、**一瞬の読み落ちや札の入れ替えで空いたスロットを別の札が奪い**、戻ってきた札が
   別位置を取って「同じ札が 2 か所」「枚数の水増しでストリートが誤って進む」が起きる。
   席 reader の抜き差しは board に影響しない。
-- **位置割り当てのリセットは「新ハンド」だけを同期点にする** **MUST**（ISSUE-0026）。
-  新ハンドで位置と board reader のデバウンス状態をまとめて落とす（盤上に残っているカードは
-  改めて 1 番から検出し直す）。運用手順は「ハンドが終わったらボードを下げて新ハンド」。
+- **位置割り当ての解放は「新ハンド」と「明示のミスディール訂正」だけ** **MUST**
+  （ISSUE-0026 / ADR-0043）。どちらも位置と board reader のデバウンス状態をまとめて落とす
+  （盤上に残っているカードは改めて検出し直す）。
+  - **新ハンド**（全位置）: 運用手順は「ハンドが終わったらボードを下げて新ハンド」。
+  - **ミスディール訂正**（1 位置だけ）: `RFIDThread.forget_board_position(index)` /
+    `forget_seat_cards(seat)`。**カードが見えなくなったことを載せ替えと解釈してはならない**
+    （一瞬の読み落ちと区別できない）。ミスディールはディーラーが宣言する明示イベントなので、
+    host のコマンド（CLI `cb`/`cs`、staff API の control `correct_board`/`correct_seat`）でのみ
+    解放する **MUST**。解放後に載っているカードは再発火し、位置を持つ札は同じ位置に戻り、
+    空いた位置は次の新しい札が取る（取り消した札を先に外していなければ再実行でやり直せる）。
 - **ボードに同じカードが 2 枚以上見えたら WARN + `needs_review`** **SHOULD**（1 組のデッキでは
   物理的にあり得ないので、`rfid_cards.json` の重複登録か誤読みのサイン。ISSUE-0026）。
 - **board reader は左から右の順に config へ並べて書く** **SHOULD**。同じ poll で台をまたいで
@@ -243,6 +251,14 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
   hardware 非依存で **不変**。本契約が変わっても上流（integration / confidence）は影響を受けない。
 
 ## 10. versioning / freeze
+
+- **v1.4（2026-09-12, ADR-0043）** — **ミスディール訂正**（additive, §4）。ハンド内 append-only
+  （v1.3 / ISSUE-0026）は「カードが見えなくなっただけでは位置を解放しない」規則だが、実運用では
+  **一度読ませた札を外して正しい札を読ませ直す**（ミスディール）ことがある。absence は一瞬の読み落ちと
+  区別できないので **推測で解放してはならない** MUST。代わりに **host の明示コマンド**で解放する:
+  `RFIDThread.forget_board_position(index)`（board 1 位置）/ `forget_seat_cards(seat)`（席の読み直し）。
+  操作面は CLI `cb <位置>` / `cs <席>` と staff API control `correct_board` / `correct_seat`。
+  **firmware の要求は変わらない**（host 側の状態管理のみ）。
 
 - 本契約は **v1.0 frozen**（ADR-0034）。後方互換な追加（新 pseudo-APDU、ATR 種別追加、live hot-add）は
   **minor bump**（1.1, 1.2…）。reader_name 規約・Get UID・UID 正規化の **意味変更は breaking（major）**。

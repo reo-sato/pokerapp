@@ -383,13 +383,20 @@ class ViewerApiClient:
     def send_control(
         self, session_id: str, type: str,
         seat: int | None = None, amount: int | None = None,
+        index: int | None = None,
     ) -> dict:
-        """hand logger に制御コマンド（new_hand / winner / rebuy）を送る。"""
+        """hand logger に制御コマンドを送る。
+
+        type: new_hand / winner / rebuy / correct_board（`index`=ボード位置） /
+        correct_seat（`seat`）。訂正はミスディールの載せ替え用（ADR-0043）。
+        """
         payload: dict = {"type": type}
         if seat is not None:
             payload["seat"] = seat
         if amount is not None:
             payload["amount"] = amount
+        if index is not None:
+            payload["index"] = index
         return self._request(
             "POST", f"/api/staff/sessions/{session_id}/control",
             json=payload, headers=self._staff_headers(),

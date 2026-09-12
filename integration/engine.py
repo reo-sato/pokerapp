@@ -156,6 +156,7 @@ class IntegrationThread(threading.Thread):
         session_repo: "Optional[SessionRepository]" = None,
         seat_player_map: Optional[dict[int, str]] = None,
         on_new_hand: Optional[Callable[[], None]] = None,
+        on_card_correction: Optional[Callable[[str, int], None]] = None,
     ) -> None:
         """
         Args:
@@ -175,6 +176,10 @@ class IntegrationThread(threading.Thread):
                          RFID の board 位置を **engine と同じタイミングでリセット**するために使う
                          （`RFIDThread.reset_board_positions`, ISSUE-0026）。integration スレッドで
                          発火するのでスレッド安全に実装すること。
+            on_card_correction: ミスディール訂正フック（additive, 既定 None = 訂正は engine 内のみ）。
+                         `("board", 位置)` / `("seat", 席)` で呼ぶので、RFID 側の割り当て・
+                         デバウンスも同じタイミングで落とす（`RFIDThread.forget_board_position` /
+                         `forget_seat_cards`, ADR-0043）。integration スレッドで発火する。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -193,6 +198,7 @@ class IntegrationThread(threading.Thread):
         self._seat_player_map: dict[int, str] = dict(seat_player_map or {})
         self._session_layer_active = session_repo is not None and bool(self._seat_player_map)
         self._on_new_hand = on_new_hand
+        self._on_card_correction = on_card_correction
 
         # センサーイベントのバッファ
         self._camera_buffer: list[CameraEvent] = []
@@ -451,6 +457,14 @@ class IntegrationThread(threading.Thread):
             self._handle_rebuy(event)
             return
 
+        if action == "correct_board":
+            self._handle_correct_board(event)
+            return
+
+        if action == "correct_seat":
+            self._handle_correct_seat(event)
+            return
+
         # ベッティングアクション。rules-aware backend（pokerkit）は境界で actor 推定 + 合法手
         # 射影、legacy（空 legal_context）は従来経路で挙動不変（ADR-0009 §1）。
         legal_ctx = gs.legal_context()
@@ -554,6 +568,54 @@ class IntegrationThread(threading.Thread):
                 needs_review=False,
                 confidence=1.0,
             ))
+
+    # ――― ミスディール訂正（ADR-0043） ―――
+
+    def _handle_correct_board(self, event: AudioEvent) -> None:
+        """ボード `amount` 枚目の記録を取り消す（ミスディールしたカードの載せ替え）。
+
+        ストリートは戻さない。カードを 1 枚差し替えても「フロップはフロップ」であり、
+        ルール上の進行は変わらない（差し替え後に枚数が戻れば自動遷移は no-op になる）。
+        """
+        index = event.amount
+        if index not in self._board_positions:
+            logger.warning(
+                "ボード %s 枚目は記録されていません（board=%s）— 訂正は無効です",
+                index, self._board_cards,
+            )
+            return
+        removed = self._board_positions.pop(index)
+        self._board_cards = [self._board_positions[i] for i in sorted(self._board_positions)]
+        # 訂正が入ったハンドは人間が記録を確認できるようにする（監査痕）。
+        self._hand_needs_review = True
+        logger.info(
+            "ボード %d 枚目 %s を取り消しました（board=%s）— 正しいカードを置いてください",
+            index, removed, self._board_cards,
+        )
+        self._notify_card_correction("board", index)
+
+    def _handle_correct_seat(self, event: AudioEvent) -> None:
+        """席 `seat` のホールカード記録を取り消し、物理的に載っている札を読み直させる。"""
+        seat = event.seat
+        if seat is None:
+            logger.warning("席が指定されていないため訂正できません（raw=%r）", event.raw_text)
+            return
+        removed = self._hole_cards.pop(seat, [])
+        self._hand_needs_review = True
+        logger.info(
+            "席 %d のホールカード %s を取り消しました — 正しいカードを置き直してください",
+            seat, removed or "（記録なし）",
+        )
+        self._notify_card_correction("seat", seat)
+
+    def _notify_card_correction(self, kind: str, key: int) -> None:
+        """RFID 側（割り当て・デバウンス）も同じタイミングで落とす。失敗してもハンドは止めない。"""
+        if self._on_card_correction is None:
+            return
+        try:
+            self._on_card_correction(kind, key)
+        except Exception:  # noqa: BLE001
+            logger.exception("on_card_correction hook failed — ハンドは続行します")
 
     def _handle_legacy_action(self, event: AudioEvent) -> None:
         """rules-aware でない backend（legacy）の従来アクション処理（挙動不変）。"""

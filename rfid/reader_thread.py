@@ -113,6 +113,8 @@ class RFIDThread(threading.Thread):
         self._board_indexes: dict[str, int] = {}
         # role=board の reader_id（新ハンドでデバウンスを落とす対象。poll 時に学習する）。
         self._board_reader_ids: set[str] = set()
+        # seat → reader_id（席のカード訂正でデバウンスを落とす対象。poll 時に学習する）。
+        self._seat_reader_ids: dict[int, set[str]] = {}
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -171,11 +173,15 @@ class RFIDThread(threading.Thread):
 
         removed = prev - current
         if removed:
-            # カードが外れた（イベント不要。board の位置は下の presence 同期が解放する）
+            # カードが外れた（イベント不要）。**board の位置は解放しない**（ハンド内 append-only,
+            # ISSUE-0026）。ミスディールで載せ替えるときは明示の訂正コマンドで解放する
+            # （`forget_board_position` / `forget_seat_cards`, ADR-0043）。
             logger.debug("Card(s) removed from %s: %s", reader_id, sorted(removed))
 
         if cfg.get("role") == "board":
             self._board_reader_ids.add(reader_id)
+        elif isinstance(cfg.get("seat"), int):
+            self._seat_reader_ids.setdefault(cfg["seat"], set()).add(reader_id)
 
         # 新規タッチ検出（読み取り順を保ったまま、増えた UID ごとに 1 event）
         seen: set[str] = set()
@@ -227,6 +233,51 @@ class RFIDThread(threading.Thread):
         for reader_id in self._board_reader_ids:
             self._last_uids[reader_id] = set()
         logger.info("新ハンド: board の位置割り当てをリセットしました")
+
+    # ――― ミスディール訂正（ADR-0043: 明示コマンドで 1 枚だけ載せ替える） ―――
+
+    def forget_board_position(self, index: int) -> Optional[str]:
+        """board 位置 `index` の割り当てを 1 つだけ解放する（ミスディール訂正, ADR-0043）。
+
+        ハンド内 append-only（ISSUE-0026）は「カードが見えなくなっただけでは解放しない」規則で、
+        一瞬の読み落ちを誤って載せ替えと解釈しないための安全弁。ミスディールは **ディーラーが
+        宣言する明示イベント**なので、推測ではなくこのコマンドで解放する。
+
+        解放と同時に board reader のデバウンスも落とす。これで **物理的に載っているカードは
+        全部再発火**し、位置を持っているカードは同じ位置に戻り（`_board_indexes` が残っている）、
+        空いた `index` は次に現れた新しいカードが取る。取り消したカードを先に物理的に外して
+        おけば 1 回で収束し、外す前に打っても同じカードが同じ位置に戻るだけなので **再実行で
+        やり直せる**（隠れた状態を持たない）。
+
+        Returns:
+            解放した位置に載っていた UID（無ければ None）。
+        """
+        uid = next((u for u, i in self._board_indexes.items() if i == index), None)
+        if uid is None:
+            logger.warning("board 位置 %s には割り当てがありません（訂正は無効）", index)
+            return None
+        self._board_indexes = {u: i for u, i in self._board_indexes.items() if u != uid}
+        for reader_id in self._board_reader_ids:
+            self._last_uids[reader_id] = set()
+        logger.info(
+            "board 位置 %d を解放しました（tag=%s）— 正しいカードを置き直してください", index, uid,
+        )
+        return uid
+
+    def forget_seat_cards(self, seat: int) -> None:
+        """席 `seat` のリーダーのデバウンスを落とし、載っているカードを読み直させる（ADR-0043）。
+
+        engine 側は `_hole_cards[seat]` を空にするので、**物理的に載っている 2 枚が改めて
+        記録される**。ミスディールしたカードを先に外してから打つこと（外す前に打つと同じ
+        カードがまた記録されるだけなので、外して再実行すればよい）。
+        """
+        reader_ids = self._seat_reader_ids.get(seat)
+        if not reader_ids:
+            logger.warning("席 %s に対応する RFID リーダーがありません（訂正は無効）", seat)
+            return
+        for reader_id in reader_ids:
+            self._last_uids[reader_id] = set()
+        logger.info("席 %d のカードを読み直します — 正しいカードを置き直してください", seat)
 
     def _assign_board_index(self, uid: str) -> Optional[int]:
         """新規 board UID に **ボード全体での位置**（1..5）を割り当てる。

@@ -200,6 +200,7 @@ class _StaffControlBody(BaseModel):
     type: str
     seat: int | None = None
     amount: int | None = None
+    index: int | None = None      # correct_board のボード位置 1..5（ADR-0043）
 
 
 class _OidcExchangeBody(BaseModel):
@@ -966,6 +967,17 @@ def create_app(
                     "message": "rebuy には seat と正の amount が必要です。"})
             args["seat"] = body.seat
             args["amount"] = body.amount
+        elif body.type == "correct_board":
+            if not isinstance(body.index, int) or not 1 <= body.index <= 5:
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_control",
+                    "message": "correct_board には index（1..5）が必要です。"})
+            args["index"] = body.index
+        elif body.type == "correct_seat":
+            if not isinstance(body.seat, int):
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_control", "message": "correct_seat には seat が必要です。"})
+            args["seat"] = body.seat
         control_log = ControlCommandLog(Path(log_dir) / f"{session_id}.control.jsonl")
         command = control_log.append(body.type, args)
         return JSONResponse(status_code=201, content=command.to_dict())

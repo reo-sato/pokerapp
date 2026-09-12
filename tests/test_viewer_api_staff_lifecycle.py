@@ -235,6 +235,31 @@ def test_hand_control_appends_commands(env: dict, tmp_path: Path):
     assert ei.value.code == "invalid_control"
 
 
+def test_hand_control_misdeal_corrections(env: dict, tmp_path: Path):
+    """ミスディール訂正も同じ control queue で送れる（ADR-0043）。"""
+    from core.control_queue import ControlCommandLog
+
+    staff = env["staff"]
+    sid = staff.create_session(label="Misdeal")["session_id"]
+
+    assert staff.send_control(sid, "correct_board", index=3)["type"] == "correct_board"
+    assert staff.send_control(sid, "correct_seat", seat=2)["type"] == "correct_seat"
+
+    log = ControlCommandLog(tmp_path / "logs" / f"{sid}.control.jsonl")
+    cmds, _ = log.read_from(0)
+    assert [c.type for c in cmds] == ["correct_board", "correct_seat"]
+    assert cmds[0].args == {"index": 3}
+    assert cmds[1].args == {"seat": 2}
+
+    for kwargs in ({}, {"index": 0}, {"index": 6}):
+        with pytest.raises(ViewerApiError) as ei:
+            staff.send_control(sid, "correct_board", **kwargs)
+        assert ei.value.code == "invalid_control"
+    with pytest.raises(ViewerApiError) as ei:
+        staff.send_control(sid, "correct_seat")
+    assert ei.value.code == "invalid_control"
+
+
 # ――― 認可 ―――
 
 def test_authz_for_new_endpoints(tmp_path: Path):

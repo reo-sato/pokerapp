@@ -80,6 +80,28 @@ def _make_event_recorder(cfg: dict, log_dir: str, session_id: str):
     return EventRecorder(Path(log_dir) / f"{session_id}.events.jsonl")
 
 
+def _make_card_correction_hook(rfid_thread):
+    """ミスディール訂正で RFID 側の割り当て・デバウンスも落とすフック（ADR-0043）。
+
+    engine は `("board", 位置)` / `("seat", 席)` で呼ぶ。RFID を使っていない構成では None
+    （engine 内の記録だけを取り消す = 訂正自体は成立する）。
+    """
+    if rfid_thread is None:
+        return None
+    forget_board = getattr(rfid_thread, "forget_board_position", None)
+    forget_seat = getattr(rfid_thread, "forget_seat_cards", None)
+    if forget_board is None or forget_seat is None:
+        return None
+
+    def hook(kind: str, key: int) -> None:
+        if kind == "board":
+            forget_board(key)
+        elif kind == "seat":
+            forget_seat(key)
+
+    return hook
+
+
 def _make_audio_thread(cfg: dict, audio_queue, stop_event):
     """config.audio.enabled が true（既定）なら AudioThread を返す。false なら None。
 
@@ -212,6 +234,7 @@ def run_cli() -> None:
     # 新ハンドで RFID の board 位置もリセットする（engine の board と同じ同期点。
     # 片方だけが番号を振り直すと同じ札が 2 か所に出る, ISSUE-0026）。
     on_new_hand = getattr(rfid_thread, "reset_board_positions", None) if rfid_thread else None
+    on_card_correction = _make_card_correction_hook(rfid_thread)
 
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
@@ -223,6 +246,7 @@ def run_cli() -> None:
         stop_event=stop_event,
         event_recorder=event_recorder,
         on_new_hand=on_new_hand,
+        on_card_correction=on_card_correction,
     )
     if audio_thread is not None:
         audio_thread.start()
@@ -230,6 +254,7 @@ def run_cli() -> None:
 
     print(f"\nセッション開始。ログ: {json_writer.path}")
     print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー  [r <席> <金額>]=リバイ")
+    print("ミスディール訂正: [cb <位置>]=ボードの N 枚目を取り消し  [cs <席>]=その席の札を読み直し")
     print("上記以外の入力は読み上げ文として解釈します"
           "（例: チェック / シート3 コール / ベット 500）。マイクが無くてもこれで進行できます。")
     print("ディーラーがアナウンスすると自動検出されます。\n")
@@ -277,6 +302,25 @@ def run_cli() -> None:
                     print(f"リバイを送信しました: 席{seat} +{amount}（反映はアクション表示で確認）")
                 except ValueError as e:
                     print(f"エラー: {e}")
+            elif cmd in ("cb", "cs") and len(parts) >= 2:
+                # ミスディール訂正（ADR-0043）。状態変更は他と同じく queue 経由。
+                try:
+                    key = int(parts[1])
+                except ValueError:
+                    print(f"使い方: {cmd} <{'位置' if cmd == 'cb' else '席番号'}>")
+                    continue
+                if cmd == "cb":
+                    audio_q.put(AudioEvent(
+                        action="correct_board", amount=key, timestamp=_time.time(),
+                        raw_text=f"ボード{key} 訂正",
+                    ))
+                    print(f"ボード {key} 枚目の取り消しを送信しました（正しいカードを置いてください）")
+                else:
+                    audio_q.put(AudioEvent(
+                        action="correct_seat", amount=0, timestamp=_time.time(),
+                        raw_text=f"シート{key} 訂正", seat=key,
+                    ))
+                    print(f"席 {key} の札の読み直しを送信しました（正しいカードを置き直してください）")
             else:
                 # 上のコマンド以外は **ディーラーのアナウンスとして解釈**する（マイク無しで
                 # アクションを投入する経路。音声と同じ `parse_action` を通すので語彙は共通 =
@@ -427,6 +471,7 @@ def run_gui() -> None:
     # 新ハンドで RFID の board 位置もリセットする（engine の board と同じ同期点。
     # 片方だけが番号を振り直すと同じ札が 2 か所に出る, ISSUE-0026）。
     on_new_hand = getattr(rfid_thread, "reset_board_positions", None) if rfid_thread else None
+    on_card_correction = _make_card_correction_hook(rfid_thread)
 
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
@@ -440,6 +485,7 @@ def run_gui() -> None:
         event_recorder=event_recorder,
         session_repo=session_repo,
         on_new_hand=on_new_hand,
+        on_card_correction=on_card_correction,
     )
 
     dash.start_threads(

@@ -24,8 +24,9 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-# staff から受け付ける制御コマンド種別（GUI/CLI の new_hand / winner / rebuy に対応）。
-VALID_CONTROL_TYPES = ("new_hand", "winner", "rebuy")
+# staff から受け付ける制御コマンド種別（GUI/CLI の new_hand / winner / rebuy / 訂正に対応）。
+# correct_board / correct_seat = ミスディール訂正（CLI の `cb` / `cs`, ADR-0043）。
+VALID_CONTROL_TYPES = ("new_hand", "winner", "rebuy", "correct_board", "correct_seat")
 
 
 def _now_iso() -> str:
@@ -156,6 +157,25 @@ def command_to_audio_event(command: ControlCommand, clock: Callable[[], float]):
         return AudioEvent(
             action="rebuy", amount=amount, timestamp=clock(),
             raw_text=f"シート{seat} リバイ {amount}", seat=seat,
+        )
+    if t == "correct_board":
+        # ミスディール訂正（ADR-0043）: ボード N 枚目の記録を取り消す。
+        index = args.get("index")
+        if not isinstance(index, int) or isinstance(index, bool) or not 1 <= index <= 5:
+            logger.warning("control correct_board with invalid index: %r", args)
+            return None
+        return AudioEvent(
+            action="correct_board", amount=index, timestamp=clock(),
+            raw_text=f"ボード{index} 訂正",
+        )
+    if t == "correct_seat":
+        seat = args.get("seat")
+        if not isinstance(seat, int) or isinstance(seat, bool):
+            logger.warning("control correct_seat without int seat: %r", args)
+            return None
+        return AudioEvent(
+            action="correct_seat", amount=0, timestamp=clock(),
+            raw_text=f"シート{seat} 訂正", seat=seat,
         )
     logger.warning("unknown control type: %r", t)
     return None
