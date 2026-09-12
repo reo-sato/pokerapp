@@ -47,6 +47,7 @@ class PokerEngine(Protocol):
 
     # additive（R3 推定/訂正が読む, ADR-0009 §2）。legacy は rules-aware でない stub を返す。
     def legal_context(self) -> LegalContext: ...
+    def is_hand_active(self) -> bool: ...
     def is_legal_actor(self, seat: int) -> bool: ...
     def fold_through(self, until_seat: int, max_folds: Optional[int] = None) -> list[int]: ...
     def pots(self) -> list[dict]: ...
@@ -211,14 +212,18 @@ class PokerkitGameState:
 
     def get_current_player(self) -> int:
         st = self._state
-        if st is None or st.actor_index is None:
+        if st is None or not self._hand_active or st.actor_index is None:
             raise RuntimeError("No actor (no active hand or hand over)")
         return self._idx_to_seat[st.actor_index]
 
     def legal_context(self) -> LegalContext:
-        """合法手プリオール（ADR-0009 §B / R3 が読む）。"""
+        """合法手プリオール（ADR-0009 §B / R3 が読む）。
+
+        `end_hand` 後の state は actor_index を持ったままなので、`_hand_active` を見ないと
+        「終わったハンドに合法手がある」と答えてしまう（ISSUE-0028）。
+        """
         st = self._state
-        if st is None or st.actor_index is None:
+        if st is None or not self._hand_active or st.actor_index is None:
             return LegalContext(None, frozenset(), 0, 0, 0)
         legal: set[str] = set()
         if st.can_fold():
@@ -240,9 +245,18 @@ class PokerkitGameState:
         st = self._state
         return (
             st is not None
+            and self._hand_active
             and st.actor_index is not None
             and self._idx_to_seat.get(st.actor_index) == seat
         )
+
+    def is_hand_active(self) -> bool:
+        """ハンドが進行中か（新ハンド前 / `end_hand` 後は False, ISSUE-0028）。
+
+        actor の有無とは別物: 全員オールインの runout 中は actor が居なくてもハンドは
+        進行中で、winner 宣言を受け付ける必要がある。
+        """
+        return self._state is not None and self._hand_active
 
     def fold_through(self, until_seat: int, max_folds: Optional[int] = None) -> list[int]:
         """現 actor から until_seat が手番になるまで中間席を silent fold 合成し、folded した席列を返す（ADR-0009 §4）。

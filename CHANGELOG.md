@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+### Fixed (ハンドが無いときのアクション / winner で traceback が出る, ISSUE-0028, 2026-09-12)
+
+- `n`（新ハンド）を押す前にアクションを打つと **traceback が出てイベントが黙って捨てられていた**
+  （backend=pokerkit）。スレッドは生き残るが、操作者には「`n` を押していない」ことが伝わらない。
+- 原因は 2 つ。(a) dispatch が「空 `legal_context` = legacy backend」と仮定していたが、pokerkit でも
+  **手番が無ければ空**を返すため rules-aware backend のイベントが legacy 経路に落ちて例外になった。
+  (b) `PokerkitGameState` の actor 系照会（`get_current_player` / `legal_context` / `is_legal_actor`）が
+  `_hand_active` を見ておらず、`end_hand` 後も `actor_index` が残るので「終わったハンドに合法手がある」と
+  答えていた（`apply_action` だけが見ていた）。
+- **Fix**: `PokerEngine` に `is_hand_active()` を additive 追加（legacy は常に `True` = **挙動不変**）+
+  actor 系照会を `_hand_active` に揃える + `integration/engine.py` で手番が無ければ
+  **「先に新ハンド（n）を実行してください」と案内して落とす**（ハンド進行中に落とした分だけ
+  `needs_review`）。
+- **winner も同じ family だった**: ハンドが無い状態の winner 宣言は例外、確定済みハンドへの
+  再宣言は **勝者にポットを二重加算**していた（黙ったデータ破損）。`_handle_winner` で
+  `is_hand_active()` を見て確定しないようにした。席を特定できないときも traceback ではなく案内ログ。
+- 845 passed。
+
 ### Fixed (読み上げ文のひらがなを認識する — 「ちぇっく」が通らなかった, ISSUE-0027, 2026-09-12)
 
 - `--cli` で IME 変換せずに `ちぇっく` と打つと認識されなかった（`ACTION_KEYWORDS` はカタカナ + 英字のみ）。

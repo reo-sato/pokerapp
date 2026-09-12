@@ -444,14 +444,7 @@ class IntegrationThread(threading.Thread):
             return
 
         if action == "winner":
-            winner_seat = _extract_seat_from_text(event.raw_text)
-            if winner_seat is None:
-                winner_seat = gs.get_current_player()
-                logger.warning(
-                    "Could not extract winner seat from %r, using current player seat=%d",
-                    event.raw_text, winner_seat,
-                )
-            self._finalize_hand(winner_seat)
+            self._handle_winner(event)
             return
 
         if action == "rebuy":
@@ -465,6 +458,68 @@ class IntegrationThread(threading.Thread):
             self._handle_rules_aware_action(event, legal_ctx)
         else:
             self._handle_legacy_action(event)
+
+    # ――― 手番が無いときのガード（ISSUE-0028） ―――
+
+    def _current_actor_or_none(self) -> Optional[int]:
+        """現在の手番席。手番が無ければ None を返す（例外にしない）。
+
+        pokerkit backend は新ハンド前・ハンド終了後・全員オールイン後に actor を持たず
+        `RuntimeError` を投げる。アクションは任意のタイミングで飛んでくるので、ここで握って
+        呼び出し側が案内ログに倒せるようにする（CLAUDE.md「認識エラーでクラッシュしない」）。
+        """
+        try:
+            return self._game_state.get_current_player()
+        except RuntimeError:
+            return None
+
+    def _warn_no_actor(self, what: str, event: AudioEvent) -> None:
+        """手番が無くて落としたイベントを、次の操作が分かる形で警告する。
+
+        ハンド進行中に落とした分は記録が欠けるので `needs_review` を立てる。ハンド自体が
+        無いときは付け先が無いので立てない（次の新ハンドでどのみちリセットされる）。
+        """
+        if self._game_state.is_hand_active():
+            logger.warning(
+                "手番が無いため%s（action=%s, raw=%r）を無視しました — "
+                "ハンドが終わっているなら「新ハンド」（CLI の n）で次のハンドを始めてください",
+                what, event.action, event.raw_text,
+            )
+            self._hand_needs_review = True
+        else:
+            logger.warning(
+                "進行中のハンドが無いため%s（action=%s, raw=%r）を無視しました — "
+                "先に「新ハンド」（CLI の n）を実行してください",
+                what, event.action, event.raw_text,
+            )
+
+    def _handle_winner(self, event: AudioEvent) -> None:
+        """winner 宣言。ハンドが無い / 席を特定できない場合は落として案内する。
+
+        ハンドが無いまま `end_hand` を呼ぶと backend によっては例外（pokerkit）や
+        確定済みハンドの二重確定（= ポット二重加算）になるため、ここで止める。
+        """
+        if not self._game_state.is_hand_active():
+            logger.warning(
+                "進行中のハンドが無いため winner 宣言を無視しました（raw=%r）— "
+                "先に「新ハンド」（CLI の n）を実行してください", event.raw_text,
+            )
+            return
+        winner_seat = _extract_seat_from_text(event.raw_text)
+        if winner_seat is None:
+            winner_seat = self._current_actor_or_none()
+            if winner_seat is None:
+                logger.warning(
+                    "winner の席を特定できませんでした（raw=%r）— 席番号を付けて宣言してください"
+                    "（例: シート1 ウィナー / CLI の `w 1`）", event.raw_text,
+                )
+                self._hand_needs_review = True
+                return
+            logger.warning(
+                "Could not extract winner seat from %r, using current player seat=%d",
+                event.raw_text, winner_seat,
+            )
+        self._finalize_hand(winner_seat)
 
     def _handle_rebuy(self, event: AudioEvent) -> None:
         """GUI/CLI から queue 経由で届いた rebuy を integration スレッドで適用する。
@@ -504,7 +559,13 @@ class IntegrationThread(threading.Thread):
         """rules-aware でない backend（legacy）の従来アクション処理（挙動不変）。"""
         action = event.action
         gs = self._game_state
-        seat = gs.get_current_player()
+        # pokerkit backend でも「合法手が無い」= 手番なし（新ハンド前 / ハンド終了後 /
+        # 全員オールイン後）はここに落ちてくる。actor が無いのは運用ミスであってバグでは
+        # ないので、traceback ではなく案内ログにする（ISSUE-0028）。
+        seat = self._current_actor_or_none()
+        if seat is None:
+            self._warn_no_actor("アクション", event)
+            return
 
         try:
             gs.apply_action(seat, action, event.amount)

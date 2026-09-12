@@ -220,6 +220,10 @@ class GameStateManager:
     def is_legal_actor(self, seat: int) -> bool:
         return bool(self._active_seats) and seat == self.get_current_player()
 
+    def is_hand_active(self) -> bool:
+        """legacy はハンドのライフサイクルを持たない（常に受け付ける = 挙動不変, ISSUE-0028）。"""
+        return True
+
     def fold_through(self, until_seat: int, max_folds: int | None = None) -> list[int]:
         raise NotImplementedError("fold_through is not supported by the legacy backend")
 
