@@ -425,8 +425,9 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 > **ライブ経路 = 暫定表示**、**正本 = 事後推定**（pokerkit の合法手列に対する制約付きビーム探索 +
 > 観測尤度、決定的）とし、読み取りは **live ⊕ estimate ⊕ staff corrections** で重ねる。
 > 下の「実装状況」表は **現時点で動いているもの**の記述であり、ADR-0045 の実施順序 P0〜P8 は未着手。
-> **P0（最優先・既存データを壊し続けている）**: ISSUE-0033（RFID の appear を actor 証拠に使っており
-> 配っただけで誤 fold）/ ISSUE-0032（ディーラーボタンが回らずターン順 prior が誤る）。
+> **P0a 済**: ISSUE-0033（RFID の appear を actor 証拠に使っており配っただけで誤 fold）→ **Fixed**。
+> **P0b 未着手（最優先・既存データを壊し続けている）**: ISSUE-0032（ディーラーボタンが回らず
+> ターン順 prior が (n-1)/n のハンドで誤る）。
 
 
 | 機能 | 状態 | 備考 |
@@ -462,7 +463,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **seat→player 選択 GUI + live 有効化 (S2.x E3)** | ✅ 実装済 | `gui/seat_selection.py`（`SeatSelectionDialog`: モーダル, 席ごと割当 / 未登録その場 create / 空席 skip / carry-forward）+ `gui/dashboard.py`「座席設定」ボタン + `integration/engine.py:set_seat_player_map` + `main.py` 結線（UUID4 session_id）。既定 off で挙動不変, ISSUE-0006 Resolved |
 | **event 記録 sidecar (R1)** | ✅ 実装済 | `output/event_recorder.py`（opt-in `recording.enabled`, 挙動不変, ADR-0010, `reconstruction_event` schema） |
 | **pokerkit game-state backend (R2) + live 既定切替 (G)** | ✅ 実装済 | `core/poker_engine.py`（`engine.backend`, ADR-0009/0012。actor/合法手/side-pot 権威）。**Phase G で live 既定を `pokerkit` に切替**（`config_default.json`、`requirements.txt` で `pokerkit>=0.7,<0.8` pin）。`legacy` は config で rollback 可。実機 E2E は Phase H |
-| **rules-aware ライブ結線 + silent-fold 合成 (R3 D1/D2a/D2b)** | ✅ 実装済 (preview) | `audio/recognizer.py:apply_corrections`（合法手射影）+ `integration/engine.py:_handle_rules_aware_action`/`_resolve_actor`（合法手射影・actor 推定[RFID>明示席]・`fold_through` で silent-fold 合成 cap=2/atomic・合成 fold 記録）。legacy 既定は不変。派生 confidence(D3) は後続 |
+| **rules-aware ライブ結線 + silent-fold 合成 (R3 D1/D2a/D2b)** | ✅ 実装済 (preview) | `audio/recognizer.py:apply_corrections`（合法手射影）+ `integration/engine.py:_handle_rules_aware_action`/`_resolve_actor`（合法手射影・actor 推定・`fold_through` で silent-fold 合成 cap=2/atomic・合成 fold 記録）。**actor の証拠は明示発話席のみ**（ISSUE-0033 で RFID の検出を証拠から外した = カードの**存在**は**行動**ではなく、配布と区別できないため。RFID は同席の裏付けとしてのみ効く）。legacy 既定は不変 |
 | **決定的 replay harness + golden fixtures (R4 F1/F3a)** | ✅ 実装済 | `integration/replay.py` + `tools/replay_hand.py`（clock 注入で決定的、ADR-0011）。golden fixtures: `tests/fixtures/reconstruction/`（**green 5: 射影 2 + 合成 2 + side-pot 1**、DoD #2 達成）。round-trip 決定性 = `tests/test_reconstruction.py` |
 | **派生 confidence + side-pot (R3 D3 / R5 F3a)** | ✅ 実装済 (preview) | `integration/engine.py:derive_confidence`（3 因子 L/A/Q、rules-aware 経路のみ。legacy 固定表は不変）+ needs_review 5 条件。`HandSummary.pots`（main/side、legacy は `[]`）。**Phase D 完了** |
 | **派生 confidence 重み較正 (R5/F2)** | ✅ 実装済 | ADR-0033: 重み（暫定）を golden fixtures archetype + 境界グリッド由来の較正プロパティ P1〜P8（順序単調性 / 閾値分離 / 合法性ゲート / synth-fold）で正当化・回帰ロック。数値据え置き。`tools/calibrate_confidence.py`（ハーネス）+ `tests/test_confidence_calibration.py`。「暫定」表記を解除 |
@@ -968,7 +969,9 @@ pip install ".[api]"                         # viewer API を使う場合のみ 
 python main.py --cli                         # CLI モード (hand logger)。マイク無しで回すには config の audio.enabled=false
 #   --cli の入力: q=終了 / n=新ハンド / w <席>=ウィナー / r <席> <金額>=リバイ。
 #   ミスディール訂正: cb <位置>=ボード N 枚目を取り消し / cs <席>=その席の札を読み直し (ADR-0043)
-#   コマンドは全角でも可（`ｎ` / `ｗ　１`。照合前に半角へ寄せる, ISSUE-0030）
+#   コマンドは全角でも可（`ｎ` / `ｗ　１`。照合前に半角へ寄せる, ISSUE-0030）。`w1` のように
+#   空白を打ち損ねても通る（w/r のみ, ISSUE-0034）
+python main.py --cli --log-file           # ログを端末に出さない（実機テスト推奨。卓は table_monitor で見る）
 #   それ以外の行は読み上げ文として parse_action に通る（例: チェック / シート3 コール / ベット 500）。
 #   ひらがなも可（照合前にカタカナへ正規化, ISSUE-0027。ASR の書き起こし揺れにも効く）
 python main.py                               # GUI モード (hand logger)

@@ -114,3 +114,16 @@ class TestCliCommandNormalization:
     def test_japanese_text_is_untouched(self):
         """読み上げ文はこの写像の対象外（カナ・漢字は範囲外なので素通り）。"""
         assert main._normalize_cli_command("シート3 コール") == "シート3 コール"  # noqa: SLF001
+
+    def test_glued_command_is_split(self):
+        """ISSUE-0034: ログが入力行に割り込む環境で空白を打ち損ねても通す（w/r のみ）。"""
+        assert main._normalize_cli_command("w1") == "w 1"          # noqa: SLF001
+        assert main._normalize_cli_command("ｗ１") == "w 1"         # noqa: SLF001
+        assert main._normalize_cli_command("r1 500") == "r 1 500"  # noqa: SLF001
+
+    def test_glued_split_does_not_touch_other_input(self):
+        assert main._normalize_cli_command("q") == "q"             # noqa: SLF001
+        assert main._normalize_cli_command("n") == "n"             # noqa: SLF001
+        assert main._normalize_cli_command("w 1") == "w 1"         # noqa: SLF001
+        # 読み上げ文は素通り（コマンド letter + 数字の形ではない）
+        assert main._normalize_cli_command("ベット500") == "ベット500"   # noqa: SLF001

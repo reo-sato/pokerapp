@@ -6,7 +6,7 @@
 
 ## Status
 
-Open
+Fixed（2026-09-12, P0a）
 
 ## Severity / Priority
 
@@ -52,24 +52,31 @@ ADR-0009 §4 /（ISSUE-0009 の暫定方針）で「物理証拠 > 明示発話 
 
 ## Fix
 
-**未着手**。ADR-0045 の **P0a**:
+ADR-0045 の **P0a**（実装済）:
 
-- `_resolve_actor` から **RFID appear を actor 証拠として外す**（明示発話席は残す）。
-- golden `out-of-turn-rfid` は「配布と区別できない」ため**期待値を作り直す**（現在の期待値は
-  不具合を固定しているので、そのまま残せない）。
-- RFID の corroboration（`_pop_matching_rfid_event` による**同席**の裏付け）は従来どおり残す
-  — こちらは「別席へ actor を移す」力を持たないので無害。
+- `_resolve_actor` から **RFID appear を actor 証拠として外した**。sensed は
+  **明示発話席（`event.seat`）のみ**。戻り値も `(actor, conflict, folded)` に縮めた
+  （RFID イベントを返す必要が無くなった）。
+- `_pop_nearest_rfid_seat`（席を問わず最近傍を取り出す）を**削除**。
+- RFID の corroboration は `_pop_matching_rfid_event`（**同席限定**）に切替。こちらは
+  「別席へ actor を移す」力を持たないので無害で、confidence の裏付けとしては従来どおり効く。
+- golden `out-of-turn-rfid` を **`rfid-appear-is-not-an-action` へ改名して期待値を作り直した**
+  （旧期待値は不具合を正解として固定していたため、そのままでは残せない）。新しい期待値は
+  「seat 1 のカードが検出されても actor は prior(seat 3) のまま・fold 合成なし」。
 - 恒久的には ADR-0045 の事後推定で、プレゼンス**遷移**を非対称な尤度として扱う（D4）。
 
 ## Regression Test
 
-未追加。修正時に「新ハンド直後に席のカードが検出されても、席の言及が無い発話で actor が
-移らない」を固定する。
+- golden `tests/fixtures/reconstruction/rfid-appear-is-not-an-action`（配布 → 席の言及が無い
+  「コール」→ actor は prior のまま）。
+- `tests/test_phase_d2_wiring.py::TestRfidIsNotActorEvidence` 3 件:
+  他席への配布で actor が動かない / 同席の読みは裏付けとして残る / 明示発話席は従来どおり勝つ。
 
 ## Affected Files
 
 - `integration/engine.py`
-- `tests/fixtures/reconstruction/out-of-turn-rfid/`（作り直し）
+- `tests/fixtures/reconstruction/rfid-appear-is-not-an-action/`（`out-of-turn-rfid` から改名・作り直し）
+- `tests/test_phase_d2_wiring.py` / `tests/test_reconstruction.py` / `tests/test_confidence_calibration.py`（コメント）
 
 ## Related
 

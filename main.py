@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 import threading
 from datetime import datetime
@@ -21,9 +22,21 @@ _FULLWIDTH_TO_ASCII = str.maketrans(
 )
 
 
+# 引数がくっついたコマンド（`w1` / `r1 500`）を分ける。ログが入力行に割り込む環境では
+# 空白を打ち損ねやすく、実機で `w1` が 2 回弾かれた（ISSUE-0034）。引数を取る w/r のみ。
+_GLUED_COMMAND = re.compile(r"^([wr])(\d+)$")
+
+
 def _normalize_cli_command(line: str) -> str:
-    """CLI コマンド照合用に全角英数字・全角スペースを半角へ寄せる。"""
-    return line.translate(_FULLWIDTH_TO_ASCII)
+    """CLI コマンド照合用に全角英数字・全角スペースを半角へ寄せ、`w1` を `w 1` に分ける。"""
+    normalized = line.translate(_FULLWIDTH_TO_ASCII)
+    parts = normalized.split()
+    if parts:
+        m = _GLUED_COMMAND.match(parts[0].lower())
+        if m:
+            parts[0:1] = [m.group(1), m.group(2)]
+            return " ".join(parts)
+    return normalized
 
 
 def _prompt_session_config() -> dict:
@@ -769,6 +782,26 @@ def export_phh(json_path: str) -> None:
         print(f"  {p}")
 
 
+def _route_logs_to_file(path: str) -> None:
+    """ログの出力先を端末からファイルへ切り替える（ISSUE-0034）。
+
+    `--cli` は 1 つの端末で「入力プロンプト」と「別スレッドのログ」を共有しているため、
+    RFID の検出ログがタイプ中の行に割り込むとコマンドが壊れる（実機で `w 1` が通らなかった）。
+    卓の状態は `tools/table_monitor.py` で見られるので、ログは落としてしまってよい。
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    handler = logging.FileHandler(p, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(threadName)s] %(levelname)s %(name)s: %(message)s"
+    ))
+    root.addHandler(handler)
+    print(f"ログは {p} に出します（端末には出ません）。")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ポーカーハンドロガー")
     parser.add_argument(
@@ -813,7 +846,19 @@ def main() -> None:
         action="store_true",
         help="player 向け読み取り専用 viewer API を起動する（Phase M1, ADR-0017, 要 [api] extra）",
     )
+    parser.add_argument(
+        "--log-file",
+        metavar="PATH",
+        nargs="?",
+        const="logs/pokerapp.log",
+        help="ログを端末ではなくファイルへ出す（既定 logs/pokerapp.log）。"
+             "--cli では RFID の検出ログが入力行に割り込んでコマンドが壊れるため、"
+             "実機テスト時はこれを付ける（卓の状態は tools/table_monitor.py で見る, ISSUE-0034）",
+    )
     args = parser.parse_args()
+
+    if args.log_file:
+        _route_logs_to_file(args.log_file)
 
     # 起動時バックアップ（B2 / v1.0 ローンチレビュー）。会計データ消失の最大リスク対策。
     # best-effort: 失敗してもアプリ起動は止めない。config.backup.on_startup=false で無効化可。

@@ -7,7 +7,7 @@ Phase F1 (#8) — golden-fixture replay 回帰 + round-trip 決定性 (R4)。
   - events.jsonl: 記録済み reconstruction_event 列（replay 入力）
   - expected_hand.json: replay 後の HandSummary.to_dict() を正規化したもの
 
-green ケースは D1/D2a で既に正しく再構築できる挙動を固定する。silent-fold / out-of-turn-rfid は
+green ケースは D1/D2a で既に正しく再構築できる挙動を固定する。silent-fold / rfid-appear-is-not-an-action は
 D2b（fold_through 合成）、unequal-allin は F3（side-pot 連携）で fixtures + 実装を追加する。
 """
 from __future__ import annotations
@@ -34,7 +34,7 @@ GREEN_CASES = [
     "check-facing-bet",      # D1/D2a: 非合法 check → call + review
     "call-amount-from-state",  # D1/D2a: heard 額無視 → state の call 額
     "silent-fold",           # D2b: 明示席へ向け中間席を fold 合成（audio 駆動）
-    "out-of-turn-rfid",      # D2b: RFID seat で prior を上書きし fold 合成（RFID 駆動）
+    "rfid-appear-is-not-an-action",  # ISSUE-0033: RFID の検出は actor を動かさない
     "unequal-allin",         # F3: スタック差 all-in → main/side pot を HandSummary.pots に
 ]
 

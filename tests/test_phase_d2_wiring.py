@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from core.event_queue import make_audio_queue
-from core.events import AudioEvent
+from core.events import AudioEvent, RFIDEvent
 from core.game_state import GameStateManager, PlayerState
 from core.poker_engine import PokerkitGameState
 from integration.engine import IntegrationThread
@@ -103,3 +103,55 @@ class TestLegacyRoutingUnchanged:
         assert rec.action == "bet"      # legacy は射影しない（生 action）
         assert rec.amount == 500        # heard そのまま
         assert rec.needs_review is False
+
+
+class TestRfidIsNotActorEvidence:
+    """ISSUE-0033: RFID の seat 読みは actor を動かさない（配布と行動を区別できないため）。
+
+    RFID が観測するのは「その席に**カードがある**」であって「その席が**行動した**」ではない。
+    ホールカードの配布は数秒で最大 16 件の検出を生み、持ち上げた札を置き直しても 1 件出る。
+    カメラ（chip motion = 行動の観測）を廃止した結果、存在検出が「物理証拠」の座に繰り上がって
+    いたのが誤りだった（ADR-0045）。RFID は**同席の裏付け**としてのみ使う。
+    """
+
+    def _rfid(self, seat: int, ts: float, card: str = "Ah") -> RFIDEvent:
+        return RFIDEvent(
+            tag_id=card, card=card, timestamp=ts, raw_tag_id=card,
+            reader_id=f"seat_{seat}", role="seat", seat=seat, board_index=None,
+        )
+
+    def test_card_dealt_to_another_seat_does_not_move_the_actor(self, tmp_path: Path):
+        """配布で seat 1 のカードが出ても、席の言及が無い発話は prior が担う。"""
+        gs = _pk(3)
+        t, cap = _thread(gs, tmp_path, "rfid1")
+        prior = gs.get_current_player()          # seat 3
+        now = time.time()
+        t._process_rfid_event(self._rfid(1, now - 0.2))     # noqa: SLF001 — 配布
+        t._handle_audio_event(AudioEvent("call", 0, now, "コール"))   # noqa: SLF001
+        assert [r.seat for r in cap] == [prior]  # fold 合成なし・actor も動かない
+        assert cap[-1].action == "call" and cap[-1].needs_review is False
+
+    def test_same_seat_rfid_still_corroborates(self, tmp_path: Path):
+        """同席の読みは裏付けとして残る（confidence が上がる）。"""
+        gs = _pk(3)
+        t, cap = _thread(gs, tmp_path, "rfid2")
+        actor = gs.get_current_player()
+        now = time.time()
+        t._process_rfid_event(self._rfid(actor, now - 0.2))          # noqa: SLF001
+        t._handle_audio_event(AudioEvent("call", 0, now, "コール"))   # noqa: SLF001
+        rec = cap[-1]
+        assert rec.seat == actor and rec.source["rfid"] is True
+
+    def test_explicit_seat_still_wins(self, tmp_path: Path):
+        """明示発話席は従来どおり actor を動かす（RFID が別席を指していても）。"""
+        gs = _pk(3)
+        t, cap = _thread(gs, tmp_path, "rfid3")
+        prior = gs.get_current_player()          # seat 3
+        now = time.time()
+        t._process_rfid_event(self._rfid(2, now - 0.2))              # noqa: SLF001 — 無関係な検出
+        t._handle_audio_event(  # noqa: SLF001
+            AudioEvent("call", 0, now, "シート1 コール", seat=1)
+        )
+        folds = [r for r in cap if r.action == "fold"]
+        assert [r.seat for r in folds] == [prior]
+        assert cap[-1].seat == 1

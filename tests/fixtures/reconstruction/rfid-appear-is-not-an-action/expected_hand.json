@@ -1,6 +1,6 @@
 {
   "hand_id": 1,
-  "session_id": "fixture-out-of-turn-rfid",
+  "session_id": "fixture-rfid-appear-is-not-an-action",
   "started_at": null,
   "ended_at": null,
   "blinds": {
@@ -19,8 +19,8 @@
       ],
       "hole_cards_source": "rfid",
       "stack_start": 9900,
-      "stack_end": 10200,
-      "result": 300
+      "stack_end": 10400,
+      "result": 500
     },
     {
       "seat": 2,
@@ -37,8 +37,8 @@
       "hole_cards": null,
       "hole_cards_source": "",
       "stack_start": 10000,
-      "stack_end": 10000,
-      "result": 0
+      "stack_end": 9800,
+      "result": -200
     }
   ],
   "pot_total": 200,
@@ -51,36 +51,18 @@
       "street": "preflop",
       "seat": 3,
       "player_name": "P3",
-      "action": "fold",
-      "amount": 0,
-      "pot_after": 300,
-      "stack_after": 10000,
-      "source": {
-        "camera": false,
-        "audio": false,
-        "rfid": false
-      },
-      "needs_review": true,
-      "confidence": 0.3
-    },
-    {
-      "hand_id": 1,
-      "timestamp": null,
-      "street": "preflop",
-      "seat": 1,
-      "player_name": "P1",
       "action": "call",
       "amount": 200,
-      "pot_after": 400,
+      "pot_after": 500,
       "stack_after": 9800,
       "source": {
         "camera": false,
         "audio": true,
-        "rfid": true
+        "rfid": false
       },
-      "needs_review": true,
-      "confidence": 0.888
+      "needs_review": false,
+      "confidence": 0.49
     }
   ],
-  "review_required": true
+  "review_required": false
 }

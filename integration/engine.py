@@ -360,6 +360,7 @@ class IntegrationThread(threading.Thread):
 
         if ev.board_index is not None:
             # 位置指定あり: board_positions に格納して順序保証
+            unchanged = self._board_positions.get(ev.board_index) == ev.card
             self._board_positions[ev.board_index] = ev.card
             # 配布時刻は **最初の検出**を採る（再発火で上書きしない, ADR-0044）。
             self._board_dealt_at.setdefault(ev.board_index, ev.timestamp)
@@ -369,7 +370,10 @@ class IntegrationThread(threading.Thread):
             ]
             # tag を出すのは、同じカード名が別 UID で 2 枚登録されている（= rfid_cards.json の
             # 重複登録）ケースを名前だけのログから切り分けられないため（ISSUE-0026）。
-            logger.info(
+            # 同じ位置に同じ札の再検出は新しい情報ではない。結合の弱いリーダーは載っている札を
+            # 何度も読み直すので、INFO のままだと端末が埋まって CLI の入力が壊れる（ISSUE-0034）。
+            logger.log(
+                logging.DEBUG if unchanged else logging.INFO,
                 "Board card [pos=%d]: %s (tag=%s) — board so far: %s",
                 ev.board_index, ev.card, ev.tag_id, self._board_cards,
             )
@@ -431,10 +435,18 @@ class IntegrationThread(threading.Thread):
             return  # 既にそのストリート
         try:
             gs.advance_street(street_enum)
-            logger.info(
-                "Street auto-advanced to %s by RFID board cards (%d cards detected)",
-                target_street, n,
-            )
+            if gs.street == street_enum.value:
+                logger.info(
+                    "Street auto-advanced to %s by RFID board cards (%d cards detected)",
+                    target_street, n,
+                )
+            else:
+                # rules-aware backend（pokerkit）はベッティング完了で進むので、ここは no-op に
+                # なる（契約どおり）。毎回 INFO を出すと端末が埋まるので DEBUG に落とす。
+                logger.debug(
+                    "RFID street hint %s (%d cards) — backend keeps %s",
+                    target_street, n, gs.street,
+                )
         except ValueError:
             # 後退遷移など無効な場合は無視
             logger.debug(
@@ -820,43 +832,32 @@ class IntegrationThread(threading.Thread):
 
         logger.debug("ActionRecord: %s", record)
 
-    def _pop_nearest_rfid_seat(self, ts: float) -> Optional[RFIDEvent]:
-        """窓内で最も近い RFID seat イベントを席に関わらず 1 件取り出す（D2b actor 解決用）。
-
-        prior と異なる席を指しうるため `_pop_matching_rfid_event`（同席限定）とは別。取り出して
-        消費することで、actor 推定に使った読みが後続アクションへ滞留・連続誤検出しない。
-        """
-        candidates = [
-            e for e in self._rfid_seat_buffer
-            if e.seat is not None and abs(e.timestamp - ts) <= MATCH_WINDOW
-        ]
-        if not candidates:
-            return None
-        best = min(candidates, key=lambda e: abs(e.timestamp - ts))
-        self._rfid_seat_buffer.remove(best)
-        return best
-
     def _resolve_actor(
         self, event: AudioEvent, legal_ctx: LegalContext
-    ) -> tuple[int, Optional[RFIDEvent], bool, list[int]]:
-        """物理/明示証拠から actor を推定する（ADR-0009 §4, ISSUE-0009）。
+    ) -> tuple[int, bool, list[int]]:
+        """明示発話席から actor を推定する（ADR-0009 §4 を ISSUE-0033 で改訂）。
 
-        prior = engine の合法手番。優先順位 **RFID seat 読み > 明示発話席(event.seat)** で sensed を
-        決め、sensed が prior と異なれば silent-fold 合成（`fold_through`, cap=SILENT_FOLD_CAP・atomic）で
-        sensed まで手番を進める。合成成功なら actor=sensed、cap 超過/到達不可なら prior 維持（合成せず）。
-        いずれの競合（sensed≠prior）も needs_review。actor 推定に使った RFID 読みは消費して返す
-        （滞留防止 + corroboration 判定に再利用）。
+        prior = engine の合法手番。**明示発話席（`event.seat`）だけ**を sensed とし、prior と
+        異なれば silent-fold 合成（`fold_through`, cap=SILENT_FOLD_CAP・atomic）で sensed まで
+        手番を進める。合成成功なら actor=sensed、cap 超過/到達不可なら prior 維持（合成せず）。
+        いずれの競合（sensed≠prior）も needs_review。
 
-        Returns: (actor, 消費した RFID seat 読み or None, conflict, 合成 fold した席列)
+        **RFID の seat 読みは actor の証拠にしない**（ISSUE-0033 / ADR-0045）。RFID が観測するのは
+        「その席に**カードがある**」であって「その席が**行動した**」ではない。ホールカードの配布は
+        数秒で最大 16 件の検出を生み、持ち上げた札を置き直しても 1 件出るため、行動と区別できない。
+        カメラ（chip motion = 行動の観測）を廃止した結果、存在検出が「物理証拠」の座に繰り上がって
+        いたのが誤りだった。RFID は**同席の裏付け**（`_pop_matching_rfid_event`）としてのみ使う
+        — こちらは actor を別席へ動かす力を持たないので無害。
+
+        Returns: (actor, conflict, 合成 fold した席列)
         """
         prior = legal_ctx.actor_seat
-        rfid_ev = self._pop_nearest_rfid_seat(event.timestamp)
-        sensed = rfid_ev.seat if rfid_ev is not None else event.seat
+        sensed = event.seat
 
         if sensed is None or sensed == prior:
-            return prior, rfid_ev, False, []
+            return prior, False, []
 
-        # sensed != prior: 物理/明示証拠が別席 → silent-fold 合成を試みる（cap 内・atomic）。
+        # sensed != prior: 明示発話が別席を指す → silent-fold 合成を試みる（cap 内・atomic）。
         try:
             folded = self._game_state.fold_through(sensed, max_folds=SILENT_FOLD_CAP)
         except (ValueError, NotImplementedError):
@@ -864,9 +865,9 @@ class IntegrationThread(threading.Thread):
                 "silent-fold 合成不可: prior=%s sensed=%s (cap=%d 超過/到達不可) → prior 維持 + review",
                 prior, sensed, SILENT_FOLD_CAP,
             )
-            return prior, rfid_ev, True, []
+            return prior, True, []
         logger.info("silent-fold 合成: prior=%s → actor=%s (folded=%s)", prior, sensed, folded)
-        return sensed, rfid_ev, True, folded
+        return sensed, True, folded
 
     def _append_synth_fold(self, seat: int) -> None:
         """合成した silent-fold を fold アクションとして記録する（推定なので常に needs_review）。
@@ -903,7 +904,7 @@ class IntegrationThread(threading.Thread):
         D3: 派生 confidence（3 因子）+ needs_review 5 条件。
         """
         gs = self._game_state
-        actor, rfid_event, conflict, synthesized_seats = self._resolve_actor(event, legal_ctx)
+        actor, conflict, synthesized_seats = self._resolve_actor(event, legal_ctx)
 
         # 合成した silent-fold を先に記録（手番順: 中間席の fold → 当該 actor のアクション）。
         for fseat in synthesized_seats:
@@ -927,8 +928,9 @@ class IntegrationThread(threading.Thread):
             apply_ok = False
 
         cam_event = self._pop_matching_camera_event(actor, event.timestamp)
-        # actor 推定に使った RFID 読みが最終 actor と一致すれば corroboration（消費済み）。
-        has_rfid = rfid_event is not None and rfid_event.seat == actor
+        # RFID は **同席の裏付け**としてのみ使う（actor を動かさない, ISSUE-0033）。
+        rfid_event = self._pop_matching_rfid_event(actor, event.timestamp)
+        has_rfid = rfid_event is not None
         has_camera = cam_event is not None
 
         source = {"camera": has_camera, "audio": True, "rfid": has_rfid}
@@ -939,7 +941,7 @@ class IntegrationThread(threading.Thread):
             apply_ok=apply_ok,
             whisper_conf=event.confidence if event.confidence is not None else 1.0,
             audio_agree=audio_agree,
-            rfid_present=rfid_event is not None, rfid_agree=has_rfid,
+            rfid_present=has_rfid, rfid_agree=has_rfid,
             camera_present=has_camera, camera_agree=has_camera,
         )
         # D3: needs_review 5 条件（ADR-0009 §6）— ①非合法 ②高信頼 ASR×規則矛盾/④amount snap
