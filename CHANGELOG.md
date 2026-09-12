@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### Fixed (ラウンドを閉じたアクションが次ストリートに記録される, ISSUE-0029, 2026-09-12)
+
+- **ハンド履歴が間違っていた**（backend=pokerkit = live 既定）。BB のチェックが `flop`、フロップを
+  閉じたコールが `turn`、turn の fold が `showdown` として記録されていた。警告も出ないので
+  後から気づけない。実機ログで「フロップで同じ席が check → bet と 2 回続く」ように見えたのもこれ。
+- 原因は `ActionRecord.street` を **`apply_action` の後**に読んでいたこと。legacy はここで
+  ストリートが動かないため無害だったが、pokerkit は**ラウンドが閉じると内部で次ストリートへ
+  自動進行**するため、ラウンドを閉じたアクションだけが 1 つ先に記録されていた（Phase G で
+  live 既定を pokerkit にした時点から）。
+- **Fix**: 適用**前**のストリートを控えて記録する（rules-aware / legacy 両経路）。`pot_after` /
+  `stack_after` は名前どおり適用後のまま。**legacy は挙動不変**。
+- 契約: `action.schema.json` の `street` に意味を明文化した description を追加し `1.1`
+  （validation 不変の additive）。848 passed。
+
 ### Fixed (ハンドが無いときのアクション / winner で traceback が出る, ISSUE-0028, 2026-09-12)
 
 - `n`（新ハンド）を押す前にアクションを打つと **traceback が出てイベントが黙って捨てられていた**

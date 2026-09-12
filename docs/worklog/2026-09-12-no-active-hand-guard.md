@@ -1,4 +1,4 @@
-# 2026-09-12 — 進行中のハンドが無いときのアクション / winner をクラッシュさせない（ISSUE-0028）
+# 2026-09-12 — 実機通しで出た 2 件: ハンドが無いときのアクション（ISSUE-0028）/ ストリートのずれ（ISSUE-0029）
 
 ## Goal
 
@@ -14,8 +14,12 @@
 | `core/poker_engine.py` | `PokerEngine` protocol に `is_hand_active()` を additive 追加。`PokerkitGameState` の `get_current_player` / `legal_context` / `is_legal_actor` が `_hand_active` を見るように（`apply_action` と前提を揃える） |
 | `core/game_state.py` | `GameStateManager.is_hand_active()` → 常に `True`（legacy はハンドのライフサイクルを持たない = 挙動不変） |
 | `integration/engine.py` | `_current_actor_or_none()` / `_warn_no_actor()` / `_handle_winner()` を追加。`_handle_legacy_action` は actor が無ければ案内して return |
+| `integration/engine.py` | （ISSUE-0029）`ActionRecord.street` を **適用前**の値で記録（両経路） |
+| `docs/contracts/schemas/action.schema.json` | （ISSUE-0029）`street` の意味を明文化 + `1.0`→`1.1`（description のみ = additive） |
+| `docs/contracts/versioning-and-freeze.md` | action schema の版表記を更新 |
 | `tests/test_no_active_hand_guard.py` | 新規（10 ケース） |
-| `docs/issues/0028-no-active-hand-action-crashes.md` | 新規 |
+| `tests/test_action_street_label.py` | 新規（3 ケース, ISSUE-0029） |
+| `docs/issues/0028-no-active-hand-action-crashes.md` / `0029-action-street-off-by-one.md` | 新規 |
 | `CLAUDE.md` / `CHANGELOG.md` / `docs/decision-log.md` | エラーハンドリング方針 / Phase H 実機状況 / 索引 |
 
 ## Expected vs implemented
@@ -46,12 +50,39 @@
 - **そもそもハンドが無い**（`n` 前 / 確定後）→ 付け先が無いので立てない。次の `_start_new_hand`
   でどのみちリセットされる。
 
+## 追加で見つかった: ストリートのずれ（ISSUE-0029）
+
+実機ログの「フロップで 席1 が check → 席1 が bet と 2 回続く」が気になり、同じ 6 アクションを
+スクリプトで再現したところ **`ActionRecord.street` が 1 つ先にずれていた**。
+
+```
+  [preflop] 席2 call 1      [preflop] 席2 call 1
+  [flop]    席1 check   →   [preflop] 席1 check     ← BB のチェックは preflop
+  [flop]    席1 bet 5       [flop]    席1 bet 5
+  [turn]    席2 call 5  →   [flop]    席2 call 5    ← flop を閉じたコール
+  [turn]    席1 bet 50      [turn]    席1 bet 50
+  [showdown]席2 fold    →   [turn]    席2 fold      ← turn の fold
+```
+
+- 原因は `street=gs.street` を **`apply_action` の後**に読んでいたこと。legacy はここで
+  ストリートが動かないので無害だったが、pokerkit は**ラウンドが閉じると内部で次ストリートへ
+  自動進行**する。→ 適用前の値を控えて記録するように修正（`street_at_action`）。
+- **警告も出ずハンド履歴が間違う**ので ISSUE-0028 より重い（Severity High）。Phase G で live 既定を
+  pokerkit にした時点から埋まっていたが、golden fixtures がストリート境界を跨いでいなかったため
+  テストでも検出できていなかった（= 回帰テストの穴も同時に塞いだ）。
+- 契約: `action.schema.json` の `street` に意味を明文化した description を追加し `1.1`
+  （validation 不変の additive, `versioning-and-freeze.md` §2）。
+- 「同じ席が 2 回続く」自体は **pokerkit の正しい heads-up 手番順**だった（BB がプリフロップを
+  チェックで閉じ、ポストフロップも BB が先）。表示がずれていただけ。
+
 ## Test results
 
 ```
 python -m pytest tests/ -q --ignore=tests/test_vision.py
-845 passed, 2 warnings in 31.17s      # 835 → 845（+10）
+848 passed, 2 warnings      # 835 → 845（ISSUE-0028 +10）→ 848（ISSUE-0029 +3）
 ```
+
+ISSUE-0029 の回帰 2 件は fix を戻すと落ちることを確認済み（`git stash` で検証）。
 
 ## Remaining gaps
 

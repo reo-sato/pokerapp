@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pokerapp.local/contracts/action.schema.json",
   "title": "Action",
-  "version": "1.0",
-  "description": "ActionRecord.to_dict() の契約（hand core, ADR-0010 R5）。ISSUE-0011 の決定により additionalProperties:true で 1.0（false 昇格は後続、範囲膨張防止）。ADR-0009 の推定 additive フィールドは optional。",
+  "version": "1.1",
+  "description": "ActionRecord.to_dict() の契約（hand core, ADR-0010 R5）。ISSUE-0011 の決定により additionalProperties:true で 1.0（false 昇格は後続、範囲膨張防止）。ADR-0009 の推定 additive フィールドは optional。1.1 = street の意味を明文化（description のみ / validation 不変, ISSUE-0029）。",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -13,7 +13,10 @@
   "properties": {
     "hand_id": {"type": "integer", "minimum": 0},
     "timestamp": {"type": "string", "description": "ISO 8601。replay では注入 clock 由来。"},
-    "street": {"type": "string"},
+    "street": {
+      "type": "string",
+      "description": "そのアクションが**行われた**ストリート（適用後ではない）。rules-aware backend はラウンドを閉じるアクションで次ストリートへ自動進行するため、記録は適用前の値を採る（ISSUE-0029）。"
+    },
     "seat": {"type": "integer", "minimum": 1, "maximum": 9},
     "player_name": {"type": "string"},
     "action": {"enum": ["bet", "call", "raise", "check", "fold", "allin", "showdown", "winner", "new_hand"]},

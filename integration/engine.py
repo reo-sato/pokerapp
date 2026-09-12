@@ -567,6 +567,8 @@ class IntegrationThread(threading.Thread):
             self._warn_no_actor("アクション", event)
             return
 
+        street_at_action = gs.street   # 適用前のストリートを記録する（ISSUE-0029）
+
         try:
             gs.apply_action(seat, action, event.amount)
         except ValueError:
@@ -599,7 +601,7 @@ class IntegrationThread(threading.Thread):
         record = ActionRecord(
             hand_id=gs.hand_id,
             timestamp=self._now_iso(),
-            street=gs.street,
+            street=street_at_action,
             seat=seat,
             player_name=gs.get_player_name(seat),
             action=action,
@@ -703,6 +705,11 @@ class IntegrationThread(threading.Thread):
 
         corrected = apply_corrections(event.action, event.amount, legal_ctx, event.confidence)
 
+        # ストリートは「適用前」を記録する。pokerkit はベッティングラウンドが閉じると
+        # apply_action の中で次ストリートへ自動進行するため、適用後を読むとラウンドを
+        # 閉じたアクション（BB のチェック等）が次ストリートに記録されてしまう（ISSUE-0029）。
+        street_at_action = gs.street
+
         try:
             gs.apply_action(actor, corrected.action, corrected.amount)
             apply_ok = True
@@ -741,7 +748,7 @@ class IntegrationThread(threading.Thread):
         record = ActionRecord(
             hand_id=gs.hand_id,
             timestamp=self._now_iso(),
-            street=gs.street,
+            street=street_at_action,
             seat=actor,
             player_name=gs.get_player_name(actor),
             action=corrected.action,
