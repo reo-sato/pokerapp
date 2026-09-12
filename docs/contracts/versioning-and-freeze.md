@@ -80,9 +80,13 @@ schema を変更する PR は、同じ PR で以下を更新する（漏れは c
 | 5b | order_request / player_session_summary | viewer (M1/M5) | **frozen `1.0`（ADR-0019。ADR-0017/0018）** |
 | 6 | repository / service interface | S5 | **frozen（ADR-0020）**。read boundary は二言語で実証（mobile `ViewerRepository` + Python `ViewerApiClient`）。write/sync 拡張は後続 ADR |
 
-> hand / action schema も `1.0` frozen（ISSUE-0011）。action は `1.1`（`street` の意味を明文化した
-> description のみ = validation 不変の additive, ISSUE-0029）。**全 domain schema + repository
-> interface が frozen**。残るのは write/sync 拡張（双方向同期, S5 後続）のみ。
+> hand / action schema も `1.0` frozen（ISSUE-0011）。以後の bump はすべて **optional フィールドの
+> 追加 = additive**（required も既存フィールドの意味も不変）:
+> - `action` `1.1` = `street` の意味を明文化（description のみ, ISSUE-0029）/ `1.2` = `position`（ISSUE-0032）
+> - `hand` `1.1` = `board_timeline`（ADR-0044）/ `1.2` = `button_seat` + `position_map`（ISSUE-0032）
+>
+> **全 domain schema + repository interface が frozen**。残るのは write/sync 拡張（双方向同期,
+> S5 後続）のみ。
 
 ## 7. drift detection（最小方針）
 

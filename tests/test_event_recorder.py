@@ -28,6 +28,7 @@ def test_audio_envelope():
         "raw_text": "ベット 500",
         "seat": None,
         "confidence": None,
+        "position": None,
     }
 
 
@@ -107,3 +108,15 @@ def test_recorded_envelopes_match_schema():
         env = event_to_envelope(ev)
         errors = list(validator.iter_errors(env))
         assert not errors, f"{env} -> {errors}"
+
+
+def test_audio_envelope_round_trips_position():
+    """読み上げられたポジション名も記録・復元する（無いと replay が別 actor を選ぶ, ISSUE-0032）。"""
+    from integration.replay import event_from_envelope
+
+    ev = AudioEvent(
+        action="call", amount=0, timestamp=2.0, raw_text="BTN コール", position="BTN",
+    )
+    env = event_to_envelope(ev)
+    assert env["position"] == "BTN"
+    assert event_from_envelope(env) == ev

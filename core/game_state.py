@@ -224,6 +224,19 @@ class GameStateManager:
         """legacy はハンドのライフサイクルを持たない（常に受け付ける = 挙動不変, ISSUE-0028）。"""
         return True
 
+    @property
+    def button_seat(self):
+        """legacy は**ボタンを持たない**（rollback path, ISSUE-0032）。
+
+        ボタン回転は rules-aware backend（pokerkit）だけに入れた。legacy の単純ラウンドロビンを
+        変えると既存の挙動不変契約が崩れるため。呼び出し側は None を「ボタン不明」として扱う。
+        """
+        return None
+
+    def position_map(self) -> dict[int, str]:
+        """legacy はポジション名を持たない（ボタン不明のため, ISSUE-0032）。"""
+        return {}
+
     def fold_through(self, until_seat: int, max_folds: int | None = None) -> list[int]:
         raise NotImplementedError("fold_through is not supported by the legacy backend")
 

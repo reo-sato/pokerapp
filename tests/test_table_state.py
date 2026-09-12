@@ -97,6 +97,22 @@ class TestBuildTableState:
         assert st.dealt_in_seats == [1, 2]
         assert st.likely_folded_seats == [2]
 
+    def test_button_and_positions_are_shown(self):
+        """ボタンが卓の脇から目視できる（回転していることを実機で確認するため, ISSUE-0032）。"""
+        st = build_table_state(
+            session_id="s", hand_id=2, now=1000.0, updated_at="t",
+            seats=[1, 2, 3], hole_cards={}, presence={}, board=[], board_timeline=[],
+            button_seat=1, position_map={2: "SB", 3: "BB", 1: "BTN"},
+        )
+        assert st.button_seat == 1
+        assert [s.position for s in st.seats] == ["BTN", "SB", "BB"]
+        assert st.to_dict()["button_seat"] == 1
+
+    def test_button_is_absent_without_a_rules_aware_backend(self):
+        st = self._state({})
+        assert st.button_seat is None
+        assert all(s.position == "" for s in st.seats)
+
 
 class TestPresenceSnapshot:
     """RFIDThread が卓状態に渡す在否。"""

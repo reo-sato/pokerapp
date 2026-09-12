@@ -22,6 +22,7 @@ from typing import Optional, Protocol, runtime_checkable
 from core.constants import STREET_ORDER
 from core.engine_types import LegalContext
 from core.game_state import GameStateManager, PlayerState, Street
+from core.positions import next_button, position_map, seat_order_from_button
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,10 @@ class PokerEngine(Protocol):
     # additive（R3 推定/訂正が読む, ADR-0009 §2）。legacy は rules-aware でない stub を返す。
     def legal_context(self) -> LegalContext: ...
     def is_hand_active(self) -> bool: ...
+    def position_map(self) -> dict[int, str]: ...
+
+    @property
+    def button_seat(self) -> Optional[int]: ...
     def is_legal_actor(self, seat: int) -> bool: ...
     def fold_through(self, until_seat: int, max_folds: Optional[int] = None) -> list[int]: ...
     def pots(self) -> list[dict]: ...
@@ -62,16 +67,20 @@ class PokerEngine(Protocol):
 
 
 def create_game_state(
-    backend: str, players: list[PlayerState], sb: int, bb: int
+    backend: str, players: list[PlayerState], sb: int, bb: int,
+    button_seat: Optional[int] = None,
 ) -> PokerEngine:
     """backend 文字列から game-state 実装を生成する。
 
     - "pokerkit": `PokerkitGameState`（preview）
     - それ以外（既定 "legacy"）: 既存 `GameStateManager`
+
+    `button_seat` は **最初のハンドで使うボタンの 1 つ手前**の席（省略時は最大の席番号 =
+    ボタン導入前と同じ並び, ISSUE-0032）。legacy はボタンを持たないので無視される。
     """
     if backend == "pokerkit":
         try:
-            engine = PokerkitGameState(players, sb, bb)
+            engine = PokerkitGameState(players, sb, bb, button_seat=button_seat)
         except ImportError:
             # 既定 backend が pokerkit (Phase G) のため、未導入環境でも起動だけは
             # 落とさない。rules-aware 機能（actor 推定/合法手射影等）は無効になる。
@@ -95,7 +104,10 @@ class PokerkitGameState:
     - mid-hand の `update_stack` / `rebuy` は次ハンドから反映（pokerkit state は hand 単位）。
     """
 
-    def __init__(self, players: list[PlayerState], sb: int, bb: int) -> None:
+    def __init__(
+        self, players: list[PlayerState], sb: int, bb: int,
+        button_seat: Optional[int] = None,
+    ) -> None:
         from pokerkit import Automation  # 遅延 import（backend 選択時のみ pokerkit 必須）
 
         if not players:
@@ -104,8 +116,14 @@ class PokerkitGameState:
         self._bb = bb
         self._players: dict[int, PlayerState] = {p.seat: p for p in players}
         self._seats: list[int] = sorted(self._players)          # 安定 seat 順
-        self._seat_to_idx: dict[int, int] = {s: i for i, s in enumerate(self._seats)}
-        self._idx_to_seat: dict[int, int] = {i: s for i, s in enumerate(self._seats)}
+        # ボタン（ISSUE-0032 / 仕様 FR-05b）。**次の `new_hand` で使う**席を持ち、ハンド開始時に
+        # 1 つ進める。初期値 None は「最大の席番号から始める」= ボタン導入前と同じ並びになる
+        # （`next_button` 参照。golden fixtures の 1 ハンド目が不変）。
+        self._button_seat: Optional[int] = button_seat
+        # pokerkit へ渡す並び（index 0=SB … 末尾=BTN）。`new_hand` で作り直す。
+        self._order: list[int] = list(self._seats)
+        self._seat_to_idx: dict[int, int] = {s: i for i, s in enumerate(self._order)}
+        self._idx_to_seat: dict[int, int] = {i: s for i, s in enumerate(self._order)}
         self._stacks: dict[int, int] = {s: self._players[s].stack for s in self._seats}  # 永続（hand 跨ぎ）
         self._hand_id: int = 0
         self._state = None
@@ -128,14 +146,23 @@ class PokerkitGameState:
         from pokerkit import NoLimitTexasHoldem
 
         self._hand_id += 1
-        stacks = [self._stacks[s] for s in self._seats]
+        # ボタンを 1 つ進めてから並びを作る（ボタンの次が SB, 末尾が BTN）。
+        self._button_seat = next_button(self._seats, self._button_seat)
+        self._order = seat_order_from_button(self._seats, self._button_seat)
+        self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
+        self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
+        stacks = [self._stacks[s] for s in self._order]
         self._hand_start_stacks = list(stacks)
         self._state = NoLimitTexasHoldem.create_state(
             self._automations, True, 0, (self._sb, self._bb), self._bb, stacks, len(stacks),
         )
         self._hand_active = True
         self._final_pots = []
-        logger.info("New hand (pokerkit) started: hand_id=%d", self._hand_id)
+        logger.info(
+            "New hand (pokerkit) started: hand_id=%d button=seat %d (%s)",
+            self._hand_id, self._button_seat,
+            " ".join(f"{s}:{n}" for s, n in self.position_map().items()),
+        )
         return self._hand_id
 
     def advance_street(self, street: Street) -> None:
@@ -249,6 +276,17 @@ class PokerkitGameState:
             and st.actor_index is not None
             and self._idx_to_seat.get(st.actor_index) == seat
         )
+
+    @property
+    def button_seat(self) -> Optional[int]:
+        """現ハンドのボタン席（`new_hand` 前は None, ISSUE-0032）。"""
+        return self._button_seat
+
+    def position_map(self) -> dict[int, str]:
+        """seat → ポジション名（BTN/SB/BB/UTG…, 仕様 §6.1）。ボタン未確定なら空。"""
+        if self._button_seat is None:
+            return {}
+        return position_map(self._seats, self._button_seat)
 
     def is_hand_active(self) -> bool:
         """ハンドが進行中か（新ハンド前 / `end_hand` 後は False, ISSUE-0028）。

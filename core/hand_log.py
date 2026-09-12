@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -19,6 +20,9 @@ class ActionRecord:
     source: dict  # {"camera": bool, "audio": bool, "rfid": bool}
     needs_review: bool
     confidence: float = 0.0  # 0.0–1.0 (FR-42: RFID+audio+camera 合意度)
+    # そのアクションを行った席の **ポジション名**（BTN/SB/BB/UTG…, 仕様 §6.2, ISSUE-0032）。
+    # ボタンを持たない backend（legacy）では空文字。additive。
+    position: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -34,6 +38,7 @@ class ActionRecord:
             "source": self.source,
             "needs_review": self.needs_review,
             "confidence": self.confidence,
+            "position": self.position,
         }
 
 
@@ -56,6 +61,10 @@ class HandSummary:
     # main/side pot スナップショット [{"amount": int, "eligible_seats": [int,...]}]。
     # rules-aware backend が end_hand 時に算出（legacy は []）。additive（F3 / R5）。
     pots: list = field(default_factory=list)
+    # このハンドの **ディーラーボタンの席**（仕様 FR-05b, ISSUE-0032）。ボタンを持たない
+    # backend（legacy）では None。`position_map` は seat → ポジション名（仕様 §6.1）。additive。
+    button_seat: Optional[int] = None
+    position_map: dict = field(default_factory=dict)
     # ボード各枚の **配布時刻**（RFID が最初にそのカードを検出した時刻）。
     # [{"index": 1..5, "card": "Qc", "dealt_at": ISO8601}]。index 昇順。
     # ターン/リバーの配布時刻はベッティングラウンドの区切りとして**アクションの時刻と対応**するため
@@ -73,6 +82,8 @@ class HandSummary:
             "board": self.board,
             "board_source": self.board_source,
             "board_timeline": self.board_timeline,
+            "button_seat": self.button_seat,
+            "position_map": {str(k): v for k, v in self.position_map.items()},
             "players": self.players,
             "pot_total": self.pot_total,
             "pots": self.pots,

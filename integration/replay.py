@@ -54,6 +54,7 @@ def event_from_envelope(d: dict) -> Event:
         return AudioEvent(
             action=d["action"], amount=d["amount"], timestamp=d["timestamp"],
             raw_text=d["raw_text"], seat=d.get("seat"), confidence=d.get("confidence"),
+            position=d.get("position"),
         )
     if t == "rfid":
         return RFIDEvent(

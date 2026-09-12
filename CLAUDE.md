@@ -74,6 +74,7 @@ pokerapp/
 │   ├── oidc.py                    ← OidcProvider 抽象 + FakeOidcProvider + resolve_player_for_claim (L2, ADR-0031)
 │   ├── atomic_io.py               ← atomic_write_json(fsync) + read_json_file(破損退避) (B2/B7)
 │   ├── backup.py                  ← データ JSON のバックアップ (B2)
+│   ├── positions.py               ← ディーラーボタン / ポジション名の純粋ロジック (FR-05b, ISSUE-0032)
 │   ├── table_state.py             ← TableState (RFID だけから導く 卓状態: カード/有効席/ストリート, ADR-0045 D5)
 │   ├── hand_correction.py         ← HandCorrection + apply_hand_corrections オーバーレイ (B4, ADR-0036)
 │   └── hand_correction_repository.py ← ハンド訂正 append-only ストア (B4, ADR-0036)
@@ -417,6 +418,49 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 
 ---
 
+## ディーラーボタン / ポジション名（P0b, 実装済）
+
+**ハンドごとにディーラーボタンを 1 つ回す**（仕様 FR-05b）。ターン順はアクター推定の最優先の
+証拠（FR-26）なので、ボタンが回らないと 2 人超の卓では (n-1)/n のハンドで prior が誤る
+（ISSUE-0032 = 収集済みデータを壊していた欠陥）。ADR-0045 の P0b。
+
+### スコープ（現時点）
+
+- ボタンは席番号の昇順に 1 ハンド 1 つ進み、1 周で全席を訪れる。**pokerkit backend のみ**
+  （legacy は `button_seat=None` / `position_map()={}` = 単純ラウンドロビンのまま、rollback path 不変）。
+- `position_map`（seat → BTN/SB/BB/UTG/UTG+1/UTG+2/MP/HJ/CO, 仕様 §6.1）はボタンから決定的に
+  導出する。**heads-up はボタンが SB**（`["BB", "BTN"]`。pokerkit の post 位置と実測で一致）。
+- ディーラーの **ポジション名の読み上げ**（「BTN、コール」, 仕様 §7）を席番号と同じ明示証拠として
+  使う。両方あれば**席番号が優先**。卓に無いポジション名は**無視**する（手番は動かない）。
+- 記録は additive: `HandSummary.button_seat` / `position_map`、`ActionRecord.position`
+  （schema `hand` `1.2` / `action` `1.2`）。`AudioEvent.position` は sidecar 記録・replay でも往復する
+  （記録しないと replay が別 actor を選ぶ）。
+- 1 ハンド目のボタン席は `--cli` / GUI のセッション設定で訊く（空 Enter = 最大の席番号 =
+  **ボタン導入前と同じ並び**）。卓状態モニタにボタンとポジション名を表示する。
+
+### 構成
+
+| 要素 | ファイル | 役割 |
+|------|---------|------|
+| 純粋ロジック | `core/positions.py` | 並び（`seat_order_from_button`）/ 回転（`next_button`）/ 名前（`position_names`, `position_map`）/ 別名パース（`parse_position`, `POSITION_ALIASES`） |
+| engine | `core/poker_engine.py` | `new_hand` でボタンを進め、ボタンの次の席を先頭に `create_state`。`button_seat` / `position_map()` |
+| 明示証拠の解決 | `integration/engine.py` | `_sensed_seat`（席番号 → ポジション名の順）。RFID の検出は**証拠にしない**（ISSUE-0033） |
+| 読み上げ | `audio/recognizer.py` | `parse_action` が正準ポジション名を `AudioEvent.position` に載せる（席への解決はしない） |
+
+### 設計上の注意
+
+- **初期ボタン = 最大の席番号**。ボタンの次が SB になるので 1 ハンド目の並びが `sorted(seats)` と
+  一致し、ボタン導入前の挙動（既存 golden fixtures）が変わらない。回転はハンド 2 から現れる。
+- ポジション名の**席への解決は engine 側**。recognizer はゲーム状態を持たない規約のため、
+  正準名を持ち回るだけにする。
+
+### Out of scope（現時点）
+
+- ミッドセッションの着席/離席に伴うボタンの飛び越し（`_seats` は engine 生成時に固定）。
+- GUI（`gui/dashboard.py`）でのボタン表示・手動指定。`turn_order` の明示記録（`position_map` から導ける）。
+
+---
+
 ## 実装状況（現時点）
 
 > **記録の正本は「事後・確率的推定」に移す（ADR-0045, 2026-09-12 決定 / 実装は未着手）**
@@ -424,10 +468,10 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 > 現在の**決定的なライブ確定**は ISSUE-0009 の暫定が定着した drift（**ISSUE-0031**）。今後は
 > **ライブ経路 = 暫定表示**、**正本 = 事後推定**（pokerkit の合法手列に対する制約付きビーム探索 +
 > 観測尤度、決定的）とし、読み取りは **live ⊕ estimate ⊕ staff corrections** で重ねる。
-> 下の「実装状況」表は **現時点で動いているもの**の記述であり、ADR-0045 の実施順序 P0〜P8 は未着手。
+> 下の「実装状況」表は **現時点で動いているもの**の記述であり、ADR-0045 の実施順序 P1〜P8 は未着手。
 > **P0a 済**: ISSUE-0033（RFID の appear を actor 証拠に使っており配っただけで誤 fold）→ **Fixed**。
-> **P0b 未着手（最優先・既存データを壊し続けている）**: ISSUE-0032（ディーラーボタンが回らず
-> ターン順 prior が (n-1)/n のハンドで誤る）。
+> **P0b 済**: ISSUE-0032（ディーラーボタンが回らずターン順 prior が (n-1)/n のハンドで誤る）→
+> **Fixed**（§ ディーラーボタン / ポジション名）。
 
 
 | 機能 | 状態 | 備考 |
@@ -439,7 +483,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | ESP32-S3 USB CCID firmware 実装 | ✅ 実機 1 slot で契約 §5–§8 通し確認（`watch` 再発火含む） | `firmware/esp32s3-pn5180-ccid/`（ESP-IDF）: USB CCID 記述子（class 0x0B, bulk IN/OUT のみ）+ CCID メッセージ処理（ATR / Get UID `FF CA 00 00 00`→UID+90 00 / Parameters T=1 7B）+ TinyUSB カスタムクラス登録（`ccid_force_link()`）+ PN5180 読取り（`jef-sure/pn5180`, ISO15693 のみ, UID **MSB-first**, presence debounce）。**2026-09-10 実機**: MUX scan で通電 ch を自動選択 → `reader 0 ready` → `🎴 UID=E0:04:…(8B)` → `probe_pcsc raw` で `PRESENT` + カード無し `SW=6A81` / 置いて `SW=9000`+UID ＝ 契約 §5/§6/§7/§8 を host 側で確認。**設計確定（ADR-0040）**: slot は仮想カード常時挿入、カード有無は Get UID の SW のみ（Windows usbccid は interrupt 通知を無視・polling せず bind 時 IccPowerOn しか送らないため）。`probe_pcsc watch` で `seat 1 UID=…(8B)` が置く→離す→置くで 2 回発火（本番 `RFIDThread` 経路）。**複数 reader 化の準備は実装済（実機未検証）**: RF 時分割（inventory 直後に `pn5180_setRF_off`）/ 未通電 reader の skip + 配線チェック / poll 周期の計測ログ / **CCID slot は 1 固定（`CCID_SLOT_COUNT=1`, `bMaxSlotIndex=0`, `bcdDevice=0x0201`）+ 物理 reader 台数は `PN5180_READER_COUNT`（既定 11）で、Get UID の P2 = reader index（`FF CA 00 <k> 00`、範囲外 `6A 86`、台数 `FF CA 00 FF 00`、契約 v1.2 / ADR-0041。台数を変えても USB 記述子は不変）** + `bMaxCCIDBusySlots=1` / 高速 inventory + mask DFS anti-collision + Get UID 連結（重ね置き = 契約 v1.1 §6、ISSUE-0021。**実機: 1 台 15 ms、2 枚/3 枚重ね OK・再発火なし**。coll_pos DFS + 確認間引きで 11 台 1 周 ≤ 300 ms を狙う（実機未検証）。coll_pos の安全弁 = 採用分割で 3 ラウンド連続 0 枚なら 1 bit DFS に固定）。**init の耐性（ISSUE-0023）**: 配線表 13 本の NSS を init 前に全 High 固定、`pn5180_init` 失敗は共有 SPI を作り直して 1 回再試行 → それでも失敗した reader だけ skip（全台停止しない）。**2026-09-11 実機（`076b844`）: 10 台接続で `PN5180 ready: 9/11 reader`（未通電 #4/#11 を skip）、9 台すべてでカード検出、1 周 124〜139 ms（1 台 ≈ 14 ms）**。配線表 `PN5180_READERS` は実機の挿し方（コネクタ #4=ch3 の BUSY 不通を飛ばして #1,#2,#3,#5,…,#12 の若い順）に振替済み。振替後の起動（`0e93de4`）は `PN5180 ready: 10/11 reader`、host 側の `list/check/watch` 通し OK。skip した reader は起動時に **BUSY 非依存の SPI で chip 生存確認**し「BUSY 線のみ不通 / 電源・chip 不良」を WARN で切り分ける（`405f218` 実機: ch10 は `FW=00 04` = chip 生存・**BUSY 1 本のみ不通**）。**10 台の poll 実測**: カード無し 1 周 138 ms（1 台 ≈ 13.8 ms）/ **満載（8 席 × 2 枚 + board）1 周 538 ms**（目標 ≤ 300 ms 未達）。原因は **`RX_COLL_POS` が実機では常に使えない**こと（衝突は UID 先頭バイトで起き受信 1 byte のみ = prefix を作れず 1 bit DFS の空枝が RX timeout を舐める, ISSUE-0021）。対策として **定常状態は「前回 UID を `mask_len=32` の完全一致 inventory で狙い撃ち」**（`PN5180_FAST_TARGETED_PROBE`, 既定 on）に変更し、衝突しない経路に。**応答待ちの上限はフレーム長に連動**（26.48 kbps, mask を伸ばすと送信が伸びるため固定値では応答前に打ち切る）。実機 `047ee1e` で **538 → 433 ms**（命中 340/342、`coll_pos fallback` 0、probe 最大 3、`応答待ち最長 7.4 ms`）。さらに **簡略サイクル**（狙い撃ちが当たる reader は `PN5180_FAST_CONFIRM_EVERY` 回に (N-1) 回、Stay Quiet と root probe を省いて狙い撃ちだけで終える。空の reader は対象外なので席 1 枚目/flop 1 枚目/turn/river は毎 poll 検出）+ `CARD_POLL_INTERVAL_MS` 100→50 を追加。**配線振替で 11/11 ready 達成後の満載実測（`081c9bb`）: 1 周 min/avg/max = 238/324/**495** ms**（簡略 180/297, 狙い撃ち 533/540 命中, `coll_pos fallback` 0）。max が突出した原因は **簡略サイクルが全 reader で lockstep**（旧実装は完全確認のたびにカウンタを 0 に畳むため、ハンドの切れ目で全 reader が 0 枚になると位相が揃う）。対策として **完全確認を `(poll 周回 + reader index) % N == 0` の reader だけに限定**（位相源 = poll 1 周の末尾で +1 する自由走行カウンタ。0 枚を跨いでも崩れず、周期はどの reader も厳密に N、1 周に完全確認するのは `ceil(11/N)` 台）+ **`PN5180_FAST_CONFIRM_EVERY` 3→6**（max が 300 ms 未満になる最小の N。遅れの上限 ≈ 1.7 s、対象は「既に札がある reader に増えた札」= 席 2 枚目 / flop 2・3 枚目のみ）。**11 台満載の実測（`83ad762`）: 1 周 min/avg/max = 272/297〜301/**331** ms**（min/max の差 36〜59 ms = 1〜2 台ぶん、`簡略 266/319` = 完全確認 1.83 台/周 = 11/6 ちょうど、`coll_pos fallback` 0、狙い撃ち 97〜98% 命中）＝ **目標 ≤ 300 ms を平均で達成 / hard bound 0.5 s に 34% の余裕（ISSUE-0021 Fixed）**。札を置いた瞬間だけ過渡で max 720 ms・probe 8（root DFS で衝突を解く）。**配線表**は BUSY 不通の コネクタ #4(ch3)/#11(ch10) を予備に降格し board2=#12(ch11) / board3=#13(ch12)（修理せず振替, ISSUE-0023）。**`PN5180_SPI_HZ` は 1 MHz 据え置きで確定**（5 MHz の効果は 3〜7% に対しハーネスに BUSY 導通不良の実績があり、間欠 SPI 化けの方が高リスク, ISSUE-0021 OQ5）。**残**: `rfid_cards.json` への実カード登録（`tools/register_cards.py`）、音声→JSON/PHH + ストリート遷移の通し、CCID/ドライバのログ水準を DEBUG に、reader 0 の `RST診断 during_rst=0`（ISSUE-0023 Open）。経緯: `docs/worklog/2026-09-10-rfid-ccid-end-to-end-bringup.md` / `docs/worklog/2026-09-10-multi-reader-firmware-prep.md` / `docs/worklog/2026-09-10-pn5180-reader-index-p2-firmware.md` / `docs/worklog/2026-09-11-pn5180-init-resilience.md` |
 | RFID カード照合 | ✅ 実装済 | `rfid/card_master.py` |
 | ストリート自動遷移 (RFID) | ✅ 実装済 | board 枚数 3/4/5 で遷移 |
-| **卓状態モニタ (ADR-0045 D5)** | ✅ 実装済 | **RFID だけから導く卓状態**（カード / 有効席 / ストリート）を publish する経路。**アクション推定に依存しない**ので、音声なし・アクションがダミーでも実プレイ環境で検証できる。`core/table_state.py`（純粋な導出）+ `output/table_state_writer.py`（`logs/{session}.table_state.json` を atomic 上書き + 実質変化時だけ `.jsonl` に append）+ `tools/table_monitor.py`（LAN のブラウザ / iPad 向けページ。1 秒自動更新 + **反映遅延を画面表示**）。config `table_state.enabled` 既定 **true**。**有効席は 1 つの真偽値に潰さない**（ADR-0045 D4）: `dealt_in`（配られた）/ `present`（いま載っている）/ `away_sec`（離席秒数）/ `likely_folded`（`DEFAULT_FOLD_HINT_SEC=20` 秒超の**表示上の推測**）。ストリートは **RFID 由来**（ボード枚数）と engine のものを**並べて表示**（pokerkit では `advance_street` が no-op なので両者は食い違い得る = それ自体が見たい情報）。カードが**外れても** RFIDEvent は出ないため、engine が `TABLE_STATE_INTERVAL=1.0` 秒ごとに定期 publish する |
+| **卓状態モニタ (ADR-0045 D5)** | ✅ 実装済 | **RFID だけから導く卓状態**（カード / 有効席 / ストリート）を publish する経路。**アクション推定に依存しない**ので、音声なし・アクションがダミーでも実プレイ環境で検証できる。`core/table_state.py`（純粋な導出）+ `output/table_state_writer.py`（`logs/{session}.table_state.json` を atomic 上書き + 実質変化時だけ `.jsonl` に append）+ `tools/table_monitor.py`（LAN のブラウザ / iPad 向けページ。1 秒自動更新 + **反映遅延を画面表示**）。config `table_state.enabled` 既定 **true**。**有効席は 1 つの真偽値に潰さない**（ADR-0045 D4）: `dealt_in`（配られた）/ `present`（いま載っている）/ `away_sec`（離席秒数）/ `likely_folded`（`DEFAULT_FOLD_HINT_SEC=20` 秒超の**表示上の推測**）。**ボタン席とポジション名**も表示する（回転を卓の脇から目視確認するため, ISSUE-0032）。ストリートは **RFID 由来**（ボード枚数）と engine のものを**並べて表示**（pokerkit では `advance_street` が no-op なので両者は食い違い得る = それ自体が見たい情報）。カードが**外れても** RFIDEvent は出ないため、engine が `TABLE_STATE_INTERVAL=1.0` 秒ごとに定期 publish する |
 | **観測の時刻精度 (ADR-0044)** | ✅ 実装済 | アクション履歴は**音声録音の時系列と突き合わせて再生**する。実時刻が要るのは **fold の時刻**と**ターン/リバーの配布時刻**の 2 つ（カード内容は事後で可・フロップ内順序は無意味）。(1) **合成 silent-fold の時刻** = RFID の「席のカードが消えたまま戻っていない時刻」（`RFIDThread.seat_cards_absent_since` → engine `_synth_fold_timestamp`）。**不在は fold の判定に使わない**（プレイヤーがカードを持ち上げるため。判定は従来どおり合法手・actor 推定、**時刻だけ**差し替え）。ハンド範囲外は棄却、新ハンド/訂正で観測を捨てる、`source.rfid` で出所を示す、confidence は据え置き。(2) **`HandSummary.board_timeline`** = `[{index, card, dealt_at}]`、時刻は**最初の検出**で固定（再発火で上書きしない）。ターン=4 枚目 / リバー=5 枚目がラウンドの区切り、フロップは 3 枚の最小値が開始。`hand` schema `1.1`（additive）|
 | **ミスディール訂正 (ADR-0043)** | ✅ 実装済 | 一度読ませた札を外して正しい札を読ませ直す操作。**`cb <位置>`** = ボード N 枚目の記録を取り消す（他の位置は不動 = 順序が壊れない）/ **`cs <席>`** = その席のホールカードを捨てて読み直す（2 枚上限に引っかからない）。`--cli` のコマンド + staff API control（`correct_board`(`index`) / `correct_seat`(`seat`) = iPad も同経路, ADR-0039）。engine が記録を取り消し、`on_card_correction` フックで RFID 側の割り当て・デバウンスも落とす。**absence からの自動判定はしない**（一瞬の読み落ちと区別できず ISSUE-0025/0026 の壊れ方が再発する）。訂正は「記録を捨てて物理を読み直す」= **冪等**（外す前に打っても打ち直せば収束）。訂正したハンドは `needs_review`、ストリートは戻さない。**音声語彙には追加しない**（「訂正」は一般語で誤爆が正しい記録を消す方向に働く）。ハンドごとのやり直しは従来どおり `n` |
 | Confidence 算出 | ✅ 実装済 | センサー組み合わせ行列 |
@@ -463,15 +507,15 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **seat→player 選択 GUI + live 有効化 (S2.x E3)** | ✅ 実装済 | `gui/seat_selection.py`（`SeatSelectionDialog`: モーダル, 席ごと割当 / 未登録その場 create / 空席 skip / carry-forward）+ `gui/dashboard.py`「座席設定」ボタン + `integration/engine.py:set_seat_player_map` + `main.py` 結線（UUID4 session_id）。既定 off で挙動不変, ISSUE-0006 Resolved |
 | **event 記録 sidecar (R1)** | ✅ 実装済 | `output/event_recorder.py`（opt-in `recording.enabled`, 挙動不変, ADR-0010, `reconstruction_event` schema） |
 | **pokerkit game-state backend (R2) + live 既定切替 (G)** | ✅ 実装済 | `core/poker_engine.py`（`engine.backend`, ADR-0009/0012。actor/合法手/side-pot 権威）。**Phase G で live 既定を `pokerkit` に切替**（`config_default.json`、`requirements.txt` で `pokerkit>=0.7,<0.8` pin）。`legacy` は config で rollback 可。実機 E2E は Phase H |
-| **rules-aware ライブ結線 + silent-fold 合成 (R3 D1/D2a/D2b)** | ✅ 実装済 (preview) | `audio/recognizer.py:apply_corrections`（合法手射影）+ `integration/engine.py:_handle_rules_aware_action`/`_resolve_actor`（合法手射影・actor 推定・`fold_through` で silent-fold 合成 cap=2/atomic・合成 fold 記録）。**actor の証拠は明示発話席のみ**（ISSUE-0033 で RFID の検出を証拠から外した = カードの**存在**は**行動**ではなく、配布と区別できないため。RFID は同席の裏付けとしてのみ効く）。legacy 既定は不変 |
+| **rules-aware ライブ結線 + silent-fold 合成 (R3 D1/D2a/D2b)** | ✅ 実装済 (preview) | `audio/recognizer.py:apply_corrections`（合法手射影）+ `integration/engine.py:_handle_rules_aware_action`/`_resolve_actor`（合法手射影・actor 推定・`fold_through` で silent-fold 合成 cap=2/atomic・合成 fold 記録）。**actor の証拠は明示発話のみ**（席番号「シート3」→ ポジション名「BTN」の順で解決 = `_sensed_seat`, ISSUE-0032。ISSUE-0033 で RFID の検出を証拠から外した = カードの**存在**は**行動**ではなく、配布と区別できないため。RFID は同席の裏付けとしてのみ効く）。legacy 既定は不変 |
 | **決定的 replay harness + golden fixtures (R4 F1/F3a)** | ✅ 実装済 | `integration/replay.py` + `tools/replay_hand.py`（clock 注入で決定的、ADR-0011）。golden fixtures: `tests/fixtures/reconstruction/`（**green 5: 射影 2 + 合成 2 + side-pot 1**、DoD #2 達成）。round-trip 決定性 = `tests/test_reconstruction.py` |
 | **派生 confidence + side-pot (R3 D3 / R5 F3a)** | ✅ 実装済 (preview) | `integration/engine.py:derive_confidence`（3 因子 L/A/Q、rules-aware 経路のみ。legacy 固定表は不変）+ needs_review 5 条件。`HandSummary.pots`（main/side、legacy は `[]`）。**Phase D 完了** |
 | **派生 confidence 重み較正 (R5/F2)** | ✅ 実装済 | ADR-0033: 重み（暫定）を golden fixtures archetype + 境界グリッド由来の較正プロパティ P1〜P8（順序単調性 / 閾値分離 / 合法性ゲート / synth-fold）で正当化・回帰ロック。数値据え置き。`tools/calibrate_confidence.py`（ハーネス）+ `tests/test_confidence_calibration.py`。「暫定」表記を解除 |
-| **hand/action schema freeze (R5 F3b)** | ✅ 実装済 | `docs/contracts/schemas/{hand,action}.schema.json`（hand `1.0` / action `1.1`, additionalProperties:true, ISSUE-0011 Fixed）+ `_MODELS` 登録 + code↔contract + golden→schema テスト。**`action.street` は「そのアクションが行われたストリート」**（適用後ではない。rules-aware backend はラウンドを閉じたアクションで次ストリートへ自動進行するため, ISSUE-0029） |
+| **hand/action schema freeze (R5 F3b)** | ✅ 実装済 | `docs/contracts/schemas/{hand,action}.schema.json`（hand `1.2` / action `1.2`, additionalProperties:true, ISSUE-0011 Fixed。additive 追加: board_timeline=ADR-0044 / button_seat・position_map・position=ISSUE-0032）+ `_MODELS` 登録 + code↔contract + golden→schema テスト。**`action.street` は「そのアクションが行われたストリート」**（適用後ではない。rules-aware backend はラウンドを閉じたアクションで次ストリートへ自動進行するため, ISSUE-0029） |
 | **PHH call/check (F3c)** | ✅ 確認済（変更不要） | PHH 標準では check/call は同一トークン `cc`（check-or-call）。区別は非標準で pokerkit が parse 不能になるため統一が正。check/call の別は JSON ログ側で保持（`output/phh_exporter.py` にコメント） |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0009） |
-| ディーラーボタン自動回転 / SB/BB 自動 post | ❌ 未実装 | future phase |
+| **ディーラーボタン回転 + ポジション名 (P0b)** | ✅ 実装済 | `core/positions.py`（純粋ロジック）+ `PokerkitGameState` がハンドごとにボタンを 1 つ回す（§ ディーラーボタン / ポジション名, ADR-0045 P0b, ISSUE-0032 Fixed）。SB/BB の自動 post は pokerkit backend が元から行う。**legacy backend はボタンを持たない**（単純ラウンドロビンのまま = rollback path 不変） |
 | schema `1.0` freeze (S4) | ✅ 実装済 | 全 model（session/seat/hand_ref・ledger/point・settlement・order_request/player_session_summary）を `1.0` freeze（ADR-0019, ISSUE-0005 Resolved）。code↔contract test 全 model カバー |
 | 実機 E2E (Phase H) | 🟡 RFID 実機 + `--cli` 1 ハンド通し 済（JSON 検証まで） | **2026-09-12 実機（11 reader / pokerkit backend / `audio.enabled=false`）**: `n` → 席 1・2 のホールカード各 2 枚 → flop(pos 1,2,3) → turn(pos 4) → river(pos 5) → キーボードのアクション（`チェック` / `ベット５` / `コール` / `ベット`）→ `w 1` → JSON 保存まで通り、**保存された JSON を検証済**: `street` が実際の進行と一致（preflop×2 / flop×3 / turn×3 / river×2, ISSUE-0029 修正確認）、`pots` に side-pot 情報あり（`{"amount":44,"eligible_seats":[1,2]}`）、`confidence` は派生値（keyboard 投入 = 合法 + audio のみ・裏付けなしで一律 0.575。legacy 固定 0.5 ではない）、金額を言わない `ベット` は最小ベットに snap + `needs_review`。**board 位置は安定**（同じ札の再発火が同じ位置に収まり付け替え無し = ISSUE-0025/0026 の修正確認。ただし 1 台で同じ札の再検出が繰り返し出る = 結合が弱い台の間欠読み。位置が固定なので記録は無害）。残りはクリーン環境の通し確認（§ ロードマップ 残作業）。**PN5180 firmware 契約は凍結済（ADR-0034, ISSUE-0015 Fixed）**= `docs/contracts/rfid-usb-ccid.md` **v1.2**（ADR-0040 で §2/§5/§8 を additive 追記、ADR-0041 で §3/§4/§6/§8 = 1 slot + P2 選択, ISSUE-0022）。**実機 RFID の bring-up 診断ツール + 手順は実装済**: `tools/probe_pcsc.py`（list/check/watch/**raw**, 契約 §3-8 を production の `PCSCBridge`/`RFIDThread` で検査。list は物理リーダー台数も表示、raw は pyscard 直叩きで OS の slot 状態と connect の hresult を表示）+ `docs/hardware-qa-checklist.md`。**2026-09-10**: 1 台で `raw`（`SW=9000`+UID）と `watch`（再発火 2 件）まで実機確認。**残**: `rfid_cards.json` の実カード登録は **1 デッキ 52 枚 済**（ジョーカー 2 枚のみ未登録）。**運用手順: ハンドが終わったらボードを下げて `n` で新ハンド**（engine と RFID の位置が揃う唯一の同期点, ISSUE-0026。`n` 前のアクションは記録されず WARN が出る, ISSUE-0028）。マイク有りの音声→JSON/PHH の通し、`--export-phh`、`--ledger`（`viewer_api.enabled`）+ スマホ注文の通し。**`config.json` に `engine.backend="pokerkit"` を明示**すること（既存 config に `engine` セクションが無いと legacy にフォールバックし side-pot / 派生 confidence / actor 推定が無効 = `pots: []`・`confidence: 0.5` 固定がその状態） |
 | **cross-app boundary (S5 read)** | ✅ 実装済 | repository interface frozen（ADR-0020）+ `api/client.py:ViewerApiClient`（Python の local↔API 分離点）+ round-trip test。read boundary を二言語で実証（mobile + Python） |
@@ -667,7 +711,8 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    既定 off）**。将来プレイヤーが LINE/Google でサインアップできる土台。**残（実環境タスク）**: 実
    LINE/Google provider の HTTP（token 交換 / JWKS）、hosted デプロイ（env override / cloud モード config /
    CORS 絞り / レート制限）、web redirect 変種。
-8. **未実装の単機能**: Vosk 代替 ASR、ディーラーボタン自動回転 / SB-BB 自動 post。
+8. **未実装の単機能**: Vosk 代替 ASR。（ディーラーボタン回転 / SB-BB 自動 post は **pokerkit
+   backend で実装済** = ADR-0045 P0b / ISSUE-0032 Fixed。legacy backend は持たない。）
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。
 
@@ -973,7 +1018,9 @@ python main.py --cli                         # CLI モード (hand logger)。マ
 #   空白を打ち損ねても通る（w/r のみ, ISSUE-0034）
 python main.py --cli --log-file           # ログを端末に出さない（実機テスト推奨。卓は table_monitor で見る）
 #   それ以外の行は読み上げ文として parse_action に通る（例: チェック / シート3 コール / ベット 500）。
+#   席の代わりにポジション名でも可（例: BTN コール / ビッグブラインド チェック, ISSUE-0032）
 #   ひらがなも可（照合前にカタカナへ正規化, ISSUE-0027。ASR の書き起こし揺れにも効く）
+#   起動時の設定で「1ハンド目のボタン席」を訊く（空 Enter = 最大の席番号。以降ハンドごとに回る）
 python main.py                               # GUI モード (hand logger)
 python main.py --players                     # Player Registry 画面 (S1, 別画面)
 python main.py --sessions                    # Session / Seating Viewer (WS2-α, read-only, 別画面)

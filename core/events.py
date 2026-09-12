@@ -45,3 +45,6 @@ class AudioEvent:
     # 以下は additive (R3/R4 用)。既存経路は未使用 = 挙動不変。
     seat: Optional[int] = None        # 明示発話された席番号（"シート3"）。actor 推定/replay 用
     confidence: Optional[float] = None  # Whisper per-segment 信頼度 [0,1]（派生 confidence の入力）
+    # 明示発話された **ポジション名**（"BTN、コール" の BTN, 正準名。仕様 §7 / FR-26, ISSUE-0032）。
+    # 席への解決はボタンを知っている engine 側が行う（`seat` が無いときの代替証拠）。
+    position: Optional[str] = None

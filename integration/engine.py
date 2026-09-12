@@ -735,12 +735,49 @@ class IntegrationThread(threading.Thread):
                 board=self._board_cards,
                 board_timeline=self._build_board_timeline(),
                 engine_street=gs.street,
+                button_seat=getattr(gs, "button_seat", None),
+                position_map=self._safe_position_map(),
             )
         except Exception:  # noqa: BLE001 — 表示用の派生。失敗でハンドを止めない
             logger.exception("卓状態の組み立てに失敗しました — スキップします")
             return
         self._table_state_published_at = self._clock()
         self._table_state_writer.publish(state, observed_at=observed_at)
+
+    def _safe_position_map(self) -> dict[int, str]:
+        try:
+            return self._game_state.position_map()
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _position_of(self, seat: int) -> str:
+        """席のポジション名（BTN/SB/BB/UTG…）。ボタンを持たない backend では空文字。"""
+        try:
+            return self._game_state.position_map().get(seat, "")
+        except Exception:  # noqa: BLE001 — 表示用の付随情報。失敗で記録を止めない
+            return ""
+
+    def _sensed_seat(self, event: AudioEvent) -> Optional[int]:
+        """発話が明示した席（= 「誰が行動したか」の明示証拠, 仕様 §7 / FR-26）。
+
+        席番号（"シート3"）が最優先。無ければ **ポジション名**（"BTN、コール"）を現ハンドの
+        `position_map` で席に解決する。ボタンを持たない backend（legacy）や、そのポジションが
+        卓に無い場合は None（= 明示証拠なし = engine の手番を維持）。
+
+        RFID の検出はここに入らない（カードの**存在**は**行動**ではない, ISSUE-0033）。
+        """
+        if event.seat is not None:
+            return event.seat
+        if not event.position:
+            return None
+        for seat, name in self._safe_position_map().items():
+            if name == event.position:
+                return seat
+        logger.debug(
+            "ポジション %r は現在の卓に無いため無視します（position_map=%s）",
+            event.position, self._safe_position_map(),
+        )
+        return None
 
     def _build_board_timeline(self) -> list[dict]:
         """ボード各枚の配布時刻を index 昇順で返す（ADR-0044）。
@@ -824,6 +861,7 @@ class IntegrationThread(threading.Thread):
             source=source,
             needs_review=needs_review,
             confidence=confidence,
+            position=self._position_of(seat),
         )
         self._current_actions.append(record)
 
@@ -837,10 +875,10 @@ class IntegrationThread(threading.Thread):
     ) -> tuple[int, bool, list[int]]:
         """明示発話席から actor を推定する（ADR-0009 §4 を ISSUE-0033 で改訂）。
 
-        prior = engine の合法手番。**明示発話席（`event.seat`）だけ**を sensed とし、prior と
-        異なれば silent-fold 合成（`fold_through`, cap=SILENT_FOLD_CAP・atomic）で sensed まで
-        手番を進める。合成成功なら actor=sensed、cap 超過/到達不可なら prior 維持（合成せず）。
-        いずれの競合（sensed≠prior）も needs_review。
+        prior = engine の合法手番。**明示発話（席番号 or ポジション名）だけ**を sensed とし
+        （`_sensed_seat`）、prior と異なれば silent-fold 合成（`fold_through`,
+        cap=SILENT_FOLD_CAP・atomic）で sensed まで手番を進める。合成成功なら actor=sensed、
+        cap 超過/到達不可なら prior 維持（合成せず）。いずれの競合（sensed≠prior）も needs_review。
 
         **RFID の seat 読みは actor の証拠にしない**（ISSUE-0033 / ADR-0045）。RFID が観測するのは
         「その席に**カードがある**」であって「その席が**行動した**」ではない。ホールカードの配布は
@@ -852,7 +890,7 @@ class IntegrationThread(threading.Thread):
         Returns: (actor, conflict, 合成 fold した席列)
         """
         prior = legal_ctx.actor_seat
-        sensed = event.seat
+        sensed = self._sensed_seat(event)
 
         if sensed is None or sensed == prior:
             return prior, False, []
@@ -888,6 +926,7 @@ class IntegrationThread(threading.Thread):
             pot_after=gs.pot,
             stack_after=gs.get_stack(seat),
             source={"camera": False, "audio": False, "rfid": from_rfid},
+            position=self._position_of(seat),
             needs_review=True,
             confidence=SYNTH_FOLD_CONFIDENCE,
         )
@@ -935,8 +974,9 @@ class IntegrationThread(threading.Thread):
 
         source = {"camera": has_camera, "audio": True, "rfid": has_rfid}
         # D3: 3 因子の派生 confidence（ADR-0009 §6）。audio は当該アクションにつき常に存在。
-        # audio が actor と一致するか（明示席がないか同席なら一致）。
-        audio_agree = event.seat is None or event.seat == actor
+        # audio が actor と一致するか（明示の席/ポジションが無いか同席なら一致）。
+        sensed = self._sensed_seat(event)
+        audio_agree = sensed is None or sensed == actor
         confidence = derive_confidence(
             apply_ok=apply_ok,
             whisper_conf=event.confidence if event.confidence is not None else 1.0,
@@ -966,6 +1006,7 @@ class IntegrationThread(threading.Thread):
             source=source,
             needs_review=needs_review,
             confidence=confidence,
+            position=self._position_of(actor),
         )
         self._current_actions.append(record)
 
@@ -1071,6 +1112,8 @@ class IntegrationThread(threading.Thread):
             board=list(self._board_cards),
             board_source=self._board_source,
             board_timeline=self._build_board_timeline(),
+            button_seat=getattr(gs, "button_seat", None),
+            position_map=dict(self._safe_position_map()),
             players=players_info,
             pot_total=sum(
                 a.amount for a in self._current_actions

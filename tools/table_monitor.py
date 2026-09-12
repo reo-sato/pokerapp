@@ -57,6 +57,7 @@ _PAGE = """<!doctype html>
  .seat.out { opacity:.45; }
  .seat.folded { border-color:#6e3b3b; }
  .seat .no { font-size:13px; color:#9aa0a6; }
+ .seat .pos { color:#e8eaed; background:#2d333b; border-radius:4px; padding:1px 5px; font-size:11px; }
  .seat .cards { font-size:20px; font-weight:700; margin:4px 0; min-height:28px; }
  .tag { display:inline-block; font-size:11px; padding:1px 7px; border-radius:999px; margin-right:4px; }
  .t-present { background:#1f3a24; color:#7ee787; }
@@ -90,7 +91,8 @@ async function tick(){
     if (s.present) tag = '<span class="tag t-present">卓上</span>';
     else if (s.likely_folded) tag = `<span class="tag t-folded">fold らしい ${s.away_sec}s</span>`;
     else if (s.dealt_in) tag = `<span class="tag t-away">離れて ${s.away_sec ?? "?"}s</span>`;
-    return `<div class="${cls}"><div class="no">席 ${s.seat}</div>
+    const pos = s.position ? ` <span class="pos">${s.position}</span>` : "";
+    return `<div class="${cls}"><div class="no">席 ${s.seat}${pos}</div>
       <div class="cards">${(s.cards||[]).join(" ") || "—"}</div>${tag}</div>`;
   }).join("");
   const tl = (d.board_timeline||[]).map(e =>
@@ -99,7 +101,8 @@ async function tick(){
     <h1>卓状態モニタ — ${d.session_id||""} / ハンド ${d.hand_id}</h1>
     <div class="meta">更新 ${d.updated_at||"—"}
       ${lag==null?"":`／ 反映遅延 <span class="lag ${lagClass(lag)}">${lag.toFixed(1)} 秒</span>`}
-      ${d.engine_street?`／ engine: ${d.engine_street}`:""}</div>
+      ${d.engine_street?`／ engine: ${d.engine_street}`:""}
+      ${d.button_seat?`／ ボタン: 席 ${d.button_seat}`:""}</div>
     <div class="board"><span class="street">${d.rfid_street||""}</span>
       ${(d.board||[]).map(cardHtml).join("") || "<span class='meta'>ボードなし</span>"}</div>
     <div class="seats">${seats}</div>
@@ -147,6 +150,7 @@ def _format_text(state: dict) -> str:
         f"session {state.get('session_id')} / hand {state.get('hand_id')} "
         f"/ 更新 {state.get('updated_at')} (遅延 {state.get('age_sec')}s)",
         f"street(RFID) {state.get('rfid_street')}  engine {state.get('engine_street')}  "
+        f"button {state.get('button_seat') or '—'}  "
         f"board {' '.join(state.get('board') or []) or '—'}",
     ]
     for s in state.get("seats", []):
@@ -158,7 +162,8 @@ def _format_text(state: dict) -> str:
             tag = f"離席({s['away_sec']}s)"
         else:
             tag = "未配布"
-        lines.append(f"  席{s['seat']}: {' '.join(s['cards']) or '—':<8} {tag}")
+        pos = f" {s.get('position') or '':<5}"
+        lines.append(f"  席{s['seat']}{pos}: {' '.join(s['cards']) or '—':<8} {tag}")
     return "\n".join(lines)
 
 

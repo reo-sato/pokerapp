@@ -129,18 +129,18 @@ review 不要にできることと矛盾するので差し替える）。`confid
 
 ## 実施順序（各段階で独立に出荷でき、テストは緑を保つ）
 
-| # | 内容 | 契約 |
-|---|------|------|
-| **P0a** | **RFID appear を actor 証拠から外す**（明示発話席は残す）。golden `out-of-turn-rfid` は「配布と区別できない」ので**期待値を作り直す** | なし |
-| **P0b** | **ボタン回転**（FR-05b）+ `button_seat` / `position_map` / `position` の記録 + ポジション名の解釈 | `hand` / `action` を MINOR bump（optional） |
-| **P1** | sidecar v2（既定 on / プレゼンス遷移 / poll サイクル / 時計統一 / セッションヘッダ） | `reconstruction_event` draft を拡張 |
-| **P2** | 音声保存 + 発話時刻 + n-best | 同上 |
-| **P3** | **計測**（D7）。ここで estimator の可否と初期パラメータを決める | — |
-| **P4** | estimator v0（オフライン、events のみの tier）+ `hand_estimate` sidecar + ライブとの差分レポート | 新 schema（draft） |
-| **P5** | 読み取りオーバーレイ（viewer / API / PHH）+ `action_id`（訂正の宛先） | MINOR bump |
-| **P6** | 時刻 tier（fold 区間 / ストリート時刻 / 音声アラインメント出力） | additive |
-| **P7** | firmware: board リーダーを簡略サイクルから除外（ターン/リバーの検出遅れ最大 ~1.8 s を削る） | 契約 additive |
-| **P8** | ヒューリスティック confidence を記録から撤去、較正を事後確率に向け直す | — |
+| # | 内容 | 契約 | 状態 |
+|---|------|------|------|
+| **P0a** | **RFID appear を actor 証拠から外す**（明示発話席は残す）。golden `out-of-turn-rfid` は「配布と区別できない」ので**期待値を作り直す** | なし | ✅ 実装済（ISSUE-0033 Fixed, 2026-09-12） |
+| **P0b** | **ボタン回転**（FR-05b）+ `button_seat` / `position_map` / `position` の記録 + ポジション名の解釈 | `hand` `1.2` / `action` `1.2`（optional 追加） | ✅ 実装済（ISSUE-0032 Fixed, 2026-09-12。`core/positions.py`。初期ボタン = 最大席番号にして 1 ハンド目を不変に保った） |
+| **P1** | sidecar v2（既定 on / プレゼンス遷移 / poll サイクル / 時計統一 / セッションヘッダ） | `reconstruction_event` draft を拡張 | 未着手 |
+| **P2** | 音声保存 + 発話時刻 + n-best | 同上 | 未着手 |
+| **P3** | **計測**（D7）。ここで estimator の可否と初期パラメータを決める | — | 未着手 |
+| **P4** | estimator v0（オフライン、events のみの tier）+ `hand_estimate` sidecar + ライブとの差分レポート | 新 schema（draft） | 未着手 |
+| **P5** | 読み取りオーバーレイ（viewer / API / PHH）+ `action_id`（訂正の宛先） | MINOR bump | 未着手 |
+| **P6** | 時刻 tier（fold 区間 / ストリート時刻 / 音声アラインメント出力） | additive | 未着手 |
+| **P7** | firmware: board リーダーを簡略サイクルから除外（ターン/リバーの検出遅れ最大 ~1.8 s を削る） | 契約 additive | 未着手 |
+| **P8** | ヒューリスティック confidence を記録から撤去、較正を事後確率に向け直す | — | 未着手 |
 
 **破壊的な schema 変更は発生しない**（`hand` / `action` は `additionalProperties: true`、
 `reconstruction_event` は未 freeze の draft）。唯一の判断は `confidence` の**意味の再定義**で、

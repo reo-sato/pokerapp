@@ -10,6 +10,12 @@
   "board": [],
   "board_source": "",
   "board_timeline": [],
+  "button_seat": 3,
+  "position_map": {
+    "1": "SB",
+    "2": "BB",
+    "3": "BTN"
+  },
   "players": [
     {
       "seat": 1,
@@ -61,7 +67,8 @@
         "rfid": false
       },
       "needs_review": false,
-      "confidence": 0.49
+      "confidence": 0.49,
+      "position": "BTN"
     }
   ],
   "review_required": false

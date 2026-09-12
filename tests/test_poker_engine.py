@@ -111,7 +111,9 @@ def test_rebuy_between_hands(pk):
     pk.rebuy(3, 5000)
     assert pk.get_stacks()[3] == 15000
     pk.new_hand()
-    assert pk.get_stacks()[3] == 15000  # 次ハンドに反映
+    # 次ハンドに反映。ただしボタンが回る（ISSUE-0032）ので seat3 がブラインドを出すことがあり、
+    # `get_stacks` は post 後の「後ろに残った額」を返す。持ち込み総額 = stack + 当ストリートの commit。
+    assert pk.get_stacks()[3] + pk.committed(3) == 15000
 
 
 def test_allin_short_stack_calls_all_in():

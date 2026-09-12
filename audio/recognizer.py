@@ -13,6 +13,7 @@ from core.constants import (
     WHISPER_PROMPT_JA,
 )
 from core.events import AudioEvent
+from core.positions import parse_position
 
 if TYPE_CHECKING:
     from core.engine_types import LegalContext
@@ -188,8 +189,12 @@ def parse_action(text: str, confidence: Optional[float] = None) -> Optional[Audi
     3. **ひらがなはカタカナに正規化**してから照合する（`ACTION_KEYWORDS` はカタカナ + 英字）。
        ASR が「ちぇっく」と書き起こす場合と、CLI で IME 変換せずに打った場合の両方を拾う
        （ISSUE-0027）。`raw_text` は元のテキストをそのまま残す。
+    4. 席番号（"シート3"）に加え **ポジション名**（"BTN、コール"）も拾う（仕様 §7 / FR-26,
+       ISSUE-0032）。どちらも「誰が行動したか」の明示証拠だが、席への解決はボタンを知っている
+       engine 側の責務なので、ここでは正準名を持ち回るだけにする。
     """
-    lower = _to_katakana(text).lower()
+    normalized = _to_katakana(text)
+    lower = normalized.lower()
 
     found_action: Optional[str] = None
     found_pos = len(text)
@@ -224,6 +229,7 @@ def parse_action(text: str, confidence: Optional[float] = None) -> Optional[Audi
         raw_text=text,
         seat=_extract_seat_no(text),
         confidence=confidence,
+        position=parse_position(normalized),
     )
 
 

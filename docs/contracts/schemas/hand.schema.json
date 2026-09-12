@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pokerapp.local/contracts/hand.schema.json",
   "title": "Hand",
-  "version": "1.1",
-  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。1.1 = board_timeline を optional 追加（ボード各枚の配布時刻。ADR-0044, additive）。",
+  "version": "1.2",
+  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。1.1 = board_timeline を optional 追加（ボード各枚の配布時刻。ADR-0044, additive）。1.2 = button_seat / position_map を optional 追加（ディーラーボタン回転。仕様 FR-05b/§6.1, ISSUE-0032, additive）。",
   "type": "object",
   "additionalProperties": true,
   "required": ["hand_id", "session_id", "started_at", "ended_at", "players", "actions"],
@@ -31,6 +31,17 @@
           "dealt_at": {"type": "string", "minLength": 1, "description": "ISO 8601。replay では注入 clock 由来。"}
         }
       }
+    },
+    "button_seat": {
+      "type": ["integer", "null"],
+      "minimum": 1, "maximum": 9,
+      "description": "このハンドの**ディーラーボタンの席**（仕様 FR-05b）。ハンドごとに 1 つ回る。ボタンを持たない backend（legacy）では null（ISSUE-0032）。"
+    },
+    "position_map": {
+      "type": "object",
+      "description": "seat（文字列化した席番号）→ ポジション名（仕様 §6.1）。`button_seat` から決定的に導出する。ボタン未確定なら空オブジェクト（ISSUE-0032）。",
+      "additionalProperties": {"enum": ["BTN", "SB", "BB", "UTG", "UTG+1", "UTG+2", "MP", "HJ", "CO"]},
+      "propertyNames": {"pattern": "^[1-9]$"}
     },
     "players": {
       "type": "array",

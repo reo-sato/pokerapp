@@ -40,6 +40,9 @@ def event_to_envelope(event: RecordableEvent) -> dict:
             "raw_text": event.raw_text,
             "seat": event.seat,              # additive (R3/R4)。未設定なら null。
             "confidence": event.confidence,  # additive (Whisper 信頼度)。未設定なら null。
+            # 読み上げられたポジション名（"BTN、コール"）。席番号と同じく actor 推定の
+            # 明示証拠なので、記録しないと replay が別の actor を選びうる（ISSUE-0032）。
+            "position": event.position,
         }
     if isinstance(event, RFIDEvent):
         return {

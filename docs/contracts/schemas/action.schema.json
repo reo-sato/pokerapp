@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pokerapp.local/contracts/action.schema.json",
   "title": "Action",
-  "version": "1.1",
-  "description": "ActionRecord.to_dict() の契約（hand core, ADR-0010 R5）。ISSUE-0011 の決定により additionalProperties:true で 1.0（false 昇格は後続、範囲膨張防止）。ADR-0009 の推定 additive フィールドは optional。1.1 = street の意味を明文化（description のみ / validation 不変, ISSUE-0029）。",
+  "version": "1.2",
+  "description": "ActionRecord.to_dict() の契約（hand core, ADR-0010 R5）。ISSUE-0011 の決定により additionalProperties:true で 1.0（false 昇格は後続、範囲膨張防止）。ADR-0009 の推定 additive フィールドは optional。1.1 = street の意味を明文化（description のみ / validation 不変, ISSUE-0029）。1.2 = position を optional 追加（ディーラーボタン回転で解決する席のポジション名。ISSUE-0032, additive）。",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -33,6 +33,11 @@
     },
     "needs_review": {"type": "boolean"},
     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "position": {
+      "type": "string",
+      "enum": ["BTN", "SB", "BB", "UTG", "UTG+1", "UTG+2", "MP", "HJ", "CO", ""],
+      "description": "そのアクションを行った席の**ポジション名**（仕様 §6.2）。ボタン席から導出（`core/positions.py`）。ボタンを持たない backend（legacy）では空文字（ISSUE-0032, additive）。"
+    },
     "legal_actions": {"type": "array", "items": {"type": "string"}},
     "amount_to_call": {"type": "integer", "minimum": 0},
     "corrected_from": {"type": ["string", "null"], "description": "修復前の生 ASR action"},

@@ -75,9 +75,29 @@ def _prompt_session_config() -> dict:
             pass
         print("正の整数を入力してください。")
 
+    # 1 ハンド目のボタン席（FR-05b / ISSUE-0032）。以降はハンドごとに 1 つずつ回る。
+    # 内部表現は「次の new_hand で 1 つ進める前の席」なので、入力された席の **1 つ手前**を渡す。
+    while True:
+        raw = input(f"1ハンド目のボタン席 (1〜{num_seats}, 空Enterで{num_seats}): ").strip()
+        if not raw:
+            first_button = num_seats
+            break
+        try:
+            first_button = int(_normalize_cli_command(raw))
+            if 1 <= first_button <= num_seats:
+                break
+        except ValueError:
+            pass
+        print(f"1〜{num_seats} の整数を入力してください。")
+    seats = [p["seat"] for p in players]
+    button_seat = seats[(seats.index(first_button) - 1) % len(seats)]
+
     log_dir = input("ログ保存先 (空Enterで ./logs): ").strip() or "./logs"
 
-    return {"players": players, "sb": sb, "bb": bb, "log_dir": log_dir}
+    return {
+        "players": players, "sb": sb, "bb": bb,
+        "button_seat": button_seat, "log_dir": log_dir,
+    }
 
 
 def _make_event_recorder(cfg: dict, log_dir: str, session_id: str):
@@ -153,16 +173,17 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event):
     )
 
 
-def _make_game_state(cfg: dict, players: list, sb: int, bb: int):
+def _make_game_state(cfg: dict, players: list, sb: int, bb: int, button_seat=None):
     """config.engine.backend で game-state 実装を選ぶ (R2, ADR-0009)。
 
     既定 "legacy" = 従来の `GameStateManager`（挙動不変）。"pokerkit" は preview backend
-    （要 pokerkit, default-off）。
+    （要 pokerkit, default-off）。`button_seat` は **1 ハンド目のボタンの 1 つ手前**の席
+    （省略時は最大の席番号 = ボタン導入前と同じ並び, ISSUE-0032）。legacy は無視する。
     """
     from core.poker_engine import create_game_state
 
     backend = cfg.get("engine", {}).get("backend", "legacy")
-    return create_game_state(backend, players, sb, bb)
+    return create_game_state(backend, players, sb, bb, button_seat=button_seat)
 
 
 def run_cli() -> None:
@@ -180,7 +201,10 @@ def run_cli() -> None:
         PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
         for p in session_cfg["players"]
     ]
-    game_state = _make_game_state(cfg, players, session_cfg["sb"], session_cfg["bb"])
+    game_state = _make_game_state(
+        cfg, players, session_cfg["sb"], session_cfg["bb"],
+        button_seat=session_cfg.get("button_seat"),
+    )
 
     session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
@@ -411,7 +435,10 @@ def run_gui() -> None:
         PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
         for p in session_cfg["players"]
     ]
-    game_state = _make_game_state(cfg, players, session_cfg["sb"], session_cfg["bb"])
+    game_state = _make_game_state(
+        cfg, players, session_cfg["sb"], session_cfg["bb"],
+        button_seat=session_cfg.get("button_seat"),
+    )
 
     # E3 (ADR-0008 / ISSUE-0006): session レイヤ接続。既定 off では従来どおり timestamp session_id。
     session_layer_enabled = cfg.get("session_layer", {}).get("enabled", False)
