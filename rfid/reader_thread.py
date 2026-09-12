@@ -139,8 +139,13 @@ class RFIDThread(threading.Thread):
             if bridge.connect():
                 bridges[reader_id] = (bridge, cfg)
                 self._last_uids[reader_id] = set()
+                # 役割は接続時に登録する（poll 時にも学習するが、**まだ一度も札が載っていない席**も
+                # 卓状態に「未配布」として出したいので、変化を待たずにここで揃える）。
                 if cfg.get("role") == "board":
+                    self._board_reader_ids.add(reader_id)
                     self._warn_obsolete_board_fields(cfg, reader_id)
+                elif isinstance(cfg.get("seat"), int):
+                    self._seat_reader_ids.setdefault(cfg["seat"], set()).add(reader_id)
                 logger.info(
                     "RFID reader ready: %s (reader %d, %s)", reader_name, reader_index, reader_id,
                 )
@@ -261,6 +266,25 @@ class RFIDThread(threading.Thread):
     def seat_cards_absent_since(self, seat: int) -> Optional[float]:
         """その席のカードが消えたまま戻っていない場合、消えた時刻（epoch）。無ければ None。"""
         return self._seat_absent_since.get(seat)
+
+    def presence_snapshot(self) -> dict[int, dict]:
+        """席ごとの現在のカード在否（卓状態の表示用, `core/table_state.py`）。
+
+        `{seat: {"present": bool, "absent_since": float | None, "uid_count": int}}`。
+        **「載っている」であって「ゲームに残っている」ではない**（ADR-0045 D4）。
+        まだ一度も検出していない席は現れない（= 未配布と区別できる）。
+        """
+        snapshot: dict[int, dict] = {}
+        for seat, reader_ids in self._seat_reader_ids.items():
+            uids: set[str] = set()
+            for reader_id in reader_ids:
+                uids |= self._last_uids.get(reader_id, set())
+            snapshot[seat] = {
+                "present": bool(uids),
+                "absent_since": self._seat_absent_since.get(seat),
+                "uid_count": len(uids),
+            }
+        return snapshot
 
     def reset_for_new_hand(self) -> None:
         """新ハンドの同期点（board 位置 + マック観測をまとめて捨てる）。

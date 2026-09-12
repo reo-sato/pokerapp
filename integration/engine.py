@@ -37,16 +37,21 @@ from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import ActionRecord, HandSummary
+from core.table_state import build_table_state
 from output.event_recorder import EventRecorder
 from output.json_writer import JsonWriter
 
 if TYPE_CHECKING:
     from core.engine_types import LegalContext
     from core.session_repository import SessionRepository
+    from output.table_state_writer import TableStateWriter
 
 logger = logging.getLogger(__name__)
 
 MATCH_WINDOW = 2.0
+# 卓状態を定期 publish する間隔（秒）。カードが外れても RFIDEvent は出ないので、
+# 有効席（= 札が載っている席）の変化はこの間隔で UI に届く。
+TABLE_STATE_INTERVAL = 1.0
 CAMERA_BUFFER_TTL = MATCH_WINDOW * 2
 
 # silent-fold 合成で許す最大席数（ISSUE-0009）。超過は合成せず prior 維持 + needs_review。
@@ -158,6 +163,8 @@ class IntegrationThread(threading.Thread):
         on_new_hand: Optional[Callable[[], None]] = None,
         on_card_correction: Optional[Callable[[str, int], None]] = None,
         seat_cards_absent_since: Optional[Callable[[int], Optional[float]]] = None,
+        seat_presence: Optional[Callable[[], dict]] = None,
+        table_state_writer: "Optional[TableStateWriter]" = None,
     ) -> None:
         """
         Args:
@@ -186,6 +193,11 @@ class IntegrationThread(threading.Thread):
                          使わない**（プレイヤーはカードを持ち上げるので不在は fold を意味しない）。
                          合成 silent-fold に **実際に札が席から離れた時刻**を与えるためだけに読む
                          （音声の時系列と突き合わせて履歴を再生するため, ADR-0044）。
+            seat_presence: 席ごとのカード在否を返す関数（`RFIDThread.presence_snapshot`）。
+                         `table_state_writer` と対で、**RFID だけから導く卓状態**（カード / 有効席 /
+                         ストリート）を publish するのに使う。None なら卓状態は在否なしで作られる。
+            table_state_writer: 卓状態スナップショットの書き出し先（`output/table_state_writer.py`）。
+                         None なら publish しない（= 挙動不変）。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -206,6 +218,11 @@ class IntegrationThread(threading.Thread):
         self._on_new_hand = on_new_hand
         self._on_card_correction = on_card_correction
         self._seat_cards_absent_since = seat_cards_absent_since
+        self._seat_presence = seat_presence
+        self._table_state_writer = table_state_writer
+        # 定期 publish の最終時刻。カードが**外れた**ときは RFIDEvent が出ないので
+        # （デバウンスは増えた UID にしか反応しない）、fold を卓状態に映すには定期更新が要る。
+        self._table_state_published_at: float = 0.0
 
         # センサーイベントのバッファ
         self._camera_buffer: list[CameraEvent] = []
@@ -258,6 +275,8 @@ class IntegrationThread(threading.Thread):
             self._drain_camera_queue()
             self._drain_rfid_queue()
 
+            self._publish_table_state_if_due()
+
             try:
                 event = self._audio_queue.get(timeout=0.1)
             except queue.Empty:
@@ -301,6 +320,11 @@ class IntegrationThread(threading.Thread):
 
     def _process_rfid_event(self, ev: RFIDEvent) -> None:
         """受信した RFIDEvent を役割に応じて振り分ける。"""
+        self._dispatch_rfid_event(ev)
+        # 卓状態はカードが動くたびに publish する（UI への反映経路, ADR-0045 D5）。
+        self._publish_table_state(observed_at=ev.timestamp)
+
+    def _dispatch_rfid_event(self, ev: RFIDEvent) -> None:
         if ev.role == "board":
             self._handle_board_rfid(ev)
         else:
@@ -659,6 +683,53 @@ class IntegrationThread(threading.Thread):
         )
         self._notify_card_correction("seat", seat)
 
+    # ――― 卓状態の publish（RFID 由来のみ。アクション推定に依存しない） ―――
+
+    def _publish_table_state_if_due(self) -> None:
+        """一定間隔で卓状態を publish する（カードが外れたことは event にならないため）。"""
+        if self._table_state_writer is None:
+            return
+        now = self._clock()
+        if now - self._table_state_published_at < TABLE_STATE_INTERVAL:
+            return
+        self._publish_table_state()
+
+    def _publish_table_state(self, observed_at: Optional[float] = None) -> None:
+        """RFID から導いた卓状態（カード / 有効席 / ストリート）を sidecar へ publish する。
+
+        アクション推定とは独立した経路。実プレイ環境で「カード読み取り・有効席・ストリート遷移が
+        プレイ速度で取れるか」「UI に反映されるか」を検証するための観測出力（ADR-0045 D4/D5）。
+        writer 未注入なら no-op（= 挙動不変）。
+        """
+        if self._table_state_writer is None:
+            return
+        gs = self._game_state
+        presence: dict = {}
+        if self._seat_presence is not None:
+            try:
+                presence = self._seat_presence() or {}
+            except Exception:  # noqa: BLE001 — 観測が取れなくても記録は続ける
+                logger.exception("seat_presence failed — 在否なしで卓状態を出します")
+        try:
+            seats = sorted(set(gs.get_stacks()) | set(presence))
+            state = build_table_state(
+                session_id=self._json_writer._session_id,  # noqa: SLF001
+                hand_id=gs.hand_id,
+                now=self._clock(),
+                updated_at=self._now_iso(),
+                seats=seats,
+                hole_cards=self._hole_cards,
+                presence=presence,
+                board=self._board_cards,
+                board_timeline=self._build_board_timeline(),
+                engine_street=gs.street,
+            )
+        except Exception:  # noqa: BLE001 — 表示用の派生。失敗でハンドを止めない
+            logger.exception("卓状態の組み立てに失敗しました — スキップします")
+            return
+        self._table_state_published_at = self._clock()
+        self._table_state_writer.publish(state, observed_at=observed_at)
+
     def _build_board_timeline(self) -> list[dict]:
         """ボード各枚の配布時刻を index 昇順で返す（ADR-0044）。
 
@@ -932,6 +1003,7 @@ class IntegrationThread(threading.Thread):
         if self._session_layer_active:
             self._assign_seats_for_hand(gs.hand_id)
         logger.info("New hand started: hand_id=%d", gs.hand_id)
+        self._publish_table_state()
 
     def _assign_seats_for_hand(self, hand_id: int) -> None:
         """S2.x: hand 開始時に seat→player を session レイヤへ write-through する（ADR-0008 §4）。
@@ -1015,6 +1087,7 @@ class IntegrationThread(threading.Thread):
         if self._on_hand:
             self._on_hand(summary)
         logger.info("Hand %d finalized. Winner: seat %d", gs.hand_id, winner_seat)
+        self._publish_table_state()
         self._current_actions = []
         # _current_actions と対称にリセットし、stale フラグが次のサマリーへ
         # 漏れない（new_hand を挟まない再 finalize でも残らない）ようにする。

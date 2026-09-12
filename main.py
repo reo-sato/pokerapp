@@ -80,6 +80,22 @@ def _make_event_recorder(cfg: dict, log_dir: str, session_id: str):
     return EventRecorder(Path(log_dir) / f"{session_id}.events.jsonl")
 
 
+def _make_table_state_writer(cfg: dict, log_dir: str, session_id: str):
+    """config.table_state.enabled（既定 true）なら TableStateWriter を返す。
+
+    RFID だけから導く卓状態（カード / 有効席 / ストリート）を
+    `logs/{session}.table_state.json` に publish する。`tools/table_monitor.py` が読む。
+    """
+    if not cfg.get("table_state", {}).get("enabled", True):
+        return None
+    from output.table_state_writer import TableStateWriter
+
+    return TableStateWriter(
+        log_dir, session_id,
+        history=cfg.get("table_state", {}).get("history", True),
+    )
+
+
 def _make_card_correction_hook(rfid_thread):
     """ミスディール訂正で RFID 側の割り当て・デバウンスも落とすフック（ADR-0043）。
 
@@ -240,6 +256,8 @@ def run_cli() -> None:
     ) if rfid_thread else None
     on_card_correction = _make_card_correction_hook(rfid_thread)
     seat_absent_since = getattr(rfid_thread, "seat_cards_absent_since", None) if rfid_thread else None
+    seat_presence = getattr(rfid_thread, "presence_snapshot", None) if rfid_thread else None
+    table_state_writer = _make_table_state_writer(cfg, session_cfg["log_dir"], session_id)
 
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
@@ -253,6 +271,8 @@ def run_cli() -> None:
         on_new_hand=on_new_hand,
         on_card_correction=on_card_correction,
         seat_cards_absent_since=seat_absent_since,
+        seat_presence=seat_presence,
+        table_state_writer=table_state_writer,
     )
     if audio_thread is not None:
         audio_thread.start()
@@ -483,6 +503,8 @@ def run_gui() -> None:
     ) if rfid_thread else None
     on_card_correction = _make_card_correction_hook(rfid_thread)
     seat_absent_since = getattr(rfid_thread, "seat_cards_absent_since", None) if rfid_thread else None
+    seat_presence = getattr(rfid_thread, "presence_snapshot", None) if rfid_thread else None
+    table_state_writer = _make_table_state_writer(cfg, session_cfg["log_dir"], session_id)
 
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
@@ -498,6 +520,8 @@ def run_gui() -> None:
         on_new_hand=on_new_hand,
         on_card_correction=on_card_correction,
         seat_cards_absent_since=seat_absent_since,
+        seat_presence=seat_presence,
+        table_state_writer=table_state_writer,
     )
 
     dash.start_threads(
