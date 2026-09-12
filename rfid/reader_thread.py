@@ -107,13 +107,12 @@ class RFIDThread(threading.Thread):
         self._last_uids: dict[str, set[str]] = {}
         # board 位置割り当て（**board reader 全台で 1 つの論理ボードを共有**, 契約 v1.3 §4）:
         # uid → board_index 1..5。どの台に載ったかではなく「ボード全体で何枚目か」で決まる。
-        self._board_index_by_uid: dict[str, int] = {}
-        # 同上の記憶: 一度外れた UID が「前と同じ位置」に戻れるように覚えておく。
-        # ボードが 0 枚になった時点でクリアする（= ハンドの切れ目）。
-        self._board_index_memory: dict[str, int] = {}
-        # board reader ごとの「いま載っている UID 集合」。位置の解放判定は **和集合**で行う
-        # （隣接リーダーの磁界が重なって 1 枚を 2 台が読む場合があるため, ISSUE-0025）。
-        self._board_uids: dict[str, set[str]] = {}
+        # **ハンド内は append-only**（一度与えた位置は返さない, ISSUE-0026）。ポーカーでは
+        # ハンド中にボードのカードが減ることはなく、engine 側の board も縮まないので、
+        # 両者を同じ規則にして構造的にずれないようにする。捨てるのは新ハンドだけ。
+        self._board_indexes: dict[str, int] = {}
+        # role=board の reader_id（新ハンドでデバウンスを落とす対象。poll 時に学習する）。
+        self._board_reader_ids: set[str] = set()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -176,11 +175,7 @@ class RFIDThread(threading.Thread):
             logger.debug("Card(s) removed from %s: %s", reader_id, sorted(removed))
 
         if cfg.get("role") == "board":
-            # board の位置は **全 board reader の UID 和集合**で管理する（契約 v1.3 §4）。
-            # reader ごとに解放すると、隣接リーダーの磁界が重なって 1 枚を 2 台が読んでいる場合に
-            # 「片方から消えただけ」で位置を失い、次の検出で別の位置を取ってしまう（ISSUE-0025）。
-            self._board_uids[reader_id] = current
-            self._sync_board_presence()
+            self._board_reader_ids.add(reader_id)
 
         # 新規タッチ検出（読み取り順を保ったまま、増えた UID ごとに 1 event）
         seen: set[str] = set()
@@ -217,23 +212,6 @@ class RFIDThread(threading.Thread):
 
     # ――― board の位置割り当て（契約 v1.3 §4: board reader 全台で 1 つの論理ボード） ―――
 
-    def _sync_board_presence(self) -> None:
-        """board reader 全台の UID 和集合に合わせて、いま載っている UID を更新する。
-
-        **位置（`_board_index_memory`）はここでは捨てない**。engine 側の board は「カードが
-        外れても縮まない」ので、RFID だけがボードが空になった時点で番号を振り直すと、
-        置き直したときに engine の古い札と混ざって同じ札が 2 か所に出る（ISSUE-0026）。
-        位置のリセットは **新ハンド（`reset_board_positions`）だけ**を同期点にする。
-
-        `_board_index_by_uid`（= いま盤上にある UID）は和集合に追従させる。**どの台からも
-        見えなくなったときだけ**解放するので、隣接リーダーの重なりで片方から消えても保たれる。
-        """
-        union: set[str] = set()
-        for uids in self._board_uids.values():
-            union |= uids
-        for uid in [u for u in self._board_index_by_uid if u not in union]:
-            del self._board_index_by_uid[uid]
-
     def reset_board_positions(self) -> None:
         """ボード位置の割り当てを捨てて次のハンドに備える（新ハンドの同期点, ISSUE-0026）。
 
@@ -245,10 +223,8 @@ class RFIDThread(threading.Thread):
         差し替えは GIL 下で原子的で、poll 側は「見えている UID との差分」で動くため、
         取りこぼしは次の poll で回復する（ロックは持たない = poll を止めない）。
         """
-        self._board_index_by_uid = {}
-        self._board_index_memory = {}
-        for reader_id in list(self._board_uids):
-            self._board_uids[reader_id] = set()
+        self._board_indexes = {}
+        for reader_id in self._board_reader_ids:
             self._last_uids[reader_id] = set()
         logger.info("新ハンド: board の位置割り当てをリセットしました")
 
@@ -260,33 +236,39 @@ class RFIDThread(threading.Thread):
         2 枚載ることもある）。よって位置は reader ごとの固定 offset ではなく
         **全 board reader を通した検出順**（= ディーラーが配った順）で決める。
 
-        - **既に位置を持っている UID はその位置を返す**（再割り当てしない）。隣接リーダーの
-          磁界が重なって 1 枚を 2 台が読むと同じ UID で 2 回発火するが、位置は 1 つに保たれ、
-          engine は同じスロットを上書きするだけになる（ISSUE-0025）。
-        - 新規 UID には空き位置の最小を与える。以前ここに居た UID には**覚えていた位置**を
-          優先して返す（1 枚だけ浮かせて戻してもボードの並びが変わらない）。
-        - 5 枚を超えたら WARN + None（engine は末尾に追記する）。
-        - 位置の解放と記憶のクリアは `_sync_board_presence`（全 board reader の和集合）が行う。
+        **ハンド内は append-only**（ISSUE-0026）。一度与えた位置は、そのカードが盤上から
+        消えても返さない。理由は 2 つ:
+
+        - **ポーカーではハンド中にボードのカードが減らない**。engine 側の board も縮まない
+          （`_handle_board_rfid` は埋めるだけ）ので、同じ規則にしておけば構造的にずれない。
+        - 位置を解放すると、**一瞬の読み落ちや札の入れ替えで空いたスロットを別の札が奪い**、
+          戻ってきた札が別位置を取って「同じ札が 2 か所」「枚数の水増し」が起きる。
+          実機 2026-09-12 で `7c` が 1→2、`Qh` が 2→4 と動いたのがこれ。
+
+        したがって:
+
+        - **既に位置を持っている UID はその位置を返す**（隣接リーダーの磁界が重なって 1 枚を
+          2 台が読むと同じ UID で 2 回発火するが、位置は 1 つに保たれる, ISSUE-0025）。
+        - 新規 UID には空き位置の最小を与える（= ディーラーが配った順に 1..5）。
+        - 5 枚を超えたら WARN + None（engine は末尾に追記する）。ボードに 6 枚目が現れるのは
+          misdeal かカードの置きっぱなしなので、黙って位置を回さず異常として出す。
+        - 捨てるのは `reset_board_positions()`（新ハンド）だけ。
         """
-        existing = self._board_index_by_uid.get(uid)
+        existing = self._board_indexes.get(uid)
         if existing is not None:
             return existing
 
-        taken = set(self._board_index_by_uid.values())
-
-        index = self._board_index_memory.get(uid)
-        if index is None or index in taken:
-            index = next((i for i in range(1, _BOARD_MAX_CARDS + 1) if i not in taken), None)
-
+        taken = set(self._board_indexes.values())
+        index = next((i for i in range(1, _BOARD_MAX_CARDS + 1) if i not in taken), None)
         if index is None:
             logger.warning(
-                "ボードが %d 枚を超えました（tag=%s）— board_index なしで記録します",
+                "ボードが %d 枚を超えました（tag=%s）— board_index なしで記録します。"
+                "ハンドを始め直すなら新ハンド（n）でリセットされます",
                 _BOARD_MAX_CARDS, uid,
             )
             return None
 
-        self._board_index_by_uid[uid] = index
-        self._board_index_memory[uid] = index
+        self._board_indexes[uid] = index
         return index
 
     def _warn_obsolete_board_fields(self, cfg: dict, reader_id: str) -> None:

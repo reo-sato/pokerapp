@@ -84,6 +84,38 @@ ISSUE-0025 の「同じ UID の再発火が同じ位置になる」は直って�
 - **ボードに同じカードが 2 枚以上あれば WARN + `needs_review`**（`_warn_duplicate_board_cards`）。
   1 組のデッキでは物理的にあり得ないので、黙って進めない。`register_cards.py list` への誘導も出す。
 
+## 追加修正（2026-09-12 実機 2 回目）: ハンド内は append-only にした
+
+上の fix（新ハンドを同期点に）を入れても、**位置の解放そのもの**が churn を生むことが実機で分かった:
+
+```
+[pos=1]: 7c → … → [pos=2]: 7c      （同じ札が 1 → 2 に移動）
+[pos=2]: Qh → … → [pos=4]: Qh      （2 → 4 に移動）
+board ['7c','7c','2h','Qh','9d']    （同じ札が 2 か所）
+```
+
+`_sync_board_presence` は「どの台からも見えなくなった UID の位置を解放」していた。すると
+**一瞬の読み落ちや札の入れ替えで空いたスロットを別の札が奪い**、戻ってきた札は別位置を取る。
+
+**ポーカーではハンド中にボードのカードが減ることはない**。engine 側の board も
+（`_handle_board_rfid` は埋めるだけで）縮まない。そこで **RFID 側もハンド内 append-only** に揃えた:
+
+- `_board_index_by_uid` / `_board_index_memory` / `_board_uids` / `_sync_board_presence` を廃止し、
+  **`_board_indexes: dict[uid, 1..5]` 1 つ**に統合。位置は一度与えたら返さない。
+- 捨てるのは `reset_board_positions()`（新ハンド）だけ。`_board_reader_ids` は poll 時に学習して
+  リセット対象の reader を覚える。
+- 6 枚目は WARN + `board_index=None`（misdeal かカードの置きっぱなし = 異常として出す。
+  「ハンドを始め直すなら新ハンド（n）でリセットされます」を WARN に添えた）。
+
+これで **RFID と engine が構造的に同一**（どちらもハンド内 append-only + 新ハンドでリセット）に
+なり、位置がずれる経路が原理的に消えた。
+
+### 併せて判明したこと
+
+- **`rfid_cards.json` の重複登録は無かった**。実機ログの `Hole card detected: seat=2 card=Jk` で
+  53 件目 = ジョーカー `Jk` と確定（52 コード + Jk）。以前の「同じカード名が 2 か所」は
+  すべて位置の churn が原因だった。
+
 ## Regression Test
 
 `tests/test_rfid.py::TestBoardGroupPositions`:
@@ -92,8 +124,12 @@ ISSUE-0025 の「同じ UID の再発火が同じ位置になる」は直って�
   それぞれ元の位置**（1 から振り直さない）。
 - `test_reset_board_positions_starts_from_one_again` — `reset_board_positions()` 後は盤上に
   残っていても 1 番から振り直す / 置き直す順が違えば番号も入れ替わる（記憶を持ち越さない）。
-- 旧 `test_empty_board_resets_positions_for_next_hand` は**本 issue で挙動を変えたため削除**
-  （上の 2 本が後継）。
+- `test_freed_position_is_not_reused_within_a_hand` — **append-only の本体**。外した札のスロットを
+  別の札が奪わず（次の空きに行く）、戻した札は元の位置に戻る。
+- `test_positions_are_shared_across_board_readers` / `test_same_card_seen_by_two_readers_keeps_one_position`
+  の末尾も append-only（全台から下げても解放しない → 次の札は空き最小 / 1..5 が埋まれば位置なし →
+  `reset_board_positions()` で初めて 1 から）に更新。
+- 旧 `test_empty_board_resets_positions_for_next_hand` は**本 issue で挙動を変えたため削除**。
 
 ## Affected Files
 

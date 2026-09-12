@@ -23,9 +23,19 @@
 - **診断を 2 つ追加**: engine の board ログに **`tag=`（UID）** を出す（「同じ札が 2 か所」が
   同一 UID か `rfid_cards.json` の重複登録かをログだけで判定できるようにする）+ **ボードに同じ
   カードが 2 枚以上あれば WARN + `needs_review`**（1 組のデッキでは物理的にあり得ない）。
-- 契約 v1.3 §4 を更新（記憶クリアの条件を「ボードが空」→「新ハンド」に、重複カードの SHOULD を追加）。
-  回帰テスト 2 本（`test_empty_board_keeps_positions_until_new_hand` /
-  `test_reset_board_positions_starts_from_one_again`）、832 passed。
+- **さらに「ハンド内 append-only」に単純化**（2026-09-12 実機 2 回目）。位置の解放そのものが churn を
+  生んでいた（`7c` が 1→2、`Qh` が 2→4 と動き、同じ札が 2 か所に並んだ）。**ポーカーではハンド中に
+  ボードのカードが減らず engine の board も縮まない**ので、RFID 側も一度与えた位置を返さないように
+  揃えた。`_board_index_by_uid` / `_board_index_memory` / `_board_uids` / `_sync_board_presence` を
+  廃止して **`_board_indexes` 1 つ**に統合。これで RFID と engine が構造的に同一（どちらもハンド内
+  append-only + 新ハンドでリセット）になり、位置がずれる経路が原理的に消えた。6 枚目の WARN には
+  「新ハンド（n）でリセットされます」を添えた。
+- 契約 v1.3 §4 を更新（**ハンド内 append-only** の MUST、リセットは新ハンドのみ、重複カードの SHOULD）。
+  回帰テスト 3 本（`test_freed_position_is_not_reused_within_a_hand` /
+  `test_empty_board_keeps_positions_until_new_hand` / `test_reset_board_positions_starts_from_one_again`）
+  + 既存 2 本の末尾を append-only に更新、832 passed。
+- **`rfid_cards.json` の重複登録は無いことを確認**（実機ログの `card=Jk` で 53 件目 = ジョーカーと確定。
+  52 コード + Jk）。以前の「同じカード名が 2 か所」はすべて位置の churn が原因だった。
 
 ### Fixed (RFID: 同じ札に別の board 位置が再割り当てされ turn が誤発火する, ISSUE-0025, 2026-09-11)
 

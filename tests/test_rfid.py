@@ -861,12 +861,20 @@ class TestBoardGroupPositions:
         p.bridge.uids = ["04:AA", "04:BB", "04:CC"]
         assert [e.board_index for e in p.poll()] == [2]   # 同じ位置に戻る
 
-    def test_freed_position_is_reusable_by_another_card(self, tmp_path: Path):
+    def test_freed_position_is_not_reused_within_a_hand(self, tmp_path: Path):
+        """ISSUE-0026: ハンド内は append-only。外した札のスロットを別の札が奪わない。
+
+        奪えると、一瞬の読み落ちや札の入れ替えで戻ってきた札が別位置を取り「同じ札が 2 か所」
+        「枚数の水増し」になる（実機 2026-09-12 で `7c` が 1→2、`Qh` が 2→4 と動いた）。
+        ポーカーではハンド中にボードの札は減らないので、append-only が正しい規則。
+        """
         p = _Poller(tmp_path, self.BOARD, _ScriptedBridge(["04:AA", "04:BB"]))
-        p.poll()
-        p.bridge.uids = ["04:BB"]              # 位置 1 が空く（ボードは空にならない）
-        p.poll()
-        p.bridge.uids = ["04:BB", "04:DD"]
+        assert [e.board_index for e in p.poll()] == [1, 2]
+        p.bridge.uids = ["04:BB"]              # 04:AA を外す（位置 1 は解放しない）
+        assert p.poll() == []
+        p.bridge.uids = ["04:BB", "04:DD"]     # 別の札 → 1 ではなく次の空き 3
+        assert [e.board_index for e in p.poll()] == [3]
+        p.bridge.uids = ["04:BB", "04:DD", "04:AA"]   # 戻した 04:AA は元の 1 のまま
         assert [e.board_index for e in p.poll()] == [1]
 
     def test_sixth_card_over_board_capacity_warns_and_has_no_index(
@@ -922,11 +930,14 @@ class TestBoardGroupPositions:
         # river: 右の台に載せて 5
         bridges[2].uids = ["04:R1"]
         assert [(e.reader_id, e.board_index) for e in poll_all()] == [("reader_2", 5)]
-        # 全台から下げたあと、未知の札を置けば空き最小 = 1（既知の札は位置を覚えている）
+        # 全台から下げても位置は残る（append-only）。1..5 が埋まっているので 6 枚目は位置なし。
         for b in bridges:
             b.uids = []
         assert poll_all() == []
         bridges[2].uids = ["04:N1"]
+        assert [e.board_index for e in poll_all()] == [None]
+        # 新ハンドで初めてリセットされ、1 から振り直す
+        thread.reset_board_positions()
         assert [e.board_index for e in poll_all()] == [1]
 
     def test_same_card_seen_by_two_readers_keeps_one_position(self, tmp_path: Path):
@@ -972,11 +983,11 @@ class TestBoardGroupPositions:
         bridges[1].uids = ["04:F1", "04:F2", "04:F3", "04:T1"]
         assert [e.board_index for e in poll_all()] == [4]
 
-        # 全台から消えて初めて解放（位置記憶は残る = ISSUE-0026）。未知の札は空き最小 = 1。
+        # 全台から消えても位置は解放しない（append-only, ISSUE-0026）。次の札は空き最小 = 5。
         bridges[1].uids = []
         assert poll_all() == []
         bridges[0].uids = ["04:N1"]
-        assert [e.board_index for e in poll_all()] == [1]
+        assert [e.board_index for e in poll_all()] == [5]
 
     def test_seat_reader_removal_does_not_clear_board_memory(self, tmp_path: Path):
         """席のカードが外れても board の位置記憶に影響しない（role で分岐していること）。"""

@@ -182,6 +182,36 @@ UID をキーにする設計を選んだ以上、**同一 UID の再入は冪等
 - turn で `席1 bet 5` → `席2 bet 10` と記録された（本来は raise）。legacy backend は読み上げを
   そのまま記録するため。rules-aware backend なら合法手射影で矯正される見込み。
 
+## 追記 3（2026-09-12）: ハンド内 append-only に単純化（ISSUE-0026 追加修正）
+
+実機 2 回目のログで、新ハンド同期点を入れても **位置の解放そのもの**が churn を生むと分かった:
+`7c` が 1→2、`Qh` が 2→4 と動き `board ['7c','7c','2h','Qh','9d']`。解放すると一瞬の読み落ちや
+札の入れ替えで空いたスロットを別の札が奪い、戻ってきた札が別位置を取る。
+
+**ポーカーではハンド中にボードのカードが減らない**（engine の board も縮まない）という事実に
+合わせて、RFID 側も **ハンド内 append-only** にした:
+
+- `_board_index_by_uid` / `_board_index_memory` / `_board_uids` / `_sync_board_presence` を廃止し
+  **`_board_indexes: dict[uid, 1..5]` 1 つ**に統合。一度与えた位置は返さない。
+- `_board_reader_ids` を poll 時に学習（`reset_board_positions` でデバウンスを落とす対象）。
+- 捨てるのは `reset_board_positions()`（新ハンド）だけ。6 枚目の WARN に「新ハンド（n）で
+  リセットされます」を添えた。
+
+**結果、RFID と engine が構造的に同一**（どちらもハンド内 append-only + 新ハンドでリセット）に
+なり、位置がずれる経路が原理的に消えた。コードも 4 つの状態 → 1 つに減った。
+
+テストは `test_freed_position_is_not_reused_within_a_hand` を新設し、既存 2 本の末尾を
+append-only の期待値に更新（旧「解放スロットは再利用できる」は意図的に廃止）。832 passed。
+
+### 実機 2 回目で分かった運用上の問題（コード変更なし）
+
+- **`n` が押されていなかった**（`Hand 0 ended`）。ハンドを始めないと board も engine もリセット
+  されない。
+- **起動時点で board リーダーに 12 枚前後載っていた**（`5 枚を超えました` WARN が 6 種類の UID）。
+  ボードは 5 枚が上限。
+- **`rfid_cards.json` は正常**: `card=Jk` が出たので 53 件目 = ジョーカー（52 + Jk）と確定。
+  重複登録という仮説は消えた。
+
 ## Related
 
 - ISSUE-0024 / ADR-0042 / 契約 `rfid-usb-ccid.md` v1.3
