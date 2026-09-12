@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted（**実装済 2026-06-14**。重みは変更せず、満たすべき較正プロパティを固定して回帰ロック）
+**Superseded by ADR-0045**（2026-09-12）。記録の正本が事後の確率推定になるため、本 ADR が較正したヒューリスティック confidence は記録経路から外れる。較正ハーネス（`tools/calibrate_confidence.py` / `tests/test_confidence_calibration.py`）は**事後確率のプロパティ**に向け直す（範囲・ASR 信頼度に対する単調性・非合法は 0 は維持。P8「合成 fold は常に review」は、裏付けのあるサイレント fold を review 不要にできることと矛盾するため差し替え）。ライブ表示の暫定 confidence としては当面そのまま残る。
+
+以下は supersede 前の記述（履歴として保持）: Accepted（**実装済 2026-06-14**。重みは変更せず、満たすべき較正プロパティを固定して回帰ロック）
 
 ## Date
 
