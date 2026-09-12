@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/player.schema.json",
+  "title": "Player",
+  "version": "1.2",
+  "description": "player registry の player 永続形 (S1)。属性は player_id + display_name + created_at。1.1 で player merge の optional な merged_into / merged_at を additive 追加 (ADR-0030)。1.2 で rename 伝播 (sync LWW) の optional な updated_at を additive 追加 (ADR-0032)。業務 validation は core が source of truth (docs/contracts/validation-rules.md)。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["player_id", "display_name", "created_at"],
+  "properties": {
+    "player_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "UUID4 hex (32 文字, lowercase)。アプリ内採番・不変。"
+    },
+    "display_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "表示名。schema は空文字のみ弾く。前後空白のみ・完全一致重複は core が弾く。"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "作成時刻 (ISO 8601)。"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "1.2 additive (ADR-0032)。最終更新時刻 (ISO 8601)。rename で更新し、sync の last-writer-wins 比較キーになる。未設定は created_at とみなす。"
+    },
+    "merged_into": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "1.1 additive (ADR-0030)。この player が merge で吸収された場合の survivor player_id。未 merge の player は本フィールドを持たない (tombstone マーカー)。read は resolve_canonical で survivor に解決する。"
+    },
+    "merged_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "1.1 additive (ADR-0030)。merge された時刻 (ISO 8601)。merged_into とセットで付く。"
+    }
+  }
+}

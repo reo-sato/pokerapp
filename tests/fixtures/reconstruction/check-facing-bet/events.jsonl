@@ -1,0 +1,3 @@
+{"type": "audio", "timestamp": 1000.0, "action": "new_hand", "amount": 0, "raw_text": "新しいハンド", "seat": null, "confidence": null}
+{"type": "audio", "timestamp": 1001.0, "action": "check", "amount": 0, "raw_text": "チェック", "seat": null, "confidence": 0.9}
+{"type": "audio", "timestamp": 1002.0, "action": "winner", "amount": 0, "raw_text": "シート1 ウィナー", "seat": null, "confidence": null}

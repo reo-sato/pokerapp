@@ -9,11 +9,9 @@ from __future__ import annotations
 
 import queue
 import threading
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from core.events import AudioEvent
 from gui.dashboard import _conf_color, _CONF_COLOR_HIGH, _CONF_COLOR_MEDIUM, _CONF_COLOR_LOW

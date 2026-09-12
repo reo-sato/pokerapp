@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/hand.schema.json",
+  "title": "Hand",
+  "version": "1.2",
+  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。1.1 = board_timeline を optional 追加（ボード各枚の配布時刻。ADR-0044, additive）。1.2 = button_seat / position_map を optional 追加（ディーラーボタン回転。仕様 FR-05b/§6.1, ISSUE-0032, additive）。",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["hand_id", "session_id", "started_at", "ended_at", "players", "actions"],
+  "properties": {
+    "hand_id": {"type": "integer", "minimum": 0},
+    "session_id": {"type": "string", "minLength": 1, "description": "ADR-0008: UUID4 hex 推奨, legacy timestamp 文字列も valid"},
+    "started_at": {"type": "string"},
+    "ended_at": {"type": "string"},
+    "blinds": {
+      "type": "object",
+      "properties": {"sb": {"type": "integer", "minimum": 0}, "bb": {"type": "integer", "minimum": 0}}
+    },
+    "board": {"type": "array", "items": {"type": "string"}},
+    "board_source": {"type": "string", "enum": ["rfid", "ocr", "manual", ""]},
+    "board_timeline": {
+      "type": "array",
+      "description": "ボード各枚の**配布時刻**（RFID が最初に検出した時刻）。index 昇順。ターン/リバーの配布時刻はベッティングラウンドの区切りとしてアクションの時刻に対応するため記録する（ADR-0044）。フロップは 3 枚の最小値がラウンド開始で、フロップ内の順序自体は意味を持たない。RFID 以外のソース・時刻未取得では空配列。",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["index", "card", "dealt_at"],
+        "properties": {
+          "index": {"type": "integer", "minimum": 1, "maximum": 5},
+          "card": {"type": "string", "minLength": 1},
+          "dealt_at": {"type": "string", "minLength": 1, "description": "ISO 8601。replay では注入 clock 由来。"}
+        }
+      }
+    },
+    "button_seat": {
+      "type": ["integer", "null"],
+      "minimum": 1, "maximum": 9,
+      "description": "このハンドの**ディーラーボタンの席**（仕様 FR-05b）。ハンドごとに 1 つ回る。ボタンを持たない backend（legacy）では null（ISSUE-0032）。"
+    },
+    "position_map": {
+      "type": "object",
+      "description": "seat（文字列化した席番号）→ ポジション名（仕様 §6.1）。`button_seat` から決定的に導出する。ボタン未確定なら空オブジェクト（ISSUE-0032）。",
+      "additionalProperties": {"enum": ["BTN", "SB", "BB", "UTG", "UTG+1", "UTG+2", "MP", "HJ", "CO"]},
+      "propertyNames": {"pattern": "^[1-9]$"}
+    },
+    "players": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["seat", "name"],
+        "properties": {
+          "seat": {"type": "integer", "minimum": 1, "maximum": 9},
+          "name": {"type": "string"},
+          "player_id": {"type": ["string", "null"], "pattern": "^[0-9a-f]{32}$", "description": "ADR-0008 additive（S2.x 接続後）"},
+          "committed": {"type": ["integer", "null"], "minimum": 0, "description": "ADR-0009 additive"}
+        }
+      }
+    },
+    "pot_total": {"type": "integer", "minimum": 0},
+    "pots": {
+      "type": "array",
+      "description": "ADR-0009 additive。main/side pot（rules-aware のみ、legacy は []）。",
+      "items": {
+        "type": "object",
+        "required": ["amount", "eligible_seats"],
+        "properties": {
+          "amount": {"type": "integer", "minimum": 0},
+          "eligible_seats": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 9}}
+        }
+      }
+    },
+    "winner_seat": {"type": "integer"},
+    "actions": {"type": "array"},
+    "review_required": {"type": "boolean"}
+  }
+}

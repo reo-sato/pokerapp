@@ -1,0 +1,10 @@
+{
+  "_comment": "注文メニューマスタ (M5, ADR-0015)。店のメニューに合わせて item を編集する。unit_amount はスタッフ確定時の prefill（最終決定権はスタッフ）。",
+  "items": [
+    {"item_name": "ビール", "unit_amount": 700},
+    {"item_name": "ジントニック", "unit_amount": 800},
+    {"item_name": "ウーロン茶", "unit_amount": 400},
+    {"item_name": "コーラ", "unit_amount": 400},
+    {"item_name": "ミネラルウォーター", "unit_amount": 300}
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "session_id": "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+  "player_id": "00000000000000000000000000000003",
+  "cash_in_total": 10000,
+  "point_spent_total": 0,
+  "order_total": 0,
+  "entry_fee": 0,
+  "point_credited_total": 0,
+  "net_due_to_store": 10000,
+  "payment_status": "partial",
+  "settled_at": "2026-06-10T23:32:00",
+  "paid_amount": 4000
+}

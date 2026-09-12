@@ -6,7 +6,6 @@ MotionDetector と parse_roi_config は合成フレームで検証する。
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from vision.motion_detector import MotionDetector, ROI
 from vision.camera import parse_roi_config

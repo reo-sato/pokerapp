@@ -8,12 +8,10 @@ Phase 7: RFID 統合 confidence スコアリングのテスト。
 """
 from __future__ import annotations
 
-import queue
 import threading
 import time
 from pathlib import Path
 
-import pytest
 
 from core.event_queue import make_audio_queue, make_camera_queue, make_rfid_queue
 from core.events import AudioEvent, CameraEvent, RFIDEvent

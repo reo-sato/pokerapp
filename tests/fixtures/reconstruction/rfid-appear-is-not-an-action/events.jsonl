@@ -1,0 +1,4 @@
+{"type": "audio", "timestamp": 4000.0, "action": "new_hand", "amount": 0, "raw_text": "新しいハンド", "seat": null, "confidence": null}
+{"type": "rfid", "timestamp": 4000.8, "tag_id": "T-AH", "card": "Ah", "reader_id": "seat_1", "role": "seat", "seat": 1, "board_index": null, "raw_tag_id": "TAH"}
+{"type": "audio", "timestamp": 4001.0, "action": "call", "amount": 0, "raw_text": "コール", "seat": null, "confidence": 0.8}
+{"type": "audio", "timestamp": 4002.0, "action": "winner", "amount": 0, "raw_text": "シート1 ウィナー", "seat": null, "confidence": null}

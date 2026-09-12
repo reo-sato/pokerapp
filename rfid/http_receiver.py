@@ -37,6 +37,9 @@ from rfid.card_master import CardMaster, normalize_tag_id
 
 logger = logging.getLogger(__name__)
 
+# RFID POST は数百 byte 程度。巨大 Content-Length による読み込み (OOM/DoS) を防ぐ上限。
+MAX_CONTENT_LENGTH = 16 * 1024
+
 
 class RFIDHTTPReceiver(threading.Thread):
     """ESP32 からの HTTP POST を受信して RFIDEvent をキューに投入するスレッド。
@@ -47,7 +50,7 @@ class RFIDHTTPReceiver(threading.Thread):
         "rfid": {
             "enabled": true,
             "transport": "http",
-            "bind_host": "0.0.0.0",
+            "bind_host": "192.168.x.x",   // ESP32 から届く PC の LAN IP（既定はローカルのみの 127.0.0.1）
             "bind_port": 8787,
             "card_master_file": "./rfid_cards.json",
             "readers": {
@@ -64,7 +67,7 @@ class RFIDHTTPReceiver(threading.Thread):
         rfid_queue: EventQueue,
         card_master: CardMaster,
         reader_configs: dict[str, dict],
-        bind_host: str = "0.0.0.0",
+        bind_host: str = "127.0.0.1",
         bind_port: int = 8787,
         stop_event: Optional[threading.Event] = None,
     ) -> None:
@@ -203,7 +206,14 @@ class _RFIDRequestHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
             return
 
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "invalid Content-Length"})
+            return
+        if length < 0 or length > MAX_CONTENT_LENGTH:
+            self._send_json(413, {"error": "payload too large"})
+            return
         body = self.rfile.read(length)
 
         receiver: RFIDHTTPReceiver = self.server._receiver  # type: ignore[attr-defined]

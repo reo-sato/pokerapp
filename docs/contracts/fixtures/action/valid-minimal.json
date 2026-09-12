@@ -1,0 +1,14 @@
+{
+  "hand_id": 2,
+  "timestamp": "2026-06-05T04:01:00.000",
+  "street": "flop",
+  "seat": 1,
+  "player_name": "P1",
+  "action": "check",
+  "amount": 0,
+  "pot_after": 500,
+  "stack_after": 9800,
+  "source": {"camera": false, "audio": true, "rfid": false},
+  "needs_review": false,
+  "confidence": 0.53
+}

@@ -1,0 +1,12 @@
+{
+  "request_id": "2a3b4c5d6e7f80918273645546372819",
+  "session_id": "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+  "player_id": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+  "item_name": "ジントニック",
+  "quantity": 2,
+  "note": "氷少なめ",
+  "status": "confirmed",
+  "requested_at": "2026-05-25T21:25:00",
+  "resolved_at": "2026-05-25T21:28:00",
+  "ledger_entry_id": "1f2e3d4c5b6a79880917263544536271"
+}

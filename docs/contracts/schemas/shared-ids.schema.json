@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/shared-ids.schema.json",
+  "title": "Shared ID formats",
+  "version": "0.1",
+  "description": "player_id / session_id / hand_id の文字列形式 $defs。documentary（参照用）。具体 schema は各 model schema 側でこの形式を踏襲する。詳細は docs/contracts/shared-ids.md を参照。",
+  "$defs": {
+    "player_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "UUID4 hex (32 文字, lowercase, ハイフンなし)。アプリ内採番・不変。S1 実装済。"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "opaque な非空文字列。UUID4 hex 推奨。採番方式は S2 で確定（planned）。"
+    },
+    "hand_id": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "現状 session 内 unique な連番 int。cross-app では (session_id, hand_id) 複合で globally unique。S2 で reconcile（ISSUE-0004）。"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+# Managed dependencies（idf.py reconfigure / build 時に取得される）。
+# 版は実機・IDF に合わせて調整。esp_tinyusb は USB スタック、pn5180 は NFC reader ドライバ。
+dependencies:
+  idf: ">=5.1"
+  # USB device スタック（TinyUSB を ESP-IDF から使う公式ラッパ）。
+  esp_tinyusb: "^1.4.0"
+  # PN5180 ドライバ（ISO14443A + ISO15693。get_all_uids で UID 列挙）。
+  # ⚠ レジストリ名は jef-sure/pn5180（GitHub repo 名 esp32-component-pn5180 とは別）。
+  # https://components.espressif.com/components/jef-sure/pn5180
+  jef-sure/pn5180: "^0.1.0"

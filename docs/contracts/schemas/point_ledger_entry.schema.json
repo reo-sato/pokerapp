@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pokerapp.local/contracts/point_ledger_entry.schema.json",
+  "title": "PointLedgerEntry",
+  "version": "1.0",
+  "description": "S3。1.0 freeze 済 (ADR-0019)。ポイント増減 1 件。append-only。player の point 残高はこの台帳の delta_points の fold が source of truth (ISSUE-0001)。spend_* は delta<0 で related_ledger_entry_id 必須、grant は delta>0。残高非負は core が enforce。詳細は docs/contracts/ledger-overview.md / ADR-0016。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entry_id", "player_id", "delta_points", "reason", "occurred_at"],
+  "properties": {
+    "entry_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "UUID4 hex。ledger レイヤが採番。一意。"
+    },
+    "player_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "registry の player_id。"
+    },
+    "delta_points": {
+      "type": "integer",
+      "description": "符号付き増減 (!=0, core)。grant は >0、spend_* は <0。残高は負にならない (core)。"
+    },
+    "reason": {
+      "type": "string",
+      "enum": ["manual_grant", "result_credit", "campaign_grant", "spend_on_buyin", "spend_on_rebuy", "spend_on_addon", "spend_on_order", "adjustment"],
+      "description": "増減理由。spend_* は related_ledger_entry_id 必須 (core)。"
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "発生時刻 (ISO 8601)。"
+    },
+    "related_ledger_entry_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "任意。spend_* / reversal-refund のとき、関係する ledger_entry の entry_id。"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "任意。session スコープの grant/credit/spend に紐づける (settlement 集計用)。"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "description": "任意。manual_grant / campaign_grant の重複防止キー (ISSUE-0001 Q4)。"
+    }
+  }
+}
