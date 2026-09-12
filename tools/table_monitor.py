@@ -32,6 +32,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Optional
 
+# リポジトリ直下を import path に入れる（他の tools/ と同じ規約）。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 _PAGE = """<!doctype html>
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

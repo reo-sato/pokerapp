@@ -268,3 +268,64 @@ class TestMonitorReader:
         out = table_monitor._format_text(state)               # noqa: SLF001
         assert "卓上" in out and "fold らしい(40.0s)" in out and "未配布" in out
         assert "flop" in out and "Qc 8s Jd" in out
+
+
+class TestAnalyzeHistory:
+    """ADR-0045 D7 の計測: 反映遅延 / 不在時間 / ストリート遷移を履歴から出す。"""
+
+    def _row(self, t: str, *, hand=1, street="preflop", observed=None, seats=()):
+        row = {
+            "session_id": "s", "hand_id": hand, "updated_at": t, "rfid_street": street,
+            "seats": [
+                {"seat": s, "dealt_in": d, "present": p, "cards": [], "away_sec": None,
+                 "likely_folded": False}
+                for s, d, p in seats
+            ],
+        }
+        if observed is not None:
+            row["observed_at"] = observed
+        return row
+
+    def test_lag_is_measured_from_observed_at(self):
+        from datetime import datetime
+
+        from tools import analyze_table_state as ats
+
+        t = "2026-09-12T10:00:01.500"
+        observed = datetime.fromisoformat("2026-09-12T10:00:01.000").timestamp()
+        result = ats.analyze([self._row(t, observed=observed)])
+        assert result["lags"] == pytest.approx([0.5])
+
+    def test_returned_and_final_absences_are_separated(self):
+        """持ち上げて戻した不在と、戻らなかった不在を分けて集計する。"""
+        from tools import analyze_table_state as ats
+
+        rows = [
+            self._row("2026-09-12T10:00:00.000", seats=[(1, True, True), (2, True, True)]),
+            self._row("2026-09-12T10:00:05.000", seats=[(1, True, False), (2, True, False)]),
+            self._row("2026-09-12T10:00:09.000", seats=[(1, True, True), (2, True, False)]),
+            self._row("2026-09-12T10:01:00.000", seats=[(1, True, True), (2, True, False)]),
+        ]
+        result = ats.analyze(rows)
+        assert result["returned"] == pytest.approx([4.0])    # 席1 は 4 秒で戻った
+        assert result["final"] == pytest.approx([55.0])      # 席2 は戻らなかった
+
+    def test_report_warns_when_threshold_is_too_low(self):
+        from tools import analyze_table_state as ats
+
+        result = {"rows": 2, "hands": [1], "lags": [], "returned": [30.0], "final": [],
+                  "streets": []}
+        assert "⚠" in ats.report(result, fold_hint_sec=20.0)
+        ok = dict(result, returned=[5.0])
+        assert "✓" in ats.report(ok, fold_hint_sec=20.0)
+
+    def test_street_transitions_are_listed_once_each(self):
+        from tools import analyze_table_state as ats
+
+        rows = [
+            self._row("2026-09-12T10:00:00.000", street="preflop"),
+            self._row("2026-09-12T10:00:30.000", street="preflop"),
+            self._row("2026-09-12T10:01:00.000", street="flop"),
+            self._row("2026-09-12T10:02:00.000", street="turn"),
+        ]
+        assert [s[2] for s in ats.analyze(rows)["streets"]] == ["preflop", "flop", "turn"]

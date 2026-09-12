@@ -64,7 +64,8 @@ fold が有効席に反映されない。履歴 `.jsonl` は**実質的に変化
 | `main.py` | `_make_table_state_writer` + `run_cli` / `run_gui` に結線 |
 | `config_default.json` | `table_state.{enabled,history}`（既定 true） |
 | `tools/table_monitor.py` | 新規。HTTP サーバ + 自動更新ページ（反映遅延を画面表示）+ `--once` の端末表示 |
-| `tests/test_table_state.py` | 新規 21 ケース |
+| `tools/analyze_table_state.py` | 新規。履歴から反映遅延 / 不在時間（戻った・戻らない別）/ ストリート遷移を集計し、しきい値の妥当性を判定 |
+| `tests/test_table_state.py` | 新規 25 ケース |
 
 ## Expected vs implemented
 

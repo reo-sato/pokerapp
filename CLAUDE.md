@@ -988,6 +988,7 @@ python tools/simulate_rfid.py register-demo && python tools/simulate_rfid.py boa
 # 卓状態モニタ（実プレイ環境の検証。音声なし・アクションはダミーで可, ADR-0045 D5）
 python tools/table_monitor.py --host 0.0.0.0 --port 8790   # iPad/スマホから http://<PCのIP>:8790/
 python tools/table_monitor.py --once                        # 端末に 1 回表示
+python tools/analyze_table_state.py                         # 反映遅延 / 不在時間 / ストリート遷移の実測 (D7)
 python tools/probe_pcsc.py list    # reader_name 列挙 + config 突き合わせ (契約 §3-4)
 python tools/probe_pcsc.py check   # config lint + connect 検査 (§5, カード不要)
 python tools/probe_pcsc.py watch --seconds 30  # 実 RFIDThread でタップ確認 (UID/役割/hot-plug, §6-8)
