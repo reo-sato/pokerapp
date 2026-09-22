@@ -42,12 +42,17 @@ Python も git も無い前提。オーナーは製品化を見据えて「一�
   `venv` / `logs` / `backups`** を除外する（`tests/test_installer.py` が両者の整合を固定）。
   `.git` があり git が使えるなら `git pull --ff-only`。
 - **アンインストール** `uninstall.cmd`: ショートカットと `venv` だけ消す（データは残す）。
-- **1 行版** `installer/bootstrap.ps1`: `irm …/bootstrap.ps1 | iex`（`| iex` の都合で param は使わず環境変数）。
-  既に展開済みなら更新モードに落とす。`.ps1` の直接実行は実行ポリシーに掛かるので、内部で
-  `powershell -ExecutionPolicy Bypass -File` を使う（`.cmd` も同様）。
-- **エンコーディング規約**: `.ps1` は **UTF-8 BOM**（Windows PowerShell 5.1 は BOM 無しを ANSI として
-  読み日本語が化ける）、`.cmd` は **ASCII のみ + CRLF**（日本語 Windows の cmd.exe は CP932 で読む。
-  日本語の案内は .ps1 側に置く）。`.gitattributes` で CRLF を固定。
+- **1 行版** `installer/bootstrap.ps1`: `irm …/bootstrap.ps1 | iex`。**ユーザーの対話コンソールの中で
+  実行される**ので書き方に制約がある: param は使えず環境変数で受ける / **`exit` を書かない**（iex の中の
+  exit はユーザーの PowerShell ウィンドウごと閉じ、結果が読めなくなる）/ **BOM を付けない**（5.1 では
+  irm の戻り値の先頭に U+FEFF が残り得て iex が失敗する）/ 全体を `& { }` で包む。既に展開済みなら
+  更新モードに落とし、取得した zip にインストーラが無ければ（ブランチ違い）明示エラーにする。
+  `.ps1` の直接実行は実行ポリシーに掛かるので、内部で `powershell -ExecutionPolicy Bypass -File` を
+  使う（`.cmd` も同様）。
+- **エンコーディング規約**: `-File` で実行する `install.ps1` は **UTF-8 BOM**（Windows PowerShell 5.1 は
+  BOM 無しを ANSI として読み日本語が化ける）、`bootstrap.ps1` は上記のとおり **BOM 無し**、`.cmd` は
+  **ASCII のみ + CRLF**（日本語 Windows の cmd.exe は CP932 で読む。日本語の案内は .ps1 側に置く）。
+  `.gitattributes` で CRLF を固定。`tests/test_installer.py` が全部を固定する。
 - **ランチャ**は `chcp 65001` + `PYTHONUTF8=1` で UTF-8 コンソールにし、hand logger は必ず
   `--log-file`（RFID ログの割り込み対策, ISSUE-0034）。
 

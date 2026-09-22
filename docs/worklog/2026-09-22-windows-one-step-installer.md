@@ -29,7 +29,7 @@ iPad / スマホ画面（Node が要る）の同梱はオーナー判断で範�
 - `.gitattributes` — **新規**。`*.cmd` / `*.ps1` を CRLF 固定。
 - `.gitignore` — `venv/` / `install.log`。
 - `pyproject.toml` — `[tool.setuptools] packages` に `api` を追加（`pip install .` で viewer API が抜けていた）。
-- `tests/test_installer.py` — **新規**（28 件）。
+- `tests/test_installer.py` — **新規**（30 件）。
 - docs: `docs/installation.md` §0 / `README.md` / `docs/adr/0057-…md` / `CLAUDE.md`（ディレクトリ構成・実装状況・
   コマンド）/ `CHANGELOG.md` / `docs/decision-log.md`。
 
@@ -48,8 +48,9 @@ iPad / スマホ画面（Node が要る）の同梱はオーナー判断で範�
 2. **Python 3.12 固定**。開発 PC で見た「py 3.14 には pyscard の wheel が無い / 3.13 には pytest が無い」の
    再発を避け、PyAudio / pyscard / ctranslate2 の wheel が揃う版に寄せる。ESP-IDF の python や
    Microsoft Store のスタブ（exit 9009）は `sys.version_info` の probe で弾く。
-3. **エンコーディング**: `.ps1` は BOM 付き UTF-8（5.1 対策）、`.cmd` は ASCII のみ（CP932 対策）。
-   日本語の案内は .ps1 側。
+3. **エンコーディング**: `-File` で実行する `install.ps1` は BOM 付き UTF-8（5.1 対策）、`.cmd` は ASCII のみ
+   （CP932 対策）。日本語の案内は .ps1 側。**`bootstrap.ps1` は逆に BOM 無し + `exit` 無し + `& { }` 包み**
+   （`irm … | iex` でユーザーの対話コンソールの中で走るため。下の Mismatches 参照）。
 4. **stderr の扱い**: 5.1 では `2>&1` + `$ErrorActionPreference=Stop` でネイティブコマンドの stderr が
    例外になる（pip の progress で落ちる）ので、`Invoke-Checked` は stderr を端末に流し exit code だけ見る。
 5. **保持リストの整合をテストで固定**: `$PreservedFiles` ⊇ `core/backup.py` の `_ROOT / "*.json"`。
@@ -57,10 +58,11 @@ iPad / スマホ画面（Node が要る）の同梱はオーナー判断で範�
 
 ## Test Results
 
-- `pytest tests/test_installer.py`（pwsh あり）— **28 passed**（構文解析 2 + DryRun 通し 1 を含む）。
-- `pytest tests/ -q --ignore=tests/test_vision.py` — pwsh あり **1176 passed** / pwsh 無し **1173 passed,
+- `pytest tests/test_installer.py`（pwsh あり）— **30 passed**（構文解析 2 + DryRun 通し 1 を含む）。
+- `pytest tests/ -q --ignore=tests/test_vision.py` — pwsh あり **1178 passed** / pwsh 無し **1175 passed,
   3 skipped**（skipped = PowerShell 検査 3 件。CI の ubuntu ランナーには pwsh があるので実行される）。
-- `ruff check .` — clean。
+- `ruff check .` — clean。GitHub Actions CI（ubuntu, pwsh あり）は最初のコミット `467f635` で **success**
+  （run #242）。
 - Windows PowerShell 5.1 向けの静的確認（Linux の pwsh 7 では検出できないもの）: PS7 専用構文
   （`??` / `?.` / 三項 / `$IsWindows` / `-LeafBase` / `GetRelativePath`）を含まない、`Join-Path` は
   すべて 2 引数、`Invoke-WebRequest` は全箇所 `-UseBasicParsing`、TLS 1.2 を明示、リポジトリのパスは
@@ -74,10 +76,23 @@ iPad / スマホ画面（Node が要る）の同梱はオーナー判断で範�
   → 行頭アンカーで修正。
 - Linux の pwsh で `-DryRun` が `Join-Path $env:LOCALAPPDATA` の null で落ちた（Windows では常に存在）
   → 環境変数が無ければ候補に入れないよう修正（Windows でも無害）。
+- コミット後の机上レビュー（`irm … | iex` の実行モデル = ユーザーの対話コンソールの中で走る）で 3 件:
+  - `bootstrap.ps1` が `exit $LASTEXITCODE` で終わっていた → iex の中の `exit` は**ユーザーの PowerShell
+    ウィンドウごと閉じる**ので「完了」もエラーも読めない → `exit` を全廃し、失敗は赤字表示にして自然終了。
+    全体を `& { }` で包み、変数・`$ErrorActionPreference` をセッションに残さない。
+  - `bootstrap.ps1` に UTF-8 BOM を付けていた → 5.1 の `irm` は戻り値の先頭に U+FEFF を残し得て `iex` が
+    失敗する（pwsh 7 でも `iex ([string][char]0xFEFF + "Write-Output ok")` は
+    `The term '﻿Write-Output' is not recognized` で失敗した = irm が BOM を落とさない環境では確実に壊れる）
+    → **BOM 無し**に変更。
+    `install.ps1`（`-File` 実行）は BOM 付きのまま。テストを「install.ps1 = BOM 有 / bootstrap.ps1 = BOM 無 +
+    exit 無」に分けた。
+  - 本 worklog の検証 one-liner が `$env:POKERAPP_BRANCH` を設定しておらず、既定の `verify-v1` の zip
+    （インストーラ未収載）を取りに行って失敗する → one-liner を修正 + zip に `installer\install.ps1` が
+    無ければ「ブランチ違い」を明示する throw を追加。
 
 ## Fixes Applied
 
-上記 2 件。
+上記 5 件。
 
 ## Remaining Gaps / Out-of-Scope
 
@@ -90,8 +105,11 @@ iPad / スマホ画面（Node が要る）の同梱はオーナー判断で範�
 
 ## 実 Windows での検証手順（オーナー用・コピペ）
 
+`verify-v1` にはまだインストーラが入っていないので、**ブランチを環境変数で明示**する（マージ後は
+`docs/installation.md` §0 の 1 行で足りる）:
+
 ```powershell
-$env:POKERAPP_INSTALL_DIR="$HOME\PokerHandLogger-test"; irm https://raw.githubusercontent.com/reo-sato/pokerapp/claude/confident-hawking-5e4hff/installer/bootstrap.ps1 | iex
+$env:POKERAPP_INSTALL_DIR="$HOME\PokerHandLogger-test"; $env:POKERAPP_BRANCH="claude/confident-hawking-5e4hff"; irm https://raw.githubusercontent.com/reo-sato/pokerapp/claude/confident-hawking-5e4hff/installer/bootstrap.ps1 | iex
 ```
 
 ## Related ADRs

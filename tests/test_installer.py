@@ -7,7 +7,9 @@ Windows ワンステップインストーラ（`install.cmd` → `installer/inst
 - 起動用 .cmd と .ps1 が揃っていて、.cmd が参照するファイルが存在する。
 - .cmd は **ASCII のみ + CRLF**（日本語 Windows の cmd.exe は CP932 で読むので日本語を書くと化ける。
   ラベル / goto は LF だけだと誤動作することがある）。
-- .ps1 は **UTF-8 BOM 付き**（Windows PowerShell 5.1 は BOM が無いと ANSI として読み、日本語が化ける）。
+- `-File` で実行する install.ps1 は **UTF-8 BOM 付き**（Windows PowerShell 5.1 は BOM が無いと ANSI として
+  読み、日本語が化ける）。`irm … | iex` で流し込む bootstrap.ps1 は逆に **BOM 無し + `exit` 無し**
+  （BOM は irm の戻り値に U+FEFF として残り得る / iex の中の exit はユーザーのウィンドウを閉じる）。
 - 更新モードで保持するファイル一覧が `core/backup.py` のデータファイル一覧を漏れなく含む
   （店舗固有データを更新で消さない）。
 - pwsh / powershell があれば構文解析と `-DryRun` の通し実行（GitHub の ubuntu ランナーには pwsh がある）。
@@ -49,10 +51,29 @@ class TestFilesAndEncodings:
         assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b""), f"{rel}: CRLF 固定"
 
     @pytest.mark.parametrize("rel", PS1_FILES)
-    def test_ps1_has_utf8_bom(self, rel):
+    def test_ps1_is_crlf(self, rel):
         raw = (ROOT / rel).read_bytes()
-        assert raw.startswith(b"\xef\xbb\xbf"), f"{rel}: PowerShell 5.1 向けに UTF-8 BOM が要る"
+        assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b""), f"{rel}: CRLF 固定"
+
+    def test_install_ps1_has_utf8_bom(self):
+        """-File で実行する install.ps1 は BOM 付き（5.1 は BOM 無しを ANSI として読み日本語が化ける）。"""
+        raw = (ROOT / "installer/install.ps1").read_bytes()
+        assert raw.startswith(b"\xef\xbb\xbf"), "install.ps1: PowerShell 5.1 向けに UTF-8 BOM が要る"
         raw[3:].decode("utf-8")  # valid UTF-8
+
+    def test_bootstrap_ps1_is_iex_safe(self):
+        """bootstrap.ps1 は `irm … | iex` でユーザーの対話コンソールの中で実行される。
+
+        - BOM は 5.1 の irm の戻り値の先頭に U+FEFF として残り得て iex が失敗するので付けない。
+        - `exit` はユーザーの PowerShell ウィンドウごと閉じて結果が読めなくなるので書かない。
+        - `& { }` で包み、変数や $ErrorActionPreference をセッションに残さない。
+        """
+        raw = (ROOT / "installer/bootstrap.ps1").read_bytes()
+        assert not raw.startswith(b"\xef\xbb\xbf"), "bootstrap.ps1: iex 経由なので BOM を付けない"
+        text = raw.decode("utf-8")
+        assert not re.search(r"^\s*exit\b", text, re.M), "iex の中の exit は PowerShell ウィンドウを閉じる"
+        assert re.search(r"^& \{", text, re.M), "全体を & { } で包む"
+        assert "-ExecutionPolicy Bypass" in text and r"installer\install.ps1" in text
 
     def test_gitattributes_pins_crlf(self):
         text = (ROOT / ".gitattributes").read_text(encoding="utf-8")

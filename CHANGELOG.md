@@ -21,7 +21,8 @@ Python の無い店舗の Windows PC に **`install.cmd` のダブルクリッ�
 - 配布形は **フォルダ in-place + venv（editable）**。データファイルがアプリのフォルダ直下にある現行設計を
   そのまま活かす（site-packages に入れない）。exe 化・データフォルダ分離・iPad 画面の API 配信は Stage 2。
 - `pyproject.toml` の `packages` に `api` を追加（`pip install .` で viewer API が抜けていた）。
-- `tests/test_installer.py`: エンコーディング（.cmd = ASCII/CRLF, .ps1 = UTF-8 BOM）、ランチャの参照先、
+- `tests/test_installer.py`: エンコーディング（.cmd = ASCII/CRLF, install.ps1 = UTF-8 BOM, bootstrap.ps1 =
+  BOM 無し + `exit` 無し = `irm | iex` 安全）、ランチャの参照先、
   更新時保持リスト ⊇ `core/backup.py` のデータ一覧、pwsh があれば構文解析 + `-DryRun` の通し。
 
 ### Changed (verify-v1 をマージ — 復元の正当性修正バッチ (ADR-0047〜0050) と合流, 2026-09-22)
