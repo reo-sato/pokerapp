@@ -1,8 +1,70 @@
 # インストール手順
 
-> 本アプリは現在 **ソースから実行**します（Windows ワンクリックインストーラは準備中）。
-> エンジニアでない方は、まず「[1. Python の準備](#1-python-の準備)」と
-> 「[2. アプリの取得とインストール](#2-アプリの取得とインストール)」だけ進めれば起動できます。
+> **店舗の Windows PC には「[0. Windows ワンステップ](#0-windows-ワンステップ店舗-pc)」だけで入ります**
+> （Python が無くても可。ADR-0057）。1 節以降は開発者向け（ソースから手動で入れる手順）です。
+
+## 0. Windows ワンステップ（店舗 PC）
+
+Python が入っていない Windows 10/11 の PC を前提にしています。**ネット接続が必要なのはインストール時だけ**です
+（Python・依存パッケージ・音声認識モデルの取得）。
+
+### 手順（店員向け）
+
+1. GitHub の **Code → Download ZIP** でこのリポジトリを取得し、`C:\PokerHandLogger` に展開する
+   （フォルダの中に `install.cmd` が見える状態にする）。
+2. `install.cmd` を**ダブルクリック**。黒い画面が開いて自動で進みます（数分〜、モデルを含めると 10 分程度）。
+   途中で「音声認識モデルを今ダウンロードしますか？」と聞かれたら Enter（= はい）。
+3. デスクトップにショートカットが 4 つできれば完了:
+
+| ショートカット | 起動するもの |
+|---|---|
+| ハンドロガー (CLI) | `main.py --cli --log-file`（ログは `logs\pokerapp.log`） |
+| 卓モニタ (iPad から閲覧) | `tools\table_monitor.py --host 0.0.0.0 --port 8790`（画面に PC の IPv4 を表示） |
+| 会計 + スマホ注文 API | `main.py --ledger --log-file`（API は `config.json` の `viewer_api.enabled=true` で有効） |
+| RFID リーダー チェック | `tools\probe_pcsc.py list` → `check` |
+
+PowerShell を開ける人は、展開の手間なく **1 行**でも入ります（既に入っていれば更新になります）:
+
+```powershell
+irm https://raw.githubusercontent.com/reo-sato/pokerapp/verify-v1/installer/bootstrap.ps1 | iex
+```
+
+### インストーラがやること（`installer\install.ps1`）
+
+1. **Python 3.12** を探し、無ければ `winget` で導入（winget が無い古い Windows では python.org の
+   インストーラをサイレント実行）。3.12 固定なのは PyAudio / pyscard / faster-whisper の Windows wheel が揃う版だから。
+2. フォルダ内に `venv` を作り、`pip install -e ".[pcsc,api]"`（RFID の PC/SC と viewer API を含む）。
+3. `config.json` を `config_default.json` から生成（既にあれば触らない）。
+4. 音声認識モデル（`config.json` の `audio.whisper_model`、既定 `medium` ≈ 1.5 GB）を先読み（任意）。
+5. デスクトップにショートカットを作成。
+6. 動作確認（主要モジュールの import と `main.py --help`）。
+7. 経過は `install.log` に残ります。失敗したときはまずここを見てください。
+
+### 更新 / アンインストール
+
+- **更新**: `update.cmd` をダブルクリック。GitHub の最新（`verify-v1`）を上書き展開します。
+  **`config.json` / `rfid_cards.json` / `menu.json` / 会計データ（`*.json`）/ `logs\` / `backups\` は保持**
+  （`core/backup.py` のデータ一覧と同じ集合。テストで整合を固定）。削除されたファイルは残ります。
+- **アンインストール**: `uninstall.cmd`。ショートカットと `venv` を消し、データは残します。
+  完全に消すときはフォルダごと削除。
+
+### 初回起動後にやること
+
+- RFID を使う: `config.json` の `rfid.enabled` を `true`、`rfid.transport` を `"pcsc"` にし、
+  「RFID リーダー チェック」で `physical readers: 11` と `check` の PASS を確認（下の 5 節）。
+- iPad / スマホから見る: `viewer_api.enabled` を `true`、`viewer_api.bind_host` を `0.0.0.0` に
+  （無認証なので**店内の信頼できる Wi-Fi のみ**）。卓モニタは設定不要（ショートカットが LAN 公開で起動）。
+- カードの登録: 店舗のデッキは `python tools/register_cards.py run --deck 1` で `rfid_cards.json` に登録
+  （同梱のものは開発用デッキ）。
+
+### うまくいかないとき
+
+| 症状 | 対処 |
+|---|---|
+| 「Python 3.12 を用意できませんでした」 | [python.org](https://www.python.org/downloads/windows/) から 3.12 を入れ（「Add python.exe to PATH」にチェック）、`install.cmd` をもう一度 |
+| pip が失敗する（社内プロキシ等） | `install.log` の URL を確認。プロキシ環境では `HTTPS_PROXY` を設定してから `install.cmd` |
+| 起動時に「venv not found」 | `install.cmd` を先に実行する |
+| PowerShell の実行ポリシーのエラー | `.cmd` は Bypass 付きで起動するので通常は出ない。出る場合は PowerShell を管理者で開き `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` |
 
 ## 1. Python の準備
 

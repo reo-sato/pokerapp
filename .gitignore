@@ -23,3 +23,7 @@ mobile/dist/
 build/
 dist/
 .venv/
+
+# Windows ワンステップインストーラ（installer/install.ps1）が作るもの
+venv/
+install.log

@@ -35,7 +35,7 @@ pokerapp = "main:main"
 
 [tool.setuptools]
 # vision / tests / tools / docs は配布パッケージから除外
-packages = ["core", "audio", "rfid", "integration", "output", "gui"]
+packages = ["core", "audio", "rfid", "integration", "output", "gui", "api"]
 py-modules = ["main"]
 
 [tool.ruff]

@@ -6,6 +6,24 @@
 
 ## [Unreleased]
 
+### Added (Windows ワンステップインストーラ — 店舗 PC 向け, ADR-0057, 2026-09-22)
+
+Python の無い店舗の Windows PC に **`install.cmd` のダブルクリック 1 回**（または PowerShell に
+`irm …/installer/bootstrap.ps1 | iex` の 1 行）で入るようにした。
+
+- `installer/install.ps1`: Python 3.12 の確保（`py` → winget → python.org サイレント）→ フォルダ内 `venv` →
+  `pip install -e ".[pcsc,api]"` → `config.json` 生成（既存は不変）→ 音声認識モデル先読み（任意）→
+  デスクトップにショートカット 4 つ（ハンドロガー / 卓モニタ / 会計 + API / RFID チェック）→ 動作確認 → `install.log`。
+- `update.cmd`（GitHub の zip を上書き。**config / rfid_cards / menu / 会計データ / logs / backups は保持**）と
+  `uninstall.cmd`（ショートカットと venv のみ削除）。
+- ランチャ `start_logger.cmd` / `start_monitor.cmd` / `start_ledger.cmd` / `rfid_check.cmd`（venv 経由、
+  UTF-8 コンソール、`--log-file` 付き）。
+- 配布形は **フォルダ in-place + venv（editable）**。データファイルがアプリのフォルダ直下にある現行設計を
+  そのまま活かす（site-packages に入れない）。exe 化・データフォルダ分離・iPad 画面の API 配信は Stage 2。
+- `pyproject.toml` の `packages` に `api` を追加（`pip install .` で viewer API が抜けていた）。
+- `tests/test_installer.py`: エンコーディング（.cmd = ASCII/CRLF, .ps1 = UTF-8 BOM）、ランチャの参照先、
+  更新時保持リスト ⊇ `core/backup.py` のデータ一覧、pwsh があれば構文解析 + `-DryRun` の通し。
+
 ### Changed (verify-v1 をマージ — 復元の正当性修正バッチ (ADR-0047〜0050) と合流, 2026-09-22)
 
 3 か月分岐していた `verify-v1`（solver 基盤 / リプレイ UI / 注文キャンセル / menu 編集 / ADR-0047〜0050）を

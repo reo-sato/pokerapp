@@ -1,0 +1,142 @@
+"""tests/test_installer.py
+
+Windows ワンステップインストーラ（`install.cmd` → `installer/install.ps1`）の整合検査（ADR-0057）。
+
+ここでは Windows を持たない CI でも検査できることだけを固定する:
+
+- 起動用 .cmd と .ps1 が揃っていて、.cmd が参照するファイルが存在する。
+- .cmd は **ASCII のみ + CRLF**（日本語 Windows の cmd.exe は CP932 で読むので日本語を書くと化ける。
+  ラベル / goto は LF だけだと誤動作することがある）。
+- .ps1 は **UTF-8 BOM 付き**（Windows PowerShell 5.1 は BOM が無いと ANSI として読み、日本語が化ける）。
+- 更新モードで保持するファイル一覧が `core/backup.py` のデータファイル一覧を漏れなく含む
+  （店舗固有データを更新で消さない）。
+- pwsh / powershell があれば構文解析と `-DryRun` の通し実行（GitHub の ubuntu ランナーには pwsh がある）。
+"""
+from __future__ import annotations
+
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).parent.parent
+CMD_FILES = [
+    "install.cmd", "update.cmd", "uninstall.cmd",
+    "start_logger.cmd", "start_monitor.cmd", "start_ledger.cmd", "rfid_check.cmd",
+]
+PS1_FILES = ["installer/install.ps1", "installer/bootstrap.ps1"]
+
+
+def _powershell() -> list[str] | None:
+    for exe in ("pwsh", "powershell"):
+        path = shutil.which(exe)
+        if path:
+            return [path, "-NoProfile"]
+    return None
+
+
+class TestFilesAndEncodings:
+    @pytest.mark.parametrize("rel", CMD_FILES + PS1_FILES)
+    def test_exists(self, rel):
+        assert (ROOT / rel).is_file(), rel
+
+    @pytest.mark.parametrize("rel", CMD_FILES)
+    def test_cmd_is_ascii_crlf(self, rel):
+        raw = (ROOT / rel).read_bytes()
+        assert raw.isascii(), f"{rel}: cmd.exe は CP932 で読むので ASCII 以外を書かない"
+        assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b""), f"{rel}: CRLF 固定"
+
+    @pytest.mark.parametrize("rel", PS1_FILES)
+    def test_ps1_has_utf8_bom(self, rel):
+        raw = (ROOT / rel).read_bytes()
+        assert raw.startswith(b"\xef\xbb\xbf"), f"{rel}: PowerShell 5.1 向けに UTF-8 BOM が要る"
+        raw[3:].decode("utf-8")  # valid UTF-8
+
+    def test_gitattributes_pins_crlf(self):
+        text = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+        assert "*.cmd text eol=crlf" in text and "*.ps1 text eol=crlf" in text
+
+
+class TestLaunchers:
+    def test_cmd_wrappers_call_the_installer(self):
+        for rel in ("install.cmd", "update.cmd", "uninstall.cmd"):
+            text = (ROOT / rel).read_text(encoding="ascii")
+            assert "-ExecutionPolicy Bypass" in text, rel
+            assert r"installer\install.ps1" in text, rel
+        assert "-Update" in (ROOT / "update.cmd").read_text(encoding="ascii")
+        assert "-Uninstall" in (ROOT / "uninstall.cmd").read_text(encoding="ascii")
+
+    def test_launchers_reference_existing_entry_points(self):
+        for rel in ("start_logger.cmd", "start_monitor.cmd", "start_ledger.cmd", "rfid_check.cmd"):
+            text = (ROOT / rel).read_text(encoding="ascii")
+            assert r"venv\Scripts\python.exe" in text, rel
+            for m in re.finditer(r'^"venv\\Scripts\\python\.exe" (\S+)', text, re.M):
+                target = m.group(1).replace("\\", "/")
+                assert (ROOT / target).is_file(), f"{rel}: {target} が無い"
+
+    def test_logger_launcher_routes_logs_to_file(self):
+        """--cli では RFID のログが入力行に割り込むので、ランチャは必ず --log-file を付ける（ISSUE-0034）。"""
+        text = (ROOT / "start_logger.cmd").read_text(encoding="ascii")
+        assert "--cli --log-file" in text
+
+    def test_monitor_launcher_binds_lan(self):
+        text = (ROOT / "start_monitor.cmd").read_text(encoding="ascii")
+        assert "--host 0.0.0.0" in text and "--port 8790" in text
+
+
+class TestUpdatePreservesShopData:
+    def _preserved(self) -> tuple[set[str], set[str]]:
+        text = (ROOT / "installer/install.ps1").read_bytes()[3:].decode("utf-8")
+        files = re.search(r"\$PreservedFiles\s*=\s*@\((.*?)\)", text, re.S).group(1)
+        dirs = re.search(r"\$PreservedDirs\s*=\s*@\((.*?)\)", text, re.S).group(1)
+        return set(re.findall(r'"([^"]+)"', files)), set(re.findall(r'"([^"]+)"', dirs))
+
+    def test_backup_data_files_are_all_preserved(self):
+        """core/backup.py が「会計の source of truth」とする JSON は更新で上書きしない。"""
+        backup_src = (ROOT / "core/backup.py").read_text(encoding="utf-8")
+        data_files = set(re.findall(r'_ROOT\s*/\s*"([^"]+\.json)"', backup_src))
+        assert data_files, "core/backup.py のデータ一覧を読めない（パターン変更?）"
+        files, dirs = self._preserved()
+        assert data_files <= files, f"更新で消える恐れ: {sorted(data_files - files)}"
+        assert {"config.json", "rfid_cards.json", "menu.json"} <= files
+        assert {"venv", "logs", "backups"} <= dirs
+
+    def test_gitignored_runtime_files(self):
+        text = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        assert "venv/" in text and "install.log" in text
+
+
+@pytest.mark.skipif(_powershell() is None, reason="pwsh / powershell が無い環境")
+class TestPowerShell:
+    @pytest.mark.parametrize("rel", PS1_FILES)
+    def test_parses(self, rel):
+        ps = _powershell()
+        script = (
+            "$errors = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile("
+            f"'{(ROOT / rel).as_posix()}', [ref]$null, [ref]$errors); "
+            "if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Output $_.Message }; exit 1 } "
+            "else { Write-Output 'parse ok'; exit 0 }"
+        )
+        r = subprocess.run(ps + ["-Command", script], capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, r.stdout + r.stderr
+
+    def test_dry_run_walks_the_whole_flow(self, tmp_path: Path):
+        """-DryRun は何も変更せずに全ステップを通る（ロジックの通し検査。Windows 以外でも動く）。"""
+        ps = _powershell()
+        # アプリフォルダ = installer/ の親。tmp にコピーして実行し、リポジトリを汚さない。
+        app = tmp_path / "app"
+        (app / "installer").mkdir(parents=True)
+        shutil.copy(ROOT / "installer/install.ps1", app / "installer/install.ps1")
+        shutil.copy(ROOT / "config_default.json", app / "config_default.json")
+        r = subprocess.run(
+            ps + ["-ExecutionPolicy", "Bypass", "-File", str(app / "installer/install.ps1"),
+                  "-DryRun", "-NonInteractive", "-SkipModel"],
+            capture_output=True, text=True, timeout=300,
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "完了" in r.stdout
+        assert not (app / "install.log").exists()      # DryRun は書かない
+        assert not (app / "config.json").exists()
+        assert not (app / "venv").exists()
