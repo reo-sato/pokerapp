@@ -26,6 +26,7 @@ import { MySessionsScreen } from "./src/screens/MySessionsScreen";
 import { OrderScreen } from "./src/screens/OrderScreen";
 import { PlayerSelectScreen } from "./src/screens/PlayerSelectScreen";
 import { styles } from "./src/screens/common";
+import { storageGetJson, storageRemove, storageSetJson } from "./src/storage";
 
 type Route =
   | { name: "players" }
@@ -37,6 +38,18 @@ type Route =
   | { name: "ledger"; player: Player; session: PlayerSessionSummary }
   | { name: "order"; player: Player; session: PlayerSessionSummary };
 
+/** 選択した player の保存キー（web 再読込を跨いで名前選択をスキップする）。 */
+const SELECTED_PLAYER_KEY = "phv.player";
+
+/** 保存済み player があればセッション一覧から再開する（stale でも read は無害・戻るで選び直せる）。 */
+function initialRoute(): Route {
+  const p = storageGetJson<Player>(SELECTED_PLAYER_KEY);
+  if (p && typeof p.player_id === "string" && typeof p.display_name === "string") {
+    return { name: "sessions", player: p };
+  }
+  return { name: "players" };
+}
+
 export default function App(): React.JSX.Element {
   const repository: ViewerRepository = useMemo(() => {
     const apiUrl = process.env.EXPO_PUBLIC_API_URL;
@@ -45,7 +58,17 @@ export default function App(): React.JSX.Element {
     return apiUrl ? new HttpRepository(apiUrl, staffToken) : new MockRepository();
   }, []);
 
-  const [route, setRoute] = useState<Route>({ name: "players" });
+  const [route, setRoute] = useState<Route>(initialRoute);
+
+  const selectPlayer = (player: Player): void => {
+    storageSetJson(SELECTED_PLAYER_KEY, player);
+    setRoute({ name: "sessions", player });
+  };
+  // 名前選択に戻る = 明示的な「自分」の切替なので保存をやめる（token は AuthScreen 側の責務）。
+  const backToPlayers = (): void => {
+    storageRemove(SELECTED_PLAYER_KEY);
+    setRoute({ name: "players" });
+  };
 
   return (
     <View style={{ flex: 1, backgroundColor: styles.screen.backgroundColor }}>
@@ -53,7 +76,7 @@ export default function App(): React.JSX.Element {
       {route.name === "players" && (
         <PlayerSelectScreen
           repository={repository}
-          onSelect={(player) => setRoute({ name: "sessions", player })}
+          onSelect={selectPlayer}
           onLogin={(player) => setRoute({ name: "auth", mode: "pin", player })}
           onSignup={() => setRoute({ name: "auth", mode: "oidc" })}
         />
@@ -63,7 +86,7 @@ export default function App(): React.JSX.Element {
           repository={repository}
           mode={route.mode}
           player={route.player}
-          onAuthed={(player) => setRoute({ name: "sessions", player })}
+          onAuthed={selectPlayer}
           onBack={() => setRoute({ name: "players" })}
         />
       )}
@@ -72,7 +95,7 @@ export default function App(): React.JSX.Element {
           repository={repository}
           player={route.player}
           onSelect={(session) => setRoute({ name: "hands", player: route.player, session })}
-          onBack={() => setRoute({ name: "players" })}
+          onBack={backToPlayers}
         />
       )}
       {route.name === "hands" && (

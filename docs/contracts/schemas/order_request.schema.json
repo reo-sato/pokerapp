@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pokerapp.local/contracts/order_request.schema.json",
   "title": "OrderRequest",
-  "version": "1.0",
-  "description": "M5 (ADR-0018)。1.0 freeze 済 (ADR-0019)。player からの注文リクエスト。ledger には書かれず、スタッフ確定 (confirm) で ledger_entry (kind=order) が作られ ledger_entry_id がリンクされる。状態遷移 pending → confirmed | rejected は core が enforce。menu 照合 (unknown_item) は API 境界。詳細は docs/contracts/viewer-api.md § 注文リクエスト。",
+  "version": "1.1",
+  "description": "M5 (ADR-0018)。1.0 freeze 済 (ADR-0019)、1.1 = status に cancelled を additive 追加 (player 本人の取り下げ, ADR-0045)。player からの注文リクエスト。ledger には書かれず、スタッフ確定 (confirm) で ledger_entry (kind=order) が作られ ledger_entry_id がリンクされる。状態遷移 pending → confirmed | rejected | cancelled は core が enforce。menu 照合 (unknown_item) は API 境界。詳細は docs/contracts/viewer-api.md § 注文リクエスト。",
   "type": "object",
   "additionalProperties": false,
   "required": ["request_id", "session_id", "player_id", "item_name", "quantity", "status", "requested_at"],
@@ -37,7 +37,7 @@
     },
     "status": {
       "type": "string",
-      "enum": ["pending", "confirmed", "rejected"]
+      "enum": ["pending", "confirmed", "rejected", "cancelled"]
     },
     "requested_at": {
       "type": "string",
@@ -46,7 +46,7 @@
     "resolved_at": {
       "type": "string",
       "format": "date-time",
-      "description": "confirmed / rejected になった時刻。pending では absent (core が enforce)。"
+      "description": "終端 (confirmed / rejected / cancelled) になった時刻。pending では absent (core が enforce)。"
     },
     "ledger_entry_id": {
       "type": "string",

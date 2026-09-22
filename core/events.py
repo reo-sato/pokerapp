@@ -48,3 +48,9 @@ class AudioEvent:
     # 明示発話された **ポジション名**（"BTN、コール" の BTN, 正準名。仕様 §7 / FR-26, ISSUE-0032）。
     # 席への解決はボタンを知っている engine 側が行う（`seat` が無いときの代替証拠）。
     position: Optional[str] = None
+    # additive (ADR-0047/0048): パース時に検出した曖昧性（"ambiguous_amount"/"multi_action_keywords"）。
+    # 非空なら engine が needs_review を付ける。
+    parse_flags: tuple[str, ...] = ()
+    # additive (ADR-0048 T1): 発話キャプチャの開始時刻（epoch 秒）。ASR デコード遅延に依らず
+    # センサー照合窓の始端に使う。None なら timestamp を始端に使う（旧記録の後方互換）。
+    utterance_start_ts: Optional[float] = None

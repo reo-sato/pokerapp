@@ -113,10 +113,11 @@ export interface SessionSettlement {
   paid_amount: number; // 受領累計（partial-paid, ADR-0023）
 }
 
-/** GET /api/menu の要素 (menu.json master, M5)。 */
+/** GET /api/menu の要素 (menu.json master, M5。sold_out は additive = ADR-0046)。 */
 export interface MenuItem {
   item_name: string;
   unit_amount: number;
+  sold_out?: boolean;
 }
 
 /** schemas/order_request.schema.json (0.x, M5 — ADR-0018)。 */
@@ -127,10 +128,83 @@ export interface OrderRequest {
   item_name: string;
   quantity: number;
   note?: string;
-  status: "pending" | "confirmed" | "rejected";
+  status: "pending" | "confirmed" | "rejected" | "cancelled"; // cancelled = 本人取り下げ (1.1, ADR-0045)
   requested_at: string;
   resolved_at?: string;
   ledger_entry_id?: string;
+}
+
+/** schemas/action.schema.json (1.0)。staff hands read（ADR-0044）用。 */
+export interface ActionRecord {
+  hand_id: number;
+  timestamp: string;
+  street: string; // "preflop" | "flop" | "turn" | "river"
+  seat: number;
+  player_name: string;
+  action: string; // "check" | "call" | "bet" | "raise" | "fold" | "allin" | ...
+  amount: number;
+  pot_after: number;
+  stack_after: number;
+  source: { camera: boolean; audio: boolean; rfid: boolean };
+  needs_review: boolean;
+  confidence: number;
+  corrected?: boolean; // 訂正オーバーレイ痕 (ADR-0036, additive)
+}
+
+export interface HandPlayer {
+  seat: number;
+  name: string;
+  player_id?: string | null;
+  hole_cards?: string[] | null;
+  hole_cards_source?: string;
+  stack_start: number;
+  stack_end: number;
+  result: number;
+  committed?: number;
+}
+
+export interface Pot {
+  amount: number;
+  eligible_seats: number[];
+}
+
+/** schemas/hand.schema.json (1.0)。GET /api/staff/sessions/{sid}/hands の要素（訂正適用済）。 */
+export interface HandSummary {
+  hand_id: number;
+  session_id: string;
+  started_at: string;
+  ended_at: string;
+  blinds?: Blinds;
+  board?: string[];
+  board_source?: string;
+  players: HandPlayer[];
+  pot_total?: number;
+  pots?: Pot[];
+  winner_seat?: number;
+  actions: ActionRecord[];
+  review_required?: boolean;
+}
+
+/** ハンド訂正レコード (ADR-0036)。append-only オーバーレイ。 */
+export interface HandCorrection {
+  correction_id: string;
+  session_id: string;
+  hand_id: number;
+  action_index: number | null; // null = hand レベル (winner_seat 等)
+  field: string; // "action" | "amount" | "winner_seat"
+  new_value: string | number;
+  corrected_by: string;
+  corrected_at: string;
+  note?: string;
+}
+
+/** ハンド訂正の入力 (staff 操作, ADR-0036)。 */
+export interface HandCorrectionInput {
+  field: string; // "action" | "amount"（action_index あり） | "winner_seat"（hand レベル）
+  new_value: string | number;
+  action_index?: number | null;
+  corrected_by?: string;
+  note?: string;
 }
 
 /** hand logger 遠隔制御コマンド（control queue, ADR-0039）。 */
@@ -148,6 +222,53 @@ export interface ControlCommand {
   type: string;
   args: { seat?: number; amount?: number };
   created_at: string;
+}
+
+/**
+ * GET /api/staff/sessions/{sid}/measurement-rows の 1 行（Phase A 計測 UI, ADR-0043）。
+ * UI は per row の `has_needs_review` で「✓ 流す」を無効化する（C-2 ガード）。
+ */
+export interface MeasurementRow {
+  hand_id: number;
+  winner_seat: number | null;
+  winner_result: number | null; // winner の chip won（players[i].result）
+  review_required: boolean;
+  has_needs_review: boolean;
+  ground_truth: MeasurementGroundTruth | null;
+}
+
+/** measurement row 内の GT メタ情報（GT 未記録なら null）。 */
+export interface MeasurementGroundTruth {
+  annotator: string;
+  annotated_at: string;
+  source: "captured-passthrough" | "manual-edit";
+}
+
+/**
+ * ground truth hand 本体 + per-hand metadata（ADR-0043, measurement-plan §2.2）。
+ * additive: 元 schema に annotator / annotated_at / source を載せている。
+ */
+export interface GroundTruthHand {
+  hand_id: number;
+  annotator: string;
+  annotated_at: string;
+  source: "captured-passthrough" | "manual-edit";
+  board?: string[];
+  actions?: Array<{ street?: string; seat?: number; action: string; amount?: number }>;
+  players?: Array<{ seat: number; hole_cards?: string[] | null; showed_down?: boolean }>;
+  winner_seat?: number | null;
+  notes?: string;
+  [key: string]: unknown;
+}
+
+/** PUT .../ground-truth/{hid} の body（manual-edit 経路）。 */
+export interface GroundTruthEditPayload {
+  hand_id: number;
+  board?: string[];
+  actions?: Array<{ street?: string; seat?: number; action: string; amount?: number }>;
+  players?: Array<{ seat: number; hole_cards?: string[] | null; showed_down?: boolean }>;
+  winner_seat?: number | null;
+  notes?: string;
 }
 
 /** error-shapes.md の論理形。分岐は code、表示は message。 */

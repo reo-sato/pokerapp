@@ -4,7 +4,7 @@ audio / camera / RFID (ESP32 HTTP) の 3 ソースを統合し、confidence ス�
 
 ソース優先度: RFID > audio > camera
 
-Confidence 行列:
+Confidence 行列 (legacy backend):
   RFID + audio + camera : 1.00
   RFID + audio          : 0.95
   RFID + camera         : 0.85
@@ -21,7 +21,9 @@ Confidence 行列:
       → _hole_cards[seat] に最大 2 枚蓄積、手終了時に HandSummary に反映
 
 アクション照合 (role="seat"):
-  ±MATCH_WINDOW 秒以内の同席 AudioEvent と照合して confidence 向上
+  発話区間 [utterance_start_ts, timestamp] ± MATCH_WINDOW 秒以内の同席イベントと照合して
+  confidence 向上（ADR-0048 T1/T2: ASR デコード遅延が照合窓を食い潰さないよう、窓は発話区間
+  ベースの両側窓。utterance_start_ts 欠損時は従来どおり timestamp ± MATCH_WINDOW）。
 """
 from __future__ import annotations
 
@@ -32,7 +34,7 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Optional
 
-from audio.recognizer import apply_corrections
+from audio.recognizer import _extract_all_seat_nos, _extract_seat_no, apply_corrections
 from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
@@ -52,13 +54,20 @@ MATCH_WINDOW = 2.0
 # 卓状態を定期 publish する間隔（秒）。カードが外れても RFIDEvent は出ないので、
 # 有効席（= 札が載っている席）の変化はこの間隔で UI に届く。
 TABLE_STATE_INTERVAL = 1.0
-CAMERA_BUFFER_TTL = MATCH_WINDOW * 2
+# センサーイベントの保持期間。照合窓（MATCH_WINDOW）とは独立で、ASR デコード遅延
+# （チャンク 5 秒 + 推論）で audio イベントが遅れて届いても RFID/camera 証拠が
+# expire で消えないだけの余裕を持たせる（ADR-0048 T1）。
+CAMERA_BUFFER_TTL = 12.0
 
 # silent-fold 合成で許す最大席数（ISSUE-0009）。超過は合成せず prior 維持 + needs_review。
 SILENT_FOLD_CAP = 2
 # 合成した silent-fold の confidence（sensor 観測なしの推定。常に needs_review）。
 # REVIEW_THRESHOLD 未満であることを較正で固定（ADR-0033 P8, tools/calibrate_confidence.py）。
 SYNTH_FOLD_CONFIDENCE = 0.3
+# Whisper 信頼度が欠測（None）のときの保守的既定（ADR-0033 追記 / B3）。
+# 従来は 1.0（満点）補完で「情報が無いほど confidence が上がる」逆転があった。
+# 0.5 は audio-only では REVIEW_THRESHOLD を下回る = 欠測 audio 単独は要レビュー側に倒す。
+MISSING_WHISPER_CONF = 0.5
 
 # ――― Confidence スコア定数 ―――
 _CONF_RFID_AUDIO_CAMERA = 1.00
@@ -71,6 +80,9 @@ _CONF_CAMERA_ONLY       = 0.30
 
 # board_index → street 推移しきい値 (1-indexed, ≥N 枚でその street)
 _BOARD_STREET_THRESHOLDS = {3: "flop", 4: "turn", 5: "river"}
+
+# G1（ADR-0049）: 状態を大きく動かす制御語。config の閾値 > 0 のとき低信頼 ASR を保留する。
+_CONTROL_ACTIONS = frozenset({"new_hand", "winner", "showdown"})
 
 
 def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
@@ -95,15 +107,16 @@ def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
 # ――― 派生 confidence (3 因子, ADR-0009 §6, D3) ―――
 # rules-aware 経路専用。legacy は上の固定 8 行 calc_confidence のまま（挙動不変）。
 # 重みは **較正済み**（ADR-0033）。golden fixtures の archetype + 境界グリッドに対し較正プロパティ
-# P1〜P8（順序単調性・閾値分離・合法性ゲート等）を満たすことを `tools/calibrate_confidence.py` /
-# `tests/test_confidence_calibration.py` で回帰ロックする。変更時は同ハーネスで再検証すること。
+# P1〜P9（順序単調性・閾値分離・合法性ゲート・欠測既定等）を満たすことを
+# `tools/calibrate_confidence.py` / `tests/test_confidence_calibration.py` で回帰ロックする。
+# 変更時は同ハーネスで再検証すること。
 _CONF_W_A = 0.15            # 合意度 A の重み
 _CONF_W_Q = 0.85           # ソース品質 Q の重み（w_A + w_Q = 1）
 _CONF_L_PENALTY = 0.25     # pokerkit が action を受理しなかったときの合法性ゲート L
 _CONF_BASE = {"rfid": 0.78, "audio": 0.50, "camera": 0.28}  # ソース base 信頼度（RFID>audio>camera）
 # confidence がこの閾値未満なら needs_review（ADR-0009 §6 条件⑤）。将来 config 化。
 # 音声優先運用（v1 は audio のみが必須経路）のため、良好な audio-only(whisper>=0.6) は閾値超え＝自動
-# review しない。低 whisper / 合成 fold は閾値未満＝review（較正 P7/P8, ADR-0033）。
+# review しない。低 whisper / 合成 fold / 欠測 whisper は閾値未満＝review（較正 P7/P8/P9, ADR-0033）。
 REVIEW_THRESHOLD = 0.40
 
 
@@ -165,6 +178,7 @@ class IntegrationThread(threading.Thread):
         seat_cards_absent_since: Optional[Callable[[int], Optional[float]]] = None,
         seat_presence: Optional[Callable[[], dict]] = None,
         table_state_writer: "Optional[TableStateWriter]" = None,
+        control_conf_threshold: float = 0.0,
     ) -> None:
         """
         Args:
@@ -175,7 +189,8 @@ class IntegrationThread(threading.Thread):
             on_hand: ハンド確定時に HandSummary を渡すコールバック (replay/テスト用、additive)。
                      on_rfid_card 同様 integration スレッドで発火するためスレッド安全に扱うこと。
             clock: epoch 秒を返す時計 (既定 time.time)。決定的 replay 用に注入する (F1)。
-                   ActionRecord/HandSummary の timestamp と buffer 期限はこの時計に従う。
+                   buffer 期限はこの時計に従う（ActionRecord/HandSummary の時刻は
+                   event.timestamp 由来 = ADR-0048 T3 で live/replay 同義）。
             session_repo: S2.x session レイヤ (ADR-0008 Pattern A)。`seat_player_map` と共に与えると
                           hand 開始時に assign_seat（write-through）し、HandSummary.players に player_id を
                           additive 埋め込む。None なら従来動作（session 未接続・挙動不変, rollback path）。
@@ -198,6 +213,9 @@ class IntegrationThread(threading.Thread):
                          ストリート）を publish するのに使う。None なら卓状態は在否なしで作られる。
             table_state_writer: 卓状態スナップショットの書き出し先（`output/table_state_writer.py`）。
                          None なら publish しない（= 挙動不変）。
+            control_conf_threshold: 制御語（new_hand/winner/showdown）を受理する Whisper 信頼度の
+                          下限（ADR-0049 G1）。0.0（既定）で無効 = 従来挙動。閾値未満の制御語は
+                          状態を動かさず保留レコード（needs_review）として on_action にのみ流す。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -211,6 +229,7 @@ class IntegrationThread(threading.Thread):
         self._event_recorder = event_recorder
         self._on_hand = on_hand
         self._clock: Callable[[], float] = clock or time.time
+        self._control_conf_threshold = control_conf_threshold
         # S2.x session 統合（ADR-0008 Pattern A, write-through）。両方揃ったときのみ有効。
         self._session_repo = session_repo
         self._seat_player_map: dict[int, str] = dict(seat_player_map or {})
@@ -234,6 +253,9 @@ class IntegrationThread(threading.Thread):
         # ハンド開始の epoch。マック観測をハンド内にクランプするのに使う（ADR-0055）。
         self._hand_started_epoch: Optional[float] = None
         self._stack_start: dict[int, int] = {}
+        # new_hand 済みで勝者未確定のハンドが進行中か（G1 の状態妥当性チェック /
+        # ハンド外イベントの unresolved 記録に使う）。
+        self._hand_open: bool = False
 
         # RFID カード情報
         self._board_cards: list[str] = []          # 順序付きボードカード（表示用）
@@ -284,12 +306,7 @@ class IntegrationThread(threading.Thread):
                 continue
 
             self._record(event)
-
-            try:
-                self._handle_audio_event(event)
-            except Exception:
-                logger.exception("Error handling audio event: %s", event)
-
+            self._handle_audio_event(event)
             self._expire_buffers()
 
         logger.info("IntegrationThread stopped")
@@ -455,17 +472,19 @@ class IntegrationThread(threading.Thread):
             )
 
     def _now_iso(self) -> str:
-        """注入された時計 (既定 time.time) を ISO 文字列に。決定的 replay の clock 源 (F1)。"""
+        """注入された時計 (既定 time.time) を ISO 文字列に（buffer 期限・fallback 用, F1）。"""
         return self._iso(self._clock())
 
     @staticmethod
-    def _iso(epoch: float) -> str:
-        return datetime.fromtimestamp(epoch).isoformat(timespec="milliseconds")
+    def _iso(ts: float) -> str:
+        """epoch 秒を ISO 文字列に。ActionRecord/HandSummary の時刻は event.timestamp 由来で
+        統一する（ADR-0048 T3: live と replay で同じ envelope から同じ時刻が出る）。"""
+        return datetime.fromtimestamp(ts).isoformat(timespec="milliseconds")
 
-    def _synth_fold_timestamp(self, seat: int) -> tuple[str, bool]:
+    def _synth_fold_timestamp(self, seat: int, event: AudioEvent) -> tuple[str, bool]:
         """合成 silent-fold の時刻（ADR-0055）。
 
-        既定は処理時刻（= 推定を引き起こした後続アクションの時刻）だが、RFID が
+        既定は推定を引き起こした後続アクション（`event`）の時刻だが、RFID が
         「その席のカードが消えたまま戻っていない時刻」を持っていればそれを使う。
         ディーラーが fold を宣言しない席の**実時刻**は他に手掛かりがないため、
         音声の時系列と突き合わせて履歴を再生するにはこれが唯一の情報源になる。
@@ -475,22 +494,23 @@ class IntegrationThread(threading.Thread):
         ここは時刻だけを差し替える。時刻はハンド開始〜現在にクランプする
         （前ハンドの観測や未来時刻が混ざらないように）。
         """
+        fallback = self._iso(event.timestamp)
         now = self._clock()
         if self._seat_cards_absent_since is None:
-            return self._iso(now), False
+            return fallback, False
         try:
             absent = self._seat_cards_absent_since(seat)
         except Exception:  # noqa: BLE001 — 観測が取れなくても記録は続ける
             logger.exception("seat_cards_absent_since failed (seat=%s)", seat)
-            return self._iso(now), False
+            return fallback, False
         if absent is None or self._hand_started_epoch is None:
-            return self._iso(now), False
-        if not self._hand_started_epoch <= absent <= now:
+            return fallback, False
+        if not self._hand_started_epoch <= absent <= max(now, event.timestamp):
             logger.debug(
-                "muck 観測 %.3f がハンド範囲外（開始 %.3f, 現在 %.3f）— 処理時刻を使います",
+                "muck 観測 %.3f がハンド範囲外（開始 %.3f, 現在 %.3f）— イベント時刻を使います",
                 absent, self._hand_started_epoch, now,
             )
-            return self._iso(now), False
+            return fallback, False
         return self._iso(absent), True
 
     def _expire_buffers(self) -> None:
@@ -498,37 +518,88 @@ class IntegrationThread(threading.Thread):
         self._camera_buffer = [e for e in self._camera_buffer if e.timestamp >= cutoff]
         self._rfid_seat_buffer = [e for e in self._rfid_seat_buffer if e.timestamp >= cutoff]
 
-    def _pop_matching_camera_event(self, seat: int, ts: float) -> Optional[CameraEvent]:
-        candidates = [
-            e for e in self._camera_buffer
-            if e.seat == seat and abs(e.timestamp - ts) <= MATCH_WINDOW
-        ]
+    # ――― 照合窓（ADR-0048 T1/T2: 発話区間ベースの両側窓）―――
+
+    @staticmethod
+    def _event_window(event: AudioEvent) -> tuple[float, float]:
+        """audio イベントの照合窓 [lo, hi] を返す。
+
+        発話開始（utterance_start_ts）から ASR 確定（timestamp）までの発話区間の両側に
+        MATCH_WINDOW を張る。utterance_start_ts 欠損（旧記録/直接構築）時は従来どおり
+        timestamp ± MATCH_WINDOW に退化する（後方互換）。
+        """
+        start = event.utterance_start_ts if event.utterance_start_ts is not None else event.timestamp
+        if start > event.timestamp:
+            start = event.timestamp
+        return start - MATCH_WINDOW, event.timestamp + MATCH_WINDOW
+
+    @staticmethod
+    def _window_distance(ts: float, lo: float, hi: float) -> float:
+        """窓 [lo, hi] からの距離（窓内は 0）。最近傍選択に使う。"""
+        if ts < lo:
+            return lo - ts
+        if ts > hi:
+            return ts - hi
+        return 0.0
+
+    def _pop_matching_camera_event(self, seat: int, event: AudioEvent) -> Optional[CameraEvent]:
+        lo, hi = self._event_window(event)
+        candidates = [e for e in self._camera_buffer if e.seat == seat and lo <= e.timestamp <= hi]
         if not candidates:
             return None
-        best = min(candidates, key=lambda e: abs(e.timestamp - ts))
+        best = min(candidates, key=lambda e: self._window_distance(e.timestamp, lo, hi) or abs(e.timestamp - event.timestamp))
         self._camera_buffer.remove(best)
         return best
 
-    def _pop_matching_rfid_event(self, seat: int, ts: float) -> Optional[RFIDEvent]:
-        """同席・±MATCH_WINDOW 秒以内の RFID seat イベントを返し除去する。"""
+    def _pop_matching_rfid_event(self, seat: int, event: AudioEvent) -> Optional[RFIDEvent]:
+        """同席・照合窓内の RFID seat イベントを返し除去する。"""
+        lo, hi = self._event_window(event)
         candidates = [
             e for e in self._rfid_seat_buffer
-            if e.seat == seat and abs(e.timestamp - ts) <= MATCH_WINDOW
+            if e.seat == seat and lo <= e.timestamp <= hi
         ]
         if not candidates:
             return None
-        best = min(candidates, key=lambda e: abs(e.timestamp - ts))
+        best = min(candidates, key=lambda e: abs(e.timestamp - event.timestamp))
         self._rfid_seat_buffer.remove(best)
         return best
 
     # ――― イベントハンドラ ―――
 
     def _handle_audio_event(self, event: AudioEvent) -> None:
+        """audio イベントの入口。例外はここで捕捉して unresolved レコードに変換する
+        （ADR-0047 B4: live の run() 捕捉と replay の直接呼び出しで同一セマンティクス。
+        イベントの無音消失を全廃する = B2）。"""
+        try:
+            self._dispatch_audio_event(event)
+        except Exception:
+            logger.exception("Error handling audio event: %s", event)
+            self._emit_unresolved(event, reason="handler_error")
+
+    def _dispatch_audio_event(self, event: AudioEvent) -> None:
         action = event.action
         gs = self._game_state
 
+        # G1（ADR-0049）: 低信頼 ASR の制御語は状態を動かさず保留（閾値 0 = 無効が既定）。
+        if (
+            action in _CONTROL_ACTIONS
+            and self._control_conf_threshold > 0.0
+            and event.confidence is not None
+            and event.confidence < self._control_conf_threshold
+        ):
+            self._emit_unresolved(event, reason="low_conf_control_held")
+            return
+
         if action == "new_hand":
-            self._start_new_hand()
+            # G1: 勝者未宣言のまま新ハンドが宣言された → 進行中の記録を捨てず異常確定する。
+            if self._hand_open and self._current_actions:
+                logger.warning(
+                    "new_hand mid-hand (hand_id=%d): 勝者未宣言のため異常確定してから開始する",
+                    gs.hand_id,
+                )
+                self._hand_needs_review = True
+                self._finalize_hand(self._fallback_winner_seat(), event)
+            self._start_new_hand(event)
             return
 
         if action == "showdown":
@@ -559,67 +630,128 @@ class IntegrationThread(threading.Thread):
         else:
             self._handle_legacy_action(event)
 
-    # ――― 手番が無いときのガード（ISSUE-0028） ―――
-
-    def _current_actor_or_none(self) -> Optional[int]:
-        """現在の手番席。手番が無ければ None を返す（例外にしない）。
-
-        pokerkit backend は新ハンド前・ハンド終了後・全員オールイン後に actor を持たず
-        `RuntimeError` を投げる。アクションは任意のタイミングで飛んでくるので、ここで握って
-        呼び出し側が案内ログに倒せるようにする（CLAUDE.md「認識エラーでクラッシュしない」）。
-        """
-        try:
-            return self._game_state.get_current_player()
-        except RuntimeError:
-            return None
-
-    def _warn_no_actor(self, what: str, event: AudioEvent) -> None:
-        """手番が無くて落としたイベントを、次の操作が分かる形で警告する。
-
-        ハンド進行中に落とした分は記録が欠けるので `needs_review` を立てる。ハンド自体が
-        無いときは付け先が無いので立てない（次の新ハンドでどのみちリセットされる）。
-        """
-        if self._game_state.is_hand_active():
-            logger.warning(
-                "手番が無いため%s（action=%s, raw=%r）を無視しました — "
-                "ハンドが終わっているなら「新ハンド」（CLI の n）で次のハンドを始めてください",
-                what, event.action, event.raw_text,
-            )
-            self._hand_needs_review = True
-        else:
-            logger.warning(
-                "進行中のハンドが無いため%s（action=%s, raw=%r）を無視しました — "
-                "先に「新ハンド」（CLI の n）を実行してください",
-                what, event.action, event.raw_text,
-            )
-
     def _handle_winner(self, event: AudioEvent) -> None:
-        """winner 宣言。ハンドが無い / 席を特定できない場合は落として案内する。
+        """winner 宣言の処理。複数席の読み上げは split pot（ADR-0050 S7）、席が読めない場合は
+        fallback 連鎖（ADR-0047 B5: 単独 active 席 → 最後のアグレッサー + review → 手番席）。"""
+        seats = _extract_all_seat_nos(event.raw_text)
 
-        ハンドが無いまま `end_hand` を呼ぶと backend によっては例外（pokerkit）や
-        確定済みハンドの二重確定（= ポット二重加算）になるため、ここで止める。
-        """
+        # 進行中のハンドが無い（新ハンド前 / 確定済み）winner は保留する（ISSUE-0028）。
+        # pokerkit は end_hand 後に actor を持たず、確定済みハンドへの再宣言を通すとポットの
+        # 二重加算か（end_hand が例外になり）空 summary の量産になる。legacy は
+        # is_hand_active が常に True なので従来どおり下の判定に進む。
         if not self._game_state.is_hand_active():
-            logger.warning(
-                "進行中のハンドが無いため winner 宣言を無視しました（raw=%r）— "
-                "先に「新ハンド」（CLI の n）を実行してください", event.raw_text,
-            )
+            self._emit_unresolved(event, reason="no_active_hand")
             return
-        winner_seat = _extract_seat_from_text(event.raw_text)
+
+        # 確定対象が何も無い winner（進行中ハンドなし・アクションもカードも review 状態も無い）
+        # はハルシネーション疑い → 保留（空 summary を書かない, ADR-0047 B5）。
+        # 何かしら記録があれば従来どおり確定する（明示 new_hand なしの運用も従来サポート）。
+        if (
+            not self._hand_open
+            and not self._current_actions
+            and not self._board_cards
+            and not self._hole_cards
+            and not self._hand_needs_review
+        ):
+            self._emit_unresolved(event, reason="no_active_hand")
+            return
+
+        if len(seats) > 1:
+            self._finalize_hand(seats[0], event, winner_seats=seats)
+            return
+
+        winner_seat = seats[0] if seats else None
         if winner_seat is None:
-            winner_seat = self._current_actor_or_none()
+            winner_seat = self._fallback_winner_seat()
             if winner_seat is None:
-                logger.warning(
-                    "winner の席を特定できませんでした（raw=%r）— 席番号を付けて宣言してください"
-                    "（例: シート1 ウィナー / CLI の `w 1`）", event.raw_text,
-                )
-                self._hand_needs_review = True
+                self._emit_unresolved(event, reason="winner_seat_unresolved")
                 return
             logger.warning(
-                "Could not extract winner seat from %r, using current player seat=%d",
+                "Could not extract winner seat from %r, using inferred seat=%d",
                 event.raw_text, winner_seat,
             )
-        self._finalize_hand(winner_seat)
+        self._finalize_hand(winner_seat, event)
+
+    def _fallback_winner_seat(self) -> Optional[int]:
+        """勝者席が読み上げから取れないときの推定連鎖（ADR-0047 B5）。
+
+        1. active 席が 1 つ → その席（全員 fold の決定的ケース、review 不要）。
+        2. 最後のアグレッサー（bet/raise/allin）→ 推定なので hand を review に。
+        3. engine の手番席（従来 fallback）→ 同じく review。
+        4. どれも取れなければ None（呼び出し側が保留レコード化）。
+        """
+        gs = self._game_state
+        try:
+            active = gs.get_active_seats()
+        except Exception:
+            active = []
+        if len(active) == 1:
+            return active[0]
+        for rec in reversed(self._current_actions):
+            if rec.action in ("bet", "raise", "allin"):
+                self._hand_needs_review = True
+                return rec.seat
+        try:
+            seat = gs.get_current_player()
+        except (RuntimeError, ValueError):
+            return None
+        self._hand_needs_review = True
+        return seat
+
+    def _emit_unresolved(self, event: AudioEvent, reason: str) -> None:
+        """状態に適用できなかった audio イベントを「適用不能レコード」として必ず可視化する
+        （ADR-0047 B2: 無音消失の全廃）。ゲーム状態は変更しないため _current_actions には積まず
+        on_action（GUI/監査）にのみ流す。進行中ハンドがあればハンド全体を要レビューにする。"""
+        gs = self._game_state
+        seat = event.seat if event.seat is not None else 0
+        try:
+            name = gs.get_player_name(seat) if seat else ""
+        except Exception:
+            name = ""
+        try:
+            stack = gs.get_stack(seat) if seat else 0
+        except Exception:
+            stack = 0
+        try:
+            pot = gs.pot
+        except Exception:
+            pot = 0
+        try:
+            street = gs.street
+        except Exception:
+            street = Street.PREFLOP.value
+        record = ActionRecord(
+            hand_id=gs.hand_id,
+            timestamp=self._iso(event.timestamp),
+            street=street,
+            seat=seat,
+            player_name=name,
+            action=event.action,
+            amount=event.amount,
+            pot_after=pot,
+            stack_after=stack,
+            source={"camera": False, "audio": True, "rfid": False},
+            needs_review=True,
+            confidence=0.0,
+            position=self._position_of(seat) if seat else "",
+            actor_source="unresolved",
+            reason=reason,
+            asr_confidence=event.confidence,
+            apply_ok=False,
+        )
+        if self._hand_open:
+            self._hand_needs_review = True
+        if self._on_action:
+            self._on_action(record)
+        if reason == "no_active_hand":
+            # 運用ミス（`n` の打ち忘れ / ハンド終了後の入力）なので次の操作を案内する（ISSUE-0028）。
+            logger.warning(
+                "進行中のハンド（手番）が無いため %s（raw=%r）を保留しました — "
+                "先に「新ハンド」（CLI の n）を実行してください",
+                event.action, event.raw_text,
+            )
+        else:
+            logger.warning("Unresolved audio event (%s): %r", reason, event.raw_text)
 
     def _handle_rebuy(self, event: AudioEvent) -> None:
         """GUI/CLI から queue 経由で届いた rebuy を integration スレッドで適用する。
@@ -630,7 +762,7 @@ class IntegrationThread(threading.Thread):
         （GUI/CLI はこれを受けてスタック表示を更新する）。
         """
         gs = self._game_state
-        seat = event.seat if event.seat is not None else _extract_seat_from_text(event.raw_text)
+        seat = event.seat if event.seat is not None else _extract_seat_no(event.raw_text)
         if seat is None:
             logger.warning("rebuy event without seat: %r", event.raw_text)
             return
@@ -642,7 +774,7 @@ class IntegrationThread(threading.Thread):
         if self._on_action:
             self._on_action(ActionRecord(
                 hand_id=gs.hand_id,
-                timestamp=self._now_iso(),
+                timestamp=self._iso(event.timestamp),
                 street=gs.street,
                 seat=seat,
                 player_name=gs.get_player_name(seat),
@@ -806,15 +938,21 @@ class IntegrationThread(threading.Thread):
             logger.exception("on_card_correction hook failed — ハンドは続行します")
 
     def _handle_legacy_action(self, event: AudioEvent) -> None:
-        """rules-aware でない backend（legacy）の従来アクション処理（挙動不変）。"""
+        """rules-aware でない backend（legacy）の従来アクション処理（挙動不変）。
+
+        pokerkit backend でも hand 未開始/終了後は legal_context が空でここに落ちるが、
+        その場合 get_current_player が例外になるため unresolved レコード化する（B2）。
+        """
         action = event.action
         gs = self._game_state
+
         # pokerkit backend でも「合法手が無い」= 手番なし（新ハンド前 / ハンド終了後 /
         # 全員オールイン後）はここに落ちてくる。actor が無いのは運用ミスであってバグでは
-        # ないので、traceback ではなく案内ログにする（ISSUE-0028）。
-        seat = self._current_actor_or_none()
-        if seat is None:
-            self._warn_no_actor("アクション", event)
+        # ないので、traceback ではなく unresolved レコード + 案内ログにする（ISSUE-0028 / B2）。
+        try:
+            seat = gs.get_current_player()
+        except (RuntimeError, ValueError):
+            self._emit_unresolved(event, reason="no_active_hand")
             return
 
         street_at_action = gs.street   # 適用前のストリートを記録する（ISSUE-0029）
@@ -827,8 +965,8 @@ class IntegrationThread(threading.Thread):
         else:
             needs_review = False
 
-        cam_event  = self._pop_matching_camera_event(seat, event.timestamp)
-        rfid_event = self._pop_matching_rfid_event(seat, event.timestamp)
+        cam_event  = self._pop_matching_camera_event(seat, event)
+        rfid_event = self._pop_matching_rfid_event(seat, event)
 
         has_camera = cam_event is not None
         has_rfid   = rfid_event is not None
@@ -850,7 +988,7 @@ class IntegrationThread(threading.Thread):
 
         record = ActionRecord(
             hand_id=gs.hand_id,
-            timestamp=self._now_iso(),
+            timestamp=self._iso(event.timestamp),
             street=street_at_action,
             seat=seat,
             player_name=gs.get_player_name(seat),
@@ -872,7 +1010,7 @@ class IntegrationThread(threading.Thread):
 
     def _resolve_actor(
         self, event: AudioEvent, legal_ctx: LegalContext
-    ) -> tuple[int, bool, list[int]]:
+    ) -> tuple[int, bool, list[int], str]:
         """明示発話席から actor を推定する（ADR-0009 §4 を ISSUE-0033 で改訂）。
 
         prior = engine の合法手番。**明示発話（席番号 or ポジション名）だけ**を sensed とし
@@ -880,20 +1018,22 @@ class IntegrationThread(threading.Thread):
         cap=SILENT_FOLD_CAP・atomic）で sensed まで手番を進める。合成成功なら actor=sensed、
         cap 超過/到達不可なら prior 維持（合成せず）。いずれの競合（sensed≠prior）も needs_review。
 
-        **RFID の seat 読みは actor の証拠にしない**（ISSUE-0033 / ADR-0056）。RFID が観測するのは
-        「その席に**カードがある**」であって「その席が**行動した**」ではない。ホールカードの配布は
-        数秒で最大 16 件の検出を生み、持ち上げた札を置き直しても 1 件出るため、行動と区別できない。
-        カメラ（chip motion = 行動の観測）を廃止した結果、存在検出が「物理証拠」の座に繰り上がって
-        いたのが誤りだった。RFID は**同席の裏付け**（`_pop_matching_rfid_event`）としてのみ使う
-        — こちらは actor を別席へ動かす力を持たないので無害。
+        **RFID の seat 読みは actor の証拠にしない**（ISSUE-0033 / ADR-0056。ADR-0049 G3 の
+        「active 席の読みだけ採用」も配布直後は全席 active なので防げず、この点は本方針が
+        supersede する）。RFID が観測するのは「その席に**カードがある**」であって「その席が
+        **行動した**」ではない。ホールカードの配布は数秒で最大 16 件の検出を生み、持ち上げた札を
+        置き直しても 1 件出るため、行動と区別できない。カメラ（chip motion = 行動の観測）を
+        廃止した結果、存在検出が「物理証拠」の座に繰り上がっていたのが誤りだった。RFID は
+        **同席の裏付け**（`_pop_matching_rfid_event`）としてのみ使う — こちらは actor を別席へ
+        動かす力を持たないので無害。
 
-        Returns: (actor, conflict, 合成 fold した席列)
+        Returns: (actor, conflict, 合成 fold した席列, 競合理由 = 監査 reason, ADR-0049 G3)
         """
         prior = legal_ctx.actor_seat
         sensed = self._sensed_seat(event)
 
         if sensed is None or sensed == prior:
-            return prior, False, []
+            return prior, False, [], ""
 
         # sensed != prior: 明示発話が別席を指す → silent-fold 合成を試みる（cap 内・atomic）。
         try:
@@ -903,18 +1043,20 @@ class IntegrationThread(threading.Thread):
                 "silent-fold 合成不可: prior=%s sensed=%s (cap=%d 超過/到達不可) → prior 維持 + review",
                 prior, sensed, SILENT_FOLD_CAP,
             )
-            return prior, True, []
+            # G3: 破棄した証拠（採用しなかった sensed 席）を監査 reason に残す。
+            return prior, True, [], f"actor_conflict_capped(sensed={sensed})"
         logger.info("silent-fold 合成: prior=%s → actor=%s (folded=%s)", prior, sensed, folded)
-        return sensed, True, folded
+        return sensed, True, folded, "actor_sensed_over_prior"
 
-    def _append_synth_fold(self, seat: int) -> None:
+    def _append_synth_fold(self, seat: int, event: AudioEvent) -> None:
         """合成した silent-fold を fold アクションとして記録する（推定なので常に needs_review）。
 
         時刻は RFID のマック観測があればそれを使う（ADR-0055）。`source.rfid` はその時刻が
         物理観測由来であることを示す（confidence は据え置き = 判定材料にはしていない）。
+        無ければ推定を引き起こした `event` の時刻（ADR-0048 T3）。
         """
         gs = self._game_state
-        timestamp, from_rfid = self._synth_fold_timestamp(seat)
+        timestamp, from_rfid = self._synth_fold_timestamp(seat, event)
         record = ActionRecord(
             hand_id=gs.hand_id,
             timestamp=timestamp,
@@ -929,6 +1071,9 @@ class IntegrationThread(threading.Thread):
             position=self._position_of(seat),
             needs_review=True,
             confidence=SYNTH_FOLD_CONFIDENCE,
+            actor_source="engine_prior",
+            reason="synth_silent_fold",
+            apply_ok=True,
         )
         self._current_actions.append(record)
         if self._on_action:
@@ -940,14 +1085,21 @@ class IntegrationThread(threading.Thread):
 
         D2b: 物理/明示証拠から actor を推定し（必要なら silent-fold 合成）、apply_corrections で
         合法手へ射影して適用。合成 fold は fold アクションとして記録。
-        D3: 派生 confidence（3 因子）+ needs_review 5 条件。
+        D3: 派生 confidence（3 因子）+ needs_review 条件。
+        G2（ADR-0047）: actor_source / corrected_from / reason / asr_confidence / apply_ok を
+        ActionRecord に配線し、review の理由を逆引き可能にする。
         """
         gs = self._game_state
-        actor, conflict, synthesized_seats = self._resolve_actor(event, legal_ctx)
+        actor, conflict, synthesized_seats, conflict_reason = self._resolve_actor(event, legal_ctx)
 
         # 合成した silent-fold を先に記録（手番順: 中間席の fold → 当該 actor のアクション）。
         for fseat in synthesized_seats:
-            self._append_synth_fold(fseat)
+            self._append_synth_fold(fseat, event)
+
+        # B1（ADR-0047）: fold 合成で盤面（min-raise / to-call / legal set）が変わるため、
+        # 射影は必ず合成後の legal_context に対して行う（stale ctx の再利用禁止）。
+        if synthesized_seats:
+            legal_ctx = gs.legal_context()
 
         corrected = apply_corrections(event.action, event.amount, legal_ctx, event.confidence)
 
@@ -966,9 +1118,9 @@ class IntegrationThread(threading.Thread):
             )
             apply_ok = False
 
-        cam_event = self._pop_matching_camera_event(actor, event.timestamp)
+        cam_event = self._pop_matching_camera_event(actor, event)
         # RFID は **同席の裏付け**としてのみ使う（actor を動かさない, ISSUE-0033）。
-        rfid_event = self._pop_matching_rfid_event(actor, event.timestamp)
+        rfid_event = self._pop_matching_rfid_event(actor, event)
         has_rfid = rfid_event is not None
         has_camera = cam_event is not None
 
@@ -979,23 +1131,40 @@ class IntegrationThread(threading.Thread):
         audio_agree = sensed is None or sensed == actor
         confidence = derive_confidence(
             apply_ok=apply_ok,
-            whisper_conf=event.confidence if event.confidence is not None else 1.0,
+            whisper_conf=(
+                event.confidence if event.confidence is not None else MISSING_WHISPER_CONF
+            ),
             audio_agree=audio_agree,
             rfid_present=has_rfid, rfid_agree=has_rfid,
             camera_present=has_camera, camera_agree=has_camera,
         )
-        # D3: needs_review 5 条件（ADR-0009 §6）— ①非合法 ②高信頼 ASR×規則矛盾/④amount snap
-        # （apply_corrections.needs_review が②④を内包）③actor 競合（prior↔sensor）⑤低 confidence。
+        # needs_review 条件（ADR-0009 §6）— ①非合法 ②高信頼 ASR×規則矛盾/④amount snap
+        # （apply_corrections.needs_review が②④を内包）③actor 競合（prior↔sensor）
+        # ⑤低 confidence ⑥パース曖昧性（ambiguous_amount / multi_action_keywords, ADR-0047 S1/V1）。
         needs_review = (
             (not apply_ok)
             or corrected.needs_review
             or conflict
+            or bool(event.parse_flags)
             or confidence < REVIEW_THRESHOLD
         )
 
+        # G2: actor の根拠 = 採用した actor と一致する最優先の**明示**証拠。RFID は actor を
+        # 決めない（裏付けは source.rfid に出る, ISSUE-0033）。ポジション名で決まった場合は
+        # "spoken_position"（ISSUE-0032）。
+        if event.seat is not None and event.seat == actor:
+            actor_source = "spoken_seat"
+        elif sensed is not None and sensed == actor:
+            actor_source = "spoken_position"
+        else:
+            actor_source = "engine_prior"
+
+        reasons = [r for r in (corrected.reason, conflict_reason) if r]
+        reasons.extend(event.parse_flags)
+
         record = ActionRecord(
             hand_id=gs.hand_id,
-            timestamp=self._now_iso(),
+            timestamp=self._iso(event.timestamp),
             street=street_at_action,
             seat=actor,
             player_name=gs.get_player_name(actor),
@@ -1007,6 +1176,11 @@ class IntegrationThread(threading.Thread):
             needs_review=needs_review,
             confidence=confidence,
             position=self._position_of(actor),
+            actor_source=actor_source,
+            corrected_from=corrected.corrected_from,
+            reason="+".join(reasons),
+            asr_confidence=event.confidence,
+            apply_ok=apply_ok,
         )
         self._current_actions.append(record)
 
@@ -1017,24 +1191,27 @@ class IntegrationThread(threading.Thread):
             "ActionRecord (rules-aware): seat=%d action=%s amount=%d synth=%s conflict=%s "
             "corrected_from=%s reason=%s review=%s",
             actor, corrected.action, corrected.amount, synthesized_seats, conflict,
-            corrected.corrected_from, corrected.reason, needs_review,
+            corrected.corrected_from, record.reason, needs_review,
         )
 
     # ――― ハンド開始 / 終了 ―――
 
-    def _start_new_hand(self) -> None:
+    def _start_new_hand(self, event: Optional[AudioEvent] = None) -> None:
         gs = self._game_state
+        # S5（ADR-0047）: stack_start はブラインド post 前に取る。pokerkit backend は new_hand() で
+        # ブラインドを自動 post するため、post 後に取ると result がブラインド分ずれる。
+        self._stack_start = gs.get_stacks()
         gs.new_hand()
         self._current_actions = []
-        self._hand_started_at = self._now_iso()
-        self._hand_started_epoch = self._clock()
-        self._stack_start = gs.get_stacks()
+        self._hand_started_epoch = event.timestamp if event is not None else self._clock()
+        self._hand_started_at = self._iso(self._hand_started_epoch)
         self._board_cards = []
         self._board_positions = {}
         self._board_dealt_at = {}
         self._board_source = ""
         self._hole_cards = {}
         self._hand_needs_review = False
+        self._hand_open = True
         if self._on_new_hand is not None:
             # RFID の board 位置を engine と同じタイミングでリセットする（ISSUE-0026）。
             # engine 側の board は「カードが外れても縮まない」ので、RFID だけが独自に位置を
@@ -1064,9 +1241,34 @@ class IntegrationThread(threading.Thread):
                     session_id, hand_id, seat_no, player_id,
                 )
 
-    def _finalize_hand(self, winner_seat: int) -> None:
+    def _finalize_hand(
+        self,
+        winner_seat: int,
+        event: Optional[AudioEvent] = None,
+        winner_seats: Optional[list[int]] = None,
+    ) -> None:
+        """ハンドを確定して HandSummary を書き出す。
+
+        - winner_seats（複数）は split pot（ADR-0050 S7）: `end_hand_split` で pot を等分し
+          `pot_awards` を additive に記録する（winner_seat は先頭勝者 = 従来互換）。
+        - engine の end_hand が失敗しても記録は捨てず、review 付きで書き出す（ADR-0047 B5:
+          actions の持ち越し/消失を全廃）。
+        """
         gs = self._game_state
-        gs.end_hand(winner_seat)
+        awards: Optional[dict[int, int]] = None
+        ended = False
+        try:
+            if winner_seats is not None and len(winner_seats) > 1:
+                awards = gs.end_hand_split(winner_seats)
+                self._hand_needs_review = True  # chop は必ず人の確認を通す（ADR-0050）
+            else:
+                gs.end_hand(winner_seat)
+            ended = True
+        except Exception:
+            logger.exception(
+                "end_hand failed (winner_seat=%s); 記録は review 付きで確定する", winner_seat
+            )
+            self._hand_needs_review = True
 
         # S2.x: 当該 hand の seat→player_id を session レイヤから解決（無効なら空 = 従来動作）。
         seat_player: dict[int, str] = {}
@@ -1103,11 +1305,23 @@ class IntegrationThread(threading.Thread):
                 {s: cards for s, cards in self._hole_cards.items()},
             )
 
+        # S6（ADR-0047）: pot_total は engine の pot スナップショット（実コミット額）を優先する。
+        # 従来の「bet/raise/call/allin の amount 加算」は rules-aware 経路では "to" 総額の
+        # 多重加算になる。legacy（pots() が空）は従来加算に fallback = 挙動不変。
+        pots = gs.pots() if ended else []
+        if pots:
+            pot_total = sum(p.get("amount", 0) for p in pots)
+        else:
+            pot_total = sum(
+                a.amount for a in self._current_actions
+                if a.action in ("bet", "raise", "call", "allin")
+            )
+
         summary = HandSummary(
             hand_id=gs.hand_id,
             session_id=self._json_writer._session_id,
             started_at=self._hand_started_at,
-            ended_at=self._now_iso(),
+            ended_at=self._iso(event.timestamp) if event is not None else self._now_iso(),
             blinds={"sb": gs._sb, "bb": gs._bb},  # noqa: SLF001
             board=list(self._board_cards),
             board_source=self._board_source,
@@ -1115,12 +1329,13 @@ class IntegrationThread(threading.Thread):
             button_seat=getattr(gs, "button_seat", None),
             position_map=dict(self._safe_position_map()),
             players=players_info,
-            pot_total=sum(
-                a.amount for a in self._current_actions
-                if a.action in ("bet", "raise", "call", "allin")
-            ),
-            pots=gs.pots(),
+            pot_total=pot_total,
+            pots=pots,
             winner_seat=winner_seat,
+            pot_awards=(
+                [{"seat": s, "amount": amt} for s, amt in sorted(awards.items())]
+                if awards is not None else None
+            ),
             actions=list(self._current_actions),
             review_required=(
                 self._hand_needs_review
@@ -1137,14 +1352,11 @@ class IntegrationThread(threading.Thread):
         # _current_actions と対称にリセットし、stale フラグが次のサマリーへ
         # 漏れない（new_hand を挟まない再 finalize でも残らない）ようにする。
         self._hand_needs_review = False
+        self._hand_open = False
 
 
 # ――― ユーティリティ ―――
 
 def _extract_seat_from_text(text: str) -> Optional[int]:
-    """テキストから席番号を抽出する。例: "シート3 ウィナー" → 3。"""
-    import re
-    m = re.search(r"(?:シート|seat)\s*(\d+)", text, re.IGNORECASE)
-    if m:
-        return int(m.group(1))
-    return None
+    """後方互換エイリアス。席抽出の実装は audio.recognizer に単一化（ADR-0047 S2）。"""
+    return _extract_seat_no(text)

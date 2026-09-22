@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pokerapp.local/contracts/hand.schema.json",
   "title": "Hand",
-  "version": "1.2",
-  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。1.1 = board_timeline を optional 追加（ボード各枚の配布時刻。ADR-0055, additive）。1.2 = button_seat / position_map を optional 追加（ディーラーボタン回転。仕様 FR-05b/§6.1, ISSUE-0032, additive）。",
+  "version": "1.3",
+  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。1.1 = board_timeline を optional 追加（ボード各枚の配布時刻。ADR-0055, additive）。1.2 = button_seat / position_map を optional 追加（ディーラーボタン回転。仕様 FR-05b/§6.1, ISSUE-0032, additive）。1.3 (ADR-0050 S7, additive) = split pot の pot_awards を追加（単独勝者ハンドでは absent。verify-v1 系列では 1.1 だったものを 2026-09-22 のマージで統合）。",
   "type": "object",
   "additionalProperties": true,
   "required": ["hand_id", "session_id", "started_at", "ended_at", "players", "actions"],
@@ -70,7 +70,19 @@
         }
       }
     },
-    "winner_seat": {"type": "integer"},
+    "winner_seat": {"type": "integer", "description": "主勝者（split pot では読み上げ先頭の勝者 = 従来互換, ADR-D）"},
+    "pot_awards": {
+      "type": "array",
+      "description": "ADR-D S7 additive。split pot（チョップ）時の授与内訳。単独勝者ハンドでは absent。",
+      "items": {
+        "type": "object",
+        "required": ["seat", "amount"],
+        "properties": {
+          "seat": {"type": "integer", "minimum": 1, "maximum": 9},
+          "amount": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
     "actions": {"type": "array"},
     "review_required": {"type": "boolean"}
   }

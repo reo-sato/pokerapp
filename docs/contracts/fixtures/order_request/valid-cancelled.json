@@ -1,0 +1,10 @@
+{
+  "request_id": "3b4c5d6e7f809182736455463728190a",
+  "session_id": "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+  "player_id": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+  "item_name": "ビール",
+  "quantity": 1,
+  "status": "cancelled",
+  "requested_at": "2026-07-12T20:10:00",
+  "resolved_at": "2026-07-12T20:11:00"
+}

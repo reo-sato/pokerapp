@@ -6,6 +6,10 @@ pokerkit backend は新ハンド前・ハンド終了後に actor を持たず `
 `RuntimeError` を投げる。`legal_context()` も空になるため dispatch は legacy 経路へ落ち、
 そこで例外 → traceback（イベントは黙って捨てられる）になっていた。CLAUDE.md のエラー
 ハンドリング方針（認識エラーでクラッシュしない）に合わせ、案内ログを出して落とす。
+
+verify-v1 マージ後（ADR-0047 B2）は「落とす」= **unresolved レコード**（`actor_source="unresolved"`,
+`apply_ok=False`, needs_review）を on_action にだけ流す形になった。ゲーム状態と HandSummary には
+入らない点は同じで、黙って消えない分だけ監査しやすい。
 """
 from __future__ import annotations
 
@@ -53,7 +57,10 @@ class TestActionWithoutActiveHand:
         gs = _pk()
         t, cap = _thread(gs, tmp_path, "guard1")
         t._handle_audio_event(AudioEvent("check", 0, time.time(), "ちぇっく"))  # noqa: SLF001
-        assert cap == []          # 記録は作らない（手番が無いので付け先がない）
+        # HandSummary には積まない（手番が無いので付け先がない）。on_action には unresolved で見せる。
+        assert [r.actor_source for r in cap] == ["unresolved"]
+        assert cap[0].apply_ok is False and cap[0].reason == "no_active_hand"
+        assert t._current_actions == []  # noqa: SLF001
 
     def test_action_before_new_hand_warns_with_next_step(self, tmp_path: Path, caplog):
         gs = _pk()
@@ -68,7 +75,8 @@ class TestActionWithoutActiveHand:
         gs.end_hand(1)
         t, cap = _thread(gs, tmp_path, "guard3")
         t._handle_audio_event(AudioEvent("call", 0, time.time(), "コール"))  # noqa: SLF001
-        assert cap == []
+        assert [r.actor_source for r in cap] == ["unresolved"]
+        assert t._current_actions == []  # noqa: SLF001
 
     def test_new_hand_after_dropped_action_works(self, tmp_path: Path):
         """落とした後でも `n` → アクションで通常どおり進む（状態を壊さない）。"""
@@ -77,7 +85,8 @@ class TestActionWithoutActiveHand:
         t._handle_audio_event(AudioEvent("check", 0, time.time(), "チェック"))  # noqa: SLF001
         t._handle_audio_event(AudioEvent("new_hand", 0, time.time(), "ハンド開始"))  # noqa: SLF001
         t._handle_audio_event(AudioEvent("call", 0, time.time(), "コール"))  # noqa: SLF001
-        assert [r.action for r in cap] == ["call"]
+        applied = [r for r in cap if r.actor_source != "unresolved"]
+        assert [r.action for r in applied] == ["call"]
 
     def test_legacy_backend_is_unaffected(self, tmp_path: Path):
         """legacy は手番を常に持つ = 従来どおり記録される（挙動不変）。"""
@@ -106,10 +115,12 @@ class TestWinnerWithoutActiveHand:
         assert gs.get_stacks() == after_first
 
     def test_winner_without_seat_uses_current_actor(self, tmp_path: Path):
-        """席を言わなかった場合の従来フォールバック（手番がある間）は不変。"""
-        gs = _pk(start=True)
-        actor = gs.get_current_player()
+        """席を言わなかった場合のフォールバック（手番がある間）: ADR-0047 B5 の連鎖の末尾 =
+        engine の手番席（review 付き）。ハンドは engine 経由で開始する（`_hand_open`）。"""
+        gs = _pk()
         t, _ = _thread(gs, tmp_path, "win3")
+        t._handle_audio_event(AudioEvent("new_hand", 0, time.time(), "ハンド開始"))  # noqa: SLF001
+        actor = gs.get_current_player()
         t._handle_audio_event(AudioEvent("winner", 0, time.time(), "ウィナー"))  # noqa: SLF001
         assert gs.get_stacks()[actor] > 10000        # actor がポットを取った
 

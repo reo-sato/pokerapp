@@ -103,6 +103,26 @@ class GameStateManager:
         )
         self._pot = 0
 
+    def end_hand_split(self, winner_seats: list[int]) -> dict[int, int]:
+        """announced chop（split pot, ADR-D S7）: pot を勝者間で等分して加算する。
+
+        端数は読み上げ順の先頭勝者に寄せる（PokerkitGameState と同一規則）。
+        """
+        if not winner_seats:
+            raise ValueError("winner_seats must not be empty")
+        for seat in winner_seats:
+            if seat not in self._players:
+                raise ValueError(f"Unknown seat: {seat}")
+        share, remainder = divmod(self._pot, len(winner_seats))
+        awards: dict[int, int] = {}
+        for i, seat in enumerate(winner_seats):
+            amount = share + (remainder if i == 0 else 0)
+            awards[seat] = awards.get(seat, 0) + amount
+            self._players[seat].stack += amount
+        logger.info("Hand %d ended (chop). Awards: %s", self._hand_id, awards)
+        self._pot = 0
+        return awards
+
     # ――― アクション適用 ―――
 
     def apply_action(self, seat: int, action: str, amount: int = 0) -> None:

@@ -50,7 +50,7 @@ def test_read_from_ignores_partial_trailing_line(tmp_path: Path):
 
 
 def test_command_to_audio_event_mapping():
-    log = ControlCommandLog(Path("/dev/null"))  # append しないので path 未使用
+    ControlCommandLog(Path("/dev/null"))  # append しないので path 未使用
     clk = lambda: 123.0  # noqa: E731
     nh = log_command("new_hand", {})
     ev = command_to_audio_event(nh, clk)

@@ -82,3 +82,13 @@ ADR-0056 の **P0a**（実装済）:
 
 - ADR-0056（P0a, D4）/ ISSUE-0031 / ISSUE-0009（優先順位の出所）/ ADR-0009 §4
 - ADR-0055（マック観測。fold の**時刻**には使うが**判定**には使わない、という区別の延長線）
+
+## 追記（2026-09-22, verify-v1 マージ）
+
+verify-v1 側は同じ問題に ADR-0049 G3「RFID 最近傍読みを actor 証拠として採用するのは **active 席**
+（未 fold）の読みだけ」で対処していたが、本 issue の壊れ方（配布直後は全席が active で数秒に
+最大 16 件の検出）は防げない。マージでは **本 issue の Fix（RFID を actor 証拠から完全に外す）を
+優先**し、ADR-0049 G3 の該当部分を supersede した（ADR-0049 の Status update 参照）。verify-v1 の
+golden `out-of-turn-rfid` は `rfid-appear-is-not-an-action` に統合、`rfid-vs-spoken-seat-conflict` は
+「明示発話席 > RFID」の期待値に作り直した。G3 の監査 reason（`actor_conflict_capped(sensed=N)` /
+`actor_sensed_over_prior`）は引き継いだ。

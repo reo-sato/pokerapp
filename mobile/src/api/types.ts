@@ -125,10 +125,11 @@ export interface PlayerSessionLedger {
   summary: LedgerSummary;
 }
 
-/** GET /api/menu の要素 (menu.json master, M5)。 */
+/** GET /api/menu の要素 (menu.json master, M5。sold_out は additive = ADR-0046)。 */
 export interface MenuItem {
   item_name: string;
   unit_amount: number;
+  sold_out?: boolean;
 }
 
 /** schemas/order_request.schema.json (0.x, M5 — ADR-0018)。 */
@@ -139,7 +140,7 @@ export interface OrderRequest {
   item_name: string;
   quantity: number;
   note?: string;
-  status: "pending" | "confirmed" | "rejected";
+  status: "pending" | "confirmed" | "rejected" | "cancelled"; // cancelled = 本人取り下げ (1.1, ADR-0045)
   requested_at: string;
   resolved_at?: string;
   ledger_entry_id?: string;

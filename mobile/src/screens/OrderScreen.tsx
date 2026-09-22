@@ -5,7 +5,7 @@ import type { ViewerRepository } from "../api/repository";
 import type { MenuItem, OrderRequest, Player, PlayerSessionSummary } from "../api/types";
 import { ViewerApiError } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
-import { BackLink, ErrorView, Loading, styles } from "./common";
+import { BackLink, ErrorView, Loading, ReloadLink, styles } from "./common";
 
 interface Props {
   repository: ViewerRepository;
@@ -18,6 +18,7 @@ const STATUS_LABELS: Record<OrderRequest["status"], string> = {
   pending: "受付中…",
   confirmed: "確定（会計に反映済み）",
   rejected: "却下",
+  cancelled: "キャンセル済み",
 };
 
 /** ドリンク注文 (M5, ADR-0018)。リクエストは pending で送られ、スタッフ確定で会計に載る。 */
@@ -31,6 +32,30 @@ export function OrderScreen({ repository, player, session, onBack }: Props): Rea
   const requestsState = useAsync(
     () => repository.listOrderRequests(player.player_id, session.session_id),
     [repository, player.player_id, session.session_id, requestsVersion],
+  );
+
+  // ADR-0045: pending の注文は本人が取り下げられる。
+  const cancel = useCallback(
+    async (r: OrderRequest) => {
+      setSending(true);
+      setMessage(null);
+      try {
+        await repository.cancelOrderRequest(player.player_id, session.session_id, r.request_id);
+        setMessage(`キャンセルしました: ${r.item_name} ×${r.quantity}`);
+      } catch (err) {
+        if (err instanceof ViewerApiError && err.code === "already_resolved") {
+          setMessage("この注文はすでにスタッフが処理済みです（状況を更新してください）。");
+        } else if (err instanceof ViewerApiError && err.code === "orders_unavailable") {
+          setMessage("現在は注文の操作を受け付けていません（スタッフ画面が起動していません）。");
+        } else {
+          setMessage(err instanceof Error ? err.message : String(err));
+        }
+      } finally {
+        setSending(false);
+        setRequestsVersion((v) => v + 1);
+      }
+    },
+    [repository, player.player_id, session.session_id],
   );
 
   const qtyOf = (item: MenuItem) => quantities[item.item_name] ?? 1;
@@ -74,10 +99,11 @@ export function OrderScreen({ repository, player, session, onBack }: Props): Rea
       <Text style={styles.subtitle}>
         {player.display_name} ・ {session.label ?? session.started_at} ・ スタッフ確定後に会計へ反映
       </Text>
+      <ReloadLink onPress={menuState.reload} />
       {menuState.loading ? (
         <Loading />
       ) : menuState.errorCode ? (
-        <ErrorView code={menuState.errorCode} message={menuState.errorMessage} />
+        <ErrorView code={menuState.errorCode} message={menuState.errorMessage} onRetry={menuState.reload} />
       ) : (
         <ScrollView>
           {message ? (
@@ -90,27 +116,30 @@ export function OrderScreen({ repository, player, session, onBack }: Props): Rea
             <Text style={styles.empty}>メニューが登録されていません。</Text>
           ) : (
             (menuState.data ?? []).map((item) => (
-              <View key={item.item_name} style={styles.card}>
+              <View key={item.item_name} style={[styles.card, item.sold_out && { opacity: 0.55 }]}>
                 <Text style={styles.cardTitle}>
                   {item.item_name}
                   <Text style={styles.cardMeta}>  {item.unit_amount.toLocaleString()} / 個</Text>
+                  {item.sold_out ? <Text style={styles.neg}>  品切れ</Text> : null}
                 </Text>
-                <View style={{ flexDirection: "row", alignItems: "center", marginTop: 8 }}>
-                  <Pressable onPress={() => bumpQty(item, -1)}>
-                    <Text style={styles.back}>−</Text>
-                  </Pressable>
-                  <Text style={[styles.cardTitle, { marginHorizontal: 12 }]}>{qtyOf(item)}</Text>
-                  <Pressable onPress={() => bumpQty(item, +1)}>
-                    <Text style={styles.back}>＋</Text>
-                  </Pressable>
-                  <Pressable
-                    disabled={sending}
-                    onPress={() => submit(item)}
-                    style={{ marginLeft: "auto" }}
-                  >
-                    <Text style={styles.back}>{sending ? "送信中…" : "注文する →"}</Text>
-                  </Pressable>
-                </View>
+                {item.sold_out ? null : (
+                  <View style={{ flexDirection: "row", alignItems: "center", marginTop: 8 }}>
+                    <Pressable onPress={() => bumpQty(item, -1)}>
+                      <Text style={styles.back}>−</Text>
+                    </Pressable>
+                    <Text style={[styles.cardTitle, { marginHorizontal: 12 }]}>{qtyOf(item)}</Text>
+                    <Pressable onPress={() => bumpQty(item, +1)}>
+                      <Text style={styles.back}>＋</Text>
+                    </Pressable>
+                    <Pressable
+                      disabled={sending}
+                      onPress={() => submit(item)}
+                      style={{ marginLeft: "auto" }}
+                    >
+                      <Text style={styles.back}>{sending ? "送信中…" : "注文する →"}</Text>
+                    </Pressable>
+                  </View>
+                )}
               </View>
             ))
           )}
@@ -123,12 +152,32 @@ export function OrderScreen({ repository, player, session, onBack }: Props): Rea
               <Text style={styles.cardMeta}>まだ注文はありません。</Text>
             ) : (
               [...(requestsState.data ?? [])].reverse().map((r) => (
-                <Text key={r.request_id} style={styles.cardMeta}>
-                  {r.requested_at} ・ {r.item_name} ×{r.quantity} ・{" "}
-                  <Text style={r.status === "rejected" ? styles.neg : styles.pos}>
-                    {STATUS_LABELS[r.status]}
+                <View
+                  key={r.request_id}
+                  style={{ flexDirection: "row", alignItems: "center", marginTop: 2 }}
+                >
+                  <Text style={[styles.cardMeta, { flexShrink: 1 }]}>
+                    {r.requested_at} ・ {r.item_name} ×{r.quantity} ・{" "}
+                    <Text
+                      style={
+                        r.status === "rejected" || r.status === "cancelled"
+                          ? styles.neg
+                          : styles.pos
+                      }
+                    >
+                      {STATUS_LABELS[r.status] ?? r.status}
+                    </Text>
                   </Text>
-                </Text>
+                  {r.status === "pending" ? (
+                    <Pressable
+                      disabled={sending}
+                      onPress={() => cancel(r)}
+                      style={{ marginLeft: "auto", paddingLeft: 12 }}
+                    >
+                      <Text style={[styles.back, { marginBottom: 0 }]}>キャンセル</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
               ))
             )}
             <Pressable onPress={() => setRequestsVersion((v) => v + 1)}>

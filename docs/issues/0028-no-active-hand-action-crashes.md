@@ -105,3 +105,14 @@ RuntimeError: No actor (no active hand or hand over)
 - ADR-0009（rules-aware backend 境界。空 `legal_context` を「legacy の印」としていた前提の補正）
 - ISSUE-0026 / ADR-0053（同じ実機通しテストで見つかった board 位置の同期点）
 - `docs/worklog/2026-09-12-no-active-hand-guard.md`
+
+## 追記（2026-09-22, verify-v1 マージ）
+
+verify-v1 の ADR-0047 B2/B5（「イベントの無音消失の全廃」）と合流し、「落として案内する」は
+**unresolved レコード**（`actor_source="unresolved"`, `apply_ok=false`, `reason="no_active_hand"`,
+needs_review）を `on_action` にだけ流す形になった。ゲーム状態と `HandSummary.actions` に入らない点は
+本 issue の修正と同じで、黙って消えない分だけ監査しやすい。`_current_actor_or_none` /
+`_warn_no_actor` は `_emit_unresolved` に吸収（案内ログは維持）。確定済みハンドへの winner 再宣言は
+`is_hand_active()` で引き続き止める（B5 の「end_hand が失敗しても review 付きで書き出す」経路に
+落とすと空 summary を量産するため）。席の無い winner は B5 の fallback 連鎖で補う。
+CLI は unresolved を `[未適用] <action> (<reason>)` と表示する。

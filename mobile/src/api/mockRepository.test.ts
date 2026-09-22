@@ -5,13 +5,17 @@
  * not_found code での reject (error-shapes.md と同じ分岐キー)。
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { beforeEach, test } from "node:test";
 
 import { MockRepository } from "./mockRepository";
 import { ViewerApiError } from "./types";
 import { ALICE_ID, BOB_ID, SESSION_ID } from "../mocks/fixtures";
+import { clearMemoryStorageForTest } from "../storage";
 
 const MISSING_ID = "f".repeat(32);
+
+// 認証の永続化（authStorage）がテスト間でリークしないように毎回クリアする。
+beforeEach(() => clearMemoryStorageForTest());
 
 test("listPlayers returns fixture players", async () => {
   const repo = new MockRepository();
@@ -206,6 +210,80 @@ test("getHand returns hand or rejects with not_found", async () => {
   await assert.rejects(repo.getHand(SESSION_ID, 99), (err: unknown) => {
     assert.ok(err instanceof ViewerApiError);
     assert.equal(err.code, "not_found");
+    return true;
+  });
+});
+
+test("cancelOrderRequest cancels own pending order and rejects resolved/foreign (ADR-0045)", async () => {
+  const repo = new MockRepository();
+  const created = await repo.createOrderRequest(ALICE_ID, SESSION_ID, {
+    item_name: "ビール", quantity: 1,
+  });
+
+  const cancelled = await repo.cancelOrderRequest(ALICE_ID, SESSION_ID, created.request_id);
+  assert.equal(cancelled.status, "cancelled");
+  assert.ok(cancelled.resolved_at);
+
+  // 再キャンセルは already_resolved。
+  await assert.rejects(
+    repo.cancelOrderRequest(ALICE_ID, SESSION_ID, created.request_id),
+    (err: unknown) => {
+      assert.ok(err instanceof ViewerApiError);
+      assert.equal(err.code, "already_resolved");
+      return true;
+    },
+  );
+
+  // 他人の request は存在を漏らさず not_found。
+  const another = await repo.createOrderRequest(ALICE_ID, SESSION_ID, {
+    item_name: "コーラ", quantity: 1,
+  });
+  await assert.rejects(
+    repo.cancelOrderRequest(BOB_ID, SESSION_ID, another.request_id),
+    (err: unknown) => {
+      assert.ok(err instanceof ViewerApiError);
+      assert.equal(err.code, "not_found");
+      return true;
+    },
+  );
+});
+
+test("createOrderRequest rejects sold_out item with item_sold_out (ADR-0046)", async () => {
+  const repo = new MockRepository();
+  await assert.rejects(
+    repo.createOrderRequest(ALICE_ID, SESSION_ID, { item_name: "枝豆", quantity: 1 }),
+    (err: unknown) => {
+      assert.ok(err instanceof ViewerApiError);
+      assert.equal(err.code, "item_sold_out");
+      return true;
+    },
+  );
+});
+
+test("setPin: first-time self-enroll, change requires current PIN, login uses new PIN (ADR-0027)", async () => {
+  const repo = new MockRepository();
+  // 初回設定（pin_self_enroll 相当）→ 新 PIN でログインできる。
+  await repo.setPin(ALICE_ID, "5678");
+  const session = await repo.login(ALICE_ID, "5678");
+  assert.equal(session.player_id, ALICE_ID);
+  // 既定 PIN では入れなくなる。
+  await assert.rejects(repo.login(ALICE_ID, "1234"), (err: unknown) => {
+    assert.ok(err instanceof ViewerApiError);
+    assert.equal(err.code, "invalid_pin");
+    return true;
+  });
+  // 変更は現 PIN 必須。
+  await assert.rejects(repo.setPin(ALICE_ID, "9999"), (err: unknown) => {
+    assert.ok(err instanceof ViewerApiError);
+    assert.equal(err.code, "unauthorized");
+    return true;
+  });
+  await repo.setPin(ALICE_ID, "9999", "5678");
+  await repo.login(ALICE_ID, "9999");
+  // 短すぎる PIN は pin_too_short。
+  await assert.rejects(repo.setPin(ALICE_ID, "12", "9999"), (err: unknown) => {
+    assert.ok(err instanceof ViewerApiError);
+    assert.equal(err.code, "pin_too_short");
     return true;
   });
 });

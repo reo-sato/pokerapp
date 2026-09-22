@@ -109,3 +109,11 @@ golden fixtures 4 ケースで pin（`tests/test_phase_d3_confidence.py` + `test
 ## Notes
 
 risk register として Open 保持。R3 実装時に golden fixtures で評価しながら順次クローズする。
+
+**追記（2026-08-19, ADR-0047/0049）**: 残っていた証拠健全性の穴を実装で塞いだ:
+- RFID 最近傍 pop に **active 席フィルタ**（fold 済み席のカード読みを actor 証拠にしない, G3）。
+- cap 超過で破棄した sensed 席を監査 reason（`actor_conflict_capped(sensed=N)`）に記録（G3）。
+- fold 合成後の **legal_context 再取得**（stale ctx への射影を廃止, B1）。
+- 監査フィールド（actor_source / corrected_from / reason / apply_ok / asr_confidence）の実配線（G2）。
+- 負例 golden fixture `cap-exceeded-negative`（cap 超過 → prior 維持 + review）を追加。
+残: chip-motion（camera）由来の call/fold 尤度（vision 廃止方針のため凍結）。

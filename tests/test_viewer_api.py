@@ -286,3 +286,57 @@ def test_not_found_error_shape(env: dict, path: str):
     body = res.json()
     assert body["code"] == "not_found"
     assert isinstance(body["message"], str) and body["message"]
+
+
+def test_cancel_order_request_roundtrip(env: dict):
+    """ADR-0045: 本人キャンセル → cancelled、他人 / 解決済み / read-only の拒否。"""
+    sid, pid = env["session"].session_id, env["alice"].player_id
+    created = env["client"].post(
+        f"/api/players/{pid}/sessions/{sid}/order-requests",
+        json={"item_name": "ビール", "quantity": 2},
+    ).json()
+    rid = created["request_id"]
+    entries_before = len(env["ledger"].list_entries(sid))
+
+    # 本人キャンセル → cancelled（schema 1.1 適合・ledger 影響なし）。
+    res = env["client"].post(
+        f"/api/players/{pid}/sessions/{sid}/order-requests/{rid}/cancel")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "cancelled"
+    assert body["resolved_at"]
+    _validate(body, "order_request")
+    assert len(env["ledger"].list_entries(sid)) == entries_before
+
+    # 再キャンセル → 409 already_resolved。
+    res = env["client"].post(
+        f"/api/players/{pid}/sessions/{sid}/order-requests/{rid}/cancel")
+    assert res.status_code == 409
+    assert res.json()["code"] == "already_resolved"
+
+
+def test_cancel_order_request_other_player_is_not_found(env: dict):
+    sid, pid = env["session"].session_id, env["alice"].player_id
+    created = env["client"].post(
+        f"/api/players/{pid}/sessions/{sid}/order-requests",
+        json={"item_name": "コーラ", "quantity": 1},
+    ).json()
+    bob = env["bob"].player_id
+    res = env["client"].post(
+        f"/api/players/{bob}/sessions/{sid}/order-requests/{created['request_id']}/cancel")
+    assert res.status_code == 404
+    assert res.json()["code"] == "not_found"
+    # 変化していない（pending のまま staff queue に残る）。
+    assert env["orders"].get(created["request_id"]).status == "pending"
+
+
+def test_cancel_order_request_readonly_is_503(env: dict):
+    sid, pid = env["session"].session_id, env["alice"].player_id
+    created = env["client"].post(
+        f"/api/players/{pid}/sessions/{sid}/order-requests",
+        json={"item_name": "ビール", "quantity": 1},
+    ).json()
+    res = env["readonly_client"].post(
+        f"/api/players/{pid}/sessions/{sid}/order-requests/{created['request_id']}/cancel")
+    assert res.status_code == 503
+    assert res.json()["code"] == "orders_unavailable"

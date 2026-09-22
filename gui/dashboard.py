@@ -135,6 +135,12 @@ class GUIDashboard:
                                         font=("Courier", 11))
         self._lbl_board.grid(row=1, column=0, columnspan=3, padx=12, pady=0, sticky="w")
 
+        # 録音系の死活表示（マイク入力レベル / RFID リーダー接続。AudioThread/RFIDThread の
+        # health を 100ms poll で読むだけ = 監視のみ、business logic なし）
+        self._lbl_health = ctk.CTkLabel(self._header, text="🎤 —　📶 —", anchor="w",
+                                         font=("", 10))
+        self._lbl_health.grid(row=2, column=0, columnspan=4, padx=12, pady=(0, 4), sticky="w")
+
         # メインエリア
         main_frame = ctk.CTkFrame(root, corner_radius=0, fg_color="transparent")
         main_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=4)
@@ -382,6 +388,56 @@ class GUIDashboard:
                 self._lbl_rfid.configure(text=f"RFID:{port} ({count}件)")
             except Exception:
                 pass
+        self._refresh_health()
+
+    _LEVEL_BLOCKS = " ▁▂▃▄▅▆▇█"
+
+    def _refresh_health(self) -> None:
+        """録音系の死活表示（AudioThread.health / RFIDThread.health を読むだけ）。"""
+        import time as _time
+
+        # 音声: 状態 + 入力レベルバー。running でもチャンクが 3 秒来なければ停滞表示。
+        audio = getattr(getattr(self, "_audio_thread", None), "health", None)
+        if not isinstance(audio, dict):
+            mic = "🎤 音声: —"
+        else:
+            state = audio.get("state")
+            if state == "running":
+                last = audio.get("last_chunk_at")
+                if last is not None and _time.time() - last > 3.0:
+                    mic = "🎤 音声: ⚠ 入力が止まっています"
+                else:
+                    level = max(0.0, min(1.0, float(audio.get("level") or 0.0)))
+                    idx = min(len(self._LEVEL_BLOCKS) - 1,
+                              int(level * (len(self._LEVEL_BLOCKS) - 1) + 0.5))
+                    bar = self._LEVEL_BLOCKS[idx] * 3
+                    mic = f"🎤 音声: ● 入力中 [{bar}]"
+            else:
+                label = {
+                    "starting": "起動中…",
+                    "unavailable": "✕ pyaudio なし",
+                    "error": "✕ デバイスを開けません",
+                    "stopped": "停止",
+                }.get(state, str(state))
+                mic = f"🎤 音声: {label}"
+
+        # RFID: 接続 reader 数（PC/SC）。未使用（rfid.enabled=false）は — のまま。
+        rfid = getattr(getattr(self, "_rfid_thread", None), "health", None)
+        if not isinstance(rfid, dict):
+            nfc = "📶 RFID: —"
+        else:
+            state = rfid.get("state")
+            connected = rfid.get("connected", 0)
+            configured = rfid.get("configured", 0)
+            if state == "running":
+                nfc = f"📶 RFID: ● {connected}/{configured} 接続"
+            elif state == "no_readers":
+                nfc = f"📶 RFID: ✕ リーダー未接続 (0/{configured})"
+            else:
+                label = {"starting": "起動中…", "stopped": "停止"}.get(state, str(state))
+                nfc = f"📶 RFID: {label}"
+
+        self._lbl_health.configure(text=f"{mic}　{nfc}")
 
     def _refresh_player_row(self, seat: int) -> None:
         if seat not in self._player_rows:

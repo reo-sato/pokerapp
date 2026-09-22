@@ -30,6 +30,11 @@ export interface ViewerRepository {
    */
   login(playerId: string, pin: string): Promise<AuthSession>;
   oidcExchange(provider: string, code: string): Promise<AuthSession>;
+  /**
+   * PIN を設定/変更する (ADR-0027 D6)。初回は pin_self_enroll=true の会場で本人が設定でき、
+   * 変更は current_pin が必要（player_auth=off は player_auth_disabled で reject）。
+   */
+  setPin(playerId: string, pin: string, currentPin?: string): Promise<void>;
   /** 現在の principal (ログイン済み player_id) / 未ログインは null。 */
   currentPrincipal(): string | null;
   /** トークンを破棄する (ログアウト / player 切替時)。 */
@@ -47,6 +52,13 @@ export interface ViewerRepository {
     playerId: string,
     sessionId: string,
     body: OrderRequestBody,
+  ): Promise<OrderRequest>;
+  /** ADR-0045: 本人が pending の注文を取り下げる（status=cancelled, ledger 影響なし）。
+      他人の request は not_found、終端済みは already_resolved で reject。 */
+  cancelOrderRequest(
+    playerId: string,
+    sessionId: string,
+    requestId: string,
   ): Promise<OrderRequest>;
   /** B4 (ADR-0036): ハンド訂正を追記する（staff 操作 = iPad）。append-only オーバーレイ。
       getHand / listPlayerHands は訂正済みビューを返す。staff token 必須。 */

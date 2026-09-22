@@ -54,7 +54,10 @@ def utterances_to_events(
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        ev = parse_action(line)
+        # 意図的なテキスト入力（ASR ノイズなし）なので信頼度は満点を明示する。
+        # None のままだと欠測扱い（MISSING_WHISPER_CONF=0.5, ADR-0033 追記）で
+        # 全アクションが needs_review になってしまう。
+        ev = parse_action(line, confidence=1.0)
         if ev is None:
             print(f"[skip] 認識できない行: {line!r}", file=sys.stderr)
             continue

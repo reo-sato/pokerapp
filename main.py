@@ -214,6 +214,11 @@ def run_cli() -> None:
     camera_q = None
 
     def on_action(record):
+        if getattr(record, "actor_source", None) == "unresolved":
+            # 状態に適用できなかった入力（ハンド外 / 低信頼の制御語 など, ADR-0047 B2）。
+            # 黙って捨てず、何が保留されたかを見せる（ゲーム状態は変わっていない）。
+            print(f"  [未適用] {record.action} ({record.reason})  ← 状態は変わっていません")
+            return
         print(
             f"  [{record.street}] 席{record.seat}({record.player_name}) "
             f"{record.action} {record.amount or ''}"
@@ -309,6 +314,7 @@ def run_cli() -> None:
         seat_cards_absent_since=seat_absent_since,
         seat_presence=seat_presence,
         table_state_writer=table_state_writer,
+        control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
     )
     if audio_thread is not None:
         audio_thread.start()
@@ -387,7 +393,9 @@ def run_cli() -> None:
                 # 上のコマンド以外は **ディーラーのアナウンスとして解釈**する（マイク無しで
                 # アクションを投入する経路。音声と同じ `parse_action` を通すので語彙は共通 =
                 # 二重管理にならない）。例: 「チェック」「シート3 コール」「ベット 500」。
-                ev = parse_action(line)
+                # キーボード入力は ASR ではなく操作者の意図的な入力なので信頼度 1.0 を明示する
+                # （None は「Whisper 欠測」の意味で保守的既定 0.5 = 要レビューに倒れる, ADR-0047 B3）。
+                ev = parse_action(line, confidence=1.0)
                 if ev is None:
                     print("認識できません。コマンド: q / n / w <席> / r <席> <金額>、"
                           "または読み上げ文（例: チェック / シート3 コール / ベット 500）")
@@ -560,6 +568,7 @@ def run_gui() -> None:
         seat_cards_absent_since=seat_absent_since,
         seat_presence=seat_presence,
         table_state_writer=table_state_writer,
+        control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
     )
 
     dash.start_threads(

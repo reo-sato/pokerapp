@@ -18,6 +18,7 @@ import type {
   PlayerSessionSummary,
 } from "./types";
 import { ViewerApiError } from "./types";
+import { clearStoredAuth, loadStoredAuth, saveStoredAuth } from "./authStorage";
 
 export class HttpRepository implements ViewerRepository {
   private readonly baseUrl: string;
@@ -30,6 +31,12 @@ export class HttpRepository implements ViewerRepository {
   constructor(baseUrl: string, staffToken: string | null = null) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.staffToken = staffToken;
+    // 保存済みログインを復元する（web 再読込対策。期限切れは loadStoredAuth が破棄）。
+    const stored = loadStoredAuth();
+    if (stored) {
+      this.playerToken = stored.token;
+      this.principal = stored.player_id;
+    }
   }
 
   setStaffToken(token: string | null): void {
@@ -91,6 +98,7 @@ export class HttpRepository implements ViewerRepository {
     );
     this.playerToken = session.token;
     this.principal = session.player_id;
+    saveStoredAuth(session);
     return session;
   }
 
@@ -100,7 +108,14 @@ export class HttpRepository implements ViewerRepository {
     );
     this.playerToken = session.token;
     this.principal = session.player_id;
+    saveStoredAuth(session);
     return session;
+  }
+
+  async setPin(playerId: string, pin: string, currentPin?: string): Promise<void> {
+    const payload: { pin: string; current_pin?: string } = { pin };
+    if (currentPin) payload.current_pin = currentPin;
+    await this.post(`/api/players/${encodeURIComponent(playerId)}/pin`, payload);
   }
 
   currentPrincipal(): string | null {
@@ -110,6 +125,7 @@ export class HttpRepository implements ViewerRepository {
   clearAuth(): void {
     this.playerToken = null;
     this.principal = null;
+    clearStoredAuth();
   }
 
   async listPlayerSessions(playerId: string): Promise<PlayerSessionSummary[]> {
@@ -157,6 +173,19 @@ export class HttpRepository implements ViewerRepository {
     return this.post(
       `/api/players/${encodeURIComponent(playerId)}/sessions/${encodeURIComponent(sessionId)}/order-requests`,
       body,
+      true,
+    );
+  }
+
+  cancelOrderRequest(
+    playerId: string,
+    sessionId: string,
+    requestId: string,
+  ): Promise<OrderRequest> {
+    // self-write（注文 POST と同じ認可姿勢, ADR-0045）。
+    return this.post(
+      `/api/players/${encodeURIComponent(playerId)}/sessions/${encodeURIComponent(sessionId)}/order-requests/${encodeURIComponent(requestId)}/cancel`,
+      {},
       true,
     );
   }

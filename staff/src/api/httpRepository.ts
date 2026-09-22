@@ -12,8 +12,14 @@
 import type { StaffRepository } from "./repository";
 import {
   type ControlCommand,
+  type GroundTruthEditPayload,
+  type GroundTruthHand,
   type HandControlInput,
+  type HandCorrection,
+  type HandCorrectionInput,
+  type HandSummary,
   type LedgerEntry,
+  type MeasurementRow,
   type MenuItem,
   type OrderRequest,
   type Player,
@@ -118,6 +124,16 @@ export class HttpStaffRepository implements StaffRepository {
     return this.send("PUT", `/api/staff/players/${E(playerId)}`, { display_name: displayName });
   }
 
+  mergePlayers(
+    survivorId: string,
+    absorbedId: string,
+  ): Promise<{ survivor_id: string; absorbed_id: string }> {
+    return this.send("POST", "/api/staff/players/merge", {
+      survivor_id: survivorId,
+      absorbed_id: absorbedId,
+    });
+  }
+
   getSeating(sessionId: string): Promise<StaffSeating> {
     return this.get(`/api/staff/sessions/${E(sessionId)}/seating`);
   }
@@ -205,6 +221,11 @@ export class HttpStaffRepository implements StaffRepository {
     return body.items;
   }
 
+  async updateMenu(items: MenuItem[]): Promise<MenuItem[]> {
+    const body = await this.send<{ items: MenuItem[] }>("PUT", "/api/staff/menu", { items });
+    return body.items;
+  }
+
   async listOrderRequests(sessionId: string, status?: string): Promise<OrderRequest[]> {
     const q = status ? `?status=${E(status)}` : "";
     const body = await this.get<{ requests: OrderRequest[] }>(
@@ -228,5 +249,71 @@ export class HttpStaffRepository implements StaffRepository {
     if (input.seat !== undefined) payload.seat = input.seat;
     if (input.amount !== undefined) payload.amount = input.amount;
     return this.send("POST", `/api/staff/sessions/${E(sessionId)}/control`, payload);
+  }
+
+  // ――― ハンド履歴 read（ADR-0044）―――
+
+  async listSessionHands(sessionId: string): Promise<HandSummary[]> {
+    const body = await this.get<{ hands: HandSummary[] }>(
+      `/api/staff/sessions/${E(sessionId)}/hands`,
+    );
+    return body.hands;
+  }
+
+  addHandCorrection(
+    sessionId: string,
+    handId: number,
+    input: HandCorrectionInput,
+  ): Promise<HandCorrection> {
+    const payload: Record<string, unknown> = {
+      field: input.field,
+      new_value: input.new_value,
+    };
+    if (input.action_index !== undefined) payload.action_index = input.action_index;
+    if (input.corrected_by) payload.corrected_by = input.corrected_by;
+    if (input.note) payload.note = input.note;
+    return this.send(
+      "POST",
+      `/api/staff/sessions/${E(sessionId)}/hands/${handId}/corrections`,
+      payload,
+    );
+  }
+
+  // ――― Phase A 計測 / ground truth（ADR-0043）―――
+
+  async listMeasurementRows(sessionId: string): Promise<MeasurementRow[]> {
+    const body = await this.get<{ rows: MeasurementRow[] }>(
+      `/api/staff/sessions/${E(sessionId)}/measurement-rows`,
+    );
+    return body.rows;
+  }
+
+  passThroughGroundTruth(
+    sessionId: string,
+    handId: number,
+    annotator = "staff",
+  ): Promise<GroundTruthHand> {
+    return this.send(
+      "PUT",
+      `/api/staff/sessions/${E(sessionId)}/ground-truth/${handId}`,
+      { source: "captured-passthrough", annotator },
+    );
+  }
+
+  submitGroundTruthEdit(
+    sessionId: string,
+    handId: number,
+    payload: GroundTruthEditPayload,
+    annotator = "staff",
+  ): Promise<GroundTruthHand> {
+    return this.send(
+      "PUT",
+      `/api/staff/sessions/${E(sessionId)}/ground-truth/${handId}`,
+      { source: "manual-edit", annotator, hand: payload },
+    );
+  }
+
+  getGroundTruth(sessionId: string, handId: number): Promise<GroundTruthHand> {
+    return this.get(`/api/staff/sessions/${E(sessionId)}/ground-truth/${handId}`);
   }
 }

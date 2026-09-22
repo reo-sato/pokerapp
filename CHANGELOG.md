@@ -6,6 +6,30 @@
 
 ## [Unreleased]
 
+### Changed (verify-v1 をマージ — 復元の正当性修正バッチ (ADR-0047〜0050) と合流, 2026-09-22)
+
+3 か月分岐していた `verify-v1`（solver 基盤 / リプレイ UI / 注文キャンセル / menu 編集 / ADR-0047〜0050）を
+本 branch に取り込んだ。両側の機能は共存する。判断した点:
+
+- **RFID の検出は actor の証拠にしない**（P0a / ISSUE-0033 / ADR-0056）を優先し、verify-v1 の
+  ADR-0049 G3「RFID 最近傍読みを actor 証拠に採用（active 席限定）」を supersede した（配布直後は
+  全席 active なので防げない）。G3 の監査 reason（`actor_conflict_capped(sensed=N)` 等）は引き継ぐ。
+  `actor_source` に `spoken_position` を追加、`"rfid"` は新規には出ない。
+- **ADR 番号の衝突**: こちらの 0040〜0045 を **0051〜0056** に振り直した（CCID 仮想カード / P2 /
+  論理ボード / ミスディール訂正 / 観測時刻 / 事後推定）。verify-v1 の 0040〜0050 はそのまま。
+- **schema 版の衝突**: `action 1.3` / `hand 1.3` / `reconstruction_event 0.3` に統合（すべて optional の
+  additive。旧記録はそのまま読める）。
+- **ハンド外の入力**は「落として案内」から verify-v1 の **unresolved レコード**（`actor_source=
+  "unresolved"`, `apply_ok=false`, on_action のみ）に寄せた。CLI は `[未適用] …` と表示する。
+  確定済みハンドへの winner 再宣言は引き続き止める（二重加算防止）。
+- **キーボード入力は confidence=1.0**（`--cli` / `tools/play_hand_text.py`）。verify-v1 の
+  「Whisper 欠測 = 0.5（要レビュー）」は ASR 向けで、操作者の意図的な入力には当てない。
+- `action.street` は「適用前のストリート」（ISSUE-0029）を維持。時刻は `event.timestamp` 由来
+  （ADR-0048 T3）に統一、合成 fold だけ RFID 不在観測を優先（ADR-0055）。
+- golden 13 件を再生成（手計算検証は worklog）。`rfid-vs-spoken-seat-conflict` は「明示発話席 > RFID」
+  に、`multi-hand-session` はボタン回転に合わせて作り直し。
+- **1148 passed / ruff clean**。
+
 ### Fixed (ディーラーボタンが回らない, ISSUE-0032 = ADR-0056 P0b, 2026-09-12)
 
 **ボタンが一度も回らず、毎ハンド同じ席が SB/BB を払い、同じ席が最初に行動していた**。ターン順は
@@ -611,6 +635,255 @@
 - `CLAUDE.md` のコマンド集 / Phase H 行 / 残作業 #2 を更新。
 - テスト: `tests/test_tools_probe_pcsc.py`（35 件。純粋ロジック + DI シーム + コマンド層を pyscard/実機なしで
   検証）。**残**: 実機を繋いだ通し QA、firmware の VID/PID・実 reader_name 確定（契約 §2/§4 追記, ISSUE-0015）。
+### Fixed / Docs (CHANGELOG ↔ 実装の全量整合監査と指摘修正)
+
+CHANGELOG 全 77 セクションを実装・テスト・git 履歴と突き合わせる全量監査を実施
+（不整合 0 / 軽微 10 + 付随 2。worklog `2026-09-10-changelog-audit-fixes.md`）。
+機能・挙動・数値レベルの食い違いは無し。検出した軽微指摘を修正:
+
+- **staff Playwright 設定の実効化**: 「iPad 相当 viewport + touch」が project 側の
+  `...devices["Desktop Chrome"]` に上書きされ実効していなかったのを修正
+  （`staff/playwright.config.ts`: device preset の後に viewport 1180×820 + hasTouch を再指定）。
+- **mobile Order 画面のメニューに ↻ 再読込リンク追加**（`OrderScreen.tsx`。「全画面に ↻」の
+  記載どおりに揃えた。従来はエラー時再試行と注文状況の更新のみ）。
+- **settlement 支払系テストのクラス所属を復元**: B1（セッション締め導線）で `TestCloseSession`
+  配下に紛れた paid/unpaid トグル + partial/full/negative の 5 テストを本来の `TestSettlement` へ
+  移動（`tests/test_ledger_view_gui.py`, 挙動・件数不変）。
+- **docs drift**: README / pyproject の RFID 記述を canonical（PN5180 + ESP32-S3, USB CCID /
+  PC/SC = ADR-0015）に更新（旧 ESP32+PN532 表記のまま残っていた）。`core/poker_engine.py`
+  冒頭 docstring の「default は legacy」を Phase G 以降の実態に更新。
+  `repository-interfaces.md` の非採用 `plan_payment` 言及、`tests/test_contracts.py` の
+  「未 freeze」陳腐化コメントを実態（ADR-0019 で 1.0 freeze 済み）に更新。
+- **CHANGELOG 自体の誤記訂正**: ADR-0039 エントリのフラグ名欠落表記、ADR-0013 エントリの
+  遡及書き換え済みファイル名（`ledger-points.md` 当時 + 統合時削除の注記に復元）、
+  Phase H エントリの requirements-dev 実内容、F3a エントリへの `_hand_needs_review`
+  finalize リセットの補記（当時の記載漏れ）。
+
+### Changed (アクション履歴復元の正当性修正バッチ = ADR-0047/0048/0049/0050)
+
+Phase A KPI（hand coverage / action 一致率 / board 一致率 ≥95%）に向け、needs_review が付かず
+GT 照合まで発見できなかった「静かな誤り」経路とバグを一括修正。pokerkit 権威・legacy rollback
+path・schema additive 原則は不変。詳細は ADR-0047〜0050 / worklog
+`2026-08-19-reconstruction-hardening-batch.md`。
+
+- **金額パース（S1）**: 「2千」「5百」「2千5百」「1.5万」「1.5K」を正しく読む（従来「2千」は
+  2 と誤読され min-raise に無警告 clamp）。「4万2」「四万二」は 42000 と解釈しつつ
+  `ambiguous_amount` flag → needs_review。
+- **席番号（S2）**: 「シート 3」（空白）「seat ３」（全角）「シート三」（漢数字）の席表現を
+  strip / 抽出とも統一処理（席番号が金額として誤読される経路を全廃。実装は recognizer に単一化）。
+- **raise 額の解釈（S3/S4/V4）**: 「to 解釈では非合法だが追加額(by)解釈なら合法」の raise に
+  `raise_to_vs_by_ambiguous` flag。金額 snap の review 閾値を同次元比較（移動量 >= bb）に修正。
+  bb 倍数への round 寄せ（合法レンジ内のみ, `rounded_to_bb`）。
+- **エンジンバグ（B1-B5）**: fold 合成後の stale legal_context 再利用を修正（記録額が実コミット
+  額とズレていた）/ ハンド外イベント・処理中例外は必ず「適用不能レコード」として可視化
+  （無音消失の全廃, live↔replay 同一セマンティクス）/ winner 席不明時の fallback 連鎖
+  （単独 active 席 → 最後のアグレッサー + review）+ 空 junk summary 抑止。
+- **会計値（S5/S6）**: `players[].result` のブラインド分ズレを修正（stack_start をブラインド
+  post 前に取得）。`pot_total` を engine の pot スナップショット権威に（従来は "to" 総額の
+  多重加算 + ブラインド抜け）。golden fixtures の誤 pin を手計算検証の上で訂正（差分表 = ADR-0047）。
+- **監査（G2）**: ActionRecord に `actor_source` / `corrected_from` / `reason` /
+  `asr_confidence` / `apply_ok` を実配線（action schema 1.0→1.1 additive）。needs_review の
+  理由がレコード単体から逆引き可能に（Phase A の切り分け表が運用可能に）。
+- **計測（G6）**: `tools/measure_capture_accuracy.py` をシーケンスアライメント比較に
+  （誤合成 fold 1 件で action_accuracy が崩壊しない。挿入/欠落 = 各 1 誤り）。GT 規約を
+  measurement-plan に明文化。
+- **confidence 欠測（B3, ADR-0033 追記）**: whisper 信頼度欠測（None）の満点補完をやめ
+  保守的既定 0.5 に（audio-only 欠測は review 側）。較正プロパティ P9 追加。
+  `tools/play_hand_text.py` は意図的入力として confidence=1.0 を明示。
+- **制御語ガード（G1, ADR-0049）**: `engine.control_conf_threshold`（既定 0 = off）で低信頼の
+  ハンド開始/ウィナー/ショーダウンを保留レコード化。進行中ハンドへの new_hand は記録を捨てず
+  異常確定（review 付き）してから開始。
+- **actor 証拠健全性（G3/G4）**: fold 済み席の RFID 読みを actor 証拠に採用しない。cap 超過で
+  破棄した証拠を監査 reason に記録。高信頼 ASR（>=0.85）が射影で action を変えられた場合は review。
+- **時刻整合（T1-T3, ADR-0048）**: `AudioEvent.utterance_start_ts` additive + センサー照合窓を
+  発話区間ベース両側窓に（ASR デコード遅延で RFID/camera 照合を取りこぼさない）。buffer 保持
+  12 秒に拡大。ActionRecord/HandSummary の時刻を event 時刻由来に統一（live/replay 同義）。
+  旧 events.jsonl は無変更で再生可（後方互換テストあり）。
+- **recorder 再構築（T4, ADR-0049）**: 推論を worker スレッドに分離（キャプチャ非ブロック）、
+  有音ゲート（無音を推論に送らない = プロンプトオウム返し対策）、発話開始時刻の記録、
+  フラッシュ判定をサンプル数ベースに、Whisper プロンプトを自然文化、no_speech_prob で
+  confidence 減衰。テスト seam を設け recorder 初のユニットテスト。
+- **split pot（S7, ADR-0050）**: 「シート3 シート5 チョップ」で pot を等分
+  （`end_hand_split`、端数は先頭勝者、必ず review）。`HandSummary.pot_awards`
+  （hand schema 1.0→1.1 additive、単独勝者は absent = 後方互換）。
+- **golden fixtures 5→13**: postflop-street-transition / full-ring-6max / multi-hand-session /
+  rfid-vs-spoken-seat-conflict / camera-corroboration / low-whisper-confidence /
+  cap-exceeded-negative / split-pot-chop を追加。「現行出力をそのまま pin しない（手計算検証
+  必須）」を event-replay.md §6.5 に規約化。
+- tests: 836 passed（+112: 新規 `tests/test_reconstruction_hardening.py` 63 ほか）。
+
+### Docs (UI 実運用機能の棚卸し台帳を計画文書に転記)
+
+- `docs/ui-feature-inventory.md` を新設: 全 UI（mobile / staff iPad / desktop）の実運用機能を
+  ◎/○/△ の優先度と着手状態で管理する台帳。チャット上で行った棚卸し（前提: 1 卓 + iPad 1 台
+  dogfood / ネイティブ配布視野 / desktop 維持最小）を転記し、◎・○ 全消化（ADR-0044/0045/0046）と
+  残 △ 群を反映。CLAUDE.md の Future Scope 残作業 #9 から参照。
+
+### Added (menu 編集 = ADR-0046 / 価格改定・品切れを staff アプリから)
+
+- **メニュー管理画面**（staff アプリ `MenuScreen`）: 価格編集・品切れトグル・追加/削除 →
+  「保存」で全量置換（last-write-wins）。`MenuMaster` を thread-safe な read-write +
+  reload-on-read 化（`set_items` + atomic write。単独 `--viewer-api` も編集に追従）。
+- `sold_out` フラグ（additive。false は永続形に書かず既存 `menu.json` 互換）。
+  `GET /api/menu` に露出し、**mobile 注文画面は品切れ表示 + 注文不可**、
+  注文 POST は 400 `item_sold_out` で reject。
+- `PUT /api/staff/menu`（staff write）+ `ViewerApiClient.update_menu` +
+  `StaffRepository.updateMenu`。新 error: `invalid_menu` / `item_sold_out`。
+  menu は sync（ADR-0022）非対象のまま（店設定）。tests: core+API 14 / staff mock 1 / mobile mock 1。
+
+### Added (mobile PIN 自己設定 / staff 座席コピー / desktop 録音死活表示)
+
+- **PIN の自己設定/変更**（mobile AuthScreen, ADR-0027 D6）: PIN ログイン画面の
+  「PIN を設定 / 変更する」から。初回は pin_self_enroll の会場で本人設定、変更は現 PIN 必須。
+  設定後は自動ログイン。`ViewerRepository.setPin`（http/mock）。
+- **座席の明示解除**（staff 座席タブ）: 「現在の座席をコピー」→ 行単位の「取消」で外して
+  次 hand へ割り当て — 退席を次 hand の seat map に明示的に反映できる。
+- **録音系の死活表示**（desktop dashboard ヘッダー）: マイク入力レベルバー（3 秒無入力で
+  警告）と RFID リーダー接続数（N/M）。`AudioThread.health` / `RFIDThread.health`
+  （dict 差し替え = atomic、監視のみで business logic なし）。音声デバイスを開けない場合も
+  クラッシュせず表示に出す。tests 3 件（fake bridge / pyaudio 不在を強制）。
+
+### Added (注文キャンセル = ADR-0045 / status `cancelled`, schema 1.0→1.1)
+
+- **player 本人による pending 注文の取り下げ**。core `OrderRequestRepository.cancel_request`
+  （equivalence class で本人判定・他人の request は**存在を漏らさず not_found**・pending のみ・
+  ledger 影響なし・closed session の残骸も取り下げ可）。
+- API `POST /api/players/{pid}/sessions/{sid}/order-requests/{rid}/cancel`（認可は注文 POST と
+  同一 = write 所有プロセスのみ + player_auth on なら principal 必須）+
+  `ViewerApiClient.cancel_order_request`。新 error code なし（not_found / already_resolved 再利用）。
+- sync の status 解決を `confirmed > rejected > cancelled > pending` に拡張（ADR-0022 additive。
+  player キャンセル × スタッフ確定の衝突は**確定が勝つ** — ledger entry が既に存在するため）。
+- mobile 注文画面: pending 行に「キャンセル」導線 + status 表示に「キャンセル済み」。
+  staff の pending queue からは自動的に消える。
+- `order_request.schema.json` `1.0`→`1.1`（enum 値の additive 追加, ADR-0023 と同パターン）。
+  tests: core 7 + API 3 + sync 1 + mobile mock 1。
+
+### Added (staff 運用機能 = 営業日サマリ / プレイヤー管理 / ライブ polling 拡大)
+
+- **営業日サマリ**: SessionList に「本日の集計」— 当日開始の全卓の中間集計
+  （compute_settlement）をクライアント側で合算し、卓ごとの net と合計（バイイン/注文/参加費
+  内訳）を表示。締め作業の目安（確定値ではない旨を明示）。API 変更なし。
+- **プレイヤー管理画面**（`PlayersScreen`）: 一覧 / 新規作成 / リネーム / **重複統合
+  （merge, ADR-0030）** を iPad から操作。`StaffRepository.mergePlayers`（HTTP = 既存
+  `POST /api/staff/players/merge` 再利用 / mock は tombstone 近似）。
+- **ライブ polling の拡大**: ハンド履歴（ハンドタブ）と座席（座席タブ）も open 卓では
+  5 秒 polling で自動反映（注文バッジと同機構。staged 編集状態には触れない）。
+
+### Added (mobile ハンド共有/書き出し — Phase B「書き出し」導線)
+
+- HandDetail に「📤 このハンドを共有 / コピー」。`shared/hand_replay/handReplayText.ts`
+  （純関数 `buildHandText`: リプレイと同じストリート分割・ボードスライス・ポット境界で
+  プレーンテキスト化。訂正適用済みビューを書き出す）+ OS 共有シート
+  （`Share.share`）→ 非対応環境はクリップボードに fallback。TS tests 2 件（両アプリで実行）。
+
+### Added (実運用 UI 補強 = mobile 再読込/永続化 + staff 注文バッジ polling + staff 訂正パネル)
+
+- **mobile 手動再読込**: 全画面（PlayerSelect / MySessions / MyHands / HandDetail / MyLedger /
+  Order のメニュー）に「↻ 再読込」リンクとエラー時の「↻ 再試行」を追加。`useAsync` に
+  `reload` を追加（staff 版と同等）。「注文が確定されたか」「新しいハンドが増えたか」を
+  画面を出直さずに確認できる。
+- **mobile 永続化**: 選択した player（`phv.player`）とログイントークン（`phv.auth`,
+  期限切れは読み出し時に破棄）を保存し、ブラウザ再読込後も名前選択・ログインをスキップ。
+  保存先は `src/storage.ts`（web = localStorage / native = in-memory fallback、
+  AsyncStorage への差し替え点を 1 ファイルに限定）。tests 4 件。
+- **staff 注文バッジ自動更新**: open 卓では pending 注文バッジを 5 秒 polling で自動更新
+  （計測タブと同間隔）。`staff/src/hooks/useAsync.ts` を再取得中 stale data 保持に変更し、
+  polling でバッジ・計測一覧がちらつかなくなった。
+- **staff アプリ内のハンド訂正導線（B4/ADR-0036）**: ハンドタブのリプレイ詳細に
+  `HandCorrectionPanel` を追加。アクション種別/金額（action_index 付き）と勝者席を
+  append-only オーバーレイで訂正し、訂正→hands read 再読込でリプレイに即反映。
+  needs_review 解除で計測タブの C-2 ガードも解除される（mock も同意味論）。
+  `StaffRepository.addHandCorrection`（HTTP = 既存 staff API 再利用 / mock）。
+  mock tests +4（計 34）、Playwright E2E +1（計 8）。
+
+### Added (ハンドリプレイ UI = mobile/staff 共有コンポーネント + staff ハンド履歴 read, ADR-0044)
+
+- **GGPoker ハンドヒストリー風のストリート単位リプレイ UI** を player 用 mobile と staff 用
+  iPad の両アプリに追加。プリフロップ〜リバーをセクション表示し、各ストリートの board
+  スライス（3/4/5 枚, 4 色スート表示）/ 開始時ポット / アクション列（needs_review・訂正済
+  バッジ付き）と、参加者行（ホールカードは**記録がある席は全員分表示**・スタック推移・収支）、
+  結果（勝者 / メイン・サイドポット）を表示する。
+- **共有方式（ADR-0044 D1）**: 正本 `shared/hand_replay/`（`handReplayModel.ts` 純関数 +
+  `HandReplay.tsx` + tests 8 件）→ `scripts/sync_shared_ui.py` で両アプリの
+  `src/shared/hand_replay/` へバイト同一コピー。drift は `tests/test_shared_ui_sync.py`
+  （CI）が検知する。monorepo 化はしない（両アプリは self-contained のまま）。
+- mobile: `HandDetailScreen` のテキスト行表示をリプレイ表示に置換（自分の収支表示・
+  スタッフ訂正導線 = ADR-0036 は維持）。typecheck + 21 tests + web export 緑。
+- staff: ハンドタブに**ハンド履歴一覧**（Hand #ID / 勝者 / board / pot / 要確認バッジ +
+  再読込）→ タップでリプレイ drill-in。typecheck + 30 tests + web export +
+  **Playwright E2E 7 件**（リプレイ E2E を追加）緑。
+- API: `GET /api/staff/sessions/{sid}/hands`（staff read = token 必須, **訂正オーバーレイ
+  適用済み** hand_id 昇順, log 不在は空 list）+ `api/read_models.py:list_session_hands` +
+  `ViewerApiClient.list_session_hands`。tests 4 件。CLAUDE.md WS4 残作業の
+  「ハンド履歴 read（staff hands-list endpoint）」が解消。
+
+### Fixed (staff アプリの既存不具合 2 件)
+
+- `staff/package-lock.json` の **react-dom 19.2.7 ↔ react 19.2.3 の不整合**を 19.2.3 に
+  そろえた（web export が React error #527 で起動不能・`npm ci` が ERESOLVE で失敗していた）。
+- `staff/e2e/staff.spec.ts` の **曖昧 locator / 実メッセージと不一致の正規表現**を修正
+  （「ログイン」「確定」「取消」「エントリ追加」の strict mode 衝突、
+  `/に割り当てました/` が実メッセージ「hand #N に M 席を割り当てました。」に不一致）。
+  修正後 E2E 7 件すべて green（preinstalled Chromium で実行確認）。
+
+### Added (Phase A ground truth 入力 UX = staff iPad app の計測タブ, ADR-0043)
+
+- Phase A 捕捉精度を計測するための **ground truth 入力 UX** を staff iPad app に追加。
+  観戦・録画担当スタッフが、ハンド直後に計測タブで一覧 triage する設計（B+T2+M2+P1）。
+- core: `core/ground_truth.py` (`GroundTruthHand` dataclass + `validate_source` +
+  `hand_has_needs_review`) + `core/ground_truth_repository.py`（LWW、per-session ファイル
+  `logs/{sid}.ground_truth.json`、atomic+fsync）。tests 13 件。
+- API: `GET /api/staff/sessions/{sid}/measurement-rows`（一覧）/ `PUT
+  /api/staff/sessions/{sid}/ground-truth/{hid}`（upsert）/ `GET .../ground-truth/{hid}`
+  （個別）。staff token + write 所有プロセスのみ。`ViewerApiClient` に
+  `list_measurement_rows` / `pass_through_ground_truth` / `submit_ground_truth_edit` /
+  `get_ground_truth`。tests 12 件。
+- **C-2 ガード** (ADR-0043 §3): `review_required` or 任意 `action.needs_review=True` を
+  含むハンドは「✓ 流す」を 400 `invalid_amount` で reject（強制 drill-in）。訂正適用後
+  needs_review が解除されたハンドは流せる（訂正適用は `get_hand()` 経由, ADR-0036）。
+- staff app: `staff/src/screens/MeasurementTab.tsx`（一覧 + per-row 「✓ 流す」「✏ 修正」+
+  「表示中の全件を流す」一括 + `needs_review` フィルタチップ + 5 秒 polling + 編集モーダル）。
+  `StaffRepository` 拡張（mock + HTTP）、type/fixture 追加、typecheck + 20 mock tests 緑。
+- docs: `docs/dogfood/measurement-plan.md` §2.2 / §2.3 / §2.4 を実装に揃えて更新。
+
+### Added (Phase A 捕捉精度の計測ハーネス / docs/dogfood/measurement-plan.md)
+
+- ハンドレビュー × GTO solver 統合（提案 rev.1 §6）の前提条件 = **Phase A（捕捉精度 95%）** の
+  合否を客観計測するためのドキュメントとツールを追加。
+- `docs/dogfood/measurement-plan.md`（rev.1）: Phase A 合否を **3 軸 ≥ 95%**（hand_coverage /
+  action_accuracy / board_accuracy）に確定。診断軸（種別/金額の内訳・hole card・winner_seat）も定義。
+  ground truth ファイル形式 `logs/{session_id}.ground_truth.json` を固定。dogfood 規模 N=5〜10 / 8 週、
+  Phase B KPI 暫定閾値（提案 rev.1 から正式化）。
+- `tools/measure_capture_accuracy.py`: `logs/{sid}.json` × `logs/{sid}.ground_truth.json` を
+  突き合わせ、3 軸 + 診断軸を算出する CLI。訂正（ADR-0036）は **既定で適用**。
+  `--raw` で訂正前の素地、`--json` で構造化出力、`--threshold` で閾値変更、exit code 0/1/2 で
+  pass/fail/input error。
+- `tests/test_measure_capture_accuracy.py`: 20 件（perfect match / missed / phantom /
+  action type-amount 分離 / board 順序非敏感 / hole=None 非カウント / 訂正適用 / pass-gate /
+  CLI smoke 3 件）。
+- CLAUDE.md「よく使うコマンド」節に CLI を 1 行追加。
+- ADR / コード変更なし。本ハーネスは Phase A 通過判定 = M1（solver 実装）着手 Go/No-Go の基盤。
+
+### Added (ADR drafts: ハンドレビュー × GTO solver 統合の前提 ADR 3 件, Proposed)
+
+- 提案 `docs/proposals/2026-06-26-hand-review-integration.md` rev.1 §4.6 で約束した
+  3 件の前提 ADR を起票（**設計のみ、コード実装なし**）。
+- ADR-0040: solver cache persistence — SQLite (`solver_cache.sqlite`, node-local)、`spot_key`
+  (SHA256) で O(1) lookup、`solver_version` で世代分離、sync / backup どちらも非対象。
+- ADR-0041: vendored solver binary shipping — git に同梱せず `tools/install_solver.py` で
+  上流から SHA256 検証付き install-time download、AGPL §Convey 境界を踏まない。
+- ADR-0042: external solver subprocess invocation — `subprocess.run` 単一ホットパス、5 例外分類、
+  stderr truncate、`ThreadPoolExecutor(max_workers=1)` + atexit で process leak 防止。
+
+### Added (ハンドレビュー × GTO solver 統合提案 rev.1 / docs/proposals/)
+
+- ライブハンドに GTO ソルバー（TexasSolver）の解を重ねる **単発レビュー機能**の統合方針を提案。
+  自店ドッグフード前提・SaaS 非対象。`docs/proposals/2026-06-26-hand-review-integration.md`。
+- コードベース照合レビュー（Must 6 + Should 4）を rev.1 で取り込み: 入力源を
+  `api/read_models.py:get_hand()`（B4 訂正適用済）に固定、ポジション/hole_cards null/pots
+  backend 依存のデータ実体ギャップ明示、`gui/` 既存規約整合、ADR-0040/0041/0042 起票約束、
+  Pio 差分 3 アーキタイプ手動 QA を M1 へ前倒し、dogfood N=5〜10 / 8 週 + KPI 暫定閾値内包。
+- M1 実装着手は **Phase A 95% 通過後**。本 PR 系列はドキュメント整備のみ、コード実装なし。
 
 ### Added (ハンド訂正 = append-only オーバーレイ / iPad staff 訂正, ADR-0036 / B4)
 
@@ -670,7 +943,7 @@
     + `integration/control_consumer.py`（`ControlConsumerThread`: 末尾シーク + command_id 重複排除で新規のみ
     `AudioEvent` に翻訳）。
   - `POST /api/staff/sessions/{session_id}/control` + `ViewerApiClient.send_control`。新 error `invalid_control`(400)。
-  - `main.py --`（GUI）に consumer を結線。config `hand_control.enabled`（既定 **false**）+ GUI +
+  - `main.py`（GUI モード `run_gui`）に consumer を結線。config `hand_control.enabled`（既定 **false**）+ GUI +
     `session_layer.enabled` のときのみ起動 → **既定では挙動不変**。
   - staff アプリに **ハンドタブ**（`staff/src/screens/HandTab.tsx`）。`StaffRepository.sendControl`（mock/HTTP）。
 - テスト: `tests/test_control_queue.py`（append/offset/idempotent/translate/consumer 末尾シーク）+
@@ -1077,7 +1350,8 @@
     **point_ledger_entry の fold**（cached 残高なし・player に global・常に 0 以上）。
     point 不足は strict reject + `plan_payment` による cash 補完分割（業務ルール 3）。
     entry fee は cash only（業務ルール 1）。spend 系 point entry は core が同時生成。
-  - **契約 draft（S3, v0.1 未 freeze）**: `docs/contracts/ledger-overview.md` +
+  - **契約 draft（S3, v0.1 未 freeze）**: `docs/contracts/ledger-points.md`（当時。verify-v1 統合で
+    `ledger-overview.md` へ統合・削除 = 上の ADR-0016 統合エントリ参照）+
     `schemas/{ledger_entry,point_ledger_entry}.schema.json` + fixtures。
     `error-shapes.md` / `validation-rules.md` / `repository-interfaces.md` に S3 セクション追加。
   - テスト: `tests/test_ledger_repository.py`（13）+ `tests/test_point_ledger.py`（5,
@@ -1155,7 +1429,8 @@
   - 依存に上限を付与（compatible-release pin）: `numpy>=1.24,<3` / `pokerkit>=0.7,<0.8` /
     `faster-whisper>=1.0,<2` / `pyaudio>=0.2.13,<0.3` / `customtkinter>=5.2,<6`。
   - `requirements.txt` を core のみ（vision 除外）に整理、`requirements-dev.txt`（テスト依存 = numpy /
-    pokerkit / jsonschema / pytest）を新設。
+    pokerkit / jsonschema / pytest。後続で M1 viewer API テスト用の fastapi/httpx と CI lint 用の
+    ruff を追加）を新設。
   - `.github/workflows/ci.yml`（新規）: push / PR で `pytest tests/ --ignore=tests/test_vision.py` を実行。
     テストはローカルパッケージを直接 import し、core の重い依存（faster-whisper/pyaudio/customtkinter）は
     lazy import のため不要。numpy/pokerkit/jsonschema を入れて **skip 0**（importorskip 対象を全て導入）。
@@ -1210,6 +1485,9 @@
   - **既知バグ 5 ケースが全緑**（check-facing-bet / call-amount-from-state / silent-fold /
     out-of-turn-rfid / unequal-allin）。**DoD #2 達成**。`pots` 追加に伴い既存 4 fixtures を再凍結
     （hand 終了が manual winner のため pots=[]、挙動不変）。
+  - `_hand_needs_review` を `_finalize_hand` でもリセット（`_current_actions` と対称。new_hand を
+    挟まない再 finalize で stale review フラグが次サマリーへ漏れない堅牢化 + 回帰テスト
+    `test_finalize_resets_review_flag`。同コミットの追記漏れを 2026-09-10 監査で補記）。
   - tests: `tests/test_reconstruction.py`（`unequal_allin_main_and_side_pots` + 全緑確認）。
     **全 274 passed, 0 skipped**（legacy は `pots=[]` で additive、回帰なし）。
   - 残 F3: `hand`/`action` schema freeze（ISSUE-0011, `_MODELS` 登録）、PHH の call/check 区別。

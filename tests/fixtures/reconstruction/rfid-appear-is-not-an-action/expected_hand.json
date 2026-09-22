@@ -24,18 +24,18 @@
         "Ah"
       ],
       "hole_cards_source": "rfid",
-      "stack_start": 9900,
+      "stack_start": 10000,
       "stack_end": 10400,
-      "result": 500
+      "result": 400
     },
     {
       "seat": 2,
       "name": "P2",
       "hole_cards": null,
       "hole_cards_source": "",
-      "stack_start": 9800,
+      "stack_start": 10000,
       "stack_end": 9800,
-      "result": 0
+      "result": -200
     },
     {
       "seat": 3,
@@ -47,8 +47,17 @@
       "result": -200
     }
   ],
-  "pot_total": 200,
-  "pots": [],
+  "pot_total": 500,
+  "pots": [
+    {
+      "amount": 500,
+      "eligible_seats": [
+        1,
+        2,
+        3
+      ]
+    }
+  ],
   "winner_seat": 1,
   "actions": [
     {
@@ -68,7 +77,10 @@
       },
       "needs_review": false,
       "confidence": 0.49,
-      "position": "BTN"
+      "position": "BTN",
+      "actor_source": "engine_prior",
+      "asr_confidence": 0.8,
+      "apply_ok": true
     }
   ],
   "review_required": false

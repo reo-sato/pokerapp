@@ -25,12 +25,22 @@ from api.read_models import (
     HandNotFoundError,
     get_hand,
     get_player_session_ledger,
+    list_measurement_rows,
     list_player_hands,
     list_player_sessions,
+    list_session_hands,
 )
 from core.auth_identity_repository import AuthIdentityRepository
 from core.auth_token import issue_player_token, verify_player_token
 from core.control_queue import VALID_CONTROL_TYPES, ControlCommandLog
+from core.ground_truth import (
+    SOURCE_EDITED,
+    SOURCE_PASSTHROUGH,
+    GroundTruthError,
+    hand_has_needs_review,
+    validate_source,
+)
+from core.ground_truth_repository import GroundTruthRepository
 from core.hand_correction_repository import (
     HandCorrectionError,
     HandCorrectionRepository,
@@ -48,7 +58,7 @@ from core.ledger_repository import (
     SessionNotClosedError,
     UnknownPlayerError as LedgerUnknownPlayerError,
 )
-from core.menu import MenuMaster
+from core.menu import MenuMaster, MenuValidationError
 from core.order_request_repository import (
     AlreadyResolvedError,
     InvalidOrderRequestError,
@@ -99,6 +109,12 @@ class _OrderRequestBody(BaseModel):
     item_name: str
     quantity: int
     note: str | None = None
+
+
+class _MenuBody(BaseModel):
+    """PUT /api/staff/menu の body（menu 全量置換, ADR-0046）。validation は core。"""
+
+    items: list[dict]
 
 
 class _StaffLedgerEntryBody(BaseModel):
@@ -220,6 +236,19 @@ class _HandCorrectionBody(BaseModel):
     note: str | None = None
 
 
+class _GroundTruthBody(BaseModel):
+    """PUT /api/staff/.../ground-truth/{hid} の body（Phase A 計測, ADR-0043）。
+
+    `source="captured-passthrough"` の時は `hand` 不要（server が訂正適用後の captured を
+    そのまま GT に書く）。`source="manual-edit"` の時は `hand` 必須（annotator 編集後の
+    board/actions/players/winner_seat/notes を含む）。
+    """
+
+    source: str
+    annotator: str = "staff"
+    hand: dict | None = None
+
+
 # ledger / settlement の error → (HTTP status, error code)。staff write で再利用する
 # （error-shapes.md の ledger セクションと 1:1, ADR-0021）。具体例外を先に並べる。
 _LEDGER_ERROR_MAP: list[tuple[type, int, str]] = [
@@ -300,6 +329,7 @@ def create_app(
     oidc_providers: "dict[str, OidcProvider] | None" = None,
     identity_repo: AuthIdentityRepository | None = None,
     correction_repo: HandCorrectionRepository | None = None,
+    ground_truth_repo: GroundTruthRepository | None = None,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -329,6 +359,8 @@ def create_app(
         identity_repo = AuthIdentityRepository()
     if correction_repo is None:
         correction_repo = HandCorrectionRepository()
+    if ground_truth_repo is None:
+        ground_truth_repo = GroundTruthRepository(log_dir)
     _oidc_providers = oidc_providers or {}
     # player トークン署名鍵。未設定なら ephemeral（再起動でトークン失効, ADR-0027 D3）。
     _player_secret = player_token_secret or secrets.token_hex(32)
@@ -557,10 +589,35 @@ def create_app(
                 "code": "unknown_item",
                 "message": f"item_name={body.item_name!r} はメニューにありません。",
             })
+        if menu.is_sold_out(body.item_name):
+            return JSONResponse(status_code=400, content={
+                "code": "item_sold_out",
+                "message": f"{body.item_name} は品切れです。",
+            })
         request = order_repo.create_request(
             session_id, player_id, body.item_name, body.quantity, note=body.note,
         )
         return request.to_dict()
+
+    @app.post(
+        "/api/players/{player_id}/sessions/{session_id}/order-requests/{request_id}/cancel",
+        response_model=None,
+    )
+    def cancel_order_request(
+        player_id: str, session_id: str, request_id: str, request: Request
+    ) -> "JSONResponse | dict":
+        """player 本人が pending の注文を取り下げる（ADR-0045。認可姿勢は注文 POST と同一）。"""
+        if not orders_writable:
+            return JSONResponse(status_code=503, content={
+                "code": "orders_unavailable",
+                "message": "注文の操作はスタッフ会計画面（--ledger）の起動中のみ可能です。",
+            })
+        auth_err = _require_player(request, player_id)
+        if auth_err is not None:
+            return auth_err
+        player_repo.get(player_id)
+        updated = order_repo.cancel_request(request_id, player_id, session_id=session_id)
+        return updated.to_dict()
 
     # ――― staff write API（ADR-0021。Bearer token 認証 + 単一書き手）―――
 
@@ -593,6 +650,19 @@ def create_app(
         return None
 
     _buyin_presets = [int(a) for a in (buyin_presets or []) if int(a) > 0]
+
+    @app.put("/api/staff/menu", response_model=None)
+    def staff_update_menu(request: Request, body: _MenuBody) -> "JSONResponse | dict":
+        """menu master を全量置換する（価格改定・品切れ, ADR-0046 D3）。staff write。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            items = menu.set_items(body.items)
+        except MenuValidationError as e:
+            return JSONResponse(status_code=400,
+                                content={"code": "invalid_menu", "message": str(e)})
+        return {"items": items}
 
     @app.get("/api/staff/buyin-presets", response_model=None)
     def staff_buyin_presets(request: Request) -> "JSONResponse | dict":
@@ -656,6 +726,103 @@ def create_app(
             return JSONResponse(status_code=400,
                                 content={"code": "invalid_correction", "message": str(e)})
         return c.to_dict()
+
+    @app.get("/api/staff/sessions/{session_id}/hands", response_model=None)
+    def staff_session_hands(
+        session_id: str, request: Request
+    ) -> "JSONResponse | dict":
+        """session の全 hand（訂正適用済, hand_id 昇順）。staff read（ADR-0044）。
+
+        ハンドリプレイ UI の staff 導線用。player read と違い seat 縛りなしで卓の
+        全ハンドを返す。log 不在は空 list。
+        """
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        return {"hands": list_session_hands(session_id, log_dir, correction_repo)}
+
+    # ――― Phase A 計測: ground truth（ADR-0043）―――
+
+    @app.get("/api/staff/sessions/{session_id}/measurement-rows", response_model=None)
+    def staff_measurement_rows(
+        session_id: str, request: Request
+    ) -> "JSONResponse | dict":
+        """計測タブの一覧行（hand_id / winner / chip won / needs_review / GT 状態）。staff read。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        return {
+            "rows": list_measurement_rows(
+                session_id, log_dir, ground_truth_repo, correction_repo
+            )
+        }
+
+    @app.put("/api/staff/sessions/{session_id}/ground-truth/{hand_id}",
+             response_model=None)
+    def staff_upsert_ground_truth(
+        session_id: str, hand_id: int, request: Request, body: _GroundTruthBody
+    ) -> "JSONResponse | dict":
+        """ground truth を 1 件 LWW 上書きする（ADR-0043）。staff write。
+
+        passthrough: server が `get_hand()`（訂正適用済）を GT として書く。
+        manual-edit: body.hand を GT として書く。
+
+        C-2 ガード（ADR-0043 §3）: passthrough 時に hand が `needs_review` を含むなら 400。
+        """
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            validate_source(body.source)
+        except GroundTruthError as e:
+            return JSONResponse(status_code=400,
+                                content={"code": "invalid_amount", "message": str(e)})
+        try:
+            captured = get_hand(session_id, hand_id, log_dir, correction_repo)
+        except HandNotFoundError as e:
+            return JSONResponse(status_code=404,
+                                content={"code": "not_found", "message": str(e)})
+        if body.source == SOURCE_PASSTHROUGH:
+            if hand_has_needs_review(captured):
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_amount",
+                    "message": "needs_review を含むハンドは「✓ 流す」できません（ADR-0043 §3）。",
+                })
+            hand_body = captured
+        elif body.source == SOURCE_EDITED:
+            if not isinstance(body.hand, dict) or not body.hand:
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_amount",
+                    "message": "source=manual-edit には hand が必要です。",
+                })
+            hand_body = body.hand
+        else:  # validate_source で弾いた後の defensive branch
+            return JSONResponse(status_code=400, content={
+                "code": "invalid_amount",
+                "message": f"unknown source: {body.source}",
+            })
+        entry = ground_truth_repo.upsert(
+            session_id, hand_id, hand_body,
+            annotator=body.annotator or "staff", source=body.source,
+        )
+        return entry.to_dict()
+
+    @app.get("/api/staff/sessions/{session_id}/ground-truth/{hand_id}",
+             response_model=None)
+    def staff_get_ground_truth(
+        session_id: str, hand_id: int, request: Request
+    ) -> "JSONResponse | dict":
+        """1 件の ground truth を返す（detail 画面の編集 prefill 用）。staff read。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        gt = ground_truth_repo.get(session_id, hand_id)
+        if gt is None:
+            return JSONResponse(status_code=404, content={
+                "code": "not_found",
+                "message": f"hand_id={hand_id} に ground truth がありません。",
+            })
+        return gt.to_dict()
 
     @app.get("/api/staff/sessions/{session_id}/settlement", response_model=None)
     def staff_settlement(session_id: str, request: Request) -> "JSONResponse | dict":
@@ -856,16 +1023,6 @@ def create_app(
         s = session_repo.create_session(label=body.label, blinds=body.blinds)
         return JSONResponse(status_code=201, content=s.to_dict())
 
-    @app.post("/api/staff/sessions/{session_id}/close", response_model=None)
-    def staff_close_session(session_id: str, request: Request) -> "JSONResponse | dict":
-        err = _staff_guard(request, need_write=True)
-        if err is not None:
-            return err
-        try:
-            s = session_repo.close_session(session_id)
-        except SessionError as e:
-            return _map_session_error(e)
-        return s.to_dict()
 
     @app.get("/api/staff/sessions/{session_id}/seating", response_model=None)
     def staff_seating(session_id: str, request: Request) -> "JSONResponse | dict":

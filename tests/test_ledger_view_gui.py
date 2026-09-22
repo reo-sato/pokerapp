@@ -234,45 +234,6 @@ class TestSettlement:
         assert win._set_status.call_args.kwargs.get("error") is True
 
 
-class TestCloseSession:
-    """B1: GUI からの session close → 精算到達の導線（2 クリック確認）。"""
-
-    def test_close_requires_two_clicks_then_commit_reachable(self, tmp_path: Path):
-        win, ledger, sessions, players = _make_window(tmp_path)
-        alice = _pid(players, "Alice")
-        s = sessions.create_session()  # open
-        ledger.add_entry(s.session_id, alice, "buy_in", cash_amount=5000)
-        win._session_id = s.session_id
-
-        # 1 回目は確認待ち（まだ close しない）。
-        win._cmd_close_session()
-        assert sessions.get_session(s.session_id).status == "open"
-        assert win._pending_close == s.session_id
-        assert win._set_status.call_args.kwargs.get("error") is True
-
-        # 2 回目で close → その後 commit が到達可能になる。
-        win._cmd_close_session()
-        assert sessions.get_session(s.session_id).status == "closed"
-        win._cmd_commit_settlement()
-        assert [c.player_id for c in ledger.list_settlements(s.session_id)] == [alice]
-
-    def test_close_requires_session(self, tmp_path: Path):
-        win, ledger, sessions, players = _make_window(tmp_path)
-        win._session_id = None
-        win._cmd_close_session()
-        assert win._set_status.call_args.kwargs.get("error") is True
-
-    def test_switching_session_clears_pending_close(self, tmp_path: Path):
-        win, ledger, sessions, players = _make_window(tmp_path)
-        s1 = sessions.create_session()
-        s2 = sessions.create_session()
-        win._session_id = s1.session_id
-        win._cmd_close_session()  # s1 を確認待ちに
-        assert win._pending_close == s1.session_id
-        win._select_session(s2.session_id)  # 別セッションへ切替
-        assert win._pending_close is None
-        assert sessions.get_session(s1.session_id).status == "open"  # 誤 close なし
-
     def test_set_payment_toggles_paid_unpaid(self, tmp_path: Path):
         win, ledger, sessions, players = _make_window(tmp_path)
         alice = _pid(players, "Alice")
@@ -331,6 +292,45 @@ class TestCloseSession:
         assert win._set_status.call_args.kwargs.get("error") is True
         # 不正入力では状態は変わらない（既定 unpaid のまま）。
         assert ledger.list_settlements(s.session_id)[0].payment_status == "unpaid"
+
+class TestCloseSession:
+    """B1: GUI からの session close → 精算到達の導線（2 クリック確認）。"""
+
+    def test_close_requires_two_clicks_then_commit_reachable(self, tmp_path: Path):
+        win, ledger, sessions, players = _make_window(tmp_path)
+        alice = _pid(players, "Alice")
+        s = sessions.create_session()  # open
+        ledger.add_entry(s.session_id, alice, "buy_in", cash_amount=5000)
+        win._session_id = s.session_id
+
+        # 1 回目は確認待ち（まだ close しない）。
+        win._cmd_close_session()
+        assert sessions.get_session(s.session_id).status == "open"
+        assert win._pending_close == s.session_id
+        assert win._set_status.call_args.kwargs.get("error") is True
+
+        # 2 回目で close → その後 commit が到達可能になる。
+        win._cmd_close_session()
+        assert sessions.get_session(s.session_id).status == "closed"
+        win._cmd_commit_settlement()
+        assert [c.player_id for c in ledger.list_settlements(s.session_id)] == [alice]
+
+    def test_close_requires_session(self, tmp_path: Path):
+        win, ledger, sessions, players = _make_window(tmp_path)
+        win._session_id = None
+        win._cmd_close_session()
+        assert win._set_status.call_args.kwargs.get("error") is True
+
+    def test_switching_session_clears_pending_close(self, tmp_path: Path):
+        win, ledger, sessions, players = _make_window(tmp_path)
+        s1 = sessions.create_session()
+        s2 = sessions.create_session()
+        win._session_id = s1.session_id
+        win._cmd_close_session()  # s1 を確認待ちに
+        assert win._pending_close == s1.session_id
+        win._select_session(s2.session_id)  # 別セッションへ切替
+        assert win._pending_close is None
+        assert sessions.get_session(s1.session_id).status == "open"  # 誤 close なし
 
 
 class TestBuyinPresets:

@@ -95,7 +95,9 @@ class TestPositionResolvesActor:
     def test_position_matching_the_prior_is_not_a_conflict(self, tmp_path: Path):
         gs = _pk(6)
         t, cap = _thread(gs, tmp_path, "pos3")
-        t._handle_audio_event(AudioEvent("call", 0, time.time(), "UTG コール", position="UTG"))
+        t._handle_audio_event(
+            AudioEvent("call", 0, time.time(), "UTG コール", position="UTG", confidence=0.9)
+        )
         rec = cap[-1]
         assert rec.seat == 3 and rec.needs_review is False
         assert not [r for r in cap if r.action == "fold"]
@@ -105,7 +107,7 @@ class TestPositionResolvesActor:
         gs = _pk(6)
         t, cap = _thread(gs, tmp_path, "pos4")
         t._handle_audio_event(
-            AudioEvent("call", 0, time.time(), "UTG+2 コール", position="UTG+2")
+            AudioEvent("call", 0, time.time(), "UTG+2 コール", position="UTG+2", confidence=0.9)
         )
         rec = cap[-1]
         assert rec.seat == 3            # prior のまま

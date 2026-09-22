@@ -49,12 +49,17 @@ class TestRulesAwareWiring:
         gs = _pk(3)
         t, cap = _thread(gs, tmp_path, "pk1")
         actor = gs.get_current_player()
-        t._handle_audio_event(AudioEvent("call", 9999, time.time(), "コール"))
+        # 信頼度は明示（None は欠測 = 保守的既定で review になる, ADR-0033 追記 B3）
+        t._handle_audio_event(AudioEvent("call", 9999, time.time(), "コール", confidence=0.9))
         rec = cap[-1]
         assert rec.seat == actor
         assert rec.action == "call"
         assert rec.amount != 9999 and rec.amount > 0   # heard 無視・状態の call 額
         assert rec.needs_review is False
+        # G2 (ADR-A): 監査フィールドが配線されている
+        assert rec.actor_source == "engine_prior"
+        assert rec.apply_ok is True
+        assert rec.asr_confidence == 0.9
 
     def test_check_facing_bet_becomes_call_review(self, tmp_path: Path):
         gs = _pk(3)
@@ -84,11 +89,13 @@ class TestRulesAwareWiring:
         t, cap = _thread(gs, tmp_path, "pk4")
         actor = gs.get_current_player()
         t._handle_audio_event(
-            AudioEvent("call", 0, time.time(), f"シート{actor} コール", seat=actor)
+            AudioEvent("call", 0, time.time(), f"シート{actor} コール", seat=actor,
+                       confidence=0.9)
         )
         rec = cap[-1]
         assert rec.seat == actor
         assert rec.needs_review is False
+        assert rec.actor_source == "spoken_seat"  # G2 (ADR-A)
 
 
 class TestLegacyRoutingUnchanged:
@@ -127,9 +134,12 @@ class TestRfidIsNotActorEvidence:
         prior = gs.get_current_player()          # seat 3
         now = time.time()
         t._process_rfid_event(self._rfid(1, now - 0.2))     # noqa: SLF001 — 配布
-        t._handle_audio_event(AudioEvent("call", 0, now, "コール"))   # noqa: SLF001
+        t._handle_audio_event(  # noqa: SLF001
+            AudioEvent("call", 0, now, "コール", confidence=0.9)  # 欠測(None)は保守既定で review
+        )
         assert [r.seat for r in cap] == [prior]  # fold 合成なし・actor も動かない
         assert cap[-1].action == "call" and cap[-1].needs_review is False
+        assert cap[-1].actor_source == "engine_prior"
 
     def test_same_seat_rfid_still_corroborates(self, tmp_path: Path):
         """同席の読みは裏付けとして残る（confidence が上がる）。"""

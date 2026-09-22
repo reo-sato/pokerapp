@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Accepted（2026-09-22 に verify-v1 へマージ。P0a/P0b 実装済。P0a は ADR-0049 G3 の
+「RFID 最近傍読みを actor 証拠に採用（active 席限定）」を supersede する — 配布直後は全席が
+active なので G3 では防げない。G1/G4/T4 と G3 の監査 reason は共存）
 
 ## Date
 

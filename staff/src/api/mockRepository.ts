@@ -10,9 +10,16 @@
 import type { StaffRepository } from "./repository";
 import {
   type ControlCommand,
+  type GroundTruthEditPayload,
+  type GroundTruthHand,
+  type ActionRecord,
   type HandControlInput,
+  type HandCorrection,
+  type HandCorrectionInput,
+  type HandSummary,
   type LedgerEntry,
   type LedgerKind,
+  type MeasurementRow,
   type MenuItem,
   type OrderRequest,
   type Player,
@@ -27,10 +34,12 @@ import {
 import {
   buyinPresets,
   ledgerEntries,
+  measurementRows,
   menuItems,
   orderRequests,
   players,
   seatAssignments,
+  sessionHands,
   sessions,
   VALID_STAFF_TOKEN,
 } from "../mocks/fixtures";
@@ -73,6 +82,11 @@ export class MockStaffRepository implements StaffRepository {
   private readonly grants: Record<string, number> = {};
   // 確定済 settlement（session_id → player_id → row）。commit でのみ生成。
   private readonly committed: Record<string, Record<string, SessionSettlement>> = {};
+  // ハンド履歴 (ADR-0044): 訂正適用済 HandSummary（リプレイ UI 用 read）。
+  private readonly hands: Record<string, HandSummary[]>;
+  // Phase A 計測 (ADR-0043): 一覧 row と GT 蓄積（hand_id → GT）。
+  private readonly measurement: Record<string, MeasurementRow[]>;
+  private readonly groundTruth: Record<string, Record<number, GroundTruthHand>> = {};
 
   constructor() {
     this.sessions = clone(sessions);
@@ -82,6 +96,8 @@ export class MockStaffRepository implements StaffRepository {
     this.ledger = clone(ledgerEntries);
     this.orders = clone(orderRequests);
     this.seating = clone(seatAssignments);
+    this.hands = clone(sessionHands);
+    this.measurement = clone(measurementRows);
   }
 
   // ――― 認可 ―――
@@ -191,7 +207,8 @@ export class MockStaffRepository implements StaffRepository {
 
   async listPlayers(): Promise<Player[]> {
     this.requireAuth();
-    return clone(this.players);
+    // server の staff players read は canonical（merge 済み tombstone を出さない, ADR-0030）。
+    return clone(this.players.filter((p) => !p.merged_into));
   }
 
   async createPlayer(displayName: string): Promise<Player> {
@@ -224,6 +241,25 @@ export class MockStaffRepository implements StaffRepository {
     }
     player.display_name = name;
     return clone(player);
+  }
+
+  async mergePlayers(
+    survivorId: string,
+    absorbedId: string,
+  ): Promise<{ survivor_id: string; absorbed_id: string }> {
+    this.requireAuth();
+    if (survivorId === absorbedId) {
+      throw new StaffApiError({ code: "invalid_merge", message: "自分自身とは merge できません。" });
+    }
+    const survivor = this.players.find((p) => p.player_id === survivorId && !p.merged_into);
+    const absorbed = this.players.find((p) => p.player_id === absorbedId && !p.merged_into);
+    if (!survivor || !absorbed) {
+      throw new StaffApiError({ code: "not_found", message: "player が見つかりません。" });
+    }
+    // alias/tombstone（ADR-0030）: absorbed に merged_into を付けるだけ（履歴 rewrite なし）。
+    absorbed.merged_into = survivorId;
+    absorbed.merged_at = new Date().toISOString();
+    return { survivor_id: survivorId, absorbed_id: absorbedId };
   }
 
   async getSeating(sessionId: string): Promise<StaffSeating> {
@@ -464,6 +500,30 @@ export class MockStaffRepository implements StaffRepository {
     return clone(this.menu);
   }
 
+  async updateMenu(items: MenuItem[]): Promise<MenuItem[]> {
+    this.requireAuth();
+    // core/menu.py:_normalize_items の近似（ADR-0046 D1）。
+    const seen = new Set<string>();
+    const normalized: MenuItem[] = [];
+    for (const raw of items) {
+      const name = (raw.item_name ?? "").trim();
+      if (!name || name.length > 100 || seen.has(name)) {
+        throw new StaffApiError({ code: "invalid_menu", message: `不正な item_name: ${raw.item_name}` });
+      }
+      if (!Number.isInteger(raw.unit_amount) || raw.unit_amount < 0) {
+        throw new StaffApiError({ code: "invalid_menu", message: `不正な unit_amount: ${raw.unit_amount}` });
+      }
+      seen.add(name);
+      normalized.push({
+        item_name: name,
+        unit_amount: raw.unit_amount,
+        ...(raw.sold_out ? { sold_out: true } : {}),
+      });
+    }
+    this.menu.splice(0, this.menu.length, ...normalized);
+    return clone(this.menu);
+  }
+
   async listOrderRequests(sessionId: string, status?: string): Promise<OrderRequest[]> {
     this.requireAuth();
     this.requireSession(sessionId);
@@ -518,6 +578,191 @@ export class MockStaffRepository implements StaffRepository {
     req.status = "rejected";
     req.resolved_at = new Date().toISOString();
     return clone(req);
+  }
+
+  // ――― ハンド履歴 read（ADR-0044）―――
+
+  async listSessionHands(sessionId: string): Promise<HandSummary[]> {
+    this.requireAuth();
+    // server の list_session_hands は lenient（log 不在 / unknown session は空 list）。
+    const hands = this.hands[sessionId] ?? [];
+    return clone([...hands].sort((a, b) => a.hand_id - b.hand_id));
+  }
+
+  async addHandCorrection(
+    sessionId: string,
+    handId: number,
+    input: HandCorrectionInput,
+  ): Promise<HandCorrection> {
+    this.requireAuth();
+    const hand = (this.hands[sessionId] ?? []).find((h) => h.hand_id === handId);
+    if (!hand) {
+      throw new StaffApiError({
+        code: "not_found",
+        message: `hand_id=${handId} は session_id=${sessionId} の hand log に存在しません。`,
+      });
+    }
+    const idx = input.action_index ?? null;
+    // core/hand_correction.py:apply_hand_corrections と同じ意味論を近似する
+    // （_original 保持 / corrected / needs_review 解除 / review_required 導出）。
+    if (idx === null) {
+      if (input.field !== "winner_seat") {
+        throw new StaffApiError({
+          code: "invalid_correction",
+          message: `hand レベルで訂正できるのは winner_seat のみです（field=${input.field}）。`,
+        });
+      }
+      hand.winner_seat = Number(input.new_value);
+    } else {
+      const actions = hand.actions ?? [];
+      if (!Number.isInteger(idx) || idx < 0 || idx >= actions.length) {
+        throw new StaffApiError({
+          code: "invalid_correction",
+          message: `action_index=${idx} が範囲外です（0..${actions.length - 1}）。`,
+        });
+      }
+      if (input.field !== "action" && input.field !== "amount") {
+        throw new StaffApiError({
+          code: "invalid_correction",
+          message: `アクション訂正の field は action / amount のみです（field=${input.field}）。`,
+        });
+      }
+      const a = actions[idx] as ActionRecord & { _original?: Record<string, unknown> };
+      const orig = (a._original ??= {});
+      if (!(input.field in orig)) orig[input.field] = a[input.field];
+      if (input.field === "action") {
+        a.action = String(input.new_value);
+      } else {
+        a.amount = Number(input.new_value);
+      }
+      a.corrected = true;
+      a.needs_review = false;
+    }
+    if (!(hand.actions ?? []).some((a) => a.needs_review)) {
+      hand.review_required = false;
+    }
+    // 計測タブの row とも整合させる（訂正で C-2 ガードが解除される流れを mock でも再現）。
+    const row = (this.measurement[sessionId] ?? []).find((r) => r.hand_id === handId);
+    if (row) {
+      row.has_needs_review =
+        Boolean(hand.review_required) || (hand.actions ?? []).some((a) => a.needs_review);
+      row.review_required = Boolean(hand.review_required);
+      if (idx === null) row.winner_seat = hand.winner_seat ?? null;
+    }
+    const correction: HandCorrection = {
+      correction_id: this.nextHex32(),
+      session_id: sessionId,
+      hand_id: handId,
+      action_index: idx,
+      field: input.field,
+      new_value: input.new_value,
+      corrected_by: input.corrected_by || "staff",
+      corrected_at: new Date().toISOString(),
+      ...(input.note ? { note: input.note } : {}),
+    };
+    return clone(correction);
+  }
+
+  // ――― Phase A 計測 / ground truth（ADR-0043）―――
+
+  async listMeasurementRows(sessionId: string): Promise<MeasurementRow[]> {
+    this.requireAuth();
+    this.requireSession(sessionId);
+    return clone(this.measurement[sessionId] ?? []);
+  }
+
+  async passThroughGroundTruth(
+    sessionId: string,
+    handId: number,
+    annotator = "staff",
+  ): Promise<GroundTruthHand> {
+    this.requireAuth();
+    this.requireSession(sessionId);
+    const row = this.findRow(sessionId, handId);
+    // C-2 ガード（ADR-0043 §3）。
+    if (row.has_needs_review) {
+      throw new StaffApiError({
+        code: "invalid_amount",
+        message: "needs_review を含むハンドは「✓ 流す」できません（ADR-0043 §3）。",
+      });
+    }
+    const entry: GroundTruthHand = {
+      hand_id: handId,
+      annotator: annotator || "staff",
+      annotated_at: new Date().toISOString(),
+      source: "captured-passthrough",
+      // mock では captured 本体を持たないため、row の要約だけ反映する。
+      winner_seat: row.winner_seat,
+    };
+    this.storeGT(sessionId, entry);
+    return clone(entry);
+  }
+
+  async submitGroundTruthEdit(
+    sessionId: string,
+    handId: number,
+    payload: GroundTruthEditPayload,
+    annotator = "staff",
+  ): Promise<GroundTruthHand> {
+    this.requireAuth();
+    this.requireSession(sessionId);
+    this.findRow(sessionId, handId);
+    if (!payload || typeof payload !== "object") {
+      throw new StaffApiError({
+        code: "invalid_amount",
+        message: "source=manual-edit には hand が必要です。",
+      });
+    }
+    const entry: GroundTruthHand = {
+      ...payload,
+      hand_id: handId,
+      annotator: annotator || "staff",
+      annotated_at: new Date().toISOString(),
+      source: "manual-edit",
+    };
+    this.storeGT(sessionId, entry);
+    return clone(entry);
+  }
+
+  async getGroundTruth(sessionId: string, handId: number): Promise<GroundTruthHand> {
+    this.requireAuth();
+    this.requireSession(sessionId);
+    const bag = this.groundTruth[sessionId] ?? {};
+    const entry = bag[handId];
+    if (!entry) {
+      throw new StaffApiError({
+        code: "not_found",
+        message: `hand_id=${handId} に ground truth がありません。`,
+      });
+    }
+    return clone(entry);
+  }
+
+  private findRow(sessionId: string, handId: number): MeasurementRow {
+    const rows = this.measurement[sessionId] ?? [];
+    const row = rows.find((r) => r.hand_id === handId);
+    if (!row) {
+      throw new StaffApiError({
+        code: "not_found",
+        message: `hand_id=${handId} は session_id=${sessionId} の hand log に存在しません。`,
+      });
+    }
+    return row;
+  }
+
+  private storeGT(sessionId: string, entry: GroundTruthHand): void {
+    const bag = this.groundTruth[sessionId] ?? {};
+    bag[entry.hand_id] = entry;
+    this.groundTruth[sessionId] = bag;
+    const rows = this.measurement[sessionId] ?? [];
+    const row = rows.find((r) => r.hand_id === entry.hand_id);
+    if (row) {
+      row.ground_truth = {
+        annotator: entry.annotator,
+        annotated_at: entry.annotated_at,
+        source: entry.source,
+      };
+    }
   }
 
   async sendControl(sessionId: string, input: HandControlInput): Promise<ControlCommand> {

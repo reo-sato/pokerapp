@@ -108,6 +108,15 @@ class RFIDThread(threading.Thread):
 
         # デバウンス用: reader_id → 現在載っている UID の集合（空 = カードなし）
         self._last_uids: dict[str, set[str]] = {}
+        # 死活表示（dashboard が読む。dict ごと差し替える = GIL で atomic、lock 不要）:
+        #   state: starting | running | no_readers | stopped
+        #   connected/configured: 接続できた/設定された reader 数 / last_event_at: unix 秒
+        self.health: dict = {
+            "state": "starting",
+            "connected": 0,
+            "configured": len(reader_configs),
+            "last_event_at": None,
+        }
         # board 位置割り当て（**board reader 全台で 1 つの論理ボードを共有**, 契約 v1.3 §4）:
         # uid → board_index 1..5。どの台に載ったかではなく「ボード全体で何枚目か」で決まる。
         # **ハンド内は append-only**（一度与えた位置は返さない, ISSUE-0026）。ポーカーでは
@@ -156,7 +165,19 @@ class RFIDThread(threading.Thread):
 
         if not bridges:
             logger.warning("No RFID readers connected. RFIDThread exiting.")
+            self.health = {
+                "state": "no_readers",
+                "connected": 0,
+                "configured": len(self._reader_configs),
+                "last_event_at": None,
+            }
             return
+        self.health = {
+            "state": "running",
+            "connected": len(bridges),
+            "configured": len(self._reader_configs),
+            "last_event_at": None,
+        }
 
         try:
             while not self._stop_event.is_set():
@@ -166,6 +187,7 @@ class RFIDThread(threading.Thread):
         finally:
             for reader_id, (bridge, _) in bridges.items():
                 bridge.close()
+            self.health = {**self.health, "state": "stopped"}
             logger.info("RFIDThread stopped")
 
     def _poll_reader(self, bridge: object, cfg: dict, reader_id: str) -> None:
@@ -224,6 +246,7 @@ class RFIDThread(threading.Thread):
             board_index=board_index,
         )
         self._queue.put(event)
+        self.health = {**self.health, "last_event_at": time.time()}
         logger.debug(
             "RFIDEvent: reader=%s role=%s seat=%s board_index=%s tag=%s card=%r",
             reader_id, role, seat, board_index, uid, card,

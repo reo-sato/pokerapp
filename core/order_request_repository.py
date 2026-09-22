@@ -7,8 +7,8 @@ Phase M5 (ADR-0018): 注文リクエストの永続化 + 状態遷移。
 - **単一プロセス所有**: write は in-process API を抱えた `--ledger` プロセスのみ
   （ADR-0018 §3）。read-only consumer（単独 `--viewer-api`）のために読み込みは
   reload-on-read（mtime 検知）で他プロセスの write に追従する。
-- 状態遷移は pending → confirmed | rejected のみ。confirm は ledger_entry (kind=order) を
-  追記してからリンクする。
+- 状態遷移は pending → confirmed | rejected | cancelled のみ（cancelled = player 本人の
+  取り下げ, ADR-0045）。confirm は ledger_entry (kind=order) を追記してからリンクする。
 
 永続形: `order_requests.json` = {"requests": [order_request, ...]}（追記順、アトミックリネーム）。
 """
@@ -56,7 +56,8 @@ class InvalidOrderRequestError(OrderRequestError):
 
 
 class AlreadyResolvedError(OrderRequestError):
-    """confirmed / rejected 済みの request を再度解決しようとした（error code: already_resolved）。"""
+    """終端（confirmed / rejected / cancelled）済みの request を再度解決しようとした
+    （error code: already_resolved）。"""
 
 
 def _now_iso() -> str:
@@ -263,6 +264,37 @@ class OrderRequestRepository:
             self._flush()
             logger.info("Order request confirmed: %s -> ledger %s",
                         request_id, entry.entry_id)
+            return request
+
+    def cancel_request(
+        self, request_id: str, player_id: str, session_id: str | None = None
+    ) -> OrderRequest:
+        """player 本人が pending の注文を取り下げる（ADR-0045。ledger には何も書かない）。
+
+        - 本人判定は merge を考慮した equivalence class（ADR-0030 D2）。他人の request は
+          **存在を漏らさず not_found** にする。
+        - ``session_id`` を渡した場合は所属 session の一致も要求する（URL 整合）。
+        - pending 以外は AlreadyResolvedError。closed session の pending は取り下げ可
+          （confirm と違い会計に影響しないため）。
+        """
+        with self._lock:
+            self._maybe_reload()
+            request = self.get(request_id)
+            cls = self._player_repo.equivalence_class(player_id)
+            if request.player_id not in cls or (
+                session_id is not None and request.session_id != session_id
+            ):
+                raise OrderRequestNotFoundError(
+                    f"request_id={request_id} は存在しません。"
+                )
+            if request.status != "pending":
+                raise AlreadyResolvedError(
+                    f"request_id={request_id} は既に {request.status} です。"
+                )
+            request.status = "cancelled"
+            request.resolved_at = _now_iso()
+            self._flush()
+            logger.info("Order request cancelled by player: %s", request_id)
             return request
 
     def reject_request(self, request_id: str) -> OrderRequest:

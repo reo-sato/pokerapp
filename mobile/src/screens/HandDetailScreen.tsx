@@ -1,11 +1,21 @@
-import React from "react";
-import { Pressable, ScrollView, Text, View } from "react-native";
+import React, { useState } from "react";
+import { Pressable, ScrollView, Share, Text, View } from "react-native";
 
 import type { ViewerRepository } from "../api/repository";
 import type { Player, PlayerSessionSummary } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
-import { BackLink, ErrorView, Loading, formatResult, styles } from "./common";
+import { HandReplay } from "../shared/hand_replay/HandReplay";
+import { buildHandText } from "../shared/hand_replay/handReplayText";
+import { BackLink, ErrorView, Loading, ReloadLink, formatResult, styles } from "./common";
 import { findOwnRow } from "./MyHandsScreen";
+
+/** navigator.clipboard（web）への安全な参照。native / 非対応環境では null。 */
+function clipboardOrNull(): { writeText(text: string): Promise<void> } | null {
+  const nav = (globalThis as {
+    navigator?: { clipboard?: { writeText(text: string): Promise<void> } };
+  }).navigator;
+  return nav?.clipboard ?? null;
+}
 
 interface Props {
   repository: ViewerRepository;
@@ -20,77 +30,69 @@ interface Props {
 export function HandDetailScreen({
   repository, player, session, handId, onBack, onCorrect,
 }: Props): React.JSX.Element {
-  const { data: hand, loading, errorCode, errorMessage } = useAsync(
+  const { data: hand, loading, errorCode, errorMessage, reload } = useAsync(
     () => repository.getHand(session.session_id, handId),
     [repository, session.session_id, handId],
   );
+  const [shareMsg, setShareMsg] = useState<string | null>(null);
+
+  // Phase B「書き出し」導線: OS 共有シート → 使えない環境（web の非対応ブラウザ等）は
+  // クリップボードに fallback する。
+  const onShare = async (): Promise<void> => {
+    if (!hand) return;
+    const text = buildHandText(hand);
+    setShareMsg(null);
+    try {
+      await Share.share({ message: text });
+      return;
+    } catch {
+      // 続けて clipboard を試す。
+    }
+    const clipboard = clipboardOrNull();
+    if (clipboard) {
+      try {
+        await clipboard.writeText(text);
+        setShareMsg("クリップボードにコピーしました。");
+        return;
+      } catch {
+        // fallthrough
+      }
+    }
+    setShareMsg("この環境では共有できませんでした。");
+  };
 
   return (
     <View style={styles.screen}>
-      <BackLink onPress={onBack} label="ハンド一覧" />
+      <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+        <BackLink onPress={onBack} label="ハンド一覧" />
+        <ReloadLink onPress={reload} />
+      </View>
       <Text style={styles.title}>Hand #{handId}</Text>
       {loading ? (
         <Loading />
       ) : errorCode || !hand ? (
-        <ErrorView code={errorCode} message={errorMessage} />
+        <ErrorView code={errorCode} message={errorMessage} onRetry={reload} />
       ) : (
         <ScrollView>
           <Text style={styles.subtitle}>
             {hand.started_at}
-            {hand.blinds?.sb != null ? ` ・ blinds ${hand.blinds.sb}/${hand.blinds.bb}` : ""}
-          </Text>
-
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>
-              Board: {hand.board?.length ? hand.board.join(" ") : "—"}
-            </Text>
-            <Text style={styles.cardMeta}>
-              pot {hand.pot_total ?? "—"}
-              {hand.winner_seat != null ? ` ・ winner 席${hand.winner_seat}` : ""}
-            </Text>
             {(() => {
               const own = findOwnRow(hand, player);
-              if (!own) return null;
-              return (
-                <Text style={styles.cardMeta}>
-                  自分: 席{own.seat}
-                  {own.hole_cards?.length ? ` ・ ${own.hole_cards.join(" ")}` : ""}
-                  {" ・ 収支 "}
-                  <Text style={own.result >= 0 ? styles.pos : styles.neg}>
-                    {formatResult(own.result)}
-                  </Text>
-                </Text>
-              );
+              if (!own) return "";
+              return ` ・ 自分: 席${own.seat} 収支 ${formatResult(own.result)}`;
             })()}
-          </View>
+          </Text>
 
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>プレイヤー</Text>
-            {hand.players.map((p) => (
-              <Text key={p.seat} style={styles.cardMeta}>
-                席{p.seat} {p.name} stack {p.stack_start}→{p.stack_end}{" "}
-                <Text style={p.result >= 0 ? styles.pos : styles.neg}>
-                  {formatResult(p.result)}
-                </Text>
-              </Text>
-            ))}
-          </View>
+          {/* ストリート単位リプレイ（共有コンポーネント, ADR-0044。訂正適用済みビュー） */}
+          <HandReplay hand={hand} />
 
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>アクション</Text>
-            {hand.actions.length === 0 ? (
-              <Text style={styles.cardMeta}>記録なし</Text>
-            ) : (
-              hand.actions.map((a, i) => (
-                <Text key={i} style={styles.cardMeta}>
-                  [{a.street}] 席{a.seat} {a.player_name} {a.action}
-                  {a.amount ? ` ${a.amount}` : ""} ・ pot {a.pot_after}
-                  {a.needs_review ? " ・ 要確認" : ""}
-                  {(a as unknown as Record<string, unknown>).corrected ? " ・ 訂正済" : ""}
-                </Text>
-              ))
-            )}
-          </View>
+          <Pressable style={styles.card} onPress={() => void onShare()}>
+            <Text style={[styles.cardTitle, { color: "#5ab0f0" }]}>📤 このハンドを共有 / コピー</Text>
+            <Text style={styles.cardMeta}>
+              テキストで書き出します（SNS・メモへの貼り付け用）
+              {shareMsg ? ` ・ ${shareMsg}` : ""}
+            </Text>
+          </Pressable>
 
           {onCorrect ? (
             <Pressable style={styles.card} onPress={onCorrect}>
@@ -98,6 +100,7 @@ export function HandDetailScreen({
               <Text style={styles.cardMeta}>誤認識のアクション種別・金額を訂正します</Text>
             </Pressable>
           ) : null}
+          <View style={{ height: 40 }} />
         </ScrollView>
       )}
     </View>

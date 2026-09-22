@@ -12,8 +12,14 @@
  */
 import type {
   ControlCommand,
+  GroundTruthEditPayload,
+  GroundTruthHand,
   HandControlInput,
+  HandCorrection,
+  HandCorrectionInput,
+  HandSummary,
   LedgerEntry,
+  MeasurementRow,
   MenuItem,
   OrderRequest,
   Player,
@@ -58,6 +64,14 @@ export interface StaffRepository {
   createPlayer(displayName: string): Promise<Player>;
   /** player の display_name をリネームする。 */
   renamePlayer(playerId: string, displayName: string): Promise<Player>;
+  /**
+   * absorbed を survivor に統合する（player merge, ADR-0030。alias/tombstone・可逆）。
+   * 自己 merge / サイクルは invalid_merge、実在しない player は not_found。
+   */
+  mergePlayers(
+    survivorId: string,
+    absorbedId: string,
+  ): Promise<{ survivor_id: string; absorbed_id: string }>;
 
   // ――― 座席（hand-based seating, ADR-0038 §B）―――
   /** 現在の seating（最新 hand 由来）+ 記録済 hand_id 一覧。 */
@@ -100,6 +114,11 @@ export interface StaffRepository {
   // ――― 注文リクエスト捌き（M5 / ADR-0018）―――
   /** 注文メニュー（menu.json master）。確定時の単価 prefill に使う。 */
   getMenu(): Promise<MenuItem[]>;
+  /**
+   * menu master を全量置換する（価格改定・品切れ, ADR-0046。last-write-wins）。
+   * validation 違反は invalid_menu(400)。
+   */
+  updateMenu(items: MenuItem[]): Promise<MenuItem[]>;
   /** session の注文 queue（全 player。status で絞り込み可）。 */
   listOrderRequests(sessionId: string, status?: string): Promise<OrderRequest[]>;
   /** 注文を確定する（単価を確定し order ledger entry を起こす）。 */
@@ -113,4 +132,40 @@ export interface StaffRepository {
    * iPad はコマンドを control queue に積むだけ（適用は hand logger プロセス）。
    */
   sendControl(sessionId: string, input: HandControlInput): Promise<ControlCommand>;
+
+  // ――― ハンド履歴 read（ADR-0044）―――
+  /**
+   * session の全 hand（訂正オーバーレイ適用済, hand_id 昇順）。ハンドリプレイ UI の導線。
+   * player read と違い seat 縛りなし。log 不在 / unknown session は空 list（lenient）。
+   */
+  listSessionHands(sessionId: string): Promise<HandSummary[]>;
+  /**
+   * ハンド訂正を 1 件追記する（B4/ADR-0036, append-only オーバーレイ）。
+   * field = action/amount（action_index 必須）または winner_seat（hand レベル）。
+   * listSessionHands は訂正適用済みビューを返すので、訂正 → 再読込で即反映される。
+   */
+  addHandCorrection(
+    sessionId: string,
+    handId: number,
+    input: HandCorrectionInput,
+  ): Promise<HandCorrection>;
+
+  // ――― Phase A 計測 / ground truth（ADR-0043）―――
+  /** 計測タブの一覧行（hand_id / winner / chip won / needs_review / GT 状態）。 */
+  listMeasurementRows(sessionId: string): Promise<MeasurementRow[]>;
+  /** 「✓ 流す」: GT = 訂正適用後の captured。needs_review 入りは invalid_amount(400)。 */
+  passThroughGroundTruth(
+    sessionId: string,
+    handId: number,
+    annotator?: string,
+  ): Promise<GroundTruthHand>;
+  /** 「✏ 修正」: annotator が編集した hand を GT として LWW 上書きする。 */
+  submitGroundTruthEdit(
+    sessionId: string,
+    handId: number,
+    payload: GroundTruthEditPayload,
+    annotator?: string,
+  ): Promise<GroundTruthHand>;
+  /** 1 件の GT を返す（detail 画面の prefill 用）。未記録は not_found(404)。 */
+  getGroundTruth(sessionId: string, handId: number): Promise<GroundTruthHand>;
 }

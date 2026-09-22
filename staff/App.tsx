@@ -20,12 +20,16 @@ import type { StaffRepository } from "./src/api/repository";
 import type { StaffSession } from "./src/api/types";
 import { colors } from "./src/screens/common";
 import { LoginScreen } from "./src/screens/LoginScreen";
+import { MenuScreen } from "./src/screens/MenuScreen";
+import { PlayersScreen } from "./src/screens/PlayersScreen";
 import { SessionListScreen } from "./src/screens/SessionListScreen";
 import { TableViewScreen } from "./src/screens/TableViewScreen";
 
 type Route =
   | { name: "login" }
   | { name: "sessions" }
+  | { name: "players" }
+  | { name: "menu" }
   | { name: "table"; session: StaffSession };
 
 export default function App(): React.JSX.Element {
@@ -49,10 +53,24 @@ export default function App(): React.JSX.Element {
         <SessionListScreen
           repository={repository}
           onSelect={(session) => setRoute({ name: "table", session })}
+          onOpenPlayers={() => setRoute({ name: "players" })}
+          onOpenMenu={() => setRoute({ name: "menu" })}
           onLogout={() => {
             repository.clearToken();
             setRoute({ name: "login" });
           }}
+        />
+      )}
+      {route.name === "players" && (
+        <PlayersScreen
+          repository={repository}
+          onBack={() => setRoute({ name: "sessions" })}
+        />
+      )}
+      {route.name === "menu" && (
+        <MenuScreen
+          repository={repository}
+          onBack={() => setRoute({ name: "sessions" })}
         />
       )}
       {route.name === "table" && (

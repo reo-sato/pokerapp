@@ -115,6 +115,7 @@ export const menuItems: MenuItem[] = [
   { item_name: "ジントニック", unit_amount: 800 },
   { item_name: "ウーロン茶", unit_amount: 400 },
   { item_name: "コーラ", unit_amount: 400 },
+  { item_name: "枝豆", unit_amount: 300, sold_out: true },
 ];
 
 /** ledger entries (verify-v1 ledger, ADR-0016)。player → session → entries。 */

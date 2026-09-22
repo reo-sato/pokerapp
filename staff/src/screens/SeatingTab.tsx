@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
 
 import type { StaffRepository } from "../api/repository";
@@ -24,6 +24,15 @@ export function SeatingTab(props: {
     repository,
     session.session_id,
   ]);
+
+  // ライブ卓では hand logger 側の seat 書き込みを 5 秒 polling で自動反映する
+  // （表示のみ。staged のローカル編集状態には触れない）。
+  const reloadSeating = seating.reload;
+  useEffect(() => {
+    if (session.status !== "open") return;
+    const id = setInterval(() => reloadSeating(), 5000);
+    return () => clearInterval(id);
+  }, [session.status, reloadSeating]);
 
   const [staged, setStaged] = useState<Record<number, string>>({});
   const [selectedPlayer, setSelectedPlayer] = useState<string | null>(null);
@@ -62,6 +71,23 @@ export function SeatingTab(props: {
     setSeatInput("");
     setSelectedPlayer(null);
     setMsg(null);
+  };
+
+  // 現在の座席（最新 hand 由来）を割り当て予定にコピーする。行単位の「取消」で外してから
+  // 割り当てれば「退席（席を空ける）」を次 hand に明示的に反映できる。
+  const onCopyCurrent = (): void => {
+    const current = seating.data?.seating ?? [];
+    if (current.length === 0) {
+      setMsg({ text: "コピーする座席がありません。", ok: false });
+      return;
+    }
+    const copied: Record<number, string> = {};
+    for (const sa of current) copied[sa.seat_no] = sa.player_id;
+    setStaged(copied);
+    setMsg({
+      text: "現在の座席をコピーしました。外す席は「取消」で外してから割り当ててください。",
+      ok: true,
+    });
   };
 
   const onAssign = async (): Promise<void> => {
@@ -148,6 +174,13 @@ export function SeatingTab(props: {
               />
               <View style={{ width: 8 }} />
               <Button label="席に追加" onPress={onAddStaged} kind="neutral" style={{ alignSelf: "flex-end" }} />
+              <View style={{ width: 8 }} />
+              <Button
+                label="現在の座席をコピー"
+                kind="ghost"
+                onPress={onCopyCurrent}
+                style={{ alignSelf: "flex-end" }}
+              />
             </View>
 
             {stagedEntries.length > 0 ? (

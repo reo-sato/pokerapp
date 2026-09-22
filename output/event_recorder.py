@@ -32,7 +32,7 @@ def event_to_envelope(event: RecordableEvent) -> dict:
     (docs/contracts/schemas/reconstruction_event.schema.json)。
     """
     if isinstance(event, AudioEvent):
-        return {
+        envelope = {
             "type": "audio",
             "timestamp": event.timestamp,
             "action": event.action,
@@ -44,6 +44,12 @@ def event_to_envelope(event: RecordableEvent) -> dict:
             # 明示証拠なので、記録しないと replay が別の actor を選びうる（ISSUE-0032）。
             "position": event.position,
         }
+        # additive (ADR-A/B): 既定値のときは省略し、旧 replay 実装でもそのまま読める形を保つ。
+        if event.utterance_start_ts is not None:
+            envelope["utterance_start_ts"] = event.utterance_start_ts
+        if event.parse_flags:
+            envelope["parse_flags"] = list(event.parse_flags)
+        return envelope
     if isinstance(event, RFIDEvent):
         return {
             "type": "rfid",

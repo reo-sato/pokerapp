@@ -4,7 +4,7 @@ import { FlatList, Pressable, Text, View } from "react-native";
 import type { ViewerRepository } from "../api/repository";
 import type { Player } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
-import { ErrorView, Loading, styles } from "./common";
+import { ErrorView, Loading, ReloadLink, styles } from "./common";
 
 interface Props {
   repository: ViewerRepository;
@@ -23,18 +23,21 @@ interface Props {
 export function PlayerSelectScreen({
   repository, onSelect, onLogin, onSignup,
 }: Props): React.JSX.Element {
-  const { data, loading, errorCode, errorMessage } = useAsync(
+  const { data, loading, errorCode, errorMessage, reload } = useAsync(
     () => repository.listPlayers(), [repository],
   );
 
   return (
     <View style={styles.screen}>
-      <Text style={styles.title}>Poker Hand Viewer</Text>
+      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+        <Text style={styles.title}>Poker Hand Viewer</Text>
+        <ReloadLink onPress={reload} />
+      </View>
       <Text style={styles.subtitle}>あなたの名前を選んでください</Text>
       {loading ? (
         <Loading />
       ) : errorCode ? (
-        <ErrorView code={errorCode} message={errorMessage} />
+        <ErrorView code={errorCode} message={errorMessage} onRetry={reload} />
       ) : (
         <FlatList
           data={data ?? []}

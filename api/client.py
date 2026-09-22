@@ -172,12 +172,30 @@ class ViewerApiClient:
             json=payload, headers=self._player_headers(),
         )
 
+    def cancel_order_request(
+        self, player_id: str, session_id: str, request_id: str
+    ) -> dict:
+        """pending の注文を本人が取り下げる（ADR-0045。認可姿勢は注文 POST と同一）。"""
+        return self._request(
+            "POST",
+            f"/api/players/{player_id}/sessions/{session_id}"
+            f"/order-requests/{request_id}/cancel",
+            headers=self._player_headers(),
+        )
+
     # ――― staff write API（ADR-0021。Bearer token。会計 write は所有プロセスのみ）―――
 
     def _staff_headers(self) -> dict[str, str]:
         if not self._staff_token:
             return {}
         return {"Authorization": f"Bearer {self._staff_token}"}
+
+    def update_menu(self, items: list[dict]) -> list[dict]:
+        """menu master を全量置換する（価格改定・品切れ, ADR-0046, staff token + write 所有）。"""
+        return self._request(
+            "PUT", "/api/staff/menu", json={"items": items},
+            headers=self._staff_headers(),
+        )["items"]
 
     def get_buyin_presets(self) -> list[int]:
         """buy-in 金額プリセットを取得する（ADR-0026, staff token）。"""
@@ -243,6 +261,50 @@ class ViewerApiClient:
         return self._request(
             "POST", f"/api/staff/sessions/{session_id}/hands/{hand_id}/corrections",
             json=payload, headers=self._staff_headers(),
+        )
+
+    def list_session_hands(self, session_id: str) -> list[dict]:
+        """session の全 hand（訂正適用済, hand_id 昇順）。staff read（ADR-0044）。"""
+        return self._request(
+            "GET", f"/api/staff/sessions/{session_id}/hands",
+            headers=self._staff_headers(),
+        )["hands"]
+
+    # ――― Phase A 計測 / ground truth（ADR-0043, staff token）―――
+
+    def list_measurement_rows(self, session_id: str) -> list[dict]:
+        """計測タブの一覧行（hand_id / winner / chip won / needs_review / GT 状態）。"""
+        return self._request(
+            "GET", f"/api/staff/sessions/{session_id}/measurement-rows",
+            headers=self._staff_headers(),
+        )["rows"]
+
+    def pass_through_ground_truth(
+        self, session_id: str, hand_id: int, annotator: str = "staff",
+    ) -> dict:
+        """「✓ 流す」: GT = 訂正適用後の captured。needs_review 入りは 400（C-2 ガード）。"""
+        return self._request(
+            "PUT", f"/api/staff/sessions/{session_id}/ground-truth/{hand_id}",
+            json={"source": "captured-passthrough", "annotator": annotator},
+            headers=self._staff_headers(),
+        )
+
+    def submit_ground_truth_edit(
+        self, session_id: str, hand_id: int, hand: dict,
+        annotator: str = "staff",
+    ) -> dict:
+        """「✏ 修正」: annotator が編集した hand 本体を GT として LWW 上書きする。"""
+        return self._request(
+            "PUT", f"/api/staff/sessions/{session_id}/ground-truth/{hand_id}",
+            json={"source": "manual-edit", "annotator": annotator, "hand": hand},
+            headers=self._staff_headers(),
+        )
+
+    def get_ground_truth(self, session_id: str, hand_id: int) -> dict:
+        """1 件の ground truth を返す（detail 画面の編集 prefill 用）。"""
+        return self._request(
+            "GET", f"/api/staff/sessions/{session_id}/ground-truth/{hand_id}",
+            headers=self._staff_headers(),
         )
 
     def close_session(self, session_id: str) -> dict:
@@ -336,12 +398,6 @@ class ViewerApiClient:
             payload["blinds"] = blinds
         return self._request(
             "POST", "/api/staff/sessions", json=payload, headers=self._staff_headers(),
-        )
-
-    def close_session(self, session_id: str) -> dict:
-        return self._request(
-            "POST", f"/api/staff/sessions/{session_id}/close",
-            headers=self._staff_headers(),
         )
 
     def get_seating(self, session_id: str) -> dict:

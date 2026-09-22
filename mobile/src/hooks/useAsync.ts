@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { ViewerApiError } from "../api/types";
 
@@ -10,11 +10,16 @@ export interface AsyncState<T> {
   errorMessage: string | null;
 }
 
-/** repository 呼び出しの loading / error(code 分岐) / data を一元化する。 */
-export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]): AsyncState<T> {
+/** repository 呼び出しの loading / error(code 分岐) / data を一元化する。reload で再取得。 */
+export function useAsync<T>(
+  fn: () => Promise<T>,
+  deps: unknown[],
+): AsyncState<T> & { reload: () => void } {
+  const [tick, setTick] = useState(0);
   const [state, setState] = useState<AsyncState<T>>({
     data: null, loading: true, errorCode: null, errorMessage: null,
   });
+  const reload = useCallback(() => setTick((t) => t + 1), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,7 +44,7 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]): AsyncState<T
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
+  }, [...deps, tick]);
 
-  return state;
+  return { ...state, reload };
 }
