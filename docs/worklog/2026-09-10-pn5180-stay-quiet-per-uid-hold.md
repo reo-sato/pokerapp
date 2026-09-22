@@ -217,7 +217,7 @@ ESP-IDF が無いので実ビルドの代わりに以下（`gcc 13` + ESP-IDF/�
 
 - `docs/adr/0034-rfid-usb-ccid-firmware-host-contract-freeze.md` — 契約 v1.0 / v1.1 §6 の連結応答。
   本タスクは firmware 内部の読み取り手順のみで、**契約は変更なし**。
-- `docs/adr/0040-ccid-virtual-card-always-present.md` — 0 枚 = `6A 81` はこの設計のまま。
+- `docs/adr/0051-ccid-virtual-card-always-present.md` — 0 枚 = `6A 81` はこの設計のまま。
 
 ## Related Issues
 

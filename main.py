@@ -130,7 +130,7 @@ def _make_table_state_writer(cfg: dict, log_dir: str, session_id: str):
 
 
 def _make_card_correction_hook(rfid_thread):
-    """ミスディール訂正で RFID 側の割り当て・デバウンスも落とすフック（ADR-0043）。
+    """ミスディール訂正で RFID 側の割り当て・デバウンスも落とすフック（ADR-0054）。
 
     engine は `("board", 位置)` / `("seat", 席)` で呼ぶ。RFID を使っていない構成では None
     （engine 内の記録だけを取り消す = 訂正自体は成立する）。
@@ -221,7 +221,6 @@ def run_cli() -> None:
             + (" [要確認]" if record.needs_review else "")
         )
 
-    audio_cfg = cfg.get("audio", {})
     cam_cfg = cfg.get("camera", {})
 
     audio_thread = _make_audio_thread(cfg, audio_q, stop_event)
@@ -286,7 +285,7 @@ def run_cli() -> None:
     event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
     # 新ハンドで RFID の board 位置もリセットする（engine の board と同じ同期点。
     # 片方だけが番号を振り直すと同じ札が 2 か所に出る, ISSUE-0026）。
-    # 新ハンドは board 位置 + マック観測をまとめてリセットする（ADR-0026 / ADR-0044）。
+    # 新ハンドは board 位置 + マック観測をまとめてリセットする（ADR-0026 / ADR-0055）。
     on_new_hand = (
         getattr(rfid_thread, "reset_for_new_hand", None)
         or getattr(rfid_thread, "reset_board_positions", None)
@@ -366,7 +365,7 @@ def run_cli() -> None:
                 except ValueError as e:
                     print(f"エラー: {e}")
             elif cmd in ("cb", "cs") and len(parts) >= 2:
-                # ミスディール訂正（ADR-0043）。状態変更は他と同じく queue 経由。
+                # ミスディール訂正（ADR-0054）。状態変更は他と同じく queue 経由。
                 try:
                     key = int(parts[1])
                 except ValueError:
@@ -462,7 +461,6 @@ def run_gui() -> None:
     camera_q = None
     rfid_q = None
 
-    audio_cfg = cfg.get("audio", {})
     cam_cfg = cfg.get("camera", {})
     rfid_cfg = cfg.get("rfid", {})
 
@@ -536,7 +534,7 @@ def run_gui() -> None:
     event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
     # 新ハンドで RFID の board 位置もリセットする（engine の board と同じ同期点。
     # 片方だけが番号を振り直すと同じ札が 2 か所に出る, ISSUE-0026）。
-    # 新ハンドは board 位置 + マック観測をまとめてリセットする（ADR-0026 / ADR-0044）。
+    # 新ハンドは board 位置 + マック観測をまとめてリセットする（ADR-0026 / ADR-0055）。
     on_new_hand = (
         getattr(rfid_thread, "reset_for_new_hand", None)
         or getattr(rfid_thread, "reset_board_positions", None)

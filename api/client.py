@@ -388,7 +388,7 @@ class ViewerApiClient:
         """hand logger に制御コマンドを送る。
 
         type: new_hand / winner / rebuy / correct_board（`index`=ボード位置） /
-        correct_seat（`seat`）。訂正はミスディールの載せ替え用（ADR-0043）。
+        correct_seat（`seat`）。訂正はミスディールの載せ替え用（ADR-0054）。
         """
         payload: dict = {"type": type}
         if seat is not None:

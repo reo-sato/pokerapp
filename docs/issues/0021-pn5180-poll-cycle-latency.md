@@ -18,7 +18,7 @@
 
 rfid / firmware（`firmware/esp32s3-pn5180-ccid/main/pn5180_reader.c`）
 
-> **用語（2026-09-10 更新, ADR-0041 / 契約 v1.2）**: 本 issue の「slot」は **物理 reader（index）** を
+> **用語（2026-09-10 更新, ADR-0052 / 契約 v1.2）**: 本 issue の「slot」は **物理 reader（index）** を
 > 指す。USB 上の CCID slot は常に 1 つで、物理リーダーは Get UID の P2（reader index）で選ぶように
 > 変わった（Windows の汎用 CCID ドライバが 1 slot しか公開しないため）。firmware の台数設定も
 > `CCID_SLOT_COUNT` → **`PN5180_READER_COUNT`** に分離済み。
@@ -521,7 +521,7 @@ turn / river）。札の**離脱**は狙い撃ちが毎周走るので N に影�
 
 - `docs/adr/0034-rfid-usb-ccid-firmware-host-contract-freeze.md` — 契約 v1.0 の凍結。
   複数枚の連結応答は §6/§7 の **拡張**（v1.1 予定）。
-- `docs/adr/0040-ccid-virtual-card-always-present.md` — カード有無は Get UID の SW だけで伝える。
+- `docs/adr/0051-ccid-virtual-card-always-present.md` — カード有無は Get UID の SW だけで伝える。
   0 枚 = `6A 81` はこの設計のまま。
 
 ## Related Issues

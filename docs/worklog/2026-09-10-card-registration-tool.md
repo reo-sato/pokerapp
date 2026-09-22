@@ -68,7 +68,7 @@ None observed.
 
 ## Related ADRs
 
-- `docs/adr/0040-ccid-virtual-card-always-present.md`（カード有無は Get UID の SW → `read_uid` の None/UID で動く前提）
+- `docs/adr/0051-ccid-virtual-card-always-present.md`（カード有無は Get UID の SW → `read_uid` の None/UID で動く前提）
 - `docs/adr/0034-…`（契約 §7 UID 正規化 = `normalize_tag_id`）
 
 ## Related Issues

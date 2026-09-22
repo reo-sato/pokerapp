@@ -1,4 +1,4 @@
-# ADR-0041: CCID slot は 1 つに固定し、物理リーダーは Get UID の P2 で選ぶ
+# ADR-0052: CCID slot は 1 つに固定し、物理リーダーは Get UID の P2 で選ぶ
 
 ## Status
 
@@ -24,10 +24,10 @@ Accepted
     同一症状の報告。
 - 回避策として **slot ごとに USB インターフェースを分ける**（composite device で CCID を N 個）方法が
   あるが、ESP32-S3 の USB device controller は **endpoint が 6 本（双方向 5 + IN 1）** しかなく、
-  CCID 1 インターフェース = bulk IN/OUT 2 本（ADR-0040 で interrupt-IN は不使用）なので
+  CCID 1 インターフェース = bulk IN/OUT 2 本（ADR-0051 で interrupt-IN は不使用）なので
   **最大 5 台**。本番 11 台に届かない。
 
-一方 host は ADR-0040 の結果として **slot 状態機械に依存しない polling 設計**であり、
+一方 host は ADR-0051 の結果として **slot 状態機械に依存しない polling 設計**であり、
 UID 取得は Get UID pseudo-APDU（`FF CA 00 00 00`）1 本だけに依存している（契約 §6）。
 つまり「どの物理リーダーを読むか」を APDU の中で指定できれば、CCID の slot 多重化は不要になる。
 
@@ -45,7 +45,7 @@ UID 取得は Get UID pseudo-APDU（`FF CA 00 00 00`）1 本だけに依存し�
   **すべて同じ `name`**（唯一の reader_name）で `reader` が 0..10。一意性の単位は
   `name` から **`(name, reader)`** に変わる。
 - host は **reader_name ごとに PC/SC 接続を 1 本だけ持続**させ、そこに N 個の Get UID を流す
-  （ADR-0040 で slot は常時 present なので接続は切れない）。transmit が失敗したら接続を捨てて
+  （ADR-0051 で slot は常時 present なので接続は切れない）。transmit が失敗したら接続を捨てて
   次の poll で張り直す。
 
 ## Alternatives Considered
@@ -70,7 +70,7 @@ UID 取得は Get UID pseudo-APDU（`FF CA 00 00 00`）1 本だけに依存し�
   - Why rejected: 運用（小規模クラブ）に対して重すぎる。
 - **E. host を `SCardControl`（escape）に変える** — PC/SC の APDU 経路を使わず vendor command で読む。
   - Pros: slot 概念から完全に自由。
-  - Cons: 契約 §6（host は Get UID pseudo-APDU のみ）を破り、可搬性を失う（ADR-0040 の C と同じ理由）。
+  - Cons: 契約 §6（host は Get UID pseudo-APDU のみ）を破り、可搬性を失う（ADR-0051 の C と同じ理由）。
   - Why rejected: P2 を使えば標準 APDU の枠内で解決できる。
 
 ## Consequences
@@ -130,6 +130,6 @@ UID 取得は Get UID pseudo-APDU（`FF CA 00 00 00`）1 本だけに依存し�
 ## Supersedes / Superseded by
 
 - Supersedes: —（ADR-0034 の契約 §3「PN5180 1 個 = CCID 1 slot / slot ごとの reader_name」を
-  **v1.2 で置き換える**。ADR-0034 自体（契約の freeze と他の MUST）は維持。ADR-0040 の
+  **v1.2 で置き換える**。ADR-0034 自体（契約の freeze と他の MUST）は維持。ADR-0051 の
   「slot 常時 present」は前提として継続）
 - Superseded by: —

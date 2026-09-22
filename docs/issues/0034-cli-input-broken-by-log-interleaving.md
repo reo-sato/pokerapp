@@ -81,6 +81,6 @@ w2026-09-12 16:00:43,843 [IntegrationThread] INFO integration.engine: Board card
 
 ## Related
 
-- ADR-0045 D5（卓状態モニタ。ログを端末に出さずに卓を見る手段）
+- ADR-0056 D5（卓状態モニタ。ログを端末に出さずに卓を見る手段）
 - ISSUE-0030（全角コマンド。同じ `_normalize_cli_command` で扱う）
 - ISSUE-0026（board 位置の append-only。再検出が無害なのはこの設計のおかげ）

@@ -7,7 +7,7 @@
 ## Scope / Task
 
 Windows の汎用 CCID ドライバが 1 slot しか公開しない（ISSUE-0022）ため、**CCID slot を 1 つに固定し
-物理リーダーは Get UID の P2 で選ぶ**設計（ADR-0041 / 契約 v1.2）へ、**host（Python）側と契約・docs**
+物理リーダーは Get UID の P2 で選ぶ**設計（ADR-0052 / 契約 v1.2）へ、**host（Python）側と契約・docs**
 を移行する。firmware 側（`FF CA 00 <k> 00` の実装・台数問い合わせ）は別タスク。
 
 ## Goal
@@ -39,7 +39,7 @@ Windows の汎用 CCID ドライバが 1 slot しか公開しない（ISSUE-0022
   同じ `pcsc_readers`(list) フォールバックに揃えた。
 - `tests/test_rfid.py` / `tests/test_tools_probe_pcsc.py` / `tests/test_tools_register_cards.py` — 下記。
 - `docs/contracts/rfid-usb-ccid.md` — **v1.2**（§1/§2/§3/§4/§6/§8/§10 + Related）。
-- `docs/adr/0041-physical-reader-index-via-get-uid-p2.md` / `docs/issues/0022-windows-ccid-single-slot.md`
+- `docs/adr/0052-physical-reader-index-via-get-uid-p2.md` / `docs/issues/0022-windows-ccid-single-slot.md`
   / `docs/decision-log.md`（索引 2 行）/ `docs/hardware-qa-checklist.md`（手順 1/2/3/4/6-7・受け入れ基準）
   / `docs/installation.md` / `CHANGELOG.md` / `CLAUDE.md`。
 
@@ -86,7 +86,7 @@ Windows の汎用 CCID ドライバが 1 slot しか公開しない（ISSUE-0022
     `check_verdict` の 5 分岐、`_cmd_list` の台数表示・超過警告・非対応注記、`_cmd_check` の
     カード無し PASS と `6A86` FAIL、`raw --reader/--name` の parser、`format_event`/`run_watch` の `[rK]`。
   - `tests/test_tools_register_cards.py::TestSelectReader` ほか CLI 経路（選択 / 既定 / 不正 selector）。
-- 実機確認は未（1 台の疎通は ADR-0040 で確認済。2 台 →11 台は ADR-0041 の Follow-up）。
+- 実機確認は未（1 台の疎通は ADR-0051 で確認済。2 台 →11 台は ADR-0052 の Follow-up）。
 
 ## Mismatches Found During Testing
 
@@ -116,8 +116,8 @@ Windows の汎用 CCID ドライバが 1 slot しか公開しない（ISSUE-0022
 
 ## Related ADRs
 
-- `docs/adr/0041-physical-reader-index-via-get-uid-p2.md` — 本作業の決定。
-- `docs/adr/0040-ccid-virtual-card-always-present.md` — slot 常時 present（1 接続持続の前提）。
+- `docs/adr/0052-physical-reader-index-via-get-uid-p2.md` — 本作業の決定。
+- `docs/adr/0051-ccid-virtual-card-always-present.md` — slot 常時 present（1 接続持続の前提）。
 - `docs/adr/0034-rfid-usb-ccid-firmware-host-contract-freeze.md` — 契約 freeze（§3 を v1.2 で置換）。
 
 ## Related Issues
@@ -127,4 +127,4 @@ Windows の汎用 CCID ドライバが 1 slot しか公開しない（ISSUE-0022
 
 ## Related Commits
 
-- （未コミット）host + 契約 v1.2 + ADR-0041 / ISSUE-0022 / QA docs
+- （未コミット）host + 契約 v1.2 + ADR-0052 / ISSUE-0022 / QA docs

@@ -6,7 +6,7 @@ PC/SC (pyscard) ラッパー。NFC リーダーからカード UID を読み取�
 - pyscard は実行時に遅延インポートする。インポートできない環境でも
   このモジュール自体はインポート可能にする（テスト・GUI での import エラー防止）。
 - UID 取得 APDU: `FF CA 00 <k> 00`（ISO 7816 Get UID）。**P2 = 物理 reader index k**
-  （契約 `docs/contracts/rfid-usb-ccid.md` v1.2 §6 / ADR-0041）。Windows の汎用 CCID ドライバは
+  （契約 `docs/contracts/rfid-usb-ccid.md` v1.2 §6 / ADR-0052）。Windows の汎用 CCID ドライバは
   1 インターフェース 1 slot しか公開しないため、PC/SC の reader（slot）は 1 つだけにして、
   物理リーダー N 台は P2 で選ぶ。`k=0` は v1.0/1.1 の `FF CA 00 00 00` と同一。
 - レスポンス末尾 2 バイト: SW1=0x90, SW2=0x00 が成功を示す。`6A 86` = P2 が firmware の
@@ -15,8 +15,8 @@ PC/SC (pyscard) ラッパー。NFC リーダーからカード UID を読み取�
   （契約 v1.1 §6）。firmware は該当 reader 上の ISO 15693 カードの 8 バイト UID を
   枚数ぶん連結して返すので、host は応答長が 16/24/32 のときだけ 8 バイトずつ
   分割する（4/7/8 バイトは従来どおり単一 UID）。
-- **接続は reader_name ごとに 1 本を持続**させる（ADR-0040 で slot は仮想カード常時挿入なので
-  接続は切れない / ADR-0041 で 1 接続に N 個の APDU を流す）。同じ reader_name を使う複数の
+- **接続は reader_name ごとに 1 本を持続**させる（ADR-0051 で slot は仮想カード常時挿入なので
+  接続は切れない / ADR-0052 で 1 接続に N 個の APDU を流す）。同じ reader_name を使う複数の
   `PCSCBridge` はモジュール内の共有接続（参照カウント）を使い、transmit を lock で直列化する。
 """
 from __future__ import annotations
@@ -115,12 +115,12 @@ def find_reader(reader_name: str):
     return next((r for r in sc_readers() if str(r) == reader_name), None)
 
 
-# ――― reader_name ごとの共有接続（契約 v1.2 §8 / ADR-0041） ―――
+# ――― reader_name ごとの共有接続（契約 v1.2 §8 / ADR-0052） ―――
 
 class _SharedConnection:
     """1 つの reader_name に対する PC/SC 接続 1 本（複数 `PCSCBridge` で共有）。
 
-    ADR-0040 で slot は仮想カード常時挿入になったため、接続は poll ごとに張り直さず持続させる
+    ADR-0051 で slot は仮想カード常時挿入になったため、接続は poll ごとに張り直さず持続させる
     （11 台ぶんの Get UID を 1 接続で流す）。USB 抜け等で transmit が失敗したら `invalidate()`
     して次回の transmit で張り直す。
     """
@@ -218,7 +218,7 @@ class PCSCBridge:
         bridge.close()
 
     `reader_index`（= Get UID の P2）は 0..254。同じ reader_name の bridge は PC/SC 接続を
-    共有する（接続本数を reader 名ごとに 1 本に保つ, ADR-0041）。
+    共有する（接続本数を reader 名ごとに 1 本に保つ, ADR-0052）。
     """
 
     def __init__(self, reader_name: str, reader_index: int = 0) -> None:

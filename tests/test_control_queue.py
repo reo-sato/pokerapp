@@ -64,7 +64,7 @@ def test_command_to_audio_event_mapping():
     ev = command_to_audio_event(rb, clk)
     assert ev.action == "rebuy" and ev.seat == 2 and ev.amount == 3000
 
-    # ミスディール訂正（ADR-0043）。iPad から同じ control queue 経由で送れる。
+    # ミスディール訂正（ADR-0054）。iPad から同じ control queue 経由で送れる。
     cb = log_command("correct_board", {"index": 3})
     ev = command_to_audio_event(cb, clk)
     assert ev.action == "correct_board" and ev.amount == 3 and "ボード3" in ev.raw_text

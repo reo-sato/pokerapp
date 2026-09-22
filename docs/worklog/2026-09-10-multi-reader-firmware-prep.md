@@ -9,7 +9,7 @@
 `firmware/esp32s3-pn5180-ccid/main/` を **`CCID_SLOT_COUNT` を 1 から 13 へ上げられる状態**にする
 準備。実機での 13 台検証（Phase H）そのものは対象外で、13 台にしたときに必ず問題になる 4 点
 （RF の重なり / 未通電 reader / 1 周の所要時間 / Windows の記述子キャッシュ）を先に潰す。
-契約 `docs/contracts/rfid-usb-ccid.md` v1.0（ADR-0034 / ADR-0040）は据え置き（§2 に additive 追記のみ）。
+契約 `docs/contracts/rfid-usb-ccid.md` v1.0（ADR-0034 / ADR-0051）は据え置き（§2 に additive 追記のみ）。
 
 ## Goal
 
@@ -162,7 +162,7 @@ bcdDevice を上げないと反映されなかった）。`bMaxSlotIndex` は `C
 
 ## Related ADRs
 
-- `docs/adr/0040-ccid-virtual-card-always-present.md` — slot は仮想カード常時挿入、カード有無は
+- `docs/adr/0051-ccid-virtual-card-always-present.md` — slot は仮想カード常時挿入、カード有無は
   Get UID の SW だけで伝える。未通電で skip した slot が「常に `6A 81`」で成立するのはこの設計のため。
 - `docs/adr/0034-rfid-usb-ccid-firmware-host-contract-freeze.md` — 契約 v1.0 の凍結。本タスクの §2 追記は additive
   （version 据え置き）。

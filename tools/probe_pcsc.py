@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tools/probe_pcsc.py
 
-実機 RFID（canonical PC/SC 経路: ESP32-S3 + PN5180 USB CCID, ADR-0015/0034/0041）を
+実機 RFID（canonical PC/SC 経路: ESP32-S3 + PN5180 USB CCID, ADR-0015/0034/0052）を
 `docs/contracts/rfid-usb-ccid.md` v1.2 の MUST 項目に対して検査する bring-up 診断 CLI。
 
 `tools/simulate_rfid.py`（HTTP 模擬・実機なし）と対になる「実機側」ツール。pyscard / OS の
@@ -9,7 +9,7 @@ PC/SC スタック越しに、production と同じ `rfid.bridge.PCSCBridge` / `r
 を使って次を確認する:
 
   - §3-4 reader_name 列挙と `config.rfid.pcsc_readers` の一致（前方一致でなく等値）。
-         **CCID slot = 1**（Windows 制限, ADR-0041）なので reader_name は 1 つで、物理リーダーは
+         **CCID slot = 1**（Windows 制限, ADR-0052）なので reader_name は 1 つで、物理リーダーは
          config の `reader`（Get UID の P2）で選ぶ。突き合わせは `(name, reader)` 単位。
   - §4   config の lint（role/seat/reader・重複・キー欠落・board の廃止フィールド/台数）
   - §5   各 reader への connect 成功（host は ATR 非依存。connect が通れば OS PC/SC が ATR 受理）
@@ -204,14 +204,14 @@ def _lint_board_obsolete_fields(cfg: dict, label: str) -> list[str]:
 
     v1.1/v1.2 は「1 台 = 1 ストリート専用（flop は 1 台に 3 枚重ね）」前提で位置を config に
     書かせていたが、実機は board reader が並んでいるだけで前提が成立しない
-    （ISSUE-0024 / ADR-0042）。現在は全台を 1 つの論理ボードとして検出順に 1..5 を振るため、
+    （ISSUE-0024 / ADR-0053）。現在は全台を 1 つの論理ボードとして検出順に 1..5 を振るため、
     両フィールドは無視される = 残っていると「設定したのに効かない」誤解のもとになる。
     """
     stale = [k for k in ("index", "cards") if k in cfg]
     if not stale:
         return []
     return [
-        f"{label}: role=board の {' / '.join(stale)} は廃止（無視されます, ADR-0042）。"
+        f"{label}: role=board の {' / '.join(stale)} は廃止（無視されます, ADR-0053）。"
         "ボード位置は board reader 全台を通した検出順で決まるので、config から削除してください。"
     ]
 
@@ -411,7 +411,7 @@ def _cmd_list(
         return 2
     present = lister()
     print(f"接続中の PC/SC reader: {len(present)} 件"
-          f"（v1.2: CCID slot は 1 つだけ = reader 名も 1 つ, ADR-0041）")
+          f"（v1.2: CCID slot は 1 つだけ = reader 名も 1 つ, ADR-0052）")
     counts: dict[str, Optional[int]] = {}
     for name in present:
         n = counter(name)
@@ -704,7 +704,7 @@ def _cmd_raw(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="実機 RFID（PC/SC canonical, ADR-0015/0034/0041, 契約 v1.2）の bring-up 診断",
+        description="実機 RFID（PC/SC canonical, ADR-0015/0034/0052, 契約 v1.2）の bring-up 診断",
     )
     parser.add_argument(
         "--config", default=None,

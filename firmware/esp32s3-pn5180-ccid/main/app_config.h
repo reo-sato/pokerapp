@@ -6,14 +6,14 @@
 //     ESP32 は SIG(=PN5180_PIN_BUSY_SIG) を読む。各 reader を処理する前に MUX channel を切替える
 //     （pn5180_reader.c の mux_select）。
 //   - 契約 docs/contracts/rfid-usb-ccid.md v1.2（CCID slot は 1 つ / 物理 reader は Get UID の
-//     P2 = reader index, ADR-0041） / docs/rfid-ccid-firmware-checklist.md。
+//     P2 = reader index, ADR-0052） / docs/rfid-ccid-firmware-checklist.md。
 #pragma once
 
 #include <stdint.h>
 #include "driver/spi_master.h"
 
 // ───────── USB 上の CCID slot 数 ─────────
-// **常に 1**（ADR-0041 / 契約 v1.2）。Windows の汎用 CCID ドライバ（usbccid）は
+// **常に 1**（ADR-0052 / 契約 v1.2）。Windows の汎用 CCID ドライバ（usbccid）は
 // **1 インターフェースにつき 1 slot しか reader として公開しない**（実機 2026-09-10:
 // `CCID_SLOT_COUNT=2` で書き込んでも `PokerRFID PN5180-CCID 1` は `Reader not found`）。
 // slot ごとに USB インターフェースを分ける回避策は ESP32-S3 の USB endpoint が 6 本

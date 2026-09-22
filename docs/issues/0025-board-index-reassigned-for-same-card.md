@@ -11,7 +11,7 @@ Fixed（`rfid/reader_thread.py`。実機での再確認は次の通しで）
 ## Severity / Priority
 
 - Severity: High（ストリートが実際より先に進む = ハンドログが壊れる）
-- Priority: P1（ADR-0042 の初回実機通しで発覚）
+- Priority: P1（ADR-0053 の初回実機通しで発覚）
 
 ## Area
 
@@ -48,7 +48,7 @@ board reader を 2 台以上、**磁界が重なる間隔**で並べ、その重
 
 ## Root Cause
 
-2 つの実装ミスが重なっている。どちらも ADR-0042（board 全台で 1 論理ボード）の実装時に入れた。
+2 つの実装ミスが重なっている。どちらも ADR-0053（board 全台で 1 論理ボード）の実装時に入れた。
 
 ### (a) 既に位置を持つ UID を再割り当てしていた
 
@@ -73,7 +73,7 @@ if index is None or index in taken:      # ← uid 自身の位置も taken に�
 
 デバウンス（`_last_uids`）は **reader ごと**に持つ。これは正しい（`RFIDEvent.reader_id` は
 reader 単位の情報）。1 枚が 2 台の磁界に入っていれば、2 台それぞれが「新しく増えた UID」として
-1 回ずつ発火する = **同じ UID で 2 イベント**が正常に起こり得る。ADR-0042 の位置モデルは
+1 回ずつ発火する = **同じ UID で 2 イベント**が正常に起こり得る。ADR-0053 の位置モデルは
 UID をキーにしているので、これは本来 **無害**（同じ位置を返して engine が上書きするだけ）
 であるべきだった。
 
@@ -109,5 +109,5 @@ UID をキーにしているので、これは本来 **無害**（同じ位置�
 
 ## Related
 
-- ADR-0042 / ISSUE-0024（board を 1 論理ボードにした変更。本 issue はその実装バグ）
+- ADR-0053 / ISSUE-0024（board を 1 論理ボードにした変更。本 issue はその実装バグ）
 - 契約 `docs/contracts/rfid-usb-ccid.md` v1.3 §4

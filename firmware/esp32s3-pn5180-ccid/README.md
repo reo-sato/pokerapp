@@ -5,7 +5,7 @@ ESP-IDF firmware。host 側の pokerapp（`rfid/reader_thread.py` 等）が PC/S
 `tools/probe_pcsc.py` でそのまま検証できる。
 
 - **契約（正準）**: [`../../docs/contracts/rfid-usb-ccid.md`](../../docs/contracts/rfid-usb-ccid.md) **v1.2**
-  （v1.2 = CCID slot は 1 つ / 物理リーダーは Get UID の P2, ADR-0041。v1.1 = 重ね置きの UID 連結）
+  （v1.2 = CCID slot は 1 つ / 物理リーダーは Get UID の P2, ADR-0052。v1.1 = 重ね置きの UID 連結）
 - **実装チェックリスト**: [`../../docs/rfid-ccid-firmware-checklist.md`](../../docs/rfid-ccid-firmware-checklist.md)
 - **host 側検証手順**: [`../../docs/hardware-qa-checklist.md`](../../docs/hardware-qa-checklist.md)
 
@@ -52,7 +52,7 @@ idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB
 
 ## アーキテクチャ（実機: 本番 11 reader / CCID slot は 1 つ / 配線は 13 台ぶん + CD74HC4067 MUX）
 
-- **CCID slot は常に 1 つ、物理リーダーは Get UID の P2 で選ぶ**（契約 **v1.2 §6** / ADR-0041）。
+- **CCID slot は常に 1 つ、物理リーダーは Get UID の P2 で選ぶ**（契約 **v1.2 §6** / ADR-0052）。
   Windows の汎用 CCID ドライバは **1 インターフェースにつき 1 slot しか reader として公開しない**
   （実機 2026-09-10: `CCID_SLOT_COUNT=2` で焼いても `PokerRFID PN5180-CCID 1` は `Reader not found`）。
   slot ごとに USB インターフェースを分ける手も ESP32-S3 の USB endpoint 6 本（双方向 5 + IN 1）では
@@ -75,7 +75,7 @@ idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB
 - **bring-up は `PN5180_READER_COUNT=1` で 1 台検証 → 動いたら 11 に上げる**（`app_config.h` の
   `PN5180_READERS` は 13 台分定義済み）。1 台検証中は起動時の **MUX 全 ch 走査で通電中の ch を自動選択**
   するので、どのコネクタに挿しても再ビルド不要（`pn5180_reader.c: select_bringup_reader`）。
-- **CCID slot は仮想カード常時挿入（ADR-0040）**: `IccPowerOn` には常に固定 ATR を返し、カード有無は
+- **CCID slot は仮想カード常時挿入（ADR-0051）**: `IccPowerOn` には常に固定 ATR を返し、カード有無は
   Get UID の SW（あり `90 00`+UID / なし `6A 81`）だけで伝える。Windows(usbccid) は interrupt-IN の挿抜通知を
   無視し、無ければ polling もせず bind 時の IccPowerOn しか送らないため（実機で確定）。interrupt-IN は
   `CCID_USE_INTERRUPT_EP=0` で記述子から外してある（EP 構成を変えたら `bcdDevice` を上げる）。
@@ -230,7 +230,7 @@ python tools/probe_pcsc.py watch     # カードをかざすと UID 表示 → �
 - live hot-add（稼働中の USB 再列挙追従）は契約上も v1.0 対象外。
 - ATR / dwFeatures は一般的な非接触リーダー値。host は ATR 非依存だが Windows の bind 検証は実機で。
 - 複数 reader は配線・ピン拡張が前提（`app_config.h` の `PN5180_READERS` を台数ぶん用意）。
-- **CCID multi-slot は使えない**（Windows の汎用ドライバが 1 slot しか公開しない, ADR-0041）。
+- **CCID multi-slot は使えない**（Windows の汎用ドライバが 1 slot しか公開しない, ADR-0052）。
   pcsc-lite など multi-slot を扱える環境でも、契約 v1.2 は P2 方式で統一する。
 - **ドライバ制約（重要）**: `pn5180_spi_init()` が add する SPI device は **全 reader で 1 本の共有**で、
   `pn5180_init()` の失敗経路はその共有ハンドルを `spi_bus_remove_device` で解放し **`pn5180_spi_t` も

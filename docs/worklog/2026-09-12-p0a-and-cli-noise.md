@@ -2,7 +2,7 @@
 
 ## Goal
 
-ADR-0045 の **P0a** を実施し、併せて実機テスト中に判明した CLI の操作不能を直す。
+ADR-0056 の **P0a** を実施し、併せて実機テスト中に判明した CLI の操作不能を直す。
 
 ## P0a — RFID の「カード検出」を actor 証拠から外す（ISSUE-0033）
 
@@ -88,5 +88,5 @@ python -m pytest tests/ -q --ignore=tests/test_vision.py
 
 ## Related
 
-- ADR-0045（P0a）/ ISSUE-0033 / ISSUE-0034 / ISSUE-0032（次）
+- ADR-0056（P0a）/ ISSUE-0033 / ISSUE-0034 / ISSUE-0032（次）
 - ADR-0009 §4（置き換えた優先順位の出所）/ ISSUE-0009

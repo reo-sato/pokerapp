@@ -1,9 +1,9 @@
 # 実機 RFID QA チェックリスト（PC/SC canonical, Phase H）
 
-実機の **ESP32-S3 + PN5180（USB CCID → PC/SC, canonical, ADR-0015/0034/0041）** を接続して、
+実機の **ESP32-S3 + PN5180（USB CCID → PC/SC, canonical, ADR-0015/0034/0052）** を接続して、
 RFID 経路を `docs/contracts/rfid-usb-ccid.md` **v1.2** の MUST に対して bring-up 確認する手順。
 
-- **v1.2（ADR-0041）**: PC/SC の reader（CCID slot）は **1 つだけ**で、物理リーダー 11 台
+- **v1.2（ADR-0052）**: PC/SC の reader（CCID slot）は **1 つだけ**で、物理リーダー 11 台
   （席 8 + board 3）は **Get UID の P2**（config の `reader` 0..10）で選ぶ。よって手順 1 で見える
   reader_name は **1 個が正常**。
 - **v1.1**: 1 台のリーダーに複数枚重ね置き（席 2 枚 / flop 3 枚）。
@@ -36,7 +36,7 @@ pip install ".[pcsc]"          # pyscard（PC/SC canonical 経路に必須）
 python tools/probe_pcsc.py list
 ```
 
-- **期待**: 接続中の PC/SC reader_name が **1 個だけ**並ぶ（v1.2: CCID slot は 1 つ, 契約 §3 / ADR-0041。
+- **期待**: 接続中の PC/SC reader_name が **1 個だけ**並ぶ（v1.2: CCID slot は 1 つ, 契約 §3 / ADR-0052。
   物理リーダーが 11 台でも reader 名は 1 個）。その行に `physical readers: N`（firmware が
   `FF CA 00 FF 00` に返した台数）が出る。下段に config との突き合わせ
   （`matched` / `MISSING` / `unconfigured`）が `(name, reader)` 単位で並ぶ。
@@ -72,7 +72,7 @@ python tools/probe_pcsc.py list
 ```
 
 本番は **物理 11 台**（席 8 + board 3）で、**reader 名は 1 つ**・`reader`（Get UID の P2）で台を選ぶ
-（契約 v1.2 §4 / ADR-0041）。board は 1 台 = 1 枚ではなく、flop の 3 枚を 1 台に重ねて置く
+（契約 v1.2 §4 / ADR-0052）。board は 1 台 = 1 枚ではなく、flop の 3 枚を 1 台に重ねて置く
 （`cards`, 契約 v1.1 §4）。席リーダーは 2 枚重ねでも `cards` を書かない（hole card は位置を持たない）。
 
 ```bash
@@ -183,7 +183,7 @@ python main.py --cli           # 起動ログに "RFID pyscardスレッド起動
 ## 実環境で確定して契約へ追記すべき項目（ISSUE-0015 / ISSUE-0022 残）
 
 - firmware の **VID/PID** と **実 reader_name** は §2/§4 に追記済（2026-06-22 実機, Windows）。
-- **物理リーダーの段階検証（ISSUE-0022 / ADR-0041）**: 1 台 → **2 台**（`reader` 0/1 で `[r0]`/`[r1]` が
+- **物理リーダーの段階検証（ISSUE-0022 / ADR-0052）**: 1 台 → **2 台**（`reader` 0/1 で `[r0]`/`[r1]` が
   出るか）→ **11 台**（席 8 + board 3）の順に手順1-5 を回す。11 台では poll 1 周（1 接続 × 11 APDU）の
   所要時間を計測し、`poll_interval_ms` を決める（ISSUE-0021）。
 - live hot-add（稼働中の reader 追加追従）は future（起動時 connect のみ。v1.2 の持続接続は

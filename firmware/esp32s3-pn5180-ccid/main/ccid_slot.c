@@ -12,7 +12,7 @@
 //
 // host(rfid/bridge.py)が依存するのは「XfrBlock に FF CA 00 <k> 00 → UID + 90 00」だけ（§6）。
 // ⚠ **CCID slot は常に 1 つ**（Windows の汎用 CCID ドライバは 1 インターフェース 1 slot しか
-//    公開しない）。11 台の物理リーダーは **P2 = reader index k** で選ぶ（契約 v1.2 / ADR-0041）。
+//    公開しない）。11 台の物理リーダーは **P2 = reader index k** で選ぶ（契約 v1.2 / ADR-0052）。
 //    台数問い合わせは `FF CA 00 FF 00` → `<N> 90 00`、範囲外の k は `6A 86`。
 // ⚠ 重ね置き対応: 1 reader に複数枚あるときは UID を uid_len byte ごとに連結して返す
 //    （例: 8B × 2 枚 = 16 byte + 90 00）。host 側は応答長から枚数を割り出して分割する必要がある。
@@ -63,8 +63,8 @@ static bool s_notified_present[CCID_SLOT_COUNT];   // 最後に host へ通知�
 static bool s_snapshot_present[CCID_SLOT_COUNT];   // build_notify 時点の present（commit で反映）
 
 // CCID slot（常に 1 つ）の present。物理 reader は N 台あるので **1 台でもカードがあれば
-// present** とする（契約 v1.2 / ADR-0041: どの reader にあるかは Get UID の P2 で問い合わせる）。
-// CCID_VIRTUAL_CARD_ALWAYS_PRESENT=1（既定, ADR-0040）ではこの関数は使われない。
+// present** とする（契約 v1.2 / ADR-0052: どの reader にあるかは Get UID の P2 で問い合わせる）。
+// CCID_VIRTUAL_CARD_ALWAYS_PRESENT=1（既定, ADR-0051）ではこの関数は使われない。
 static bool slot_present(uint8_t slot) {
     if (slot >= CCID_SLOT_COUNT) return false;
     for (uint8_t k = 0; k < PN5180_READER_COUNT; k++) {
@@ -117,7 +117,7 @@ static size_t put_header(uint8_t *out, uint8_t type, uint32_t data_len,
 // XfrBlock 内の APDU を処理して応答(データ+SW)を resp に書き、長さを返す。
 // Get UID(FF CA 00 <k> 00)のみ実装。他は未対応 SW を返す。
 //
-// ── 契約 v1.2 §6 / ADR-0041: **物理 reader は P2 (=apdu[3]) で選ぶ** ──
+// ── 契約 v1.2 §6 / ADR-0052: **物理 reader は P2 (=apdu[3]) で選ぶ** ──
 // Windows の汎用 CCID ドライバは 1 インターフェースにつき 1 slot しか公開しないので、CCID slot は
 // 常に 1 つ（CCID_SLOT_COUNT=1）にして、11 台の物理リーダーは pseudo-APDU の P2 で指定する。
 //   FF CA 00 <k> 00  (k = 0..PN5180_READER_COUNT-1) → reader k の UID 連結 + 90 00 / 無しは 6A 81

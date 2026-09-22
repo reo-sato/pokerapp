@@ -3,7 +3,7 @@
 ESP32-S3（PN5180 ×N）firmware を **USB CCID smart card reader** として host PC に公開し、
 本アプリ（hand logger）が PC/SC 経由で UID を読めるようにするための **firmware 実装者向け**チェックリスト。
 
-- **正準（normative）は契約** `docs/contracts/rfid-usb-ccid.md` **v1.2**（ADR-0015/0034/0041）。本書はそれを
+- **正準（normative）は契約** `docs/contracts/rfid-usb-ccid.md` **v1.2**（ADR-0015/0034/0052）。本書はそれを
   firmware 実装の手順に落とした **implementer's guide**。MUST/SHOULD の意味は契約に従う（食い違いは契約優先）。
 - **ホスト側（Python / pyscard）は実装・テスト済み**（`rfid/bridge.py` の Get UID、`rfid/reader_thread.py` の
   polling/debounce、`rfid/card_master.py` の UID 正規化、回帰 `tests/test_rfid.py`）。**本チェックリストを
@@ -42,7 +42,7 @@ ESP32-S3（PN5180 ×N）firmware を **USB CCID smart card reader** として ho
 **受け入れ**: `probe_pcsc list` の reader_name に product 文字列（例 `PN5180-CCID [Interface 0]`）が出る。
 **確定したら**: 実 **VID/PID** と **実 reader_name** を契約 `rfid-usb-ccid.md` §2/§4 に追記（ISSUE-0015 残作業）。
 
-## 2. CCID slot は 1 つ / 物理リーダーは Get UID の P2（契約 v1.2 §3, ADR-0041）
+## 2. CCID slot は 1 つ / 物理リーダーは Get UID の P2（契約 v1.2 §3, ADR-0052）
 
 - [ ] **CCID slot は 1 つだけ**（`bMaxSlotIndex = 0`）。**CCID multi-slot は使わない**。
       Windows の汎用 CCID ドライバ（usbccid）は **1 インターフェースにつき 1 slot しか reader として
@@ -67,7 +67,7 @@ ESP32-S3（PN5180 ×N）firmware を **USB CCID smart card reader** として ho
 - [ ] ATR は card-type ごとに **安定**（同一カード種別で毎回同じ, SHOULD）。
 - [ ] **host は ATR の中身を解釈しない**（forward-compat）。connect さえ成立すればよい。凝らなくてよい。
 - [ ] **IccPowerOn には常に ATR を返す**（物理カード無しでも）。Windows は bind 直後に IccPowerOn ×3 を送り、
-      `ICC_MUTE` を返すと再列挙まで「無応答（0x80100066）」を latch する（ADR-0040）。
+      `ICC_MUTE` を返すと再列挙まで「無応答（0x80100066）」を latch する（ADR-0051）。
 - [ ] `Parameters` 応答は `bProtocolNum` と整合させる（T=1 は 7 byte / T=0 は 5 byte）。
 - [ ] ATR 受理後に Windows が送る探索 APDU（`00 A4 04 00 …` / `00 CA 7F 68 00`）には `6D 00` でよい。
 
@@ -102,7 +102,7 @@ ESP32-S3（PN5180 ×N）firmware を **USB CCID smart card reader** として ho
 
 ## 6. card present/removed・hot-plug・切断（契約 §8）
 
-- [ ] CCID の slot 状態は **常時 present** でよい（推奨・Windows では必須, ADR-0040）。カード有無は
+- [ ] CCID の slot 状態は **常時 present** でよい（推奨・Windows では必須, ADR-0051）。カード有無は
       **Get UID の SW だけ**で伝え、カード無しで `90 00`+UID を返さないこと
       （host は UID の有無で検出。デバウンスは host 側 = 同一 UID 連続は 1 回、外す→再タップで再発火）。
 - [ ] **interrupt-IN endpoint は載せない**（Windows が `NotifySlotChange` を無視した実績。host は polling）。
@@ -126,7 +126,7 @@ ESP32-S3（PN5180 ×N）firmware を **USB CCID smart card reader** として ho
 1 台の bring-up が済んだあと、PN5180 を **11 台**（席 8 + board 3: board1 = flop 3 枚重ね /
 board2 = turn / board3 = river）に増やすときの追加要件。配線ハーネスと firmware の配線表は
 13 台ぶんあるが、本番で有効化するのは先頭 11。**増やすのは物理 reader 台数だけ**で、
-USB 上の CCID slot は 1 つのまま（§2 / ADR-0041）＝ **USB 記述子は変わらない**。
+USB 上の CCID slot は 1 つのまま（§2 / ADR-0052）＝ **USB 記述子は変わらない**。
 
 - [ ] **1 reader あたりの inventory は 1 回に絞る**（ISSUE-0021）。ドライバの `get_all_uids()` は
       RF 設定 2 種（ASK10/ASK100）× データレート 2 種（high/low）を毎回総当たりし、しかも

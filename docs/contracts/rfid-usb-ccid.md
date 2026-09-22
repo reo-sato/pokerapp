@@ -1,14 +1,14 @@
 # RFID USB CCID firmware ↔ host (PC/SC) contract
 
-**version: 1.4 (ADR-0043。1.0 frozen 起点、以降は additive)** ／ canonical RFID transport（ADR-0015）の
+**version: 1.4 (ADR-0054。1.0 frozen 起点、以降は additive)** ／ canonical RFID transport（ADR-0015）の
 firmware↔Python 境界。v1.1 の追加点（1 reader 複数枚の Get UID 連結 / UID MSB-first）、
 **v1.2 の変更点（CCID slot は 1 つだけ / 物理リーダーは Get UID の P2 で選ぶ / 台数問い合わせ）**、
 **v1.3 の変更点（board reader 全台で 1 つの論理ボードを共有し、位置は検出順で決める =
 board の `index` / `cards` を廃止）**、**v1.4 の追加点（ミスディール訂正 = 明示コマンドでの位置解放）**
 は §10 を参照。v1.2 は「slot ごとに reader 名を分ける」規約を
 廃止し（Windows の汎用 CCID ドライバが 1 インターフェース 1 slot しか公開しないため。ISSUE-0022 /
-ADR-0041）、v1.3 は「board reader = ストリート専用」という前提を廃止する（実機は board reader が
-並んでいるだけで、どの台がどのストリートを受けるかは置き方次第。ISSUE-0024 / ADR-0042）。
+ADR-0052）、v1.3 は「board reader = ストリート専用」という前提を廃止する（実機は board reader が
+並んでいるだけで、どの台がどのストリートを受けるかは置き方次第。ISSUE-0024 / ADR-0053）。
 **firmware 側の要求は v1.0 から一つも変わっていない**（firmware は UID を返すだけで役割・位置を
 知らない）。Get UID の `P2=0`・UID 正規化・デバウンスも v1.0/1.1 と同一なので **1 台構成の挙動は不変**。
 
@@ -34,7 +34,7 @@ HTTP 経路（`rfid/http_receiver.py`, ADR-0015 で optional secondary）は本�
 ```
 
 - firmware は PN5180 ×N を **1 つの USB CCID device の 1 slot**（reader_name 1 個）として公開し、
-  **物理リーダー k（0..N-1）は Get UID pseudo-APDU の P2 で選ばせる**（v1.2, §3/§6, ADR-0041）。
+  **物理リーダー k（0..N-1）は Get UID pseudo-APDU の P2 で選ばせる**（v1.2, §3/§6, ADR-0052）。
 - host は OS 標準 PC/SC スタック越しに **pyscard** でその reader を列挙し、1 本の接続に
   N 個の Get UID を流して全リーダーを読む。WiFi/HTTP 不要。
 
@@ -49,7 +49,7 @@ HTTP 経路（`rfid/http_receiver.py`, ADR-0015 で optional secondary）は本�
   マッチ対象になるため **安定**（ファーム更新で変えない）**MUST**。
   - **確定値**: `manufacturer=PokerRFID`、`product=PN5180-CCID`（Windows PC/SC は `<manufacturer> <product> <slot index>` の体裁で描画 → §4 reader_name 参照）。
 - **serial 文字列**: device 単位で安定 **SHOULD**（複数台運用時の識別。reader_name に現れうる）。
-- **endpoint 構成（2026-09-10 実機で確定, ADR-0040）**: bulk OUT + bulk IN の **2 本のみ**とし、
+- **endpoint 構成（2026-09-10 実機で確定, ADR-0051）**: bulk OUT + bulk IN の **2 本のみ**とし、
   interrupt-IN（`RDR_to_PC_NotifySlotChange`）は載せない **SHOULD**。Windows(usbccid) は interrupt-IN が
   あると通知を読み取っても slot 状態に反映せず、無くても `GetSlotStatus` を polling しない（カード有無は
   §8 の方式で伝える）。記述子の EP 構成を変えるときは `bcdDevice` を上げる（Windows は VID/PID/REV で
@@ -62,7 +62,7 @@ HTTP 経路（`rfid/http_receiver.py`, ADR-0015 で optional secondary）は本�
 ## 3. CCID slot は 1 つだけ / 物理リーダーは P2 で選ぶ（firmware MUST / host MUST, v1.2）
 
 - firmware は PN5180 が何台でも **CCID slot を 1 つだけ**公開する **MUST**（`bMaxSlotIndex=0`）。
-  **理由（実機で確定, ISSUE-0022 / ADR-0041）**: Windows の Microsoft 汎用 CCID ドライバ（usbccid）は
+  **理由（実機で確定, ISSUE-0022 / ADR-0052）**: Windows の Microsoft 汎用 CCID ドライバ（usbccid）は
   **1 インターフェース 1 slot** しかサポートせず、`bMaxSlotIndex=1` にしても PC/SC には
   `PokerRFID PN5180-CCID 0` しか現れない（`… 1` は "Reader not found"）。slot ごとに USB
   インターフェースを分ける回避策は ESP32-S3 の USB endpoint が 6 本しかなく最大 5 台までで、
@@ -104,7 +104,7 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
   1 台構成の v1.0/1.1 の config はそのまま動く。**`(name, reader)` の組が一意**であること **MUST**
   （v1.1 までの「`name` が一意」は廃止 — reader 名は 1 つだけになったため `name` は重複するのが正常）。
   255（`0xFF`）は台数問い合わせ用に予約（§6）。`probe_pcsc check` が範囲・重複を検出する。
-- **board は全台で 1 つの論理ボード（v1.3, ADR-0042）**。物理配置は「ボード領域に board reader が
+- **board は全台で 1 つの論理ボード（v1.3, ADR-0053）**。物理配置は「ボード領域に board reader が
   N 台並んでいるだけ」で、どの台がどのストリートを受けるかは **置き方次第**（flop 3 枚が 3 台に
   散ることも、真ん中の 1 台に 2 枚載ることもある）。よって位置は reader 単位に固定できない。
 - **位置割り当て規則（host, v1.3）**: `RFIDEvent.board_index`（1..5）は **board reader 全台を
@@ -124,7 +124,7 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
   別位置を取って「同じ札が 2 か所」「枚数の水増しでストリートが誤って進む」が起きる。
   席 reader の抜き差しは board に影響しない。
 - **位置割り当ての解放は「新ハンド」と「明示のミスディール訂正」だけ** **MUST**
-  （ISSUE-0026 / ADR-0043）。どちらも位置と board reader のデバウンス状態をまとめて落とす
+  （ISSUE-0026 / ADR-0054）。どちらも位置と board reader のデバウンス状態をまとめて落とす
   （盤上に残っているカードは改めて検出し直す）。
   - **新ハンド**（全位置）: 運用手順は「ハンドが終わったらボードを下げて新ハンド」。
   - **ミスディール訂正**（1 位置だけ）: `RFIDThread.forget_board_position(index)` /
@@ -164,7 +164,7 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 - ATR は card-type ごとに **安定** **SHOULD**（同一カード種別で毎回同じ）。
 - **host は UID 読み取りに特定 ATR バイトを前提にしない**（forward-compat）**MUST**。host は connect 成功後に
   §6 の Get UID pseudo-APDU のみで UID を取得する（`rfid/bridge.py` は ATR を解釈しない）。
-- **power-on は常に成功させる（firmware MUST, 2026-09-10 追記, ADR-0040）**: Windows(usbccid) は bind 直後に
+- **power-on は常に成功させる（firmware MUST, 2026-09-10 追記, ADR-0051）**: Windows(usbccid) は bind 直後に
   `PC_to_RDR_IccPowerOn` を送り、`ICC_MUTE` を返すとカードを「無応答（`0x80100066`）」として latch し
   再列挙まで再試行しない。よって firmware は物理カードの有無に関わらず IccPowerOn に固定 ATR を返す
   （slot は常時 present, §8）。ATR 受理後に OS がカード種別探索の APDU（`00 A4 04 00 …` SELECT AID /
@@ -216,7 +216,7 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 
 ## 8. hot-plug / 再列挙 / multi-platform
 
-- **接続は reader 名ごとに 1 本を持続してよい（host, v1.2）**: slot は常時 present（ADR-0040）なので、
+- **接続は reader 名ごとに 1 本を持続してよい（host, v1.2）**: slot は常時 present（ADR-0051）なので、
   host は poll ごとに `SCardConnect/Disconnect` を繰り返さず、**reader_name につき 1 本の接続を保持**して
   そこに N 個の Get UID を流す（`rfid/bridge.py` の共有接続 + transmit の直列化）。firmware から見ると
   `IccPowerOn/Off` の往復が消え、11 台ぶんの poll が 1 接続の APDU 列になる。transmit が失敗したら
@@ -227,7 +227,7 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
   UID の有無で検出する（`RFIDThread`。同一 UID 連続はデバウンスで 1 回, 外れ→再タッチで再発火）。**カード有無は
   Get UID の SW だけで伝える**（あり: UID + `90 00` / なし: `6A 81` 等）**MUST**。host は CCID の slot 状態
   （bmICCStatus / NotifySlotChange）に依存しないため、firmware は slot を **常時 present** として公開してよい
-  （**推奨・Windows では必須**, ADR-0040: 物理有無を slot 状態に反映すると Windows が bind 時に MUTE を
+  （**推奨・Windows では必須**, ADR-0051: 物理有無を slot 状態に反映すると Windows が bind 時に MUTE を
   latch する）。**カード無しで Get UID が `90 00`+UID を返さない**ことが唯一の不変条件 **MUST**。
 - **デバウンスは UID 単位（host, v1.1）**: host は reader ごとに「現在載っている UID の**集合**」を保持し、
   poll ごとに **増えた UID だけ** `RFIDEvent` を 1 件ずつ出す（2 枚同時に置けば 2 件）。減った UID は
@@ -252,7 +252,7 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 
 ## 10. versioning / freeze
 
-- **v1.4（2026-09-12, ADR-0043）** — **ミスディール訂正**（additive, §4）。ハンド内 append-only
+- **v1.4（2026-09-12, ADR-0054）** — **ミスディール訂正**（additive, §4）。ハンド内 append-only
   （v1.3 / ISSUE-0026）は「カードが見えなくなっただけでは位置を解放しない」規則だが、実運用では
   **一度読ませた札を外して正しい札を読ませ直す**（ミスディール）ことがある。absence は一瞬の読み落ちと
   区別できないので **推測で解放してはならない** MUST。代わりに **host の明示コマンド**で解放する:
@@ -263,7 +263,7 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 - 本契約は **v1.0 frozen**（ADR-0034）。後方互換な追加（新 pseudo-APDU、ATR 種別追加、live hot-add）は
   **minor bump**（1.1, 1.2…）。reader_name 規約・Get UID・UID 正規化の **意味変更は breaking（major）**。
 - firmware の確定値（VID/PID、実 reader_name）は確定し次第 §2/§4 に追記する（host コードは変更不要 = 契約安定）。
-- **v1.3（2026-09-11, ADR-0042 / ISSUE-0024）** — **board reader 全台で 1 つの論理ボードを共有し、
+- **v1.3（2026-09-11, ADR-0053 / ISSUE-0024）** — **board reader 全台で 1 つの論理ボードを共有し、
   位置は検出順で決める**。v1.1 §4 は board reader を「ストリート専用」とし、`index`（先頭ボード位置）
   \+ `cards`（その台に重ねる枚数）を config に書かせていたが、**実機の配置はボード領域に board reader が
   並んでいるだけ**で、どの台がどのカードを受けるかは置き方次第（flop の 2・3 枚目は真ん中の台の方が
@@ -282,7 +282,7 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
     `_warn_obsolete_board_fields`）/ `tools/probe_pcsc.py`（lint 差し替え・config ラベルは位置なし・
     event ラベルは実位置）/ `config_default.json`（board 3 件から `index`/`cards` を削除）。
     回帰テスト: `tests/test_rfid.py::TestBoardGroupPositions`。
-- **v1.2（2026-09-10, ADR-0041 / ISSUE-0022）** — **CCID slot は 1 つだけ、物理リーダーは Get UID の
+- **v1.2（2026-09-10, ADR-0052 / ISSUE-0022）** — **CCID slot は 1 つだけ、物理リーダーは Get UID の
   P2 で選ぶ**。Windows の Microsoft 汎用 CCID ドライバが 1 インターフェース 1 slot しか公開しないことが
   実機で確定したため（`bMaxSlotIndex=1` にしても `… 1` は "Reader not found"）、multi-slot による
   11 台公開を諦め、reader は 1 つのまま P2 で切り替える。**Get UID の意味（P2=0）・UID・デバウンス・
@@ -296,7 +296,7 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
   - host 実装: `rfid/bridge.py`（`get_uid_apdu` / 共有持続接続 / `query_reader_count` / `6A86` WARN）/
     `rfid/reader_thread.py`（config `reader` → factory）/ `tools/probe_pcsc.py`（lint・`list` の台数表示・
     `check` の SW 判定・`raw --reader`・`watch` の `[rk]`）/ `tools/register_cards.py`（`--reader` で
-    config 要素を選択）/ `config_default.json`（11 件・同一 name・`reader` 0..10）。firmware は ADR-0041。
+    config 要素を選択）/ `config_default.json`（11 件・同一 name・`reader` 0..10）。firmware は ADR-0052。
 - **v1.1（2026-09-10, additive）** — 1 reader に複数枚を重ねて置く運用（席 = hole card 2 枚 /
   board1 = flop 3 枚）に対応。v1.0 の要求は一つも変更していない（1 枚運用の挙動は同一）:
   1. **Get UID の複数 UID 連結**（§6）: 8B UID × k 枚（k ≤ 4, UID 昇順）+ `90 00`。host は応答長
@@ -314,8 +314,8 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 
 - **`docs/rfid-ccid-firmware-checklist.md`** — 本契約の MUST を ESP32-S3 firmware 実装手順に落とした
   implementer's guide（各項目を `tools/probe_pcsc.py` で受け入れ確認）。
-- ADR-0015（PC/SC canonical）/ ADR-0034（本契約 freeze）/ ADR-0040（slot 常時 present）/
-  **ADR-0041（1 slot + Get UID の P2 で物理リーダー選択 = v1.2）** /
+- ADR-0015（PC/SC canonical）/ ADR-0034（本契約 freeze）/ ADR-0051（slot 常時 present）/
+  **ADR-0052（1 slot + Get UID の P2 で物理リーダー選択 = v1.2）** /
   ISSUE-0015（本契約の出所）/ ISSUE-0021（複数枚 anti-collision + poll 周期。v1.1 の firmware 側）/
   **ISSUE-0022（Windows usbccid の single-slot 制限 = v1.2 の出所）**
 - `rfid/bridge.py`（Get UID / UID 正規化）/ `rfid/reader_thread.py`（pcsc_readers / polling / debounce）

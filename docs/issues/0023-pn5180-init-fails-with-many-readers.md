@@ -251,7 +251,7 @@ PN5180 ready: 10/11 reader（skip: #10(ch10)）
 
 ## Related ADRs
 
-- `docs/adr/0041-physical-reader-index-via-get-uid-p2.md`（11 台を 1 slot + P2 で扱う前提）
+- `docs/adr/0052-physical-reader-index-via-get-uid-p2.md`（11 台を 1 slot + P2 で扱う前提）
 
 ## Related Issues
 

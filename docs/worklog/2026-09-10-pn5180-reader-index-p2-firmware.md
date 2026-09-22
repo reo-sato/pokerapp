@@ -1,4 +1,4 @@
-# Worklog: CCID slot を 1 つに固定し、物理リーダーを Get UID の P2 で選ぶ（firmware 側, 契約 v1.2 / ADR-0041）
+# Worklog: CCID slot を 1 つに固定し、物理リーダーを Get UID の P2 で選ぶ（firmware 側, 契約 v1.2 / ADR-0052）
 
 ## Date
 
@@ -6,9 +6,9 @@
 
 ## Scope / Task
 
-実機で判明した **Windows の CCID multi-slot 制限**を受けた設計変更（ADR-0041 / 契約 v1.2）の
+実機で判明した **Windows の CCID multi-slot 制限**を受けた設計変更（ADR-0052 / 契約 v1.2）の
 **firmware 側**の実装。`firmware/esp32s3-pn5180-ccid/` と firmware 向け docs のみを担当し、
-host 側（`rfid/` / `tools/` / `tests/` / 契約本体 / ADR-0041 / ISSUE-0022 など）は別作業が同時進行。
+host 側（`rfid/` / `tools/` / `tests/` / 契約本体 / ADR-0052 / ISSUE-0022 など）は別作業が同時進行。
 
 ## 背景（実機で確定）
 
@@ -19,7 +19,7 @@ host 側（`rfid/` / `tools/` / `tests/` / 契約本体 / ADR-0041 / ISSUE-0022 
 - 「slot ごとに USB インターフェースを分ける」回避策は、**ESP32-S3 の USB endpoint が 6 本**
   （双方向 5 + IN 1）なので **最大 5 台**にしかならず、本番 11 台（席 8 + board 3）に届かない。
 - → **CCID slot は常に 1 つ**にして、**物理リーダーは Get UID の P2（reader index）で選ぶ**
-  （契約 v1.2 §6 / ADR-0041）。
+  （契約 v1.2 §6 / ADR-0052）。
 
 ## Goal
 
@@ -28,7 +28,7 @@ host 側（`rfid/` / `tools/` / `tests/` / 契約本体 / ADR-0041 / ISSUE-0022 
   0 枚は `6A 81`、`k >= N` は `6A 86`。**k=0 は従来と同一バイト列**（後方互換）。
 - `FF CA 00 FF 00` → `<N>`（1 byte = 物理 reader 数）+ `90 00`。
 - 物理 reader 台数は `PN5180_READER_COUNT`（既定 11）で、CCID slot 数とは独立。
-- ATR / slot 状態（常時 present, ADR-0040）/ Parameters / UID の並び・向きは**不変**。
+- ATR / slot 状態（常時 present, ADR-0051）/ Parameters / UID の並び・向きは**不変**。
 
 ## Changed Files
 
@@ -75,7 +75,7 @@ docs（担当分）:
   `FF CA 00 FF 00` / 未通電 index は `6A 81` を追加、§8 と受け入れマトリクスを
   `PN5180_READER_COUNT` / `physical readers: N` に更新、§0/§1/§3 の文言も 1 slot 前提に修正。
 - `docs/issues/0021-pn5180-poll-cycle-latency.md` — 冒頭に「本 issue の slot は物理 reader index を
-  指す（ADR-0041 / v1.2 で用語が分離した）」の注記。
+  指す（ADR-0052 / v1.2 で用語が分離した）」の注記。
 - 本 worklog。
 
 ## Expected Behavior
@@ -86,7 +86,7 @@ docs（担当分）:
   範囲内だが未通電/カード無しは `6A 81`。
 - 物理 reader 台数を 1 → 11 に増やしても **USB 記述子は変わらない**（Windows の記述子キャッシュ
   問題が起きない）。
-- ATR・Parameters・slot 常時 present（ADR-0040）・UID の向き（MSB-first）と連結規則（v1.1 §6）は不変。
+- ATR・Parameters・slot 常時 present（ADR-0051）・UID の向き（MSB-first）と連結規則（v1.1 §6）は不変。
 
 ### 追加: coll_pos の安全弁（前タスク ISSUE-0021 実装 A の補強）
 
@@ -195,7 +195,7 @@ CCID ヘッダの slot は常に 0 で送っている（`XfrBlock slot=0 …` �
 - [ ] **11 台の段階 bring-up**（1 → 2 → 11）と `PN5180_SPI_HZ` 1MHz → 5MHz は未消化のまま。
 - [ ] **`RX_COLL_POS` の基準は依然として実機未確認**（安全弁と fallback で保護している）。
       起動後 reader ごと 3 回の `coll_pos=…` INFO で確定する。
-- [ ] host 側（契約 v1.2 本体 / ADR-0041 / `rfid/bridge.py` の P2 対応 / `probe_pcsc` の
+- [ ] host 側（契約 v1.2 本体 / ADR-0052 / `rfid/bridge.py` の P2 対応 / `probe_pcsc` の
       `physical readers` 表示 / config の `reader` フィールド）は**別作業**。firmware と host の
       組み合わせでの通し確認は両方が入ってから。
 - [ ] `CCID_VIRTUAL_CARD_ALWAYS_PRESENT=0` の経路（`slot_present` = いずれかの reader にカード）は
@@ -203,9 +203,9 @@ CCID ヘッダの slot は常に 0 で送っている（`XfrBlock slot=0 …` �
 
 ## Related ADRs
 
-- `docs/adr/0041-*`（別作業で作成中）— CCID slot 1 つ + Get UID P2 = 物理 reader index の設計判断。
+- `docs/adr/0052-*`（別作業で作成中）— CCID slot 1 つ + Get UID P2 = 物理 reader index の設計判断。
 - `docs/adr/0034-rfid-usb-ccid-firmware-host-contract-freeze.md` — 契約 v1.0 の凍結（v1.2 で §3/§6 を改訂）。
-- `docs/adr/0040-ccid-virtual-card-always-present.md` — slot 常時 present / カード有無は SW のみ（不変）。
+- `docs/adr/0051-ccid-virtual-card-always-present.md` — slot 常時 present / カード有無は SW のみ（不変）。
 
 ## Related Issues
 

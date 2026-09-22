@@ -1,4 +1,4 @@
-# ADR-0040: CCID slot は仮想カード「常時挿入」とし、カード有無は Get UID の SW だけで伝える
+# ADR-0051: CCID slot は仮想カード「常時挿入」とし、カード有無は Get UID の SW だけで伝える
 
 ## Status
 

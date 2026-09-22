@@ -50,11 +50,11 @@ pokerkit から見た席順が固定される。ボタン位置という概念�
   actor も系統的にずれる。
 - ポジション名（UTG / BTN / CO …）の解釈が原理的にできない（`position_map` が無い）。
   仕様 §7 が推奨するディーラー発話「BTN、コール」を活かせない。
-- 事後推定（ADR-0045）でも、ボタンが分からないハンドは prior を持てない。
+- 事後推定（ADR-0056）でも、ボタンが分からないハンドは prior を持てない。
 
 ## Fix
 
-**実装済（2026-09-12）**。ADR-0045 の **P0b**:
+**実装済（2026-09-12）**。ADR-0056 の **P0b**:
 
 - `core/positions.py`（新規・純粋ロジック）: `seat_order_from_button` / `next_button` /
   `position_names` / `position_map` / `seat_for_position` / `parse_position`。
@@ -106,5 +106,5 @@ pokerkit から見た席順が固定される。ボタン位置という概念�
 
 ## Related
 
-- ADR-0045（P0b）/ ISSUE-0031 / ADR-0009 §5（未実施の約束）
+- ADR-0056（P0b）/ ISSUE-0031 / ADR-0009 §5（未実施の約束）
 - 仕様 `sprc_v4.docx` FR-05b〜FR-05h / FR-26 / §6.1 / §6.2 / §7

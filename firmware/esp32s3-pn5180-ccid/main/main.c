@@ -3,7 +3,7 @@
 // 構成: esp_tinyusb が native USB(§0) を CCID として公開し、ccid_device.c の app driver が
 // bulk を捌く。別タスクで PN5180 を周期ポーリングして **物理 reader ごと**のカード状態を更新する
 // （USB と RF を分離。host の RFIDThread も同様に polling/debounce する）。
-// CCID slot は 1 つだけで、物理リーダー N 台は Get UID の P2 で選ぶ（契約 v1.2 / ADR-0041）。
+// CCID slot は 1 つだけで、物理リーダー N 台は Get UID の P2 で選ぶ（契約 v1.2 / ADR-0052）。
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -40,7 +40,7 @@ void app_main(void) {
     // （これが無いと別ファイルの強定義がリンクされず TinyUSB の weak スタブが使われる = Code 10）。
     ccid_force_link();
 
-    // slot は常に 1（Windows の汎用 CCID ドライバの制限, ADR-0041）。物理リーダーは Get UID の
+    // slot は常に 1（Windows の汎用 CCID ドライバの制限, ADR-0052）。物理リーダーは Get UID の
     // P2（reader index 0..N-1）で選ぶ。台数は `FF CA 00 FF 00` で host から問い合わせできる。
     ESP_LOGI(TAG, "PN5180 USB CCID reader: %d CCID slot, %d physical reader(s), product='%s'",
              CCID_SLOT_COUNT, PN5180_READER_COUNT, USB_PRODUCT_STR);

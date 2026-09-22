@@ -1,4 +1,4 @@
-# ADR-0042: board reader 全台で 1 つの論理ボードを共有し、位置は検出順で決める
+# ADR-0053: board reader 全台で 1 つの論理ボードを共有し、位置は検出順で決める
 
 ## Status
 
@@ -99,6 +99,6 @@ Accepted
 ## Related
 
 - ISSUE-0024（本 ADR の動機。実機で発覚した配置の取り違え）
-- ADR-0034（契約 v1.0 freeze）/ ADR-0041（1 slot + P2 で 11 台）/ ADR-0040（仮想カード常時挿入）
+- ADR-0034（契約 v1.0 freeze）/ ADR-0052（1 slot + P2 で 11 台）/ ADR-0051（仮想カード常時挿入）
 - ISSUE-0021（poll 周期。`cards` は v1.1 でここから入った）
 - 契約: `docs/contracts/rfid-usb-ccid.md` v1.3 §4

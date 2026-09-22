@@ -236,7 +236,7 @@ def test_hand_control_appends_commands(env: dict, tmp_path: Path):
 
 
 def test_hand_control_misdeal_corrections(env: dict, tmp_path: Path):
-    """ミスディール訂正も同じ control queue で送れる（ADR-0043）。"""
+    """ミスディール訂正も同じ control queue で送れる（ADR-0054）。"""
     from core.control_queue import ControlCommandLog
 
     staff = env["staff"]

@@ -200,7 +200,7 @@ class _StaffControlBody(BaseModel):
     type: str
     seat: int | None = None
     amount: int | None = None
-    index: int | None = None      # correct_board のボード位置 1..5（ADR-0043）
+    index: int | None = None      # correct_board のボード位置 1..5（ADR-0054）
 
 
 class _OidcExchangeBody(BaseModel):

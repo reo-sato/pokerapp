@@ -44,7 +44,7 @@ host / tools / docs:
   connect/Get UID の結果・例外を hresult 付きで時系列表示）。純粋ヘルパ `scard_state_table` /
   `decode_reader_state` / `format_scard_error`。
 - `tests/test_tools_probe_pcsc.py` — `TestRawHelpers`（6 件）+ pyscard ゲートに `_cmd_raw`。
-- `docs/adr/0040-ccid-virtual-card-always-present.md`（新規）、`docs/contracts/rfid-usb-ccid.md` §2/§5/§8、
+- `docs/adr/0051-ccid-virtual-card-always-present.md`（新規）、`docs/contracts/rfid-usb-ccid.md` §2/§5/§8、
   `docs/rfid-ccid-firmware-checklist.md` §3/§6/受け入れ表、`CLAUDE.md`、`CHANGELOG.md`、`docs/decision-log.md`。
 
 ## Expected Behavior
@@ -88,7 +88,7 @@ host / tools / docs:
      3.13 を導入して `py -3.13 -m pip install pyscard`（cp313 wheel）。
    - `watch` → `core.events` → `import numpy` で `ModuleNotFoundError`（numpy は型注釈でしか使っていない）。
    - Windows(usbccid) の slot 状態追跡: interrupt-IN ありでは通知を無視、無しでは polling せず
-     bind 直後の `IccPowerOn ×3` に `ICC_MUTE` を返して `PRESENT|MUTE` を latch（詳細 ADR-0040）。
+     bind 直後の `IccPowerOn ×3` に `ICC_MUTE` を返して `PRESENT|MUTE` を latch（詳細 ADR-0051）。
 6. **Parameters 応答の不整合**: `bProtocolNum=1` と言いつつ T=0 用 5 byte を返していた。
 7. リーダー電源が落ちていた時間帯（MUX scan 全 `1`）— firmware は正しく「通電 ch なし」と報告し USB は維持。
 
@@ -100,7 +100,7 @@ host / tools / docs:
 - 4 → ISO15693 のみ `reverse_bytes`（14443A は元から MSB-first）。
 - 5 → `py -3.13` + pyscard wheel / `core.events` の numpy を `TYPE_CHECKING` ガード /
   `probe_pcsc raw` で OS 状態と hresult を可視化 → interrupt-IN 撤回（`CCID_USE_INTERRUPT_EP=0`）→
-  **仮想カード常時挿入**（`CCID_VIRTUAL_CARD_ALWAYS_PRESENT=1`, ADR-0040）。
+  **仮想カード常時挿入**（`CCID_VIRTUAL_CARD_ALWAYS_PRESENT=1`, ADR-0051）。
 - 6 → T=1 は 7 byte、SetParameters は host 指定の bProtocolNum に追従。
 - 途中の誤診（記述子コメントに「interrupt が無いから watch 0 件」と書いた）は訂正済み。
 
@@ -119,7 +119,7 @@ host / tools / docs:
 
 ## Related ADRs
 
-- `docs/adr/0040-ccid-virtual-card-always-present.md` — 本 worklog の中心的判断
+- `docs/adr/0051-ccid-virtual-card-always-present.md` — 本 worklog の中心的判断
 - `docs/adr/0034-…`（契約 freeze）/ `docs/adr/0015-…`（USB CCID canonical）
 
 ## Related Issues

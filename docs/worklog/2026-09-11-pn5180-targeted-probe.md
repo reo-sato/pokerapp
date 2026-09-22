@@ -222,7 +222,7 @@ root を送らないサイクルでは不要。狙い撃ちが使える reader �
 
 ## Related ADRs
 
-- ADR-0041（1 slot + P2 で 11 台）/ ADR-0040（slot 常時 present）
+- ADR-0052（1 slot + P2 で 11 台）/ ADR-0051（slot 常時 present）
 
 ## Related Issues
 

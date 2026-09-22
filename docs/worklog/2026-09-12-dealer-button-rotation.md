@@ -6,7 +6,7 @@
 
 ## Scope / Task
 
-ADR-0045 の **P0b**。ハンドごとにディーラーボタンを回し、`button_seat` / `position_map` /
+ADR-0056 の **P0b**。ハンドごとにディーラーボタンを回し、`button_seat` / `position_map` /
 `ActionRecord.position` を記録し、ディーラーの**ポジション名の読み上げ**を actor 推定の
 明示証拠として使えるようにする（ISSUE-0032 の解消）。
 
@@ -124,7 +124,7 @@ heads-up の並びは実測で確定した: pokerkit の `create_state` は inde
 
 ## Related ADRs
 
-- `docs/adr/0045-post-hoc-probabilistic-action-history.md` — P0b の出典。
+- `docs/adr/0056-post-hoc-probabilistic-action-history.md` — P0b の出典。
 - `docs/adr/0009-rules-aware-hand-reconstruction.md` §5 — 「BTN 基準の安定全単射」の未実施分。
 
 ## Related Issues

@@ -1,4 +1,4 @@
-# 2026-09-12 — 方針決定: アクション履歴は「事後・確率的」に推定する（ADR-0045）
+# 2026-09-12 — 方針決定: アクション履歴は「事後・確率的」に推定する（ADR-0056）
 
 ## Goal
 
@@ -18,7 +18,7 @@
 2. **Fable 5.1 に設計監査を依頼**。途中で「これは新方針ではなく drift」「仕様は
    `sprc_v4.docx`、読める」という訂正を送り、仕様条文を基準に評価し直させた。
 3. **監査の中核指摘を自分で実測検証**（鵜呑みにしない）。
-4. **ADR-0045 を起こして方針を確定**し、検証できた欠陥を ISSUE-0032 / ISSUE-0033 として起票、
+4. **ADR-0056 を起こして方針を確定**し、検証できた欠陥を ISSUE-0032 / ISSUE-0033 として起票、
    ADR-0033 を Superseded、ADR-0009 に部分置換の追記。
 
 ## 検証した指摘（すべて事実だった）
@@ -31,7 +31,7 @@
 | pokerkit では `advance_street` が no-op | `core/poker_engine.py:141-153` + 実機ログ | 事実（FR-30 のボード枚数トリガーは既に死んでいる） |
 | 生イベント sidecar が既定 off | `config_default.json` | 事実（2026-09-12 の実機セッションは sidecar を残していない） |
 
-## 決めたこと（詳細は ADR-0045）
+## 決めたこと（詳細は ADR-0056）
 
 - **D1** 記録の正本 = 事後推定。ライブは provisional 表示。読み取りは live ⊕ estimate ⊕ corrections。
 - **D2** 推定器 = pokerkit の合法手列に対する**制約付きビーム探索**（決定的 / N-best + 事後周辺確率）。
@@ -53,10 +53,10 @@
 
 | ファイル | 変更 |
 |---------|------|
-| `docs/adr/0045-post-hoc-probabilistic-action-history.md` | 新規（方針） |
+| `docs/adr/0056-post-hoc-probabilistic-action-history.md` | 新規（方針） |
 | `docs/issues/0032-*.md` / `0033-*.md` | 新規（検証済の P0 欠陥 2 件） |
-| `docs/adr/0033-*.md` | Status を **Superseded by ADR-0045** に（本文は保持） |
-| `docs/adr/0009-*.md` | §4/§6 と Alternatives を ADR-0045 が部分置換する旨を追記 |
+| `docs/adr/0033-*.md` | Status を **Superseded by ADR-0056** に（本文は保持） |
+| `docs/adr/0009-*.md` | §4/§6 と Alternatives を ADR-0056 が部分置換する旨を追記 |
 | `CLAUDE.md` / `CHANGELOG.md` / `docs/decision-log.md` | 方針・索引・P0 の明示 |
 
 ## Test results
@@ -77,6 +77,6 @@
 
 ## Related
 
-- ADR-0045 / ISSUE-0031 / 0032 / 0033
-- ADR-0009（部分置換）/ ADR-0033（Superseded）/ ADR-0010・0011（土台）/ ADR-0044（観測の時刻）
+- ADR-0056 / ISSUE-0031 / 0032 / 0033
+- ADR-0009（部分置換）/ ADR-0033（Superseded）/ ADR-0010・0011（土台）/ ADR-0055（観測の時刻）
 - 仕様 `sprc_v4.docx`（FR-05b / FR-10 / FR-15-17 / FR-25 / FR-26 / FR-27 / FR-28 / FR-30 / FR-35 / §5.4 / §7）

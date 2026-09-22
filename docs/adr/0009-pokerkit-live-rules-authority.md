@@ -5,7 +5,7 @@
 <!-- One of: Proposed / Accepted / Superseded / Rejected / Deprecated -->
 Accepted（ISSUE-0008 spike 済。R2 pokerkit engine 実装済・default-off。R3 = actor 推定 / apply_corrections / 融合は planned）
 
-**部分的に ADR-0045 が置き換える（2026-09-12）**: §4/§6 の「物理/明示証拠を prior より優先して actor を単一に決める」規則と、Alternatives の「確率モデル（HMM / particle filter）は現段階 overkill。golden fixtures が揃えば再評価」という判断。fixtures は揃い、本 ADR が予告した**再評価を ADR-0045 で実施**した（記録の正本を事後の確率推定に移す）。pokerkit をルール権威とする中核判断（§1-§3）と `apply_corrections` は有効なまま。
+**部分的に ADR-0056 が置き換える（2026-09-12）**: §4/§6 の「物理/明示証拠を prior より優先して actor を単一に決める」規則と、Alternatives の「確率モデル（HMM / particle filter）は現段階 overkill。golden fixtures が揃えば再評価」という判断。fixtures は揃い、本 ADR が予告した**再評価を ADR-0056 で実施**した（記録の正本を事後の確率推定に移す）。pokerkit をルール権威とする中核判断（§1-§3）と `apply_corrections` は有効なまま。
 
 ## Date
 

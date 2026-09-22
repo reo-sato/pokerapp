@@ -77,4 +77,4 @@ audio（`audio/recognizer.py:parse_action`）
 
 ## Related
 
-- ISSUE-0024 / ADR-0042（マイク無し運用の入口。`--cli` の読み上げ文投入は同タスクで追加）
+- ISSUE-0024 / ADR-0053（マイク無し運用の入口。`--cli` の読み上げ文投入は同タスクで追加）

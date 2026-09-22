@@ -83,7 +83,7 @@ schema を変更する PR は、同じ PR で以下を更新する（漏れは c
 > hand / action schema も `1.0` frozen（ISSUE-0011）。以後の bump はすべて **optional フィールドの
 > 追加 = additive**（required も既存フィールドの意味も不変）:
 > - `action` `1.1` = `street` の意味を明文化（description のみ, ISSUE-0029）/ `1.2` = `position`（ISSUE-0032）
-> - `hand` `1.1` = `board_timeline`（ADR-0044）/ `1.2` = `button_seat` + `position_map`（ISSUE-0032）
+> - `hand` `1.1` = `board_timeline`（ADR-0055）/ `1.2` = `button_seat` + `position_map`（ISSUE-0032）
 >
 > **全 domain schema + repository interface が frozen**。残るのは write/sync 拡張（双方向同期,
 > S5 後続）のみ。

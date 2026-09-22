@@ -1,4 +1,4 @@
-# 2026-09-12 — 観測の時刻精度（ADR-0044）+ 仕様との drift 記録（ISSUE-0031）
+# 2026-09-12 — 観測の時刻精度（ADR-0055）+ 仕様との drift 記録（ISSUE-0031）
 
 ## Goal
 
@@ -28,7 +28,7 @@
 | `docs/contracts/schemas/hand.schema.json` | `board_timeline` を optional 追加、`1.0`→`1.1`（additive） |
 | `tests/fixtures/reconstruction/*/expected_hand.json` | golden 5 件に `board_timeline: []` を追加（出力形の変化を golden に反映） |
 | `tests/test_timeline_fidelity.py` | 新規 12 ケース |
-| `docs/adr/0044-*.md` / `docs/issues/0031-*.md` / CLAUDE.md / CHANGELOG / decision-log | docs |
+| `docs/adr/0055-*.md` / `docs/issues/0031-*.md` / CLAUDE.md / CHANGELOG / decision-log | docs |
 
 ## Expected vs implemented
 
@@ -68,7 +68,7 @@
 ヒューリスティック、RFID フォールド検知は未実装、ポジション名言及も未対応。**ISSUE-0009 で尤度を
 後回しにした暫定の決定的ポリシーが、そのまま既定として定着した**のが原因。→ **ISSUE-0031** に記録。
 
-方針は **Fable 5.1 による設計監査**の結果を踏まえて別 ADR で決める（本タスクの範囲外）。本 ADR-0044 は
+方針は **Fable 5.1 による設計監査**の結果を踏まえて別 ADR で決める（本タスクの範囲外）。本 ADR-0055 は
 **どの推定器でも入力として必要な観測の時刻**に限定したので、方針がどちらに転んでも無駄にならない。
 
 ## Test results
@@ -89,6 +89,6 @@ python -m pytest tests/ -q --ignore=tests/test_vision.py
 
 ## Related
 
-- ADR-0044 / ISSUE-0031 / ISSUE-0009
-- ADR-0043（ミスディール訂正。訂正時に観測・配布時刻も捨てる）
+- ADR-0055 / ISSUE-0031 / ISSUE-0009
+- ADR-0054（ミスディール訂正。訂正時に観測・配布時刻も捨てる）
 - ADR-0033（confidence 較正。本タスクは confidence を動かさない）

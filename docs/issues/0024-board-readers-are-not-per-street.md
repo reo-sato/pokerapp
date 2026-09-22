@@ -6,7 +6,7 @@
 
 ## Status
 
-Fixed（host 実装 + 契約 v1.3 + ADR-0042。実機での位置割り当て確認は次の通しで）
+Fixed（host 実装 + 契約 v1.3 + ADR-0053。実機での位置割り当て確認は次の通しで）
 
 ## Severity / Priority
 
@@ -66,7 +66,7 @@ board の 1 台に 2〜3 枚）。誤っていたのは **位置の決め方**�
 
 ## Fix
 
-**ADR-0042**: board reader 全台を **1 つの論理ボード**として扱い、`board_index` は
+**ADR-0053**: board reader 全台を **1 つの論理ボード**として扱い、`board_index` は
 **全台を通した検出順**（= ディーラーが配った順）で 1..5 を割り当てる。契約 **v1.3 §4**。
 
 - `rfid/reader_thread.py`: `_board_offsets`（reader_id → {uid: offset}）を廃し、
@@ -114,5 +114,5 @@ board の 1 台に 2〜3 枚）。誤っていたのは **位置の決め方**�
 
 ## Related
 
-- ADR-0042（本 issue の fix 設計）/ ADR-0034（契約 freeze）/ ADR-0041（1 slot + P2）
+- ADR-0053（本 issue の fix 設計）/ ADR-0034（契約 freeze）/ ADR-0052（1 slot + P2）
 - ISSUE-0021（poll 周期。`cards` は v1.1 でここから入った）

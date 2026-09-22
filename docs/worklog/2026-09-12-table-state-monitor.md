@@ -1,4 +1,4 @@
-# 2026-09-12 — 卓状態モニタ（RFID だけでカード / 有効席 / ストリートを見る, ADR-0045 D5）
+# 2026-09-12 — 卓状態モニタ（RFID だけでカード / 有効席 / ストリートを見る, ADR-0056 D5）
 
 ## Goal
 
@@ -27,7 +27,7 @@ engine の street                 ─┘        │
                              tools/table_monitor.py（HTTP + 自動更新ページ）
 ```
 
-### 有効席を 1 つの真偽値に潰さない（ADR-0045 D4）
+### 有効席を 1 つの真偽値に潰さない（ADR-0056 D4）
 
 プレイヤーは札を持ち上げて見るので「載っている = ゲームに残っている」ではない。4 つを分けて出す:
 
@@ -92,12 +92,12 @@ python -m pytest tests/ -q --ignore=tests/test_vision.py
 
 - **実機での確認が未了**（本タスクの目的そのもの）。
 - `likely_folded` の 20 秒は**暫定**。`.table_state.jsonl` の不在時間分布を実測して決める
-  （ADR-0045 D7 計測 #3）。
+  （ADR-0056 D7 計測 #3）。
 - staff iPad アプリ（`staff/`）へのタブ追加は未着手（当面はモニタページで足りる）。
 - モニタは**無認証**（`--host 0.0.0.0` は信頼できる LAN のみ）。viewer API と同じ前提。
 - P0a（ISSUE-0033）/ P0b（ISSUE-0032）は本タスクの後。
 
 ## Related
 
-- ADR-0045 D4/D5（有効席の扱い・卓状態）/ ADR-0044（ボード配布時刻 = `board_timeline` を同梱）
+- ADR-0056 D4/D5（有効席の扱い・卓状態）/ ADR-0055（ボード配布時刻 = `board_timeline` を同梱）
 - ADR-0020（単一書き手 + reload-on-read）/ ISSUE-0031

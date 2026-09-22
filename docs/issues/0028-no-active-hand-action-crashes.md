@@ -103,5 +103,5 @@ RuntimeError: No actor (no active hand or hand over)
 ## Related
 
 - ADR-0009（rules-aware backend 境界。空 `legal_context` を「legacy の印」としていた前提の補正）
-- ISSUE-0026 / ADR-0042（同じ実機通しテストで見つかった board 位置の同期点）
+- ISSUE-0026 / ADR-0053（同じ実機通しテストで見つかった board 位置の同期点）
 - `docs/worklog/2026-09-12-no-active-hand-guard.md`

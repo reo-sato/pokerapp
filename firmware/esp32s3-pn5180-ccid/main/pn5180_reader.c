@@ -66,7 +66,7 @@ static const char *TAG = "pn5180";
 #endif
 
 // 物理 reader 数は配線表 PN5180_READERS の要素数を超えられない（超えると配列外参照）。
-// USB 上の CCID slot は常に 1（ADR-0041）で、物理 reader は Get UID の P2 index で選ぶ。
+// USB 上の CCID slot は常に 1（ADR-0052）で、物理 reader は Get UID の P2 index で選ぶ。
 // メッセージは ASCII 固定（gcc の診断が非 ASCII を 8 進エスケープして読めなくなるため）。
 _Static_assert(PN5180_READER_COUNT >= 1 &&
                    PN5180_READER_COUNT <= (int)(sizeof(PN5180_READERS) / sizeof(PN5180_READERS[0])),

@@ -70,7 +70,7 @@ RFID を使わない場合は `rfid.enabled` を `false`（既定）のままで
    ここに出る **reader_name 文字列を完全一致で** `config.json` の `rfid.pcsc_readers[].name` に記入します
    （OS により文字列が異なります。契約 `docs/contracts/rfid-usb-ccid.md` §4/§8）。
    **リーダー名は 1 個だけ出るのが正常です**（PN5180 が 11 台でも 1 個。Windows の CCID ドライバの
-   制限により、物理リーダーは名前ではなく次項の `reader` 番号で選びます。契約 v1.2 / ADR-0041）。
+   制限により、物理リーダーは名前ではなく次項の `reader` 番号で選びます。契約 v1.2 / ADR-0052）。
    同じ行に `physical readers: N` として firmware が公開している台数が出ます。
 3. `config.json` の `rfid.transport` を `"pcsc"`、`rfid.enabled` を `true` に。
 4. `rfid.pcsc_readers`（**list**）で各リーダーの役割を設定:

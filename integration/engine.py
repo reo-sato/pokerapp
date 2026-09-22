@@ -187,12 +187,12 @@ class IntegrationThread(threading.Thread):
             on_card_correction: ミスディール訂正フック（additive, 既定 None = 訂正は engine 内のみ）。
                          `("board", 位置)` / `("seat", 席)` で呼ぶので、RFID 側の割り当て・
                          デバウンスも同じタイミングで落とす（`RFIDThread.forget_board_position` /
-                         `forget_seat_cards`, ADR-0043）。integration スレッドで発火する。
+                         `forget_seat_cards`, ADR-0054）。integration スレッドで発火する。
             seat_cards_absent_since: 席のカードが消えたまま戻っていない時刻（epoch）を返す関数
                          （additive, 既定 None = 従来どおり処理時刻を使う）。**fold の判定には
                          使わない**（プレイヤーはカードを持ち上げるので不在は fold を意味しない）。
                          合成 silent-fold に **実際に札が席から離れた時刻**を与えるためだけに読む
-                         （音声の時系列と突き合わせて履歴を再生するため, ADR-0044）。
+                         （音声の時系列と突き合わせて履歴を再生するため, ADR-0055）。
             seat_presence: 席ごとのカード在否を返す関数（`RFIDThread.presence_snapshot`）。
                          `table_state_writer` と対で、**RFID だけから導く卓状態**（カード / 有効席 /
                          ストリート）を publish するのに使う。None なら卓状態は在否なしで作られる。
@@ -231,7 +231,7 @@ class IntegrationThread(threading.Thread):
         # ハンド内の一時バッファ
         self._current_actions: list[ActionRecord] = []
         self._hand_started_at: str = self._now_iso()
-        # ハンド開始の epoch。マック観測をハンド内にクランプするのに使う（ADR-0044）。
+        # ハンド開始の epoch。マック観測をハンド内にクランプするのに使う（ADR-0055）。
         self._hand_started_epoch: Optional[float] = None
         self._stack_start: dict[int, int] = {}
 
@@ -239,7 +239,7 @@ class IntegrationThread(threading.Thread):
         self._board_cards: list[str] = []          # 順序付きボードカード（表示用）
         self._board_positions: dict[int, str] = {} # board_index → card
         # board_index → **最初に検出した時刻**（epoch）。ターン/リバーの配布時刻はベッティング
-        # ラウンドの区切りとしてアクションの時刻に対応するため記録する（ADR-0044）。
+        # ラウンドの区切りとしてアクションの時刻に対応するため記録する（ADR-0055）。
         # 再検出（結合の弱いリーダーの間欠読み）では上書きしない = 配布の瞬間を保つ。
         self._board_dealt_at: dict[int, float] = {}
         self._board_source: str = ""
@@ -321,7 +321,7 @@ class IntegrationThread(threading.Thread):
     def _process_rfid_event(self, ev: RFIDEvent) -> None:
         """受信した RFIDEvent を役割に応じて振り分ける。"""
         self._dispatch_rfid_event(ev)
-        # 卓状態はカードが動くたびに publish する（UI への反映経路, ADR-0045 D5）。
+        # 卓状態はカードが動くたびに publish する（UI への反映経路, ADR-0056 D5）。
         self._publish_table_state(observed_at=ev.timestamp)
 
     def _dispatch_rfid_event(self, ev: RFIDEvent) -> None:
@@ -362,7 +362,7 @@ class IntegrationThread(threading.Thread):
             # 位置指定あり: board_positions に格納して順序保証
             unchanged = self._board_positions.get(ev.board_index) == ev.card
             self._board_positions[ev.board_index] = ev.card
-            # 配布時刻は **最初の検出**を採る（再発火で上書きしない, ADR-0044）。
+            # 配布時刻は **最初の検出**を採る（再発火で上書きしない, ADR-0055）。
             self._board_dealt_at.setdefault(ev.board_index, ev.timestamp)
             self._board_cards = [
                 self._board_positions[i]
@@ -463,7 +463,7 @@ class IntegrationThread(threading.Thread):
         return datetime.fromtimestamp(epoch).isoformat(timespec="milliseconds")
 
     def _synth_fold_timestamp(self, seat: int) -> tuple[str, bool]:
-        """合成 silent-fold の時刻（ADR-0044）。
+        """合成 silent-fold の時刻（ADR-0055）。
 
         既定は処理時刻（= 推定を引き起こした後続アクションの時刻）だが、RFID が
         「その席のカードが消えたまま戻っていない時刻」を持っていればそれを使う。
@@ -655,7 +655,7 @@ class IntegrationThread(threading.Thread):
                 confidence=1.0,
             ))
 
-    # ――― ミスディール訂正（ADR-0043） ―――
+    # ――― ミスディール訂正（ADR-0054） ―――
 
     def _handle_correct_board(self, event: AudioEvent) -> None:
         """ボード `amount` 枚目の記録を取り消す（ミスディールしたカードの載せ替え）。
@@ -671,7 +671,7 @@ class IntegrationThread(threading.Thread):
             )
             return
         removed = self._board_positions.pop(index)
-        self._board_dealt_at.pop(index, None)   # 差し替え後の配布時刻を採り直す（ADR-0044）
+        self._board_dealt_at.pop(index, None)   # 差し替え後の配布時刻を採り直す（ADR-0055）
         self._board_cards = [self._board_positions[i] for i in sorted(self._board_positions)]
         # 訂正が入ったハンドは人間が記録を確認できるようにする（監査痕）。
         self._hand_needs_review = True
@@ -710,7 +710,7 @@ class IntegrationThread(threading.Thread):
         """RFID から導いた卓状態（カード / 有効席 / ストリート）を sidecar へ publish する。
 
         アクション推定とは独立した経路。実プレイ環境で「カード読み取り・有効席・ストリート遷移が
-        プレイ速度で取れるか」「UI に反映されるか」を検証するための観測出力（ADR-0045 D4/D5）。
+        プレイ速度で取れるか」「UI に反映されるか」を検証するための観測出力（ADR-0056 D4/D5）。
         writer 未注入なら no-op（= 挙動不変）。
         """
         if self._table_state_writer is None:
@@ -780,7 +780,7 @@ class IntegrationThread(threading.Thread):
         return None
 
     def _build_board_timeline(self) -> list[dict]:
-        """ボード各枚の配布時刻を index 昇順で返す（ADR-0044）。
+        """ボード各枚の配布時刻を index 昇順で返す（ADR-0055）。
 
         ターン（4 枚目）/ リバー（5 枚目）の配布時刻はベッティングラウンドの区切りとして
         アクションの時刻に対応するため記録する。フロップは 3 枚の最小値がラウンドの開始
@@ -880,7 +880,7 @@ class IntegrationThread(threading.Thread):
         cap=SILENT_FOLD_CAP・atomic）で sensed まで手番を進める。合成成功なら actor=sensed、
         cap 超過/到達不可なら prior 維持（合成せず）。いずれの競合（sensed≠prior）も needs_review。
 
-        **RFID の seat 読みは actor の証拠にしない**（ISSUE-0033 / ADR-0045）。RFID が観測するのは
+        **RFID の seat 読みは actor の証拠にしない**（ISSUE-0033 / ADR-0056）。RFID が観測するのは
         「その席に**カードがある**」であって「その席が**行動した**」ではない。ホールカードの配布は
         数秒で最大 16 件の検出を生み、持ち上げた札を置き直しても 1 件出るため、行動と区別できない。
         カメラ（chip motion = 行動の観測）を廃止した結果、存在検出が「物理証拠」の座に繰り上がって
@@ -910,7 +910,7 @@ class IntegrationThread(threading.Thread):
     def _append_synth_fold(self, seat: int) -> None:
         """合成した silent-fold を fold アクションとして記録する（推定なので常に needs_review）。
 
-        時刻は RFID のマック観測があればそれを使う（ADR-0044）。`source.rfid` はその時刻が
+        時刻は RFID のマック観測があればそれを使う（ADR-0055）。`source.rfid` はその時刻が
         物理観測由来であることを示す（confidence は据え置き = 判定材料にはしていない）。
         """
         gs = self._game_state

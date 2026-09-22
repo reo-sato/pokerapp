@@ -6,7 +6,7 @@
 
 ## Status
 
-Fixed（設計変更 = ADR-0041 / 契約 v1.2。**実機 2026-09-11（firmware `0e93de4`, 10 台 ready）で host 側を
+Fixed（設計変更 = ADR-0052 / 契約 v1.2。**実機 2026-09-11（firmware `0e93de4`, 10 台 ready）で host 側を
 通しで確認**: `probe_pcsc list` = reader 1 件 + `physical readers: 11` + 11 件 matched / `check` = 11 行 PASS
 （未通電 index は `6A81` で PASS）/ `watch` = 席 8 台 × 2 枚 + board で 22 タッチ、`seat N [rK]` の対応が
 config どおり。残 1 台はコネクタ #11（ch10）の未通電 = ISSUE-0023）
@@ -59,7 +59,7 @@ controller の **endpoint が 6 本（双方向 5 + IN 1）** しかないため
 
 ## Fix
 
-**ADR-0041 / 契約 v1.2**: USB 上の CCID slot は **常に 1 つ**にし、**物理リーダーは Get UID
+**ADR-0052 / 契約 v1.2**: USB 上の CCID slot は **常に 1 つ**にし、**物理リーダーは Get UID
 pseudo-APDU の P2 で選ぶ**。
 
 - firmware: `FF CA 00 <k> 00` → リーダー k の UID（複数枚は 8B 連結）+ `90 00` / カード無し `6A 81` /
@@ -96,8 +96,8 @@ pseudo-APDU の P2 で選ぶ**。
 
 ## Related ADRs
 
-- `docs/adr/0041-physical-reader-index-via-get-uid-p2.md`（本 issue の Fix）
-- `docs/adr/0040-ccid-virtual-card-always-present.md`（slot 常時 present。1 接続持続の前提）
+- `docs/adr/0052-physical-reader-index-via-get-uid-p2.md`（本 issue の Fix）
+- `docs/adr/0051-ccid-virtual-card-always-present.md`（slot 常時 present。1 接続持続の前提）
 - `docs/adr/0034-rfid-usb-ccid-firmware-host-contract-freeze.md`（v1.0 契約 = 置き換え対象の §3）
 
 ## Related Commits

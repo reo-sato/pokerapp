@@ -86,12 +86,12 @@ ADR-0009（pokerkit を live ルール権威に）以降、設計の重心が「
 5. FR-25/35 の RFID フォールド検知は、**プレイヤーがカードを持ち上げる**運用と両立するか
    （不在 ≠ fold）。
 
-**先行して着手済み（ADR-0044）**: 推定方式に依存しない **観測の時刻精度**（fold の実時刻 =
+**先行して着手済み（ADR-0055）**: 推定方式に依存しない **観測の時刻精度**（fold の実時刻 =
 マック観測 / ターン・リバーの配布時刻）。どの推定器でも入力として必要なので先に確保した。
 
 ## Regression Test
 
-方針確定後に追加。現時点では `tests/test_timeline_fidelity.py`（ADR-0044 の観測時刻）のみ。
+方針確定後に追加。現時点では `tests/test_timeline_fidelity.py`（ADR-0055 の観測時刻）のみ。
 
 ## Affected Files
 
@@ -106,4 +106,4 @@ ADR-0009（pokerkit を live ルール権威に）以降、設計の重心が「
 - ISSUE-0009（尤度を後回しにした当時の判断 = 本 drift の起点）
 - ADR-0009 / ADR-0012（live 決定的設計）/ ADR-0033（confidence 較正）
 - ADR-0010 / ADR-0011（record/replay = 事後推定の土台）
-- ADR-0044（観測の時刻精度。本 issue の前提として先行実装）
+- ADR-0055（観測の時刻精度。本 issue の前提として先行実装）

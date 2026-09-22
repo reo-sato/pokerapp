@@ -3,7 +3,7 @@
   "$id": "https://pokerapp.local/contracts/hand.schema.json",
   "title": "Hand",
   "version": "1.2",
-  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。1.1 = board_timeline を optional 追加（ボード各枚の配布時刻。ADR-0044, additive）。1.2 = button_seat / position_map を optional 追加（ディーラーボタン回転。仕様 FR-05b/§6.1, ISSUE-0032, additive）。",
+  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。1.1 = board_timeline を optional 追加（ボード各枚の配布時刻。ADR-0055, additive）。1.2 = button_seat / position_map を optional 追加（ディーラーボタン回転。仕様 FR-05b/§6.1, ISSUE-0032, additive）。",
   "type": "object",
   "additionalProperties": true,
   "required": ["hand_id", "session_id", "started_at", "ended_at", "players", "actions"],
@@ -20,7 +20,7 @@
     "board_source": {"type": "string", "enum": ["rfid", "ocr", "manual", ""]},
     "board_timeline": {
       "type": "array",
-      "description": "ボード各枚の**配布時刻**（RFID が最初に検出した時刻）。index 昇順。ターン/リバーの配布時刻はベッティングラウンドの区切りとしてアクションの時刻に対応するため記録する（ADR-0044）。フロップは 3 枚の最小値がラウンド開始で、フロップ内の順序自体は意味を持たない。RFID 以外のソース・時刻未取得では空配列。",
+      "description": "ボード各枚の**配布時刻**（RFID が最初に検出した時刻）。index 昇順。ターン/リバーの配布時刻はベッティングラウンドの区切りとしてアクションの時刻に対応するため記録する（ADR-0055）。フロップは 3 枚の最小値がラウンド開始で、フロップ内の順序自体は意味を持たない。RFID 以外のソース・時刻未取得では空配列。",
       "items": {
         "type": "object",
         "additionalProperties": true,

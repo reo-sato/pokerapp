@@ -135,7 +135,7 @@ register-level simulator で検証）。
 
 ## Related ADRs
 
-- ADR-0041（1 slot + P2 で 11 台）
+- ADR-0052（1 slot + P2 で 11 台）
 
 ## Related Issues
 

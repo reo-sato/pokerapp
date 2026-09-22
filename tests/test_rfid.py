@@ -3,7 +3,7 @@
 Phase 6: RFID モジュールのテスト。
 - CardMaster: lookup, register, normalize, bytes_to_tag_id, load/save
 - PCSCBridge: MockPCSCBridge の基本動作 / 複数 UID 応答の分割（契約 v1.1 §6）/
-  物理 reader index = Get UID の P2・接続の持続・共有接続（契約 v1.2 §6/§8, ADR-0041）
+  物理 reader index = Get UID の P2・接続の持続・共有接続（契約 v1.2 §6/§8, ADR-0052）
 - RFIDThread: デバウンス（UID 集合）、RFIDEvent 投入、ロール/席番号マッピング、
   board の重ね置き位置割り当て（契約 v1.1 §4）、config の `reader` を bridge factory に渡す
 """
@@ -311,7 +311,7 @@ class TestPCSCBridgeReadUids:
         assert _connected_bridge(b"", sw=(0x6A, 0x81)).read_uid() is None
 
 
-# ――― 物理 reader index（Get UID の P2）と接続の持続（契約 v1.2 §6/§8, ADR-0041） ―――
+# ――― 物理 reader index（Get UID の P2）と接続の持続（契約 v1.2 §6/§8, ADR-0052） ―――
 
 class TestPCSCBridgeReaderIndex:
     """Windows は CCID slot を 1 つしか出さないので、物理リーダーは P2 で選ぶ。"""
@@ -338,7 +338,7 @@ class TestPCSCBridgeReaderIndex:
                 PCSCBridge("r", reader_index=bad)   # type: ignore[arg-type]
 
     def test_connection_is_reused_across_polls(self):
-        """ADR-0040/0041: slot は常時 present なので接続を持続し、2 回目は connect しない。"""
+        """ADR-0051/0052: slot は常時 present なので接続を持続し、2 回目は connect しない。"""
         reader = _FakeReader(self._A, name="persistent reader")
         bridge = _connected_bridge(b"", reader=reader)
         bridge.read_uids()
@@ -633,7 +633,7 @@ class TestRFIDThread:
         assert ev.role == "board"
         assert ev.seat is None
         # B3: PC/SC 経路でも board_index が流れること。位置は config ではなく検出順
-        # （ボード 1 枚目 = 1, 契約 v1.3 §4 / ADR-0042）。
+        # （ボード 1 枚目 = 1, 契約 v1.3 §4 / ADR-0053）。
         assert ev.board_index == 1
 
     def test_seat_role_has_no_board_index(self, tmp_path: Path):
@@ -829,7 +829,7 @@ class TestStackedDebounce:
 
 
 class TestBoardGroupPositions:
-    """board reader **全台で 1 つの論理ボード**を共有し、検出順に 1..5 を振る（v1.3 §4 / ADR-0042）。
+    """board reader **全台で 1 つの論理ボード**を共有し、検出順に 1..5 を振る（v1.3 §4 / ADR-0053）。
 
     物理配置は「ボード領域に board reader が並んでいるだけ」で、flop 3 枚が 3 台に散ることも
     真ん中の 1 台に 2 枚載ることもある。位置は reader ごとの固定 offset ではなく配った順で決まる。

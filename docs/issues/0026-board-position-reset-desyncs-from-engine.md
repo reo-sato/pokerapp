@@ -47,7 +47,7 @@ ISSUE-0025 の「同じ UID の再発火が同じ位置になる」は直って�
   カードが外れても **イベントは出ない**ので board は縮まない（設計どおり = ハンド確定まで
   ボードを保持する）。
 - RFID 側（`_sync_board_presence`）は「board reader の UID 和集合が空 → 位置記憶をクリア」と
-  していた（ADR-0042 の「ハンドの切れ目」判定）。
+  していた（ADR-0053 の「ハンドの切れ目」判定）。
 
 よって **ボードを一度全部下げて、別の順で置き直す**と:
 
@@ -148,6 +148,6 @@ board ['7c','7c','2h','Qh','9d']    （同じ札が 2 か所）
 ## Related
 
 - ISSUE-0025（同じ UID の位置再割り当て。本 issue はその修正後に残った別要因）
-- ISSUE-0024 / ADR-0042（board を 1 論理ボードにした設計。Alternatives 4 =「engine → RFIDThread の
+- ISSUE-0024 / ADR-0053（board を 1 論理ボードにした設計。Alternatives 4 =「engine → RFIDThread の
   明示リセット」を本 issue で実装した）
 - 契約 `docs/contracts/rfid-usb-ccid.md` v1.3 §4

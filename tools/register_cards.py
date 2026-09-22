@@ -30,7 +30,7 @@
 
 要 `pip install ".[pcsc]"`（pyscard）。**登録に使う物理リーダーは `--reader` で config の
 `pcsc_readers` の要素を選ぶ**（index か `seat 1` / `board 1` のラベル。既定は先頭要素）。
-契約 v1.2（ADR-0041）では PC/SC の reader 名は 1 つだけで、物理リーダー N 台は Get UID の
+契約 v1.2（ADR-0052）では PC/SC の reader 名は 1 つだけで、物理リーダー N 台は Get UID の
 P2（config の `reader`）で選ぶため、reader_name だけでは 1 台を指定できない。
 """
 from __future__ import annotations
@@ -137,7 +137,7 @@ def reader_choices(pcsc_readers: list[dict]) -> list[str]:
 
 
 def select_reader(pcsc_readers: list[dict], selector: Optional[str] = None) -> dict:
-    """`--reader` の指定から config 要素を 1 つ選ぶ（契約 v1.2 §4 / ADR-0041）。
+    """`--reader` の指定から config 要素を 1 つ選ぶ（契約 v1.2 §4 / ADR-0052）。
 
     selector は **config の index**（"0"）か **役割ラベル**（"seat 1" / "board 1" / "board 1-3"、
     `[r3]` 付きも可・大小/空白ゆるめ）。None / 空なら先頭要素。選べなければ ValueError。

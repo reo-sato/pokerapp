@@ -179,11 +179,11 @@ class TestLint:
         assert len(cfgs) == 11
         assert lint_pcsc_readers(cfgs) == []
         assert {c["reader"] for c in cfgs} == set(range(11))
-        assert len({c["name"] for c in cfgs}) == 1     # reader 名は 1 つだけ（ADR-0041）
+        assert len({c["name"] for c in cfgs}) == 1     # reader 名は 1 つだけ（ADR-0052）
 
 
 class TestLintBoardGroup:
-    """board reader 群の検査（契約 v1.3 §4 / ADR-0042: 位置は config に書かない）。"""
+    """board reader 群の検査（契約 v1.3 §4 / ADR-0053: 位置は config に書かない）。"""
 
     def test_board_without_position_fields_passes(self):
         cfgs = [

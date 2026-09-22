@@ -203,7 +203,7 @@ mask の意味（LSB-first、mask bit i = 受信 rx[2] の bit0 から i 番目�
 
 ## Related ADRs
 
-- `docs/adr/0040-ccid-virtual-card-always-present.md` — 0 枚 = `6A 81` はこの設計のまま。
+- `docs/adr/0051-ccid-virtual-card-always-present.md` — 0 枚 = `6A 81` はこの設計のまま。
 - `docs/adr/0034-rfid-usb-ccid-firmware-host-contract-freeze.md` — 契約 v1.0。複数枚の連結は
   §6/§7 の拡張（v1.1 予定、本タスクでは契約ファイルを変更していない）。
 

@@ -6,7 +6,7 @@
 
 ## [Unreleased]
 
-### Fixed (ディーラーボタンが回らない, ISSUE-0032 = ADR-0045 P0b, 2026-09-12)
+### Fixed (ディーラーボタンが回らない, ISSUE-0032 = ADR-0056 P0b, 2026-09-12)
 
 **ボタンが一度も回らず、毎ハンド同じ席が SB/BB を払い、同じ席が最初に行動していた**。ターン順は
 アクター推定の最優先の証拠（仕様 FR-26）なので、2 人超の卓では (n-1)/n のハンドで prior が誤り、
@@ -38,7 +38,7 @@
 - **`--log-file`（既定 `logs/pokerapp.log`）を追加**。ログを端末から切り離せる。卓の状態は
   `tools/table_monitor.py` で見られるので、実機テストではログを端末に出す必要がない。
 
-### Fixed (RFID の「カード検出」を actor 証拠に使わない, ISSUE-0033 = ADR-0045 P0a, 2026-09-12)
+### Fixed (RFID の「カード検出」を actor 証拠に使わない, ISSUE-0033 = ADR-0056 P0a, 2026-09-12)
 
 - `_resolve_actor` が **席を問わず ±2 秒で最近傍の RFID seat 検出**を明示発話席より優先し、
   prior と違えば間の席を silent fold していた。ホールカードの配布は数秒で最大 16 件の検出を生み、
@@ -51,7 +51,7 @@
   actor は prior のまま・fold 合成なし）。回帰 `TestRfidIsNotActorEvidence` 3 件を追加。909 passed。
 
 
-### Added (卓状態モニタ — RFID だけでカード/有効席/ストリートを見る, ADR-0045 D5, 2026-09-12)
+### Added (卓状態モニタ — RFID だけでカード/有効席/ストリートを見る, ADR-0056 D5, 2026-09-12)
 
 実プレイ環境での検証用。**アクション推定に依存しない**ので、音声なし・アクションがダミーでも
 「カード読み取り・有効席・ストリート遷移がプレイ速度で取れるか」「UI に反映されるか」を試せる。
@@ -61,20 +61,20 @@
   **1 秒ごとに定期 publish** する（fold が有効席に反映される経路）。
 - **`python tools/table_monitor.py --host 0.0.0.0`** で LAN のブラウザ / iPad 向けページを出す。
   1 秒自動更新で、**反映遅延を画面に表示**する（要件「数分程度のラグ」の実測用）。
-- **有効席は 1 つの真偽値に潰さない**（ADR-0045 D4。プレイヤーは札を持ち上げる）:
+- **有効席は 1 つの真偽値に潰さない**（ADR-0056 D4。プレイヤーは札を持ち上げる）:
   `dealt_in`（配られた）/ `present`（いま載っている）/ `away_sec`（離席秒数）/
   `likely_folded`（20 秒超の**表示上の推測**であって判定ではない）。
 - **ストリートは RFID 由来と engine のものを並べて表示**する。pokerkit backend では
   `advance_street` が no-op なので両者は食い違い得る — その食い違い自体が見たい情報。
 - `.table_state.jsonl` に**実質的に変化したときだけ** append し、観測時刻（`observed_at`）を残す。
-  後から**反映遅延**と**不在時間の分布**を測れる（ADR-0045 D7 の計測 #2/#3 の入力）。
+  後から**反映遅延**と**不在時間の分布**を測れる（ADR-0056 D7 の計測 #2/#3 の入力）。
 - **`python tools/analyze_table_state.py`** で履歴から数字を出す: **反映遅延** / **不在時間の分布**
   （「戻ってきた = 持ち上げただけ」と「戻らなかった = マック」を分けて集計）/ **ストリート遷移時刻**。
   `likely_folded` の 20 秒が妥当かを ✓/⚠ で判定する（戻ってきた不在の最大値と比較）。
 - 906 passed。
 
 
-### Changed (方針決定: アクション履歴は「事後・確率的」に推定する, ADR-0045, 2026-09-12)
+### Changed (方針決定: アクション履歴は「事後・確率的」に推定する, ADR-0056, 2026-09-12)
 
 コードの挙動変更はまだ無い（**方針の確定**と、それに伴う仕様 drift・重大欠陥の記録）。
 
@@ -92,13 +92,13 @@
     seat 3・ブラインドも毎回 seat 1/2）。仕様 FR-05b は回転を要求し、FR-26 はターン順を最優先の
     証拠とするので、アクター推定の前提が (n-1)/n のハンドで崩れている。
 - **ADR-0033 は Superseded**（ヒューリスティック confidence は記録経路から外れる。較正ハーネスは
-  事後確率のプロパティに向け直す）。ADR-0009 §4/§6 の actor 優先順位も ADR-0045 が置換
+  事後確率のプロパティに向け直す）。ADR-0009 §4/§6 の actor 優先順位も ADR-0056 が置換
   （本 ADR が予告した「golden fixtures が揃えば再評価」の実施）。
 - **数値を決める前に計測する**（無宣言アクション率 / 時刻ズレ / 不在時間分布）。実施順序 P0〜P8 は ADR 参照。
 - 破壊的 schema 変更は無し（`hand`/`action` は `additionalProperties:true`、`reconstruction_event` は draft）。
 
 
-### Added (fold の実時刻とターン/リバーの配布時刻を記録するようにした, ADR-0044, 2026-09-12)
+### Added (fold の実時刻とターン/リバーの配布時刻を記録するようにした, ADR-0055, 2026-09-12)
 
 アクション履歴は最終的に **音声録音の時系列と突き合わせて再生**される。実時刻が要るのは
 **fold の時刻**と**ターン/リバーの配布時刻**の 2 つで、どちらも記録できていなかった。
@@ -118,7 +118,7 @@
 - **注**: 推定方式そのもの（尤度ベースのアクター推定・事後確率）は仕様との drift として
   **ISSUE-0031** に記録し、別途方針 ADR で決める。本変更はその入力となる観測の時刻精度のみ。
 
-### Added (ミスディールの載せ替えを訂正できるようにした, ADR-0043, 2026-09-12)
+### Added (ミスディールの載せ替えを訂正できるようにした, ADR-0054, 2026-09-12)
 
 - **一度読ませたカードを外して正しいカードを読ませ直す**（ミスディール）操作に対応した。従来は
   ハンド内 append-only（ISSUE-0026）のため **誤った札が位置を持ち続けて枚数が水増しされ**
@@ -224,7 +224,7 @@
 
 ### Fixed (RFID: 同じ札に別の board 位置が再割り当てされ turn が誤発火する, ISSUE-0025, 2026-09-11)
 
-- ADR-0042 の初回実機通し（11 台, flop を左 1 枚 + 真ん中 2 枚）で、**同じ札が 2 つの位置を占め**、
+- ADR-0053 の初回実機通し（11 台, flop を左 1 枚 + 真ん中 2 枚）で、**同じ札が 2 つの位置を占め**、
   flop を置いただけで turn に進んだ: `[pos=2]: 5c` の直後に `[pos=4]: 5c`、`6c` も 3 番 → 2 番へ。
 - 原因は 2 つ。(a) **既に位置を持つ UID を再割り当てしていた**（自分が占めている位置が「使用中」に
   含まれるため、毎回新しい位置を取り直していた）。(b) **位置の解放が reader 単位**だった。
@@ -237,7 +237,7 @@
   （**2 つの修正それぞれを外すと落ちる**ことを確認）+ `test_seat_reader_removal_does_not_clear_board_memory`。
   831 passed。
 
-### Fixed (RFID: board reader を「ストリート専用」と取り違えていた — 全台で 1 つの論理ボードに, ISSUE-0024 / ADR-0042, 2026-09-11)
+### Fixed (RFID: board reader を「ストリート専用」と取り違えていた — 全台で 1 つの論理ボードに, ISSUE-0024 / ADR-0053, 2026-09-11)
 
 - **契約 v1.1/v1.2 は board reader を「1 台 = 1 ストリート専用」**（`index` = 先頭ボード位置 +
   `cards` = その台に重ねる枚数、flop は 1 台に 3 枚重ね）として設計していた。**実機はボード領域に
@@ -368,7 +368,7 @@
   `physical readers: 11` + 11 件 matched / `check` = 11 行 PASS / `watch` = 席 8 台 × 2 枚 + board で
   22 タッチ、`seat 4 [r3]` も振替どおり（ISSUE-0022）。
 
-### Changed (firmware: CCID slot を 1 つに固定し、物理リーダーを Get UID の P2 で選ぶ — 契約 **v1.2** / firmware 側, ADR-0041 / ISSUE-0022, 2026-09-10)
+### Changed (firmware: CCID slot を 1 つに固定し、物理リーダーを Get UID の P2 で選ぶ — 契約 **v1.2** / firmware 側, ADR-0052 / ISSUE-0022, 2026-09-10)
 
 - **firmware 側の v1.2 実装**（host 側は次の項）: `CCID_SLOT_COUNT` は **1 固定**（`bMaxSlotIndex=0`、
   `bcdDevice=0x0201`。物理 reader 台数を変えても USB 記述子は変わらないので Windows の記述子
@@ -388,13 +388,13 @@
   スタブ 128 構成で警告 0 + register-level simulator（APDU 応答 4 種 + 安全弁）で確認。**実機未検証**
   （次: 焼いて `probe_pcsc list` の `physical readers: 11`、`watch` で index 0 と 10 が別々に発火）。
 
-### Changed (RFID: 物理リーダーは Get UID の P2 で選ぶ — 契約 **v1.2** / host, ADR-0041 / ISSUE-0022, 2026-09-10)
+### Changed (RFID: 物理リーダーは Get UID の P2 で選ぶ — 契約 **v1.2** / host, ADR-0052 / ISSUE-0022, 2026-09-10)
 
 - **背景**: Windows の Microsoft 汎用 CCID ドライバは **1 インターフェース 1 slot** しか公開せず、
   firmware を 2 slot（`bMaxSlotIndex=1`）にしても PC/SC には `PokerRFID PN5180-CCID 0` しか現れない
   （実機で確定, ISSUE-0022）。slot ごとに USB インターフェースを分ける回避策も ESP32-S3 の
   endpoint 数（6 本）で最大 5 台までで、本番 11 台（席 8 + board 3）に届かない。
-- **設計変更（ADR-0041 / 契約 v1.2）**: **CCID slot は常に 1 つ**（PC/SC の reader 名も 1 つ）にし、
+- **設計変更（ADR-0052 / 契約 v1.2）**: **CCID slot は常に 1 つ**（PC/SC の reader 名も 1 つ）にし、
   **物理リーダー k は Get UID の P2 で選ぶ**（`FF CA 00 <k> 00`。範囲外は `6A 86`、台数問い合わせは
   `FF CA 00 FF 00` → `<N>` + `90 00`）。`k=0` は従来の `FF CA 00 00 00` と同一なので **1 台構成の
   挙動は不変**。v1.1 までの「slot ごとに reader 名を分ける」規約は廃止。
@@ -411,7 +411,7 @@
   `register_cards run --reader "seat 1"` で config 要素（= 物理リーダー）を選べる。
 - **Fixed**: GUI モード（`python main.py`）で `transport="pcsc"` のとき `RFIDThread` に HTTP 用の
   `readers`(dict) を渡していて RFID スレッドが起動しなかった（CLI 経路のみ ADR-0034 で修正済だった）。
-- docs: 契約 `docs/contracts/rfid-usb-ccid.md` **v1.2**、ADR-0041、ISSUE-0022、
+- docs: 契約 `docs/contracts/rfid-usb-ccid.md` **v1.2**、ADR-0052、ISSUE-0022、
   `docs/hardware-qa-checklist.md`（手順 1/2/3/4 + 受け入れ基準）、`docs/installation.md`、
   worklog `docs/worklog/2026-09-10-rfid-reader-index-p2-host.md`。823 passed。
   **残**: 実機 2 台 → 11 台の通し QA（firmware 側の P2 実装は上の項）。
@@ -533,7 +533,7 @@
   複数 slot を並行実行しないため。
 - 出荷値の `CCID_SLOT_COUNT` は **1 のまま**（実機 1 slot の挙動は不変）。上記はいずれも **実機未検証**。
 
-### Added / Fixed (RFID 実機: PN5180 読取り → PC/SC 越し UID 到達まで通し, ADR-0040, 2026-09-10)
+### Added / Fixed (RFID 実機: PN5180 読取り → PC/SC 越し UID 到達まで通し, ADR-0051, 2026-09-10)
 
 - **実機 1 slot で契約 §5–§8 を本番 host コードで確認**: `tools/probe_pcsc.py watch` で
   `seat 1 UID=E0:04:…(8B)` が置く→離す→置くで 2 回発火。`raw` で `PRESENT` + カード無し `SW=6A81` /
@@ -543,14 +543,14 @@
     偽陽性と、失敗時の 2 回目 `pn5180_init` による再起動ループを修正。
   - ISO15693 UID を **MSB-first** に（契約 v1.1 §7 相当。`E0:04:…` 先頭）。presence debounce。
     ISO14443A の試行を既定 OFF（poll ~800ms→~300ms、ログ静音化）。
-  - **CCID slot を仮想カード常時挿入に（ADR-0040）**: Windows usbccid は interrupt 通知を無視し、無ければ
+  - **CCID slot を仮想カード常時挿入に（ADR-0051）**: Windows usbccid は interrupt 通知を無視し、無ければ
     polling もせず bind 時の IccPowerOn しか送らないため、IccPowerOn に常に ATR を返しカード有無は
     Get UID の SW だけで伝える。interrupt-IN は `CCID_USE_INTERRUPT_EP=0`。bmICCStatus を 3 値化、
     Parameters を T=1 7 byte に、`bcdDevice` 0x0102。CCID コマンドを UART に診断ログ。
 - **host**: `core/events.py` の numpy を `TYPE_CHECKING` ガードに（RFID 経路は pyscard だけで動く）。
   `probe_pcsc raw` サブコマンド（pyscard 直叩き: OS の slot 状態 + connect/Get UID の例外を hresult 付きで
   表示、`watch` 0 件の切り分け）。tests 41 passed。
-- docs: ADR-0040、契約 §2/§5/§8 追記、firmware checklist §3/§6/受け入れ表、worklog
+- docs: ADR-0051、契約 §2/§5/§8 追記、firmware checklist §3/§6/受け入れ表、worklog
   `docs/worklog/2026-09-10-rfid-ccid-end-to-end-bringup.md`（Store 版 `python` スタブ / py -3.13 + pyscard
   wheel の環境メモ含む）。
 - **カード登録ツール `tools/register_cards.py`**（`run` / `list` / `unregister`）: 次に置くカードを表示 →

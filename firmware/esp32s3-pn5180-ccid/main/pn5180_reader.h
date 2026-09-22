@@ -3,7 +3,7 @@
 // host(RFIDThread)も polling/debounce するので、ここは「今この reader にどの UID があるか」を
 // RF から更新し続けるだけ。CCID 層(ccid_slot.c)はこのキャッシュを読む（USB と RF の分離）。
 // ⚠ index は **物理 reader index（0..PN5180_READER_COUNT-1）= Get UID の P2**（契約 v1.2 §6 /
-//    ADR-0041）。USB 上の CCID slot は常に 1 つだけなので、slot 番号とは別物。
+//    ADR-0052）。USB 上の CCID slot は常に 1 つだけなので、slot 番号とは別物。
 #pragma once
 
 #include <stdbool.h>

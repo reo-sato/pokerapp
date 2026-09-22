@@ -15,7 +15,7 @@ import tools.register_cards as reg
 from rfid.bridge import MockPCSCBridge
 from rfid.card_master import CardMaster
 
-# v1.2（ADR-0041）: reader 名は 1 つで、物理リーダーは `reader`（Get UID の P2）で選ぶ。
+# v1.2（ADR-0052）: reader 名は 1 つで、物理リーダーは `reader`（Get UID の P2）で選ぶ。
 _READERS = [
     {"name": "CCID 0", "reader": 0, "role": "seat", "seat": 1},
     {"name": "CCID 0", "reader": 1, "role": "seat", "seat": 2},
@@ -90,7 +90,7 @@ class TestPendingAndStatus:
 
 
 class TestSelectReader:
-    """`--reader` は config.rfid.pcsc_readers の要素を選ぶ（契約 v1.2 §4 / ADR-0041）。"""
+    """`--reader` は config.rfid.pcsc_readers の要素を選ぶ（契約 v1.2 §4 / ADR-0052）。"""
 
     def test_default_is_first_element(self):
         assert reg.select_reader(_READERS) is _READERS[0]
@@ -104,7 +104,7 @@ class TestSelectReader:
     def test_select_by_role_label(self):
         assert reg.select_reader(_READERS, "seat 2") is _READERS[1]
         assert reg.select_reader(_READERS, "SEAT  2") is _READERS[1]
-        # board reader は位置を持たない（位置は検出順で決まる, 契約 v1.3 §4 / ADR-0042）。
+        # board reader は位置を持たない（位置は検出順で決まる, 契約 v1.3 §4 / ADR-0053）。
         assert reg.select_reader(_READERS, "board") is _READERS[2]
         assert reg.select_reader(_READERS, "seat 1 [r0]") is _READERS[0]
 

@@ -22,7 +22,7 @@ static const tusb_desc_device_t s_device_desc = {
     .idProduct          = USB_PID,
     // Windows は VID/PID/REV で記述子をキャッシュする。記述子を変えたら REV を上げて再読込させる
     // （reader_name には影響しない, 契約 §2/§3）。
-    // **slot は常に 1**（ADR-0041 / 契約 v1.2: Windows の汎用 CCID ドライバは 1 インターフェース
+    // **slot は常に 1**（ADR-0052 / 契約 v1.2: Windows の汎用 CCID ドライバは 1 インターフェース
     // 1 slot しか公開しないので、物理リーダーは Get UID の P2 で選ぶ）。よって記述子は
     // 物理 reader 台数（PN5180_READER_COUNT）を変えても **変わらない** = REV も 0x0201 のまま。
     //   0x0201 = 1 slot（現行・固定）
@@ -45,7 +45,7 @@ const tusb_desc_device_t *ccid_device_descriptor(void) {
 // dwFeatures は Short-APDU level exchange を含む値（ACR122U 由来 0x000204BA）。
 // host は XfrBlock で pseudo-APDU `FF CA 00 00 00` を送り、データ+SW を期待する（§6）。
 // bMaxSlotIndex は CCID_SLOT_COUNT-1 = **0 固定**（slot は常に 1。物理リーダーは Get UID の
-// P2 = reader index で選ぶ, 契約 v1.2 §6 / ADR-0041）。ここを変えたら bcdDevice も上げること。
+// P2 = reader index で選ぶ, 契約 v1.2 §6 / ADR-0052）。ここを変えたら bcdDevice も上げること。
 // bMaxCCIDBusySlots は **1 固定**: ccid_device.c は bulk OUT を 1 コマンドずつ処理する（単一バッファ、
 // 応答を送り終えてから次を受信）ので、slot 数に連動させると「同時に N slot 走らせられる」と host に
 // 嘘をつくことになる。

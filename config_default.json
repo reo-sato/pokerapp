@@ -43,7 +43,7 @@
       "board_4": {"role": "board", "index": 4},
       "board_5": {"role": "board", "index": 5}
     },
-    "_pcsc_transport_comment": "transport='pcsc' の場合は下の pcsc_readers (list) を使う (pyscard 必須, canonical ADR-0015)。readers (dict, 上) は transport='http' 用。物理リーダーは name ではなく `reader` (Get UID の P2) で選ぶ (契約 v1.2 / ADR-0041)。",
+    "_pcsc_transport_comment": "transport='pcsc' の場合は下の pcsc_readers (list) を使う (pyscard 必須, canonical ADR-0015)。readers (dict, 上) は transport='http' 用。物理リーダーは name ではなく `reader` (Get UID の P2) で選ぶ (契約 v1.2 / ADR-0052)。",
     "_pcsc_poll_interval_ms": 100,
     "pcsc_readers": [
       {"name": "PokerRFID PN5180-CCID 0", "reader": 0,  "role": "seat",  "seat": 1},
@@ -58,13 +58,13 @@
       {"name": "PokerRFID PN5180-CCID 0", "reader": 9,  "role": "board"},
       {"name": "PokerRFID PN5180-CCID 0", "reader": 10, "role": "board"}
     ],
-    "_pcsc_readers_comment": "ADR-0034/0041 / docs/contracts/rfid-usb-ccid.md v1.2: PN5180 + ESP32-S3 USB CCID を PC/SC で読む canonical 経路の reader 設定 (list)。本番構成は 11 台 = 席 8 台 (reader 0..7 = seat 1..8) + board 3 台 (reader 8..10 = ボード領域に並べる。ストリート専用ではない)。Windows は 1 インターフェース 1 slot しか出さないため **reader 名は 1 つだけ**で、物理リーダーは `reader`（Get UID の P2, 0 起点）で選ぶ (契約 v1.2 / ADR-0041)。name は OS が描画する reader_name と完全一致させる (上のサンプルは Windows の実機確定値。他 OS は文字列が異なるので `python tools/probe_pcsc.py list` で実値を確認して置換する)。`(name, reader)` の組が一意であること。role/seat/index が RFIDEvent への対応の source of truth。",
-    "_pcsc_board_comment": "ADR-0042 / 契約 v1.3 §4: role=board は **役割だけ**を書く (位置指定なし)。ボード領域には board reader が並んでいるだけで、どの台がどのストリートを受けるかは置き方次第 (flop 3 枚が 3 台に散ることも、真ん中の 1 台に 2 枚載ることもある)。よって board reader 全台を 1 つの論理ボードとして扱い、board_index (1..5) は全台を通した検出順 = 配った順で決める。board reader は **左から右の順に並べて書く** (同じ poll で 2 枚以上増えたときの位置順が記載順で決まる)。旧 config の index / cards は廃止 (あれば WARN して無視)。席 reader は 2 枚重ねでも設定不要 (hole card は位置を持たない)。"
+    "_pcsc_readers_comment": "ADR-0034/0052 / docs/contracts/rfid-usb-ccid.md v1.2: PN5180 + ESP32-S3 USB CCID を PC/SC で読む canonical 経路の reader 設定 (list)。本番構成は 11 台 = 席 8 台 (reader 0..7 = seat 1..8) + board 3 台 (reader 8..10 = ボード領域に並べる。ストリート専用ではない)。Windows は 1 インターフェース 1 slot しか出さないため **reader 名は 1 つだけ**で、物理リーダーは `reader`（Get UID の P2, 0 起点）で選ぶ (契約 v1.2 / ADR-0052)。name は OS が描画する reader_name と完全一致させる (上のサンプルは Windows の実機確定値。他 OS は文字列が異なるので `python tools/probe_pcsc.py list` で実値を確認して置換する)。`(name, reader)` の組が一意であること。role/seat/index が RFIDEvent への対応の source of truth。",
+    "_pcsc_board_comment": "ADR-0053 / 契約 v1.3 §4: role=board は **役割だけ**を書く (位置指定なし)。ボード領域には board reader が並んでいるだけで、どの台がどのストリートを受けるかは置き方次第 (flop 3 枚が 3 台に散ることも、真ん中の 1 台に 2 枚載ることもある)。よって board reader 全台を 1 つの論理ボードとして扱い、board_index (1..5) は全台を通した検出順 = 配った順で決める。board reader は **左から右の順に並べて書く** (同じ poll で 2 枚以上増えたときの位置順が記載順で決まる)。旧 config の index / cards は廃止 (あれば WARN して無視)。席 reader は 2 枚重ねでも設定不要 (hole card は位置を持たない)。"
   },
   "table_state": {
     "enabled": true,
     "history": true,
-    "_comment": "ADR-0045 D5: RFID だけから導く卓状態 (カード / 有効席 / ストリート) を logs/{session_id}.table_state.json に publish する。アクション推定には依存しない。UI は `python tools/table_monitor.py --host 0.0.0.0` で見る。history=true なら実質的に変化したときだけ .table_state.jsonl に append し、反映遅延・不在時間の計測に使う。"
+    "_comment": "ADR-0056 D5: RFID だけから導く卓状態 (カード / 有効席 / ストリート) を logs/{session_id}.table_state.json に publish する。アクション推定には依存しない。UI は `python tools/table_monitor.py --host 0.0.0.0` で見る。history=true なら実質的に変化したときだけ .table_state.jsonl に append し、反映遅延・不在時間の計測に使う。"
   },
   "recording": {
     "enabled": false,

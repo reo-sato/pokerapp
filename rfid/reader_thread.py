@@ -10,14 +10,14 @@ Phase 6: RFID リーダーをポーリングして RFIDEvent を rfid_queue に�
   1 件ずつ投入する。置きっぱなしは再発火しない。外れた UID は状態更新のみ（イベントなし）で、
   外して再度置けば同じ UID がもう一度発火する（契約 §8 を UID 単位に拡張）。
 - reader_configs: [{"name": "...", "reader": 0, "role": "seat", "seat": 1}, ...] の形式。
-  `reader`（任意・既定 0）は **物理リーダーの index**（Get UID の P2, 契約 v1.2 §6 / ADR-0041）。
+  `reader`（任意・既定 0）は **物理リーダーの index**（Get UID の P2, 契約 v1.2 §6 / ADR-0052）。
   Windows の汎用 CCID ドライバは 1 インターフェース 1 slot しか公開しないため、PC/SC reader
   （`name`）は 1 つで、物理リーダー N 台は `reader` で選ぶ。`(name, reader)` の組で一意。
   role="board" は **役割だけ**を書く（位置は書かない）。ボード領域には board reader が N 台
   並んでいるだけで、どの台がどのストリートを受けるかは置き方次第（flop 3 枚が 3 台に散ることも、
   真ん中の 1 台に 2 枚載ることもある）。よって **board reader 全台を 1 つの論理ボード**として扱い、
   `board_index`（1..5）は **全台を通した検出順** = ディーラーが配った順で決める（契約 v1.3 §4 /
-  ADR-0042）。旧 config の `index` / `cards` は廃止（あれば WARN して無視）。
+  ADR-0053）。旧 config の `index` / `cards` は廃止（あれば WARN して無視）。
 
 設定例 (config.json, 本番 11 台 = 席 8 + board 3。reader 名は 1 つだけ):
     "rfid": {
@@ -95,7 +95,7 @@ class RFIDThread(threading.Thread):
             bridge_factory:   テスト用ブリッジファクトリ (reader_name: str, reader_index: int) -> bridge。
                               旧シグネチャ (reader_name) -> bridge も互換で受け付ける。
                               省略時は PCSCBridge を使用。
-            clock:            epoch 秒を返す時計（既定 time.time）。マック観測時刻の源（ADR-0044）。
+            clock:            epoch 秒を返す時計（既定 time.time）。マック観測時刻の源（ADR-0055）。
         """
         super().__init__(daemon=True, name="RFIDThread")
         self._queue = rfid_queue
@@ -118,7 +118,7 @@ class RFIDThread(threading.Thread):
         self._board_reader_ids: set[str] = set()
         # seat → reader_id（席のカード訂正でデバウンスを落とす対象。poll 時に学習する）。
         self._seat_reader_ids: dict[int, set[str]] = {}
-        # seat → **カードが席から消えた時刻**（epoch）。戻ってきたら消す（ADR-0044）。
+        # seat → **カードが席から消えた時刻**（epoch）。戻ってきたら消す（ADR-0055）。
         # fold を「判定」するためではなく、合成 fold に**実時刻を与える**ために使う
         # （プレイヤーはカードを持ち上げて見ることがあるので、不在そのものは fold を意味しない）。
         self._seat_absent_since: dict[int, float] = {}
@@ -187,7 +187,7 @@ class RFIDThread(threading.Thread):
         if removed:
             # カードが外れた（イベント不要）。**board の位置は解放しない**（ハンド内 append-only,
             # ISSUE-0026）。ミスディールで載せ替えるときは明示の訂正コマンドで解放する
-            # （`forget_board_position` / `forget_seat_cards`, ADR-0043）。
+            # （`forget_board_position` / `forget_seat_cards`, ADR-0054）。
             logger.debug("Card(s) removed from %s: %s", reader_id, sorted(removed))
 
         if cfg.get("role") == "board":
@@ -247,7 +247,7 @@ class RFIDThread(threading.Thread):
             self._last_uids[reader_id] = set()
         logger.info("新ハンド: board の位置割り当てをリセットしました")
 
-    # ――― マック観測（ADR-0044: 合成 fold に実時刻を与えるためだけに使う） ―――
+    # ――― マック観測（ADR-0055: 合成 fold に実時刻を与えるためだけに使う） ―――
 
     def _track_seat_presence(self, seat: int) -> None:
         """席のカードが「全部消えた」時刻を覚え、戻ってきたら忘れる。
@@ -271,7 +271,7 @@ class RFIDThread(threading.Thread):
         """席ごとの現在のカード在否（卓状態の表示用, `core/table_state.py`）。
 
         `{seat: {"present": bool, "absent_since": float | None, "uid_count": int}}`。
-        **「載っている」であって「ゲームに残っている」ではない**（ADR-0045 D4）。
+        **「載っている」であって「ゲームに残っている」ではない**（ADR-0056 D4）。
         まだ一度も検出していない席は現れない（= 未配布と区別できる）。
         """
         snapshot: dict[int, dict] = {}
@@ -298,10 +298,10 @@ class RFIDThread(threading.Thread):
             for reader_id in reader_ids:
                 self._last_uids[reader_id] = set()
 
-    # ――― ミスディール訂正（ADR-0043: 明示コマンドで 1 枚だけ載せ替える） ―――
+    # ――― ミスディール訂正（ADR-0054: 明示コマンドで 1 枚だけ載せ替える） ―――
 
     def forget_board_position(self, index: int) -> Optional[str]:
-        """board 位置 `index` の割り当てを 1 つだけ解放する（ミスディール訂正, ADR-0043）。
+        """board 位置 `index` の割り当てを 1 つだけ解放する（ミスディール訂正, ADR-0054）。
 
         ハンド内 append-only（ISSUE-0026）は「カードが見えなくなっただけでは解放しない」規則で、
         一瞬の読み落ちを誤って載せ替えと解釈しないための安全弁。ミスディールは **ディーラーが
@@ -329,7 +329,7 @@ class RFIDThread(threading.Thread):
         return uid
 
     def forget_seat_cards(self, seat: int) -> None:
-        """席 `seat` のリーダーのデバウンスを落とし、載っているカードを読み直させる（ADR-0043）。
+        """席 `seat` のリーダーのデバウンスを落とし、載っているカードを読み直させる（ADR-0054）。
 
         engine 側は `_hole_cards[seat]` を空にするので、**物理的に載っている 2 枚が改めて
         記録される**。ミスディールしたカードを先に外してから打つこと（外す前に打つと同じ
@@ -341,7 +341,7 @@ class RFIDThread(threading.Thread):
             return
         for reader_id in reader_ids:
             self._last_uids[reader_id] = set()
-        self._seat_absent_since.pop(seat, None)   # 訂正後の観測をやり直す（ADR-0044）
+        self._seat_absent_since.pop(seat, None)   # 訂正後の観測をやり直す（ADR-0055）
         logger.info("席 %d のカードを読み直します — 正しいカードを置き直してください", seat)
 
     def _assign_board_index(self, uid: str) -> Optional[int]:
@@ -391,13 +391,13 @@ class RFIDThread(threading.Thread):
         """旧 config（board reader ごとの `index` / `cards`）を使っていたら一度だけ警告する。
 
         v1.1/v1.2 は「1 台 = 1 ストリート専用（flop は 1 台に 3 枚重ね）」前提だったが、
-        実機は 3 台が並んでいるだけなので前提が成立しない（ISSUE-0024 / ADR-0042）。
+        実機は 3 台が並んでいるだけなので前提が成立しない（ISSUE-0024 / ADR-0053）。
         現在は全台を 1 つの論理ボードとして検出順に 1..5 を振るため、両フィールドは無視する。
         """
         stale = [k for k in ("index", "cards") if k in cfg]
         if stale:
             logger.warning(
                 "%s: board reader の %s は廃止されました（無視します）。ボード位置は "
-                "board reader 全台を通した検出順で決まります（ADR-0042）。config から削除してください",
+                "board reader 全台を通した検出順で決まります（ADR-0053）。config から削除してください",
                 reader_id, " / ".join(stale),
             )

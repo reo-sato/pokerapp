@@ -1,9 +1,9 @@
 """tests/test_table_state.py
 
-ADR-0045 D5: **RFID だけから導く卓状態**（カード / 有効席 / ストリート）。
+ADR-0056 D5: **RFID だけから導く卓状態**（カード / 有効席 / ストリート）。
 
 実プレイ環境で検証したいのはこの 3 つで、アクション推定には依存しない（推定はダミーでよい）。
-要点は **「札が載っている」と「ゲームに残っている」を混同しない**こと（ADR-0045 D4）。
+要点は **「札が載っている」と「ゲームに残っている」を混同しない**こと（ADR-0056 D4）。
 プレイヤーは札を持ち上げて見るので、不在は fold を意味しない。
 """
 from __future__ import annotations
@@ -287,7 +287,7 @@ class TestMonitorReader:
 
 
 class TestAnalyzeHistory:
-    """ADR-0045 D7 の計測: 反映遅延 / 不在時間 / ストリート遷移を履歴から出す。"""
+    """ADR-0056 D7 の計測: 反映遅延 / 不在時間 / ストリート遷移を履歴から出す。"""
 
     def _row(self, t: str, *, hand=1, street="preflop", observed=None, seats=()):
         row = {

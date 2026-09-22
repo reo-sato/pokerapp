@@ -1,4 +1,4 @@
-# 2026-09-12 — ミスディールの載せ替えを訂正できるようにする（ADR-0043）
+# 2026-09-12 — ミスディールの載せ替えを訂正できるようにする（ADR-0054）
 
 ## Goal
 
@@ -23,7 +23,7 @@ ISSUE-0026 で **「カードが見えなくなったら位置を解放する」
 実機で `Tc` が同じ位置で 10 回以上再検出）。解放に戻すと一瞬の読み落ちが載せ替えと解釈され、
 **同じ札が 2 か所 / 枚数の水増し**が再発する。
 
-→ **ミスディールはディーラーが宣言する明示イベント**として扱い、コマンドで解放する（ADR-0043）。
+→ **ミスディールはディーラーが宣言する明示イベント**として扱い、コマンドで解放する（ADR-0054）。
 
 ## Changed files
 
@@ -37,7 +37,7 @@ ISSUE-0026 で **「カードが見えなくなったら位置を解放する」
 | `api/client.py` | `send_control(..., index=)` |
 | `tests/test_misdeal_correction.py` | 新規 16 ケース（engine 8 / RFID 8） |
 | `tests/test_control_queue.py` / `tests/test_viewer_api_staff_lifecycle.py` | 新コマンド種別の翻訳・API 検証 |
-| `docs/adr/0043-*.md` / 契約 v1.4 / CLAUDE.md / CHANGELOG / decision-log | docs |
+| `docs/adr/0054-*.md` / 契約 v1.4 / CLAUDE.md / CHANGELOG / decision-log | docs |
 
 ## Expected vs implemented
 
@@ -51,7 +51,7 @@ ISSUE-0026 で **「カードが見えなくなったら位置を解放する」
 | iPad から操作できる | ✅ control queue に種別を additive 追加（API 検査 + client 引数まで） |
 | 監査痕が残る | ✅ 訂正したハンドは `needs_review` |
 
-## 設計上の選択（詳細は ADR-0043）
+## 設計上の選択（詳細は ADR-0054）
 
 - **absence + タイムアウトの自動解放は採らない**（実機の読み落ち間隔が数秒あり安全な閾値が引けない）。
 - **ボード全体の読み直しではなく位置指定**（全体だと同じ台に載った複数枚の順序が入れ替わりうる）。
@@ -76,6 +76,6 @@ python -m pytest tests/ -q --ignore=tests/test_vision.py
 
 ## Related
 
-- ADR-0043 / 契約 `docs/contracts/rfid-usb-ccid.md` v1.4 §4
-- ADR-0042 / ISSUE-0024・0025・0026（board 位置モデルの経緯 = 本 ADR の前提）
+- ADR-0054 / 契約 `docs/contracts/rfid-usb-ccid.md` v1.4 §4
+- ADR-0053 / ISSUE-0024・0025・0026（board 位置モデルの経緯 = 本 ADR の前提）
 - ADR-0039（control queue）/ ADR-0036（確定後のハンド訂正）/ ISSUE-0012（状態変更の一元化）

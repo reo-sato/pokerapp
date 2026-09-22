@@ -104,7 +104,7 @@ None observed（既存テストは無改修で通った = 1 枚運用の挙動�
 ## Related ADRs
 
 - `docs/adr/0034-rfid-usb-ccid-firmware-host-contract-freeze.md` — 本契約の freeze（v1.1 は additive）。
-- `docs/adr/0040-ccid-virtual-card-always-present.md` — slot 常時 present / カード有無は Get UID の SW
+- `docs/adr/0051-ccid-virtual-card-always-present.md` — slot 常時 present / カード有無は Get UID の SW
   （v1.1 でも前提として不変）。
 
 ## Related Issues

@@ -13,7 +13,7 @@
 
 ## Changed files
 
-### board を 1 つの論理ボードに（ADR-0042 / 契約 v1.3 §4）
+### board を 1 つの論理ボードに（ADR-0053 / 契約 v1.3 §4）
 
 - `rfid/reader_thread.py`
   - `_board_offsets`（reader_id → {uid: offset}）/ `_board_offset_memory` を廃止し、
@@ -63,7 +63,7 @@
 ### docs
 
 - `docs/issues/0024-board-readers-are-not-per-street.md`（新規, Fixed）
-- `docs/adr/0042-board-readers-share-one-logical-board.md`（新規, Accepted）
+- `docs/adr/0053-board-readers-share-one-logical-board.md`（新規, Accepted）
 - `docs/contracts/rfid-usb-ccid.md` → **v1.3**（header / §3 / §4 / §10）
 - `CLAUDE.md` / `CHANGELOG.md` / `docs/decision-log.md`
 
@@ -99,7 +99,7 @@
 - **ハンドの切れ目の扱い**: RFID 側のリセットは「ボードが 0 枚」に暗黙依存する。ボードを片付けずに
   次のハンドを始めると RFID 側の位置記憶が残る（engine の `_board_positions` は新ハンドでクリアされる）。
   運用手順に「ハンド終了でボードを下げる」を入れる。engine → RFIDThread の明示リセットは未実装
-  （ADR-0042 Alternatives 4）。
+  （ADR-0053 Alternatives 4）。
 - flop 内の左右順（1 台に同時に載ったぶん）は UID 順で不定 = 既知の制約（ISSUE-0024）。
 
 ## 追記（同日）: 初回実機通しで見つかった位置の再割り当てバグ（ISSUE-0025）
@@ -135,7 +135,7 @@
 回帰テストは **2 つの修正をそれぞれ単独で外すと落ちる**ことを確認済み
 （`test_same_card_seen_by_two_readers_keeps_one_position`）。831 passed。
 
-**学び**: 「同じ UID が複数 reader から発火し得る」ことは ADR-0042 の時点で分かっていた
+**学び**: 「同じ UID が複数 reader から発火し得る」ことは ADR-0053 の時点で分かっていた
 （デバウンスは reader 単位）はずなのに、位置割り当て側でその経路を考慮していなかった。
 UID をキーにする設計を選んだ以上、**同一 UID の再入は冪等**でなければならない。
 
@@ -214,5 +214,5 @@ append-only の期待値に更新（旧「解放スロットは再利用でき�
 
 ## Related
 
-- ISSUE-0024 / ADR-0042 / 契約 `rfid-usb-ccid.md` v1.3
+- ISSUE-0024 / ADR-0053 / 契約 `rfid-usb-ccid.md` v1.3
 - ISSUE-0021（poll 周期。`cards` は v1.1 でここから入った）
