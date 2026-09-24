@@ -52,6 +52,16 @@ $VenvDir    = Join-Path $AppDir "venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 $LogPath    = Join-Path $AppDir "install.log"
 
+# 取得元のブランチを覚える（installer\branch.txt, git 管理外）。update.cmd は -Branch を渡さないので、
+# 覚えたブランチが無いと既定の verify-v1 を取りに行き、別ブランチで入れた店舗 PC を古い版で上書きしてしまう。
+$BranchFile = Join-Path $PSScriptRoot "branch.txt"
+if ($PSBoundParameters.ContainsKey("Branch")) {
+    if (-not $DryRun) { try { Set-Content -Path $BranchFile -Value $Branch -Encoding ASCII } catch { } }
+} elseif (Test-Path $BranchFile) {
+    $saved = ([string](Get-Content -Path $BranchFile -Raw)).Trim()
+    if ($saved) { $Branch = $saved }
+}
+
 # 更新時に保持するもの（店舗固有の設定・データ）。core/backup.py のデータ一覧と揃える
 # （tests/test_installer.py が両者の整合を検査する）。
 $PreservedFiles = @(

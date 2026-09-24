@@ -26,9 +26,15 @@
     $Branch     = if ($env:POKERAPP_BRANCH) { $env:POKERAPP_BRANCH } else { "verify-v1" }
     $Repo       = if ($env:POKERAPP_REPO) { $env:POKERAPP_REPO } else { "reo-sato/pokerapp" }
     $installer  = Join-Path $InstallDir "installer\install.ps1"
+    # 取得元のブランチを覚えさせる（update.cmd が同じブランチから更新するため）。展開済みの install.ps1 が
+    # 古い版（覚える機能が無い）でも効くように、ここで書く。
+    $rememberBranch = {
+        try { Set-Content -Path (Join-Path $InstallDir "installer\branch.txt") -Value $Branch -Encoding ASCII } catch { }
+    }
 
     if (Test-Path $installer) {
         Write-Host "既にインストール済みです ($InstallDir)。更新モードで実行します。" -ForegroundColor Cyan
+        & $rememberBranch
         # .ps1 の直接実行は実行ポリシーに引っかかるので、明示的に Bypass で起動する。
         & powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Update -Branch $Branch -Repo $Repo
     } else {
@@ -59,7 +65,8 @@
         } finally {
             Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
         }
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $installer
+        & $rememberBranch
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Branch $Branch -Repo $Repo
     }
 
     if ($LASTEXITCODE -ne 0) {

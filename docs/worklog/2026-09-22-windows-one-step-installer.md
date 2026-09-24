@@ -131,6 +131,11 @@ GEEKOM A8（Windows 11 Pro、初期セットアップ直後・ローカルアカ
 6. **結果**: インストール → 設定（RFID = PC/SC、マイク off）→ リーダー確認 → ハンドロガー（`--cli`）と
    卓モニタを起動し、**iPhone から卓モニタの表示と反映を確認**。店舗 PC での通しは完了。卓モニタの表示に
    気になる点があるとの報告あり（詳細は未受領）。
+8. **`update.cmd` が既定の `verify-v1` を取りに行く問題**（ADR-0058 の反映前に判明）: 店舗 PC は別ブランチで
+   入れているので、`update.cmd` をダブルクリックすると古い版で上書きしてしまう。取得元のブランチを
+   `installer\branch.txt` に記録し、`-Branch` 無しの更新はそれを使うようにした（bootstrap も記録するので、
+   店舗 PC の古い install.ps1 のままでも 1 行インストールで更新すれば以後の `update.cmd` が正しいブランチになる）。
+   回帰: `TestFieldFindings::test_update_remembers_the_branch_it_was_installed_from` + DryRun 通し。
 7. 依頼元の手順書との差分として伝えたこと: 7（Python）はインストーラに置き換え / 7.5 の rfid_cards.json を
    空にしない（登録済みの 52 枚）/ 9（ESP32 を Wi-Fi・HTTP 8787 で繋ぐ前提）は USB 接続なので不要 /
    10（自動起動）はヘッドレスでの操作の形を決めてから。

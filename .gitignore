@@ -27,3 +27,4 @@ dist/
 # Windows ワンステップインストーラ（installer/install.ps1）が作るもの
 venv/
 install.log
+installer/branch.txt

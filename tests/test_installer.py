@@ -150,6 +150,15 @@ class TestFieldFindings:
         """-Update はファイルを差し替えても実行中の古いスクリプトで続きを走らせてしまう → 起動し直す。"""
         assert "-File $PSCommandPath" in self._install_ps1()
 
+    def test_update_remembers_the_branch_it_was_installed_from(self):
+        """update.cmd は -Branch を渡さない。覚えていないと既定の verify-v1 で別ブランチの導入を上書きする。"""
+        text = self._install_ps1()
+        assert '$PSBoundParameters.ContainsKey("Branch")' in text
+        assert "branch.txt" in text
+        boot = (ROOT / "installer/bootstrap.ps1").read_bytes().decode("utf-8")
+        assert "branch.txt" in boot, "古い install.ps1 のままでも効くよう bootstrap 側でも書く"
+        assert "installer/branch.txt" in (ROOT / ".gitignore").read_text(encoding="utf-8")
+
     def test_web_requests_skip_the_slow_progress_bar(self):
         for rel in PS1_FILES:
             raw = (ROOT / rel).read_bytes()
@@ -190,3 +199,19 @@ class TestPowerShell:
         assert not (app / "install.log").exists()      # DryRun は書かない
         assert not (app / "config.json").exists()
         assert not (app / "venv").exists()
+
+    def test_update_without_branch_uses_the_remembered_one(self, tmp_path: Path):
+        ps = _powershell()
+        app = tmp_path / "app"
+        (app / "installer").mkdir(parents=True)
+        shutil.copy(ROOT / "installer/install.ps1", app / "installer/install.ps1")
+        shutil.copy(ROOT / "config_default.json", app / "config_default.json")
+        (app / "installer/branch.txt").write_text("feature/store-pc\n", encoding="ascii")
+        r = subprocess.run(
+            ps + ["-ExecutionPolicy", "Bypass", "-File", str(app / "installer/install.ps1"),
+                  "-DryRun", "-NonInteractive", "-SkipModel", "-Update"],
+            capture_output=True, text=True, timeout=300,
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "refs/heads/feature/store-pc" in r.stdout      # verify-v1 に戻らない
+        assert (app / "installer/branch.txt").read_text(encoding="ascii").strip() == "feature/store-pc"
