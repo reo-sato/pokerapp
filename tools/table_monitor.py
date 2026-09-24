@@ -4,7 +4,8 @@
 
 実プレイ環境での検証用（ADR-0056 D5）:
 
-- **カード読み取り** — 各席の札とボードが読めているか。
+- **カード読み取り** — 各席の札とボードが読めているか。ボードに記録した札がいま読めていなければ
+  「外れた N s」と薄く出す（札を外したことが伝わっているか・差し直しを確かめ中か, ADR-0058）。
 - **有効席** — 誰に札が配られ、いま誰の札が卓上にあるか。**「載っている」と「ゲームに残っている」は
   別物**なので、配布 / 在否 / 離席秒数 / fold らしさを分けて出す（ADR-0056 D4）。手札が卓の中央
   （ボードのリーダーの上）を通過した席は「マック」と出す（ADR-0058）。
@@ -52,6 +53,8 @@ _PAGE = """<!doctype html>
  .card { background:#1e232b; border:1px solid #3a414d; border-radius:8px; padding:10px 12px;
          font-size:20px; font-weight:700; min-width:46px; text-align:center; }
  .card.red { color:#ff7b72; }
+ .card.gone { opacity:.5; border-style:dashed; }
+ .card .sub { display:block; font-size:11px; font-weight:400; color:#e3b341; }
  .street { font-size:22px; font-weight:700; margin-right:12px; }
  .seats { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px; }
  .seat { background:#1a1f27; border:1px solid #2d333b; border-radius:10px; padding:10px 12px; }
@@ -73,9 +76,10 @@ _PAGE = """<!doctype html>
 <div id="app">読み込み中…</div>
 <script>
 const RED = new Set(["h","d"]);
-function cardHtml(c){
+function cardHtml(c, away){
   const red = RED.has((c||"").slice(-1).toLowerCase());
-  return `<div class="card${red?" red":""}">${c}</div>`;
+  if (away == null) return `<div class="card${red?" red":""}">${c}</div>`;
+  return `<div class="card gone${red?" red":""}">${c}<span class="sub">外れた ${away}s</span></div>`;
 }
 function lagClass(s){ return s < 3 ? "ok" : (s < 15 ? "warn" : "bad"); }
 async function tick(){
@@ -106,7 +110,8 @@ async function tick(){
       ${d.engine_street?`／ engine: ${d.engine_street}`:""}
       ${d.button_seat?`／ ボタン: 席 ${d.button_seat}`:""}</div>
     <div class="board"><span class="street">${d.rfid_street||""}</span>
-      ${(d.board||[]).map(cardHtml).join("") || "<span class='meta'>ボードなし</span>"}</div>
+      ${(d.board||[]).map(c => cardHtml(c, (d.board_away_sec||{})[c])).join("")
+        || "<span class='meta'>ボードなし</span>"}</div>
     <div class="seats">${seats}</div>
     ${tl?`<table class="tl"><tr><td colspan="3">ボード配布時刻</td></tr>${tl}</table>`:""}`;
 }
@@ -148,12 +153,14 @@ def _format_text(state: dict) -> str:
     """端末表示（`--once`）。"""
     if state.get("error"):
         return state["error"]
+    away = state.get("board_away_sec") or {}
+    board = [f"{c}(外れた {away[c]}s)" if c in away else c for c in state.get("board") or []]
     lines = [
         f"session {state.get('session_id')} / hand {state.get('hand_id')} "
         f"/ 更新 {state.get('updated_at')} (遅延 {state.get('age_sec')}s)",
         f"street(RFID) {state.get('rfid_street')}  engine {state.get('engine_street')}  "
         f"button {state.get('button_seat') or '—'}  "
-        f"board {' '.join(state.get('board') or []) or '—'}",
+        f"board {' '.join(board) or '—'}",
     ]
     for s in state.get("seats", []):
         if s["present"]:

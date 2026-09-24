@@ -45,14 +45,17 @@ config の記載順で決まるため。1 台に複数枚載ったぶんの左�
 - **配り直しは入力なしで反映する**（`release_sec`）。前の札が `release_sec` 以上見えず、
   **新しい札が載り続けた**ときだけ差し替える。一瞬の読み落ちでは差し替わらない（ISSUE-0026）。
   ボードは次の 3 通り（どれにも当たらなければ次の空き位置 = 従来どおり）:
-  1. **1 枚だけの差し直し**: 前の札が消えた直後（`redeal_window_sec` 以内）に、**前の札を読んで
-     いたリーダーの上**に新しい札が載り続けたら、その位置を差し替える。前の札が `release_sec`
-     見えなくなるまで待ち、その間に戻れば新しい札は次の位置（読み落ちだった）。別のリーダーの
-     札が読み落ちている間に次のストリートの札が来ても、次の位置のまま。
-  2. **flop 全体の配り直し**: flop の札が全部 `release_sec` 以上見えなければ、時間によらず
+  1. **1 枚だけの差し直し**: 前の札が消えた近くに新しい札が載り続けたら、その位置を差し替える。
+     前の札が `redeal_confirm_sec` 見えないのを確かめてから反映し、その間に戻れば新しい札は次の
+     位置（読み落ちだった）。flop の札は「前の札を読んでいたリーダー」+ 消えてから
+     `redeal_window_sec` 以内、**最後に配った turn / river** は「同じか隣のリーダー」+ 時間は
+     問わない（位置がリーダーの境目にある / 間を空けて配り直す）。別のリーダーの札が読み落ちて
+     いる間に次のストリートの札が来ても、次の位置のまま。途中で読めなくなったことのある札は
+     厳しい側（同じリーダー・時間窓・`release_sec`）で判断する。
+  2. **flop 全体の配り直し**: flop の札が全部 `redeal_confirm_sec` 以上見えなければ、時間によらず
      flop の位置を若い順に差し替える（早すぎた flop を戻して後から配り直した）。
-  3. **6 枚目**: 5 枚埋まったあとに新しい札が確定し、5 枚のうち 1 枚だけが消えていれば、その札を
-     抜いて後ろを詰める（早すぎた turn を外して、間を空けて配り直した等）。
+  3. **6 枚目**: 5 枚埋まったあとに新しい札が確定し、5 枚のうち 1 枚だけが `release_sec` 以上
+     消えていれば、その札を抜いて後ろを詰める。
   席では、同じハンドで別の席に記録した札が、元の席から消えて新しい席に載り続けたら移す
   （配り直しで席が変わった）。
 
@@ -87,6 +90,7 @@ DEFAULT_COMMIT_SEC = 2.0    # ボードの札はこの秒数載り続けてか�
 DEFAULT_GAP_SEC = 1.5       # この秒数までの途切れは「載り続けている」とみなす（間欠読みの許容）
 DEFAULT_RELEASE_SEC = 6.0   # 前の札がこの秒数以上見えないときだけ、新しい札で差し替える（配り直し）
 DEFAULT_REDEAL_WINDOW_SEC = 30.0  # ボードの札が消えてからこの秒数以内に同じリーダーへ置かれた札は差し直し
+DEFAULT_REDEAL_CONFIRM_SEC = 3.0  # ボードの差し直しで、前の札が見えないことを確かめる秒数
 
 
 @dataclass
@@ -133,6 +137,7 @@ class RFIDThread(threading.Thread):
         gap_sec: float = 0.0,
         release_sec: Optional[float] = None,
         redeal_window_sec: Optional[float] = None,
+        redeal_confirm_sec: Optional[float] = None,
     ) -> None:
         """
         Args:
@@ -158,6 +163,10 @@ class RFIDThread(threading.Thread):
             redeal_window_sec: ボードの 1 枚だけの差し直しとみなす時間窓。前の札が消えてから
                               この秒数以内に、前の札を読んでいたリーダーへ新しい札が置かれたら差し替える。
                               None = 1 枚だけの差し直しは扱わない（flop 全体と 6 枚目の詰め直しだけ）。
+                              最後に配った turn / river は時間窓によらない。
+            redeal_confirm_sec: ボードの差し直し（1 枚 / flop 全体）で、前の札が見えないことを
+                              確かめる秒数。None = `release_sec` と同じ。途中で読めなくなったことの
+                              ある札は常に `release_sec` を使う。
         """
         super().__init__(daemon=True, name="RFIDThread")
         self._queue = rfid_queue
@@ -201,7 +210,14 @@ class RFIDThread(threading.Thread):
         self._redeal_window_sec = (
             None if redeal_window_sec is None else max(0.0, float(redeal_window_sec))
         )
+        self._redeal_confirm_sec = (
+            self._release_sec if redeal_confirm_sec is None else max(0.0, float(redeal_confirm_sec))
+        )
         self._tracking = self._commit_sec > 0 or self._release_sec is not None
+        # board reader の左からの並び（config の記載順, 0 始まり）。差し直しの「近くのリーダー」と
+        # ログの「左から N 台目」に使う。
+        board_ids = [f"reader_{i}" for i, c in enumerate(reader_configs) if c.get("role") == "board"]
+        self._board_order: dict[str, int] = {rid: k for k, rid in enumerate(board_ids)}
         # 別スレッド（IntegrationThread）からの新ハンド / 訂正と poll の状態更新を直列化する。
         # 保持するのは状態の更新の間だけ（リーダーとの通信中は持たない）。
         self._lock = threading.RLock()
@@ -462,25 +478,28 @@ class RFIDThread(threading.Thread):
             return []               # まだ確定しない（中央を通過する札かもしれない）
 
         slot_uid = {i: u for u, i in self._board_indexes.items()}
-        index = self._flop_redeal_slot(run, slot_uid, now)
-        if index is None:
+        index, waiting = self._flop_redeal_slot(uid, run, slot_uid, now)
+        if index is None and not waiting:
             candidates = self._redeal_candidates(run, slot_uid)
-            ready = [i for i in candidates if self._is_gone(slot_uid[i], now)]
-            if candidates and not ready:
-                # 前の札が消えた直後に、同じリーダーの上へ置かれた。差し直しか（前の札が戻らない）、
+            ready = [i for i, confirm in candidates
+                     if self._absent_for("board", slot_uid[i], now) >= confirm]
+            if ready:
+                index = ready[0]
+            elif candidates:
+                # 前の札が消えた直後に、その近くへ置かれた。差し直しか（前の札が戻らない）、
                 # 読み落ちだったか（前の札が戻る）が分かるまで位置を決めない。
+                waiting = [i for i, _ in candidates]
                 if not run.noted:
                     logger.info(
-                        "ボードの新しい札 %s: 同じリーダーから %s が消えた直後です — "
-                        "差し直しか確かめています（前の札が %.0f 秒見えなければ差し替え）",
-                        self._card_master.lookup(uid) or uid,
-                        ", ".join(self._card_master.lookup(slot_uid[i]) or slot_uid[i]
-                                  for i in candidates),
-                        self._release_sec,
+                        "ボードの新しい札 %s（%s）: %s が消えた直後です — 差し直しか確かめています"
+                        "（前の札が %.0f 秒見えなければ差し替え）",
+                        self._card_name(uid), self._reader_label(run.readers),
+                        ", ".join(self._slot_label(i, slot_uid[i], now) for i in waiting),
+                        min(confirm for _, confirm in candidates),
                     )
                     run.noted = True
-                return []
-            index = ready[0] if ready else None
+        if waiting:
+            return []
 
         run.fired = True
         if index is not None:
@@ -489,6 +508,7 @@ class RFIDThread(threading.Thread):
         if free:
             self._board_indexes[uid] = free[0]
             self._board_first_seen[uid] = run.first_seen
+            self._log_board_commit(uid, run, free[0], slot_uid, now)
             return [self._run_event(uid, run, "board", None, board_index=free[0])]
         rebuilt = self._rebuild_board(uid, run, slot_uid, now)
         if rebuilt:
@@ -509,50 +529,122 @@ class RFIDThread(threading.Thread):
         run = self._runs.get(("board", uid))
         return run.readers if run is not None else set()
 
-    def _flop_redeal_slot(self, run: _Run, slot_uid: dict[int, str], now: float) -> Optional[int]:
-        """flop が丸ごと配り直されたとき、新しい札が差し替える位置（無ければ None）。
+    def _flop_redeal_slot(
+        self, uid: str, run: _Run, slot_uid: dict[int, str], now: float,
+    ) -> tuple[Optional[int], bool]:
+        """flop が丸ごと配り直されたとき、新しい札が差し替える位置と「まだ確かめ中か」。
 
-        flop の札が**全部** `release_sec` 以上見えず、新しい札が flop の札を読んでいたリーダーの
-        上に載ったら、時間によらず flop の若い位置から差し替える（早すぎた flop を戻し、ベッティングの
-        後で配り直した）。残りの消えた flop の札は、続けて確定した新しい札が順に差し替える。
+        flop の札が**全部**見えず、新しい札が flop の札を読んでいたリーダーの上に載ったら、全部が
+        `redeal_confirm_sec` 以上見えないのを確かめてから、**時間によらず** flop の若い位置から
+        差し替える（早すぎた flop を戻し、ベッティングの後で配り直した）。残りの消えた flop の札は、
+        続けて確定した新しい札が順に差し替える（新しい flop が前と違う並べ方でも取りこぼさない）。
         """
         if self._release_sec is None:
-            return None
+            return None, False
+        present = self._loc_present.get("board", set())
         self._board_pending = {
-            u for u in self._board_pending if u in self._board_indexes and self._is_gone(u, now)
+            u for u in self._board_pending if u in self._board_indexes and u not in present
         }
         if self._board_pending:
-            return min(self._board_indexes[u] for u in self._board_pending)
+            return min(self._board_indexes[u] for u in self._board_pending), False
         flop = [i for i in _FLOP_SLOTS if i in slot_uid]
-        if not flop or not all(self._is_gone(slot_uid[i], now) for i in flop):
-            return None
+        if not flop or any(slot_uid[i] in present for i in flop):
+            return None, False
         if not any(self._board_readers_of(slot_uid[i]) & run.readers for i in flop):
-            return None
+            return None, False
+        if any(self._absent_for("board", slot_uid[i], now) < self._redeal_confirm_sec for i in flop):
+            if not run.noted:
+                logger.info(
+                    "ボードの新しい札 %s（%s）: flop の札が全部消えた直後です — 配り直しか確かめています",
+                    self._card_name(uid), self._reader_label(run.readers),
+                )
+                run.noted = True
+            return None, True
         self._board_pending = {slot_uid[i] for i in flop[1:]}
-        return flop[0]
+        return flop[0], False
 
-    def _redeal_candidates(self, run: _Run, slot_uid: dict[int, str]) -> list[int]:
-        """1 枚だけの差し直しで、新しい札が差し替えるかもしれない位置（若い順）。
+    def _redeal_candidates(
+        self, run: _Run, slot_uid: dict[int, str],
+    ) -> list[tuple[int, float]]:
+        """1 枚だけの差し直しで、新しい札が差し替えるかもしれない位置と、前の札が見えないことを
+        確かめる秒数（位置の若い順）。
 
-        前の札が (1) いま見えず、(2) 新しい札が最初に見えた時刻の `redeal_window_sec` 前より後まで
-        見えていて、(3) 新しい札を読んだリーダーで読まれていた、の 3 つを満たすもの。ディーラーは
-        取り除いた札の場所に新しい札を置くので (3) が「同じ場所」の根拠になる。別のリーダーの札が
-        読み落ちている間に次のストリートの札が来ても、ここには入らない（次の位置のまま）。
+        前の札が**いま見えない**ことに加えて:
+
+        - **最後に配った turn / river**（いちばん後ろの 4・5 枚目）: 新しい札が**同じか隣の**
+          リーダーで読まれた（位置がリーダーの境目にあると、置き直した札を隣の台が読む）。時間は
+          問わない（早すぎた turn を外し、ベッティングの後で配り直すこともある）。
+        - **それ以外**（flop の札・後ろに札がある札）: 前の札を読んでいたリーダーで新しい札が読まれ、
+          前の札が消えてから `redeal_window_sec` 以内に新しい札が現れた。ディーラーは取り除いた札の
+          場所に新しい札を置くので、同じリーダーが「同じ場所」の根拠になる。別のリーダーの札が読み
+          落ちている間に次のストリートの札が来ても、ここには入らない（次の位置のまま）。
+
+        確定したあとに一度途切れて戻った札（読めにくい場所にある）は、消えても取り除いたとは
+        限らないので、常に同じリーダー・時間窓・`release_sec` の厳しい側で判断する。
         """
         if self._release_sec is None or self._redeal_window_sec is None:
             return []
         present = self._loc_present.get("board", set())
-        candidates: list[int] = []
+        latest = max(slot_uid) if slot_uid else 0
+        candidates: list[tuple[int, float]] = []
         for index, old in sorted(slot_uid.items()):
             old_run = self._runs.get(("board", old))
             if old in present or old_run is None:
                 continue
-            if old_run.last_seen < run.first_seen - self._redeal_window_sec:
+            flaky = old_run.first_seen > self._board_first_seen.get(old, old_run.first_seen)
+            newest = index == latest and index > _FLOP_SLOTS[-1] and not flaky
+            if not newest and old_run.last_seen < run.first_seen - self._redeal_window_sec:
                 continue            # 新しい札よりずっと前から読めていない札（読み落ち続けている）
-            if not old_run.readers & run.readers:
+            if newest:
+                if not self._near(old_run.readers, run.readers):
+                    continue
+            elif not old_run.readers & run.readers:
                 continue            # 別の場所の札
-            candidates.append(index)
+            candidates.append((index, self._release_sec if flaky else self._redeal_confirm_sec))
         return candidates
+
+    def _near(self, a: set[str], b: set[str]) -> bool:
+        """同じ board reader か、左右に隣り合う board reader（config の記載順）で読まれた。"""
+        if a & b:
+            return True
+        oa = [self._board_order[r] for r in a if r in self._board_order]
+        ob = [self._board_order[r] for r in b if r in self._board_order]
+        return any(abs(x - y) <= 1 for x in oa for y in ob)
+
+    def _card_name(self, uid: str) -> str:
+        return self._card_master.lookup(uid) or uid
+
+    def _reader_label(self, readers: set[str]) -> str:
+        """board reader を「左から N 台目」で表す（現場で config の並びと突き合わせるため）。"""
+        order = sorted(self._board_order[r] + 1 for r in readers if r in self._board_order)
+        if order:
+            return "左から " + "・".join(str(k) for k in order) + " 台目"
+        return "・".join(sorted(readers)) or "リーダー不明"
+
+    def _slot_label(self, index: int, uid: str, now: Optional[float] = None) -> str:
+        """ログ用「7c（4 枚目・左から 2 台目[・3.2 秒前から]）」。`now` を渡すと見えなくなってからの秒数も。"""
+        run = self._runs.get(("board", uid))
+        parts = [f"{index} 枚目", self._reader_label(run.readers if run is not None else set())]
+        if now is not None and run is not None:
+            parts.append(f"{now - run.last_seen:.1f} 秒前から")
+        return f"{self._card_name(uid)}（{'・'.join(parts)}）"
+
+    def _log_board_commit(
+        self, uid: str, run: _Run, index: int, slot_uid: dict[int, str], now: float,
+    ) -> None:
+        """ボードの札を空き位置に入れたことを、読んだリーダーと「いま見えていない札」付きで残す。
+
+        差し直しのつもりが次の位置に入ったとき、原因（前の札がまだ読めていた / 別の場所に置いた /
+        時間が空いた）をログだけで切り分けるため。
+        """
+        present = self._loc_present.get("board", set())
+        missing = [self._slot_label(i, u, now) for i, u in sorted(slot_uid.items())
+                   if u not in present]
+        logger.info(
+            "ボードの札 %s を %d 枚目にしました（%s）%s",
+            self._card_name(uid), index, self._reader_label(run.readers),
+            f" — 見えていない札: {', '.join(missing)}" if missing else " — 見えていない札なし",
+        )
 
     def _replace_board_card(self, uid: str, run: _Run, index: int, old: str) -> RFIDEvent:
         self._forget_board_uid(old)
@@ -560,8 +652,8 @@ class RFIDThread(threading.Thread):
         self._board_first_seen[uid] = run.first_seen
         replaces = self._card_master.lookup(old) or None
         logger.info(
-            "配り直しを検出: ボード %d 枚目を差し替えました（%s → %s）",
-            index, replaces or old, self._card_master.lookup(uid) or uid,
+            "配り直しを検出: ボード %d 枚目を差し替えました（%s → %s, %s）",
+            index, replaces or old, self._card_name(uid), self._reader_label(run.readers),
         )
         return self._run_event(uid, run, "board", None, board_index=index, replaces=replaces)
 
@@ -747,6 +839,28 @@ class RFIDThread(threading.Thread):
                     "mucked_at": self._mucked_at.get(seat),
                 }
         return snapshot
+
+    def board_presence(self) -> dict[str, float]:
+        """ボードに記録した札のうち、いま読めていない札 → 見えなくなった時刻（epoch）。
+
+        卓モニタの「外れた」表示用（ADR-0058）。札を外したことが伝わっているか、差し直しの札が
+        まだ確かめ中かを卓の脇から見られるようにする。一瞬の読み落ち（`gap_sec` 以内）は含めない。
+        記録（engine の board）は変えない = 表示だけ。従来の解釈（最初に見えた瞬間に確定）では空。
+        """
+        if not self._tracking:
+            return {}
+        now = self._clock()
+        absent: dict[str, float] = {}
+        with self._lock:
+            present = self._loc_present.get("board", set())
+            for uid in self._board_indexes:
+                run = self._runs.get(("board", uid))
+                if uid in present or run is None or now - run.last_seen <= self._gap_sec:
+                    continue
+                card = self._card_master.lookup(uid)
+                if card:
+                    absent[card] = run.last_seen
+        return absent
 
     def reset_for_new_hand(self) -> None:
         """新ハンドの同期点（board 位置 + マック観測 + 席の記録をまとめて捨てる）。

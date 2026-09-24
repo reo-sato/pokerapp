@@ -179,6 +179,7 @@ class IntegrationThread(threading.Thread):
         seat_presence: Optional[Callable[[], dict]] = None,
         table_state_writer: "Optional[TableStateWriter]" = None,
         control_conf_threshold: float = 0.0,
+        board_presence: Optional[Callable[[], dict]] = None,
     ) -> None:
         """
         Args:
@@ -216,6 +217,9 @@ class IntegrationThread(threading.Thread):
             control_conf_threshold: 制御語（new_hand/winner/showdown）を受理する Whisper 信頼度の
                           下限（ADR-0049 G1）。0.0（既定）で無効 = 従来挙動。閾値未満の制御語は
                           状態を動かさず保留レコード（needs_review）として on_action にのみ流す。
+            board_presence: ボードに記録した札のうち、いま読めていない札 → 見えなくなった時刻を返す関数
+                         （`RFIDThread.board_presence`, ADR-0058）。卓状態の「外れた」表示にだけ使い、
+                         ボードの記録は変えない。None なら表示しない。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -238,6 +242,7 @@ class IntegrationThread(threading.Thread):
         self._on_card_correction = on_card_correction
         self._seat_cards_absent_since = seat_cards_absent_since
         self._seat_presence = seat_presence
+        self._board_presence = board_presence
         self._table_state_writer = table_state_writer
         # 定期 publish の最終時刻。カードが**外れた**ときは RFIDEvent が出ないので
         # （デバウンスは増えた UID にしか反応しない）、fold を卓状態に映すには定期更新が要る。
@@ -885,6 +890,12 @@ class IntegrationThread(threading.Thread):
                 presence = self._seat_presence() or {}
             except Exception:  # noqa: BLE001 — 観測が取れなくても記録は続ける
                 logger.exception("seat_presence failed — 在否なしで卓状態を出します")
+        board_absent: dict = {}
+        if self._board_presence is not None:
+            try:
+                board_absent = self._board_presence() or {}
+            except Exception:  # noqa: BLE001 — 表示用。取れなくても卓状態は出す
+                logger.exception("board_presence failed — ボードの在否なしで卓状態を出します")
         try:
             seats = sorted(set(gs.get_stacks()) | set(presence))
             state = build_table_state(
@@ -900,6 +911,7 @@ class IntegrationThread(threading.Thread):
                 engine_street=gs.street,
                 button_seat=getattr(gs, "button_seat", None),
                 position_map=self._safe_position_map(),
+                board_absent_since=board_absent,
             )
         except Exception:  # noqa: BLE001 — 表示用の派生。失敗でハンドを止めない
             logger.exception("卓状態の組み立てに失敗しました — スキップします")

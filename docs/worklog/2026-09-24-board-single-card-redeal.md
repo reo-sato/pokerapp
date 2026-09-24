@@ -86,9 +86,62 @@ ADR-0058 D3 のボードの規則は「ストリートの札が**全部** `relea
       運用は「前の札を先に取る」（usage.md に記載）。
 - [ ] `redeal_window_sec` / `release_sec` の実測による調整。
 
+## 追補: 店舗での確認と修正（2026-09-24 夜, ADR-0058 追記 2）
+
+### 報告とログ
+
+「フロップの変更はうまく行っていますが、ターンは外したカードが消えず、リバーへ遷移してしまいます。また反映に
+かなり時間がかかっているようです」。店舗 PC の `logs/pokerapp.log`:
+
+```
+22:23:26 ボードの新しい札 5c: 同じリーダーから 6c が消えた直後です — 差し直しか確かめています（前の札が 6 秒見えなければ差し替え）
+22:23:38 配り直しを検出: ボード 2 枚目を差し替えました（6c → 3c）
+```
+
+- flop: 5c を置いたが 6 秒の確認中（モニタが変わらない）に 5c を外し、3c を置き直していた = 「遅い」。
+- turn: 「確かめています」が出ていない = 新しい札は差し直しの候補なしで 5 枚目。候補から外れる条件は
+  「別のリーダーで読まれた」「30 秒超」「前の札がまだ読めていた」。3 台で 5 枚を受けるので turn の位置は
+  リーダーの境目にあり、隣の台が読んだのが最有力（30 秒超もあり得る）。当時のログでは確定できないので、
+  切り分け用のログと卓モニタの表示を足した。
+
+### 変更
+
+- `rfid/reader_thread.py`:
+  - `_redeal_candidates` が `(位置, 確かめる秒数)` を返す。最後に配った turn / river（最大の位置 ≥ 4）は
+    `_near`（同じか隣の board reader, config の左からの並び = `_board_order`）+ 時間窓なし。それ以外は同じ
+    リーダー + 時間窓。**一度読めなくなって戻った札**（最新の期間の開始 > 確定時の開始 = `_board_first_seen`）は
+    同じリーダー + 時間窓 + `release_sec`。
+  - `redeal_confirm_sec`（既定 `None` = `release_sec`、本番 3.0）。
+  - `_flop_redeal_slot` は flop が全部見えなくなった時点で新しい札を待たせ、全部が確認秒数以上見えないのを
+    確かめてから差し替える（`(位置, 待つか)` を返す）。pending は「いま見えていない」で保つ。
+  - `_log_board_commit`: 空き位置に入れるたびに INFO「ボードの札 X を N 枚目にしました（左から K 台目）—
+    見えていない札: …（位置・リーダー・何秒前から）」。差し替え・待機のログにもリーダーを出す。
+  - `board_presence()`: 記録したボードの札のうち、いま読めていない札（`gap_sec` 超）→ 見えなくなった時刻。
+- `core/table_state.py`: `TableState.board_away_sec`（`build_table_state(board_absent_since=...)`、ボードに無い札は無視）。
+- `integration/engine.py`: `board_presence` 提供関数（失敗しても卓状態は出す）。`main.py`: 2 か所で結線 +
+  `_rfid_tracking_kwargs` に `redeal_confirm_sec`。`config_default.json`: `redeal_confirm_sec: 3.0` と説明。
+- `tools/table_monitor.py`: 外れた札を破線・薄く + 「外れた N s」（端末表示も）。headless Chromium で描画を確認。
+- `tests/test_rfid_table_flow.py`: テスト用の卓を board reader 3 台（左・中・右）に。確認 3 秒に合わせて時刻を
+  直し、新規 11 件（47 件）。各規則（隣の台 / 時間窓なし / 読めなくなった札 / 確認 3 秒）を 1 つずつ外すと対応する
+  テストが落ちることを確認（mutation）。
+- docs: ADR-0058 追記 2（Alternatives 6・7）/ ISSUE-0035 追加の報告 2 / 契約 v1.7 / CLAUDE.md / usage.md /
+  CHANGELOG / decision-log。
+
+### テスト
+
+- `pytest tests/test_rfid_table_flow.py` — 47 passed。
+- `pytest tests/ -q --ignore=tests/test_vision.py`（pwsh あり）— **1232 passed**、skip 0。`ruff check .` — clean。
+
+### 残
+
+- [ ] 店舗で再確認（turn の差し直し / 取ってすぐ置く flop の差し直し / モニタの「外れた」）。turn がまだ 5 枚目に
+      なるなら、「枚目にしました」のログ行で原因（見えていない札なし = 前の札がまだ読めていた / 別の台）を確認。
+- [ ] 既知の制約: turn / river の読み落ち（同じか隣の台）が 3 秒以上続く間に次の札が置かれると差し直しとして
+      記録する（`needs_review`, 並びだけが入れ替わる）。一度読めなくなった札は対象外。
+
 ## Related ADRs
 
-- ADR-0058（追記）/ ADR-0053 / ADR-0054 / ADR-0055
+- ADR-0058（追記 / 追記 2）/ ADR-0053 / ADR-0054 / ADR-0055
 
 ## Related Issues
 

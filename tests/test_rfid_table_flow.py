@@ -57,18 +57,20 @@ class _Bridge:
 
 
 class Table:
-    """席 3 つ + ボード 2 台（左 BL / 右 BR）の卓を、時計を手で進めながら回す決定的ドライバ。"""
+    """席 3 つ + ボード 3 台（左 BL / 中 BM / 右 BR）の卓を、時計を手で進めながら回す決定的ドライバ。"""
 
     CONFIGS = [
         {"name": "S1", "role": "seat", "seat": 1},
         {"name": "S2", "role": "seat", "seat": 2},
         {"name": "S3", "role": "seat", "seat": 3},
         {"name": "BL", "role": "board"},
+        {"name": "BM", "role": "board"},
         {"name": "BR", "role": "board"},
     ]
 
     def __init__(self, tmp_path: Path, *, commit: float = 2.0, gap: float = 1.5,
-                 release: float | None = 6.0, window: float | None = 30.0) -> None:
+                 release: float | None = 6.0, window: float | None = 30.0,
+                 confirm: float | None = 3.0) -> None:
         cm = CardMaster(tmp_path / "cards.json")
         for uid, card in CARDS.items():
             cm.register(uid, card)
@@ -81,6 +83,7 @@ class Table:
             bridge_factory=lambda name, reader=0: self.bridges[name],
             clock=lambda: self.now,
             commit_sec=commit, gap_sec=gap, release_sec=release, redeal_window_sec=window,
+            redeal_confirm_sec=confirm,
         )
 
     def put(self, reader: str, *uids: str) -> None:
@@ -293,23 +296,31 @@ def _deal_flop(t: Table) -> list[RFIDEvent]:
 class TestSingleBoardCardRedeal:
     """ボードは 1 枚だけ差し直すことがある（flop 全体を外すとは限らない）。"""
 
-    def test_one_flop_card_swapped_in_place_keeps_its_position(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
-    ):
+    def test_one_flop_card_swapped_in_place_keeps_its_position(self, tmp_path: Path):
         t = Table(tmp_path)
         _deal_flop(t)
         t.put("BL", "04:F1")                      # Tc だけ取る
         t.run(1.0)
         t.put("BL", "04:F1", "04:E1")             # 同じ場所に新しい札
         placed_at = t.now + 0.3
-        with caplog.at_level(logging.INFO, logger="rfid.reader_thread"):
-            assert t.run(2.4) == []               # Tc が 6 秒見えなくなるまで待つ（戻れば読み落ち）
-            events = t.run(3.0)
-        assert sum("差し直しか確かめています" in r.getMessage() for r in caplog.records) == 1
+        events = t.run(2.4)                       # 新しい札が確定した時点で Tc は 3 秒以上消えている
         assert _board(events) == [("Ah", 2, "Tc")]
         assert events[0].timestamp == pytest.approx(placed_at)   # 置いた時刻（ADR-0055）
         t.put("BR", "04:F3", "04:D1")
         assert _board(t.run(2.4)) == [("7c", 4, None)]            # turn は 4 枚目のまま
+
+    def test_quick_swap_waits_until_the_old_card_is_gone_3_seconds(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ):
+        """取ってすぐ置くと、前の札が 3 秒見えないのを確かめてから差し替える（戻れば読み落ち）。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BL", "04:F1", "04:E1")             # Tc を取り、同じ動きで Ah を置く
+        with caplog.at_level(logging.INFO, logger="rfid.reader_thread"):
+            assert t.run(2.4) == []
+            events = t.run(1.5)
+        assert _board(events) == [("Ah", 2, "Tc")]
+        assert sum("差し直しか確かめています" in r.getMessage() for r in caplog.records) == 1
 
     def test_new_card_put_down_just_before_the_old_one_is_taken(self, tmp_path: Path):
         """新しい札を先に置いて、すぐ前の札を取っても差し直しになる（確定を待つ間に取れば）。"""
@@ -328,16 +339,106 @@ class TestSingleBoardCardRedeal:
         t.put("BR", "04:F3")
         t.run(1.0)
         t.put("BR", "04:F3", "04:E1")
-        assert _board(t.run(6.0)) == [("Ah", 4, "7c")]
+        assert _board(t.run(2.4)) == [("Ah", 4, "7c")]
         t.put("BR", "04:F3", "04:E1", "04:D2")
         assert _board(t.run(2.4)) == [("6h", 5, None)]
+
+    def test_turn_swapped_onto_the_neighbouring_reader(self, tmp_path: Path):
+        """turn の位置がリーダーの境目にあり、置き直した札を隣の台が読んでも差し直しになる（店舗の実卓）。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BM", "04:D1")                      # turn を中のリーダーが読んだ
+        assert _board(t.run(2.4)) == [("7c", 4, None)]
+        t.put("BM")
+        t.run(1.0)
+        t.put("BR", "04:F3", "04:E1")             # 置き直した札は右のリーダーが読んだ
+        assert _board(t.run(2.4)) == [("Ah", 4, "7c")]
+
+    def test_turn_swapped_after_a_long_pause(self, tmp_path: Path):
+        """最後に配った turn は、外してから時間が空いても差し直しになる（早すぎた turn の配り直し）。"""
+        t = Table(tmp_path)
+        dealt = _deal_flop(t)
+        t.put("BR", "04:F3", "04:D1")
+        dealt += t.run(2.4)
+        t.put("BR", "04:F3")
+        t.run(45.0)
+        t.put("BR", "04:F3", "04:E1")
+        turn_at = t.now + 0.3
+        swapped = t.run(2.4)
+        assert _board(swapped) == [("Ah", 4, "7c")]
+        t.put("BR", "04:F3", "04:E1", "04:D2")
+        river = t.run(2.4)
+        assert _board(river) == [("6h", 5, None)]
+
+        engine = _engine(tmp_path)
+        for ev in [*dealt, *swapped, *river]:
+            engine._process_rfid_event(ev)                        # noqa: SLF001
+        assert engine._board_cards == ["5d", "Tc", "2h", "Ah", "6h"]  # noqa: SLF001
+        assert engine._board_dealt_at[4] == pytest.approx(turn_at)    # noqa: SLF001
+        assert engine._hand_needs_review is True                      # noqa: SLF001
+
+    def test_flop_card_needs_the_same_reader(self, tmp_path: Path):
+        """flop の札は前の札と同じリーダーの上に置き直したときだけ差し直し（隣の台なら次の位置）。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BL", "04:F1")
+        t.run(1.0)
+        t.put("BM", "04:E1")
+        assert _board(t.run(2.4)) == [("Ah", 4, None)]
+
+    def test_last_card_on_a_far_reader_is_not_a_swap(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ):
+        """隣でもない台に置かれた札は、最後の札が消えていても次の位置。ログに理由が分かる形で残す。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BL", "04:F1", "04:F2", "04:D1")    # turn を左のリーダーが読んだ
+        assert _board(t.run(2.4)) == [("7c", 4, None)]
+        t.put("BL", "04:F1", "04:F2")
+        t.run(1.0)
+        t.put("BR", "04:F3", "04:E1")
+        with caplog.at_level(logging.INFO, logger="rfid.reader_thread"):
+            assert _board(t.run(2.4)) == [("Ah", 5, None)]
+        msg = next(r.getMessage() for r in caplog.records if "5 枚目にしました" in r.getMessage())
+        assert "左から 3 台目" in msg
+        assert "7c（4 枚目・左から 1 台目・" in msg
+
+    def test_card_that_dropped_out_before_needs_the_same_reader_and_6_seconds(self, tmp_path: Path):
+        """確定後に一度読めなくなって戻った札（読めにくい場所）は、消えても 6 秒待つ。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BM", "04:D1")
+        t.run(2.4)
+        t.put("BM")
+        t.run(2.1)                                # 2 秒ほど読めなかった
+        t.put("BM", "04:D1")
+        t.run(0.6)
+        t.put("BM")                               # 取った
+        t.run(1.0)
+        t.put("BM", "04:E1")
+        assert t.run(2.4) == []                   # 3 秒では差し替えない
+        assert _board(t.run(4.0)) == [("Ah", 4, "7c")]
+
+    def test_card_that_dropped_out_before_is_not_swapped_from_the_next_reader(self, tmp_path: Path):
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BM", "04:D1")
+        t.run(2.4)
+        t.put("BM")
+        t.run(2.1)
+        t.put("BM", "04:D1")
+        t.run(0.6)
+        t.put("BM")
+        t.run(1.0)
+        t.put("BR", "04:F3", "04:E1")
+        assert _board(t.run(8.0)) == [("Ah", 5, None)]
 
     def test_dropout_that_comes_back_was_not_a_swap(self, tmp_path: Path):
         """同じリーダーの札が読めない間に turn が来ても、札が戻れば turn は 4 枚目。"""
         t = Table(tmp_path)
         _deal_flop(t)
         t.put("BL", "04:F1")                      # Tc が読めなくなる（取ってはいない）
-        t.run(1.0)
+        t.run(0.3)
         t.put("BL", "04:F1", "04:D1")             # turn が同じリーダーの上に置かれた
         assert t.run(2.4) == []                   # 差し直しかもしれないので待つ
         t.put("BL", "04:F1", "04:F2", "04:D1")    # Tc がまた読めた
@@ -345,7 +446,7 @@ class TestSingleBoardCardRedeal:
         assert sorted(_board(events), key=lambda e: e[1]) == [("Tc", 2, None), ("7c", 4, None)]
 
     def test_card_unread_since_long_before_is_not_swapped(self, tmp_path: Path):
-        """ずっと前から読めていない札（時間窓の外）は、同じリーダーでも差し直しにしない。"""
+        """ずっと前から読めていない flop の札（時間窓の外）は、同じリーダーでも差し直しにしない。"""
         t = Table(tmp_path)
         _deal_flop(t)
         t.put("BL", "04:F1")
@@ -364,31 +465,31 @@ class TestSingleBoardCardRedeal:
         t.put("BR", "04:E3")
         assert _board(t.run(2.4)) == [("Ah", 1, "5d"), ("Ad", 2, "Tc"), ("Ac", 3, "2h")]
 
-    def test_premature_turn_is_fixed_when_the_river_arrives(
+    def test_flop_card_redealt_after_a_long_pause_is_fixed_by_the_sixth_card(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ):
-        """早すぎた turn を外して後から配り直すと、river が来た時点で消えた札を抜いて詰める。"""
+        """時間窓の外で flop の 1 枚を差し直すと次の位置に入るが、6 枚目が来た時点で抜いて詰める。"""
         t = Table(tmp_path)
         dealt = _deal_flop(t)
-        t.put("BR", "04:F3", "04:D1")             # 早すぎた turn（7c）
-        dealt += t.run(2.4)
-        t.put("BR", "04:F3")                      # 外してベッティングを続ける
+        t.put("BL", "04:F2")                      # 5d を外し、しばらくしてから Ah を置く
         t.run(40.0)
-        t.put("BR", "04:F3", "04:E1")             # 本当の turn
-        turn_at = t.now + 0.3
+        t.put("BL", "04:F2", "04:E1")
         first = t.run(2.4)
-        assert _board(first) == [("Ah", 5, None)]         # この時点では読み落ちと区別できない
-        t.put("BR", "04:F3", "04:E1", "04:E2")    # river
+        assert _board(first) == [("Ah", 4, None)]         # この時点では読み落ちと区別できない
+        t.put("BR", "04:F3", "04:D1")
         second = t.run(2.4)
-        assert _board(second) == [("Ad", 5, "Ah"), ("Ah", 4, "7c")]   # 後ろの位置から送る
-        assert second[1].timestamp == pytest.approx(turn_at)         # 本当の turn を置いた時刻
+        assert _board(second) == [("7c", 5, None)]
+        t.put("BR", "04:F3", "04:D1", "04:D2")    # river = 6 枚目
+        third = t.run(2.4)
+        assert _board(third) == [                 # 後ろの位置から送る
+            ("6h", 5, "7c"), ("7c", 4, "Ah"), ("Ah", 3, "2h"), ("2h", 2, "Tc"), ("Tc", 1, "5d"),
+        ]
 
         engine = _engine(tmp_path)
         with caplog.at_level(logging.WARNING, logger="integration.engine"):
-            for ev in [*dealt, *first, *second]:
+            for ev in [*dealt, *first, *second, *third]:
                 engine._process_rfid_event(ev)                        # noqa: SLF001
-        assert engine._board_cards == ["5d", "Tc", "2h", "Ah", "Ad"]  # noqa: SLF001
-        assert engine._board_dealt_at[4] == pytest.approx(turn_at)    # noqa: SLF001
+        assert engine._board_cards == ["Tc", "2h", "Ah", "7c", "6h"]  # noqa: SLF001
         assert engine._hand_needs_review is True                      # noqa: SLF001
         assert not any("複数あります" in r.getMessage() for r in caplog.records)
 
@@ -424,7 +525,7 @@ class TestSingleBoardCardRedeal:
         assert _board(t.run(8.0)) == [("Ah", 4, None)]
 
     def test_known_limit_dropout_under_the_next_card(self, tmp_path: Path):
-        """既知の制約: 同じリーダーの札が読めなくなった直後にそこへ次の札が置かれ、6 秒以上戻らないと
+        """既知の制約: 同じリーダーの札が読めなくなった直後にそこへ次の札が置かれ、3 秒以上戻らないと
         差し直しと区別できない。差し替えとして記録し（engine は needs_review）、札が戻れば次の位置に入る
         （札の集合と枚数は正しく、並びだけが入れ替わる）。"""
         t = Table(tmp_path)
@@ -434,9 +535,25 @@ class TestSingleBoardCardRedeal:
         t.put("BL", "04:F1", "04:F2", "04:D1")    # Tc がまた読めた
         assert _board(t.run(2.4)) == [("Tc", 4, None)]
 
-    def test_main_wires_the_window_with_production_defaults(self):
+    def test_board_presence_lists_cards_taken_off_the_board(self, tmp_path: Path):
+        """卓モニタの「外れた」表示用。一瞬の読み落ちは出さず、差し替わった札は消える。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        assert t.thread.board_presence() == {}
+        t.put("BL", "04:F1")
+        t.run(0.9)
+        assert t.thread.board_presence() == {}                   # gap 以内は出さない
+        t.run(1.2)
+        assert set(t.thread.board_presence()) == {"Tc"}
+        t.put("BL", "04:F1", "04:E1")
+        t.run(2.4)
+        assert t.thread.board_presence() == {}                   # 差し替わった
+
+    def test_main_wires_the_production_defaults(self):
         import main
-        assert main._rfid_tracking_kwargs({})["redeal_window_sec"] == 30.0     # noqa: SLF001
+        kwargs = main._rfid_tracking_kwargs({})                                 # noqa: SLF001
+        assert kwargs["redeal_window_sec"] == 30.0
+        assert kwargs["redeal_confirm_sec"] == 3.0
         assert main._rfid_tracking_kwargs(                                      # noqa: SLF001
             {"redeal_window_sec": None})["redeal_window_sec"] is None
 
@@ -588,3 +705,45 @@ class TestRecordingAndTableState:
                        "dealt_in": True, "away_sec": 3.0, "cards": ["As", "Kd"], "position": ""}],
         })
         assert "マック" in text
+
+    def test_table_state_shows_board_cards_taken_off(self):
+        state = build_table_state(
+            session_id="s", hand_id=1, now=100.0, updated_at="t", seats=[1],
+            hole_cards={}, presence={}, board=["5d", "Tc", "2h"], board_timeline=[],
+            board_absent_since={"Tc": 96.0, "Ks": 90.0},     # Ks はボードに無い（差し替え済み）
+        )
+        assert state.board_away_sec == {"Tc": 4.0}
+        assert state.to_dict()["board_away_sec"] == {"Tc": 4.0}
+        assert state.board == ["5d", "Tc", "2h"]              # 記録は変えない（表示だけ）
+
+    def test_monitor_text_says_taken_off(self):
+        from tools.table_monitor import _format_text
+        text = _format_text({
+            "session_id": "s", "hand_id": 1, "updated_at": "t", "age_sec": 0.1,
+            "rfid_street": "flop", "engine_street": "flop", "button_seat": None,
+            "board": ["5d", "Tc", "2h"], "board_away_sec": {"Tc": 4.0}, "seats": [],
+        })
+        assert "5d Tc(外れた 4.0s) 2h" in text
+
+    def test_engine_publishes_board_presence(self, tmp_path: Path):
+        from output.table_state_writer import TableStateWriter
+
+        gs = GameStateManager([PlayerState(seat=1, name="P1", stack=100)], sb=1, bb=2)
+        writer = TableStateWriter(tmp_path, "bp")
+        absent = {"5d": 495.0}
+        t = IntegrationThread(
+            audio_queue=make_audio_queue(), game_state=gs,
+            json_writer=JsonWriter(tmp_path, "bp"), stop_event=threading.Event(),
+            clock=lambda: 500.0, table_state_writer=writer, board_presence=lambda: absent,
+        )
+        _board_ev(t, 1, "5d", ts=490.0)
+        state = json.loads(writer.snapshot_path.read_text(encoding="utf-8"))
+        assert state["board_away_sec"] == {"5d": 5.0}
+
+        def boom():
+            raise RuntimeError("reader gone")
+
+        t._board_presence = boom                              # noqa: SLF001
+        _board_ev(t, 2, "Tc", ts=491.0)
+        state = json.loads(writer.snapshot_path.read_text(encoding="utf-8"))
+        assert state["board"] == ["5d", "Tc"] and state["board_away_sec"] == {}

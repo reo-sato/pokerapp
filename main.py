@@ -158,20 +158,24 @@ def _rfid_tracking_kwargs(rfid_cfg: dict) -> dict:
     既定で有効にする（フォールドした札がボードに入る / 配り直しが入力なしで反映されない、を防ぐ）。
     `release_sec: null` で自動の差し替えを止め、`commit_sec: 0` で最初に見えた瞬間に確定する。
     `redeal_window_sec: null` でボードの 1 枚だけの差し直しを扱わない（flop 全体と 6 枚目の詰め直しだけ）。
+    `redeal_confirm_sec` はボードの差し直しで前の札が見えないことを確かめる秒数（null = `release_sec`）。
     """
     from rfid.reader_thread import (
         DEFAULT_COMMIT_SEC,
         DEFAULT_GAP_SEC,
+        DEFAULT_REDEAL_CONFIRM_SEC,
         DEFAULT_REDEAL_WINDOW_SEC,
         DEFAULT_RELEASE_SEC,
     )
     release = rfid_cfg.get("release_sec", DEFAULT_RELEASE_SEC)
     window = rfid_cfg.get("redeal_window_sec", DEFAULT_REDEAL_WINDOW_SEC)
+    confirm = rfid_cfg.get("redeal_confirm_sec", DEFAULT_REDEAL_CONFIRM_SEC)
     return {
         "commit_sec": float(rfid_cfg.get("commit_sec", DEFAULT_COMMIT_SEC)),
         "gap_sec": float(rfid_cfg.get("gap_sec", DEFAULT_GAP_SEC)),
         "release_sec": None if release is None else float(release),
         "redeal_window_sec": None if window is None else float(window),
+        "redeal_confirm_sec": None if confirm is None else float(confirm),
     }
 
 
@@ -323,6 +327,7 @@ def run_cli() -> None:
     on_card_correction = _make_card_correction_hook(rfid_thread)
     seat_absent_since = getattr(rfid_thread, "seat_cards_absent_since", None) if rfid_thread else None
     seat_presence = getattr(rfid_thread, "presence_snapshot", None) if rfid_thread else None
+    board_presence = getattr(rfid_thread, "board_presence", None) if rfid_thread else None
     table_state_writer = _make_table_state_writer(cfg, session_cfg["log_dir"], session_id)
 
     integration_thread = IntegrationThread(
@@ -338,6 +343,7 @@ def run_cli() -> None:
         on_card_correction=on_card_correction,
         seat_cards_absent_since=seat_absent_since,
         seat_presence=seat_presence,
+        board_presence=board_presence,
         table_state_writer=table_state_writer,
         control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
     )
@@ -576,6 +582,7 @@ def run_gui() -> None:
     on_card_correction = _make_card_correction_hook(rfid_thread)
     seat_absent_since = getattr(rfid_thread, "seat_cards_absent_since", None) if rfid_thread else None
     seat_presence = getattr(rfid_thread, "presence_snapshot", None) if rfid_thread else None
+    board_presence = getattr(rfid_thread, "board_presence", None) if rfid_thread else None
     table_state_writer = _make_table_state_writer(cfg, session_cfg["log_dir"], session_id)
 
     integration_thread = IntegrationThread(
@@ -593,6 +600,7 @@ def run_gui() -> None:
         on_card_correction=on_card_correction,
         seat_cards_absent_since=seat_absent_since,
         seat_presence=seat_presence,
+        board_presence=board_presence,
         table_state_writer=table_state_writer,
         control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
     )

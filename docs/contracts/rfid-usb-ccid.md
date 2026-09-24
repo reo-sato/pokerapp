@@ -1,12 +1,13 @@
 # RFID USB CCID firmware ↔ host (PC/SC) contract
 
-**version: 1.6 (ADR-0058 追記。1.0 frozen 起点、以降は additive)** ／ canonical RFID transport（ADR-0015）の
+**version: 1.7 (ADR-0058 追記 2。1.0 frozen 起点、以降は additive)** ／ canonical RFID transport（ADR-0015）の
 firmware↔Python 境界。v1.1 の追加点（1 reader 複数枚の Get UID 連結 / UID MSB-first）、
 **v1.2 の変更点（CCID slot は 1 つだけ / 物理リーダーは Get UID の P2 で選ぶ / 台数問い合わせ）**、
 **v1.3 の変更点（board reader 全台で 1 つの論理ボードを共有し、位置は検出順で決める =
 board の `index` / `cards` を廃止）**、**v1.4 の追加点（ミスディール訂正 = 明示コマンドでの位置解放）**、
 **v1.5 の変更点（卓の流れに合わせた解釈 = 手札は board にならない / 滞留で確定 / 配り直しの自動反映）**、
-**v1.6 の変更点（board の 1 枚だけの差し直し）** は §10 を参照。v1.2 は「slot ごとに reader 名を分ける」規約を
+**v1.6 の変更点（board の 1 枚だけの差し直し）**、**v1.7 の変更点（turn / river の差し直し・確認 3 秒）**
+は §10 を参照。v1.2 は「slot ごとに reader 名を分ける」規約を
 廃止し（Windows の汎用 CCID ドライバが 1 インターフェース 1 slot しか公開しないため。ISSUE-0022 /
 ADR-0052）、v1.3 は「board reader = ストリート専用」という前提を廃止する（実機は board reader が
 並んでいるだけで、どの台がどのストリートを受けるかは置き方次第。ISSUE-0024 / ADR-0053）。
@@ -132,12 +133,18 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
     いるとみなす。`RFIDEvent.timestamp` は**最初に見えた時刻**のまま（配布時刻, ADR-0055）。
   - **配り直しは入力なしで反映する** **SHOULD**。消えただけでは差し替えない。board は次のどれかに
     当たったときだけ位置を差し替え、どれにも当たらなければ次の空き位置に入れる（v1.6）:
-    1. **1 枚だけの差し直し**: 前の札が消えてから `redeal_window_sec`（既定 30 秒）以内に、**前の札を
-       読んでいた board reader の上**へ新しい札が置かれて `commit_sec` 載り続け、前の札が `release_sec`
-       （既定 6 秒）以上見えない。前の札が戻れば読み落ちとみなし、新しい札は次の位置。別の reader の
-       札が読み落ちている間に次のストリートの札が来ても、次の位置のまま。
-    2. **flop 全体の配り直し**: flop の札が全部 `release_sec` 以上見えず、新しい札が flop の札を
-       読んでいた reader の上に載り続けた（時間によらない）。続く新しい札が残りの flop の位置を順に取る。
+    1. **1 枚だけの差し直し**: 前の札が見えなくなった近くへ新しい札が置かれて `commit_sec` 載り続け、
+       前の札が `redeal_confirm_sec`（既定 3 秒）以上見えない（v1.7）。前の札が戻れば読み落ちとみなし、
+       新しい札は次の位置。「近く」と時間の条件:
+       - **最後に配った turn / river**（いちばん後ろの 4・5 枚目）: **同じか隣の** board reader（config の
+         左からの並び）。時間は問わない（位置が reader の境目にある / 間を空けて配り直す）。
+       - **それ以外**（flop の札など）: 前の札を読んでいた board reader、かつ前の札が消えてから
+         `redeal_window_sec`（既定 30 秒）以内。別の reader の札が読み落ちている間に次のストリートの札が
+         来ても、次の位置のまま。
+       - 確定後に `gap_sec` を超えて読めなかったことがある札は、同じ reader・時間窓・`release_sec`（6 秒）。
+    2. **flop 全体の配り直し**: flop の札が全部見えず、新しい札が flop の札を読んでいた reader の上に
+       載り続けた（時間によらない）。全部が `redeal_confirm_sec` 以上見えないのを確かめてから差し替え、
+       続く新しい札が残りの flop の位置を順に取る。
     3. **6 枚目**: 5 枚埋まったあとに新しい札が確定し、5 枚のうち**ちょうど 1 枚**が `release_sec` 以上
        見えない → その札を抜いて後ろを詰め、新しい札を 5 枚目にする（早すぎた turn を外し、間を空けて
        配り直した等）。host の board は位置の上書きしかできないので、**後ろの位置から**送る。
@@ -146,6 +153,8 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
     engine はそのハンドを `needs_review` にする。
   - `release_sec=None` / `commit_sec=0` は従来の解釈（最初に見えた瞬間に確定・差し替えは明示の
     訂正だけ）。`tools/probe_pcsc.py` の検査はこちら。`redeal_window_sec=None` は上の 1 を行わない。
+  - 記録したボードの札がいま読めていなければ、host は表示用に「外れた」と出してよい
+    （`RFIDThread.board_presence()`。記録は変えない, v1.7）。
 - **位置割り当ての全解放は「新ハンド」、1 位置の解放は「明示のミスディール訂正」** **MUST**
   （ISSUE-0026 / ADR-0054）。どちらも位置と board reader のデバウンス状態をまとめて落とす
   （盤上に残っているカードは改めて検出し直す）。
@@ -274,6 +283,11 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 
 ## 10. versioning / freeze
 
+- **v1.7（2026-09-24, ADR-0058 追記 2 / ISSUE-0035）** — **turn / river の差し直しと確認 3 秒**（host のみ, §4）。
+  店舗の実卓で「turn の差し直しが river になる」「反映が遅い」。3 台の board reader で 5 枚を受けるため turn の
+  位置が reader の境目にあり、置き直した札を隣の台が読んでいた。最後に配った turn / river は同じか隣の reader・
+  時間は問わない、ボードの確認は `redeal_confirm_sec`（3 秒）、一度読めなくなった札は厳しい側、flop 全体は全部
+  消えるのを確かめてから、に改めた。表示用の `board_presence()`（「外れた」）を追加。**firmware の要求は変わらない**。
 - **v1.6（2026-09-24, ADR-0058 追記 / ISSUE-0035）** — **board の 1 枚だけの差し直し**（host のみ, §4）。
   店舗では board の配り直しで flop 全体を外さず 1 枚だけ差し直すことがあり、v1.5 の「ストリートの札が
   全部消えたときだけ」では、差し直した札が次のストリートの札（flop なら turn）として数えられた。
