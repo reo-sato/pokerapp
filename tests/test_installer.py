@@ -129,6 +129,34 @@ class TestUpdatePreservesShopData:
         assert "venv/" in text and "install.log" in text
 
 
+class TestFieldFindings:
+    """店舗 PC（Windows 11 Pro 初期状態）の実機導入で踏んだ罠の回帰ロック（2026-09-24）。"""
+
+    def _install_ps1(self) -> str:
+        return (ROOT / "installer/install.ps1").read_bytes()[3:].decode("utf-8")
+
+    def test_winget_is_pinned_to_the_winget_source(self):
+        """msstore ソースが証明書エラー（0x8a15005e）で落ちると、winget はソース指定を求めて何も入れない。"""
+        assert '"--source", "winget"' in self._install_ps1()
+
+    def test_python_org_fallback_after_winget_failure(self):
+        text = self._install_ps1()
+        body = re.search(r"function Install-Python \{(.*?)\n\}", text, re.S).group(1)
+        assert "if (Find-Python) { return }" in body, "winget の成否は Find-Python で判定する"
+        assert "Install-PythonFromPythonOrg" in body, "winget で入らなければ python.org に切り替える"
+        assert "InstallLauncherAllUsers=0" in text, "per-user 導入でランチャが昇格を求めないように"
+
+    def test_update_mode_continues_with_the_updated_installer(self):
+        """-Update はファイルを差し替えても実行中の古いスクリプトで続きを走らせてしまう → 起動し直す。"""
+        assert "-File $PSCommandPath" in self._install_ps1()
+
+    def test_web_requests_skip_the_slow_progress_bar(self):
+        for rel in PS1_FILES:
+            raw = (ROOT / rel).read_bytes()
+            text = raw[3:].decode("utf-8") if raw.startswith(b"\xef\xbb\xbf") else raw.decode("utf-8")
+            assert '$ProgressPreference = "SilentlyContinue"' in text, rel
+
+
 @pytest.mark.skipif(_powershell() is None, reason="pwsh / powershell が無い環境")
 class TestPowerShell:
     @pytest.mark.parametrize("rel", PS1_FILES)
@@ -143,7 +171,8 @@ class TestPowerShell:
         r = subprocess.run(ps + ["-Command", script], capture_output=True, text=True, timeout=120)
         assert r.returncode == 0, r.stdout + r.stderr
 
-    def test_dry_run_walks_the_whole_flow(self, tmp_path: Path):
+    @pytest.mark.parametrize("extra", [[], ["-Update"]], ids=["install", "update"])
+    def test_dry_run_walks_the_whole_flow(self, tmp_path: Path, extra: list[str]):
         """-DryRun は何も変更せずに全ステップを通る（ロジックの通し検査。Windows 以外でも動く）。"""
         ps = _powershell()
         # アプリフォルダ = installer/ の親。tmp にコピーして実行し、リポジトリを汚さない。
@@ -153,7 +182,7 @@ class TestPowerShell:
         shutil.copy(ROOT / "config_default.json", app / "config_default.json")
         r = subprocess.run(
             ps + ["-ExecutionPolicy", "Bypass", "-File", str(app / "installer/install.ps1"),
-                  "-DryRun", "-NonInteractive", "-SkipModel"],
+                  "-DryRun", "-NonInteractive", "-SkipModel", *extra],
             capture_output=True, text=True, timeout=300,
         )
         assert r.returncode == 0, r.stdout + r.stderr

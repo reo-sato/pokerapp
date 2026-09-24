@@ -84,6 +84,18 @@ Python も git も無い前提。オーナーは製品化を見据えて「一�
   実行できない。**構文解析と `-DryRun` の通し**を CI（ubuntu の pwsh）で固定し、実 Windows での通しは
   オーナーの PC で行う（`docs/worklog/2026-09-22-windows-one-step-installer.md`）。
 
+## 追記（2026-09-24, 店舗 PC への実機導入）
+
+Windows 11 Pro 初期状態の店舗 PC で判明し、Decision を次のとおり補う（詳細は worklog）。
+
+- Python の確保は **winget を `--source winget` に固定**し、成否は `Find-Python` で判定する。入らなければ
+  **python.org のサイレント導入に自動で切り替える**（旧: winget があれば python.org には行かなかった）。
+  msstore ソースの証明書エラー（`0x8a15005e`）で winget がソース指定を求めて止まるのを実測したため。
+- `-Update` はファイルを差し替えたあと、**更新後の `install.ps1` を起動し直して**続きを実行する
+  （実行中のスクリプトは古い版のままなので、インストーラ自身の修正が次回まで効かなかった）。
+- 1 行インストールの取得失敗は、固定 IP のゲートウェイ未設定（IPv6 だけ通る）を疑うよう案内する。
+  GitHub の zip 配布は IPv4 のみ。Stage 2 の配布経路（release / exe）でも同じ制約を考慮する。
+
 ## Related
 
 - ADR-0015（RFID canonical = PC/SC）/ ADR-0052（1 slot + P2）/ ISSUE-0034（`--log-file`）

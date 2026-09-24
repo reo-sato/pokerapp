@@ -62,6 +62,8 @@ irm https://raw.githubusercontent.com/reo-sato/pokerapp/verify-v1/installer/boot
 | 症状 | 対処 |
 |---|---|
 | 「Python 3.12 を用意できませんでした」 | [python.org](https://www.python.org/downloads/windows/) から 3.12 を入れ（「Add python.exe to PATH」にチェック）、`install.cmd` をもう一度 |
+| 「リモート名を解決できませんでした: 'codeload.github.com'」（1 行インストールの取得直後） | 固定 IP にしてデフォルトゲートウェイが空のとき、IPv6 だけ通って GitHub の zip（IPv4 のみ）が取れない。PowerShell で `Get-NetIPConfiguration` を見て `IPv4DefaultGateway` が空なら、ルーターの IP をゲートウェイに設定する（Windows の IP 設定、または管理者 PowerShell で `New-NetRoute -InterfaceAlias "Wi-Fi" -DestinationPrefix 0.0.0.0/0 -NextHop <ルーターの IP>`） |
+| winget が `0x8a15005e : The server certificate did not match…` と出して「--source で指定せよ」で止まる | 初期状態の Windows で Microsoft Store ソースの検索が失敗する既知の問題。インストーラは winget のソースを固定し、それでも入らなければ python.org に自動で切り替える（2026-09-24 以降の版）。古い版で止まった場合は `winget install --id Python.Python.3.12 --exact --source winget` を実行してから `install.cmd` をもう一度 |
 | pip が失敗する（社内プロキシ等） | `install.log` の URL を確認。プロキシ環境では `HTTPS_PROXY` を設定してから `install.cmd` |
 | 起動時に「venv not found」 | `install.cmd` を先に実行する |
 | PowerShell の実行ポリシーのエラー | `.cmd` は Bypass 付きで起動するので通常は出ない。出る場合は PowerShell を管理者で開き `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` |

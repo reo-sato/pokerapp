@@ -94,6 +94,31 @@ iPad / スマホ画面（Node が要る）の同梱はオーナー判断で範�
 
 上記 5 件。
 
+## 実機導入（店舗 PC, 2026-09-24）
+
+GEEKOM A8（Windows 11 Pro、初期セットアップ直後・ローカルアカウント・RDP でヘッドレス運用）に 1 行インストールで
+導入した。依頼元の手順書（Windows 初期設定 / RDP / 固定 IP / BIOS / ヘッドレス化）を 5 まで済ませた状態から。
+
+1. **取得直後に「リモート名を解決できませんでした: 'codeload.github.com'」**。原因はアプリではなく、手順書 3.2 の
+   固定 IP で **デフォルトゲートウェイが空**だったこと（`IPv4=192.168.1.136/24 GW4=` / DHCP 無効 / DNS はルーターの
+   IPv6 アドレスのみ。手順書の 8.8.8.8 / 1.1.1.1 は反映されていなかった）。IPv6 はルーターの RA で生きていたので、
+   IPv6 を持つ raw.githubusercontent.com（1 行目）は取れ、IPv4 しか持たない codeload だけが落ちた。1.1.1.1 宛ては
+   `WSAENETUNREACH`（10051）= IPv4 の経路なし。ルーター 192.168.1.1 は arp 表と、IPv6 DNS アドレスの EUI-64
+   （`0225:36ff:fe5d:3310` ← MAC `00-25-36-5d-33-10`）が一致したことで特定。管理者で
+   `New-NetRoute -InterfaceAlias Wi-Fi -DestinationPrefix 0.0.0.0/0 -NextHop 192.168.1.1`（IP は変えないので RDP は
+   切れない）→ 解消。**アプリ側の対応**: bootstrap の取得失敗時に「固定 IP ならゲートウェイを確認」と案内する。
+   installation.md §0 のトラブル表に追加。
+2. **winget が `0x8a15005e : The server certificate did not match any of the expected values` で msstore ソースの
+   検索に失敗し、「--source で指定せよ」と言って何も入れずに終了**。旧実装は winget があれば python.org に
+   フォールバックしなかったので、「Python 3.12 を用意できませんでした」で止まった。**修正**: winget を
+   `--source winget` に固定 / 成否は Find-Python で判定し、入らなければ python.org のサイレント導入に自動で
+   切り替える / python.org 版は `InstallLauncherAllUsers=0`（per-user 導入でランチャが昇格を求めない）。
+3. 付随の改善: **`-Update` は更新後のインストーラで続きを実行し直す**（旧実装はファイルを差し替えても、実行中の
+   古いスクリプトで Python / 依存の手順を続けていた = 上の修正が次回まで効かない）。`$ProgressPreference =
+   "SilentlyContinue"`（5.1 の Invoke-WebRequest は進捗表示で数十 MB に数分かかる）。
+
+回帰ロック: `tests/test_installer.py::TestFieldFindings`（4 件）+ `-Update` の DryRun 通し。
+
 ## Remaining Gaps / Out-of-Scope
 
 - [ ] **実 Windows での通し**（オーナーの PC。手順は本 worklog 末尾）。特に winget の無い環境での

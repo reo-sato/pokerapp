@@ -38,6 +38,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# Windows PowerShell 5.1 の Invoke-WebRequest は進捗表示のせいで極端に遅くなる（数十 MB で数分）ので切る。
+$ProgressPreference = "SilentlyContinue"
 # Windows PowerShell 5.1 は既定で TLS 1.2 を使わないことがある（python.org / GitHub は TLS 1.2 必須）。
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -156,30 +158,44 @@ function Find-Python {
     return $null
 }
 
+function Install-PythonFromPythonOrg {
+    $tmp = Join-Path (Get-TempDir) ("python-" + $PythonMajorMinor + "-installer.exe")
+    Write-Log "python.org からインストーラを取得します: $PythonInstallerUrl"
+    if ($DryRun) { return }
+    Invoke-WebRequest -Uri $PythonInstallerUrl -OutFile $tmp -UseBasicParsing
+    # 現在のユーザーだけに入れる（管理者権限が要らない）。ランチャ (py) も per-user にしないと
+    # 全ユーザー向けの導入で昇格を求められ、/quiet では黙って失敗することがある。
+    $p = Start-Process -FilePath $tmp -Wait -PassThru -ArgumentList @(
+        "/quiet", "InstallAllUsers=0", "InstallLauncherAllUsers=0", "PrependPath=1",
+        "Include_launcher=1", "Include_test=0", "Include_doc=0"
+    )
+    if ($p.ExitCode -ne 0) { throw "Python のインストールに失敗しました（exit code $($p.ExitCode)）" }
+}
+
 function Install-Python {
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($winget) {
         Write-Log "winget で Python $PythonMajorMinor を導入します（数分かかります）..."
-        if (-not $DryRun) {
-            $prev = $ErrorActionPreference
-            $ErrorActionPreference = "Continue"
-            & $winget.Source install --id "Python.Python.$PythonMajorMinor" --exact --silent `
-                --accept-package-agreements --accept-source-agreements
-            $ErrorActionPreference = $prev
-            # winget の exit code は「既に導入済み」等でも 0 以外になるので、成否は Find-Python で判定する。
-        }
+        if ($DryRun) { return }
+        # --source winget: 初期状態の Windows では msstore ソースの検索が証明書エラー（0x8a15005e）で
+        # 失敗しやすく、そのとき winget は「--source で指定せよ」と言って何も入れずに終わる（店舗 PC で実測）。
+        $wingetArgs = @(
+            "install", "--id", "Python.Python.$PythonMajorMinor", "--exact", "--source", "winget",
+            "--silent", "--accept-package-agreements", "--accept-source-agreements"
+        )
+        Write-Log ("$ winget " + ($wingetArgs -join " "))
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & $winget.Source @wingetArgs
+        $ErrorActionPreference = $prev
+        # winget の exit code は「既に導入済み」等でも 0 以外になるので、成否は Find-Python で判定する。
+        Update-ProcessPath
+        if (Find-Python) { return }
+        Write-Log "winget では導入できませんでした。python.org のインストーラに切り替えます。" "WARN"
     } else {
-        $tmp = Join-Path (Get-TempDir) ("python-" + $PythonMajorMinor + "-installer.exe")
-        Write-Log "winget が無いので python.org からインストーラを取得します: $PythonInstallerUrl"
-        if (-not $DryRun) {
-            Invoke-WebRequest -Uri $PythonInstallerUrl -OutFile $tmp -UseBasicParsing
-            $p = Start-Process -FilePath $tmp -Wait -PassThru -ArgumentList @(
-                "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_launcher=1",
-                "Include_test=0", "Include_doc=0"
-            )
-            if ($p.ExitCode -ne 0) { throw "Python のインストールに失敗しました（exit code $($p.ExitCode)）" }
-        }
+        Write-Log "winget が無いので python.org のインストーラを使います。"
     }
+    Install-PythonFromPythonOrg
     Update-ProcessPath
 }
 
@@ -327,7 +343,22 @@ if ($DryRun) { Write-Log "DryRun: 表示のみで何も変更しません" "WARN
 
 try {
     if ($Uninstall) { Invoke-Uninstall; exit 0 }
-    if ($Update) { Write-Log "ファイルの更新" "STEP"; Invoke-Update }
+    if ($Update) {
+        Write-Log "ファイルの更新" "STEP"
+        Invoke-Update
+        if (-not $DryRun) {
+            # このプロセスは更新前のスクリプトを実行し続けるので、続き（Python / 依存 / 設定 …）は
+            # 更新後のインストーラで行う。-Update を外し、それ以外の指定は引き継いで起動し直す。
+            $pass = @("-Branch", $Branch, "-Repo", $Repo, "-PythonInstallerUrl", $PythonInstallerUrl)
+            if ($PrefetchModel) { $pass += "-PrefetchModel" }
+            if ($SkipModel) { $pass += "-SkipModel" }
+            if ($NoShortcuts) { $pass += "-NoShortcuts" }
+            if ($NonInteractive) { $pass += "-NonInteractive" }
+            Write-Log "更新後のインストーラで続きを実行します"
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath @pass
+            exit $LASTEXITCODE
+        }
+    }
 
     Write-Log "Python $PythonMajorMinor を確認" "STEP"
     $py = Find-Python

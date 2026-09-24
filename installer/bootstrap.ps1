@@ -15,6 +15,8 @@
 
 & {
     $ErrorActionPreference = "Stop"
+    # 5.1 の Invoke-WebRequest は進捗表示で極端に遅くなるので切る（& { } の中なのでセッションには残らない）。
+    $ProgressPreference = "SilentlyContinue"
     # Windows PowerShell 5.1 は既定で TLS 1.2 を使わないことがある（GitHub は TLS 1.2 必須）。
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -36,7 +38,14 @@
         try {
             Write-Host "取得中: $zipUrl" -ForegroundColor Cyan
             $zip = Join-Path $tmpRoot "src.zip"
-            Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing
+            try {
+                Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing
+            } catch {
+                # 店舗 PC で実測: 固定 IP にデフォルトゲートウェイが無いと、IPv6 だけ通ってこの 1 行目は取れるのに、
+                # IPv4 しか持たない GitHub の zip 配布だけが「リモート名を解決できませんでした」で失敗する。
+                throw ("GitHub から取得できませんでした: " + $_.Exception.Message +
+                    " / 固定 IP にしている場合はデフォルトゲートウェイが入っているか確認してください（docs/installation.md §0 のトラブル表）。")
+            }
             Expand-Archive -Path $zip -DestinationPath $tmpRoot -Force
             $src = Get-ChildItem -Path $tmpRoot -Directory | Select-Object -First 1   # pokerapp-<branch>
             if (-not $src) { throw "zip の展開結果が見つかりません" }

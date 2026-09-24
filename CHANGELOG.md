@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### Fixed (Windows インストーラ — 店舗 PC の実機導入で判明, 2026-09-24)
+
+- winget が Microsoft Store ソースの証明書エラー（`0x8a15005e`）で「--source で指定せよ」と止まり、Python が
+  入らなかった → winget を `--source winget` に固定し、それでも入らなければ python.org のサイレント導入に
+  自動で切り替える（per-user、ランチャも per-user）。
+- `update.cmd` / `-Update` が、差し替え前の古いスクリプトのまま続きの手順を実行していた → 更新後の
+  インストーラで起動し直す。
+- 1 行インストールで GitHub から取得できないとき、固定 IP のゲートウェイ未設定を疑うよう案内する
+  （IPv6 だけ通って IPv4 のみの GitHub zip 配布が落ちる、を実測）。ダウンロードの進捗表示を切って高速化。
+
 ### Added (Windows ワンステップインストーラ — 店舗 PC 向け, ADR-0057, 2026-09-22)
 
 Python の無い店舗の Windows PC に **`install.cmd` のダブルクリック 1 回**（または PowerShell に
