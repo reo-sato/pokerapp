@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### Docs (店舗 PC を画面なし・RDP で運用する手順, 2026-09-24)
+
+- `docs/installation.md` §0 に「店舗 PC を画面なし・RDP で運用する場合」を追加: 卓の USB は基板の「USB」口を
+  直挿し（「UART」口は書き込み用）/ RDP のスマートカード転送を止める（止めないと RDP 内のアプリから卓の
+  リーダーが見えない）/ Wi-Fi をプライベートにして 8788・8790 を店内 LAN に限って許可 / 固定 IP はゲートウェイ
+  必須 / RDP は × で閉じる。
+- `docs/hardware-qa-checklist.md` §0 に、卓から出ている 2 本の USB のどちらが出力かを VID/PID で見分ける表と
+  コマンドを追加。
+
 ### Fixed (Windows インストーラ — 店舗 PC の実機導入で判明, 2026-09-24)
 
 - winget が Microsoft Store ソースの証明書エラー（`0x8a15005e`）で「--source で指定せよ」と止まり、Python が

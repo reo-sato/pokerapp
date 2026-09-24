@@ -119,10 +119,32 @@ GEEKOM A8（Windows 11 Pro、初期セットアップ直後・ローカルアカ
 
 回帰ロック: `tests/test_installer.py::TestFieldFindings`（4 件）+ `-Update` の DryRun 通し。
 
+4. **RDP ヘッドレス運用の設定**（インストーラの外。`docs/installation.md` §0「店舗 PC を画面なし・RDP で
+   運用する場合」に手順化）: RDP のスマートカード転送を PC 側のポリシーで停止（`fEnableSmartCard=0`。
+   既定では RDP セッション内のアプリに接続元端末のリーダーが見え、PC に挿した卓のリーダーが見えない）/
+   店の Wi-Fi をプライベート + TCP 8788・8790 を LocalSubnet に限って許可（iPad / スマホから卓モニタ・API）。
+5. **卓の USB が 2 本**（ESP32-S3-DevKitC-1 の「USB」= CCID 出力 / 「UART」= CP2102N の書き込み・ログ用）で、
+   どちらがどちらか現地で分からなかった → Windows の PnP デバイスを VID/PID で見分ける 1 行で特定
+   （`hardware-qa-checklist.md` §0 に表と手順）。USB 口が足りずハブを使う場合は、RFID とマイク受信機を
+   直挿し・ハブはキーボードとマウスだけ、と案内。UART 側を外した場合、電源不足で起動しなかったリーダーは
+   host には「カードなし」（SW=6A81）に見え `check` では見分けられないので、全台にカードを置く `watch` で確認する。
+6. **結果**: インストール → 設定（RFID = PC/SC、マイク off）→ リーダー確認 → ハンドロガー（`--cli`）と
+   卓モニタを起動し、**iPhone から卓モニタの表示と反映を確認**。店舗 PC での通しは完了。卓モニタの表示に
+   気になる点があるとの報告あり（詳細は未受領）。
+7. 依頼元の手順書との差分として伝えたこと: 7（Python）はインストーラに置き換え / 7.5 の rfid_cards.json を
+   空にしない（登録済みの 52 枚）/ 9（ESP32 を Wi-Fi・HTTP 8787 で繋ぐ前提）は USB 接続なので不要 /
+   10（自動起動）はヘッドレスでの操作の形を決めてから。
+
 ## Remaining Gaps / Out-of-Scope
 
-- [ ] **実 Windows での通し**（オーナーの PC。手順は本 worklog 末尾）。特に winget の無い環境での
-      python.org フォールバックと、Whisper モデル先読みの所要時間。
+- [x] **実 Windows での通し** — 2026-09-24 に店舗 PC で完了（上の「実機導入」）。
+- [ ] Whisper モデル先読みの所要時間（今回はマイク未使用で skip）と、python.org フォールバック経路の実機確認
+      （今回は手動の `winget --source winget` で通したため未通過）。
+- [ ] 店舗 PC 向け設定（RDP のスマートカード転送停止 / ネットワーク種別 / ファイアウォール）を
+      インストーラの任意手順にするか（管理者権限が要る・PC 全体に効くので既定では入れない前提で検討）。
+- [ ] 画面なし運用での自動起動（依頼元手順書の 10）。`--cli` はキーボード入力前提なので、ハンドの開始と
+      勝者を誰がどう入れるか（iPad の staff アプリ = GUI + session_layer + hand_control 等）を決めてから。
+- [ ] 卓モニタの表示の気になる点（店舗 PC で報告、詳細待ち）。
 - [ ] Stage 2: iPad / スマホ画面の API 配信（Node 不要化）/ データフォルダ分離 / release zip /
       PyInstaller + Inno Setup の exe / 自動起動。
 - [ ] `update.cmd` は削除を行わない（上流で消えたファイルが残る）。

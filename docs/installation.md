@@ -57,6 +57,38 @@ irm https://raw.githubusercontent.com/reo-sato/pokerapp/verify-v1/installer/boot
 - カードの登録: 店舗のデッキは `python tools/register_cards.py run --deck 1` で `rfid_cards.json` に登録
   （同梱のものは開発用デッキ）。
 
+### 店舗 PC を画面なし・RDP で運用する場合
+
+2026-09-24 の店舗 PC（Windows 11 Pro、HDMI ダミープラグでヘッドレス、RDP で操作）で必要だった設定。
+コマンドは PowerShell にそのまま貼る。管理者の確認には「はい」。
+
+1. **卓の USB は基板の「USB」口**（ESP32-S3 直結 = カードリーダーとして見える）を PC に**直接**挿す。
+   「UART」口（CP2102N = COM ポート）はファームウェアの書き込みとログ用で、本番は外してよい。
+   どちらがどちらか分からないときは [実機 RFID QA チェックリスト](hardware-qa-checklist.md) §0 の見分け方。
+   ハブを使うならキーボードとマウスだけにする（RFID をハブ経由にすると瞬断・電流不足のおそれ）。
+   **UART 側を外したら、11 台すべてにカードを置いて反応を確かめる**
+   （`python tools/probe_pcsc.py watch --seconds 120`）。電源不足で起動しなかったリーダーは PC からは
+   「カードなし」に見えるので、`check` の PASS だけでは見分けられない。
+2. **RDP のスマートカード転送を止める**。RDP は既定で、PC に挿したリーダーではなく接続元の端末の
+   リーダーをセッション内のアプリに見せる。止めたあと、RDP を一度閉じて接続し直すと効く。
+
+   ```powershell
+   Start-Process reg.exe -Verb RunAs -Wait -ArgumentList 'add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fEnableSmartCard /t REG_DWORD /d 0 /f'; reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" /v fEnableSmartCard
+   ```
+
+3. **iPad / スマホから卓モニタと API を見られるようにする**。店の Wi-Fi を「プライベート」にし、
+   同じ店内ネットワークからだけ 8788（viewer API）と 8790（卓モニタ）を受け付ける。
+
+   ```powershell
+   Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -Command "Set-NetConnectionProfile -InterfaceAlias ''Wi-Fi'' -NetworkCategory Private; New-NetFirewallRule -DisplayName ''Poker Hand Logger LAN'' -Direction Inbound -Protocol TCP -LocalPort 8788,8790 -RemoteAddress LocalSubnet -Action Allow -Profile Private | Out-Null; Get-NetConnectionProfile | Format-Table Name, InterfaceAlias, NetworkCategory -AutoSize; Get-NetFirewallRule -DisplayName ''Poker Hand Logger LAN'' | Format-Table DisplayName, Enabled, Profile, Action -AutoSize; pause"'
+   ```
+
+   初回起動時に Windows セキュリティの警告が出たら「アクセスを許可する」（キャンセルすると
+   ブロック規則が作られ、上の許可より優先される）。
+4. **固定 IP にするならデフォルトゲートウェイも入れる**（空だと IPv6 だけ通り、GitHub からの取得や
+   更新が失敗する。下のトラブル表）。ルーター側での DHCP 予約のほうが、他の機器と番号がぶつからず安全。
+5. **RDP は右上の × で閉じる**（切断）。起動したハンドロガーと卓モニタは動き続ける。サインアウトすると止まる。
+
 ### うまくいかないとき
 
 | 症状 | 対処 |

@@ -29,6 +29,19 @@ pip install ".[pcsc]"          # pyscard（PC/SC canonical 経路に必須）
 - **期待**: `python -c "import smartcard; print('ok')"` が `ok`。
 - **見る点**: ESP32-S3 を USB 接続し、OS が **USB CCID（Smart Card）class** として認識していること
   （HID/シリアルではない, 契約 §2）。Linux は `lsusb` に CCID デバイス、`pcsc_scan` でも可。
+- **どのケーブルが出力か（ESP32-S3-DevKitC-1 は USB 口が 2 つ）**: 基板の印字「USB」が出力用、「UART」が
+  書き込み・ログ用。卓から 2 本出ていて見分けられないときは、Windows でデバイスの VID/PID を見る
+  （片方を抜いて、消えた方がそのケーブル）。
+
+  | VID&PID | 見え方 | 意味 |
+  |---|---|---|
+  | `303A&8B5D` | スマートカード リーダー（Microsoft Usbccid Smartcard Reader） | **出力用**。本番で PC に直接挿す |
+  | `10C4&EA60` | COM ポート（Silicon Labs CP210x） | 書き込み・ログ用。本番は外してよい |
+  | `303A&1001` | USB シリアル / JTAG | 出力用の口だが CCID ファームが動いていない（書き込みモード等）。リセットか挿し直し |
+
+  ```powershell
+  Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match '^USB\\VID_(303A|10C4)&PID_[0-9A-F]{4}\\' } | Format-Table Class, FriendlyName, InstanceId -AutoSize
+  ```
 
 ## 1. reader 列挙と reader_name 確定 + 物理リーダー台数（契約 §3-4 / §6 / §8）🖥️
 
