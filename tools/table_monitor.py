@@ -5,7 +5,8 @@
 実プレイ環境での検証用（ADR-0056 D5）:
 
 - **カード読み取り** — 各席の札とボードが読めているか。ボードに記録した札がいま読めていなければ
-  「外れた N s」と薄く出す（札を外したことが伝わっているか・差し直しを確かめ中か, ADR-0058）。
+  「外れた N s」と薄く出す（札を外したことが伝わっているか, ADR-0058）。読めているがまだ数えて
+  いない札は「確認中 N s」/「差し直し確認中」と点線で出す（置いた札が読めているか・なぜまだ出ないか）。
 - **有効席** — 誰に札が配られ、いま誰の札が卓上にあるか。**「載っている」と「ゲームに残っている」は
   別物**なので、配布 / 在否 / 離席秒数 / fold らしさを分けて出す（ADR-0056 D4）。手札が卓の中央
   （ボードのリーダーの上）を通過した席は「マック」と出す（ADR-0058）。
@@ -54,6 +55,8 @@ _PAGE = """<!doctype html>
          font-size:20px; font-weight:700; min-width:46px; text-align:center; }
  .card.red { color:#ff7b72; }
  .card.gone { opacity:.5; border-style:dashed; }
+ .card.pending { opacity:.6; border-style:dotted; border-color:#58a6ff; }
+ .card.pending .sub { color:#58a6ff; }
  .card .sub { display:block; font-size:11px; font-weight:400; color:#e3b341; }
  .street { font-size:22px; font-weight:700; margin-right:12px; }
  .seats { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px; }
@@ -80,6 +83,11 @@ function cardHtml(c, away){
   const red = RED.has((c||"").slice(-1).toLowerCase());
   if (away == null) return `<div class="card${red?" red":""}">${c}</div>`;
   return `<div class="card gone${red?" red":""}">${c}<span class="sub">外れた ${away}s</span></div>`;
+}
+function pendingHtml(p){
+  const red = RED.has((p.card||"").slice(-1).toLowerCase());
+  const label = p.swap ? "差し直し確認中" : `確認中 ${p.sec}s`;
+  return `<div class="card pending${red?" red":""}">${p.card}<span class="sub">${label}</span></div>`;
 }
 function lagClass(s){ return s < 3 ? "ok" : (s < 15 ? "warn" : "bad"); }
 async function tick(){
@@ -111,7 +119,8 @@ async function tick(){
       ${d.button_seat?`／ ボタン: 席 ${d.button_seat}`:""}</div>
     <div class="board"><span class="street">${d.rfid_street||""}</span>
       ${(d.board||[]).map(c => cardHtml(c, (d.board_away_sec||{})[c])).join("")
-        || "<span class='meta'>ボードなし</span>"}</div>
+        || ((d.board_pending||[]).length ? "" : "<span class='meta'>ボードなし</span>")}
+      ${(d.board_pending||[]).map(pendingHtml).join("")}</div>
     <div class="seats">${seats}</div>
     ${tl?`<table class="tl"><tr><td colspan="3">ボード配布時刻</td></tr>${tl}</table>`:""}`;
 }
@@ -149,12 +158,18 @@ def read_state(log_dir: Path, session: Optional[str]) -> dict:
     return state
 
 
+def _pending_label(p: dict) -> str:
+    """数える前のボードの札の表示（HTML の pendingHtml と同じ文言）。"""
+    return "差し直し確認中" if p.get("swap") else f"確認中 {p.get('sec')}s"
+
+
 def _format_text(state: dict) -> str:
     """端末表示（`--once`）。"""
     if state.get("error"):
         return state["error"]
     away = state.get("board_away_sec") or {}
     board = [f"{c}(外れた {away[c]}s)" if c in away else c for c in state.get("board") or []]
+    board += [f"[{p['card']} {_pending_label(p)}]" for p in state.get("board_pending") or []]
     lines = [
         f"session {state.get('session_id')} / hand {state.get('hand_id')} "
         f"/ 更新 {state.get('updated_at')} (遅延 {state.get('age_sec')}s)",

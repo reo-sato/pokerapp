@@ -1,13 +1,13 @@
 # RFID USB CCID firmware ↔ host (PC/SC) contract
 
-**version: 1.7 (ADR-0058 追記 2。1.0 frozen 起点、以降は additive)** ／ canonical RFID transport（ADR-0015）の
+**version: 1.8 (ADR-0058 追記 3。1.0 frozen 起点、以降は additive)** ／ canonical RFID transport（ADR-0015）の
 firmware↔Python 境界。v1.1 の追加点（1 reader 複数枚の Get UID 連結 / UID MSB-first）、
 **v1.2 の変更点（CCID slot は 1 つだけ / 物理リーダーは Get UID の P2 で選ぶ / 台数問い合わせ）**、
 **v1.3 の変更点（board reader 全台で 1 つの論理ボードを共有し、位置は検出順で決める =
 board の `index` / `cards` を廃止）**、**v1.4 の追加点（ミスディール訂正 = 明示コマンドでの位置解放）**、
 **v1.5 の変更点（卓の流れに合わせた解釈 = 手札は board にならない / 滞留で確定 / 配り直しの自動反映）**、
-**v1.6 の変更点（board の 1 枚だけの差し直し）**、**v1.7 の変更点（turn / river の差し直し・確認 3 秒）**
-は §10 を参照。v1.2 は「slot ごとに reader 名を分ける」規約を
+**v1.6 の変更点（board の 1 枚だけの差し直し）**、**v1.7 の変更点（turn / river の差し直し・確認 3 秒）**、
+**v1.8 の変更点（確定前の board の札の途切れを 3 秒まで許す・「確認中」の表示）** は §10 を参照。v1.2 は「slot ごとに reader 名を分ける」規約を
 廃止し（Windows の汎用 CCID ドライバが 1 インターフェース 1 slot しか公開しないため。ISSUE-0022 /
 ADR-0052）、v1.3 は「board reader = ストリート専用」という前提を廃止する（実機は board reader が
 並んでいるだけで、どの台がどのストリートを受けるかは置き方次第。ISSUE-0024 / ADR-0053）。
@@ -130,7 +130,8 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
     手札は卓の中央へ押し出され、board reader の上を通る。位置は与えず、その席の「マック」として記録する。
   - **board の札は `commit_sec`（既定 2 秒）載り続けてから位置を与える** **SHOULD**。一瞬の通過
     （席で読めなかった手札など）は位置を取らない。`gap_sec`（既定 1.5 秒）以下の途切れは載り続けて
-    いるとみなす。`RFIDEvent.timestamp` は**最初に見えた時刻**のまま（配布時刻, ADR-0055）。
+    いるとみなす（**位置を与える前の board の札は 3 秒まで**, v1.8。reader の境目・重ね置きの札は途切れ
+    ながら読める）。`RFIDEvent.timestamp` は**最初に見えた時刻**のまま（配布時刻, ADR-0055）。
   - **配り直しは入力なしで反映する** **SHOULD**。消えただけでは差し替えない。board は次のどれかに
     当たったときだけ位置を差し替え、どれにも当たらなければ次の空き位置に入れる（v1.6）:
     1. **1 枚だけの差し直し**: 前の札が見えなくなった近くへ新しい札が置かれて `commit_sec` 載り続け、
@@ -154,7 +155,8 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
   - `release_sec=None` / `commit_sec=0` は従来の解釈（最初に見えた瞬間に確定・差し替えは明示の
     訂正だけ）。`tools/probe_pcsc.py` の検査はこちら。`redeal_window_sec=None` は上の 1 を行わない。
   - 記録したボードの札がいま読めていなければ、host は表示用に「外れた」と出してよい
-    （`RFIDThread.board_presence()`。記録は変えない, v1.7）。
+    （`RFIDThread.board_presence()["absent"]`。記録は変えない, v1.7）。読めているが位置を与える前の札は
+    「確認中」と出してよい（`["pending"]`, v1.8）。
 - **位置割り当ての全解放は「新ハンド」、1 位置の解放は「明示のミスディール訂正」** **MUST**
   （ISSUE-0026 / ADR-0054）。どちらも位置と board reader のデバウンス状態をまとめて落とす
   （盤上に残っているカードは改めて検出し直す）。
@@ -283,6 +285,9 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 
 ## 10. versioning / freeze
 
+- **v1.8（2026-09-24, ADR-0058 追記 3 / ISSUE-0035）** — 位置を与える前の board の札は 3 秒までの途切れを載り続けて
+  いるとみなす（reader の境目・重ね置きで途切れながら読める札の確定が遅れていた）。表示用に「確認中」
+  （`board_presence()["pending"]`）。host のみ。**firmware の要求は変わらない**。
 - **v1.7（2026-09-24, ADR-0058 追記 2 / ISSUE-0035）** — **turn / river の差し直しと確認 3 秒**（host のみ, §4）。
   店舗の実卓で「turn の差し直しが river になる」「反映が遅い」。3 台の board reader で 5 枚を受けるため turn の
   位置が reader の境目にあり、置き直した札を隣の台が読んでいた。最後に配った turn / river は同じか隣の reader・

@@ -91,6 +91,10 @@ DEFAULT_GAP_SEC = 1.5       # この秒数までの途切れは「載り続け�
 DEFAULT_RELEASE_SEC = 6.0   # 前の札がこの秒数以上見えないときだけ、新しい札で差し替える（配り直し）
 DEFAULT_REDEAL_WINDOW_SEC = 30.0  # ボードの札が消えてからこの秒数以内に同じリーダーへ置かれた札は差し直し
 DEFAULT_REDEAL_CONFIRM_SEC = 3.0  # ボードの差し直しで、前の札が見えないことを確かめる秒数
+# 確定前のボードの札は、この秒数までの途切れを「載り続けている」とみなす（`gap_sec` より長い）。
+# リーダーの境目・重ね置きの札は途切れながら読めるので、`gap_sec` のままだと確定まで数え直しを
+# 繰り返して反映が遅れる（店舗の実卓, ADR-0058 追記 3）。一瞬の通過は 1 回きりなので影響しない。
+_PENDING_GAP_SEC = 3.0
 
 
 @dataclass
@@ -104,6 +108,7 @@ class _Run:
     readers: set[str] = field(default_factory=set)
     fired: bool = False     # この期間について判定を済ませた（確定・再発火・却下のいずれか）
     noted: bool = False     # 保留理由をログに出した（毎 poll 出さないため）
+    waiting: bool = False   # ボードの差し直しを確かめ中（卓モニタの「差し直し確認中」）
 
 
 def _reader_index_of(cfg: dict, position: int) -> int:
@@ -214,6 +219,9 @@ class RFIDThread(threading.Thread):
             self._release_sec if redeal_confirm_sec is None else max(0.0, float(redeal_confirm_sec))
         )
         self._tracking = self._commit_sec > 0 or self._release_sec is not None
+        self._pending_gap_sec = (
+            max(self._gap_sec, _PENDING_GAP_SEC) if self._commit_sec > 0 else self._gap_sec
+        )
         # board reader の左からの並び（config の記載順, 0 始まり）。差し直しの「近くのリーダー」と
         # ログの「左から N 台目」に使う。
         board_ids = [f"reader_{i}" for i, c in enumerate(reader_configs) if c.get("role") == "board"]
@@ -231,6 +239,7 @@ class RFIDThread(threading.Thread):
         self._seat_committed: dict[int, list[str]] = {}           # 席 → 記録した uid（最大 2）
         self._board_first_seen: dict[str, float] = {}             # ボードの札 → 配った時刻（詰め直し用）
         self._board_pending: set[str] = set()                     # flop の配り直しで、次の札が差し替える札
+        self._board_rereads: dict[str, int] = {}                  # 確定前の札を読み直した回数（ログ用）
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -434,10 +443,13 @@ class RFIDThread(threading.Thread):
     ) -> None:
         key = (loc, uid)
         run = self._runs.get(key)
-        if run is not None and (uid in prev_present or now - run.last_seen <= self._gap_sec):
+        pending = loc == "board" and uid not in self._board_indexes and uid not in self._seat_owner
+        tolerance = self._pending_gap_sec if pending else self._gap_sec
+        if run is not None and (uid in prev_present or now - run.last_seen <= tolerance):
             run.last_seen = now
         else:
-            # 新しく載った（または途切れが gap を超えた）→ 新しい期間。挿入順 = 最初に見えた順を保つ。
+            # 新しく載った（または途切れが許容を超えた）→ 新しい期間。挿入順 = 最初に見えた順を保つ。
+            gap = None if run is None else now - run.last_seen
             self._runs.pop(key, None)
             run = _Run(first_seen=now, last_seen=now, reader_id=reader_id)
             self._runs[key] = run
@@ -445,8 +457,23 @@ class RFIDThread(threading.Thread):
                 owner = self._seat_owner.get(uid)
                 if owner is not None:
                     self._note_muck(owner, uid, now)
+                elif pending:
+                    self._log_board_sighting(uid, reader_id, gap)
         if seen_here:
             run.readers.add(reader_id)
+
+    def _log_board_sighting(self, uid: str, reader_id: str, gap: Optional[float]) -> None:
+        """確定前のボードの札が見え始めた時刻を残す（置いてから読めるまでの遅れを切り分けるため）。"""
+        where = self._reader_label({reader_id})
+        if gap is None:
+            logger.info("ボードに札 %s が載りました（%s）", self._card_name(uid), where)
+            return
+        n = self._board_rereads[uid] = self._board_rereads.get(uid, 0) + 1
+        if n <= 3:  # 読めにくい位置の札は何度も途切れるので、最初の数回だけ
+            logger.info(
+                "ボードの札 %s を読み直しました（%.1f 秒読めなかった, %s）— 載り続けた時間を数え直します",
+                self._card_name(uid), gap, where,
+            )
 
     def _absent_for(self, loc: str, uid: str, now: float) -> float:
         """場所 `loc` で `uid` が見えていない秒数（見えていれば 0、記録が無ければ無限大）。"""
@@ -498,6 +525,7 @@ class RFIDThread(threading.Thread):
                         min(confirm for _, confirm in candidates),
                     )
                     run.noted = True
+        run.waiting = bool(waiting)
         if waiting:
             return []
 
@@ -795,6 +823,7 @@ class RFIDThread(threading.Thread):
             self._loc_present.pop("board", None)
             self._board_first_seen = {}
             self._board_pending = set()
+            self._board_rereads = {}
         logger.info("新ハンド: board の位置割り当てをリセットしました")
 
     # ――― マック観測（ADR-0055: 合成 fold に実時刻を与えるためだけに使う） ―――
@@ -840,17 +869,23 @@ class RFIDThread(threading.Thread):
                 }
         return snapshot
 
-    def board_presence(self) -> dict[str, float]:
-        """ボードに記録した札のうち、いま読めていない札 → 見えなくなった時刻（epoch）。
+    def board_presence(self) -> dict[str, dict]:
+        """卓モニタ用のボードの読み取り状況（ADR-0058）。記録（engine の board）は変えない = 表示だけ。
 
-        卓モニタの「外れた」表示用（ADR-0058）。札を外したことが伝わっているか、差し直しの札が
-        まだ確かめ中かを卓の脇から見られるようにする。一瞬の読み落ち（`gap_sec` 以内）は含めない。
-        記録（engine の board）は変えない = 表示だけ。従来の解釈（最初に見えた瞬間に確定）では空。
+        `{"absent": {札: 見えなくなった時刻}, "pending": {札: {"since": 最初に見えた時刻,
+        "swap": 差し直しを確かめ中か}}}`。
+
+        - **absent**: 記録した札のうち、いま読めていない札（一瞬の読み落ち = `gap_sec` 以内は含めない）。
+          札を外したことが伝わっているかを卓の脇から見る。
+        - **pending**: 読めているがまだ数えていない札（載り続けるのを待っている / 差し直しを確かめ中）。
+          置いた札が読めているか・なぜまだ出ないかを見る。
+        従来の解釈（最初に見えた瞬間に確定）では両方とも空。
         """
         if not self._tracking:
-            return {}
+            return {"absent": {}, "pending": {}}
         now = self._clock()
         absent: dict[str, float] = {}
+        pending: dict[str, dict] = {}
         with self._lock:
             present = self._loc_present.get("board", set())
             for uid in self._board_indexes:
@@ -860,7 +895,14 @@ class RFIDThread(threading.Thread):
                 card = self._card_master.lookup(uid)
                 if card:
                     absent[card] = run.last_seen
-        return absent
+            for (loc, uid), run in self._runs.items():
+                if (loc != "board" or run.fired or uid in self._board_indexes
+                        or uid in self._seat_owner or now - run.last_seen > self._pending_gap_sec):
+                    continue
+                card = self._card_master.lookup(uid)
+                if card:
+                    pending[card] = {"since": run.first_seen, "swap": run.waiting}
+        return {"absent": absent, "pending": pending}
 
     def reset_for_new_hand(self) -> None:
         """新ハンドの同期点（board 位置 + マック観測 + 席の記録をまとめて捨てる）。

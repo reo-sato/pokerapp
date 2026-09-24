@@ -76,6 +76,9 @@ class TableState:
     # ボードに記録した札のうち、いま読めていない札 → 見えなくなってからの秒数（ADR-0058）。
     # 外した札が伝わっているか・差し直しを確かめ中かを卓の脇から見るための**表示**（記録は変えない）。
     board_away_sec: dict[str, float] = field(default_factory=dict)
+    # 読めているがまだ数えていないボードの札（載り続けるのを待っている / 差し直しを確かめ中）。
+    # [{"card", "sec"（見え始めてからの秒数）, "swap"}]。置いた札が読めているかを卓の脇から見る表示。
+    board_pending: list[dict] = field(default_factory=list)
     rfid_street: str = "preflop"                     # ボード枚数から導いたストリート
     engine_street: str = ""                          # engine のストリート（比較用）
     # ボタン席（engine 由来, ISSUE-0032）。`engine_street` と同じく **比較・確認のための表示**で、
@@ -95,6 +98,7 @@ class TableState:
             "board": list(self.board),
             "board_timeline": list(self.board_timeline),
             "board_away_sec": dict(self.board_away_sec),
+            "board_pending": [dict(p) for p in self.board_pending],
             "rfid_street": self.rfid_street,
             "engine_street": self.engine_street,
             "button_seat": self.button_seat,
@@ -121,6 +125,7 @@ def build_table_state(
     position_map: Optional[dict[int, str]] = None,
     fold_hint_sec: float = DEFAULT_FOLD_HINT_SEC,
     board_absent_since: Optional[dict[str, float]] = None,
+    board_pending: Optional[dict[str, dict]] = None,
 ) -> TableState:
     """観測から `TableState` を組み立てる（純粋関数）。
 
@@ -134,8 +139,10 @@ def build_table_state(
         engine_street: engine 側のストリート（比較表示用。空可）。
         button_seat / position_map: engine 側のボタンとポジション名（表示用。無ければ None/空）。
         fold_hint_sec: 「fold らしい」と表示するまでの不在秒数。
-        board_absent_since: ボードの札 → 見えなくなった時刻（`RFIDThread.board_presence()`）。
+        board_absent_since: ボードの札 → 見えなくなった時刻（`RFIDThread.board_presence()["absent"]`）。
                       `board` に無い札は無視する。
+        board_pending: 数える前の札 → `{"since", "swap"}`（`board_presence()["pending"]`）。
+                      `board` に既にある札は無視する。
 
     `dealt_in` は **カードが読めたか**（`hole_cards`）または **一度でも検出されたか**
     （`presence` に現れたか）で判定する。カードマスター未登録の札でも検出はされるため、
@@ -165,6 +172,12 @@ def build_table_state(
         card: round(max(0.0, now - since), 1)
         for card, since in (board_absent_since or {}).items() if card in board
     }
+    pending = sorted(
+        ({"card": card, "sec": round(max(0.0, now - p.get("since", now)), 1),
+          "swap": bool(p.get("swap"))}
+         for card, p in (board_pending or {}).items() if card not in board),
+        key=lambda p: -p["sec"],
+    )
     return TableState(
         session_id=session_id,
         hand_id=hand_id,
@@ -173,6 +186,7 @@ def build_table_state(
         board=list(board),
         board_timeline=list(board_timeline),
         board_away_sec=board_away,
+        board_pending=pending,
         rfid_street=derive_street(len(board)),
         engine_street=engine_street,
         button_seat=button_seat,

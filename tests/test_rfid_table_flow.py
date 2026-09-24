@@ -539,15 +539,61 @@ class TestSingleBoardCardRedeal:
         """卓モニタの「外れた」表示用。一瞬の読み落ちは出さず、差し替わった札は消える。"""
         t = Table(tmp_path)
         _deal_flop(t)
-        assert t.thread.board_presence() == {}
+        assert t.thread.board_presence()["absent"] == {}
         t.put("BL", "04:F1")
         t.run(0.9)
-        assert t.thread.board_presence() == {}                   # gap 以内は出さない
+        assert t.thread.board_presence()["absent"] == {}         # gap 以内は出さない
         t.run(1.2)
-        assert set(t.thread.board_presence()) == {"Tc"}
+        assert set(t.thread.board_presence()["absent"]) == {"Tc"}
         t.put("BL", "04:F1", "04:E1")
         t.run(2.4)
-        assert t.thread.board_presence() == {}                   # 差し替わった
+        assert t.thread.board_presence()["absent"] == {}         # 差し替わった
+
+    def test_board_presence_lists_cards_being_confirmed(self, tmp_path: Path):
+        """置いた札が読めていれば、数える前から「確認中」として見える（差し直しなら swap）。"""
+        t = Table(tmp_path)
+        t.put("BL", "04:F1")
+        t.run(0.9)
+        pending = t.thread.board_presence()["pending"]
+        assert set(pending) == {"5d"} and pending["5d"]["swap"] is False
+        assert pending["5d"]["since"] == pytest.approx(1000.3)
+        t.run(1.5)
+        assert t.thread.board_presence()["pending"] == {}        # 数えた
+        t.put("BL", "04:F1", "04:F2", "04:F3")
+        t.run(2.4)
+        t.put("BL", "04:F1", "04:E1", "04:F3")    # Tc を取ってすぐ Ah
+        t.run(2.4)                                # Ah は Tc が 3 秒消えるのを待っている
+        assert t.thread.board_presence()["pending"]["Ah"]["swap"] is True
+        t.run(1.5)
+        assert t.thread.board_presence()["pending"] == {}
+
+    def test_card_read_on_and_off_still_counts(self, tmp_path: Path):
+        """リーダーの境目などで 2 秒ずつ途切れながら読める札も、数え直しを繰り返さずに数える。"""
+        t = Table(tmp_path)
+        events = []
+        for present, seconds in ((True, 0.6), (False, 2.1), (True, 0.6), (False, 2.1), (True, 0.6)):
+            t.put("BR", *(["04:D1"] if present else []))
+            events += t.run(seconds)
+        # 確定は 1 回（1 枚目）。確定後の途切れは同じ位置での再発火になる（engine は無視する）。
+        assert set(_board(events)) == {("7c", 1, None)}
+        assert _board(events)[0] == ("7c", 1, None)
+
+    def test_log_says_when_a_board_card_was_first_read(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ):
+        """置いてから読めるまでの遅れを切り分けられるよう、見え始めた時刻と途切れを INFO で残す。"""
+        t = Table(tmp_path)
+        with caplog.at_level(logging.INFO, logger="rfid.reader_thread"):
+            t.put("BR", "04:D1")
+            t.run(0.6)
+            t.put("BR")
+            t.run(3.3)                            # 3 秒を超えて読めなかった
+            t.put("BR", "04:D1")
+            t.run(0.3)
+        messages = [r.getMessage() for r in caplog.records]
+        assert "ボードに札 7c が載りました（左から 3 台目）" in messages
+        # 他の board reader は 1 poll 遅れて札を失うので、最後に見えたのは外した次の poll（3.3 秒前）
+        assert any(m.startswith("ボードの札 7c を読み直しました（3.3 秒読めなかった") for m in messages)
 
     def test_main_wires_the_production_defaults(self):
         import main
@@ -730,15 +776,16 @@ class TestRecordingAndTableState:
 
         gs = GameStateManager([PlayerState(seat=1, name="P1", stack=100)], sb=1, bb=2)
         writer = TableStateWriter(tmp_path, "bp")
-        absent = {"5d": 495.0}
+        presence = {"absent": {"5d": 495.0}, "pending": {"Ah": {"since": 498.8, "swap": True}}}
         t = IntegrationThread(
             audio_queue=make_audio_queue(), game_state=gs,
             json_writer=JsonWriter(tmp_path, "bp"), stop_event=threading.Event(),
-            clock=lambda: 500.0, table_state_writer=writer, board_presence=lambda: absent,
+            clock=lambda: 500.0, table_state_writer=writer, board_presence=lambda: presence,
         )
         _board_ev(t, 1, "5d", ts=490.0)
         state = json.loads(writer.snapshot_path.read_text(encoding="utf-8"))
         assert state["board_away_sec"] == {"5d": 5.0}
+        assert state["board_pending"] == [{"card": "Ah", "sec": 1.2, "swap": True}]
 
         def boom():
             raise RuntimeError("reader gone")
@@ -747,3 +794,26 @@ class TestRecordingAndTableState:
         _board_ev(t, 2, "Tc", ts=491.0)
         state = json.loads(writer.snapshot_path.read_text(encoding="utf-8"))
         assert state["board"] == ["5d", "Tc"] and state["board_away_sec"] == {}
+        assert state["board_pending"] == []
+
+    def test_table_state_lists_cards_being_confirmed(self):
+        state = build_table_state(
+            session_id="s", hand_id=1, now=100.0, updated_at="t", seats=[1],
+            hole_cards={}, presence={}, board=["5d", "Tc", "2h"], board_timeline=[],
+            board_pending={"Ah": {"since": 99.0, "swap": True}, "7c": {"since": 98.5, "swap": False},
+                           "Tc": {"since": 99.5, "swap": False}},   # Tc は既にボードにある
+        )
+        assert state.to_dict()["board_pending"] == [
+            {"card": "7c", "sec": 1.5, "swap": False}, {"card": "Ah", "sec": 1.0, "swap": True},
+        ]
+
+    def test_monitor_text_says_being_confirmed(self):
+        from tools.table_monitor import _format_text
+        text = _format_text({
+            "session_id": "s", "hand_id": 1, "updated_at": "t", "age_sec": 0.1,
+            "rfid_street": "flop", "engine_street": "flop", "button_seat": None,
+            "board": ["5d"], "board_pending": [
+                {"card": "Ac", "sec": 1.2, "swap": False}, {"card": "3s", "sec": 0.4, "swap": True},
+            ], "seats": [],
+        })
+        assert "5d [Ac 確認中 1.2s] [3s 差し直し確認中]" in text

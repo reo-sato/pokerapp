@@ -139,9 +139,47 @@ ADR-0058 D3 のボードの規則は「ストリートの札が**全部** `relea
 - [ ] 既知の制約: turn / river の読み落ち（同じか隣の台）が 3 秒以上続く間に次の札が置かれると差し直しとして
       記録する（`needs_review`, 並びだけが入れ替わる）。一度読めなくなった札は対象外。
 
+## 追補 2: 置いてから読めるまでの遅れ（2026-09-24 夜, ADR-0058 追記 3）
+
+### 報告とログ
+
+「新しいターンカードの 3s、新しい 2 枚目フロップの Ac の反映がだいぶ遅い。Ac はターンを置いた後、3s は揺らしてから
+反映された」。店舗のログ（`枚目にしました|確かめています|配り直しを検出`）を読むと:
+
+- どの札も「最初に読めてから数えるまで」は 2 秒、差し替えは即時（7c → 2c, Ac → 4s）= ホストの判定は想定どおり。
+- 7c を外してから新しい札が初めて読めるまで約 10 秒、3s は揺らすまで読めていない = **置いてから読めるまで**が遅い。
+- 3s は読めたとき 4s がまだ読めていた（見えていない札なし）ので 5 枚目。Ac は右端（ターンの位置）、2c は左
+  （フロップの位置）で読まれており、報告と札の名前が逆に見える（取り違え / 登録の入れ替わりの確認を依頼）。
+- firmware: 既に札がある台で新しい札を探す完全確認は 6 周に 1 回（≈ 1.8 秒）。揺らすまで読めないのは、位置
+  （リーダーの境目）か重ね置き（capture effect で強い方の札だけが応答し、Stay Quiet が効かないと 2 ラウンドで
+  打ち切る）が主因と考えられる。firmware は変えていない。
+
+### 変更
+
+- `rfid/reader_thread.py`: 確定前の board の札は `_PENDING_GAP_SEC`=3 秒までの途切れを許す（確定後・席は
+  `gap_sec`）。見え始め「ボードに札 X が載りました（左から K 台目）」と読み直し（1 枚 3 回まで）を INFO。
+  `_Run.waiting`（差し直し確認中）。`board_presence()` は `{"absent", "pending"}`。
+- `core/table_state.py`: `TableState.board_pending`（`build_table_state(board_pending=...)`）。
+- `integration/engine.py`: 新しい形を卓状態に渡す。`tools/table_monitor.py`: 「確認中 N s」「差し直し確認中」
+  （点線・青）+ 端末表示。headless Chromium で描画を確認。
+- tests: 5 件追加・2 件更新（52 件）。許容を 1.5 秒に戻すと「途切れながら読める札」のテストが落ちる（mutation）。
+- docs: ADR-0058 追記 3 / ISSUE-0035 追加の報告 3 / 契約 v1.8 / CLAUDE.md / usage.md / CHANGELOG / decision-log。
+
+### テスト
+
+- `pytest tests/test_rfid_table_flow.py tests/test_table_state.py` — 79 passed。
+- `pytest tests/ -q --ignore=tests/test_vision.py`（pwsh あり）— **1237 passed**、skip 0。`ruff check .` — clean。
+
+### 残
+
+- [ ] 店舗で再確認: 札を置いた直後に卓モニタへ「確認中」が出るか（出なければ読めていない = 位置・重ね置き）。
+      ログの「載りました」の時刻と置いた時刻の差。
+- [ ] Ac / 2c の名前の確認（1 枚ずつ空いた席のリーダーに置いて卓モニタの表示を見る）。
+- [ ] 読めにくい位置が特定できたら、リーダーの配置 / firmware の完全確認の周期を検討（別 issue）。
+
 ## Related ADRs
 
-- ADR-0058（追記 / 追記 2）/ ADR-0053 / ADR-0054 / ADR-0055
+- ADR-0058（追記 / 追記 2 / 追記 3）/ ADR-0053 / ADR-0054 / ADR-0055
 
 ## Related Issues
 
