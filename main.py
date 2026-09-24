@@ -157,13 +157,21 @@ def _rfid_tracking_kwargs(rfid_cfg: dict) -> dict:
     店舗 PC の config.json はこの設定が入る前に作られていることがあるので、キーが無いときも
     既定で有効にする（フォールドした札がボードに入る / 配り直しが入力なしで反映されない、を防ぐ）。
     `release_sec: null` で自動の差し替えを止め、`commit_sec: 0` で最初に見えた瞬間に確定する。
+    `redeal_window_sec: null` でボードの 1 枚だけの差し直しを扱わない（flop 全体と 6 枚目の詰め直しだけ）。
     """
-    from rfid.reader_thread import DEFAULT_COMMIT_SEC, DEFAULT_GAP_SEC, DEFAULT_RELEASE_SEC
+    from rfid.reader_thread import (
+        DEFAULT_COMMIT_SEC,
+        DEFAULT_GAP_SEC,
+        DEFAULT_REDEAL_WINDOW_SEC,
+        DEFAULT_RELEASE_SEC,
+    )
     release = rfid_cfg.get("release_sec", DEFAULT_RELEASE_SEC)
+    window = rfid_cfg.get("redeal_window_sec", DEFAULT_REDEAL_WINDOW_SEC)
     return {
         "commit_sec": float(rfid_cfg.get("commit_sec", DEFAULT_COMMIT_SEC)),
         "gap_sec": float(rfid_cfg.get("gap_sec", DEFAULT_GAP_SEC)),
         "release_sec": None if release is None else float(release),
+        "redeal_window_sec": None if window is None else float(window),
     }
 
 

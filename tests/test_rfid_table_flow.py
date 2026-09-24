@@ -35,8 +35,8 @@ ROOT = Path(__file__).parent.parent
 CARDS = {
     # 席 1 / 2 / 3 の手札
     "04:A1": "As", "04:A2": "Kd", "04:B1": "Qh", "04:B2": "Jc", "04:C1": "9s", "04:C2": "8s",
-    # ボード
-    "04:F1": "5d", "04:F2": "Tc", "04:F3": "2h", "04:D1": "7c",
+    # ボード（flop / turn / river）
+    "04:F1": "5d", "04:F2": "Tc", "04:F3": "2h", "04:D1": "7c", "04:D2": "6h",
     # 配り直しの新しい札（UID は実機と同じく 16 進）
     "04:E1": "Ah", "04:E2": "Ad", "04:E3": "Ac",
 }
@@ -68,7 +68,7 @@ class Table:
     ]
 
     def __init__(self, tmp_path: Path, *, commit: float = 2.0, gap: float = 1.5,
-                 release: float | None = 6.0) -> None:
+                 release: float | None = 6.0, window: float | None = 30.0) -> None:
         cm = CardMaster(tmp_path / "cards.json")
         for uid, card in CARDS.items():
             cm.register(uid, card)
@@ -80,7 +80,7 @@ class Table:
             stop_event=threading.Event(),
             bridge_factory=lambda name, reader=0: self.bridges[name],
             clock=lambda: self.now,
-            commit_sec=commit, gap_sec=gap, release_sec=release,
+            commit_sec=commit, gap_sec=gap, release_sec=release, redeal_window_sec=window,
         )
 
     def put(self, reader: str, *uids: str) -> None:
@@ -181,7 +181,7 @@ class TestBoardDwell:
         assert _board(events) == [("5d", 1, None)]
 
     def test_flop_card_dropout_does_not_give_its_slot_to_the_turn(self, tmp_path: Path):
-        """flop の 1 枚が 7 秒読めなくても、残りが載っているので turn は 4 枚目のまま。"""
+        """左のリーダーの flop の 1 枚が 7 秒読めなくても、turn は右のリーダーに置かれたので 4 枚目。"""
         t = Table(tmp_path)
         t.put("BL", "04:F1", "04:F2")
         t.put("BR", "04:F3")
@@ -279,6 +279,166 @@ class TestRedealWithoutInput:
         t.run(10.0)
         t.put("S1", "04:E1", "04:E2")
         assert t.run(5.0) == []
+
+
+def _deal_flop(t: Table) -> list[RFIDEvent]:
+    """flop = 左のリーダーに 5d・Tc、右のリーダーに 2h（1..3 で確定させる）。"""
+    t.put("BL", "04:F1", "04:F2")
+    t.put("BR", "04:F3")
+    events = t.run(2.4)
+    assert _board(events) == [("5d", 1, None), ("Tc", 2, None), ("2h", 3, None)]
+    return events
+
+
+class TestSingleBoardCardRedeal:
+    """ボードは 1 枚だけ差し直すことがある（flop 全体を外すとは限らない）。"""
+
+    def test_one_flop_card_swapped_in_place_keeps_its_position(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ):
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BL", "04:F1")                      # Tc だけ取る
+        t.run(1.0)
+        t.put("BL", "04:F1", "04:E1")             # 同じ場所に新しい札
+        placed_at = t.now + 0.3
+        with caplog.at_level(logging.INFO, logger="rfid.reader_thread"):
+            assert t.run(2.4) == []               # Tc が 6 秒見えなくなるまで待つ（戻れば読み落ち）
+            events = t.run(3.0)
+        assert sum("差し直しか確かめています" in r.getMessage() for r in caplog.records) == 1
+        assert _board(events) == [("Ah", 2, "Tc")]
+        assert events[0].timestamp == pytest.approx(placed_at)   # 置いた時刻（ADR-0055）
+        t.put("BR", "04:F3", "04:D1")
+        assert _board(t.run(2.4)) == [("7c", 4, None)]            # turn は 4 枚目のまま
+
+    def test_new_card_put_down_just_before_the_old_one_is_taken(self, tmp_path: Path):
+        """新しい札を先に置いて、すぐ前の札を取っても差し直しになる（確定を待つ間に取れば）。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BL", "04:F1", "04:F2", "04:E1")
+        t.run(0.9)
+        t.put("BL", "04:F1", "04:E1")
+        assert _board(t.run(8.0)) == [("Ah", 2, "Tc")]
+
+    def test_turn_card_swapped_in_place(self, tmp_path: Path):
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BR", "04:F3", "04:D1")
+        assert _board(t.run(2.4)) == [("7c", 4, None)]
+        t.put("BR", "04:F3")
+        t.run(1.0)
+        t.put("BR", "04:F3", "04:E1")
+        assert _board(t.run(6.0)) == [("Ah", 4, "7c")]
+        t.put("BR", "04:F3", "04:E1", "04:D2")
+        assert _board(t.run(2.4)) == [("6h", 5, None)]
+
+    def test_dropout_that_comes_back_was_not_a_swap(self, tmp_path: Path):
+        """同じリーダーの札が読めない間に turn が来ても、札が戻れば turn は 4 枚目。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BL", "04:F1")                      # Tc が読めなくなる（取ってはいない）
+        t.run(1.0)
+        t.put("BL", "04:F1", "04:D1")             # turn が同じリーダーの上に置かれた
+        assert t.run(2.4) == []                   # 差し直しかもしれないので待つ
+        t.put("BL", "04:F1", "04:F2", "04:D1")    # Tc がまた読めた
+        events = t.run(0.3)
+        assert sorted(_board(events), key=lambda e: e[1]) == [("Tc", 2, None), ("7c", 4, None)]
+
+    def test_card_unread_since_long_before_is_not_swapped(self, tmp_path: Path):
+        """ずっと前から読めていない札（時間窓の外）は、同じリーダーでも差し直しにしない。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BL", "04:F1")
+        t.run(40.0)
+        t.put("BL", "04:F1", "04:D1")
+        assert _board(t.run(2.4)) == [("7c", 4, None)]           # 待たずに 4 枚目
+
+    def test_whole_flop_redealt_after_a_long_pause(self, tmp_path: Path):
+        """早すぎた flop を戻し、ベッティングの後で配り直した（時間窓の外でも flop を差し替える）。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BL")
+        t.put("BR")
+        t.run(40.0)
+        t.put("BL", "04:E1", "04:E2")
+        t.put("BR", "04:E3")
+        assert _board(t.run(2.4)) == [("Ah", 1, "5d"), ("Ad", 2, "Tc"), ("Ac", 3, "2h")]
+
+    def test_premature_turn_is_fixed_when_the_river_arrives(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ):
+        """早すぎた turn を外して後から配り直すと、river が来た時点で消えた札を抜いて詰める。"""
+        t = Table(tmp_path)
+        dealt = _deal_flop(t)
+        t.put("BR", "04:F3", "04:D1")             # 早すぎた turn（7c）
+        dealt += t.run(2.4)
+        t.put("BR", "04:F3")                      # 外してベッティングを続ける
+        t.run(40.0)
+        t.put("BR", "04:F3", "04:E1")             # 本当の turn
+        turn_at = t.now + 0.3
+        first = t.run(2.4)
+        assert _board(first) == [("Ah", 5, None)]         # この時点では読み落ちと区別できない
+        t.put("BR", "04:F3", "04:E1", "04:E2")    # river
+        second = t.run(2.4)
+        assert _board(second) == [("Ad", 5, "Ah"), ("Ah", 4, "7c")]   # 後ろの位置から送る
+        assert second[1].timestamp == pytest.approx(turn_at)         # 本当の turn を置いた時刻
+
+        engine = _engine(tmp_path)
+        with caplog.at_level(logging.WARNING, logger="integration.engine"):
+            for ev in [*dealt, *first, *second]:
+                engine._process_rfid_event(ev)                        # noqa: SLF001
+        assert engine._board_cards == ["5d", "Tc", "2h", "Ah", "Ad"]  # noqa: SLF001
+        assert engine._board_dealt_at[4] == pytest.approx(turn_at)    # noqa: SLF001
+        assert engine._hand_needs_review is True                      # noqa: SLF001
+        assert not any("複数あります" in r.getMessage() for r in caplog.records)
+
+    def test_sixth_card_without_a_missing_card_is_an_overflow(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ):
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BR", "04:F3", "04:D1", "04:D2")
+        t.run(2.4)
+        t.put("BR", "04:F3", "04:D1", "04:D2", "04:E1")
+        with caplog.at_level(logging.WARNING, logger="rfid.reader_thread"):
+            assert _board(t.run(2.4)) == [("Ah", None, None)]
+        assert any("5 枚を超えました" in r.getMessage() for r in caplog.records)
+
+    def test_sixth_card_with_two_missing_cards_is_an_overflow(self, tmp_path: Path):
+        """消えた札が 2 枚以上だと、どれを抜くか決められないので詰めない。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BR", "04:F3", "04:D1", "04:D2")
+        t.run(2.4)
+        t.put("BL")                               # 5d と Tc が消えた
+        t.run(40.0)
+        t.put("BR", "04:F3", "04:D1", "04:D2", "04:E1")
+        assert _board(t.run(2.4)) == [("Ah", None, None)]
+
+    def test_window_none_turns_off_single_card_swaps(self, tmp_path: Path):
+        t = Table(tmp_path, window=None)
+        _deal_flop(t)
+        t.put("BL", "04:F1")
+        t.run(1.0)
+        t.put("BL", "04:F1", "04:E1")
+        assert _board(t.run(8.0)) == [("Ah", 4, None)]
+
+    def test_known_limit_dropout_under_the_next_card(self, tmp_path: Path):
+        """既知の制約: 同じリーダーの札が読めなくなった直後にそこへ次の札が置かれ、6 秒以上戻らないと
+        差し直しと区別できない。差し替えとして記録し（engine は needs_review）、札が戻れば次の位置に入る
+        （札の集合と枚数は正しく、並びだけが入れ替わる）。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BL", "04:F1", "04:D1")             # Tc が読めなくなった所に turn
+        assert _board(t.run(8.0)) == [("7c", 2, "Tc")]
+        t.put("BL", "04:F1", "04:F2", "04:D1")    # Tc がまた読めた
+        assert _board(t.run(2.4)) == [("Tc", 4, None)]
+
+    def test_main_wires_the_window_with_production_defaults(self):
+        import main
+        assert main._rfid_tracking_kwargs({})["redeal_window_sec"] == 30.0     # noqa: SLF001
+        assert main._rfid_tracking_kwargs(                                      # noqa: SLF001
+            {"redeal_window_sec": None})["redeal_window_sec"] is None
 
 
 class TestManualCorrectionsAndNewHand:
