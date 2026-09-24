@@ -403,12 +403,15 @@ class TestSingleBoardCardRedeal:
         assert "左から 3 台目" in msg
         assert "7c（4 枚目・左から 1 台目・" in msg
 
-    def test_card_that_dropped_out_before_needs_the_same_reader_and_6_seconds(self, tmp_path: Path):
-        """確定後に一度読めなくなって戻った札（読めにくい場所）は、消えても 6 秒待つ。"""
+    def test_card_that_dropped_out_before_is_not_swapped_but_fixed_by_the_sixth_card(
+        self, tmp_path: Path,
+    ):
+        """一度読めなくなって戻った札（読みにくい位置）は、消えても差し直しとはみなさない。本当に
+        差し直していたら新しい札は次の位置に入り、6 枚目（river）が来た時点で抜いて詰める。"""
         t = Table(tmp_path)
-        _deal_flop(t)
+        dealt = _deal_flop(t)
         t.put("BM", "04:D1")
-        t.run(2.4)
+        dealt += t.run(2.4)
         t.put("BM")
         t.run(2.1)                                # 2 秒ほど読めなかった
         t.put("BM", "04:D1")
@@ -416,8 +419,16 @@ class TestSingleBoardCardRedeal:
         t.put("BM")                               # 取った
         t.run(1.0)
         t.put("BM", "04:E1")
-        assert t.run(2.4) == []                   # 3 秒では差し替えない
-        assert _board(t.run(4.0)) == [("Ah", 4, "7c")]
+        appended = t.run(8.0)
+        assert _board(appended) == [("Ah", 5, None)]
+        t.put("BR", "04:F3", "04:D2")             # river = 6 枚目
+        river = t.run(2.4)
+        assert _board(river) == [("6h", 5, "Ah"), ("Ah", 4, "7c")]
+
+        engine = _engine(tmp_path)
+        for ev in [*dealt, *appended, *river]:
+            engine._process_rfid_event(ev)                        # noqa: SLF001
+        assert engine._board_cards == ["5d", "Tc", "2h", "Ah", "6h"]  # noqa: SLF001
 
     def test_card_that_dropped_out_before_is_not_swapped_from_the_next_reader(self, tmp_path: Path):
         t = Table(tmp_path)
@@ -524,16 +535,139 @@ class TestSingleBoardCardRedeal:
         t.put("BL", "04:F1", "04:E1")
         assert _board(t.run(8.0)) == [("Ah", 4, None)]
 
-    def test_known_limit_dropout_under_the_next_card(self, tmp_path: Path):
-        """既知の制約: 同じリーダーの札が読めなくなった直後にそこへ次の札が置かれ、3 秒以上戻らないと
-        差し直しと区別できない。差し替えとして記録し（engine は needs_review）、札が戻れば次の位置に入る
-        （札の集合と枚数は正しく、並びだけが入れ替わる）。"""
+    def test_dropout_under_the_next_card_is_undone_when_the_card_comes_back(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ):
+        """同じリーダーの札が初めて読めなくなった直後にそこへ次の札が置かれ、3 秒以上戻らないと
+        差し直しと区別できない（差し替えとして記録する）。札が戻ってきて次の札も載っていれば、
+        取り除いていなかったのだから差し替えを取り消す。"""
+        t = Table(tmp_path)
+        dealt = _deal_flop(t)
+        t.put("BL", "04:F1", "04:D1")             # Tc が読めなくなった所に turn
+        swapped = t.run(8.0)
+        assert _board(swapped) == [("7c", 2, "Tc")]
+        t.put("BL", "04:F1", "04:F2", "04:D1")    # Tc がまた読めた
+        with caplog.at_level(logging.INFO, logger="rfid.reader_thread"):
+            restored = t.run(2.4)
+        assert _board(restored) == [("Tc", 2, "7c"), ("7c", 4, None)]
+        assert any(r.getMessage().startswith("差し替えを取り消しました: Tc が 2 枚目に戻りました")
+                   for r in caplog.records)
+
+        engine = _engine(tmp_path)
+        with caplog.at_level(logging.WARNING, logger="integration.engine"):
+            for ev in [*dealt, *swapped, *restored]:
+                engine._process_rfid_event(ev)                    # noqa: SLF001
+        assert engine._board_cards == ["5d", "Tc", "2h", "7c"]    # noqa: SLF001
+        assert engine._board_dealt_at[2] == dealt[1].timestamp    # noqa: SLF001  Tc を配った時刻
+        assert engine._board_dealt_at[4] == swapped[0].timestamp  # noqa: SLF001  turn を置いた時刻
+        assert not any("複数あります" in r.getMessage() for r in caplog.records)
+
+    def test_turn_that_is_hard_to_read_is_not_swapped_by_the_river(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ):
+        """店舗の実卓（2026-09-24 23:09〜23:10）: turn を 9s → Ts に差し直した。Ts はリーダーの境目で
+        途切れながら読め、river の Js を置いたときも読めていなかった。Js が Ts を差し替えて、戻った
+        Ts が 5 枚目になり turn と river が逆になった。途切れたことのある Ts は差し直しの対象にしない。"""
+        t = Table(tmp_path)
+        dealt = _deal_flop(t)
+        t.put("BM", "04:D1")                      # 9s（= 7c）を中と右のリーダーが読む
+        t.put("BR", "04:F3", "04:D1")
+        dealt += t.run(2.4)
+        assert _board(dealt)[-1] == ("7c", 4, None)
+        t.put("BM")                               # 9s を取り
+        t.put("BR", "04:F3")
+        t.run(1.2)
+        t.put("BR", "04:F3", "04:E1")             # Ts（= Ah）を置いたが
+        t.run(0.3)
+        t.put("BR", "04:F3")                      # 載ったまま読めなくなった
+        t.run(12.6)
+        t.put("BR", "04:F3", "04:E1")             # 12.7 秒後にまた読めた
+        swapped = t.run(2.4)
+        assert _board(swapped) == [("Ah", 4, "7c")]
+        t.run(4.5)
+        t.put("BR", "04:F3")                      # Ts がまた読めなくなった（15 秒）
+        t.run(7.0)
+        t.put("BR", "04:F3", "04:D2")             # river の Js（= 6h）
+        with caplog.at_level(logging.INFO, logger="rfid.reader_thread"):
+            river = t.run(2.4)
+        assert _board(river) == [("6h", 5, None)]
+        msg = next(r.getMessage() for r in caplog.records if "5 枚目にしました" in r.getMessage())
+        assert "Ah（4 枚目・左から 3 台目・" in msg and "読み直し 1 回）" in msg
+        t.put("BR", "04:F3", "04:E1", "04:D2")    # Ts がまた読めた
+        back = t.run(2.4)
+        assert set(_board(back)) == {("Ah", 4, None)}
+
+        engine = _engine(tmp_path)
+        for ev in [*dealt, *swapped, *river, *back]:
+            engine._process_rfid_event(ev)                        # noqa: SLF001
+        assert engine._board_cards == ["5d", "Tc", "2h", "Ah", "6h"]  # noqa: SLF001
+
+    def test_river_that_replaced_an_unread_turn_is_undone(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ):
+        """turn が確定後に初めて読めなくなった所へ river を置くと、差し直しと区別できない。turn が
+        戻ってきて river も載っていれば取り消す（turn = 4 枚目、river = 5 枚目。時刻もそれぞれ）。"""
+        t = Table(tmp_path)
+        dealt = _deal_flop(t)
+        t.put("BR", "04:F3", "04:D1")
+        turn = t.run(2.4)
+        assert _board(turn) == [("7c", 4, None)]
+        t.put("BR", "04:F3")                      # turn が読めなくなった（載ったまま）
+        t.run(1.0)
+        t.put("BR", "04:F3", "04:D2")             # river
+        swapped = t.run(4.0)
+        assert _board(swapped) == [("6h", 4, "7c")]
+        t.put("BR", "04:F3", "04:D1", "04:D2")    # turn がまた読めた
+        restored = t.run(2.4)
+        assert _board(restored) == [("7c", 4, "6h"), ("6h", 5, None)]
+
+        engine = _engine(tmp_path)
+        with caplog.at_level(logging.WARNING, logger="integration.engine"):
+            for ev in [*dealt, *turn, *swapped, *restored]:
+                engine._process_rfid_event(ev)                    # noqa: SLF001
+        assert engine._board_cards == ["5d", "Tc", "2h", "7c", "6h"]  # noqa: SLF001
+        assert engine._board_dealt_at[4] == turn[0].timestamp     # noqa: SLF001
+        assert engine._board_dealt_at[5] == swapped[0].timestamp  # noqa: SLF001
+        assert engine._hand_needs_review is True                  # noqa: SLF001
+        assert not any("複数あります" in r.getMessage() for r in caplog.records)
+
+    def test_swapping_back_to_the_first_card_is_a_swap_not_an_undo(self, tmp_path: Path):
+        """差し直した札を取り、最初の札を戻した（差し替えた札は卓に無い）= 通常の差し直し。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BR", "04:F3", "04:D1")
+        t.run(2.4)
+        t.put("BR", "04:F3")
+        t.run(1.0)
+        t.put("BR", "04:F3", "04:E1")
+        assert _board(t.run(4.0)) == [("Ah", 4, "7c")]
+        t.put("BR", "04:F3")
+        t.run(1.0)
+        t.put("BR", "04:F3", "04:D1")
+        assert _board(t.run(4.0)) == [("7c", 4, "Ah")]
+
+    def test_swapped_card_turning_up_on_a_far_reader_is_not_an_undo(self, tmp_path: Path):
+        """戻ってきた札が元の場所から離れたリーダーで読めたら、動かした札 = 取り消さない。"""
         t = Table(tmp_path)
         _deal_flop(t)
         t.put("BL", "04:F1", "04:D1")             # Tc が読めなくなった所に turn
         assert _board(t.run(8.0)) == [("7c", 2, "Tc")]
-        t.put("BL", "04:F1", "04:F2", "04:D1")    # Tc がまた読めた
+        t.put("BR", "04:F3", "04:F2")             # Tc が右端のリーダーに現れた
         assert _board(t.run(2.4)) == [("Tc", 4, None)]
+
+    def test_swapped_card_put_back_after_the_next_street_is_not_reordered(self, tmp_path: Path):
+        """差し替えた札の後に別の札を配っていたら、戻ってきた札で並べ直さない（回収した札をボードの
+        上に置いた、などと区別できない）。新しい札として扱う（従来どおり）。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BL", "04:F1")                      # Tc を取り
+        t.run(1.0)
+        t.put("BL", "04:F1", "04:E1")             # 同じ場所に Ah
+        assert _board(t.run(2.4)) == [("Ah", 2, "Tc")]
+        t.put("BR", "04:F3", "04:D1")             # turn
+        assert _board(t.run(2.4)) == [("7c", 4, None)]
+        t.put("BM", "04:F2")                      # 回収した Tc をボードの上に置いた
+        assert _board(t.run(2.4)) == [("Tc", 5, None)]
 
     def test_board_presence_lists_cards_taken_off_the_board(self, tmp_path: Path):
         """卓モニタの「外れた」表示用。一瞬の読み落ちは出さず、差し替わった札は消える。"""
@@ -638,6 +772,27 @@ class TestManualCorrectionsAndNewHand:
         assert t.mucked_at(1) is None
         t.put("BL", "04:A1")                      # 前のハンドの手札が次のハンドのボードに来てもよい
         assert _board(t.run(2.4)) == [("As", 1, None)]
+
+    def test_new_hand_forgets_rereads_and_swaps(self, tmp_path: Path):
+        """「途中で読めなくなった札」「差し替えた札」はハンドごと。次のハンドの判断に持ち越さない。"""
+        t = Table(tmp_path)
+        _deal_flop(t)
+        t.put("BR", "04:F3", "04:D1")
+        t.run(2.4)
+        t.put("BR", "04:F3")
+        t.run(2.1)                                # 7c が途切れた（このハンドでは差し直しの対象外）
+        t.put("BR", "04:F3", "04:D1")
+        t.run(0.6)
+        t.put("BL")
+        t.put("BR")
+        t.thread.reset_for_new_hand()
+        _deal_flop(t)
+        t.put("BR", "04:F3", "04:D1")
+        t.run(2.4)
+        t.put("BR", "04:F3")
+        t.run(1.0)
+        t.put("BR", "04:F3", "04:E1")
+        assert _board(t.run(4.0)) == [("Ah", 4, "7c")]     # 新しいハンドでは差し直しになる
 
 
 # ――― engine 側（差し替え / 席の移動 / ボード位置の差し替え）―――
