@@ -46,6 +46,9 @@ class SeatState:
     away_sec: Optional[float] = None                 # 離れている秒数（載っていれば None）
     likely_folded: bool = False                      # away_sec > しきい値 の **表示上の推測**
     position: str = ""           # BTN/SB/BB/UTG…（ボタンから導出。持たない backend では空）
+    # 手札が卓の中央（board reader の上）を通過した = マック（ADR-0058）。不在よりずっと強い
+    # fold の手がかりだが、ハンド終了の回収でも立つので**表示**に留める（判定には使わない）。
+    mucked: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -56,6 +59,7 @@ class SeatState:
             "away_sec": round(self.away_sec, 1) if self.away_sec is not None else None,
             "likely_folded": self.likely_folded,
             "position": self.position,
+            "mucked": self.mucked,
         }
 
 
@@ -77,6 +81,7 @@ class TableState:
     dealt_in_seats: list[int] = field(default_factory=list)
     present_seats: list[int] = field(default_factory=list)
     likely_folded_seats: list[int] = field(default_factory=list)
+    mucked_seats: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -92,6 +97,7 @@ class TableState:
             "dealt_in_seats": list(self.dealt_in_seats),
             "present_seats": list(self.present_seats),
             "likely_folded_seats": list(self.likely_folded_seats),
+            "mucked_seats": list(self.mucked_seats),
         }
 
 
@@ -116,8 +122,9 @@ def build_table_state(
     Args:
         seats:        卓の全席番号（着席している席）。
         hole_cards:   seat → 読めたカード（engine が蓄積したもの）。
-        presence:     seat → `{"present": bool, "absent_since": float | None}`
-                      （`RFIDThread.presence_snapshot()` の形）。RFID 無しなら空 dict。
+        presence:     seat → `{"present": bool, "absent_since": float | None,
+                      "mucked_at": float | None}`（`RFIDThread.presence_snapshot()` の形）。
+                      RFID 無しなら空 dict。`mucked_at` は無くてもよい（旧形式）。
         board:        位置順のボードカード。
         engine_street: engine 側のストリート（比較表示用。空可）。
         button_seat / position_map: engine 側のボタンとポジション名（表示用。無ければ None/空）。
@@ -144,6 +151,7 @@ def build_table_state(
             away_sec=away,
             likely_folded=bool(away is not None and away > fold_hint_sec),
             position=positions.get(seat, ""),
+            mucked=p.get("mucked_at") is not None and not present,
         ))
 
     return TableState(
@@ -159,4 +167,5 @@ def build_table_state(
         dealt_in_seats=[s.seat for s in seat_states if s.dealt_in],
         present_seats=[s.seat for s in seat_states if s.present],
         likely_folded_seats=[s.seat for s in seat_states if s.likely_folded],
+        mucked_seats=[s.seat for s in seat_states if s.mucked],
     )

@@ -51,7 +51,7 @@ def event_to_envelope(event: RecordableEvent) -> dict:
             envelope["parse_flags"] = list(event.parse_flags)
         return envelope
     if isinstance(event, RFIDEvent):
-        return {
+        envelope = {
             "type": "rfid",
             "timestamp": event.timestamp,
             "tag_id": event.tag_id,
@@ -62,6 +62,10 @@ def event_to_envelope(event: RecordableEvent) -> dict:
             "board_index": event.board_index,
             "raw_tag_id": event.raw_tag_id,
         }
+        # 配り直しの差し替え（ADR-0058, schema 0.4 additive）。通常の配布では省略 = 旧 replay 互換。
+        if event.replaces:
+            envelope["replaces"] = event.replaces
+        return envelope
     if isinstance(event, CameraEvent):
         return {
             "type": "camera",

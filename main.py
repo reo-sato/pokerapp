@@ -151,6 +151,22 @@ def _make_card_correction_hook(rfid_thread):
     return hook
 
 
+def _rfid_tracking_kwargs(rfid_cfg: dict) -> dict:
+    """卓の流れに合わせた RFID の解釈（ADR-0058）の設定。config に無ければ本番の既定値。
+
+    店舗 PC の config.json はこの設定が入る前に作られていることがあるので、キーが無いときも
+    既定で有効にする（フォールドした札がボードに入る / 配り直しが入力なしで反映されない、を防ぐ）。
+    `release_sec: null` で自動の差し替えを止め、`commit_sec: 0` で最初に見えた瞬間に確定する。
+    """
+    from rfid.reader_thread import DEFAULT_COMMIT_SEC, DEFAULT_GAP_SEC, DEFAULT_RELEASE_SEC
+    release = rfid_cfg.get("release_sec", DEFAULT_RELEASE_SEC)
+    return {
+        "commit_sec": float(rfid_cfg.get("commit_sec", DEFAULT_COMMIT_SEC)),
+        "gap_sec": float(rfid_cfg.get("gap_sec", DEFAULT_GAP_SEC)),
+        "release_sec": None if release is None else float(release),
+    }
+
+
 def _make_audio_thread(cfg: dict, audio_queue, stop_event):
     """config.audio.enabled が true（既定）なら AudioThread を返す。false なら None。
 
@@ -283,6 +299,7 @@ def run_cli() -> None:
                 reader_configs=pcsc_readers,
                 poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
                 stop_event=stop_event,
+                **_rfid_tracking_kwargs(rfid_cfg),
             )
             print("RFID pyscardスレッド起動。")
         rfid_thread.start()
@@ -533,6 +550,7 @@ def run_gui() -> None:
                 reader_configs=pcsc_readers,
                 poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
                 stop_event=stop_event,
+                **_rfid_tracking_kwargs(rfid_cfg),
             )
 
     # HTTP transport の場合、rfid_receiver を GUI に渡してステータス表示する

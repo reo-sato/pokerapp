@@ -23,6 +23,9 @@ class RFIDEvent:
     timestamp: float             # time.time()
     raw_tag_id: str              # デバッグ用の生タグ ID
     board_index: Optional[int] = None  # role="board" 時のボード位置 (1=flop1…5=river)
+    # 配り直しで差し替えた前の札（カード名。ADR-0058）。席ならその席の手札のうちこの札を置き換え、
+    # ボードなら同じ board_index の札を置き換える。None = 通常の配布（追加）。
+    replaces: Optional[str] = None
 
 
 @dataclass

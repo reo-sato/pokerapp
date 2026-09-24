@@ -34,12 +34,29 @@ Phase 6: RFID リーダーをポーリングして RFIDEvent を rfid_queue に�
     }
 board reader は **左から右の順に並べて書く**（同じ poll で 2 枚以上増えたときの位置順が
 config の記載順で決まるため。1 台に複数枚載ったぶんの左右順は UID 順で不定 = §4 の既知の制約）。
+
+**卓の流れに合わせた解釈（ADR-0058, 本番の起動経路で有効）**:
+
+- **席で読んだ札はボードの札にならない**（常に有効）。フォールドした手札は卓の中央へ押し出され、
+  ボードのリーダーの上を通る。そのハンドで席に記録した UID を board reader が読んでも位置は
+  与えず、その席の**マック（手札が中央を通過した）**として記録する。
+- **ボードの札は載り続けてから確定する**（`commit_sec`）。通過する札は一瞬しか読めない。
+  確定までは位置を与えず、確定した札の時刻は**最初に見えた時刻**のまま（ADR-0055）。
+- **配り直しは入力なしで反映する**（`release_sec`）。前の札が `release_sec` 以上見えず、
+  **新しい札が載り続けた**ときだけ差し替える。一瞬の読み落ちでは差し替わらない（ISSUE-0026）。
+  ボードは「同じストリートの札が全部消えた」ときだけ差し替え対象にする（flop の 1 枚が読み
+  落ちている間に turn が来ても、turn は 4 枚目のまま）。席では、同じハンドで別の席に記録した
+  札が、元の席から消えて新しい席に載り続けたら移す（配り直しで席が変わった）。
+
+既定値（`commit_sec=0` / `release_sec=None`）は従来の挙動（最初に見えた瞬間に確定・ハンド内は
+append-only・差し替えは明示の訂正コマンドだけ）で、`tools/probe_pcsc.py` の検査が使う。
 """
 from __future__ import annotations
 
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from core.event_queue import EventQueue
@@ -51,6 +68,26 @@ logger = logging.getLogger(__name__)
 
 # コミュニティカードの最大枚数（flop 3 + turn + river）。board 位置は 1..5。
 _BOARD_MAX_CARDS = 5
+# 席のホールカードの枚数（テキサスホールデム）。
+_SEAT_MAX_CARDS = 2
+# ボード位置のストリート区分。差し替えは「同じストリートの札が全部消えた」ときだけ（ADR-0058）。
+_BOARD_STREETS: tuple[tuple[int, ...], ...] = ((1, 2, 3), (4,), (5,))
+
+# 本番（main.py）の既定値。config の rfid.commit_sec / gap_sec / release_sec で上書きする（ADR-0058）。
+DEFAULT_COMMIT_SEC = 2.0    # ボードの札はこの秒数載り続けてから確定（フォールドした札の通過を除く）
+DEFAULT_GAP_SEC = 1.5       # この秒数までの途切れは「載り続けている」とみなす（間欠読みの許容）
+DEFAULT_RELEASE_SEC = 6.0   # 前の札がこの秒数以上見えないときだけ、新しい札で差し替える（配り直し）
+
+
+@dataclass
+class _Run:
+    """ある場所（ボード / 席 N）で 1 枚の札が載り続けている期間。"""
+
+    first_seen: float
+    last_seen: float
+    reader_id: str = ""     # 最初に見えた reader（event の reader_id に使う）
+    fired: bool = False     # この期間について判定を済ませた（確定・再発火・却下のいずれか）
+    noted: bool = False     # 保留理由をログに出した（毎 poll 出さないため）
 
 
 def _reader_index_of(cfg: dict, position: int) -> int:
@@ -80,6 +117,9 @@ class RFIDThread(threading.Thread):
         stop_event: Optional[threading.Event] = None,
         bridge_factory: Optional[object] = None,
         clock: Optional[Callable[[], float]] = None,
+        commit_sec: float = 0.0,
+        gap_sec: float = 0.0,
+        release_sec: Optional[float] = None,
     ) -> None:
         """
         Args:
@@ -96,6 +136,12 @@ class RFIDThread(threading.Thread):
                               旧シグネチャ (reader_name) -> bridge も互換で受け付ける。
                               省略時は PCSCBridge を使用。
             clock:            epoch 秒を返す時計（既定 time.time）。マック観測時刻の源（ADR-0055）。
+            commit_sec:       ボードの札を確定するまでに載り続けている秒数（ADR-0058）。0 = 最初に
+                              見えた瞬間に確定（従来）。> 0 か `release_sec` を指定すると卓の流れに
+                              合わせた解釈（下記）が有効になる。
+            gap_sec:          この秒数以下の途切れは「載り続けている」とみなす（間欠読みの許容）。
+            release_sec:      前の札がこの秒数以上見えず、新しい札が載り続けたら差し替える
+                              （配り直し, ADR-0058）。None = 差し替えは明示の訂正コマンドだけ（従来）。
         """
         super().__init__(daemon=True, name="RFIDThread")
         self._queue = rfid_queue
@@ -131,6 +177,24 @@ class RFIDThread(threading.Thread):
         # fold を「判定」するためではなく、合成 fold に**実時刻を与える**ために使う
         # （プレイヤーはカードを持ち上げて見ることがあるので、不在そのものは fold を意味しない）。
         self._seat_absent_since: dict[int, float] = {}
+
+        # ――― 卓の流れに合わせた解釈（ADR-0058）―――
+        self._commit_sec = max(0.0, float(commit_sec))
+        self._gap_sec = max(0.0, float(gap_sec))
+        self._release_sec = None if release_sec is None else max(0.0, float(release_sec))
+        self._tracking = self._commit_sec > 0 or self._release_sec is not None
+        # 別スレッド（IntegrationThread）からの新ハンド / 訂正と poll の状態更新を直列化する。
+        # 保持するのは状態の更新の間だけ（リーダーとの通信中は持たない）。
+        self._lock = threading.RLock()
+        # そのハンドで**席に記録した** UID → 席番号。ボードの札にはならない（常に有効）。
+        self._seat_owner: dict[str, int] = {}
+        # 席 → 手札が卓の中央（board reader の上）を通過した最初の時刻 = マック（表示・記録用）。
+        self._mucked_at: dict[int, float] = {}
+        # 以下は tracking 時のみ使う。場所は "board" / "seat:N"。
+        self._runs: dict[tuple[str, str], _Run] = {}             # (場所, uid) → 載り続けている期間
+        self._loc_present: dict[str, set[str]] = {}               # 場所 → 直前に見えていた uid
+        self._seat_committed: dict[int, list[str]] = {}           # 席 → 記録した uid（最大 2）
+        self._redeal_streets: set[int] = set()                    # 差し替えが始まったストリート
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -191,66 +255,301 @@ class RFIDThread(threading.Thread):
             logger.info("RFIDThread stopped")
 
     def _poll_reader(self, bridge: object, cfg: dict, reader_id: str) -> None:
-        """1 リーダーをポーリングし、**新しく増えた UID ごとに** RFIDEvent を投入する。
+        """1 リーダーをポーリングし、確定した札ごとに RFIDEvent を投入する。
 
         重ね置き（席 2 枚 / flop 3 枚）に対応するため、状態は UID 1 個ではなく集合で持つ。
+        リーダーとの通信はロックの外で行い、状態の更新だけを直列化する。
         """
         uids = bridge_read_uids(bridge)   # 旧 bridge（read_uid のみ）互換シム
         current: set[str] = set(uids)
-        prev = self._last_uids.get(reader_id, set())
+        with self._lock:
+            if self._tracking:
+                events = self._poll_tracked(cfg, reader_id, uids, current)
+            else:
+                events = self._poll_immediate(cfg, reader_id, uids, current)
+        for event in events:
+            self._queue.put(event)
+            logger.debug(
+                "RFIDEvent: reader=%s role=%s seat=%s board_index=%s tag=%s card=%r replaces=%r",
+                event.reader_id, event.role, event.seat, event.board_index, event.tag_id,
+                event.card, event.replaces,
+            )
+        if events:
+            self.health = {**self.health, "last_event_at": time.time()}
 
-        # デバウンス: 集合が前回と同じなら何もしない
-        if current == prev:
-            return
-
-        self._last_uids[reader_id] = current
-
-        removed = prev - current
-        if removed:
-            # カードが外れた（イベント不要）。**board の位置は解放しない**（ハンド内 append-only,
-            # ISSUE-0026）。ミスディールで載せ替えるときは明示の訂正コマンドで解放する
-            # （`forget_board_position` / `forget_seat_cards`, ADR-0054）。
-            logger.debug("Card(s) removed from %s: %s", reader_id, sorted(removed))
-
+    def _learn_role(self, cfg: dict, reader_id: str) -> None:
         if cfg.get("role") == "board":
             self._board_reader_ids.add(reader_id)
         elif isinstance(cfg.get("seat"), int):
             self._seat_reader_ids.setdefault(cfg["seat"], set()).add(reader_id)
             self._track_seat_presence(cfg["seat"])
 
-        # 新規タッチ検出（読み取り順を保ったまま、増えた UID ごとに 1 event）
-        seen: set[str] = set()
-        for uid in uids:
-            if uid in prev or uid in seen:
-                continue
-            seen.add(uid)
-            self._emit_event(cfg, reader_id, uid)
-
-    def _emit_event(self, cfg: dict, reader_id: str, uid: str) -> None:
-        """新規検出 UID 1 件を RFIDEvent にして投入する。"""
-        card = self._card_master.lookup(uid)
-        role = cfg.get("role", "seat")
-        seat = cfg.get("seat") if role == "seat" else None
-        # board_index は board street 自動遷移に必須（engine が board_index!=None を分岐条件にする,
-        # engine.py:294）。**board reader 全台で共有する論理ボードの「何枚目か」**（契約 v1.3 §4）。
-        board_index = self._assign_board_index(uid) if role == "board" else None
-
-        event = RFIDEvent(
+    def _make_event(
+        self, uid: str, reader_id: str, role: str, seat: Optional[int], timestamp: float,
+        board_index: Optional[int] = None, replaces: Optional[str] = None,
+    ) -> RFIDEvent:
+        return RFIDEvent(
             tag_id=uid,
-            card=card,
+            card=self._card_master.lookup(uid),
             reader_id=reader_id,
             role=role,
             seat=seat,
-            timestamp=time.time(),
+            timestamp=timestamp,
             raw_tag_id=uid,
+            # board_index は board street 自動遷移に必須（engine が board_index!=None を分岐条件にする）。
+            # **board reader 全台で共有する論理ボードの「何枚目か」**（契約 v1.3 §4）。
             board_index=board_index,
+            replaces=replaces,
         )
-        self._queue.put(event)
-        self.health = {**self.health, "last_event_at": time.time()}
-        logger.debug(
-            "RFIDEvent: reader=%s role=%s seat=%s board_index=%s tag=%s card=%r",
-            reader_id, role, seat, board_index, uid, card,
+
+    def _note_muck(self, seat: int, uid: str, now: float) -> None:
+        """席に記録した札が board reader の上に現れた = 手札が卓の中央を通過した（マック）。"""
+        if seat not in self._mucked_at:
+            self._mucked_at[seat] = now
+            logger.info(
+                "席 %d の手札が卓の中央を通過しました（マック, tag=%s）— ボードの札にはしません",
+                seat, uid,
+            )
+
+    # ――― 従来の解釈（最初に見えた瞬間に確定, ADR-0053/0054）―――
+
+    def _poll_immediate(
+        self, cfg: dict, reader_id: str, uids: list[str], current: set[str],
+    ) -> list[RFIDEvent]:
+        """**新しく増えた UID ごとに** 1 event（リーダー単位のデバウンス）。"""
+        prev = self._last_uids.get(reader_id, set())
+        # デバウンス: 集合が前回と同じなら何もしない
+        if current == prev:
+            return []
+        self._last_uids[reader_id] = current
+
+        removed = prev - current
+        if removed:
+            # カードが外れた（イベント不要）。**board の位置は解放しない**（ハンド内 append-only,
+            # ISSUE-0026）。この解釈では、載せ替えは明示の訂正コマンドで解放する
+            # （`forget_board_position` / `forget_seat_cards`, ADR-0054）。
+            logger.debug("Card(s) removed from %s: %s", reader_id, sorted(removed))
+
+        self._learn_role(cfg, reader_id)
+        now = self._clock()
+        role = cfg.get("role", "seat")
+        events: list[RFIDEvent] = []
+        seen: set[str] = set()
+        for uid in uids:   # 読み取り順を保ったまま、増えた UID ごとに 1 event
+            if uid in prev or uid in seen:
+                continue
+            seen.add(uid)
+            if role == "board":
+                owner = self._seat_owner.get(uid)
+                if owner is not None:            # 手札は盤の札にならない（ADR-0058）
+                    self._note_muck(owner, uid, now)
+                    continue
+                events.append(self._make_event(
+                    uid, reader_id, "board", None, now, board_index=self._assign_board_index(uid),
+                ))
+            else:
+                seat = cfg.get("seat")
+                if isinstance(seat, int):
+                    self._seat_owner.setdefault(uid, seat)
+                events.append(self._make_event(uid, reader_id, role, seat, now))
+        return events
+
+    # ――― 卓の流れに合わせた解釈（ADR-0058）―――
+
+    def _poll_tracked(
+        self, cfg: dict, reader_id: str, uids: list[str], current: set[str],
+    ) -> list[RFIDEvent]:
+        """場所（ボード / 席）ごとに「載り続けている期間」を追い、確定した札だけ event にする。"""
+        now = self._clock()
+        self._last_uids[reader_id] = current
+        self._learn_role(cfg, reader_id)
+        if cfg.get("role") == "board":
+            loc, readers, seat = "board", self._board_reader_ids, None
+        else:
+            seat = cfg.get("seat")
+            if not isinstance(seat, int):
+                return []
+            loc, readers = f"seat:{seat}", self._seat_reader_ids.get(seat, set())
+
+        union: set[str] = set()
+        for rid in readers:
+            union |= self._last_uids.get(rid, set())
+        prev_present = self._loc_present.get(loc, set())
+        # この reader が読んだ順を先に（同じ poll で増えた札の位置順を読み取り順にする）。
+        for uid in list(dict.fromkeys(uids)) + sorted(union - current):
+            self._sight(loc, uid, now, prev_present, reader_id)
+        self._loc_present[loc] = union
+
+        events: list[RFIDEvent] = []
+        for (run_loc, uid), run in list(self._runs.items()):
+            if run_loc != loc or run.fired or uid not in union:
+                continue
+            if loc == "board":
+                event = self._decide_board(uid, run, now)
+            else:
+                event = self._decide_seat(seat, uid, run, now)
+            if event is not None:
+                events.append(event)
+        return events
+
+    def _sight(self, loc: str, uid: str, now: float, prev_present: set[str], reader_id: str) -> None:
+        key = (loc, uid)
+        run = self._runs.get(key)
+        continuing = run is not None and (uid in prev_present or now - run.last_seen <= self._gap_sec)
+        if continuing:
+            run.last_seen = now
+            return
+        # 新しく載った（または途切れが gap を超えた）→ 新しい期間。挿入順 = 最初に見えた順を保つ。
+        self._runs.pop(key, None)
+        self._runs[key] = _Run(first_seen=now, last_seen=now, reader_id=reader_id)
+        if loc == "board":
+            owner = self._seat_owner.get(uid)
+            if owner is not None:
+                self._note_muck(owner, uid, now)
+
+    def _absent_for(self, loc: str, uid: str, now: float) -> float:
+        """場所 `loc` で `uid` が見えていない秒数（見えていれば 0、記録が無ければ無限大）。"""
+        if uid in self._loc_present.get(loc, set()):
+            return 0.0
+        run = self._runs.get((loc, uid))
+        return float("inf") if run is None else now - run.last_seen
+
+    def _run_event(
+        self, uid: str, run: _Run, role: str, seat: Optional[int],
+        board_index: Optional[int] = None, replaces: Optional[str] = None,
+    ) -> RFIDEvent:
+        # 時刻は**最初に見えた時刻**（確定を待った分だけ遅らせない, ADR-0055 の配布時刻）。
+        return self._make_event(
+            uid, run.reader_id, role, seat, run.first_seen,
+            board_index=board_index, replaces=replaces,
         )
+
+    def _decide_board(self, uid: str, run: _Run, now: float) -> Optional[RFIDEvent]:
+        owner = self._seat_owner.get(uid)
+        if owner is not None:
+            run.fired = True        # 手札は盤の札にならない（マックは _sight で記録済み）
+            return None
+        existing = self._board_indexes.get(uid)
+        if existing is not None:    # 既に位置を持つ札が戻ってきた → 同じ位置で再発火（従来どおり）
+            run.fired = True
+            return self._run_event(uid, run, "board", None, board_index=existing)
+        if now - run.first_seen < self._commit_sec:
+            return None             # まだ確定しない（中央を通過する札かもしれない）
+        run.fired = True
+        index, replaced = self._choose_board_slot(now)
+        if index is None:
+            logger.warning(
+                "ボードが %d 枚を超えました（tag=%s）— board_index なしで記録します。"
+                "ハンドを始め直すなら新ハンド（n）でリセットされます",
+                _BOARD_MAX_CARDS, uid,
+            )
+            return self._run_event(uid, run, "board", None)
+        replaces = None
+        if replaced is not None:
+            self._board_indexes.pop(replaced, None)
+            replaces = self._card_master.lookup(replaced) or None
+            self._redeal_streets.add(next(i for i, s in enumerate(_BOARD_STREETS) if index in s))
+            logger.info(
+                "配り直しを検出: ボード %d 枚目を差し替えました（%s → %s）",
+                index, replaces or replaced, self._card_master.lookup(uid) or uid,
+            )
+        self._board_indexes[uid] = index
+        return self._run_event(uid, run, "board", None, board_index=index, replaces=replaces)
+
+    def _choose_board_slot(self, now: float) -> tuple[Optional[int], Optional[str]]:
+        """確定した新しいボード札の位置。差し替え対象があればそれ、無ければ空き位置の最小。
+
+        差し替え対象は「そのストリートの札が **全部** `release_sec` 以上見えない」ときだけ
+        （flop の 1 枚が読み落ちている間に turn が来ても、turn を 2 枚目にしない）。
+        一度差し替えが始まったストリートは、残りの消えた札も対象にする（flop の配り直し）。
+        """
+        slot_uid = {i: u for u, i in self._board_indexes.items()}
+        if self._release_sec is not None:
+            replaceable: list[int] = []
+            for street_no, street in enumerate(_BOARD_STREETS):
+                slots = [i for i in street if i in slot_uid]
+                gone = [i for i in slots
+                        if self._absent_for("board", slot_uid[i], now) >= self._release_sec]
+                if gone and (street_no in self._redeal_streets or len(gone) == len(slots)):
+                    replaceable.extend(gone)
+            if replaceable:
+                index = min(replaceable)
+                return index, slot_uid[index]
+        free = [i for i in range(1, _BOARD_MAX_CARDS + 1) if i not in slot_uid]
+        return (free[0], None) if free else (None, None)
+
+    def _decide_seat(self, seat: int, uid: str, run: _Run, now: float) -> Optional[RFIDEvent]:
+        loc = f"seat:{seat}"
+        card = self._card_master.lookup(uid) or uid
+        if uid in self._board_indexes:
+            if not run.noted:
+                logger.info("ボードの札 %s が席 %d の上にあります — 手札としては記録しません", card, seat)
+                run.noted = True
+            run.fired = True
+            return None
+        owner = self._seat_owner.get(uid)
+        committed = self._seat_committed.setdefault(seat, [])
+        if owner == seat:           # 戻ってきた自分の札 → 再発火（従来どおり。engine は重複を無視）
+            run.fired = True
+            return self._run_event(uid, run, "seat", seat)
+
+        moved_from: Optional[int] = None
+        if owner is not None:
+            # 同じハンドで別の席に記録した札。元の席から消えて、ここに載り続けたときだけ移す。
+            ready = (self._release_sec is not None
+                     and self._absent_for(f"seat:{owner}", uid, now) >= self._release_sec
+                     and now - run.first_seen >= self._commit_sec)
+            if not ready:
+                if not run.noted:
+                    logger.info(
+                        "席 %d の札 %s が席 %d にあります — 元の席から消えて載り続けるまで記録しません",
+                        owner, card, seat,
+                    )
+                    run.noted = True
+                return None
+            moved_from = owner
+
+        if moved_from is None and len(committed) < _SEAT_MAX_CARDS:
+            # 通常の配布: 最初に見えた瞬間に記録する（持ち上げて見られる前に拾う）。
+            committed.append(uid)
+            self._seat_owner[uid] = seat
+            run.fired = True
+            return self._run_event(uid, run, "seat", seat)
+
+        # 差し替え / 移動は、新しい札が載り続けていることを確かめてから。
+        if now - run.first_seen < self._commit_sec:
+            return None
+        victim: Optional[str] = None
+        if len(committed) >= _SEAT_MAX_CARDS:
+            gone = [] if self._release_sec is None else [
+                (self._absent_for(loc, u, now), u) for u in committed
+                if self._absent_for(loc, u, now) >= self._release_sec
+            ]
+            if not gone:
+                if not run.noted:
+                    logger.warning(
+                        "席 %d に 3 枚目の札 %s があります — 前の札が消えるまで記録しません"
+                        "（すぐ直すならハンドロガーで cs %d）", seat, card, seat,
+                    )
+                    run.noted = True
+                return None
+            victim = max(gone)[1]   # 一番長く消えている札を差し替える
+            committed.remove(victim)
+            self._seat_owner.pop(victim, None)
+            logger.info(
+                "配り直しを検出: 席 %d の %s を %s に差し替えました",
+                seat, self._card_master.lookup(victim) or victim, card,
+            )
+        if moved_from is not None:
+            prior = self._seat_committed.get(moved_from, [])
+            if uid in prior:
+                prior.remove(uid)
+            logger.info("配り直しを検出: %s を席 %d から席 %d に移しました", card, moved_from, seat)
+        committed.append(uid)
+        self._seat_owner[uid] = seat
+        run.fired = True
+        replaces = (self._card_master.lookup(victim) or None) if victim else None
+        return self._run_event(uid, run, "seat", seat, replaces=replaces)
 
     # ――― board の位置割り当て（契約 v1.3 §4: board reader 全台で 1 つの論理ボード） ―――
 
@@ -261,13 +560,17 @@ class RFIDThread(threading.Thread):
         落とすので、**ハンド開始時に盤上に残っているカードは改めて 1 番から検出し直す**
         （engine 側も `_board_positions` を空にするため、両者が必ず同じ状態から始まる）。
 
-        poll スレッドとは別スレッド（IntegrationThread）から呼ばれるが、dict/set の
-        差し替えは GIL 下で原子的で、poll 側は「見えている UID との差分」で動くため、
-        取りこぼしは次の poll で回復する（ロックは持たない = poll を止めない）。
+        poll スレッドとは別スレッド（IntegrationThread）から呼ばれる。状態の更新の間だけ
+        ロックを取る（リーダーとの通信中は取らないので poll を止めない）。
         """
-        self._board_indexes = {}
-        for reader_id in self._board_reader_ids:
-            self._last_uids[reader_id] = set()
+        with self._lock:
+            self._board_indexes = {}
+            for reader_id in self._board_reader_ids:
+                self._last_uids[reader_id] = set()
+            # 卓の流れに合わせた解釈（ADR-0058）: ボード上の「載り続けている期間」も捨てる。
+            self._runs = {k: r for k, r in self._runs.items() if k[0] != "board"}
+            self._loc_present.pop("board", None)
+            self._redeal_streets = set()
         logger.info("新ハンド: board の位置割り当てをリセットしました")
 
     # ――― マック観測（ADR-0055: 合成 fold に実時刻を与えるためだけに使う） ―――
@@ -293,33 +596,43 @@ class RFIDThread(threading.Thread):
     def presence_snapshot(self) -> dict[int, dict]:
         """席ごとの現在のカード在否（卓状態の表示用, `core/table_state.py`）。
 
-        `{seat: {"present": bool, "absent_since": float | None, "uid_count": int}}`。
+        `{seat: {"present": bool, "absent_since": float | None, "uid_count": int,
+        "mucked_at": float | None}}`。
         **「載っている」であって「ゲームに残っている」ではない**（ADR-0056 D4）。
         まだ一度も検出していない席は現れない（= 未配布と区別できる）。
+        `mucked_at` はその席の手札が卓の中央（board reader の上）を通過した時刻（ADR-0058）。
         """
         snapshot: dict[int, dict] = {}
-        for seat, reader_ids in self._seat_reader_ids.items():
-            uids: set[str] = set()
-            for reader_id in reader_ids:
-                uids |= self._last_uids.get(reader_id, set())
-            snapshot[seat] = {
-                "present": bool(uids),
-                "absent_since": self._seat_absent_since.get(seat),
-                "uid_count": len(uids),
-            }
+        with self._lock:
+            for seat, reader_ids in self._seat_reader_ids.items():
+                uids: set[str] = set()
+                for reader_id in reader_ids:
+                    uids |= self._last_uids.get(reader_id, set())
+                snapshot[seat] = {
+                    "present": bool(uids),
+                    "absent_since": self._seat_absent_since.get(seat),
+                    "uid_count": len(uids),
+                    "mucked_at": self._mucked_at.get(seat),
+                }
         return snapshot
 
     def reset_for_new_hand(self) -> None:
-        """新ハンドの同期点（board 位置 + マック観測をまとめて捨てる）。
+        """新ハンドの同期点（board 位置 + マック観測 + 席の記録をまとめて捨てる）。
 
         ハンド終了時はディーラーが全席のカードを回収するので、観測を持ち越すと次のハンドの
         合成 fold に前のハンドの時刻が付く。`on_new_hand` フックはこちらを呼ぶ。
         """
-        self.reset_board_positions()
-        self._seat_absent_since = {}
-        for reader_ids in self._seat_reader_ids.values():
-            for reader_id in reader_ids:
-                self._last_uids[reader_id] = set()
+        with self._lock:
+            self.reset_board_positions()
+            self._seat_absent_since = {}
+            for reader_ids in self._seat_reader_ids.values():
+                for reader_id in reader_ids:
+                    self._last_uids[reader_id] = set()
+            self._seat_owner = {}
+            self._mucked_at = {}
+            self._seat_committed = {}
+            self._runs = {}
+            self._loc_present = {}
 
     # ――― ミスディール訂正（ADR-0054: 明示コマンドで 1 枚だけ載せ替える） ―――
 
@@ -339,13 +652,19 @@ class RFIDThread(threading.Thread):
         Returns:
             解放した位置に載っていた UID（無ければ None）。
         """
-        uid = next((u for u, i in self._board_indexes.items() if i == index), None)
-        if uid is None:
-            logger.warning("board 位置 %s には割り当てがありません（訂正は無効）", index)
-            return None
-        self._board_indexes = {u: i for u, i in self._board_indexes.items() if u != uid}
-        for reader_id in self._board_reader_ids:
-            self._last_uids[reader_id] = set()
+        with self._lock:
+            uid = next((u for u, i in self._board_indexes.items() if i == index), None)
+            if uid is None:
+                logger.warning("board 位置 %s には割り当てがありません（訂正は無効）", index)
+                return None
+            self._board_indexes = {u: i for u, i in self._board_indexes.items() if u != uid}
+            for reader_id in self._board_reader_ids:
+                self._last_uids[reader_id] = set()
+            # 卓の流れに合わせた解釈（ADR-0058）: 解放した札がまだ載っていれば、次の poll で
+            # 空き位置の最小（= 同じ位置）に戻る。外してあれば、次に確定した札がこの位置を取る。
+            run = self._runs.get(("board", uid))
+            if run is not None:
+                run.fired = False
         logger.info(
             "board 位置 %d を解放しました（tag=%s）— 正しいカードを置き直してください", index, uid,
         )
@@ -358,13 +677,23 @@ class RFIDThread(threading.Thread):
         記録される**。ミスディールしたカードを先に外してから打つこと（外す前に打つと同じ
         カードがまた記録されるだけなので、外して再実行すればよい）。
         """
-        reader_ids = self._seat_reader_ids.get(seat)
-        if not reader_ids:
-            logger.warning("席 %s に対応する RFID リーダーがありません（訂正は無効）", seat)
-            return
-        for reader_id in reader_ids:
-            self._last_uids[reader_id] = set()
-        self._seat_absent_since.pop(seat, None)   # 訂正後の観測をやり直す（ADR-0055）
+        with self._lock:
+            reader_ids = self._seat_reader_ids.get(seat)
+            if not reader_ids:
+                logger.warning("席 %s に対応する RFID リーダーがありません（訂正は無効）", seat)
+                return
+            for reader_id in reader_ids:
+                self._last_uids[reader_id] = set()
+            self._seat_absent_since.pop(seat, None)   # 訂正後の観測をやり直す（ADR-0055）
+            # この席に記録した札を解放する（載っていれば読み直しで改めて記録される, ADR-0058）。
+            self._seat_owner = {u: s for u, s in self._seat_owner.items() if s != seat}
+            self._seat_committed.pop(seat, None)
+            self._mucked_at.pop(seat, None)
+            loc = f"seat:{seat}"
+            for (run_loc, _uid), run in self._runs.items():
+                if run_loc == loc:
+                    run.fired = False
+                    run.noted = False
         logger.info("席 %d のカードを読み直します — 正しいカードを置き直してください", seat)
 
     def _assign_board_index(self, uid: str) -> Optional[int]:

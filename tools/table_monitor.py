@@ -6,7 +6,8 @@
 
 - **カード読み取り** — 各席の札とボードが読めているか。
 - **有効席** — 誰に札が配られ、いま誰の札が卓上にあるか。**「載っている」と「ゲームに残っている」は
-  別物**なので、配布 / 在否 / 離席秒数 / fold らしさを分けて出す（ADR-0056 D4）。
+  別物**なので、配布 / 在否 / 離席秒数 / fold らしさを分けて出す（ADR-0056 D4）。手札が卓の中央
+  （ボードのリーダーの上）を通過した席は「マック」と出す（ADR-0058）。
 - **ストリート遷移** — ボード枚数から導いたストリート（engine のストリートと並べて表示）。
 - **反映遅延** — 観測時刻とページ描画時刻の差を画面に出す。
 
@@ -86,9 +87,10 @@ async function tick(){
       `<h1>卓状態モニタ</h1><p class="err">${d.error}</p>`; return; }
   const lag = d.age_sec == null ? null : d.age_sec;
   const seats = (d.seats||[]).map(s => {
-    const cls = !s.dealt_in ? "seat out" : (s.likely_folded ? "seat folded" : "seat");
+    const cls = !s.dealt_in ? "seat out" : ((s.likely_folded || s.mucked) ? "seat folded" : "seat");
     let tag = '<span class="tag t-none">未配布</span>';
     if (s.present) tag = '<span class="tag t-present">卓上</span>';
+    else if (s.mucked) tag = '<span class="tag t-folded">マック</span>';
     else if (s.likely_folded) tag = `<span class="tag t-folded">fold らしい ${s.away_sec}s</span>`;
     else if (s.dealt_in) tag = `<span class="tag t-away">離れて ${s.away_sec ?? "?"}s</span>`;
     const pos = s.position ? ` <span class="pos">${s.position}</span>` : "";
@@ -156,6 +158,8 @@ def _format_text(state: dict) -> str:
     for s in state.get("seats", []):
         if s["present"]:
             tag = "卓上"
+        elif s.get("mucked"):
+            tag = "マック"
         elif s["likely_folded"]:
             tag = f"fold らしい({s['away_sec']}s)"
         elif s["dealt_in"]:

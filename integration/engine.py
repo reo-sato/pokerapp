@@ -377,10 +377,20 @@ class IntegrationThread(threading.Thread):
 
         if ev.board_index is not None:
             # 位置指定あり: board_positions に格納して順序保証
-            unchanged = self._board_positions.get(ev.board_index) == ev.card
+            previous = self._board_positions.get(ev.board_index)
+            unchanged = previous == ev.card
             self._board_positions[ev.board_index] = ev.card
-            # 配布時刻は **最初の検出**を採る（再発火で上書きしない, ADR-0055）。
-            self._board_dealt_at.setdefault(ev.board_index, ev.timestamp)
+            if previous is not None and not unchanged:
+                # 配り直しで同じ位置の札が替わった（ADR-0058）。配布時刻も新しい札のものにする。
+                self._board_dealt_at[ev.board_index] = ev.timestamp
+                self._hand_needs_review = True
+                logger.info(
+                    "配り直し: ボード %d 枚目を差し替えました（%s → %s）",
+                    ev.board_index, previous, ev.card,
+                )
+            else:
+                # 配布時刻は **最初の検出**を採る（再発火で上書きしない, ADR-0055）。
+                self._board_dealt_at.setdefault(ev.board_index, ev.timestamp)
             self._board_cards = [
                 self._board_positions[i]
                 for i in sorted(self._board_positions)
@@ -416,7 +426,26 @@ class IntegrationThread(threading.Thread):
         # ホールカード蓄積 (カード情報がある場合のみ)
         if ev.card and ev.seat is not None:
             seat_cards = self._hole_cards.setdefault(ev.seat, [])
-            if ev.card not in seat_cards and len(seat_cards) < 2:
+            # デッキ整合: 同じ札を別の席に記録していたら外す（配り直しで席が変わった, ADR-0058）。
+            moved = False
+            for other_seat, other_cards in self._hole_cards.items():
+                if other_seat != ev.seat and ev.card in other_cards:
+                    other_cards.remove(ev.card)
+                    moved = True
+                    logger.info(
+                        "配り直し: %s を席 %d から席 %d に移しました", ev.card, other_seat, ev.seat,
+                    )
+            if ev.replaces and ev.replaces in seat_cards and ev.card not in seat_cards:
+                # 配り直しで前の札が消え、新しい札が載り続けた（RFIDThread が確かめてから送る）。
+                seat_cards[seat_cards.index(ev.replaces)] = ev.card
+                self._hand_needs_review = True
+                logger.info(
+                    "配り直し: 席 %d の %s を %s に差し替えました（cards: %s）",
+                    ev.seat, ev.replaces, ev.card, seat_cards,
+                )
+                if self._on_rfid_card:
+                    self._on_rfid_card(ev)
+            elif ev.card not in seat_cards and len(seat_cards) < 2:
                 seat_cards.append(ev.card)
                 logger.info(
                     "Hole card detected: seat=%d card=%s (cards so far: %s)",
@@ -424,6 +453,8 @@ class IntegrationThread(threading.Thread):
                 )
                 if self._on_rfid_card:
                     self._on_rfid_card(ev)
+            if moved:
+                self._hand_needs_review = True
         elif not ev.card:
             logger.warning(
                 "Seat RFID event has no card (tag=%s reader=%s seat=%s) — needs_review",

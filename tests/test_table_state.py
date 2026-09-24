@@ -147,13 +147,13 @@ class TestPresenceSnapshot:
         t = self._thread(tmp_path, bridges, lambda: now[0])
         t._poll_reader(bridges["s1"], cfg, "reader_0")        # noqa: SLF001
         assert t.presence_snapshot() == {
-            1: {"present": True, "absent_since": None, "uid_count": 2}
+            1: {"present": True, "absent_since": None, "uid_count": 2, "mucked_at": None}
         }
         now[0] = 130.0
         bridges["s1"].uids = []
         t._poll_reader(bridges["s1"], cfg, "reader_0")        # noqa: SLF001
         assert t.presence_snapshot() == {
-            1: {"present": False, "absent_since": 130.0, "uid_count": 0}
+            1: {"present": False, "absent_since": 130.0, "uid_count": 0, "mucked_at": None}
         }
 
 

@@ -64,6 +64,7 @@ def event_from_envelope(d: dict) -> Event:
             tag_id=d["tag_id"], card=d["card"], reader_id=d["reader_id"], role=d["role"],
             seat=d.get("seat"), timestamp=d["timestamp"], raw_tag_id=d.get("raw_tag_id") or "",
             board_index=d.get("board_index"),
+            replaces=d.get("replaces"),   # ADR-0058 additive（旧 events.jsonl には無い）
         )
     if t == "camera":
         return CameraEvent(seat=d["seat"], timestamp=d["timestamp"])

@@ -86,7 +86,7 @@ schema を変更する PR は、同じ PR で以下を更新する（漏れは c
 >   `1.3` = 監査フィールド `reason` / `apply_ok`（ADR-0047 G2。verify-v1 系列では `1.1` だったものを 2026-09-22 のマージで統合）
 > - `hand` `1.1` = `board_timeline`（ADR-0055）/ `1.2` = `button_seat` + `position_map`（ISSUE-0032）/
 >   `1.3` = `pot_awards`（ADR-0050 S7。同上）
-> - `reconstruction_event`（draft, 未 freeze）`0.2` = `utterance_start_ts` + `parse_flags`（ADR-0047/0048）/ `0.3` = `position`（ISSUE-0032）
+> - `reconstruction_event`（draft, 未 freeze）`0.2` = `utterance_start_ts` + `parse_flags`（ADR-0047/0048）/ `0.3` = `position`（ISSUE-0032）/ `0.4` = rfid の `replaces`（配り直しの差し替え, ADR-0058）
 >
 > **全 domain schema + repository interface が frozen**。残るのは write/sync 拡張（双方向同期,
 > S5 後続）のみ。
