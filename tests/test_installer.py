@@ -26,7 +26,7 @@ import pytest
 ROOT = Path(__file__).parent.parent
 CMD_FILES = [
     "install.cmd", "update.cmd", "uninstall.cmd",
-    "start_logger.cmd", "start_monitor.cmd", "start_ledger.cmd", "rfid_check.cmd",
+    "start_logger.cmd", "start_monitor.cmd", "start_viewer.cmd", "start_ledger.cmd", "rfid_check.cmd",
 ]
 PS1_FILES = ["installer/install.ps1", "installer/bootstrap.ps1"]
 
@@ -90,7 +90,8 @@ class TestLaunchers:
         assert "-Uninstall" in (ROOT / "uninstall.cmd").read_text(encoding="ascii")
 
     def test_launchers_reference_existing_entry_points(self):
-        for rel in ("start_logger.cmd", "start_monitor.cmd", "start_ledger.cmd", "rfid_check.cmd"):
+        for rel in ("start_logger.cmd", "start_monitor.cmd", "start_viewer.cmd", "start_ledger.cmd",
+                    "rfid_check.cmd"):
             text = (ROOT / rel).read_text(encoding="ascii")
             assert r"venv\Scripts\python.exe" in text, rel
             for m in re.finditer(r'^"venv\\Scripts\\python\.exe" (\S+)', text, re.M):
@@ -105,6 +106,19 @@ class TestLaunchers:
     def test_monitor_launcher_binds_lan(self):
         text = (ROOT / "start_monitor.cmd").read_text(encoding="ascii")
         assert "--host 0.0.0.0" in text and "--port 8790" in text
+
+    def test_viewer_launcher_serves_customers_on_the_lan(self):
+        """お客さんのスマホから開く（ADR-0059）。config を書き換えずに LAN へ出す。"""
+        text = (ROOT / "start_viewer.cmd").read_text(encoding="ascii")
+        assert "main.py --viewer-api --host 0.0.0.0 --port 8788" in text
+
+    def test_every_shortcut_points_at_a_launcher(self):
+        text = (ROOT / "installer/install.ps1").read_bytes()[3:].decode("utf-8")
+        block = re.search(r"\$Shortcuts\s*=\s*@\((.*?)\n\)", text, re.S).group(1)
+        targets = re.findall(r'Target\s*=\s*"([^"]+)"', block)
+        assert "start_viewer.cmd" in targets
+        for target in targets:
+            assert target in CMD_FILES and (ROOT / target).is_file(), target
 
 
 class TestUpdatePreservesShopData:

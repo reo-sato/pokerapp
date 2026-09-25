@@ -99,6 +99,12 @@ Windows 11 Pro 初期状態の店舗 PC で判明し、Decision を次のとお�
 - 1 行インストールの取得失敗は、固定 IP のゲートウェイ未設定（IPv6 だけ通る）を疑うよう案内する。
   GitHub の zip 配布は IPv4 のみ。Stage 2 の配布経路（release / exe）でも同じ制約を考慮する。
 
+## 追記（2026-09-25, お客さん向け画面の配信 = ADR-0059）
+
+Stage 2 の「スマホ画面を API サーバーから配信（店舗 PC に Node 不要）」のうち、**お客さん向け画面**は ADR-0059 で
+実現した（ビルドを `api/static/player/` にコミットし、viewer API が `/` で配信。ショートカット 5 つ目
+「お客さん用 ハンド履歴 (スマホ)」= `start_viewer.cmd`）。staff アプリ（iPad）の配信は引き続き Stage 2。
+
 ## Related
 
 - ADR-0015（RFID canonical = PC/SC）/ ADR-0052（1 slot + P2）/ ISSUE-0034（`--log-file`）

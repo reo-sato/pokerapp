@@ -50,12 +50,18 @@ function initialRoute(): Route {
   return { name: "players" };
 }
 
+// staff 端末（iPad 訂正等）は EXPO_PUBLIC_STAFF_TOKEN を設定すると staff write が有効になる。
+// 未設定（お客さん向けの配布）では訂正の導線を出さない（ADR-0059）。
+const STAFF_TOKEN = process.env.EXPO_PUBLIC_STAFF_TOKEN || null;
+// 会場が本人確認（PIN / LINE・Google）を使わないとき（player_auth=off）は "off" でビルドし、
+// ログイン・サインアップの導線を出さない（名前を選ぶだけ, ADR-0059）。
+const PLAYER_AUTH_UI = process.env.EXPO_PUBLIC_PLAYER_AUTH !== "off";
+
 export default function App(): React.JSX.Element {
   const repository: ViewerRepository = useMemo(() => {
+    // "/" = 画面と同じ PC・同じポートの API（店舗 PC の viewer API が画面も配信する, ADR-0059）。
     const apiUrl = process.env.EXPO_PUBLIC_API_URL;
-    // staff 端末（iPad 訂正等）は EXPO_PUBLIC_STAFF_TOKEN を設定すると staff write が有効になる。
-    const staffToken = process.env.EXPO_PUBLIC_STAFF_TOKEN ?? null;
-    return apiUrl ? new HttpRepository(apiUrl, staffToken) : new MockRepository();
+    return apiUrl ? new HttpRepository(apiUrl, STAFF_TOKEN) : new MockRepository();
   }, []);
 
   const [route, setRoute] = useState<Route>(initialRoute);
@@ -77,8 +83,10 @@ export default function App(): React.JSX.Element {
         <PlayerSelectScreen
           repository={repository}
           onSelect={selectPlayer}
-          onLogin={(player) => setRoute({ name: "auth", mode: "pin", player })}
-          onSignup={() => setRoute({ name: "auth", mode: "oidc" })}
+          onLogin={
+            PLAYER_AUTH_UI ? (player) => setRoute({ name: "auth", mode: "pin", player }) : undefined
+          }
+          onSignup={PLAYER_AUTH_UI ? () => setRoute({ name: "auth", mode: "oidc" }) : undefined}
         />
       )}
       {route.name === "auth" && (
@@ -146,10 +154,14 @@ export default function App(): React.JSX.Element {
           onBack={() =>
             setRoute({ name: "hands", player: route.player, session: route.session })
           }
-          onCorrect={() =>
-            setRoute({
-              name: "correct", player: route.player, session: route.session, handId: route.handId,
-            })
+          onCorrect={
+            STAFF_TOKEN
+              ? () =>
+                  setRoute({
+                    name: "correct", player: route.player, session: route.session,
+                    handId: route.handId,
+                  })
+              : undefined
           }
         />
       )}

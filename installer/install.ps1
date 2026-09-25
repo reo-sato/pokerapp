@@ -76,6 +76,7 @@ $PreservedDirs = @("venv", "logs", "backups")
 $Shortcuts = @(
     @{ Name = "ハンドロガー (CLI)";        Target = "start_logger.cmd" },
     @{ Name = "卓モニタ (iPad から閲覧)";   Target = "start_monitor.cmd" },
+    @{ Name = "お客さん用 ハンド履歴 (スマホ)"; Target = "start_viewer.cmd" },
     @{ Name = "会計 + スマホ注文 API";      Target = "start_ledger.cmd" },
     @{ Name = "RFID リーダー チェック";     Target = "rfid_check.cmd" }
 )

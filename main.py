@@ -54,7 +54,8 @@ def _prompt_session_config() -> dict:
 
     players = []
     for i in range(1, num_seats + 1):
-        name = input(f"席{i} プレイヤー名: ").strip() or f"Player{i}"
+        typed = input(f"席{i} プレイヤー名: ").strip()
+        name = typed or f"Player{i}"
         while True:
             try:
                 stack = int(input(f"席{i} 初期スタック: ").strip())
@@ -63,7 +64,8 @@ def _prompt_session_config() -> dict:
             except ValueError:
                 pass
             print("正の整数を入力してください。")
-        players.append({"seat": i, "name": name, "stack": stack})
+        # named = 名前を入力した席。空 Enter の席（PlayerN）はお客さんに結び付けない（ADR-0059）。
+        players.append({"seat": i, "name": name, "stack": stack, "named": bool(typed)})
 
     while True:
         try:
@@ -201,6 +203,57 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event):
     )
 
 
+def _open_session_layer(cfg: dict, session_cfg: dict):
+    """`session_layer.enabled` なら session を作り、起動時に入力した名前を席に結び付ける（ADR-0059）。
+
+    戻り値は (session_repo, player_repo, session_id, 席 → player_id)。無効なら None（従来どおり
+    timestamp の session_id で、席とお客さんの対応を記録しない）。名前は同じ表示名の player に
+    結び付き、無ければ作る。名前を入れなかった席（PlayerN）は結び付けない。
+    """
+    if not cfg.get("session_layer", {}).get("enabled", False):
+        return None
+    from core.player_repository import PlayerRepository
+    from core.session_repository import SessionRepository
+
+    player_repo = PlayerRepository()
+    session_repo = SessionRepository(player_repo=player_repo)
+    session = session_repo.create_session(
+        label=datetime.now().strftime("%Y-%m-%d_%H%M%S"),
+        blinds={"sb": session_cfg["sb"], "bb": session_cfg["bb"]},
+    )
+    seat_player_map = {
+        p["seat"]: player_repo.find_or_create(p["name"]).player_id
+        for p in session_cfg["players"] if p.get("named", True)
+    }
+    return session_repo, player_repo, session.session_id, seat_player_map
+
+
+def _close_session_layer(session_repo, session_id: str) -> None:
+    """hand logger の終了で session を閉じる（お客さんの画面で「進行中」のまま残さない, ADR-0059）。"""
+    from core.session_repository import SessionAlreadyClosedError
+
+    try:
+        session_repo.close_session(session_id)
+    except SessionAlreadyClosedError:
+        pass
+    except Exception:
+        logger.exception("session を閉じられませんでした: %s", session_id)
+
+
+def _parse_seat_command(parts: list[str]) -> "tuple[int, str | None] | None":
+    """`seat <席> <名前>` / `seat <席> -`（空席にする）を (席, 名前 or None) にする。不正なら None。"""
+    if len(parts) < 3:
+        return None
+    try:
+        seat = int(parts[1])
+    except ValueError:
+        return None
+    name = " ".join(parts[2:]).strip()
+    if name == "-":
+        return seat, None
+    return (seat, name) if name else None
+
+
 def _make_game_state(cfg: dict, players: list, sb: int, bb: int, button_seat=None):
     """config.engine.backend で game-state 実装を選ぶ (R2, ADR-0009)。
 
@@ -234,7 +287,14 @@ def run_cli() -> None:
         button_seat=session_cfg.get("button_seat"),
     )
 
-    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
+    # 席とお客さんの対応（ADR-0059）。お客さん向け画面はこの記録からハンドを探す。
+    session_layer = _open_session_layer(cfg, session_cfg)
+    if session_layer is not None:
+        session_repo, player_repo, session_id, seat_player_map = session_layer
+    else:
+        session_repo = player_repo = None
+        seat_player_map = {}
+        session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
 
     audio_q = make_audio_queue()
@@ -346,14 +406,23 @@ def run_cli() -> None:
         board_presence=board_presence,
         table_state_writer=table_state_writer,
         control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
+        session_repo=session_repo,
+        seat_player_map=seat_player_map,
     )
     if audio_thread is not None:
         audio_thread.start()
     integration_thread.start()
 
     print(f"\nセッション開始。ログ: {json_writer.path}")
+    if session_repo is not None:
+        seated = ", ".join(
+            f"席{p['seat']}={p['name']}" for p in session_cfg["players"] if p.get("named", True)
+        )
+        print(f"お客さんの記録: {seated or 'なし（名前を入力した席がありません）'}")
     print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー  [r <席> <金額>]=リバイ")
     print("ミスディール訂正: [cb <位置>]=ボードの N 枚目を取り消し  [cs <席>]=その席の札を読み直し")
+    if session_repo is not None:
+        print("席替え: [seat <席> <名前>]=その席のお客さんを変える（次のハンドから）  [seat <席> -]=空席にする")
     print("上記以外の入力は読み上げ文として解釈します"
           "（例: チェック / シート3 コール / ベット 500）。マイクが無くてもこれで進行できます。")
     print("ディーラーがアナウンスすると自動検出されます。\n")
@@ -401,6 +470,32 @@ def run_cli() -> None:
                     print(f"リバイを送信しました: 席{seat} +{amount}（反映はアクション表示で確認）")
                 except ValueError as e:
                     print(f"エラー: {e}")
+            elif cmd == "seat":
+                parsed = _parse_seat_command(line.translate(_FULLWIDTH_TO_ASCII).split())
+                if session_repo is None:
+                    print("席とお客さんの記録は無効です（config の session_layer.enabled=true で有効）")
+                elif parsed is None:
+                    print("使い方: seat <席> <名前> / seat <席> -（空席）")
+                else:
+                    seat, name = parsed
+                    if seat not in {p["seat"] for p in session_cfg["players"]}:
+                        print(f"席{seat} はこの卓にありません")
+                        continue
+                    new_map = dict(seat_player_map)
+                    if name is None:
+                        new_map.pop(seat, None)
+                        name = f"Player{seat}"
+                    else:
+                        new_map[seat] = player_repo.find_or_create(name).player_id
+                    seat_player_map = new_map
+                    # 席 → player は次のハンドの開始時に書かれる。名前はゲーム状態を持つ
+                    # integration スレッドで変える（ハンドの途中なら次のハンドから）。
+                    integration_thread.set_seat_player_map(seat_player_map)
+                    audio_q.put(AudioEvent(
+                        action="rename_seat", amount=0, timestamp=_time.time(),
+                        raw_text=name, seat=seat,
+                    ))
+                    print(f"席{seat} を {name} にしました（次のハンドから）")
             elif cmd in ("cb", "cs") and len(parts) >= 2:
                 # ミスディール訂正（ADR-0054）。状態変更は他と同じく queue 経由。
                 try:
@@ -447,6 +542,8 @@ def run_cli() -> None:
             camera_thread.join(timeout=3)
         if rfid_thread is not None:
             rfid_thread.join(timeout=3)
+        if session_repo is not None:
+            _close_session_layer(session_repo, session_id)
         print(f"\nセッション終了。ログ保存先: {json_writer.path}")
 
 
@@ -714,7 +811,7 @@ def run_ledger_view() -> None:
     if api_cfg.get("enabled", False):
         try:
             import uvicorn
-            from api.server import auth_kwargs_from_config, create_app
+            from api.server import PLAYER_WEB_DIR, auth_kwargs_from_config, create_app
         except ImportError:
             print("viewer_api.enabled=true ですが fastapi/uvicorn が未導入のため "
                   "API なしで起動します（pip install \".[api]\"）。")
@@ -728,6 +825,7 @@ def run_ledger_view() -> None:
                 orders_writable=True,
                 staff_token=api_cfg.get("staff_token") or None,
                 buyin_presets=buyin_presets,
+                player_web_dir=PLAYER_WEB_DIR,  # お客さん向け画面も同じポートで（ADR-0059）
                 **auth_kwargs_from_config(api_cfg),  # L1 PIN, ADR-0027
             )
             api_server = uvicorn.Server(uvicorn.Config(
@@ -749,8 +847,12 @@ def run_ledger_view() -> None:
         api_thread.join(timeout=3)
 
 
-def run_viewer_api() -> None:
-    """Phase M1: player 向け読み取り専用 viewer API を起動する (ADR-0017)。"""
+def run_viewer_api(host: str | None = None, port: int | None = None) -> None:
+    """Phase M1: player 向け読み取り専用 viewer API を起動する (ADR-0017)。
+
+    お客さん向け画面（mobile/ の web 版）も同じポートの `/` で配信する（ADR-0059）。
+    `host` / `port` は config の `viewer_api.bind_host` / `bind_port` より優先する。
+    """
     from core.config import load_config
 
     try:
@@ -761,11 +863,12 @@ def run_viewer_api() -> None:
 
     cfg = load_config()
     api_cfg = cfg.get("viewer_api", {})
-    print(
-        f"Viewer API を起動します: http://{api_cfg.get('bind_host', '127.0.0.1')}:"
-        f"{api_cfg.get('bind_port', 8788)}/api/health (Ctrl+C で終了)"
-    )
-    run_server(cfg)
+    shown_host = host or api_cfg.get("bind_host", "127.0.0.1")
+    shown_port = port or api_cfg.get("bind_port", 8788)
+    print(f"Viewer API を起動します: http://{shown_host}:{shown_port}/api/health (Ctrl+C で終了)")
+    if shown_host == "0.0.0.0":
+        print(f"お客さんのスマホからは http://<この PC の IP アドレス>:{shown_port}/ を開きます")
+    run_server(cfg, host=host, port=port)
 
 
 def export_ledger(out_dir: str) -> None:
@@ -915,6 +1018,16 @@ def main() -> None:
         help="player 向け読み取り専用 viewer API を起動する（Phase M1, ADR-0017, 要 [api] extra）",
     )
     parser.add_argument(
+        "--host",
+        help="--viewer-api の待ち受けアドレス（config の viewer_api.bind_host より優先。"
+             "店舗の LAN に出すなら 0.0.0.0, ADR-0059）",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        help="--viewer-api の待ち受けポート（config の viewer_api.bind_port より優先）",
+    )
+    parser.add_argument(
         "--log-file",
         metavar="PATH",
         nargs="?",
@@ -953,7 +1066,7 @@ def main() -> None:
         sys.exit(0)
 
     if args.viewer_api:
-        run_viewer_api()
+        run_viewer_api(host=args.host, port=args.port)
         sys.exit(0)
 
     if args.sessions:

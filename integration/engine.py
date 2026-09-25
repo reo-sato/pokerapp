@@ -261,6 +261,8 @@ class IntegrationThread(threading.Thread):
         # new_hand 済みで勝者未確定のハンドが進行中か（G1 の状態妥当性チェック /
         # ハンド外イベントの unresolved 記録に使う）。
         self._hand_open: bool = False
+        # ハンドの途中に届いた席替えの名前（席 → 名前）。次のハンドの開始時に反映する（ADR-0059）。
+        self._pending_renames: dict[int, str] = {}
 
         # RFID カード情報
         self._board_cards: list[str] = []          # 順序付きボードカード（表示用）
@@ -658,6 +660,10 @@ class IntegrationThread(threading.Thread):
             self._handle_correct_seat(event)
             return
 
+        if action == "rename_seat":
+            self._handle_rename_seat(event)
+            return
+
         # ベッティングアクション。rules-aware backend（pokerkit）は境界で actor 推定 + 合法手
         # 射影、legacy（空 legal_context）は従来経路で挙動不変（ADR-0009 §1）。
         legal_ctx = gs.legal_context()
@@ -822,6 +828,31 @@ class IntegrationThread(threading.Thread):
                 needs_review=False,
                 confidence=1.0,
             ))
+
+    def _handle_rename_seat(self, event: AudioEvent) -> None:
+        """席替えで席のプレイヤー名を変える（CLI の `seat`, ADR-0059）。名前は `raw_text`。
+
+        ハンドの途中なら次のハンドの開始時に反映する（ハンドの記録は 1 ハンドの中で名前が
+        揃うように。席と player_id の対応も次のハンドから切り替わる）。
+        """
+        seat = event.seat
+        name = (event.raw_text or "").strip()
+        if seat is None or not name:
+            logger.warning("rename_seat without seat or name: seat=%r raw=%r", seat, event.raw_text)
+            return
+        if self._hand_open:
+            self._pending_renames[seat] = name
+            logger.info("席 %d の名前を次のハンドから %s にします", seat, name)
+            return
+        self._apply_rename(seat, name)
+
+    def _apply_rename(self, seat: int, name: str) -> None:
+        try:
+            self._game_state.set_player_name(seat, name)
+        except ValueError:
+            logger.warning("rename_seat: 席 %d はありません（%s）", seat, name)
+            return
+        logger.info("席 %d の名前を %s にしました", seat, name)
 
     # ――― ミスディール訂正（ADR-0054） ―――
 
@@ -1242,6 +1273,9 @@ class IntegrationThread(threading.Thread):
 
     def _start_new_hand(self, event: Optional[AudioEvent] = None) -> None:
         gs = self._game_state
+        for seat, name in self._pending_renames.items():   # ハンドの途中に届いた席替え（ADR-0059）
+            self._apply_rename(seat, name)
+        self._pending_renames = {}
         # S5（ADR-0047）: stack_start はブラインド post 前に取る。pokerkit backend は new_hand() で
         # ブラインドを自動 post するため、post 後に取ると result がブラインド分ずれる。
         self._stack_start = gs.get_stacks()

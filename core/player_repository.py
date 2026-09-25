@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from core.atomic_io import atomic_write_json, read_json_file
+from core.atomic_io import atomic_write_json, file_stat, read_json_file
 from core.player import Player
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,7 @@ class PlayerRepository:
         self._lock = threading.RLock()
         self._path = Path(path) if path is not None else _DEFAULT_PLAYER_DB
         self._players: dict[str, Player] = {}
+        self._loaded_stat: tuple[int, int] | None = None
         self._load()
 
     @property
@@ -86,16 +87,21 @@ class PlayerRepository:
     # ――― 永続化 ―――
 
     def _load(self) -> None:
+        self._loaded_stat = file_stat(self._path)
         data = read_json_file(self._path)  # 破損は退避して None（B7）
-        if data is None:
-            return
-        for raw in data.get("players", []):
+        self._players.update(self._parse(data))
+
+    @staticmethod
+    def _parse(data: dict | None) -> dict[str, Player]:
+        players: dict[str, Player] = {}
+        for raw in (data or {}).get("players", []):
             try:
                 player = Player.from_dict(raw)
             except (KeyError, TypeError):
                 logger.warning("Skipping malformed player record: %r", raw)
                 continue
-            self._players[player.player_id] = player
+            players[player.player_id] = player
+        return players
 
     def _flush(self) -> None:
         """アトミック + fsync で書き込む（ADR-0034/B2）。失敗してもクラッシュしない。"""
@@ -104,6 +110,7 @@ class PlayerRepository:
             atomic_write_json(self._path, data)
         except OSError:
             logger.exception("Failed to write player DB: %s", self._path)
+        self._loaded_stat = file_stat(self._path)
 
     @_locked
     def reload(self) -> None:
@@ -114,6 +121,25 @@ class PlayerRepository:
         """
         self._players.clear()
         self._load()
+
+    @_locked
+    def reload_if_changed(self) -> bool:
+        """ディスクの `players.json` が前回読んだ後に変わっていれば再読込する（変わったら True）。
+
+        お客さん向け viewer API は hand logger とは別プロセスで動き、hand logger が席入力で
+        player を作る（ADR-0059）。毎リクエスト全件読み直すのではなく、更新時刻とサイズで判定する。
+        ファイルはあるのに読めなかった（別プロセスが書き換えている最中など）ときは今の内容を保ち、
+        次の呼び出しで読み直す。
+        """
+        stat = file_stat(self._path)
+        if stat == self._loaded_stat:
+            return False
+        data = read_json_file(self._path)
+        if data is None and stat is not None:
+            return False
+        self._players = self._parse(data)
+        self._loaded_stat = stat
+        return True
 
     # ――― validation ―――
 
@@ -242,6 +268,23 @@ class PlayerRepository:
         self._flush()
         logger.info("Created player %s (%s)", player_id, name)
         return player
+
+    @_locked
+    def find_or_create(self, display_name: str) -> Player:
+        """表示名が一致する player を返し、無ければ作る（hand logger の席入力, ADR-0059）。
+
+        一致は前後空白を除いた完全一致（`_validate_name` と同じ = 同じ名前は同じ人）。merge で
+        吸収された player に一致したら統合先を返す。作る前にディスクを読み直し、別プロセスが
+        作った同名の player を二重に作らない。
+        """
+        name = (display_name or "").strip()
+        if not name:
+            raise EmptyDisplayNameError("display_name が空です。")
+        self.reload_if_changed()
+        for player in self._players.values():
+            if player.display_name == name:
+                return self._players.get(self.resolve_canonical(player.player_id), player)
+        return self.create_player(name)
 
     @_locked
     def rename_player(self, player_id: str, new_display_name: str) -> Player:

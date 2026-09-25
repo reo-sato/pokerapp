@@ -7,7 +7,8 @@ python main.py            # GUI（ハンドロガー画面）
 python main.py --cli      # CLI（音声のみ・画面なし）
 python main.py --players  # プレイヤー登録画面（別画面）
 python main.py --ledger   # 会計（台帳）入力 + 注文確定画面（別画面）
-python main.py --viewer-api  # プレイヤー向け読み取り専用 viewer API（要 [api] extra）
+python main.py --viewer-api  # お客さん向けのハンド閲覧（画面 + 読み取り専用 API, 要 [api] extra）
+python main.py --viewer-api --host 0.0.0.0 --port 8788   # 店の Wi-Fi のスマホから開く（下の「お客さんがスマホで…」）
 python main.py --export-phh logs/<セッションID>.json   # JSON → PHH 変換
 ```
 
@@ -132,15 +133,50 @@ GUI と `--cli` はどちらも**音声でハンドを記録**します。配信
 
 ---
 
-## プレイヤー向け参照（viewer API / スマホ）
+## お客さんがスマホでハンドを見る
 
-`pip install ".[api]"` のうえ `python main.py --viewer-api` を実行すると、プレイヤーが自分の
-スマホから自分の session / ハンド履歴 / 会計を参照できる**読み取り専用 API** が起動します
-（既定 `127.0.0.1:8788`、無認証）。スマホから LAN 越しに見せる場合は `config.json` の
-`viewer_api.bind_host` を PC の LAN IP（または `0.0.0.0`）に変更してください。**信頼できる
-ネットワークでのみ**使用してください。mobile アプリ（`mobile/`, Expo）はこの API に接続します。
+お客さんが店の Wi-Fi で自分のスマホから、**自分が座ったセッション・ハンド・カード**を見られます
+（ログイン不要。名前を選ぶだけ）。
 
-`--viewer-api` 単独は read-only で、注文は受け付けません（503）。
+### 準備（最初に 1 回）
+
+ハンドロガーが「誰がどの席か」を記録するように、`config.json` の `session_layer.enabled` を `true` に
+します（店舗 PC ではインストール先のフォルダで次の 1 行。メモ帳で直接書き換えるより安全です）。
+
+```
+cd C:\PokerHandLogger
+.\venv\Scripts\python.exe tools\set_config.py session_layer.enabled true
+```
+
+### ハンドロガー（`--cli`）で席とお客さんを入れる
+
+- 起動時の「席N プレイヤー名」に**お客さんの名前**を入れます。**名前を入れずに Enter** した席は
+  `PlayerN` になり、どのお客さんにも結び付けません（空席・名前を出したくない人）。
+- **同じ名前は同じお客さん**です（前回の来店と同じ名前なら、履歴がつながります）。表記がゆれると
+  別の人になります（例: 「たろう」と「太郎」）。
+- **席替え**: `seat <席> <名前>`（例 `seat 3 花子`）で**次のハンドから**その席の人を変えます。
+  `seat <席> -` で空席（誰にも結び付けない）にします。ハンドの途中で打っても、そのハンドは元の人のままです。
+- `q` で終えると、そのセッションはお客さんの画面で「終了」になります。
+
+### 画面を出す
+
+- デスクトップの「**お客さん用 ハンド履歴 (スマホ)**」（`start_viewer.cmd`）を起動します。表示される
+  この PC の IPv4 アドレスを使い、お客さんはスマホのブラウザで **`http://<PC の IPv4>:8788/`** を開きます
+  （例 `http://192.168.1.136:8788/`）。QR コードにして卓に置くと便利です。
+- 名前を選ぶ → セッション → ハンド一覧 → ハンドの詳細（ストリートごとのアクション・ボード・
+  **記録した全員分のホールカード**・収支）。
+- 画面を先に起動しておいて構いません。あとから始めたセッションやハンドは、画面の「↻ 再読込」で出ます
+  （画面を起動し直す必要はありません）。
+- **本人確認が無いので、誰でも他の人の名前を選べます。** 当面は全員分のカードを見せる運用です
+  （セッションごとに公開範囲を決める機能は今後, ADR-0059）。**店の Wi-Fi の中だけ**で使ってください。
+- 手元の PC で試すときは `python main.py --viewer-api`（`http://127.0.0.1:8788/`）。
+  `--host` / `--port` は `config.json` の `viewer_api.bind_host` / `bind_port` より優先します。
+- `--viewer-api` 単独は読み取り専用で、注文は受け付けません（503）。会計画面（`--ledger`,
+  `viewer_api.enabled=true`）を使う日は、会計画面が同じ画面を出すので `start_viewer.cmd` は要りません
+  （同じポート 8788 を使うため、両方は起動できません）。
+
+画面は `mobile/`（Expo）の web 版で、ビルドを `api/static/player/` に同梱しています（店舗 PC に Node は
+不要）。`mobile/` を変えたら `python scripts/build_player_web.py` で作り直してコミットします。
 
 ## ドリンク注文（任意）
 
@@ -180,6 +216,11 @@ GUI と `--cli` はどちらも**音声でハンドを記録**します。配信
 | | `redeal_confirm_sec` | `3.0` | ボードの差し直しで、前の札が見えないことを確かめる秒数（短いほど早く反映、読み落ちとの区別は弱くなる） |
 | `recording` | `enabled` | `false` | 生イベントの記録（再現・検証用、任意） |
 | `engine` | `backend` | `pokerkit` | ルール準拠の再構築。問題時は `legacy` に戻せる |
+| `session_layer` | `enabled` | `false` | 誰がどの席かを記録する（お客さん向けのハンド閲覧に必要） |
+| `viewer_api` | `bind_host` / `bind_port` | `127.0.0.1` / `8788` | お客さん向け画面の待ち受け（`--host` / `--port` が優先） |
+
+1 項目だけ変えるときは `python tools/set_config.py <項目> <値>`（例 `session_layer.enabled true`）。
+値を省くと今の値を表示します。
 
 > `camera` セクションは**廃止予定（レガシー）**で使用しません。`session` セクションと `audio.initial_prompt` は
 > 現在のコードでは参照されません（席/ブラインド等は起動時入力、Whisper プロンプトは内蔵語彙を使用）。

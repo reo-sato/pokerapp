@@ -8,8 +8,13 @@ player 向け参照 front-end（WS3, Expo）が消費する **読み取り専用
   - `python main.py --ledger`（`viewer_api.enabled=true`）= スタッフ会計画面に **in-process 組み込み**。
     注文 write が有効になる（単一プロセス所有, ADR-0018 §3）。
 - bind 既定: `127.0.0.1:8788`（無認証のため。LAN 公開は `config.viewer_api.bind_host` を明示変更。
-  rfid receiver と同じ前例）。プライバシーモデルは **v1 = name-pick で確定**（ISSUE-0019 Fixed,
+  rfid receiver と同じ前例）。`--viewer-api --host / --port` は config より優先する（店舗 PC のランチャ,
+  ADR-0059）。プライバシーモデルは **v1 = name-pick で確定**（ISSUE-0019 Fixed,
   ADR-0018。注文はスタッフ確定を挟むため対面で検証される）。
+- **API 以外のパス（`/` 以下）はお客さん向け画面**（`mobile/` の web 版, ADR-0059）。API は `/api/` の下だけで、
+  未知の `/api/...` は JSON の 404。画面は同じ origin の `/api/` を読む。
+- **要求ごとに `sessions.json` / `players.json` を読み直す**（前回から変わっていれば, ADR-0059）。hand logger が
+  別プロセスで書いたセッション・席・player は、API を再起動せずに次の要求から見える。
 - **M1 は GET のみ／M5 で注文リクエストの write を追加**（ledger への直接 write は無い —
   本 doc § 注文リクエスト / verify-v1 ledger は `ledger-overview.md` / `ledger-schema.md`）。
 - version: **0.x draft**。session 系 model（session / seat_assignment / hand_ref）が draft（0.x,

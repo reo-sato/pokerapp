@@ -9,10 +9,10 @@ import { ErrorView, Loading, ReloadLink, styles } from "./common";
 interface Props {
   repository: ViewerRepository;
   onSelect: (player: Player) => void;
-  /** L1 PIN ログイン (ADR-0027): 選んだ player の本人確認へ。 */
-  onLogin: (player: Player) => void;
-  /** L2 外部 IdP サインアップ (ADR-0031)。 */
-  onSignup: () => void;
+  /** L1 PIN ログイン (ADR-0027): 選んだ player の本人確認へ。無ければ導線を出さない。 */
+  onLogin?: (player: Player) => void;
+  /** L2 外部 IdP サインアップ (ADR-0031)。無ければ導線を出さない。 */
+  onSignup?: () => void;
 }
 
 /**
@@ -48,17 +48,21 @@ export function PlayerSelectScreen({
               <Pressable onPress={() => onSelect(item)}>
                 <Text style={styles.cardTitle}>{item.display_name}</Text>
               </Pressable>
-              <Pressable onPress={() => onLogin(item)}>
-                <Text style={[styles.cardMeta, { color: "#5ab0f0" }]}>🔒 PIN でログイン</Text>
-              </Pressable>
+              {onLogin ? (
+                <Pressable onPress={() => onLogin(item)}>
+                  <Text style={[styles.cardMeta, { color: "#5ab0f0" }]}>🔒 PIN でログイン</Text>
+                </Pressable>
+              ) : null}
             </View>
           )}
           ListFooterComponent={
-            <Pressable onPress={onSignup}>
-              <Text style={[styles.back, { marginTop: 16, textAlign: "center" }]}>
-                LINE / Google でサインアップ
-              </Text>
-            </Pressable>
+            onSignup ? (
+              <Pressable onPress={onSignup}>
+                <Text style={[styles.back, { marginTop: 16, textAlign: "center" }]}>
+                  LINE / Google でサインアップ
+                </Text>
+              </Pressable>
+            ) : null
           }
         />
       )}

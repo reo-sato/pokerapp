@@ -1,3 +1,6 @@
 # Windows 向けスクリプトは CRLF 固定（cmd.exe のラベル/goto と PowerShell 5.1 の互換のため）
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+
+# お客さん向け画面のビルド（scripts/build_player_web.py が作る）は改行を変換しない
+api/static/player/** -text

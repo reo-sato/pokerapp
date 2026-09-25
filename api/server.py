@@ -19,7 +19,9 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from api.read_models import (
     HandNotFoundError,
@@ -94,6 +96,23 @@ from core.session_repository import (
 from core.sync import build_snapshot, merge_snapshot_into
 
 logger = logging.getLogger(__name__)
+
+# お客さん向け画面（mobile/ の web 版）のビルド。`scripts/build_player_web.py` が作る（ADR-0059）。
+PLAYER_WEB_DIR = Path(__file__).parent / "static" / "player"
+
+
+class _PlayerWebFiles(StaticFiles):
+    """お客さん向け画面の静的配信。入口（index.html 等）は毎回確かめさせる。
+
+    更新で JS のファイル名（hash 入り）が変わるので、古い index.html がスマホに残ると消えた JS を
+    読みに行って画面が真っ白になる。hash 入りの `_expo/` 配下はそのまま（変わらない）。
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if not path.replace("\\", "/").startswith("_expo/"):   # Windows は区切りが "\"
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 def _app_version() -> str:
@@ -330,6 +349,7 @@ def create_app(
     identity_repo: AuthIdentityRepository | None = None,
     correction_repo: HandCorrectionRepository | None = None,
     ground_truth_repo: GroundTruthRepository | None = None,
+    player_web_dir: str | Path | None = None,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -346,6 +366,11 @@ def create_app(
     （PIN 登録済 player の write のみ本人トークンを要求）/ 'required'（全 player write に
     本人トークンを要求）。PIN 検証成功で stateless 署名トークン（player_token_secret、
     未設定なら起動ごとに ephemeral 生成）を発行し、self-write の principal を解決する。
+
+    player_web_dir（ADR-0059）: お客さん向け画面（mobile/ の web 版）を `/` で配信する。API は
+    `/api/` のまま。スマホは「PC の IP:ポート」を開くだけでよい（画面と API が同じ origin）。
+    `sessions.json` / `players.json` は hand logger が別プロセスで書くので、`/api/` の要求ごとに
+    変わっていれば読み直す。
     """
     if ledger_repo is None:
         ledger_repo = LedgerRepository(session_repo=session_repo, player_repo=player_repo)
@@ -397,6 +422,15 @@ def create_app(
                                     content={"code": code, "message": str(exc)})
             return _handler
         app.add_exception_handler(exc_type, _make_handler())
+
+    reload_shared = getattr(session_repo, "reload_if_changed", None)
+
+    @app.middleware("http")
+    async def _reload_shared_files(request: Request, call_next):
+        # hand logger（別プロセス）が書いた席とお客さんの記録を取り込む（ADR-0059）。
+        if reload_shared is not None and request.url.path.startswith("/api/"):
+            await run_in_threadpool(reload_shared)
+        return await call_next(request)
 
     @app.get("/api/health")
     def health() -> dict:
@@ -1177,6 +1211,10 @@ def create_app(
         order_repo.reload()
         return summary
 
+    # お客さん向け画面（ADR-0059）。API のルートより後に置く（`/` はそれ以外の全パスを受ける）。
+    if player_web_dir is not None and (Path(player_web_dir) / "index.html").is_file():
+        app.mount("/", _PlayerWebFiles(directory=str(player_web_dir), html=True), name="player-web")
+
     return app
 
 
@@ -1200,13 +1238,17 @@ def auth_kwargs_from_config(api_cfg: dict) -> dict:
     }
 
 
-def run_server(cfg: dict) -> None:
-    """config に従って viewer API を foreground で起動する（main.py --viewer-api）。"""
+def run_server(cfg: dict, host: str | None = None, port: int | None = None) -> None:
+    """config に従って viewer API を foreground で起動する（main.py --viewer-api）。
+
+    `host` / `port` は config の `viewer_api.bind_host` / `bind_port` より優先する（店舗 PC の
+    ショートカットが config を書き換えずに LAN へ公開するため, ADR-0059）。
+    """
     import uvicorn
 
     api_cfg = cfg.get("viewer_api", {})
-    bind_host = api_cfg.get("bind_host", "127.0.0.1")
-    bind_port = api_cfg.get("bind_port", 8788)
+    bind_host = host or api_cfg.get("bind_host", "127.0.0.1")
+    bind_port = port or api_cfg.get("bind_port", 8788)
     log_dir = cfg.get("session", {}).get("log_dir", "./logs")
 
     player_repo = PlayerRepository()
@@ -1217,7 +1259,10 @@ def run_server(cfg: dict) -> None:
     # player_auth が有効でも write（注文 POST）は 503 が先に返るが、login / PIN 設定は可能。
     app = create_app(player_repo, session_repo, log_dir, ledger_repo=ledger_repo,
                      staff_token=api_cfg.get("staff_token") or None,
+                     player_web_dir=PLAYER_WEB_DIR,
                      **auth_kwargs_from_config(api_cfg))
 
     logger.info("Starting viewer API on %s:%s (log_dir=%s)", bind_host, bind_port, log_dir)
+    if (PLAYER_WEB_DIR / "index.html").is_file():
+        logger.info("お客さん向け画面: http://<この PC の IP>:%s/", bind_port)
     uvicorn.run(app, host=bind_host, port=bind_port)

@@ -36,7 +36,7 @@ pokerapp/
 ├── sprc_v4.docx                   ← 仕様書（要件定義）
 ├── claude_v4.docx                 ← 旧仕様書（参考）
 ├── install.cmd / update.cmd / uninstall.cmd   ← Windows ワンステップインストーラの入口 (ダブルクリック, ADR-0057)
-├── start_logger.cmd / start_monitor.cmd / start_ledger.cmd / rfid_check.cmd ← 店舗 PC 用ランチャ (venv 経由。デスクトップのショートカットが指す。ASCII のみ)
+├── start_logger.cmd / start_monitor.cmd / start_viewer.cmd / start_ledger.cmd / rfid_check.cmd ← 店舗 PC 用ランチャ (venv 経由。デスクトップのショートカットが指す。ASCII のみ。start_viewer = お客さん向けハンド閲覧, ADR-0059)
 ├── installer/
 │   ├── install.ps1                ← 本体: Python 3.12 導入 → venv → pip install -e .[pcsc,api] → config → モデル先読み → ショートカット → 動作確認 (-Update / -Uninstall / -DryRun)
 │   └── bootstrap.ps1              ← 1 行インストール (irm … | iex): zip を C:\PokerHandLogger に展開して install.ps1 を実行
@@ -106,8 +106,9 @@ pokerapp/
 │
 ├── api/
 │   ├── read_models.py             ← viewer read model (seat_assignment 起点 join + settlement 由来 summary, fastapi 非依存, M1)
-│   ├── server.py                  ← viewer API server (FastAPI app factory + uvicorn, M1, ADR-0017)
-│   └── client.py                  ← ViewerApiClient (viewer API の Python client = local↔API 分離点, S5, ADR-0020)
+│   ├── server.py                  ← viewer API server (FastAPI app factory + uvicorn, M1, ADR-0017。`/` でお客さん向け画面も配信, ADR-0059)
+│   ├── client.py                  ← ViewerApiClient (viewer API の Python client = local↔API 分離点, S5, ADR-0020)
+│   └── static/player/             ← お客さん向け画面 (mobile/ の web 版) のビルド。コミット済 = 店舗 PC に Node 不要。scripts/build_player_web.py が作り、tests/test_player_web_build.py が mobile/ との drift を CI 検知 (ADR-0059)
 │
 ├── gui/
 │   ├── dashboard.py               ← GUIDashboard (hand logger 画面, customtkinter; E3 で座席設定ボタン追加)
@@ -215,7 +216,11 @@ ADR-0006、実装上の判断は ADR-0007。**hand logger とは config フラ�
 write-through 接続可**（E1+E2-core, ADR-0008 Pattern A: `IntegrationThread` に `session_repo`/`seat_player_map`
 を DI し、hand 開始で `assign_seat`・確定時に `HandSummary.players[i].player_id` を additive 埋め込み）。
 **off では従来どおり独立**（別ストア・別 namespace、player_id キーも付けない）。seat 選択 GUI
-（`gui/seat_selection.py`）と main.py 結線は **E3 で実装済**（ISSUE-0006 Resolved）。
+（`gui/seat_selection.py`）と main.py 結線は **E3 で実装済**（ISSUE-0006 Resolved）。**`--cli` も同じく記録する**
+（ADR-0059, ISSUE-0036）: 起動時に session を作り、入力した名前を `PlayerRepository.find_or_create`（前後空白を
+除いた完全一致 = 同じ名前は同じ人）で player に結び付ける（空 Enter の `PlayerN` 席は結び付けない）。
+`seat <席> <名前>` / `seat <席> -` で**次のハンドから**席替え（名前の変更は `rename_seat` を queue 経由で
+integration スレッドへ。ハンド途中なら次のハンド開始で反映）。`q` で session を close。
 
 ### スコープ（現時点）
 
@@ -341,7 +346,17 @@ ADR-0017）。**player 向け desktop viewer は作らない**（desktop = ス�
   当該 player に絞った settlement 由来（`cash_in_total / order_total / entry_fee /
   point_spent_total / point_credited_total / net_due_to_store`, ADR-0016）。
 - error は `{"code", "message"}`（`error-shapes.md` 準拠）。config: `viewer_api.bind_host` 既定
-  `127.0.0.1`（無認証。LAN 参照は明示変更, ISSUE-0019）/ `bind_port` 既定 8788。
+  `127.0.0.1`（無認証。LAN 参照は明示変更, ISSUE-0019）/ `bind_port` 既定 8788。`--viewer-api --host / --port`
+  が config より優先（店舗 PC のランチャ `start_viewer.cmd` = `--host 0.0.0.0 --port 8788`）。
+- **お客さん向け画面も配信する**（ADR-0059）: `create_app(player_web_dir=PLAYER_WEB_DIR)` が `/` に
+  `api/static/player/`（`mobile/` の web 版、API = 同じ origin の `/api/`、PIN / LINE・Google と staff 訂正の
+  導線なし）を mount する（全 API ルートの後。未知の `/api/...` は JSON 404 のまま）。入口は
+  `Cache-Control: no-cache`、hash 入りの `_expo/` はキャッシュ可。`--viewer-api` と `--ledger` の両方が配信する。
+- **別プロセスの hand logger が書いた `sessions.json` / `players.json` を読み直す**（ADR-0059）: `/api/` の要求
+  ごとに `SessionRepository.reload_if_changed()`（player も連鎖）が (mtime_ns, size) を比べ、変わっていれば
+  読み直す（読めない瞬間は今の内容を保つ）。Windows の共有違反は `core/atomic_io.py` が短く再試行。
+- 公開範囲: 当面は**記録したホールカードを全員分**見せる（オーナー決定, ADR-0059 D7）。**セッションごとの
+  公開範囲は future scope**（session 属性 + read model で適用する想定）。
 
 ### staff write API（S5, `api/server.py` の `/api/staff/...`, ADR-0021）
 
@@ -514,15 +529,16 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **settlement 確定 GUI (S4)** | ✅ 実装済 | `gui/ledger_view.py` 精算パネル: closed session の `commit_settlement` + 確定済 settlement の paid/unpaid 切替（`set_payment_status`）+ **受領額入力で partial-paid 記録**（`record_payment`, ADR-0023） |
 | **settlement partial-paid (S4)** | ✅ 実装済 | `SessionSettlement.paid_amount`（additive, 既定 0）+ `payment_status` 導出（paid/unpaid/partial, ADR-0023）。core `record_payment` / staff API `PUT .../payment` / `ViewerApiClient.record_payment` / GUI 受領額入力 / mobile 一部支払い表示。schema `1.0`→`1.1`（optional field + enum 値, additive） |
 | **settlement / cashflow CSV export (S3.3)** | ✅ 実装済 | `output/ledger_csv_exporter.py`（`main.py --export-ledger`, utf-8-sig） |
-| **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（`main.py --viewer-api`, read-only GET, `[api]` extra, ADR-0017。ledger summary は `compute_settlement` 由来 = ADR-0016） |
-| **mobile viewer (M2)** | ✅ 実装済 | `mobile/`（Expo/RN。PlayerSelect→MySessions→MyHands→HandDetail + 会計（**精算状況: 確定/未確定・支払済み/未払い** 表示, S4）+ 注文画面。`ViewerRepository` に mock/HTTP 注入, `EXPO_PUBLIC_API_URL` 切替, ADR-0017。HandDetail は**ストリート単位リプレイ**表示 = ADR-0044。全画面に手動再読込（↻）+ エラー再試行、選択 player / ログイントークンを永続化 = web localStorage・native は in-memory fallback, `src/storage.ts`。注文の**本人キャンセル**（ADR-0045）+ **品切れ表示/注文不可**（ADR-0046）+ ハンドの**テキスト共有/コピー**（`shared/hand_replay/handReplayText.ts`, Phase B「書き出し」導線）+ **PIN の自己設定/変更**（AuthScreen, `setPin` = ADR-0027 D6。初回 = pin_self_enroll 会場・変更 = 現 PIN 必須）） |
+| **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（`main.py --viewer-api`, read-only GET, `[api]` extra, ADR-0017。ledger summary は `compute_settlement` 由来 = ADR-0016。`/` でお客さん向け画面を配信 + 要求ごとに `sessions.json` / `players.json` を変わっていれば読み直す + `--host` / `--port`, ADR-0059） |
+| **お客さん向けハンド閲覧の店舗運用 (ADR-0059)** | ✅ 実装済（店舗 PC 未確認） | `--cli` が席とお客さんを記録（`session_layer.enabled=true`。起動時の名前 → player、`seat <席> <名前>` / `seat <席> -` で次のハンドから席替え、`q` で session close）→ `start_viewer.cmd`（`--viewer-api --host 0.0.0.0 --port 8788`, ショートカット「お客さん用 ハンド履歴 (スマホ)」）→ お客さんは `http://<PC の IP>:8788/` で名前を選ぶだけ。画面のビルドは `api/static/player/` にコミット（`scripts/build_player_web.py`、API = `/`、`EXPO_PUBLIC_PLAYER_AUTH=off`、staff token なし、drift は CI）。記録したホールカードは全員分表示（公開範囲の設定は future）。`tools/set_config.py` で config の 1 項目を変更（BOM なし）。ISSUE-0036 |
+| **mobile viewer (M2)** | ✅ 実装済 | `mobile/`（Expo/RN。PlayerSelect→MySessions→MyHands→HandDetail + 会計（**精算状況: 確定/未確定・支払済み/未払い** 表示, S4）+ 注文画面。`ViewerRepository` に mock/HTTP 注入, `EXPO_PUBLIC_API_URL` 切替（`/` = 画面と同じ origin の API, ADR-0059）, ADR-0017。`EXPO_PUBLIC_STAFF_TOKEN` が無ければハンド訂正、`EXPO_PUBLIC_PLAYER_AUTH=off` なら PIN / サインアップの導線を出さない（ADR-0059）。HandDetail は**ストリート単位リプレイ**表示 = ADR-0044。全画面に手動再読込（↻）+ エラー再試行、選択 player / ログイントークンを永続化 = web localStorage・native は in-memory fallback, `src/storage.ts`。注文の**本人キャンセル**（ADR-0045）+ **品切れ表示/注文不可**（ADR-0046）+ ハンドの**テキスト共有/コピー**（`shared/hand_replay/handReplayText.ts`, Phase B「書き出し」導線）+ **PIN の自己設定/変更**（AuthScreen, `setPin` = ADR-0027 D6。初回 = pin_self_enroll 会場・変更 = 現 PIN 必須）） |
 | **ハンドリプレイ UI (ADR-0044)** | ✅ 実装済 | GG 風ストリート単位リプレイ（board スライス 3/4/5・4 色スート・ポット推移・needs_review/訂正済バッジ・記録がある席は全員分ホールカード・main/side pot）。正本 `shared/hand_replay/`（`handReplayModel.ts` 純関数 + `HandReplay.tsx` + TS tests 8）を `scripts/sync_shared_ui.py` で mobile/staff 両アプリへコピー配布（monorepo 化しない）、drift は `tests/test_shared_ui_sync.py`（CI）。mobile HandDetail + staff ハンドタブ履歴 drill-in に搭載。staff hands read = `GET /api/staff/sessions/{sid}/hands`（訂正適用済, `list_session_hands` + `ViewerApiClient.list_session_hands`）。BTN/ポジション推定は scope 外（M1 の spot_config_builder） |
 | **ハンド訂正 (B4, ADR-0036)** | ✅ 実装済 | 音声自動記録の誤認識を append-only オーバーレイで訂正。`core/hand_correction*.py`（store + `apply_hand_corrections`: 元値 `_original` 保持・`corrected`・needs_review 解除・監査痕、元 hand log は不変）+ viewer get_hand/list_player_hands に適用 + staff API `POST .../hands/{hid}/corrections` + `ViewerApiClient.add_hand_correction` + mobile `addHandCorrection` + **iPad 訂正画面 `mobile/src/screens/CorrectionScreen.tsx`**（HandDetail から導線、`EXPO_PUBLIC_STAFF_TOKEN` で staff write。typecheck + web export green）+ **staff アプリ内の訂正パネル**（`staff/src/screens/HandCorrectionPanel.tsx`, ハンドタブのリプレイ詳細から action/amount/winner_seat を訂正）。**残**: PHH overlay / 訂正取消 / board・hole 訂正 |
 | **Phase A ground truth 入力 UX (ADR-0043)** | ✅ 実装済 | `core/ground_truth*.py`（LWW per-session）+ staff API (`GET /measurement-rows`, `PUT/GET /ground-truth/{hid}`, staff token + write 所有) + `staff/src/screens/MeasurementTab.tsx`（一覧 triage + 「✓ 流す」/ 「✏ 修正」+ 一括 + 5 秒 polling）。**C-2 ガード**: `review_required` or 任意 `action.needs_review=True` を含むハンドは「✓ 流す」を 400 で reject（強制 drill-in）。訂正適用は `get_hand()` 経由（ADR-0036）。tests 32 件（core 13 + API 12 + mock 7）。measurement-plan §2.3 と整合 |
 | **mobile 本人認証 UI (L1/L2)** | ✅ 実装済 (preview) | `mobile/src/screens/AuthScreen.tsx`（PIN ログイン = L1/ADR-0027、LINE/Google サインアップ = L2/ADR-0031）+ `ViewerRepository.{login,oidcExchange,currentPrincipal,clearAuth}`（mock/HTTP 両実装）+ 注文 POST に Bearer トークン付与。PlayerSelect に「PIN でログイン」「サインアップ」導線。既定 name-pick は不変。実 IdP の認可コード取得（SDK/redirect）は実環境タスク。typecheck + 11 mock tests + web export green |
 | **注文リクエスト write path (M5)** | ✅ 実装済 | `core/order_request*.py` / `core/menu.py` + viewer API `/menu`・`/order-requests`（GET/POST）+ `gui/ledger_view.py` の確定/却下パネル（§ 注文リクエスト参照, ADR-0018。staff-in-the-loop / in-process API / name-pick = ISSUE-0019 Fixed） |
 | **hand logger × session 統合 (S2.x E1+E2-core)** | ✅ 実装済 | `integration/engine.py`（`session_repo`/`seat_player_map` DI、`assign_seat` write-through + `player_id` additive 埋め込み、`session_layer.enabled` 既定 off で挙動不変, ADR-0008） |
-| **seat→player 選択 GUI + live 有効化 (S2.x E3)** | ✅ 実装済 | `gui/seat_selection.py`（`SeatSelectionDialog`: モーダル, 席ごと割当 / 未登録その場 create / 空席 skip / carry-forward）+ `gui/dashboard.py`「座席設定」ボタン + `integration/engine.py:set_seat_player_map` + `main.py` 結線（UUID4 session_id）。既定 off で挙動不変, ISSUE-0006 Resolved |
+| **seat→player 選択 GUI + live 有効化 (S2.x E3)** | ✅ 実装済 | `gui/seat_selection.py`（`SeatSelectionDialog`: モーダル, 席ごと割当 / 未登録その場 create / 空席 skip / carry-forward）+ `gui/dashboard.py`「座席設定」ボタン + `integration/engine.py:set_seat_player_map` + `main.py` 結線（UUID4 session_id）。既定 off で挙動不変, ISSUE-0006 Resolved。**`--cli` も記録**（起動時の名前 + `seat` コマンド, ADR-0059） |
 | **event 記録 sidecar (R1)** | ✅ 実装済 | `output/event_recorder.py`（opt-in `recording.enabled`, 挙動不変, ADR-0010, `reconstruction_event` schema） |
 | **pokerkit game-state backend (R2) + live 既定切替 (G)** | ✅ 実装済 | `core/poker_engine.py`（`engine.backend`, ADR-0009/0012。actor/合法手/side-pot 権威）。**Phase G で live 既定を `pokerkit` に切替**（`config_default.json`、`requirements.txt` で `pokerkit>=0.7,<0.8` pin）。`legacy` は config で rollback 可。実機 E2E は Phase H |
 | **rules-aware ライブ結線 + silent-fold 合成 (R3 D1/D2a/D2b)** | ✅ 実装済 (preview) | `audio/recognizer.py:apply_corrections`（合法手射影）+ `integration/engine.py:_handle_rules_aware_action`/`_resolve_actor`（合法手射影・actor 推定・`fold_through` で silent-fold 合成 cap=2/atomic・合成 fold 記録）。**actor の証拠は明示発話のみ**（席番号「シート3」→ ポジション名「BTN」の順で解決 = `_sensed_seat`, ISSUE-0032。ISSUE-0033 で RFID の検出を証拠から外した = カードの**存在**は**行動**ではなく、配布と区別できないため。RFID は同席の裏付けとしてのみ効く）。legacy 既定は不変 |
@@ -537,7 +553,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **ディーラーボタン回転 + ポジション名 (P0b)** | ✅ 実装済 | `core/positions.py`（純粋ロジック）+ `PokerkitGameState` がハンドごとにボタンを 1 つ回す（§ ディーラーボタン / ポジション名, ADR-0056 P0b, ISSUE-0032 Fixed）。SB/BB の自動 post は pokerkit backend が元から行う。**legacy backend はボタンを持たない**（単純ラウンドロビンのまま = rollback path 不変） |
 | schema `1.0` freeze (S4) | ✅ 実装済 | 全 model（session/seat/hand_ref・ledger/point・settlement・order_request/player_session_summary）を `1.0` freeze（ADR-0019, ISSUE-0005 Resolved）。code↔contract test 全 model カバー |
 | 実機 E2E (Phase H) | 🟡 RFID 実機 + `--cli` 1 ハンド通し 済（JSON 検証まで）+ 店舗 PC 導入済 | **2026-09-24 店舗 PC（GEEKOM A8 / Windows 11 Pro / HDMI ダミープラグで画面なし・RDP 操作）**: 1 行インストール（ADR-0057）→ RFID（卓の ESP32-S3 を USB 直結）→ `--cli` + 卓モニタを起動し、iPhone から卓モニタの反映まで確認。RDP 運用に要る PC 側設定（スマートカード転送の停止 / Wi-Fi をプライベート + 8788・8790 を LAN 限定で許可）は `docs/installation.md` §0。**2026-09-12 実機（11 reader / pokerkit backend / `audio.enabled=false`）**: `n` → 席 1・2 のホールカード各 2 枚 → flop(pos 1,2,3) → turn(pos 4) → river(pos 5) → キーボードのアクション（`チェック` / `ベット５` / `コール` / `ベット`）→ `w 1` → JSON 保存まで通り、**保存された JSON を検証済**: `street` が実際の進行と一致（preflop×2 / flop×3 / turn×3 / river×2, ISSUE-0029 修正確認）、`pots` に side-pot 情報あり（`{"amount":44,"eligible_seats":[1,2]}`）、`confidence` は派生値（keyboard 投入 = 合法 + audio のみ・裏付けなしで一律 0.575。legacy 固定 0.5 ではない）、金額を言わない `ベット` は最小ベットに snap + `needs_review`。**board 位置は安定**（同じ札の再発火が同じ位置に収まり付け替え無し = ISSUE-0025/0026 の修正確認。ただし 1 台で同じ札の再検出が繰り返し出る = 結合が弱い台の間欠読み。位置が固定なので記録は無害）。残りはクリーン環境の通し確認（§ ロードマップ 残作業）。**PN5180 firmware 契約は凍結済（ADR-0034, ISSUE-0015 Fixed）**= `docs/contracts/rfid-usb-ccid.md` **v1.2**（ADR-0051 で §2/§5/§8 を additive 追記、ADR-0052 で §3/§4/§6/§8 = 1 slot + P2 選択, ISSUE-0022）。**実機 RFID の bring-up 診断ツール + 手順は実装済**: `tools/probe_pcsc.py`（list/check/watch/**raw**, 契約 §3-8 を production の `PCSCBridge`/`RFIDThread` で検査。list は物理リーダー台数も表示、raw は pyscard 直叩きで OS の slot 状態と connect の hresult を表示）+ `docs/hardware-qa-checklist.md`。**2026-09-10**: 1 台で `raw`（`SW=9000`+UID）と `watch`（再発火 2 件）まで実機確認。**残**: `rfid_cards.json` の実カード登録は **1 デッキ 52 枚 済**（ジョーカー 2 枚のみ未登録）。**運用手順: ハンドが終わったらボードを下げて `n` で新ハンド**（engine と RFID の位置が揃う唯一の同期点, ISSUE-0026。`n` 前のアクションは記録されず WARN が出る, ISSUE-0028）。マイク有りの音声→JSON/PHH の通し、`--export-phh`、`--ledger`（`viewer_api.enabled`）+ スマホ注文の通し。**`config.json` に `engine.backend="pokerkit"` を明示**すること（既存 config に `engine` セクションが無いと legacy にフォールバックし side-pot / 派生 confidence / actor 推定が無効 = `pots: []`・`confidence: 0.5` 固定がその状態） |
-| **Windows ワンステップインストーラ (ADR-0057)** | ✅ 実装済 (Stage 1) | 店舗 PC 向け。`install.cmd`（ダブルクリック）→ `installer/install.ps1`: **Python 3.12** を `py` → winget（`--source winget` 固定。msstore の証明書エラー 0x8a15005e で止まるため）→ 入らなければ python.org の順で確保 → フォルダ内 `venv` → `pip install -e ".[pcsc,api]"`（データが `Path(__file__).parent.parent` 直下にある前提なので **フォルダ in-place + editable**。site-packages に入れない）→ `config.json` 生成（既存は不変）→ Whisper モデル先読み（任意）→ デスクトップにショートカット 4 つ（`start_*.cmd` / `rfid_check.cmd`）→ import と `main.py --help` で動作確認 → `install.log`。`update.cmd` = GitHub の zip を robocopy で上書き（`.git` があれば `git pull --ff-only`）したあと、**更新後のインストーラで続きを実行し直す**（取得元のブランチは `installer\branch.txt` に覚え、`-Branch` 無しの更新はそれを使う）、**`$PreservedFiles` = `core/backup.py` のデータ一覧 + config/rfid_cards/menu、`$PreservedDirs` = venv/logs/backups** は保持（`tests/test_installer.py` が整合を固定）。`uninstall.cmd` = ショートカットと venv のみ削除。1 行版 `installer/bootstrap.ps1`（`irm … \| iex`、既導入なら更新）。`install.ps1` は UTF-8 BOM（PowerShell 5.1 の `-File`）、`bootstrap.ps1` は **BOM 無し + `exit` 無し + `& { }` 包み**（`irm \| iex` でユーザーの対話コンソールの中で走る。exit はウィンドウを閉じ、BOM は irm の戻り値に残る）、.cmd は ASCII + CRLF（CP932 の cmd.exe）。CI は pwsh で構文解析 + `-DryRun` 通し。**Stage 2（未着手）**: iPad/スマホ画面（`dist/`）の API 配信（Node 不要化）/ データフォルダ分離 / release zip / PyInstaller + Inno Setup の exe / 自動起動 |
+| **Windows ワンステップインストーラ (ADR-0057)** | ✅ 実装済 (Stage 1) | 店舗 PC 向け。`install.cmd`（ダブルクリック）→ `installer/install.ps1`: **Python 3.12** を `py` → winget（`--source winget` 固定。msstore の証明書エラー 0x8a15005e で止まるため）→ 入らなければ python.org の順で確保 → フォルダ内 `venv` → `pip install -e ".[pcsc,api]"`（データが `Path(__file__).parent.parent` 直下にある前提なので **フォルダ in-place + editable**。site-packages に入れない）→ `config.json` 生成（既存は不変）→ Whisper モデル先読み（任意）→ デスクトップにショートカット 5 つ（`start_*.cmd` / `rfid_check.cmd`）→ import と `main.py --help` で動作確認 → `install.log`。`update.cmd` = GitHub の zip を robocopy で上書き（`.git` があれば `git pull --ff-only`）したあと、**更新後のインストーラで続きを実行し直す**（取得元のブランチは `installer\branch.txt` に覚え、`-Branch` 無しの更新はそれを使う）、**`$PreservedFiles` = `core/backup.py` のデータ一覧 + config/rfid_cards/menu、`$PreservedDirs` = venv/logs/backups** は保持（`tests/test_installer.py` が整合を固定）。`uninstall.cmd` = ショートカットと venv のみ削除。1 行版 `installer/bootstrap.ps1`（`irm … \| iex`、既導入なら更新）。`install.ps1` は UTF-8 BOM（PowerShell 5.1 の `-File`）、`bootstrap.ps1` は **BOM 無し + `exit` 無し + `& { }` 包み**（`irm \| iex` でユーザーの対話コンソールの中で走る。exit はウィンドウを閉じ、BOM は irm の戻り値に残る）、.cmd は ASCII + CRLF（CP932 の cmd.exe）。CI は pwsh で構文解析 + `-DryRun` 通し。**Stage 2（未着手）**: iPad 画面（staff `dist/`）の API 配信（Node 不要化。お客さん向け画面は ADR-0059 で実現済 = `api/static/player/`）/ データフォルダ分離 / release zip / PyInstaller + Inno Setup の exe / 自動起動 |
 | **cross-app boundary (S5 read)** | ✅ 実装済 | repository interface frozen（ADR-0020）+ `api/client.py:ViewerApiClient`（Python の local↔API 分離点）+ round-trip test。read boundary を二言語で実証（mobile + Python） |
 | **staff 会計 write API (S5 write)** | ✅ 実装済 | `api/server.py` の `/api/staff/...`（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下 + staff read）を **staff shared token**（`Authorization: Bearer <viewer_api.staff_token>`）で公開（ADR-0021）。`LedgerRepository` を RLock で thread-safe 化。単一書き手維持（read-only は 503）。`ViewerApiClient(staff_token=...)` の staff メソッド + `tests/test_viewer_api_staff.py` |
 | **staff iPad app（会計/注文/座席/ハンド, WS4）** | 🟡 一部実装済 (preview) | `staff/`（Expo/RN, player `mobile/` とは別アプリ, ADR-0037）。**会計タブ**（エントリ追加 / buy-in プリセット / ポイント付与 / 中間集計 / 精算確定・paid-unpaid-partial / エントリ一覧 + 取消(reversal)）+ **注文タブ**（pending 確定→order entry / 却下）+ **座席タブ**（現在 seating / 次 hand への seat→player 割当 / その場 player 作成）+ **ハンドタブ**（hand logger 遠隔制御 = 新ハンド/ウィナー/リバイ, ADR-0039）+ **SessionList**（session 作成・close）を staff API（`/api/staff/...`, ADR-0021/0038/0039）上に実装。`StaffRepository`（mock/HTTP）。**ハンドタブにハンド履歴一覧 + ストリート単位リプレイ drill-in + アクション/勝者席の訂正パネル**（ADR-0044 + B4/ADR-0036 の staff アプリ内導線 = `HandCorrectionPanel`, 訂正→hands read 再読込で即反映）。**注文 pending バッジ・ハンド履歴・座席は open 卓で 5 秒 polling 自動更新**（useAsync は再取得中 stale data 保持でちらつかない）。**SessionList に営業日サマリ**（当日全卓の中間集計をクライアント合算 = 締め目安）+ **プレイヤー管理画面**（作成/リネーム/merge = `PlayersScreen`, `StaffRepository.mergePlayers`） + **メニュー管理画面**（価格改定/品切れ/追加削除 = `MenuScreen`, ADR-0046）。座席タブは**「現在の座席をコピー」→ 行単位で外して次 hand へ**（退席の明示反映）。typecheck + 38 mock tests + web export + **Playwright E2E 8 件**（`staff/e2e/`, headless Chromium。browser 取得はネットワーク要）。**残**: 実機タッチの手動 QA、open question = ISSUE-0020 |
@@ -1054,6 +1070,7 @@ update.cmd / uninstall.cmd                   # 更新（config / データ / rfi
 python main.py --cli                         # CLI モード (hand logger)。マイク無しで回すには config の audio.enabled=false
 #   --cli の入力: q=終了 / n=新ハンド / w <席>=ウィナー / r <席> <金額>=リバイ。
 #   ミスディール訂正: cb <位置>=ボード N 枚目を取り消し / cs <席>=その席の札を読み直し (ADR-0054)
+#   席替え（session_layer.enabled=true）: seat <席> <名前>=次のハンドからその席の人 / seat <席> -=空席 (ADR-0059)
 #   コマンドは全角でも可（`ｎ` / `ｗ　１`。照合前に半角へ寄せる, ISSUE-0030）。`w1` のように
 #   空白を打ち損ねても通る（w/r のみ, ISSUE-0034）
 python main.py --cli --log-file           # ログを端末に出さない（実機テスト推奨。卓は table_monitor で見る）
@@ -1067,6 +1084,9 @@ python main.py --sessions                    # Session / Seating Viewer (WS2-α,
 python main.py --ledger                      # Ledger Viewer/Editor + 注文確定 画面 (S3.2/M5, 別画面)
 python main.py --export-ledger logs/ledger_export  # settlement / cashflow CSV 出力 (S3.3)
 python main.py --viewer-api                  # player 向け読み取り専用 viewer API (M1, ADR-0017)
+python main.py --viewer-api --host 0.0.0.0 --port 8788   # 店の Wi-Fi のスマホから http://<PCのIP>:8788/ (画面 + API, ADR-0059)
+python scripts/build_player_web.py            # mobile/ を変えたらお客さん向け画面を作り直す (api/static/player/, 要 Node, ADR-0059)
+python tools/set_config.py session_layer.enabled true   # config.json の 1 項目を変える (BOM なし。値を省くと表示)
 pytest tests/ -v --ignore=tests/test_vision.py   # CI と同じ（vision レガシー除外）
 python tools/replay_hand.py tests/fixtures/reconstruction/silent-fold  # 決定的 replay (F1)
 python tools/calibrate_confidence.py            # 派生 confidence 較正サーフェス + P1〜P8 検証 (ADR-0033)

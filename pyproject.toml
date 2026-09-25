@@ -38,6 +38,10 @@ pokerapp = "main:main"
 packages = ["core", "audio", "rfid", "integration", "output", "gui", "api"]
 py-modules = ["main"]
 
+[tool.setuptools.package-data]
+# お客さん向け画面のビルド（viewer API が `/` で配信する, ADR-0059）
+api = ["static/player/*", "static/player/**/*"]
+
 [tool.ruff]
 target-version = "py311"
 # vision/ はレガシー（CI のテスト対象からも除外済み）

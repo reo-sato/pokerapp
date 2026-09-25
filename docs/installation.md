@@ -14,12 +14,13 @@ Python が入っていない Windows 10/11 の PC を前提にしています。
    （フォルダの中に `install.cmd` が見える状態にする）。
 2. `install.cmd` を**ダブルクリック**。黒い画面が開いて自動で進みます（数分〜、モデルを含めると 10 分程度）。
    途中で「音声認識モデルを今ダウンロードしますか？」と聞かれたら Enter（= はい）。
-3. デスクトップにショートカットが 4 つできれば完了:
+3. デスクトップにショートカットが 5 つできれば完了:
 
 | ショートカット | 起動するもの |
 |---|---|
 | ハンドロガー (CLI) | `main.py --cli --log-file`（ログは `logs\pokerapp.log`） |
 | 卓モニタ (iPad から閲覧) | `tools\table_monitor.py --host 0.0.0.0 --port 8790`（画面に PC の IPv4 を表示） |
+| お客さん用 ハンド履歴 (スマホ) | `main.py --viewer-api --host 0.0.0.0 --port 8788`（お客さんが `http://<PC の IPv4>:8788/` を開く） |
 | 会計 + スマホ注文 API | `main.py --ledger --log-file`（API は `config.json` の `viewer_api.enabled=true` で有効） |
 | RFID リーダー チェック | `tools\probe_pcsc.py list` → `check` |
 
@@ -52,7 +53,10 @@ irm https://raw.githubusercontent.com/reo-sato/pokerapp/verify-v1/installer/boot
 
 - RFID を使う: `config.json` の `rfid.enabled` を `true`、`rfid.transport` を `"pcsc"` にし、
   「RFID リーダー チェック」で `physical readers: 11` と `check` の PASS を確認（下の 5 節）。
-- iPad / スマホから見る: `viewer_api.enabled` を `true`、`viewer_api.bind_host` を `0.0.0.0` に
+- お客さんがスマホで自分のハンドを見る: ハンドロガーが席とお客さんを記録するよう
+  `.\venv\Scripts\python.exe tools\set_config.py session_layer.enabled true`（インストール先のフォルダで）。
+  画面は「お客さん用 ハンド履歴 (スマホ)」で出ます（config の変更は不要。使い方は `docs/usage.md`）。
+- 会計画面からスマホ注文も受ける: `viewer_api.enabled` を `true`、`viewer_api.bind_host` を `0.0.0.0` に
   （無認証なので**店内の信頼できる Wi-Fi のみ**）。卓モニタは設定不要（ショートカットが LAN 公開で起動）。
 - カードの登録: 店舗のデッキは `python tools/register_cards.py run --deck 1` で `rfid_cards.json` に登録
   （同梱のものは開発用デッキ）。

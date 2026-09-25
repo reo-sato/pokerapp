@@ -12,12 +12,15 @@ _CONFIG_PATH = Path(__file__).parent.parent / "config.json"
 
 
 def load_config(path: Path | None = None) -> dict:
-    """config.json を読み込む。存在しない場合は config_default.json をコピーして使用する。"""
+    """config.json を読み込む。存在しない場合は config_default.json をコピーして使用する。
+
+    BOM 付き UTF-8 も読む（Windows の PowerShell 5.1 やメモ帳で保存すると BOM が付くことがある）。
+    """
     target = path or _CONFIG_PATH
     if not target.exists():
         logger.info("config.json not found, copying from config_default.json")
         shutil.copy(_DEFAULT_CONFIG_PATH, target)
-    with target.open(encoding="utf-8") as f:
+    with target.open(encoding="utf-8-sig") as f:
         return json.load(f)
 
 

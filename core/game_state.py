@@ -223,6 +223,12 @@ class GameStateManager:
             raise ValueError(f"Unknown seat: {seat}")
         return self._players[seat].name
 
+    def set_player_name(self, seat: int, name: str) -> None:
+        """席のプレイヤー名を変える（席替え, ADR-0059）。スタックとハンドの状態は変えない。"""
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        self._players[seat].name = name
+
     def get_active_seats(self) -> list[int]:
         return list(self._active_seats)
 
