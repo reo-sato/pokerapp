@@ -17,6 +17,8 @@
     "device_id": 0,
     "sample_rate": 16000,
     "whisper_model": "medium",
+    "min_speech_sec": 0.15,
+    "_min_speech_sec_comment": "認識に回す最短の有音秒数（ADR-0061）。これ未満の音（チップの音・咳など）は捨てる。「チェック」のような短い言葉が落ちるなら下げ、雑音で余計な聞き取りが増えるなら上げる。`python tools/audio_check.py listen` の「短い音 N 秒 — 認識に回さず」の行を見て決める。",
     "language": "ja",
     "initial_prompt": "ポーカーのディーラーがアクションを読み上げています。シート3 レイズ 2千、コール、チェック、フォールド、オールイン、ショーダウン、ウィナー、ハンド開始、チョップ などの言葉が含まれます。",
     "_initial_prompt_comment": "参考値（実際の initial_prompt は core/constants.py の WHISPER_PROMPT_JA）。キーワードの箇条列挙はオウム返し型ハルシネーションの温床になるため自然文にする（ADR-C T4）。"

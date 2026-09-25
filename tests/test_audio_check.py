@@ -54,7 +54,8 @@ class TestTranscriptHook:
         [(t, queued_when_called)] = seen
         assert queued_when_called == 0          # 表示が先（アクションの行より前に出る）
         assert t.text == "シート3 レイズ 600" and t.confidence == 0.8
-        assert (t.event.action, t.event.amount, t.event.seat) == ("raise", 600, 3)
+        [event] = t.events
+        assert (event.action, event.amount, event.seat) == ("raise", 600, 3)
         assert t.audio_sec == pytest.approx(1.0) and t.utterance_start_ts == 100.0
         assert q.get_nowait().action == "raise"
 
@@ -63,7 +64,7 @@ class TestTranscriptHook:
         q, thread = _thread("えーと、ちょっと待って", seen.append)
         with caplog.at_level("INFO", logger="audio.recorder"):
             thread._process_chunk(_ONE_SECOND)   # noqa: SLF001
-        assert [t.event for t in seen] == [None]
+        assert [t.events for t in seen] == [()]
         assert q.empty()
         assert any("えーと" in r.getMessage() and "読めず" in r.getMessage() for r in caplog.records)
 
@@ -200,13 +201,20 @@ class TestListen:
         from audio.recognizer import parse_action
 
         t = Transcript(text="シート3 レイズ 600", confidence=0.82,
-                       event=parse_action("シート3 レイズ 600"), audio_sec=1.6, infer_sec=0.9,
+                       events=(parse_action("シート3 レイズ 600"),), audio_sec=1.6, infer_sec=0.9,
                        utterance_start_ts=1000.0, heard_at=1003.0)
         line = audio_check.format_transcript(t)
         assert "「シート3 レイズ 600」→ raise 600 席3" in line
         assert "信頼度 0.82" in line and "認識 0.9 秒" in line and "話し始めから 3.0 秒" in line
 
     def test_summary(self):
-        stats = audio_check.ListenStats(heard=3, actions=2, infer_secs=[0.5, 1.0, 1.5])
-        assert stats.summary() == "発話 3 件（アクション 2 件 / 読めず 1 件）・認識 平均 1.0 秒 / 最大 1.5 秒"
+        stats = audio_check.ListenStats(heard=3, actions=4, unreadable=1, infer_secs=[0.5, 1.0, 1.5])
+        assert stats.summary() == ("発話 3 件 → アクション 4 件（読めなかった発話 1 件）"
+                                   "・認識 平均 1.0 秒 / 最大 1.5 秒")
+        stats.dropped = 2
+        assert stats.summary().endswith("・短すぎて認識しなかった音 2 件")
         assert "ありませんでした" in audio_check.ListenStats().summary()
+
+    def test_dropped_line_names_the_setting(self):
+        line = audio_check.format_dropped(0.12, 0.0)
+        assert "短い音 0.12 秒" in line and "audio.min_speech_sec" in line

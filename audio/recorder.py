@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from audio.recognizer import WhisperTranscriber, parse_action
+from audio.recognizer import WhisperTranscriber, parse_actions
 from core.event_queue import EventQueue
 from core.events import AudioEvent
 
@@ -18,10 +18,15 @@ logger = logging.getLogger(__name__)
 _SILENCE_RMS_THRESHOLD = 300
 # 音声チャンクの最大バッファ秒数（この秒数分溜まったら強制的に推論へ送る）
 _MAX_BUFFER_SECONDS = 5.0
-# バッファフラッシュの最小秒数（短すぎる音声チャンクは無視）
-_MIN_BUFFER_SECONDS = 0.3
-# 推論待ちキューの上限（推論がキャプチャより遅い場合のバックプレッシャ。超過は最古を捨てる）
-_INFERENCE_QUEUE_MAX = 8
+# 認識に回す最短の「有音」秒数（これ未満は咳・チップの音などとして捨てる）。店舗の実測で
+# 「チェック」単独の発話が 0.3 秒に届かずに落ちていたため 0.15 秒にした（ADR-0061。
+# config `audio.min_speech_sec` で変えられる）。
+_MIN_BUFFER_SECONDS = 0.15
+# 「短すぎて捨てた」を報告する下限（これ未満はチップの音などの一瞬の音として黙って捨てる）
+_REPORT_DROP_MIN_SECONDS = 0.08
+# 推論待ちがこの件数を超えたら WARN する（捨てはしない。認識が発話に追いつかないときは
+# 遅れても全部処理する = 記録を落とさない方を取る, ADR-0061）。
+_BACKLOG_WARN = 20
 
 # 死活表示のレベル正規化に使う RMS 上限（これ以上は 1.0 に飽和。発話時の実測オーダー）
 _HEALTH_LEVEL_FULL_RMS = 8000.0
@@ -36,11 +41,18 @@ class Transcript:
 
     text: str
     confidence: Optional[float]
-    event: Optional[AudioEvent]            # アクションとして読めたもの（読めなければ None）
+    events: tuple[AudioEvent, ...]          # アクションとして読めたもの（言った順。読めなければ空）
     audio_sec: float                       # 切り出した発話の長さ（秒）
     infer_sec: float                       # Whisper にかかった秒数
     utterance_start_ts: Optional[float]    # 話し始めの時刻（unix 秒）
     heard_at: float                        # 文字になった時刻（unix 秒）
+
+
+def describe_events(events) -> str:
+    """1 発話から読めたアクションを 1 行で表す（複数なら「 / 」でつなぐ）。"""
+    if not events:
+        return describe_event(None)
+    return " / ".join(describe_event(e) for e in events)
 
 
 def describe_event(event: Optional[AudioEvent]) -> str:
@@ -98,6 +110,8 @@ class AudioThread(threading.Thread):
         stop_event: Optional[threading.Event] = None,
         transcriber: Optional[WhisperTranscriber] = None,
         on_transcript: Optional[Callable[[Transcript], None]] = None,
+        min_speech_sec: float = _MIN_BUFFER_SECONDS,
+        on_dropped: Optional[Callable[[float], None]] = None,
     ) -> None:
         """
         Args:
@@ -105,6 +119,8 @@ class AudioThread(threading.Thread):
                          `transcribe_with_confidence(bytes) -> (text, conf)` を持てばよい。
             on_transcript: 文字になった発話ごとに呼ぶ（アクションとして読めなかったものも）。
                          推論スレッドから呼ばれる。CLI の表示と `tools/audio_check.py` が使う。
+            min_speech_sec: 認識に回す最短の有音秒数（config `audio.min_speech_sec`）。
+            on_dropped: 短すぎて認識に回さなかった音ごとに有音秒数で呼ぶ（`audio_check listen`）。
         """
         super().__init__(daemon=True, name="AudioThread")
         self._audio_queue = audio_queue
@@ -112,20 +128,31 @@ class AudioThread(threading.Thread):
         self._sample_rate = sample_rate
         self._stop_event = stop_event or threading.Event()
         self._on_transcript = on_transcript
+        self._min_speech_sec = min_speech_sec
+        self._on_dropped = on_dropped
+        # 推論中の件数（0/1）と、発話を切り出している最中か。`backlog()` が待ちと合わせて返す。
+        self._inferring = 0
+        self._capturing = False
         self._transcriber = (
             transcriber if transcriber is not None
             else WhisperTranscriber(model_size=model_size, language=language)
         )
         # 推論待ちの (発話バイト列, 発話開始時刻)。None は worker 終了の sentinel。
-        self._chunk_queue: "queue.Queue[Optional[tuple[bytes, float]]]" = queue.Queue(
-            maxsize=_INFERENCE_QUEUE_MAX
-        )
+        # 上限なし: 認識が遅れても発話を捨てない（プレーの切れ目で追いつく, ADR-0061）。
+        self._chunk_queue: "queue.Queue[Optional[tuple[bytes, float]]]" = queue.Queue()
         # 死活表示（dashboard が読む。dict ごと差し替える = GIL で atomic、lock 不要）:
         #   state: starting | running | unavailable(pyaudio 無し) | error | stopped
         #   level: 直近チャンクの RMS を 0..1 に正規化 / last_chunk_at: unix 秒
         #   device_name: 開いたマイクの名前 / error: 開けなかった理由（CLI が起動時に表示する）
         self.health: dict = {"state": "starting", "level": 0.0, "last_chunk_at": None}
         self._device_name: Optional[str] = None
+
+    def backlog(self) -> int:
+        """まだアクションになっていない発話の数（推論待ち + 推論中）。
+
+        CLI が `n` / `w` などを打たれたとき、先に言われた発話を追い越さないよう待つのに使う。
+        """
+        return self._chunk_queue.qsize() + self._inferring + (1 if self._capturing else 0)
 
     @property
     def asr_ready(self) -> bool:
@@ -184,10 +211,7 @@ class AudioThread(threading.Thread):
             stream.stop_stream()
             stream.close()
             pa.terminate()
-            try:
-                self._chunk_queue.put_nowait(None)  # worker へ終了 sentinel
-            except queue.Full:
-                pass
+            self._chunk_queue.put(None)  # worker へ終了 sentinel（たまっている発話を処理してから止まる）
             self.health = {"state": "stopped", "level": 0.0, "last_chunk_at": None}
             logger.info("AudioThread stopped")
 
@@ -207,7 +231,8 @@ class AudioThread(threading.Thread):
         silence_chunks = 0
         silence_threshold_chunks = max(1, int(self._sample_rate / chunk_size * 0.5))  # 約0.5秒
         max_buffer_samples = int(_MAX_BUFFER_SECONDS * self._sample_rate)
-        min_buffer_samples = int(_MIN_BUFFER_SECONDS * self._sample_rate)
+        min_buffer_samples = int(self._min_speech_sec * self._sample_rate)
+        report_drop_samples = int(_REPORT_DROP_MIN_SECONDS * self._sample_rate)
 
         def flush() -> None:
             nonlocal buffer, buffered_samples, voiced_samples, voiced
@@ -215,6 +240,14 @@ class AudioThread(threading.Thread):
             # 最小長は「有音サンプル数」で判定する（末尾の無音でかさ増ししない）。
             if voiced and voiced_samples >= min_buffer_samples and utterance_start_ts is not None:
                 self._enqueue_utterance(b"".join(buffer), utterance_start_ts)
+            elif voiced and voiced_samples >= report_drop_samples:
+                voiced_sec = voiced_samples / self._sample_rate
+                logger.debug("Dropped a short sound (%.2f s voiced)", voiced_sec)
+                if self._on_dropped is not None:
+                    try:
+                        self._on_dropped(voiced_sec)
+                    except Exception:
+                        logger.exception("on_dropped callback failed")
             buffer = []
             buffered_samples = 0
             voiced_samples = 0
@@ -262,29 +295,20 @@ class AudioThread(threading.Thread):
                     or buffered_samples >= max_buffer_samples
                 ):
                     flush()
+            self._capturing = voiced
             # 有音ゲート: 発話が始まるまでバッファは溜めない（無音を推論に送らない）。
 
             prev_chunk = data
 
         flush()  # 停止時に取り残しがあれば送る
+        self._capturing = False
 
     def _enqueue_utterance(self, audio_bytes: bytes, utterance_start_ts: float) -> None:
-        """発話チャンクを推論キューに積む。満杯なら最古を捨てて警告する（新しい発話を優先）。"""
-        item = (audio_bytes, utterance_start_ts)
-        try:
-            self._chunk_queue.put_nowait(item)
-        except queue.Full:
-            try:
-                self._chunk_queue.get_nowait()
-            except queue.Empty:
-                pass
-            logger.warning(
-                "Inference queue full — dropping oldest utterance (ASR falling behind)"
-            )
-            try:
-                self._chunk_queue.put_nowait(item)
-            except queue.Full:
-                logger.warning("Inference queue still full — utterance dropped")
+        """発話チャンクを推論キューに積む（捨てない。たまりすぎたら警告だけ出す）。"""
+        self._chunk_queue.put((audio_bytes, utterance_start_ts))
+        waiting = self._chunk_queue.qsize()
+        if waiting > _BACKLOG_WARN:
+            logger.warning("聞き取りの処理待ちが %d 件たまっています（遅れても順に処理します）", waiting)
 
     # ――― 推論 worker ―――
 
@@ -300,7 +324,11 @@ class AudioThread(threading.Thread):
             if item is None:
                 break
             audio_bytes, utterance_start_ts = item
-            self._process_chunk(audio_bytes, utterance_start_ts)
+            self._inferring = 1
+            try:
+                self._process_chunk(audio_bytes, utterance_start_ts)
+            finally:
+                self._inferring = 0
 
     def _process_chunk(
         self, audio_bytes: bytes, utterance_start_ts: Optional[float] = None
@@ -316,26 +344,27 @@ class AudioThread(threading.Thread):
             heard_at = time.time()
             if not text:
                 return
-            event = parse_action(
+            # 続けて言った複数のアクションは言った順に分ける（ADR-0061）。
+            events = tuple(parse_actions(
                 text, confidence=confidence, utterance_start_ts=utterance_start_ts
-            )
+            ))
             infer_sec = heard_at - started
             logger.info(
                 "聞き取り: %r (confidence=%s, 推論 %.2f 秒) → %s",
                 text, "-" if confidence is None else f"{confidence:.2f}", infer_sec,
-                describe_event(event),
+                describe_events(events),
             )
             if self._on_transcript is not None:
                 try:
                     self._on_transcript(Transcript(
-                        text=text, confidence=confidence, event=event,
+                        text=text, confidence=confidence, events=events,
                         audio_sec=len(audio_bytes) / 2 / self._sample_rate,
                         infer_sec=infer_sec, utterance_start_ts=utterance_start_ts,
                         heard_at=heard_at,
                     ))
                 except Exception:
                     logger.exception("on_transcript callback failed")
-            if event is not None:
+            for event in events:
                 self._audio_queue.put(event)
         except Exception:
             logger.exception("Error in _process_chunk (chunk size=%d bytes)", len(audio_bytes))

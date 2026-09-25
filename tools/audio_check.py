@@ -39,7 +39,7 @@ _LEVEL_FULL_RMS = 8000.0
 _BAR_WIDTH = 20
 # これ未満しか来ないなら「無音」とみなす（プライバシー設定・RDP の音声設定で 0 が続く）
 _NEAR_SILENT_RMS = 50.0
-_EXAMPLES = "例: 「ハンド開始」「シート3 レイズ 600」「コール」「チェック」「フォールド」「シート1 ウィナー」"
+_EXAMPLES = "例: 「ハンド開始」「レイズ 600」「コール」「チェック」「フォールド」「オールイン」"
 
 
 # ――― config（読むだけ。config.json は作らない） ―――
@@ -254,21 +254,24 @@ def _cmd_level(args: argparse.Namespace) -> int:
 
 @dataclass
 class ListenStats:
-    heard: int = 0
-    actions: int = 0
+    heard: int = 0            # 文字になった発話
+    actions: int = 0          # そこから読めたアクション（1 発話に複数あれば複数）
+    unreadable: int = 0       # アクションとして読めなかった発話
+    dropped: int = 0          # 短すぎて認識に回さなかった音
     infer_secs: list[float] = field(default_factory=list)
 
     def summary(self) -> str:
+        dropped = f"・短すぎて認識しなかった音 {self.dropped} 件" if self.dropped else ""
         if not self.heard:
-            return "聞き取れた発話はありませんでした。"
+            return "聞き取れた発話はありませんでした。" + dropped
         avg = sum(self.infer_secs) / len(self.infer_secs)
-        return (f"発話 {self.heard} 件（アクション {self.actions} 件 / 読めず {self.heard - self.actions} 件）"
-                f"・認識 平均 {avg:.1f} 秒 / 最大 {max(self.infer_secs):.1f} 秒")
+        return (f"発話 {self.heard} 件 → アクション {self.actions} 件（読めなかった発話 {self.unreadable} 件）"
+                f"・認識 平均 {avg:.1f} 秒 / 最大 {max(self.infer_secs):.1f} 秒" + dropped)
 
 
 def format_transcript(t) -> str:
     """1 発話の表示（`audio.recorder.Transcript`）。"""
-    from audio.recorder import describe_event
+    from audio.recorder import describe_events
 
     clock = time.strftime("%H:%M:%S", time.localtime(t.heard_at))
     details = []
@@ -277,13 +280,18 @@ def format_transcript(t) -> str:
     details.append(f"認識 {t.infer_sec:.1f} 秒")
     if t.utterance_start_ts is not None:
         details.append(f"話し始めから {t.heard_at - t.utterance_start_ts:.1f} 秒")
-    return f"  {clock}  「{t.text}」→ {describe_event(t.event)}（{'・'.join(details)}）"
+    return f"  {clock}  「{t.text}」→ {describe_events(t.events)}（{'・'.join(details)}）"
+
+
+def format_dropped(voiced_sec: float, now: float) -> str:
+    clock = time.strftime("%H:%M:%S", time.localtime(now))
+    return f"  {clock}  （短い音 {voiced_sec:.2f} 秒 — 認識に回さず。言葉なら audio.min_speech_sec を下げる）"
 
 
 def _cmd_listen(args: argparse.Namespace) -> int:
     if _import_pyaudio() is None:
         return 1
-    from audio.recorder import AudioThread
+    from audio.recorder import _MIN_BUFFER_SECONDS, AudioThread
     from core.event_queue import make_audio_queue
 
     cfg = load_audio_config(args.config)
@@ -295,17 +303,26 @@ def _cmd_listen(args: argparse.Namespace) -> int:
     def on_transcript(t) -> None:
         with lock:
             stats.heard += 1
-            stats.actions += 1 if t.event is not None else 0
+            stats.actions += len(t.events)
+            stats.unreadable += 0 if t.events else 1
             stats.infer_secs.append(t.infer_sec)
             print(format_transcript(t), flush=True)
+
+    def on_dropped(voiced_sec: float) -> None:
+        with lock:
+            stats.dropped += 1
+            print(format_dropped(voiced_sec, time.time()), flush=True)
 
     print(f"音声認識モデル（{model}）を読み込んでいます…（初回はダウンロードで数分かかります）", flush=True)
     started = time.time()
     stop = threading.Event()
+    min_speech = (args.min_speech if args.min_speech is not None
+                  else float(cfg.get("min_speech_sec", _MIN_BUFFER_SECONDS)))
     thread = AudioThread(
         audio_queue=make_audio_queue(), device_id=device,
         sample_rate=int(cfg.get("sample_rate", 16000)), model_size=model,
         language=cfg.get("language", "ja"), stop_event=stop, on_transcript=on_transcript,
+        min_speech_sec=min_speech, on_dropped=on_dropped,
     )
     if not thread.asr_ready:
         error = getattr(thread._transcriber, "load_error", None)  # noqa: SLF001
@@ -333,6 +350,9 @@ def _cmd_listen(args: argparse.Namespace) -> int:
         pass
     stop.set()
     thread.join(timeout=10)
+    deadline = time.time() + 60   # 認識が遅れていても、聞いた発話は全部表示してから終える
+    while thread.backlog() > 0 and time.time() < deadline:
+        time.sleep(0.1)
     print()
     print(stats.summary())
     return 0
@@ -357,6 +377,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_listen.add_argument("--seconds", type=float, default=120.0, help="聞き取る秒数（既定 120）")
     p_listen.add_argument("--model", default=None,
                           help="音声認識モデル（既定: config の audio.whisper_model。例 small / medium）")
+    p_listen.add_argument("--min-speech", type=float, default=None,
+                          help="認識に回す最短の有音秒数（既定: config の audio.min_speech_sec、無ければ 0.15）")
     p_listen.set_defaults(func=_cmd_listen)
     return parser
 

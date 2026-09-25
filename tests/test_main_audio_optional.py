@@ -154,8 +154,9 @@ class TestCliAudioStatus:
         from audio.recorder import Transcript
 
         for text, expected in [("シート3 レイズ 600", "→ raise 600 席3"), ("えーと", "→ アクションとして読めず")]:
+            ev = parse_action(text)
             main._print_transcript(Transcript(  # noqa: SLF001
-                text=text, confidence=0.8, event=parse_action(text), audio_sec=1.0,
+                text=text, confidence=0.8, events=(ev,) if ev else (), audio_sec=1.0,
                 infer_sec=0.5, utterance_start_ts=None, heard_at=0.0,
             ))
             assert f"[聞き取り] 「{text}」{expected}" in capsys.readouterr().out

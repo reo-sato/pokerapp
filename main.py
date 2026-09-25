@@ -192,7 +192,7 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None):
     audio_cfg = cfg.get("audio", {})
     if not audio_cfg.get("enabled", True):
         return None
-    from audio.recorder import AudioThread
+    from audio.recorder import _MIN_BUFFER_SECONDS, AudioThread
 
     return AudioThread(
         audio_queue=audio_queue,
@@ -202,14 +202,34 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None):
         language=audio_cfg.get("language", "ja"),
         stop_event=stop_event,
         on_transcript=on_transcript,
+        min_speech_sec=float(audio_cfg.get("min_speech_sec", _MIN_BUFFER_SECONDS)),
     )
 
 
 def _print_transcript(transcript) -> None:
     """聞き取った文とアクションとしての読みを CLI に出す（音声テスト用, ADR-0060）。"""
-    from audio.recorder import describe_event
+    from audio.recorder import describe_events
 
-    print(f"  [聞き取り] 「{transcript.text}」→ {describe_event(transcript.event)}", flush=True)
+    print(f"  [聞き取り] 「{transcript.text}」→ {describe_events(transcript.events)}", flush=True)
+
+
+def _wait_for_backlog(audio_thread, timeout_sec: float = 60.0) -> None:
+    """打った入力が、先に言われてまだ認識中の発話を追い越さないよう待つ（ADR-0061）。
+
+    認識は発話より遅れることがある（遅れても全部処理する）。`n` / `w` などを先に積むと、
+    前のハンドのアクションが次のハンドに入ってしまうので、認識待ちが無くなるまで待つ。
+    """
+    import time as _time
+
+    if audio_thread is None or audio_thread.backlog() == 0:
+        return
+    print(f"  （聞き取った発話を先に反映しています… 残り {audio_thread.backlog()} 件）", flush=True)
+    deadline = _time.time() + timeout_sec
+    while audio_thread.backlog() > 0 and _time.time() < deadline:
+        _time.sleep(0.1)
+    if audio_thread.backlog() > 0:
+        print(f"  （{timeout_sec:.0f} 秒待っても残り {audio_thread.backlog()} 件。入力を先に反映します）",
+              flush=True)
 
 
 def _report_audio_start(audio_thread, device_id: int, wait_sec: float = 3.0) -> None:
@@ -480,7 +500,7 @@ def run_cli() -> None:
 
     # GameStateManager はロックを持たないため、状態変更コマンド (n/w/r) はすべて
     # audio_q 経由で IntegrationThread に処理させる（直接呼ぶと apply_action とレースする）。
-    from audio.recognizer import parse_action
+    from audio.recognizer import parse_actions
     from core.events import AudioEvent
     import time as _time
 
@@ -489,6 +509,8 @@ def run_cli() -> None:
             line = input("> ").strip()
             if not line:
                 continue
+            # 先に言われた発話がまだ認識中なら、その反映を待ってから入力を積む（順序を保つ）
+            _wait_for_backlog(audio_thread)
             parts = _normalize_cli_command(line).split()
             cmd = parts[0].lower()
 
@@ -568,15 +590,16 @@ def run_cli() -> None:
                     print(f"席 {key} の札の読み直しを送信しました（正しいカードを置き直してください）")
             else:
                 # 上のコマンド以外は **ディーラーのアナウンスとして解釈**する（マイク無しで
-                # アクションを投入する経路。音声と同じ `parse_action` を通すので語彙は共通 =
+                # アクションを投入する経路。音声と同じ `parse_actions` を通すので語彙は共通 =
                 # 二重管理にならない）。例: 「チェック」「シート3 コール」「ベット 500」。
                 # キーボード入力は ASR ではなく操作者の意図的な入力なので信頼度 1.0 を明示する
                 # （None は「Whisper 欠測」の意味で保守的既定 0.5 = 要レビューに倒れる, ADR-0047 B3）。
-                ev = parse_action(line, confidence=1.0)
-                if ev is None:
+                # 続けて打った複数のアクション（「フォールド フォールド コール」）は順に分ける（ADR-0061）
+                events = parse_actions(line, confidence=1.0)
+                if not events:
                     print("認識できません。コマンド: q / n / w <席> / r <席> <金額>、"
                           "または読み上げ文（例: チェック / シート3 コール / ベット 500）")
-                else:
+                for ev in events:
                     audio_q.put(ev)
                     print(f"  → {ev.action}"
                           + (f" {ev.amount}" if ev.amount else "")

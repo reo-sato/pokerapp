@@ -248,6 +248,106 @@ def parse_amount(text: str) -> int:
     return parse_amount_ex(text).value
 
 
+def _keyword_matches(norm: str) -> list[tuple[int, int, str]]:
+    """正規化済みテキスト中のアクションキーワードの出現 (位置, 長さ, action) を返す。
+
+    最左優先・同位置なら長いキーワードを先（より具体的な表現を採用するため）に並べる。
+    """
+    lower = norm.lower()
+    matches: list[tuple[int, int, str]] = []
+    for keyword, action in ACTION_KEYWORDS.items():
+        # キーワード側にも同じ正規化を掛ける（「降ります」のようにひらがなを含む語彙が、
+        # カタカナ化した入力と食い違わないように）。
+        kw = _to_katakana(unicodedata.normalize("NFKC", keyword)).lower()
+        start = 0
+        while True:
+            pos = lower.find(kw, start)
+            if pos == -1:
+                break
+            matches.append((pos, len(kw), action))
+            start = pos + 1
+    matches.sort(key=lambda t: (t[0], -t[1]))
+    return matches
+
+
+# 1 回の発話から分けるアクションの上限。9 人卓の 1 ラウンドは最大 8 アクションで足り、
+# これを超えるのは Whisper の繰り返し（同じ語が何十回も並ぶ幻聴）とみなして分けない。
+_MAX_ACTIONS_PER_UTTERANCE = 8
+# アクションの区切りとみなす文字（Whisper は間の短い発話を「、」や空白でつなぐ）。
+_SPLIT_DELIMITERS = frozenset("、。，,.・ 　")
+
+
+def _distinct_keywords(matches: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
+    """重なり（「スリーベット」⊃「ベット」等の包含）を除いた、左から順のキーワード出現。"""
+    kept: list[tuple[int, int, str]] = []
+    for m in matches:
+        if kept and m[0] < kept[-1][0] + kept[-1][1]:
+            continue
+        kept.append(m)
+    return kept
+
+
+def _split_points(norm: str, keywords: list[tuple[int, int, str]]) -> list[int]:
+    """隣り合うキーワードの間で、発話をどこで切るか（次のアクションの始まり）を返す。
+
+    1. 間に席番号・ポジション名（次のアクションの主語）があれば、その直前で切る。
+    2. 無ければ最後の区切り文字（「、」・空白など）の直後で切る（金額は前のアクションに残る:
+       「レイズ 600、コール」→「レイズ 600、」「コール」）。
+    3. 区切りも無ければ次のキーワードの直前で切る（「フォールドフォールド」）。
+    """
+    from core.positions import _ALIAS_PATTERN
+
+    cuts: list[int] = []
+    for prev, nxt in zip(keywords, keywords[1:]):
+        lo, hi = prev[0] + prev[1], nxt[0]
+        between = norm[lo:hi]
+        subjects = [m.start() for m in _SEAT_PATTERN.finditer(between)]
+        subjects += [m.start() for m in _ALIAS_PATTERN.finditer(between)]
+        if subjects:
+            cuts.append(lo + min(subjects))
+            continue
+        delims = [i for i, ch in enumerate(between) if ch in _SPLIT_DELIMITERS]
+        cuts.append(lo + delims[-1] + 1 if delims else hi)
+    return cuts
+
+
+def parse_actions(
+    text: str,
+    confidence: Optional[float] = None,
+    utterance_start_ts: Optional[float] = None,
+) -> list[AudioEvent]:
+    """1 回の発話からアクションを**言った順にすべて**返す（ADR-0061）。
+
+    ディーラーが間を空けずに続けて言うと（「フォールド、フォールド、コール」）、1 つの発話として
+    書き起こされる。席番号を言わない運用では手番の順でアクターを決めるので、1 つでも落とすと
+    以降のアクターがすべてずれる。キーワードが 2 つ以上あれば `_split_points` で切り分け、
+    それぞれを `parse_action` で読む（切り分けた各アクションには複数アクションの flag は付かない）。
+    キーワードが 1 つ、または多すぎる（繰り返しの幻聴）ときは従来どおり `parse_action` 1 件。
+    """
+    nfkc = unicodedata.normalize("NFKC", text)
+    norm = _to_katakana(nfkc)
+    keywords = _distinct_keywords(_keyword_matches(norm))
+    if len(keywords) <= 1 or len(keywords) > _MAX_ACTIONS_PER_UTTERANCE:
+        event = parse_action(text, confidence=confidence, utterance_start_ts=utterance_start_ts)
+        if event is None:
+            return []
+        if len(keywords) > _MAX_ACTIONS_PER_UTTERANCE:
+            # 繰り返しの聞き違いの疑い。分けずに 1 件にして要レビューにする。
+            event.parse_flags = (*event.parse_flags, "too_many_actions")
+        return [event]
+    cuts = _split_points(norm, keywords)
+    # 区間を原文から切り出す（NFKC で長さが変わった入力だけは正規化後の文字列から切る）。
+    source = text if len(nfkc) == len(text) else nfkc
+    bounds = [0, *cuts, len(norm)]
+    events: list[AudioEvent] = []
+    for start, end in zip(bounds, bounds[1:]):
+        part = source[start:end].strip("".join(_SPLIT_DELIMITERS))
+        event = parse_action(part, confidence=confidence, utterance_start_ts=utterance_start_ts)
+        if event is not None:
+            events.append(event)
+    return events
+
+
 def parse_action(
     text: str,
     confidence: Optional[float] = None,
@@ -276,27 +376,12 @@ def parse_action(
     # 全角数字・全角英字・半角カナ等を正規化し、ひらがなをカタカナに寄せてからパースする
     # （raw_text は原文を保持）。どちらも文字位置を保つ 1:1 の写像。
     norm = _to_katakana(unicodedata.normalize("NFKC", text))
-    lower = norm.lower()
-
-    matches: list[tuple[int, int, str]] = []  # (pos, kw_len, action)
-    for keyword, action in ACTION_KEYWORDS.items():
-        # キーワード側にも同じ正規化を掛ける（「降ります」のようにひらがなを含む語彙が、
-        # カタカナ化した入力と食い違わないように）。
-        kw = _to_katakana(unicodedata.normalize("NFKC", keyword)).lower()
-        start = 0
-        while True:
-            pos = lower.find(kw, start)
-            if pos == -1:
-                break
-            matches.append((pos, len(kw), action))
-            start = pos + 1
+    matches = _keyword_matches(norm)
 
     if not matches:
         logger.debug("No action keyword found in: %r", text)
         return None
 
-    # 最左優先。同位置なら長いキーワードを優先（より具体的な表現を採用するため）
-    matches.sort(key=lambda t: (t[0], -t[1]))
     found_pos, found_len, found_action = matches[0]
     span_end = found_pos + found_len
 

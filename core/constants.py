@@ -13,6 +13,7 @@ WHISPER_PROMPT_JA = (
 # 内包する短い語（ベット）より左からマッチするため、span 重複は選択語が勝つ。
 ACTION_KEYWORDS: dict[str, str] = {
     "ベット": "bet",
+    "ベッド": "bet",          # Whisper が「ベット」を「ベッド」と書き起こす（店舗の実測 2026-09-25, ADR-0061）
     "bet": "bet",
     "コール": "call",
     "call": "call",
@@ -20,6 +21,7 @@ ACTION_KEYWORDS: dict[str, str] = {
     "raise": "raise",
     "リレイズ": "raise",
     "スリーベット": "raise",
+    "チェックレイズ": "raise",  # 一度チェックした人のレイズ = 1 アクション（「チェック」「レイズ」に分けない）
     "チェック": "check",
     "check": "check",
     "フォールド": "fold",

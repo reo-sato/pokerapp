@@ -195,6 +195,7 @@ const REASON_LABELS: Record<string, string> = {
   amount_snapped: "金額を出せる額に寄せた",
   no_legal_context: "手番が分からない場面だった",
   multi_action_keywords: "1 回の発話にアクションが複数あった",
+  too_many_actions: "1 回の発話にアクションが多すぎた（繰り返しの聞き違いの疑い）",
   ambiguous_amount: "金額の言い方が曖昧",
   no_active_hand: "ハンドが始まっていなかった",
   low_conf_control_held: "自信の低い制御語を保留した",

@@ -181,10 +181,16 @@ class TestVocabularyV1:
         assert ev is not None and ev.action == action
 
     def test_multi_keyword_flag(self):
-        ev = parse_action("チェックレイズ", confidence=0.9)
+        # parse_action は 1 件だけ返す（複数は parse_actions が分ける, ADR-0061）
+        ev = parse_action("チェック コール", confidence=0.9)
         assert ev is not None
         assert ev.action == "check"                       # 先頭のみ採用
         assert "multi_action_keywords" in ev.parse_flags  # + 要レビュー
+
+    def test_check_raise_is_one_raise(self):
+        # 「チェックレイズ」は一度チェックした人のレイズ = 1 アクション（ADR-0061）
+        ev = parse_action("チェックレイズ 1200", confidence=0.9)
+        assert (ev.action, ev.amount, ev.parse_flags) == ("raise", 1200, ())
 
     def test_containment_not_flagged(self):
         # スリーベット ⊃ ベット は包含マッチ → flag しない
@@ -519,7 +525,7 @@ class TestRecorderT4:
         assert t._chunk_queue.empty()
 
     def test_short_blip_dropped(self):
-        # _MIN_BUFFER_SECONDS(0.3s = 約5チャンク)未満の短音は捨てる。
+        # _MIN_BUFFER_SECONDS(0.15s ≒ 2.3 チャンク)未満の短音は捨てる（ADR-0061 で 0.3 → 0.15）。
         t, _ = _make_audio_thread()
         _run_capture(t, [_voiced_chunk()] * 2 + [_silent_chunk()] * 9)
         assert t._chunk_queue.empty()
@@ -534,12 +540,13 @@ class TestRecorderT4:
         assert ev.confidence == 0.9
         assert ev.utterance_start_ts == 123.0
 
-    def test_inference_queue_drops_oldest_when_full(self):
+    def test_inference_queue_keeps_every_utterance_in_order(self):
+        # ADR-0061: 認識が遅れても発話は捨てない（プレーの切れ目で追いつく）。
         t, _ = _make_audio_thread()
-        for i in range(10):
+        for i in range(30):
             t._enqueue_utterance(bytes([i]) * 2, float(i))
+        assert t.backlog() == 30
         items = []
         while not t._chunk_queue.empty():
             items.append(t._chunk_queue.get_nowait())
-        assert len(items) == 8                      # _INFERENCE_QUEUE_MAX
-        assert items[-1][1] == 9.0                  # 新しい発話が残る
+        assert [ts for _, ts in items] == [float(i) for i in range(30)]
