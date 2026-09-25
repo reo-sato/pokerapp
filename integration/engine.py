@@ -93,6 +93,14 @@ DEAL_WINDOW_SEC = 15.0
 DEAL_SPEECH_WAIT_SEC = 60.0
 # 配った直後（アクション前）のハンドに届いた `w` / 「ウィナー」を、前のハンドへの宣言とみなす時間（秒）。
 LATE_WINNER_SEC = 60.0
+# RFID の在否で配布を検出する（ADR-0063）: 2 席以上に手札 2 枚ずつがこの秒数載り続け、ボードの
+# リーダーが空なら配布。シャッフル・ウォッシュで一瞬リーダーを通った札では始めない。
+DEAL_STABLE_SEC = 1.5
+# 載り続けているとみなす途切れの上限（読み落ち 1〜2 周ぶん）
+DEAL_GAP_SEC = 0.6
+# ハンドの途中でも、卓（席とボードのリーダー）に札が 1 枚も無い状態がこの秒数続いたらプレーは
+# 終わったとみなし、音声を聞き流す（片付け・シャッフル中の会話を認識に回さない, ADR-0063）。
+TABLE_CLEAR_SEC = 15.0
 
 
 def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
@@ -194,6 +202,7 @@ class IntegrationThread(threading.Thread):
         auto_winner: bool = False,
         speech_backlog: Optional[Callable[[], int]] = None,
         on_notice: Optional[Callable[[str], None]] = None,
+        listen_gate: Optional[threading.Event] = None,
     ) -> None:
         """
         Args:
@@ -245,6 +254,8 @@ class IntegrationThread(threading.Thread):
                          None なら待たない（音声なし・replay）。
             on_notice: 操作する人へのお知らせ（ハンドの開始・勝者・判定待ち）を受け取る関数。
                          integration スレッドで呼ばれる。None なら logger だけ。
+            listen_gate: プレー中だけ set される Event（ADR-0063）。`AudioThread` が見て、プレー中で
+                         ない間の発話を認識に回さない。None なら常に聞く。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -309,10 +320,22 @@ class IntegrationThread(threading.Thread):
         self._speech_backlog = speech_backlog
         self._on_notice = on_notice
         self._rules_aware = bool(getattr(game_state, "rules_aware", False))
-        # 次のハンドとして配られた札（まだハンドに入れていない）と、配布を検出した時刻。
-        self._deal_cards: list[RFIDEvent] = []
+        # 次のハンドとして読んだ札 (席, 札, 時刻)。在否が無いとき（replay 等）はこれで配布を判断する。
+        self._deal_events: list[tuple[int, str, float]] = []
+        # 配布と判断したハンドの手札（席 → 札）。ハンドを始めるときに手札として入れる。
+        self._deal_hands: dict[int, list[str]] = {}
+        # 在否による配布の検出: 席 → (手札 2 枚が載り始めた時刻, 最後に載っていた時刻)（ADR-0063）
+        self._deal_since: dict[int, tuple[float, float]] = {}
         self._deal_at: Optional[float] = None          # 最初の札が見えた時刻
         self._deal_detected_at: Optional[float] = None  # 検出した時刻（engine の時計）
+        # 配布の検出で RFID をリセット済み（ハンド開始時に二重にリセットしない）
+        self._rfid_reset_for_deal = False
+        # プレー中か（配布〜確定、または卓が空になるまで）。音声の聞き取りとボードの受付に使う。
+        self._listen_gate = listen_gate
+        self._in_play = False
+        if listen_gate is not None:
+            listen_gate.clear()
+        self._table_empty_since: Optional[float] = None
         # いまのハンドを配布の検出で始めたか（直後の「ハンド開始」/ `n` を二重に数えない）。
         self._hand_auto_started = False
         # ショーダウンでマックした席（見せずに降りた = ポットを受け取れない）。
@@ -348,6 +371,8 @@ class IntegrationThread(threading.Thread):
             self._drain_rfid_queue()
 
             self._publish_table_state_if_due()
+            self._check_deal_presence()     # 手札の配布（ADR-0063）
+            self._check_table_cleared()     # 片付け（プレーの終わり）
 
             try:
                 event = self._audio_queue.get(timeout=0.1)
@@ -422,6 +447,17 @@ class IntegrationThread(threading.Thread):
         if self._deal_at is not None and ev.timestamp >= self._deal_at:
             # 配ったあとのボードの札は新しいハンドのもの（ADR-0062）
             self._start_dealt_hand_if_ready(force=True)
+        elif self._auto_new_hand and not (self._hand_open and self._in_play):
+            # 手札が配られる前・プレーが終わったあと（シャッフル・片付け）のボードは読まない（ADR-0063）
+            logger.debug("プレー中でないボードの札を無視しました: %s (tag=%s)", ev.card, ev.tag_id)
+            return
+        if self._auto_new_hand and self._betting_over() and (
+            ev.replaces or ev.board_index not in self._board_positions
+            and len(self._board_positions) >= 5
+        ):
+            # ショーダウン待ちのボードは変えない（次のハンドのウォッシュで差し替わるのを防ぐ, ADR-0063）
+            logger.info("ショーダウン待ちのボードの差し替えを無視しました: %s", ev.card)
+            return
         if not ev.card:
             logger.warning(
                 "Board RFID event has no card (tag=%s reader=%s) — needs_review",
@@ -478,7 +514,9 @@ class IntegrationThread(threading.Thread):
 
     def _handle_seat_rfid(self, ev: RFIDEvent) -> None:
         """座席カードの RFID イベントを処理する (ホールカード蓄積 + アクション照合用)。"""
-        if self._auto_new_hand and ev.card and ev.seat is not None and self._is_next_deal(ev):
+        if self._auto_new_hand and ev.card and ev.seat is not None and (
+            (self._deal_at is not None and ev.timestamp >= self._deal_at) or self._is_next_deal(ev)
+        ):
             self._collect_deal(ev)   # 次のハンドの札（ADR-0062）。いまのハンドには入れない
             return
         # ホールカード蓄積 (カード情報がある場合のみ)
@@ -865,20 +903,128 @@ class IntegrationThread(threading.Thread):
         )
 
     def _collect_deal(self, ev: RFIDEvent) -> None:
-        """次のハンドの札を集め、2 席以上に配られたら配布と判断する。"""
-        if self._deal_at is None:
-            # 片付けの途中で 1 枚だけ触れた札などは、窓を過ぎたら捨てる
-            self._deal_cards = [
-                e for e in self._deal_cards if ev.timestamp - e.timestamp <= DEAL_WINDOW_SEC
-            ]
-        if not any(e.seat == ev.seat and e.card == ev.card for e in self._deal_cards):
-            self._deal_cards.append(ev)
-        seats = sorted({e.seat for e in self._deal_cards})
-        if self._deal_at is None and len(seats) >= 2:
-            self._deal_at = min(e.timestamp for e in self._deal_cards)
-            self._deal_detected_at = self._clock()
-            logger.info("手札の配布を検出しました（席 %s）", seats)
+        """次のハンドの札を集める。
+
+        配布と判断したあと（`_deal_at` あり）の札は、そのハンドの手札にする。判断の前は、RFID の在否が
+        あれば在否で判断し（`_check_deal_presence`, シャッフルで一瞬通った札では始めない）、無ければ
+        （replay・HTTP 受信）2 席以上に 2 枚ずつ読めたら配布とする。
+        """
+        if self._deal_at is not None:
+            self._add_deal_card(ev.seat, ev.card)
+            return
+        # 片付けの途中で触れた札などは、窓を過ぎたら捨てる
+        self._deal_events = [
+            e for e in self._deal_events if ev.timestamp - e[2] <= DEAL_WINDOW_SEC
+        ]
+        if not any(s == ev.seat and c == ev.card for s, c, _ in self._deal_events):
+            self._deal_events.append((ev.seat, ev.card, ev.timestamp))
+        if self._seat_presence is not None:
+            self._check_deal_presence()
+            return
+        hands: dict[int, list[str]] = {}
+        for seat, card, _ in self._deal_events:
+            hands.setdefault(seat, []).append(card)
+        dealt = [s for s, cards in hands.items() if len(cards) >= 2]
+        if len(dealt) >= 2:
+            self._deal_detected(min(ts for _, _, ts in self._deal_events), hands)
+
+    def _add_deal_card(self, seat: int, card: str) -> None:
+        cards = self._deal_hands.setdefault(seat, [])
+        if len(cards) < 2 and not any(card in c for c in self._deal_hands.values()):
+            cards.append(card)
+
+    def _game_seats(self) -> list[int]:
+        try:
+            return sorted(self._game_state.get_stacks())
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _check_deal_presence(self) -> None:
+        """RFID の在否から次のハンドの配布を検出する（ADR-0063）。
+
+        配布 = 卓の 2 席以上に、前のハンドと違う手札 2 枚が `DEAL_STABLE_SEC` 載り続け、ボードの
+        リーダーが空。シャッフル・ウォッシュでリーダーを一瞬通った札や、ショーダウンのあと残っている
+        前のハンドの札では始めない。
+        """
+        if not self._auto_new_hand or self._seat_presence is None or self._deal_at is not None:
+            return
+        if self._hand_open and not self._hand_in_play():
+            self._deal_since = {}          # 始めたばかりのハンド（配り直しは同じハンド）
+            return
+        now = self._clock()
+        try:
+            snapshot = self._seat_presence() or {}
+            board = (self._board_presence() or {}) if self._board_presence is not None else {}
+        except Exception:  # noqa: BLE001 — 在否が取れなければ判断しない
+            return
+        hands: dict[int, list[str]] = {}
+        for seat in self._game_seats():
+            cards = list((snapshot.get(seat) or {}).get("cards") or [])
+            previous = self._hole_cards.get(seat, [])
+            if len(cards) >= 2 and any(c not in previous for c in cards):
+                since = self._deal_since.get(seat, (now, now))[0]
+                self._deal_since[seat] = (since, now)
+                hands[seat] = cards[:2]
+            elif seat in self._deal_since and now - self._deal_since[seat][1] > DEAL_GAP_SEC:
+                del self._deal_since[seat]
+        stable = [
+            s for s, (since, last) in self._deal_since.items()
+            if now - since >= DEAL_STABLE_SEC and now - last <= DEAL_GAP_SEC and s in hands
+        ]
+        if len(stable) < 2 or (board.get("present_count") or 0) > 0:
+            return
+        self._deal_detected(min(self._deal_since[s][0] for s in stable), hands)
+
+    def _deal_detected(self, deal_at: float, hands: dict[int, list[str]]) -> None:
+        """配布と判断した。RFID のボード位置をいま捨て（シャッフル中に読んだ札を持ち越さない）、
+        プレー中にして、配る前の発話を反映し終えたら新しいハンドを始める。"""
+        self._deal_at = deal_at
+        self._deal_detected_at = self._clock()
+        self._deal_since = {}
+        self._deal_hands = {}
+        for seat, cards in sorted(hands.items()):
+            for card in cards:
+                self._add_deal_card(seat, card)
+        logger.info("手札の配布を検出しました（%s）", self._deal_hands)
+        self._set_in_play(True)
+        if self._on_new_hand is not None:
+            try:
+                self._on_new_hand()
+                self._rfid_reset_for_deal = True
+            except Exception:  # noqa: BLE001
+                logger.exception("on_new_hand hook failed at deal")
         self._start_dealt_hand_if_ready()
+
+    def _set_in_play(self, in_play: bool) -> None:
+        """プレー中かを切り替える（音声の聞き取りとボードの受付, ADR-0063）。"""
+        if self._in_play == in_play:
+            return
+        self._in_play = in_play
+        self._table_empty_since = None
+        if self._listen_gate is not None:
+            if in_play:
+                self._listen_gate.set()
+            else:
+                self._listen_gate.clear()
+        logger.info("プレー中: %s", "はい（聞き取りを再開）" if in_play else "いいえ（次の配布まで音声を聞き流す）")
+
+    def _check_table_cleared(self) -> None:
+        """ハンドが確定していなくても、卓に札が無い状態が続いたらプレーは終わったとみなす。"""
+        if not (self._in_play and self._hand_open and self._deal_at is None) or self._seat_presence is None:
+            return
+        try:
+            seats = self._seat_presence() or {}
+            board = (self._board_presence() or {}) if self._board_presence is not None else {}
+        except Exception:  # noqa: BLE001
+            return
+        if any(info.get("present") for info in seats.values()) or (board.get("present_count") or 0):
+            self._table_empty_since = None
+            return
+        now = self._clock()
+        if self._table_empty_since is None:
+            self._table_empty_since = now
+        elif now - self._table_empty_since >= TABLE_CLEAR_SEC:
+            self._set_in_play(False)
 
     def _speech_pending_before_deal(self) -> bool:
         """配る前に話された発話が、まだ認識中か（先に前のハンドへ反映する）。"""
@@ -915,12 +1061,14 @@ class IntegrationThread(threading.Thread):
     def _adopt_deal_cards(self) -> None:
         """配布の検出で集めた札を、いまのハンドの手札にする（配布と判断していない札は捨てる）。"""
         if self._deal_at is not None:
-            for ev in self._deal_cards:
-                cards = self._hole_cards.setdefault(ev.seat, [])
-                if len(cards) < 2 and not any(ev.card in c for c in self._hole_cards.values()):
-                    cards.append(ev.card)
+            for seat, dealt in self._deal_hands.items():
+                cards = self._hole_cards.setdefault(seat, [])
+                for card in dealt:
+                    if len(cards) < 2 and not any(card in c for c in self._hole_cards.values()):
+                        cards.append(card)
             logger.info("配られた手札: %s", {s: c for s, c in self._hole_cards.items() if c})
-        self._deal_cards = []
+        self._deal_events = []
+        self._deal_hands = {}
         self._deal_at = None
         self._deal_detected_at = None
 
@@ -1733,7 +1881,10 @@ class IntegrationThread(threading.Thread):
         self._hand_auto_started = auto
         self._showdown_mucks = []
         self._showdown_notice_shown = False
-        if self._on_new_hand is not None:
+        self._set_in_play(True)
+        if self._rfid_reset_for_deal:
+            self._rfid_reset_for_deal = False   # 配布の検出でリセット済み（ADR-0063）
+        elif self._on_new_hand is not None:
             # RFID の board 位置を engine と同じタイミングでリセットする（ISSUE-0026）。
             # engine 側の board は「カードが外れても縮まない」ので、RFID だけが独自に位置を
             # 振り直すと両者がずれて同じ札が 2 か所に出る。ハンドの切れ目を唯一の同期点にする。
@@ -1903,6 +2054,8 @@ class IntegrationThread(threading.Thread):
         self._hand_open = False
         self._hand_auto_started = False
         self._showdown_mucks = []
+        if self._deal_at is None:
+            self._set_in_play(False)            # 次の配布まで音声を聞き流す（ADR-0063）
 
     def _describe_result(self, summary: HandSummary, awards: Optional[dict[int, int]]) -> str:
         """確定したハンドを 1 行で表す（CLI のお知らせ用）。"""

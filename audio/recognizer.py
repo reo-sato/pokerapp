@@ -317,13 +317,18 @@ def _kana_amount_to_kanji(norm: str, keyword_end: int) -> str:
     return norm[:start] + kanji + norm[end:]
 
 
+# 書き起こしゆれとして足した短い語は、ほかの言葉の一部として現れやすい（「なべとなって」の「ベト」、
+# 「ゴールド」の「ゴール」）。前後が区切り・数・別のアクションの語のときだけアクションとみなす（ADR-0063）。
+_BOUNDARY_KEYWORDS = frozenset({"ベト", "ゴール", "ホールド", "ベッド"})
+
+
 def _keyword_matches(norm: str) -> list[tuple[int, int, str]]:
     """正規化済みテキスト中のアクションキーワードの出現 (位置, 長さ, action) を返す。
 
     最左優先・同位置なら長いキーワードを先（より具体的な表現を採用するため）に並べる。
     """
     lower = norm.lower()
-    matches: list[tuple[int, int, str]] = []
+    matches: list[tuple[int, int, str, str]] = []
     for keyword, action in ACTION_KEYWORDS.items():
         # キーワード側にも同じ正規化を掛ける（「降ります」のようにひらがなを含む語彙が、
         # カタカナ化した入力と食い違わないように）。
@@ -333,10 +338,37 @@ def _keyword_matches(norm: str) -> list[tuple[int, int, str]]:
             pos = lower.find(kw, start)
             if pos == -1:
                 break
-            matches.append((pos, len(kw), action))
+            matches.append((pos, len(kw), action, kw))
             start = pos + 1
-    matches.sort(key=lambda t: (t[0], -t[1]))
-    return matches
+    starts = {m[0] for m in matches}
+    ends = {m[0] + m[1] for m in matches}
+
+    def isolated(pos: int, end: int) -> bool:
+        before_ok = pos == 0 or not _is_katakana(lower[pos - 1]) or pos in ends
+        after_ok = (
+            end == len(lower) or not _is_katakana(lower[end]) or end in starts
+            or _kana_number_at(norm, end) is not None
+        )
+        return before_ok and after_ok
+
+    kept = [
+        (pos, length, action) for pos, length, action, kw in matches
+        if kw not in _BOUNDARY_KEYWORDS or isolated(pos, pos + length)
+    ]
+    kept.sort(key=lambda t: (t[0], -t[1]))
+    return kept
+
+
+# Whisper は雑音や聞き取れない音に対して initial_prompt（WHISPER_PROMPT_JA）をそのまま書き起こすことがある
+# （店舗の実測: 「シート3 レイズ 2千、コール、チョップ などの言葉が含まれます」が信頼度 0.1〜0.2 で出て、
+# レイズ・コール・ウィナーとして記録された, ADR-0063）。ディーラーが言うはずのない部分で見分ける。
+_PROMPT_ECHO_MARKERS = ("言葉が含まれ", "読み上げています", "ウィナー、ハンド開始", "ハンド開始、チョップ")
+
+
+def is_prompt_echo(text: str) -> bool:
+    """書き起こしが initial_prompt の繰り返し（= 雑音）か。"""
+    norm = unicodedata.normalize("NFKC", text).replace(" ", "").replace("　", "")
+    return any(marker in norm for marker in _PROMPT_ECHO_MARKERS)
 
 
 # 1 回の発話から分けるアクションの上限。9 人卓の 1 ラウンドは最大 8 アクションで足り、
@@ -486,8 +518,20 @@ def parse_action(
 class WhisperTranscriber:
     """faster-whisper を使ってマイク音声をテキストに変換するクラス。"""
 
-    def __init__(self, model_size: str = "medium", language: str = "ja") -> None:
+    def __init__(
+        self, model_size: str = "medium", language: str = "ja",
+        beam_size: int = 5, temperature_fallback: bool = False,
+    ) -> None:
+        """
+        Args:
+            beam_size: ビーム幅（小さいほど速い）。config `audio.beam_size`。
+            temperature_fallback: 自信の低い書き起こしを温度を上げて最大 5 回やり直すか（faster-whisper の
+                既定）。雑音では毎回やり直しになり 1 発話に 10〜80 秒かかって認識が数分遅れたので、
+                既定では行わない（店舗の実測, ADR-0063）。config `audio.temperature_fallback`。
+        """
         self._language = language
+        self._beam_size = max(1, int(beam_size))
+        self._temperature = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0) if temperature_fallback else 0.0
         # 読み込めなかった理由（CLI / audio_check が表示する）。読み込めたら None。
         self.load_error: Optional[str] = None
         logger.info("Loading Whisper model: %s", model_size)
@@ -544,6 +588,9 @@ class WhisperTranscriber:
                 audio_array,
                 language=self._language,
                 initial_prompt=WHISPER_PROMPT_JA,
+                beam_size=self._beam_size,
+                temperature=self._temperature,
+                condition_on_previous_text=False,
             )
             texts: list[str] = []
             logprobs: list[float] = []

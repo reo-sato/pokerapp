@@ -197,18 +197,19 @@ def _rfid_tracking_kwargs(rfid_cfg: dict) -> dict:
     }
 
 
-def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None):
+def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, listen_gate=None):
     """config.audio.enabled が true（既定）なら AudioThread を返す。false なら None。
 
     false はマイクを繋がない実機テスト（RFID のカード読み取りだけを見る / ダミーアクションを
     キーボードで投入する）用。アクションは CLI の入力ループが読み上げ文を `parse_action` に
     通して AudioEvent にするので、音声と同じ語彙・同じ経路で進行できる。
     `on_transcript` は聞き取った文ごとに呼ばれる（CLI の表示, ADR-0060）。
+    `listen_gate` はプレー中だけ set される Event（ハンドの間の発話は認識に回さない, ADR-0063）。
     """
     audio_cfg = cfg.get("audio", {})
     if not audio_cfg.get("enabled", True):
         return None
-    from audio.recorder import _MIN_BUFFER_SECONDS, AudioThread
+    from audio.recorder import _MIN_BUFFER_SECONDS, _SILENCE_RMS_THRESHOLD, AudioThread
 
     return AudioThread(
         audio_queue=audio_queue,
@@ -219,14 +220,35 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None):
         stop_event=stop_event,
         on_transcript=on_transcript,
         min_speech_sec=float(audio_cfg.get("min_speech_sec", _MIN_BUFFER_SECONDS)),
+        listen_gate=listen_gate,
+        speech_rms=float(audio_cfg.get("speech_rms", _SILENCE_RMS_THRESHOLD)),
+        beam_size=int(audio_cfg.get("beam_size", 5)),
+        temperature_fallback=bool(audio_cfg.get("temperature_fallback", False)),
     )
+
+
+def _make_listen_gate(cfg: dict):
+    """手札の配布でハンドを始める運用（RFID + `engine.auto_new_hand`）なら、プレー中だけ音声を認識に
+    回すための Event を返す（ADR-0063）。それ以外（RFID なし等）は None = 常に聞く
+    （配る前の「ハンド開始」で始める運用を止めない）。"""
+    if not cfg.get("rfid", {}).get("enabled", False):
+        return None
+    if not cfg.get("engine", {}).get("auto_new_hand", True):
+        return None
+    return threading.Event()
 
 
 def _print_transcript(transcript) -> None:
     """聞き取った文とアクションとしての読みを CLI に出す（音声テスト用, ADR-0060）。"""
     from audio.recorder import describe_events
 
-    print(f"  [聞き取り] 「{transcript.text}」→ {describe_events(transcript.events)}", flush=True)
+    heard = "雑音として無視" if getattr(transcript, "noise", False) else describe_events(transcript.events)
+    lag = ""
+    if transcript.utterance_start_ts is not None:
+        delay = transcript.heard_at - transcript.utterance_start_ts
+        if delay >= 10:
+            lag = f"  （{delay:.0f} 秒前の発話）"
+    print(f"  [聞き取り] 「{transcript.text}」→ {heard}{lag}", flush=True)
 
 
 def _wait_for_backlog(audio_thread, timeout_sec: float = 60.0) -> None:
@@ -413,7 +435,9 @@ def run_cli() -> None:
         print(f"音声認識モデル（{audio_cfg.get('whisper_model', 'medium')}）を読み込んでいます…"
               "（初回はダウンロードで数分かかります）", flush=True)
         loading_since = _time.time()
-    audio_thread = _make_audio_thread(cfg, audio_q, stop_event, on_transcript=_print_transcript)
+    listen_gate = _make_listen_gate(cfg)
+    audio_thread = _make_audio_thread(cfg, audio_q, stop_event, on_transcript=_print_transcript,
+                                      listen_gate=listen_gate)
     if audio_thread is None:
         print("音声入力は無効です (audio.enabled=false)。"
               "アクションはキーボードから読み上げ文で投入してください。")
@@ -513,6 +537,7 @@ def run_cli() -> None:
         session_repo=session_repo,
         seat_player_map=seat_player_map,
         on_notice=_print_notice,
+        listen_gate=listen_gate,
         **_auto_hand_kwargs(cfg, audio_thread),
     )
     if audio_thread is not None:
@@ -529,7 +554,8 @@ def run_cli() -> None:
         print(f"お客さんの記録: {seated or 'なし（名前を入力した席がありません）'}")
     auto = _auto_hand_kwargs(cfg, None)
     if auto["auto_new_hand"] and rfid_thread is not None:
-        print("手札を配ると新しいハンドが始まります（n は不要）。")
+        print("手札を配ると新しいハンドが始まります（2 席以上に 2 枚ずつ置いたとき。n は不要）。"
+              "音声はプレー中だけ聞き取ります。")
     if auto["auto_winner"]:
         print("勝者: ほかが全員フォールドしたら自動。ショーダウンは、見せずにマックしたら「フォールド」"
               "（アウトオブポジションから順）、全員見せたら「ハンド終了」か次の手札で手札から判定。"
@@ -729,7 +755,8 @@ def run_gui() -> None:
         session_layer_enabled=session_layer_enabled,
     )
 
-    audio_thread = _make_audio_thread(cfg, audio_q, stop_event)
+    listen_gate = _make_listen_gate(cfg)
+    audio_thread = _make_audio_thread(cfg, audio_q, stop_event, listen_gate=listen_gate)
     if audio_thread is None:
         print("音声入力は無効です (audio.enabled=false)。"
               "アクションはキーボードから読み上げ文で投入してください。")
@@ -818,6 +845,7 @@ def run_gui() -> None:
         board_presence=board_presence,
         table_state_writer=table_state_writer,
         control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
+        listen_gate=listen_gate,
         **_auto_hand_kwargs(cfg, audio_thread),
     )
 

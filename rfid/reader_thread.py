@@ -998,10 +998,12 @@ class RFIDThread(threading.Thread):
         """席ごとの現在のカード在否（卓状態の表示用, `core/table_state.py`）。
 
         `{seat: {"present": bool, "absent_since": float | None, "uid_count": int,
-        "mucked_at": float | None}}`。
+        "mucked_at": float | None, "cards": [str, ...]}}`。
         **「載っている」であって「ゲームに残っている」ではない**（ADR-0056 D4）。
         まだ一度も検出していない席は現れない（= 未配布と区別できる）。
         `mucked_at` はその席の手札が卓の中央（board reader の上）を通過した時刻（ADR-0058）。
+        `cards` はいまリーダーが読んでいる札（未登録の札は `?<UID>`）。手札の配布の検出に使う
+        （ハンドの記録やデバウンスとは無関係の、読んだままの札, ADR-0063）。
         """
         snapshot: dict[int, dict] = {}
         with self._lock:
@@ -1014,6 +1016,7 @@ class RFIDThread(threading.Thread):
                     "absent_since": self._seat_absent_since.get(seat),
                     "uid_count": len(uids),
                     "mucked_at": self._mucked_at.get(seat),
+                    "cards": sorted(self._card_master.lookup(u) or f"?{u}" for u in uids),
                 }
         return snapshot
 
@@ -1028,9 +1031,15 @@ class RFIDThread(threading.Thread):
         - **pending**: 読めているがまだ数えていない札（載り続けるのを待っている / 差し直しを確かめ中）。
           置いた札が読めているか・なぜまだ出ないかを見る。
         従来の解釈（最初に見えた瞬間に確定）では両方とも空。
+        - **present_count**: いま board reader が読んでいる札の枚数（記録とは無関係）。手札の配布は
+          ボードが空のときだけ検出する（シャッフルでボードのリーダーに札が載る, ADR-0063）。
         """
+        with self._lock:
+            on_board: set[str] = set()
+            for reader_id in self._board_reader_ids:
+                on_board |= self._last_uids.get(reader_id, set())
         if not self._tracking:
-            return {"absent": {}, "pending": {}}
+            return {"absent": {}, "pending": {}, "present_count": len(on_board)}
         now = self._clock()
         absent: dict[str, float] = {}
         pending: dict[str, dict] = {}
@@ -1050,7 +1059,7 @@ class RFIDThread(threading.Thread):
                 card = self._card_master.lookup(uid)
                 if card:
                     pending[card] = {"since": run.first_seen, "swap": run.waiting}
-        return {"absent": absent, "pending": pending}
+        return {"absent": absent, "pending": pending, "present_count": len(on_board)}
 
     def reset_for_new_hand(self) -> None:
         """新ハンドの同期点（board 位置 + マック観測 + 席の記録をまとめて捨てる）。

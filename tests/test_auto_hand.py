@@ -126,12 +126,12 @@ class TestHandStartsWhenCardsAreDealt:
     def test_dealing_starts_a_hand_and_keeps_the_cards(self, tmp_path):
         tb = _Table(tmp_path)
         tb.seat(2, "As", 1.0)
-        assert tb.gs.hand_id == 0                       # 1 席だけではまだ始めない
         tb.seat(5, "Kd", 1.4)
-        assert tb.gs.hand_id == 1 and tb.resets == 1    # RFID も同じ時点でリセット
-        tb.deal({8: "Qh"}, 1.8)
+        tb.seat(8, "Qh", 1.8)
         tb.seat(2, "Ad", 2.2)
+        assert tb.gs.hand_id == 0                       # 2 枚そろった席が 1 つだけではまだ始めない
         tb.seat(5, "Kc", 2.6)
+        assert tb.gs.hand_id == 1 and tb.resets == 1    # RFID も同じ時点でリセット
         tb.seat(8, "Qc", 3.0)
         assert tb.t._hole_cards == {2: ["As", "Ad"], 5: ["Kd", "Kc"], 8: ["Qh", "Qc"]}   # noqa: SLF001
         assert tb.notices[0] == "ハンド 1 開始（手札が配られました / ボタン 席8）"
@@ -148,9 +148,7 @@ class TestHandStartsWhenCardsAreDealt:
     def test_a_stray_card_during_cleanup_does_not_start_a_hand(self, tmp_path):
         tb = _Table(tmp_path)
         tb.seat(5, "Kd", 1.0)                           # 片付けの途中で 1 枚だけ読めた
-        tb.seat(2, "As", 30.0)                          # 15 秒の窓を過ぎてから次の札
-        assert tb.gs.hand_id == 0
-        tb.seat(8, "Qh", 30.5)
+        tb.deal({2: "AsAd", 8: "QhQc"}, 30.0)           # 15 秒の窓を過ぎてから配布
         assert tb.gs.hand_id == 1
         assert 5 not in tb.t._hole_cards                # noqa: SLF001 — 古い札は入れない
 

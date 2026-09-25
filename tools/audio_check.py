@@ -280,7 +280,8 @@ def format_transcript(t) -> str:
     details.append(f"認識 {t.infer_sec:.1f} 秒")
     if t.utterance_start_ts is not None:
         details.append(f"話し始めから {t.heard_at - t.utterance_start_ts:.1f} 秒")
-    return f"  {clock}  「{t.text}」→ {describe_events(t.events)}（{'・'.join(details)}）"
+    heard = "雑音として無視" if getattr(t, "noise", False) else describe_events(t.events)
+    return f"  {clock}  「{t.text}」→ {heard}（{'・'.join(details)}）"
 
 
 def format_dropped(voiced_sec: float, now: float) -> str:
@@ -323,6 +324,9 @@ def _cmd_listen(args: argparse.Namespace) -> int:
         sample_rate=int(cfg.get("sample_rate", 16000)), model_size=model,
         language=cfg.get("language", "ja"), stop_event=stop, on_transcript=on_transcript,
         min_speech_sec=min_speech, on_dropped=on_dropped,
+        speech_rms=float(cfg.get("speech_rms", 300)),
+        beam_size=int(cfg.get("beam_size", 5)),
+        temperature_fallback=bool(cfg.get("temperature_fallback", False)),
     )
     if not thread.asr_ready:
         error = getattr(thread._transcriber, "load_error", None)  # noqa: SLF001

@@ -1181,6 +1181,14 @@ python tools/register_cards.py run --deck 1    # 実カード UID を rfid_cards
 
 - ユーザー可視の挙動変更、および仕様 / docs の重要更新は `Unreleased` セクションに追記する。
 
+### 7b. 店舗テスト中の軽い運用（オーナー決定, 2026-09-25）
+
+- 店舗での実機テストを受けた修正を繰り返している間は、文書は **CHANGELOG と worklog だけ**を短く更新する。
+  ADR / ISSUE / CLAUDE.md / usage / troubleshooting / decision-log は、動きが固まった時点かオーナーの依頼で
+  まとめて更新する。
+- 手元で変更部分のテストと全体テスト（1 回）が通ったらプッシュし、**CI の完了を待たずに**更新コマンドを渡す。
+  CI はあとで確認し、失敗したときだけ知らせる。
+
 ### 8. 完了条件
 
 - code / tests / docs（CLAUDE.md / ADR / worklog / issue / decision-log / CHANGELOG の該当箇所）が

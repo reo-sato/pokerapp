@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from audio.recognizer import WhisperTranscriber, parse_actions
+from audio.recognizer import WhisperTranscriber, is_prompt_echo, parse_actions
 from core.event_queue import EventQueue
 from core.events import AudioEvent
 
@@ -46,6 +46,7 @@ class Transcript:
     infer_sec: float                       # Whisper にかかった秒数
     utterance_start_ts: Optional[float]    # 話し始めの時刻（unix 秒）
     heard_at: float                        # 文字になった時刻（unix 秒）
+    noise: bool = False                    # 雑音への幻聴（プロンプトの繰り返し）として捨てた（ADR-0063）
 
 
 def describe_events(events) -> str:
@@ -112,6 +113,10 @@ class AudioThread(threading.Thread):
         on_transcript: Optional[Callable[[Transcript], None]] = None,
         min_speech_sec: float = _MIN_BUFFER_SECONDS,
         on_dropped: Optional[Callable[[float], None]] = None,
+        listen_gate: Optional[threading.Event] = None,
+        speech_rms: float = _SILENCE_RMS_THRESHOLD,
+        beam_size: int = 5,
+        temperature_fallback: bool = False,
     ) -> None:
         """
         Args:
@@ -121,6 +126,10 @@ class AudioThread(threading.Thread):
                          推論スレッドから呼ばれる。CLI の表示と `tools/audio_check.py` が使う。
             min_speech_sec: 認識に回す最短の有音秒数（config `audio.min_speech_sec`）。
             on_dropped: 短すぎて認識に回さなかった音ごとに有音秒数で呼ぶ（`audio_check listen`）。
+            listen_gate: プレー中だけ set される Event（ADR-0063）。一度も set されていない間に話された
+                         発話は認識に回さない（ハンドの間の会話で認識待ちがたまらないように）。None なら常に聞く。
+            speech_rms: 有音とみなす RMS（config `audio.speech_rms`）。離れた席の会話を拾うなら上げる。
+            beam_size / temperature_fallback: `WhisperTranscriber` に渡す（config `audio.*`）。
         """
         super().__init__(daemon=True, name="AudioThread")
         self._audio_queue = audio_queue
@@ -130,12 +139,17 @@ class AudioThread(threading.Thread):
         self._on_transcript = on_transcript
         self._min_speech_sec = min_speech_sec
         self._on_dropped = on_dropped
+        self._listen_gate = listen_gate
+        self._speech_rms = float(speech_rms)
+        # プレー中でないため認識に回さなかった発話の数（ログ・テスト用）
+        self.skipped = 0
         # 推論中の件数（0/1）と、発話を切り出している最中か。`backlog()` が待ちと合わせて返す。
         self._inferring = 0
         self._capturing = False
         self._transcriber = (
             transcriber if transcriber is not None
-            else WhisperTranscriber(model_size=model_size, language=language)
+            else WhisperTranscriber(model_size=model_size, language=language,
+                                    beam_size=beam_size, temperature_fallback=temperature_fallback)
         )
         # 推論待ちの (発話バイト列, 発話開始時刻)。None は worker 終了の sentinel。
         # 上限なし: 認識が遅れても発話を捨てない（プレーの切れ目で追いつく, ADR-0061）。
@@ -227,6 +241,7 @@ class AudioThread(threading.Thread):
         voiced_samples = 0
         voiced = False
         utterance_start_ts: Optional[float] = None
+        in_play = False  # この発話のあいだに一度でもプレー中だったか（ADR-0063）
         prev_chunk: Optional[bytes] = None  # 発話立ち上がりの取りこぼし防止の 1 チャンク pre-roll
         silence_chunks = 0
         silence_threshold_chunks = max(1, int(self._sample_rate / chunk_size * 0.5))  # 約0.5秒
@@ -236,9 +251,13 @@ class AudioThread(threading.Thread):
 
         def flush() -> None:
             nonlocal buffer, buffered_samples, voiced_samples, voiced
-            nonlocal utterance_start_ts, silence_chunks
+            nonlocal utterance_start_ts, silence_chunks, in_play
             # 最小長は「有音サンプル数」で判定する（末尾の無音でかさ増ししない）。
-            if voiced and voiced_samples >= min_buffer_samples and utterance_start_ts is not None:
+            if voiced and not in_play:
+                # プレー中でない（ハンドの間の）発話は認識に回さない（ADR-0063）
+                self.skipped += 1
+                logger.debug("Skipped speech outside play (%.2f s)", buffered_samples / self._sample_rate)
+            elif voiced and voiced_samples >= min_buffer_samples and utterance_start_ts is not None:
                 self._enqueue_utterance(b"".join(buffer), utterance_start_ts)
             elif voiced and voiced_samples >= report_drop_samples:
                 voiced_sec = voiced_samples / self._sample_rate
@@ -254,6 +273,7 @@ class AudioThread(threading.Thread):
             voiced = False
             utterance_start_ts = None
             silence_chunks = 0
+            in_play = False
 
         while not self._stop_event.is_set():
             try:
@@ -273,7 +293,7 @@ class AudioThread(threading.Thread):
                 "device_name": self._device_name,
             }
 
-            is_voiced = rms >= _SILENCE_RMS_THRESHOLD
+            is_voiced = rms >= self._speech_rms
             if is_voiced:
                 silence_chunks = 0
                 voiced_samples += len(data) // 2
@@ -288,6 +308,8 @@ class AudioThread(threading.Thread):
                 silence_chunks += 1
 
             if voiced:
+                if self._listen_gate is None or self._listen_gate.is_set():
+                    in_play = True
                 buffer.append(data)
                 buffered_samples += len(data) // 2
                 if (
@@ -344,15 +366,16 @@ class AudioThread(threading.Thread):
             heard_at = time.time()
             if not text:
                 return
-            # 続けて言った複数のアクションは言った順に分ける（ADR-0061）。
-            events = tuple(parse_actions(
+            noise = is_prompt_echo(text)
+            # 続けて言った複数のアクションは言った順に分ける（ADR-0061）。雑音への幻聴は読まない（ADR-0063）。
+            events = () if noise else tuple(parse_actions(
                 text, confidence=confidence, utterance_start_ts=utterance_start_ts
             ))
             infer_sec = heard_at - started
             logger.info(
                 "聞き取り: %r (confidence=%s, 推論 %.2f 秒) → %s",
                 text, "-" if confidence is None else f"{confidence:.2f}", infer_sec,
-                describe_events(events),
+                "雑音（プロンプトの繰り返し）として無視" if noise else describe_events(events),
             )
             if self._on_transcript is not None:
                 try:
@@ -360,7 +383,7 @@ class AudioThread(threading.Thread):
                         text=text, confidence=confidence, events=events,
                         audio_sec=len(audio_bytes) / 2 / self._sample_rate,
                         infer_sec=infer_sec, utterance_start_ts=utterance_start_ts,
-                        heard_at=heard_at,
+                        heard_at=heard_at, noise=noise,
                     ))
                 except Exception:
                     logger.exception("on_transcript callback failed")
