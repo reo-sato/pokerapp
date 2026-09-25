@@ -154,7 +154,7 @@ class TestCliSessionLayer:
         logs = data_dir / "logs"
         _run_cli(monkeypatch, _cfg(enabled),
                  _setup(["太郎", "次郎"], logs) + ["n", "seat 2 call", "w 1", "q"])
-        assert "→ call (席2)" in capsys.readouterr().out
+        assert "→ call 席2" in capsys.readouterr().out
         _, hands = _hands(logs)
         assert [p["name"] for p in hands[0]["players"]] == ["太郎", "次郎"]
 

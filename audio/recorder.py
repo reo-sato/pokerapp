@@ -60,15 +60,23 @@ def describe_event(event: Optional[AudioEvent]) -> str:
     """聞き取り結果を 1 行で表す（ログ・CLI・audio_check で共通）。"""
     if event is None:
         return "アクションとして読めず"
-    parts = [event.action]
+    flags = event.parse_flags
+    if "amount_only" in flags:
+        action = "bet/raise"               # どちらかは engine が状態から決める
+    elif "check_around" in flags:
+        action = "check 全員"
+    else:
+        action = event.action
+    parts = [action]
     if event.amount:
         parts.append(str(event.amount))
     if event.seat is not None:
         parts.append(f"席{event.seat}")
     elif event.position:
         parts.append(event.position)
-    if event.parse_flags:
-        parts.append("（" + "・".join(event.parse_flags) + "）")
+    shown = ["数字だけ" if f == "amount_only" else f for f in flags if f != "check_around"]
+    if shown:
+        parts.append("（" + "・".join(shown) + "）")
     return " ".join(parts)
 
 

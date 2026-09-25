@@ -363,12 +363,116 @@ def _keyword_matches(norm: str) -> list[tuple[int, int, str]]:
 # （店舗の実測: 「シート3 レイズ 2千、コール、チョップ などの言葉が含まれます」が信頼度 0.1〜0.2 で出て、
 # レイズ・コール・ウィナーとして記録された, ADR-0063）。ディーラーが言うはずのない部分で見分ける。
 _PROMPT_ECHO_MARKERS = ("言葉が含まれ", "読み上げています", "ウィナー、ハンド開始", "ハンド開始、チョップ")
+# プロンプトの語をその順に 4 つ以上並べたもの（「コール、チェック、フォールド、オールイン、…」を繰り返す幻聴。
+# 店舗の 3 回目の通しテストで「シート4 レイズ 2千」として記録された）。ディーラーはこの順には言わない。
+_PROMPT_WORD_ORDER = ("コール", "チェック", "フォールド", "オールイン", "ショーダウン", "ウィナー", "ハンド")
+_PROMPT_WORD_RUNS = tuple(
+    "、".join(_PROMPT_WORD_ORDER[i:i + 4]) for i in range(len(_PROMPT_WORD_ORDER) - 3)
+)
+# 無音・雑音に対する Whisper の定型の幻聴（動画の字幕に多い締めの言葉）。
+_STOCK_HALLUCINATIONS = ("ご視聴", "ご覧いただ", "ご覧頂", "チャンネル登録")
 
 
 def is_prompt_echo(text: str) -> bool:
-    """書き起こしが initial_prompt の繰り返し（= 雑音）か。"""
-    norm = unicodedata.normalize("NFKC", text).replace(" ", "").replace("　", "")
-    return any(marker in norm for marker in _PROMPT_ECHO_MARKERS)
+    """書き起こしが雑音への幻聴（initial_prompt の繰り返し・字幕の定型句）か。"""
+    norm = unicodedata.normalize("NFKC", text).replace(" ", "").replace("　", "").replace(",", "、")
+    return any(marker in norm for marker in (
+        *_PROMPT_ECHO_MARKERS, *_PROMPT_WORD_RUNS, *_STOCK_HALLUCINATIONS,
+    ))
+
+
+# 数字だけの発話（「600点」「2千点です」）はベットかレイズ（店のディーラーは語を省いて額だけ言う。店舗の
+# 3 回目の通しテストで「600点」「2千点」がベットだった）。どちらかは engine が状態から決め、額がいまのベット
+# 以下・最小ベット未満なら使わない。額の前後に付いてよいのは下の語だけ — 「ポット 2千点」「残り 1500」
+# 「7ヒット」のような発話や、違う数が並ぶ発話（「5 6 7」）はアクションにしない。
+_AMOUNT_TOKEN = re.compile(r"(?:\d[\d,]*(?:\.\d+)?[万千百Kk]?)+|[一二三四五六七八九〇十百千万]+")
+_AMOUNT_ONLY_REST = re.compile(
+    r"(?:[\s、。・!?,.ー〜~]|点|テン|ポイント|デス|デース|ニナリマス|ハイ|エー|エット|エート|エ|アー|ア"
+    r"|ジャア|ジャ|デハ|アクション|ネ|ヨ)*"
+)
+# 数字だけの部分を区切る文字（空白では区切らない: 「シート3 600点」「5 6 7」を 1 まとまりに見る）
+_AMOUNT_CHUNK = re.compile(r"[^、。・!?]+")
+# 前後に区切って言った額を、別の人のベット・レイズとして分けるアクション（「2千点、コール」= 2000 のベット
+# のあとにコール）。ベット・レイズ・オールインの前後の額はそのアクションの額なので分けない。
+_AMOUNT_SPLIT_ACTIONS = frozenset({"call", "check", "fold"})
+# 「チェックアラウンド」= まだ動いていない全員がチェックした（オーナーの説明, 2026-09-25）。
+_CHECK_AROUND = re.compile(r"(?:チェック|check)\s*(?:ア(?:ラウ|ラ)ン(?:ド|ト)?|around)", re.IGNORECASE)
+
+
+def parse_amount_only(
+    text: str,
+    confidence: Optional[float] = None,
+    utterance_start_ts: Optional[float] = None,
+) -> Optional[AudioEvent]:
+    """額だけを言った発話を、ベットかレイズの候補（action="bet" + flag "amount_only"）にする。
+
+    席番号・ポジション名は付いていてもよい。額でなければ None。
+    """
+    from core.positions import _ALIAS_PATTERN
+
+    norm = _to_katakana(unicodedata.normalize("NFKC", text))
+    body = _ALIAS_PATTERN.sub(" ", _SEAT_PATTERN.sub(" ", norm))
+    tokens = [m.group() for m in _AMOUNT_TOKEN.finditer(body)]
+    if not tokens:
+        return None
+    amounts = [parse_amount_ex(token) for token in tokens]
+    if len({a.value for a in amounts}) != 1 or amounts[0].value <= 0:
+        return None                         # 違う数が並ぶ（「5 6 7」）
+    if not _AMOUNT_ONLY_REST.fullmatch(_AMOUNT_TOKEN.sub(" ", body)):
+        return None                         # 額のほかに言葉がある（「ポット 2千点」）
+    flags = ["amount_only"]
+    if amounts[0].ambiguous:
+        flags.append("ambiguous_amount")
+    return AudioEvent(
+        action="bet",
+        amount=amounts[0].value,
+        timestamp=time.time(),
+        raw_text=text,
+        seat=_extract_seat_no(norm),
+        confidence=confidence,
+        position=parse_position(norm),
+        parse_flags=tuple(flags),
+        utterance_start_ts=utterance_start_ts,
+    )
+
+
+def _split_off_amounts(
+    part: str, event: AudioEvent,
+    confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> list[AudioEvent]:
+    """コール・チェック・フォールドの前後に区切って言った額を、別のベット・レイズとして分ける。
+
+    「2千点、コール」→ 2000 / コール。区切らずに言った額（「600点コールです」）はコールの額のまま。
+    同じ額の言い直しは engine が「いまのベット以下」として捨てる。
+    """
+    if event.action not in _AMOUNT_SPLIT_ACTIONS:
+        return [event]
+    nfkc = unicodedata.normalize("NFKC", part)
+    norm = _to_katakana(nfkc)
+    source = part if len(nfkc) == len(part) else nfkc
+    matches = _keyword_matches(norm)
+    if not matches:
+        return [event]
+    keyword_at = matches[0][0]
+    before: list[AudioEvent] = []
+    after: list[AudioEvent] = []
+    kept: list[str] = []
+    for m in _AMOUNT_CHUNK.finditer(norm):
+        chunk = source[m.start():m.end()]
+        if m.start() <= keyword_at < m.end():
+            kept.append(chunk)
+            continue
+        amount = parse_amount_only(chunk, confidence, utterance_start_ts)
+        if amount is None:
+            kept.append(chunk)
+        elif m.end() <= keyword_at:
+            before.append(amount)
+        else:
+            after.append(amount)
+    if not before and not after:
+        return [event]
+    main = parse_action("、".join(kept), confidence=confidence, utterance_start_ts=utterance_start_ts)
+    return [*before, main or event, *after]
 
 
 # 1 回の発話から分けるアクションの上限。9 人卓の 1 ラウンドは最大 8 アクションで足り、
@@ -428,14 +532,19 @@ def parse_actions(
     nfkc = unicodedata.normalize("NFKC", text)
     norm = _to_katakana(nfkc)
     keywords = _distinct_keywords(_keyword_matches(norm))
-    if len(keywords) <= 1 or len(keywords) > _MAX_ACTIONS_PER_UTTERANCE:
+    if not keywords:
+        # アクションの語が無くても、額だけを言っていればベットかレイズ（「600点」）
+        event = parse_amount_only(text, confidence=confidence, utterance_start_ts=utterance_start_ts)
+        return [event] if event is not None else []
+    if len(keywords) == 1 or len(keywords) > _MAX_ACTIONS_PER_UTTERANCE:
         event = parse_action(text, confidence=confidence, utterance_start_ts=utterance_start_ts)
         if event is None:
             return []
         if len(keywords) > _MAX_ACTIONS_PER_UTTERANCE:
             # 繰り返しの聞き違いの疑い。分けずに 1 件にして要レビューにする。
             event.parse_flags = (*event.parse_flags, "too_many_actions")
-        return [event]
+            return [event]
+        return _split_off_amounts(text, event, confidence, utterance_start_ts)
     cuts = _split_points(norm, keywords)
     # 区間を原文から切り出す（NFKC で長さが変わった入力だけは正規化後の文字列から切る）。
     source = text if len(nfkc) == len(text) else nfkc
@@ -445,7 +554,7 @@ def parse_actions(
         part = source[start:end].strip("".join(_SPLIT_DELIMITERS))
         event = parse_action(part, confidence=confidence, utterance_start_ts=utterance_start_ts)
         if event is not None:
-            events.append(event)
+            events.extend(_split_off_amounts(part, event, confidence, utterance_start_ts))
     return events
 
 
@@ -494,6 +603,8 @@ def parse_action(
             continue  # 採用キーワードと重なる包含マッチ（例: スリーベット ⊃ ベット）
         flags.append("multi_action_keywords")
         break
+    if found_action == "check" and _CHECK_AROUND.match(norm, found_pos):
+        flags.append("check_around")
 
     # 席番号表現（シート1 / seat 3 等）を除去してから金額を抽出する。
     # 除去しないと parse_amount() が席番号の数字を最初の金額候補として拾ってしまう。

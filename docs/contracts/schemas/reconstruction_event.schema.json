@@ -17,7 +17,7 @@
     "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Whisper per-segment 信頼度 (ADR-0009 additive)。"},
     "position": {"type": ["string", "null"], "enum": ["BTN", "SB", "BB", "UTG", "UTG+1", "UTG+2", "MP", "HJ", "CO", null], "description": "読み上げられたポジション名（\"BTN、コール\"）。actor 推定の明示証拠で、席への解決はボタンを知る engine 側が行う（ISSUE-0032 additive）。"},
     "utterance_start_ts": {"type": "number", "description": "発話キャプチャ開始時刻 (ADR-0048 T1 additive)。欠損時は timestamp を窓始端に使う。"},
-    "parse_flags": {"type": "array", "items": {"enum": ["ambiguous_amount", "multi_action_keywords"]}, "description": "パース時に検出した曖昧性 (ADR-0047 additive)。非空なら needs_review。"},
+    "parse_flags": {"type": "array", "items": {"enum": ["ambiguous_amount", "multi_action_keywords", "too_many_actions", "amount_only", "check_around"]}, "description": "パース時に検出した曖昧性 (ADR-0047 additive)。非空なら needs_review。ただし amount_only（数字だけの発話 = ベットかレイズ）と check_around（チェックアラウンド = 全員チェック）は読み方の情報で review の理由にしない。too_many_actions = 1 発話に 9 個以上のアクション（繰り返しの聞き違い, ADR-0061）。"},
     "tag_id": {"type": "string"},
     "card": {"type": "string"},
     "reader_id": {"type": "string"},

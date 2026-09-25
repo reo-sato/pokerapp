@@ -31,6 +31,7 @@ import logging
 import queue
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -101,6 +102,26 @@ DEAL_GAP_SEC = 0.6
 # ハンドの途中でも、卓（席とボードのリーダー）に札が 1 枚も無い状態がこの秒数続いたらプレーは
 # 終わったとみなし、音声を聞き流す（片付け・シャッフル中の会話を認識に回さない, ADR-0063）。
 TABLE_CLEAR_SEC = 15.0
+# いまのストリートの最初の札が見える前にこの秒数以上早く話し始めた「コール」は、前のストリートで
+# 言われたもの（言い直し）とみなす（店舗の実測: 「コール」のあとの「600点コールです」がターンの札の 3 秒前）。
+STALE_CALL_MARGIN_SEC = 1.0
+
+# review の理由にしない parse flag（読み方の情報。「数字だけ」「チェックアラウンド」は運用どおりの言い方）
+_INFO_PARSE_FLAGS = frozenset({"amount_only", "check_around"})
+
+_SUIT_MARKS = {"s": "♠", "h": "♥", "d": "♦", "c": "♣"}
+
+
+def _card_text(card: str) -> str:
+    """"Td" → "10♦"（CLI の表示用）。形の違う札（未登録の UID 等）はそのまま。"""
+    if len(card) == 2 and card[1].lower() in _SUIT_MARKS:
+        rank = "10" if card[0] in "Tt" else card[0].upper()
+        return rank + _SUIT_MARKS[card[1].lower()]
+    return card
+
+
+def _cards_text(cards) -> str:
+    return " ".join(_card_text(c) for c in cards)
 
 
 def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
@@ -203,6 +224,7 @@ class IntegrationThread(threading.Thread):
         speech_backlog: Optional[Callable[[], int]] = None,
         on_notice: Optional[Callable[[str], None]] = None,
         listen_gate: Optional[threading.Event] = None,
+        on_cards: Optional[Callable[[str], None]] = None,
     ) -> None:
         """
         Args:
@@ -256,6 +278,8 @@ class IntegrationThread(threading.Thread):
                          integration スレッドで呼ばれる。None なら logger だけ。
             listen_gate: プレー中だけ set される Event（ADR-0063）。`AudioThread` が見て、プレー中で
                          ない間の発話を認識に回さない。None なら常に聞く。
+            on_cards: RFID で読んだ札（手札・フロップ / ターン / リバー・確定時のまとめ）を 1 行ずつ
+                         受け取る関数（CLI の表示用）。integration スレッドで呼ばれる。None なら logger だけ。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -343,6 +367,10 @@ class IntegrationThread(threading.Thread):
         self._showdown_notice_shown = False
         # 直前に確定したハンド（自動で決めた勝者のあとに届いた `w` / 「ウィナー」を扱う）。
         self._last_result: Optional[dict] = None
+        # CLI に出した札（同じ札を何度も出さない）: 席 → 手札、ボードは出した枚数
+        self._on_cards = on_cards
+        self._shown_holes: dict[int, tuple[str, ...]] = {}
+        self._shown_board = 0
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -497,6 +525,10 @@ class IntegrationThread(threading.Thread):
             )
             self._warn_duplicate_board_cards()
             self._try_advance_street_from_rfid()
+            self._show_board(
+                replaced=(ev.board_index, previous, ev.card)
+                if previous is not None and not unchanged else None
+            )
         else:
             # board_index なし: 末尾に追記
             self._board_cards.append(ev.card)
@@ -505,6 +537,7 @@ class IntegrationThread(threading.Thread):
                 ev.card, ev.tag_id, self._board_cards,
             )
             self._warn_duplicate_board_cards()
+            self._show_board()
 
         if not self._board_source:
             self._board_source = "rfid"
@@ -551,6 +584,7 @@ class IntegrationThread(threading.Thread):
                     self._on_rfid_card(ev)
             if moved:
                 self._hand_needs_review = True
+            self._show_hole_cards()
         elif not ev.card:
             logger.warning(
                 "Seat RFID event has no card (tag=%s reader=%s seat=%s) — needs_review",
@@ -768,7 +802,24 @@ class IntegrationThread(threading.Thread):
         # ベッティングアクション。rules-aware backend（pokerkit）は境界で actor 推定 + 合法手
         # 射影、legacy（空 legal_context）は従来経路で挙動不変（ADR-0009 §1）。
         legal_ctx = gs.legal_context()
+        if "amount_only" in event.parse_flags:
+            # 数字だけの発話 = ベットかレイズ。使えない額なら記録しない（「7」「いまのベットと同じ額」）
+            problem = self._amount_only_problem(event, legal_ctx)
+            if problem is not None:
+                self._notice(f"数字だけの「{event.raw_text}」は記録しませんでした（{problem}）")
+                return
+            event = replace(event, action="raise" if "raise" in legal_ctx.legal_actions else "bet")
         if legal_ctx.legal_actions:
+            if event.action == "call" and legal_ctx.amount_to_call == 0 and self._said_before_street(event):
+                # チェックとして次の人の手番を食わない（言い直しの「600点コールです」, 店舗の実測）
+                self._notice(f"「{event.raw_text}」は前のストリートのコール（言い直し）とみなして記録しませんでした")
+                return
+            if "check_around" in event.parse_flags:
+                if self._said_before_street(event):
+                    self._notice(f"「{event.raw_text}」は前のストリートのチェックアラウンドとみなして記録しませんでした")
+                    return
+                self._handle_check_around(event, legal_ctx)
+                return
             self._handle_rules_aware_action(event, legal_ctx)
         elif self._betting_over():
             # ベッティングが終わってショーダウンを待っている。ここでの「フォールド」はマック（ADR-0062）
@@ -778,6 +829,65 @@ class IntegrationThread(threading.Thread):
                 self._emit_unresolved(event, reason="betting_over")
         else:
             self._handle_legacy_action(event)
+
+    def _amount_only_problem(self, event: AudioEvent, ctx: LegalContext) -> Optional[str]:
+        """数字だけの発話をベット・レイズにできない理由（できるなら None）。
+
+        レイズはいまのベットより大きい額、ベットは最小ベット以上の額だけ（ショーダウンで手を読み上げた
+        「7」や、コールの額を言い直した「600点」をアクションにしない）。
+        """
+        legal = ctx.legal_actions
+        if not legal or ctx.actor_seat is None:
+            return "ベッティングは終わっています" if self._betting_over() else "ベッティング中ではありません"
+        if "raise" in legal:
+            current = ctx.committed + ctx.amount_to_call
+            if event.amount <= current:
+                return f"いまのベット {current} 以下の額です"
+        elif "bet" in legal:
+            if event.amount < ctx.min_raise:
+                return f"最小ベット {ctx.min_raise} より少ない額です"
+        else:
+            return "ベット・レイズできる手番ではありません"
+        return None
+
+    def _street_started_at(self) -> Optional[float]:
+        """いまのストリートの最初の札が見えた時刻（フロップは 3 枚のうち最初）。読めていなければ None。"""
+        indices = {"flop": (1, 2, 3), "turn": (4,), "river": (5,)}.get(self._game_state.street, ())
+        times = [self._board_dealt_at[i] for i in indices if i in self._board_dealt_at]
+        return min(times) if times else None
+
+    def _said_before_street(self, event: AudioEvent) -> bool:
+        """発話がいまのストリートの札より前に始まった（= 前のストリートのラウンドの発話）か。
+
+        ボードを RFID で読んでいるハンドのターン・リバーで、その札がまだ見えていなければ前（配る前）。
+        フロップは札がまだ 1 枚も読めていないと RFID の有無が分からないので、見えたときだけ比べる。
+        """
+        street = self._game_state.street
+        if street not in ("flop", "turn", "river"):
+            return False
+        started = self._street_started_at()
+        if started is None:
+            return street != "flop" and self._board_source == "rfid"
+        return _spoken_at(event) < started - STALE_CALL_MARGIN_SEC
+
+    def _handle_check_around(self, event: AudioEvent, legal_ctx: LegalContext) -> None:
+        """「チェックアラウンド」= このラウンドでまだ動いていない全員がチェックした（オーナーの説明）。
+
+        手番の人から順に、ラウンドが閉じる（ストリートが進む / ベッティングが終わる）までチェックを入れる。
+        最初の人がチェックできない（ベットがある）ときは、1 つのチェックとして読む（合法手へ射影して要確認）。
+        """
+        gs = self._game_state
+        if "check" not in legal_ctx.legal_actions:
+            self._handle_rules_aware_action(event, legal_ctx)
+            return
+        street = gs.street
+        each = replace(event, seat=None, position=None)
+        ctx = legal_ctx
+        for _ in range(max(len(self._game_seats()), 1)):
+            self._handle_rules_aware_action(each, ctx)
+            ctx = gs.legal_context()
+            if gs.street != street or ctx.actor_seat is None or "check" not in ctx.legal_actions:
+                return
 
     def _handle_winner(self, event: AudioEvent) -> None:
         """winner 宣言の処理。複数席の読み上げは split pot（ADR-0050 S7）、席が読めない場合は
@@ -869,6 +979,65 @@ class IntegrationThread(threading.Thread):
                 self._on_notice(message)
             except Exception:  # noqa: BLE001 — 表示の失敗で記録を止めない
                 logger.exception("on_notice failed")
+
+    # ――― 読んだ札の表示（CLI）―――
+
+    def _card_info(self, message: str) -> None:
+        """RFID で読んだ札を 1 行で知らせる（CLI の [カード] 行）。logger にも残す。"""
+        logger.info("カード: %s", message)
+        if self._on_cards is not None:
+            try:
+                self._on_cards(message)
+            except Exception:  # noqa: BLE001 — 表示の失敗で記録を止めない
+                logger.exception("on_cards failed")
+
+    def _show_hole_cards(self) -> None:
+        """2 枚そろった席の手札を出す（まだ出していない席・配り直しで変わった席だけ）。"""
+        if not self._hand_open:
+            return
+        shown = []
+        for seat in sorted(self._hole_cards):
+            cards = tuple(self._hole_cards[seat])
+            if len(cards) != 2 or self._shown_holes.get(seat) == cards:
+                continue
+            redeal = seat in self._shown_holes
+            self._shown_holes[seat] = cards
+            shown.append(f"席{seat} {_cards_text(cards)}" + ("（配り直し）" if redeal else ""))
+        if shown:
+            self._card_info("手札 " + " ／ ".join(shown))
+
+    def _show_board(self, replaced: Optional[tuple[int, str, str]] = None) -> None:
+        """フロップ（3 枚）・ターン・リバーがそろったとき、配り直しで替わったときにボードを出す。"""
+        if not self._hand_open:
+            return
+        board = self._board_cards
+        if replaced is not None:
+            index, old, new = replaced
+            self._card_info(
+                f"ボード {index} 枚目を差し替え {_card_text(old)} → {_card_text(new)}"
+                f"（{_cards_text(board)}）"
+            )
+        elif len(board) > self._shown_board and len(board) >= 3:
+            if len(board) == 3:
+                self._card_info(f"フロップ {_cards_text(board)}")
+            else:
+                name = "ターン" if len(board) == 4 else "リバー"
+                self._card_info(f"{name} {_card_text(board[-1])}（ボード {_cards_text(board)}）")
+        self._shown_board = len(board)
+
+    def _describe_cards(self, summary: HandSummary) -> str:
+        """確定したハンドの札をまとめて 1 行にする（ボード / 席ごとの手札と、見せた手の役）。"""
+        from core.showdown import HAND_NAMES_JA
+
+        hands = {h["seat"]: HAND_NAMES_JA.get(h["hand"], h["hand"]) for h in summary.showdown or []}
+        parts = [f"ボード {_cards_text(summary.board)}"] if summary.board else []
+        for player in summary.players:
+            if player.get("hole_cards"):
+                text = f"席{player['seat']} {_cards_text(player['hole_cards'])}"
+                if player["seat"] in hands:
+                    text += f"（{hands[player['seat']]}）"
+                parts.append(text)
+        return " ／ ".join(parts)
 
     def _hand_in_play(self) -> bool:
         """配り終えてプレーが始まっているか（アクション・ボードがある / ベッティングが終わった）。
@@ -1450,6 +1619,7 @@ class IntegrationThread(threading.Thread):
         removed = self._board_positions.pop(index)
         self._board_dealt_at.pop(index, None)   # 差し替え後の配布時刻を採り直す（ADR-0055）
         self._board_cards = [self._board_positions[i] for i in sorted(self._board_positions)]
+        self._shown_board = len(self._board_cards)   # 置き直した札をもう一度出す
         # 訂正が入ったハンドは人間が記録を確認できるようにする（監査痕）。
         self._hand_needs_review = True
         logger.info(
@@ -1465,6 +1635,7 @@ class IntegrationThread(threading.Thread):
             logger.warning("席が指定されていないため訂正できません（raw=%r）", event.raw_text)
             return
         removed = self._hole_cards.pop(seat, [])
+        self._shown_holes.pop(seat, None)            # 読み直した札をもう一度出す
         self._hand_needs_review = True
         logger.info(
             "席 %d のホールカード %s を取り消しました — 正しいカードを置き直してください",
@@ -1798,7 +1969,7 @@ class IntegrationThread(threading.Thread):
             (not apply_ok)
             or corrected.needs_review
             or conflict
-            or bool(event.parse_flags)
+            or any(flag not in _INFO_PARSE_FLAGS for flag in event.parse_flags)
             or confidence < REVIEW_THRESHOLD
         )
 
@@ -1881,6 +2052,8 @@ class IntegrationThread(threading.Thread):
         self._hand_auto_started = auto
         self._showdown_mucks = []
         self._showdown_notice_shown = False
+        self._shown_holes = {}
+        self._shown_board = 0
         self._set_in_play(True)
         if self._rfid_reset_for_deal:
             self._rfid_reset_for_deal = False   # 配布の検出でリセット済み（ADR-0063）
@@ -1903,6 +2076,7 @@ class IntegrationThread(threading.Thread):
             f"ボタン 席{button}" if button is not None else "",
         ) if d]
         self._notice(f"ハンド {gs.hand_id} 開始" + (f"（{' / '.join(details)}）" if details else ""))
+        self._show_hole_cards()
         self._publish_table_state()
 
     def _assign_seats_for_hand(self, hand_id: int) -> None:
@@ -2041,6 +2215,9 @@ class IntegrationThread(threading.Thread):
             self._on_hand(summary)
         logger.info("Hand %d finalized. Winner: seat %s", gs.hand_id, winner_seat)
         self._notice(self._describe_result(summary, awards))
+        cards = self._describe_cards(summary)
+        if cards:
+            self._card_info(f"ハンド {summary.hand_id}: {cards}")
         self._last_result = {
             "hand_id": gs.hand_id,
             "winners": sorted(awards) if awards else [winner_seat],

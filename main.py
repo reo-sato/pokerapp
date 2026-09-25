@@ -377,6 +377,11 @@ def _print_notice(message: str) -> None:
     print(f"  ● {message}", flush=True)
 
 
+def _print_cards(message: str) -> None:
+    """RFID で読んだ札（手札・ボード・確定時のまとめ）。integration スレッドから呼ばれる。"""
+    print(f"  [カード] {message}", flush=True)
+
+
 def run_cli() -> None:
     """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。"""
     from core.config import load_config
@@ -537,6 +542,7 @@ def run_cli() -> None:
         session_repo=session_repo,
         seat_player_map=seat_player_map,
         on_notice=_print_notice,
+        on_cards=_print_cards,
         listen_gate=listen_gate,
         **_auto_hand_kwargs(cfg, audio_thread),
     )
@@ -571,6 +577,7 @@ def run_cli() -> None:
     # GameStateManager はロックを持たないため、状態変更コマンド (n/w/r) はすべて
     # audio_q 経由で IntegrationThread に処理させる（直接呼ぶと apply_action とレースする）。
     from audio.recognizer import parse_actions
+    from audio.recorder import describe_event
     from core.events import AudioEvent
     import time as _time
 
@@ -668,12 +675,10 @@ def run_cli() -> None:
                 events = parse_actions(line, confidence=1.0)
                 if not events:
                     print("認識できません。コマンド: q / n / w <席> / r <席> <金額>、"
-                          "または読み上げ文（例: チェック / シート3 コール / ベット 500）")
+                          "または読み上げ文（例: チェック / シート3 コール / ベット 500 / 600）")
                 for ev in events:
                     audio_q.put(ev)
-                    print(f"  → {ev.action}"
-                          + (f" {ev.amount}" if ev.amount else "")
-                          + (f" (席{ev.seat})" if ev.seat else ""))
+                    print(f"  → {describe_event(ev)}")
 
     except (KeyboardInterrupt, EOFError):
         pass
