@@ -26,6 +26,13 @@ class RFIDEvent:
     # 配り直しで差し替えた前の札（カード名。ADR-0058）。席ならその席の手札のうちこの札を置き換え、
     # ボードなら同じ board_index の札を置き換える。None = 通常の配布（追加）。
     replaces: Optional[str] = None
+    # 種類（2026-09-25, フォールドは札の離脱で決める = オーナー決定）。"card" = 札を読んだ（従来）。
+    # 以下は engine が席の在否から作って記録する（replay で同じ判断を再現するため）:
+    # "leave" = 席の札が離れたまま戻らない / "muck" = 席の札が卓の中央を通過 / "return" = 離れた札が
+    # 戻った（それまでフォールドではない）/ "confirm" = 最後の 1 人を残すフォールドを確定。
+    kind: str = "card"
+    # "leave" / "muck" の札が離れた時刻（`timestamp` は engine がそれを反映した時刻 = replay の順序）。
+    observed_at: Optional[float] = None
 
 
 @dataclass

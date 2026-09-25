@@ -5,7 +5,10 @@ import math
 import queue
 import threading
 import time
+import wave
+from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Optional
 
 from audio.recognizer import WhisperTranscriber, is_prompt_echo, parse_actions
@@ -24,6 +27,9 @@ _MAX_BUFFER_SECONDS = 5.0
 _MIN_BUFFER_SECONDS = 0.15
 # 「短すぎて捨てた」を報告する下限（これ未満はチップの音などの一瞬の音として黙って捨てる）
 _REPORT_DROP_MIN_SECONDS = 0.08
+# 発話が始まる前の音も認識に回す秒数。有音ゲートを越える前の語頭（「ロッピャク」の「ロ」など小さい
+# 子音）が切れないように（店舗の実測で短い語が崩れていた, 設計監査 2026-09-25）。
+_PREROLL_SECONDS = 0.3
 # 推論待ちがこの件数を超えたら WARN する（捨てはしない。認識が発話に追いつかないときは
 # 遅れても全部処理する = 記録を落とさない方を取る, ADR-0061）。
 _BACKLOG_WARN = 20
@@ -47,6 +53,7 @@ class Transcript:
     utterance_start_ts: Optional[float]    # 話し始めの時刻（unix 秒）
     heard_at: float                        # 文字になった時刻（unix 秒）
     noise: bool = False                    # 雑音への幻聴（プロンプトの繰り返し）として捨てた（ADR-0063）
+    audio_file: Optional[str] = None       # 保存した発話の音声（`audio_dir` があるとき, ファイル名）
 
 
 def describe_events(events) -> str:
@@ -125,6 +132,7 @@ class AudioThread(threading.Thread):
         speech_rms: float = _SILENCE_RMS_THRESHOLD,
         beam_size: int = 5,
         temperature_fallback: bool = False,
+        audio_dir: Optional[Path] = None,
     ) -> None:
         """
         Args:
@@ -138,6 +146,8 @@ class AudioThread(threading.Thread):
                          発話は認識に回さない（ハンドの間の会話で認識待ちがたまらないように）。None なら常に聞く。
             speech_rms: 有音とみなす RMS（config `audio.speech_rms`）。離れた席の会話を拾うなら上げる。
             beam_size / temperature_fallback: `WhisperTranscriber` に渡す（config `audio.*`）。
+            audio_dir: 認識に回した発話の音声を WAV で保存するフォルダ（config `audio.save_audio`）。
+                         聞き違いの原因（語頭の切れ・音量・雑音）を店舗のデータで確かめるため。None なら保存しない。
         """
         super().__init__(daemon=True, name="AudioThread")
         self._audio_queue = audio_queue
@@ -154,6 +164,10 @@ class AudioThread(threading.Thread):
         # 推論中の件数（0/1）と、発話を切り出している最中か。`backlog()` が待ちと合わせて返す。
         self._inferring = 0
         self._capturing = False
+        # 推論中・切り出し中の発話の話し始め（`oldest_pending_start` が返す）
+        self._inferring_start: Optional[float] = None
+        self._capture_start: Optional[float] = None
+        self._audio_dir = Path(audio_dir) if audio_dir is not None else None
         self._transcriber = (
             transcriber if transcriber is not None
             else WhisperTranscriber(model_size=model_size, language=language,
@@ -175,6 +189,20 @@ class AudioThread(threading.Thread):
         CLI が `n` / `w` などを打たれたとき、先に言われた発話を追い越さないよう待つのに使う。
         """
         return self._chunk_queue.qsize() + self._inferring + (1 if self._capturing else 0)
+
+    def oldest_pending_start(self) -> Optional[float]:
+        """まだアクションになっていない発話のうち、一番早い話し始めの時刻（無ければ None）。
+
+        engine が RFID の札の離脱を反映する前に、それより前に話された発話を先に反映するために使う
+        （認識は数秒遅れる。ショーダウンで前に出した札をフォールドと取り違えないように）。
+        """
+        starts: list[float] = []
+        with self._chunk_queue.mutex:
+            starts.extend(item[1] for item in self._chunk_queue.queue if item is not None)
+        for start in (self._inferring_start, self._capture_start):
+            if start is not None:
+                starts.append(start)
+        return min(starts) if starts else None
 
     @property
     def asr_ready(self) -> bool:
@@ -250,7 +278,10 @@ class AudioThread(threading.Thread):
         voiced = False
         utterance_start_ts: Optional[float] = None
         in_play = False  # この発話のあいだに一度でもプレー中だったか（ADR-0063）
-        prev_chunk: Optional[bytes] = None  # 発話立ち上がりの取りこぼし防止の 1 チャンク pre-roll
+        # 発話の立ち上がりの取りこぼしを防ぐ pre-roll（直前 `_PREROLL_SECONDS` 秒ぶんのチャンク）
+        preroll: deque[bytes] = deque(
+            maxlen=max(1, math.ceil(_PREROLL_SECONDS * self._sample_rate / chunk_size))
+        )
         silence_chunks = 0
         silence_threshold_chunks = max(1, int(self._sample_rate / chunk_size * 0.5))  # 約0.5秒
         max_buffer_samples = int(_MAX_BUFFER_SECONDS * self._sample_rate)
@@ -282,6 +313,7 @@ class AudioThread(threading.Thread):
             utterance_start_ts = None
             silence_chunks = 0
             in_play = False
+            self._capture_start = None
 
         while not self._stop_event.is_set():
             try:
@@ -306,12 +338,14 @@ class AudioThread(threading.Thread):
                 silence_chunks = 0
                 voiced_samples += len(data) // 2
                 if not voiced:
-                    # 発話の開始: pre-roll（直前チャンク）から取り込み、開始時刻を記録。
+                    # 発話の開始: pre-roll（直前のチャンク）から取り込み、開始時刻を記録。
                     voiced = True
                     utterance_start_ts = now - (len(data) // 2) / self._sample_rate
-                    if prev_chunk is not None:
-                        buffer.append(prev_chunk)
-                        buffered_samples += len(prev_chunk) // 2
+                    self._capture_start = utterance_start_ts
+                    for chunk in preroll:
+                        buffer.append(chunk)
+                        buffered_samples += len(chunk) // 2
+                    preroll.clear()
             else:
                 silence_chunks += 1
 
@@ -328,7 +362,8 @@ class AudioThread(threading.Thread):
             self._capturing = voiced
             # 有音ゲート: 発話が始まるまでバッファは溜めない（無音を推論に送らない）。
 
-            prev_chunk = data
+            if not voiced:
+                preroll.append(data)
 
         flush()  # 停止時に取り残しがあれば送る
         self._capturing = False
@@ -355,10 +390,12 @@ class AudioThread(threading.Thread):
                 break
             audio_bytes, utterance_start_ts = item
             self._inferring = 1
+            self._inferring_start = utterance_start_ts
             try:
                 self._process_chunk(audio_bytes, utterance_start_ts)
             finally:
                 self._inferring = 0
+                self._inferring_start = None
 
     def _process_chunk(
         self, audio_bytes: bytes, utterance_start_ts: Optional[float] = None
@@ -370,6 +407,7 @@ class AudioThread(threading.Thread):
         """
         try:
             started = time.time()
+            audio_file = self._save_audio(audio_bytes, utterance_start_ts or started)
             text, confidence = self._transcriber.transcribe_with_confidence(audio_bytes)
             heard_at = time.time()
             if not text:
@@ -391,7 +429,7 @@ class AudioThread(threading.Thread):
                         text=text, confidence=confidence, events=events,
                         audio_sec=len(audio_bytes) / 2 / self._sample_rate,
                         infer_sec=infer_sec, utterance_start_ts=utterance_start_ts,
-                        heard_at=heard_at, noise=noise,
+                        heard_at=heard_at, noise=noise, audio_file=audio_file,
                     ))
                 except Exception:
                     logger.exception("on_transcript callback failed")
@@ -399,3 +437,20 @@ class AudioThread(threading.Thread):
                 self._audio_queue.put(event)
         except Exception:
             logger.exception("Error in _process_chunk (chunk size=%d bytes)", len(audio_bytes))
+
+    def _save_audio(self, audio_bytes: bytes, started_at: float) -> Optional[str]:
+        """認識に回す発話を WAV で保存し、ファイル名を返す（`audio_dir` が無ければ何もしない）。"""
+        if self._audio_dir is None:
+            return None
+        name = f"{int(started_at * 1000)}.wav"
+        try:
+            self._audio_dir.mkdir(parents=True, exist_ok=True)
+            with wave.open(str(self._audio_dir / name), "wb") as out:
+                out.setnchannels(1)
+                out.setsampwidth(2)
+                out.setframerate(self._sample_rate)
+                out.writeframes(audio_bytes)
+        except OSError:
+            logger.exception("発話の音声を保存できませんでした: %s", name)
+            return None
+        return name

@@ -65,6 +65,11 @@ def event_to_envelope(event: RecordableEvent) -> dict:
         # 配り直しの差し替え（ADR-0058, schema 0.4 additive）。通常の配布では省略 = 旧 replay 互換。
         if event.replaces:
             envelope["replaces"] = event.replaces
+        # 席の札の離脱・戻り（フォールドの判断, schema 0.5 additive）。札の読み取りでは省略。
+        if event.kind != "card":
+            envelope["kind"] = event.kind
+        if event.observed_at is not None:
+            envelope["observed_at"] = event.observed_at
         return envelope
     if isinstance(event, CameraEvent):
         return {

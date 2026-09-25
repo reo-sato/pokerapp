@@ -277,6 +277,22 @@ class PokerkitGameState:
 
     # ――― アクション適用 ―――
 
+    def snapshot(self) -> dict:
+        """いまの状態の複製（札の離脱で入れたフォールドを取り消して組み直すため）。"""
+        return copy.deepcopy(self.__dict__)
+
+    def restore(self, snapshot: dict) -> None:
+        """`snapshot()` の時点に戻す（同じオブジェクトのまま = 参照している側はそのまま使える）。"""
+        self.__dict__.clear()
+        self.__dict__.update(copy.deepcopy(snapshot))
+
+    def seats_to_act(self) -> list[int]:
+        """このベッティングラウンドでまだ行動する席（手番の順。先頭が actor）。"""
+        st = self._state
+        if st is None or not self._hand_active:
+            return []
+        return [self._idx_to_seat[i] for i in st.actor_indices]
+
     def apply_action(self, seat: int, action: str, amount: int = 0) -> None:
         st = self._state
         if st is None or not self._hand_active:

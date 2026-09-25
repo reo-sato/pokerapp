@@ -128,3 +128,44 @@ M5 ゲート設定ごとの幻聴率 / M6 認識時間と発話の長さ / M7 �
 
 中期: 事後推定（ADR-0056）を正本に、表示は暫定 ⊕ 推定 ⊕ 訂正、要確認を構造（不明な額・補ったアクション・
 候補の差）から付ける、音の近さによる照合。
+
+## 実装（オーナーの回答を受けて, 同日）
+
+オーナーの回答: 手番でない席の離脱 = 前の人の聞き落とし / 離脱 3 秒でフォールド / 発話の音声を保存してよい /
+範囲は「フォールドを札の離脱で」「記録の完全化」「語頭の取りこぼし対策」（ストリートの同期は今回入れない）。
+追加の指示: 札が戻って再検知されたら少なくともその時刻まではフォールドではない / 手番前に誤ってフォールドした
+場合はたいてい札が再検知される / 音声のフォールドはショーダウン後のアウトオブポジション等を除いて補助に使って
+よい / 見せずにマックしたらディーラーが「フォールド」と言う / ショーダウンは札を前に出すので必ずリーダーから
+離れる（最初に離れた人をマックにしてはいけない）。監査の「手番まで待つ」「ショーダウンを在席で判定」は、
+この指示で採らなかった。
+
+### Changed files
+
+- `integration/engine.py`: `rfid_folds` / `fold_absent_sec` / `speech_pending_since`。`_poll_departures`（在否 →
+  離脱・中央の通過・戻り）、`_apply_departures_before`（発話の前に、それより前の離脱を入れる）、
+  `_apply_idle_departures`（手番の人の離脱だけ）、`_run_input` / `_apply_leave` / `_resolve_departures`（手番の人
+  はフォールド、手番より先の席の離脱は間の人をチェック / コールで補う = `implied`）、`_fold_departed`（チェック
+  できるときはチェック + 勝敗の対象から外す）、`_handle_fold_word`、`_foldout_pending` + `_confirm_foldout` /
+  `_check_foldout_timeout` / `_showdown_after_foldout`、`_retract_departure`（札の離脱を入れる前の状態に戻して
+  以降の入力を流し直す。流し直しの間は表示を止め、終わってから組み直した記録を出す）。
+- `core/events.py`: `RFIDEvent.kind`（card / leave / muck / return / confirm）・`observed_at`。
+  `output/event_recorder.py` / `integration/replay.py`（`rfid_folds`）/ schema `reconstruction_event` 0.5。
+- `core/poker_engine.py`: `snapshot` / `restore` / `seats_to_act`。
+- `audio/recorder.py`: プリロール 0.3 秒、`audio_dir`（WAV 保存）、`oldest_pending_start`、`Transcript.audio_file`。
+  `output/transcript_log.py`（新規）。`main.py`: transcripts.jsonl・`audio.save_audio`・`_rfid_folds_enabled`・
+  CLI の出所表示（札が離れた / 中央を通過 / 補完）。`config_default.json` に `engine.rfid_folds` /
+  `fold_absent_sec` / `audio.save_audio`。
+
+### Tests
+
+`tests/test_rfid_folds.py`（18: 離脱・覗き見・中央の通過・音声のフォールド・2 ハンド目の聞き落とし・前の
+ストリートの離脱・戻りで組み直し・ショーダウン・最後のフォールドの確定 / 取り消し・発話との順序・replay の一致・
+schema）、`tests/test_audio_records.py`（4）。全体 1515 passed / 5 skipped、ruff clean。
+
+### Remaining gaps
+
+- 札を手に持ったまま行動する客、配った直後に札を持ち上げたままの客は、戻るまで誤ったフォールド・補完が残る
+  （戻れば組み直す）。一度も席で読めない客は音声の「フォールド」でだけ決まる。
+- 最後のコールを聞き落としてショーダウンで札を前に出すと、「ショーダウン」と聞こえない限りフォールドとして
+  確定する（残った人の札も離れたら要確認）。
+- ストリートの同期（次のストリートの札で前のラウンドを閉じる）は未実装。

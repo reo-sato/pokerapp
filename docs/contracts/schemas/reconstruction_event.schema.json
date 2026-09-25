@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pokerapp.local/contracts/reconstruction_event.schema.json",
   "title": "ReconstructionEvent",
-  "version": "0.4",
+  "version": "0.5",
   "description": "R1 (ADR-0010): 記録される生センサーイベントの envelope。AudioEvent / RFIDEvent / CameraEvent を type で判別する discriminated union。camera frame は除外。seat / confidence は audio の additive (ADR-0009, R3) で optional。0.2 (ADR-0047/0048, additive): audio に utterance_start_ts（発話開始時刻, 照合窓の始端）と parse_flags（パース曖昧性）を追加（既定値のとき省略 = 旧 replay 互換）。0.3 (ISSUE-0032, additive): audio に position（読み上げられたポジション名）を追加。0.4 (ADR-0058, additive): rfid に replaces（配り直しで差し替えた前の札）を追加（通常の配布では省略）。詳細は docs/contracts/event-replay.md §3。",
   "type": "object",
   "additionalProperties": false,
@@ -24,7 +24,9 @@
     "role": {"enum": ["seat", "board"]},
     "board_index": {"type": ["integer", "null"], "minimum": 1, "maximum": 5},
     "raw_tag_id": {"type": ["string", "null"]},
-    "replaces": {"type": ["string", "null"], "description": "配り直しで差し替えた前の札（カード名, ADR-0058 additive）。席ならその席の手札のこの札を、ボードなら同じ board_index の札を置き換える。省略 = 通常の配布。"}
+    "replaces": {"type": ["string", "null"], "description": "配り直しで差し替えた前の札（カード名, ADR-0058 additive）。席ならその席の手札のこの札を、ボードなら同じ board_index の札を置き換える。省略 = 通常の配布。"},
+    "kind": {"enum": ["card", "leave", "muck", "return", "confirm"], "description": "rfid の種類（0.5 additive, フォールドは席の札の離脱で決める = オーナー決定 2026-09-25）。省略 = card（札を読んだ）。leave = 席の札が離れたまま戻らない / muck = 席の札が卓の中央を通過 / return = 離れた札が戻った（それまでフォールドではない）/ confirm = 最後の 1 人を残すフォールドを確定。leave 以降は engine が席の在否から作って記録する。"},
+    "observed_at": {"type": ["number", "null"], "description": "leave / muck の札が離れた時刻（0.5 additive）。timestamp は engine がそれを反映した時刻 = replay の順序。"}
   },
   "allOf": [
     {

@@ -65,6 +65,8 @@ def event_from_envelope(d: dict) -> Event:
             seat=d.get("seat"), timestamp=d["timestamp"], raw_tag_id=d.get("raw_tag_id") or "",
             board_index=d.get("board_index"),
             replaces=d.get("replaces"),   # ADR-0058 additive（旧 events.jsonl には無い）
+            kind=d.get("kind") or "card",           # 札の離脱・戻り（2026-09-25 additive）
+            observed_at=d.get("observed_at"),
         )
     if t == "camera":
         return CameraEvent(seat=d["seat"], timestamp=d["timestamp"])
@@ -93,6 +95,7 @@ def replay_events(
     out_dir: str | Path,
     auto_new_hand: bool = False,
     auto_winner: bool = False,
+    rfid_folds: bool = False,
 ) -> list[HandSummary]:
     """Event 列を timestamp 昇順で再構築し、確定した HandSummary 群を返す。
 
@@ -103,6 +106,7 @@ def replay_events(
     `auto_new_hand` / `auto_winner`（ADR-0062, 既定 False）: 手札の配布でハンドを始め、勝者を自動で決めた
     セッション（店舗の既定）を再生するときに True にする。replay は発話の認識待ちを持たないので、
     配布を検出した時点で新しいハンドを始める。
+    `rfid_folds`: フォールドを札の離脱で決めたセッション（記録された leave / return / confirm で再現する）。
     """
     gs = create_game_state(backend, players, sb, bb)
     json_writer = JsonWriter(out_dir, session_id)
@@ -118,6 +122,7 @@ def replay_events(
         stop_event=threading.Event(),
         auto_new_hand=auto_new_hand,
         auto_winner=auto_winner,
+        rfid_folds=rfid_folds,
     )
 
     for ev in sorted(events, key=lambda e: (e.timestamp, _ORDER[type(e)])):
@@ -140,7 +145,7 @@ def replay_fixture(case_dir: str | Path, out_dir: str | Path) -> list[HandSummar
     """`<case_dir>/{setup.json, events.jsonl}` を読み replay する。
 
     setup.json = {"backend", "sb", "bb", "session_id", "players":[{"seat","name","stack"},...]}。
-    任意で "auto_new_hand" / "auto_winner"（ADR-0062, 既定 false）。
+    任意で "auto_new_hand" / "auto_winner"（ADR-0062, 既定 false）/ "rfid_folds"（札の離脱でフォールド）。
     """
     case_dir = Path(case_dir)
     setup = json.loads((case_dir / "setup.json").read_text(encoding="utf-8"))
@@ -158,4 +163,5 @@ def replay_fixture(case_dir: str | Path, out_dir: str | Path) -> list[HandSummar
         out_dir=out_dir,
         auto_new_hand=bool(setup.get("auto_new_hand", False)),
         auto_winner=bool(setup.get("auto_winner", False)),
+        rfid_folds=bool(setup.get("rfid_folds", False)),
     )

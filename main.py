@@ -197,7 +197,8 @@ def _rfid_tracking_kwargs(rfid_cfg: dict) -> dict:
     }
 
 
-def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, listen_gate=None):
+def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, listen_gate=None,
+                       audio_dir=None):
     """config.audio.enabled が true（既定）なら AudioThread を返す。false なら None。
 
     false はマイクを繋がない実機テスト（RFID のカード読み取りだけを見る / ダミーアクションを
@@ -205,6 +206,7 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, l
     通して AudioEvent にするので、音声と同じ語彙・同じ経路で進行できる。
     `on_transcript` は聞き取った文ごとに呼ばれる（CLI の表示, ADR-0060）。
     `listen_gate` はプレー中だけ set される Event（ハンドの間の発話は認識に回さない, ADR-0063）。
+    `audio_dir` は発話の音声を WAV で保存するフォルダ（`audio.save_audio` のとき）。
     """
     audio_cfg = cfg.get("audio", {})
     if not audio_cfg.get("enabled", True):
@@ -224,6 +226,7 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, l
         speech_rms=float(audio_cfg.get("speech_rms", _SILENCE_RMS_THRESHOLD)),
         beam_size=int(audio_cfg.get("beam_size", 5)),
         temperature_fallback=bool(audio_cfg.get("temperature_fallback", False)),
+        audio_dir=audio_dir,
     )
 
 
@@ -369,7 +372,18 @@ def _auto_hand_kwargs(cfg: dict, audio_thread) -> dict:
         "auto_new_hand": bool(engine_cfg.get("auto_new_hand", True)),
         "auto_winner": bool(engine_cfg.get("auto_winner", True)),
         "speech_backlog": audio_thread.backlog if audio_thread is not None else None,
+        "speech_pending_since": audio_thread.oldest_pending_start if audio_thread is not None else None,
+        "fold_absent_sec": float(engine_cfg.get("fold_absent_sec", 3.0)),
     }
+
+
+def _rfid_folds_enabled(cfg: dict, seat_presence) -> bool:
+    """フォールドを席の札の離脱で決めるか（オーナー決定 2026-09-25, `engine.rfid_folds` 既定 true）。
+
+    席の在否が取れる RFID（PC/SC の RFIDThread）があるときだけ。無ければ従来どおり音声の「フォールド」を
+    次の手番の人に付ける（キーボードだけの進行も止めない）。
+    """
+    return bool(cfg.get("engine", {}).get("rfid_folds", True)) and seat_presence is not None
 
 
 def _print_notice(message: str) -> None:
@@ -422,11 +436,18 @@ def run_cli() -> None:
             # 黙って捨てず、何が保留されたかを見せる（ゲーム状態は変わっていない）。
             print(f"  [未適用] {record.action} ({record.reason})  ← 状態は変わっていません")
             return
+        # どこから決めたか（札の離脱 / 聞き取れなかったとみて補った）
+        origin = {
+            "rfid_departure": "  ← 札が離れた",
+            "rfid_muck": "  ← 札が中央を通過",
+            "implied": "  ← 聞き取れなかったとみて補完",
+        }.get(getattr(record, "actor_source", None), "")
         print(
             f"  [{record.street}] 席{record.seat}({record.player_name}) "
             f"{record.action} {record.amount or ''}"
             f"  pot={record.pot_after}"
             + (" [要確認]" if record.needs_review else "")
+            + origin
         )
 
     cam_cfg = cfg.get("camera", {})
@@ -441,8 +462,19 @@ def run_cli() -> None:
               "（初回はダウンロードで数分かかります）", flush=True)
         loading_since = _time.time()
     listen_gate = _make_listen_gate(cfg)
-    audio_thread = _make_audio_thread(cfg, audio_q, stop_event, on_transcript=_print_transcript,
-                                      listen_gate=listen_gate)
+    # 聞き取った発話はすべて記録する（読めなかったもの・雑音も）。音声は audio.save_audio のときだけ保存。
+    from output.transcript_log import TranscriptLog
+
+    transcript_log = TranscriptLog(Path(session_cfg["log_dir"]) / f"{session_id}.transcripts.jsonl")
+
+    def on_transcript(transcript):
+        _print_transcript(transcript)
+        transcript_log.write(transcript)
+
+    audio_dir = (Path(session_cfg["log_dir"]) / "audio" / session_id
+                 if audio_cfg.get("save_audio", False) else None)
+    audio_thread = _make_audio_thread(cfg, audio_q, stop_event, on_transcript=on_transcript,
+                                      listen_gate=listen_gate, audio_dir=audio_dir)
     if audio_thread is None:
         print("音声入力は無効です (audio.enabled=false)。"
               "アクションはキーボードから読み上げ文で投入してください。")
@@ -536,6 +568,7 @@ def run_cli() -> None:
         on_card_correction=on_card_correction,
         seat_cards_absent_since=seat_absent_since,
         seat_presence=seat_presence,
+        rfid_folds=_rfid_folds_enabled(cfg, seat_presence),
         board_presence=board_presence,
         table_state_writer=table_state_writer,
         control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
@@ -562,6 +595,11 @@ def run_cli() -> None:
     if auto["auto_new_hand"] and rfid_thread is not None:
         print("手札を配ると新しいハンドが始まります（2 席以上に 2 枚ずつ置いたとき。n は不要）。"
               "音声はプレー中だけ聞き取ります。")
+    if _rfid_folds_enabled(cfg, seat_presence):
+        print(f"フォールドは席の札で決めます（{auto['fold_absent_sec']:.0f} 秒離れたまま / 卓の中央を通過）。"
+              "札が戻れば取り消します。音声の「フォールド」は次の手番の人には付けません。")
+    if audio_dir is not None:
+        print(f"発話の音声を保存しています: {audio_dir}")
     if auto["auto_winner"]:
         print("勝者: ほかが全員フォールドしたら自動。ショーダウンは、見せずにマックしたら「フォールド」"
               "（アウトオブポジションから順）、全員見せたら「ハンド終了」か次の手札で手札から判定。"
@@ -847,6 +885,7 @@ def run_gui() -> None:
         on_card_correction=on_card_correction,
         seat_cards_absent_since=seat_absent_since,
         seat_presence=seat_presence,
+        rfid_folds=_rfid_folds_enabled(cfg, seat_presence),
         board_presence=board_presence,
         table_state_writer=table_state_writer,
         control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),

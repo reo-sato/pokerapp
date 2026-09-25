@@ -23,6 +23,8 @@
     "_speech_rms_comment": "有音とみなす入力レベル（RMS）。離れた席の会話まで聞き取ってしまうなら上げる（`python tools/audio_check.py level` でディーラーの声と周りの音のレベルを見て決める）。",
     "beam_size": 5,
     "temperature_fallback": false,
+    "save_audio": false,
+    "_save_audio_comment": "true = 認識に回した発話の音声を logs/audio/<セッション>/ に WAV で保存する（聞き違いの原因を確かめるため。卓の会話も入るのでテスト中だけ）。聞き取った文は音声の保存と関係なく logs/<セッション>.transcripts.jsonl にすべて残る。",
     "_temperature_fallback_comment": "true = 自信の低い書き起こしを温度を上げて最大 5 回やり直す（faster-whisper の既定）。雑音では毎回やり直しになり認識が数分遅れたので既定は false。beam_size を下げると速くなる（精度は少し下がる）。",
     "language": "ja",
     "initial_prompt": "ポーカーのディーラーがアクションを読み上げています。シート3 レイズ 2千、コール、チェック、フォールド、オールイン、ショーダウン、ウィナー、ハンド開始、チョップ などの言葉が含まれます。",
@@ -92,6 +94,9 @@
     "auto_new_hand": true,
     "_auto_new_hand_comment": "ADR-0062: 手札が 2 席以上に配られたら新しいハンドを始める（n /「ハンド開始」は不要。前のハンドが確定していなければ先に確定する）。false = 従来どおり n /「ハンド開始」だけ。",
     "auto_winner": true,
+    "rfid_folds": true,
+    "_rfid_folds_comment": "フォールドを席の札の離脱で決める（オーナー決定 2026-09-25, 席の在否が取れる PC/SC の RFID のとき）。札が fold_absent_sec 秒離れたまま / 卓の中央を通過 → フォールド、戻れば取り消す。手番でない席の離脱は前の人のアクションの聞き落としとみて補う（要確認）。音声の「フォールド」は次の手番の人に付けない（ショーダウンの見せないマックは従来どおり）。",
+    "fold_absent_sec": 3.0,
     "_auto_winner_comment": "ADR-0062: 勝者を自動で決める（pokerkit のみ）。ほかが全員フォールドしたら残った人。ベッティング後の「フォールド」はショーダウンのマック（アウトオブポジションから順、見せずにマックした人は手札が強くても負け）。誰もマックしなければ「ハンド終了」か次の配布のときに手札とボードで判定。false = 従来どおり w /「ウィナー」だけ。"
   },
   "session_layer": {
