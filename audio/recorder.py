@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from audio.recognizer import WhisperTranscriber, is_prompt_echo, parse_actions
+from audio.recognizer import WhisperTranscriber, is_implausibly_long, is_prompt_echo, parse_actions
 from core.event_queue import EventQueue
 from core.events import AudioEvent
 
@@ -54,6 +54,7 @@ class Transcript:
     heard_at: float                        # 文字になった時刻（unix 秒）
     noise: bool = False                    # 雑音への幻聴（プロンプトの繰り返し）として捨てた（ADR-0063）
     audio_file: Optional[str] = None       # 保存した発話の音声（`audio_dir` があるとき, ファイル名）
+    no_speech: bool = False                # 声が無い音（VAD）なので Whisper にかけなかった（text は空）
 
 
 def describe_events(events) -> str:
@@ -133,6 +134,7 @@ class AudioThread(threading.Thread):
         beam_size: int = 5,
         temperature_fallback: bool = False,
         audio_dir: Optional[Path] = None,
+        vad_threshold: float = 0.5,
     ) -> None:
         """
         Args:
@@ -145,7 +147,7 @@ class AudioThread(threading.Thread):
             listen_gate: プレー中だけ set される Event（ADR-0063）。一度も set されていない間に話された
                          発話は認識に回さない（ハンドの間の会話で認識待ちがたまらないように）。None なら常に聞く。
             speech_rms: 有音とみなす RMS（config `audio.speech_rms`）。離れた席の会話を拾うなら上げる。
-            beam_size / temperature_fallback: `WhisperTranscriber` に渡す（config `audio.*`）。
+            beam_size / temperature_fallback / vad_threshold: `WhisperTranscriber` に渡す（config `audio.*`）。
             audio_dir: 認識に回した発話の音声を WAV で保存するフォルダ（config `audio.save_audio`）。
                          聞き違いの原因（語頭の切れ・音量・雑音）を店舗のデータで確かめるため。None なら保存しない。
         """
@@ -174,7 +176,8 @@ class AudioThread(threading.Thread):
         self._transcriber = (
             transcriber if transcriber is not None
             else WhisperTranscriber(model_size=model_size, language=language,
-                                    beam_size=beam_size, temperature_fallback=temperature_fallback)
+                                    beam_size=beam_size, temperature_fallback=temperature_fallback,
+                                    vad_threshold=vad_threshold)
         )
         # 推論待ちの (発話バイト列, 発話開始時刻)。None は worker 終了の sentinel。
         # 上限なし: 認識が遅れても発話を捨てない（プレーの切れ目で追いつく, ADR-0061）。
@@ -411,36 +414,56 @@ class AudioThread(threading.Thread):
         """
         try:
             started = time.time()
+            audio_sec = len(audio_bytes) / 2 / self._sample_rate
             audio_file = self._save_audio(audio_bytes, utterance_start_ts or started)
-            text, confidence = self._transcriber.transcribe_with_confidence(audio_bytes)
+            recognize = getattr(self._transcriber, "recognize", None)
+            if callable(recognize):
+                result = recognize(audio_bytes)
+                text, confidence, no_speech = result.text, result.confidence, result.no_speech
+            else:   # テストの差し替え（`transcribe_with_confidence` だけを持つ）
+                text, confidence = self._transcriber.transcribe_with_confidence(audio_bytes)
+                no_speech = False
             heard_at = time.time()
+            infer_sec = heard_at - started
+            if no_speech:
+                # 声が無い音（札を混ぜる音など）は Whisper にかけていない。記録にだけ残す（CLI には出さない）。
+                logger.info("声ではない音 %.1f 秒 — 聞き取りに回さず（VAD）", audio_sec)
+                self._report(Transcript(
+                    text="", confidence=None, events=(), audio_sec=audio_sec, infer_sec=infer_sec,
+                    utterance_start_ts=utterance_start_ts, heard_at=heard_at, noise=True,
+                    audio_file=audio_file, no_speech=True,
+                ))
+                return
             if not text:
                 return
-            noise = is_prompt_echo(text)
+            noise = is_prompt_echo(text) or is_implausibly_long(text, audio_sec)
             # 続けて言った複数のアクションは言った順に分ける（ADR-0061）。雑音への幻聴は読まない（ADR-0063）。
             events = () if noise else tuple(parse_actions(
                 text, confidence=confidence, utterance_start_ts=utterance_start_ts
             ))
-            infer_sec = heard_at - started
             logger.info(
                 "聞き取り: %r (confidence=%s, 推論 %.2f 秒) → %s",
                 text, "-" if confidence is None else f"{confidence:.2f}", infer_sec,
-                "雑音（プロンプトの繰り返し）として無視" if noise else describe_events(events),
+                "雑音（聞き違い）として無視" if noise else describe_events(events),
             )
-            if self._on_transcript is not None:
-                try:
-                    self._on_transcript(Transcript(
-                        text=text, confidence=confidence, events=events,
-                        audio_sec=len(audio_bytes) / 2 / self._sample_rate,
-                        infer_sec=infer_sec, utterance_start_ts=utterance_start_ts,
-                        heard_at=heard_at, noise=noise, audio_file=audio_file,
-                    ))
-                except Exception:
-                    logger.exception("on_transcript callback failed")
+            self._report(Transcript(
+                text=text, confidence=confidence, events=events,
+                audio_sec=audio_sec,
+                infer_sec=infer_sec, utterance_start_ts=utterance_start_ts,
+                heard_at=heard_at, noise=noise, audio_file=audio_file,
+            ))
             for event in events:
                 self._audio_queue.put(event)
         except Exception:
             logger.exception("Error in _process_chunk (chunk size=%d bytes)", len(audio_bytes))
+
+    def _report(self, transcript: Transcript) -> None:
+        if self._on_transcript is None:
+            return
+        try:
+            self._on_transcript(transcript)
+        except Exception:
+            logger.exception("on_transcript callback failed")
 
     def _save_audio(self, audio_bytes: bytes, started_at: float) -> Optional[str]:
         """認識に回す発話を WAV で保存し、ファイル名を返す（`audio_dir` が無ければ何もしない）。"""

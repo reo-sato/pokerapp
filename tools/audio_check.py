@@ -258,10 +258,13 @@ class ListenStats:
     actions: int = 0          # そこから読めたアクション（1 発話に複数あれば複数）
     unreadable: int = 0       # アクションとして読めなかった発話
     dropped: int = 0          # 短すぎて認識に回さなかった音
+    no_speech: int = 0        # 声ではない音（VAD）として Whisper にかけなかった音
     infer_secs: list[float] = field(default_factory=list)
 
     def summary(self) -> str:
         dropped = f"・短すぎて認識しなかった音 {self.dropped} 件" if self.dropped else ""
+        if self.no_speech:
+            dropped += f"・声ではない音 {self.no_speech} 件"
         if not self.heard:
             return "聞き取れた発話はありませんでした。" + dropped
         avg = sum(self.infer_secs) / len(self.infer_secs)
@@ -280,7 +283,10 @@ def format_transcript(t) -> str:
     details.append(f"認識 {t.infer_sec:.1f} 秒")
     if t.utterance_start_ts is not None:
         details.append(f"話し始めから {t.heard_at - t.utterance_start_ts:.1f} 秒")
-    heard = "雑音として無視" if getattr(t, "noise", False) else describe_events(t.events)
+    if getattr(t, "no_speech", False):
+        return (f"  {clock}  （声ではない音 {t.audio_sec:.1f} 秒 — Whisper にかけず。"
+                "言葉なら audio.vad_threshold を下げる）")
+    heard = "雑音（聞き違い）として無視" if getattr(t, "noise", False) else describe_events(t.events)
     return f"  {clock}  「{t.text}」→ {heard}（{'・'.join(details)}）"
 
 
@@ -303,6 +309,10 @@ def _cmd_listen(args: argparse.Namespace) -> int:
 
     def on_transcript(t) -> None:
         with lock:
+            if getattr(t, "no_speech", False):
+                stats.no_speech += 1
+                print(format_transcript(t), flush=True)
+                return
             stats.heard += 1
             stats.actions += len(t.events)
             stats.unreadable += 0 if t.events else 1
@@ -327,6 +337,8 @@ def _cmd_listen(args: argparse.Namespace) -> int:
         speech_rms=float(cfg.get("speech_rms", 300)),
         beam_size=int(cfg.get("beam_size", 5)),
         temperature_fallback=bool(cfg.get("temperature_fallback", False)),
+        vad_threshold=(args.vad_threshold if args.vad_threshold is not None
+                       else float(cfg.get("vad_threshold", 0.5))),
     )
     if not thread.asr_ready:
         error = getattr(thread._transcriber, "load_error", None)  # noqa: SLF001
@@ -383,6 +395,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="音声認識モデル（既定: config の audio.whisper_model。例 small / medium）")
     p_listen.add_argument("--min-speech", type=float, default=None,
                           help="認識に回す最短の有音秒数（既定: config の audio.min_speech_sec、無ければ 0.15）")
+    p_listen.add_argument("--vad-threshold", type=float, default=None,
+                          help="声か（VAD）の閾値。0 で使わない（既定: config の audio.vad_threshold、無ければ 0.5）")
     p_listen.set_defaults(func=_cmd_listen)
     return parser
 

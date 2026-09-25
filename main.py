@@ -227,6 +227,7 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, l
         beam_size=int(audio_cfg.get("beam_size", 5)),
         temperature_fallback=bool(audio_cfg.get("temperature_fallback", False)),
         audio_dir=audio_dir,
+        vad_threshold=float(audio_cfg.get("vad_threshold", 0.5)),
     )
 
 
@@ -241,17 +242,32 @@ def _make_listen_gate(cfg: dict):
     return threading.Event()
 
 
+# 雑音（聞き違い）として捨てた文は、CLI では頭だけ出す（幻聴のループは数百文字になる。全文は transcripts.jsonl）
+_NOISE_SHOWN_CHARS = 20
+
+
 def _print_transcript(transcript) -> None:
-    """聞き取った文とアクションとしての読みを CLI に出す（音声テスト用, ADR-0060）。"""
+    """聞き取った文とアクションとしての読みを CLI に出す（音声テスト用, ADR-0060）。
+
+    声ではない音（VAD で Whisper にかけなかった音）は出さない（記録 transcripts.jsonl にだけ残る）。
+    """
     from audio.recorder import describe_events
 
-    heard = "雑音として無視" if getattr(transcript, "noise", False) else describe_events(transcript.events)
+    if getattr(transcript, "no_speech", False):
+        return
+    text = transcript.text
+    if getattr(transcript, "noise", False):
+        heard = "雑音（聞き違い）として無視"
+        if len(text) > _NOISE_SHOWN_CHARS:
+            text = text[:_NOISE_SHOWN_CHARS] + "…"
+    else:
+        heard = describe_events(transcript.events)
     lag = ""
     if transcript.utterance_start_ts is not None:
         delay = transcript.heard_at - transcript.utterance_start_ts
         if delay >= 10:
             lag = f"  （{delay:.0f} 秒前の発話）"
-    print(f"  [聞き取り] 「{transcript.text}」→ {heard}{lag}", flush=True)
+    print(f"  [聞き取り] 「{text}」→ {heard}{lag}", flush=True)
 
 
 def _wait_for_backlog(audio_thread, timeout_sec: float = 60.0) -> None:

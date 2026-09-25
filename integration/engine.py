@@ -383,6 +383,8 @@ class IntegrationThread(threading.Thread):
         self._deal_detected_at: Optional[float] = None  # 検出した時刻（engine の時計）
         # 配布の検出で RFID をリセット済み（ハンド開始時に二重にリセットしない）
         self._rfid_reset_for_deal = False
+        # 手札が配られる前のボードの札を読まなかった（最初の手札で RFID のボード位置を捨てる）
+        self._board_before_deal = False
         # プレー中か（配布〜確定、または卓が空になるまで）。音声の聞き取りとボードの受付に使う。
         self._listen_gate = listen_gate
         self._in_play = False
@@ -536,6 +538,12 @@ class IntegrationThread(threading.Thread):
             # 手札が配られる前・プレーが終わったあと（シャッフル・片付け）のボードは読まない（ADR-0063）
             logger.debug("プレー中でないボードの札を無視しました: %s (tag=%s)", ev.card, ev.tag_id)
             return
+        elif self._auto_new_hand and self._waiting_for_deal():
+            # 「ハンド開始」/ n で先に始めたハンドで、まだ手札が配られていない = 配る前のウォッシュ。
+            # RFID が振ったボードの位置は、最初の手札が届いたときに捨てる（本物の flop を 1 枚目から数える）。
+            self._board_before_deal = True
+            logger.debug("手札が配られる前のボードの札を無視しました: %s (tag=%s)", ev.card, ev.tag_id)
+            return
         if self._auto_new_hand and self._betting_over() and (
             ev.replaces or ev.board_index not in self._board_positions
             and len(self._board_positions) >= 5
@@ -640,6 +648,8 @@ class IntegrationThread(threading.Thread):
                 )
                 if self._on_rfid_card:
                     self._on_rfid_card(ev)
+                if self._board_before_deal:
+                    self._forget_board_before_deal()
             if moved:
                 self._hand_needs_review = True
             self._show_hole_cards()
@@ -1601,6 +1611,42 @@ class IntegrationThread(threading.Thread):
         """
         return bool(self._current_actions or self._board_positions or self._betting_over())
 
+    def _seat_readers_live(self) -> bool:
+        """この卓の席に RFID のリーダーがつながっているか（live のみ。replay は在否を持たない）。"""
+        if self._seat_presence is None:
+            return False
+        try:
+            snapshot = self._seat_presence() or {}
+        except Exception:  # noqa: BLE001
+            return False
+        return any(seat in snapshot for seat in self._game_seats())
+
+    def _forget_board_before_deal(self) -> None:
+        """配る前にボードのリーダーが読んだ札（ウォッシュ）の位置を、RFID 側でも捨てる。
+
+        RFID はハンドの中でボードの位置を解放しない（ISSUE-0026）ので、捨てないと本物の flop が
+        4 枚目から数えられる。新しいハンドと同じ同期点を使う（engine のボードはまだ空）。
+        """
+        self._board_before_deal = False
+        if self._on_new_hand is None:
+            return
+        try:
+            self._on_new_hand()
+        except Exception:  # noqa: BLE001 — フックの失敗でハンドを止めない
+            logger.exception("on_new_hand hook failed (board before deal)")
+            return
+        logger.info("手札が配られたので、配る前にボードのリーダーが読んだ札の位置を捨てました")
+
+    def _waiting_for_deal(self) -> bool:
+        """配る前に「ハンド開始」/ n で始めたハンドで、まだ手札が 1 枚も届いていないか。
+
+        席のリーダーがあるときだけそう判断する（無い構成では手札が届かないので、ボードを待たせない）。
+        """
+        return (
+            self._hand_open and not any(self._hole_cards.values())
+            and not self._hand_in_play() and self._seat_readers_live()
+        )
+
     def _is_next_deal(self, ev: RFIDEvent) -> bool:
         """この席の札が **次のハンドの配布**か（ADR-0062）。
 
@@ -1733,8 +1779,16 @@ class IntegrationThread(threading.Thread):
         logger.info("プレー中: %s", "はい（聞き取りを再開）" if in_play else "いいえ（次の配布まで音声を聞き流す）")
 
     def _check_table_cleared(self) -> None:
-        """ハンドが確定していなくても、卓に札が無い状態が続いたらプレーは終わったとみなす。"""
+        """ハンドが確定していなくても、卓に札が無い状態が続いたらプレーは終わったとみなす。
+
+        まだ何も起きていないハンド（配る前に「ハンド開始」/ n で始めた・配り直し）の空の卓は片付けでは
+        ない。ここでプレーを終えると、配ったあとのボードの札と声を読まなくなる（店舗の 5 回目の通しテスト:
+        n のあと配るまでの 19 秒で聞き流しに入り、ボードを読まずにショーダウンの札をフォールドにした）。
+        """
         if not (self._in_play and self._hand_open and self._deal_at is None) or self._seat_presence is None:
+            return
+        if not self._hand_in_play():
+            self._table_empty_since = None
             return
         try:
             seats = self._seat_presence() or {}
@@ -2659,6 +2713,7 @@ class IntegrationThread(threading.Thread):
         self._street_marks = {}
         self._streets_synced = set()
         self._silent_mic_warned = False
+        self._board_before_deal = False
         self._set_in_play(True)
         if self._rfid_reset_for_deal:
             self._rfid_reset_for_deal = False   # 配布の検出でリセット済み（ADR-0063）

@@ -23,6 +23,8 @@
     "_speech_rms_comment": "有音とみなす入力レベル（RMS）。離れた席の会話まで聞き取ってしまうなら上げる（`python tools/audio_check.py level` でディーラーの声と周りの音のレベルを見て決める）。",
     "beam_size": 5,
     "temperature_fallback": false,
+    "vad_threshold": 0.5,
+    "_vad_threshold_comment": "声か（Silero VAD）の閾値。声が見つからない音（札を混ぜる音・チップの音）は Whisper にかけない（雑音にプロンプトを繰り返す幻聴と、その 15 秒以上の認識待ちを防ぐ）。短い言葉が「声ではない音」として落ちるなら下げる（0.3 など）。0 で使わない。`python tools/audio_check.py listen` で確かめる。",
     "save_audio": false,
     "_save_audio_comment": "true = 認識に回した発話の音声を logs/audio/<セッション>/ に WAV で保存する（聞き違いの原因を確かめるため。卓の会話も入るのでテスト中だけ）。聞き取った文は音声の保存と関係なく logs/<セッション>.transcripts.jsonl にすべて残る。",
     "_temperature_fallback_comment": "true = 自信の低い書き起こしを温度を上げて最大 5 回やり直す（faster-whisper の既定）。雑音では毎回やり直しになり認識が数分遅れたので既定は false。beam_size を下げると速くなる（精度は少し下がる）。",

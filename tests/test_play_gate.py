@@ -245,6 +245,7 @@ class TestWhisperNoise:
 
         t = WhisperTranscriber.__new__(WhisperTranscriber)
         t._model, t._language, t._beam_size, t._temperature = Model(), "ja", 5, 0.0
+        t._vad_threshold = 0.0
         t.transcribe_with_confidence(b"\x00\x00" * 160)
         assert calls["temperature"] == 0.0 and calls["beam_size"] == 5
         assert calls["condition_on_previous_text"] is False

@@ -381,6 +381,22 @@ def is_prompt_echo(text: str) -> bool:
     ))
 
 
+# 発話の長さで言える文字数の上限（空白を除く）。人は 1 秒に 10 文字も言わない。幻聴のループ（「…ウィナー、
+# ハンド、チェック、フォールド、…」を繰り返す）は 1 秒の音から数十文字が出る（店舗の 5 回目の通しテスト:
+# 3.6 秒の音から 250 文字）。書き起こしを長さの上限で打ち切ったものもここで捨てる（`WhisperTranscriber`）。
+_TEXT_CHARS_BASE = 12
+_TEXT_CHARS_PER_SEC = 12
+
+
+def is_implausibly_long(text: str, audio_sec: float) -> bool:
+    """書き起こしが発話の長さでは言えない量か（雑音への幻聴のループ）。
+
+    切り出した音は語頭の前 0.3 秒と語尾の無音を含むので 1 秒より短くはならない（1 秒として数える）。
+    """
+    chars = len(re.sub(r"\s", "", text))
+    return chars > _TEXT_CHARS_BASE + _TEXT_CHARS_PER_SEC * max(1.0, audio_sec)
+
+
 # 数字だけの発話（「600点」「2千点です」）はベットかレイズ（店のディーラーは語を省いて額だけ言う。店舗の
 # 3 回目の通しテストで「600点」「2千点」がベットだった）。どちらかは engine が状態から決め、額がいまのベット
 # 以下・最小ベット未満なら使わない。額の前後に付いてよいのは下の語だけ — 「ポット 2千点」「残り 1500」
@@ -639,12 +655,30 @@ def parse_action(
     )
 
 
+# 1 発話の書き起こしに使うトークン数の上限 = 基本 + 音の長さ（秒）あたり。人の発話（1 秒に 10 トークン前後）
+# の倍以上を残し、雑音への幻聴のループ（プロンプトの語を 448 トークンまで繰り返して 1 回 15〜18 秒かかった,
+# 店舗の 5 回目の通しテスト）を早く打ち切る。打ち切った書き起こしは `is_implausibly_long` で雑音になる。
+_TOKENS_BASE = 40
+_TOKENS_PER_SEC = 20
+_TOKENS_MAX = 200     # プロンプトと合わせてモデルの上限（448）を超えない
+
+
+@dataclass(frozen=True)
+class Recognition:
+    """1 発話の書き起こし（`WhisperTranscriber.recognize`）。"""
+
+    text: str
+    confidence: Optional[float]
+    no_speech: bool = False     # 声が無い（VAD）ので Whisper にかけなかった
+
+
 class WhisperTranscriber:
     """faster-whisper を使ってマイク音声をテキストに変換するクラス。"""
 
     def __init__(
         self, model_size: str = "medium", language: str = "ja",
         beam_size: int = 5, temperature_fallback: bool = False,
+        vad_threshold: float = 0.5,
     ) -> None:
         """
         Args:
@@ -652,10 +686,14 @@ class WhisperTranscriber:
             temperature_fallback: 自信の低い書き起こしを温度を上げて最大 5 回やり直すか（faster-whisper の
                 既定）。雑音では毎回やり直しになり 1 発話に 10〜80 秒かかって認識が数分遅れたので、
                 既定では行わない（店舗の実測, ADR-0063）。config `audio.temperature_fallback`。
+            vad_threshold: 声か（Silero VAD, faster-whisper に同梱）の閾値。声が見つからない音（札を混ぜる音・
+                チップの音）は Whisper にかけない（雑音にプロンプトを繰り返す幻聴と、その認識待ちを防ぐ）。
+                0 で使わない。config `audio.vad_threshold`。
         """
         self._language = language
         self._beam_size = max(1, int(beam_size))
         self._temperature = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0) if temperature_fallback else 0.0
+        self._vad_threshold = max(0.0, float(vad_threshold))
         # 読み込めなかった理由（CLI / audio_check が表示する）。読み込めたら None。
         self.load_error: Optional[str] = None
         logger.info("Loading Whisper model: %s", model_size)
@@ -688,8 +726,26 @@ class WhisperTranscriber:
     def transcribe_with_confidence(
         self, audio_bytes: bytes
     ) -> tuple[str, Optional[float]]:
-        """PCM16 音声バイト列を (テキスト, 信頼度[0,1]) に変換する。
-        変換失敗・モデル未ロード時は ("", None) を返す（クラッシュしない）。
+        """PCM16 音声バイト列を (テキスト, 信頼度[0,1]) に変換する（`recognize` の後方互換版）。"""
+        result = self.recognize(audio_bytes)
+        return result.text, result.confidence
+
+    def has_speech(self, audio_array) -> bool:
+        """音に声が含まれるか（Silero VAD）。VAD を使わない・使えないときは True（Whisper にかける）。"""
+        if self._vad_threshold <= 0:
+            return True
+        try:
+            from faster_whisper.vad import VadOptions, get_speech_timestamps  # type: ignore[import]
+
+            options = VadOptions(threshold=self._vad_threshold, min_speech_duration_ms=100)
+            return bool(get_speech_timestamps(audio_array, options))
+        except Exception:  # noqa: BLE001 — VAD が動かなければ従来どおり全部かける
+            logger.warning("VAD が使えないので、有音の音をすべて Whisper にかけます", exc_info=True)
+            self._vad_threshold = 0.0
+            return True
+
+    def recognize(self, audio_bytes: bytes) -> Recognition:
+        """PCM16 音声バイト列を書き起こす。変換失敗・モデル未ロード時は空（クラッシュしない）。
 
         入力は 16kHz モノラル PCM16 固定を前提とする（faster-whisper は配列長から
         16kHz を仮定するため sample_rate は受け取らない）。
@@ -699,7 +755,7 @@ class WhisperTranscriber:
         高く出るため、制御語ガードの入力として意味を持つ）。segment が無ければ None。
         """
         if self._model is None:
-            return "", None
+            return Recognition("", None)
         try:
             import math
 
@@ -708,6 +764,10 @@ class WhisperTranscriber:
             audio_array = (
                 np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             )
+            if not self.has_speech(audio_array):
+                return Recognition("", None, no_speech=True)
+            seconds = len(audio_array) / 16000
+            max_new_tokens = min(_TOKENS_MAX, _TOKENS_BASE + math.ceil(_TOKENS_PER_SEC * seconds))
             segments, _ = self._model.transcribe(
                 audio_array,
                 language=self._language,
@@ -715,6 +775,7 @@ class WhisperTranscriber:
                 beam_size=self._beam_size,
                 temperature=self._temperature,
                 condition_on_previous_text=False,
+                max_new_tokens=max_new_tokens,
             )
             texts: list[str] = []
             logprobs: list[float] = []
@@ -736,10 +797,10 @@ class WhisperTranscriber:
                 if no_speech:
                     mean_nsp = sum(no_speech) / len(no_speech)
                     confidence *= max(0.0, 1.0 - mean_nsp)
-            return text, confidence
+            return Recognition(text, confidence)
         except Exception:
             logger.exception("Whisper transcription failed")
-            return "", None
+            return Recognition("", None)
 
 
 # ――― R3: 合法手への射影（apply_corrections, ADR-0009 §5）―――
