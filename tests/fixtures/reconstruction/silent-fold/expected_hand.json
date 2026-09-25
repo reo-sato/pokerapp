@@ -100,7 +100,8 @@
       "actor_source": "spoken_seat",
       "reason": "actor_sensed_over_prior",
       "asr_confidence": 0.85,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "シート1 レイズ 600"
     }
   ],
   "review_required": true

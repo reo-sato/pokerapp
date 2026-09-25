@@ -80,7 +80,8 @@
       "position": "BTN",
       "actor_source": "engine_prior",
       "asr_confidence": 0.8,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "コール"
     }
   ],
   "review_required": false

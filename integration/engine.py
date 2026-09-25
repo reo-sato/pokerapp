@@ -780,6 +780,7 @@ class IntegrationThread(threading.Thread):
             reason=reason,
             asr_confidence=event.confidence,
             apply_ok=False,
+            raw_text=event.raw_text or None,
         )
         if self._hand_open:
             self._hand_needs_review = True
@@ -830,7 +831,7 @@ class IntegrationThread(threading.Thread):
             ))
 
     def _handle_rename_seat(self, event: AudioEvent) -> None:
-        """席替えで席のプレイヤー名を変える（CLI の `seat`, ADR-0059）。名前は `raw_text`。
+        """席替えで席のプレイヤー名を変える（CLI の `name`, ADR-0059）。名前は `raw_text`。
 
         ハンドの途中なら次のハンドの開始時に反映する（ハンドの記録は 1 ハンドの中で名前が
         揃うように。席と player_id の対応も次のハンドから切り替わる）。
@@ -1256,6 +1257,7 @@ class IntegrationThread(threading.Thread):
             reason="+".join(reasons),
             asr_confidence=event.confidence,
             apply_ok=apply_ok,
+            raw_text=event.raw_text or None,
         )
         self._current_actions.append(record)
 

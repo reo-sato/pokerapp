@@ -112,7 +112,8 @@
       "actor_source": "engine_prior",
       "reason": "actor_conflict_capped(sensed=6)",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "シート6 レイズ 600"
     }
   ],
   "review_required": true

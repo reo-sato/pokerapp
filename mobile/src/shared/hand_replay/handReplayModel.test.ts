@@ -14,7 +14,9 @@ import {
   buildReplayModel,
   formatChips,
   formatSigned,
+  heardDetails,
   parseCard,
+  reasonLabels,
   type ReplayHand,
 } from "./handReplayModel";
 
@@ -132,4 +134,41 @@ test("labels and formatters", () => {
   assert.equal(formatSigned(800), "+800");
   assert.equal(formatSigned(-1600), "-1,600");
   assert.equal(formatSigned(0), "±0");
+});
+
+// ――― 音声テスト用の表示 (ADR-0060) ―――
+
+test("reasonLabels: known codes, patterns, and unknown codes", () => {
+  assert.deepEqual(reasonLabels(undefined), []);
+  assert.deepEqual(reasonLabels("check_facing_bet+amount_snapped"), [
+    "ベットがあるのにチェック → コールにした",
+    "金額を出せる額に寄せた",
+  ]);
+  assert.deepEqual(reasonLabels("actor_conflict_capped(sensed=6)"), [
+    "言った席6は手番から遠いので手番の席にした",
+  ]);
+  assert.deepEqual(reasonLabels("raise_illegal_to_call"), ["レイズできない場面 → コールにした"]);
+  assert.deepEqual(reasonLabels("something_new"), ["something_new"]);
+});
+
+test("heardDetails: heard text, correction, and synthesized fold", () => {
+  const spoken = heardDetails({
+    street: "flop", seat: 3, action: "call", amount: 200,
+    raw_text: "シート3 チェック", corrected_from: "check", reason: "check_facing_bet",
+  });
+  assert.equal(spoken.heard, "シート3 チェック");
+  assert.deepEqual(spoken.notes, ["聞き取り チェック → コール", "ベットがあるのにチェック → コールにした"]);
+
+  const synth = heardDetails({ street: "preflop", seat: 2, action: "fold", reason: "synth_silent_fold" });
+  assert.equal(synth.heard, null);
+  assert.deepEqual(synth.notes, ["声のないフォールド（あとで言われた席から補った）"]);
+
+  const remapped = heardDetails({
+    street: "flop", seat: 1, action: "raise", amount: 600,
+    raw_text: "シート1 ベット 600", corrected_from: "bet", reason: "bet_to_raise",
+  });
+  assert.deepEqual(remapped.notes, ["聞き取り ベット → レイズ"]);   // 付け替えは 1 行で足りる
+
+  const plain = heardDetails({ street: "river", seat: 1, action: "check", raw_text: "チェック" });
+  assert.deepEqual(plain, { heard: "チェック", notes: [] });
 });

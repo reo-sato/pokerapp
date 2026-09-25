@@ -21,6 +21,10 @@ export interface ReplayAction {
   stack_after?: number;
   needs_review?: boolean;
   corrected?: boolean; // 訂正オーバーレイ痕 (ADR-0036)
+  // ――― 音声テスト用の表示 (ADR-0060。showHeard のときだけ使う) ―――
+  raw_text?: string; // そのアクションになった発話 (Whisper の書き起こし / CLI で打った読み上げ文)
+  reason?: string; // 補正・合成の理由コード ("+" 区切り, ADR-0047 G2)
+  corrected_from?: string | null; // 補正前に聞き取った action
 }
 
 export interface ReplayPlayer {
@@ -175,6 +179,64 @@ export function buildReplayModel(hand: ReplayHand): ReplayModel {
     potTotal: hand.pot_total ?? null,
     pots: hand.pots ?? [],
   };
+}
+
+/** 補正・合成の理由コード → 短い日本語 (音声テスト用の表示, ADR-0060)。未知のコードはそのまま。 */
+const REASON_LABELS: Record<string, string> = {
+  synth_silent_fold: "声のないフォールド（あとで言われた席から補った）",
+  actor_sensed_over_prior: "手番と違う席を言った（間の席をフォールドにした）",
+  check_facing_bet: "ベットがあるのにチェック → コールにした",
+  check_illegal_fold: "チェックできない場面 → フォールドにした",
+  heard_call_but_check: "払う額が無いのでコールをチェックにした",
+  high_conf_asr_projection: "はっきり聞こえたが場面と合わない",
+  no_amount_heard: "金額が聞き取れず最小額にした",
+  raise_to_vs_by_ambiguous: "レイズ額が「まで」か「追加」か曖昧",
+  rounded_to_bb: "金額を BB 単位に丸めた",
+  amount_snapped: "金額を出せる額に寄せた",
+  no_legal_context: "手番が分からない場面だった",
+  multi_action_keywords: "1 回の発話にアクションが複数あった",
+  ambiguous_amount: "金額の言い方が曖昧",
+  no_active_hand: "ハンドが始まっていなかった",
+  low_conf_control_held: "自信の低い制御語を保留した",
+  winner_seat_unresolved: "勝者の席が分からなかった",
+  handler_error: "処理中のエラー",
+};
+
+export function reasonLabels(reason?: string): string[] {
+  if (!reason) return [];
+  return reason
+    .split("+")
+    .filter((code) => code.length > 0)
+    .map((code) => {
+      const known = REASON_LABELS[code];
+      if (known) return known;
+      const capped = /^actor_conflict_capped\(sensed=(\d+)\)$/.exec(code);
+      if (capped) return `言った席${capped[1]}は手番から遠いので手番の席にした`;
+      const illegal = /^(\w+)_illegal_to_(call|fold)$/.exec(code);
+      if (illegal) return `${actionLabel(illegal[1])}できない場面 → ${actionLabel(illegal[2])}にした`;
+      const remap = /^(bet|raise)_to_(bet|raise)$/.exec(code);
+      if (remap) return `${actionLabel(remap[1])}を${actionLabel(remap[2])}として記録した`;
+      return code;
+    });
+}
+
+/**
+ * 音声テスト用: そのアクションが「何と聞こえて」記録されたか (ADR-0060)。
+ * heard = 発話の書き起こし (無ければ null)。notes = 補正の内容と理由。
+ */
+export function heardDetails(a: ReplayAction): { heard: string | null; notes: string[] } {
+  const notes: string[] = [];
+  let reason = a.reason;
+  if (a.corrected_from && a.corrected_from !== a.action) {
+    notes.push(`聞き取り ${actionLabel(a.corrected_from)} → ${actionLabel(a.action)}`);
+    // bet↔raise の付け替えは上の 1 行で分かるので理由からは省く
+    reason = reason
+      ?.split("+")
+      .filter((code) => !/^(bet|raise)_to_(bet|raise)$/.test(code))
+      .join("+");
+  }
+  notes.push(...reasonLabels(reason));
+  return { heard: a.raw_text ? a.raw_text : null, notes };
 }
 
 /** 金額の桁区切り表示 (チップ額。円ではないので ¥ は付けない)。 */

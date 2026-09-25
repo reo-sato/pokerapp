@@ -6,8 +6,11 @@ import type { Player, PlayerSessionSummary } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
 import { HandReplay } from "../shared/hand_replay/HandReplay";
 import { buildHandText } from "../shared/hand_replay/handReplayText";
+import { isTestMode } from "../testMode";
 import { BackLink, ErrorView, Loading, ReloadLink, formatResult, styles } from "./common";
 import { findOwnRow } from "./MyHandsScreen";
+
+const TEST_MODE = isTestMode();
 
 /** navigator.clipboard（web）への安全な参照。native / 非対応環境では null。 */
 function clipboardOrNull(): { writeText(text: string): Promise<void> } | null {
@@ -83,8 +86,15 @@ export function HandDetailScreen({
             })()}
           </Text>
 
+          {/* 音声テスト用の表示（URL に ?test を付けた端末だけ, ADR-0060） */}
+          {TEST_MODE ? (
+            <Text style={[styles.cardMeta, { color: "#ffb74d", marginBottom: 8 }]}>
+              テスト表示: 各アクションの下に聞き取った文と補正の理由を出しています
+            </Text>
+          ) : null}
+
           {/* ストリート単位リプレイ（共有コンポーネント, ADR-0044。訂正適用済みビュー） */}
-          <HandReplay hand={hand} />
+          <HandReplay hand={hand} showHeard={TEST_MODE} />
 
           <Pressable style={styles.card} onPress={() => void onShare()}>
             <Text style={[styles.cardTitle, { color: "#5ab0f0" }]}>📤 このハンドを共有 / コピー</Text>

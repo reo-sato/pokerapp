@@ -127,3 +127,59 @@ class TestCliCommandNormalization:
         assert main._normalize_cli_command("w 1") == "w 1"         # noqa: SLF001
         # 読み上げ文は素通り（コマンド letter + 数字の形ではない）
         assert main._normalize_cli_command("ベット500") == "ベット500"   # noqa: SLF001
+
+
+class TestCliAudioStatus:
+    """ADR-0060: ログはファイルに行くので、音声の準備状況と聞き取った文は CLI に直接出す。"""
+
+    def _report(self, capsys, health: dict) -> str:
+        from types import SimpleNamespace
+
+        main._report_audio_start(SimpleNamespace(health=health), 1, wait_sec=0)  # noqa: SLF001
+        return capsys.readouterr().out
+
+    def test_running_names_the_mic(self, capsys):
+        out = self._report(capsys, {"state": "running", "device_name": "マイク (USB Audio)"})
+        assert "番号 1（マイク (USB Audio)）で聞き取っています" in out
+
+    def test_open_failure_points_at_audio_check(self, capsys):
+        out = self._report(capsys, {"state": "error", "error": "Invalid sample rate"})
+        assert "開けませんでした" in out and "Invalid sample rate" in out
+        assert r"tools\audio_check.py list" in out
+
+    def test_missing_pyaudio(self, capsys):
+        assert "PyAudio が無い" in self._report(capsys, {"state": "unavailable"})
+
+    def test_heard_line(self, capsys):
+        from audio.recorder import Transcript
+
+        for text, expected in [("シート3 レイズ 600", "→ raise 600 席3"), ("えーと", "→ アクションとして読めず")]:
+            main._print_transcript(Transcript(  # noqa: SLF001
+                text=text, confidence=0.8, event=parse_action(text), audio_sec=1.0,
+                infer_sec=0.5, utterance_start_ts=None, heard_at=0.0,
+            ))
+            assert f"[聞き取り] 「{text}」{expected}" in capsys.readouterr().out
+
+    def test_the_hook_reaches_the_thread(self):
+        def hook(t):
+            return None
+
+        thread = main._make_audio_thread({}, make_audio_queue(), threading.Event(), on_transcript=hook)
+        assert thread._on_transcript is hook  # noqa: SLF001
+
+
+def test_cli_keeps_going_when_the_model_cannot_load(tmp_path, monkeypatch, capsys):
+    """初回のモデル取得に失敗しても（ここでは faster-whisper 無し）落ちずにキーボードで進行できる。"""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", None)   # import すると ImportError
+    cfg = {"audio": {"enabled": True}, "rfid": {"enabled": False}, "engine": {"backend": "legacy"},
+           "table_state": {"enabled": False}}
+    answers = iter(["2", "", "1000", "", "1000", "5", "10", "", str(tmp_path / "logs"), "q"])
+    monkeypatch.setattr("core.config.load_config", lambda path=None: cfg)
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    main.run_cli()
+    out = capsys.readouterr().out
+    assert "音声認識モデル（medium）を読み込んでいます" in out
+    assert "音声認識モデルを読み込めませんでした（faster-whisper が入っていません）" in out
+    assert "セッション終了" in out

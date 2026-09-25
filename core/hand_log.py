@@ -35,6 +35,9 @@ class ActionRecord:
     reason: Optional[str] = None            # 射影/合成/競合の短い理由（"+区切りで複合）
     asr_confidence: Optional[float] = None  # Whisper 信頼度（欠測は None のまま）
     apply_ok: Optional[bool] = None         # pokerkit が受理したか（False = state 非反映のレコード）
+    # そのアクションになった発話（Whisper の書き起こし、または CLI で打った読み上げ文）。
+    # 合成した fold には無い。音声テストで「何と聞こえて何になったか」を追うため（ADR-0060, additive）。
+    raw_text: Optional[str] = None
 
     def to_dict(self) -> dict:
         data = {
@@ -62,6 +65,8 @@ class ActionRecord:
             data["asr_confidence"] = self.asr_confidence
         if self.apply_ok is not None:
             data["apply_ok"] = self.apply_ok
+        if self.raw_text:
+            data["raw_text"] = self.raw_text
         return data
 
 

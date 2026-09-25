@@ -46,6 +46,10 @@ export interface ActionRecord {
   source: { camera: boolean; audio: boolean; rfid: boolean };
   needs_review: boolean;
   confidence: number;
+  // 音声テスト用の表示で使う（action schema 1.4 / ADR-0047 G2, 省略可）
+  raw_text?: string; // そのアクションになった発話（書き起こし / CLI で打った読み上げ文）
+  reason?: string; // 補正・合成の理由コード（"+" 区切り）
+  corrected_from?: string | null; // 補正前に聞き取った action
 }
 
 export interface HandPlayer {

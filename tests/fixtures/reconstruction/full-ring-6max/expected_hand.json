@@ -107,7 +107,8 @@
       "position": "UTG",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "フォールド"
     },
     {
       "hand_id": 1,
@@ -129,7 +130,8 @@
       "position": "HJ",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "フォールド"
     },
     {
       "hand_id": 1,
@@ -151,7 +153,8 @@
       "position": "CO",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "フォールド"
     },
     {
       "hand_id": 1,
@@ -173,7 +176,8 @@
       "position": "BTN",
       "actor_source": "spoken_seat",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "シート6 レイズ 600"
     },
     {
       "hand_id": 1,
@@ -195,7 +199,8 @@
       "position": "SB",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "フォールド"
     },
     {
       "hand_id": 1,
@@ -217,7 +222,8 @@
       "position": "BB",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "コール"
     }
   ],
   "review_required": false

@@ -83,6 +83,16 @@ def test_round_trip_determinism(case: str, tmp_path: Path):
     assert [s.to_dict() for s in s1] == [s.to_dict() for s in s2]
 
 
+def test_actions_keep_what_was_heard():
+    """ADR-0060: 各アクションに「そのアクションになった発話」を残す。合成した fold には無い。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        summaries = replay_fixture(_FIXTURES / "silent-fold", d)
+    fold, raise_ = summaries[0].to_dict()["actions"]
+    assert fold["reason"] == "synth_silent_fold" and "raw_text" not in fold
+    assert raise_["raw_text"] == "シート1 レイズ 600"
+
+
 def test_check_facing_bet_corrected_to_call():
     """中核アサーション: 非合法 'check' が 'call'+needs_review に射影される。"""
     import tempfile

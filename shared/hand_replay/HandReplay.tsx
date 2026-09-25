@@ -16,6 +16,7 @@ import {
   buildReplayModel,
   formatChips,
   formatSigned,
+  heardDetails,
   parseCard,
   SUIT_COLORS,
   SUIT_SYMBOLS,
@@ -112,10 +113,11 @@ function SeatRow(props: { player: ReplayPlayer; isWinner: boolean }): React.JSX.
 function ActionRow(props: {
   action: ReplayAction;
   resolveName: (seat: number) => string;
+  showHeard?: boolean;
 }): React.JSX.Element {
   const a = props.action;
   const name = a.player_name || props.resolveName(a.seat);
-  return (
+  const row = (
     <View style={s.actionRow}>
       <Text style={s.actionSeat}>席{a.seat}</Text>
       <Text style={s.actionText} numberOfLines={1}>
@@ -130,13 +132,30 @@ function ActionRow(props: {
       ) : null}
     </View>
   );
+  if (!props.showHeard) return row;
+  // 音声テスト用 (ADR-0060): 何と聞こえて、どう補正されたか
+  const { heard, notes } = heardDetails(a);
+  return (
+    <View>
+      {row}
+      <View style={s.heardBlock}>
+        <Text style={s.heardText}>{heard ? `「${heard}」` : "（発話なし）"}</Text>
+        {notes.map((note, i) => (
+          <Text key={i} style={[s.heardText, { color: c.warn }]}>
+            {note}
+          </Text>
+        ))}
+      </View>
+    </View>
+  );
 }
 
 /**
  * ハンドリプレイ本体。`hand` は viewer API / staff API の HandSummary dict をそのまま渡せる
  * (訂正オーバーレイ適用済みビューを渡すこと — ADR-0036)。
+ * `showHeard` は音声テスト用: 各アクションの下に聞き取った文と補正の理由を出す (ADR-0060)。
  */
-export function HandReplay(props: { hand: ReplayHand }): React.JSX.Element {
+export function HandReplay(props: { hand: ReplayHand; showHeard?: boolean }): React.JSX.Element {
   const model = buildReplayModel(props.hand);
   const nameBySeat = new Map(model.seats.map((p) => [p.seat, p.name]));
   const resolveName = (seat: number): string => nameBySeat.get(seat) ?? `席${seat}`;
@@ -173,7 +192,9 @@ export function HandReplay(props: { hand: ReplayHand }): React.JSX.Element {
           {st.actions.length === 0 ? (
             <Text style={s.metaText}>（アクションなし）</Text>
           ) : (
-            st.actions.map((a, i) => <ActionRow key={i} action={a} resolveName={resolveName} />)
+            st.actions.map((a, i) => (
+              <ActionRow key={i} action={a} resolveName={resolveName} showHeard={props.showHeard} />
+            ))
           )}
         </View>
       ))}
@@ -249,6 +270,8 @@ const s = StyleSheet.create({
   actionSeat: { color: c.muted, fontSize: 12, width: 34 },
   actionText: { fontSize: 14, flexShrink: 1, marginRight: 8 },
   badge: { fontSize: 11, fontWeight: "700", marginRight: 8 },
+  heardBlock: { marginLeft: 34, marginBottom: 4 },
+  heardText: { color: c.muted, fontSize: 12 },
   metaText: { color: c.muted, fontSize: 12 },
   resultText: { fontSize: 13, fontWeight: "700" },
   resultLine: { color: c.text, fontSize: 14, fontWeight: "600", marginBottom: 4 },

@@ -333,6 +333,8 @@ class WhisperTranscriber:
 
     def __init__(self, model_size: str = "medium", language: str = "ja") -> None:
         self._language = language
+        # 読み込めなかった理由（CLI / audio_check が表示する）。読み込めたら None。
+        self.load_error: Optional[str] = None
         logger.info("Loading Whisper model: %s", model_size)
         try:
             from faster_whisper import WhisperModel  # type: ignore[import]
@@ -343,6 +345,18 @@ class WhisperTranscriber:
                 "faster-whisper not installed. WhisperTranscriber will not function."
             )
             self._model = None
+            self.load_error = "faster-whisper が入っていません"
+        except Exception as e:
+            # 初回のモデル取得（約 1.5 GB）がネットワーク不通で失敗した等。起動は止めない
+            # （キーボードからの読み上げ文でアクションを入れられる）。
+            logger.exception("Could not load Whisper model %r", model_size)
+            self._model = None
+            self.load_error = f"{type(e).__name__}: {e}"
+
+    @property
+    def ready(self) -> bool:
+        """モデルを読み込めたか。"""
+        return self._model is not None
 
     def transcribe(self, audio_bytes: bytes) -> str:
         """PCM16 音声バイト列をテキストに変換して返す（信頼度を捨てる後方互換版）。"""

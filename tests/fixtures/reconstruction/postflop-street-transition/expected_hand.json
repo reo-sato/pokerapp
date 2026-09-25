@@ -102,7 +102,8 @@
       "position": "BTN",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "コール"
     },
     {
       "hand_id": 1,
@@ -124,7 +125,8 @@
       "position": "SB",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "コール"
     },
     {
       "hand_id": 1,
@@ -146,7 +148,8 @@
       "position": "BB",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "チェック"
     },
     {
       "hand_id": 1,
@@ -168,7 +171,8 @@
       "position": "SB",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "ベット 400"
     },
     {
       "hand_id": 1,
@@ -190,7 +194,8 @@
       "position": "BB",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "フォールド"
     },
     {
       "hand_id": 1,
@@ -212,7 +217,8 @@
       "position": "BTN",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "フォールド"
     }
   ],
   "review_required": false

@@ -181,12 +181,13 @@ def _rfid_tracking_kwargs(rfid_cfg: dict) -> dict:
     }
 
 
-def _make_audio_thread(cfg: dict, audio_queue, stop_event):
+def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None):
     """config.audio.enabled が true（既定）なら AudioThread を返す。false なら None。
 
     false はマイクを繋がない実機テスト（RFID のカード読み取りだけを見る / ダミーアクションを
     キーボードで投入する）用。アクションは CLI の入力ループが読み上げ文を `parse_action` に
     通して AudioEvent にするので、音声と同じ語彙・同じ経路で進行できる。
+    `on_transcript` は聞き取った文ごとに呼ばれる（CLI の表示, ADR-0060）。
     """
     audio_cfg = cfg.get("audio", {})
     if not audio_cfg.get("enabled", True):
@@ -200,7 +201,36 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event):
         model_size=audio_cfg.get("whisper_model", "medium"),
         language=audio_cfg.get("language", "ja"),
         stop_event=stop_event,
+        on_transcript=on_transcript,
     )
+
+
+def _print_transcript(transcript) -> None:
+    """聞き取った文とアクションとしての読みを CLI に出す（音声テスト用, ADR-0060）。"""
+    from audio.recorder import describe_event
+
+    print(f"  [聞き取り] 「{transcript.text}」→ {describe_event(transcript.event)}", flush=True)
+
+
+def _report_audio_start(audio_thread, device_id: int, wait_sec: float = 3.0) -> None:
+    """マイクを開けたかを CLI に出す（ログはファイルに行くので、失敗に気づけるように）。"""
+    import time as _time
+
+    deadline = _time.time() + wait_sec
+    while audio_thread.health.get("state") == "starting" and _time.time() < deadline:
+        _time.sleep(0.05)
+    health = audio_thread.health
+    state = health.get("state")
+    if state == "running":
+        print(f"音声入力: マイク 番号 {device_id}（{health.get('device_name') or '?'}）で聞き取っています。"
+              "聞き取った文は [聞き取り] と表示します。")
+    elif state == "unavailable":
+        print("音声入力: PyAudio が無いため使えません（キーボードの読み上げ文で進行できます）。")
+    elif state == "error":
+        print(f"音声入力: マイク（番号 {device_id}）を開けませんでした — {health.get('error', '')}。"
+              r"番号は tools\audio_check.py list で確かめてください（音声なしで続けます）。")
+    else:
+        print(f"音声入力: マイクの状態を確認できません（{state}）。")
 
 
 def _open_session_layer(cfg: dict, session_cfg: dict):
@@ -319,10 +349,26 @@ def run_cli() -> None:
 
     cam_cfg = cfg.get("camera", {})
 
-    audio_thread = _make_audio_thread(cfg, audio_q, stop_event)
+    audio_cfg = cfg.get("audio", {})
+    if audio_cfg.get("enabled", True):
+        # 初回は音声認識モデル（medium ≈ 1.5 GB）をダウンロードする。ログはファイルに行くので
+        # 何も出ないと固まったように見える（ADR-0060）。
+        import time as _time
+
+        print(f"音声認識モデル（{audio_cfg.get('whisper_model', 'medium')}）を読み込んでいます…"
+              "（初回はダウンロードで数分かかります）", flush=True)
+        loading_since = _time.time()
+    audio_thread = _make_audio_thread(cfg, audio_q, stop_event, on_transcript=_print_transcript)
     if audio_thread is None:
         print("音声入力は無効です (audio.enabled=false)。"
               "アクションはキーボードから読み上げ文で投入してください。")
+    elif not audio_thread.asr_ready:
+        error = getattr(audio_thread._transcriber, "load_error", None)  # noqa: SLF001
+        print(f"音声認識モデルを読み込めませんでした（{error}）。音声は使わずに続けます"
+              "（キーボードの読み上げ文で進行できます）。")
+        audio_thread = None
+    else:
+        print(f"音声認識モデルの読み込み完了（{_time.time() - loading_since:.0f} 秒）。")
     # Phase 2/3: カメラが設定済みの場合のみ CameraThread を起動する
     # Phase 3: camera_q を IntegrationThread に渡すことで ±2秒マッチングが有効になる
     camera_thread = None
@@ -415,6 +461,8 @@ def run_cli() -> None:
     if audio_thread is not None:
         audio_thread.start()
     integration_thread.start()
+    if audio_thread is not None:
+        _report_audio_start(audio_thread, audio_cfg.get("device_id", 0))
 
     print(f"\nセッション開始。ログ: {json_writer.path}")
     if session_repo is not None:

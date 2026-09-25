@@ -5,10 +5,12 @@ import math
 import queue
 import threading
 import time
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from audio.recognizer import WhisperTranscriber, parse_action
 from core.event_queue import EventQueue
+from core.events import AudioEvent
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,38 @@ _INFERENCE_QUEUE_MAX = 8
 
 # 死活表示のレベル正規化に使う RMS 上限（これ以上は 1.0 に飽和。発話時の実測オーダー）
 _HEALTH_LEVEL_FULL_RMS = 8000.0
+
+
+@dataclass(frozen=True)
+class Transcript:
+    """1 発話の聞き取り結果（アクションとして読めなかったものも含む）。
+
+    実機の音声テストで「何と聞こえたか」を見るためのもの（CLI の表示 / `tools/audio_check.py`）。
+    """
+
+    text: str
+    confidence: Optional[float]
+    event: Optional[AudioEvent]            # アクションとして読めたもの（読めなければ None）
+    audio_sec: float                       # 切り出した発話の長さ（秒）
+    infer_sec: float                       # Whisper にかかった秒数
+    utterance_start_ts: Optional[float]    # 話し始めの時刻（unix 秒）
+    heard_at: float                        # 文字になった時刻（unix 秒）
+
+
+def describe_event(event: Optional[AudioEvent]) -> str:
+    """聞き取り結果を 1 行で表す（ログ・CLI・audio_check で共通）。"""
+    if event is None:
+        return "アクションとして読めず"
+    parts = [event.action]
+    if event.amount:
+        parts.append(str(event.amount))
+    if event.seat is not None:
+        parts.append(f"席{event.seat}")
+    elif event.position:
+        parts.append(event.position)
+    if event.parse_flags:
+        parts.append("（" + "・".join(event.parse_flags) + "）")
+    return " ".join(parts)
 
 
 def _calc_rms(data: bytes) -> float:
@@ -63,17 +97,21 @@ class AudioThread(threading.Thread):
         language: str = "ja",
         stop_event: Optional[threading.Event] = None,
         transcriber: Optional[WhisperTranscriber] = None,
+        on_transcript: Optional[Callable[[Transcript], None]] = None,
     ) -> None:
         """
         Args:
             transcriber: テスト用の差し替え点（None なら WhisperTranscriber を生成）。
                          `transcribe_with_confidence(bytes) -> (text, conf)` を持てばよい。
+            on_transcript: 文字になった発話ごとに呼ぶ（アクションとして読めなかったものも）。
+                         推論スレッドから呼ばれる。CLI の表示と `tools/audio_check.py` が使う。
         """
         super().__init__(daemon=True, name="AudioThread")
         self._audio_queue = audio_queue
         self._device_id = device_id
         self._sample_rate = sample_rate
         self._stop_event = stop_event or threading.Event()
+        self._on_transcript = on_transcript
         self._transcriber = (
             transcriber if transcriber is not None
             else WhisperTranscriber(model_size=model_size, language=language)
@@ -85,7 +123,14 @@ class AudioThread(threading.Thread):
         # 死活表示（dashboard が読む。dict ごと差し替える = GIL で atomic、lock 不要）:
         #   state: starting | running | unavailable(pyaudio 無し) | error | stopped
         #   level: 直近チャンクの RMS を 0..1 に正規化 / last_chunk_at: unix 秒
+        #   device_name: 開いたマイクの名前 / error: 開けなかった理由（CLI が起動時に表示する）
         self.health: dict = {"state": "starting", "level": 0.0, "last_chunk_at": None}
+        self._device_name: Optional[str] = None
+
+    @property
+    def asr_ready(self) -> bool:
+        """音声認識モデルを読み込めたか（faster-whisper が無い・読み込みに失敗したら False）。"""
+        return bool(getattr(self._transcriber, "ready", True))
 
     def stop(self) -> None:
         """スレッドの停止を要求する。"""
@@ -102,6 +147,10 @@ class AudioThread(threading.Thread):
         pa = pyaudio.PyAudio()
         chunk_size = 1024
         try:
+            self._device_name = str(pa.get_device_info_by_index(self._device_id).get("name", ""))
+        except Exception:  # 番号が範囲外など。open の失敗として下で扱う
+            self._device_name = None
+        try:
             stream = pa.open(
                 format=pyaudio.paInt16,
                 channels=1,
@@ -113,11 +162,13 @@ class AudioThread(threading.Thread):
         except OSError as e:
             # デバイス不在/占有。クラッシュさせず死活表示に出す（エラーハンドリング方針）。
             logger.error("Could not open audio input device %d: %s", self._device_id, e)
-            self.health = {"state": "error", "level": 0.0, "last_chunk_at": None}
+            self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": str(e)}
             pa.terminate()
             return
-        logger.info("AudioThread started (device_id=%d, rate=%d)", self._device_id, self._sample_rate)
-        self.health = {"state": "running", "level": 0.0, "last_chunk_at": None}
+        logger.info("AudioThread started (device_id=%d %r, rate=%d)",
+                    self._device_id, self._device_name, self._sample_rate)
+        self.health = {"state": "running", "level": 0.0, "last_chunk_at": None,
+                       "device_name": self._device_name}
 
         worker = threading.Thread(
             target=self._inference_loop, daemon=True, name="AudioInference"
@@ -186,6 +237,7 @@ class AudioThread(threading.Thread):
                 "state": "running",
                 "level": min(1.0, rms / _HEALTH_LEVEL_FULL_RMS),
                 "last_chunk_at": now,
+                "device_name": self._device_name,
             }
 
             is_voiced = rms >= _SILENCE_RMS_THRESHOLD
@@ -253,17 +305,37 @@ class AudioThread(threading.Thread):
     def _process_chunk(
         self, audio_bytes: bytes, utterance_start_ts: Optional[float] = None
     ) -> None:
-        """音声チャンクをテキストに変換し、アクションを検出して queue に送出する。"""
+        """音声チャンクをテキストに変換し、アクションを検出して queue に送出する。
+
+        文字になった発話はアクションとして読めなくても INFO で残し、`on_transcript` に渡す
+        （実機の音声テストで「何と聞こえたか」を後から追えるように）。
+        """
         try:
+            started = time.time()
             text, confidence = self._transcriber.transcribe_with_confidence(audio_bytes)
+            heard_at = time.time()
             if not text:
                 return
-            logger.debug("Transcribed: %r (confidence=%s)", text, confidence)
             event = parse_action(
                 text, confidence=confidence, utterance_start_ts=utterance_start_ts
             )
+            infer_sec = heard_at - started
+            logger.info(
+                "聞き取り: %r (confidence=%s, 推論 %.2f 秒) → %s",
+                text, "-" if confidence is None else f"{confidence:.2f}", infer_sec,
+                describe_event(event),
+            )
+            if self._on_transcript is not None:
+                try:
+                    self._on_transcript(Transcript(
+                        text=text, confidence=confidence, event=event,
+                        audio_sec=len(audio_bytes) / 2 / self._sample_rate,
+                        infer_sec=infer_sec, utterance_start_ts=utterance_start_ts,
+                        heard_at=heard_at,
+                    ))
+                except Exception:
+                    logger.exception("on_transcript callback failed")
             if event is not None:
-                logger.info("AudioEvent: action=%s amount=%d", event.action, event.amount)
                 self._audio_queue.put(event)
         except Exception:
             logger.exception("Error in _process_chunk (chunk size=%d bytes)", len(audio_bytes))

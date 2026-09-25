@@ -80,7 +80,8 @@
       "corrected_from": "check",
       "reason": "check_facing_bet",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "チェック"
     }
   ],
   "review_required": true

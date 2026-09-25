@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pokerapp.local/contracts/action.schema.json",
   "title": "Action",
-  "version": "1.3",
-  "description": "ActionRecord.to_dict() の契約（hand core, ADR-0010 R5）。ISSUE-0011 の決定により additionalProperties:true で 1.0（false 昇格は後続、範囲膨張防止）。ADR-0009 の推定 additive フィールドは optional。1.1 = street の意味を明文化（description のみ / validation 不変, ISSUE-0029）。1.2 = position を optional 追加（ディーラーボタン回転で解決する席のポジション名。ISSUE-0032, additive）。1.3 (ADR-0047 G2, additive) = reason / apply_ok を追加し、監査フィールド一式（actor_source / corrected_from / reason / asr_confidence / apply_ok）を rules-aware 経路が実際に emit する（verify-v1 系列では 1.1 だったものを 2026-09-22 のマージで統合）。actor_source に \"spoken_position\" を追加（ポジション名の読み上げ）。\"rfid\" は旧記録にのみ現れる（RFID の検出は actor の証拠にしない, ISSUE-0033 / ADR-0056）。",
+  "version": "1.4",
+  "description": "ActionRecord.to_dict() の契約（hand core, ADR-0010 R5）。ISSUE-0011 の決定により additionalProperties:true で 1.0（false 昇格は後続、範囲膨張防止）。ADR-0009 の推定 additive フィールドは optional。1.1 = street の意味を明文化（description のみ / validation 不変, ISSUE-0029）。1.2 = position を optional 追加（ディーラーボタン回転で解決する席のポジション名。ISSUE-0032, additive）。1.3 (ADR-0047 G2, additive) = reason / apply_ok を追加し、監査フィールド一式（actor_source / corrected_from / reason / asr_confidence / apply_ok）を rules-aware 経路が実際に emit する（verify-v1 系列では 1.1 だったものを 2026-09-22 のマージで統合）。actor_source に \"spoken_position\" を追加（ポジション名の読み上げ）。\"rfid\" は旧記録にのみ現れる（RFID の検出は actor の証拠にしない, ISSUE-0033 / ADR-0056）。1.4 (ADR-0060, additive) = raw_text（そのアクションになった発話の書き起こし / CLI で打った読み上げ文。合成 fold と legacy 経路には無い）を optional 追加。",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -44,6 +44,7 @@
     "actor_source": {"type": ["string", "null"], "description": "actor 推定の根拠: rfid | spoken_seat | engine_prior | unresolved"},
     "asr_confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
     "reason": {"type": "string", "description": "射影/合成/競合の監査理由（複数は '+' 区切り, ADR-A G2）"},
-    "apply_ok": {"type": "boolean", "description": "pokerkit が受理したか（false = state 非反映のレコード, ADR-A G2）"}
+    "apply_ok": {"type": "boolean", "description": "pokerkit が受理したか（false = state 非反映のレコード, ADR-A G2）"},
+    "raw_text": {"type": "string", "description": "そのアクションになった発話（Whisper の書き起こし、または CLI で打った読み上げ文）。合成した fold には無い（ADR-0060, additive）"}
   }
 }
