@@ -228,9 +228,53 @@ ADR-0058 D3 のボードの規則は「ストリートの札が**全部** `relea
 - [ ] 読みにくい位置の turn を本当に差し直し、turn でハンドが終わると 5 枚のまま（`needs_review` にならない）。
       配置で読みにくい位置を無くすのが本筋。
 
+## 追補 4: 置き方の決定と、river のあとの turn の差し直し（2026-09-25, ADR-0058 追記 5）
+
+### 報告とログ
+
+オーナーが置き直しを繰り返して確かめ、「flop と turn の間を空けて turn を 3 枚目のリーダーに読ませるのがよさそう」と
+決定。ログ（ISSUE-0035 追加の報告 5）を追うと、flop 全体・flop の 1 枚・river の差し直しと、読み落ちたことのある turn
+の差し直し → river で詰め直しは想定どおり。13:46:54 だけが誤り: river まで配ったあとで turn（6s → Ks）を差し直すと
+`Qs, Ks`（river が 4 枚目・新しい turn が 5 枚目）。
+
+### 再現と原因
+
+同じ手順（turn は読み落ちたことがある → river → turn を取って新しい札）を `Table` ドライバで再現:
+取ってから 5 秒後に置くと `[('Ah', 5, '6h'), ('6h', 4, '7c')]`（逆）、1 秒後に置くと「5 枚を超えました」で
+`('Ah', None, None)` のまま確定（二度と位置を与えない = engine のボードが 6 枚）。5 枚埋まったボードの規則
+（`_rebuild_board`）が「新しい札 = 次のストリート」と決め打ちし、消えた札が `release_sec` に達する前に確定させていた。
+
+### 変更（`rfid/reader_thread.py`）
+
+- `_settle_full_board`: 見えていない札（`gap_sec` 超）がちょうど 1 枚で `release_sec` 以上 → `_replace_on_full_board`。
+  見えていない札がまだ `release_sec` 未満なら None（待つ。`run.waiting` = 卓モニタの「差し直し確認中」、ログ 1 回）。
+  無い / 2 枚以上消えて決められない → 従来どおり WARN・位置なし。`release_sec=None` は従来どおり即 WARN。
+- `_replace_on_full_board`（`_rebuild_board` を置換）: 消えた札のあとに空き位置へ入れた札（`_board_swapped_in` に
+  無く、`_board_first_seen` が消えた札の `last_seen` より後）があれば、最初のものを消えた札の位置へ移し、その後ろを
+  1 つ前へ詰めて新しい札を 5 枚目に。無ければ新しい札を消えた札の位置へ。engine へは後ろの位置から送る。
+- `_board_swapped_in`: 差し替えで位置を得た札（1 枚の差し直し・flop 全体・5 枚埋まったボードの置き換え）。取り消しで
+  次の位置へ移った札・空き位置に入れた札は外す。新ハンドで捨てる。
+- `_decide_board`: `run.fired` を実際に決めたときだけ立てる（待つ場合は立てない）。
+- docs: ADR-0058 追記 5（Alternatives 10・11、並び順の修正）/ ISSUE-0035 追加の報告 5 / 契約 v1.10 / CLAUDE.md /
+  usage.md（置き方・river のあとの差し直し）/ CHANGELOG / decision-log。
+
+### テスト
+
+- `tests/test_rfid_table_flow.py` 63 件（5 件追加・1 件更新）: river のあとの turn の差し直し（店舗の再現・engine）/
+  取ってすぐ置くと待つ / 差し替えで入った river は turn の代わりにしない / 離れたリーダーで差し直した flop の札を river
+  で移す / 読めていない札が戻れば 6 枚目の WARN / 時間窓の外の flop の差し直し（移すのは Ah だけ = Tc・2h は動かない）。
+- 修正前のコードで 6 件が落ちる。`_board_swapped_in` の除外を外すと 1 件が落ちる（mutation）。
+- `pytest tests/ -q --ignore=tests/test_vision.py`（pwsh あり）— **1248 passed**、skip 0。`ruff check .` — clean。
+
+### 残
+
+- [ ] 店舗で再確認: 新しい置き方で turn / river の差し直し（river のあとで turn も）。
+- [ ] 13:47:03 の 2s（3 台目で一度読めて 148 秒読めず）が何だったか（置いた位置 / すぐ外した / 重ねた）。
+- [ ] 新しいハンドは `n` を押してから配る運用の徹底（押さないと前の turn / river の位置が残る）。
+
 ## Related ADRs
 
-- ADR-0058（追記 / 追記 2 / 追記 3 / 追記 4）/ ADR-0053 / ADR-0054 / ADR-0055
+- ADR-0058（追記 / 追記 2 / 追記 3 / 追記 4 / 追記 5）/ ADR-0053 / ADR-0054 / ADR-0055
 
 ## Related Issues
 
