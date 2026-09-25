@@ -35,6 +35,7 @@ class TestSplit:
         ("ハンド開始、シート3 レイズ 600", [("new_hand", 0, None), ("raise", 600, 3)]),
         # 席番号を言わない運用（手番の順でアクターを決める）
         ("フォールド、フォールド、コール", [("fold", 0, None), ("fold", 0, None), ("call", 0, None)]),
+        ("フォールド、ホールド", [("fold", 0, None), ("fold", 0, None)]),   # 店舗の実測（2 回目）
         ("フォールドフォールドコール", [("fold", 0, None), ("fold", 0, None), ("call", 0, None)]),
         ("チェック チェック チェック", [("check", 0, None)] * 3),
         ("レイズ 600、コール", [("raise", 600, None), ("call", 0, None)]),
@@ -50,6 +51,8 @@ class TestSplit:
         ("チェックレイズ 1200", [("raise", 1200, None)]),       # 1 人のレイズ
         ("シート3 シート5 チョップ", [("winner", 0, 3)]),       # 席が複数でもアクションは 1 つ
         ("ベッド 1200", [("bet", 1200, None)]),
+        ("ホールド", [("fold", 0, None)]),
+        ("テキサスホールデム", []),                            # 「ホールド」を含まない
         ("えーと", []),
     ])
     def test_single_actions_stay_single(self, text, expected):

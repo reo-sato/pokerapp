@@ -26,6 +26,7 @@ ACTION_KEYWORDS: dict[str, str] = {
     "check": "check",
     "フォールド": "fold",
     "フォルド": "fold",       # 促音落ちの誤認識ゆらぎ
+    "ホールド": "fold",       # 続けて言った 2 つ目の「フォールド」を Whisper がこう書き起こした（店舗の実測 2026-09-25, ADR-0061）
     "fold": "fold",
     "降ります": "fold",
     "マック": "fold",          # muck
