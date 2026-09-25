@@ -48,13 +48,16 @@ Accepted（2026-09-25, 実装済。店舗 PC での確認は未）
 - `q`（終了）で **session を閉じる**（お客さんの画面で「進行中」のまま残さない）。
 - 無効（既定）は従来どおり（timestamp の session_id、席の記録なし = rollback 経路）。
 
-### D2. 席替えコマンド `seat <席> <名前>` / `seat <席> -`
+### D2. 席替えコマンド `name <席> <名前>` / `name <席> -`
 
 - 次のハンドからその席の人を変える（`-` は空席 = 結び付けない）。席 → player の対応は
   `set_seat_player_map`、ゲーム状態の名前は `rename_seat` の AudioEvent を queue に積んで integration
   スレッドで変える（ゲーム状態の変更は integration スレッドに一元化, ISSUE-0012）。
 - **ハンドの途中なら次のハンドの開始まで待つ**（1 ハンドの中で名前と player_id が食い違わない）。
 - 全角の数字・空白も通す（他のコマンドと同じ, ISSUE-0030）。卓に無い席は弾く。
+- コマンド名を **`seat` にしない**。`seat 3 call` / `seat 2 bet 500` は英語の席表現の**読み上げ文**として既に通る
+  （キーボードからのアクション入力）。最初の実装は `seat` にしていて、`seat 2 call` を席替え（名前が "call"）や
+  「無効です」に取ってしまった（同日に `name` へ変更, 回帰テストあり）。
 
 ### D3. viewer API が画面も配信する（同じ origin）
 
@@ -145,7 +148,7 @@ Accepted（2026-09-25, 実装済。店舗 PC での確認は未）
 
 ## Related Files
 
-- `main.py`（`_open_session_layer` / `_close_session_layer` / `_parse_seat_command` / `seat` コマンド / `--host` `--port`）
+- `main.py`（`_open_session_layer` / `_close_session_layer` / `_parse_name_command` / `name` コマンド / `--host` `--port`）
 - `integration/engine.py`（`rename_seat`）/ `core/game_state.py` / `core/poker_engine.py`（`set_player_name`）
 - `core/player_repository.py`（`find_or_create` / `reload_if_changed`）/ `core/session_repository.py`（`reload_if_changed`）
 - `core/atomic_io.py`（再試行）/ `core/config.py`（BOM）/ `tools/set_config.py`

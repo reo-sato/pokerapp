@@ -21,8 +21,8 @@ web 版 = M2 + viewer API = M1）を、店舗の構成（ADR-0057 の店舗 PC +
 
 ## Changed Files
 
-- `main.py` — `--cli` の session layer（`_open_session_layer` / `_close_session_layer`）、`seat` コマンド
-  （`_parse_seat_command`）、起動時の名前入力に `named`、`--host` / `--port`、`--ledger` の組み込み API にも画面。
+- `main.py` — `--cli` の session layer（`_open_session_layer` / `_close_session_layer`）、`name` コマンド
+  （`_parse_name_command`）、起動時の名前入力に `named`、`--host` / `--port`、`--ledger` の組み込み API にも画面。
 - `integration/engine.py` — `rename_seat`（ハンド途中は次のハンド開始まで保留）。
 - `core/game_state.py` / `core/poker_engine.py` — `set_player_name`。
 - `core/player_repository.py` — `find_or_create` / `reload_if_changed` / `_parse`。
@@ -45,7 +45,7 @@ web 版 = M2 + viewer API = M1）を、店舗の構成（ADR-0057 の店舗 PC +
 ## Expected Behavior
 
 - `session_layer.enabled=true` の `--cli` は起動時の名前を player に結び付け、ハンドごとに席を記録する。
-  名前を入れない席は結び付けない。`seat` で次のハンドから席替え。終了で session を閉じる。
+  名前を入れない席は結び付けない。`name` で次のハンドから席替え。終了で session を閉じる。
 - viewer API は `/` で画面、`/api/` で API。hand logger が後から書いたものも再起動なしで見える。
 - 画面にログイン・サインアップ・訂正の導線が出ない。店舗 PC に Node は要らない。
 - 既定（`session_layer.enabled=false`）の `--cli` は従来どおり。
@@ -67,6 +67,10 @@ web 版 = M2 + viewer API = M1）を、店舗の構成（ADR-0057 の店舗 PC +
 ## Mismatches
 
 - 最初の実装では `q` の後もセッションが「進行中」のまま残った → 終了で close するよう追加（テスト追加）。
+- 最初のコミット（6daa390）は席替えのコマンドを `seat <席> <名前>` にしていたが、`seat 2 call` は英語の席表現の
+  読み上げ文としてキーボードから打てる（`parse_action` が席 2 のコールと解釈する）。`seat` をコマンドにすると
+  有効時は席 2 の名前が "call" に、無効時は「無効です」と出てアクションが入らない → **`name <席> <名前>` に変更**
+  （`test_seat_n_utterances_still_act` で有効・無効とも固定）。店舗への案内前に修正。
 - お客さん画面の目視で気づいた細部（今回は変えていない。オーナーの確認後に判断）:
   - プリフロップの見出しの「ポット 0」（ブラインドを含まない。共有リプレイ `shared/hand_replay` の `potStart` の仕様）。
   - 日時が ISO のまま（`2026-09-25T05:49:42.842`）、セッション名が起動時刻（`2026-09-25_054942`）。
@@ -75,14 +79,14 @@ web 版 = M2 + viewer API = M1）を、店舗の構成（ADR-0057 の店舗 PC +
 
 ## Fixes
 
-- CLI の session layer / `seat` / 終了時 close、viewer の画面配信・読み直し・no-cache・`--host`/`--port`、
+- CLI の session layer / `name` / 終了時 close、viewer の画面配信・読み直し・no-cache・`--host`/`--port`、
   ビルドの同梱と drift 検知、Windows の再試行、`tools/set_config.py`、BOM 許容。
 
 ## Test Results
 
-- `tests/test_cli_session_layer.py` 19 / `tests/test_viewer_api_store.py` 8 / `tests/test_player_web_build.py` 8 /
+- `tests/test_cli_session_layer.py` 21 / `tests/test_viewer_api_store.py` 8 / `tests/test_player_web_build.py` 8 /
   `tests/test_set_config.py` 10 / `tests/test_installer.py`（pwsh の構文解析 + `-DryRun` 込み）all passed。
-- 全体: `pytest tests/ --ignore=tests/test_vision.py` 1297 passed、`ruff check .` clean。
+- 全体: `pytest tests/ --ignore=tests/test_vision.py` 1299 passed、`ruff check .` clean。
 - `mobile/`: `npx tsc --noEmit` exit 0。
 
 ## Remaining Gaps

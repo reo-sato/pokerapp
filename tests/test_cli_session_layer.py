@@ -5,7 +5,8 @@ ADR-0059: ハンドロガー（`--cli`）で席とお客さんの対応を記録
 
 - 起動時に入力した名前を player registry に結び付け（無ければ作る）、session を作る。
 - ハンドごとに席 → player を `sessions.json` に書き、ハンドの記録に player_id を載せる。
-- `seat <席> <名前>` で席替え（次のハンドから）、`seat <席> -` で空席にする。
+- `name <席> <名前>` で席替え（次のハンドから）、`name <席> -` で空席にする。`seat 3 call` は従来どおり
+  読み上げ文（英語の席表現）で、席替えにはしない。
 - `session_layer.enabled=false`（既定）は従来どおり（timestamp の session_id、記録なし）。
 """
 from __future__ import annotations
@@ -102,13 +103,13 @@ class TestCliSessionLayer:
             1: ("太郎", players["太郎"]), 2: ("Player2", None), 3: ("花子", players["花子"]),
         }
 
-    def test_seat_command_changes_the_customer_from_the_next_hand(
+    def test_name_command_changes_the_customer_from_the_next_hand(
         self, data_dir: Path, monkeypatch: pytest.MonkeyPatch,
     ):
         logs = data_dir / "logs"
         _run_cli(monkeypatch, _cfg(True),
                  _setup(["太郎", "次郎"], logs)
-                 + ["n", "seat 2 三郎", "w 1", "n", "w 1", "seat 1 -", "n", "w 2", "q"])
+                 + ["n", "name 2 三郎", "w 1", "n", "w 1", "name 1 -", "n", "w 2", "q"])
 
         session_id, hands = _hands(logs)
         players = {p.display_name: p.player_id for p in PlayerRepository().list_players()}
@@ -143,12 +144,26 @@ class TestCliSessionLayer:
         assert names == ["太郎", "次郎", "花子"]
         assert len(SessionRepository().list_sessions()) == 2
 
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_seat_n_utterances_still_act(
+        self, data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+        enabled: bool,
+    ):
+        # `seat 2 call` は英語の席表現の読み上げ文（parse_action が席 2 のコールと解釈する）。
+        # 席替えのコマンドに取られて名前が "call" になってはいけない
+        logs = data_dir / "logs"
+        _run_cli(monkeypatch, _cfg(enabled),
+                 _setup(["太郎", "次郎"], logs) + ["n", "seat 2 call", "w 1", "q"])
+        assert "→ call (席2)" in capsys.readouterr().out
+        _, hands = _hands(logs)
+        assert [p["name"] for p in hands[0]["players"]] == ["太郎", "次郎"]
+
     def test_disabled_keeps_the_timestamp_session_and_writes_nothing(
         self, data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
     ):
         logs = data_dir / "logs"
         _run_cli(monkeypatch, _cfg(False),
-                 _setup(["太郎", "次郎"], logs) + ["n", "seat 2 三郎", "w 1", "q"])
+                 _setup(["太郎", "次郎"], logs) + ["n", "name 2 三郎", "w 1", "q"])
         session_id, hands = _hands(logs)
         assert session_id.endswith("_session1")
         assert "player_id" not in hands[0]["players"][0]
@@ -157,16 +172,16 @@ class TestCliSessionLayer:
         assert "session_layer.enabled=true" in capsys.readouterr().out
 
 
-class TestSeatCommandParsing:
+class TestNameCommandParsing:
     @pytest.mark.parametrize("parts, expected", [
-        (["seat", "3", "山田"], (3, "山田")),
-        (["seat", "3", "山田", "太郎"], (3, "山田 太郎")),
-        (["seat", "3", "-"], (3, None)),
-        (["seat", "3"], None),
-        (["seat", "x", "山田"], None),
+        (["name", "3", "山田"], (3, "山田")),
+        (["name", "3", "山田", "太郎"], (3, "山田 太郎")),
+        (["name", "3", "-"], (3, None)),
+        (["name", "3"], None),
+        (["name", "x", "山田"], None),
     ])
     def test_parse(self, parts: list[str], expected):
-        assert main._parse_seat_command(parts) == expected
+        assert main._parse_name_command(parts) == expected
 
 
 class TestEngineRenameSeat:

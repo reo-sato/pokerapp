@@ -240,8 +240,11 @@ def _close_session_layer(session_repo, session_id: str) -> None:
         logger.exception("session を閉じられませんでした: %s", session_id)
 
 
-def _parse_seat_command(parts: list[str]) -> "tuple[int, str | None] | None":
-    """`seat <席> <名前>` / `seat <席> -`（空席にする）を (席, 名前 or None) にする。不正なら None。"""
+def _parse_name_command(parts: list[str]) -> "tuple[int, str | None] | None":
+    """`name <席> <名前>` / `name <席> -`（空席にする）を (席, 名前 or None) にする。不正なら None。
+
+    `seat` にしないのは、`seat 3 call` が読み上げ文（英語の席表現）として既に通るため。
+    """
     if len(parts) < 3:
         return None
     try:
@@ -422,7 +425,7 @@ def run_cli() -> None:
     print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー  [r <席> <金額>]=リバイ")
     print("ミスディール訂正: [cb <位置>]=ボードの N 枚目を取り消し  [cs <席>]=その席の札を読み直し")
     if session_repo is not None:
-        print("席替え: [seat <席> <名前>]=その席のお客さんを変える（次のハンドから）  [seat <席> -]=空席にする")
+        print("席替え: [name <席> <名前>]=その席のお客さんを変える（次のハンドから）  [name <席> -]=空席にする")
     print("上記以外の入力は読み上げ文として解釈します"
           "（例: チェック / シート3 コール / ベット 500）。マイクが無くてもこれで進行できます。")
     print("ディーラーがアナウンスすると自動検出されます。\n")
@@ -470,12 +473,12 @@ def run_cli() -> None:
                     print(f"リバイを送信しました: 席{seat} +{amount}（反映はアクション表示で確認）")
                 except ValueError as e:
                     print(f"エラー: {e}")
-            elif cmd == "seat":
-                parsed = _parse_seat_command(line.translate(_FULLWIDTH_TO_ASCII).split())
+            elif cmd == "name":
+                parsed = _parse_name_command(line.translate(_FULLWIDTH_TO_ASCII).split())
                 if session_repo is None:
                     print("席とお客さんの記録は無効です（config の session_layer.enabled=true で有効）")
                 elif parsed is None:
-                    print("使い方: seat <席> <名前> / seat <席> -（空席）")
+                    print("使い方: name <席> <名前> / name <席> -（空席）")
                 else:
                     seat, name = parsed
                     if seat not in {p["seat"] for p in session_cfg["players"]}:

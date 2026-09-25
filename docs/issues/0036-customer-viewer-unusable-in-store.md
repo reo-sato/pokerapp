@@ -52,7 +52,7 @@ API の後に hand logger が書かない」前提（起動時に一度読む・
 ADR-0059:
 
 - `--cli`: `session_layer.enabled=true` なら session を作り、起動時の名前を player に結び付けて席を記録。
-  `seat <席> <名前>` / `seat <席> -` で次のハンドから席替え。終了で session を閉じる。
+  `name <席> <名前>` / `name <席> -` で次のハンドから席替え。終了で session を閉じる。
 - viewer API: `/` で画面を配信（同じ origin）、`/api/` の要求ごとに変わっていれば読み直す、
   `--host` / `--port`。ランチャ `start_viewer.cmd` + ショートカット。
 - 画面のビルドをリポジトリに含める（`scripts/build_player_web.py` → `api/static/player/`。API = `/`、
