@@ -103,7 +103,7 @@ class _Table:
             self.now = round(self.now + step, 3)
             self.t._check_deal_presence()        # noqa: SLF001
             self.t._poll_departures()            # noqa: SLF001
-            self.t._apply_idle_departures()      # noqa: SLF001
+            self.t._apply_idle_observations()    # noqa: SLF001
             self.t._check_foldout_timeout()      # noqa: SLF001
 
     def say(self, text: str, spoken_at: float | None = None) -> None:
@@ -350,3 +350,91 @@ def test_recorded_seat_signals_match_the_schema(tmp_path):
     assert "leave" in kinds and "return" in kinds
     for event in tb.recorder.events:
         jsonschema.validate(event_to_envelope(event), schema)
+
+
+class TestStoreSessions:
+    """店舗の 4 回目の通しテスト（音声のアクションなし）: ショーダウンで前に出した札をフォールドにしていた。
+
+    ボードの札でストリートを進め（前のラウンドは札が残っている人のチェック / コールで閉じる）、リバーで
+    ベットが無いときの札の離脱はチェック（ショーダウンに向けて前に出した）にする。
+    """
+
+    def _board(self, tb: _Table, index: int, card: str) -> None:
+        ev = RFIDEvent(tag_id=card, card=card, reader_id="b", role="board", seat=None,
+                       timestamp=tb.now, raw_tag_id=card, board_index=index)
+        tb.recorder.record(ev)
+        tb.t._process_rfid_event(ev)   # noqa: SLF001
+
+    def _play(self, tb: _Table, holes, board, departures) -> None:
+        tb.deal(holes)
+        t0 = tb.now
+        events = [(at, "board", (i, card)) for i, (at, card) in enumerate(board, start=1)]
+        events += [(at, "lift", seat) for at, seat in departures]
+        for at, kind, arg in sorted(events, key=lambda e: e[0]):
+            tb.tick(t0 + at)
+            if kind == "board":
+                self._board(tb, *arg)
+            elif arg == 4 and holes is SESSION_A:
+                tb.muck(arg)                        # 席4 の札は卓の中央を通った
+            else:
+                tb.lift(arg)
+        tb.tick(t0 + 95)
+
+    def _next_deal(self, tb: _Table) -> None:
+        tb.cards = {}
+        tb.deal({4: ["As", "Ad"], 5: ["Ks", "Kd"], 6: ["Qs", "Qd"]})
+
+    def test_session_a(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._play(tb, SESSION_A,
+                   board=[(14.5, "5d"), (15.0, "Jc"), (17.7, "Th"), (36.6, "8c"), (53.1, "5h")],
+                   departures=[(6.6, 4), (63.1, 5), (66.7, 6)])
+        assert tb.hands == [] and tb.t._betting_over()   # noqa: SLF001
+        played = tb.played()
+        assert ("preflop", 4, "fold", 0) in played
+        assert [a for a in played if a[2] == "fold" and a[1] in (5, 6)] == []
+        assert played[-2:] == [("river", 5, "check", 0), ("river", 6, "check", 0)]
+        self._next_deal(tb)
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (6, "cards")   # J と 8 のツーペア
+
+    def test_session_b(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._play(tb, SESSION_B,
+                   board=[(18.1, "Jd"), (21.0, "Ac"), (21.6, "3d"), (44.1, "9d"), (50.8, "5h")],
+                   departures=[(32.2, 4), (72.9, 5), (75.2, 6)])
+        played = tb.played()
+        assert ("flop", 4, "fold", 0) in played                           # フロップで降りた
+        assert [a for a in played if a[2] == "fold" and a[1] in (5, 6)] == []
+        self._next_deal(tb)
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (6, "cards")   # J のペア、K キッカー
+
+    def test_replay_matches_live(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._play(tb, SESSION_B,
+                   board=[(18.1, "Jd"), (21.0, "Ac"), (21.6, "3d"), (44.1, "9d"), (50.8, "5h")],
+                   departures=[(32.2, 4), (72.9, 5), (75.2, 6)])
+        self._next_deal(tb)
+        (live,) = tb.hands
+        replayed = replay_events(
+            tb.recorder.events, backend="pokerkit",
+            players=[PlayerState(seat=s, name=f"P{s}", stack=10000) for s in (4, 5, 6)],
+            sb=100, bb=200, session_id="replay", out_dir=tmp_path / "replay",
+            auto_new_hand=True, auto_winner=True, rfid_folds=True,
+        )
+        assert ([(a.street, a.seat, a.action, a.amount) for a in replayed[0].actions]
+                == [(a.street, a.seat, a.action, a.amount) for a in live.actions])
+        assert replayed[0].winner_seat == 6
+
+    def test_new_cards_on_the_seat_are_not_a_return(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._play(tb, SESSION_B,
+                   board=[(18.1, "Jd"), (21.0, "Ac"), (21.6, "3d"), (44.1, "9d"), (50.8, "5h")],
+                   departures=[(32.2, 4), (72.9, 5), (75.2, 6)])
+        self._next_deal(tb)
+        assert not any("取り消して" in n for n in tb.notices)
+
+
+SESSION_A = {4: ["2c", "Kh"], 5: ["6d", "7h"], 6: ["Js", "8s"]}
+SESSION_B = {4: ["6s", "Qd"], 5: ["4c", "Jh"], 6: ["Jc", "Kh"]}

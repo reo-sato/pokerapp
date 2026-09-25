@@ -293,6 +293,30 @@ class PokerkitGameState:
             return []
         return [self._idx_to_seat[i] for i in st.actor_indices]
 
+    def force_fold(self, seat: int) -> None:
+        """チェックできる場面でもフォールドにする（席の札が離れた = 降りた, 2026-09-25）。
+
+        pokerkit はトーナメントの扱いではチェックできるときのフォールドを受け付けないので、その 1 回だけ
+        キャッシュゲームの扱い（警告だけ）にする。
+        """
+        import warnings
+
+        from pokerkit import Mode
+
+        st = self._state
+        if st is None or not self._hand_active:
+            raise ValueError("No active hand")
+        if seat != self.get_current_player():
+            raise ValueError(f"Seat {seat} is not the actor")
+        mode = st.mode
+        st.mode = Mode.CASH_GAME
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                st.fold()
+        finally:
+            st.mode = mode
+
     def apply_action(self, seat: int, action: str, amount: int = 0) -> None:
         st = self._state
         if st is None or not self._hand_active:

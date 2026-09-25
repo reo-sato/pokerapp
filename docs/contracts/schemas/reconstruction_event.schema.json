@@ -25,7 +25,7 @@
     "board_index": {"type": ["integer", "null"], "minimum": 1, "maximum": 5},
     "raw_tag_id": {"type": ["string", "null"]},
     "replaces": {"type": ["string", "null"], "description": "配り直しで差し替えた前の札（カード名, ADR-0058 additive）。席ならその席の手札のこの札を、ボードなら同じ board_index の札を置き換える。省略 = 通常の配布。"},
-    "kind": {"enum": ["card", "leave", "muck", "return", "confirm"], "description": "rfid の種類（0.5 additive, フォールドは席の札の離脱で決める = オーナー決定 2026-09-25）。省略 = card（札を読んだ）。leave = 席の札が離れたまま戻らない / muck = 席の札が卓の中央を通過 / return = 離れた札が戻った（それまでフォールドではない）/ confirm = 最後の 1 人を残すフォールドを確定。leave 以降は engine が席の在否から作って記録する。"},
+    "kind": {"enum": ["card", "leave", "muck", "return", "confirm", "street", "showdown"], "description": "rfid の種類（0.5 additive, フォールドは席の札の離脱で決める = オーナー決定 2026-09-25）。省略 = card（札を読んだ）。leave = 席の札が離れたまま戻らない / muck = 席の札が卓の中央を通過 / return = 離れた札が戻った（それまでフォールドではない）/ confirm = 最後の 1 人を残すフォールドを確定 / street = ボードの札（board_index 3/4/5 = フロップ/ターン/リバー）が置かれたので前のラウンドを閉じた / showdown = リバーで残った人の札も離れた（ショーダウン）。leave 以降は engine が在否・ボードから作って記録する。"},
     "observed_at": {"type": ["number", "null"], "description": "leave / muck の札が離れた時刻（0.5 additive）。timestamp は engine がそれを反映した時刻 = replay の順序。"}
   },
   "allOf": [

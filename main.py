@@ -442,6 +442,8 @@ def run_cli() -> None:
             "rfid_muck": "  ← 札が中央を通過",
             "implied": "  ← 聞き取れなかったとみて補完",
         }.get(getattr(record, "actor_source", None), "")
+        if getattr(record, "actor_source", None) == "rfid_departure" and record.action == "check":
+            origin = "  ← 札を前に出した（ショーダウン）"
         print(
             f"  [{record.street}] 席{record.seat}({record.player_name}) "
             f"{record.action} {record.amount or ''}"
