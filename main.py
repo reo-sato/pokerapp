@@ -373,6 +373,7 @@ def _auto_hand_kwargs(cfg: dict, audio_thread) -> dict:
         "auto_winner": bool(engine_cfg.get("auto_winner", True)),
         "speech_backlog": audio_thread.backlog if audio_thread is not None else None,
         "speech_pending_since": audio_thread.oldest_pending_start if audio_thread is not None else None,
+        "voice_heard_at": (lambda: audio_thread.last_voice_at) if audio_thread is not None else None,
         "fold_absent_sec": float(engine_cfg.get("fold_absent_sec", 3.0)),
     }
 

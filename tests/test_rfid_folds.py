@@ -438,3 +438,32 @@ class TestStoreSessions:
 
 SESSION_A = {4: ["2c", "Kh"], 5: ["6d", "7h"], 6: ["Js", "8s"]}
 SESSION_B = {4: ["6s", "Qd"], 5: ["4c", "Jh"], 6: ["Jc", "Kh"]}
+
+
+class TestSilentMic:
+    """ワイヤレスマイクの電池切れでハンドが丸ごと記録されなかった（店舗の 4 回目の通しテスト）。"""
+
+    def _table(self, tmp_path, heard):
+        tb = _Table(tmp_path)
+        tb.t._voice_heard_at = lambda: heard["at"]   # noqa: SLF001
+        return tb
+
+    def test_a_silent_mic_is_reported_once(self, tmp_path):
+        heard = {"at": None}
+        tb = self._table(tmp_path, heard)
+        tb.deal()
+        for _ in range(3):
+            tb.now += 30
+            tb.t._check_silent_mic()                 # noqa: SLF001
+        warnings = [n for n in tb.notices if "マイクに声が入っていません" in n]
+        assert len(warnings) == 1
+
+    def test_no_warning_while_the_dealer_speaks(self, tmp_path):
+        heard = {"at": None}
+        tb = self._table(tmp_path, heard)
+        tb.deal()
+        for _ in range(4):
+            tb.now += 30
+            heard["at"] = tb.now - 5
+            tb.t._check_silent_mic()                 # noqa: SLF001
+        assert not any("マイクに声が入っていません" in n for n in tb.notices)

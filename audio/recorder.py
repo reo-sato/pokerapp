@@ -168,6 +168,9 @@ class AudioThread(threading.Thread):
         self._inferring_start: Optional[float] = None
         self._capture_start: Optional[float] = None
         self._audio_dir = Path(audio_dir) if audio_dir is not None else None
+        # 最後に声（有音ゲートを越える音）が入った時刻。プレー中に長く入らなければ engine がマイクの
+        # 電池・受信機を疑って知らせる（ワイヤレスマイクの電池切れでハンドが丸ごと記録されなかった, 2026-09-25）。
+        self.last_voice_at: Optional[float] = None
         self._transcriber = (
             transcriber if transcriber is not None
             else WhisperTranscriber(model_size=model_size, language=language,
@@ -335,6 +338,7 @@ class AudioThread(threading.Thread):
 
             is_voiced = rms >= self._speech_rms
             if is_voiced:
+                self.last_voice_at = now
                 silence_chunks = 0
                 voiced_samples += len(data) // 2
                 if not voiced:

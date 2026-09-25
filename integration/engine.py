@@ -118,6 +118,8 @@ RFID_MUCK_CONFIDENCE = 0.95
 # ボードの枚数 → ストリートと、その始まりの札の位置（ボードの札が置かれたら前のラウンドは終わっている）
 _BOARD_STREETS = {3: ("flop", (1, 2, 3)), 4: ("turn", (4,)), 5: ("river", (5,))}
 _STREET_RANK = {"preflop": 0, "flop": 1, "turn": 2, "river": 3, "showdown": 4}
+# プレー中にこの秒数、マイクに声が入らなければ知らせる（ワイヤレスマイクの電池切れ等, 2026-09-25）
+SILENT_MIC_SEC = 60.0
 # 札の離脱で組み直す（取り消す）ときに入力として残す音声のアクション
 _REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin"})
 
@@ -243,6 +245,7 @@ class IntegrationThread(threading.Thread):
         rfid_folds: bool = False,
         fold_absent_sec: float = FOLD_ABSENT_SEC,
         speech_pending_since: Optional[Callable[[], Optional[float]]] = None,
+        voice_heard_at: Optional[Callable[[], Optional[float]]] = None,
     ) -> None:
         """
         Args:
@@ -304,6 +307,8 @@ class IntegrationThread(threading.Thread):
             fold_absent_sec: 札が離れたまま何秒でフォールドとみなすか（config `engine.fold_absent_sec`）。
             speech_pending_since: まだアクションになっていない発話の一番早い話し始め（`AudioThread.
                          oldest_pending_start`）。札の離脱は、それより前に話された発話を反映してから入れる。
+            voice_heard_at: マイクに最後に声が入った時刻（`AudioThread.last_voice_at`）。プレー中に
+                         `SILENT_MIC_SEC` 入らなければ、マイクの電池・受信機・音量を確かめるよう知らせる。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -384,6 +389,8 @@ class IntegrationThread(threading.Thread):
         if listen_gate is not None:
             listen_gate.clear()
         self._table_empty_since: Optional[float] = None
+        self._voice_heard_at = voice_heard_at
+        self._silent_mic_warned = False
         # いまのハンドを配布の検出で始めたか（直後の「ハンド開始」/ `n` を二重に数えない）。
         self._hand_auto_started = False
         # ショーダウンでマックした席（見せずに降りた = ポットを受け取れない）。
@@ -444,6 +451,7 @@ class IntegrationThread(threading.Thread):
             self._publish_table_state_if_due()
             self._check_deal_presence()     # 手札の配布（ADR-0063）
             self._check_table_cleared()     # 片付け（プレーの終わり）
+            self._check_silent_mic()        # マイクに声が入っているか
             self._poll_departures()         # 席の札の離脱・戻り（フォールド）
 
             try:
@@ -1742,6 +1750,26 @@ class IntegrationThread(threading.Thread):
         elif now - self._table_empty_since >= TABLE_CLEAR_SEC:
             self._set_in_play(False)
 
+    def _check_silent_mic(self) -> None:
+        """プレー中に `SILENT_MIC_SEC` 声が入らなければ 1 ハンドに 1 回知らせる（マイクの電池切れ等）。"""
+        if self._voice_heard_at is None or self._silent_mic_warned or not (self._hand_open and self._in_play):
+            return
+        started = self._hand_started_epoch
+        now = self._clock()
+        if started is None or now - started < SILENT_MIC_SEC:
+            return
+        try:
+            last = self._voice_heard_at()
+        except Exception:  # noqa: BLE001
+            return
+        if last is not None and now - last < SILENT_MIC_SEC:
+            return
+        self._silent_mic_warned = True
+        self._notice(
+            f"{SILENT_MIC_SEC:.0f} 秒以上、マイクに声が入っていません — マイクの電池・受信機・音量を確かめて"
+            r"ください（tools\audio_check.py level で入力の大きさを見られます）"
+        )
+
     def _speech_pending_before_deal(self) -> bool:
         """配る前に話された発話が、まだ認識中か（先に前のハンドへ反映する）。"""
         if self._speech_backlog is None:
@@ -2630,6 +2658,7 @@ class IntegrationThread(threading.Thread):
         self._last_action_at = self._hand_started_epoch
         self._street_marks = {}
         self._streets_synced = set()
+        self._silent_mic_warned = False
         self._set_in_play(True)
         if self._rfid_reset_for_deal:
             self._rfid_reset_for_deal = False   # 配布の検出でリセット済み（ADR-0063）
