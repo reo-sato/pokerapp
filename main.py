@@ -336,6 +336,25 @@ def _make_game_state(cfg: dict, players: list, sb: int, bb: int, button_seat=Non
     return create_game_state(backend, players, sb, bb, button_seat=button_seat)
 
 
+def _auto_hand_kwargs(cfg: dict, audio_thread) -> dict:
+    """手札が配られたら新しいハンド / 勝者の自動判定（ADR-0062）の設定。
+
+    `engine.auto_new_hand` / `engine.auto_winner` は既定で有効（config に無い既存の店舗 PC も有効）。
+    認識待ちの発話の数を渡し、配る前に話された発話を前のハンドへ先に反映させる。
+    """
+    engine_cfg = cfg.get("engine", {})
+    return {
+        "auto_new_hand": bool(engine_cfg.get("auto_new_hand", True)),
+        "auto_winner": bool(engine_cfg.get("auto_winner", True)),
+        "speech_backlog": audio_thread.backlog if audio_thread is not None else None,
+    }
+
+
+def _print_notice(message: str) -> None:
+    """ハンドの開始・勝者・判定待ちのお知らせ（integration スレッドから呼ばれる）。"""
+    print(f"  ● {message}", flush=True)
+
+
 def run_cli() -> None:
     """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。"""
     from core.config import load_config
@@ -493,6 +512,8 @@ def run_cli() -> None:
         control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
         session_repo=session_repo,
         seat_player_map=seat_player_map,
+        on_notice=_print_notice,
+        **_auto_hand_kwargs(cfg, audio_thread),
     )
     if audio_thread is not None:
         audio_thread.start()
@@ -506,6 +527,13 @@ def run_cli() -> None:
             f"席{p['seat']}={p['name']}" for p in session_cfg["players"] if p.get("named", True)
         )
         print(f"お客さんの記録: {seated or 'なし（名前を入力した席がありません）'}")
+    auto = _auto_hand_kwargs(cfg, None)
+    if auto["auto_new_hand"] and rfid_thread is not None:
+        print("手札を配ると新しいハンドが始まります（n は不要）。")
+    if auto["auto_winner"]:
+        print("勝者: ほかが全員フォールドしたら自動。ショーダウンは、見せずにマックしたら「フォールド」"
+              "（アウトオブポジションから順）、全員見せたら「ハンド終了」か次の手札で手札から判定。"
+              "決まらないときは w <席>。")
     print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー  [r <席> <金額>]=リバイ")
     print("ミスディール訂正: [cb <位置>]=ボードの N 枚目を取り消し  [cs <席>]=その席の札を読み直し")
     if session_repo is not None:
@@ -790,6 +818,7 @@ def run_gui() -> None:
         board_presence=board_presence,
         table_state_writer=table_state_writer,
         control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
+        **_auto_hand_kwargs(cfg, audio_thread),
     )
 
     dash.start_threads(

@@ -100,8 +100,15 @@ class HandSummary:
     # フロップは 3 枚の最小値がラウンドの開始。RFID 以外のソースでは空リスト。additive。
     board_timeline: list = field(default_factory=list)
     # split pot（チョップ）時の授与内訳 [{"seat": int, "amount": int}]（ADR-0050 S7, additive）。
-    # 単独勝者の従来ハンドでは None = 出力に含めない（後方互換）。
+    # 単独勝者の従来ハンドでは None = 出力に含めない（後方互換）。ショーダウンを手札で判定して
+    # 2 人以上に配ったとき（引き分け・side pot の勝者が別）も入る（ADR-0062）。
     pot_awards: Optional[list] = None
+    # 勝者を自動で決めたときの決まり方（ADR-0062, additive）: "fold"（ほかが全員フォールド / マック）|
+    # "cards"（ショーダウンを RFID の手札とボードで判定）| "estimated"（決まらないまま次の手札が配られた
+    # = 仮, 要確認）。ディーラーの宣言（`w` / 「ウィナー」）で決めたハンドは None = 出力に含めない。
+    winner_source: Optional[str] = None
+    # ショーダウンで見せた手札の役 [{"seat", "hole_cards", "hand", "best"}]（winner_source="cards" のとき）。
+    showdown: Optional[list] = None
 
     def to_dict(self) -> dict:
         data = {
@@ -124,4 +131,8 @@ class HandSummary:
         }
         if self.pot_awards is not None:
             data["pot_awards"] = self.pot_awards
+        if self.winner_source is not None:
+            data["winner_source"] = self.winner_source
+        if self.showdown is not None:
+            data["showdown"] = self.showdown
         return data

@@ -269,6 +269,25 @@ class GameStateManager:
     def pots(self) -> list[dict]:
         return []  # legacy はサイドポットを扱わない
 
+    # 勝者の自動判定（ADR-0062）は rules-aware backend だけ。legacy は手番の終わりも side pot も
+    # 分からないので使わない（以下は Protocol を満たすための最小実装）。
+    rules_aware = False
+
+    def acting_order(self) -> list[int]:
+        return sorted(self._players)
+
+    def current_pots(self) -> list[dict]:
+        return [{"amount": self._pot, "eligible_seats": list(self._active_seats)}] if self._pot else []
+
+    def end_hand_awards(self, awards: dict[int, int]) -> None:
+        if sum(awards.values()) != self._pot:
+            raise ValueError(f"awards {awards} do not add up to the pot {self._pot}")
+        for seat, amount in awards.items():
+            if seat not in self._players:
+                raise ValueError(f"Unknown seat: {seat}")
+            self._players[seat].stack += amount
+        self._pot = 0
+
     def committed(self, seat: int) -> int:
         return 0  # legacy はストリート別コミット額を追跡しない
 

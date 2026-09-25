@@ -91,12 +91,18 @@ def replay_events(
     bb: int,
     session_id: str,
     out_dir: str | Path,
+    auto_new_hand: bool = False,
+    auto_winner: bool = False,
 ) -> list[HandSummary]:
     """Event 列を timestamp 昇順で再構築し、確定した HandSummary 群を返す。
 
     `out_dir` には JsonWriter が `{session_id}.json` を書く (session_id 源でもある)。
     決定性のため clock を注入し、ActionRecord/HandSummary の timestamp を各イベントの
     timestamp に固定する。
+
+    `auto_new_hand` / `auto_winner`（ADR-0062, 既定 False）: 手札の配布でハンドを始め、勝者を自動で決めた
+    セッション（店舗の既定）を再生するときに True にする。replay は発話の認識待ちを持たないので、
+    配布を検出した時点で新しいハンドを始める。
     """
     gs = create_game_state(backend, players, sb, bb)
     json_writer = JsonWriter(out_dir, session_id)
@@ -110,6 +116,8 @@ def replay_events(
         on_hand=summaries.append,
         clock=clock,
         stop_event=threading.Event(),
+        auto_new_hand=auto_new_hand,
+        auto_winner=auto_winner,
     )
 
     for ev in sorted(events, key=lambda e: (e.timestamp, _ORDER[type(e)])):
@@ -132,6 +140,7 @@ def replay_fixture(case_dir: str | Path, out_dir: str | Path) -> list[HandSummar
     """`<case_dir>/{setup.json, events.jsonl}` を読み replay する。
 
     setup.json = {"backend", "sb", "bb", "session_id", "players":[{"seat","name","stack"},...]}。
+    任意で "auto_new_hand" / "auto_winner"（ADR-0062, 既定 false）。
     """
     case_dir = Path(case_dir)
     setup = json.loads((case_dir / "setup.json").read_text(encoding="utf-8"))
@@ -147,4 +156,6 @@ def replay_fixture(case_dir: str | Path, out_dir: str | Path) -> list[HandSummar
         sb=setup["sb"], bb=setup["bb"],
         session_id=setup["session_id"],
         out_dir=out_dir,
+        auto_new_hand=bool(setup.get("auto_new_hand", False)),
+        auto_winner=bool(setup.get("auto_winner", False)),
     )

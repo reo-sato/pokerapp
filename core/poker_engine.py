@@ -61,6 +61,12 @@ class PokerEngine(Protocol):
     def pots(self) -> list[dict]: ...
     def committed(self, seat: int) -> int: ...
 
+    # additive（勝者の自動判定, ADR-0062）。`rules_aware` が False の backend では使わない。
+    rules_aware: bool
+    def acting_order(self) -> list[int]: ...
+    def current_pots(self) -> list[dict]: ...
+    def end_hand_awards(self, awards: dict[int, int]) -> None: ...
+
     @property
     def hand_id(self) -> int: ...
     @property
@@ -106,6 +112,10 @@ class PokerkitGameState:
     - street は betting 完了で **自動進行**（`advance_street` の外部シグナルは cross-check 扱い）。
     - mid-hand の `update_stack` / `rebuy` は次ハンドから反映（pokerkit state は hand 単位）。
     """
+
+    # ルールの状態機械を持つ（手番・ベッティングの終わり・side pot が分かる）。勝者の自動判定は
+    # これが True の backend だけで行う（ADR-0062）。
+    rules_aware = True
 
     def __init__(
         self, players: list[PlayerState], sb: int, bb: int,
@@ -227,6 +237,42 @@ class PokerkitGameState:
         self._hand_active = False
         logger.info("Hand %d ended (pokerkit, chop). Awards: %s", self._hand_id, awards)
         return awards
+
+    def end_hand_awards(self, awards: dict[int, int]) -> None:
+        """ショーダウンの判定どおりに pot を配って確定する（席 → 受け取る額, ADR-0062）。
+
+        side pot の勝者が main pot と違う場合（短いスタックのオールイン）も正しく配れる。
+        合計は pot と一致しなければならない（ずれていたら何も変えずに ValueError）。
+        """
+        st = self._state
+        if st is None or not self._hand_active:
+            raise RuntimeError("end_hand_awards called without an active hand")
+        for seat in awards:
+            if seat not in self._players:
+                raise ValueError(f"Unknown seat: {seat}")
+        pot_total = sum(self._hand_start_stacks) - sum(st.stacks)
+        if sum(awards.values()) != pot_total or any(a < 0 for a in awards.values()):
+            raise ValueError(f"awards {awards} do not add up to the pot {pot_total}")
+        self._final_pots = self._snapshot_pots(pot_total)
+        for s in self._seats:
+            self._stacks[s] = st.stacks[self._seat_to_idx[s]]
+        for seat, amount in awards.items():
+            self._stacks[seat] += amount
+        self._hand_active = False
+        logger.info("Hand %d ended (pokerkit, showdown). Awards: %s", self._hand_id, awards)
+
+    def acting_order(self) -> list[int]:
+        """このハンドのフロップ以降の手番の順（一番アウトオブポジション = ボタンの次の席が先頭、
+        ボタンが最後。heads-up はボタンでない方が先頭）。"""
+        return list(self._order)
+
+    def current_pots(self) -> list[dict]:
+        """進行中のハンドの main / side pot（`[{"amount", "eligible_seats"}]`, main pot が先頭）。
+        フォールドした席は対象に入らない。状態は変えない。"""
+        st = self._state
+        if st is None or not self._hand_active:
+            return []
+        return self._snapshot_pots(sum(self._hand_start_stacks) - sum(st.stacks))
 
     # ――― アクション適用 ―――
 

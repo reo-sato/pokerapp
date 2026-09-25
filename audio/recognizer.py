@@ -248,6 +248,75 @@ def parse_amount(text: str) -> int:
     return parse_amount_ex(text).value
 
 
+# 仮名で書き起こされた数の読み → 漢数字（ADR-0062）。Whisper は「ベット なな」を「ベトナナ」のように
+# 仮名で書くことがある。照合前にひらがなはカタカナへ寄せてあるので、カタカナだけを持つ。
+# 同じ位置では長い読みを先に試す（「キュウ」「ナナ」を「キュ」「ナ」…と切らない）。
+_KANA_NUMBER_WORDS: tuple[tuple[str, str], ...] = tuple(sorted((
+    ("イチ", "一"), ("イッ", "一"), ("ニ", "二"), ("サン", "三"), ("ヨン", "四"),
+    ("ゴ", "五"), ("ロク", "六"), ("ロッ", "六"), ("ナナ", "七"), ("シチ", "七"),
+    ("ハチ", "八"), ("ハッ", "八"), ("キュウ", "九"), ("キュー", "九"),
+    ("ジュウ", "十"), ("ジュー", "十"),
+    ("ヒャク", "百"), ("ビャク", "百"), ("ピャク", "百"),
+    ("セン", "千"), ("ゼン", "千"), ("マン", "万"),
+), key=lambda w: -len(w[0])))
+# 促音の形（イッ / ロッ / ハッ）は単位（セン / ピャク）の前にしか来ない
+_KANA_NUMBER_CLIPPED = frozenset({"イッ", "ロッ", "ハッ"})
+# 数の読みのあとに続いてよいカタカナ（ひらがなの「です」「で」「まい」もカタカナに寄っている）
+_KANA_NUMBER_SUFFIXES = ("デス", "デ", "ダ", "マイ", "ポイント", "エン")
+_KANJI_DIGITS_ONLY = frozenset("一二三四五六七八九")
+
+
+def _is_katakana(ch: str) -> bool:
+    return "ァ" <= ch <= "ヺ"
+
+
+def _kana_number_at(text: str, pos: int) -> Optional[tuple[int, int, str]]:
+    """`pos` から始まる仮名の数の読みを漢数字にする。(開始, 終了, 漢数字) か、数でなければ None。
+
+    「ニシマス」（〜にします）の「ニ」や「ゴール」の「ゴ」のように、続きがほかの言葉なら数と
+    みなさない（読みの直後が文の終わり・区切り・カタカナ以外・「です」等のときだけ数）。
+    """
+    i, words = pos, []
+    while i < len(text):
+        for kana, kanji in _KANA_NUMBER_WORDS:
+            if text.startswith(kana, i):
+                words.append((kana, kanji))
+                i += len(kana)
+                while i < len(text) and text[i] == "ー":   # 「ゴー」「ニー」のように伸ばした読み
+                    i += 1
+                break
+        else:
+            break
+    if not words:
+        return None
+    rest = text[i:]
+    if rest and _is_katakana(rest[0]) and not rest.startswith(_KANA_NUMBER_SUFFIXES):
+        return None
+    kanji = "".join(k for _, k in words)
+    for (kana, _), nxt in zip(words, [*kanji[1:], ""]):
+        if kana in _KANA_NUMBER_CLIPPED and nxt not in ("千", "百"):
+            return None
+    if any(a in _KANJI_DIGITS_ONLY and b in _KANJI_DIGITS_ONLY for a, b in zip(kanji, kanji[1:])):
+        return None                                          # 「ニサン」のように数字が 2 つ並ぶ
+    return pos, i, kanji
+
+
+def _kana_amount_to_kanji(norm: str, keyword_end: int) -> str:
+    """アクションの語の直後にある仮名の数の読みを漢数字に置き換えた文字列を返す（ADR-0062）。
+
+    「ベトナナ」→「ベト七」、「ベット にじゅうさん」→「ベット 二十三」。語の直後だけを見るのは、
+    ほかの言葉の中の「ゴ」「ニ」を金額と取り違えないため。
+    """
+    i = keyword_end
+    while i < len(norm) and norm[i] in _SPLIT_DELIMITERS:
+        i += 1
+    found = _kana_number_at(norm, i)
+    if found is None:
+        return norm
+    start, end, kanji = found
+    return norm[:start] + kanji + norm[end:]
+
+
 def _keyword_matches(norm: str) -> list[tuple[int, int, str]]:
     """正規化済みテキスト中のアクションキーワードの出現 (位置, 長さ, action) を返す。
 
@@ -396,7 +465,8 @@ def parse_action(
 
     # 席番号表現（シート1 / seat 3 等）を除去してから金額を抽出する。
     # 除去しないと parse_amount() が席番号の数字を最初の金額候補として拾ってしまう。
-    amount = parse_amount_ex(_strip_seat_references(norm))
+    # 語の直後の仮名の数（「ベトナナ」の「ナナ」）は漢数字にしてから読む（ADR-0062）。
+    amount = parse_amount_ex(_strip_seat_references(_kana_amount_to_kanji(norm, span_end)))
     if amount.ambiguous:
         flags.append("ambiguous_amount")
 

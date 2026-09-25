@@ -14,8 +14,10 @@ WHISPER_PROMPT_JA = (
 ACTION_KEYWORDS: dict[str, str] = {
     "ベット": "bet",
     "ベッド": "bet",          # Whisper が「ベット」を「ベッド」と書き起こす（店舗の実測 2026-09-25, ADR-0061）
+    "ベト": "bet",            # 「ベット なな」を「ベトナナ」と書き起こした（店舗の実測 2026-09-25, ADR-0062）
     "bet": "bet",
     "コール": "call",
+    "ゴール": "call",         # 「レイズ、コール」の「コール」を「ゴール」と書き起こした（同上）
     "call": "call",
     "レイズ": "raise",
     "raise": "raise",
@@ -43,6 +45,8 @@ ACTION_KEYWORDS: dict[str, str] = {
     "スプリット": "winner",
     "ハンド開始": "new_hand",
     "new hand": "new_hand",
+    # ショーダウンで残った全員が手札を見せた = 手札とボードで勝者を決めてよい（ADR-0062）
+    "ハンド終了": "end_hand",
 }
 
 # 漢数字 → 数値

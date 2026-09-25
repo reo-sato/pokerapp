@@ -82,7 +82,17 @@ _CONF_CAMERA_ONLY       = 0.30
 _BOARD_STREET_THRESHOLDS = {3: "flop", 4: "turn", 5: "river"}
 
 # G1（ADR-0049）: 状態を大きく動かす制御語。config の閾値 > 0 のとき低信頼 ASR を保留する。
-_CONTROL_ACTIONS = frozenset({"new_hand", "winner", "showdown"})
+_CONTROL_ACTIONS = frozenset({"new_hand", "winner", "showdown", "end_hand"})
+
+# ――― 手札が配られたら新しいハンド / 勝者の自動判定（ADR-0062）―――
+# 次のハンドの配布とみなす時間窓（秒）。この間に 2 席以上へ札が配られたら配布と判断する。
+# 片付けの途中で 1 枚だけ別の席のリーダーに触れた札は、窓を過ぎると捨てる。
+DEAL_WINDOW_SEC = 15.0
+# 配布を検出してから、それより前に話された発話の認識を待つ上限（秒）。認識が遅れていても、
+# 前のハンドのアクション（最後のコールやマック）を新しいハンドに入れないため。
+DEAL_SPEECH_WAIT_SEC = 60.0
+# 配った直後（アクション前）のハンドに届いた `w` / 「ウィナー」を、前のハンドへの宣言とみなす時間（秒）。
+LATE_WINNER_SEC = 60.0
 
 
 def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
@@ -180,6 +190,10 @@ class IntegrationThread(threading.Thread):
         table_state_writer: "Optional[TableStateWriter]" = None,
         control_conf_threshold: float = 0.0,
         board_presence: Optional[Callable[[], dict]] = None,
+        auto_new_hand: bool = False,
+        auto_winner: bool = False,
+        speech_backlog: Optional[Callable[[], int]] = None,
+        on_notice: Optional[Callable[[str], None]] = None,
     ) -> None:
         """
         Args:
@@ -220,6 +234,17 @@ class IntegrationThread(threading.Thread):
             board_presence: ボードの読み取り状況（外れた札 / 数える前の札）を返す関数
                          （`RFIDThread.board_presence`, ADR-0058）。卓状態の「外れた」「確認中」表示にだけ
                          使い、ボードの記録は変えない。None なら表示しない。
+            auto_new_hand: 手札が配られたら新しいハンドを始める（ADR-0062, 既定 False = 従来どおり
+                         `n` / 「ハンド開始」だけ）。前のハンドが終わっていなければ先に確定する。
+            auto_winner: 勝者を自動で決める（ADR-0062, 既定 False）。rules-aware backend のみ。
+                         ほかが全員フォールドしたら残った人。ベッティングが終わったあとの「フォールド」は
+                         ショーダウンでのマック（一番アウトオブポジションから順）。マックが無ければ
+                         「ハンド終了」か次の配布のときに手札とボードで判定する。
+            speech_backlog: 認識待ちの発話の数を返す関数（`AudioThread.backlog`）。配布を検出しても、
+                         それより前に話された発話を先に反映してから新しいハンドを始めるために使う。
+                         None なら待たない（音声なし・replay）。
+            on_notice: 操作する人へのお知らせ（ハンドの開始・勝者・判定待ち）を受け取る関数。
+                         integration スレッドで呼ばれる。None なら logger だけ。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -278,6 +303,24 @@ class IntegrationThread(threading.Thread):
         # 要レビューにする（個々の ActionRecord では捕捉できないため）。
         self._hand_needs_review: bool = False
 
+        # ――― 手札が配られたら新しいハンド / 勝者の自動判定（ADR-0062）―――
+        self._auto_new_hand = auto_new_hand
+        self._auto_winner = auto_winner
+        self._speech_backlog = speech_backlog
+        self._on_notice = on_notice
+        self._rules_aware = bool(getattr(game_state, "rules_aware", False))
+        # 次のハンドとして配られた札（まだハンドに入れていない）と、配布を検出した時刻。
+        self._deal_cards: list[RFIDEvent] = []
+        self._deal_at: Optional[float] = None          # 最初の札が見えた時刻
+        self._deal_detected_at: Optional[float] = None  # 検出した時刻（engine の時計）
+        # いまのハンドを配布の検出で始めたか（直後の「ハンド開始」/ `n` を二重に数えない）。
+        self._hand_auto_started = False
+        # ショーダウンでマックした席（見せずに降りた = ポットを受け取れない）。
+        self._showdown_mucks: list[int] = []
+        self._showdown_notice_shown = False
+        # 直前に確定したハンド（自動で決めた勝者のあとに届いた `w` / 「ウィナー」を扱う）。
+        self._last_result: Optional[dict] = None
+
     def stop(self) -> None:
         self._stop_event.set()
 
@@ -309,6 +352,8 @@ class IntegrationThread(threading.Thread):
             try:
                 event = self._audio_queue.get(timeout=0.1)
             except queue.Empty:
+                # 配布を検出していて、それより前の発話がもう無ければ新しいハンドを始める（ADR-0062）
+                self._start_dealt_hand_if_ready()
                 self._expire_buffers()
                 continue
 
@@ -374,6 +419,9 @@ class IntegrationThread(threading.Thread):
 
     def _handle_board_rfid(self, ev: RFIDEvent) -> None:
         """ボードカードの RFID イベントを処理する。"""
+        if self._deal_at is not None and ev.timestamp >= self._deal_at:
+            # 配ったあとのボードの札は新しいハンドのもの（ADR-0062）
+            self._start_dealt_hand_if_ready(force=True)
         if not ev.card:
             logger.warning(
                 "Board RFID event has no card (tag=%s reader=%s) — needs_review",
@@ -430,6 +478,9 @@ class IntegrationThread(threading.Thread):
 
     def _handle_seat_rfid(self, ev: RFIDEvent) -> None:
         """座席カードの RFID イベントを処理する (ホールカード蓄積 + アクション照合用)。"""
+        if self._auto_new_hand and ev.card and ev.seat is not None and self._is_next_deal(ev):
+            self._collect_deal(ev)   # 次のハンドの札（ADR-0062）。いまのハンドには入れない
+            return
         # ホールカード蓄積 (カード情報がある場合のみ)
         if ev.card and ev.seat is not None:
             seat_cards = self._hole_cards.setdefault(ev.seat, [])
@@ -608,6 +659,10 @@ class IntegrationThread(threading.Thread):
         """audio イベントの入口。例外はここで捕捉して unresolved レコードに変換する
         （ADR-0047 B4: live の run() 捕捉と replay の直接呼び出しで同一セマンティクス。
         イベントの無音消失を全廃する = B2）。"""
+        if self._deal_at is not None and _spoken_at(event) >= self._deal_at:
+            # 配ったあとに話されたアクションは新しいハンドのもの。前に話されたもの（前のハンドの
+            # 最後のコールやマック）は、認識が遅れて届いても前のハンドに入れる（ADR-0062）。
+            self._start_dealt_hand_if_ready(force=True)
         try:
             self._dispatch_audio_event(event)
         except Exception:
@@ -629,8 +684,12 @@ class IntegrationThread(threading.Thread):
             return
 
         if action == "new_hand":
+            if self._hand_auto_started and self._hand_open and not self._current_actions:
+                # 手札を配った時点で始めている（ADR-0062）。二重に始めるとボタンが 2 つ進む。
+                self._notice(f"ハンド {gs.hand_id} は手札が配られた時点で始めています（「ハンド開始」は不要です）")
+                return
             # G1: 勝者未宣言のまま新ハンドが宣言された → 進行中の記録を捨てず異常確定する。
-            if self._hand_open and self._current_actions:
+            if self._hand_open and self._current_actions and not self._finish_by_rules(event):
                 logger.warning(
                     "new_hand mid-hand (hand_id=%d): 勝者未宣言のため異常確定してから開始する",
                     gs.hand_id,
@@ -638,6 +697,10 @@ class IntegrationThread(threading.Thread):
                 self._hand_needs_review = True
                 self._finalize_hand(self._fallback_winner_seat(), event)
             self._start_new_hand(event)
+            return
+
+        if action == "end_hand":
+            self._handle_end_hand(event)
             return
 
         if action == "showdown":
@@ -669,6 +732,12 @@ class IntegrationThread(threading.Thread):
         legal_ctx = gs.legal_context()
         if legal_ctx.legal_actions:
             self._handle_rules_aware_action(event, legal_ctx)
+        elif self._betting_over():
+            # ベッティングが終わってショーダウンを待っている。ここでの「フォールド」はマック（ADR-0062）
+            if action == "fold" and self._auto_winner:
+                self._apply_showdown_muck(event)
+            else:
+                self._emit_unresolved(event, reason="betting_over")
         else:
             self._handle_legacy_action(event)
 
@@ -677,11 +746,23 @@ class IntegrationThread(threading.Thread):
         fallback 連鎖（ADR-0047 B5: 単独 active 席 → 最後のアグレッサー + review → 手番席）。"""
         seats = _extract_all_seat_nos(event.raw_text)
 
+        if (
+            self._hand_auto_started and self._hand_open and not self._current_actions
+            and self._last_result
+            and _spoken_at(event) - (self._hand_started_epoch or 0.0) <= LATE_WINNER_SEC
+        ):
+            # 配ったばかりのハンドに勝者は無い = 前のハンドへの宣言が遅れて届いた（ADR-0062）
+            self._late_winner(event, seats)
+            return
+
         # 進行中のハンドが無い（新ハンド前 / 確定済み）winner は保留する（ISSUE-0028）。
         # pokerkit は end_hand 後に actor を持たず、確定済みハンドへの再宣言を通すとポットの
         # 二重加算か（end_hand が例外になり）空 summary の量産になる。legacy は
         # is_hand_active が常に True なので従来どおり下の判定に進む。
         if not self._game_state.is_hand_active():
+            if self._auto_winner and self._last_result:
+                self._late_winner(event, seats)
+                return
             self._emit_unresolved(event, reason="no_active_hand")
             return
 
@@ -704,6 +785,9 @@ class IntegrationThread(threading.Thread):
 
         winner_seat = seats[0] if seats else None
         if winner_seat is None:
+            # 席を言わない「ウィナー」: ショーダウンなら残った全員が見せたとして手札で決める（ADR-0062）
+            if self._finish_by_rules(event):
+                return
             winner_seat = self._fallback_winner_seat()
             if winner_seat is None:
                 self._emit_unresolved(event, reason="winner_seat_unresolved")
@@ -723,14 +807,11 @@ class IntegrationThread(threading.Thread):
         4. どれも取れなければ None（呼び出し側が保留レコード化）。
         """
         gs = self._game_state
-        try:
-            active = gs.get_active_seats()
-        except Exception:
-            active = []
+        active = self._remaining_seats()   # ショーダウンでマックした席は除く（ADR-0062）
         if len(active) == 1:
             return active[0]
         for rec in reversed(self._current_actions):
-            if rec.action in ("bet", "raise", "allin"):
+            if rec.action in ("bet", "raise", "allin") and (not active or rec.seat in active):
                 self._hand_needs_review = True
                 return rec.seat
         try:
@@ -739,6 +820,349 @@ class IntegrationThread(threading.Thread):
             return None
         self._hand_needs_review = True
         return seat
+
+    # ――― 手札が配られたら新しいハンド（ADR-0062）―――
+
+    def _notice(self, message: str) -> None:
+        """操作する人へのお知らせ（CLI に出す）。logger にも残す。"""
+        logger.info("%s", message)
+        if self._on_notice is not None:
+            try:
+                self._on_notice(message)
+            except Exception:  # noqa: BLE001 — 表示の失敗で記録を止めない
+                logger.exception("on_notice failed")
+
+    def _hand_in_play(self) -> bool:
+        """配り終えてプレーが始まっているか（アクション・ボードがある / ベッティングが終わった）。
+
+        まだ何も起きていないハンドに届いた札は、同じハンドの配り直しとして扱う（ADR-0058）。
+        """
+        return bool(self._current_actions or self._board_positions or self._betting_over())
+
+    def _is_next_deal(self, ev: RFIDEvent) -> bool:
+        """この席の札が **次のハンドの配布**か（ADR-0062）。
+
+        - ハンドが無い（前のハンドは確定済み / まだ始めていない）ときに卓の席へ置かれた札。
+        - プレー中のハンドで、手札 2 枚がそろっている席に来た別の札・差し替え・別の席の札。
+          手札がそろっていない席に来た新しい札は、読み遅れた手札としていまのハンドに入れる。
+        """
+        try:
+            seats = self._game_state.get_stacks()
+        except Exception:  # noqa: BLE001
+            return False
+        if ev.seat not in seats:
+            return False                     # 卓で使っていない席のリーダー
+        if not self._hand_open:
+            return True
+        cards = self._hole_cards.get(ev.seat, [])
+        if ev.card in cards or not self._hand_in_play():
+            return False                     # 同じ札の読み直し / まだ配っている（配り直し）
+        return (
+            ev.replaces is not None
+            or len(cards) >= 2
+            or ev.card in self._board_cards
+            or any(ev.card in other for seat, other in self._hole_cards.items() if seat != ev.seat)
+        )
+
+    def _collect_deal(self, ev: RFIDEvent) -> None:
+        """次のハンドの札を集め、2 席以上に配られたら配布と判断する。"""
+        if self._deal_at is None:
+            # 片付けの途中で 1 枚だけ触れた札などは、窓を過ぎたら捨てる
+            self._deal_cards = [
+                e for e in self._deal_cards if ev.timestamp - e.timestamp <= DEAL_WINDOW_SEC
+            ]
+        if not any(e.seat == ev.seat and e.card == ev.card for e in self._deal_cards):
+            self._deal_cards.append(ev)
+        seats = sorted({e.seat for e in self._deal_cards})
+        if self._deal_at is None and len(seats) >= 2:
+            self._deal_at = min(e.timestamp for e in self._deal_cards)
+            self._deal_detected_at = self._clock()
+            logger.info("手札の配布を検出しました（席 %s）", seats)
+        self._start_dealt_hand_if_ready()
+
+    def _speech_pending_before_deal(self) -> bool:
+        """配る前に話された発話が、まだ認識中か（先に前のハンドへ反映する）。"""
+        if self._speech_backlog is None:
+            return False
+        waited = self._clock() - (self._deal_detected_at if self._deal_detected_at is not None
+                                  else self._clock())
+        if waited > DEAL_SPEECH_WAIT_SEC:
+            logger.warning(
+                "配布の検出から %.0f 秒たっても認識待ちの発話があります — 新しいハンドを先に始めます",
+                waited,
+            )
+            return False
+        try:
+            pending = int(self._speech_backlog())
+        except Exception:  # noqa: BLE001 — 待てないなら始める
+            return False
+        return pending > 0 or not self._audio_queue.empty()
+
+    def _start_dealt_hand_if_ready(self, force: bool = False) -> None:
+        """配布を検出していれば、そのハンドを始める（前のハンドが終わっていなければ先に確定する）。"""
+        if self._deal_at is None:
+            return
+        if not force and self._speech_pending_before_deal():
+            return
+        if self._hand_open and self._hand_in_play():
+            self._close_hand_for_next_deal()
+        if self._hand_open:
+            # 配る前に「ハンド開始」/ n で始めていたハンド → 配った札をこのハンドの手札にする
+            self._adopt_deal_cards()
+            return
+        self._start_new_hand(started_at=self._deal_at, auto=True)
+
+    def _adopt_deal_cards(self) -> None:
+        """配布の検出で集めた札を、いまのハンドの手札にする（配布と判断していない札は捨てる）。"""
+        if self._deal_at is not None:
+            for ev in self._deal_cards:
+                cards = self._hole_cards.setdefault(ev.seat, [])
+                if len(cards) < 2 and not any(ev.card in c for c in self._hole_cards.values()):
+                    cards.append(ev.card)
+            logger.info("配られた手札: %s", {s: c for s, c in self._hole_cards.items() if c})
+        self._deal_cards = []
+        self._deal_at = None
+        self._deal_detected_at = None
+
+    def _close_hand_for_next_deal(self) -> None:
+        """次の手札が配られたのに確定していないハンドを、確定してから次へ進む。"""
+        if self._finish_by_rules(ended_ts=self._deal_at):
+            return
+        gs = self._game_state
+        remaining = self._remaining_seats()
+        if len(remaining) == 1:   # 全員フォールド（勝者の自動判定が off でも決まっている）
+            self._finalize_hand(remaining[0], winner_source="fold", ended_ts=self._deal_at)
+            return
+        winner = self._fallback_winner_seat()
+        if winner is None:
+            remaining = self._remaining_seats()
+            winner = remaining[0] if remaining else min(gs.get_stacks())
+        self._hand_needs_review = True
+        self._notice(
+            f"ハンド {gs.hand_id} の勝者が決まらないまま次の手札が配られました — "
+            f"席{winner} を仮の勝者にします（要確認）"
+        )
+        self._finalize_hand(winner, winner_source="estimated", ended_ts=self._deal_at)
+
+    # ――― 勝者の自動判定（ADR-0062）―――
+
+    def _remaining_seats(self) -> list[int]:
+        """まだポットを争っている席（フォールドもショーダウンでのマックもしていない）。"""
+        try:
+            active = self._game_state.get_active_seats()
+        except Exception:  # noqa: BLE001
+            return []
+        return [s for s in active if s not in self._showdown_mucks]
+
+    def _betting_over(self) -> bool:
+        """ハンドの途中でベッティングが終わっている（手番が無い = ショーダウン待ち）か。"""
+        if not (self._rules_aware and self._hand_open):
+            return False
+        gs = self._game_state
+        try:
+            return gs.is_hand_active() and gs.legal_context().actor_seat is None
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _maybe_finish_hand(self, event: Optional[AudioEvent] = None) -> bool:
+        """ほかが全員フォールド（マック）したら、残った人の勝ちで確定する。
+
+        2 人以上が残ってベッティングが終わったとき（ショーダウン）は、ここでは決めない。見せずに
+        マックした人は手札が強くてもポットを失うので、手札で決めてよいのは誰もマックしなかった
+        ときだけ（「ハンド終了」/ 次の配布 = `_finish_showdown`）。
+        """
+        if not (self._auto_winner and self._rules_aware and self._hand_open):
+            return False
+        if not self._game_state.is_hand_active():
+            return False
+        remaining = self._remaining_seats()
+        if len(remaining) == 1:
+            self._finalize_hand(remaining[0], event, winner_source="fold")
+            return True
+        if len(remaining) >= 2 and self._betting_over() and not self._showdown_notice_shown:
+            self._showdown_notice_shown = True
+            self._notice(
+                "ショーダウン（" + "・".join(f"席{s}" for s in remaining) + "）— 見せずにマックしたら"
+                "「フォールド」、全員見せたら「ハンド終了」（言わなければ次の手札が配られたときに判定）"
+            )
+        return False
+
+    def _finish_by_rules(
+        self, event: Optional[AudioEvent] = None, *, explicit: bool = False,
+        ended_ts: Optional[float] = None,
+    ) -> bool:
+        """ルールで勝者が決まるなら確定する（1 人残り / ショーダウンを手札で）。決まったら True。"""
+        if not (self._auto_winner and self._rules_aware and self._hand_open):
+            return False
+        if not self._game_state.is_hand_active():
+            return False
+        remaining = self._remaining_seats()
+        if len(remaining) == 1:
+            self._finalize_hand(remaining[0], event, winner_source="fold", ended_ts=ended_ts)
+            return True
+        if len(remaining) >= 2 and self._betting_over():
+            return self._finish_showdown(event, explicit=explicit, ended_ts=ended_ts)
+        return False
+
+    def _finish_showdown(
+        self, event: Optional[AudioEvent] = None, *, explicit: bool = False,
+        ended_ts: Optional[float] = None,
+    ) -> bool:
+        """残った全員が手札を見せたとして、RFID の手札とボードで勝者を決める（side pot も）。"""
+        from core.showdown import award_pots, evaluate_hands
+
+        gs = self._game_state
+        remaining = self._remaining_seats()
+        board = list(self._board_cards)
+        gaps = [] if len(board) == 5 else [f"ボード {len(board)}/5 枚"]
+        for seat in remaining:
+            n = len(self._hole_cards.get(seat, []))
+            if n < 2:
+                gaps.append(f"席{seat} の手札 {n}/2 枚")
+        cards = board + [c for s in remaining for c in self._hole_cards.get(s, [])]
+        if not gaps and len(set(cards)) != len(cards):
+            gaps.append("同じ札が 2 か所にあります")
+        if gaps:
+            message = f"勝者を手札で判定できません（{'・'.join(gaps)}）— w <席> で入力してください"
+            if explicit:
+                self._notice(message)
+            else:
+                logger.info("%s", message)
+            return False
+        try:
+            hands = evaluate_hands({s: self._hole_cards[s] for s in remaining}, board)
+            pots = gs.current_pots() or [{"amount": gs.pot, "eligible_seats": remaining}]
+            awards, winners_by_pot = award_pots(pots, hands, gs.acting_order())
+        except Exception:  # noqa: BLE001 — 判定できなければ人に任せる
+            logger.exception("手札での勝者判定に失敗しました")
+            if explicit:
+                self._notice("勝者を手札で判定できませんでした — w <席> で入力してください")
+            return False
+        if not winners_by_pot:
+            return False
+        order = gs.acting_order()
+        showdown = [hands[s].to_dict() for s in sorted(remaining, key=lambda s: order.index(s)
+                                                       if s in order else s)]
+        self._finalize_hand(
+            winners_by_pot[0][0], event, awards=awards, winner_source="cards",
+            showdown=showdown, ended_ts=ended_ts,
+        )
+        return True
+
+    def _mucked_stronger_hand(self, seat: int, remaining: list[int]) -> bool:
+        """マックした席の手札が、残りの誰よりも強かったか（手札とボードが全部読めているときだけ）。"""
+        from core.showdown import evaluate_hands
+
+        board = list(self._board_cards)
+        if len(board) != 5 or any(len(self._hole_cards.get(s, [])) != 2 for s in remaining):
+            return False
+        try:
+            hands = evaluate_hands({s: self._hole_cards[s] for s in remaining}, board)
+        except Exception:  # noqa: BLE001 — 参考情報
+            return False
+        others = [hands[s].value for s in remaining if s != seat]
+        return bool(others) and hands[seat].value > max(others)
+
+    def _apply_showdown_muck(self, event: AudioEvent) -> None:
+        """ベッティングが終わったあとの「フォールド」= ショーダウンでのマック。
+
+        見せずにマックした人は、手札が強くてもポットを受け取れない。席が言われなければ、残っている中で
+        一番アウトオブポジション（ボタンの次の席から）の人がマックしたとみなす（店の運用）。
+        手札で見るとマックした人の方が強かったときは、勝者はマックしなかった人のまま要確認にする。
+        """
+        gs = self._game_state
+        remaining = self._remaining_seats()
+        sensed = self._sensed_seat(event)
+        by_order = sensed is None or sensed not in remaining
+        if by_order:
+            seat = next((s for s in gs.acting_order() if s in remaining), None)
+        else:
+            seat = sensed
+        if seat is None or len(remaining) < 2:
+            self._emit_unresolved(event, reason="betting_over")
+            return
+        stronger = self._mucked_stronger_hand(seat, remaining)
+        self._showdown_mucks.append(seat)
+        confidence = derive_confidence(
+            apply_ok=True,
+            whisper_conf=(
+                event.confidence if event.confidence is not None else MISSING_WHISPER_CONF
+            ),
+            audio_agree=True,
+            rfid_present=False, rfid_agree=False,
+            camera_present=False, camera_agree=False,
+        )
+        reasons = ["showdown_muck"]
+        if by_order and len(remaining) > 2:
+            reasons.append("muck_order_assumed")   # 3 人以上: 順番どおりにマックしたとは限らない
+        if stronger:
+            reasons.append("mucked_stronger_hand")
+        reasons.extend(event.parse_flags)
+        needs_review = len(reasons) > 1 or confidence < REVIEW_THRESHOLD
+        if by_order:
+            actor_source = "engine_prior"
+        elif event.seat == seat:
+            actor_source = "spoken_seat"
+        else:
+            actor_source = "spoken_position"
+        record = ActionRecord(
+            hand_id=gs.hand_id,
+            timestamp=self._iso(event.timestamp),
+            street=Street.SHOWDOWN.value,
+            seat=seat,
+            player_name=gs.get_player_name(seat),
+            action="fold",
+            amount=0,
+            pot_after=gs.pot,
+            stack_after=gs.get_stack(seat),
+            source={"camera": False, "audio": True, "rfid": False},
+            needs_review=needs_review,
+            confidence=confidence,
+            position=self._position_of(seat),
+            actor_source=actor_source,
+            reason="+".join(reasons),
+            asr_confidence=event.confidence,
+            apply_ok=True,
+            raw_text=event.raw_text or None,
+        )
+        self._current_actions.append(record)
+        if self._on_action:
+            self._on_action(record)
+        if stronger:
+            self._notice(f"席{seat} がマック — 手札はこちらの方が強いので確認してください（要確認）")
+        self._maybe_finish_hand(event)
+
+    def _handle_end_hand(self, event: AudioEvent) -> None:
+        """「ハンド終了」: 残った全員が見せたとして勝者を決める。決められなければ `w <席>` を案内する。"""
+        gs = self._game_state
+        if not self._hand_open or not gs.is_hand_active():
+            logger.info("「ハンド終了」— 進行中のハンドはありません（確定済み）")
+            return
+        if not (self._auto_winner and self._rules_aware):
+            self._notice("勝者を w <席> で入力してください")
+            return
+        if self._finish_by_rules(event, explicit=True):
+            return
+        if not self._betting_over():
+            actor = gs.legal_context().actor_seat
+            self._notice(
+                f"ハンド {gs.hand_id} はまだベッティングの途中です（次は席{actor} の番）— "
+                "抜けたアクションが無いか確認し、勝者は w <席> で入力してください"
+            )
+
+    def _late_winner(self, event: AudioEvent, seats: list[int]) -> None:
+        """確定したハンドのあとに届いた `w` / 「ウィナー」（配ったばかりのハンドには勝者が無い）。"""
+        last = self._last_result or {}
+        winners = last.get("winners", [])
+        shown = "・".join(f"席{s}" for s in winners) or "?"
+        if not seats or set(seats) <= set(winners):
+            self._notice(f"ハンド {last.get('hand_id')} の勝者は {shown} で確定しています")
+            return
+        self._notice(
+            f"ハンド {last.get('hand_id')} は {shown} の勝ちで確定済みです — "
+            "違っていればスマホの訂正画面で直してください"
+        )
+        self._emit_unresolved(event, reason="winner_after_hand_end")
 
     def _emit_unresolved(self, event: AudioEvent, reason: str) -> None:
         """状態に適用できなかった audio イベントを「適用不能レコード」として必ず可視化する
@@ -791,6 +1215,11 @@ class IntegrationThread(threading.Thread):
             logger.warning(
                 "進行中のハンド（手番）が無いため %s（raw=%r）を保留しました — "
                 "先に「新ハンド」（CLI の n）を実行してください",
+                event.action, event.raw_text,
+            )
+        elif reason == "betting_over":
+            logger.warning(
+                "ベッティングは終わっています（ショーダウン待ち）— %s（raw=%r）を保留しました",
                 event.action, event.raw_text,
             )
         else:
@@ -1270,10 +1699,16 @@ class IntegrationThread(threading.Thread):
             actor, corrected.action, corrected.amount, synthesized_seats, conflict,
             corrected.corrected_from, record.reason, needs_review,
         )
+        # ほかが全員フォールドしたら確定、ベッティングが終わったらショーダウンの案内（ADR-0062）
+        self._maybe_finish_hand(event)
 
     # ――― ハンド開始 / 終了 ―――
 
-    def _start_new_hand(self, event: Optional[AudioEvent] = None) -> None:
+    def _start_new_hand(
+        self, event: Optional[AudioEvent] = None, *,
+        started_at: Optional[float] = None, auto: bool = False,
+    ) -> None:
+        """新しいハンドを始める。`auto` = 手札の配布を検出して始めた（ADR-0062）。"""
         gs = self._game_state
         for seat, name in self._pending_renames.items():   # ハンドの途中に届いた席替え（ADR-0059）
             self._apply_rename(seat, name)
@@ -1283,7 +1718,10 @@ class IntegrationThread(threading.Thread):
         self._stack_start = gs.get_stacks()
         gs.new_hand()
         self._current_actions = []
-        self._hand_started_epoch = event.timestamp if event is not None else self._clock()
+        if started_at is not None:
+            self._hand_started_epoch = started_at
+        else:
+            self._hand_started_epoch = event.timestamp if event is not None else self._clock()
         self._hand_started_at = self._iso(self._hand_started_epoch)
         self._board_cards = []
         self._board_positions = {}
@@ -1292,6 +1730,9 @@ class IntegrationThread(threading.Thread):
         self._hole_cards = {}
         self._hand_needs_review = False
         self._hand_open = True
+        self._hand_auto_started = auto
+        self._showdown_mucks = []
+        self._showdown_notice_shown = False
         if self._on_new_hand is not None:
             # RFID の board 位置を engine と同じタイミングでリセットする（ISSUE-0026）。
             # engine 側の board は「カードが外れても縮まない」ので、RFID だけが独自に位置を
@@ -1300,9 +1741,17 @@ class IntegrationThread(threading.Thread):
                 self._on_new_hand()
             except Exception:  # noqa: BLE001 — フックの失敗でハンドを止めない
                 logger.exception("on_new_hand hook failed — ハンドは続行します")
+        # 配布の検出で集めた札をこのハンドの手札にする（RFID のリセット後に載っている札も読み直される）
+        self._adopt_deal_cards()
         if self._session_layer_active:
             self._assign_seats_for_hand(gs.hand_id)
         logger.info("New hand started: hand_id=%d", gs.hand_id)
+        button = getattr(gs, "button_seat", None)
+        details = [d for d in (
+            "手札が配られました" if auto else "",
+            f"ボタン 席{button}" if button is not None else "",
+        ) if d]
+        self._notice(f"ハンド {gs.hand_id} 開始" + (f"（{' / '.join(details)}）" if details else ""))
         self._publish_table_state()
 
     def _assign_seats_for_hand(self, hand_id: int) -> None:
@@ -1326,19 +1775,28 @@ class IntegrationThread(threading.Thread):
         winner_seat: int,
         event: Optional[AudioEvent] = None,
         winner_seats: Optional[list[int]] = None,
+        *,
+        awards: Optional[dict[int, int]] = None,
+        winner_source: Optional[str] = None,
+        showdown: Optional[list[dict]] = None,
+        ended_ts: Optional[float] = None,
     ) -> None:
         """ハンドを確定して HandSummary を書き出す。
 
         - winner_seats（複数）は split pot（ADR-0050 S7）: `end_hand_split` で pot を等分し
           `pot_awards` を additive に記録する（winner_seat は先頭勝者 = 従来互換）。
+        - awards（席 → 額）はショーダウンを手札で判定した結果（ADR-0062）: side pot ごとの勝者どおりに
+          `end_hand_awards` で配る。`winner_source` は勝者の決まり方（fold / cards / estimated）、
+          `showdown` は見せた手札の役。
         - engine の end_hand が失敗しても記録は捨てず、review 付きで書き出す（ADR-0047 B5:
           actions の持ち越し/消失を全廃）。
         """
         gs = self._game_state
-        awards: Optional[dict[int, int]] = None
         ended = False
         try:
-            if winner_seats is not None and len(winner_seats) > 1:
+            if awards is not None:
+                gs.end_hand_awards(awards)
+            elif winner_seats is not None and len(winner_seats) > 1:
                 awards = gs.end_hand_split(winner_seats)
                 self._hand_needs_review = True  # chop は必ず人の確認を通す（ADR-0050）
             else:
@@ -1397,11 +1855,13 @@ class IntegrationThread(threading.Thread):
                 if a.action in ("bet", "raise", "call", "allin")
             )
 
+        if ended_ts is None and event is not None:
+            ended_ts = event.timestamp
         summary = HandSummary(
             hand_id=gs.hand_id,
             session_id=self._json_writer._session_id,
             started_at=self._hand_started_at,
-            ended_at=self._iso(event.timestamp) if event is not None else self._now_iso(),
+            ended_at=self._iso(ended_ts) if ended_ts is not None else self._now_iso(),
             blinds={"sb": gs._sb, "bb": gs._bb},  # noqa: SLF001
             board=list(self._board_cards),
             board_source=self._board_source,
@@ -1414,28 +1874,70 @@ class IntegrationThread(threading.Thread):
             winner_seat=winner_seat,
             pot_awards=(
                 [{"seat": s, "amount": amt} for s, amt in sorted(awards.items())]
-                if awards is not None else None
+                if awards is not None and (len(awards) > 1 or winner_seats) else None
             ),
             actions=list(self._current_actions),
             review_required=(
                 self._hand_needs_review
                 or any(a.needs_review for a in self._current_actions)
             ),
+            winner_source=winner_source,
+            showdown=showdown,
         )
 
         self._json_writer.append_hand_summary(summary)
         if self._on_hand:
             self._on_hand(summary)
-        logger.info("Hand %d finalized. Winner: seat %d", gs.hand_id, winner_seat)
+        logger.info("Hand %d finalized. Winner: seat %s", gs.hand_id, winner_seat)
+        self._notice(self._describe_result(summary, awards))
+        self._last_result = {
+            "hand_id": gs.hand_id,
+            "winners": sorted(awards) if awards else [winner_seat],
+            "source": winner_source,
+        }
         self._publish_table_state()
         self._current_actions = []
         # _current_actions と対称にリセットし、stale フラグが次のサマリーへ
         # 漏れない（new_hand を挟まない再 finalize でも残らない）ようにする。
         self._hand_needs_review = False
         self._hand_open = False
+        self._hand_auto_started = False
+        self._showdown_mucks = []
+
+    def _describe_result(self, summary: HandSummary, awards: Optional[dict[int, int]]) -> str:
+        """確定したハンドを 1 行で表す（CLI のお知らせ用）。"""
+        from core.showdown import HAND_NAMES_JA
+
+        gs = self._game_state
+
+        def who(seat: Optional[int]) -> str:
+            try:
+                return f"席{seat} {gs.get_player_name(seat)}"
+            except Exception:  # noqa: BLE001
+                return f"席{seat}"
+
+        if awards and len(awards) > 1:
+            text = "分配: " + "・".join(f"{who(s)} {amt}" for s, amt in sorted(awards.items()))
+        else:
+            text = f"勝ち: {who(summary.winner_seat)}"
+        hands = {h["seat"]: h["hand"] for h in (summary.showdown or [])}
+        detail = {
+            "fold": "ほかは全員フォールド",
+            "estimated": "勝者が決まらず仮",
+        }.get(summary.winner_source or "", "")
+        if summary.winner_source == "cards" and summary.winner_seat in hands:
+            detail = HAND_NAMES_JA.get(hands[summary.winner_seat], hands[summary.winner_seat])
+        tail = [d for d in (detail, f"ポット {summary.pot_total}",
+                            "要確認" if summary.review_required else "") if d]
+        return f"ハンド {summary.hand_id} 終了 — {text}（{' / '.join(tail)}）"
 
 
 # ――― ユーティリティ ―――
+
+def _spoken_at(event: AudioEvent) -> float:
+    """発話が始まった時刻（無ければ処理時刻 = 打った入力）。配布の前後を比べるのに使う（ADR-0062）。"""
+    return event.utterance_start_ts if event.utterance_start_ts is not None else event.timestamp
+
 
 def _extract_seat_from_text(text: str) -> Optional[int]:
     """後方互換エイリアス。席抽出の実装は audio.recognizer に単一化（ADR-0047 S2）。"""

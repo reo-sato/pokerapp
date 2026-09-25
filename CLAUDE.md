@@ -87,6 +87,7 @@ pokerapp/
 │   ├── backup.py                  ← データ JSON のバックアップ (B2)
 │   ├── positions.py               ← ディーラーボタン / ポジション名の純粋ロジック (FR-05b, ISSUE-0032)
 │   ├── table_state.py             ← TableState (RFID だけから導く 卓状態: カード/有効席/ストリート, ADR-0056 D5)
+│   ├── showdown.py                ← ショーダウンの役判定 + pot ごとの配分（RFID の手札とボード, pokerkit, ADR-0062）
 │   ├── hand_correction.py         ← HandCorrection + apply_hand_corrections オーバーレイ (B4, ADR-0036)
 │   └── hand_correction_repository.py ← ハンド訂正 append-only ストア (B4, ADR-0036)
 │
@@ -508,14 +509,15 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 > **Fixed**（§ ディーラーボタン / ポジション名）。
 > **2026-09-22 verify-v1 へマージ**: 復元の正当性修正バッチ（ADR-0047〜0050）と合流。**RFID の
 > 検出を actor 証拠にしない（P0a）を優先**し、ADR-0049 G3 の該当部分を supersede した。
-> schema は `hand 1.3` / `action 1.3` / `reconstruction_event 0.3` に統合（2026-09-24 に `reconstruction_event 0.4` = rfid の `replaces`, ADR-0058。2026-09-25 に `action 1.4` = `raw_text`, ADR-0060）。
+> schema は `hand 1.3` / `action 1.3` / `reconstruction_event 0.3` に統合（2026-09-24 に `reconstruction_event 0.4` = rfid の `replaces`, ADR-0058。2026-09-25 に `action 1.4` = `raw_text`, ADR-0060 / `hand 1.4` = `winner_source`・`showdown` + `action 1.5` = `end_hand`, ADR-0062）。
 
 
 | 機能 | 状態 | 備考 |
 |------|------|------|
 | 音声認識 (Whisper) | ✅ 実装済 | `audio/recognizer.py` |
 | **音声テストの見える化 (ADR-0060)** | ✅ 実装済（店舗 PC 未確認） | 聞き取った文を**すべて**報告（`AudioThread` の `on_transcript` + INFO ログ。アクションとして読めなかった発話も）→ `--cli` が `[聞き取り] 「…」→ raise 600 席3` と表示。モデルの読み込み中・所要秒数・マイクの状態（番号・名前 / 開けなかった理由）も CLI に出す。**モデル取得の失敗で落ちない**（`WhisperTranscriber.ready` / `load_error`、音声なしで続行）。ハンドの記録に `ActionRecord.raw_text`（そのアクションになった発話。rules-aware 経路と unresolved のみ、合成 fold には無い, action schema `1.4`）。スマホ画面の URL に **`?test`** を付けた端末だけ、各アクションの下に聞き取った文と補正の内容・理由（日本語）を出す（`shared/hand_replay` の `showHeard` / `heardDetails`）。マイク確認 `tools/audio_check.py`（`list` = 番号・方式・16 kHz の可否 / `level` = 入力レベル / `listen` = 本番と同じ経路で聞き取り）。RDP の音声設定・マイクのプライバシー設定は `docs/troubleshooting.md` |
-| **音声の実測への対応 (ADR-0061)** | ✅ 実装済（店舗 PC 再確認は未） | 店舗の `audio_check listen` の実測（ISSUE-0037）と「実運用では席番号を言わない」「遅れても最終的に解釈できればよい」を受けて: **続けて言った複数のアクションを言った順に分ける**（`audio/recognizer.py:parse_actions`。席番号・ポジション名の直前 → 最後の区切り文字の直後 → 次のキーワードの直前の順で切る。9 個以上は繰り返しの聞き違いとみなし 1 件 + `too_many_actions`。「チェックレイズ」は 1 つのレイズ（ただし運用ではチェックレイズも「レイズ N」とだけ言う = 「チェック、レイズ」と区切られると 2 人と区別できない）。音声・CLI の打鍵・`play_hand_text` 共通）/ 「ベッド」= bet・「ホールド」= fold（店舗の実測の書き起こしゆれ）/ **発話を捨てない**（推論待ちの上限なし、`AudioThread.backlog()`）/ **打った入力は認識待ちの発話を追い越さない**（`--cli` は `backlog()` が 0 になるまで待ってから積む、最大 60 秒。`q` も）/ 認識に回す有音の下限 0.3 → **0.15 秒**（config `audio.min_speech_sec`、捨てた短い音は `audio_check listen` に表示）。モデルは medium のまま（small は金額を聞き違えた）。席番号を言わない運用では**全員のアクションをフォールドも含めて順に言う**のが前提、勝者は `w <席>` |
+| **音声の実測への対応 (ADR-0061)** | ✅ 実装済（店舗 PC 再確認は未） | 店舗の `audio_check listen` の実測（ISSUE-0037）と「実運用では席番号を言わない」「遅れても最終的に解釈できればよい」を受けて: **続けて言った複数のアクションを言った順に分ける**（`audio/recognizer.py:parse_actions`。席番号・ポジション名の直前 → 最後の区切り文字の直後 → 次のキーワードの直前の順で切る。9 個以上は繰り返しの聞き違いとみなし 1 件 + `too_many_actions`。「チェックレイズ」は 1 つのレイズ（ただし運用ではチェックレイズも「レイズ N」とだけ言う = 「チェック、レイズ」と区切られると 2 人と区別できない）。音声・CLI の打鍵・`play_hand_text` 共通）/ 「ベッド」= bet・「ホールド」= fold（店舗の実測の書き起こしゆれ）/ **発話を捨てない**（推論待ちの上限なし、`AudioThread.backlog()`）/ **打った入力は認識待ちの発話を追い越さない**（`--cli` は `backlog()` が 0 になるまで待ってから積む、最大 60 秒。`q` も）/ 認識に回す有音の下限 0.3 → **0.15 秒**（config `audio.min_speech_sec`、捨てた短い音は `audio_check listen` に表示）。モデルは medium のまま（small は金額を聞き違えた）。席番号を言わない運用では**全員のアクションをフォールドも含めて順に言う**のが前提、勝者は自動（ADR-0062。決まらないときだけ `w <席>`） |
+| **手札を配ったらハンド開始・勝者の自動判定 (ADR-0062)** | ✅ 実装済（店舗 PC 未確認） | 店舗の通しテストで `n` /「ハンド開始」を言わない運用のためハンドが一度も始まらなかった（ISSUE-0038）。**2 席以上に手札が置かれたら新しいハンド**（`engine.auto_new_hand`, 既定 true。15 秒窓で片付け中の 1 枚を除く・卓で使っていない席は数えない・集めた札を手札に入れる・前のハンドが未確定なら先に確定・**配る前に話された発話を先に反映**（`speech_backlog` = `AudioThread.backlog` が 0 になるまで、最大 60 秒。話し始めが配布後の発話が届いたら開始）・アクション前の「ハンド開始」/ `n` は無視・何も起きていないハンドへの札は配り直し = ADR-0058）。**勝者の自動判定**（`engine.auto_winner`, 既定 true, pokerkit のみ）: ほかが全員フォールド → 即確定（`winner_source=fold`）。ショーダウン（2 人以上残りベッティング終了）はすぐ決めない。**「フォールド」= 見せずにマック**（席が無ければ残りの中で一番アウトオブポジションから順。見せずにマックした人は手札が強くても負け = オーナーの指示、手札ではマックした側が強ければ `mucked_stronger_hand` で要確認、3 人以上の順番推定は `muck_order_assumed`。記録は fold / street=showdown）。誰もマックしなければ「ハンド終了」・席の無い「ウィナー」・`n`・次の配布のときに **RFID の手札とボードで判定**（`core/showdown.py`、pot ごとに対象の席の最強 = side pot の勝者が別でも `end_hand_awards` で正しく配る、同点は等分・端数はボタンの次から。`winner_source=cards` + `showdown` + 2 人以上なら `pot_awards`）。読めていなければ「w <席>」を案内、次の配布なら仮（`estimated`, 要確認）。確定後の `w` は同じ席ならお知らせ、違えば `winner_after_hand_end` の保留。CLI は `● …` でお知らせ（`on_notice`）。聞き取り: 「ベト」= bet・「ゴール」= call・「ハンド終了」= `end_hand`・**語の直後の仮名の数**（ベトナナ = 7、ロッピャク = 600）。schema `hand` 1.4 / `action` 1.5 |
 | RFID PC/SC 受信 | ✅ 実装済 (canonical) | `rfid/reader_thread.py`（ESP32-S3 USB CCID 経由で PN5180 公開, ADR-0015）。**reader 1 台に複数枚（席 = hole card 2 枚 / board = 1 台に 1〜3 枚）**: Get UID の連結応答（8B×k, 16/24/32B）を `rfid/bridge.py:split_uid_response` で分割し、**UID 単位の集合デバウンス**で増えた UID ごとに 1 event。**board reader は全台で 1 つの論理ボードを共有**し、`board_index`（1..5）は **全台を通した検出順** = 配った順で決まる（どの台が読んだかに依存しない。flop を「左 1 枚 + 真ん中 2 枚」で置いても 1,2,3、turn/river がどの台でも 4/5。5 枚超過は WARN + 位置なし。**1 枚 = 1 位置**（既に位置を持つ UID には常に同じ位置を返す。隣接リーダーの磁界が重なると 1 枚を 2 台が読んでデバウンスが台ごとに発火するため, ISSUE-0025）。**ハンド内は append-only**（一度与えた位置はカードが盤上から消えても解放しない）＋ **解放は「新ハンド」と「明示のミスディール訂正」だけ**（`RFIDThread.reset_board_positions` を `IntegrationThread(on_new_hand=...)` から engine の `_board_positions` クリアと同じ場所で呼ぶ。1 位置だけの解放は `forget_board_position` / 席は `forget_seat_cards` = § ミスディール訂正, ADR-0054）。ポーカーではハンド中にボードの札は減らず engine の board も縮まないので両者を同じ規則に揃える — 解放すると一瞬の読み落ちや札の入れ替えで空きスロットを別の札が奪い、同じ札が 2 か所に並んで枚数が水増しされる（ISSUE-0026）。**卓の流れに合わせた解釈（ADR-0058, 本番の起動経路で既定有効）**: そのハンドで**席に記録した札はボードの札にしない**（フォールドした手札は卓の中央 = ボードのリーダーの上を通る。その席の「マック」として記録）/ **ボードの札は `commit_sec`=2 秒載り続けてから確定**（一瞬の通過を除く。時刻は最初に見えた時刻。確定前の札は 3 秒までの途切れを許す = リーダーの境目・重ね置きで途切れながら読める札。見え始め・読み直しは INFO ログ）/ **配り直しは入力なしで反映**: 前の札が `release_sec`=6 秒以上見えず新しい札が載り続けたら差し替え。ボードは **1 枚だけの差し直し**（前の札が見えなくなった近くへ置かれた札。前の札が `redeal_confirm_sec`=3 秒見えなければ差し替え、戻れば読み落ち = 次の位置。flop の札は**前の札を読んでいたリーダー** + 消えてから `redeal_window_sec`=30 秒以内、**最後に配った turn / river** は**同じか隣のリーダー**・時間は問わない（位置がリーダーの境目にある）。**そのハンドで一度でも読めなくなって戻った札は差し直しの対象にしない**（読みにくい位置の札は載ったまま長く読めなくなる。確定前の途切れも数える）。**差し替えた札が戻ってきて、差し替えた札（最後に配った札）も載っていれば差し替えを取り消す**（戻った札を元の位置へ、差し替えた札を次の位置へ。戻った札が前と同じか隣のリーダーで読めたときだけ）。別のリーダーの読み落ち中に来た次のストリートの札は次の位置のまま）/ **flop 全体の配り直し**（flop が全部消えたら時間によらず）/ **5 枚埋まったボードの差し直し**（5 枚のうち 1 枚だけ `release_sec` 消えていれば、新しい札を**その位置に入れる** = river のあとで turn を差し直しても turn と river が逆にならない。消えたあとに空き位置へ入れた札があれば、それを見逃した差し直しとしてその位置へ移して詰め、新しい札を 5 枚目に = 読みにくい札を本当に差し直したときもここで直る。消えた札がまだ `release_sec` に達していなければ待つ）。ボードの札を空き位置に入れるたびに INFO ログ「N 枚目にしました（左から K 台目）— 見えていない札: …（読み直し N 回）」。同じハンドで別の席に記録した札は元の席から消えたら移す。差し替えは `RFIDEvent.replaces` で engine へ、そのハンドは `needs_review`（ADR-0058 + 追記 1〜5 / 契約 v1.10 §4）。`probe_pcsc` と既存テストは従来の解釈（最初に見えた瞬間に確定）。**ボードに同じカードが 2 枚以上見えたら WARN + needs_review**（1 組のデッキではあり得ない = `rfid_cards.json` 重複登録か誤読みのサイン）。board ログには `tag=`（UID）も出す。config の `index`/`cards` は廃止 = 残っていても無視 + 起動 WARN + lint 指摘。board reader は左から右の順に並べて書く。ADR-0053 / 契約 v1.3 §4, ISSUE-0024）。**物理リーダーは Get UID の P2（config `reader`, 既定 0）で選ぶ**（Windows は CCID slot を 1 つしか公開しないため reader 名は 1 個。`(name, reader)` が一意、範囲外は `6A 86` で WARN、台数は `FF CA 00 FF 00`）。**接続は reader 名ごとに 1 本持続**し 1 接続に N 個の APDU（ADR-0052, 契約 v1.2）。engine は無改修。**実機 2026-09-11（10 台 ready）**: `probe_pcsc list`（`physical readers: 11`, 11 件 matched）/ `check` 11 PASS / `watch` で席 8 台 × 2 枚 + board の 22 タッチが config どおりの `seat N [rK]` に対応（ISSUE-0022 Fixed 確認） |
 | RFID HTTP 受信 | ✅ 実装済 (optional secondary) | `rfid/http_receiver.py`（debug/remote 用, ADR-0015） |
 | ESP32-S3 USB CCID firmware ↔ Python 契約固定 | ✅ 実装済 (契約 freeze + 実機確定値追記 + v1.2) | `docs/contracts/rfid-usb-ccid.md` **v1.3**（ADR-0034 で freeze / ADR-0052 で v1.2 / ADR-0053 で v1.3, ISSUE-0015 Fixed / ISSUE-0022 Fixed / ISSUE-0024 Fixed）: USB descriptor / reader_name 安定規約 / **CCID slot は 1 つ固定・物理リーダーは Get UID の P2（`FF CA 00 <k> 00`、範囲外 `6A 86`、台数 `FF CA 00 FF 00`）** / 役割は host config が source of truth / ATR-agnostic / UID 4-7-8B 正規化 / hot-plug / reader 名ごと 1 接続持続。config `pcsc_readers`(list, 要素に `reader`) 分離。firmware 実装者向け MUST チェックリスト = `docs/rfid-ccid-firmware-checklist.md`（各項目を `probe_pcsc` で受け入れ確認）。**実機確定値（2026-06-22）**: VID=0x303A PID=0x8B5D、manufacturer="PokerRFID"、product="PN5180-CCID"、Windows reader_name = `PokerRFID PN5180-CCID 0` |
@@ -554,7 +556,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **決定的 replay harness + golden fixtures (R4 F1/F3a)** | ✅ 実装済 | `integration/replay.py` + `tools/replay_hand.py`（clock 注入で決定的、ADR-0011）。golden fixtures: `tests/fixtures/reconstruction/`（**green 13**: 射影 2 + 合成 1 + `rfid-appear-is-not-an-action`（RFID は actor を動かさない, ISSUE-0033）+ side-pot 1 + ADR-0047 で 8 追加 = postflop 遷移 / 6max / multi-hand / 明示席>RFID（`rfid-vs-spoken-seat-conflict`） / camera / 低信頼 / cap 負例 / chop）。round-trip 決定性 = `tests/test_reconstruction.py`。**pin は手計算検証必須**（event-replay.md §6.5） |
 | **派生 confidence + side-pot (R3 D3 / R5 F3a)** | ✅ 実装済 (preview) | `integration/engine.py:derive_confidence`（3 因子 L/A/Q、rules-aware 経路のみ。legacy 固定表は不変）+ needs_review 条件（パース曖昧 flag 含む）。`HandSummary.pots`（main/side、legacy は `[]`。未回収 bet は残差合成で `sum(pots)=実ポット`）。whisper 欠測は `MISSING_WHISPER_CONF=0.5`（満点補完廃止, ADR-0033 追記） |
 | **派生 confidence 重み較正 (R5/F2)** | ✅ 実装済 | ADR-0033: 重み（暫定）を golden fixtures archetype + 境界グリッド由来の較正プロパティ **P1〜P9**（順序単調性 / 閾値分離 / 合法性ゲート / synth-fold / 欠測保守性）で正当化・回帰ロック。数値据え置き。`tools/calibrate_confidence.py`（ハーネス）+ `tests/test_confidence_calibration.py`。「暫定」表記を解除 |
-| **hand/action schema freeze (R5 F3b)** | ✅ 実装済 | `docs/contracts/schemas/{hand,action}.schema.json`（hand `1.3` / action `1.4`, additionalProperties:true, ISSUE-0011 Fixed。additive 追加: board_timeline=ADR-0055 / button_seat・position_map・position=ISSUE-0032 / 監査フィールド actor_source・corrected_from・reason・asr_confidence・apply_ok=ADR-0047 G2 / pot_awards=ADR-0050 / raw_text=ADR-0060。`reconstruction_event` は `0.4` = utterance_start_ts・parse_flags（ADR-0047/0048）+ position + rfid の replaces（ADR-0058））+ `_MODELS` 登録 + code↔contract + golden→schema テスト。**`action.street` は「そのアクションが行われたストリート」**（適用後ではない。rules-aware backend はラウンドを閉じたアクションで次ストリートへ自動進行するため, ISSUE-0029） |
+| **hand/action schema freeze (R5 F3b)** | ✅ 実装済 | `docs/contracts/schemas/{hand,action}.schema.json`（hand `1.4` / action `1.5`, additionalProperties:true, ISSUE-0011 Fixed。additive 追加: board_timeline=ADR-0055 / button_seat・position_map・position=ISSUE-0032 / 監査フィールド actor_source・corrected_from・reason・asr_confidence・apply_ok=ADR-0047 G2 / pot_awards=ADR-0050 / raw_text=ADR-0060 / winner_source・showdown・action の end_hand=ADR-0062。`reconstruction_event` は `0.4` = utterance_start_ts・parse_flags（ADR-0047/0048）+ position + rfid の replaces（ADR-0058））+ `_MODELS` 登録 + code↔contract + golden→schema テスト。**`action.street` は「そのアクションが行われたストリート」**（適用後ではない。rules-aware backend はラウンドを閉じたアクションで次ストリートへ自動進行するため, ISSUE-0029） |
 | **PHH call/check (F3c)** | ✅ 確認済（変更不要） | PHH 標準では check/call は同一トークン `cc`（check-or-call）。区別は非標準で pokerkit が parse 不能になるため統一が正。check/call の別は JSON ログ側で保持（`output/phh_exporter.py` にコメント） |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
 | 音声正規化 / 数値正規化 | ❌ 未実装 | 設計提案 R0: `apply_corrections()`（合法手制約, ADR-0009） |
@@ -745,7 +747,7 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    stale ctx・イベント消失・result/pot_total）・監査配線・制御語ガード・時刻整合・recorder 再構築・
    split pot・計測アライメント・fixtures 5→13。
    残: 実運用 review ログが貯まってからの数値較正（+ `engine.control_conf_threshold` の実運用値決め）、
-   camera 源の統合、side pot 個別勝者（V2 複数アクション発話は **ADR-0061 で実装済** = 店舗の実測に基づく分割）
+   camera 源の統合、宣言した勝者の side pot 個別配分（手札で判定したときの side pot 個別勝者は **ADR-0062 で実装済**。V2 複数アクション発話は **ADR-0061 で実装済** = 店舗の実測に基づく分割）
    （ADR-0050 future scope）。
 7. **player 本人確認の進化（ADR-0025 方針 / ADR-0027・0028）**: player_id を内部不変キーに保ち、
    認証を additive レイヤで重ねる — L0 name-pick（済）→ **L1 per-player PIN = ✅ 実装済（ADR-0027）**:
@@ -1048,7 +1050,13 @@ schema・fixtures・repository interface・error 形・validation・freeze/versi
   記録も変えない。CLI は `[未適用]` と表示）。ログは「先に新ハンド（CLI の `n`）を」と案内する。
   winner はハンドが無ければ確定しない（確定済みハンドへの再宣言によるポット二重加算を防ぐ）。
   席の無い winner は ADR-0047 B5 の連鎖（唯一の active 席 → 最後のアグレッサー + review →
-  手番席 + review）で補う。
+  手番席 + review）で補う（`engine.auto_winner` ではショーダウンなら先に手札で判定, ADR-0062）。
+  ベッティングが終わったあと（ショーダウン待ち）の check / call 等は `reason="betting_over"`。
+- **ショーダウンでは手札より「見せずにマック」を優先する**（ADR-0062）。ベッティングが終わった時点で手札から
+  勝者を決めてはならない（見せずにマックした人は手札が強くてもポットを失う）。手札で判定するのは誰もマック
+  しなかったとき（「ハンド終了」/ 次の配布）だけ。
+- **配布の検出（RFID）は音声より先に届く**ので、配る前に話された発話（認識待ち）を反映してから新しいハンドを
+  始める（`speech_backlog`, ADR-0062）。前のハンドの最後のアクションを新しいハンドに入れない。
 - ゲーム状態の変更は IntegrationThread に一元化する。GUI/CLI の操作（新ハンド/ウィナー/リバイ/
   ミスディール訂正）は `AudioEvent` として queue に積む（`GameStateManager` はロックを持たないため
   直接変更禁止, ISSUE-0012）
@@ -1077,6 +1085,8 @@ update.cmd / uninstall.cmd                   # 更新（config / データ / rfi
 #   検証: pwsh -File installer/install.ps1 -DryRun -NonInteractive -SkipModel（何も変更せず全手順を表示）
 python main.py --cli                         # CLI モード (hand logger)。マイク無しで回すには config の audio.enabled=false
 #   --cli の入力: q=終了 / n=新ハンド / w <席>=ウィナー / r <席> <金額>=リバイ。
+#   RFID があれば手札を配るとハンドが始まり（n 不要）、勝者は自動（全員フォールド / ショーダウンは「フォールド」= OOP から
+#   順のマック、全員見せたら「ハンド終了」か次の配布で手札から判定。決まらないときだけ w）。お知らせは「● …」(ADR-0062)
 #   ミスディール訂正: cb <位置>=ボード N 枚目を取り消し / cs <席>=その席の札を読み直し (ADR-0054)
 #   席替え（session_layer.enabled=true）: name <席> <名前>=次のハンドからその席の人 / name <席> -=空席 (ADR-0059)
 #   コマンドは全角でも可（`ｎ` / `ｗ　１`。照合前に半角へ寄せる, ISSUE-0030）。`w1` のように

@@ -83,7 +83,11 @@
     "backend": "pokerkit",
     "_comment": "game-state backend。'pokerkit'（既定, ルール準拠の再構築 = actor 推定/合法手射影/silent-fold/side-pot, ADR-0009）| 'legacy'（rollback, 素朴 round-robin）。Phase G で既定を pokerkit に切替。",
     "control_conf_threshold": 0.0,
-    "_control_conf_threshold_comment": "ADR-C (G1): 制御語（ハンド開始/ウィナー/ショーダウン）を受理する Whisper 信頼度の下限。0.0（既定）= 無効。>0 で閾値未満の制御語は状態を動かさず保留レコード（needs_review）としてのみ通知する（ハルシネーション由来の偽 new_hand/winner 対策）。"
+    "_control_conf_threshold_comment": "ADR-C (G1): 制御語（ハンド開始/ウィナー/ショーダウン）を受理する Whisper 信頼度の下限。0.0（既定）= 無効。>0 で閾値未満の制御語は状態を動かさず保留レコード（needs_review）としてのみ通知する（ハルシネーション由来の偽 new_hand/winner 対策）。",
+    "auto_new_hand": true,
+    "_auto_new_hand_comment": "ADR-0062: 手札が 2 席以上に配られたら新しいハンドを始める（n /「ハンド開始」は不要。前のハンドが確定していなければ先に確定する）。false = 従来どおり n /「ハンド開始」だけ。",
+    "auto_winner": true,
+    "_auto_winner_comment": "ADR-0062: 勝者を自動で決める（pokerkit のみ）。ほかが全員フォールドしたら残った人。ベッティング後の「フォールド」はショーダウンのマック（アウトオブポジションから順、見せずにマックした人は手札が強くても負け）。誰もマックしなければ「ハンド終了」か次の配布のときに手札とボードで判定。false = 従来どおり w /「ウィナー」だけ。"
   },
   "session_layer": {
     "enabled": false,
