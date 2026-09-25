@@ -262,7 +262,7 @@ _KANA_NUMBER_WORDS: tuple[tuple[str, str], ...] = tuple(sorted((
 # 促音の形（イッ / ロッ / ハッ）は単位（セン / ピャク）の前にしか来ない
 _KANA_NUMBER_CLIPPED = frozenset({"イッ", "ロッ", "ハッ"})
 # 数の読みのあとに続いてよいカタカナ（ひらがなの「です」「で」「まい」もカタカナに寄っている）
-_KANA_NUMBER_SUFFIXES = ("デス", "デ", "ダ", "マイ", "ポイント", "エン")
+_KANA_NUMBER_SUFFIXES = ("デス", "デ", "ダ", "マイ", "ポイント", "エン", "テン")
 _KANJI_DIGITS_ONLY = frozenset("一二三四五六七八九")
 
 
@@ -370,7 +370,7 @@ _PROMPT_WORD_RUNS = tuple(
     "、".join(_PROMPT_WORD_ORDER[i:i + 4]) for i in range(len(_PROMPT_WORD_ORDER) - 3)
 )
 # 無音・雑音に対する Whisper の定型の幻聴（動画の字幕に多い締めの言葉）。
-_STOCK_HALLUCINATIONS = ("ご視聴", "ご覧いただ", "ご覧頂", "チャンネル登録")
+_STOCK_HALLUCINATIONS = ("ご視聴", "ご覧いただ", "ご覧頂", "チャンネル登録", "お楽しみに")
 
 
 def is_prompt_echo(text: str) -> bool:
@@ -396,7 +396,10 @@ _AMOUNT_CHUNK = re.compile(r"[^、。・!?]+")
 # のあとにコール）。ベット・レイズ・オールインの前後の額はそのアクションの額なので分けない。
 _AMOUNT_SPLIT_ACTIONS = frozenset({"call", "check", "fold"})
 # 「チェックアラウンド」= まだ動いていない全員がチェックした（オーナーの説明, 2026-09-25）。
-_CHECK_AROUND = re.compile(r"(?:チェック|check)\s*(?:ア(?:ラウ|ラ)ン(?:ド|ト)?|around)", re.IGNORECASE)
+# 「チェック、アランド」のように区切って書き起こされることもある（店舗の実測）。
+_CHECK_AROUND = re.compile(
+    r"(?:チェック|check)[\s、。,.・]*(?:ア(?:ラウ|ラ)ン(?:ド|ト)?|around)", re.IGNORECASE,
+)
 
 
 def parse_amount_only(
@@ -414,7 +417,17 @@ def parse_amount_only(
     body = _ALIAS_PATTERN.sub(" ", _SEAT_PATTERN.sub(" ", norm))
     tokens = [m.group() for m in _AMOUNT_TOKEN.finditer(body)]
     if not tokens:
-        return None
+        # 仮名で書き起こされた額（「ロッピャク」「センゴヒャクテン」）。発話が額だけのときに限る
+        for start in range(len(body) + 1):
+            if not _AMOUNT_ONLY_REST.fullmatch(body[:start]):
+                continue
+            found = _kana_number_at(body, start)
+            if found is not None and _AMOUNT_ONLY_REST.fullmatch(body[found[1]:]):
+                tokens = [found[2]]
+                body = body[:start] + found[2] + body[found[1]:]
+                break
+        if not tokens:
+            return None
     amounts = [parse_amount_ex(token) for token in tokens]
     if len({a.value for a in amounts}) != 1 or amounts[0].value <= 0:
         return None                         # 違う数が並ぶ（「5 6 7」）
@@ -869,9 +882,12 @@ def apply_corrections(
             review = True
             reasons.append("raise_to_vs_by_ambiguous")
 
-    # V4: bb 倍数への round 寄せ（合法レンジ内に収まる場合のみ）。
-    if bb > 0 and val % bb != 0:
-        rounded = int(round(val / bb)) * bb
+    # V4: チップの最小単位への round 寄せ（合法レンジ内に収まる場合のみ）。単位は SB と BB の最大公約数
+    # （100/200 の卓の「2500」を 2400 にしない = 言った数字どおり, ADR-0062）。chip が無い（legacy）なら bb。
+    # reason 名は画面の説明文（shared/hand_replay）と合わせて従来の rounded_to_bb のまま。
+    unit = ctx.chip or bb
+    if unit > 0 and val % unit != 0:
+        rounded = int(round(val / unit)) * unit
         if m <= rounded <= s:
             reasons.append("rounded_to_bb")
             val = rounded

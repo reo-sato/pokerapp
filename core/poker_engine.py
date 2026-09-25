@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 from typing import Optional, Protocol, runtime_checkable
 
 from core.constants import STREET_ORDER
@@ -342,6 +343,7 @@ class PokerkitGameState:
             max_raise=st.max_completion_betting_or_raising_to_amount or 0,
             bb=self._bb,
             committed=st.bets[st.actor_index] if st.actor_index < len(st.bets) else 0,
+            chip=math.gcd(self._sb, self._bb),
         )
 
     def is_legal_actor(self, seat: int) -> bool:

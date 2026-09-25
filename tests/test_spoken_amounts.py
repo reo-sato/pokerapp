@@ -318,3 +318,25 @@ class TestNoise:
                                       "チェック、チェック、600点"])
     def test_real_sequences_are_not(self, text):
         assert not is_prompt_echo(text)
+
+
+class TestStoreHandB:
+    """店舗の 3 回目の通しテストの 2 ハンド目（真のアクション: オーナー提供）。"""
+
+    def test_amounts_are_kept_as_spoken(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal({4: ["6s", "Qc"], 5: ["4s", "7c"], 6: ["Qd", "Ac"]})
+        for text in ("ロッピャク", "フォールド", "2500", "コール"):
+            tb.say(text)
+        assert tb.played() == [
+            ("preflop", 6, "raise", 600), ("preflop", 4, "fold", 0),
+            ("preflop", 5, "raise", 2500), ("preflop", 6, "call", 1900),
+        ]
+
+    def test_check_around_after_a_comma(self):
+        events = parse_actions("チェック、チェック、アランド")
+        assert [(e.action, e.parse_flags) for e in events] == [
+            ("check", ()), ("check", ("check_around",))]
+
+    def test_stock_hallucination(self):
+        assert is_prompt_echo("次回もお楽しみに!")
