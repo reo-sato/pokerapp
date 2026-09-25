@@ -1087,7 +1087,8 @@ python main.py --cli --log-file           # ログを端末に出さない（実
 #   認識待ちの発話の反映を待ってから入る（前のハンドの発話を追い越さない）。
 #   席の代わりにポジション名でも可（例: BTN コール / ビッグブラインド チェック, ISSUE-0032）
 #   ひらがなも可（照合前にカタカナへ正規化, ISSUE-0027。ASR の書き起こし揺れにも効く）
-#   起動時の設定で「1ハンド目のボタン席」を訊く（空 Enter = 最大の席番号。以降ハンドごとに回る）
+#   起動時の「席」は人数（`6` = 1〜6 番）か使う席番号の並び（`2 4 5 8`。空いている席を飛ばして座る卓）。
+#   「1ハンド目のボタン席」も訊く（使う席のどれか。空 Enter = 最大の席番号。以降ハンドごとに回る）
 python main.py                               # GUI モード (hand logger)
 python main.py --players                     # Player Registry 画面 (S1, 別画面)
 python main.py --sessions                    # Session / Seating Viewer (WS2-α, read-only, 別画面)

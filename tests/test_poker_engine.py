@@ -131,3 +131,23 @@ def test_allin_short_stack_calls_all_in():
     gs.apply_action(1, "allin")              # 旧実装ではここで ValueError → desync。修正後は call-all-in。
     assert gs.get_stacks()[1] == 0           # SB all-in
     assert gs.get_current_player() == 2      # 手番は BB（state が正しく前進）
+
+
+def test_pokerkit_plays_on_non_contiguous_seats():
+    """空いている席を飛ばして座った卓（2・5・8 番）でも、手番とポジションが席番号どおりに回る。"""
+    pytest.importorskip("pokerkit")
+    from core.poker_engine import PokerkitGameState
+
+    players = [PlayerState(seat=s, name=f"P{s}", stack=1000) for s in (2, 5, 8)]
+    gs = PokerkitGameState(players, 5, 10, button_seat=5)   # 次の new_hand でボタンは 8 番へ
+    gs.new_hand()
+    assert gs.button_seat == 8
+    assert gs.position_map() == {2: "SB", 5: "BB", 8: "BTN"}
+    assert gs.legal_context().actor_seat == 8                # 3 人ならボタンから
+    gs.apply_action(8, "fold")
+    gs.apply_action(2, "call", 5)
+    gs.apply_action(5, "check")
+    assert gs.street == "flop"
+    assert gs.legal_context().actor_seat == 2                # フロップは SB から
+    gs.new_hand()
+    assert gs.button_seat == 2 and gs.position_map() == {5: "SB", 8: "BB", 2: "BTN"}

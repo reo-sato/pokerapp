@@ -299,3 +299,43 @@ class TestAtomicIoRetries:
         monkeypatch.setattr(Path, "open", flaky_open)
         monkeypatch.setattr(atomic_io, "_RETRY_SEC", 0)
         assert atomic_io.read_json_file(path) == {"a": 1}
+
+
+class TestArbitrarySeats:
+    """卓の空いている席を飛ばして座るとき、好きな番号の席を使える（例 2・5・8 番）。"""
+
+    @pytest.mark.parametrize("raw, expected", [
+        ("6", [1, 2, 3, 4, 5, 6]),            # 人数 = 1 番から順（従来どおり）
+        ("2 4 5 8", [2, 4, 5, 8]),
+        ("8 2 5", [2, 5, 8]),                 # 並びは席番号順に
+        ("２　４　８", [2, 4, 8]),             # 全角
+        ("2、5、7", [2, 5, 7]),
+        ("2,5", [2, 5]),
+    ])
+    def test_seat_list(self, raw: str, expected: list[int]):
+        assert main._parse_seat_list(raw) == expected   # noqa: SLF001
+
+    @pytest.mark.parametrize("raw", ["", "1", "10", "2 2", "0 3", "3 10", "a", "2 b"])
+    def test_invalid_seat_list(self, raw: str):
+        assert main._parse_seat_list(raw) is None   # noqa: SLF001
+
+    def test_hands_are_played_on_the_chosen_seats(
+        self, data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    ):
+        logs = data_dir / "logs"
+        answers = ["2 5 8", "太郎", "1000", "", "1000", "花子", "1000", "5", "10",
+                   "4", "5", str(logs),              # 4 は使わない席 → 聞き直し → 5
+                   "n", "name 3 次郎", "name 8 次郎", "w 5", "n", "w 8", "q"]
+        _run_cli(monkeypatch, _cfg(True), answers)
+        out = capsys.readouterr().out
+        assert "1ハンド目のボタン席 (2/5/8, 空Enterで8)" not in out   # プロンプトは input 側
+        assert "使う席（2/5/8）のどれかを入力してください" in out
+        assert "席3 はこの卓にありません" in out
+        session_id, hands = _hands(logs)
+        assert [p["seat"] for p in hands[0]["players"]] == [2, 5, 8]
+        assert [p["name"] for p in hands[0]["players"]] == ["太郎", "Player5", "花子"]
+        assert [p["name"] for p in hands[1]["players"]] == ["太郎", "Player5", "次郎"]
+        players = {p.display_name: p.player_id for p in PlayerRepository().list_players()}
+        repo = SessionRepository()
+        assert repo.resolve_seat_map_for_hand(session_id, 1) == {2: players["太郎"], 8: players["花子"]}
+        assert repo.resolve_seat_map_for_hand(session_id, 2) == {2: players["太郎"], 8: players["次郎"]}

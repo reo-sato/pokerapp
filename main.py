@@ -39,33 +39,49 @@ def _normalize_cli_command(line: str) -> str:
     return normalized
 
 
+def _parse_seat_list(raw: str) -> "list[int] | None":
+    """使う席の入力を席番号の昇順リストにする。不正なら None。
+
+    - 数字 1 つ（2〜9）= 人数。1 番から順に使う（従来どおり。例 `6` → 1〜6 番）。
+    - 数字 2 つ以上 = 使う席番号（1〜9、重複なし。例 `2 4 5 8`）。卓の空いている席を飛ばして座るとき。
+      全角の数字・空白、「、」「,」区切りも可。
+    """
+    text = raw.translate(_FULLWIDTH_TO_ASCII).replace("、", " ").replace(",", " ")
+    try:
+        numbers = [int(tok) for tok in text.split()]
+    except ValueError:
+        return None
+    if len(numbers) == 1:
+        return list(range(1, numbers[0] + 1)) if 2 <= numbers[0] <= 9 else None
+    if len(numbers) < 2 or len(set(numbers)) != len(numbers) or not all(1 <= n <= 9 for n in numbers):
+        return None
+    return sorted(numbers)
+
+
 def _prompt_session_config() -> dict:
-    """CLIで席数・プレイヤー名・スタック・ブラインドを入力する。"""
+    """CLIで使う席・プレイヤー名・スタック・ブラインドを入力する。"""
     print("=== ポーカーハンドロガー セッション設定 ===")
 
     while True:
-        try:
-            num_seats = int(input("席数 (2〜9): ").strip())
-            if 2 <= num_seats <= 9:
-                break
-        except ValueError:
-            pass
-        print("2〜9 の整数を入力してください。")
+        seats = _parse_seat_list(input("席（人数か席番号。例: 6 = 1〜6 番 / 2 4 5 8 = その番号の席）: "))
+        if seats is not None:
+            break
+        print("人数（2〜9）か、使う席番号を 2 つ以上（1〜9、空白区切り）入力してください。")
 
     players = []
-    for i in range(1, num_seats + 1):
-        typed = input(f"席{i} プレイヤー名: ").strip()
-        name = typed or f"Player{i}"
+    for seat in seats:
+        typed = input(f"席{seat} プレイヤー名: ").strip()
+        name = typed or f"Player{seat}"
         while True:
             try:
-                stack = int(input(f"席{i} 初期スタック: ").strip())
+                stack = int(input(f"席{seat} 初期スタック: ").strip())
                 if stack > 0:
                     break
             except ValueError:
                 pass
             print("正の整数を入力してください。")
         # named = 名前を入力した席。空 Enter の席（PlayerN）はお客さんに結び付けない（ADR-0059）。
-        players.append({"seat": i, "name": name, "stack": stack, "named": bool(typed)})
+        players.append({"seat": seat, "name": name, "stack": stack, "named": bool(typed)})
 
     while True:
         try:
@@ -79,19 +95,19 @@ def _prompt_session_config() -> dict:
 
     # 1 ハンド目のボタン席（FR-05b / ISSUE-0032）。以降はハンドごとに 1 つずつ回る。
     # 内部表現は「次の new_hand で 1 つ進める前の席」なので、入力された席の **1 つ手前**を渡す。
+    seat_list = "/".join(str(n) for n in seats)
     while True:
-        raw = input(f"1ハンド目のボタン席 (1〜{num_seats}, 空Enterで{num_seats}): ").strip()
+        raw = input(f"1ハンド目のボタン席 ({seat_list}, 空Enterで{seats[-1]}): ").strip()
         if not raw:
-            first_button = num_seats
+            first_button = seats[-1]
             break
         try:
             first_button = int(_normalize_cli_command(raw))
-            if 1 <= first_button <= num_seats:
+            if first_button in seats:
                 break
         except ValueError:
             pass
-        print(f"1〜{num_seats} の整数を入力してください。")
-    seats = [p["seat"] for p in players]
+        print(f"使う席（{seat_list}）のどれかを入力してください。")
     button_seat = seats[(seats.index(first_button) - 1) % len(seats)]
 
     log_dir = input("ログ保存先 (空Enterで ./logs): ").strip() or "./logs"
