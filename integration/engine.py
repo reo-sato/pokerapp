@@ -122,6 +122,9 @@ _BOARD_STREETS = {3: ("flop", (1, 2, 3)), 4: ("turn", (4,)), 5: ("river", (5,))}
 _STREET_RANK = {"preflop": 0, "flop": 1, "turn": 2, "river": 3, "showdown": 4}
 # プレー中にこの秒数、マイクに声が入らなければ知らせる（ワイヤレスマイクの電池切れ等, 2026-09-25）
 SILENT_MIC_SEC = 60.0
+# 「フォールド」と聞こえたが手番の人の札がまだ席にあるとき、この秒数以内に札が離れたら、その発話の時刻の
+# フォールドにする（勝った人が先に札を投げても、降りた人の方が先になる）。
+SPOKEN_FOLD_WINDOW_SEC = 15.0
 # 札の離脱で組み直す（取り消す）ときに入力として残す音声のアクション
 _REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin"})
 
@@ -414,6 +417,8 @@ class IntegrationThread(threading.Thread):
         # 組み直しで採る解釈: 入力番号 → {"k": 無言だった人数, "because_seat": その根拠になった離脱の席}
         self._run_override: dict[int, dict] = {}
         self._current_input_index: Optional[int] = None
+        # 「フォールド」と聞こえたが札がまだ席にある席 → 発話の時刻（札が離れたらこの時刻のフォールドにする）
+        self._spoken_folds: dict[int, float] = {}
         # CLI に出した札（同じ札を何度も出さない）: 席 → 手札、ボードは出した枚数
         self._on_cards = on_cards
         self._shown_holes: dict[int, tuple[str, ...]] = {}
@@ -1065,10 +1070,10 @@ class IntegrationThread(threading.Thread):
             if seat not in active or seat in self._showdown_mucks:
                 continue
             if mucked is not None and (since is None or mucked >= since - 1.0):
-                self._departures[seat] = {"t": since if since is not None else mucked,
-                                          "muck": True, "applied": False}
+                t = since if since is not None else mucked
+                self._departures[seat] = {"t": self._fold_time(seat, t), "muck": True, "applied": False}
             elif since is not None and now - since >= self._fold_absent_sec:
-                self._departures[seat] = {"t": since, "muck": False, "applied": False}
+                self._departures[seat] = {"t": self._fold_time(seat, since), "muck": False, "applied": False}
         pending = self._foldout_pending
         if pending is not None and not self._foldout_winner_left:
             for seat in self._remaining_seats():
@@ -1077,8 +1082,18 @@ class IntegrationThread(threading.Thread):
                 if not info.get("present") and since is not None and now - since >= self._fold_absent_sec:
                     self._foldout_winner_left = True
                     folder = self._departures.get(pending["seat"], {})
-                    if len(self._board_positions) >= 5 and not folder.get("muck"):
-                        # リバーで残った人の札も離れた = ショーダウンで札を前に出した（最後のコールの聞き落とし）
+                    if folder.get("facing_bet"):
+                        # ベットに全員が降りた = 勝った人がポットを取って札を前に出した（オーナー: 素早く投げる）。
+                        # リバーでは「コール」を聞き落としたショーダウンの可能性もあるので、役名・「ショーダウン」を
+                        # 待ってから確定する（確定までの時間をこの離脱から数え直す）。
+                        if len(self._board_positions) >= 5:
+                            pending["t"] = max(pending["t"], since)
+                            logger.info("席%d の札も離れました（リバー）— 役名か「ショーダウン」が無ければ %.0f 秒後に確定",
+                                        seat, FOLDOUT_CONFIRM_SEC)
+                        else:
+                            logger.info("席%d の札も離れました（勝ってポットを取った）", seat)
+                    elif len(self._board_positions) >= 5 and not folder.get("muck"):
+                        # リバーでベットが無いのに残った人の札も離れた = ショーダウンで札を前に出した
                         self._emit_seat_signal(self._seat_signal("showdown", pending["seat"], now))
                     else:
                         self._hand_needs_review = True
@@ -1263,12 +1278,6 @@ class IntegrationThread(threading.Thread):
         if seat not in active or seat in self._showdown_mucks or self._betting_over():
             dep["applied"] = True                # ショーダウンでは札を前に出す（マックはディーラーの宣言で）
             return
-        hyp = self._contradicted_run(seat)
-        if hyp is not None:
-            # レイズしたはずの席の札が、そのラウンドが終わる前に離れた（レイズのあとに手番は無い）=
-            # その席はレイズではなく無言のチェック / コールで、レイズはあとの席だった。組み直す。
-            self._reinterpret_run(hyp, because_seat=seat)
-            return
         self._checkpoints.append(self._take_checkpoint(index, seat))
         dep["applied"] = True
         self._resolve_departures()
@@ -1386,6 +1395,7 @@ class IntegrationThread(threading.Thread):
             self._showdown_mucks.append(seat)
             return
         dep["action"] = action
+        dep["facing_bet"] = can_fold
         reasons = ["rfid_muck" if muck else "rfid_departure"]
         if not can_fold:
             reasons.append("river_check" if action == "check" else "no_bet")
@@ -1485,8 +1495,12 @@ class IntegrationThread(threading.Thread):
             if seat in hyp["candidates"] and seat != hyp["actor"]:
                 hyp["candidates"].remove(seat)
 
-    def _contradicted_run(self, seat: int) -> Optional[dict]:
-        """`seat` の札が離れたとき、その席を仮のレイズにしていて手番が無い仮説（= 解釈し直す）。"""
+    def _contradicted_run(self, seat: int, at: Optional[float] = None) -> Optional[dict]:
+        """`seat` の札が離れたとき、その席を仮のベットにしていて手番が無い仮説（= 解釈し直す）。
+
+        `at`（離れた時刻）があれば、そのときほかの候補の席にまだ札があった場合だけ矛盾とみる。ほかの候補が
+        先に降りていれば、ベットに全員が降りて勝った人が札を前に出しただけ（オーナー: 勝った人は素早く投げる）。
+        """
         gs = self._game_state
         for hyp in reversed(self._run_hyps):
             if hyp["closed"] or hyp["sealed"] or hyp["street"] != gs.street or hyp["actor"] != seat:
@@ -1494,13 +1508,18 @@ class IntegrationThread(threading.Thread):
             to_act = gs.seats_to_act()
             if not to_act or seat in to_act or seat not in gs.get_active_seats():
                 return None
+            others = [s for s in hyp["candidates"] if s != seat]
+            if not others:
+                return None
+            if at is not None and not any(self._had_cards_at(s, at) for s in others):
+                return None
             return hyp
         return None
 
     def _check_run_contradictions(self, bound: float) -> bool:
         """札が離れたまま（まだ反映していない）席が、仮にベットにした席なら解釈し直す（記録に残す）。"""
         for seat, dep in sorted(self._departures.items(), key=lambda item: item[1]["t"]):
-            if dep.get("applied") or dep["t"] >= bound or self._contradicted_run(seat) is None:
+            if dep.get("applied") or dep["t"] >= bound or self._contradicted_run(seat, at=dep["t"]) is None:
                 continue
             self._emit_seat_signal(self._seat_signal("reinterpret", seat, self._clock(), observed_at=dep["t"]))
             return True
@@ -1569,7 +1588,12 @@ class IntegrationThread(threading.Thread):
             return                               # 札の離脱は記録した leave の入力で流し直す
         seat, since = self._absent_seat_for_fold_word()
         if seat is None:
-            self._notice(f"「{event.raw_text}」— 手番の人の札が席に残っているのでフォールドにしませんでした")
+            actor = self._game_state.legal_context().actor_seat
+            if actor is not None:
+                # 札が離れたら、その席のフォールドをこの発話の時刻にする（オーナー: 発声を省略しない運用で
+                # 勝った人が先に札を投げても、降りた人の方が先になる）
+                self._spoken_folds[actor] = _spoken_at(event)
+            self._notice(f"「{event.raw_text}」— 手番の人の札が席に残っているのでまだフォールドにしません（札が離れたら入れます）")
             return
         dep = self._departures.setdefault(seat, {"t": since, "muck": False, "applied": False})
         if dep.get("applied"):
@@ -1577,6 +1601,32 @@ class IntegrationThread(threading.Thread):
         self._emit_seat_signal(self._seat_signal(
             "muck" if dep.get("muck") else "leave", seat, event.timestamp, observed_at=dep["t"],
         ))
+
+    def _fold_time(self, seat: int, t: float) -> float:
+        """離脱の時刻。「フォールド」がその少し前に聞こえていれば、発話の時刻にする。"""
+        spoken = self._spoken_folds.pop(seat, None)
+        if spoken is not None and 0 <= t - spoken <= SPOKEN_FOLD_WINDOW_SEC:
+            return spoken
+        return t
+
+    def _had_cards_at(self, seat: int, t: float) -> bool:
+        """時刻 `t` にその席の札が席にあった（まだ降りていなかった）か。"""
+        spoken = self._spoken_folds.get(seat)
+        if spoken is not None and spoken <= t <= spoken + SPOKEN_FOLD_WINDOW_SEC:
+            return False                     # 「フォールド」と言われていた（札が残っていても降りている）
+        dep = self._departures.get(seat)
+        if dep is not None:
+            return dep["t"] > t
+        if self._seat_presence is None:
+            return True                      # 在否が無い（replay）: 記録した信号を信じる
+        try:
+            info = (self._seat_presence() or {}).get(seat) or {}
+        except Exception:  # noqa: BLE001
+            return True
+        if info.get("present"):
+            return True
+        since = info.get("absent_since")
+        return since is not None and since > t
 
     def _absent_seat_for_fold_word(self) -> tuple[Optional[int], float]:
         """「フォールド」と聞こえたときに、札が席に無い（まだ行動する）席を手番の順に探す。"""
@@ -3128,6 +3178,7 @@ class IntegrationThread(threading.Thread):
         self._checkpoints = []
         self._run_hyps = []
         self._run_override = {}
+        self._spoken_folds = {}
         self._foldout_pending = None
         self._foldout_winner_left = False
         self._last_action_at = self._hand_started_epoch

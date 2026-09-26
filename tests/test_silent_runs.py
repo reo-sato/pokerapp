@@ -225,3 +225,111 @@ class TestSpokenSeat:
         tb.say("BTN ベット 600")
         actions = _flop_actions(tb)
         assert [a[:3] for a in actions] == [(4, "check", 0), (5, "fold", 0), (6, "bet", 600)]
+
+
+def _to_river_with_checks(tb: _Table) -> None:
+    _to_flop(tb)
+    for cards in (["5h"], ["2c"]):
+        tb.say("チェック")
+        tb.tick(tb.now + 2.0)
+        _board(tb, cards)
+
+
+class TestWinnerToss:
+    """ベットに全員が降りると、勝った人は素早く札を前に投げる（オーナー, 2026-09-26）。降りた人の札が先に
+    離れているので、仮のベットの席の離脱を「無言のチェックだった」と解釈し直さない。"""
+
+    def _bet_then(self, tb: _Table, lifts: list[tuple[float, int]]) -> None:
+        _to_flop(tb)
+        tb.say("チェック")
+        tb.tick(tb.now + 2.0)
+        tb.say("ベット 600")
+        tb.tick(tb.now + 2.0)
+        start = tb.now
+        for at, seat in sorted(lifts):
+            tb.tick(start + at)
+            tb.lift(seat)
+        tb.tick(tb.now + 20.0)
+
+    def test_the_bettor_tossing_after_the_folds_wins_without_review(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._bet_then(tb, [(0.0, 6), (0.5, 4), (1.0, 5)])
+        (hand,) = tb.hands
+        assert [a[:2] for a in _flop_actions(tb)] == [(4, "check"), (5, "bet"), (6, "fold"), (4, "fold")]
+        assert (hand.winner_seat, hand.review_required) == (5, False)
+        assert not any("組み直し" in n or "要確認" in n for n in tb.notices)
+
+    def test_a_folders_cards_collected_late_do_not_matter(self, tmp_path):
+        # 席4 は「フォールド」のあと札が席に残り、ディーラーがあとで片付けた（席4 は候補ではない）
+        tb = _Table(tmp_path)
+        self._bet_then(tb, [(0.0, 6), (1.0, 5), (3.0, 4)])
+        (hand,) = tb.hands
+        assert [a[:2] for a in _flop_actions(tb)] == [(4, "check"), (5, "bet"), (6, "fold"), (4, "fold")]
+        assert (hand.winner_seat, hand.review_required) == (5, False)
+        assert not any("組み直し" in n or "決められません" in n for n in tb.notices)
+
+    def test_the_last_candidate_to_leave_is_the_bettor(self, tmp_path):
+        # 席5 は無言のチェック、席6 がベット、席4 と席5 が降り、勝った席6 が札を投げた
+        tb = _Table(tmp_path)
+        self._bet_then(tb, [(0.0, 4), (1.0, 5), (2.0, 6)])
+        (hand,) = tb.hands
+        assert [a[:2] for a in _flop_actions(tb)] == [
+            (4, "check"), (5, "check"), (6, "bet"), (4, "fold"), (5, "fold"),
+        ]
+        assert (hand.winner_seat, hand.review_required) == (6, False)
+
+    def test_a_spoken_fold_keeps_the_order_when_the_cards_linger(self, tmp_path):
+        # 席6 が「フォールド」と言われたが札は席に残り、席4 も（無言で）降り、勝った席5 が先に札を投げ、
+        # 席6 の札はあとで片付いた
+        tb = _Table(tmp_path)
+        _to_flop(tb)
+        tb.say("チェック")
+        tb.tick(tb.now + 2.0)
+        tb.say("ベット 600")
+        tb.tick(tb.now + 2.0)
+        tb.say("フォールド")                   # 席6 の番。札はまだ席にある
+        spoken = tb.now
+        tb.tick(tb.now + 0.5)
+        tb.lift(4)                             # 席4 も降りた（同じアクションの 2 回目 = 言わない）
+        tb.tick(tb.now + 1.0)
+        tb.lift(5)                             # 勝った席5 が札を投げた
+        tb.tick(tb.now + 3.0)
+        tb.lift(6)                             # 席6 の札が片付いた
+        tb.tick(tb.now + 20.0)
+        (hand,) = tb.hands
+        assert [a[:2] for a in _flop_actions(tb)] == [(4, "check"), (5, "bet"), (6, "fold"), (4, "fold")]
+        assert (hand.winner_seat, hand.review_required) == (5, False)
+        assert not any("組み直し" in n or "決められません" in n for n in tb.notices)
+        fold = next(a for a in hand.actions if a.seat == 6 and a.action == "fold")
+        assert fold.timestamp == tb.t._iso(spoken)                          # noqa: SLF001
+
+    def test_a_river_fold_out_waits_for_a_hand_name_then_confirms(self, tmp_path):
+        tb = _Table(tmp_path)
+        _to_river_with_checks(tb)
+        tb.say("ベット 600")                   # 席4
+        tb.tick(tb.now + 2.0)
+        tb.lift(5)
+        tb.tick(tb.now + 1.0)
+        tb.lift(6)
+        tb.tick(tb.now + 4.0)
+        tb.lift(4)                             # 勝った席4 が札を投げた
+        tb.tick(tb.now + 5.0)
+        assert tb.hands == []                  # 役名・「ショーダウン」を待つ
+        tb.tick(tb.now + 12.0)
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source, hand.review_required) == (4, "fold", False)
+
+    def test_a_hand_name_after_a_river_fold_out_means_a_showdown(self, tmp_path):
+        tb = _Table(tmp_path)
+        _to_river_with_checks(tb)
+        tb.say("ベット 600")
+        tb.tick(tb.now + 2.0)
+        tb.lift(5)
+        tb.tick(tb.now + 4.0)
+        tb.lift(6)                             # 実は「コール」を聞き落として席6 が札を見せた
+        tb.tick(tb.now + 1.0)
+        tb.lift(4)
+        tb.tick(tb.now + 4.0)
+        tb.say("ツーペア")
+        (hand,) = tb.hands
+        assert hand.winner_source in ("cards", "announced") and hand.review_required
