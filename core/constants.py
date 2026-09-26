@@ -49,6 +49,35 @@ ACTION_KEYWORDS: dict[str, str] = {
     "ハンド終了": "end_hand",
 }
 
+# ショーダウンでディーラーが言う **勝った役の名前**（言い方 → pokerkit の役名）。この店では「ウィナー」は
+# 言わず、勝ったプレイヤーの役名を言う（オーナー, 2026-09-26）。役名 = ハンドの終わり（「ハンド終了」と同じ）で、
+# 手札とボードの判定と突き合わせる（違えば要確認、片方の手札が読めていなければ勝者を決める材料）。
+# 同じ位置では長い語が勝つ（「ストレートフラッシュ」⊃「ストレート」「フラッシュ」）。
+HAND_NAME_KEYWORDS: dict[str, str] = {
+    "ロイヤルストレートフラッシュ": "Straight flush",
+    "ロイヤルフラッシュ": "Straight flush",
+    "ストレートフラッシュ": "Straight flush",
+    "フォーカード": "Four of a kind",
+    "フォーオブアカインド": "Four of a kind",
+    "クワッズ": "Four of a kind",
+    "4カード": "Four of a kind",
+    "フルハウス": "Full house",
+    "フラッシュ": "Flush",
+    "ストレート": "Straight",
+    "スリーカード": "Three of a kind",
+    "スリーオブアカインド": "Three of a kind",
+    "トリップス": "Three of a kind",
+    "3カード": "Three of a kind",
+    "ツーペア": "Two pair",
+    "トゥーペア": "Two pair",
+    "2ペア": "Two pair",
+    "ワンペア": "One pair",
+    "1ペア": "One pair",
+    "ハイカード": "High card",
+    "ノーペア": "High card",
+}
+ACTION_KEYWORDS.update({keyword: "end_hand" for keyword in HAND_NAME_KEYWORDS})
+
 # 漢数字 → 数値
 KANJI_DIGIT: dict[str, int] = {
     "〇": 0,

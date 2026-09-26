@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import threading
 import time
+import unicodedata
 from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Optional
@@ -400,6 +402,10 @@ class IntegrationThread(threading.Thread):
         self._showdown_notice_shown = False
         # 直前に確定したハンド（自動で決めた勝者のあとに届いた `w` / 「ウィナー」を扱う）。
         self._last_result: Optional[dict] = None
+        # ディーラーがショーダウンで言った勝った役の名前（pokerkit の役名, 2026-09-26）。ハンドごとに捨てる。
+        self._announced_hand: Optional[str] = None
+        # ハンドを始められなかった理由（同じ理由を繰り返し知らせない。始められたら None）
+        self._start_refused: Optional[str] = None
         # CLI に出した札（同じ札を何度も出さない）: 席 → 手札、ボードは出した枚数
         self._on_cards = on_cards
         self._shown_holes: dict[int, tuple[str, ...]] = {}
@@ -534,6 +540,8 @@ class IntegrationThread(threading.Thread):
         if self._deal_at is not None and ev.timestamp >= self._deal_at:
             # 配ったあとのボードの札は新しいハンドのもの（ADR-0062）
             self._start_dealt_hand_if_ready(force=True)
+            if not self._hand_open:
+                return                       # ハンドを始められていない（参加できる席が 2 つ未満）
         elif self._auto_new_hand and not (self._hand_open and self._in_play):
             # 手札が配られる前・プレーが終わったあと（シャッフル・片付け）のボードは読まない（ADR-0063）
             logger.debug("プレー中でないボードの札を無視しました: %s (tag=%s)", ev.card, ev.tag_id)
@@ -875,6 +883,14 @@ class IntegrationThread(threading.Thread):
 
         if action == "rename_seat":
             self._handle_rename_seat(event)
+            return
+
+        if action == "set_blinds":
+            self._handle_set_blinds(event)
+            return
+
+        if action in ("sit_out", "sit_in"):
+            self._handle_sit(event)
             return
 
         # ベッティングアクション。rules-aware backend（pokerkit）は境界で actor 推定 + 合法手
@@ -1854,6 +1870,7 @@ class IntegrationThread(threading.Thread):
             # 配る前に「ハンド開始」/ n で始めていたハンド → 配った札をこのハンドの手札にする
             self._adopt_deal_cards()
             return
+        # 始められなければ（参加できる席が 2 つ未満）配布は保留のまま = 買い足し・参加の操作で始まる
         self._start_new_hand(started_at=self._deal_at, auto=True)
 
     def _adopt_deal_cards(self) -> None:
@@ -1986,7 +2003,10 @@ class IntegrationThread(threading.Thread):
         cards = board + [c for s in remaining for c in self._hole_cards.get(s, [])]
         if not gaps and len(set(cards)) != len(cards):
             gaps.append("同じ札が 2 か所にあります")
+        announced = self._announced_hand
         if gaps:
+            if announced and self._finish_by_announcement(remaining, board, event, ended_ts):
+                return True
             message = f"勝者を手札で判定できません（{'・'.join(gaps)}）— w <席> で入力してください"
             if explicit:
                 self._notice(message)
@@ -2007,11 +2027,89 @@ class IntegrationThread(threading.Thread):
         order = gs.acting_order()
         showdown = [hands[s].to_dict() for s in sorted(remaining, key=lambda s: order.index(s)
                                                        if s in order else s)]
+        winner = winners_by_pot[0][0]
+        if announced and hands[winner].name != announced:
+            # ディーラーの役名が判定と違う = 札の読み違い・読み落としの疑い（要確認）。役名に合う席が
+            # 1 つだけならその席の勝ち（ディーラーが見たものを優先）。
+            from core.showdown import HAND_NAMES_JA
+
+            said = HAND_NAMES_JA.get(announced, announced)
+            judged = HAND_NAMES_JA.get(hands[winner].name, hands[winner].name)
+            matching = [s for s in remaining if hands[s].name == announced]
+            self._hand_needs_review = True
+            if len(matching) == 1 and matching[0] != winner:
+                self._notice(
+                    f"ディーラーの役名「{said}」は席{matching[0]} の手です（判定は席{winner} の{judged}）— "
+                    f"席{matching[0]} の勝ちにします（要確認）"
+                )
+                self._finalize_hand(
+                    matching[0], event, winner_source="announced", showdown=showdown, ended_ts=ended_ts,
+                )
+                return True
+            self._notice(
+                f"ディーラーの役名「{said}」が判定（席{winner} の{judged}）と合いません — "
+                "札の読み違いの可能性があります（要確認）"
+            )
+        elif announced:
+            logger.info("ディーラーの役名 %s は判定（席%d）と一致", announced, winner)
         self._finalize_hand(
-            winners_by_pot[0][0], event, awards=awards, winner_source="cards",
+            winner, event, awards=awards, winner_source="cards",
             showdown=showdown, ended_ts=ended_ts,
         )
         return True
+
+    def _finish_by_announcement(
+        self, remaining: list[int], board: list[str],
+        event: Optional[AudioEvent], ended_ts: Optional[float],
+    ) -> bool:
+        """手札が読めていない席があるとき、ディーラーの役名から勝者を決める（要確認）。
+
+        読めている席のうち役名に合う席が 1 つだけならその席、どれも合わず読めていない席が 1 つだけなら
+        その席の勝ち。それ以外は決めない（`w <席>` の案内に戻る）。
+        """
+        from core.showdown import HAND_NAMES_JA, evaluate_hands
+
+        announced = self._announced_hand
+        readable = [s for s in remaining if len(self._hole_cards.get(s, [])) == 2]
+        unreadable = [s for s in remaining if s not in readable]
+        if len(board) != 5 or not readable or not announced:
+            return False
+        try:
+            hands = evaluate_hands({s: self._hole_cards[s] for s in readable}, board)
+        except Exception:  # noqa: BLE001
+            return False
+        matching = [s for s in readable if hands[s].name == announced]
+        if len(matching) == 1:
+            winner = matching[0]
+        elif not matching and len(unreadable) == 1:
+            winner = unreadable[0]
+        else:
+            return False
+        said = HAND_NAMES_JA.get(announced, announced)
+        self._hand_needs_review = True
+        self._notice(
+            f"手札が読めていない席があります（席{'・'.join(map(str, unreadable))}）— "
+            f"ディーラーの役名「{said}」から席{winner} の勝ちにします（要確認）"
+        )
+        order = self._game_state.acting_order()
+        showdown = [hands[s].to_dict() for s in sorted(readable, key=lambda s: order.index(s)
+                                                       if s in order else s)]
+        self._finalize_hand(winner, event, winner_source="announced", showdown=showdown, ended_ts=ended_ts)
+        return True
+
+    def _check_announced_after_end(self, name: str) -> None:
+        """確定したあとに届いた役名: 手札で判定した役と違えば知らせる（記録は訂正画面で）。"""
+        from core.showdown import HAND_NAMES_JA
+
+        last = self._last_result or {}
+        judged = last.get("hand")
+        if last.get("source") == "cards" and judged and judged != name:
+            self._notice(
+                f"ハンド {last.get('hand_id')} のディーラーの役名「{HAND_NAMES_JA.get(name, name)}」が"
+                f"判定（{HAND_NAMES_JA.get(judged, judged)}）と違います — スマホの訂正画面で確かめてください"
+            )
+            return
+        logger.info("役名 %s — ハンド %s は確定済み", name, last.get("hand_id"))
 
     def _mucked_stronger_hand(self, seat: int, remaining: list[int]) -> bool:
         """マックした席の手札が、残りの誰よりも強かったか（手札とボードが全部読めているときだけ）。"""
@@ -2097,14 +2195,32 @@ class IntegrationThread(threading.Thread):
         self._maybe_finish_hand(event)
 
     def _handle_end_hand(self, event: AudioEvent) -> None:
-        """「ハンド終了」: 残った全員が見せたとして勝者を決める。決められなければ `w <席>` を案内する。"""
+        """「ハンド終了」/ 勝った役名（「ツーペア」）: 残った全員が見せたとして勝者を決める。
+
+        役名はディーラーがショーダウンで言う（「ウィナー」は言わない運用, 2026-09-26）。ハンドの終わりの
+        合図であり、手札の判定との突き合わせにも使う（`_finish_showdown`）。閉じていないベッティングは
+        聞き取れなかったとみて閉じる。決められなければ `w <席>` を案内する。
+        """
         gs = self._game_state
+        name = event.hand_name
         if not self._hand_open or not gs.is_hand_active():
-            logger.info("「ハンド終了」— 進行中のハンドはありません（確定済み）")
+            if name:
+                self._check_announced_after_end(name)
+            else:
+                logger.info("「ハンド終了」— 進行中のハンドはありません（確定済み）")
             return
+        if name:
+            self._announced_hand = name
         if not (self._auto_winner and self._rules_aware):
             self._notice("勝者を w <席> で入力してください")
             return
+        if name:
+            spoken = _spoken_at(event)
+            if self._foldout_pending is not None and spoken >= self._foldout_pending["t"]:
+                # 最後のフォールドとみた札の離脱は、ショーダウンで前に出したものだった
+                self._showdown_after_foldout(spoken, "役名が言われた（ショーダウン）ので")
+            if not self._betting_over() and len(self._board_cards) >= 5 and len(self._remaining_seats()) >= 2:
+                self._close_betting(spoken)      # 役名を言った = ハンドは終わっている（残りは聞き落とし）
         if self._finish_by_rules(event, explicit=True):
             return
         if not self._betting_over():
@@ -2202,11 +2318,14 @@ class IntegrationThread(threading.Thread):
         if seat is None:
             logger.warning("rebuy event without seat: %r", event.raw_text)
             return
+        was_out = gs.get_stacks().get(seat, 0) <= 0
         try:
             gs.rebuy(seat, event.amount)
         except ValueError:
             logger.exception("rebuy failed (seat=%s amount=%s)", seat, event.amount)
             return
+        if was_out:
+            self._notice(f"席{seat} に {event.amount} を買い足しました — 次のハンドから配られます")
         if self._on_action:
             self._on_action(ActionRecord(
                 hand_id=gs.hand_id,
@@ -2247,6 +2366,45 @@ class IntegrationThread(threading.Thread):
             logger.warning("rename_seat: 席 %d はありません（%s）", seat, name)
             return
         logger.info("席 %d の名前を %s にしました", seat, name)
+
+    # ――― 席の参加・休み、ブラインドの変更（次のハンドから, 2026-09-26） ―――
+
+    def _handle_sit(self, event: AudioEvent) -> None:
+        """`name <席> -`（休み = 配られない）/ `name <席> <名前>`（参加）。次のハンドから反映する。"""
+        gs = self._game_state
+        seat = event.seat
+        if seat is None:
+            logger.warning("%s without seat: %r", event.action, event.raw_text)
+            return
+        try:
+            changed = gs.sit_out(seat) if event.action == "sit_out" else gs.sit_in(seat)
+        except ValueError:
+            logger.warning("%s: 席 %d はありません", event.action, seat)
+            return
+        if changed is False:
+            return                            # もともとその状態（名前の変更だけ）
+        if event.action == "sit_out":
+            self._notice(f"席{seat} は次のハンドから休みです（配られません）")
+        elif gs.get_stacks().get(seat, 0) <= 0:
+            self._notice(f"席{seat} は次のハンドから参加です（スタック 0 — r <席> <金額> で買い足すまで配られません）")
+        else:
+            self._notice(f"席{seat} は次のハンドから参加です")
+
+    def _handle_set_blinds(self, event: AudioEvent) -> None:
+        """ブラインドの変更（トーナメントのレベル上昇）。`raw_text` の「SB/BB」。次のハンドから。"""
+        gs = self._game_state
+        m = re.search(r"(\d+)\s*/\s*(\d+)", unicodedata.normalize("NFKC", event.raw_text or ""))
+        if m is None:
+            logger.warning("set_blinds without SB/BB: %r", event.raw_text)
+            return
+        sb, bb = int(m.group(1)), int(m.group(2))
+        try:
+            gs.set_blinds(sb, bb)
+        except ValueError as e:
+            self._notice(f"ブラインドを変えられません: {e}")
+            return
+        later = self._hand_open and gs.is_hand_active()
+        self._notice(f"ブラインドを {sb}/{bb} にしました" + ("（次のハンドから）" if later else ""))
 
     # ――― ミスディール訂正（ADR-0054） ―――
 
@@ -2676,8 +2834,12 @@ class IntegrationThread(threading.Thread):
     def _start_new_hand(
         self, event: Optional[AudioEvent] = None, *,
         started_at: Optional[float] = None, auto: bool = False,
-    ) -> None:
-        """新しいハンドを始める。`auto` = 手札の配布を検出して始めた（ADR-0062）。"""
+    ) -> bool:
+        """新しいハンドを始める。`auto` = 手札の配布を検出して始めた（ADR-0062）。
+
+        配られる席（休みでなく、チップがある席）が 2 つ未満なら始めない（False。知らせるのは理由が変わった
+        ときだけ）。買い足し（`r`）・参加（`name`）の操作で始められるようになる。
+        """
         gs = self._game_state
         for seat, name in self._pending_renames.items():   # ハンドの途中に届いた席替え（ADR-0059）
             self._apply_rename(seat, name)
@@ -2685,7 +2847,12 @@ class IntegrationThread(threading.Thread):
         # S5（ADR-0047）: stack_start はブラインド post 前に取る。pokerkit backend は new_hand() で
         # ブラインドを自動 post するため、post 後に取ると result がブラインド分ずれる。
         self._stack_start = gs.get_stacks()
-        gs.new_hand()
+        try:
+            gs.new_hand()
+        except ValueError as e:
+            self._refuse_start(str(e))
+            return False
+        self._start_refused = None
         self._current_actions = []
         if started_at is not None:
             self._hand_started_epoch = started_at
@@ -2714,6 +2881,7 @@ class IntegrationThread(threading.Thread):
         self._streets_synced = set()
         self._silent_mic_warned = False
         self._board_before_deal = False
+        self._announced_hand = None
         self._set_in_play(True)
         if self._rfid_reset_for_deal:
             self._rfid_reset_for_deal = False   # 配布の検出でリセット済み（ADR-0063）
@@ -2731,13 +2899,38 @@ class IntegrationThread(threading.Thread):
             self._assign_seats_for_hand(gs.hand_id)
         logger.info("New hand started: hand_id=%d", gs.hand_id)
         button = getattr(gs, "button_seat", None)
+        out = [s for s in self._game_seats() if s not in self._seats_in_hand()]
         details = [d for d in (
             "手札が配られました" if auto else "",
             f"ボタン 席{button}" if button is not None else "",
+            ("休み: " + "・".join(f"席{s}" for s in out)) if out else "",
         ) if d]
         self._notice(f"ハンド {gs.hand_id} 開始" + (f"（{' / '.join(details)}）" if details else ""))
         self._show_hole_cards()
         self._publish_table_state()
+        return True
+
+    def _refuse_start(self, why: str) -> None:
+        """ハンドを始められない（配られる席が 2 つ未満）。同じ理由は 1 回だけ知らせる。"""
+        message = (
+            f"ハンドを始められません — {why}。r <席> <金額> で買い足すか、"
+            "name <席> <名前> で参加させてください"
+        )
+        if message == self._start_refused:
+            logger.debug("%s", message)
+            return
+        self._start_refused = message
+        self._notice(message)
+
+    def _seats_in_hand(self) -> list[int]:
+        """いまのハンドに配られた席（backend が区別しなければ全席）。"""
+        method = getattr(self._game_state, "seats_in_hand", None)
+        if method is None:
+            return self._game_seats()
+        try:
+            return list(method())
+        except Exception:  # noqa: BLE001
+            return self._game_seats()
 
     def _assign_seats_for_hand(self, hand_id: int) -> None:
         """S2.x: hand 開始時に seat→player を session レイヤへ write-through する（ADR-0008 §4）。
@@ -2804,8 +2997,9 @@ class IntegrationThread(threading.Thread):
                 logger.exception("resolve_seat_map_for_hand failed; player_id を省略")
 
         stacks_end = gs.get_stacks()
+        in_hand = set(self._seats_in_hand())
         players_info = []
-        for seat in sorted(stacks_end.keys()):
+        for seat in sorted(s for s in stacks_end if s in in_hand):   # 配られた席だけ
             hole = self._hole_cards.get(seat, [])
             info = {
                 "seat":              seat,
@@ -2868,6 +3062,7 @@ class IntegrationThread(threading.Thread):
             ),
             winner_source=winner_source,
             showdown=showdown,
+            announced_hand=self._announced_hand,
         )
 
         self._json_writer.append_hand_summary(summary)
@@ -2882,6 +3077,7 @@ class IntegrationThread(threading.Thread):
             "hand_id": gs.hand_id,
             "winners": sorted(awards) if awards else [winner_seat],
             "source": winner_source,
+            "hand": next((h.get("hand") for h in (showdown or []) if h.get("seat") == winner_seat), None),
         }
         self._publish_table_state()
         self._current_actions = []
@@ -2923,6 +3119,8 @@ class IntegrationThread(threading.Thread):
         }.get(summary.winner_source or "", "")
         if summary.winner_source == "cards" and summary.winner_seat in hands:
             detail = HAND_NAMES_JA.get(hands[summary.winner_seat], hands[summary.winner_seat])
+        elif summary.winner_source == "announced" and summary.announced_hand:
+            detail = "ディーラーの役名 " + HAND_NAMES_JA.get(summary.announced_hand, summary.announced_hand)
         tail = [d for d in (detail, f"ポット {summary.pot_total}",
                             "要確認" if summary.review_required else "") if d]
         return f"ハンド {summary.hand_id} 終了 — {text}（{' / '.join(tail)}）"

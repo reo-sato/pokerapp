@@ -73,6 +73,10 @@ def describe_event(event: Optional[AudioEvent]) -> str:
         action = "bet/raise"               # どちらかは engine が状態から決める
     elif "check_around" in flags:
         action = "check 全員"
+    elif getattr(event, "hand_name", None):
+        from core.showdown import HAND_NAMES_JA
+
+        action = f"ハンド終了（{HAND_NAMES_JA.get(event.hand_name, event.hand_name)}）"
     else:
         action = event.action
     parts = [action]

@@ -86,8 +86,8 @@ schema を変更する PR は、同じ PR で以下を更新する（漏れは c
 >   `1.3` = 監査フィールド `reason` / `apply_ok`（ADR-0047 G2。verify-v1 系列では `1.1` だったものを 2026-09-22 のマージで統合）/
 >   `1.4` = `raw_text`（聞き取った発話, ADR-0060）/ `1.5` = action に `end_hand`（「ハンド終了」, ADR-0062）
 > - `hand` `1.1` = `board_timeline`（ADR-0055）/ `1.2` = `button_seat` + `position_map`（ISSUE-0032）/
->   `1.3` = `pot_awards`（ADR-0050 S7。同上）/ `1.4` = `winner_source` + `showdown`（勝者の自動判定, ADR-0062）
-> - `reconstruction_event`（draft, 未 freeze）`0.2` = `utterance_start_ts` + `parse_flags`（ADR-0047/0048）/ `0.3` = `position`（ISSUE-0032）/ `0.4` = rfid の `replaces`（配り直しの差し替え, ADR-0058） / `0.5` = rfid の `kind`・`observed_at`（札の離脱でフォールド, 2026-09-25）
+>   `1.3` = `pot_awards`（ADR-0050 S7。同上）/ `1.4` = `winner_source` + `showdown`（勝者の自動判定, ADR-0062）/ `1.5` = `announced_hand` + winner_source の `announced`（ディーラーの役名, 2026-09-26）
+> - `reconstruction_event`（draft, 未 freeze）`0.2` = `utterance_start_ts` + `parse_flags`（ADR-0047/0048）/ `0.3` = `position`（ISSUE-0032）/ `0.4` = rfid の `replaces`（配り直しの差し替え, ADR-0058） / `0.5` = rfid の `kind`・`observed_at`（札の離脱でフォールド, 2026-09-25）/ `0.6` = audio の `hand_name`（ディーラーの役名, 2026-09-26）
 >
 > **全 domain schema + repository interface が frozen**。残るのは write/sync 拡張（双方向同期,
 > S5 後続）のみ。

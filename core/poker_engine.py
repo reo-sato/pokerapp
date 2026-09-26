@@ -68,6 +68,12 @@ class PokerEngine(Protocol):
     def current_pots(self) -> list[dict]: ...
     def end_hand_awards(self, awards: dict[int, int]) -> None: ...
 
+    # additive（席の参加・休み、ブラインドの変更, 2026-09-26）。次のハンドから反映する。
+    def sit_out(self, seat: int) -> bool: ...
+    def sit_in(self, seat: int) -> bool: ...
+    def seats_in_hand(self) -> list[int]: ...
+    def set_blinds(self, sb: int, bb: int) -> None: ...
+
     @property
     def hand_id(self) -> int: ...
     @property
@@ -139,6 +145,12 @@ class PokerkitGameState:
         self._seat_to_idx: dict[int, int] = {s: i for i, s in enumerate(self._order)}
         self._idx_to_seat: dict[int, int] = {i: s for i, s in enumerate(self._order)}
         self._stacks: dict[int, int] = {s: self._players[s].stack for s in self._seats}  # 永続（hand 跨ぎ）
+        # 休みの席（操作で外した。次のハンドから配られない）。スタック 0 の席も配られない。
+        self._sitting_out: set[int] = set()
+        # いまのハンド（最後のハンド）に配られた席。ボタン・ブラインド・手番はこの席だけで回す。
+        self._hand_seats: list[int] = list(self._seats)
+        # 次のハンドから使うブラインド（ハンドの途中に変えたとき）
+        self._pending_blinds: Optional[tuple[int, int]] = None
         self._hand_id: int = 0
         self._state = None
         self._hand_active: bool = False
@@ -156,13 +168,34 @@ class PokerkitGameState:
 
     # ――― ハンド管理 ―――
 
+    def playing_seats(self) -> list[int]:
+        """次のハンドに配られる席（休みでなく、チップがある席）。"""
+        return [s for s in self._seats if s not in self._sitting_out and self._stacks[s] > 0]
+
     def new_hand(self) -> int:
+        """新しいハンドを始める。配られる席が 2 つ未満なら ValueError（状態は変えない）。"""
         from pokerkit import NoLimitTexasHoldem
 
+        playing = self.playing_seats()
+        if len(playing) < 2:
+            raise ValueError(
+                "配られる席が 2 つ未満です（休み: "
+                f"{sorted(self._sitting_out) or 'なし'} / スタック 0: "
+                f"{[s for s in self._seats if self._stacks[s] <= 0] or 'なし'}）"
+            )
+        if self._pending_blinds is not None:
+            self._sb, self._bb = self._pending_blinds
+            self._pending_blinds = None
         self._hand_id += 1
-        # ボタンを 1 つ進めてから並びを作る（ボタンの次が SB, 末尾が BTN）。
-        self._button_seat = next_button(self._seats, self._button_seat)
-        self._order = seat_order_from_button(self._seats, self._button_seat)
+        # ボタンを 1 つ進めてから並びを作る（ボタンの次が SB, 末尾が BTN）。前のボタンの席が
+        # 抜けていたら（バースト・休み）、その次の席にボタンを置く。
+        if self._button_seat is None or self._button_seat in playing:
+            self._button_seat = next_button(playing, self._button_seat)
+        else:
+            later = [s for s in playing if s > self._button_seat]
+            self._button_seat = later[0] if later else playing[0]
+        self._hand_seats = list(playing)
+        self._order = seat_order_from_button(playing, self._button_seat)
         self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
         self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
         stacks = [self._stacks[s] for s in self._order]
@@ -196,13 +229,15 @@ class PokerkitGameState:
     def end_hand(self, winner_seat: int) -> None:
         if winner_seat not in self._players:
             raise ValueError(f"Unknown seat: {winner_seat}")
+        if winner_seat not in self._hand_seats:
+            raise ValueError(f"Seat {winner_seat} is not in this hand")
         st = self._state
         if st is None:
             raise RuntimeError("end_hand called without an active hand")
         pot_total = sum(self._hand_start_stacks) - sum(st.stacks)
         # side-pot スナップショット（HandSummary 用 additive 情報）
         self._final_pots = self._snapshot_pots(pot_total)
-        for s in self._seats:
+        for s in self._hand_seats:
             self._stacks[s] = st.stacks[self._seat_to_idx[s]]
         self._stacks[winner_seat] += pot_total
         self._hand_active = False
@@ -220,14 +255,14 @@ class PokerkitGameState:
         if not winner_seats:
             raise ValueError("winner_seats must not be empty")
         for seat in winner_seats:
-            if seat not in self._players:
+            if seat not in self._hand_seats:
                 raise ValueError(f"Unknown seat: {seat}")
         st = self._state
         if st is None:
             raise RuntimeError("end_hand_split called without an active hand")
         pot_total = sum(self._hand_start_stacks) - sum(st.stacks)
         self._final_pots = self._snapshot_pots(pot_total)
-        for s in self._seats:
+        for s in self._hand_seats:
             self._stacks[s] = st.stacks[self._seat_to_idx[s]]
         share, remainder = divmod(pot_total, len(winner_seats))
         awards: dict[int, int] = {}
@@ -249,13 +284,13 @@ class PokerkitGameState:
         if st is None or not self._hand_active:
             raise RuntimeError("end_hand_awards called without an active hand")
         for seat in awards:
-            if seat not in self._players:
+            if seat not in self._hand_seats:
                 raise ValueError(f"Unknown seat: {seat}")
         pot_total = sum(self._hand_start_stacks) - sum(st.stacks)
         if sum(awards.values()) != pot_total or any(a < 0 for a in awards.values()):
             raise ValueError(f"awards {awards} do not add up to the pot {pot_total}")
         self._final_pots = self._snapshot_pots(pot_total)
-        for s in self._seats:
+        for s in self._hand_seats:
             self._stacks[s] = st.stacks[self._seat_to_idx[s]]
         for seat, amount in awards.items():
             self._stacks[seat] += amount
@@ -404,7 +439,7 @@ class PokerkitGameState:
         """seat → ポジション名（BTN/SB/BB/UTG…, 仕様 §6.1）。ボタン未確定なら空。"""
         if self._button_seat is None:
             return {}
-        return position_map(self._seats, self._button_seat)
+        return position_map(self._hand_seats, self._button_seat)
 
     def is_hand_active(self) -> bool:
         """ハンドが進行中か（新ハンド前 / `end_hand` 後は False, ISSUE-0028）。
@@ -466,7 +501,7 @@ class PokerkitGameState:
         ]
         collected = sum(p["amount"] for p in pots)
         if pot_total > 0 and collected < pot_total:
-            eligible = [s for s in self._seats if st.statuses[self._seat_to_idx[s]]]
+            eligible = [s for s in self._hand_seats if st.statuses[self._seat_to_idx[s]]]
             if pots:
                 # 回収済み pot + 未回収 bet の残差を最後の pot 相当として追記。
                 pots.append({"amount": pot_total - collected, "eligible_seats": eligible})
@@ -483,8 +518,8 @@ class PokerkitGameState:
         st = self._state
         if st is None:
             return 0
-        idx = self._seat_to_idx[seat]
-        return st.bets[idx] if idx < len(st.bets) else 0
+        idx = self._seat_to_idx.get(seat)
+        return st.bets[idx] if idx is not None and idx < len(st.bets) else 0
 
     @property
     def hand_id(self) -> int:
@@ -512,10 +547,12 @@ class PokerkitGameState:
         return self.get_stacks()[seat]
 
     def get_stacks(self) -> dict[int, int]:
+        """全席のスタック（ハンドに入っていない席は持ち越しの値）。"""
+        stacks = dict(self._stacks)
         st = self._state
         if st is not None and self._hand_active:
-            return {s: st.stacks[self._seat_to_idx[s]] for s in self._seats}
-        return dict(self._stacks)
+            stacks.update({s: st.stacks[self._seat_to_idx[s]] for s in self._hand_seats})
+        return stacks
 
     def get_player_name(self, seat: int) -> str:
         if seat not in self._players:
@@ -531,8 +568,42 @@ class PokerkitGameState:
     def get_active_seats(self) -> list[int]:
         st = self._state
         if st is None or not self._hand_active:
-            return list(self._seats)
-        return [s for s in self._seats if st.statuses[self._seat_to_idx[s]]]
+            return list(self._hand_seats)
+        return [s for s in self._hand_seats if st.statuses[self._seat_to_idx[s]]]
+
+    # ――― 席の参加・休み、ブラインドの変更（次のハンドから, 2026-09-26） ―――
+
+    def seats_in_hand(self) -> list[int]:
+        """いまのハンド（まだ無ければ最後のハンド / 全席）に配られた席。"""
+        return list(self._hand_seats)
+
+    def sit_out(self, seat: int) -> bool:
+        """席を休みにする（次のハンドから配られない。スタックは持ち越す）。変わったら True。"""
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        if seat in self._sitting_out:
+            return False
+        self._sitting_out.add(seat)
+        return True
+
+    def sit_in(self, seat: int) -> bool:
+        """休みの席を戻す（次のハンドから配られる。スタック 0 なら買い足すまで配られない）。変わったら True。"""
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        if seat not in self._sitting_out:
+            return False
+        self._sitting_out.discard(seat)
+        return True
+
+    def set_blinds(self, sb: int, bb: int) -> None:
+        """ブラインドを変える（トーナメントのレベル上昇）。ハンドの途中なら次のハンドから。"""
+        if sb <= 0 or bb <= 0 or sb > bb:
+            raise ValueError(f"Invalid blinds: sb={sb} bb={bb}")
+        if self._hand_active:
+            self._pending_blinds = (sb, bb)
+        else:
+            self._sb, self._bb = sb, bb
+            self._pending_blinds = None
 
     # ――― 手動修正（pokerkit は hand 単位のため次ハンドから反映） ―――
 

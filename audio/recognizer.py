@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Optional
 
 from core.constants import (
     ACTION_KEYWORDS,
+    HAND_NAME_KEYWORDS,
     KANJI_DIGIT,
     KANJI_UNIT,
     WHISPER_PROMPT_JA,
@@ -634,11 +635,15 @@ def parse_action(
         break
     if found_action == "check" and _CHECK_AROUND.match(norm, found_pos):
         flags.append("check_around")
+    # ショーダウンで言った勝った役名（「ツーペア」= ハンドの終わり + 判定との突き合わせ, 2026-09-26）
+    hand_name = _hand_name_for(norm[found_pos:span_end]) if found_action == "end_hand" else None
 
     # 席番号表現（シート1 / seat 3 等）を除去してから金額を抽出する。
     # 除去しないと parse_amount() が席番号の数字を最初の金額候補として拾ってしまう。
     # 語の直後の仮名の数（「ベトナナ」の「ナナ」）は漢数字にしてから読む（ADR-0062）。
-    amount = parse_amount_ex(_strip_seat_references(_kana_amount_to_kanji(norm, span_end)))
+    # 役名に額は無い（「2ペア」の 2 を額にしない）。
+    amount = (AmountParse(0) if hand_name else
+              parse_amount_ex(_strip_seat_references(_kana_amount_to_kanji(norm, span_end))))
     if amount.ambiguous:
         flags.append("ambiguous_amount")
 
@@ -652,7 +657,17 @@ def parse_action(
         position=parse_position(norm),
         parse_flags=tuple(flags),
         utterance_start_ts=utterance_start_ts,
+        hand_name=hand_name,
     )
+
+
+def _hand_name_for(keyword_text: str) -> Optional[str]:
+    """照合に使った語（正規化済み）が役名なら pokerkit の役名を返す。"""
+    kw = keyword_text.lower()
+    for keyword, name in HAND_NAME_KEYWORDS.items():
+        if _to_katakana(unicodedata.normalize("NFKC", keyword)).lower() == kw:
+            return name
+    return None
 
 
 # 1 発話の書き起こしに使うトークン数の上限 = 基本 + 音の長さ（秒）あたり。人の発話（1 秒に 10 トークン前後）
@@ -851,7 +866,7 @@ def apply_corrections(
     - S4: 金額 snap の review 閾値を同次元比較（gap >= bb）に修正（従来の gap > min_raise_to は
       「2千→2 誤読 → min へ clamp」を無警告で通していた）。bb 不明（=0）は従来閾値に fallback。
     - S3: heard 額が to 解釈では非合法だが「追加額(by)解釈」なら合法という場合、
-      by 読み上げの可能性を reason="raise_to_vs_by_ambiguous" で明示（採用は従来どおり to 解釈 + snap）。
+      レイズの額は常にトータル（by 読み上げの疑いは立てない = オーナー確認 2026-09-26。採用は to 解釈 + snap）。
       両解釈とも合法な通常レイズは慣例（to 読み上げ）を信頼し flag しない。
     - V4: heard 額が bb の倍数でない場合、bb 倍数への丸めが合法レンジ内なら丸める
       （reason="rounded_to_bb"。ASR の端数誤認識対策）。
@@ -935,13 +950,8 @@ def apply_corrections(
 
     val = amount
 
-    # S3: raise の to/by 曖昧性。to 解釈が非合法（min 未満）だが「追加額」解釈
-    # （現最高額 committed+c に heard を上乗せ）なら合法 → by 読み上げの可能性を flag。
-    if target == "raise" and val < m:
-        by_total = ctx.committed + c + val
-        if m <= by_total <= s:
-            review = True
-            reasons.append("raise_to_vs_by_ambiguous")
+    # レイズの額は常にトータル（「レイズ 2500」= 2500 にする。上乗せ分は言わない = オーナー確認 2026-09-26）。
+    # 最小レイズ未満は聞き違いとして、下の snap + review に任せる（「追加額」とは読み替えない）。
 
     # V4: チップの最小単位への round 寄せ（合法レンジ内に収まる場合のみ）。単位は SB と BB の最大公約数
     # （100/200 の卓の「2500」を 2400 にしない = 言った数字どおり, ADR-0062）。chip が無い（legacy）なら bb。

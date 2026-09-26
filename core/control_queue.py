@@ -26,7 +26,10 @@ logger = logging.getLogger(__name__)
 
 # staff から受け付ける制御コマンド種別（GUI/CLI の new_hand / winner / rebuy / 訂正に対応）。
 # correct_board / correct_seat = ミスディール訂正（CLI の `cb` / `cs`, ADR-0054）。
-VALID_CONTROL_TYPES = ("new_hand", "winner", "rebuy", "correct_board", "correct_seat")
+# set_blinds = ブラインドの変更（トーナメントのレベル上昇）/ sit_out・sit_in = 席の休み・参加（次のハンドから, 2026-09-26）。
+VALID_CONTROL_TYPES = (
+    "new_hand", "winner", "rebuy", "correct_board", "correct_seat", "set_blinds", "sit_out", "sit_in",
+)
 
 
 def _now_iso() -> str:
@@ -176,6 +179,21 @@ def command_to_audio_event(command: ControlCommand, clock: Callable[[], float]):
         return AudioEvent(
             action="correct_seat", amount=0, timestamp=clock(),
             raw_text=f"シート{seat} 訂正", seat=seat,
+        )
+    if t == "set_blinds":
+        sb, bb = args.get("sb"), args.get("bb")
+        if not all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in (sb, bb)) or sb > bb:
+            logger.warning("control set_blinds with invalid args: %r", args)
+            return None
+        return AudioEvent(action="set_blinds", amount=bb, timestamp=clock(), raw_text=f"{sb}/{bb}")
+    if t in ("sit_out", "sit_in"):
+        seat = args.get("seat")
+        if not isinstance(seat, int) or isinstance(seat, bool):
+            logger.warning("control %s without int seat: %r", t, args)
+            return None
+        return AudioEvent(
+            action=t, amount=0, timestamp=clock(),
+            raw_text=f"シート{seat} {'休み' if t == 'sit_out' else '参加'}", seat=seat,
         )
     logger.warning("unknown control type: %r", t)
     return None

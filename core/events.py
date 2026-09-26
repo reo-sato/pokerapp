@@ -64,3 +64,6 @@ class AudioEvent:
     # additive (ADR-0048 T1): 発話キャプチャの開始時刻（epoch 秒）。ASR デコード遅延に依らず
     # センサー照合窓の始端に使う。None なら timestamp を始端に使う（旧記録の後方互換）。
     utterance_start_ts: Optional[float] = None
+    # additive (2026-09-26): ディーラーが言った **勝った役の名前**（pokerkit の役名, action="end_hand" のとき）。
+    # ショーダウンの判定との突き合わせに使う。役名を言わない「ハンド終了」では None。
+    hand_name: Optional[str] = None

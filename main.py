@@ -625,8 +625,9 @@ def run_cli() -> None:
               "決まらないときは w <席>。")
     print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー  [r <席> <金額>]=リバイ")
     print("ミスディール訂正: [cb <位置>]=ボードの N 枚目を取り消し  [cs <席>]=その席の札を読み直し")
-    if session_repo is not None:
-        print("席替え: [name <席> <名前>]=その席のお客さんを変える（次のハンドから）  [name <席> -]=空席にする")
+    print("席: [name <席> <名前>]=その席の人（参加）  [name <席> -]=空席（次のハンドから配られない）"
+          "  スタック 0 の席は r で買い足すまで配られません")
+    print("ブラインド: [blinds <SB> <BB>]=次のハンドからブラインドを変える（例: blinds 200 400）")
     print("上記以外の入力は読み上げ文として解釈します"
           "（例: チェック / シート3 コール / ベット 500）。マイクが無くてもこれで進行できます。")
     print("ディーラーがアナウンスすると自動検出されます。\n")
@@ -679,30 +680,51 @@ def run_cli() -> None:
                     print(f"エラー: {e}")
             elif cmd == "name":
                 parsed = _parse_name_command(line.translate(_FULLWIDTH_TO_ASCII).split())
-                if session_repo is None:
-                    print("席とお客さんの記録は無効です（config の session_layer.enabled=true で有効）")
-                elif parsed is None:
+                if parsed is None:
                     print("使い方: name <席> <名前> / name <席> -（空席）")
                 else:
                     seat, name = parsed
                     if seat not in {p["seat"] for p in session_cfg["players"]}:
                         print(f"席{seat} はこの卓にありません")
                         continue
-                    new_map = dict(seat_player_map)
-                    if name is None:
-                        new_map.pop(seat, None)
-                        name = f"Player{seat}"
+                    vacate = name is None
+                    if session_repo is None:
+                        print("（席とお客さんの記録は無効です: config の session_layer.enabled=true で有効。"
+                              "席の参加・休みだけ反映します）")
                     else:
-                        new_map[seat] = player_repo.find_or_create(name).player_id
-                    seat_player_map = new_map
-                    # 席 → player は次のハンドの開始時に書かれる。名前はゲーム状態を持つ
-                    # integration スレッドで変える（ハンドの途中なら次のハンドから）。
-                    integration_thread.set_seat_player_map(seat_player_map)
+                        new_map = dict(seat_player_map)
+                        if vacate:
+                            new_map.pop(seat, None)
+                        else:
+                            new_map[seat] = player_repo.find_or_create(name).player_id
+                        seat_player_map = new_map
+                        # 席 → player は次のハンドの開始時に書かれる。名前はゲーム状態を持つ
+                        # integration スレッドで変える（ハンドの途中なら次のハンドから）。
+                        integration_thread.set_seat_player_map(seat_player_map)
+                    shown = f"Player{seat}" if vacate else name
                     audio_q.put(AudioEvent(
                         action="rename_seat", amount=0, timestamp=_time.time(),
-                        raw_text=name, seat=seat,
+                        raw_text=shown, seat=seat,
                     ))
-                    print(f"席{seat} を {name} にしました（次のハンドから）")
+                    # 空席は次のハンドから配られない（休み）。名前を付けた席は参加（休みなら戻す）。
+                    audio_q.put(AudioEvent(
+                        action="sit_out" if vacate else "sit_in", amount=0, timestamp=_time.time(),
+                        raw_text=f"シート{seat} {'休み' if vacate else '参加'}", seat=seat,
+                    ))
+                    if vacate:
+                        print(f"席{seat} を空席にしました（次のハンドから配られません）")
+                    else:
+                        print(f"席{seat} を {shown} にしました（次のハンドから）")
+            elif cmd == "blinds":
+                numbers = re.findall(r"\d+", " ".join(parts[1:]))    # `blinds 200 400` / `blinds 200/400`
+                if len(numbers) != 2 or int(numbers[0]) <= 0 or int(numbers[0]) > int(numbers[1]):
+                    print("使い方: blinds <SB> <BB>（例: blinds 200 400）")
+                    continue
+                sb, bb = int(numbers[0]), int(numbers[1])
+                audio_q.put(AudioEvent(
+                    action="set_blinds", amount=bb, timestamp=_time.time(), raw_text=f"{sb}/{bb}",
+                ))
+                print(f"ブラインド {sb}/{bb} を送信しました（次のハンドから）")
             elif cmd in ("cb", "cs") and len(parts) >= 2:
                 # ミスディール訂正（ADR-0054）。状態変更は他と同じく queue 経由。
                 try:

@@ -109,6 +109,9 @@ class HandSummary:
     winner_source: Optional[str] = None
     # ショーダウンで見せた手札の役 [{"seat", "hole_cards", "hand", "best"}]（winner_source="cards" のとき）。
     showdown: Optional[list] = None
+    # ディーラーが言った勝った役の名前（pokerkit の役名, 2026-09-26 additive）。言わなければ None = 出力に
+    # 含めない。判定と違えば review_required。winner_source="announced" = 役名から勝者を決めた（要確認）。
+    announced_hand: Optional[str] = None
 
     def to_dict(self) -> dict:
         data = {
@@ -135,4 +138,6 @@ class HandSummary:
             data["winner_source"] = self.winner_source
         if self.showdown is not None:
             data["showdown"] = self.showdown
+        if self.announced_hand is not None:
+            data["announced_hand"] = self.announced_hand
         return data

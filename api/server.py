@@ -236,6 +236,8 @@ class _StaffControlBody(BaseModel):
     seat: int | None = None
     amount: int | None = None
     index: int | None = None      # correct_board のボード位置 1..5（ADR-0054）
+    sb: int | None = None         # set_blinds（次のハンドからのブラインド, 2026-09-26）
+    bb: int | None = None
 
 
 class _OidcExchangeBody(BaseModel):
@@ -1168,6 +1170,19 @@ def create_app(
             if not isinstance(body.seat, int):
                 return JSONResponse(status_code=400, content={
                     "code": "invalid_control", "message": "correct_seat には seat が必要です。"})
+            args["seat"] = body.seat
+        elif body.type == "set_blinds":
+            if (not isinstance(body.sb, int) or not isinstance(body.bb, int)
+                    or body.sb <= 0 or body.bb <= 0 or body.sb > body.bb):
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_control",
+                    "message": "set_blinds には正の sb と bb（sb <= bb）が必要です。"})
+            args["sb"] = body.sb
+            args["bb"] = body.bb
+        elif body.type in ("sit_out", "sit_in"):
+            if not isinstance(body.seat, int):
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_control", "message": f"{body.type} には seat が必要です。"})
             args["seat"] = body.seat
         control_log = ControlCommandLog(Path(log_dir) / f"{session_id}.control.jsonl")
         command = control_log.append(body.type, args)

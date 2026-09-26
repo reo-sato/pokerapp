@@ -49,6 +49,8 @@ class GameStateManager:
         # is_active な席番号を昇順で保持（フォールドで除外）
         self._active_seats: list[int] = sorted(self._players.keys())
         self._turn_idx: int = 0  # _active_seats 上のインデックス
+        # 休みの席（次のハンドから配られない）。legacy はスタック 0 でも配る（挙動不変）。
+        self._sitting_out: set[int] = set()
 
     # ――― ハンド管理 ―――
 
@@ -65,8 +67,8 @@ class GameStateManager:
         self._pot = 0
         self._turn_idx = 0
         for ps in self._players.values():
-            ps.is_active = True
-        self._active_seats = sorted(self._players.keys())
+            ps.is_active = ps.seat not in self._sitting_out
+        self._active_seats = sorted(s for s in self._players if s not in self._sitting_out)
         logger.info("New hand started: hand_id=%d", self._hand_id)
         return self._hand_id
 
@@ -290,6 +292,31 @@ class GameStateManager:
 
     def committed(self, seat: int) -> int:
         return 0  # legacy はストリート別コミット額を追跡しない
+
+    # 席の参加・休み、ブラインドの変更（2026-09-26）。legacy は次のハンドの並びだけ変える。
+    def seats_in_hand(self) -> list[int]:
+        return sorted(s for s in self._players if s not in self._sitting_out)
+
+    def sit_out(self, seat: int) -> bool:
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        if seat in self._sitting_out:
+            return False
+        self._sitting_out.add(seat)
+        return True
+
+    def sit_in(self, seat: int) -> bool:
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        if seat not in self._sitting_out:
+            return False
+        self._sitting_out.discard(seat)
+        return True
+
+    def set_blinds(self, sb: int, bb: int) -> None:
+        if sb <= 0 or bb <= 0 or sb > bb:
+            raise ValueError(f"Invalid blinds: sb={sb} bb={bb}")
+        self._sb, self._bb = sb, bb
 
     # ――― 手動修正 ―――
 

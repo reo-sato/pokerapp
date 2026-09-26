@@ -244,13 +244,13 @@ class TestCorrectionsHardening:
         assert r.amount == 800
         assert r.reason == ""
 
-    def test_s3_raise_to_vs_by_ambiguous(self):
-        # heard 400 は to 解釈では min(600) 未満 = 非合法。だが「追加額」解釈なら
-        # committed(0)+call(300)+400=700 で合法 → by 読み上げの可能性を flag。
+    def test_s3_raise_below_the_minimum_is_a_mishearing_not_a_by_amount(self):
+        # heard 400 は to 解釈では min(600) 未満。レイズの額は常にトータル（上乗せ分は言わない = オーナー確認
+        # 2026-09-26）なので「追加額」とは読み替えず、聞き違いとして snap + review。
         r = apply_corrections("raise", 400, _facing_bet(bb=200))
-        assert r.amount == 600                     # 採用は従来どおり to 解釈 + snap
+        assert r.amount == 600
         assert r.needs_review is True
-        assert "raise_to_vs_by_ambiguous" in r.reason
+        assert "amount_snapped" in r.reason and "raise_to_vs_by" not in r.reason
 
     def test_s3_not_flagged_when_both_legal(self):
         # 両解釈とも合法な通常レイズは慣例（to 読み上げ）を信頼して flag しない。

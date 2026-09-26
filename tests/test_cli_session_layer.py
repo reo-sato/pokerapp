@@ -121,9 +121,9 @@ class TestCliSessionLayer:
             1: players["太郎"], 2: players["三郎"],
         }
         assert [p["name"] for p in hands[1]["players"]] == ["太郎", "三郎"]
-        # 空席にした席は結び付けない
+        # 空席にした席は結び付けず、次のハンドから配られない（記録の players にも入らない, 2026-09-26）
         assert repo.resolve_seat_map_for_hand(session_id, 3) == {2: players["三郎"]}
-        assert [p["name"] for p in hands[2]["players"]] == ["Player1", "三郎"]
+        assert [p["name"] for p in hands[2]["players"]] == ["三郎"]
 
     def test_quitting_closes_the_session(
         self, data_dir: Path, monkeypatch: pytest.MonkeyPatch,

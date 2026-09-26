@@ -73,6 +73,21 @@ def test_command_to_audio_event_mapping():
     ev = command_to_audio_event(cs, clk)
     assert ev.action == "correct_seat" and ev.seat == 4 and "シート4" in ev.raw_text
 
+    # ブラインドの変更・席の参加と休み（次のハンドから, 2026-09-26）。
+    bl = log_command("set_blinds", {"sb": 200, "bb": 400})
+    ev = command_to_audio_event(bl, clk)
+    assert ev.action == "set_blinds" and ev.amount == 400 and ev.raw_text == "200/400"
+    so = log_command("sit_out", {"seat": 3})
+    ev = command_to_audio_event(so, clk)
+    assert ev.action == "sit_out" and ev.seat == 3 and "シート3" in ev.raw_text
+    si = log_command("sit_in", {"seat": 3})
+    ev = command_to_audio_event(si, clk)
+    assert ev.action == "sit_in" and ev.seat == 3
+    assert command_to_audio_event(log_command("set_blinds", {"sb": 400, "bb": 200}), clk) is None
+    assert command_to_audio_event(log_command("set_blinds", {"sb": 0, "bb": 200}), clk) is None
+    assert command_to_audio_event(log_command("set_blinds", {"sb": "100", "bb": 200}), clk) is None
+    assert command_to_audio_event(log_command("sit_out", {}), clk) is None
+
     # 不正 args / unknown は None。
     assert command_to_audio_event(log_command("winner", {}), clk) is None
     assert command_to_audio_event(log_command("rebuy", {"seat": 1, "amount": 0}), clk) is None
