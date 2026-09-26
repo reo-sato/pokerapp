@@ -1179,7 +1179,7 @@ def create_app(
                     "message": "set_blinds には正の sb と bb（sb <= bb）が必要です。"})
             args["sb"] = body.sb
             args["bb"] = body.bb
-        elif body.type in ("sit_out", "sit_in"):
+        elif body.type in ("sit_out", "sit_in", "set_button"):
             if not isinstance(body.seat, int):
                 return JSONResponse(status_code=400, content={
                     "code": "invalid_control", "message": f"{body.type} には seat が必要です。"})

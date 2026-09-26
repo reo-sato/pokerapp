@@ -270,10 +270,11 @@ def test_hand_control_blinds_and_seats(env: dict, tmp_path: Path):
     assert staff.send_control(sid, "set_blinds", sb=200, bb=400)["args"] == {"sb": 200, "bb": 400}
     assert staff.send_control(sid, "sit_out", seat=3)["args"] == {"seat": 3}
     assert staff.send_control(sid, "sit_in", seat=3)["type"] == "sit_in"
+    assert staff.send_control(sid, "set_button", seat=6)["args"] == {"seat": 6}
 
     log = ControlCommandLog(tmp_path / "logs" / f"{sid}.control.jsonl")
     cmds, _ = log.read_from(0)
-    assert [c.type for c in cmds] == ["set_blinds", "sit_out", "sit_in"]
+    assert [c.type for c in cmds] == ["set_blinds", "sit_out", "sit_in", "set_button"]
 
     for kwargs in ({}, {"sb": 400, "bb": 200}, {"sb": 0, "bb": 200}):
         with pytest.raises(ViewerApiError) as ei:

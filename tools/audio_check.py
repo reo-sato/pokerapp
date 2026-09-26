@@ -286,7 +286,14 @@ def format_transcript(t) -> str:
     if getattr(t, "no_speech", False):
         return (f"  {clock}  （声ではない音 {t.audio_sec:.1f} 秒 — Whisper にかけず。"
                 "言葉なら audio.vad_threshold を下げる）")
-    heard = "雑音（聞き違い）として無視" if getattr(t, "noise", False) else describe_events(t.events)
+    from audio.recorder import QUESTION_NOTE
+
+    if getattr(t, "noise", False):
+        heard = "雑音（聞き違い）として無視"
+    elif getattr(t, "question", False):
+        heard = QUESTION_NOTE
+    else:
+        heard = describe_events(t.events)
     return f"  {clock}  「{t.text}」→ {heard}（{'・'.join(details)}）"
 
 

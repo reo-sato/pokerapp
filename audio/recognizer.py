@@ -546,12 +546,28 @@ def _split_points(norm: str, keywords: list[tuple[int, int, str]]) -> list[int]:
     return cuts
 
 
+# 確認型の発話（仕様 FR-16/17, §7）: 「コールですか？」「レイズ 2400 でよろしいですか？」はディーラーがプレイヤーに
+# 確かめている言葉で、アクションではない。確認のあとに言う確定の発話（「コール」）だけを読む。疑問形は文末で見る
+# （Whisper は上がり調子に「？」を付ける。書き起こしの語尾はカタカナに寄せてから比べる）。
+_QUESTION_ENDINGS = ("デスカ", "デショウカ", "マスカ", "デスヨネ", "ダヨネ", "デスネ")
+_TRAILING_PUNCTUATION = "？?。、！!．.・ 　…"
+
+
+def is_question(text: str) -> bool:
+    """発話が確認型（疑問形）か。アクションにしない（仕様 FR-17）。"""
+    nfkc = unicodedata.normalize("NFKC", text).strip()
+    if nfkc.endswith("?"):
+        return True
+    norm = _to_katakana(nfkc).rstrip(_TRAILING_PUNCTUATION)
+    return norm.endswith(_QUESTION_ENDINGS)
+
+
 def parse_actions(
     text: str,
     confidence: Optional[float] = None,
     utterance_start_ts: Optional[float] = None,
 ) -> list[AudioEvent]:
-    """1 回の発話からアクションを**言った順にすべて**返す（ADR-0061）。
+    """1 回の発話からアクションを**言った順にすべて**返す（ADR-0061）。確認型（疑問形）は空（仕様 FR-17）。
 
     ディーラーが間を空けずに続けて言うと（「フォールド、フォールド、コール」）、1 つの発話として
     書き起こされる。席番号を言わない運用では手番の順でアクターを決めるので、1 つでも落とすと
@@ -559,6 +575,8 @@ def parse_actions(
     それぞれを `parse_action` で読む（切り分けた各アクションには複数アクションの flag は付かない）。
     キーワードが 1 つ、または多すぎる（繰り返しの幻聴）ときは従来どおり `parse_action` 1 件。
     """
+    if is_question(text):
+        return []
     nfkc = unicodedata.normalize("NFKC", text)
     norm = _to_katakana(nfkc)
     keywords = _distinct_keywords(_keyword_matches(norm))

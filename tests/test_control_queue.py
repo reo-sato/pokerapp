@@ -83,6 +83,10 @@ def test_command_to_audio_event_mapping():
     si = log_command("sit_in", {"seat": 3})
     ev = command_to_audio_event(si, clk)
     assert ev.action == "sit_in" and ev.seat == 3
+    bt = log_command("set_button", {"seat": 6})
+    ev = command_to_audio_event(bt, clk)
+    assert ev.action == "set_button" and ev.seat == 6 and "ボタン" in ev.raw_text
+    assert command_to_audio_event(log_command("set_button", {}), clk) is None
     assert command_to_audio_event(log_command("set_blinds", {"sb": 400, "bb": 200}), clk) is None
     assert command_to_audio_event(log_command("set_blinds", {"sb": 0, "bb": 200}), clk) is None
     assert command_to_audio_event(log_command("set_blinds", {"sb": "100", "bb": 200}), clk) is None

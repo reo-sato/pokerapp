@@ -446,7 +446,7 @@ class ViewerApiClient:
         type: new_hand / winner / rebuy / correct_board（`index`=ボード位置） /
         correct_seat（`seat`）。訂正はミスディールの載せ替え用（ADR-0054）。
         set_blinds（`sb`, `bb` = 次のハンドからのブラインド）/ sit_out・sit_in（`seat` = 席の休み・参加, 次の
-        ハンドから）。
+        ハンドから）/ set_button（`seat` = 次のハンドのボタン, 仕様 FR-05g）。
         """
         payload: dict = {"type": type}
         if seat is not None:

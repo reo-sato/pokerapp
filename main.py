@@ -251,7 +251,7 @@ def _print_transcript(transcript) -> None:
 
     声ではない音（VAD で Whisper にかけなかった音）は出さない（記録 transcripts.jsonl にだけ残る）。
     """
-    from audio.recorder import describe_events
+    from audio.recorder import QUESTION_NOTE, describe_events
 
     if getattr(transcript, "no_speech", False):
         return
@@ -260,6 +260,8 @@ def _print_transcript(transcript) -> None:
         heard = "雑音（聞き違い）として無視"
         if len(text) > _NOISE_SHOWN_CHARS:
             text = text[:_NOISE_SHOWN_CHARS] + "…"
+    elif getattr(transcript, "question", False):
+        heard = QUESTION_NOTE
     else:
         heard = describe_events(transcript.events)
     lag = ""
@@ -628,6 +630,7 @@ def run_cli() -> None:
     print("席: [name <席> <名前>]=その席の人（参加）  [name <席> -]=空席（次のハンドから配られない）"
           "  スタック 0 の席は r で買い足すまで配られません")
     print("ブラインド: [blinds <SB> <BB>]=次のハンドからブラインドを変える（例: blinds 200 400）")
+    print("ボタン: [button <席>]=次のハンドのボタンを手で直す（ディーラーの手違いなど）")
     print("上記以外の入力は読み上げ文として解釈します"
           "（例: チェック / シート3 コール / ベット 500）。マイクが無くてもこれで進行できます。")
     print("ディーラーがアナウンスすると自動検出されます。\n")
@@ -715,6 +718,17 @@ def run_cli() -> None:
                         print(f"席{seat} を空席にしました（次のハンドから配られません）")
                     else:
                         print(f"席{seat} を {shown} にしました（次のハンドから）")
+            elif cmd in ("button", "btn") and len(parts) >= 2:
+                try:
+                    seat = int(parts[1])
+                except ValueError:
+                    print("使い方: button <席番号>")
+                    continue
+                audio_q.put(AudioEvent(
+                    action="set_button", amount=0, timestamp=_time.time(),
+                    raw_text=f"シート{seat} ボタン", seat=seat,
+                ))
+                print(f"次のハンドのボタン 席{seat} を送信しました")
             elif cmd == "blinds":
                 numbers = re.findall(r"\d+", " ".join(parts[1:]))    # `blinds 200 400` / `blinds 200/400`
                 if len(numbers) != 2 or int(numbers[0]) <= 0 or int(numbers[0]) > int(numbers[1]):

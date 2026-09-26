@@ -27,8 +27,10 @@ logger = logging.getLogger(__name__)
 # staff から受け付ける制御コマンド種別（GUI/CLI の new_hand / winner / rebuy / 訂正に対応）。
 # correct_board / correct_seat = ミスディール訂正（CLI の `cb` / `cs`, ADR-0054）。
 # set_blinds = ブラインドの変更（トーナメントのレベル上昇）/ sit_out・sit_in = 席の休み・参加（次のハンドから, 2026-09-26）。
+# set_button = 次のハンドのボタンを手で直す（仕様 FR-05g）。
 VALID_CONTROL_TYPES = (
     "new_hand", "winner", "rebuy", "correct_board", "correct_seat", "set_blinds", "sit_out", "sit_in",
+    "set_button",
 )
 
 
@@ -186,14 +188,12 @@ def command_to_audio_event(command: ControlCommand, clock: Callable[[], float]):
             logger.warning("control set_blinds with invalid args: %r", args)
             return None
         return AudioEvent(action="set_blinds", amount=bb, timestamp=clock(), raw_text=f"{sb}/{bb}")
-    if t in ("sit_out", "sit_in"):
+    if t in ("sit_out", "sit_in", "set_button"):
         seat = args.get("seat")
         if not isinstance(seat, int) or isinstance(seat, bool):
             logger.warning("control %s without int seat: %r", t, args)
             return None
-        return AudioEvent(
-            action=t, amount=0, timestamp=clock(),
-            raw_text=f"シート{seat} {'休み' if t == 'sit_out' else '参加'}", seat=seat,
-        )
+        label = {"sit_out": "休み", "sit_in": "参加", "set_button": "ボタン"}[t]
+        return AudioEvent(action=t, amount=0, timestamp=clock(), raw_text=f"シート{seat} {label}", seat=seat)
     logger.warning("unknown control type: %r", t)
     return None

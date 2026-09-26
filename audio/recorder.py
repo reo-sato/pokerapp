@@ -11,7 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from audio.recognizer import WhisperTranscriber, is_implausibly_long, is_prompt_echo, parse_actions
+from audio.recognizer import (
+    WhisperTranscriber,
+    is_implausibly_long,
+    is_prompt_echo,
+    is_question,
+    parse_actions,
+)
 from core.event_queue import EventQueue
 from core.events import AudioEvent
 
@@ -55,6 +61,11 @@ class Transcript:
     noise: bool = False                    # 雑音への幻聴（プロンプトの繰り返し）として捨てた（ADR-0063）
     audio_file: Optional[str] = None       # 保存した発話の音声（`audio_dir` があるとき, ファイル名）
     no_speech: bool = False                # 声が無い音（VAD）なので Whisper にかけなかった（text は空）
+    question: bool = False                 # 確認型の発話（「コールですか？」）= アクションにしない（仕様 FR-17）
+
+
+# 確認型の発話の表示（CLI / audio_check / ログで共通）
+QUESTION_NOTE = "確認の発話（アクションにしない。確定の言い方を待つ）"
 
 
 def describe_events(events) -> str:
@@ -441,6 +452,7 @@ class AudioThread(threading.Thread):
             if not text:
                 return
             noise = is_prompt_echo(text) or is_implausibly_long(text, audio_sec)
+            question = not noise and is_question(text)     # 確認型はアクションにしない（仕様 FR-17）
             # 続けて言った複数のアクションは言った順に分ける（ADR-0061）。雑音への幻聴は読まない（ADR-0063）。
             events = () if noise else tuple(parse_actions(
                 text, confidence=confidence, utterance_start_ts=utterance_start_ts
@@ -448,13 +460,14 @@ class AudioThread(threading.Thread):
             logger.info(
                 "聞き取り: %r (confidence=%s, 推論 %.2f 秒) → %s",
                 text, "-" if confidence is None else f"{confidence:.2f}", infer_sec,
-                "雑音（聞き違い）として無視" if noise else describe_events(events),
+                "雑音（聞き違い）として無視" if noise
+                else QUESTION_NOTE if question else describe_events(events),
             )
             self._report(Transcript(
                 text=text, confidence=confidence, events=events,
                 audio_sec=audio_sec,
                 infer_sec=infer_sec, utterance_start_ts=utterance_start_ts,
-                heard_at=heard_at, noise=noise, audio_file=audio_file,
+                heard_at=heard_at, noise=noise, audio_file=audio_file, question=question,
             ))
             for event in events:
                 self._audio_queue.put(event)

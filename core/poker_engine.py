@@ -73,6 +73,7 @@ class PokerEngine(Protocol):
     def sit_in(self, seat: int) -> bool: ...
     def seats_in_hand(self) -> list[int]: ...
     def set_blinds(self, sb: int, bb: int) -> None: ...
+    def set_button(self, seat: int) -> None: ...
 
     @property
     def hand_id(self) -> int: ...
@@ -151,6 +152,9 @@ class PokerkitGameState:
         self._hand_seats: list[int] = list(self._seats)
         # 次のハンドから使うブラインド（ハンドの途中に変えたとき）
         self._pending_blinds: Optional[tuple[int, int]] = None
+        # 次のハンドのボタンを手で指定（仕様 FR-05g）。使ったら (通常の進み方の席, 指定した席) を残す。
+        self._forced_button: Optional[int] = None
+        self.last_button_override: Optional[tuple[int, int]] = None
         self._hand_id: int = 0
         self._state = None
         self._hand_active: bool = False
@@ -188,12 +192,20 @@ class PokerkitGameState:
             self._pending_blinds = None
         self._hand_id += 1
         # ボタンを 1 つ進めてから並びを作る（ボタンの次が SB, 末尾が BTN）。前のボタンの席が
-        # 抜けていたら（バースト・休み）、その次の席にボタンを置く。
+        # 抜けていたら（バースト・休み）、その次の席にボタンを置く（仕様 FR-05b）。
         if self._button_seat is None or self._button_seat in playing:
-            self._button_seat = next_button(playing, self._button_seat)
+            natural = next_button(playing, self._button_seat)
         else:
             later = [s for s in playing if s > self._button_seat]
-            self._button_seat = later[0] if later else playing[0]
+            natural = later[0] if later else playing[0]
+        forced = self._forced_button
+        self._forced_button = None
+        self.last_button_override = None
+        if forced is not None and forced in playing and forced != natural:
+            self._button_seat = forced                  # 手動移動（仕様 FR-05g）
+            self.last_button_override = (natural, forced)
+        else:
+            self._button_seat = natural
         self._hand_seats = list(playing)
         self._order = seat_order_from_button(playing, self._button_seat)
         self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
@@ -604,6 +616,12 @@ class PokerkitGameState:
         else:
             self._sb, self._bb = sb, bb
             self._pending_blinds = None
+
+    def set_button(self, seat: int) -> None:
+        """次のハンドのボタンを手で指定する（ディーラーの手違い等の修正, 仕様 FR-05g）。"""
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        self._forced_button = seat
 
     # ――― 手動修正（pokerkit は hand 単位のため次ハンドから反映） ―――
 

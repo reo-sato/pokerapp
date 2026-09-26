@@ -37,6 +37,7 @@ class TranscriptLog:
             "confidence": transcript.confidence,
             "noise": transcript.noise,
             "no_speech": getattr(transcript, "no_speech", False),
+            "question": getattr(transcript, "question", False),
             "audio_file": getattr(transcript, "audio_file", None),
             "events": [
                 {

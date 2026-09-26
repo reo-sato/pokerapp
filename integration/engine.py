@@ -893,6 +893,10 @@ class IntegrationThread(threading.Thread):
             self._handle_sit(event)
             return
 
+        if action == "set_button":
+            self._handle_set_button(event)
+            return
+
         # ベッティングアクション。rules-aware backend（pokerkit）は境界で actor 推定 + 合法手
         # 射影、legacy（空 legal_context）は従来経路で挙動不変（ADR-0009 §1）。
         if action == "fold" and self._rfid_folds and self._hand_open:
@@ -2390,6 +2394,21 @@ class IntegrationThread(threading.Thread):
         else:
             self._notice(f"席{seat} は次のハンドから参加です")
 
+    def _handle_set_button(self, event: AudioEvent) -> None:
+        """次のハンドのボタンを手で指定する（`button <席>`, 仕様 FR-05g）。"""
+        gs = self._game_state
+        seat = event.seat
+        if seat is None:
+            logger.warning("set_button without seat: %r", event.raw_text)
+            return
+        try:
+            gs.set_button(seat)
+        except ValueError:
+            self._notice(f"席{seat} はこの卓にありません")
+            return
+        if self._rules_aware:
+            self._notice(f"次のハンドのボタンを席{seat} にします（その席が配られなければ通常どおり進めます）")
+
     def _handle_set_blinds(self, event: AudioEvent) -> None:
         """ブラインドの変更（トーナメントのレベル上昇）。`raw_text` の「SB/BB」。次のハンドから。"""
         gs = self._game_state
@@ -2899,6 +2918,10 @@ class IntegrationThread(threading.Thread):
             self._assign_seats_for_hand(gs.hand_id)
         logger.info("New hand started: hand_id=%d", gs.hand_id)
         button = getattr(gs, "button_seat", None)
+        override = getattr(gs, "last_button_override", None)
+        if override:
+            # 手動移動でボタンが通常の進み方と違う席になった（仕様 §9: 手違いの修正か、誤操作かを人が見る）
+            self._notice(f"ボタンを席{override[1]} に動かしました（通常の進み方なら席{override[0]}）")
         out = [s for s in self._game_seats() if s not in self._seats_in_hand()]
         details = [d for d in (
             "手札が配られました" if auto else "",

@@ -85,6 +85,32 @@ class TestEngineSeats:
         gs.end_hand(1)
 
 
+class TestEngineButton:
+    """ディーラーボタンの手動移動（仕様 FR-05g）。次のハンドのボタンを指定し、通常の進み方と違えば知らせる。"""
+
+    def test_the_next_hand_starts_at_the_given_seat(self):
+        gs = _engine({1: 10000, 2: 10000, 3: 10000})
+        gs.new_hand()                       # ボタン 3
+        gs.end_hand(1)
+        gs.set_button(3)                    # 通常なら 1 に進むところを 3 のまま
+        gs.new_hand()
+        assert gs.button_seat == 3 and gs.last_button_override == (1, 3)
+        gs.end_hand(1)
+        gs.new_hand()
+        assert gs.button_seat == 1 and gs.last_button_override is None   # 指定は 1 回だけ
+
+    def test_a_seat_that_is_not_dealt_is_ignored(self):
+        gs = _engine({1: 10000, 2: 0, 3: 10000})
+        gs.set_button(2)
+        gs.new_hand()
+        assert gs.button_seat == 3 and gs.last_button_override is None
+
+    def test_unknown_seat(self):
+        gs = _engine({1: 10000, 2: 10000})
+        with pytest.raises(ValueError):
+            gs.set_button(9)
+
+
 class TestEngineBlinds:
     def test_a_change_during_a_hand_applies_to_the_next(self):
         gs = _engine({1: 10000, 2: 10000, 3: 10000})
@@ -210,6 +236,17 @@ class TestTable:
         _win(tb, 6)
         assert tb.hands[1].blinds == {"sb": 200, "bb": 400}
         assert tb.hands[1].pot_total == 1000                # SB 200 + BB 400 + BTN のコール 400
+
+    def test_button_moved_by_hand_is_reported(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal(HOLES_A)                                    # ボタン 席6
+        _win(tb, 5)
+        _send(tb, action="set_button", seat=6, raw_text="シート6 ボタン")
+        assert any("次のハンドのボタンを席6 にします" in n for n in tb.notices)
+        tb.cards = {}
+        tb.deal(HOLES_B)
+        assert tb.gs.button_seat == 6
+        assert any("ボタンを席6 に動かしました（通常の進み方なら席4）" in n for n in tb.notices)
 
     def test_invalid_blinds_are_reported(self, tmp_path):
         tb = _Table(tmp_path)

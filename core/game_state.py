@@ -318,6 +318,12 @@ class GameStateManager:
             raise ValueError(f"Invalid blinds: sb={sb} bb={bb}")
         self._sb, self._bb = sb, bb
 
+    def set_button(self, seat: int) -> None:
+        """legacy はボタンを持たない（ISSUE-0032）。受け付けるだけで何もしない。"""
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        logger.warning("set_button: legacy backend はボタンを持ちません（席 %d は無視）", seat)
+
     # ――― 手動修正 ―――
 
     def update_stack(self, seat: int, new_stack: int) -> None:

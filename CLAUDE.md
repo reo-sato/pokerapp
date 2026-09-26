@@ -460,7 +460,10 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 
 ### スコープ（現時点）
 
-- ボタンは席番号の昇順に 1 ハンド 1 つ進み、1 周で全席を訪れる。**pokerkit backend のみ**
+- ボタンは席番号の昇順に 1 ハンド 1 つ進み、1 周で全席を訪れる。**参加している席の中で回る**（休み
+  `name <席> -` / スタック 0 の席はハンドに入らず飛ばす = 仕様 FR-05b、前のボタンの席が抜けたらその次の席。
+  2026-09-26）。手動移動は `--cli` の `button <席>` / control `set_button`（仕様 FR-05g。通常の進み方と違えば
+  知らせる = 仕様 §9）。**pokerkit backend のみ**
   （legacy は `button_seat=None` / `position_map()={}` = 単純ラウンドロビンのまま、rollback path 不変）。
 - `position_map`（seat → BTN/SB/BB/UTG/UTG+1/UTG+2/MP/HJ/CO, 仕様 §6.1）はボタンから決定的に
   導出する。**heads-up はボタンが SB**（`["BB", "BTN"]`。pokerkit の post 位置と実測で一致）。
@@ -491,8 +494,8 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 
 ### Out of scope（現時点）
 
-- ミッドセッションの着席/離席に伴うボタンの飛び越し（`_seats` は engine 生成時に固定）。
-- GUI（`gui/dashboard.py`）でのボタン表示・手動指定。`turn_order` の明示記録（`position_map` から導ける）。
+- GUI（`gui/dashboard.py`）でのボタン表示・手動指定（CLI / control には有る）。`turn_order` の明示記録
+  （`position_map` から導ける）。起動時に決めた席以外への着席（席は操作で決める = オーナー, 2026-09-26）。
 
 ---
 
