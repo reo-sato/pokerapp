@@ -993,7 +993,7 @@ class TestRecordingAndTableState:
         schema = json.loads(
             (ROOT / "docs/contracts/schemas/reconstruction_event.schema.json").read_text(encoding="utf-8")
         )
-        assert schema["version"] == "0.6"
+        assert schema["version"] == "0.7"
         env = event_to_envelope(RFIDEvent(
             tag_id="04:E1", card="Ah", reader_id="reader_3", role="board", seat=None,
             timestamp=1.0, raw_tag_id="04:E1", board_index=1, replaces="5d",
