@@ -154,11 +154,11 @@ class TestSession:
         rescorer, _ = _rescorer()
         lines: list[str] = []
         assert ra.rescore_session(session, rescorer, limit=1, log=lines.append) == (1, 0)
-        assert ra.rescore_session(session, rescorer, log=lines.append) == (2, 1)    # 続きから
+        assert ra.rescore_session(session, rescorer, log=lines.append) == (1, 0)    # 続きから
         rows = ra.read_jsonl(session.rescored)
-        assert [r["audio_file"] for r in rows] == ["1000.wav", "2000.wav", "3000.wav"]
+        assert [r["audio_file"] for r in rows] == ["1000.wav", "2000.wav"]          # 音声の無い発話は飛ばす
         assert rows[0]["best"] == "ヘッズアップです" and rows[0]["utterance_start_ts"] == 1.0
-        assert rows[2]["error"] == "音声のファイルがありません"
+        assert "  音声の無い発話 1 個は飛ばします" in lines
         assert ra.rescore_session(session, rescorer, log=lines.append) == (0, 0)    # 採点済み
 
     def test_zip_layout(self, tmp_path):

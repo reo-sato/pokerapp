@@ -285,10 +285,17 @@ def rescore_session(
     session: SessionAudio, rescorer: Any, *, limit: Optional[int] = None, include_no_speech: bool = False,
     model_name: str = "", log: Callable[[str], None] = print,
 ) -> tuple[int, int]:
-    """1 セッションの発話を採点し、`<sid>.rescored.jsonl` に追記する。(採点した数, 失敗した数) を返す。"""
+    """1 セッションの発話を採点し、`<sid>.rescored.jsonl` に追記する。(採点した数, 失敗した数) を返す。
+
+    音声が保存されていない発話（`audio.save_audio` が off のときの記録）は飛ばす（行も書かない）。
+    """
     done = {row.get("audio_file") for row in read_jsonl(session.rescored)}
     rows = [r for r in read_jsonl(session.transcripts)
             if _row_key(r) and r.get("audio_file") not in done and (include_no_speech or not r.get("no_speech"))]
+    missing = [r for r in rows if session.audio_path(r["audio_file"]) is None]
+    if missing:
+        log(f"  音声の無い発話 {len(missing)} 個は飛ばします")
+    rows = [r for r in rows if session.audio_path(r["audio_file"]) is not None]
     if limit is not None:
         rows = rows[:max(0, limit)]
     count = failed = 0
@@ -300,13 +307,10 @@ def rescore_session(
             "rescored_at": datetime.now().isoformat(timespec="seconds"), "model": model_name,
         }
         started = time.time()
-        if path is None:
-            out["error"] = "音声のファイルがありません"
-        else:
-            try:
-                out.update(rescorer.rescore(load_wav(path), out["text"]))
-            except Exception as e:  # noqa: BLE001 — 1 発話の失敗で全体を止めない
-                out["error"] = f"{type(e).__name__}: {e}"
+        try:
+            out.update(rescorer.rescore(load_wav(path), out["text"]))
+        except Exception as e:  # noqa: BLE001 — 1 発話の失敗で全体を止めない
+            out["error"] = f"{type(e).__name__}: {e}"
         out["sec"] = round(time.time() - started, 2)
         failed += 1 if "error" in out else 0
         count += 1
