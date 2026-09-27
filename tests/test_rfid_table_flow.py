@@ -1090,3 +1090,67 @@ class TestRecordingAndTableState:
             ], "seats": [],
         })
         assert "5d [Ac 確認中 1.2s] [3s 差し直し確認中]" in text
+
+
+class TestBoardSweep:
+    """ハンドの終わりに札をまとめて動かすと、新しい札がいくつも続けて載る（店舗 2026-09-27）。"""
+
+    def _full_board(self, t: Table) -> None:
+        _deal_flop(t)
+        t.put("BR", "04:F3", "04:D1")
+        assert _board(t.run(2.4)) == [("7c", 4, None)]
+        t.put("BR", "04:F3", "04:D1", "04:D2")
+        assert _board(t.run(2.4)) == [("6h", 5, None)]
+
+    def test_gathering_the_cards_does_not_rewrite_the_board(self, tmp_path: Path):
+        t = Table(tmp_path)
+        self._full_board(t)
+        t.put("BL")                              # 片付け: ボードの札を集め、デッキの束がリーダーの上を通る
+        t.put("BR")
+        t.run(7.0)
+        t.put("BL", "04:E1")
+        events = t.run(2.4)
+        t.put("BL", "04:E1", "04:E2")
+        events += t.run(2.4)
+        t.put("BR", "04:E3", "04:A1")
+        events += t.run(3.0)
+        assert t.thread._board_swept                                            # noqa: SLF001
+        # 差し直しに見えて先に送った差し替えは、片付けとみた時点で元の札に戻す
+        replaced = {i: new for new, i, old in _board(events) if old in ("5d", "Tc", "2h", "7c", "6h")}
+        restored = [(card, i) for card, i, old in _board(events) if old in ("Ah", "Ad", "Ac", "As")]
+        assert replaced and sorted(i for _, i in restored) == sorted(replaced)
+        assert {i: u for u, i in t.thread._board_indexes.items()} == {          # noqa: SLF001
+            1: "04:F1", 2: "04:F2", 3: "04:F3", 4: "04:D1", 5: "04:D2"}
+        # 片付けのあとに載った札はボードにしない
+        t.put("BM", "04:C1")
+        assert _board(t.run(3.0)) == []
+
+    def test_a_quick_runout_is_not_a_sweep(self, tmp_path: Path):
+        """全員オールインのあとは flop・turn・river を続けて配る（10 秒以内でも片付けではない）。"""
+        t = Table(tmp_path)
+        events = _deal_flop(t)
+        t.put("BR", "04:F3", "04:D1")
+        events += t.run(2.4)
+        t.put("BR", "04:F3", "04:D1", "04:D2")
+        events += t.run(2.4)
+        assert [(c, i) for c, i, _ in _board(events)] == [("5d", 1), ("Tc", 2), ("2h", 3), ("7c", 4), ("6h", 5)]
+        assert not t.thread._board_swept                                        # noqa: SLF001
+
+    def test_a_single_turn_redeal_after_the_river_still_works(self, tmp_path: Path):
+        t = Table(tmp_path)
+        self._full_board(t)
+        t.put("BR", "04:F3", "04:D2")            # turn（7c）を外した
+        t.run(7.0)
+        t.put("BR", "04:F3", "04:D2", "04:E1")   # 置き直した turn
+        assert _board(t.run(2.4)) == [("Ah", 4, "7c")]
+        assert not t.thread._board_swept                                        # noqa: SLF001
+
+    def test_the_next_hand_starts_fresh(self, tmp_path: Path):
+        t = Table(tmp_path)
+        self._full_board(t)
+        t.thread._board_swept = True                                             # noqa: SLF001
+        t.thread.reset_for_new_hand()
+        t.put("BL", "04:E1", "04:E2")
+        t.put("BR", "04:E3")
+        t.put("BM")
+        assert [(c, i) for c, i, _ in _board(t.run(2.4))] == [("Ah", 1), ("Ad", 2), ("Ac", 3)]

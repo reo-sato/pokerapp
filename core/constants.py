@@ -25,6 +25,7 @@ ACTION_KEYWORDS: dict[str, str] = {
     "スリーベット": "raise",
     "チェックレイズ": "raise",  # 一度チェックした人のレイズ = 1 アクション（「チェック」「レイズ」に分けない）
     "チェック": "check",
+    "チッカーランド": "check",  # 「チェックアラウンド」の書き起こしゆれ（店舗の実測 2026-09-27）
     "check": "check",
     "フォールド": "fold",
     "フォルド": "fold",       # 促音落ちの誤認識ゆらぎ
@@ -45,6 +46,7 @@ ACTION_KEYWORDS: dict[str, str] = {
     "ヘッズアップ": "heads_up",
     "ヘッドアップ": "heads_up",  # 書き起こしゆれ（店舗の実測 2026-09-27: 7 回）
     "ヘッドホップ": "heads_up",
+    "ヘッドロップ": "heads_up",  # 同上（店舗の実測 2026-09-27）
     "ウィナー": "winner",
     "wins": "winner",
     "winner": "winner",

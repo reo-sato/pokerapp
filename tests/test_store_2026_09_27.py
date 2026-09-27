@@ -8,6 +8,14 @@
 - ディーラーは残りが 2 人になると「ヘッズアップ」と言う → 言われなかったコールの裏付けに使う。
 - ベッティングの途中の「ショーダウン」のあとの札の離脱をフォールドにしていた。
 - 最後のハンド（2e658148）はオーナーが真のアクションと確認済み = 回帰テスト。
+
+2 回目の zip（8d08c010）:
+
+- 自信 0.27 の「オールイン」に誰も応えないまま（コールは次のストリートの札で補っただけ）全員オールインになり、
+  そのあとのチェック 5 回・「2700」がすべて保留になった（ポット 59700）→ ベッティングの言葉が 2 つ続いたら
+  そのオールインを聞き違いとみて外し、組み直す。
+- その結果 持ち点 0 になった席4 に次のハンドで手札が配られたのに休み扱いになった → 最初の持ち点に戻して配る。
+- 書き起こしゆれ: チェックアウンド・チッカーランド（チェックアラウンド）/ ヘッドロップ（ヘッズアップ）。
 """
 from __future__ import annotations
 
@@ -22,6 +30,7 @@ from core.game_state import PlayerState
 
 pytest.importorskip("pokerkit")
 
+from integration.engine import FOLDOUT_CONFIRM_SEC  # noqa: E402
 from integration.replay import load_events, replay_events  # noqa: E402
 from tests.test_rfid_folds import _Table  # noqa: E402
 from tests.test_silent_runs import _board  # noqa: E402
@@ -58,10 +67,18 @@ class TestParsing:
 
     @pytest.mark.parametrize("text, action", [
         ("オーリン", "allin"), ("ソーダウン", "showdown"), ("ヘッドアップ!", "heads_up"),
-        ("ヘッズアップ", "heads_up"), ("ヘッドホップ", "heads_up"),
+        ("ヘッズアップ", "heads_up"), ("ヘッドホップ", "heads_up"), ("ヘッドロップ", "heads_up"),
     ])
     def test_store_spellings(self, text, action):
         assert [a for a, _, _ in _parsed(text)] == [action]
+
+    @pytest.mark.parametrize("text, expected", [
+        ("チェックアウンド", [("check", 0, ("check_around",))]),
+        ("チッカーランド", [("check", 0, ("check_around",))]),
+        ("チェック、チッカーランド", [("check", 0, ()), ("check", 0, ("check_around",))]),
+    ])
+    def test_check_around_spellings(self, text, expected):
+        assert _parsed(text) == expected
 
     def test_heads_up_is_described_in_japanese(self):
         (event,) = parse_actions("ヘッドアップ!")
@@ -212,3 +229,90 @@ class TestConfirmedStoreHand:
         assert hand.board == expected["board"] and hand.button_seat == expected["button_seat"]
         assert ({str(p["seat"]): sorted(p["hole_cards"]) for p in hand.players}
                 == {s: sorted(c) for s, c in expected["hole_cards"].items()})   # 並び順は読んだ順
+
+
+def _replayed(tb: _Table, tmp_path: Path) -> list:
+    return replay_events(
+        tb.recorder.events, backend="pokerkit",
+        players=[PlayerState(seat=s, name=f"P{s}", stack=10000) for s in (4, 5, 6)],
+        sb=100, bb=200, session_id="replay", out_dir=tmp_path / "replay",
+        auto_new_hand=True, auto_winner=True, rfid_folds=True,
+    )
+
+
+class TestMisheardAllin:
+    """ボタン 席6（最初の手番）/ SB 席4 / BB 席5。"""
+
+    def _allin_then_flop(self, tb: _Table, *answers: str) -> None:
+        tb.deal(STORE_HOLES)
+        tb.say("コール")                             # 席6 リンプ
+        tb.tick(tb.now + 1.0)
+        tb.say("オールイン")                          # 席4 …と聞こえた（本当は「コール」）
+        tb.tick(tb.now + 1.0)
+        for text in answers:
+            tb.say(text)
+            tb.tick(tb.now + 1.0)
+        _board(tb, ["7d", "6h", "Qc"])               # 誰も応えていなければ、札でコールを補う
+
+    def test_betting_words_after_an_unanswered_allin_drop_it(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._allin_then_flop(tb)
+        assert [a for _, _, a, _ in _acts(tb)] == ["call", "allin", "call", "call"]
+        tb.say("チェック")                             # 全員オールインのはずなのに…（保留 1）
+        tb.tick(tb.now + 1.0)
+        assert not any("聞き違い" in n for n in tb.notices)
+        tb.say("チェック")                             # 保留 2 → オールインを外して組み直す
+        tb.tick(tb.now + 1.0)
+        assert _acts(tb) == [
+            ("preflop", 6, "call", 200), ("preflop", 4, "call", 100), ("preflop", 5, "check", 0),
+            ("flop", 4, "check", 0), ("flop", 5, "check", 0),
+        ]
+        assert any("聞き違いとみて外し" in n for n in tb.notices) and tb.t._hand_needs_review   # noqa: SLF001
+        assert tb.gs.get_stacks() == {4: 9800, 5: 9800, 6: 9800}
+        tb.say("ベット 600")                          # 組み直したあとも続けて記録できる
+        tb.tick(tb.now + 1.0)
+        tb.lift(4)
+        tb.tick(tb.now + 4.0)
+        tb.lift(5)
+        tb.tick(tb.now + FOLDOUT_CONFIRM_SEC + 4.0)
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.pot_total, hand.review_required) == (6, 1200, True)
+        (replayed,) = _replayed(tb, tmp_path)      # 記録から同じ組み直しになる
+        assert [(a.street, a.seat, a.action, a.amount) for a in replayed.actions] == [
+            (a.street, a.seat, a.action, a.amount) for a in hand.actions]
+
+    def test_a_heard_call_keeps_the_allin(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._allin_then_flop(tb, "コール", "コール")
+        for _ in range(2):
+            tb.say("チェック")
+            tb.tick(tb.now + 1.0)
+        assert [a for _, _, a, _ in _acts(tb)] == ["call", "allin", "call", "call"]
+        assert not any("聞き違い" in n for n in tb.notices)
+
+    def test_a_single_late_word_keeps_the_allin(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._allin_then_flop(tb)
+        tb.say("コール")                              # 札のあとに届いた 1 つだけの言葉（言うのが遅れた）
+        tb.tick(tb.now + 1.0)
+        assert [a for _, _, a, _ in _acts(tb)] == ["call", "allin", "call", "call"]
+        assert not any("聞き違い" in n for n in tb.notices)
+
+
+class TestBustedSeatDealtIn:
+    def test_a_seat_with_no_chips_that_is_dealt_cards_gets_its_starting_stack_back(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.gs.update_stack(4, 0)                    # 記録の誤りで 0 になった席
+        tb.deal(STORE_HOLES)
+        assert tb.t._seats_in_hand() == [4, 5, 6]                               # noqa: SLF001
+        assert tb.gs.get_stacks()[4] == 10000 - 100                             # SB を払った
+        assert any("持ち点 0 の席4" in n for n in tb.notices) and tb.t._hand_needs_review   # noqa: SLF001
+        assert tb.t._stack_start[4] == 10000                                   # noqa: SLF001
+
+    def test_a_seat_that_is_sitting_out_stays_out(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.gs.update_stack(4, 0)
+        tb.gs.sit_out(4)
+        tb.deal(STORE_HOLES)
+        assert tb.t._seats_in_hand() == [5, 6]                                  # noqa: SLF001
+        assert not any("持ち点 0" in n for n in tb.notices)

@@ -715,6 +715,7 @@ _PAGE = r"""<!doctype html>
  .quick .who { font-weight:700; margin-bottom:8px; }
  .quick .btns { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
  .actions-bottom { display:flex; flex-wrap:wrap; gap:10px; margin-top:18px; align-items:center; }
+ .rowadd { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px; }
  .hidden { display:none !important; }
  #modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:flex-end; justify-content:center; z-index:10; }
  .sheet { background:#161a20; border:1px solid #3a414d; border-radius:16px 16px 0 0; padding:12px 14px 24px; width:100%; max-width:720px; }
@@ -872,6 +873,19 @@ function setRowAmount(i, v){ S.gt.actions[i].amount = parseInt(v, 10) || 0; touc
 function setRowStreet(i, v){ S.gt.actions[i].street = v; S.dirty = true; renderEdit(); }
 function delRow(i){ S.gt.actions.splice(i, 1); touch(); }
 function insRow(i){ const a = S.gt.actions[i]; S.gt.actions.splice(i, 0, {seat: a ? a.seat : S.gt.players[0].seat, action:"check", amount:0}); touch(); }
+function addRow(){
+  // 最後に 1 行足す（次の手番が分かればその席、分からなければ最後の行の次の席）
+  const g = S.gt, L = S.legal || {}, n = L.next;
+  const seats = (g.players || []).map(p => p.seat);
+  let seat = seats.length ? seats[0] : 1;
+  if (n && n.actor_seat != null && !L.error) seat = n.actor_seat;
+  else if (g.actions.length && seats.length) {
+    const i = seats.indexOf(g.actions[g.actions.length - 1].seat);
+    seat = seats[(i + 1) % seats.length];
+  }
+  g.actions.push({seat, action: "check", amount: 0});
+  touch();
+}
 function addQuick(act){
   const n = S.legal && S.legal.next; if (!n || n.actor_seat == null) return;
   let amount = 0;
@@ -915,14 +929,14 @@ function renderEdit(){
   let quick = "";
   if (!replayOk) {
     quick = `<div class="quick"><div class="who err">手番の自動補完は使えません</div><div class="small muted">${esc((err && err.message) || "")}。ストリートは各行で選んでください。</div>
-      <div class="btns" style="margin-top:8px"><button class="sm" onclick="insRow(${g.actions.length})">＋ 行を足す</button></div></div>`;
+      </div>`;
   } else if (err) {
     quick = `<div class="quick"><div class="who err">赤い行を直してください</div><div class="small muted">その先の手番はまだ決められません。</div></div>`;
   } else if (n.hand_over) {
     const who = n.foldout_winner != null
       ? `席 ${n.foldout_winner} の勝ち（ほかは全員フォールド）`
       : `ショーダウン: 席 ${(n.active_seats||[]).join("・")} — 勝った席を下で選んでください`;
-    quick = `<div class="quick"><div class="who">ベッティング終了 — ${who}</div><div class="small muted">ポット ${n.pot}。行が足りなければ ✕ / ＋ で直せます。</div></div>`;
+    quick = `<div class="quick"><div class="who">ベッティング終了 — ${who}</div><div class="small muted">ポット ${n.pot}。行が足りなければ「＋ 行を追加」、多ければ ✕ で直せます。</div></div>`;
   } else {
     const legal = n.legal_actions || [];
     const cc = n.amount_to_call > 0 ? `コール ${n.amount_to_call}` : "チェック";
@@ -966,6 +980,8 @@ function renderEdit(){
         <h2>手札（分かる席だけ）</h2>${playersHtml}
         <h2>アクション <span class="muted small">コールの額とストリートは自動。ベット / レイズはトータルの額</span></h2>
         <div class="tbl"><table><tr><th>ストリート</th><th>席</th><th>アクション</th><th>額</th><th></th></tr>${rows || "<tr><td colspan='5' class='muted'>まだありません（下のボタンで足す）</td></tr>"}</table></div>
+        <div class="rowadd"><button class="sm" onclick="addRow()">＋ 行を追加</button>
+          <span class="muted small">最後に 1 行足します（席・アクション・額はあとで変えられます。行の ＋ はその行の前に入れます）</span></div>
         ${quick}
         <h2>勝った席</h2>${winnerHtml}
         <h2>メモ</h2><input type="text" style="width:100%" value="${esc(g.notes)}" placeholder="気づいたこと（任意）" onchange="setNotes(this.value)">

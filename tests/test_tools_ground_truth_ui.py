@@ -102,6 +102,7 @@ class TestRead:
     def test_page_is_served(self, base):
         status, body = _req(base, "GET", "/")
         assert status == 200 and "真のアクション入力" in body
+        assert "＋ 行を追加" in body and "function addRow()" in body     # 最後に 1 行足すボタン（オーナー要望）
 
     def test_hand_list_is_newest_first_with_review_and_status(self, base):
         status, d = _req(base, "GET", f"/api/sessions/{SID}/hands")

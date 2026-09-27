@@ -5,7 +5,10 @@
 
 - `name <席> -` = 休み（次のハンドから配られない）、`name <席> <名前>` = 参加。
 - スタック 0 の席（バースト）は買い足す（`r`）まで配られない。pokerkit はスタック 0 を受け付けないので、
-  そのまま配ると新しいハンドが始まらず、integration スレッドが止まっていた。
+  そのまま配ると新しいハンドが始まらず、integration スレッドが止まっていた。ただし手札が**配られた**スタック 0 の
+  席は、記録の誤りか買い足しの入れ忘れとみて最初の持ち点に戻して配る（店舗 2026-09-27）。あとから届いた `r` は
+  戻した額の代わり（二重にしない）。
+- ハンドの途中の買い足しは次のハンドから（そのハンドの結果に入れない。以前はハンドの終わりに消えていた）。
 - ボタンはハンドに参加する席の中で回る（抜けた席は飛ばす）。
 - 配られる席が 2 つ未満ならハンドを始めない（1 回だけ知らせる）。買い足し・参加で始まる。
 - `blinds <SB> <BB>` は次のハンドから。ハンドの記録の blinds はそのハンドのもの。
@@ -51,6 +54,42 @@ class TestEngineSeats:
         gs.rebuy(2, 5000)
         gs.new_hand()
         assert gs.seats_in_hand() == [1, 2, 3]
+
+    def test_a_rebuy_during_a_hand_counts_from_the_next_hand(self):
+        gs = _engine({1: 10000, 2: 10000, 3: 10000})
+        gs.new_hand()
+        gs.rebuy(2, 5000)                               # ハンドの途中（席2 はこのハンドに参加）
+        gs.end_hand(1)
+        assert gs.get_stacks()[2] < 10000               # このハンドの結果には入れない
+        before = gs.get_stacks()[2]
+        gs.new_hand()
+        assert gs.get_stacks()[2] + gs.committed(2) == before + 5000
+
+    def test_a_busted_seat_rebuying_during_a_hand_is_dealt_next(self):
+        gs = _engine({1: 10000, 2: 0, 3: 10000})
+        gs.new_hand()
+        gs.rebuy(2, 5000)                               # 休みの席 = すぐ足す
+        assert gs.playing_seats() == [1, 2, 3]
+        gs.end_hand(1)
+        gs.new_hand()
+        assert gs.seats_in_hand() == [1, 2, 3]
+
+    def test_restore_keeps_what_was_changed_from_outside_the_hand(self):
+        gs = _engine({1: 10000, 2: 10000, 3: 10000})
+        gs.new_hand()
+        snap = gs.snapshot()
+        gs.apply_action(gs.legal_context().actor_seat, "call", 200)
+        gs.sit_out(2)
+        gs.set_blinds(200, 400)
+        gs.set_button(1)
+        gs.rebuy(3, 5000)
+        gs.restore(snap)                                # 組み直し: ハンドの入力だけ戻す
+        assert gs.pot == 300 and gs.is_sitting_out(2)
+        gs.end_hand(1)
+        before = gs.get_stacks()[3]
+        gs.new_hand()
+        assert gs.seats_in_hand() == [1, 3] and gs.legal_context().bb == 400
+        assert gs.get_stacks()[3] + gs.committed(3) == before + 5000
 
     def test_the_button_skips_a_seat_that_left(self):
         gs = _engine({1: 10000, 2: 10000, 3: 10000})
@@ -204,23 +243,40 @@ class TestTable:
     def test_a_busted_seat_is_skipped(self, tmp_path):
         tb = _Table(tmp_path)
         tb.gs.update_stack(4, 0)
-        tb.deal(HOLES_A)
+        tb.deal({5: HOLES_A[5], 6: HOLES_A[6]})            # バーストした人には配らない
         assert tb.gs.seats_in_hand() == [5, 6] and any("休み: 席4" in n for n in tb.notices)
 
     def test_the_deal_waits_until_two_seats_can_play(self, tmp_path):
         tb = _LiveTable(tmp_path)
-        tb.gs.update_stack(4, 0)
-        tb.gs.update_stack(5, 0)
+        _send(tb, action="sit_out", seat=4, raw_text="シート4 休み")
+        _send(tb, action="sit_out", seat=5, raw_text="シート5 休み")
         _deal_without_assert(tb, HOLES_A)
         tb.tick(tb.now + 5.0)
         assert not tb.t._hand_open                          # noqa: SLF001
         refusals = [n for n in tb.notices if "ハンドを始められません" in n]
         assert len(refusals) == 1 and "r <席> <金額>" in refusals[0]
-        _send(tb, action="rebuy", seat=4, amount=5000, raw_text="シート4 リバイ 5000")
-        assert any("席4 に 5000 を買い足しました" in n for n in tb.notices)
+        _send(tb, action="sit_in", seat=4, raw_text="シート4 参加")
         tb.tick(tb.now + 1.0)
         assert tb.t._hand_open and tb.gs.seats_in_hand() == [4, 6]   # noqa: SLF001
         assert tb.t._hole_cards == {4: ["Jd", "2s"], 5: ["5s", "6h"], 6: ["8s", "Qd"]}  # noqa: SLF001
+
+    def test_a_busted_seat_that_is_dealt_cards_plays_with_its_starting_stack(self, tmp_path):
+        tb = _LiveTable(tmp_path)
+        tb.gs.update_stack(4, 0)
+        tb.gs.update_stack(5, 0)
+        _deal_without_assert(tb, HOLES_A)
+        tb.tick(tb.now + 1.0)
+        assert tb.t._hand_open and tb.gs.seats_in_hand() == [4, 5, 6]   # noqa: SLF001
+        assert sum("最初の持ち点 10000 に戻して配ります" in n for n in tb.notices) == 2
+        _send(tb, action="rebuy", seat=4, amount=5000, raw_text="シート4 リバイ 5000")   # 実際は 5000 の買い足し
+        assert any("戻した持ち点 10000 の代わりにします（差はこのハンドのあとに直します）" in n for n in tb.notices)
+        _win(tb, 6)
+        (hand,) = tb.hands
+        players = {p["seat"]: p for p in hand.players}
+        assert players[4]["stack_start"] == 10000 and hand.review_required
+        assert tb.gs.get_stacks()[4] == players[4]["stack_end"] - 5000   # 10000 → 5000 に直す
+        _send(tb, action="rebuy", seat=5, amount=10000, raw_text="シート5 リバイ 10000")  # 戻した額と同じ
+        assert tb.gs.get_stacks()[5] == players[5]["stack_end"]            # 二重に足さない
 
     def test_blinds_change_from_the_next_hand(self, tmp_path):
         tb = _Table(tmp_path)

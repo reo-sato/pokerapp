@@ -129,6 +129,11 @@ SILENT_MIC_SEC = 60.0
 SPOKEN_FOLD_WINDOW_SEC = 15.0
 # 札の離脱で組み直す（取り消す）ときに入力として残す音声のアクション
 _REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin", "heads_up"})
+# 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
+# 言葉がこの数だけ聞こえたら、そのオールインを聞き違いとみて外す（店舗 2026-09-27: 自信 0.27 の「オールイン」の
+# あとのチェック 5 回と「2700」がすべて保留になり、全員オールインの 59700 のポットになった）
+HELD_WORDS_TO_DROP_ALLIN = 2
+_BETTING_WORDS = frozenset({"check", "call", "bet", "raise", "allin"})
 
 # review の理由にしない parse flag（読み方の情報。「数字だけ」「チェックアラウンド」は運用どおりの言い方）
 _INFO_PARSE_FLAGS = frozenset({"amount_only", "check_around"})
@@ -354,6 +359,16 @@ class IntegrationThread(threading.Thread):
         # ハンド開始の epoch。マック観測をハンド内にクランプするのに使う（ADR-0055）。
         self._hand_started_epoch: Optional[float] = None
         self._stack_start: dict[int, int] = {}
+        # 卓の最初の持ち点（持ち点 0 の席に手札が配られたときに戻す, 店舗 2026-09-27）
+        try:
+            self._initial_stacks: dict[int, int] = dict(game_state.get_stacks())
+        except Exception:  # noqa: BLE001
+            self._initial_stacks = {}
+        # 持ち点 0 で手札が配られて最初の持ち点に戻した席 → (戻した額, そのハンドの番号)。そのハンドが終わって
+        # 次のハンドが始まるまでに届いた買い足し（`r`）は、戻した額の代わりにする（二重にしない）
+        self._provisional_stacks: dict[int, tuple[int, int]] = {}
+        # ハンドのあとに直す持ち点（席 → 差）。戻した額の代わりの買い足しがハンドの途中に届いたとき
+        self._stack_corrections: dict[int, int] = {}
         # new_hand 済みで勝者未確定のハンドが進行中か（G1 の状態妥当性チェック /
         # ハンド外イベントの unresolved 記録に使う）。
         self._hand_open: bool = False
@@ -434,8 +449,11 @@ class IntegrationThread(threading.Thread):
         self._departures: dict[int, dict] = {}
         # このハンドの入力（組み直しで同じ順に流し直す）: ("audio", AudioEvent) / ("leave", RFIDEvent)
         self._hand_inputs: list[tuple[str, object]] = []
-        # 札の離脱を入れる直前の状態（戻ったら取り消して組み直す）
+        # 札の離脱を入れる直前の状態（戻ったら取り消して組み直す）。聞こえたベット・レイズ・オールインの
+        # 直前の状態も持つ（オールインは記録を "allin" に入れる = 聞き違いなら外して組み直す）
         self._checkpoints: list[dict] = []
+        # ベッティングが終わったあとに聞こえたベッティングの言葉の数（聞き違いのオールインを見つける）
+        self._held_betting_words = 0
         # 最後の 1 人を残すフォールドの確定待ち {"seat", "t"}
         self._foldout_pending: Optional[dict] = None
         self._foldout_winner_left = False
@@ -969,6 +987,8 @@ class IntegrationThread(threading.Thread):
             problem = self._amount_only_problem(event, legal_ctx)
             if problem is not None:
                 self._notice(f"数字だけの「{event.raw_text}」は記録しませんでした（{problem}）")
+                if self._betting_over():
+                    self._count_held_betting_word()
                 return
             event = replace(event, action="raise" if "raise" in legal_ctx.legal_actions else "bet")
         if legal_ctx.legal_actions:
@@ -989,6 +1009,8 @@ class IntegrationThread(threading.Thread):
                 self._apply_showdown_muck(event)
             else:
                 self._emit_unresolved(event, reason="betting_over")
+                if action in _BETTING_WORDS:
+                    self._count_held_betting_word()
         else:
             self._handle_legacy_action(event)
 
@@ -1347,6 +1369,7 @@ class IntegrationThread(threading.Thread):
             "review": self._hand_needs_review,
             "synced": set(self._streets_synced),
             "spoken": dict(self._spoken_folds),
+            "held": self._held_betting_words,
             "hyps": [dict(h, candidates=list(h["candidates"])) for h in self._run_hyps
                      if h["index"] < index],
         }
@@ -1371,6 +1394,7 @@ class IntegrationThread(threading.Thread):
         for other, d in self._departures.items():
             d["applied"] = checkpoint["applied"].get(other, False)
         self._streets_synced = set(checkpoint["synced"])
+        self._held_betting_words = checkpoint.get("held", 0)
         self._run_hyps = [dict(h, candidates=list(h["candidates"])) for h in checkpoint.get("hyps", [])]
 
     def _replay_inputs(self, rest: list) -> None:
@@ -1669,6 +1693,64 @@ class IntegrationThread(threading.Thread):
                 record.reason = "+".join(r for r in (record.reason, f"silent_run_ambiguous({seats})") if r)
                 self._hand_needs_review = True
                 logger.info("レイズした席を決められません（無言の連続）: 候補 %s", seats)
+
+    # ――― 聞き違いのオールイン（店舗 2026-09-27）―――
+    #
+    # 「オールイン」に誰も応えていない（コールは次のストリートの札で補っただけ）のに、全員オールインで
+    # ベッティングが終わったあとも「チェック」「コール」や額が聞こえ続けるなら、オールインは聞き違い。
+    # 外して、そのあとの入力を流し直して記録を組み直す。
+
+    def _count_held_betting_word(self) -> None:
+        """ベッティングが終わっていて保留にしたベッティングの言葉を数える（`HELD_WORDS_TO_DROP_ALLIN` で判断）。"""
+        self._held_betting_words += 1
+        if self._held_betting_words >= HELD_WORDS_TO_DROP_ALLIN and not self._rebuilding:
+            self._drop_unanswered_allin()
+
+    def _unanswered_allin(self) -> Optional[dict]:
+        """いちばん新しい聞こえたオールインのチェックポイント。誰の応答も聞こえていない（そのあとの記録が、
+        補ったコール・チェックと札の離脱のフォールドだけで、補ったコールがある）ときだけ。"""
+        checkpoint = next((c for c in reversed(self._checkpoints) if c.get("allin") is not None), None)
+        if checkpoint is None:
+            return None
+        record = checkpoint["allin"]
+        at = next((i for i, r in enumerate(self._current_actions) if r is record), None)
+        if at is None:
+            return None
+        later = self._current_actions[at + 1:]
+        if not any(r.actor_source == "implied" and r.action == "call" for r in later):
+            return None
+        if any(r.actor_source not in ("implied", "rfid_departure", "rfid_muck") for r in later):
+            return None                       # 誰かのコール・フォールドが聞こえている = オールインの裏付け
+        return checkpoint
+
+    def _drop_unanswered_allin(self) -> bool:
+        """誰も応えていないオールインを聞き違いとみて外し、そのあとの入力から記録を組み直す。外したら True。"""
+        checkpoint = self._unanswered_allin()
+        if checkpoint is None:
+            return False
+        record = checkpoint["allin"]
+        index = checkpoint["index"]
+        rest = self._hand_inputs[index + 1:]
+        self._hand_inputs = self._hand_inputs[:index]
+        # 外したオールインより後の入力は番号が 1 つ前にずれる（組み直しで採る解釈も合わせる）
+        self._run_override = {(i - 1 if i > index else i): o for i, o in self._run_override.items() if i != index}
+        self._restore_checkpoint(checkpoint)
+        self._replay_inputs(rest)
+        self._hand_needs_review = True
+        logger.warning(
+            "席%d の「%s」（オールイン）に誰も応えていないのに、ベッティングの言葉が続きました — "
+            "聞き違いとみて外し、記録を組み直しました", record.seat, record.raw_text,
+        )
+        self._notice(
+            f"「{record.raw_text}」（席{record.seat} のオールイン）に誰も応えていないのに「チェック」などが続くので、"
+            "聞き違いとみて外し、記録を組み直しました（要確認）"
+        )
+        if self._on_action:
+            for rebuilt in self._current_actions[checkpoint["actions"]:]:
+                self._on_action(rebuilt)
+        if self._foldout_pending is None:
+            self._maybe_finish_hand()
+        return True
 
     def _handle_fold_word(self, event: AudioEvent) -> None:
         """ベッティング中の「フォールド」: 手番の人にすぐには付けない。札が離れかけている席があれば、その席の
@@ -2718,14 +2800,19 @@ class IntegrationThread(threading.Thread):
         if seat is None:
             logger.warning("rebuy event without seat: %r", event.raw_text)
             return
-        was_out = gs.get_stacks().get(seat, 0) <= 0
-        try:
-            gs.rebuy(seat, event.amount)
-        except ValueError:
-            logger.exception("rebuy failed (seat=%s amount=%s)", seat, event.amount)
-            return
-        if was_out:
-            self._notice(f"席{seat} に {event.amount} を買い足しました — 次のハンドから配られます")
+        marker = self._provisional_stacks.pop(seat, None)
+        if marker is not None and gs.hand_id <= marker[1]:
+            if not self._rebuy_instead_of_restored(seat, event.amount, marker[0]):
+                return
+        else:
+            was_out = gs.get_stacks().get(seat, 0) <= 0
+            try:
+                gs.rebuy(seat, event.amount)
+            except ValueError:
+                logger.exception("rebuy failed (seat=%s amount=%s)", seat, event.amount)
+                return
+            if was_out:
+                self._notice(f"席{seat} に {event.amount} を買い足しました — 次のハンドから配られます")
         if self._on_action:
             self._on_action(ActionRecord(
                 hand_id=gs.hand_id,
@@ -2741,6 +2828,37 @@ class IntegrationThread(threading.Thread):
                 needs_review=False,
                 confidence=1.0,
             ))
+
+    def _rebuy_instead_of_restored(self, seat: int, amount: int, restored: int) -> bool:
+        """手札が配られたときに最初の持ち点に戻した席の買い足し = 戻した額の代わりにする（二重にしない）。
+
+        ハンドの途中なら差はハンドのあとに直す（そのハンドの記録は戻した額のまま = 要確認）。
+        """
+        if amount <= 0:
+            logger.warning("rebuy amount must be positive: seat=%s amount=%s", seat, amount)
+            return False
+        gs = self._game_state
+        delta = amount - restored
+        in_play = self._hand_open and gs.is_hand_active() and seat in self._seats_in_hand()
+        if delta and in_play:
+            self._stack_corrections[seat] = self._stack_corrections.get(seat, 0) + delta
+        elif delta:
+            gs.update_stack(seat, max(0, gs.get_stack(seat) + delta))
+        self._notice(
+            f"席{seat} の買い足し {amount} は、手札が配られたときに戻した持ち点 {restored} の代わりにします"
+            + ("（差はこのハンドのあとに直します）" if delta and in_play else "")
+        )
+        return True
+
+    def _apply_stack_corrections(self) -> None:
+        """ハンドの途中に届いた「戻した額の代わりの買い足し」の差を、ハンドのあとに持ち点へ入れる。"""
+        gs = self._game_state
+        for seat, delta in self._stack_corrections.items():
+            try:
+                gs.update_stack(seat, max(0, gs.get_stack(seat) + delta))
+            except ValueError:
+                logger.exception("持ち点を直せませんでした（席 %s）", seat)
+        self._stack_corrections = {}
 
     def _handle_rename_seat(self, event: AudioEvent) -> None:
         """席替えで席のプレイヤー名を変える（CLI の `name`, ADR-0059）。名前は `raw_text`。
@@ -3162,12 +3280,12 @@ class IntegrationThread(threading.Thread):
                 return
         index = self._current_input_index
         spoken_seat = self._sensed_seat(event)
+        heard_raise = self._rfid_folds and index is not None and event.action in ("bet", "raise", "allin")
         run_possible = (
-            self._rfid_folds and index is not None and spoken_seat is None
-            and event.action in ("bet", "raise", "allin")
+            heard_raise and spoken_seat is None
             and self._last_announced_action() in ("check", "call")
         )
-        checkpoint = self._take_checkpoint(index) if run_possible else None
+        checkpoint = self._take_checkpoint(index) if heard_raise else None
         override = self._run_override.get(index) if run_possible else None
         if override:
             # 組み直し: 手前の k 人は無言で同じアクションをしていたとみる
@@ -3288,6 +3406,11 @@ class IntegrationThread(threading.Thread):
                 if run_possible and override:
                     self._checkpoints.append(checkpoint)   # 解釈を取り消して流し直せるように残す
                 self._seal_run_hyps()
+        if corrected.action == "allin" and apply_ok and checkpoint is not None:
+            # 聞き違いなら外して組み直せるように残す（誰も応えないまま「チェック」等が続いたとき）
+            checkpoint["allin"] = record
+            if not any(c is checkpoint for c in self._checkpoints):
+                self._checkpoints.append(checkpoint)
 
         if self._on_action:
             self._on_action(record)
@@ -3318,6 +3441,7 @@ class IntegrationThread(threading.Thread):
         for seat, name in self._pending_renames.items():   # ハンドの途中に届いた席替え（ADR-0059）
             self._apply_rename(seat, name)
         self._pending_renames = {}
+        restored = self._restore_dealt_busted_seats() if auto else []
         # S5（ADR-0047）: stack_start はブラインド post 前に取る。pokerkit backend は new_hand() で
         # ブラインドを自動 post するため、post 後に取ると result がブラインド分ずれる。
         self._stack_start = gs.get_stacks()
@@ -3338,7 +3462,7 @@ class IntegrationThread(threading.Thread):
         self._board_dealt_at = {}
         self._board_source = ""
         self._hole_cards = {}
-        self._hand_needs_review = False
+        self._hand_needs_review = bool(restored)
         self._hand_open = True
         self._hand_auto_started = auto
         self._showdown_mucks = []
@@ -3348,6 +3472,7 @@ class IntegrationThread(threading.Thread):
         self._departures = {}
         self._hand_inputs = []
         self._checkpoints = []
+        self._held_betting_words = 0
         self._run_hyps = []
         self._run_override = {}
         self._spoken_folds = {}
@@ -3403,6 +3528,43 @@ class IntegrationThread(threading.Thread):
             return
         self._start_refused = message
         self._notice(message)
+
+    def _restore_dealt_busted_seats(self) -> list[int]:
+        """持ち点 0 の席に手札が配られた → 休みにせず、最初の持ち点に戻して配る（要確認）。戻した席を返す。
+
+        持ち点 0 の人に札は配られないので、記録の誤り（聞き違いのオールイン等）か買い足しの入れ忘れ。休みにすると
+        手番の順が狂い、そのハンドのアクションがすべてずれる（店舗 2026-09-27: 聞き違いのオールインで席4 が 0 に
+        なり、次のハンドで 2♣ 2♦ が配られたのに休み扱いになった）。
+        """
+        if not (self._rules_aware and self._deal_hands):
+            return []
+        gs = self._game_state
+        try:
+            stacks = gs.get_stacks()
+            playing = getattr(gs, "playing_seats", None)
+            # チップがある席（ハンドの途中に入れた買い足しを含む）
+            chips = set(playing()) if playing is not None else {s for s, st in stacks.items() if st > 0}
+        except Exception:  # noqa: BLE001
+            return []
+        is_out = getattr(gs, "is_sitting_out", None)
+        restored = []
+        for seat, cards in sorted(self._deal_hands.items()):
+            amount = self._initial_stacks.get(seat, 0)
+            if (len(cards) < 2 or seat not in stacks or seat in chips or amount <= 0
+                    or (is_out is not None and is_out(seat))):
+                continue
+            try:
+                gs.rebuy(seat, amount)
+            except ValueError:
+                logger.exception("持ち点を戻せませんでした（席 %s）", seat)
+                continue
+            restored.append(seat)
+            self._provisional_stacks[seat] = (amount, gs.hand_id + 1)
+            self._notice(
+                f"持ち点 0 の席{seat} に手札が配られました — 最初の持ち点 {amount} に戻して配ります（記録の誤りか"
+                f"買い足しの入れ忘れ。要確認。買い足しなら r {seat} <額> で入れると、この額の代わりになります）"
+            )
+        return restored
 
     def _seats_in_hand(self) -> list[int]:
         """いまのハンドに配られた席（backend が区別しなければ全席）。"""
@@ -3550,6 +3712,7 @@ class IntegrationThread(threading.Thread):
         self._json_writer.append_hand_summary(summary)
         if self._on_hand:
             self._on_hand(summary)
+        self._apply_stack_corrections()       # そのハンドの結果には入れない
         logger.info("Hand %d finalized. Winner: seat %s", gs.hand_id, winner_seat)
         self._notice(self._describe_result(summary, awards))
         cards = self._describe_cards(summary)

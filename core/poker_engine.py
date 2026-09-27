@@ -146,6 +146,9 @@ class PokerkitGameState:
         self._seat_to_idx: dict[int, int] = {s: i for i, s in enumerate(self._order)}
         self._idx_to_seat: dict[int, int] = {i: s for i, s in enumerate(self._order)}
         self._stacks: dict[int, int] = {s: self._players[s].stack for s in self._seats}  # 永続（hand 跨ぎ）
+        # ハンドの途中に買い足した額（ハンドの席）。ハンドの終わりに席のスタックを書き直すので、次のハンドの
+        # 始めに足す（そのハンドの結果には入れない）
+        self._pending_rebuys: dict[int, int] = {}
         # 休みの席（操作で外した。次のハンドから配られない）。スタック 0 の席も配られない。
         self._sitting_out: set[int] = set()
         # いまのハンド（最後のハンド）に配られた席。ボタン・ブラインド・手番はこの席だけで回す。
@@ -173,8 +176,9 @@ class PokerkitGameState:
     # ――― ハンド管理 ―――
 
     def playing_seats(self) -> list[int]:
-        """次のハンドに配られる席（休みでなく、チップがある席）。"""
-        return [s for s in self._seats if s not in self._sitting_out and self._stacks[s] > 0]
+        """次のハンドに配られる席（休みでなく、チップがある席。ハンドの途中の買い足しも数える）。"""
+        return [s for s in self._seats
+                if s not in self._sitting_out and self._stacks[s] + self._pending_rebuys.get(s, 0) > 0]
 
     def new_hand(self) -> int:
         """新しいハンドを始める。配られる席が 2 つ未満なら ValueError（状態は変えない）。"""
@@ -187,6 +191,7 @@ class PokerkitGameState:
                 f"{sorted(self._sitting_out) or 'なし'} / スタック 0: "
                 f"{[s for s in self._seats if self._stacks[s] <= 0] or 'なし'}）"
             )
+        self._apply_pending_rebuys()
         if self._pending_blinds is not None:
             self._sb, self._bb = self._pending_blinds
             self._pending_blinds = None
@@ -328,10 +333,19 @@ class PokerkitGameState:
         """いまの状態の複製（札の離脱で入れたフォールドを取り消して組み直すため）。"""
         return copy.deepcopy(self.__dict__)
 
+    # 組み直しで戻さない、ハンドの外から変える設定（買い足し・休み・次のハンドのブラインドとボタン）。
+    # 組み直しはハンドの入力だけを流し直すので、戻すとスナップショットのあとの操作が消える。
+    _KEEP_ON_RESTORE = ("_stacks", "_pending_rebuys", "_sitting_out", "_pending_blinds", "_forced_button")
+
     def restore(self, snapshot: dict) -> None:
-        """`snapshot()` の時点に戻す（同じオブジェクトのまま = 参照している側はそのまま使える）。"""
+        """`snapshot()` の時点に戻す（同じオブジェクトのまま = 参照している側はそのまま使える）。
+
+        ハンドの外から変える設定（`_KEEP_ON_RESTORE`）はいまの値のまま。
+        """
+        kept = {key: copy.deepcopy(self.__dict__[key]) for key in self._KEEP_ON_RESTORE if key in self.__dict__}
         self.__dict__.clear()
         self.__dict__.update(copy.deepcopy(snapshot))
+        self.__dict__.update(kept)
 
     def seats_to_act(self) -> list[int]:
         """このベッティングラウンドでまだ行動する席（手番の順。先頭が actor）。"""
@@ -598,6 +612,10 @@ class PokerkitGameState:
         self._sitting_out.add(seat)
         return True
 
+    def is_sitting_out(self, seat: int) -> bool:
+        """操作で休みにした席か（スタック 0 で配られない席は含まない）。"""
+        return seat in self._sitting_out
+
     def sit_in(self, seat: int) -> bool:
         """休みの席を戻す（次のハンドから配られる。スタック 0 なら買い足すまで配られない）。変わったら True。"""
         if seat not in self._players:
@@ -639,6 +657,14 @@ class PokerkitGameState:
             raise ValueError(f"Unknown seat: {seat}")
         if amount <= 0:
             raise ValueError(f"Rebuy amount must be positive, got {amount}")
-        if self._hand_active:
+        if self._hand_active and seat in self._hand_seats:
+            # ハンドの席のスタックはハンドの終わりに書き直すので、いま足すと消える → 次のハンドの始めに足す
             logger.warning("rebuy mid-hand (pokerkit): 次ハンドから反映 (seat=%d)", seat)
+            self._pending_rebuys[seat] = self._pending_rebuys.get(seat, 0) + amount
+            return
         self._stacks[seat] += amount
+
+    def _apply_pending_rebuys(self) -> None:
+        for seat, amount in self._pending_rebuys.items():
+            self._stacks[seat] += amount
+        self._pending_rebuys = {}
