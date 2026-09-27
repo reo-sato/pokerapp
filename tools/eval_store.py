@@ -278,8 +278,19 @@ def evaluate_against_truth(truth: dict, captured_hands: list[dict]) -> dict:
             conf = c.get("asr_confidence")
             if conf is not None and (c.get("source") or {}).get("audio"):
                 (conf_ok if good else conf_ng).append(float(conf))
+    blind_ids = {h.get("hand_id") for h in truth.get("hands") or [] if h.get("blind")}
+    split = {True: [0, 0], False: [0, 0]}
+    for h in acc.per_hand:
+        split[h.hand_id in blind_ids][0] += h.action_correct
+        split[h.hand_id in blind_ids][1] += h.action_total
+    entry = [h.get("entry_sec") for h in truth.get("hands") or [] if isinstance(h.get("entry_sec"), (int, float))]
     return {
         "hands": len(truth.get("hands") or []),
+        # 記録を見ずに入れたハンドとそれ以外の一致率（大きく違えば、入れる人が記録に引きずられている）
+        "blind_hands": len(blind_ids),
+        "blind_accuracy": _pct(*split[True]), "seen_accuracy": _pct(*split[False]),
+        "unsure_rows": sum(1 for h in truth.get("hands") or [] for a in h.get("actions") or [] if a.get("unsure")),
+        "entry_sec_avg": round(sum(entry) / len(entry), 1) if entry else None,
         "action_accuracy": acc.action_accuracy, "board_accuracy": acc.board_accuracy,
         "winner_accuracy": acc.winner_seat_accuracy, "missed_hands": acc.missed_hands,
         "per_hand": [
@@ -566,6 +577,17 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                 totals[key]["flagged"] += t["flagged_rows"]
                 totals[key]["flagged_wrong"] += t["flagged_wrong"]
                 totals[key]["wrong"] += t["wrong_rows"]
+            rec = r.truth["record"]
+            extra = []
+            if rec["blind_hands"]:
+                extra.append(f"ブラインド {rec['blind_hands']} ハンドの一致率 {_fmt_pct(rec['blind_accuracy'])}"
+                             f"（ほか {_fmt_pct(rec['seen_accuracy'])}）")
+            if rec["unsure_rows"]:
+                extra.append(f"自信なしの行 {rec['unsure_rows']}")
+            if rec["entry_sec_avg"] is not None:
+                extra.append(f"入力の時間 平均 {rec['entry_sec_avg']:.0f} 秒")
+            if extra:
+                print("    " + " ／ ".join(extra))
             conf = r.truth["record"]["asr_confidence"]
             if conf["correct"] or conf["wrong"]:
                 print(f"    聞き取りの自信（記録の音声の行）: 正しい {conf['correct']} / 誤り {conf['wrong']}")

@@ -11,6 +11,9 @@
 - **手番・ストリート・コールの額は pokerkit で補う**。入力するのは席とアクション、ベット / レイズの
   額（トータル）だけ。合法でない列は行を赤くして知らせる。
 - 保存のたびに `tools/measure_capture_accuracy.py` と同じ計算で一致 / 差分を出す。
+- 手間を減らす（ADR-0056 追記 1 の S1）: ハンドの間の**発話の音声を再生**でき、書き起こし・ボードの札・札の
+  離脱を時刻順に並べる。要確認の行を **✓ で確かめれば「記録どおり」**にできる。行ごとに「自信なし」を付けられる。
+  **5 ハンドに 1 つはブラインド**（記録を見ずに入れる = 記録に引きずられていないかを測る）。入力にかかった時間を残す。
 
 使い方:
 
@@ -22,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -57,6 +61,12 @@ _SESSION_RE = re.compile(r"^[A-Za-z0-9_\-]{1,120}$")
 # ストリートの補完なので、十分大きければよい）
 _FALLBACK_STACK = 10_000_000
 _MAX_BODY = 1_000_000
+# ブラインドで入れるハンドの割合（N ハンドに 1 つ。0 = しない）。オーナー決定: 2 割（ADR-0056 追記 1）
+BLIND_EVERY = 5
+_AUDIO_RE = re.compile(r"^[0-9]{6,16}\.wav$")
+# タイムラインに出す範囲: ハンドの始まり（配布）の少し前から、次のハンドの始まりまで
+_TIMELINE_BEFORE_SEC = 10.0
+_TIMELINE_AFTER_SEC = 20.0
 
 # ───────────────────────── 読み取り ─────────────────────────
 
@@ -151,11 +161,17 @@ def _hand_row(hand: dict, gt) -> dict:
         "review_required": bool(hand.get("review_required")),
         "has_needs_review": hand_has_needs_review(hand),
         "ground_truth": (
-            {"source": gt.source, "annotated_at": gt.annotated_at, "annotator": gt.annotator}
+            {"source": gt.source, "annotated_at": gt.annotated_at, "annotator": gt.annotator,
+             "blind": bool(gt.hand.get("blind")), "entry_sec": gt.hand.get("entry_sec")}
             if gt is not None else None
         ),
         "accuracy": accuracy,
     }
+
+
+def _average(values: list[Any]) -> Optional[float]:
+    nums = [float(v) for v in values if isinstance(v, (int, float))]
+    return round(sum(nums) / len(nums), 1) if nums else None
 
 
 def list_hands(
@@ -181,6 +197,8 @@ def list_hands(
         "winner_match": sum(1 for r in annotated if r["accuracy"]["winner_match"] is True),
         "winner_total": sum(1 for r in annotated if r["accuracy"]["winner_match"] is not None),
         "hands_match": sum(1 for r in annotated if r["accuracy"]["all_match"]),
+        "blind": sum(1 for r in rows if r["ground_truth"] and r["ground_truth"].get("blind")),
+        "entry_sec_avg": _average([r["ground_truth"].get("entry_sec") for r in rows if r["ground_truth"]]),
     }
     rows.sort(key=lambda r: r["hand_id"], reverse=True)
     return {"session_id": session_id, "hands": rows, "summary": summary}
@@ -211,21 +229,120 @@ def _gt_actions(hand: dict) -> list[dict]:
     return out
 
 
+def _epoch(iso: Any) -> Optional[float]:
+    """記録の時刻（この PC の時刻の ISO 文字列）を epoch 秒に。"""
+    if not isinstance(iso, str) or not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso).timestamp()
+    except ValueError:
+        return None
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    rows = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue                      # 書き込み途中の行
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _next_started_at(log_dir: Path, session_id: str, hand_id: int) -> Optional[str]:
+    log = _load_hand_log(log_dir, session_id)
+    if log is None:
+        return None
+    later = [h for h in _hands_of(log) if h["hand_id"] > hand_id]
+    return later[0].get("started_at") if later else None
+
+
+def hand_timeline(log_dir: Path, session_id: str, hand: dict, next_started_at: Optional[str] = None) -> list[dict]:
+    """ハンドの間の発話（書き起こし・自信・音声ファイル）・ボードの札・札の離脱を時刻順に（`t` = 配布からの秒）。"""
+    start = _epoch(hand.get("started_at"))
+    if start is None:
+        return []
+    end = _epoch(next_started_at)
+    if end is None:
+        end = (_epoch(hand.get("ended_at")) or start) + _TIMELINE_AFTER_SEC
+    lo = start - _TIMELINE_BEFORE_SEC
+    audio_dir = log_dir / "audio" / session_id
+    items: list[dict] = []
+    for x in _read_jsonl(log_dir / f"{session_id}.transcripts.jsonl"):
+        t = x.get("utterance_start_ts")
+        if not isinstance(t, (int, float)) or not lo <= t < end or x.get("no_speech"):
+            continue
+        parsed = []
+        for e in x.get("events") or []:
+            if isinstance(e, dict) and e.get("action"):
+                parsed.append(str(e["action"]) + (f" {e['amount']}" if e.get("amount") else "")
+                              + (f" 席{e['seat']}" if e.get("seat") else ""))
+        audio = x.get("audio_file")
+        heard = x.get("heard_at")
+        items.append({
+            "t": round(t - start, 1), "kind": "speech", "text": str(x.get("text") or ""),
+            "confidence": round(float(x["confidence"]), 2) if isinstance(x.get("confidence"), (int, float)) else None,
+            "noise": bool(x.get("noise")), "question": bool(x.get("question")), "parsed": parsed,
+            "lag": round(heard - t, 1) if isinstance(heard, (int, float)) else None,
+            "audio": audio if isinstance(audio, str) and _AUDIO_RE.match(audio) and (audio_dir / audio).is_file()
+            else None,
+        })
+    for x in _read_jsonl(log_dir / f"{session_id}.events.jsonl"):
+        if x.get("type") != "rfid":
+            continue
+        kind = x.get("kind") or "card"
+        t = x.get("observed_at") if kind in ("leave", "muck") and x.get("observed_at") else x.get("timestamp")
+        if not isinstance(t, (int, float)) or not lo <= t < end:
+            continue
+        if kind == "card" and x.get("role") == "board" and x.get("board_index"):
+            text = f"ボード {x['board_index']} 枚目 {x.get('card') or '?'}"
+            if x.get("replaces"):
+                text += f"（{x['replaces']} を差し替え）"
+            items.append({"t": round(t - start, 1), "kind": "board", "text": text})
+        elif kind in ("leave", "muck", "return") and isinstance(x.get("seat"), int):
+            what = {"leave": "札が離れた", "muck": "札が中央を通過", "return": "札が戻った"}[kind]
+            items.append({"t": round(t - start, 1), "kind": kind, "text": f"席{x['seat']} の{what}"})
+    items.sort(key=lambda i: i["t"])
+    return items
+
+
+def is_blind(session_id: str, hand_id: int, every: int = BLIND_EVERY) -> bool:
+    """このハンドを記録を見ずに入れるか（`every` ハンドに 1 つ。ハンドごとに決まっていて選べない）。"""
+    if every <= 0:
+        return False
+    digest = hashlib.sha1(f"{session_id}:{hand_id}".encode("utf-8")).hexdigest()
+    return int(digest, 16) % every == 0
+
+
 def hand_detail(
     log_dir: Path, session_id: str, hand_id: int, gt_repo: GroundTruthRepository,
-    corr_repo: Optional[HandCorrectionRepository] = None,
+    corr_repo: Optional[HandCorrectionRepository] = None, blind_every: int = BLIND_EVERY,
 ) -> Optional[dict]:
     captured = _get_hand(log_dir, session_id, hand_id, corr_repo)
     if captured is None:
         return None
     gt = gt_repo.get(session_id, hand_id)
-    initial = _gt_actions(gt.hand) if gt is not None else _gt_actions(captured)
+    blind = gt is None and is_blind(session_id, hand_id, blind_every)
+    initial = _gt_actions(gt.hand) if gt is not None else ([] if blind else _gt_actions(captured))
     return {
         "session_id": session_id,
         "captured": captured,
         "ground_truth": gt.to_dict() if gt is not None else None,
         "has_needs_review": hand_has_needs_review(captured),
         "legal": replay_legal(captured, initial),
+        "blind": blind,
+        "timeline": hand_timeline(log_dir, session_id, captured, _next_started_at(log_dir, session_id, hand_id)),
     }
 
 
@@ -389,6 +506,8 @@ def validate_gt_hand(hand: Any) -> dict:
         street = a.get("street")
         if isinstance(street, str) and street:
             row["street"] = street
+        if a.get("unsure") is True:
+            row["unsure"] = True             # 入れた人に自信が無い行（評価で分けて見る）
         actions.append(row)
     players = []
     seen_cards: dict[str, str] = {c: "ボード" for c in board}
@@ -424,7 +543,16 @@ def validate_gt_hand(hand: Any) -> dict:
     notes = hand.get("notes")
     if isinstance(notes, str) and notes.strip():
         out["notes"] = notes.strip()[:2000]
+    if hand.get("blind") is True:
+        out["blind"] = True                  # 記録を見ずに入れた
     return out
+
+
+def _entry_sec(body: dict) -> Optional[float]:
+    value = body.get("entry_sec")
+    if isinstance(value, (int, float)) and 0 <= value <= 24 * 3600:
+        return round(float(value), 1)
+    return None
 
 
 def save_ground_truth(
@@ -444,20 +572,34 @@ def save_ground_truth(
         return 400, {"code": "invalid_amount", "message": str(e)}
     annotator = str(body.get("annotator") or "staff").strip()[:64] or "staff"
     if source == SOURCE_PASSTHROUGH:
-        if hand_has_needs_review(captured):
+        if hand_has_needs_review(captured) and not _review_confirmed(captured, body):
             return 400, {
                 "code": "invalid_amount",
-                "message": "要確認のハンドは「記録どおり」にできません。内容を確かめて「保存」してください（ADR-0043）。",
+                "message": "要確認のハンドは、要確認の行をすべて ✓ で確かめてから「記録どおり」にしてください"
+                           "（ADR-0043）。違っていれば直して「保存」してください。",
             }
-        hand_body = captured
+        hand_body = dict(captured)
     else:
         try:
             hand_body = validate_gt_hand(body.get("hand"))
         except GroundTruthError as e:
             return 400, {"code": "invalid_amount", "message": str(e)}
+    entry_sec = _entry_sec(body)
+    if entry_sec is not None:
+        hand_body["entry_sec"] = entry_sec      # 入力にかかった時間（手間を測る）
     entry = gt_repo.upsert(session_id, hand_id, hand_body, annotator=annotator, source=source)
     accuracy = _accuracy_dict(measure_hand(dict(entry.hand, hand_id=hand_id), captured))
     return 200, {"saved": entry.to_dict(), "accuracy": accuracy}
+
+
+def _review_confirmed(captured: dict, body: dict) -> bool:
+    """要確認の行（と、ハンド全体が要確認ならハンド全体）をすべて ✓ で確かめたか（C-2 ガードの通り方）。"""
+    rows = body.get("confirmed_rows")
+    confirmed = {int(i) for i in rows if isinstance(i, int)} if isinstance(rows, list) else set()
+    needed = {i for i, a in enumerate(captured.get("actions") or []) if isinstance(a, dict) and a.get("needs_review")}
+    if not needed <= confirmed:
+        return False
+    return not captured.get("review_required") or body.get("confirmed_hand") is True
 
 
 # ───────────────────────── HTTP ─────────────────────────
@@ -466,6 +608,8 @@ _ROUTE_SESSIONS = re.compile(r"^/api/sessions/?$")
 _ROUTE_HANDS = re.compile(r"^/api/sessions/([^/]+)/hands/?$")
 _ROUTE_HAND = re.compile(r"^/api/sessions/([^/]+)/hands/(\d+)/?$")
 _ROUTE_LEGAL = re.compile(r"^/api/sessions/([^/]+)/hands/(\d+)/legal/?$")
+_ROUTE_AUDIO = re.compile(r"^/api/sessions/([^/]+)/audio/([^/]+)$")
+_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
 class GroundTruthServer(ThreadingHTTPServer):
@@ -474,9 +618,10 @@ class GroundTruthServer(ThreadingHTTPServer):
 
     def __init__(
         self, address: tuple[str, int], log_dir: Path,
-        corrections: Optional[Path] = None,
+        corrections: Optional[Path] = None, blind_every: int = BLIND_EVERY,
     ) -> None:
         self.log_dir = Path(log_dir)
+        self.blind_every = blind_every
         self.gt_repo = GroundTruthRepository(self.log_dir)
         self.corr_repo: Optional[HandCorrectionRepository] = None
         if corrections is not None and Path(corrections).is_file():
@@ -524,6 +669,35 @@ class _Handler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError):
             return None
 
+    def _send_audio(self, path: Path) -> None:
+        """WAV を返す（iPad の Safari は Range で少しずつ取りに来るので 206 で応える）。"""
+        data = path.read_bytes()
+        size = len(data)
+        start, end = 0, size - 1
+        m = _RANGE_RE.match(self.headers.get("Range") or "")
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            else:
+                start = max(0, size - int(m.group(2)))
+            if start > end or start >= size:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        else:
+            self.send_response(200)
+        body = data[start:end + 1]
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "max-age=3600")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     @staticmethod
     def _session(raw: str) -> Optional[str]:
         sid = unquote(raw)
@@ -561,11 +735,22 @@ class _Handler(BaseHTTPRequestHandler):
         m = _ROUTE_HAND.match(path)
         if m:
             sid = self._session(m.group(1))
-            data = hand_detail(srv.log_dir, sid, int(m.group(2)), srv.gt_repo, srv.corr_repo) if sid else None
+            data = (hand_detail(srv.log_dir, sid, int(m.group(2)), srv.gt_repo, srv.corr_repo, srv.blind_every)
+                    if sid else None)
             if data is None:
                 self._send_json(404, {"code": "not_found", "message": "ハンドがありません"})
             else:
                 self._send_json(200, data)
+            return
+        m = _ROUTE_AUDIO.match(path)
+        if m:
+            sid = self._session(m.group(1))
+            name = unquote(m.group(2))
+            audio = srv.log_dir / "audio" / sid / name if sid and _AUDIO_RE.match(name) else None
+            if audio is None or not audio.is_file():
+                self._send_json(404, {"code": "not_found", "message": "音声がありません"})
+            else:
+                self._send_audio(audio)
             return
         self._send_json(404, {"code": "not_found", "message": path})
 
@@ -614,9 +799,9 @@ class _Handler(BaseHTTPRequestHandler):
 
 def make_server(
     log_dir: Path, host: str = "127.0.0.1", port: int = 8791,
-    corrections: Optional[Path] = None,
+    corrections: Optional[Path] = None, blind_every: int = BLIND_EVERY,
 ) -> GroundTruthServer:
-    return GroundTruthServer((host, port), log_dir, corrections)
+    return GroundTruthServer((host, port), log_dir, corrections, blind_every)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -626,11 +811,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--port", type=int, default=8791, help="bind port（既定 8791）")
     ap.add_argument("--corrections", default="hand_corrections.json",
                     help="ハンド訂正の保存先（あれば訂正を重ねて表示・比較する, ADR-0036）")
+    ap.add_argument("--blind-every", type=int, default=BLIND_EVERY,
+                    help=f"N ハンドに 1 つ記録を見ずに入れる（既定 {BLIND_EVERY}。0 = しない）")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
-    server = make_server(log_dir, args.host, args.port, Path(args.corrections))
+    server = make_server(log_dir, args.host, args.port, Path(args.corrections), args.blind_every)
     print(f"[ground-truth] http://{args.host}:{args.port}/  (logs: {log_dir.resolve()})")
     print("[ground-truth] Ctrl+C で終了")
     try:
@@ -700,6 +887,7 @@ _PAGE = r"""<!doctype html>
  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
  .cap td, .cap th { white-space:nowrap; }
  .cap td.raw { white-space:normal; min-width:140px; }
+ .cap td.raw .tag { white-space:normal; }
  .panel { background:#161a20; border:1px solid #2d333b; border-radius:12px; padding:12px 14px; }
  .seatrow { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #2d333b; }
  .seatrow .no { min-width:120px; }
@@ -732,6 +920,17 @@ _PAGE = r"""<!doctype html>
  .summary b { font-size:18px; }
  .cap td { font-size:14px; }
  .err { color:#ff7b72; }
+ .tl { max-height:52vh; overflow-y:auto; -webkit-overflow-scrolling:touch; margin-top:6px; }
+ .tl .item { display:flex; gap:8px; align-items:center; padding:4px 0; border-bottom:1px solid #23272e; font-size:14px; }
+ .tl .t { color:#9aa0a6; min-width:56px; font-variant-numeric:tabular-nums; font-size:13px; }
+ .tl .noise { opacity:.5; }
+ .tl .sys { color:#9aa0a6; }
+ .tl .gap { min-width:44px; }
+ button.play { min-height:34px; min-width:44px; padding:2px 8px; }
+ button.chk { min-height:34px; min-width:44px; padding:2px 8px; }
+ button.chk.on { background:#238636; border-color:#238636; }
+ button.unsure.on { background:#9e6a03; border-color:#9e6a03; }
+ .blind { background:#241d33; border:1px solid #4d3a6e; border-radius:12px; padding:10px 12px; margin:6px 0; }
 </style></head>
 <body>
 <div id="app">読み込み中…</div>
@@ -746,7 +945,8 @@ const ACTION_JA = {fold:"フォールド", check:"チェック", call:"コール
 const STREET_JA = {preflop:"プリフロップ", flop:"フロップ", turn:"ターン", river:"リバー", showdown:"ショーダウン"};
 const BOARD_LABEL = ["フロップ","フロップ","フロップ","ターン","リバー"];
 const S = {sessions:[], sid:null, hands:null, summary:null, view:"list", hand:null, gt:null, legal:null,
-           dirty:false, annotator:"", picker:null, busy:false};
+           dirty:false, annotator:"", picker:null, busy:false,
+           openedAt:0, confirmed:new Set(), confirmedHand:false, revealed:false, audio:null};
 const $ = (id) => document.getElementById(id);
 function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function fmtTime(iso){ const m = String(iso||"").match(/T(\d\d:\d\d:\d\d)/); return m ? m[1] : (iso || "—"); }
@@ -796,7 +996,9 @@ function renderList(){
       <div>ハンド一致 <b>${pct(sm.hands_match, sm.annotated)}</b></div>
       <div>アクション一致 <b>${pct(sm.action_correct, sm.action_total)}</b> <span class="muted small">(${sm.action_correct}/${sm.action_total})</span></div>
       <div>ボード一致 <b>${pct(sm.board_match, sm.annotated)}</b></div>
-      <div>勝者一致 <b>${pct(sm.winner_match, sm.winner_total)}</b></div></div>` : "";
+      <div>勝者一致 <b>${pct(sm.winner_match, sm.winner_total)}</b></div>
+      ${sm.entry_sec_avg != null ? `<div>入力の時間 平均 <b>${Math.round(sm.entry_sec_avg)}</b> 秒</div>` : ""}
+      ${sm.blind ? `<div>ブラインド <b>${sm.blind}</b></div>` : ""}</div>` : "";
   const next = (S.hands||[]).filter(h => !h.ground_truth).sort((a,b) => a.hand_id - b.hand_id)[0];
   const rows = (S.hands||[]).map(h => {
     const st = h.ground_truth
@@ -804,9 +1006,10 @@ function renderList(){
       : '<span class="tag t-none">未入力</span>';
     const rv = h.has_needs_review ? '<span class="tag t-warn">要確認</span>' : "";
     const acc = h.accuracy ? (h.accuracy.all_match ? '<span class="tag t-ok">一致</span>' : `<span class="tag t-bad">差分 ${h.accuracy.mismatches}</span>`) : "";
+    const bl = h.ground_truth && h.ground_truth.blind ? '<span class="tag t-edit">ブラインド</span>' : "";
     return `<tr class="row" onclick="openHand(${h.hand_id})"><td>#${h.hand_id}</td><td>${fmtTime(h.started_at)}</td>
       <td>${(h.seats||[]).join(" ")}</td><td>${(h.board||[]).map(c => cardHtml(c, "sm")).join("")}</td>
-      <td>${h.winner_seat != null ? "席 " + h.winner_seat : "—"}</td><td>${rv} ${st} ${acc}</td></tr>`;
+      <td>${h.winner_seat != null ? "席 " + h.winner_seat : "—"}</td><td>${rv} ${st} ${bl} ${acc}</td></tr>`;
   }).join("");
   $("app").innerHTML = `<h1>真のアクション入力</h1>
     <div class="bar">
@@ -829,15 +1032,17 @@ function buildGt(d){
     const gp = (g && (g.players || []).find(x => x.seat === p.seat)) || p;
     return {seat:p.seat, name:p.name || "", hole_cards: normCards(gp.hole_cards, 2), showed_down: !!gp.showed_down};
   });
-  const actions = (src.actions || []).filter(a => GT_ACTIONS.includes(a.action) && typeof a.seat === "number")
-                  .map(a => ({seat:a.seat, action:a.action, amount:a.amount || 0}));
+  const blind = !!d.blind && !g;              // 記録を見ずに入れる（アクションと勝者は空から）
+  const actions = blind ? [] : (src.actions || []).filter(a => GT_ACTIONS.includes(a.action) && typeof a.seat === "number")
+                  .map(a => ({seat:a.seat, action:a.action, amount:a.amount || 0, unsure: !!a.unsure}));
   return {board: normCards(src.board, 5), players, actions,
-          winner_seat: (src.winner_seat === undefined ? null : src.winner_seat), notes: (g && g.notes) || ""};
+          winner_seat: blind ? null : (src.winner_seat === undefined ? null : src.winner_seat), notes: (g && g.notes) || ""};
 }
 async function openHand(hid){
   try {
     const d = await api(sidPath() + "/hands/" + hid);
     S.hand = d; S.gt = buildGt(d); S.legal = d.legal; S.dirty = false; S.view = "edit";
+    S.openedAt = Date.now(); S.confirmed = new Set(); S.confirmedHand = false; S.revealed = false;
     applyLegal();
     renderEdit();
     window.scrollTo(0, 0);
@@ -896,6 +1101,41 @@ function addQuick(act){
   S.gt.actions.push({seat: n.actor_seat, action: act, amount});
   touch();
 }
+function isBlind(){ return !!(S.hand && S.hand.blind && !S.revealed); }
+function reveal(){
+  if (!confirm("記録を見ると、このハンドはブラインドではなくなります。見ますか？")) return;
+  S.revealed = true; renderEdit();
+}
+function toggleConfirm(i){ if (S.confirmed.has(i)) S.confirmed.delete(i); else S.confirmed.add(i); renderEdit(); }
+function toggleConfirmHand(){ S.confirmedHand = !S.confirmedHand; renderEdit(); }
+function reviewItems(){
+  const cap = S.hand.captured;
+  const rows = (cap.actions || []).map((a, i) => a.needs_review ? i : -1).filter(i => i >= 0);
+  return {rows, hand: !!cap.review_required};
+}
+function allConfirmed(){
+  const r = reviewItems();
+  return r.rows.every(i => S.confirmed.has(i)) && (!r.hand || S.confirmedHand);
+}
+function toggleUnsure(i){ const a = S.gt.actions[i]; a.unsure = !a.unsure; S.dirty = true; renderEdit(); }
+function playAudio(name){
+  try { if (S.audio) S.audio.pause(); } catch (e) {}
+  S.audio = new Audio(sidPath() + "/audio/" + encodeURIComponent(name));
+  S.audio.play().catch(e => toast("再生できません: " + e.message, true));
+}
+function renderTimeline(items, blind){
+  if (!items || !items.length) return "<p class='muted small'>このハンドの間の発話・札の記録はありません。</p>";
+  return `<div class="tl">${items.map(it => {
+    const t = (it.t >= 0 ? "+" : "") + Number(it.t).toFixed(1) + "s";
+    if (it.kind === "speech") {
+      const play = it.audio ? `<button class="play sm" onclick="playAudio('${esc(it.audio)}')" title="音声を聞く">▶</button>` : '<span class="gap"></span>';
+      const conf = it.confidence != null ? ` <span class="muted small">${Number(it.confidence).toFixed(2)}</span>` : "";
+      const parsed = blind ? "" : ` <span class="muted small">→ ${it.parsed && it.parsed.length ? esc(it.parsed.join("、")) : (it.noise ? "雑音" : "（読まない）")}</span>`;
+      return `<div class="item ${it.noise ? "noise" : ""}"><span class="t">${t}</span>${play}<span>「${esc(it.text)}」${conf}${parsed}</span></div>`;
+    }
+    return `<div class="item sys"><span class="t">${t}</span><span class="gap"></span><span>${esc(it.text)}</span></div>`;
+  }).join("")}</div>`;
+}
 function setWinner(seat){ S.gt.winner_seat = (S.gt.winner_seat === seat) ? null : seat; S.dirty = true; renderEdit(); }
 function setShowed(seat){ const p = S.gt.players.find(x => x.seat === seat); p.showed_down = !p.showed_down; S.dirty = true; renderEdit(); }
 function setNotes(v){ S.gt.notes = v; S.dirty = true; }
@@ -923,7 +1163,7 @@ function renderEdit(){
       <td><select onchange="setRowSeat(${i}, this.value)">${seats.map(s => `<option value="${s}" ${s===a.seat?"selected":""}>席 ${s}</option>`).join("")}</select></td>
       <td><select onchange="setRowAction(${i}, this.value)">${GT_ACTIONS.map(x => `<option value="${x}" ${x===a.action?"selected":""}>${ACTION_JA[x]}</option>`).join("")}</select></td>
       <td>${amtCell}</td>
-      <td class="tools"><button class="sm" onclick="insRow(${i})" title="この前に挿入">＋</button> <button class="sm danger" onclick="delRow(${i})">✕</button></td></tr>
+      <td class="tools"><button class="sm unsure ${a.unsure?"on":""}" onclick="toggleUnsure(${i})" title="自信なし">?</button> <button class="sm" onclick="insRow(${i})" title="この前に挿入">＋</button> <button class="sm danger" onclick="delRow(${i})">✕</button></td></tr>
       ${isErr ? `<tr class="errmsg"><td colspan="5">⚠ ${esc(err.message)}</td></tr>` : ""}`;
   }).join("");
   let quick = "";
@@ -955,16 +1195,24 @@ function renderEdit(){
       <button class="sm chip ${p.showed_down?"on":""}" onclick="setShowed(${p.seat})">見せた</button></div>`).join("");
   const winnerHtml = `<div class="chips">${seats.map(s => `<button class="chip ${g.winner_seat===s?"on":""}" onclick="setWinner(${s})">席 ${s}</button>`).join("")}
       <span class="muted small" style="align-self:center">${g.winner_seat==null?"（未定）":""}</span></div>`;
-  const capRows = (cap.actions || []).map(a => `<tr class="${a.needs_review?"warn":""}"><td class="street">${STREET_JA[a.street]||a.street||""}</td><td>席 ${a.seat}</td>
+  const capRows = (cap.actions || []).map((a, i) => `<tr class="${a.needs_review?"warn":""}">
+      <td>${a.needs_review ? `<button class="chk ${S.confirmed.has(i)?"on":""}" onclick="toggleConfirm(${i})" title="確かめた">✓</button>` : ""}</td>
+      <td class="street">${STREET_JA[a.street]||a.street||""}</td><td>席 ${a.seat}</td>
       <td>${ACTION_JA[a.action]||a.action}</td><td>${a.amount||""}</td>
       <td class="muted small raw">${esc(a.raw_text||"")}${a.needs_review?` <span class="tag t-warn">要確認${a.reason?": "+esc(a.reason):""}</span>`:""}</td></tr>`).join("");
   const capPlayers = (cap.players || []).map(p => `席 ${p.seat}: ${(p.hole_cards||[]).map(c => cardHtml(c, "sm")).join("") || "<span class='muted'>—</span>"}`).join(" ｜ ");
   const gtMeta = d.ground_truth ? `<span class="tag ${d.ground_truth.source==="captured-passthrough"?"t-ok":"t-edit"}">${d.ground_truth.source==="captured-passthrough"?"記録どおり":"修正済"} ${esc(d.ground_truth.annotated_at||"")} ${esc(d.ground_truth.annotator||"")}</span>` : '<span class="tag t-none">未入力</span>';
-  const canPass = !d.has_needs_review;
-  $("app").innerHTML = `
-    <div class="bar"><button onclick="backToList()">← 一覧</button><h1 style="margin:0">ハンド #${cap.hand_id}</h1>
-      <span class="muted small">${fmtTime(cap.started_at)} ／ ボタン 席 ${cap.button_seat ?? "—"} ／ ブラインド ${(cap.blinds||{}).sb ?? "?"}/${(cap.blinds||{}).bb ?? "?"}</span> ${gtMeta}</div>
-    <div class="cols">
+  const blind = isBlind();
+  const canPass = !blind && (!d.has_needs_review || allConfirmed());
+  const ri = reviewItems();
+  const leftPanel = blind ? `
+      <div class="panel cap">
+        <h2 style="margin-top:0">ブラインド</h2>
+        <div class="blind">このハンドは<b>記録を見ずに</b>入れてください（5 ハンドに 1 つ。記録に引きずられていないかを測ります）。
+          下の発話は ▶ で聞けます。 <button class="sm" onclick="reveal()">記録を見る</button></div>
+        <h2>発話と札の流れ <span class="muted small">+秒 = 手札が配られてから</span></h2>
+        ${renderTimeline(d.timeline, true)}
+      </div>` : `
       <div class="panel cap">
         <h2 style="margin-top:0">記録（システムが取ったもの）</h2>
         <div>ボード: ${(cap.board||[]).map(c => cardHtml(c, "sm")).join("") || "<span class='muted'>—</span>"}</div>
@@ -972,8 +1220,16 @@ function renderEdit(){
         <div class="small">勝者: ${cap.winner_seat != null ? "席 " + cap.winner_seat : "—"} ${cap.winner_source ? `<span class="muted">(${esc(cap.winner_source)})</span>` : ""}
           ${cap.announced_hand ? `／ 役名 ${esc(cap.announced_hand)}` : ""} ／ ポット ${cap.pot_total ?? "—"}
           ${d.has_needs_review ? '<span class="tag t-warn">要確認</span>' : ""}</div>
-        <div class="tbl" style="margin-top:8px"><table><tr><th>ストリート</th><th>席</th><th>アクション</th><th>額</th><th>聞き取り</th></tr>${capRows || "<tr><td colspan='5' class='muted'>アクションなし</td></tr>"}</table></div>
-      </div>
+        <div class="tbl" style="margin-top:8px"><table><tr><th>確認</th><th>ストリート</th><th>席</th><th>アクション</th><th>額</th><th>聞き取り</th></tr>${capRows || "<tr><td colspan='6' class='muted'>アクションなし</td></tr>"}</table></div>
+        ${ri.hand ? `<div class="small" style="margin-top:6px">ハンド全体（勝者・ボード・手札）も確かめた <button class="chk ${S.confirmedHand?"on":""}" onclick="toggleConfirmHand()">✓</button></div>` : ""}
+        <h2>発話と札の流れ <span class="muted small">+秒 = 手札が配られてから ／ ▶ で聞く</span></h2>
+        ${renderTimeline(d.timeline, false)}
+      </div>`;
+  $("app").innerHTML = `
+    <div class="bar"><button onclick="backToList()">← 一覧</button><h1 style="margin:0">ハンド #${cap.hand_id}</h1>
+      <span class="muted small">${fmtTime(cap.started_at)} ／ ボタン 席 ${cap.button_seat ?? "—"} ／ ブラインド ${(cap.blinds||{}).sb ?? "?"}/${(cap.blinds||{}).bb ?? "?"}</span> ${gtMeta}</div>
+    <div class="cols">
+      ${leftPanel}
       <div class="panel">
         <h2 style="margin-top:0">実際（真のアクション）</h2>
         <h2>ボード</h2><div style="display:flex;gap:6px;flex-wrap:wrap">${boardHtml}</div>
@@ -986,10 +1242,10 @@ function renderEdit(){
         <h2>勝った席</h2>${winnerHtml}
         <h2>メモ</h2><input type="text" style="width:100%" value="${esc(g.notes)}" placeholder="気づいたこと（任意）" onchange="setNotes(this.value)">
         <div class="actions-bottom">
-          <button class="ok" onclick="savePassthrough()" ${canPass?"":"disabled"}>✓ 記録どおり</button>
+          ${blind ? "" : `<button class="ok" onclick="savePassthrough()" ${canPass?"":"disabled"}>✓ 記録どおり</button>`}
           <button class="primary" onclick="saveEdited()">保存（この内容が真）</button>
-          <button class="sm" onclick="resetToCaptured()">記録の内容に戻す</button>
-          ${canPass ? "" : '<span class="small muted">要確認のハンドは「記録どおり」にできません。内容を確かめて保存してください。</span>'}
+          ${blind ? "" : '<button class="sm" onclick="resetToCaptured()">記録の内容に戻す</button>'}
+          ${blind || canPass ? "" : '<span class="small muted">要確認の行を左の ✓ ですべて確かめると「記録どおり」にできます。違っていれば直して保存してください。</span>'}
         </div>
       </div>
     </div>`;
@@ -1026,9 +1282,9 @@ $("modal").addEventListener("click", (e) => { if (e.target === $("modal")) close
 function gtPayload(){
   const g = S.gt;
   return {board: g.board.filter(Boolean),
-          actions: g.actions.map(a => ({seat:a.seat, action:a.action, amount:a.amount || 0, street:a.street})),
+          actions: g.actions.map(a => ({seat:a.seat, action:a.action, amount:a.amount || 0, street:a.street, unsure: a.unsure || undefined})),
           players: g.players.map(p => ({seat:p.seat, name:p.name, hole_cards: p.hole_cards.filter(Boolean), showed_down: p.showed_down})),
-          winner_seat: g.winner_seat, notes: g.notes || ""};
+          winner_seat: g.winner_seat, notes: g.notes || "", blind: isBlind() || undefined};
 }
 async function saveWith(body){
   if (S.busy) return; S.busy = true;
@@ -1040,12 +1296,16 @@ async function saveWith(body){
   } catch (e) { toast("保存できません: " + e.message, true); }
   finally { S.busy = false; }
 }
-function savePassthrough(){ saveWith({source:"captured-passthrough", annotator: S.annotator || "staff"}); }
+function entrySec(){ return Math.round((Date.now() - S.openedAt) / 100) / 10; }
+function savePassthrough(){
+  saveWith({source:"captured-passthrough", annotator: S.annotator || "staff", entry_sec: entrySec(),
+            confirmed_rows: [...S.confirmed], confirmed_hand: S.confirmedHand});
+}
 function saveEdited(){
   const L = S.legal;
   if (L && L.error && L.next && !confirm("赤い行（反映できないアクション）があります。このまま保存しますか？")) return;
   if (S.gt.winner_seat == null && !confirm("勝った席が未定です。このまま保存しますか？")) return;
-  saveWith({source:"manual-edit", annotator: S.annotator || "staff", hand: gtPayload()});
+  saveWith({source:"manual-edit", annotator: S.annotator || "staff", hand: gtPayload(), entry_sec: entrySec()});
 }
 
 // ――― 起動 ―――

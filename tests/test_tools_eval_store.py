@@ -146,6 +146,9 @@ class TestEvaluate:
             truth.append({"hand_id": hand.hand_id, "actions": actions, "board": list(hand.board),
                           "winner_seat": hand.winner_seat, "annotator": "owner", "source": "manual-edit"})
         truth[0]["actions"][0]["amount"] = 800                                # 本当は 800 のレイズだった
+        truth[0].update(blind=True, entry_sec=30.0)                            # 記録を見ずに入れた
+        truth[1]["actions"][0]["unsure"] = True
+        truth[1]["entry_sec"] = 50.0
         (tmp_path / f"{SID}.ground_truth.json").write_text(json.dumps({"hands": truth}), encoding="utf-8")
         report = eval_store.evaluate_session(_files(tmp_path), {}, None)
         rec = report.truth["record"]
@@ -154,6 +157,8 @@ class TestEvaluate:
         assert rec["flagged_rows"] == sum(a.needs_review for h in tb.hands for a in h.actions)
         assert rec["review_recall"] in (0.0, 1.0)
         assert report.truth["replay"]["wrong_rows"] == 1
+        assert (rec["blind_hands"], rec["unsure_rows"], rec["entry_sec_avg"]) == (1, 1, 40.0)
+        assert rec["blind_accuracy"] == 2 / 3 and rec["seen_accuracy"] == 1.0
 
     def test_timeline_and_rows(self, tmp_path):
         _two_hands(tmp_path)

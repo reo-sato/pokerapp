@@ -1,7 +1,9 @@
 """tests/test_tools_ground_truth_ui.py
 
 真のアクション入力の画面（`tools/ground_truth_ui.py`）: ハンドログを読み、pokerkit で手番を補い、
-`logs/<sid>.ground_truth.json` を書く。staff API（ADR-0043）と同じ規則（要確認のハンドは「記録どおり」を拒む）。
+`logs/<sid>.ground_truth.json` を書く。staff API（ADR-0043）と同じ規則（要確認のハンドは「記録どおり」を拒む。
+要確認の行をすべて ✓ で確かめれば通す）。S1（ADR-0056 追記 1）: 発話の音声とタイムライン・ブラインド入力・
+行ごとの「自信なし」・入力にかかった時間。
 """
 from __future__ import annotations
 
@@ -9,11 +11,13 @@ import json
 import threading
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from tools.ground_truth_ui import (
+    is_blind,
     list_sessions,
     make_server,
     replay_legal,
@@ -67,9 +71,8 @@ def log_dir(tmp_path: Path) -> Path:
     return d
 
 
-@pytest.fixture
-def base(log_dir: Path):
-    server = make_server(log_dir, "127.0.0.1", 0)
+def _serve(log_dir: Path, blind_every: int):
+    server = make_server(log_dir, "127.0.0.1", 0, blind_every=blind_every)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -77,6 +80,17 @@ def base(log_dir: Path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.fixture
+def base(log_dir: Path):
+    yield from _serve(log_dir, blind_every=0)            # ブラインドなし（記録から始まる入力の検査）
+
+
+@pytest.fixture
+def blind_base(log_dir: Path):
+    assert is_blind(SID, 2) and not is_blind(SID, 1)     # 既定（5 ハンドに 1 つ）でハンド 2 がブラインド
+    yield from _serve(log_dir, blind_every=5)
 
 
 def _req(base: str, method: str, path: str, body: dict | None = None) -> tuple[int, dict | str]:
@@ -265,3 +279,121 @@ class TestValidate:
         with pytest.raises(GroundTruthError):
             validate_gt_hand({"board": [], "actions": [],
                               "players": [{"seat": 4, "hole_cards": ["As", "Kd", "Qh"]}]})
+
+
+# ――― S1: 発話の音声とタイムライン・✓・ブラインド・自信なし・入力時間（ADR-0056 追記 1）―――
+
+AUDIO = "1790000005000.wav"
+
+
+def _epoch(iso: str) -> float:
+    return datetime.fromisoformat(iso).timestamp()
+
+
+@pytest.fixture
+def with_speech(log_dir: Path) -> Path:
+    start = _epoch("2026-09-27T20:01:00")                 # ハンド 1 の始まり（次のハンドは 20:02:00）
+    rows = [
+        {"utterance_start_ts": start + 5.0, "heard_at": start + 9.5, "text": "コール", "confidence": 0.41,
+         "noise": False, "question": False, "audio_file": AUDIO,
+         "events": [{"action": "call", "amount": 0, "seat": None}]},
+        {"utterance_start_ts": start + 8.0, "heard_at": start + 12.0, "text": "ご視聴ありがとうございました。",
+         "confidence": 0.2, "noise": True, "events": [], "audio_file": "1790000008000.wav"},   # 音声ファイルが無い
+        {"utterance_start_ts": start + 200.0, "heard_at": start + 204.0, "text": "次のハンド", "events": []},
+        {"utterance_start_ts": start + 3.0, "no_speech": True, "text": ""},
+    ]
+    (log_dir / f"{SID}.transcripts.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n{broken", encoding="utf-8")
+    events = [
+        {"type": "rfid", "timestamp": start + 20.0, "tag_id": "x", "card": "As", "reader_id": "b", "role": "board",
+         "seat": None, "board_index": 1, "raw_tag_id": "x"},
+        {"type": "rfid", "timestamp": start + 34.0, "tag_id": "", "card": "", "reader_id": "", "role": "seat",
+         "seat": 6, "board_index": None, "raw_tag_id": "", "kind": "leave", "observed_at": start + 30.0},
+        {"type": "audio", "timestamp": start + 9.5, "action": "call", "amount": 0, "raw_text": "コール"},
+    ]
+    (log_dir / f"{SID}.events.jsonl").write_text(
+        "\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n", encoding="utf-8")
+    audio_dir = log_dir / "audio" / SID
+    audio_dir.mkdir(parents=True)
+    (audio_dir / AUDIO).write_bytes(b"RIFF" + bytes(range(60)))
+    return log_dir
+
+
+class TestTimelineAndAudio:
+    def test_the_hand_shows_speech_board_cards_and_departures_in_order(self, with_speech, base):
+        status, d = _req(base, "GET", f"/api/sessions/{SID}/hands/1")
+        assert status == 200
+        items = d["timeline"]
+        assert [(i["t"], i["kind"]) for i in items] == [(5.0, "speech"), (8.0, "speech"), (20.0, "board"), (30.0, "leave")]
+        speech = items[0]
+        assert (speech["text"], speech["audio"], speech["parsed"], speech["lag"]) == ("コール", AUDIO, ["call"], 4.5)
+        assert items[1]["noise"] is True and items[1]["audio"] is None       # ファイルが無ければ再生しない
+        assert items[2]["text"] == "ボード 1 枚目 As" and items[3]["text"] == "席6 の札が離れた"
+
+    def test_audio_is_served_in_ranges_for_the_ipad(self, with_speech, base):
+        url = f"{base}/api/sessions/{SID}/audio/{AUDIO}"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            assert resp.status == 200 and resp.headers["Content-Type"] == "audio/wav"
+            assert resp.read().startswith(b"RIFF")
+        req = urllib.request.Request(url, headers={"Range": "bytes=0-3"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 206 and resp.read() == b"RIFF"
+            assert resp.headers["Content-Range"] == "bytes 0-3/64"
+        for bad in ("nope.wav", "..%2F..%2Fsecret.wav", "1790000008000.wav"):
+            assert _req(base, "GET", f"/api/sessions/{SID}/audio/{bad}")[0] == 404
+
+    def test_page_has_the_timeline_and_the_new_controls(self, base):
+        status, body = _req(base, "GET", "/")
+        assert status == 200
+        for fragment in ("発話と札の流れ", "記録を見る", "function playAudio", "function toggleConfirm", "自信なし"):
+            assert fragment in body
+
+
+class TestConfirmAndBlind:
+    def test_a_review_hand_passes_once_every_flagged_row_and_the_hand_are_confirmed(self, base, log_dir):
+        path = f"/api/sessions/{SID}/hands/2"
+        status, d = _req(base, "PUT", path, {"source": "captured-passthrough", "confirmed_rows": [4]})
+        assert status == 400 and "✓" in d["message"]              # ハンド全体の要確認が残っている
+        status, d = _req(base, "PUT", path, {"source": "captured-passthrough", "confirmed_rows": [3],
+                                             "confirmed_hand": True})
+        assert status == 400                                      # 要確認の行（4 行目 = index 4）を確かめていない
+        status, d = _req(base, "PUT", path, {"source": "captured-passthrough", "confirmed_rows": [4],
+                                             "confirmed_hand": True, "entry_sec": 37.26})
+        assert status == 200 and d["accuracy"]["all_match"] is True
+        gt = json.loads((log_dir / f"{SID}.ground_truth.json").read_text(encoding="utf-8"))
+        assert gt["hands"][0]["entry_sec"] == 37.3 and gt["hands"][0]["source"] == "captured-passthrough"
+
+    def test_unsure_rows_blind_and_entry_time_are_kept(self, base):
+        hand = {"board": ["As", "Kd", "7h"], "winner_seat": 5, "blind": True, "actions": [
+            {"seat": 6, "action": "call", "amount": 200},
+            {"seat": 4, "action": "call", "amount": 100, "unsure": True},
+            {"seat": 5, "action": "check", "amount": 0, "unsure": False},
+        ]}
+        status, d = _req(base, "PUT", f"/api/sessions/{SID}/hands/1",
+                         {"source": "manual-edit", "hand": hand, "entry_sec": 42.5})
+        assert status == 200, d
+        _, detail = _req(base, "GET", f"/api/sessions/{SID}/hands/1")
+        saved = detail["ground_truth"]
+        assert [a.get("unsure", False) for a in saved["actions"]] == [False, True, False]
+        assert saved["blind"] is True and saved["entry_sec"] == 42.5
+        _, listing = _req(base, "GET", f"/api/sessions/{SID}/hands")
+        assert listing["summary"]["blind"] == 1 and listing["summary"]["entry_sec_avg"] == 42.5
+        row = next(h for h in listing["hands"] if h["hand_id"] == 1)
+        assert row["ground_truth"]["blind"] is True
+
+    def test_a_blind_hand_starts_without_the_record(self, blind_base):
+        _, d2 = _req(blind_base, "GET", f"/api/sessions/{SID}/hands/2")
+        assert d2["blind"] is True and d2["legal"]["actions"] == []
+        assert d2["legal"]["next"]["actor_seat"] == 6                 # 手番の補完は使える
+        _, d1 = _req(blind_base, "GET", f"/api/sessions/{SID}/hands/1")
+        assert d1["blind"] is False and len(d1["legal"]["actions"]) == len(ACTIONS)
+        hand = {"board": ["As", "Kd", "7h"], "actions": [{"seat": 6, "action": "fold"}], "blind": True}
+        assert _req(blind_base, "PUT", f"/api/sessions/{SID}/hands/2", {"source": "manual-edit", "hand": hand})[0] == 200
+        _, again = _req(blind_base, "GET", f"/api/sessions/{SID}/hands/2")
+        assert again["blind"] is False                                 # 入れたあとは記録と並べて見る
+
+    def test_one_hand_in_five_is_blind(self):
+        picked = sum(is_blind("s", h) for h in range(1, 2001))
+        assert 320 <= picked <= 480
+        assert not any(is_blind("s", h, every=0) for h in range(1, 50))
+        assert is_blind("s", 7) == is_blind("s", 7)                   # ハンドごとに決まっている
