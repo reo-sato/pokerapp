@@ -222,13 +222,13 @@ class TestListen:
 
 # ――― bench: Whisper のスレッド数ごとの聞き取りの時間 ―――
 
-def _write_wav(path: Path, seconds: float = 0.5, rate: int = 16000, channels: int = 1) -> None:
+def _write_wav(path: Path, seconds: float = 0.5, rate: int = 16000, channels: int = 1, cycles: float = 100) -> None:
     import wave
 
     import numpy as np
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    samples = (np.sin(np.linspace(0, 100, int(rate * seconds) * channels)) * 4000).astype(np.int16)
+    samples = (np.sin(np.linspace(0, cycles, int(rate * seconds) * channels)) * 4000).astype(np.int16)
     with wave.open(str(path), "wb") as out:
         out.setnchannels(channels)
         out.setsampwidth(2)
@@ -243,7 +243,7 @@ def _session(log_dir: Path, sid: str, n: int, *, mtime: float) -> None:
     for i in range(n):
         name = f"{1000 + i}.wav"
         rows.append({"utterance_start_ts": float(i), "text": f"コール{i}", "audio_file": name})
-        _write_wav(log_dir / "audio" / sid / name)
+        _write_wav(log_dir / "audio" / sid / name, cycles=100 + i)          # 発話ごとに違う音
     rows.append({"utterance_start_ts": 90.0, "text": "", "audio_file": "9000.wav", "no_speech": True})
     rows.append({"utterance_start_ts": 91.0, "text": "チェック", "audio_file": "9100.wav"})   # 音声が無い
     path = log_dir / f"{sid}.transcripts.jsonl"
@@ -274,17 +274,42 @@ class _TimedTranscriber:
         return SimpleNamespace(text=text, confidence=0.9)
 
 
+class _JoinTranscriber:
+    """発話の音声 → 文の表を持つ偽の Whisper。まとめた音声は無音で区切って読み、「、」でつなぐ。"""
+
+    ready = True
+    gap = b"\x00\x00" * 16000
+
+    def __init__(self, clock: _Clock, texts: dict[bytes, str], drop_last: bool = False) -> None:
+        self.clock, self.texts, self.drop_last = clock, texts, drop_last
+
+    def recognize(self, pcm: bytes):
+        parts = pcm.split(self.gap)
+        self.clock.now += 3.0 + 0.3 * (len(parts) - 1)        # まとめても 30 秒の窓は 1 回ぶん
+        words = [self.texts.get(part, "?") for part in parts]
+        if self.drop_last and len(words) > 1:
+            words = words[:-1]
+        return SimpleNamespace(text="、".join(words), confidence=0.9)
+
+
 class TestBench:
-    def test_utterances_come_from_the_newest_session_with_audio(self, tmp_path):
+    def test_utterances_come_from_the_newest_sessions_with_audio(self, tmp_path):
         _session(tmp_path, "old", 3, mtime=1000.0)
         _session(tmp_path, "new", 30, mtime=2000.0)
-        sid, utterances = audio_check.pick_utterances(tmp_path, None, 10)
-        assert sid == "new" and len(utterances) == 10
+        label, utterances = audio_check.pick_utterances(tmp_path, None, 10)
+        assert label == "new" and len(utterances) == 10
         assert utterances[0][0] == "1000.wav" and utterances[1][0] == "1003.wav"     # 全体に散らす
         assert all(path.is_file() for _, path, _ in utterances)
-        sid, utterances = audio_check.pick_utterances(tmp_path, "ol", 10)
-        assert sid == "old" and [u[0] for u in utterances] == ["1000.wav", "1001.wav", "1002.wav"]
+        label, utterances = audio_check.pick_utterances(tmp_path, "ol", 10)
+        assert label == "old" and [u[0] for u in utterances] == ["1000.wav", "1001.wav", "1002.wav"]
         assert audio_check.pick_utterances(tmp_path / "none", None, 10) is None
+
+    def test_older_sessions_fill_up_the_count(self, tmp_path):
+        _session(tmp_path, "old", 4, mtime=1000.0)
+        _session(tmp_path, "new", 3, mtime=2000.0)
+        label, utterances = audio_check.pick_utterances(tmp_path, None, 5)
+        assert label == "new ほか 1 セッション" and len(utterances) == 5
+        assert [p.parent.name for _, p, _ in utterances] == ["new", "new", "new", "old", "old"]
 
     def test_wav_is_read_as_live_pcm(self, tmp_path):
         _write_wav(tmp_path / "a.wav", seconds=1.0)
@@ -302,37 +327,86 @@ class TestBench:
             lambda threads, beam: _TimedTranscriber(clock, threads, beam), clock=clock, log=lines.append,
         )
         assert [(r.threads, r.beam, round(r.median, 2)) for r in results] == [(4, 5, 3.5), (8, 5, 2.0), (8, 2, 1.7)]
-        assert "書き起こしは最初の設定と 0/4 同じ" in lines[2]
+        # 2 周目は逆の順で測る（温まる前・あとから重くなる影響を打ち消す）
+        assert [line.split("：")[0].split(": ")[0] for line in lines] == [
+            "  [1/6] スレッド 4・ビーム 5（1 周目）", "  [2/6] スレッド 8・ビーム 5（1 周目）",
+            "  [3/6] スレッド 8・ビーム 2（1 周目）", "  [4/6] スレッド 8・ビーム 2（2 周目）",
+            "  [5/6] スレッド 8・ビーム 5（2 周目）", "  [6/6] スレッド 4・ビーム 5（2 周目）",
+        ]
+        base = audio_check.base_result(results, 4, 5)
+        summary = audio_check.summary_lines(results, base)
+        assert "（基準）" in summary[0] and "1 周目 3.50・2 周目 3.50" in summary[0]
+        assert "書き起こしは基準と 0/4 同じ" in summary[2]
         advice = audio_check.recommend(results, current_threads=4, current_beam=5)
         assert "スレッド 8・ビーム 5" in advice[1] and "57%" in advice[1]            # ビーム 2 は書き起こしが違う
         assert advice[2].endswith("set_config.py audio.cpu_threads 8") and len(advice) == 3
 
-    def test_nothing_faster(self, tmp_path):
+    def test_a_cold_start_does_not_make_the_first_setting_look_slow(self, tmp_path):
+        """店舗 PC: 最初に測った設定だけが 0.6 秒ほど遅く出た（同じ設定が回によって 2.96 秒と 3.58 秒）。"""
+        _session(tmp_path, "s", 4, mtime=1.0)
+        _, utterances = audio_check.pick_utterances(tmp_path, None, 4)
+        clock = _Clock()
+        calls = {"n": 0}
+
+        class Same:
+            ready = True
+
+            def recognize(self, pcm):
+                calls["n"] += 1
+                clock.now += 3.0 + (2.0 if calls["n"] <= 3 else 0.0)     # 最初の 3 回だけ遅い（温まる前）
+                return SimpleNamespace(text="コール", confidence=0.9)
+
+        results = audio_check.run_bench(utterances, [(4, 5), (8, 5)], lambda t, b: Same(), clock=clock,
+                                        log=lambda _: None)
+        assert [r.median for r in results] == [3.0, 3.0]
+        assert audio_check.recommend(results, 4, 5)[-1].startswith("書き起こしを変えずにはっきり速くなる設定は")
+
+    def test_a_setting_faster_in_only_one_round_is_not_recommended(self, tmp_path):
         _session(tmp_path, "s", 2, mtime=1.0)
         _, utterances = audio_check.pick_utterances(tmp_path, None, 2)
+        base = audio_check.BenchResult(4, 5, rounds=[[3.0, 3.0], [3.0, 3.0]], texts=["a", "b"])
+        noisy = audio_check.BenchResult(8, 5, rounds=[[1.0, 1.0], [3.5, 3.5]], texts=["a", "b"])
+        assert "はっきり速くなる設定はありませんでした" in audio_check.recommend([base, noisy], 4, 5)[-1]
+
+    def test_joined_utterances(self, tmp_path):
+        _session(tmp_path, "s", 4, mtime=1.0)
+        _, utterances = audio_check.pick_utterances(tmp_path, None, 4)
+        texts = {audio_check.read_pcm16(path): text for _, path, text in utterances}
         clock = _Clock()
-        results = audio_check.run_bench(utterances, [(4, 5)], lambda t, b: _TimedTranscriber(clock, t, b),
-                                        clock=clock, log=lambda _: None)
-        assert audio_check.recommend(results, 4, 5)[-1] == "速くなる設定はありませんでした（いまのままで）。"
+        base = audio_check.BenchResult(4, 5, rounds=[[3.0] * 4], texts=[t for _, _, t in utterances])
+        joined = audio_check.run_joined(utterances, base, 2, lambda t, b: _JoinTranscriber(clock, texts),
+                                        clock=clock)
+        assert (joined["groups"], joined["same"]) == (2, 2)
+        assert (round(joined["joined_per_utterance"], 2), joined["single_per_utterance"]) == (1.65, 3.0)
+        lines = audio_check.joined_lines(joined)
+        assert lines == ["まとめて 2 発話ずつ聞き取ると: 1 発話あたり 1.65 秒（1 つずつだと 3.00 秒）・"
+                         "読んだアクションが 1 つずつと同じ 2/2 組"]
+        dropped = audio_check.run_joined(
+            utterances, base, 2, lambda t, b: _JoinTranscriber(clock, texts, drop_last=True), clock=clock)
+        assert dropped["same"] == 0 and len(dropped["examples"]) == 2
+        assert "違った組: 1 つずつ「コール0 ／ コール1」 → まとめて「コール0」" in audio_check.joined_lines(dropped)[1]
+        assert audio_check.run_joined(utterances[:1], base, 2, lambda t, b: None) is None
 
     def test_command_line(self, tmp_path, capsys, monkeypatch):
-        _session(tmp_path, "s", 3, mtime=1.0)
+        _session(tmp_path, "s", 4, mtime=1.0)
         made: list[tuple[int, int]] = []
+        clock = _Clock()
 
         def factory(model, language, vad):
             def make(threads, beam):
                 made.append((threads, beam))
-                return _TimedTranscriber(_Clock(), threads, beam)
+                return _TimedTranscriber(clock, threads, beam)
             return make
 
         monkeypatch.setattr(audio_check, "_make_whisper", factory)
         config = tmp_path / "config.json"
-        config.write_text(json.dumps({"audio": {"beam_size": 5, "cpu_threads": 0}}), encoding="utf-8")
-        args = ["--config", str(config), "bench", "--log-dir", str(tmp_path), "--threads", "4,8"]
+        config.write_text(json.dumps({"audio": {"beam_size": 5, "cpu_threads": 8}}), encoding="utf-8")
+        args = ["--config", str(config), "bench", "--log-dir", str(tmp_path), "--threads", "16", "--joined", "2"]
         assert audio_check.main(args) == 0
-        assert made == [(4, 5), (8, 5)]
+        assert made == [(8, 5), (16, 5), (16, 5), (8, 5), (8, 5)]     # いまの設定（8）も必ず測る + まとめる試し
         out = capsys.readouterr().out
-        assert "計測: セッション s の発話 3 個" in out and "スレッド 8・ビーム 5: 1 発話 中央値" in out
+        assert "計測: セッション s の発話 4 個" in out and "スレッド 16・ビーム 5: 1 発話 中央値" in out
+        assert "まとめて 2 発話ずつ聞き取ると" in out
 
     def test_no_saved_audio(self, tmp_path, capsys):
         config = tmp_path / "config.json"

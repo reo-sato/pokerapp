@@ -20,6 +20,7 @@ config（`audio.device_id` / `sample_rate` / `whisper_model` / `language`）と�
   python tools/audio_check.py listen --device 1 --model small
   python tools/audio_check.py bench                 # スレッド 4 と 8 を比べる
   python tools/audio_check.py bench --threads 4,8,16 --count 20
+  python tools/audio_check.py bench --threads 4,8 --joined 3   # 発話を 3 つずつまとめて聞き取る試しも
 """
 from __future__ import annotations
 
@@ -412,25 +413,33 @@ Utterance = tuple[str, Path, str]          # (音声のファイル名, パス, 
 
 
 def pick_utterances(log_dir: Path, session: Optional[str], count: int) -> Optional[tuple[str, list[Utterance]]]:
-    """測るのに使う発話: 音声が保存されていて聞き取りに回した（声だった）発話を、いちばん新しいセッション
-    （`session` があればそのセッション）から、全体に散らばるように `count` 個。(セッション ID, 発話の列)。"""
+    """測るのに使う発話: 音声が保存されていて聞き取りに回した（声だった）発話を、新しいセッションから順に
+    `count` 個たまるまで集め（`session` があればそのセッションだけ）、全体に散らばるように `count` 個選ぶ。
+    (セッションの表示, 発話の列)。"""
     found = []
     for transcripts in sorted(log_dir.glob("*.transcripts.jsonl")):
         sid = transcripts.name[: -len(".transcripts.jsonl")]
         if session and not sid.startswith(session):
             continue
         audio_dir = log_dir / "audio" / sid
-        rows = [r for r in _read_jsonl(transcripts)
+        rows = [(r["audio_file"], audio_dir / r["audio_file"], r["text"]) for r in _read_jsonl(transcripts)
                 if r.get("audio_file") and not r.get("no_speech") and (r.get("text") or "").strip()
                 and (audio_dir / r["audio_file"]).is_file()]
         if rows:
-            found.append((transcripts.stat().st_mtime, sid, audio_dir, rows))
+            found.append((transcripts.stat().st_mtime, sid, rows))
     if not found:
         return None
-    _, sid, audio_dir, rows = max(found, key=lambda x: x[0])
-    step = max(1, len(rows) // max(1, count))
-    chosen = rows[::step][:count]
-    return sid, [(r["audio_file"], audio_dir / r["audio_file"], r["text"]) for r in chosen]
+    found.sort(key=lambda x: -x[0])
+    pool: list[Utterance] = []
+    used: list[str] = []
+    for _, sid, rows in found:
+        pool.extend(rows)
+        used.append(sid[:8])
+        if len(pool) >= count:
+            break
+    step = max(1, len(pool) // max(1, count))
+    label = used[0] + (f" ほか {len(used) - 1} セッション" if len(used) > 1 else "")
+    return label, pool[::step][:count]
 
 
 def read_pcm16(path: Path, rate: int = 16000) -> bytes:
@@ -455,60 +464,110 @@ def read_pcm16(path: Path, rate: int = 16000) -> bytes:
 class BenchResult:
     threads: int
     beam: int
-    load_sec: float
-    times: list[float]
-    texts: list[str]
+    rounds: list[list[float]] = field(default_factory=list)   # 周ごとの、発話ごとの時間
+    texts: list[str] = field(default_factory=list)            # 1 周目の書き起こし
+    stable: bool = True                                       # 周によって書き起こしが変わらなかった
+
+    @property
+    def times(self) -> list[float]:
+        return [t for r in self.rounds for t in r]
 
     @property
     def median(self) -> float:
         return statistics.median(self.times)
 
+    @property
+    def round_medians(self) -> list[float]:
+        return [statistics.median(r) for r in self.rounds]
+
+    def per_utterance(self) -> list[float]:
+        """発話ごとの時間（周の中央値）。"""
+        return [statistics.median(ts) for ts in zip(*self.rounds)]
+
+
+# 最初のモデルは、測る前にこの数の発話で空回しする（PC が温まる前は遅い: 店舗 PC で最初に測った設定だけが
+# 0.6 秒ほど遅く出た）。2 つ目からは 1 発話。
+_WARMUP_FIRST = 3
+
 
 def run_bench(
     utterances: list[Utterance], settings: list[tuple[int, int]],
     make_transcriber: Callable[[int, int], object], clock: Callable[[], float] = time.perf_counter,
-    log: Callable[[str], None] = print,
+    log: Callable[[str], None] = print, rounds: int = 2,
 ) -> list[BenchResult]:
-    """設定（スレッド数, ビーム幅）ごとにモデルを読み込み、同じ発話を聞き取って時間を測る。"""
+    """設定（スレッド数, ビーム幅）ごとにモデルを読み込み、同じ発話を聞き取って時間を測る。
+
+    順番の影響（温まる前・あとから重くなる）を打ち消すため、`rounds` 周のうち 2 周目は逆の順で測る。
+    """
     audio = [read_pcm16(path) for _, path, _ in utterances]
-    results: list[BenchResult] = []
-    for threads, beam in settings:
-        started = clock()
-        transcriber = make_transcriber(threads, beam)
-        load_sec = clock() - started
-        if not getattr(transcriber, "ready", True):
-            log(f"  スレッド {threads}・ビーム {beam}: モデルを読み込めませんでした"
-                f"（{getattr(transcriber, 'load_error', '')}）")
-            continue
-        transcriber.recognize(audio[0])            # 1 回目は準備の時間が入るので数えない
-        times, texts = [], []
-        for pcm in audio:
-            started = clock()
-            result = transcriber.recognize(pcm)
-            times.append(clock() - started)
-            texts.append(result.text)
-        result = BenchResult(threads, beam, load_sec, times, texts)
-        results.append(result)
-        same = ""
-        if results[0] is not result:
-            agree = sum(a == b for a, b in zip(results[0].texts, texts))
-            same = f" — 書き起こしは最初の設定と {agree}/{len(texts)} 同じ"
-        log(f"  スレッド {threads}・ビーム {beam}: 1 発話 中央値 {result.median:.2f} 秒・最大 {max(times):.2f} 秒"
-            f"（読み込み {load_sec:.0f} 秒）{same}")
-    return results
+    results = {setting: BenchResult(*setting) for setting in settings}
+    broken: set[tuple[int, int]] = set()
+    total = rounds * len(settings)
+    step = 0
+    warmup = _WARMUP_FIRST
+    for r in range(rounds):
+        order = settings if r % 2 == 0 else list(reversed(settings))
+        for setting in order:
+            step += 1
+            if setting in broken:
+                continue
+            transcriber = make_transcriber(*setting)
+            if not getattr(transcriber, "ready", True):
+                log(f"  スレッド {setting[0]}・ビーム {setting[1]}: モデルを読み込めませんでした"
+                    f"（{getattr(transcriber, 'load_error', '')}）")
+                broken.add(setting)
+                continue
+            for pcm in audio[:warmup]:
+                transcriber.recognize(pcm)          # 空回し（数えない）
+            warmup = 1
+            times, texts = [], []
+            for pcm in audio:
+                started = clock()
+                result = transcriber.recognize(pcm)
+                times.append(clock() - started)
+                texts.append(result.text)
+            res = results[setting]
+            res.rounds.append(times)
+            if not res.texts:
+                res.texts = texts
+            elif texts != res.texts:
+                res.stable = False
+            log(f"  [{step}/{total}] スレッド {setting[0]}・ビーム {setting[1]}（{r + 1} 周目）: "
+                f"中央値 {statistics.median(times):.2f} 秒")
+    return [results[s] for s in settings if results[s].rounds]
+
+
+def summary_lines(results: list[BenchResult], base: BenchResult) -> list[str]:
+    lines = []
+    for r in results:
+        rounds = "・".join(f"{i + 1} 周目 {m:.2f}" for i, m in enumerate(r.round_medians))
+        agree = sum(a == b for a, b in zip(base.texts, r.texts))
+        same = "（基準）" if r is base else f" — 書き起こしは基準と {agree}/{len(r.texts)} 同じ"
+        unstable = "（周によって書き起こしが変わった）" if not r.stable else ""
+        lines.append(f"  スレッド {r.threads}・ビーム {r.beam}: 1 発話 中央値 {r.median:.2f} 秒（{rounds}）・"
+                     f"最大 {max(r.times):.2f} 秒{same}{unstable}")
+    return lines
+
+
+def base_result(results: list[BenchResult], current_threads: int, current_beam: int) -> BenchResult:
+    return next((r for r in results if (r.threads, r.beam) == (current_threads, current_beam)), results[0])
 
 
 def recommend(results: list[BenchResult], current_threads: int, current_beam: int) -> list[str]:
-    """いまの設定より 1 割以上速く、書き起こしが同じ設定があれば、それを config に入れるコマンドを出す。"""
+    """いまの設定より 1 割以上速く（どの周でも速く）、書き起こしが同じ設定があれば、config に入れるコマンドを出す。"""
     if not results:
         return []
-    base = next((r for r in results if (r.threads, r.beam) == (current_threads, current_beam)), results[0])
-    same = [r for r in results if r.texts == base.texts]
-    best = min(same, key=lambda r: r.median)
+    base = base_result(results, current_threads, current_beam)
     lines = [f"いまの設定（スレッド {base.threads}・ビーム {base.beam}）: 1 発話 中央値 {base.median:.2f} 秒"]
-    if best is base or best.median > 0.9 * base.median:
-        lines.append("速くなる設定はありませんでした（いまのままで）。")
+    faster = [
+        r for r in results
+        if r is not base and r.stable and r.texts == base.texts and r.median <= 0.9 * base.median
+        and all(a < b for a, b in zip(r.round_medians, base.round_medians))
+    ]
+    if not faster:
+        lines.append("書き起こしを変えずにはっきり速くなる設定はありませんでした（いまのままで）。")
         return lines
+    best = min(faster, key=lambda r: r.median)
     lines.append(f"いちばん速いのはスレッド {best.threads}・ビーム {best.beam}（中央値 {best.median:.2f} 秒 = "
                  f"いまの {best.median / base.median * 100:.0f}%、書き起こしは同じ）。config に入れるなら:")
     tool = _ROOT / "tools" / "set_config.py"
@@ -516,6 +575,67 @@ def recommend(results: list[BenchResult], current_threads: int, current_beam: in
         lines.append(f"  {sys.executable} {tool} audio.cpu_threads {best.threads}")
     if best.beam != base.beam:
         lines.append(f"  {sys.executable} {tool} audio.beam_size {best.beam}")
+    return lines
+
+
+# まとめて聞き取るときに発話の間に入れる無音（秒）
+_JOIN_GAP_SEC = 1.0
+
+
+def _action_list(text: str) -> list[tuple[str, int]]:
+    from audio.recognizer import parse_actions
+
+    return [(e.action, e.amount) for e in parse_actions(text)]
+
+
+def run_joined(
+    utterances: list[Utterance], base: BenchResult, group: int, make_transcriber: Callable[[int, int], object],
+    clock: Callable[[], float] = time.perf_counter, rate: int = 16000,
+) -> Optional[dict]:
+    """待っている発話を `group` 個ずつ（間に 1 秒の無音を入れて）まとめて 1 回で聞き取ったときの時間と、
+    読んだアクションが 1 つずつ聞き取ったときと同じかを測る（Whisper は短い発話でも 30 秒の窓を処理するので、
+    まとめれば 1 回ぶんで済む）。"""
+    if group < 2 or len(utterances) < group:
+        return None
+    transcriber = make_transcriber(base.threads, base.beam)
+    if not getattr(transcriber, "ready", True):
+        return None
+    audio = [read_pcm16(path) for _, path, _ in utterances]
+    transcriber.recognize(audio[0])
+    gap = b"\x00\x00" * int(rate * _JOIN_GAP_SEC)
+    single = base.per_utterance()
+    joined_times, single_times, same, groups = [], [], 0, 0
+    examples = []
+    for i in range(0, len(audio) - group + 1, group):
+        idx = list(range(i, i + group))
+        started = clock()
+        text = transcriber.recognize(gap.join(audio[j] for j in idx)).text
+        joined_times.append(clock() - started)
+        single_times.append(sum(single[j] for j in idx))
+        expected = [a for j in idx for a in _action_list(base.texts[j])]
+        got = _action_list(text)
+        groups += 1
+        if got == expected:
+            same += 1
+        elif len(examples) < 3:
+            examples.append((" ／ ".join(base.texts[j] for j in idx), text))
+    return {
+        "group": group, "groups": groups, "same": same, "examples": examples,
+        "joined_per_utterance": statistics.median(joined_times) / group,
+        "single_per_utterance": statistics.median(single_times) / group,
+    }
+
+
+def joined_lines(joined: Optional[dict]) -> list[str]:
+    if not joined:
+        return []
+    lines = [
+        f"まとめて {joined['group']} 発話ずつ聞き取ると: 1 発話あたり {joined['joined_per_utterance']:.2f} 秒"
+        f"（1 つずつだと {joined['single_per_utterance']:.2f} 秒）・読んだアクションが 1 つずつと同じ"
+        f" {joined['same']}/{joined['groups']} 組",
+    ]
+    for single, joined_text in joined["examples"]:
+        lines.append(f"  違った組: 1 つずつ「{single}」 → まとめて「{joined_text}」")
     return lines
 
 
@@ -541,21 +661,35 @@ def _cmd_bench(args: argparse.Namespace, make_transcriber=None) -> int:
         print(f"保存した発話の音声がありません（{log_dir / 'audio'}）。config の audio.save_audio を true にして"
               "記録したセッションが要ります。")
         return 1
-    sid, utterances = picked
+    label, utterances = picked
     current_threads = int(cfg.get("cpu_threads", 0) or 0) or 4
     current_beam = int(cfg.get("beam_size", 5))
     threads = _parse_ints(args.threads) if args.threads else sorted({current_threads, 4, default_threads()})
     beams = _parse_ints(args.beam) if args.beam else [current_beam]
     settings = [(t, b) for b in beams for t in threads]
+    if (current_threads, current_beam) not in settings:
+        settings.insert(0, (current_threads, current_beam))       # いまの設定を基準として必ず測る
     model = args.model or cfg.get("whisper_model", "medium")
-    print(f"計測: セッション {sid[:8]} の発話 {len(utterances)} 個・モデル {model}・この PC の論理コア {os.cpu_count()}")
-    print("（本番のロガーを閉じてから。設定ごとにモデルを読み込むので数分かかります）")
+    print(f"計測: セッション {label} の発話 {len(utterances)} 個・モデル {model}・この PC の論理コア {os.cpu_count()}")
+    print(f"（本番のロガーを閉じてから。設定ごとにモデルを読み込み、順番を入れ替えて {args.rounds} 周測ります）")
     make = make_transcriber or _make_whisper(model, cfg.get("language", "ja"), float(cfg.get("vad_threshold", 0.5)))
-    results = run_bench(utterances, settings, make)
+    results = run_bench(utterances, settings, make, rounds=args.rounds)
+    if not results:
+        return 1
+    base = base_result(results, current_threads, current_beam)
+    print()
+    for line in summary_lines(results, base):
+        print(line)
     print()
     for line in recommend(results, current_threads, current_beam):
         print(line)
-    return 0 if results else 1
+    if args.joined:
+        joined = run_joined(utterances, base, args.joined, make)
+        if joined:
+            print()
+            for line in joined_lines(joined):
+                print(line)
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -587,10 +721,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_bench.add_argument("--threads", default=None,
                          help="比べるスレッド数（カンマ区切り。既定: 4 と この PC の物理コア数の見積もり）")
     p_bench.add_argument("--beam", default=None, help="比べるビーム幅（カンマ区切り。既定: config の audio.beam_size）")
-    p_bench.add_argument("--count", type=int, default=10, help="使う発話の数（既定 10）")
-    p_bench.add_argument("--session", default=None, help="セッション ID（先頭でよい。既定: いちばん新しい）")
+    p_bench.add_argument("--count", type=int, default=10, help="使う発話の数（既定 10。足りなければ前のセッションからも）")
+    p_bench.add_argument("--session", default=None, help="セッション ID（先頭でよい。既定: 新しいものから）")
     p_bench.add_argument("--model", default=None, help="音声認識モデル（既定: config の audio.whisper_model）")
     p_bench.add_argument("--log-dir", default=None, help="logs フォルダ（既定: アプリの logs/）")
+    p_bench.add_argument("--rounds", type=int, default=2, help="何周測るか（2 周目は逆の順。既定 2）")
+    p_bench.add_argument("--joined", type=int, default=0,
+                         help="発話を N 個ずつまとめて 1 回で聞き取る試しもする（いまの設定で。例 3）")
     p_bench.set_defaults(func=_cmd_bench)
     return parser
 
