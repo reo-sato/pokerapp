@@ -27,6 +27,7 @@ ROOT = Path(__file__).parent.parent
 CMD_FILES = [
     "install.cmd", "update.cmd", "uninstall.cmd",
     "start_logger.cmd", "start_monitor.cmd", "start_viewer.cmd", "start_ledger.cmd", "rfid_check.cmd",
+    "start_truth.cmd",
 ]
 PS1_FILES = ["installer/install.ps1", "installer/bootstrap.ps1"]
 
@@ -91,7 +92,7 @@ class TestLaunchers:
 
     def test_launchers_reference_existing_entry_points(self):
         for rel in ("start_logger.cmd", "start_monitor.cmd", "start_viewer.cmd", "start_ledger.cmd",
-                    "rfid_check.cmd"):
+                    "rfid_check.cmd", "start_truth.cmd"):
             text = (ROOT / rel).read_text(encoding="ascii")
             assert r"venv\Scripts\python.exe" in text, rel
             for m in re.finditer(r'^"venv\\Scripts\\python\.exe" (\S+)', text, re.M):
@@ -106,6 +107,11 @@ class TestLaunchers:
     def test_monitor_launcher_binds_lan(self):
         text = (ROOT / "start_monitor.cmd").read_text(encoding="ascii")
         assert "--host 0.0.0.0" in text and "--port 8790" in text
+
+    def test_truth_launcher_binds_lan(self):
+        """真のアクション入力は iPad から使う（卓モニタと同じ LAN 公開、別ポート 8791）。"""
+        text = (ROOT / "start_truth.cmd").read_text(encoding="ascii")
+        assert "tools\\ground_truth_ui.py --host 0.0.0.0 --port 8791" in text
 
     def test_viewer_launcher_serves_customers_on_the_lan(self):
         """お客さんのスマホから開く（ADR-0059）。config を書き換えずに LAN へ出す。"""
