@@ -320,7 +320,7 @@ def _kana_amount_to_kanji(norm: str, keyword_end: int) -> str:
 
 # 書き起こしゆれとして足した短い語は、ほかの言葉の一部として現れやすい（「なべとなって」の「ベト」、
 # 「ゴールド」の「ゴール」）。前後が区切り・数・別のアクションの語のときだけアクションとみなす（ADR-0063）。
-_BOUNDARY_KEYWORDS = frozenset({"ベト", "ゴール", "ホールド", "ベッド"})
+_BOUNDARY_KEYWORDS = frozenset({"ベト", "ゴール", "ホールド", "ベッド", "オーリン", "ソーダウン"})
 
 
 def _keyword_matches(norm: str) -> list[tuple[int, int, str]]:
@@ -404,7 +404,7 @@ def is_implausibly_long(text: str, audio_sec: float) -> bool:
 # 「7ヒット」のような発話や、違う数が並ぶ発話（「5 6 7」）はアクションにしない。
 _AMOUNT_TOKEN = re.compile(r"(?:\d[\d,]*(?:\.\d+)?[万千百Kk]?)+|[一二三四五六七八九〇十百千万]+")
 _AMOUNT_ONLY_REST = re.compile(
-    r"(?:[\s、。・!?,.ー〜~]|点|テン|ポイント|デス|デース|ニナリマス|ハイ|エー|エット|エート|エ|アー|ア"
+    r"(?:[\s、。・!?,.ー〜~]|点|円|エン|テン|ポイント|デス|デース|ニナリマス|ハイ|エー|エット|エート|エ|アー|ア"
     r"|ジャア|ジャ|デハ|アクション|ネ|ヨ)*"
 )
 # 数字だけの部分を区切る文字（空白では区切らない: 「シート3 600点」「5 6 7」を 1 まとまりに見る）
@@ -553,13 +553,61 @@ _QUESTION_ENDINGS = ("デスカ", "デショウカ", "マスカ", "デスヨネ"
 _TRAILING_PUNCTUATION = "？?。、！!．.・ 　…"
 
 
-def is_question(text: str) -> bool:
-    """発話が確認型（疑問形）か。アクションにしない（仕様 FR-17）。"""
-    nfkc = unicodedata.normalize("NFKC", text).strip()
+_SENTENCE_SPLIT = re.compile(r"(?<=[?？!！。])")
+
+
+def _is_question_sentence(sentence: str) -> bool:
+    nfkc = unicodedata.normalize("NFKC", sentence).strip()
     if nfkc.endswith("?"):
         return True
     norm = _to_katakana(nfkc).rstrip(_TRAILING_PUNCTUATION)
     return norm.endswith(_QUESTION_ENDINGS)
+
+
+def _drop_question_sentences(text: str) -> str:
+    """確認型（疑問形）の文だけを除く。後ろに続けて言った確定の発話は読む（店舗 2026-09-27:
+    「600だけもう一回言ってもらっていいですか? 600」の最後の「600」が、文全体が疑問形とみなされて落ちていた）。"""
+    sentences = [s for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+    return "".join(s for s in sentences if not _is_question_sentence(s)).strip()
+
+
+def is_question(text: str) -> bool:
+    """発話が確認型（疑問形）だけか。アクションにしない（仕様 FR-17）。疑問形の文のあとに別の文が続けば False。"""
+    return bool(text.strip()) and not _drop_question_sentences(text)
+
+
+# 発話全体がこの語だけのときの書き起こしゆれ（店舗の実測 2026-09-27。どれも「チェック」と「コール」の間など、
+# 額が言われるはずの所で出た）。単語としてはほかの意味もあるので、発話全体が一致するときだけ読み替える。
+_WHOLE_UTTERANCE_ALIASES = {
+    "シーン": "千",        # 「千（セン）」（2 回。「セン」は既に千として読める）
+    "参戦": "3千",         # 「三千（サンゼン）」
+    "発表": "8百",         # 「八百（ハッピャク）」
+}
+
+# 会話の中にアクションの語が紛れているだけの発話（店舗 2026-09-27:「結構コールとか迷路に発音してますよね」を
+# コールとして記録した）。アクションの語・額・席・ポットの用語・つなぎの言葉を除いても長い言葉が残り、それが
+# 発話の大半なら、ディーラーのアクションの読み上げではないとみる。
+_CONVERSATION_MIN_CHARS = 8
+_CONVERSATION_MIN_RATIO = 0.6
+_TABLE_WORDS = re.compile(
+    r"シート|セキ|席|番|フロップ|ターン|リバー|ラストカード|ポット|サイド|メイン|ボタン|アクション|オッケー|"
+    r"ハイ|エート|エット|エー|アー|デス|マス|ネ|ヨ|点|テン|ポイント|ニナリマス|ジャア|デハ|デ|ハ"
+)
+_NON_TEXT = re.compile(r"[\s、。,.・!?！？ー〜~…「」()（）]+")
+
+
+def _is_conversation(norm: str, keywords: list[tuple[int, int, str]]) -> bool:
+    from core.positions import _ALIAS_PATTERN
+
+    chars = list(norm)
+    for pos, length, _ in keywords:
+        chars[pos:pos + length] = [" "] * length
+    rest = "".join(chars)
+    rest = _AMOUNT_TOKEN.sub(" ", _ALIAS_PATTERN.sub(" ", _SEAT_PATTERN.sub(" ", rest)))
+    rest = _TABLE_WORDS.sub(" ", rest)
+    residue = _NON_TEXT.sub("", rest)
+    total = len(_NON_TEXT.sub("", norm))
+    return len(residue) >= _CONVERSATION_MIN_CHARS and len(residue) >= _CONVERSATION_MIN_RATIO * total
 
 
 def parse_actions(
@@ -575,11 +623,20 @@ def parse_actions(
     それぞれを `parse_action` で読む（切り分けた各アクションには複数アクションの flag は付かない）。
     キーワードが 1 つ、または多すぎる（繰り返しの幻聴）ときは従来どおり `parse_action` 1 件。
     """
-    if is_question(text):
+    text = _drop_question_sentences(text)
+    if not text:
         return []
+    alias = _WHOLE_UTTERANCE_ALIASES.get(
+        _to_katakana(unicodedata.normalize("NFKC", text)).strip(_TRAILING_PUNCTUATION)
+    )
+    if alias is not None:
+        text = alias
     nfkc = unicodedata.normalize("NFKC", text)
     norm = _to_katakana(nfkc)
     keywords = _distinct_keywords(_keyword_matches(norm))
+    if keywords and _is_conversation(norm, keywords):
+        logger.debug("会話の中のアクションの語とみなして読みません: %r", text)
+        return []
     if not keywords:
         # アクションの語が無くても、額だけを言っていればベットかレイズ（「600点」）
         event = parse_amount_only(text, confidence=confidence, utterance_start_ts=utterance_start_ts)

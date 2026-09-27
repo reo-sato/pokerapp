@@ -88,6 +88,8 @@ def describe_event(event: Optional[AudioEvent]) -> str:
         from core.showdown import HAND_NAMES_JA
 
         action = f"ハンド終了（{HAND_NAMES_JA.get(event.hand_name, event.hand_name)}）"
+    elif event.action == "heads_up":
+        action = "ヘッズアップ（残り 2 人）"
     else:
         action = event.action
     parts = [action]

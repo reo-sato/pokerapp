@@ -128,7 +128,7 @@ SILENT_MIC_SEC = 60.0
 # フォールドにする（勝った人が先に札を投げても、降りた人の方が先になる）。
 SPOKEN_FOLD_WINDOW_SEC = 15.0
 # 札の離脱で組み直す（取り消す）ときに入力として残す音声のアクション
-_REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin"})
+_REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin", "heads_up"})
 
 # review の理由にしない parse flag（読み方の情報。「数字だけ」「チェックアラウンド」は運用どおりの言い方）
 _INFO_PARSE_FLAGS = frozenset({"amount_only", "check_around"})
@@ -492,7 +492,31 @@ class IntegrationThread(threading.Thread):
             self._handle_audio_event(event)
             self._expire_buffers()
 
+        self._close_open_hand_at_stop()
         logger.info("IntegrationThread stopped")
+
+    def _close_open_hand_at_stop(self) -> None:
+        """終了（`q`）のとき、届いている発話を反映してから確定していないハンドを保存する。
+
+        店舗 2026-09-27: ハンドの途中で終了して 2 ハンドが記録に残らなかった。次の手札が配られたときと
+        同じ規則で閉じる（ショーダウンなら手札で判定、決まらなければ仮の勝者 + 要確認）。終了も記録に残す
+        （replay で同じハンドが保存される）。
+        """
+        try:
+            self._drain_rfid_queue()
+            while True:
+                try:
+                    event = self._audio_queue.get_nowait()
+                except queue.Empty:
+                    break
+                self._record(event)
+                self._handle_audio_event(event)
+            if self._hand_open and self._hand_in_play():
+                end = AudioEvent(action="session_end", amount=0, timestamp=self._clock(), raw_text="（終了）")
+                self._record(end)
+                self._handle_audio_event(end)
+        except Exception:  # noqa: BLE001 — 終了の途中の失敗で止まらない（記録は events.jsonl に残っている）
+            logger.exception("終了時にハンドを保存できませんでした")
 
     # ――― バッファ管理 ―――
 
@@ -878,7 +902,23 @@ class IntegrationThread(threading.Thread):
                 # 札の離脱を最後のフォールドとみていたが、ショーダウン（札を前に出した）だった
                 self._showdown_after_foldout(_spoken_at(event), "「ショーダウン」と聞こえたので")
                 return
+            if (self._rules_aware and self._hand_open and not self._betting_over()
+                    and len(self._remaining_seats()) >= 2):
+                # ディーラーがショーダウンと言った = ベッティングは終わっている。閉じていないラウンドは
+                # 聞き取れなかったとみて閉じる（このあと札を前に出してもフォールドにしない, 店舗 2026-09-27）
+                self._close_betting(_spoken_at(event))
+                self._notice("「ショーダウン」— 閉じていないベッティングは聞き取れなかったとみて閉じました（要確認）")
             gs.advance_street(Street.SHOWDOWN)
+            return
+
+        if action == "heads_up":
+            self._handle_heads_up(event)
+            return
+
+        if action == "session_end":
+            # 終了（q）: 確定していないハンドを次の配布と同じ規則で閉じて保存する
+            if self._hand_open and self._hand_in_play():
+                self._close_hand_for_next_deal(ended_ts=event.timestamp, when="終了しました")
             return
 
         if action == "winner":
@@ -1439,6 +1479,35 @@ class IntegrationThread(threading.Thread):
         self._last_action_at = dep["t"]
         self._prune_run_candidates(seat)
 
+    def _handle_heads_up(self, event: AudioEvent) -> None:
+        """「ヘッズアップ」= 残りが 2 人（ディーラーが次のストリートへ進む前に言う, 店舗 2026-09-27）。
+
+        2 人残っていて手番の人がベットに向き合っていれば、その人は降りずに次へ進んだ = コールした（レイズなら
+        額が言われる）。言われなかった「コール」をこれで補い、要確認にしない。次のストリートの札で先に閉じた
+        ラウンドの補ったコールも裏付ける。3 人以上残っていればフォールドの聞き落としを知らせる。
+        """
+        if not (self._rules_aware and self._hand_open):
+            return
+        gs = self._game_state
+        spoken = _spoken_at(event)
+        self._apply_pending_spoken_fold(spoken, "spoken_fold_before_heads_up")
+        remaining = self._remaining_seats()
+        if len(remaining) > 2:
+            self._hand_needs_review = True
+            self._notice(f"「{event.raw_text}」— まだ {len(remaining)} 人残っています（フォールドの聞き落とし？ 要確認）")
+            return
+        if len(remaining) < 2:
+            return
+        ctx = gs.legal_context()
+        if ctx.actor_seat is not None and ctx.amount_to_call > 0:
+            self._imply_action(ctx.actor_seat, ctx, spoken, "heads_up_call", confirmed=True)
+            return
+        last = self._current_actions[-1] if self._current_actions else None
+        if (last is not None and last.street != gs.street and last.actor_source == "implied"
+                and last.action == "call" and last.needs_review):
+            last.needs_review = False
+            last.reason = "+".join(r for r in (last.reason, "heads_up") if r)
+
     def _last_announced_action(self) -> Optional[str]:
         """いまのストリートでディーラーが最後に言ったアクション（無ければ None）。"""
         street = self._game_state.street
@@ -1449,18 +1518,19 @@ class IntegrationThread(threading.Thread):
                 return record.action
         return None
 
-    def _imply_action(self, seat: int, ctx: LegalContext, t: float, reason: str) -> None:
+    def _imply_action(self, seat: int, ctx: LegalContext, t: float, reason: str,
+                      confirmed: bool = False) -> None:
         """言われなかったアクション（チェック / コール）を入れる。
 
         直前に言われたアクションと同じなら **無言の連続**（同じアクションの 2 回目以降は言わない =
         店舗のディーラー, 2026-09-26）で、記録どおり（要確認にしない）。違えば聞き取れなかった
-        とみて要確認。
+        とみて要確認。`confirmed` はディーラーの別の言葉で裏付けられた場合（「ヘッズアップ」）。
         """
         gs = self._game_state
         action = "check" if ctx.amount_to_call == 0 else "call"
         amount = 0 if action == "check" else ctx.amount_to_call
         street = gs.street
-        repeat = self._rfid_folds and self._last_announced_action() == action
+        repeat = confirmed or (self._rfid_folds and self._last_announced_action() == action)
         gs.apply_action(seat, action, amount)
         self._append_rfid_record(ActionRecord(
             hand_id=gs.hand_id,
@@ -1477,7 +1547,7 @@ class IntegrationThread(threading.Thread):
             confidence=SYNTH_FOLD_CONFIDENCE,
             position=self._position_of(seat),
             actor_source="implied",
-            reason=("silent_repeat+" + reason) if repeat else reason,
+            reason=(reason if confirmed else ("silent_repeat+" + reason) if repeat else reason),
             apply_ok=True,
         ))
         self._last_action_at = t
@@ -2215,16 +2285,18 @@ class IntegrationThread(threading.Thread):
         self._deal_at = None
         self._deal_detected_at = None
 
-    def _close_hand_for_next_deal(self) -> None:
-        """次の手札が配られたのに確定していないハンドを、確定してから次へ進む。"""
+    def _close_hand_for_next_deal(self, ended_ts: Optional[float] = None,
+                                  when: str = "次の手札が配られました") -> None:
+        """次の手札が配られた（または終了した）のに確定していないハンドを、確定してから次へ進む。"""
+        ended = self._deal_at if ended_ts is None else ended_ts
         if self._rfid_folds and self._hand_open:
             self._close_rounds_at_hand_end()
-        if self._finish_by_rules(ended_ts=self._deal_at):
+        if self._finish_by_rules(ended_ts=ended):
             return
         gs = self._game_state
         remaining = self._remaining_seats()
         if len(remaining) == 1:   # 全員フォールド（勝者の自動判定が off でも決まっている）
-            self._finalize_hand(remaining[0], winner_source="fold", ended_ts=self._deal_at)
+            self._finalize_hand(remaining[0], winner_source="fold", ended_ts=ended)
             return
         winner = self._fallback_winner_seat()
         if winner is None:
@@ -2232,10 +2304,10 @@ class IntegrationThread(threading.Thread):
             winner = remaining[0] if remaining else min(gs.get_stacks())
         self._hand_needs_review = True
         self._notice(
-            f"ハンド {gs.hand_id} の勝者が決まらないまま次の手札が配られました — "
+            f"ハンド {gs.hand_id} の勝者が決まらないまま{when} — "
             f"席{winner} を仮の勝者にします（要確認）"
         )
-        self._finalize_hand(winner, winner_source="estimated", ended_ts=self._deal_at)
+        self._finalize_hand(winner, winner_source="estimated", ended_ts=ended)
 
     def _close_rounds_at_hand_end(self) -> None:
         """次の配布の時点で、ボードの札まで進めていないラウンドを閉じる。ボードが 5 枚ならリバーも閉じて
@@ -3180,6 +3252,10 @@ class IntegrationThread(threading.Thread):
 
         reasons = [r for r in (corrected.reason, conflict_reason) if r]
         reasons.extend(event.parse_flags)
+        if confidence < REVIEW_THRESHOLD:
+            # 要確認の本当の理由を残す（店舗 2026-09-27: 理由が「amount_only」だけに見えて、実は聞き取りの
+            # 自信の低さで要確認になっていた）
+            reasons.append("low_asr_confidence")
 
         record = ActionRecord(
             hand_id=gs.hand_id,

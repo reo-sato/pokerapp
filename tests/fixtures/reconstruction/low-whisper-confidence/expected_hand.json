@@ -79,7 +79,8 @@
       "actor_source": "engine_prior",
       "asr_confidence": 0.3,
       "apply_ok": true,
-      "raw_text": "コール"
+      "raw_text": "コール",
+      "reason": "low_asr_confidence"
     }
   ],
   "review_required": true

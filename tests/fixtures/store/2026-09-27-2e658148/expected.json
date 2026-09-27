@@ -1,0 +1,111 @@
+{
+  "_comment": "店舗の通しテスト 2026-09-27（セッション 2e658148）。記録されたアクション列はオーナーが真のアクションと確認済み（チャット 2026-09-27）。",
+  "players": [
+    {
+      "seat": 4,
+      "name": "A",
+      "stack": 10000
+    },
+    {
+      "seat": 5,
+      "name": "B",
+      "stack": 10000
+    },
+    {
+      "seat": 6,
+      "name": "C",
+      "stack": 10000
+    }
+  ],
+  "blinds": {
+    "sb": 100,
+    "bb": 200
+  },
+  "button_seat": 6,
+  "board": [
+    "7d",
+    "6h",
+    "Qc",
+    "6c",
+    "Ac"
+  ],
+  "hole_cards": {
+    "4": [
+      "2h",
+      "5d"
+    ],
+    "5": [
+      "3c",
+      "Td"
+    ],
+    "6": [
+      "4c",
+      "Tc"
+    ]
+  },
+  "actions": [
+    [
+      "preflop",
+      6,
+      "raise",
+      600
+    ],
+    [
+      "preflop",
+      4,
+      "fold",
+      0
+    ],
+    [
+      "preflop",
+      5,
+      "call",
+      400
+    ],
+    [
+      "flop",
+      5,
+      "check",
+      0
+    ],
+    [
+      "flop",
+      6,
+      "check",
+      0
+    ],
+    [
+      "turn",
+      5,
+      "bet",
+      2000
+    ],
+    [
+      "turn",
+      6,
+      "call",
+      2000
+    ],
+    [
+      "river",
+      5,
+      "bet",
+      400
+    ],
+    [
+      "river",
+      6,
+      "allin",
+      7400
+    ],
+    [
+      "river",
+      5,
+      "fold",
+      0
+    ]
+  ],
+  "winner_seat": 6,
+  "winner_source": "fold",
+  "pot_total": 13100
+}
