@@ -258,6 +258,7 @@ class IntegrationThread(threading.Thread):
         fold_absent_sec: float = FOLD_ABSENT_SEC,
         speech_pending_since: Optional[Callable[[], Optional[float]]] = None,
         voice_heard_at: Optional[Callable[[], Optional[float]]] = None,
+        recorded_deals: bool = False,
     ) -> None:
         """
         Args:
@@ -405,6 +406,10 @@ class IntegrationThread(threading.Thread):
         self._deal_detected_at: Optional[float] = None  # 検出した時刻（engine の時計）
         # 配布の検出で RFID をリセット済み（ハンド開始時に二重にリセットしない）
         self._rfid_reset_for_deal = False
+        # replay: 記録に配布（deal）とハンド開始（hand_start）の信号がある。札の読み取りから配布を決め直さず、
+        # live が在否で決めた配布と、発話を待って始めた時点に従う（ADR-0056 追記 1, S0）。
+        self._recorded_deals = recorded_deals
+        self._hand_start_due = False
         # 手札が配られる前のボードの札を読まなかった（最初の手札で RFID のボード位置を捨てる）
         self._board_before_deal = False
         # プレー中か（配布〜確定、または卓が空になるまで）。音声の聞き取りとボードの受付に使う。
@@ -1273,6 +1278,14 @@ class IntegrationThread(threading.Thread):
             self._emit_seat_signal(self._seat_signal("confirm", pending["seat"], now))
 
     def _handle_seat_signal(self, ev: RFIDEvent) -> None:
+        if ev.kind == "deal":
+            self._apply_deal_signal(ev)
+            return
+        if ev.kind == "hand_start":
+            if self._recorded_deals:
+                self._hand_start_due = True      # live がこの時点でハンドを始めた（発話を待ったあと）
+                self._start_dealt_hand_if_ready()
+            return
         if not (self._rfid_folds and self._hand_open):
             return
         if ev.kind == "street":
@@ -2187,6 +2200,8 @@ class IntegrationThread(threading.Thread):
         if self._seat_presence is not None:
             self._check_deal_presence()
             return
+        if self._recorded_deals:
+            return                           # replay: 記録した配布の信号を待つ
         hands: dict[int, list[str]] = {}
         for seat, card, _ in self._deal_events:
             hands.setdefault(seat, []).append(card)
@@ -2239,7 +2254,24 @@ class IntegrationThread(threading.Thread):
         ]
         if len(stable) < 2 or (board.get("present_count") or 0) > 0:
             return
-        self._deal_detected(min(self._deal_since[s][0] for s in stable), hands)
+        # 記録してから反映する（replay は在否を持たないので、この信号で同じ配布を再現する）
+        deal_at = min(self._deal_since[s][0] for s in stable)
+        self._emit_seat_signal(RFIDEvent(
+            tag_id="", card="", reader_id="", role="seat", seat=None, timestamp=now, raw_tag_id="",
+            kind="deal", observed_at=deal_at,
+            cards=tuple(f"{seat}:{card}" for seat, cards in sorted(hands.items()) for card in cards),
+        ))
+
+    def _apply_deal_signal(self, ev: RFIDEvent) -> None:
+        """記録した配布（在否で決めた live の判断, `cards` = "席:札"）を反映する。"""
+        if self._deal_at is not None:
+            return
+        hands: dict[int, list[str]] = {}
+        for item in ev.cards:
+            seat, _, card = item.partition(":")
+            if seat.isdigit() and card:
+                hands.setdefault(int(seat), []).append(card)
+        self._deal_detected(ev.observed_at if ev.observed_at is not None else ev.timestamp, hands)
 
     def _deal_detected(self, deal_at: float, hands: dict[int, list[str]]) -> None:
         """配布と判断した。RFID のボード位置をいま捨て（シャッフル中に読んだ札を持ち越さない）、
@@ -2344,14 +2376,23 @@ class IntegrationThread(threading.Thread):
             return
         if not force and self._speech_pending_before_deal():
             return
+        if self._recorded_deals and not force and not self._hand_start_due:
+            return                           # replay: live が始めた時点（記録した hand_start）まで待つ
+        self._hand_start_due = False
         if self._hand_open and self._hand_in_play():
             self._close_hand_for_next_deal()
         if self._hand_open:
             # 配る前に「ハンド開始」/ n で始めていたハンド → 配った札をこのハンドの手札にする
             self._adopt_deal_cards()
-            return
-        # 始められなければ（参加できる席が 2 つ未満）配布は保留のまま = 買い足し・参加の操作で始まる
-        self._start_new_hand(started_at=self._deal_at, auto=True)
+            started = True
+        else:
+            # 始められなければ（参加できる席が 2 つ未満）配布は保留のまま = 買い足し・参加の操作で始まる
+            started = self._start_new_hand(started_at=self._deal_at, auto=True)
+        if started and not self._recorded_deals and not self._rebuilding:
+            self._record(RFIDEvent(
+                tag_id="", card="", reader_id="", role="seat", seat=None, timestamp=self._clock(),
+                raw_tag_id="", kind="hand_start",
+            ))
 
     def _adopt_deal_cards(self) -> None:
         """配布の検出で集めた札を、いまのハンドの手札にする（配布と判断していない札は捨てる）。"""

@@ -72,6 +72,8 @@ def event_to_envelope(event: RecordableEvent) -> dict:
             envelope["kind"] = event.kind
         if event.observed_at is not None:
             envelope["observed_at"] = event.observed_at
+        if event.cards:
+            envelope["cards"] = list(event.cards)   # 配布の手札（schema 0.9 additive）
         return envelope
     if isinstance(event, CameraEvent):
         return {

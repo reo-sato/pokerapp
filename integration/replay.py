@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 from core.event_queue import make_audio_queue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
@@ -68,6 +68,7 @@ def event_from_envelope(d: dict) -> Event:
             replaces=d.get("replaces"),   # ADR-0058 additive（旧 events.jsonl には無い）
             kind=d.get("kind") or "card",           # 札の離脱・戻り（2026-09-25 additive）
             observed_at=d.get("observed_at"),
+            cards=tuple(d.get("cards") or ()),      # 配布の手札（0.9 additive）
         )
     if t == "camera":
         return CameraEvent(seat=d["seat"], timestamp=d["timestamp"])
@@ -97,6 +98,8 @@ def replay_events(
     auto_new_hand: bool = False,
     auto_winner: bool = False,
     rfid_folds: bool = False,
+    button_seat: Optional[int] = None,
+    close_open_hand: bool = False,
 ) -> list[HandSummary]:
     """Event 列を timestamp 昇順で再構築し、確定した HandSummary 群を返す。
 
@@ -108,8 +111,13 @@ def replay_events(
     セッション（店舗の既定）を再生するときに True にする。replay は発話の認識待ちを持たないので、
     配布を検出した時点で新しいハンドを始める。
     `rfid_folds`: フォールドを札の離脱で決めたセッション（記録された leave / return / confirm で再現する）。
+    `button_seat`: 1 ハンド目のボタンの **1 つ手前**の席（`create_game_state` と同じ。省略時は最大の席番号）。
+    `close_open_hand`: 最後に確定していないハンドを、終了（`q`）と同じ規則で閉じる（記録に終了が無いセッション）。
+
+    記録に配布の信号（rfid kind `deal` / `hand_start`, schema 0.9）があれば、札の読み取りから配布を決め直さず、
+    live が在否で決めた配布と、発話を待って始めた時点に従う（在否を持たない replay で live と同じにするため）。
     """
-    gs = create_game_state(backend, players, sb, bb)
+    gs = create_game_state(backend, players, sb, bb, button_seat=button_seat)
     json_writer = JsonWriter(out_dir, session_id)
     summaries: list[HandSummary] = []
     clock = _ReplayClock()
@@ -124,6 +132,7 @@ def replay_events(
         auto_new_hand=auto_new_hand,
         auto_winner=auto_winner,
         rfid_folds=rfid_folds,
+        recorded_deals=any(isinstance(e, RFIDEvent) and e.kind == "deal" for e in events),
     )
 
     for ev in sorted(events, key=lambda e: (e.timestamp, _ORDER[type(e)])):
@@ -138,6 +147,8 @@ def replay_events(
             thread._camera_buffer.append(ev)  # noqa: SLF001 — live は drain で buffer 追加
         else:  # pragma: no cover — load_events が型を保証
             raise TypeError(f"unexpected event: {ev!r}")
+    if close_open_hand:
+        thread._close_open_hand_at_stop()     # noqa: SLF001 — 終了（q）と同じ規則で保存
 
     return summaries
 
@@ -146,7 +157,8 @@ def replay_fixture(case_dir: str | Path, out_dir: str | Path) -> list[HandSummar
     """`<case_dir>/{setup.json, events.jsonl}` を読み replay する。
 
     setup.json = {"backend", "sb", "bb", "session_id", "players":[{"seat","name","stack"},...]}。
-    任意で "auto_new_hand" / "auto_winner"（ADR-0062, 既定 false）/ "rfid_folds"（札の離脱でフォールド）。
+    任意で "auto_new_hand" / "auto_winner"（ADR-0062, 既定 false）/ "rfid_folds"（札の離脱でフォールド）/
+    "button_seat"（1 ハンド目のボタンの 1 つ手前の席）。
     """
     case_dir = Path(case_dir)
     setup = json.loads((case_dir / "setup.json").read_text(encoding="utf-8"))
@@ -165,4 +177,5 @@ def replay_fixture(case_dir: str | Path, out_dir: str | Path) -> list[HandSummar
         auto_new_hand=bool(setup.get("auto_new_hand", False)),
         auto_winner=bool(setup.get("auto_winner", False)),
         rfid_folds=bool(setup.get("rfid_folds", False)),
+        button_seat=setup.get("button_seat"),
     )

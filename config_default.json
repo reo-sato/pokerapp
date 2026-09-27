@@ -85,8 +85,8 @@
     "_comment": "ADR-0056 D5: RFID だけから導く卓状態 (カード / 有効席 / ストリート) を logs/{session_id}.table_state.json に publish する。アクション推定には依存しない。UI は `python tools/table_monitor.py --host 0.0.0.0` で見る。history=true なら実質的に変化したときだけ .table_state.jsonl に append し、反映遅延・不在時間の計測に使う。"
   },
   "recording": {
-    "enabled": false,
-    "_comment": "R1 (ADR-0010): 生センサーイベントを logs/{session_id}.events.jsonl に append-only 記録する sidecar。挙動不変・opt-in。"
+    "enabled": true,
+    "_comment": "R1 (ADR-0010): 生センサーイベントを logs/{session_id}.events.jsonl に append-only 記録する sidecar。記録の挙動は変えない。既定 on（ADR-0056 追記 1: 再生・評価・事後推定の入力。off にすると tools/eval_store.py で再生できない）。"
   },
   "engine": {
     "backend": "pokerkit",

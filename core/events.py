@@ -33,6 +33,9 @@ class RFIDEvent:
     kind: str = "card"
     # "leave" / "muck" の札が離れた時刻（`timestamp` は engine がそれを反映した時刻 = replay の順序）。
     observed_at: Optional[float] = None
+    # "deal" = 在否で決めた配布（observed_at = 手札が載り始めた時刻、cards = "席:札" の並び）/ "hand_start" =
+    # 配布のハンドを始めた（配る前の発話を待ったあと）。replay はこの 2 つで live と同じ時点にハンドを始める。
+    cards: tuple[str, ...] = ()
 
 
 @dataclass
