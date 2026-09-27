@@ -8,7 +8,8 @@
 
 入るもの（セッションごとに `<セッションID>/` の下）:
 - `logs/<sid>.json`（ハンドの記録）/ `.events.jsonl`（センサーの入力）/ `.transcripts.jsonl`（聞き取った文）/
-  `.table_state.json(l)`（卓状態）/ `.ground_truth.json`（真のアクション）/ `.control.jsonl` など `<sid>.*` の全部
+  `.table_state.json(l)`（卓状態）/ `.ground_truth.json`（真のアクション）/ `.rescored.jsonl`（音声を採点し直した
+  結果, `tools/rescore_audio.py`）/ `.control.jsonl` など `<sid>.*` の全部
 - `logs/audio/<sid>/*.wav`（発話の音声。合計 25 MB までなら自動で入れる。`--audio` / `--no-audio` で指定）
 - `pokerapp.log` はそのセッションの時間帯の行だけ / `config.json`（トークン類は伏せる）/ `rfid_cards.json` /
   `manifest.json`（入れたもの・インストールしたコードの指紋）

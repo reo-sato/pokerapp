@@ -47,6 +47,7 @@ def root(tmp_path: Path) -> Path:
                                                ensure_ascii=False) + "\n",
         f"{NEW}.table_state.json": "{}",
         f"{NEW}.ground_truth.json": json.dumps({"session_id": NEW, "hands": []}),
+        f"{NEW}.rescored.jsonl": json.dumps({"audio_file": "1.wav", "best": "レイズ600"}, ensure_ascii=False) + "\n",
     }
     for name, body in new_files.items():
         (logs / name).write_text(body, encoding="utf-8")
@@ -91,7 +92,7 @@ class TestSelect:
     def test_sessions_are_grouped_by_id(self, root):
         sessions = find_sessions(root / "logs")
         assert set(sessions) == {NEW, OLD}
-        assert len(sessions[NEW].files) == 5 and len(sessions[NEW].audio) == 2
+        assert len(sessions[NEW].files) == 6 and len(sessions[NEW].audio) == 2
 
     def test_recent_sessions_or_the_latest(self, root):
         sessions = find_sessions(root / "logs")
@@ -112,7 +113,7 @@ class TestZip:
         assert _names(out) == sorted([
             "manifest.json", "pokerapp.log", "config.json", "rfid_cards.json",
             f"{NEW}/{NEW}.json", f"{NEW}/{NEW}.events.jsonl", f"{NEW}/{NEW}.transcripts.jsonl",
-            f"{NEW}/{NEW}.table_state.json", f"{NEW}/{NEW}.ground_truth.json",
+            f"{NEW}/{NEW}.table_state.json", f"{NEW}/{NEW}.ground_truth.json", f"{NEW}/{NEW}.rescored.jsonl",
             f"{NEW}/audio/1.wav", f"{NEW}/audio/2.wav",
         ])
         s = manifest["sessions"][0]

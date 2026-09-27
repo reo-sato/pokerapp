@@ -597,7 +597,8 @@ _TABLE_WORDS = re.compile(
 _NON_TEXT = re.compile(r"[\s、。,.・!?！？ー〜~…「」()（）]+")
 
 
-def _is_conversation(norm: str, keywords: list[tuple[int, int, str]]) -> bool:
+def _residue(norm: str, keywords: list[tuple[int, int, str]]) -> str:
+    """アクションの語・額・席・ポジション・卓の用語・つなぎの言葉を除いて残る言葉。"""
     from core.positions import _ALIAS_PATTERN
 
     chars = list(norm)
@@ -606,9 +607,198 @@ def _is_conversation(norm: str, keywords: list[tuple[int, int, str]]) -> bool:
     rest = "".join(chars)
     rest = _AMOUNT_TOKEN.sub(" ", _ALIAS_PATTERN.sub(" ", _SEAT_PATTERN.sub(" ", rest)))
     rest = _TABLE_WORDS.sub(" ", rest)
-    residue = _NON_TEXT.sub("", rest)
+    return _NON_TEXT.sub("", rest)
+
+
+def _is_conversation(norm: str, keywords: list[tuple[int, int, str]]) -> bool:
+    residue = _residue(norm, keywords)
     total = len(_NON_TEXT.sub("", norm))
     return len(residue) >= _CONVERSATION_MIN_CHARS and len(residue) >= _CONVERSATION_MIN_RATIO * total
+
+
+# 音の近さで読む片仮名の語（ADR-0056 追記 1 の S2, `audio/phonetic.py`）。「ヘッズ・アップ」「ヘッズ アップ」の
+# ように区切って書き起こされた語は続けて照合する。ひらがなの語は候補にしない（Whisper は外来語を片仮名で書く。
+# ひらがなの語は日本語の会話）。
+_KATAKANA_RUN = re.compile(r"[ァ-ヺー]+")
+_RUN_JOINERS = frozenset("・ 　")
+# 音の近さで読んだ発話は、アクションの語が言葉の半分以上を占めること（席・額・卓の用語・つなぎの言葉は数えない）。
+# 会話の中の片仮名の語をアクションとして読まない（「かわいいペット」）。
+_FUZZY_MIN_SHARE = 0.5
+
+
+@dataclass(frozen=True)
+class _PhoneticRewrite:
+    """音の近さで読んだ語を正準のアクションの語に置き換えた発話（NFKC）。"""
+
+    text: str
+    # 置き換えた区間: (元の開始, 元の終了, 置き換え後の開始, 置き換え後の終了)
+    spans: tuple[tuple[int, int, int, int], ...]
+    # 区間ごとに、表記が違うだけの同じ音か（「レーズ」「ヘッズ・アップ」= 要確認にしない）
+    same_sound: tuple[bool, ...]
+
+    def to_original(self, pos: int) -> int:
+        """置き換え後の位置を元の発話の位置に戻す。"""
+        shift = 0
+        for start, end, new_start, new_end in self.spans:
+            if pos < new_start:
+                break
+            if pos <= new_end:
+                return start if pos == new_start else end
+            shift = end - new_end
+        return pos + shift
+
+    def fuzzy_in(self, start: int, end: int) -> bool:
+        """置き換え後の区間 [start, end) に、音の近さで読んだ（同じ音ではない）語があるか。"""
+        return any(
+            start < new_end and new_start < end and not same
+            for (_, _, new_start, new_end), same in zip(self.spans, self.same_sound)
+        )
+
+
+# この拍数以下の語は、ほかの言葉の一部として現れやすい（「ホールドする」「ゴールド」）。辞書の短い語と同じく、
+# 前後が区切り・数のときだけアクションとみなす（`_BOUNDARY_KEYWORDS`, ADR-0063）。
+_SHORT_WORD_MORAE = 4
+
+
+def _isolated(norm: str, start: int, end: int) -> bool:
+    before = start == 0 or not _is_katakana(norm[start - 1])
+    after = end == len(norm) or not _is_katakana(norm[end]) or _kana_number_at(norm, end) is not None
+    return before and after
+
+
+def _phonetic_span(norm: str, start: int, end: int):
+    """片仮名の語 norm[start:end] が音の近さでアクションの語と読めれば (終了, 照合結果)。
+
+    語の直後に仮名の数が続いていれば（「ペットナナ」）数の前までで照合する。語全体が数の読みなら照合しない。
+    """
+    from audio.phonetic import match_keyword
+
+    found = _kana_number_at(norm, start)
+    if found is not None and found[1] == end:
+        return None
+    ends = [end]
+    for k in range(end - 1, start + 1, -1):
+        found = _kana_number_at(norm, k)
+        if found is not None and found[1] == end:
+            ends.append(k)
+    for stop in ends:
+        match = match_keyword(norm[start:stop])
+        if match is not None:
+            if match.word_morae <= _SHORT_WORD_MORAE and not _isolated(norm, start, stop):
+                return None
+            return stop, match
+    return None
+
+
+def _phonetic_rewrite(
+    nfkc: str, norm: str, keywords: list[tuple[int, int, str]],
+) -> Optional[_PhoneticRewrite]:
+    """辞書の語を含まない片仮名の語を音の近さで読み、正準のアクションの語に置き換える。読めなければ None。"""
+    covered = [(pos, pos + length) for pos, length, _ in keywords]
+    runs = [(m.start(), m.end()) for m in _KATAKANA_RUN.finditer(nfkc)]
+    found: list[tuple[int, int, str, bool]] = []
+    i = 0
+    while i < len(runs):
+        start, end = runs[i]
+        candidates = [(start, end, 1)]
+        if i + 1 < len(runs) and runs[i + 1][0] == end + 1 and nfkc[end] in _RUN_JOINERS:
+            candidates.insert(0, (start, runs[i + 1][1], 2))
+        used = 1
+        for c_start, c_end, count in candidates:
+            if any(c_start < e and s < c_end for s, e in covered):
+                continue
+            hit = _phonetic_span(norm, c_start, c_end)
+            if hit is not None:
+                stop, match = hit
+                logger.debug("音の近さで読みました: %r → %s（距離 %.2f / 次 %.2f）",
+                             match.heard, match.rewrite, match.distance, match.runner_up)
+                found.append((c_start, stop, match.rewrite, match.distance == 0))
+                used = count
+                break
+        i += used
+    if not found:
+        return None
+    pieces: list[str] = []
+    spans: list[tuple[int, int, int, int]] = []
+    prev = offset = 0
+    for start, end, word, _ in found:
+        pieces.append(nfkc[prev:start])
+        pieces.append(word)
+        new_start = start + offset
+        spans.append((start, end, new_start, new_start + len(word)))
+        offset += len(word) - (end - start)
+        prev = end
+    pieces.append(nfkc[prev:])
+    return _PhoneticRewrite("".join(pieces), tuple(spans), tuple(same for *_, same in found))
+
+
+def phonetic_reading(text: str) -> Optional[str]:
+    """片仮名の語を音の近さでアクションの語に読み替えた文（NFKC）。読み替えが無ければ None。
+
+    事後の採点（`tools/rescore_audio.py`）で、ライブの書き起こしと並べて確からしさを測る候補に使う。
+    """
+    nfkc = unicodedata.normalize("NFKC", text)
+    norm = _to_katakana(nfkc)
+    rewrite = _phonetic_rewrite(nfkc, norm, _distinct_keywords(_keyword_matches(norm)))
+    return rewrite.text if rewrite is not None and rewrite.text != nfkc else None
+
+
+def _parse_phonetic(
+    text: str, nfkc: str, rewrite: _PhoneticRewrite,
+    confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> Optional[list[AudioEvent]]:
+    """音の近さで置き換えた発話を読む。読んだ語から出たアクションに `fuzzy_keyword`（要確認）を付け、
+    `raw_text` は聞こえたままの言葉にする。会話・アクションの語が少ない発話は None。"""
+    norm = _to_katakana(rewrite.text)
+    keywords = _distinct_keywords(_keyword_matches(norm))
+    if not keywords or _is_conversation(norm, keywords):
+        return None
+    keyword_chars = sum(length for _, length, _ in keywords)
+    if keyword_chars < _FUZZY_MIN_SHARE * (keyword_chars + len(_residue(norm, keywords))):
+        return None
+    source = text if len(nfkc) == len(text) else nfkc
+    events: list[AudioEvent] = []
+    for event, start, end in _parse_keyword_parts(
+        rewrite.text, rewrite.text, norm, keywords, confidence, utterance_start_ts,
+    ):
+        if "amount_only" not in event.parse_flags and rewrite.fuzzy_in(start, end):
+            event.parse_flags = (*event.parse_flags, "fuzzy_keyword")
+        if (start, end) == (0, len(norm)):
+            event.raw_text = text
+        else:
+            heard = source[rewrite.to_original(start):rewrite.to_original(end)]
+            event.raw_text = heard.strip("".join(_SPLIT_DELIMITERS)) or event.raw_text
+        events.append(event)
+    return events
+
+
+def _parse_keyword_parts(
+    text: str, nfkc: str, norm: str, keywords: list[tuple[int, int, str]],
+    confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> list[tuple[AudioEvent, int, int]]:
+    """アクションの語を含む発話を読み、(アクション, 区間の開始, 区間の終了) を言った順に返す。"""
+    if len(keywords) == 1 or len(keywords) > _MAX_ACTIONS_PER_UTTERANCE:
+        event = parse_action(text, confidence=confidence, utterance_start_ts=utterance_start_ts)
+        if event is None:
+            return []
+        if len(keywords) > _MAX_ACTIONS_PER_UTTERANCE:
+            # 繰り返しの聞き違いの疑い。分けずに 1 件にして要レビューにする。
+            event.parse_flags = (*event.parse_flags, "too_many_actions")
+            return [(event, 0, len(norm))]
+        return [(e, 0, len(norm)) for e in _split_off_amounts(text, event, confidence, utterance_start_ts)]
+    cuts = _split_points(norm, keywords)
+    # 区間を原文から切り出す（NFKC で長さが変わった入力だけは正規化後の文字列から切る）。
+    source = text if len(nfkc) == len(text) else nfkc
+    bounds = [0, *cuts, len(norm)]
+    parts: list[tuple[AudioEvent, int, int]] = []
+    for start, end in zip(bounds, bounds[1:]):
+        part = source[start:end].strip("".join(_SPLIT_DELIMITERS))
+        event = parse_action(part, confidence=confidence, utterance_start_ts=utterance_start_ts)
+        if event is not None:
+            parts.extend(
+                (e, start, end) for e in _split_off_amounts(part, event, confidence, utterance_start_ts)
+            )
+    return parts
 
 
 def parse_actions(
@@ -623,6 +813,10 @@ def parse_actions(
     以降のアクターがすべてずれる。キーワードが 2 つ以上あれば `_split_points` で切り分け、
     それぞれを `parse_action` で読む（切り分けた各アクションには複数アクションの flag は付かない）。
     キーワードが 1 つ、または多すぎる（繰り返しの幻聴）ときは従来どおり `parse_action` 1 件。
+
+    辞書に無い書き起こしゆれ（「ヘッドゾップ」）は、片仮名の語を音の近さでアクションの語と照合して読む
+    （`audio/phonetic.py`。読んだアクションは `fuzzy_keyword` = 要確認）。音の近さは辞書で読めるアクションを
+    減らさない（読めなければ辞書だけの読みに戻る）。
     """
     text = _drop_question_sentences(text)
     if not text:
@@ -635,33 +829,22 @@ def parse_actions(
     nfkc = unicodedata.normalize("NFKC", text)
     norm = _to_katakana(nfkc)
     keywords = _distinct_keywords(_keyword_matches(norm))
-    if keywords and _is_conversation(norm, keywords):
-        logger.debug("会話の中のアクションの語とみなして読みません: %r", text)
-        return []
     if not keywords:
         # アクションの語が無くても、額だけを言っていればベットかレイズ（「600点」）
         event = parse_amount_only(text, confidence=confidence, utterance_start_ts=utterance_start_ts)
-        return [event] if event is not None else []
-    if len(keywords) == 1 or len(keywords) > _MAX_ACTIONS_PER_UTTERANCE:
-        event = parse_action(text, confidence=confidence, utterance_start_ts=utterance_start_ts)
-        if event is None:
-            return []
-        if len(keywords) > _MAX_ACTIONS_PER_UTTERANCE:
-            # 繰り返しの聞き違いの疑い。分けずに 1 件にして要レビューにする。
-            event.parse_flags = (*event.parse_flags, "too_many_actions")
-            return [event]
-        return _split_off_amounts(text, event, confidence, utterance_start_ts)
-    cuts = _split_points(norm, keywords)
-    # 区間を原文から切り出す（NFKC で長さが変わった入力だけは正規化後の文字列から切る）。
-    source = text if len(nfkc) == len(text) else nfkc
-    bounds = [0, *cuts, len(norm)]
-    events: list[AudioEvent] = []
-    for start, end in zip(bounds, bounds[1:]):
-        part = source[start:end].strip("".join(_SPLIT_DELIMITERS))
-        event = parse_action(part, confidence=confidence, utterance_start_ts=utterance_start_ts)
         if event is not None:
-            events.extend(_split_off_amounts(part, event, confidence, utterance_start_ts))
-    return events
+            return [event]
+    rewrite = _phonetic_rewrite(nfkc, norm, keywords)
+    if rewrite is not None:
+        events = _parse_phonetic(text, nfkc, rewrite, confidence, utterance_start_ts)
+        if events is not None:
+            return events
+    if not keywords:
+        return []
+    if _is_conversation(norm, keywords):
+        logger.debug("会話の中のアクションの語とみなして読みません: %r", text)
+        return []
+    return [e for e, _, _ in _parse_keyword_parts(text, nfkc, norm, keywords, confidence, utterance_start_ts)]
 
 
 def parse_action(

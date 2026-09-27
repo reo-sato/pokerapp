@@ -13,6 +13,9 @@
 4. `--timeline`: ハンドごとに発話・RFID の信号・入力を時刻順に並べ、真のアクション・記録・再生の行を比べる。
 5. `--export-fixture DIR`: 真のアクションのあるセッションを回帰テスト用に書き出す（`tests/test_store_fixtures.py`
    が、真のアクションとの一致が書き出したときより悪くならないことを確かめる）。
+6. 聞き取りの読み直し（S2）: 書き起こし（`<sid>.transcripts.jsonl`）を**いまの読み取り**で読み直して再生する
+   （記録したときの読み取りとの差 = 読み取りの修正の効果）。音声を採点し直した結果（`<sid>.rescored.jsonl`,
+   `tools/rescore_audio.py`）があれば、いちばん確からしい文で読み直した再生も並べ、書き起こしと違った発話を出す。
 
 使い方:
 
@@ -41,6 +44,7 @@ from typing import Any, Optional
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from audio.recognizer import is_implausibly_long, is_prompt_echo, parse_actions  # noqa: E402
 from core.events import AudioEvent, RFIDEvent  # noqa: E402
 from core.game_state import PlayerState  # noqa: E402
 from integration.replay import load_events, replay_events  # noqa: E402
@@ -181,9 +185,10 @@ def replay_flags(config: dict, events: list) -> dict:
     }
 
 
-def replay_session(events_path: Path, setup: dict, flags: dict, session_id: str) -> list[dict]:
-    """events.jsonl を再生して、記録（`<sid>.json`）と同じ形のハンドの辞書を返す。"""
-    events = load_events(events_path)
+def replay_session(events: "list | Path", setup: dict, flags: dict, session_id: str) -> list[dict]:
+    """events.jsonl（または読み込んだ入力の列）を再生して、記録（`<sid>.json`）と同じ形のハンドの辞書を返す。"""
+    if isinstance(events, Path):
+        events = load_events(events)
     players = [PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"]) for p in setup["players"]]
     with tempfile.TemporaryDirectory(prefix="eval_replay_") as tmp:
         replay_events(
@@ -193,6 +198,100 @@ def replay_session(events_path: Path, setup: dict, flags: dict, session_id: str)
         )
         data = _read_json(Path(tmp) / f"{session_id}.json") or {}
     return list(data.get("hands") or [])
+
+
+# ――― 聞き取りの読み直し（S2）―――
+
+def _is_noise(row: dict, text: str) -> bool:
+    """声ではない音・雑音への幻聴（ライブと同じ判定を、いまのコードで）。"""
+    return bool(row.get("no_speech")) or not text or is_prompt_echo(text) or is_implausibly_long(
+        text, float(row.get("audio_sec") or 0.0))
+
+
+def reparse_events(events: list, transcripts: list[dict], texts: Optional[dict[str, str]] = None) -> list:
+    """音声のアクションを、書き起こしから**いまの読み取り**で読み直したものに置き換えた入力の列。
+
+    texts: 音声のファイル名 → 読み直す文（採点し直した文）。無い発話は書き起こしのまま。打った入力（書き起こしに
+    無い行）と RFID の入力はそのまま。記録に行があった発話はその位置・時刻に、無かった発話は聞き取った時刻の
+    位置に入れる。
+    """
+    rows = {r["utterance_start_ts"]: r for r in transcripts if r.get("utterance_start_ts") is not None}
+    live_time: dict[float, float] = {}
+    for e in events:
+        if isinstance(e, AudioEvent) and e.utterance_start_ts in rows:
+            live_time.setdefault(e.utterance_start_ts, e.timestamp)
+    reparsed: dict[float, list[AudioEvent]] = {}
+    for start, row in rows.items():
+        text = ((texts or {}).get(row.get("audio_file") or "") or row.get("text") or "").strip()
+        if _is_noise(row, text):
+            continue
+        at = live_time.get(start, row.get("heard_at") or start)
+        parsed = parse_actions(text, confidence=row.get("confidence"), utterance_start_ts=start)
+        for ev in parsed:
+            ev.timestamp = at
+        if parsed:
+            reparsed[start] = parsed
+    out: list = []
+    for e in events:
+        if isinstance(e, AudioEvent) and e.utterance_start_ts in rows:
+            out.extend(reparsed.pop(e.utterance_start_ts, []))
+            continue
+        out.append(e)
+    rest = sorted((ev for evs in reparsed.values() for ev in evs), key=lambda ev: ev.timestamp)
+    merged: list = []
+    i = 0
+    for e in out:
+        while i < len(rest) and rest[i].timestamp < e.timestamp:
+            merged.append(rest[i])
+            i += 1
+        merged.append(e)
+    merged.extend(rest[i:])
+    return merged
+
+
+def _read_actions(text: str, row: dict) -> Optional[list[AudioEvent]]:
+    """いまの読み取りで読んだアクション（雑音なら None）。"""
+    return None if _is_noise(row, text) else parse_actions(text)
+
+
+def _actions_text(text: str, row: dict) -> str:
+    events = _read_actions(text, row)
+    if events is None:
+        return "（雑音）"
+    parts = [e.action + (f" {e.amount}" if e.amount else "") + (f" 席{e.seat}" if e.seat else "")
+             + ("（音の近さ）" if "fuzzy_keyword" in e.parse_flags else "") for e in events]
+    return ", ".join(parts) or "（読まない）"
+
+
+def _action_keys(text: str, row: dict) -> Optional[list[tuple]]:
+    events = _read_actions(text, row)
+    return None if events is None else [(e.action, e.amount, e.seat, e.position) for e in events]
+
+
+def listening_summary(transcripts: list[dict], rescored: list[dict]) -> dict:
+    """採点し直した発話のうち、いちばん確からしい文が書き起こしと違ったもの（読んだアクションの違いも）。"""
+    rows = {r.get("audio_file"): r for r in transcripts if r.get("audio_file")}
+    changed = []
+    n = errors = 0
+    for r in rescored:
+        if r.get("error") or not r.get("best"):
+            errors += 1 if r.get("error") else 0
+            continue
+        n += 1
+        heard, best = (r.get("text") or "").strip(), r["best"].strip()
+        if heard == best:
+            continue
+        row = rows.get(r.get("audio_file")) or {}
+        scores = {x.get("text"): x.get("logprob") for x in r.get("scored") or []}
+        margin = (scores[best] - scores[heard]) if heard in scores and best in scores else None
+        changed.append({"audio_file": r.get("audio_file"), "utterance_start_ts": r.get("utterance_start_ts"),
+                        "heard": heard, "best": best, "margin": None if margin is None else round(margin, 2),
+                        "before": _actions_text(heard, row), "after": _actions_text(best, row),
+                        "actions_changed": _action_keys(heard, row) != _action_keys(best, row)})
+    return {
+        "rescored": n, "errors": errors, "changed_text": len(changed),
+        "changed_actions": sum(1 for c in changed if c["actions_changed"]), "changed": changed,
+    }
 
 
 # ――― 比べる ―――
@@ -337,13 +436,17 @@ class SessionReport:
     flags: dict = field(default_factory=dict)
     live: list[dict] = field(default_factory=list)
     replayed: list[dict] = field(default_factory=list)
+    reparsed: list[dict] = field(default_factory=list)   # 書き起こしをいまの読み取りで読み直した再生
+    rescored: list[dict] = field(default_factory=list)   # 採点し直した文で読み直した再生
+    listening: dict = field(default_factory=dict)        # 採点し直して書き起こしと違った発話
     gt: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return {
             "session_id": self.session_id, "hands": self.hands, "note": self.note, "same_code": self.same_code,
             "changed_files": self.changed_files, "differences": self.differences, "sources": self.sources,
-            "truth": self.truth, "setup": self.setup, "flags": self.flags,
+            "truth": self.truth, "setup": self.setup, "flags": self.flags, "listening": self.listening,
+            "reparse_differences": diff_record(self.replayed, self.reparsed) if self.reparsed else [],
         }
 
 
@@ -364,16 +467,31 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
         return report
     events = load_events(files.events)
     report.flags = replay_flags(config, events)
-    report.replayed = replay_session(files.events, report.setup, report.flags, files.session_id)
+    report.replayed = replay_session(events, report.setup, report.flags, files.session_id)
     report.differences = diff_record(report.live, report.replayed)
     if report.differences and not any(isinstance(e, RFIDEvent) and e.kind == "deal" for e in events):
         report.note = ("配布の信号（schema 0.9）が無い記録です。在否で決めた配布は再生で違うことがあります"
                        "（起動時に卓に残っていた札・配る前の発話の待ち）")
+    transcripts = _read_jsonl(files.path(".transcripts.jsonl"))
+    if transcripts:
+        report.reparsed = replay_session(
+            reparse_events(events, transcripts), report.setup, report.flags, files.session_id)
+    rescored = _read_jsonl(files.path(".rescored.jsonl"))
+    if transcripts and rescored:
+        texts = {r["audio_file"]: r["best"] for r in rescored
+                 if r.get("audio_file") and r.get("best") and not r.get("error")}
+        report.rescored = replay_session(
+            reparse_events(events, transcripts, texts), report.setup, report.flags, files.session_id)
+        report.listening = listening_summary(transcripts, rescored)
     if report.gt["hands"]:
         report.truth = {
             "record": evaluate_against_truth(report.gt, report.live),
             "replay": evaluate_against_truth(report.gt, report.replayed),
         }
+        if report.reparsed:
+            report.truth["reparse"] = evaluate_against_truth(report.gt, report.reparsed)
+        if report.rescored:
+            report.truth["rescored"] = evaluate_against_truth(report.gt, report.rescored)
     return report
 
 
@@ -407,6 +525,8 @@ def timeline(files: SessionFiles, window: tuple[float, float], tz: Optional[time
     start, end = window
     rows: list[tuple[float, str]] = []
     heard = set()
+    best = {r.get("audio_file"): r.get("best") for r in _read_jsonl(files.path(".rescored.jsonl"))
+            if r.get("audio_file") and r.get("best")}
     for x in _read_jsonl(files.path(".transcripts.jsonl")):
         t = x.get("utterance_start_ts")
         if t is None or not start - 5.0 <= t < end:
@@ -419,7 +539,11 @@ def timeline(files: SessionFiles, window: tuple[float, float], tz: Optional[time
             f"{e.get('action')}" + (f" {e['amount']}" if e.get("amount") else "") + (f" 席{e['seat']}" if e.get("seat") else "")
             for e in x.get("events") or []) or "（読まない）"
         lag = (x.get("heard_at") or t) - t
-        rows.append((t, f"{tag} 「{x.get('text')}」 自信 {x.get('confidence') or 0:.2f}・認識 +{lag:.1f}s → {parsed}"))
+        line = f"{tag} 「{x.get('text')}」 自信 {x.get('confidence') or 0:.2f}・認識 +{lag:.1f}s → {parsed}"
+        alt = best.get(x.get("audio_file"))
+        if alt and alt.strip() != (x.get("text") or "").strip():
+            line += f" ／ 採点: 「{alt}」→ {_actions_text(alt, x)}"
+        rows.append((t, line))
     for ev in load_events(files.events):
         t = ev.timestamp
         if not start - 5.0 <= t < end:
@@ -542,9 +666,14 @@ def _fmt_pct(value: Optional[float]) -> str:
     return "—" if value is None else f"{value * 100:.0f}%"
 
 
+_TRUTH_LABELS = (
+    ("record", "記録"), ("replay", "再生"), ("reparse", "読み直し"), ("rescored", "採点し直した文"),
+)
+
+
 def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: Optional[int],
                  tz: Optional[timezone], files_by_sid: dict[str, SessionFiles]) -> None:
-    totals: dict[str, Counter] = {"record": Counter(), "replay": Counter()}
+    totals: dict[str, Counter] = {key: Counter() for key, _ in _TRUTH_LABELS}
     for r in reports:
         print(f"=== セッション {r.session_id[:8]}（{r.hands} ハンド）")
         if r.same_code is not None:
@@ -563,9 +692,25 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                 print(f"    （{r.note}）")
         else:
             print("  再生の結果は記録と同じ")
+        if r.reparsed:
+            reparse_diff = diff_record(r.replayed, r.reparsed)
+            print("  書き起こしをいまの読み取りで読み直すと: "
+                  + (f"{len(reparse_diff)} ハンドが変わる" if reparse_diff else "再生と同じ"))
+            for d in reparse_diff:
+                print(f"    ハンド {d['hand_id']}: {d['what']}")
+        if r.listening:
+            lis = r.listening
+            print(f"  音声の採点: {lis['rescored']} 発話（失敗 {lis['errors']}）・書き起こしと違う文 {lis['changed_text']}"
+                  f"・読んだアクションが違う {lis['changed_actions']}")
+            for c in lis["changed"]:
+                if c["actions_changed"]:
+                    margin = "" if c["margin"] is None else f"（確からしさ +{c['margin']}）"
+                    print(f"    {c['audio_file']} 「{c['heard']}」{c['before']} → 「{c['best']}」{c['after']}{margin}")
         if r.truth:
             print(f"  真のアクション: {r.truth['record']['hands']} ハンド")
-            for key, label in (("record", "記録"), ("replay", "再生")):
+            for key, label in _TRUTH_LABELS:
+                if key not in r.truth:
+                    continue
                 t = r.truth[key]
                 print(f"    {label}: 一致率 {_fmt_pct(t['action_accuracy'])}・ボード {_fmt_pct(t['board_accuracy'])}"
                       f"・勝者 {_fmt_pct(t['winner_accuracy'])} ／ 誤った行 {t['wrong_rows']}・取りこぼし "
@@ -608,7 +753,7 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                         print(line)
                 for line in compare_rows(gt_by_id.get(hid), live_by_id.get(hid), rep_by_id.get(hid)):
                     print(line)
-    for key, label in (("record", "記録"), ("replay", "再生")):
+    for key, label in _TRUTH_LABELS:
         c = totals[key]
         if c["total"]:
             print(f"合計（真のアクションのあるハンド）{label}: 一致 {c['correct']}/{c['total']}"

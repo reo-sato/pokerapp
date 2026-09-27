@@ -285,7 +285,7 @@ class TestParsing:
         ("7ヒット!", []),
         ("ポット2千点", []),
         ("残り1500", []),
-        ("ヒットアップです。", []),
+        ("ヒットアップです。", [("heads_up", 0, ("fuzzy_keyword",))]),   # 「ヘッズアップ」（音の近さ, S2）
     ])
     def test_utterances(self, text, expected):
         assert [(e.action, e.amount, e.parse_flags) for e in parse_actions(text)] == expected

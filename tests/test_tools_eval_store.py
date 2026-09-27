@@ -172,6 +172,81 @@ class TestEvaluate:
         assert not any(row.lstrip().startswith("≠") for row in rows)
 
 
+def _transcripts(tb: _Table, folder: Path, *, heard: dict[str, str] | None = None, drop: tuple[str, ...] = ()) -> list:
+    """記録した音声のアクションから聞き取りの記録（`<sid>.transcripts.jsonl`）を作る。
+
+    heard: 発話の文 → 書き起こし（聞き違い）。drop: 記録したときに読めなかった発話（events.jsonl から外す）。
+    """
+    from core.events import AudioEvent
+
+    rows: dict[float, dict] = {}
+    for e in tb.recorder.events:
+        if isinstance(e, AudioEvent) and e.utterance_start_ts is not None:
+            text = (heard or {}).get(e.raw_text, e.raw_text)
+            rows.setdefault(e.utterance_start_ts, {
+                "utterance_start_ts": e.utterance_start_ts, "heard_at": e.timestamp, "text": text,
+                "confidence": 0.9, "audio_sec": 1.0, "audio_file": f"{int(e.utterance_start_ts * 1000)}.wav",
+            })
+    (folder / f"{SID}.transcripts.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows.values()), encoding="utf-8")
+    if drop:
+        kept = [e for e in tb.recorder.events if not (isinstance(e, AudioEvent) and e.raw_text in drop)]
+        lines = [json.dumps(event_to_envelope(e), ensure_ascii=False) for e in kept]
+        (folder / f"{SID}.events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return list(rows.values())
+
+
+class TestListening:
+    """書き起こしをいまの読み取りで読み直した再生と、音声を採点し直した文での再生（S2）。"""
+
+    def test_reading_again_is_the_same_when_nothing_changed(self, tmp_path):
+        _transcripts(_two_hands(tmp_path), tmp_path)
+        report = eval_store.evaluate_session(_files(tmp_path), {}, None)
+        assert report.reparsed and eval_store.diff_record(report.replayed, report.reparsed) == []
+
+    def test_reading_again_uses_the_current_parser(self, tmp_path):
+        # 記録したときは「レイス 600」を読めず、レイズが記録に無かった（いまは音の近さで読める）
+        tb = _two_hands(tmp_path)
+        _transcripts(tb, tmp_path, heard={"レイズ 600": "レイス 600"}, drop=("レイズ 600",))
+        report = eval_store.evaluate_session(_files(tmp_path), {}, None)
+        replay_rows = [eval_store._row(a) for a in report.replayed[0]["actions"]]   # noqa: SLF001
+        assert ("preflop", 6, "raise", 600) not in replay_rows
+        live_rows = [eval_store._row(a) for a in report.live[0]["actions"]]         # noqa: SLF001
+        rows = report.reparsed[0]["actions"]
+        assert [eval_store._row(a) for a in rows] == live_rows                        # noqa: SLF001
+        (raise_row,) = [a for a in rows if a["action"] == "raise"]
+        assert raise_row["needs_review"] and "fuzzy_keyword" in raise_row["reason"]
+        assert raise_row["raw_text"] == "レイス 600"
+
+    def test_rescored_best_texts(self, tmp_path, capsys):
+        tb = _two_hands(tmp_path)
+        rows = _transcripts(tb, tmp_path, heard={"レイズ 600": "れいぞう 600"}, drop=("レイズ 600",))
+        rescored = []
+        for r in rows:
+            best = "レイズ 600" if r["text"] == "れいぞう 600" else r["text"]
+            rescored.append({"audio_file": r["audio_file"], "text": r["text"], "best": best,
+                             "scored": [{"text": best, "logprob": -1.0}, {"text": r["text"], "logprob": -3.5}]})
+        rescored.append({"audio_file": "missing.wav", "text": "", "error": "音声のファイルがありません"})
+        (tmp_path / f"{SID}.rescored.jsonl").write_text(
+            "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rescored), encoding="utf-8")
+        truth = [{"hand_id": h.hand_id, "board": list(h.board), "winner_seat": h.winner_seat,
+                  "actions": [{"street": a.street, "seat": a.seat, "action": a.action, "amount": a.amount}
+                              for a in h.actions]} for h in tb.hands]
+        (tmp_path / f"{SID}.ground_truth.json").write_text(json.dumps({"hands": truth}), encoding="utf-8")
+        report = eval_store.evaluate_session(_files(tmp_path), {}, None)
+        lis = report.listening
+        assert (lis["rescored"], lis["errors"], lis["changed_text"], lis["changed_actions"]) == (len(rows), 1, 1, 1)
+        (change,) = lis["changed"]
+        assert (change["heard"], change["best"], change["margin"]) == ("れいぞう 600", "レイズ 600", 2.5)
+        # 書き起こし（読めない）より、採点し直した文（レイズ 600）の方が真のアクションに合う
+        assert report.truth["rescored"]["action_accuracy"] == 1.0
+        assert report.truth["reparse"]["action_accuracy"] < 1.0
+        eval_store.print_report([report], True, 1, None, {SID: _files(tmp_path)})
+        out = capsys.readouterr().out
+        assert "音声の採点: " in out and "「れいぞう 600」" in out and "採点し直した文: 一致率 100%" in out
+        assert "採点: 「レイズ 600」→ raise 600" in out                         # タイムライン
+
+
 class TestFixtures:
     def _with_truth(self, tmp_path: Path) -> _Table:
         tb = _two_hands(tmp_path)
