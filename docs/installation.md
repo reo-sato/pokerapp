@@ -21,6 +21,7 @@ Python が入っていない Windows 10/11 の PC を前提にしています。
 | ハンドロガー (CLI) | `main.py --cli --log-file`（ログは `logs\pokerapp.log`） |
 | 卓モニタ (iPad から閲覧) | `tools\table_monitor.py --host 0.0.0.0 --port 8790`（画面に PC の IPv4 を表示） |
 | お客さん用 ハンド履歴 (スマホ) | `main.py --viewer-api --host 0.0.0.0 --port 8788`（お客さんが `http://<PC の IPv4>:8788/` を開く） |
+| 真のアクション入力 (iPad から) | `tools\ground_truth_ui.py --host 0.0.0.0 --port 8791`（ハンドごとに実際のアクション列を入れる = `docs/usage.md`） |
 | 会計 + スマホ注文 API | `main.py --ledger --log-file`（API は `config.json` の `viewer_api.enabled=true` で有効） |
 | RFID リーダー チェック | `tools\probe_pcsc.py list` → `check` |
 
@@ -81,10 +82,10 @@ irm https://raw.githubusercontent.com/reo-sato/pokerapp/verify-v1/installer/boot
    ```
 
 3. **iPad / スマホから卓モニタと API を見られるようにする**。店の Wi-Fi を「プライベート」にし、
-   同じ店内ネットワークからだけ 8788（viewer API）と 8790（卓モニタ）を受け付ける。
+   同じ店内ネットワークからだけ 8788（viewer API）・8790（卓モニタ）・8791（真のアクション入力）を受け付ける。
 
    ```powershell
-   Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -Command "Set-NetConnectionProfile -InterfaceAlias ''Wi-Fi'' -NetworkCategory Private; New-NetFirewallRule -DisplayName ''Poker Hand Logger LAN'' -Direction Inbound -Protocol TCP -LocalPort 8788,8790 -RemoteAddress LocalSubnet -Action Allow -Profile Private | Out-Null; Get-NetConnectionProfile | Format-Table Name, InterfaceAlias, NetworkCategory -AutoSize; Get-NetFirewallRule -DisplayName ''Poker Hand Logger LAN'' | Format-Table DisplayName, Enabled, Profile, Action -AutoSize; pause"'
+   Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -Command "Set-NetConnectionProfile -InterfaceAlias ''Wi-Fi'' -NetworkCategory Private; New-NetFirewallRule -DisplayName ''Poker Hand Logger LAN'' -Direction Inbound -Protocol TCP -LocalPort 8788,8790,8791 -RemoteAddress LocalSubnet -Action Allow -Profile Private | Out-Null; Get-NetConnectionProfile | Format-Table Name, InterfaceAlias, NetworkCategory -AutoSize; Get-NetFirewallRule -DisplayName ''Poker Hand Logger LAN'' | Format-Table DisplayName, Enabled, Profile, Action -AutoSize; pause"'
    ```
 
    初回起動時に Windows セキュリティの警告が出たら「アクセスを許可する」（キャンセルすると
