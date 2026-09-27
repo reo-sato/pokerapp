@@ -14,7 +14,7 @@ Python が入っていない Windows 10/11 の PC を前提にしています。
    （フォルダの中に `install.cmd` が見える状態にする）。
 2. `install.cmd` を**ダブルクリック**。黒い画面が開いて自動で進みます（数分〜、モデルを含めると 10 分程度）。
    途中で「音声認識モデルを今ダウンロードしますか？」と聞かれたら Enter（= はい）。
-3. デスクトップにショートカットが 5 つできれば完了:
+3. デスクトップにショートカットができれば完了:
 
 | ショートカット | 起動するもの |
 |---|---|
@@ -22,6 +22,7 @@ Python が入っていない Windows 10/11 の PC を前提にしています。
 | 卓モニタ (iPad から閲覧) | `tools\table_monitor.py --host 0.0.0.0 --port 8790`（画面に PC の IPv4 を表示） |
 | お客さん用 ハンド履歴 (スマホ) | `main.py --viewer-api --host 0.0.0.0 --port 8788`（お客さんが `http://<PC の IPv4>:8788/` を開く） |
 | 真のアクション入力 (iPad から) | `tools\ground_truth_ui.py --host 0.0.0.0 --port 8791`（ハンドごとに実際のアクション列を入れる = `docs/usage.md`） |
+| ログをまとめる (送付用) | `tools\pack_logs.py`（直近 12 時間のテストのログをデスクトップの zip 1 つに = レビューに送る） |
 | 会計 + スマホ注文 API | `main.py --ledger --log-file`（API は `config.json` の `viewer_api.enabled=true` で有効） |
 | RFID リーダー チェック | `tools\probe_pcsc.py list` → `check` |
 

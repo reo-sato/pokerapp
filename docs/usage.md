@@ -293,6 +293,21 @@ cd C:\PokerHandLogger
 真の履歴は「実際に起きた全アクション」（言われなかったチェック / フォールドも含む）を入れます。
 入力者の名前は画面の「入力者」に入れておくと、その端末で覚えます。
 
+## ログを送る（レビュー用）
+
+テストのあと、デスクトップの **「ログをまとめる (送付用)」**（`pack_logs.cmd`）をダブルクリックすると、直近 12 時間の
+セッションのログがデスクトップの `pokerlogs_<日時>.zip` 1 つにまとまり、エクスプローラでその zip が選ばれた状態で
+開きます。その 1 ファイルをチャットに添付してください。
+
+- 入るもの: ハンドの記録（`<セッション>.json`）・センサーの入力（`.events.jsonl`）・聞き取った文（`.transcripts.jsonl`）・
+  卓状態・真のアクション（`.ground_truth.json`）・発話の音声（`logs\audio\<セッション>\*.wav`、合計 25 MB まで）・
+  そのセッションの時間帯の `pokerapp.log`・`config.json`（トークン類は伏せる）・`rfid_cards.json`。
+- 発話の音声は `config.json` の `audio.save_audio` が true のとき `logs\audio\<セッション ID>\` に保存されます
+  （ファイル名は発話の始まりの時刻 = `.transcripts.jsonl` の `audio_file`）。
+- オプション（PowerShell で `C:\PokerHandLogger\pack_logs.cmd --audio` のように付ける）: `--audio`（音声を必ず入れる）/
+  `--no-audio` / `--hours 48`（直近 48 時間）/ `--session <ID>` / `--text`（zip を添付できないとき: テキスト 1 ファイル、
+  音声なし）。
+
 ## 設定 (`config.json`)
 
 初回起動時に `config_default.json` から `config.json` が作られます。
