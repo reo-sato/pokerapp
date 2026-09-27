@@ -8,7 +8,9 @@
 """
 from __future__ import annotations
 
+import sys
 import threading
+import types
 
 import main
 from audio.recognizer import parse_action
@@ -36,6 +38,15 @@ class TestMakeAudioThread:
         assert thread is not None
         assert thread._device_id == 3          # noqa: SLF001
         assert thread._sample_rate == 8000     # noqa: SLF001
+
+    def test_whisper_threads_from_config(self, monkeypatch):
+        seen: dict = {}
+        monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(
+            WhisperModel=lambda *args, **kwargs: seen.update(kwargs) or object()))
+        main._make_audio_thread({"audio": {"cpu_threads": 8}}, make_audio_queue(), threading.Event())
+        assert seen["cpu_threads"] == 8
+        main._make_audio_thread({"audio": {}}, make_audio_queue(), threading.Event())
+        assert seen["cpu_threads"] == 0              # 既定 = faster-whisper の既定（4）
 
 
 class TestDummyActionVocabulary:

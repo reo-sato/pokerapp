@@ -228,6 +228,7 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, l
         temperature_fallback=bool(audio_cfg.get("temperature_fallback", False)),
         audio_dir=audio_dir,
         vad_threshold=float(audio_cfg.get("vad_threshold", 0.5)),
+        cpu_threads=int(audio_cfg.get("cpu_threads", 0) or 0),
     )
 
 

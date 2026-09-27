@@ -218,3 +218,137 @@ class TestListen:
     def test_dropped_line_names_the_setting(self):
         line = audio_check.format_dropped(0.12, 0.0)
         assert "短い音 0.12 秒" in line and "audio.min_speech_sec" in line
+
+
+# ――― bench: Whisper のスレッド数ごとの聞き取りの時間 ―――
+
+def _write_wav(path: Path, seconds: float = 0.5, rate: int = 16000, channels: int = 1) -> None:
+    import wave
+
+    import numpy as np
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    samples = (np.sin(np.linspace(0, 100, int(rate * seconds) * channels)) * 4000).astype(np.int16)
+    with wave.open(str(path), "wb") as out:
+        out.setnchannels(channels)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(samples.tobytes())
+
+
+def _session(log_dir: Path, sid: str, n: int, *, mtime: float) -> None:
+    import os
+
+    rows = []
+    for i in range(n):
+        name = f"{1000 + i}.wav"
+        rows.append({"utterance_start_ts": float(i), "text": f"コール{i}", "audio_file": name})
+        _write_wav(log_dir / "audio" / sid / name)
+    rows.append({"utterance_start_ts": 90.0, "text": "", "audio_file": "9000.wav", "no_speech": True})
+    rows.append({"utterance_start_ts": 91.0, "text": "チェック", "audio_file": "9100.wav"})   # 音声が無い
+    path = log_dir / f"{sid}.transcripts.jsonl"
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _TimedTranscriber:
+    """スレッドが多いほど速い偽の Whisper（時計を進める）。"""
+
+    ready = True
+
+    def __init__(self, clock: _Clock, threads: int, beam: int) -> None:
+        self.clock, self.threads, self.beam = clock, threads, beam
+        clock.now += 5.0                                  # 読み込み
+
+    def recognize(self, pcm: bytes):
+        self.clock.now += 12.0 / self.threads + 0.1 * self.beam
+        text = "コール" if self.beam >= 5 else "ゴール"      # ビームを下げると書き起こしが変わる
+        return SimpleNamespace(text=text, confidence=0.9)
+
+
+class TestBench:
+    def test_utterances_come_from_the_newest_session_with_audio(self, tmp_path):
+        _session(tmp_path, "old", 3, mtime=1000.0)
+        _session(tmp_path, "new", 30, mtime=2000.0)
+        sid, utterances = audio_check.pick_utterances(tmp_path, None, 10)
+        assert sid == "new" and len(utterances) == 10
+        assert utterances[0][0] == "1000.wav" and utterances[1][0] == "1003.wav"     # 全体に散らす
+        assert all(path.is_file() for _, path, _ in utterances)
+        sid, utterances = audio_check.pick_utterances(tmp_path, "ol", 10)
+        assert sid == "old" and [u[0] for u in utterances] == ["1000.wav", "1001.wav", "1002.wav"]
+        assert audio_check.pick_utterances(tmp_path / "none", None, 10) is None
+
+    def test_wav_is_read_as_live_pcm(self, tmp_path):
+        _write_wav(tmp_path / "a.wav", seconds=1.0)
+        assert len(audio_check.read_pcm16(tmp_path / "a.wav")) == 32000
+        _write_wav(tmp_path / "b.wav", seconds=1.0, rate=8000, channels=2)
+        assert len(audio_check.read_pcm16(tmp_path / "b.wav")) == 32000       # 16 kHz モノラルに
+
+    def test_faster_settings_with_the_same_text_are_recommended(self, tmp_path):
+        _session(tmp_path, "s", 4, mtime=1.0)
+        _, utterances = audio_check.pick_utterances(tmp_path, None, 4)
+        clock = _Clock()
+        lines: list[str] = []
+        results = audio_check.run_bench(
+            utterances, [(4, 5), (8, 5), (8, 2)],
+            lambda threads, beam: _TimedTranscriber(clock, threads, beam), clock=clock, log=lines.append,
+        )
+        assert [(r.threads, r.beam, round(r.median, 2)) for r in results] == [(4, 5, 3.5), (8, 5, 2.0), (8, 2, 1.7)]
+        assert "書き起こしは最初の設定と 0/4 同じ" in lines[2]
+        advice = audio_check.recommend(results, current_threads=4, current_beam=5)
+        assert "スレッド 8・ビーム 5" in advice[1] and "57%" in advice[1]            # ビーム 2 は書き起こしが違う
+        assert advice[2].endswith("set_config.py audio.cpu_threads 8") and len(advice) == 3
+
+    def test_nothing_faster(self, tmp_path):
+        _session(tmp_path, "s", 2, mtime=1.0)
+        _, utterances = audio_check.pick_utterances(tmp_path, None, 2)
+        clock = _Clock()
+        results = audio_check.run_bench(utterances, [(4, 5)], lambda t, b: _TimedTranscriber(clock, t, b),
+                                        clock=clock, log=lambda _: None)
+        assert audio_check.recommend(results, 4, 5)[-1] == "速くなる設定はありませんでした（いまのままで）。"
+
+    def test_command_line(self, tmp_path, capsys, monkeypatch):
+        _session(tmp_path, "s", 3, mtime=1.0)
+        made: list[tuple[int, int]] = []
+
+        def factory(model, language, vad):
+            def make(threads, beam):
+                made.append((threads, beam))
+                return _TimedTranscriber(_Clock(), threads, beam)
+            return make
+
+        monkeypatch.setattr(audio_check, "_make_whisper", factory)
+        config = tmp_path / "config.json"
+        config.write_text(json.dumps({"audio": {"beam_size": 5, "cpu_threads": 0}}), encoding="utf-8")
+        args = ["--config", str(config), "bench", "--log-dir", str(tmp_path), "--threads", "4,8"]
+        assert audio_check.main(args) == 0
+        assert made == [(4, 5), (8, 5)]
+        out = capsys.readouterr().out
+        assert "計測: セッション s の発話 3 個" in out and "スレッド 8・ビーム 5: 1 発話 中央値" in out
+
+    def test_no_saved_audio(self, tmp_path, capsys):
+        config = tmp_path / "config.json"
+        config.write_text(json.dumps({"audio": {}}), encoding="utf-8")
+        assert audio_check.main(["--config", str(config), "bench", "--log-dir", str(tmp_path)]) == 1
+        assert "audio.save_audio" in capsys.readouterr().out
+
+
+def test_whisper_threads_are_passed_to_faster_whisper(monkeypatch):
+    seen: dict = {}
+
+    def model(*args, **kwargs):
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=model))
+    assert WhisperTranscriber("medium", cpu_threads=8).ready and seen["cpu_threads"] == 8
+    WhisperTranscriber("medium")
+    assert seen["cpu_threads"] == 0                    # 0 = faster-whisper の既定（4）のまま

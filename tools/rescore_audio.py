@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import time
 import wave
@@ -169,11 +170,11 @@ class WhisperRescorer:
 
     @classmethod
     def load(cls, model_size: str, language: str = "ja", prompt: Optional[str] = WHISPER_PROMPT_JA,
-             beam_size: int = 5) -> "WhisperRescorer":
+             beam_size: int = 5, cpu_threads: int = 0) -> "WhisperRescorer":
         from faster_whisper import WhisperModel  # type: ignore[import]
         from faster_whisper.tokenizer import Tokenizer  # type: ignore[import]
 
-        model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        model = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
         tokenizer = Tokenizer(model.hf_tokenizer, model.model.is_multilingual, task="transcribe",
                               language=language)
         return cls(model, tokenizer, prompt=prompt, beam_size=beam_size)
@@ -321,6 +322,11 @@ def rescore_session(
     return count, failed
 
 
+def default_threads() -> int:
+    """物理コア数の見積もり（論理コアの半分、4 以上）。採点は営業のあとに動かすので CPU を全部使う。"""
+    return max(4, (os.cpu_count() or 8) // 2)
+
+
 def _load_config() -> dict:
     try:
         from core.config import load_config
@@ -338,6 +344,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--model", default=None, help="Whisper のモデル（既定 config の audio.whisper_model）")
     ap.add_argument("--no-prompt", action="store_true", help="ライブのプロンプトを付けずに採点する")
     ap.add_argument("--include-no-speech", action="store_true", help="声ではない音（VAD）も採点する")
+    ap.add_argument("--threads", type=int, default=None,
+                    help="Whisper の CPU スレッド数（既定: この PC の物理コア数の見積もり。ロガーを閉じてから動かす）")
     args = ap.parse_args(argv)
 
     config = _load_config()
@@ -348,11 +356,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"[rescore] 聞き取りの記録（*.transcripts.jsonl）が {root} にありません")
         return 1
     model_name = args.model or audio_cfg.get("whisper_model") or "medium"
-    print(f"[rescore] Whisper {model_name} を読み込んでいます（初回はモデルの取得に時間がかかります）")
+    threads = args.threads or default_threads()
+    print(f"[rescore] Whisper {model_name} を読み込んでいます（CPU {threads} スレッド。初回はモデルの取得に"
+          "時間がかかります）")
     try:
         rescorer = WhisperRescorer.load(
             model_name, language=audio_cfg.get("language") or "ja",
             prompt=None if args.no_prompt else WHISPER_PROMPT_JA, beam_size=int(audio_cfg.get("beam_size") or 5),
+            cpu_threads=threads,
         )
     except Exception as e:  # noqa: BLE001
         print(f"[rescore] Whisper を読み込めませんでした: {type(e).__name__}: {e}")

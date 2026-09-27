@@ -952,7 +952,7 @@ class WhisperTranscriber:
     def __init__(
         self, model_size: str = "medium", language: str = "ja",
         beam_size: int = 5, temperature_fallback: bool = False,
-        vad_threshold: float = 0.5,
+        vad_threshold: float = 0.5, cpu_threads: int = 0,
     ) -> None:
         """
         Args:
@@ -963,6 +963,8 @@ class WhisperTranscriber:
             vad_threshold: 声か（Silero VAD, faster-whisper に同梱）の閾値。声が見つからない音（札を混ぜる音・
                 チップの音）は Whisper にかけない（雑音にプロンプトを繰り返す幻聴と、その認識待ちを防ぐ）。
                 0 で使わない。config `audio.vad_threshold`。
+            cpu_threads: Whisper が使う CPU のスレッド数。0 = faster-whisper の既定（4）。8 コアの PC では増やすと
+                速くなることがある（`python tools/audio_check.py bench` で測ってから決める）。config `audio.cpu_threads`。
         """
         self._language = language
         self._beam_size = max(1, int(beam_size))
@@ -970,11 +972,13 @@ class WhisperTranscriber:
         self._vad_threshold = max(0.0, float(vad_threshold))
         # 読み込めなかった理由（CLI / audio_check が表示する）。読み込めたら None。
         self.load_error: Optional[str] = None
-        logger.info("Loading Whisper model: %s", model_size)
+        self.cpu_threads = max(0, int(cpu_threads))
+        logger.info("Loading Whisper model: %s (cpu_threads=%s)", model_size, self.cpu_threads or "既定")
         try:
             from faster_whisper import WhisperModel  # type: ignore[import]
 
-            self._model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            self._model = WhisperModel(model_size, device="cpu", compute_type="int8",
+                                       cpu_threads=self.cpu_threads)
         except ImportError:
             logger.warning(
                 "faster-whisper not installed. WhisperTranscriber will not function."

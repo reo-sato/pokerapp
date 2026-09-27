@@ -153,6 +153,7 @@ class AudioThread(threading.Thread):
         temperature_fallback: bool = False,
         audio_dir: Optional[Path] = None,
         vad_threshold: float = 0.5,
+        cpu_threads: int = 0,
     ) -> None:
         """
         Args:
@@ -165,7 +166,8 @@ class AudioThread(threading.Thread):
             listen_gate: プレー中だけ set される Event（ADR-0063）。一度も set されていない間に話された
                          発話は認識に回さない（ハンドの間の会話で認識待ちがたまらないように）。None なら常に聞く。
             speech_rms: 有音とみなす RMS（config `audio.speech_rms`）。離れた席の会話を拾うなら上げる。
-            beam_size / temperature_fallback / vad_threshold: `WhisperTranscriber` に渡す（config `audio.*`）。
+            beam_size / temperature_fallback / vad_threshold / cpu_threads: `WhisperTranscriber` に渡す
+                         （config `audio.*`）。
             audio_dir: 認識に回した発話の音声を WAV で保存するフォルダ（config `audio.save_audio`）。
                          聞き違いの原因（語頭の切れ・音量・雑音）を店舗のデータで確かめるため。None なら保存しない。
         """
@@ -195,7 +197,7 @@ class AudioThread(threading.Thread):
             transcriber if transcriber is not None
             else WhisperTranscriber(model_size=model_size, language=language,
                                     beam_size=beam_size, temperature_fallback=temperature_fallback,
-                                    vad_threshold=vad_threshold)
+                                    vad_threshold=vad_threshold, cpu_threads=cpu_threads)
         )
         # 推論待ちの (発話バイト列, 発話開始時刻)。None は worker 終了の sentinel。
         # 上限なし: 認識が遅れても発話を捨てない（プレーの切れ目で追いつく, ADR-0061）。

@@ -10,20 +10,27 @@ config（`audio.device_id` / `sample_rate` / `whisper_model` / `language`）と�
   level   入力レベルを表示する（しきい値を超えた = 発話として拾う）。マイクの位置・音量の確認
   listen  本番と同じ経路で聞き取り、発話ごとに「何と聞こえたか → どのアクションになったか」と
           かかった時間を表示する（初回は音声認識モデル ≈ 1.5 GB をダウンロード）
+  bench   保存した発話の音声（`logs/audio/<セッション>/`）で、Whisper の CPU スレッド数（とビーム幅）ごとの
+          聞き取りの時間を測る。いちばん速い設定と、それを config に入れるコマンドを表示する（マイク不要）
 
 使用例:
   python tools/audio_check.py list
   python tools/audio_check.py level --seconds 15
   python tools/audio_check.py listen --seconds 120
   python tools/audio_check.py listen --device 1 --model small
+  python tools/audio_check.py bench                 # スレッド 4 と 8 を比べる
+  python tools/audio_check.py bench --threads 4,8,16 --count 20
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import statistics
 import sys
 import threading
 import time
+import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -346,6 +353,7 @@ def _cmd_listen(args: argparse.Namespace) -> int:
         temperature_fallback=bool(cfg.get("temperature_fallback", False)),
         vad_threshold=(args.vad_threshold if args.vad_threshold is not None
                        else float(cfg.get("vad_threshold", 0.5))),
+        cpu_threads=int(cfg.get("cpu_threads", 0) or 0),
     )
     if not thread.asr_ready:
         error = getattr(thread._transcriber, "load_error", None)  # noqa: SLF001
@@ -381,6 +389,175 @@ def _cmd_listen(args: argparse.Namespace) -> int:
     return 0
 
 
+# ――― bench ―――
+
+def default_threads() -> int:
+    """物理コア数の見積もり（論理コアの半分、4 以上）。faster-whisper の既定は 4。"""
+    return max(4, (os.cpu_count() or 8) // 2)
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return rows
+
+
+Utterance = tuple[str, Path, str]          # (音声のファイル名, パス, ライブの書き起こし)
+
+
+def pick_utterances(log_dir: Path, session: Optional[str], count: int) -> Optional[tuple[str, list[Utterance]]]:
+    """測るのに使う発話: 音声が保存されていて聞き取りに回した（声だった）発話を、いちばん新しいセッション
+    （`session` があればそのセッション）から、全体に散らばるように `count` 個。(セッション ID, 発話の列)。"""
+    found = []
+    for transcripts in sorted(log_dir.glob("*.transcripts.jsonl")):
+        sid = transcripts.name[: -len(".transcripts.jsonl")]
+        if session and not sid.startswith(session):
+            continue
+        audio_dir = log_dir / "audio" / sid
+        rows = [r for r in _read_jsonl(transcripts)
+                if r.get("audio_file") and not r.get("no_speech") and (r.get("text") or "").strip()
+                and (audio_dir / r["audio_file"]).is_file()]
+        if rows:
+            found.append((transcripts.stat().st_mtime, sid, audio_dir, rows))
+    if not found:
+        return None
+    _, sid, audio_dir, rows = max(found, key=lambda x: x[0])
+    step = max(1, len(rows) // max(1, count))
+    chosen = rows[::step][:count]
+    return sid, [(r["audio_file"], audio_dir / r["audio_file"], r["text"]) for r in chosen]
+
+
+def read_pcm16(path: Path, rate: int = 16000) -> bytes:
+    """保存した発話の WAV を、ライブの聞き取りと同じ PCM16 モノラル（16 kHz）のバイト列にする。"""
+    with wave.open(str(path), "rb") as src:
+        channels, width, src_rate = src.getnchannels(), src.getsampwidth(), src.getframerate()
+        data = src.readframes(src.getnframes())
+    if (channels, width, src_rate) == (1, 2, rate):
+        return data
+    import numpy as np
+
+    audio = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)
+    if src_rate != rate and len(audio):
+        n = max(1, round(len(audio) * rate / src_rate))
+        audio = np.interp(np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio)
+    return np.clip(audio, -32768, 32767).astype(np.int16).tobytes()
+
+
+@dataclass
+class BenchResult:
+    threads: int
+    beam: int
+    load_sec: float
+    times: list[float]
+    texts: list[str]
+
+    @property
+    def median(self) -> float:
+        return statistics.median(self.times)
+
+
+def run_bench(
+    utterances: list[Utterance], settings: list[tuple[int, int]],
+    make_transcriber: Callable[[int, int], object], clock: Callable[[], float] = time.perf_counter,
+    log: Callable[[str], None] = print,
+) -> list[BenchResult]:
+    """設定（スレッド数, ビーム幅）ごとにモデルを読み込み、同じ発話を聞き取って時間を測る。"""
+    audio = [read_pcm16(path) for _, path, _ in utterances]
+    results: list[BenchResult] = []
+    for threads, beam in settings:
+        started = clock()
+        transcriber = make_transcriber(threads, beam)
+        load_sec = clock() - started
+        if not getattr(transcriber, "ready", True):
+            log(f"  スレッド {threads}・ビーム {beam}: モデルを読み込めませんでした"
+                f"（{getattr(transcriber, 'load_error', '')}）")
+            continue
+        transcriber.recognize(audio[0])            # 1 回目は準備の時間が入るので数えない
+        times, texts = [], []
+        for pcm in audio:
+            started = clock()
+            result = transcriber.recognize(pcm)
+            times.append(clock() - started)
+            texts.append(result.text)
+        result = BenchResult(threads, beam, load_sec, times, texts)
+        results.append(result)
+        same = ""
+        if results[0] is not result:
+            agree = sum(a == b for a, b in zip(results[0].texts, texts))
+            same = f" — 書き起こしは最初の設定と {agree}/{len(texts)} 同じ"
+        log(f"  スレッド {threads}・ビーム {beam}: 1 発話 中央値 {result.median:.2f} 秒・最大 {max(times):.2f} 秒"
+            f"（読み込み {load_sec:.0f} 秒）{same}")
+    return results
+
+
+def recommend(results: list[BenchResult], current_threads: int, current_beam: int) -> list[str]:
+    """いまの設定より 1 割以上速く、書き起こしが同じ設定があれば、それを config に入れるコマンドを出す。"""
+    if not results:
+        return []
+    base = next((r for r in results if (r.threads, r.beam) == (current_threads, current_beam)), results[0])
+    same = [r for r in results if r.texts == base.texts]
+    best = min(same, key=lambda r: r.median)
+    lines = [f"いまの設定（スレッド {base.threads}・ビーム {base.beam}）: 1 発話 中央値 {base.median:.2f} 秒"]
+    if best is base or best.median > 0.9 * base.median:
+        lines.append("速くなる設定はありませんでした（いまのままで）。")
+        return lines
+    lines.append(f"いちばん速いのはスレッド {best.threads}・ビーム {best.beam}（中央値 {best.median:.2f} 秒 = "
+                 f"いまの {best.median / base.median * 100:.0f}%、書き起こしは同じ）。config に入れるなら:")
+    tool = _ROOT / "tools" / "set_config.py"
+    if best.threads != base.threads:
+        lines.append(f"  {sys.executable} {tool} audio.cpu_threads {best.threads}")
+    if best.beam != base.beam:
+        lines.append(f"  {sys.executable} {tool} audio.beam_size {best.beam}")
+    return lines
+
+
+def _parse_ints(raw: str) -> list[int]:
+    return [int(x) for x in raw.replace(" ", "").split(",") if x]
+
+
+def _make_whisper(model: str, language: str, vad_threshold: float) -> Callable[[int, int], object]:
+    from audio.recognizer import WhisperTranscriber
+
+    def make(threads: int, beam: int):
+        return WhisperTranscriber(model_size=model, language=language, beam_size=beam,
+                                  vad_threshold=vad_threshold, cpu_threads=threads)
+
+    return make
+
+
+def _cmd_bench(args: argparse.Namespace, make_transcriber=None) -> int:
+    cfg = load_audio_config(args.config)
+    log_dir = Path(args.log_dir) if args.log_dir else _ROOT / "logs"
+    picked = pick_utterances(log_dir, args.session, args.count)
+    if picked is None:
+        print(f"保存した発話の音声がありません（{log_dir / 'audio'}）。config の audio.save_audio を true にして"
+              "記録したセッションが要ります。")
+        return 1
+    sid, utterances = picked
+    current_threads = int(cfg.get("cpu_threads", 0) or 0) or 4
+    current_beam = int(cfg.get("beam_size", 5))
+    threads = _parse_ints(args.threads) if args.threads else sorted({current_threads, 4, default_threads()})
+    beams = _parse_ints(args.beam) if args.beam else [current_beam]
+    settings = [(t, b) for b in beams for t in threads]
+    model = args.model or cfg.get("whisper_model", "medium")
+    print(f"計測: セッション {sid[:8]} の発話 {len(utterances)} 個・モデル {model}・この PC の論理コア {os.cpu_count()}")
+    print("（本番のロガーを閉じてから。設定ごとにモデルを読み込むので数分かかります）")
+    make = make_transcriber or _make_whisper(model, cfg.get("language", "ja"), float(cfg.get("vad_threshold", 0.5)))
+    results = run_bench(utterances, settings, make)
+    print()
+    for line in recommend(results, current_threads, current_beam):
+        print(line)
+    return 0 if results else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="マイクと音声認識の確認（音声テストの前に）")
     parser.add_argument("--config", default=None,
@@ -405,6 +582,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_listen.add_argument("--vad-threshold", type=float, default=None,
                           help="声か（VAD）の閾値。0 で使わない（既定: config の audio.vad_threshold、無ければ 0.5）")
     p_listen.set_defaults(func=_cmd_listen)
+
+    p_bench = sub.add_parser("bench", help="保存した発話で、Whisper のスレッド数ごとの聞き取りの時間を測る")
+    p_bench.add_argument("--threads", default=None,
+                         help="比べるスレッド数（カンマ区切り。既定: 4 と この PC の物理コア数の見積もり）")
+    p_bench.add_argument("--beam", default=None, help="比べるビーム幅（カンマ区切り。既定: config の audio.beam_size）")
+    p_bench.add_argument("--count", type=int, default=10, help="使う発話の数（既定 10）")
+    p_bench.add_argument("--session", default=None, help="セッション ID（先頭でよい。既定: いちばん新しい）")
+    p_bench.add_argument("--model", default=None, help="音声認識モデル（既定: config の audio.whisper_model）")
+    p_bench.add_argument("--log-dir", default=None, help="logs フォルダ（既定: アプリの logs/）")
+    p_bench.set_defaults(func=_cmd_bench)
     return parser
 
 
