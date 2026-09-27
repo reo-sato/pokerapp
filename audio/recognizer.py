@@ -371,7 +371,7 @@ _PROMPT_WORD_RUNS = tuple(
     "、".join(_PROMPT_WORD_ORDER[i:i + 4]) for i in range(len(_PROMPT_WORD_ORDER) - 3)
 )
 # 無音・雑音に対する Whisper の定型の幻聴（動画の字幕に多い締めの言葉）。
-_STOCK_HALLUCINATIONS = ("ご視聴", "ご覧いただ", "ご覧頂", "チャンネル登録", "お楽しみに")
+_STOCK_HALLUCINATIONS = ("ご視聴", "視聴して", "ご覧いただ", "ご覧頂", "チャンネル登録", "お楽しみに")
 
 
 def is_prompt_echo(text: str) -> bool:

@@ -158,6 +158,32 @@ class TestPresenceSnapshot:
                 "cards": []}
         }
 
+    def test_a_seat_that_never_had_cards_is_not_absent(self, tmp_path: Path):
+        """配られていない席を卓モニタが「離席 / fold らしい」と出さない（店舗 2026-09-27: 8 席全部が離席表示）。"""
+        now = [100.0]
+        bridges = {"s1": self._Bridge([])}
+        cfg = {"name": "s1", "role": "seat", "seat": 1}
+        t = self._thread(tmp_path, bridges, lambda: now[0])
+
+        def poll() -> None:                                   # run() と同じ: 読んだあと役割と在否を更新
+            t._poll_reader(bridges["s1"], cfg, "reader_0")    # noqa: SLF001
+            t._learn_role(cfg, "reader_0")                    # noqa: SLF001
+
+        for _ in range(3):
+            now[0] += 10.0
+            poll()
+        assert t.presence_snapshot()[1]["absent_since"] is None
+        bridges["s1"].uids = ["A1"]
+        poll()
+        bridges["s1"].uids = []
+        now[0] = 200.0
+        poll()
+        assert t.presence_snapshot()[1]["absent_since"] == 200.0
+        t.reset_for_new_hand()
+        now[0] = 210.0
+        poll()
+        assert t.presence_snapshot()[1]["absent_since"] is None     # 新ハンドでは載っていない席に戻る
+
 
 class TestWriterAndPublish:
     def _thread(self, tmp_path: Path, presence):

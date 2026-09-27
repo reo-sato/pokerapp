@@ -211,6 +211,8 @@ class RFIDThread(threading.Thread):
         # fold を「判定」するためではなく、合成 fold に**実時刻を与える**ために使う
         # （プレイヤーはカードを持ち上げて見ることがあるので、不在そのものは fold を意味しない）。
         self._seat_absent_since: dict[int, float] = {}
+        # このハンドで一度でも札が載った席（載ったことのない席は「離れた」にしない）
+        self._seat_seen: set[int] = set()
 
         # ――― 卓の流れに合わせた解釈（ADR-0058）―――
         self._commit_sec = max(0.0, float(commit_sec))
@@ -985,9 +987,11 @@ class RFIDThread(threading.Thread):
         """
         present = any(self._last_uids.get(rid) for rid in self._seat_reader_ids.get(seat, ()))
         if present:
+            self._seat_seen.add(seat)
             self._seat_absent_since.pop(seat, None)
-        elif seat not in self._seat_absent_since:
-            # 「消えた最初の瞬間」を採る（確認は engine 側。後から上書きしない）。
+        elif seat in self._seat_seen and seat not in self._seat_absent_since:
+            # 「消えた最初の瞬間」を採る（確認は engine 側。後から上書きしない）。このハンドで一度も札が
+            # 載っていない席には付けない（卓モニタが配られていない席を「離席」と出していた, 2026-09-27）。
             self._seat_absent_since[seat] = self._clock()
 
     def seat_cards_absent_since(self, seat: int) -> Optional[float]:
@@ -1070,6 +1074,7 @@ class RFIDThread(threading.Thread):
         with self._lock:
             self.reset_board_positions()
             self._seat_absent_since = {}
+            self._seat_seen = set()
             for reader_ids in self._seat_reader_ids.values():
                 for reader_id in reader_ids:
                     self._last_uids[reader_id] = set()
@@ -1130,6 +1135,7 @@ class RFIDThread(threading.Thread):
             for reader_id in reader_ids:
                 self._last_uids[reader_id] = set()
             self._seat_absent_since.pop(seat, None)   # 訂正後の観測をやり直す（ADR-0055）
+            self._seat_seen.discard(seat)
             # この席に記録した札を解放する（載っていれば読み直しで改めて記録される, ADR-0058）。
             self._seat_owner = {u: s for u, s in self._seat_owner.items() if s != seat}
             self._seat_committed.pop(seat, None)

@@ -117,6 +117,8 @@ FOLDOUT_CONFIRM_SEC = 10.0
 # 札の離脱・中央の通過で決めたフォールドの confidence（物理観測。通過の方が確か）
 RFID_FOLD_CONFIDENCE = 0.8
 RFID_MUCK_CONFIDENCE = 0.95
+# 「フォールド」と言われたのに札が席に残っていた席を、次のアクションの前にフォールドにしたとき（音声だけ）
+SPOKEN_FOLD_CONFIDENCE = 0.5
 # ボードの枚数 → ストリートと、その始まりの札の位置（ボードの札が置かれたら前のラウンドは終わっている）
 _BOARD_STREETS = {3: ("flop", (1, 2, 3)), 4: ("turn", (4,)), 5: ("river", (5,))}
 _STREET_RANK = {"preflop": 0, "flop": 1, "turn": 2, "river": 3, "showdown": 4}
@@ -419,6 +421,7 @@ class IntegrationThread(threading.Thread):
         self._current_input_index: Optional[int] = None
         # 「フォールド」と聞こえたが札がまだ席にある席 → 発話の時刻（札が離れたらこの時刻のフォールドにする）
         self._spoken_folds: dict[int, float] = {}
+        self._spoken_fold_raw: dict[int, str] = {}     # その「フォールド」の聞き取った文（記録用）
         # CLI に出した札（同じ札を何度も出さない）: 席 → 手札、ボードは出した枚数
         self._on_cards = on_cards
         self._shown_holes: dict[int, tuple[str, ...]] = {}
@@ -1057,8 +1060,10 @@ class IntegrationThread(threading.Thread):
             info = snapshot.get(seat) or {}
             dep = self._departures.get(seat)
             if info.get("present"):
-                # このハンドの手札が戻った（次のハンドの札を置いたのは「戻った」ではない）
-                if dep is not None and set(info.get("cards") or ()) & set(self._hole_cards.get(seat, ())):
+                # このハンドの手札が戻った（次のハンドの札を置いたのは「戻った」ではない）。「フォールド」の
+                # 発話で降ろした席の札は元から席にある（戻ったのではない）
+                if (dep is not None and not dep.get("spoken")
+                        and set(info.get("cards") or ()) & set(self._hole_cards.get(seat, ()))):
                     self._observe_return(seat, now)
                 continue
             since, mucked = info.get("absent_since"), info.get("mucked_at")
@@ -1187,6 +1192,8 @@ class IntegrationThread(threading.Thread):
             else:
                 if self._check_run_contradictions(bound):
                     continue          # 仮にベットにした席の札が離れた = 解釈し直してから続ける
+                if self._apply_pending_spoken_fold(bound, "spoken_fold_before_departure"):
+                    continue          # 「フォールド」と言われた手番の人が降り、別の席の離脱が待っている
                 actor = self._game_state.legal_context().actor_seat
                 item = next((i for i in items if i[2] == actor), None)
                 if item is None:
@@ -1215,6 +1222,8 @@ class IntegrationThread(threading.Thread):
             self._run_input("leave", ev)
         elif ev.kind == "reinterpret":
             self._run_input("reinterpret", ev)
+        elif ev.kind == "spoken_fold":
+            self._run_input("spoken_fold", ev)
         elif ev.kind == "return":
             self._retract_departure(ev.seat, f"席{ev.seat} の札が戻ったので")
         elif ev.kind == "confirm":
@@ -1226,6 +1235,7 @@ class IntegrationThread(threading.Thread):
         """ハンドの入力を記録してから反映する（札が戻ったとき、同じ順に流し直して組み直すため）。"""
         index = len(self._hand_inputs)
         self._hand_inputs.append((kind, item))
+        previous = self._current_input_index     # 入れ子（発話の処理中に作った信号）でも外側の index を保つ
         self._current_input_index = index
         try:
             if kind == "audio":
@@ -1234,10 +1244,12 @@ class IntegrationThread(threading.Thread):
                 self._sync_to_street(item)
             elif kind == "reinterpret":
                 self._apply_reinterpret(item)
+            elif kind == "spoken_fold":
+                self._register_spoken_fold(item)
             else:
                 self._apply_leave(item, index)
         finally:
-            self._current_input_index = None
+            self._current_input_index = previous
         if not self._rebuilding:
             self._settle_run_hyps()
 
@@ -1259,6 +1271,8 @@ class IntegrationThread(threading.Thread):
             actor = ctx.actor_seat
             if actor is None:
                 break
+            if self._apply_pending_spoken_fold(t, f"spoken_fold+implied_before_{target}"):
+                continue                         # 「フォールド」と言われたまま札が残っていた手番の席
             dep = self._departed().get(actor)
             if dep is not None and dep["t"] < t and actor not in self._showdown_mucks:
                 self._fold_departed(actor, ctx)
@@ -1292,6 +1306,7 @@ class IntegrationThread(threading.Thread):
             "applied": {s: d.get("applied", False) for s, d in self._departures.items()},
             "review": self._hand_needs_review,
             "synced": set(self._streets_synced),
+            "spoken": dict(self._spoken_folds),
             "hyps": [dict(h, candidates=list(h["candidates"])) for h in self._run_hyps
                      if h["index"] < index],
         }
@@ -1309,6 +1324,10 @@ class IntegrationThread(threading.Thread):
         self._showdown_notice_shown = checkpoint["notice"]
         self._last_action_at = checkpoint["last"]
         self._foldout_pending = checkpoint["foldout"]
+        self._spoken_folds = dict(checkpoint.get("spoken", {}))
+        # 「フォールド」の発話から作った離脱はチェックポイントより後なら捨てる（流し直しで作り直す）
+        self._departures = {s: d for s, d in self._departures.items()
+                            if not (d.get("spoken") and s not in checkpoint["applied"])}
         for other, d in self._departures.items():
             d["applied"] = checkpoint["applied"].get(other, False)
         self._streets_synced = set(checkpoint["synced"])
@@ -1582,18 +1601,30 @@ class IntegrationThread(threading.Thread):
                 logger.info("レイズした席を決められません（無言の連続）: 候補 %s", seats)
 
     def _handle_fold_word(self, event: AudioEvent) -> None:
-        """ベッティング中の「フォールド」: 手番の人に付けない。札が離れかけている席があれば、その席の
-        フォールドをいま入れる（3 秒待たない）。札が残っていれば別の解釈（聞き違い・別の席）とみて何もしない。"""
+        """ベッティング中の「フォールド」: 手番の人にすぐには付けない。札が離れかけている席があれば、その席の
+        フォールドをいま入れる（3 秒待たない）。札が残っていれば手番の席を覚えておき、札が離れたとき
+        （その発話の時刻のフォールド）か、同じ人の番のまま次のアクションが聞こえたとき・次のストリートの
+        札が置かれたときに、その席のフォールドにする（「フォールド、コール」と続けて言った = 別の人。
+        店舗 2026-09-27: 札が席に残ったままの「フォールド、コール」で「コール」が降りた人に付いていた）。"""
         if self._rebuilding:
-            return                               # 札の離脱は記録した leave の入力で流し直す
+            return                               # 記録した信号（leave / spoken_fold）の流し直しで再現する
+        spoken_at = _spoken_at(event)
+        if any(d.get("applied") and d.get("action") == "fold" and not d.get("spoken")
+               and 0 <= spoken_at - d["t"] <= SPOKEN_FOLD_WINDOW_SEC
+               for d in self._departures.values()):
+            return                               # 札の離脱で降ろしたばかりの人のこと（言うのが遅れた）
         seat, since = self._absent_seat_for_fold_word()
         if seat is None:
             actor = self._game_state.legal_context().actor_seat
-            if actor is not None:
-                # 札が離れたら、その席のフォールドをこの発話の時刻にする（オーナー: 発声を省略しない運用で
-                # 勝った人が先に札を投げても、降りた人の方が先になる）
-                self._spoken_folds[actor] = _spoken_at(event)
-            self._notice(f"「{event.raw_text}」— 手番の人の札が席に残っているのでまだフォールドにしません（札が離れたら入れます）")
+            if actor is not None and self._seat_presence is not None:
+                # 記録して反映する（replay も同じ順で再現する）。札が離れたらその席のフォールドをこの発話の
+                # 時刻にする（オーナー: 勝った人が先に札を投げても、降りた人の方が先になる）
+                self._spoken_fold_raw[actor] = event.raw_text or ""
+                self._emit_seat_signal(self._seat_signal(
+                    "spoken_fold", actor, event.timestamp, observed_at=_spoken_at(event),
+                ))
+            self._notice(f"「{event.raw_text}」— 手番の人の札が席に残っているのでまだフォールドにしません"
+                         "（札が離れるか、次のアクションで入れます）")
             return
         dep = self._departures.setdefault(seat, {"t": since, "muck": False, "applied": False})
         if dep.get("applied"):
@@ -1605,9 +1636,69 @@ class IntegrationThread(threading.Thread):
     def _fold_time(self, seat: int, t: float) -> float:
         """離脱の時刻。「フォールド」がその少し前に聞こえていれば、発話の時刻にする。"""
         spoken = self._spoken_folds.pop(seat, None)
+        self._spoken_fold_raw.pop(seat, None)
         if spoken is not None and 0 <= t - spoken <= SPOKEN_FOLD_WINDOW_SEC:
             return spoken
         return t
+
+    def _register_spoken_fold(self, ev: RFIDEvent) -> None:
+        """「フォールド」と言われたのに札が席に残っていた手番の席を覚える（記録した信号から。replay も同じ）。"""
+        if ev.seat is not None:
+            self._spoken_folds[ev.seat] = ev.observed_at if ev.observed_at is not None else ev.timestamp
+
+    def _apply_pending_spoken_fold(self, before: float, reason: str) -> bool:
+        """覚えている「フォールド」の席がまだ手番のままなら、その席をフォールドにする。
+
+        次のアクション・次のストリートの札の前に呼ぶ。ディーラーが「フォールド、コール」と続けて言ったときの
+        「フォールド」は手番の人、「コール」はその次の人（札が席に残っていても）。反映したら True。
+        """
+        gs = self._game_state
+        ctx = gs.legal_context()
+        seat = ctx.actor_seat
+        if seat is None:
+            return False
+        spoken = self._spoken_folds.get(seat)
+        if spoken is None or spoken > before:
+            return False
+        del self._spoken_folds[seat]
+        raw = self._spoken_fold_raw.pop(seat, "")
+        street = gs.street
+        can_fold = "fold" in ctx.legal_actions
+        try:
+            if can_fold:
+                gs.apply_action(seat, "fold")
+            else:
+                gs.force_fold(seat)              # チェックできるときに降りた
+        except ValueError:
+            logger.exception("「フォールド」の席をフォールドにできませんでした（席 %s）", seat)
+            return False
+        # 札の離脱で決めたフォールドと同じ扱い（勝った人の離脱の判断・候補の絞り込み）。札はまだ席にある
+        self._departures[seat] = {"t": spoken, "muck": False, "applied": True, "action": "fold",
+                                  "facing_bet": can_fold, "spoken": True}
+        self._append_rfid_record(ActionRecord(
+            hand_id=gs.hand_id,
+            timestamp=self._iso(spoken),
+            street=street,
+            seat=seat,
+            player_name=gs.get_player_name(seat),
+            action="fold",
+            amount=0,
+            pot_after=gs.pot,
+            stack_after=gs.get_stack(seat),
+            source={"camera": False, "audio": True, "rfid": False},
+            needs_review=False,
+            confidence=SPOKEN_FOLD_CONFIDENCE,
+            position=self._position_of(seat),
+            actor_source="spoken_fold",
+            reason=reason,
+            apply_ok=True,
+            raw_text=raw or None,
+        ))
+        self._last_action_at = spoken
+        self._prune_run_candidates(seat)
+        logger.info("「%s」の席%d をフォールドにしました（札は席に残ったまま, %s）", raw or "フォールド", seat, reason)
+        self._resolve_departures()
+        return True
 
     def _had_cards_at(self, seat: int, t: float) -> bool:
         """時刻 `t` にその席の札が席にあった（まだ降りていなかった）か。"""
@@ -2992,6 +3083,11 @@ class IntegrationThread(threading.Thread):
         ActionRecord に配線し、review の理由を逆引き可能にする。
         """
         gs = self._game_state
+        if self._apply_pending_spoken_fold(_spoken_at(event), "spoken_fold_before_next_action"):
+            legal_ctx = gs.legal_context()
+            if legal_ctx.actor_seat is None or not self._hand_open:
+                self._emit_unresolved(event, reason="betting_over")   # そのフォールドで残り 1 人になった
+                return
         index = self._current_input_index
         spoken_seat = self._sensed_seat(event)
         run_possible = (
@@ -3179,6 +3275,7 @@ class IntegrationThread(threading.Thread):
         self._run_hyps = []
         self._run_override = {}
         self._spoken_folds = {}
+        self._spoken_fold_raw = {}
         self._foldout_pending = None
         self._foldout_winner_left = False
         self._last_action_at = self._hand_started_epoch
