@@ -179,11 +179,20 @@ class WhisperRescorer:
                               language=language)
         return cls(model, tokenizer, prompt=prompt, beam_size=beam_size)
 
-    def encode(self, audio: np.ndarray) -> Any:
-        """30 秒の窓に詰めたメルスペクトルを 1 回だけエンコードする（候補の採点はこの出力を使い回す）。"""
+    def encode(self, audio: np.ndarray, window: Optional[int] = None) -> Any:
+        """30 秒の窓に詰めたメルスペクトルを 1 回だけエンコードする（候補の採点はこの出力を使い回す）。
+
+        window: 窓のフレーム数（10 ms 単位）。短くするとエンコードも採点も速い（Whisper は 30 秒の窓で学習して
+        いるので、精度は確かめてから使う = tools/second_ear.py --whisper）。
+        """
         features = self.model.feature_extractor(audio)
         frames = features.shape[-1] - 1
-        return self.model.encode(_pad_or_trim(features[:, :frames]))
+        return self.model.encode(_pad_or_trim(features[:, :frames], window or 3000))
+
+    def transcribe(self, encoded: Any, seconds: float) -> str:
+        """ビーム探索の 1 位の書き起こし。"""
+        alternatives, _ = self.alternatives(encoded, seconds)
+        return alternatives[0]["text"] if alternatives else ""
 
     def alternatives(self, encoded: Any, seconds: float) -> tuple[list[dict], Optional[float]]:
         """ビーム探索の上位の書き起こし（text / tokens / score = 1 トークンあたりの対数確率）と無音の確率。"""

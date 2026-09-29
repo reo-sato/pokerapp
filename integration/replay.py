@@ -137,6 +137,7 @@ def replay_events(
     rfid_folds: bool = False,
     button_seat: Optional[int] = None,
     close_open_hand: bool = False,
+    hand_stacks: Optional[dict[int, dict[int, int]]] = None,
 ) -> list[HandSummary]:
     """Event 列を timestamp 昇順で再構築し、確定した HandSummary 群を返す。
 
@@ -150,6 +151,9 @@ def replay_events(
     `rfid_folds`: フォールドを札の離脱で決めたセッション（記録された leave / return / confirm で再現する）。
     `button_seat`: 1 ハンド目のボタンの **1 つ手前**の席（`create_game_state` と同じ。省略時は最大の席番号）。
     `close_open_hand`: 最後に確定していないハンドを、終了（`q`）と同じ規則で閉じる（記録に終了が無いセッション）。
+    `hand_stacks`: hand_id → {席: 持ち点}。そのハンドをこの持ち点から始める（評価用: 記録の `stack_start` を渡すと、
+    前のハンドの違いが持ち点を通して次のハンドへ持ち越されない。真のアクションのオールインの額は記録の持ち点から
+    決めているので、これが無いと前のハンドを直しただけで後のハンドが違って見える）。pokerkit backend のみ。
 
     記録に配布の信号（rfid kind `deal` / `hand_start`, schema 0.9）があれば、札の読み取りから配布を決め直さず、
     live が在否で決めた配布と、発話を待って始めた時点に従う（在否を持たない replay で live と同じにするため）。
@@ -158,6 +162,11 @@ def replay_events(
     json_writer = JsonWriter(out_dir, session_id)
     summaries: list[HandSummary] = []
     clock = _ReplayClock()
+
+    def start_from_recorded_stacks(hand_id: int) -> None:
+        stacks = (hand_stacks or {}).get(hand_id)
+        if stacks and hasattr(gs, "set_stacks"):
+            gs.set_stacks(stacks)
 
     thread = IntegrationThread(
         audio_queue=make_audio_queue(),
@@ -170,6 +179,7 @@ def replay_events(
         auto_winner=auto_winner,
         rfid_folds=rfid_folds,
         recorded_deals=any(isinstance(e, RFIDEvent) and e.kind == "deal" for e in events),
+        before_new_hand=start_from_recorded_stacks if hand_stacks else None,
     )
 
     for ev in _in_replay_order(events):

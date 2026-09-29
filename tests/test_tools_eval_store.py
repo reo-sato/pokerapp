@@ -247,6 +247,127 @@ class TestListening:
         assert "採点: 「レイズ 600」→ raise 600" in out                         # タイムライン
 
 
+def _ear_row(name: str, free: str, free_logp: float, cands: list[tuple[str, float]]) -> dict:
+    return {"audio_file": name, "ear": {"text": free, "logp": free_logp,
+                                        "candidates": [{"text": t, "logp": lp} for t, lp in cands]}}
+
+
+def _jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+
+
+class TestSecondEarRoutes:
+    """第 2 の耳（`<sid>.ear.jsonl`）と Whisper の別のやり方（`<sid>.whisper.jsonl`）で書き起こしを置き換えた再生。"""
+
+    TRANSCRIPTS = [
+        {"audio_file": "a.wav", "utterance_start_ts": 1.0, "text": "コール", "audio_sec": 1.0},
+        {"audio_file": "b.wav", "utterance_start_ts": 2.0, "text": "ご視聴ありがとうございました。", "audio_sec": 1.2},
+        {"audio_file": "c.wav", "utterance_start_ts": 3.0, "text": "これぞ", "audio_sec": 1.0},
+        {"audio_file": "d.wav", "utterance_start_ts": 4.0, "text": "撮れないからね。", "audio_sec": 1.0},
+        {"audio_file": "e.wav", "utterance_start_ts": 5.0, "text": "えっと", "audio_sec": 1.0},
+    ]
+    EAR = [
+        _ear_row("a.wav", "コール", -1.0, [("コール", -1.0)]),                    # Whisper も読めた
+        _ear_row("b.wav", "六百", -2.0, [("六百", -2.0), ("六百点", -4.0)]),       # 幻聴の下の「六百」（厳しめ）
+        _ear_row("c.wav", "これど", -5.0, [("フォールド", -7.0)]),                 # 崩れた「フォールド」（ゆるめ）
+        _ear_row("d.wav", "お願いしま", -3.0, [("千", -3.4)]),                     # 雑談（差は小さいが読めない）
+        _ear_row("e.wav", "", -0.5, [("百", -3.0)]),                              # 何も聞こえていない
+        {"audio_file": "f.wav", "error": "RuntimeError: boom"},
+    ]
+    WHISPER = [
+        {"audio_file": "b.wav", "noprompt": {"text": "600"}, "short": {"text": "ご視聴ありがとうございました。"},
+         "short_noprompt": {"text": "600"}, "scores": [{"text": "六百", "logp": -1.0}, {"text": "六百点", "logp": -0.5}]},
+        {"audio_file": "c.wav", "noprompt": {"text": "これぞ"}, "short": {"text": "これぞ"},
+         "short_noprompt": {"text": "フォールド"}, "scores": [{"text": "フォールド", "logp": -2.0}]},
+        {"audio_file": "g.wav", "error": "RuntimeError: boom"},
+    ]
+
+    def test_which_text_each_route_reads(self):
+        routes = eval_store.route_texts(self.TRANSCRIPTS, self.EAR, self.WHISPER)
+        assert routes["ear"] == {"a.wav": "コール", "b.wav": "六百", "c.wav": "", "d.wav": "", "e.wav": ""}
+        assert routes["combo_strict"] == {"b.wav": "六百"}
+        assert routes["combo_loose"] == {"b.wav": "六百", "c.wav": "フォールド", "d.wav": "千"}
+        # 2 つの耳の確からしさの和: 六百 = -2.0 + -1.0 > 六百点 = -4.0 + -0.5
+        assert routes["combo_whisper"] == {"b.wav": "六百", "c.wav": "フォールド"}
+        assert routes["w_noprompt"] == {"b.wav": "600", "c.wav": "これぞ"}
+        assert routes["w_short_noprompt"] == {"b.wav": "600", "c.wav": "フォールド"}
+        assert set(routes) == {key for key, _ in eval_store._ROUTE_LABELS}             # noqa: SLF001
+
+    def test_only_the_ear_or_only_whisper(self):
+        assert set(eval_store.route_texts(self.TRANSCRIPTS, self.EAR, [])) == {"ear", "combo_strict", "combo_loose"}
+        assert set(eval_store.route_texts(self.TRANSCRIPTS, [], self.WHISPER)) == {
+            "w_noprompt", "w_short", "w_short_noprompt"}
+
+    def test_the_summary(self):
+        summary = eval_store.ear_summary(self.TRANSCRIPTS, self.EAR)
+        assert (summary["heard"], summary["errors"], summary["rescued_strict"], summary["rescued_loose"]) == (5, 1, 1, 3)
+        assert [(r["audio_file"], r["candidate"], r["strict"]) for r in summary["rescued"]] == [
+            ("b.wav", "六百", True), ("c.wav", "フォールド", False), ("d.wav", "千", False)]
+
+    def test_the_routes_against_the_truth(self, tmp_path, capsys):
+        # 記録したときは「レイズ 600」が幻聴になって読めなかった。第 2 の耳は「レイズ六百」と聞いた
+        tb = _two_hands(tmp_path)
+        rows = _transcripts(tb, tmp_path, heard={"レイズ 600": "ご視聴ありがとうございました。"}, drop=("レイズ 600",))
+        ear, variants = [], []
+        for r in rows:
+            if r["text"] == "ご視聴ありがとうございました。":
+                ear.append(_ear_row(r["audio_file"], "レイズ六百", -1.5, [("レイズ 六百", -1.4), ("六百", -6.0)]))
+                variants.append({"audio_file": r["audio_file"], "noprompt": {"text": r["text"]},
+                                 "short": {"text": "レイズ 600"}, "short_noprompt": {"text": "レイズ 600"}})
+            else:
+                ear.append(_ear_row(r["audio_file"], r["text"], -1.0, [(r["text"], -1.0)]))
+                variants.append({"audio_file": r["audio_file"], "noprompt": {"text": r["text"]},
+                                 "short": {"text": r["text"]}, "short_noprompt": {"text": r["text"]}})
+        _jsonl(tmp_path / f"{SID}.ear.jsonl", ear)
+        _jsonl(tmp_path / f"{SID}.whisper.jsonl", variants)
+        truth = [{"hand_id": h.hand_id, "board": list(h.board), "winner_seat": h.winner_seat,
+                  "actions": [{"street": a.street, "seat": a.seat, "action": a.action, "amount": a.amount}
+                              for a in h.actions]} for h in tb.hands]
+        (tmp_path / f"{SID}.ground_truth.json").write_text(json.dumps({"hands": truth}), encoding="utf-8")
+        report = eval_store.evaluate_session(_files(tmp_path), {}, None)
+        assert report.truth["reparse"]["action_accuracy"] < 1.0
+        assert report.truth["combo_strict"]["action_accuracy"] == 1.0
+        assert report.truth["w_short"]["action_accuracy"] == 1.0
+        assert report.truth["w_noprompt"]["action_accuracy"] < 1.0
+        assert report.ear["rescued_strict"] == 1
+        assert "combo_strict" in report.to_json()["route_differences"]
+        eval_store.print_report([report], True, 1, None, {SID: _files(tmp_path)})
+        out = capsys.readouterr().out
+        assert "第 2 の耳: " in out and "組み合わせ（厳しめ）: 一致率 100%" in out
+        assert "合計（真のアクションのあるハンド）組み合わせ（厳しめ）: 一致" in out
+        assert "耳「レイズ六百」 → レイズ 六百（差 +0.1・読める）" in out                  # タイムライン
+        assert "W 短「レイズ 600」 短なし「レイズ 600」" in out
+
+
+class TestHandStacks:
+    """再生は各ハンドを記録の持ち点から始める（真のアクションのオールインの額は記録の持ち点から決めているので、
+    前のハンドの違いを持ち越すと、直したハンドのあとが違って見える。店舗 2026-09-29）。"""
+
+    def test_the_setup_has_the_stacks_of_each_hand(self, tmp_path):
+        _two_hands(tmp_path)
+        record = json.loads((tmp_path / f"{SID}.json").read_text(encoding="utf-8"))
+        stacks = eval_store.session_setup(record)["hand_stacks"]
+        assert stacks == {str(h["hand_id"]): {str(p["seat"]): p["stack_start"] for p in h["players"]}
+                          for h in record["hands"]}
+        assert stacks["2"] != stacks["1"]                                  # 1 ハンド目の結果で変わった
+
+    def test_each_hand_starts_from_the_given_stacks(self, tmp_path):
+        _two_hands(tmp_path)
+        record = json.loads((tmp_path / f"{SID}.json").read_text(encoding="utf-8"))
+        setup = eval_store.session_setup(record)
+        flags = {"auto_new_hand": True, "auto_winner": True, "rfid_folds": True}
+        events = tmp_path / f"{SID}.events.jsonl"
+        setup["hand_stacks"]["2"] = {"4": 5000, "5": 7000, "6": 9000}      # JSON のキー（文字列）のまま渡せる
+        hands = eval_store.replay_session(events, setup, flags, SID)
+        assert {p["seat"]: p["stack_start"] for p in hands[1]["players"]} == {4: 5000, 5: 7000, 6: 9000}
+        assert hands[0]["actions"] == record["hands"][0]["actions"]
+        # 持ち点を渡さなければ、1 ハンド目の結果を持ち越す（古い fixture）
+        del setup["hand_stacks"]
+        carried = eval_store.replay_session(events, setup, flags, SID)
+        assert ({p["seat"]: p["stack_start"] for p in carried[1]["players"]}
+                == {p["seat"]: p["stack_start"] for p in record["hands"][1]["players"]})
+
+
 class TestFixtures:
     def _with_truth(self, tmp_path: Path) -> _Table:
         tb = _two_hands(tmp_path)

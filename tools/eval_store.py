@@ -16,6 +16,8 @@
 6. 聞き取りの読み直し（S2）: 書き起こし（`<sid>.transcripts.jsonl`）を**いまの読み取り**で読み直して再生する
    （記録したときの読み取りとの差 = 読み取りの修正の効果）。音声を採点し直した結果（`<sid>.rescored.jsonl`,
    `tools/rescore_audio.py`）があれば、いちばん確からしい文で読み直した再生も並べ、書き起こしと違った発話を出す。
+7. 第 2 の耳（`<sid>.ear.jsonl`）と Whisper の別のやり方（`<sid>.whisper.jsonl`, どちらも `tools/second_ear.py`）
+   があれば、方式ごと（`_ROUTE_LABELS`）に書き起こしを置き換えて再生し、真のアクションとの一致を並べる。
 
 使い方:
 
@@ -143,9 +145,13 @@ def find_config(root: Path) -> dict:
 # ――― 卓の設定と再生 ―――
 
 def session_setup(record: dict) -> Optional[dict]:
-    """記録から卓の設定を取る: 席・名前・最初に配られたときの持ち点・最初のハンドのブラインドとボタン。
+    """記録から卓の設定を取る: 席・名前・最初に配られたときの持ち点・最初のハンドのブラインドとボタン・
+    ハンドごとの持ち点（`hand_stacks`）。
 
     ボタンは `create_game_state` と同じく「1 ハンド目のボタンの 1 つ手前の席」で渡す（main.py と同じ計算）。
+    `hand_stacks` = ハンドごとの記録の持ち点。再生は各ハンドをこの持ち点から始める（真のアクションのオールインの額は
+    記録の持ち点から決めているので、前のハンドの違いを持ち越すと、直したハンドのあとが違って見える。店舗 2026-09-29:
+    第 2 の耳で 2 ハンド目の額が直ると、8 ハンド目のオールインの額が真のアクションと合わなくなった）。
     """
     hands = [h for h in (record or {}).get("hands") or [] if isinstance(h, dict)]
     if not hands:
@@ -163,10 +169,16 @@ def session_setup(record: dict) -> Optional[dict]:
     seats = sorted(players)
     button = first.get("button_seat")
     prior = seats[(seats.index(button) - 1) % len(seats)] if button in seats else None
+    hand_stacks = {
+        str(h["hand_id"]): {str(p["seat"]): int(p["stack_start"]) for p in h.get("players") or []
+                            if isinstance(p.get("seat"), int) and p.get("stack_start") is not None}
+        for h in hands if isinstance(h.get("hand_id"), int)
+    }
     return {
         "players": [players[s] for s in seats],
         "sb": int(blinds.get("sb") or 100), "bb": int(blinds.get("bb") or 200),
         "button_prior": prior, "first_hand_id": first.get("hand_id"),
+        "hand_stacks": {k: v for k, v in hand_stacks.items() if v},
     }
 
 
@@ -190,11 +202,14 @@ def replay_session(events: "list | Path", setup: dict, flags: dict, session_id: 
     if isinstance(events, Path):
         events = load_events(events)
     players = [PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"]) for p in setup["players"]]
+    # JSON（fixture の expected.json）のキーは文字列。hand_stacks の無い古い fixture は持ち点を持ち越す
+    hand_stacks = {int(h): {int(s): int(v) for s, v in seats.items()}
+                   for h, seats in (setup.get("hand_stacks") or {}).items()}
     with tempfile.TemporaryDirectory(prefix="eval_replay_") as tmp:
         replay_events(
             events, backend="pokerkit", players=players, sb=setup["sb"], bb=setup["bb"],
             session_id=session_id, out_dir=tmp, button_seat=setup.get("button_prior"), close_open_hand=True,
-            **flags,
+            hand_stacks=hand_stacks or None, **flags,
         )
         data = _read_json(Path(tmp) / f"{session_id}.json") or {}
     return list(data.get("hands") or [])
@@ -211,9 +226,9 @@ def _is_noise(row: dict, text: str) -> bool:
 def reparse_events(events: list, transcripts: list[dict], texts: Optional[dict[str, str]] = None) -> list:
     """音声のアクションを、書き起こしから**いまの読み取り**で読み直したものに置き換えた入力の列。
 
-    texts: 音声のファイル名 → 読み直す文（採点し直した文）。無い発話は書き起こしのまま。打った入力（書き起こしに
-    無い行）と RFID の入力はそのまま。記録に行があった発話はその位置・時刻に、無かった発話は聞き取った時刻の
-    位置に入れる。
+    texts: 音声のファイル名 → 読み直す文（採点し直した文・第 2 の耳の候補）。空の文 = アクションにしない。無い
+    発話は書き起こしのまま。打った入力（書き起こしに無い行）と RFID の入力はそのまま。記録に行があった発話は
+    その位置・時刻に、無かった発話は聞き取った時刻の位置に入れる。
     """
     rows = {r["utterance_start_ts"]: r for r in transcripts if r.get("utterance_start_ts") is not None}
     live_time: dict[float, float] = {}
@@ -222,7 +237,8 @@ def reparse_events(events: list, transcripts: list[dict], texts: Optional[dict[s
             live_time.setdefault(e.utterance_start_ts, e.timestamp)
     reparsed: dict[float, list[AudioEvent]] = {}
     for start, row in rows.items():
-        text = ((texts or {}).get(row.get("audio_file") or "") or row.get("text") or "").strip()
+        name = row.get("audio_file") or ""
+        text = ((texts[name] if texts is not None and name in texts else row.get("text")) or "").strip()
         if _is_noise(row, text):
             continue
         at = live_time.get(start, row.get("heard_at") or start)
@@ -292,6 +308,113 @@ def listening_summary(transcripts: list[dict], rescored: list[dict]) -> dict:
         "rescored": n, "errors": errors, "changed_text": len(changed),
         "changed_actions": sum(1 for c in changed if c["actions_changed"]), "changed": changed,
     }
+
+
+# ――― 第 2 の耳と Whisper の別のやり方（tools/second_ear.py, 2026-09-29）―――
+
+# 第 2 の耳の候補を使う条件。厳しめ = 第 2 の耳が自由に聞いた文そのものが、いちばん確からしい候補と同じ
+# アクションに読める（「のっぴょく」→ 耳「六百」）。ゆるめ = 候補の確からしさが自由に聞いた文より EAR_LOOSE 以上
+# （崩れて聞こえた「これど」→ フォールドも入る。雑談への誤りも増える）。
+EAR_LOOSE = -3.0
+_ROUTE_LABELS = (
+    ("ear", "第 2 の耳だけ（厳しめ）"),
+    ("combo_strict", "組み合わせ（厳しめ）"),
+    ("combo_loose", "組み合わせ（ゆるめ）"),
+    ("combo_whisper", "組み合わせ（2 つの耳で採点）"),
+    ("w_noprompt", "Whisper プロンプトなし"),
+    ("w_short", "Whisper 短い窓"),
+    ("w_short_noprompt", "Whisper 短い窓・プロンプトなし"),
+)
+
+
+@dataclass(frozen=True)
+class EarBest:
+    text: str        # いちばん確からしい候補（読み取りに渡す文）
+    diff: float      # 候補の確からしさ − 自由に聞いた文の確からしさ
+    agrees: bool     # 自由に聞いた文も、候補と同じアクションに読める（厳しめ）
+
+
+def _parsed_keys(text: str) -> list[tuple]:
+    return [(e.action, e.amount, e.seat, e.position) for e in parse_actions(text)]
+
+
+def ear_best(row: dict) -> Optional[EarBest]:
+    """第 2 の耳のいちばん確からしい候補。何も聞こえていなければ None（空の文と比べた差は当てにならない）。"""
+    ear = row.get("ear") or {}
+    cands = ear.get("candidates") or []
+    if row.get("error") or not cands or ear.get("logp") is None or cands[0].get("logp") is None:
+        return None
+    free = (ear.get("text") or "").strip()
+    if not free:
+        return None
+    keys = _parsed_keys(cands[0]["text"])
+    return EarBest(cands[0]["text"], cands[0]["logp"] - ear["logp"], bool(keys) and _parsed_keys(free) == keys)
+
+
+def whisper_reads(row: dict) -> bool:
+    """ライブの Whisper の書き起こしを、いまの読み取りでアクションとして読めるか。"""
+    text = (row.get("text") or "").strip()
+    return not _is_noise(row, text) and bool(parse_actions(text))
+
+
+def route_texts(transcripts: list[dict], ear_rows: list[dict], whisper_rows: list[dict]) -> dict[str, dict[str, str]]:
+    """方式ごとの「音声のファイル名 → 読み直す文」（`reparse_events` の texts）。
+
+    - 第 2 の耳だけ: 候補（厳しめ）。当てはまらなければアクションにしない。
+    - 組み合わせ: Whisper が読めた発話は Whisper のまま。読めなかった発話（雑音・幻聴・読めない文）だけ第 2 の耳の候補。
+    - 2 つの耳で採点: 組み合わせ（ゆるめ）の発話で、第 2 の耳の上位の候補から、2 つの耳の確からしさの和が
+      いちばん大きいもの。
+    - Whisper の別のやり方: その書き起こし。
+    音声の無い発話（第 2 の耳で聞いていない）はどの方式でも書き起こしのまま。
+    """
+    live = {r.get("audio_file"): r for r in transcripts if r.get("audio_file")}
+    routes: dict[str, dict[str, str]] = {}
+    scores = {r.get("audio_file"): {s["text"]: s["logp"] for s in r.get("scores") or [] if s.get("logp") is not None}
+              for r in whisper_rows if r.get("audio_file") and not r.get("error")}
+    if ear_rows:
+        only, strict, loose, both = {}, {}, {}, {}
+        for row in ear_rows:
+            name = row.get("audio_file")
+            if not name or row.get("error"):
+                continue
+            best = ear_best(row)
+            only[name] = best.text if best is not None and best.agrees else ""
+            if best is None or whisper_reads(live.get(name) or {}):
+                continue
+            if best.agrees:
+                strict[name] = best.text
+            if best.diff >= EAR_LOOSE:
+                loose[name] = best.text
+                heard = scores.get(name) or {}
+                joint = [(c["text"], c["logp"] + heard[c["text"]]) for c in row["ear"]["candidates"]
+                         if c.get("logp") is not None and c["text"] in heard]
+                if joint:
+                    both[name] = max(joint, key=lambda x: x[1])[0]
+        routes.update({"ear": only, "combo_strict": strict, "combo_loose": loose})
+        if any(scores.values()):
+            routes["combo_whisper"] = both
+    for key, field_name in (("w_noprompt", "noprompt"), ("w_short", "short"), ("w_short_noprompt", "short_noprompt")):
+        texts = {r["audio_file"]: (r.get(field_name) or {}).get("text") or "" for r in whisper_rows
+                 if r.get("audio_file") and not r.get("error") and r.get(field_name)}
+        if texts:
+            routes[key] = texts
+    return routes
+
+
+def ear_summary(transcripts: list[dict], ear_rows: list[dict]) -> dict:
+    """第 2 の耳で聞いた発話の数と、Whisper が読めなかったのに候補を聞いた発話（厳しめ / ゆるめ）。"""
+    live = {r.get("audio_file"): r for r in transcripts if r.get("audio_file")}
+    rescued = []
+    for row in ear_rows:
+        best = ear_best(row)
+        name = row.get("audio_file")
+        if best is None or not (best.agrees or best.diff >= EAR_LOOSE) or whisper_reads(live.get(name) or {}):
+            continue
+        rescued.append({"audio_file": name, "whisper": (live.get(name) or {}).get("text") or "",
+                        "ear_text": (row.get("ear") or {}).get("text") or "", "candidate": best.text,
+                        "diff": round(best.diff, 2), "strict": best.agrees})
+    return {"heard": sum(1 for r in ear_rows if not r.get("error")), "errors": sum(1 for r in ear_rows if r.get("error")),
+            "rescued_strict": sum(1 for r in rescued if r["strict"]), "rescued_loose": len(rescued), "rescued": rescued}
 
 
 # ――― 比べる ―――
@@ -439,6 +562,8 @@ class SessionReport:
     reparsed: list[dict] = field(default_factory=list)   # 書き起こしをいまの読み取りで読み直した再生
     rescored: list[dict] = field(default_factory=list)   # 採点し直した文で読み直した再生
     listening: dict = field(default_factory=dict)        # 採点し直して書き起こしと違った発話
+    routes: dict = field(default_factory=dict)           # 方式（_ROUTE_LABELS）→ その文で読み直した再生
+    ear: dict = field(default_factory=dict)              # 第 2 の耳（ear_summary）
     gt: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
@@ -447,6 +572,8 @@ class SessionReport:
             "changed_files": self.changed_files, "differences": self.differences, "sources": self.sources,
             "truth": self.truth, "setup": self.setup, "flags": self.flags, "listening": self.listening,
             "reparse_differences": diff_record(self.replayed, self.reparsed) if self.reparsed else [],
+            "ear": self.ear,
+            "route_differences": {k: diff_record(self.reparsed, v) for k, v in self.routes.items()},
         }
 
 
@@ -483,6 +610,14 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
         report.rescored = replay_session(
             reparse_events(events, transcripts, texts), report.setup, report.flags, files.session_id)
         report.listening = listening_summary(transcripts, rescored)
+    ear_rows = _read_jsonl(files.path(".ear.jsonl"))
+    whisper_rows = _read_jsonl(files.path(".whisper.jsonl"))
+    if transcripts and (ear_rows or whisper_rows):
+        for key, texts in route_texts(transcripts, ear_rows, whisper_rows).items():
+            report.routes[key] = replay_session(
+                reparse_events(events, transcripts, texts), report.setup, report.flags, files.session_id)
+        if ear_rows:
+            report.ear = ear_summary(transcripts, ear_rows)
     if report.gt["hands"]:
         report.truth = {
             "record": evaluate_against_truth(report.gt, report.live),
@@ -492,6 +627,8 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
             report.truth["reparse"] = evaluate_against_truth(report.gt, report.reparsed)
         if report.rescored:
             report.truth["rescored"] = evaluate_against_truth(report.gt, report.rescored)
+        for key, hands in report.routes.items():
+            report.truth[key] = evaluate_against_truth(report.gt, hands)
     return report
 
 
@@ -520,6 +657,31 @@ def hand_windows(hands: list[dict]) -> dict[int, tuple[float, float]]:
     return out
 
 
+_VARIANT_NAMES = (("noprompt", "なし"), ("short", "短"), ("short_noprompt", "短なし"))
+
+
+def _ear_note(row: dict) -> str:
+    """タイムラインの第 2 の耳: 自由に聞いた文 → いちばん確からしい候補（自由に聞いた文との確からしさの差）。"""
+    if row.get("error"):
+        return " ／ 耳: 失敗"
+    ear = row.get("ear") or {}
+    cands = ear.get("candidates") or []
+    best = ear_best(row)
+    top = f" → {cands[0].get('text')}" if cands else ""
+    diff = f"（差 {best.diff:+.1f}{'・読める' if best.agrees else ''}）" if best is not None else ""
+    return f" ／ 耳「{ear.get('text') or ''}」{top}{diff}"
+
+
+def _variant_note(row: dict, live: dict) -> str:
+    """タイムラインの Whisper の別のやり方（ライブの書き起こしと違ったものだけ。なし = プロンプトなし・短 = 短い窓）。"""
+    if row.get("error"):
+        return " ／ W: 失敗"
+    heard = (live.get("text") or "").strip()
+    parts = [f"{label}「{(row[key].get('text') or '').strip()}」" for key, label in _VARIANT_NAMES
+             if isinstance(row.get(key), dict) and (row[key].get("text") or "").strip() != heard]
+    return (" ／ W " + " ".join(parts)) if parts else ""
+
+
 def timeline(files: SessionFiles, window: tuple[float, float], tz: Optional[timezone] = None) -> list[str]:
     """ハンドの時間帯の発話・RFID の札と信号・入力を時刻順に（相対秒 + 時計）。"""
     start, end = window
@@ -527,6 +689,8 @@ def timeline(files: SessionFiles, window: tuple[float, float], tz: Optional[time
     heard = set()
     best = {r.get("audio_file"): r.get("best") for r in _read_jsonl(files.path(".rescored.jsonl"))
             if r.get("audio_file") and r.get("best")}
+    ears = {r.get("audio_file"): r for r in _read_jsonl(files.path(".ear.jsonl")) if r.get("audio_file")}
+    variants = {r.get("audio_file"): r for r in _read_jsonl(files.path(".whisper.jsonl")) if r.get("audio_file")}
     for x in _read_jsonl(files.path(".transcripts.jsonl")):
         t = x.get("utterance_start_ts")
         if t is None or not start - 5.0 <= t < end:
@@ -543,6 +707,10 @@ def timeline(files: SessionFiles, window: tuple[float, float], tz: Optional[time
         alt = best.get(x.get("audio_file"))
         if alt and alt.strip() != (x.get("text") or "").strip():
             line += f" ／ 採点: 「{alt}」→ {_actions_text(alt, x)}"
+        if x.get("audio_file") in ears:
+            line += _ear_note(ears[x["audio_file"]])
+        if x.get("audio_file") in variants:
+            line += _variant_note(variants[x["audio_file"]], x)
         rows.append((t, line))
     for ev in load_events(files.events):
         t = ev.timestamp
@@ -709,7 +877,8 @@ _TRUTH_LABELS = (
 
 def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: Optional[int],
                  tz: Optional[timezone], files_by_sid: dict[str, SessionFiles]) -> None:
-    totals: dict[str, Counter] = {key: Counter() for key, _ in _TRUTH_LABELS}
+    labels = _TRUTH_LABELS + _ROUTE_LABELS
+    totals: dict[str, Counter] = {key: Counter() for key, _ in labels}
     for r in reports:
         print(f"=== セッション {r.session_id[:8]}（{r.hands} ハンド）")
         if r.same_code is not None:
@@ -742,9 +911,20 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                 if c["actions_changed"]:
                     margin = "" if c["margin"] is None else f"（確からしさ +{c['margin']}）"
                     print(f"    {c['audio_file']} 「{c['heard']}」{c['before']} → 「{c['best']}」{c['after']}{margin}")
+        if r.ear:
+            e = r.ear
+            print(f"  第 2 の耳: {e['heard']} 発話（失敗 {e['errors']}）・Whisper が読めなかったのに候補を聞いた発話 "
+                  f"{e['rescued_loose']}（うち厳しめ {e['rescued_strict']}）")
+            for c in e["rescued"]:
+                print(f"    {c['audio_file']}  Whisper「{c['whisper'][:20]}」 耳「{c['ear_text']}」→ {c['candidate']}"
+                      f"（差 {c['diff']:+.1f}{'・厳しめ' if c['strict'] else ''}）")
+        if r.routes and r.reparsed:
+            changed = [f"{label} {len(diff_record(r.reparsed, r.routes[key]))}" for key, label in _ROUTE_LABELS
+                       if key in r.routes]
+            print("  方式ごとに読み直すと変わるハンド（書き起こしの読み直しと比べて）: " + " / ".join(changed))
         if r.truth:
             print(f"  真のアクション: {r.truth['record']['hands']} ハンド")
-            for key, label in _TRUTH_LABELS:
+            for key, label in labels:
                 if key not in r.truth:
                     continue
                 t = r.truth[key]
@@ -789,7 +969,7 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                         print(line)
                 for line in compare_rows(gt_by_id.get(hid), live_by_id.get(hid), rep_by_id.get(hid)):
                     print(line)
-    for key, label in _TRUTH_LABELS:
+    for key, label in labels:
         c = totals[key]
         if c["total"]:
             print(f"合計（真のアクションのあるハンド）{label}: 一致 {c['correct']}/{c['total']}"

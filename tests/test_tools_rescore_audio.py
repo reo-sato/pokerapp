@@ -46,13 +46,15 @@ class FakeWhisper:
         self.alternatives = [tok.encode(a) for a in alternatives]
         self.model = SimpleNamespace(generate=self.generate)
         self.calls: list[dict] = []
+        self.windows: list[int] = []            # エンコードした窓のフレーム数
 
     def feature_extractor(self, audio):
         return np.zeros((80, len(audio) // 160 + 1), dtype=np.float32)
 
     def encode(self, features):
-        assert features.shape == (80, 3000)
-        return np.zeros((1, 1500, 4), dtype=np.float32)
+        assert features.shape[0] == 80 and features.shape[1] in (3000, 600)   # 30 秒の窓 / 短い窓
+        self.windows.append(features.shape[1])
+        return np.zeros((1, features.shape[1] // 2, 4), dtype=np.float32)
 
     def _logits(self, position: int) -> np.ndarray:
         row = np.zeros(VOCAB, dtype=np.float32)
@@ -132,6 +134,13 @@ class TestRescore:
         tok = FakeTokenizer()
         rescorer = ra.WhisperRescorer(FakeWhisper(tok, "コール", []), tok, prompt=None)
         assert rescorer.start == [*SOT_SEQUENCE, NO_TS]
+
+    def test_a_short_window_and_the_best_transcription(self):
+        rescorer, _ = _rescorer()
+        audio = np.zeros(16000, dtype=np.float32)
+        assert rescorer.transcribe(rescorer.encode(audio), 1.0) == "ヘッズアップです"    # ビーム探索の 1 位
+        rescorer.encode(audio, 600)                                                      # 短い窓（6 秒）
+        assert rescorer.model.windows == [3000, 600]
 
 
 class TestSession:

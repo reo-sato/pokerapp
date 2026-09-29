@@ -263,6 +263,7 @@ class IntegrationThread(threading.Thread):
         speech_pending_since: Optional[Callable[[], Optional[float]]] = None,
         voice_heard_at: Optional[Callable[[], Optional[float]]] = None,
         recorded_deals: bool = False,
+        before_new_hand: Optional[Callable[[int], None]] = None,
     ) -> None:
         """
         Args:
@@ -283,6 +284,9 @@ class IntegrationThread(threading.Thread):
                          RFID の board 位置を **engine と同じタイミングでリセット**するために使う
                          （`RFIDThread.reset_board_positions`, ISSUE-0026）。integration スレッドで
                          発火するのでスレッド安全に実装すること。
+            before_new_hand: 新しいハンドの持ち点を取る直前に、そのハンドの hand_id で呼ぶフック（additive,
+                         既定 None）。評価の replay が各ハンドを記録の持ち点から始めるのに使う
+                         （`replay_events(hand_stacks=...)`）。
             on_card_correction: ミスディール訂正フック（additive, 既定 None = 訂正は engine 内のみ）。
                          `("board", 位置)` / `("seat", 席)` で呼ぶので、RFID 側の割り当て・
                          デバウンスも同じタイミングで落とす（`RFIDThread.forget_board_position` /
@@ -345,6 +349,7 @@ class IntegrationThread(threading.Thread):
         self._seat_player_map: dict[int, str] = dict(seat_player_map or {})
         self._session_layer_active = session_repo is not None and bool(self._seat_player_map)
         self._on_new_hand = on_new_hand
+        self._before_new_hand = before_new_hand
         self._on_card_correction = on_card_correction
         self._seat_cards_absent_since = seat_cards_absent_since
         self._seat_presence = seat_presence
@@ -3528,6 +3533,8 @@ class IntegrationThread(threading.Thread):
             self._apply_rename(seat, name)
         self._pending_renames = {}
         restored = self._restore_dealt_busted_seats() if auto else []
+        if self._before_new_hand is not None:
+            self._before_new_hand(gs.hand_id + 1)
         # S5（ADR-0047）: stack_start はブラインド post 前に取る。pokerkit backend は new_hand() で
         # ブラインドを自動 post するため、post 後に取ると result がブラインド分ずれる。
         self._stack_start = gs.get_stacks()

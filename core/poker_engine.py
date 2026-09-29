@@ -664,6 +664,16 @@ class PokerkitGameState:
             return
         self._stacks[seat] += amount
 
+    def set_stacks(self, stacks: dict[int, int]) -> None:
+        """次のハンドの持ち点を決める（評価で各ハンドを記録の持ち点から始める = `replay_events(hand_stacks=...)`）。
+
+        ハンドの途中の買い足しの保留は捨てる（記録の持ち点に入っている）。
+        """
+        for seat, stack in stacks.items():
+            if seat in self._players and stack >= 0:
+                self._stacks[seat] = int(stack)
+                self._pending_rebuys.pop(seat, None)
+
     def _apply_pending_rebuys(self) -> None:
         for seat, amount in self._pending_rebuys.items():
             self._stacks[seat] += amount

@@ -6,7 +6,7 @@
 .DESCRIPTION
     このスクリプトがあるフォルダの親（= アプリのフォルダ）に対して次を行う。
       1. Python 3.12 を確認（無ければ winget → python.org のサイレントインストールで導入）
-      2. venv を作成し、依存パッケージを導入（pip install -e ".[pcsc,api]"）
+      2. venv を作成し、依存パッケージを導入（pip install -e ".[pcsc,api]"。第 2 の耳の部品 ".[ear]" は失敗しても続ける）
       3. config.json を雛形（config_default.json）から生成（既存は上書きしない）
       4. 音声認識モデルを先読み（任意。あとでも可）
       5. デスクトップにショートカットを作成
@@ -70,7 +70,7 @@ $PreservedFiles = @(
     "player_credentials.json", "auth_identity.json", "hand_corrections.json",
     "install.log"
 )
-$PreservedDirs = @("venv", "logs", "backups")
+$PreservedDirs = @("venv", "logs", "backups", "models")
 
 # デスクトップに作るショートカット（表示名 → 起動する .cmd）
 $Shortcuts = @(
@@ -227,6 +227,12 @@ function Install-Dependencies {
         # -e（editable）: データファイルや tools/ はアプリのフォルダ直下にある前提なので、
         # site-packages にコピーせずこのフォルダを指したまま入れる。
         Invoke-Checked $VenvPython @("-m", "pip", "install", "-e", ".[pcsc,api]") "依存パッケージの導入"
+        # 第 2 の耳（聞き直しの測定 tools/second_ear.py）の部品。入らなくても本体は動くので、失敗しても止めない。
+        try {
+            Invoke-Checked $VenvPython @("-m", "pip", "install", "-e", ".[ear]") "第 2 の耳の部品の導入"
+        } catch {
+            Write-Log ("第 2 の耳の部品を入れられませんでした（本体の動作には影響しません）: " + $_.Exception.Message) "WARN"
+        }
     } finally { Pop-Location }
 }
 
