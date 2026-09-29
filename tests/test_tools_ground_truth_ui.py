@@ -262,6 +262,73 @@ class TestLegal:
         assert r["next"] is None and r["error"]["index"] == -1
 
 
+# 3 人がリバーまでチェックで進み、ショーダウン（ボタン 席6 → 席4 から）
+CHECKDOWN = [{"seat": 6, "action": "call"}, {"seat": 4, "action": "call"}, {"seat": 5, "action": "check"}] + [
+    {"seat": s, "action": "check"} for _ in range(3) for s in (4, 5, 6)
+]
+
+
+class TestShowdownMuck:
+    """ショーダウンで手札を見せずに降りた（マック）人は、ベッティングのあとのフォールドとして入れられる
+    （オーナー 2026-09-29: リバーのアウトオブポジションのフォールドが入らなかった。ライブの記録も
+    street=showdown の fold, ADR-0062）。"""
+
+    def test_heads_up_all_in_called_then_the_caller_mucks(self):
+        cap = {"players": [{"seat": 4, "stack_start": 10000}, {"seat": 5, "stack_start": 10000}],
+               "blinds": {"sb": 100, "bb": 200}, "button_seat": 5}
+        actions = [{"seat": 5, "action": "call"}, {"seat": 4, "action": "check"},
+                   {"seat": 4, "action": "check"}, {"seat": 5, "action": "check"},
+                   {"seat": 4, "action": "check"}, {"seat": 5, "action": "bet", "amount": 1800},
+                   {"seat": 4, "action": "call"},
+                   {"seat": 4, "action": "check"}, {"seat": 5, "action": "allin"}, {"seat": 4, "action": "call"},
+                   {"seat": 4, "action": "fold"}]
+        r = replay_legal(cap, actions)
+        assert r["error"] is None
+        assert r["actions"][-1] == {"seat": 4, "action": "fold", "amount": 0, "street": "showdown"}
+        assert r["next"]["hand_over"] and r["next"]["foldout_winner"] == 5 and r["next"]["active_seats"] == [5]
+
+    def test_mucks_until_one_is_left(self):
+        cap = _hand(1)
+        r = replay_legal(cap, CHECKDOWN)
+        assert r["error"] is None and r["next"]["active_seats"] == [4, 5, 6] and r["next"]["foldout_winner"] is None
+        r = replay_legal(cap, CHECKDOWN + [{"seat": 4, "action": "fold"}])
+        assert r["error"] is None and r["next"]["active_seats"] == [5, 6] and r["next"]["foldout_winner"] is None
+        r = replay_legal(cap, CHECKDOWN + [{"seat": 4, "action": "fold"}, {"seat": 6, "action": "fold"}])
+        assert r["error"] is None and r["next"]["foldout_winner"] == 5
+        assert [(a["street"], a["seat"]) for a in r["actions"][-2:]] == [("showdown", 4), ("showdown", 6)]
+
+    @pytest.mark.parametrize("extra, message", [
+        ([{"seat": 4, "action": "fold"}, {"seat": 4, "action": "fold"}], "席4 はショーダウンに残っていません（残っているのは席 5・6）"),
+        ([{"seat": 4, "action": "fold"}, {"seat": 5, "action": "fold"}, {"seat": 6, "action": "fold"}],
+         "ほかの人はもう降りています（この行は入りません）"),
+        ([{"seat": 5, "action": "check"}], "ベッティングは終わっています（この行は入りません。ショーダウンで見せずに降りた人はフォールド）"),
+    ])
+    def test_rows_that_cannot_follow_the_betting(self, extra, message):
+        r = replay_legal(_hand(1), CHECKDOWN + extra)
+        assert r["error"] == {"index": len(CHECKDOWN) + len(extra) - 1, "message": message}
+
+    def test_saved_muck_measures_against_the_live_showdown_fold(self, base, log_dir):
+        """保存した真のアクションのショーダウンのフォールドは、ライブの記録の同じ行と一致として数える。"""
+        record = json.loads((log_dir / f"{SID}.json").read_text(encoding="utf-8"))
+        hand = record["hands"][0]
+        rows = replay_legal(hand, CHECKDOWN + [{"seat": 4, "action": "fold"}, {"seat": 6, "action": "fold"}])["actions"]
+        hand["actions"] = [dict(a, raw_text=a["action"], needs_review=False) for a in rows]
+        hand["winner_source"] = "fold"
+        (log_dir / f"{SID}.json").write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        body = {"source": "manual-edit", "hand": {"board": ["As", "Kd", "7h"], "winner_seat": 5,
+                                                  "actions": [dict(a) for a in rows], "players": []}}
+        status, d = _req(base, "PUT", f"/api/sessions/{SID}/hands/1", body)
+        assert status == 200
+        saved = d["saved"]["actions"]
+        assert saved[-2:] == [{"seat": 4, "action": "fold", "amount": 0, "street": "showdown"},
+                              {"seat": 6, "action": "fold", "amount": 0, "street": "showdown"}]
+        assert d["accuracy"]["action_correct"] == d["accuracy"]["action_total"] == len(rows)
+
+    def test_page_offers_a_muck_button(self, base):
+        status, html = _req(base, "GET", "/")
+        assert status == 200 and "function addMuck(seat)" in html and "が見せずに降りた" in html
+
+
 class TestValidate:
     def test_keeps_only_known_fields_and_zeroes_fold_check_amounts(self):
         out = validate_gt_hand({

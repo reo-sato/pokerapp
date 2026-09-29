@@ -360,12 +360,29 @@ def _players_for_replay(captured: dict) -> list[PlayerState]:
     return sorted(players, key=lambda p: p.seat)
 
 
+def _showdown_muck_error(active: list[int], seat: int, act: str) -> Optional[str]:
+    """ベッティングが終わったあとの行を入れられない理由（入れられるなら None）。
+
+    入れられるのは、ショーダウンに残っている人が手札を見せずに降りた（マック）フォールドだけ（ADR-0062。
+    ライブの記録も street=showdown の fold として残す）。最後の 1 人は降りられない（その人の勝ち）。
+    """
+    if act != "fold":
+        return "ベッティングは終わっています（この行は入りません。ショーダウンで見せずに降りた人はフォールド）"
+    if len(active) < 2:
+        return "ほかの人はもう降りています（この行は入りません）"
+    if seat not in active:
+        return f"席{seat} はショーダウンに残っていません（残っているのは席 {'・'.join(map(str, active))}）"
+    return None
+
+
 def replay_legal(captured: dict, actions: list[dict]) -> dict:
     """GT のアクション列を pokerkit で流し、各行のストリートと額（コールは自動）、次の手番を返す。
 
     返り値: `{"actions": [{seat, action, amount, street}], "next": {...} | None, "error": {index, message} | None}`。
     `error` はその行から先を反映できなかった理由（手番違い・額の範囲外など）。`next` は最後に反映できた
     ところの手番（`hand_over` ならベッティングは終わり、`foldout_winner` はほかが全員降りた勝者）。
+    ベッティングが終わったあとのフォールドは、ショーダウンで手札を見せずに降りた（マック）として
+    street=showdown で入る（ライブの記録と同じ形, ADR-0062）。
     """
     players = _players_for_replay(captured)
     if len(players) < 2:
@@ -388,6 +405,14 @@ def replay_legal(captured: dict, actions: list[dict]) -> dict:
 
     out: list[dict] = []
     error: Optional[dict] = None
+    mucked: list[int] = []                   # ショーダウンで手札を見せずに降りた席
+
+    def showdown_seats() -> list[int]:
+        try:
+            return [s for s in gs.get_active_seats() if s not in mucked]
+        except Exception:  # noqa: BLE001
+            return []
+
     for i, raw in enumerate(actions):
         if not isinstance(raw, dict):
             error = {"index": i, "message": "行の形が不正です"}
@@ -403,8 +428,13 @@ def replay_legal(captured: dict, actions: list[dict]) -> dict:
             break
         ctx = gs.legal_context()
         if ctx.actor_seat is None:
-            error = {"index": i, "message": "ベッティングは終わっています（この行は入りません）"}
-            break
+            reason = _showdown_muck_error(showdown_seats(), seat, act)
+            if reason is not None:
+                error = {"index": i, "message": reason}
+                break
+            mucked.append(seat)
+            out.append({"seat": seat, "action": "fold", "amount": 0, "street": "showdown"})
+            continue
         if seat != ctx.actor_seat:
             error = {"index": i, "message": f"手番は席{ctx.actor_seat} です（席{seat} の番ではありません）"}
             break
@@ -446,10 +476,7 @@ def replay_legal(captured: dict, actions: list[dict]) -> dict:
         out.append({"seat": seat, "action": act, "amount": amount, "street": street})
 
     ctx = gs.legal_context()
-    try:
-        active = gs.get_active_seats()
-    except Exception:  # noqa: BLE001
-        active = []
+    active = showdown_seats()
     nxt = {
         "street": gs.street,
         "actor_seat": ctx.actor_seat,
@@ -1101,6 +1128,11 @@ function addQuick(act){
   S.gt.actions.push({seat: n.actor_seat, action: act, amount});
   touch();
 }
+function addMuck(seat){
+  // ショーダウンで手札を見せずに降りた = street=showdown のフォールド（ライブの記録と同じ形, ADR-0062）
+  S.gt.actions.push({seat, action: "fold", amount: 0});
+  touch();
+}
 function isBlind(){ return !!(S.hand && S.hand.blind && !S.revealed); }
 function reveal(){
   if (!confirm("記録を見ると、このハンドはブラインドではなくなります。見ますか？")) return;
@@ -1173,10 +1205,14 @@ function renderEdit(){
   } else if (err) {
     quick = `<div class="quick"><div class="who err">赤い行を直してください</div><div class="small muted">その先の手番はまだ決められません。</div></div>`;
   } else if (n.hand_over) {
-    const who = n.foldout_winner != null
-      ? `席 ${n.foldout_winner} の勝ち（ほかは全員フォールド）`
-      : `ショーダウン: 席 ${(n.active_seats||[]).join("・")} — 勝った席を下で選んでください`;
-    quick = `<div class="quick"><div class="who">ベッティング終了 — ${who}</div><div class="small muted">ポット ${n.pot}。行が足りなければ「＋ 行を追加」、多ければ ✕ で直せます。</div></div>`;
+    const showdown = n.foldout_winner == null;
+    const who = showdown
+      ? `ショーダウン: 席 ${(n.active_seats||[]).join("・")} — 勝った席を下で選んでください`
+      : `席 ${n.foldout_winner} の勝ち（ほかは全員フォールド）`;
+    const mucks = showdown
+      ? `<div class="btns">${(n.active_seats||[]).map(s => `<button onclick="addMuck(${s})">席 ${s} が見せずに降りた</button>`).join("")}</div>`
+      : "";
+    quick = `<div class="quick"><div class="who">ベッティング終了 — ${who}</div>${mucks}<div class="small muted">ポット ${n.pot}。手札を見せずに降りた人がいれば、その席の「見せずに降りた」（ショーダウンのフォールド）。行が足りなければ「＋ 行を追加」、多ければ ✕ で直せます。</div></div>`;
   } else {
     const legal = n.legal_actions || [];
     const cc = n.amount_to_call > 0 ? `コール ${n.amount_to_call}` : "チェック";
