@@ -296,12 +296,17 @@ def format_transcript(t) -> str:
                 "言葉なら audio.vad_threshold を下げる）")
     from audio.recorder import QUESTION_NOTE
 
-    if getattr(t, "noise", False):
+    ear = getattr(t, "ear", None)
+    if getattr(t, "ear_text", None):
+        heard = f"第 2 の耳「{t.ear_text}」→ {describe_events(t.events)}"
+    elif getattr(t, "noise", False):
         heard = "雑音（聞き違い）として無視"
     elif getattr(t, "question", False):
         heard = QUESTION_NOTE
     else:
         heard = describe_events(t.events)
+    if ear is not None:
+        details.append(f"第 2 の耳「{ear.get('text') or ''}」{ear.get('sec') or 0:.1f} 秒")
     return f"  {clock}  「{t.text}」→ {heard}（{'・'.join(details)}）"
 
 
@@ -344,6 +349,10 @@ def _cmd_listen(args: argparse.Namespace) -> int:
     stop = threading.Event()
     min_speech = (args.min_speech if args.min_speech is not None
                   else float(cfg.get("min_speech_sec", _MIN_BUFFER_SECONDS)))
+    from audio.second_ear import load_live
+
+    second_ear, ear_message = load_live(Path(__file__).resolve().parent.parent, cfg)   # 本番と同じ聞き直し
+    print(ear_message, flush=True)
     thread = AudioThread(
         audio_queue=make_audio_queue(), device_id=device,
         sample_rate=int(cfg.get("sample_rate", 16000)), model_size=model,
@@ -355,6 +364,7 @@ def _cmd_listen(args: argparse.Namespace) -> int:
         vad_threshold=(args.vad_threshold if args.vad_threshold is not None
                        else float(cfg.get("vad_threshold", 0.5))),
         cpu_threads=int(cfg.get("cpu_threads", 0) or 0),
+        second_ear=second_ear,
     )
     if not thread.asr_ready:
         error = getattr(thread._transcriber, "load_error", None)  # noqa: SLF001

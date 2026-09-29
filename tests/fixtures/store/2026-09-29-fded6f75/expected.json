@@ -22,16 +22,43 @@
   "bb": 200,
   "button_prior": 5,
   "first_hand_id": 1,
+  "hand_stacks": {
+   "1": {
+    "4": 10000,
+    "5": 10000,
+    "6": 10000
+   },
+   "2": {
+    "4": 7000,
+    "5": 9000,
+    "6": 14000
+   },
+   "3": {
+    "4": 7000,
+    "5": 8800,
+    "6": 14200
+   },
+   "4": {
+    "4": 6000,
+    "5": 6800,
+    "6": 17200
+   },
+   "5": {
+    "4": 12200,
+    "5": 6600,
+    "6": 11200
+   }
+  },
   "auto_new_hand": true,
   "auto_winner": true,
   "rfid_folds": true
  },
  "code": {
-  "main.py": "c8bc3bba6dc920b4",
-  "integration/engine.py": "7734eaa823f8cfc6",
-  "core/poker_engine.py": "42285d8c31744048",
+  "main.py": "c609080bfa7c6a98",
+  "integration/engine.py": "b5a27f28ecef8a55",
+  "core/poker_engine.py": "e6f07f1811a5c20c",
   "audio/recognizer.py": "fc74214dfc014efd",
-  "audio/recorder.py": "beb3404964ba7507",
+  "audio/recorder.py": "fc5c20c6cb8af165",
   "rfid/reader_thread.py": "fa5afebb74a9b76a"
  },
  "hands": [
@@ -413,7 +440,7 @@
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 4,
+    "action_correct": 8,
     "action_total": 8,
     "winner_match": true,
     "board_match": true

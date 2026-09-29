@@ -8,7 +8,7 @@
       1. Python 3.12 を確認（無ければ winget → python.org のサイレントインストールで導入）
       2. venv を作成し、依存パッケージを導入（pip install -e ".[pcsc,api]"。第 2 の耳の部品 ".[ear]" は失敗しても続ける）
       3. config.json を雛形（config_default.json）から生成（既存は上書きしない）
-      4. 音声認識モデルを先読み（任意。あとでも可）
+      4. 音声認識モデルを先読み（任意。あとでも可）と、第 2 の耳のモデルの取得（失敗しても続ける）
       5. デスクトップにショートカットを作成
       6. 動作確認（import と main.py --help）
 
@@ -266,6 +266,17 @@ function Invoke-ModelPrefetch {
     Invoke-Checked $VenvPython @("-c", $code) "音声認識モデルの取得"
 }
 
+function Invoke-EarModel {
+    # 第 2 の耳（Whisper が読めなかった発話の聞き直し）のモデル（約 170 MB。GitHub の配布物 約 713 MB を読みながら
+    # 取り出す。取得済みなら何もしない）。取れなくても本体は動く（Whisper だけで聞く）ので、失敗しても止めない。
+    if ($SkipModel) { Write-Log "第 2 の耳のモデルの取得はスキップ（-SkipModel）"; return }
+    try {
+        Invoke-Checked $VenvPython @((Join-Path $AppDir "tools\second_ear.py"), "--model-only") "第 2 の耳のモデルの取得"
+    } catch {
+        Write-Log ("第 2 の耳のモデルを取得できませんでした（Whisper だけで聞き取ります。次の更新でもう一度試します）: " + $_.Exception.Message) "WARN"
+    }
+}
+
 # ───────────────────────── ショートカット / 動作確認 ─────────────────────────
 
 function New-Shortcuts {
@@ -401,6 +412,7 @@ try {
 
     Write-Log "音声認識モデル" "STEP"
     Invoke-ModelPrefetch
+    Invoke-EarModel
 
     Write-Log "ショートカット" "STEP"
     New-Shortcuts

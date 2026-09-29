@@ -198,7 +198,7 @@ def _rfid_tracking_kwargs(rfid_cfg: dict) -> dict:
 
 
 def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, listen_gate=None,
-                       audio_dir=None):
+                       audio_dir=None, second_ear=None):
     """config.audio.enabled が true（既定）なら AudioThread を返す。false なら None。
 
     false はマイクを繋がない実機テスト（RFID のカード読み取りだけを見る / ダミーアクションを
@@ -207,6 +207,7 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, l
     `on_transcript` は聞き取った文ごとに呼ばれる（CLI の表示, ADR-0060）。
     `listen_gate` はプレー中だけ set される Event（ハンドの間の発話は認識に回さない, ADR-0063）。
     `audio_dir` は発話の音声を WAV で保存するフォルダ（`audio.save_audio` のとき）。
+    `second_ear` は Whisper が読めなかった発話を聞き直す第 2 の耳（`audio.second_ear.load_live`）。
     """
     audio_cfg = cfg.get("audio", {})
     if not audio_cfg.get("enabled", True):
@@ -229,7 +230,17 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, l
         audio_dir=audio_dir,
         vad_threshold=float(audio_cfg.get("vad_threshold", 0.5)),
         cpu_threads=int(audio_cfg.get("cpu_threads", 0) or 0),
+        second_ear=second_ear,
     )
+
+
+def _load_second_ear(audio_cfg: dict):
+    """第 2 の耳を読み込み、どうなったかを CLI に出す（使えなくても Whisper だけで続ける, 2026-09-29）。"""
+    from audio.second_ear import load_live
+
+    ear, message = load_live(Path(__file__).resolve().parent, audio_cfg)
+    print(message, flush=True)
+    return ear
 
 
 def _make_listen_gate(cfg: dict):
@@ -257,10 +268,13 @@ def _print_transcript(transcript) -> None:
     if getattr(transcript, "no_speech", False):
         return
     text = transcript.text
-    if getattr(transcript, "noise", False):
+    if getattr(transcript, "noise", False) and len(text) > _NOISE_SHOWN_CHARS:
+        text = text[:_NOISE_SHOWN_CHARS] + "…"
+    if getattr(transcript, "ear_text", None):
+        # Whisper が読めず、第 2 の耳で読んだ（2026-09-29）
+        heard = f"第 2 の耳「{transcript.ear_text}」→ {describe_events(transcript.events)}"
+    elif getattr(transcript, "noise", False):
         heard = "雑音（聞き違い）として無視"
-        if len(text) > _NOISE_SHOWN_CHARS:
-            text = text[:_NOISE_SHOWN_CHARS] + "…"
     elif getattr(transcript, "question", False):
         heard = QUESTION_NOTE
     else:
@@ -495,8 +509,9 @@ def run_cli() -> None:
 
     audio_dir = (Path(session_cfg["log_dir"]) / "audio" / session_id
                  if audio_cfg.get("save_audio", False) else None)
+    second_ear = _load_second_ear(audio_cfg) if audio_cfg.get("enabled", True) else None
     audio_thread = _make_audio_thread(cfg, audio_q, stop_event, on_transcript=on_transcript,
-                                      listen_gate=listen_gate, audio_dir=audio_dir)
+                                      listen_gate=listen_gate, audio_dir=audio_dir, second_ear=second_ear)
     if audio_thread is None:
         print("音声入力は無効です (audio.enabled=false)。"
               "アクションはキーボードから読み上げ文で投入してください。")
@@ -855,7 +870,9 @@ def run_gui() -> None:
     )
 
     listen_gate = _make_listen_gate(cfg)
-    audio_thread = _make_audio_thread(cfg, audio_q, stop_event, listen_gate=listen_gate)
+    audio_cfg = cfg.get("audio", {})
+    second_ear = _load_second_ear(audio_cfg) if audio_cfg.get("enabled", True) else None
+    audio_thread = _make_audio_thread(cfg, audio_q, stop_event, listen_gate=listen_gate, second_ear=second_ear)
     if audio_thread is None:
         print("音声入力は無効です (audio.enabled=false)。"
               "アクションはキーボードから読み上げ文で投入してください。")

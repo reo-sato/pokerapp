@@ -6,11 +6,15 @@
 2. 決まった候補（アクションの語・額・その組み合わせ）ごとの確からしさ log P(候補 | 音声)（全アラインメントの和）
 
 を出す。Whisper の書き起こしの文字列を読むのではなく、音にどの候補がいちばん合うかを確率で比べるので、
-書き起こしの表記揺れは関係がない。どれにするかはここでは決めない（推定器が卓の状態と合わせて決める。
-ADR-0056 追記 1）。店舗の実験では 1 発話 0.1 秒ほど（CPU, int8）。
+書き起こしの表記揺れは関係がない。1 発話 0.3 秒ほど（CPU, int8）。
 
-音の近さだけでは決まらない発話（ディーラーの短く崩した「コル」と「これ」）があるので、候補と確からしさを
-記録して、あとで卓の状態と合わせる。
+ライブでは **Whisper がアクションとして読めなかった発話だけ**を聞き直し、第 2 の耳が自由に聞いた文そのものが
+いちばん確からしい候補と同じアクションに読めるときだけ、その候補を使う（`rescue_events`。店舗 9/29 の評価:
+真のアクションとの一致 73% → 80%, `docs/worklog/2026-09-29-second-ear-evaluation.md`）。Whisper が読めた発話は
+変えない（第 2 の耳には席番号・ポジションの候補が無い）。
+
+音の近さだけでは決まらない発話（ディーラーの短く崩した「コル」と「これ」）は使わない。候補と確からしさは記録して、
+あとで卓の状態と合わせる（ADR-0056 追記 1 の推定器）。
 """
 from __future__ import annotations
 
@@ -413,3 +417,79 @@ class SecondEar:
         scores = heard.score_trie(self.trie)
         order = np.argsort(-scores)[:top]
         return EarResult(text, free, [(self.trie.candidates[i].text, float(scores[i])) for i in order])
+
+
+# ――― ライブの聞き直し ―――
+
+# 第 2 の耳の候補から作ったアクションの印（要確認）と、聞き取りの自信（Whisper の自信は、読めなかった文・
+# 幻聴のものなので使えない）
+EAR_FLAG = "second_ear"
+EAR_CONFIDENCE = 0.5
+
+
+def _action_keys(text: str) -> list[tuple]:
+    from audio.recognizer import parse_actions
+
+    return [(e.action, e.amount, e.seat, e.position) for e in parse_actions(text)]
+
+
+def agreed_candidate(ear: Optional[dict]) -> Optional[str]:
+    """第 2 の耳が自由に聞いた文そのものが、いちばん確からしい候補と同じアクションに読めるとき、その候補の文。
+
+    `ear` は `EarResult.to_dict()` の形。何も聞こえていない（自由に聞いた文が空）・候補が読めない・自由に聞いた文が
+    違うアクションに読める（雑談「お願いしま」→ 候補「千」、チップを数える「三万四千四百点」→「四千四百点」）なら None。
+    """
+    if not ear:
+        return None
+    cands = ear.get("candidates") or []
+    free = (ear.get("text") or "").strip()
+    if not cands or not free:
+        return None
+    best = (cands[0].get("text") or "").strip()
+    keys = _action_keys(best) if best else []
+    return best if keys and _action_keys(free) == keys else None
+
+
+def rescue_events(ear: Optional[dict], *, utterance_start_ts: Optional[float] = None) -> list:
+    """`agreed_candidate` の文を読んだアクション（`second_ear` の印 = 要確認）。使えなければ空。"""
+    from audio.recognizer import parse_actions
+
+    text = agreed_candidate(ear)
+    if text is None:
+        return []
+    events = parse_actions(text, confidence=EAR_CONFIDENCE, utterance_start_ts=utterance_start_ts)
+    for event in events:
+        event.parse_flags = (*event.parse_flags, EAR_FLAG)
+    return events
+
+
+def pcm16_samples(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
+    """PCM16（モノラル）→ 16 kHz の float32 [-1, 1]。"""
+    audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    if sample_rate != SAMPLE_RATE and len(audio):
+        n = max(1, round(len(audio) * SAMPLE_RATE / sample_rate))
+        audio = np.interp(np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio).astype(np.float32)
+    return audio
+
+
+def load_live(root: Path, audio_cfg: dict) -> tuple[Optional[SecondEar], str]:
+    """ライブで使う第 2 の耳を読み込む（config `audio.second_ear` = {"enabled", "threads"}, 既定は使う）。
+
+    (第 2 の耳 or None, CLI に出す一言) を返す。使えなくても聞き取りは Whisper だけで続ける。
+    """
+    cfg = audio_cfg.get("second_ear") or {}
+    if not cfg.get("enabled", True):
+        return None, "第 2 の耳は使いません（audio.second_ear.enabled=false）"
+    folder = model_dir(root)
+    if not model_ready(folder):
+        return None, "第 2 の耳のモデルがありません（更新で取得します）。Whisper だけで聞き取ります"
+    try:
+        import kaldi_native_fbank  # type: ignore[import]  # noqa: F401 — 聞くときに使う。無ければここで分かる
+
+        ear = SecondEar.load(folder, threads=int(cfg.get("threads", 4) or 4))
+        ear.hear(np.zeros(SAMPLE_RATE // 2, dtype=np.float32))    # 一度聞いてみる（壊れたモデルをここで見つける）
+    except ImportError as e:
+        return None, f"第 2 の耳の部品がありません（{e}。更新で入ります）。Whisper だけで聞き取ります"
+    except Exception as e:  # noqa: BLE001 — 読み込めなくても聞き取りは止めない
+        return None, f"第 2 の耳を読み込めませんでした（{type(e).__name__}: {e}）。Whisper だけで聞き取ります"
+    return ear, "第 2 の耳（Whisper が読めなかった発話の聞き直し）を使います"

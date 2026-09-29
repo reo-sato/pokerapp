@@ -149,6 +149,10 @@ test("reasonLabels: known codes, patterns, and unknown codes", () => {
   ]);
   assert.deepEqual(reasonLabels("raise_illegal_to_call"), ["レイズできない場面 → コールにした"]);
   assert.deepEqual(reasonLabels("something_new"), ["something_new"]);
+  assert.deepEqual(reasonLabels("amount_only+second_ear"), [
+    "数字だけ（ベットかレイズかは場面から）",
+    "Whisper が読めず、第 2 の耳で読んだ",
+  ]);
 });
 
 test("heardDetails: heard text, correction, and synthesized fold", () => {

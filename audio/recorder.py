@@ -62,6 +62,10 @@ class Transcript:
     audio_file: Optional[str] = None       # 保存した発話の音声（`audio_dir` があるとき, ファイル名）
     no_speech: bool = False                # 声が無い音（VAD）なので Whisper にかけなかった（text は空）
     question: bool = False                 # 確認型の発話（「コールですか？」）= アクションにしない（仕様 FR-17）
+    # 第 2 の耳で聞き直した結果（Whisper がアクションとして読めなかった発話だけ, `EarResult.to_dict()` + 秒数）と、
+    # それで読んだ候補の文（使わなかったら None）。events はその候補から読んだもの（2026-09-29）
+    ear: Optional[dict] = None
+    ear_text: Optional[str] = None
 
 
 # 確認型の発話の表示（CLI / audio_check / ログで共通）
@@ -99,7 +103,7 @@ def describe_event(event: Optional[AudioEvent]) -> str:
         parts.append(f"席{event.seat}")
     elif event.position:
         parts.append(event.position)
-    labels = {"amount_only": "数字だけ", "fuzzy_keyword": "音の近さで読んだ"}
+    labels = {"amount_only": "数字だけ", "fuzzy_keyword": "音の近さで読んだ", "second_ear": "第 2 の耳"}
     shown = [labels.get(f, f) for f in flags if f != "check_around"]
     if shown:
         parts.append("（" + "・".join(shown) + "）")
@@ -154,6 +158,7 @@ class AudioThread(threading.Thread):
         audio_dir: Optional[Path] = None,
         vad_threshold: float = 0.5,
         cpu_threads: int = 0,
+        second_ear=None,
     ) -> None:
         """
         Args:
@@ -170,6 +175,10 @@ class AudioThread(threading.Thread):
                          （config `audio.*`）。
             audio_dir: 認識に回した発話の音声を WAV で保存するフォルダ（config `audio.save_audio`）。
                          聞き違いの原因（語頭の切れ・音量・雑音）を店舗のデータで確かめるため。None なら保存しない。
+            second_ear: 第 2 の耳（`audio.second_ear.SecondEar` = `hear(samples) -> EarResult`）。Whisper が
+                         アクションとして読めなかった発話（雑音・幻聴・読めない文。確認型の発話は除く）だけを聞き直し、
+                         第 2 の耳が自由に聞いた文そのものが候補と同じアクションに読めるときだけ、その候補を使う
+                         （`second_ear.rescue_events`, 2026-09-29）。None なら Whisper だけ。
         """
         super().__init__(daemon=True, name="AudioThread")
         self._audio_queue = audio_queue
@@ -190,6 +199,7 @@ class AudioThread(threading.Thread):
         self._inferring_start: Optional[float] = None
         self._capture_start: Optional[float] = None
         self._audio_dir = Path(audio_dir) if audio_dir is not None else None
+        self._second_ear = second_ear
         # 最後に声（有音ゲートを越える音）が入った時刻。プレー中に長く入らなければ engine がマイクの
         # 電池・受信機を疑って知らせる（ワイヤレスマイクの電池切れでハンドが丸ごと記録されなかった, 2026-09-25）。
         self.last_voice_at: Optional[float] = None
@@ -454,30 +464,60 @@ class AudioThread(threading.Thread):
                     audio_file=audio_file, no_speech=True,
                 ))
                 return
-            if not text:
-                return
-            noise = is_prompt_echo(text) or is_implausibly_long(text, audio_sec)
-            question = not noise and is_question(text)     # 確認型はアクションにしない（仕様 FR-17）
+            noise = bool(text) and (is_prompt_echo(text) or is_implausibly_long(text, audio_sec))
+            question = bool(text) and not noise and is_question(text)   # 確認型はアクションにしない（仕様 FR-17）
             # 続けて言った複数のアクションは言った順に分ける（ADR-0061）。雑音への幻聴は読まない（ADR-0063）。
-            events = () if noise else tuple(parse_actions(
+            events = () if noise or not text else tuple(parse_actions(
                 text, confidence=confidence, utterance_start_ts=utterance_start_ts
             ))
+            ear, ear_text = None, None
+            if not events and not question and self._second_ear is not None:
+                ear, ear_text, events = self._hear_again(audio_bytes, utterance_start_ts)
+            if not text and not events:
+                return                      # 何も聞こえなかった（第 2 の耳でも）
+            if ear_text is not None:
+                heard = f"第 2 の耳「{ear_text}」→ {describe_events(events)}"
+            elif noise:
+                heard = "雑音（聞き違い）として無視"
+            else:
+                heard = QUESTION_NOTE if question else describe_events(events)
             logger.info(
                 "聞き取り: %r (confidence=%s, 推論 %.2f 秒) → %s",
-                text, "-" if confidence is None else f"{confidence:.2f}", infer_sec,
-                "雑音（聞き違い）として無視" if noise
-                else QUESTION_NOTE if question else describe_events(events),
+                text, "-" if confidence is None else f"{confidence:.2f}", infer_sec, heard,
             )
             self._report(Transcript(
                 text=text, confidence=confidence, events=events,
                 audio_sec=audio_sec,
                 infer_sec=infer_sec, utterance_start_ts=utterance_start_ts,
                 heard_at=heard_at, noise=noise, audio_file=audio_file, question=question,
+                ear=ear, ear_text=ear_text,
             ))
             for event in events:
                 self._audio_queue.put(event)
         except Exception:
             logger.exception("Error in _process_chunk (chunk size=%d bytes)", len(audio_bytes))
+
+    def _hear_again(
+        self, audio_bytes: bytes, utterance_start_ts: Optional[float]
+    ) -> tuple[Optional[dict], Optional[str], tuple[AudioEvent, ...]]:
+        """Whisper がアクションとして読めなかった発話を第 2 の耳で聞き直す（2026-09-29）。
+
+        (第 2 の耳の結果, 使った候補の文 or None, その候補から読んだアクション) を返す。聞き直せなければ
+        (None, None, ())。
+        """
+        from audio.second_ear import agreed_candidate, pcm16_samples, rescue_events
+
+        started = time.time()
+        try:
+            ear = self._second_ear.hear(pcm16_samples(audio_bytes, self._sample_rate)).to_dict()
+        except Exception:
+            logger.exception("第 2 の耳で聞き直せませんでした")
+            return None, None, ()
+        ear["sec"] = round(time.time() - started, 3)
+        text = agreed_candidate(ear)
+        if text is None:
+            return ear, None, ()
+        return ear, text, tuple(rescue_events(ear, utterance_start_ts=utterance_start_ts))
 
     def _report(self, transcript: Transcript) -> None:
         if self._on_transcript is None:

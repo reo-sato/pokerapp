@@ -16,7 +16,8 @@
     python tools/second_ear.py --whisper             # Whisper の別のやり方も（1 発話 数秒）
 
 初回は第 2 の耳のモデル（約 170 MB）を、GitHub の配布物（約 713 MB）から取り出して `models/reazonspeech-k2-v2/`
-に置く（一度だけ）。
+に置く（一度だけ。インストーラ・更新も `--model-only` で取得する）。ライブの聞き取りも同じモデルで、Whisper が
+読めなかった発話を聞き直す（`audio/recorder.py`, config `audio.second_ear`）。
 """
 from __future__ import annotations
 
@@ -250,7 +251,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--whisper", action="store_true",
                     help="Whisper の別のやり方も（プロンプトなし・短い窓・第 2 の耳の候補の採点。1 発話 数秒）")
     ap.add_argument("--model-dir", default=None, help="第 2 の耳のモデルの置き場（既定 models/reazonspeech-k2-v2）")
+    ap.add_argument("--model-only", action="store_true",
+                    help="モデルを取得するだけ（インストーラ・更新が使う。取得済みなら何もしない）")
     args = ap.parse_args(argv)
+    if args.model_only:
+        return 0 if ensure_model(Path(args.model_dir) if args.model_dir else se.model_dir(ROOT)) else 1
 
     try:
         from core.config import load_config

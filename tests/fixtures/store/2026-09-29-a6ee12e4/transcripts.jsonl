@@ -5,7 +5,7 @@
 {"utterance_start_ts": 1790671981.7011726, "heard_at": 1790671987.222933, "text": "チェック、チェックランド", "audio_sec": 2.048, "confidence": 0.6108041303540903, "no_speech": false}
 {"utterance_start_ts": 1790671986.4372911, "heard_at": 1790671991.4935322, "text": "チェック、1800", "audio_sec": 2.56, "confidence": 0.5703901034692339, "no_speech": false}
 {"utterance_start_ts": 1790671989.50775, "heard_at": 1790671994.0911045, "text": "コール", "audio_sec": 1.344, "confidence": 0.2719875071375834, "no_speech": false}
-{"utterance_start_ts": 1790671991.364562, "heard_at": 1790671996.9549391, "text": "ラストカードです。", "audio_sec": 1.536, "confidence": 0.7139042273271781, "no_speech": false}
+{"utterance_start_ts": 1790671991.364562, "heard_at": 1790671996.9549391, "text": "ラストカードです。", "audio_sec": 1.536, "confidence": 0.7139042273271781, "no_speech": false, "ear": {"text": "カードです", "logp": -0.734, "candidates": [{"text": "百", "logp": -10.211}, {"text": "二千", "logp": -12.918}, {"text": "五百", "logp": -13.303}, {"text": "二万", "logp": -13.456}, {"text": "二百", "logp": -13.622}, {"text": "三百", "logp": -13.642}, {"text": "八百", "logp": -13.933}, {"text": "六百", "logp": -14.021}], "sec": 0.243}}
 {"utterance_start_ts": 1790671994.3090827, "heard_at": 1790671999.6025054, "text": "チェック", "audio_sec": 1.024, "confidence": 0.5541631029309438, "no_speech": false}
 {"utterance_start_ts": 1790671995.3413672, "heard_at": 1790672002.3490446, "text": "オールイン", "audio_sec": 1.088, "confidence": 0.5171384515516486, "no_speech": false}
 {"utterance_start_ts": 1790671996.228941, "heard_at": 1790672004.9731414, "text": "コール", "audio_sec": 1.088, "confidence": 0.37094637825548366, "no_speech": false}

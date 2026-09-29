@@ -46,7 +46,8 @@ from typing import Any, Optional
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from audio.recognizer import is_implausibly_long, is_prompt_echo, parse_actions  # noqa: E402
+from audio.recognizer import is_implausibly_long, is_prompt_echo, is_question, parse_actions  # noqa: E402
+from audio.second_ear import agreed_candidate, rescue_events  # noqa: E402
 from core.events import AudioEvent, RFIDEvent  # noqa: E402
 from core.game_state import PlayerState  # noqa: E402
 from integration.replay import load_events, replay_events  # noqa: E402
@@ -229,6 +230,8 @@ def reparse_events(events: list, transcripts: list[dict], texts: Optional[dict[s
     texts: 音声のファイル名 → 読み直す文（採点し直した文・第 2 の耳の候補）。空の文 = アクションにしない。無い
     発話は書き起こしのまま。打った入力（書き起こしに無い行）と RFID の入力はそのまま。記録に行があった発話は
     その位置・時刻に、無かった発話は聞き取った時刻の位置に入れる。
+    書き起こしをアクションとして読めない発話は、ライブで第 2 の耳が聞き直した結果（行の `ear`）があれば、いまの
+    規則（`second_ear.rescue_events`）で読む（ライブと同じ。texts で置き換えた発話には使わない）。
     """
     rows = {r["utterance_start_ts"]: r for r in transcripts if r.get("utterance_start_ts") is not None}
     live_time: dict[float, float] = {}
@@ -238,11 +241,13 @@ def reparse_events(events: list, transcripts: list[dict], texts: Optional[dict[s
     reparsed: dict[float, list[AudioEvent]] = {}
     for start, row in rows.items():
         name = row.get("audio_file") or ""
-        text = ((texts[name] if texts is not None and name in texts else row.get("text")) or "").strip()
-        if _is_noise(row, text):
-            continue
+        overridden = texts is not None and name in texts
+        text = ((texts[name] if overridden else row.get("text")) or "").strip()
+        parsed = [] if _is_noise(row, text) else parse_actions(
+            text, confidence=row.get("confidence"), utterance_start_ts=start)
+        if not parsed and not overridden and row.get("ear") and not is_question(text):
+            parsed = rescue_events(row["ear"], utterance_start_ts=start)
         at = live_time.get(start, row.get("heard_at") or start)
-        parsed = parse_actions(text, confidence=row.get("confidence"), utterance_start_ts=start)
         for ev in parsed:
             ev.timestamp = at
         if parsed:
@@ -334,21 +339,16 @@ class EarBest:
     agrees: bool     # 自由に聞いた文も、候補と同じアクションに読める（厳しめ）
 
 
-def _parsed_keys(text: str) -> list[tuple]:
-    return [(e.action, e.amount, e.seat, e.position) for e in parse_actions(text)]
-
-
 def ear_best(row: dict) -> Optional[EarBest]:
-    """第 2 の耳のいちばん確からしい候補。何も聞こえていなければ None（空の文と比べた差は当てにならない）。"""
+    """第 2 の耳のいちばん確からしい候補。何も聞こえていなければ None（空の文と比べた差は当てにならない）。
+    厳しめ（`agrees`）はライブと同じ規則（`second_ear.agreed_candidate`）。"""
     ear = row.get("ear") or {}
     cands = ear.get("candidates") or []
     if row.get("error") or not cands or ear.get("logp") is None or cands[0].get("logp") is None:
         return None
-    free = (ear.get("text") or "").strip()
-    if not free:
+    if not (ear.get("text") or "").strip():
         return None
-    keys = _parsed_keys(cands[0]["text"])
-    return EarBest(cands[0]["text"], cands[0]["logp"] - ear["logp"], bool(keys) and _parsed_keys(free) == keys)
+    return EarBest(cands[0]["text"], cands[0]["logp"] - ear["logp"], agreed_candidate(ear) is not None)
 
 
 def whisper_reads(row: dict) -> bool:
@@ -707,8 +707,9 @@ def timeline(files: SessionFiles, window: tuple[float, float], tz: Optional[time
         alt = best.get(x.get("audio_file"))
         if alt and alt.strip() != (x.get("text") or "").strip():
             line += f" ／ 採点: 「{alt}」→ {_actions_text(alt, x)}"
-        if x.get("audio_file") in ears:
-            line += _ear_note(ears[x["audio_file"]])
+        ear_row = x if x.get("ear") else ears.get(x.get("audio_file"))     # ライブで聞き直した / あとで聞き直した
+        if ear_row is not None:
+            line += _ear_note(ear_row)
         if x.get("audio_file") in variants:
             line += _variant_note(variants[x["audio_file"]], x)
         rows.append((t, line))
@@ -775,7 +776,7 @@ def compare_rows(gt_hand: Optional[dict], live_hand: Optional[dict], rep_hand: O
 # ――― 回帰テスト用の書き出し ―――
 
 # fixture に残す書き起こしの項目（いまの読み取りで読み直して再生するのに要るものだけ）
-_FIXTURE_TRANSCRIPT_KEYS = ("utterance_start_ts", "heard_at", "text", "audio_sec", "confidence", "no_speech")
+_FIXTURE_TRANSCRIPT_KEYS = ("utterance_start_ts", "heard_at", "text", "audio_sec", "confidence", "no_speech", "ear")
 
 
 def _baseline(truth: dict, hand: Optional[dict]) -> dict:
@@ -795,7 +796,7 @@ def export_fixture(files: SessionFiles, report: SessionReport, out_root: Path) -
     `baseline` は書き出したときの再生と真のアクションの一致、`reparse_baseline` は書き起こしをそのときの読み取りで
     読み直した再生の一致（読み取りの変更で悪くなったことに気づくため。店舗 2026-09-29:「オーリー」をオールインと
     読むようにしたら、ディーラーの言い直しで 2 ハンドが悪くなったのを、記録の再生だけでは見られなかった）。
-    前に書き出した値より低ければ前の値を残す（悪くなったことを黙って受け入れない）。
+    真のアクションが同じで、前に書き出した値より低ければ前の値を残す（悪くなったことを黙って受け入れない）。
     """
     if not report.gt.get("hands") or report.setup is None:
         return None
@@ -810,6 +811,8 @@ def export_fixture(files: SessionFiles, report: SessionReport, out_root: Path) -
     hands = []
     for truth in report.gt["hands"]:
         prev = old_hands.get(truth["hand_id"]) or {}
+        if prev.get("truth") != truth:
+            prev = {}        # 真のアクションを直した（オーナーの確認など）= 前の baseline とは比べられない
         hand = {"hand_id": truth["hand_id"], "truth": truth,
                 "baseline": _keep_higher(_baseline(truth, rep_by_id.get(truth["hand_id"])), prev.get("baseline"))}
         if reparsed_by_id is not None:

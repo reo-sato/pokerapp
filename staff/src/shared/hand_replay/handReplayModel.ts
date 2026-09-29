@@ -201,6 +201,9 @@ const REASON_LABELS: Record<string, string> = {
   low_conf_control_held: "自信の低い制御語を保留した",
   winner_seat_unresolved: "勝者の席が分からなかった",
   handler_error: "処理中のエラー",
+  amount_only: "数字だけ（ベットかレイズかは場面から）",
+  fuzzy_keyword: "音の近さで読んだ",
+  second_ear: "Whisper が読めず、第 2 の耳で読んだ",
 };
 
 export function reasonLabels(reason?: string): string[] {
