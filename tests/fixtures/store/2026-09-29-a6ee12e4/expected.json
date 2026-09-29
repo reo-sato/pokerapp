@@ -1,0 +1,148 @@
+{
+ "session_id": "a6ee12e4cba9479493c7aed4e93953d8",
+ "setup": {
+  "players": [
+   {
+    "seat": 4,
+    "name": "A",
+    "stack": 10000
+   },
+   {
+    "seat": 5,
+    "name": "B",
+    "stack": 10000
+   }
+  ],
+  "sb": 100,
+  "bb": 200,
+  "button_prior": 4,
+  "first_hand_id": 1,
+  "auto_new_hand": true,
+  "auto_winner": true,
+  "rfid_folds": true
+ },
+ "code": {
+  "main.py": "c8bc3bba6dc920b4",
+  "integration/engine.py": "7734eaa823f8cfc6",
+  "core/poker_engine.py": "42285d8c31744048",
+  "audio/recognizer.py": "fc74214dfc014efd",
+  "audio/recorder.py": "beb3404964ba7507",
+  "rfid/reader_thread.py": "fa5afebb74a9b76a"
+ },
+ "hands": [
+  {
+   "hand_id": 1,
+   "truth": {
+    "board": [
+     "6c",
+     "Tc",
+     "Td",
+     "Qc",
+     "7s"
+    ],
+    "actions": [
+     {
+      "seat": 5,
+      "action": "raise",
+      "amount": 1800,
+      "street": "preflop"
+     },
+     {
+      "seat": 4,
+      "action": "call",
+      "amount": 1600,
+      "street": "preflop"
+     },
+     {
+      "seat": 4,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 5,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 4,
+      "action": "check",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 5,
+      "action": "bet",
+      "amount": 1800,
+      "street": "turn"
+     },
+     {
+      "seat": 4,
+      "action": "call",
+      "amount": 1800,
+      "street": "turn"
+     },
+     {
+      "seat": 4,
+      "action": "check",
+      "amount": 0,
+      "street": "river"
+     },
+     {
+      "seat": 5,
+      "action": "allin",
+      "amount": 6400,
+      "street": "river"
+     },
+     {
+      "seat": 4,
+      "action": "call",
+      "amount": 6400,
+      "street": "river"
+     },
+     {
+      "seat": 5,
+      "action": "fold",
+      "amount": 0
+     }
+    ],
+    "players": [
+     {
+      "seat": 4,
+      "hole_cards": [
+       "As",
+       "Js"
+      ],
+      "showed_down": false,
+      "name": "A"
+     },
+     {
+      "seat": 5,
+      "hole_cards": [
+       "5c",
+       "Th"
+      ],
+      "showed_down": false,
+      "name": "B"
+     }
+    ],
+    "winner_seat": 5,
+    "entry_sec": 146.0,
+    "hand_id": 1
+   },
+   "baseline": {
+    "action_correct": 11,
+    "action_total": 11,
+    "winner_match": true,
+    "board_match": true
+   },
+   "reparse_baseline": {
+    "action_correct": 11,
+    "action_total": 11,
+    "winner_match": true,
+    "board_match": true
+   }
+  }
+ ]
+}

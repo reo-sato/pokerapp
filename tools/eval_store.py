@@ -606,11 +606,28 @@ def compare_rows(gt_hand: Optional[dict], live_hand: Optional[dict], rep_hand: O
 
 # ――― 回帰テスト用の書き出し ―――
 
-def export_fixture(files: SessionFiles, report: SessionReport, out_root: Path) -> Optional[Path]:
-    """真のアクションのあるセッションを `out_root/<日付>-<sid 8 桁>/` に書き出す（events.jsonl + expected.json）。
+# fixture に残す書き起こしの項目（いまの読み取りで読み直して再生するのに要るものだけ）
+_FIXTURE_TRANSCRIPT_KEYS = ("utterance_start_ts", "heard_at", "text", "audio_sec", "confidence", "no_speech")
 
-    `baseline` は書き出したときの再生と真のアクションの一致。前に書き出した baseline より低ければ前の値を残す
-    （悪くなったことを黙って受け入れない）。
+
+def _baseline(truth: dict, hand: Optional[dict]) -> dict:
+    m = measure_hand(truth, hand)
+    return {"action_correct": m.action_correct, "action_total": m.action_total,
+            "winner_match": m.winner_match, "board_match": m.board_match}
+
+
+def _keep_higher(new: dict, prev: Optional[dict]) -> dict:
+    return prev if prev and prev.get("action_correct", 0) > new["action_correct"] else new
+
+
+def export_fixture(files: SessionFiles, report: SessionReport, out_root: Path) -> Optional[Path]:
+    """真のアクションのあるセッションを `out_root/<日付>-<sid 8 桁>/` に書き出す（events.jsonl + expected.json、
+    書き起こしがあれば transcripts.jsonl）。
+
+    `baseline` は書き出したときの再生と真のアクションの一致、`reparse_baseline` は書き起こしをそのときの読み取りで
+    読み直した再生の一致（読み取りの変更で悪くなったことに気づくため。店舗 2026-09-29:「オーリー」をオールインと
+    読むようにしたら、ディーラーの言い直しで 2 ハンドが悪くなったのを、記録の再生だけでは見られなかった）。
+    前に書き出した値より低ければ前の値を残す（悪くなったことを黙って受け入れない）。
     """
     if not report.gt.get("hands") or report.setup is None:
         return None
@@ -619,19 +636,25 @@ def export_fixture(files: SessionFiles, report: SessionReport, out_root: Path) -
     old = _read_json(folder / "expected.json") if (folder / "expected.json").exists() else None
     if old is not None and "setup" not in old:
         raise SystemExit(f"{folder} は別の形式の fixture です（上書きしません）")
-    old_baseline = {h["hand_id"]: h["baseline"] for h in (old or {}).get("hands") or []}
+    old_hands = {h["hand_id"]: h for h in (old or {}).get("hands") or []}
     rep_by_id = {h.get("hand_id"): h for h in report.replayed}
+    reparsed_by_id = {h.get("hand_id"): h for h in report.reparsed} if report.reparsed else None
     hands = []
     for truth in report.gt["hands"]:
-        m = measure_hand(truth, rep_by_id.get(truth["hand_id"]))
-        baseline = {"action_correct": m.action_correct, "action_total": m.action_total,
-                    "winner_match": m.winner_match, "board_match": m.board_match}
-        prev = old_baseline.get(truth["hand_id"])
-        if prev and prev.get("action_correct", 0) > baseline["action_correct"]:
-            baseline = prev
-        hands.append({"hand_id": truth["hand_id"], "truth": truth, "baseline": baseline})
+        prev = old_hands.get(truth["hand_id"]) or {}
+        hand = {"hand_id": truth["hand_id"], "truth": truth,
+                "baseline": _keep_higher(_baseline(truth, rep_by_id.get(truth["hand_id"])), prev.get("baseline"))}
+        if reparsed_by_id is not None:
+            hand["reparse_baseline"] = _keep_higher(
+                _baseline(truth, reparsed_by_id.get(truth["hand_id"])), prev.get("reparse_baseline"))
+        hands.append(hand)
     folder.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(files.events, folder / "events.jsonl")
+    transcripts = _read_jsonl(files.path(".transcripts.jsonl"))
+    if transcripts and reparsed_by_id is not None:
+        rows = [{k: r[k] for k in _FIXTURE_TRANSCRIPT_KEYS if k in r} for r in transcripts]
+        (folder / "transcripts.jsonl").write_text(
+            "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
     expected = {
         "session_id": files.session_id, "setup": {**report.setup, **report.flags},
         "code": code_fingerprint(ROOT), "hands": hands,
@@ -641,22 +664,35 @@ def export_fixture(files: SessionFiles, report: SessionReport, out_root: Path) -
 
 
 def check_fixture(folder: Path) -> list[str]:
-    """書き出した fixture を再生し、真のアクションとの一致が baseline より悪くなった点を返す（空 = 問題なし）。"""
+    """書き出した fixture を再生し、真のアクションとの一致が baseline より悪くなった点を返す（空 = 問題なし）。
+
+    書き起こし（transcripts.jsonl）があれば、いまの読み取りで読み直した再生も `reparse_baseline` と比べる。
+    """
     expected = _read_json(folder / "expected.json") or {}
     setup = expected.get("setup") or {}
     flags = {k: bool(setup.get(k)) for k in ("auto_new_hand", "auto_winner", "rfid_folds")}
-    replayed = replay_session(folder / "events.jsonl", setup, flags, expected.get("session_id") or folder.name)
-    rep_by_id = {h.get("hand_id"): h for h in replayed}
+    session_id = expected.get("session_id") or folder.name
+    runs = [("baseline", "", replay_session(folder / "events.jsonl", setup, flags, session_id))]
+    transcripts = _read_jsonl(folder / "transcripts.jsonl") if (folder / "transcripts.jsonl").exists() else []
+    if transcripts:
+        events = reparse_events(load_events(folder / "events.jsonl"), transcripts)
+        runs.append(("reparse_baseline", "（書き起こしの読み直し）",
+                     replay_session(events, setup, flags, session_id)))
     problems = []
-    for hand in expected.get("hands") or []:
-        m = measure_hand(hand["truth"], rep_by_id.get(hand["hand_id"]))
-        base = hand["baseline"]
-        if m.action_correct < base["action_correct"]:
-            problems.append(f"{folder.name} ハンド {hand['hand_id']}: 一致する行が "
-                            f"{base['action_correct']} → {m.action_correct}（{m.action_total} 行中）")
-        for key, label in (("winner_match", "勝者"), ("board_match", "ボード")):
-            if base.get(key) and not getattr(m, key):
-                problems.append(f"{folder.name} ハンド {hand['hand_id']}: {label}が真のアクションと合わなくなった")
+    for key, label_run, replayed in runs:
+        rep_by_id = {h.get("hand_id"): h for h in replayed}
+        for hand in expected.get("hands") or []:
+            base = hand.get(key)
+            if base is None:
+                continue
+            m = measure_hand(hand["truth"], rep_by_id.get(hand["hand_id"]))
+            where = f"{folder.name} ハンド {hand['hand_id']}{label_run}"
+            if m.action_correct < base["action_correct"]:
+                problems.append(f"{where}: 一致する行が {base['action_correct']} → {m.action_correct}"
+                                f"（{m.action_total} 行中）")
+            for attr, label in (("winner_match", "勝者"), ("board_match", "ボード")):
+                if base.get(attr) and not getattr(m, attr):
+                    problems.append(f"{where}: {label}が真のアクションと合わなくなった")
     return problems
 
 

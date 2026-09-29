@@ -283,6 +283,26 @@ class TestFixtures:
         again = json.loads((folder / "expected.json").read_text(encoding="utf-8"))
         assert again["hands"][0]["baseline"]["action_correct"] == 99       # 黙って下げない
 
+    def test_the_transcripts_guard_a_change_in_reading(self, tmp_path):
+        """書き起こしも書き出し、いまの読み取りで読み直した再生が悪くなったら知らせる（店舗 2026-09-29: 読み取りの
+        変更で悪くなったのを、記録の再生だけでは見られなかった）。"""
+        tb = self._with_truth(tmp_path)
+        _transcripts(tb, tmp_path)
+        report = eval_store.evaluate_session(_files(tmp_path), {}, None)
+        folder = eval_store.export_fixture(_files(tmp_path), report, tmp_path / "fixtures")
+        expected = json.loads((folder / "expected.json").read_text(encoding="utf-8"))
+        (hand,) = expected["hands"]
+        assert hand["reparse_baseline"]["action_correct"] == hand["reparse_baseline"]["action_total"] > 0
+        rows = [json.loads(line) for line in (folder / "transcripts.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert rows and all(set(r) <= set(eval_store._FIXTURE_TRANSCRIPT_KEYS) for r in rows)   # noqa: SLF001
+        assert eval_store.check_fixture(folder) == []
+        # 読み取りが変わって、ある発話を別のアクションに読むようになった = 読み直しの再生だけが悪くなる
+        broken = [dict(r, text="レイズ 800") if r["text"] == "コール" else r for r in rows]
+        (folder / "transcripts.jsonl").write_text(
+            "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in broken), encoding="utf-8")
+        problems = eval_store.check_fixture(folder)
+        assert problems and all("書き起こしの読み直し" in p for p in problems)
+
     def test_an_old_style_fixture_is_not_overwritten(self, tmp_path):
         self._with_truth(tmp_path)
         report = eval_store.evaluate_session(_files(tmp_path), {}, None)

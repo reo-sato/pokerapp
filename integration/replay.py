@@ -34,6 +34,43 @@ Event = Union[AudioEvent, RFIDEvent, CameraEvent]
 _ORDER: dict[type, int] = {CameraEvent: 0, RFIDEvent: 1, AudioEvent: 2}
 
 
+def _is_signal(ev: Event) -> bool:
+    return isinstance(ev, RFIDEvent) and ev.kind != "card"
+
+
+def _in_replay_order(events: list[Event]) -> list[Event]:
+    """live が処理した順に並べる。
+
+    記録（events.jsonl）は live が処理した順に書かれている。時刻では並べ替えない: ボードの札は 2 秒載り続けて
+    から確定し、時刻は最初に見えた時刻なので、そのあいだに処理した信号より前の時刻になる（店舗 2026-09-29
+    d0f055fb: 時刻で並べ替えるとターンの札がフロップの信号・札の離脱より先に流れ、4 ハンドが記録と違った）。
+    ただし発話の処理の中で出した信号（発話と同じ時刻で、その直後に記録したもの）は、live はその発話のアクションを
+    入れる前に反映したので、発話の前に流す。engine の信号が無い記録（信号を記録する前の記録・手で書いた
+    fixture）は従来どおり時刻順（同じ時刻は camera → rfid → audio）。
+    """
+    if not any(_is_signal(e) for e in events):
+        return sorted(events, key=lambda e: (e.timestamp, _ORDER[type(e)]))
+    ordered: list[Event] = []
+    i = 0
+    while i < len(events):
+        ev = events[i]
+        j = i + 1
+        while j < len(events) and _is_signal(events[j]):
+            j += 1                            # この出来事のあとに続けて記録した信号
+        signals = events[i + 1:j]
+        if isinstance(ev, AudioEvent):
+            # 発話と同じ時刻の信号 = その発話の処理の中で出したもの（アクションを入れる前に反映した）
+            same = [s for s in signals if s.timestamp == ev.timestamp]
+            ordered.extend(same)
+            ordered.append(ev)
+            ordered.extend(s for s in signals if s.timestamp != ev.timestamp)
+        else:
+            ordered.append(ev)
+            ordered.extend(signals)
+        i = j
+    return ordered
+
+
 class _ReplayClock:
     """各イベントの timestamp を「現在時刻」として返す注入用時計。"""
 
@@ -135,8 +172,8 @@ def replay_events(
         recorded_deals=any(isinstance(e, RFIDEvent) and e.kind == "deal" for e in events),
     )
 
-    for ev in sorted(events, key=lambda e: (e.timestamp, _ORDER[type(e)])):
-        clock.now = ev.timestamp
+    for ev in _in_replay_order(events):
+        clock.now = max(clock.now, ev.timestamp)   # 記録の順（時刻が前後する札）でも時計は戻さない
         if isinstance(ev, AudioEvent):
             thread._expire_buffers()          # noqa: SLF001 — live run() と同じ前処理
             thread._handle_audio_event(ev)    # noqa: SLF001

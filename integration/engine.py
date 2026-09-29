@@ -133,6 +133,10 @@ _REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin
 # 言葉がこの数だけ聞こえたら、そのオールインを聞き違いとみて外す（店舗 2026-09-27: 自信 0.27 の「オールイン」の
 # あとのチェック 5 回と「2700」がすべて保留になり、全員オールインの 59700 のポットになった）
 HELD_WORDS_TO_DROP_ALLIN = 2
+# ディーラーはオールインを言い直す（店舗 2026-09-29: 「オーリー」→「オールイン、コール」/「オールインフォールド」、
+# 「オールイン」→「オールイン、コール、ショーダウン」。間は 2.1〜6.5 秒）。直前の記録がオールインで、その発話から
+# この秒数以内に別の発話で「オールイン」と聞こえたら、同じオールインの言い直しとみて次の人のオールインにしない。
+ALLIN_RESTATE_SEC = 8.0
 _BETTING_WORDS = frozenset({"check", "call", "bet", "raise", "allin"})
 
 # review の理由にしない parse flag（読み方の情報。「数字だけ」「チェックアラウンド」は運用どおりの言い方）
@@ -410,6 +414,8 @@ class IntegrationThread(threading.Thread):
         # live が在否で決めた配布と、発話を待って始めた時点に従う（ADR-0056 追記 1, S0）。
         self._recorded_deals = recorded_deals
         self._hand_start_due = False
+        # replay: 配布を検出してからハンドを始めるまでに届いた、そのハンドの札の信号（始めてから反映する）
+        self._signals_before_start: list[RFIDEvent] = []
         # 手札が配られる前のボードの札を読まなかった（最初の手札で RFID のボード位置を捨てる）
         self._board_before_deal = False
         # プレー中か（配布〜確定、または卓が空になるまで）。音声の聞き取りとボードの受付に使う。
@@ -459,6 +465,8 @@ class IntegrationThread(threading.Thread):
         self._checkpoints: list[dict] = []
         # ベッティングが終わったあとに聞こえたベッティングの言葉の数（聞き違いのオールインを見つける）
         self._held_betting_words = 0
+        # 最後に記録したオールイン (記録, 話し始めた時刻, 発話の開始時刻)（言い直しを見分ける）
+        self._last_allin: Optional[tuple[ActionRecord, float, Optional[float]]] = None
         # 最後の 1 人を残すフォールドの確定待ち {"seat", "t"}
         self._foldout_pending: Optional[dict] = None
         self._foldout_winner_left = False
@@ -986,6 +994,8 @@ class IntegrationThread(threading.Thread):
                 self._handle_fold_word(event)   # 次の手番の人には付けない（オーナー決定）
                 return
             # ベッティングが終わったあと（ショーダウン）は従来どおり: 見せずにマック（ディーラーが宣言する）
+        if action == "allin" and self._rules_aware and self._hand_open and self._is_restated_allin(event):
+            return
         legal_ctx = gs.legal_context()
         if "amount_only" in event.parse_flags:
             # 数字だけの発話 = ベットかレイズ。使えない額なら記録しない（「7」「いまのベットと同じ額」）
@@ -1044,6 +1054,29 @@ class IntegrationThread(threading.Thread):
         indices = {"flop": (1, 2, 3), "turn": (4,), "river": (5,)}.get(self._game_state.street, ())
         times = [self._board_dealt_at[i] for i in indices if i in self._board_dealt_at]
         return min(times) if times else None
+
+    def _is_restated_allin(self, event: AudioEvent) -> bool:
+        """「オールイン」が、直前に記録したオールインの言い直しか（`ALLIN_RESTATE_SEC`）。
+
+        直前の記録がそのオールインで（あいだにほかのアクションが無い）、別の発話で、話し始めがその発話から
+        `ALLIN_RESTATE_SEC` 以内のとき。同じ発話の中の 2 つ目（「オールイン、オールイン」）は 2 人とみる。
+        """
+        last = self._last_allin
+        if last is None or not self._current_actions or self._current_actions[-1] is not last[0]:
+            return False
+        record, spoken, utterance = last
+        if utterance is not None and event.utterance_start_ts == utterance:
+            return False
+        if not 0.0 <= _spoken_at(event) - spoken <= ALLIN_RESTATE_SEC:
+            return False
+        if "allin_restated" not in (record.reason or ""):
+            record.reason = "+".join(r for r in (record.reason, "allin_restated") if r)
+        if not self._rebuilding:
+            logger.info("「%s」は席%d のオールイン（「%s」）の言い直しとみなしました",
+                        event.raw_text, record.seat, record.raw_text)
+            self._notice(f"「{event.raw_text}」のオールインは、直前の「{record.raw_text}」（席{record.seat}）の"
+                         "言い直しとみなしました")
+        return True
 
     def _said_before_street(self, event: AudioEvent) -> bool:
         """発話がいまのストリートの札より前に始まった（= 前のストリートのラウンドの発話）か。
@@ -1287,6 +1320,12 @@ class IntegrationThread(threading.Thread):
                 self._start_dealt_hand_if_ready()
             return
         if not (self._rfid_folds and self._hand_open):
+            if self._rfid_folds and self._recorded_deals and self._deal_at is not None and (
+                    ev.observed_at if ev.observed_at is not None else ev.timestamp) >= self._deal_at:
+                # replay: live は配った直後の発話でハンドを始め、その発話の処理の中で出した信号を発話と同じ時刻で
+                # 記録した。同じ時刻は札（信号）を発話より先に流すので、ハンドの開始より前に届く → 始めてから
+                # 反映する（店舗 2026-09-29 d0f055fb ハンド 1: 配った直後の「フォールド」と、その席の札の離脱）
+                self._signals_before_start.append(ev)
             return
         if ev.kind == "street":
             self._run_input("street", ev)
@@ -2393,6 +2432,10 @@ class IntegrationThread(threading.Thread):
                 tag_id="", card="", reader_id="", role="seat", seat=None, timestamp=self._clock(),
                 raw_tag_id="", kind="hand_start",
             ))
+        early, self._signals_before_start = self._signals_before_start, []
+        if started:
+            for ev in early:
+                self._handle_seat_signal(ev)
 
     def _adopt_deal_cards(self) -> None:
         """配布の検出で集めた札を、いまのハンドの手札にする（配布と判断していない札は捨てる）。"""
@@ -3439,6 +3482,8 @@ class IntegrationThread(threading.Thread):
         )
         self._current_actions.append(record)
         self._last_action_at = _spoken_at(event)
+        if corrected.action == "allin" and apply_ok:
+            self._last_allin = (record, _spoken_at(event), event.utterance_start_ts)
         if corrected.action in ("bet", "raise", "allin") and self._rfid_folds:
             if run_possible and apply_ok and len(candidates) >= 2 and actor in candidates:
                 self._checkpoints.append(checkpoint)
@@ -3514,6 +3559,7 @@ class IntegrationThread(threading.Thread):
         self._hand_inputs = []
         self._checkpoints = []
         self._held_betting_words = 0
+        self._last_allin = None
         self._run_hyps = []
         self._run_override = {}
         self._spoken_folds = {}

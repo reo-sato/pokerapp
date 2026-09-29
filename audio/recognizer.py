@@ -35,6 +35,11 @@ _MAN_DECIMAL   = re.compile(r"(\d[\d,]*)\.(\d+)万")            # 1.5万 (ADR-A 
 _MAN_TRAILING  = re.compile(r"(\d[\d,]*)万(\d)(?![\d,.千百十万Kk])")  # 4万2 (曖昧, ADR-A S1)
 _MAN_ONLY      = re.compile(r"(\d[\d,]*)万")                   # 3万
 _SEN_HYAKU     = re.compile(r"(\d+)千(\d+)百")                 # 2千5百 (ADR-A S1)
+# 単位のあとに続けた算用数字（店舗 2026-09-29:「2千500」を 2000 と読んでいた）。千のあとは 3 桁ならそのまま足す。
+# 1〜2 桁（「2千5」）は「4万2」と同じく百・十の位の省略とみて曖昧にする。
+_SEN_DIGITS    = re.compile(r"(\d+)千(\d{1,3})(?![\d,.千百十万Kk])")        # 2千500
+_MAN_DIGITS    = re.compile(r"(\d[\d,]*)万(\d{3,4})(?![\d,.千百十万Kk])")   # 1万2000 / 1万500
+_KANJI_DIGITS  = re.compile(r"([一二三四五六七八九十百千万]*[千万])(\d{3,4})(?![\d,.千百十万Kk])")  # 千500
 _SEN_ONLY      = re.compile(r"(\d+)千")                        # 2千 (ADR-A S1: 従来 2 と誤読)
 _HYAKU_ONLY    = re.compile(r"(\d+)百")                        # 5百 (ADR-A S1)
 _K_DECIMAL     = re.compile(r"(\d[\d,]*)\.(\d+)[Kk]")          # 1.5K (ADR-A S1)
@@ -217,6 +222,20 @@ def parse_amount_ex(text: str) -> AmountParse:
         candidates.append(
             (m.start(), int(m.group(1)) * 1000 + int(m.group(2)) * 100, False)
         )
+
+    for m in _SEN_DIGITS.finditer(text):
+        tail = m.group(2)
+        scale = {1: 100, 2: 10, 3: 1}[len(tail)]
+        candidates.append((m.start(), int(m.group(1)) * 1000 + int(tail) * scale, len(tail) < 3))
+
+    for m in _MAN_DIGITS.finditer(text):
+        candidates.append((m.start(), int(m.group(1).replace(",", "")) * 10000 + int(m.group(2)), False))
+
+    for m in _KANJI_DIGITS.finditer(text):
+        base, amb = _kanji_amount(m.group(1))
+        tail = int(m.group(2))
+        if base > 0 and tail < (1000 if m.group(1).endswith("千") else 10000):
+            candidates.append((m.start(), base + tail, amb))
 
     for m in _SEN_ONLY.finditer(text):
         candidates.append((m.start(), int(m.group(1)) * 1000, False))
@@ -405,7 +424,7 @@ def is_implausibly_long(text: str, audio_sec: float) -> bool:
 # 3 回目の通しテストで「600点」「2千点」がベットだった）。どちらかは engine が状態から決め、額がいまのベット
 # 以下・最小ベット未満なら使わない。額の前後に付いてよいのは下の語だけ — 「ポット 2千点」「残り 1500」
 # 「7ヒット」のような発話や、違う数が並ぶ発話（「5 6 7」）はアクションにしない。
-_AMOUNT_TOKEN = re.compile(r"(?:\d[\d,]*(?:\.\d+)?[万千百Kk]?)+|[一二三四五六七八九〇十百千万]+")
+_AMOUNT_TOKEN = re.compile(r"(?:\d[\d,]*(?:\.\d+)?[万千百Kk]?)+|[一二三四五六七八九〇十百千万]+(?:\d[\d,]*)?")
 _AMOUNT_ONLY_REST = re.compile(
     r"(?:[\s、。・!?,.ー〜~]|点|円|エン|テン|ポイント|デス|デース|ニナリマス|ハイ|エー|エット|エート|エ|アー|ア"
     r"|ジャア|ジャ|デハ|アクション|ネ|ヨ)*"
