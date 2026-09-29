@@ -17,10 +17,12 @@ from pathlib import Path
 import pytest
 
 from tools.ground_truth_ui import (
+    hand_lint,
     is_blind,
     list_sessions,
     make_server,
     replay_legal,
+    street_lint,
     validate_gt_hand,
 )
 from core.ground_truth import GroundTruthError
@@ -89,7 +91,7 @@ def base(log_dir: Path):
 
 @pytest.fixture
 def blind_base(log_dir: Path):
-    assert is_blind(SID, 2) and not is_blind(SID, 1)     # 既定（5 ハンドに 1 つ）でハンド 2 がブラインド
+    assert is_blind(SID, 2, 5) and not is_blind(SID, 1, 5)     # 5 ハンドに 1 つならハンド 2 がブラインド
     yield from _serve(log_dir, blind_every=5)
 
 
@@ -554,7 +556,137 @@ class TestConfirmAndBlind:
         assert again["blind"] is False                                 # 入れたあとは記録と並べて見る
 
     def test_one_hand_in_five_is_blind(self):
-        picked = sum(is_blind("s", h) for h in range(1, 2001))
+        picked = sum(is_blind("s", h, 5) for h in range(1, 2001))
         assert 320 <= picked <= 480
         assert not any(is_blind("s", h, every=0) for h in range(1, 50))
-        assert is_blind("s", 7) == is_blind("s", 7)                   # ハンドごとに決まっている
+        assert is_blind("s", 7, 5) == is_blind("s", 7, 5)             # ハンドごとに決まっている
+
+    def test_every_free_hand_is_blind_first_by_default(self):
+        """テスト方針 週 1: 全部のハンドを先に記録を見ずに入れ、保存したあとで記録と照らし合わせる。"""
+        assert all(is_blind("s", h) for h in range(1, 50))
+
+    def test_blind_entry_is_kept_through_the_reconcile(self, blind_base, log_dir):
+        """ブラインドで入れた内容は `blind_entry` に残り、照らし合わせで直した内容が正解になる（`reconciled`）。"""
+        path = f"/api/sessions/{SID}/hands/2"
+        blind = {"board": ["As", "Kd", "7h"], "winner_seat": 4, "blind": True,
+                 "actions": [{"seat": 6, "action": "fold"}, {"seat": 4, "action": "call", "amount": 100}]}
+        assert _req(blind_base, "PUT", path, {"source": "manual-edit", "hand": blind, "entry_sec": 50})[0] == 200
+        _, listing = _req(blind_base, "GET", f"/api/sessions/{SID}/hands")
+        row = next(h for h in listing["hands"] if h["hand_id"] == 2)
+        assert row["ground_truth"]["blind"] and not row["ground_truth"]["reconciled"]
+        fixed = dict(blind, blind=None, actions=blind["actions"] + [{"seat": 5, "action": "check"}])
+        assert _req(blind_base, "PUT", path, {"source": "manual-edit", "hand": fixed, "entry_sec": 12})[0] == 200
+        gt = json.loads((log_dir / f"{SID}.ground_truth.json").read_text(encoding="utf-8"))
+        saved = next(h for h in gt["hands"] if h["hand_id"] == 2)
+        assert saved["blind"] is True and saved["reconciled"] is True and len(saved["actions"]) == 3
+        assert [a["action"] for a in saved["blind_entry"]["actions"]] == ["fold", "call"]
+        assert saved["blind_entry"]["entry_sec"] == 50 and saved["entry_sec"] == 12
+        # 記録どおり（照らし合わせたら記録が正しかった）でもブラインドの内容は残る
+        assert _req(blind_base, "PUT", path, {"source": "captured-passthrough", "confirmed_rows": [4],
+                                              "confirmed_hand": True})[0] == 200
+        gt = json.loads((log_dir / f"{SID}.ground_truth.json").read_text(encoding="utf-8"))
+        saved = next(h for h in gt["hands"] if h["hand_id"] == 2)
+        assert saved["reconciled"] is True and len(saved["blind_entry"]["actions"]) == 2
+
+
+class TestStreetLint:
+    """真のアクションのストリートのずれ（店舗 9d1d8536 ハンド 2: 記憶で入れてフロップのチェック 3 つが抜けた）。"""
+
+    CAPTURED = {
+        "players": [{"seat": s, "stack_start": 10000} for s in (4, 5, 6)], "blinds": {"sb": 100, "bb": 200},
+        "button_seat": 6, "board": ["As", "Kd", "7h", "2c", "9s"],
+        "actions": [
+            {"street": "preflop", "seat": 6, "action": "call", "amount": 200},
+            {"street": "preflop", "seat": 4, "action": "call", "amount": 100},
+            {"street": "preflop", "seat": 5, "action": "check", "amount": 0},
+            {"street": "flop", "seat": 4, "action": "check", "amount": 0},
+            {"street": "flop", "seat": 5, "action": "check", "amount": 0},
+            {"street": "flop", "seat": 6, "action": "check", "amount": 0},
+            {"street": "turn", "seat": 4, "action": "bet", "amount": 1500},
+            {"street": "turn", "seat": 5, "action": "call", "amount": 1500},
+            {"street": "turn", "seat": 6, "action": "fold", "amount": 0},
+            {"street": "river", "seat": 4, "action": "bet", "amount": 500},
+            {"street": "river", "seat": 5, "action": "fold", "amount": 0},
+        ],
+    }
+    # フロップのチェック 3 つを抜かして入れた（ターンのアクションがフロップに、リバーのアクションがターンに入る）
+    SHIFTED = [
+        {"seat": 6, "action": "call"}, {"seat": 4, "action": "call"}, {"seat": 5, "action": "check"},
+        {"seat": 4, "action": "bet", "amount": 1500}, {"seat": 5, "action": "call"}, {"seat": 6, "action": "fold"},
+        {"seat": 4, "action": "bet", "amount": 500}, {"seat": 5, "action": "fold"},
+    ]
+
+    def _lint(self, actions, board=None, show_record=True):
+        result = replay_legal(self.CAPTURED, actions, board=board)
+        return street_lint(self.CAPTURED, result["actions"], result["next"], board, show_record=show_record)
+
+    def test_folded_out_before_the_dealt_street(self):
+        msgs = self._lint(self.SHIFTED)
+        assert any("ボードは 5 枚" in m and "ターンで全員降りて" in m for m in msgs)
+        assert any("記録にはリバーのアクションがある" in m for m in msgs)
+
+    def test_blind_entry_only_checks_the_board(self):
+        msgs = self._lint(self.SHIFTED, show_record=False)
+        assert len(msgs) == 1 and "ボードは 5 枚" in msgs[0]
+
+    def test_the_right_entry_has_no_warning(self):
+        right = [dict(a, street=None) for a in self.CAPTURED["actions"]]
+        assert self._lint(right) == []
+
+    def test_an_unread_card_still_counts_as_dealt(self):
+        folded_on_flop = self.SHIFTED[:4] + [{"seat": 5, "action": "fold"}, {"seat": 6, "action": "fold"}]
+        msgs = self._lint(folded_on_flop, board=["As", "??", "7h", "2c", "??"], show_record=False)
+        assert any("ボードは 4 枚" in m and "フロップで全員降りて" in m for m in msgs)
+
+    def test_legal_endpoint_returns_the_warnings(self, base):
+        body = {"actions": [{"seat": 6, "action": "fold"}, {"seat": 4, "action": "fold"}],
+                "board": ["As", "Kd", "7h"], "blind": True}
+        status, d = _req(base, "POST", f"/api/sessions/{SID}/hands/1/legal", body)
+        assert status == 200 and any("ボードは 3 枚" in m for m in d["lint"])
+
+
+class TestHandLint:
+    """入れ終わった真のアクションの見直しで見つかった入力ミスの形を知らせる（2026-09-30 の洗い直し: 18 ハンド中 8 件）。"""
+
+    BOARD = ["As", "Kd", "7h", "2c", "3d"]
+    HOLES = {4: ["9s", "9h"], 5: ["Ah", "Ad"], 6: ["Kc", "Qc"]}
+
+    def _lint(self, captured, actions, board=None, holes=None, show_record=True):
+        r = replay_legal(captured, actions, board=board, holes=holes)
+        return hand_lint(captured, r["actions"], r["next"], board, holes, show_record=show_record)
+
+    def test_the_best_hand_mucked_at_showdown_is_questioned(self):
+        """店舗 a6ee12e4 ハンド 1: 勝ったトリップスの席を「フォールド」にして、負けた席が残っていた。"""
+        wrong = CHECKDOWN + [{"seat": 5, "action": "fold"}, {"seat": 4, "action": "fold"}]
+        msgs = self._lint(_hand(1), wrong, board=self.BOARD, holes=self.HOLES)
+        assert any("席5 は手札が一番強い" in m for m in msgs)
+        right = CHECKDOWN + [{"seat": 4, "action": "fold"}, {"seat": 6, "action": "fold"}]
+        assert self._lint(_hand(1), right, board=self.BOARD, holes=self.HOLES) == []
+
+    def test_a_card_that_rfid_read_but_the_entry_lacks_is_questioned(self):
+        """店舗 d0f055fb ハンド 5: RFID はリバーを 9s と読んだ（9s のタグはほかのハンドでは正しい）のに、真のアクションは 9c。"""
+        holes = {4: [], 5: ["Ah", "Ac"], 6: ["Kc", "Qc"]}           # 記録は席5 = Ah Ad。席4 は記録に札が無い
+        msgs = self._lint(_hand(1), [dict(a) for a in _hand(1)["actions"]], board=["As", "Kd", "7c"], holes=holes)
+        assert any("ボードに 7h" in m for m in msgs)
+        assert any("席5 の手札に Ad" in m for m in msgs)
+        assert not any("席4" in m or "席6" in m for m in msgs)
+        same = {5: ["Ad", "Ah"], 6: ["Qc", "Kc"]}
+        assert self._lint(_hand(1), [dict(a) for a in _hand(1)["actions"]], board=["7h", "As", "Kd"],
+                          holes=same) == []
+
+    def test_record_streets_past_the_board_are_not_asked_about(self):
+        """店舗 d0f055fb ハンド 2: ボードはターンまで（4 枚）で、記録だけがリバーに進んでいた = 記録の誤り。"""
+        captured = dict(TestStreetLint.CAPTURED, board=["As", "Kd", "7h", "2c"])
+        turn_foldout = [dict(a, street=None) for a in TestStreetLint.CAPTURED["actions"][:7]] + [
+            {"seat": 5, "action": "fold"}, {"seat": 6, "action": "fold"}]
+        assert self._lint(captured, turn_foldout, board=captured["board"]) == []
+        # ボードが 5 枚なら、記録のリバーのアクションを入れ忘れていないか訊く
+        five = self._lint(TestStreetLint.CAPTURED, turn_foldout, board=TestStreetLint.CAPTURED["board"])
+        assert any("記録にはリバーのアクションがある" in m for m in five)
+
+    def test_opening_a_saved_hand_shows_the_warnings(self, base):
+        hand = {"board": ["As", "Kd", "7c"], "winner_seat": 5,
+                "actions": [dict(a) for a in _hand(1)["actions"]], "players": []}
+        assert _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "manual-edit", "hand": hand})[0] == 200
+        status, detail = _req(base, "GET", f"/api/sessions/{SID}/hands/1")
+        assert status == 200 and any("ボードに 7h" in m for m in detail["legal"]["lint"])

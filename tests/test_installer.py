@@ -27,7 +27,7 @@ ROOT = Path(__file__).parent.parent
 CMD_FILES = [
     "install.cmd", "update.cmd", "uninstall.cmd",
     "start_logger.cmd", "start_monitor.cmd", "start_viewer.cmd", "start_ledger.cmd", "rfid_check.cmd",
-    "start_truth.cmd", "pack_logs.cmd", "pack_logs_audio.cmd",
+    "start_truth.cmd", "pack_logs.cmd", "pack_logs_audio.cmd", "start_script.cmd", "start_cards.cmd",
 ]
 PS1_FILES = ["installer/install.ps1", "installer/bootstrap.ps1"]
 
@@ -92,7 +92,8 @@ class TestLaunchers:
 
     def test_launchers_reference_existing_entry_points(self):
         for rel in ("start_logger.cmd", "start_monitor.cmd", "start_viewer.cmd", "start_ledger.cmd",
-                    "rfid_check.cmd", "start_truth.cmd", "pack_logs.cmd", "pack_logs_audio.cmd"):
+                    "rfid_check.cmd", "start_truth.cmd", "pack_logs.cmd", "pack_logs_audio.cmd",
+                    "start_script.cmd", "start_cards.cmd"):
             text = (ROOT / rel).read_text(encoding="ascii")
             assert r"venv\Scripts\python.exe" in text, rel
             for m in re.finditer(r'^"venv\\Scripts\\python\.exe" (\S+)', text, re.M):
@@ -112,6 +113,12 @@ class TestLaunchers:
         """真のアクション入力は iPad から使う（卓モニタと同じ LAN 公開、別ポート 8791）。"""
         text = (ROOT / "start_truth.cmd").read_text(encoding="ascii")
         assert "tools\\ground_truth_ui.py --host 0.0.0.0 --port 8791" in text
+
+    def test_script_launchers_start_the_logger_with_a_script(self):
+        """台本のハンド（テスト方針 週 1）: 卓の設定を入力せずに、台本の卓でロガーを起動する（ログはファイルへ）。"""
+        for rel, kind in (("start_script.cmd", "voice"), ("start_cards.cmd", "cards")):
+            text = (ROOT / rel).read_text(encoding="ascii")
+            assert f"main.py --cli --log-file --script {kind}" in text, rel
 
     def test_pack_logs_launcher_passes_options_through(self):
         """ショートカットでは既定（直近 12 時間 → デスクトップ）、コマンドでは --audio などを足せる。"""

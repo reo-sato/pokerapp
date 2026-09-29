@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import re
 import sys
@@ -436,8 +437,31 @@ def _print_cards(message: str) -> None:
     print(f"  [カード] {message}", flush=True)
 
 
-def run_cli() -> None:
-    """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。"""
+def _load_test_script(spec: str) -> dict:
+    """`--script` の指定: `voice`（声だけの台本を作る。`voice:8` で 8 人の卓）/ `cards`（札の確認）/ 台本のファイル。"""
+    import random
+
+    from tools.test_script import DEFAULT_SEATS, cards_script, generate_voice_script
+
+    kind, _, arg = spec.partition(":")
+    if kind == "voice":
+        seats = int(arg) if arg.isdigit() else DEFAULT_SEATS
+        return generate_voice_script(random.randrange(1_000_000), seats=seats)
+    if kind == "cards":
+        return cards_script()
+    data = json.loads(Path(spec).read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("kind") not in ("voice", "cards"):
+        raise ValueError(f"台本のファイルではありません: {spec}")
+    return data
+
+
+def run_cli(script: str | None = None) -> None:
+    """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。
+
+    `script`（`--script`）: 台本のハンド（`tools/test_script.py`, テスト方針 週 1）。卓の設定は台本から取り（入力なし）、
+    真のアクション入力の画面の「台本」から制御（`script_hand`）を受け取る。声だけの台本は RFID を使わない。
+    お客さんの記録（session_layer）にはしない。
+    """
     from core.config import load_config
     from core.event_queue import make_audio_queue
     from core.game_state import PlayerState
@@ -445,7 +469,16 @@ def run_cli() -> None:
     from output.json_writer import JsonWriter
 
     cfg = load_config()
-    session_cfg = _prompt_session_config()
+    test_script = _load_test_script(script) if script else None
+    if test_script is not None:
+        from tools.test_script import session_table
+
+        session_cfg = session_table(test_script)
+        cfg.setdefault("session_layer", {})["enabled"] = False
+        if test_script["kind"] == "voice":
+            cfg.setdefault("rfid", {})["enabled"] = False       # 声だけの台本は札を置かない
+    else:
+        session_cfg = _prompt_session_config()
 
     players = [
         PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
@@ -463,12 +496,19 @@ def run_cli() -> None:
     else:
         session_repo = player_repo = None
         seat_player_map = {}
-        session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
+        suffix = f"_script_{test_script['kind']}" if test_script is not None else "_session1"
+        session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + suffix
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
 
     audio_q = make_audio_queue()
     stop_event = threading.Event()
     camera_q = None
+    control_thread = None
+    if test_script is not None:
+        # 台本は画面（真のアクション入力の「台本」）が読むので logs に置く
+        from tools.test_script import write_session_script
+
+        write_session_script(Path(session_cfg["log_dir"]), session_id, test_script)
 
     def on_action(record):
         if getattr(record, "actor_source", None) == "unresolved":
@@ -630,10 +670,28 @@ def run_cli() -> None:
     if audio_thread is not None:
         audio_thread.start()
     integration_thread.start()
+    if test_script is not None:
+        # 画面の操作（台本のハンドを始める）は制御で受け取る。先に言われた発話の聞き取りを待ってから積む
+        # （前のハンドの最後のアクションを次のハンドに入れない = CLI の入力と同じ）
+        from core.control_queue import ControlCommandLog
+        from integration.control_consumer import ControlConsumerThread
+
+        control_thread = ControlConsumerThread(
+            ControlCommandLog(Path(session_cfg["log_dir"]) / f"{session_id}.control.jsonl"), audio_q, stop_event,
+            backlog=audio_thread.backlog if audio_thread is not None else None)
+        control_thread.start()
     if audio_thread is not None:
         _report_audio_start(audio_thread, audio_cfg.get("device_id", 0))
 
     print(f"\nセッション開始。ログ: {json_writer.path}")
+    if test_script is not None and test_script["kind"] == "voice":
+        print(f"台本のハンド（声だけ）: {len(test_script['table']['seats'])} 人の卓・{len(test_script['hands'])} ハンド。"
+              "RFID は使いません。")
+        print("iPad で真のアクション入力の画面の「台本」（http://<この PC の IP>:8791/script）を開き、"
+              "「このハンドを始める」を押してから、出てくる行を順に読んでください。")
+    elif test_script is not None:
+        print("札の確認（席 4・5・6、1 ハンド目のボタンは席 6）。手順は iPad の「台本」"
+              "（http://<この PC の IP>:8791/script）に出ます。")
     if session_repo is not None:
         seated = ", ".join(
             f"席{p['seat']}={p['name']}" for p in session_cfg["players"] if p.get("named", True)
@@ -812,6 +870,8 @@ def run_cli() -> None:
             camera_thread.join(timeout=3)
         if rfid_thread is not None:
             rfid_thread.join(timeout=3)
+        if control_thread is not None:
+            control_thread.join(timeout=3)
         if session_repo is not None:
             _close_session_layer(session_repo, session_id)
         print(f"\nセッション終了。ログ保存先: {json_writer.path}")
@@ -1312,6 +1372,13 @@ def main() -> None:
              "--cli では RFID の検出ログが入力行に割り込んでコマンドが壊れるため、"
              "実機テスト時はこれを付ける（卓の状態は tools/table_monitor.py で見る, ISSUE-0034）",
     )
+    parser.add_argument(
+        "--script",
+        metavar="KIND",
+        help="--cli を台本のハンドで起動する（テスト方針 週 1）: voice = 声だけの台本（RFID なし、voice:8 で 8 人）/ "
+             "cards = 札の確認（席 4・5・6）/ 台本のファイル。卓の設定は入力しない。"
+             "台本は真のアクション入力の画面の「台本」（:8791/script）に出る",
+    )
     args = parser.parse_args()
 
     if args.log_file:
@@ -1362,7 +1429,10 @@ def main() -> None:
         sys.exit(0)
 
     if args.cli:
-        run_cli()
+        run_cli(script=args.script)
+    elif args.script:
+        print("--script は --cli と一緒に使います（例: python main.py --cli --log-file --script voice）")
+        sys.exit(2)
     else:
         run_gui()
 

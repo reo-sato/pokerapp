@@ -30,10 +30,11 @@ import json
 import logging
 import re
 import sys
+import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import unquote, urlsplit
 
 # リポジトリ直下を import path に入れる（他の tools/ と同じ規約）。
@@ -62,9 +63,13 @@ _SESSION_RE = re.compile(r"^[A-Za-z0-9_\-]{1,120}$")
 # ストリートの補完なので、十分大きければよい）
 _FALLBACK_STACK = 10_000_000
 _MAX_BODY = 1_000_000
-# ブラインドで入れるハンドの割合（N ハンドに 1 つ。0 = しない）。オーナー決定: 2 割（ADR-0056 追記 1）
-BLIND_EVERY = 5
+# ブラインドで入れるハンドの割合（N ハンドに 1 つ。0 = しない）。テスト方針 週 1（2026-09-30）: 全部のハンドを先に
+# 記録を見ずに入れ、保存したあとで記録と照らし合わせて直す（ADR-0056 追記 1 の 2 割から変更。記憶で入れると誤るので、
+# 照らし合わせで正解を直しつつ、記録を見ずに入れた内容で入れる側の誤りと記録への引きずられを測る）
+BLIND_EVERY = 1
 _AUDIO_RE = re.compile(r"^[0-9]{6,16}\.wav$")
+# 台本のハンドのセッション（`tools/test_script.py`）。正解は台本なので入力は要らない
+_SCRIPT_SUFFIX = ".script.json"
 # タイムラインに出す範囲: ハンドの始まり（配布）の少し前から、次のハンドの始まりまで
 _TIMELINE_BEFORE_SEC = 10.0
 _TIMELINE_AFTER_SEC = 20.0
@@ -124,6 +129,7 @@ def list_sessions(log_dir: Path, gt_repo: GroundTruthRepository) -> list[dict]:
             "annotated": len(gt_repo.list_for_session(path.stem)),
             "started_at": hands[0].get("started_at") if hands else None,
             "updated_at": datetime.fromtimestamp(mtime).isoformat(timespec="seconds"),
+            "script": (log_dir / f"{path.stem}{_SCRIPT_SUFFIX}").is_file(),
         }))
     return [d for _, d in sorted(out, key=lambda t: t[0], reverse=True)]
 
@@ -163,7 +169,8 @@ def _hand_row(hand: dict, gt) -> dict:
         "has_needs_review": hand_has_needs_review(hand),
         "ground_truth": (
             {"source": gt.source, "annotated_at": gt.annotated_at, "annotator": gt.annotator,
-             "blind": bool(gt.hand.get("blind")), "entry_sec": gt.hand.get("entry_sec")}
+             "blind": bool(gt.hand.get("blind")), "reconciled": bool(gt.hand.get("reconciled")),
+             "entry_sec": gt.hand.get("entry_sec")}
             if gt is not None else None
         ),
         "accuracy": accuracy,
@@ -202,7 +209,8 @@ def list_hands(
         "entry_sec_avg": _average([r["ground_truth"].get("entry_sec") for r in rows if r["ground_truth"]]),
     }
     rows.sort(key=lambda r: r["hand_id"], reverse=True)
-    return {"session_id": session_id, "hands": rows, "summary": summary}
+    return {"session_id": session_id, "hands": rows, "summary": summary,
+            "script": (log_dir / f"{session_id}{_SCRIPT_SUFFIX}").is_file()}
 
 
 def _get_hand(
@@ -349,17 +357,22 @@ def hand_detail(
         return None
     _add_street_totals(captured)
     gt = gt_repo.get(session_id, hand_id)
-    blind = gt is None and is_blind(session_id, hand_id, blind_every)
+    script = (log_dir / f"{session_id}{_SCRIPT_SUFFIX}").is_file()   # 台本のハンドは正解が台本（入力は要らない）
+    blind = gt is None and not script and is_blind(session_id, hand_id, blind_every)
     initial = _gt_actions(gt.hand) if gt is not None else ([] if blind else _gt_actions(captured))
     board, holes = _gt_cards(gt.hand) if gt is not None else (None, None)
     button = _gt_button(gt.hand) if gt is not None else None
+    legal = replay_legal(captured, initial, board=board, holes=holes, button=button)
+    # 開いた時点で食い違いを見せる（入れ終わったハンドを見直すときに、編集しなくても出る）
+    legal["lint"] = hand_lint(captured, legal["actions"], legal["next"], board, holes, show_record=not blind)
     return {
         "session_id": session_id,
         "captured": captured,
         "ground_truth": gt.to_dict() if gt is not None else None,
         "has_needs_review": hand_has_needs_review(captured),
-        "legal": replay_legal(captured, initial, board=board, holes=holes, button=button),
+        "legal": legal,
         "blind": blind,
+        "script": script,
         "timeline": hand_timeline(log_dir, session_id, captured, _next_started_at(log_dir, session_id, hand_id)),
     }
 
@@ -533,6 +546,12 @@ def replay_legal(
     }
     if ctx.actor_seat is None and len(active) >= 2:
         nxt["showdown_winner"] = _showdown_winner(captured, gs, active, board, holes)
+    if ctx.actor_seat is None and mucked and len(active) == 1:
+        # 見せずに降りた人のほうが手札が強い = 降りた席の入れ間違いのことが多い（店舗 a6ee12e4 ハンド 1: トリップスの
+        # 勝者を「フォールド」にしていた）。ショーダウンの行は手番の順に縛られないので画面では止まらない
+        strongest = _showdown_winner(captured, gs, active + mucked, board, holes)
+        if strongest is not None and strongest in mucked:
+            nxt["mucked_stronger"] = strongest
     return {"actions": out, "next": nxt, "error": error}
 
 
@@ -686,9 +705,111 @@ def save_ground_truth(
     entry_sec = _entry_sec(body)
     if entry_sec is not None:
         hand_body["entry_sec"] = entry_sec      # 入力にかかった時間（手間を測る）
+    _keep_blind_entry(hand_body, gt_repo.get(session_id, hand_id))
     entry = gt_repo.upsert(session_id, hand_id, hand_body, annotator=annotator, source=source)
     accuracy = _accuracy_dict(measure_hand(dict(entry.hand, hand_id=hand_id), captured))
     return 200, {"saved": entry.to_dict(), "accuracy": accuracy}
+
+
+def _keep_blind_entry(hand_body: dict, existing: Any) -> None:
+    """ブラインドで先に入れた内容を残す（テスト方針 週 1: 先に記録を見ずに入れ、そのあと記録と照らし合わせて直す）。
+
+    ブラインドの保存では、入れたアクションと勝者を `blind_entry` にも写す。そのあとの保存（照らし合わせ）では前の
+    `blind_entry` をそのまま持ち越し、`reconciled` を付ける = 最後の内容が正解、`blind_entry` は記録を見ずに入れた内容
+    （入れる側の誤りの率と、記録に引きずられていないかを測る）。
+    """
+    if hand_body.get("blind") is True:
+        hand_body["blind_entry"] = {
+            "actions": [dict(a) for a in hand_body.get("actions") or []],
+            "winner_seat": hand_body.get("winner_seat"),
+            "entry_sec": hand_body.get("entry_sec"),
+        }
+        return
+    previous = getattr(existing, "hand", None) or {}
+    if isinstance(previous.get("blind_entry"), dict):
+        hand_body["blind"] = True
+        hand_body["blind_entry"] = previous["blind_entry"]
+        hand_body["reconciled"] = True
+
+
+_STREET_ORDER = ("preflop", "flop", "turn", "river")
+_BOARD_STREET = {3: "flop", 4: "turn", 5: "river"}
+
+
+def street_lint(captured: dict, rows: list[dict], nxt: Optional[dict], board: Optional[list],
+                show_record: bool = True) -> list[str]:
+    """真のアクションのストリートが、ボードの枚数・記録と食い違っていないか（店舗 9d1d8536 ハンド 2: 記憶で入れて
+    フロップのチェック 3 つが抜け、ストリートが 1 つずれた）。見つけた食い違いを文で返す。
+
+    `show_record=False`（ブラインドで入れている間）は記録を使う検査をしない（記録の中身を見せない）。
+    """
+    if not rows or nxt is None:
+        return []
+    msgs: list[str] = []
+    slots = list(board if board is not None else captured.get("board") or [])
+    # 配った枚数 = 最後に分かっている札の位置（途中の読めない札 "??" も配った札）
+    dealt_n = max((i + 1 for i, c in enumerate(slots) if isinstance(c, str) and c and c != "??"), default=0)
+    dealt = _BOARD_STREET.get(dealt_n)
+    betting = [r for r in rows if r.get("street") in _STREET_ORDER]
+    last = betting[-1]["street"] if betting else "preflop"
+    if (dealt is not None and nxt.get("hand_over") and nxt.get("foldout_winner") is not None
+            and _STREET_ORDER.index(dealt) > _STREET_ORDER.index(last)):
+        msgs.append(f"ボードは {dealt_n} 枚（{_STREET_JA[dealt]}まで配った）のに、アクションは{_STREET_JA[last]}で"
+                    "全員降りて終わっています。どこかのストリートのアクション（チェックなど）が抜けていませんか")
+    if show_record:
+        reached = {r.get("street") for r in rows}
+        recorded = [a.get("street") for a in captured.get("actions") or [] if isinstance(a, dict)]
+        # ボードに無いストリートの記録の行は記録の誤り（店舗 d0f055fb ハンド 2: 記録がストリートを 1 つ先に進めていた）
+        missing = [s for s in _STREET_ORDER[1:] if s in recorded and s not in reached
+                   and (dealt is None or _STREET_ORDER.index(s) <= _STREET_ORDER.index(dealt))]
+        allin = nxt.get("hand_over") and nxt.get("foldout_winner") is None and _STREET_ORDER.index(last) < 3
+        if missing and not allin:
+            msgs.append("記録には" + "・".join(_STREET_JA[s] for s in missing) + "のアクションがあるのに、"
+                        "こちらにはありません（ストリートがずれていないか、発話と札の時刻で確かめてください）")
+    return msgs
+
+
+def hand_lint(captured: dict, rows: list[dict], nxt: Optional[dict], board: Optional[list],
+              holes: Optional[dict], show_record: bool = True) -> list[str]:
+    """入れた真のアクションの食い違い（ストリート・ショーダウンで降りた席・札）を文で返す（2026-09-30 の洗い直しで
+    見つかった入力ミスの形）。"""
+    msgs = street_lint(captured, rows, nxt, board, show_record)
+    seat = (nxt or {}).get("mucked_stronger")
+    if seat is not None:
+        msgs.append(f"席{seat} は手札が一番強いのに、ショーダウンで見せずに降りた（フォールド）ことになっています。"
+                    "降りた席が合っているか確かめてください（見せずに降りたなら、そのままで構いません）")
+    msgs.extend(card_lint(captured, board, holes))
+    return msgs
+
+
+def card_lint(captured: dict, board: Optional[list], holes: Optional[dict]) -> list[str]:
+    """RFID が読んだ札（記録のボード・手札）が、入れた真のアクションの札に無い（店舗 d0f055fb ハンド 5: RFID は
+    リバーを 9s と読み、9s のタグはほかのハンドでは毎回正しいのに、真のアクションは 9c）。札を直したのが正しい
+    こともある（読めていない札・登録の誤り）ので、止めずに知らせるだけ。"""
+    from core.hand_log import UNKNOWN_CARD
+
+    msgs: list[str] = []
+    if board is not None:
+        given = {c for c in board if isinstance(c, str)}
+        read = [c for c in captured.get("board") or [] if isinstance(c, str) and c and c != UNKNOWN_CARD]
+        lost = [c for c in read if c not in given]
+        if lost:
+            msgs.append("RFID はボードに " + "・".join(lost) + " を読んでいますが、入れたボードにありません"
+                        "（打ち間違いでないか確かめてください）")
+    for p in captured.get("players") or []:
+        if not isinstance(p, dict) or not isinstance(p.get("seat"), int) or holes is None or p["seat"] not in holes:
+            continue
+        given = {c for c in holes.get(p["seat"]) or [] if isinstance(c, str)}
+        read = [c for c in p.get("hole_cards") or [] if isinstance(c, str) and c and c != UNKNOWN_CARD]
+        lost = [c for c in read if c not in given]
+        if lost and given:
+            msgs.append(f"RFID は席{p['seat']} の手札に " + "・".join(lost) + " を読んでいますが、入れた手札にありません"
+                        "（打ち間違いでないか確かめてください）")
+    return msgs
+
+
+_STREET_JA = {"preflop": "プリフロップ", "flop": "フロップ", "turn": "ターン", "river": "リバー",
+              "showdown": "ショーダウン"}
 
 
 def _review_confirmed(captured: dict, body: dict) -> bool:
@@ -718,6 +839,7 @@ class GroundTruthServer(ThreadingHTTPServer):
     def __init__(
         self, address: tuple[str, int], log_dir: Path,
         corrections: Optional[Path] = None, blind_every: int = BLIND_EVERY,
+        corpus_factory: Optional[Callable[[Path], Any]] = None,
     ) -> None:
         self.log_dir = Path(log_dir)
         self.blind_every = blind_every
@@ -725,7 +847,31 @@ class GroundTruthServer(ThreadingHTTPServer):
         self.corr_repo: Optional[HandCorrectionRepository] = None
         if corrections is not None and Path(corrections).is_file():
             self.corr_repo = HandCorrectionRepository(corrections)
+        # 読み上げ集（`tools/read_corpus.py`）。マイクとモデルを使うので、画面を開いたときに作る
+        self._corpus: Any = None
+        self._corpus_factory = corpus_factory
+        self._corpus_lock = threading.Lock()
+        # 台本のハンド（`tools/test_script.py`）
+        from tools.test_script import ScriptApp
+
+        self.script = ScriptApp(self.log_dir)
         super().__init__(address, _Handler)
+
+    def corpus(self) -> Any:
+        with self._corpus_lock:
+            if self._corpus is None:
+                if self._corpus_factory is not None:
+                    self._corpus = self._corpus_factory(self.log_dir)
+                else:
+                    from tools.read_corpus import CorpusApp
+
+                    self._corpus = CorpusApp(self.log_dir)
+            return self._corpus
+
+    def server_close(self) -> None:
+        if self._corpus is not None:
+            self._corpus.close()
+        super().server_close()
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -746,8 +892,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_page(self) -> None:
-        body = _PAGE.encode("utf-8")
+    def _send_page(self, page: Optional[str] = None) -> None:
+        body = (_PAGE if page is None else page).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -810,6 +956,26 @@ class _Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self._send_page()
             return
+        if path in ("/corpus", "/corpus/"):
+            from tools.read_corpus import CORPUS_PAGE
+
+            self._send_page(CORPUS_PAGE)
+            return
+        if path in ("/script", "/script/"):
+            from tools.test_script import SCRIPT_PAGE
+
+            self._send_page(SCRIPT_PAGE)
+            return
+        if path.startswith("/api/script/"):
+            self._send_json(*srv.script.route("GET", path))
+            return
+        if path.startswith("/api/corpus/"):
+            status, payload = srv.corpus().route("GET", path)
+            if isinstance(payload, Path):
+                self._send_audio(payload)
+            else:
+                self._send_json(status, payload)
+            return
         if path == "/favicon.ico":
             body = _FAVICON.encode("utf-8")
             self.send_response(200)
@@ -856,6 +1022,12 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:         # noqa: N802
         path = urlsplit(self.path).path
         srv = self.server
+        if path.startswith("/api/corpus/"):
+            self._send_json(*srv.corpus().route("POST", path, self._read_json() or {}))
+            return
+        if path.startswith("/api/script/"):
+            self._send_json(*srv.script.route("POST", path, self._read_json() or {}))
+            return
         m = _ROUTE_LEGAL.match(path)
         if m:
             sid = self._session(m.group(1))
@@ -869,7 +1041,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"code": "invalid_amount", "message": "actions が要ります"})
                 return
             board, holes = _gt_cards(body)
-            self._send_json(200, replay_legal(captured, actions, board=board, holes=holes, button=_gt_button(body)))
+            result = replay_legal(captured, actions, board=board, holes=holes, button=_gt_button(body))
+            result["lint"] = hand_lint(captured, result["actions"], result["next"], board, holes,
+                                       show_record=body.get("blind") is not True)
+            self._send_json(200, result)
             return
         if _ROUTE_HAND.match(path):
             self.do_PUT()
@@ -900,8 +1075,9 @@ class _Handler(BaseHTTPRequestHandler):
 def make_server(
     log_dir: Path, host: str = "127.0.0.1", port: int = 8791,
     corrections: Optional[Path] = None, blind_every: int = BLIND_EVERY,
+    corpus_factory: Optional[Callable[[Path], Any]] = None,
 ) -> GroundTruthServer:
-    return GroundTruthServer((host, port), log_dir, corrections, blind_every)
+    return GroundTruthServer((host, port), log_dir, corrections, blind_every, corpus_factory)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -912,7 +1088,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--corrections", default="hand_corrections.json",
                     help="ハンド訂正の保存先（あれば訂正を重ねて表示・比較する, ADR-0036）")
     ap.add_argument("--blind-every", type=int, default=BLIND_EVERY,
-                    help=f"N ハンドに 1 つ記録を見ずに入れる（既定 {BLIND_EVERY}。0 = しない）")
+                    help=f"N ハンドに 1 つ記録を見ずに先に入れる（既定 {BLIND_EVERY} = 全部。0 = しない）。"
+                         "保存したあとで記録と照らし合わせて直す")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     log_dir = Path(args.log_dir)
@@ -949,6 +1126,8 @@ _PAGE = r"""<!doctype html>
  h1 { font-size:18px; margin:0 0 8px; }
  h2 { font-size:15px; margin:18px 0 6px; color:#c9d1d9; }
  .muted { color:#9aa0a6; } .small { font-size:13px; }
+ a { color:#58a6ff; }
+ .top { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:baseline; gap:8px; }
  .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:10px; }
  .bar select, .bar input { max-width:100%; }
  select, input[type=text], input[type=number] { font:inherit; color:#e8eaed; background:#1e232b;
@@ -997,6 +1176,10 @@ _PAGE = r"""<!doctype html>
  tr.err td { background:#3a1f1f; }
  tr.errmsg td { color:#ff7b72; font-size:13px; }
  tr.warn td { background:#2a2416; }
+ tr.diffrow td { background:#2b2a12; }
+ .t-diff { background:#3a3514; color:#e3d341; }
+ .lint { background:#2a2416; border:1px solid #6b5a2e; border-radius:12px; padding:10px 12px; margin-top:10px; color:#e3b341; font-size:14px; }
+ .reconcile { background:#1f2a3a; border:1px solid #2d4a6e; border-radius:12px; padding:10px 12px; margin:0 0 10px; }
  td.street { color:#9aa0a6; font-size:13px; white-space:nowrap; }
  td.tools { white-space:nowrap; }
  .quick { background:#1a2230; border:1px solid #2d3a4d; border-radius:12px; padding:12px 14px; margin-top:10px; }
@@ -1081,7 +1264,7 @@ async function loadHands(){
   if (!S.sid) { S.hands = []; S.summary = null; if (S.view === "list") renderList(); return; }
   try {
     const d = await api(sidPath() + "/hands");
-    S.hands = d.hands || []; S.summary = d.summary || null;
+    S.hands = d.hands || []; S.summary = d.summary || null; S.script = !!d.script;
   } catch (e) { S.hands = []; S.summary = null; }
   if (S.view === "list") renderList();
 }
@@ -1107,18 +1290,20 @@ function renderList(){
       : '<span class="tag t-none">未入力</span>';
     const rv = h.has_needs_review ? '<span class="tag t-warn">要確認</span>' : "";
     const acc = h.accuracy ? (h.accuracy.all_match ? '<span class="tag t-ok">一致</span>' : `<span class="tag t-bad">差分 ${h.accuracy.mismatches}</span>`) : "";
-    const bl = h.ground_truth && h.ground_truth.blind ? '<span class="tag t-edit">ブラインド</span>' : "";
+    const bl = h.ground_truth && h.ground_truth.blind
+      ? (h.ground_truth.reconciled ? '<span class="tag t-edit">ブラインド→照合済</span>' : '<span class="tag t-warn">照らし合わせ待ち</span>') : "";
     return `<tr class="row" onclick="openHand(${h.hand_id})"><td>#${h.hand_id}</td><td>${fmtTime(h.started_at)}</td>
       <td>${(h.seats||[]).join(" ")}</td><td>${(h.board||[]).map(c => cardHtml(c, "sm")).join("")}</td>
       <td>${h.winner_seat != null ? "席 " + h.winner_seat : "—"}</td><td>${rv} ${st} ${bl} ${acc}</td></tr>`;
   }).join("");
-  $("app").innerHTML = `<h1>真のアクション入力</h1>
+  $("app").innerHTML = `<div class="top"><h1>真のアクション入力</h1><span class="small"><a href="/script">台本 →</a>　<a href="/corpus">読み上げ集 →</a></span></div>
     <div class="bar">
       <select onchange="selectSession(this.value)">${sess || "<option>セッションがありません</option>"}</select>
       <button class="sm" onclick="refreshAll()">↻ 読み直す</button>
       <label class="small muted">入力者 <input type="text" value="${esc(S.annotator)}" onchange="setAnnotator(this.value)" style="width:120px"></label>
       ${next ? `<button class="primary sm" onclick="openHand(${next.hand_id})">次の未入力 #${next.hand_id} →</button>` : ""}
     </div>
+    ${S.script ? `<div class="reconcile">このセッションは<b>台本のハンド</b>です。正解は台本なので入力は要りません（<a href="/script">台本の画面</a>）。</div>` : ""}
     ${summary}
     ${S.hands === null ? "<p class='muted'>読み込み中…</p>" :
       (rows ? `<div class="tbl"><table><tr><th>#</th><th>時刻</th><th>席</th><th>ボード</th><th>勝者</th><th>状態</th></tr>${rows}</table></div>`
@@ -1172,7 +1357,8 @@ function refreshLegal(){
       const body = {actions: S.gt.actions.map(a => ({seat:a.seat, action:a.action, amount:a.amount})),
                     button_seat: S.gt.button_seat,
                     board: S.gt.board.map(c => c || "??"),
-                    players: S.gt.players.map(p => ({seat: p.seat, hole_cards: p.hole_cards.filter(Boolean)}))};
+                    players: S.gt.players.map(p => ({seat: p.seat, hole_cards: p.hole_cards.filter(Boolean)})),
+                    blind: isBlind()};
       S.legal = await api(sidPath() + "/hands/" + S.hand.captured.hand_id + "/legal", {method:"POST", body: JSON.stringify(body)});
       applyLegal();
     } catch (e) { toast("手番の確認に失敗: " + e.message, true); }
@@ -1230,6 +1416,21 @@ function allConfirmed(){
   const r = reviewItems();
   return r.rows.every(i => S.confirmed.has(i)) && (!r.hand || S.confirmedHand);
 }
+// 記録と同じ行か（ストリート・席・アクション・ベット / レイズの額が同じ行を順に対応させる）。違う行を黄色で見せる
+function rowKey(a){ return [a.street || "", a.seat, a.action, ["bet","raise"].includes(a.action) ? (a.amount || 0) : ""].join("|"); }
+function matchRows(xs, ys){
+  const n = xs.length, m = ys.length;
+  const dp = Array.from({length: n + 1}, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    dp[i][j] = xs[i] === ys[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const a = new Set(), b = new Set();
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (xs[i] === ys[j]) { a.add(i); b.add(j); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) i++; else j++;
+  }
+  return [a, b];
+}
 function toggleUnsure(i){ const a = S.gt.actions[i]; a.unsure = !a.unsure; S.dirty = true; renderEdit(); }
 function playAudio(name){
   try { if (S.audio) S.audio.pause(); } catch (e) {}
@@ -1265,9 +1466,15 @@ function renderEdit(){
   const seats = g.players.map(p => p.seat);
   const la = L.actions || [], err = L.error, n = L.next;
   const replayOk = !!n;
+  const hidden = isBlind();
+  const capActions = (cap.actions || []).filter(a => GT_ACTIONS.includes(a.action));
+  const [gtSame, capSame] = hidden ? [new Set(), new Set()]
+    : matchRows(g.actions.map((a, i) => rowKey(Object.assign({}, a, la[i] || {}))), capActions.map(rowKey));
+  const capSameRows = new Set(capActions.map((a, j) => capSame.has(j) ? a : null).filter(Boolean));
   const rows = g.actions.map((a, i) => {
     const l = la[i];
     const isErr = err && err.index === i;
+    const differs = !hidden && !isErr && !gtSame.has(i);
     const street = l ? (STREET_JA[l.street] || l.street) : (isErr ? "" : (replayOk ? "?" : ""));
     const streetCell = replayOk ? `<td class="street">${street}</td>`
       : `<td class="street"><select onchange="setRowStreet(${i}, this.value)">${["preflop","flop","turn","river"].map(s => `<option value="${s}" ${a.street===s?"selected":""}>${STREET_JA[s]}</option>`).join("")}</select></td>`;
@@ -1275,11 +1482,11 @@ function renderEdit(){
     const amtCell = needAmt
       ? `<input type="number" inputmode="numeric" value="${(a.action === "allin" && l && l.total) || a.amount || ""}" onchange="setRowAmount(${i}, this.value)" ${a.action==="allin"?"disabled":""}>`
       : (a.action === "call" ? `<span class="muted">${(l && l.total) || a.amount || ""}</span>` : "");
-    return `<tr class="${isErr?"err":""}">${streetCell}
+    return `<tr class="${isErr?"err":(differs?"diffrow":"")}">${streetCell}
       <td><select onchange="setRowSeat(${i}, this.value)">${seats.map(s => `<option value="${s}" ${s===a.seat?"selected":""}>席 ${s}</option>`).join("")}</select></td>
       <td><select onchange="setRowAction(${i}, this.value)">${GT_ACTIONS.map(x => `<option value="${x}" ${x===a.action?"selected":""}>${ACTION_JA[x]}</option>`).join("")}</select></td>
       <td>${amtCell}</td>
-      <td class="tools"><button class="sm unsure ${a.unsure?"on":""}" onclick="toggleUnsure(${i})" title="自信なし">?</button> <button class="sm" onclick="insRow(${i})" title="この前に挿入">＋</button> <button class="sm danger" onclick="delRow(${i})">✕</button></td></tr>
+      <td class="tools">${differs ? '<span class="tag t-diff">記録と違う</span>' : ""}<button class="sm unsure ${a.unsure?"on":""}" onclick="toggleUnsure(${i})" title="自信なし">?</button> <button class="sm" onclick="insRow(${i})" title="この前に挿入">＋</button> <button class="sm danger" onclick="delRow(${i})">✕</button></td></tr>
       ${isErr ? `<tr class="errmsg"><td colspan="5">⚠ ${esc(err.message)}</td></tr>` : ""}`;
   }).join("");
   let quick = "";
@@ -1319,12 +1526,17 @@ function renderEdit(){
   const winnerHtml = `<div class="chips">${seats.map(s => `<button class="chip ${g.winner_seat===s?"on":""}" onclick="setWinner(${s})">席 ${s}</button>`).join("")}
       <button class="chip ${g.winner_seat==null?"on":""}" onclick="setWinner(null)">未定</button>
       ${sdw != null ? `<span class="muted small" style="align-self:center">手札で判定: 席 ${sdw}</span>` : ""}</div>`;
-  const capRows = (cap.actions || []).map((a, i) => `<tr class="${a.needs_review?"warn":""}">
+  const capRows = (cap.actions || []).map((a, i) => `<tr class="${GT_ACTIONS.includes(a.action) && !capSameRows.has(a) ? "diffrow" : (a.needs_review?"warn":"")}">
       <td>${a.needs_review ? `<button class="chk ${S.confirmed.has(i)?"on":""}" onclick="toggleConfirm(${i})" title="確かめた">✓</button>` : ""}</td>
       <td class="street">${STREET_JA[a.street]||a.street||""}</td><td>席 ${a.seat}</td>
       <td>${ACTION_JA[a.action]||a.action}</td><td>${(["call","allin"].includes(a.action) && a.total) || a.amount || ""}</td>
       <td class="muted small raw">${esc(a.raw_text||"")}${a.needs_review?` <span class="tag t-warn">要確認${a.reason?": "+esc(a.reason):""}</span>`:""}</td></tr>`).join("");
   const capPlayers = (cap.players || []).map(p => `席 ${p.seat}: ${(p.hole_cards||[]).map(c => cardHtml(c, "sm")).join("") || "<span class='muted'>—</span>"}`).join(" ｜ ");
+  const lint = (L.lint || []).map(m => `<div class="lint">⚠ ${esc(m)}</div>`).join("");
+  const gtd = d.ground_truth;
+  const reconcile = gtd && gtd.blind && !gtd.reconciled
+    ? `<div class="reconcile">ブラインドで入れた内容を保存しました。<b>記録と違う行（黄色）</b>を左の ▶ の音声で確かめ、正しい方に直して「保存」してください（直すところが無ければ、そのまま「保存」）。</div>`
+    : "";
   const gtMeta = d.ground_truth ? `<span class="tag ${d.ground_truth.source==="captured-passthrough"?"t-ok":"t-edit"}">${d.ground_truth.source==="captured-passthrough"?"記録どおり":"修正済"} ${esc(d.ground_truth.annotated_at||"")} ${esc(d.ground_truth.annotator||"")}</span>` : '<span class="tag t-none">未入力</span>';
   const blind = isBlind();
   const canPass = !blind && (!d.has_needs_review || allConfirmed());
@@ -1332,8 +1544,9 @@ function renderEdit(){
   const leftPanel = blind ? `
       <div class="panel cap">
         <h2 style="margin-top:0">ブラインド</h2>
-        <div class="blind">このハンドは<b>記録を見ずに</b>入れてください（5 ハンドに 1 つ。記録に引きずられていないかを測ります）。
-          下の発話は ▶ で聞けます。 <button class="sm" onclick="reveal()">記録を見る</button></div>
+        <div class="blind">まず<b>記録を見ずに</b>入れて「保存」してください。保存したあとで記録と照らし合わせ、違う行を
+          音声で確かめて直します（記録に引きずられずに正解を作るため）。下の発話は ▶ で聞けます。
+          <button class="sm" onclick="reveal()">記録を見る</button></div>
         <h2>発話と札の流れ <span class="muted small">+秒 = 手札が配られてから</span></h2>
         ${renderTimeline(d.timeline, true)}
       </div>` : `
@@ -1355,6 +1568,7 @@ function renderEdit(){
     <div class="cols">
       ${leftPanel}
       <div class="panel">
+        ${reconcile}
         <h2 style="margin-top:0">実際（真のアクション）</h2>
         <h2>ボード</h2><div style="display:flex;gap:6px;flex-wrap:wrap">${boardHtml}</div>
         <h2>手札（分かる席だけ）</h2>${playersHtml}
@@ -1363,7 +1577,7 @@ function renderEdit(){
         <div class="tbl"><table><tr><th>ストリート</th><th>席</th><th>アクション</th><th>額</th><th></th></tr>${rows || "<tr><td colspan='5' class='muted'>まだありません（下のボタンで足す）</td></tr>"}</table></div>
         <div class="rowadd"><button class="sm" onclick="addRow()">＋ 行を追加</button>
           <span class="muted small">最後に 1 行足します（席・アクション・額はあとで変えられます。行の ＋ はその行の前に入れます）</span></div>
-        ${quick}
+        ${quick}${lint}
         <h2>勝った席</h2>${winnerHtml}
         <h2>メモ</h2><input type="text" style="width:100%" value="${esc(g.notes)}" placeholder="気づいたこと（任意）" onchange="setNotes(this.value)">
         <div class="actions-bottom">
@@ -1418,7 +1632,12 @@ async function saveWith(body){
     const d = await api(sidPath() + "/hands/" + S.hand.captured.hand_id, {method:"PUT", body: JSON.stringify(body)});
     const a = d.accuracy || {};
     toast(a.all_match ? `保存しました — 記録と一致` : `保存しました — 記録との差分 ${a.mismatches}（アクション ${a.action_correct}/${a.action_total}${a.board_match?"":"・ボード"}${a.winner_match===false?"・勝者":""}）`);
-    S.dirty = false; S.view = "list"; S.hand = null; renderList(); await refreshAll();
+    S.dirty = false;
+    if (body.hand && body.hand.blind) {        // ブラインドで入れた → 記録と照らし合わせる
+      await openHand(S.hand.captured.hand_id);
+      return;
+    }
+    S.view = "list"; S.hand = null; renderList(); await refreshAll();
   } catch (e) { toast("保存できません: " + e.message, true); }
   finally { S.busy = false; }
 }

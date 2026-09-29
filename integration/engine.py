@@ -38,6 +38,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Optional
 
 from audio.recognizer import _extract_all_seat_nos, _extract_seat_no, apply_corrections
+from core.control_queue import parse_script_hand
 from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
@@ -935,6 +936,10 @@ class IntegrationThread(threading.Thread):
             and event.confidence < self._control_conf_threshold
         ):
             self._emit_unresolved(event, reason="low_conf_control_held")
+            return
+
+        if action == "script_hand":
+            self._handle_script_hand(event)
             return
 
         if action == "new_hand":
@@ -3028,6 +3033,23 @@ class IntegrationThread(threading.Thread):
         else:
             self._notice(f"席{seat} は次のハンドから参加です")
 
+    def _handle_script_hand(self, event: AudioEvent) -> None:
+        """台本のハンドを始める（`tools/test_script.py` の画面の「このハンドを始める」, 2026-09-30）。
+
+        台本のボタンと持ち点で新しいハンドにする（前のハンドの聞き違い・やり直しで持ち点やボタンがずれても、
+        台本の正解と同じ卓から始まる）。前のハンドが確定していなければ「ハンド開始」と同じく先に確定する。
+        """
+        gs = self._game_state
+        button, stacks = parse_script_hand(event.raw_text)
+        try:
+            if stacks and hasattr(gs, "force_next_stacks"):
+                gs.force_next_stacks(stacks)
+            if button is not None and hasattr(gs, "set_button"):
+                gs.set_button(button)
+        except ValueError as e:
+            self._notice(f"台本のハンドのボタン・持ち点を使えません（{e}）")
+        self._dispatch_audio_event(replace(event, action="new_hand"))
+
     def _handle_set_button(self, event: AudioEvent) -> None:
         """ボタンを手で指定する（`button <席>`, 仕様 FR-05g）。
 
@@ -3555,8 +3577,9 @@ class IntegrationThread(threading.Thread):
         if self._before_new_hand is not None:
             self._before_new_hand(gs.hand_id + 1)
         # S5（ADR-0047）: stack_start はブラインド post 前に取る。pokerkit backend は new_hand() で
-        # ブラインドを自動 post するため、post 後に取ると result がブラインド分ずれる。
-        self._stack_start = gs.get_stacks()
+        # ブラインドを自動 post するため、post 後に取ると result がブラインド分ずれる。台本のハンドは台本の持ち点。
+        next_stacks = getattr(gs, "stacks_before_next_hand", None)
+        self._stack_start = next_stacks() if next_stacks is not None else gs.get_stacks()
         try:
             gs.new_hand()
         except ValueError as e:

@@ -53,12 +53,12 @@ from core.game_state import PlayerState  # noqa: E402
 from integration.replay import load_events, replay_events  # noqa: E402
 from tools.measure_capture_accuracy import (  # noqa: E402
     _align_actions,
-    _normalize_action_type,
-    _normalize_amount,
     measure_hand,
     measure_session,
+    row_correct,
 )
 from tools.pack_logs import code_fingerprint  # noqa: E402
+from tools.test_script import MARKS_SUFFIX, SCRIPT_SUFFIX, script_steps, script_truth  # noqa: E402
 
 # 真のアクションのファイルで、ハンドの中身ではない項目（入力した人・時刻・入れ方）
 _GT_META = ("annotator", "annotated_at", "source")
@@ -470,10 +470,7 @@ def action_sources(hands: list[dict]) -> Counter:
 
 
 def _correct(gt_action: dict, captured: dict) -> bool:
-    gt_type = _normalize_action_type(gt_action.get("action"))
-    cap_type = _normalize_action_type(captured.get("action"))
-    return gt_type == cap_type and (
-        _normalize_amount(gt_action.get("amount"), gt_type) == _normalize_amount(captured.get("amount"), cap_type))
+    return row_correct(gt_action, captured)
 
 
 def _pct(num: int, den: int) -> Optional[float]:
@@ -583,6 +580,7 @@ class SessionReport:
     ear: dict = field(default_factory=dict)              # 第 2 の耳（ear_summary）
     gt: dict = field(default_factory=dict)
     memos: list[dict] = field(default_factory=list)      # 真のアクションのメモ（truth_memos）
+    script: dict = field(default_factory=dict)           # 台本のハンド（tools/test_script.py）を真のアクションにした
 
     def to_json(self) -> dict:
         return {
@@ -590,7 +588,7 @@ class SessionReport:
             "changed_files": self.changed_files, "differences": self.differences, "sources": self.sources,
             "truth": self.truth, "setup": self.setup, "flags": self.flags, "listening": self.listening,
             "reparse_differences": diff_record(self.replayed, self.reparsed) if self.reparsed else [],
-            "ear": self.ear, "memos": self.memos,
+            "ear": self.ear, "memos": self.memos, "script": self.script,
             "route_differences": {k: diff_record(self.reparsed, v) for k, v in self.routes.items()},
         }
 
@@ -609,6 +607,16 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
     gt_file = _read_json(files.path(".ground_truth.json"))
     report.gt = truth_hands(gt_file)
     report.memos = truth_memos(gt_file)
+    script = _read_json(files.path(SCRIPT_SUFFIX))
+    if script is not None:
+        # 台本のハンド: 正解は台本（真のアクションの入力が無くても評価できる）。札の確認の手順のメモも読む
+        marks = _read_jsonl(files.path(MARKS_SUFFIX))
+        st = script_truth(script, marks, report.live)
+        report.script = {"kind": script.get("kind"), "hands": len(script.get("hands") or []),
+                         "used": st["script_hands"], "redone": st["redone"], "unmatched": st["unmatched"],
+                         "steps": script_steps(script, marks)}
+        if st["hands"] and not report.gt["hands"]:
+            report.gt = {"hands": st["hands"]}
     if report.setup is None:
         report.note = "確定したハンドの記録が無いので卓の設定が分からず、再生できません"
         return report
@@ -908,6 +916,15 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
             print(f"  メモ（気づいたこと）{len(r.memos)} 件:")
             for m in r.memos:
                 print(f"    ハンド {m['hand_id']}: {m['notes']}")
+        if r.script:
+            sc = r.script
+            if sc["kind"] == "voice":
+                print(f"  台本のハンド（声だけ）: 台本 {sc['hands']} ハンドのうち {len(sc['used'])} を評価"
+                      f"（やり直し {sc['redone']}" + (f"・記録が見つからない {sc['unmatched']}" if sc["unmatched"] else "")
+                      + "）")
+            for step in sc.get("steps") or []:
+                mark = {"ok": "✓", "ng": "✗"}.get(step["result"], "・")
+                print(f"  札の確認 {mark} {step['title']}" + (f" — メモ: {step['note']}" if step["note"] else ""))
         if r.same_code is not None:
             print("  コード: " + ("記録したときと同じ" if r.same_code
                                 else "記録したときと違う（" + "・".join(r.changed_files) + "）"))

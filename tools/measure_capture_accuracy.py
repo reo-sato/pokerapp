@@ -111,6 +111,44 @@ def _normalize_amount(value: Any, action_type: str) -> int:
         return 0
 
 
+# オールインと同じ額なら同じアクションとみなす種類（持ち点を全部出すコール・ベット・レイズ = オールイン。
+# 真のアクションの画面・記録のどちらで「オールイン」と書いても、出したチップが同じなら同じ, 2026-09-30）
+_ALLIN_EQUIVALENT = frozenset({"call", "bet", "raise"})
+
+
+def same_action_type(gt_type: str, cap_type: str, gt_amount: int, cap_amount: int) -> bool:
+    """種類が同じか。オールインは、同じ額（0 でない）のコール / ベット / レイズと同じ。"""
+    if gt_type == cap_type:
+        return True
+    pair = {gt_type, cap_type}
+    return "allin" in pair and bool(pair & _ALLIN_EQUIVALENT) and gt_amount == cap_amount and gt_amount > 0
+
+
+def same_place(gt_action: dict, cap_action: dict) -> bool:
+    """同じ人の同じストリートの行か。
+
+    アライメントの「置き換え」の区間では、席やストリートの違う行どうしが並ぶ（店舗 a6ee12e4 ハンド 1: 真のアクション
+    「席5 フォールド」と記録「席4 フォールド」が種類と額だけで一致扱いになっていた, 2026-09-30）。ストリートは
+    どちらかが無ければ比べない（ストリートの無い古い真のアクションの行）。
+    """
+    if gt_action.get("seat") != cap_action.get("seat"):
+        return False
+    gt_street = str(gt_action.get("street") or "").strip().lower()
+    cap_street = str(cap_action.get("street") or "").strip().lower()
+    return not gt_street or not cap_street or gt_street == cap_street
+
+
+def row_correct(gt_action: dict, cap_action: dict) -> bool:
+    """1 行が正しいか: 同じ人・同じストリートで、種類（オールインの扱いは `same_action_type`）と額が一致。"""
+    if not same_place(gt_action, cap_action):
+        return False
+    gt_type = _normalize_action_type(gt_action.get("action"))
+    cap_type = _normalize_action_type(cap_action.get("action"))
+    gt_amount = _normalize_amount(gt_action.get("amount"), gt_type)
+    cap_amount = _normalize_amount(cap_action.get("amount"), cap_type)
+    return same_action_type(gt_type, cap_type, gt_amount, cap_amount) and gt_amount == cap_amount
+
+
 def _normalize_board(board: Any) -> list[str]:
     if not isinstance(board, list):
         return []
@@ -201,8 +239,10 @@ def measure_hand(
         cap_type = _normalize_action_type(cap_a.get("action"))
         gt_amount = _normalize_amount(gt_a.get("amount"), gt_type)
         cap_amount = _normalize_amount(cap_a.get("amount"), cap_type)
-        t_ok = gt_type == cap_type
-        a_ok = gt_amount == cap_amount
+        # 別の人・別のストリートの行は、種類や額がたまたま同じでも正しくない
+        place_ok = same_place(gt_a, cap_a)
+        t_ok = place_ok and same_action_type(gt_type, cap_type, gt_amount, cap_amount)
+        a_ok = place_ok and gt_amount == cap_amount
         if t_ok:
             type_correct += 1
         if a_ok:

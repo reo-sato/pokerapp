@@ -35,6 +35,8 @@ class ControlConsumerThread(threading.Thread):
         poll_interval_ms: int = 200,
         clock: Callable[[], float] = time.time,
         start_offset: Optional[int] = None,
+        backlog: Optional[Callable[[], int]] = None,
+        backlog_wait_sec: float = 60.0,
     ) -> None:
         super().__init__(daemon=True, name="ControlConsumerThread")
         self._log = control_log
@@ -45,6 +47,17 @@ class ControlConsumerThread(threading.Thread):
         # 既定では末尾から（過去コマンドを再生しない）。テストは 0 を渡せる。
         self._offset = control_log.end_offset() if start_offset is None else start_offset
         self._seen: set[str] = set()
+        # 聞き取り待ちの発話の数（`AudioThread.backlog`）。0 になるまで待ってからコマンドを積む（先に言われた発話を
+        # 追い越さない = CLI の入力と同じ。台本のハンドの開始が前のハンドの最後のアクションより先に入らないように）
+        self._backlog = backlog
+        self._backlog_wait_sec = backlog_wait_sec
+
+    def _wait_for_speech(self) -> None:
+        if self._backlog is None:
+            return
+        deadline = time.monotonic() + self._backlog_wait_sec
+        while self._backlog() > 0 and time.monotonic() < deadline and not self._stop_event.is_set():
+            time.sleep(0.05)
 
     def poll_once(self) -> int:
         """新規コマンドを 1 回分処理し、積んだ件数を返す（テスト用に分離）。"""
@@ -55,6 +68,7 @@ class ControlConsumerThread(threading.Thread):
             if command.command_id in self._seen:
                 continue
             self._seen.add(command.command_id)
+            self._wait_for_speech()
             event = command_to_audio_event(command, self._clock)
             if event is not None:
                 self._audio_queue.put(event)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,10 +29,28 @@ logger = logging.getLogger(__name__)
 # correct_board / correct_seat = ミスディール訂正（CLI の `cb` / `cs`, ADR-0054）。
 # set_blinds = ブラインドの変更（トーナメントのレベル上昇）/ sit_out・sit_in = 席の休み・参加（次のハンドから, 2026-09-26）。
 # set_button = 次のハンドのボタンを手で直す（仕様 FR-05g）。
+# script_hand = 台本のハンドを台本のボタンと持ち点で始める（`tools/test_script.py` の画面, 2026-09-30）。
 VALID_CONTROL_TYPES = (
     "new_hand", "winner", "rebuy", "correct_board", "correct_seat", "set_blinds", "sit_out", "sit_in",
-    "set_button",
+    "set_button", "script_hand",
 )
+
+
+def script_hand_text(button: int, stacks: dict[int, int]) -> str:
+    """台本のハンドの開始（`script_hand`）を 1 行にする（AudioEvent の raw_text = 記録と再生に残る）。"""
+    return f"button={int(button)} stacks=" + ",".join(f"{int(s)}:{int(v)}" for s, v in sorted(stacks.items()))
+
+
+def parse_script_hand(text: str) -> tuple[Optional[int], dict[int, int]]:
+    """`script_hand_text` の逆（読めない部分は無視: ボタン None / 持ち点 空）。"""
+    button_m = re.search(r"button=(\d+)", text or "")
+    stacks: dict[int, int] = {}
+    stacks_m = re.search(r"stacks=([\d:,]+)", text or "")
+    for part in (stacks_m.group(1).split(",") if stacks_m else []):
+        seat, _, stack = part.partition(":")
+        if seat.isdigit() and stack.isdigit():
+            stacks[int(seat)] = int(stack)
+    return (int(button_m.group(1)) if button_m else None), stacks
 
 
 def _now_iso() -> str:
@@ -195,5 +214,13 @@ def command_to_audio_event(command: ControlCommand, clock: Callable[[], float]):
             return None
         label = {"sit_out": "休み", "sit_in": "参加", "set_button": "ボタン"}[t]
         return AudioEvent(action=t, amount=0, timestamp=clock(), raw_text=f"シート{seat} {label}", seat=seat)
+    if t == "script_hand":
+        button, stacks = args.get("button"), args.get("stacks")
+        if (not isinstance(button, int) or isinstance(button, bool) or not isinstance(stacks, dict)
+                or not all(str(k).isdigit() and isinstance(v, int) and v >= 0 for k, v in stacks.items())):
+            logger.warning("control script_hand with invalid args: %r", args)
+            return None
+        return AudioEvent(action="script_hand", amount=0, timestamp=clock(),
+                          raw_text=script_hand_text(button, {int(k): v for k, v in stacks.items()}))
     logger.warning("unknown control type: %r", t)
     return None

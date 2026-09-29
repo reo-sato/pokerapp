@@ -1,0 +1,388 @@
+{
+ "session_id": "9d1d85363e1f498f956b7f648018b885",
+ "setup": {
+  "players": [
+   {
+    "seat": 4,
+    "name": "A",
+    "stack": 10000
+   },
+   {
+    "seat": 5,
+    "name": "B",
+    "stack": 10000
+   },
+   {
+    "seat": 6,
+    "name": "C",
+    "stack": 10000
+   }
+  ],
+  "sb": 100,
+  "bb": 200,
+  "button_prior": 5,
+  "first_hand_id": 1,
+  "hand_stacks": {
+   "1": {
+    "4": 10000,
+    "5": 10000,
+    "6": 10000
+   },
+   "2": {
+    "4": 9900,
+    "5": 6600,
+    "6": 13500
+   },
+   "3": {
+    "4": 9100,
+    "5": 3800,
+    "6": 17100
+   },
+   "4": {
+    "4": 8900,
+    "5": 7800,
+    "6": 13300
+   }
+  },
+  "auto_new_hand": true,
+  "auto_winner": true,
+  "rfid_folds": true
+ },
+ "code": {
+  "main.py": "3cf5381bb482d41a",
+  "integration/engine.py": "f49711e0074a1d75",
+  "core/poker_engine.py": "fc9a3d4c5165b64d",
+  "audio/recognizer.py": "2af1d13848adbad6",
+  "audio/recorder.py": "b565930c5cb0dedb",
+  "rfid/reader_thread.py": "d7f0708354eef421"
+ },
+ "hands": [
+  {
+   "hand_id": 1,
+   "truth": {
+    "board": [
+     "5c",
+     "8c",
+     "Ks",
+     "5d"
+    ],
+    "actions": [
+     {
+      "seat": 6,
+      "action": "raise",
+      "amount": 1200,
+      "street": "preflop"
+     },
+     {
+      "seat": 4,
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "call",
+      "amount": 1000,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 6,
+      "action": "bet",
+      "amount": 1000,
+      "street": "flop"
+     },
+     {
+      "seat": 5,
+      "action": "call",
+      "amount": 1000,
+      "street": "flop"
+     },
+     {
+      "seat": 5,
+      "action": "bet",
+      "amount": 1200,
+      "street": "turn"
+     },
+     {
+      "seat": 6,
+      "action": "raise",
+      "amount": 4500,
+      "street": "turn"
+     },
+     {
+      "seat": 5,
+      "action": "fold",
+      "amount": 0,
+      "street": "turn"
+     }
+    ],
+    "players": [
+     {
+      "seat": 4,
+      "hole_cards": [
+       "8d",
+       "Ts"
+      ],
+      "showed_down": false,
+      "name": "A"
+     },
+     {
+      "seat": 5,
+      "hole_cards": [
+       "4d",
+       "Ac"
+      ],
+      "showed_down": false,
+      "name": "B"
+     },
+     {
+      "seat": 6,
+      "hole_cards": [
+       "9s",
+       "Jd"
+      ],
+      "showed_down": false,
+      "name": "C"
+     }
+    ],
+    "winner_seat": 6,
+    "entry_sec": 134.5,
+    "hand_id": 1
+   },
+   "baseline": {
+    "action_correct": 9,
+    "action_total": 9,
+    "winner_match": true,
+    "board_match": true
+   },
+   "reparse_baseline": {
+    "action_correct": 9,
+    "action_total": 9,
+    "winner_match": true,
+    "board_match": true
+   }
+  },
+  {
+   "hand_id": 2,
+   "truth": {
+    "board": [
+     "5d",
+     "5c",
+     "8c",
+     "8h",
+     "3s"
+    ],
+    "actions": [
+     {
+      "seat": 4,
+      "action": "raise",
+      "amount": 800,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "call",
+      "amount": 700,
+      "street": "preflop"
+     },
+     {
+      "seat": 6,
+      "action": "call",
+      "amount": 600,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 6,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 4,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 5,
+      "action": "bet",
+      "amount": 1500,
+      "street": "turn"
+     },
+     {
+      "seat": 6,
+      "action": "call",
+      "amount": 1500,
+      "street": "turn"
+     },
+     {
+      "seat": 4,
+      "action": "fold",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 5,
+      "action": "bet",
+      "amount": 500,
+      "street": "river"
+     },
+     {
+      "seat": 6,
+      "action": "raise",
+      "amount": 5000,
+      "street": "river"
+     },
+     {
+      "seat": 5,
+      "action": "fold",
+      "amount": 0,
+      "street": "river"
+     }
+    ],
+    "players": [
+     {
+      "seat": 4,
+      "hole_cards": [
+       "Ad",
+       "Qs"
+      ],
+      "showed_down": false,
+      "name": "A"
+     },
+     {
+      "seat": 5,
+      "hole_cards": [
+       "4h",
+       "Qh"
+      ],
+      "showed_down": false,
+      "name": "B"
+     },
+     {
+      "seat": 6,
+      "hole_cards": [
+       "2s",
+       "6d"
+      ],
+      "showed_down": false,
+      "name": "C"
+     }
+    ],
+    "winner_seat": 6,
+    "blind": true,
+    "entry_sec": 250.2,
+    "hand_id": 2,
+    "note": "洗い直し 2026-09-30: 記憶で入れたときにフロップのチェック 3 つ（チェック・チェック・チェックアラウンド）が抜け、以降が 1 ストリート早くなっていた（発話・ボード 5 枚と合わせて直した）"
+   },
+   "baseline": {
+    "action_correct": 12,
+    "action_total": 12,
+    "winner_match": true,
+    "board_match": true
+   },
+   "reparse_baseline": {
+    "action_correct": 12,
+    "action_total": 12,
+    "winner_match": true,
+    "board_match": true
+   }
+  },
+  {
+   "hand_id": 3,
+   "truth": {
+    "board": [
+     "2s",
+     "8d",
+     "2h",
+     "3s",
+     "3c"
+    ],
+    "actions": [
+     {
+      "seat": 5,
+      "action": "raise",
+      "amount": 700,
+      "street": "preflop"
+     },
+     {
+      "seat": 6,
+      "action": "raise",
+      "amount": 5000,
+      "street": "preflop"
+     },
+     {
+      "seat": 4,
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "call",
+      "amount": 3100,
+      "street": "preflop"
+     }
+    ],
+    "players": [
+     {
+      "seat": 4,
+      "hole_cards": [
+       "Qh",
+       "Kd"
+      ],
+      "showed_down": false,
+      "name": "A"
+     },
+     {
+      "seat": 5,
+      "hole_cards": [
+       "Ac",
+       "Ah"
+      ],
+      "showed_down": true,
+      "name": "B"
+     },
+     {
+      "seat": 6,
+      "hole_cards": [
+       "7h",
+       "8s"
+      ],
+      "showed_down": true,
+      "name": "C"
+     }
+    ],
+    "notes": "勝った席が未定になってしまう。実際には確定している",
+    "entry_sec": 510.5,
+    "hand_id": 3,
+    "winner_seat": 5,
+    "note": "洗い直し 2026-09-30: オールインのコールのあとの「席6 チェック」（ストリートなし）は無い行なので外し、勝者を席5（AA）にした（メモ「勝った席が未定になってしまう」）"
+   },
+   "baseline": {
+    "action_correct": 4,
+    "action_total": 4,
+    "winner_match": true,
+    "board_match": true
+   },
+   "reparse_baseline": {
+    "action_correct": 4,
+    "action_total": 4,
+    "winner_match": true,
+    "board_match": true
+   }
+  }
+ ]
+}

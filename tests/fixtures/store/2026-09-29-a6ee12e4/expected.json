@@ -108,9 +108,10 @@
       "street": "river"
      },
      {
-      "seat": 5,
+      "seat": 4,
       "action": "fold",
-      "amount": 0
+      "amount": 0,
+      "street": "showdown"
      }
     ],
     "players": [
@@ -135,7 +136,8 @@
     ],
     "winner_seat": 5,
     "entry_sec": 146.0,
-    "hand_id": 1
+    "hand_id": 1,
+    "note": "洗い直し 2026-09-30: 最後の行が勝者の席5（トリップス）の「フォールド」になっていた → 負けた席4 がショーダウンで見せずに降りた（勝者 席5・RFID の札の離脱と合う）"
    },
    "baseline": {
     "action_correct": 11,

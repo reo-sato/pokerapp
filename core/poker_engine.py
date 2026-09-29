@@ -158,6 +158,8 @@ class PokerkitGameState:
         # 次のハンドのボタンを手で指定（仕様 FR-05g）。使ったら (通常の進み方の席, 指定した席) を残す。
         self._forced_button: Optional[int] = None
         self.last_button_override: Optional[tuple[int, int]] = None
+        # 次のハンドの持ち点を決める（台本のハンド = 台本どおりの持ち点で始める, 2026-09-30）
+        self._forced_stacks: Optional[dict[int, int]] = None
         self._hand_id: int = 0
         self._state = None
         self._hand_active: bool = False
@@ -184,8 +186,17 @@ class PokerkitGameState:
         """新しいハンドを始める。配られる席が 2 つ未満なら ValueError（状態は変えない）。"""
         from pokerkit import NoLimitTexasHoldem
 
+        forced, saved = self._forced_stacks, (dict(self._stacks), dict(self._pending_rebuys))
+        if forced is not None:
+            # 台本の持ち点（前のハンドの結果・買い足しの保留より優先）
+            for seat, stack in forced.items():
+                self._stacks[seat] = stack
+                self._pending_rebuys.pop(seat, None)
+            self._forced_stacks = None
         playing = self.playing_seats()
         if len(playing) < 2:
+            self._stacks, self._pending_rebuys = saved
+            self._forced_stacks = forced
             raise ValueError(
                 "配られる席が 2 つ未満です（休み: "
                 f"{sorted(self._sitting_out) or 'なし'} / スタック 0: "
@@ -379,7 +390,8 @@ class PokerkitGameState:
 
     # 組み直しで戻さない、ハンドの外から変える設定（買い足し・休み・次のハンドのブラインドとボタン）。
     # 組み直しはハンドの入力だけを流し直すので、戻すとスナップショットのあとの操作が消える。
-    _KEEP_ON_RESTORE = ("_stacks", "_pending_rebuys", "_sitting_out", "_pending_blinds", "_forced_button")
+    _KEEP_ON_RESTORE = ("_stacks", "_pending_rebuys", "_sitting_out", "_pending_blinds", "_forced_button",
+                        "_forced_stacks")
 
     def restore(self, snapshot: dict) -> None:
         """`snapshot()` の時点に戻す（同じオブジェクトのまま = 参照している側はそのまま使える）。
@@ -707,6 +719,24 @@ class PokerkitGameState:
             self._pending_rebuys[seat] = self._pending_rebuys.get(seat, 0) + amount
             return
         self._stacks[seat] += amount
+
+    def stacks_before_next_hand(self) -> dict[int, int]:
+        """次のハンドの始めの持ち点（ブラインドの前）: いまの持ち点に、台本で決めた持ち点（`force_next_stacks`）を
+        重ねたもの。記録の `stack_start` に使う。"""
+        stacks = self.get_stacks()
+        if self._forced_stacks:
+            stacks.update(self._forced_stacks)
+        return stacks
+
+    def force_next_stacks(self, stacks: dict[int, int]) -> None:
+        """次のハンドを、この持ち点で始める（台本のハンド。前のハンドがまだ確定していなくても、その結果より
+        優先する）。卓に無い席・負の値は ValueError（何も変えない）。"""
+        for seat, stack in stacks.items():
+            if seat not in self._players:
+                raise ValueError(f"Unknown seat: {seat}")
+            if stack < 0:
+                raise ValueError(f"Stack must be non-negative, got {stack}")
+        self._forced_stacks = {int(s): int(v) for s, v in stacks.items()}
 
     def set_stacks(self, stacks: dict[int, int]) -> None:
         """次のハンドの持ち点を決める（評価で各ハンドを記録の持ち点から始める = `replay_events(hand_stacks=...)`）。

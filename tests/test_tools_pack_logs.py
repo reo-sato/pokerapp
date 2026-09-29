@@ -184,6 +184,60 @@ class TestZip:
             pack(tmp_path / "logs", tmp_path / "out", root=tmp_path)
 
 
+CORPUS = "20260927_140000_owner"
+
+
+def _corpus(logs: Path, name: str = CORPUS, when: datetime = END) -> Path:
+    """読み上げ集（`tools/read_corpus.py`）のフォルダ。"""
+    folder = logs / "corpus" / name
+    folder.mkdir(parents=True)
+    (folder / "meta.json").write_text(json.dumps({"speaker": "オーナー", "round": 1}, ensure_ascii=False),
+                                      encoding="utf-8")
+    (folder / "labels.jsonl").write_text('{"id": "act01"}\n', encoding="utf-8")
+    (folder / "transcripts.jsonl").write_text('{"id": "act01"}\n', encoding="utf-8")
+    (folder / "act01_t1_m1.wav").write_bytes(b"RIFF" + bytes(500))
+    (folder / "full_m1.wav").write_bytes(b"RIFF" + bytes(5000))             # ずっと録った音声 = 入れない
+    _touch(list(folder.iterdir()), when)
+    return folder
+
+
+class TestCorpus:
+    def test_recent_corpus_goes_in_with_its_phrase_audio(self, root, tmp_path):
+        _corpus(root / "logs")
+        _corpus(root / "logs", "20260920_100000_old", datetime(2026, 9, 20, 10))
+        out, manifest = _pack(root, tmp_path, audio=True)
+        names = _names(out)
+        assert {f"corpus/{CORPUS}/meta.json", f"corpus/{CORPUS}/labels.jsonl", f"corpus/{CORPUS}/transcripts.jsonl",
+                f"corpus/{CORPUS}/act01_t1_m1.wav"} <= set(names)
+        assert not any("full_m1" in n or "20260920" in n for n in names)
+        assert manifest["corpora"] == [{"name": CORPUS, "speaker": "オーナー", "round": 1, "updated_at": END.isoformat(),
+                                        "files": ["labels.jsonl", "meta.json", "transcripts.jsonl"], "audio_files": 1}]
+        assert f"{NEW}/{NEW}.json" in names                                   # セッションも今までどおり
+
+    def test_corpus_audio_follows_the_audio_setting(self, root, tmp_path):
+        _corpus(root / "logs")
+        out, manifest = _pack(root, tmp_path, audio=False)
+        assert f"corpus/{CORPUS}/labels.jsonl" in _names(out) and not any(n.endswith(".wav") for n in _names(out))
+
+    def test_a_named_session_leaves_the_corpus_out(self, root, tmp_path):
+        _corpus(root / "logs")
+        out, manifest = _pack(root, tmp_path, session_ids=[NEW])
+        assert manifest["corpora"] == [] and not any(n.startswith("corpus/") for n in _names(out))
+
+    def test_only_a_corpus(self, tmp_path):
+        logs = tmp_path / "logs"
+        _corpus(logs, when=datetime(2026, 9, 20, 10))                      # 12 時間より前でも、それしか無ければ入れる
+        out, manifest = pack(logs, tmp_path / "out", root=tmp_path, now=END)
+        assert manifest["sessions"] == [] and [c["name"] for c in manifest["corpora"]] == [CORPUS]
+        assert f"corpus/{CORPUS}/act01_t1_m1.wav" in _names(out)
+
+    def test_main_reports_the_corpus(self, root, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(pack_logs, "ROOT", root)
+        _corpus(root / "logs", when=datetime.now())
+        assert pack_logs.main(["--out-dir", str(tmp_path / "out"), "--no-open", "--audio"]) == 0
+        assert f"読み上げ集 1 つ: {CORPUS}（オーナー・句の音声 1）" in capsys.readouterr().out
+
+
 class TestText:
     def test_single_text_file_without_audio(self, root, tmp_path):
         out, manifest = _pack(root, tmp_path, text=True)

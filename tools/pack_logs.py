@@ -17,6 +17,9 @@
   分ける）/ `--no-audio` で入れない）
 - `pokerapp.log` はそのセッションの時間帯の行だけ / `config.json`（トークン類は伏せる）/ `rfid_cards.json` /
   `manifest.json`（入れたもの・インストールしたコードの指紋）
+- 読み上げ集（`logs/corpus/<フォルダ>/`, `tools/read_corpus.py`）: 同じ時間帯に録ったものを `corpus/<フォルダ>/` に
+  （`meta.json`・`labels.jsonl`・`transcripts.jsonl` と句ごとの音声。ずっと録った `full_*.wav` は大きいので入れない。
+  `--session` を指定したときは入れない）
 
 使い方:
 
@@ -62,6 +65,8 @@ _SESSION_SUFFIXES = (
     ".json", ".events.jsonl", ".transcripts.jsonl", ".table_state.json", ".table_state.jsonl",
     ".control.jsonl", ".ground_truth.json",
 )
+# 読み上げ集（`tools/read_corpus.py`）の置き場所（logs の下）
+CORPUS_DIR = "corpus"
 # どの版のコードで記録したかを突き合わせるための指紋（改行は LF に揃えてから sha256）
 FINGERPRINT_FILES = (
     "main.py", "integration/engine.py", "core/poker_engine.py", "audio/recognizer.py",
@@ -84,6 +89,20 @@ class Session:
         return max(p.stat().st_mtime for p in self.files)
 
 
+@dataclass
+class Corpus:
+    """読み上げ集 1 つ（`logs/corpus/<フォルダ>/`, `tools/read_corpus.py`）。"""
+
+    name: str
+    folder: Path
+    files: list[Path]                       # meta.json / labels.jsonl / transcripts.jsonl
+    audio: list[Path] = field(default_factory=list)   # 句ごとの WAV（ずっと録った full_*.wav は大きいので入れない）
+
+    @property
+    def updated(self) -> float:
+        return max(p.stat().st_mtime for p in self.files + self.audio)
+
+
 # ───────────────────────── 集める ─────────────────────────
 
 
@@ -104,6 +123,33 @@ def find_sessions(log_dir: Path) -> dict[str, Session]:
         audio = sorted(audio_dir.glob("*.wav")) if audio_dir.is_dir() else []
         sessions[sid] = Session(sid, files, audio)
     return sessions
+
+
+def find_corpora(log_dir: Path) -> dict[str, Corpus]:
+    """`logs/corpus/` の読み上げ集（`meta.json` のあるフォルダ）。"""
+    base = log_dir / CORPUS_DIR
+    if not base.is_dir():
+        return {}
+    out: dict[str, Corpus] = {}
+    for folder in sorted(base.iterdir()):
+        if not folder.is_dir() or not (folder / "meta.json").is_file():
+            continue
+        files = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix in (".json", ".jsonl"))
+        audio = sorted(p for p in folder.glob("*.wav") if not p.name.startswith("full_"))
+        out[folder.name] = Corpus(folder.name, folder, files, audio)
+    return out
+
+
+def select_corpora(
+    corpora: dict[str, Corpus], *, hours: float = DEFAULT_HOURS, all_sessions: bool = False,
+    now: Optional[datetime] = None,
+) -> list[Corpus]:
+    """直近 `hours` 時間に更新した読み上げ集（`all_sessions` なら全部）。古い順。"""
+    ordered = sorted(corpora.values(), key=lambda c: c.updated)
+    if all_sessions:
+        return ordered
+    now_ts = (now or datetime.now()).timestamp()
+    return [c for c in ordered if now_ts - c.updated <= hours * 3600]
 
 
 def select_sessions(
@@ -240,6 +286,21 @@ def _hand_count(session: Session) -> Optional[int]:
     return None
 
 
+def _corpus_manifest(corpus: Corpus) -> dict:
+    meta: Any = {}
+    try:
+        meta = json.loads((corpus.folder / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    if not isinstance(meta, dict):
+        meta = {}
+    return {
+        "name": corpus.name, "speaker": meta.get("speaker"), "round": meta.get("round"),
+        "updated_at": datetime.fromtimestamp(corpus.updated).isoformat(timespec="seconds"),
+        "files": [p.name for p in corpus.files], "audio_files": len(corpus.audio),
+    }
+
+
 # ───────────────────────── まとめる ─────────────────────────
 
 
@@ -254,14 +315,21 @@ def pack(
     出力先は 1 つ目の zip、全部の名前は `manifest["parts"]`。
     """
     sessions = find_sessions(log_dir)
-    if not sessions:
+    corpora = find_corpora(log_dir)
+    if not sessions and not corpora:
         raise PackError(f"{log_dir} にセッションのログがありません")
     now = now or datetime.now()
-    chosen = select_sessions(sessions, ids=session_ids, hours=hours, all_sessions=all_sessions, now=now)
+    chosen = (select_sessions(sessions, ids=session_ids, hours=hours, all_sessions=all_sessions, now=now)
+              if sessions or session_ids else [])
+    # 読み上げ集は、セッションを指定しないとき直近の分を一緒に入れる（無ければいちばん新しい 1 つ、セッションも無いとき）
+    chosen_corpora = [] if session_ids else select_corpora(corpora, hours=hours, all_sessions=all_sessions, now=now)
+    if not chosen and not chosen_corpora:
+        chosen_corpora = sorted(corpora.values(), key=lambda c: c.updated)[-1:]
     app_log = log_dir / APP_LOG
     created = scan_created(app_log)
     windows = [session_window(s, created) for s in chosen]
-    audio_bytes = sum(p.stat().st_size for s in chosen for p in s.audio)
+    audio_bytes = (sum(p.stat().st_size for s in chosen for p in s.audio)
+                   + sum(p.stat().st_size for c in chosen_corpora for p in c.audio))
     include_audio = not text and (audio if audio is not None else audio_bytes <= AUDIO_AUTO_LIMIT)
 
     # (zip の中の名前, 中身 = bytes か音声のパス)
@@ -272,6 +340,12 @@ def pack(
         if include_audio:
             for p in s.audio:
                 entries.append((f"{s.session_id}/audio/{p.name}", p))
+    for c in chosen_corpora:
+        for p in c.files:
+            entries.append((f"{CORPUS_DIR}/{c.name}/{p.name}", p.read_bytes()))
+        if include_audio:
+            for p in c.audio:
+                entries.append((f"{CORPUS_DIR}/{c.name}/{p.name}", p))
     log_text = slice_app_log(app_log, windows)
     if log_text:
         entries.append((APP_LOG, log_text.encode("utf-8")))
@@ -301,6 +375,7 @@ def pack(
             }
             for s, (a, b) in zip(chosen, windows)
         ],
+        "corpora": [_corpus_manifest(c) for c in chosen_corpora],
         "audio_bytes": audio_bytes,
         "audio_included": include_audio,
         "app_log_lines": log_text.count("\n"),
@@ -440,7 +515,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         for s in manifest["sessions"]
     )
     print(f"[pack] セッション {len(manifest['sessions'])} つ: {names}")
-    n_audio = sum(s["audio_files"] for s in manifest["sessions"])
+    if manifest["corpora"]:
+        corpora = " / ".join(f"{c['name']}（{c['speaker'] or '?'}・句の音声 {c['audio_files']}）" for c in manifest["corpora"])
+        print(f"[pack] 読み上げ集 {len(manifest['corpora'])} つ: {corpora}")
+    n_audio = (sum(s["audio_files"] for s in manifest["sessions"])
+               + sum(c["audio_files"] for c in manifest["corpora"]))
     if n_audio:
         if manifest["audio_included"]:
             print(f"[pack] 発話の音声 {n_audio} 個（{_mb(manifest['audio_bytes'])}）を入れました")

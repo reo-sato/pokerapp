@@ -251,12 +251,6 @@
       "action": "fold",
       "amount": 0,
       "street": "turn"
-     },
-     {
-      "seat": 4,
-      "action": "fold",
-      "amount": 0,
-      "street": "showdown"
      }
     ],
     "players": [
@@ -290,7 +284,8 @@
     ],
     "winner_seat": 5,
     "entry_sec": 317.2,
-    "hand_id": 2
+    "hand_id": 2,
+    "note": "洗い直し 2026-09-30: ターンで降りた席4 の「ショーダウンのフォールド」が重ねて入っていた行を外した"
    },
    "baseline": {
     "action_correct": 2,
