@@ -485,8 +485,8 @@ class BenchResult:
         return [statistics.median(ts) for ts in zip(*self.rounds)]
 
 
-# 最初のモデルは、測る前にこの数の発話で空回しする（PC が温まる前は遅い: 店舗 PC で最初に測った設定だけが
-# 0.6 秒ほど遅く出た）。2 つ目からは 1 発話。
+# 最初のモデルは、測る前にこの数の発話で空回しする（起動直後の数回は遅い = ウォームアップ。店舗 PC で最初に
+# 測った設定だけが 0.6〜1.8 秒遅く出た）。2 つ目からは 1 発話。
 _WARMUP_FIRST = 3
 
 
@@ -497,7 +497,7 @@ def run_bench(
 ) -> list[BenchResult]:
     """設定（スレッド数, ビーム幅）ごとにモデルを読み込み、同じ発話を聞き取って時間を測る。
 
-    順番の影響（温まる前・あとから重くなる）を打ち消すため、`rounds` 周のうち 2 周目は逆の順で測る。
+    順番の影響（起動直後の遅さ・あとから重くなる）を打ち消すため、`rounds` 周のうち 2 周目は逆の順で測る。
     """
     audio = [read_pcm16(path) for _, path, _ in utterances]
     results = {setting: BenchResult(*setting) for setting in settings}

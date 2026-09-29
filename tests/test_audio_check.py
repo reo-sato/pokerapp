@@ -327,7 +327,7 @@ class TestBench:
             lambda threads, beam: _TimedTranscriber(clock, threads, beam), clock=clock, log=lines.append,
         )
         assert [(r.threads, r.beam, round(r.median, 2)) for r in results] == [(4, 5, 3.5), (8, 5, 2.0), (8, 2, 1.7)]
-        # 2 周目は逆の順で測る（温まる前・あとから重くなる影響を打ち消す）
+        # 2 周目は逆の順で測る（起動直後の遅さ・あとから重くなる影響を打ち消す）
         assert [line.split("：")[0].split(": ")[0] for line in lines] == [
             "  [1/6] スレッド 4・ビーム 5（1 周目）", "  [2/6] スレッド 8・ビーム 5（1 周目）",
             "  [3/6] スレッド 8・ビーム 2（1 周目）", "  [4/6] スレッド 8・ビーム 2（2 周目）",
@@ -353,7 +353,7 @@ class TestBench:
 
             def recognize(self, pcm):
                 calls["n"] += 1
-                clock.now += 3.0 + (2.0 if calls["n"] <= 3 else 0.0)     # 最初の 3 回だけ遅い（温まる前）
+                clock.now += 3.0 + (2.0 if calls["n"] <= 3 else 0.0)     # 最初の 3 回だけ遅い（起動直後）
                 return SimpleNamespace(text="コール", confidence=0.9)
 
         results = audio_check.run_bench(utterances, [(4, 5), (8, 5)], lambda t, b: Same(), clock=clock,
