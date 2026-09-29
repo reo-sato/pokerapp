@@ -261,6 +261,15 @@ class TestShortAliases:
         ("レイズゴール", [("raise", 0), ("call", 0)]),
         ("ベッド1200", [("bet", 1200)]),
         ("フォールド、ホールド", [("fold", 0), ("fold", 0)]),
+        # 「オーリー」= オールイン（店舗 2026-09-25・09-29）。短い語のあとの「です」は区切り（2026-09-29）
+        ("オーリー", [("allin", 0)]),
+        ("はい、オーリー!", [("allin", 0)]),
+        ("オーリーです", [("allin", 0)]),
+        ("オーリンです", [("allin", 0)]),
+        ("ソーダウンです", [("showdown", 0)]),
+        ("ホールドです", [("fold", 0)]),
+        ("ホールドデスク", []),                      # 「です」のあとに片仮名 = 別の言葉
+        ("オーライ", []),
     ])
     def test_aliases_need_word_boundaries(self, text, expected):
         assert [(e.action, e.amount) for e in parse_actions(text)] == expected

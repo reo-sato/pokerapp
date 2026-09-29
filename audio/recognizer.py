@@ -320,7 +320,10 @@ def _kana_amount_to_kanji(norm: str, keyword_end: int) -> str:
 
 # 書き起こしゆれとして足した短い語は、ほかの言葉の一部として現れやすい（「なべとなって」の「ベト」、
 # 「ゴールド」の「ゴール」）。前後が区切り・数・別のアクションの語のときだけアクションとみなす（ADR-0063）。
-_BOUNDARY_KEYWORDS = frozenset({"ベト", "ゴール", "ホールド", "ベッド", "オーリン", "ソーダウン"})
+_BOUNDARY_KEYWORDS = frozenset({"ベト", "ゴール", "ホールド", "ベッド", "オーリン", "オーリー", "ソーダウン"})
+# 短い語のあとに続いても区切りとみなす言い方（「オーリンです」= オールインです。店舗 2026-09-29）。
+# 「です」のあとに片仮名が続く（「ホールドデスク」）ときは区切りにしない。
+_BOUNDARY_SUFFIX = re.compile(r"(?:デス|デース|デシタ)(?:ネ|ヨ)?(?![ァ-ヺー])")
 
 
 def _keyword_matches(norm: str) -> list[tuple[int, int, str]]:
@@ -348,7 +351,7 @@ def _keyword_matches(norm: str) -> list[tuple[int, int, str]]:
         before_ok = pos == 0 or not _is_katakana(lower[pos - 1]) or pos in ends
         after_ok = (
             end == len(lower) or not _is_katakana(lower[end]) or end in starts
-            or _kana_number_at(norm, end) is not None
+            or _kana_number_at(norm, end) is not None or _BOUNDARY_SUFFIX.match(norm, end) is not None
         )
         return before_ok and after_ok
 
