@@ -345,6 +345,84 @@ class TestShowdownMuck:
         assert status == 200 and "function addMuck(seat)" in html and "が見せずに降りた" in html
 
 
+class TestShowdownWinner:
+    """ショーダウンの勝者は、入れたボードと手札で判定して入れる（オーナー 2026-09-29 9d1d8536 ハンド 3: 勝った席が
+    未定になってしまう。実際には確定している）。読めていない札で結果が変わりうるなら未定のまま（人が選ぶ）。"""
+
+    BOARD = ["As", "Kd", "7h", "2c", "3d"]
+    HOLES = {4: ["9s", "9h"], 5: ["Ah", "Ad"], 6: ["Kc", "Qc"]}
+
+    def test_the_winner_comes_from_the_cards(self):
+        r = replay_legal(_hand(1), CHECKDOWN, board=self.BOARD, holes=self.HOLES)
+        assert r["next"]["hand_over"] and r["next"]["foldout_winner"] is None
+        assert r["next"]["showdown_winner"] == 5
+
+    def test_unknown_cards_that_could_change_the_winner_leave_it_open(self):
+        # 席4 の手札が分からない（4・5 ならストレートで勝つ）
+        r = replay_legal(_hand(1), CHECKDOWN, board=self.BOARD, holes={5: ["Ah", "Ad"], 6: ["Kc", "Qc"]})
+        assert r["next"]["showdown_winner"] is None
+        # 記録のボードは 3 枚だけ（ターン・リバーが分からない）
+        assert replay_legal(_hand(1), CHECKDOWN)["next"]["showdown_winner"] is None
+        # 画面の読めていない札（??）は分からない札
+        r = replay_legal(_hand(1), CHECKDOWN, board=self.BOARD[:3] + ["??", "??"], holes=self.HOLES)
+        assert r["next"]["showdown_winner"] is None
+
+    def test_a_card_that_cannot_matter_still_decides(self):
+        """席4 の手札だけ分からなくても、どの 2 枚でも勝てないなら決める（ボードのフラッシュ・ストレートの目が無い）。"""
+        board = ["As", "Ac", "Ad", "Kd", "Kh"]                     # 席5 は A のフォーカード
+        r = replay_legal(_hand(1), CHECKDOWN, board=board, holes={5: ["Ah", "2d"], 6: ["Kc", "Qc"]})
+        assert r["next"]["showdown_winner"] == 5
+
+    def test_after_a_muck_only_the_players_left_are_compared(self):
+        holes = {4: ["4c", "5c"], 5: ["Ah", "Ad"], 6: ["Kc", "Qc"]}   # 席4 はストレートでも見せずに降りた
+        r = replay_legal(_hand(1), CHECKDOWN + [{"seat": 4, "action": "fold"}], board=self.BOARD, holes=holes)
+        assert r["next"]["active_seats"] == [5, 6] and r["next"]["showdown_winner"] == 5
+
+    def test_a_tie_is_left_to_the_person(self):
+        holes = {4: ["2c", "3c"], 5: ["2d", "3d"], 6: ["2h", "3h"]}
+        r = replay_legal(_hand(1), CHECKDOWN, board=["As", "Ks", "Qs", "Js", "Ts"], holes=holes)
+        assert r["next"]["hand_over"] and r["next"]["showdown_winner"] is None
+
+    def test_the_endpoint_and_the_saved_cards(self, base):
+        players = [{"seat": s, "hole_cards": c} for s, c in self.HOLES.items()]
+        status, d = _req(base, "POST", f"/api/sessions/{SID}/hands/1/legal",
+                         {"actions": CHECKDOWN, "board": self.BOARD, "players": players})
+        assert status == 200 and d["next"]["showdown_winner"] == 5
+        # 保存した真のアクションの札で、開き直したときも判定する（記録のボードは 3 枚だけ）
+        hand = {"board": self.BOARD, "actions": CHECKDOWN, "players": players, "winner_seat": 5}
+        assert _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "manual-edit", "hand": hand})[0] == 200
+        status, detail = _req(base, "GET", f"/api/sessions/{SID}/hands/1")
+        assert status == 200 and detail["legal"]["next"]["showdown_winner"] == 5
+
+    def test_the_button_can_be_changed_when_the_dealer_forgot_to_move_it(self, base):
+        """ディーラーがボタンを動かし忘れたハンド（店舗 2026-09-29 9d1d8536 ハンド 4）は、実際のボタンを選ぶと
+        手番の順がそれに合う（記録のボタンの順でしか入れられず、最後に不要な行が残っていた）。"""
+        assert replay_legal(_hand(1), [])["next"]["actor_seat"] == 6          # 記録: ボタン 席6 = 最初に話す
+        r = replay_legal(_hand(1), [{"seat": 5, "action": "raise", "amount": 600}], button=5)
+        assert r["error"] is None and r["next"]["button_seat"] == 5
+        assert r["next"]["actor_seat"] == 6 and r["next"]["amount_to_call"] == 500   # 席6 は SB
+        status, d = _req(base, "POST", f"/api/sessions/{SID}/hands/1/legal",
+                         {"actions": [{"seat": 5, "action": "call"}], "button_seat": 5})
+        assert status == 200 and d["error"] is None and d["next"]["actor_seat"] == 6
+        hand = {"board": [], "actions": [{"seat": 5, "action": "fold"}, {"seat": 6, "action": "fold"}],
+                "players": [], "winner_seat": 4, "button_seat": 5}
+        status, saved = _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "manual-edit", "hand": hand})
+        assert status == 200 and saved["saved"]["button_seat"] == 5
+        status, detail = _req(base, "GET", f"/api/sessions/{SID}/hands/1")
+        assert detail["legal"]["error"] is None and detail["legal"]["next"]["foldout_winner"] == 4
+        bad = dict(hand, button_seat="5")
+        assert _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "manual-edit", "hand": bad})[0] == 400
+        status, html = _req(base, "GET", "/")
+        assert "function setButton(seat)" in html and "ディーラーがボタンを動かし忘れた" in html
+
+    def test_page_keeps_the_winner_and_offers_undetermined(self, base):
+        """選んである席をもう一度押しても外さない（確かめるつもりで押すと未定になっていた）。未定は専用のボタン。"""
+        status, html = _req(base, "GET", "/")
+        assert status == 200
+        assert "function setWinner(seat){ S.gt.winner_seat = seat;" in html
+        assert 'onclick="setWinner(null)">未定</button>' in html and "手札で判定: 席" in html
+
+
 class TestValidate:
     def test_keeps_only_known_fields_and_zeroes_fold_check_amounts(self):
         out = validate_gt_hand({

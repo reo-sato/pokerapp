@@ -843,6 +843,36 @@ def parse_actions(
     text = _drop_question_sentences(text)
     if not text:
         return []
+    events = _parse_utterance(text, confidence, utterance_start_ts)
+    if events:
+        return events
+    # 雑談に続けて言ったアクション（店舗 2026-09-29 7b897671 ハンド 2:「それが撮りづらくなります。 そんな機能入れて
+    # ないんですよ、まだ。 1300」）は、発話全体では会話とみて読まない。最後の文から前へ、アクションとして読める文
+    # だけを読み直す（つなぎの言葉だけの文は飛ばす）。雑談に挟まれた文は読まない（d0f055fb:「ラッシャーに4とか
+    # 書いちゃってたよ。4番レイズとかね。最悪ね。」）。
+    sentences = [s.strip() for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+    groups: list[list[AudioEvent]] = []
+    for sentence in reversed(sentences[1:]):
+        found = _parse_utterance(sentence, confidence, utterance_start_ts)
+        if found:
+            groups.append(found)
+        elif not _is_filler(sentence):
+            break
+    salvaged = [event for found in reversed(groups) for event in found]
+    for event in salvaged:
+        event.parse_flags = (*event.parse_flags, "sentence_after_chatter")
+    return salvaged
+
+
+def _is_filler(sentence: str) -> bool:
+    """つなぎの言葉だけの文（「はい。」「えー、」）。"""
+    return not _residue(_to_katakana(unicodedata.normalize("NFKC", sentence)), [])
+
+
+def _parse_utterance(
+    text: str, confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> list[AudioEvent]:
+    """`parse_actions` の本体（疑問形の文を除いたあとの 1 つの発話 / 文）。"""
     alias = _WHOLE_UTTERANCE_ALIASES.get(
         _to_katakana(unicodedata.normalize("NFKC", text)).strip(_TRAILING_PUNCTUATION)
     )

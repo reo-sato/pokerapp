@@ -42,6 +42,7 @@ from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
 from core.hand_log import UNKNOWN_CARD, ActionRecord, HandSummary, street_totals
+from core.positions import DEAL_ORDER_TIE_SEC, button_from_deal
 from core.table_state import build_table_state
 from output.event_recorder import EventRecorder
 from output.json_writer import JsonWriter
@@ -266,6 +267,7 @@ class IntegrationThread(threading.Thread):
         voice_heard_at: Optional[Callable[[], Optional[float]]] = None,
         recorded_deals: bool = False,
         before_new_hand: Optional[Callable[[int], None]] = None,
+        button_from_deal: bool = True,
     ) -> None:
         """
         Args:
@@ -332,6 +334,10 @@ class IntegrationThread(threading.Thread):
                          oldest_pending_start`）。札の離脱は、それより前に話された発話を反映してから入れる。
             voice_heard_at: マイクに最後に声が入った時刻（`AudioThread.last_voice_at`）。プレー中に
                          `SILENT_MIC_SEC` 入らなければ、マイクの電池・受信機・音量を確かめるよう知らせる。
+            button_from_deal: 手札を最初に読んだ順（配った順）が別の席をボタンとした配り方にだけ合うなら、
+                         ディーラーがボタンを動かし忘れたとみて、そのハンドのボタンを直して組み直す（config
+                         `engine.button_from_deal`, 既定 True, 2026-09-29）。読んだ時刻は在否（`seat_presence` の
+                         `since`）から取り、`deal_order` の信号として記録する（replay も同じ判断）。False でも記録はする。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -478,6 +484,12 @@ class IntegrationThread(threading.Thread):
         # ボードの札で分かったストリートの始まり（street → 最初の札が見えた時刻）と、前のラウンドを閉じたか
         self._street_marks: dict[str, float] = {}
         self._streets_synced: set[str] = set()
+        # ――― ボタンの置き忘れの救済（2026-09-29）―――
+        self._button_from_deal = bool(button_from_deal)
+        # このハンドで配った順を見たか（1 ハンドに 1 回）
+        self._deal_order_checked = False
+        # ハンドを始めた直後の状態（ボタンを直して始め直すとき、ここから入力を流し直す）
+        self._hand_origin: Optional[dict] = None
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -507,6 +519,7 @@ class IntegrationThread(threading.Thread):
 
             self._publish_table_state_if_due()
             self._check_deal_presence()     # 手札の配布（ADR-0063）
+            self._check_deal_order()        # 配った順（ボタンの置き忘れ）
             self._check_table_cleared()     # 片付け（プレーの終わり）
             self._check_silent_mic()        # マイクに声が入っているか
             self._poll_departures()         # 席の札の離脱・戻り（フォールド）
@@ -901,7 +914,8 @@ class IntegrationThread(threading.Thread):
             # この発話より前に離れた札を先に反映する（フォールドのあとの人のアクションとして読む）
             self._apply_observations_before(_spoken_at(event), event.timestamp)
         try:
-            if self._rfid_folds and self._hand_open and event.action in _REPLAYABLE_ACTIONS:
+            # ハンドの入力として残す（札が戻ったとき・ボタンを直したときに同じ順に流し直す）
+            if self._rules_aware and self._hand_open and event.action in _REPLAYABLE_ACTIONS:
                 self._run_input("audio", event)
             else:
                 self._dispatch_audio_event(event)
@@ -1332,6 +1346,9 @@ class IntegrationThread(threading.Thread):
                 self._hand_start_due = True      # live がこの時点でハンドを始めた（発話を待ったあと）
                 self._start_dealt_hand_if_ready()
             return
+        if ev.kind == "deal_order":
+            self._apply_deal_order(ev)
+            return
         if not (self._rfid_folds and self._hand_open):
             if self._rfid_folds and self._recorded_deals and self._deal_at is not None and (
                     ev.observed_at if ev.observed_at is not None else ev.timestamp) >= self._deal_at:
@@ -1455,13 +1472,22 @@ class IntegrationThread(threading.Thread):
         self._streets_synced = set(checkpoint["synced"])
         self._held_betting_words = checkpoint.get("held", 0)
 
-    def _replay_inputs(self, rest: list) -> None:
-        """記録した入力を同じ順に流し直す（お知らせ・画面は止めて、終わってから記録だけ流す）。"""
+    def _replay_inputs(self, rest: list, reassign_spoken_folds: bool = False) -> None:
+        """記録した入力を同じ順に流し直す（お知らせ・画面は止めて、終わってから記録だけ流す）。
+
+        `reassign_spoken_folds`: 「フォールド」と言われた席（spoken_fold）を、流し直した時点の手番の席にする。
+        記録の席は前の手番の順で決めた席なので、ボタンを直して流し直すときに使う。
+        """
         callbacks = (self._on_action, self._on_notice, self._on_cards)
         self._on_action = self._on_notice = self._on_cards = None
         self._rebuilding = True
         try:
             for kind, item in rest:
+                if reassign_spoken_folds and kind == "spoken_fold":
+                    actor = self._game_state.legal_context().actor_seat
+                    if actor is None:
+                        continue
+                    item = replace(item, seat=actor)
                 try:
                     self._run_input(kind, item)
                 except Exception:  # noqa: BLE001 — 組み直しの 1 件の失敗で残りを止めない
@@ -2291,6 +2317,104 @@ class IntegrationThread(threading.Thread):
             for ev in early:
                 self._handle_seat_signal(ev)
 
+    # ――― ボタンの置き忘れの救済（2026-09-29, 店舗 9d1d8536 ハンド 4）―――
+    # ディーラーはボタンの次の席から 1 枚ずつ 2 周配る。手札を最初に読んだ順がほかの席をボタンとした配り方にだけ
+    # 合うなら、ボタンを動かし忘れたとみてそのハンドを組み直す（`core.positions.button_from_deal`）。手で直すときは
+    # ハンドの途中でも `button <席>`。
+
+    def _check_deal_order(self) -> None:
+        """手札がそろったら 1 回だけ、札ごとに最初に読んだ時刻を記録してから反映する（live のみ）。
+
+        フロップが開いても手札がそろわなければ、読めた札だけで見る。比べられる組（違う席の札で、時刻の差が
+        `DEAL_ORDER_TIE_SEC` 以上）が無ければ記録しない（全員の札を同時に置いた = 順が分からない）。
+        """
+        if self._deal_order_checked or not self._hand_open or self._seat_presence is None or self._rebuilding:
+            return
+        gs = self._game_state
+        if getattr(gs, "button_seat", None) is None or not hasattr(gs, "restart_hand_with_button"):
+            self._deal_order_checked = True
+            return
+        seats = self._seats_in_hand()
+        if any(len(self._hole_cards.get(s, [])) < 2 for s in seats) and self._board_top() < 3:
+            return                               # 手札がそろうまで（フロップまで）待つ
+        try:
+            snapshot = self._seat_presence() or {}
+        except Exception:  # noqa: BLE001 — 在否が取れなければ見ない
+            return
+        self._deal_order_checked = True
+        items: list[str] = []
+        times: list[float] = []
+        for seat in seats:
+            since = (snapshot.get(seat) or {}).get("since") or {}
+            for card in self._hole_cards.get(seat, []):
+                if isinstance(since.get(card), (int, float)):
+                    items.append(f"{seat}:{card}")
+                    times.append(float(since[card]))
+        seat_of = [int(item.partition(":")[0]) for item in items]
+        if not any(seat_of[i] != seat_of[j] and abs(times[i] - times[j]) >= DEAL_ORDER_TIE_SEC
+                   for i in range(len(items)) for j in range(i + 1, len(items))):
+            return
+        self._emit_seat_signal(RFIDEvent(
+            tag_id="", card="", reader_id="", role="seat", seat=None, timestamp=self._clock(),
+            raw_tag_id="", kind="deal_order", cards=tuple(items), times=tuple(times),
+        ))
+
+    def _apply_deal_order(self, ev: RFIDEvent) -> None:
+        """記録した配った順（`deal_order`）から、ボタンの置き忘れを見つけたら組み直す（live も replay も）。"""
+        gs = self._game_state
+        current = getattr(gs, "button_seat", None)
+        if not (self._button_from_deal and self._hand_open and current is not None):
+            return
+        times: dict[int, list[float]] = {}
+        for item, t in zip(ev.cards, ev.times):
+            seat, _, _ = item.partition(":")
+            if seat.isdigit():
+                times.setdefault(int(seat), []).append(float(t))
+        found = button_from_deal(self._seats_in_hand(), times, current)
+        if found is None:
+            return
+        order = " → ".join(
+            f"席{int(i.partition(':')[0])}" for _, i in sorted(zip(ev.times, ev.cards))
+        )
+        self._rebutton(found, f"手札を読んだ順（{order}）は席{found} がボタンの配り方です（記録は席{current}）")
+
+    def _rebutton(self, seat: int, why: str) -> bool:
+        """いまのハンドのボタンを `seat` に直し、ハンドの入力を始めから流し直して記録を組み直す（要確認）。
+
+        ディーラーがボタンを動かし忘れると、手番の順がずれて声のアクションが別の席に付く（店舗 2026-09-29
+        9d1d8536 ハンド 4）。同じ持ち点・ブラインドでボタンだけ変えて始め直す。次のハンドのボタンはここから進む。
+        """
+        gs = self._game_state
+        restart = getattr(gs, "restart_hand_with_button", None)
+        origin = self._hand_origin
+        if restart is None or origin is None or not self._hand_open or not gs.is_hand_active():
+            return False
+        if seat == getattr(gs, "button_seat", None):
+            return False
+        if seat not in self._seats_in_hand():
+            self._notice(f"席{seat} はこのハンドに配られていません（ボタンは直しません）")
+            return False
+        inputs = list(self._hand_inputs)
+        self._hand_inputs = []
+        self._restore_checkpoint(origin)
+        # 入力から作り直す状態（チェックポイントに無いもの）
+        self._last_allin = None
+        self._spoken_fold_raw = {}
+        self._foldout_winner_left = False
+        restart(seat)
+        self._hand_origin = self._take_checkpoint(0)
+        self._replay_inputs(inputs, reassign_spoken_folds=True)
+        self._hand_needs_review = True
+        positions = " ".join(f"席{s}={p}" for s, p in sorted(gs.position_map().items()))
+        self._notice(f"{why} — ボタンを席{seat} に直して、このハンドの記録を組み直しました（{positions}。要確認）")
+        if self._on_action:
+            for record in self._current_actions:
+                self._on_action(record)
+        self._publish_table_state()
+        if self._foldout_pending is None:
+            self._maybe_finish_hand()
+        return True
+
     def _adopt_deal_cards(self) -> None:
         """配布の検出で集めた札を、いまのハンドの手札にする（配布と判断していない札は捨てる）。"""
         if self._deal_at is not None:
@@ -2905,11 +3029,23 @@ class IntegrationThread(threading.Thread):
             self._notice(f"席{seat} は次のハンドから参加です")
 
     def _handle_set_button(self, event: AudioEvent) -> None:
-        """次のハンドのボタンを手で指定する（`button <席>`, 仕様 FR-05g）。"""
+        """ボタンを手で指定する（`button <席>`, 仕様 FR-05g）。
+
+        ハンドの途中なら、そのハンドのボタンを直して記録を組み直す（ディーラーがボタンを動かし忘れた,
+        2026-09-29）。ハンドが無ければ次のハンドのボタン。
+        """
         gs = self._game_state
         seat = event.seat
         if seat is None:
             logger.warning("set_button without seat: %r", event.raw_text)
+            return
+        if self._hand_open and self._hand_origin is not None and gs.is_hand_active():
+            if seat == getattr(gs, "button_seat", None):
+                self._notice(f"このハンドのボタンは席{seat} です（変えません）")
+            elif seat in self._seats_in_hand():
+                self._rebutton(seat, f"手で指定（{event.raw_text}）")
+            else:
+                self._notice(f"席{seat} はこのハンドに配られていません（ボタンは変えません）")
             return
         try:
             gs.set_button(seat)
@@ -3461,6 +3597,11 @@ class IntegrationThread(threading.Thread):
         self._silent_mic_warned = False
         self._board_before_deal = False
         self._announced_hand = None
+        self._deal_order_checked = False
+        # ボタンを直して始め直すときに戻る状態（ブラインドを置いた直後、アクションは無い）
+        self._hand_origin = (
+            self._take_checkpoint(0) if hasattr(gs, "restart_hand_with_button") else None
+        )
         self._set_in_play(True)
         if self._rfid_reset_for_deal:
             self._rfid_reset_for_deal = False   # 配布の検出でリセット済み（ADR-0063）

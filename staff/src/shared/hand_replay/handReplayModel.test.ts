@@ -157,6 +157,10 @@ test("reasonLabels: known codes, patterns, and unknown codes", () => {
     "数字だけ（ベットかレイズかは場面から）",
     "Whisper が読めず、第 2 の耳で読んだ",
   ]);
+  assert.deepEqual(reasonLabels("amount_only+sentence_after_chatter"), [
+    "数字だけ（ベットかレイズかは場面から）",
+    "雑談の文のあとの文だけで読んだ",
+  ]);
 });
 
 test("streetTotals / shownAmount: a call is shown as what the player put in on that street", () => {

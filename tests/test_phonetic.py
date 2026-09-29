@@ -81,6 +81,8 @@ class TestMatchKeyword:
         "バック", "マッチ", "ショー", "ダウン", "ヘッド", "ゴールデン", "ホテル",
         # 意味の違う 2 つの語に同じくらい近い（ゴールド = ホールド / ゴール、オール = オールイン / ホールド）
         "ゴールド", "オール",
+        # 札を見せる「オープン」（店舗 2026-09-29 9d1d8536 ハンド 4: 「フォールド オープン」がターンのオールインになった）
+        "オープン",
     ])
     def test_other_words_are_not_read(self, heard):
         assert match_keyword(heard) is None
@@ -154,6 +156,13 @@ class TestParseActions:
 
     def test_dictionary_words_are_kept_when_the_near_word_is_ambiguous(self):
         assert _parsed("フォールド、ゴールド") == [("fold", 0, None, ())]
+
+    def test_open_is_not_an_allin(self):
+        """店舗 2026-09-29 9d1d8536 ハンド 4: 「フォールド オープン」の「オープン」をオールインと読み、ターンがオールインになった。"""
+        assert _parsed("フォールド オープン") == [("fold", 0, None, ())]
+        assert _parsed("オープン") == []
+        assert _parsed("オーリン") == [("allin", 0, None, ())]          # 店舗のゆれ（辞書）はそのまま
+        assert _parsed("オーイン") == [("allin", 0, None, ("fuzzy_keyword",))]
 
     def test_description(self):
         assert "音の近さで読んだ" in describe_events(parse_actions("ここまでのヘッドゾップです"))

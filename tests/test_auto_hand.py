@@ -449,10 +449,11 @@ def test_the_cli_turns_both_on_by_default():
 
     kwargs = main._auto_hand_kwargs({}, None)   # noqa: SLF001
     assert kwargs == {"auto_new_hand": True, "auto_winner": True, "speech_backlog": None,
-                      "speech_pending_since": None, "fold_absent_sec": 3.0, "voice_heard_at": None}
+                      "speech_pending_since": None, "fold_absent_sec": 3.0, "voice_heard_at": None,
+                      "button_from_deal": True}
     off = main._auto_hand_kwargs(   # noqa: SLF001
-        {"engine": {"auto_new_hand": False, "auto_winner": False}}, None)
-    assert off["auto_new_hand"] is False and off["auto_winner"] is False
+        {"engine": {"auto_new_hand": False, "auto_winner": False, "button_from_deal": False}}, None)
+    assert off["auto_new_hand"] is False and off["auto_winner"] is False and off["button_from_deal"] is False
 
 
 def test_notices_are_printed(capsys):

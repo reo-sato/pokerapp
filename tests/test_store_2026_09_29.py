@@ -170,3 +170,48 @@ class TestAmounts:
         assert [(e.action, e.amount) for e in parse_actions("レイズ2千500")] == [("raise", 2500)]
         assert [(e.action, e.amount) for e in parse_actions("千500")] == [("bet", 1500)]
         assert parse_actions("2千、500") == []                  # 区切って言った 2 つの数は額にしない
+
+
+def _parsed(text: str) -> list[tuple]:
+    return [(e.action, e.amount, tuple(e.parse_flags)) for e in parse_actions(text, confidence=0.5)]
+
+
+class TestActionAfterChatter:
+    """メモ（7b897671 ハンド 2）「最初の1300が長い雑談に巻き込まれてる」: 雑談の文に続けて言った額は、発話全体では
+    会話とみて読まなかった。発話全体で読めないときだけ、最後の文から前へアクションとして読める文を読み直す
+    （要確認 = sentence_after_chatter。雑談に挟まれた文は読まない）。"""
+
+    def test_the_amount_after_the_chatter_is_read(self):
+        text = "それが撮りづらくなります。 そんな機能入れてないんですよ、まだ。 1300"
+        assert _parsed(text) == [("bet", 1300, ("amount_only", "sentence_after_chatter"))]
+        (event,) = parse_actions(text)
+        assert event.raw_text == "1300"
+
+    def test_an_action_word_after_the_chatter_is_read(self):
+        text = "そうなんですよ、エアコンが効きすぎてしまって。 コール"
+        assert _parsed(text) == [("call", 0, ("sentence_after_chatter",))]
+
+    def test_filler_after_the_action_is_skipped(self):
+        text = "そうなんですよ、エアコンが効きすぎてしまって。 コール。 はい。"
+        assert _parsed(text) == [("call", 0, ("sentence_after_chatter",))]
+
+    @pytest.mark.parametrize("text", [
+        "それが撮りづらくなります。 そんな機能入れてないんですよ、まだ。",
+        # 会話の中のアクションの語は、文ごとに読み直しても読まない
+        "結構コールとか迷路に発音してますよね。 そうなんですよ、本当に困ってしまって。",
+        # 雑談に挟まれた文は読まない（d0f055fb: 前は 2 行目をレイズ 4 と読み、ハンド 7 の一致が 2 → 1 行に）
+        "ラッシャーに4とか書いちゃってたよ。4番レイズとかね。最悪ね。",
+    ])
+    def test_chatter_alone_is_not_read(self, text):
+        assert _parsed(text) == []
+
+    def test_an_utterance_read_as_a_whole_is_not_split(self):
+        assert _parsed("チェック。 ベット600。") == [("check", 0, ()), ("bet", 600, ())]
+
+    def test_the_flag_asks_for_review(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal(STORE_HOLES)
+        tb.say("それが撮りづらくなります。 そんな機能入れてないんですよ、まだ。 1300")
+        (record,) = tb.t._current_actions                   # noqa: SLF001
+        assert (record.action, record.amount, record.needs_review) == ("raise", 1300, True)
+        assert "sentence_after_chatter" in (record.reason or "")

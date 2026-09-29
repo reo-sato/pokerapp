@@ -139,3 +139,68 @@ def seat_for_position(seats: list[int], button_seat: int, position: str) -> Opti
         if name == canonical:
             return seat
     return None
+
+
+# ――― 配った順から見るボタン（ディーラーがボタンを動かし忘れたときの救済, 店舗 2026-09-29 9d1d8536 ハンド 4）―――
+# ディーラーはボタンの次の席から 1 枚ずつ 2 周配る（heads-up はボタンでない方から）。手札を最初に読んだ時刻の
+# 並びが、どの席をボタンとした配る順に合うかを見る。
+
+# 読んだ時刻の差がこれより小さい 2 枚は、どちらが先か分からないとみて比べない（全リーダーを 1 周読むのに
+# 約 0.3 秒かかる = ISSUE-0021 の実測。同じ周に読んだ 2 枚は置いた順と逆に記録されうる）。
+DEAL_ORDER_TIE_SEC = 0.3
+
+
+def deal_order_fit(
+    seats: list[int], times: dict[int, list[float]], button_seat: int, tie_sec: float = DEAL_ORDER_TIE_SEC,
+) -> tuple[int, int]:
+    """手札を読んだ時刻の並びが、ボタン `button_seat` での配る順とどれだけ合うか。
+
+    Args:
+        seats: ハンドに配られた席。
+        times: 席 → その席の手札を最初に読んだ時刻（1〜2 枚。読めなかった札は無くてよい）。
+        button_seat: 仮のボタン。
+
+    Returns:
+        (配る順と合った組の数, 比べた組の数)。比べるのは違う席の札の組で、時刻の差が `tie_sec` 以上のもの
+        （比べる組はボタンによらない）。同じ席の 2 枚はどのボタンでも同じなので数えない。
+    """
+    order = seat_order_from_button(seats, button_seat)
+    rank = {seat: i for i, seat in enumerate(order)}
+    cards = [
+        ((k, rank[seat]), seat, t)
+        for seat in order for k, t in enumerate(sorted(times.get(seat, ()))[:2])
+    ]
+    agree = total = 0
+    for i, (dealt_a, seat_a, t_a) in enumerate(cards):
+        for dealt_b, seat_b, t_b in cards[i + 1:]:
+            if seat_a == seat_b or abs(t_a - t_b) < tie_sec:
+                continue
+            total += 1
+            if (dealt_a < dealt_b) == (t_a < t_b):
+                agree += 1
+    return agree, total
+
+
+def button_from_deal(
+    seats: list[int], times: dict[int, list[float]], current: int, tie_sec: float = DEAL_ORDER_TIE_SEC,
+) -> Optional[int]:
+    """配った順から見たボタンの席（いまのボタン `current` と違うときだけ。それ以外は None）。
+
+    読み取りの時刻はプレイヤーの手の動き（札を置き直す・持ち上げる）にも左右されるので、次がすべてそろった
+    ときだけ判断する（オーナー 2026-09-29: 1 人で 3 人を演じたテストの読み取りの時刻は当てにならない）:
+
+    - 比べられる組が `2 × 席数` 以上ある（証拠が足りなければ判断しない）。
+    - 配る順に 1 か所の食い違いもなく合うボタンが 1 つだけ。
+    - いまのボタンと食い違う組が 2 つ以上（1 枚の読み遅れで変えない）。
+    """
+    seats = sorted(seats)
+    if len(seats) < 2 or current not in seats:
+        return None
+    fits = {b: deal_order_fit(seats, times, b, tie_sec) for b in seats}
+    total = fits[current][1]
+    perfect = [b for b, (agree, n) in fits.items() if n and agree == n]
+    if len(perfect) != 1 or perfect[0] == current or total < 2 * len(seats):
+        return None
+    if total - fits[current][0] < 2:
+        return None
+    return perfect[0]

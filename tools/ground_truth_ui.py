@@ -230,6 +230,20 @@ def _gt_actions(hand: dict) -> list[dict]:
     return out
 
 
+def _gt_cards(hand: dict) -> tuple[Optional[list], Optional[dict]]:
+    """GT に入れたボードと手札（ショーダウンの勝者の判定に使う。無ければ記録の札）。"""
+    board = hand.get("board") if isinstance(hand.get("board"), list) else None
+    holes = {p["seat"]: p.get("hole_cards") or [] for p in hand.get("players") or []
+             if isinstance(p, dict) and isinstance(p.get("seat"), int)}
+    return board, holes or None
+
+
+def _gt_button(hand: dict) -> Optional[int]:
+    """GT で選んだボタンの席（ディーラーがボタンを動かし忘れたハンド, 2026-09-29）。無ければ記録のボタン。"""
+    button = hand.get("button_seat")
+    return button if isinstance(button, int) and not isinstance(button, bool) else None
+
+
 def _epoch(iso: Any) -> Optional[float]:
     """記録の時刻（この PC の時刻の ISO 文字列）を epoch 秒に。"""
     if not isinstance(iso, str) or not iso:
@@ -337,12 +351,14 @@ def hand_detail(
     gt = gt_repo.get(session_id, hand_id)
     blind = gt is None and is_blind(session_id, hand_id, blind_every)
     initial = _gt_actions(gt.hand) if gt is not None else ([] if blind else _gt_actions(captured))
+    board, holes = _gt_cards(gt.hand) if gt is not None else (None, None)
+    button = _gt_button(gt.hand) if gt is not None else None
     return {
         "session_id": session_id,
         "captured": captured,
         "ground_truth": gt.to_dict() if gt is not None else None,
         "has_needs_review": hand_has_needs_review(captured),
-        "legal": replay_legal(captured, initial),
+        "legal": replay_legal(captured, initial, board=board, holes=holes, button=button),
         "blind": blind,
         "timeline": hand_timeline(log_dir, session_id, captured, _next_started_at(log_dir, session_id, hand_id)),
     }
@@ -386,7 +402,10 @@ def _showdown_muck_error(active: list[int], seat: int, act: str) -> Optional[str
     return None
 
 
-def replay_legal(captured: dict, actions: list[dict]) -> dict:
+def replay_legal(
+    captured: dict, actions: list[dict], *, board: Optional[list] = None, holes: Optional[dict] = None,
+    button: Optional[int] = None,
+) -> dict:
     """GT のアクション列を pokerkit で流し、各行のストリートと額（コールは自動）、次の手番を返す。
 
     返り値: `{"actions": [{seat, action, amount, total, street}], "next": {...} | None, "error": {index, message} | None}`。
@@ -396,6 +415,8 @@ def replay_legal(captured: dict, actions: list[dict]) -> dict:
     ところの手番（`hand_over` ならベッティングは終わり、`foldout_winner` はほかが全員降りた勝者）。
     ベッティングが終わったあとのフォールドは、ショーダウンで手札を見せずに降りた（マック）として
     street=showdown で入る（ライブの記録と同じ形, ADR-0062）。
+    `button` はこのハンドのボタンの席（無ければ記録のボタン。ディーラーがボタンを動かし忘れたハンドは、
+    実際のボタンを選ぶと手番の順がそれに合う, 2026-09-29）。
     """
     players = _players_for_replay(captured)
     if len(players) < 2:
@@ -408,7 +429,8 @@ def replay_legal(captured: dict, actions: list[dict]) -> dict:
         sb, bb = 1, 2
     try:
         gs = PokerkitGameState(players, sb, bb)
-        button = captured.get("button_seat")
+        if button is None:
+            button = captured.get("button_seat")
         if isinstance(button, int) and any(p.seat == button for p in players):
             gs.set_button(button)
         gs.new_hand()
@@ -506,8 +528,35 @@ def replay_legal(captured: dict, actions: list[dict]) -> dict:
         "active_seats": active,
         "hand_over": ctx.actor_seat is None,
         "foldout_winner": active[0] if len(active) == 1 else None,
+        "showdown_winner": None,
+        "button_seat": gs.button_seat,
     }
+    if ctx.actor_seat is None and len(active) >= 2:
+        nxt["showdown_winner"] = _showdown_winner(captured, gs, active, board, holes)
     return {"actions": out, "next": nxt, "error": error}
+
+
+def _showdown_winner(
+    captured: dict, gs: Any, active: list[int], board: Optional[list], holes: Optional[dict],
+) -> Optional[int]:
+    """ショーダウンの勝者を入力したボードと手札（無ければ記録の札）で判定する（オーナー 2026-09-29:
+    勝った席が未定になってしまう。実際には確定している）。読めていない札があっても、どの札でも同じ勝者なら決める。"""
+    from core.hand_log import UNKNOWN_CARD
+    from core.showdown import award_with_unknown_cards
+
+    cards = [c for c in (board if board is not None else captured.get("board") or [])
+             if isinstance(c, str) and c and c != UNKNOWN_CARD]
+    recorded = {p.get("seat"): p.get("hole_cards") or [] for p in captured.get("players") or []
+                if isinstance(p, dict)}
+    hands = {s: [c for c in ((holes or {}).get(s) if holes and s in holes else recorded.get(s)) or []
+                 if isinstance(c, str) and c] for s in active}
+    try:
+        pots = gs.current_pots() or [{"amount": gs.pot, "eligible_seats": active}]
+        decided = award_with_unknown_cards(hands, cards, pots, gs.acting_order())
+    except Exception:  # noqa: BLE001 — 判定できなければ未定のまま（人が選ぶ）
+        return None
+    winners = decided[1][0] if decided and decided[1] else []
+    return winners[0] if len(winners) == 1 else None   # 引き分けは 1 席を選べないので人が選ぶ
 
 
 # ───────────────────────── 保存 ─────────────────────────
@@ -585,6 +634,11 @@ def validate_gt_hand(hand: Any) -> dict:
     out: dict[str, Any] = {"board": board, "actions": actions, "players": players}
     if winner is not None:
         out["winner_seat"] = winner
+    button = hand.get("button_seat")
+    if button is not None:
+        if not isinstance(button, int) or isinstance(button, bool) or button < 1:
+            raise GroundTruthError("button_seat が不正です")
+        out["button_seat"] = button          # 実際のボタン（記録と違うとき = ディーラーが動かし忘れた）
     notes = hand.get("notes")
     if isinstance(notes, str) and notes.strip():
         out["notes"] = notes.strip()[:2000]
@@ -814,7 +868,8 @@ class _Handler(BaseHTTPRequestHandler):
             if not isinstance(actions, list):
                 self._send_json(400, {"code": "invalid_amount", "message": "actions が要ります"})
                 return
-            self._send_json(200, replay_legal(captured, actions))
+            board, holes = _gt_cards(body)
+            self._send_json(200, replay_legal(captured, actions, board=board, holes=holes, button=_gt_button(body)))
             return
         if _ROUTE_HAND.match(path):
             self.do_PUT()
@@ -1081,7 +1136,9 @@ function buildGt(d){
   const blind = !!d.blind && !g;              // 記録を見ずに入れる（アクションと勝者は空から）
   const actions = blind ? [] : (src.actions || []).filter(a => GT_ACTIONS.includes(a.action) && typeof a.seat === "number")
                   .map(a => ({seat:a.seat, action:a.action, amount:a.amount || 0, unsure: !!a.unsure}));
-  return {board: normCards(src.board, 5), players, actions,
+  // ボタン: 入れた真のアクションで選んだ席（ディーラーが動かし忘れたハンド）か、記録のボタン
+  const button = (g && g.button_seat != null) ? g.button_seat : (cap.button_seat ?? null);
+  return {board: normCards(src.board, 5), players, actions, button_seat: button,
           winner_seat: blind ? null : (src.winner_seat === undefined ? null : src.winner_seat), notes: (g && g.notes) || ""};
 }
 async function openHand(hid){
@@ -1104,13 +1161,18 @@ function applyLegal(){
   L.actions.forEach((la, i) => { const a = S.gt.actions[i]; if (a) { a.action = la.action; a.amount = la.amount; a.street = la.street; } });
   const n = L.next;
   if (n && n.hand_over && n.foldout_winner != null) S.gt.winner_seat = n.foldout_winner;
+  // ショーダウン: 入れたボードと手札で勝者が決まるなら入れる（未定のときだけ。選び直した席は変えない）
+  else if (n && n.hand_over && n.showdown_winner != null && S.gt.winner_seat == null) S.gt.winner_seat = n.showdown_winner;
 }
 let legalTimer = null;
 function refreshLegal(){
   clearTimeout(legalTimer);
   legalTimer = setTimeout(async () => {
     try {
-      const body = {actions: S.gt.actions.map(a => ({seat:a.seat, action:a.action, amount:a.amount}))};
+      const body = {actions: S.gt.actions.map(a => ({seat:a.seat, action:a.action, amount:a.amount})),
+                    button_seat: S.gt.button_seat,
+                    board: S.gt.board.map(c => c || "??"),
+                    players: S.gt.players.map(p => ({seat: p.seat, hole_cards: p.hole_cards.filter(Boolean)}))};
       S.legal = await api(sidPath() + "/hands/" + S.hand.captured.hand_id + "/legal", {method:"POST", body: JSON.stringify(body)});
       applyLegal();
     } catch (e) { toast("手番の確認に失敗: " + e.message, true); }
@@ -1187,7 +1249,10 @@ function renderTimeline(items, blind){
     return `<div class="item sys"><span class="t">${t}</span><span class="gap"></span><span>${esc(it.text)}</span></div>`;
   }).join("")}</div>`;
 }
-function setWinner(seat){ S.gt.winner_seat = (S.gt.winner_seat === seat) ? null : seat; S.dirty = true; renderEdit(); }
+// 選んである席をもう一度押しても外さない（オーナー 2026-09-29: 確かめるつもりで押すと未定になっていた）。未定は専用のボタン
+function setWinner(seat){ S.gt.winner_seat = seat; S.dirty = true; renderEdit(); }
+// ボタンの席（ディーラーがボタンを動かし忘れたハンドは実際の席に。手番の順が変わる, 2026-09-29）
+function setButton(seat){ S.gt.button_seat = seat; touch(); }
 function setShowed(seat){ const p = S.gt.players.find(x => x.seat === seat); p.showed_down = !p.showed_down; S.dirty = true; renderEdit(); }
 function setNotes(v){ S.gt.notes = v; S.dirty = true; }
 function resetToCaptured(){
@@ -1248,8 +1313,12 @@ function renderEdit(){
   const playersHtml = g.players.map(p => `<div class="seatrow"><div class="no">席 ${p.seat} <span class="muted small">${esc(p.name)}</span></div>
       <div>${cardHtml(p.hole_cards[0], "", `openPicker('hole',${p.seat},0)`)}${cardHtml(p.hole_cards[1], "", `openPicker('hole',${p.seat},1)`)}</div>
       <button class="sm chip ${p.showed_down?"on":""}" onclick="setShowed(${p.seat})">見せた</button></div>`).join("");
+  const buttonHtml = `<div class="chips">${seats.map(s => `<button class="chip ${g.button_seat===s?"on":""}" onclick="setButton(${s})">席 ${s}</button>`).join("")}
+      <span class="muted small" style="align-self:center">${g.button_seat !== cap.button_seat ? `記録は席 ${cap.button_seat ?? "—"}（ディーラーがボタンを動かし忘れた）` : "記録どおり。ディーラーがボタンを動かし忘れたときは実際の席を選ぶ（手番の順が変わります）"}</span></div>`;
+  const sdw = L.next && L.next.hand_over && L.next.foldout_winner == null ? L.next.showdown_winner : null;
   const winnerHtml = `<div class="chips">${seats.map(s => `<button class="chip ${g.winner_seat===s?"on":""}" onclick="setWinner(${s})">席 ${s}</button>`).join("")}
-      <span class="muted small" style="align-self:center">${g.winner_seat==null?"（未定）":""}</span></div>`;
+      <button class="chip ${g.winner_seat==null?"on":""}" onclick="setWinner(null)">未定</button>
+      ${sdw != null ? `<span class="muted small" style="align-self:center">手札で判定: 席 ${sdw}</span>` : ""}</div>`;
   const capRows = (cap.actions || []).map((a, i) => `<tr class="${a.needs_review?"warn":""}">
       <td>${a.needs_review ? `<button class="chk ${S.confirmed.has(i)?"on":""}" onclick="toggleConfirm(${i})" title="確かめた">✓</button>` : ""}</td>
       <td class="street">${STREET_JA[a.street]||a.street||""}</td><td>席 ${a.seat}</td>
@@ -1289,6 +1358,7 @@ function renderEdit(){
         <h2 style="margin-top:0">実際（真のアクション）</h2>
         <h2>ボード</h2><div style="display:flex;gap:6px;flex-wrap:wrap">${boardHtml}</div>
         <h2>手札（分かる席だけ）</h2>${playersHtml}
+        <h2>ボタン</h2>${buttonHtml}
         <h2>アクション <span class="muted small">コールの額とストリートは自動。ベット / レイズはトータルの額</span></h2>
         <div class="tbl"><table><tr><th>ストリート</th><th>席</th><th>アクション</th><th>額</th><th></th></tr>${rows || "<tr><td colspan='5' class='muted'>まだありません（下のボタンで足す）</td></tr>"}</table></div>
         <div class="rowadd"><button class="sm" onclick="addRow()">＋ 行を追加</button>
@@ -1329,7 +1399,7 @@ function pickCard(c){
   const g = S.gt;
   if (c) { g.board = g.board.map(x => x === c ? null : x); g.players.forEach(pl => { pl.hole_cards = pl.hole_cards.map(x => x === c ? null : x); }); }
   if (p.kind === "board") g.board[p.a] = c; else g.players.find(pl => pl.seat === p.a).hole_cards[p.b] = c;
-  S.dirty = true; closePicker(); renderEdit();
+  S.dirty = true; closePicker(); renderEdit(); refreshLegal();   // 札が変わればショーダウンの判定も変わる
 }
 $("modal").addEventListener("click", (e) => { if (e.target === $("modal")) closePicker(); });
 
@@ -1339,7 +1409,8 @@ function gtPayload(){
   return {board: g.board.filter(Boolean),
           actions: g.actions.map(a => ({seat:a.seat, action:a.action, amount:a.amount || 0, street:a.street, unsure: a.unsure || undefined})),
           players: g.players.map(p => ({seat:p.seat, name:p.name, hole_cards: p.hole_cards.filter(Boolean), showed_down: p.showed_down})),
-          winner_seat: g.winner_seat, notes: g.notes || "", blind: isBlind() || undefined};
+          winner_seat: g.winner_seat, notes: g.notes || "", blind: isBlind() || undefined,
+          button_seat: g.button_seat != null && g.button_seat !== S.hand.captured.button_seat ? g.button_seat : undefined};
 }
 async function saveWith(body){
   if (S.busy) return; S.busy = true;

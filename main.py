@@ -412,6 +412,8 @@ def _auto_hand_kwargs(cfg: dict, audio_thread) -> dict:
         "speech_pending_since": audio_thread.oldest_pending_start if audio_thread is not None else None,
         "voice_heard_at": (lambda: audio_thread.last_voice_at) if audio_thread is not None else None,
         "fold_absent_sec": float(engine_cfg.get("fold_absent_sec", 3.0)),
+        # 手札を読んだ順からボタンの置き忘れを見つけて直す（2026-09-29）
+        "button_from_deal": bool(engine_cfg.get("button_from_deal", True)),
     }
 
 
@@ -655,7 +657,8 @@ def run_cli() -> None:
     print("席: [name <席> <名前>]=その席の人（参加）  [name <席> -]=空席（次のハンドから配られない）"
           "  スタック 0 の席は r で買い足すまで配られません")
     print("ブラインド: [blinds <SB> <BB>]=次のハンドからブラインドを変える（例: blinds 200 400）")
-    print("ボタン: [button <席>]=次のハンドのボタンを手で直す（ディーラーの手違いなど）")
+    print("ボタン: [button <席>]=ボタンを手で直す（ハンドの途中ならそのハンドを組み直す・ハンドの外なら次のハンド。"
+          "ディーラーがボタンを動かし忘れたときなど）")
     print("上記以外の入力は読み上げ文として解釈します"
           "（例: チェック / シート3 コール / ベット 500）。マイクが無くてもこれで進行できます。")
     print("ディーラーがアナウンスすると自動検出されます。\n")
@@ -753,7 +756,7 @@ def run_cli() -> None:
                     action="set_button", amount=0, timestamp=_time.time(),
                     raw_text=f"シート{seat} ボタン", seat=seat,
                 ))
-                print(f"次のハンドのボタン 席{seat} を送信しました")
+                print(f"ボタン 席{seat} を送信しました")
             elif cmd == "blinds":
                 numbers = re.findall(r"\d+", " ".join(parts[1:]))    # `blinds 200 400` / `blinds 200/400`
                 if len(numbers) != 2 or int(numbers[0]) <= 0 or int(numbers[0]) > int(numbers[1]):

@@ -211,6 +211,11 @@ _DECOY_WORDS = (
     "ジャック", "オーライ", "オッケー", "オーケー", "サンキュー", "ナイス", "ラッキー", "ドンマイ",
     "ストップ", "スタート", "ラスト", "ゲーム", "タイム", "オーバー", "トップ",
 )
+# そのままの音で聞こえたらアクションでない語。上の語と違い、近い語の判定には加えない（オープンを加えると、
+# 1 音違いの店舗のゆれ = オーイン・オーリンもオールインと読めなくなる）。
+_EXACT_NOT_ACTIONS = (
+    "オープン",   # 札を見せる（店舗 2026-09-29 9d1d8536 ハンド 4: 「フォールド オープン」をオールインと読み、ターンがオールインに）
+)
 _MIN_HEARD_MORAE = 3
 _MARGIN = 0.15
 
@@ -255,6 +260,7 @@ def _build_targets() -> tuple[_Target, ...]:
 
 
 _TARGETS = _build_targets()
+_EXACT_NOT_ACTION_MORAE = frozenset(tuple(morae(word)) for word in _EXACT_NOT_ACTIONS)
 
 
 @dataclass(frozen=True)
@@ -278,7 +284,7 @@ def rank(heard: str) -> list[tuple[float, str, Optional[str]]]:
 def match_keyword(heard: str) -> Optional[PhoneticMatch]:
     """書き起こしの語（片仮名）が、音の近さでアクションの語と読めるか。読めなければ None。"""
     seq = morae(heard)
-    if len(seq) < _MIN_HEARD_MORAE:
+    if len(seq) < _MIN_HEARD_MORAE or tuple(seq) in _EXACT_NOT_ACTION_MORAE:
         return None
     scored = sorted(
         ((distance(seq, list(t.morae)), t) for t in _TARGETS), key=lambda x: (x[0], x[1].word),

@@ -229,6 +229,34 @@ class PokerkitGameState:
         )
         return self._hand_id
 
+    def restart_hand_with_button(self, seat: int) -> None:
+        """いまのハンドを、同じ席・同じ持ち点・同じブラインドのままボタンだけ変えて始め直す（アクションは空に戻る）。
+
+        ディーラーがボタンを動かし忘れたハンドの組み直しに使う（呼ぶ側がハンドの入力を流し直す, 2026-09-29）。
+        次のハンドのボタンはここから進む。ハンドの席でなければ ValueError（状態は変えない）。
+        """
+        from pokerkit import NoLimitTexasHoldem
+
+        if not self._hand_active or self._state is None:
+            raise RuntimeError("restart_hand_with_button called without an active hand")
+        if seat not in self._hand_seats:
+            raise ValueError(f"席{seat} はこのハンドに配られていません")
+        start = {s: self._hand_start_stacks[self._seat_to_idx[s]] for s in self._hand_seats}
+        self._button_seat = seat
+        self._order = seat_order_from_button(self._hand_seats, seat)
+        self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
+        self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
+        self._hand_start_stacks = [start[s] for s in self._order]
+        self._state = NoLimitTexasHoldem.create_state(
+            self._automations, True, 0, (self._sb, self._bb), self._bb,
+            list(self._hand_start_stacks), len(self._order),
+        )
+        self._final_pots = []
+        logger.info(
+            "Hand %d restarted (pokerkit) with button=seat %d (%s)",
+            self._hand_id, seat, " ".join(f"{s}:{n}" for s, n in self.position_map().items()),
+        )
+
     def advance_street(self, street: Street) -> None:
         # pokerkit は betting 完了で自動進行する。外部シグナル（RFID/audio）は cross-check 扱いで no-op。
         cur = self.street

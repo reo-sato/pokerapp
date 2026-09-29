@@ -106,6 +106,7 @@ def event_from_envelope(d: dict) -> Event:
             kind=d.get("kind") or "card",           # 札の離脱・戻り（2026-09-25 additive）
             observed_at=d.get("observed_at"),
             cards=tuple(d.get("cards") or ()),      # 配布の手札（0.9 additive）
+            times=tuple(d.get("times") or ()),      # 手札を最初に読んだ時刻（0.11 additive）
         )
     if t == "camera":
         return CameraEvent(seat=d["seat"], timestamp=d["timestamp"])

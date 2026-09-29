@@ -148,15 +148,17 @@ class TestPresenceSnapshot:
         t._poll_reader(bridges["s1"], cfg, "reader_0")        # noqa: SLF001
         assert t.presence_snapshot() == {
             1: {"present": True, "absent_since": None, "uid_count": 2, "mucked_at": None,
-                "cards": ["?A1", "?A2"]}
+                "cards": ["?A1", "?A2"], "since": {"?A1": 100.0, "?A2": 100.0}}
         }
         now[0] = 130.0
         bridges["s1"].uids = []
         t._poll_reader(bridges["s1"], cfg, "reader_0")        # noqa: SLF001
         assert t.presence_snapshot() == {
             1: {"present": False, "absent_since": 130.0, "uid_count": 0, "mucked_at": None,
-                "cards": []}
+                "cards": [], "since": {"?A1": 100.0, "?A2": 100.0}}   # 離れて間もない札も残す
         }
+        now[0] = 141.0
+        assert t.presence_snapshot()[1]["since"] == {}                   # 10 秒より前に離れた札は出さない
 
     def test_a_seat_that_never_had_cards_is_not_absent(self, tmp_path: Path):
         """配られていない席を卓モニタが「離席 / fold らしい」と出さない（店舗 2026-09-27: 8 席全部が離席表示）。"""
@@ -183,6 +185,31 @@ class TestPresenceSnapshot:
         now[0] = 210.0
         poll()
         assert t.presence_snapshot()[1]["absent_since"] is None     # 新ハンドでは載っていない席に戻る
+
+    def test_first_sighting_of_each_card_for_the_deal_order(self, tmp_path: Path):
+        """札ごとに最初に読んだ時刻（配った順, 2026-09-29）。持ち上げて見て戻した札・新しいハンドの同期点では
+        変えない。10 秒より長く離れた札は、次に載ったときに測り直す。"""
+        now = [100.0]
+        bridges = {"s1": self._Bridge(["A1"])}
+        cfg = {"name": "s1", "role": "seat", "seat": 1}
+        t = self._thread(tmp_path, bridges, lambda: now[0])
+
+        def poll(uids, at) -> None:
+            bridges["s1"].uids = uids
+            now[0] = at
+            t._poll_reader(bridges["s1"], cfg, "reader_0")    # noqa: SLF001
+
+        poll(["A1"], 100.0)
+        poll(["A1", "A2"], 101.5)                             # 2 周目の札
+        assert t.presence_snapshot()[1]["since"] == {"?A1": 100.0, "?A2": 101.5}
+        t.reset_for_new_hand()                                # 配布を検出してハンドを始めた
+        poll(["A1", "A2"], 103.0)
+        poll([], 110.0)                                       # 持ち上げて見る
+        poll(["A1", "A2"], 115.0)
+        assert t.presence_snapshot()[1]["since"] == {"?A1": 100.0, "?A2": 101.5}
+        poll([], 120.0)                                       # 回収
+        poll(["A2", "A3"], 140.0)                             # 次のハンド（同じ札がまた来た）
+        assert t.presence_snapshot()[1]["since"] == {"?A2": 140.0, "?A3": 140.0}
 
 
 class TestWriterAndPublish:

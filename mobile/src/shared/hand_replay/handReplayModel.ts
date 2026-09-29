@@ -323,6 +323,7 @@ const REASON_LABELS: Record<string, string> = {
   amount_only: "数字だけ（ベットかレイズかは場面から）",
   fuzzy_keyword: "音の近さで読んだ",
   second_ear: "Whisper が読めず、第 2 の耳で読んだ",
+  sentence_after_chatter: "雑談の文のあとの文だけで読んだ",
 };
 
 export function reasonLabels(reason?: string): string[] {

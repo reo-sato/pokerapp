@@ -35,7 +35,10 @@ class RFIDEvent:
     observed_at: Optional[float] = None
     # "deal" = 在否で決めた配布（observed_at = 手札が載り始めた時刻、cards = "席:札" の並び）/ "hand_start" =
     # 配布のハンドを始めた（配る前の発話を待ったあと）。replay はこの 2 つで live と同じ時点にハンドを始める。
+    # "deal_order" = 手札を最初に読んだ時刻（cards = "席:札"、times = 同じ並びの時刻）。配った順からボタンの
+    # 置き忘れを見つける（2026-09-29）。
     cards: tuple[str, ...] = ()
+    times: tuple[float, ...] = ()
 
 
 @dataclass

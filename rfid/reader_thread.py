@@ -116,6 +116,10 @@ _FLOP_EDGE = 0.6
 # リーダーの境目・重ね置きの札は途切れながら読めるので、`gap_sec` のままだと確定まで数え直しを
 # 繰り返して反映が遅れる（店舗の実卓, ADR-0058 追記 3）。一瞬の通過は 1 回きりなので影響しない。
 _PENDING_GAP_SEC = 3.0
+# 席の札を最初に読んだ時刻（配った順 = ボタンの置き忘れの救済, 2026-09-29）は、札がこの秒数より長く席から
+# 離れていたら、次に載ったときに測り直す（前のハンドの札・片付けのあとに同じ席へ配られた札）。持ち上げて
+# 見て戻した札は測り直さない。
+_CARD_SINCE_FORGET_SEC = 10.0
 
 
 @dataclass
@@ -234,6 +238,9 @@ class RFIDThread(threading.Thread):
         self._seat_absent_since: dict[int, float] = {}
         # このハンドで一度でも札が載った席（載ったことのない席は「離れた」にしない）
         self._seat_seen: set[int] = set()
+        # (席, UID) → [最初に読んだ時刻, 離れた時刻（載っていれば None）]。配った順を見るため（2026-09-29）。
+        # 新しいハンドの同期点でも捨てない（配布を検出してからハンドを始めるまでに同期点が来る）。
+        self._seat_card_seen: dict[tuple[int, str], list] = {}
 
         # ――― 卓の流れに合わせた解釈（ADR-0058）―――
         self._commit_sec = max(0.0, float(commit_sec))
@@ -370,6 +377,27 @@ class RFIDThread(threading.Thread):
         elif isinstance(cfg.get("seat"), int):
             self._seat_reader_ids.setdefault(cfg["seat"], set()).add(reader_id)
             self._track_seat_presence(cfg["seat"])
+            self._note_seat_cards(cfg["seat"])
+
+    def _note_seat_cards(self, seat: int) -> None:
+        """席の札ごとに最初に読んだ時刻を覚える（配った順, `presence_snapshot` の `since`）。"""
+        now = self._clock()
+        present: set[str] = set()
+        for rid in self._seat_reader_ids.get(seat, ()):
+            present |= self._last_uids.get(rid, set())
+        for key, entry in list(self._seat_card_seen.items()):
+            if key[0] != seat or key[1] in present:
+                continue
+            if entry[1] is None:
+                entry[1] = now                                   # 離れた（持ち上げた・回収した）
+            elif now - entry[1] > _CARD_SINCE_FORGET_SEC:
+                del self._seat_card_seen[key]
+        for uid in present:
+            entry = self._seat_card_seen.get((seat, uid))
+            if entry is None or (entry[1] is not None and now - entry[1] > _CARD_SINCE_FORGET_SEC):
+                self._seat_card_seen[(seat, uid)] = [now, None]
+            else:
+                entry[1] = None                                  # 載り続けている / すぐ戻った
 
     def _make_event(
         self, uid: str, reader_id: str, role: str, seat: Optional[int], timestamp: float,
@@ -1131,8 +1159,11 @@ class RFIDThread(threading.Thread):
         `mucked_at` はその席の手札が卓の中央（board reader の上）を通過した時刻（ADR-0058）。
         `cards` はいまリーダーが読んでいる札（未登録の札は `?<UID>`）。手札の配布の検出に使う
         （ハンドの記録やデバウンスとは無関係の、読んだままの札, ADR-0063）。
+        `since` は札 → その席で最初に読んだ時刻（いま載っている札と、少し前まで載っていた札）。配った順から
+        ボタンの置き忘れを見つけるのに使う（2026-09-29）。
         """
         snapshot: dict[int, dict] = {}
+        now = self._clock()
         with self._lock:
             for seat, reader_ids in self._seat_reader_ids.items():
                 uids: set[str] = set()
@@ -1144,6 +1175,11 @@ class RFIDThread(threading.Thread):
                     "uid_count": len(uids),
                     "mucked_at": self._mucked_at.get(seat),
                     "cards": sorted(self._card_master.lookup(u) or f"?{u}" for u in uids),
+                    "since": {
+                        self._card_master.lookup(uid) or f"?{uid}": first
+                        for (s, uid), (first, gone) in self._seat_card_seen.items()
+                        if s == seat and (gone is None or now - gone <= _CARD_SINCE_FORGET_SEC)
+                    },
                 }
         return snapshot
 

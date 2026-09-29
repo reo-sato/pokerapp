@@ -103,7 +103,8 @@ def describe_event(event: Optional[AudioEvent]) -> str:
         parts.append(f"席{event.seat}")
     elif event.position:
         parts.append(event.position)
-    labels = {"amount_only": "数字だけ", "fuzzy_keyword": "音の近さで読んだ", "second_ear": "第 2 の耳"}
+    labels = {"amount_only": "数字だけ", "fuzzy_keyword": "音の近さで読んだ", "second_ear": "第 2 の耳",
+              "sentence_after_chatter": "雑談のあとの文"}
     shown = [labels.get(f, f) for f in flags if f != "check_around"]
     if shown:
         parts.append("（" + "・".join(shown) + "）")
