@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
+# 読めなかった札（ボードの位置は分かるが札が分からない。PHH の未知の札と同じ表記で、pokerkit も読める）
+UNKNOWN_CARD = "??"
+
 
 @dataclass
 class ActionRecord:
@@ -83,7 +86,7 @@ class HandSummary:
     board_source: str  # ボード情報のソース: "rfid" | "ocr" | "manual" | ""
     players: list[dict]  # {seat, name, hole_cards, stack_start, stack_end, result}
     pot_total: int
-    winner_seat: int
+    winner_seat: Optional[int]  # None = 勝者が分からずチップを動かしていない（winner_source=undetermined）
     actions: list[ActionRecord]
     review_required: bool  # いずれかのアクションに needs_review=True があれば True
     # main/side pot スナップショット [{"amount": int, "eligible_seats": [int,...]}]。
@@ -104,8 +107,10 @@ class HandSummary:
     # 2 人以上に配ったとき（引き分け・side pot の勝者が別）も入る（ADR-0062）。
     pot_awards: Optional[list] = None
     # 勝者を自動で決めたときの決まり方（ADR-0062, additive）: "fold"（ほかが全員フォールド / マック）|
-    # "cards"（ショーダウンを RFID の手札とボードで判定）| "estimated"（決まらないまま次の手札が配られた
-    # = 仮, 要確認）。ディーラーの宣言（`w` / 「ウィナー」）で決めたハンドは None = 出力に含めない。
+    # "cards"（ショーダウンを RFID の手札とボードで判定。読めていない札があってもどの札でも同じ勝者）|
+    # "estimated"（決まらないまま次の手札が配られた = 仮, 要確認）| "undetermined"（ショーダウンで札が読めず
+    # 勝者が分からない = チップを動かさない, winner_seat は None, 要確認, オーナー 2026-09-29）。
+    # ディーラーの宣言（`w` / 「ウィナー」）で決めたハンドは None = 出力に含めない。
     winner_source: Optional[str] = None
     # ショーダウンで見せた手札の役 [{"seat", "hole_cards", "hand", "best"}]（winner_source="cards" のとき）。
     showdown: Optional[list] = None

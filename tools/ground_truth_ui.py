@@ -999,6 +999,7 @@ function pct(a, b){ return b ? Math.round(1000 * a / b) / 10 + "%" : "—"; }
 function cardHtml(c, cls, onclick){
   const cl = cls || "";
   if (!c) return `<span class="card empty ${cl}" ${onclick?`onclick="${onclick}"`:""}>＋</span>`;
+  if (c === "??") return `<span class="card ${cl}" title="読めなかった札">?</span>`;
   const red = c[1] === "h" || c[1] === "d";
   const rank = c[0] === "T" ? "10" : c[0];
   return `<span class="card ${red?"red":""} ${cl}" ${onclick?`onclick="${onclick}"`:""}>${rank}${SUIT_SYM[c[1]]||c[1]}</span>`;
@@ -1070,7 +1071,7 @@ function renderList(){
 }
 
 // ――― 編集 ―――
-function normCards(arr, n){ const out = []; for (let i = 0; i < n; i++) out.push((arr && arr[i]) ? arr[i] : null); return out; }
+function normCards(arr, n){ const out = []; for (let i = 0; i < n; i++) out.push((arr && arr[i] && arr[i] !== "??") ? arr[i] : null); return out; }
 function buildGt(d){
   const cap = d.captured, g = d.ground_truth, src = g || cap;
   const players = (cap.players || []).filter(p => typeof p.seat === "number").map(p => {

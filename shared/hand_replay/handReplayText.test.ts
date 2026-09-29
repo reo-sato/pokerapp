@@ -59,6 +59,17 @@ test("buildHandText handles missing winner and empty streets", () => {
   assert.ok(text.endsWith("結果: ポット合計 1,600"));
 });
 
+test("buildHandText says no chips moved when the showdown could not be decided", () => {
+  const text = buildHandText({
+    ...HAND,
+    board: ["3c", "Kh", "??", "Kc", "9s"],
+    winner_seat: null,
+    winner_source: "undetermined",
+  });
+  assert.ok(text.includes("??"));
+  assert.ok(text.endsWith("結果: 勝者なし（札が読めず判定できないので、チップは動かしていません）"));
+});
+
 test("buildHandText shows a call as the street total (not the added chips)", () => {
   // BB の席2 が 600 のレイズにコール: 追加 400、そのストリートで出した合計 600 (オーナー 2026-09-29)
   const text = buildHandText({

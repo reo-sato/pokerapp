@@ -299,7 +299,7 @@ class TestShowdown:
 
     def test_missing_cards_ask_for_the_winner(self, tmp_path):
         tb = _Table(tmp_path)
-        tb.deal({2: "AsAd", 5: "KdKc", 8: "Qh"}, 1.0)   # 席8 の 2 枚目が読めていない
+        tb.deal({2: "AsAd", 5: "KdKc", 8: "Jh"}, 1.0)   # 席8 の 2 枚目が読めていない（8・Q・K ならストレート）
         _to_river(tb)
         tb.say("ハンド終了", 50)
         assert tb.hands == []
@@ -307,13 +307,27 @@ class TestShowdown:
         tb.say("シート8 ウィナー", 55)
         assert tb.hands[0].winner_seat == 8 and tb.hands[0].winner_source is None
 
-    def test_missing_cards_at_the_next_deal_record_an_estimated_winner(self, tmp_path):
+    def test_a_missing_card_that_cannot_change_the_winner_still_decides(self, tmp_path):
+        """読めていない札があっても、どの札でも勝者が変わらなければ決める（要確認）。"""
         tb = _Table(tmp_path)
-        tb.deal({2: "AsAd", 5: "KdKc", 8: "Qh"}, 1.0)
+        tb.deal({2: "AsAd", 5: "KdKc", 8: "Qh"}, 1.0)   # 席8 の 2 枚目が何でも AA に勝てない
+        _to_river(tb)
+        tb.say("ハンド終了", 50)
+        (hand,) = tb.hands
+        assert hand.winner_seat == 2 and hand.winner_source == "cards" and hand.review_required
+        assert "どの札でも勝者は変わりません" in tb.notices[-2]
+
+    def test_missing_cards_at_the_next_deal_move_no_chips(self, tmp_path):
+        """ショーダウンで札が読めず勝者が分からなければ、チップは動かさない（オーナー 2026-09-29。仮の勝者にしない）。"""
+        tb = _Table(tmp_path)
+        tb.deal({2: "AsAd", 5: "KdKc", 8: "Jh"}, 1.0)
         _to_river(tb)
         tb.deal({2: "7s7d", 5: "8s8d", 8: "9s9d"}, 90.0)
         (hand,) = tb.hands
-        assert hand.winner_source == "estimated" and hand.review_required
+        assert hand.winner_seat is None and hand.winner_source == "undetermined" and hand.review_required
+        assert all(p["result"] == 0 and p["stack_end"] == p["stack_start"] for p in hand.players)
+        assert hand.pot_awards is None and hand.to_dict()["winner_seat"] is None
+        assert "チップは動かしません" in " ".join(tb.notices)
         assert tb.gs.hand_id == 2
 
     def test_hand_end_during_betting_points_at_the_missing_action(self, tmp_path):

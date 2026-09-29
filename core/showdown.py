@@ -8,13 +8,25 @@ pokerkit の役判定（`StandardHighHand`）を使う純粋関数で、ゲー�
 - `award_pots`: main / side pot ごとに、その pot に参加できる席のうち一番強い手へ配る。
   同じ強さは等分し、割り切れない端数は **手番の順で先の人**（ボタンの次の席から）に 1 枚ずつ配る。
 
+- `award_with_unknown_cards`: 読めていない札（ボードの `??`・手札の不足）があっても、ありうるすべての札で
+  配当が同じならその配当（勝者は分かる）。違う配当がありうれば None（勝者は分からない = チップは動かさない,
+  オーナー 2026-09-29）。
+
 手札で決めてよいのは「残った全員が手札を見せた」ときだけ。見せずにマックした人は手札が強くても
 ポットを失うので、マックの扱いは呼び出し側（`integration/engine.py`）が決める。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from itertools import combinations
+from math import comb
+from typing import Any, Iterable, Optional
+
+from core.hand_log import UNKNOWN_CARD
+
+# 読めていない札の埋め方をこの数まで試す（役判定 1 回 ≈ 1.5 ms / 2 席。ハンドの終わりに止まりすぎない）
+MAX_COMPLETIONS = 1000
+_DECK = [r + s for r in "23456789TJQKA" for s in "shdc"]
 
 # pokerkit の役名 → 日本語（CLI と記録の表示用）
 HAND_NAMES_JA: dict[str, str] = {
@@ -107,3 +119,50 @@ def award_pots(
             awards[seat] = awards.get(seat, 0) + share + (1 if i < remainder else 0)
         winners_by_pot.append(winners)
     return awards, winners_by_pot
+
+
+def award_with_unknown_cards(
+    hole_cards: dict[int, list[str]], board: list[str], pots: list[dict], order: list[int],
+    *, excluded: Iterable[str] = (), limit: int = MAX_COMPLETIONS,
+) -> Optional[tuple[dict[int, int], list[list[int]]]]:
+    """読めていない札があっても配当が決まるなら、その配当（`award_pots` と同じ形）。決まらなければ None。
+
+    読めていない札 = ボードの `??` と 5 枚に足りないぶん・手札の 2 枚に足りないぶん。デッキの残り（読めた札と
+    `excluded` = 降りた人の手札など、ほかで見えている札を除く）から、ありうる埋め方をすべて試し、どの埋め方でも
+    同じ配当になるときだけ返す（例: 残りのどの札でも役が変わらない）。違う配当が 1 つでも見つかる・埋め方が
+    `limit` を超えるときは None（勝者は分からない）。
+    """
+    known_board = [c for c in board if c != UNKNOWN_CARD]
+    board_missing = 5 - len(known_board)
+    known_hole = {seat: [c for c in cards if c != UNKNOWN_CARD] for seat, cards in hole_cards.items()}
+    seen = set(known_board) | {c for cards in known_hole.values() for c in cards} | set(excluded)
+    pool = [c for c in _DECK if c not in seen]
+    missing = [(seat, 2 - len(cards)) for seat, cards in sorted(known_hole.items()) if len(cards) < 2]
+    count, left = comb(len(pool), board_missing), len(pool) - board_missing
+    for _, n in missing:
+        count *= comb(left, n)
+        left -= n
+    if board_missing < 0 or count == 0 or count > limit:
+        return None
+
+    def fillings(rest: list[str], need: list[tuple[int, int]]):
+        if not need:
+            yield {}
+            return
+        (seat, n), more = need[0], need[1:]
+        for cards in combinations(rest, n):
+            left_cards = [c for c in rest if c not in cards]
+            for other in fillings(left_cards, more):
+                yield {seat: list(cards), **other}
+
+    result: Optional[tuple[dict[int, int], list[list[int]]]] = None
+    for extra in combinations(pool, board_missing):
+        rest = [c for c in pool if c not in extra]
+        for filled in fillings(rest, missing):
+            holes = {seat: known_hole[seat] + filled.get(seat, []) for seat in known_hole}
+            awards = award_pots(pots, evaluate_hands(holes, known_board + list(extra)), order)
+            if result is None:
+                result = awards
+            elif awards[0] != result[0]:
+                return None
+    return result

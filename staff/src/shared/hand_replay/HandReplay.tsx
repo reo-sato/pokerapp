@@ -213,6 +213,8 @@ export function HandReplay(props: { hand: ReplayHand; showHeard?: boolean }): Re
           <Text style={s.resultLine}>
             🏆 席{model.winnerSeat} {winner ?? ""}
           </Text>
+        ) : model.noWinner ? (
+          <Text style={s.metaText}>勝者なし — 札が読めず判定できないので、チップは動かしていません</Text>
         ) : (
           <Text style={s.metaText}>勝者記録なし</Text>
         )}

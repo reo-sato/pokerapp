@@ -458,5 +458,23 @@ class TestCommandLine:
         (session,) = json.loads(capsys.readouterr().out)
         assert session["session_id"] == SID and session["differences"] == []
 
+    def test_memos_are_listed_for_every_hand(self, tmp_path, capsys):
+        """真のアクションのメモ（気づいたこと）はレポートの先頭と各ハンドに必ず出す（オーナー 2026-09-29: 毎ハンド読む）。"""
+        tb = _two_hands(tmp_path)
+        truth = [{"hand_id": h.hand_id, "actions": [], "winner_seat": h.winner_seat} for h in tb.hands]
+        truth[1]["notes"] = "  フロップの 1 枚が読めていない  "
+        truth[0]["notes"] = "   "                                              # 空白だけは出さない
+        (tmp_path / f"{SID}.ground_truth.json").write_text(
+            json.dumps({"hands": truth}, ensure_ascii=False), encoding="utf-8")
+        report = eval_store.evaluate_session(_files(tmp_path), {}, None)
+        assert [(m["hand_id"], m["notes"]) for m in report.memos] == [(2, "フロップの 1 枚が読めていない")]
+        assert eval_store.main([str(tmp_path), "--timeline", "--hand", "2"]) == 0
+        out = capsys.readouterr().out
+        assert "メモ（気づいたこと）1 件:" in out and "ハンド 2: フロップの 1 枚が読めていない" in out
+        assert "    メモ: フロップの 1 枚が読めていない" in out
+        assert eval_store.main([str(tmp_path), "--json"]) == 0
+        (session,) = json.loads(capsys.readouterr().out)
+        assert session["memos"][0]["hand_id"] == 2
+
     def test_no_sessions(self, tmp_path, capsys):
         assert eval_store.main([str(tmp_path)]) == 1

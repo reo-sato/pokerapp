@@ -543,6 +543,17 @@ def truth_hands(gt_file: Optional[dict]) -> dict:
     return {"hands": hands}
 
 
+def truth_memos(gt_file: Optional[dict]) -> list[dict]:
+    """真のアクションの各ハンドのメモ（気づいたこと）。オーナーの指示（2026-09-29）で**毎ハンド読む** = レポートの
+    先頭に全部出す（ここに要望・仕様が書かれる）。"""
+    out = []
+    for h in (gt_file or {}).get("hands") or []:
+        notes = h.get("notes") if isinstance(h, dict) else None
+        if isinstance(notes, str) and notes.strip() and isinstance(h.get("hand_id"), int):
+            out.append({"hand_id": h["hand_id"], "notes": notes.strip(), "annotated_at": h.get("annotated_at")})
+    return sorted(out, key=lambda m: m["hand_id"])
+
+
 # ――― セッションごとの評価 ―――
 
 @dataclass
@@ -565,6 +576,7 @@ class SessionReport:
     routes: dict = field(default_factory=dict)           # 方式（_ROUTE_LABELS）→ その文で読み直した再生
     ear: dict = field(default_factory=dict)              # 第 2 の耳（ear_summary）
     gt: dict = field(default_factory=dict)
+    memos: list[dict] = field(default_factory=list)      # 真のアクションのメモ（truth_memos）
 
     def to_json(self) -> dict:
         return {
@@ -572,7 +584,7 @@ class SessionReport:
             "changed_files": self.changed_files, "differences": self.differences, "sources": self.sources,
             "truth": self.truth, "setup": self.setup, "flags": self.flags, "listening": self.listening,
             "reparse_differences": diff_record(self.replayed, self.reparsed) if self.reparsed else [],
-            "ear": self.ear,
+            "ear": self.ear, "memos": self.memos,
             "route_differences": {k: diff_record(self.reparsed, v) for k, v in self.routes.items()},
         }
 
@@ -588,7 +600,9 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
         report.same_code = not report.changed_files
     report.setup = session_setup(record)
     report.sources = dict(action_sources(report.live))
-    report.gt = truth_hands(_read_json(files.path(".ground_truth.json")))
+    gt_file = _read_json(files.path(".ground_truth.json"))
+    report.gt = truth_hands(gt_file)
+    report.memos = truth_memos(gt_file)
     if report.setup is None:
         report.note = "確定したハンドの記録が無いので卓の設定が分からず、再生できません"
         return report
@@ -884,6 +898,10 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
     totals: dict[str, Counter] = {key: Counter() for key, _ in labels}
     for r in reports:
         print(f"=== セッション {r.session_id[:8]}（{r.hands} ハンド）")
+        if r.memos:                                   # 要望・仕様が書かれる。毎ハンド読む（オーナー, 2026-09-29）
+            print(f"  メモ（気づいたこと）{len(r.memos)} 件:")
+            for m in r.memos:
+                print(f"    ハンド {m['hand_id']}: {m['notes']}")
         if r.same_code is not None:
             print("  コード: " + ("記録したときと同じ" if r.same_code
                                 else "記録したときと違う（" + "・".join(r.changed_files) + "）"))
@@ -967,6 +985,9 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                 if only_hand is not None and hid != only_hand:
                     continue
                 print(f"  --- ハンド {hid}")
+                for m in r.memos:
+                    if m["hand_id"] == hid:
+                        print(f"    メモ: {m['notes']}")
                 if hid in windows:
                     for line in timeline(files, windows[hid], tz):
                         print(line)

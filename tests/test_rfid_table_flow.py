@@ -70,7 +70,7 @@ class Table:
 
     def __init__(self, tmp_path: Path, *, commit: float = 2.0, gap: float = 1.5,
                  release: float | None = 6.0, window: float | None = 30.0,
-                 confirm: float | None = 3.0) -> None:
+                 confirm: float | None = 3.0, flop_window: float | None = None) -> None:
         cm = CardMaster(tmp_path / "cards.json")
         for uid, card in CARDS.items():
             cm.register(uid, card)
@@ -83,7 +83,7 @@ class Table:
             bridge_factory=lambda name, reader=0: self.bridges[name],
             clock=lambda: self.now,
             commit_sec=commit, gap_sec=gap, release_sec=release, redeal_window_sec=window,
-            redeal_confirm_sec=confirm,
+            redeal_confirm_sec=confirm, flop_window_sec=flop_window,
         )
 
     def put(self, reader: str, *uids: str) -> None:
@@ -852,8 +852,74 @@ class TestSingleBoardCardRedeal:
         kwargs = main._rfid_tracking_kwargs({})                                 # noqa: SLF001
         assert kwargs["redeal_window_sec"] == 30.0
         assert kwargs["redeal_confirm_sec"] == 3.0
+        assert kwargs["flop_window_sec"] == 10.0
+        assert main._rfid_tracking_kwargs(                                      # noqa: SLF001
+            {"flop_window_sec": None})["flop_window_sec"] is None
         assert main._rfid_tracking_kwargs(                                      # noqa: SLF001
             {"redeal_window_sec": None})["redeal_window_sec"] is None
+
+
+class TestUnreadFlopCard:
+    """フロップは 3 枚が同時に出る（オーナー 2026-09-29, 店舗 d0f055fb ハンド 5）: フロップの 1 枚が読めていない
+    とき、あとから出たターンの札をフロップの空き位置に入れない。"""
+
+    def test_a_late_card_on_the_right_reader_is_the_turn(self, tmp_path: Path, caplog):
+        t = Table(tmp_path, flop_window=10.0)
+        t.put("BL", "04:F1")
+        t.put("BM", "04:F2")                        # フロップの 3 枚目（04:F3）は読めない
+        assert _board(t.run(2.4)) == [("5d", 1, None), ("Tc", 2, None)]
+        t.run(10.0)                                 # フロップのベッティング
+        t.put("BR", "04:D1")                        # ターン（一番右のリーダー）
+        with caplog.at_level(logging.INFO, logger="rfid.reader_thread"):
+            assert _board(t.run(2.4)) == [("7c", 4, None)]
+        assert any("フロップと同時に出ていません" in r.getMessage() and "4 枚目" in r.getMessage()
+                   for r in caplog.records)
+        t.run(8.0)
+        t.put("BR", "04:D1", "04:D2")               # リバー
+        assert _board(t.run(2.4)) == [("6h", 5, None)]
+
+    def test_a_quick_turn_on_the_right_reader_is_not_a_flop_card(self, tmp_path: Path):
+        """オールインで続けて開く（店舗 d0f055fb ハンド 8: ターンはフロップの最初の札から 7 秒）: 時間の窓の中でも、
+        一番右のリーダーだけで読んだ札はフロップにしない。"""
+        t = Table(tmp_path, flop_window=10.0)
+        t.put("BL", "04:F1", "04:F2")
+        t.run(2.4)
+        t.run(2.1)
+        t.put("BR", "04:D1")
+        assert _board(t.run(2.4)) == [("7c", 4, None)]
+
+    def test_a_late_card_on_the_middle_reader_goes_by_time(self, tmp_path: Path):
+        t = Table(tmp_path, flop_window=10.0)
+        t.put("BL", "04:F1", "04:F2")
+        t.run(2.4)
+        t.put("BM", "04:F3")                        # 3 枚目が少し遅れて読めた（窓の中）
+        assert _board(t.run(2.4)) == [("2h", 3, None)]
+
+        t2 = Table(tmp_path, flop_window=10.0)
+        t2.put("BL", "04:F1", "04:F2")
+        t2.run(2.4)
+        t2.run(12.0)
+        t2.put("BM", "04:D1")                       # 窓のあと = ターン
+        assert _board(t2.run(2.4)) == [("7c", 4, None)]
+
+    def test_a_late_card_on_the_left_reader_is_the_missing_flop_card(self, tmp_path: Path):
+        """一番左のリーダー（フロップの位置）で遅れて読めた札は、フロップの読めていなかった札。"""
+        t = Table(tmp_path, flop_window=10.0)
+        t.put("BL", "04:F1")
+        t.put("BM", "04:F2")
+        t.run(2.4)
+        t.run(12.0)
+        t.put("BL", "04:F1", "04:F3")
+        assert _board(t.run(2.4)) == [("2h", 3, None)]
+
+    def test_without_the_window_the_next_free_position_is_used(self, tmp_path: Path):
+        t = Table(tmp_path)                         # flop_window_sec=None（従来どおり）
+        t.put("BL", "04:F1")
+        t.put("BM", "04:F2")
+        t.run(2.4)
+        t.run(10.0)
+        t.put("BR", "04:D1")
+        assert _board(t.run(2.4)) == [("7c", 3, None)]
 
 
 class TestManualCorrectionsAndNewHand:

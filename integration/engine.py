@@ -41,7 +41,7 @@ from audio.recognizer import _extract_all_seat_nos, _extract_seat_no, apply_corr
 from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
-from core.hand_log import ActionRecord, HandSummary, street_totals
+from core.hand_log import UNKNOWN_CARD, ActionRecord, HandSummary, street_totals
 from core.table_state import build_table_state
 from output.event_recorder import EventRecorder
 from output.json_writer import JsonWriter
@@ -146,7 +146,9 @@ _SUIT_MARKS = {"s": "♠", "h": "♥", "d": "♦", "c": "♣"}
 
 
 def _card_text(card: str) -> str:
-    """"Td" → "10♦"（CLI の表示用）。形の違う札（未登録の UID 等）はそのまま。"""
+    """"Td" → "10♦"（CLI の表示用）。読めなかった位置は "?"。形の違う札（未登録の UID 等）はそのまま。"""
+    if card == UNKNOWN_CARD:
+        return "?"
     if len(card) == 2 and card[1].lower() in _SUIT_MARKS:
         rank = "10" if card[0] in "Tt" else card[0].upper()
         return rank + _SUIT_MARKS[card[1].lower()]
@@ -435,6 +437,8 @@ class IntegrationThread(threading.Thread):
         self._hand_auto_started = False
         # ショーダウンでマックした席（見せずに降りた = ポットを受け取れない）。
         self._showdown_mucks: list[int] = []
+        # ショーダウンを手札で判定できなかった理由（次の配布でチップを動かさずに終えるときの表示）
+        self._showdown_gaps: list[str] = []
         self._showdown_notice_shown = False
         # 直前に確定したハンド（自動で決めた勝者のあとに届いた `w` / 「ウィナー」を扱う）。
         self._last_result: Optional[dict] = None
@@ -593,7 +597,8 @@ class IntegrationThread(threading.Thread):
         誤読み。どちらもハンドログが壊れるので WARN + needs_review を立てる（ISSUE-0026）。
         枚数判定によるストリート自動遷移も水増しされるため、黙って進めない。
         """
-        dupes = sorted({c for c in self._board_cards if self._board_cards.count(c) > 1})
+        dupes = sorted({c for c in self._board_cards
+                        if c != UNKNOWN_CARD and self._board_cards.count(c) > 1})
         if not dupes:
             return
         logger.warning(
@@ -623,7 +628,7 @@ class IntegrationThread(threading.Thread):
             return
         if self._auto_new_hand and self._betting_over() and (
             ev.replaces or ev.board_index not in self._board_positions
-            and len(self._board_positions) >= 5
+            and self._board_top() >= 5
         ):
             # ショーダウン待ちのボードは変えない（次のハンドのウォッシュで差し替わるのを防ぐ, ADR-0063）
             logger.info("ショーダウン待ちのボードの差し替えを無視しました: %s", ev.card)
@@ -652,10 +657,7 @@ class IntegrationThread(threading.Thread):
             else:
                 # 配布時刻は **最初の検出**を採る（再発火で上書きしない, ADR-0055）。
                 self._board_dealt_at.setdefault(ev.board_index, ev.timestamp)
-            self._board_cards = [
-                self._board_positions[i]
-                for i in sorted(self._board_positions)
-            ]
+            self._board_cards = self._board_list()
             # tag を出すのは、同じカード名が別 UID で 2 枚登録されている（= rfid_cards.json の
             # 重複登録）ケースを名前だけのログから切り分けられないため（ISSUE-0026）。
             # 同じ位置に同じ札の再検出は新しい情報ではない。結合の弱いリーダーは載っている札を
@@ -740,9 +742,24 @@ class IntegrationThread(threading.Thread):
         # アクション照合バッファに追加
         self._rfid_seat_buffer.append(ev)
 
+    def _board_list(self) -> list[str]:
+        """ボードを位置どおりに（読めなかった位置は `??`）。最後に読めた位置まで。
+
+        フロップの 1 枚が読めずにターン・リバーが読めたとき、読めた札だけを詰めるとターンの札がフロップに
+        並ぶ（オーナー 2026-09-29: 充当してはいけない）。位置を保てば、枚数 = いまのストリートになる。
+        """
+        if not self._board_positions:
+            return []
+        top = max(self._board_positions)
+        return [self._board_positions.get(i, UNKNOWN_CARD) for i in range(1, top + 1)]
+
+    def _board_top(self) -> int:
+        """ボードの読めた一番後ろの位置（3 = フロップ・4 = ターン・5 = リバー）。途中の位置が読めていなくてもよい。"""
+        return max(self._board_positions, default=0)
+
     def _try_advance_street_from_rfid(self) -> None:
         """ボードカード枚数に応じてストリートを自動推移する (RFID 優先証拠)。"""
-        n = len(self._board_positions)
+        n = self._board_top()
         gs = self._game_state
         target_street = _BOARD_STREET_THRESHOLDS.get(n)
         if target_street is None:
@@ -1189,13 +1206,13 @@ class IntegrationThread(threading.Thread):
                         # ベットに全員が降りた = 勝った人がポットを取って札を前に出した（オーナー: 素早く投げる）。
                         # リバーでは「コール」を聞き落としたショーダウンの可能性もあるので、役名・「ショーダウン」を
                         # 待ってから確定する（確定までの時間をこの離脱から数え直す）。
-                        if len(self._board_positions) >= 5:
+                        if self._board_top() >= 5:
                             pending["t"] = max(pending["t"], since)
                             logger.info("席%d の札も離れました（リバー）— 役名か「ショーダウン」が無ければ %.0f 秒後に確定",
                                         seat, FOLDOUT_CONFIRM_SEC)
                         else:
                             logger.info("席%d の札も離れました（勝ってポットを取った）", seat)
-                    elif len(self._board_positions) >= 5 and not folder.get("muck"):
+                    elif self._board_top() >= 5 and not folder.get("muck"):
                         # リバーでベットが無いのに残った人の札も離れた = ショーダウンで札を前に出した
                         self._emit_seat_signal(self._seat_signal("showdown", pending["seat"], now))
                     else:
@@ -1216,7 +1233,11 @@ class IntegrationThread(threading.Thread):
         if not (self._rfid_folds and self._hand_open):
             return
         for count, (street, indices) in _BOARD_STREETS.items():
-            if len(self._board_positions) < count or street in self._street_marks:
+            if street in self._street_marks:
+                continue
+            # フロップは 2 枚読めれば始まっている（3 枚目が読めないことがある。ボードに 2 枚だけ載ることはない）
+            flop_seen = street == "flop" and sum(i in self._board_positions for i in indices) >= 2
+            if self._board_top() < count and not flop_seen:
                 continue
             times = [self._board_dealt_at[i] for i in indices if i in self._board_dealt_at]
             if times:
@@ -2297,6 +2318,17 @@ class IntegrationThread(threading.Thread):
         if len(remaining) == 1:   # 全員フォールド（勝者の自動判定が off でも決まっている）
             self._finalize_hand(remaining[0], winner_source="fold", ended_ts=ended)
             return
+        if (self._auto_winner and self._rules_aware and len(remaining) >= 2 and self._betting_over()
+                and hasattr(gs, "end_hand_refund")):
+            # ショーダウンで札が読めず勝者が分からない → チップは動かさない（オーナー 2026-09-29。仮の勝者にしない）
+            gaps = "・".join(self._showdown_gaps) or "札が読めていません"
+            self._hand_needs_review = True
+            self._notice(
+                f"ハンド {gs.hand_id} の勝者を手札で判定できないまま{when}（{gaps}）— "
+                "チップは動かしません（要確認）"
+            )
+            self._finalize_hand(None, winner_source="undetermined", ended_ts=ended)
+            return
         winner = self._fallback_winner_seat()
         if winner is None:
             remaining = self._remaining_seats()
@@ -2319,7 +2351,9 @@ class IntegrationThread(threading.Thread):
                     tag_id="", card="", reader_id="", role="board", seat=None, timestamp=t,
                     raw_tag_id="", board_index=count, kind="street", observed_at=t,
                 ))
-        if len(self._board_positions) >= 5 and not self._betting_over() and self._hand_open:
+        river = self._board_top() >= 5 or self._game_state.street == "river"
+        if river and not self._betting_over() and self._hand_open:
+            # リバーまで配った（札が読めていなくても、ベッティングがリバーに進んでいる）= ショーダウン
             self._close_betting(self._deal_at or self._clock())
 
     # ――― 勝者の自動判定（ADR-0062）―――
@@ -2394,19 +2428,25 @@ class IntegrationThread(threading.Thread):
         gs = self._game_state
         remaining = self._remaining_seats()
         board = list(self._board_cards)
-        gaps = [] if len(board) == 5 else [f"ボード {len(board)}/5 枚"]
+        known = [c for c in board if c != UNKNOWN_CARD]
+        gaps = [] if len(known) == 5 else [f"ボード {len(known)}/5 枚"]
         for seat in remaining:
             n = len(self._hole_cards.get(seat, []))
             if n < 2:
                 gaps.append(f"席{seat} の手札 {n}/2 枚")
-        cards = board + [c for s in remaining for c in self._hole_cards.get(s, [])]
-        if not gaps and len(set(cards)) != len(cards):
+        cards = known + [c for s in remaining for c in self._hole_cards.get(s, [])]
+        duplicated = len(set(cards)) != len(cards)
+        if duplicated:
             gaps.append("同じ札が 2 か所にあります")
         announced = self._announced_hand
         if gaps:
             if announced and self._finish_by_announcement(remaining, board, event, ended_ts):
                 return True
-            message = f"勝者を手札で判定できません（{'・'.join(gaps)}）— w <席> で入力してください"
+            if not duplicated and self._finish_despite_unknowns(remaining, board, gaps, event, ended_ts):
+                return True
+            self._showdown_gaps = gaps
+            message = (f"勝者を手札で判定できません（{'・'.join(gaps)}）— w <席> で入力してください"
+                       "（入力が無ければ次の手札が配られたときにチップを動かさずに終えます）")
             if explicit:
                 self._notice(message)
             else:
@@ -2457,6 +2497,36 @@ class IntegrationThread(threading.Thread):
         )
         return True
 
+    def _finish_despite_unknowns(
+        self, remaining: list[int], board: list[str], gaps: list[str],
+        event: Optional[AudioEvent], ended_ts: Optional[float],
+    ) -> bool:
+        """読めていない札があっても、どの札でも配当が同じなら（勝者は分かる）確定する（要確認）。"""
+        from core.showdown import award_with_unknown_cards
+
+        gs = self._game_state
+        others = [c for s, cards in self._hole_cards.items() if s not in remaining for c in cards]
+        try:
+            pots = gs.current_pots() or [{"amount": gs.pot, "eligible_seats": remaining}]
+            decided = award_with_unknown_cards(
+                {s: list(self._hole_cards.get(s, [])) for s in remaining}, board, pots,
+                gs.acting_order(), excluded=others,
+            )
+        except Exception:  # noqa: BLE001 — 判定できなければ人に任せる
+            logger.exception("読めていない札のある手札の判定に失敗しました")
+            return False
+        if decided is None:
+            return False
+        awards, winners_by_pot = decided
+        winner = winners_by_pot[0][0]
+        self._hand_needs_review = True
+        self._notice(
+            f"読めていない札があります（{'・'.join(gaps)}）が、どの札でも勝者は変わりません — "
+            f"席{winner} の勝ちにします（要確認）"
+        )
+        self._finalize_hand(winner, event, awards=awards, winner_source="cards", ended_ts=ended_ts)
+        return True
+
     def _finish_by_announcement(
         self, remaining: list[int], board: list[str],
         event: Optional[AudioEvent], ended_ts: Optional[float],
@@ -2471,7 +2541,7 @@ class IntegrationThread(threading.Thread):
         announced = self._announced_hand
         readable = [s for s in remaining if len(self._hole_cards.get(s, [])) == 2]
         unreadable = [s for s in remaining if s not in readable]
-        if len(board) != 5 or not readable or not announced:
+        if len(board) != 5 or UNKNOWN_CARD in board or not readable or not announced:
             return False
         try:
             hands = evaluate_hands({s: self._hole_cards[s] for s in readable}, board)
@@ -2515,7 +2585,8 @@ class IntegrationThread(threading.Thread):
         from core.showdown import evaluate_hands
 
         board = list(self._board_cards)
-        if len(board) != 5 or any(len(self._hole_cards.get(s, [])) != 2 for s in remaining):
+        if (len(board) != 5 or UNKNOWN_CARD in board
+                or any(len(self._hole_cards.get(s, [])) != 2 for s in remaining)):
             return False
         try:
             hands = evaluate_hands({s: self._hole_cards[s] for s in remaining}, board)
@@ -2634,6 +2705,14 @@ class IntegrationThread(threading.Thread):
         last = self._last_result or {}
         winners = last.get("winners", [])
         shown = "・".join(f"席{s}" for s in winners) or "?"
+        if last.get("source") == "undetermined":
+            self._notice(
+                f"ハンド {last.get('hand_id')} は勝者が分からず、チップを動かさずに確定しています — "
+                "勝者が分かっていればスマホの訂正画面で直してください"
+            )
+            if seats:
+                self._emit_unresolved(event, reason="winner_after_hand_end")
+            return
         if not seats or set(seats) <= set(winners):
             self._notice(f"ハンド {last.get('hand_id')} の勝者は {shown} で確定しています")
             return
@@ -2873,7 +2952,7 @@ class IntegrationThread(threading.Thread):
             return
         removed = self._board_positions.pop(index)
         self._board_dealt_at.pop(index, None)   # 差し替え後の配布時刻を採り直す（ADR-0055）
-        self._board_cards = [self._board_positions[i] for i in sorted(self._board_positions)]
+        self._board_cards = self._board_list()
         self._shown_board = len(self._board_cards)   # 置き直した札をもう一度出す
         # 訂正が入ったハンドは人間が記録を確認できるようにする（監査痕）。
         self._hand_needs_review = True
@@ -3363,6 +3442,7 @@ class IntegrationThread(threading.Thread):
         self._hand_open = True
         self._hand_auto_started = auto
         self._showdown_mucks = []
+        self._showdown_gaps = []
         self._showdown_notice_shown = False
         self._shown_holes = {}
         self._shown_board = 0
@@ -3490,7 +3570,7 @@ class IntegrationThread(threading.Thread):
 
     def _finalize_hand(
         self,
-        winner_seat: int,
+        winner_seat: Optional[int],
         event: Optional[AudioEvent] = None,
         winner_seats: Optional[list[int]] = None,
         *,
@@ -3512,7 +3592,9 @@ class IntegrationThread(threading.Thread):
         gs = self._game_state
         ended = False
         try:
-            if awards is not None:
+            if winner_seat is None:
+                gs.end_hand_refund()             # 勝者が分からない: チップを動かさない
+            elif awards is not None:
                 gs.end_hand_awards(awards)
             elif winner_seats is not None and len(winner_seats) > 1:
                 awards = gs.end_hand_split(winner_seats)
@@ -3616,7 +3698,7 @@ class IntegrationThread(threading.Thread):
             self._card_info(f"ハンド {summary.hand_id}: {cards}")
         self._last_result = {
             "hand_id": gs.hand_id,
-            "winners": sorted(awards) if awards else [winner_seat],
+            "winners": sorted(awards) if awards else ([] if winner_seat is None else [winner_seat]),
             "source": winner_source,
             "hand": next((h.get("hand") for h in (showdown or []) if h.get("seat") == winner_seat), None),
         }
@@ -3628,6 +3710,7 @@ class IntegrationThread(threading.Thread):
         self._hand_open = False
         self._hand_auto_started = False
         self._showdown_mucks = []
+        self._showdown_gaps = []
         self._foldout_pending = None
         self._departures = {}
         self._hand_inputs = []
@@ -3649,7 +3732,9 @@ class IntegrationThread(threading.Thread):
             except Exception:  # noqa: BLE001
                 return f"席{seat}"
 
-        if awards and len(awards) > 1:
+        if summary.winner_seat is None:
+            text = "勝者なし（チップは動かしていません）"
+        elif awards and len(awards) > 1:
             text = "分配: " + "・".join(f"{who(s)} {amt}" for s, amt in sorted(awards.items()))
         else:
             text = f"勝ち: {who(summary.winner_seat)}"
@@ -3657,6 +3742,7 @@ class IntegrationThread(threading.Thread):
         detail = {
             "fold": "ほかは全員フォールド",
             "estimated": "勝者が決まらず仮",
+            "undetermined": "札が読めず手札で判定できない",
         }.get(summary.winner_source or "", "")
         if summary.winner_source == "cards" and summary.winner_seat in hands:
             detail = HAND_NAMES_JA.get(hands[summary.winner_seat], hands[summary.winner_seat])

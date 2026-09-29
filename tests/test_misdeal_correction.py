@@ -95,7 +95,7 @@ class TestBoardCorrection:
         _board(t, 2, "Tc", "T2")
         _board(t, 3, "9s", "T3")
         t._handle_audio_event(AudioEvent("correct_board", 2, time.time(), "ボード2 訂正"))  # noqa: SLF001
-        assert t._board_cards == ["5d", "9s"]           # noqa: SLF001
+        assert t._board_cards == ["5d", "??", "9s"]     # noqa: SLF001  空いた位置は ?? のまま（詰めない）
         _board(t, 2, "Qh", "T4")
         assert t._board_cards == ["5d", "Qh", "9s"]     # noqa: SLF001
 

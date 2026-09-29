@@ -55,6 +55,8 @@ export interface ReplayHand {
   pot_total?: number;
   pots?: ReplayPot[]; // main/side (pokerkit backend。legacy は [])
   winner_seat?: number | null;
+  /** 勝者の決まり方 (fold / cards / estimated / announced / undetermined = 札が読めず判定できない・チップは動かしていない)。 */
+  winner_source?: string | null;
   actions: ReplayAction[];
   review_required?: boolean;
   position_map?: Record<string, string>; // 席 → ポジション名 (pokerkit backend)
@@ -76,6 +78,8 @@ export interface ReplayModel {
   seats: ReplayPlayer[];
   streets: StreetSection[];
   winnerSeat: number | null;
+  /** 勝者が決まらずチップを動かしていない (winner_source=undetermined, hand schema 1.6)。 */
+  noWinner: boolean;
   potTotal: number | null;
   pots: ReplayPot[];
 }
@@ -184,6 +188,7 @@ export function buildReplayModel(hand: ReplayHand): ReplayModel {
     seats,
     streets,
     winnerSeat: hand.winner_seat ?? null,
+    noWinner: hand.winner_seat == null && hand.winner_source === "undetermined",
     potTotal: hand.pot_total ?? null,
     pots: hand.pots ?? [],
   };

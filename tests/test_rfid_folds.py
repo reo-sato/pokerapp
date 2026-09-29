@@ -384,6 +384,34 @@ class TestStoreSessions:
         tb.cards = {}
         tb.deal({4: ["As", "Ad"], 5: ["Ks", "Kd"], 6: ["Qs", "Qd"]})
 
+    def test_unread_flop_card_d0f055fb_hand_5(self, tmp_path):
+        """店舗 2026-09-29 d0f055fb ハンド 5（オーナーのメモ）: フロップの 1 枚（6s）が読めず、ターンの Kc は 4 枚目、
+        リバーの 9s は 5 枚目（RFIDThread がフロップに充当しない）。リバーで札を前に出した席4 はフォールドではなく
+        ショーダウン。読めていない 1 枚しだいで勝者が変わる（8・7 なら席4）ので、チップは動かさない。"""
+        tb = _Table(tmp_path)
+        holes = {4: ["8h", "7d"], 5: ["2d", "Tc"], 6: ["9d", "Td"]}
+        tb.deal(holes)
+        t0 = tb.now
+        for at, kind, arg in [(15.9, "board", (2, "Kh")), (16.7, "board", (1, "3c")), (23.2, "lift", 6),
+                              (28.8, "board", (4, "Kc")), (44.0, "board", (5, "9s")), (49.6, "lift", 4)]:
+            tb.tick(t0 + at)
+            if kind == "board":
+                self._board(tb, *arg)
+            else:
+                tb.lift(arg)
+        assert tb.t._board_cards == ["3c", "Kh", "??", "Kc", "9s"]          # noqa: SLF001
+        tb.tick(t0 + 95)
+        played = tb.played()
+        assert {a[0] for a in played} >= {"preflop", "flop", "turn", "river"}
+        assert ("flop", 6, "fold", 0) in played
+        assert [a for a in played if a[1] == 4 and a[2] == "fold"] == []    # 前に出した札はフォールドにしない
+        tb.cards = {}
+        tb.deal({4: ["As", "Ad"], 5: ["Ks", "Kd"], 6: ["Qs", "Qd"]})
+        (hand,) = tb.hands
+        assert hand.board == ["3c", "Kh", "??", "Kc", "9s"]
+        assert hand.winner_seat is None and hand.winner_source == "undetermined" and hand.review_required
+        assert all(p["result"] == 0 for p in hand.players)
+
     def test_session_a(self, tmp_path):
         tb = _Table(tmp_path)
         self._play(tb, SESSION_A,

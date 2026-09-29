@@ -68,6 +68,8 @@ export function buildHandText(hand: ReplayHand): string {
     if (winner) result += ` ${winner.name}`;
     if (m.potTotal != null) result += ` ・ ポット合計 ${formatChips(m.potTotal)}`;
     lines.push(result);
+  } else if (m.noWinner) {
+    lines.push("結果: 勝者なし（札が読めず判定できないので、チップは動かしていません）");
   } else if (m.potTotal != null) {
     lines.push(`結果: ポット合計 ${formatChips(m.potTotal)}`);
   }

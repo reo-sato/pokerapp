@@ -103,6 +103,15 @@ DEFAULT_GAP_SEC = 1.5       # この秒数までの途切れは「載り続け�
 DEFAULT_RELEASE_SEC = 6.0   # 前の札がこの秒数以上見えないときだけ、新しい札で差し替える（配り直し）
 DEFAULT_REDEAL_WINDOW_SEC = 30.0  # ボードの札が消えてからこの秒数以内に同じリーダーへ置かれた札は差し直し
 DEFAULT_REDEAL_CONFIRM_SEC = 3.0  # ボードの差し直しで、前の札が見えないことを確かめる秒数
+# フロップは 3 枚が同時に出る（オーナー, 2026-09-29）。フロップの最初の札からこの秒数より後に見え始めた札は、
+# フロップの札が読めていなくてもフロップの空き位置に入れない（ターン以降の位置にする）。店舗 20 ハンドの実測:
+# フロップの 3 枚は最初の札から 5.5 秒以内、ターンは早いと 7 秒（どちらも一番右のリーダー = 下の位置の目安で分かる）。
+DEFAULT_FLOP_WINDOW_SEC = 10.0
+# board reader の左右の位置の目安（左端 0 〜 右端 1）。ボードの 5 枚は左から均等に並ぶとみて、フロップ（1〜3 枚目）は
+# 0.6 より左、ターン・リバー（4・5 枚目）は 0.6 より右に載る。右端が 0.6 以下のリーダーはフロップの札しか読まず、
+# 左端が 0.6 以上のリーダーはターン・リバーしか読まない（店舗の 3 台: 左 = フロップだけ・右 = ターン・リバーだけ・
+# 真ん中 = どちらも。20 ハンドの実測で例外なし）。
+_FLOP_EDGE = 0.6
 # 確定前のボードの札は、この秒数までの途切れを「載り続けている」とみなす（`gap_sec` より長い）。
 # リーダーの境目・重ね置きの札は途切れながら読めるので、`gap_sec` のままだと確定まで数え直しを
 # 繰り返して反映が遅れる（店舗の実卓, ADR-0058 追記 3）。一瞬の通過は 1 回きりなので影響しない。
@@ -155,6 +164,7 @@ class RFIDThread(threading.Thread):
         release_sec: Optional[float] = None,
         redeal_window_sec: Optional[float] = None,
         redeal_confirm_sec: Optional[float] = None,
+        flop_window_sec: Optional[float] = None,
     ) -> None:
         """
         Args:
@@ -183,6 +193,10 @@ class RFIDThread(threading.Thread):
                               最後に配った turn / river は時間窓によらない。
             redeal_confirm_sec: ボードの差し直し（1 枚 / flop 全体）で、前の札が見えないことを
                               確かめる秒数。None = `release_sec` と同じ。
+            flop_window_sec:  フロップは 3 枚が同時に出る。フロップの最初の札からこの秒数より後に見え始めた
+                              札は、フロップが 3 枚そろっていなくてもフロップの位置に入れない（ターン以降）。
+                              一番左・一番右のリーダーの札はリーダーの位置で決める（`_FLOP_EDGE`）。
+                              None = 従来どおり空いている位置の若い順（オーナー 2026-09-29）。
         """
         super().__init__(daemon=True, name="RFIDThread")
         self._queue = rfid_queue
@@ -231,6 +245,7 @@ class RFIDThread(threading.Thread):
         self._redeal_confirm_sec = (
             self._release_sec if redeal_confirm_sec is None else max(0.0, float(redeal_confirm_sec))
         )
+        self._flop_window_sec = None if flop_window_sec is None else max(0.0, float(flop_window_sec))
         self._tracking = self._commit_sec > 0 or self._release_sec is not None
         self._pending_gap_sec = (
             max(self._gap_sec, _PENDING_GAP_SEC) if self._commit_sec > 0 else self._gap_sec
@@ -573,9 +588,17 @@ class RFIDThread(threading.Thread):
             run.fired = True
             return [self._replace_board_card(uid, run, index, slot_uid[index])]
         free = [i for i in range(1, _BOARD_MAX_CARDS + 1) if i not in slot_uid]
+        late = self._not_a_flop_card(uid, run, slot_uid)
+        if late:
+            free = [i for i in free if i not in _FLOP_SLOTS]
         if free:
             run.fired = True
             self._place_board_card(uid, free[0], run.first_seen)
+            if late:
+                logger.info(
+                    "ボードの札 %s はフロップと同時に出ていません（%s）— フロップの読めていない位置には入れず、"
+                    "%d 枚目にします", self._card_name(uid), late, free[0],
+                )
             self._log_board_commit(uid, run, free[0], slot_uid, now)
             return [self._run_event(uid, run, "board", None, board_index=free[0])]
         events = self._settle_full_board(uid, run, slot_uid, now)
@@ -584,6 +607,41 @@ class RFIDThread(threading.Thread):
             return []
         run.fired = True
         return events
+
+    def _not_a_flop_card(self, uid: str, run: _Run, slot_uid: dict[int, str]) -> str:
+        """フロップに空き位置があっても、この札をフロップに入れない理由（入れてよければ ""）。
+
+        フロップは 3 枚が同時に出る（オーナー, 2026-09-29: フロップの 1 枚が読めていないとき、あとから出た
+        ターンの札をフロップに充当してはいけない）。リーダーの位置で分かれば位置で（一番右のリーダーだけで
+        読んだ札はターン・リバー、一番左のリーダーで読んだ札はフロップ）、分からなければ時刻で決める
+        （フロップの最初の札から `flop_window_sec` より後に見え始めた札はフロップではない）。
+        """
+        if self._flop_window_sec is None:
+            return ""
+        flop = [u for i, u in slot_uid.items() if i in _FLOP_SLOTS]
+        if not flop or len(flop) >= len(_FLOP_SLOTS):
+            return ""                       # この札がフロップの最初 / フロップに空きが無い
+        sides = {self._board_side(r) for r in run.readers}
+        if sides == {"right"}:
+            return f"{self._reader_label(run.readers)} = ターン・リバーの位置"
+        if "left" in sides:
+            return ""                       # フロップの位置で読んだ（遅れて読めたフロップの札）
+        started = min(self._board_first_seen.get(u, run.first_seen) for u in flop)
+        gap = run.first_seen - started
+        if gap > self._flop_window_sec:
+            return f"フロップの最初の札から {gap:.1f} 秒あと"
+        return ""
+
+    def _board_side(self, reader_id: str) -> str:
+        """board reader がボードのどちら側を読むか: "left"（フロップだけ）/ "right"（ターン・リバーだけ）/ ""。"""
+        k, n = self._board_order.get(reader_id), len(self._board_order)
+        if k is None or n < 2:
+            return ""
+        if (k + 1) / n <= _FLOP_EDGE:
+            return "left"
+        if k / n >= _FLOP_EDGE:
+            return "right"
+        return ""
 
     def _settle_full_board(
         self, uid: str, run: _Run, slot_uid: dict[int, str], now: float,

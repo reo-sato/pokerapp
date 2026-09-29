@@ -314,6 +314,22 @@ class PokerkitGameState:
         self._hand_active = False
         logger.info("Hand %d ended (pokerkit, showdown). Awards: %s", self._hand_id, awards)
 
+    def end_hand_refund(self) -> dict[int, int]:
+        """勝者が決まらないハンドを、チップを動かさずに終える（各席に出した額を返す = 持ち点はハンドの前のまま）。
+
+        ショーダウンで札が読めず勝者が分からないとき（オーナー 2026-09-29: チップ移動は無し）。席 → 返した額。
+        """
+        st = self._state
+        if st is None or not self._hand_active:
+            raise RuntimeError("end_hand_refund called without an active hand")
+        refunds = {
+            s: self._hand_start_stacks[self._seat_to_idx[s]] - st.stacks[self._seat_to_idx[s]]
+            for s in self._hand_seats
+        }
+        self.end_hand_awards({s: amount for s, amount in refunds.items() if amount > 0})
+        logger.info("Hand %d ended (pokerkit) without a winner — chips returned: %s", self._hand_id, refunds)
+        return refunds
+
     def acting_order(self) -> list[int]:
         """このハンドのフロップ以降の手番の順（一番アウトオブポジション = ボタンの次の席が先頭、
         ボタンが最後。heads-up はボタンでない方が先頭）。"""

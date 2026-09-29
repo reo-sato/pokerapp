@@ -177,9 +177,11 @@ def _rfid_tracking_kwargs(rfid_cfg: dict) -> dict:
     `release_sec: null` で自動の差し替えを止め、`commit_sec: 0` で最初に見えた瞬間に確定する。
     `redeal_window_sec: null` でボードの 1 枚だけの差し直しを扱わない（flop 全体と 6 枚目の詰め直しだけ）。
     `redeal_confirm_sec` はボードの差し直しで前の札が見えないことを確かめる秒数（null = `release_sec`）。
+    `flop_window_sec` はフロップの最初の札からこの秒数より後に出た札をフロップにしない（null = 従来どおり）。
     """
     from rfid.reader_thread import (
         DEFAULT_COMMIT_SEC,
+        DEFAULT_FLOP_WINDOW_SEC,
         DEFAULT_GAP_SEC,
         DEFAULT_REDEAL_CONFIRM_SEC,
         DEFAULT_REDEAL_WINDOW_SEC,
@@ -188,12 +190,14 @@ def _rfid_tracking_kwargs(rfid_cfg: dict) -> dict:
     release = rfid_cfg.get("release_sec", DEFAULT_RELEASE_SEC)
     window = rfid_cfg.get("redeal_window_sec", DEFAULT_REDEAL_WINDOW_SEC)
     confirm = rfid_cfg.get("redeal_confirm_sec", DEFAULT_REDEAL_CONFIRM_SEC)
+    flop_window = rfid_cfg.get("flop_window_sec", DEFAULT_FLOP_WINDOW_SEC)
     return {
         "commit_sec": float(rfid_cfg.get("commit_sec", DEFAULT_COMMIT_SEC)),
         "gap_sec": float(rfid_cfg.get("gap_sec", DEFAULT_GAP_SEC)),
         "release_sec": None if release is None else float(release),
         "redeal_window_sec": None if window is None else float(window),
         "redeal_confirm_sec": None if confirm is None else float(confirm),
+        "flop_window_sec": None if flop_window is None else float(flop_window),
     }
 
 
