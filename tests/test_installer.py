@@ -27,7 +27,7 @@ ROOT = Path(__file__).parent.parent
 CMD_FILES = [
     "install.cmd", "update.cmd", "uninstall.cmd",
     "start_logger.cmd", "start_monitor.cmd", "start_viewer.cmd", "start_ledger.cmd", "rfid_check.cmd",
-    "start_truth.cmd", "pack_logs.cmd",
+    "start_truth.cmd", "pack_logs.cmd", "pack_logs_audio.cmd",
 ]
 PS1_FILES = ["installer/install.ps1", "installer/bootstrap.ps1"]
 
@@ -92,7 +92,7 @@ class TestLaunchers:
 
     def test_launchers_reference_existing_entry_points(self):
         for rel in ("start_logger.cmd", "start_monitor.cmd", "start_viewer.cmd", "start_ledger.cmd",
-                    "rfid_check.cmd", "start_truth.cmd", "pack_logs.cmd"):
+                    "rfid_check.cmd", "start_truth.cmd", "pack_logs.cmd", "pack_logs_audio.cmd"):
             text = (ROOT / rel).read_text(encoding="ascii")
             assert r"venv\Scripts\python.exe" in text, rel
             for m in re.finditer(r'^"venv\\Scripts\\python\.exe" (\S+)', text, re.M):
@@ -118,6 +118,11 @@ class TestLaunchers:
         text = (ROOT / "pack_logs.cmd").read_text(encoding="ascii")
         assert "tools\\pack_logs.py %*" in text and "pause" in text
 
+    def test_audio_pack_launcher_always_includes_audio(self):
+        """音声付きのショートカット（オーナー 2026-09-29）: 音声を必ず入れる。大きければ zip を分ける（pack_logs 側）。"""
+        text = (ROOT / "pack_logs_audio.cmd").read_text(encoding="ascii")
+        assert "tools\\pack_logs.py --audio %*" in text and "pause" in text
+
     def test_viewer_launcher_serves_customers_on_the_lan(self):
         """お客さんのスマホから開く（ADR-0059）。config を書き換えずに LAN へ出す。"""
         text = (ROOT / "start_viewer.cmd").read_text(encoding="ascii")
@@ -127,7 +132,7 @@ class TestLaunchers:
         text = (ROOT / "installer/install.ps1").read_bytes()[3:].decode("utf-8")
         block = re.search(r"\$Shortcuts\s*=\s*@\((.*?)\n\)", text, re.S).group(1)
         targets = re.findall(r'Target\s*=\s*"([^"]+)"', block)
-        assert "start_viewer.cmd" in targets
+        assert "start_viewer.cmd" in targets and "pack_logs_audio.cmd" in targets
         for target in targets:
             assert target in CMD_FILES and (ROOT / target).is_file(), target
 

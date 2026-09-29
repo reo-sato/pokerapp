@@ -91,14 +91,20 @@ class SessionFiles:
         return self.folder / f"{self.session_id}.events.jsonl"
 
 
-def open_input(path: Path) -> tuple[Path, Optional[Path]]:
-    """zip なら一時フォルダに展開する。(読むフォルダ, あとで消す一時フォルダ) を返す。"""
-    if path.is_file() and path.suffix.lower() == ".zip":
-        tmp = Path(tempfile.mkdtemp(prefix="eval_store_"))
-        with zipfile.ZipFile(path) as zf:
+def open_input(path: "Path | list[Path]") -> tuple[Path, Optional[Path]]:
+    """zip なら一時フォルダに展開する。(読むフォルダ, あとで消す一時フォルダ) を返す。
+
+    zip は複数でもよい（pack_logs が大きいログを `_1of3.zip`… に分けたもの）: 同じ一時フォルダに全部展開する。
+    """
+    paths = path if isinstance(path, list) else [path]
+    zips = [p for p in paths if p.is_file() and p.suffix.lower() == ".zip"]
+    if not zips:
+        return paths[0], None
+    tmp = Path(tempfile.mkdtemp(prefix="eval_store_"))
+    for z in zips:
+        with zipfile.ZipFile(z) as zf:
             zf.extractall(tmp)
-        return tmp, tmp
-    return path, None
+    return tmp, tmp
 
 
 def find_sessions(root: Path, only: Optional[list[str]] = None) -> list[SessionFiles]:
@@ -1003,7 +1009,8 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
 
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="店舗のログをいまのコードで再生して評価する（ADR-0056 追記 1, S0）")
-    ap.add_argument("path", type=Path, help="pack_logs の zip / 展開したフォルダ / logs")
+    ap.add_argument("path", type=Path, nargs="+",
+                    help="pack_logs の zip（分けた zip は全部並べる）/ 展開したフォルダ / logs")
     ap.add_argument("--session", action="append", help="セッション ID（先頭の数文字でよい。複数回可）")
     ap.add_argument("--timeline", action="store_true", help="ハンドごとのタイムラインと行の比較を出す")
     ap.add_argument("--hand", type=int, help="--timeline で出すハンド")
@@ -1021,7 +1028,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         manifest = _read_json(root / "manifest.json" if (root / "manifest.json").exists() else None) or {}
         sessions = find_sessions(root, args.session)
         if not sessions:
-            print(f"{args.path} にセッション（*.events.jsonl）がありません", file=sys.stderr)
+            print(f"{' '.join(map(str, args.path))} にセッション（*.events.jsonl）がありません", file=sys.stderr)
             return 1
         reports = [evaluate_session(f, config, manifest.get("code_fingerprint")) for f in sessions]
         if args.export_fixture:

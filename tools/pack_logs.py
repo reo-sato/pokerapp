@@ -4,13 +4,17 @@
 
 店舗 PC で「ログをまとめる (送付用)」（`pack_logs.cmd`）をダブルクリックすると、直近 12 時間のセッションの
 ファイルをデスクトップの `pokerlogs_<日時>.zip` にまとめ、エクスプローラでその zip を選んだ状態で開く。
-その 1 ファイルをチャットに添付すればよい。
+その 1 ファイルをチャットに添付すればよい。「ログをまとめる (音声付き・送付用)」（`pack_logs_audio.cmd` = `--audio`）は
+発話の音声を必ず全部入れる。1 つの zip が `PART_LIMIT`（25 MB = チャットに添付できる大きさ）を超えるときは
+`pokerlogs_<日時>_1of3.zip`・`_2of3.zip`… に分ける（1 つ目にログと音声の一部、2 つ目以降は音声の続き。全部を同じ
+フォルダに展開すると 1 つの zip と同じになる。`tools/eval_store.py` は分けた zip をまとめて渡せば読める）。
 
 入るもの（セッションごとに `<セッションID>/` の下）:
 - `logs/<sid>.json`（ハンドの記録）/ `.events.jsonl`（センサーの入力）/ `.transcripts.jsonl`（聞き取った文）/
   `.table_state.json(l)`（卓状態）/ `.ground_truth.json`（真のアクション）/ `.rescored.jsonl`（音声を採点し直した
   結果, `tools/rescore_audio.py`）/ `.control.jsonl` など `<sid>.*` の全部
-- `logs/audio/<sid>/*.wav`（発話の音声。合計 25 MB までなら自動で入れる。`--audio` / `--no-audio` で指定）
+- `logs/audio/<sid>/*.wav`（発話の音声。合計 25 MB までなら自動で入れる。`--audio` で必ず入れる（大きければ zip を
+  分ける）/ `--no-audio` で入れない）
 - `pokerapp.log` はそのセッションの時間帯の行だけ / `config.json`（トークン類は伏せる）/ `rfid_cards.json` /
   `manifest.json`（入れたもの・インストールしたコードの指紋）
 
@@ -19,6 +23,7 @@
     python tools/pack_logs.py                  # 直近 12 時間のセッション → デスクトップに zip
     python tools/pack_logs.py --hours 48       # 直近 48 時間
     python tools/pack_logs.py --session <sid>  # セッションを指定（複数回可）
+    python tools/pack_logs.py --audio          # 音声を全部入れる（25 MB を超えたら zip を分ける）
     python tools/pack_logs.py --text           # zip を添付できないとき: テキスト 1 ファイル（音声なし）
 """
 from __future__ import annotations
@@ -41,6 +46,10 @@ ROOT = Path(__file__).resolve().parent.parent
 APP_LOG = "pokerapp.log"
 # 音声はこの合計サイズまでなら既定で入れる（チャットに添付できる大きさに収める）
 AUDIO_AUTO_LIMIT = 25 * 1024 * 1024
+# 1 つの zip の大きさの上限（チャットに添付できる大きさ）。超えるときは音声を 2 つ目以降の zip に分ける
+PART_LIMIT = 25 * 1024 * 1024
+# zip の 1 項目あたりの見出しの大きさの見積もり（ローカル + 中央ディレクトリ + 名前）
+_ENTRY_OVERHEAD = 256
 # pokerapp.log から切り出す範囲の前後の余白（起動・終了の行を含める）
 LOG_MARGIN = timedelta(seconds=60)
 DEFAULT_HOURS = 12.0
@@ -237,9 +246,13 @@ def _hand_count(session: Session) -> Optional[int]:
 def pack(
     log_dir: Path, out_dir: Path, *, root: Path = ROOT, session_ids: Optional[list[str]] = None,
     hours: float = DEFAULT_HOURS, all_sessions: bool = False, audio: Optional[bool] = None,
-    text: bool = False, now: Optional[datetime] = None,
+    text: bool = False, now: Optional[datetime] = None, part_bytes: Optional[int] = None,
 ) -> tuple[Path, dict]:
-    """ログを zip（`text=True` ならテキスト 1 ファイル）にまとめ、(出力先, manifest) を返す。"""
+    """ログを zip（`text=True` ならテキスト 1 ファイル）にまとめ、(出力先, manifest) を返す。
+
+    zip が `part_bytes`（既定 `PART_LIMIT`、0 = 分けない）を超えるときは音声を 2 つ目以降の zip に分ける。
+    出力先は 1 つ目の zip、全部の名前は `manifest["parts"]`。
+    """
     sessions = find_sessions(log_dir)
     if not sessions:
         raise PackError(f"{log_dir} にセッションのログがありません")
@@ -312,14 +325,43 @@ def pack(
                 f.write(chunk if chunk.endswith("\n") or not chunk else chunk + "\n")
             f.write("===== END =====\n")
         return out, manifest
-    out = out_dir / f"pokerlogs_{stamp}.zip"
-    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for name, body in entries:
-            if isinstance(body, Path):
-                zf.write(body, name, compress_type=zipfile.ZIP_STORED)   # WAV はほとんど縮まない
-            else:
-                zf.writestr(name, body)
-    return out, manifest
+    groups = split_entries(entries[1:], PART_LIMIT if part_bytes is None else part_bytes)
+    names = ([f"pokerlogs_{stamp}.zip"] if len(groups) == 1
+             else [f"pokerlogs_{stamp}_{i}of{len(groups)}.zip" for i in range(1, len(groups) + 1)])
+    manifest["parts"] = names
+    entries[0] = ("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+    groups[0].insert(0, entries[0])
+    for name, group in zip(names, groups):
+        with zipfile.ZipFile(out_dir / name, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for entry, body in group:
+                if isinstance(body, Path):
+                    zf.write(body, entry, compress_type=zipfile.ZIP_STORED)   # WAV はほとんど縮まない
+                else:
+                    zf.writestr(entry, body)
+    return out_dir / names[0], manifest
+
+
+def split_entries(entries: list[tuple[str, Any]], limit: int) -> list[list[tuple[str, Any]]]:
+    """zip の中身を、1 つが `limit` バイト以下の組に分ける（0 以下 = 分けない）。
+
+    ログ（bytes）はすべて 1 つ目に入れ、音声（Path）を順に詰めて、入りきらなければ次の組へ。大きさは圧縮前で
+    見積もる（WAV は圧縮しないで入れるので見積もりどおり、ログは圧縮で小さくなる = 安全側）。
+    """
+    def size(body: Any) -> int:
+        return (len(body) if isinstance(body, bytes) else body.stat().st_size) + _ENTRY_OVERHEAD
+
+    logs = [e for e in entries if not isinstance(e[1], Path)]
+    audio = [e for e in entries if isinstance(e[1], Path)]
+    groups: list[list[tuple[str, Any]]] = [list(logs)]
+    used = sum(size(body) for _, body in logs) + 4096          # manifest の見積もり
+    for entry in audio:
+        n = size(entry[1])
+        if limit > 0 and used + n > limit and groups[-1]:
+            groups.append([])
+            used = 0
+        groups[-1].append(entry)
+        used += n
+    return groups
 
 
 # ───────────────────────── 起動 ─────────────────────────
@@ -374,10 +416,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--all", action="store_true", help="すべてのセッション")
     audio = ap.add_mutually_exclusive_group()
     audio.add_argument("--audio", dest="audio", action="store_true", default=None,
-                       help="発話の音声を必ず入れる（既定: 合計 25 MB までなら入れる）")
+                       help="発話の音声を必ず入れる（既定: 合計 25 MB までなら入れる）。zip が 25 MB を超えたら分ける")
     audio.add_argument("--no-audio", dest="audio", action="store_false", help="音声を入れない")
     ap.add_argument("--text", action="store_true", help="zip ではなくテキスト 1 ファイル（音声なし）")
     ap.add_argument("--no-open", action="store_true", help="できたファイルをエクスプローラで開かない")
+    ap.add_argument("--part-mb", type=float, default=PART_LIMIT / 1024 / 1024,
+                    help="1 つの zip の大きさの上限（MB, 既定 25。0 = 分けない）")
     args = ap.parse_args(argv)
 
     log_dir = Path(args.log_dir) if args.log_dir else _log_dir_from_config(ROOT)
@@ -386,6 +430,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         out, manifest = pack(
             log_dir, out_dir, session_ids=args.session or None, hours=args.hours,
             all_sessions=args.all, audio=args.audio, text=args.text,
+            part_bytes=int(args.part_mb * 1024 * 1024),
         )
     except PackError as e:
         print(f"[pack] {e}")
@@ -404,8 +449,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         else:
             print(f"[pack] 発話の音声 {n_audio} 個（{_mb(manifest['audio_bytes'])}）は入れていません"
                   "（入れるなら --audio）")
-    print(f"[pack] できました: {out}（{_mb(out.stat().st_size)}）")
-    print("[pack] この 1 ファイルをチャットに添付してください。")
+    parts = [out.parent / name for name in manifest.get("parts") or [out.name]]
+    if len(parts) == 1:
+        print(f"[pack] できました: {out}（{_mb(out.stat().st_size)}）")
+        print("[pack] この 1 ファイルをチャットに添付してください。")
+    else:
+        print(f"[pack] 大きいので {len(parts)} 個の zip に分けました（1 つ {args.part_mb:g} MB まで）:")
+        for part in parts:
+            print(f"[pack]   {part}（{_mb(part.stat().st_size)}）")
+        print(f"[pack] {len(parts)} 個すべてをチャットに添付してください。")
     if not args.no_open:
         reveal(out)
     return 0

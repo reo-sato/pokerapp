@@ -452,6 +452,24 @@ class TestCommandLine:
         assert "セッション folds（2 ハンド）" in out and "記録したときと違う（main.py）" in out
         assert "再生の結果は記録と同じ" in out and "--- ハンド 2" in out and "--- ハンド 1" not in out
 
+    def test_split_zips_are_read_together(self, tmp_path, capsys):
+        """pack_logs が分けた zip（_1of2 / _2of2）はまとめて渡せば 1 つの zip と同じに読める。"""
+        folder = tmp_path / "logs"
+        folder.mkdir()
+        _two_hands(folder)
+        first, second = tmp_path / "pokerlogs_1of2.zip", tmp_path / "pokerlogs_2of2.zip"
+        files = [p for p in folder.iterdir() if p.is_file()]
+        with zipfile.ZipFile(first, "w") as zf:
+            for p in files:
+                if not p.name.endswith(".events.jsonl"):
+                    zf.write(p, f"{SID}/{p.name}")
+        with zipfile.ZipFile(second, "w") as zf:
+            for p in files:
+                if p.name.endswith(".events.jsonl"):
+                    zf.write(p, f"{SID}/{p.name}")
+        assert eval_store.main([str(first), str(second)]) == 0
+        assert "セッション folds（2 ハンド）" in capsys.readouterr().out
+
     def test_json_output(self, tmp_path, capsys):
         _two_hands(tmp_path)
         assert eval_store.main([str(tmp_path), "--json"]) == 0

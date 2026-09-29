@@ -149,6 +149,29 @@ class TestZip:
         out, manifest = _pack(root, tmp_path, audio=False)
         assert manifest["audio_included"] is False
 
+    def test_large_audio_is_split_into_parts_that_can_be_attached(self, root, tmp_path):
+        """音声付き（オーナー 2026-09-29）: 1 つの zip が上限を超えたら、音声を 2 つ目以降に分ける。全部を展開すると 1 つと同じ。"""
+        for i in range(3, 9):                                     # 音声を 8 個（各 1004 バイト）に
+            (root / "logs" / "audio" / NEW / f"{i}.wav").write_bytes(b"RIFF" + bytes(1000))
+        single, _ = _pack(root, tmp_path / "one", audio=True, part_bytes=0)
+        out, manifest = _pack(root, tmp_path, audio=True, part_bytes=8000)
+        parts = [out.parent / name for name in manifest["parts"]]
+        assert len(parts) >= 2 and out == parts[0]
+        assert [p.name for p in parts] == [f"pokerlogs_20260927_144850_{i}of{len(parts)}.zip"
+                                           for i in range(1, len(parts) + 1)]
+        first = _names(parts[0])
+        assert "manifest.json" in first and f"{NEW}/{NEW}.json" in first and "pokerapp.log" in first
+        for part in parts[1:]:
+            assert all("/audio/" in n for n in _names(part))       # 2 つ目以降は音声の続きだけ
+        assert sorted(n for part in parts for n in _names(part)) == _names(single)
+        assert all(part.stat().st_size <= 8000 + 2048 for part in parts[1:])
+        with zipfile.ZipFile(parts[0]) as zf:
+            assert json.loads(zf.read("manifest.json"))["parts"] == [p.name for p in parts]
+
+    def test_small_logs_stay_in_one_zip(self, root, tmp_path):
+        out, manifest = _pack(root, tmp_path, audio=True)
+        assert manifest["parts"] == [out.name] and out.name == "pokerlogs_20260927_144850.zip"
+
     def test_an_old_session_by_id(self, root, tmp_path):
         out, manifest = _pack(root, tmp_path, session_ids=[OLD])
         assert f"{OLD}/{OLD}.json" in _names(out) and not any(n.startswith(NEW) for n in _names(out))
@@ -178,6 +201,16 @@ class TestMain:
         assert code == 0
         assert "セッション 2 つ" in out and "この 1 ファイルをチャットに添付してください" in out
         assert len(list((tmp_path / "out").glob("pokerlogs_*.zip"))) == 1
+
+    def test_main_reports_every_part(self, root, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(pack_logs, "ROOT", root)
+        for i in range(3, 9):
+            (root / "logs" / "audio" / NEW / f"{i}.wav").write_bytes(b"RIFF" + bytes(100_000))
+        code = pack_logs.main(["--out-dir", str(tmp_path / "out"), "--no-open", "--audio", "--part-mb", "0.3"])
+        out = capsys.readouterr().out
+        parts = sorted((tmp_path / "out").glob("pokerlogs_*of*.zip"))
+        assert code == 0 and len(parts) >= 2
+        assert f"{len(parts)} 個の zip に分けました" in out and f"{len(parts)} 個すべてをチャットに添付してください" in out
 
     def test_main_reads_the_log_dir_from_config(self, root, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(pack_logs, "ROOT", root)

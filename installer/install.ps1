@@ -79,6 +79,7 @@ $Shortcuts = @(
     @{ Name = "お客さん用 ハンド履歴 (スマホ)"; Target = "start_viewer.cmd" },
     @{ Name = "真のアクション入力 (iPad から)"; Target = "start_truth.cmd" },
     @{ Name = "ログをまとめる (送付用)";     Target = "pack_logs.cmd" },
+    @{ Name = "ログをまとめる (音声付き・送付用)"; Target = "pack_logs_audio.cmd" },
     @{ Name = "会計 + スマホ注文 API";      Target = "start_ledger.cmd" },
     @{ Name = "RFID リーダー チェック";     Target = "rfid_check.cmd" }
 )
