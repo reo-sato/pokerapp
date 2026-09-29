@@ -204,17 +204,18 @@
     "hand_id": 1
    },
    "baseline": {
-    "action_correct": 13,
+    "action_correct": 10,
     "action_total": 16,
-    "winner_match": true,
+    "winner_match": false,
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 13,
+    "action_correct": 10,
     "action_total": 16,
-    "winner_match": true,
+    "winner_match": false,
     "board_match": true
-   }
+   },
+   "baseline_note": "2026-09-29: コール・チェックを毎回言う運用にしたので、言われなかったチェックを前提にベットの席を組み直す処理を外した。このハンドは前の運用（フロップ・リバーの席5 のチェックが言われていない）なので、ベットが席5 に付く（下がったのは想定どおり）"
   },
   {
    "hand_id": 3,

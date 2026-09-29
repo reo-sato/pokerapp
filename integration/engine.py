@@ -442,13 +442,6 @@ class IntegrationThread(threading.Thread):
         self._announced_hand: Optional[str] = None
         # ハンドを始められなかった理由（同じ理由を繰り返し知らせない。始められたら None）
         self._start_refused: Optional[str] = None
-        # 無言の連続（同じアクションの 2 回目以降は言わない = 店舗のディーラー, 2026-09-26）:
-        # チェック / コールのあとに言われたベット / レイズは、間の人が無言で同じことをしていたかもしれない。
-        # 仮説 = {"index": 入力番号, "street", "actor": 仮に置いた席, "candidates": [あり得る席...],
-        # "order": [候補の元の並び], "record": ActionRecord, "sealed": あとのレイズで絞れなくなった, "closed"}
-        self._run_hyps: list[dict] = []
-        # 組み直しで採る解釈: 入力番号 → {"k": 無言だった人数, "because_seat": その根拠になった離脱の席}
-        self._run_override: dict[int, dict] = {}
         self._current_input_index: Optional[int] = None
         # 「フォールド」と聞こえたが札がまだ席にある席 → 発話の時刻（札が離れたらこの時刻のフォールドにする）
         self._spoken_folds: dict[int, float] = {}
@@ -1213,8 +1206,7 @@ class IntegrationThread(threading.Thread):
         dep = self._departures.get(seat)
         if dep is None:
             return
-        justified = any(o.get("because_seat") == seat for o in self._run_override.values())
-        if not justified and (not dep.get("applied") or dep.get("action") == "check"):
+        if not dep.get("applied") or dep.get("action") == "check":
             del self._departures[seat]           # 記録に入れていない / チェック（リバー）だった離脱は消すだけ
             return
         self._emit_seat_signal(self._seat_signal("return", seat, now))
@@ -1267,9 +1259,6 @@ class IntegrationThread(threading.Thread):
 
         ストリートの札は 1 秒の余裕を見る（札を置く直前に話し始めた前のラウンドの最後のアクションを先に入れる）。
         """
-        for _ in range(len(self._departures) + 1):
-            if not self._check_run_contradictions(spoken_at):
-                break
         for item in self._pending_observations(spoken_at):
             if item[1] == 0 and item[0] > spoken_at - STALE_CALL_MARGIN_SEC:
                 continue
@@ -1295,8 +1284,6 @@ class IntegrationThread(threading.Thread):
             if any(kind == 0 for _, kind, _ in items):
                 item = items[0]                       # ストリートの札まで、時刻順に
             else:
-                if self._check_run_contradictions(bound):
-                    continue          # 仮にベットにした席の札が離れた = 解釈し直してから続ける
                 if self._apply_pending_spoken_fold(bound, "spoken_fold_before_departure"):
                     continue          # 「フォールド」と言われた手番の人が降り、別の席の離脱が待っている
                 actor = self._game_state.legal_context().actor_seat
@@ -1337,10 +1324,10 @@ class IntegrationThread(threading.Thread):
             return
         if ev.seat is None:
             return
+        # "reinterpret"（無言の連続の解釈し直し, reconstruction_event 0.7）は、コール・チェックを毎回言う運用に
+        # したので出さない（2026-09-29）。前の記録にあっても何もしない。
         if ev.kind in ("leave", "muck"):
             self._run_input("leave", ev)
-        elif ev.kind == "reinterpret":
-            self._run_input("reinterpret", ev)
         elif ev.kind == "spoken_fold":
             self._run_input("spoken_fold", ev)
         elif ev.kind == "return":
@@ -1361,16 +1348,12 @@ class IntegrationThread(threading.Thread):
                 self._dispatch_audio_event(item)
             elif kind == "street":
                 self._sync_to_street(item)
-            elif kind == "reinterpret":
-                self._apply_reinterpret(item)
             elif kind == "spoken_fold":
                 self._register_spoken_fold(item)
             else:
                 self._apply_leave(item, index)
         finally:
             self._current_input_index = previous
-        if not self._rebuilding:
-            self._settle_run_hyps()
 
     def _sync_to_street(self, ev: RFIDEvent) -> None:
         """ボードの札が置かれた = 前のラウンドは終わっている。閉じていなければ、札が離れていた人は
@@ -1427,8 +1410,6 @@ class IntegrationThread(threading.Thread):
             "synced": set(self._streets_synced),
             "spoken": dict(self._spoken_folds),
             "held": self._held_betting_words,
-            "hyps": [dict(h, candidates=list(h["candidates"])) for h in self._run_hyps
-                     if h["index"] < index],
         }
 
     def _checkpoint_at(self, index: int) -> Optional[dict]:
@@ -1452,7 +1433,6 @@ class IntegrationThread(threading.Thread):
             d["applied"] = checkpoint["applied"].get(other, False)
         self._streets_synced = set(checkpoint["synced"])
         self._held_betting_words = checkpoint.get("held", 0)
-        self._run_hyps = [dict(h, candidates=list(h["candidates"])) for h in checkpoint.get("hyps", [])]
 
     def _replay_inputs(self, rest: list) -> None:
         """記録した入力を同じ順に流し直す（お知らせ・画面は止めて、終わってから記録だけ流す）。"""
@@ -1558,7 +1538,6 @@ class IntegrationThread(threading.Thread):
             apply_ok=True,
         ))
         self._last_action_at = dep["t"]
-        self._prune_run_candidates(seat)
 
     def _handle_heads_up(self, event: AudioEvent) -> None:
         """「ヘッズアップ」= 残りが 2 人（ディーラーが次のストリートへ進む前に言う, 店舗 2026-09-27）。
@@ -1589,29 +1568,18 @@ class IntegrationThread(threading.Thread):
             last.needs_review = False
             last.reason = "+".join(r for r in (last.reason, "heads_up") if r)
 
-    def _last_announced_action(self) -> Optional[str]:
-        """いまのストリートでディーラーが最後に言ったアクション（無ければ None）。"""
-        street = self._game_state.street
-        for record in reversed(self._current_actions):
-            if record.street != street:
-                break
-            if record.source.get("audio"):
-                return record.action
-        return None
-
     def _imply_action(self, seat: int, ctx: LegalContext, t: float, reason: str,
                       confirmed: bool = False) -> None:
         """言われなかったアクション（チェック / コール）を入れる。
 
-        直前に言われたアクションと同じなら **無言の連続**（同じアクションの 2 回目以降は言わない =
-        店舗のディーラー, 2026-09-26）で、記録どおり（要確認にしない）。違えば聞き取れなかった
-        とみて要確認。`confirmed` はディーラーの別の言葉で裏付けられた場合（「ヘッズアップ」）。
+        コール・チェックは毎回言う運用なので（オーナー, 2026-09-29。それまでの「同じアクションの 2 回目以降は
+        言わない」運用は廃止）、言われなかった = 聞き取れなかったとみて要確認。`confirmed` はディーラーの別の
+        言葉で裏付けられた場合（「ヘッズアップ」）。
         """
         gs = self._game_state
         action = "check" if ctx.amount_to_call == 0 else "call"
         amount = 0 if action == "check" else ctx.amount_to_call
         street = gs.street
-        repeat = confirmed or (self._rfid_folds and self._last_announced_action() == action)
         gs.apply_action(seat, action, amount)
         self._append_rfid_record(ActionRecord(
             hand_id=gs.hand_id,
@@ -1624,132 +1592,14 @@ class IntegrationThread(threading.Thread):
             pot_after=gs.pot,
             stack_after=gs.get_stack(seat),
             source={"camera": False, "audio": False, "rfid": False},
-            needs_review=not repeat,
+            needs_review=not confirmed,
             confidence=SYNTH_FOLD_CONFIDENCE,
             position=self._position_of(seat),
             actor_source="implied",
-            reason=(reason if confirmed else ("silent_repeat+" + reason) if repeat else reason),
+            reason=reason,
             apply_ok=True,
         ))
         self._last_action_at = t
-
-    # ――― 無言の連続（同じアクションの 2 回目以降は言わない, 2026-09-26） ―――
-    #
-    # 「チェック」「コール」のあとに言われたベット / レイズは、次の手番の人のものとは限らない（間の人が
-    # 無言で同じアクションをしていたかもしれない）。仮にいちばん近い手番の人に置き、候補（そのとき手番を
-    # 待っていた席）を持つ。RFID でフォールドした席は候補から外れる。仮に置いた席の札がラウンドの途中で
-    # 離れたら（レイズのあとに手番は無い）解釈し直して記録を組み直す。ラウンドが終わって候補が 2 席以上
-    # 残れば要確認（音声と札では決められない: 全員がコールしてラウンドが終わった場合）。
-
-    def _open_run_hyp(self, index: int, actor: int, candidates: list[int],
-                      record: ActionRecord) -> None:
-        for other in self._run_hyps:
-            if other["street"] == self._game_state.street and not other["closed"]:
-                other["sealed"] = True       # あとのレイズに降りた席は、前のレイズの候補から外せない
-        self._run_hyps.append({
-            "index": index, "street": record.street, "actor": actor,
-            "candidates": list(candidates), "order": list(candidates), "record": record,
-            "sealed": False, "closed": False,
-        })
-
-    def _seal_run_hyps(self) -> None:
-        for hyp in self._run_hyps:
-            if hyp["street"] == self._game_state.street and not hyp["closed"]:
-                hyp["sealed"] = True
-
-    def _prune_run_candidates(self, seat: int) -> None:
-        """席がフォールドした（同じラウンドで、あとにレイズは無い）= その席はレイズしていない。"""
-        for hyp in self._run_hyps:
-            if hyp["closed"] or hyp["sealed"] or hyp["street"] != self._game_state.street:
-                continue
-            if seat in hyp["candidates"] and seat != hyp["actor"]:
-                hyp["candidates"].remove(seat)
-
-    def _contradicted_run(self, seat: int, at: Optional[float] = None) -> Optional[dict]:
-        """`seat` の札が離れたとき、その席を仮のベットにしていて手番が無い仮説（= 解釈し直す）。
-
-        `at`（離れた時刻）があれば、そのときほかの候補の席にまだ札があった場合だけ矛盾とみる。ほかの候補が
-        先に降りていれば、ベットに全員が降りて勝った人が札を前に出しただけ（オーナー: 勝った人は素早く投げる）。
-        """
-        gs = self._game_state
-        for hyp in reversed(self._run_hyps):
-            if hyp["closed"] or hyp["sealed"] or hyp["street"] != gs.street or hyp["actor"] != seat:
-                continue
-            to_act = gs.seats_to_act()
-            if not to_act or seat in to_act or seat not in gs.get_active_seats():
-                return None
-            others = [s for s in hyp["candidates"] if s != seat]
-            if not others:
-                return None
-            if at is not None and not any(self._had_cards_at(s, at) for s in others):
-                return None
-            return hyp
-        return None
-
-    def _check_run_contradictions(self, bound: float) -> bool:
-        """札が離れたまま（まだ反映していない）席が、仮にベットにした席なら解釈し直す（記録に残す）。"""
-        for seat, dep in sorted(self._departures.items(), key=lambda item: item[1]["t"]):
-            if dep.get("applied") or dep["t"] >= bound or self._contradicted_run(seat, at=dep["t"]) is None:
-                continue
-            self._emit_seat_signal(self._seat_signal("reinterpret", seat, self._clock(), observed_at=dep["t"]))
-            return True
-        return False
-
-    def _apply_reinterpret(self, ev: RFIDEvent) -> None:
-        """記録した「仮のベットの席の札が離れた」を反映する（replay でも同じ組み直しになる）。"""
-        hyp = self._contradicted_run(ev.seat) if ev.seat is not None else None
-        if hyp is None:
-            return                            # もう解釈し直したあと（組み直しの流し直し）
-        self._reinterpret_run(hyp, because_seat=ev.seat)
-
-    def _reinterpret_run(self, hyp: dict, because_seat: int) -> None:
-        """仮のレイズの席を次の候補に替えて、その入力から記録を組み直す。"""
-        remaining = [s for s in hyp["candidates"] if s != hyp["actor"]]
-        if not remaining:
-            hyp["closed"] = True
-            self._hand_needs_review = True
-            self._notice(f"席{hyp['actor']} の札が離れましたが、レイズした席を決められません（要確認）")
-            return
-        new_actor = remaining[0]
-        k = hyp["order"].index(new_actor)
-        index = hyp["index"]
-        checkpoint = self._checkpoint_at(index)
-        if checkpoint is None:
-            hyp["closed"] = True
-            self._hand_needs_review = True
-            return
-        self._run_override[index] = {"k": k, "because_seat": because_seat}
-        rest = self._hand_inputs[index:]
-        self._hand_inputs = self._hand_inputs[:index]
-        self._restore_checkpoint(checkpoint)
-        self._replay_inputs(rest)
-        self._notice(
-            f"席{because_seat} の札が離れました — 席{hyp['actor']} はレイズではなく無言のチェック / コールで、"
-            f"レイズは席{new_actor} とみて記録を組み直しました"
-        )
-        if self._on_action:
-            for record in self._current_actions[checkpoint["actions"]:]:
-                self._on_action(record)
-        if self._foldout_pending is None:
-            self._maybe_finish_hand()
-
-    def _settle_run_hyps(self) -> None:
-        """ラウンドが終わった仮説を閉じる。候補が 2 席以上残っていれば、そのレイズを要確認にする。"""
-        gs = self._game_state
-        for hyp in self._run_hyps:
-            if hyp["closed"]:
-                continue
-            over = (not gs.is_hand_active()) or gs.street != hyp["street"] or self._betting_over()
-            if not over:
-                continue
-            hyp["closed"] = True
-            if len(hyp["candidates"]) >= 2:
-                record = hyp["record"]
-                seats = "・".join(f"席{s}" for s in hyp["candidates"])
-                record.needs_review = True
-                record.reason = "+".join(r for r in (record.reason, f"silent_run_ambiguous({seats})") if r)
-                self._hand_needs_review = True
-                logger.info("レイズした席を決められません（無言の連続）: 候補 %s", seats)
 
     # ――― 聞き違いのオールイン（店舗 2026-09-27）―――
     #
@@ -1789,8 +1639,6 @@ class IntegrationThread(threading.Thread):
         index = checkpoint["index"]
         rest = self._hand_inputs[index + 1:]
         self._hand_inputs = self._hand_inputs[:index]
-        # 外したオールインより後の入力は番号が 1 つ前にずれる（組み直しで採る解釈も合わせる）
-        self._run_override = {(i - 1 if i > index else i): o for i, o in self._run_override.items() if i != index}
         self._restore_checkpoint(checkpoint)
         self._replay_inputs(rest)
         self._hand_needs_review = True
@@ -1904,29 +1752,9 @@ class IntegrationThread(threading.Thread):
             raw_text=raw or None,
         ))
         self._last_action_at = spoken
-        self._prune_run_candidates(seat)
         logger.info("「%s」の席%d をフォールドにしました（札は席に残ったまま, %s）", raw or "フォールド", seat, reason)
         self._resolve_departures()
         return True
-
-    def _had_cards_at(self, seat: int, t: float) -> bool:
-        """時刻 `t` にその席の札が席にあった（まだ降りていなかった）か。"""
-        spoken = self._spoken_folds.get(seat)
-        if spoken is not None and spoken <= t <= spoken + SPOKEN_FOLD_WINDOW_SEC:
-            return False                     # 「フォールド」と言われていた（札が残っていても降りている）
-        dep = self._departures.get(seat)
-        if dep is not None:
-            return dep["t"] > t
-        if self._seat_presence is None:
-            return True                      # 在否が無い（replay）: 記録した信号を信じる
-        try:
-            info = (self._seat_presence() or {}).get(seat) or {}
-        except Exception:  # noqa: BLE001
-            return True
-        if info.get("present"):
-            return True
-        since = info.get("absent_since")
-        return since is not None and since > t
 
     def _absent_seat_for_fold_word(self) -> tuple[Optional[int], float]:
         """「フォールド」と聞こえたときに、札が席に無い（まだ行動する）席を手番の順に探す。"""
@@ -1980,27 +1808,19 @@ class IntegrationThread(threading.Thread):
             self._foldout_pending = None
         index = next((i for i, (kind, item) in enumerate(self._hand_inputs)
                       if kind == "leave" and item.seat == seat), None)
-        # この席の離脱を根拠に「無言の連続」と解釈し直したベットがあれば、その解釈も捨てて元から流し直す
-        justified = [i for i, o in self._run_override.items() if o.get("because_seat") == seat]
-        for i in justified:
-            del self._run_override[i]
-        if dep is None or (index is None and not justified):
+        if dep is None or index is None:
             return
-        start = min(i for i in (index, *justified) if i is not None)
-        checkpoint = self._checkpoint_at(start)
-        rest = [(kind, item) for kind, item in self._hand_inputs[start:]
-                if not (kind in ("leave", "reinterpret") and item.seat == seat)]
-        self._hand_inputs = self._hand_inputs[:start]
+        checkpoint = self._checkpoint_at(index)
+        rest = [(kind, item) for kind, item in self._hand_inputs[index:]
+                if not (kind == "leave" and item.seat == seat)]
+        self._hand_inputs = self._hand_inputs[:index]
         if checkpoint is None:                       # 記録を変えなかった離脱（ショーダウン中など）
             self._hand_inputs.extend(rest)
             return
         self._restore_checkpoint(checkpoint)
         self._replay_inputs(rest)
         self._hand_needs_review = True
-        if index is None:
-            self._notice(f"{why}、席{seat} を無言のチェック / コールとみた解釈を取り消して記録を組み直しました")
-        else:
-            self._notice(f"{why}、席{seat} のフォールドを取り消して記録を組み直しました")
+        self._notice(f"{why}、席{seat} のフォールドを取り消して記録を組み直しました")
         if self._on_action:
             for record in self._current_actions[checkpoint["actions"]:]:
                 self._on_action(record)
@@ -3287,8 +3107,8 @@ class IntegrationThread(threading.Thread):
             return prior, False, [], ""
 
         if self._rfid_folds and sensed in self._game_state.seats_to_act():
-            # 席・ポジションが言われたレイズ: 間の人は無言の連続（チェック / コール）、札が離れた席は
-            # フォールド（フォールドは RFID で決める。合成 fold で埋めない）。
+            # 手番より先の席・ポジションが言われた: 間の人は札が離れていればフォールド（フォールドは RFID で
+            # 決める。合成 fold で埋めない）、残っていればチェック / コールを聞き取れなかったとみる（要確認）。
             self._walk_to_sensed(sensed, _spoken_at(event))
             return sensed, False, [], "actor_sensed_over_prior"
 
@@ -3306,7 +3126,8 @@ class IntegrationThread(threading.Thread):
         return sensed, True, folded, "actor_sensed_over_prior"
 
     def _walk_to_sensed(self, sensed: int, t: float) -> None:
-        """手番を `sensed` まで進める: 間の席は無言のチェック / コール、札が離れている席はフォールド。"""
+        """手番を `sensed` まで進める: 札が離れている席はフォールド、残っている席は聞き取れなかったチェック /
+        コール（要確認）。"""
         gs = self._game_state
         for _ in range(len(self._game_seats()) + 1):
             ctx = gs.legal_context()
@@ -3318,7 +3139,7 @@ class IntegrationThread(threading.Thread):
                 dep["applied"] = True
                 self._fold_departed(actor, ctx)
             else:
-                self._imply_action(actor, ctx, t, "silent_run(spoken)")
+                self._imply_action(actor, ctx, t, "implied_before_spoken_seat")
 
     def _append_synth_fold(self, seat: int, event: AudioEvent) -> None:
         """合成した silent-fold を fold アクションとして記録する（推定なので常に needs_review）。
@@ -3368,26 +3189,9 @@ class IntegrationThread(threading.Thread):
                 self._emit_unresolved(event, reason="betting_over")   # そのフォールドで残り 1 人になった
                 return
         index = self._current_input_index
-        spoken_seat = self._sensed_seat(event)
         heard_raise = self._rfid_folds and index is not None and event.action in ("bet", "raise", "allin")
-        run_possible = (
-            heard_raise and spoken_seat is None
-            and self._last_announced_action() in ("check", "call")
-        )
+        # オールインの聞き違いを外して組み直せるように、この入力の前の状態を残す（`_drop_unanswered_allin`）
         checkpoint = self._take_checkpoint(index) if heard_raise else None
-        override = self._run_override.get(index) if run_possible else None
-        if override:
-            # 組み直し: 手前の k 人は無言で同じアクションをしていたとみる
-            for _ in range(override["k"]):
-                ctx = gs.legal_context()
-                if ctx.actor_seat is None:
-                    break
-                self._imply_action(ctx.actor_seat, ctx, _spoken_at(event), "silent_run")
-            legal_ctx = gs.legal_context()
-        candidates = [
-            s for s in gs.seats_to_act()
-            if s not in self._departures or self._departures[s]["t"] >= _spoken_at(event)
-        ] if run_possible else []
         actor, conflict, synthesized_seats, conflict_reason = self._resolve_actor(event, legal_ctx)
 
         # 合成した silent-fold を先に記録（手番順: 中間席の fold → 当該 actor のアクション）。
@@ -3489,14 +3293,6 @@ class IntegrationThread(threading.Thread):
         self._last_action_at = _spoken_at(event)
         if corrected.action == "allin" and apply_ok:
             self._last_allin = (record, _spoken_at(event), event.utterance_start_ts)
-        if corrected.action in ("bet", "raise", "allin") and self._rfid_folds:
-            if run_possible and apply_ok and len(candidates) >= 2 and actor in candidates:
-                self._checkpoints.append(checkpoint)
-                self._open_run_hyp(index, actor, candidates, record)
-            else:
-                if run_possible and override:
-                    self._checkpoints.append(checkpoint)   # 解釈を取り消して流し直せるように残す
-                self._seal_run_hyps()
         if corrected.action == "allin" and apply_ok and checkpoint is not None:
             # 聞き違いなら外して組み直せるように残す（誰も応えないまま「チェック」等が続いたとき）
             checkpoint["allin"] = record
@@ -3567,8 +3363,6 @@ class IntegrationThread(threading.Thread):
         self._checkpoints = []
         self._held_betting_words = 0
         self._last_allin = None
-        self._run_hyps = []
-        self._run_override = {}
         self._spoken_folds = {}
         self._spoken_fold_raw = {}
         self._foldout_pending = None
@@ -3830,8 +3624,6 @@ class IntegrationThread(threading.Thread):
         self._departures = {}
         self._hand_inputs = []
         self._checkpoints = []
-        self._run_hyps = []
-        self._run_override = {}
         self._street_marks = {}
         self._streets_synced = set()
         if self._deal_at is None:
