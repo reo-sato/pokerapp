@@ -1,0 +1,195 @@
+{
+ "session_id": "027e4b15f59a4fd099654bfc3c4c626a",
+ "setup": {
+  "players": [
+   {
+    "seat": 4,
+    "name": "a",
+    "stack": 10000
+   },
+   {
+    "seat": 5,
+    "name": "B",
+    "stack": 10000
+   },
+   {
+    "seat": 6,
+    "name": "C",
+    "stack": 10000
+   }
+  ],
+  "sb": 100,
+  "bb": 200,
+  "button_prior": 5,
+  "first_hand_id": 1,
+  "hand_stacks": {
+   "1": {
+    "4": 10000,
+    "5": 10000,
+    "6": 10000
+   }
+  },
+  "auto_new_hand": true,
+  "auto_winner": true,
+  "rfid_folds": true
+ },
+ "code": {
+  "main.py": "c609080bfa7c6a98",
+  "integration/engine.py": "b5a27f28ecef8a55",
+  "core/poker_engine.py": "e6f07f1811a5c20c",
+  "audio/recognizer.py": "fc74214dfc014efd",
+  "audio/recorder.py": "fc5c20c6cb8af165",
+  "rfid/reader_thread.py": "fa5afebb74a9b76a"
+ },
+ "hands": [
+  {
+   "hand_id": 1,
+   "truth": {
+    "board": [
+     "Qd",
+     "2d",
+     "2h",
+     "Tc",
+     "4d"
+    ],
+    "actions": [
+     {
+      "seat": 6,
+      "action": "raise",
+      "amount": 600,
+      "street": "preflop"
+     },
+     {
+      "seat": 4,
+      "action": "call",
+      "amount": 500,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "call",
+      "amount": 400,
+      "street": "preflop"
+     },
+     {
+      "seat": 4,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 5,
+      "action": "bet",
+      "amount": 1000,
+      "street": "flop"
+     },
+     {
+      "seat": 6,
+      "action": "call",
+      "amount": 1000,
+      "street": "flop"
+     },
+     {
+      "seat": 4,
+      "action": "call",
+      "amount": 1000,
+      "street": "flop"
+     },
+     {
+      "seat": 4,
+      "action": "check",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 5,
+      "action": "bet",
+      "amount": 1400,
+      "street": "turn"
+     },
+     {
+      "seat": 6,
+      "action": "call",
+      "amount": 1400,
+      "street": "turn"
+     },
+     {
+      "seat": 4,
+      "action": "call",
+      "amount": 1400,
+      "street": "turn"
+     },
+     {
+      "seat": 4,
+      "action": "check",
+      "amount": 0,
+      "street": "river"
+     },
+     {
+      "seat": 5,
+      "action": "bet",
+      "amount": 6500,
+      "street": "river"
+     },
+     {
+      "seat": 6,
+      "action": "call",
+      "amount": 6500,
+      "street": "river"
+     },
+     {
+      "seat": 4,
+      "action": "call",
+      "amount": 6500,
+      "street": "river",
+      "unsure": true
+     }
+    ],
+    "players": [
+     {
+      "seat": 4,
+      "hole_cards": [
+       "5d",
+       "Th"
+      ],
+      "showed_down": false,
+      "name": "a"
+     },
+     {
+      "seat": 5,
+      "hole_cards": [
+       "7s",
+       "Kd"
+      ],
+      "showed_down": false,
+      "name": "B"
+     },
+     {
+      "seat": 6,
+      "hole_cards": [
+       "9c",
+       "Qs"
+      ],
+      "showed_down": false,
+      "name": "C"
+     }
+    ],
+    "winner_seat": 6,
+    "hand_id": 1,
+    "note": "オーナー確認 2026-09-29: フロップの「シング」= 1000 のベットと「コール」、リバーの「ご視聴ありがとうございました」= 6500 のベットと「コール」。席4 のコールは言われていない（同じコールの 2 回目以降は言わない）ので補った。リバーの席4 は自信なし"
+   },
+   "baseline": {
+    "action_correct": 9,
+    "action_total": 15,
+    "winner_match": true,
+    "board_match": true
+   },
+   "reparse_baseline": {
+    "action_correct": 12,
+    "action_total": 16,
+    "winner_match": true,
+    "board_match": true
+   }
+  }
+ ]
+}
