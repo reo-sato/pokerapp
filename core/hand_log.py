@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Mapping, Optional, Sequence
 
 
 @dataclass
@@ -141,3 +141,131 @@ class HandSummary:
         if self.announced_hand is not None:
             data["announced_hand"] = self.announced_hand
         return data
+
+
+# ――― 表示用: コールの額をトータルで見せる（オーナー, 2026-09-29）―――
+#
+# 記録の `amount` はコールなら追加額（ベット・レイズ・オールインはトータル）。画面はコールもトータル
+# （その人がそのストリートで出した合計）で見せる。記録は変えない（真のアクション・計測は追加額のまま）。
+
+_BET_LIKE = frozenset({"bet", "raise", "allin", "all_in"})
+_CALL_LIKE = frozenset({"call", "allin", "all_in"})
+
+
+def _field(a: Any, key: str) -> Any:
+    return a.get(key) if isinstance(a, Mapping) else getattr(a, key, None)
+
+
+def _blind_of(
+    seat: int, position: Any, blinds: Optional[Mapping[str, Any]], position_map: Optional[Mapping[Any, Any]],
+) -> Optional[int]:
+    """プリフロップにその席が払ったブラインド（ポジションから）。分からなければ None。"""
+    positions = {str(k): v for k, v in (position_map or {}).items()}
+    pos = position or positions.get(str(seat))
+    sb, bb = (blinds or {}).get("sb"), (blinds or {}).get("bb")
+    if not pos:
+        return None
+    if pos == "BTN":
+        if not positions:
+            return None                                # ヘッズアップ（ボタンが SB）か分からない
+        pos = "BTN" if "SB" in positions.values() else "SB"
+    if pos in ("SB", "BB"):
+        blind = sb if pos == "SB" else bb
+        return blind if isinstance(blind, int) else None
+    return 0
+
+
+def _after(action: Any, amount: int, prior: Optional[int]) -> Optional[int]:
+    """アクションのあとの合計（記録の額から）。コールは前に出していた額 + 追加額。"""
+    if action == "call":
+        return None if prior is None else prior + amount
+    if action in _BET_LIKE:
+        return amount
+    return prior                                       # チェック / フォールド
+
+
+def street_flow(
+    actions: Sequence[Any],
+    stack_start: Mapping[Any, Any],
+    *,
+    blinds: Optional[Mapping[str, Any]] = None,
+    position_map: Optional[Mapping[Any, Any]] = None,
+) -> list[tuple[Optional[int], Optional[int]]]:
+    """各アクションの (前に出していた額, あとの合計) — その人がそのストリートで出した額（表示用）。
+
+    合計 = ストリートの始めの持ち点 − アクションのあとの持ち点（`stack_after`）。プリフロップはブラインドも入る
+    （`stack_start` はブラインドを払う前, ADR-0047）。訂正した行（`_original`, ADR-0036）は持ち点が訂正前のままなので、
+    前に出していた額 + 訂正後の額から出す。分からない値は None。`actions` は dict でも ActionRecord でもよい（記録の順）。
+    """
+    last: dict[int, int] = {}
+    for seat, stack in (stack_start or {}).items():
+        try:
+            last[int(seat)] = int(stack)
+        except (TypeError, ValueError):
+            continue
+    begin: dict[int, int] = {}
+    put: dict[int, int] = {}                           # このストリートで出した額（記録どおり）
+    street: Any = object()
+    out: list[tuple[Optional[int], Optional[int]]] = []
+    for a in actions:
+        if _field(a, "street") != street:
+            street = _field(a, "street")
+            begin, put = dict(last), {}
+        seat, after, action = _field(a, "seat"), _field(a, "stack_after"), _field(a, "action")
+        if not isinstance(seat, int):
+            out.append((None, None))
+            continue
+        original = _field(a, "_original")
+        original = original if isinstance(original, Mapping) else {}
+        was_action = original.get("action", action)
+        was_amount = original.get("amount", _field(a, "amount")) or 0
+        recorded = begin[seat] - after if isinstance(after, int) and seat in begin else None
+        prior = put.get(seat)
+        if prior is None:
+            if street != "preflop":
+                prior = 0
+            elif recorded is not None and was_action == "call":
+                prior = recorded - was_amount
+            elif recorded is not None and was_action in ("check", "fold"):
+                prior = recorded
+            else:
+                prior = _blind_of(seat, _field(a, "position"), blinds, position_map)
+        if isinstance(after, int):
+            last[seat] = after
+        total = recorded if recorded is not None else _after(was_action, was_amount, prior)
+        if total is not None:
+            put[seat] = total
+        if "action" in original or "amount" in original:
+            total = _after(action, _field(a, "amount") or 0, prior)
+        out.append((prior, total))
+    return out
+
+
+def street_totals(actions: Sequence[Any], stack_start: Mapping[Any, Any]) -> list[Optional[int]]:
+    """各アクションのあと、その人がそのストリートで出した額の合計（`street_flow` の合計だけ）。"""
+    return [total for _, total in street_flow(actions, stack_start)]
+
+
+def hand_street_flow(hand: Mapping[str, Any]) -> list[tuple[Optional[int], Optional[int]]]:
+    """ハンドの記録（`HandSummary.to_dict()`, 訂正を重ねたものも可）の `street_flow`。"""
+    actions = [a for a in hand.get("actions") or [] if isinstance(a, Mapping)]
+    return street_flow(
+        actions, hand_stack_start(hand), blinds=hand.get("blinds"), position_map=hand.get("position_map"),
+    )
+
+
+def shown_amount(action: str, amount: int, total: Optional[int]) -> int:
+    """画面に出す額: コール（とオールイン）はトータル（そのストリートで出した合計）、ほかは記録の額（ベット・レイズは
+    もともとトータル。足りないオールインのコールは記録が追加額）。トータルが分からない・合わないときは記録の額。"""
+    if action in _CALL_LIKE and total is not None and total >= (amount or 0):
+        return total
+    return amount or 0
+
+
+def hand_stack_start(hand: Mapping[str, Any]) -> dict[int, int]:
+    """ハンドの記録（`HandSummary.to_dict()`）の `players[].stack_start`。"""
+    out: dict[int, int] = {}
+    for p in hand.get("players") or []:
+        if isinstance(p, Mapping) and isinstance(p.get("seat"), int) and isinstance(p.get("stack_start"), int):
+            out[p["seat"]] = p["stack_start"]
+    return out

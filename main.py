@@ -478,9 +478,14 @@ def run_cli() -> None:
         }.get(getattr(record, "actor_source", None), "")
         if getattr(record, "actor_source", None) == "rfid_departure" and record.action == "check":
             origin = "  ← 札を前に出した（ショーダウン）"
+        # コールの額は追加額ではなくトータル（そのストリートで出した合計）で見せる（オーナー, 2026-09-29。
+        # 記録の amount は追加額のまま）
+        from core.hand_log import shown_amount
+
+        amount = shown_amount(record.action, record.amount, integration_thread.street_total(record))
         print(
             f"  [{record.street}] 席{record.seat}({record.player_name}) "
-            f"{record.action} {record.amount or ''}"
+            f"{record.action} {amount or ''}"
             f"  pot={record.pot_after}"
             + (" [要確認]" if record.needs_review else "")
             + origin

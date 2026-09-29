@@ -18,6 +18,7 @@ import {
   formatSigned,
   heardDetails,
   parseCard,
+  shownAmount,
   SUIT_COLORS,
   SUIT_SYMBOLS,
   type ReplayAction,
@@ -117,13 +118,14 @@ function ActionRow(props: {
 }): React.JSX.Element {
   const a = props.action;
   const name = a.player_name || props.resolveName(a.seat);
+  const shown = shownAmount(a); // コールはトータル (そのストリートで出した合計)
   const row = (
     <View style={s.actionRow}>
       <Text style={s.actionSeat}>席{a.seat}</Text>
       <Text style={s.actionText} numberOfLines={1}>
         <Text style={{ color: c.text }}>{name} </Text>
         <Text style={{ color: c.accent, fontWeight: "700" }}>{actionLabel(a.action)}</Text>
-        {a.amount ? <Text style={{ color: c.text }}> {formatChips(a.amount)}</Text> : null}
+        {shown ? <Text style={{ color: c.text }}> {formatChips(shown)}</Text> : null}
       </Text>
       {a.needs_review ? <Text style={[s.badge, { color: c.warn }]}>要確認</Text> : null}
       {a.corrected ? <Text style={[s.badge, { color: c.accent }]}>訂正済</Text> : null}

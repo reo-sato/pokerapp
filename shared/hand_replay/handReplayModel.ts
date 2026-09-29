@@ -25,6 +25,10 @@ export interface ReplayAction {
   raw_text?: string; // そのアクションになった発話 (Whisper の書き起こし / CLI で打った読み上げ文)
   reason?: string; // 補正・合成の理由コード ("+" 区切り, ADR-0047 G2)
   corrected_from?: string | null; // 補正前に聞き取った action
+  position?: string; // ポジション名 (BTN/SB/BB/…, ISSUE-0032)
+  _original?: { action?: string; amount?: number }; // 訂正前の値 (ADR-0036)
+  /** そのストリートでその人が出した合計 (表示用。buildReplayModel が stack_after から付ける)。 */
+  total?: number;
 }
 
 export interface ReplayPlayer {
@@ -53,6 +57,7 @@ export interface ReplayHand {
   winner_seat?: number | null;
   actions: ReplayAction[];
   review_required?: boolean;
+  position_map?: Record<string, string>; // 席 → ポジション名 (pokerkit backend)
 }
 
 export interface StreetSection {
@@ -142,7 +147,10 @@ export const SUIT_COLORS: Record<string, string> = {
  */
 export function buildReplayModel(hand: ReplayHand): ReplayModel {
   const board = hand.board ?? [];
-  const actions = hand.actions ?? [];
+  const totals = streetTotals(hand);
+  const actions = (hand.actions ?? []).map((a, i) =>
+    totals[i] == null ? a : { ...a, total: totals[i] },
+  );
   const byStreet: Record<string, ReplayAction[]> = {};
   for (const a of actions) {
     (byStreet[a.street] ??= []).push(a);
@@ -179,6 +187,112 @@ export function buildReplayModel(hand: ReplayHand): ReplayModel {
     potTotal: hand.pot_total ?? null,
     pots: hand.pots ?? [],
   };
+}
+
+/** ベット・レイズ・オールインの額はトータル (記録どおり)。コールは追加額。 */
+const BET_LIKE = new Set(["bet", "raise", "allin", "all_in"]);
+const CALL_LIKE = new Set(["call", "allin", "all_in"]);
+
+/** その席の、そのストリートの前に出していた額と、アクションのあとの合計 (表示用)。 */
+export interface StreetFlow {
+  prior?: number;
+  total?: number;
+}
+
+/** プリフロップにその席が払ったブラインド (ポジションから)。分からなければ undefined。 */
+function blindOf(hand: ReplayHand, a: ReplayAction): number | undefined {
+  const positions = hand.position_map ?? {};
+  const names = Object.values(positions);
+  let pos = a.position || positions[String(a.seat)];
+  if (!pos) return undefined;
+  if (pos === "BTN") {
+    if (names.length === 0) return undefined; // ヘッズアップ (ボタンが SB) か分からない
+    pos = names.includes("SB") ? "BTN" : "SB";
+  }
+  if (pos === "SB" || pos === "BB") {
+    const blind = pos === "SB" ? hand.blinds?.sb : hand.blinds?.bb;
+    return typeof blind === "number" ? blind : undefined;
+  }
+  return 0;
+}
+
+/** アクションのあとの合計 (記録の額から)。コールは前に出していた額 + 追加額。 */
+function afterOf(action: string, amount: number, prior: number | undefined): number | undefined {
+  if (action === "call") return prior == null ? undefined : prior + amount;
+  if (BET_LIKE.has(action)) return amount;
+  return prior; // チェック / フォールド
+}
+
+/**
+ * 各アクションの「前に出していた額」と「あとの合計」— その人がそのストリートで出した額 (表示用。
+ * オーナー 2026-09-29: コールは追加額ではなくトータルで見せる。記録の amount はコールなら追加額のまま)。
+ *
+ * 合計 = ストリートの始めの持ち点 − stack_after。プリフロップはブラインドも入る (stack_start は払う前)。
+ * 訂正した行 (_original, ADR-0036) は持ち点が訂正前のままなので、前に出していた額 + 訂正後の額から出す。
+ * 分からない値は undefined。core/hand_log.py の street_flow と同じ計算。
+ */
+export function streetFlow(hand: ReplayHand): StreetFlow[] {
+  const last = new Map<number, number>();
+  for (const p of hand.players ?? []) {
+    if (typeof p.stack_start === "number") last.set(p.seat, p.stack_start);
+  }
+  let begin = new Map<number, number>();
+  let put = new Map<number, number>(); // このストリートで出した額 (記録どおり)
+  let street: string | undefined;
+  let first = true;
+  return (hand.actions ?? []).map((a) => {
+    if (first || a.street !== street) {
+      first = false;
+      street = a.street;
+      begin = new Map(last);
+      put = new Map();
+    }
+    const original = a._original ?? {};
+    const wasAction = original.action ?? a.action;
+    const wasAmount = original.amount ?? a.amount ?? 0;
+    const start = begin.get(a.seat);
+    const recorded =
+      typeof a.stack_after === "number" && start != null ? start - a.stack_after : undefined;
+    let prior = put.get(a.seat);
+    if (prior == null) {
+      if (a.street !== "preflop") prior = 0;
+      else if (recorded != null && wasAction === "call") prior = recorded - wasAmount;
+      else if (recorded != null && (wasAction === "check" || wasAction === "fold")) prior = recorded;
+      else prior = blindOf(hand, a);
+    }
+    if (typeof a.stack_after === "number") last.set(a.seat, a.stack_after);
+    let total = recorded ?? afterOf(wasAction, wasAmount, prior);
+    if (total != null) put.set(a.seat, total);
+    if ("action" in original || "amount" in original) total = afterOf(a.action, a.amount ?? 0, prior);
+    return { prior, total };
+  });
+}
+
+/** 各アクションのあと、その人がそのストリートで出した額の合計 (streetFlow の合計だけ)。 */
+export function streetTotals(hand: ReplayHand): (number | undefined)[] {
+  return streetFlow(hand).map((f) => f.total);
+}
+
+/**
+ * 画面に出す額: コール (とオールイン) はトータル (そのストリートで出した合計)、ほかは記録の額 (ベット・レイズは
+ * もともとトータル。足りないオールインのコールは記録が追加額)。トータルが分からない・合わないときは記録の額。
+ */
+export function shownAmount(a: ReplayAction): number | undefined {
+  if (CALL_LIKE.has(a.action) && a.total != null && a.total >= (a.amount ?? 0)) return a.total;
+  return a.amount;
+}
+
+/**
+ * 訂正画面の金額欄 → 記録する額。金額欄はコールもトータルで入れるので、コールは前に出していた額を引いて
+ * 追加額に戻す (記録のコールは追加額)。前に出していた額より少なければ undefined (入力の誤り)。
+ */
+export function recordedAmount(
+  action: string,
+  typed: number,
+  prior: number | undefined,
+): number | undefined {
+  if (action !== "call" || prior == null) return typed;
+  return typed >= prior ? typed - prior : undefined;
 }
 
 /** 補正・合成の理由コード → 短い日本語 (音声テスト用の表示, ADR-0060)。未知のコードはそのまま。 */

@@ -17,6 +17,10 @@ import {
   heardDetails,
   parseCard,
   reasonLabels,
+  recordedAmount,
+  shownAmount,
+  streetFlow,
+  streetTotals,
   type ReplayHand,
 } from "./handReplayModel";
 
@@ -153,6 +157,113 @@ test("reasonLabels: known codes, patterns, and unknown codes", () => {
     "数字だけ（ベットかレイズかは場面から）",
     "Whisper が読めず、第 2 の耳で読んだ",
   ]);
+});
+
+test("streetTotals / shownAmount: a call is shown as what the player put in on that street", () => {
+  const hand: ReplayHand = {
+    hand_id: 8,
+    blinds: { sb: 100, bb: 200 },
+    players: [
+      { seat: 4, name: "A", stack_start: 10500 },
+      { seat: 5, name: "B", stack_start: 13800 },
+      { seat: 6, name: "C", stack_start: 5700 },
+    ],
+    actions: [
+      { street: "preflop", seat: 4, action: "raise", amount: 900, stack_after: 9600 },
+      { street: "preflop", seat: 5, action: "call", amount: 800, stack_after: 12900 }, // SB: 100 + 800
+      { street: "preflop", seat: 6, action: "allin", amount: 5700, stack_after: 0 },
+      { street: "preflop", seat: 4, action: "call", amount: 4800, stack_after: 4800 },
+      { street: "preflop", seat: 5, action: "allin", amount: 13800, stack_after: 0 },
+      { street: "preflop", seat: 4, action: "call", amount: 4800, stack_after: 0 }, // 足りないオールインのコール
+      { street: "flop", seat: 4, action: "check", amount: 0 }, // stack_after が無い行 (記録の額から: チェック = 0)
+    ],
+  };
+  assert.deepEqual(streetTotals(hand), [900, 900, 5700, 5700, 13800, 10500, 0]);
+  const shown = buildReplayModel(hand).streets[0].actions.map(shownAmount);
+  assert.deepEqual(shown, [900, 900, 5700, 5700, 13800, 10500]);
+  // 持ち点が分からなければ記録の額
+  assert.equal(shownAmount({ street: "preflop", seat: 1, action: "call", amount: 400 }), 400);
+  // 合わない (訂正で額だけ変わった) ときも記録の額
+  assert.equal(shownAmount({ street: "preflop", seat: 1, action: "call", amount: 500, total: 300 }), 500);
+});
+
+test("streetFlow: corrected rows use what the player had in before + the corrected amount", () => {
+  const base: ReplayHand = {
+    hand_id: 8,
+    blinds: { sb: 100, bb: 200 },
+    position_map: { "4": "BTN", "5": "SB", "6": "BB" },
+    players: [
+      { seat: 4, name: "A", stack_start: 10500 },
+      { seat: 5, name: "B", stack_start: 13800 },
+      { seat: 6, name: "C", stack_start: 5700 },
+    ],
+    actions: [
+      { street: "preflop", seat: 4, action: "raise", amount: 900, stack_after: 9600 },
+      { street: "preflop", seat: 5, action: "call", amount: 800, stack_after: 12900 },
+      { street: "preflop", seat: 6, action: "fold", amount: 0, stack_after: 5500 },
+    ],
+  };
+  assert.deepEqual(streetFlow(base), [
+    { prior: 0, total: 900 },
+    { prior: 100, total: 900 },
+    { prior: 200, total: 200 },
+  ]);
+  // SB のコール (追加 800) をレイズ 2700 に訂正: 合計はレイズの額
+  const raised = structuredClone(base);
+  Object.assign(raised.actions[1], { action: "raise", amount: 2700, _original: { action: "call", amount: 800 } });
+  assert.equal(streetFlow(raised)[1].total, 2700);
+  // BTN のレイズ 900 をコール (追加 200) に訂正: 前に出していた額は 0 (ブラインドではない)
+  const called = structuredClone(base);
+  Object.assign(called.actions[0], { action: "call", amount: 200, _original: { action: "raise", amount: 900 } });
+  assert.deepEqual(streetFlow(called)[0], { prior: 0, total: 200 });
+  // SB のコールの額だけ訂正 (800 → 700): SB の 100 + 700
+  const amended = structuredClone(base);
+  Object.assign(amended.actions[1], { amount: 700, _original: { amount: 800 } });
+  assert.deepEqual(streetFlow(amended)[1], { prior: 100, total: 800 });
+  // SB のレイズを訂正でコールに: ブラインドはポジションから (SB 100)
+  const sbRaise = structuredClone(base);
+  sbRaise.actions[1] = {
+    street: "preflop", seat: 5, action: "call", amount: 800, stack_after: 11100,
+    _original: { action: "raise", amount: 2700 },
+  };
+  assert.deepEqual(streetFlow(sbRaise)[1], { prior: 100, total: 900 });
+  // ヘッズアップはボタンが SB
+  const headsUp: ReplayHand = {
+    hand_id: 9,
+    blinds: { sb: 100, bb: 200 },
+    position_map: { "1": "BTN", "2": "BB" },
+    players: [
+      { seat: 1, name: "A", stack_start: 5000 },
+      { seat: 2, name: "B", stack_start: 5000 },
+    ],
+    actions: [{ street: "preflop", seat: 1, action: "call", amount: 100, _original: { action: "raise", amount: 600 } }],
+  };
+  assert.deepEqual(streetFlow(headsUp)[0], { prior: 100, total: 200 });
+});
+
+test("shownAmount: a short all-in call recorded as the added chips is shown as the total", () => {
+  const hand: ReplayHand = {
+    hand_id: 3,
+    players: [
+      { seat: 1, name: "A", stack_start: 10000 },
+      { seat: 2, name: "B", stack_start: 3000 },
+    ],
+    actions: [
+      { street: "flop", seat: 1, action: "bet", amount: 1000, stack_after: 9000 },
+      { street: "flop", seat: 2, action: "call", amount: 1000, stack_after: 2000 },
+      { street: "turn", seat: 1, action: "bet", amount: 5000, stack_after: 4000 },
+      { street: "turn", seat: 2, action: "allin", amount: 2000, stack_after: 0 },
+    ],
+  };
+  const shown = buildReplayModel(hand).streets.flatMap((st) => st.actions.map(shownAmount));
+  assert.deepEqual(shown, [1000, 1000, 5000, 2000]);
+});
+
+test("recordedAmount: a call typed as the street total is stored as the added chips", () => {
+  assert.equal(recordedAmount("call", 900, 100), 800); // SB が 900 にコール → 追加 800
+  assert.equal(recordedAmount("call", 50, 100), undefined); // 前に出していた額より少ない
+  assert.equal(recordedAmount("call", 400, undefined), 400); // 分からなければそのまま
+  assert.equal(recordedAmount("raise", 1800, 200), 1800); // レイズはトータルのまま
 });
 
 test("heardDetails: heard text, correction, and synthesized fold", () => {

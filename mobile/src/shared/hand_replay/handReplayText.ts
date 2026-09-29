@@ -12,6 +12,7 @@ import {
   buildReplayModel,
   formatChips,
   formatSigned,
+  shownAmount,
   type ReplayHand,
 } from "./handReplayModel";
 
@@ -54,7 +55,8 @@ export function buildHandText(hand: ReplayHand): string {
       const name = a.player_name || nameBySeat.get(a.seat);
       if (name) line += ` ${name}`;
       line += ` ${actionLabel(a.action)}`;
-      if (a.amount) line += ` ${formatChips(a.amount)}`;
+      const shown = shownAmount(a); // コールはトータル (そのストリートで出した合計)
+      if (shown) line += ` ${formatChips(shown)}`;
       if (a.needs_review) line += "（要確認）";
       lines.push(line);
     }

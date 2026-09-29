@@ -134,8 +134,24 @@ class TestRead:
         legal = d["legal"]
         assert legal["error"] is None
         assert [a["street"] for a in legal["actions"]] == [s for s, _, _, _ in ACTIONS]
-        assert legal["actions"][1] == {"seat": 4, "action": "call", "amount": 100, "street": "preflop"}
+        # コールの額は追加額（記録と同じ）、画面にはトータル（SB が BB の 200 にそろえた）
+        assert legal["actions"][1] == {"seat": 4, "action": "call", "amount": 100, "total": 200, "street": "preflop"}
         assert legal["next"]["hand_over"] is True and legal["next"]["foldout_winner"] == 5
+
+    def test_calls_are_shown_as_the_street_total(self, base):
+        """コールの額は画面ではトータル（そのストリートで出した合計, オーナー 2026-09-29）。記録・真のアクションの
+        amount は追加額のまま。"""
+        status, d = _req(base, "GET", f"/api/sessions/{SID}/hands/1")
+        cap = d["captured"]["actions"]
+        assert [(a["action"], a["amount"], a.get("total")) for a in cap[:2]] == [("call", 200, 200), ("call", 100, 200)]
+        r = replay_legal(_hand(1), [{"seat": 6, "action": "raise", "amount": 600}])
+        assert (r["next"]["actor_seat"], r["next"]["amount_to_call"], r["next"]["call_total"]) == (4, 500, 600)
+        short = _hand(1)
+        short["players"][0]["stack_start"] = 3000           # 席4 は 3000 しかない
+        r = replay_legal(short, [{"seat": 6, "action": "raise", "amount": 5000}, {"seat": 4, "action": "allin"}])
+        assert r["actions"][1] == {"seat": 4, "action": "allin", "amount": 2900, "total": 3000, "street": "preflop"}
+        status, page = _req(base, "GET", "/")
+        assert "n.call_total" in page and "l.total" in page
 
     def test_unknown_session_and_hand_are_404(self, base):
         assert _req(base, "GET", "/api/sessions/nope/hands")[0] == 404

@@ -58,3 +58,19 @@ test("buildHandText handles missing winner and empty streets", () => {
   assert.ok(text.includes("（アクションなし）"));
   assert.ok(text.endsWith("結果: ポット合計 1,600"));
 });
+
+test("buildHandText shows a call as the street total (not the added chips)", () => {
+  // BB の席2 が 600 のレイズにコール: 追加 400、そのストリートで出した合計 600 (オーナー 2026-09-29)
+  const text = buildHandText({
+    ...HAND,
+    actions: [
+      { street: "preflop", seat: 1, action: "raise", amount: 600, pot_after: 800, stack_after: 9400 },
+      { street: "preflop", seat: 2, action: "call", amount: 400, pot_after: 1200, stack_after: 9400 },
+      { street: "flop", seat: 2, action: "bet", amount: 300, pot_after: 1500, stack_after: 9100 },
+      { street: "flop", seat: 1, action: "call", amount: 300, pot_after: 1800, stack_after: 9100 },
+    ],
+  });
+  assert.ok(text.includes("席2 Bob コール 600"));
+  assert.ok(text.includes("席1 Alice コール 300"));
+});
+

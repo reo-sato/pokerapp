@@ -41,7 +41,7 @@ from audio.recognizer import _extract_all_seat_nos, _extract_seat_no, apply_corr
 from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
-from core.hand_log import ActionRecord, HandSummary
+from core.hand_log import ActionRecord, HandSummary, street_totals
 from core.table_state import build_table_state
 from output.event_recorder import EventRecorder
 from output.json_writer import JsonWriter
@@ -1488,6 +1488,14 @@ class IntegrationThread(threading.Thread):
             )
         elif len(remaining) >= 2 and not self._rebuilding:
             self._maybe_finish_hand()
+
+    def street_total(self, record: ActionRecord) -> Optional[int]:
+        """表示用: そのアクションのあと、その人がこのストリートで出した額の合計（CLI がコールをトータルで見せる,
+        オーナー 2026-09-29）。いまのハンドの記録に無い行（未適用など）は None。integration スレッドから呼ぶ。"""
+        index = next((i for i, r in enumerate(self._current_actions) if r is record), None)
+        if index is None:
+            return None
+        return street_totals(self._current_actions[:index + 1], self._stack_start or {})[index]
 
     def _append_rfid_record(self, record: ActionRecord) -> None:
         self._current_actions.append(record)

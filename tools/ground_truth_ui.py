@@ -49,6 +49,7 @@ from core.ground_truth import (  # noqa: E402
 from core.ground_truth_repository import GroundTruthRepository  # noqa: E402
 from core.hand_correction import apply_hand_corrections  # noqa: E402
 from core.hand_correction_repository import HandCorrectionRepository  # noqa: E402
+from core.hand_log import hand_street_flow  # noqa: E402
 from core.poker_engine import PokerkitGameState  # noqa: E402
 from tools.measure_capture_accuracy import HandAccuracy, measure_hand  # noqa: E402
 
@@ -332,6 +333,7 @@ def hand_detail(
     captured = _get_hand(log_dir, session_id, hand_id, corr_repo)
     if captured is None:
         return None
+    _add_street_totals(captured)
     gt = gt_repo.get(session_id, hand_id)
     blind = gt is None and is_blind(session_id, hand_id, blind_every)
     initial = _gt_actions(gt.hand) if gt is not None else ([] if blind else _gt_actions(captured))
@@ -344,6 +346,15 @@ def hand_detail(
         "blind": blind,
         "timeline": hand_timeline(log_dir, session_id, captured, _next_started_at(log_dir, session_id, hand_id)),
     }
+
+
+def _add_street_totals(captured: dict) -> None:
+    """記録の各アクションに `total`（そのストリートでその人が出した合計）を付ける。画面はコールをこの額で見せる
+    （オーナー, 2026-09-29: コールは追加額ではなくトータル。記録・真のアクションの `amount` は追加額のまま）。"""
+    actions = [a for a in captured.get("actions") or [] if isinstance(a, dict)]
+    for a, (_, total) in zip(actions, hand_street_flow(captured)):
+        if total is not None:
+            a["total"] = total
 
 
 # ───────────────────────── pokerkit で手番・ストリート・額を補う ─────────────────────────
@@ -378,7 +389,9 @@ def _showdown_muck_error(active: list[int], seat: int, act: str) -> Optional[str
 def replay_legal(captured: dict, actions: list[dict]) -> dict:
     """GT のアクション列を pokerkit で流し、各行のストリートと額（コールは自動）、次の手番を返す。
 
-    返り値: `{"actions": [{seat, action, amount, street}], "next": {...} | None, "error": {index, message} | None}`。
+    返り値: `{"actions": [{seat, action, amount, total, street}], "next": {...} | None, "error": {index, message} | None}`。
+    `amount` はコールなら追加額（記録と同じ）、`total` はそのストリートでその人が出した合計（画面の表示用。コールは
+    トータルで見せる）。
     `error` はその行から先を反映できなかった理由（手番違い・額の範囲外など）。`next` は最後に反映できた
     ところの手番（`hand_over` ならベッティングは終わり、`foldout_winner` はほかが全員降りた勝者）。
     ベッティングが終わったあとのフォールドは、ショーダウンで手札を見せずに降りた（マック）として
@@ -440,6 +453,7 @@ def replay_legal(captured: dict, actions: list[dict]) -> dict:
             break
         street = gs.street
         amount = 0
+        total = 0
         try:
             if act == "fold":
                 if "fold" in ctx.legal_actions:
@@ -449,9 +463,11 @@ def replay_legal(captured: dict, actions: list[dict]) -> dict:
             elif act in ("check", "call"):
                 act = "call" if ctx.amount_to_call > 0 else "check"
                 amount = ctx.amount_to_call
+                total = ctx.committed + ctx.amount_to_call if act == "call" else 0
                 gs.apply_action(seat, act)
             elif act == "allin":
                 amount = ctx.max_raise if ctx.max_raise else ctx.amount_to_call
+                total = ctx.max_raise if ctx.max_raise else ctx.committed + ctx.amount_to_call
                 gs.apply_action(seat, "allin")
             else:
                 try:
@@ -470,10 +486,11 @@ def replay_legal(captured: dict, actions: list[dict]) -> dict:
                     gs.apply_action(seat, act, amount)
                 except ValueError:
                     raise ValueError(f"額 {amount} は使えません（最小 {ctx.min_raise} / 最大 {ctx.max_raise}）") from None
+                total = amount
         except ValueError as e:
             error = {"index": i, "message": str(e)}
             break
-        out.append({"seat": seat, "action": act, "amount": amount, "street": street})
+        out.append({"seat": seat, "action": act, "amount": amount, "total": total, "street": street})
 
     ctx = gs.legal_context()
     active = showdown_seats()
@@ -482,6 +499,7 @@ def replay_legal(captured: dict, actions: list[dict]) -> dict:
         "actor_seat": ctx.actor_seat,
         "legal_actions": sorted(ctx.legal_actions),
         "amount_to_call": ctx.amount_to_call,
+        "call_total": ctx.committed + ctx.amount_to_call if ctx.amount_to_call else 0,
         "min_raise": ctx.min_raise,
         "max_raise": ctx.max_raise,
         "pot": gs.pot,
@@ -1189,8 +1207,8 @@ function renderEdit(){
       : `<td class="street"><select onchange="setRowStreet(${i}, this.value)">${["preflop","flop","turn","river"].map(s => `<option value="${s}" ${a.street===s?"selected":""}>${STREET_JA[s]}</option>`).join("")}</select></td>`;
     const needAmt = ["bet","raise","allin"].includes(a.action);
     const amtCell = needAmt
-      ? `<input type="number" inputmode="numeric" value="${a.amount || ""}" onchange="setRowAmount(${i}, this.value)" ${a.action==="allin"?"disabled":""}>`
-      : (a.action === "call" ? `<span class="muted">${a.amount || ""}</span>` : "");
+      ? `<input type="number" inputmode="numeric" value="${(a.action === "allin" && l && l.total) || a.amount || ""}" onchange="setRowAmount(${i}, this.value)" ${a.action==="allin"?"disabled":""}>`
+      : (a.action === "call" ? `<span class="muted">${(l && l.total) || a.amount || ""}</span>` : "");
     return `<tr class="${isErr?"err":""}">${streetCell}
       <td><select onchange="setRowSeat(${i}, this.value)">${seats.map(s => `<option value="${s}" ${s===a.seat?"selected":""}>席 ${s}</option>`).join("")}</select></td>
       <td><select onchange="setRowAction(${i}, this.value)">${GT_ACTIONS.map(x => `<option value="${x}" ${x===a.action?"selected":""}>${ACTION_JA[x]}</option>`).join("")}</select></td>
@@ -1215,7 +1233,7 @@ function renderEdit(){
     quick = `<div class="quick"><div class="who">ベッティング終了 — ${who}</div>${mucks}<div class="small muted">ポット ${n.pot}。手札を見せずに降りた人がいれば、その席の「見せずに降りた」（ショーダウンのフォールド）。行が足りなければ「＋ 行を追加」、多ければ ✕ で直せます。</div></div>`;
   } else {
     const legal = n.legal_actions || [];
-    const cc = n.amount_to_call > 0 ? `コール ${n.amount_to_call}` : "チェック";
+    const cc = n.amount_to_call > 0 ? `コール ${n.call_total || n.amount_to_call}` : "チェック";
     const br = legal.includes("raise") ? "レイズ" : "ベット";
     quick = `<div class="quick"><div class="who">次: 席 ${n.actor_seat} の番 <span class="muted small">${STREET_JA[n.street]||n.street} ／ ポット ${n.pot}</span></div>
       <div class="btns">
@@ -1234,7 +1252,7 @@ function renderEdit(){
   const capRows = (cap.actions || []).map((a, i) => `<tr class="${a.needs_review?"warn":""}">
       <td>${a.needs_review ? `<button class="chk ${S.confirmed.has(i)?"on":""}" onclick="toggleConfirm(${i})" title="確かめた">✓</button>` : ""}</td>
       <td class="street">${STREET_JA[a.street]||a.street||""}</td><td>席 ${a.seat}</td>
-      <td>${ACTION_JA[a.action]||a.action}</td><td>${a.amount||""}</td>
+      <td>${ACTION_JA[a.action]||a.action}</td><td>${(["call","allin"].includes(a.action) && a.total) || a.amount || ""}</td>
       <td class="muted small raw">${esc(a.raw_text||"")}${a.needs_review?` <span class="tag t-warn">要確認${a.reason?": "+esc(a.reason):""}</span>`:""}</td></tr>`).join("");
   const capPlayers = (cap.players || []).map(p => `席 ${p.seat}: ${(p.hole_cards||[]).map(c => cardHtml(c, "sm")).join("") || "<span class='muted'>—</span>"}`).join(" ｜ ");
   const gtMeta = d.ground_truth ? `<span class="tag ${d.ground_truth.source==="captured-passthrough"?"t-ok":"t-edit"}">${d.ground_truth.source==="captured-passthrough"?"記録どおり":"修正済"} ${esc(d.ground_truth.annotated_at||"")} ${esc(d.ground_truth.annotator||"")}</span>` : '<span class="tag t-none">未入力</span>';
