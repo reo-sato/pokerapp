@@ -51,6 +51,7 @@ from audio.second_ear import agreed_candidate, apply_ear  # noqa: E402
 from core.events import AudioEvent, RFIDEvent  # noqa: E402
 from core.game_state import PlayerState  # noqa: E402
 from integration.replay import load_events, replay_events  # noqa: E402
+from integration.world_replay import PresenceTimeline  # noqa: E402
 from tools.measure_capture_accuracy import (  # noqa: E402
     _align_actions,
     hand_fully_correct,
@@ -982,6 +983,12 @@ def export_fixture(files: SessionFiles, report: SessionReport, out_root: Path) -
         rows = [{k: r[k] for k in _FIXTURE_TRANSCRIPT_KEYS if k in r} for r in transcripts]
         (folder / "transcripts.jsonl").write_text(
             "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    table_state = _read_jsonl(files.path(".table_state.jsonl"))
+    if table_state:
+        # 席の札の在否の変化だけ（推定器の再生の入力, `integration/world_replay.py`）
+        presence = PresenceTimeline.from_table_state(table_state).to_rows()
+        (folder / "presence.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in presence), encoding="utf-8")
     expected = {
         "session_id": files.session_id, "setup": {**report.setup, **report.flags},
         "code": code_fingerprint(ROOT), "hands": hands,

@@ -1,0 +1,7 @@
+{"t": 1790671946.296, "seat": 4, "present": false, "absent_since": null, "mucked_at": null}
+{"t": 1790671946.296, "seat": 5, "present": false, "absent_since": null, "mucked_at": null}
+{"t": 1790671958.94, "seat": 4, "present": true, "absent_since": null, "mucked_at": null}
+{"t": 1790671961.611, "seat": 5, "present": true, "absent_since": null, "mucked_at": null}
+{"t": 1790672055.88, "seat": 5, "present": false, "absent_since": 1790672055.88, "mucked_at": null}
+{"t": 1790672055.9, "seat": 5, "present": false, "absent_since": 1790672055.9, "mucked_at": 1790672059.876}
+{"t": 1790672057.974, "seat": 4, "present": false, "absent_since": 1790672057.974, "mucked_at": null}
