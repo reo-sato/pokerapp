@@ -116,6 +116,10 @@ FOLD_ABSENT_SEC = 3.0
 # 最後の 1 人を残すフォールド（札の離脱）を確定するまでの待ち。札が戻る・「ショーダウン」なら取り消す
 # （ショーダウンでは札を前に出すのでリーダーから離れる）。音声の「フォールド」・中央の通過・次の配布でも確定。
 FOLDOUT_CONFIRM_SEC = 10.0
+# ショーダウンで見せずにマックする人は素早くマックし、ディーラーが「フォールド」と言う（オーナー, 2026-09-30）。
+# ベッティングが終わって（リバーの札があとならその札から）この秒数マックが無ければ、残った全員が見せたとして
+# 手札で勝者を決める（次の配布まで待たない）。
+SHOWDOWN_MUCK_SEC = 8.0
 # 札の離脱・中央の通過で決めたフォールドの confidence（物理観測。通過の方が確か）
 RFID_FOLD_CONFIDENCE = 0.8
 RFID_MUCK_CONFIDENCE = 0.95
@@ -457,6 +461,11 @@ class IntegrationThread(threading.Thread):
         # ショーダウンを手札で判定できなかった理由（次の配布でチップを動かさずに終えるときの表示）
         self._showdown_gaps: list[str] = []
         self._showdown_notice_shown = False
+        # ショーダウンの最後の出来事（ベッティングの終わり・役名・マック）を話した時刻。`SHOWDOWN_MUCK_SEC` 何も
+        # 無ければ手札で決める
+        self._showdown_at: Optional[float] = None
+        # ショーダウンで見せた席 → ディーラーが言った役名（見せる順はアウトオブポジションから）
+        self._showdown_shown: dict[int, Optional[str]] = {}
         # 直前に確定したハンド（自動で決めた勝者のあとに届いた `w` / 「ウィナー」を扱う）。
         self._last_result: Optional[dict] = None
         # ディーラーがショーダウンで言った勝った役の名前（pokerkit の役名, 2026-09-26）。ハンドごとに捨てる。
@@ -545,6 +554,7 @@ class IntegrationThread(threading.Thread):
                 self._start_dealt_hand_if_ready()
                 self._apply_idle_observations()
                 self._check_foldout_timeout()
+                self._check_showdown_timeout()
                 self._expire_buffers()
                 continue
 
@@ -1381,6 +1391,9 @@ class IntegrationThread(threading.Thread):
         if ev.kind == "deal":
             self._apply_deal_signal(ev)
             return
+        if ev.kind == "showdown_end":
+            self._end_showdown(ev)
+            return
         if ev.kind == "hand_start":
             if self._recorded_deals:
                 self._hand_start_due = True      # live がこの時点でハンドを始めた（発話を待ったあと）
@@ -1482,6 +1495,7 @@ class IntegrationThread(threading.Thread):
             "index": index, "seat": seat, "gs": self._game_state.snapshot(),
             "actions": len(self._current_actions), "mucks": list(self._showdown_mucks),
             "notice": self._showdown_notice_shown, "last": self._last_action_at,
+            "showdown_at": self._showdown_at, "shown": dict(self._showdown_shown),
             "foldout": dict(self._foldout_pending) if self._foldout_pending else None,
             "applied": {s: d.get("applied", False) for s, d in self._departures.items()},
             "review": self._hand_needs_review,
@@ -1501,6 +1515,8 @@ class IntegrationThread(threading.Thread):
         del self._current_actions[checkpoint["actions"]:]
         self._showdown_mucks = list(checkpoint["mucks"])
         self._showdown_notice_shown = checkpoint["notice"]
+        self._showdown_at = checkpoint.get("showdown_at")
+        self._showdown_shown = dict(checkpoint.get("shown", {}))
         self._last_action_at = checkpoint["last"]
         self._foldout_pending = checkpoint["foldout"]
         self._spoken_folds = dict(checkpoint.get("spoken", {}))
@@ -2562,7 +2578,8 @@ class IntegrationThread(threading.Thread):
 
         2 人以上が残ってベッティングが終わったとき（ショーダウン）は、ここでは決めない。見せずに
         マックした人は手札が強くてもポットを失うので、手札で決めてよいのは誰もマックしなかった
-        ときだけ（「ハンド終了」/ 次の配布 = `_finish_showdown`）。
+        ときだけ（残った全員が見せた（役名）/「ハンド終了」/ `SHOWDOWN_MUCK_SEC` マックが無い / 次の配布
+        = `_finish_showdown`）。
         """
         if not (self._auto_winner and self._rules_aware and self._hand_open) or self._rebuilding:
             return False
@@ -2574,13 +2591,88 @@ class IntegrationThread(threading.Thread):
                 return False                     # 札の離脱で決めた最後のフォールドは確定待ち
             self._finalize_hand(remaining[0], event, winner_source="fold")
             return True
-        if len(remaining) >= 2 and self._betting_over() and not self._showdown_notice_shown:
-            self._showdown_notice_shown = True
-            self._notice(
-                "ショーダウン（" + "・".join(f"席{s}" for s in remaining) + "）— 見せずにマックしたら"
-                "「フォールド」、全員見せたら「ハンド終了」（言わなければ次の手札が配られたときに判定）"
-            )
+        if len(remaining) >= 2 and self._betting_over():
+            if self._showdown_at is None:
+                self._showdown_at = self._last_action_at if self._last_action_at is not None else self._clock()
+            if not self._showdown_notice_shown:
+                self._showdown_notice_shown = True
+                self._notice(
+                    "ショーダウン（" + "・".join(f"席{s}" for s in remaining) + "）— 見せたら役名、"
+                    f"見せずにマックしたら「フォールド」（どちらも無いまま {SHOWDOWN_MUCK_SEC:.0f} 秒たったら"
+                    "手札で判定）"
+                )
         return False
+
+    def _showdown_turn(self) -> list[int]:
+        """ショーダウンでまだ見せても降りてもいない席（見せる順 = アウトオブポジションから）。"""
+        remaining = self._remaining_seats()
+        return [s for s in self._game_state.acting_order() if s in remaining and s not in self._showdown_shown]
+
+    def _showdown_show(self, event: AudioEvent, name: str) -> None:
+        """ショーダウンの役名 = 次に見せる人が見せた（オーナー 2026-09-30: アウトオブポジションが見せ、ディーラーが
+        役名を言う。見せると札がリーダーから外れるので、役名は見せるたびに必ず言う運用）。
+
+        誰が見せたかは見せる順（アウトオブポジションから）。手札で役名に合う席が見せていない中に 1 つだけあれば
+        その席。残った全員が見せたら手札で決める。そうでなければ次の人（役名 / 「フォールド」）を待つ。
+        """
+        from core.showdown import HAND_NAMES_JA
+
+        turn = self._showdown_turn()
+        if not turn:
+            self._check_announced_after_end(name)
+            return
+        seat = self._seat_with_hand(turn, name) or turn[0]
+        self._showdown_shown[seat] = name
+        self._announced_hand = name
+        self._showdown_at = _spoken_at(event)
+        self._notice(f"席{seat} が見せました（{HAND_NAMES_JA.get(name, name)}）")
+        if not self._showdown_turn():
+            self._finish_by_rules(event, explicit=True)
+
+    def _seat_with_hand(self, seats: list[int], name: str) -> Optional[int]:
+        """手札とボードで役が `name` になる席が `seats` の中に 1 つだけあればその席。"""
+        from core.showdown import evaluate_hands
+
+        board = [c for c in self._board_cards if c != UNKNOWN_CARD]
+        readable = {s: self._hole_cards[s] for s in seats if len(self._hole_cards.get(s, [])) == 2}
+        if len(board) != 5 or not readable:
+            return None
+        try:
+            hands = evaluate_hands(readable, board)
+        except Exception:  # noqa: BLE001 — 読めた札が重なっている など
+            return None
+        matching = [s for s in seats if s in hands and hands[s].name == name]
+        return matching[0] if len(matching) == 1 else None
+
+    def _check_showdown_timeout(self) -> None:
+        """ショーダウンで見せる・マックが `SHOWDOWN_MUCK_SEC` 無ければ、残った全員が見せたとして手札で決める
+        （オーナー 2026-09-30: マックする人は素早くマックしてディーラーが「フォールド」と言うので、次の配布まで
+        待たない）。その時刻までに話し始めた発話（「フォールド」かもしれない）を聞き終えてから。
+        記録してから反映する（replay は記録した `showdown_end` で同じ時点に決める）。"""
+        if (self._showdown_at is None or self._rebuilding or not (self._auto_winner and self._hand_open)
+                or not self._betting_over() or len(self._remaining_seats()) < 2):
+            return
+        deadline = self._showdown_at + SHOWDOWN_MUCK_SEC
+        river = self._board_dealt_at.get(5)
+        if river is not None:
+            deadline = max(deadline, river + SHOWDOWN_MUCK_SEC)   # オールインのあとのリバーから数える
+        oldest = self._oldest_speech()
+        if self._clock() < deadline or (oldest is not None and oldest <= deadline):
+            return
+        self._showdown_at = None
+        self._emit_seat_signal(RFIDEvent(
+            tag_id="", card="", reader_id="", role="seat", seat=None, timestamp=self._clock(),
+            raw_tag_id="", kind="showdown_end", observed_at=deadline,
+        ))
+
+    def _end_showdown(self, ev: RFIDEvent) -> None:
+        """`showdown_end`: マックが無いまま時間がたった = 残った全員が見せた。手札で決める。"""
+        if not (self._auto_winner and self._hand_open) or not self._betting_over():
+            return
+        if len(self._remaining_seats()) < 2:
+            return
+        self._showdown_at = None
+        self._finish_by_rules(explicit=True, ended_ts=ev.observed_at if ev.observed_at is not None else ev.timestamp)
 
     def _finish_by_rules(
         self, event: Optional[AudioEvent] = None, *, explicit: bool = False,
@@ -2619,9 +2711,8 @@ class IntegrationThread(threading.Thread):
         duplicated = len(set(cards)) != len(cards)
         if duplicated:
             gaps.append("同じ札が 2 か所にあります")
-        announced = self._announced_hand
         if gaps:
-            if announced and self._finish_by_announcement(remaining, board, event, ended_ts):
+            if self._showdown_shown and self._finish_by_announcement(remaining, board, event, ended_ts):
                 return True
             if not duplicated and self._finish_despite_unknowns(remaining, board, gaps, event, ended_ts):
                 return True
@@ -2645,33 +2736,15 @@ class IntegrationThread(threading.Thread):
         if not winners_by_pot:
             return False
         order = gs.acting_order()
-        showdown = [hands[s].to_dict() for s in sorted(remaining, key=lambda s: order.index(s)
-                                                       if s in order else s)]
+        showdown = [self._with_announced(hands[s].to_dict()) for s in sorted(
+            remaining, key=lambda s: order.index(s) if s in order else s)]
         winner = winners_by_pot[0][0]
-        if announced and hands[winner].name != announced:
-            # ディーラーの役名が判定と違う = 札の読み違い・読み落としの疑い（要確認）。役名に合う席が
-            # 1 つだけならその席の勝ち（ディーラーが見たものを優先）。
-            from core.showdown import HAND_NAMES_JA
-
-            said = HAND_NAMES_JA.get(announced, announced)
-            judged = HAND_NAMES_JA.get(hands[winner].name, hands[winner].name)
-            matching = [s for s in remaining if hands[s].name == announced]
-            self._hand_needs_review = True
-            if len(matching) == 1 and matching[0] != winner:
-                self._notice(
-                    f"ディーラーの役名「{said}」は席{matching[0]} の手です（判定は席{winner} の{judged}）— "
-                    f"席{matching[0]} の勝ちにします（要確認）"
-                )
-                self._finalize_hand(
-                    matching[0], event, winner_source="announced", showdown=showdown, ended_ts=ended_ts,
-                )
-                return True
-            self._notice(
-                f"ディーラーの役名「{said}」が判定（席{winner} の{judged}）と合いません — "
-                "札の読み違いの可能性があります（要確認）"
+        named_winner = self._check_shown_names(remaining, hands, winner)
+        if named_winner is not None:
+            self._finalize_hand(
+                named_winner, event, winner_source="announced", showdown=showdown, ended_ts=ended_ts,
             )
-        elif announced:
-            logger.info("ディーラーの役名 %s は判定（席%d）と一致", announced, winner)
+            return True
         self._finalize_hand(
             winner, event, awards=awards, winner_source="cards",
             showdown=showdown, ended_ts=ended_ts,
@@ -2712,40 +2785,75 @@ class IntegrationThread(threading.Thread):
         self, remaining: list[int], board: list[str],
         event: Optional[AudioEvent], ended_ts: Optional[float],
     ) -> bool:
-        """手札が読めていない席があるとき、ディーラーの役名から勝者を決める（要確認）。
+        """札が読めていないとき、見せた席の役名（見せていない席は読めた手札の判定）から勝者を決める（要確認）。
 
-        読めている席のうち役名に合う席が 1 つだけならその席、どれも合わず読めていない席が 1 つだけなら
-        その席の勝ち。それ以外は決めない（`w <席>` の案内に戻る）。
+        残った全員の役が分かり、役名だけで一番強い席が 1 つに決まるときだけ。それ以外は決めない（`w <席>` の
+        案内に戻る）。
         """
-        from core.showdown import HAND_NAMES_JA, evaluate_hands
+        from core.showdown import best_by_names, evaluate_hands
 
-        announced = self._announced_hand
-        readable = [s for s in remaining if len(self._hole_cards.get(s, [])) == 2]
-        unreadable = [s for s in remaining if s not in readable]
-        if len(board) != 5 or UNKNOWN_CARD in board or not readable or not announced:
+        names: dict[int, str] = {s: n for s, n in self._showdown_shown.items() if s in remaining and n}
+        hands: dict = {}
+        if len(board) == 5 and UNKNOWN_CARD not in board:
+            readable = {s: self._hole_cards[s] for s in remaining if len(self._hole_cards.get(s, [])) == 2}
+            try:
+                hands = evaluate_hands(readable, board) if readable else {}
+            except Exception:  # noqa: BLE001 — 読めた札が重なっている など
+                hands = {}
+            for s, h in hands.items():
+                names.setdefault(s, h.name)
+        if set(names) != set(remaining):
             return False
-        try:
-            hands = evaluate_hands({s: self._hole_cards[s] for s in readable}, board)
-        except Exception:  # noqa: BLE001
+        winner = best_by_names(names)
+        if winner is None:
             return False
-        matching = [s for s in readable if hands[s].name == announced]
-        if len(matching) == 1:
-            winner = matching[0]
-        elif not matching and len(unreadable) == 1:
-            winner = unreadable[0]
-        else:
-            return False
-        said = HAND_NAMES_JA.get(announced, announced)
+        unreadable = [s for s in remaining if s not in hands]
         self._hand_needs_review = True
         self._notice(
-            f"手札が読めていない席があります（席{'・'.join(map(str, unreadable))}）— "
-            f"ディーラーの役名「{said}」から席{winner} の勝ちにします（要確認）"
+            f"読めていない札があります（席{'・'.join(map(str, unreadable)) or '—'}・ボード）— "
+            f"ディーラーの役名から席{winner} の勝ちにします（要確認）"
         )
         order = self._game_state.acting_order()
-        showdown = [hands[s].to_dict() for s in sorted(readable, key=lambda s: order.index(s)
-                                                       if s in order else s)]
-        self._finalize_hand(winner, event, winner_source="announced", showdown=showdown, ended_ts=ended_ts)
+        showdown = [self._with_announced(hands[s].to_dict()) for s in sorted(
+            hands, key=lambda s: order.index(s) if s in order else s)]
+        self._finalize_hand(winner, event, winner_source="announced", showdown=showdown or None,
+                            ended_ts=ended_ts)
         return True
+
+    def _with_announced(self, entry: dict) -> dict:
+        """ショーダウンの席の記録に、ディーラーがその席に言った役名を足す（見せた席だけ）。"""
+        name = self._showdown_shown.get(entry.get("seat"))
+        if name:
+            entry["announced"] = name
+        return entry
+
+    def _check_shown_names(self, remaining: list[int], hands: dict, winner: int) -> Optional[int]:
+        """見せた席の役名を手札の判定と突き合わせる。違えば要確認（札の読み違い・読み落としの疑い）。
+
+        役名が残った全員にあり、役名だけで決まる一番強い席が判定の勝者と違えば、その席を返す（ディーラーが
+        見たものを優先）。それ以外は None（判定のまま）。
+        """
+        from core.showdown import HAND_NAMES_JA, best_by_names
+
+        mismatched = [(s, n) for s, n in self._showdown_shown.items()
+                      if n and s in hands and hands[s].name != n]
+        for seat, name in mismatched:
+            self._hand_needs_review = True
+            judged = hands[seat].name
+            self._notice(
+                f"席{seat} の役名「{HAND_NAMES_JA.get(name, name)}」が手札の判定"
+                f"（{HAND_NAMES_JA.get(judged, judged)}）と違います — 札の読み違いの可能性があります（要確認）"
+            )
+        if not mismatched:
+            return None
+        names = {s: self._showdown_shown.get(s) for s in remaining}
+        if not all(names.values()):
+            return None
+        best = best_by_names({s: n for s, n in names.items() if n})
+        if best is None or best == winner:
+            return None
+        self._notice(f"ディーラーの役名では席{best} の勝ちです（手札の判定は席{winner}）— 席{best} の勝ちにします（要確認）")
+        return best
 
     def _check_announced_after_end(self, name: str) -> None:
         """確定したあとに届いた役名: 手札で判定した役と違えば知らせる（記録は訂正画面で）。"""
@@ -2753,7 +2861,8 @@ class IntegrationThread(threading.Thread):
 
         last = self._last_result or {}
         judged = last.get("hand")
-        if last.get("source") == "cards" and judged and judged != name:
+        shown = last.get("hands") or ([judged] if judged else [])
+        if last.get("source") == "cards" and judged and name not in shown:
             self._notice(
                 f"ハンド {last.get('hand_id')} のディーラーの役名「{HAND_NAMES_JA.get(name, name)}」が"
                 f"判定（{HAND_NAMES_JA.get(judged, judged)}）と違います — スマホの訂正画面で確かめてください"
@@ -2779,16 +2888,19 @@ class IntegrationThread(threading.Thread):
     def _apply_showdown_muck(self, event: AudioEvent) -> None:
         """ベッティングが終わったあとの「フォールド」= ショーダウンでのマック。
 
-        見せずにマックした人は、手札が強くてもポットを受け取れない。席が言われなければ、残っている中で
-        一番アウトオブポジション（ボタンの次の席から）の人がマックしたとみなす（店の運用）。
+        見せずにマックした人は、手札が強くてもポットを受け取れない。席が言われなければ、まだ見せていない
+        人の中で一番アウトオブポジション（ボタンの次の席から）の人がマックしたとみなす（店の運用。見せた人には
+        ディーラーが役名を言う = `_showdown_show`。アウトオブポジションが見せたあとの「フォールド」は
+        インポジションのマック, オーナー 2026-09-30）。
         手札で見るとマックした人の方が強かったときは、勝者はマックしなかった人のまま要確認にする。
         """
         gs = self._game_state
         remaining = self._remaining_seats()
         sensed = self._sensed_seat(event)
         by_order = sensed is None or sensed not in remaining
+        turn = self._showdown_turn()
         if by_order:
-            seat = next((s for s in gs.acting_order() if s in remaining), None)
+            seat = turn[0] if turn else next((s for s in gs.acting_order() if s in remaining), None)
         else:
             seat = sensed
         if seat is None or len(remaining) < 2:
@@ -2806,7 +2918,7 @@ class IntegrationThread(threading.Thread):
             camera_present=False, camera_agree=False,
         )
         reasons = ["showdown_muck"]
-        if by_order and len(remaining) > 2:
+        if by_order and len(remaining) > 2 and len(turn) > 1:
             reasons.append("muck_order_assumed")   # 3 人以上: 順番どおりにマックしたとは限らない
         if stronger:
             reasons.append("mucked_stronger_hand")
@@ -2843,14 +2955,19 @@ class IntegrationThread(threading.Thread):
             self._on_action(record)
         if stronger:
             self._notice(f"席{seat} がマック — 手札はこちらの方が強いので確認してください（要確認）")
-        self._maybe_finish_hand(event)
+        self._showdown_at = _spoken_at(event)
+        if self._maybe_finish_hand(event):
+            return
+        if self._hand_open and self._betting_over() and len(self._remaining_seats()) >= 2 and not self._showdown_turn():
+            self._finish_by_rules(event, explicit=True)     # 残った全員が見せている
 
     def _handle_end_hand(self, event: AudioEvent) -> None:
-        """「ハンド終了」/ 勝った役名（「ツーペア」）: 残った全員が見せたとして勝者を決める。
+        """「ハンド終了」: 残った全員が見せたとして勝者を決める。役名（「ツーペア」）: 次の人が見せた。
 
-        役名はディーラーがショーダウンで言う（「ウィナー」は言わない運用, 2026-09-26）。ハンドの終わりの
-        合図であり、手札の判定との突き合わせにも使う（`_finish_showdown`）。閉じていないベッティングは
-        聞き取れなかったとみて閉じる。決められなければ `w <席>` を案内する。
+        役名はディーラーがショーダウンで見せた手ごとに言う（オーナー 2026-09-30: アウトオブポジションが見せ、
+        見せると札がリーダーから外れるので、役名は必ず言う運用）。残った全員が見せたら手札で決め、役名は
+        見せた席の手札の判定と突き合わせる（`_finish_showdown`）。閉じていないベッティングは聞き取れなかったと
+        みて閉じる。決められなければ `w <席>` を案内する。
         """
         gs = self._game_state
         name = event.hand_name
@@ -2871,7 +2988,11 @@ class IntegrationThread(threading.Thread):
                 # 最後のフォールドとみた札の離脱は、ショーダウンで前に出したものだった
                 self._showdown_after_foldout(spoken, "役名が言われた（ショーダウン）ので")
             if not self._betting_over() and len(self._board_cards) >= 5 and len(self._remaining_seats()) >= 2:
-                self._close_betting(spoken)      # 役名を言った = ハンドは終わっている（残りは聞き落とし）
+                self._close_betting(spoken)      # 役名を言った = ベッティングは終わっている（残りは聞き落とし）
+            if self._betting_over() and len(self._remaining_seats()) >= 2:
+                self._maybe_finish_hand(event)   # ショーダウンの始まり（時刻・お知らせ）
+                self._showdown_show(event, name)   # 役名 = 次の人が見せた（ハンドはまだ終わらない）
+                return
         if self._finish_by_rules(event, explicit=True):
             return
         if not self._betting_over():
@@ -3722,6 +3843,8 @@ class IntegrationThread(threading.Thread):
         self._showdown_mucks = []
         self._showdown_gaps = []
         self._showdown_notice_shown = False
+        self._showdown_at = None
+        self._showdown_shown = {}
         self._shown_holes = {}
         self._shown_board = 0
         self._departures = {}
@@ -3967,7 +4090,9 @@ class IntegrationThread(threading.Thread):
             ),
             winner_source=winner_source,
             showdown=showdown,
-            announced_hand=self._announced_hand,
+            # 勝った人に言った役名（見せた人ごとに言う運用, オーナー 2026-09-30）
+            announced_hand=(self._showdown_shown.get(winner_seat) if self._showdown_shown
+                            else self._announced_hand),
         )
 
         self._json_writer.append_hand_summary(summary)
@@ -3985,6 +4110,7 @@ class IntegrationThread(threading.Thread):
             "winners": sorted(awards) if awards else ([] if winner_seat is None else [winner_seat]),
             "source": winner_source,
             "hand": next((h.get("hand") for h in (showdown or []) if h.get("seat") == winner_seat), None),
+            "hands": [h.get("hand") for h in (showdown or []) if h.get("hand")],
         }
         self._publish_table_state()
         self._current_actions = []

@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pokerapp.local/contracts/hand.schema.json",
   "title": "Hand",
-  "version": "1.6",
-  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。1.1 = board_timeline を optional 追加（ボード各枚の配布時刻。ADR-0055, additive）。1.2 = button_seat / position_map を optional 追加（ディーラーボタン回転。仕様 FR-05b/§6.1, ISSUE-0032, additive）。1.3 (ADR-0050 S7, additive) = split pot の pot_awards を追加（単独勝者ハンドでは absent。verify-v1 系列では 1.1 だったものを 2026-09-22 のマージで統合）。1.4 (ADR-0062, additive) = winner_source（勝者の自動判定の決まり方: fold / cards / estimated。宣言で決めたハンドでは absent）と showdown（ショーダウンを手札で判定したときの各席の役）を optional 追加。pot_awards は手札で判定して 2 人以上に配ったとき（引き分け・side pot の勝者が別）にも入る。1.5 (2026-09-26, additive) = announced_hand（ディーラーが言った勝った役の名前）を optional 追加、winner_source に announced（役名から勝者を決めた = 判定と違う / 手札が読めない席がある, review_required）を追加。1.6 (2026-09-29, additive) = board に読めなかった位置の `??` を入れる（読めた一番後ろの位置まで。フロップの 1 枚が読めずにターンが読めたとき、ターンの札をフロップに詰めない）。winner_source に undetermined（ショーダウンで札が読めず、読めていない札しだいで勝者が変わる = チップを動かさない, winner_seat は null, review_required）を追加し、winner_seat は null も可。",
+  "version": "1.7",
+  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。1.1 = board_timeline を optional 追加（ボード各枚の配布時刻。ADR-0055, additive）。1.2 = button_seat / position_map を optional 追加（ディーラーボタン回転。仕様 FR-05b/§6.1, ISSUE-0032, additive）。1.3 (ADR-0050 S7, additive) = split pot の pot_awards を追加（単独勝者ハンドでは absent。verify-v1 系列では 1.1 だったものを 2026-09-22 のマージで統合）。1.4 (ADR-0062, additive) = winner_source（勝者の自動判定の決まり方: fold / cards / estimated。宣言で決めたハンドでは absent）と showdown（ショーダウンを手札で判定したときの各席の役）を optional 追加。pot_awards は手札で判定して 2 人以上に配ったとき（引き分け・side pot の勝者が別）にも入る。1.5 (2026-09-26, additive) = announced_hand（ディーラーが言った勝った役の名前）を optional 追加、winner_source に announced（役名から勝者を決めた = 判定と違う / 手札が読めない席がある, review_required）を追加。1.6 (2026-09-29, additive) = board に読めなかった位置の `??` を入れる（読めた一番後ろの位置まで。フロップの 1 枚が読めずにターンが読めたとき、ターンの札をフロップに詰めない）。winner_source に undetermined（ショーダウンで札が読めず、読めていない札しだいで勝者が変わる = チップを動かさない, winner_seat は null, review_required）を追加し、winner_seat は null も可。1.7 (2026-09-30, additive) = showdown の各席に announced（その席が見せたときにディーラーが言った役名。オーナー: アウトオブポジションから見せ、見せるたびに役名を言う運用）。announced_hand は勝った人に言った役名。",
   "type": "object",
   "additionalProperties": true,
   "required": ["hand_id", "session_id", "started_at", "ended_at", "players", "actions"],
@@ -98,7 +98,7 @@
         "properties": {
           "seat": {"type": "integer", "minimum": 1, "maximum": 9},
           "hole_cards": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2},
-          "hand": {"type": "string", "description": "役名（pokerkit の表記: High card / One pair / Two pair / Three of a kind / Straight / Flush / Full house / Four of a kind / Straight flush）"},
+          "hand": {"type": "string", "description": "役名（pokerkit の表記: High card / One pair / Two pair / Three of a kind / Straight / Flush / Full house / Four of a kind / Straight flush）"}, "announced": {"type": "string", "description": "1.7 additive。その席が見せたときにディーラーが言った役名（pokerkit の表記）。言わなかった・聞き取れなかった席は absent。"},
           "best": {"type": "array", "items": {"type": "string"}, "minItems": 5, "maxItems": 5}
         }
       }

@@ -279,12 +279,21 @@ def measure_hand(
     )
 
 
+def _without_showdown_rows(hand: dict) -> dict:
+    return dict(hand, actions=[a for a in hand.get("actions") or [] if a.get("street") != "showdown"])
+
+
 def hand_fully_correct(gt_hand: dict, captured_hand: dict | None) -> bool:
     """ハンドが丸ごと正しいか（ハンドの整合, オーナー 2026-09-30: 発話の読みが 9 割当たっても、ハンドが丸ごと
     正しい割合は全然足りない）: 真のアクションの行が全部正しく・余計な行が無く・勝者が合い・真のアクションにボードが
-    あればボードも合う。"""
+    あればボードも合う。
+
+    ショーダウンのマックの行（street = showdown）は比べない: 真のアクションの入力では入れても入れなくてもよく
+    （入れ方がハンドごとに違う）、結果は勝者で見ている。
+    """
     if captured_hand is None:
         return False
+    gt_hand, captured_hand = _without_showdown_rows(gt_hand), _without_showdown_rows(captured_hand)
     m = measure_hand(gt_hand, captured_hand)
     rows = len(gt_hand.get("actions") or [])
     if not (m.action_correct == m.action_total == rows) or m.winner_match is False:

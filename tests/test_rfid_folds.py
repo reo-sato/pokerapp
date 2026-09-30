@@ -105,6 +105,7 @@ class _Table:
             self.t._poll_departures()            # noqa: SLF001
             self.t._apply_idle_observations()    # noqa: SLF001
             self.t._check_foldout_timeout()      # noqa: SLF001
+            self.t._check_showdown_timeout()     # noqa: SLF001
 
     def say(self, text: str, spoken_at: float | None = None) -> None:
         start = self.now if spoken_at is None else spoken_at
@@ -417,13 +418,12 @@ class TestStoreSessions:
         self._play(tb, SESSION_A,
                    board=[(14.5, "5d"), (15.0, "Jc"), (17.7, "Th"), (36.6, "8c"), (53.1, "5h")],
                    departures=[(6.6, 4), (63.1, 5), (66.7, 6)])
-        assert tb.hands == [] and tb.t._betting_over()   # noqa: SLF001
-        played = tb.played()
+        # ショーダウンで見せる・マックが無いまま SHOWDOWN_MUCK_SEC たった = 手札で決める（次の配布まで待たない）
+        (hand,) = tb.hands
+        played = [(a.street, a.seat, a.action, a.amount) for a in hand.actions]
         assert ("preflop", 4, "fold", 0) in played
         assert [a for a in played if a[2] == "fold" and a[1] in (5, 6)] == []
         assert played[-2:] == [("river", 5, "check", 0), ("river", 6, "check", 0)]
-        self._next_deal(tb)
-        (hand,) = tb.hands
         assert (hand.winner_seat, hand.winner_source) == (6, "cards")   # J と 8 のツーペア
 
     def test_session_b(self, tmp_path):
@@ -431,11 +431,10 @@ class TestStoreSessions:
         self._play(tb, SESSION_B,
                    board=[(18.1, "Jd"), (21.0, "Ac"), (21.6, "3d"), (44.1, "9d"), (50.8, "5h")],
                    departures=[(32.2, 4), (72.9, 5), (75.2, 6)])
-        played = tb.played()
+        (hand,) = tb.hands                                                # ショーダウン → 手札で決めた
+        played = [(a.street, a.seat, a.action, a.amount) for a in hand.actions]
         assert ("flop", 4, "fold", 0) in played                           # フロップで降りた
         assert [a for a in played if a[2] == "fold" and a[1] in (5, 6)] == []
-        self._next_deal(tb)
-        (hand,) = tb.hands
         assert (hand.winner_seat, hand.winner_source) == (6, "cards")   # J のペア、K キッカー
 
     def test_replay_matches_live(self, tmp_path):

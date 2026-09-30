@@ -40,6 +40,16 @@ HAND_NAMES_JA: dict[str, str] = {
     "Four of a kind": "フォーカード",
     "Straight flush": "ストレートフラッシュ",
 }
+# 役の強さの順（弱い → 強い）。ディーラーの役名どうしを比べるのに使う（同じ役の中の強さは分からない）
+HAND_NAME_RANK: dict[str, int] = {name: i for i, name in enumerate(HAND_NAMES_JA)}
+
+
+def best_by_names(names: dict[int, str]) -> Optional[int]:
+    """役名だけで一番強い席（同じ役が一番上に 2 つ以上なら決まらない = None）。"""
+    ranked = sorted(((HAND_NAME_RANK.get(n, -1), s) for s, n in names.items()), reverse=True)
+    if not ranked or ranked[0][0] < 0 or (len(ranked) > 1 and ranked[1][0] == ranked[0][0]):
+        return None
+    return ranked[0][1]
 
 
 @dataclass(frozen=True)

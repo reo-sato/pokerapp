@@ -45,6 +45,12 @@ class TestFullyCorrect:
         """声だけの台本の正解にはボードが無い（札を置かない）。"""
         assert hand_fully_correct(dict(TRUTH, board=[]), _hand(board=[]))
 
+    def test_showdown_mucks_are_not_compared(self):
+        """ショーダウンのマックの行は真のアクションの入力で任意（結果は勝者で見る）。"""
+        muck = {"street": "showdown", "seat": 1, "action": "fold", "amount": 0}
+        assert hand_fully_correct(TRUTH, _hand(actions=[*TRUTH["actions"], muck]))
+        assert hand_fully_correct(dict(TRUTH, actions=[*TRUTH["actions"], muck]), _hand())
+
 
 def test_script_input_uses_the_latest_start_and_speech_start_times():
     from tools.estimate import SCRIPT_FLAGS, script_input

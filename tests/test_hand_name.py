@@ -1,13 +1,18 @@
 """tests/test_hand_name.py
 
-ショーダウンでディーラーが言う **勝った役の名前**（オーナーの回答 2026-09-26: 「ウィナー」は言わず、役名を言う。
-見せるべきときにマックしたら「フォールド」）:
+ショーダウンでディーラーが言う **役名**（オーナー 2026-09-30: アウトオブポジションが見せ、ディーラーが役名を言う。
+見せると札がリーダーから外れるので、役名は見せるたびに必ず言う運用。マックする人は素早くマックし、ディーラーが
+「フォールド」と言う。役名のあと、まれにインポジションが勝っている手をマックすることもある）:
 
-- 役名（「ツーペア」「フラッシュ」…）はハンドの終わり（「ハンド終了」と同じ）。`AudioEvent.hand_name` に
-  pokerkit の役名を載せ、events.jsonl にも残す（reconstruction_event 0.6）。
-- 手札とボードの判定と突き合わせる: 一致すれば確定、違えば要確認（役名に合う席が 1 つだけならその席の勝ち =
-  `winner_source="announced"`）。手札が読めていない席があるときも、役名から勝者を決める（要確認）。
-- 閉じていないベッティングは聞き取れなかったとみて閉じる。確定したあとの役名は判定と違えば知らせる。
+- 役名（「ツーペア」「フラッシュ」…）= 次に見せる人（アウトオブポジションから）が見せた。ハンドはまだ終わらない。
+  手札で役名に合う席が見せていない中に 1 つだけあれば、その席が見せた。`AudioEvent.hand_name` に pokerkit の
+  役名を載せ、events.jsonl にも残す（reconstruction_event 0.6）。
+- 見せたあとの「フォールド」= まだ見せていない次の人のマック（手札が強くても負け、要確認）。
+- 残った全員が見せたら手札で決める。見せる・マックが `SHOWDOWN_MUCK_SEC` 無ければ、見せたとして手札で決める
+  （次の配布まで待たない。記録した `showdown_end` で replay も同じ）。
+- 役名は見せた席の手札の判定と突き合わせる: 違えば要確認。役名が全員にあって役名だけで決まる勝者が判定と違えば
+  その席の勝ち（`winner_source="announced"`）。手札が読めていない席があるときも、役名から勝者を決める（要確認）。
+- 閉じていないベッティングは聞き取れなかったとみて閉じる。確定したあとの役名は、見せた手のどれとも違えば知らせる。
 """
 from __future__ import annotations
 
@@ -25,6 +30,7 @@ from output.event_recorder import event_to_envelope
 
 pytest.importorskip("pokerkit")
 
+from integration.engine import SHOWDOWN_MUCK_SEC  # noqa: E402
 from tests.test_rfid_folds import _Table  # noqa: E402
 
 _SCHEMA = Path(__file__).resolve().parent.parent / "docs" / "contracts" / "schemas" / "reconstruction_event.schema.json"
@@ -59,7 +65,7 @@ class TestParsing:
         assert parse_actions(text) == []
 
     def test_described_for_the_cli(self):
-        assert describe_event(parse_action("ツーペア")) == "ハンド終了（ツーペア）"
+        assert describe_event(parse_action("ツーペア")) == "見せた（ツーペア）"
 
     def test_recorded_and_replayed(self):
         event = parse_action("フラッシュ", confidence=0.7, utterance_start_ts=5.0)
@@ -105,53 +111,110 @@ def _to_river(tb: _Table, holes=HOLES, checks_on_river: bool = True) -> None:
 
 
 class TestShowdown:
-    def test_a_matching_hand_name_confirms_the_winner(self, tmp_path):
+    """3 人: 席4 ハイカード / 席5 ツーペア / 席6 フラッシュ。見せる順は 4 → 5 → 6。"""
+
+    def test_each_show_is_announced_and_the_best_hand_wins(self, tmp_path):
         tb = _Table(tmp_path)
         _to_river(tb)
+        tb.say("ハイカード")
+        assert tb.hands == [] and tb.notices[-1] == "席4 が見せました（ハイカード）"
+        tb.say("ツーペア")
+        assert tb.hands == []
         tb.say("フラッシュ")
         (hand,) = tb.hands
         assert (hand.winner_seat, hand.winner_source, hand.announced_hand) == (6, "cards", "Flush")
         assert not hand.review_required
-        assert hand.to_dict()["announced_hand"] == "Flush"
+        assert [(s["seat"], s.get("announced")) for s in hand.to_dict()["showdown"]] == [
+            (4, "High card"), (5, "Two pair"), (6, "Flush")]
 
-    def test_a_hand_name_nobody_has_flags_the_hand(self, tmp_path):
+    def test_folds_after_a_show_are_the_next_players(self, tmp_path):
+        # 席4 が見せたあと、席5・席6 が見せずにマック（席6 はフラッシュ = まれに勝っている手をマック）
         tb = _Table(tmp_path)
         _to_river(tb)
-        tb.say("フルハウス")
+        tb.say("ハイカード")
+        tb.say("フォールド")
+        assert tb.hands == [] and tb.t._showdown_mucks == [5]   # noqa: SLF001
+        tb.say("フォールド")
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (4, "fold")
+        assert [(a.seat, a.action, a.street) for a in hand.actions[-2:]] == [
+            (5, "fold", "showdown"), (6, "fold", "showdown")]
+        assert "mucked_stronger_hand" in hand.actions[-1].reason and hand.review_required
+
+    def test_nobody_mucks_for_a_while_then_the_cards_decide(self, tmp_path):
+        tb = _Table(tmp_path)
+        _to_river(tb)
+        tb.say("ハイカード")
+        tb.tick(tb.now + SHOWDOWN_MUCK_SEC - 1.0)
+        assert tb.hands == []
+        tb.tick(tb.now + 1.5)
         (hand,) = tb.hands
         assert (hand.winner_seat, hand.winner_source) == (6, "cards")
-        assert hand.review_required and hand.announced_hand == "Full house"
-        assert any("合いません" in n for n in tb.notices)
+        assert any(isinstance(e, RFIDEvent) and e.kind == "showdown_end" for e in tb.recorder.events)
 
-    def test_the_seat_with_the_announced_hand_wins(self, tmp_path):
-        # 判定は席6 のフラッシュだが、ディーラーは「ツーペア」= 席5 の手（席6 の札の読み違いの疑い）
+    def test_no_hand_name_and_no_muck_also_decides_by_the_cards(self, tmp_path):
         tb = _Table(tmp_path)
         _to_river(tb)
-        tb.say("ツーペア")
+        tb.tick(tb.now + SHOWDOWN_MUCK_SEC + 0.5)
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (6, "cards")
+
+    def test_it_waits_for_speech_said_before_the_deadline(self, tmp_path):
+        tb = _Table(tmp_path)
+        _to_river(tb)
+        tb.say("ハイカード")
+        spoken = tb.now + 2.0
+        tb.speech_since = spoken                     # 「フォールド」を認識中
+        tb.tick(tb.now + SHOWDOWN_MUCK_SEC + 5.0)
+        assert tb.hands == []
+        tb.speech_since = None
+        tb.say("フォールド", spoken_at=spoken)
+        assert tb.hands == [] and tb.t._showdown_mucks == [5]   # noqa: SLF001
+
+    def test_a_hand_name_that_only_one_unshown_seat_has_says_who_showed(self, tmp_path):
+        # 最初の役名が席6 の手（フラッシュ）: 席6 が見せた。そのあとの「フォールド」は席4（まだ見せていない先頭）
+        tb = _Table(tmp_path)
+        _to_river(tb)
+        tb.say("フラッシュ")
+        assert tb.notices[-1] == "席6 が見せました（フラッシュ）"
+        tb.say("フォールド")
+        assert tb.t._showdown_mucks == [4]           # noqa: SLF001
+
+    def test_a_hand_name_that_differs_from_the_cards_is_flagged(self, tmp_path):
+        tb = _Table(tmp_path)
+        _to_river(tb)
+        for name in ("ハイカード", "ツーペア", "ツーペア"):      # 席6 は手札ではフラッシュ
+            tb.say(name)
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (6, "cards") and hand.review_required
+        assert any("席6 の役名「ツーペア」が手札の判定（フラッシュ）と違います" in n for n in tb.notices)
+
+    def test_the_hand_names_decide_when_they_disagree_with_the_cards(self, tmp_path):
+        # 役名: 席4 ハイカード / 席5 ストレート / 席6 ツーペア → 役名では席5 の勝ち（札の読み違いの疑い）
+        tb = _Table(tmp_path)
+        _to_river(tb)
+        for name in ("ハイカード", "ストレート", "ツーペア"):
+            tb.say(name)
         (hand,) = tb.hands
         assert (hand.winner_seat, hand.winner_source) == (5, "announced")
         assert hand.review_required and hand.pot_total == 600
         assert any("席5 の勝ちにします" in n for n in tb.notices)
 
-    def test_an_unreadable_seat_is_resolved_by_the_hand_name(self, tmp_path):
+    def test_an_unreadable_seat_is_resolved_by_the_hand_names(self, tmp_path):
         tb = _Table(tmp_path)
         _to_river(tb, holes={4: HOLES[4], 5: HOLES[5], 6: ["Kd"]})    # 席6 の札は 1 枚しか読めていない
-        tb.say("ツーペア")
-        (hand,) = tb.hands
-        assert (hand.winner_seat, hand.winner_source) == (5, "announced") and hand.review_required
-
-    def test_an_unreadable_seat_wins_when_no_readable_hand_matches(self, tmp_path):
-        tb = _Table(tmp_path)
-        _to_river(tb, holes={4: HOLES[4], 5: HOLES[5], 6: ["Kd"]})
-        tb.say("フラッシュ")
+        for name in ("ハイカード", "ツーペア", "フラッシュ"):
+            tb.say(name)
         (hand,) = tb.hands
         assert (hand.winner_seat, hand.winner_source) == (6, "announced") and hand.review_required
 
     def test_a_hand_name_closes_the_betting(self, tmp_path):
-        # リバーのチェックが聞き取れないまま役名が言われた = ハンドは終わっている
+        # リバーのチェックが聞き取れないまま役名が言われた = ベッティングは終わっている
         tb = _Table(tmp_path)
         _to_river(tb, checks_on_river=False)
         tb.say("フラッシュ")
+        assert tb.hands == []                        # 席6 が見せた。ほかはまだ
+        tb.tick(tb.now + SHOWDOWN_MUCK_SEC + 0.5)
         (hand,) = tb.hands
         assert (hand.winner_seat, hand.winner_source) == (6, "cards") and hand.review_required
         assert [a.seat for a in hand.actions if a.street == "river"] == [4, 5, 6]
@@ -167,15 +230,74 @@ class TestShowdown:
     def test_a_late_hand_name_that_differs_is_reported(self, tmp_path):
         tb = _Table(tmp_path)
         _to_river(tb)
-        tb.say("フラッシュ")
-        tb.say("ツーペア")
+        for name in ("ハイカード", "ツーペア", "フラッシュ"):
+            tb.say(name)
+        tb.say("ストレート")
         assert len(tb.hands) == 1
-        assert any("役名「ツーペア」が判定（フラッシュ）と違います" in n for n in tb.notices)
+        assert any("役名「ストレート」が判定（フラッシュ）と違います" in n for n in tb.notices)
 
-    def test_a_late_hand_name_that_matches_is_quiet(self, tmp_path):
+    def test_a_late_hand_name_of_a_shown_hand_is_quiet(self, tmp_path):
         tb = _Table(tmp_path)
         _to_river(tb)
-        tb.say("フラッシュ")
+        for name in ("ハイカード", "ツーペア", "フラッシュ"):
+            tb.say(name)
         before = len(tb.notices)
-        tb.say("フラッシュ")
+        tb.say("ツーペア")
         assert len(tb.notices) == before
+
+    def test_replay_reproduces_the_decision_by_time(self, tmp_path):
+        from core.game_state import PlayerState
+        from integration.replay import replay_events
+
+        tb = _Table(tmp_path)
+        _to_river(tb)
+        tb.say("ハイカード")
+        tb.tick(tb.now + SHOWDOWN_MUCK_SEC + 0.5)
+        (live,) = tb.hands
+        replayed = replay_events(
+            tb.recorder.events, backend="pokerkit",
+            players=[PlayerState(seat=s, name=f"P{s}", stack=10000) for s in (4, 5, 6)],
+            sb=100, bb=200, session_id="replay", out_dir=tmp_path / "replay",
+            auto_new_hand=True, auto_winner=True, rfid_folds=True,
+        )
+        assert [(h.winner_seat, h.winner_source) for h in replayed] == [(live.winner_seat, live.winner_source)]
+
+
+class TestHeadsUp:
+    """2 人: 席4（BB, アウトオブポジション）ハイカード / 席6（ボタン = SB）フラッシュ。"""
+
+    HOLES = {4: HOLES[4], 6: HOLES[6]}
+
+    def _to_river(self, tb: _Table) -> None:
+        tb.deal(self.HOLES)
+        for text in ("コール", "チェック"):
+            tb.say(text)
+            tb.tick(tb.now + 1.0)
+        for street in (FLUSH_BOARD[:3], FLUSH_BOARD[3:4], FLUSH_BOARD[4:]):
+            _board(tb, street)
+            tb.say("チェック チェック")
+            tb.tick(tb.now + 1.0)
+
+    def test_in_position_mucks_a_winning_hand_after_the_show(self, tmp_path):
+        tb = _Table(tmp_path, seats=(4, 6))
+        self._to_river(tb)
+        tb.say("ハイカード")                         # 席4 が見せた
+        tb.say("フォールド")                         # 席6 がマック（手札はフラッシュ）
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (4, "fold") and hand.review_required
+        assert (hand.actions[-1].seat, hand.actions[-1].street) == (6, "showdown")
+
+    def test_both_show(self, tmp_path):
+        tb = _Table(tmp_path, seats=(4, 6))
+        self._to_river(tb)
+        tb.say("ハイカード")
+        tb.say("フラッシュ")
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (6, "cards") and not hand.review_required
+
+    def test_a_fold_before_any_show_is_out_of_position(self, tmp_path):
+        tb = _Table(tmp_path, seats=(4, 6))
+        self._to_river(tb)
+        tb.say("フォールド")
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (6, "fold")

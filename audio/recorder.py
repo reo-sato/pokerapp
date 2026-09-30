@@ -97,7 +97,7 @@ def describe_event(event: Optional[AudioEvent]) -> str:
     elif getattr(event, "hand_name", None):
         from core.showdown import HAND_NAMES_JA
 
-        action = f"ハンド終了（{HAND_NAMES_JA.get(event.hand_name, event.hand_name)}）"
+        action = f"見せた（{HAND_NAMES_JA.get(event.hand_name, event.hand_name)}）"   # ショーダウンの役名
     elif event.action == "heads_up":
         action = "ヘッズアップ（残り 2 人）"
     elif event.action == "players_left":

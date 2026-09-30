@@ -18,6 +18,7 @@ from core.events import RFIDEvent
 
 pytest.importorskip("pokerkit")
 
+from integration.engine import SHOWDOWN_MUCK_SEC  # noqa: E402
 from tests.test_rfid_folds import _Table  # noqa: E402
 
 # ボタン 席6: プリフロップは 6 → 4 → 5、フロップ以降は 4 → 5 → 6 の順。
@@ -246,6 +247,8 @@ class TestWinnerToss:
         tb.tick(tb.now + 1.0)
         tb.lift(4)
         tb.tick(tb.now + 4.0)
-        tb.say("ツーペア")
+        tb.say("ツーペア")                     # ショーダウン（見せた）。もう 1 人の役名・マックを待つ
+        assert tb.hands == []
+        tb.tick(tb.now + SHOWDOWN_MUCK_SEC + 0.5)
         (hand,) = tb.hands
         assert hand.winner_source in ("cards", "announced") and hand.review_required
