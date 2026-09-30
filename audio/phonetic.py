@@ -281,6 +281,29 @@ def rank(heard: str) -> list[tuple[float, str, Optional[str]]]:
     return sorted((distance(seq, list(t.morae)), t.word, t.rewrite) for t in _TARGETS)
 
 
+def sounds_like(heard: str, word: str, after: str = "") -> bool:
+    """書き起こしの語 heard が、音の近さで word と読めるか（アクションでない語 = ターン・ハンド…のほうが近ければ
+    読まない）。
+
+    アクションの語（辞書で読めた語 `after`）に続けて言う部分 = 「チェックアラウンド」の「アラウンド」、「チェックレイズ」の
+    「レイズ」を、書き起こしゆれ（「ラウンド」「アランド」「アウンド」「ランド」「レース」）を並べずに照合する。
+    - `after` の終わりの音に続けて比べる（「チェック」の「ク」に続く「アラウンド」の「ア」は、続けて言うと消えやすい
+      = 語の頭の音として重く数えない）。
+    - 前の語が確かなので、意味の違う語との差（`_MARGIN`）は求めず、いちばん近いことだけを求める。
+    """
+    context = morae(after)[-1:]
+    seq, target = context + morae(heard), morae(word)
+    if len(seq) == len(context) or not target:
+        return False
+
+    def cost(to: tuple[Mora, ...] | list[Mora]) -> float:
+        full = context + list(to)
+        return distance(seq, full) * len(full) / len(to)
+
+    d = cost(target)
+    return d <= _threshold(len(target)) and all(d < cost(t.morae) for t in _TARGETS if t.rewrite is None)
+
+
 def match_keyword(heard: str) -> Optional[PhoneticMatch]:
     """書き起こしの語（片仮名）が、音の近さでアクションの語と読めるか。読めなければ None。"""
     seq = morae(heard)

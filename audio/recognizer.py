@@ -340,15 +340,27 @@ def _kana_amount_to_kanji(norm: str, keyword_end: int) -> str:
 # 書き起こしゆれとして足した短い語は、ほかの言葉の一部として現れやすい（「なべとなって」の「ベト」、
 # 「ゴールド」の「ゴール」）。前後が区切り・数・別のアクションの語のときだけアクションとみなす（ADR-0063）。
 _BOUNDARY_KEYWORDS = frozenset({"ベト", "ゴール", "ホールド", "ベッド", "オーリン", "オーリー", "ソーダウン"})
-# 短い語のあとに続いても区切りとみなす言い方（「オーリンです」= オールインです。店舗 2026-09-29）。
+# 同じ種類の仮名が続いていても区切りとみなす言い方: 「です」（「おーりんです」）と「を」（語の中には出ない）。
 # 「です」のあとに片仮名が続く（「ホールドデスク」）ときは区切りにしない。
 _BOUNDARY_SUFFIX = re.compile(r"(?:デス|デース|デシタ)(?:ネ|ヨ)?(?![ァ-ヺー])")
 
 
-def _keyword_matches(norm: str) -> list[tuple[int, int, str]]:
+def _kana_script(ch: str) -> Optional[str]:
+    if "ぁ" <= ch <= "ゖ":
+        return "hiragana"
+    if _is_katakana(ch):
+        return "katakana"
+    return None
+
+
+def _keyword_matches(norm: str, script: Optional[str] = None) -> list[tuple[int, int, str]]:
     """正規化済みテキスト中のアクションキーワードの出現 (位置, 長さ, action) を返す。
 
     最左優先・同位置なら長いキーワードを先（より具体的な表現を採用するため）に並べる。
+
+    script: 片仮名に寄せる前の文字列（NFKC, norm と同じ長さ）。短い語の区切りを元の文字の種類で見る
+    （Whisper は外来語 = アクションの語を片仮名で、助詞・「です」「する」をひらがなで書く。片仮名の語の隣の
+    ひらがなは語の区切り: 「フォールドをホールド」「オーリンです」「ゴールします」）。
     """
     lower = norm.lower()
     matches: list[tuple[int, int, str, str]] = []
@@ -364,17 +376,19 @@ def _keyword_matches(norm: str) -> list[tuple[int, int, str]]:
             matches.append((pos, len(kw), action, kw))
             start = pos + 1
     starts = {m[0] for m in matches}
+    matches += _check_raise_compounds(norm, script, matches, starts)
     ends = {m[0] + m[1] for m in matches}
 
-    def word_char(ch: str) -> bool:
-        # 「を」（片仮名にすると「ヲ」）は語の中に現れない = 区切り（「フォールドをホールド」= フォールド、フォールド。
-        # 台本 2026-09-30）
-        return _is_katakana(ch) and ch != "ヲ"
+    def same_word(i: int, edge: int) -> bool:
+        """位置 i の文字が、語の端（位置 edge）の文字と同じ語の続きか = 同じ種類の仮名（「を」は除く）。"""
+        if not _is_katakana(lower[i]) or lower[i] == "ヲ":
+            return False
+        return script is None or _kana_script(script[i]) == _kana_script(script[edge])
 
     def isolated(pos: int, end: int) -> bool:
-        before_ok = pos == 0 or not word_char(lower[pos - 1]) or pos in ends
+        before_ok = pos == 0 or not same_word(pos - 1, pos) or pos in ends
         after_ok = (
-            end == len(lower) or not word_char(lower[end]) or end in starts
+            end == len(lower) or not same_word(end, end - 1) or end in starts
             or _kana_number_at(norm, end) is not None or _BOUNDARY_SUFFIX.match(norm, end) is not None
         )
         return before_ok and after_ok
@@ -436,15 +450,77 @@ _AMOUNT_ONLY_REST = re.compile(
 )
 # 数字だけの部分を区切る文字（空白では区切らない: 「シート3 600点」「5 6 7」を 1 まとまりに見る）
 _AMOUNT_CHUNK = re.compile(r"[^、。・!?]+")
-# 前後に区切って言った額を、別の人のベット・レイズとして分けるアクション（「2千点、コール」= 2000 のベット
-# のあとにコール）。ベット・レイズ・オールインの前後の額はそのアクションの額なので分けない。
-_AMOUNT_SPLIT_ACTIONS = frozenset({"call", "check", "fold"})
-# 「チェックアラウンド」= まだ動いていない全員がチェックした（オーナーの説明, 2026-09-25）。
-# 「チェック、アランド」のように区切って書き起こされることもある（店舗の実測）。「チェックアウンド」
-# 「チッカーランド」とも書き起こされた（店舗の実測 2026-09-27）。「チェックラウンド」も（台本 2026-09-30）。
-_CHECK_AROUND = re.compile(
-    r"(?:チェック|チッカー|check)[\s、。,.・]*(?:ア(?:ラウ|ラ|ウ)ン(?:ド|ト)?|ラウ?ン(?:ド|ト)|around)", re.IGNORECASE,
-)
+_CHUNK_DELIMITERS = frozenset("、。・!?")
+# アクションの語が、発話のどの額を自分の額にするか（ほかの額 = 別の人のベット・レイズ。額だけの運用では 1 つでも
+# 落とすと以降の手番がずれる, オーナー 2026-09-30）。区切り = 「、」など・語のすぐ隣の空白。
+#   None      額を持たない: フォールド・チェック・ヘッズアップ（「フォールド600」「チェック、800」「ヘッズアップ、600」の
+#             額は次の人の賭け）
+#   "glued"   区切らずに続けた額だけ: コール（「600点コールです」「コール600」= コールの額の言い直し。「2千点、コール」
+#             「コール 3000」は別の人の賭け）
+#   "nearest" 語のあとの最初の額、無ければ前の最後の額: ベット・レイズ・オールイン（「600、レイズ 1800」= 600 の賭けの
+#             あとに 1800 へのレイズ）
+# 自分の額と同じ額は言い直し（「レイズ 2000、2000です」）。表に無いアクション（勝者・ハンドの始まりと終わり・
+# ショーダウン）の額は分けない。
+_AMOUNT_OWNERSHIP: dict[str, Optional[str]] = {
+    "fold": None, "check": None, "heads_up": None,
+    "call": "glued",
+    "bet": "nearest", "raise": "nearest", "allin": "nearest",
+}
+# 「チェックアラウンド」= まだ動いていない全員がチェックした（オーナーの説明, 2026-09-25）。チェックの語に続く
+# 「アラウンド」は音の近さで読む（書き起こしゆれを並べない: 店舗・台本で「チェック、アランド」「チェックアウンド」
+# 「チェックラウンド」があった）。区切って言ってもよい（「アラウンド」だけでは別のアクションにならない）。
+_AROUND = "アラウンド"
+_CHECK_AROUND_GAP = frozenset(" 　、。,.・")
+_CHECK_AROUND_EN = re.compile(r"around", re.IGNORECASE)
+# 「チェックレイズ」= 一度チェックした人のレイズ（1 つのレイズ）。チェックの語に**続けて**言った「レイズ」を音の近さで
+# 読む（「チェックレーズ」「チェックレース」）。区切った「チェック、レイズ」は 2 人のアクション（ADR-0061）。
+_CHECK_RAISE_TAIL = "レイズ"
+
+
+def _word_end(norm: str, script: Optional[str], start: int, stop: int) -> int:
+    """`start` から続く、同じ種類の仮名の語（長音「ー」を含む）の終わり（`stop` まで）。仮名でなければ `start`。"""
+    end = start
+    while end < stop and (_is_katakana(norm[end]) or norm[end] == "ー") and norm[end] != "ヲ" and (
+        script is None or norm[end] == "ー" or _kana_script(script[end]) == _kana_script(script[start])
+    ):
+        end += 1
+    return end
+
+
+def _check_raise_compounds(
+    norm: str, script: Optional[str], matches: list[tuple[int, int, str, str]], starts: set[int],
+) -> list[tuple[int, int, str, str]]:
+    """チェックの語に続けて（同じ語の中で）言った「レイズ」を 1 つのレイズの語にした出現。"""
+    from audio.phonetic import sounds_like
+
+    found: list[tuple[int, int, str, str]] = []
+    for pos, length, action, _ in matches:
+        end = pos + length
+        if action != "check" or end >= len(norm):
+            continue
+        if script is not None and _kana_script(script[end]) != _kana_script(script[end - 1]):
+            continue
+        stop = min((s for s in starts if s >= end), default=len(norm))
+        tail_end = _word_end(norm, script, end, stop)
+        if tail_end > end and sounds_like(norm[end:tail_end], _CHECK_RAISE_TAIL, after=norm[pos:end]):
+            found.append((pos, tail_end - pos, "raise", norm[pos:tail_end].lower()))
+    return found
+
+
+def _is_check_around(norm: str, script: Optional[str], pos: int, end: int, stop: int) -> bool:
+    """位置 pos のチェックの語（norm[pos:end]）が「チェックアラウンド」か。`stop` = 次のアクションの語の位置。"""
+    from audio.phonetic import match_keyword, sounds_like
+
+    whole = match_keyword(norm[pos:end])
+    if whole is not None and whole.rewrite == "チェックアラウンド":   # 語全体がゆれた「チッカーランド」
+        return True
+    i = end
+    while i < stop and norm[i] in _CHECK_AROUND_GAP:
+        i += 1
+    if _CHECK_AROUND_EN.match(norm, i):
+        return True
+    tail = norm[i:_word_end(norm, script, i, stop)]
+    return bool(tail) and sounds_like(tail, _AROUND, after=norm[pos:end])
 
 
 def parse_amount_only(
@@ -494,48 +570,81 @@ def parse_amount_only(
     )
 
 
+def _pieces_around(norm: str, start: int, end: int) -> list[tuple[int, int, str, bool]]:
+    """アクションの語（norm[start:end]）の前後の言葉を区切りで分けた (開始, 終了, "before"/"after", 語に続けたか)。
+
+    区切り = 「、」「。」など（`_CHUNK_DELIMITERS`）と、語のすぐ隣の空白（Whisper は「、」の代わりに空白で書くことが
+    ある。額の中の空白「1万 2000」・席の「シート 3」は区切らない）。
+    """
+    before_end = start
+    while before_end > 0 and norm[before_end - 1].isspace():
+        before_end -= 1
+    after_start = end
+    while after_start < len(norm) and norm[after_start].isspace():
+        after_start += 1
+    pieces: list[tuple[int, int, str, bool]] = []
+    for side, lo, hi in (("before", 0, before_end), ("after", after_start, len(norm))):
+        i = lo
+        while i < hi:
+            j = i
+            while j < hi and norm[j] not in _CHUNK_DELIMITERS:
+                j += 1
+            if norm[i:j].strip():
+                pieces.append((i, j, side, j == start if side == "before" else i == end))
+            i = j + 1
+    return pieces
+
+
 def _split_off_amounts(
     part: str, event: AudioEvent,
     confidence: Optional[float], utterance_start_ts: Optional[float],
 ) -> list[AudioEvent]:
-    """コール・チェック・フォールドの前後に区切って言った額を、別のベット・レイズとして分ける。
+    """アクションの語が自分の額にしない額（`_AMOUNT_OWNERSHIP`）を、別の人のベット・レイズとして前後に分ける。
 
-    「2千点、コール」→ 2000 / コール。語のすぐ隣の空白も区切り（「コール 3000」= コールのあとに次の人の 3000。
-    Whisper は「、」の代わりに空白で書くことがある。額だけの運用では 3000 を失い、以降の手番がずれていた,
-    2026-09-30）。区切らずに言った額（「600点コールです」）はコールの額のまま。同じ額の言い直し（「コール 600」）は
-    engine が「いまのベット以下」として捨てる。
+    「2千点、コール」→ 2000 / コール、「フォールド600」→ フォールド / 600、「600、レイズ 1800」→ 600 / 1800 へのレイズ。
+    別の人の賭けにした額が使えない額（いまのベット以下など）なら engine が記録しない。
     """
-    if event.action not in _AMOUNT_SPLIT_ACTIONS:
+    if event.action not in _AMOUNT_OWNERSHIP:
         return [event]
+    rule = _AMOUNT_OWNERSHIP[event.action]
     nfkc = unicodedata.normalize("NFKC", part)
     norm = _to_katakana(nfkc)
     source = part if len(nfkc) == len(part) else nfkc
-    matches = _keyword_matches(norm)
+    matches = _keyword_matches(norm, nfkc)
     if not matches:
         return [event]
-    keyword_at, keyword_len = matches[0][0], matches[0][1]
-    norm, source = _space_next_to_keyword_as_comma(norm, source, keyword_at, keyword_at + keyword_len)
-    if event.action in _NO_AMOUNT_ACTIONS:
-        norm, source, keyword_at = _comma_next_to_keyword(norm, source, keyword_at, keyword_at + keyword_len)
-    before: list[AudioEvent] = []
-    after: list[AudioEvent] = []
-    kept: list[str] = []
-    for m in _AMOUNT_CHUNK.finditer(norm):
-        chunk = source[m.start():m.end()]
-        if m.start() <= keyword_at < m.end():
-            kept.append(chunk)
-            continue
-        amount = parse_amount_only(chunk, confidence, utterance_start_ts)
-        if amount is None:
-            kept.append(chunk)
-        elif m.end() <= keyword_at:
-            before.append(amount)
-        else:
-            after.append(amount)
-    if not before and not after:
+    start, end = matches[0][0], matches[0][0] + matches[0][1]
+    pieces = _pieces_around(norm, start, end)
+    amounts = {p: parse_amount_only(source[p[0]:p[1]], confidence, utterance_start_ts) for p in pieces}
+    amount_pieces = [p for p in pieces if amounts[p] is not None]
+    if rule == "glued":
+        owned = [p for p in amount_pieces if p[3]]
+    elif rule == "nearest":
+        owned = [p for p in amount_pieces if p[2] == "after"][:1] or [p for p in amount_pieces if p[2] == "before"][-1:]
+    else:
+        owned = []
+    others = [p for p in amount_pieces if p not in owned]
+    own = amounts[owned[0]] if rule == "nearest" and owned else None
+    if not others and (own is None or own.amount == event.amount):
         return [event]
-    main = parse_action("、".join(kept), confidence=confidence, utterance_start_ts=utterance_start_ts)
-    return [*before, main or event, *after]
+    own_values = {amounts[p].amount for p in owned}
+    split = {"before": [], "after": []}
+    for p in others:
+        if amounts[p].amount not in own_values:          # 自分の額と同じ額は言い直し
+            split[p[2]].append(amounts[p])
+    kept = sorted([p for p in pieces if p not in others] + [(start, end, "keyword", True)])
+    text = source[kept[0][0]:kept[0][1]]
+    for prev, cur in zip(kept, kept[1:]):
+        removed_between = any(prev[1] <= p[0] < cur[0] for p in others)
+        text += ("、" if removed_between else source[prev[1]:cur[0]]) + source[cur[0]:cur[1]]
+    main = parse_action(text, confidence=confidence, utterance_start_ts=utterance_start_ts) or event
+    if own is not None:
+        main.amount = own.amount
+        main.parse_flags = tuple(
+            [f for f in main.parse_flags if f != "ambiguous_amount"]
+            + [f for f in own.parse_flags if f == "ambiguous_amount"]
+        )
+    return [*split["before"], main, *split["after"]]
 
 
 # 区切って続けて言った額（「500、1500」= ベットのあとにレイズ）は、額が上がっていくときだけ別々の賭けにする
@@ -560,43 +669,6 @@ def _wagers_in_turn(
             return []
         events.append(event)
     return events if len(events) >= 2 else []
-
-
-_NUMERAL = re.compile(r"[0-9〇一二三四五六七八九十百千万]")
-# 額を持たないアクション。語に続けて（区切らずに）言った額も次の人の賭け（「フォールド600」= フォールドのあとに
-# 次の人の 600。台本 2026-09-30）。コールは「600点コールです」のようにコールの額を言うので含めない
-_NO_AMOUNT_ACTIONS = frozenset({"fold", "check"})
-
-
-def _comma_next_to_keyword(norm: str, source: str, start: int, end: int) -> tuple[str, str, int]:
-    """語のすぐ隣（区切りなし）の額との間に「、」を入れる（norm と source の両方の同じ位置に）。語の位置を返す。"""
-    if end < len(norm) and _NUMERAL.match(norm[end]):
-        norm, source = norm[:end] + "、" + norm[end:], source[:end] + "、" + source[end:]
-    if start > 0 and (_NUMERAL.match(norm[start - 1]) or norm[start - 1] == "点"):
-        norm, source = norm[:start] + "、" + norm[start:], source[:start] + "、" + source[start:]
-        start += 1
-    return norm, source, start
-
-
-def _space_next_to_keyword_as_comma(norm: str, source: str, start: int, end: int) -> tuple[str, str]:
-    """アクションの語のすぐ隣の空白（向こう側が額）を「、」にする（長さは変えない = norm と source の位置がそろったまま）。
-
-    額の中の空白（「1万 2000」）は語の隣ではないので変えない。
-    """
-    def fill(text: str, a: int, b: int) -> str:
-        return text[:a] + "、" * (b - a) + text[b:]
-
-    after = end
-    while after < len(norm) and norm[after].isspace():
-        after += 1
-    if after > end and after < len(norm) and _NUMERAL.match(norm[after]):
-        norm, source = fill(norm, end, after), fill(source, end, after)
-    before = start
-    while before > 0 and norm[before - 1].isspace():
-        before -= 1
-    if before < start and before > 0 and (_NUMERAL.match(norm[before - 1]) or norm[before - 1] == "点"):
-        norm, source = fill(norm, before, start), fill(source, before, start)
-    return norm, source
 
 
 # 1 回の発話から分けるアクションの上限。9 人卓の 1 ラウンドは最大 8 アクションで足り、
@@ -845,7 +917,7 @@ def phonetic_reading(text: str) -> Optional[str]:
     """
     nfkc = unicodedata.normalize("NFKC", text)
     norm = _to_katakana(nfkc)
-    rewrite = _phonetic_rewrite(nfkc, norm, _distinct_keywords(_keyword_matches(norm)))
+    rewrite = _phonetic_rewrite(nfkc, norm, _distinct_keywords(_keyword_matches(norm, nfkc)))
     return rewrite.text if rewrite is not None and rewrite.text != nfkc else None
 
 
@@ -856,7 +928,7 @@ def _parse_phonetic(
     """音の近さで置き換えた発話を読む。読んだ語から出たアクションに `fuzzy_keyword`（要確認）を付け、
     `raw_text` は聞こえたままの言葉にする。会話・アクションの語が少ない発話は None。"""
     norm = _to_katakana(rewrite.text)
-    keywords = _distinct_keywords(_keyword_matches(norm))
+    keywords = _distinct_keywords(_keyword_matches(norm, rewrite.text))
     if not keywords or _is_conversation(norm, keywords):
         return None
     keyword_chars = sum(length for _, length, _ in keywords)
@@ -969,7 +1041,7 @@ def _parse_utterance(
     players_left = _PLAYERS_LEFT.search(norm)
     if players_left is not None:
         return _around_players_left(text, nfkc, players_left, confidence, utterance_start_ts)
-    keywords = _distinct_keywords(_keyword_matches(norm))
+    keywords = _distinct_keywords(_keyword_matches(norm, nfkc))
     if not keywords:
         # アクションの語が無くても、額だけを言っていればベットかレイズ（「600点」）
         event = parse_amount_only(text, confidence=confidence, utterance_start_ts=utterance_start_ts)
@@ -1049,8 +1121,9 @@ def parse_action(
     """
     # 全角数字・全角英字・半角カナ等を正規化し、ひらがなをカタカナに寄せてからパースする
     # （raw_text は原文を保持）。どちらも文字位置を保つ 1:1 の写像。
-    norm = _to_katakana(unicodedata.normalize("NFKC", text))
-    matches = _keyword_matches(norm)
+    nfkc = unicodedata.normalize("NFKC", text)
+    norm = _to_katakana(nfkc)
+    matches = _keyword_matches(norm, nfkc)
 
     if not matches:
         logger.debug("No action keyword found in: %r", text)
@@ -1067,8 +1140,10 @@ def parse_action(
             continue  # 採用キーワードと重なる包含マッチ（例: スリーベット ⊃ ベット）
         flags.append("multi_action_keywords")
         break
-    if found_action == "check" and _CHECK_AROUND.match(norm, found_pos):
-        flags.append("check_around")
+    if found_action == "check":
+        next_keyword = min((pos for pos, _, _ in matches if pos >= span_end), default=len(norm))
+        if _is_check_around(norm, nfkc, found_pos, span_end, next_keyword):
+            flags.append("check_around")
     # ショーダウンで言った勝った役名（「ツーペア」= ハンドの終わり + 判定との突き合わせ, 2026-09-26）
     hand_name = _hand_name_for(norm[found_pos:span_end]) if found_action == "end_hand" else None
 
