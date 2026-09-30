@@ -54,17 +54,21 @@ PARAMS: dict[str, float] = {
     "p_sub": 0.02,               # 語の種類の取り違え（チェック ↔ コール など）
     "p_amount": 0.05,            # 額の聞き違い（寄せた・丸めた）
     # 札の離脱（卓状態の履歴）。時刻の密度で比べる（どの仮説でも離脱 1 つに密度 1 つ）
-    "p_nodepart": 0.03,          # フォールドしたのに札が離れない（店舗 0/25）
-    "fold_lag_mu": 0.1,          # 「フォールド」の話し始めから札が離れるまで（店舗 20 回の中央値 0.1 秒、最大 1.4 秒）
-    "fold_lag_b": 0.4,           # その広がり（ラプラス分布の尺度, 秒）
-    "fold_lag_max": 4.0,         # これより離れた離脱はその声のフォールドとみない
+    "p_nodepart": 0.03,          # フォールドしたのに札が離れない（店舗 0/25。その席の札がハンドで一度も読めなければ数えない）
+    "fold_lag_mu": 0.1,          # 「フォールド」の話し始めから札が離れるまで（店舗 20 回の中央値 0.1 秒、[−1.35, +1.02]）
+    "fold_lag_b": 0.4,           # その広がり（ラプラス分布の尺度, 秒。最尤は 0.3、狭いと崩れるので広め = 監査 2 回目）
+    "fold_early_mix": 0.1,       # フォールドの札の離脱の裾（語が発話の後ろの方・手番より前に投げた札）の重み
+    "fold_tail_sec": 20.0,       # その裾の幅（± 秒、一様）
+    "flicker_sec": 3.0,          # これより早く戻った離脱（ちらつき・のぞき見）は数えない（engine がフォールドにしない 3 秒と同じ）
+    "departure_after_end_sec": 60.0,   # 離脱を数える窓: 直しの無い再生のハンドの終わりからこの秒数まで
     "silent_fold_wait": 30.0,    # 言われないフォールドは前後の言われたアクションの間（最後なら前からこの秒数まで）
     "silent_fold_mean": 3.0,     # 言われないフォールドの札が離れるまでの考える時間（前の言われたアクションから, 指数分布
                                  # の平均。店舗の 5 回: 2.1〜4.7 秒）
     "other_departure_sec": 20.0,  # ショーダウン・片付けで札が離れる時刻の幅
     "lift_sec": 200.0,           # ベッティングの途中に残っている席の札が離れる（持ち上げ）の平均の間隔
     # そのほか
-    "p_button": 0.05,            # ボタンが記録（ライブが回したボタン）と違う
+    "p_button": 0.05,            # ボタンが記録（ライブが回したボタン）と違う（隣の席 = 動かし忘れ・動かしすぎを 4 倍厚く）
+    "p_unclosed": 0.01,          # ベッティングのラウンドが閉じないまま（手番の人が残ったまま）ハンドが終わった
     "p_players": 0.05,           # 残り人数の宣言（ヘッズアップ・N プレイヤーズ）が合わない
     "p_unread_board": 0.03,      # 次のストリートのアクションなのにボードの札が読めていない（店舗 1 回 / 約 40）
     "p_street_time": 0.02,       # アクションの時刻がそのストリートの札の配布と合わない（前のストリートの札より
@@ -89,8 +93,23 @@ _INSERT_LEAD_SEC = 0.3          # 聞こえなかったアクションは次の�
 _STREETS = ("preflop", "flop", "turn", "river")
 
 
+# 発話の読みの確からしさ（`tools/estimate.py` の `utterance_options`, v0 と共通）のうち v1 で置き直す値。
+# 定型の幻聴（「ご覧いただきありがとうございます。」・プロンプトの繰り返し）の下で第 2 の耳が何かを聞いた発話が
+# アクションだったのは店舗の真のアクションで 1/23（7b897671 ハンド 3 のコール）。v0 の −4.0（捨てるのは重い）の
+# ままだと、既定の読みの確からしさを足したとき、雑談の幻聴を第 2 の耳の数字の候補で読む別解が安くなる。
+READING_OVERRIDES: dict[str, float] = {"drop_heard": -0.1}
+
+
+def reading_params() -> dict:
+    from tools.estimate import PARAMS as V0
+
+    return dict(V0, **READING_OVERRIDES)
+
+
 def params_hash(params: dict[str, float] = PARAMS) -> str:
-    return hashlib.sha1(json.dumps(params, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+    """値の指紋。発話の読みの確からしさ（`reading_params`）も含める（監査 2 回目）。"""
+    both = {"estimator": params, "reading": reading_params()}
+    return hashlib.sha1(json.dumps(both, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 
 
 def _log(p: float) -> float:
@@ -267,6 +286,38 @@ class SessionEstimator:
         self.replays = 0
         self._parse_cache: dict = {}
         self._text_at = {r["utterance_start_ts"]: (r.get("text") or "").strip() for r in self.transcripts}
+        self._row_at = {r["utterance_start_ts"]: r for r in self.transcripts}
+        self._options_cache: dict[float, list] = {}
+
+    def _options(self, start: float) -> list:
+        """発話の読みの選択肢（[0] が既定, v0 と同じ `utterance_options`）。"""
+        if start not in self._options_cache:
+            from tools.estimate import utterance_options
+
+            self._options_cache[start] = utterance_options(self._row_at[start], reading_params())
+        return self._options_cache[start]
+
+    @property
+    def _default_logp(self) -> "_DefaultLogp":
+        return _DefaultLogp(self)
+
+    def _window_starts(self, w: HandWindow) -> list[float]:
+        return [s for s in self._row_at if w.start - 0.5 <= s < w.end]
+
+    def _button_logp(self, w: HandWindow, button: Optional[int]) -> float:
+        """ボタンの事前: 記録のボタン 1 − p_button、ほかの席に p_button を分ける（隣の席 = 動かし忘れ・動かしすぎを
+        4 倍厚く）。席の数で割るので卓の大きさによらず足して 1（監査 2 回目）。"""
+        p = self.params["p_button"]
+        if button == w.button:
+            return _log(1 - p)
+        seats = sorted({pl["seat"] for pl in w.base.get("players") or []})
+        alts = [s for s in seats if s != w.button]
+        if w.button not in seats or button not in alts:
+            return _log(p / max(1, len(alts)))
+        i = seats.index(w.button)
+        near = {seats[i - 1], seats[(i + 1) % len(seats)]} - {w.button}
+        weight = {s: 4.0 if s in near else 1.0 for s in alts}
+        return _log(p * weight[button] / sum(weight.values()))
 
     def _p_phantom(self, start: Optional[float], words: tuple[tuple[str, str], ...] = (), k: int = -1) -> float:
         """その発話の k 番目の語が余計な語である確率。同じ発話で同じアクションが続けば言い直し（言い方が同じなら
@@ -370,13 +421,25 @@ class SessionEstimator:
         flags: list[str] = []
         if hand is None:
             return -1e6, [("ハンドが作れない", -1e6)], ["ハンドが作れない"]
-        for e in edits:
-            if e.logp:
-                terms.append((f"読み: {e.label}", e.logp))
-        terms.append(("ボタン", _log(1 - p["p_button"]) if info["button"] == w.button else _log(p["p_button"] / 2)))
+        # 発話の読み: 各発話でちょうど 1 つの読みを選び、その確からしさを足す（直しの読み or 既定の読み。既定の読みも
+        # 第 2 の耳で聞き直した・音の近さで読んだ・定型の幻聴を捨てた、などで確からしさが違う = 監査 2 回目）
+        read_at = {e.at: e for e in edits if e.kind == "read"}
+        for start in self._window_starts(w):
+            e = read_at.get(start)
+            logp = e.logp if e is not None else self._default_logp.get(start, 0.0)
+            if logp:
+                terms.append((f"読み: {e.label}" if e is not None else f"既定の読み「{self._text_at.get(start, '')}」",
+                              logp))
+        terms.append(("ボタン", self._button_logp(w, info["button"])))
+        if hand.get("betting_open_at_end"):
+            # 実卓のハンドは全員が降りるかショーダウンでしか終わらない（語を捨てて短くしたハンドが、最後の人が
+            # 行動しないまま勝者の操作で終わるのを止める = 監査 2 回目の要約 2）
+            terms.append(("ラウンドが閉じないまま終わった", _log(p["p_unclosed"])))
+            flags.append("ベッティングが閉じないまま終わった")
         rows, unused = align_words(hand.get("actions") or [], info["tokens"], info["inserted"])
         betting = [r for r in rows if r.street != "showdown"]
         terms += self._action_terms(hand, betting, flags)
+        flags += self._amount_readings(betting, edits)
         # ショーダウンで見せずに降りた（マック）: ディーラーは「フォールド」と言う
         for r in rows:
             if r.street == "showdown" and r.action == "fold":
@@ -458,6 +521,29 @@ class SessionEstimator:
             prev[r.street] = r.action
         return terms
 
+    def _amount_readings(self, betting: list[_Row], edits: tuple[Edit, ...]) -> list[str]:
+        """賭けの額を読んだ発話に、別の額になる読み（第 2 の耳の候補など）が、選んだ読みから `review_margin` 以内の
+        確からしさである。採点には足さず要確認の理由だけ（監査 2 回目: 合法な額の聞き違いは、寄せ・丸めが無いと何の
+        印も付かない）。店舗の 15 発話（第 2 の耳が額を読んだ）では別の額の候補は 2.75 以上離れ、額は全部正しかった。"""
+        margin = self.params["review_margin"]
+        chosen = {e.at: e.value for e in edits if e.kind == "read"}
+        out: list[str] = []
+        seen: set[float] = set()
+        for r in betting:
+            start = r.word.utterance_start_ts if r.word is not None else None
+            if r.action not in _WAGER or start is None or start in seen or start not in self._row_at:
+                continue
+            seen.add(start)
+            options = self._options(start)
+            mine = next((o for o in options if o.source != "drop" and o.text == chosen.get(start)), options[0])
+            amounts = _wager_amounts(mine.keys)
+            others = sorted({a for o in options if o is not mine and o.logp >= mine.logp - margin
+                             for a in _wager_amounts(o.keys)} - amounts)
+            if amounts and others:
+                out.append(f"額の読みが 2 通り（{r.street} 席{r.seat} {'・'.join(map(str, sorted(amounts)))} / "
+                           f"{'・'.join(map(str, others))}）")
+        return out
+
     def _p_miss(self, action: Optional[str], previous: Optional[str], last_fold: bool = False) -> float:
         p = self.params
         if action in _WAGER:
@@ -476,10 +562,17 @@ class SessionEstimator:
         if self.presence is None:
             return []
         seats = {pl["seat"] for pl in hand.get("players") or []}
-        deps = [d for d in self.presence.departures(w.start, w.end) if d[0] in seats]
+        # 窓はどの仮説でも同じ（ハンドの始まりから、直しの無い再生のハンドの終わり + `departure_after_end_sec`
+        # または次のハンドの始まりまで）。すぐ戻った離脱（ちらつき・のぞき見 = engine が 3 秒でフォールドにしない
+        # のと同じ）はどの仮説でも数えない（監査 2 回目: フォールドの証拠に流用されない）
+        stop = min(w.end, (_epoch(w.base.get("ended_at")) or w.end) + p["departure_after_end_sec"])
+        deps = [d for d in self.presence.departures(w.start, stop)
+                if d[0] in seats and not (d[2] is not None and d[2] - d[1] < p["flicker_sec"])]
+        end = _epoch(hand.get("ended_at")) or stop
         terms: list[tuple[str, float]] = []
         explained: set[int] = set()
         folded_at: dict[int, float] = {}
+        eps, tail = p["fold_early_mix"], p["fold_tail_sec"]
         # 時刻の分かる行（言われた語の話し始め・札の離脱で作ったフォールドの離脱の時刻）。言われないフォールドは
         # 前後の時刻の分かる行の間のどこか（最後のフォールドなら前の行から `silent_fold_wait` 秒まで）
         anchors = [(_word_start(r) if r.word is not None else r.t)
@@ -488,46 +581,69 @@ class SessionEstimator:
         for i, r in enumerate(betting):
             if r.action != "fold":
                 continue
+            folded_at.setdefault(r.seat, r.t)
+            if not self._seat_read(r.seat, w.start, stop):
+                continue                          # そのハンドで一度も読めていない席: 離脱は証拠にならない
             spoken = r.word is not None
             if spoken:
                 at = _word_start(r)
-                lo, hi = at - p["fold_lag_max"], at + p["fold_lag_max"]
+                lo, hi = at - tail, at + tail
+                nxt: list[float] = []
             else:
-                lo = max((a for a in anchors[:i] if a is not None), default=w.start)
+                prev = max((a for a in anchors[:i] if a is not None), default=w.start)
                 nxt = [a for a in anchors[i + 1:] if a is not None]
-                hi = min(nxt) if nxt else lo + p["silent_fold_wait"]
-                lo, hi = lo - 1.0, hi + 1.0
+                after = min(nxt) if nxt else prev + p["silent_fold_wait"]
+                lo, hi = prev - tail, after + 1.0          # 手番より前に投げた札（早いマック）も裾で受ける
                 at = r.t
+            # フォールドした札はそのハンドの中では戻らない（戻った離脱は持ち上げ）
             best = min((k for k, d in enumerate(deps) if d[0] == r.seat and k not in explained
-                        and lo <= d[1] <= hi), key=lambda k: abs(deps[k][1] - at), default=None)
-            folded_at.setdefault(r.seat, r.t)
+                        and lo <= d[1] <= hi and (d[2] is None or d[2] >= end)),
+                       key=lambda k: abs(deps[k][1] - at), default=None)
             if best is None:
                 terms.append((f"席{r.seat} のフォールドに札の離脱が無い", _log(p["p_nodepart"])))
                 flags.append(f"札が離れないフォールド（{r.street} 席{r.seat}）")
                 continue
             explained.add(best)
             folded_at[r.seat] = min(folded_at[r.seat], deps[best][1])
-            bet_end = max(bet_end, deps[best][1])
+            if not spoken:
+                bet_end = max(bet_end, deps[best][1])   # 言われないフォールドの時刻 = 札が離れた時刻
+            t_dep = deps[best][1]
             if spoken:
-                lag = deps[best][1] - at
-                density = math.exp(-abs(lag - p["fold_lag_mu"]) / p["fold_lag_b"]) / (2 * p["fold_lag_b"])
+                # 話し始めのほぼ同時（ラプラス）+ 裾（語が発話の後ろの方・早いマック: ±`fold_tail_sec` の一様）
+                lag = t_dep - at
+                core = math.exp(-abs(lag - p["fold_lag_mu"]) / p["fold_lag_b"]) / (2 * p["fold_lag_b"])
+                density = (1 - eps) * core + eps / (2 * tail)
                 terms.append((f"席{r.seat} の離脱 = 声のフォールド（{lag:+.1f} 秒）", _log(density)))
             else:
-                # 前の言われたアクションからの考える時間（指数分布）。次の言われたアクションで打ち切る
+                # 前の言われたアクションからの考える時間（指数分布、次の言われたアクションで打ち切る。打ち切りの
+                # 幅は 3 秒より狭くしない）+ 裾（早いマック）
                 mean = p["silent_fold_mean"]
-                wait = max(0.0, deps[best][1] - (lo + 1.0))
-                span = (hi - 1.0) - (lo + 1.0) if nxt else math.inf
-                density = math.exp(-wait / mean) / mean / (1 - math.exp(-max(span, 0.5) / mean))
-                terms.append((f"席{r.seat} の離脱 = 言われないフォールド（{wait:.1f} 秒後）", _log(density)))
-        for k, (seat, t, _back) in enumerate(deps):
+                wait = t_dep - prev
+                span = max(3.0, (after - prev)) if nxt else math.inf
+                core = math.exp(-max(0.0, wait) / mean) / mean / (1 - math.exp(-span / mean)) if wait >= -1.0 else 0.0
+                density = (1 - eps) * core + eps / max(1.0, hi - lo)
+                terms.append((f"席{r.seat} の離脱 = 言われないフォールド（{wait:+.1f} 秒）", _log(density)))
+            terms.append(("フォールドの札が離れた", _log(1 - p["p_nodepart"])))
+        for k, (seat, t, back) in enumerate(deps):
             if k in explained:
                 continue
             if (seat in folded_at and folded_at[seat] <= t) or t >= bet_end - 2.0:
                 terms.append((f"席{seat} の離脱（ショーダウン・片付け）", _log(1 / p["other_departure_sec"])))
             else:
                 terms.append((f"席{seat} の離脱（残っているのに）", _log(1 / p["lift_sec"])))
-                flags.append(f"残っている席{seat} の札が離れた")
+                if back is None or back >= end:
+                    flags.append(f"残っている席{seat} の札が離れた")
         return terms
+
+    def _seat_read(self, seat: int, t0: float, t1: float) -> bool:
+        """その席の札がハンドの中で一度でも載っていたか（読めない席のフォールドを札の離脱で罰しない）。"""
+        obs = (self.presence._seats or {}).get(seat) if self.presence is not None else None   # noqa: SLF001
+        if not obs:
+            return False
+        before = [o for o in obs if o.t <= t0]
+        if before and before[-1].present:
+            return True
+        return any(o.present for o in obs if t0 < o.t <= t1)
 
     def _board_terms(self, hand: dict, flags: list[str]) -> list[tuple[str, float]]:
         p = self.params
@@ -576,14 +692,12 @@ class SessionEstimator:
     # ――― 直しの候補 ―――
 
     def candidate_edits(self, w: HandWindow, base_info: dict) -> list[Edit]:
-        from tools.estimate import utterance_options   # 読みの選択肢（第 2 の耳の候補など）は v0 と同じ
-
         edits: list[Edit] = []
         _events, rows = self._window_inputs(w)
         by_start = {r["utterance_start_ts"]: r for r in rows}
         # 別の読み
         for start, row in by_start.items():
-            options = utterance_options(row)
+            options = self._options(start)       # 読みの選択肢（第 2 の耳の候補など）は v0 と同じ
             for opt in options[1:]:
                 if opt.source == "drop":
                     continue                        # 語を捨てるのは drop で
@@ -662,8 +776,10 @@ class SessionEstimator:
             beam = sorted([root, *ranked], key=lambda c: -c.score)[:int(p["beam"])]
             for _depth in range(2, int(p["depth"]) + 1):
                 grown: list[Candidate] = []
-                for c in beam:
-                    for e in useful:
+                for rank, c in enumerate(beam):
+                    # いちばん良い候補にはすべての直しを試す（単独では点が低くても、ほかの直しのあとで効く直しが
+                    # ある = 店舗 fded6f75 ハンド 1: リバーを直したあとのフロップの無言のチェック）
+                    for e in (edits if rank == 0 else useful):
                         if e in c.edits or any(e.conflicts(x) for x in c.edits):
                             continue
                         child = evaluate(_ordered((*c.edits, e)))
@@ -702,17 +818,50 @@ class SessionEstimator:
         reasons += r.best.flags
         return list(dict.fromkeys(reasons))
 
-    def estimate(self, on_hand: Optional[Callable[[HandResult], None]] = None) -> list[HandResult]:
-        out = []
-        for w in self.windows():
-            r = self.estimate_hand(w)
-            out.append(r)
-            if on_hand:
-                on_hand(r)
+    def estimate(self, on_hand: Optional[Callable[[HandResult], None]] = None, workers: int = 1,
+                 windows: Optional[list[HandWindow]] = None) -> list[HandResult]:
+        """セッションのハンドを推定する。ハンドどうしは独立なので `workers` > 1 なら別のプロセスで並べて回す
+        （結果は同じ。店舗 PC で 1 セッション 1 分以内 = ADR-0056）。"""
+        windows = self.windows() if windows is None else windows
+        out: list[HandResult] = []
+        if workers <= 1 or len(windows) < 2:
+            for w in windows:
+                r = self.estimate_hand(w)
+                out.append(r)
+                if on_hand:
+                    on_hand(r)
+            return out
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+
+        args = (self.events, self.transcripts, self.presence, self.setup, self.flags, self.session_id, self.params)
+        with ProcessPoolExecutor(max_workers=min(workers, len(windows)), mp_context=multiprocessing.get_context("spawn"),
+                                 initializer=_init_worker, initargs=(args,)) as pool:
+            for r in pool.map(_estimate_in_worker, windows):
+                out.append(r)
+                if on_hand:
+                    on_hand(r)
         return out
 
 
 # ───────────────────────── 補助 ─────────────────────────
+
+_WORKER: Optional[SessionEstimator] = None
+_KEEP_CANDIDATES = 50          # 別のプロセスから返す候補の数（受け渡しを軽くする。1 番・次点・事後確率は変わらない）
+
+
+def _init_worker(args: tuple) -> None:
+    global _WORKER
+    logging.disable(logging.CRITICAL)             # 候補の再生で出るエンジンのログは要らない
+    _WORKER = SessionEstimator(*args)
+
+
+def _estimate_in_worker(w: HandWindow) -> HandResult:
+    assert _WORKER is not None
+    r = _WORKER.estimate_hand(w)
+    r.candidates = r.candidates[:_KEEP_CANDIDATES]
+    r.posteriors = r.posteriors[:_KEEP_CANDIDATES]
+    return r
 
 
 def _restates(t: AudioEvent, rows: list[_Row]) -> bool:
@@ -739,11 +888,31 @@ def _ordered(edits: tuple[Edit, ...]) -> tuple[Edit, ...]:
     return tuple(sorted(edits, key=lambda x: (x.kind, x.at, str(x.value))))
 
 
+class _DefaultLogp:
+    """発話の既定の読みの確からしさ（`utterance_options` の [0]）。"""
+
+    def __init__(self, est: SessionEstimator) -> None:
+        self._est = est
+
+    def get(self, start: float, default: float = 0.0) -> float:
+        try:
+            options = self._est._options(start)          # noqa: SLF001
+        except KeyError:
+            return default
+        return float(options[0].logp) if options else default
+
+
+def _wager_amounts(keys: tuple) -> set[int]:
+    """読みの選択肢のアクション（`tools/estimate.py` の `_keys`）のうち賭けの額。"""
+    return {int(k[1]) for k in keys if k[0] in _WAGER and k[1]}
+
+
 def _street_open(dealt: dict[int, float], n: int) -> Optional[float]:
-    """ボードが n 枚になった時刻（その枚数までの札がすべて配られた時刻）。"""
-    if not all(i in dealt for i in range(1, n + 1)):
-        return None
-    return max(dealt[i] for i in range(1, n + 1))
+    """そのストリートが始まった時刻: フロップは 3 枚のうち最初に読んだ札（1 枚の読み遅れでストリートの窓ごとずれ
+    ないように = 監査 2 回目）、ターン・リバーはその札。"""
+    group = {3: (1, 2, 3), 4: (4,), 5: (5,)}.get(n, tuple(range(1, n + 1)))
+    times = [dealt[i] for i in group if i in dealt]
+    return min(times) if times else None
 
 
 def _last_fold(hand: dict, betting: list[_Row]) -> Optional[int]:

@@ -66,6 +66,23 @@ class TestWorldEvents:
         assert [e.action for e in world_events([live], rows, {10.0: "コール"})] == ["call"]
 
 
+def test_a_hand_that_ends_with_someone_still_to_act_is_marked():
+    """確定の時点で手番の人が残っていた（ベッティングのラウンドが閉じないまま勝者の操作で終わった）ハンドに印を付ける
+    （推定器が罰する。実卓のハンドは全員が降りるかショーダウンでしか終わらない）。"""
+    from core.game_state import PlayerState
+
+    t = datetime(2026, 9, 29, 12, 0, 0).timestamp()
+    rows = [{"utterance_start_ts": t + s, "audio_sec": 0.8, "text": text, "confidence": 0.9}
+            for s, text in ((2, "コール"), (22, "フォールド"), (25, "フォールド"))]
+    typed = [AudioEvent(action="new_hand", amount=0, timestamp=t, raw_text=""),
+             AudioEvent(action="winner", amount=0, timestamp=t + 10, raw_text="シート5 ウィナー"),   # 席4 がまだ
+             AudioEvent(action="new_hand", amount=0, timestamp=t + 20, raw_text="")]
+    players = [PlayerState(seat=s, name=f"P{s}", stack=10000) for s in (4, 5, 6)]
+    hands = replay_world(world_events(typed, rows), None, players=players, sb=100, bb=200, session_id="s",
+                         auto_new_hand=False, rfid_folds=False)
+    assert [(h["winner_seat"], h["betting_open_at_end"]) for h in hands] == [(5, True), (6, False)]
+
+
 def _load_store(prefix: str):
     from core.game_state import PlayerState
     from integration.replay import load_events

@@ -8,6 +8,7 @@
 
     python tools/estimate_logs.py logs_2026-10-01.zip                  # 推定だけ見る（書かない）
     python tools/estimate_logs.py C:\\PokerHandLogger\\logs --shadow   # 影のファイルに書く
+    python tools/estimate_logs.py logs --latest --shadow               # いちばん新しいセッションだけ（所要を測る）
     python tools/estimate_logs.py C:\\PokerHandLogger\\logs --write    # 記録の本体にする（評価に通ってから）
 """
 from __future__ import annotations
@@ -16,6 +17,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -43,6 +45,12 @@ def _jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def _default_workers() -> int:
+    import os
+
+    return max(1, min(4, (os.cpu_count() or 2) - 1))
+
+
 def presence_for(folder: Optional[Path], session_id: str) -> Optional[PresenceTimeline]:
     """席の札の在否の履歴: fixture の `presence.jsonl`、店舗のログの `<sid>.table_state.jsonl`。"""
     if folder is None:
@@ -61,6 +69,14 @@ def _epoch(iso: Optional[str]) -> Optional[float]:
         return datetime.fromisoformat(iso).timestamp() if iso else None
     except ValueError:
         return None
+
+
+def newest_session(paths: list[Path]) -> Optional[str]:
+    """ログのフォルダのうち、いちばん新しいセッション（events.jsonl を最後に書いた）の ID。"""
+    events = [e for p in paths if p.is_dir() for e in p.rglob("*.events.jsonl")]
+    if not events:
+        return None
+    return max(events, key=lambda e: e.stat().st_mtime).name[: -len(".events.jsonl")]
 
 
 def _live_hand(live: list[dict], started_at: Optional[str]) -> Optional[dict]:
@@ -105,18 +121,21 @@ def entry_for(result: HandResult, live: Optional[dict]) -> dict:
 
 def estimate_session(events: list, transcripts: list[dict], presence: Optional[PresenceTimeline], setup: dict,
                      flags: dict, session_id: str, live_hands: list[dict], params: dict = PARAMS,
-                     on_hand: Optional[Callable[[HandResult, Optional[dict]], None]] = None) -> dict:
-    """セッションの全ハンドの推定（推定のファイルの中身）。"""
+                     on_hand: Optional[Callable[[HandResult, Optional[dict]], None]] = None,
+                     workers: int = 1) -> dict:
+    """セッションの全ハンドの推定（推定のファイルの中身）。`workers` > 1 ならハンドを並べて回す（結果は同じ）。"""
     est = SessionEstimator(events, transcripts, presence, setup, flags, session_id, params)
     hands: dict[str, dict] = {}
-    for w in est.windows():
-        result = est.estimate_hand(w)
-        live = _live_hand(live_hands, w.base.get("started_at"))
+
+    def add(result: HandResult) -> None:
+        live = _live_hand(live_hands, result.window.base.get("started_at"))
         entry = entry_for(result, live)
         if entry["hand_id"] is not None:
             hands[str(entry["hand_id"])] = entry
         if on_hand:
             on_hand(result, live)
+
+    est.estimate(on_hand=add, workers=workers)
     return {"tool": "estimator", "estimator_version": ESTIMATOR_VERSION, "params_hash": params_hash(params),
             "session_id": session_id, "hands": hands}
 
@@ -127,13 +146,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="店舗のログのハンドごとに推定器 v1 を回す")
     ap.add_argument("paths", nargs="+", type=Path, help="ログのフォルダ・pack_logs の zip（分けた zip は全部）")
     ap.add_argument("--session", action="append", help="このセッション（ID の頭）だけ")
+    ap.add_argument("--latest", action="store_true", help="いちばん新しいセッションだけ（ログのフォルダを渡したとき）")
+    ap.add_argument("--workers", type=int, default=_default_workers(),
+                    help="ハンドを並べて推定するプロセスの数（結果は同じ。既定 = CPU の数 − 1、最大 4）")
     group = ap.add_mutually_exclusive_group()
     group.add_argument("--shadow", action="store_true", help=f"推定を <sid>{SHADOW_SUFFIX} に書く（読む側は使わない）")
     group.add_argument("--write", action="store_true",
                        help=f"推定を <sid>{ESTIMATE_SUFFIX} に書く（読む側が記録の本体として使う。評価に通ってから）")
     args = ap.parse_args(argv)
     logging.disable(logging.CRITICAL)
-    inputs, tmp = inputs_from_logs(args.paths, args.session)
+    only = args.session
+    if args.latest:
+        newest = newest_session(args.paths)
+        if newest is None:
+            print("セッションが見つかりません（--latest はログのフォルダを渡してください）")
+            return 2
+        only = [newest]
+    inputs, tmp = inputs_from_logs(args.paths, only)
     if (args.shadow or args.write) and tmp is not None:
         print("zip には書けません（ログのフォルダを渡してください）")
         return 2
@@ -154,8 +183,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"      ライブ: {' | '.join(_summary(live_hand))}")
                 print(f"      推定:   {' | '.join(_summary(result.best.hand))}")
 
+        started = time.time()
         data = estimate_session(inp.events, inp.transcripts, presence_for(inp.folder, inp.session_id), inp.setup,
-                                inp.flags, inp.session_id, live, on_hand=show)
+                                inp.flags, inp.session_id, live, on_hand=show, workers=args.workers)
+        # 切り替えの条件の「店舗 PC で 1 セッション 1 分以内」（ADR-0056 追記 2）
+        print(f"  所要 {time.time() - started:.0f} 秒（{len(data['hands'])} ハンド・{args.workers} プロセス）")
         if args.shadow or args.write:
             out = inp.folder / f"{inp.session_id}{SHADOW_SUFFIX if args.shadow else ESTIMATE_SUFFIX}"
             atomic_write_json(out, data)

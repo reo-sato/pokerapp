@@ -77,9 +77,10 @@ def test_v1_bench_format_and_interval():
     assert wilson(0, 0) == (0.0, 1.0)
     r = V1Result("店舗（実卓）", hands=18, base_exact=12, exact=14, in_candidates=16, flagged=7,
                  better=["9d1d8536#4", "7b897671#3"], failing=["027e4b15#1"], not_found=["027e4b15#1"],
-                 flagged_correct=["9d1d8536#4"], edits={"0": 15, "2": 1})
+                 flagged_correct=["9d1d8536#4"], edits={"0": 15, "2": 1}, ties=["d0f055fb#3"])
     text = "\n".join(format_v1(r))
     assert "読み直し 12/18（67%） → 推定 14/18（78%, 95% 区間 55%〜91%）" in text
+    assert "同点（次点との差 0）: d0f055fb#3" in text
     assert "良くなった 2・悪くなった 0" in text and "誤りに付かない 0・正しいのに付く 1" in text
     assert "正解が候補に無い 1・候補にあるが点で負けた 0" in text
 
@@ -92,6 +93,18 @@ def test_search_check_format():
     b = V1Result("店舗（実卓）", hands=3, exact=1, best={"x#1": "A2", "x#2": "B2", "x#3": "C"}, correct=["x#2"])
     text = "\n".join(format_search_check([a], [b]))
     assert "1 番が変わる 2/3（正しくなる 1・正しくなくなる 1）" in text and "x#1 x#2" in text
+
+
+def test_repeat_check_format():
+    """切り替えの条件「同じ入力で同じ結果」: 2 回回して、ハンドごとの 1 番の記録と要確認を比べる。"""
+    from tools.bench_hands import V1Result, format_repeat_check
+
+    first = V1Result("店舗（実卓）", hands=2, best={"x#1": "A", "x#2": "B"}, review_of={"x#1": True, "x#2": False})
+    same = V1Result("店舗（実卓）", hands=2, best={"x#1": "A", "x#2": "B"}, review_of={"x#1": True, "x#2": False})
+    assert "同じ入力で 2 回: 全ハンド同じ" in "\n".join(format_repeat_check([first], [same]))
+    other = V1Result("店舗（実卓）", hands=2, best={"x#1": "A", "x#2": "B2"}, review_of={"x#1": False, "x#2": False})
+    text = "\n".join(format_repeat_check([first], [other]))
+    assert "1 番が違う 1・要確認が違う 1" in text and "x#1 x#2" in text
 
 
 def test_bench_format():

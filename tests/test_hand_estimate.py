@@ -71,6 +71,13 @@ class TestOverlay:
         assert out["estimate"]["margin"] == 2.5 and out["estimate"]["estimator_version"] == "1.0"
         assert [a["action"] for a in out["_live"]["actions"]] == ["fold", "raise"]
 
+    def test_the_review_of_the_record_is_the_estimates(self):
+        """記録の本体の「要確認」= 推定の要確認（監査 2 回目: 記録上の要確認の定義）。"""
+        live = dict(_live_hand(), review_required=True)
+        assert apply_estimate(live, _entry(review=False))["review_required"] is False
+        assert apply_estimate(_live_hand(), _entry(review=True))["review_required"] is True
+        assert "review_required" not in apply_estimate(_live_hand(), _entry())    # 古い推定のファイルは触らない
+
     def test_the_live_record_is_not_changed(self):
         live = _live_hand()
         apply_estimate(live, _entry())

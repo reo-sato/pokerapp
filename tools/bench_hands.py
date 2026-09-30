@@ -165,6 +165,10 @@ class V1Result:
     best: dict[str, str] = field(default_factory=dict)          # ハンド → 1 番の記録（探索の確かめで比べる）
     correct: list[str] = field(default_factory=list)
     reasons: list[int] = field(default_factory=list)            # ハンドごとの要確認の理由の数（1 ハンド 2 件以下の目安）
+    actions: list[int] = field(default_factory=list)            # ハンドごとのアクションの数（要確認のアクション率の分母）
+    chain: list[str] = field(default_factory=list)              # 前のハンドの推定が勝者・ポットを変えた（持ち点が連鎖する）
+    ties: list[str] = field(default_factory=list)               # 1 番と次点が同点（差 0 = どちらが 1 番かは並び順）
+    review_of: dict[str, bool] = field(default_factory=dict)    # ハンド → 要確認（同じ入力で 2 回の確かめで比べる）
     # ライブの記録（店舗のログのみ）: 切り替えの条件の「同じハンドで比べて悪くなったハンド 0」
     live_hands: int = 0
     live_exact: int = 0
@@ -181,7 +185,11 @@ class V1Result:
         found = any(hand_fully_correct(truth, c.hand) for c in result.candidates)
         flagged = bool(result.reasons)
         self.best[key] = repr(record_key(result.best.hand))
+        self.review_of[key] = flagged
+        if result.margin is not None and result.margin == 0:
+            self.ties.append(key)
         self.reasons.append(len(result.reasons))
+        self.actions.append(sum(1 for a in result.best.hand.get("actions") or [] if a.get("street") != "showdown"))
         if ok:
             self.correct.append(key)
         if live is not _NO_LIVE:
@@ -249,8 +257,16 @@ def v1_inputs(store: bool = True, script: bool = True, sim_sessions: int = 0, si
     return out
 
 
+def default_workers() -> int:
+    """推定を並べて回すプロセスの数（1 つは残す。多すぎても受け渡しが重いので 4 まで）。"""
+    import os
+
+    return max(1, min(4, (os.cpu_count() or 2) - 1))
+
+
 def run_bench_v1(*, store: bool = True, script: bool = True, sim_sessions: int = 0,
-                 params: Optional[dict] = None, logs: Optional[list[Path]] = None) -> list[V1Result]:
+                 params: Optional[dict] = None, logs: Optional[list[Path]] = None,
+                 workers: int = 1) -> list[V1Result]:
     from integration.estimator import PARAMS as V1_PARAMS
     from integration.estimator import SessionEstimator
 
@@ -265,13 +281,24 @@ def run_bench_v1(*, store: bool = True, script: bool = True, sim_sessions: int =
                                    params or V1_PARAMS)
             truth = {int(h["hand_id"]): h for h in inp.truth.get("hands") or []}
             live_hands = _live_record(inp)
+            picked = []
             for w in est.windows():
                 # 店舗のログはライブの記録のハンド番号で真のアクションが付く（始まりの時刻で合わせる）
                 live = _live_hand(live_hands, w.base.get("started_at")) if live_hands else None
                 hid = int(live["hand_id"]) if live is not None else w.hand_id
                 if hid in truth:
-                    res.add_hand(f"{short_id(inp.session_id)}#{hid}", truth[hid], est.estimate_hand(w),
-                                 live=live if live_hands else _NO_LIVE)
+                    picked.append((w, hid, live))
+            results = est.estimate(windows=[w for w, _, _ in picked], workers=workers)
+            prev_changed = False
+            for (w, hid, live), result in zip(picked, results):
+                key = f"{short_id(inp.session_id)}#{hid}"
+                res.add_hand(key, truth[hid], result, live=live if live_hands else _NO_LIVE)
+                if prev_changed:
+                    res.chain.append(key)
+                # 記録の持ち点はライブの記録から来る: 推定がこのハンドの勝者・ポットを変えたら、次のハンドの持ち点は
+                # 推定の世界ではずれている（監査 2 回目: 持ち点の連鎖の印）
+                ref = live if live is not None else next((c.hand for c in result.candidates if not c.edits), {})
+                prev_changed = any(result.best.hand.get(k) != (ref or {}).get(k) for k in ("winner_seat", "pot_total"))
             res.session_seconds.append(round(time.time() - started, 1))
             res.seconds += time.time() - started
         out.append(res)
@@ -314,6 +341,20 @@ def format_search_check(normal: list[V1Result], wide: list[V1Result]) -> list[st
     return lines
 
 
+def format_repeat_check(first: list[V1Result], second: list[V1Result]) -> list[str]:
+    """切り替えの条件「同じ入力で同じ結果」: 同じ入力で 2 回回し、ハンドごとの 1 番の記録と要確認を比べる。"""
+    lines = []
+    for a, b in zip(first, second):
+        best = [k for k in a.best if a.best.get(k) != b.best.get(k)]
+        review = [k for k in a.review_of if a.review_of.get(k) != b.review_of.get(k)]
+        if not best and not review:
+            lines.append(f"{a.name}: 同じ入力で 2 回: 全ハンド同じ（{a.hands} ハンド）")
+            continue
+        lines.append(f"{a.name}: 同じ入力で 2 回: 1 番が違う {len(best)}・要確認が違う {len(review)}")
+        lines.append(f"    違うハンド: {' '.join(sorted(set(best) | set(review)))}")
+    return lines
+
+
 def format_v1(r: V1Result) -> list[str]:
     lo, hi = wilson(r.exact, r.hands)
     lines = [
@@ -325,6 +366,7 @@ def format_v1(r: V1Result) -> list[str]:
         f"    誤り {len(r.failing)} の内訳: 正解が候補に無い {len(r.not_found)}・候補にあるが点で負けた {len(r.outscored)}"
         f" ／ 1 番の直しの数 {dict(sorted(r.edits.items()))}",
         f"    要確認の理由 1 ハンド平均 {sum(r.reasons) / max(1, len(r.reasons)):.1f}・最多 {max(r.reasons, default=0)}"
+        f"・アクションあたり {sum(r.reasons) / max(1, sum(r.actions)):.0%}"
         f" ／ 1 セッション最長 {max(r.session_seconds, default=0.0):.0f} 秒",
     ]
     if r.live_hands:
@@ -332,7 +374,9 @@ def format_v1(r: V1Result) -> list[str]:
                      f"（ライブより良くなった {len(r.better_than_live)}・悪くなった {len(r.worse_than_live)}）")
     for label, keys in (("良くなった", r.better), ("悪くなった", r.worse), ("誤りに要確認が付かない", r.unflagged_errors),
                         ("正解が候補に無い", r.not_found), ("点で負けた", r.outscored),
-                        ("ライブより悪くなった", r.worse_than_live)):
+                        ("ライブより悪くなった", r.worse_than_live),
+                        ("同点（次点との差 0）", r.ties),
+                        ("前のハンドの推定で持ち点が連鎖", r.chain)):
         if keys:
             lines.append(f"    {label}: {' '.join(keys[:20])}{' …' if len(keys) > 20 else ''}")
     return lines
@@ -350,21 +394,34 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--no-script", action="store_true", help="v1: 台本を回さない")
     ap.add_argument("--search-check", action="store_true",
                     help="v1: 探索を 2 倍に広げてもう 1 回回し、1 番が変わる率（探索の誤りの目安）を出す")
+    ap.add_argument("--twice", action="store_true",
+                    help="v1: 同じ入力でもう 1 回回し、ハンドごとの 1 番の記録と要確認が同じかを確かめる（切り替えの条件）")
+    ap.add_argument("--workers", type=int, default=default_workers(),
+                    help="v1: ハンドを並べて推定するプロセスの数（結果は同じ。既定 = CPU の数 − 1、最大 4）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
     logging.disable(logging.CRITICAL)          # 候補の再生で出るエンジンのログは要らない
     if not args.v0:
         def run(params: Optional[dict] = None) -> list[V1Result]:
             if args.logs:
-                return run_bench_v1(store=False, script=False, logs=args.logs, params=params)
-            return run_bench_v1(script=not args.no_script, sim_sessions=args.sim, params=params)
+                return run_bench_v1(store=False, script=False, logs=args.logs, params=params, workers=args.workers)
+            return run_bench_v1(script=not args.no_script, sim_sessions=args.sim, params=params,
+                                workers=args.workers)
 
         results_v1 = run()
+        if args.twice and not args.json:
+            again = run()
+            for r in results_v1:
+                print("\n".join(format_v1(r)))
+            print("\n".join(format_repeat_check(results_v1, again)))
+            if not args.search_check:
+                return 0
         if args.search_check:
             wide = run(wide_params())
             if not args.json:
-                for r in results_v1:
-                    print("\n".join(format_v1(r)))
+                if not args.twice:
+                    for r in results_v1:
+                        print("\n".join(format_v1(r)))
                 print("\n".join(format_search_check(results_v1, wide)))
                 return 0
         if args.json:

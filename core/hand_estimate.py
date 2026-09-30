@@ -92,10 +92,13 @@ def apply_estimate(hand: dict, entry: Optional[dict]) -> dict:
         "estimated_at": entry.get("estimated_at"),
         "changed": bool(entry.get("changed")),
         "margin": entry.get("margin"),
-        "posterior": entry.get("posterior"),
+        "posterior": entry.get("posterior"),     # 較正していない（確率として画面に出さない = 監査 2 回目）
         "alternatives": deepcopy(entry.get("alternatives") or []),
         "notes": list(entry.get("notes") or []),
     }
+    # 記録の本体の「要確認」= 推定の要確認（理由が 1 つでもある）。推定のファイルに無ければ推定のハンドのまま
+    if "review" in entry:
+        out["review_required"] = bool(entry.get("review"))
     out["_live"] = {"actions": deepcopy(hand.get("actions") or []), "winner_seat": hand.get("winner_seat"),
                     "button_seat": hand.get("button_seat")}
     return out

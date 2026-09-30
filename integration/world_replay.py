@@ -353,6 +353,21 @@ def replay_world(
             on_action=on_action,
         )
 
+        # ハンドを確定する時点で、まだ手番の人がいたか（ベッティングのラウンドが閉じないまま終わった = 推定器が
+        # 罰する。実卓では全員が降りるかショーダウンでしか終わらない）
+        open_at_end: dict[int, bool] = {}
+        finalize = thread._finalize_hand                # noqa: SLF001
+
+        def finalize_and_note(*args: Any, **kwargs: Any) -> None:
+            try:
+                open_at_end[int(getattr(gs, "_hand_id", 0))] = bool(
+                    gs.is_hand_active() and gs.legal_context().actor_seat is not None)
+            except Exception:  # noqa: BLE001 — 印を付けられないだけ
+                pass
+            finalize(*args, **kwargs)
+
+        thread._finalize_hand = finalize_and_note        # noqa: SLF001
+
         def periodic() -> None:
             thread._check_deal_presence()     # noqa: SLF001 — ライブの run() と同じ順
             thread._check_table_cleared()     # noqa: SLF001
@@ -392,4 +407,8 @@ def replay_world(
         import json
         path = Path(tmp) / f"{session_id}.json"
         data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    return list(data.get("hands") or [])
+    hands = list(data.get("hands") or [])
+    for h in hands:
+        if isinstance(h, dict) and h.get("hand_id") in open_at_end:
+            h["betting_open_at_end"] = open_at_end[h["hand_id"]]
+    return hands

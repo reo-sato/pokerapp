@@ -13,7 +13,7 @@ import pytest
 
 from core.hand_estimate import apply_estimate
 from integration.replay import load_events
-from tools.estimate_logs import _live_hand, estimate_session, presence_for
+from tools.estimate_logs import _live_hand, estimate_session, newest_session, presence_for
 
 STORE = Path(__file__).resolve().parent / "fixtures" / "store"
 
@@ -24,6 +24,18 @@ def test_live_hand_is_matched_by_start_time():
     assert _live_hand(live, "2026-09-29T08:52:43.500")["hand_id"] == 7
     assert _live_hand(live, "2026-09-29T08:53:30.000") is None          # 10 秒より離れている
     assert _live_hand(live, None) is None
+
+
+def test_the_newest_session(tmp_path):
+    """`--latest`: 店舗 PC でセッションのあとに所要を測る（事前登録の手順 = コピペで回せる 1 行）。"""
+    import os
+
+    assert newest_session([tmp_path]) is None
+    for i, sid in enumerate(("aaa", "bbb", "ccc")):
+        path = tmp_path / f"{sid}.events.jsonl"
+        path.write_text("", encoding="utf-8")
+        os.utime(path, (1_000_000 + i * (1 if sid != "bbb" else 100),) * 2)
+    assert newest_session([tmp_path]) == "bbb"
 
 
 def test_estimate_file_overlays_the_live_record():
