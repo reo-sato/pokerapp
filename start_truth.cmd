@@ -8,6 +8,13 @@ if not exist "venv\Scripts\python.exe" (
   pause
   exit /b 1
 )
+rem Already running (started by start_script.cmd / start_cards.cmd or earlier): do not start twice.
+netstat -an | findstr /c:"0.0.0.0:8791 " >nul
+if not errorlevel 1 (
+  echo [ground-truth] Already running on port 8791. Open http://this-PC-IPv4:8791/ on the iPad.
+  pause
+  exit /b 0
+)
 rem Ground truth entry (true action history per hand) for iPad / phone / this PC.
 rem Open http://<this PC's IPv4>:8791/ on the shop Wi-Fi.
 echo [ground-truth] This PC's IPv4 addresses (use one of them on the iPad):

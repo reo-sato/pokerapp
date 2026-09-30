@@ -189,3 +189,16 @@
   - 3 つの画面の `api()`: つながらないときに「サーバにつながりません。…黒い窓が開いているか確かめてください」と出す。
 - テスト: `test_store_2026_09_29.py`（言い直し 6）、`test_tools_ground_truth_ui.py`（2）、`test_read_corpus.py`（1）。
   全体 2159 passed, 5 skipped。
+
+### 追記 2: 台本の画面が開けない（店舗の画面の写真）
+
+- iPhone は新しい文言「サーバにつながりません…」を出していた（更新は入っている）。
+- PC の画面にあった窓は 2 つだけ: 更新に使った PowerShell と、台本のハンドのロガー（`main.py --cli --script voice`）。
+  台本の画面を出す「真のアクション入力 (iPad から)」の窓は無かった。
+- ロガーは「ベッド 200」を `[未適用] no_active_hand` にしていた。台本の画面の「このハンドを始める」が押せず、ハンドが
+  始まっていないため。
+- 直したこと:
+  - `start_script.cmd`・`start_cards.cmd`: 8791 で待ち受けているものが無ければ（`netstat -an` に `0.0.0.0:8791`）、
+    `start_truth.cmd` を別の窓で起動してからロガーを起動する。
+  - `start_truth.cmd`: 既に 8791 で動いていれば、二重に起動せずに知らせる。
+  - テスト: `tests/test_installer.py`（1）。全体 2160 passed, 5 skipped。

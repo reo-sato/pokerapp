@@ -120,6 +120,18 @@ class TestLaunchers:
             text = (ROOT / rel).read_text(encoding="ascii")
             assert f"main.py --cli --log-file --script {kind}" in text, rel
 
+    def test_script_launchers_start_the_script_page_server(self):
+        """台本の画面は真のアクション入力のサーバ（8791）が出す。動いていなければ別の窓で起動する（店舗 2026-09-30:
+        ロガーだけを起動して台本の画面が開けなかった）。真のアクション入力は二重に起動しない。"""
+        check = 'netstat -an | findstr /c:"0.0.0.0:8791 " >nul'
+        for rel in ("start_script.cmd", "start_cards.cmd"):
+            text = (ROOT / rel).read_text(encoding="ascii")
+            assert check in text and 'start "ground-truth" "%~dp0start_truth.cmd"' in text, rel
+            assert text.index("start_truth.cmd\"") < text.index("main.py --cli"), rel     # ロガーより先に
+        truth = (ROOT / "start_truth.cmd").read_text(encoding="ascii")
+        assert check in truth and "if not errorlevel 1 (" in truth
+        assert truth.index(check) < truth.index("tools\\ground_truth_ui.py")
+
     def test_pack_logs_launcher_passes_options_through(self):
         """ショートカットでは既定（直近 12 時間 → デスクトップ）、コマンドでは --audio などを足せる。"""
         text = (ROOT / "pack_logs.cmd").read_text(encoding="ascii")
