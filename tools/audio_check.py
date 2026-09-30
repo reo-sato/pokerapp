@@ -34,7 +34,7 @@ import time
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -81,6 +81,29 @@ class InputDevice:
     api: str
     rate_ok: bool
     default: bool
+
+
+# RDP の音声が接続元に回っていると、PC のマイクは MME などから見えず WDM-KS 方式だけに出る。WDM-KS では
+# Bluetooth のマイクを開けない（店舗 2026-09-30: DJI Mic Mini 2 が「[Errno -9999] Unanticipated host error」）
+RDP_AUDIO_HINT = ("マイクが WDM-KS 方式でしか見えていません。リモートデスクトップの音声が接続元の端末に回っていると"
+                  "こうなり、WDM-KS では Bluetooth のマイクを開けません。接続元の設定で音声の再生を「リモート PC で再生」"
+                  "（Windows の「リモート デスクトップ接続」は「リモート コンピューターで再生する」）にしてつなぎ直し、"
+                  "マイクを探し直してください。")
+WDM_KS_OPEN_HINT = "WDM-KS の番号は開けないことがあります。MME の番号を選んでください。"
+
+
+def _api_of(device: Any) -> str:
+    return str(device.get("api", "") if isinstance(device, dict) else getattr(device, "api", ""))
+
+
+def only_wdm_ks(devices: list) -> bool:
+    """録音できるデバイスが WDM-KS 方式だけか（= RDP の音声が接続元に回っている）。"""
+    return bool(devices) and all("WDM-KS" in _api_of(d) for d in devices)
+
+
+def open_error_hint(device: Any) -> str:
+    """マイクを開けなかったときに添える一言（WDM-KS の番号なら MME を勧める）。"""
+    return WDM_KS_OPEN_HINT if "WDM-KS" in _api_of(device) else ""
 
 
 def list_input_devices(pa, pyaudio_mod, sample_rate: int) -> list[InputDevice]:
@@ -148,6 +171,9 @@ def _cmd_list(args: argparse.Namespace) -> int:
         print(line)
     chosen = next((d for d in devices if d.index == configured), None)
     print()
+    if only_wdm_ks(devices):
+        print(RDP_AUDIO_HINT)
+        print()
     if chosen is None:
         print(f"config の audio.device_id = {configured} は上の一覧にありません。")
     elif not chosen.rate_ok:

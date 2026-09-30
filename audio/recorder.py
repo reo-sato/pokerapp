@@ -33,6 +33,12 @@ _MAX_BUFFER_SECONDS = 5.0
 _MIN_BUFFER_SECONDS = 0.15
 # 「短すぎて捨てた」を報告する下限（これ未満はチップの音などの一瞬の音として黙って捨てる）
 _REPORT_DROP_MIN_SECONDS = 0.08
+# 有音が最短（`min_speech_sec`）に届かなくても、その 2/3 以上あり（既定で 0.1 秒 = 64 ms のチャンク 2 つ）、声の区切りの
+# しきい値のこの倍以上の大きさがあれば認識に回す（短い言葉。読み上げ集 2026-09-30:「チェック」「チョップ」の有音が
+# 0.13 秒で捨てられていた。どれも山は 2,400 以上で、捨てたほかの短い音 = 息など のほとんどは 520 以下。声かどうかは
+# Whisper の前の VAD が決める）
+_SHORT_WORD_RATIO = 2 / 3
+_SHORT_WORD_PEAK_FACTOR = 5.0
 # 発話が始まる前の音も認識に回す秒数。有音ゲートを越える前の語頭（「ロッピャク」の「ロ」など小さい
 # 子音）が切れないように（店舗の実測で短い語が崩れていた, 設計監査 2026-09-25）。
 _PREROLL_SECONDS = 0.3
@@ -324,16 +330,21 @@ class AudioThread(threading.Thread):
         max_buffer_samples = int(_MAX_BUFFER_SECONDS * self._sample_rate)
         min_buffer_samples = int(self._min_speech_sec * self._sample_rate)
         report_drop_samples = int(_REPORT_DROP_MIN_SECONDS * self._sample_rate)
+        short_word_samples = int(self._min_speech_sec * _SHORT_WORD_RATIO * self._sample_rate)
+        short_word_rms = self._speech_rms * _SHORT_WORD_PEAK_FACTOR
+        peak_rms = 0.0
 
         def flush() -> None:
             nonlocal buffer, buffered_samples, voiced_samples, voiced
-            nonlocal utterance_start_ts, silence_chunks, in_play
+            nonlocal utterance_start_ts, silence_chunks, in_play, peak_rms
             # 最小長は「有音サンプル数」で判定する（末尾の無音でかさ増ししない）。
+            long_enough = voiced_samples >= min_buffer_samples or (
+                voiced_samples >= short_word_samples and peak_rms >= short_word_rms)
             if voiced and not in_play:
                 # プレー中でない（ハンドの間の）発話は認識に回さない（ADR-0063）
                 self.skipped += 1
                 logger.debug("Skipped speech outside play (%.2f s)", buffered_samples / self._sample_rate)
-            elif voiced and voiced_samples >= min_buffer_samples and utterance_start_ts is not None:
+            elif voiced and long_enough and utterance_start_ts is not None:
                 self._enqueue_utterance(b"".join(buffer), utterance_start_ts)
             elif voiced and voiced_samples >= report_drop_samples:
                 voiced_sec = voiced_samples / self._sample_rate
@@ -350,6 +361,7 @@ class AudioThread(threading.Thread):
             utterance_start_ts = None
             silence_chunks = 0
             in_play = False
+            peak_rms = 0.0
             self._capture_start = None
 
         while not self._stop_event.is_set():
@@ -375,6 +387,7 @@ class AudioThread(threading.Thread):
                 self.last_voice_at = now
                 silence_chunks = 0
                 voiced_samples += len(data) // 2
+                peak_rms = max(peak_rms, rms)
                 if not voiced:
                     # 発話の開始: pre-roll（直前のチャンク）から取り込み、開始時刻を記録。
                     voiced = True
@@ -472,8 +485,15 @@ class AudioThread(threading.Thread):
                 text, confidence=confidence, utterance_start_ts=utterance_start_ts
             ))
             ear, ear_text = None, None
-            if not events and not question and self._second_ear is not None:
-                ear, ear_text, events = self._hear_again(audio_bytes, utterance_start_ts)
+            if self._second_ear is not None:
+                from audio.second_ear import apply_ear, wants_ear
+
+                if wants_ear(events, text, question):
+                    ear = self._hear_again(audio_bytes)
+                    used, text_used = apply_ear(events, text, ear, question=question,
+                                                utterance_start_ts=utterance_start_ts)
+                    if text_used is not None:
+                        events, ear_text = tuple(used), text_used
             if not text and not events:
                 return                      # 何も聞こえなかった（第 2 の耳でも）
             if ear_text is not None:
@@ -498,27 +518,19 @@ class AudioThread(threading.Thread):
         except Exception:
             logger.exception("Error in _process_chunk (chunk size=%d bytes)", len(audio_bytes))
 
-    def _hear_again(
-        self, audio_bytes: bytes, utterance_start_ts: Optional[float]
-    ) -> tuple[Optional[dict], Optional[str], tuple[AudioEvent, ...]]:
-        """Whisper がアクションとして読めなかった発話を第 2 の耳で聞き直す（2026-09-29）。
-
-        (第 2 の耳の結果, 使った候補の文 or None, その候補から読んだアクション) を返す。聞き直せなければ
-        (None, None, ())。
-        """
-        from audio.second_ear import agreed_candidate, pcm16_samples, rescue_events
+    def _hear_again(self, audio_bytes: bytes) -> Optional[dict]:
+        """発話を第 2 の耳で聞き直す（2026-09-29）。結果（`EarResult.to_dict()`）か、聞き直せなければ None。
+        どの発話を聞き直し、結果をどう使うかは `second_ear.wants_ear` / `apply_ear`。"""
+        from audio.second_ear import pcm16_samples
 
         started = time.time()
         try:
             ear = self._second_ear.hear(pcm16_samples(audio_bytes, self._sample_rate)).to_dict()
         except Exception:
             logger.exception("第 2 の耳で聞き直せませんでした")
-            return None, None, ()
+            return None
         ear["sec"] = round(time.time() - started, 3)
-        text = agreed_candidate(ear)
-        if text is None:
-            return ear, None, ()
-        return ear, text, tuple(rescue_events(ear, utterance_start_ts=utterance_start_ts))
+        return ear
 
     def _report(self, transcript: Transcript) -> None:
         if self._on_transcript is None:

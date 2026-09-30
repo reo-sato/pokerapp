@@ -41,7 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from audio.recognizer import is_prompt_echo, is_question, parse_actions  # noqa: E402
-from audio.second_ear import agreed_candidate, rescue_events  # noqa: E402
+from audio.second_ear import apply_ear  # noqa: E402
 from integration.replay import load_events  # noqa: E402
 from tools.eval_store import (  # noqa: E402
     _epoch,
@@ -147,23 +147,25 @@ def _flag_penalty(events: list, params: dict) -> float:
 
 
 def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
-    """1 つの発話の読みの選択肢。[0] が既定（`reparse_events` と同じ規則: Whisper で読めればそれ、読めなければ
-    第 2 の耳のライブの規則、どちらも無ければ捨てる）。選択肢が 1 つしか無ければ選択点にしない。"""
+    """1 つの発話の読みの選択肢。[0] が既定（`reparse_events` と同じ規則: Whisper で読めればそれ（額の無いベット /
+    レイズには第 2 の耳の額）、読めなければ第 2 の耳のライブの規則、どちらも無ければ捨てる）。選択肢が 1 つしか
+    無ければ選択点にしない。"""
     start = row.get("utterance_start_ts")
     text = (row.get("text") or "").strip()
     whisper = [] if _is_noise(row, text) else parse_actions(text, utterance_start_ts=start)
     ear = row.get("ear") or None
-    rescue = []
-    if not whisper and ear and not is_question(text):
-        rescue = rescue_events(ear, utterance_start_ts=start)
-    if any(e.action not in _BETTING for e in whisper + rescue):
+    # ライブの規則（読めない発話の聞き直し・額の無いベット / レイズの額, `second_ear.apply_ear`）
+    live, used = apply_ear(whisper, text, ear, question=is_question(text), utterance_start_ts=start)
+    if any(e.action not in _BETTING for e in whisper + live):
         # ハンドの区切り・勝者の宣言などの制御は選ばない（既定のまま = ハンドどうしを独立に保つ）
-        return [Option("whisper" if whisper else "rescue", text, 0.0, _keys(whisper or rescue))]
+        return [Option("whisper" if whisper and used is None else "rescue", text, 0.0, _keys(live))]
     options: list[Option] = []
-    if whisper:
+    if used is not None:
+        options.append(Option("rescue", used, params["rescue"], _keys(live)))
+        if whisper:     # 額を入れる前の Whisper の読み
+            options.append(Option("whisper", text, _flag_penalty(whisper, params), _keys(whisper)))
+    elif whisper:
         options.append(Option("whisper", text, _flag_penalty(whisper, params), _keys(whisper)))
-    elif rescue:
-        options.append(Option("rescue", agreed_candidate(ear) or "", params["rescue"], _keys(rescue)))
     else:
         # 定型の幻聴（「ご覧いただきありがとうございます。」）の下で第 2 の耳が何かを聞いた = 何かを言った（店舗
         # 7b897671 ハンド 3: オールインへのコールが幻聴になり、札の離脱でフォールドと記録した）

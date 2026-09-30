@@ -599,6 +599,19 @@ def is_question(text: str) -> bool:
     return bool(text.strip()) and not _drop_question_sentences(text)
 
 
+# ブラインドの額の読み上げ（「ブラインド 200 400 です」）。Whisper が間に「オールイン」を足した（読み上げ集
+# 2026-09-30:「ブラインド200、オールイン400です。」）ので、ブラインドで始まり額が続く発話はアクションにしない。
+# 席のポジション（「ビッグブラインド」「スモールブラインド」）は文頭が「ブラインド」にならないので当たらない。
+_BLIND_ANNOUNCEMENT = re.compile(r"^ブラインド[\s、,。]*[0-9〇一二三四五六七八九十百千万]")
+
+
+def is_announcement(text: str) -> bool:
+    """ディーラーがポットの額・ブラインドを読み上げた発話（アクションではない）。第 2 の耳でも聞き直さない
+    （読み上げ集 2026-09-30:「ポット1万2000です。」を第 2 の耳が「一万二千です」と聞いて額にしていた）。"""
+    norm = _to_katakana(unicodedata.normalize("NFKC", text)).strip()
+    return "ポット" in norm or _BLIND_ANNOUNCEMENT.match(norm) is not None
+
+
 # 発話全体がこの語だけのときの書き起こしゆれ（店舗の実測 2026-09-27。どれも「チェック」と「コール」の間など、
 # 額が言われるはずの所で出た）。単語としてはほかの意味もあるので、発話全体が一致するときだけ読み替える。
 _WHOLE_UTTERANCE_ALIASES = {
@@ -880,6 +893,8 @@ def _parse_utterance(
         text = alias
     nfkc = unicodedata.normalize("NFKC", text)
     norm = _to_katakana(nfkc)
+    if _BLIND_ANNOUNCEMENT.match(norm.strip()):
+        return []
     keywords = _distinct_keywords(_keyword_matches(norm))
     if not keywords:
         # アクションの語が無くても、額だけを言っていればベットかレイズ（「600点」）

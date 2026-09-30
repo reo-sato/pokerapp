@@ -47,7 +47,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from audio.recognizer import is_implausibly_long, is_prompt_echo, is_question, parse_actions  # noqa: E402
-from audio.second_ear import agreed_candidate, rescue_events  # noqa: E402
+from audio.second_ear import agreed_candidate, apply_ear  # noqa: E402
 from core.events import AudioEvent, RFIDEvent  # noqa: E402
 from core.game_state import PlayerState  # noqa: E402
 from integration.replay import load_events, replay_events  # noqa: E402
@@ -241,8 +241,8 @@ def reparse_events(events: list, transcripts: list[dict], texts: Optional[dict[A
     → 読み直す文（採点し直した文・第 2 の耳の候補）。空の文 = アクションにしない。無い
     発話は書き起こしのまま。打った入力（書き起こしに無い行）と RFID の入力はそのまま。記録に行があった発話は
     その位置・時刻に、無かった発話は聞き取った時刻の位置に入れる。
-    書き起こしをアクションとして読めない発話は、ライブで第 2 の耳が聞き直した結果（行の `ear`）があれば、いまの
-    規則（`second_ear.rescue_events`）で読む（ライブと同じ。texts で置き換えた発話には使わない）。
+    ライブで第 2 の耳が聞き直した結果（行の `ear`）があれば、いまの規則（`second_ear.apply_ear`: 読めない発話の
+    聞き直し・額の無いベット / レイズの額）で重ねる（ライブと同じ。texts で置き換えた発話には使わない）。
     """
     rows = {r["utterance_start_ts"]: r for r in transcripts if r.get("utterance_start_ts") is not None}
     live_time: dict[float, float] = {}
@@ -257,8 +257,8 @@ def reparse_events(events: list, transcripts: list[dict], texts: Optional[dict[A
         text = ((texts[key] if overridden else row.get("text")) or "").strip()
         parsed = [] if _is_noise(row, text) else parse_actions(
             text, confidence=row.get("confidence"), utterance_start_ts=start)
-        if not parsed and not overridden and row.get("ear") and not is_question(text):
-            parsed = rescue_events(row["ear"], utterance_start_ts=start)
+        if not overridden and row.get("ear"):
+            parsed, _ = apply_ear(parsed, text, row["ear"], question=is_question(text), utterance_start_ts=start)
         at = live_time.get(start, row.get("heard_at") or start)
         for ev in parsed:
             ev.timestamp = at

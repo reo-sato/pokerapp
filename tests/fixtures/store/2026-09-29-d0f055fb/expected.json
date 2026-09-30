@@ -562,7 +562,7 @@
      "Kh",
      "6s",
      "Kc",
-     "9c"
+     "9s"
     ],
     "actions": [
      {
@@ -657,101 +657,21 @@
     ],
     "notes": "フロップのうち一枚が読めてない。フロップは必ず3枚出るので、同時に出てなかった場合に、ターンカードをフロップに充当してはいけない。フロップあるいは他のボードカードが不明でショーダウン勝者は分からない場合はチップ移動は無し。",
     "entry_sec": 38.8,
-    "hand_id": 5
+    "hand_id": 5,
+    "winner_seat": 5,
+    "note": "オーナー確認 2026-09-30: リバーは 9♠（入力の 9♣ は誤り。RFID の読みと同じ）、勝者は席5（K のペア・T キッカー）"
    },
    "baseline": {
     "action_correct": 4,
     "action_total": 10,
-    "winner_match": null,
+    "winner_match": true,
     "board_match": false
    },
    "reparse_baseline": {
     "action_correct": 4,
     "action_total": 13,
-    "winner_match": null,
+    "winner_match": true,
     "board_match": false
-   }
-  },
-  {
-   "hand_id": 7,
-   "truth": {
-    "board": [],
-    "actions": [
-     {
-      "seat": 6,
-      "action": "raise",
-      "amount": 500,
-      "street": "preflop"
-     },
-     {
-      "seat": 4,
-      "action": "call",
-      "amount": 400,
-      "street": "preflop"
-     },
-     {
-      "seat": 5,
-      "action": "raise",
-      "amount": 4000,
-      "street": "preflop"
-     },
-     {
-      "seat": 6,
-      "action": "fold",
-      "amount": 0,
-      "street": "preflop"
-     },
-     {
-      "seat": 4,
-      "action": "fold",
-      "amount": 0,
-      "street": "preflop"
-     }
-    ],
-    "players": [
-     {
-      "seat": 4,
-      "hole_cards": [
-       "5d",
-       "3h"
-      ],
-      "showed_down": false,
-      "name": "A"
-     },
-     {
-      "seat": 5,
-      "hole_cards": [
-       "Kc",
-       "Qd"
-      ],
-      "showed_down": false,
-      "name": "B"
-     },
-     {
-      "seat": 6,
-      "hole_cards": [
-       "6s",
-       "7h"
-      ],
-      "showed_down": false,
-      "name": "C"
-     }
-    ],
-    "winner_seat": 5,
-    "entry_sec": 8.4,
-    "hand_id": 7
-   },
-   "baseline": {
-    "action_correct": 2,
-    "action_total": 6,
-    "winner_match": false,
-    "board_match": true
-   },
-   "reparse_baseline": {
-    "action_correct": 2,
-    "action_total": 6,
-    "winner_match": false,
-    "board_match": true
    }
   },
   {

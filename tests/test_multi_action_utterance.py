@@ -102,8 +102,8 @@ class TestAudioThread:
         assert [q.get_nowait().action for _ in range(3)] == ["fold", "fold", "call"]
         assert [e.action for e in seen[0].events] == ["fold", "fold", "call"]
 
-    def _capture(self, t: AudioThread, voiced_chunks: int) -> None:
-        loud = struct.pack("1024h", *([5000] * 1024))
+    def _capture(self, t: AudioThread, voiced_chunks: int, level: int = 5000) -> None:
+        loud = struct.pack("1024h", *([level] * 1024))
         quiet = b"\x00" * 2048
         chunks = iter([quiet] * 2 + [loud] * voiced_chunks + [quiet] * 9 + [b""])
         t._capture_loop(lambda: next(chunks), 1024)   # noqa: SLF001
@@ -114,11 +114,24 @@ class TestAudioThread:
         self._capture(t, 3)
         assert t.backlog() == 1
 
-    def test_a_click_is_dropped_and_reported(self):
+    def test_a_short_loud_word_is_kept(self):
+        """有音 0.128 秒（< 0.15 秒）でも、声の区切りのしきい値の 5 倍以上の大きさなら認識に回す（読み上げ集
+        2026-09-30:「チェック」の有音が 0.13 秒で捨てられていた）。"""
         dropped: list[float] = []
         _, t = _thread(on_dropped=dropped.append)
-        self._capture(t, 2)      # 0.128 秒 < 0.15 秒
+        self._capture(t, 2)
+        assert t.backlog() == 1 and dropped == []
+
+    def test_a_short_quiet_sound_is_dropped_and_reported(self):
+        dropped: list[float] = []
+        _, t = _thread(on_dropped=dropped.append)
+        self._capture(t, 2, level=1000)     # 0.128 秒 < 0.15 秒、しきい値 300 の 5 倍に届かない（息など）
         assert t.backlog() == 0 and dropped == [pytest.approx(0.128)]
+
+    def test_a_click_is_dropped(self):
+        _, t = _thread()
+        self._capture(t, 1)      # 0.064 秒（チップの音など）は大きくても捨てる
+        assert t.backlog() == 0
 
     def test_the_minimum_is_configurable(self):
         _, t = _thread(min_speech_sec=0.3)

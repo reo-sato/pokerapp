@@ -8,10 +8,12 @@
 を出す。Whisper の書き起こしの文字列を読むのではなく、音にどの候補がいちばん合うかを確率で比べるので、
 書き起こしの表記揺れは関係がない。1 発話 0.3 秒ほど（CPU, int8）。
 
-ライブでは **Whisper がアクションとして読めなかった発話だけ**を聞き直し、第 2 の耳が自由に聞いた文そのものが
+ライブでは **Whisper がアクションとして読めなかった発話**を聞き直し、第 2 の耳が自由に聞いた文そのものが
 いちばん確からしい候補と同じアクションに読めるときだけ、その候補を使う（`rescue_events`。店舗 9/29 の評価:
 真のアクションとの一致 73% → 80%, `docs/worklog/2026-09-29-second-ear-evaluation.md`）。Whisper が読めた発話は
-変えない（第 2 の耳には席番号・ポジションの候補が無い）。
+アクションを変えない（第 2 の耳には席番号・ポジションの候補が無い）。ただし Whisper が読んだベット・レイズに
+額が無い・100 未満のとき（「レイズ3 ハピック」）は、第 2 の耳の額だけを入れる（`fill_amounts`。読み上げ集
+2026-09-30）。どの発話をどう聞き直すかは `wants_ear` / `apply_ear` の 1 か所で決める（ライブ・読み直し・推定器）。
 
 音の近さだけでは決まらない発話（ディーラーの短く崩した「コル」と「これ」）は使わない。候補と確からしさは記録して、
 あとで卓の状態と合わせる（ADR-0056 追記 1 の推定器）。
@@ -21,7 +23,7 @@ from __future__ import annotations
 import shutil
 import tarfile
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Protocol
 
@@ -204,18 +206,29 @@ def kanji_number(n: int) -> str:
 # ディーラーが言うアクションの語（正準の形だけ。崩れた言い方は音の確からしさで比べる）
 ACTION_WORDS = ("フォールド", "コール", "チェック", "オールイン", "ショーダウン", "ヘッズアップ",
                 "チェックアラウンド", "ハンド終了")
+# ショーダウンで言う役の名前（第 2 の耳の書き方 → 読み取りに渡す語）。Whisper は短い役名を幻聴にしやすいが、
+# 第 2 の耳は聞けていた（読み上げ集 2026-09-30:「ワンペア」→「本日はここまでです。」「完璧だ!」、
+# 「ツーペア」→「つぺよ!」を第 2 の耳は「ワンペア」「二ペア」）
+HAND_NAME_WORDS = (("ワンペア", "ワンペア"), ("二ペア", "ツーペア"), ("ツーペア", "ツーペア"),
+                   ("スリーカード", "スリーカード"), ("ストレート", "ストレート"), ("フラッシュ", "フラッシュ"),
+                   ("フルハウス", "フルハウス"), ("フォーカード", "フォーカード"),
+                   ("ストレートフラッシュ", "ストレートフラッシュ"))
 # 2 つ続けて言うことがある語（「フォールド、コール」）
 _PAIR_WORDS = ("フォールド", "コール", "チェック", "オールイン")
 AMOUNTS = tuple(range(100, 20001, 100)) + (25000, 30000, 40000, 50000)
+# 第 2 の耳の候補にある一番小さい額。Whisper が読んだ額がこれ未満なら聞き違い（「レイズ3 ハピック」= 1800）
+EAR_MIN_AMOUNT = min(AMOUNTS)
 
 
 def build_candidates(amounts: Iterable[int] = AMOUNTS) -> list[Candidate]:
-    """ディーラーの読み上げの候補: アクションの語（+「です」）・額（+「点」）・レイズ/ベット + 額・
+    """ディーラーの読み上げの候補: アクションの語（+「です」）・役の名前・額（+「点」）・レイズ/ベット + 額・
     2 つのアクション・額 + コール・コール + 額。"""
     out: list[Candidate] = []
     for word in ACTION_WORDS:
         out.append(Candidate(word, word))
         out.append(Candidate(word + "です", word + "です"))
+    for spoken, text in HAND_NAME_WORDS:
+        out.append(Candidate(spoken, text))
     for amount in amounts:
         k = kanji_number(amount)
         out.append(Candidate(k, k))
@@ -430,7 +443,7 @@ EAR_CONFIDENCE = 0.5
 def _action_keys(text: str) -> list[tuple]:
     from audio.recognizer import parse_actions
 
-    return [(e.action, e.amount, e.seat, e.position) for e in parse_actions(text)]
+    return [(e.action, e.amount, e.seat, e.position, e.hand_name) for e in parse_actions(text)]
 
 
 def agreed_candidate(ear: Optional[dict]) -> Optional[str]:
@@ -461,6 +474,82 @@ def rescue_events(ear: Optional[dict], *, utterance_start_ts: Optional[float] = 
     for event in events:
         event.parse_flags = (*event.parse_flags, EAR_FLAG)
     return events
+
+
+def _amountless(events: Iterable) -> list[int]:
+    """ベット・レイズなのに額が無い・`EAR_MIN_AMOUNT` 未満の位置。"""
+    return [i for i, e in enumerate(events) if e.action in ("bet", "raise") and (e.amount or 0) < EAR_MIN_AMOUNT]
+
+
+def agreed_amount(ear: Optional[dict]) -> Optional[tuple[int, str]]:
+    """第 2 の耳が自由に聞いた文と、いちばん確からしい候補が、同じ額（`EAR_MIN_AMOUNT` 以上）を 1 つだけ含むとき、
+    (額, 候補の文)。アクションの語は問わない（読み上げ集 2026-09-30:「レイズ 800」を自由に「レーズ八百句」、
+    候補は「八百」と聞いた）。額を入れるだけなので、アクションは Whisper の読みを使う。"""
+    from audio.recognizer import parse_actions
+
+    if not ear:
+        return None
+    cands = ear.get("candidates") or []
+    free = (ear.get("text") or "").strip()
+    best = (cands[0].get("text") or "").strip() if cands else ""
+    if not free or not best:
+        return None
+    amounts = [[e.amount for e in parse_actions(t) if e.amount] for t in (best, free)]
+    if len(amounts[0]) == 1 and amounts[0] == amounts[1] and amounts[0][0] >= EAR_MIN_AMOUNT:
+        return amounts[0][0], best
+    return None
+
+
+def fill_amounts(events: list, ear: Optional[dict]) -> Optional[tuple[list, str]]:
+    """Whisper が読んだアクションのうち、額の無い・`EAR_MIN_AMOUNT` 未満のベット・レイズがちょうど 1 つなら、第 2 の耳の
+    額（`agreed_amount`）を入れる（`second_ear` の印 = 要確認）。(アクション, 候補の文) か、入れられなければ None。
+
+    読み上げ集 2026-09-30: Whisper が「ベッド サンビュアック」「レイズ3 ハピック」「ディレイズ 4 セント」と額だけを
+    崩した句で、第 2 の耳は「ベッド三百」「レイズ千八百」「リレーズ四千」と聞けていた。額を言わずに次の発話で言った
+    ときは、第 2 の耳の自由に聞いた文にも額が無いので入れない。
+    """
+    targets = _amountless(events)
+    if len(targets) != 1:
+        return None
+    got = agreed_amount(ear)
+    if got is None:
+        return None
+    amount, text = got
+    out = list(events)
+    event = out[targets[0]]
+    confidence = EAR_CONFIDENCE if event.confidence is None else min(event.confidence, EAR_CONFIDENCE)
+    out[targets[0]] = replace(event, amount=amount, confidence=confidence,
+                              parse_flags=(*event.parse_flags, EAR_FLAG))
+    return out, text
+
+
+def wants_ear(events: Iterable, text: str, question: bool = False) -> bool:
+    """ライブで第 2 の耳に聞き直させるか。Whisper がアクションとして読めなかった発話（確認の問い・ポットや
+    ブラインドの読み上げは除く）と、読んだベット・レイズに額が無い・`EAR_MIN_AMOUNT` 未満の発話。"""
+    from audio.recognizer import is_announcement
+
+    events = list(events)
+    if not events:
+        return not question and not is_announcement(text)
+    return bool(_amountless(events))
+
+
+def apply_ear(events: Iterable, text: str, ear: Optional[dict], *, question: bool = False,
+              utterance_start_ts: Optional[float] = None) -> tuple[list, Optional[str]]:
+    """Whisper の読み（`events`, 文 `text`）に第 2 の耳の結果を重ねる。(アクション, 使った候補の文 or None)。
+
+    ライブ（`AudioThread`）・書き起こしの読み直し（`tools/eval_store.py`）・読み上げ集・推定器が同じ規則を使う。
+    読めなかった発話は `rescue_events`（ポット・ブラインドの読み上げ =「ポット1万2000です。」は、第 2 の耳が額だけを
+    聞いてもアクションにしない）、額の無いベット・レイズは `fill_amounts`。
+    """
+    events = list(events)
+    if not ear or not wants_ear(events, text, question):
+        return events, None
+    if not events:
+        rescued = rescue_events(ear, utterance_start_ts=utterance_start_ts)
+        return rescued, (agreed_candidate(ear) if rescued else None)
+    filled = fill_amounts(events, ear)
+    return (events, None) if filled is None else filled
 
 
 def pcm16_samples(audio_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> np.ndarray:

@@ -24,6 +24,7 @@ ACTION_KEYWORDS: dict[str, str] = {
     "リレイズ": "raise",
     "スリーベット": "raise",
     "チェックレイズ": "raise",  # 一度チェックした人のレイズ = 1 アクション（「チェック」「レイズ」に分けない）
+    "チェックレーズ": "raise",  # 同じ（書き起こしゆれ。読み上げ集 2026-09-30:「チェックレーズ 2千」を「チェック」と読んでいた）
     "チェック": "check",
     "チッカーランド": "check",  # 「チェックアラウンド」の書き起こしゆれ（店舗の実測 2026-09-27）
     "check": "check",
@@ -71,16 +72,20 @@ HAND_NAME_KEYWORDS: dict[str, str] = {
     "フォーオブアカインド": "Four of a kind",
     "クワッズ": "Four of a kind",
     "4カード": "Four of a kind",
+    "四カード": "Four of a kind",
     "フルハウス": "Full house",
+    "プルハウス": "Full house",   # 書き起こしゆれ（読み上げ集 2026-09-30）
     "フラッシュ": "Flush",
     "ストレート": "Straight",
     "スリーカード": "Three of a kind",
     "スリーオブアカインド": "Three of a kind",
     "トリップス": "Three of a kind",
     "3カード": "Three of a kind",
+    "三カード": "Three of a kind",   # 第 2 の耳は数を漢数字で書く
     "ツーペア": "Two pair",
     "トゥーペア": "Two pair",
     "2ペア": "Two pair",
+    "二ペア": "Two pair",           # 第 2 の耳の書き方（読み上げ集 2026-09-30）
     "ワンペア": "One pair",
     "1ペア": "One pair",
     "ハイカード": "High card",

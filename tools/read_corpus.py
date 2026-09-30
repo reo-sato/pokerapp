@@ -404,6 +404,13 @@ def _capture(recorder: DeviceRecorder, stream: Any, stop: threading.Event, clock
         recorder.alive = False
 
 
+def _device_hint(devices: list[dict]) -> Optional[str]:
+    """マイクの一覧に添える注意（WDM-KS 方式しか見えない = RDP の音声が接続元に回っている）。"""
+    from tools.audio_check import RDP_AUDIO_HINT, only_wdm_ks
+
+    return RDP_AUDIO_HINT if only_wdm_ks(devices) else None
+
+
 class PyAudioBackend:
     """PC のマイク（PyAudio）。テストでは同じ形の偽物を渡す。"""
 
@@ -748,14 +755,16 @@ def _hearer_class():
 
 
 def live_events(transcript: Any, ear: Optional[dict]) -> list:
-    """本番の経路で 1 つの発話から読むアクション（`AudioThread._process_chunk`: Whisper が読めない発話だけ第 2 の耳）。"""
-    from audio.second_ear import rescue_events
+    """本番の経路で 1 つの発話から読むアクション（`AudioThread._process_chunk`: Whisper の読みに第 2 の耳を
+    `second_ear.apply_ear` の規則で重ねる = 読めない発話の聞き直し・額の無いベット / レイズの額）。"""
+    from audio.second_ear import apply_ear
 
     if transcript is not None and transcript.no_speech:
         return []
-    if transcript is not None and (transcript.events or transcript.question):
-        return list(transcript.events)
-    return rescue_events(ear)
+    events = list(transcript.events) if transcript is not None else []
+    text = transcript.text if transcript is not None else ""
+    question = bool(transcript is not None and transcript.question)
+    return apply_ear(events, text, ear, question=question)[0]
 
 
 def transcribe_take(pcm: bytes, hearer: Any, ear: Any = None, *, rate: int = 16000,
@@ -973,6 +982,7 @@ class CorpusApp:
         if not self.recording:
             out["devices"] = self.devices()
             out["device_error"] = self.backend_error
+            out["device_hint"] = _device_hint(out["devices"])
             out["recent"] = self.recent()
         return out
 
@@ -1061,7 +1071,11 @@ class CorpusApp:
                             pass
                     for r in recorders:
                         r.close()
-                    return 400, {"code": "mic", "message": f"マイク {m}（{devices[m]['name']}）を開けません: {e}"}
+                    from tools.audio_check import open_error_hint
+
+                    hint = open_error_hint(devices[m])
+                    return 400, {"code": "mic", "message": f"マイク {m}（{devices[m]['name']}）を開けません: {e}"
+                                                        + (f"。{hint}" if hint else "")}
                 full = folder / f"full_{label}.wav"
                 if full.exists():
                     full = folder / f"full_{label}_{stamp}.wav"
@@ -1127,7 +1141,9 @@ class CorpusApp:
             if rest == "state":
                 return 200, self.state()
             if rest == "devices":
-                return 200, {"devices": self.devices(refresh=True), "device_error": self.backend_error}
+                devices = self.devices(refresh=True)
+                return 200, {"devices": devices, "device_error": self.backend_error,
+                             "device_hint": _device_hint(devices)}
             m = re.match(r"^audio/([^/]+)/([^/]+)$", rest)
             if m:
                 audio = self.audio_path(m.group(1), m.group(2))
@@ -1155,9 +1171,10 @@ class CorpusApp:
 
 
 def reread_segment(seg: dict, route: str = "live") -> list[str]:
-    """保存した 1 発話を、いまの読み取りで読む。live = 本番の経路（Whisper が読めなければ第 2 の耳）/
-    whisper = Whisper だけ / ear = 第 2 の耳だけ（候補と自由に聞いた文が同じアクション = 本番と同じ厳しめ）。"""
-    from audio.second_ear import agreed_candidate, rescue_events
+    """保存した 1 発話を、いまの読み取りで読む。live = 本番の経路（Whisper の読みに第 2 の耳を
+    `second_ear.apply_ear` の規則で重ねる）/ whisper = Whisper だけ / ear = 第 2 の耳だけ（候補と自由に聞いた文が
+    同じアクション = 本番と同じ厳しめ）。"""
+    from audio.second_ear import agreed_candidate, apply_ear
 
     if route == "ear":
         text = agreed_candidate(seg.get("ear"))
@@ -1167,10 +1184,10 @@ def reread_segment(seg: dict, route: str = "live") -> list[str]:
         return []
     noise = bool(text) and (is_prompt_echo(text) or is_implausibly_long(text, float(seg.get("sec") or 0.0)))
     question = bool(text) and not noise and is_question(text)
-    keys = [] if noise or not text else parse_keys(text)
-    if not keys and not question and route == "live":
-        keys = [event_key(e) for e in rescue_events(seg.get("ear"))]
-    return keys
+    events = [] if noise or not text else parse_actions(text)
+    if route == "live":
+        events, _ = apply_ear(events, text, seg.get("ear"), question=question)
+    return [event_key(e) for e in events]
 
 
 ROUTES = (("live", "本番の経路"), ("whisper", "Whisper だけ"), ("ear", "第 2 の耳だけ"))
@@ -1554,7 +1571,7 @@ async function start(resume){
     render(); poll();
   } catch (e) { toast(e.message); }
 }
-async function rescan(){ try { const d = await api("devices"); S.st.devices = d.devices; S.st.device_error = d.device_error; render(); } catch (e) { toast(e.message); } }
+async function rescan(){ try { const d = await api("devices"); S.st.devices = d.devices; S.st.device_error = d.device_error; S.st.device_hint = d.device_hint; render(); } catch (e) { toast(e.message); } }
 function togglePick(i){
   const k = S.picked.indexOf(i);
   if (k >= 0) S.picked.splice(k, 1); else if (S.picked.length < 2) S.picked.push(i); else toast("マイクは 2 本までです");
@@ -1606,6 +1623,7 @@ function renderSetup(st){
       <input type="text" id="speaker" value="${esc(S.speaker)}" placeholder="例: オーナー / 配り手の名前" oninput="S.speaker=this.value" onchange="S.speaker=this.value">
       <div class="small muted" style="margin-top:12px">マイク（2 本まで。選んだ順に m1・m2）</div>
       ${devs}
+      ${st.device_hint ? `<p class="err">${esc(st.device_hint)}</p>` : ""}
       <div class="bar"><button class="sm" onclick="rescan()">マイクを探し直す</button></div>
       <div class="small muted" style="margin-top:8px">周</div>
       <div class="bar">

@@ -525,9 +525,10 @@ class TestRecorderT4:
         assert t._chunk_queue.empty()
 
     def test_short_blip_dropped(self):
-        # _MIN_BUFFER_SECONDS(0.15s ≒ 2.3 チャンク)未満の短音は捨てる（ADR-0061 で 0.3 → 0.15）。
+        # _MIN_BUFFER_SECONDS(0.15s ≒ 2.3 チャンク)未満の短音は捨てる（ADR-0061 で 0.3 → 0.15）。ただし
+        # しきい値の 5 倍以上の大きさなら短い言葉として回す（読み上げ集 2026-09-30, test_multi_action_utterance）。
         t, _ = _make_audio_thread()
-        _run_capture(t, [_voiced_chunk()] * 2 + [_silent_chunk()] * 9)
+        _run_capture(t, [_voiced_chunk(amp=1000)] * 2 + [_silent_chunk()] * 9)
         assert t._chunk_queue.empty()
 
     def test_process_chunk_emits_event_with_utterance_start(self):

@@ -297,7 +297,7 @@ class TestTranscribe:
 
     def test_short_sounds_are_dropped_like_live(self):
         listener = _listener([])
-        row = listener.take_row(self.LABEL, "m1", silence(0.3) + tone(0.07) + silence(0.7))
+        row = listener.take_row(self.LABEL, "m1", silence(0.3) + tone(0.07, amp=1000) + silence(0.7))
         assert row["segments"] == [] and row["heard"] == []
 
     def test_worker_writes_transcripts(self, tmp_path):
@@ -454,6 +454,17 @@ def _wait(cond, timeout: float = 5.0) -> bool:
     return False
 
 
+class WdmKsOnlyBackend(FakeBackend):
+    """RDP の音声が接続元に回っているときの一覧（店舗 2026-09-30）。Bluetooth のマイクは WDM-KS で開けない。"""
+    DEVICES = [{"index": 11, "name": "Headset (…DJI Mic Mini 2-ED8C97)", "api": "Windows WDM-KS", "rate_ok": True,
+                "default": False},
+               {"index": 13, "name": "Headset (…DJI Mic Mini 2-EBA00C)", "api": "Windows WDM-KS", "rate_ok": True,
+                "default": False}]
+
+    def open(self, index, rate):
+        raise OSError(-9999, "Unanticipated host error")
+
+
 class TestApp:
     def test_setup_state_marks_the_configured_mic(self, tmp_path):
         app = _app(tmp_path)
@@ -461,6 +472,17 @@ class TestApp:
         assert not st["recording"] and st["session"] is None and st["recent"] == []
         assert [d["index"] for d in st["devices"] if d["configured"]] == [3]
         assert st["asr"]["state"] == "off" and st["total_phrases"] == len(rc.PHRASES)
+        assert st["device_hint"] is None
+        app.close()
+
+    def test_only_wdm_ks_mics_explain_the_remote_desktop_setting(self, tmp_path):
+        app = rc.CorpusApp(tmp_path, audio_cfg={"sample_rate": RATE, "device_id": 1}, backend_factory=WdmKsOnlyBackend,
+                           use_asr=False)
+        st = app.state()
+        assert "リモート PC で再生" in st["device_hint"]
+        status, payload = app.start({"speaker": "Leo", "mics": [13]})
+        assert status == 400 and "Unanticipated host error" in payload["message"]
+        assert "MME の番号を選んでください" in payload["message"]
         app.close()
 
     @pytest.mark.parametrize("body,message", [

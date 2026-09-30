@@ -32,12 +32,14 @@ POSITION_ALIASES: dict[str, str] = {
     "btn": "BTN", "button": "BTN", "ボタン": "BTN",
     "sb": "SB", "smallblind": "SB", "スモールブラインド": "SB", "スモール": "SB",
     "bb": "BB", "bigblind": "BB", "ビッグブラインド": "BB", "ビッグ": "BB",
-    "utg": "UTG", "アンダーザガン": "UTG",
+    # 書き起こしゆれ（読み上げ集 2026-09-30:「ビックブラインド」「カット オフ」「ATG」「UDG」）
+    "ビックブラインド": "BB", "ビック": "BB",
+    "utg": "UTG", "アンダーザガン": "UTG", "atg": "UTG", "udg": "UTG",
     "utg+1": "UTG+1", "utg1": "UTG+1",
     "utg+2": "UTG+2", "utg2": "UTG+2",
     "mp": "MP", "ミドルポジション": "MP",
     "hj": "HJ", "hijack": "HJ", "ハイジャック": "HJ",
-    "co": "CO", "cutoff": "CO", "カットオフ": "CO",
+    "co": "CO", "cutoff": "CO", "カットオフ": "CO", "カット オフ": "CO",
 }
 
 

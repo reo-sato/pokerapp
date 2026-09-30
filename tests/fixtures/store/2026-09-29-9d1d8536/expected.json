@@ -383,6 +383,132 @@
     "winner_match": true,
     "board_match": true
    }
+  },
+  {
+   "hand_id": 4,
+   "truth": {
+    "board": [
+     "Kd",
+     "7c",
+     "9h",
+     "2h"
+    ],
+    "actions": [
+     {
+      "seat": 5,
+      "action": "raise",
+      "amount": 1100,
+      "street": "preflop"
+     },
+     {
+      "seat": 6,
+      "action": "call",
+      "amount": 1000,
+      "street": "preflop"
+     },
+     {
+      "seat": 4,
+      "action": "call",
+      "amount": 900,
+      "street": "preflop"
+     },
+     {
+      "seat": 6,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 4,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 5,
+      "action": "bet",
+      "amount": 2000,
+      "street": "flop"
+     },
+     {
+      "seat": 6,
+      "action": "call",
+      "amount": 2000,
+      "street": "flop"
+     },
+     {
+      "seat": 4,
+      "action": "fold",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 6,
+      "action": "check",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 5,
+      "action": "bet",
+      "amount": 2000,
+      "street": "turn"
+     },
+     {
+      "seat": 6,
+      "action": "fold",
+      "amount": 0,
+      "street": "turn"
+     }
+    ],
+    "players": [
+     {
+      "seat": 4,
+      "hole_cards": [
+       "Qs",
+       "Kc"
+      ],
+      "showed_down": false,
+      "name": "A"
+     },
+     {
+      "seat": 5,
+      "hole_cards": [
+       "Ad",
+       "Th"
+      ],
+      "showed_down": false,
+      "name": "B"
+     },
+     {
+      "seat": 6,
+      "hole_cards": [
+       "9d",
+       "9s"
+      ],
+      "showed_down": false,
+      "name": "C"
+     }
+    ],
+    "winner_seat": 5,
+    "button_seat": 5,
+    "notes": "なぜターンはオールインになってる？この回に限ってディーラーがボタンを動かすのを忘れた。ハンド読み込む時間が最速と最遅になっている連番の席を見つけて、そこがボタンになるように修正する必要がある",
+    "entry_sec": 208.5,
+    "hand_id": 4,
+    "note": "オーナー確認 2026-09-30: ディーラーがボタンを動かし忘れた（実際のボタンは席5、記録は席6）。店舗の入力は記録のボタンの順で1 席ずつずれていたので、実際の席で入れ直した: プリフロップ 席5 レイズ 1100 → 席6・席4 コール、フロップ 席6・席4 チェック → 席5 ベット 2000 → 席6 コール → 席4 フォールド（札の離脱も席4）、ターン 席6 チェック → 席5 ベット 2000 → 席6 フォールド。勝者 席5"
+   },
+   "baseline": {
+    "action_correct": 1,
+    "action_total": 12,
+    "winner_match": false,
+    "board_match": true
+   },
+   "reparse_baseline": {
+    "action_correct": 1,
+    "action_total": 11,
+    "winner_match": false,
+    "board_match": true
+   }
   }
  ]
 }

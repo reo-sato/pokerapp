@@ -193,3 +193,82 @@ class TestLoad:
         monkeypatch.setattr(se.SecondEar, "load", classmethod(lambda cls, folder, threads=4: FakeEar(fail=True)))
         ear, message = se.load_live(tmp_path, {})
         assert ear is None and "読み込めませんでした" in message and "onnx failed" in message
+
+
+# ――― 読み上げ集 2026-09-30: 額の補い・読み上げ・役の名前 ―――
+
+BET_300 = se.EarResult("ベッド三百", -0.1, [("ベット 三百", -3.3), ("三百", -9.1)])
+RAISE_1800 = se.EarResult("レイズ千八百", -0.1, [("レイズ 千八百", -0.1), ("千八百", -4.7)])
+EIGHT_HUNDRED = se.EarResult("レーズ八百句", -0.5, [("八百", -10.0), ("レイズ 八百", -10.8)])
+POT = se.EarResult("一万二千です", -0.3, [("一万二千", -0.5)])
+TWO_PAIR = se.EarResult("二ペア", -0.2, [("ツーペア", -0.4), ("百", -12.0)])
+
+
+class TestAmountFromTheEar:
+    """Whisper がベット・レイズを読めて額だけ崩したとき（「ベッド サンビュアック」「レイズ3 ハピック」）、第 2 の耳の
+    額を入れる。自由に聞いた文と候補が同じ額のときだけ（要確認の印）。"""
+
+    @pytest.mark.parametrize("text, result, want", [
+        ("ベッド サンビュアック", BET_300, ("bet", 300)),
+        ("レイズ3 ハピック", RAISE_1800, ("raise", 1800)),        # 100 未満 = 聞き違い
+        ("レイズ アクション", EIGHT_HUNDRED, ("raise", 800)),      # 候補は額だけ・自由に聞いた文はレイズ + 額
+    ])
+    def test_the_amount_is_filled(self, text, result, want):
+        ear = FakeEar(result)
+        events, (transcript,) = _run(text, ear)
+        assert [(e.action, e.amount) for e in events] == [want]
+        assert "second_ear" in events[0].parse_flags and events[0].confidence <= se.EAR_CONFIDENCE
+        assert transcript.ear_text == result.candidates[0][0] and len(ear.heard) == 1
+
+    def test_no_amount_when_the_ear_heard_none(self):
+        """額を次の発話で言った（「ベット、」「2000」）なら、第 2 の耳の自由に聞いた文にも額が無い。"""
+        events, (transcript,) = _run("ベット", FakeEar(se.EarResult("ベッド", -0.1, [("ベット 三百", -3.0)])))
+        assert [(e.action, e.amount) for e in events] == [("bet", 0)] and transcript.ear_text is None
+
+    def test_a_read_amount_is_not_heard_again(self):
+        ear = FakeEar(RAISE_1800)
+        events, _ = _run("レイズ 1200", ear)
+        assert [(e.action, e.amount) for e in events] == [("raise", 1200)] and ear.heard == []
+
+    def test_only_one_amountless_bet_is_filled(self):
+        assert se.fill_amounts(se.rescue_events(None) + [], RAISE_1800.to_dict()) is None
+        two = __import__("audio.recognizer", fromlist=["parse_actions"]).parse_actions("ベット、レイズ")
+        assert se.fill_amounts(two, RAISE_1800.to_dict()) is None
+
+
+class TestAnnouncements:
+    def test_a_pot_announcement_is_not_heard_again(self):
+        """「ポット1万2000です。」を第 2 の耳が「一万二千です」と聞いて額にしていた。"""
+        ear = FakeEar(POT)
+        events, _ = _run("ポット1万2000です。", ear)
+        assert events == [] and ear.heard == []
+
+    def test_a_blind_announcement_is_not_an_action(self):
+        """Whisper が間に「オールイン」を足した（「ブラインド200、オールイン400です。」）。"""
+        events, _ = _run("ブラインド200、オールイン400です。", FakeEar(POT))
+        assert events == []
+
+
+class TestHandNames:
+    def test_the_ear_hears_hand_names(self):
+        """Whisper が「ツーペア」を「つぺよ!」にした（第 2 の耳は「二ペア」）。"""
+        events, _ = _run("つぺよ!", FakeEar(TWO_PAIR))
+        assert [(e.action, e.hand_name) for e in events] == [("end_hand", "Two pair")]
+        assert "second_ear" in events[0].parse_flags
+
+    def test_different_hand_names_do_not_agree(self):
+        ear = se.EarResult("ワンペア", -0.2, [("ツーペア", -0.4)])
+        assert se.agreed_candidate(ear.to_dict()) is None
+
+    def test_candidates_include_hand_names(self):
+        texts = {c.text for c in se.build_candidates(amounts=(100,))}
+        assert {"ワンペア", "ツーペア", "フルハウス", "ストレートフラッシュ"} <= texts
+        assert any(c.spoken == "二ペア" and c.text == "ツーペア" for c in se.build_candidates(amounts=(100,)))
+
+
+class TestReparseUsesTheSameRules:
+    def test_eval_store_fills_the_amount_from_the_logged_ear(self):
+        row = {"utterance_start_ts": 5.0, "heard_at": 6.0, "text": "レイズ3 ハピック", "audio_sec": 1.6,
+               "confidence": 0.4, "ear": RAISE_1800.to_dict()}
+        events = eval_store.reparse_events([], [row])
+        assert [(e.action, e.amount) for e in events] == [("raise", 1800)]
