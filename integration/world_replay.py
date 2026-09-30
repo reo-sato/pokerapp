@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import bisect
+import copy
 import statistics
 import tempfile
 import threading
@@ -235,12 +236,17 @@ def delivered_at(row: dict) -> float:
 
 def world_events(events: list[Event], transcripts: list[dict],
                  texts: Optional[dict[float, Optional[str]]] = None,
-                 extra: Optional[list[Event]] = None) -> list[Event]:
+                 extra: Optional[list[Event]] = None,
+                 drops: Optional[dict[float, set[int]]] = None,
+                 cache: Optional[dict] = None) -> list[Event]:
     """世界の時刻の入力: 席の信号を捨て、発話は書き起こしから読み直して話し終わりに置く。
 
     `texts`: 発話の始まり → 読み直す文（None = 書き起こしのまま、空 = アクションにしない）。
+    `drops`: 発話の始まり → 捨てる語の番号（読んだアクションの何番目か。余計な語 = 推定器の選択点）。
     `extra`: 推定器が足す入力（聞こえなかったアクション・ボタン）。
-    打った操作（書き起こしに無い発話のイベント）は記録の時刻のまま。
+    `cache`: 読んだ結果を覚えておく辞書（推定器は同じ発話を何度も読み直すので）。
+    打った操作（書き起こしに無い発話のイベント）は記録の時刻のまま。同じ発話の語は 1 ms ずつずらす
+    （記録の時刻 = ミリ秒で語を見分ける）。
     """
     rows = {r["utterance_start_ts"]: r for r in transcripts if r.get("utterance_start_ts") is not None}
     out: list[Event] = []
@@ -252,10 +258,17 @@ def world_events(events: list[Event], transcripts: list[dict],
         out.append(e)
     for start, row in rows.items():
         text = (texts or {}).get(start)
-        parsed = read_utterance(row, text)
+        if cache is None:
+            parsed = read_utterance(row, text)
+        else:
+            if (start, text) not in cache:
+                cache[(start, text)] = read_utterance(row, text)
+            parsed = [copy.copy(ev) for ev in cache[(start, text)]]
+        dropped = (drops or {}).get(start) or set()
+        parsed = [ev for i, ev in enumerate(parsed) if i not in dropped]
         at = delivered_at(row)
         for i, ev in enumerate(parsed):
-            ev.timestamp = at + 0.0001 * i         # 同じ発話の中の順を保つ
+            ev.timestamp = at + 0.001 * i          # 同じ発話の中の順を保つ
         out.extend(parsed)
     out.extend(extra or [])
     return sorted(out, key=lambda e: (e.timestamp, _ORDER[type(e)]))

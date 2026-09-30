@@ -69,6 +69,21 @@ def test_script_input_uses_the_latest_start_and_speech_start_times():
     assert inp.flags == SCRIPT_FLAGS
 
 
+def test_v1_bench_format_and_interval():
+    from tools.bench_hands import V1Result, format_v1, wilson
+
+    lo, hi = wilson(14, 18)
+    assert 0.54 < lo < 0.56 and 0.90 < hi < 0.92            # 18 ハンドでは区間が広い（監査の指摘）
+    assert wilson(0, 0) == (0.0, 1.0)
+    r = V1Result("店舗（実卓）", hands=18, base_exact=12, exact=14, in_candidates=16, flagged=7,
+                 better=["9d1d8536#4", "7b897671#3"], failing=["027e4b15#1"], not_found=["027e4b15#1"],
+                 flagged_correct=["9d1d8536#4"], edits={"0": 15, "2": 1})
+    text = "\n".join(format_v1(r))
+    assert "読み直し 12/18（67%） → 推定 14/18（78%, 95% 区間 55%〜91%）" in text
+    assert "良くなった 2・悪くなった 0" in text and "誤りに付かない 0・正しいのに付く 1" in text
+    assert "正解が候補に無い 1・候補にあるが点で負けた 0" in text
+
+
 def test_bench_format():
     assert (short_id("2026-09-30_165030_script_voice"), short_id("d0f055fb6fdd441082be18ced7cee437")) == (
         "165030", "d0f055fb")

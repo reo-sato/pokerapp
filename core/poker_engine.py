@@ -19,7 +19,7 @@ from __future__ import annotations
 import copy
 import logging
 import math
-from typing import Optional, Protocol, runtime_checkable
+from typing import Any, Optional, Protocol, runtime_checkable
 
 from core.constants import STREET_ORDER
 from core.engine_types import LegalContext
@@ -480,8 +480,20 @@ class PokerkitGameState:
 
         `end_hand` 後の state は actor_index を持ったままなので、`_hand_active` を見ないと
         「終わったハンドに合法手がある」と答えてしまう（ISSUE-0028）。
+
+        状態が変わらないあいだは同じ答えを返す（engine の定期の確認が毎回呼ぶ。pokerkit の state は操作のたびに
+        `operations` が伸び、ハンドの作り直し・巻き戻しでは別の state になる）。
         """
         st = self._state
+        key = (len(st.operations), self._hand_active) if st is not None else None
+        cached = getattr(self, "_legal_cache", None)
+        if cached is not None and cached[0] is st and cached[1] == key:
+            return cached[2]
+        ctx = self._legal_context(st)
+        self._legal_cache = (st, key, ctx)
+        return ctx
+
+    def _legal_context(self, st: Any) -> LegalContext:
         if st is None or not self._hand_active or st.actor_index is None:
             return LegalContext(None, frozenset(), 0, 0, 0)
         legal: set[str] = set()

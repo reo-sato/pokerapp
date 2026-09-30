@@ -2,24 +2,30 @@
 """tools/bench_hands.py — 全部正しいハンドの割合（ハンドの整合の物差し, オーナー 2026-09-30）
 
 発話の読みの当たり（行）ではなく、**ハンドが丸ごと正しいか**（真のアクションの行が全部正しく・余計な行が無く・勝者が
-合い・ボードがあればボードも合う = `measure_capture_accuracy.hand_fully_correct`）を数える。推定器（`tools/estimate.py`）
-を良くしたかどうかは、この数字で決める。
+合い・ボードがあればボードも合う = `measure_capture_accuracy.hand_fully_correct`）を数える。推定器を良くしたかどうかは、
+この数字で決める。
 
 - 店舗: 真のアクションのある店舗のハンド（`tests/fixtures/store`。09-27・09-29 の一人テストの実卓）
 - 台本: 声だけの台本のハンド（`tests/fixtures/script`。正解は台本。台本の画面を押した順に並べる）
 - シミュレーション: 台本 + 決まった割合の聞き違い（`tools/simulate.py`。**精度の主張には使わない**）
 
+推定器 v1（`integration/estimator.py`, 既定）は、生の観測の再生（直しの無い = 読み直し）と比べ、要確認の漏れ（誤りの
+あるハンドに要確認が付かない）・付きすぎ（正しいハンドに付く）と、誤りの内訳（正解が候補に無い = 直しで表せないか
+探しきれない / 候補にあるが点で負けた）を出す（監査 2026-09-30 の 3 分解・区間・対の比較）。`--v0` で推定器 v0。
+
 使い方:
 
-    python tools/bench_hands.py                 # 3 つとも（シミュレーションは 4 セッション × 30 ハンド）
-    python tools/bench_hands.py --quick         # シミュレーションを 1 セッションに
-    python tools/bench_hands.py --no-sim --json
+    python tools/bench_hands.py                 # v1: 店舗 + 台本
+    python tools/bench_hands.py --sim 2         # v1: シミュレーションも 2 セッション
+    python tools/bench_hands.py --v0 --quick    # v0: 3 つとも（シミュレーションは 1 セッション）
+    python tools/bench_hands.py --json
 """
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import math
 import re
 import sys
 import time
@@ -125,14 +131,165 @@ def format_result(r: SourceResult) -> list[str]:
     return lines
 
 
+# ───────────────────────── 推定器 v1 ─────────────────────────
+
+
+def wilson(x: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """割合 x/n の 95% 区間（Wilson）。"""
+    if n <= 0:
+        return 0.0, 1.0
+    p = x / n
+    center = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+    return max(0.0, center - half), min(1.0, center + half)
+
+
+@dataclass
+class V1Result:
+    name: str
+    hands: int = 0
+    base_exact: int = 0           # 生の観測の再生（直し無し = 読み直し）
+    exact: int = 0                # 推定器 v1 の 1 番
+    in_candidates: int = 0        # 正解が候補に入った
+    flagged: int = 0              # 要確認が付いた
+    better: list[str] = field(default_factory=list)
+    worse: list[str] = field(default_factory=list)
+    failing: list[str] = field(default_factory=list)
+    unflagged_errors: list[str] = field(default_factory=list)   # 誤りがあるのに要確認が付かない（あってはならない）
+    flagged_correct: list[str] = field(default_factory=list)    # 正しいのに要確認（直しを使った・差が小さい など）
+    not_found: list[str] = field(default_factory=list)          # 正解が候補に無い（直しで表せない or 探しきれない）
+    outscored: list[str] = field(default_factory=list)          # 正解は候補にあるが点で負けた（採点の誤り）
+    edits: dict[str, int] = field(default_factory=dict)         # 1 番の直しの数 → ハンド数
+    seconds: float = 0.0
+
+    def add_hand(self, key: str, truth: dict, result) -> None:
+        from tools.measure_capture_accuracy import hand_fully_correct
+
+        base = next((c for c in result.candidates if not c.edits), None)
+        ok_base = hand_fully_correct(truth, base.hand if base else None)
+        ok = hand_fully_correct(truth, result.best.hand)
+        found = any(hand_fully_correct(truth, c.hand) for c in result.candidates)
+        flagged = bool(result.reasons)
+        self.hands += 1
+        self.base_exact += ok_base
+        self.exact += ok
+        self.in_candidates += found
+        self.flagged += flagged
+        n_edits = str(len(result.best.edits))
+        self.edits[n_edits] = self.edits.get(n_edits, 0) + 1
+        if ok and not ok_base:
+            self.better.append(key)
+        if ok_base and not ok:
+            self.worse.append(key)
+        if not ok:
+            self.failing.append(key)
+            (self.outscored if found else self.not_found).append(key)
+            if not flagged:
+                self.unflagged_errors.append(key)
+        elif flagged:
+            self.flagged_correct.append(key)
+
+
+def v1_inputs(store: bool = True, script: bool = True, sim_sessions: int = 0, sim_hands: int = 30,
+              logs: Optional[list[Path]] = None):
+    """(名前, [(SessionInput, 席の札の在否の履歴 or None)]) の並び。"""
+    from integration.world_replay import PresenceTimeline
+
+    def presence_of(inp: SessionInput):
+        if inp.folder is None:
+            return None
+        path = inp.folder / "presence.jsonl"
+        if path.exists():
+            return PresenceTimeline.from_rows(
+                json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+        state = inp.folder / f"{inp.session_id}.table_state.jsonl"       # 店舗のログ（卓状態の履歴）
+        if state.exists():
+            return PresenceTimeline.from_table_state(
+                [json.loads(line) for line in state.read_text(encoding="utf-8").splitlines() if line.strip()])
+        return None
+
+    out = []
+    if logs:
+        from tools.estimate import inputs_from_logs
+
+        inputs, _tmp = inputs_from_logs(logs)
+        out.append(("店舗のログ", [(inp, presence_of(inp)) for inp in inputs if inp.truth.get("hands")]))
+    if store:
+        out.append(("店舗（実卓）", [(inp, presence_of(inp)) for inp in inputs_from_fixtures()
+                                  if inp.transcripts and presence_of(inp) is not None]))
+    if script:
+        out.append(("台本（声だけ）", [(inp, None) for inp in inputs_from_script_fixtures()]))
+    if sim_sessions > 0:
+        from tools.simulate import Noise, simulate_session
+
+        out.append(("シミュレーション", [(simulate_session(seed, sim_hands, noise=Noise()), None)
+                                      for seed in range(1, sim_sessions + 1)]))
+    return out
+
+
+def run_bench_v1(*, store: bool = True, script: bool = True, sim_sessions: int = 0,
+                 params: Optional[dict] = None, logs: Optional[list[Path]] = None) -> list[V1Result]:
+    from integration.estimator import PARAMS as V1_PARAMS
+    from integration.estimator import SessionEstimator
+
+    out = []
+    for name, sessions in v1_inputs(store, script, sim_sessions, logs=logs):
+        res = V1Result(name)
+        for inp, presence in sessions:
+            started = time.time()
+            est = SessionEstimator(inp.events, inp.transcripts, presence, inp.setup, inp.flags, inp.session_id,
+                                   params or V1_PARAMS)
+            truth = {int(h["hand_id"]): h for h in inp.truth.get("hands") or []}
+            for w in est.windows():
+                if w.hand_id in truth:
+                    res.add_hand(f"{short_id(inp.session_id)}#{w.hand_id}", truth[w.hand_id], est.estimate_hand(w))
+            res.seconds += time.time() - started
+        out.append(res)
+    return out
+
+
+def format_v1(r: V1Result) -> list[str]:
+    lo, hi = wilson(r.exact, r.hands)
+    lines = [
+        f"{r.name}: 全部正しいハンド 読み直し {r.base_exact}/{r.hands}（{_pct(r.base_exact, r.hands)}）"
+        f" → 推定 {r.exact}/{r.hands}（{_pct(r.exact, r.hands)}, 95% 区間 {lo:.0%}〜{hi:.0%}）"
+        f" ／ 良くなった {len(r.better)}・悪くなった {len(r.worse)}"
+        f" ／ 要確認 {r.flagged}（誤りに付かない {len(r.unflagged_errors)}・正しいのに付く {len(r.flagged_correct)}）"
+        f"（{r.seconds:.0f} 秒）",
+        f"    誤り {len(r.failing)} の内訳: 正解が候補に無い {len(r.not_found)}・候補にあるが点で負けた {len(r.outscored)}"
+        f" ／ 1 番の直しの数 {dict(sorted(r.edits.items()))}",
+    ]
+    for label, keys in (("良くなった", r.better), ("悪くなった", r.worse), ("誤りに要確認が付かない", r.unflagged_errors),
+                        ("正解が候補に無い", r.not_found), ("点で負けた", r.outscored)):
+        if keys:
+            lines.append(f"    {label}: {' '.join(keys[:20])}{' …' if len(keys) > 20 else ''}")
+    return lines
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="全部正しいハンドの割合（店舗・台本・シミュレーション）")
-    ap.add_argument("--quick", action="store_true", help="シミュレーションを 1 セッションにする")
-    ap.add_argument("--no-sim", action="store_true", help="シミュレーションを回さない")
-    ap.add_argument("--sessions", type=int, default=4, help="シミュレーションのセッション数（1 セッション 30 ハンド）")
+    ap.add_argument("logs", nargs="*", type=Path,
+                    help="v1: 店舗のログ（pack_logs の zip かフォルダ）。渡すと、真のアクションのあるセッションだけを測る")
+    ap.add_argument("--v0", action="store_true", help="推定器 v0（tools/estimate.py）で測る")
+    ap.add_argument("--quick", action="store_true", help="v0: シミュレーションを 1 セッションにする")
+    ap.add_argument("--no-sim", action="store_true", help="v0: シミュレーションを回さない")
+    ap.add_argument("--sessions", type=int, default=4, help="v0: シミュレーションのセッション数（1 セッション 30 ハンド）")
+    ap.add_argument("--sim", type=int, default=0, help="v1: シミュレーションのセッション数（既定 0 = 回さない）")
+    ap.add_argument("--no-script", action="store_true", help="v1: 台本を回さない")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
     logging.disable(logging.CRITICAL)          # 候補の再生で出るエンジンのログは要らない
+    if not args.v0:
+        if args.logs:
+            results_v1 = run_bench_v1(store=False, script=False, logs=args.logs)
+        else:
+            results_v1 = run_bench_v1(script=not args.no_script, sim_sessions=args.sim)
+        if args.json:
+            print(json.dumps([asdict(r) for r in results_v1], ensure_ascii=False, indent=1))
+        else:
+            for r in results_v1:
+                print("\n".join(format_v1(r)))
+        return 0
     sessions = 0 if args.no_sim else (1 if args.quick else args.sessions)
     results = run_bench(sim_sessions=sessions)
     if args.json:
