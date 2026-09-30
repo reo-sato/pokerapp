@@ -57,7 +57,7 @@ from tools.eval_store import (  # noqa: E402
     session_setup,
     truth_hands,
 )
-from tools.measure_capture_accuracy import measure_hand, row_correct  # noqa: E402
+from tools.measure_capture_accuracy import hand_fully_correct, measure_hand, row_correct  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -456,11 +456,13 @@ class TruthResult:
     estimate: tuple[int, int]
     in_nbest: bool
     changed: bool
+    default_exact: bool = False       # 読み直し（既定）がハンドとして丸ごと正しい
+    estimate_exact: bool = False      # 推定がハンドとして丸ごと正しい
 
 
 def exact(truth: dict, hand: dict) -> bool:
-    m = measure_hand(truth, hand)
-    return m.action_correct == m.action_total == len(truth.get("actions") or []) and m.winner_match is not False
+    """ハンドが丸ごと正しいか（`measure_capture_accuracy.hand_fully_correct`）。"""
+    return hand_fully_correct(truth, hand)
 
 
 def compare_with_truth(estimates: list[HandEstimate], truth: dict) -> list[TruthResult]:
@@ -473,7 +475,8 @@ def compare_with_truth(estimates: list[HandEstimate], truth: dict) -> list[Truth
         d = measure_hand(t, est.default.hand)
         b = measure_hand(t, est.best.hand)
         out.append(TruthResult(t["hand_id"], (d.action_correct, d.action_total), (b.action_correct, b.action_total),
-                               any(exact(t, c.hand) for c in est.candidates), est.changed))
+                               any(exact(t, c.hand) for c in est.candidates), est.changed,
+                               exact(t, est.default.hand), exact(t, est.best.hand)))
     return out
 
 
@@ -516,6 +519,57 @@ def inputs_from_fixtures(folder: Path = FIXTURES) -> list[SessionInput]:
         truth = {"hands": [dict(h["truth"], hand_id=h["hand_id"]) for h in data.get("hands") or []]}
         out.append(SessionInput(data.get("session_id") or exp.parent.name, load_events(exp.parent / "events.jsonl"),
                                 transcripts, setup, flags, truth, exp.parent))
+    return out
+
+
+SCRIPT_FIXTURES = ROOT / "tests" / "fixtures" / "script"
+SCRIPT_FLAGS = {"auto_new_hand": False, "auto_winner": True, "rfid_folds": False}   # 声だけ = 札なし
+
+
+def script_input(script: dict, marks: list[dict], transcripts: list[dict], session_id: str,
+                 folder: Optional[Path] = None) -> SessionInput:
+    """声だけの台本のセッションを推定器の入力にする（台本の画面を押した順 = `eval_store.script_order_events` と同じ
+    並べ方: 発話は話し始めの時刻に置く）。正解は台本（やり直したハンドは後の回）。"""
+    from core.control_queue import ControlCommand, command_to_audio_event, script_hand_text
+    from core.events import AudioEvent
+    from tools.eval_store import script_setup
+
+    by_n = {int(h["n"]): h for h in script.get("hands") or []}
+    events: list = []
+    starts = []
+    for m in marks:
+        t = m.get("t")
+        if not isinstance(t, (int, float)):
+            continue
+        if m.get("event") == "start" and m.get("hand") in by_n:
+            spec = by_n[m["hand"]]
+            stacks = {int(k): int(v) for k, v in spec["stacks"].items()}
+            events.append(AudioEvent(action="script_hand", amount=0, timestamp=float(t),
+                                     raw_text=script_hand_text(int(spec["button"]), stacks)))
+            starts.append(m["hand"])
+        elif m.get("event") == "winner":
+            args = {k: m[k] for k in ("seat", "seats") if k in m}
+            ev = command_to_audio_event(ControlCommand("script", "winner", args, ""), lambda: float(t) - 0.001)
+            if ev is not None:
+                events.append(ev)
+    events.sort(key=lambda e: e.timestamp)
+    rows = [dict(r, heard_at=r["utterance_start_ts"]) for r in transcripts if r.get("utterance_start_ts") is not None]
+    latest = {n: k + 1 for k, n in enumerate(starts)}
+    truth = {"hands": [{"hand_id": k, "actions": by_n[n]["actions"], "winner_seat": by_n[n].get("winner_seat"),
+                        "board": [], "players": []} for n, k in sorted(latest.items())]}
+    setup = dict(script_setup(script), hand_stacks={})
+    return SessionInput(session_id, events, rows, setup, dict(SCRIPT_FLAGS), truth, folder)
+
+
+def inputs_from_script_fixtures(folder: Path = SCRIPT_FIXTURES) -> list[SessionInput]:
+    """回帰テストの台本のセッション（`tests/fixtures/script/*/`: script.json・script_marks.jsonl・transcripts.jsonl）。"""
+    out = []
+    for script_path in sorted(folder.glob("*/script.json")):
+        base = script_path.parent
+        script = json.loads(script_path.read_text(encoding="utf-8"))
+        out.append(script_input(script, _read_jsonl(base / "script_marks.jsonl"),
+                                _read_jsonl(base / "transcripts.jsonl"),
+                                script.get("session_id") or base.name, base))
     return out
 
 
@@ -562,9 +616,11 @@ def print_totals(results: list[TruthResult]) -> None:
     b = sum(r.estimate[0] for r in results), sum(r.estimate[1] for r in results)
     worse = [r.hand_id for r in results if r.estimate[0] < r.default[0]]
     better = [r.hand_id for r in results if r.estimate[0] > r.default[0]]
-    print(f"合計（真のアクションのあるハンド {len(results)}）: 読み直し {d[0]}/{d[1]}（{d[0] / max(d[1], 1):.0%}）"
+    n = len(results)
+    print(f"合計（真のアクションのあるハンド {n}）: 全部正しいハンド 読み直し {sum(r.default_exact for r in results)}/{n}"
+          f" → 推定 {sum(r.estimate_exact for r in results)}/{n} ／ 行 読み直し {d[0]}/{d[1]}（{d[0] / max(d[1], 1):.0%}）"
           f" → 推定 {b[0]}/{b[1]}（{b[0] / max(b[1], 1):.0%}）・良くなった {len(better)}・悪くなった {len(worse)}"
-          f"・正解が候補に入った {sum(r.in_nbest for r in results)}/{len(results)}")
+          f"・正解が候補に入った {sum(r.in_nbest for r in results)}/{n}")
 
 
 def main(argv: Optional[list[str]] = None) -> int:

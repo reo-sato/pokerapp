@@ -243,7 +243,7 @@ class TestListening:
         assert report.truth["reparse"]["action_accuracy"] < 1.0
         eval_store.print_report([report], True, 1, None, {SID: _files(tmp_path)})
         out = capsys.readouterr().out
-        assert "音声の採点: " in out and "「れいぞう 600」" in out and "採点し直した文: 一致率 100%" in out
+        assert "音声の採点: " in out and "「れいぞう 600」" in out and "採点し直した文: 全部正しいハンド 2/2・一致率 100%" in out
         assert "採点: 「レイズ 600」→ raise 600" in out                         # タイムライン
 
 
@@ -333,8 +333,8 @@ class TestSecondEarRoutes:
         assert "combo_strict" in report.to_json()["route_differences"]
         eval_store.print_report([report], True, 1, None, {SID: _files(tmp_path)})
         out = capsys.readouterr().out
-        assert "第 2 の耳: " in out and "組み合わせ（厳しめ）: 一致率 100%" in out
-        assert "合計（真のアクションのあるハンド）組み合わせ（厳しめ）: 一致" in out
+        assert "第 2 の耳: " in out and "組み合わせ（厳しめ）: 全部正しいハンド 2/2・一致率 100%" in out
+        assert "合計（真のアクションのあるハンド）組み合わせ（厳しめ）: 全部正しいハンド 2/2・一致" in out
         assert "耳「レイズ六百」 → レイズ 六百（差 +0.1・読める）" in out                  # タイムライン
         assert "W 短「レイズ 600」 短なし「レイズ 600」" in out
 

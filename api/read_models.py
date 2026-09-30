@@ -11,13 +11,13 @@ fastapi に依存しない純関数群 (HTTP なしで単体テスト可能)。
 """
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
 from core.ground_truth import hand_has_needs_review
 from core.ground_truth_repository import GroundTruthRepository
 from core.hand_correction import apply_hand_corrections
+from core.hand_estimate import load_record
 from core.hand_correction_repository import HandCorrectionRepository
 from core.ledger_repository import LedgerRepository
 from core.session_repository import SessionRepository
@@ -30,16 +30,9 @@ class HandNotFoundError(Exception):
 
 
 def _load_hand_log(log_dir: str | Path, session_id: str) -> dict | None:
-    """logs/{session_id}.json を読む。不在・破損は None（gracefully-empty）。"""
-    path = Path(log_dir) / f"{session_id}.json"
-    if not path.exists():
-        return None
-    try:
-        with path.open(encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning("Could not load hand log %s (%s), treating as absent.", path, e)
-        return None
+    """記録の本体 = logs/{session_id}.json（ライブの記録, 暫定）に推定（logs/{session_id}.estimate.json）を重ねたもの
+    （ADR-0056 D1: live ⊕ estimate ⊕ staff corrections。訂正は呼び出し側が重ねる）。不在・破損は None。"""
+    return load_record(log_dir, session_id)
 
 
 def list_player_sessions(player_id: str, session_repo: SessionRepository) -> list[dict]:

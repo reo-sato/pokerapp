@@ -53,6 +53,7 @@ from core.game_state import PlayerState  # noqa: E402
 from integration.replay import load_events, replay_events  # noqa: E402
 from tools.measure_capture_accuracy import (  # noqa: E402
     _align_actions,
+    hand_fully_correct,
     measure_hand,
     measure_session,
     row_correct,
@@ -597,8 +598,11 @@ def evaluate_against_truth(truth: dict, captured_hands: list[dict]) -> dict:
         split[h.hand_id in blind_ids][0] += h.action_correct
         split[h.hand_id in blind_ids][1] += h.action_total
     entry = [h.get("entry_sec") for h in truth.get("hands") or [] if isinstance(h.get("entry_sec"), (int, float))]
+    # ハンドが丸ごと正しい数（ハンドの整合 = 目標の数字, オーナー 2026-09-30）
+    exact = sum(1 for gt in truth.get("hands") or [] if hand_fully_correct(gt, cap_by_id.get(gt.get("hand_id"))))
     return {
         "hands": len(truth.get("hands") or []),
+        "exact_hands": exact,
         # 記録を見ずに入れたハンドとそれ以外の一致率（大きく違えば、入れる人が記録に引きずられている）
         "blind_hands": len(blind_ids),
         "blind_accuracy": _pct(*split[True]), "seen_accuracy": _pct(*split[False]),
@@ -1104,13 +1108,16 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                 if key not in r.truth:
                     continue
                 t = r.truth[key]
-                print(f"    {label}: 一致率 {_fmt_pct(t['action_accuracy'])}・ボード {_fmt_pct(t['board_accuracy'])}"
+                print(f"    {label}: 全部正しいハンド {t['exact_hands']}/{t['hands']}"
+                      f"・一致率 {_fmt_pct(t['action_accuracy'])}・ボード {_fmt_pct(t['board_accuracy'])}"
                       f"・勝者 {_fmt_pct(t['winner_accuracy'])} ／ 誤った行 {t['wrong_rows']}・取りこぼし "
                       f"{t['missed_rows']} ／ 要確認 {t['flagged_rows']} 行（うち誤り {t['flagged_wrong']}）"
                       f" = 精度 {_fmt_pct(t['review_precision'])}・再現率 {_fmt_pct(t['review_recall'])}")
                 for ph in t["per_hand"]:
                     totals[key]["correct"] += ph["correct"]
                     totals[key]["total"] += ph["total"]
+                totals[key]["exact"] += t["exact_hands"]
+                totals[key]["hands"] += t["hands"]
                 totals[key]["flagged"] += t["flagged_rows"]
                 totals[key]["flagged_wrong"] += t["flagged_wrong"]
                 totals[key]["wrong"] += t["wrong_rows"]
@@ -1151,7 +1158,8 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
     for key, label in labels:
         c = totals[key]
         if c["total"]:
-            print(f"合計（真のアクションのあるハンド）{label}: 一致 {c['correct']}/{c['total']}"
+            print(f"合計（真のアクションのあるハンド）{label}: 全部正しいハンド {c['exact']}/{c['hands']}"
+                  f"・一致 {c['correct']}/{c['total']}"
                   f"（{_fmt_pct(c['correct'] / c['total'])}）・要確認の精度 {_fmt_pct(_pct(c['flagged_wrong'], c['flagged']))}"
                   f"・再現率 {_fmt_pct(_pct(c['flagged_wrong'], c['wrong']))}")
 

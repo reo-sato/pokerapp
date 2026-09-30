@@ -43,6 +43,7 @@ from core.ground_truth import (
     validate_source,
 )
 from core.ground_truth_repository import GroundTruthRepository
+from core.hand_correction import row_target
 from core.hand_correction_repository import (
     HandCorrectionError,
     HandCorrectionRepository,
@@ -752,11 +753,14 @@ def create_app(
                     "code": "invalid_correction",
                     "message": f"action_index={body.action_index} が範囲外です（0..{len(actions) - 1}）。",
                 })
+        # 訂正した行を宛先として残す（記録の本体 = 推定が推定し直しで変わっても、同じ行に当てる）
+        target = (row_target((hand.get("actions") or [])[body.action_index])
+                  if body.action_index is not None else None)
         try:
             c = correction_repo.add_correction(
                 session_id, hand_id, body.field, body.new_value,
                 action_index=body.action_index,
-                corrected_by=body.corrected_by or "staff", note=body.note,
+                corrected_by=body.corrected_by or "staff", note=body.note, target=target,
             )
         except HandCorrectionError as e:
             return JSONResponse(status_code=400,

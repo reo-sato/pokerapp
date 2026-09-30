@@ -279,6 +279,19 @@ def measure_hand(
     )
 
 
+def hand_fully_correct(gt_hand: dict, captured_hand: dict | None) -> bool:
+    """ハンドが丸ごと正しいか（ハンドの整合, オーナー 2026-09-30: 発話の読みが 9 割当たっても、ハンドが丸ごと
+    正しい割合は全然足りない）: 真のアクションの行が全部正しく・余計な行が無く・勝者が合い・真のアクションにボードが
+    あればボードも合う。"""
+    if captured_hand is None:
+        return False
+    m = measure_hand(gt_hand, captured_hand)
+    rows = len(gt_hand.get("actions") or [])
+    if not (m.action_correct == m.action_total == rows) or m.winner_match is False:
+        return False
+    return m.board_match or not _normalize_board(gt_hand.get("board"))
+
+
 def measure_session(
     session_log: dict,
     ground_truth: dict,

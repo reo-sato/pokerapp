@@ -1360,6 +1360,11 @@ def export_phh(json_path: str) -> None:
         sys.exit(1)
 
     data = json.loads(src.read_text(encoding="utf-8"))
+    # 記録の本体 = ライブの記録 ⊕ 推定（ADR-0056 D1）。推定のファイルが隣にあれば重ねる。
+    from core.hand_estimate import load_estimates, overlay_log
+
+    if src.name.endswith(".json") and src.stem.count(".") == 0:
+        data = overlay_log(data, load_estimates(src.parent, src.stem))
     hands_raw = data.get("hands", [])
     if not hands_raw:
         print("ハンドデータがありません。")

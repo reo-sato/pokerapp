@@ -50,6 +50,7 @@ from core.ground_truth import (  # noqa: E402
 )
 from core.ground_truth_repository import GroundTruthRepository  # noqa: E402
 from core.hand_correction import apply_hand_corrections  # noqa: E402
+from core.hand_estimate import load_estimates, overlay_log  # noqa: E402
 from core.hand_correction_repository import HandCorrectionRepository  # noqa: E402
 from core.hand_log import hand_street_flow  # noqa: E402
 from core.poker_engine import PokerkitGameState  # noqa: E402
@@ -81,7 +82,8 @@ _TIMELINE_AFTER_SEC = 20.0
 
 
 def _load_hand_log(log_dir: Path, session_id: str) -> Optional[dict]:
-    """`logs/{session_id}.json` を読む。不在・破損・書き込み途中は None（次の読み直しで読める）。"""
+    """記録の本体 = `logs/{session_id}.json`（ライブの記録）に推定（`{session_id}.estimate.json`）を重ねたもの
+    （ADR-0056 D1）。不在・破損・書き込み途中は None（次の読み直しで読める）。"""
     path = log_dir / f"{session_id}.json"
     if not path.is_file():
         return None
@@ -91,7 +93,7 @@ def _load_hand_log(log_dir: Path, session_id: str) -> Optional[dict]:
         return None
     if not isinstance(data, dict) or not isinstance(data.get("hands"), list):
         return None
-    return data
+    return overlay_log(data, load_estimates(log_dir, session_id))
 
 
 def _hands_of(log: dict) -> list[dict]:
