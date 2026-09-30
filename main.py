@@ -687,6 +687,7 @@ def run_cli(script: str | None = None) -> None:
         on_notice=_print_notice,
         on_cards=_print_cards,
         listen_gate=listen_gate,
+        live_hand=True,        # フロップから進行中のハンドを真のアクション入力の画面へ
         **_auto_hand_kwargs(cfg, audio_thread),
     )
     if audio_thread is not None:
@@ -1063,6 +1064,7 @@ def run_gui() -> None:
         table_state_writer=table_state_writer,
         control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
         listen_gate=listen_gate,
+        live_hand=True,        # フロップから進行中のハンドを真のアクション入力の画面へ
         **_auto_hand_kwargs(cfg, audio_thread),
     )
 

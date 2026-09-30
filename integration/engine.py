@@ -275,6 +275,7 @@ class IntegrationThread(threading.Thread):
         recorded_deals: bool = False,
         before_new_hand: Optional[Callable[[int], None]] = None,
         button_from_deal: bool = True,
+        live_hand: bool = False,
     ) -> None:
         """
         Args:
@@ -345,6 +346,9 @@ class IntegrationThread(threading.Thread):
                          ディーラーがボタンを動かし忘れたとみて、そのハンドのボタンを直して組み直す（config
                          `engine.button_from_deal`, 既定 True, 2026-09-29）。読んだ時刻は在否（`seat_presence` の
                          `since`）から取り、`deal_order` の信号として記録する（replay も同じ判断）。False でも記録はする。
+            live_hand: フロップが配られたら、進行中のハンド（ここまでの記録）を `JsonWriter.write_live_hand` に
+                         書き、ハンドが終わったら消す（真のアクション入力の画面がハンドの途中で入力する, オーナー
+                         2026-09-30）。ライブのロガーだけ True（既定 False = replay・テストは書かない）。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -493,6 +497,8 @@ class IntegrationThread(threading.Thread):
         self._streets_synced: set[str] = set()
         # ――― ボタンの置き忘れの救済（2026-09-29）―――
         self._button_from_deal = bool(button_from_deal)
+        self._live_hand = bool(live_hand)
+        self._live_signature: Optional[tuple] = None     # 最後に書いた進行中のハンド（変わったときだけ書く）
         # このハンドで配った順を見たか（1 ハンドに 1 回）
         self._deal_order_checked = False
         # ハンドを始めた直後の状態（ボタンを直して始め直すとき、ここから入力を流し直す）
@@ -525,6 +531,7 @@ class IntegrationThread(threading.Thread):
             self._drain_rfid_queue()
 
             self._publish_table_state_if_due()
+            self._publish_live_hand()       # 進行中のハンド（フロップから, 真のアクション入力の画面）
             self._check_deal_presence()     # 手札の配布（ADR-0063）
             self._check_deal_order()        # 配った順（ボタンの置き忘れ）
             self._check_table_cleared()     # 片付け（プレーの終わり）
@@ -3237,6 +3244,73 @@ class IntegrationThread(threading.Thread):
         self._table_state_published_at = self._clock()
         self._table_state_writer.publish(state, observed_at=observed_at)
 
+    # ――― 進行中のハンド（真のアクション入力の画面, オーナー 2026-09-30）―――
+
+    _FLOP_OR_LATER = frozenset({"flop", "turn", "river", "showdown"})
+
+    def _publish_live_hand(self) -> None:
+        """フロップが配られたハンドの、ここまでの記録を書く（変わったときだけ）。フロップの前・ハンドの外は消す。"""
+        if not self._live_hand:
+            return
+        gs = self._game_state
+        dealt = len(self._board_cards) >= 3 or getattr(gs, "street", None) in self._FLOP_OR_LATER
+        if not (self._hand_open and dealt):
+            self._clear_live_hand()
+            return
+        signature = (
+            gs.hand_id, gs.street, len(self._current_actions), tuple(self._board_cards),
+            tuple(sorted((s, tuple(c)) for s, c in self._hole_cards.items())), getattr(gs, "button_seat", None),
+        )
+        if signature == self._live_signature:
+            return
+        try:
+            hand = self._live_hand_dict()
+        except Exception:  # noqa: BLE001 — 表示用。失敗でハンドを止めない
+            logger.exception("進行中のハンドの組み立てに失敗しました — スキップします")
+            return
+        self._json_writer.write_live_hand(hand)
+        self._live_signature = signature
+
+    def _clear_live_hand(self) -> None:
+        if self._live_hand and self._live_signature is not None:
+            self._json_writer.clear_live_hand()
+            self._live_signature = None
+
+    def _live_hand_dict(self) -> dict:
+        """進行中のハンドを、確定したハンド（`HandSummary.to_dict`）と同じ形で（勝者・結果は無し）。"""
+        gs = self._game_state
+        stacks = gs.get_stacks()
+        in_hand = set(self._seats_in_hand())
+        players = []
+        for seat in sorted(s for s in stacks if s in in_hand):
+            hole = self._hole_cards.get(seat, [])
+            players.append({
+                "seat": seat,
+                "name": gs.get_player_name(seat),
+                "hole_cards": list(hole) if hole else None,
+                "hole_cards_source": "rfid" if hole else "",
+                "stack_start": self._stack_start.get(seat, 0),
+            })
+        return {
+            "hand_id": gs.hand_id,
+            "session_id": self._json_writer._session_id,  # noqa: SLF001
+            "started_at": self._hand_started_at,
+            "ended_at": None,
+            "blinds": {"sb": gs._sb, "bb": gs._bb},  # noqa: SLF001
+            "board": list(self._board_cards),
+            "board_source": self._board_source,
+            "board_timeline": self._build_board_timeline(),
+            "button_seat": getattr(gs, "button_seat", None),
+            "position_map": {str(k): v for k, v in self._safe_position_map().items()},
+            "players": players,
+            "winner_seat": None,
+            "actions": [a.to_dict() for a in self._current_actions],
+            "review_required": self._hand_needs_review or any(a.needs_review for a in self._current_actions),
+            "street": gs.street,
+            "in_progress": True,
+            "updated_at": self._now_iso(),
+        }
+
     def _safe_position_map(self) -> dict[int, str]:
         try:
             return self._game_state.position_map()
@@ -3897,6 +3971,7 @@ class IntegrationThread(threading.Thread):
         )
 
         self._json_writer.append_hand_summary(summary)
+        self._clear_live_hand()
         if self._on_hand:
             self._on_hand(summary)
         self._apply_stack_corrections()       # そのハンドの結果には入れない

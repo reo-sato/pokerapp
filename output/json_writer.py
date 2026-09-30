@@ -59,6 +59,26 @@ class JsonWriter:
         self._flush()
         logger.info("Hand %d saved to %s", summary.hand_id, self._path)
 
+    @property
+    def live_path(self) -> Path:
+        """進行中のハンド（`write_live_hand`）の置き場所 `logs/{session_id}.live_hand.json`。"""
+        return self._log_dir / f"{self._session_id}.live_hand.json"
+
+    def write_live_hand(self, hand: dict) -> None:
+        """進行中のハンド（ここまでの記録）を書く。真のアクション入力の画面が、ハンドの途中で入力できるように
+        フロップから出す（オーナー 2026-09-30）。ハンドの記録（`logs/{session_id}.json`）には入れない。"""
+        try:
+            atomic_write_json(self.live_path, {"session_id": self._session_id, "hand": hand})
+        except OSError:
+            logger.exception("Failed to write the hand in progress: %s", self.live_path)
+
+    def clear_live_hand(self) -> None:
+        """進行中のハンドを消す（ハンドが終わったとき）。"""
+        try:
+            self.live_path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed to remove the hand in progress: %s", self.live_path)
+
     def _flush(self) -> None:
         """データをディスクへ書き込む。書き込み失敗時もクラッシュしない。"""
         try:

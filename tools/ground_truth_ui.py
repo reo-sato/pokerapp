@@ -31,6 +31,7 @@ import logging
 import re
 import sys
 import threading
+import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -70,6 +71,8 @@ BLIND_EVERY = 1
 _AUDIO_RE = re.compile(r"^[0-9]{6,16}\.wav$")
 # 台本のハンドのセッション（`tools/test_script.py`）。正解は台本なので入力は要らない
 _SCRIPT_SUFFIX = ".script.json"
+# 進行中のハンド（ロガーがフロップから書く。ハンドが終わると消える, オーナー 2026-09-30）
+_LIVE_SUFFIX = ".live_hand.json"
 # タイムラインに出す範囲: ハンドの始まり（配布）の少し前から、次のハンドの始まりまで
 _TIMELINE_BEFORE_SEC = 10.0
 _TIMELINE_AFTER_SEC = 20.0
@@ -209,8 +212,35 @@ def list_hands(
         "entry_sec_avg": _average([r["ground_truth"].get("entry_sec") for r in rows if r["ground_truth"]]),
     }
     rows.sort(key=lambda r: r["hand_id"], reverse=True)
+    live = _load_live_hand(log_dir, session_id)
+    if live is not None:
+        row = _hand_row(live, gt_repo.get(session_id, live["hand_id"]))
+        row.update(in_progress=True, street=live.get("street"), accuracy=None)   # 記録が途中なので比べない
+        rows.insert(0, row)
     return {"session_id": session_id, "hands": rows, "summary": summary,
             "script": (log_dir / f"{session_id}{_SCRIPT_SUFFIX}").is_file()}
+
+
+def _load_live_hand(log_dir: Path, session_id: str) -> Optional[dict]:
+    """進行中のハンド（`logs/{session_id}.live_hand.json`, `in_progress` 付き）。無い・壊れている・もう確定したなら None。
+
+    ハンドの途中で真のアクションを入れるため、ロガーがフロップが配られた時点から書く（オーナー 2026-09-30）。
+    """
+    path = log_dir / f"{session_id}{_LIVE_SUFFIX}"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None                                   # 書き込み途中（次の読み直しで読める）
+    hand = data.get("hand") if isinstance(data, dict) else None
+    if not isinstance(hand, dict) or type(hand.get("hand_id")) is not int:
+        return None
+    log = _load_hand_log(log_dir, session_id)
+    if log is not None and any(h["hand_id"] == hand["hand_id"] for h in _hands_of(log)):
+        return None                                   # もう確定した（消す前に読んだ）
+    hand["in_progress"] = True
+    return hand
 
 
 def _get_hand(
@@ -218,12 +248,11 @@ def _get_hand(
     corr_repo: Optional[HandCorrectionRepository] = None,
 ) -> Optional[dict]:
     log = _load_hand_log(log_dir, session_id)
-    if log is None:
-        return None
-    for hand in _hands_of(log):
+    for hand in _hands_of(log) if log is not None else []:
         if hand["hand_id"] == hand_id:
             return _apply_corrections(hand, session_id, corr_repo)
-    return None
+    live = _load_live_hand(log_dir, session_id)
+    return live if live is not None and live["hand_id"] == hand_id else None
 
 
 def _gt_actions(hand: dict) -> list[dict]:
@@ -297,7 +326,9 @@ def hand_timeline(log_dir: Path, session_id: str, hand: dict, next_started_at: O
     if start is None:
         return []
     end = _epoch(next_started_at)
-    if end is None:
+    if end is None and hand.get("in_progress"):
+        end = time.time() + _TIMELINE_AFTER_SEC           # 進行中: いままでの発話・札をすべて
+    elif end is None:
         end = (_epoch(hand.get("ended_at")) or start) + _TIMELINE_AFTER_SEC
     lo = start - _TIMELINE_BEFORE_SEC
     audio_dir = log_dir / "audio" / session_id
@@ -358,7 +389,10 @@ def hand_detail(
     _add_street_totals(captured)
     gt = gt_repo.get(session_id, hand_id)
     script = (log_dir / f"{session_id}{_SCRIPT_SUFFIX}").is_file()   # 台本のハンドは正解が台本（入力は要らない）
-    blind = gt is None and not script and is_blind(session_id, hand_id, blind_every)
+    in_progress = bool(captured.get("in_progress"))
+    # 進行中のハンドは、途中で保存したあともブラインドのまま（記録との照らし合わせはハンドが終わってから）
+    blind_saved = gt is not None and in_progress and bool(gt.hand.get("blind")) and not gt.hand.get("reconciled")
+    blind = (gt is None or blind_saved) and not script and is_blind(session_id, hand_id, blind_every)
     initial = _gt_actions(gt.hand) if gt is not None else ([] if blind else _gt_actions(captured))
     board, holes = _gt_cards(gt.hand) if gt is not None else (None, None)
     button = _gt_button(gt.hand) if gt is not None else None
@@ -373,6 +407,7 @@ def hand_detail(
         "legal": legal,
         "blind": blind,
         "script": script,
+        "in_progress": in_progress,
         "timeline": hand_timeline(log_dir, session_id, captured, _next_started_at(log_dir, session_id, hand_id)),
     }
 
@@ -689,6 +724,12 @@ def save_ground_truth(
     except GroundTruthError as e:
         return 400, {"code": "invalid_amount", "message": str(e)}
     annotator = str(body.get("annotator") or "staff").strip()[:64] or "staff"
+    in_progress = bool(captured.get("in_progress"))
+    if source == SOURCE_PASSTHROUGH and in_progress:
+        return 400, {
+            "code": "invalid_amount",
+            "message": "進行中のハンドは「記録どおり」にできません（記録が途中です）。入れたアクションを「保存」してください。",
+        }
     if source == SOURCE_PASSTHROUGH:
         if hand_has_needs_review(captured) and not _review_confirmed(captured, body):
             return 400, {
@@ -707,6 +748,8 @@ def save_ground_truth(
         hand_body["entry_sec"] = entry_sec      # 入力にかかった時間（手間を測る）
     _keep_blind_entry(hand_body, gt_repo.get(session_id, hand_id))
     entry = gt_repo.upsert(session_id, hand_id, hand_body, annotator=annotator, source=source)
+    if in_progress:
+        return 200, {"saved": entry.to_dict(), "accuracy": None, "in_progress": True}
     accuracy = _accuracy_dict(measure_hand(dict(entry.hand, hand_id=hand_id), captured))
     return 200, {"saved": entry.to_dict(), "accuracy": accuracy}
 
@@ -1174,6 +1217,7 @@ _PAGE = r"""<!doctype html>
  tr.row { cursor:pointer; } tr.row:active { background:#1a1f27; }
  .tag { display:inline-block; font-size:12px; padding:1px 8px; border-radius:999px; margin-right:4px; white-space:nowrap; }
  .t-ok { background:#1f3a24; color:#7ee787; } .t-edit { background:#1f2f3a; color:#58a6ff; }
+ .t-live { background:#3a1f35; color:#f778ba; }
  .t-warn { background:#3a2f1f; color:#e3b341; } .t-bad { background:#3a1f1f; color:#ff7b72; }
  .t-none { background:#23262b; color:#9aa0a6; }
  .card { display:inline-block; background:#1e232b; border:1px solid #3a414d; border-radius:8px; padding:6px 8px;
@@ -1336,11 +1380,15 @@ function renderList(){
       : '<span class="tag t-none">未入力</span>';
     const rv = h.has_needs_review ? '<span class="tag t-warn">要確認</span>' : "";
     const acc = h.accuracy ? (h.accuracy.all_match ? '<span class="tag t-ok">一致</span>' : `<span class="tag t-bad">差分 ${h.accuracy.mismatches}</span>`) : "";
-    const bl = h.ground_truth && h.ground_truth.blind
+    const bl = h.ground_truth && h.ground_truth.blind && !h.in_progress
       ? (h.ground_truth.reconciled ? '<span class="tag t-edit">ブラインド→照合済</span>' : '<span class="tag t-warn">照らし合わせ待ち</span>') : "";
+    // 進行中のハンド（フロップから出る）: 入れたところまで保存でき、ハンドが終わってから照らし合わせる
+    const live = h.in_progress
+      ? `<span class="tag t-live">進行中（${esc(STREET_JA[h.street] || h.street || "")}）</span>`
+        + (h.ground_truth ? '<span class="tag t-edit">途中まで保存</span>' : "") : "";
     return `<tr class="row" onclick="openHand(${h.hand_id})"><td>#${h.hand_id}</td><td>${fmtTime(h.started_at)}</td>
       <td>${(h.seats||[]).join(" ")}</td><td>${(h.board||[]).map(c => cardHtml(c, "sm")).join("")}</td>
-      <td>${h.winner_seat != null ? "席 " + h.winner_seat : "—"}</td><td>${rv} ${st} ${bl} ${acc}</td></tr>`;
+      <td>${h.winner_seat != null ? "席 " + h.winner_seat : "—"}</td><td>${live || `${rv} ${st} ${bl} ${acc}`}</td></tr>`;
   }).join("");
   $("app").innerHTML = `<div class="top"><h1>真のアクション入力</h1><span class="small"><a href="/script">台本 →</a>　<a href="/corpus">読み上げ集 →</a></span></div>
     <div class="bar">
@@ -1582,12 +1630,14 @@ function renderEdit(){
   const capPlayers = (cap.players || []).map(p => `席 ${p.seat}: ${(p.hole_cards||[]).map(c => cardHtml(c, "sm")).join("") || "<span class='muted'>—</span>"}`).join(" ｜ ");
   const lint = (L.lint || []).map(m => `<div class="lint">⚠ ${esc(m)}</div>`).join("");
   const gtd = d.ground_truth;
-  const reconcile = gtd && gtd.blind && !gtd.reconciled
+  const reconcile = d.in_progress
+    ? `<div class="reconcile">このハンドは<b>進行中</b>です（${esc(STREET_JA[cap.street] || cap.street || "")}）。入れたところまで「保存」でき、あとで開き直して続きを入れられます。記録との照らし合わせはハンドが終わってからです（ボードの札は開いた時点のもの）。</div>`
+    : gtd && gtd.blind && !gtd.reconciled
     ? `<div class="reconcile">ブラインドで入れた内容を保存しました。<b>記録と違う行（黄色）</b>を左の ▶ の音声で確かめ、正しい方に直して「保存」してください（直すところが無ければ、そのまま「保存」）。</div>`
     : "";
   const gtMeta = d.ground_truth ? `<span class="tag ${d.ground_truth.source==="captured-passthrough"?"t-ok":"t-edit"}">${d.ground_truth.source==="captured-passthrough"?"記録どおり":"修正済"} ${esc(d.ground_truth.annotated_at||"")} ${esc(d.ground_truth.annotator||"")}</span>` : '<span class="tag t-none">未入力</span>';
   const blind = isBlind();
-  const canPass = !blind && (!d.has_needs_review || allConfirmed());
+  const canPass = !blind && !d.in_progress && (!d.has_needs_review || allConfirmed());
   const ri = reviewItems();
   const leftPanel = blind ? `
       <div class="panel cap">
@@ -1629,10 +1679,10 @@ function renderEdit(){
         <h2>勝った席</h2>${winnerHtml}
         <h2>メモ</h2><input type="text" style="width:100%" value="${esc(g.notes)}" placeholder="気づいたこと（任意）" oninput="setNotes(this.value)" onchange="setNotes(this.value)">
         <div class="actions-bottom">
-          ${blind ? "" : `<button class="ok" onclick="savePassthrough()" ${canPass?"":"disabled"}>✓ 記録どおり</button>`}
+          ${blind || d.in_progress ? "" : `<button class="ok" onclick="savePassthrough()" ${canPass?"":"disabled"}>✓ 記録どおり</button>`}
           <button class="primary" onclick="saveEdited()">保存（この内容が真）</button>
           ${blind ? "" : '<button class="sm" onclick="resetToCaptured()">記録の内容に戻す</button>'}
-          ${blind || canPass ? "" : '<span class="small muted">要確認の行を左の ✓ ですべて確かめると「記録どおり」にできます。違っていれば直して保存してください。</span>'}
+          ${blind || canPass || d.in_progress ? "" : '<span class="small muted">要確認の行を左の ✓ ですべて確かめると「記録どおり」にできます。違っていれば直して保存してください。</span>'}
         </div>
       </div>
     </div>`;
@@ -1679,9 +1729,10 @@ async function saveWith(body){
   try {
     const d = await api(sidPath() + "/hands/" + S.hand.captured.hand_id, {method:"PUT", body: JSON.stringify(body)});
     const a = d.accuracy || {};
-    toast(a.all_match ? `保存しました — 記録と一致` : `保存しました — 記録との差分 ${a.mismatches}（アクション ${a.action_correct}/${a.action_total}${a.board_match?"":"・ボード"}${a.winner_match===false?"・勝者":""}）`);
+    toast(d.in_progress ? "保存しました（進行中のハンド。続きは開き直して入れ、ハンドが終わったら記録と照らし合わせます）"
+          : a.all_match ? `保存しました — 記録と一致` : `保存しました — 記録との差分 ${a.mismatches}（アクション ${a.action_correct}/${a.action_total}${a.board_match?"":"・ボード"}${a.winner_match===false?"・勝者":""}）`);
     S.dirty = false;
-    if (body.hand && body.hand.blind) {        // ブラインドで入れた → 記録と照らし合わせる
+    if (body.hand && body.hand.blind && !d.in_progress) {        // ブラインドで入れた → 記録と照らし合わせる
       await openHand(S.hand.captured.hand_id);
       return;
     }
@@ -1697,7 +1748,7 @@ function savePassthrough(){
 function saveEdited(){
   const L = S.legal;
   if (L && L.error && L.next && !confirm("赤い行（反映できないアクション）があります。このまま保存しますか？")) return;
-  if (S.gt.winner_seat == null && !confirm("勝った席が未定です。このまま保存しますか？")) return;
+  if (S.gt.winner_seat == null && !S.hand.in_progress && !confirm("勝った席が未定です。このまま保存しますか？")) return;
   saveWith({source:"manual-edit", annotator: S.annotator || "staff", hand: gtPayload(), entry_sec: entrySec()});
 }
 
