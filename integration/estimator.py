@@ -32,7 +32,7 @@ from integration.world_replay import PresenceTimeline, SeatObservation, delivere
 
 logger = logging.getLogger(__name__)
 
-ESTIMATOR_VERSION = "1.0-dev"
+ESTIMATOR_VERSION = "1.0"
 
 # 確率の値（仮）。log にして足す。出所は design の worklog（店舗の真のアクション 18 ハンド = 開発データ）。
 PARAMS: dict[str, float] = {
@@ -50,7 +50,8 @@ PARAMS: dict[str, float] = {
     "p_restate": 0.3,            # 言い直し: 同じアクションを言い方を変えて続けた（「コールします。コール。」「コール
                                  # です。コール800点。」= 店舗 2/2 が 1 つのアクション）・次の発話で額や「オールイン」を
                                  # 繰り返した・ショーダウンのあとのマックの声
-    "p_restate_same": 0.1,       # 同じ語をそのまま繰り返した（「チェック、チェック。」店舗 1/2 が 1 つ、台本はすべて 2 人分）
+    "p_restate_same": 0.05,      # 同じ語をそのまま繰り返した（「チェック、チェック。」店舗 1/2 が 1 つ、台本 0/15 = 合わせて
+                                 # 1/17。掃引で店舗・台本の正誤が動かない 0.03〜0.1 の中）
     "p_sub": 0.02,               # 語の種類の取り違え（チェック ↔ コール など）
     "p_amount": 0.05,            # 額の聞き違い（寄せた・丸めた）
     # 札の離脱（卓状態の履歴）。時刻の密度で比べる（どの仮説でも離脱 1 つに密度 1 つ）
@@ -62,8 +63,8 @@ PARAMS: dict[str, float] = {
     "flicker_sec": 3.0,          # これより早く戻った離脱（ちらつき・のぞき見）は数えない（engine がフォールドにしない 3 秒と同じ）
     "departure_after_end_sec": 60.0,   # 離脱を数える窓: 直しの無い再生のハンドの終わりからこの秒数まで
     "silent_fold_wait": 30.0,    # 言われないフォールドは前後の言われたアクションの間（最後なら前からこの秒数まで）
-    "silent_fold_mean": 3.0,     # 言われないフォールドの札が離れるまでの考える時間（前の言われたアクションから, 指数分布
-                                 # の平均。店舗の 5 回: 2.1〜4.7 秒）
+    "silent_fold_mean": 2.5,     # 言われないフォールドの札が離れるまでの考える時間（前の言われたアクションから, 指数分布
+                                 # の平均。店舗の 5 回: 2.1〜4.7 秒・中央値 2.4。掃引で店舗の正誤が動かない 1〜3 の中）
     "other_departure_sec": 20.0,  # ショーダウン・片付けで札が離れる時刻の幅
     "lift_sec": 200.0,           # ベッティングの途中に残っている席の札が離れる（持ち上げ）の平均の間隔
     # そのほか
@@ -524,7 +525,7 @@ class SessionEstimator:
     def _amount_readings(self, betting: list[_Row], edits: tuple[Edit, ...]) -> list[str]:
         """賭けの額を読んだ発話に、別の額になる読み（第 2 の耳の候補など）が、選んだ読みから `review_margin` 以内の
         確からしさである。採点には足さず要確認の理由だけ（監査 2 回目: 合法な額の聞き違いは、寄せ・丸めが無いと何の
-        印も付かない）。店舗の 15 発話（第 2 の耳が額を読んだ）では別の額の候補は 2.75 以上離れ、額は全部正しかった。"""
+        印も付かない）。店舗の 15 発話（第 2 の耳が額を読んだ）では、別の額の候補はどれも 2.75 以上離れていた。"""
         margin = self.params["review_margin"]
         chosen = {e.at: e.value for e in edits if e.kind == "read"}
         out: list[str] = []
