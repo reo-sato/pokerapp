@@ -17,12 +17,12 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from core.event_queue import make_audio_queue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import PlayerState
-from core.hand_log import HandSummary
+from core.hand_log import ActionRecord, HandSummary
 from core.poker_engine import create_game_state
 from integration.engine import IntegrationThread
 from output.json_writer import JsonWriter
@@ -139,6 +139,7 @@ def replay_events(
     button_seat: Optional[int] = None,
     close_open_hand: bool = False,
     hand_stacks: Optional[dict[int, dict[int, int]]] = None,
+    on_action: Optional[Callable[[ActionRecord], None]] = None,
 ) -> list[HandSummary]:
     """Event 列を timestamp 昇順で再構築し、確定した HandSummary 群を返す。
 
@@ -155,6 +156,7 @@ def replay_events(
     `hand_stacks`: hand_id → {席: 持ち点}。そのハンドをこの持ち点から始める（評価用: 記録の `stack_start` を渡すと、
     前のハンドの違いが持ち点を通して次のハンドへ持ち越されない。真のアクションのオールインの額は記録の持ち点から
     決めているので、これが無いと前のハンドを直しただけで後のハンドが違って見える）。pokerkit backend のみ。
+    `on_action`: live の画面と同じ通知（反映できなかった発話 = actor_source "unresolved" も来る。推定器が採点に使う）。
 
     記録に配布の信号（rfid kind `deal` / `hand_start`, schema 0.9）があれば、札の読み取りから配布を決め直さず、
     live が在否で決めた配布と、発話を待って始めた時点に従う（在否を持たない replay で live と同じにするため）。
@@ -181,6 +183,7 @@ def replay_events(
         rfid_folds=rfid_folds,
         recorded_deals=any(isinstance(e, RFIDEvent) and e.kind == "deal" for e in events),
         before_new_hand=start_from_recorded_stacks if hand_stacks else None,
+        on_action=on_action,
     )
 
     for ev in _in_replay_order(events):
