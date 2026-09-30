@@ -84,6 +84,16 @@ def test_v1_bench_format_and_interval():
     assert "正解が候補に無い 1・候補にあるが点で負けた 0" in text
 
 
+def test_search_check_format():
+    from tools.bench_hands import V1Result, format_search_check, wide_params
+
+    assert wide_params({"beam": 4, "expand": 12, "depth": 3}) == {"beam": 8, "expand": 24, "depth": 3}
+    a = V1Result("店舗（実卓）", hands=3, exact=1, best={"x#1": "A", "x#2": "B", "x#3": "C"}, correct=["x#1"])
+    b = V1Result("店舗（実卓）", hands=3, exact=1, best={"x#1": "A2", "x#2": "B2", "x#3": "C"}, correct=["x#2"])
+    text = "\n".join(format_search_check([a], [b]))
+    assert "1 番が変わる 2/3（正しくなる 1・正しくなくなる 1）" in text and "x#1 x#2" in text
+
+
 def test_bench_format():
     assert (short_id("2026-09-30_165030_script_voice"), short_id("d0f055fb6fdd441082be18ced7cee437")) == (
         "165030", "d0f055fb")

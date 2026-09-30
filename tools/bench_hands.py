@@ -161,8 +161,11 @@ class V1Result:
     outscored: list[str] = field(default_factory=list)          # 正解は候補にあるが点で負けた（採点の誤り）
     edits: dict[str, int] = field(default_factory=dict)         # 1 番の直しの数 → ハンド数
     seconds: float = 0.0
+    best: dict[str, str] = field(default_factory=dict)          # ハンド → 1 番の記録（探索の確かめで比べる）
+    correct: list[str] = field(default_factory=list)
 
     def add_hand(self, key: str, truth: dict, result) -> None:
+        from integration.estimator import record_key
         from tools.measure_capture_accuracy import hand_fully_correct
 
         base = next((c for c in result.candidates if not c.edits), None)
@@ -170,6 +173,9 @@ class V1Result:
         ok = hand_fully_correct(truth, result.best.hand)
         found = any(hand_fully_correct(truth, c.hand) for c in result.candidates)
         flagged = bool(result.reasons)
+        self.best[key] = repr(record_key(result.best.hand))
+        if ok:
+            self.correct.append(key)
         self.hands += 1
         self.base_exact += ok_base
         self.exact += ok
@@ -248,6 +254,28 @@ def run_bench_v1(*, store: bool = True, script: bool = True, sim_sessions: int =
     return out
 
 
+def wide_params(params: Optional[dict] = None) -> dict:
+    """探索を広げた値（ビーム幅・広げる直しを 2 倍）。1 番が変わる率 = 探索の誤りの目安（監査 2026-09-30）。"""
+    from integration.estimator import PARAMS as V1_PARAMS
+
+    base = dict(params or V1_PARAMS)
+    return dict(base, beam=int(base["beam"]) * 2, expand=int(base["expand"]) * 2)
+
+
+def format_search_check(normal: list[V1Result], wide: list[V1Result]) -> list[str]:
+    lines = []
+    for a, b in zip(normal, wide):
+        changed = [k for k in a.best if k in b.best and a.best[k] != b.best[k]]
+        fixed = [k for k in changed if k in b.correct and k not in a.correct]
+        broken = [k for k in changed if k in a.correct and k not in b.correct]
+        lines.append(f"{a.name}: 探索を 2 倍に広げると 1 番が変わる {len(changed)}/{a.hands}"
+                     f"（正しくなる {len(fixed)}・正しくなくなる {len(broken)}）"
+                     f" ／ 全部正しいハンド {a.exact} → {b.exact}（{a.seconds:.0f} 秒 → {b.seconds:.0f} 秒）")
+        if changed:
+            lines.append(f"    1 番が変わる: {' '.join(changed)}")
+    return lines
+
+
 def format_v1(r: V1Result) -> list[str]:
     lo, hi = wilson(r.exact, r.hands)
     lines = [
@@ -276,14 +304,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--sessions", type=int, default=4, help="v0: シミュレーションのセッション数（1 セッション 30 ハンド）")
     ap.add_argument("--sim", type=int, default=0, help="v1: シミュレーションのセッション数（既定 0 = 回さない）")
     ap.add_argument("--no-script", action="store_true", help="v1: 台本を回さない")
+    ap.add_argument("--search-check", action="store_true",
+                    help="v1: 探索を 2 倍に広げてもう 1 回回し、1 番が変わる率（探索の誤りの目安）を出す")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
     logging.disable(logging.CRITICAL)          # 候補の再生で出るエンジンのログは要らない
     if not args.v0:
-        if args.logs:
-            results_v1 = run_bench_v1(store=False, script=False, logs=args.logs)
-        else:
-            results_v1 = run_bench_v1(script=not args.no_script, sim_sessions=args.sim)
+        def run(params: Optional[dict] = None) -> list[V1Result]:
+            if args.logs:
+                return run_bench_v1(store=False, script=False, logs=args.logs, params=params)
+            return run_bench_v1(script=not args.no_script, sim_sessions=args.sim, params=params)
+
+        results_v1 = run()
+        if args.search_check:
+            wide = run(wide_params())
+            if not args.json:
+                for r in results_v1:
+                    print("\n".join(format_v1(r)))
+                print("\n".join(format_search_check(results_v1, wide)))
+                return 0
         if args.json:
             print(json.dumps([asdict(r) for r in results_v1], ensure_ascii=False, indent=1))
         else:
