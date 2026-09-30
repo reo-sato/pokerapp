@@ -1247,7 +1247,9 @@ const GT_ACTIONS = ["fold","check","call","bet","raise","allin"];
 const ACTION_JA = {fold:"フォールド", check:"チェック", call:"コール", bet:"ベット", raise:"レイズ", allin:"オールイン"};
 const STREET_JA = {preflop:"プリフロップ", flop:"フロップ", turn:"ターン", river:"リバー", showdown:"ショーダウン"};
 const BOARD_LABEL = ["フロップ","フロップ","フロップ","ターン","リバー"];
-const S = {sessions:[], sid:null, hands:null, summary:null, view:"list", hand:null, gt:null, legal:null,
+// follow: いちばん新しいセッションを見ている（新しいセッションが始まったらそちらに移る）。ロールダウンで前のセッションを
+// 選んだら移らない。
+const S = {sessions:[], sid:null, follow:true, hands:null, summary:null, view:"list", hand:null, gt:null, legal:null,
            dirty:false, annotator:"", picker:null, busy:false,
            openedAt:0, confirmed:new Set(), confirmedHand:false, revealed:false, audio:null};
 const $ = (id) => document.getElementById(id);
@@ -1295,7 +1297,10 @@ function sidPath(){ return "/api/sessions/" + encodeURIComponent(S.sid); }
 async function loadSessions(){
   const d = await api("/api/sessions");
   S.sessions = d.sessions || [];
-  if (!S.sid || !S.sessions.some(s => s.session_id === S.sid)) S.sid = S.sessions.length ? S.sessions[0].session_id : null;
+  const newest = S.sessions.length ? S.sessions[0].session_id : null;
+  if ((S.follow || !S.sessions.some(s => s.session_id === S.sid)) && S.sid !== newest) {
+    S.sid = newest; S.hands = null; S.summary = null;
+  }
 }
 async function loadHands(background){
   const show = () => { if (S.view === "list") renderList(); };
@@ -1306,7 +1311,10 @@ async function loadHands(background){
   } catch (e) { S.hands = []; S.summary = null; }
   background ? whenFree(show) : show();
 }
-async function selectSession(sid){ S.sid = sid; S.hands = null; renderList(); await loadHands(); }
+async function selectSession(sid){
+  S.sid = sid; S.follow = S.sessions.length > 0 && sid === S.sessions[0].session_id;
+  S.hands = null; renderList(); await loadHands();
+}
 async function refreshAll(){ try { await loadSessions(); await loadHands(); } catch (e) { toast("読み込めません: " + e.message, true); } }
 function setAnnotator(v){ S.annotator = v.trim(); try { localStorage.setItem("gt_annotator", S.annotator); } catch (e) {} }
 function renderList(){
@@ -1696,7 +1704,12 @@ function saveEdited(){
 // ――― 起動 ―――
 try { S.annotator = localStorage.getItem("gt_annotator") || ""; } catch (e) {}
 refreshAll();
-setInterval(() => { if (S.view === "list" && !S.busy && !editing()) loadHands(true); }, 5000);
+// ハンドだけでなくセッションの一覧も読み直す（ロガーをあとから起動したセッションも出す, 店舗 2026-09-30）
+setInterval(async () => {
+  if (S.view !== "list" || S.busy || editing()) return;
+  try { await loadSessions(); } catch (e) {}
+  loadHands(true);
+}, 5000);
 </script></body></html>
 """
 

@@ -520,6 +520,7 @@ def run_cli(script: str | None = None) -> None:
         suffix = f"_script_{test_script['kind']}" if test_script is not None else "_session1"
         session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + suffix
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
+    json_writer.ensure_created()        # 真のアクション入力の画面に、最初のハンドが終わる前から出す
 
     audio_q = make_audio_queue()
     stop_event = threading.Event()
@@ -947,6 +948,7 @@ def run_gui() -> None:
     else:
         session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
+    json_writer.ensure_created()
 
     audio_q = make_audio_queue()
     stop_event = threading.Event()

@@ -347,7 +347,7 @@ class TestShowdownMuck:
         閉じた（店舗 2026-09-30）。文字の欄・ロールダウンを触っている間は作り直さず、離れたら作り直す。"""
         status, html = _req(base, "GET", "/")
         assert status == 200 and "function editing()" in html and 'addEventListener("focusout"' in html
-        assert "!editing()) loadHands(true)" in html                         # 一覧の読み直し
+        assert "S.busy || editing()) return;" in html                        # 一覧の読み直し
         assert 'whenFree(() => { if (S.view === "edit") renderEdit(); })' in html   # 手番の確認の結果
 
     def test_page_offers_a_muck_button(self, base):
@@ -431,6 +431,50 @@ class TestShowdownWinner:
         assert status == 200
         assert "function setWinner(seat){ S.gt.winner_seat = seat;" in html
         assert 'onclick="setWinner(null)">未定</button>' in html and "手札で判定: 席" in html
+
+
+class TestNewLoggerSession:
+    """店舗 2026-09-30: `start_logger.cmd` で始めたセッションが画面に出なかった。
+    - ハンドの記録（`logs/<sid>.json`）は最初のハンドが終わるまで作られていなかった。
+    - 画面はハンドの一覧を 5 秒ごとに読み直すが、セッションの一覧は開いたときにしか読まなかった。"""
+
+    def test_the_logger_creates_the_session_file_at_start(self, tmp_path):
+        from output.json_writer import JsonWriter
+
+        log_dir = tmp_path / "logs"
+        JsonWriter(log_dir, "2026-09-30_180000_session1").ensure_created()
+        [session] = list_sessions(log_dir, GroundTruthRepository(log_dir))
+        assert (session["session_id"], session["hands"]) == ("2026-09-30_180000_session1", 0)
+
+    def test_an_existing_session_is_not_emptied(self, log_dir):
+        from output.json_writer import JsonWriter
+
+        JsonWriter(log_dir, SID).ensure_created()
+        assert len(json.loads((log_dir / f"{SID}.json").read_text(encoding="utf-8"))["hands"]) == 2
+
+    def test_cli_start_writes_the_session_before_any_hand(self, data_dir, monkeypatch):
+        from tests.test_cli_session_layer import _cfg, _hands, _run_cli, _setup
+
+        logs = data_dir / "logs"
+        _run_cli(monkeypatch, _cfg(False), _setup(["太郎", "花子"], logs) + ["q"])
+        session_id, hands = _hands(logs)
+        assert session_id.endswith("_session1") and hands == []
+
+    def test_page_reloads_the_session_list_and_follows_the_newest(self, base):
+        status, html = _req(base, "GET", "/")
+        assert status == 200
+        assert "try { await loadSessions(); } catch (e) {}" in html          # 5 秒ごとにセッションの一覧も
+        assert "S.follow" in html                                             # 前のセッションを選んだら移らない
+
+
+@pytest.fixture
+def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    import core.player_repository as player_repository
+    import core.session_repository as session_repository
+
+    monkeypatch.setattr(player_repository, "_DEFAULT_PLAYER_DB", tmp_path / "players.json")
+    monkeypatch.setattr(session_repository, "_DEFAULT_SESSION_DB", tmp_path / "sessions.json")
+    return tmp_path
 
 
 class TestValidate:

@@ -44,6 +44,15 @@ class JsonWriter:
                 logger.warning("Could not load existing log (%s), starting fresh.", e)
                 self._data = {"session_id": session_id, "hands": []}
 
+    def ensure_created(self) -> None:
+        """記録ファイルがまだ無ければ、ハンド 0 のまま作る。
+
+        セッションを始めた時点で真のアクション入力の画面（`logs/*.json` を一覧にする）に出すため。前は最初のハンドが
+        終わるまで作らず、ロガーを起動しても画面にセッションが出なかった（店舗 2026-09-30）。
+        """
+        if not self._path.exists():
+            self._flush()
+
     def append_hand_summary(self, summary: HandSummary) -> None:
         """ハンドサマリー（ActionRecord を含む）をファイルに追記保存する。"""
         self._data["hands"].append(summary.to_dict())
