@@ -285,3 +285,11 @@ class TestEvaluation:
         assert report.script["used"] == [1, 2, 3, 4] and report.script["unmatched"] == []
         assert report.truth["record"]["action_accuracy"] == 1.0
         assert report.truth["record"]["winner_accuracy"] == 1.0
+
+
+def test_the_page_does_not_rebuild_a_field_being_typed_in():
+    """3 秒ごとの読み直しで、メモの欄（とロールダウン・文字の欄）を作り直さない（店舗 2026-09-30）。"""
+    from tools.test_script import SCRIPT_PAGE
+
+    assert "function editing()" in SCRIPT_PAGE and "renderWhenFree();" in SCRIPT_PAGE
+    assert 'addEventListener("focusout"' in SCRIPT_PAGE

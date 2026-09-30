@@ -723,7 +723,16 @@ SCRIPT_PAGE = r"""<!doctype html>
 <div id="app">読み込み中…</div>
 <div id="toast" class="hidden"></div>
 <script>
-const S = {st:null, hand:null, line:0, busy:false, timer:null, notes:{}};
+const S = {st:null, hand:null, line:0, busy:false, timer:null, notes:{}, pending:false};
+// 文字の欄・ロールダウンを触っている間は画面を作り直さない（キーボードが閉じる。店舗 2026-09-30）。離れたら作り直す
+function editing(){
+  const a = document.activeElement, app = document.getElementById("app");
+  if (!a || !app || !app.contains(a)) return false;
+  if (a.tagName === "SELECT" || a.tagName === "TEXTAREA") return true;
+  return a.tagName === "INPUT" && !["checkbox", "radio", "button", "submit", "range"].includes((a.type || "").toLowerCase());
+}
+function renderWhenFree(){ if (editing()) S.pending = true; else { S.pending = false; render(); } }
+document.addEventListener("focusout", () => setTimeout(() => { if (S.pending && !editing()) renderWhenFree(); }, 0));
 const $ = (id) => document.getElementById(id);
 function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function toast(msg){ const t = $("toast"); t.textContent = msg; t.classList.remove("hidden");
@@ -744,7 +753,7 @@ async function poll(){
   try {
     S.st = await api("state");
     // メモを書いている間は描き直さない（キーボードが閉じる・書いた文字が消える）
-    if (!(document.activeElement && document.activeElement.tagName === "TEXTAREA")) render();
+    renderWhenFree();
   } catch (e) { $("app").innerHTML = `<p>読み込めません: ${esc(e.message)}</p>`; }
   S.timer = setTimeout(poll, 3000);
 }

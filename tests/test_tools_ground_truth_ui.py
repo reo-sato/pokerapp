@@ -342,6 +342,14 @@ class TestShowdownMuck:
                               {"seat": 6, "action": "fold", "amount": 0, "street": "showdown"}]
         assert d["accuracy"]["action_correct"] == d["accuracy"]["action_total"] == len(rows)
 
+    def test_page_does_not_rebuild_a_field_being_typed_in(self, base):
+        """一覧の 5 秒ごとの読み直し・手番の確認の結果で画面を作り直すと、セッションを選ぶロールダウンやキーボードが
+        閉じた（店舗 2026-09-30）。文字の欄・ロールダウンを触っている間は作り直さず、離れたら作り直す。"""
+        status, html = _req(base, "GET", "/")
+        assert status == 200 and "function editing()" in html and 'addEventListener("focusout"' in html
+        assert "!editing()) loadHands(true)" in html                         # 一覧の読み直し
+        assert 'whenFree(() => { if (S.view === "edit") renderEdit(); })' in html   # 手番の確認の結果
+
     def test_page_offers_a_muck_button(self, base):
         status, html = _req(base, "GET", "/")
         assert status == 200 and "function addMuck(seat)" in html and "が見せずに降りた" in html

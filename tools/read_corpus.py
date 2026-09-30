@@ -1506,8 +1506,19 @@ CORPUS_PAGE = r"""<!doctype html>
 <div id="app">読み込み中…</div>
 <div id="toast" class="hidden"></div>
 <script>
-const S = {st:null, picked:[], speaker:"", round:1, confirmEnd:false, busy:false, timer:null, audio:null, dismissed:null};
+const S = {st:null, picked:[], speaker:"", round:1, confirmEnd:false, busy:false, timer:null, audio:null, dismissed:null,
+           pending:false};
 const $ = (id) => document.getElementById(id);
+// 文字の欄・ロールダウンを触っている間は画面を作り直さない（作り直すとキーボードやロールダウンが閉じ、打ちかけの文字も
+// 消える。店舗 2026-09-30: 読む人の名前が打てなかった）。離れたら作り直す
+function editing(){
+  const a = document.activeElement, app = $("app");
+  if (!a || !app || !app.contains(a)) return false;
+  if (a.tagName === "SELECT" || a.tagName === "TEXTAREA") return true;
+  return a.tagName === "INPUT" && !["checkbox", "radio", "button", "submit", "range"].includes((a.type || "").toLowerCase());
+}
+function renderWhenFree(){ if (editing()) S.pending = true; else { S.pending = false; render(); } }
+document.addEventListener("focusout", () => setTimeout(() => { if (S.pending && !editing()) renderWhenFree(); }, 0));
 function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function toast(msg){ const t = $("toast"); t.textContent = msg; t.classList.remove("hidden");
   clearTimeout(t._h); t._h = setTimeout(() => t.classList.add("hidden"), 6000); }
@@ -1521,7 +1532,7 @@ async function api(path, body){
 try { S.speaker = localStorage.getItem("corpus_speaker") || ""; } catch (e) {}
 async function poll(){
   clearTimeout(S.timer);
-  try { S.st = await api("state"); render(); } catch (e) { $("app").innerHTML = `<p class="err">読み込めません: ${esc(e.message)}</p>`; }
+  try { S.st = await api("state"); renderWhenFree(); } catch (e) { if (!editing()) $("app").innerHTML = `<p class="err">読み込めません: ${esc(e.message)}</p>`; }
   S.timer = setTimeout(poll, S.st && S.st.recording ? 400 : 2000);
 }
 async function send(verb){
@@ -1592,7 +1603,7 @@ function renderSetup(st){
       前の句を読み直すなら「戻る」。1 周 ${st.total_phrases} 句・15 分ほどです。</p>
     <div class="panel">
       <div class="small muted">読む人</div>
-      <input type="text" id="speaker" value="${esc(S.speaker)}" placeholder="例: オーナー / 配り手の名前" onchange="S.speaker=this.value">
+      <input type="text" id="speaker" value="${esc(S.speaker)}" placeholder="例: オーナー / 配り手の名前" oninput="S.speaker=this.value" onchange="S.speaker=this.value">
       <div class="small muted" style="margin-top:12px">マイク（2 本まで。選んだ順に m1・m2）</div>
       ${devs}
       <div class="bar"><button class="sm" onclick="rescan()">マイクを探し直す</button></div>

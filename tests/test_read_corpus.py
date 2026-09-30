@@ -563,3 +563,13 @@ class TestServedFromGroundTruthUi:
         finally:
             server.shutdown()
             server.server_close()
+
+
+def test_the_page_does_not_rebuild_a_field_being_typed_in():
+    """2 秒ごとの読み直しで画面を作り直すと、名前の欄のキーボードが消えて打ちかけの文字も消えた（店舗 2026-09-30 の
+    画面録画）。文字の欄・ロールダウンを触っている間は作り直さず、離れたら作り直す。"""
+    from tools.read_corpus import CORPUS_PAGE
+
+    assert "function editing()" in CORPUS_PAGE and "S.st = await api(\"state\"); renderWhenFree();" in CORPUS_PAGE
+    assert 'addEventListener("focusout"' in CORPUS_PAGE
+    assert 'oninput="S.speaker=this.value"' in CORPUS_PAGE          # 作り直しても打った名前が残る

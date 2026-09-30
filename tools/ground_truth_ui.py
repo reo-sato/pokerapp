@@ -1232,6 +1232,20 @@ const S = {sessions:[], sid:null, hands:null, summary:null, view:"list", hand:nu
            openedAt:0, confirmed:new Set(), confirmedHand:false, revealed:false, audio:null};
 const $ = (id) => document.getElementById(id);
 function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+// 文字の欄・ロールダウンを触っている間は、裏で届いた結果（一覧の 5 秒ごとの読み直し・手番の確認）で画面を作り直さない。
+// 作り直すとキーボードやロールダウンが閉じ、打ちかけの文字も消える（店舗 2026-09-30: セッションを選ぶロールダウンが
+// 閉じる・キーボードが消える）。離れたら作り直す
+function editing(){
+  const a = document.activeElement, app = $("app");
+  if (!a || !app || !app.contains(a)) return false;
+  if (a.tagName === "SELECT" || a.tagName === "TEXTAREA") return true;
+  return a.tagName === "INPUT" && !["checkbox", "radio", "button", "submit", "range"].includes((a.type || "").toLowerCase());
+}
+let pendingRender = null;
+function whenFree(fn){ if (editing()) pendingRender = fn; else { pendingRender = null; fn(); } }
+document.addEventListener("focusout", () => setTimeout(() => {
+  if (pendingRender && !editing()) { const fn = pendingRender; pendingRender = null; fn(); }
+}, 0));
 function fmtTime(iso){ const m = String(iso||"").match(/T(\d\d:\d\d:\d\d)/); return m ? m[1] : (iso || "—"); }
 function pct(a, b){ return b ? Math.round(1000 * a / b) / 10 + "%" : "—"; }
 function cardHtml(c, cls, onclick){
@@ -1260,13 +1274,14 @@ async function loadSessions(){
   S.sessions = d.sessions || [];
   if (!S.sid || !S.sessions.some(s => s.session_id === S.sid)) S.sid = S.sessions.length ? S.sessions[0].session_id : null;
 }
-async function loadHands(){
-  if (!S.sid) { S.hands = []; S.summary = null; if (S.view === "list") renderList(); return; }
+async function loadHands(background){
+  const show = () => { if (S.view === "list") renderList(); };
+  if (!S.sid) { S.hands = []; S.summary = null; background ? whenFree(show) : show(); return; }
   try {
     const d = await api(sidPath() + "/hands");
     S.hands = d.hands || []; S.summary = d.summary || null; S.script = !!d.script;
   } catch (e) { S.hands = []; S.summary = null; }
-  if (S.view === "list") renderList();
+  background ? whenFree(show) : show();
 }
 async function selectSession(sid){ S.sid = sid; S.hands = null; renderList(); await loadHands(); }
 async function refreshAll(){ try { await loadSessions(); await loadHands(); } catch (e) { toast("読み込めません: " + e.message, true); } }
@@ -1362,7 +1377,7 @@ function refreshLegal(){
       S.legal = await api(sidPath() + "/hands/" + S.hand.captured.hand_id + "/legal", {method:"POST", body: JSON.stringify(body)});
       applyLegal();
     } catch (e) { toast("手番の確認に失敗: " + e.message, true); }
-    renderEdit();
+    whenFree(() => { if (S.view === "edit") renderEdit(); });
   }, 60);
 }
 function touch(){ S.dirty = true; refreshLegal(); }
@@ -1393,6 +1408,8 @@ function addQuick(act){
     if (!amount) { toast("ベット / レイズの額（トータル）を入れてください", true); return; }
   }
   S.gt.actions.push({seat: n.actor_seat, action: act, amount});
+  // 額の欄から追加したときは欄を離れて、追加した行をすぐ見せる（入力中は作り直さないので）
+  if (document.activeElement && document.activeElement.id === "qamt") document.activeElement.blur();
   touch();
 }
 function addMuck(seat){
@@ -1579,7 +1596,7 @@ function renderEdit(){
           <span class="muted small">最後に 1 行足します（席・アクション・額はあとで変えられます。行の ＋ はその行の前に入れます）</span></div>
         ${quick}${lint}
         <h2>勝った席</h2>${winnerHtml}
-        <h2>メモ</h2><input type="text" style="width:100%" value="${esc(g.notes)}" placeholder="気づいたこと（任意）" onchange="setNotes(this.value)">
+        <h2>メモ</h2><input type="text" style="width:100%" value="${esc(g.notes)}" placeholder="気づいたこと（任意）" oninput="setNotes(this.value)" onchange="setNotes(this.value)">
         <div class="actions-bottom">
           ${blind ? "" : `<button class="ok" onclick="savePassthrough()" ${canPass?"":"disabled"}>✓ 記録どおり</button>`}
           <button class="primary" onclick="saveEdited()">保存（この内容が真）</button>
@@ -1656,7 +1673,7 @@ function saveEdited(){
 // ――― 起動 ―――
 try { S.annotator = localStorage.getItem("gt_annotator") || ""; } catch (e) {}
 refreshAll();
-setInterval(() => { if (S.view === "list" && !S.busy) loadHands(); }, 5000);
+setInterval(() => { if (S.view === "list" && !S.busy && !editing()) loadHands(true); }, 5000);
 </script></body></html>
 """
 
