@@ -161,10 +161,17 @@ class V1Result:
     outscored: list[str] = field(default_factory=list)          # 正解は候補にあるが点で負けた（採点の誤り）
     edits: dict[str, int] = field(default_factory=dict)         # 1 番の直しの数 → ハンド数
     seconds: float = 0.0
+    session_seconds: list[float] = field(default_factory=list)   # セッションごとの秒数（1 セッション 1 分以内の条件）
     best: dict[str, str] = field(default_factory=dict)          # ハンド → 1 番の記録（探索の確かめで比べる）
     correct: list[str] = field(default_factory=list)
+    reasons: list[int] = field(default_factory=list)            # ハンドごとの要確認の理由の数（1 ハンド 2 件以下の目安）
+    # ライブの記録（店舗のログのみ）: 切り替えの条件の「同じハンドで比べて悪くなったハンド 0」
+    live_hands: int = 0
+    live_exact: int = 0
+    better_than_live: list[str] = field(default_factory=list)
+    worse_than_live: list[str] = field(default_factory=list)
 
-    def add_hand(self, key: str, truth: dict, result) -> None:
+    def add_hand(self, key: str, truth: dict, result, live=None) -> None:
         from integration.estimator import record_key
         from tools.measure_capture_accuracy import hand_fully_correct
 
@@ -174,8 +181,17 @@ class V1Result:
         found = any(hand_fully_correct(truth, c.hand) for c in result.candidates)
         flagged = bool(result.reasons)
         self.best[key] = repr(record_key(result.best.hand))
+        self.reasons.append(len(result.reasons))
         if ok:
             self.correct.append(key)
+        if live is not _NO_LIVE:
+            ok_live = hand_fully_correct(truth, live) if isinstance(live, dict) else False
+            self.live_hands += 1
+            self.live_exact += ok_live
+            if ok and not ok_live:
+                self.better_than_live.append(key)
+            if ok_live and not ok:
+                self.worse_than_live.append(key)
         self.hands += 1
         self.base_exact += ok_base
         self.exact += ok
@@ -238,6 +254,8 @@ def run_bench_v1(*, store: bool = True, script: bool = True, sim_sessions: int =
     from integration.estimator import PARAMS as V1_PARAMS
     from integration.estimator import SessionEstimator
 
+    from tools.estimate_logs import _live_hand
+
     out = []
     for name, sessions in v1_inputs(store, script, sim_sessions, logs=logs):
         res = V1Result(name)
@@ -246,12 +264,32 @@ def run_bench_v1(*, store: bool = True, script: bool = True, sim_sessions: int =
             est = SessionEstimator(inp.events, inp.transcripts, presence, inp.setup, inp.flags, inp.session_id,
                                    params or V1_PARAMS)
             truth = {int(h["hand_id"]): h for h in inp.truth.get("hands") or []}
+            live_hands = _live_record(inp)
             for w in est.windows():
-                if w.hand_id in truth:
-                    res.add_hand(f"{short_id(inp.session_id)}#{w.hand_id}", truth[w.hand_id], est.estimate_hand(w))
+                # 店舗のログはライブの記録のハンド番号で真のアクションが付く（始まりの時刻で合わせる）
+                live = _live_hand(live_hands, w.base.get("started_at")) if live_hands else None
+                hid = int(live["hand_id"]) if live is not None else w.hand_id
+                if hid in truth:
+                    res.add_hand(f"{short_id(inp.session_id)}#{hid}", truth[hid], est.estimate_hand(w),
+                                 live=live if live_hands else _NO_LIVE)
+            res.session_seconds.append(round(time.time() - started, 1))
             res.seconds += time.time() - started
         out.append(res)
     return out
+
+
+_NO_LIVE = object()      # ライブの記録が無い（fixture・台本）= ライブとは比べない
+
+
+def _live_record(inp: SessionInput) -> list[dict]:
+    """店舗のログのライブの記録（`<sid>.json` のハンド）。fixture・台本には無い。"""
+    path = inp.folder / f"{inp.session_id}.json" if inp.folder is not None else None
+    if path is None or not path.exists():
+        return []
+    try:
+        return list((json.loads(path.read_text(encoding="utf-8")) or {}).get("hands") or [])
+    except (OSError, ValueError):
+        return []
 
 
 def wide_params(params: Optional[dict] = None) -> dict:
@@ -286,9 +324,15 @@ def format_v1(r: V1Result) -> list[str]:
         f"（{r.seconds:.0f} 秒）",
         f"    誤り {len(r.failing)} の内訳: 正解が候補に無い {len(r.not_found)}・候補にあるが点で負けた {len(r.outscored)}"
         f" ／ 1 番の直しの数 {dict(sorted(r.edits.items()))}",
+        f"    要確認の理由 1 ハンド平均 {sum(r.reasons) / max(1, len(r.reasons)):.1f}・最多 {max(r.reasons, default=0)}"
+        f" ／ 1 セッション最長 {max(r.session_seconds, default=0.0):.0f} 秒",
     ]
+    if r.live_hands:
+        lines.append(f"    ライブの記録 {r.live_exact}/{r.live_hands} → 推定 {r.exact}/{r.hands}"
+                     f"（ライブより良くなった {len(r.better_than_live)}・悪くなった {len(r.worse_than_live)}）")
     for label, keys in (("良くなった", r.better), ("悪くなった", r.worse), ("誤りに要確認が付かない", r.unflagged_errors),
-                        ("正解が候補に無い", r.not_found), ("点で負けた", r.outscored)):
+                        ("正解が候補に無い", r.not_found), ("点で負けた", r.outscored),
+                        ("ライブより悪くなった", r.worse_than_live)):
         if keys:
             lines.append(f"    {label}: {' '.join(keys[:20])}{' …' if len(keys) > 20 else ''}")
     return lines
