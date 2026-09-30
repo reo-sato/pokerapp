@@ -235,6 +235,19 @@ class AudioThread(threading.Thread):
         """
         return self._chunk_queue.qsize() + self._inferring + (1 if self._capturing else 0)
 
+    def pending_before(self, ts: float) -> int:
+        """`ts` より前に話し始めて、まだアクションになっていない発話の数（推論待ち + 推論中 + 切り出し中）。
+
+        台本のハンドの開始・打った入力は、それより前に話し始めた発話だけを待つ。あとから話し始めた発話まで待つと、
+        読み続けている間は 0 にならず上限まで待ってから積んでいた（次のハンドの行が前のハンドに入った, 店舗 2026-09-30）。
+        """
+        with self._chunk_queue.mutex:
+            n = sum(1 for item in self._chunk_queue.queue if item is not None and item[1] < ts)
+        for start in (self._inferring_start, self._capture_start):
+            if start is not None and start < ts:
+                n += 1
+        return n
+
     def oldest_pending_start(self) -> Optional[float]:
         """まだアクションになっていない発話のうち、一番早い話し始めの時刻（無ければ None）。
 

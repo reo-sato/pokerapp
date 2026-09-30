@@ -1,0 +1,77 @@
+{"t": 1790754647.416, "event": "start", "hand": 1, "redo": false}
+{"t": 1790754654.537, "event": "line", "hand": 1, "line": 1}
+{"t": 1790754658.409, "event": "start", "hand": 1, "redo": true}
+{"t": 1790754659.24, "event": "line", "hand": 1, "line": 0}
+{"t": 1790754660.7, "event": "line", "hand": 1, "line": 1}
+{"t": 1790754661.606, "event": "line", "hand": 1, "line": 2}
+{"t": 1790754662.721, "event": "line", "hand": 1, "line": 3}
+{"t": 1790754663.984, "event": "line", "hand": 1, "line": 4}
+{"t": 1790754665.126, "event": "line", "hand": 1, "line": 5}
+{"t": 1790754666.601, "event": "line", "hand": 1, "line": 6}
+{"t": 1790754669.892, "event": "line", "hand": 1, "line": 7}
+{"t": 1790754671.2, "event": "line", "hand": 1, "line": 8}
+{"t": 1790754672.596, "event": "line", "hand": 1, "line": 9}
+{"t": 1790754673.722, "event": "line", "hand": 1, "line": 10}
+{"t": 1790754676.325, "event": "start", "hand": 2, "redo": false}
+{"t": 1790754678.276, "event": "line", "hand": 2, "line": 1}
+{"t": 1790754679.399, "event": "line", "hand": 2, "line": 2}
+{"t": 1790754680.607, "event": "line", "hand": 2, "line": 3}
+{"t": 1790754681.743, "event": "line", "hand": 2, "line": 4}
+{"t": 1790754683.176, "event": "line", "hand": 2, "line": 5}
+{"t": 1790754685.138, "event": "line", "hand": 2, "line": 6}
+{"t": 1790754686.305, "event": "line", "hand": 2, "line": 7}
+{"t": 1790754687.277, "event": "line", "hand": 2, "line": 8}
+{"t": 1790754688.446, "event": "line", "hand": 2, "line": 9}
+{"t": 1790754690.345, "event": "line", "hand": 2, "line": 10}
+{"t": 1790754691.619, "event": "line", "hand": 2, "line": 11}
+{"t": 1790754692.768, "event": "line", "hand": 2, "line": 12}
+{"t": 1790754694.237, "event": "line", "hand": 2, "line": 13}
+{"t": 1790754699.939, "event": "line", "hand": 2, "line": 14}
+{"t": 1790754714.575, "event": "winner", "hand": 2, "start_t": 1790754676.325, "seat": 2}
+{"t": 1790754714.576, "event": "start", "hand": 3, "redo": false}
+{"t": 1790754735.076, "event": "line", "hand": 3, "line": 1}
+{"t": 1790754742.085, "event": "winner", "hand": 3, "start_t": 1790754714.576, "seat": 2}
+{"t": 1790754742.085, "event": "start", "hand": 4, "redo": false}
+{"t": 1790754755.263, "event": "line", "hand": 4, "line": 1}
+{"t": 1790754756.916, "event": "start", "hand": 5, "redo": false}
+{"t": 1790754767.418, "event": "line", "hand": 5, "line": 1}
+{"t": 1790754768.84, "event": "start", "hand": 6, "redo": false}
+{"t": 1790754780.814, "event": "start", "hand": 6, "redo": true}
+{"t": 1790754795.249, "event": "start", "hand": 7, "redo": false}
+{"t": 1790754811.955, "event": "winner", "hand": 7, "start_t": 1790754795.249, "seat": 3}
+{"t": 1790754811.957, "event": "start", "hand": 8, "redo": false}
+{"t": 1790754829.715, "event": "start", "hand": 9, "redo": false}
+{"t": 1790754851.372, "event": "line", "hand": 9, "line": 1}
+{"t": 1790754852.175, "event": "start", "hand": 10, "redo": false}
+{"t": 1790754877.317, "event": "line", "hand": 10, "line": 1}
+{"t": 1790754879.086, "event": "winner", "hand": 10, "start_t": 1790754852.175, "seat": 2}
+{"t": 1790754879.086, "event": "start", "hand": 11, "redo": false}
+{"t": 1790754893.522, "event": "start", "hand": 12, "redo": false}
+{"t": 1790754903.446, "event": "winner", "hand": 12, "start_t": 1790754893.522, "seat": 4}
+{"t": 1790754903.447, "event": "start", "hand": 13, "redo": false}
+{"t": 1790754912.058, "event": "start", "hand": 14, "redo": false}
+{"t": 1790754920.94, "event": "winner", "hand": 14, "start_t": 1790754912.058, "seat": 4}
+{"t": 1790754920.941, "event": "start", "hand": 15, "redo": false}
+{"t": 1790754934.501, "event": "start", "hand": 16, "redo": false}
+{"t": 1790754948.879, "event": "start", "hand": 17, "redo": false}
+{"t": 1790754970.159, "event": "winner", "hand": 17, "start_t": 1790754948.879, "seat": 4}
+{"t": 1790754970.16, "event": "start", "hand": 18, "redo": false}
+{"t": 1790754983.589, "event": "start", "hand": 19, "redo": false}
+{"t": 1790754993.31, "event": "start", "hand": 20, "redo": false}
+{"t": 1790755012.003, "event": "start", "hand": 21, "redo": false}
+{"t": 1790755033.857, "event": "winner", "hand": 21, "start_t": 1790755012.003, "seat": 3}
+{"t": 1790755033.858, "event": "start", "hand": 22, "redo": false}
+{"t": 1790755045.189, "event": "winner", "hand": 22, "start_t": 1790755033.858, "seat": 4}
+{"t": 1790755045.191, "event": "start", "hand": 23, "redo": false}
+{"t": 1790755056.475, "event": "start", "hand": 24, "redo": false}
+{"t": 1790755068.408, "event": "start", "hand": 25, "redo": false}
+{"t": 1790755089.731, "event": "winner", "hand": 25, "start_t": 1790755068.408, "seat": 2}
+{"t": 1790755089.732, "event": "start", "hand": 26, "redo": false}
+{"t": 1790755095.212, "event": "start", "hand": 26, "redo": true}
+{"t": 1790755111.94, "event": "start", "hand": 27, "redo": false}
+{"t": 1790755118.951, "event": "start", "hand": 28, "redo": false}
+{"t": 1790755135.942, "event": "start", "hand": 29, "redo": false}
+{"t": 1790755151.294, "event": "winner", "hand": 29, "start_t": 1790755135.942, "seat": 6}
+{"t": 1790755151.295, "event": "start", "hand": 30, "redo": false}
+{"t": 1790755168.934, "event": "winner", "hand": 30, "start_t": 1790755151.295, "seat": 6}
+{"t": 1790755168.935, "event": "end"}

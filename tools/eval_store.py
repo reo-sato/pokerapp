@@ -58,7 +58,7 @@ from tools.measure_capture_accuracy import (  # noqa: E402
     row_correct,
 )
 from tools.pack_logs import code_fingerprint  # noqa: E402
-from tools.test_script import MARKS_SUFFIX, SCRIPT_SUFFIX, script_steps, script_truth  # noqa: E402
+from tools.test_script import MARKS_SUFFIX, SCRIPT_SUFFIX, script_steps, script_truth, session_table  # noqa: E402
 
 # 真のアクションのファイルで、ハンドの中身ではない項目（入力した人・時刻・入れ方）
 _GT_META = ("annotator", "annotated_at", "source")
@@ -189,11 +189,17 @@ def session_setup(record: dict) -> Optional[dict]:
     }
 
 
-def replay_flags(config: dict, events: list) -> dict:
-    """店舗の設定どおりに再生する（無ければ店舗の既定: 手札でハンド開始・勝者の自動判定・札の離脱でフォールド）。"""
+def replay_flags(config: dict, events: list, script: Optional[dict] = None) -> dict:
+    """店舗の設定どおりに再生する（無ければ店舗の既定: 手札でハンド開始・勝者の自動判定・札の離脱でフォールド）。
+
+    声だけの台本（`script` の kind が voice）は RFID を使わずに動いた（`main.py --script voice`）。店の設定の RFID は
+    有効でも、札の離脱でフォールドにしない（していると 30 ハンド中 11 ハンドが記録と違う再生になった, 2026-09-30）。
+    """
     engine = config.get("engine") or {}
     rfid = config.get("rfid") or {}
-    if rfid:
+    if script is not None and script.get("kind") == "voice":
+        presence = False
+    elif rfid:
         presence = bool(rfid.get("enabled")) and rfid.get("transport") == "pcsc"
     else:
         presence = any(isinstance(e, RFIDEvent) and e.role == "seat" for e in events)
@@ -232,6 +238,82 @@ def _is_noise(row: dict, text: str) -> bool:
     """声ではない音・雑音への幻聴（ライブと同じ判定を、いまのコードで）。"""
     return bool(row.get("no_speech")) or not text or is_prompt_echo(text) or is_implausibly_long(
         text, float(row.get("audio_sec") or 0.0))
+
+
+def script_order_events(script: dict, marks: list[dict], transcripts: list[dict]) -> list:
+    """声だけの台本のセッションの入力を、台本の画面を押した順に並べ直す（発話は話し始めの順）。
+
+    ロガーは「始める」を押した時刻より前に話し始めた発話を聞き取ってから、台本のハンドを始める
+    （`ControlConsumerThread`）。この順で再生すれば、聞き取りが遅れても台本のハンドと発話の対応は押した時刻どおり。
+    2026-09-30 の台本はハンドの開始が最大 60 秒遅れて次のハンドの行が前のハンドに入り、記録は評価に使えなかった。
+    書き起こしはいまの読み取りで読み直す（ライブの第 2 の耳の結果も同じ規則で重ねる）。
+    """
+    from core.control_queue import ControlCommand, command_to_audio_event, script_hand_text
+
+    by_n = {int(h["n"]): h for h in script.get("hands") or []}
+    events: list = []
+    for m in marks:
+        t = m.get("t")
+        if not isinstance(t, (int, float)):
+            continue
+        if m.get("event") == "start" and m.get("hand") in by_n:
+            spec = by_n[m["hand"]]
+            stacks = {int(k): int(v) for k, v in spec["stacks"].items()}
+            events.append(AudioEvent(action="script_hand", amount=0, timestamp=float(t),
+                                     raw_text=script_hand_text(int(spec["button"]), stacks)))
+        elif m.get("event") == "winner":
+            args = {k: m[k] for k in ("seat", "seats") if k in m}
+            ev = command_to_audio_event(ControlCommand("script", "winner", args, ""), lambda: float(t) - 0.001)
+            if ev is not None:
+                events.append(ev)            # 次のハンドの「始める」と同じ時刻に送った = その前に
+    for row in transcripts:
+        start = row.get("utterance_start_ts")
+        if start is None:
+            continue
+        text = (row.get("text") or "").strip()
+        parsed = [] if _is_noise(row, text) else parse_actions(
+            text, confidence=row.get("confidence"), utterance_start_ts=start)
+        if row.get("ear"):
+            parsed, _ = apply_ear(parsed, text, row["ear"], question=is_question(text), utterance_start_ts=start)
+        for i, ev in enumerate(parsed):
+            ev.timestamp = float(start) + 0.001 * (i + 1)
+        events.extend(parsed)
+    return sorted(events, key=lambda e: e.timestamp)
+
+
+def script_setup(script: dict) -> dict:
+    """台本の卓（`replay_session` の setup の形）。"""
+    table = session_table(script)
+    return {"players": [{"seat": p["seat"], "name": p["name"], "stack": p["stack"]} for p in table["players"]],
+            "sb": table["sb"], "bb": table["bb"], "button_prior": table["button_seat"], "first_hand_id": 1}
+
+
+def score_script_order(script: dict, marks: list[dict], hands: list[dict]) -> dict:
+    """`script_order_events` を再生したハンド（k 回目の「始める」= ハンド k）を台本と比べる（やり直しは後の方）。"""
+    by_n = {int(h["n"]): h for h in script.get("hands") or []}
+    starts = [m for m in marks if m.get("event") == "start" and m.get("hand") in by_n]
+    latest = {m["hand"]: k + 1 for k, m in enumerate(starts)}
+    got = {h.get("hand_id"): h for h in hands}
+    rows = total = winners = exact = 0
+    missed: list[dict] = []
+    for n, hand_id in sorted(latest.items()):
+        spec = by_n[n]
+        truth = {"hand_id": hand_id, "actions": spec["actions"], "winner_seat": spec.get("winner_seat"), "board": []}
+        hand = got.get(hand_id)
+        if hand is None:
+            total += len(spec["actions"])
+            missed.append({"hand": n, "scenario": spec.get("scenario"), "rows": 0, "total": len(spec["actions"]),
+                           "winner": False})
+            continue
+        acc = measure_hand(truth, hand)
+        rows, total = rows + acc.action_correct, total + acc.action_total
+        winners += bool(acc.winner_match)
+        if acc.action_correct == acc.action_total and acc.winner_match:
+            exact += 1
+        else:
+            missed.append({"hand": n, "scenario": spec.get("scenario"), "rows": acc.action_correct,
+                           "total": acc.action_total, "winner": bool(acc.winner_match)})
+    return {"hands": len(latest), "rows": rows, "total": total, "winners": winners, "exact": exact, "missed": missed}
 
 
 def reparse_events(events: list, transcripts: list[dict], texts: Optional[dict[Any, str]] = None) -> list:
@@ -614,20 +696,29 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
     report.gt = truth_hands(gt_file)
     report.memos = truth_memos(gt_file)
     script = _read_json(files.path(SCRIPT_SUFFIX))
+    events = load_events(files.events) if files.events.exists() else []
     if script is not None:
         # 台本のハンド: 正解は台本（真のアクションの入力が無くても評価できる）。札の確認の手順のメモも読む
         marks = _read_jsonl(files.path(MARKS_SUFFIX))
-        st = script_truth(script, marks, report.live)
+        began = [e.timestamp for e in events if isinstance(e, AudioEvent) and e.action == "script_hand"]
+        st = script_truth(script, marks, report.live, hand_starts=began or None,
+                          utc_offset=record_utc_offset(report.live, events))
         report.script = {"kind": script.get("kind"), "hands": len(script.get("hands") or []),
                          "used": st["script_hands"], "redone": st["redone"], "unmatched": st["unmatched"],
                          "steps": script_steps(script, marks)}
+        transcripts = _read_jsonl(files.path(".transcripts.jsonl"))
+        if script.get("kind") == "voice" and marks and transcripts:
+            ordered = script_order_events(script, marks, transcripts)
+            hands = replay_session(ordered, script_setup(script),
+                                   {"auto_new_hand": False, "auto_winner": True, "rfid_folds": False},
+                                   files.session_id)
+            report.script["ordered"] = score_script_order(script, marks, hands)
         if st["hands"] and not report.gt["hands"]:
             report.gt = {"hands": st["hands"]}
     if report.setup is None:
         report.note = "確定したハンドの記録が無いので卓の設定が分からず、再生できません"
         return report
-    events = load_events(files.events)
-    report.flags = replay_flags(config, events)
+    report.flags = replay_flags(config, events, script)
     report.replayed = replay_session(events, report.setup, report.flags, files.session_id)
     report.differences = diff_record(report.live, report.replayed)
     if report.differences and not any(isinstance(e, RFIDEvent) and e.kind == "deal" for e in events):
@@ -664,6 +755,33 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
         for key, hands in report.routes.items():
             report.truth[key] = evaluate_against_truth(report.gt, hands)
     return report
+
+
+def record_utc_offset(hands: list[dict], events: list) -> Optional[float]:
+    """記録（`<sid>.json`）の時刻を書いた PC の時差（秒, 15 分単位）。無ければ None。
+
+    記録の時刻は時差の表記の無い、その PC の時計の時刻（`IntegrationThread._iso`）。同じ発話の入力（`events.jsonl`,
+    epoch）と並べて差を取る（店の記録を別の時差の PC で評価すると 9 時間ずれていた, 2026-09-30）。
+    """
+    spoken: dict[str, list[float]] = {}
+    for e in events:
+        if isinstance(e, AudioEvent) and e.raw_text:
+            spoken.setdefault(e.raw_text, []).append(e.timestamp)
+    diffs: Counter = Counter()
+    for hand in hands:
+        for a in hand.get("actions") or []:
+            try:
+                naive = datetime.fromisoformat(str(a.get("timestamp")))
+            except ValueError:
+                continue
+            if naive.tzinfo is not None:
+                continue
+            clock = naive.replace(tzinfo=timezone.utc).timestamp()
+            for t in spoken.get(a.get("raw_text") or "", ()):
+                diff = round((clock - t) / 900.0) * 900.0
+                if abs(clock - t - diff) < 1.0:
+                    diffs[diff] += 1
+    return diffs.most_common(1)[0][0] if diffs else None
 
 
 # ――― タイムライン ―――
@@ -928,6 +1046,14 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                 print(f"  台本のハンド（声だけ）: 台本 {sc['hands']} ハンドのうち {len(sc['used'])} を評価"
                       f"（やり直し {sc['redone']}" + (f"・記録が見つからない {sc['unmatched']}" if sc["unmatched"] else "")
                       + "）")
+            od = sc.get("ordered")
+            if od:
+                print(f"  台本の画面を押した順に並べ直して再生すると: 行 {od['rows']}/{od['total']}"
+                      f"（{od['rows'] / max(od['total'], 1):.0%}）・勝者 {od['winners']}/{od['hands']}"
+                      f"・全部正しいハンド {od['exact']}/{od['hands']}")
+                for miss in od["missed"]:
+                    print(f"    台本のハンド {miss['hand']}（{miss['scenario']}）: 行 {miss['rows']}/{miss['total']}"
+                          f"・勝者 {'○' if miss['winner'] else '×'}")
             for step in sc.get("steps") or []:
                 mark = {"ok": "✓", "ng": "✗"}.get(step["result"], "・")
                 print(f"  札の確認 {mark} {step['title']}" + (f" — メモ: {step['note']}" if step["note"] else ""))

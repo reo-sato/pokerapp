@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -65,22 +66,29 @@ class ControlCommand:
     type: str
     args: dict
     created_at: str
+    # 作った時刻（epoch 秒, additive）。consumer はこれより前に話し始めた発話を先に反映してから積む
+    created_ts: Optional[float] = None
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "command_id": self.command_id,
             "type": self.type,
             "args": dict(self.args),
             "created_at": self.created_at,
         }
+        if self.created_ts is not None:
+            data["created_ts"] = self.created_ts
+        return data
 
     @classmethod
     def from_dict(cls, d: dict) -> "ControlCommand":
+        ts = d.get("created_ts")
         return cls(
             command_id=d["command_id"],
             type=d["type"],
             args=dict(d.get("args") or {}),
             created_at=d.get("created_at", ""),
+            created_ts=float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else None,
         )
 
 
@@ -96,7 +104,8 @@ class ControlCommandLog:
         self.path = Path(path)
 
     def append(
-        self, type: str, args: Optional[dict] = None, clock: Callable[[], str] = _now_iso
+        self, type: str, args: Optional[dict] = None, clock: Callable[[], str] = _now_iso,
+        ts_clock: Callable[[], float] = time.time,
     ) -> ControlCommand:
         """コマンドを 1 行 append して返す。type は VALID_CONTROL_TYPES のみ。"""
         if type not in VALID_CONTROL_TYPES:
@@ -106,6 +115,7 @@ class ControlCommandLog:
             type=type,
             args=dict(args or {}),
             created_at=clock(),
+            created_ts=round(ts_clock(), 3),
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(command.to_dict(), ensure_ascii=False) + "\n"

@@ -292,23 +292,44 @@ def _print_transcript(transcript) -> None:
     print(f"  [聞き取り] 「{text}」→ {heard}{lag}", flush=True)
 
 
-def _wait_for_backlog(audio_thread, timeout_sec: float = 60.0) -> None:
+def _wait_for_backlog(audio_thread, timeout_sec: float = 60.0, since: float | None = None) -> None:
     """打った入力が、先に言われてまだ認識中の発話を追い越さないよう待つ（ADR-0061）。
 
     認識は発話より遅れることがある（遅れても全部処理する）。`n` / `w` などを先に積むと、
-    前のハンドのアクションが次のハンドに入ってしまうので、認識待ちが無くなるまで待つ。
+    前のハンドのアクションが次のハンドに入ってしまうので、打つより前（`since`）に話し始めた発話の認識を待つ。
+    あとから話し始めた発話は待たない（待つと話し続けている間は終わらない, 店舗 2026-09-30）。認識が進んで
+    いるあいだは待ち、`timeout_sec` 秒進まなければ入力を先に反映する。
     """
     import time as _time
 
-    if audio_thread is None or audio_thread.backlog() == 0:
+    if audio_thread is None:
         return
-    print(f"  （聞き取った発話を先に反映しています… 残り {audio_thread.backlog()} 件）", flush=True)
-    deadline = _time.time() + timeout_sec
-    while audio_thread.backlog() > 0 and _time.time() < deadline:
+    pending_before = getattr(audio_thread, "pending_before", None)
+    if pending_before is None:
+        count = audio_thread.backlog
+    else:
+        since = _time.time() if since is None else since
+
+        def count() -> int:
+            return pending_before(since)
+    pending = count()
+    if pending == 0:
+        return
+    print(f"  （聞き取った発話を先に反映しています… 残り {pending} 件）", flush=True)
+    last, moved_at = pending, _time.time()
+    shown_at = moved_at
+    while pending > 0:
         _time.sleep(0.1)
-    if audio_thread.backlog() > 0:
-        print(f"  （{timeout_sec:.0f} 秒待っても残り {audio_thread.backlog()} 件。入力を先に反映します）",
-              flush=True)
+        pending = count()
+        if _time.time() - shown_at >= 10.0 and pending > 0:
+            shown_at = _time.time()
+            print(f"  （残り {pending} 件。聞き取りが追いつくまでお待ちください）", flush=True)
+        if pending < last:
+            last, moved_at = pending, _time.time()
+        elif _time.time() - moved_at >= timeout_sec:
+            print(f"  （{timeout_sec:.0f} 秒待っても聞き取りが進みません（残り {pending} 件）。入力を先に反映します）",
+                  flush=True)
+            return
 
 
 def _report_audio_start(audio_thread, device_id: int, wait_sec: float = 3.0) -> None:
@@ -678,7 +699,8 @@ def run_cli(script: str | None = None) -> None:
 
         control_thread = ControlConsumerThread(
             ControlCommandLog(Path(session_cfg["log_dir"]) / f"{session_id}.control.jsonl"), audio_q, stop_event,
-            backlog=audio_thread.backlog if audio_thread is not None else None)
+            backlog=audio_thread.backlog if audio_thread is not None else None,
+            pending_before=audio_thread.pending_before if audio_thread is not None else None)
         control_thread.start()
     if audio_thread is not None:
         _report_audio_start(audio_thread, audio_cfg.get("device_id", 0))
@@ -731,10 +753,11 @@ def run_cli(script: str | None = None) -> None:
     try:
         while True:
             line = input("> ").strip()
+            typed_at = _time.time()
             if not line:
                 continue
             # 先に言われた発話がまだ認識中なら、その反映を待ってから入力を積む（順序を保つ）
-            _wait_for_backlog(audio_thread)
+            _wait_for_backlog(audio_thread, since=typed_at)
             parts = _normalize_cli_command(line).split()
             cmd = parts[0].lower()
 
@@ -1062,6 +1085,7 @@ def run_gui() -> None:
             audio_queue=audio_q,
             stop_event=stop_event,
             poll_interval_ms=cfg.get("hand_control", {}).get("poll_interval_ms", 200),
+            pending_before=audio_thread.pending_before if audio_thread is not None else None,
         )
         control_thread.start()
         print(f"hand 遠隔制御を有効化しました: {control_log.path}（staff iPad から操作可）")

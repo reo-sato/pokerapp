@@ -30,7 +30,7 @@ import argparse
 import json
 import random
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -619,11 +619,16 @@ class ScriptApp:
 # ───────────────────────── 評価（台本 = 真のアクション） ─────────────────────────
 
 
-def _epoch(iso: Any) -> Optional[float]:
+def _epoch(iso: Any, utc_offset: Optional[float] = None) -> Optional[float]:
+    """記録の時刻（時差の表記なし = 記録した PC の時計）を epoch に。`utc_offset` は記録した PC の時差（秒）。
+    無ければこの PC の時差とみる（店の記録を別の時差の PC で評価すると 9 時間ずれていた, 2026-09-30）。"""
     try:
-        return datetime.fromisoformat(str(iso)).timestamp()
+        t = datetime.fromisoformat(str(iso))
     except (TypeError, ValueError):
         return None
+    if t.tzinfo is None and utc_offset is not None:
+        t = t.replace(tzinfo=timezone(timedelta(seconds=utc_offset)))
+    return t.timestamp()
 
 
 def script_steps(script: dict, marks: list[dict]) -> list[dict]:
@@ -641,28 +646,36 @@ def script_steps(script: dict, marks: list[dict]) -> list[dict]:
     return out
 
 
-def script_truth(script: dict, marks: list[dict], recorded_hands: list[dict]) -> dict:
+def script_truth(script: dict, marks: list[dict], recorded_hands: list[dict], *,
+                 hand_starts: Optional[list[float]] = None, utc_offset: Optional[float] = None) -> dict:
     """台本と画面の操作から、記録のハンドごとの真のアクション（`ground_truth.json` の hands と同じ形）を作る。
 
-    台本のハンドを始めた（`start`）時刻のあと最初に始まった記録のハンドがそのハンド。同じ台本のハンドをやり直したら
-    最後に始めたものだけを使う（前の分は `redone` に数える）。返り値の `script_hands` は評価に使った台本のハンドの番号。
+    `hand_starts`（ロガーが台本のハンドを始めた時刻 = `events.jsonl` の `script_hand` の時刻、順に）があれば、k 回目の
+    「始める」は k 回目の `script_hand` で始まったハンド（聞き取りが遅れてハンドの開始が遅れても対応がずれない）。
+    無ければ「始める」の時刻から 30 秒以内に始まった記録のハンド。`utc_offset` は記録した PC の時差（秒）。
+    同じ台本のハンドをやり直したら最後に始めたものだけを使う（前の分は `redone` に数える）。返り値の `script_hands` は
+    評価に使った台本のハンドの番号。
     """
     if script.get("kind") != "voice":
         return {"hands": [], "script_hands": [], "redone": 0, "unmatched": []}
     by_n = {int(h["n"]): h for h in script.get("hands") or []}
     starts = [m for m in marks if m.get("event") == "start" and isinstance(m.get("hand"), int)]
-    latest: dict[int, dict] = {}
-    for m in starts:
-        latest[m["hand"]] = m                 # やり直したら後の方
+    latest: dict[int, int] = {}
+    for k, m in enumerate(starts):
+        latest[m["hand"]] = k                 # やり直したら後の方
     redone = len(starts) - len(latest)
-    recorded = sorted((h for h in recorded_hands if _epoch(h.get("started_at")) is not None),
-                      key=lambda h: _epoch(h.get("started_at")))
+    recorded = sorted((h for h in recorded_hands if _epoch(h.get("started_at"), utc_offset) is not None),
+                      key=lambda h: _epoch(h.get("started_at"), utc_offset))
     hands, used, unmatched = [], [], []
-    for n, mark in sorted(latest.items(), key=lambda kv: kv[1].get("t", 0)):
-        t = float(mark.get("t") or 0)
-        # 画面の操作からロガーがハンドを始めるまでは 1 秒もかからない（制御の読み取りは 0.2 秒ごと）
-        match = next((h for h in recorded if _epoch(h["started_at"]) >= t - 1.0
-                      and _epoch(h["started_at"]) <= t + 30.0), None)
+    for n, k in sorted(latest.items(), key=lambda kv: kv[1]):
+        t = float(starts[k].get("t") or 0)
+        if hand_starts is not None:
+            began = hand_starts[k] if k < len(hand_starts) else None
+            match = None if began is None else next(
+                (h for h in recorded if abs(_epoch(h["started_at"], utc_offset) - began) < 0.05), None)
+        else:
+            # 画面の操作からロガーがハンドを始めるまでは 1 秒もかからない（制御の読み取りは 0.2 秒ごと）
+            match = next((h for h in recorded if t - 1.0 <= _epoch(h["started_at"], utc_offset) <= t + 30.0), None)
         spec = by_n.get(n)
         if match is None or spec is None:
             unmatched.append(n)

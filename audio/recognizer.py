@@ -366,10 +366,15 @@ def _keyword_matches(norm: str) -> list[tuple[int, int, str]]:
     starts = {m[0] for m in matches}
     ends = {m[0] + m[1] for m in matches}
 
+    def word_char(ch: str) -> bool:
+        # 「を」（片仮名にすると「ヲ」）は語の中に現れない = 区切り（「フォールドをホールド」= フォールド、フォールド。
+        # 台本 2026-09-30）
+        return _is_katakana(ch) and ch != "ヲ"
+
     def isolated(pos: int, end: int) -> bool:
-        before_ok = pos == 0 or not _is_katakana(lower[pos - 1]) or pos in ends
+        before_ok = pos == 0 or not word_char(lower[pos - 1]) or pos in ends
         after_ok = (
-            end == len(lower) or not _is_katakana(lower[end]) or end in starts
+            end == len(lower) or not word_char(lower[end]) or end in starts
             or _kana_number_at(norm, end) is not None or _BOUNDARY_SUFFIX.match(norm, end) is not None
         )
         return before_ok and after_ok
@@ -436,9 +441,9 @@ _AMOUNT_CHUNK = re.compile(r"[^、。・!?]+")
 _AMOUNT_SPLIT_ACTIONS = frozenset({"call", "check", "fold"})
 # 「チェックアラウンド」= まだ動いていない全員がチェックした（オーナーの説明, 2026-09-25）。
 # 「チェック、アランド」のように区切って書き起こされることもある（店舗の実測）。「チェックアウンド」
-# 「チッカーランド」とも書き起こされた（店舗の実測 2026-09-27）。
+# 「チッカーランド」とも書き起こされた（店舗の実測 2026-09-27）。「チェックラウンド」も（台本 2026-09-30）。
 _CHECK_AROUND = re.compile(
-    r"(?:チェック|チッカー|check)[\s、。,.・]*(?:ア(?:ラウ|ラ|ウ)ン(?:ド|ト)?|ラン(?:ド|ト)|around)", re.IGNORECASE,
+    r"(?:チェック|チッカー|check)[\s、。,.・]*(?:ア(?:ラウ|ラ|ウ)ン(?:ド|ト)?|ラウ?ン(?:ド|ト)|around)", re.IGNORECASE,
 )
 
 
@@ -510,6 +515,8 @@ def _split_off_amounts(
         return [event]
     keyword_at, keyword_len = matches[0][0], matches[0][1]
     norm, source = _space_next_to_keyword_as_comma(norm, source, keyword_at, keyword_at + keyword_len)
+    if event.action in _NO_AMOUNT_ACTIONS:
+        norm, source, keyword_at = _comma_next_to_keyword(norm, source, keyword_at, keyword_at + keyword_len)
     before: list[AudioEvent] = []
     after: list[AudioEvent] = []
     kept: list[str] = []
@@ -556,6 +563,19 @@ def _wagers_in_turn(
 
 
 _NUMERAL = re.compile(r"[0-9〇一二三四五六七八九十百千万]")
+# 額を持たないアクション。語に続けて（区切らずに）言った額も次の人の賭け（「フォールド600」= フォールドのあとに
+# 次の人の 600。台本 2026-09-30）。コールは「600点コールです」のようにコールの額を言うので含めない
+_NO_AMOUNT_ACTIONS = frozenset({"fold", "check"})
+
+
+def _comma_next_to_keyword(norm: str, source: str, start: int, end: int) -> tuple[str, str, int]:
+    """語のすぐ隣（区切りなし）の額との間に「、」を入れる（norm と source の両方の同じ位置に）。語の位置を返す。"""
+    if end < len(norm) and _NUMERAL.match(norm[end]):
+        norm, source = norm[:end] + "、" + norm[end:], source[:end] + "、" + source[end:]
+    if start > 0 and (_NUMERAL.match(norm[start - 1]) or norm[start - 1] == "点"):
+        norm, source = norm[:start] + "、" + norm[start:], source[:start] + "、" + source[start:]
+        start += 1
+    return norm, source, start
 
 
 def _space_next_to_keyword_as_comma(norm: str, source: str, start: int, end: int) -> tuple[str, str]:
