@@ -523,31 +523,61 @@ def fill_amounts(events: list, ear: Optional[dict]) -> Optional[tuple[list, str]
     return out, text
 
 
-def wants_ear(events: Iterable, text: str, question: bool = False) -> bool:
+# Whisper の自信がこれ未満の読みは、第 2 の耳がアクションを何も聞いていなければ捨てる（短い音への幻聴。読み上げ集
+# 2026-09-30: 句の前の「あ」を「コール」0.06、無音を「コール」0.10、「はい」を「オールイン」0.12。読み上げ集 3 つと
+# 店舗の書き起こし 960 発話で、正しい読みの自信は 0.155 以上）
+EAR_VETO_CONFIDENCE = 0.15
+EAR_HEARD_NOTHING = "（聞こえない）"
+
+
+def _whisper_confidence(events: list, confidence: Optional[float]) -> Optional[float]:
+    if confidence is not None:
+        return confidence
+    values = [e.confidence for e in events if getattr(e, "confidence", None) is not None]
+    return min(values) if values else None
+
+
+def _doubtful(events: list, confidence: Optional[float]) -> bool:
+    conf = _whisper_confidence(events, confidence)
+    return bool(events) and conf is not None and conf < EAR_VETO_CONFIDENCE
+
+
+def wants_ear(events: Iterable, text: str, question: bool = False, confidence: Optional[float] = None) -> bool:
     """ライブで第 2 の耳に聞き直させるか。Whisper がアクションとして読めなかった発話（確認の問い・ポットや
-    ブラインドの読み上げは除く）と、読んだベット・レイズに額が無い・`EAR_MIN_AMOUNT` 未満の発話。"""
+    ブラインドの読み上げは除く）と、読んだベット・レイズに額が無い・`EAR_MIN_AMOUNT` 未満の発話と、自信の
+    とても低い読み（`EAR_VETO_CONFIDENCE` 未満）。`confidence` を省くとアクションに付いた Whisper の自信を使う。"""
     from audio.recognizer import is_announcement
 
     events = list(events)
     if not events:
         return not question and not is_announcement(text)
-    return bool(_amountless(events))
+    return bool(_amountless(events)) or _doubtful(events, confidence)
 
 
 def apply_ear(events: Iterable, text: str, ear: Optional[dict], *, question: bool = False,
-              utterance_start_ts: Optional[float] = None) -> tuple[list, Optional[str]]:
+              utterance_start_ts: Optional[float] = None,
+              confidence: Optional[float] = None) -> tuple[list, Optional[str]]:
     """Whisper の読み（`events`, 文 `text`）に第 2 の耳の結果を重ねる。(アクション, 使った候補の文 or None)。
 
     ライブ（`AudioThread`）・書き起こしの読み直し（`tools/eval_store.py`）・読み上げ集・推定器が同じ規則を使う。
     読めなかった発話は `rescue_events`（ポット・ブラインドの読み上げ =「ポット1万2000です。」は、第 2 の耳が額だけを
-    聞いてもアクションにしない）、額の無いベット・レイズは `fill_amounts`。
+    聞いてもアクションにしない）、額の無いベット・レイズは `fill_amounts`。自信のとても低い読みは、第 2 の耳が
+    アクションを何も聞いていなければ捨てる（使った文 = 第 2 の耳が聞いた文、空なら `EAR_HEARD_NOTHING`）。
     """
     events = list(events)
-    if not ear or not wants_ear(events, text, question):
+    if not ear or not wants_ear(events, text, question, confidence):
         return events, None
     if not events:
         rescued = rescue_events(ear, utterance_start_ts=utterance_start_ts)
         return rescued, (agreed_candidate(ear) if rescued else None)
+    if _doubtful(events, confidence):
+        free = (ear.get("text") or "").strip()
+        cands = ear.get("candidates") or []
+        best = (cands[0].get("text") or "").strip() if cands else ""
+        whisper_keys = [(e.action, e.amount, e.seat, e.position, e.hand_name) for e in events]
+        # 自由に聞いた文にアクションが無く、候補でも Whisper と同じ読みにならない（「こる」= 候補「コール」は残す）
+        if not (_action_keys(free) if free else []) and not (best and _action_keys(best) == whisper_keys):
+            return [], free or EAR_HEARD_NOTHING
     filled = fill_amounts(events, ear)
     return (events, None) if filled is None else filled
 

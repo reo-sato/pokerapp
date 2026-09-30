@@ -21,7 +21,7 @@
     python tools/read_corpus.py phrases                         # 句の一覧と正解
     python tools/read_corpus.py eval pokerlogs_20261001_1of3.zip pokerlogs_20261001_2of3.zip
     python tools/read_corpus.py transcribe logs/corpus/<フォルダ>   # 聞き取りを書く（途中からでよい）
-    python tools/read_corpus.py serve                           # この画面だけ（http://127.0.0.1:8792/corpus）
+    python tools/read_corpus.py serve                           # この画面だけ（http://127.0.0.1:8793/corpus）
 """
 from __future__ import annotations
 
@@ -1201,7 +1201,7 @@ def reread_segment(seg: dict, route: str = "live") -> list[str]:
         return []
     noise = bool(text) and (is_prompt_echo(text) or is_implausibly_long(text, float(seg.get("sec") or 0.0)))
     question = bool(text) and not noise and is_question(text)
-    events = [] if noise or not text else parse_actions(text)
+    events = [] if noise or not text else parse_actions(text, confidence=seg.get("confidence"))
     if route == "live":
         events, _ = apply_ear(events, text, seg.get("ear"), question=question)
     return [event_key(e) for e in events]
@@ -1461,10 +1461,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--redo", action="store_true", help="全部聞き取り直す（前の結果は日時つきの名前で残す）")
     p.add_argument("--misses", type=int, default=20)
     p.set_defaults(func=_cmd_transcribe)
-    p = sub.add_parser("serve", help="読み上げ集の画面だけを開く（既定 http://127.0.0.1:8792/corpus）")
+    p = sub.add_parser("serve", help="読み上げ集の画面だけを開く（既定 http://127.0.0.1:8793/corpus。8792 は RFID の中継）")
     p.add_argument("--log-dir", default="./logs")
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8792)
+    p.add_argument("--port", type=int, default=8793)
     p.add_argument("--no-asr", action="store_true", help="録りながら聞き取らない")
     p.set_defaults(func=_cmd_serve)
     return ap

@@ -304,6 +304,29 @@ def sounds_like(heard: str, word: str, after: str = "") -> bool:
     return d <= _threshold(len(target)) and all(d < cost(t.morae) for t in _TARGETS if t.rewrite is None)
 
 
+# 残りの人数の言い方（「フォープレイヤーズ」）の数の語。
+COUNT_WORDS = {"ツー": 2, "スリー": 3, "フォー": 4, "ファイブ": 5, "シックス": 6, "セブン": 7, "エイト": 8, "ナイン": 9}
+_COUNT_MAX_DISTANCE = 0.5   # 1〜2 拍の語の 1 拍の違い（「フォール」= フォー）まで
+_COUNT_MARGIN = 0.3
+
+
+def match_count(heard: str) -> Optional[int]:
+    """「プレイヤーズ」の前の片仮名の語が、音の近さで数の語と読めれば人数（読み上げ集・台本 2026-09-30:
+    「フォープレイヤーズ」を「フォールプレイヤー」）。ほかの数の語と近さが同じくらいのとき・アクションでない語
+    （「ナイスプレイヤー」の「ナイス」）のほうが近いときは読まない。"""
+    seq = morae(heard)
+    if len(seq) < 2:
+        return None
+    scored = sorted((distance(seq, morae(word)), count, len(morae(word))) for word, count in COUNT_WORDS.items())
+    (best, count, length), (second, _, _) = scored[0], scored[1]
+    if best > _COUNT_MAX_DISTANCE or second - best < _COUNT_MARGIN:
+        return None
+    # アクションでない語との比べは編集の重さの合計で（`distance` は語の拍数で割るので、長い語ほど小さく出る）
+    cost = best * length
+    closer = any(distance(seq, list(t.morae)) * len(t.morae) <= cost for t in _TARGETS if t.rewrite is None)
+    return None if closer else count
+
+
 def match_keyword(heard: str) -> Optional[PhoneticMatch]:
     """書き起こしの語（片仮名）が、音の近さでアクションの語と読めるか。読めなければ None。"""
     seq = morae(heard)

@@ -344,6 +344,30 @@ _BOUNDARY_KEYWORDS = frozenset({"ベト", "ゴール", "ホールド", "ベッ�
 # 「です」のあとに片仮名が続く（「ホールドデスク」）ときは区切りにしない。
 _BOUNDARY_SUFFIX = re.compile(r"(?:デス|デース|デシタ)(?:ネ|ヨ)?(?![ァ-ヺー])")
 
+# 速く言うと伸ばす音が落ちる（読み上げ集 2026-09-30:「コール、コール」を「コル コル」、「フォールド、フォールド、
+# コール」を「ホルドフォルドコル」と書き起こした）。賭けのアクションの語から「ー」を除いた形も同じ語として読む。
+# 短い形はほかの言葉の一部やひらがなの語（「起こる」の「こる」）と重なるので、片仮名で書かれていて前後が区切りの
+# ときだけ（`_BOUNDARY_KEYWORDS` と同じ）。
+_CLIPPED_ACTIONS = frozenset({"bet", "call", "raise", "check", "fold", "allin", "showdown"})
+
+
+def _clipped_keywords() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for keyword, action in ACTION_KEYWORDS.items():
+        word = unicodedata.normalize("NFKC", keyword)
+        # 伸ばす音が 1 つの語だけ（2 つ落ちた形 =「オーリー」→「オリ」は元の語から遠すぎる）
+        if action not in _CLIPPED_ACTIONS or word.count("ー") != 1 or not all(
+            "ァ" <= ch <= "ヺ" or ch == "ー" for ch in word
+        ):
+            continue
+        clipped = word.replace("ー", "")
+        if len(clipped) >= 2 and clipped not in ACTION_KEYWORDS:
+            out.setdefault(clipped, action)
+    return out
+
+
+_CLIPPED_KEYWORDS = _clipped_keywords()
+
 
 def _kana_script(ch: str) -> Optional[str]:
     if "ぁ" <= ch <= "ゖ":
@@ -375,6 +399,13 @@ def _keyword_matches(norm: str, script: Optional[str] = None) -> list[tuple[int,
                 break
             matches.append((pos, len(kw), action, kw))
             start = pos + 1
+    if script is not None:
+        for kw, action in _CLIPPED_KEYWORDS.items():
+            start = 0
+            while (pos := lower.find(kw, start)) != -1:
+                start = pos + 1
+                if all(_kana_script(ch) == "katakana" for ch in script[pos:pos + len(kw)]):
+                    matches.append((pos, len(kw), action, kw))
     starts = {m[0] for m in matches}
     matches += _check_raise_compounds(norm, script, matches, starts)
     ends = {m[0] + m[1] for m in matches}
@@ -395,7 +426,7 @@ def _keyword_matches(norm: str, script: Optional[str] = None) -> list[tuple[int,
 
     kept = [
         (pos, length, action) for pos, length, action, kw in matches
-        if kw not in _BOUNDARY_KEYWORDS or isolated(pos, pos + length)
+        if (kw not in _BOUNDARY_KEYWORDS and kw not in _CLIPPED_KEYWORDS) or isolated(pos, pos + length)
     ]
     kept.sort(key=lambda t: (t[0], -t[1]))
     return kept
@@ -1038,7 +1069,7 @@ def _parse_utterance(
     norm = _to_katakana(nfkc)
     if _BLIND_ANNOUNCEMENT.match(norm.strip()):
         return []
-    players_left = _PLAYERS_LEFT.search(norm)
+    players_left = _find_players_left(nfkc, norm)
     if players_left is not None:
         return _around_players_left(text, nfkc, players_left, confidence, utterance_start_ts)
     keywords = _distinct_keywords(_keyword_matches(norm, nfkc))
@@ -1071,22 +1102,50 @@ _PLAYERS_LEFT = re.compile(
     r"(?:プレ[イー]?ヤー?[ズス]?|ウ[ェエ]イ|players?|ways?)",
     re.IGNORECASE,
 )
+# 数の語が崩れた言い方（読み上げ集・台本 2026-09-30:「フォープレイヤーズ」を「フォールプレイヤー」）。「プレイヤー」の
+# 前の片仮名を音の近さで数の語と比べる（`phonetic.match_count`）。
+_PLAYERS_WORD = re.compile(r"プレ[イー]?ヤー?[ズス]?")
+
+
+@dataclass(frozen=True)
+class _PlayersLeft:
+    start: int
+    end: int
+    count: int
+
+
+def _find_players_left(nfkc: str, norm: str) -> Optional[_PlayersLeft]:
+    """残りの人数の言い方（「スリープレイヤーズ」「3ウェイ」）の位置と人数。無ければ None。"""
+    from audio.phonetic import match_count
+
+    found = _PLAYERS_LEFT.search(norm)
+    if found is not None:
+        word = found.group("count")
+        count = _PLAYERS_WORDS.get(word) or (int(word) if word.isdigit() else KANJI_DIGIT[word])
+        return _PlayersLeft(found.start(), found.end(), count)
+    for tail in _PLAYERS_WORD.finditer(norm):
+        start = tail.start()
+        while start > 0 and (nfkc[start - 1] == "ー" or _kana_script(nfkc[start - 1]) == "katakana"):
+            start -= 1
+        count = match_count(norm[start:tail.start()]) if start < tail.start() else None
+        if count is not None:
+            return _PlayersLeft(start, tail.end(), count)
+    return None
 
 
 def _around_players_left(
-    text: str, nfkc: str, found: re.Match, confidence: Optional[float], utterance_start_ts: Optional[float],
+    text: str, nfkc: str, found: _PlayersLeft, confidence: Optional[float], utterance_start_ts: Optional[float],
 ) -> list[AudioEvent]:
     """残りの人数を 1 つの合図（2 人は heads_up、3 人以上は players_left + 人数）にし、前後は別に読む。"""
     source = text if len(nfkc) == len(text) else nfkc
-    word = found.group("count")
-    count = _PLAYERS_WORDS.get(word) or (int(word) if word.isdigit() else KANJI_DIGIT[word])
+    count = found.count
     left = AudioEvent(
         action="heads_up" if count == 2 else "players_left", amount=0 if count == 2 else count,
-        timestamp=time.time(), raw_text=source[found.start():found.end()], confidence=confidence,
+        timestamp=time.time(), raw_text=source[found.start:found.end], confidence=confidence,
         utterance_start_ts=utterance_start_ts,
     )
-    before = source[:found.start()].rstrip("".join(_SPLIT_DELIMITERS))
-    after = source[found.end():].lstrip("".join(_SPLIT_DELIMITERS))
+    before = source[:found.start].rstrip("".join(_SPLIT_DELIMITERS))
+    after = source[found.end:].lstrip("".join(_SPLIT_DELIMITERS))
     return [
         *(_parse_utterance(before, confidence, utterance_start_ts) if before.strip() else []),
         left,

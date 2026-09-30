@@ -152,7 +152,8 @@ def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
     無ければ選択点にしない。"""
     start = row.get("utterance_start_ts")
     text = (row.get("text") or "").strip()
-    whisper = [] if _is_noise(row, text) else parse_actions(text, utterance_start_ts=start)
+    whisper = [] if _is_noise(row, text) else parse_actions(
+        text, confidence=row.get("confidence"), utterance_start_ts=start)
     ear = row.get("ear") or None
     # ライブの規則（読めない発話の聞き直し・額の無いベット / レイズの額, `second_ear.apply_ear`）
     live, used = apply_ear(whisper, text, ear, question=is_question(text), utterance_start_ts=start)
