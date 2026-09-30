@@ -86,6 +86,7 @@ def test_rfid_thread_health_no_readers(tmp_path: Path):
         reader_configs=configs,
         stop_event=threading.Event(),
         bridge_factory=lambda name: _FakeBridge(name, ok=False),
+        reconnect_sec=None,       # 試し直さない（既定は試し直す = tests/test_rfid_relay.py）
     )
     assert thread.health["state"] == "starting"
     thread.run()  # 全 reader 接続失敗 → 即 return

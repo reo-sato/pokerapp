@@ -448,6 +448,85 @@ def _rfid_folds_enabled(cfg: dict, seat_presence) -> bool:
     return bool(cfg.get("engine", {}).get("rfid_folds", True)) and seat_presence is not None
 
 
+def _make_rfid_source(rfid_cfg: dict):
+    """RFID の読み取り元（店舗 2026-09-30）: 中継（RDP のセッションの外でリーダーを読む `tools/rfid_relay.py`）が
+    動いていれば中継から、無ければリーダーを直接読む。リーダーにつなぐたびに選び直す。"""
+    from rfid.relay import AutoRFIDSource, RelayClient, relay_port
+
+    return AutoRFIDSource(RelayClient(port=relay_port(rfid_cfg)))
+
+
+def _rfid_not_connected_message(configured: int) -> str:
+    task = Path(__file__).resolve().parent / "installer" / "rfid_relay_task.ps1"
+    return (
+        f"⚠ RFID: リーダーにつながりません（設定 {configured} 台）。手札を配ってもハンドが始まらず、声も聞き取りません。\n"
+        "  RDP で操作しているときは、RDP の中からリーダーは見えません。RFID の中継を一度だけ登録してください"
+        "（PowerShell に貼る。管理者の確認には「はい」）:\n"
+        f"  Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File {task}'\n"
+        "  つながれば自動で使い始めます（ロガーの起動し直しは要りません）。"
+    )
+
+
+def _rfid_status_message(health: dict, source) -> str | None:
+    """RFID のつながり具合（CLI に出す 1 文。まだ分からなければ None）。
+
+    中継から読んでいるときの台数は中継が実際につないでいる台数（ロガーの側は中継につながれば全台「つながった」になる）。
+    """
+    state = health.get("state")
+    if state == "no_readers":
+        return _rfid_not_connected_message(int(health.get("configured") or 0))
+    if state == "stopped":
+        return "⚠ RFID の読み取りが止まりました。ロガーを起動し直してください。"
+    if state != "running":
+        return None
+    if getattr(source, "mode", "") != "relay":
+        return f"RFID: リーダー {health.get('connected')}/{health.get('configured')} 台を直接読んでいます。"
+    snap = source.client.snapshot(max_age=1.0)
+    if snap is None:
+        return ("⚠ RFID: 中継（RDP の外の読み取り）が止まっています。札が読めません。管理者で "
+                "installer\\rfid_relay_task.ps1 をもう一度実行してください。")
+    connected, configured = snap.get("connected", 0), snap.get("configured", 0)
+    if not connected:
+        return (f"⚠ RFID: 中継は動いていますが、リーダーにつながっていません（設定 {configured} 台）。"
+                "卓の USB を確かめてください（つながれば自動で読み始めます）。")
+    return f"RFID: リーダー {connected}/{configured} 台を中継（RDP の外の読み取り）から読んでいます。"
+
+
+def _report_rfid_status(rfid_thread, source, stop_event: threading.Event, wait_sec: float = 3.0) -> None:
+    """RFID のリーダーにつながったかを CLI に出し、あとで変わったとき（つながった・止まった）も出す。
+
+    店舗 2026-09-30: RDP のセッションの中からリーダーが見えず、RFID のスレッドはログのファイルにだけ書いて止まって
+    いた（画面には何も出ず、手札を配ってもハンドが始まらないまま 2 ハンドが記録されなかった）。
+    """
+    import time as _time
+
+    def health() -> dict:
+        return dict(getattr(rfid_thread, "health", None) or {})
+
+    deadline = _time.time() + wait_sec
+    while health().get("state") == "starting" and _time.time() < deadline:
+        _time.sleep(0.05)
+    last: list = [None]
+
+    def show() -> None:
+        h = health()
+        if h.get("state") == "stopped" and stop_event.is_set():
+            return                                   # 終了（q）で止めた
+        message = _rfid_status_message(h, source)
+        if message is None or message == last[0]:
+            return
+        last[0] = message
+        print(message, flush=True)
+
+    show()
+
+    def watch() -> None:
+        while not stop_event.wait(1.0):
+            show()
+
+    threading.Thread(target=watch, daemon=True, name="RFIDStatus").start()
+
+
 def _print_notice(message: str) -> None:
     """ハンドの開始・勝者・判定待ちのお知らせ（integration スレッドから呼ばれる）。"""
     print(f"  ● {message}", flush=True)
@@ -615,6 +694,7 @@ def run_cli(script: str | None = None) -> None:
 
     # Phase 6/7: RFID が有効な場合のみ起動する (transport に応じてスレッドを選択)
     rfid_thread = None
+    rfid_source = None
     rfid_cfg = cfg.get("rfid", {})
     if rfid_cfg.get("enabled", False):
         from core.event_queue import make_rfid_queue
@@ -640,16 +720,21 @@ def run_cli(script: str | None = None) -> None:
             pcsc_readers = rfid_cfg.get("pcsc_readers", rfid_cfg.get("readers", []))
             if not isinstance(pcsc_readers, list):
                 pcsc_readers = []
+            rfid_source = _make_rfid_source(rfid_cfg)
             rfid_thread = RFIDThread(
                 rfid_queue=rfid_q,
                 card_master=card_master,
                 reader_configs=pcsc_readers,
                 poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
                 stop_event=stop_event,
+                bridge_factory=rfid_source.bridge,
+                reader_present=rfid_source.present,
                 **_rfid_tracking_kwargs(rfid_cfg),
             )
             print("RFID pyscardスレッド起動。")
         rfid_thread.start()
+        if rfid_source is not None:
+            _report_rfid_status(rfid_thread, rfid_source, stop_event)
 
     event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
     # 新ハンドで RFID の board 位置もリセットする（engine の board と同じ同期点。
@@ -1017,12 +1102,15 @@ def run_gui() -> None:
             pcsc_readers = rfid_cfg.get("pcsc_readers", rfid_cfg.get("readers", []))
             if not isinstance(pcsc_readers, list):
                 pcsc_readers = []
+            rfid_source = _make_rfid_source(rfid_cfg)
             rfid_thread = RFIDThread(
                 rfid_queue=rfid_q,
                 card_master=card_master,
                 reader_configs=pcsc_readers,
                 poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
                 stop_event=stop_event,
+                bridge_factory=rfid_source.bridge,
+                reader_present=rfid_source.present,
                 **_rfid_tracking_kwargs(rfid_cfg),
             )
 

@@ -737,8 +737,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _running_relay(args: argparse.Namespace):
+    """RFID の中継（RDP のセッションの外でリーダーを読む, `tools/rfid_relay.py`）が動いていれば、その client。"""
+    from rfid.relay import running_relay
+
+    return running_relay(load_rfid_config(args.config))
+
+
+def _relay_command(args: argparse.Namespace, client) -> int:
+    """中継が動いているときの list / check / watch（中継を通して確かめる = ロガーと同じ経路）。"""
+    from rfid.relay import RelayBridge
+    from tools.rfid_relay import describe
+
+    rfid_cfg = load_rfid_config(args.config)
+    pcsc_readers = get_pcsc_readers(rfid_cfg)
+    print("RFID の中継（RDP の外の読み取り）が動いています — 中継を通して確かめます。")
+    if args.command == "watch":
+        card_master = CardMaster(rfid_cfg.get("card_master_file", "./rfid_cards.json"))
+        print(f"{args.seconds:.0f} 秒間、カードのタッチを待ちます（Ctrl+C で中断）…")
+        seen = run_watch(pcsc_readers, card_master, seconds=args.seconds,
+                         bridge_factory=lambda name, index=0: RelayBridge(name, index, client))
+        print(f"\n観測した新規タッチ: {seen} 件")
+        return 0
+    ok, lines = describe(client.fetch(), pcsc_readers, time.time())
+    if args.command == "list":
+        print(lines[0])
+        return 0
+    print("\n".join(lines))
+    print(f"\n結果: {'PASS ✅' if ok else 'FAIL ❌'}")
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command in ("list", "check", "watch"):
+        client = _running_relay(args)
+        if client is not None:
+            return _relay_command(args, client)
     return args.func(args)
 
 

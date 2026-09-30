@@ -77,7 +77,13 @@ from typing import Callable, Optional
 
 from core.event_queue import EventQueue
 from core.events import RFIDEvent
-from rfid.bridge import MAX_READER_INDEX, PCSCBridge, bridge_read_uids, call_bridge_factory
+from rfid.bridge import (
+    MAX_READER_INDEX,
+    PCSCBridge,
+    bridge_read_uids,
+    call_bridge_factory,
+    pcsc_reader_present,
+)
 from rfid.card_master import CardMaster
 
 logger = logging.getLogger(__name__)
@@ -112,6 +118,10 @@ DEFAULT_FLOP_WINDOW_SEC = 10.0
 # 左端が 0.6 以上のリーダーはターン・リバーしか読まない（店舗の 3 台: 左 = フロップだけ・右 = ターン・リバーだけ・
 # 真ん中 = どちらも。20 ハンドの実測で例外なし）。
 _FLOP_EDGE = 0.6
+# 起動時にリーダーが 1 台もつながらないとき、つながるまで試し直す間隔（秒）。前は 1 回試してスレッドを終え、
+# ログのファイルにだけ書いていた（店舗 2026-09-30: 画面には何も出ず、手札を配ってもハンドが始まらないまま 2 ハンドが
+# 記録されなかった）。USB の差し直し・リモートデスクトップのスマートカードの転送を止めたあと、起動し直さなくても使い始める。
+DEFAULT_RECONNECT_SEC = 5.0
 # 確定前のボードの札は、この秒数までの途切れを「載り続けている」とみなす（`gap_sec` より長い）。
 # リーダーの境目・重ね置きの札は途切れながら読めるので、`gap_sec` のままだと確定まで数え直しを
 # 繰り返して反映が遅れる（店舗の実卓, ADR-0058 追記 3）。一瞬の通過は 1 回きりなので影響しない。
@@ -169,6 +179,8 @@ class RFIDThread(threading.Thread):
         redeal_window_sec: Optional[float] = None,
         redeal_confirm_sec: Optional[float] = None,
         flop_window_sec: Optional[float] = None,
+        reconnect_sec: Optional[float] = DEFAULT_RECONNECT_SEC,
+        reader_present: Optional[Callable[[str], bool]] = None,
     ) -> None:
         """
         Args:
@@ -201,6 +213,10 @@ class RFIDThread(threading.Thread):
                               札は、フロップが 3 枚そろっていなくてもフロップの位置に入れない（ターン以降）。
                               一番左・一番右のリーダーの札はリーダーの位置で決める（`_FLOP_EDGE`）。
                               None = 従来どおり空いている位置の若い順（オーナー 2026-09-29）。
+            reconnect_sec:    起動時にリーダーが 1 台もつながらないとき、つながるまで試し直す間隔（秒）。
+                              None = 試し直さずに終える（従来）。
+            reader_present:   リーダー名が PC/SC に見えているか（試し直すのは見えたときだけ = つながらない間に
+                              ログを埋めない）。既定は pyscard の一覧。
         """
         super().__init__(daemon=True, name="RFIDThread")
         self._queue = rfid_queue
@@ -210,6 +226,8 @@ class RFIDThread(threading.Thread):
         self._stop_event = stop_event or threading.Event()
         self._bridge_factory = bridge_factory or PCSCBridge
         self._clock: Callable[[], float] = clock or time.time
+        self._reconnect_sec = None if reconnect_sec is None else max(0.1, float(reconnect_sec))
+        self._reader_present = reader_present or pcsc_reader_present
 
         # デバウンス用: reader_id → 現在載っている UID の集合（空 = カードなし）
         self._last_uids: dict[str, set[str]] = {}
@@ -293,11 +311,12 @@ class RFIDThread(threading.Thread):
     def stop(self) -> None:
         self._stop_event.set()
 
-    def run(self) -> None:
-        logger.info("RFIDThread started (%d reader(s))", len(self._reader_configs))
+    def _reader_names(self) -> set[str]:
+        return {str(cfg.get("name", "")) for cfg in self._reader_configs if cfg.get("name")}
 
-        # ブリッジを初期化
-        bridges: dict[str, object] = {}
+    def _connect_readers(self) -> dict[str, tuple]:
+        """設定のリーダーにつなぐ。つながった reader_id → (bridge, 設定)。"""
+        bridges: dict[str, tuple] = {}
         for i, cfg in enumerate(self._reader_configs):
             reader_name = cfg.get("name", "")
             reader_index = _reader_index_of(cfg, i)
@@ -320,15 +339,29 @@ class RFIDThread(threading.Thread):
                 logger.warning(
                     "Could not connect to RFID reader: %s (reader %d)", reader_name, reader_index,
                 )
+        return bridges
 
+    def run(self) -> None:
+        logger.info("RFIDThread started (%d reader(s))", len(self._reader_configs))
+        bridges = self._connect_readers()
         if not bridges:
-            logger.warning("No RFID readers connected. RFIDThread exiting.")
             self.health = {
                 "state": "no_readers",
                 "connected": 0,
                 "configured": len(self._reader_configs),
                 "last_event_at": None,
             }
+            if self._reconnect_sec is None:
+                logger.warning("No RFID readers connected. RFIDThread exiting.")
+                return
+            logger.warning(
+                "No RFID readers connected. つながるまで %.0f 秒ごとに試し直します（設定のリーダー名: %s）",
+                self._reconnect_sec, ", ".join(sorted(self._reader_names())) or "なし",
+            )
+        while not bridges and not self._stop_event.wait(self._reconnect_sec or 0):
+            if any(self._reader_present(name) for name in self._reader_names()):
+                bridges = self._connect_readers()
+        if not bridges:
             return
         self.health = {
             "state": "running",

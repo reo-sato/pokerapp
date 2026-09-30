@@ -357,8 +357,26 @@ function Invoke-Update {
     }
 }
 
+function Remove-RelayTask {
+    # RFID の中継（installer\rfid_relay_task.ps1, システムの権限）が venv の python を使っている間は venv を消せない。
+    $name = "PokerRFIDRelay"
+    if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return }
+    if (-not (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) { return }
+    Write-Log "削除: RFID の中継のタスク $name"
+    if ($DryRun) { return }
+    try {
+        Stop-ScheduledTask -TaskName $name -ErrorAction Stop
+        Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction Stop
+    } catch {
+        $script = Join-Path $AppDir "installer\rfid_relay_task.ps1"
+        throw ("RFID の中継のタスクを消せません（管理者の権限が要ります）。先に次を PowerShell に貼ってください: " +
+            "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File $script -Remove'")
+    }
+}
+
 function Invoke-Uninstall {
     Remove-Shortcuts
+    Remove-RelayTask
     if (Test-Path $VenvDir) {
         Write-Log "削除: $VenvDir"
         if (-not $DryRun) { Remove-Item -Recurse -Force $VenvDir }

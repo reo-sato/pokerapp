@@ -406,6 +406,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.func is _cmd_run:
+        # RDP のセッションの中からはリーダーが見えない（店舗 2026-09-30）。中継が動いていれば中継を通して読む。
+        from rfid.relay import RelayBridge, running_relay
+
+        client = running_relay(load_rfid_config(args.config))
+        if client is not None:
+            print("RFID の中継（RDP の外の読み取り）が動いています — 中継を通して読みます。")
+            return _cmd_run(args, bridge_factory=lambda name, index=0: RelayBridge(name, index, client))
     return args.func(args)
 
 

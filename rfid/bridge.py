@@ -109,6 +109,17 @@ def list_readers() -> list[str]:
         return []
 
 
+def pcsc_reader_present(reader_name: str) -> bool:
+    """PC/SC にそのリーダー名が見えているか。見えない・pyscard が無い・サービスが動いていない（RDP のセッションの中 =
+    0x8010001D）ときは、ログを出さずに False（つながるまで試し直す間にログを埋めない）。"""
+    try:
+        from smartcard.System import readers as sc_readers
+
+        return any(str(r) == reader_name for r in sc_readers())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def find_reader(reader_name: str):
     """接続中の PC/SC reader のうち reader_name と**等値**のものを返す（無ければ None）。"""
     from smartcard.System import readers as sc_readers

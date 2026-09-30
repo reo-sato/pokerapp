@@ -594,7 +594,8 @@ class TestRFIDThread:
         assert ev.card == "As"
 
     def test_no_readers_thread_exits_gracefully(self, tmp_path: Path):
-        """リーダーが 1 台も接続できない場合、スレッドは正常終了する。"""
+        """リーダーが 1 台も接続できず試し直さない設定（reconnect_sec=None）なら、スレッドは正常終了する。
+        既定は試し直す（`tests/test_rfid_relay.py`）。"""
         from core.event_queue import make_rfid_queue
         rfid_q = make_rfid_queue()
         stop = threading.Event()
@@ -611,6 +612,7 @@ class TestRFIDThread:
             poll_interval_ms=10,
             stop_event=stop,
             bridge_factory=always_fail_factory,
+            reconnect_sec=None,
         )
         thread.start()
         thread.join(timeout=2)
