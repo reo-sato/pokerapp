@@ -595,3 +595,13 @@ def test_the_page_does_not_rebuild_a_field_being_typed_in():
     assert "function editing()" in CORPUS_PAGE and "S.st = await api(\"state\"); renderWhenFree();" in CORPUS_PAGE
     assert 'addEventListener("focusout"' in CORPUS_PAGE
     assert 'oninput="S.speaker=this.value"' in CORPUS_PAGE          # 作り直しても打った名前が残る
+
+
+def test_restatements_count_once_like_the_engine():
+    """続けて同じオールイン・同じ額の賭けは言い直し（エンジンと同じ, オーナー 2026-09-30）。コールは 2 人のことがある。"""
+    assert rc.engine_actions(["allin", "allin"]) == ["allin"]
+    assert rc.engine_actions(["raise 1500", "amount 1500"]) == ["wager 1500"]
+    assert rc.engine_actions(["bet 2000", "bet 2000"]) == ["wager 2000"]
+    assert rc.engine_actions(["raise 600", "raise 1800"]) == ["wager 600", "wager 1800"]
+    assert rc.engine_actions(["call", "call"]) == ["call", "call"]
+    assert rc.engine_actions(["allin", "call", "allin"]) == ["allin", "call", "allin"]

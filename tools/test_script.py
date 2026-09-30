@@ -738,9 +738,11 @@ function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","
 function toast(msg){ const t = $("toast"); t.textContent = msg; t.classList.remove("hidden");
   clearTimeout(t._h); t._h = setTimeout(() => t.classList.add("hidden"), 6000); }
 function fmt(n){ return Number(n || 0).toLocaleString("ja-JP"); }
+const OFFLINE = "サーバにつながりません。PC の「真のアクション入力 (iPad から)」の黒い窓が開いているか確かめてください（閉じていたら起動し直して、この画面を再読み込み）";
 async function api(path, body){
   const opts = body === undefined ? {} : {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)};
-  const r = await fetch("/api/script/" + path, opts);
+  let r;
+  try { r = await fetch("/api/script/" + path, opts); } catch (e) { throw new Error(OFFLINE); }
   let d = null; try { d = await r.json(); } catch (e) {}
   if (!r.ok) throw new Error((d && d.message) || ("HTTP " + r.status));
   return d;

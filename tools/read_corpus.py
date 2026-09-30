@@ -262,6 +262,17 @@ def engine_key(key: str) -> str:
     return _WAGER.sub(r"wager \1", key)
 
 
+def engine_actions(keys: list[str]) -> list[str]:
+    """エンジンが記録する形: `engine_key` にし、言い直し（続けて同じオールイン・同じ額の賭け）を 1 つにする
+    （`IntegrationThread._is_restated`、数字だけの発話は `_amount_only_problem` と同じ。オーナー 2026-09-30）。"""
+    out: list[str] = []
+    for key in (engine_key(k) for k in keys):
+        if out and key == out[-1] and (key == "allin" or key.startswith("wager ")):
+            continue
+        out.append(key)
+    return out
+
+
 # ───────────────────────── 録音 ─────────────────────────
 
 
@@ -1196,7 +1207,8 @@ ROUTES = (("live", "本番の経路"), ("whisper", "Whisper だけ"), ("ear", "�
 def evaluate_folder(folder: Path) -> dict:
     """読み上げ集 1 つを評価する: 句（最後に読んだ回）ごとに、マイク × 方式で正解と比べる。
 
-    一致 = ベット / レイズ / 額だけを同じに扱って（エンジンが卓の状態で決める）アクションの列が同じ。
+    一致 = ベット / レイズ / 額だけを同じに扱い（エンジンが卓の状態で決める）、言い直しを 1 つにした（`engine_actions`）
+    アクションの列が同じ。
     完全一致 = そのまま同じ。
     """
     meta = read_meta(folder) or {}
@@ -1227,7 +1239,7 @@ def evaluate_folder(folder: Path) -> dict:
                 stat = per_route[route]
                 stat["n"] += 1
                 exact = got == expect
-                ok = [engine_key(k) for k in got] == [engine_key(k) for k in expect]
+                ok = engine_actions(got) == engine_actions(expect)
                 stat["exact"] += int(exact)
                 stat["ok"] += int(ok)
                 if route == "live":
@@ -1539,9 +1551,11 @@ document.addEventListener("focusout", () => setTimeout(() => { if (S.pending && 
 function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function toast(msg){ const t = $("toast"); t.textContent = msg; t.classList.remove("hidden");
   clearTimeout(t._h); t._h = setTimeout(() => t.classList.add("hidden"), 6000); }
+const OFFLINE = "サーバにつながりません。PC の「真のアクション入力 (iPad から)」の黒い窓が開いているか確かめてください（閉じていたら起動し直して、この画面を再読み込み）";
 async function api(path, body){
   const opts = body === undefined ? {} : {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)};
-  const r = await fetch("/api/corpus/" + path, opts);
+  let r;
+  try { r = await fetch("/api/corpus/" + path, opts); } catch (e) { throw new Error(OFFLINE); }
   let d = null; try { d = await r.json(); } catch (e) {}
   if (!r.ok) throw new Error((d && d.message) || ("HTTP " + r.status));
   return d;

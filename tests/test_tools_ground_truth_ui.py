@@ -698,3 +698,30 @@ class TestHandLint:
         assert _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "manual-edit", "hand": hand})[0] == 200
         status, detail = _req(base, "GET", f"/api/sessions/{SID}/hands/1")
         assert status == 200 and any("ボードに 7h" in m for m in detail["legal"]["lint"])
+
+
+class TestServerErrors:
+    """例外で応答を返さずに接続を切らない（店舗 2026-09-30: 台本の画面が「Load failed」としか出さず、原因が
+    分からなかった）。中身を 500 で返し、画面はつながらないときに黒い窓を確かめるよう出す。"""
+
+    def test_an_exception_is_reported_not_dropped(self, base, monkeypatch):
+        from tools.test_script import ScriptApp
+
+        def boom(self, method, path, body=None):
+            raise RuntimeError("台本が読めない")
+
+        monkeypatch.setattr(ScriptApp, "route", boom)
+        status, d = _req(base, "GET", "/api/script/state")
+        assert status == 500 and d["code"] == "server_error" and "台本が読めない" in d["message"]
+        status, d = _req(base, "POST", "/api/script/start", {"hand": 1})
+        assert status == 500 and "RuntimeError" in d["message"]
+        status, _ = _req(base, "GET", f"/api/sessions/{SID}/hands")     # サーバは動き続ける
+        assert status == 200
+
+    def test_pages_explain_a_lost_connection(self):
+        from tools.read_corpus import CORPUS_PAGE
+        from tools.test_script import SCRIPT_PAGE
+        from tools.ground_truth_ui import _PAGE
+
+        for page in (_PAGE, CORPUS_PAGE, SCRIPT_PAGE):
+            assert "サーバにつながりません" in page and "catch (e) { throw new Error(OFFLINE); }" in page

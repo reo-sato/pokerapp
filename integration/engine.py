@@ -137,7 +137,10 @@ _REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin
 HELD_WORDS_TO_DROP_ALLIN = 2
 # ディーラーはオールインを言い直す（店舗 2026-09-29: 「オーリー」→「オールイン、コール」/「オールインフォールド」、
 # 「オールイン」→「オールイン、コール、ショーダウン」。間は 2.1〜6.5 秒）。直前の記録がオールインで、その発話から
-# この秒数以内に別の発話で「オールイン」と聞こえたら、同じオールインの言い直しとみて次の人のオールインにしない。
+# この秒数以内に「オールイン」と聞こえたら、同じオールインの言い直しとみて次の人のオールインにしない。同じ発話の
+# 「オールイン、オールインです」も言い直し（間を置かずに 2 人が続けてオールインすることはまず無い, オーナー 2026-09-30）。
+# 同じ額のベット・レイズ（「ベット 2000」→「ベット 2000です」）も同じ: 次の人は同じ額をベット・レイズできない
+# （同じ額ならコール）ので、言い直しを次の人のレイズにしていた。
 ALLIN_RESTATE_SEC = 8.0
 _BETTING_WORDS = frozenset({"check", "call", "bet", "raise", "allin"})
 
@@ -474,8 +477,8 @@ class IntegrationThread(threading.Thread):
         self._checkpoints: list[dict] = []
         # ベッティングが終わったあとに聞こえたベッティングの言葉の数（聞き違いのオールインを見つける）
         self._held_betting_words = 0
-        # 最後に記録したオールイン (記録, 話し始めた時刻, 発話の開始時刻)（言い直しを見分ける）
-        self._last_allin: Optional[tuple[ActionRecord, float, Optional[float]]] = None
+        # 最後に記録した賭け（オールイン・ベット・レイズ）(記録, 話し始めた時刻, 言った額)（言い直しを見分ける）
+        self._last_wager: Optional[tuple[ActionRecord, float, int]] = None
         # 最後の 1 人を残すフォールドの確定待ち {"seat", "t"}
         self._foldout_pending: Optional[dict] = None
         self._foldout_winner_left = False
@@ -1028,7 +1031,7 @@ class IntegrationThread(threading.Thread):
                 self._handle_fold_word(event)   # 次の手番の人には付けない（オーナー決定）
                 return
             # ベッティングが終わったあと（ショーダウン）は従来どおり: 見せずにマック（ディーラーが宣言する）
-        if action == "allin" and self._rules_aware and self._hand_open and self._is_restated_allin(event):
+        if action in ("allin", "bet", "raise") and self._rules_aware and self._hand_open and self._is_restated(event):
             return
         legal_ctx = gs.legal_context()
         if "amount_only" in event.parse_flags:
@@ -1089,27 +1092,32 @@ class IntegrationThread(threading.Thread):
         times = [self._board_dealt_at[i] for i in indices if i in self._board_dealt_at]
         return min(times) if times else None
 
-    def _is_restated_allin(self, event: AudioEvent) -> bool:
-        """「オールイン」が、直前に記録したオールインの言い直しか（`ALLIN_RESTATE_SEC`）。
+    def _is_restated(self, event: AudioEvent) -> bool:
+        """オールイン・ベット・レイズが、直前に記録した同じ賭けの言い直しか（`ALLIN_RESTATE_SEC`）。
 
-        直前の記録がそのオールインで（あいだにほかのアクションが無い）、別の発話で、話し始めがその発話から
-        `ALLIN_RESTATE_SEC` 以内のとき。同じ発話の中の 2 つ目（「オールイン、オールイン」）は 2 人とみる。
+        直前の記録がその賭けで（あいだにほかのアクションが無い）、話し始めがその発話から `ALLIN_RESTATE_SEC` 以内
+        （同じ発話の中の 2 つ目も）のとき。オールインはオールインの、ベット・レイズは同じ額（額を言ったとき。数字だけの
+        発話は `_amount_only_problem` が扱う）のベット・レイズの言い直し。
         """
-        last = self._last_allin
+        last = self._last_wager
         if last is None or not self._current_actions or self._current_actions[-1] is not last[0]:
             return False
-        record, spoken, utterance = last
-        if utterance is not None and event.utterance_start_ts == utterance:
-            return False
+        record, spoken, said_amount = last
+        if event.action == "allin":
+            if record.action != "allin":
+                return False
+        elif ("amount_only" in event.parse_flags or not event.amount
+              or event.amount not in (record.amount, said_amount)):
+            return False      # 記録した額（寄せたあと）か、言った額と同じときだけ
         if not 0.0 <= _spoken_at(event) - spoken <= ALLIN_RESTATE_SEC:
             return False
-        if "allin_restated" not in (record.reason or ""):
-            record.reason = "+".join(r for r in (record.reason, "allin_restated") if r)
+        reason = "allin_restated" if record.action == "allin" else "restated"
+        if reason not in (record.reason or "").split("+"):
+            record.reason = "+".join(r for r in (record.reason, reason) if r)
         if not self._rebuilding:
-            logger.info("「%s」は席%d のオールイン（「%s」）の言い直しとみなしました",
-                        event.raw_text, record.seat, record.raw_text)
-            self._notice(f"「{event.raw_text}」のオールインは、直前の「{record.raw_text}」（席{record.seat}）の"
-                         "言い直しとみなしました")
+            logger.info("「%s」は席%d の %s（「%s」）の言い直しとみなしました",
+                        event.raw_text, record.seat, record.action, record.raw_text)
+            self._notice(f"「{event.raw_text}」は、直前の「{record.raw_text}」（席{record.seat}）の言い直しとみなしました")
         return True
 
     def _said_before_street(self, event: AudioEvent) -> bool:
@@ -2403,7 +2411,7 @@ class IntegrationThread(threading.Thread):
         self._hand_inputs = []
         self._restore_checkpoint(origin)
         # 入力から作り直す状態（チェックポイントに無いもの）
-        self._last_allin = None
+        self._last_wager = None
         self._spoken_fold_raw = {}
         self._foldout_winner_left = False
         restart(seat)
@@ -3536,8 +3544,8 @@ class IntegrationThread(threading.Thread):
         )
         self._current_actions.append(record)
         self._last_action_at = _spoken_at(event)
-        if corrected.action == "allin" and apply_ok:
-            self._last_allin = (record, _spoken_at(event), event.utterance_start_ts)
+        if corrected.action in ("allin", "bet", "raise") and apply_ok:
+            self._last_wager = (record, _spoken_at(event), event.amount)
         if corrected.action == "allin" and apply_ok and checkpoint is not None:
             # 聞き違いなら外して組み直せるように残す（誰も応えないまま「チェック」等が続いたとき）
             checkpoint["allin"] = record
@@ -3609,7 +3617,7 @@ class IntegrationThread(threading.Thread):
         self._hand_inputs = []
         self._checkpoints = []
         self._held_betting_words = 0
-        self._last_allin = None
+        self._last_wager = None
         self._spoken_folds = {}
         self._spoken_fold_raw = {}
         self._foldout_pending = None

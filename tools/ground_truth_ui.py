@@ -951,6 +951,26 @@ class _Handler(BaseHTTPRequestHandler):
     # ――― ルーティング ―――
 
     def do_GET(self) -> None:          # noqa: N802 — BaseHTTPRequestHandler の規約
+        self._guarded(self._get)
+
+    def do_POST(self) -> None:         # noqa: N802
+        self._guarded(self._post)
+
+    def _guarded(self, handle: Any) -> None:
+        """例外で応答を返さずに接続を切らない（画面には「Load failed」としか出ず、原因が分からなかった。
+        店舗 2026-09-30 の台本の画面）。中身を 500 で返し、窓（ログ）にも残す。"""
+        try:
+            handle()
+        except (BrokenPipeError, ConnectionResetError):
+            pass                           # 画面側が先に閉じた
+        except Exception as e:  # noqa: BLE001
+            logger.exception("%s %s でエラー", self.command, self.path)
+            try:
+                self._send_json(500, {"code": "server_error", "message": f"サーバでエラー: {type(e).__name__}: {e}"})
+            except Exception:  # noqa: BLE001 — 送れなければ諦める（ヘッダを送ったあとなど）
+                pass
+
+    def _get(self) -> None:
         path = urlsplit(self.path).path
         srv = self.server
         if path in ("/", "/index.html"):
@@ -1019,7 +1039,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._send_json(404, {"code": "not_found", "message": path})
 
-    def do_POST(self) -> None:         # noqa: N802
+    def _post(self) -> None:
         path = urlsplit(self.path).path
         srv = self.server
         if path.startswith("/api/corpus/"):
@@ -1256,8 +1276,11 @@ function cardHtml(c, cls, onclick){
   const rank = c[0] === "T" ? "10" : c[0];
   return `<span class="card ${red?"red":""} ${cl}" ${onclick?`onclick="${onclick}"`:""}>${rank}${SUIT_SYM[c[1]]||c[1]}</span>`;
 }
+const OFFLINE = "サーバにつながりません。PC の「真のアクション入力 (iPad から)」の黒い窓が開いているか確かめてください（閉じていたら起動し直して、この画面を再読み込み）";
 async function api(path, opts){
-  const r = await fetch(path, Object.assign({headers:{"Content-Type":"application/json"}}, opts || {}));
+  let r;
+  try { r = await fetch(path, Object.assign({headers:{"Content-Type":"application/json"}}, opts || {})); }
+  catch (e) { throw new Error(OFFLINE); }
   let d = null; try { d = await r.json(); } catch (e) {}
   if (!r.ok) throw new Error((d && d.message) || ("HTTP " + r.status));
   return d;

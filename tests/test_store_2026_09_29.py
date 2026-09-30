@@ -122,10 +122,13 @@ class TestAllinRestated:
         assert _acts(tb) == [(6, "raise", 600), (4, "allin", 10000), (5, "call", 9800)]
         assert not any("言い直し" in n for n in tb.notices)
 
-    def test_two_allins_in_one_utterance_are_two_players(self, tmp_path):
-        tb = self._raise_then(tmp_path, ("オールイン、オールイン", 1.0))
-        assert [s for s, _, _ in _acts(tb)] == [6, 4, 5]
-        assert not any("言い直し" in n for n in tb.notices)
+    def test_two_allins_in_one_utterance_are_a_restatement(self, tmp_path):
+        """間を置かずに 2 人が続けてオールインすることはまず無い（オーナー 2026-09-30。前は 2 人とみていた）。"""
+        tb = self._raise_then(tmp_path, ("オールイン、オールインです", 1.0))
+        assert _acts(tb) == [(6, "raise", 600), (4, "allin", 10000)]
+        assert any("言い直し" in n for n in tb.notices)
+        (hand,) = _replayed_open(tb, tmp_path)
+        assert [(a.seat, a.action, a.amount) for a in hand.actions][:2] == _acts(tb)
 
     def test_an_allin_long_after_is_another_player(self, tmp_path):
         tb = self._raise_then(tmp_path, ("オールイン", ALLIN_RESTATE_SEC + 2.0), ("オールイン", 1.0))
@@ -141,6 +144,46 @@ class TestAllinRestated:
         tb.say("オールイン")                             # 席5（BB）もオールイン = 言い直しではない
         tb.tick(tb.now + 1.0)
         assert [s for s, _, _ in _acts(tb)] == [6, 4, 5]
+
+
+class TestWagerRestated:
+    """同じ額のベット・レイズの言い直し（読み上げ集 2026-09-30「ベット、2000」。オーナー「言い直しはする」）。
+    次の人は同じ額をベット・レイズできない（同じ額ならコール）ので、次の人のレイズにしていたのを止める。
+    ボタン 席6（最初の手番）/ SB 席4 / BB 席5。"""
+
+    def _say(self, tmp_path, *said: tuple[str, float]) -> _Table:
+        tb = _Table(tmp_path)
+        tb.deal(STORE_HOLES)
+        for text, wait in said:
+            tb.say(text)
+            tb.tick(tb.now + wait)
+        return tb
+
+    def test_a_restated_raise_is_one_raise(self, tmp_path):
+        tb = self._say(tmp_path, ("レイズ 600", 1.5), ("レイズ 600です", 2.0), ("コール", 1.0))
+        assert _acts(tb) == [(6, "raise", 600), (4, "call", 500)]
+        assert "restated" in tb.t._current_actions[0].reason.split("+")    # noqa: SLF001
+        assert any("言い直し" in n for n in tb.notices)
+        (hand,) = _replayed_open(tb, tmp_path)
+        assert [(a.seat, a.action, a.amount) for a in hand.actions][:2] == _acts(tb)
+
+    def test_a_restated_raise_in_one_utterance(self, tmp_path):
+        tb = self._say(tmp_path, ("レイズ 600、レイズ 600", 1.0))
+        assert _acts(tb) == [(6, "raise", 600)]
+
+    def test_a_different_amount_is_a_reraise(self, tmp_path):
+        tb = self._say(tmp_path, ("レイズ 600", 1.5), ("レイズ 1800", 1.0))
+        assert _acts(tb) == [(6, "raise", 600), (4, "raise", 1800)]
+        assert not any("言い直し" in n for n in tb.notices)
+
+    def test_an_action_in_between_ends_the_restatement(self, tmp_path):
+        tb = self._say(tmp_path, ("レイズ 600", 1.5), ("コール", 1.5), ("レイズ 600", 1.0))
+        assert [s for s, _, _ in _acts(tb)] == [6, 4, 5]
+        assert not any("言い直し" in n for n in tb.notices)
+
+    def test_a_repeat_long_after_is_not_a_restatement(self, tmp_path):
+        tb = self._say(tmp_path, ("レイズ 600", ALLIN_RESTATE_SEC + 2.0), ("レイズ 600", 1.0))
+        assert [s for s, _, _ in _acts(tb)] == [6, 4]
 
 
 def _replayed_open(tb: _Table, tmp_path) -> list:
