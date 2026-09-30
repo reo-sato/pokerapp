@@ -97,7 +97,7 @@ PARAMS: dict[str, float] = {
 }
 
 # 選択肢にするアクション（ハンドの区切りを変える制御は選択肢にしない = ハンドどうしを独立に保つ）
-_BETTING = frozenset({"fold", "check", "call", "bet", "raise", "allin", "check_around", "heads_up",
+_BETTING = frozenset({"fold", "check", "call", "bet", "raise", "allin", "check_around", "heads_up", "players_left",
                       "showdown", "end_hand"})
 _STREETS = ("preflop", "flop", "turn", "river")
 _BOARD_STREET = {3: "flop", 4: "turn", 5: "river"}

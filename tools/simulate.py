@@ -35,10 +35,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from audio.second_ear import kanji_number  # noqa: E402
-from core.control_queue import script_hand_text  # noqa: E402
+from audio.recognizer import parse_amount_ex  # noqa: E402
+from core.control_queue import ControlCommand, command_to_audio_event, script_hand_text  # noqa: E402
 from core.events import AudioEvent  # noqa: E402
 from tools.estimate import PARAMS, SessionInput, compare_with_truth, estimate_session, exact  # noqa: E402
-from tools.test_script import DEFAULT_SEATS, generate_voice_script  # noqa: E402
+from tools.test_script import DEFAULT_SEATS, generate_voice_script, winner_control  # noqa: E402
 
 T0 = 1_800_000_000.0
 
@@ -70,7 +71,8 @@ class Noise:
 
 def ear_form(say: str) -> Optional[str]:
     """第 2 の耳の候補の形（閉じた語彙: アクションの語・額・レイズ / ベット + 額・2 つのアクション）。席・ポジション
-    は語彙に無いので落とす。語彙で言えない行（チョップ・ウィナー・3 つ以上続けて言う）は None。"""
+    は語彙に無いので落とす。語彙で言えない行（チョップ・ウィナー・役の名前・残りの人数・札の言葉・3 つ以上続けて言う）
+    は None。"""
     body = _PREFIX.sub("", say).strip()
     if "チョップ" in body or "ウィナー" in body:
         return None
@@ -79,9 +81,10 @@ def ear_form(say: str) -> Optional[str]:
         return None
     out = []
     for w in words:
-        m = re.fullmatch(r"(レイズ|ベット)?\s*(\d+)", w)
+        m = re.fullmatch(r"(レイズ|ベット)?\s*([\d万千]+)点?", w)       # 額だけ（「600」「2千点」「1万2千」）も
         if m:
-            out.append((f"{m.group(1)} " if m.group(1) else "") + kanji_number(int(m.group(2))))
+            value = parse_amount_ex(m.group(2)).value
+            out.append((f"{m.group(1)} " if m.group(1) else "") + kanji_number(value))
         elif w in ("フォールド", "コール", "チェック", "オールイン", "チェックアラウンド", "ヘッズアップ", "ショーダウン"):
             out.append(w)
         else:
@@ -177,6 +180,9 @@ def simulate_session(seed: int, hands: int = 30, seats: int = DEFAULT_SEATS, noi
             if row is not None:
                 transcripts.append(row)
             t += 2.5 + rng.random()
+        args = winner_control(spec)            # 声では決まらない勝者は台本の画面が送る（札を置かない）
+        if args is not None:
+            events.append(command_to_audio_event(ControlCommand("w", "winner", args, ""), lambda: t + 4.0))
         t += 8.0
     seats_list = [int(s) for s in table["seats"]]
     first = int(table["first_button"])

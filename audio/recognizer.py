@@ -426,7 +426,7 @@ def is_implausibly_long(text: str, audio_sec: float) -> bool:
 # 「7ヒット」のような発話や、違う数が並ぶ発話（「5 6 7」）はアクションにしない。
 _AMOUNT_TOKEN = re.compile(r"(?:\d[\d,]*(?:\.\d+)?[万千百Kk]?)+|[一二三四五六七八九〇十百千万]+(?:\d[\d,]*)?")
 _AMOUNT_ONLY_REST = re.compile(
-    r"(?:[\s、。・!?,.ー〜~]|点|円|エン|テン|ポイント|デス|デース|ニナリマス|ハイ|エー|エット|エート|エ|アー|ア"
+    r"(?:[\s、。・!?,.ー〜~]|点|円|エン|テン|ポイント|トータル|デス|デース|ニナリマス|ハイ|エー|エット|エート|エ|アー|ア"
     r"|ジャア|ジャ|デハ|アクション|ネ|ヨ)*"
 )
 # 数字だけの部分を区切る文字（空白では区切らない: 「シート3 600点」「5 6 7」を 1 まとまりに見る）
@@ -495,8 +495,10 @@ def _split_off_amounts(
 ) -> list[AudioEvent]:
     """コール・チェック・フォールドの前後に区切って言った額を、別のベット・レイズとして分ける。
 
-    「2千点、コール」→ 2000 / コール。区切らずに言った額（「600点コールです」）はコールの額のまま。
-    同じ額の言い直しは engine が「いまのベット以下」として捨てる。
+    「2千点、コール」→ 2000 / コール。語のすぐ隣の空白も区切り（「コール 3000」= コールのあとに次の人の 3000。
+    Whisper は「、」の代わりに空白で書くことがある。額だけの運用では 3000 を失い、以降の手番がずれていた,
+    2026-09-30）。区切らずに言った額（「600点コールです」）はコールの額のまま。同じ額の言い直し（「コール 600」）は
+    engine が「いまのベット以下」として捨てる。
     """
     if event.action not in _AMOUNT_SPLIT_ACTIONS:
         return [event]
@@ -506,7 +508,8 @@ def _split_off_amounts(
     matches = _keyword_matches(norm)
     if not matches:
         return [event]
-    keyword_at = matches[0][0]
+    keyword_at, keyword_len = matches[0][0], matches[0][1]
+    norm, source = _space_next_to_keyword_as_comma(norm, source, keyword_at, keyword_at + keyword_len)
     before: list[AudioEvent] = []
     after: list[AudioEvent] = []
     kept: list[str] = []
@@ -526,6 +529,54 @@ def _split_off_amounts(
         return [event]
     main = parse_action("、".join(kept), confidence=confidence, utterance_start_ts=utterance_start_ts)
     return [*before, main or event, *after]
+
+
+# 区切って続けて言った額（「500、1500」= ベットのあとにレイズ）は、額が上がっていくときだけ別々の賭けにする
+# （額だけの運用, オーナー 2026-09-30。どちらも読まずに捨てていた）。ブラインドより小さい額（「5、6、7」）は使わない。
+_MIN_WAGER_IN_TURN = 100
+
+
+def _wagers_in_turn(
+    text: str, nfkc: str, confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> list[AudioEvent]:
+    source = text if len(nfkc) == len(text) else nfkc
+    events: list[AudioEvent] = []
+    for m in _AMOUNT_CHUNK.finditer(source):
+        if not m.group().strip():
+            continue
+        event = parse_amount_only(m.group(), confidence, utterance_start_ts)
+        if event is None or event.amount < _MIN_WAGER_IN_TURN:
+            return []
+        if events and event.amount == events[-1].amount:
+            continue                                   # 同じ額の言い直し
+        if events and event.amount < events[-1].amount:
+            return []
+        events.append(event)
+    return events if len(events) >= 2 else []
+
+
+_NUMERAL = re.compile(r"[0-9〇一二三四五六七八九十百千万]")
+
+
+def _space_next_to_keyword_as_comma(norm: str, source: str, start: int, end: int) -> tuple[str, str]:
+    """アクションの語のすぐ隣の空白（向こう側が額）を「、」にする（長さは変えない = norm と source の位置がそろったまま）。
+
+    額の中の空白（「1万 2000」）は語の隣ではないので変えない。
+    """
+    def fill(text: str, a: int, b: int) -> str:
+        return text[:a] + "、" * (b - a) + text[b:]
+
+    after = end
+    while after < len(norm) and norm[after].isspace():
+        after += 1
+    if after > end and after < len(norm) and _NUMERAL.match(norm[after]):
+        norm, source = fill(norm, end, after), fill(source, end, after)
+    before = start
+    while before > 0 and norm[before - 1].isspace():
+        before -= 1
+    if before < start and before > 0 and (_NUMERAL.match(norm[before - 1]) or norm[before - 1] == "点"):
+        norm, source = fill(norm, before, start), fill(source, before, start)
+    return norm, source
 
 
 # 1 回の発話から分けるアクションの上限。9 人卓の 1 ラウンドは最大 8 アクションで足り、
@@ -895,12 +946,18 @@ def _parse_utterance(
     norm = _to_katakana(nfkc)
     if _BLIND_ANNOUNCEMENT.match(norm.strip()):
         return []
+    players_left = _PLAYERS_LEFT.search(norm)
+    if players_left is not None:
+        return _around_players_left(text, nfkc, players_left, confidence, utterance_start_ts)
     keywords = _distinct_keywords(_keyword_matches(norm))
     if not keywords:
         # アクションの語が無くても、額だけを言っていればベットかレイズ（「600点」）
         event = parse_amount_only(text, confidence=confidence, utterance_start_ts=utterance_start_ts)
         if event is not None:
             return [event]
+        wagers = _wagers_in_turn(text, nfkc, confidence, utterance_start_ts)
+        if wagers:
+            return wagers
     rewrite = _phonetic_rewrite(nfkc, norm, keywords)
     if rewrite is not None:
         events = _parse_phonetic(text, nfkc, rewrite, confidence, utterance_start_ts)
@@ -912,6 +969,37 @@ def _parse_utterance(
         logger.debug("会話の中のアクションの語とみなして読みません: %r", text)
         return []
     return [e for e, _, _ in _parse_keyword_parts(text, nfkc, norm, keywords, confidence, utterance_start_ts)]
+
+
+# 「スリープレイヤーズ」「3ウェイ」= 残りの人数（ディーラーがストリートの移りに言う。言わないこともある,
+# オーナー 2026-09-30）。数を額と読まない（「コール 3プレイヤーズ」がコール 3 になっていた）。2 人は「ヘッズアップ」
+_PLAYERS_WORDS = {"ツー": 2, "スリー": 3, "フォー": 4, "ファイブ": 5, "シックス": 6, "セブン": 7, "エイト": 8, "ナイン": 9}
+_PLAYERS_LEFT = re.compile(
+    r"(?P<count>[2-9二三四五六七八九]|" + "|".join(_PLAYERS_WORDS) + r")[\s・]*"
+    r"(?:プレ[イー]?ヤー?[ズス]?|ウ[ェエ]イ|players?|ways?)",
+    re.IGNORECASE,
+)
+
+
+def _around_players_left(
+    text: str, nfkc: str, found: re.Match, confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> list[AudioEvent]:
+    """残りの人数を 1 つの合図（2 人は heads_up、3 人以上は players_left + 人数）にし、前後は別に読む。"""
+    source = text if len(nfkc) == len(text) else nfkc
+    word = found.group("count")
+    count = _PLAYERS_WORDS.get(word) or (int(word) if word.isdigit() else KANJI_DIGIT[word])
+    left = AudioEvent(
+        action="heads_up" if count == 2 else "players_left", amount=0 if count == 2 else count,
+        timestamp=time.time(), raw_text=source[found.start():found.end()], confidence=confidence,
+        utterance_start_ts=utterance_start_ts,
+    )
+    before = source[:found.start()].rstrip("".join(_SPLIT_DELIMITERS))
+    after = source[found.end():].lstrip("".join(_SPLIT_DELIMITERS))
+    return [
+        *(_parse_utterance(before, confidence, utterance_start_ts) if before.strip() else []),
+        left,
+        *(_parse_utterance(after, confidence, utterance_start_ts) if after.strip() else []),
+    ]
 
 
 def parse_action(

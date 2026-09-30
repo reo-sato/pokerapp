@@ -36,6 +36,7 @@ class _Table:
         self.gs = PokerkitGameState(
             [PlayerState(seat=s, name=f"P{s}", stack=10000) for s in seats], sb=100, bb=200)
         self.now = 0.0
+        self._last_start = -1.0
         self.cards: dict[int, list[str]] = {}
         self.hands: list = []
         self.actions: list = []
@@ -61,6 +62,9 @@ class _Table:
 
     def say(self, text: str, spoken_at: float | None = None) -> None:
         start = self.now if spoken_at is None else spoken_at
+        if spoken_at is None and start <= self._last_start:
+            start = round(self._last_start + 0.001, 6)   # 別の発話は話し始めが違う（同じ時刻の say を 1 つの発話にしない）
+        self._last_start = start
         for event in parse_actions(text, confidence=0.9, utterance_start_ts=start):
             event.timestamp = self.now
             self.t._handle_audio_event(event)   # noqa: SLF001

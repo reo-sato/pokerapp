@@ -130,7 +130,7 @@ SILENT_MIC_SEC = 60.0
 # フォールドにする（勝った人が先に札を投げても、降りた人の方が先になる）。
 SPOKEN_FOLD_WINDOW_SEC = 15.0
 # 札の離脱で組み直す（取り消す）ときに入力として残す音声のアクション
-_REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin", "heads_up"})
+_REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin", "heads_up", "players_left"})
 # 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
 # 言葉がこの数だけ聞こえたら、そのオールインを聞き違いとみて外す（店舗 2026-09-27: 自信 0.27 の「オールイン」の
 # あとのチェック 5 回と「2700」がすべて保留になり、全員オールインの 59700 のポットになった）
@@ -146,6 +146,9 @@ _BETTING_WORDS = frozenset({"check", "call", "bet", "raise", "allin"})
 
 # review の理由にしない parse flag（読み方の情報。「数字だけ」「チェックアラウンド」は運用どおりの言い方）
 _INFO_PARSE_FLAGS = frozenset({"amount_only", "check_around"})
+
+# 分けた（勝者が 2 人以上）ことを言う語（`core.constants.ACTION_KEYWORDS` の winner のうち）
+_SPLIT_WORDS = re.compile(r"チョップ|ちょっぷ|スプリット|split|chop", re.IGNORECASE)
 
 _SUIT_MARKS = {"s": "♠", "h": "♥", "d": "♦", "c": "♣"}
 
@@ -980,7 +983,11 @@ class IntegrationThread(threading.Thread):
             return
 
         if action == "heads_up":
-            self._handle_heads_up(event)
+            self._handle_players_left(event, 2)
+            return
+
+        if action == "players_left":
+            self._handle_players_left(event, event.amount)
             return
 
         if action == "session_end":
@@ -1037,6 +1044,8 @@ class IntegrationThread(threading.Thread):
         if "amount_only" in event.parse_flags:
             # 数字だけの発話 = ベットかレイズ。使えない額なら記録しない（「7」「いまのベットと同じ額」）
             problem = self._amount_only_problem(event, legal_ctx)
+            if problem is None and self._said_with_round_closer(event):
+                problem = f"前のラウンドを閉じた「{self._current_actions[-1].raw_text}」と同じ発話の額です"
             if problem is not None:
                 self._notice(f"数字だけの「{event.raw_text}」は記録しませんでした（{problem}）")
                 if self._betting_over():
@@ -1085,6 +1094,17 @@ class IntegrationThread(threading.Thread):
         else:
             return "ベット・レイズできる手番ではありません"
         return None
+
+    def _said_with_round_closer(self, event: AudioEvent) -> bool:
+        """数字だけの発話が、前のラウンドを閉じたアクションと同じ発話か。
+
+        次のストリートは札を配ってからなので、同じ発話の額は次のストリートのベットではない（「コール 2千5百」=
+        2500 へのコールの額の言い直し。コールがラウンドを閉じるとフロップのベットにしていた, 店舗 2026-09-29）。
+        """
+        if not self._current_actions or event.utterance_start_ts is None:
+            return False
+        last = self._current_actions[-1]
+        return last.street != self._game_state.street and self._last_action_at == event.utterance_start_ts
 
     def _street_started_at(self) -> Optional[float]:
         """いまのストリートの最初の札が見えた時刻（フロップは 3 枚のうち最初）。読めていなければ None。"""
@@ -1607,34 +1627,46 @@ class IntegrationThread(threading.Thread):
         ))
         self._last_action_at = dep["t"]
 
-    def _handle_heads_up(self, event: AudioEvent) -> None:
-        """「ヘッズアップ」= 残りが 2 人（ディーラーが次のストリートへ進む前に言う, 店舗 2026-09-27）。
+    def _handle_players_left(self, event: AudioEvent, count: int) -> None:
+        """「ヘッズアップ」/「スリープレイヤーズ」= 残りが `count` 人（ディーラーが次のストリートへ進むときに言う。
+        言わないこともある, 店舗 2026-09-27 / オーナー 2026-09-30）。
 
-        2 人残っていて手番の人がベットに向き合っていれば、その人は降りずに次へ進んだ = コールした（レイズなら
+        その人数が残っていて、ベットに向き合っている人がいれば、その人は降りずに次へ進んだ = コールした（レイズなら
         額が言われる）。言われなかった「コール」をこれで補い、要確認にしない。次のストリートの札で先に閉じた
-        ラウンドの補ったコールも裏付ける。3 人以上残っていればフォールドの聞き落としを知らせる。
+        ラウンドの補ったコールも裏付ける。多く残っていればフォールドの聞き落とし、少なければ聞き違いを知らせる。
         """
-        if not (self._rules_aware and self._hand_open):
+        if not (self._rules_aware and self._hand_open) or count < 2:
             return
         gs = self._game_state
         spoken = _spoken_at(event)
         self._apply_pending_spoken_fold(spoken, "spoken_fold_before_heads_up")
         remaining = self._remaining_seats()
-        if len(remaining) > 2:
+        if len(remaining) > count:
             self._hand_needs_review = True
             self._notice(f"「{event.raw_text}」— まだ {len(remaining)} 人残っています（フォールドの聞き落とし？ 要確認）")
             return
         if len(remaining) < 2:
             return
-        ctx = gs.legal_context()
-        if ctx.actor_seat is not None and ctx.amount_to_call > 0:
-            self._imply_action(ctx.actor_seat, ctx, spoken, "heads_up_call", confirmed=True)
+        if len(remaining) < count:
+            self._hand_needs_review = True
+            self._notice(f"「{event.raw_text}」— 記録では {len(remaining)} 人です（フォールドの聞き違い？ 要確認）")
+            return
+        reason = "heads_up_call" if count == 2 else "players_left_call"
+        street = gs.street
+        implied = False
+        for _ in range(len(remaining)):
+            ctx = gs.legal_context()
+            if gs.street != street or ctx.actor_seat is None or ctx.amount_to_call <= 0:
+                break
+            self._imply_action(ctx.actor_seat, ctx, spoken, reason, confirmed=True)
+            implied = True
+        if implied:
             return
         last = self._current_actions[-1] if self._current_actions else None
         if (last is not None and last.street != gs.street and last.actor_source == "implied"
                 and last.action == "call" and last.needs_review):
             last.needs_review = False
-            last.reason = "+".join(r for r in (last.reason, "heads_up") if r)
+            last.reason = "+".join(r for r in (last.reason, "heads_up" if count == 2 else "players_left") if r)
 
     def _imply_action(self, seat: int, ctx: LegalContext, t: float, reason: str,
                       confirmed: bool = False) -> None:
@@ -1941,6 +1973,11 @@ class IntegrationThread(threading.Thread):
         if winner_seat is None:
             # 席を言わない「ウィナー」: ショーダウンなら残った全員が見せたとして手札で決める（ADR-0062）
             if self._finish_by_rules(event):
+                return
+            if _SPLIT_WORDS.search(event.raw_text or "") and len(self._remaining_seats()) >= 2:
+                # 「チョップ」= 2 人以上で分けた。手札で決められないとき 1 人を推定しない（最後に賭けた人にしていた）
+                self._hand_needs_review = True
+                self._notice(f"「{event.raw_text}」— 分けた席を手札で決められません。w <席> <席> で入力してください")
                 return
             winner_seat = self._fallback_winner_seat()
             if winner_seat is None:

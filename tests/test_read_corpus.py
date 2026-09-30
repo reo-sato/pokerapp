@@ -58,17 +58,28 @@ class Clock:
 
 class TestPhrases:
     def test_clean_text_reads_as_the_expected_actions(self):
-        """画面の言葉そのものは、いまの読み取りで正解どおりに読める（言い直しの 2 句だけは違うと分かっている）。"""
+        """画面の言葉そのものは、いまの読み取り（+ エンジンの言い直しの扱い = 評価と同じ比べ方）で正解どおりに読める
+        （言い直しの「コール、はい、コール」だけは違うと分かっている）。"""
         for p in rc.PHRASES:
-            got = rc.parse_keys(p.text)
+            got = rc.engine_actions(rc.parse_keys(p.text))
             if p.known_gap:
-                assert got != list(p.expect), p
+                assert got != rc.engine_actions(list(p.expect)), p
             else:
-                assert got == list(p.expect), p
+                assert got == rc.engine_actions(list(p.expect)), p
+
+    def test_the_phrases_are_the_store_speech(self):
+        """席番号・ポジション・ベット / レイズの語は言わない（額だけ）。オーナー 2026-09-30。"""
+        for p in rc.PHRASES:
+            for word in ("シート", "ベット", "レイズ", "ウィナー", "ボタン", "スモール", "ビッグ", "カットオフ",
+                         "ハイジャック", "UTG", "ハンド開始", "ハンド終了"):
+                assert word not in p.text, p
+        kinds = {p.kind for p in rc.PHRASES}
+        assert {"amount", "sequence", "street", "hand_name", "restate", "none"} <= kinds
+        assert not kinds & {"bet", "raise", "position", "seat", "wording"}
 
     def test_ids_are_unique_and_every_kind_has_a_label(self):
         ids = [p.id for p in rc.PHRASES]
-        assert len(ids) == len(set(ids)) and 150 <= len(ids) <= 200
+        assert len(ids) == len(set(ids)) and 120 <= len(ids) <= 200
         assert {p.kind for p in rc.PHRASES} <= set(rc.KIND_LABELS)
         assert any(not p.expect for p in rc.PHRASES)            # アクションではない言葉も読む
 
@@ -89,7 +100,8 @@ class TestPhrases:
     def test_keys(self):
         assert rc.parse_keys("ボタン レイズ 1500") == ["raise 1500 @BTN"]
         assert rc.parse_keys("シート3 ウィナー") == ["winner @3"]
-        assert rc.parse_keys("コール 3ウェイ") == ["call"]             # コールの額は比べない
+        assert rc.parse_keys("600点コールです") == ["call"]            # コールの額は比べない
+        assert rc.parse_keys("コール 3ウェイ") == ["call", "players_left 3"]   # 残りの人数
         assert rc.engine_key("amount 1300") == rc.engine_key("raise 1300") == "wager 1300"
         assert rc.engine_key("call @BTN") == "call @BTN"
 
@@ -528,6 +540,21 @@ class TestApp:
         assert (folder / "full_m1.wav").is_file() and list(folder.glob("full_m1_*.wav"))
         app.act("finish", {})
         assert len(rc.read_meta(folder)["runs"]) == 2
+        app.close()
+
+    def test_a_reading_of_the_old_phrase_set_is_not_resumed(self, tmp_path):
+        """句の組を作り直すと同じ ID が別の句を指す（2026-09-30: 店の言い方に作り直した）。前の組の続きは読まない。"""
+        app = _app(tmp_path)
+        status, st = app.start({"speaker": "reo", "mics": [1]})
+        folder = tmp_path / "corpus" / st["session"]["folder"]
+        app.act("finish", {})
+        meta = rc.read_meta(folder)
+        meta["phrase_set"] = "2026-09-30"
+        (folder / rc.META).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        [recent] = app.state()["recent"]
+        assert recent["current_set"] is False
+        status, payload = app.start({"resume": folder.name, "mics": [1]})
+        assert status == 409 and "新しく始めてください" in payload["message"]
         app.close()
 
     def test_reading_the_last_phrase_finishes(self, tmp_path, monkeypatch):

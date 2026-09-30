@@ -1,9 +1,10 @@
 """tools/read_corpus.py — 読み上げ集（正解が先に分かっている発話）を録る（テスト方針 週 1, 2026-09-29）
 
 店舗の真のアクションは記録を見ながら入れるので、聞き取りの誤りと入れる側の誤りが混ざり、数も少ない
-（`docs/worklog/2026-09-29-test-strategy.md`）。読み上げ集は、画面に出した句（「レイズ 1300」「フォールド、
-フォールド、コール」「ポット 3000」…）をディーラーが読み、句ごとの音声を**正解**（読み取りが返すべきアクション）と
-一緒に残す。聞き取りの方式の比較・推定器の確からしさ・マイクの選択に使う。
+（`docs/worklog/2026-09-29-test-strategy.md`）。読み上げ集は、画面に出した句（「1300」「フォールド、
+フォールド、コール」「スリープレイヤーズ」「ポット 3000」…）をディーラーが読み、句ごとの音声を**正解**（読み取りが
+返すべきアクション）と一緒に残す。聞き取りの方式の比較・推定器の確からしさ・マイクの選択に使う。句は店の言い方
+（席番号・ポジション・ベット / レイズの語は言わない, オーナー 2026-09-30）。
 
 - 真のアクション入力の画面（`tools/ground_truth_ui.py`, ポート 8791）の「読み上げ集」（`/corpus`）から使う。
   スマホ / iPad に句を 1 つずつ大きく出し、読んだら「次へ」。PC のマイクで録り続け、句を出した時刻から「次へ」を
@@ -51,7 +52,8 @@ from audio.recorder import _calc_rms  # noqa: E402
 logger = logging.getLogger(__name__)
 
 # 句の組の版（句を変えたら上げる。meta.json に残す）
-PHRASE_SET = "2026-09-30"
+# 2026-09-30b: 店の言い方（額だけ・席とポジションなし・ストリートの移りの言葉）に作り直した
+PHRASE_SET = "2026-09-30b"
 CORPUS_DIR = "corpus"
 META = "meta.json"
 LABELS = "labels.jsonl"
@@ -82,6 +84,7 @@ KIND_LABELS = {
     "seat": "席",
     "control": "進行",
     "hand_name": "役の名前",
+    "street": "ストリートの移り",
     "restate": "言い直し",
     "none": "アクションではない",
 }
@@ -117,8 +120,10 @@ def amount_text(n: int) -> str:
 
 
 def build_phrases() -> list[Phrase]:
-    """読み上げ集の句（約 160）。額は店舗の実際の額（100 / 200 のブラインド）と、聞き違えた額（6千・8千・2千・
-    1200 など, 店舗の書き起こし）を多めに。"""
+    """読み上げ集の句（約 140）。**店の言い方**（オーナー 2026-09-30）: 席番号・ポジションは言わない、ベット・レイズは
+    額だけ（「600」「2千点」）、コール・チェック・フォールドは言う、ストリートの移りの言葉（チェックアラウンド・
+    ヘッズアップ・スリープレイヤーズ・ターンカード・ラストカード）は言うことがある、ショーダウンは勝った役。
+    額は店舗の実際の額（100 / 200 のブラインド）と、聞き違えた額（6千・8千・2千・1200 など, 店舗の書き起こし）を多めに。"""
     out: list[Phrase] = []
     counts: Counter = Counter()
 
@@ -126,82 +131,76 @@ def build_phrases() -> list[Phrase]:
         counts[prefix] += 1
         out.append(Phrase(f"{prefix}{counts[prefix]:02d}", text, kind, tuple(expect), note, gap))
 
-    for word, key, times in (("チェック", "check", 5), ("コール", "call", 5), ("フォールド", "fold", 5),
+    for word, key, times in (("チェック", "check", 6), ("コール", "call", 6), ("フォールド", "fold", 6),
                              ("オールイン", "allin", 4)):
         for _ in range(times):
             add("act", "action", word, [key])
-    for n in (300, 500, 600, 800, 900, 1000, 1200, 1500, 2000, 2500, 3000, 4000, 5000, 6000, 8000, 10000, 12000):
-        add("bet", "bet", f"ベット {amount_text(n)}", [f"bet {n}"])
-    for n in (400, 500, 600, 700, 800, 1100, 1200, 1300, 1600, 1800, 2200, 2400, 3500, 4500, 6000, 8000, 9000,
-              15000, 20000, 30000):
-        add("rai", "raise", f"レイズ {amount_text(n)}", [f"raise {n}"])
-    for text, n in (("600", 600), ("900点", 900), ("1100", 1100), ("1300", 1300), ("2000", 2000), ("2500", 2500),
-                    ("3千点", 3000), ("4000", 4000), ("6000", 6000), ("8000", 8000), ("1万", 10000),
-                    ("1万2500", 12500)):
-        add("amt", "amount", text, [f"amount {n}"])
-    for text, key in (("スリーベット 1800", "raise 1800"), ("リレイズ 4000", "raise 4000"),
-                      ("チェックレイズ 2000", "raise 2000"), ("レイズ トータル 2400", "raise 2400"),
-                      ("ベット 1000点", "bet 1000"), ("レイズ 2千点", "raise 2000")):
-        add("wrd", "wording", text, [key])
+    for text, n in (
+        ("400", 400), ("500", 500), ("600", 600), ("600点", 600), ("700", 700), ("800", 800), ("900点", 900),
+        ("1000", 1000), ("1100", 1100), ("1200", 1200), ("1300", 1300), ("1500", 1500), ("1600", 1600),
+        ("1800", 1800), ("2000", 2000), ("2千点", 2000), ("2200", 2200), ("2400", 2400), ("2500", 2500),
+        ("2700", 2700), ("3000", 3000), ("3千点", 3000), ("3500", 3500), ("4000", 4000), ("4500", 4500),
+        ("5000", 5000), ("6000", 6000), ("6千点", 6000), ("7000", 7000), ("8000", 8000), ("9000", 9000),
+        ("1万", 10000), ("1万2千", 12000), ("1万2500", 12500), ("1万5千", 15000), ("2万", 20000), ("3万", 30000),
+    ):
+        add("amt", "amount", text, [f"amount {n}"], note="ベット・レイズの額（語は付けない）")
     for text, keys in (
         ("フォールド、フォールド、コール", ["fold", "fold", "call"]),
         ("チェック、チェック", ["check", "check"]),
         ("コール、コール", ["call", "call"]),
-        ("フォールド、レイズ 1200", ["fold", "raise 1200"]),
-        ("チェック、ベット 800", ["check", "bet 800"]),
+        ("フォールド、1200", ["fold", "amount 1200"]),
+        ("チェック、800", ["check", "amount 800"]),
         ("コール、フォールド、フォールド", ["call", "fold", "fold"]),
-        ("レイズ 2000、フォールド、コール", ["raise 2000", "fold", "call"]),
+        ("2000、フォールド、コール", ["amount 2000", "fold", "call"]),
         ("フォールド、フォールド、フォールド", ["fold", "fold", "fold"]),
         ("チェック、チェック、チェック", ["check", "check", "check"]),
-        ("ベット 1500、コール、フォールド", ["bet 1500", "call", "fold"]),
+        ("1500、コール、フォールド", ["amount 1500", "call", "fold"]),
         ("フォールド、コール、コール", ["fold", "call", "call"]),
         ("オールイン、コール", ["allin", "call"]),
         ("コール、オールイン", ["call", "allin"]),
-        ("レイズ 600、コール、コール、フォールド", ["raise 600", "call", "call", "fold"]),
-        ("チェック、ベット 2000、コール", ["check", "bet 2000", "call"]),
-        ("フォールド、フォールド、レイズ 900", ["fold", "fold", "raise 900"]),
-        ("コール、レイズ 3000", ["call", "raise 3000"]),
-        ("ベット 500、レイズ 1500、フォールド", ["bet 500", "raise 1500", "fold"]),
+        ("600、コール、コール、フォールド", ["amount 600", "call", "call", "fold"]),
+        ("チェック、2000、コール", ["check", "amount 2000", "call"]),
+        ("フォールド、フォールド、900", ["fold", "fold", "amount 900"]),
+        ("コール、3000", ["call", "amount 3000"]),
+        ("500、1500、フォールド", ["amount 500", "amount 1500", "fold"]),
+        ("500、1500", ["amount 500", "amount 1500"]),
         ("フォールド、オールイン、フォールド", ["fold", "allin", "fold"]),
-        ("チェック、チェック、ベット 1200、フォールド", ["check", "check", "bet 1200", "fold"]),
+        ("チェック、チェック、1200、フォールド", ["check", "check", "amount 1200", "fold"]),
+        ("2千点、コール", ["amount 2000", "call"]),
+        ("コール、6千点", ["call", "amount 6000"]),
+        ("フォールド、コール、1万", ["fold", "call", "amount 10000"]),
     ):
         add("seq", "sequence", text, keys, note="プレイヤーが順に動くときの間で")
-    for text, key in (
-        ("ボタン コール", "call @BTN"), ("ボタン レイズ 1500", "raise 1500 @BTN"), ("スモール フォールド", "fold @SB"),
-        ("スモールブラインド コール", "call @SB"), ("ビッグ チェック", "check @BB"),
-        ("ビッグブラインド レイズ 1200", "raise 1200 @BB"), ("UTG レイズ 600", "raise 600 @UTG"),
-        ("UTG フォールド", "fold @UTG"), ("カットオフ コール", "call @CO"), ("カットオフ レイズ 1100", "raise 1100 @CO"),
-        ("ハイジャック フォールド", "fold @HJ"), ("ハイジャック コール", "call @HJ"), ("ボタン オールイン", "allin @BTN"),
-        ("ビッグ コール", "call @BB"),
-    ):
-        add("pos", "position", text, [key], note="UTG は「ユーティージー」" if text.startswith("UTG") else "")
-    for text, key in (
-        ("シート3 コール", "call @3"), ("シート5 フォールド", "fold @5"), ("シート7 レイズ 1500", "raise 1500 @7"),
-        ("シート2 オールイン", "allin @2"), ("シート1 チェック", "check @1"), ("シート6 ベット 800", "bet 800 @6"),
-        ("シート4 コール", "call @4"), ("シート9 フォールド", "fold @9"),
-    ):
-        add("seat", "seat", text, [key])
-    for text, key, times in (
-        ("ハンド開始", "new_hand", 3), ("ショーダウン", "showdown", 3), ("ハンド終了", "end_hand", 2),
-        ("チョップ", "winner", 2), ("ヘッズアップ", "heads_up", 2), ("チェックアラウンド", "check_around", 2),
+    for text, keys, times in (
+        ("チェックアラウンド", ["check_around"], 3), ("ヘッズアップ", ["heads_up"], 3),
+        ("スリープレイヤーズ", ["players_left 3"], 2), ("フォープレイヤーズ", ["players_left 4"], 2),
+        ("ファイブプレイヤーズ", ["players_left 5"], 1), ("シックスプレイヤーズ", ["players_left 6"], 1),
+        ("ターンカード", [], 2), ("ラストカード", [], 2),
     ):
         for _ in range(times):
-            add("ctl", "control", text, [key])
-    for seat in (3, 5, 1):
-        add("ctl", "control", f"シート{seat} ウィナー", [f"winner @{seat}"])
+            add("str", "street", text, keys)
+    for text, keys in (
+        ("チェック、チェック、ターンカード", ["check", "check"]),
+        ("コール、スリープレイヤーズ", ["call", "players_left 3"]),
+        ("フォールド、ヘッズアップ", ["fold", "heads_up"]),
+        ("チェックアラウンド、ラストカード", ["check_around"]),
+        ("コール、ヘッズアップ", ["call", "heads_up"]),
+    ):
+        add("str", "street", text, keys, note="ストリートが移るときの間で")
     for text, name in (("フルハウス", "Full house"), ("フラッシュ", "Flush"), ("ストレート", "Straight"),
                        ("ツーペア", "Two pair"), ("ワンペア", "One pair"), ("スリーカード", "Three of a kind"),
                        ("ハイカード", "High card")):
         add("hn", "hand_name", text, [f"end_hand:{name}"], note="ショーダウンで勝った役")
-    add("rst", "restate", "レイズ 1500、トータル 1500", ["raise 1500"])
-    add("rst", "restate", "ベット、2000", ["bet 2000"], note="「ベット」と「2000」の間を 1 秒あける")
+    for text, key, times in (("チョップ", "winner", 2), ("ショーダウン", "showdown", 2)):
+        for _ in range(times):
+            add("ctl", "control", text, [key])
+    add("rst", "restate", "1500、トータル 1500", ["amount 1500"])
+    add("rst", "restate", "2000、2000です", ["amount 2000"], note="「2000」と「2000です」の間を 1 秒あける")
+    add("rst", "restate", "オールイン、オールインです", ["allin"])
     add("rst", "restate", "コール、はい、コール", ["call"], gap=True)
-    add("rst", "restate", "オールイン、オールインです", ["allin"], gap=True)
-    add("rst", "restate", "コール 3ウェイ", ["call"], note="3 人でポットに入った")
-    for text in ("ポット 3000", "ポット 1万2千です", "100点 お釣りです", "ターンです", "リバー", "ラストカード",
-                 "フロップです", "3プレイヤー", "ナイスハンド", "お願いします", "少々お待ちください", "次のハンドです",
-                 "スタック 8000 です", "ブラインド 200 400 です", "アクションどうぞ",
-                 "コールですか？", "レイズですか？", "オールインですか？"):
+    for text in ("ポット 3000", "ポット 1万2千です", "100点 お釣りです", "ターンです", "リバー", "フロップです",
+                 "ナイスハンド", "お願いします", "少々お待ちください", "次のハンドです", "スタック 8000 です",
+                 "ブラインド 200 400 です", "アクションどうぞ", "コールですか？", "オールインですか？", "2千点ですか？"):
         add("neg", "none", text, [], note="確かめる言い方で" if text.endswith("？") else "")
     return out
 
@@ -241,6 +240,8 @@ def event_key(event: Any) -> str:
         key = f"end_hand:{event.hand_name}"
     elif event.action in ("bet", "raise") and event.amount:
         key = f"{event.action} {event.amount}"
+    elif event.action == "players_left":
+        key = f"players_left {event.amount}"
     else:
         key = str(event.action)
     if getattr(event, "seat", None) is not None:
@@ -1020,6 +1021,7 @@ class CorpusApp:
             "saved": sum(1 for r in latest.values() if r.get("files")),
             "skipped": sum(1 for r in latest.values() if r.get("skipped")),
             "total": len(order), "finished": bool(meta.get("finished")),
+            "current_set": meta.get("phrase_set") == PHRASE_SET,
             "done": len(latest), "transcribed": (result or {}).get("transcribed", 0),
             "match": m1.get("live", {}).get("rate"),
         }
@@ -1053,6 +1055,10 @@ class CorpusApp:
                 meta = read_meta(folder) if _FOLDER_RE.match(str(resume)) else None
                 if meta is None:
                     return 404, {"code": "not_found", "message": "続きの読み上げが見つかりません"}
+                if meta.get("phrase_set") != PHRASE_SET:
+                    # 句の組が変わると同じ ID が別の句を指す（混ぜると正解がずれる）
+                    return 409, {"code": "phrase_set", "message": "前の句の組の読み上げです（句を店の言い方に作り直しました）。"
+                                                                  "新しく始めてください"}
                 order = [PHRASES_BY_ID[i] for i in meta.get("order") or [] if i in PHRASES_BY_ID]
                 start_index, takes = resume_point(folder, order)
             else:
@@ -1624,7 +1630,7 @@ function renderSetup(st){
       ${k >= 0 ? `<span class="tag m">m${k + 1}</span>` : ""}</span></label>`;
   }).join("") || `<p class="err">${esc(st.device_error || "録音できるマイクがありません")}</p>`;
   const recent = st.recent || [];
-  const resumable = recent.filter(r => !r.finished && r.done < r.total);
+  const resumable = recent.filter(r => !r.finished && r.done < r.total && r.current_set);
   const when = (f) => `${f.slice(4, 6)}/${f.slice(6, 8)} ${f.slice(9, 11)}:${f.slice(11, 13)}`;
   const rows = recent.map(r => `<tr><td>${esc(when(r.folder))}</td><td>${esc(r.speaker || "")}</td><td>${r.round || ""}</td>
       <td>${r.saved}/${r.total}${r.skipped ? `（飛ばし ${r.skipped}）` : ""}</td>

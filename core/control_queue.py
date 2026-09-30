@@ -164,6 +164,14 @@ def command_to_audio_event(command: ControlCommand, clock: Callable[[], float]):
     if t == "new_hand":
         return AudioEvent(action="new_hand", amount=0, timestamp=clock(), raw_text="")
     if t == "winner":
+        # seats（2 席以上）= 分ける（チョップ。台本のハンドの画面が送る, 2026-09-30）
+        seats = args.get("seats")
+        if isinstance(seats, list) and len(seats) >= 2 and all(
+                isinstance(s, int) and not isinstance(s, bool) for s in seats):
+            return AudioEvent(
+                action="winner", amount=0, timestamp=clock(),
+                raw_text=" ".join(f"シート{s}" for s in seats) + " チョップ", seat=seats[0],
+            )
         seat = args.get("seat")
         if not isinstance(seat, int):
             logger.warning("control winner without int seat: %r", args)

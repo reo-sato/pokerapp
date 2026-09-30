@@ -15,7 +15,9 @@ from pathlib import Path
 import pytest
 
 from audio.recognizer import parse_actions
-from core.control_queue import ControlCommandLog, command_to_audio_event, parse_script_hand, script_hand_text
+from core.control_queue import (
+    ControlCommand, ControlCommandLog, command_to_audio_event, parse_script_hand, script_hand_text,
+)
 from core.events import AudioEvent
 from core.game_state import PlayerState
 from core.poker_engine import PokerkitGameState
@@ -35,7 +37,8 @@ def _quiet():
 
 
 def _events_for(script: dict, start: float = 1_000_000.0, only: list[int] | None = None) -> tuple[list, list[dict]]:
-    """台本を完璧に読んだときの入力（ハンドの開始 = 画面の制御 + 各行を読み取りに通した発話）と、画面の操作の記録。"""
+    """台本を完璧に読んだときの入力（ハンドの開始 = 画面の制御 + 各行を読み取りに通した発話 + 声では決まらない勝者
+    = 画面の制御）と、画面の操作の記録。"""
     events, marks, t = [], [], start
     for hand in script["hands"]:
         if only is not None and hand["n"] not in only:
@@ -51,6 +54,9 @@ def _events_for(script: dict, start: float = 1_000_000.0, only: list[int] | None
                 events.append(ev)
                 t += 0.01
             t += 1.0
+        args = ts.winner_control(hand)
+        if args is not None:
+            events.append(command_to_audio_event(ControlCommand("w", "winner", args, ""), lambda: t))
         t += 5.0
     return events, marks
 
@@ -86,8 +92,34 @@ class TestGenerator:
         assert {"allin", "side_pot", "showdown_muck", "chop", "multiway", "heads_up", "normal"} <= scenarios
         says = [ln["say"] for h in script["hands"] for ln in h["lines"]]
         assert "チェックアラウンド" in says and "ヘッズアップ" in says and "オールイン" in says
-        assert any("チョップ" in s for s in says) and any("、" in s for s in says)
-        assert any(s.startswith(("ボタン ", "スモール ", "ビッグ ", "カットオフ ", "UTG ")) for s in says)
+        assert "チョップ" in says and any("、" in s for s in says)
+        assert {"ターンカード", "ラストカード"} <= set(says) and any(s.endswith("プレイヤーズ") for s in says)
+        assert any(s in ("ツーペア", "フラッシュ", "フルハウス") for s in says)
+        assert any(s.endswith("点") for s in says) and any(s.isdigit() for s in says)
+
+    def test_the_lines_are_the_store_speech(self):
+        """席番号・ポジション・ベット / レイズの語は言わない（額だけ）。コール・チェック・フォールドは言う（オーナー
+        2026-09-30）。"""
+        script = ts.generate_voice_script(2, hands=80, seats=9)
+        says = [ln["say"] for h in script["hands"] for ln in h["lines"]]
+        for word in ("シート", "ベット", "レイズ", "ウィナー", "ボタン", "スモール", "ビッグ", "カットオフ", "UTG"):
+            assert not any(word in s for s in says), word
+        for hand in script["hands"]:
+            wagers = [a for a in hand["actions"] if a["action"] in ("bet", "raise")]
+            amount_lines = [ln for ln in hand["lines"] if ln.get("actions") == 1
+                            and parse_actions(ln["say"])[0].parse_flags == ("amount_only",)]
+            assert len(amount_lines) == len(wagers), hand["n"]
+
+    def test_the_page_sends_the_winners_that_speech_does_not_decide(self):
+        script = ts.generate_voice_script(1, hands=120, seats=6)
+        for hand in script["hands"]:
+            args = ts.winner_control(hand)
+            if hand["scenario"] == "chop" and hand["showdown"]:
+                assert args == {"seats": hand["winner_seats"]} and len(hand["winner_seats"]) == 2
+            elif not hand["showdown"] or any(a["street"] == "showdown" for a in hand["actions"]):
+                assert args is None, hand["n"]            # 全員フォールド・見せずに降りた = 声で決まる
+            else:
+                assert args == {"seat": hand["winner_seat"]}
 
     def test_truth_rows_are_what_the_gt_screen_would_make(self):
         """台本の正解の行は、真のアクション入力の画面（`replay_legal`）と同じ形（コールは追加額・オールインの額）。"""
@@ -128,6 +160,30 @@ class TestGenerator:
         assert second["button_seat"] == script["hands"][1]["button"]
         assert {p["seat"]: p["stack_start"] for p in second["players"]} == \
                {int(s): v for s, v in script["hands"][1]["stacks"].items()}
+
+
+class TestShowdownWithoutCards:
+    """声だけの台本は札を置かないので、ショーダウンの勝者は画面が送る（制御 `winner`）。"""
+
+    def _chop(self):
+        script = ts.generate_voice_script(1, hands=120, seats=6)
+        return script, next(h for h in script["hands"] if h["scenario"] == "chop" and h["showdown"])
+
+    def test_a_chop_is_split_between_the_seats_the_page_sends(self, tmp_path):
+        script, chop = self._chop()
+        events, _ = _events_for(script, only=[chop["n"]])
+        (got,) = _replay(script, events, tmp_path)
+        assert sorted(a["seat"] for a in got["pot_awards"]) == sorted(chop["winner_seats"])
+        gt = {"hand_id": got["hand_id"], "actions": chop["actions"], "winner_seat": chop["winner_seat"], "board": []}
+        acc = measure_hand(gt, got)
+        assert acc.action_correct == acc.action_total and acc.winner_match
+
+    def test_a_chop_without_seats_does_not_guess_one_winner(self, tmp_path):
+        """「チョップ」だけで手札が読めなければ 1 人を推定しない（最後に賭けた人の勝ちにしていた）。"""
+        script, chop = self._chop()
+        events, _ = _events_for(script, only=[chop["n"]])
+        (got,) = _replay(script, [e for e in events if e.action != "winner"], tmp_path)
+        assert got["winner_source"] == "undetermined" and got.get("winner_seat") is None
 
 
 class TestScriptHandControl:
@@ -230,11 +286,43 @@ class TestPage:
             server.shutdown()
             server.server_close()
         commands, _ = ControlCommandLog(logs / f"{sid}.control.jsonl").read_from(0)
-        assert [c.type for c in commands] == ["script_hand", "script_hand"]
         spec = script["hands"][1]
+        winner = ts.winner_control(spec)
+        assert [c.type for c in commands] == ["script_hand", "script_hand"] + (["winner"] if winner else [])
         assert commands[0].args == {"button": spec["button"], "stacks": {s: v for s, v in spec["stacks"].items()}}
         marks = ts.read_marks(logs / f"{sid}{ts.MARKS_SUFFIX}")
-        assert [m["event"] for m in marks] == ["start", "start", "line", "end"] and marks[1]["redo"]
+        assert [m["event"] for m in marks] == ["start", "start", "line"] + (["winner"] if winner else []) + ["end"]
+        assert marks[1]["redo"]
+
+    def test_the_winner_is_sent_before_the_next_hand(self, tmp_path):
+        """ショーダウンの勝者は声では決まらない（札を置かない）。次のハンドを始めるときに、前のハンドの勝者を送る。
+        同じハンドを始め直す（やり直し）ときは送らない。送ったら 2 度は送らない。最後は「終わる」で送る。"""
+        script = ts.generate_voice_script(1, hands=120, seats=6)
+        needs = [h["n"] for h in script["hands"] if ts.winner_control(h)]
+        a, b = needs[0], needs[1]
+        logs, sid = _session_dir(tmp_path, script)
+        clock = iter(range(100, 200))
+        app = ts.ScriptApp(logs, clock=lambda: float(next(clock)))
+        app.act("start", {"hand": a})
+        app.act("start", {"hand": a, "redo": True})            # やり直し: 送らない
+        app.act("start", {"hand": b})                          # 前のハンド a の勝者を送ってから b
+        app.act("start", {"hand": b, "redo": True})
+        app.act("end", {})                                     # 最後のハンド b の勝者
+        app.act("end", {})                                     # 2 度は送らない
+        commands, _ = ControlCommandLog(logs / f"{sid}.control.jsonl").read_from(0)
+        spec = {h["n"]: h for h in script["hands"]}
+        assert [(c.type, c.args) for c in commands if c.type == "winner"] == [
+            ("winner", ts.winner_control(spec[a])), ("winner", ts.winner_control(spec[b]))]
+        assert [c.type for c in commands] == ["script_hand", "script_hand", "winner", "script_hand", "script_hand",
+                                              "winner"]
+
+    def test_a_chop_is_sent_as_two_seats(self, tmp_path):
+        script = ts.generate_voice_script(1, hands=120, seats=6)
+        chop = next(h for h in script["hands"] if h["scenario"] == "chop" and h["showdown"])
+        log = ControlCommandLog(tmp_path / "s.control.jsonl")
+        ev = command_to_audio_event(log.append("winner", ts.winner_control(chop)), lambda: 5.0)
+        a, b = chop["winner_seats"]
+        assert (ev.action, ev.raw_text, ev.seat) == ("winner", f"シート{a} シート{b} チョップ", a)
 
     def test_cards_steps(self, tmp_path):
         logs, sid = _session_dir(tmp_path, ts.cards_script(), "2026-10-01_190000_script_cards")

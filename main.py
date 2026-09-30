@@ -710,7 +710,7 @@ def run_cli(script: str | None = None) -> None:
         print("勝者: ほかが全員フォールドしたら自動。ショーダウンは、見せずにマックしたら「フォールド」"
               "（アウトオブポジションから順）、全員見せたら「ハンド終了」か次の手札で手札から判定。"
               "決まらないときは w <席>。")
-    print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー  [r <席> <金額>]=リバイ")
+    print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー（分けたら w <席> <席>）  [r <席> <金額>]=リバイ")
     print("ミスディール訂正: [cb <位置>]=ボードの N 枚目を取り消し  [cs <席>]=その席の札を読み直し")
     print("席: [name <席> <名前>]=その席の人（参加）  [name <席> -]=空席（次のハンドから配られない）"
           "  スタック 0 の席は r で買い足すまで配られません")
@@ -747,15 +747,18 @@ def run_cli(script: str | None = None) -> None:
                 print("新ハンド開始を送信しました。")
             elif cmd == "w" and len(parts) >= 2:
                 try:
-                    seat = int(parts[1])
+                    seats = [int(p) for p in parts[1:]]
+                    # 2 席以上 = 分けた（チョップ。engine が席をすべて拾って等分する）
+                    raw = (" ".join(f"シート{s}" for s in seats) + " チョップ" if len(seats) > 1
+                           else f"シート{seats[0]} ウィナー")
                     audio_q.put(AudioEvent(
                         action="winner",
                         amount=0,
                         timestamp=_time.time(),
-                        raw_text=f"シート{seat} ウィナー",
+                        raw_text=raw,
                     ))
                 except ValueError:
-                    print("使い方: w <席番号>")
+                    print("使い方: w <席番号>（分けたときは w <席> <席>）")
             elif cmd == "r" and len(parts) >= 3:
                 try:
                     seat = int(parts[1])

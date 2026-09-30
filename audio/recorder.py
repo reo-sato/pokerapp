@@ -100,10 +100,12 @@ def describe_event(event: Optional[AudioEvent]) -> str:
         action = f"ハンド終了（{HAND_NAMES_JA.get(event.hand_name, event.hand_name)}）"
     elif event.action == "heads_up":
         action = "ヘッズアップ（残り 2 人）"
+    elif event.action == "players_left":
+        action = f"残り {event.amount} 人"
     else:
         action = event.action
     parts = [action]
-    if event.amount:
+    if event.amount and event.action != "players_left":
         parts.append(str(event.amount))
     if event.seat is not None:
         parts.append(f"席{event.seat}")

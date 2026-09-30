@@ -8,8 +8,12 @@
   （`python main.py --cli --log-file --script voice`, ショートカット「台本のハンド (声だけ)」）、真のアクション入力の画面の
   「台本」（`/script`）にハンドを 1 つずつ出す。「このハンドを始める」で、ロガーは台本のボタンと持ち点で新しいハンドを
   始める（制御 `script_hand`。前のハンドの聞き違い・やり直しで持ち点やボタンがずれても、正解と同じ卓から始まる）。
-  ディーラーは台本の行（「フォールド」「レイズ 600」…）を読むだけ。まれな場面（オールイン・サイドポット・ショーダウンで
-  見せずに降りる・チョップ・チェックアラウンド・ヘッズアップ・続けて言う・ポジションを付けて言う）を決まった割合で入れる。
+  ディーラーは台本の行を読むだけ。行は**店の言い方**（オーナー 2026-09-30）: 席番号・ポジションは言わない、ベット・
+  レイズは額だけ（「600」「2千点」）、コール・チェック・フォールドは言う。ストリートの移りの「チェックアラウンド」
+  「ヘッズアップ」「スリープレイヤーズ」「ターンカード」「ラストカード」は言うことも言わないこともある。まれな場面
+  （オールイン・サイドポット・ショーダウンで見せずに降りる・チョップ・続けて言う）を決まった割合で入れる。
+  ショーダウンでは勝った役を言う（言わないこともある）。札を置かないので手札で勝者を決められず、**勝った席は画面が
+  ロガーに送る**（次のハンドを始めたとき・終わったとき。制御 `winner`、チョップは 2 席）。
 - **札の確認**（`cards`）: 実際の札と RFID の手順（配った順・持ち上げ・卓の中央へのマック・フロップを同時に・差し直し）。
   ロガーは席 4・5・6 の決まった卓で RFID ありで起動する（`--script cards`, ショートカット「札の確認 (RFID)」）。
 - 画面の操作（始めた・やり直した・終わった・行を読んだ）は `logs/<セッション>.script_marks.jsonl` に時刻つきで残る。
@@ -36,7 +40,8 @@ sys.path.insert(0, str(ROOT))
 from core.game_state import PlayerState  # noqa: E402
 from core.positions import next_button  # noqa: E402
 
-SCRIPT_VERSION = 1
+# 2: 店の言い方（額だけ・席を言わない・ストリートの移りの言葉・勝った役）+ 勝者は画面が送る（2026-09-30）
+SCRIPT_VERSION = 2
 SCRIPT_SUFFIX = ".script.json"
 MARKS_SUFFIX = ".script_marks.jsonl"
 DEFAULT_HANDS = 30
@@ -54,7 +59,7 @@ SCENARIOS = (
     ("allin", 0.10),             # 短いスタックのオールインにコール 1 人
     ("side_pot", 0.06),          # 短いスタックのオールインにコール 2 人 → サイドポット
     ("showdown_muck", 0.10),     # ショーダウンで見せずに降りる（「フォールド」）
-    ("chop", 0.04),              # 2 人で分ける（「シート2 シート4 チョップ」）
+    ("chop", 0.04),              # 2 人で分ける（「チョップ」。分けた席は画面が送る）
     ("heads_up", 0.10),          # レイズとコールの 2 人（「ヘッズアップ」）
 )
 SCENARIO_LABELS = {
@@ -63,10 +68,13 @@ SCENARIO_LABELS = {
 }
 STREET_LABELS = {"preflop": "プリフロップ", "flop": "フロップ", "turn": "ターン", "river": "リバー",
                  "showdown": "ショーダウン"}
-# ポジションを付けて言うときの言い方（読み取りが知っている言い方）
-_SPOKEN_POSITION = {"BTN": "ボタン", "SB": "スモール", "BB": "ビッグ", "CO": "カットオフ", "HJ": "ハイジャック",
-                    "UTG": "UTG"}
 _WORDS = {"fold": "フォールド", "check": "チェック", "call": "コール", "allin": "オールイン"}
+# 残りの人数の言い方（2 人は「ヘッズアップ」）
+_PLAYERS_SAID = {3: "スリー", 4: "フォー", 5: "ファイブ", 6: "シックス", 7: "セブン", 8: "エイト", 9: "ナイン"}
+# ショーダウンで言う勝った役（札を置かないので役は台本の飾り。勝った席は画面が送る）
+_HAND_NAMES = ("ワンペア", "ツーペア", "スリーカード", "ストレート", "フラッシュ", "フルハウス")
+# ストリートの移りに言う札の言葉
+_CARD_WORDS = {"turn": "ターンカード", "river": "ラストカード"}
 
 
 def _amount_text(n: int) -> str:
@@ -240,11 +248,10 @@ class _Hand:
     def _line(self, seat: int, action: str, amount: int, street: str) -> dict:
         pos = self.positions.get(seat, "")
         if action in ("bet", "raise"):
-            say = f"{'ベット' if action == 'bet' else 'レイズ'} {_amount_text(amount)}"
+            # 額だけ（店のディーラーはベット・レイズの語も席も言わない）。「点」を付けることもある
+            say = _amount_text(amount) + ("点" if self.rng.random() < 0.3 else "")
         else:
             say = _WORDS[action]
-        if action in ("bet", "raise", "allin") and pos in _SPOKEN_POSITION and self.rng.random() < 0.15:
-            say = f"{_SPOKEN_POSITION[pos]} {say}"
         return {"say": say, "seats": [seat], "positions": [pos], "street": street, "actions": 1}
 
     # ――― ハンドの終わり ―――
@@ -256,6 +263,7 @@ class _Hand:
         remaining = gs.get_active_seats()
         winner_seats: list[int]
         showdown = len(remaining) >= 2
+        needs_winner = False               # 声では決まらない勝者（画面がロガーに送る）
         if not showdown:
             winner_seats = list(remaining)
             gs.end_hand(remaining[0])
@@ -269,10 +277,10 @@ class _Hand:
             gs.end_hand(winner)
         elif self.scenario == "chop" and len(remaining) == 2:
             order = [s for s in gs.acting_order() if s in remaining]
-            winner_seats = order
-            self.lines.append({"say": f"シート{order[0]} シート{order[1]} チョップ", "seats": order,
+            winner_seats, needs_winner = order, True
+            self.lines.append({"say": "チョップ", "seats": order,
                                "positions": [self.positions.get(s, "") for s in order], "street": "showdown",
-                               "actions": 0, "note": "2 人で分ける"})
+                               "actions": 0, "note": "2 人で分ける（分けた席は画面が送る）"})
             gs.end_hand_split(order)
         else:
             pots = gs.current_pots()
@@ -280,22 +288,24 @@ class _Hand:
             for pot in pots:
                 covering &= set(pot["eligible_seats"])
             winner = self.rng.choice(sorted(covering or remaining))
-            winner_seats = [winner]
-            self.lines.append({"say": f"シート{winner} ウィナー", "seats": [winner],
-                               "positions": [self.positions.get(winner, "")], "street": "showdown", "actions": 0,
-                               "note": "勝った席" + ("（サイドポットも）" if len(pots) > 1 else "")})
+            winner_seats, needs_winner = [winner], True
+            if self.rng.random() < 0.7:            # 勝った役を言う（言わないこともある）
+                self.lines.append({"say": self.rng.choice(_HAND_NAMES), "seats": [winner],
+                                   "positions": [self.positions.get(winner, "")], "street": "showdown",
+                                   "actions": 0, "note": "勝った役（勝った席は画面が送る）"
+                                   + ("・サイドポットも" if len(pots) > 1 else "")})
             gs.end_hand(winner)
         self._decorate()
         return {
             "n": self.n, "button": self.button, "stacks": {str(s): v for s, v in sorted(self.start.items())},
             "positions": {str(s): p for s, p in sorted(self.positions.items())}, "scenario": self.scenario,
             "lines": self.lines, "actions": self.actions, "winner_seat": winner_seats[0],
-            "winner_seats": winner_seats, "showdown": showdown,
+            "winner_seats": winner_seats, "showdown": showdown, "needs_winner": needs_winner,
             "end_stacks": {str(s): v for s, v in sorted(gs.get_stacks().items())},
         }
 
     def _decorate(self) -> None:
-        """読み方の変化: チェックアラウンド・ヘッズアップ・続けて言う（本番のディーラーの言い方）。"""
+        """読み方の変化（本番のディーラーの言い方）: チェックアラウンド・ストリートの移りの言葉・続けて言う。"""
         rng = self.rng
         lines = self.lines
         # 全員がチェックしたストリートは「チェックアラウンド」とまとめて言うことがある
@@ -306,15 +316,25 @@ class _Hand:
                           "positions": [p for i in idx for p in lines[i]["positions"]], "street": street,
                           "actions": len(idx), "note": "全員チェック"}
                 lines[idx[0]:idx[-1] + 1] = [merged]
-        # プリフロップが 2 人で終わったら「ヘッズアップ」と言うことがある
-        pre = [a for a in self.actions if a["street"] == "preflop"]
-        folded = {a["seat"] for a in pre if a["action"] == "fold"}
-        in_hand = [s for s in self.start if s in self.positions and s not in folded]
-        later = any(a["street"] in ("flop", "turn", "river") for a in self.actions)
-        if len(in_hand) == 2 and later and rng.random() < 0.5:
-            at = max(i for i, ln in enumerate(lines) if ln["street"] == "preflop") + 1
-            lines.insert(at, {"say": "ヘッズアップ", "seats": [], "positions": [], "street": "preflop",
-                              "actions": 0, "note": "残り 2 人"})
+        # ストリートの移り（アクションのあるストリートの初め）に、残りの人数（「ヘッズアップ」「スリープレイヤーズ」）と
+        # 札の言葉（「ターンカード」「ラストカード」）を言うことがある（どれも任意, オーナー 2026-09-30）
+        said_heads_up = False
+        for street in ("flop", "turn", "river"):
+            at = next((i for i, ln in enumerate(lines) if ln["street"] == street), None)
+            if at is None:
+                continue
+            before = {"flop": ("preflop",), "turn": ("preflop", "flop"), "river": ("preflop", "flop", "turn")}[street]
+            folded = {a["seat"] for a in self.actions if a["street"] in before and a["action"] == "fold"}
+            left = len([s for s in self.positions if s not in folded])
+            said: list[dict] = []
+            if street in _CARD_WORDS and rng.random() < 0.3:
+                said.append({"say": _CARD_WORDS[street], "note": "札の言葉（読まなくてもよい）"})
+            if left == 2 and not said_heads_up and rng.random() < 0.5:
+                said.append({"say": "ヘッズアップ", "note": "残り 2 人"})
+                said_heads_up = True
+            elif left >= 3 and rng.random() < 0.3:
+                said.append({"say": f"{_PLAYERS_SAID[left]}プレイヤーズ", "note": f"残り {left} 人"})
+            lines[at:at] = [dict(s, seats=[], positions=[], street=street, actions=0) for s in said]
         # 続けて言う: 額の無いアクション（フォールド・チェック・コール）が 2〜3 つ続くところをまとめる
         out: list[dict] = []
         for ln in lines:
@@ -377,7 +397,7 @@ CARDS_TABLE = {"seats": [4, 5, 6], "stacks": {"4": 10000, "5": 10000, "6": 10000
 CARDS_STEPS = (
     {"id": "deal_order", "title": "ふつうに配る（SB から 1 枚ずつ）",
      "do": ["ボタンを席 6 に置く", "SB（席 4）から 1 枚ずつ時計回りに 2 周配る（4→5→6→4→5→6）",
-            "「コール」「コール」「チェック」→ フロップを 1 枚ずつ置く →「チェック」×3 → ターン →「ベット 400」、"
+            "「コール」「コール」「チェック」→ フロップを 1 枚ずつ置く →「チェック」×3 → ターン →「400」、"
             "席 5 と席 6 は札を外して「フォールド」「フォールド」"],
      "expect": "ボタンは席 6。席 4 の勝ち。フォールドは札が離れたので付く"},
     {"id": "button_forgot", "title": "ボタンを動かし忘れる",
@@ -387,20 +407,20 @@ CARDS_STEPS = (
     {"id": "lift", "title": "札を持ち上げて戻す",
      "do": ["ボタンを席 4 に動かす", "SB（席 5）から 1 枚ずつ 2 周配る",
             "席 4 の人が札を持ち上げて見て、2 秒以内に戻す（2 回）", "「コール」「コール」「チェック」→ フロップ →「チェック」×3",
-            "ターン →「ベット 600」「コール」→ 席 4 は札を外して「フォールド」→ リバー →「チェック」「チェック」→「ハンド終了」"],
+            "ターン →「600」「コール」→ 席 4 は札を外して「フォールド」→ リバー →「チェック」「チェック」→ 勝った役（例「ツーペア」）"],
      "expect": "持ち上げてもフォールドにならない。勝者は手札で決まる"},
     {"id": "muck", "title": "卓の中央へマック",
      "do": ["ボタンを席 5 に動かす", "SB（席 6）から 1 枚ずつ 2 周配る",
-            "「レイズ 600」（席 5）→ 席 6 は札を卓の中央（ボードのリーダーの上）を通して捨てる →「コール」（席 4）",
-            "フロップ →「チェック」（席 4）→「ベット 800」（席 5）→ 席 4 も札を中央を通して捨てる"],
+            "「600」（席 5）→ 席 6 は札を卓の中央（ボードのリーダーの上）を通して捨てる →「コール」（席 4）",
+            "フロップ →「チェック」（席 4）→「800」（席 5）→ 席 4 も札を中央を通して捨てる"],
      "expect": "中央を通した札はマック（フォールド）として付く。席 5 の勝ち"},
     {"id": "flop_at_once", "title": "フロップを 3 枚同時に置く",
      "do": ["ボタンを席 6 に動かす", "SB（席 4）から 1 枚ずつ 2 周配る", "「コール」「コール」「チェック」",
-            "フロップの 3 枚を重ねて持ち、同時に 3 台のリーダーに置く", "「チェック」×3 → ターン →「チェック」×3 → リバー →「チェック」×3 →「ハンド終了」"],
+            "フロップの 3 枚を重ねて持ち、同時に 3 台のリーダーに置く", "「チェック」×3 → ターン →「チェック」×3 → リバー →「チェック」×3 → 勝った役（例「ツーペア」）"],
      "expect": "フロップ 3 枚・ターン・リバーが正しい位置に入る"},
     {"id": "redeal_turn", "title": "ターンを置き直す",
      "do": ["ボタンを席 4 に動かす", "SB（席 5）から 1 枚ずつ 2 周配る", "「コール」「コール」「チェック」→ フロップ →「チェック」×3",
-            "ターンに違う札を置き、3 秒たったら外して正しい札を同じリーダーに置く", "「チェック」×3 → リバー →「チェック」×3 →「ハンド終了」"],
+            "ターンに違う札を置き、3 秒たったら外して正しい札を同じリーダーに置く", "「チェック」×3 → リバー →「チェック」×3 → 勝った役（例「ツーペア」）"],
      "expect": "ターンが置き直した札に差し替わる（要確認が付く）"},
 )
 
@@ -466,6 +486,17 @@ def append_mark(path: Path, row: dict) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def winner_control(spec: Optional[dict]) -> Optional[dict]:
+    """声では決まらない勝者（ショーダウン・チョップ）をロガーに送る制御 `winner` の args。要らなければ None。
+
+    札を置かないので手札で勝者を決められない。台本の勝者を送る（店では RFID の手札で決まる, ADR-0062）。
+    """
+    if not spec or not spec.get("needs_winner"):
+        return None
+    seats = [int(s) for s in (spec.get("winner_seats") or [spec["winner_seat"]])]
+    return {"seats": seats} if len(seats) > 1 else {"seat": seats[0]}
+
+
 def latest_script_session(log_dir: Path) -> Optional[str]:
     """いちばん新しい台本のセッション（`<sid>.script.json` が最後に書かれたもの）。"""
     files = sorted(Path(log_dir).glob(f"*{SCRIPT_SUFFIX}"), key=lambda p: p.stat().st_mtime)
@@ -479,7 +510,8 @@ class ScriptApp:
     """台本の画面の中身（`/api/script/...`）。真のアクション入力のサーバが持つ（`ground_truth_ui`）。
 
     いちばん新しい台本のセッション（`<sid>.script.json`）を出し、操作を `<sid>.script_marks.jsonl` に残す。
-    声だけの台本の「このハンドを始める」は、ロガーへ制御 `script_hand`（台本のボタンと持ち点）を送る。
+    声だけの台本の「このハンドを始める」は、ロガーへ制御 `script_hand`（台本のボタンと持ち点）を送る。その前に、
+    前のハンドの声では決まらない勝者（`winner_control`）を送る（「終わる」でも）。
     """
 
     def __init__(self, log_dir: Path, clock: Any = None) -> None:
@@ -521,6 +553,24 @@ class ScriptApp:
     def _mark(self, sid: str, row: dict) -> None:
         append_mark(self._paths(sid)[1], {"t": round(self.clock(), 3), **row})
 
+    def _send_winner(self, sid: str, script: dict, starting: Optional[int] = None) -> None:
+        """最後に始めたハンドの、声では決まらない勝者をロガーに送る（そのハンドを始め直すとき・送ったあとは送らない）。"""
+        from core.control_queue import ControlCommandLog
+
+        marks = read_marks(self._paths(sid)[1])
+        starts = [m for m in marks if m.get("event") == "start"]
+        if not starts or starts[-1].get("hand") == starting:
+            return
+        last = starts[-1]
+        if any(m.get("event") == "winner" and m.get("start_t") == last.get("t") for m in marks):
+            return
+        spec = next((h for h in script.get("hands") or [] if h.get("n") == last.get("hand")), None)
+        args = winner_control(spec)
+        if args is None:
+            return
+        ControlCommandLog(self._paths(sid)[2]).append("winner", args)
+        self._mark(sid, {"event": "winner", "hand": last.get("hand"), "start_t": last.get("t"), **args})
+
     def act(self, verb: str, body: dict) -> tuple[int, dict]:
         from core.control_queue import ControlCommandLog
 
@@ -535,6 +585,7 @@ class ScriptApp:
             spec = next((h for h in script.get("hands") or [] if h.get("n") == hand), None)
             if spec is None:
                 return 400, {"code": "invalid", "message": f"ハンド {hand} は台本にありません"}
+            self._send_winner(sid, script, starting=hand)
             stacks = {int(s): int(v) for s, v in spec["stacks"].items()}
             ControlCommandLog(self._paths(sid)[2]).append("script_hand", {"button": spec["button"], "stacks": stacks})
             self._mark(sid, {"event": "start", "hand": hand, "redo": bool(body.get("redo"))})
@@ -549,6 +600,8 @@ class ScriptApp:
             note = str(body.get("note") or "")[:500]
             self._mark(sid, {"event": "step", "step": body["step"], "result": body["result"], "note": note})
         elif verb == "end":
+            if script.get("kind") == "voice":
+                self._send_winner(sid, script)
             self._mark(sid, {"event": "end"})
         else:
             return 404, {"code": "not_found", "message": verb}
@@ -800,7 +853,8 @@ function renderVoice(st){
           <button onclick="startHand(${shown}, true)">やり直す（ハンド ${shown} を最初から）</button></div>`);
   $("app").innerHTML = `<div class="top"><h1>台本のハンド（声だけ）</h1><a class="small" href="/">← 真のアクション入力</a></div>
     <p class="muted small">「始める」を押してから、行を上から順に読んでください（卓で配るときと同じ声・間で）。読んだら「次の行」
-      （押さなくてもかまいません）。言い間違えたら「やり直す」。</p>
+      （押さなくてもかまいません）。言い間違えたら「やり直す」。席番号・ポジション（灰色の字）は読みません。
+      ショーダウンで勝った席は、次のハンドを始めたとき（最後は「終わる」）に画面がロガーに送ります。</p>
     <div class="hand-h"><span class="n">ハンド ${shown} / ${hands.length}</span>
       <span class="tag">${esc(st.scenario_labels[h.scenario] || h.scenario)}</span>
       ${tries > 1 ? `<span class="tag warn">やり直し ${tries - 1} 回</span>` : ""}
