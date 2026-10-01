@@ -64,7 +64,8 @@ def _prompt_session_config() -> dict:
     print("=== ポーカーハンドロガー セッション設定 ===")
 
     while True:
-        seats = _parse_seat_list(input("席（人数か席番号。例: 6 = 1〜6 番 / 2 4 5 8 = その番号の席）: "))
+        seats = _parse_seat_list(input(
+            "席（人数か、札を置く席の番号。例: 6 = 1〜6 番 / 2 4 5 8 = その番号の席）: "))
         if seats is not None:
             break
         print("人数（2〜9）か、使う席番号を 2 つ以上（1〜9、空白区切り）入力してください。")

@@ -392,9 +392,13 @@ class AudioThread(threading.Thread):
             long_enough = voiced_samples >= min_buffer_samples or (
                 voiced_samples >= short_word_samples and peak_rms >= short_word_rms)
             if voiced and not in_play:
-                # プレー中でない（ハンドの間の）発話は認識に回さない（ADR-0063）
+                # プレー中でない（ハンドの間の）発話は認識に回さない（ADR-0063）。配った検出より前に話した
+                # アクションが捨てられていないかをあとで確かめられるよう、ログには残す（2026-10-01 オーナー）
                 self.skipped += 1
-                logger.debug("Skipped speech outside play (%.2f s)", buffered_samples / self._sample_rate)
+                started = (time.strftime("%H:%M:%S", time.localtime(utterance_start_ts))
+                           if utterance_start_ts is not None else "?")
+                logger.info("ハンドの外の発話を聞き流しました（話し始め %s・%.1f 秒）",
+                            started, buffered_samples / self._sample_rate)
             elif voiced and long_enough and utterance_start_ts is not None:
                 self._enqueue_utterance(b"".join(buffer), utterance_start_ts)
             elif voiced and voiced_samples >= report_drop_samples:

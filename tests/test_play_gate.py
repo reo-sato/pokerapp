@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import logging
 import queue
 import struct
 import threading
@@ -188,12 +189,16 @@ class TestListenGate:
 
         thread._capture_loop(read, 1024)   # noqa: SLF001
 
-    def test_speech_outside_play_is_not_transcribed(self):
+    def test_speech_outside_play_is_not_transcribed(self, caplog):
         gate = threading.Event()
         thread = AudioThread(audio_queue=queue.Queue(), stop_event=threading.Event(),
                              transcriber=_Fake(), listen_gate=gate)
-        self._capture(thread, gate, open_at=99)
+        with caplog.at_level(logging.INFO, logger="audio.recorder"):
+            self._capture(thread, gate, open_at=99)
         assert thread.backlog() == 0 and thread.skipped == 1
+        # 配った検出より前に話したアクションが捨てられていないかを、店舗のログであとから確かめられる
+        assert any("ハンドの外の発話を聞き流しました" in r.getMessage() and r.levelno == logging.INFO
+                   for r in caplog.records)
 
     def test_speech_that_runs_into_play_is_kept(self):
         gate = threading.Event()

@@ -130,6 +130,9 @@ _BOARD_STREETS = {3: ("flop", (1, 2, 3)), 4: ("turn", (4,)), 5: ("river", (5,))}
 _STREET_RANK = {"preflop": 0, "flop": 1, "turn": 2, "river": 3, "showdown": 4}
 # プレー中にこの秒数、マイクに声が入らなければ知らせる（ワイヤレスマイクの電池切れ等, 2026-09-25）
 SILENT_MIC_SEC = 60.0
+# ハンドを始めてからこの秒数たったら、卓で使っていない席に手札が無いかを確かめる（配っている途中の席を
+# 「手札が無い」と言わないため）
+SEAT_SETUP_CHECK_SEC = 5.0
 # 「フォールド」と聞こえたが手番の人の札がまだ席にあるとき、この秒数以内に札が離れたら、その発話の時刻の
 # フォールドにする（勝った人が先に札を投げても、降りた人の方が先になる）。
 SPOKEN_FOLD_WINDOW_SEC = 15.0
@@ -169,6 +172,10 @@ def _card_text(card: str) -> str:
 
 def _cards_text(cards) -> str:
     return " ".join(_card_text(c) for c in cards)
+
+
+def _seats_text(seats) -> str:
+    return "・".join(str(s) for s in seats)
 
 
 def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
@@ -480,6 +487,7 @@ class IntegrationThread(threading.Thread):
         self._on_cards = on_cards
         self._shown_holes: dict[int, tuple[str, ...]] = {}
         self._shown_board = 0
+        self._seat_setup_warned = False   # このハンドで席の設定の食い違いを知らせたか
         # ――― フォールドは札の離脱から ―――
         self._rfid_folds = bool(rfid_folds) and self._rules_aware
         self._fold_absent_sec = float(fold_absent_sec)
@@ -545,6 +553,7 @@ class IntegrationThread(threading.Thread):
             self._check_deal_order()        # 配った順（ボタンの置き忘れ）
             self._check_table_cleared()     # 片付け（プレーの終わり）
             self._check_silent_mic()        # マイクに声が入っているか
+            self._check_seat_setup()        # 起動時の席と札を置いた席の食い違い
             self._poll_departures()         # 席の札の離脱・戻り（フォールド）
 
             try:
@@ -1880,21 +1889,26 @@ class IntegrationThread(threading.Thread):
         return True
 
     def _absent_seat_for_fold_word(self) -> tuple[Optional[int], float]:
-        """「フォールド」と聞こえたときに、札が席に無い（まだ行動する）席を手番の順に探す。"""
+        """「フォールド」と聞こえたときに、札が席から離れた（まだ行動する）席を手番の順に探す。
+
+        このハンドで札が一度も読めていない席は数えない（札が席に無いのか、読めていないだけか分からない）。
+        2026-10-01 のリハーサル: 席の設定が 1 つずれて席 7 のリーダーに札が無く、各ハンドの最初の「フォールド」が
+        席 7 に付いて、その前の人がコールで補われた。読めていない席が手番なら、ふつうの手番の人の「フォールド」に
+        なる（札が離れるか、次のアクションで入れる）。
+        """
         if self._seat_presence is None:
             return None, 0.0
         try:
             snapshot = self._seat_presence() or {}
         except Exception:  # noqa: BLE001
             return None, 0.0
-        now = self._clock()
         for seat in self._game_state.seats_to_act():
             info = snapshot.get(seat) or {}
             if info.get("present") or seat in self._showdown_mucks:
                 continue
             since = info.get("absent_since")
-            if since is not None or seat not in self._hole_cards:
-                return seat, since if since is not None else now
+            if since is not None and self._hole_cards.get(seat):
+                return seat, since
         return None, 0.0
 
     def _confirm_foldout(self) -> None:
@@ -2071,6 +2085,36 @@ class IntegrationThread(threading.Thread):
             shown.append(f"席{seat} {_cards_text(cards)}" + ("（配り直し）" if redeal else ""))
         if shown:
             self._card_info("手札 " + " ／ ".join(shown))
+
+    def _check_seat_setup(self) -> None:
+        """卓で使っていない席に手札が 2 枚ある = 起動時の席の設定が違う見込みを知らせる（ハンドごとに 1 回, live のみ）。
+
+        2026-10-01 のリハーサル: ロガーは席 4〜7、札は席 3〜6 のリーダー（1 つずつずれていた）で、札の離脱・マックが
+        隣の人のフォールドになり、手札の読めない席 7 に「フォールド」が付いて 4 ハンドとも崩れた（席をずらして
+        推定し直すと 4/4）。配り終わるのを待ってから確かめる（配っている途中の席を「手札が無い」と言わない）。
+        お知らせだけで記録は変えない（replay は在否を持たず、同じ記録を再現するため）。
+        """
+        if (not self._hand_open or self._seat_setup_warned or self._hand_started_epoch is None
+                or self._clock() - self._hand_started_epoch < SEAT_SETUP_CHECK_SEC):
+            return
+        game = self._game_seats()
+        extra = [s for s, cards in sorted(self._hole_cards.items()) if len(cards) >= 2 and s not in game]
+        if not game or not extra:
+            return
+        self._seat_setup_warned = True
+        with_cards = sorted(s for s, cards in self._hole_cards.items() if cards)
+        missing = [s for s in game if not self._hole_cards.get(s)]
+        if missing:
+            self._notice(
+                f"席の設定が違うかもしれません: 手札は 席{_seats_text(with_cards)} にありますが、ロガーの席は "
+                f"{_seats_text(game)} です（席{_seats_text(missing)} に手札がありません）。札の離脱・マックが別の人の"
+                "ものになります — q で終了して、札を置く席の番号で起動し直してください"
+            )
+        else:
+            self._notice(
+                f"席{_seats_text(extra)} に手札がありますが、ロガーの席（{_seats_text(game)}）に入っていません — "
+                "席の設定を確かめてください"
+            )
 
     def _show_board(self, replaced: Optional[tuple[int, str, str]] = None) -> None:
         """フロップ（3 枚）・ターン・リバーがそろったとき、配り直しで替わったときにボードを出す。"""
@@ -3868,6 +3912,7 @@ class IntegrationThread(threading.Thread):
         self._showdown_shown = {}
         self._shown_holes = {}
         self._shown_board = 0
+        self._seat_setup_warned = False
         self._departures = {}
         self._hand_inputs = []
         self._checkpoints = []

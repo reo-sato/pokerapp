@@ -166,6 +166,60 @@ class TestFoldWord:
         assert tb.played() == [("preflop", 6, "fold", 0)]
 
 
+class TestUnreadSeat:
+    """このハンドで札が一度も読めていない席（2026-10-01 のリハーサル: 席の設定が 1 つずれて席 7 のリーダーに札が
+    無く、各ハンドの最初の「フォールド」が席 7 に付いて、その前の人がコールで補われた）。"""
+
+    def test_a_fold_word_does_not_go_to_a_seat_whose_cards_were_never_read(self, tmp_path):
+        tb = _Table(tmp_path, seats=(4, 5, 6, 7))       # ボタン 席7 → 最初の手番は 席6
+        tb.deal()                                       # 席7 の札は読めていない
+        tb.say("フォールド")
+        assert tb.played() == []                       # 前は「席6 コール（補い）・席7 フォールド」
+        tb.lift(6)
+        tb.tick(tb.now + 3.5)
+        assert tb.played() == [("preflop", 6, "fold", 0)]
+
+    def test_an_unread_actor_folds_on_the_next_action(self, tmp_path):
+        tb = _Table(tmp_path, seats=(4, 5, 6, 7))
+        tb.deal({4: HOLES[4], 5: HOLES[5], 7: HOLES[6]})   # 手番の 席6 の札が読めていない
+        tb.say("フォールド")
+        tb.say("600")
+        assert tb.played() == [("preflop", 6, "fold", 0), ("preflop", 7, "raise", 600)]
+
+
+class TestSeatSetup:
+    """卓で使っていない席に手札がある = 起動時の席の設定が違う（2026-10-01 のリハーサル: ロガーは席 4〜7、
+    札は席 3〜6 のリーダー）。配り終わるのを待ってから、ハンドごとに 1 回知らせる。"""
+
+    def _deal_with_seat_3(self, tb: _Table) -> None:
+        tb.deal()                                       # 席4・5・6（ロガーの席）
+        for card in ("Kh", "Kd"):                       # 4 人目の札は 席3 のリーダー（ロガーの席ではない）
+            tb.t._process_rfid_event(RFIDEvent(        # noqa: SLF001
+                tag_id=card, card=card, reader_id="r3", role="seat", seat=3, timestamp=tb.now,
+                raw_tag_id=card))
+
+    def test_cards_on_a_seat_outside_the_game_are_reported(self, tmp_path):
+        tb = _Table(tmp_path, seats=(4, 5, 6, 7))
+        self._deal_with_seat_3(tb)
+        warnings = [n for n in tb.notices if "席の設定" in n]
+        tb.t._check_seat_setup()                        # noqa: SLF001 — 配って 5 秒たつまでは言わない
+        assert [n for n in tb.notices if "席の設定" in n] == warnings == []
+        tb.tick(tb.now + 5.0)
+        tb.t._check_seat_setup()                        # noqa: SLF001
+        tb.t._check_seat_setup()                        # noqa: SLF001 — 1 ハンドに 1 回
+        warnings = [n for n in tb.notices if "席の設定" in n]
+        assert len(warnings) == 1
+        assert "手札は 席3・4・5・6" in warnings[0] and "ロガーの席は 4・5・6・7" in warnings[0]
+        assert "席7 に手札がありません" in warnings[0]
+
+    def test_no_warning_when_the_cards_are_on_the_logger_seats(self, tmp_path):
+        tb = _Table(tmp_path, seats=(4, 5, 6, 7))
+        tb.deal()
+        tb.tick(tb.now + 6.0)
+        tb.t._check_seat_setup()                        # noqa: SLF001
+        assert not [n for n in tb.notices if "席の設定" in n or "入っていません" in n]
+
+
 class TestMissedActions:
     """手番でない席の札が離れた = 前の人のアクションが聞き取れなかった（店舗の 2 ハンド目）。"""
 
