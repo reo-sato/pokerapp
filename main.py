@@ -204,7 +204,7 @@ def _rfid_tracking_kwargs(rfid_cfg: dict) -> dict:
 
 
 def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, listen_gate=None,
-                       audio_dir=None, second_ear=None):
+                       audio_dir=None, second_ear=None, on_status=None):
     """config.audio.enabled が true（既定）なら AudioThread を返す。false なら None。
 
     false はマイクを繋がない実機テスト（RFID のカード読み取りだけを見る / ダミーアクションを
@@ -214,6 +214,7 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, l
     `listen_gate` はプレー中だけ set される Event（ハンドの間の発話は認識に回さない, ADR-0063）。
     `audio_dir` は発話の音声を WAV で保存するフォルダ（`audio.save_audio` のとき）。
     `second_ear` は Whisper が読めなかった発話を聞き直す第 2 の耳（`audio.second_ear.load_live`）。
+    `on_status` は録音の途中でマイクが切れた・開き直せたときのお知らせ（CLI の「●」行）。
     """
     audio_cfg = cfg.get("audio", {})
     if not audio_cfg.get("enabled", True):
@@ -230,6 +231,7 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, l
         language=audio_cfg.get("language", "ja"),
         stop_event=stop_event,
         on_transcript=on_transcript,
+        on_status=on_status,
         min_speech_sec=float(audio_cfg.get("min_speech_sec", _MIN_BUFFER_SECONDS)),
         listen_gate=listen_gate,
         speech_rms=float(audio_cfg.get("speech_rms", _SILENCE_RMS_THRESHOLD)),
@@ -675,7 +677,8 @@ def run_cli(script: str | None = None) -> None:
                  if audio_cfg.get("save_audio", False) else None)
     second_ear = _load_second_ear(audio_cfg) if audio_cfg.get("enabled", True) else None
     audio_thread = _make_audio_thread(cfg, audio_q, stop_event, on_transcript=on_transcript,
-                                      listen_gate=listen_gate, audio_dir=audio_dir, second_ear=second_ear)
+                                      listen_gate=listen_gate, audio_dir=audio_dir, second_ear=second_ear,
+                                      on_status=_print_notice)
     if audio_thread is None:
         print("音声入力は無効です (audio.enabled=false)。"
               "アクションはキーボードから読み上げ文で投入してください。")

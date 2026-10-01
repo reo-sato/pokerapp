@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import platform
 import re
@@ -56,6 +57,11 @@ _ENTRY_OVERHEAD = 256
 # pokerapp.log から切り出す範囲の前後の余白（起動・終了の行を含める）
 LOG_MARGIN = timedelta(seconds=60)
 DEFAULT_HOURS = 12.0
+# 「Created session」の行（ロガーの起動）を探すのに、セッションの最初の記録（卓状態の履歴はロガーの起動の数秒後から
+# 書かれる）からさかのぼる長さ
+CREATED_LOOKBACK = timedelta(minutes=10)
+# pokerapp.log の中を時刻で二分探索するとき、この大きさまで狭めたら先頭から読む
+_SEEK_SLACK = 1 << 20
 
 _LOG_TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3} ")
 _CREATED = re.compile(r"Created session ([0-9A-Za-z_\-]+)")
@@ -186,19 +192,76 @@ def _first_time(path: Path) -> Optional[float]:
                     value = data.get(key) if isinstance(data, dict) else None
                     if isinstance(value, (int, float)):
                         return float(value)
+                # 卓状態の履歴の最初の行 = ロガーの起動の数秒後（engine が 1 秒ごとに書き始める）
+                updated = data.get("updated_at") if isinstance(data, dict) else None
+                if isinstance(updated, str):
+                    try:
+                        return datetime.fromisoformat(updated).timestamp()
+                    except ValueError:
+                        return None
                 return None
     except OSError:
         return None
     return None
 
 
-def scan_created(app_log: Path) -> dict[str, datetime]:
-    """pokerapp.log の「Created session <sid>」の時刻（ハンドロガーの起動）。"""
+def _ts_key(t: datetime) -> str:
+    """pokerapp.log の行頭の時刻と同じ形（文字列のまま大小を比べられる）。"""
+    return t.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _line_ts(line: str) -> Optional[str]:
+    """行頭の時刻（"YYYY-MM-DD HH:MM:SS"）。時刻の無い続きの行（traceback）は None。"""
+    if len(line) > 23 and line[19] == "," and line[10] == " " and line[4] == "-":
+        return line[:19]
+    return None
+
+
+def _open_from(app_log: Path, key: Optional[str]) -> io.TextIOWrapper:
+    """pokerapp.log を、時刻が `key` 以上の最初の行の少し手前から読めるように開く。
+
+    ログは時刻の順に追記されるので二分探索で飛ぶ（店舗 2026-10-01: 閉じたマイクの警告で 3.7 GB になったログを、
+    まとめるたびに頭から全部読んでいて長い時間がかかった）。
+    """
+    raw = app_log.open("rb")
+    if key is not None:
+        raw.seek(0, 2)
+        lo, hi = 0, raw.tell()
+        while hi - lo > _SEEK_SLACK:
+            mid = (lo + hi) // 2
+            raw.seek(mid)
+            raw.readline()                       # 途中から読んだ行は捨てる
+            ts = None
+            for _ in range(1000):                # 時刻の無い続きの行を飛ばす
+                line = raw.readline()
+                if not line:
+                    break
+                ts = _line_ts(line.decode("utf-8", errors="replace"))
+                if ts is not None:
+                    break
+            if ts is None or ts >= key:
+                hi = mid
+            else:
+                lo = mid
+        raw.seek(lo)
+        if lo:
+            raw.readline()
+    return io.TextIOWrapper(raw, encoding="utf-8", errors="replace")
+
+
+def scan_created(app_log: Path, since: Optional[datetime] = None,
+                 until: Optional[datetime] = None) -> dict[str, datetime]:
+    """pokerapp.log の「Created session <sid>」の時刻（ハンドロガーの起動）。`since`〜`until` の間だけ読む。"""
     out: dict[str, datetime] = {}
     if not app_log.is_file():
         return out
-    with app_log.open(encoding="utf-8", errors="replace") as f:
+    end = _ts_key(until) if until is not None else None
+    with _open_from(app_log, _ts_key(since) if since is not None else None) as f:
         for line in f:
+            if end is not None:
+                ts_text = _line_ts(line)
+                if ts_text is not None and ts_text > end:
+                    break
             if "Created session" not in line:
                 continue
             ts, created = _LOG_TS.match(line), _CREATED.search(line)
@@ -222,7 +285,7 @@ def session_window(session: Session, created: dict[str, datetime]) -> tuple[date
     if session.session_id in created:
         starts.append(created[session.session_id])
     for p in session.files:
-        if p.name.endswith((".events.jsonl", ".transcripts.jsonl")):
+        if p.name.endswith((".events.jsonl", ".transcripts.jsonl", ".table_state.jsonl")):
             t = _first_time(p)
             if t is not None:
                 starts.append(datetime.fromtimestamp(t))
@@ -232,22 +295,58 @@ def session_window(session: Session, created: dict[str, datetime]) -> tuple[date
 
 
 def slice_app_log(app_log: Path, windows: list[tuple[datetime, datetime]]) -> str:
-    """pokerapp.log のうち、どれかの時間帯に入る行（時刻の無い続きの行 = traceback も含む）。"""
+    """pokerapp.log のうち、どれかの時間帯に入る行（時刻の無い続きの行 = traceback も含む）。
+
+    同じ行（時刻を除いて同じ。続きの行ごと）が続けて出ていれば、最初の 1 つと「…さらに N 回」の 1 行に畳む
+    （店舗 2026-10-01: 閉じたマイクの警告が 9 分で 3470 万行）。いちばん遅い時間帯の終わりで読むのをやめる。
+    """
     if not app_log.is_file() or not windows:
         return ""
+    keys = sorted((_ts_key(a), _ts_key(b)) for a, b in windows)
+    last_end = max(b for _, b in keys)
     out: list[str] = []
+    state = {"body": None, "repeats": 0, "last_ts": ""}
+
+    def emit(record: list[str], ts: str) -> None:
+        body = "".join([record[0][24:], *record[1:]])
+        if body == state["body"]:
+            state["repeats"] += 1
+            state["last_ts"] = ts
+            return
+        close_run()
+        out.extend(record)
+        state["body"] = body
+
+    def close_run() -> None:
+        if state["repeats"]:
+            out.append(f"{state['last_ts']} …（上の行がさらに {state['repeats']} 回続きました）\n")
+        state["repeats"] = 0
+
+    record: list[str] = []
+    record_ts = ""
     keep = False
-    with app_log.open(encoding="utf-8", errors="replace") as f:
+    with _open_from(app_log, keys[0][0]) as f:
         for line in f:
-            m = _LOG_TS.match(line)
-            if m:
-                try:
-                    ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
-                    keep = any(a <= ts <= b for a, b in windows)
-                except ValueError:
-                    pass
+            ts = _line_ts(line)
+            if ts is None:
+                if keep and record:
+                    record.append(line)
+                continue
+            if keep and record:
+                emit(record, record_ts)
+            record = []
+            if ts > last_end:
+                break
+            keep = any(a <= ts <= b for a, b in keys)
             if keep:
-                out.append(line)
+                record = [line]
+                record_ts = ts
+            else:
+                close_run()
+                state["body"] = None             # 時間帯の外をはさんだら、同じ行でももう一度出す
+        if keep and record:
+            emit(record, record_ts)
+    close_run()
     return "".join(out)
 
 
@@ -326,7 +425,9 @@ def pack(
     if not chosen and not chosen_corpora:
         chosen_corpora = sorted(corpora.values(), key=lambda c: c.updated)[-1:]
     app_log = log_dir / APP_LOG
-    created = scan_created(app_log)
+    rough = [session_window(s, {}) for s in chosen]      # 起動の行を探す範囲（記録のファイルだけから）
+    created = (scan_created(app_log, since=min(a for a, _ in rough) - CREATED_LOOKBACK,
+                            until=max(b for _, b in rough)) if rough else {})
     windows = [session_window(s, created) for s in chosen]
     audio_bytes = (sum(p.stat().st_size for s in chosen for p in s.audio)
                    + sum(p.stat().st_size for c in chosen_corpora for p in c.audio))

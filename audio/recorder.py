@@ -49,6 +49,25 @@ _BACKLOG_WARN = 20
 # 死活表示のレベル正規化に使う RMS 上限（これ以上は 1.0 に飽和。発話時の実測オーダー）
 _HEALTH_LEVEL_FULL_RMS = 8000.0
 
+# マイクの読み取りが続けて失敗したら、そのマイクは切れた（Bluetooth の切断・電源・ドライバ）とみて開き直す。
+# 店舗 2026-10-01: 「Unanticipated host error」のあと閉じたマイクを間を空けずに読み続け、9 分で 3470 万行の警告を
+# ログに書いた（ログが 3.7 GB になり、ログをまとめるのに長い時間がかかった。聞き取りもそのまま止まっていた）。
+_READ_FAILURES_TO_REOPEN = 3
+_READ_RETRY_SEC = 0.2
+# 開き直すまでの待ち（倍々にして上限まで）と、開けないままのときに知らせる間隔
+_REOPEN_FIRST_SEC = 1.0
+_REOPEN_MAX_SEC = 10.0
+_REOPEN_NOTE_SEC = 60.0
+
+
+def _close_quietly(stream) -> None:
+    """マイクのストリームを閉じる（切れたマイクでは止める・閉じるが失敗することがある）。"""
+    for method in ("stop_stream", "close"):
+        try:
+            getattr(stream, method)()
+        except Exception:  # noqa: BLE001 — 片付けの失敗は無視する
+            pass
+
 
 @dataclass(frozen=True)
 class Transcript:
@@ -169,6 +188,7 @@ class AudioThread(threading.Thread):
         cpu_threads: int = 0,
         second_ear=None,
         device_names: Optional[list[str]] = None,
+        on_status: Optional[Callable[[str], None]] = None,
     ) -> None:
         """
         Args:
@@ -192,6 +212,7 @@ class AudioThread(threading.Thread):
             device_names: 開くマイクの名前（の一部, 優先順, config `audio.device_name` = `audio.devices`）。
                          起動のたびに番号を探す（Bluetooth のつなぎ外しで番号がずれても同じマイク）。どれも
                          見つからなければマイクを開かない（別のマイクで録らない）。空なら `device_id` の番号。
+            on_status: 録音の途中でマイクが切れた・開き直せたときに 1 行のお知らせで呼ぶ（CLI の「●」行）。
         """
         super().__init__(daemon=True, name="AudioThread")
         self._audio_queue = audio_queue
@@ -232,6 +253,9 @@ class AudioThread(threading.Thread):
         #   device_name: 開いたマイクの名前 / error: 開けなかった理由（CLI が起動時に表示する）
         self.health: dict = {"state": "starting", "level": 0.0, "last_chunk_at": None}
         self._device_name: Optional[str] = None
+        self._on_status = on_status
+        # 読み取りが続けて失敗した理由（`_capture_loop` が入れて抜け、`run` がマイクを開き直す）
+        self._stream_failed: Optional[str] = None
 
     def backlog(self) -> int:
         """まだアクションになっていない発話の数（推論待ち + 推論中）。
@@ -302,38 +326,8 @@ class AudioThread(threading.Thread):
 
         pa = pyaudio.PyAudio()
         chunk_size = 1024
-        devices = None
-        if self._device_names:
-            from audio.devices import choose_device, describe_names
-
-            devices = self._input_devices(pa, pyaudio)
-            chosen = choose_device(devices, self._device_names)
-            if chosen is None:
-                message = f"設定したマイク（{describe_names(self._device_names)}）が見つかりません"
-                logger.error("%s (audio.device_name)", message)
-                self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": message,
-                               "missing_names": True, "rdp_audio": self._rdp_audio(pa, pyaudio, devices)}
-                pa.terminate()
-                return
-            self._device_id = chosen.index
-        try:
-            self._device_name = str(pa.get_device_info_by_index(self._device_id).get("name", ""))
-        except Exception:  # 番号が範囲外など。open の失敗として下で扱う
-            self._device_name = None
-        try:
-            stream = pa.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=self._sample_rate,
-                input=True,
-                input_device_index=self._device_id,
-                frames_per_buffer=chunk_size,
-            )
-        except OSError as e:
-            # デバイス不在/占有。クラッシュさせず死活表示に出す（エラーハンドリング方針）。
-            logger.error("Could not open audio input device %d: %s", self._device_id, e)
-            self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": str(e),
-                           "device_index": self._device_id, "rdp_audio": self._rdp_audio(pa, pyaudio, devices)}
+        stream = self._open_stream(pa, pyaudio, chunk_size)
+        if stream is None:
             pa.terminate()
             return
         logger.info("AudioThread started (device_id=%d %r, rate=%d)",
@@ -347,17 +341,116 @@ class AudioThread(threading.Thread):
         worker.start()
 
         try:
-            self._capture_loop(
-                lambda: stream.read(chunk_size, exception_on_overflow=False),
-                chunk_size,
-            )
+            while stream is not None:
+                self._stream_failed = None
+                current = stream
+                self._capture_loop(
+                    lambda: current.read(chunk_size, exception_on_overflow=False),
+                    chunk_size,
+                )
+                if self._stream_failed is None or self._stop_event.is_set():
+                    break
+                # 録音の途中でマイクが切れた（Bluetooth の切断・電源・ドライバ）: 待って開き直す
+                _close_quietly(stream)
+                stream = None
+                pa, stream = self._reopen(pa, pyaudio, chunk_size, self._stream_failed)
         finally:
-            stream.stop_stream()
-            stream.close()
-            pa.terminate()
+            if stream is not None:
+                _close_quietly(stream)
+            try:
+                pa.terminate()
+            except Exception:  # noqa: BLE001 — 終わるときの片付けの失敗は無視する
+                pass
             self._chunk_queue.put(None)  # worker へ終了 sentinel（たまっている発話を処理してから止まる）
             self.health = {"state": "stopped", "level": 0.0, "last_chunk_at": None}
             logger.info("AudioThread stopped")
+
+    def _open_stream(self, pa, pyaudio_mod, chunk_size: int, *, reopening: bool = False):
+        """マイクを開く（名前があれば名前で探す）。開けなければ None（起動時は理由を死活表示に出す）。"""
+        devices = None
+        if self._device_names:
+            from audio.devices import choose_device, describe_names
+
+            devices = self._input_devices(pa, pyaudio_mod)
+            chosen = choose_device(devices, self._device_names)
+            if chosen is None:
+                if not reopening:
+                    message = f"設定したマイク（{describe_names(self._device_names)}）が見つかりません"
+                    logger.error("%s (audio.device_name)", message)
+                    self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": message,
+                                   "missing_names": True, "rdp_audio": self._rdp_audio(pa, pyaudio_mod, devices)}
+                return None
+            self._device_id = chosen.index
+        try:
+            self._device_name = str(pa.get_device_info_by_index(self._device_id).get("name", ""))
+        except Exception:  # 番号が範囲外など。open の失敗として下で扱う
+            self._device_name = None
+        try:
+            return pa.open(
+                format=pyaudio_mod.paInt16,
+                channels=1,
+                rate=self._sample_rate,
+                input=True,
+                input_device_index=self._device_id,
+                frames_per_buffer=chunk_size,
+            )
+        except OSError as e:
+            if not reopening:
+                # デバイス不在/占有。クラッシュさせず死活表示に出す（エラーハンドリング方針）。
+                logger.error("Could not open audio input device %d: %s", self._device_id, e)
+                self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": str(e),
+                               "device_index": self._device_id,
+                               "rdp_audio": self._rdp_audio(pa, pyaudio_mod, devices)}
+            return None
+
+    def _reopen(self, pa, pyaudio_mod, chunk_size: int, reason: str):
+        """切れたマイクを開き直す。待ちを倍々に延ばしながら、開けるか止めるまで繰り返す。
+
+        PortAudio はデバイスの一覧を初期化のときにしか読まないので、毎回 PyAudio を作り直す（Bluetooth を
+        つなぎ直すとマイクの番号が変わる。名前で選んでいれば同じマイクを探し直す）。(pa, stream) を返す
+        （止めたときは stream = None）。
+        """
+        message = f"マイクが切れました（{reason}）— つながり直すのを待っています"
+        logger.warning("%s", message)
+        self._status(f"{message}。Bluetooth・電源を確かめてください（つながれば自動で再開します）")
+        self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": message,
+                       "device_name": self._device_name, "reconnecting": True}
+        delay = _REOPEN_FIRST_SEC
+        attempts = 0
+        noted_at = time.monotonic()
+        while not self._stop_event.wait(delay):
+            attempts += 1
+            try:
+                pa.terminate()
+            except Exception:  # noqa: BLE001 — 壊れたマイクの片付けの失敗は無視する
+                pass
+            try:
+                pa = pyaudio_mod.PyAudio()
+            except Exception as e:  # noqa: BLE001 — 作れなければ次の待ちのあとに試す
+                logger.warning("PyAudio を作り直せません: %s", e)
+                delay = min(delay * 2, _REOPEN_MAX_SEC)
+                continue
+            stream = self._open_stream(pa, pyaudio_mod, chunk_size, reopening=True)
+            if stream is not None:
+                logger.info("マイクを開き直しました（%d 回目, device_id=%d %r）",
+                            attempts, self._device_id, self._device_name)
+                self._status(f"マイクを開き直しました（{self._device_name or self._device_id}）— 聞き取りを再開します")
+                self.health = {"state": "running", "level": 0.0, "last_chunk_at": None,
+                               "device_name": self._device_name, "device_index": self._device_id}
+                return pa, stream
+            delay = min(delay * 2, _REOPEN_MAX_SEC)
+            if time.monotonic() - noted_at >= _REOPEN_NOTE_SEC:
+                noted_at = time.monotonic()
+                logger.warning("まだマイクを開けません（%d 回試しました）", attempts)
+        return pa, None
+
+    def _status(self, message: str) -> None:
+        if self._on_status is None:
+            return
+        try:
+            self._on_status(message)
+        except Exception:  # noqa: BLE001 — 表示の失敗で録音を止めない
+            logger.exception("on_status callback failed")
 
     # ――― キャプチャ（録音専用。推論でブロックしない） ―――
 
@@ -419,12 +512,22 @@ class AudioThread(threading.Thread):
             peak_rms = 0.0
             self._capture_start = None
 
+        failures = 0
         while not self._stop_event.is_set():
             try:
                 data = read_chunk()
             except OSError as e:
-                logger.warning("Audio read error: %s", e)
+                # 1 回の失敗（あふれ等）は読み直す。続けて失敗するならマイクが切れた → 抜けて開き直す
+                # （閉じたマイクを間を空けずに読み続けると、警告でログが何 GB にもなる, 店舗 2026-10-01）
+                failures += 1
+                if failures == 1:
+                    logger.warning("Audio read error: %s", e)
+                if failures >= _READ_FAILURES_TO_REOPEN:
+                    self._stream_failed = str(e)
+                    break
+                self._stop_event.wait(_READ_RETRY_SEC)
                 continue
+            failures = 0
             if not data:
                 break  # テスト用 fake stream の終端
 

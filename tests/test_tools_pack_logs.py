@@ -133,6 +133,48 @@ class TestZip:
         assert "old session line" not in log and "much later line" not in log
         assert manifest["app_log_lines"] == 4
 
+    def test_repeated_lines_are_folded(self, root, tmp_path):
+        """店舗 2026-10-01: 閉じたマイクの警告が 9 分で 3470 万行 → 最初の 1 行と「さらに N 回」に畳む。"""
+        warn = "2026-09-27 13:47:{:02d},{:03d} [AudioThread] WARNING audio.recorder: Audio read error: Stream closed\n"
+        lines = [_log_line(START, f"Created session {NEW} (2026-09-27_134604)")]
+        lines += [warn.format(10 + i // 1000, i % 1000) for i in range(5000)]
+        lines += [_log_line(START + timedelta(seconds=90), "AudioThread stopped")]
+        (root / "logs" / "pokerapp.log").write_text("".join(lines), encoding="utf-8")
+        out, manifest = _pack(root, tmp_path)
+        with zipfile.ZipFile(out) as zf:
+            log = zf.read("pokerapp.log").decode("utf-8").splitlines()
+        assert len(log) == 4 and "Audio read error" in log[1]
+        assert log[2] == "2026-09-27 13:47:14 …（上の行がさらに 4999 回続きました）"
+        assert "AudioThread stopped" in log[3]
+
+    def test_the_same_line_after_a_gap_is_kept(self, root, tmp_path):
+        line = "{} [MainThread] INFO x: same line\n"
+        (root / "logs" / "pokerapp.log").write_text(
+            line.format("2026-09-27 13:46:30,000") + line.format("2026-09-27 13:46:31,000")
+            + line.format("2026-09-27 16:00:00,000")              # どの時間帯にも入らない
+            + line.format("2026-09-27 16:00:01,000"), encoding="utf-8")
+        windows = [(START, START + timedelta(minutes=1)),
+                   (datetime(2026, 9, 27, 16, 0, 1), datetime(2026, 9, 27, 16, 2))]
+        text = pack_logs.slice_app_log(root / "logs" / "pokerapp.log", windows)
+        assert text.splitlines() == [
+            "2026-09-27 13:46:30,000 [MainThread] INFO x: same line",
+            "2026-09-27 13:46:31 …（上の行がさらに 1 回続きました）",
+            "2026-09-27 16:00:01,000 [MainThread] INFO x: same line",
+        ]
+
+    def test_a_long_log_is_searched_not_read_from_the_top(self, root, tmp_path, monkeypatch):
+        """ログは時刻の順に追記されるので、時間帯の始まりへ二分探索で飛ぶ（同じ結果）。"""
+        monkeypatch.setattr(pack_logs, "_SEEK_SLACK", 256)
+        early = "".join(_log_line(datetime(2026, 9, 26, 0, 0) + timedelta(seconds=i), f"old {i}")
+                        for i in range(3000))
+        log = root / "logs" / "pokerapp.log"
+        log.write_text(early + log.read_text(encoding="utf-8"), encoding="utf-8")
+        out, manifest = _pack(root, tmp_path)
+        with zipfile.ZipFile(out) as zf:
+            text = zf.read("pokerapp.log").decode("utf-8")
+        assert f"Created session {NEW}" in text and "old " not in text and "much later line" not in text
+        assert manifest["app_log_lines"] == 4
+
     def test_config_tokens_are_hidden(self, root, tmp_path):
         out, _ = _pack(root, tmp_path)
         with zipfile.ZipFile(out) as zf:

@@ -208,3 +208,117 @@ class TestRemoteDesktopAudio:
 def test_list_input_devices_matches_the_fake(fake_pyaudio):
     devices = list_input_devices(_FakePA(), SimpleNamespace(paInt16=8), 16000)
     assert [(d.index, d.default) for d in devices] == [(0, False), (1, True), (2, False)]
+
+
+# ───────────────── 録音の途中でマイクが切れたとき（店舗 2026-10-01）─────────────────
+# 「Unanticipated host error」のあと閉じたマイクを間を空けずに読み続け、9 分で 3470 万行の警告をログに書いた
+# （ログが 3.7 GB になり、ログをまとめるのに長い時間がかかった。聞き取りも止まったままだった）。
+
+
+class _Stream:
+    """読むたびに次のチャンクを返す（例外なら投げる）。尽きたら b""（`_capture_loop` の終端）。"""
+
+    def __init__(self, chunks) -> None:
+        self.chunks = list(chunks)
+        self.reads = 0
+        self.closed = False
+
+    def read(self, n, exception_on_overflow=False):
+        self.reads += 1
+        item = self.chunks.pop(0) if self.chunks else b""
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def stop_stream(self):
+        raise OSError(-9988, "Stream closed")       # 切れたマイクは止めるのにも失敗する
+
+    def close(self):
+        self.closed = True
+
+
+class _DroppingPA(_FakePA):
+    """開くたびに用意したストリームを順に渡す。作り直した回数を数える（一覧を取り直すため）。"""
+
+    created = 0
+    streams: list = []
+
+    def __init__(self) -> None:
+        type(self).created += 1
+
+    def open(self, **kwargs):
+        _FakePA.opened.append(kwargs["input_device_index"])
+        if not self.streams:
+            raise OSError(-9996, "Invalid input device")
+        return self.streams.pop(0)
+
+
+@pytest.fixture
+def dropping_pyaudio(monkeypatch):
+    import audio.recorder as recorder
+
+    _FakePA.opened = []
+    _DroppingPA.created = 0
+    monkeypatch.setitem(sys.modules, "pyaudio", SimpleNamespace(PyAudio=_DroppingPA, paInt16=8))
+    monkeypatch.setattr(recorder, "_READ_RETRY_SEC", 0.0)
+    monkeypatch.setattr(recorder, "_REOPEN_FIRST_SEC", 0.0)
+    return _DroppingPA
+
+
+def _closed_errors(n: int) -> list:
+    return [OSError(-9999, "Unanticipated host error")] + [OSError(-9988, "Stream closed")] * (n - 1)
+
+
+class TestMicDrop:
+    def test_a_dead_stream_is_not_read_in_a_tight_loop(self, dropping_pyaudio, caplog):
+        stream = _Stream(_closed_errors(1000))
+        thread = AudioThread(audio_queue=make_audio_queue(), transcriber=SimpleNamespace(ready=True),
+                             stop_event=threading.Event())
+        with caplog.at_level("WARNING", logger="audio.recorder"):
+            thread._capture_loop(lambda: stream.read(1024), 1024)   # noqa: SLF001
+        assert stream.reads == 3                                    # 3 回続けて失敗したら抜ける
+        assert thread._stream_failed and "Stream closed" in thread._stream_failed   # noqa: SLF001
+        assert sum("Audio read error" in r.getMessage() for r in caplog.records) == 1
+
+    def test_one_failed_read_is_retried(self, dropping_pyaudio):
+        stream = _Stream([OSError(-9981, "Input overflowed"), b"\x00" * 2048, b"\x00" * 2048])
+        thread = AudioThread(audio_queue=make_audio_queue(), transcriber=SimpleNamespace(ready=True),
+                             stop_event=threading.Event())
+        thread._capture_loop(lambda: stream.read(1024), 1024)       # noqa: SLF001
+        assert thread._stream_failed is None and stream.reads == 4  # noqa: SLF001
+
+    def test_the_mic_is_reopened_by_name_after_it_drops(self, dropping_pyaudio):
+        first, second = _Stream(_closed_errors(5)), _Stream([b"\x00" * 2048])
+        dropping_pyaudio.streams = [first, second]
+        notes: list[str] = []
+        thread = AudioThread(audio_queue=make_audio_queue(), device_names=["DJI Mic Mini 2"],
+                             transcriber=SimpleNamespace(ready=True), stop_event=threading.Event(),
+                             on_status=notes.append)
+        thread.run()                                                # 2 つ目のストリームが尽きたら止まる
+        assert _FakePA.opened == [1, 1] and dropping_pyaudio.created == 2   # PyAudio を作り直して名前で探す
+        assert first.closed and first.reads == 3
+        assert len(notes) == 2 and "マイクが切れました" in notes[0] and "開き直しました" in notes[1]
+        assert thread.health["state"] == "stopped"
+
+    def test_waiting_for_the_mic_stops_when_the_logger_stops(self, dropping_pyaudio):
+        dropping_pyaudio.streams = [_Stream(_closed_errors(3))]     # 開き直しはずっと失敗する
+        stop = threading.Event()
+        notes: list[str] = []
+        thread = AudioThread(audio_queue=make_audio_queue(), device_names=["DJI Mic Mini 2"],
+                             transcriber=SimpleNamespace(ready=True), stop_event=stop,
+                             on_status=notes.append)
+        original = thread._open_stream                             # noqa: SLF001
+        tries = []
+
+        def open_and_maybe_stop(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if kwargs.get("reopening"):
+                tries.append(1)
+                if len(tries) >= 3:
+                    stop.set()
+            return result
+
+        thread._open_stream = open_and_maybe_stop                  # noqa: SLF001
+        thread.run()
+        assert len(tries) == 3 and thread.health["state"] == "stopped"
+        assert len(notes) == 1                                      # 切れたことを 1 回だけ知らせる
