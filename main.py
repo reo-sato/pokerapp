@@ -217,11 +217,13 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, l
     audio_cfg = cfg.get("audio", {})
     if not audio_cfg.get("enabled", True):
         return None
+    from audio.devices import parse_device_names
     from audio.recorder import _MIN_BUFFER_SECONDS, _SILENCE_RMS_THRESHOLD, AudioThread
 
     return AudioThread(
         audio_queue=audio_queue,
         device_id=audio_cfg.get("device_id", 0),
+        device_names=parse_device_names(audio_cfg.get("device_name")),
         sample_rate=audio_cfg.get("sample_rate", 16000),
         model_size=audio_cfg.get("whisper_model", "medium"),
         language=audio_cfg.get("language", "ja"),
@@ -341,13 +343,22 @@ def _report_audio_start(audio_thread, device_id: int, wait_sec: float = 3.0) -> 
         _time.sleep(0.05)
     health = audio_thread.health
     state = health.get("state")
+    index = health.get("device_index", device_id)     # 名前で選んだときは、いま見つけた番号
     if state == "running":
-        print(f"音声入力: マイク 番号 {device_id}（{health.get('device_name') or '?'}）で聞き取っています。"
+        print(f"音声入力: マイク 番号 {index}（{health.get('device_name') or '?'}）で聞き取っています。"
               "聞き取った文は [聞き取り] と表示します。")
     elif state == "unavailable":
         print("音声入力: PyAudio が無いため使えません（キーボードの読み上げ文で進行できます）。")
+    elif state == "error" and health.get("rdp_audio"):
+        from audio.devices import RDP_AUDIO_FIX
+
+        print("音声入力: リモートデスクトップの音声が接続元の端末に回っているため、PC のマイクを開けません。"
+              f"{RDP_AUDIO_FIX}、ロガーを起動し直してください（音声なしで続けます）。")
+    elif state == "error" and health.get("missing_names"):
+        print(f"音声入力: {health.get('error', '')}。受信機の差し込み・Bluetooth の接続を確かめて、ロガーを"
+              r"起動し直してください（名前は tools\audio_check.py list で確かめられます。音声なしで続けます）。")
     elif state == "error":
-        print(f"音声入力: マイク（番号 {device_id}）を開けませんでした — {health.get('error', '')}。"
+        print(f"音声入力: マイク（番号 {index}）を開けませんでした — {health.get('error', '')}。"
               r"番号は tools\audio_check.py list で確かめてください（音声なしで続けます）。")
     else:
         print(f"音声入力: マイクの状態を確認できません（{state}）。")

@@ -34,7 +34,7 @@ import time
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -74,65 +74,21 @@ def _import_pyaudio():
 
 # ――― list ―――
 
-@dataclass
-class InputDevice:
-    index: int
-    name: str
-    api: str
-    rate_ok: bool
-    default: bool
+from audio.devices import (  # noqa: E402,F401 — 一覧・名前・RDP の判定は audio/devices.py（ロガーも使う）
+    RDP_AUDIO_HINT,
+    WDM_KS_OPEN_HINT,
+    InputDevice,
+    choose_device,
+    describe_names,
+    list_input_devices,
+    only_wdm_ks,
+    open_error_hint,
+    parse_device_names,
+)
 
 
-# RDP の音声が接続元に回っていると、PC のマイクは MME などから見えず WDM-KS 方式だけに出る。WDM-KS では
-# Bluetooth のマイクを開けない（店舗 2026-09-30: DJI Mic Mini 2 が「[Errno -9999] Unanticipated host error」）
-RDP_AUDIO_HINT = ("マイクが WDM-KS 方式でしか見えていません。リモートデスクトップの音声が接続元の端末に回っていると"
-                  "こうなり、WDM-KS では Bluetooth のマイクを開けません。接続元の設定で音声の再生を「リモート PC で再生」"
-                  "（Windows の「リモート デスクトップ接続」は「リモート コンピューターで再生する」）にしてつなぎ直し、"
-                  "マイクを探し直してください。")
-WDM_KS_OPEN_HINT = "WDM-KS の番号は開けないことがあります。MME の番号を選んでください。"
-
-
-def _api_of(device: Any) -> str:
-    return str(device.get("api", "") if isinstance(device, dict) else getattr(device, "api", ""))
-
-
-def only_wdm_ks(devices: list) -> bool:
-    """録音できるデバイスが WDM-KS 方式だけか（= RDP の音声が接続元に回っている）。"""
-    return bool(devices) and all("WDM-KS" in _api_of(d) for d in devices)
-
-
-def open_error_hint(device: Any) -> str:
-    """マイクを開けなかったときに添える一言（WDM-KS の番号なら MME を勧める）。"""
-    return WDM_KS_OPEN_HINT if "WDM-KS" in _api_of(device) else ""
-
-
-def list_input_devices(pa, pyaudio_mod, sample_rate: int) -> list[InputDevice]:
-    """録音できるデバイス（入力チャンネルがあるもの）を番号順に返す。"""
-    try:
-        default_index: Optional[int] = int(pa.get_default_input_device_info()["index"])
-    except Exception:  # 既定の入力が無い（マイク未接続・RDP でリダイレクトされていない等）
-        default_index = None
-    devices: list[InputDevice] = []
-    for i in range(pa.get_device_count()):
-        info = pa.get_device_info_by_index(i)
-        if int(info.get("maxInputChannels", 0)) <= 0:
-            continue
-        try:
-            api = str(pa.get_host_api_info_by_index(info["hostApi"])["name"])
-        except Exception:
-            api = "?"
-        try:
-            rate_ok = bool(pa.is_format_supported(
-                sample_rate, input_device=i, input_channels=1,
-                input_format=pyaudio_mod.paInt16,
-            ))
-        except ValueError:
-            rate_ok = False
-        devices.append(InputDevice(i, str(info.get("name", "")), api, rate_ok, i == default_index))
-    return devices
-
-
-def format_device_table(devices: list[InputDevice], configured: int, sample_rate: int) -> list[str]:
+def format_device_table(devices: list[InputDevice], configured: int, sample_rate: int,
+                        label: str = "audio.device_id") -> list[str]:
     khz = f"{sample_rate // 1000}kHz"
     lines = [f"  番号  {khz:5}  方式              名前"]
     for d in devices:
@@ -140,7 +96,7 @@ def format_device_table(devices: list[InputDevice], configured: int, sample_rate
         if d.default:
             marks.append("既定")
         if d.index == configured:
-            marks.append("← config の audio.device_id")
+            marks.append(f"← config の {label}")
         lines.append(
             f"  {d.index:4d}  {'OK' if d.rate_ok else '不可':5}  {d.api:16}  {d.name}"
             + (f"  {' '.join(marks)}" if marks else "")
@@ -166,6 +122,24 @@ def _cmd_list(args: argparse.Namespace) -> int:
         print("  - RDP でつないでいるなら、リモートデスクトップの音声を「リモート コンピューターで再生」にして"
               "つなぎ直す（docs/troubleshooting.md）")
         return 1
+    names = parse_device_names(cfg.get("device_name"))
+    if names:
+        chosen = choose_device(devices, names)
+        print("録音できるデバイス:")
+        for line in format_device_table(devices, chosen.index if chosen else -1, rate, "audio.device_name"):
+            print(line)
+        print()
+        if only_wdm_ks(devices):
+            print(RDP_AUDIO_HINT)
+            print()
+        if chosen is None:
+            print(f"config の audio.device_name = {describe_names(names)} のマイクが見つかりません"
+                  "（受信機の差し込み・Bluetooth の接続を確かめてください）。")
+        else:
+            print(f"config の audio.device_name = {describe_names(names)} → 番号 {chosen.index}（{chosen.name}）を使います"
+                  "（名前で選ぶので、Bluetooth のつなぎ外しで番号が変わっても同じマイク）。")
+        print("名前を変えるとき: python tools/set_config.py audio.device_name \"名前の一部|次の候補\"")
+        return 0 if chosen is not None and chosen.rate_ok else 1
     print("録音できるデバイス:")
     for line in format_device_table(devices, configured, rate):
         print(line)
@@ -181,7 +155,8 @@ def _cmd_list(args: argparse.Namespace) -> int:
               "（同じマイクの「MME」の番号を選んでください）。")
     else:
         print(f"config の audio.device_id = {configured}（{chosen.name}）を使います。")
-    print("番号を変えるとき: python tools/set_config.py audio.device_id <番号>")
+    print("番号を変えるとき: python tools/set_config.py audio.device_id <番号>"
+          "（Bluetooth のつなぎ外しで番号がずれるなら、名前で固定: audio.device_name）")
     print("「16kHz 不可」の番号は選ばない（同じマイクが方式ごとに並ぶ。MME の番号が無難）。")
     return 0 if chosen is not None and chosen.rate_ok else 1
 
@@ -256,6 +231,15 @@ def _cmd_level(args: argparse.Namespace) -> int:
     device = args.device if args.device is not None else int(cfg.get("device_id", 0))
     chunk = 1024
     pa = pyaudio_mod.PyAudio()
+    names = parse_device_names(cfg.get("device_name")) if args.device is None else []
+    if names:
+        chosen = choose_device(list_input_devices(pa, pyaudio_mod, rate), names)
+        if chosen is None:
+            pa.terminate()
+            print(f"config の audio.device_name = {describe_names(names)} のマイクが見つかりません。")
+            print("名前は `python tools/audio_check.py list` で確かめてください。")
+            return 1
+        device = chosen.index
     try:
         try:
             stream = pa.open(format=pyaudio_mod.paInt16, channels=1, rate=rate, input=True,
@@ -349,6 +333,7 @@ def _cmd_listen(args: argparse.Namespace) -> int:
 
     cfg = load_audio_config(args.config)
     device = args.device if args.device is not None else int(cfg.get("device_id", 0))
+    names = parse_device_names(cfg.get("device_name")) if args.device is None else []
     model = args.model or cfg.get("whisper_model", "medium")
     stats = ListenStats()
     lock = threading.Lock()
@@ -380,7 +365,7 @@ def _cmd_listen(args: argparse.Namespace) -> int:
     second_ear, ear_message = load_live(Path(__file__).resolve().parent.parent, cfg)   # 本番と同じ聞き直し
     print(ear_message, flush=True)
     thread = AudioThread(
-        audio_queue=make_audio_queue(), device_id=device,
+        audio_queue=make_audio_queue(), device_id=device, device_names=names,
         sample_rate=int(cfg.get("sample_rate", 16000)), model_size=model,
         language=cfg.get("language", "ja"), stop_event=stop, on_transcript=on_transcript,
         min_speech_sec=min_speech, on_dropped=on_dropped,
@@ -403,12 +388,20 @@ def _cmd_listen(args: argparse.Namespace) -> int:
         time.sleep(0.05)
     health = thread.health
     if health.get("state") != "running":
-        print(f"マイク（番号 {device}）を開けませんでした: {health.get('error', health.get('state'))}")
-        print("番号は `python tools/audio_check.py list` で確かめてください。")
+        if health.get("rdp_audio"):
+            print(f"マイクを開けませんでした: {health.get('error', health.get('state'))}")
+            print(RDP_AUDIO_HINT)
+        elif health.get("missing_names"):
+            print(f"{health.get('error')}（config の audio.device_name）。")
+            print("名前は `python tools/audio_check.py list` で確かめてください。")
+        else:
+            print(f"マイク（番号 {health.get('device_index', device)}）を開けませんでした: "
+                  f"{health.get('error', health.get('state'))}")
+            print("番号は `python tools/audio_check.py list` で確かめてください。")
         stop.set()
         thread.join(timeout=3)
         return 1
-    print(f"マイク: 番号 {device}（{health.get('device_name') or '?'}）")
+    print(f"マイク: 番号 {health.get('device_index', device)}（{health.get('device_name') or '?'}）")
     print(f"{args.seconds:.0f} 秒聞き取ります。{_EXAMPLES}（Ctrl+C で終了）")
     end = time.time() + args.seconds
     try:

@@ -16,13 +16,13 @@
 
 | 項目 | 値 |
 |---|---|
-| コード | コミット `46a2ba6ef1751033aab595e84a8d41a02725056a`（ブランチ `claude/confident-hawking-5e4hff`。このあとのコミットは文書だけ = `git diff 46a2ba6 -- '*.py'` が空であることを報告で確かめる）。推定器・再生器（`integration/world_replay.py`）・engine（`integration/engine.py`・`core/poker_engine.py` ほか）・語の読み（`audio/recognizer.py`）・発話の読みの選択肢（`tools/estimate.py` の `utterance_options`）を含めてこのコミットのもの |
+| コード | コミット `46a2ba6ef1751033aab595e84a8d41a02725056a`（ブランチ `claude/confident-hawking-5e4hff`。このあとのコミットは文書と、マイクを名前で選ぶ変更（2026-10-01 オーナー: Bluetooth のつなぎ外しで入力が別のマイクに変わる。`audio/devices.py`・`audio/recorder.py` の開くマイクの選択・`main.py` の起動時の表示・`tools/audio_check.py`・`tools/read_corpus.py` とそのテスト）だけ = 報告で `git diff --stat 46a2ba6 -- '*.py'` にこれら以外が出ないことを確かめる）。推定器・再生器（`integration/world_replay.py`）・engine（`integration/engine.py`・`core/poker_engine.py` ほか）・語の読み（`audio/recognizer.py`）・発話の読みの選択肢（`tools/estimate.py` の `utterance_options`）を含めてこのコミットのもの |
 | 推定器の版 | `ESTIMATOR_VERSION = "1.0"` |
 | 値 | `params_hash = 5e54104723c3`（推定器の `PARAMS` と発話の読みの値 `reading_params()` の両方の指紋。推定のファイルに書かれる） |
 | 要確認 | 推定の `review`（理由が 1 つ以上）。理由は 3. |
 | 店舗 PC のロガー | 同じコミット（評価のセッションの前に更新する）。**比べる相手のライブの記録** = そのロガーが書いた `logs/<sid>.json` |
 | 第 2 の耳 | ライブのロガーが聞き直した結果（書き起こしの `ear`）だけを使う。あとから全発話を聞き直した結果（`<sid>.ear.jsonl`）は使わない |
-| 音の設定 | 評価のセッションの `config.json`（pack_logs の zip に入る）を報告に書く。評価の前に `audio.min_speech_sec` を 0.15 → 0.08 にする（2026-10-01 オーナー: 最後の「ク」を言わない短い「チェック」が捨てられていた。`audio_check listen` で 0.08 のほうが聞き取れた）。評価の間は変えない（ライブの記録も推定も同じ聞き取りを使うので比べ方は変わらない） |
+| 音の設定 | 評価のセッションの `config.json`（pack_logs の zip に入る）と、使ったマイク（ロガーのログの `AudioThread started` の名前）を報告に書く。評価の前に `audio.min_speech_sec` を 0.15 → 0.08 にする（2026-10-01 オーナー: 最後の「ク」を言わない短い「チェック」が捨てられていた。`audio_check listen` で 0.08 のほうが聞き取れた）。評価の間は変えない（ライブの記録も推定も同じ聞き取りを使うので比べ方は変わらない） |
 
 ## 2. 評価のデータ
 

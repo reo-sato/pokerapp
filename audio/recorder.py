@@ -168,6 +168,7 @@ class AudioThread(threading.Thread):
         vad_threshold: float = 0.5,
         cpu_threads: int = 0,
         second_ear=None,
+        device_names: Optional[list[str]] = None,
     ) -> None:
         """
         Args:
@@ -188,10 +189,14 @@ class AudioThread(threading.Thread):
                          アクションとして読めなかった発話（雑音・幻聴・読めない文。確認型の発話は除く）だけを聞き直し、
                          第 2 の耳が自由に聞いた文そのものが候補と同じアクションに読めるときだけ、その候補を使う
                          （`second_ear.rescue_events`, 2026-09-29）。None なら Whisper だけ。
+            device_names: 開くマイクの名前（の一部, 優先順, config `audio.device_name` = `audio.devices`）。
+                         起動のたびに番号を探す（Bluetooth のつなぎ外しで番号がずれても同じマイク）。どれも
+                         見つからなければマイクを開かない（別のマイクで録らない）。空なら `device_id` の番号。
         """
         super().__init__(daemon=True, name="AudioThread")
         self._audio_queue = audio_queue
         self._device_id = device_id
+        self._device_names = list(device_names or [])
         self._sample_rate = sample_rate
         self._stop_event = stop_event or threading.Event()
         self._on_transcript = on_transcript
@@ -271,6 +276,22 @@ class AudioThread(threading.Thread):
         """スレッドの停止を要求する。"""
         self._stop_event.set()
 
+    def _input_devices(self, pa, pyaudio_mod) -> list:
+        from audio.devices import list_input_devices
+
+        try:
+            return list_input_devices(pa, pyaudio_mod, self._sample_rate)
+        except Exception as e:  # noqa: BLE001 — 一覧を取れない = 見つからないと同じ
+            logger.warning("Could not list audio devices: %s", e)
+            return []
+
+    def _rdp_audio(self, pa, pyaudio_mod, devices: Optional[list] = None) -> bool:
+        """マイクを開けなかったとき: 録音できるデバイスが WDM-KS 方式だけ = RDP の音声が接続元に回っている
+        （店舗 2026-09-30）。原因と直し方を起動時に出すため。"""
+        from audio.devices import only_wdm_ks
+
+        return only_wdm_ks(devices if devices is not None else self._input_devices(pa, pyaudio_mod))
+
     def run(self) -> None:
         try:
             import pyaudio  # type: ignore[import]
@@ -281,6 +302,20 @@ class AudioThread(threading.Thread):
 
         pa = pyaudio.PyAudio()
         chunk_size = 1024
+        devices = None
+        if self._device_names:
+            from audio.devices import choose_device, describe_names
+
+            devices = self._input_devices(pa, pyaudio)
+            chosen = choose_device(devices, self._device_names)
+            if chosen is None:
+                message = f"設定したマイク（{describe_names(self._device_names)}）が見つかりません"
+                logger.error("%s (audio.device_name)", message)
+                self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": message,
+                               "missing_names": True, "rdp_audio": self._rdp_audio(pa, pyaudio, devices)}
+                pa.terminate()
+                return
+            self._device_id = chosen.index
         try:
             self._device_name = str(pa.get_device_info_by_index(self._device_id).get("name", ""))
         except Exception:  # 番号が範囲外など。open の失敗として下で扱う
@@ -297,13 +332,14 @@ class AudioThread(threading.Thread):
         except OSError as e:
             # デバイス不在/占有。クラッシュさせず死活表示に出す（エラーハンドリング方針）。
             logger.error("Could not open audio input device %d: %s", self._device_id, e)
-            self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": str(e)}
+            self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": str(e),
+                           "device_index": self._device_id, "rdp_audio": self._rdp_audio(pa, pyaudio, devices)}
             pa.terminate()
             return
         logger.info("AudioThread started (device_id=%d %r, rate=%d)",
                     self._device_id, self._device_name, self._sample_rate)
         self.health = {"state": "running", "level": 0.0, "last_chunk_at": None,
-                       "device_name": self._device_name}
+                       "device_name": self._device_name, "device_index": self._device_id}
 
         worker = threading.Thread(
             target=self._inference_loop, daemon=True, name="AudioInference"

@@ -487,6 +487,28 @@ class TestApp:
         assert st["device_hint"] is None
         app.close()
 
+    def test_named_mics_are_marked_in_the_order_of_the_names(self, tmp_path):
+        """config の audio.device_name（優先順）で選んだマイクに印 = 画面は m1・m2 にその順で選ぶ（番号は見ない）。"""
+        app = rc.CorpusApp(tmp_path, audio_cfg={"sample_rate": RATE, "device_id": 5,
+                                                "device_name": "ヘッドセット|Yeti|USB マイク"},
+                           backend_factory=FakeBackend, use_asr=False)
+        st = app.state()
+        marked = sorted((d["configured_rank"], d["index"]) for d in st["devices"] if d["configured"])
+        assert marked == [(0, 3), (1, 1)]
+        assert st["device_names"] == ["ヘッドセット", "Yeti", "USB マイク"] and st["device_hint"] is None
+        app.close()
+
+    def test_missing_named_mics_are_explained(self, tmp_path):
+        """名前のマイクが 1 本も無ければ印を付けず（画面は既定のマイクを選ばない）、つなぎ方を案内する。"""
+        app = rc.CorpusApp(tmp_path, audio_cfg={"sample_rate": RATE, "device_id": 1, "device_name": "Wireless Mic Rx"},
+                           backend_factory=FakeBackend, use_asr=False)
+        st = app.state()
+        assert not any(d["configured"] for d in st["devices"])
+        assert "「Wireless Mic Rx」" in st["device_hint"] and "Bluetooth" in st["device_hint"]
+        status, payload = app.route("GET", "/api/corpus/devices")
+        assert status == 200 and payload["device_names"] == ["Wireless Mic Rx"] and "見つかりません" in payload["device_hint"]
+        app.close()
+
     def test_only_wdm_ks_mics_explain_the_remote_desktop_setting(self, tmp_path):
         app = rc.CorpusApp(tmp_path, audio_cfg={"sample_rate": RATE, "device_id": 1}, backend_factory=WdmKsOnlyBackend,
                            use_asr=False)

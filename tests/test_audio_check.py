@@ -173,6 +173,30 @@ class TestList:
         code, out = self._run(tmp_path, monkeypatch, capsys, 0)
         assert code == 1 and "RDP" in out
 
+    def _run_names(self, tmp_path, monkeypatch, capsys, name: str, command: str = "list") -> tuple[int, str]:
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"audio": {"device_id": 0, "device_name": name}}), encoding="utf-8")
+        monkeypatch.setitem(sys.modules, "pyaudio", _FAKE_PYAUDIO)
+        code = audio_check.main(["--config", str(cfg), command])
+        return code, capsys.readouterr().out
+
+    def test_the_named_mic_is_marked_instead_of_the_number(self, tmp_path, monkeypatch, capsys):
+        """名前（audio.device_name）があれば番号ではなく名前で選んだマイクに印（Bluetooth で番号がずれても同じ）。"""
+        code, out = self._run_names(tmp_path, monkeypatch, capsys, "Yeti|USB Audio")
+        assert code == 0
+        [line] = [l for l in out.splitlines() if "← config" in l]
+        assert line.split()[0] == "1" and "audio.device_name" in line     # WASAPI の 3 番（16kHz 不可）ではなく MME
+        assert "「Yeti」 / 「USB Audio」 → 番号 1（マイク (USB Audio Device)）を使います" in out
+
+    def test_a_missing_name_is_reported(self, tmp_path, monkeypatch, capsys):
+        code, out = self._run_names(tmp_path, monkeypatch, capsys, "Wireless Mic Rx")
+        assert code == 1 and "← config" not in out
+        assert "「Wireless Mic Rx」 のマイクが見つかりません" in out and "Bluetooth" in out
+
+    def test_level_does_not_open_another_mic(self, tmp_path, monkeypatch, capsys):
+        code, out = self._run_names(tmp_path, monkeypatch, capsys, "Wireless Mic Rx", "level")
+        assert code == 1 and "見つかりません" in out          # _FakePA に open は無い = 開こうとしていない
+
 
 class TestLevel:
     def _chunks(self, rms_values: list[int]):

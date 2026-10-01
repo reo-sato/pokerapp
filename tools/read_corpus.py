@@ -47,6 +47,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from audio.recognizer import is_implausibly_long, is_prompt_echo, is_question, parse_actions  # noqa: E402
+from audio.devices import chosen_per_name, describe_names, parse_device_names  # noqa: E402
 from audio.recorder import _calc_rms  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -416,11 +417,17 @@ def _capture(recorder: DeviceRecorder, stream: Any, stop: threading.Event, clock
         recorder.alive = False
 
 
-def _device_hint(devices: list[dict]) -> Optional[str]:
-    """マイクの一覧に添える注意（WDM-KS 方式しか見えない = RDP の音声が接続元に回っている）。"""
-    from tools.audio_check import RDP_AUDIO_HINT, only_wdm_ks
+def _device_hint(devices: list[dict], names: Optional[list[str]] = None) -> Optional[str]:
+    """マイクの一覧に添える注意（WDM-KS 方式しか見えない = RDP の音声が接続元に回っている / config の名前の
+    マイクが無い = 受信機・Bluetooth がつながっていない）。"""
+    from audio.devices import RDP_AUDIO_HINT, only_wdm_ks
 
-    return RDP_AUDIO_HINT if only_wdm_ks(devices) else None
+    if only_wdm_ks(devices):
+        return RDP_AUDIO_HINT
+    if names and devices and not any(d.get("configured") for d in devices):
+        return (f"config の audio.device_name（{describe_names(names)}）のマイクが見つかりません。受信機の差し込み・"
+                "Bluetooth の接続を確かめて「マイクを探し直す」を押してください（別のマイクを選んで録ることもできます）。")
+    return None
 
 
 class PyAudioBackend:
@@ -433,7 +440,7 @@ class PyAudioBackend:
         self._pa = pyaudio.PyAudio()
 
     def devices(self, rate: int) -> list[dict]:
-        from tools.audio_check import list_input_devices
+        from audio.devices import list_input_devices
 
         return [{"index": d.index, "name": d.name, "api": d.api, "rate_ok": d.rate_ok, "default": d.default}
                 for d in list_input_devices(self._pa, self._mod, rate)]
@@ -942,6 +949,8 @@ class CorpusApp:
         self.rate = int(self.cfg.get("sample_rate", 16000))
         self.speech_rms = float(self.cfg.get("speech_rms", 300))
         self.configured_device = int(self.cfg.get("device_id", 0) or 0)
+        # マイクの名前（config `audio.device_name`, 優先順）。あれば番号ではなく名前で「いまの設定」を選ぶ
+        self.configured_names = parse_device_names(self.cfg.get("device_name"))
         self._backend_factory = backend_factory or PyAudioBackend
         self._backend: Any = None
         self.backend_error: Optional[str] = None
@@ -969,8 +978,14 @@ class CorpusApp:
                     return []
             if self._devices is None:
                 try:
-                    self._devices = [dict(d, configured=d["index"] == self.configured_device)
-                                     for d in self._backend.devices(self.rate)]
+                    found = self._backend.devices(self.rate)
+                    if self.configured_names:
+                        # 名前ごとに選んだマイク（優先順 = 画面で m1・m2 の順に選ぶ）
+                        rank = {d["index"]: k for k, d in enumerate(chosen_per_name(found, self.configured_names))}
+                        self._devices = [dict(d, configured=d["index"] in rank, configured_rank=rank.get(d["index"]))
+                                         for d in found]
+                    else:
+                        self._devices = [dict(d, configured=d["index"] == self.configured_device) for d in found]
                 except Exception as e:  # noqa: BLE001
                     self.backend_error = f"マイクの一覧を取れません（{type(e).__name__}: {e}）"
                     return []
@@ -994,7 +1009,8 @@ class CorpusApp:
         if not self.recording:
             out["devices"] = self.devices()
             out["device_error"] = self.backend_error
-            out["device_hint"] = _device_hint(out["devices"])
+            out["device_hint"] = _device_hint(out["devices"], self.configured_names)
+            out["device_names"] = self.configured_names
             out["recent"] = self.recent()
         return out
 
@@ -1070,7 +1086,8 @@ class CorpusApp:
                     "created_at": datetime.now().isoformat(timespec="seconds"), "rate": self.rate,
                     "pre_roll": PRE_ROLL, "post_roll": POST_ROLL, "order": [p.id for p in order],
                     "audio_config": {k: self.cfg.get(k) for k in (
-                        "device_id", "whisper_model", "speech_rms", "min_speech_sec", "vad_threshold", "beam_size")},
+                        "device_id", "device_name", "whisper_model", "speech_rms", "min_speech_sec", "vad_threshold",
+                        "beam_size")},
                     "runs": [], "finished": False,
                 }
             recorders: list[DeviceRecorder] = []
@@ -1088,7 +1105,7 @@ class CorpusApp:
                             pass
                     for r in recorders:
                         r.close()
-                    from tools.audio_check import open_error_hint
+                    from audio.devices import open_error_hint
 
                     hint = open_error_hint(devices[m])
                     return 400, {"code": "mic", "message": f"マイク {m}（{devices[m]['name']}）を開けません: {e}"
@@ -1160,7 +1177,8 @@ class CorpusApp:
             if rest == "devices":
                 devices = self.devices(refresh=True)
                 return 200, {"devices": devices, "device_error": self.backend_error,
-                             "device_hint": _device_hint(devices)}
+                             "device_hint": _device_hint(devices, self.configured_names),
+                             "device_names": self.configured_names}
             m = re.match(r"^audio/([^/]+)/([^/]+)$", rest)
             if m:
                 audio = self.audio_path(m.group(1), m.group(2))
@@ -1591,7 +1609,7 @@ async function start(resume){
     render(); poll();
   } catch (e) { toast(e.message); }
 }
-async function rescan(){ try { const d = await api("devices"); S.st.devices = d.devices; S.st.device_error = d.device_error; S.st.device_hint = d.device_hint; render(); } catch (e) { toast(e.message); } }
+async function rescan(){ try { const d = await api("devices"); S.st.devices = d.devices; S.st.device_error = d.device_error; S.st.device_hint = d.device_hint; S.st.device_names = d.device_names; render(); } catch (e) { toast(e.message); } }
 function togglePick(i){
   const k = S.picked.indexOf(i);
   if (k >= 0) S.picked.splice(k, 1); else if (S.picked.length < 2) S.picked.push(i); else toast("マイクは 2 本までです");
@@ -1619,8 +1637,13 @@ function levelBars(s){
 }
 function renderSetup(st){
   if (!S.picked.length && st.devices) {
-    const c = st.devices.find(d => d.configured && d.rate_ok) || st.devices.find(d => d.default && d.rate_ok);
-    if (c) S.picked = [c.index];
+    // config の名前で選んだマイク（2 本まで、名前の順 = m1・m2）。名前の設定が無ければ既定のマイク
+    // （名前を設定していて見つからないときは選ばない = 別のマイクで録らない。注意を出す）
+    const cs = st.devices.filter(d => d.configured && d.rate_ok)
+      .sort((a, b) => (a.configured_rank ?? 0) - (b.configured_rank ?? 0));
+    const c = cs.length || (st.device_names || []).length ? null : st.devices.find(d => d.default && d.rate_ok);
+    if (cs.length) S.picked = cs.slice(0, 2).map(d => d.index);
+    else if (c) S.picked = [c.index];
   }
   const devs = (st.devices || []).map(d => {
     const k = S.picked.indexOf(d.index);

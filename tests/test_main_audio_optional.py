@@ -38,6 +38,13 @@ class TestMakeAudioThread:
         assert thread is not None
         assert thread._device_id == 3          # noqa: SLF001
         assert thread._sample_rate == 8000     # noqa: SLF001
+        assert thread._device_names == []      # noqa: SLF001 — 名前が無ければ番号で選ぶ（従来どおり）
+
+    def test_mic_names_from_config(self):
+        """Bluetooth のつなぎ外しで番号がずれても同じマイクを開けるよう、名前（優先順）を渡す（店舗 2026-10-01）。"""
+        cfg = {"audio": {"device_id": 1, "device_name": "Wireless Mic Rx|DJI Mic Mini 2"}}
+        thread = main._make_audio_thread(cfg, make_audio_queue(), threading.Event())
+        assert thread._device_names == ["Wireless Mic Rx", "DJI Mic Mini 2"]   # noqa: SLF001
 
     def test_whisper_threads_from_config(self, monkeypatch):
         seen: dict = {}
@@ -157,6 +164,24 @@ class TestCliAudioStatus:
         out = self._report(capsys, {"state": "error", "error": "Invalid sample rate"})
         assert "開けませんでした" in out and "Invalid sample rate" in out
         assert r"tools\audio_check.py list" in out
+
+    def test_the_number_found_by_name_is_shown(self, capsys):
+        out = self._report(capsys, {"state": "running", "device_name": "Microphone (Wireless Mic Rx)",
+                                    "device_index": 4})
+        assert "番号 4（Microphone (Wireless Mic Rx)）で聞き取っています" in out
+
+    def test_remote_desktop_audio_is_named_as_the_cause(self, capsys):
+        out = self._report(capsys, {"state": "error", "error": "[Errno -9999] Unanticipated host error",
+                                    "device_index": 13, "rdp_audio": True, "missing_names": False})
+        assert "リモートデスクトップの音声が接続元の端末に回っている" in out
+        assert "リモート PC で再生" in out and "起動し直して" in out
+
+    def test_named_mic_not_found(self, capsys):
+        out = self._report(capsys, {"state": "error", "missing_names": True,
+                                    "error": "設定したマイク（「Wireless Mic Rx」）が見つかりません"})
+        assert "設定したマイク（「Wireless Mic Rx」）が見つかりません" in out
+        assert "Bluetooth" in out and "起動し直して" in out and r"tools\audio_check.py list" in out
+        assert "開けませんでした" not in out
 
     def test_missing_pyaudio(self, capsys):
         assert "PyAudio が無い" in self._report(capsys, {"state": "unavailable"})
