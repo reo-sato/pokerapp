@@ -20,7 +20,7 @@
 
 | 項目 | 値 |
 |---|---|
-| コード | コミット `4dbb1bc24915fb2b5e0c2f3f03564e68ca5a6df6`（ブランチ `claude/confident-hawking-5e4hff`。2026-10-01 に 46a2ba6 から改訂 = 上の「改訂」。このあとのコミットは文書だけ = 報告で `git diff 4dbb1bc -- '*.py'` が空であることを確かめる）。推定器・再生器（`integration/world_replay.py`）・engine（`integration/engine.py`・`core/poker_engine.py` ほか）・語の読み（`audio/recognizer.py`）・発話の読みの選択肢（`tools/estimate.py` の `utterance_options`）を含めてこのコミットのもの |
+| コード | コミット `4dbb1bc24915fb2b5e0c2f3f03564e68ca5a6df6`（ブランチ `claude/confident-hawking-5e4hff`。2026-10-01 に 46a2ba6 から改訂 = 上の「改訂」。このあとのコミットは文書と、カードの登録のツール（`tools/register_cards.py` の `swap-suits` とそのテスト。`rfid_cards.json` のスートの取り違えを直す道具で、ロガー・推定器は使わない）だけ = 報告で `git diff --stat 4dbb1bc -- '*.py'` にこれら以外が出ないことを確かめる）。推定器・再生器（`integration/world_replay.py`）・engine（`integration/engine.py`・`core/poker_engine.py` ほか）・語の読み（`audio/recognizer.py`）・発話の読みの選択肢（`tools/estimate.py` の `utterance_options`）を含めてこのコミットのもの |
 | 推定器の版 | `ESTIMATOR_VERSION = "1.0"` |
 | 値 | `params_hash = 5e54104723c3`（推定器の `PARAMS` と発話の読みの値 `reading_params()` の両方の指紋。推定のファイルに書かれる） |
 | 要確認 | 推定の `review`（理由が 1 つ以上）。理由は 3. |

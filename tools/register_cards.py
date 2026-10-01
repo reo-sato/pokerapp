@@ -18,6 +18,7 @@
   run         タップ駆動で登録（既定: deck 1 / suit-rank 順 / ジョーカー 2 枚）
   list        登録状況（deck ごとの進捗と不足 code、多重登録の警告）
   unregister  UID の登録を解除
+  swap-suits  登録済みの札の 2 つのスートを入れ替える（登録のときにスートを取り違えた: 例 ダイヤとクラブ）
 
 使用例:
   python tools/register_cards.py run --deck 1
@@ -27,6 +28,7 @@
   python tools/register_cards.py run --reader "seat 1"              # 使う物理リーダーを選ぶ
   python tools/register_cards.py list --deck 2
   python tools/register_cards.py unregister E0:04:01:53:1C:2A:B2:6C
+  python tools/register_cards.py swap-suits d c                     # ダイヤとクラブを入れ替える
 
 要 `pip install ".[pcsc]"`（pyscard）。**登録に使う物理リーダーは `--reader` で config の
 `pcsc_readers` の要素を選ぶ**（index か `seat 1` / `board 1` のラベル。既定は先頭要素）。
@@ -126,6 +128,24 @@ def format_status(entries: dict[str, str], order: list[str], deck: int) -> list[
     if outside:
         lines.append(f"  （順序外の code も登録あり: {' '.join(outside)}）")
     return lines
+
+
+SUIT_NAMES = {"s": "スペード", "h": "ハート", "d": "ダイヤ", "c": "クラブ"}
+
+
+def swap_suits(entries: dict[str, str], a: str, b: str) -> dict[str, str]:
+    """登録済みの札のスート a と b を入れ替えた対応表（登録の順は保つ。ジョーカーはそのまま）。
+
+    登録のときに 2 つのスートを取り違えた（新品のデッキの並びが登録の順 ♠♥♦♣ と違った など）ときに、
+    52 枚を登録し直さずに直す。同じ入れ替えをもう一度すると元に戻る。"""
+    if a == b or a not in SUITS or b not in SUITS:
+        raise ValueError(f"入れ替えるスートは s / h / d / c の違う 2 つ（例: d c）: {a!r} {b!r}")
+    out: dict[str, str] = {}
+    for tag, code in entries.items():
+        if code not in JOKERS and code[-1] in (a, b):
+            code = code[:-1] + (b if code[-1] == a else a)
+        out[tag] = code
+    return out
 
 
 def reader_choices(pcsc_readers: list[dict]) -> list[str]:
@@ -369,6 +389,32 @@ def _cmd_unregister(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_swap_suits(args: argparse.Namespace) -> int:
+    import shutil
+    from datetime import datetime
+
+    try:
+        path = _cards_file(args)
+        master = CardMaster(path)
+        entries = master.all_entries()
+        swapped = swap_suits(entries, args.a, args.b)
+    except ValueError as e:
+        print(f"[error] {e}", file=sys.stderr)
+        return 2
+    changed = [(entries[t], swapped[t]) for t in entries if entries[t] != swapped[t]]
+    if not changed:
+        print(f"{path} に {SUIT_NAMES[args.a]}・{SUIT_NAMES[args.b]} の札の登録がありません。")
+        return 1
+    backup = path.with_name(f"{path.name}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    shutil.copy2(path, backup)
+    master._mapping = swapped        # noqa: SLF001 — 登録の順を保ったまま全体を書き直す
+    master._save()                   # noqa: SLF001
+    print(f"{SUIT_NAMES[args.a]}（{args.a}）と{SUIT_NAMES[args.b]}（{args.b}）を入れ替えました: {len(changed)} 枚"
+          f"（例: {changed[0][0]} → {changed[0][1]}）。前の登録は {backup} に残しました。")
+    print("ロガーを起動し直すと新しい登録で読みます。同じコマンドをもう一度実行すると元に戻ります。")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="実機カード UID を rfid_cards.json に登録（タップ駆動）")
     parser.add_argument("--config", default=None, help="config パス（既定: config.json → config_default.json）")
@@ -401,6 +447,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_unreg = sub.add_parser("unregister", help="UID の登録を解除")
     p_unreg.add_argument("uid", help="tag_id（例 E0:04:01:53:1C:2A:B2:6C。区切り/大小は正規化）")
     p_unreg.set_defaults(func=_cmd_unregister)
+
+    p_swap = sub.add_parser("swap-suits", help="登録済みの札の 2 つのスートを入れ替える（例: d c = ダイヤとクラブ）")
+    p_swap.add_argument("a", choices=list(SUITS), help="スート（s / h / d / c）")
+    p_swap.add_argument("b", choices=list(SUITS), help="入れ替える相手のスート")
+    p_swap.set_defaults(func=_cmd_swap_suits)
     return parser
 
 

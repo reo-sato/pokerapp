@@ -298,3 +298,37 @@ class TestCli:
         assert rc == 0 and "2 枚検出" in out and "登録 1 枚" in out
         cm = CardMaster(cards)
         assert cm.lookup("AA") == "Ah" and cm.lookup("BB") == ""
+
+
+class TestSwapSuits:
+    """登録のときに 2 つのスートを取り違えた（例: ダイヤとクラブ）ときに、登録し直さずに直す。"""
+
+    def test_swaps_only_the_two_suits_and_keeps_the_order(self):
+        entries = {"U1": "As", "U2": "Ad", "U3": "Kc", "U4": "Th", "U5": "Jk", "U6": "2d"}
+        swapped = reg.swap_suits(entries, "d", "c")
+        assert swapped == {"U1": "As", "U2": "Ac", "U3": "Kd", "U4": "Th", "U5": "Jk", "U6": "2c"}
+        assert list(swapped) == list(entries)
+        assert reg.swap_suits(swapped, "d", "c") == entries        # もう一度で元に戻る
+
+    @pytest.mark.parametrize("a, b", [("d", "d"), ("x", "c")])
+    def test_rejects_bad_suits(self, a, b):
+        with pytest.raises(ValueError):
+            reg.swap_suits({"U1": "Ad"}, a, b)
+
+    def test_command_rewrites_the_file_and_keeps_a_backup(self, tmp_path, capsys):
+        cards = tmp_path / "cards.json"
+        _master(tmp_path, {"E0:04:00:01": "Ad", "E0:04:00:02": "Ac", "E0:04:00:03": "As"})
+        assert reg.main(["--cards-file", str(cards), "swap-suits", "d", "c"]) == 0
+        out = capsys.readouterr().out
+        assert "ダイヤ（d）とクラブ（c）を入れ替えました: 2 枚" in out
+        after = CardMaster(cards)
+        assert (after.lookup("E0:04:00:01"), after.lookup("E0:04:00:02"), after.lookup("E0:04:00:03")) == (
+            "Ac", "Ad", "As")
+        (backup,) = tmp_path.glob("cards.json.bak-*")
+        assert CardMaster(backup).lookup("E0:04:00:01") == "Ad"
+
+    def test_nothing_to_swap(self, tmp_path, capsys):
+        cards = tmp_path / "cards.json"
+        _master(tmp_path, {"E0:04:00:03": "As"})
+        assert reg.main(["--cards-file", str(cards), "swap-suits", "d", "c"]) == 1
+        assert not list(tmp_path.glob("cards.json.bak-*"))
