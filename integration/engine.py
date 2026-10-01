@@ -1159,10 +1159,16 @@ class IntegrationThread(threading.Thread):
         elif ("amount_only" in event.parse_flags or not event.amount
               or event.amount not in (record.amount, said_amount)):
             return False      # 記録した額（寄せたあと）か、言った額と同じときだけ
-        if not 0.0 <= _spoken_at(event) - spoken <= ALLIN_RESTATE_SEC:
+        if not 0.0 <= _spoken_at(event) - spoken <= ALLIN_RESTATE_SEC or self._fold_word_between(spoken, event):
             return False
         self._mark_restated(record, event, "allin_restated" if record.action == "allin" else "restated")
         return True
+
+    def _fold_word_between(self, since: float, event: AudioEvent) -> bool:
+        """`since`（賭けの話し始め）からこの発話までに「フォールド」と聞こえて、まだ席に付けていない（札が席に残っている
+        = 次のアクションの前に手番の人のフォールドにする）か。あいだのアクションなので、この発話は言い直しではない
+        （店舗 7b897671 ハンド 3:「1600」→「フォールド」→「2千3百」の「2千3百」は次の人の額）。"""
+        return any(since <= t <= _spoken_at(event) for t in self._spoken_folds.values())
 
     def _mark_restated(self, record: ActionRecord, event: AudioEvent, reason: str) -> None:
         if reason not in (record.reason or "").split("+"):
@@ -1196,6 +1202,8 @@ class IntegrationThread(threading.Thread):
         record, spoken, said = last
         if record.action not in ("bet", "raise") or not 0.0 <= _spoken_at(event) - spoken <= ALLIN_RESTATE_SEC:
             return False
+        if self._fold_word_between(spoken, event):
+            return False                     # あいだに「フォールド」（席に付ける前）= あいだのアクション
         checkpoint, wager_ctx = point
         index, current = checkpoint["index"], self._current_input_index
         if (current is None or not index < current < len(self._hand_inputs)

@@ -84,6 +84,17 @@ class TestAmountRestated:
         tb = _say(tmp_path, ("600", 1.0), ("1800", 1.0), ("コール", 1.0), ("1700", 1.0))
         assert _acts(tb) == [(6, "raise", 600), (4, "raise", 1800), (5, "call", 1600)]
 
+    def test_a_fold_word_in_between_ends_it(self, tmp_path):
+        """7b897671 ハンド 3（席4 の札が席に残っていた読み）:「1600」→「フォールド」→「2千3百」の「2千3百」は次の人の額。
+        「フォールド」は札が離れるか次のアクションまで席に付けない（保留）が、あいだのアクションに数える。"""
+        tb = _say(tmp_path, ("600", 1.0), ("フォールド", 1.0), ("800", 1.0))
+        assert _acts(tb) == [(6, "raise", 600), (4, "fold", 0), (5, "raise", 1000)]
+        assert not any("言い直し" in n for n in tb.notices)
+
+    def test_a_fold_word_in_between_ends_an_allin_restatement(self, tmp_path):
+        tb = _say(tmp_path, ("オールイン", 1.0), ("フォールド", 1.0), ("オールイン", 1.0))
+        assert [s for s, _, _ in _acts(tb)] == [6, 4, 5]
+
     def test_rebuilding_the_hand_gives_the_same_record(self, tmp_path):
         tb = _say(tmp_path, ("600", 1.0), ("1800", 1.5), ("1700", 1.5), ("コール", 1.0))
         before = _acts(tb)
