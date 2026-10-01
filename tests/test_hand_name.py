@@ -67,6 +67,33 @@ class TestParsing:
     def test_described_for_the_cli(self):
         assert describe_event(parse_action("ツーペア")) == "見せた（ツーペア）"
 
+    @pytest.mark.parametrize("text, name", [
+        # 店舗のディーラーの言い方（オーナー 2026-10-01）: 札の名前 + 役の言い方
+        ("キングヒット", "One pair"), ("キング ヒット", "One pair"), ("Kヒット", "One pair"), ("7ヒット", "One pair"),
+        ("テンヒットです", "One pair"), ("ポケットエース", "One pair"), ("エースエース", "One pair"),
+        ("キングのペア", "One pair"),
+        ("エースファイブツーペア", "Two pair"), ("クイーンジャックツーペア", "Two pair"),
+        ("クイーンジャック", "High card"), ("クイーン ジャック", "High card"), ("QJ", "High card"),
+        ("エースハイ", "High card"), ("エースキングハイ", "High card"),
+        ("セブンのセット", "Three of a kind"),
+        ("キングハイストレート", "Straight"), ("キングハイ、ストレート", "Straight"),
+        ("エースハイフラッシュ", "Flush"),
+        ("エースキングフル", "Full house"), ("エースキング、フル", "Full house"), ("AKフル", "Full house"),
+        ("エースフル", "Full house"), ("エースキングフルハウス", "Full house"),
+    ])
+    def test_the_store_wording_with_card_names(self, text, name):
+        (event,) = parse_actions(text)
+        assert (event.action, event.hand_name, event.amount) == ("end_hand", name, 0)
+
+    @pytest.mark.parametrize("text", ["エース", "キング", "エースキングでしょ", "エースキング対クイーンクイーン",
+                                      "セットアップです。", "600点", "スリーベット"])
+    def test_card_names_alone_or_in_talk_are_not_hand_names(self, text):
+        assert all(e.action != "end_hand" for e in parse_actions(text))
+
+    def test_a_hand_name_then_a_muck_in_one_utterance(self):
+        assert [(e.action, e.hand_name) for e in parse_actions("キングヒット、フォールド")] == [
+            ("end_hand", "One pair"), ("fold", None)]
+
     def test_recorded_and_replayed(self):
         event = parse_action("フラッシュ", confidence=0.7, utterance_start_ts=5.0)
         envelope = event_to_envelope(event)
@@ -301,3 +328,64 @@ class TestHeadsUp:
         tb.say("フォールド")
         (hand,) = tb.hands
         assert (hand.winner_seat, hand.winner_source) == (6, "fold")
+
+    @pytest.mark.parametrize("shown", ["クイーンシックス", "クイーンハイ"])
+    def test_the_hole_card_name_is_the_show_before_the_muck(self, tmp_path, shown):
+        # 店舗の言い方（オーナー 2026-10-01）: 役の無い手は手札の名前。読めないと「フォールド」が見せた席のマックになる
+        tb = _Table(tmp_path, seats=(4, 6))
+        self._to_river(tb)
+        tb.say(shown)                                 # 席4（Q6）が見せた
+        tb.say("フォールド")                          # 席6 がマック
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (4, "fold")
+        assert (hand.actions[-1].seat, hand.actions[-1].action) == (6, "fold")
+
+    def test_a_hit_is_a_pair(self, tmp_path):
+        tb = _Table(tmp_path, seats=(4, 6))
+        self.HOLES = {4: ["Jc", "Ac"], 6: HOLES[6]}   # 席4 ジャックのワンペア（ボードの J と組）
+        self._to_river(tb)
+        tb.say("ジャックヒット")
+        tb.say("キングハイフラッシュ")
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (6, "cards") and not hand.review_required
+        assert [(s["seat"], s.get("announced")) for s in hand.to_dict()["showdown"]] == [
+            (4, "One pair"), (6, "Flush")]
+
+
+class TestAllInBeforeTheRiver:
+    """オールインで手を開いたとき、手札の名前（「エースキング」「クイーンクイーン」）が言われても、ボードが出きる
+    までは役名で勝者を決めない（ボードで AK が勝つことがある）。"""
+
+    def test_the_board_decides_not_the_names(self, tmp_path):
+        tb = _Table(tmp_path, seats=(4, 6))
+        tb.deal({4: ["As", "Kh"], 6: ["Qc", "Qh"]})
+        tb.say("オールイン")                          # 席6（ボタン = SB）
+        tb.tick(tb.now + 1.0)
+        tb.say("コール")                              # 席4
+        tb.tick(tb.now + 1.0)
+        tb.say("エースキング")
+        tb.say("クイーンクイーン")
+        assert tb.hands == []
+        for street in (["Ad", "7c", "3s"], ["9h"], ["2d"]):
+            _board(tb, street)
+        tb.tick(tb.now + SHOWDOWN_MUCK_SEC + 1.0)
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (4, "cards")
+        assert not hand.review_required
+        assert all("announced" not in s for s in hand.to_dict()["showdown"])   # 開いたときの名前は役名ではない
+
+    def test_the_hand_name_after_the_river_decides_at_once(self, tmp_path):
+        tb = _Table(tmp_path, seats=(4, 6))
+        tb.deal({4: ["As", "Kh"], 6: ["Qc", "Qh"]})
+        tb.say("オールイン")
+        tb.tick(tb.now + 1.0)
+        tb.say("コール")
+        tb.tick(tb.now + 1.0)
+        tb.say("エースキング")
+        tb.say("クイーンクイーン")
+        for street in (["Ad", "Kc", "3s"], ["9h"], ["2d"]):
+            _board(tb, street)
+        tb.say("エースキングツーペア")                # 勝った席の役（待たずに決める）
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (4, "cards") and not hand.review_required
+        assert [(s["seat"], s.get("announced")) for s in hand.to_dict()["showdown"]] == [(4, "Two pair"), (6, None)]

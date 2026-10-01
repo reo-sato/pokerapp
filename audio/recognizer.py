@@ -473,7 +473,7 @@ def is_implausibly_long(text: str, audio_sec: float) -> bool:
 # 数字だけの発話（「600点」「2千点です」）はベットかレイズ（店のディーラーは語を省いて額だけ言う。店舗の
 # 3 回目の通しテストで「600点」「2千点」がベットだった）。どちらかは engine が状態から決め、額がいまのベット
 # 以下・最小ベット未満なら使わない。額の前後に付いてよいのは下の語だけ — 「ポット 2千点」「残り 1500」
-# 「7ヒット」のような発話や、違う数が並ぶ発話（「5 6 7」）はアクションにしない。
+# 「7ヒット」（役名 = 7 のワンペア, `_HAND_PHRASES`）のような発話や、違う数が並ぶ発話（「5 6 7」）は額のアクションにしない。
 _AMOUNT_TOKEN = re.compile(r"(?:\d[\d,]*(?:\.\d+)?[万千百Kk]?)+|[一二三四五六七八九〇十百千万]+(?:\d[\d,]*)?")
 _AMOUNT_ONLY_REST = re.compile(
     r"(?:[\s、。・!?,.ー〜~]|点|円|エン|テン|ポイント|トータル|デス|デース|ニナリマス|ハイ|エー|エット|エート|エ|アー|ア"
@@ -1072,6 +1072,9 @@ def _parse_utterance(
     players_left = _find_players_left(nfkc, norm)
     if players_left is not None:
         return _around_players_left(text, nfkc, players_left, confidence, utterance_start_ts)
+    hand_phrase = _find_hand_phrase(norm)
+    if hand_phrase is not None:
+        return _around_hand_phrase(text, nfkc, hand_phrase, confidence, utterance_start_ts)
     keywords = _distinct_keywords(_keyword_matches(norm, nfkc))
     if not keywords:
         # アクションの語が無くても、額だけを言っていればベットかレイズ（「600点」）
@@ -1149,6 +1152,99 @@ def _around_players_left(
     return [
         *(_parse_utterance(before, confidence, utterance_start_ts) if before.strip() else []),
         left,
+        *(_parse_utterance(after, confidence, utterance_start_ts) if after.strip() else []),
+    ]
+
+
+# ショーダウンの役を札の名前で言う言い方（オーナー 2026-10-01: 「ワンペア」より「キングヒット」、何も無ければ手札の
+# 名前「クイーンジャック」、フルハウスは「エースキングフル」。「エースファイブツーペア」「キングハイストレート」
+# 「エースハイフラッシュ」は役の語で読める = HAND_NAME_KEYWORDS）。札の名前 + 役の言い方を 1 つの役名として読む。
+_RANK_WORDS = ("エース", "キング", "クイーン", "クィーン", "ジャック", "テン", "ナイン", "エイト", "セブン", "シックス",
+               "ファイブ", "フォー", "スリー", "ツー", "トゥー", "デュース")
+_RANK_WORD = "(?:" + "|".join(_RANK_WORDS) + ")"
+_RANK = r"(?:" + "|".join(_RANK_WORDS) + r"|10|[2-9]|[AKQJT])"     # 役の語が続くときは数字・英字も
+_NOT_LETTER = r"(?<![A-Za-z])"
+_CHUNK_START = r"(?:^|(?<=[、。,.・!?\s]))"
+_CHUNK_END = r"(?=$|[、。,.・!?\s]|デス|デシタ)"
+_HAND_PHRASES: tuple[tuple[re.Pattern, str], ...] = (
+    # 「エースキングフル」「セブンフル」= フルハウス（「…フルハウス」は役の語で読む）
+    (re.compile(_NOT_LETTER + _RANK + r"[ズス]?[\s・、]*(?:" + _RANK + r"[ズス]?[\s・、]*)?(?:フル|フール)(?!ハウス)",
+                re.IGNORECASE), "Full house"),
+    # 「セブンのセット」= スリーカード（「セットアップ」は違う）
+    (re.compile(_NOT_LETTER + _RANK + r"[\sノ・]*セット(?!アップ)", re.IGNORECASE), "Three of a kind"),
+    # 「キングヒット」= ボードの札と組になったワンペア
+    (re.compile(_NOT_LETTER + _RANK + r"[\sノ・]*ヒット", re.IGNORECASE), "One pair"),
+    # 「ポケットエース」「キングのペア」= ワンペア（「ツーペア」「2ペア」は役の語 = ツーペア）
+    (re.compile(r"ポケット[\s・]*" + _RANK, re.IGNORECASE), "One pair"),
+    (re.compile(_NOT_LETTER + r"(?!(?:ツー|トゥー|2)ペア)" + _RANK + r"[\sノ・]*ペア", re.IGNORECASE), "One pair"),
+)
+# 手札の名前だけ（「クイーンジャック」「エースキングハイ」「エースハイ」）= 役が無い。発話の区切りから区切りまでが
+# 札の名前だけのとき（会話の中の札の名前は読まない）。「エースエース」はワンペア。
+_HOLE_CARDS_NAMED = re.compile(
+    _CHUNK_START + r"(?P<r1>" + _RANK_WORD + r"|[AKQJT])[\s・]*(?P<r2>" + _RANK_WORD + r"|[AKQJT])?[\s・]*"
+    r"(?P<high>ハイ)?" + _CHUNK_END, re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class _HandPhrase:
+    start: int
+    end: int
+    name: str
+
+
+def _find_hand_phrase(norm: str) -> Optional[_HandPhrase]:
+    """札の名前を使った役の言い方の、いちばん左のもの（同じ位置なら上の表の順）。無ければ None。
+
+    手札の名前だけの言い方は、発話に役の語（「ストレート」など）が無いときだけ（「キングハイ、ストレート」と
+    区切って書き起こされた「キングハイ」をハイカードにしない）。"""
+    found: list[tuple[int, int, int, str]] = []
+    for order, (pattern, name) in enumerate(_HAND_PHRASES):
+        hit = pattern.search(norm)
+        if hit is not None:
+            found.append((hit.start(), order, hit.end(), name))
+    if not found and not _has_hand_name_keyword(norm):
+        for hit in _HOLE_CARDS_NAMED.finditer(norm):
+            r1, r2 = hit.group("r1"), hit.group("r2")
+            if r2 is None and hit.group("high") is None:
+                continue                         # 札の名前 1 つだけ（「エース」）は役の言い方ではない
+            pair = r2 is not None and _rank_of(r1) == _rank_of(r2)
+            found.append((hit.start(), 0, hit.end(), "One pair" if pair else "High card"))
+            break
+    if not found:
+        return None
+    start, _, end, name = min(found)
+    return _HandPhrase(start, end, name)
+
+
+_RANK_LETTERS = {"エース": "A", "キング": "K", "クイーン": "Q", "クィーン": "Q", "ジャック": "J", "テン": "T",
+                 "ナイン": "9", "エイト": "8", "セブン": "7", "シックス": "6", "ファイブ": "5", "フォー": "4",
+                 "スリー": "3", "ツー": "2", "トゥー": "2", "デュース": "2"}
+
+
+def _rank_of(word: str) -> str:
+    return _RANK_LETTERS.get(word, word.upper())
+
+
+def _has_hand_name_keyword(norm: str) -> bool:
+    lower = norm.lower()
+    return any(_to_katakana(unicodedata.normalize("NFKC", k)).lower() in lower for k in HAND_NAME_KEYWORDS)
+
+
+def _around_hand_phrase(
+    text: str, nfkc: str, found: _HandPhrase, confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> list[AudioEvent]:
+    """札の名前を使った役の言い方を 1 つの役名（end_hand + hand_name）にし、前後は別に読む。"""
+    source = text if len(nfkc) == len(text) else nfkc
+    shown = AudioEvent(
+        action="end_hand", amount=0, timestamp=time.time(), raw_text=source[found.start:found.end],
+        confidence=confidence, utterance_start_ts=utterance_start_ts, hand_name=found.name,
+    )
+    before = source[:found.start].rstrip("".join(_SPLIT_DELIMITERS))
+    after = source[found.end:].lstrip("".join(_SPLIT_DELIMITERS))
+    return [
+        *(_parse_utterance(before, confidence, utterance_start_ts) if before.strip() else []),
+        shown,
         *(_parse_utterance(after, confidence, utterance_start_ts) if after.strip() else []),
     ]
 

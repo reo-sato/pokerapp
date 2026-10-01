@@ -94,7 +94,9 @@ class TestGenerator:
         assert "チェックアラウンド" in says and "ヘッズアップ" in says and "オールイン" in says
         assert "チョップ" in says and any("、" in s for s in says)
         assert {"ターンカード", "ラストカード"} <= set(says) and any(s.endswith("プレイヤーズ") for s in says)
-        assert any(s in ("ツーペア", "フラッシュ", "フルハウス") for s in says)
+        hand_names = [s for s in says if s in ts._HAND_NAMES]          # noqa: SLF001
+        assert hand_names and all(e.action == "end_hand" and e.hand_name
+                                  for s in hand_names for e in parse_actions(s))
         assert any(s.endswith("点") for s in says) and any(s.isdigit() for s in says)
 
     def test_the_lines_are_the_store_speech(self):

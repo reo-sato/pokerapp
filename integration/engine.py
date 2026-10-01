@@ -2619,7 +2619,25 @@ class IntegrationThread(threading.Thread):
 
         turn = self._showdown_turn()
         if not turn:
+            if self._hand_open and self._game_state.is_hand_active() and len(self._board_cards) >= 5:
+                # 全員がボードの出る前に手を開いた（オールイン）。いま言った役名はその役の席のもの。手札で決める
+                unnamed = [s for s in self._remaining_seats() if not self._showdown_shown.get(s)]
+                seat = self._seat_with_hand(unnamed, name)
+                if seat is not None:
+                    self._showdown_shown[seat] = name
+                self._finish_by_rules(event, explicit=True)
+                return
             self._check_announced_after_end(name)
+            return
+        if len(self._board_cards) < 5:
+            # ボードが出る前（オールインで手を開いた）: 見せた順には数えるが、言った名前（「エースキング」）は
+            # 最後の役ではないので、判定との突き合わせ・役名での勝者には使わない（2026-10-01）
+            seat = turn[0]
+            self._showdown_shown[seat] = None
+            self._showdown_at = _spoken_at(event)
+            self._notice(f"席{seat} が手を開きました（ボードが出る前: {HAND_NAMES_JA.get(name, name)}）")
+            if not self._showdown_turn():
+                self._finish_by_rules(event, explicit=True)
             return
         seat = self._seat_with_hand(turn, name) or turn[0]
         self._showdown_shown[seat] = name
@@ -2792,6 +2810,9 @@ class IntegrationThread(threading.Thread):
         """
         from core.showdown import best_by_names, evaluate_hands
 
+        if len(board) < 5:
+            # ボードが出きる前（オールインで手を開いたときに手札の名前「エースキング」などを言う）。役名では決めない
+            return False
         names: dict[int, str] = {s: n for s, n in self._showdown_shown.items() if s in remaining and n}
         hands: dict = {}
         if len(board) == 5 and UNKNOWN_CARD not in board:
