@@ -945,6 +945,10 @@ class IntegrationThread(threading.Thread):
             # 配ったあとに話されたアクションは新しいハンドのもの。前に話されたもの（前のハンドの
             # 最後のコールやマック）は、認識が遅れて届いても前のハンドに入れる（ADR-0062）。
             self._start_dealt_hand_if_ready(force=True)
+            if self._deal_at is None:
+                # いま始めた: 始めるのを待っていたあいだに札が離れた席（降りた人）を、この発話より先に見る
+                # （店舗 b0a27270 ハンド 2: 配って 5 秒で降りた席6 に、始めるきっかけの「八百」が付いた）
+                self._poll_departures()
         if self._rfid_folds and self._hand_open:
             # この発話より前に離れた札を先に反映する（フォールドのあとの人のアクションとして読む）
             self._apply_observations_before(_spoken_at(event), event.timestamp)
@@ -2491,7 +2495,14 @@ class IntegrationThread(threading.Thread):
             )
             return False
         try:
-            pending = int(self._speech_backlog())
+            if self._speech_pending_since is not None and self._deal_at is not None:
+                # 配ってから話し始めた発話は新しいハンドのものなので待たない。全部を待つと、話し声が続くあいだ
+                # 始まらない（店舗 2026-10-01 b0a27270 ハンド 2: 配ってから 20 秒始まらず、そのあいだに降りた
+                # 席6 に「八百」が付いた。7b897671 も 16〜26 秒が 3 回）
+                oldest = self._speech_pending_since()
+                pending = int(oldest is not None and oldest < self._deal_at)
+            else:
+                pending = int(self._speech_backlog())
         except Exception:  # noqa: BLE001 — 待てないなら始める
             return False
         return pending > 0 or not self._audio_queue.empty()

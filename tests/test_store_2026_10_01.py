@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import pytest
 
+from core.events import RFIDEvent
+
 pytest.importorskip("pokerkit")
 
 from integration.engine import ALLIN_RESTATE_SEC  # noqa: E402
@@ -130,3 +132,47 @@ class TestDeclarationAndEcho:
     def test_a_raise_word_after_a_raise_with_an_amount_is_the_next_player(self, tmp_path):
         tb = _say(tmp_path, ("レイズ 600", 1.0), ("レイズ", 1.0))
         assert [s for s, _, _ in _acts(tb)] == [6, 4]
+
+
+def _deal_waiting(tb: _Table, speech_since: float) -> None:
+    """手札を配る（認識待ちの発話の話し始めが `speech_since`）。始まるかどうかは確かめない。"""
+    tb.t._speech_backlog = lambda: 1       # noqa: SLF001 — 認識待ちの発話がずっとある（話し声が続く）
+    tb.speech_since = speech_since
+    for seat, cards in STORE_HOLES.items():
+        tb.put(seat, cards)
+        for card in cards:
+            ev = RFIDEvent(tag_id=card, card=card, reader_id=f"r{seat}", role="seat", seat=seat,
+                           timestamp=tb.now, raw_tag_id=card)
+            tb.recorder.record(ev)
+            tb.t._process_rfid_event(ev)     # noqa: SLF001
+    tb.tick(tb.now + 2.0)
+
+
+class TestHandStartWhileTalking:
+    """店舗 b0a27270 ハンド 2: 配ってから 20 秒ハンドが始まらなかった（話し声が続いて「認識待ちの発話」が 0 に
+    ならなかった）。そのあいだに降りた席6 に、始めるきっかけになった「八百」が付いた。"""
+
+    def test_speech_started_after_the_deal_does_not_hold_the_hand(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.now = 10.0
+        _deal_waiting(tb, speech_since=10.5)          # 配ったあとに話し始めた発話だけが認識待ち
+        assert tb.t._hand_open                         # noqa: SLF001
+
+    def test_speech_started_before_the_deal_still_holds_it(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.now = 10.0
+        _deal_waiting(tb, speech_since=9.0)           # 配る前に話し始めた発話（前のハンドのもの）を待つ
+        assert not tb.t._hand_open                     # noqa: SLF001
+        tb.speech_since = None
+        tb.t._start_dealt_hand_if_ready()              # noqa: SLF001 — run() の発話が無いときの確認
+        assert tb.t._hand_open                         # noqa: SLF001
+
+    def test_a_fold_while_waiting_goes_before_the_first_action(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.now = 10.0
+        _deal_waiting(tb, speech_since=9.0)
+        tb.lift(6)                                     # 席6（ボタン = 最初の手番）が降りた
+        tb.tick(tb.now + 5.0)
+        assert not tb.t._hand_open                     # noqa: SLF001
+        tb.say("800", spoken_at=tb.now - 1.0)          # 配ったあとの発話が届いて始まる
+        assert _acts(tb) == [(6, "fold", 0), (4, "raise", 800)]
