@@ -75,6 +75,7 @@ HAND_NAME_KEYWORDS: dict[str, str] = {
     "フォーカード": "Four of a kind",
     "フォーオブアカインド": "Four of a kind",
     "クワッズ": "Four of a kind",
+    "クアッズ": "Four of a kind",   # 書き起こしゆれ
     "4カード": "Four of a kind",
     "四カード": "Four of a kind",
     "フルハウス": "Full house",

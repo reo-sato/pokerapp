@@ -80,13 +80,24 @@ class TestParsing:
         ("エースハイフラッシュ", "Flush"),
         ("エースキングフル", "Full house"), ("エースキング、フル", "Full house"), ("AKフル", "Full house"),
         ("エースフル", "Full house"), ("エースキングフルハウス", "Full house"),
+        # スリーカード: 「トリップス」「ナナのセット」「セットオブセブン」「スリーカード」/ フォーカード:「クワッズ」
+        ("ナナのセット", "Three of a kind"), ("7のセット", "Three of a kind"), ("セットオブセブン", "Three of a kind"),
+        ("セットオブセブンズ", "Three of a kind"), ("クアッズ", "Four of a kind"),
+        # ポケットペアの呼び名: 「エーシーズ」「キングス」…「Xポケ」「ポケットX(s)」
+        ("エーシーズ", "One pair"), ("キングス", "One pair"), ("クイーンズ", "One pair"), ("ジャックス", "One pair"),
+        ("テンズ", "One pair"), ("ナインズ", "One pair"), ("ナナポケ", "One pair"), ("Kポケ", "One pair"),
+        ("ポケットキングス", "One pair"), ("ポケットエーシーズ", "One pair"), ("キングのポケット", "One pair"),
+        # 長い札の名前のツーペア・複数形のフルハウス
+        ("キングスアンドセブンズ、ツーペア", "Two pair"), ("二ペア", "Two pair"),
+        ("エーシーズフルオブキングス", "Full house"),
     ])
     def test_the_store_wording_with_card_names(self, text, name):
         (event,) = parse_actions(text)
         assert (event.action, event.hand_name, event.amount) == ("end_hand", name, 0)
 
     @pytest.mark.parametrize("text", ["エース", "キング", "エースキングでしょ", "エースキング対クイーンクイーン",
-                                      "セットアップです。", "600点", "スリーベット"])
+                                      "セットアップです。", "600点", "スリーベット", "サンセット", "ポケモン",
+                                      "キングスパーク", "ベトナナ"])
     def test_card_names_alone_or_in_talk_are_not_hand_names(self, text):
         assert all(e.action != "end_hand" for e in parse_actions(text))
 
@@ -356,7 +367,9 @@ class TestAllInBeforeTheRiver:
     """オールインで手を開いたとき、手札の名前（「エースキング」「クイーンクイーン」）が言われても、ボードが出きる
     までは役名で勝者を決めない（ボードで AK が勝つことがある）。"""
 
-    def test_the_board_decides_not_the_names(self, tmp_path):
+    @pytest.mark.parametrize("queens", ["クイーンクイーン", "クイーンズ", "ポケットクイーンズ"])
+    def test_the_board_decides_not_the_names(self, tmp_path, queens):
+        # オールインで見せたら、その場で手札の名前を言う（オーナー 2026-10-01）
         tb = _Table(tmp_path, seats=(4, 6))
         tb.deal({4: ["As", "Kh"], 6: ["Qc", "Qh"]})
         tb.say("オールイン")                          # 席6（ボタン = SB）
@@ -364,7 +377,7 @@ class TestAllInBeforeTheRiver:
         tb.say("コール")                              # 席4
         tb.tick(tb.now + 1.0)
         tb.say("エースキング")
-        tb.say("クイーンクイーン")
+        tb.say(queens)
         assert tb.hands == []
         for street in (["Ad", "7c", "3s"], ["9h"], ["2d"]):
             _board(tb, street)

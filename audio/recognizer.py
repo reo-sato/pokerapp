@@ -1156,27 +1156,47 @@ def _around_players_left(
     ]
 
 
-# ショーダウンの役を札の名前で言う言い方（オーナー 2026-10-01: 「ワンペア」より「キングヒット」、何も無ければ手札の
-# 名前「クイーンジャック」、フルハウスは「エースキングフル」。「エースファイブツーペア」「キングハイストレート」
-# 「エースハイフラッシュ」は役の語で読める = HAND_NAME_KEYWORDS）。札の名前 + 役の言い方を 1 つの役名として読む。
+# ショーダウンの役を札の名前で言う言い方（オーナー 2026-10-01）。札の名前 + 役の言い方を 1 つの役名として読む:
+#   ワンペア     「キングヒット」/ ポケットペアは呼び名「エーシーズ」「キングス」・「ナナポケ」・「ポケットキングス」
+#   スリーカード 「ナナのセット」「セットオブセブン」（「トリップス」「スリーカード」は役の語）
+#   フルハウス   「エースキングフル」
+#   役が無い     手札の名前「クイーンジャック」
+# 「エースファイブツーペア」「キングハイストレート」「エースハイフラッシュ」「クワッズ」は役の語 = HAND_NAME_KEYWORDS。
 _RANK_WORDS = ("エース", "キング", "クイーン", "クィーン", "ジャック", "テン", "ナイン", "エイト", "セブン", "シックス",
                "ファイブ", "フォー", "スリー", "ツー", "トゥー", "デュース")
+# 日本語の数の読み（「ナナのセット」）。ほかの語と紛れる 1 文字の読み（シ・ク）は入れない
+_RANK_KANA = ("ナナ", "シチ", "ハチ", "キュウ", "キュー", "ジュウ", "ジュー", "ロク", "ヨン", "サン", "ゴ", "ニ")
 _RANK_WORD = "(?:" + "|".join(_RANK_WORDS) + ")"
-_RANK = r"(?:" + "|".join(_RANK_WORDS) + r"|10|[2-9]|[AKQJT])"     # 役の語が続くときは数字・英字も
+_RANK = (r"(?:" + "|".join(_RANK_WORDS + _RANK_KANA)
+         + r"|10|[2-9]|[二三四五六七八九十]|[AKQJT])")       # 役の言い方が続くときは数・英字も
+# ポケットペアの呼び名（英語の複数形のカタカナ読み）
+_RANK_PLURALS = ("エーシーズ", "エーシズ", "エースィズ", "キングス", "キングズ", "クイーンズ", "クィーンズ", "クイーンス",
+                 "ジャックス", "ジャックズ", "テンズ", "テンス", "ナインズ", "ナインス", "エイツ", "セブンズ", "セブンス",
+                 "シックシーズ", "シクシーズ", "シックスィーズ", "シックスズ", "ファイブズ", "ファイヴズ", "フォーズ",
+                 "スリーズ", "ツーズ", "デューシーズ", "デュースィズ")
+_RANK_PLURAL = "(?:" + "|".join(_RANK_PLURALS) + ")"
 _NOT_LETTER = r"(?<![A-Za-z])"
 _CHUNK_START = r"(?:^|(?<=[、。,.・!?\s]))"
 _CHUNK_END = r"(?=$|[、。,.・!?\s]|デス|デシタ)"
+_CARD = r"(?:" + _RANK_PLURAL + "|" + _RANK + r"[ズス]?)"      # 札の名前（複数形も）
 _HAND_PHRASES: tuple[tuple[re.Pattern, str], ...] = (
-    # 「エースキングフル」「セブンフル」= フルハウス（「…フルハウス」は役の語で読む）
-    (re.compile(_NOT_LETTER + _RANK + r"[ズス]?[\s・、]*(?:" + _RANK + r"[ズス]?[\s・、]*)?(?:フル|フール)(?!ハウス)",
-                re.IGNORECASE), "Full house"),
-    # 「セブンのセット」= スリーカード（「セットアップ」は違う）
-    (re.compile(_NOT_LETTER + _RANK + r"[\sノ・]*セット(?!アップ)", re.IGNORECASE), "Three of a kind"),
+    # 「エースファイブツーペア」「キングスアンドセブンズ、ツーペア」= ツーペア（札の名前が長くても会話とみない）
+    (re.compile(_NOT_LETTER + _CARD + r"[\s・]*(?:(?:アンド|ト)[\s・]*)?" + _CARD + r"[\s・、]*(?:ツー|トゥー|2|二)ペア",
+                re.IGNORECASE), "Two pair"),
+    # 「エースキングフル」「セブンフル」「エーシーズフルオブキングス」= フルハウス（「…フルハウス」は役の語で読む）
+    (re.compile(_NOT_LETTER + _CARD + r"[\s・、]*(?:" + _CARD + r"[\s・、]*)?(?:フル|フール)(?!ハウス)"
+                r"(?:[\s・]*オブ[\s・]*" + _CARD + ")?", re.IGNORECASE), "Full house"),
+    # 「ナナのセット」「セットオブセブン」= スリーカード（「セットアップ」「サンセット」は違う）
+    (re.compile(_NOT_LETTER + r"(?!サンセット)" + _RANK + r"[\sノ・]*セット(?!アップ)", re.IGNORECASE),
+     "Three of a kind"),
+    (re.compile(r"セット[\s・]*オブ[\s・]*" + _RANK, re.IGNORECASE), "Three of a kind"),
     # 「キングヒット」= ボードの札と組になったワンペア
     (re.compile(_NOT_LETTER + _RANK + r"[\sノ・]*ヒット", re.IGNORECASE), "One pair"),
-    # 「ポケットエース」「キングのペア」= ワンペア（「ツーペア」「2ペア」は役の語 = ツーペア）
-    (re.compile(r"ポケット[\s・]*" + _RANK, re.IGNORECASE), "One pair"),
-    (re.compile(_NOT_LETTER + r"(?!(?:ツー|トゥー|2)ペア)" + _RANK + r"[\sノ・]*ペア", re.IGNORECASE), "One pair"),
+    # ポケットペア: 「ポケットキングス」「ポケットエース」「ナナポケ」「キングのポケット」
+    (re.compile(r"ポケット[\s・]*(?:" + _RANK_PLURAL + "|" + _RANK + ")", re.IGNORECASE), "One pair"),
+    (re.compile(_NOT_LETTER + _RANK + r"(?:" + _RANK + r")?[\sノ・]*ポケ(?:ット)?", re.IGNORECASE), "One pair"),
+    # 「キングのペア」= ワンペア（「ツーペア」「2ペア」「二ペア」は役の語 = ツーペア）
+    (re.compile(_NOT_LETTER + r"(?!(?:ツー|トゥー|2|二)ペア)" + _RANK + r"[\sノ・]*ペア", re.IGNORECASE), "One pair"),
 )
 # 手札の名前だけ（「クイーンジャック」「エースキングハイ」「エースハイ」）= 役が無い。発話の区切りから区切りまでが
 # 札の名前だけのとき（会話の中の札の名前は読まない）。「エースエース」はワンペア。
@@ -1184,6 +1204,8 @@ _HOLE_CARDS_NAMED = re.compile(
     _CHUNK_START + r"(?P<r1>" + _RANK_WORD + r"|[AKQJT])[\s・]*(?P<r2>" + _RANK_WORD + r"|[AKQJT])?[\s・]*"
     r"(?P<high>ハイ)?" + _CHUNK_END, re.IGNORECASE,
 )
+# ポケットペアの呼び名だけ（「エーシーズ」「キングス」）= ワンペア
+_POCKET_NAMED = re.compile(_CHUNK_START + _RANK_PLURAL + _CHUNK_END, re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -1204,6 +1226,9 @@ def _find_hand_phrase(norm: str) -> Optional[_HandPhrase]:
         if hit is not None:
             found.append((hit.start(), order, hit.end(), name))
     if not found and not _has_hand_name_keyword(norm):
+        pocket = _POCKET_NAMED.search(norm)
+        if pocket is not None:
+            found.append((pocket.start(), 0, pocket.end(), "One pair"))
         for hit in _HOLE_CARDS_NAMED.finditer(norm):
             r1, r2 = hit.group("r1"), hit.group("r2")
             if r2 is None and hit.group("high") is None:
