@@ -74,6 +74,8 @@ PARAMS: dict[str, float] = {
     "ear_diff_weight": 0.4,     # 候補の確からしさ − 自由に聞いた文の確からしさ（0 以下）にかける重み
     "ear_min_diff": -8.0,       # これより確からしさの低い候補は選択肢にしない（雑談に候補を当てはめない）
     "ear_top": 3,               # 候補の上から何個を選択肢にするか
+    "ear_amount_top": 3,        # 額を読んだ発話に、第 2 の耳の額ごとの点数の上から何個の別の額を選択肢にするか
+                                # （確からしさは候補と同じ式。2026-10-01「額の空間を事前に用意」のステップ 2）
     "drop_read": -4.0,          # Whisper で読めた発話を雑談・言い直しとして捨てる（長い文 = 雑談が混ざりうる）
     "drop_short": -7.0,         # アクションの言葉だけの短い発話（`short_chars` 文字以下）を捨てる
     "drop_heard": -4.0,         # Whisper が定型の幻聴を書いたが、第 2 の耳は何かを聞いた発話を捨てる（音はあった）
@@ -122,7 +124,8 @@ class Option:
         return f"{what}（{_SOURCE_JA.get(self.source, self.source)}）"
 
 
-_SOURCE_JA = {"whisper": "Whisper", "rescue": "第 2 の耳・ライブの規則", "ear": "第 2 の耳の候補", "drop": "雑談"}
+_SOURCE_JA = {"whisper": "Whisper", "rescue": "第 2 の耳・ライブの規則", "ear": "第 2 の耳の候補", "drop": "雑談",
+             "ear_amount": "第 2 の耳の額の点数", "phonetic": "音の近さの額"}
 
 
 @dataclass
@@ -168,8 +171,16 @@ def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
     elif whisper:
         options.append(Option("whisper", text, _flag_penalty(whisper, params), _keys(whisper)))
     elif live:
-        # 意味のない単発の語を、第 2 の耳なしで音の近さだけで額と読んだ（`recognizer.parse_garbled_amount`）
-        options.append(Option("rescue", text, params["rescue"], _keys(live)))
+        # 意味のない単発の語を、第 2 の耳なしで音の近さだけで額と読んだ（`recognizer.parse_garbled_amount`）。
+        # 確からしさは音の近さ（−10 × 距離）: 遠い語ほど捨てる読みに近い（作業計画の監査 2026-10-01 §4 の (c)。前は
+        # 第 2 の耳が合った救い出しと同じ −0.5）。ほかの近い額も選択肢にする（engine は使える額から選ぶが、推定器は
+        # ハンド全体で選べる）
+        scores = dict(live[0].amount_scores) if len(live) == 1 else {}
+        best = max(scores.values()) if scores else params["rescue"]
+        options.append(Option("rescue", text, best, _keys(live)))
+        for amount, score in sorted(scores.items(), key=lambda kv: -kv[1]):
+            options.append(Option("phonetic", str(amount), score,
+                                  _keys(parse_actions(str(amount), utterance_start_ts=start))))
     else:
         # 定型の幻聴（「ご覧いただきありがとうございます。」）の下で第 2 の耳が何かを聞いた = 何かを言った（店舗
         # 7b897671 ハンド 3: オールインへのコールが幻聴になり、札の離脱でフォールドと記録した）
@@ -187,6 +198,7 @@ def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
                 continue
             options.append(Option("ear", c["text"], params["ear_base"] + params["ear_diff_weight"] * diff,
                                   _keys(events)))
+    options.extend(_ear_amount_options(live, ear, start, params))
     if options[0].keys:
         short = len(text) <= params["short_chars"] if options[0].source == "whisper" else False
         options.append(Option("drop", "", params["drop_short"] if short else params["drop_read"], ()))
@@ -196,6 +208,32 @@ def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
         if all(opt.keys != k.keys for k in kept):
             kept.append(opt)
     return kept
+
+
+def _ear_amount_options(live: list, ear: Optional[dict], start: Optional[float], params: dict) -> list[Option]:
+    """額を読んだベット・レイズがちょうど 1 つの発話に、第 2 の耳の額ごとの点数（`ear.amounts`）の上から
+    `ear_amount_top` 個の別の額を選択肢にする（その場面で使える額かは、推定器が流し直したときに engine が決める）。
+    確からしさは第 2 の耳の候補と同じ式（`ear_base` + `ear_diff_weight` × (その額の確からしさ − 自由に聞いた文)）。
+    文は既定の読みと同じ言い方（数字だけなら数字、語と一緒なら「レイズ 1300」）。"""
+    from audio.second_ear import amount_table
+
+    table = amount_table(ear)
+    wagers = [e for e in live if e.action in ("bet", "raise") and e.amount]
+    if not table or len(wagers) != 1 or len(live) != 1 or (ear or {}).get("logp") is None:
+        return []
+    event = wagers[0]
+    word = "" if "amount_only" in event.parse_flags else ("レイズ " if event.action == "raise" else "ベット ")
+    out: list[Option] = []
+    for amount, logp in sorted(table.items(), key=lambda kv: (-kv[1], kv[0])):
+        if len(out) >= int(params["ear_amount_top"]):
+            break
+        diff = min(0.0, logp - float(ear["logp"]))
+        if amount == event.amount or diff < params["ear_min_diff"]:
+            continue
+        text = f"{word}{amount}"
+        out.append(Option("ear_amount", text, params["ear_base"] + params["ear_diff_weight"] * diff,
+                          _keys(parse_actions(text, utterance_start_ts=start))))
+    return out
 
 
 def choice_points(events: list, transcripts: list[dict], params: dict = PARAMS) -> list[ChoicePoint]:

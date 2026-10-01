@@ -311,3 +311,43 @@ class TestEstimator:
         assert size_terms(1300) == [pytest.approx(PARAMS["amount_prior_weight"] * -1.2)]
         assert size_terms(600) == []
         assert math.isclose(size_prior(2.2), -1.2)
+
+
+# ――― ステップ 2: 推定器の選択肢（`tools/estimate.utterance_options`）―――
+
+class TestReadingOptions:
+    def test_a_garbled_amount_is_priced_by_its_sound(self):
+        """音の近さだけで読んだ額の既定の確からしさは −10 × 距離（前は救い出しと同じ −0.5）。ほかの近い額も選択肢。"""
+        from tools.estimate import utterance_options
+
+        options = utterance_options({"utterance_start_ts": 1.0, "text": "よっしゃんてん", "confidence": 0.4})
+        default, other = options[0], options[1]
+        scores = dict(parse_garbled_amount("よっしゃんてん").amount_scores)
+        assert default.logp == pytest.approx(max(scores.values()))
+        assert (other.source, other.text, other.logp) == ("phonetic", "4000", pytest.approx(scores[4000]))
+        assert options[-1].source == "drop"
+
+    def test_other_amounts_from_the_second_ear(self):
+        """額を読んだ発話に、第 2 の耳の額ごとの点数の上から別の額を選択肢にする（確からしさは候補と同じ式）。"""
+        from tools.estimate import PARAMS as V0
+        from tools.estimate import utterance_options
+
+        ear = {"text": "三百", "logp": -0.4, "candidates": [{"text": "三百", "logp": -0.4}],
+               "amounts": [[300, -0.4], [1300, -1.4], [3000, -2.0], [1200, -2.5], [2000, -3.0]]}
+        options = utterance_options({"utterance_start_ts": 4.0, "text": "300", "confidence": 0.6, "ear": ear})
+        extra = [(o.text, round(o.logp, 3)) for o in options if o.source == "ear_amount"]
+        base, weight = V0["ear_base"], V0["ear_diff_weight"]
+        assert extra == [("1300", round(base + weight * -1.0, 3)), ("3000", round(base + weight * -1.6, 3)),
+                         ("1200", round(base + weight * -2.1, 3))]           # 上から 3 つ（読んだ 300 は除く）
+        raised = utterance_options({"utterance_start_ts": 5.0, "text": "レイズ 300", "confidence": 0.6, "ear": ear})
+        assert [o.text for o in raised if o.source == "ear_amount"][:1] == ["レイズ 1300"]   # 言い方をそろえる
+
+    def test_not_for_two_wagers_or_old_records(self):
+        from tools.estimate import utterance_options
+
+        ear = {"text": "五百", "logp": -0.4, "candidates": [], "amounts": [[500, -0.4], [1500, -1.0]]}
+        two = utterance_options({"utterance_start_ts": 6.0, "text": "500、1500", "confidence": 0.6, "ear": ear})
+        assert not any(o.source == "ear_amount" for o in two)
+        old = utterance_options({"utterance_start_ts": 7.0, "text": "500", "confidence": 0.6,
+                                 "ear": {k: v for k, v in ear.items() if k != "amounts"}})
+        assert not any(o.source == "ear_amount" for o in old)
