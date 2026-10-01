@@ -554,6 +554,49 @@ def wants_ear(events: Iterable, text: str, question: bool = False, confidence: O
     return bool(_amountless(events)) or _doubtful(events, confidence)
 
 
+# 意味のない単発の語（「ゼニューク」）を額と読むとき（オーナー 2026-10-01, `recognizer.garbled_word`）: 第 2 の耳の額の
+# 候補のうち、確からしさが自由に聞いた文から `EAR_AMOUNT_LOGP_GAP` 以内（音声が額でも同じくらい説明できる）で、Whisper の
+# 語に音が近い（`EAR_AMOUNT_MAX_DISTANCE` 以下）もの。確からしさと音の近さを足して並べる（距離 0〜1 を
+# `EAR_AMOUNT_PHONETIC_WEIGHT` 倍して確からしさ（log）から引く）。店舗 b0a27270:「ゼニューク」の第 2 の耳は何も聞かず
+# （-3.5）、候補は 三百 -4.0・千二百 -4.2・二百 -5.1 → 音の近さで 千二百（正解）。「はい」「ナイス」「これぞ」は自由に
+# 聞いた文がその語で、額の候補は 10 以上低いので読まない。
+EAR_AMOUNT_LOGP_GAP = 3.0
+EAR_AMOUNT_MAX_DISTANCE = 0.6
+EAR_AMOUNT_PHONETIC_WEIGHT = 10.0
+
+
+def garbled_amount_events(text: str, ear: Optional[dict], *,
+                          utterance_start_ts: Optional[float] = None) -> tuple[list, Optional[str]]:
+    """意味のない単発の語を、第 2 の耳の額の候補と音の近さで額と読む。(アクション, 使った候補の文) か ([], None)。"""
+    from audio.phonetic import amount_distance
+    from audio.recognizer import garbled_word, parse_actions, phonetic_amount_event
+
+    word = garbled_word(text)
+    free = (ear or {}).get("logp")
+    if word is None or free is None:
+        return [], None
+    scored: dict[int, tuple[float, str]] = {}
+    for cand in ear.get("candidates") or []:
+        logp, cand_text = cand.get("logp"), (cand.get("text") or "").strip()
+        if logp is None or logp < free - EAR_AMOUNT_LOGP_GAP:
+            continue
+        read = parse_actions(cand_text)
+        if len(read) != 1 or "amount_only" not in read[0].parse_flags or not read[0].amount:
+            continue
+        d = amount_distance(word, read[0].amount)
+        if d > EAR_AMOUNT_MAX_DISTANCE:
+            continue
+        score = logp - EAR_AMOUNT_PHONETIC_WEIGHT * d
+        if score > scored.get(read[0].amount, (float("-inf"), ""))[0]:
+            scored[read[0].amount] = (score, cand_text)
+    if not scored:
+        return [], None
+    order = sorted(scored.items(), key=lambda item: (-item[1][0], item[0]))
+    options = tuple(amount for amount, _ in order)
+    event = phonetic_amount_event(text, options, EAR_CONFIDENCE, utterance_start_ts, flags=(EAR_FLAG,))
+    return [event], order[0][1][1]
+
+
 def apply_ear(events: Iterable, text: str, ear: Optional[dict], *, question: bool = False,
               utterance_start_ts: Optional[float] = None,
               confidence: Optional[float] = None) -> tuple[list, Optional[str]]:
@@ -561,15 +604,27 @@ def apply_ear(events: Iterable, text: str, ear: Optional[dict], *, question: boo
 
     ライブ（`AudioThread`）・書き起こしの読み直し（`tools/eval_store.py`）・読み上げ集・推定器が同じ規則を使う。
     読めなかった発話は `rescue_events`（ポット・ブラインドの読み上げ =「ポット1万2000です。」は、第 2 の耳が額だけを
-    聞いてもアクションにしない）、額の無いベット・レイズは `fill_amounts`。自信のとても低い読みは、第 2 の耳が
-    アクションを何も聞いていなければ捨てる（使った文 = 第 2 の耳が聞いた文、空なら `EAR_HEARD_NOTHING`）。
+    聞いてもアクションにしない）、それでも読めない意味のない単発の語は `garbled_amount_events`（額の候補と音の近さ）、
+    額の無いベット・レイズは `fill_amounts`。自信のとても低い読みは、第 2 の耳がアクションを何も聞いていなければ捨てる
+    （使った文 = 第 2 の耳が聞いた文、空なら `EAR_HEARD_NOTHING`）。第 2 の耳が無ければ（`ear` = None）、意味のない
+    単発の語を音の近さだけで額と読む（`recognizer.parse_garbled_amount`、使った文は None）。
     """
+    from audio.recognizer import parse_garbled_amount
+
     events = list(events)
-    if not ear or not wants_ear(events, text, question, confidence):
+    if not ear:
+        if not events and not question and text:
+            garbled = parse_garbled_amount(text, confidence=confidence, utterance_start_ts=utterance_start_ts)
+            if garbled is not None:
+                return [garbled], None
+        return events, None
+    if not wants_ear(events, text, question, confidence):
         return events, None
     if not events:
         rescued = rescue_events(ear, utterance_start_ts=utterance_start_ts)
-        return rescued, (agreed_candidate(ear) if rescued else None)
+        if rescued:
+            return rescued, agreed_candidate(ear)
+        return garbled_amount_events(text, ear, utterance_start_ts=utterance_start_ts)
     if _doubtful(events, confidence):
         free = (ear.get("text") or "").strip()
         cands = ear.get("candidates") or []

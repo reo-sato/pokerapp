@@ -51,6 +51,8 @@ def event_to_envelope(event: RecordableEvent) -> dict:
             envelope["parse_flags"] = list(event.parse_flags)
         if event.hand_name is not None:
             envelope["hand_name"] = event.hand_name   # 勝った役名（0.6 additive）
+        if event.amount_options:
+            envelope["amount_options"] = list(event.amount_options)   # 音で読んだ額の候補（0.13 additive）
         return envelope
     if isinstance(event, RFIDEvent):
         envelope = {

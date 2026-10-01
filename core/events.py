@@ -73,3 +73,6 @@ class AudioEvent:
     # additive (2026-09-26): ディーラーが言った **勝った役の名前**（pokerkit の役名, action="end_hand" のとき）。
     # ショーダウンの判定との突き合わせに使う。役名を言わない「ハンド終了」では None。
     hand_name: Optional[str] = None
+    # additive (2026-10-01): 意味のない単発の語を額の音で読んだとき（parse_flags "phonetic_amount"）の額の候補
+    # （確からしい順。`amount` は先頭）。engine がその場面で使える額のうち最初のものを選ぶ。
+    amount_options: tuple[int, ...] = ()

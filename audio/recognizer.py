@@ -1056,6 +1056,84 @@ def _is_filler(sentence: str) -> bool:
     return not _residue(_to_katakana(unicodedata.normalize("NFKC", sentence)), [])
 
 
+# ――― 意味のない単発の語を額と読む（オーナー 2026-10-01）―――
+# 「会話として意味のない単語（ゼニューク）などを単発で宣言したとき、額の発声を疑う」。Whisper は額の読み（セン・ヒャク・
+# テン）を崩して仮名の語にする（店舗:「センニハク」= 1200・「にせんたん」= 2000・「さんびょくてん」= 300・「よっしゃん
+# てん」= 4000・「ゼニューク」= 1200、読み上げ集:「ロックセンテン」= 6000・「ニモン」= 2 万）。発話全体が仮名だけの 1 語で、
+# アクションとして読めず、笑い声・繰り返しでないときだけ、額の読みに音が近いか調べる（要確認 `phonetic_amount`）。
+# 第 2 の耳があればその額の候補と合わせて（`second_ear.garbled_amount_events`）、無ければ音の近さだけで
+# （`parse_garbled_amount`）読む。どちらも `second_ear.apply_ear` から（ライブ・読み直し・推定器が同じ規則）。
+GARBLED_MIN_MORAE = 3
+GARBLED_MAX_MORAE = 12
+# 音の近さだけで読むときの距離の上限。店舗の単発の仮名の語 189 種・読み上げ集で、これ以下は（笑い声を除いて）全部が
+# 額の崩れで、額も合っていた。これより遠いと「はい」「ナイス」「これで」など意味のある語が混ざる。
+PHONETIC_AMOUNT_MAX_DISTANCE = 0.4
+# いちばん近い額からこの差までの額も候補にする（「よっしゃんてん」= 4 万 0.22 / 4000 0.25）。場面で使える額を engine が選ぶ
+PHONETIC_AMOUNT_OPTION_SPAN = 0.1
+_GARBLED_STRIP = re.compile(r"[\s、。,.!?！？・…〜~「」]+")
+_GARBLED_TRAILERS = ("デース", "デス", "デシタ")
+
+
+def _is_repetition(word: str) -> bool:
+    """笑い声・同じ言葉の繰り返し（「ハッハッハッハ」「アハハハ」「ゴメンゴメン」「ハイハイ」）。"""
+    w = word.replace("ッ", "").replace("ー", "")
+    return bool(re.fullmatch(r"(.{1,4}?)\1+.?", w)) or re.search(r"(.)\1\1", w) is not None
+
+
+def garbled_word(text: str) -> Optional[str]:
+    """発話全体が仮名だけの 1 語（額の崩れかもしれない語）なら、その語（片仮名）。そうでなければ None。
+
+    拍の数が `GARBLED_MIN_MORAE`〜`GARBLED_MAX_MORAE`（「はい」「でん」のような短い語は額と区別できない）で、
+    笑い声・繰り返しでないこと。語のあとの「です」は除く（「センペンです」）。
+    """
+    from audio.phonetic import morae
+
+    body = _to_katakana(_GARBLED_STRIP.sub("", unicodedata.normalize("NFKC", text)))
+    for trailer in _GARBLED_TRAILERS:
+        if body.endswith(trailer) and len(body) > len(trailer):
+            body = body[:-len(trailer)]
+            break
+    if not body or not all(_is_katakana(ch) or ch == "ー" for ch in body):
+        return None
+    if not GARBLED_MIN_MORAE <= len(morae(body)) <= GARBLED_MAX_MORAE or _is_repetition(body):
+        return None
+    return body
+
+
+def phonetic_amount_event(
+    text: str, options: tuple[int, ...], confidence: Optional[float],
+    utterance_start_ts: Optional[float], flags: tuple[str, ...] = (),
+) -> AudioEvent:
+    """音で読んだ額（候補 `options` の先頭）のベット・レイズ。engine がその場面で使える候補を選ぶ。"""
+    return AudioEvent(
+        action="bet", amount=options[0], timestamp=time.time(), raw_text=text, confidence=confidence,
+        parse_flags=("amount_only", "phonetic_amount", *flags), utterance_start_ts=utterance_start_ts,
+        amount_options=tuple(options),
+    )
+
+
+def parse_garbled_amount(
+    text: str, confidence: Optional[float] = None, utterance_start_ts: Optional[float] = None,
+) -> Optional[AudioEvent]:
+    """意味のない単発の語を、音の近さだけで額と読む（第 2 の耳の無いとき）。読めなければ None。
+
+    いちばん近い額が `PHONETIC_AMOUNT_MAX_DISTANCE` 以下で、アクションの語・卓の用語のほうが近くないとき。
+    """
+    from audio.phonetic import rank_amounts, word_closer_than
+
+    if is_question(text) or is_announcement(text) or parse_actions(text):
+        return None
+    word = garbled_word(text)
+    if word is None:
+        return None
+    ranked = rank_amounts(word)
+    best = ranked[0][0]
+    if best > PHONETIC_AMOUNT_MAX_DISTANCE or word_closer_than(word, best):
+        return None
+    options = tuple(amount for d, amount in ranked if d <= best + PHONETIC_AMOUNT_OPTION_SPAN)
+    return phonetic_amount_event(text, options, confidence, utterance_start_ts)
+
+
 def _parse_utterance(
     text: str, confidence: Optional[float], utterance_start_ts: Optional[float],
 ) -> list[AudioEvent]:

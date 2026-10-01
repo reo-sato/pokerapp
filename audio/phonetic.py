@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import unicodedata
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
 from core.constants import ACTION_KEYWORDS, HAND_NAME_KEYWORDS
@@ -342,3 +343,64 @@ def match_keyword(heard: str) -> Optional[PhoneticMatch]:
     if runner_up - best_distance < _MARGIN:
         return None
     return PhoneticMatch(heard, best.word, best.rewrite, best_distance, runner_up, len(best.morae))
+
+
+# ---------------------------------------------------------------------------
+# 額（オーナー 2026-10-01:「会話として意味のない単語（ゼニューク）などを単発で宣言したとき、額の発声を疑う」）
+
+_MAN = ("", "イチマン", "ニマン", "サンマン", "ヨンマン", "ゴマン", "ロクマン", "ナナマン", "ハチマン", "キュウマン")
+_SEN: tuple[tuple[str, ...], ...] = (
+    ("",), ("セン", "イッセン"), ("ニセン",), ("サンゼン",), ("ヨンセン",), ("ゴセン",), ("ロクセン",),
+    ("ナナセン",), ("ハッセン",), ("キュウセン",),
+)
+_HYAKU = ("", "ヒャク", "ニヒャク", "サンビャク", "ヨンヒャク", "ゴヒャク", "ロッピャク", "ナナヒャク", "ハッピャク",
+          "キュウヒャク")
+# 音で読む額の範囲（100 点刻み。それより細かい額は店では言わない）
+AMOUNT_STEP = 100
+AMOUNT_MAX = 99_900
+
+
+def amount_readings(amount: int) -> tuple[str, ...]:
+    """額の読み（片仮名）。「点」を付けた形も（「センニヒャクテン」）。100 点刻み・99,900 まで。"""
+    man, rest = divmod(amount, 10_000)
+    sen, rest = divmod(rest, 1_000)
+    hyaku = rest // 100
+    if not 0 < amount <= AMOUNT_MAX or amount % AMOUNT_STEP or man > 9:
+        return ()
+    heads = tuple(_MAN[man] + s for s in _SEN[sen])
+    words = tuple(h + _HYAKU[hyaku] for h in heads)
+    return tuple(w + suffix for w in words for suffix in ("", "テン"))
+
+
+_AMOUNT_TABLE: tuple[tuple[int, tuple[Mora, ...]], ...] = tuple(
+    (amount, tuple(morae(reading)))
+    for amount in range(AMOUNT_STEP, AMOUNT_MAX + 1, AMOUNT_STEP)
+    for reading in amount_readings(amount)
+)
+
+
+def word_closer_than(heard: str, limit: float) -> bool:
+    """アクションの語・卓の用語（`_TARGETS`）のどれかが、距離 `limit` 以下で近いか（額より語に近い語は額にしない）。"""
+    seq = morae(heard)
+    return any(distance(seq, list(t.morae)) <= limit for t in _TARGETS)
+
+
+def amount_distance(heard: str, amount: int) -> float:
+    """書き起こしの語と額の読みの距離（いちばん近い読みとの `distance`）。"""
+    seq = morae(heard)
+    return min((distance(seq, list(morae(r))) for r in amount_readings(amount)), default=float("inf"))
+
+
+@lru_cache(maxsize=4096)
+def rank_amounts(heard: str) -> tuple[tuple[float, int], ...]:
+    """書き起こしの語と近い順の (距離, 額)（100 点刻みの全部の額。額ごとにいちばん近い読みで）。
+
+    1 語に 0.1〜0.2 秒かかる（約 4,000 の読み）。読み直し・推定は同じ語を何度も読むので覚えておく。
+    """
+    seq = morae(heard)
+    best: dict[int, float] = {}
+    for amount, reading in _AMOUNT_TABLE:
+        d = distance(seq, list(reading))
+        if d < best.get(amount, float("inf")):
+            best[amount] = d
+    return tuple(sorted((d, amount) for amount, d in best.items()))

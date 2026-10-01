@@ -1075,6 +1075,12 @@ class IntegrationThread(threading.Thread):
         if action in ("bet", "raise") and self._rules_aware and self._hand_open and self._restate_wager_amount(event):
             return
         legal_ctx = gs.legal_context()
+        if "phonetic_amount" in event.parse_flags:
+            # 意味のない単発の語を音で読んだ額: 候補のうち、いま使える額（最小ベット・レイズ以上・持ち点まで）の先頭
+            picked = self._pick_phonetic_amount(event, legal_ctx)
+            if picked is None:
+                return
+            event = picked
         if "amount_only" in event.parse_flags:
             # 数字だけの発話 = ベットかレイズ。使えない額なら記録しない（「7」「いまのベットと同じ額」）
             problem = self._amount_only_problem(event, legal_ctx)
@@ -1108,6 +1114,29 @@ class IntegrationThread(threading.Thread):
                     self._count_held_betting_word()
         else:
             self._handle_legacy_action(event)
+
+    def _pick_phonetic_amount(self, event: AudioEvent, ctx: LegalContext) -> Optional[AudioEvent]:
+        """音で読んだ額（`phonetic_amount`）の候補のうち、いまの手番でベット・レイズに使える最初の額にする。
+
+        使える額が無ければ記録しない（お知らせだけ）。使える候補が 2 つ以上あれば `ambiguous_amount` も付ける（要確認）。
+        """
+        options = event.amount_options or (event.amount,)
+        usable = [a for a in options if ctx.actor_seat is not None and ("raise" in ctx.legal_actions
+                                                                        or "bet" in ctx.legal_actions)
+                  and ctx.min_raise <= a <= ctx.max_raise]
+        if not usable:
+            shown = "・".join(str(a) for a in options[:3])
+            self._notice(f"「{event.raw_text}」は額（{shown}）の言い間違いに聞こえますが、いまは使えない額なので記録しませんでした")
+            if self._betting_over():
+                self._count_held_betting_word()
+            return None
+        flags = tuple(event.parse_flags)
+        if len(usable) > 1 and "ambiguous_amount" not in flags:
+            flags = (*flags, "ambiguous_amount")
+        if not self._rebuilding:
+            logger.info("「%s」を額 %d と読みました（音の近さ%s。候補 %s）", event.raw_text, usable[0],
+                        "・第 2 の耳" if "second_ear" in flags else "", options)
+        return replace(event, amount=usable[0], parse_flags=flags)
 
     def _amount_only_problem(self, event: AudioEvent, ctx: LegalContext) -> Optional[str]:
         """数字だけの発話をベット・レイズにできない理由（できるなら None）。
@@ -1201,8 +1230,8 @@ class IntegrationThread(threading.Thread):
         """
         last, point = self._last_wager, self._last_wager_point
         if (last is None or point is None or not self._current_actions
-                or self._current_actions[-1] is not last[0]):
-            return False
+                or self._current_actions[-1] is not last[0] or "phonetic_amount" in event.parse_flags):
+            return False      # 音で読んだ額（意味のない語）で、はっきり聞こえた額を言い直さない
         record, spoken, said = last
         if record.action not in ("bet", "raise") or not 0.0 <= _spoken_at(event) - spoken <= ALLIN_RESTATE_SEC:
             return False

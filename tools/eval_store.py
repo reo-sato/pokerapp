@@ -275,8 +275,8 @@ def script_order_events(script: dict, marks: list[dict], transcripts: list[dict]
         text = (row.get("text") or "").strip()
         parsed = [] if _is_noise(row, text) else parse_actions(
             text, confidence=row.get("confidence"), utterance_start_ts=start)
-        if row.get("ear"):
-            parsed, _ = apply_ear(parsed, text, row["ear"], question=is_question(text), utterance_start_ts=start)
+        parsed, _ = apply_ear(parsed, text, row.get("ear"), question=is_question(text), utterance_start_ts=start,
+                              confidence=row.get("confidence"))
         for i, ev in enumerate(parsed):
             ev.timestamp = float(start) + 0.001 * (i + 1)
         events.extend(parsed)
@@ -341,8 +341,9 @@ def reparse_events(events: list, transcripts: list[dict], texts: Optional[dict[A
         text = ((texts[key] if overridden else row.get("text")) or "").strip()
         parsed = [] if _is_noise(row, text) else parse_actions(
             text, confidence=row.get("confidence"), utterance_start_ts=start)
-        if not overridden and row.get("ear"):
-            parsed, _ = apply_ear(parsed, text, row["ear"], question=is_question(text), utterance_start_ts=start)
+        if not overridden:      # 第 2 の耳が無い発話も（意味のない単発の語を音の近さで額と読む, ライブと同じ）
+            parsed, _ = apply_ear(parsed, text, row.get("ear"), question=is_question(text), utterance_start_ts=start,
+                                  confidence=row.get("confidence"))
         at = live_time.get(start, row.get("heard_at") or start)
         for ev in parsed:
             ev.timestamp = at

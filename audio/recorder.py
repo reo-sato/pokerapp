@@ -131,7 +131,7 @@ def describe_event(event: Optional[AudioEvent]) -> str:
     elif event.position:
         parts.append(event.position)
     labels = {"amount_only": "数字だけ", "fuzzy_keyword": "音の近さで読んだ", "second_ear": "第 2 の耳",
-              "sentence_after_chatter": "雑談のあとの文"}
+              "sentence_after_chatter": "雑談のあとの文", "phonetic_amount": "意味のない語を額の音で読んだ"}
     shown = [labels.get(f, f) for f in flags if f != "check_around"]
     if shown:
         parts.append("（" + "・".join(shown) + "）")
@@ -642,16 +642,15 @@ class AudioThread(threading.Thread):
             events = () if noise or not text else tuple(parse_actions(
                 text, confidence=confidence, utterance_start_ts=utterance_start_ts
             ))
-            ear, ear_text = None, None
-            if self._second_ear is not None:
-                from audio.second_ear import apply_ear, wants_ear
+            from audio.second_ear import apply_ear, wants_ear
 
-                if wants_ear(events, text, question):
-                    ear = self._hear_again(audio_bytes)
-                    used, text_used = apply_ear(events, text, ear, question=question,
-                                                utterance_start_ts=utterance_start_ts)
-                    if text_used is not None:
-                        events, ear_text = tuple(used), text_used
+            ear = None
+            if self._second_ear is not None and wants_ear(events, text, question):
+                ear = self._hear_again(audio_bytes)
+            # 第 2 の耳が無い・聞き直せなかったときも通す（意味のない単発の語を音の近さで額と読む, 2026-10-01）
+            used, ear_text = apply_ear(events, text, ear, question=question,
+                                       utterance_start_ts=utterance_start_ts, confidence=confidence)
+            events = tuple(used)
             if not text and not events:
                 return                      # 何も聞こえなかった（第 2 の耳でも）
             if ear_text is not None:

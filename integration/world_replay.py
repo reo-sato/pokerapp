@@ -223,8 +223,9 @@ def read_utterance(row: dict, text: Optional[str] = None) -> list[AudioEvent]:
     text = ((text if overridden else row.get("text")) or "").strip()
     events = [] if is_noise(row, text) else parse_actions(
         text, confidence=row.get("confidence"), utterance_start_ts=start)
-    if not overridden and row.get("ear"):
-        events, _ = apply_ear(events, text, row["ear"], question=is_question(text), utterance_start_ts=start)
+    if not overridden:      # 第 2 の耳が無い発話も（意味のない単発の語を音の近さで額と読む, ライブと同じ）
+        events, _ = apply_ear(events, text, row.get("ear"), question=is_question(text), utterance_start_ts=start,
+                              confidence=row.get("confidence"))
     return events
 
 

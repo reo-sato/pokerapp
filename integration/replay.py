@@ -96,6 +96,7 @@ def event_from_envelope(d: dict) -> Event:
             parse_flags=tuple(d.get("parse_flags") or ()),
             utterance_start_ts=d.get("utterance_start_ts"),
             hand_name=d.get("hand_name"),             # 勝った役名（0.6 additive）
+            amount_options=tuple(d.get("amount_options") or ()),   # 音で読んだ額の候補（0.13 additive）
         )
     if t == "rfid":
         return RFIDEvent(

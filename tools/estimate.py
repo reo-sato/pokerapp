@@ -167,6 +167,9 @@ def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
             options.append(Option("whisper", text, _flag_penalty(whisper, params), _keys(whisper)))
     elif whisper:
         options.append(Option("whisper", text, _flag_penalty(whisper, params), _keys(whisper)))
+    elif live:
+        # 意味のない単発の語を、第 2 の耳なしで音の近さだけで額と読んだ（`recognizer.parse_garbled_amount`）
+        options.append(Option("rescue", text, params["rescue"], _keys(live)))
     else:
         # 定型の幻聴（「ご覧いただきありがとうございます。」）の下で第 2 の耳が何かを聞いた = 何かを言った（店舗
         # 7b897671 ハンド 3: オールインへのコールが幻聴になり、札の離脱でフォールドと記録した）

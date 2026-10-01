@@ -324,6 +324,8 @@ const REASON_LABELS: Record<string, string> = {
   fuzzy_keyword: "音の近さで読んだ",
   second_ear: "Whisper が読めず、第 2 の耳で読んだ",
   sentence_after_chatter: "雑談の文のあとの文だけで読んだ",
+  phonetic_amount: "意味のない語を、額の音に近いので額と読んだ",
+  amount_restated: "直前の賭けの額の言い直しとして額を直した",
 };
 
 export function reasonLabels(reason?: string): string[] {
