@@ -450,3 +450,59 @@ def test_whisper_threads_are_passed_to_faster_whisper(monkeypatch):
     assert WhisperTranscriber("medium", cpu_threads=8).ready and seen["cpu_threads"] == 8
     WhisperTranscriber("medium")
     assert seen["cpu_threads"] == 0                    # 0 = faster-whisper の既定（4）のまま
+
+
+# ――― gain: 保存した発話を、そのままと音量をそろえて聞き直す（店舗 2026-10-01 18:42: 声が小さく決まり文句に） ―――
+
+def _tone_pcm(amplitude: float, seconds: float = 0.5, rate: int = 16000) -> bytes:
+    import numpy as np
+
+    t = np.arange(int(rate * seconds)) / rate
+    return (np.sin(2 * np.pi * 200 * t) * amplitude).astype(np.int16).tobytes()
+
+
+class TestGain:
+    def test_voice_level_and_raising(self):
+        quiet = _tone_pcm(1000)
+        assert audio_check.voice_level(quiet) == pytest.approx(707, rel=0.02)    # 正弦波の RMS = 振幅 / √2
+        raised, gain = audio_check.raise_level(quiet, 3000)
+        assert gain == pytest.approx(3000 / 707, rel=0.02)
+        assert audio_check.voice_level(raised) == pytest.approx(3000, rel=0.02)
+        assert audio_check.raise_level(_tone_pcm(8000), 3000)[1] == 1.0            # 下げはしない
+        assert audio_check.raise_level(_tone_pcm(200), 30000)[1] == pytest.approx(150, rel=0.01)   # 割れない範囲まで
+
+    def test_heard_labels(self):
+        assert audio_check._heard("ご視聴ありがとうございました。") == "決まり文句"     # noqa: SLF001
+        assert audio_check._heard("えーと") == "アクションとして読めず"                 # noqa: SLF001
+        assert audio_check._heard("フォールド") == "fold"                               # noqa: SLF001
+
+    def test_command_compares_both(self, tmp_path, capsys):
+        import wave
+
+        log = tmp_path / "logs"
+        sid = "abc123"
+        (log / "audio" / sid).mkdir(parents=True)
+        rows = []
+        for i, amp in enumerate((800, 900, 6000)):
+            name = f"{i}.wav"
+            with wave.open(str(log / "audio" / sid / name), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(_tone_pcm(amp))
+            rows.append({"utterance_start_ts": float(i), "text": "x", "audio_file": name})
+        (log / f"{sid}.transcripts.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+        class Loudness:                      # 声が 2000 より小さいと決まり文句にする Whisper の代わり
+            def transcribe_with_confidence(self, pcm):
+                return ("フォールド" if audio_check.voice_level(pcm) >= 2000 else "ご視聴ありがとうございました"), 0.5
+
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"audio": {}}), encoding="utf-8")
+        args = audio_check.build_parser().parse_args(
+            ["--config", str(cfg), "gain", "--log-dir", str(log), "--session", "abc"])
+        assert audio_check._cmd_gain(args, make_transcriber=lambda threads, beam: Loudness()) == 0   # noqa: SLF001
+        out = capsys.readouterr().out
+        assert "そのまま: アクションとして読めた 1/3・決まり文句 2" in out
+        assert "そろえて: アクションとして読めた 3/3・決まり文句 0" in out

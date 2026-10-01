@@ -721,6 +721,82 @@ def _cmd_bench(args: argparse.Namespace, make_transcriber=None) -> int:
     return 0
 
 
+# ――― gain: 保存した発話を、そのままと音量をそろえて聞き直す ―――
+#
+# 人が聞けば分かる発話を Whisper が「ご視聴ありがとうございました」などの決まり文句にした（店舗 2026-10-01 18:42 の
+# リハーサル: 声が 13:56 の半分の大きさ）。音量だけが原因かを、同じ発話の音量を上げて聞き直して確かめる。
+
+_STOCK_PHRASES = ("ご視聴", "ありがとうございま", "お疲れ様", "ご覧いただ", "チャンネル登録", "これで終わり")
+_GAIN_TARGET = 3000.0        # 声の大きさ（発話の上位 10% の RMS）をここにそろえる（13:56 の台本の発話は約 2900）
+_PEAK_LIMIT = 30000          # 上げすぎて割れないように
+
+
+def voice_level(pcm: bytes, frame: int = 512) -> float:
+    """発話の声の大きさ = 512 サンプルごとの RMS の上位 10%（無音の部分を数えない）。"""
+    import numpy as np
+
+    x = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
+    if len(x) < frame:
+        return float(np.sqrt(np.mean(x ** 2))) if len(x) else 0.0
+    rms = [np.sqrt(np.mean(x[i:i + frame] ** 2)) for i in range(0, len(x) - frame + 1, frame)]
+    return float(np.percentile(rms, 90))
+
+
+def raise_level(pcm: bytes, target: float = _GAIN_TARGET) -> tuple[bytes, float]:
+    """声の大きさを `target` まで上げた音（下げはしない。割れない範囲まで）と倍率。"""
+    import numpy as np
+
+    x = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
+    level = voice_level(pcm)
+    peak = float(np.max(np.abs(x))) if len(x) else 0.0
+    if level <= 0 or peak <= 0:
+        return pcm, 1.0
+    gain = max(1.0, min(target / level, _PEAK_LIMIT / peak))
+    return np.clip(np.round(x * gain), -32768, 32767).astype(np.int16).tobytes(), gain
+
+
+def _heard(text: str) -> str:
+    from audio.recognizer import parse_actions
+    from audio.recorder import describe_events
+
+    if any(p in text for p in _STOCK_PHRASES):
+        return "決まり文句"
+    events = parse_actions(text)
+    return describe_events(tuple(events)) if events else "アクションとして読めず"
+
+
+def _cmd_gain(args: argparse.Namespace, make_transcriber=None) -> int:
+    cfg = load_audio_config(args.config)
+    log_dir = Path(args.log_dir) if args.log_dir else _ROOT / "logs"
+    picked = pick_utterances(log_dir, args.session, args.count)
+    if picked is None:
+        print(f"保存した発話の音声がありません（{log_dir / 'audio'}）。")
+        return 1
+    label, utterances = picked
+    model = args.model or cfg.get("whisper_model", "medium")
+    threads = int(cfg.get("cpu_threads", 0) or 0) or 4
+    beam = int(cfg.get("beam_size", 5))
+    print(f"セッション {label} の発話 {len(utterances)} 個を、そのままと声の大きさを {args.target:.0f} にそろえた音で"
+          f"聞き直します（モデル {model}。本番のロガーを閉じてから。1 発話 数秒）")
+    make = make_transcriber or _make_whisper(model, cfg.get("language", "ja"), float(cfg.get("vad_threshold", 0.5)))
+    transcriber = make(threads, beam)
+    counts = {"そのまま": [0, 0], "そろえて": [0, 0]}      # [読めた, 決まり文句]
+    for name, path, _live in utterances:
+        pcm = read_pcm16(path)
+        raised, gain = raise_level(pcm, args.target)
+        print(f"  {name}（声 {voice_level(pcm):.0f}・×{gain:.1f}）")
+        for key, audio in (("そのまま", pcm), ("そろえて", raised)):
+            text = (transcriber.transcribe_with_confidence(audio)[0] or "").strip()
+            heard = _heard(text)
+            counts[key][0] += heard not in ("決まり文句", "アクションとして読めず")
+            counts[key][1] += heard == "決まり文句"
+            print(f"    {key}: 「{text}」→ {heard}")
+    print()
+    for key, (ok, stock) in counts.items():
+        print(f"{key}: アクションとして読めた {ok}/{len(utterances)}・決まり文句 {stock}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="マイクと音声認識の確認（音声テストの前に）")
     parser.add_argument("--config", default=None,
@@ -758,6 +834,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_bench.add_argument("--joined", type=int, default=0,
                          help="発話を N 個ずつまとめて 1 回で聞き取る試しもする（いまの設定で。例 3）")
     p_bench.set_defaults(func=_cmd_bench)
+
+    p_gain = sub.add_parser("gain", help="保存した発話を、そのままと音量をそろえて聞き直す（音量が原因かを確かめる）")
+    p_gain.add_argument("--session", default=None, help="セッション ID（先頭でよい。既定: 新しいセッションから）")
+    p_gain.add_argument("--count", type=int, default=60, help="使う発話の数（既定 60）")
+    p_gain.add_argument("--target", type=float, default=_GAIN_TARGET,
+                        help=f"そろえる声の大きさ（発話の上位 10%% の RMS。既定 {_GAIN_TARGET:.0f}）")
+    p_gain.add_argument("--model", default=None, help="音声認識モデル（既定: config の audio.whisper_model）")
+    p_gain.add_argument("--log-dir", default=None, help="logs フォルダ（既定: アプリの logs/）")
+    p_gain.set_defaults(func=_cmd_gain)
     return parser
 
 
