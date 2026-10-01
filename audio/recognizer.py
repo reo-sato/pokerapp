@@ -1070,6 +1070,8 @@ GARBLED_MAX_MORAE = 12
 PHONETIC_AMOUNT_MAX_DISTANCE = 0.4
 # いちばん近い額からこの差までの額も候補にする（「よっしゃんてん」= 4 万 0.22 / 4000 0.25）。場面で使える額を engine が選ぶ
 PHONETIC_AMOUNT_OPTION_SPAN = 0.1
+# 候補の点数 = −（この重み）× 距離（第 2 の耳の確からしさと同じ尺度。`second_ear.EAR_AMOUNT_PHONETIC_WEIGHT` と同じ値）
+PHONETIC_AMOUNT_SCORE_WEIGHT = 10.0
 _GARBLED_STRIP = re.compile(r"[\s、。,.!?！？・…〜~「」]+")
 _GARBLED_TRAILERS = ("デース", "デス", "デシタ")
 
@@ -1103,12 +1105,14 @@ def garbled_word(text: str) -> Optional[str]:
 def phonetic_amount_event(
     text: str, options: tuple[int, ...], confidence: Optional[float],
     utterance_start_ts: Optional[float], flags: tuple[str, ...] = (),
+    scores: tuple[tuple[int, float], ...] = (),
 ) -> AudioEvent:
-    """音で読んだ額（候補 `options` の先頭）のベット・レイズ。engine がその場面で使える候補を選ぶ。"""
+    """音で読んだ額（候補 `options` の先頭）のベット・レイズ。engine がその場面で使える候補を選ぶ
+    （候補の点数 `scores` = 音の近さ・第 2 の耳の確からしさに、ポットに対する大きさの重みを足して）。"""
     return AudioEvent(
         action="bet", amount=options[0], timestamp=time.time(), raw_text=text, confidence=confidence,
         parse_flags=("amount_only", "phonetic_amount", *flags), utterance_start_ts=utterance_start_ts,
-        amount_options=tuple(options),
+        amount_options=tuple(options), amount_scores=tuple(scores),
     )
 
 
@@ -1130,8 +1134,11 @@ def parse_garbled_amount(
     best = ranked[0][0]
     if best > PHONETIC_AMOUNT_MAX_DISTANCE or word_closer_than(word, best):
         return None
-    options = tuple(amount for d, amount in ranked if d <= best + PHONETIC_AMOUNT_OPTION_SPAN)
-    return phonetic_amount_event(text, options, confidence, utterance_start_ts)
+    near = [(amount, d) for d, amount in ranked if d <= best + PHONETIC_AMOUNT_OPTION_SPAN]
+    return phonetic_amount_event(
+        text, tuple(amount for amount, _ in near), confidence, utterance_start_ts,
+        scores=tuple((amount, round(-PHONETIC_AMOUNT_SCORE_WEIGHT * d, 3)) for amount, d in near),
+    )
 
 
 def _parse_utterance(

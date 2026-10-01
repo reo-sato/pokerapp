@@ -74,5 +74,9 @@ class AudioEvent:
     # ショーダウンの判定との突き合わせに使う。役名を言わない「ハンド終了」では None。
     hand_name: Optional[str] = None
     # additive (2026-10-01): 意味のない単発の語を額の音で読んだとき（parse_flags "phonetic_amount"）の額の候補
-    # （確からしい順。`amount` は先頭）。engine がその場面で使える額のうち最初のものを選ぶ。
+    # （確からしい順。`amount` は先頭）。
     amount_options: tuple[int, ...] = ()
+    # additive (2026-10-01): 額の候補ごとの音の点数 (額, log の確からしさ)。第 2 の耳の額ごとの点数（ベット・レイズが
+    # 1 つの発話）か、音で読んだ額の候補の点数。engine が使える額（最小ベット・レイズ〜オールイン）に絞り、ポットに
+    # 対する大きさの重みを足して選ぶ（`integration/engine.py:_choose_amount`）。
+    amount_scores: tuple[tuple[int, float], ...] = ()

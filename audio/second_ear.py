@@ -183,6 +183,7 @@ def read_tokens(path: Path) -> list[str]:
 class Candidate:
     spoken: str   # 音のモデルに与える文（句読点なし。モデルの書き方 = 漢数字）
     text: str     # 読み取り（parse_actions）に渡す文
+    amount: int = 0   # 額の候補ならその額（額ごとの点数の表を作る）
 
 
 _DIGITS = "〇一二三四五六七八九"
@@ -231,12 +232,12 @@ def build_candidates(amounts: Iterable[int] = AMOUNTS) -> list[Candidate]:
         out.append(Candidate(spoken, text))
     for amount in amounts:
         k = kanji_number(amount)
-        out.append(Candidate(k, k))
-        out.append(Candidate(k + "点", k + "点"))
-        out.append(Candidate("レイズ" + k, "レイズ " + k))
-        out.append(Candidate("ベット" + k, "ベット " + k))
-        out.append(Candidate(k + "コール", k + "、コール"))
-        out.append(Candidate("コール" + k, "コール " + k))
+        out.append(Candidate(k, k, amount))
+        out.append(Candidate(k + "点", k + "点", amount))
+        out.append(Candidate("レイズ" + k, "レイズ " + k, amount))
+        out.append(Candidate("ベット" + k, "ベット " + k, amount))
+        out.append(Candidate(k + "コール", k + "、コール", amount))
+        out.append(Candidate("コール" + k, "コール " + k, amount))
     for first in _PAIR_WORDS:
         for second in _PAIR_WORDS:
             out.append(Candidate(first + second, first + "、" + second))
@@ -400,14 +401,47 @@ class EarResult:
     text: str                           # 自由に聞いた文
     logp: float                         # その文の確からしさ
     candidates: list[tuple[str, float]]  # (読み取りに渡す文, 確からしさ) の上位
+    # 額ごとの点数（その額のどの言い方でもいちばん確からしいもの）の上位 `AMOUNT_TABLE_SIZE`。engine がその場面で
+    # 使える額だけに絞って選ぶ（オーナー 2026-10-01「可能なベット / レイズ額の空間を事前に用意しておけば」）
+    amounts: list[tuple[int, float]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {"text": self.text, "logp": _round(self.logp),
-                "candidates": [{"text": t, "logp": _round(s)} for t, s in self.candidates]}
+        out = {"text": self.text, "logp": _round(self.logp),
+               "candidates": [{"text": t, "logp": _round(s)} for t, s in self.candidates]}
+        if self.amounts:
+            out["amounts"] = [[a, _round(s)] for a, s in self.amounts if np.isfinite(s)]
+        return out
 
 
 def _round(value: float) -> Optional[float]:
     return None if not np.isfinite(value) else round(float(value), 3)
+
+
+# 記録に残す額の数（点数の上位）。使える額の最も良いものは、ほぼこの中にある（ほかは音が遠い）
+AMOUNT_TABLE_SIZE = 40
+
+
+def amount_scores_of(candidates: list[Candidate], scores: np.ndarray,
+                     size: int = AMOUNT_TABLE_SIZE) -> list[tuple[int, float]]:
+    """候補ごとの点数から、額ごとの点数（言い方のうち最も確からしいもの）の上位 `size`。"""
+    best: dict[int, float] = {}
+    for cand, score in zip(candidates, scores):
+        if cand.amount and np.isfinite(score) and score > best.get(cand.amount, float("-inf")):
+            best[cand.amount] = float(score)
+    return sorted(best.items(), key=lambda kv: (-kv[1], kv[0]))[:size]
+
+
+def amount_table(ear: Optional[dict]) -> dict[int, float]:
+    """`EarResult.to_dict()` の額ごとの点数（無ければ空。古い記録には無い）。"""
+    table: dict[int, float] = {}
+    for item in (ear or {}).get("amounts") or []:
+        try:
+            amount, logp = int(item[0]), item[1]
+        except (TypeError, ValueError, IndexError):
+            continue
+        if logp is not None and amount > 0:
+            table[amount] = float(logp)
+    return table
 
 
 class SecondEar:
@@ -429,7 +463,8 @@ class SecondEar:
         free = heard.score(ids, self.model.context_size)
         scores = heard.score_trie(self.trie)
         order = np.argsort(-scores)[:top]
-        return EarResult(text, free, [(self.trie.candidates[i].text, float(scores[i])) for i in order])
+        return EarResult(text, free, [(self.trie.candidates[i].text, float(scores[i])) for i in order],
+                         amounts=amount_scores_of(self.trie.candidates, scores))
 
 
 # ――― ライブの聞き直し ―――
@@ -554,6 +589,22 @@ def wants_ear(events: Iterable, text: str, question: bool = False, confidence: O
     return bool(_amountless(events)) or _doubtful(events, confidence)
 
 
+def wants_amount_scores(events: Iterable) -> bool:
+    """額を読んだベット・レイズのある発話（Whisper がはっきり読んでも）。第 2 の耳の額ごとの点数を残し、engine が
+    いま使えない額だったときに使える額から選び直せるようにする（第 2 の耳は 1 発話 0.1〜0.2 秒）。"""
+    return any(e.action in ("bet", "raise") and e.amount for e in events)
+
+
+def _with_amount_scores(events: list, ear: Optional[dict]) -> list:
+    """発話の中のベット・レイズがちょうど 1 つなら、第 2 の耳の額ごとの点数を付ける（2 つ以上ならどの額の点数か
+    分からないので付けない）。音で読んだ額（`phonetic_amount`）は自分の候補の点数を持っているのでそのまま。"""
+    table = amount_table(ear)
+    wagers = [e for e in events if e.action in ("bet", "raise")]
+    if table and len(wagers) == 1 and not wagers[0].amount_scores:
+        wagers[0].amount_scores = tuple(sorted(table.items(), key=lambda kv: (-kv[1], kv[0])))
+    return events
+
+
 # 意味のない単発の語（「ゼニューク」）を額と読むとき（オーナー 2026-10-01, `recognizer.garbled_word`）: 第 2 の耳の額の
 # 候補のうち、確からしさが自由に聞いた文から `EAR_AMOUNT_LOGP_GAP` 以内（音声が額でも同じくらい説明できる）で、Whisper の
 # 語に音が近い（`EAR_AMOUNT_MAX_DISTANCE` 以下）もの。確からしさと音の近さを足して並べる（距離 0〜1 を
@@ -593,7 +644,8 @@ def garbled_amount_events(text: str, ear: Optional[dict], *,
         return [], None
     order = sorted(scored.items(), key=lambda item: (-item[1][0], item[0]))
     options = tuple(amount for amount, _ in order)
-    event = phonetic_amount_event(text, options, EAR_CONFIDENCE, utterance_start_ts, flags=(EAR_FLAG,))
+    event = phonetic_amount_event(text, options, EAR_CONFIDENCE, utterance_start_ts, flags=(EAR_FLAG,),
+                                  scores=tuple((amount, round(score, 3)) for amount, (score, _) in order))
     return [event], order[0][1][1]
 
 
@@ -601,6 +653,19 @@ def apply_ear(events: Iterable, text: str, ear: Optional[dict], *, question: boo
               utterance_start_ts: Optional[float] = None,
               confidence: Optional[float] = None) -> tuple[list, Optional[str]]:
     """Whisper の読み（`events`, 文 `text`）に第 2 の耳の結果を重ねる。(アクション, 使った候補の文 or None)。
+
+    ベット・レイズがちょうど 1 つの発話には、第 2 の耳の額ごとの点数を付ける（`_with_amount_scores`。engine が
+    使えない額だったとき・音で読んだ額の候補から選ぶとき、その場面で使える額に絞って使う）。
+    """
+    used, used_text = _apply_ear(events, text, ear, question=question, utterance_start_ts=utterance_start_ts,
+                                 confidence=confidence)
+    return _with_amount_scores(used, ear), used_text
+
+
+def _apply_ear(events: Iterable, text: str, ear: Optional[dict], *, question: bool = False,
+               utterance_start_ts: Optional[float] = None,
+               confidence: Optional[float] = None) -> tuple[list, Optional[str]]:
+    """`apply_ear` の本体（額ごとの点数を付ける前）。
 
     ライブ（`AudioThread`）・書き起こしの読み直し（`tools/eval_store.py`）・読み上げ集・推定器が同じ規則を使う。
     読めなかった発話は `rescue_events`（ポット・ブラインドの読み上げ =「ポット1万2000です。」は、第 2 の耳が額だけを

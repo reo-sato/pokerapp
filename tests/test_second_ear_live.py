@@ -225,10 +225,16 @@ class TestAmountFromTheEar:
         events, (transcript,) = _run("ベット", FakeEar(se.EarResult("ベッド", -0.1, [("ベット 三百", -3.0)])))
         assert [(e.action, e.amount) for e in events] == [("bet", 0)] and transcript.ear_text is None
 
-    def test_a_read_amount_is_not_heard_again(self):
-        ear = FakeEar(RAISE_1800)
-        events, _ = _run("レイズ 1200", ear)
-        assert [(e.action, e.amount) for e in events] == [("raise", 1200)] and ear.heard == []
+    def test_a_read_amount_is_heard_only_for_the_amount_scores(self):
+        """額を読めた発話も聞き直す（2026-10-01）が、読みは変えない。額ごとの点数を付けて engine に渡す（いま使えない
+        額だったときに、使える額から選び直すため）。"""
+        result = se.EarResult("レイズ千二百", -0.2, [("レイズ 千二百", -0.2)], amounts=[(1200, -0.2), (200, -3.0)])
+        ear = FakeEar(result)
+        events, (transcript,) = _run("レイズ 1200", ear)
+        assert [(e.action, e.amount) for e in events] == [("raise", 1200)] and len(ear.heard) == 1
+        assert "second_ear" not in events[0].parse_flags and transcript.ear_text is None
+        assert events[0].amount_scores == ((1200, -0.2), (200, -3.0))
+        assert transcript.ear["amounts"] == [[1200, -0.2], [200, -3.0]]
 
     def test_only_one_amountless_bet_is_filled(self):
         assert se.fill_amounts(se.rescue_events(None) + [], RAISE_1800.to_dict()) is None

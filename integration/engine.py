@@ -150,6 +150,11 @@ HELD_WORDS_TO_DROP_ALLIN = 2
 # （同じ額ならコール）ので、言い直しを次の人のレイズにしていた。
 ALLIN_RESTATE_SEC = 8.0
 _BETTING_WORDS = frozenset({"check", "call", "bet", "raise", "allin"})
+# 額の候補から選ぶとき（`_choose_amount`）、使える額の 1 番と 2 番の点数の差がこれ未満なら「額があいまい」（要確認）
+AMOUNT_CLOSE = 1.0
+# 読んだ額がいま使えない（最小ベット・レイズに届かない）とき、第 2 の耳の額ごとの点数から使える額を選び直すのは、
+# その額の点数がいちばん確からしい額（使えない額も含む）からこの差以内のときだけ（音がどの使える額にも遠ければ選ばない）
+LEGAL_AMOUNT_MAX_GAP = 5.0
 
 # review の理由にしない parse flag（読み方の情報。「数字だけ」「チェックアラウンド」は運用どおりの言い方）
 _INFO_PARSE_FLAGS = frozenset({"amount_only", "check_around"})
@@ -1076,11 +1081,27 @@ class IntegrationThread(threading.Thread):
             return
         legal_ctx = gs.legal_context()
         if "phonetic_amount" in event.parse_flags:
-            # 意味のない単発の語を音で読んだ額: 候補のうち、いま使える額（最小ベット・レイズ以上・持ち点まで）の先頭
-            picked = self._pick_phonetic_amount(event, legal_ctx)
+            # 意味のない単発の語を音で読んだ額: 候補のうち、いま使える額（最小ベット・レイズ以上・持ち点まで）から
+            # 音の点数とポットに対する大きさの重みで選ぶ
+            picked = self._choose_amount(event, legal_ctx)
             if picked is None:
+                options = event.amount_options or tuple(a for a, _ in event.amount_scores) or (event.amount,)
+                shown = "・".join(str(a) for a in options[:3])
+                self._notice(f"「{event.raw_text}」は額（{shown}）の言い間違いに聞こえますが、いまは使えない額なので"
+                             "記録しませんでした")
+                if self._betting_over():
+                    self._count_held_betting_word()
                 return
             event = picked
+        elif self._amount_needs_choice(event, legal_ctx):
+            # 「レイズ 300」（最小レイズ 1000）のように読んだ額がいま使えない: 第 2 の耳の額ごとの点数から、使える額を
+            # 選び直す（オーナー 2026-10-01: 可能な額は最小 1bb〜持ち点、チップの刻みしか無い）
+            picked = self._choose_amount(event, legal_ctx, flag="legal_amount", max_gap=LEGAL_AMOUNT_MAX_GAP)
+            if picked is not None:
+                if not self._rebuilding:
+                    self._notice(f"「{event.raw_text}」の {event.amount} はいま使えない額なので、音の近い使える額 "
+                                 f"{picked.amount} にしました（要確認）")
+                event = picked
         if "amount_only" in event.parse_flags:
             # 数字だけの発話 = ベットかレイズ。使えない額なら記録しない（「7」「いまのベットと同じ額」）
             problem = self._amount_only_problem(event, legal_ctx)
@@ -1115,28 +1136,59 @@ class IntegrationThread(threading.Thread):
         else:
             self._handle_legacy_action(event)
 
-    def _pick_phonetic_amount(self, event: AudioEvent, ctx: LegalContext) -> Optional[AudioEvent]:
-        """音で読んだ額（`phonetic_amount`）の候補のうち、いまの手番でベット・レイズに使える最初の額にする。
+    def _choose_amount(self, event: AudioEvent, ctx: LegalContext, *, flag: Optional[str] = None,
+                       max_gap: Optional[float] = None) -> Optional[AudioEvent]:
+        """額の候補（音の点数 `amount_scores`、無ければ `amount_options` の順）のうち、いまの手番でベット・レイズに使える
+        額（最小ベット・レイズ〜オールイン）から、音の点数 + ポットに対する大きさの重み（`core.bet_sizing`）が最も高い額。
 
-        使える額が無ければ記録しない（お知らせだけ）。使える候補が 2 つ以上あれば `ambiguous_amount` も付ける（要確認）。
+        使える額が無い（`max_gap` があれば、その額の音の点数がいちばん確からしい額からその差より遠い）なら None。
+        使える額の 1 番と 2 番の差が `AMOUNT_CLOSE` 未満なら `ambiguous_amount` も付ける（要確認）。`flag` は付ける印。
         """
-        options = event.amount_options or (event.amount,)
-        usable = [a for a in options if ctx.actor_seat is not None and ("raise" in ctx.legal_actions
-                                                                        or "bet" in ctx.legal_actions)
-                  and ctx.min_raise <= a <= ctx.max_raise]
-        if not usable:
-            shown = "・".join(str(a) for a in options[:3])
-            self._notice(f"「{event.raw_text}」は額（{shown}）の言い間違いに聞こえますが、いまは使えない額なので記録しませんでした")
-            if self._betting_over():
-                self._count_held_betting_word()
+        from core.bet_sizing import amount_prior
+
+        if ctx.actor_seat is None or not ({"bet", "raise"} & ctx.legal_actions):
             return None
-        flags = tuple(event.parse_flags)
-        if len(usable) > 1 and "ambiguous_amount" not in flags:
-            flags = (*flags, "ambiguous_amount")
+        scores = dict(event.amount_scores)
+        if not scores:
+            options = event.amount_options or ((event.amount,) if event.amount else ())
+            scores = {a: -float(i) for i, a in enumerate(options)}
+        if not scores:
+            return None
+        top = max(scores.values())
+        pot = self._game_state.pot
+        ranked = sorted(
+            ((s + amount_prior(a, ctx, pot), -i, a) for i, (a, s) in enumerate(scores.items())
+             if ctx.min_raise <= a <= ctx.max_raise and (max_gap is None or s >= top - max_gap)),
+            reverse=True,
+        )
+        if not ranked:
+            return None
+        best_score, _, best = ranked[0]
+        flags = list(event.parse_flags)
+        close = len(ranked) > 1 and best_score - ranked[1][0] < AMOUNT_CLOSE
+        for extra in (flag, "ambiguous_amount" if close else None):
+            if extra and extra not in flags:
+                flags.append(extra)
         if not self._rebuilding:
-            logger.info("「%s」を額 %d と読みました（音の近さ%s。候補 %s）", event.raw_text, usable[0],
-                        "・第 2 の耳" if "second_ear" in flags else "", options)
-        return replace(event, amount=usable[0], parse_flags=flags)
+            logger.info("「%s」の額を %d にしました（使える額の候補 %s）", event.raw_text, best,
+                        [(a, round(sc, 2)) for sc, _, a in ranked[:3]])
+        return replace(event, amount=best, parse_flags=tuple(flags))
+
+    def _amount_needs_choice(self, event: AudioEvent, ctx: LegalContext) -> bool:
+        """読んだ額がいまの最小ベット・レイズに届かない（使えない）ので、第 2 の耳の額ごとの点数から選び直すか。
+
+        語と一緒に言った額（「レイズ 300」）は最小に届かなければ選び直す。数字だけの発話（店の言い方 = 額だけ）は、
+        いまのベットより大きく最小レイズに届かないとき（これまでは最小レイズに寄せていた）だけ。いまのベット以下の
+        数字（コールの額の言い直し・ポットの読み上げ・役の「7」など）は従来どおり記録しない（`_amount_only_problem`）。
+        額が無い語（「レイズ」だけ）は選ばない（次の発話の額を待つ）。第 2 の耳の点数が無ければ従来どおり。
+        """
+        if (event.action not in ("bet", "raise") or not event.amount or not event.amount_scores
+                or not (self._rules_aware and self._hand_open) or ctx.actor_seat is None
+                or not ({"bet", "raise"} & ctx.legal_actions) or event.amount >= ctx.min_raise):
+            return False
+        if "amount_only" in event.parse_flags:
+            return "raise" in ctx.legal_actions and event.amount > ctx.committed + ctx.amount_to_call
+        return True
 
     def _amount_only_problem(self, event: AudioEvent, ctx: LegalContext) -> Optional[str]:
         """数字だけの発話をベット・レイズにできない理由（できるなら None）。

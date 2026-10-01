@@ -642,10 +642,11 @@ class AudioThread(threading.Thread):
             events = () if noise or not text else tuple(parse_actions(
                 text, confidence=confidence, utterance_start_ts=utterance_start_ts
             ))
-            from audio.second_ear import apply_ear, wants_ear
+            from audio.second_ear import apply_ear, wants_amount_scores, wants_ear
 
             ear = None
-            if self._second_ear is not None and wants_ear(events, text, question):
+            # 額を読んだ発話も聞き直す（額ごとの点数 = いま使えない額だったときに使える額から選び直す, 2026-10-01）
+            if self._second_ear is not None and (wants_ear(events, text, question) or wants_amount_scores(events)):
                 ear = self._hear_again(audio_bytes)
             # 第 2 の耳が無い・聞き直せなかったときも通す（意味のない単発の語を音の近さで額と読む, 2026-10-01）
             used, ear_text = apply_ear(events, text, ear, question=question,

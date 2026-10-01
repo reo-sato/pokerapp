@@ -326,6 +326,7 @@ const REASON_LABELS: Record<string, string> = {
   sentence_after_chatter: "雑談の文のあとの文だけで読んだ",
   phonetic_amount: "意味のない語を、額の音に近いので額と読んだ",
   amount_restated: "直前の賭けの額の言い直しとして額を直した",
+  legal_amount: "聞いた額がその場面で使えないので、音の近い使える額にした",
 };
 
 export function reasonLabels(reason?: string): string[] {

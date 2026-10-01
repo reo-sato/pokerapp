@@ -53,6 +53,9 @@ def event_to_envelope(event: RecordableEvent) -> dict:
             envelope["hand_name"] = event.hand_name   # 勝った役名（0.6 additive）
         if event.amount_options:
             envelope["amount_options"] = list(event.amount_options)   # 音で読んだ額の候補（0.13 additive）
+        if event.amount_scores:
+            # 額の候補ごとの音の点数（0.14 additive）
+            envelope["amount_scores"] = [[int(a), float(s)] for a, s in event.amount_scores]
         return envelope
     if isinstance(event, RFIDEvent):
         envelope = {

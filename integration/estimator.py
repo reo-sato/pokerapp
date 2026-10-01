@@ -54,6 +54,8 @@ PARAMS: dict[str, float] = {
                                  # 1/17。掃引で店舗・台本の正誤が動かない 0.03〜0.1 の中）
     "p_sub": 0.02,               # 語の種類の取り違え（チェック ↔ コール など）
     "p_amount": 0.05,            # 額の聞き違い（寄せた・丸めた）
+    "amount_prior_weight": 1.0,  # 賭けの額のポットに対する大きさの重み（`core.bet_sizing.size_prior` に掛ける。オーナー
+                                 # 2026-10-01: 多くはポット以下、多くても 3 倍。真のアクションの賭け 92 のうちポット以下 75%）
     # 札の離脱（卓状態の履歴）。時刻の密度で比べる（どの仮説でも離脱 1 つに密度 1 つ）
     "p_nodepart": 0.03,          # フォールドしたのに札が離れない（店舗 0/25。その席の札がハンドで一度も読めなければ数えない）
     "fold_lag_mu": 0.1,          # 「フォールド」の話し始めから札が離れるまで（店舗 20 回の中央値 0.1 秒、[−1.35, +1.02]）
@@ -89,6 +91,9 @@ _WAGER = frozenset({"bet", "raise", "allin"})
 _BETTING = frozenset({"fold", "check", "call", "bet", "raise", "allin"})
 _WORD_SOURCES = frozenset({"engine_prior", "spoken_seat", "spoken_position"})
 _RFID_FOLDS = frozenset({"rfid_departure", "rfid_muck"})
+# engine が額を決めた印（ライブの記録では要確認）。推定の要確認の理由にもする（作業計画の監査 2026-10-01 §4: 推定を
+# 記録の本体にすると、記録の要確認は推定の `review` で置き換わるため、これが無いと印が消える）。採点には足さない
+_AMOUNT_READ_REASONS = frozenset({"phonetic_amount", "amount_restated", "legal_amount", "ambiguous_amount"})
 _INSERTABLE = ("fold", "check", "call")
 _INSERT_LEAD_SEC = 0.3          # 聞こえなかったアクションは次の語の少し前に置く
 _STREETS = ("preflop", "flop", "turn", "river")
@@ -491,14 +496,21 @@ class SessionEstimator:
 
     def _action_terms(self, hand: dict, betting: list[_Row], flags: list[str]) -> list[tuple[str, float]]:
         """アクション列の事前（合法手の種類の数）と、各行が言われた / 言われなかった確率。"""
+        from core.bet_sizing import hand_wager_ratios, size_prior
+
         p = self.params
         terms: list[tuple[str, float]] = []
         last_fold = _last_fold(hand, betting)
         prev: dict[str, Optional[str]] = {}
         facing = {"preflop": True}
+        ratios = (hand_wager_ratios([r.raw or {} for r in betting], hand.get("blinds") or {},
+                                    hand.get("position_map") or {}) if p.get("amount_prior_weight") else {})
         for i, r in enumerate(betting):
             n_legal = 3 if facing.get(r.street, False) else 2
             terms.append(("手の事前", -math.log(n_legal)))
+            size = p.get("amount_prior_weight", 0.0) * size_prior(ratios.get(i))
+            if size < 0:
+                terms.append(("賭けの大きさ", size))      # ポットに対して大きすぎる額ほど低い（弱い事前）
             if r.action in _WAGER:
                 facing[r.street] = True
             miss = self._p_miss(r.action, prev.get(r.street), i == last_fold)
@@ -512,6 +524,8 @@ class SessionEstimator:
                 if r.reasons & {"amount_snapped", "no_amount_heard", "rounded_to_bb"}:
                     terms.append(("額の聞き違い", _log(p["p_amount"])))
                     flags.append(f"額の聞き違い（{r.street} 席{r.seat}）")
+                if r.reasons & _AMOUNT_READ_REASONS:
+                    flags.append(f"額の読み（{r.street} 席{r.seat} {(r.raw or {}).get('amount')}）")
             else:
                 terms.append((f"言われない {r.action}", _log(miss)))
                 if i != last_fold and "players_left_call" not in r.reasons:     # 「N プレイヤーズ」で言われた

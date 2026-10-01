@@ -170,6 +170,11 @@ test("reasonLabels: known codes, patterns, and unknown codes", () => {
     "数字だけ（ベットかレイズかは場面から）",
     "直前の賭けの額の言い直しとして額を直した",
   ]);
+  assert.deepEqual(reasonLabels("amount_only+legal_amount+ambiguous_amount"), [
+    "数字だけ（ベットかレイズかは場面から）",
+    "聞いた額がその場面で使えないので、音の近い使える額にした",
+    "金額の言い方が曖昧",
+  ]);
 });
 
 test("streetTotals / shownAmount: a call is shown as what the player put in on that street", () => {
