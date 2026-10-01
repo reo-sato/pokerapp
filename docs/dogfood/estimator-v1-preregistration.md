@@ -20,7 +20,7 @@
 
 | 項目 | 値 |
 |---|---|
-| コード | コミット `4dbb1bc24915fb2b5e0c2f3f03564e68ca5a6df6`（ブランチ `claude/confident-hawking-5e4hff`。2026-10-01 に 46a2ba6 から改訂 = 上の「改訂」。このあとのコミットは文書と、カードの登録のツール（`tools/register_cards.py` の `swap-suits` とそのテスト。`rfid_cards.json` のスートの取り違えを直す道具で、ロガー・推定器は使わない）だけ = 報告で `git diff --stat 4dbb1bc -- '*.py'` にこれら以外が出ないことを確かめる）。推定器・再生器（`integration/world_replay.py`）・engine（`integration/engine.py`・`core/poker_engine.py` ほか）・語の読み（`audio/recognizer.py`）・発話の読みの選択肢（`tools/estimate.py` の `utterance_options`）を含めてこのコミットのもの |
+| コード | コミット `4dbb1bc24915fb2b5e0c2f3f03564e68ca5a6df6`（ブランチ `claude/confident-hawking-5e4hff`。2026-10-01 に 46a2ba6 から改訂 = 上の「改訂」。このあとのコミットは文書と、カードの登録のツール（`tools/register_cards.py` の `swap-suits` とそのテスト。`rfid_cards.json` のスートの取り違えを直す道具で、ロガー・推定器は使わない）と、推定のコマンドのハンドごとの時間の表示（`tools/estimate_logs.py` とそのテスト。推定の結果は変えない）だけ = 報告で `git diff --stat 4dbb1bc -- '*.py'` にこれら以外が出ないことを確かめる）。推定器・再生器（`integration/world_replay.py`）・engine（`integration/engine.py`・`core/poker_engine.py` ほか）・語の読み（`audio/recognizer.py`）・発話の読みの選択肢（`tools/estimate.py` の `utterance_options`）を含めてこのコミットのもの |
 | 推定器の版 | `ESTIMATOR_VERSION = "1.0"` |
 | 値 | `params_hash = 5e54104723c3`（推定器の `PARAMS` と発話の読みの値 `reading_params()` の両方の指紋。推定のファイルに書かれる） |
 | 要確認 | 推定の `review`（理由が 1 つ以上）。理由は 3. |
@@ -71,7 +71,8 @@
 3. 推定の誤りには**全部**要確認が付く。
 4. 推定の誤り **4 以下**。
 5. 同じ入力で同じ結果（同じ機械で 2 回回して、全ハンドの 1 番の記録と要確認が同じ）。
-6. 店舗 PC で **1 セッション 1 分以内**（`tools/estimate_logs.py` の「所要」）。
+6. 店舗 PC で 1 ハンドの推定（1 プロセスで順に = ロガーがハンドごとに回すときと同じ）が **中央値 15 秒以内・最長 90 秒以内**（`tools/estimate_logs.py --workers 1` の「1 ハンドの推定」）。
+   2026-10-01 オーナー承認で「1 セッション 1 分以内」から変えた（評価のデータを録る前）。推定はハンドごとに回し、次のハンドが終わるまでに出れば足りる（1 ハンドは 1〜3 分）。セッションの所要は札のあるハンドが多いと 40 ハンドで数分になり（リハーサル: 店舗 PC で 4 ハンド 11 秒）、使い方に合わない。開発データ（店舗 25 ハンド、この VM・1 プロセス）は中央値 2.9 秒・9 割 9.5 秒以内・最長 44.0 秒（30 秒を超えたのは 2 ハンド）。店舗 PC は約 1.3 倍。
 
 目安（合否にはしない。報告に書く）: 要確認の理由はアクションの 3 割以下・1 ハンド平均 2 件以下。
 
@@ -124,10 +125,14 @@
 
 評価のセッション:
 
+0. 配る人がマイク（送信機）を付けたら、`audio_check listen` で配るときの言い方を言い、決まり文句（「ご視聴
+   ありがとうございました」など）にならずに読めることを確かめる（2026-10-01 のリハーサル: 配る人・付け方で
+   声の大きさが半分になり、決まり文句が 28% に増えて全ハンドを誤った）。配る人が替わるたびに:
+   `cd C:\PokerHandLogger; .\venv\Scripts\python.exe tools\audio_check.py listen --seconds 60`
 1. いつもどおりロガーと真のアクションの入力画面を使う（全ハンドに真のアクション、記録を見ずに入れる）。
-2. セッションのあと（営業中は動かさない）、店舗 PC で所要を測る（いちばん新しいセッションを推定して影のファイルに
-   書く = 読む側は使わない）:
-   `cd C:\PokerHandLogger; .\venv\Scripts\python.exe tools\estimate_logs.py logs --latest --shadow`
+2. セッションのあと（営業中は動かさない）、店舗 PC で 1 ハンドの推定の時間を測る（いちばん新しいセッションを
+   1 ハンドずつ推定して影のファイルに書く = 読む側は使わない）:
+   `cd C:\PokerHandLogger; .\venv\Scripts\python.exe tools\estimate_logs.py logs --latest --shadow --workers 1`
 3. デスクトップの「ログをまとめる (音声付き・送付用)」でログを zip にして送る（誤りの理由を聞いて確かめるため音声も）。
 
 こちら: 固定したコミットで `python tools/bench_hands.py <zip> --twice --search-check`（ライブの記録との比較・

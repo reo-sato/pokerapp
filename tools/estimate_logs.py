@@ -9,6 +9,7 @@
     python tools/estimate_logs.py logs_2026-10-01.zip                  # 推定だけ見る（書かない）
     python tools/estimate_logs.py C:\\PokerHandLogger\\logs --shadow   # 影のファイルに書く
     python tools/estimate_logs.py logs --latest --shadow               # いちばん新しいセッションだけ（所要を測る）
+    python tools/estimate_logs.py logs --latest --shadow --workers 1   # 1 ハンドずつ順に（ハンドごとの時間を出す）
     python tools/estimate_logs.py C:\\PokerHandLogger\\logs --write    # 記録の本体にする（評価に通ってから）
 """
 from __future__ import annotations
@@ -96,6 +97,14 @@ def _summary(hand: dict) -> list[str]:
             for a in hand.get("actions") or [] if a.get("street") != "showdown"]
 
 
+def format_hand_times(hand_secs: list[tuple[float, object]]) -> str:
+    """1 ハンドの推定の時間のまとめ（1 プロセスで順に回したとき）。"""
+    secs = sorted(t for t, _ in hand_secs)
+    median = secs[len(secs) // 2] if len(secs) % 2 else (secs[len(secs) // 2 - 1] + secs[len(secs) // 2]) / 2
+    longest, hid = max(hand_secs, key=lambda x: x[0])
+    return f"1 ハンドの推定: 中央値 {median:.1f} 秒・最長 {longest:.1f} 秒（ハンド {hid}）・{len(secs)} ハンド"
+
+
 def entry_for(result: HandResult, live: Optional[dict]) -> dict:
     """1 ハンドの推定（`core/hand_estimate.py` が読む形）。hand_id と始まりの時刻はライブの記録のもの。"""
     hand = dict(result.best.hand)
@@ -173,12 +182,22 @@ def main(argv: Optional[list[str]] = None) -> int:
             live = list((json.loads(record_path.read_text(encoding="utf-8")) or {}).get("hands") or [])
         print(f"=== {inp.session_id[:8]}（{len(live)} ハンド）")
 
+        hand_secs: list[tuple[float, object]] = []
+        last = [time.time()]
+
         def show(result: HandResult, live_hand: Optional[dict]) -> None:
             changed = live_hand is not None and record_key(live_hand) != record_key(result.best.hand)
             hid = live_hand.get("hand_id") if live_hand else result.window.hand_id
             mark = "変えた" if changed else "同じ"
             review = f" 要確認: {' / '.join(result.reasons)}" if result.reasons else ""
-            print(f"  ハンド {hid}: ライブと{mark}（事後 {result.posteriors[0]:.2f}・次点との差 {result.margin}）{review}")
+            # 1 プロセスで順に回すと、前のハンドからの時間 = そのハンドの推定の時間（ロガーがハンドごとに回すときと同じ）
+            now = time.time()
+            took = ""
+            if args.workers == 1:
+                hand_secs.append((now - last[0], hid))
+                took = f"（{now - last[0]:.1f} 秒）"
+            last[0] = now
+            print(f"  ハンド {hid}: ライブと{mark}{took}（事後 {result.posteriors[0]:.2f}・次点との差 {result.margin}）{review}")
             if changed:
                 print(f"      ライブ: {' | '.join(_summary(live_hand))}")
                 print(f"      推定:   {' | '.join(_summary(result.best.hand))}")
@@ -186,8 +205,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         started = time.time()
         data = estimate_session(inp.events, inp.transcripts, presence_for(inp.folder, inp.session_id), inp.setup,
                                 inp.flags, inp.session_id, live, on_hand=show, workers=args.workers)
-        # 切り替えの条件の「店舗 PC で 1 セッション 1 分以内」（ADR-0056 追記 2）
         print(f"  所要 {time.time() - started:.0f} 秒（{len(data['hands'])} ハンド・{args.workers} プロセス）")
+        if hand_secs:
+            # 評価の条件（事前登録 4. の 6.）: 1 ハンドの推定の中央値と最長
+            print("  " + format_hand_times(hand_secs))
         if args.shadow or args.write:
             out = inp.folder / f"{inp.session_id}{SHADOW_SUFFIX if args.shadow else ESTIMATE_SUFFIX}"
             atomic_write_json(out, data)
