@@ -43,6 +43,33 @@ class TestOptions:
         assert [o.keys for o in ear] == [(("call", 0, None, None),)]              # -12 の候補は選択肢にしない
         assert ear[0].logp > opts[0].logp                                          # 構造が同じなら候補を採る
 
+    def test_a_canned_phrase_has_two_states_when_enabled(self):
+        """`canned_action` > 0（推定器 v1）: 決まり文句になった発話は「雑談だった log(1 − r) / アクションを言った
+        log r + log q」。q はフォールド・チェック・コールに一様 + 第 2 の耳の候補の重み exp(差 / 温度)（自由に聞いた文も
+        重み 1 で分母に入れる）。v0（0）はこれまでどおり。"""
+        import math
+
+        params = dict(PARAMS, canned_action=0.2, canned_ear_temp=2.0)
+        row = {"utterance_start_ts": 1.0, "text": "ご覧いただきありがとうございます。", "no_speech": False,
+               "ear": _ear("る空", [("コール", -5.3), ("千", -12.0)], logp=-0.5)}
+        opts = utterance_options(row, params)
+        assert opts[0].source == "drop" and opts[0].logp == pytest.approx(math.log(0.8))
+        q = {o.text: math.exp(o.logp) / 0.2 for o in opts[1:]}
+        weight = math.exp((-5.3 + 0.5) / 2.0)          # -12 の候補は差 -11.5 < −8 で入れない
+        assert q["コール"] == pytest.approx(weight / (1 + weight) + 1 / (1 + weight) / 3)
+        assert q["フォールド"] == pytest.approx(q["チェック"]) == pytest.approx(1 / (1 + weight) / 3)
+        assert set(q) == {"コール", "フォールド", "チェック"} and sum(q.values()) == pytest.approx(1.0)
+        # 第 2 の耳がはっきり額を聞いた: 賭けの読みが入る（上から ear_top 個まで）
+        amount = {"utterance_start_ts": 2.0, "text": "ご覧いただきありがとうございます。", "no_speech": False,
+                  "ear": _ear("強くて", [("九百点", -1.0), ("百点", -3.4), ("二百点", -4.3), ("千百", -5.4),
+                                       ("千", -6.0)], logp=-0.7)}
+        texts = [o.text for o in utterance_options(amount, params)[1:]]
+        assert texts[0] == "九百点" and len([t for t in texts if t not in ("コール", "フォールド", "チェック")]) == 3
+        # ライブの規則で読めた決まり文句（第 2 の耳の救い出し）はこれまでどおり
+        rescued = {"utterance_start_ts": 3.0, "text": "ご視聴ありがとうございました。", "no_speech": False,
+                   "ear": _ear("六百", [("六百", -0.6), ("二百", -9.0)])}
+        assert utterance_options(rescued, params)[0].source == "rescue"
+
     def test_the_live_rule_is_the_default_when_the_ears_agree(self):
         row = {"utterance_start_ts": 1.0, "text": "のっぴょく", "no_speech": False,
                "ear": _ear("六百", [("六百", -0.6), ("二百", -9.0)])}

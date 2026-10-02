@@ -74,6 +74,8 @@ PARAMS: dict[str, float] = {
     "p_button": 0.05,            # ボタンが記録（ライブが回したボタン）と違う（隣の席 = 動かし忘れ・動かしすぎを 4 倍厚く）
     "p_unclosed": 0.01,          # ベッティングのラウンドが閉じないまま（手番の人が残ったまま）ハンドが終わった
     "p_players": 0.05,           # 残り人数の宣言（ヘッズアップ・N プレイヤーズ）が合わない
+    "p_showdown_word": 0.03,     # ショーダウンの声（「ショーダウン」・役の名前）があるのに全員降りて終わった（真のアクションの
+                                 # 92 ハンド: 声のあった 23 ハンドはすべてショーダウン、全員降りて終わった 45 ハンドで声 0）
     "p_unread_board": 0.03,      # 次のストリートのアクションなのにボードの札が読めていない（店舗 1 回 / 約 40）
     "p_street_time": 0.02,       # アクションの時刻がそのストリートの札の配布と合わない（前のストリートの札より
                                  # 前・次のストリートの札よりあと。札の読み取りの遅れ `street_slack_sec` は許す）
@@ -82,6 +84,9 @@ PARAMS: dict[str, float] = {
     "p_undetermined": 0.20,      # 勝者が決まらない・推し量った
     # 探し方・事後確率
     "beam": 4, "depth": 3, "expand": 12,
+    "canned_near_sec": 15.0,     # 決まり文句の発話をアクションと読む直しは、読めた賭けの語からこの秒数以内の発話だけ（全
+                                 # セッションで、穴を埋めた決まり文句 20 のうち 17 が 13 秒以内。遠い 3 つは 58〜286 秒 =
+                                 # 偶然。ハンドの途中の長い雑談まで広げると 1 ハンドの推定が 3 分になった = 店舗 9d1d8536#4）
     "button_explore": 6.0,       # ボタンを変えた再生が既定よりこれ以上悪ければ、そのボタンでは探さない
     "temperature": 1.0,          # 事後確率の温度（較正する）
     "outside": 0.10,             # 正解が候補の外にある質量 λ（開発データから）
@@ -101,10 +106,13 @@ _STREETS = ("preflop", "flop", "turn", "river")
 
 
 # 発話の読みの確からしさ（`tools/estimate.py` の `utterance_options`, v0 と共通）のうち v1 で置き直す値。
-# 定型の幻聴（「ご覧いただきありがとうございます。」・プロンプトの繰り返し）の下で第 2 の耳が何かを聞いた発話が
-# アクションだったのは店舗の真のアクションで 1/23（7b897671 ハンド 3 のコール）。v0 の −4.0（捨てるのは重い）の
-# ままだと、既定の読みの確からしさを足したとき、雑談の幻聴を第 2 の耳の数字の候補で読む別解が安くなる。
-READING_OVERRIDES: dict[str, float] = {"drop_heard": -0.1}
+# 決まり文句（定型の幻聴「ご覧いただきありがとうございます。」・プロンプトの繰り返し）になり、ライブの規則でも
+# 読めなかった発話は「雑談だった / アクションを言った」の 2 つの状態（`tools/estimate.py` の `_canned_options`）。
+# アクションだった確率 0.2 は全セッションの数え直し（2026-10-02: 店舗の fixture・台本・9/30〜10/01 のログで、真の
+# アクションの並びと読めた語を対応づけて残った穴を、読めた賭けの語から 15 秒以内の決まり文句の 17/51 = 0.33 が埋めた
+# = 上限。雑談の発話でも 0.29 埋めるので偶然を全部引くと 0.06、監査役の目視 ≈ 0.11 → その間。前の値 = 捨てる −0.1 は
+# 開発データの 1/23 から）。
+READING_OVERRIDES: dict[str, float] = {"canned_action": 0.2, "canned_ear_temp": 2.0}
 
 
 def reading_params() -> dict:
@@ -487,6 +495,15 @@ class SessionEstimator:
                               _log(1 - p["p_players"]) if ok else _log(p["p_players"])))
                 if not ok:
                     flags.append(f"人数の宣言が合わない（{want} 人と言ったが {have} 人）")
+        # ショーダウンの声（「ショーダウン」・役の名前）は全員降りて終わったハンドでは言われない（声の数によらず 1 つ。
+        # 店舗 42f7b964 ハンド 2: リバーのコールが決まり文句になり、言われないフォールドで終わる別解が役の名前を
+        # 説明しないまま 1 番だった）
+        if any(t.action == "showdown" or (t.action == "end_hand" and t.hand_name) for t in info["tokens"]):
+            foldout = hand.get("winner_source") == "fold"
+            terms.append(("ショーダウンの声" + ("があるのに全員降りて終わった" if foldout else ""),
+                          _log(p["p_showdown_word"]) if foldout else _log(1 - p["p_showdown_word"])))
+            if foldout:
+                flags.append("ショーダウンの声があるのに全員降りて終わった")
         terms += self._departure_terms(w, hand, betting, flags)
         terms += self._board_terms(hand, flags)
         terms += self._street_time_terms(hand, betting, flags)
@@ -711,11 +728,17 @@ class SessionEstimator:
         edits: list[Edit] = []
         _events, rows = self._window_inputs(w)
         by_start = {r["utterance_start_ts"]: r for r in rows}
+        heard = [t.utterance_start_ts for t in base_info["tokens"]
+                 if t.action in _BETTING and t.utterance_start_ts is not None]
+        near = self.params["canned_near_sec"]
+        # 決まり文句の発話（アクションだったかもしれない）は、読めた賭けの語の近くのものだけ選択点にする
+        canned = {s for s in by_start if any(o.source == "canned" for o in self._options(s))
+                  and any(abs(s - t) <= near for t in heard)}
         # 別の読み
         for start, row in by_start.items():
             options = self._options(start)       # 読みの選択肢（第 2 の耳の候補など）は v0 と同じ
             for opt in options[1:]:
-                if opt.source == "drop":
+                if opt.source == "drop" or (opt.source == "canned" and start not in canned):
                     continue                        # 語を捨てるのは drop で
                 edits.append(Edit("read", start, opt.text, logp=opt.logp, label=f"{row.get('text')!r} → {opt.label()}"))
         # 余計な語を捨てる（その発話で読んだアクションの何番目か = world_events の drops と同じ数え方）
@@ -729,9 +752,10 @@ class SessionEstimator:
             betting_times.append(t.utterance_start_ts)
             edits.append(Edit("drop", t.utterance_start_ts, k,
                               label=f"「{by_start.get(t.utterance_start_ts, {}).get('text')}」の {k + 1} 語目を捨てる"))
-        # 聞こえなかったアクションを入れる（次の語の少し前・最後の語のあと）
+        # 聞こえなかったアクションを入れる（次の語の少し前・最後の語のあと）。選択点にした決まり文句の発話の前も（店舗
+        # 4c252c77 ハンド 2: 決まり文句になったレイズの前に、言われない SB のコール）
         times = sorted(set(betting_times))
-        spots = [s - _INSERT_LEAD_SEC for s in times]
+        spots = [s - _INSERT_LEAD_SEC for s in sorted(set(times) | set(canned))]
         if times and times[-1] in by_start:
             spots.append(delivered_at(by_start[times[-1]]) + 1.0)
         for at in spots:
@@ -771,12 +795,14 @@ class SessionEstimator:
         distinct: dict[tuple, Candidate] = {base.key(): base}
 
         def keep(c: Candidate, parent: Candidate) -> bool:
-            """同じ記録になる直しは得点の良い 1 つ。何も変えない直しは候補にしない。"""
-            if not c.hand or c.key() == parent.key():
+            """同じ記録になる直しは得点の良い 1 つ。記録を変えない直しは候補を広げないが、得点が良ければその記録の
+            説明としては残す（エンジンが補ったコールを、近くの決まり文句の発話の読みで説明する = 店舗 42f7b964
+            ハンド 2）。"""
+            if not c.hand:
                 return False
             if c.key() not in distinct or c.score > distinct[c.key()].score:
                 distinct[c.key()] = c
-            return True
+            return c.key() != parent.key()
 
         def search(root: Candidate, edits: list[Edit]) -> None:
             """root の直しに 1 つずつ足すビーム。"""

@@ -31,6 +31,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -80,6 +81,11 @@ PARAMS: dict[str, float] = {
     "drop_short": -7.0,         # アクションの言葉だけの短い発話（`short_chars` 文字以下）を捨てる
     "drop_heard": -4.0,         # Whisper が定型の幻聴を書いたが、第 2 の耳は何かを聞いた発話を捨てる（音はあった）
     "short_chars": 15,
+    # 決まり文句（Whisper の定型の幻聴）になった発話の状態: 雑談・雑音だった / アクションを言ったのに書き起こしが
+    # 決まり文句になった（`_canned_options`）。0 = 使わない（v0 は `drop_heard` のまま）。v1 は
+    # `integration/estimator.py` の `READING_OVERRIDES` で値を置く
+    "canned_action": 0.0,       # 決まり文句になった発話が実はアクションだった確率
+    "canned_ear_temp": 2.0,     # その発話のアクションの見込みに第 2 の耳の候補を使うときの温度（確からしさの差を割る）
     # ハンドとしての筋の通り方
     "implied": -1.5,            # エンジンが補ったチェック・コール（言われていない）
     "silent_fold": -2.0,        # エンジンが補ったフォールド
@@ -125,7 +131,7 @@ class Option:
 
 
 _SOURCE_JA = {"whisper": "Whisper", "rescue": "第 2 の耳・ライブの規則", "ear": "第 2 の耳の候補", "drop": "雑談",
-             "ear_amount": "第 2 の耳の額の点数", "phonetic": "音の近さの額"}
+             "ear_amount": "第 2 の耳の額の点数", "phonetic": "音の近さの額", "canned": "決まり文句の下のアクション"}
 
 
 @dataclass
@@ -152,7 +158,8 @@ def _flag_penalty(events: list, params: dict) -> float:
 def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
     """1 つの発話の読みの選択肢。[0] が既定（`reparse_events` と同じ規則: Whisper で読めればそれ（額の無いベット /
     レイズには第 2 の耳の額）、読めなければ第 2 の耳のライブの規則、どちらも無ければ捨てる）。選択肢が 1 つしか
-    無ければ選択点にしない。"""
+    無ければ選択点にしない。決まり文句になってライブの規則でも読めなかった発話は、`canned_action` > 0 なら
+    `_canned_options`（雑談だった / アクションを言った）。"""
     start = row.get("utterance_start_ts")
     text = (row.get("text") or "").strip()
     whisper = [] if _is_noise(row, text) else parse_actions(
@@ -181,6 +188,8 @@ def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
         for amount, score in sorted(scores.items(), key=lambda kv: -kv[1]):
             options.append(Option("phonetic", str(amount), score,
                                   _keys(parse_actions(str(amount), utterance_start_ts=start))))
+    elif params.get("canned_action", 0.0) > 0 and is_prompt_echo(text) and not row.get("no_speech"):
+        return _canned_options(ear, start, params)
     else:
         # 定型の幻聴（「ご覧いただきありがとうございます。」）の下で第 2 の耳が何かを聞いた = 何かを言った（店舗
         # 7b897671 ハンド 3: オールインへのコールが幻聴になり、札の離脱でフォールドと記録した）
@@ -234,6 +243,60 @@ def _ear_amount_options(live: list, ear: Optional[dict], start: Optional[float],
         out.append(Option("ear_amount", text, params["ear_base"] + params["ear_diff_weight"] * diff,
                           _keys(parse_actions(text, utterance_start_ts=start))))
     return out
+
+
+# 決まり文句の下のアクションの見込みの土台（額は分からないので賭けは第 2 の耳の候補からだけ）
+_CANNED_WORDS = ("フォールド", "チェック", "コール")
+_CANNED_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin"})
+
+
+def _canned_options(ear: Optional[dict], start: Optional[float], params: dict) -> list[Option]:
+    """書き起こしが決まり文句（Whisper の定型の幻聴）になり、ライブの規則でも読めなかった発話の読み（発話単位の
+    状態: 監査 1 回目の推奨・作業計画の監査 2026-10-01 の最優先）。
+
+    - 既定 = 雑談・雑音だった: log(1 − r)。r = `canned_action`（全セッションの数え直し, 2026-10-02: 真のアクションの
+      並びと読めた語を対応づけて残った穴を、読めた賭けの語から 15 秒以内の決まり文句の 0.33 が埋めた = 上限、雑談の
+      対照で引くと 0.06。`integration/estimator.py` の `READING_OVERRIDES`）。
+    - アクションを言ったのに決まり文句になった: log r + log q(a)。q = フォールド・チェック・コールに一様 +
+      第 2 の耳の候補（1 つのアクションに読める・自由に聞いた文との差が `ear_min_diff` 以上）の重み
+      exp(差 / `canned_ear_temp`)。自由に聞いた文も重み 1 の候補として分母に入れる（耳が自由に聞いた文の方が確からしい
+      ほど、候補の重みは小さい）。賭けは候補の額だけ（上から `ear_top` 個）。どのアクションかは、推定器が流し直した
+      ハンドの筋（閉じないラウンド・言われない賭け・札の離脱）で決まる。
+    """
+    r = float(params["canned_action"])
+    temp = float(params["canned_ear_temp"])
+    found: dict[tuple, tuple[float, str]] = {}          # 読み → (重み, 文)
+    free = (ear or {}).get("logp")
+    if ear and free is not None:
+        for c in ear.get("candidates") or []:
+            if c.get("logp") is None:
+                continue
+            diff = min(0.0, float(c["logp"]) - float(free))
+            if diff < params["ear_min_diff"]:
+                continue
+            events = parse_actions(c["text"], utterance_start_ts=start)
+            if len(events) != 1 or events[0].action not in _CANNED_ACTIONS:
+                continue
+            key, weight = _keys(events), math.exp(diff / temp)
+            if key not in found or weight > found[key][0]:
+                found[key] = (weight, c["text"])
+    wagers = sorted((k for k in found if k[0][0] in ("bet", "raise", "allin")), key=lambda k: -found[k][0])
+    for key in wagers[int(params["ear_top"]):]:
+        del found[key]
+    total = 1.0 + sum(w for w, _ in found.values())
+    rest = 1.0 / total                                   # 耳の候補に当たらない分 = 一様
+    q: dict[tuple, list] = {}
+    for word in _CANNED_WORDS:
+        q[_keys(parse_actions(word, utterance_start_ts=start))] = [rest / len(_CANNED_WORDS), word]
+    for key, (weight, text) in found.items():
+        if key in q:
+            q[key][0] += weight / total
+        else:
+            q[key] = [weight / total, text]
+    options = [Option("drop", "", math.log(1.0 - r), ())]
+    for key, (prob, text) in sorted(q.items(), key=lambda kv: -kv[1][0]):
+        options.append(Option("canned", text, math.log(r) + math.log(prob), key))
+    return options
 
 
 def choice_points(events: list, transcripts: list[dict], params: dict = PARAMS) -> list[ChoicePoint]:

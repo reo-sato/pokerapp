@@ -259,16 +259,60 @@ class TestHandTerms:
         assert "ベッティングが閉じないまま終わった" in open_flags and not closed_flags
 
     def test_every_utterance_adds_the_reading_it_takes(self):
-        """各発話でちょうど 1 つの読みを選び、その確からしさを足す: 直しの無い候補にも既定の読み（定型の幻聴の下で
-        第 2 の耳が何かを聞いた発話を捨てる）の確からしさが入る（監査 2 回目）。"""
+        """各発話でちょうど 1 つの読みを選び、その確からしさを足す: 直しの無い候補にも既定の読み（決まり文句になった
+        発話 = 雑談だった log(1 − r)）の確からしさが入る（監査 2 回目）。"""
         rows = ({"utterance_start_ts": T0 + 10, "text": "ご覧いただきありがとうございます。",
                  "ear": {"text": "コール", "logp": -3.0, "candidates": []}},
                 {"utterance_start_ts": T0 + 20, "text": "コール", "confidence": 0.9})
         est = _estimator(transcripts=rows)
-        assert est._default_logp.get(T0 + 10) == READING_OVERRIDES["drop_heard"]
+        chatter = math.log(1 - READING_OVERRIDES["canned_action"])
+        assert est._default_logp.get(T0 + 10) == pytest.approx(chatter)
         assert est._default_logp.get(T0 + 20) == 0.0
         _, terms, _ = est.score(_window(), self._hand(), [], self._INFO, ())
-        assert [v for name, v in terms if name.startswith("既定の読み")] == [READING_OVERRIDES["drop_heard"]]
+        assert [v for name, v in terms if name.startswith("既定の読み")] == [pytest.approx(chatter)]
+
+    def test_a_canned_phrase_may_hide_an_action(self):
+        """決まり文句になってライブの規則でも読めなかった発話は「雑談だった / アクションを言った」の 2 つの状態。
+        アクションはフォールド・チェック・コールに一様 + 第 2 の耳の候補（作業計画の監査 2026-10-01 の最優先）。
+        どれかは推定器がハンドの筋で決める。"""
+        r = READING_OVERRIDES["canned_action"]
+        rows = ({"utterance_start_ts": T0 + 10, "text": "ご視聴ありがとうございました。",
+                 "ear": {"text": "", "logp": -1.0, "candidates": []}},)
+        est = _estimator(transcripts=rows)
+        options = est._options(T0 + 10)
+        assert options[0].source == "drop" and options[0].logp == pytest.approx(math.log(1 - r))
+        assert sorted((o.text, round(o.logp, 6)) for o in options[1:]) == sorted(
+            (w, round(math.log(r / 3), 6)) for w in ("フォールド", "チェック", "コール"))
+        # 確からしさの和は 1（雑談 + アクション）
+        assert sum(math.exp(o.logp) for o in options) == pytest.approx(1.0)
+        # 選択点にするのは読めた賭けの語の近く（`canned_near_sec` 以内）の決まり文句だけ（ハンドの途中の長い雑談は広げない）
+        near = [e for e in est.candidate_edits(_window(), {"tokens": [_word("call", T0 + 12, T0 + 13)]})
+                if e.kind == "read"]
+        far = [e for e in est.candidate_edits(_window(), {"tokens": [_word("call", T0 + 40, T0 + 41)]})
+               if e.kind == "read"]
+        assert sorted(e.value for e in near) == sorted(["フォールド", "チェック", "コール"]) and far == []
+        inserts = {e.at for e in est.candidate_edits(_window(), {"tokens": [_word("call", T0 + 12, T0 + 13)]})
+                   if e.kind == "insert"}
+        assert T0 + 10 - 0.3 in inserts                   # 決まり文句の前にも聞こえなかったアクションを入れられる
+
+    def test_showdown_words_say_the_hand_was_not_folded_out(self):
+        """ショーダウンの声（「ショーダウン」・役の名前）があるのに全員降りて終わったハンドは低い（真のアクションの
+        92 ハンド: 声のあった 23 ハンドはすべてショーダウン、全員降りた 45 ハンドで声 0）。声の数によらず 1 つ。"""
+        est = _estimator()
+        words = [AudioEvent(action="end_hand", amount=0, timestamp=T0 + 30, raw_text="ツーペア",
+                            utterance_start_ts=T0 + 29, hand_name="two_pair"),
+                 AudioEvent(action="showdown", amount=0, timestamp=T0 + 31, raw_text="ショーダウン",
+                            utterance_start_ts=T0 + 30.5)]
+        info = dict(self._INFO, tokens=words)
+        folded, terms, flags = est.score(_window(), self._hand(), [], info, ())
+        shown, _, shown_flags = est.score(_window(), self._hand(winner_source="cards"), [], info, ())
+        quiet, _, _ = est.score(_window(), self._hand(), [], self._INFO, ())
+        assert [v for n, v in terms if n.startswith("ショーダウンの声")] == [
+            pytest.approx(math.log(PARAMS["p_showdown_word"]))]
+        assert "ショーダウンの声があるのに全員降りて終わった" in flags and not shown_flags
+        assert shown - folded == pytest.approx(math.log(1 - PARAMS["p_showdown_word"])
+                                               - math.log(PARAMS["p_showdown_word"]), abs=1e-3)
+        assert quiet - folded == pytest.approx(-math.log(PARAMS["p_showdown_word"]), abs=1e-3)
 
     def test_an_amount_the_second_ear_also_heard_differently_is_reviewed(self):
         """賭けの額の発話に、選んだ読みから `review_margin` 以内の別の額の読みがあれば要確認（採点は変えない）。
@@ -287,8 +331,46 @@ class TestHandTerms:
         import integration.estimator as module
 
         before = params_hash()
-        monkeypatch.setitem(module.READING_OVERRIDES, "drop_heard", -4.0)
+        monkeypatch.setitem(module.READING_OVERRIDES, "canned_action", 0.1)
         assert params_hash() != before
+
+
+def _heads_up_river(last_word: str) -> tuple[SessionEstimator, HandWindow]:
+    """ヘッズアップ（席4 = ボタン・SB、席5 = BB）を声だけで: リバーの 500 のあとのコールが決まり文句になった。"""
+    rows = [{"utterance_start_ts": T0 + s, "audio_sec": 0.9, "text": text, "confidence": 0.9}
+            for s, text in ((2, "コール"), (4, "チェック"), (6, "チェック"), (8, "チェック"), (10, "チェック"),
+                            (12, "チェック"), (14, "500"), (20, last_word))]
+    rows.insert(7, {"utterance_start_ts": T0 + 17, "audio_sec": 1.0, "text": "ご覧いただきありがとうございます。",
+                    "confidence": 0.3, "ear": {"text": "", "logp": -1.0, "candidates": []}})
+    setup = {"players": [{"seat": s, "name": f"P{s}", "stack": 10000} for s in (4, 5)], "sb": 100, "bb": 200,
+             "button_prior": 5}
+    typed = [AudioEvent(action="new_hand", amount=0, timestamp=T0, raw_text="")]
+    est = SessionEstimator(typed, rows, None, setup, {"auto_new_hand": False, "rfid_folds": False}, "s")
+    return est, est.windows()[0]
+
+
+class TestCannedPhrase:
+    def test_a_canned_phrase_can_be_the_call_that_closes_the_round(self):
+        """役の名前（ショーダウン）の前のコールが決まり文句になった: そのままではラウンドが閉じないまま終わる。決まり文句を
+        コールと読む直しで閉じる（要確認 = 直しを使った）。"""
+        pytest.importorskip("pokerkit")
+        est, w = _heads_up_river("ツーペア")
+        base = est.replay(w, ())[0]
+        result = est.estimate_hand(w)
+        river = [(a["seat"], a["action"]) for a in result.best.hand["actions"] if a["street"] == "river"]
+        assert base.get("betting_open_at_end") and river == [(5, "bet"), (4, "call")]
+        assert [e.value for e in result.best.edits] == ["コール"] and result.reasons
+
+    def test_a_better_explanation_of_the_same_record_is_kept(self):
+        """記録を変えない直しでも、得点が良ければその記録の説明として残す: 「ショーダウン」でエンジンが補ったコール
+        （言われない）より、決まり文句の下のコールの方が筋が通る（店舗 42f7b964 ハンド 2）。"""
+        pytest.importorskip("pokerkit")
+        est, w = _heads_up_river("ショーダウン")
+        base = est.replay(w, ())[0]
+        result = est.estimate_hand(w)
+        river = [(a["seat"], a["action"]) for a in base["actions"] if a["street"] == "river"]
+        assert river == [(5, "bet"), (4, "call")] and record_key(result.best.hand) == record_key(base)
+        assert [e.value for e in result.best.edits] == ["コール"]
 
 
 class TestStreetTime:
