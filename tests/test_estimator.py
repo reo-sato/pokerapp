@@ -371,6 +371,9 @@ class TestCannedPhrase:
         river = [(a["seat"], a["action"]) for a in base["actions"] if a["street"] == "river"]
         assert river == [(5, "bet"), (4, "call")] and record_key(result.best.hand) == record_key(base)
         assert [e.value for e in result.best.edits] == ["コール"]
+        # 直しの無い再生（読み直し）は候補の外に残す（物差しの「読み直し」・推定のファイルの changed が使う）
+        assert result.base is not None and not result.base.edits and record_key(result.base.hand) == record_key(base)
+        assert all(c.edits for c in result.candidates)
 
 
 class TestStreetTime:

@@ -179,7 +179,7 @@ class V1Result:
         from integration.estimator import record_key
         from tools.measure_capture_accuracy import hand_fully_correct
 
-        base = next((c for c in result.candidates if not c.edits), None)
+        base = result.base or next((c for c in result.candidates if not c.edits), None)
         ok_base = hand_fully_correct(truth, base.hand if base else None)
         ok = hand_fully_correct(truth, result.best.hand)
         found = any(hand_fully_correct(truth, c.hand) for c in result.candidates)
@@ -297,7 +297,7 @@ def run_bench_v1(*, store: bool = True, script: bool = True, sim_sessions: int =
                     res.chain.append(key)
                 # 記録の持ち点はライブの記録から来る: 推定がこのハンドの勝者・ポットを変えたら、次のハンドの持ち点は
                 # 推定の世界ではずれている（監査 2 回目: 持ち点の連鎖の印）
-                ref = live if live is not None else next((c.hand for c in result.candidates if not c.edits), {})
+                ref = live if live is not None else (result.base.hand if result.base is not None else {})
                 prev_changed = any(result.best.hand.get(k) != (ref or {}).get(k) for k in ("winner_seat", "pot_total"))
             res.session_seconds.append(round(time.time() - started, 1))
             res.seconds += time.time() - started

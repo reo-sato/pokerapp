@@ -117,7 +117,9 @@ def entry_for(result: HandResult, live: Optional[dict]) -> dict:
         "hand_id": hand.get("hand_id"),
         "started_at": (live or hand).get("started_at"),
         "estimated_at": datetime.now().isoformat(timespec="seconds"),
-        "changed": record_key(live) != record_key(result.best.hand) if live is not None else bool(result.best.edits),
+        "changed": (record_key(live) != record_key(result.best.hand) if live is not None
+                    else record_key(result.base.hand) != record_key(result.best.hand) if result.base is not None
+                    else bool(result.best.edits)),
         "margin": result.margin,
         "posterior": round(result.posteriors[0], 3) if result.posteriors else None,
         "review": bool(result.reasons),

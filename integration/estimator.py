@@ -204,6 +204,8 @@ class HandResult:
     posteriors: list[float]
     replays: int
     reasons: list[str] = field(default_factory=list)
+    # 直しの無い再生（= 読み直し）。候補の中のその記録は、同じ記録のより良い説明（直しあり）に置き換わることがある
+    base: Optional[Candidate] = None
 
     @property
     def best(self) -> Candidate:
@@ -847,7 +849,7 @@ class SessionEstimator:
         weights = [math.exp(c.score / tau - top) for c in groups]
         total = sum(weights) or 1.0
         posteriors = [(1 - p["outside"]) * wgt / total for wgt in weights]
-        result = HandResult(window=w, candidates=groups, posteriors=posteriors, replays=len(seen))
+        result = HandResult(window=w, candidates=groups, posteriors=posteriors, replays=len(seen), base=base)
         result.reasons = self._review_reasons(result)
         return result
 
