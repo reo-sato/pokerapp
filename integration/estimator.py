@@ -99,7 +99,8 @@ _WORD_SOURCES = frozenset({"engine_prior", "spoken_seat", "spoken_position"})
 _RFID_FOLDS = frozenset({"rfid_departure", "rfid_muck"})
 # engine が額を決めた印（ライブの記録では要確認）。推定の要確認の理由にもする（作業計画の監査 2026-10-01 §4: 推定を
 # 記録の本体にすると、記録の要確認は推定の `review` で置き換わるため、これが無いと印が消える）。採点には足さない
-_AMOUNT_READ_REASONS = frozenset({"phonetic_amount", "amount_restated", "legal_amount", "ambiguous_amount"})
+_AMOUNT_READ_REASONS = frozenset({"phonetic_amount", "amount_restated", "legal_amount", "ambiguous_amount",
+                                  "garbled_digits"})
 _INSERTABLE = ("fold", "check", "call")
 _INSERT_LEAD_SEC = 0.3          # 聞こえなかったアクションは次の語の少し前に置く
 _STREETS = ("preflop", "flop", "turn", "river")
@@ -112,7 +113,9 @@ _STREETS = ("preflop", "flop", "turn", "river")
 # アクションの並びと読めた語を対応づけて残った穴を、読めた賭けの語から 15 秒以内の決まり文句の 17/51 = 0.33 が埋めた
 # = 上限。雑談の発話でも 0.29 埋めるので偶然を全部引くと 0.06、監査役の目視 ≈ 0.11 → その間。前の値 = 捨てる −0.1 は
 # 開発データの 1/23 から）。
-READING_OVERRIDES: dict[str, float] = {"canned_action": 0.2, "canned_ear_temp": 2.0}
+# 第 2 の耳が自由に聞いた文が空でも、その候補を選択肢にする（`ear_empty_text`, 2026-10-02。空の文は耳の貪欲な探索が
+# 何も書かなかっただけで、候補の確からしさはその空の文と比べられる。v0 が空を除いていた理由は記録に無い）。
+READING_OVERRIDES: dict[str, float] = {"canned_action": 0.2, "canned_ear_temp": 2.0, "ear_empty_text": 1.0}
 
 
 def reading_params() -> dict:

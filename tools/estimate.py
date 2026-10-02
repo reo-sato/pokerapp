@@ -77,6 +77,7 @@ PARAMS: dict[str, float] = {
     "ear_top": 3,               # 候補の上から何個を選択肢にするか
     "ear_amount_top": 3,        # 額を読んだ発話に、第 2 の耳の額ごとの点数の上から何個の別の額を選択肢にするか
                                 # （確からしさは候補と同じ式。2026-10-01「額の空間を事前に用意」のステップ 2）
+    "ear_empty_text": 0.0,      # 1 = 第 2 の耳が自由に聞いた文が空でも候補を選択肢にする（v1 は `READING_OVERRIDES` で 1）
     "drop_read": -4.0,          # Whisper で読めた発話を雑談・言い直しとして捨てる（長い文 = 雑談が混ざりうる）
     "drop_short": -7.0,         # アクションの言葉だけの短い発話（`short_chars` 文字以下）を捨てる
     "drop_heard": -4.0,         # Whisper が定型の幻聴を書いたが、第 2 の耳は何かを聞いた発話を捨てる（音はあった）
@@ -152,7 +153,8 @@ def _keys(events: list) -> tuple:
 
 def _flag_penalty(events: list, params: dict) -> float:
     flags = {f for e in events for f in e.parse_flags}
-    return params["fuzzy"] if flags & {"fuzzy_keyword", "ambiguous_amount", "sentence_after_chatter"} else 0.0
+    return params["fuzzy"] if flags & {"fuzzy_keyword", "ambiguous_amount", "garbled_digits",
+                                       "sentence_after_chatter"} else 0.0
 
 
 def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
@@ -195,7 +197,11 @@ def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
         # 7b897671 ハンド 3: オールインへのコールが幻聴になり、札の離脱でフォールドと記録した）
         heard = bool(ear and (ear.get("text") or "").strip()) and not row.get("no_speech") and is_prompt_echo(text)
         options.append(Option("drop", "", params["drop_heard"] if heard else 0.0, ()))
-    if ear and (ear.get("text") or "").strip() and ear.get("logp") is not None:
+    # 第 2 の耳の候補。自由に聞いた文が空（耳の貪欲な探索が何も書かなかった）でも、候補の確からしさはその空の文と
+    # 比べられる（v1, `ear_empty_text`。店舗 4c252c77 ハンド 2: SB のコールを Whisper は「コーナー」、耳は空の文
+    # −2.80・候補「コール」−4.73 と聞いた。v0 は空なら使わない）
+    heard_text = bool(ear and (ear.get("text") or "").strip())
+    if ear and ear.get("logp") is not None and (heard_text or params.get("ear_empty_text", 0.0) > 0):
         cands = sorted((c for c in ear.get("candidates") or [] if c.get("logp") is not None),
                        key=lambda c: -c["logp"])[:int(params["ear_top"])]
         for c in cands:

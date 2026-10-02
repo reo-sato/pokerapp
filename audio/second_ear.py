@@ -579,14 +579,70 @@ def _doubtful(events: list, confidence: Optional[float]) -> bool:
 
 def wants_ear(events: Iterable, text: str, question: bool = False, confidence: Optional[float] = None) -> bool:
     """ライブで第 2 の耳に聞き直させるか。Whisper がアクションとして読めなかった発話（確認の問い・ポットや
-    ブラインドの読み上げは除く）と、読んだベット・レイズに額が無い・`EAR_MIN_AMOUNT` 未満の発話と、自信の
-    とても低い読み（`EAR_VETO_CONFIDENCE` 未満）。`confidence` を省くとアクションに付いた Whisper の自信を使う。"""
+    ブラインドの読み上げは除く）と、読んだベット・レイズに額が無い・`EAR_MIN_AMOUNT` 未満の発話と、額を「千」「万」で
+    終わる数で読んだ発話（下の桁を聞き落としたかもしれない, `_open_wagers`）と、自信のとても低い読み
+    （`EAR_VETO_CONFIDENCE` 未満）。`confidence` を省くとアクションに付いた Whisper の自信を使う。"""
     from audio.recognizer import is_announcement
 
     events = list(events)
     if not events:
         return not question and not is_announcement(text)
-    return bool(_amountless(events)) or _doubtful(events, confidence)
+    return bool(_amountless(events)) or bool(_open_wagers(events)) or _doubtful(events, confidence)
+
+
+def _open_wagers(events: Iterable) -> list[tuple[int, int, int]]:
+    """額を「千」「万」で終わる数（下の桁を言っていない）で読んだベット・レイズ: (位置, 額の下限, 上限)。"""
+    from audio.recognizer import open_amount_range
+
+    out = []
+    for i, e in enumerate(events):
+        if e.action in ("bet", "raise", "allin") and e.amount:
+            span = open_amount_range(e.raw_text or "", e.amount)
+            if span is not None:
+                out.append((i, *span))
+    return out
+
+
+def _wager_amounts(text: str) -> list[int]:
+    from audio.recognizer import parse_actions
+
+    return [e.amount for e in parse_actions(text) if e.action in ("bet", "raise", "allin") and e.amount]
+
+
+def fill_lower_digits(events: list, ear: Optional[dict], *,
+                      utterance_start_ts: Optional[float] = None) -> Optional[tuple[list, str]]:
+    """「千」「万」で終わる数で読んだ賭けがちょうど 1 つの発話で、第 2 の耳がその下の桁まで聞いていれば、それを使う
+    （オーナー 2026-10-02:「数字の後に、残りの桁などを発声できるタイミングで意味の通らない単語が入った際には、
+    読み直す」）。(アクション, 使った候補の文) か、使えなければ None（Whisper の読みのまま）。
+
+    Whisper は下の桁を崩した語やアクションの語に書くことがある（10/01 の真のアクション: 0f7705c8 ハンド 1
+    「7千ドップチェック」= 7600、1709932e ハンド 3「2千、コール。」= 2500。どちらも第 2 の耳は「七千六百」「二千五百」
+    とだけ聞いた）。第 2 の耳の額が Whisper の数の下の桁を埋めた額（7000 なら 7001〜7999）のときだけ使う（2 つの耳が
+    上の桁で合っている。音声のある全セッションで、千・万で終わる額の発話 22 のうち 2 = 上の 2 つ、ほかは同じ額）:
+    - 自由に聞いた文といちばん確からしい候補が同じアクションに読め（`agreed_candidate`）、その賭けの額が下の桁を
+      埋めた → 発話を第 2 の耳の読みにする（Whisper が数のあとに書いた語は、下の桁の聞き違い）。
+    - そうでなくても、自由に聞いた文と候補が同じ額を 1 つだけ含めば（`agreed_amount`）、その額を入れる。
+    """
+    from audio.recognizer import GARBLED_DIGITS
+
+    opens = _open_wagers(events)
+    if len(opens) != 1:
+        return None
+    index, low, high = opens[0]
+    text = agreed_candidate(ear)
+    if text is not None:
+        amounts = _wager_amounts(text)
+        if len(amounts) == 1 and low < amounts[0] < high:
+            return rescue_events(ear, utterance_start_ts=utterance_start_ts), text
+    got = agreed_amount(ear)
+    if got is None or not low < got[0] < high:
+        return None
+    event = events[index]
+    out = list(events)
+    confidence = EAR_CONFIDENCE if event.confidence is None else min(event.confidence, EAR_CONFIDENCE)
+    flags = tuple(f for f in event.parse_flags if f != GARBLED_DIGITS) + (EAR_FLAG,)
+    out[index] = replace(event, amount=got[0], confidence=confidence, parse_flags=flags)
+    return out, got[1]
 
 
 def wants_amount_scores(events: Iterable) -> bool:
@@ -670,7 +726,9 @@ def _apply_ear(events: Iterable, text: str, ear: Optional[dict], *, question: bo
     ライブ（`AudioThread`）・書き起こしの読み直し（`tools/eval_store.py`）・読み上げ集・推定器が同じ規則を使う。
     読めなかった発話は `rescue_events`（ポット・ブラインドの読み上げ =「ポット1万2000です。」は、第 2 の耳が額だけを
     聞いてもアクションにしない）、それでも読めない意味のない単発の語は `garbled_amount_events`（額の候補と音の近さ）、
-    額の無いベット・レイズは `fill_amounts`。自信のとても低い読みは、第 2 の耳がアクションを何も聞いていなければ捨てる
+    「千」「万」で終わる数の額は `fill_lower_digits`（第 2 の耳が下の桁まで聞いた額）、額の無いベット・レイズは
+    `fill_amounts`。
+    自信のとても低い読みは、第 2 の耳がアクションを何も聞いていなければ捨てる
     （使った文 = 第 2 の耳が聞いた文、空なら `EAR_HEARD_NOTHING`）。第 2 の耳が無ければ（`ear` = None）、意味のない
     単発の語を音の近さだけで額と読む（`recognizer.parse_garbled_amount`、使った文は None）。
     """
@@ -690,6 +748,9 @@ def _apply_ear(events: Iterable, text: str, ear: Optional[dict], *, question: bo
         if rescued:
             return rescued, agreed_candidate(ear)
         return garbled_amount_events(text, ear, utterance_start_ts=utterance_start_ts)
+    digits = fill_lower_digits(events, ear, utterance_start_ts=utterance_start_ts)
+    if digits is not None:
+        return digits
     if _doubtful(events, confidence):
         free = (ear.get("text") or "").strip()
         cands = ear.get("candidates") or []

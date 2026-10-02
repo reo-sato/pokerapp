@@ -497,6 +497,10 @@ _AMOUNT_OWNERSHIP: dict[str, Optional[str]] = {
     "call": "glued",
     "bet": "nearest", "raise": "nearest", "allin": "nearest",
 }
+# 「千」「万」のすぐあとの意味の通らない語（下の桁が読めない, `_open_digits`）の印
+GARBLED_DIGITS = "garbled_digits"
+# 自分の額にした部分の読みの印（額の読みが確かでない）。アクションの語の読みにも付け替える
+_AMOUNT_READ_FLAGS = ("ambiguous_amount", GARBLED_DIGITS)
 # 「チェックアラウンド」= まだ動いていない全員がチェックした（オーナーの説明, 2026-09-25）。チェックの語に続く
 # 「アラウンド」は音の近さで読む（書き起こしゆれを並べない: 店舗・台本で「チェック、アランド」「チェックアウンド」
 # 「チェックラウンド」があった）。区切って言ってもよい（「アラウンド」だけでは別のアクションにならない）。
@@ -554,6 +558,60 @@ def _is_check_around(norm: str, script: Optional[str], pos: int, end: int, stop:
     return bool(tail) and sounds_like(tail, _AROUND, after=norm[pos:end])
 
 
+# 下の桁を続けて言える位置（「千」「万」のすぐあと）に、続けて書いた片仮名の語（オーナー 2026-10-02「数字の後に、
+# 残りの桁などを発声できるタイミングで意味の通らない単語が入った際には、読み直す」。店舗 0f7705c8 ハンド 1:
+# 「7千ドップチェック」= 七千六百。額が読めずに 7000 がチェックに付いて消えていた）。仮名で書いた数（「7千ロッピャク」）は
+# その桁として読む。どの言葉でもない語は、前の数だけを額にして `GARBLED_DIGITS`（要確認）を付ける。「千」「万」で
+# 終わる数の額は、第 2 の耳が下の桁まで聞いていればそれを使う（`second_ear.fill_lower_digits`, `open_amount_range`）。
+# 音の近さだけでは下の桁を決めない（「ドップ」は 600 の読みより卓の用語「トップ」に近い）。
+_OPEN_UNITS = {"千": 1000, "万": 10000}
+
+
+def _open_digits(text: str) -> Optional[tuple[str, bool, int, int]]:
+    """「千」「万」のすぐあとに続けた片仮名の語を読んだ文。(読んだ文, 意味の通らない語か, 額の下限, 上限) か None。
+
+    仮名の数（その桁に入る 100 点刻みの数）なら数字にした文、意味の通らない語ならその語を除いた文（額は前の数だけ）。
+    額の言い方に付く語（「テン」「ポイント」）・アクションの語に音で読める語・卓の用語そのもの（「千チップ」）は読まない。
+    """
+    from audio.phonetic import match_keyword, rank
+
+    nfkc = unicodedata.normalize("NFKC", text)
+    norm = _to_katakana(nfkc)
+    for m in _AMOUNT_TOKEN.finditer(norm):
+        unit = _OPEN_UNITS.get(m.group()[-1])
+        if unit is None:
+            continue
+        start = end = m.end()
+        while end < len(nfkc) and (_is_katakana(nfkc[end]) or nfkc[end] == "ー"):
+            end += 1                            # ひらがなは言葉の続き（「2千になっちゃって」）
+        if end == start or _AMOUNT_ONLY_REST.fullmatch(norm[start:end]):
+            continue
+        base = parse_amount_ex(m.group()).value
+        if base <= 0:
+            continue
+        found = _kana_number_at(norm, start)
+        if found is not None and found[1] <= end:
+            value = _kanji_to_int(found[2])
+            if 0 < value < unit and value % 100 == 0:
+                return nfkc[:m.start()] + str(base + value) + nfkc[found[1]:], False, base, base + unit
+        word = norm[start:end]
+        if match_keyword(word) is not None or rank(word)[0][0] == 0.0:
+            return None
+        return nfkc[:start] + " " + nfkc[end:], True, base, base + unit
+    return None
+
+
+def open_amount_range(text: str, amount: int) -> Optional[tuple[int, int]]:
+    """額 `amount` を「千」「万」で終わる数（下の桁を言っていない: 「7千」「2千、コール」「7千ドップ」）で言った発話なら、
+    その数から言える額の範囲 [下限, 上限)（7000〜7999）。そうでなければ None（「7600」「2千5百」・千や万の無い数）。"""
+    norm = _to_katakana(unicodedata.normalize("NFKC", text))
+    for m in _AMOUNT_TOKEN.finditer(norm):
+        unit = _OPEN_UNITS.get(m.group()[-1])
+        if unit is not None and amount > 0 and amount % unit == 0 and parse_amount_ex(m.group()).value == amount:
+            return amount, amount + unit
+    return None
+
+
 def parse_amount_only(
     text: str,
     confidence: Optional[float] = None,
@@ -561,8 +619,28 @@ def parse_amount_only(
 ) -> Optional[AudioEvent]:
     """額だけを言った発話を、ベットかレイズの候補（action="bet" + flag "amount_only"）にする。
 
-    席番号・ポジション名は付いていてもよい。額でなければ None。
+    席番号・ポジション名は付いていてもよい。額でなければ None。「千」「万」のすぐあとに続けた片仮名の語は
+    `_open_digits`（仮名の数ならその桁、意味の通らない語なら前の数だけ + `GARBLED_DIGITS`）。
     """
+    event = _amount_only(text, confidence, utterance_start_ts)
+    if event is not None:
+        return event
+    opened = _open_digits(text)
+    if opened is None:
+        return None
+    event = _amount_only(opened[0], confidence, utterance_start_ts)
+    if event is None:
+        return None
+    event.raw_text = text
+    if opened[1]:
+        event.parse_flags = (*event.parse_flags, GARBLED_DIGITS)
+    return event
+
+
+def _amount_only(
+    text: str, confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> Optional[AudioEvent]:
+    """`parse_amount_only` の本体（「千」「万」のあとの語を読む前）。"""
     from core.positions import _ALIAS_PATTERN
 
     norm = _to_katakana(unicodedata.normalize("NFKC", text))
@@ -656,7 +734,8 @@ def _split_off_amounts(
         owned = []
     others = [p for p in amount_pieces if p not in owned]
     own = amounts[owned[0]] if rule == "nearest" and owned else None
-    if not others and (own is None or own.amount == event.amount):
+    own_flags = [f for f in (own.parse_flags if own is not None else ()) if f in _AMOUNT_READ_FLAGS]
+    if not others and (own is None or (own.amount == event.amount and set(own_flags) <= set(event.parse_flags))):
         return [event]
     own_values = {amounts[p].amount for p in owned}
     split = {"before": [], "after": []}
@@ -671,10 +750,7 @@ def _split_off_amounts(
     main = parse_action(text, confidence=confidence, utterance_start_ts=utterance_start_ts) or event
     if own is not None:
         main.amount = own.amount
-        main.parse_flags = tuple(
-            [f for f in main.parse_flags if f != "ambiguous_amount"]
-            + [f for f in own.parse_flags if f == "ambiguous_amount"]
-        )
+        main.parse_flags = tuple([f for f in main.parse_flags if f not in _AMOUNT_READ_FLAGS] + own_flags)
     return [*split["before"], main, *split["after"]]
 
 
