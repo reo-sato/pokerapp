@@ -43,6 +43,7 @@ pokerapp/
 │   ├── templates/                 ← adr / issue / worklog テンプレート
 │   ├── contracts/                 ← contract-first 基盤 (shared IDs / schemas / fixtures; **全 model schema `1.0` frozen** — player/hand/action + session/seat/hand_ref(S2) + ledger/point/settlement(S3) + order_request/player_session_summary(viewer), ADR-0019。残 draft は interface/sync(S5) のみ)
 │   ├── ui-feature-inventory.md    ← UI 実運用機能の棚卸し台帳（◎/○/△ 優先度 + 着手状態。◎○ は 2026-07-12 全消化、残は △ 群）
+│   ├── estimator.md               ← 推定器（事後推定, ADR-0056）のいまの設計・監査の推奨ごとの対応・文書の地図
 │   ├── installation.md            ← エンドユーザー: インストール手順 (Phase I)
 │   ├── usage.md                   ← エンドユーザー: 使い方・読み上げ語彙・設定 (Phase I)
 │   ├── troubleshooting.md         ← エンドユーザー: 困りごと対処 (Phase I)
@@ -510,12 +511,15 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 
 ## 実装状況（現時点）
 
-> **記録の正本は「事後・確率的推定」に移す（ADR-0056, 2026-09-12 決定 / 実装は未着手）**
+> **記録の正本は「事後・確率的推定」に移す（ADR-0056, 2026-09-12 決定 / 推定器 v1 は実装済で影で運用・正本への切り替えは評価のあと）**
 > 仕様 `sprc_v4.docx`（FR-26/27・§5.4・FR-25/35）は当初からアクター推定を**尤度ベース**と規定しており、
 > 現在の**決定的なライブ確定**は ISSUE-0009 の暫定が定着した drift（**ISSUE-0031**）。今後は
 > **ライブ経路 = 暫定表示**、**正本 = 事後推定**（pokerkit の合法手列に対する制約付きビーム探索 +
 > 観測尤度、決定的）とし、読み取りは **live ⊕ estimate ⊕ staff corrections** で重ねる。
-> 下の「実装状況」表は **現時点で動いているもの**の記述であり、ADR-0056 の実施順序 P1〜P8 は未着手。
+> 実施順序は追記 1 で S0〜S5 に引き直した（P1〜P8 を置き換え）。推定器 v1・生の観測の再生器・物差し・読む側の
+> 重ね方は実装済だが、推定はまだ影のファイルに書く（記録の本体にするのは事前登録した評価に通ってから。評価は
+> 音声入力の改善のあと = 2026-10-01 オーナー決定、追記 3）。**いまの設計・監査の推奨ごとの対応・文書の地図は
+> `docs/estimator.md`**。下の「実装状況」表は **現時点で動いているもの**の記述。
 > **P0a 済**: ISSUE-0033（RFID の appear を actor 証拠に使っており配っただけで誤 fold）→ **Fixed**。
 > **P0b 済**: ISSUE-0032（ディーラーボタンが回らずターン順 prior が (n-1)/n のハンドで誤る）→
 > **Fixed**（§ ディーラーボタン / ポジション名）。
@@ -568,6 +572,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **決定的 replay harness + golden fixtures (R4 F1/F3a)** | ✅ 実装済 | `integration/replay.py` + `tools/replay_hand.py`（clock 注入で決定的、ADR-0011）。golden fixtures: `tests/fixtures/reconstruction/`（**green 13**: 射影 2 + 合成 1 + `rfid-appear-is-not-an-action`（RFID は actor を動かさない, ISSUE-0033）+ side-pot 1 + ADR-0047 で 8 追加 = postflop 遷移 / 6max / multi-hand / 明示席>RFID（`rfid-vs-spoken-seat-conflict`） / camera / 低信頼 / cap 負例 / chop）。round-trip 決定性 = `tests/test_reconstruction.py`。**pin は手計算検証必須**（event-replay.md §6.5） |
 | **派生 confidence + side-pot (R3 D3 / R5 F3a)** | ✅ 実装済 (preview) | `integration/engine.py:derive_confidence`（3 因子 L/A/Q、rules-aware 経路のみ。legacy 固定表は不変）+ needs_review 条件（パース曖昧 flag 含む）。`HandSummary.pots`（main/side、legacy は `[]`。未回収 bet は残差合成で `sum(pots)=実ポット`）。whisper 欠測は `MISSING_WHISPER_CONF=0.5`（満点補完廃止, ADR-0033 追記） |
 | **派生 confidence 重み較正 (R5/F2)** | ✅ 実装済 | ADR-0033: 重み（暫定）を golden fixtures archetype + 境界グリッド由来の較正プロパティ **P1〜P9**（順序単調性 / 閾値分離 / 合法性ゲート / synth-fold / 欠測保守性）で正当化・回帰ロック。数値据え置き。`tools/calibrate_confidence.py`（ハーネス）+ `tests/test_confidence_calibration.py`。「暫定」表記を解除 |
+| **推定器 v1（事後推定, ADR-0056）** | 🟡 影で運用（記録の本体にはまだしない） | `integration/estimator.py`（ハンドごとのビーム探索・log 事後確率・要確認）+ `integration/world_replay.py`（生の観測の再生）+ `tools/estimate.py`（発話の読みの選択肢、v0）+ `core/hand_estimate.py`（読む側の重ね方 = viewer API・真のアクションの入力画面・PHH）+ `tools/bench_hands.py`（全部正しいハンドの割合）・`tools/estimate_logs.py`（`--shadow` / `--write`）。統計の監査 2 回と作業計画の監査（Fable 5.1）を受けた。評価の事前登録は保留（2026-10-01 オーナー: 評価の前に音声入力を改善）。設計・監査の推奨ごとの対応は `docs/estimator.md` |
 | **hand/action schema freeze (R5 F3b)** | ✅ 実装済 | `docs/contracts/schemas/{hand,action}.schema.json`（hand `1.4` / action `1.5`, additionalProperties:true, ISSUE-0011 Fixed。additive 追加: board_timeline=ADR-0055 / button_seat・position_map・position=ISSUE-0032 / 監査フィールド actor_source・corrected_from・reason・asr_confidence・apply_ok=ADR-0047 G2 / pot_awards=ADR-0050 / raw_text=ADR-0060 / winner_source・showdown・action の end_hand=ADR-0062。`reconstruction_event` は `0.4` = utterance_start_ts・parse_flags（ADR-0047/0048）+ position + rfid の replaces（ADR-0058））+ `_MODELS` 登録 + code↔contract + golden→schema テスト。**`action.street` は「そのアクションが行われたストリート」**（適用後ではない。rules-aware backend はラウンドを閉じたアクションで次ストリートへ自動進行するため, ISSUE-0029） |
 | **PHH call/check (F3c)** | ✅ 確認済（変更不要） | PHH 標準では check/call は同一トークン `cc`（check-or-call）。区別は非標準で pokerkit が parse 不能になるため統一が正。check/call の別は JSON ログ側で保持（`output/phh_exporter.py` にコメント） |
 | Vosk 代替バックエンド | ❌ 未実装 | future phase |
@@ -1123,6 +1128,8 @@ python tools/set_config.py session_layer.enabled true   # config.json の 1 項�
 pytest tests/ -v --ignore=tests/test_vision.py   # CI と同じ（vision レガシー除外）
 python tools/replay_hand.py tests/fixtures/reconstruction/silent-fold  # 決定的 replay (F1)
 python tools/calibrate_confidence.py            # 派生 confidence 較正サーフェス + P1〜P8 検証 (ADR-0033)
+python tools/bench_hands.py --twice --search-check --workers 3   # 推定器の物差し: 開発データの全部正しいハンド (docs/estimator.md)
+python tools/estimate_logs.py logs --latest --shadow --workers 1  # いちばん新しいセッションを推定して影のファイルに (ハンドごとの時間)
 python tools/measure_capture_accuracy.py --session logs/<sid>.json --ground-truth logs/<sid>.ground_truth.json  # Phase A 捕捉精度計測 (docs/dogfood/measurement-plan.md)
 python main.py --export-phh logs/session_xxx.json
 # ローカル QA（実機なし。docs/manual-qa-checklist.md 参照）

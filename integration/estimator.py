@@ -1,7 +1,8 @@
 """integration/estimator.py — 推定器 v1: 生の観測の再生（world_replay）を直しながら、ハンドごとに筋の通る記録を探す
 
 ADR-0056（事後・確率的推定）追記 1・2 と、Fable 5.1 の統計の監査（`docs/worklog/2026-09-30-estimator-audit.md`）の
-最小モデル。設計と実測は `docs/worklog/2026-09-30-estimator-v1-design.md`。
+最小モデル。いまの設計・監査への対応は `docs/estimator.md`（9/30 の設計と実測の記録は
+`docs/worklog/2026-09-30-estimator-v1-design.md`）。
 
 - 仮説 = 入力への「直し」の組: 発話の別の読み（第 2 の耳の候補など）/ 余計な語を 1 つ捨てる / 聞こえなかった
   アクション（フォールド・チェック・コール）を入れる / ボタンを変える / 札の離脱を持ち上げとみる。ハンドは
