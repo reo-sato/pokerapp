@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from tools.ground_truth_ui import (
+    evaluation_mode,
     hand_lint,
     is_blind,
     list_sessions,
@@ -74,7 +75,8 @@ def log_dir(tmp_path: Path) -> Path:
 
 
 def _serve(log_dir: Path, blind_every: int):
-    server = make_server(log_dir, "127.0.0.1", 0, blind_every=blind_every)
+    # 練習のセッション（リポジトリの config.json の評価のモードに左右されない）
+    server = make_server(log_dir, "127.0.0.1", 0, blind_every=blind_every, evaluation=False)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -639,6 +641,77 @@ class TestConfirmAndBlind:
         gt = json.loads((log_dir / f"{SID}.ground_truth.json").read_text(encoding="utf-8"))
         saved = next(h for h in gt["hands"] if h["hand_id"] == 2)
         assert saved["reconciled"] is True and len(saved["blind_entry"]["actions"]) == 2
+
+
+class TestEvaluationMode:
+    """評価のセッション（オーナー決定 2026-10-02）: 記録を見ずに保存するまで、記録を見られない・「記録どおり」も
+    使えない。サーバーも受け付けない（古い画面・押し間違いでも記録を初期値にした真のアクションが入らない）。"""
+
+    @pytest.fixture
+    def eval_base(self, log_dir: Path):
+        # ブラインドの割合（0 = しない）によらず、評価のセッションは全部のハンドをブラインドで入れる
+        server = make_server(log_dir, "127.0.0.1", 0, blind_every=0, evaluation=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_address[1]}"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_the_switch_is_read_from_config(self, tmp_path):
+        path = tmp_path / "config.json"
+        assert evaluation_mode(path) is False                                # ファイルが無い = 練習
+        path.write_text(json.dumps({"ground_truth": {"evaluation": True}}), encoding="utf-8-sig")   # BOM 付きも読む
+        assert evaluation_mode(path) is True
+        path.write_text(json.dumps({"ground_truth": {"evaluation": False}}), encoding="utf-8")
+        assert evaluation_mode(path) is False
+        path.write_text("{broken", encoding="utf-8")
+        assert evaluation_mode(path) is False
+        server = make_server(tmp_path, "127.0.0.1", 0, config_path=path)
+        try:
+            path.write_text(json.dumps({"ground_truth": {"evaluation": True}}), encoding="utf-8")
+            assert server.evaluation() is True                               # 開き直すだけで効く（起動し直さない）
+        finally:
+            server.server_close()
+
+    def test_the_record_is_locked_until_the_first_save(self, eval_base, log_dir):
+        path = f"/api/sessions/{SID}/hands/1"
+        _, d = _req(eval_base, "GET", path)
+        assert d["evaluation"] is True and d["blind"] is True and d["reveal_locked"] is True
+        assert d["legal"]["actions"] == []                                   # 記録から始めない
+        status, err = _req(eval_base, "PUT", path, {"source": "captured-passthrough"})
+        assert status == 400 and "評価のセッション" in err["message"]
+        seen = {"board": ["As", "Kd", "7h"], "winner_seat": 5,
+                "actions": [{"seat": 6, "action": "call", "amount": 200}]}      # 記録を見て入れた（blind 無し）
+        assert _req(eval_base, "PUT", path, {"source": "manual-edit", "hand": seen})[0] == 400
+        assert not (log_dir / f"{SID}.ground_truth.json").exists()
+        blind = dict(seen, blind=True)
+        assert _req(eval_base, "PUT", path, {"source": "manual-edit", "hand": blind, "entry_sec": 30})[0] == 200
+        _, after = _req(eval_base, "GET", path)
+        assert after["blind"] is False and after["reveal_locked"] is False   # 保存したら記録と照らし合わせる
+        fixed = dict(seen, actions=seen["actions"] + [{"seat": 4, "action": "call", "amount": 100}])
+        assert _req(eval_base, "PUT", path, {"source": "manual-edit", "hand": fixed})[0] == 200
+        gt = json.loads((log_dir / f"{SID}.ground_truth.json").read_text(encoding="utf-8"))
+        saved = next(h for h in gt["hands"] if h["hand_id"] == 1)
+        assert saved["evaluation"] is True and saved["reconciled"] is True
+        assert [a["action"] for a in saved["blind_entry"]["actions"]] == ["call"]
+
+    def test_a_hand_in_progress_stays_blind_until_it_ends(self, eval_base, log_dir):
+        live = _hand(3)
+        (log_dir / f"{SID}.live_hand.json").write_text(json.dumps({"hand": live}), encoding="utf-8")
+        path = f"/api/sessions/{SID}/hands/3"
+        part = {"board": ["As", "Kd", "7h"], "blind": True, "actions": [{"seat": 6, "action": "call", "amount": 200}]}
+        assert _req(eval_base, "PUT", path, {"source": "manual-edit", "hand": part})[0] == 200
+        _, d = _req(eval_base, "GET", path)
+        assert d["in_progress"] is True and d["reveal_locked"] is True       # 途中で保存しても、終わるまで見られない
+        seen = dict(part, blind=None)
+        assert _req(eval_base, "PUT", path, {"source": "manual-edit", "hand": seen})[0] == 400
+
+    def test_practice_sessions_are_unchanged(self, base):
+        _, d = _req(base, "GET", f"/api/sessions/{SID}/hands/1")
+        assert d["evaluation"] is False and d["reveal_locked"] is False
+        assert _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "captured-passthrough"})[0] == 200
 
 
 class TestStreetLint:

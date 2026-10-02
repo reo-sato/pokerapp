@@ -149,5 +149,9 @@
   "ledger": {
     "buyin_presets": [10000, 20000, 30000],
     "_buyin_presets_comment": "ADR-0026: buy-in 記帳時にスタッフが選ぶ金額プリセット（整数円）。--ledger 画面でボタン表示、staff API GET /api/staff/buyin-presets でも取得。店が編集する。chips とは別単位・自動換算なし。"
+  },
+  "ground_truth": {
+    "evaluation": false,
+    "_evaluation_comment": "評価のセッション（docs/dogfood/estimator-v1-preregistration.md）では true。真のアクションの入力画面で、記録を見ずに保存するまで「記録を見る」「記録どおり」が使えない（オーナー決定 2026-10-02）。練習のセッションは false（押せるが、押さないことを勧める）。画面を開き直すだけで効く。"
   }
 }

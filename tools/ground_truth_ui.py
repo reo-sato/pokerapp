@@ -13,7 +13,10 @@
 - 保存のたびに `tools/measure_capture_accuracy.py` と同じ計算で一致 / 差分を出す。
 - 手間を減らす（ADR-0056 追記 1 の S1）: ハンドの間の**発話の音声を再生**でき、書き起こし・ボードの札・札の
   離脱を時刻順に並べる。要確認の行を **✓ で確かめれば「記録どおり」**にできる。行ごとに「自信なし」を付けられる。
-  **5 ハンドに 1 つはブラインド**（記録を見ずに入れる = 記録に引きずられていないかを測る）。入力にかかった時間を残す。
+  **全部のハンドをブラインド**で先に入れる（記録を見ずに入れる = 記録に引きずられていないかを測る。`--blind-every`）。
+  入力にかかった時間を残す。
+- **評価のモード**（config `ground_truth.evaluation`、または `--evaluation`。オーナー決定 2026-10-02）: 評価の
+  セッションでは、記録を見ずに保存するまで「記録を見る」も「記録どおり」も使えない（サーバーも受け付けない）。
 
 使い方:
 
@@ -69,6 +72,10 @@ _MAX_BODY = 1_000_000
 # 記録を見ずに入れ、保存したあとで記録と照らし合わせて直す（ADR-0056 追記 1 の 2 割から変更。記憶で入れると誤るので、
 # 照らし合わせで正解を直しつつ、記録を見ずに入れた内容で入れる側の誤りと記録への引きずられを測る）
 BLIND_EVERY = 1
+# 評価のセッション（`docs/dogfood/estimator-v1-preregistration.md`）: 記録を見ずに保存するまで、記録を見られない
+# （オーナー決定 2026-10-02。2026-10-01 は 14 ハンド中 8 ハンドで保存の前に「記録を見る」を押していた = 記録を初期値に
+# した真のアクションは評価に使えない）。config.json の `ground_truth.evaluation`（既定 false = 練習。押せるが勧めない）
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 _AUDIO_RE = re.compile(r"^[0-9]{6,16}\.wav$")
 # 台本のハンドのセッション（`tools/test_script.py`）。正解は台本なので入力は要らない
 _SCRIPT_SUFFIX = ".script.json"
@@ -373,6 +380,18 @@ def hand_timeline(log_dir: Path, session_id: str, hand: dict, next_started_at: O
     return items
 
 
+def evaluation_mode(config_path: Optional[Path] = None) -> bool:
+    """config.json の `ground_truth.evaluation` が true か（評価のセッション）。読めなければ false（練習）。
+    リクエストごとに読むので、`tools/set_config.py ground_truth.evaluation true` は画面を開き直すだけで効く。"""
+    path = config_path or _CONFIG_PATH
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else {}
+    except (OSError, ValueError):
+        return False
+    section = cfg.get("ground_truth") if isinstance(cfg, dict) else None
+    return isinstance(section, dict) and section.get("evaluation") is True
+
+
 def is_blind(session_id: str, hand_id: int, every: int = BLIND_EVERY) -> bool:
     """このハンドを記録を見ずに入れるか（`every` ハンドに 1 つ。ハンドごとに決まっていて選べない）。"""
     if every <= 0:
@@ -381,9 +400,18 @@ def is_blind(session_id: str, hand_id: int, every: int = BLIND_EVERY) -> bool:
     return int(digest, 16) % every == 0
 
 
+def _blind_phase(gt: Any, in_progress: bool) -> bool:
+    """まだ記録を見ずに入れる段階か: 保存していない、または進行中のハンドをブラインドで途中まで保存した
+    （記録との照らし合わせはハンドが終わってから）。"""
+    if gt is None:
+        return True
+    return in_progress and bool(gt.hand.get("blind")) and not gt.hand.get("reconciled")
+
+
 def hand_detail(
     log_dir: Path, session_id: str, hand_id: int, gt_repo: GroundTruthRepository,
     corr_repo: Optional[HandCorrectionRepository] = None, blind_every: int = BLIND_EVERY,
+    evaluation: bool = False,
 ) -> Optional[dict]:
     captured = _get_hand(log_dir, session_id, hand_id, corr_repo)
     if captured is None:
@@ -392,9 +420,9 @@ def hand_detail(
     gt = gt_repo.get(session_id, hand_id)
     script = (log_dir / f"{session_id}{_SCRIPT_SUFFIX}").is_file()   # 台本のハンドは正解が台本（入力は要らない）
     in_progress = bool(captured.get("in_progress"))
-    # 進行中のハンドは、途中で保存したあともブラインドのまま（記録との照らし合わせはハンドが終わってから）
-    blind_saved = gt is not None and in_progress and bool(gt.hand.get("blind")) and not gt.hand.get("reconciled")
-    blind = (gt is None or blind_saved) and not script and is_blind(session_id, hand_id, blind_every)
+    # 評価のセッションは全部のハンドをブラインドで（`--blind-every` によらない）
+    blind = (_blind_phase(gt, in_progress) and not script
+             and (evaluation or is_blind(session_id, hand_id, blind_every)))
     initial = _gt_actions(gt.hand) if gt is not None else ([] if blind else _gt_actions(captured))
     board, holes = _gt_cards(gt.hand) if gt is not None else (None, None)
     button = _gt_button(gt.hand) if gt is not None else None
@@ -408,6 +436,8 @@ def hand_detail(
         "has_needs_review": hand_has_needs_review(captured),
         "legal": legal,
         "blind": blind,
+        "evaluation": evaluation,
+        "reveal_locked": bool(evaluation and blind),     # 評価: 保存するまで「記録を見る」を押せない
         "script": script,
         "in_progress": in_progress,
         "timeline": hand_timeline(log_dir, session_id, captured, _next_started_at(log_dir, session_id, hand_id)),
@@ -713,8 +743,13 @@ def _entry_sec(body: dict) -> Optional[float]:
 def save_ground_truth(
     log_dir: Path, session_id: str, hand_id: int, body: Any,
     gt_repo: GroundTruthRepository, corr_repo: Optional[HandCorrectionRepository] = None,
+    evaluation: bool = False,
 ) -> tuple[int, dict]:
-    """PUT の本体。staff API（ADR-0043）と同じ規則: passthrough は要確認のハンドを拒む。"""
+    """PUT の本体。staff API（ADR-0043）と同じ規則: passthrough は要確認のハンドを拒む。
+
+    評価のセッション（`evaluation`）では、最初の保存（進行中のハンドはハンドが終わるまで）は記録を見ずに入れた内容
+    （`hand.blind` = true）だけを受け付ける（古い画面・押し間違いでも記録を初期値にした真のアクションが入らない）。
+    """
     if not isinstance(body, dict):
         return 400, {"code": "invalid_amount", "message": "本体が JSON オブジェクトではありません"}
     captured = _get_hand(log_dir, session_id, hand_id, corr_repo)
@@ -727,6 +762,15 @@ def save_ground_truth(
         return 400, {"code": "invalid_amount", "message": str(e)}
     annotator = str(body.get("annotator") or "staff").strip()[:64] or "staff"
     in_progress = bool(captured.get("in_progress"))
+    script = (log_dir / f"{session_id}{_SCRIPT_SUFFIX}").is_file()
+    if evaluation and not script and _blind_phase(gt_repo.get(session_id, hand_id), in_progress):
+        hand = body.get("hand")
+        if source == SOURCE_PASSTHROUGH or not (isinstance(hand, dict) and hand.get("blind") is True):
+            return 400, {
+                "code": "invalid_amount",
+                "message": "評価のセッションです。まず記録を見ずに入れて「保存」してください（そのあとで記録と"
+                           "照らし合わせます）。覚えていない行は「自信なし」を付けてください。",
+            }
     if source == SOURCE_PASSTHROUGH and in_progress:
         return 400, {
             "code": "invalid_amount",
@@ -749,6 +793,8 @@ def save_ground_truth(
     if entry_sec is not None:
         hand_body["entry_sec"] = entry_sec      # 入力にかかった時間（手間を測る）
     _keep_blind_entry(hand_body, gt_repo.get(session_id, hand_id))
+    if evaluation:
+        hand_body["evaluation"] = True          # 評価のセッションで入れた（記録を見ずに入れた内容は blind_entry）
     entry = gt_repo.upsert(session_id, hand_id, hand_body, annotator=annotator, source=source)
     if in_progress:
         return 200, {"saved": entry.to_dict(), "accuracy": None, "in_progress": True}
@@ -885,9 +931,13 @@ class GroundTruthServer(ThreadingHTTPServer):
         self, address: tuple[str, int], log_dir: Path,
         corrections: Optional[Path] = None, blind_every: int = BLIND_EVERY,
         corpus_factory: Optional[Callable[[Path], Any]] = None,
+        evaluation: Optional[bool] = None, config_path: Optional[Path] = None,
     ) -> None:
         self.log_dir = Path(log_dir)
         self.blind_every = blind_every
+        # 評価のモード: 起動の引数で決めたらそれ、無ければ config.json をリクエストごとに読む
+        self._evaluation = evaluation
+        self._config_path = config_path
         self.gt_repo = GroundTruthRepository(self.log_dir)
         self.corr_repo: Optional[HandCorrectionRepository] = None
         if corrections is not None and Path(corrections).is_file():
@@ -901,6 +951,9 @@ class GroundTruthServer(ThreadingHTTPServer):
 
         self.script = ScriptApp(self.log_dir)
         super().__init__(address, _Handler)
+
+    def evaluation(self) -> bool:
+        return self._evaluation if self._evaluation is not None else evaluation_mode(self._config_path)
 
     def corpus(self) -> Any:
         with self._corpus_lock:
@@ -1065,7 +1118,8 @@ class _Handler(BaseHTTPRequestHandler):
         m = _ROUTE_HAND.match(path)
         if m:
             sid = self._session(m.group(1))
-            data = (hand_detail(srv.log_dir, sid, int(m.group(2)), srv.gt_repo, srv.corr_repo, srv.blind_every)
+            data = (hand_detail(srv.log_dir, sid, int(m.group(2)), srv.gt_repo, srv.corr_repo, srv.blind_every,
+                                evaluation=srv.evaluation())
                     if sid else None)
             if data is None:
                 self._send_json(404, {"code": "not_found", "message": "ハンドがありません"})
@@ -1132,7 +1186,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"code": "invalid_amount", "message": "本体が JSON ではありません"})
             return
         status, payload = save_ground_truth(
-            srv.log_dir, sid, int(m.group(2)), body, srv.gt_repo, srv.corr_repo,
+            srv.log_dir, sid, int(m.group(2)), body, srv.gt_repo, srv.corr_repo, evaluation=srv.evaluation(),
         )
         self._send_json(status, payload)
 
@@ -1141,8 +1195,10 @@ def make_server(
     log_dir: Path, host: str = "127.0.0.1", port: int = 8791,
     corrections: Optional[Path] = None, blind_every: int = BLIND_EVERY,
     corpus_factory: Optional[Callable[[Path], Any]] = None,
+    evaluation: Optional[bool] = None, config_path: Optional[Path] = None,
 ) -> GroundTruthServer:
-    return GroundTruthServer((host, port), log_dir, corrections, blind_every, corpus_factory)
+    return GroundTruthServer((host, port), log_dir, corrections, blind_every, corpus_factory,
+                             evaluation=evaluation, config_path=config_path)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -1155,12 +1211,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--blind-every", type=int, default=BLIND_EVERY,
                     help=f"N ハンドに 1 つ記録を見ずに先に入れる（既定 {BLIND_EVERY} = 全部。0 = しない）。"
                          "保存したあとで記録と照らし合わせて直す")
+    ap.add_argument("--evaluation", action="store_const", const=True, default=None,
+                    help="評価のセッション: 記録を見ずに保存するまで記録を見られない（省くと config.json の "
+                         "ground_truth.evaluation）")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
-    server = make_server(log_dir, args.host, args.port, Path(args.corrections), args.blind_every)
+    server = make_server(log_dir, args.host, args.port, Path(args.corrections), args.blind_every,
+                         evaluation=args.evaluation)
     print(f"[ground-truth] http://{args.host}:{args.port}/  (logs: {log_dir.resolve()})")
+    if server.evaluation():
+        print("[ground-truth] 評価のセッション: 記録を見ずに保存するまで、記録は見られません")
     print("[ground-truth] Ctrl+C で終了")
     try:
         server.serve_forever()
@@ -1500,6 +1562,7 @@ function addMuck(seat){
 }
 function isBlind(){ return !!(S.hand && S.hand.blind && !S.revealed); }
 function reveal(){
+  if (S.hand && S.hand.reveal_locked) return;     // 評価のセッション: 保存するまで見られない
   if (!confirm("記録を見ると、このハンドはブラインドではなくなります。見ますか？")) return;
   S.revealed = true; renderEdit();
 }
@@ -1646,7 +1709,9 @@ function renderEdit(){
         <h2 style="margin-top:0">ブラインド</h2>
         <div class="blind">まず<b>記録を見ずに</b>入れて「保存」してください。保存したあとで記録と照らし合わせ、違う行を
           音声で確かめて直します（記録に引きずられずに正解を作るため）。下の発話は ▶ で聞けます。
-          <button class="sm" onclick="reveal()">記録を見る</button></div>
+          ${d.reveal_locked
+            ? `<div class="small" style="margin-top:6px"><b>評価のセッション</b>なので、保存するまで記録は見られません。覚えていない行は「自信なし」を付けて保存してください。</div>`
+            : `<button class="sm" onclick="reveal()">記録を見る</button>`}</div>
         <h2>発話と札の流れ <span class="muted small">+秒 = 手札が配られてから</span></h2>
         ${renderTimeline(d.timeline, true)}
       </div>` : `
@@ -1664,7 +1729,8 @@ function renderEdit(){
       </div>`;
   $("app").innerHTML = `
     <div class="bar"><button onclick="backToList()">← 一覧</button><h1 style="margin:0">ハンド #${cap.hand_id}</h1>
-      <span class="muted small">${fmtTime(cap.started_at)} ／ ボタン 席 ${cap.button_seat ?? "—"} ／ ブラインド ${(cap.blinds||{}).sb ?? "?"}/${(cap.blinds||{}).bb ?? "?"}</span> ${gtMeta}</div>
+      <span class="muted small">${fmtTime(cap.started_at)} ／ ボタン 席 ${cap.button_seat ?? "—"} ／ ブラインド ${(cap.blinds||{}).sb ?? "?"}/${(cap.blinds||{}).bb ?? "?"}</span> ${gtMeta}
+      ${d.evaluation ? '<span class="tag t-warn">評価のセッション</span>' : ""}</div>
     <div class="cols">
       ${leftPanel}
       <div class="panel">

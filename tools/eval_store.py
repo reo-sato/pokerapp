@@ -412,6 +412,109 @@ def listening_summary(transcripts: list[dict], rescored: list[dict]) -> dict:
     }
 
 
+# ――― 音声の改善を終える目安（オーナー決定 2026-10-02 = 作業計画の監査 §5 の止める規則）―――
+# 直すのに使っていない新しいセッションで、配る人のアクションの発話が 90% 以上正しく読め、決まり文句に化けるのが
+# 5% 以下。これが 2 回続いたら音声の改善を終える（上限 4 セッション・2 週間。`docs/dogfood/estimator-v1-preregistration.md`）
+STOP_READ_RATE = 0.90
+STOP_CANNED_RATE = 0.05
+_SPOKEN_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin"})
+
+
+def _speech_token(action: str, amount: Any) -> Optional[tuple]:
+    """発話の読みと真のアクションを比べる形。ベット・レイズは額だけ（店ではどちらも額だけを言い、どちらかは engine が
+    決める）、ほかはアクションの種類だけ（コールの額は言わないことが多い）。チェックアラウンドは続くチェックと対応する。"""
+    if action in ("bet", "raise"):
+        return ("wager", int(amount or 0))
+    if action in _SPOKEN_ACTIONS or action == "check_around":
+        return (action, 0)
+    return None
+
+
+def truth_tokens(hand: dict) -> list[tuple]:
+    """真のアクションのうち、配る人が言う行。ショーダウンで見せずに降りた行と、ハンドを終わらせる最後のフォールド
+    （札の離脱と勝者で分かるので言わないことが多い）は数えない。"""
+    actions = [a for a in hand.get("actions") or [] if isinstance(a, dict)]
+    showdown = any(a.get("street") == "showdown" for a in actions)
+    rows = [a for a in actions if a.get("action") in _SPOKEN_ACTIONS and a.get("street") != "showdown"]
+    if rows and rows[-1].get("action") == "fold" and not showdown:      # 全員降りて終わったハンドの最後のフォールド
+        rows = rows[:-1]
+    return [_speech_token(a["action"], a.get("amount")) for a in rows]
+
+
+def heard_tokens(transcripts: list[dict], window: tuple[float, float]) -> list[tuple]:
+    """ハンドの時間帯に話し始めた発話を、ライブと同じ規則（いまの読み取り + 第 2 の耳）で読んだアクション。"""
+    start, end = window
+    rows = sorted((r for r in transcripts if isinstance(r.get("utterance_start_ts"), (int, float))
+                   and start <= r["utterance_start_ts"] < end), key=lambda r: r["utterance_start_ts"])
+    out: list[tuple] = []
+    for row in rows:
+        text = (row.get("text") or "").strip()
+        at = row["utterance_start_ts"]
+        parsed = [] if _is_noise(row, text) else parse_actions(
+            text, confidence=row.get("confidence"), utterance_start_ts=at)
+        parsed, _ = apply_ear(parsed, text, row.get("ear"), question=is_question(text), utterance_start_ts=at,
+                              confidence=row.get("confidence"))
+        out.extend(t for t in (_speech_token(e.action, e.amount) for e in parsed) if t is not None)
+    return out
+
+
+def matched_tokens(truth: list[tuple], heard: list[tuple]) -> int:
+    """真のアクションの行のうち、発話の読みと順に対応づけられた数（最長共通部分列。チェックアラウンドは続く
+    チェック 1 つ以上と対応する）。"""
+    n, m = len(truth), len(heard)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            best = max(dp[i - 1][j], dp[i][j - 1])
+            if heard[j - 1] == truth[i - 1]:
+                best = max(best, dp[i - 1][j - 1] + 1)
+            elif heard[j - 1][0] == "check_around":
+                k = 0
+                while k < i and truth[i - 1 - k][0] == "check":
+                    k += 1
+                    best = max(best, dp[i - k][j - 1] + k)
+            dp[i][j] = best
+    return dp[n][m]
+
+
+def script_windows(script: dict, marks: list[dict]) -> dict[int, tuple[float, float]]:
+    """台本のハンド n の時間帯 = 台本の画面で「始める」を押してから次の「始める」まで（やり直しは後の方）。"""
+    known = {int(h["n"]) for h in script.get("hands") or []}
+    starts = sorted((float(m["t"]), int(m["hand"])) for m in marks
+                    if m.get("event") == "start" and m.get("hand") in known and isinstance(m.get("t"), (int, float)))
+    out: dict[int, tuple[float, float]] = {}
+    for i, (t, n) in enumerate(starts):
+        out[n] = (t, starts[i + 1][0] if i + 1 < len(starts) else t + 600.0)
+    return out
+
+
+def listening_stop_metrics(gt: dict, hands: list[dict], transcripts: list[dict],
+                           windows: Optional[dict[int, tuple[float, float]]] = None) -> dict:
+    """音声の改善を終える目安: 真のアクションのある各ハンドで、配る人が言うアクションのうち発話の読みと合った割合と、
+    認識に回した発話のうち決まり文句（`is_prompt_echo`）になった割合。ハンドの時間帯は再生したハンド（`hands`）から、
+    台本のセッションは台本の画面を押した時刻から（`windows`）。"""
+    windows = hand_windows(hands) if windows is None else windows
+    per_hand = []
+    for h in gt.get("hands") or []:
+        hid = h.get("hand_id")
+        truth = truth_tokens(h)
+        if hid not in windows or not truth:
+            continue
+        per_hand.append({"hand_id": hid, "actions": len(truth),
+                         "read": matched_tokens(truth, heard_tokens(transcripts, windows[hid]))})
+    actions = sum(p["actions"] for p in per_hand)
+    read = sum(p["read"] for p in per_hand)
+    texts = [t for t in ((r.get("text") or "").strip() for r in transcripts) if t]
+    canned = sum(1 for t in texts if is_prompt_echo(t))
+    read_rate = read / actions if actions else None
+    canned_rate = canned / len(texts) if texts else None
+    meets = (read_rate is not None and canned_rate is not None
+             and read_rate >= STOP_READ_RATE and canned_rate <= STOP_CANNED_RATE)
+    return {"hands": len(per_hand), "actions": actions, "read": read, "read_rate": read_rate,
+            "utterances": len(texts), "canned": canned, "canned_rate": canned_rate, "meets": meets,
+            "per_hand": per_hand}
+
+
 # ――― 第 2 の耳と Whisper の別のやり方（tools/second_ear.py, 2026-09-29）―――
 
 # 第 2 の耳の候補を使う条件。厳しめ = 第 2 の耳が自由に聞いた文そのものが、いちばん確からしい候補と同じ
@@ -675,12 +778,14 @@ class SessionReport:
     gt: dict = field(default_factory=dict)
     memos: list[dict] = field(default_factory=list)      # 真のアクションのメモ（truth_memos）
     script: dict = field(default_factory=dict)           # 台本のハンド（tools/test_script.py）を真のアクションにした
+    stop: dict = field(default_factory=dict)             # 音声の改善を終える目安（listening_stop_metrics）
 
     def to_json(self) -> dict:
         return {
             "session_id": self.session_id, "hands": self.hands, "note": self.note, "same_code": self.same_code,
             "changed_files": self.changed_files, "differences": self.differences, "sources": self.sources,
             "truth": self.truth, "setup": self.setup, "flags": self.flags, "listening": self.listening,
+            "stop": self.stop,
             "reparse_differences": diff_record(self.replayed, self.reparsed) if self.reparsed else [],
             "ear": self.ear, "memos": self.memos, "script": self.script,
             "route_differences": {k: diff_record(self.reparsed, v) for k, v in self.routes.items()},
@@ -760,6 +865,16 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
             report.truth["rescored"] = evaluate_against_truth(report.gt, report.rescored)
         for key, hands in report.routes.items():
             report.truth[key] = evaluate_against_truth(report.gt, hands)
+        if transcripts and script is not None:
+            # 台本のセッション: ハンドの区切りはライブの記録ではなく台本の画面を押した時刻（ライブはハンドの始まりが
+            # 遅れることがある）
+            marks = _read_jsonl(files.path(MARKS_SUFFIX))
+            report.stop = listening_stop_metrics(
+                {"hands": [{"hand_id": int(h["n"]), "actions": h.get("actions") or []}
+                           for h in script.get("hands") or []]},
+                [], transcripts, windows=script_windows(script, marks))
+        elif transcripts:
+            report.stop = listening_stop_metrics(report.gt, report.reparsed or report.replayed, transcripts)
     return report
 
 
@@ -1143,6 +1258,13 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
             conf = r.truth["record"]["asr_confidence"]
             if conf["correct"] or conf["wrong"]:
                 print(f"    聞き取りの自信（記録の音声の行）: 正しい {conf['correct']} / 誤り {conf['wrong']}")
+            st = r.stop
+            if st and st["actions"]:
+                print(f"  音声の改善を終える目安: アクションの発話 {st['read']}/{st['actions']}"
+                      f"（{_fmt_pct(st['read_rate'])}）が正しく読めた・決まり文句 {st['canned']}/{st['utterances']}"
+                      f"（{_fmt_pct(st['canned_rate'])}）→ "
+                      + ("目安を満たす" if st["meets"] else "目安に届かない")
+                      + f"（{STOP_READ_RATE:.0%} 以上・{STOP_CANNED_RATE:.0%} 以下。{st['hands']} ハンド）")
         else:
             print("  真のアクション: なし")
         if show_timeline:

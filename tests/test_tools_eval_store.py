@@ -496,3 +496,69 @@ class TestCommandLine:
 
     def test_no_sessions(self, tmp_path, capsys):
         assert eval_store.main([str(tmp_path)]) == 1
+
+
+class TestStopRule:
+    """音声の改善を終える目安（オーナー決定 2026-10-02 = 作業計画の監査 §5）: 配る人のアクションの発話が 90% 以上
+    正しく読め、決まり文句が 5% 以下。"""
+
+    START = 1_790_000_000.0
+
+    def _hands(self):
+        from datetime import datetime
+
+        iso = datetime.fromtimestamp(self.START).isoformat()
+        return [{"hand_id": 1, "started_at": iso, "ended_at": datetime.fromtimestamp(self.START + 60).isoformat()}]
+
+    @staticmethod
+    def _gt(actions):
+        return {"hands": [{"hand_id": 1, "actions": [
+            {"street": s, "seat": seat, "action": a, "amount": amt} for s, seat, a, amt in actions]}]}
+
+    def _rows(self, texts):
+        return [{"utterance_start_ts": self.START + 2 + i * 3, "text": t, "confidence": 0.9}
+                for i, t in enumerate(texts)]
+
+    def test_tokens_compare_amounts_for_wagers_and_kinds_for_the_rest(self):
+        assert eval_store._speech_token("raise", 1300) == eval_store._speech_token("bet", 1300) == ("wager", 1300)
+        assert eval_store._speech_token("call", 800) == ("call", 0)
+        assert eval_store._speech_token("heads_up", 0) is None            # 進行の語は数えない
+
+    def test_the_hand_ending_fold_and_showdown_mucks_are_not_counted(self):
+        hand = {"actions": [{"street": "preflop", "action": "raise", "amount": 600},
+                            {"street": "preflop", "action": "call", "amount": 600},
+                            {"street": "river", "action": "fold"},
+                            {"street": "showdown", "action": "fold"}]}
+        assert eval_store.truth_tokens(hand) == [("wager", 600), ("call", 0), ("fold", 0)]
+        foldout = {"actions": [{"street": "preflop", "action": "raise", "amount": 600},
+                               {"street": "preflop", "action": "fold"}]}
+        assert eval_store.truth_tokens(foldout) == [("wager", 600)]   # 札の離脱と勝者で分かるので言わないことが多い
+
+    def test_check_around_matches_the_run_of_checks(self):
+        truth = [("check", 0), ("check", 0), ("check", 0), ("wager", 500)]
+        assert eval_store.matched_tokens(truth, [("check_around", 0), ("wager", 500)]) == 4
+        assert eval_store.matched_tokens(truth, [("check", 0), ("wager", 600)]) == 1   # 額の聞き違いは合わない
+
+    def test_a_session_that_reads_well_meets_the_rule(self):
+        gt = self._gt([("preflop", 4, "raise", 600), ("preflop", 5, "call", 600), ("preflop", 6, "call", 600),
+                       ("flop", 5, "check", 0), ("flop", 6, "check", 0), ("flop", 4, "bet", 1200),
+                       ("flop", 5, "fold", 0), ("flop", 6, "call", 1200), ("turn", 6, "check", 0),
+                       ("turn", 4, "check", 0), ("river", 6, "bet", 2000), ("river", 4, "fold", 0)])
+        rows = self._rows(["600", "コール", "コール", "チェック", "チェック", "1200", "フォールド", "コール",
+                           "チェック", "チェック", "2000", "ナイスハンド"])
+        m = eval_store.listening_stop_metrics(gt, self._hands(), rows)
+        assert m["actions"] == 11 and m["read"] == 11 and m["read_rate"] == 1.0
+        assert m["canned"] == 0 and m["meets"] is True
+
+    def test_canned_phrases_and_misreads_fail_the_rule(self):
+        gt = self._gt([("preflop", 4, "raise", 600), ("preflop", 5, "call", 600), ("preflop", 6, "call", 600),
+                       ("flop", 5, "check", 0)])
+        rows = self._rows(["600", "ご視聴ありがとうございました", "コール", "チェック"])
+        m = eval_store.listening_stop_metrics(gt, self._hands(), rows)
+        assert m["read"] == 3 and m["actions"] == 4 and m["canned"] == 1 and m["meets"] is False
+
+    def test_script_windows_follow_the_page_and_take_the_redo(self):
+        script = {"hands": [{"n": 1}, {"n": 2}]}
+        marks = [{"event": "start", "hand": 1, "t": 100.0}, {"event": "start", "hand": 2, "t": 200.0},
+                 {"event": "start", "hand": 2, "t": 260.0}, {"event": "winner", "seat": 4, "t": 300.0}]
+        assert eval_store.script_windows(script, marks) == {1: (100.0, 200.0), 2: (260.0, 860.0)}
