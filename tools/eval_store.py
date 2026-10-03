@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import shutil
 import statistics
 import sys
@@ -417,6 +418,12 @@ def listening_summary(transcripts: list[dict], rescored: list[dict]) -> dict:
 # 5% 以下。これが 2 回続いたら音声の改善を終える（上限 4 セッション・2 週間。`docs/dogfood/estimator-v1-preregistration.md`）
 STOP_READ_RATE = 0.90
 STOP_CANNED_RATE = 0.05
+# 1 セッションでは決めない（オーナー決定 2026-10-03 = 監査 3 回目: 12〜35 発話では 90% 読めていても「2 回続く」が
+# 0.4 前後 = 偶然で決まる）。真のアクションのあるハンドが 10 以上のセッションの直近 2 つを合算し、配る人が言う
+# アクションが 100 以上のときだけ判定する
+STOP_POOL_SESSIONS = 2
+STOP_POOL_MIN_ACTIONS = 100
+STOP_MIN_HANDS = 10
 _SPOKEN_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin"})
 
 
@@ -513,6 +520,54 @@ def listening_stop_metrics(gt: dict, hands: list[dict], transcripts: list[dict],
     return {"hands": len(per_hand), "actions": actions, "read": read, "read_rate": read_rate,
             "utterances": len(texts), "canned": canned, "canned_rate": canned_rate, "meets": meets,
             "per_hand": per_hand}
+
+
+def pooled_stop_metrics(sessions: list[tuple[str, float, dict]]) -> Optional[dict]:
+    """音声の改善を終える目安の判定（合算）。`sessions`: (セッション ID, 始まりの時刻, `listening_stop_metrics`)。
+
+    真のアクションのあるハンドが `STOP_MIN_HANDS` 以上のセッションのうち、始まりの新しい `STOP_POOL_SESSIONS` 個を
+    合算する。合算のアクションが `STOP_POOL_MIN_ACTIONS` 未満・セッションが足りなければ判定しない（`decided` = False）。
+    """
+    usable = sorted((s for s in sessions if s[2] and s[2].get("hands", 0) >= STOP_MIN_HANDS), key=lambda s: s[1])
+    if not sessions:
+        return None
+    recent = usable[-STOP_POOL_SESSIONS:]
+    actions = sum(s[2]["actions"] for s in recent)
+    read = sum(s[2]["read"] for s in recent)
+    utterances = sum(s[2]["utterances"] for s in recent)
+    canned = sum(s[2]["canned"] for s in recent)
+    read_rate = read / actions if actions else None
+    canned_rate = canned / utterances if utterances else None
+    decided = len(recent) == STOP_POOL_SESSIONS and actions >= STOP_POOL_MIN_ACTIONS and canned_rate is not None
+    meets = bool(decided and read_rate >= STOP_READ_RATE and canned_rate <= STOP_CANNED_RATE)
+    return {"sessions": [s[0] for s in recent], "short": [s[0] for s in sessions if s not in usable],
+            "actions": actions, "read": read, "read_rate": read_rate, "utterances": utterances, "canned": canned,
+            "canned_rate": canned_rate, "decided": decided, "meets": meets}
+
+
+def _short_sid(session_id: str) -> str:
+    """表示用のセッションの短い名前（台本の「2026-09-30_165030_script_voice」は時刻の部分）。"""
+    m = re.match(r"\d{4}-\d{2}-\d{2}_(\d{6})", session_id)
+    return m.group(1) if m else session_id[:8]
+
+
+def format_pooled_stop(pooled: dict) -> str:
+    head = (f"音声の改善を終える目安（直近 {STOP_POOL_SESSIONS} セッションの合算・真のアクションのあるハンドが"
+            f" {STOP_MIN_HANDS} 以上のセッションだけ）: ")
+    if not pooled["sessions"]:
+        return head + f"判定しない（{STOP_MIN_HANDS} ハンド以上のセッションがありません）"
+    body = (f"{'・'.join(_short_sid(s) for s in pooled['sessions'])}: アクションの発話 {pooled['read']}/{pooled['actions']}"
+            f"（{_fmt_pct(pooled['read_rate'])}）が正しく読めた・決まり文句 {pooled['canned']}/{pooled['utterances']}"
+            f"（{_fmt_pct(pooled['canned_rate'])}）→ ")
+    if not pooled["decided"]:
+        need = []
+        if len(pooled["sessions"]) < STOP_POOL_SESSIONS:
+            need.append(f"{STOP_MIN_HANDS} ハンド以上のセッションが {STOP_POOL_SESSIONS} つ要る")
+        if pooled["actions"] < STOP_POOL_MIN_ACTIONS:
+            need.append(f"アクションの発話が合わせて {STOP_POOL_MIN_ACTIONS} 以上要る")
+        return head + body + "判定しない（" + "・".join(need) + "）"
+    return head + body + ("目安を満たす（音声の改善を終える）" if pooled["meets"] else "目安に届かない") + \
+        f"（{STOP_READ_RATE:.0%} 以上・{STOP_CANNED_RATE:.0%} 以下）"
 
 
 # ――― 第 2 の耳と Whisper の別のやり方（tools/second_ear.py, 2026-09-29）―――
@@ -1157,6 +1212,12 @@ _TRUTH_LABELS = (
 )
 
 
+def session_started(report: SessionReport) -> float:
+    """セッションの始まり（いちばん早いハンドの始まり。無ければ 0）。音声の改善を終える目安の「直近」の並び。"""
+    times = [_epoch(h.get("started_at")) for h in [*report.live, *report.replayed] if isinstance(h, dict)]
+    return min((t for t in times if t is not None), default=0.0)
+
+
 def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: Optional[int],
                  tz: Optional[timezone], files_by_sid: dict[str, SessionFiles]) -> None:
     labels = _TRUTH_LABELS + _ROUTE_LABELS
@@ -1260,11 +1321,11 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                 print(f"    聞き取りの自信（記録の音声の行）: 正しい {conf['correct']} / 誤り {conf['wrong']}")
             st = r.stop
             if st and st["actions"]:
-                print(f"  音声の改善を終える目安: アクションの発話 {st['read']}/{st['actions']}"
+                # 1 セッションの値は参考（判定は最後の合算の行 = `pooled_stop_metrics`）
+                print(f"  音声の改善を終える目安（このセッション, 参考）: アクションの発話 {st['read']}/{st['actions']}"
                       f"（{_fmt_pct(st['read_rate'])}）が正しく読めた・決まり文句 {st['canned']}/{st['utterances']}"
-                      f"（{_fmt_pct(st['canned_rate'])}）→ "
-                      + ("目安を満たす" if st["meets"] else "目安に届かない")
-                      + f"（{STOP_READ_RATE:.0%} 以上・{STOP_CANNED_RATE:.0%} 以下。{st['hands']} ハンド）")
+                      f"（{_fmt_pct(st['canned_rate'])}）。{st['hands']} ハンド"
+                      + ("" if st["hands"] >= STOP_MIN_HANDS else f"（{STOP_MIN_HANDS} ハンド未満なので合算に入れない）"))
         else:
             print("  真のアクション: なし")
         if show_timeline:
@@ -1285,6 +1346,9 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                         print(line)
                 for line in compare_rows(gt_by_id.get(hid), live_by_id.get(hid), rep_by_id.get(hid)):
                     print(line)
+    pooled = pooled_stop_metrics([(r.session_id, session_started(r), r.stop) for r in reports if r.stop])
+    if pooled is not None:
+        print(format_pooled_stop(pooled))
     for key, label in labels:
         c = totals[key]
         if c["total"]:

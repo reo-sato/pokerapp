@@ -18,6 +18,7 @@ import pytest
 
 from tools.ground_truth_ui import (
     evaluation_mode,
+    gt_lint,
     hand_lint,
     is_blind,
     list_sessions,
@@ -815,6 +816,50 @@ class TestHandLint:
         assert _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "manual-edit", "hand": hand})[0] == 200
         status, detail = _req(base, "GET", f"/api/sessions/{SID}/hands/1")
         assert status == 200 and any("ボードに 7h" in m for m in detail["legal"]["lint"])
+
+
+class TestSaveLint:
+    """保存の前の確かめ（監査 3 回目, 2026-10-03: 店舗 1709932e ハンド 3 は、降りた席のコールと、その先のストリートの
+    無い行が入ったまま保存された）。確かめて保存すれば通し、その不備を真のアクションに残す。"""
+
+    FOLDED_CALLS = [
+        {"seat": 6, "action": "call", "amount": 200, "street": "preflop"},
+        {"seat": 4, "action": "fold", "amount": 0, "street": "preflop"},
+        {"seat": 5, "action": "check", "amount": 0, "street": "preflop"},
+        {"seat": 5, "action": "check", "amount": 0, "street": "flop"},
+        {"seat": 6, "action": "bet", "amount": 600, "street": "flop"},
+        {"seat": 4, "action": "call", "amount": 600},                  # 席4 は降りている・ストリートが無い
+    ]
+
+    def test_a_folded_seat_acting_and_the_rows_that_cannot_follow(self):
+        msgs = gt_lint(_hand(1), {"actions": self.FOLDED_CALLS})
+        assert msgs[0] == "6 行目: 席4 は 2 行目で降りています（フォールドのあとのコール）"
+        assert msgs[1].startswith("6 行目から先は反映できません（ストリートが付きません）: 手番は席5")
+
+    def test_the_right_entry_and_a_showdown_muck_pass(self):
+        rows = [{"seat": s, "action": a, "amount": m, "street": st} for st, s, a, m in ACTIONS]
+        assert gt_lint(_hand(1), {"actions": rows}) == []
+        cap = {"players": [{"seat": 4, "stack_start": 10000}, {"seat": 5, "stack_start": 10000}],
+               "blinds": {"sb": 100, "bb": 200}, "button_seat": 5}
+        rows = [{"seat": 5, "action": "call", "street": "preflop"}, {"seat": 4, "action": "check", "street": "preflop"}]
+        rows += [{"seat": s, "action": "check", "street": st} for st in ("flop", "turn", "river") for s in (4, 5)]
+        rows.append({"seat": 4, "action": "fold", "street": "showdown"})       # ショーダウンで見せずに降りた
+        assert gt_lint(cap, {"actions": rows}) == []
+
+    def test_saving_asks_first_then_keeps_what_was_confirmed(self, base, log_dir):
+        hand = {"board": ["As", "Kd", "7h"], "actions": self.FOLDED_CALLS, "winner_seat": 6}
+        status, d = _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "manual-edit", "hand": hand})
+        assert status == 409 and d["code"] == "gt_lint" and len(d["problems"]) == 2, d
+        assert not (log_dir / f"{SID}.ground_truth.json").exists()
+        status, d = _req(base, "PUT", f"/api/sessions/{SID}/hands/1",
+                         {"source": "manual-edit", "hand": hand, "confirm_lint": True})
+        assert status == 200, d
+        saved = json.loads((log_dir / f"{SID}.ground_truth.json").read_text(encoding="utf-8"))["hands"][0]
+        assert saved["lint_confirmed"][0].startswith("6 行目: 席4 は 2 行目で降りています")
+
+    def test_page_asks_before_saving_a_flawed_entry(self, base):
+        status, page = _req(base, "GET", "/")
+        assert 'e.code === "gt_lint"' in page and "confirm_lint: true" in page
 
 
 class TestServerErrors:

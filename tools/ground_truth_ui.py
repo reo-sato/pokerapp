@@ -789,6 +789,11 @@ def save_ground_truth(
             hand_body = validate_gt_hand(body.get("hand"))
         except GroundTruthError as e:
             return 400, {"code": "invalid_amount", "message": str(e)}
+        problems = gt_lint(captured, hand_body)
+        if problems and body.get("confirm_lint") is not True:
+            return 409, {"code": "gt_lint", "message": "／".join(problems), "problems": problems}
+        if problems:
+            hand_body["lint_confirmed"] = problems    # 確かめて保存した不備（評価では数えないハンドの理由になる）
     entry_sec = _entry_sec(body)
     if entry_sec is not None:
         hand_body["entry_sec"] = entry_sec      # 入力にかかった時間（手間を測る）
@@ -825,6 +830,35 @@ def _keep_blind_entry(hand_body: dict, existing: Any) -> None:
 
 _STREET_ORDER = ("preflop", "flop", "turn", "river")
 _BOARD_STREET = {3: "flop", 4: "turn", 5: "river"}
+
+
+def gt_lint(captured: dict, hand: dict) -> list[str]:
+    """保存する真のアクションの不備（監査 3 回目, 2026-10-03: 店舗 1709932e ハンド 3 は、降りた席のコールと、その先の
+    ストリートの無い行が入ったまま保存され、評価なら「数えない」かを後から決めることになった）。
+
+    - 降りた席のアクション（前の行でフォールドした席。ショーダウンで見せずに降りた行は除く）
+    - 反映できない行（手番違い・額の範囲外など）: その行から先はストリートが付かない
+    記録は使わない（ブラインドで入れている間も出してよい）。保存の前に知らせ、確かめてから保存する（`confirm_lint`）。
+    評価の物差し（`tools/bench_hands.py`）も、この不備のあるハンドを数えない（理由つきで別に出す）。
+    """
+    rows = _gt_actions(hand)
+    msgs: list[str] = []
+    folded: dict[int, int] = {}
+    streets = [a.get("street") for a in hand.get("actions") or []
+               if isinstance(a, dict) and a.get("action") in GT_ACTIONS and isinstance(a.get("seat"), int)]
+    for i, a in enumerate(rows):
+        street = streets[i] if i < len(streets) else None
+        if a["seat"] in folded and street != "showdown":
+            msgs.append(f"{i + 1} 行目: 席{a['seat']} は {folded[a['seat']] + 1} 行目で降りています（フォールドのあとの"
+                        f"{_ACTION_JA.get(a['action'], a['action'])}）")
+        if a["action"] == "fold":
+            folded.setdefault(a["seat"], i)
+    board, holes = _gt_cards(hand)
+    legal = replay_legal(captured, rows, board=board, holes=holes, button=_gt_button(hand))
+    err = legal.get("error") or {}
+    if isinstance(err.get("index"), int) and err["index"] >= 0:
+        msgs.append(f"{err['index'] + 1} 行目から先は反映できません（ストリートが付きません）: {err.get('message')}")
+    return msgs
 
 
 def street_lint(captured: dict, rows: list[dict], nxt: Optional[dict], board: Optional[list],
@@ -901,6 +935,8 @@ def card_lint(captured: dict, board: Optional[list], holes: Optional[dict]) -> l
 
 _STREET_JA = {"preflop": "プリフロップ", "flop": "フロップ", "turn": "ターン", "river": "リバー",
               "showdown": "ショーダウン"}
+_ACTION_JA = {"fold": "フォールド", "check": "チェック", "call": "コール", "bet": "ベット", "raise": "レイズ",
+              "allin": "オールイン"}
 
 
 def _review_confirmed(captured: dict, body: dict) -> bool:
@@ -1392,7 +1428,11 @@ async function api(path, opts){
   try { r = await fetch(path, Object.assign({headers:{"Content-Type":"application/json"}}, opts || {})); }
   catch (e) { throw new Error(OFFLINE); }
   let d = null; try { d = await r.json(); } catch (e) {}
-  if (!r.ok) throw new Error((d && d.message) || ("HTTP " + r.status));
+  if (!r.ok) {
+    const err = new Error((d && d.message) || ("HTTP " + r.status));
+    err.code = d && d.code; err.data = d;
+    throw err;
+  }
   return d;
 }
 function toast(msg, bad){
@@ -1805,7 +1845,20 @@ async function saveWith(body){
       return;
     }
     S.view = "list"; S.hand = null; renderList(); await refreshAll();
-  } catch (e) { toast("保存できません: " + e.message, true); }
+  } catch (e) {
+    // 保存の前の確かめ（降りた席のアクション・反映できない行）: 確かめたうえで保存するか選ぶ
+    if (e.code === "gt_lint" && !body.confirm_lint) {
+      const items = ((e.data && e.data.problems) || [e.message]).map(m => "・" + m).join("\n");
+      if (confirm("入れたアクションに不備があります:\n" + items + "\n\n直さずにこのまま保存しますか？（評価では数えないハンドになります）")) {
+        S.busy = false;
+        await saveWith(Object.assign({}, body, {confirm_lint: true}));
+        return;
+      }
+      toast("保存していません。赤い行を直してください", true);
+      return;
+    }
+    toast("保存できません: " + e.message, true);
+  }
   finally { S.busy = false; }
 }
 function entrySec(){ return Math.round((Date.now() - S.openedAt) / 100) / 10; }
@@ -1814,8 +1867,7 @@ function savePassthrough(){
             confirmed_rows: [...S.confirmed], confirmed_hand: S.confirmedHand});
 }
 function saveEdited(){
-  const L = S.legal;
-  if (L && L.error && L.next && !confirm("赤い行（反映できないアクション）があります。このまま保存しますか？")) return;
+  // 赤い行（反映できないアクション）・降りた席のアクションは、保存のときにサーバーが確かめる（`gt_lint`）
   if (S.gt.winner_seat == null && !S.hand.in_progress && !confirm("勝った席が未定です。このまま保存しますか？")) return;
   saveWith({source:"manual-edit", annotator: S.annotator || "staff", hand: gtPayload(), entry_sec: entrySec()});
 }

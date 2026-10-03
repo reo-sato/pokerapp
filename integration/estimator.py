@@ -24,6 +24,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from core.events import AudioEvent, RFIDEvent
@@ -104,6 +105,7 @@ _AMOUNT_READ_REASONS = frozenset({"phonetic_amount", "amount_restated", "legal_a
 _INSERTABLE = ("fold", "check", "call")
 _INSERT_LEAD_SEC = 0.3          # 聞こえなかったアクションは次の語の少し前に置く
 _STREETS = ("preflop", "flop", "turn", "river")
+EXPLANATION_MARK = "（記録は変えない説明）"    # 記録を変えない説明だけの直しの要確認の理由に付ける
 
 
 # 発話の読みの確からしさ（`tools/estimate.py` の `utterance_options`, v0 と共通）のうち v1 で置き直す値。
@@ -115,7 +117,10 @@ _STREETS = ("preflop", "flop", "turn", "river")
 # 開発データの 1/23 から）。
 # 第 2 の耳が自由に聞いた文が空でも、その候補を選択肢にする（`ear_empty_text`, 2026-10-02。空の文は耳の貪欲な探索が
 # 何も書かなかっただけで、候補の確からしさはその空の文と比べられる。v0 が空を除いていた理由は記録に無い）。
-READING_OVERRIDES: dict[str, float] = {"canned_action": 0.2, "canned_ear_temp": 2.0, "ear_empty_text": 1.0}
+# 監査 3 回目（2026-10-03, オーナーが推奨の案を採用）: 第 2 の耳が否定した Whisper の読みを第 2 の耳の候補と同じ式で
+# 値付けする（下の桁の読みの値の逆転）・意味のない語の額（第 2 の耳あり）を候補と同じ式 + 音の距離で。
+READING_OVERRIDES: dict[str, float] = {"canned_action": 0.2, "canned_ear_temp": 2.0, "ear_empty_text": 1.0,
+                                       "price_overridden_whisper": 1.0, "price_ear_phonetic": 1.0}
 
 
 def reading_params() -> dict:
@@ -128,6 +133,30 @@ def params_hash(params: dict[str, float] = PARAMS) -> str:
     """値の指紋。発話の読みの確からしさ（`reading_params`）も含める（監査 2 回目）。"""
     both = {"estimator": params, "reading": reading_params()}
     return hashlib.sha1(json.dumps(both, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+
+
+# 推定の結果を決めるファイル（監査 3 回目の必須 4: `params_hash` は値だけで、読みの規則・engine・再生の変更を見分け
+# られない）。正誤を決める物差し（`tools/measure_capture_accuracy.py`）と、台本・店舗のログを入力にする部分も含める。
+# 推定器が読み込むファイルのうち、ここに無いもの（記録・画面の補助）は `tests/test_estimator.py` が理由つきで固定する
+CONTENT_FILES = (
+    "integration/estimator.py", "integration/world_replay.py", "integration/engine.py", "integration/replay.py",
+    "tools/estimate.py", "tools/eval_store.py", "tools/measure_capture_accuracy.py",
+    "audio/recognizer.py", "audio/phonetic.py", "audio/second_ear.py",
+    "core/bet_sizing.py", "core/poker_engine.py", "core/showdown.py", "core/positions.py", "core/constants.py",
+    "core/game_state.py", "core/engine_types.py", "core/events.py", "core/hand_log.py", "core/control_queue.py",
+)
+
+
+def content_hash(root: Optional[Path] = None) -> str:
+    """推定器まわりのファイルの内容の指紋（`CONTENT_FILES`）。改行は LF にそろえる（取り出し方で変わらない）。
+    推定のファイル・物差しの出力・事前登録に書く（同じ指紋 = 同じ推定のコード）。"""
+    base = root or Path(__file__).resolve().parent.parent
+    digest = hashlib.sha1()
+    for rel in CONTENT_FILES:
+        path = base / rel
+        data = path.read_bytes().replace(b"\r\n", b"\n") if path.exists() else b"<missing>"
+        digest.update(rel.encode("utf-8") + b"\0" + data + b"\0")
+    return digest.hexdigest()[:12]
 
 
 def _log(p: float) -> float:
@@ -173,6 +202,10 @@ class HandWindow:
     start: float
     end: float
     base: dict                       # 直しの無い再生のハンド（持ち点・ボタン・ブラインドの出所）
+    # 配ったあとに届いた前のハンドへの勝者の指定（打った `w`・画面の勝者）の時刻: `late` はこの窓のあとに流し、
+    # `skip` はこの窓では流さない（`SessionEstimator._route_late_winners`）
+    late: tuple[float, ...] = ()
+    skip: tuple[float, ...] = ()
 
     @property
     def button(self) -> Optional[int]:
@@ -200,6 +233,15 @@ def record_key(hand: Optional[dict]) -> tuple:
     return rows, hand.get("winner_seat"), tuple(hand.get("board") or []), hand.get("button_seat")
 
 
+def hand_from_key(key: tuple) -> dict:
+    """`record_key` を、全部正しいハンドの物差し（行・勝者・ボード）で比べられるハンドに戻す。"""
+    if not key:
+        return {}
+    rows, winner, board, button = key
+    return {"actions": [{"street": s, "seat": seat, "action": a, "amount": m} for s, seat, a, m in rows],
+            "winner_seat": winner, "board": list(board), "button_seat": button}
+
+
 @dataclass
 class HandResult:
     window: HandWindow
@@ -209,10 +251,24 @@ class HandResult:
     reasons: list[str] = field(default_factory=list)
     # 直しの無い再生（= 読み直し）。候補の中のその記録は、同じ記録のより良い説明（直しあり）に置き換わることがある
     base: Optional[Candidate] = None
+    # 候補の記録すべて（良い順）。別のプロセスから候補を減らして返すときも全部残す（物差しの「正解が候補に」が
+    # `--workers` によらない = 監査 3 回目）
+    record_keys: list[tuple] = field(default_factory=list)
 
     @property
     def best(self) -> Candidate:
         return self.candidates[0]
+
+    @property
+    def explanation_only(self) -> bool:
+        """1 番の直しが記録を変えない（直しの無い再生と同じ記録の、より良い説明だけ）。監査 3 回目: `keep()` で残した
+        説明の直しも要確認の理由になる（記録は読み直しと同じ）ので、評価の報告では別に数える。"""
+        return bool(self.best.edits) and self.base is not None and self.best.key() == self.base.key()
+
+    @property
+    def explanation_reasons(self) -> list[str]:
+        """要確認の理由のうち、記録を変えない説明だけの直し（`EXPLANATION_MARK` の付いた理由）。"""
+        return [r for r in self.reasons if r.endswith(EXPLANATION_MARK)]
 
     @property
     def margin(self) -> Optional[float]:
@@ -371,7 +427,27 @@ class SessionEstimator:
             start = _epoch(h["started_at"])
             end = _epoch(hands[i + 1]["started_at"]) if i + 1 < len(hands) else last
             out.append(HandWindow(hand_id=h["hand_id"], start=start, end=end, base=h))
+        self._route_late_winners(out)
         return out
+
+    def _route_late_winners(self, windows: list[HandWindow]) -> None:
+        """配ったあとに届いた前のハンドへの勝者の指定（打った `w`・画面の勝者）を前のハンドの窓で流す。ライブと同じ
+        見分け方: 配ったばかりのハンドにまだアクションが無く、始まりから `LATE_WINNER_SEC` 以内（ADR-0062）。次の
+        ハンドの窓で流すと、前のハンドを知らない再生がその新しいハンドをその席の勝ちで終えてしまう。"""
+        from integration.engine import LATE_WINNER_SEC
+
+        typed = [e.timestamp for e in self.events
+                 if isinstance(e, AudioEvent) and e.action == "winner" and e.utterance_start_ts is None]
+        if not typed:
+            return
+        for prev, w in zip(windows, windows[1:]):
+            acted = [t for t in (_epoch(a.get("timestamp")) for a in w.base.get("actions") or []) if t is not None]
+            first = min(acted, default=None)
+            moved = tuple(t for t in typed if w.start <= t < w.end and t - w.start <= LATE_WINNER_SEC
+                          and (first is None or t < first))
+            if moved:
+                prev.late += moved
+                w.skip += moved
 
     def _window_inputs(self, w: HandWindow) -> tuple[list[Event], list[dict]]:
         rows = [r for r in self.transcripts if w.start - 0.5 <= r["utterance_start_ts"] < w.end]
@@ -380,6 +456,11 @@ class SessionEstimator:
         for e in self.events:
             if isinstance(e, AudioEvent) and e.utterance_start_ts in starts:
                 continue                      # 書き起こしから読み直す（窓の中の行だけ）
+            if isinstance(e, AudioEvent) and (e.timestamp in w.skip or e.timestamp in w.late) \
+                    and e.action == "winner" and e.utterance_start_ts is None:
+                if e.timestamp in w.late:
+                    events.append(e)          # 前のハンドへの遅れた勝者の指定（ハンドが終わったあとに流す）
+                continue
             if isinstance(e, RFIDEvent) and e.kind == "deal":
                 t = e.observed_at if e.observed_at is not None else e.timestamp
                 if w.start - 1.0 <= t < w.end - 0.5:
@@ -515,6 +596,12 @@ class SessionEstimator:
         if hand.get("winner_source") in ("estimated", "undetermined") or hand.get("winner_seat") is None:
             terms.append(("勝者が決まらない", _log(p["p_undetermined"])))
             flags.append("勝者が決まらない")
+        # ハンドが終わったあとに届いた勝者の指定（打った `w`・画面の勝者）が、このハンドの勝者と違う（ライブは
+        # `winner_after_hand_end` で要確認にする。監査 3 回目の必須 3。採点には足さない = 要確認の理由だけ）
+        for rec in records:
+            if getattr(rec, "reason", None) == "winner_after_hand_end":
+                flags.append(f"終わったあとの勝者の指定「{getattr(rec, 'raw_text', None) or '勝者'}」が勝者"
+                             f"（席{hand.get('winner_seat')}）と違う")
         return round(sum(v for _, v in terms), 4), terms, list(dict.fromkeys(flags))
 
     def _action_terms(self, hand: dict, betting: list[_Row], flags: list[str]) -> list[tuple[str, float]]:
@@ -852,7 +939,8 @@ class SessionEstimator:
         weights = [math.exp(c.score / tau - top) for c in groups]
         total = sum(weights) or 1.0
         posteriors = [(1 - p["outside"]) * wgt / total for wgt in weights]
-        result = HandResult(window=w, candidates=groups, posteriors=posteriors, replays=len(seen), base=base)
+        result = HandResult(window=w, candidates=groups, posteriors=posteriors, replays=len(seen), base=base,
+                            record_keys=[c.key() for c in groups])
         result.reasons = self._review_reasons(result)
         return result
 
@@ -860,8 +948,10 @@ class SessionEstimator:
         reasons = []
         if r.margin is not None and r.margin < self.params["review_margin"]:
             reasons.append(f"次点との差が小さい（{r.margin:.1f}）")
+        # 記録を変えない説明だけの直しも理由にする（要確認の再現率を下げない）が、印を付けて別に数えられるように
+        mark = EXPLANATION_MARK if r.explanation_only else ""
         for e in r.best.edits:
-            reasons.append(e.label or e.kind)
+            reasons.append((e.label or e.kind) + mark)
         reasons += r.best.flags
         return list(dict.fromkeys(reasons))
 

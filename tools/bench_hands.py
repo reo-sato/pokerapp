@@ -169,23 +169,34 @@ class V1Result:
     chain: list[str] = field(default_factory=list)              # 前のハンドの推定が勝者・ポットを変えた（持ち点が連鎖する）
     ties: list[str] = field(default_factory=list)               # 1 番と次点が同点（差 0 = どちらが 1 番かは並び順）
     review_of: dict[str, bool] = field(default_factory=dict)    # ハンド → 要確認（同じ入力で 2 回の確かめで比べる）
-    # ライブの記録（店舗のログのみ）: 切り替えの条件の「同じハンドで比べて悪くなったハンド 0」
+    # 要確認の理由が、記録を変えない説明だけの直しだけ（監査 3 回目: 評価の報告で別に数える）
+    explanation_flagged: list[str] = field(default_factory=list)
+    worse_unflagged: list[str] = field(default_factory=list)    # 読み直しより悪くなったのに要確認が付かない
+    # 数えないハンド → 理由（真のアクションの不備・自信なしの行・席の設定の警告 = 事前登録 §2）
+    excluded: dict[str, list[str]] = field(default_factory=dict)
+    # ライブの記録（店舗のログのみ）: 合格の条件 1（オーナー決定 2026-10-03 = 監査 3 回目の B）: 要確認の付いていない
+    # 悪くなったハンド 0（硬い条件）・悪くなったハンド 40 ハンドで 1 以下 / 80 ハンドで 2 以下
     live_hands: int = 0
     live_exact: int = 0
     better_than_live: list[str] = field(default_factory=list)
     worse_than_live: list[str] = field(default_factory=list)
+    worse_than_live_unflagged: list[str] = field(default_factory=list)
 
     def add_hand(self, key: str, truth: dict, result, live=None) -> None:
-        from integration.estimator import record_key
+        from integration.estimator import hand_from_key, record_key
         from tools.measure_capture_accuracy import hand_fully_correct
 
         base = result.base or next((c for c in result.candidates if not c.edits), None)
         ok_base = hand_fully_correct(truth, base.hand if base else None)
         ok = hand_fully_correct(truth, result.best.hand)
-        found = any(hand_fully_correct(truth, c.hand) for c in result.candidates)
+        # 候補の記録すべてで見る（別のプロセスは候補を減らして返す。記録の鍵は全部返る = `--workers` によらない）
+        keys = getattr(result, "record_keys", None) or [c.key() for c in result.candidates]
+        found = any(hand_fully_correct(truth, hand_from_key(k)) for k in keys)
         flagged = bool(result.reasons)
         self.best[key] = repr(record_key(result.best.hand))
         self.review_of[key] = flagged
+        if flagged and set(result.reasons) <= set(getattr(result, "explanation_reasons", [])):
+            self.explanation_flagged.append(key)
         if result.margin is not None and result.margin == 0:
             self.ties.append(key)
         self.reasons.append(len(result.reasons))
@@ -200,6 +211,8 @@ class V1Result:
                 self.better_than_live.append(key)
             if ok_live and not ok:
                 self.worse_than_live.append(key)
+                if not flagged:
+                    self.worse_than_live_unflagged.append(key)
         self.hands += 1
         self.base_exact += ok_base
         self.exact += ok
@@ -211,6 +224,8 @@ class V1Result:
             self.better.append(key)
         if ok_base and not ok:
             self.worse.append(key)
+            if not flagged:
+                self.worse_unflagged.append(key)
         if not ok:
             self.failing.append(key)
             (self.outscored if found else self.not_found).append(key)
@@ -292,9 +307,13 @@ def run_bench_v1(*, store: bool = True, script: bool = True, sim_sessions: int =
             prev_changed = False
             for (w, hid, live), result in zip(picked, results):
                 key = f"{short_id(inp.session_id)}#{hid}"
-                res.add_hand(key, truth[hid], result, live=live if live_hands else _NO_LIVE)
-                if prev_changed:
-                    res.chain.append(key)
+                why = truth_exclusions(truth[hid], live if live is not None else w.base, seat_warning(inp, w))
+                if why:
+                    res.excluded[key] = why           # 数えない（理由つきで別に出す = 事前登録 §2）
+                else:
+                    res.add_hand(key, truth[hid], result, live=live if live_hands else _NO_LIVE)
+                    if prev_changed:
+                        res.chain.append(key)
                 # 記録の持ち点はライブの記録から来る: 推定がこのハンドの勝者・ポットを変えたら、次のハンドの持ち点は
                 # 推定の世界ではずれている（監査 2 回目: 持ち点の連鎖の印）
                 ref = live if live is not None else (result.base.hand if result.base is not None else {})
@@ -306,6 +325,38 @@ def run_bench_v1(*, store: bool = True, script: bool = True, sim_sessions: int =
 
 
 _NO_LIVE = object()      # ライブの記録が無い（fixture・台本）= ライブとは比べない
+
+
+def truth_exclusions(truth: dict, captured: dict, seat_warned: bool = False) -> list[str]:
+    """このハンドを数えない理由（事前登録 §2・監査 3 回目の必須 5）。推定の結果は見ない（真のアクションと卓の設定だけ）。
+
+    - 真のアクションの不備: 降りた席のアクション・反映できない行（入力画面の保存のときの確かめ `gt_lint` と同じ。
+      店舗 1709932e ハンド 3）
+    - 真のアクションに「自信なし」の行が残っている（結果を見る前にオーナーに確かめて直す。直せなければ数えない）
+    - ハンドの始めに席の設定の警告が出た（ロガーの席と札を置く席がずれている）
+    """
+    from tools.ground_truth_ui import gt_lint
+
+    why = [f"真のアクションの不備: {m}" for m in gt_lint(captured, truth)]
+    if any(isinstance(a, dict) and a.get("unsure") for a in truth.get("actions") or []):
+        why.append("真のアクションに「自信なし」の行が残っている")
+    if seat_warned:
+        why.append("席の設定の警告（ロガーの席に無い席に手札が 2 枚）")
+    return why
+
+
+def seat_warning(inp: SessionInput, w) -> bool:
+    """ハンドの間に、ロガーの席に無い席の札が 2 枚読めた（ロガーの「席の設定が違うかもしれません」と同じ条件。
+    ロガーはお知らせだけで記録に残さないので、札の読み取りから決め直す）。"""
+    from core.events import RFIDEvent
+
+    seats = {int(p["seat"]) for p in inp.setup.get("players") or []}
+    cards: dict[int, set] = {}
+    for e in inp.events:
+        if (isinstance(e, RFIDEvent) and e.kind == "card" and e.role == "seat" and e.seat is not None and e.card
+                and e.seat not in seats and w.start - 1.0 <= e.timestamp < w.end):
+            cards.setdefault(e.seat, set()).add(e.card)
+    return any(len(c) >= 2 for c in cards.values())
 
 
 def _live_record(inp: SessionInput) -> list[dict]:
@@ -360,8 +411,9 @@ def format_v1(r: V1Result) -> list[str]:
     lines = [
         f"{r.name}: 全部正しいハンド 読み直し {r.base_exact}/{r.hands}（{_pct(r.base_exact, r.hands)}）"
         f" → 推定 {r.exact}/{r.hands}（{_pct(r.exact, r.hands)}, 95% 区間 {lo:.0%}〜{hi:.0%}）"
-        f" ／ 良くなった {len(r.better)}・悪くなった {len(r.worse)}"
-        f" ／ 要確認 {r.flagged}（誤りに付かない {len(r.unflagged_errors)}・正しいのに付く {len(r.flagged_correct)}）"
+        f" ／ 良くなった {len(r.better)}・悪くなった {len(r.worse)}（要確認なし {len(r.worse_unflagged)}）"
+        f" ／ 要確認 {r.flagged}（誤りに付かない {len(r.unflagged_errors)}・正しいのに付く {len(r.flagged_correct)}"
+        f"・説明だけの直しだけで付く {len(r.explanation_flagged)}）"
         f"（{r.seconds:.0f} 秒）",
         f"    誤り {len(r.failing)} の内訳: 正解が候補に無い {len(r.not_found)}・候補にあるが点で負けた {len(r.outscored)}"
         f" ／ 1 番の直しの数 {dict(sorted(r.edits.items()))}",
@@ -370,16 +422,40 @@ def format_v1(r: V1Result) -> list[str]:
         f" ／ 1 セッション最長 {max(r.session_seconds, default=0.0):.0f} 秒",
     ]
     if r.live_hands:
+        # 合格の条件 1（B）: 要確認なしで悪くなった 0・悪くなった 40 ハンドで 1 以下 / 80 ハンドで 2 以下
         lines.append(f"    ライブの記録 {r.live_exact}/{r.live_hands} → 推定 {r.exact}/{r.hands}"
-                     f"（ライブより良くなった {len(r.better_than_live)}・悪くなった {len(r.worse_than_live)}）")
+                     f"（ライブより良くなった {len(r.better_than_live)}・悪くなった {len(r.worse_than_live)}、"
+                     f"うち要確認なし {len(r.worse_than_live_unflagged)}）")
+    lines += format_chain(r)
     for label, keys in (("良くなった", r.better), ("悪くなった", r.worse), ("誤りに要確認が付かない", r.unflagged_errors),
                         ("正解が候補に無い", r.not_found), ("点で負けた", r.outscored),
                         ("ライブより悪くなった", r.worse_than_live),
+                        ("ライブより悪くなったのに要確認が付かない", r.worse_than_live_unflagged),
+                        ("説明だけの直しだけで要確認", r.explanation_flagged),
                         ("同点（次点との差 0）", r.ties),
                         ("前のハンドの推定で持ち点が連鎖", r.chain)):
         if keys:
             lines.append(f"    {label}: {' '.join(keys[:20])}{' …' if len(keys) > 20 else ''}")
+    if r.excluded:
+        lines.append(f"    数えないハンド {len(r.excluded)}: "
+                     + " ／ ".join(f"{k}（{'・'.join(v)}）" for k, v in r.excluded.items()))
     return lines
+
+
+def format_chain(r: V1Result) -> list[str]:
+    """持ち点の連鎖のあるハンド（前のハンドの推定が勝者・ポットを変えた次のハンド）を別に数える（監査 3 回目の推奨 13:
+    1709932e ハンド 3 は、前のハンドの誤りが連鎖した持ち点で推定が誤った額へ導かれた）。"""
+    if not r.chain:
+        return []
+    chained = [k for k in r.best if k in r.chain]
+    plain = [k for k in r.best if k not in r.chain]
+
+    def part(keys: list[str]) -> str:
+        right = sum(1 for k in keys if k in r.correct)
+        review = sum(1 for k in keys if r.review_of.get(k))
+        return f"{len(keys)} ハンド（全部正しい {right}・要確認 {review}）"
+
+    return [f"    持ち点の連鎖: あり {part(chained)} ／ なし {part(plain)}"]
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -402,6 +478,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = ap.parse_args(argv)
     logging.disable(logging.CRITICAL)          # 候補の再生で出るエンジンのログは要らない
     if not args.v0:
+        if not args.json:
+            from integration.estimator import ESTIMATOR_VERSION, content_hash, params_hash
+
+            print(f"推定器 v{ESTIMATOR_VERSION}: 値の指紋 {params_hash()}・内容の指紋 {content_hash()}")
+
         def run(params: Optional[dict] = None) -> list[V1Result]:
             if args.logs:
                 return run_bench_v1(store=False, script=False, logs=args.logs, params=params, workers=args.workers)

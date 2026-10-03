@@ -557,6 +557,33 @@ class TestStopRule:
         m = eval_store.listening_stop_metrics(gt, self._hands(), rows)
         assert m["read"] == 3 and m["actions"] == 4 and m["canned"] == 1 and m["meets"] is False
 
+    @staticmethod
+    def _stop(hands, actions, read, utterances, canned):
+        return {"hands": hands, "actions": actions, "read": read, "utterances": utterances, "canned": canned}
+
+    def test_the_rule_pools_the_two_latest_sessions_of_ten_hands_or_more(self):
+        """オーナー決定 2026-10-03（監査 3 回目）: 1 セッション 12〜35 発話では偶然で決まる → 真のアクションのある
+        ハンドが 10 以上のセッションの直近 2 つを合算し、アクションが 100 以上のときだけ判定する。"""
+        sessions = [("old", 1.0, self._stop(12, 60, 40, 80, 20)),        # 古い（直近 2 つに入らない）
+                    ("short", 4.0, self._stop(6, 40, 40, 50, 0)),        # 10 ハンド未満は入れない
+                    ("a", 2.0, self._stop(12, 55, 50, 70, 3)),
+                    ("b", 3.0, self._stop(15, 60, 55, 80, 2))]
+        m = eval_store.pooled_stop_metrics(sessions)
+        assert m["sessions"] == ["a", "b"] and m["short"] == ["short"]
+        assert (m["read"], m["actions"], m["canned"], m["utterances"]) == (105, 115, 5, 150)
+        assert m["decided"] and m["meets"]                       # 91% 読めた・決まり文句 3.3%
+        assert "目安を満たす" in eval_store.format_pooled_stop(m)
+
+    def test_too_few_actions_or_sessions_are_not_decided(self):
+        m = eval_store.pooled_stop_metrics([("a", 1.0, self._stop(10, 40, 40, 50, 0)),
+                                            ("b", 2.0, self._stop(11, 50, 50, 60, 0))])
+        assert not m["decided"] and not m["meets"]
+        assert "アクションの発話が合わせて 100 以上要る" in eval_store.format_pooled_stop(m)
+        m = eval_store.pooled_stop_metrics([("a", 1.0, self._stop(30, 150, 150, 160, 0))])
+        assert not m["decided"] and "10 ハンド以上のセッションが 2 つ要る" in eval_store.format_pooled_stop(m)
+        m = eval_store.pooled_stop_metrics([("a", 1.0, self._stop(3, 15, 15, 20, 0))])
+        assert m["sessions"] == [] and "判定しない" in eval_store.format_pooled_stop(m)
+
     def test_script_windows_follow_the_page_and_take_the_redo(self):
         script = {"hands": [{"n": 1}, {"n": 2}]}
         marks = [{"event": "start", "hand": 1, "t": 100.0}, {"event": "start", "hand": 2, "t": 200.0},

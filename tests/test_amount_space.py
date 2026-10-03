@@ -44,14 +44,15 @@ class TestBetSizing:
         assert pot_fraction(500, ctx, 1000) == pytest.approx(0.5)
 
     @pytest.mark.parametrize("ratio, weight", [(0.0, 0.0), (0.8, 0.0), (1.0, 0.0), (2.0, -1.0), (3.0, -2.0),
-                                               (4.0, -4.0), (50.0, -8.0)])
+                                               (4.0, -3.0), (5.0, -4.0), (50.0, -4.0)])
     def test_the_shape(self, ratio, weight):
-        """ポット以下は同じ、3 倍までゆるく、その先は急に（オーナー: 多くはポット以下、多くても 3 倍）。"""
+        """ポット以下は同じ、その先はゆるく、下限 −4（オーナー: 多くはポット以下、多くても 3 倍。監査 3 回目で
+        3 倍より先を 1 倍あたり −2 → −1・下限 −8 → −4 = 本当の 4 倍の賭けが第 2 の耳の別の額に上書きされない）。"""
         assert size_prior(ratio) == pytest.approx(weight)
 
     def test_an_allin_is_never_unnatural(self):
         ctx = _ctx(max_raise=10000)
-        assert size_prior(pot_fraction(10000, ctx, 300)) == -8.0
+        assert size_prior(pot_fraction(10000, ctx, 300)) == -4.0
         assert amount_prior(10000, ctx, 300) == 0.0
 
     def test_the_ratios_of_a_recorded_hand(self):

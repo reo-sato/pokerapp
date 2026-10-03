@@ -33,6 +33,7 @@ from integration.estimator import (  # noqa: E402
     PARAMS,
     HandResult,
     SessionEstimator,
+    content_hash,
     params_hash,
     record_key,
 )
@@ -123,6 +124,7 @@ def entry_for(result: HandResult, live: Optional[dict]) -> dict:
         "margin": result.margin,
         "posterior": round(result.posteriors[0], 3) if result.posteriors else None,
         "review": bool(result.reasons),
+        "explanation_only": result.explanation_only,     # 1 番の直しは記録を変えない説明だけ（監査 3 回目）
         "edits": [e.label for e in result.best.edits],
         "notes": list(result.reasons),
         "hand": hand,
@@ -148,7 +150,7 @@ def estimate_session(events: list, transcripts: list[dict], presence: Optional[P
 
     est.estimate(on_hand=add, workers=workers)
     return {"tool": "estimator", "estimator_version": ESTIMATOR_VERSION, "params_hash": params_hash(params),
-            "session_id": session_id, "hands": hands}
+            "content_hash": content_hash(), "session_id": session_id, "hands": hands}
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -177,6 +179,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     if (args.shadow or args.write) and tmp is not None:
         print("zip には書けません（ログのフォルダを渡してください）")
         return 2
+    # 店舗 PC の影のファイルとこちらで回した結果を比べるときの目印（同じ指紋 = 同じ推定のコードと値）
+    print(f"推定器 v{ESTIMATOR_VERSION}: 値の指紋 {params_hash()}・内容の指紋 {content_hash()}")
     for inp in inputs:
         record_path = inp.folder / f"{inp.session_id}.json" if inp.folder is not None else None
         live = []

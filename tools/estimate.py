@@ -41,7 +41,7 @@ from typing import Any, Optional
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from audio.recognizer import is_prompt_echo, is_question, parse_actions  # noqa: E402
+from audio.recognizer import garbled_word, is_prompt_echo, is_question, parse_actions  # noqa: E402
 from audio.second_ear import apply_ear  # noqa: E402
 from integration.replay import load_events  # noqa: E402
 from tools.eval_store import (  # noqa: E402
@@ -78,6 +78,9 @@ PARAMS: dict[str, float] = {
     "ear_amount_top": 3,        # 額を読んだ発話に、第 2 の耳の額ごとの点数の上から何個の別の額を選択肢にするか
                                 # （確からしさは候補と同じ式。2026-10-01「額の空間を事前に用意」のステップ 2）
     "ear_empty_text": 0.0,      # 1 = 第 2 の耳が自由に聞いた文が空でも候補を選択肢にする（v1 は `READING_OVERRIDES` で 1）
+    # 監査 3 回目（2026-10-03）の値の直し。v0 は 0（これまでどおり）、v1 は `READING_OVERRIDES` で 1
+    "price_overridden_whisper": 0.0,  # 1 = 第 2 の耳が否定した Whisper の読みを候補と同じ式で値付け（`_overridden_logp`）
+    "price_ear_phonetic": 0.0,  # 1 = 意味のない語の額（第 2 の耳あり）を候補と同じ式 + 音の距離で（`_rescue_logp`）
     "drop_read": -4.0,          # Whisper で読めた発話を雑談・言い直しとして捨てる（長い文 = 雑談が混ざりうる）
     "drop_short": -7.0,         # アクションの言葉だけの短い発話（`short_chars` 文字以下）を捨てる
     "drop_heard": -4.0,         # Whisper が定型の幻聴を書いたが、第 2 の耳は何かを聞いた発話を捨てる（音はあった）
@@ -173,10 +176,13 @@ def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
         # ハンドの区切り・勝者の宣言などの制御は選ばない（既定のまま = ハンドどうしを独立に保つ）
         return [Option("whisper" if whisper and used is None else "rescue", text, 0.0, _keys(live))]
     options: list[Option] = []
+    # 意味のない単発の語（第 2 の耳ありで額と読んだ）: 額の読みには、どれにも Whisper の語との音の距離の項を付ける
+    word = garbled_word(text) if params.get("price_ear_phonetic", 0.0) > 0 and not whisper else None
     if used is not None:
-        options.append(Option("rescue", used, params["rescue"], _keys(live)))
-        if whisper:     # 額を入れる前の Whisper の読み
-            options.append(Option("whisper", text, _flag_penalty(whisper, params), _keys(whisper)))
+        options.append(Option("rescue", used, _rescue_logp(live, ear, word, params), _keys(live)))
+        if whisper:     # 第 2 の耳で額を入れる・読み直す前の Whisper の読み
+            options.append(Option("whisper", text, _overridden_logp(whisper, live, ear, start, params),
+                                  _keys(whisper)))
     elif whisper:
         options.append(Option("whisper", text, _flag_penalty(whisper, params), _keys(whisper)))
     elif live:
@@ -211,9 +217,9 @@ def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
             events = parse_actions(c["text"], utterance_start_ts=start)
             if not events or any(e.action not in _BETTING for e in events):
                 continue
-            options.append(Option("ear", c["text"], params["ear_base"] + params["ear_diff_weight"] * diff,
-                                  _keys(events)))
-    options.extend(_ear_amount_options(live, ear, start, params))
+            logp = params["ear_base"] + params["ear_diff_weight"] * diff + _sound_logp(word, events)
+            options.append(Option("ear", c["text"], logp, _keys(events)))
+    options.extend(_ear_amount_options(live, ear, start, params, word))
     if options[0].keys:
         short = len(text) <= params["short_chars"] if options[0].source == "whisper" else False
         options.append(Option("drop", "", params["drop_short"] if short else params["drop_read"], ()))
@@ -225,11 +231,90 @@ def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
     return kept
 
 
-def _ear_amount_options(live: list, ear: Optional[dict], start: Optional[float], params: dict) -> list[Option]:
+def _ear_diff(events: list, ear: Optional[dict], start: Optional[float], params: dict) -> Optional[float]:
+    """第 2 の耳の記録で、読み `events` の確からしさ − 自由に聞いた文（0 以下、`ear_min_diff` 以上に丸める）。
+
+    同じ読みになる候補（記録は上位だけ）、額だけの賭け 1 つなら額ごとの点数から。記録に無ければ、記録した候補の最下位
+    より低い = 最下位の差を上限として使う。第 2 の耳の記録が無ければ None。"""
+    from audio.second_ear import amount_table
+
+    if not ear or ear.get("logp") is None:
+        return None
+    free = float(ear["logp"])
+    keys = _keys(events)
+    cands = [c for c in ear.get("candidates") or [] if c.get("logp") is not None]
+    found = [float(c["logp"]) for c in cands if _keys(parse_actions(c["text"], utterance_start_ts=start)) == keys]
+    table = amount_table(ear)
+    if not found and len(events) == 1 and events[0].action in ("bet", "raise") and events[0].amount in table:
+        found = [table[events[0].amount]]
+    if found:
+        logp = max(found)
+    else:
+        lowest = [float(c["logp"]) for c in cands] + list(table.values())
+        if not lowest:
+            return None
+        logp = min(lowest)
+    return max(params["ear_min_diff"], min(0.0, logp - free))
+
+
+def _only_filled(whisper: list, live: list) -> bool:
+    """ライブの規則が Whisper の読みに額を入れただけ（額の無いベット・レイズ, `second_ear.fill_amounts`）か。"""
+    from audio.second_ear import EAR_MIN_AMOUNT
+
+    if len(whisper) != len(live):
+        return False
+    return all(w.action == lv.action and (w.amount == lv.amount or (w.amount or 0) < EAR_MIN_AMOUNT)
+               for w, lv in zip(whisper, live))
+
+
+def _overridden_logp(whisper: list, live: list, ear: Optional[dict], start: Optional[float], params: dict) -> float:
+    """ライブの規則が第 2 の耳で読み直した発話の、もとの Whisper の読みの確からしさ。
+
+    監査 3 回目（2026-10-03）: 第 2 の耳と食い違う Whisper の読み（「2千、コール。」の 2000 + コール）が 0 で、第 2 の耳の
+    読み（既定 = 救い出し −0.5）より安い逆転があった。第 2 の耳がその読みを否定したときは、第 2 の耳の候補と同じ式
+    （`ear_base` + `ear_diff_weight` × 差）で値付けする（`price_overridden_whisper`）。額を入れただけ（額の無いベット）は
+    これまでどおり（足りない額は採点の「額の聞き違い」で数える）。"""
+    base = _flag_penalty(whisper, params)
+    if params.get("price_overridden_whisper", 0.0) <= 0 or _only_filled(whisper, live):
+        return base
+    diff = _ear_diff(whisper, ear, start, params)
+    if diff is None:
+        return base
+    return min(base, params["ear_base"] + params["ear_diff_weight"] * diff)
+
+
+def _sound_logp(word: Optional[str], events: list) -> float:
+    """意味のない単発の語 `word` を額と読むときの音の項（−10 × 音の距離, `recognizer.PHONETIC_AMOUNT_SCORE_WEIGHT`）。
+    語が無い・額の賭け 1 つでなければ 0。"""
+    from audio.phonetic import amount_distance
+    from audio.recognizer import PHONETIC_AMOUNT_SCORE_WEIGHT
+
+    if word is None or len(events) != 1 or events[0].action not in ("bet", "raise") or not events[0].amount:
+        return 0.0
+    return -PHONETIC_AMOUNT_SCORE_WEIGHT * amount_distance(word, events[0].amount)
+
+
+def _rescue_logp(live: list, ear: Optional[dict], word: Optional[str], params: dict) -> float:
+    """ライブの規則（第 2 の耳）の読みの確からしさ。救い出しは `rescue`（−0.5）。
+
+    監査 3 回目（2026-10-03）: 意味のない単発の語を第 2 の耳ありで額と読んだ読み（`phonetic_amount`）は、救い出しと同じ
+    −0.5 では強すぎる（「ゼニューク」は第 2 の耳自身が空の文の方を確からしいと聞いた）→ 第 2 の耳の候補と同じ式に音の
+    距離の項を足す（`price_ear_phonetic`）。"""
+    if word is None or len(live) != 1 or "phonetic_amount" not in live[0].parse_flags:
+        return params["rescue"]
+    diff = _ear_diff(live, ear, None, params)
+    if diff is None:
+        return params["rescue"]
+    return params["ear_base"] + params["ear_diff_weight"] * diff + _sound_logp(word, live)
+
+
+def _ear_amount_options(live: list, ear: Optional[dict], start: Optional[float], params: dict,
+                        garbled: Optional[str] = None) -> list[Option]:
     """額を読んだベット・レイズがちょうど 1 つの発話に、第 2 の耳の額ごとの点数（`ear.amounts`）の上から
     `ear_amount_top` 個の別の額を選択肢にする（その場面で使える額かは、推定器が流し直したときに engine が決める）。
     確からしさは第 2 の耳の候補と同じ式（`ear_base` + `ear_diff_weight` × (その額の確からしさ − 自由に聞いた文)）。
-    文は既定の読みと同じ言い方（数字だけなら数字、語と一緒なら「レイズ 1300」）。"""
+    文は既定の読みと同じ言い方（数字だけなら数字、語と一緒なら「レイズ 1300」）。意味のない単発の語を額と読んだ発話は
+    音の項も足す（`_sound_logp`）。"""
     from audio.second_ear import amount_table
 
     table = amount_table(ear)
@@ -246,8 +331,10 @@ def _ear_amount_options(live: list, ear: Optional[dict], start: Optional[float],
         if amount == event.amount or diff < params["ear_min_diff"]:
             continue
         text = f"{word}{amount}"
-        out.append(Option("ear_amount", text, params["ear_base"] + params["ear_diff_weight"] * diff,
-                          _keys(parse_actions(text, utterance_start_ts=start))))
+        events = parse_actions(text, utterance_start_ts=start)
+        out.append(Option("ear_amount", text,
+                          params["ear_base"] + params["ear_diff_weight"] * diff + _sound_logp(garbled, events),
+                          _keys(events)))
     return out
 
 

@@ -15,6 +15,8 @@ import pytest
 
 from core.events import AudioEvent
 from integration.estimator import (
+    CONTENT_FILES,
+    EXPLANATION_MARK,
     PARAMS,
     READING_OVERRIDES,
     HandWindow,
@@ -23,6 +25,8 @@ from integration.estimator import (
     _restates,
     _street_open,
     align_words,
+    content_hash,
+    hand_from_key,
     params_hash,
     record_key,
 )
@@ -374,6 +378,122 @@ class TestCannedPhrase:
         # 直しの無い再生（読み直し）は候補の外に残す（物差しの「読み直し」・推定のファイルの changed が使う）
         assert result.base is not None and not result.base.edits and record_key(result.base.hand) == record_key(base)
         assert all(c.edits for c in result.candidates)
+        # 記録を変えない説明だけの直し: 要確認の理由には残し（再現率を下げない）、印を付けて別に数える（監査 3 回目）
+        assert result.explanation_only
+        assert result.explanation_reasons and all(r.endswith(EXPLANATION_MARK) for r in result.explanation_reasons)
+        assert set(result.explanation_reasons) <= set(result.reasons)
+
+    def test_an_edit_that_changes_the_record_is_not_marked(self):
+        pytest.importorskip("pokerkit")
+        est, w = _heads_up_river("ツーペア")
+        result = est.estimate_hand(w)
+        assert not result.explanation_only and result.explanation_reasons == []
+        # 候補の記録はすべて残る（別のプロセスが候補を減らして返しても物差しの内訳が変わらない）
+        assert result.record_keys == [c.key() for c in result.candidates]
+        assert record_key(hand_from_key(result.record_keys[0])) == result.record_keys[0]
+
+
+def _two_hands(winner_at: float, winner_seat: int) -> SessionEstimator:
+    """ヘッズアップ（席4 = ボタン・SB、席5 = BB）を声だけで 2 ハンド。ハンド 1 は席5 のベットに席4 が降りて席5 の
+    勝ち。画面の勝者（打った `w` と同じ）が `winner_at` に届く。"""
+    rows = [{"utterance_start_ts": T0 + s, "audio_sec": 0.8, "text": text, "confidence": 0.9}
+            for s, text in ((2, "コール"), (4, "チェック"), (8, "500"), (10, "フォールド"),
+                            (50, "コール"), (52, "チェック"))]
+    setup = {"players": [{"seat": s, "name": f"P{s}", "stack": 10000} for s in (4, 5)], "sb": 100, "bb": 200,
+             "button_prior": 5}
+    typed = [AudioEvent(action="new_hand", amount=0, timestamp=T0, raw_text=""),
+             AudioEvent(action="new_hand", amount=0, timestamp=T0 + 40, raw_text=""),
+             AudioEvent(action="winner", amount=0, timestamp=winner_at, raw_text=f"シート{winner_seat} ウィナー",
+                        seat=winner_seat)]
+    return SessionEstimator(typed, rows, None, setup, {"auto_new_hand": False, "rfid_folds": False}, "s")
+
+
+class TestWinnerAfterTheHand:
+    """ハンドが終わったあとに届いた勝者の指定（打った `w`・台本の画面の勝者）が、推定の勝者と違えば要確認（ライブの
+    `winner_after_hand_end` と同じ。監査 3 回目の必須 3。採点には足さない）。"""
+
+    def test_a_different_winner_after_the_hand_is_reviewed(self):
+        pytest.importorskip("pokerkit")
+        est = _two_hands(T0 + 20, 4)
+        w = est.windows()[0]
+        result = est.estimate_hand(w)
+        assert result.best.hand["winner_seat"] == 5
+        assert "終わったあとの勝者の指定「シート4 ウィナー」が勝者（席5）と違う" in result.reasons
+        same = _two_hands(T0 + 20, 5)
+        assert not any(r.startswith("終わったあとの勝者") for r in same.estimate_hand(same.windows()[0]).reasons)
+
+    def test_a_late_winner_after_the_next_deal_belongs_to_the_previous_hand(self):
+        """次のハンドが始まってから（アクションの前・`LATE_WINNER_SEC` 以内）届いた勝者の指定は前のハンドのもの:
+        次のハンドの窓で流すと、その新しいハンドをその席の勝ちで終えてしまう。"""
+        pytest.importorskip("pokerkit")
+        est = _two_hands(T0 + 45, 4)
+        first, second = est.windows()
+        assert first.late == (T0 + 45,) and second.skip == (T0 + 45,)
+        assert "終わったあとの勝者の指定「シート4 ウィナー」が勝者（席5）と違う" in est.estimate_hand(first).reasons
+        hand2 = est.replay(second, ())[0]
+        assert [(a["seat"], a["action"]) for a in hand2["actions"]][:2] == [(5, "call"), (4, "check")]
+
+
+class TestContentFingerprint:
+    """推定器まわりのファイルの内容の指紋（監査 3 回目の必須 4: `params_hash` は値だけ）。"""
+
+    def test_every_file_exists_and_a_change_moves_the_fingerprint(self, tmp_path):
+        root = Path(__file__).resolve().parent.parent
+        assert all((root / rel).exists() for rel in CONTENT_FILES)
+        for rel in CONTENT_FILES:
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_bytes((root / rel).read_bytes())
+        assert content_hash(tmp_path) == content_hash(root)
+        target = tmp_path / "core" / "bet_sizing.py"
+        target.write_bytes(target.read_bytes().replace(b"\n", b"\r\n"))     # Windows の改行でも同じ
+        assert content_hash(tmp_path) == content_hash(root)
+        target.write_bytes(target.read_bytes() + b"# x\n")
+        assert content_hash(tmp_path) != content_hash(root)
+
+    # 推定器が読み込むリポジトリのファイルのうち、推定の結果を変えないもの（記録・画面・道具の補助）
+    NOT_IN_FINGERPRINT = {
+        "audio/devices.py": "マイクの一覧（再生では使わない）",
+        "audio/recorder.py": "録音（再生では使わない）",
+        "core/atomic_io.py": "ファイルの書き方",
+        "core/event_queue.py": "スレッド間のキュー",
+        "core/hand_correction.py": "訂正の重ね方（読む側）",
+        "core/player.py": "player registry", "core/player_repository.py": "player registry",
+        "core/session.py": "session layer", "core/session_repository.py": "session layer",
+        "core/table_state.py": "卓状態の表示",
+        "output/event_recorder.py": "観測の記録（ライブ）", "output/json_writer.py": "記録の書き出し",
+        "output/table_state_writer.py": "卓状態の書き出し",
+        "tools/audio_check.py": "マイクの確認の道具", "tools/pack_logs.py": "ログをまとめる道具",
+        "tools/read_corpus.py": "読み上げ集の道具", "tools/test_script.py": "台本の生成",
+    }
+
+    def test_the_files_the_estimator_reads_are_fingerprinted_or_explained(self):
+        """推定器・発話の読みの選択肢・再生器が読み込むリポジトリのファイルは、指紋に入れるか、入れない理由を書く
+        （新しい読み込みが指紋から漏れない）。"""
+        import ast
+
+        root = Path(__file__).resolve().parent.parent
+
+        def path_of(name: str) -> Path | None:
+            for cand in (root / (name.replace(".", "/") + ".py"), root / name.replace(".", "/") / "__init__.py"):
+                if cand.exists():
+                    return cand
+            return None
+
+        seen: dict[str, Path] = {}
+        stack = ["integration.estimator", "tools.estimate", "integration.world_replay"]
+        while stack:
+            name = stack.pop()
+            path = path_of(name)
+            if name in seen or path is None:
+                continue
+            seen[name] = path
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
+                    stack += [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                    stack += [node.module, *(f"{node.module}.{a.name}" for a in node.names)]
+        files = {p.relative_to(root).as_posix() for p in seen.values() if p.name != "__init__.py"}
+        assert files - set(CONTENT_FILES) - set(self.NOT_IN_FINGERPRINT) == set()
 
 
 class TestStreetTime:
