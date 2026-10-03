@@ -347,9 +347,8 @@ def _canned_options(ear: Optional[dict], start: Optional[float], params: dict) -
     """書き起こしが決まり文句（Whisper の定型の幻聴）になり、ライブの規則でも読めなかった発話の読み（発話単位の
     状態: 監査 1 回目の推奨・作業計画の監査 2026-10-01 の最優先）。
 
-    - 既定 = 雑談・雑音だった: log(1 − r)。r = `canned_action`（全セッションの数え直し, 2026-10-02: 真のアクションの
-      並びと読めた語を対応づけて残った穴を、読めた賭けの語から 15 秒以内の決まり文句の 0.33 が埋めた = 上限、雑談の
-      対照で引くと 0.06。`integration/estimator.py` の `READING_OVERRIDES`）。
+    - 既定 = 雑談・雑音だった: log(1 − r)。r = `canned_action`（オーナーが読めた賭けの語から 15 秒以内の決まり文句
+      51 発話を聞いて数えた 14/51 = 0.27, 2026-10-03。`integration/estimator.py` の `READING_OVERRIDES`）。
     - アクションを言ったのに決まり文句になった: log r + log q(a)。q = フォールド・チェック・コールに一様 +
       第 2 の耳の候補（1 つのアクションに読める・自由に聞いた文との差が `ear_min_diff` 以上）の重み
       exp(差 / `canned_ear_temp`)。自由に聞いた文も重み 1 の候補として分母に入れる（耳が自由に聞いた文の方が確からしい
