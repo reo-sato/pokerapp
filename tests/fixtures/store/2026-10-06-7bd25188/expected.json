@@ -337,6 +337,7 @@
      }
     ],
     "winner_seat": 6,
+    "button_seat": 6,
     "blind": true,
     "entry_sec": 45.1,
     "blind_entry": {
