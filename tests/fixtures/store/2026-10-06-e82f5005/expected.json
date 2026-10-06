@@ -125,9 +125,9 @@
  },
  "code": {
   "main.py": "88c530b1a15f9242",
-  "integration/engine.py": "dcabcdfce9781353",
+  "integration/engine.py": "1a954395154fd6a8",
   "core/poker_engine.py": "d42f130da5db32eb",
-  "audio/recognizer.py": "fd430174d501aaf5",
+  "audio/recognizer.py": "529d323a3af64fb3",
   "audio/recorder.py": "6a83bead225894d0",
   "rfid/reader_thread.py": "f00853bb1362b378"
  },
@@ -1736,7 +1736,13 @@
   {
    "hand_id": 8,
    "truth": {
-    "board": [],
+    "board": [
+     "Qc",
+     "2c",
+     "9d",
+     "8h",
+     "3s"
+    ],
     "actions": [
      {
       "seat": 7,
@@ -1849,8 +1855,9 @@
       "name": "8"
      }
     ],
+    "winner_seat": 6,
+    "entry_sec": 126.9,
     "blind": true,
-    "entry_sec": 101.1,
     "blind_entry": {
      "actions": [
       {
@@ -1929,25 +1936,32 @@
      "winner_seat": null,
      "entry_sec": 101.1
     },
+    "reconciled": true,
     "hand_id": 8
    },
    "baseline": {
     "action_correct": 9,
     "action_total": 12,
-    "winner_match": null,
-    "board_match": false
+    "winner_match": false,
+    "board_match": true
    },
    "reparse_baseline": {
     "action_correct": 10,
     "action_total": 12,
-    "winner_match": null,
-    "board_match": false
+    "winner_match": true,
+    "board_match": true
    }
   },
   {
    "hand_id": 9,
    "truth": {
-    "board": [],
+    "board": [
+     "Ad",
+     "Jd",
+     "2s",
+     "4c",
+     "5s"
+    ],
     "actions": [
      {
       "seat": 8,
@@ -2066,8 +2080,9 @@
       "name": "8"
      }
     ],
+    "winner_seat": 7,
+    "entry_sec": 77.5,
     "blind": true,
-    "entry_sec": 96.6,
     "blind_entry": {
      "actions": [
       {
@@ -2152,25 +2167,32 @@
      "winner_seat": null,
      "entry_sec": 96.6
     },
+    "reconciled": true,
     "hand_id": 9
    },
    "baseline": {
     "action_correct": 13,
     "action_total": 13,
-    "winner_match": null,
-    "board_match": false
+    "winner_match": true,
+    "board_match": true
    },
    "reparse_baseline": {
     "action_correct": 13,
     "action_total": 13,
-    "winner_match": null,
-    "board_match": false
+    "winner_match": true,
+    "board_match": true
    }
   },
   {
    "hand_id": 10,
    "truth": {
-    "board": [],
+    "board": [
+     "Jc",
+     "2h",
+     "Js",
+     "7h",
+     "6h"
+    ],
     "actions": [
      {
       "seat": 5,
@@ -2289,8 +2311,9 @@
       "name": "8"
      }
     ],
+    "winner_seat": 7,
+    "entry_sec": 68.9,
     "blind": true,
-    "entry_sec": 73.5,
     "blind_entry": {
      "actions": [
       {
@@ -2375,25 +2398,32 @@
      "winner_seat": null,
      "entry_sec": 73.5
     },
+    "reconciled": true,
     "hand_id": 10
    },
    "baseline": {
     "action_correct": 8,
     "action_total": 14,
-    "winner_match": null,
-    "board_match": false
+    "winner_match": true,
+    "board_match": true
    },
    "reparse_baseline": {
     "action_correct": 8,
     "action_total": 14,
-    "winner_match": null,
-    "board_match": false
+    "winner_match": true,
+    "board_match": true
    }
   },
   {
    "hand_id": 11,
    "truth": {
-    "board": [],
+    "board": [
+     "7d",
+     "3c",
+     "5d",
+     "8s",
+     "7s"
+    ],
     "actions": [
      {
       "seat": 6,
@@ -2536,8 +2566,8 @@
       "name": "8"
      }
     ],
+    "entry_sec": 64.5,
     "blind": true,
-    "entry_sec": 176.9,
     "blind_entry": {
      "actions": [
       {
@@ -2646,19 +2676,20 @@
      "winner_seat": null,
      "entry_sec": 176.9
     },
+    "reconciled": true,
     "hand_id": 11
    },
    "baseline": {
     "action_correct": 4,
     "action_total": 17,
     "winner_match": null,
-    "board_match": false
+    "board_match": true
    },
    "reparse_baseline": {
     "action_correct": 4,
     "action_total": 17,
     "winner_match": null,
-    "board_match": false
+    "board_match": true
    }
   },
   {

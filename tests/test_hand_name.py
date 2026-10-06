@@ -60,6 +60,17 @@ class TestParsing:
     def test_plain_end_of_hand_has_no_name(self):
         assert parse_action("ハンド終了").hand_name is None
 
+    @pytest.mark.parametrize("text", ["キングハイにクイーンハイ", "キングハイとクイーンハイ"])
+    def test_two_hands_named_together(self, text):
+        # 店舗 2026-10-06 05cccd6c ハンド 16: 2 人の手を「に」でつないで言った（読めずに降りた手とみていた）
+        events = parse_actions(text)
+        assert [(e.action, e.hand_name, e.raw_text) for e in events] == [
+            ("end_hand", "High card", "キングハイ"), ("end_hand", "High card", "クイーンハイ")]
+
+    @pytest.mark.parametrize("text", ["キングハイに", "キングハイにして"])
+    def test_a_joiner_needs_a_second_hand(self, text):
+        assert parse_actions(text) == []
+
     @pytest.mark.parametrize("text", ["セット", "リセットします", "フル"])
     def test_loose_words_are_not_hand_names(self, text):
         assert parse_actions(text) == []

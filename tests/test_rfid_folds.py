@@ -483,6 +483,25 @@ class TestGarbledCall:
         tb.say("コール")
         assert tb.played()[-1] == ("preflop", 5, "call", 400)
 
+    def test_a_bare_fall_word_facing_a_bet_is_a_call(self, tmp_path):
+        # 「フォール」（語尾の「ド」が無い）: 店舗の書き起こしの 3 回とも、札が席に残ったコールだった
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")
+        tb.say("フォール")
+        assert tb.played()[-1] == ("preflop", 4, "call", 500)
+        assert "garbled_call" in tb.t._current_actions[-1].reason   # noqa: SLF001
+
+    def test_a_bare_fall_word_with_the_cards_leaving_is_a_fold(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")
+        tb.lift(4)
+        spoken = tb.now
+        tb.tick(tb.now + 1.5)
+        tb.say("フォール", spoken_at=spoken)
+        assert tb.played()[-1] == ("preflop", 4, "fold", 0)
+
     def test_cards_leaving_later_are_the_showdown(self, tmp_path):
         tb = _Table(tmp_path)
         tb.deal()

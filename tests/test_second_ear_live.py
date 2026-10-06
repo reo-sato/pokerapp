@@ -271,6 +271,16 @@ class TestHandNames:
         assert {"ワンペア", "ツーペア", "フルハウス", "ストレートフラッシュ"} <= texts
         assert any(c.spoken == "二ペア" and c.text == "ツーペア" for c in se.build_candidates(amounts=(100,)))
 
+    def test_candidates_include_hits_and_highs(self):
+        texts = {c.text for c in se.build_candidates(amounts=(100,))}
+        assert {"十ヒット", "テンヒット", "エースヒット", "キングハイ"} <= texts
+
+    def test_a_hit_heard_only_by_the_ear(self):
+        """店舗 2026-10-06 05cccd6c ハンド 18: Whisper「転筆と」、第 2 の耳は自由に「十ヒット」と聞いた。"""
+        events, _ = _run("転筆と", FakeEar(se.EarResult("十ヒット", -0.3, [("十ヒット", -0.3), ("テンヒット", -1.5)])))
+        assert [(e.action, e.hand_name, e.hit_rank) for e in events] == [("end_hand", "One pair", "T")]
+        assert "second_ear" in events[0].parse_flags
+
 
 class TestReparseUsesTheSameRules:
     def test_eval_store_fills_the_amount_from_the_logged_ear(self):

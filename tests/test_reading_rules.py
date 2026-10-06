@@ -189,3 +189,14 @@ class TestWordsTheDealerNeverSays:
     def test_only_the_whole_utterance(self, text):
         assert all("garbled_call" not in e.parse_flags for e in parse_actions(text, confidence=0.5))
 
+    @pytest.mark.parametrize("text, expected", [
+        ("フォール", [("call", 0, ("garbled_call",))]),
+        ("センテン、フォール", [("bet", 1000, ("amount_only",)), ("call", 0, ("garbled_call",))]),
+        ("フォールド、フォール", [("fold", 0, ()), ("fold", 0, ("fuzzy_keyword",))]),   # 続けて言った 2 つ目はフォールド
+        ("フォールド", [("fold", 0, ())]),
+    ])
+    def test_a_fall_without_do_is_a_garbled_call(self, text, expected):
+        # 語尾の「ド」が無い「フォール」: 店舗の書き起こしの 3 回とも、札が席に残ったコール（2026-10-06 の 1f838667
+        # ハンド 15・20、05cccd6c ハンド 1）
+        assert [(e.action, e.amount, e.parse_flags) for e in parse_actions(text, confidence=0.5)] == expected
+

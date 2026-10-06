@@ -155,6 +155,10 @@ FOLD_WORD_DEPARTURE_SEC = 3.0
 # 2 秒ほどあと）。店舗: フォールドの 2 回は離脱が語の -0.1 / +0.1 秒、コールの 3 回は +1.8 / +2.0 / +12 秒
 GARBLED_FOLD_BEFORE_SEC = 2.0
 GARBLED_FOLD_AFTER_SEC = 1.0
+# ディーラーがここまでのアクションを言い直す（「センテン、コール」= 1000 のレイズとそのコール, 店舗 2026-10-06 05cccd6c
+# ハンド 7 のオーナーのメモ）: いまのベットと同じ額だけを言ったあと、この秒数のうちに話し始めた「コール」は、その賭けの
+# あとに記録したコールの言い直し
+RECAP_SEC = 3.0
 # 札の離脱で組み直す（取り消す）ときに入力として残す音声のアクション
 _REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin", "heads_up", "players_left"})
 # 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
@@ -175,8 +179,9 @@ AMOUNT_CLOSE = 1.0
 # その額の点数がいちばん確からしい額（使えない額も含む）からこの差以内のときだけ（音がどの使える額にも遠ければ選ばない）
 LEGAL_AMOUNT_MAX_GAP = 5.0
 
-# review の理由にしない parse flag（読み方の情報。「数字だけ」「チェックアラウンド」は運用どおりの言い方）
-_INFO_PARSE_FLAGS = frozenset({"amount_only", "check_around"})
+# review の理由にしない parse flag（読み方の情報。「数字だけ」「チェックアラウンド」「チェックアラウンドの前のチェック」は
+# 運用どおりの言い方）
+_INFO_PARSE_FLAGS = frozenset({"amount_only", "check_around", "before_check_around"})
 
 # 分けた（勝者が 2 人以上）ことを言う語（`core.constants.ACTION_KEYWORDS` の winner のうち）
 _SPLIT_WORDS = re.compile(r"チョップ|ちょっぷ|スプリット|split|chop", re.IGNORECASE)
@@ -532,6 +537,8 @@ class IntegrationThread(threading.Thread):
         self._last_wager: Optional[tuple[ActionRecord, float, int]] = None
         # そのベット・レイズの前の状態と、そのときの合法手（額の言い直しで組み直す, `_restate_wager_amount`）
         self._last_wager_point: Optional[tuple[dict, LegalContext]] = None
+        # いまのベットの額の言い直しのあとに続く「コール」の言い直しを待つ {"t", "records", "text"}（`RECAP_SEC`）
+        self._recap: Optional[dict] = None
         # 最後の 1 人を残すフォールドの確定待ち {"seat", "t"}
         self._foldout_pending: Optional[dict] = None
         self._foldout_winner_left = False
@@ -1135,12 +1142,15 @@ class IntegrationThread(threading.Thread):
                     self._notice(f"「{event.raw_text}」の {event.amount} はいま使えない額なので、音の近い使える額 "
                                  f"{picked.amount} にしました（要確認）")
                 event = picked
+        if self._recap is not None and self._is_recap_call(event):
+            return
         if "amount_only" in event.parse_flags:
             # 数字だけの発話 = ベットかレイズ。使えない額なら記録しない（「7」「いまのベットと同じ額」）
             problem = self._amount_only_problem(event, legal_ctx)
             if problem is None and self._said_with_round_closer(event):
                 problem = f"前のラウンドを閉じた「{self._current_actions[-1].raw_text}」と同じ発話の額です"
             if problem is not None:
+                self._remember_recap(event, legal_ctx)
                 self._notice(f"数字だけの「{event.raw_text}」は記録しませんでした（{problem}）")
                 if self._betting_over():
                     self._count_held_betting_word()
@@ -1158,6 +1168,11 @@ class IntegrationThread(threading.Thread):
                 # 「コール2千、ロック、チェック」のコールでラウンドが閉じた: 同じ発話の「チェック」は次のストリートの
                 # 最初の人のチェックではない（札を配る前。店舗 2026-10-06 e82f5005 ハンド 9 で次の人のベットがずれた）
                 self._notice(f"「{event.raw_text}」のチェックは前のラウンドを閉じた発話の余りとみなして記録しませんでした")
+                return
+            if "before_check_around" in event.parse_flags and self._check_around_of_closed_street(event):
+                # 「チェック、チェックラウンド、ラストカード」: 続くチェックアラウンドが閉じたストリートの言い直しなら、
+                # その前のチェックも同じ言い直し（店舗 2026-10-06 05cccd6c ハンド 14）
+                self._notice(f"「{event.raw_text}」は前のストリートのチェックアラウンドの言い直しとみなして記録しませんでした")
                 return
             if "check_around" in event.parse_flags:
                 if self._check_around_of_closed_street(event):
@@ -1182,7 +1197,8 @@ class IntegrationThread(threading.Thread):
             self._handle_legacy_action(event)
 
     def _resolve_garbled_call(self, event: AudioEvent) -> Optional[AudioEvent]:
-        """「これで終わりです」= ほかの語の聞き違い（ディーラーは言わない, オーナー 2026-10-06）を決め直す。
+        """「これで終わりです」= ほかの語の聞き違い（ディーラーは言わない, オーナー 2026-10-06）と、語尾の「ド」が無い
+        「フォール」（店舗では 3 回ともコール）を決め直す。
 
         その語の前後（`GARBLED_FOLD_BEFORE_SEC` 前〜`GARBLED_FOLD_AFTER_SEC` 後）に札が離れた席があれば、その席の
         「フォールド」: 札の離脱でもう降ろした席なら、その離脱と組にして記録しない（replay も記録した離脱の信号から同じ）。
@@ -1215,7 +1231,7 @@ class IntegrationThread(threading.Thread):
         ctx = self._game_state.legal_context()
         if ctx.actor_seat is not None and ctx.amount_to_call > 0 and not self._betting_over():
             if not self._rebuilding:
-                self._notice(f"「{event.raw_text}」はディーラーが言わない言葉なので、コールの聞き違いとみました（要確認）")
+                self._notice(f"「{event.raw_text}」はコールの聞き違いとみました（要確認）")
             return event
         self._notice(f"「{event.raw_text}」は聞き違いの言葉ですが、いまはベットに向き合った手番が無いので記録しませんでした")
         return None
@@ -1272,6 +1288,44 @@ class IntegrationThread(threading.Thread):
             return False
         if "amount_only" in event.parse_flags:
             return "raise" in ctx.legal_actions and event.amount > ctx.committed + ctx.amount_to_call
+        return True
+
+    def _remember_recap(self, event: AudioEvent, ctx: LegalContext) -> None:
+        """いまのベットと同じ額だけの発話（記録しない）が、ディーラーがここまでのアクションを言い直した最初の語なら、続く
+        「コール」を待つ（`RECAP_SEC`, `_is_recap_call`）。最後の賭けのあとに同じストリートでコールだけが記録されている
+        とき（店舗 05cccd6c ハンド 7:「センテー」「ごめんなさい、コール」→「センテン。」「コール」→ 次の人の「レイズ3500」。
+        賭けのすぐあとの言い直しの次の「コール」は次の人のコール = 7b897671 ハンド 3・d0f055fb ハンド 8）。"""
+        self._recap = None
+        last = self._last_wager
+        if last is None or "raise" not in ctx.legal_actions or event.amount != ctx.committed + ctx.amount_to_call:
+            return
+        if self._last_action_at == _spoken_at(event):
+            return              # 「コール 600」= コールと同じ発話の額（コールの額の言い直し。言い直しの始まりではない）
+        record, _, said = last
+        if event.amount not in (record.amount, said):
+            return
+        index = next((i for i, a in enumerate(self._current_actions) if a is record), None)
+        after = self._current_actions[index + 1:] if index is not None else []
+        if after and all(a.action == "call" and a.street == record.street for a in after):
+            self._recap = {"t": _spoken_at(event), "records": list(after), "text": event.raw_text}
+
+    def _is_recap_call(self, event: AudioEvent) -> bool:
+        """`_remember_recap` のあとの「コール」（額なし）なら、言い直したコールとして記録しない（要確認の印は付けない
+        = 言い直しの印 `restated` を言い直されたコールに付ける）。それ以外の発話が来たら待つのをやめる。"""
+        recap, self._recap = self._recap, None
+        if (event.action != "call" or event.amount or "garbled_call" in event.parse_flags
+                or not 0.0 <= _spoken_at(event) - recap["t"] <= RECAP_SEC):
+            return False
+        record, rest = recap["records"][0], recap["records"][1:]
+        if rest:
+            self._recap = {**recap, "records": rest}
+        if "restated" not in (record.reason or "").split("+"):
+            record.reason = "+".join(r for r in (record.reason, "restated") if r)
+        if not self._rebuilding:
+            logger.info("「%s」「%s」は、ここまでのアクション（席%d のコール）の言い直しとみなしました",
+                        recap["text"], event.raw_text, record.seat)
+            self._notice(f"「{recap['text']}」「{event.raw_text}」は、ここまでのアクション（席{record.seat} のコール）の"
+                         "言い直しとみなして記録しませんでした")
         return True
 
     def _amount_only_problem(self, event: AudioEvent, ctx: LegalContext) -> Optional[str]:
@@ -1838,6 +1892,7 @@ class IntegrationThread(threading.Thread):
             "synced": set(self._streets_synced),
             "spoken": dict(self._spoken_folds),
             "held": self._held_betting_words,
+            "recap": dict(self._recap) if self._recap else None,
         }
 
     def _checkpoint_at(self, index: int) -> Optional[dict]:
@@ -1864,6 +1919,7 @@ class IntegrationThread(threading.Thread):
             d["applied"] = checkpoint["applied"].get(other, False)
         self._streets_synced = set(checkpoint["synced"])
         self._held_betting_words = checkpoint.get("held", 0)
+        self._recap = checkpoint.get("recap")
 
     def _replay_inputs(self, rest: list, reassign_spoken_folds: bool = False) -> None:
         """記録した入力を同じ順に流し直す（お知らせ・画面は止めて、終わってから記録だけ流す）。
@@ -2938,6 +2994,7 @@ class IntegrationThread(threading.Thread):
         # 入力から作り直す状態（チェックポイントに無いもの）
         self._last_wager = None
         self._last_wager_point = None
+        self._recap = None
         self._spoken_fold_raw = {}
         self._foldout_winner_left = False
         restart(seat)
@@ -4400,6 +4457,7 @@ class IntegrationThread(threading.Thread):
         self._held_betting_words = 0
         self._last_wager = None
         self._last_wager_point = None
+        self._recap = None
         self._spoken_folds = {}
         self._spoken_fold_raw = {}
         self._foldout_pending = None

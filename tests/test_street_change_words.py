@@ -43,6 +43,12 @@ class TestReading:
         (event,) = parse_actions(text, confidence=0.9)
         assert event.action == "check" and "check_around" in event.parse_flags
 
+    def test_checks_just_before_a_check_around_are_marked(self):
+        events = parse_actions("チェック、チェックラウンド、ラストカード", confidence=0.9)
+        assert [(e.action, e.parse_flags) for e in events] == [
+            ("check", ("before_check_around",)), ("check", ("check_around",))]
+        assert [e.parse_flags for e in parse_actions("チェック、チェック", confidence=0.9)] == [(), ()]
+
     def test_check_then_check_and_all(self):
         first, second = parse_actions("チェック、チェック、アンド、オール。", confidence=0.9)
         assert "check_around" not in first.parse_flags and "check_around" in second.parse_flags
@@ -170,6 +176,30 @@ class TestCheckLeftOverFromTheClosedRound:
         _board(tb, ["Kc"])
         tb.say("チェック")
         assert _street(tb, "turn") == [(4, "check", 0)]
+
+    def test_a_check_before_a_closed_streets_check_around_is_also_the_closed_streets(self, tmp_path):
+        # 店舗 2026-10-06 05cccd6c ハンド 14: ターンを閉じた「チェック、チェック」のあとの「チェック、チェックラウンド、
+        # ラストカード」（リバーの札はまだ）。最初のチェックがリバーの最初の人のチェックになっていた
+        tb = _Table(tmp_path)
+        _checks_through_flop(tb)
+        _board(tb, ["Kc"])
+        for _ in range(3):
+            tb.say("チェック")                          # ターンは全員チェック = 閉じた
+            tb.tick(tb.now + 1.0)
+        tb.say("チェック、チェックラウンド、ラストカード")   # 閉じた発話とは別の発話
+        assert _street(tb, "river") == []
+        assert any("チェックアラウンドの言い直し" in n for n in tb.notices[-3:])
+        _board(tb, ["2s"])
+        tb.say("3500")
+        assert _street(tb, "river") == [(4, "bet", 3500)]
+
+    def test_a_check_and_check_around_on_the_open_street_are_the_streets(self, tmp_path):
+        tb = _Table(tmp_path)
+        _checks_through_flop(tb)
+        _board(tb, ["Kc"])
+        tb.say("チェック")                              # 席4
+        tb.say("チェック、チェックアラウンド")          # 席5 のチェック → 残りの席6 もチェック
+        assert _street(tb, "turn") == [(4, "check", 0), (5, "check", 0), (6, "check", 0)]
 
     def test_without_the_board_cards_a_check_is_kept(self, tmp_path):
         tb = _Table(tmp_path)

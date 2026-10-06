@@ -54,10 +54,11 @@ class TestFoldWordThenAction:
 
     def test_fold_word_with_cards_kept_is_not_a_fold_at_the_next_street(self, tmp_path):
         """「フォールド」のあと札が席に残ったまま次のストリートの札 = 降りていない（店舗 2026-10-06 1f838667
-        ハンド 15・20: 「フォール」= コールの聞き違いで、ヘッズアップではハンドがそこで終わっていた）。"""
+        ハンド 15・20: 「フォール」= コールの聞き違いで、ヘッズアップではハンドがそこで終わっていた。いまは語尾の「ド」が
+        無い「フォール」はコールの聞き違いとして読む = tests/test_rfid_folds.py の TestGarbledCall）。"""
         tb = _Table(tmp_path)
         _raise_then(tb)
-        tb.say("フォール")
+        tb.say("フォールド")
         tb.tick(tb.now + 6.0)
         assert _acts(tb) == [("preflop", 6, "raise", 600)]      # 札が残っているうちは入れない
         _board(tb, ["Qs", "9h", "9c"])
@@ -66,7 +67,7 @@ class TestFoldWordThenAction:
         ]
         kept = tb.t._current_actions[1]                                          # noqa: SLF001
         assert kept.actor_source == "implied" and kept.needs_review
-        assert kept.reason == "fold_word_but_cards_stayed_before_flop" and kept.raw_text == "フォール"
+        assert kept.reason == "fold_word_but_cards_stayed_before_flop" and kept.raw_text == "フォールド"
         assert tb.gs.get_active_seats() == [4, 5, 6] and tb.gs.street == "flop"
         assert any("フォールドにしません" in n for n in tb.notices)
 

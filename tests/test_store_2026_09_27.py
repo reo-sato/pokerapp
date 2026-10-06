@@ -75,7 +75,7 @@ class TestParsing:
     @pytest.mark.parametrize("text, expected", [
         ("チェックアウンド", [("check", 0, ("check_around",))]),
         ("チッカーランド", [("check", 0, ("check_around",))]),
-        ("チェック、チッカーランド", [("check", 0, ()), ("check", 0, ("check_around",))]),
+        ("チェック、チッカーランド", [("check", 0, ("before_check_around",)), ("check", 0, ("check_around",))]),
     ])
     def test_check_around_spellings(self, text, expected):
         assert _parsed(text) == expected
@@ -96,7 +96,7 @@ class TestParsing:
         ("ショーダウンです。", [("showdown", 0, ())]),
         ("えーと、ベット600点です", [("bet", 600, ())]),
         ("はい、ではフロップを開きます、チェック", [("check", 0, ())]),
-        ("チェック、チェックアランド", [("check", 0, ()), ("check", 0, ("check_around",))]),
+        ("チェック、チェックアランド", [("check", 0, ("before_check_around",)), ("check", 0, ("check_around",))]),
     ])
     def test_short_dealer_phrases_are_not_conversation(self, text, expected):
         assert _parsed(text) == expected
