@@ -121,8 +121,8 @@ def describe_event(event: Optional[AudioEvent]) -> str:
         action = "ヘッズアップ（残り 2 人）"
     elif event.action == "players_left":
         action = f"残り {event.amount} 人"
-    elif event.action == "reset_actions":
-        action = "アクションのやり直し（このハンドのアクションを最初から）"
+    elif event.action == "correction":
+        action = "訂正の合図（直前のアクションか、ストリートの最初から言い直す）"
     else:
         action = event.action
     parts = [action]

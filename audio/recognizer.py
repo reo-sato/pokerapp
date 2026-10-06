@@ -528,18 +528,13 @@ def _after_fold_word(norm: str, pos: int) -> bool:
     return bool(_FOLD_WORD_BEFORE.search(norm[:pos]))
 
 
-# 「アクションリセット」「アクションやり直し」: このハンドのアクションを捨てて最初からやり直す合図（オーナー 2026-10-06:
-# 口頭で直す。e82f5005 ハンド 11 はボタンの話し合いのあとアクションを最初からやり直したが、記録を戻す手段が無く 1 回目と
-# 2 回目が混ざった）。発話の頭がこの言葉のときだけ（続けて最初のアクションを言ってよい）。会話の「リセットできないんで」
-# 「一回それリセットして」「アクションをやり直してもらっていいですか」は合図にしない（店舗の書き起こし 3106 発話で
-# 「リセット」は 3 回、どれも会話。「アクション」だけは「アクションです」= 手番の案内で多い）
-RESET_ACTIONS = "reset_actions"
-_RESET_ACTIONS_PHRASE = re.compile(
-    r"(?:(?:ハイ|デハ|デワ|ジャア|ソレデハ|ソレジャア)[、,\s]*)?"
-    r"アクション[、,\s]*[ヲノ]?[、,\s]*"
-    r"(?:リセット(?:シマス|シマショウ|デス|オネガイシマス|オ願イシマス)?|ヤリ(?:直|ナオ)(?:シ(?:マス|マショウ)?|ス))"
-    r"(?=$|[、。,.!！\s])"
-)
+# 「失礼しました」: ディーラーが言い間違えたときの訂正の合図（オーナー 2026-10-06: ハンドのアクションを最初からやり直す
+# ことはない。ストリートの最初からやり直すか、直前のアクションを訂正する。どちらかは、そのあとのアクションとの辻褄で
+# engine が選ぶ）。店舗の書き起こしでは、台本の「600点」→「失礼しました。800点。」（直前の額の訂正）と、7b897671 ハンド 3 の
+# 「失礼しました。これでお願いします。」（2300 → 2800 の言い直し）。会話の「失礼失礼」「失礼します」は合図にしない。
+# 発話のどこにあってもよい（前は直す前のアクション、後ろは直したあとのアクション）
+CORRECTION = "correction"
+_CORRECTION_CUE = re.compile(r"(?:大変|タイヘン)?(?:失礼|シツレイ)(?:イタ|致)?シマシタ")
 # 自分の額にした部分の読みの印（額の読みが確かでない）。アクションの語の読みにも付け替える
 _AMOUNT_READ_FLAGS = ("ambiguous_amount", GARBLED_DIGITS)
 # 「チェックアラウンド」= まだ動いていない全員がチェックした（オーナーの説明, 2026-09-25）。チェックの語に続く
@@ -1299,14 +1294,20 @@ def _parse_utterance(
     text: str, confidence: Optional[float], utterance_start_ts: Optional[float],
 ) -> list[AudioEvent]:
     """`parse_actions` の本体（疑問形の文を除いたあとの 1 つの発話 / 文）。"""
-    whole = _to_katakana(unicodedata.normalize("NFKC", text)).strip(_TRAILING_PUNCTUATION)
-    reset = _RESET_ACTIONS_PHRASE.match(whole)
-    if reset is not None:
-        # やり直しの合図。続けて言ったアクション（「アクションリセット、700」）はやり直したあとの最初のアクション
-        event = AudioEvent(action=RESET_ACTIONS, amount=0, timestamp=time.time(), raw_text=text,
+    full = unicodedata.normalize("NFKC", text)
+    cue = _CORRECTION_CUE.search(_to_katakana(full))
+    if cue is not None:
+        # 訂正の合図。前に言ったアクションは合図の前、続けて言ったアクション（「失礼しました。800点。」）は直したあと
+        before = full[:cue.start()].strip(_TRAILING_PUNCTUATION)
+        after = full[cue.end():].strip(_TRAILING_PUNCTUATION)
+        event = AudioEvent(action=CORRECTION, amount=0, timestamp=time.time(), raw_text=text,
                            confidence=confidence, utterance_start_ts=utterance_start_ts)
-        rest = whole[reset.end():].strip(_TRAILING_PUNCTUATION)
-        return [event, *(_parse_utterance(rest, confidence, utterance_start_ts) if rest else [])]
+        return [
+            *(_parse_utterance(before, confidence, utterance_start_ts) if before else []),
+            event,
+            *(_parse_utterance(after, confidence, utterance_start_ts) if after else []),
+        ]
+    whole = _to_katakana(full).strip(_TRAILING_PUNCTUATION)
     if _GARBLED_CALL_PHRASE.fullmatch(whole):
         return [AudioEvent(action="call", amount=0, timestamp=time.time(), raw_text=text, confidence=confidence,
                            utterance_start_ts=utterance_start_ts, parse_flags=(GARBLED_CALL,))]
