@@ -31,7 +31,7 @@ api = ["fastapi>=0.110,<1", "uvicorn>=0.29,<1", "httpx>=0.27,<1"]
 # （tools/second_ear.py）に使う。モデルは初回に models/ へ取得する
 ear = ["kaldi-native-fbank>=1.20,<2", "onnxruntime>=1.14,<2"]
 # 開発/テスト/契約検証（CI が使用。実行時 core には不要）
-dev = ["pytest>=7.0", "jsonschema>=4.0,<5", "fastapi>=0.110,<1", "httpx>=0.27,<1"]
+dev = ["pytest>=7.0", "pytest-xdist>=3.5,<4", "pytest-timeout>=2.3,<3", "jsonschema>=4.0,<5", "fastapi>=0.110,<1", "httpx>=0.27,<1"]
 
 [project.scripts]
 pokerapp = "main:main"
@@ -44,6 +44,18 @@ py-modules = ["main"]
 [tool.setuptools.package-data]
 # お客さん向け画面のビルド（viewer API が `/` で配信する, ADR-0059）
 api = ["static/player/*", "static/player/**/*"]
+
+[tool.pytest.ini_options]
+# テストのダイエット（docs/worklog/2026-10-06-test-diet.md, 監査 1 D12）: 遅いテストに印を付けて、変更ごとに回す速い組
+# （`pytest -m "not slow" -n auto`）と遅い組を分ける。CI は 2 ジョブで両方を回す。遅いテストが増えたら
+# `--durations` の表で見える。
+testpaths = ["tests"]
+markers = [
+    "slow: 単独で 2 秒を超えるテスト（推定器の店舗のハンドなど）。速い組（-m \"not slow\"）では回さない",
+]
+addopts = "--strict-markers --durations=15 --durations-min=1.0"
+# pytest-timeout（requirements-dev）: 速い組で 20 秒を超えたら落として知らせる。slow の印のテストは 300 秒
+timeout = 20
 
 [tool.ruff]
 target-version = "py311"

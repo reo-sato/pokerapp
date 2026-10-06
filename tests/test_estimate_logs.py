@@ -38,6 +38,7 @@ def test_the_newest_session(tmp_path):
     assert newest_session([tmp_path]) == "bbb"
 
 
+@pytest.mark.slow                        # 店舗のセッションを推定する（約 5 秒）
 def test_estimate_file_overlays_the_live_record():
     pytest.importorskip("pokerkit")
     folder = next(STORE.glob("*a6ee12e4"))

@@ -58,7 +58,7 @@ def relay():
     poller = RelayPoller(READERS, poll_interval_ms=5, bridge_factory=table.factory,
                          reader_present=lambda _name: table.present, reconnect_sec=0.1)
     server = make_relay_server(poller, port=0)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
     poller.start()
     yield table, poller, RelayClient(port=server.server_address[1])
     poller.stop()

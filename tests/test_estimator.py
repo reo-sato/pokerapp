@@ -537,6 +537,7 @@ def _session(prefix: str) -> tuple[SessionEstimator, dict]:
     return est, {h["hand_id"]: h["truth"] for h in expected["hands"]}
 
 
+@pytest.mark.slow       # 本番と同じ探索の幅で店舗のハンドを推定する（合わせて約 85 秒。幅は変えない = 監査 1 D2）
 @pytest.mark.parametrize("prefix,hand_id,correct,review", [
     # ボタンの置き忘れ + 「チェック、チェック」の言い直し: 記録の再生では崩れ、推定で丸ごと正しい（直しを使った = 要確認）
     ("9d1d8536", 4, True, True),

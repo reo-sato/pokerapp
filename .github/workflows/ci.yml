@@ -5,8 +5,12 @@ on:
     branches: ["**"]
   pull_request:
 
+# テストは 2 ジョブに分けて同時に回す（テストのダイエット, docs/worklog/2026-10-06-test-diet.md）:
+# 速い組（-m "not slow"）と、遅い印のテスト（推定器の店舗のハンドなど, -m slow）。
+# 収集の対象と除外（vision レガシー）は pyproject.toml と tests/conftest.py にある。
 jobs:
-  test:
+  fast:
+    name: tests (fast) + lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,8 +27,47 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Runner
+        run: nproc
+
       - name: Lint (ruff — 実バグ系 F/E9 の最小ゲート, 設定は pyproject.toml)
         run: ruff check .
 
-      - name: Run tests (vision レガシーは除外、skip 0 が前提)
-        run: pytest tests/ -v --ignore=tests/test_vision.py
+      - name: Run tests (速い組、skip 0 が前提)
+        run: pytest -m "not slow" -n auto -v --junitxml=reports/junit-fast.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-fast
+          path: reports/junit-fast.xml
+
+  slow:
+    name: tests (slow)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Runner
+        run: nproc
+
+      - name: Run tests (遅い組)
+        run: pytest -m slow -n auto -v --junitxml=reports/junit-slow.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-slow
+          path: reports/junit-slow.xml

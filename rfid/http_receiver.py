@@ -44,6 +44,8 @@ MAX_CONTENT_LENGTH = 16 * 1024
 class RFIDHTTPReceiver(threading.Thread):
     """ESP32 からの HTTP POST を受信して RFIDEvent をキューに投入するスレッド。
 
+    `POLL_INTERVAL`: 止める合図を見に行く間隔（秒）。`stop()` はこの間隔まで待つ（テストでは短くする）。
+
     スレッド安全: rfid_queue への put() のみ使用。stop() 後に join() 可能。
 
     設定例 (config_default.json):
@@ -61,6 +63,8 @@ class RFIDHTTPReceiver(threading.Thread):
             }
         }
     """
+
+    POLL_INTERVAL = 0.5
 
     def __init__(
         self,
@@ -115,7 +119,7 @@ class RFIDHTTPReceiver(threading.Thread):
                 "RFIDHTTPReceiver listening on %s:%d",
                 self._bind_host, self._bind_port,
             )
-            server.serve_forever(poll_interval=0.5)
+            server.serve_forever(poll_interval=self.POLL_INTERVAL)
         except OSError as exc:
             logger.error(
                 "RFIDHTTPReceiver failed to bind %s:%d — %s",

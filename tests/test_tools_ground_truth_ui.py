@@ -78,7 +78,7 @@ def log_dir(tmp_path: Path) -> Path:
 def _serve(log_dir: Path, blind_every: int):
     # 練習のセッション（リポジトリの config.json の評価のモードに左右されない）
     server = make_server(log_dir, "127.0.0.1", 0, blind_every=blind_every, evaluation=False)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_address[1]}"
@@ -668,7 +668,7 @@ class TestEvaluationMode:
     def eval_base(self, log_dir: Path):
         # ブラインドの割合（0 = しない）によらず、評価のセッションは全部のハンドをブラインドで入れる
         server = make_server(log_dir, "127.0.0.1", 0, blind_every=0, evaluation=True)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
         thread.start()
         try:
             yield f"http://127.0.0.1:{server.server_address[1]}"

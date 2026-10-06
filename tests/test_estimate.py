@@ -19,7 +19,13 @@ from tools.estimate import (  # noqa: E402
 )
 from tools.simulate import Noise, ear_form, observe, run, simulate_session  # noqa: E402
 
-logging.disable(logging.CRITICAL)
+@pytest.fixture(autouse=True)
+def _quiet():
+    """推定の候補の再生で出るエンジンのログを止める（このファイルのテストのあいだだけ。モジュールの頭で止めると
+    ほかのファイルのログの検査まで止まる = 監査 1 D14）。"""
+    logging.disable(logging.CRITICAL)
+    yield
+    logging.disable(logging.NOTSET)
 
 
 def _ear(text: str, cands: list[tuple[str, float]], logp: float = -0.5) -> dict:
@@ -130,6 +136,7 @@ class TestSimulation:
         result = run(noise, sessions=1, hands=6, seats=6)
         assert result.default_exact == result.estimate_exact == result.hands == 6
 
+    @pytest.mark.slow                    # シミュレーションの 1 セッション（約 10 秒）
     def test_the_estimator_rescues_hallucinated_actions(self):
         """幻聴になった発話を、第 2 の耳の候補とハンドの筋から戻す（シミュレーションの 1 セッション）。"""
         noise = Noise(misread=0, hallucinate=0.2, garble=0, missing=0, chatter=0, ear_agree=0.3)
@@ -150,6 +157,7 @@ def results():
     return out
 
 
+@pytest.mark.slow                        # 店舗の 2 セッションを推定する fixture（約 7 秒）を共有する
 class TestStoreFixtures:
     """店舗の真のアクションのあるハンドで、推定が読み直し（既定）より悪くならない（ADR-0056 追記 1 の S3 の条件）。"""
 

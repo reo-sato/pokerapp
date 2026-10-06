@@ -13,6 +13,7 @@ from core.event_queue import make_audio_queue, make_camera_queue
 from core.events import AudioEvent, CameraEvent
 from core.game_state import GameStateManager, PlayerState
 from core.hand_log import ActionRecord
+from tests.harness import HandledAudio, stop_thread
 from integration.engine import MATCH_WINDOW, IntegrationThread, _CONF_AUDIO_CAMERA, _CONF_AUDIO_ONLY
 from output.json_writer import JsonWriter
 
@@ -30,10 +31,12 @@ def _make_game() -> GameStateManager:
 
 
 def _run_thread(thread: IntegrationThread, stop: threading.Event, join_timeout: float = 2.0) -> None:
+    """入れた音声のイベントがすべて処理されるまで動かして止める（決まった時間は待たない）。"""
+    handled = HandledAudio(thread)
+    expected = thread._audio_queue.qsize()
     thread.start()
-    time.sleep(0.3)  # イベント処理を待つ
-    stop.set()
-    thread.join(timeout=join_timeout)
+    handled.wait(expected)
+    stop_thread(thread, stop, join_timeout)
 
 
 # ――― テストケース ―――

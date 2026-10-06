@@ -55,13 +55,28 @@ def _run_cli(monkeypatch: pytest.MonkeyPatch, cfg: dict, answers: list[str]) -> 
     monkeypatch.setattr("core.config.load_config", lambda path=None: cfg)
     monkeypatch.setattr("core.event_queue.make_audio_queue", lambda: audio_q)
     pending = list(answers)
+    unhandled: set[int] = set()                # 入れたが、まだ処理し終えていないイベント
+    real_put = audio_q.put
+    real_handle = IntegrationThread._handle_audio_event
+
+    def put(item, *args, **kwargs):
+        unhandled.add(id(item))
+        real_put(item, *args, **kwargs)
+
+    def handle(self, event):
+        try:
+            real_handle(self, event)
+        finally:
+            unhandled.discard(id(event))
+
+    audio_q.put = put
+    monkeypatch.setattr(IntegrationThread, "_handle_audio_event", handle)
 
     def fake_input(prompt: str = "") -> str:
-        if prompt == "> ":                     # コマンド: 前のコマンドの処理を待つ
+        if prompt == "> ":                     # コマンド: 前のコマンドの処理を待つ（決まった時間は待たない）
             deadline = time.time() + 5
-            while not audio_q.empty() and time.time() < deadline:
-                time.sleep(0.01)
-            time.sleep(0.15)
+            while unhandled and time.time() < deadline:
+                time.sleep(0.005)
         return pending.pop(0)
 
     monkeypatch.setattr("builtins.input", fake_input)

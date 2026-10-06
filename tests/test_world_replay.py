@@ -115,6 +115,7 @@ def test_the_button_can_be_changed_without_old_decisions(tmp_path):
     assert hands[4]["button_seat"] == 5 and hand_fully_correct(truth, hands[4])
 
 
+@pytest.mark.slow                        # 店舗の全セッションを生の観測から再生する（約 4 秒）
 def test_store_sessions_are_rebuilt_from_the_raw_observations():
     """記録の席の信号を使わずに、店舗の真のアクションのある 18 ハンドのうち 12 ハンドが丸ごと正しい（記録の再生と
     同じ数。違いは 027e4b15 ハンド 1 の「フォールド、コール」= 聞き違いの 1 語）。"""
