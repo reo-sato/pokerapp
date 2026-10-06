@@ -181,6 +181,94 @@ class TestDepartures:
         assert q > s
 
 
+class TestDepartureEvidence:
+    """店舗 2026-10-06 の見直し（Fable 5.1 の助言 P2〜P5）: 聞き違いのコールと札の離脱の組・片付けの一瞬の読み取り・
+    フォールドのあとも札が残る・ベットの無いところのフォールド・札は語のあとに離れることが多い。"""
+
+    def test_a_blip_does_not_end_an_absence(self):
+        seats = {s: [SeatObservation(T0, True, None, None)] for s in (4, 5, 6)}
+        seats[5] += [SeatObservation(T0 + 30.5, False, T0 + 30.0, None),
+                     SeatObservation(T0 + 50.0, True, None, None),          # 片付けで 0.1 秒だけ読めた
+                     SeatObservation(T0 + 50.1, False, T0 + 50.1, None)]
+        presence = PresenceTimeline(seats)
+        assert presence.departures(T0, T0 + 120) == [(5, T0 + 30.0, T0 + 50.0), (5, T0 + 50.1, None)]
+        assert presence.departures(T0, T0 + 120, blip_sec=1.0, settle_sec=3.0) == [(5, T0 + 30.0, None)]
+        _, flags = TestDepartures()._terms(_estimator(presence), 5, T0 + 30.0, caller=4)
+        assert flags == []
+
+    def test_a_flicker_is_still_a_flicker(self):
+        """短い不在のあとの短い読み取り（読み取りのちらつき）はつなげない。"""
+        seats = {5: [SeatObservation(T0, True, None, None), SeatObservation(T0 + 10.5, False, T0 + 10.0, None),
+                     SeatObservation(T0 + 11.0, True, None, None), SeatObservation(T0 + 11.2, False, T0 + 11.2, None),
+                     SeatObservation(T0 + 12.0, True, None, None)]}
+        assert PresenceTimeline(seats).departures(T0, T0 + 60, blip_sec=1.0, settle_sec=3.0) == [
+            (5, T0 + 10.0, T0 + 11.0), (5, T0 + 11.2, T0 + 12.0)]
+
+    def test_cards_still_on_the_seat_long_after_the_fold(self):
+        """フォールドから 10 秒たっても札が席にある（店舗の真のフォールド 0/172）は、離脱が見えないだけより重い。"""
+        est = _estimator(_presence({}))
+        _, flags = TestDepartures()._terms(est, 4, T0 + 30.0, caller=5)
+        hand = {"players": [{"seat": 4}, {"seat": 5}, {"seat": 6}], "winner_source": "fold"}
+        betting = [_Row("river", 6, "bet", T0 + 25, _word("bet", T0 + 25, T0 + 26, amount=2000)),
+                   _Row("river", 4, "fold", T0 + 30.0, _word("fold", T0 + 30.0, T0 + 30.8), source="spoken_fold")]
+        terms = dict(est._departure_terms(_window(), hand, betting, []))
+        assert terms["席4 はフォールドのあとも札が席に載っていた"] == pytest.approx(math.log(PARAMS["p_present_after_fold"]))
+        assert "札が離れないフォールド（river 席4）" in flags
+        ending = HandWindow(hand_id=1, start=T0, end=T0 + 120.0,
+                            base={"players": hand["players"], "button_seat": 6, "ended_at": _iso(T0 + 35.0)})
+        short = dict(est._departure_terms(ending, dict(hand, ended_at=_iso(T0 + 35.0)), betting, []))
+        assert short["席4 のフォールドに札の離脱が無い"] == pytest.approx(math.log(PARAMS["p_nodepart"]))
+
+    def test_a_momentary_read_after_the_fold_is_not_cards_staying(self):
+        """フォールドの 10 秒後に一瞬だけ読めた（片付けの札がかすめた）のは「札が残っていた」にしない。"""
+        seats = {s: [SeatObservation(T0, True, None, None)] for s in (4, 5, 6)}
+        seats[4] = [SeatObservation(T0, True, None, None), SeatObservation(T0 + 25.5, False, T0 + 25.0, None),
+                    SeatObservation(T0 + 39.8, True, None, None), SeatObservation(T0 + 40.3, False, T0 + 40.3, None)]
+        est = _estimator(PresenceTimeline(seats))
+        assert est._present_at(4, T0 + 40.0, T0 + 120.0) is False
+        assert est._present_at(5, T0 + 40.0, T0 + 120.0) is True
+        assert est._present_at(5, T0 + 40.0, T0 + 30.0) is False          # ハンドの終わりのあと
+
+    def test_an_open_fold_is_unlikely(self):
+        est = _estimator()
+        hand = {"players": [{"seat": 4}, {"seat": 5}, {"seat": 6}], "winner_source": "fold"}
+        open_fold = [_Row("flop", 4, "check", T0 + 20, _word("check", T0 + 20, T0 + 21)),
+                     _Row("flop", 5, "fold", T0 + 25, None, source="rfid_departure", reasons=frozenset({"no_bet"}))]
+        flags: list[str] = []
+        terms = est._action_terms(hand, open_fold, flags)
+        assert ("ベットの無いところのフォールド", math.log(PARAMS["p_open_fold"])) in terms
+        assert "ベットの無いところのフォールド（flop 席5）" in flags
+        facing = [_Row("flop", 4, "bet", T0 + 20, _word("bet", T0 + 20, T0 + 21, amount=400)),
+                  _Row("flop", 5, "fold", T0 + 25, None, source="rfid_departure")]
+        assert not any(name == "ベットの無いところのフォールド" for name, _ in est._action_terms(hand, facing, []))
+
+    def test_cards_leave_after_the_word_more_often_than_before(self):
+        est = _estimator(_presence({5: T0 + 31.5}))
+        late, _ = TestDepartures()._terms(est, 5, T0 + 30.0, caller=4)
+        early_est = _estimator(_presence({5: T0 + 28.5}))
+        early, _ = TestDepartures()._terms(early_est, 5, T0 + 30.0, caller=4)
+        assert late > early
+
+    def test_a_garbled_call_word_pairs_with_the_departure(self):
+        garbled = _word("call", T0 + 30.0, T0 + 31.0, "これで終わります")
+        garbled.parse_flags = ("garbled_call",)
+        actions = [_row("river", 6, "bet", T0 + 26, amount=2000),
+                   _row("river", 5, "fold", T0 + 30.1, source="rfid_departure")]
+        rows, unused = align_words(actions, [_word("bet", T0 + 25, T0 + 26, amount=2000), garbled], {})
+        assert rows[1].word is garbled and unused == []
+        far = _row("river", 5, "fold", T0 + 33.0, source="rfid_departure")     # 語の 3 秒あとの離脱は組にしない
+        _, unused = align_words([actions[0], far], [_word("bet", T0 + 25, T0 + 26, amount=2000), garbled], {})
+        assert unused == [garbled]
+
+    def test_a_garbled_call_used_as_a_call_is_not_taken_by_a_fold(self):
+        garbled = _word("call", T0 + 30.0, T0 + 31.0, "コールド")
+        garbled.parse_flags = ("garbled_call",)
+        actions = [_row("river", 5, "fold", T0 + 30.2, source="rfid_departure"),
+                   _row("river", 6, "call", T0 + 31.0, amount=2000)]
+        rows, _ = align_words(actions, [garbled], {})
+        assert rows[0].word is None and rows[1].word is garbled
+
+
 class TestWords:
     def test_the_last_fold_is_often_not_announced(self):
         est = _estimator()

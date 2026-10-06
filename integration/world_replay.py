@@ -192,17 +192,38 @@ class PresenceTimeline:
         """ボードのリーダーの枚数は卓状態の履歴に無い（0 とする = 配布の検出を止めない）。"""
         return {"absent": {}, "pending": {}, "present_count": 0}
 
-    def departures(self, t0: float, t1: float) -> list[tuple[int, float, Optional[float]]]:
-        """[t0, t1) に札が消えた席と時刻と戻った時刻（戻らなければ None）。推定器の「持ち上げ」の選択点に使う。"""
+    def departures(self, t0: float, t1: float, blip_sec: float = 0.0,
+                   settle_sec: float = 0.0) -> list[tuple[int, float, Optional[float]]]:
+        """[t0, t1) に札が消えた席と時刻と戻った時刻（戻らなければ None）。推定器の「持ち上げ」の選択点に使う。
+
+        `blip_sec`: 札が `settle_sec` 秒以上消えていたあとの、`blip_sec` 秒より短い読み取り（片付けの札がリーダーを
+        かすめた）は戻ったとみない（推定器。店舗 2026-10-06 05cccd6c ハンド 16: 32 秒消えていた札が 0.1 秒だけ読めて、
+        フォールドの離脱に使えなくなっていた）。続けて消えた分も同じ不在。
+        """
         out = []
         for seat, obs in self._seats.items():
-            for i, o in enumerate(obs):
-                if o.present or o.absent_since is None or not t0 <= o.absent_since < t1:
+            i = 0
+            while i < len(obs):
+                o = obs[i]
+                if o.present or o.absent_since is None or (i > 0 and not obs[i - 1].present):
+                    i += 1                        # 載っている / 同じ不在の続き（中央を通過した など）
                     continue
-                if i > 0 and not obs[i - 1].present:
-                    continue                      # 同じ不在の続き（中央を通過した など）
-                back = next((n.t for n in obs[i + 1:] if n.present), None)
-                out.append((seat, o.absent_since, back))
+                start = o.absent_since
+                back: Optional[float] = None
+                j = i + 1
+                while j < len(obs):
+                    if obs[j].present:
+                        until = obs[j + 1].t if j + 1 < len(obs) else None
+                        if (until is not None and until - obs[j].t < blip_sec
+                                and obs[j].t - start >= settle_sec):
+                            j += 1                # 一瞬の読み取り: 消えたままとみる
+                            continue
+                        back = obs[j].t
+                        break
+                    j += 1
+                if t0 <= start < t1:
+                    out.append((seat, start, back))
+                i = j
         return sorted(out, key=lambda x: (x[1], x[0]))
 
 

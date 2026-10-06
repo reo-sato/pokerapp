@@ -522,6 +522,16 @@ _GARBLED_FOLD_WORD = re.compile(r"フォール(?:デス)?")
 # ただし「フォールド」に続けて言った 2 つ目は語尾が落ちたフォールド（読み上げ集 2026-09-30:「フォールド、フォールド」を
 # 「フォールド、フォール」と書き起こした）
 _FOLD_WORD_BEFORE = re.compile(r"(?:フォールド|ホールド)[\s、。,.・]*$")
+# 「コールド」=「コール」と「フォールド」の聞き分けられない語: 店舗の書き起こしの 5 回とも、その語のころ（前 1.1 秒〜
+# あと 0.9 秒）に手番の人の札が離れていて、フォールドだった（2026-10-06 の 05cccd6c ハンド 11・13、1f838667 ハンド 6・
+# 12、b7f32031 ハンド 2）。「コード」だけの発話はコールの崩れ（2 回とも札は離れずコール: 1f838667 ハンド 3、
+# b7f32031 ハンド 3）。どちらも聞き違いのコールとして読み、engine が札の離脱で決め直す
+_GARBLED_CALL_WORD = re.compile(r"コールド")
+_GARBLED_CALL_WHOLE = re.compile(r"コード(?:デス)?")
+# 「チュック」「チョック」だけの発話 = チェックの崩れ（店舗の書き起こしの 15 回のうち 14 回、第 2 の耳がその場で
+# 「チェック」と聞いた。残る 1 回も候補の 1 番はチェック）。音の近さでは「チョップ」とも同じくらい近いので（チョップは
+# 勝者の語）、この 2 語だけを要確認のチェックとして読む
+_GARBLED_CHECK_WHOLE = re.compile(r"(?:チュック|チョック)(?:デス)?")
 
 
 def _after_fold_word(norm: str, pos: int) -> bool:
@@ -1162,7 +1172,7 @@ def parse_actions(
         return []
     events = _parse_utterance(text, confidence, utterance_start_ts)
     if events:
-        return _mark_before_check_around(events)
+        return _mark_garbled_calls(_mark_before_check_around(events))
     # 雑談に続けて言ったアクション（店舗 2026-09-29 7b897671 ハンド 2:「それが撮りづらくなります。 そんな機能入れて
     # ないんですよ、まだ。 1300」）は、発話全体では会話とみて読まない。最後の文から前へ、アクションとして読める文
     # だけを読み直す（つなぎの言葉だけの文は飛ばす）。雑談に挟まれた文は読まない（d0f055fb:「ラッシャーに4とか
@@ -1178,7 +1188,16 @@ def parse_actions(
     salvaged = [event for found in reversed(groups) for event in found]
     for event in salvaged:
         event.parse_flags = (*event.parse_flags, "sentence_after_chatter")
-    return salvaged
+    return _mark_garbled_calls(salvaged)
+
+
+def _mark_garbled_calls(events: list[AudioEvent]) -> list[AudioEvent]:
+    """「コールド」と書き起こしたコールに聞き違いのコールの印を付ける（`_GARBLED_CALL_WORD`）。"""
+    for event in events:
+        if (event.action == "call" and GARBLED_CALL not in event.parse_flags
+                and _GARBLED_CALL_WORD.search(_to_katakana(unicodedata.normalize("NFKC", event.raw_text or "")))):
+            event.parse_flags = tuple(f for f in event.parse_flags if f != "fuzzy_keyword") + (GARBLED_CALL,)
+    return events
 
 
 # チェックアラウンドの直前に続けて言ったチェック（「チェック、チェックアラウンド、ラストカード」）の印。チェックアラウンドが
@@ -1308,9 +1327,12 @@ def _parse_utterance(
             *(_parse_utterance(after, confidence, utterance_start_ts) if after else []),
         ]
     whole = _to_katakana(full).strip(_TRAILING_PUNCTUATION)
-    if _GARBLED_CALL_PHRASE.fullmatch(whole):
+    if _GARBLED_CALL_PHRASE.fullmatch(whole) or _GARBLED_CALL_WHOLE.fullmatch(whole):
         return [AudioEvent(action="call", amount=0, timestamp=time.time(), raw_text=text, confidence=confidence,
                            utterance_start_ts=utterance_start_ts, parse_flags=(GARBLED_CALL,))]
+    if _GARBLED_CHECK_WHOLE.fullmatch(whole):
+        return [AudioEvent(action="check", amount=0, timestamp=time.time(), raw_text=text, confidence=confidence,
+                           utterance_start_ts=utterance_start_ts, parse_flags=("fuzzy_keyword",))]
     alias = _WHOLE_UTTERANCE_ALIASES.get(whole)
     if alias is not None:
         text = alias

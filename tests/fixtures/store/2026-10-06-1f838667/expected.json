@@ -373,7 +373,7 @@
     "board_match": false
    },
    "reparse_baseline": {
-    "action_correct": 9,
+    "action_correct": 10,
     "action_total": 12,
     "winner_match": null,
     "board_match": false
@@ -807,15 +807,15 @@
     "hand_id": 3
    },
    "baseline": {
-    "action_correct": 10,
+    "action_correct": 13,
     "action_total": 13,
-    "winner_match": false,
+    "winner_match": true,
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 10,
+    "action_correct": 13,
     "action_total": 13,
-    "winner_match": false,
+    "winner_match": true,
     "board_match": true
    }
   },
@@ -2653,13 +2653,13 @@
     "hand_id": 12
    },
    "baseline": {
-    "action_correct": 10,
+    "action_correct": 11,
     "action_total": 14,
     "winner_match": true,
     "board_match": false
    },
    "reparse_baseline": {
-    "action_correct": 10,
+    "action_correct": 11,
     "action_total": 14,
     "winner_match": true,
     "board_match": false
@@ -3319,7 +3319,7 @@
     "hand_id": 15
    },
    "baseline": {
-    "action_correct": 8,
+    "action_correct": 9,
     "action_total": 12,
     "winner_match": null,
     "board_match": true
@@ -3507,15 +3507,15 @@
     "hand_id": 16
    },
    "baseline": {
-    "action_correct": 7,
+    "action_correct": 9,
     "action_total": 10,
-    "winner_match": false,
+    "winner_match": true,
     "board_match": false
    },
    "reparse_baseline": {
-    "action_correct": 7,
+    "action_correct": 9,
     "action_total": 10,
-    "winner_match": false,
+    "winner_match": true,
     "board_match": false
    }
   },
@@ -4461,13 +4461,13 @@
     "hand_id": 20
    },
    "baseline": {
-    "action_correct": 4,
+    "action_correct": 10,
     "action_total": 18,
     "winner_match": true,
     "board_match": false
    },
    "reparse_baseline": {
-    "action_correct": 4,
+    "action_correct": 5,
     "action_total": 18,
     "winner_match": true,
     "board_match": false
@@ -4716,8 +4716,8 @@
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 14,
-    "action_total": 17,
+    "action_correct": 15,
+    "action_total": 15,
     "winner_match": null,
     "board_match": true
    }

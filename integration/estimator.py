@@ -59,12 +59,23 @@ PARAMS: dict[str, float] = {
     "amount_prior_weight": 1.0,  # 賭けの額のポットに対する大きさの重み（`core.bet_sizing.size_prior` に掛ける。オーナー
                                  # 2026-10-01: 多くはポット以下、多くても 3 倍。真のアクションの賭け 92 のうちポット以下 75%）
     # 札の離脱（卓状態の履歴）。時刻の密度で比べる（どの仮説でも離脱 1 つに密度 1 つ）
-    "p_nodepart": 0.03,          # フォールドしたのに札が離れない（店舗 0/25。その席の札がハンドで一度も読めなければ数えない）
-    "fold_lag_mu": 0.1,          # 「フォールド」の話し始めから札が離れるまで（店舗 20 回の中央値 0.1 秒、[−1.35, +1.02]）
-    "fold_lag_b": 0.4,           # その広がり（ラプラス分布の尺度, 秒。最尤は 0.3、狭いと崩れるので広め = 監査 2 回目）
+    "p_nodepart": 0.01,          # フォールドしたのに札が離れない（店舗の真のアクションのフォールド 0/172、2026-10-06 に
+                                 # 0.03 から。その席の札がハンドで一度も読めなければ数えない）
+    "p_present_after_fold": 0.002,  # フォールドから `present_after_sec` 秒たっても札が席に載っている（0/172。言われない
+                                 # フォールドを入れて札が残ったままのハンドの読みを止める = 店舗 05cccd6c ハンド 1）
+    "present_after_sec": 10.0,
+    # 「フォールド」の話し始めから札が離れるまで: 左右で幅の違うラプラス分布。札は語のあとに離れることが多い（店舗の
+    # 真のフォールド 111 回: ±0.5 秒に 67%・+0.5〜+1.5 秒に 23%・+2.5 秒より遅い 3 回）。2026-10-06 に語よりあとの側の
+    # 幅だけ 0.4 → 0.55（最尤。ブートストラップの 90% 区間 0.4〜0.7）。中心と語より前の側は最尤（0.08 / 0.35）が前の値と
+    # 見分けられない（90% 区間 0.25〜0.45）ので据え置き。+2.8 秒の離脱が −5.6 → −4.7（店舗 7bd25188 ハンド 2）
+    "fold_lag_mu": 0.1,          # 中心（秒。店舗 20 回の中央値 0.1 秒）
+    "fold_lag_b": 0.4,           # 語より前に札が離れる側の幅（秒）
+    "fold_lag_b_late": 0.55,     # 語よりあとに札が離れる側の幅（秒）
     "fold_early_mix": 0.1,       # フォールドの札の離脱の裾（語が発話の後ろの方・手番より前に投げた札）の重み
     "fold_tail_sec": 20.0,       # その裾の幅（± 秒、一様）
     "flicker_sec": 3.0,          # これより早く戻った離脱（ちらつき・のぞき見）は数えない（engine がフォールドにしない 3 秒と同じ）
+    "blip_sec": 1.0,             # `flicker_sec` 以上消えていた札がこれより短く読めただけ（片付けでリーダーをかすめた）は戻った
+                                 # とみない（店舗 05cccd6c ハンド 16: 0.1 秒。ハンドの途中のこの形は全データで 3 回）
     "departure_after_end_sec": 60.0,   # 離脱を数える窓: 直しの無い再生のハンドの終わりからこの秒数まで
     "silent_fold_wait": 30.0,    # 言われないフォールドは前後の言われたアクションの間（最後なら前からこの秒数まで）
     "silent_fold_mean": 2.5,     # 言われないフォールドの札が離れるまでの考える時間（前の言われたアクションから, 指数分布
@@ -75,6 +86,8 @@ PARAMS: dict[str, float] = {
     "p_button": 0.05,            # ボタンが記録（ライブが回したボタン）と違う（隣の席 = 動かし忘れ・動かしすぎを 4 倍厚く）
     "p_unclosed": 0.01,          # ベッティングのラウンドが閉じないまま（手番の人が残ったまま）ハンドが終わった
     "p_players": 0.05,           # 残り人数の宣言（ヘッズアップ・N プレイヤーズ）が合わない
+    "p_open_fold": 0.005,        # ベットに向き合っていないのに降りた（店舗の真のアクションで 0/171。pokerkit も force_fold が
+                                 # 要る。手の事前の −log 2 の代わり。2026-10-06）
     "p_showdown_word": 0.03,     # ショーダウンの声（「ショーダウン」・役の名前）があるのに全員降りて終わった（真のアクションの
                                  # 92 ハンド: 声のあった 23 ハンドはすべてショーダウン、全員降りて終わった 45 ハンドで声 0）
     "p_unread_board": 0.03,      # 次のストリートのアクションなのにボードの札が読めていない（店舗 1 回 / 約 40）
@@ -306,6 +319,9 @@ def align_words(actions: list[dict], tokens: list[AudioEvent], inserted: dict[st
     by_ts: dict[str, AudioEvent] = {}
     for t in betting:
         by_ts.setdefault(_iso(t.timestamp), t)
+    # 語から作った行が使う語（札の離脱のフォールドが聞き違いのコールを取らないように）
+    claimed = {id(by_ts[a.get("timestamp") or ""]) for a in actions if (a.get("timestamp") or "") in by_ts
+               and (str(a.get("actor_source") or "") in _WORD_SOURCES or "check_around" in str(a.get("reason") or ""))}
     used: set[int] = set()
     rows: list[_Row] = []
     for a in actions:
@@ -324,8 +340,12 @@ def align_words(actions: list[dict], tokens: list[AudioEvent], inserted: dict[st
                         and abs((x.utterance_start_ts or x.timestamp) - t) <= 1.0),
                        key=lambda x: abs((x.utterance_start_ts or x.timestamp) - t), default=None)
         elif src in _RFID_FOLDS:
-            word = min((x for x in betting if x.action == "fold" and id(x) not in used
-                        and -4.0 <= (x.utterance_start_ts or x.timestamp) - t <= 6.0),
+            # 聞き違いのコール（「これで終わりです」「コールド」）は、engine と同じ幅で札の離脱と組になる
+            # （`engine.GARBLED_FOLD_BEFORE_SEC` / `GARBLED_FOLD_AFTER_SEC`: 離脱が語の 2 秒前〜1 秒後）
+            word = min((x for x in betting if id(x) not in used and (
+                            (x.action == "fold" and -4.0 <= (x.utterance_start_ts or x.timestamp) - t <= 6.0)
+                            or (x.action == "call" and "garbled_call" in x.parse_flags and id(x) not in claimed
+                                and -1.0 <= (x.utterance_start_ts or x.timestamp) - t <= 2.0))),
                        key=lambda x: abs((x.utterance_start_ts or x.timestamp) - t), default=None)
         if word is not None and (id(word) not in used or collective):
             used.add(id(word))
@@ -617,7 +637,11 @@ class SessionEstimator:
                                     hand.get("position_map") or {}) if p.get("amount_prior_weight") else {})
         for i, r in enumerate(betting):
             n_legal = 3 if facing.get(r.street, False) else 2
-            terms.append(("手の事前", -math.log(n_legal)))
+            if r.action == "fold" and not facing.get(r.street, False):
+                terms.append(("ベットの無いところのフォールド", _log(p["p_open_fold"])))
+                flags.append(f"ベットの無いところのフォールド（{r.street} 席{r.seat}）")
+            else:
+                terms.append(("手の事前", -math.log(n_legal)))
             size = p.get("amount_prior_weight", 0.0) * size_prior(ratios.get(i))
             if size < 0:
                 terms.append(("賭けの大きさ", size))      # ポットに対して大きすぎる額ほど低い（弱い事前）
@@ -691,7 +715,7 @@ class SessionEstimator:
         # または次のハンドの始まりまで）。すぐ戻った離脱（ちらつき・のぞき見 = engine が 3 秒でフォールドにしない
         # のと同じ）はどの仮説でも数えない（監査 2 回目: フォールドの証拠に流用されない）
         stop = min(w.end, (_epoch(w.base.get("ended_at")) or w.end) + p["departure_after_end_sec"])
-        deps = [d for d in self.presence.departures(w.start, stop)
+        deps = [d for d in self.presence.departures(w.start, stop, p["blip_sec"], p["flicker_sec"])
                 if d[0] in seats and not (d[2] is not None and d[2] - d[1] < p["flicker_sec"])]
         end = _epoch(hand.get("ended_at")) or stop
         terms: list[tuple[str, float]] = []
@@ -725,7 +749,10 @@ class SessionEstimator:
                         and lo <= d[1] <= hi and (d[2] is None or d[2] >= end)),
                        key=lambda k: abs(deps[k][1] - at), default=None)
             if best is None:
-                terms.append((f"席{r.seat} のフォールドに札の離脱が無い", _log(p["p_nodepart"])))
+                if self._present_at(r.seat, at + p["present_after_sec"], end):
+                    terms.append((f"席{r.seat} はフォールドのあとも札が席に載っていた", _log(p["p_present_after_fold"])))
+                else:
+                    terms.append((f"席{r.seat} のフォールドに札の離脱が無い", _log(p["p_nodepart"])))
                 flags.append(f"札が離れないフォールド（{r.street} 席{r.seat}）")
                 continue
             explained.add(best)
@@ -734,9 +761,11 @@ class SessionEstimator:
                 bet_end = max(bet_end, deps[best][1])   # 言われないフォールドの時刻 = 札が離れた時刻
             t_dep = deps[best][1]
             if spoken:
-                # 話し始めのほぼ同時（ラプラス）+ 裾（語が発話の後ろの方・早いマック: ±`fold_tail_sec` の一様）
+                # 話し始めのほぼ同時（左右で幅の違うラプラス）+ 裾（語が発話の後ろの方・早いマック: ±`fold_tail_sec` の一様）
                 lag = t_dep - at
-                core = math.exp(-abs(lag - p["fold_lag_mu"]) / p["fold_lag_b"]) / (2 * p["fold_lag_b"])
+                early, late = p["fold_lag_b"], p["fold_lag_b_late"]
+                core = math.exp(-(p["fold_lag_mu"] - lag) / early if lag < p["fold_lag_mu"]
+                                else -(lag - p["fold_lag_mu"]) / late) / (early + late)
                 density = (1 - eps) * core + eps / (2 * tail)
                 terms.append((f"席{r.seat} の離脱 = 声のフォールド（{lag:+.1f} 秒）", _log(density)))
             else:
@@ -759,6 +788,18 @@ class SessionEstimator:
                 if back is None or back >= end:
                     flags.append(f"残っている席{seat} の札が離れた")
         return terms
+
+    def _present_at(self, seat: int, t: float, end: float) -> bool:
+        """その席の札が時刻 `t`（ハンドの終わりより前）に席に載っていて、そのまま `flicker_sec` 以上（またはハンドの
+        終わりまで）載り続けたか（片付けの札がリーダーを一瞬かすめたのを「札が残っていた」にしない）。"""
+        if self.presence is None or t >= end:
+            return False
+        o = self.presence._at(seat, t)                 # noqa: SLF001
+        if o is None or not o.present:
+            return False
+        later = [x for x in self.presence._seats.get(seat, []) if x.t > t]   # noqa: SLF001
+        gone = next((x.t for x in later if not x.present), None)
+        return gone is None or gone >= min(end, t + self.params["flicker_sec"])
 
     def _seat_read(self, seat: int, t0: float, t1: float) -> bool:
         """その席の札がハンドの中で一度でも載っていたか（読めない席のフォールドを札の離脱で罰しない）。"""
@@ -862,7 +903,8 @@ class SessionEstimator:
         # 札の離脱を持ち上げとみる
         if self.presence is not None:
             end = _epoch(w.base.get("ended_at")) or w.end
-            for seat, t, back in self.presence.departures(w.start, end):
+            for seat, t, back in self.presence.departures(w.start, end, self.params["blip_sec"],
+                                                          self.params["flicker_sec"]):
                 edits.append(Edit("lift", t, (seat, back if back is not None else end + 60.0),
                                   label=f"席{seat} の離脱（{_iso(t)[11:19]}）は持ち上げ"))
         return edits

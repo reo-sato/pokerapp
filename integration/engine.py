@@ -156,6 +156,17 @@ FOLD_WORD_DEPARTURE_SEC = 3.0
 # 2 秒ほどあと）。店舗: フォールドの 2 回は離脱が語の -0.1 / +0.1 秒、コールの 3 回は +1.8 / +2.0 / +12 秒
 GARBLED_FOLD_BEFORE_SEC = 2.0
 GARBLED_FOLD_AFTER_SEC = 1.0
+# ベットに向き合っていない席の札が離れた（離れてもフォールドにならない）とき、その席の最後の声のコールが札の離れた
+# あと（語の話し始めが離脱の `DEPARTED_CALL_BEFORE_SEC` 前〜`DEPARTED_CALL_AFTER_SEC` 後）なら、そのコールは次の人の
+# もので、その席はコールの前のベットに降りていた（ベットの無いところで降りることは無い: 店舗の真のアクションの
+# フォールド 171 のうち 0）。コールが札の離れるより前なら付け直さない: そのコールはその席より前の人のもの（手番の
+# ずれはもっと前 = ボタン・持ち上げ・前のハンドの札。店舗 2026-10-06 の 5 回とも。付け直すとずれが隠れる）
+DEPARTED_CALL_BEFORE_SEC = 0.5
+DEPARTED_CALL_AFTER_SEC = 6.0
+# チェックで閉じたラウンドのあと、次のストリートの札よりこの秒数以上前に話した賭けは、次のストリートのものと言い切れない
+# （閉じたチェックが同じ語の聞き直し = 2 回目なら前のストリートの賭け。店舗 2026-10-06 05cccd6c ハンド 19: ターンの札の
+# 13.5 秒前の「千二百」がターンのベットになった）。記録は変えず要確認にする（推定器が札の時刻と合わせて読み直す）
+WAGER_BEFORE_CARD_SEC = 3.0
 # ディーラーがここまでのアクションを言い直す（「センテン、コール」= 1000 のレイズとそのコール, 店舗 2026-10-06 05cccd6c
 # ハンド 7 のオーナーのメモ）: いまのベットと同じ額だけを言ったあと、この秒数のうちに話し始めた「コール」は、その賭けの
 # あとに記録したコールの言い直し
@@ -598,6 +609,12 @@ class IntegrationThread(threading.Thread):
         self._unresolved_count = 0
         # 訂正の解釈を決めるまで、全員フォールドでのハンドの確定を待っている
         self._finish_wanted = False
+        # ベットに向き合っていない席の札の離脱と、その席に付けた直前のコール（離脱の入力, コールの入力, 席）。発話の
+        # 処理のあと・ハンドを終わらせる前に、離脱をコールの前に移して組み直す（`_retract_departed_calls`）
+        self._departed_calls: list[tuple[object, object, int]] = []
+        # 最初に処理したときに札の離脱と組にした聞き違いのコールの語（id → 語）。組み直しでは記録した離脱の入力が降ろす
+        # ので、語はもう何もしない（組み直しの入力の並び = live は語のあと、replay は語の前に離脱 = によらず同じにする）
+        self._garbled_absorbed: dict[int, AudioEvent] = {}
         # 合図のあとの最初の声のアクションに付ける印（いまの解釈）
         self._correction_tag: Optional[str] = None
         # 処理中のイベントの入れ子の深さ（訂正の解釈は、いちばん外の発話を反映し終えてから選び直す）
@@ -1275,6 +1292,8 @@ class IntegrationThread(threading.Thread):
         ベットに向き合っていればコール（要確認）。どちらでもなければアクションにしない。
         """
         spoken = _spoken_at(event)
+        if self._rebuilding and self._garbled_absorbed.get(id(event)) is event:
+            return None
 
         def near(t: float) -> bool:
             return -GARBLED_FOLD_BEFORE_SEC <= t - spoken <= GARBLED_FOLD_AFTER_SEC
@@ -1282,6 +1301,8 @@ class IntegrationThread(threading.Thread):
         for seat, dep in self._departures.items():
             if dep.get("applied") and dep.get("action") == "fold" and not dep.get("word") and near(dep["t"]):
                 dep["word"] = True               # この語と組になった離脱（次の「フォールド」は吸わない）
+                if not self._rebuilding:
+                    self._garbled_absorbed[id(event)] = event
                 self._notice(f"「{event.raw_text}」は席{seat} のフォールド（札が同じころ離れた）の聞き違いとみました")
                 return None
         if not self._rebuilding and self._seat_presence is not None and not self._betting_over():
@@ -1295,6 +1316,7 @@ class IntegrationThread(threading.Thread):
                 since = dep["t"] if dep is not None else info.get("absent_since")
                 if (not info.get("present") and since is not None and near(since)
                         and self._hole_cards.get(seat) and not (dep or {}).get("applied")):
+                    self._garbled_absorbed[id(event)] = event
                     self._notice(f"「{event.raw_text}」は席{seat} のフォールド（札が同じころ離れた）の聞き違いとみました")
                     return replace(event, action="fold", parse_flags=())
         ctx = self._game_state.legal_context()
@@ -1693,6 +1715,8 @@ class IntegrationThread(threading.Thread):
                 continue
             if seat not in active or seat in self._showdown_mucks:
                 continue
+            if self._before_deal(since if since is not None else mucked):
+                continue                     # 配る前からの不在（前のハンドの札。このハンドの札はまだ見えていない）
             if mucked is not None and (since is None or mucked >= since - 1.0):
                 t = since if since is not None else mucked
                 t, word = self._fold_time(seat, t)
@@ -1724,6 +1748,12 @@ class IntegrationThread(threading.Thread):
                     else:
                         self._hand_needs_review = True
                         self._notice(f"席{seat} の札も離れました — フォールドかショーダウンか確認してください（要確認）")
+
+    def _before_deal(self, t: Optional[float]) -> bool:
+        """このハンドの札を配る前の時刻か（前のハンドの札の離脱・マックは、このハンドのフォールドではない。店舗
+        2026-10-06 e82f5005 ハンド 13: 前のハンドのマックが、在否の読み直しの間にこのハンドの席5 のフォールドになった）。"""
+        start = self._hand_started_epoch
+        return t is not None and start is not None and t < start
 
     def _observe_return(self, seat: int, now: float) -> None:
         dep = self._departures.get(seat)
@@ -1956,6 +1986,29 @@ class IntegrationThread(threading.Thread):
             else:
                 self._imply_action(actor, ctx, t, f"implied_before_{target}")
         self._resolve_departures()
+        self._flag_wager_before_card(target, t)
+
+    def _flag_wager_before_card(self, street: str, t: float) -> None:
+        """チェックで閉じたラウンドのあと、このストリートの札より `WAGER_BEFORE_CARD_SEC` 以上前に話した賭けをこの
+        ストリートの最初のアクションにしていたら要確認にする（記録は変えない）。"""
+        index = next((i for i, r in enumerate(self._current_actions) if r.street == street), None)
+        if index is None or index == 0:
+            return
+        first, before = self._current_actions[index], self._current_actions[index - 1]
+        if (first.action not in ("bet", "raise", "allin") or first.actor_source not in _VOICE_SOURCES
+                or before.action != "check" or before.actor_source not in _VOICE_SOURCES):
+            return
+        word = next((item for kind, item in self._hand_inputs if kind == "audio"
+                     and (entry := self._input_voice.get(id(item))) is not None and entry[0] is item
+                     and any(r is first for r in entry[1])), None)
+        if word is None or t - _spoken_at(word) < WAGER_BEFORE_CARD_SEC:
+            return
+        if "wager_before_street_card" not in (first.reason or "").split("+"):
+            first.reason = "+".join(r for r in (first.reason, "wager_before_street_card") if r)
+        first.needs_review = True
+        self._hand_needs_review = True
+        self._notice(f"「{first.raw_text}」は{_STREET_JA.get(street, street)}の札が置かれる {t - _spoken_at(word):.0f} 秒前に"
+                     f"聞こえました — 前のストリートの賭けかもしれません（要確認）")
 
     def _apply_leave(self, ev: RFIDEvent, index: int) -> None:
         seat = ev.seat
@@ -2114,6 +2167,8 @@ class IntegrationThread(threading.Thread):
         # ベットが無いときに札が離れた: リバーならショーダウンに向けて札を前に出した（チェック）。それより前は
         # 降りた（フォールド。pokerkit はチェックできるときのフォールドを受け付けないので force_fold）。
         action = "fold" if can_fold or street != "river" else "check"
+        if not can_fold and street != "river" and not self._rebuilding:
+            self._note_departed_call(seat, dep)
         try:
             if can_fold or action == "check":
                 gs.apply_action(seat, action, 0)
@@ -2130,6 +2185,8 @@ class IntegrationThread(threading.Thread):
         reasons = ["rfid_muck" if muck else "rfid_departure"]
         if not can_fold:
             reasons.append("river_check" if action == "check" else "no_bet")
+        if dep.get("moved"):
+            reasons.append("late_departure_retracted_call")    # 札が離れたあとのコールを次の人に付け直した
         self._append_rfid_record(ActionRecord(
             hand_id=gs.hand_id,
             timestamp=self._iso(dep["t"]),
@@ -2141,7 +2198,7 @@ class IntegrationThread(threading.Thread):
             pot_after=gs.pot,
             stack_after=gs.get_stack(seat),
             source={"camera": False, "audio": False, "rfid": True},
-            needs_review=not can_fold,
+            needs_review=not can_fold or bool(dep.get("moved")),
             confidence=RFID_MUCK_CONFIDENCE if muck else RFID_FOLD_CONFIDENCE,
             position=self._position_of(seat),
             actor_source="rfid_muck" if muck else "rfid_departure",
@@ -2149,6 +2206,60 @@ class IntegrationThread(threading.Thread):
             apply_ok=True,
         ))
         self._last_action_at = dep["t"]
+
+    def _note_departed_call(self, seat: int, dep: dict) -> None:
+        """ベットに向き合っていない席の札が離れた: その席の最後の記録が、離脱の少し前〜あとに聞いた手番の推定の
+        コールなら、そのコールは次の人のもの（この席は札の離れたときに、コールの前のベットに降りていた）。組み直しは
+        発話の処理のあと（`_retract_departed_calls`）。"""
+        mine = [r for r in self._current_actions if r.seat == seat]
+        last = mine[-1] if mine else None
+        if last is None or last.action != "call" or last.actor_source != "engine_prior":
+            return
+        word = next((item for kind, item in self._hand_inputs if kind == "audio"
+                     and (entry := self._input_voice.get(id(item))) is not None and entry[0] is item
+                     and any(r is last for r in entry[1])), None)
+        if word is None or not -DEPARTED_CALL_BEFORE_SEC <= _spoken_at(word) - dep["t"] <= DEPARTED_CALL_AFTER_SEC:
+            return
+        leave = next((item for kind, item in reversed(self._hand_inputs)
+                      if kind == "leave" and item.seat == seat), None)
+        if leave is not None:
+            self._departed_calls.append((leave, word, seat))
+
+    def _retract_departed_calls(self, before_end: bool = False) -> None:
+        """`_note_departed_call` で見つけた離脱を、その席に付けたコールの入力の前に移して、ハンドを組み直す（コールは
+        次の人のものになる。要確認）。発話の処理のあと（live と replay で同じ時点）とハンドを終わらせる前に呼ぶ。
+
+        `before_end`: ハンドを終わらせる前（勝者・配布・確定の信号。どれもハンドの入力ではないので、処理の途中でも
+        組み直してよい = 訂正の解釈を決めるのと同じ）。"""
+        if self._rebuilding or (self._event_depth and not before_end) or not self._departed_calls:
+            return
+        pending, self._departed_calls = self._departed_calls, []
+        if not (self._hand_open and self._hand_origin is not None and self._game_state.is_hand_active()):
+            return
+        moved: list[int] = []
+        for leave, word, seat in pending:
+            at = {id(item): i for i, (_, item) in enumerate(self._hand_inputs)}
+            li, wi = at.get(id(leave)), at.get(id(word))
+            if li is None or wi is None or wi >= li or self._hand_inputs[li][1] is not leave:
+                continue
+            self._hand_inputs.insert(wi, self._hand_inputs.pop(li))
+            dep = self._departures.get(seat)
+            if dep is not None:
+                dep["moved"] = True
+            moved.append(seat)
+        if not moved:
+            return
+        before = list(self._current_actions)
+        self._rebuild_hand()
+        self._hand_needs_review = True
+        for seat in moved:
+            logger.info("席%d の札は直前のコールのころに離れていたので、そのコールを次の人に付け直しました", seat)
+            self._notice(f"席{seat} の札は「コール」のころに離れていたので、席{seat} はその前のベットに降りたとみて、"
+                         "「コール」を次の人に付け直しました（要確認）")
+        self._emit_rebuilt(before)
+        self._publish_table_state()
+        if self._foldout_pending is None and not before_end:
+            self._maybe_finish_hand()            # ハンドを終わらせる前に呼ばれたときは、呼んだ側が終わらせる
 
     def _handle_players_left(self, event: AudioEvent, count: int) -> None:
         """「ヘッズアップ」/「スリープレイヤーズ」= 残りが `count` 人（ディーラーが次のストリートへ進むときに言う。
@@ -2300,6 +2411,13 @@ class IntegrationThread(threading.Thread):
             # 2 つ目が席8 の離脱に吸われ、コールが降りた人に付いた）
             return
         seat, since = self._absent_seat_for_fold_word(spoken_at)
+        if seat is not None and self._has_fold_word(seat, spoken_at):
+            # その席はもう「フォールド」と言われていて（札が残っていたので覚えておいた / 札の離脱と組にした）、札は
+            # そのあと離れた = その語の札。この語は次の人のこと（1 つの席に「フォールド」は 1 つ。店舗の全データで
+            # この形の 3 回はどれも次の人のフォールドだった: 2026-10-06 5b1ca234 ハンド 1・9db1e032 ハンド 5・
+            # 80078377 ハンド 1）
+            self._apply_worded_departure(seat, since, event)
+            seat, since = self._absent_seat_for_fold_word(spoken_at)
         if seat is None:
             actor = self._game_state.legal_context().actor_seat
             if actor is not None and self._seat_presence is not None:
@@ -2316,6 +2434,28 @@ class IntegrationThread(threading.Thread):
         if dep.get("applied"):
             return
         dep["word"] = True                       # この語と組になった離脱（次の「フォールド」は吸わない）
+        self._emit_seat_signal(self._seat_signal(
+            "muck" if dep.get("muck") else "leave", seat, event.timestamp, observed_at=dep["t"],
+        ))
+
+    def _has_fold_word(self, seat: int, spoken_at: float) -> bool:
+        """その席に、この語より前の「フォールド」の語がもうある（覚えている語・離脱と組にした語）。"""
+        held = self._spoken_folds.get(seat)
+        if held is not None and held < spoken_at:
+            return True
+        dep = self._departures.get(seat)
+        return bool(dep and dep.get("word") and not dep.get("applied") and dep["t"] < spoken_at)
+
+    def _apply_worded_departure(self, seat: int, since: float, event: AudioEvent) -> None:
+        """前の「フォールド」の語と組にして、その席の札の離脱をいま入れる（時刻はその語の時刻）。"""
+        t, _ = self._fold_time(seat, since)
+        dep = self._departures.setdefault(seat, {"t": t, "muck": False, "applied": False})
+        if dep.get("applied"):
+            return
+        if not dep.get("word"):
+            dep["t"] = t
+        dep["word"] = True
+        self._notice(f"「{event.raw_text}」— 席{seat} はもう「フォールド」と言われて札が離れたので、次の人のこととみます")
         self._emit_seat_signal(self._seat_signal(
             "muck" if dep.get("muck") else "leave", seat, event.timestamp, observed_at=dep["t"],
         ))
@@ -2423,7 +2563,7 @@ class IntegrationThread(threading.Thread):
             if info.get("present") or seat in self._showdown_mucks:
                 continue
             since = info.get("absent_since")
-            if since is not None and self._hole_cards.get(seat):
+            if since is not None and self._hole_cards.get(seat) and not self._before_deal(since):
                 return seat, since
         if spoken_at is None:
             return None, 0.0
@@ -4260,6 +4400,7 @@ class IntegrationThread(threading.Thread):
         """訂正の解釈をいま決める（ハンドを終わらせる前・次の合図の前）。"""
         if self._rebuilding:
             return
+        self._retract_departed_calls(before_end=True)
         for corr in self._corrections:
             if corr["frozen"]:
                 continue
@@ -4268,9 +4409,11 @@ class IntegrationThread(threading.Thread):
             corr["frozen"] = True
 
     def _after_hand_change(self) -> None:
-        """発話を反映したあと: 訂正の解釈を選び直す（決める条件なら決める）。決めるのを待っていた確定をする。"""
+        """発話を反映したあと: 札の離脱のあとのコールを付け直す。訂正の解釈を選び直す（決める条件なら決める）。決めるのを
+        待っていた確定をする。"""
         if self._rebuilding or self._event_depth:
             return
+        self._retract_departed_calls()
         corr = self._open_correction()
         if corr is not None and self._hand_open and self._hand_origin is not None and (
                 corr["dirty"] or self._finish_wanted):
@@ -4301,6 +4444,8 @@ class IntegrationThread(threading.Thread):
             self._on_action(record)
 
     def _reset_corrections(self) -> None:
+        self._departed_calls = []
+        self._garbled_absorbed = {}
         self._corrections = []
         self._retracted = {}
         self._input_voice = {}

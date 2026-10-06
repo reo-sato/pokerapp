@@ -668,10 +668,10 @@
     "board_match": false
    },
    "reparse_baseline": {
-    "action_correct": 4,
-    "action_total": 13,
+    "action_correct": 10,
+    "action_total": 10,
     "winner_match": true,
-    "board_match": false
+    "board_match": true
    }
   },
   {

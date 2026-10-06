@@ -716,14 +716,14 @@
     "hand_id": 3
    },
    "baseline": {
-    "action_correct": 9,
-    "action_total": 15,
+    "action_correct": 12,
+    "action_total": 16,
     "winner_match": null,
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 9,
-    "action_total": 15,
+    "action_correct": 12,
+    "action_total": 16,
     "winner_match": null,
     "board_match": true
    }
