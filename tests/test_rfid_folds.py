@@ -22,7 +22,7 @@ from audio.recognizer import parse_actions
 from core.event_queue import make_audio_queue
 from core.events import RFIDEvent
 from core.game_state import PlayerState
-from integration.engine import FOLDOUT_CONFIRM_SEC, IntegrationThread
+from integration.engine import FOLDOUT_CONFIRM_SEC, POST_FOLDOUT_LISTEN_SEC, IntegrationThread
 from output.json_writer import JsonWriter
 
 pytest.importorskip("pokerkit")
@@ -106,6 +106,7 @@ class _Table:
             self.t._apply_idle_observations()    # noqa: SLF001
             self.t._check_foldout_timeout()      # noqa: SLF001
             self.t._check_showdown_timeout()     # noqa: SLF001
+            self.t._check_post_hand_listening()  # noqa: SLF001
 
     def say(self, text: str, spoken_at: float | None = None) -> None:
         start = self.now if spoken_at is None else spoken_at
@@ -351,6 +352,49 @@ class TestLastFold:
         tb.say("ショーダウン")
         assert tb.played()[-1][1:] == (5, "call", 1000)
         assert tb.t._betting_over() and tb.hands == []   # noqa: SLF001
+
+
+class TestListeningAfterAFoldOut:
+    """全員フォールドで確定したのに 2 席以上に札が載っていれば（降りた判断が早すぎた疑い）、`POST_FOLDOUT_LISTEN_SEC`
+    まで聞き取りを続けて書き起こしに残す（記録には入れない）。札が片付く・次の配布で止める。"""
+
+    def _fold_out(self, tb: _Table, *, cards_back: bool) -> None:
+        tb.t._listen_gate = threading.Event()       # noqa: SLF001
+        tb.deal()
+        assert tb.t._listen_gate.is_set()           # noqa: SLF001
+        tb.lift(6)
+        tb.tick(tb.now + 3.5)                       # 席6 フォールド
+        tb.lift(4)
+        tb.tick(tb.now + 3.5)                       # 席4 フォールド → 席5 だけ（確定待ち）
+        if cards_back:
+            tb.put(4, HOLES[4])                     # 席4 の札が載ったまま確定する
+        tb.say("フォールド")                        # ディーラーの宣言で確定
+        assert len(tb.hands) == 1 and tb.hands[0].winner_source == "fold"
+
+    def test_it_keeps_listening_while_two_seats_hold_cards(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._fold_out(tb, cards_back=True)
+        gate = tb.t._listen_gate                    # noqa: SLF001
+        assert gate.is_set()
+        tb.say("ベット 2000")                       # ハンドの外 = 記録には入らない
+        assert tb.actions[-1].actor_source == "unresolved" and len(tb.hands) == 1
+        tb.tick(tb.now + POST_FOLDOUT_LISTEN_SEC - 1.0)
+        assert gate.is_set()
+        tb.tick(tb.now + 2.0)
+        assert not gate.is_set()                   # 時間切れ
+
+    def test_it_stops_when_the_cards_are_collected(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._fold_out(tb, cards_back=True)
+        tb.lift(4)
+        tb.lift(5)
+        tb.tick(tb.now + 0.2)
+        assert not tb.t._listen_gate.is_set()      # noqa: SLF001
+
+    def test_a_clean_fold_out_stops_listening_at_once(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._fold_out(tb, cards_back=False)        # 札が残っているのは勝った 席5 だけ
+        assert not tb.t._listen_gate.is_set()      # noqa: SLF001
 
 
 class TestOrderingAndReplay:

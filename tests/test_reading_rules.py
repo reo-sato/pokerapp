@@ -63,18 +63,22 @@ class TestCheckAroundBySound:
         "チェックラウンド",                                          # 台本 2026-09-30
         "チェック、アワンド", "チェックアラン", "チェック、ラウンズ",       # まだ出ていない言い方
         "check around",
+        # 終わりの「ンド」が残った語は、卓の用語（ハンド）のほうが音が近くてもアラウンド（店舗の「チェック、アンド」7 回・
+        # 台本 2026-10-01 で読んだ「チェックアラウンド」の書き起こし「チェック、ハンド」。オーナー 2026-10-06）
+        "チェック、アンド", "チェック アンド", "チェック、ハンド",
     ])
     def test_check_around(self, text):
         assert _read(text) == [("check", 0, "around")]
 
     @pytest.mark.parametrize("text", [
-        "チェック", "チェック、ターンカード", "チェック、ターン", "チェック、ラストカード", "チェック、ハンド",
+        "チェック", "チェック、ターンカード", "チェック、ターン", "チェック、ラストカード", "チェック、ラスト",
     ])
     def test_a_street_word_after_check_is_not_around(self, text):
         assert _read(text) == [("check", 0)]
 
     def test_the_word_after_check_is_compared_as_said_after_check(self):
-        """「チェック」の「ク」に続く「アラウンド」の「ア」は消えやすい（「ランド」= アラウンド、「ハンド」ではない）。"""
+        """「チェック」の「ク」に続く「アラウンド」の「ア」は消えやすい（「ランド」= アラウンド。音だけなら「ハンド」は
+        卓の用語のほう。チェックのすぐあとの「ハンド」は終わりの「ンド」で読む = `_is_check_around`）。"""
         assert sounds_like("ランド", "アラウンド", after="チェック")
         assert not sounds_like("ランド", "アラウンド")
         assert not sounds_like("ハンド", "アラウンド", after="チェック")
@@ -96,6 +100,36 @@ class TestCheckRaiseBySound:
     @pytest.mark.parametrize("tail", ["リスト", "レート", "ライズ", "リレイズ"])
     def test_other_words_after_check_are_not_raise(self, tail):
         assert not sounds_like(tail, "レイズ", after="チェック")
+
+
+class TestGarbledWayAfterACount:
+    """コールでラウンドが閉じた直後の「N ウェイ」が崩れて聞こえる（店舗 2026-09-29・10-06 の 5 回。オーナー 2026-10-06
+    「コールでストリート遷移が確定した直後に N ウェイを宣言することで、コール 3 レイなどの聞き間違いが生まれている」）。
+    数のすぐあとの、エ段の音に「イ」（伸ばす音）か「ン」が続く語は残りの人数。"""
+
+    @pytest.mark.parametrize("text, expected", [
+        ("コール 3 レイ", [("call", 0), ("players_left", 3)]),
+        ("コール3レイズ", [("call", 0), ("players_left", 3)]),      # 第 2 の耳は「コールスリーウェイ」
+        ("ポールスリーベイク", [("players_left", 3)]),              # 第 2 の耳は「ホールスリーウェイ」
+        ("コール、コール、スリーベン", [("call", 0), ("call", 0), ("players_left", 3)]),
+        ("フォーレイ", [("players_left", 4)]),
+        ("ツーベイ", [("heads_up", 0)]),
+    ])
+    def test_it_is_players_left(self, text, expected):
+        assert _read(text) == expected
+
+    @pytest.mark.parametrize("text, expected", [
+        ("3ベット", [("bet", 3)]),                                # 「ベット」はこの形ではない
+        ("レイズ3", [("raise", 3)]),                              # 数が前に無い
+        ("3千レイズ", [("raise", 3000)]),
+        ("コール3レイズ 2千", [("call", 3), ("raise", 2000)]),     # あとに額が続く
+        ("フォールド", [("fold", 0)]),                            # 「フォー」の語ではない
+    ])
+    def test_other_words_after_a_number_are_unchanged(self, text, expected):
+        assert _read(text) == expected
+
+    def test_a_seat_number_is_not_a_count(self):
+        assert ("players_left", 3) not in _read("シート3 レイズ")
 
 
 class TestAmountOwnership:

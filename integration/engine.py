@@ -106,9 +106,18 @@ DEAL_GAP_SEC = 0.6
 # ハンドの途中でも、卓（席とボードのリーダー）に札が 1 枚も無い状態がこの秒数続いたらプレーは
 # 終わったとみなし、音声を聞き流す（片付け・シャッフル中の会話を認識に回さない, ADR-0063）。
 TABLE_CLEAR_SEC = 15.0
+# 全員フォールドでハンドを確定したのに 2 席以上に札が載っている（降りた判断が早すぎた疑い）あいだは、この秒数まで
+# 聞き取りを続けて書き起こしに残す（記録には入れない = ハンドの外。店舗 2026-10-06: 早く終わったあとのリバーの
+# ベット・レイズ・コールが聞き流されて失われ、あとから推定にも使えなかった）。次の配布・札が片付いたら止める。
+POST_FOLDOUT_LISTEN_SEC = 30.0
 # いまのストリートの最初の札が見える前にこの秒数以上早く話し始めた「コール」は、前のストリートで
 # 言われたもの（言い直し）とみなす（店舗の実測: 「コール」のあとの「600点コールです」がターンの札の 3 秒前）。
 STALE_CALL_MARGIN_SEC = 1.0
+# 「チェックアラウンド」はストリートが変わるときに言う（オーナー 2026-10-06）。いまのストリートでまだ誰も動いていず、
+# その札が見えてからこの秒数より前に話し始めたチェックアラウンドは、閉じた前のストリートのこと（札の直後に全員が
+# チェックし終えることはない。店舗のログ: 前のストリートのこと = 札の 1.2〜1.8 秒前に話し始め、いまのストリートの
+# こと = 札の 4.4 秒以上あと）。
+CHECK_AROUND_STREET_CHANGE_SEC = 3.0
 
 # ――― フォールドは札の離脱から（オーナー決定 2026-09-25）―――
 # 席の札が離れたまま戻らなければフォールド（札を持ち上げて見るのと区別する秒数）。卓の中央を通過したら待たない。
@@ -136,6 +145,11 @@ SEAT_SETUP_CHECK_SEC = 5.0
 # 「フォールド」と聞こえたが手番の人の札がまだ席にあるとき、この秒数以内に札が離れたら、その発話の時刻の
 # フォールドにする（勝った人が先に札を投げても、降りた人の方が先になる）。
 SPOKEN_FOLD_WINDOW_SEC = 15.0
+# 「フォールド」と言われてから、この秒数たっても手番の人の札が席から離れなければ、その人は降りていない（札が離れる
+# のを `FOLD_ABSENT_SEC` 待つ + 在否を見る間隔のぶん）。次のストリートの札のときだけ使う（店舗 2026-10-06）
+HELD_FOLD_STAYED_SEC = 5.0
+# 「フォールド」と、もう行動を済ませた席の札の離脱を結びつける時間の幅（語の話し始めの前後）
+FOLD_WORD_DEPARTURE_SEC = 3.0
 # 札の離脱で組み直す（取り消す）ときに入力として残す音声のアクション
 _REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin", "heads_up", "players_left"})
 # 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
@@ -465,6 +479,7 @@ class IntegrationThread(threading.Thread):
         if listen_gate is not None:
             listen_gate.clear()
         self._table_empty_since: Optional[float] = None
+        self._listen_after_hand_until: Optional[float] = None   # `POST_FOLDOUT_LISTEN_SEC`
         self._voice_heard_at = voice_heard_at
         self._silent_mic_warned = False
         # いまのハンドを配布の検出で始めたか（直後の「ハンド開始」/ `n` を二重に数えない）。
@@ -560,6 +575,7 @@ class IntegrationThread(threading.Thread):
             self._check_deal_presence()     # 手札の配布（ADR-0063）
             self._check_deal_order()        # 配った順（ボタンの置き忘れ）
             self._check_table_cleared()     # 片付け（プレーの終わり）
+            self._check_post_hand_listening()   # 全員フォールドのあとも札が残っているあいだの聞き取り
             self._check_silent_mic()        # マイクに声が入っているか
             self._check_seat_setup()        # 起動時の席と札を置いた席の食い違い
             self._poll_departures()         # 席の札の離脱・戻り（フォールド）
@@ -1035,8 +1051,12 @@ class IntegrationThread(threading.Thread):
             return
 
         if action == "winner":
-            self._handle_winner(event)
-            return
+            check = self._chop_heard_as_check(event)
+            if check is not None:
+                event, action = check, "check"     # ベットの途中の「チョップ」= チェックの聞き違い（下の経路へ）
+            else:
+                self._handle_winner(event)
+                return
 
         if action == "rebuy":
             self._handle_rebuy(event)
@@ -1115,13 +1135,19 @@ class IntegrationThread(threading.Thread):
                 return
             event = replace(event, action="raise" if "raise" in legal_ctx.legal_actions else "bet")
         if legal_ctx.legal_actions:
-            if event.action == "call" and legal_ctx.amount_to_call == 0 and self._said_before_street(event):
-                # チェックとして次の人の手番を食わない（言い直しの「600点コールです」, 店舗の実測）
+            if event.action == "call" and legal_ctx.amount_to_call == 0 and (
+                    self._said_before_street(event) or self._said_with_round_closer(event)):
+                # チェックとして次の人の手番を食わない（言い直しの「600点コールです」、前のラウンドを閉じた発話の中の
+                # 「コールします、コール」, 店舗の実測）
                 self._notice(f"「{event.raw_text}」は前のストリートのコール（言い直し）とみなして記録しませんでした")
                 return
             if "check_around" in event.parse_flags:
-                if self._said_before_street(event):
-                    self._notice(f"「{event.raw_text}」は前のストリートのチェックアラウンドとみなして記録しませんでした")
+                if self._check_around_of_closed_street(event):
+                    confirmed = self._confirm_implied_checks(event)
+                    self._notice(
+                        f"「{event.raw_text}」は前のストリートのチェックアラウンドとみなして記録しませんでした"
+                        + (f"（札で補ったチェック {confirmed} つの裏付けにしました）" if confirmed else "")
+                    )
                     return
                 self._handle_check_around(event, legal_ctx)
                 return
@@ -1355,6 +1381,42 @@ class IntegrationThread(threading.Thread):
             return street != "flop" and self._board_source == "rfid"
         return _spoken_at(event) < started - STALE_CALL_MARGIN_SEC
 
+    def _check_around_of_closed_street(self, event: AudioEvent) -> bool:
+        """チェックアラウンドが、もう閉じた前のストリートのことか（`CHECK_AROUND_STREET_CHANGE_SEC`）。
+
+        チェックアラウンドはストリートが変わるときに言い、前のストリートの一人ひとりのチェックは言わないこともある
+        （オーナー 2026-10-06）。前のストリートがまだ閉じていなければ、いまのストリートのこととして残りの全員のチェックに
+        する（`_handle_check_around`）。閉じていれば（一人ひとりのチェックが聞こえた・次の札で補った）言い直し。
+        """
+        if self._said_before_street(event):
+            return True
+        street = self._game_state.street
+        if street not in ("flop", "turn", "river") or any(r.street == street for r in self._current_actions):
+            return False
+        started = self._street_started_at()
+        return started is not None and _spoken_at(event) < started + CHECK_AROUND_STREET_CHANGE_SEC
+
+    def _confirm_implied_checks(self, event: AudioEvent) -> int:
+        """前のストリートを次の札で閉じたときに補ったチェック（要確認）を、ディーラーのチェックアラウンドで裏付ける。
+
+        いまのストリートにまだアクションが無く、前のストリートの最後に続く補ったチェックだけ。裏付けた数を返す。
+        """
+        street = self._game_state.street
+        records = self._current_actions
+        if not records or records[-1].street == street:
+            return 0
+        closed = records[-1].street
+        confirmed = 0
+        for record in reversed(records):
+            if record.street != closed or record.actor_source != "implied" or record.action != "check":
+                break
+            if record.needs_review:
+                record.needs_review = False
+                record.reason = "+".join(r for r in (record.reason, "check_around") if r)
+                record.raw_text = record.raw_text or event.raw_text
+                confirmed += 1
+        return confirmed
+
     def _handle_check_around(self, event: AudioEvent, legal_ctx: LegalContext) -> None:
         """「チェックアラウンド」= このラウンドでまだ動いていない全員がチェックした（オーナーの説明）。
 
@@ -1439,9 +1501,11 @@ class IntegrationThread(threading.Thread):
                 continue
             if mucked is not None and (since is None or mucked >= since - 1.0):
                 t = since if since is not None else mucked
-                self._departures[seat] = {"t": self._fold_time(seat, t), "muck": True, "applied": False}
+                t, word = self._fold_time(seat, t)
+                self._departures[seat] = {"t": t, "muck": True, "applied": False, "word": word}
             elif since is not None and now - since >= self._fold_absent_sec:
-                self._departures[seat] = {"t": self._fold_time(seat, since), "muck": False, "applied": False}
+                t, word = self._fold_time(seat, since)
+                self._departures[seat] = {"t": t, "muck": False, "applied": False, "word": word}
         pending = self._foldout_pending
         if pending is not None and not self._foldout_winner_left:
             for seat in self._remaining_seats():
@@ -1553,9 +1617,14 @@ class IntegrationThread(threading.Thread):
             if any(kind == 0 for _, kind, _ in items):
                 item = items[0]                       # ストリートの札まで、時刻順に
             else:
-                if self._apply_pending_spoken_fold(bound, "spoken_fold_before_departure"):
-                    continue          # 「フォールド」と言われた手番の人が降り、別の席の離脱が待っている
                 actor = self._game_state.legal_context().actor_seat
+                held = self._spoken_folds.get(actor) if actor is not None else None
+                if held is not None and held <= bound and any(i[2] != actor for i in items):
+                    # 「フォールド」と言われたのに手番の人の札は席に残り、別の席の札が離れた = その語は離れた席の
+                    # こと（手番の見立てがずれている）。手番の人は降ろさない（店舗 2026-10-06: この形で手番の人を
+                    # 降ろした 3 回はすべて誤り）。判断は信号として記録し、再生も同じにする
+                    self._emit_seat_signal(self._seat_signal("spoken_fold_drop", actor, self._clock()))
+                    continue
                 item = next((i for i in items if i[2] == actor), None)
                 if item is None:
                     return
@@ -1605,6 +1674,8 @@ class IntegrationThread(threading.Thread):
             self._run_input("leave", ev)
         elif ev.kind == "spoken_fold":
             self._run_input("spoken_fold", ev)
+        elif ev.kind == "spoken_fold_drop":
+            self._run_input("spoken_fold_drop", ev)
         elif ev.kind == "return":
             self._retract_departure(ev.seat, f"席{ev.seat} の札が戻ったので")
         elif ev.kind == "confirm":
@@ -1625,6 +1696,8 @@ class IntegrationThread(threading.Thread):
                 self._sync_to_street(item)
             elif kind == "spoken_fold":
                 self._register_spoken_fold(item)
+            elif kind == "spoken_fold_drop":
+                self._drop_spoken_fold(item.seat, "別の席の札が離れた")
             else:
                 self._apply_leave(item, index)
         finally:
@@ -1648,6 +1721,15 @@ class IntegrationThread(threading.Thread):
             actor = ctx.actor_seat
             if actor is None:
                 break
+            spoken = self._spoken_folds.get(actor)
+            if (spoken is not None and spoken <= t and self._hole_cards.get(actor)
+                    and ev.timestamp - spoken >= HELD_FOLD_STAYED_SEC):
+                # 「フォールド」と言われてから札が離れないまま次のストリートの札が置かれた = その人は降りていない
+                # （降りた人の札はほぼ必ず離れる。店舗 2026-10-06: 次の札でこう入れた 2 回はどちらも「フォール」=
+                # コールの聞き違いで、ヘッズアップではハンドがそこで終わり、リバーのアクションが失われた）
+                raw = self._drop_spoken_fold(actor, "次のストリートの札が置かれた")
+                self._imply_action(actor, ctx, t, f"fold_word_but_cards_stayed_before_{target}", raw_text=raw)
+                continue
             if self._apply_pending_spoken_fold(t, f"spoken_fold+implied_before_{target}"):
                 continue                         # 「フォールド」と言われたまま札が残っていた手番の席
             dep = self._departed().get(actor)
@@ -1877,7 +1959,7 @@ class IntegrationThread(threading.Thread):
             last.reason = "+".join(r for r in (last.reason, "heads_up" if count == 2 else "players_left") if r)
 
     def _imply_action(self, seat: int, ctx: LegalContext, t: float, reason: str,
-                      confirmed: bool = False) -> None:
+                      confirmed: bool = False, raw_text: Optional[str] = None) -> None:
         """言われなかったアクション（チェック / コール）を入れる。
 
         コール・チェックは毎回言う運用なので（オーナー, 2026-09-29。それまでの「同じアクションの 2 回目以降は
@@ -1906,6 +1988,7 @@ class IntegrationThread(threading.Thread):
             actor_source="implied",
             reason=reason,
             apply_ok=True,
+            raw_text=raw_text,
         ))
         self._last_action_at = t
 
@@ -1974,11 +2057,14 @@ class IntegrationThread(threading.Thread):
         if self._rebuilding:
             return                               # 記録した信号（leave / spoken_fold）の流し直しで再現する
         spoken_at = _spoken_at(event)
-        if any(d.get("applied") and d.get("action") == "fold" and not d.get("spoken")
+        if any(d.get("applied") and d.get("action") == "fold" and not d.get("spoken") and not d.get("word")
                and 0 <= spoken_at - d["t"] <= SPOKEN_FOLD_WINDOW_SEC
                for d in self._departures.values()):
-            return                               # 札の離脱で降ろしたばかりの人のこと（言うのが遅れた）
-        seat, since = self._absent_seat_for_fold_word()
+            # 札の離脱で降ろしたばかりの人のこと（言うのが遅れた）。その離脱がもう「フォールド」の語と組になって
+            # いれば、この語は別の人のこと（店舗 2026-10-06 9db1e032 ハンド 5:「フォールド」「フォールド、コール」の
+            # 2 つ目が席8 の離脱に吸われ、コールが降りた人に付いた）
+            return
+        seat, since = self._absent_seat_for_fold_word(spoken_at)
         if seat is None:
             actor = self._game_state.legal_context().actor_seat
             if actor is not None and self._seat_presence is not None:
@@ -1994,22 +2080,35 @@ class IntegrationThread(threading.Thread):
         dep = self._departures.setdefault(seat, {"t": since, "muck": False, "applied": False})
         if dep.get("applied"):
             return
+        dep["word"] = True                       # この語と組になった離脱（次の「フォールド」は吸わない）
         self._emit_seat_signal(self._seat_signal(
             "muck" if dep.get("muck") else "leave", seat, event.timestamp, observed_at=dep["t"],
         ))
 
-    def _fold_time(self, seat: int, t: float) -> float:
-        """離脱の時刻。「フォールド」がその少し前に聞こえていれば、発話の時刻にする。"""
+    def _fold_time(self, seat: int, t: float) -> tuple[float, bool]:
+        """離脱の時刻と、「フォールド」の語と組になったか。語がその少し前に聞こえていれば、発話の時刻にする。"""
         spoken = self._spoken_folds.pop(seat, None)
         self._spoken_fold_raw.pop(seat, None)
         if spoken is not None and 0 <= t - spoken <= SPOKEN_FOLD_WINDOW_SEC:
-            return spoken
-        return t
+            return spoken, True
+        return t, False
 
     def _register_spoken_fold(self, ev: RFIDEvent) -> None:
         """「フォールド」と言われたのに札が席に残っていた手番の席を覚える（記録した信号から。replay も同じ）。"""
         if ev.seat is not None:
             self._spoken_folds[ev.seat] = ev.observed_at if ev.observed_at is not None else ev.timestamp
+
+    def _drop_spoken_fold(self, seat: Optional[int], why: str) -> Optional[str]:
+        """覚えている「フォールド」（手番の人の札は席にあった）を捨てる（その人は降ろさない）。言った文を返す。
+
+        ハンドに要確認は付けない: 別の席の札が離れたなら、その語は離れた席のこと（札を持ったまま口頭で降りることは
+        基本的に無い, オーナー 2026-10-06）。次のストリートの札なら、補ったチェック / コールに要確認が付く。
+        """
+        if seat is None or self._spoken_folds.pop(seat, None) is None:
+            return None
+        raw = self._spoken_fold_raw.pop(seat, "") or "フォールド"
+        self._notice(f"「{raw}」— 席{seat} の札は席に残ったまま{why}ので、席{seat} はフォールドにしません")
+        return raw
 
     def _apply_pending_spoken_fold(self, before: float, reason: str) -> bool:
         """覚えている「フォールド」の席がまだ手番のままなら、その席をフォールドにする。
@@ -2064,8 +2163,13 @@ class IntegrationThread(threading.Thread):
         self._resolve_departures()
         return True
 
-    def _absent_seat_for_fold_word(self) -> tuple[Optional[int], float]:
-        """「フォールド」と聞こえたときに、札が席から離れた（まだ行動する）席を手番の順に探す。
+    def _absent_seat_for_fold_word(self, spoken_at: Optional[float] = None) -> tuple[Optional[int], float]:
+        """「フォールド」と聞こえたときに、札が席から離れた席を探す。まだ行動する席を手番の順に見て、無ければ
+        このラウンドで行動を済ませた席のうち、その語の前後（`FOLD_WORD_DEPARTURE_SEC`）に札が離れた席。
+
+        札を持ったまま口頭で降りることは基本的に無い（オーナー 2026-10-06）。手番の人の札が残っていて別の席の札が
+        語と同じころ離れたなら、その語は離れた席のこと = 手番の見立てがずれている（店舗 9db1e032 ハンド 4: 聞き
+        落としたベットのあと「フォールド、コール」の「フォールド」が、もう動いた席5 の札の離脱と同時だった）。
 
         このハンドで札が一度も読めていない席は数えない（札が席に無いのか、読めていないだけか分からない）。
         2026-10-01 のリハーサル: 席の設定が 1 つずれて席 7 のリーダーに札が無く、各ハンドの最初の「フォールド」が
@@ -2078,12 +2182,23 @@ class IntegrationThread(threading.Thread):
             snapshot = self._seat_presence() or {}
         except Exception:  # noqa: BLE001
             return None, 0.0
-        for seat in self._game_state.seats_to_act():
+        to_act = list(self._game_state.seats_to_act())
+        for seat in to_act:
             info = snapshot.get(seat) or {}
             if info.get("present") or seat in self._showdown_mucks:
                 continue
             since = info.get("absent_since")
             if since is not None and self._hole_cards.get(seat):
+                return seat, since
+        if spoken_at is None:
+            return None, 0.0
+        for seat in self._remaining_seats():
+            if seat in to_act or seat in self._departures:
+                continue
+            info = snapshot.get(seat) or {}
+            since = info.get("absent_since")
+            if (not info.get("present") and since is not None and self._hole_cards.get(seat)
+                    and abs(since - spoken_at) <= FOLD_WORD_DEPARTURE_SEC):
                 return seat, since
         return None, 0.0
 
@@ -2201,6 +2316,23 @@ class IntegrationThread(threading.Thread):
                 event.raw_text, winner_seat,
             )
         self._finalize_hand(winner_seat, event)
+
+    def _chop_heard_as_check(self, event: AudioEvent) -> Optional[AudioEvent]:
+        """席を言わない「チョップ」が、ベットの途中（チェックできる手番の人がいる）で聞こえたらチェックの聞き違い。
+
+        分けるのはショーダウンのあとだけなので、ベットの途中の「チョップ」は勝者ではない。店舗のログ全体の短い
+        「チョップ」6 回はすべてベットの途中で、真のアクションはチェックだった（2026-10-06 1f838667 ハンド 3・16 は
+        これを読めずにチェックが抜け、以降の手番がずれた）。チェックできない（ベットに直面）ときは今まで通り。
+        """
+        if not (self._rules_aware and self._hand_open and _SPLIT_WORDS.search(event.raw_text or "")):
+            return None
+        if _extract_all_seat_nos(event.raw_text) or self._betting_over():
+            return None
+        ctx = self._game_state.legal_context()
+        if ctx.actor_seat is None or "check" not in ctx.legal_actions:
+            return None
+        self._notice(f"「{event.raw_text}」— ベットの途中なのでチェックの聞き違いとみます（要確認）")
+        return replace(event, action="check", amount=0, parse_flags=(*event.parse_flags, "chop_heard_as_check"))
 
     def _fallback_winner_seat(self) -> Optional[int]:
         """勝者席が読み上げから取れないときの推定連鎖（ADR-0047 B5）。
@@ -2507,6 +2639,7 @@ class IntegrationThread(threading.Thread):
 
     def _set_in_play(self, in_play: bool) -> None:
         """プレー中かを切り替える（音声の聞き取りとボードの受付, ADR-0063）。"""
+        self._listen_after_hand_until = None
         if self._in_play == in_play:
             return
         self._in_play = in_play
@@ -2517,6 +2650,40 @@ class IntegrationThread(threading.Thread):
             else:
                 self._listen_gate.clear()
         logger.info("プレー中: %s", "はい（聞き取りを再開）" if in_play else "いいえ（次の配布まで音声を聞き流す）")
+
+    def _seats_holding_cards(self) -> list[int]:
+        """いま札が載っている、卓で使っている席。在否が分からなければ空。"""
+        if self._seat_presence is None:
+            return []
+        try:
+            seats = self._seat_presence() or {}
+        except Exception:  # noqa: BLE001
+            return []
+        game = set(self._game_seats())
+        return sorted(s for s, info in seats.items() if s in game and info.get("present"))
+
+    def _keep_listening_after_foldout(self) -> bool:
+        """全員フォールドで確定したのに 2 席以上に札が載っていれば、聞き取りを続ける（`POST_FOLDOUT_LISTEN_SEC`）。
+
+        フォールドを札の離脱で決める卓だけ（声でフォールドを決める卓では、降りた人の札が席に残る）。
+        """
+        if not self._rfid_folds:
+            return False
+        holding = self._seats_holding_cards()
+        if len(holding) < 2:
+            return False
+        self._listen_after_hand_until = self._clock() + POST_FOLDOUT_LISTEN_SEC
+        logger.info("全員フォールドで確定しましたが席%s に札が残っています — %.0f 秒まで聞き取りを続けます"
+                    "（書き起こしに残すだけで、記録には入れません）", holding, POST_FOLDOUT_LISTEN_SEC)
+        return True
+
+    def _check_post_hand_listening(self) -> None:
+        """全員フォールドのあとの聞き取りを、時間切れか札が片付いたら止める（次の配布でも止まる）。"""
+        until = self._listen_after_hand_until
+        if until is None or self._hand_open:
+            return
+        if self._clock() >= until or len(self._seats_holding_cards()) < 2:
+            self._set_in_play(False)
 
     def _check_table_cleared(self) -> None:
         """ハンドが確定していなくても、卓に札が無い状態が続いたらプレーは終わったとみなす。
@@ -4386,7 +4553,7 @@ class IntegrationThread(threading.Thread):
         self._checkpoints = []
         self._street_marks = {}
         self._streets_synced = set()
-        if self._deal_at is None:
+        if self._deal_at is None and not (winner_source == "fold" and self._keep_listening_after_foldout()):
             self._set_in_play(False)            # 次の配布まで音声を聞き流す（ADR-0063）
 
     def _describe_result(self, summary: HandSummary, awards: Optional[dict[int, int]]) -> str:

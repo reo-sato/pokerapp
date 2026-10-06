@@ -1,0 +1,233 @@
+{
+ "session_id": "5b1ca2349f24424aa1064a250d0e3a42",
+ "setup": {
+  "players": [
+   {
+    "seat": 5,
+    "name": "5",
+    "stack": 100000
+   },
+   {
+    "seat": 6,
+    "name": "6",
+    "stack": 100000
+   },
+   {
+    "seat": 7,
+    "name": "7",
+    "stack": 100000
+   },
+   {
+    "seat": 8,
+    "name": "8",
+    "stack": 100000
+   }
+  ],
+  "sb": 100,
+  "bb": 200,
+  "button_prior": 7,
+  "first_hand_id": 1,
+  "hand_stacks": {
+   "1": {
+    "5": 100000,
+    "6": 100000,
+    "7": 100000,
+    "8": 100000
+   }
+  },
+  "auto_new_hand": true,
+  "auto_winner": true,
+  "rfid_folds": true
+ },
+ "code": {
+  "main.py": "88c530b1a15f9242",
+  "integration/engine.py": "4ab9de00d94669ab",
+  "core/poker_engine.py": "d42f130da5db32eb",
+  "audio/recognizer.py": "b02d8bb3b4c8f39b",
+  "audio/recorder.py": "6a83bead225894d0",
+  "rfid/reader_thread.py": "f00853bb1362b378"
+ },
+ "hands": [
+  {
+   "hand_id": 1,
+   "truth": {
+    "board": [
+     "Td",
+     "8s",
+     "8c",
+     "Ks"
+    ],
+    "actions": [
+     {
+      "seat": 7,
+      "action": "raise",
+      "amount": 800,
+      "street": "preflop"
+     },
+     {
+      "seat": 8,
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 6,
+      "action": "call",
+      "amount": 600,
+      "street": "preflop"
+     },
+     {
+      "seat": 6,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 7,
+      "action": "bet",
+      "amount": 600,
+      "street": "flop"
+     },
+     {
+      "seat": 6,
+      "action": "call",
+      "amount": 600,
+      "street": "flop"
+     },
+     {
+      "seat": 6,
+      "action": "bet",
+      "amount": 2200,
+      "street": "turn"
+     },
+     {
+      "seat": 7,
+      "action": "fold",
+      "amount": 0,
+      "street": "turn"
+     }
+    ],
+    "players": [
+     {
+      "seat": 5,
+      "hole_cards": [
+       "2s",
+       "6c"
+      ],
+      "showed_down": false,
+      "name": "5"
+     },
+     {
+      "seat": 6,
+      "hole_cards": [
+       "4s",
+       "Qh"
+      ],
+      "showed_down": false,
+      "name": "6"
+     },
+     {
+      "seat": 7,
+      "hole_cards": [
+       "Ah",
+       "3s"
+      ],
+      "showed_down": false,
+      "name": "7"
+     },
+     {
+      "seat": 8,
+      "hole_cards": [
+       "2d",
+       "5d"
+      ],
+      "showed_down": false,
+      "name": "8"
+     }
+    ],
+    "winner_seat": 6,
+    "blind": true,
+    "entry_sec": 112.7,
+    "blind_entry": {
+     "actions": [
+      {
+       "seat": 7,
+       "action": "raise",
+       "amount": 800,
+       "street": "preflop"
+      },
+      {
+       "seat": 8,
+       "action": "fold",
+       "amount": 0,
+       "street": "preflop"
+      },
+      {
+       "seat": 5,
+       "action": "fold",
+       "amount": 0,
+       "street": "preflop"
+      },
+      {
+       "seat": 6,
+       "action": "call",
+       "amount": 600,
+       "street": "preflop"
+      },
+      {
+       "seat": 6,
+       "action": "check",
+       "amount": 0,
+       "street": "flop"
+      },
+      {
+       "seat": 7,
+       "action": "bet",
+       "amount": 600,
+       "street": "flop"
+      },
+      {
+       "seat": 6,
+       "action": "call",
+       "amount": 600,
+       "street": "flop"
+      },
+      {
+       "seat": 6,
+       "action": "bet",
+       "amount": 2200,
+       "street": "turn"
+      },
+      {
+       "seat": 7,
+       "action": "fold",
+       "amount": 0,
+       "street": "turn"
+      }
+     ],
+     "winner_seat": 6,
+     "entry_sec": 112.7
+    },
+    "hand_id": 1
+   },
+   "baseline": {
+    "action_correct": 6,
+    "action_total": 11,
+    "winner_match": false,
+    "board_match": true
+   },
+   "reparse_baseline": {
+    "action_correct": 6,
+    "action_total": 11,
+    "winner_match": false,
+    "board_match": true
+   }
+  }
+ ]
+}

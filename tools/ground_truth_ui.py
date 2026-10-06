@@ -182,7 +182,7 @@ def _hand_row(hand: dict, gt) -> dict:
         "ground_truth": (
             {"source": gt.source, "annotated_at": gt.annotated_at, "annotator": gt.annotator,
              "blind": bool(gt.hand.get("blind")), "reconciled": bool(gt.hand.get("reconciled")),
-             "entry_sec": gt.hand.get("entry_sec")}
+             "entry_sec": gt.hand.get("entry_sec"), "excluded": bool(gt.hand.get("excluded"))}
             if gt is not None else None
         ),
         "accuracy": accuracy,
@@ -731,6 +731,12 @@ def validate_gt_hand(hand: Any) -> dict:
         out["notes"] = notes.strip()[:2000]
     if hand.get("blind") is True:
         out["blind"] = True                  # 記録を見ずに入れた
+    if hand.get("excluded") is True:
+        # 評価から外す（理由はメモ。オーナーのメモ「除外」, 2026-10-06）。物差し・eval_store が数えない
+        out["excluded"] = True
+        reason = hand.get("excluded_reason")
+        if isinstance(reason, str) and reason.strip():
+            out["excluded_reason"] = reason.strip()[:500]
     return out
 
 
@@ -1485,6 +1491,7 @@ function renderList(){
       : '<span class="tag t-none">未入力</span>';
     const rv = h.has_needs_review ? '<span class="tag t-warn">要確認</span>' : "";
     const acc = h.accuracy ? (h.accuracy.all_match ? '<span class="tag t-ok">一致</span>' : `<span class="tag t-bad">差分 ${h.accuracy.mismatches}</span>`) : "";
+    const ex = h.ground_truth && h.ground_truth.excluded ? '<span class="tag t-warn">評価から外す</span>' : "";
     const bl = h.ground_truth && h.ground_truth.blind && !h.in_progress
       ? (h.ground_truth.reconciled ? '<span class="tag t-edit">ブラインド→照合済</span>' : '<span class="tag t-warn">照らし合わせ待ち</span>') : "";
     // 進行中のハンド（手札を配ったときから出る）: 入れたところまで保存でき、ハンドが終わってから照らし合わせる
@@ -1493,7 +1500,7 @@ function renderList(){
         + (h.ground_truth ? '<span class="tag t-edit">途中まで保存</span>' : "") : "";
     return `<tr class="row" onclick="openHand(${h.hand_id})"><td>#${h.hand_id}</td><td>${fmtTime(h.started_at)}</td>
       <td>${(h.seats||[]).join(" ")}</td><td>${(h.board||[]).map(c => cardHtml(c, "sm")).join("")}</td>
-      <td>${h.winner_seat != null ? "席 " + h.winner_seat : "—"}</td><td>${live || `${rv} ${st} ${bl} ${acc}`}</td></tr>`;
+      <td>${h.winner_seat != null ? "席 " + h.winner_seat : "—"}</td><td>${live || `${rv} ${st} ${bl} ${ex} ${acc}`}</td></tr>`;
   }).join("");
   $("app").innerHTML = `<div class="top"><h1>真のアクション入力</h1><span class="small"><a href="/script">台本 →</a>　<a href="/corpus">読み上げ集 →</a></span></div>
     <div class="bar">
@@ -1511,6 +1518,13 @@ function renderList(){
 
 // ――― 編集 ―――
 function normCards(arr, n){ const out = []; for (let i = 0; i < n; i++) out.push((arr && arr[i] && arr[i] !== "??") ? arr[i] : null); return out; }
+// 進行中に保存したハンドのボードは、そのときの枚数のまま残る（プリフロップなら空）。入れた最後の札より後ろは記録の札で補う
+function boardWithRecord(gtBoard, capBoard){
+  const out = normCards(gtBoard, 5), rec = normCards(capBoard, 5);
+  let last = -1; out.forEach((c, i) => { if (c) last = i; });
+  for (let i = last + 1; i < 5; i++) if (!out[i] && rec[i] && !out.includes(rec[i])) out[i] = rec[i];
+  return out;
+}
 function buildGt(d){
   const cap = d.captured, g = d.ground_truth, src = g || cap;
   const players = (cap.players || []).filter(p => typeof p.seat === "number").map(p => {
@@ -1522,8 +1536,9 @@ function buildGt(d){
                   .map(a => ({seat:a.seat, action:a.action, amount:a.amount || 0, unsure: !!a.unsure}));
   // ボタン: 入れた真のアクションで選んだ席（ディーラーが動かし忘れたハンド）か、記録のボタン
   const button = (g && g.button_seat != null) ? g.button_seat : (cap.button_seat ?? null);
-  return {board: normCards(src.board, 5), players, actions, button_seat: button,
-          winner_seat: blind ? null : (src.winner_seat === undefined ? null : src.winner_seat), notes: (g && g.notes) || ""};
+  return {board: g ? boardWithRecord(g.board, cap.board) : normCards(src.board, 5), players, actions, button_seat: button,
+          winner_seat: blind ? null : (src.winner_seat === undefined ? null : src.winner_seat), notes: (g && g.notes) || "",
+          excluded: !!(g && g.excluded)};
 }
 async function openHand(hid){
   try {
@@ -1658,6 +1673,7 @@ function setWinner(seat){ S.gt.winner_seat = seat; S.dirty = true; renderEdit();
 function setButton(seat){ S.gt.button_seat = seat; touch(); }
 function setShowed(seat){ const p = S.gt.players.find(x => x.seat === seat); p.showed_down = !p.showed_down; S.dirty = true; renderEdit(); }
 function setNotes(v){ S.gt.notes = v; S.dirty = true; }
+function setExcluded(v){ S.gt.excluded = !!v; S.dirty = true; }
 function resetToCaptured(){
   if (!confirm("入力した内容を捨てて、記録の内容に戻しますか？")) return;
   S.gt = buildGt({captured: S.hand.captured, ground_truth: null}); touch();
@@ -1787,6 +1803,7 @@ function renderEdit(){
         ${quick}${lint}
         <h2>勝った席</h2>${winnerHtml}
         <h2>メモ</h2><input type="text" style="width:100%" value="${esc(g.notes)}" placeholder="気づいたこと（任意）" oninput="setNotes(this.value)" onchange="setNotes(this.value)">
+        <label class="small" style="display:inline-flex;gap:6px;align-items:center;margin-top:6px"><input type="checkbox" ${g.excluded ? "checked" : ""} onchange="setExcluded(this.checked)"> 評価から外す（理由はメモに。入力不全・中断・ボタンが動いていない など）</label>
         <div class="actions-bottom">
           ${blind || d.in_progress ? "" : `<button class="ok" onclick="savePassthrough()" ${canPass?"":"disabled"}>✓ 記録どおり</button>`}
           <button class="primary" onclick="saveEdited()">保存（この内容が真）</button>
@@ -1831,6 +1848,7 @@ function gtPayload(){
           actions: g.actions.map(a => ({seat:a.seat, action:a.action, amount:a.amount || 0, street:a.street, unsure: a.unsure || undefined})),
           players: g.players.map(p => ({seat:p.seat, name:p.name, hole_cards: p.hole_cards.filter(Boolean), showed_down: p.showed_down})),
           winner_seat: g.winner_seat, notes: g.notes || "", blind: isBlind() || undefined,
+          excluded: g.excluded || undefined,
           button_seat: g.button_seat != null && g.button_seat !== S.hand.captured.button_seat ? g.button_seat : undefined};
 }
 async function saveWith(body){

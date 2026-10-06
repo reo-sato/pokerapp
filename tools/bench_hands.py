@@ -238,6 +238,7 @@ class V1Result:
 def v1_inputs(store: bool = True, script: bool = True, sim_sessions: int = 0, sim_hands: int = 30,
               logs: Optional[list[Path]] = None):
     """(名前, [(SessionInput, 席の札の在否の履歴 or None)]) の並び。"""
+    from core.atomic_io import read_jsonl
     from integration.world_replay import PresenceTimeline
 
     def presence_of(inp: SessionInput):
@@ -245,12 +246,10 @@ def v1_inputs(store: bool = True, script: bool = True, sim_sessions: int = 0, si
             return None
         path = inp.folder / "presence.jsonl"
         if path.exists():
-            return PresenceTimeline.from_rows(
-                json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+            return PresenceTimeline.from_rows(read_jsonl(path))
         state = inp.folder / f"{inp.session_id}.table_state.jsonl"       # 店舗のログ（卓状態の履歴）
         if state.exists():
-            return PresenceTimeline.from_table_state(
-                [json.loads(line) for line in state.read_text(encoding="utf-8").splitlines() if line.strip()])
+            return PresenceTimeline.from_table_state(read_jsonl(state))   # 電源断の末尾（NUL の行）は飛ばす
         return None
 
     out = []
@@ -334,9 +333,13 @@ def truth_exclusions(truth: dict, captured: dict, seat_warned: bool = False) -> 
       店舗 1709932e ハンド 3）
     - 真のアクションに「自信なし」の行が残っている（結果を見る前にオーナーに確かめて直す。直せなければ数えない）
     - ハンドの始めに席の設定の警告が出た（ロガーの席と札を置く席がずれている）
+    - 「評価から外す」の印（入力画面・オーナーのメモ「除外」, 2026-10-06）
     """
     from tools.ground_truth_ui import gt_lint
+    from tools.measure_capture_accuracy import excluded_reason, is_excluded
 
+    if is_excluded(truth):
+        return [f"評価から外す: {excluded_reason(truth)}"]
     why = [f"真のアクションの不備: {m}" for m in gt_lint(captured, truth)]
     if any(isinstance(a, dict) and a.get("unsure") for a in truth.get("actions") or []):
         why.append("真のアクションに「自信なし」の行が残っている")

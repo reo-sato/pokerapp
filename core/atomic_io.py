@@ -64,6 +64,30 @@ def read_json_file(path: "str | Path", *, quarantine: bool = True) -> "dict | No
     return None
 
 
+def read_jsonl(path: "str | Path") -> list[dict]:
+    """1 行 1 つの JSON（`*.jsonl`）を読む。読めない行は飛ばす。
+
+    電源断・強制終了のあとは、最後の行が書きかけか NUL の並びになっていることがある（店舗 2026-10-06:
+    卓状態の履歴の末尾が NUL の 1 行で、物差しが落ちた）。そういう行が 1 つあってもほかの行は使う。
+    """
+    rows: list[dict] = []
+    skipped = 0
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            skipped += 1
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    if skipped:
+        logger.warning("%s の読めない行 %d 行を飛ばしました（書きかけ・電源断のあとなど）", path, skipped)
+    return rows
+
+
 def _quarantine(p: Path) -> None:
     try:
         dest = p.with_name(f"{p.name}.corrupt-{datetime.now():%Y%m%d-%H%M%S}")

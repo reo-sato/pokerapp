@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from core.atomic_io import atomic_write_json, read_json_file
+from core.atomic_io import atomic_write_json, read_json_file, read_jsonl
 
 
 def test_writes_readable_json(tmp_path: Path):
@@ -65,3 +65,21 @@ def test_corrupt_without_quarantine_keeps_file(tmp_path: Path):
     p.write_text("broken", encoding="utf-8")
     assert read_json_file(p, quarantine=False) is None
     assert p.exists()  # 退避しない指定では元ファイルを残す
+
+
+# ――― read_jsonl / 電源断のあとの末尾（店舗 2026-10-06）―――
+
+def test_read_jsonl_skips_nul_tail_and_partial_line(tmp_path: Path):
+    p = tmp_path / "s.table_state.jsonl"
+    p.write_bytes(b'{"a": 1}\r\n{"a": 2}\r\n' + b"\x00" * 64 + b"\n" + b'{"a": 3')
+    assert read_jsonl(p) == [{"a": 1}, {"a": 2}]
+
+
+def test_load_events_skips_crash_tail(tmp_path: Path):
+    from integration.replay import load_events
+
+    p = tmp_path / "s.events.jsonl"
+    p.write_bytes(b'{"type": "audio", "action": "check", "amount": 0, "timestamp": 1.0, "raw_text": "x"}\n'
+                  + b"\x00" * 40)
+    events = load_events(p)
+    assert len(events) == 1 and events[0].action == "check"

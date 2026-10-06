@@ -195,9 +195,10 @@ class TestWinnerToss:
         assert (hand.winner_seat, hand.review_required) == (5, False)
         assert not any("組み直し" in n or "決められません" in n for n in tb.notices)
 
-    def test_a_spoken_fold_keeps_the_order_when_the_cards_linger(self, tmp_path):
-        # 席6 が「フォールド」と言われたが札は席に残り、席4 も（無言で）降り、勝った席5 が先に札を投げ、
-        # 席6 の札はあとで片付いた
+    def test_a_fold_word_with_lingering_cards_belongs_to_the_seat_that_left(self, tmp_path):
+        # 手番の席6 の札が席に残ったまま「フォールド」と言われ、すぐあとに席4 の札が離れた = 語は席4 のこと
+        # （札を持ったまま口頭で降りることは基本的に無い, オーナー 2026-10-06）。勝った席5 が先に札を投げ、
+        # 席6 の札はあとで離れた（席6 のフォールドはその時刻）。記録は同じで、要確認にしない
         tb = _Table(tmp_path)
         _to_flop(tb)
         tb.say("チェック")
@@ -205,20 +206,21 @@ class TestWinnerToss:
         tb.say("ベット 600")
         tb.tick(tb.now + 2.0)
         tb.say("フォールド")                   # 席6 の番。札はまだ席にある
-        spoken = tb.now
         tb.tick(tb.now + 0.5)
-        tb.lift(4)                             # 席4 も降りた（同じアクションの 2 回目 = 言わない）
+        tb.lift(4)                             # 席4 が降りた
         tb.tick(tb.now + 1.0)
         tb.lift(5)                             # 勝った席5 が札を投げた
         tb.tick(tb.now + 3.0)
-        tb.lift(6)                             # 席6 の札が片付いた
+        left = tb.now
+        tb.lift(6)                             # 席6 の札が離れた
         tb.tick(tb.now + 20.0)
         (hand,) = tb.hands
         assert [a[:2] for a in _flop_actions(tb)] == [(4, "check"), (5, "bet"), (6, "fold"), (4, "fold")]
         assert (hand.winner_seat, hand.review_required) == (5, False)
         assert not any("組み直し" in n or "決められません" in n for n in tb.notices)
+        assert any("席6 はフォールドにしません" in n for n in tb.notices)
         fold = next(a for a in hand.actions if a.seat == 6 and a.action == "fold")
-        assert fold.timestamp == tb.t._iso(spoken)                          # noqa: SLF001
+        assert fold.timestamp == tb.t._iso(left)                            # noqa: SLF001
 
     def test_a_river_fold_out_waits_for_a_hand_name_then_confirms(self, tmp_path):
         tb = _Table(tmp_path)

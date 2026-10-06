@@ -219,6 +219,41 @@ def test_board_order_insensitive():
     assert result.board_accuracy == 1.0
 
 
+def test_board_saved_mid_hand_is_not_a_mismatch():
+    """進行中のハンドを途中で保存した真のアクションのボード（記録のボードの頭）は合う（店舗 2026-10-06）。"""
+    full = ["3d", "5h", "2s", "5c"]
+    for saved in (["3d", "5h", "2s"], ["5h", "3d", "2s"]):
+        gt = _gt_hand(board=saved)
+        captured = _captured_hand(gt)
+        captured["board"] = list(full)
+        assert measure_hand(gt, captured).board_match is True
+    gt = _gt_hand(board=["3d", "5h", "9c"])          # 入れた札が記録と違えば合わない
+    captured = _captured_hand(gt)
+    captured["board"] = list(full)
+    assert measure_hand(gt, captured).board_match is False
+
+
+def test_board_accuracy_counts_only_entered_boards():
+    entered = _gt_hand(hand_id=1)
+    empty = _gt_hand(hand_id=2, board=[])
+    cap_empty = _captured_hand(empty)
+    cap_empty["board"] = ["As", "Kc", "Qd"]
+    result = measure_session(_session([_captured_hand(entered), cap_empty]), _gt_session([entered, empty]))
+    assert result.board_accuracy == 1.0
+
+
+def test_excluded_hand_is_not_counted():
+    """「評価から外す」のハンドは数えない（記録だけにあるハンドにもしない, オーナーのメモ 2026-10-06）。"""
+    good = _gt_hand(hand_id=1)
+    bad = _gt_hand(hand_id=2, actions=[{"street": "preflop", "seat": 2, "action": "fold", "amount": 0}])
+    bad["excluded"] = True
+    captured_bad = _captured_hand(_gt_hand(hand_id=2))
+    result = measure_session(_session([_captured_hand(good), captured_bad]), _gt_session([good, bad]))
+    assert result.action_accuracy == 1.0
+    assert [h.hand_id for h in result.per_hand] == [1]
+    assert result.phantom_hands == []
+
+
 def test_hole_cards_none_in_gt_not_counted():
     gt = _gt_hand(players=[
         {"seat": 2, "hole_cards": ["Ah", "Ad"], "showed_down": True},

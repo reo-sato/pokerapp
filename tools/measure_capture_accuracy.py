@@ -156,6 +156,32 @@ def _normalize_board(board: Any) -> list[str]:
     return sorted(cards, key=str.lower)
 
 
+def _board_matches(gt_board: Any, cap_board: Any) -> bool:
+    """ボードが合うか（順は問わない）。真のアクションのボードが記録のボードの頭の何枚かと同じなら合うとみる:
+    進行中のハンドを途中で保存すると、そのときのボード（プリフロップなら空・フロップなら 3 枚）のまま残る
+    （店舗 2026-10-06: プリフロップから入力できるようにした日に「ボード 0%」）。入れた札だけを比べる。"""
+    gt, cap = _normalize_board(gt_board), _normalize_board(cap_board)
+    if gt == cap:
+        return True
+    head = [str(c).strip() for c in (cap_board if isinstance(cap_board, list) else []) if c][:len(gt)]
+    return bool(gt) and len(gt) < len(cap) and gt == _normalize_board(head)
+
+
+def board_entered(gt_hand: dict) -> bool:
+    """真のアクションにボードを入れたか（空 = 入れていない = ボードは比べない）。"""
+    return bool(_normalize_board(gt_hand.get("board")))
+
+
+def is_excluded(gt_hand: dict) -> bool:
+    """「評価から外す」の印のあるハンド（真のアクションの入力画面・オーナーのメモ, 2026-10-06）。"""
+    return bool(gt_hand.get("excluded"))
+
+
+def excluded_reason(gt_hand: dict) -> str:
+    """外した理由（入れた理由か、メモ）。"""
+    return str(gt_hand.get("excluded_reason") or gt_hand.get("notes") or "理由なし").strip()
+
+
 def _index_by_hand_id(hands: list[dict]) -> dict[int, dict]:
     out: dict[int, dict] = {}
     for h in hands:
@@ -250,9 +276,7 @@ def measure_hand(
         if t_ok and a_ok:
             both_correct += 1
 
-    board_match = _normalize_board(gt_hand.get("board")) == _normalize_board(
-        (captured_hand or {}).get("board")
-    )
+    board_match = _board_matches(gt_hand.get("board"), (captured_hand or {}).get("board"))
 
     gt_hole = _seat_to_hole_cards(gt_hand.get("players") or [])
     cap_hole = _seat_to_hole_cards((captured_hand or {}).get("players") or [])
@@ -298,7 +322,7 @@ def hand_fully_correct(gt_hand: dict, captured_hand: dict | None) -> bool:
     rows = len(gt_hand.get("actions") or [])
     if not (m.action_correct == m.action_total == rows) or m.winner_match is False:
         return False
-    return m.board_match or not _normalize_board(gt_hand.get("board"))
+    return m.board_match or not board_entered(gt_hand)
 
 
 def measure_session(
@@ -313,7 +337,9 @@ def measure_session(
     `apply_hand_corrections` を通す（ADR-0036 と同じ read-time オーバーレイ）。
     """
     captured_by_id = _index_by_hand_id(session_log.get("hands") or [])
-    gt_hands = ground_truth.get("hands") or []
+    # 「評価から外す」ハンドは数えない（記録だけにあるハンドにも数えない）
+    excluded_ids = {h.get("hand_id") for h in ground_truth.get("hands") or [] if is_excluded(h)}
+    gt_hands = [h for h in ground_truth.get("hands") or [] if not is_excluded(h)]
 
     corrections = corrections or []
     by_hand: dict[int, list[HandCorrection]] = {}
@@ -337,7 +363,7 @@ def measure_session(
             captured = apply_hand_corrections(captured, by_hand[hid])
         per_hand.append(measure_hand(gt, captured))
 
-    phantom = sorted(set(captured_by_id) - gt_ids)
+    phantom = sorted(set(captured_by_id) - gt_ids - excluded_ids)
 
     n_gt = len(gt_ids)
     coverage = (n_gt - len(missed)) / n_gt if n_gt else 1.0
@@ -356,8 +382,11 @@ def measure_session(
         if total_actions else 1.0
     )
 
+    # ボードを入れたハンドだけで比べる（入れていない = 記録のボードを確かめていない）
+    entered = {h.get("hand_id") for h in gt_hands if board_entered(h)}
+    board_hands = [h for h in per_hand if h.hand_id in entered]
     board_acc = (
-        sum(1 for h in per_hand if h.board_match) / n_gt if n_gt else 1.0
+        sum(1 for h in board_hands if h.board_match) / len(board_hands) if board_hands else 1.0
     )
 
     total_hole = sum(h.hole_total for h in per_hand)

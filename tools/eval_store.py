@@ -55,7 +55,9 @@ from integration.replay import load_events, replay_events  # noqa: E402
 from integration.world_replay import PresenceTimeline  # noqa: E402
 from tools.measure_capture_accuracy import (  # noqa: E402
     _align_actions,
+    excluded_reason,
     hand_fully_correct,
+    is_excluded,
     measure_hand,
     measure_session,
     row_correct,
@@ -727,7 +729,13 @@ def _pct(num: int, den: int) -> Optional[float]:
 
 
 def evaluate_against_truth(truth: dict, captured_hands: list[dict]) -> dict:
-    """真のアクションとの一致率・要確認の精度と再現率・出所ごとの正誤・聞き取りの自信。"""
+    """真のアクションとの一致率・要確認の精度と再現率・出所ごとの正誤・聞き取りの自信。
+
+    「評価から外す」のハンド（オーナーのメモ・入力画面の印）は数えず、理由つきで `excluded` に出す。
+    """
+    excluded = [{"hand_id": h.get("hand_id"), "reason": excluded_reason(h)}
+                for h in truth.get("hands") or [] if is_excluded(h)]
+    truth = {**truth, "hands": [h for h in truth.get("hands") or [] if not is_excluded(h)]}
     captured = {"hands": captured_hands}
     acc = measure_session(captured, truth)
     cap_by_id = {h.get("hand_id"): h for h in captured_hands}
@@ -763,6 +771,7 @@ def evaluate_against_truth(truth: dict, captured_hands: list[dict]) -> dict:
     return {
         "hands": len(truth.get("hands") or []),
         "exact_hands": exact,
+        "excluded": excluded,
         # 記録を見ずに入れたハンドとそれ以外の一致率（大きく違えば、入れる人が記録に引きずられている）
         "blind_hands": len(blind_ids),
         "blind_accuracy": _pct(*split[True]), "seen_accuracy": _pct(*split[False]),
@@ -1288,6 +1297,10 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
             print("  方式ごとに読み直すと変わるハンド（書き起こしの読み直しと比べて）: " + " / ".join(changed))
         if r.truth:
             print(f"  真のアクション: {r.truth['record']['hands']} ハンド")
+            excluded = r.truth["record"].get("excluded") or []
+            if excluded:
+                print(f"  数えないハンド {len(excluded)}: "
+                      + " ／ ".join(f"ハンド {e['hand_id']}（{e['reason']}）" for e in excluded))
             for key, label in labels:
                 if key not in r.truth:
                     continue

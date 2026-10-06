@@ -1,0 +1,251 @@
+{
+ "session_id": "8007837717ad42f695e814b26fd415f5",
+ "setup": {
+  "players": [
+   {
+    "seat": 5,
+    "name": "5",
+    "stack": 100000
+   },
+   {
+    "seat": 6,
+    "name": "6",
+    "stack": 100000
+   },
+   {
+    "seat": 7,
+    "name": "7",
+    "stack": 100000
+   },
+   {
+    "seat": 8,
+    "name": "8",
+    "stack": 100000
+   }
+  ],
+  "sb": 100,
+  "bb": 200,
+  "button_prior": 6,
+  "first_hand_id": 1,
+  "hand_stacks": {
+   "1": {
+    "5": 100000,
+    "6": 100000,
+    "7": 100000,
+    "8": 100000
+   }
+  },
+  "auto_new_hand": true,
+  "auto_winner": true,
+  "rfid_folds": true
+ },
+ "code": {
+  "main.py": "88c530b1a15f9242",
+  "integration/engine.py": "4ab9de00d94669ab",
+  "core/poker_engine.py": "d42f130da5db32eb",
+  "audio/recognizer.py": "b02d8bb3b4c8f39b",
+  "audio/recorder.py": "6a83bead225894d0",
+  "rfid/reader_thread.py": "f00853bb1362b378"
+ },
+ "hands": [
+  {
+   "hand_id": 1,
+   "truth": {
+    "board": [
+     "5h",
+     "Ac"
+    ],
+    "actions": [
+     {
+      "seat": 6,
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 7,
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 8,
+      "action": "call",
+      "amount": 100,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "check",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 8,
+      "action": "bet",
+      "amount": 200,
+      "street": "flop"
+     },
+     {
+      "seat": 5,
+      "action": "call",
+      "amount": 200,
+      "street": "flop"
+     },
+     {
+      "seat": 8,
+      "action": "check",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 5,
+      "action": "check",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 8,
+      "action": "bet",
+      "amount": 1500,
+      "street": "river"
+     },
+     {
+      "seat": 5,
+      "action": "fold",
+      "amount": 0,
+      "street": "river"
+     }
+    ],
+    "players": [
+     {
+      "seat": 5,
+      "hole_cards": [
+       "2d",
+       "2s"
+      ],
+      "showed_down": false,
+      "name": "5"
+     },
+     {
+      "seat": 6,
+      "hole_cards": [
+       "Qs",
+       "6s"
+      ],
+      "showed_down": false,
+      "name": "6"
+     },
+     {
+      "seat": 7,
+      "hole_cards": [
+       "Kc",
+       "9d"
+      ],
+      "showed_down": false,
+      "name": "7"
+     },
+     {
+      "seat": 8,
+      "hole_cards": [
+       "3d",
+       "4s"
+      ],
+      "showed_down": false,
+      "name": "8"
+     }
+    ],
+    "winner_seat": 8,
+    "notes": "ディーラーに後から確認したらフロップは b200, cが正でした。私の入力が間違えてた",
+    "entry_sec": 20.6,
+    "blind": true,
+    "blind_entry": {
+     "actions": [
+      {
+       "seat": 6,
+       "action": "fold",
+       "amount": 0,
+       "street": "preflop"
+      },
+      {
+       "seat": 7,
+       "action": "fold",
+       "amount": 0,
+       "street": "preflop"
+      },
+      {
+       "seat": 8,
+       "action": "call",
+       "amount": 100,
+       "street": "preflop"
+      },
+      {
+       "seat": 5,
+       "action": "check",
+       "amount": 0,
+       "street": "preflop"
+      },
+      {
+       "seat": 8,
+       "action": "check",
+       "amount": 0,
+       "street": "flop"
+      },
+      {
+       "seat": 5,
+       "action": "bet",
+       "amount": 200,
+       "street": "flop"
+      },
+      {
+       "seat": 8,
+       "action": "call",
+       "amount": 200,
+       "street": "flop"
+      },
+      {
+       "seat": 8,
+       "action": "check",
+       "amount": 0,
+       "street": "turn"
+      },
+      {
+       "seat": 5,
+       "action": "check",
+       "amount": 0,
+       "street": "turn"
+      },
+      {
+       "seat": 8,
+       "action": "bet",
+       "amount": 1500,
+       "street": "river"
+      },
+      {
+       "seat": 5,
+       "action": "fold",
+       "amount": 0,
+       "street": "river"
+      }
+     ],
+     "winner_seat": 8,
+     "entry_sec": 216.8
+    },
+    "reconciled": true,
+    "hand_id": 1
+   },
+   "baseline": {
+    "action_correct": 10,
+    "action_total": 10,
+    "winner_match": true,
+    "board_match": true
+   },
+   "reparse_baseline": {
+    "action_correct": 10,
+    "action_total": 10,
+    "winner_match": true,
+    "board_match": true
+   }
+  }
+ ]
+}

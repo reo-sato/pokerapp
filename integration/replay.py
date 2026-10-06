@@ -116,14 +116,11 @@ def event_from_envelope(d: dict) -> Event:
 
 
 def load_events(path: str | Path) -> list[Event]:
-    """events.jsonl (1 行 1 envelope) を Event 列に復元する。空行は無視。"""
-    events: list[Event] = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        events.append(event_from_envelope(json.loads(line)))
-    return events
+    """events.jsonl (1 行 1 envelope) を Event 列に復元する。空行と JSON として読めない行（電源断のあとの
+    書きかけ・NUL の末尾）は飛ばす。形の合わない envelope は今まで通り例外（記録の誤り）。"""
+    from core.atomic_io import read_jsonl
+
+    return [event_from_envelope(d) for d in read_jsonl(path)]
 
 
 def replay_events(

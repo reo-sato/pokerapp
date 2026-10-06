@@ -53,10 +53,13 @@ def _two_hands(tmp_path: Path) -> _Table:
     for text in ("チェック", "チェック", "チェック"):
         tb.say(text)
         tb.tick(tb.now + 1.0)
+    # ターン・リバーは全員がチェックしてからチェックアラウンド（札の直後のチェックアラウンドは前のストリートのこと）
     _board(tb, ["2c"])
+    tb.tick(tb.now + 4.0)
     tb.say("チェックアラウンド")
     tb.tick(tb.now + 1.0)
     _board(tb, ["9s"])
+    tb.tick(tb.now + 4.0)
     tb.say("チェックアラウンド")
     tb.tick(tb.now + 1.0)
     tb.say("ハンド終了")

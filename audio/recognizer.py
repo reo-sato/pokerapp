@@ -555,7 +555,10 @@ def _is_check_around(norm: str, script: Optional[str], pos: int, end: int, stop:
     if _CHECK_AROUND_EN.match(norm, i):
         return True
     tail = norm[i:_word_end(norm, script, i, stop)]
-    return bool(tail) and sounds_like(tail, _AROUND, after=norm[pos:end])
+    # 終わりの「ンド」が残った語（「アンド」「ハンド」）は、卓の用語（ハンド）のほうが音が近くてもアラウンド: チェックの
+    # すぐあとで頭がつぶれても語の終わりは残る（店舗の「チェック、アンド」7 回・台本の「チェックアラウンド」が
+    # 「チェック、ハンド」, 2026-10-01。オーナー 2026-10-06「チェック、アンドは多分チェックアラウンドの聞き違い」）
+    return bool(tail) and sounds_like(tail, _AROUND, after=norm[pos:end], compete=not tail.endswith(_AROUND[-2:]))
 
 
 # 下の桁を続けて言える位置（「千」「万」のすぐあと）に、続けて書いた片仮名の語（オーナー 2026-10-02「数字の後に、
@@ -1269,6 +1272,10 @@ _PLAYERS_LEFT = re.compile(
 # 数の語が崩れた言い方（読み上げ集・台本 2026-09-30:「フォープレイヤーズ」を「フォールプレイヤー」）。「プレイヤー」の
 # 前の片仮名を音の近さで数の語と比べる（`phonetic.match_count`）。
 _PLAYERS_WORD = re.compile(r"プレ[イー]?ヤー?[ズス]?")
+# 「ウェイ」が崩れた言い方: 数のすぐあとの、エ段の音に「イ」（伸ばす音）か「ン」が続く語（「コール 3 レイ」「コール3レイズ」
+# 「スリーベイク」「スリーベン」, 店舗 2026-09-29・10-06 の 5 回。第 2 の耳は同じ音を「スリーウェイ」と聞いた）。
+# 「3 ベット」「スリーカード」「ツーペア」はこの形ではない。店のディーラーは賭けを額で言う（「スリーベット」は出ていない）。
+_PLAYERS_COUNT = re.compile(r"(?P<count>[2-9二三四五六七八九]|" + "|".join(_PLAYERS_WORDS) + r")[\s・]*")
 
 
 @dataclass(frozen=True)
@@ -1282,7 +1289,7 @@ def _find_players_left(nfkc: str, norm: str) -> Optional[_PlayersLeft]:
     """残りの人数の言い方（「スリープレイヤーズ」「3ウェイ」）の位置と人数。無ければ None。"""
     from audio.phonetic import match_count
 
-    found = _PLAYERS_LEFT.search(norm)
+    found = _PLAYERS_LEFT.search(norm) or _garbled_way(nfkc, norm)
     if found is not None:
         word = found.group("count")
         count = _PLAYERS_WORDS.get(word) or (int(word) if word.isdigit() else KANJI_DIGIT[word])
@@ -1294,6 +1301,47 @@ def _find_players_left(nfkc: str, norm: str) -> Optional[_PlayersLeft]:
         count = match_count(norm[start:tail.start()]) if start < tail.start() else None
         if count is not None:
             return _PlayersLeft(start, tail.end(), count)
+    return None
+
+
+class _WayMatch:
+    """`_garbled_way` の見つけた位置（`re.Match` と同じ読み方: start / end / group("count")）。"""
+
+    def __init__(self, count: re.Match, end: int) -> None:
+        self._count = count
+        self._end = end
+
+    def start(self) -> int:
+        return self._count.start()
+
+    def end(self) -> int:
+        return self._end
+
+    def group(self, name: str) -> str:
+        return self._count.group(name)
+
+
+def _garbled_way(nfkc: str, norm: str) -> Optional[_WayMatch]:
+    """数のすぐあとの「ウェイ」が崩れた語（`_PLAYERS_COUNT` の説明）。あとに額が続くなら読まない。"""
+    from audio.phonetic import morae
+
+    seats = [m.span(1) for m in _SEAT_PATTERN.finditer(norm)]
+    for count in _PLAYERS_COUNT.finditer(norm):
+        if any(a <= count.start() < b for a, b in seats):
+            continue                            # 席番号（「シート3 レイズ」）
+        start = count.end()
+        if start >= len(norm) or not _is_katakana(norm[start]):
+            continue
+        end = start
+        while end < len(norm) and (_is_katakana(norm[end]) or norm[end] == "ー"):
+            end += 1
+        sounds = morae(norm[start:end])
+        if len(sounds) < 2 or sounds[0][1] != "e" or sounds[1] not in (("", "e", "long"), ("N", "", "N")):
+            continue
+        rest = norm[end:].lstrip(" 　、,")
+        if rest and _AMOUNT_TOKEN.match(rest):
+            continue
+        return _WayMatch(count, end)
     return None
 
 

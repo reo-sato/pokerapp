@@ -220,6 +220,22 @@ class TestSave:
         gt = json.loads((log_dir / f"{SID}.ground_truth.json").read_text(encoding="utf-8"))
         assert len(gt["hands"]) == 1
 
+    def test_exclude_from_evaluation_is_saved(self, base, log_dir):
+        """「評価から外す」の印（オーナーのメモ「除外」, 2026-10-06）は保存され、一覧にも出る。"""
+        hand = {"board": [], "actions": [], "players": [], "notes": "中断", "excluded": True}
+        status, d = _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "manual-edit", "hand": hand})
+        assert status == 200, d
+        gt = json.loads((log_dir / f"{SID}.ground_truth.json").read_text(encoding="utf-8"))
+        saved = next(h for h in gt["hands"] if h["hand_id"] == 1)
+        assert saved["excluded"] is True and saved["notes"] == "中断"
+        status, rows = _req(base, "GET", f"/api/sessions/{SID}/hands")
+        row = next(r for r in rows["hands"] if r["hand_id"] == 1)
+        assert row["ground_truth"]["excluded"] is True
+        hand["excluded"] = False                  # 外したのを戻す
+        assert _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "manual-edit", "hand": hand})[0] == 200
+        gt = json.loads((log_dir / f"{SID}.ground_truth.json").read_text(encoding="utf-8"))
+        assert "excluded" not in next(h for h in gt["hands"] if h["hand_id"] == 1)
+
     @pytest.mark.parametrize("hand, fragment", [
         ({"board": ["Xx"], "actions": []}, "カード"),
         ({"board": [], "actions": [{"seat": 4, "action": "limp"}]}, "不正"),

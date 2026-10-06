@@ -1,0 +1,732 @@
+{
+ "session_id": "b7f32031524b4d74bea95317f6fbcac2",
+ "setup": {
+  "players": [
+   {
+    "seat": 5,
+    "name": "5",
+    "stack": 10000
+   },
+   {
+    "seat": 6,
+    "name": "6",
+    "stack": 10000
+   },
+   {
+    "seat": 7,
+    "name": "7",
+    "stack": 10000
+   },
+   {
+    "seat": 8,
+    "name": "8",
+    "stack": 10000
+   }
+  ],
+  "sb": 100,
+  "bb": 200,
+  "button_prior": 7,
+  "first_hand_id": 1,
+  "hand_stacks": {
+   "1": {
+    "5": 10000,
+    "6": 10000,
+    "7": 10000,
+    "8": 10000
+   },
+   "2": {
+    "5": 13000,
+    "6": 9800,
+    "7": 10000,
+    "8": 7200
+   },
+   "3": {
+    "5": 10300,
+    "6": 13300,
+    "7": 9800,
+    "8": 6600
+   }
+  },
+  "auto_new_hand": true,
+  "auto_winner": true,
+  "rfid_folds": true
+ },
+ "code": {
+  "main.py": "88c530b1a15f9242",
+  "integration/engine.py": "4ab9de00d94669ab",
+  "core/poker_engine.py": "d42f130da5db32eb",
+  "audio/recognizer.py": "b02d8bb3b4c8f39b",
+  "audio/recorder.py": "6a83bead225894d0",
+  "rfid/reader_thread.py": "f00853bb1362b378"
+ },
+ "hands": [
+  {
+   "hand_id": 1,
+   "truth": {
+    "board": [],
+    "actions": [
+     {
+      "seat": 7,
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 8,
+      "action": "raise",
+      "amount": 600,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "call",
+      "amount": 500,
+      "street": "preflop"
+     },
+     {
+      "seat": 6,
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 8,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 5,
+      "action": "check",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 8,
+      "action": "bet",
+      "amount": 2200,
+      "street": "turn"
+     },
+     {
+      "seat": 5,
+      "action": "call",
+      "amount": 2200,
+      "street": "turn"
+     },
+     {
+      "seat": 5,
+      "action": "check",
+      "amount": 0,
+      "street": "river"
+     },
+     {
+      "seat": 8,
+      "action": "check",
+      "amount": 0,
+      "street": "river"
+     }
+    ],
+    "players": [
+     {
+      "seat": 5,
+      "hole_cards": [
+       "5s",
+       "As"
+      ],
+      "showed_down": false,
+      "name": "5"
+     },
+     {
+      "seat": 6,
+      "hole_cards": [
+       "Kh",
+       "Ts"
+      ],
+      "showed_down": false,
+      "name": "6"
+     },
+     {
+      "seat": 7,
+      "hole_cards": [
+       "7c",
+       "Qd"
+      ],
+      "showed_down": false,
+      "name": "7"
+     },
+     {
+      "seat": 8,
+      "hole_cards": [
+       "Js",
+       "Tc"
+      ],
+      "showed_down": false,
+      "name": "8"
+     }
+    ],
+    "entry_sec": 26.4,
+    "blind": true,
+    "blind_entry": {
+     "actions": [
+      {
+       "seat": 7,
+       "action": "fold",
+       "amount": 0,
+       "street": "preflop"
+      },
+      {
+       "seat": 8,
+       "action": "raise",
+       "amount": 600,
+       "street": "preflop"
+      },
+      {
+       "seat": 5,
+       "action": "call",
+       "amount": 500,
+       "street": "preflop"
+      },
+      {
+       "seat": 6,
+       "action": "fold",
+       "amount": 0,
+       "street": "preflop"
+      },
+      {
+       "seat": 5,
+       "action": "check",
+       "amount": 0,
+       "street": "flop"
+      },
+      {
+       "seat": 8,
+       "action": "check",
+       "amount": 0,
+       "street": "flop"
+      },
+      {
+       "seat": 5,
+       "action": "check",
+       "amount": 0,
+       "street": "turn"
+      },
+      {
+       "seat": 8,
+       "action": "bet",
+       "amount": 2200,
+       "street": "turn"
+      },
+      {
+       "seat": 5,
+       "action": "call",
+       "amount": 2200,
+       "street": "turn"
+      },
+      {
+       "seat": 5,
+       "action": "check",
+       "amount": 0,
+       "street": "river"
+      },
+      {
+       "seat": 8,
+       "action": "check",
+       "amount": 0,
+       "street": "river"
+      }
+     ],
+     "winner_seat": null,
+     "entry_sec": 108.8
+    },
+    "reconciled": true,
+    "hand_id": 1
+   },
+   "baseline": {
+    "action_correct": 11,
+    "action_total": 11,
+    "winner_match": null,
+    "board_match": false
+   },
+   "reparse_baseline": {
+    "action_correct": 11,
+    "action_total": 11,
+    "winner_match": null,
+    "board_match": false
+   }
+  },
+  {
+   "hand_id": 2,
+   "truth": {
+    "board": [
+     "9h",
+     "Ks",
+     "Ts",
+     "Qc",
+     "Kd"
+    ],
+    "actions": [
+     {
+      "seat": 8,
+      "action": "raise",
+      "amount": 600,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "call",
+      "amount": 600,
+      "street": "preflop"
+     },
+     {
+      "seat": 6,
+      "action": "call",
+      "amount": 500,
+      "street": "preflop"
+     },
+     {
+      "seat": 7,
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 6,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 8,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 5,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 6,
+      "action": "bet",
+      "amount": 2100,
+      "street": "turn"
+     },
+     {
+      "seat": 8,
+      "action": "fold",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 5,
+      "action": "call",
+      "amount": 2100,
+      "street": "turn"
+     },
+     {
+      "seat": 6,
+      "action": "bet",
+      "amount": 4500,
+      "street": "river"
+     },
+     {
+      "seat": 5,
+      "action": "fold",
+      "amount": 0,
+      "street": "river"
+     }
+    ],
+    "players": [
+     {
+      "seat": 5,
+      "hole_cards": [
+       "7d",
+       "Tc"
+      ],
+      "showed_down": false,
+      "name": "5"
+     },
+     {
+      "seat": 6,
+      "hole_cards": [
+       "2c",
+       "8s"
+      ],
+      "showed_down": false,
+      "name": "6"
+     },
+     {
+      "seat": 7,
+      "hole_cards": [
+       "7h",
+       "Th"
+      ],
+      "showed_down": false,
+      "name": "7"
+     },
+     {
+      "seat": 8,
+      "hole_cards": [
+       "9c",
+       "9s"
+      ],
+      "showed_down": false,
+      "name": "8"
+     }
+    ],
+    "winner_seat": 6,
+    "entry_sec": 112.2,
+    "blind": true,
+    "blind_entry": {
+     "actions": [
+      {
+       "seat": 8,
+       "action": "raise",
+       "amount": 600,
+       "street": "preflop"
+      },
+      {
+       "seat": 5,
+       "action": "call",
+       "amount": 600,
+       "street": "preflop"
+      },
+      {
+       "seat": 6,
+       "action": "call",
+       "amount": 500,
+       "street": "preflop"
+      },
+      {
+       "seat": 7,
+       "action": "fold",
+       "amount": 0,
+       "street": "preflop"
+      },
+      {
+       "seat": 6,
+       "action": "check",
+       "amount": 0,
+       "street": "flop"
+      },
+      {
+       "seat": 8,
+       "action": "check",
+       "amount": 0,
+       "street": "flop"
+      },
+      {
+       "seat": 5,
+       "action": "check",
+       "amount": 0,
+       "street": "flop"
+      },
+      {
+       "seat": 6,
+       "action": "bet",
+       "amount": 2100,
+       "street": "turn"
+      },
+      {
+       "seat": 8,
+       "action": "fold",
+       "amount": 0,
+       "street": "turn"
+      },
+      {
+       "seat": 5,
+       "action": "call",
+       "amount": 2100,
+       "street": "turn"
+      },
+      {
+       "seat": 6,
+       "action": "bet",
+       "amount": 4500,
+       "street": "river"
+      },
+      {
+       "seat": 5,
+       "action": "fold",
+       "amount": 0,
+       "street": "river"
+      }
+     ],
+     "winner_seat": 6,
+     "entry_sec": 105.8
+    },
+    "reconciled": true,
+    "hand_id": 2
+   },
+   "baseline": {
+    "action_correct": 12,
+    "action_total": 12,
+    "winner_match": true,
+    "board_match": false
+   },
+   "reparse_baseline": {
+    "action_correct": 12,
+    "action_total": 12,
+    "winner_match": true,
+    "board_match": false
+   }
+  },
+  {
+   "hand_id": 3,
+   "truth": {
+    "board": [
+     "9h"
+    ],
+    "actions": [
+     {
+      "seat": 5,
+      "action": "raise",
+      "amount": 600,
+      "street": "preflop"
+     },
+     {
+      "seat": 6,
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 7,
+      "action": "call",
+      "amount": 500,
+      "street": "preflop"
+     },
+     {
+      "seat": 8,
+      "action": "call",
+      "amount": 400,
+      "street": "preflop"
+     },
+     {
+      "seat": 7,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 8,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 5,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 7,
+      "action": "check",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 8,
+      "action": "check",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 5,
+      "action": "bet",
+      "amount": 600,
+      "street": "turn"
+     },
+     {
+      "seat": 7,
+      "action": "fold",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 8,
+      "action": "call",
+      "amount": 600,
+      "street": "turn"
+     },
+     {
+      "seat": 8,
+      "action": "check",
+      "amount": 0,
+      "street": "river"
+     },
+     {
+      "seat": 5,
+      "action": "bet",
+      "amount": 3100,
+      "street": "river"
+     },
+     {
+      "seat": 8,
+      "action": "call",
+      "amount": 3100,
+      "street": "river"
+     }
+    ],
+    "players": [
+     {
+      "seat": 5,
+      "hole_cards": [
+       "8c",
+       "9s"
+      ],
+      "showed_down": false,
+      "name": "5"
+     },
+     {
+      "seat": 6,
+      "hole_cards": [
+       "Tc",
+       "8s"
+      ],
+      "showed_down": false,
+      "name": "6"
+     },
+     {
+      "seat": 7,
+      "hole_cards": [
+       "9c",
+       "Js"
+      ],
+      "showed_down": false,
+      "name": "7"
+     },
+     {
+      "seat": 8,
+      "hole_cards": [
+       "3c",
+       "Ks"
+      ],
+      "showed_down": false,
+      "name": "8"
+     }
+    ],
+    "blind": true,
+    "entry_sec": 72.5,
+    "blind_entry": {
+     "actions": [
+      {
+       "seat": 5,
+       "action": "raise",
+       "amount": 600,
+       "street": "preflop"
+      },
+      {
+       "seat": 6,
+       "action": "fold",
+       "amount": 0,
+       "street": "preflop"
+      },
+      {
+       "seat": 7,
+       "action": "call",
+       "amount": 500,
+       "street": "preflop"
+      },
+      {
+       "seat": 8,
+       "action": "call",
+       "amount": 400,
+       "street": "preflop"
+      },
+      {
+       "seat": 7,
+       "action": "check",
+       "amount": 0,
+       "street": "flop"
+      },
+      {
+       "seat": 8,
+       "action": "check",
+       "amount": 0,
+       "street": "flop"
+      },
+      {
+       "seat": 5,
+       "action": "check",
+       "amount": 0,
+       "street": "flop"
+      },
+      {
+       "seat": 7,
+       "action": "check",
+       "amount": 0,
+       "street": "turn"
+      },
+      {
+       "seat": 8,
+       "action": "check",
+       "amount": 0,
+       "street": "turn"
+      },
+      {
+       "seat": 5,
+       "action": "bet",
+       "amount": 600,
+       "street": "turn"
+      },
+      {
+       "seat": 7,
+       "action": "fold",
+       "amount": 0,
+       "street": "turn"
+      },
+      {
+       "seat": 8,
+       "action": "call",
+       "amount": 600,
+       "street": "turn"
+      },
+      {
+       "seat": 8,
+       "action": "check",
+       "amount": 0,
+       "street": "river"
+      },
+      {
+       "seat": 5,
+       "action": "bet",
+       "amount": 3100,
+       "street": "river"
+      },
+      {
+       "seat": 8,
+       "action": "call",
+       "amount": 3100,
+       "street": "river"
+      }
+     ],
+     "winner_seat": null,
+     "entry_sec": 72.5
+    },
+    "hand_id": 3
+   },
+   "baseline": {
+    "action_correct": 9,
+    "action_total": 15,
+    "winner_match": null,
+    "board_match": true
+   },
+   "reparse_baseline": {
+    "action_correct": 9,
+    "action_total": 15,
+    "winner_match": null,
+    "board_match": true
+   }
+  }
+ ]
+}

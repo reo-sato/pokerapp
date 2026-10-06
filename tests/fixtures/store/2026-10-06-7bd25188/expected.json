@@ -1,0 +1,512 @@
+{
+ "session_id": "7bd25188cd8b46cf91f3838dcd2a8100",
+ "setup": {
+  "players": [
+   {
+    "seat": 5,
+    "name": "5",
+    "stack": 100000
+   },
+   {
+    "seat": 6,
+    "name": "6",
+    "stack": 100000
+   },
+   {
+    "seat": 7,
+    "name": "7",
+    "stack": 100000
+   },
+   {
+    "seat": 8,
+    "name": "8",
+    "stack": 100000
+   }
+  ],
+  "sb": 100,
+  "bb": 200,
+  "button_prior": 7,
+  "first_hand_id": 1,
+  "hand_stacks": {
+   "1": {
+    "5": 100000,
+    "6": 100000,
+    "7": 100000,
+    "8": 100000
+   },
+   "2": {
+    "5": 99900,
+    "6": 99800,
+    "7": 101100,
+    "8": 99200
+   },
+   "3": {
+    "5": 102200,
+    "6": 98400,
+    "7": 100900,
+    "8": 98500
+   }
+  },
+  "auto_new_hand": true,
+  "auto_winner": true,
+  "rfid_folds": true
+ },
+ "code": {
+  "main.py": "88c530b1a15f9242",
+  "integration/engine.py": "4ab9de00d94669ab",
+  "core/poker_engine.py": "d42f130da5db32eb",
+  "audio/recognizer.py": "b02d8bb3b4c8f39b",
+  "audio/recorder.py": "6a83bead225894d0",
+  "rfid/reader_thread.py": "f00853bb1362b378"
+ },
+ "hands": [
+  {
+   "hand_id": 1,
+   "truth": {
+    "board": [
+     "3s",
+     "5d",
+     "6s",
+     "6d"
+    ],
+    "actions": [
+     {
+      "seat": 7,
+      "action": "raise",
+      "amount": 800,
+      "street": "preflop"
+     },
+     {
+      "seat": 8,
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 6,
+      "action": "call",
+      "amount": 600,
+      "street": "preflop"
+     },
+     {
+      "seat": 6,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 7,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     }
+    ],
+    "players": [
+     {
+      "seat": 5,
+      "hole_cards": [
+       "Jc",
+       "9h"
+      ],
+      "showed_down": false,
+      "name": "5"
+     },
+     {
+      "seat": 6,
+      "hole_cards": [
+       "4d",
+       "2h"
+      ],
+      "showed_down": false,
+      "name": "6"
+     },
+     {
+      "seat": 7,
+      "hole_cards": [
+       "8s",
+       "Qc"
+      ],
+      "showed_down": false,
+      "name": "7"
+     },
+     {
+      "seat": 8,
+      "hole_cards": [
+       "Ad",
+       "Js"
+      ],
+      "showed_down": false,
+      "name": "8"
+     }
+    ],
+    "notes": "アクションを忘れた　入力不全",
+    "entry_sec": 54.0,
+    "blind": true,
+    "blind_entry": {
+     "actions": [
+      {
+       "seat": 7,
+       "action": "raise",
+       "amount": 800,
+       "street": "preflop"
+      },
+      {
+       "seat": 8,
+       "action": "fold",
+       "amount": 0,
+       "street": "preflop"
+      },
+      {
+       "seat": 5,
+       "action": "fold",
+       "amount": 0,
+       "street": "preflop"
+      },
+      {
+       "seat": 6,
+       "action": "call",
+       "amount": 600,
+       "street": "preflop"
+      },
+      {
+       "seat": 6,
+       "action": "check",
+       "amount": 0,
+       "street": "flop"
+      },
+      {
+       "seat": 7,
+       "action": "check",
+       "amount": 0,
+       "street": "flop"
+      }
+     ],
+     "winner_seat": null,
+     "entry_sec": 34.4
+    },
+    "reconciled": true,
+    "hand_id": 1,
+    "excluded": true,
+    "excluded_reason": "真のアクションの入力不全（オーナーのメモ）"
+   },
+   "baseline": {
+    "action_correct": 3,
+    "action_total": 11,
+    "winner_match": null,
+    "board_match": true
+   },
+   "reparse_baseline": {
+    "action_correct": 3,
+    "action_total": 11,
+    "winner_match": null,
+    "board_match": true
+   }
+  },
+  {
+   "hand_id": 2,
+   "truth": {
+    "board": [],
+    "actions": [
+     {
+      "seat": 8,
+      "action": "raise",
+      "amount": 700,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "call",
+      "amount": 700,
+      "street": "preflop"
+     },
+     {
+      "seat": 6,
+      "action": "fold",
+      "amount": 0,
+      "street": "preflop"
+     },
+     {
+      "seat": 7,
+      "action": "call",
+      "amount": 500,
+      "street": "preflop"
+     },
+     {
+      "seat": 7,
+      "action": "check",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 8,
+      "action": "bet",
+      "amount": 700,
+      "street": "flop"
+     },
+     {
+      "seat": 5,
+      "action": "call",
+      "amount": 700,
+      "street": "flop"
+     },
+     {
+      "seat": 7,
+      "action": "fold",
+      "amount": 0,
+      "street": "flop"
+     },
+     {
+      "seat": 8,
+      "action": "check",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 5,
+      "action": "check",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 8,
+      "action": "check",
+      "amount": 0,
+      "street": "river"
+     },
+     {
+      "seat": 5,
+      "action": "bet",
+      "amount": 3000,
+      "street": "river"
+     },
+     {
+      "seat": 8,
+      "action": "fold",
+      "amount": 0,
+      "street": "river"
+     }
+    ],
+    "players": [
+     {
+      "seat": 5,
+      "hole_cards": [
+       "3c",
+       "Td"
+      ],
+      "showed_down": false,
+      "name": "5"
+     },
+     {
+      "seat": 6,
+      "hole_cards": [
+       "Qh",
+       "4c"
+      ],
+      "showed_down": false,
+      "name": "6"
+     },
+     {
+      "seat": 7,
+      "hole_cards": [
+       "9s",
+       "Kc"
+      ],
+      "showed_down": false,
+      "name": "7"
+     },
+     {
+      "seat": 8,
+      "hole_cards": [
+       "2c",
+       "2d"
+      ],
+      "showed_down": false,
+      "name": "8"
+     }
+    ],
+    "winner_seat": 5,
+    "blind": true,
+    "entry_sec": 45.1,
+    "blind_entry": {
+     "actions": [
+      {
+       "seat": 8,
+       "action": "raise",
+       "amount": 700,
+       "street": "preflop"
+      },
+      {
+       "seat": 5,
+       "action": "call",
+       "amount": 700,
+       "street": "preflop"
+      },
+      {
+       "seat": 6,
+       "action": "fold",
+       "amount": 0,
+       "street": "preflop"
+      },
+      {
+       "seat": 7,
+       "action": "call",
+       "amount": 500,
+       "street": "preflop"
+      },
+      {
+       "seat": 7,
+       "action": "check",
+       "amount": 0,
+       "street": "flop"
+      },
+      {
+       "seat": 8,
+       "action": "bet",
+       "amount": 700,
+       "street": "flop"
+      },
+      {
+       "seat": 5,
+       "action": "call",
+       "amount": 700,
+       "street": "flop"
+      },
+      {
+       "seat": 7,
+       "action": "fold",
+       "amount": 0,
+       "street": "flop"
+      },
+      {
+       "seat": 8,
+       "action": "check",
+       "amount": 0,
+       "street": "turn"
+      },
+      {
+       "seat": 5,
+       "action": "check",
+       "amount": 0,
+       "street": "turn"
+      },
+      {
+       "seat": 8,
+       "action": "check",
+       "amount": 0,
+       "street": "river"
+      },
+      {
+       "seat": 5,
+       "action": "bet",
+       "amount": 3000,
+       "street": "river"
+      },
+      {
+       "seat": 8,
+       "action": "fold",
+       "amount": 0,
+       "street": "river"
+      }
+     ],
+     "winner_seat": 5,
+     "entry_sec": 45.1
+    },
+    "hand_id": 2,
+    "excluded": true,
+    "excluded_reason": "記録のボタンが 1 席ずれていた疑い（オーナーに確認中）"
+   },
+   "baseline": {
+    "action_correct": 4,
+    "action_total": 14,
+    "winner_match": true,
+    "board_match": false
+   },
+   "reparse_baseline": {
+    "action_correct": 4,
+    "action_total": 14,
+    "winner_match": true,
+    "board_match": false
+   }
+  },
+  {
+   "hand_id": 3,
+   "truth": {
+    "board": [
+     "2c",
+     "As",
+     "2d",
+     "9d",
+     "6d"
+    ],
+    "actions": [],
+    "players": [
+     {
+      "seat": 5,
+      "hole_cards": [
+       "6h",
+       "Kh"
+      ],
+      "showed_down": false,
+      "name": "5"
+     },
+     {
+      "seat": 6,
+      "hole_cards": [
+       "Kd",
+       "Ts"
+      ],
+      "showed_down": false,
+      "name": "6"
+     },
+     {
+      "seat": 7,
+      "hole_cards": [
+       "9s",
+       "Ks"
+      ],
+      "showed_down": false,
+      "name": "7"
+     },
+     {
+      "seat": 8,
+      "hole_cards": [
+       "4s",
+       "5h"
+      ],
+      "showed_down": false,
+      "name": "8"
+     }
+    ],
+    "notes": "中断",
+    "blind": true,
+    "entry_sec": 24.9,
+    "blind_entry": {
+     "actions": [],
+     "winner_seat": null,
+     "entry_sec": 24.9
+    },
+    "hand_id": 3,
+    "excluded": true,
+    "excluded_reason": "中断（オーナーのメモ）"
+   },
+   "baseline": {
+    "action_correct": 0,
+    "action_total": 16,
+    "winner_match": null,
+    "board_match": true
+   },
+   "reparse_baseline": {
+    "action_correct": 0,
+    "action_total": 16,
+    "winner_match": null,
+    "board_match": true
+   }
+  }
+ ]
+}
