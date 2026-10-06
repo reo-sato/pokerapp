@@ -362,9 +362,10 @@ class IntegrationThread(threading.Thread):
                          ディーラーがボタンを動かし忘れたとみて、そのハンドのボタンを直して組み直す（config
                          `engine.button_from_deal`, 既定 True, 2026-09-29）。読んだ時刻は在否（`seat_presence` の
                          `since`）から取り、`deal_order` の信号として記録する（replay も同じ判断）。False でも記録はする。
-            live_hand: フロップが配られたら、進行中のハンド（ここまでの記録）を `JsonWriter.write_live_hand` に
+            live_hand: 手札が配られたら、進行中のハンド（ここまでの記録）を `JsonWriter.write_live_hand` に
                          書き、ハンドが終わったら消す（真のアクション入力の画面がハンドの途中で入力する, オーナー
-                         2026-09-30）。ライブのロガーだけ True（既定 False = replay・テストは書かない）。
+                         2026-09-30 はフロップから → 2026-10-06 にプリフロップの配布から）。ライブのロガーだけ True
+                         （既定 False = replay・テストは書かない）。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -555,7 +556,7 @@ class IntegrationThread(threading.Thread):
             self._drain_rfid_queue()
 
             self._publish_table_state_if_due()
-            self._publish_live_hand()       # 進行中のハンド（フロップから, 真のアクション入力の画面）
+            self._publish_live_hand()       # 進行中のハンド（手札を配ったときから, 真のアクション入力の画面）
             self._check_deal_presence()     # 手札の配布（ADR-0063）
             self._check_deal_order()        # 配った順（ボタンの置き忘れ）
             self._check_table_cleared()     # 片付け（プレーの終わり）
@@ -3613,17 +3614,18 @@ class IntegrationThread(threading.Thread):
         self._table_state_published_at = self._clock()
         self._table_state_writer.publish(state, observed_at=observed_at)
 
-    # ――― 進行中のハンド（真のアクション入力の画面, オーナー 2026-09-30）―――
-
-    _FLOP_OR_LATER = frozenset({"flop", "turn", "river", "showdown"})
+    # ――― 進行中のハンド（真のアクション入力の画面, オーナー 2026-09-30 / 2026-10-06）―――
 
     def _publish_live_hand(self) -> None:
-        """フロップが配られたハンドの、ここまでの記録を書く（変わったときだけ）。フロップの前・ハンドの外は消す。"""
+        """手札が配られたハンドの、ここまでの記録を書く（変わったときだけ）。ハンドの外は消す。
+
+        RFID の自動開始では配った瞬間にハンドが開く。「ハンド開始」/ n で先に始めたハンドは、席のリーダーがあれば
+        最初の手札が届くまで待つ（`_waiting_for_deal`）。席のリーダーが無い構成では始めた時点から。
+        """
         if not self._live_hand:
             return
         gs = self._game_state
-        dealt = len(self._board_cards) >= 3 or getattr(gs, "street", None) in self._FLOP_OR_LATER
-        if not (self._hand_open and dealt):
+        if not self._hand_open or self._waiting_for_deal():
             self._clear_live_hand()
             return
         signature = (

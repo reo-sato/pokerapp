@@ -1,10 +1,13 @@
 """tests/test_live_hand.py
 
 オーナー 2026-09-30: 「ハンド進行中に真のアクションを入力したいので、フロップがディールされるタイミングで UI に
-表示するようにしてください」。
+表示するようにしてください」→ 2026-10-06: 「ハンド情報を、UI にプリフロップのディールが行われたタイミングで
+表示できますか？」。
 
-- ロガー（`IntegrationThread(live_hand=True)`）はフロップが配られた時点から、そのハンドのここまでの記録を
+- ロガー（`IntegrationThread(live_hand=True)`）は手札が配られた時点から、そのハンドのここまでの記録を
   `logs/<sid>.live_hand.json` に書き、ハンドが終わったら消す（ハンドの記録 `logs/<sid>.json` には入れない）。
+  RFID の自動開始は配った瞬間、「ハンド開始」/ n で先に始めたハンドは席のリーダーがあれば最初の手札が届いた時点、
+  席のリーダーが無い構成では始めた時点から。
 - 真のアクション入力の画面は、それを一覧のいちばん上に「進行中」で出し、ふつうのハンドと同じように開いて保存できる。
   進行中は「記録どおり」にできず、途中で保存してもブラインドのまま。ハンドが終わると同じハンドに保存した内容が付き、
   記録と照らし合わせる。
@@ -63,19 +66,23 @@ class _Logger:
 
 
 class TestLoggerWritesTheHandInProgress:
-    def test_from_the_flop_until_the_hand_ends(self, tmp_path):
+    def test_from_the_start_until_the_hand_ends(self, tmp_path):
+        """席のリーダーが無い構成: 「ハンド開始」の時点から（プリフロップのうちから入れられる）。"""
         lg = _Logger(tmp_path)
         lg.t._json_writer.ensure_created()          # noqa: SLF001 — ロガーは起動時に作る
+        lg.t._publish_live_hand()                   # noqa: SLF001
+        assert lg.live() is None                     # ハンドの外は出さない
         lg.event("new_hand", "ハンド開始")
-        lg.say("コール")
-        lg.say("コール")
-        assert lg.live() is None                     # プリフロップの間は出さない
-        lg.say("チェック")                            # プリフロップが閉じる = フロップ
         live = lg.live()
-        assert (live["hand_id"], live["street"], live["in_progress"]) == (1, "flop", True)
-        assert [(a["seat"], a["action"]) for a in live["actions"]] == [(6, "call"), (4, "call"), (5, "check")]
+        assert (live["hand_id"], live["street"], live["in_progress"], live["actions"]) == (1, "preflop", True, [])
         assert [p["seat"] for p in live["players"]] == [4, 5, 6]
         assert live["players"][0]["stack_start"] == 10000 and live["button_seat"] == 6
+        lg.say("コール")
+        lg.say("コール")
+        assert [(a["seat"], a["action"]) for a in lg.live()["actions"]] == [(6, "call"), (4, "call")]
+        lg.say("チェック")                            # プリフロップが閉じる = フロップ
+        live = lg.live()
+        assert (live["street"], len(live["actions"])) == ("flop", 3)
         assert lg.recorded() == []                   # ハンドの記録には入れない
         lg.say("チェック")
         assert len(lg.live()["actions"]) == 4        # 進むたびに書き直す
@@ -89,6 +96,43 @@ class TestLoggerWritesTheHandInProgress:
         for text in ("コール", "コール", "チェック"):
             lg.say(text)
         assert lg.gs.street == "flop" and lg.live() is None
+
+
+def _live_of(log_dir: Path, sid: str) -> dict | None:
+    path = log_dir / f"{sid}.live_hand.json"
+    return json.loads(path.read_text(encoding="utf-8"))["hand"] if path.is_file() else None
+
+
+class TestWithSeatReaders:
+    """席のリーダーがある卓（店舗）: 手札が配られた時点から。"""
+
+    def test_the_automatic_start_shows_it_when_the_cards_are_dealt(self, tmp_path):
+        from tests.test_rfid_folds import HOLES, _Table
+
+        tb = _Table(tmp_path)
+        tb.t._live_hand = True                      # noqa: SLF001 — ライブのロガー
+        tb.t._publish_live_hand()                   # noqa: SLF001
+        assert _live_of(tmp_path, "folds") is None   # 配る前
+        tb.deal()
+        tb.t._publish_live_hand()                   # noqa: SLF001 — run() の 1 周
+        live = _live_of(tmp_path, "folds")
+        assert (live["hand_id"], live["street"], live["actions"]) == (1, "preflop", [])
+        assert {p["seat"]: p["hole_cards"] for p in live["players"]} == HOLES
+
+    def test_a_hand_started_by_n_waits_for_the_first_hole_card(self, tmp_path):
+        from tests.test_hand_before_deal import _ManualTable
+
+        tb = _ManualTable(tmp_path)
+        tb.t._live_hand = True                      # noqa: SLF001
+        tb.type_n()
+        tb.t._publish_live_hand()                   # noqa: SLF001
+        assert _live_of(tmp_path, "folds") is None   # n のあと、まだ配っていない
+        tb.tick(2.0)
+        tb.seat_card(4, "Jd")
+        tb.t._publish_live_hand()                   # noqa: SLF001
+        live = _live_of(tmp_path, "folds")
+        assert (live["street"], live["actions"]) == ("preflop", [])
+        assert next(p for p in live["players"] if p["seat"] == 4)["hole_cards"] == ["Jd"]
 
 
 def _completed_hand() -> dict:
@@ -171,6 +215,20 @@ class TestPageShowsTheHandInProgress:
         assert done["ground_truth"]["blind"] is True and not done["ground_truth"].get("reconciled")
         rows = list_hands(log_dir, SID, gt)["hands"]
         assert [h["hand_id"] for h in rows] == [2, 1] and not rows[0].get("in_progress")
+
+    def test_a_preflop_hand_shows_before_the_flop(self, log_dir):
+        """プリフロップ（ボード空・アクション 0 件）の進行中のハンドも一覧に出て、開いて途中まで保存できる。"""
+        preflop = dict(_live_hand(), board=[], actions=[], street="preflop")
+        (log_dir / f"{SID}.live_hand.json").write_text(json.dumps({"session_id": SID, "hand": preflop}),
+                                                       encoding="utf-8")
+        gt = GroundTruthRepository(log_dir)
+        row = list_hands(log_dir, SID, gt)["hands"][0]
+        assert (row["hand_id"], row["in_progress"], row["street"], row["board"]) == (2, True, "preflop", [])
+        detail = hand_detail(log_dir, SID, 2, gt, blind_every=1)
+        assert detail["in_progress"] is True and detail["blind"] is True
+        first = dict(_PREFLOP, actions=_PREFLOP["actions"][:1])
+        status, body = save_ground_truth(log_dir, SID, 2, {"source": "manual-edit", "hand": first}, gt)
+        assert status == 200 and body["in_progress"] is True
 
     def test_a_stale_file_for_a_finished_hand_is_ignored(self, log_dir):
         (log_dir / f"{SID}.live_hand.json").write_text(

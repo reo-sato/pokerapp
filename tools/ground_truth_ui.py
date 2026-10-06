@@ -79,7 +79,7 @@ _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 _AUDIO_RE = re.compile(r"^[0-9]{6,16}\.wav$")
 # 台本のハンドのセッション（`tools/test_script.py`）。正解は台本なので入力は要らない
 _SCRIPT_SUFFIX = ".script.json"
-# 進行中のハンド（ロガーがフロップから書く。ハンドが終わると消える, オーナー 2026-09-30）
+# 進行中のハンド（ロガーが手札を配ったときから書く。ハンドが終わると消える, オーナー 2026-09-30 / 2026-10-06）
 _LIVE_SUFFIX = ".live_hand.json"
 # タイムラインに出す範囲: ハンドの始まり（配布）の少し前から、次のハンドの始まりまで
 _TIMELINE_BEFORE_SEC = 10.0
@@ -233,7 +233,8 @@ def list_hands(
 def _load_live_hand(log_dir: Path, session_id: str) -> Optional[dict]:
     """進行中のハンド（`logs/{session_id}.live_hand.json`, `in_progress` 付き）。無い・壊れている・もう確定したなら None。
 
-    ハンドの途中で真のアクションを入れるため、ロガーがフロップが配られた時点から書く（オーナー 2026-09-30）。
+    ハンドの途中で真のアクションを入れるため、ロガーが手札を配った時点から書く（オーナー 2026-09-30 はフロップから、
+    2026-10-06 にプリフロップの配布から）。
     """
     path = log_dir / f"{session_id}{_LIVE_SUFFIX}"
     if not path.is_file():
@@ -1486,7 +1487,7 @@ function renderList(){
     const acc = h.accuracy ? (h.accuracy.all_match ? '<span class="tag t-ok">一致</span>' : `<span class="tag t-bad">差分 ${h.accuracy.mismatches}</span>`) : "";
     const bl = h.ground_truth && h.ground_truth.blind && !h.in_progress
       ? (h.ground_truth.reconciled ? '<span class="tag t-edit">ブラインド→照合済</span>' : '<span class="tag t-warn">照らし合わせ待ち</span>') : "";
-    // 進行中のハンド（フロップから出る）: 入れたところまで保存でき、ハンドが終わってから照らし合わせる
+    // 進行中のハンド（手札を配ったときから出る）: 入れたところまで保存でき、ハンドが終わってから照らし合わせる
     const live = h.in_progress
       ? `<span class="tag t-live">進行中（${esc(STREET_JA[h.street] || h.street || "")}）</span>`
         + (h.ground_truth ? '<span class="tag t-edit">途中まで保存</span>' : "") : "";
