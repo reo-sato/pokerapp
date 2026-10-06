@@ -30,3 +30,13 @@ bool pn5180_reader_get_card(uint8_t reader_index, pn5180_card_t *out);
 
 // 全 reader を 1 周ポーリングしてキャッシュを更新する（main の poll task から周期実行）。
 void pn5180_reader_poll_once(void);
+
+// 使える reader の一覧（bit k = reader k）。起動時に未通電・init 失敗で飛ばした reader（dev=NULL = 常にカード無し）と、
+// 実行中に SPI/BUSY が PN5180_FAULT_STREAK_LIMIT 回続けて答えなかった reader は 0。host は Get UID の P2=0xFE で
+// 問い合わせる（契約 v1.11 §6, 2026-10-06 店舗: 真ん中のボードの reader が 1 時間「札なし」と答え続け、host からは
+// 区別できなかった）。init が終わる前（pn5180_reader_init_done() が false）は意味が無い。
+uint16_t pn5180_reader_ready_mask(void);
+
+// 起動時の初期化（pn5180_reader_init）が終わったか（成功・失敗とも）。USB は init の前に上がるので、それまで host に
+// 一覧を返さない（P2=0xFE は SW=69 85）。
+bool pn5180_reader_init_done(void);

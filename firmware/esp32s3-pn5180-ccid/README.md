@@ -50,6 +50,32 @@ idf.py build
 idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB-Serial/JTAG)でも可
 ```
 
+### 書き換え（店舗 PC に ESP-IDF がある場合, v1.11 の再起動の命令を入れるとき）
+
+ロガーを更新すると `C:\PokerHandLogger\firmware\esp32s3-pn5180-ccid` にこのフォルダが入る。スタートメニューの
+「ESP-IDF 5.3 PowerShell」（ESP-IDF の環境が入った PowerShell）で、卓の読み取り装置を書き込み用の口につないでから:
+
+```powershell
+cd C:\PokerHandLogger\firmware\esp32s3-pn5180-ccid; idf.py set-target esp32s3; idf.py build; idf.py flash
+```
+
+- 書き込みの口とつなぎ方（UART 側 = CP2102N か、native USB を書き込みモードにするか）は 2026-09 の実機の立ち上げと同じ。
+  ポートが自動で見つからないときは `idf.py -p COM5 flash` のように番号を付ける。
+- 書き込んだら卓の USB（native USB 側）を挿し直し、`python tools/probe_pcsc.py list`（RDP なら中継を通した
+  `python tools/rfid_relay.py status`）で「使えるリーダー」の一覧が出ることを確かめる。
+
+## 読み取り装置の再起動と使えるリーダーの一覧（契約 v1.11 §6, 2026-10-06）
+
+- 店舗で真ん中の board reader が 1 時間「札なし」と答え続け（host にはエラーが出ない）、ESP32 の再起動で直った。
+  起動のときに init に失敗した reader（`dev=NULL`）は Get UID に `6A 81` を返し続けるので、host は区別できなかった。
+- **`FF CA 00 FE 00`** → 使える reader の一覧（2 byte, little endian, bit k = reader k）+ `90 00`。起動のときに未通電・
+  init 失敗で飛ばした reader と、**実行中に RF の ON/OFF・RF 設定のロード（SPI/BUSY）が `PN5180_FAULT_STREAK_LIMIT`
+  （20）回続けて失敗した reader** は 0（`pn5180_reader.c:note_reader_fault`。成功した inventory で戻る）。init が
+  終わる前（USB は init の前に上がる）は `69 85`。
+- **`FF CA 00 FD 00`** → `90 00` を返してから 300 ms 後に `esp_restart()`（USB は列挙し直し、init の共有 RST で
+  全 PN5180 がリセットされる）。host は卓に札が無いときだけ送る（ロガーの `rr` / 自動, `rfid/reader_thread.py`）。
+- 旧 firmware は両方 `6A 86`（範囲外の P2）= host は「一覧なし・命令なし」として動き、USB の挿し直しを案内する。
+
 ## アーキテクチャ（実機: 本番 11 reader / CCID slot は 1 つ / 配線は 13 台ぶん + CD74HC4067 MUX）
 
 - **CCID slot は常に 1 つ、物理リーダーは Get UID の P2 で選ぶ**（契約 **v1.2 §6** / ADR-0052）。
@@ -215,6 +241,7 @@ python tools/probe_pcsc.py watch     # カードをかざすと UID 表示 → �
 | §3-4 reader_name（1 つ）↔ 物理 reader index | `usb_descriptors.c`（EP/IF）, host config の `reader` | `probe_pcsc list` |
 | §5 ATR | `ccid_slot.c`（`ATR[]` + IccPowerOn） | `probe_pcsc check` |
 | §6 Get UID `FF CA 00 <k> 00` / 台数 `FF CA 00 FF 00` | `ccid_slot.c`（`handle_apdu`） | `probe_pcsc list` / `watch` |
+| §6 一覧 `FF CA 00 FE 00` / 再起動 `FF CA 00 FD 00`（v1.11） | `ccid_slot.c` + `pn5180_reader.c`（`pn5180_reader_ready_mask`） | `probe_pcsc list` / `restart`（RDP は `rfid_relay.py status` / `restart`） |
 | §7 UID 4/7/8B 生バイト（重ね置きは連結） | `pn5180_reader.c` → `ccid_slot.c` | `probe_pcsc watch` |
 | §8 present/removed・hot-plug | `pn5180_reader.c`（poll）+ host debounce | `probe_pcsc watch` |
 

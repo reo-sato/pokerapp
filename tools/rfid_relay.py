@@ -9,6 +9,7 @@ RDP で操作する店舗 PC では、RDP のセッションの中のアプリ�
     python tools/rfid_relay.py serve            # 中継を動かす（タスクが使う。ログは logs/rfid_relay.log）
     python tools/rfid_relay.py status           # 中継が動いているか・リーダーごとの読み取り
     python tools/rfid_relay.py watch --seconds 60   # 札を置く・外すたびに 1 行出す（中継を通した読み取りの確認）
+    python tools/rfid_relay.py restart          # 読み取り装置（ESP32）を再起動して、つなぎ直したあとの様子を出す
 
 中継の登録と起動（管理者）: installer/rfid_relay_task.ps1
 """
@@ -122,25 +123,46 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 def describe(snapshot: dict | None, readers: list[dict], now: float) -> tuple[bool, list[str]]:
-    """中継の読み取りを人が読む形に。(使えるか, 行)。"""
+    """中継の読み取りを人が読む形に。(使えるか, 行)。
+
+    firmware が使えるリーダーの一覧（契約 v1.11 §6）を返すときは、一覧に無いリーダー（起動のときに初期化できなかった・
+    途中で答えなくなった = 札を置いても「札なし」）も ✗ にする。
+    """
+    from rfid.reader_thread import _reader_index_of
+
     if snapshot is None:
         return False, ["中継: 動いていません（installer\\rfid_relay_task.ps1 で登録・起動）"]
+    if snapshot.get("restarting"):
+        return False, ["中継: 読み取り装置を再起動しています（つなぎ直すまで数秒〜数十秒）"]
     connected, configured = snapshot.get("connected", 0), snapshot.get("configured", 0)
     ok = snapshot.get("state") == "running" and connected == configured and configured > 0
     lines = [f"中継: 動いています（リーダー {connected}/{configured} 台）"
              + ("" if ok else " — つながっていないリーダーがあります")]
     table = snapshot.get("readers") or {}
-    for label, key in _keys(readers):
+    ready = snapshot.get("ready") if isinstance(snapshot.get("ready"), dict) else {}
+    unusable = 0
+    for i, ((label, key), cfg) in enumerate(zip(_keys(readers), readers)):
         entry = table.get(key)
         if not isinstance(entry, dict):
             lines.append(f"  ✗ {label:<14} つながっていません")
             ok = False
+            continue
+        listed = ready.get(str(cfg.get("name", "")))
+        if isinstance(listed, list) and _reader_index_of(cfg, i) not in listed:
+            lines.append(f"  ✗ {label:<14} 使えません（読み取り装置が「札なし」と答え続けます）")
+            ok = False
+            unusable += 1
             continue
         age = now - float(entry.get("at") or 0)
         uids = entry.get("uids") or []
         state = "読み取りが止まっています" if age > STALE_SEC else (f"札 {len(uids)} 枚" if uids else "札なし")
         lines.append(f"  {'✓' if age <= STALE_SEC else '✗'} {label:<14} {state}")
         ok = ok and age <= STALE_SEC
+    if unusable:
+        lines.append("  → 卓に札が無いときに読み取り装置を再起動してください: python tools/rfid_relay.py restart"
+                     "（直らなければ配線・電源）")
+    elif ready and all(v is None for v in ready.values()):
+        lines.append("  （使えるリーダーの一覧は出ていません: 読み取り装置のファームウェアが古いか、起動の途中です）")
     return ok, lines
 
 
@@ -154,6 +176,45 @@ def cmd_status(args: argparse.Namespace) -> int:
             break
         time.sleep(0.5)
     print("\n".join(lines))
+    print(f"\n結果: {'PASS ✅' if ok else 'FAIL ❌'}")
+    return 0 if ok else 1
+
+
+def cmd_restart(args: argparse.Namespace) -> int:
+    """読み取り装置（ESP32）を再起動する（中継を通して）。卓に札が無いときに使う（再起動のあいだは全リーダーが読めない）。"""
+    rfid_cfg = _rfid_config()
+    client = RelayClient(port=_port(args, rfid_cfg))
+    if client.fetch() is None:
+        print("中継: 動いていません（installer\\rfid_relay_task.ps1 で登録・起動）")
+        return 1
+    result = client.restart()
+    if result is None:
+        print("中継に届きませんでした。")
+        return 1
+    if result.get("unsupported"):
+        print("中継が古い版です（再起動の命令がありません）。管理者で installer\\rfid_relay_task.ps1 を"
+              "もう一度実行して、中継を新しい版で動かし直してください。")
+        return 1
+    if not result.get("ok"):
+        per = result.get("results") or {}
+        if per and all(v is False for v in per.values()):
+            print("読み取り装置のファームウェアに再起動の命令がありません（古い版）。USB を抜いて挿し直してください。")
+        else:
+            print(f"再起動の命令を送れませんでした: {per or result}")
+        return 1
+    print("読み取り装置を再起動しています…（全リーダーが数秒読めません）")
+    deadline = time.time() + max(5.0, float(args.wait))
+    time.sleep(1.0)
+    ok, lines = False, []
+    while time.time() < deadline:
+        snap = client.fetch()
+        if snap is not None and not snap.get("restarting"):
+            ok, lines = describe(snap, _readers(rfid_cfg), time.time())
+            ready = snap.get("ready") or {}
+            if ok or (ready and all(isinstance(v, list) for v in ready.values())):
+                break
+        time.sleep(0.5)
+    print("\n".join(lines) if lines else "再起動のあと、まだつながっていません（status で確かめてください）。")
     print(f"\n結果: {'PASS ✅' if ok else 'FAIL ❌'}")
     return 0 if ok else 1
 
@@ -200,6 +261,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch = sub.add_parser("watch", help="札を置く・外すたびに 1 行出す")
     p_watch.add_argument("--seconds", type=float, default=60.0)
     p_watch.set_defaults(func=cmd_watch)
+    p_restart = sub.add_parser("restart", help="読み取り装置（ESP32）を再起動する（卓に札が無いときに）")
+    p_restart.add_argument("--wait", type=float, default=40.0, help="つなぎ直すのを待つ秒数")
+    p_restart.set_defaults(func=cmd_restart)
     return parser
 
 

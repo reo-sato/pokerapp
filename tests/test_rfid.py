@@ -28,6 +28,8 @@ from rfid.bridge import (
     bridge_read_uids,
     call_bridge_factory,
     query_reader_count,
+    query_ready_readers,
+    request_device_restart,
     split_uid_response,
 )
 from rfid.card_master import CardMaster, bytes_to_tag_id, normalize_tag_id
@@ -428,6 +430,39 @@ class TestQueryReaderCount:
         reader = _FakeReader(bytes([2]), exc=RuntimeError("boom"), name="boom reader")
         self._install_fake_pyscard(monkeypatch, reader)
         assert query_reader_count("boom reader") is None
+
+
+class TestReadyReadersAndRestart:
+    """使える reader の一覧（`FF CA 00 FE 00`）と読み取り装置の再起動（`FF CA 00 FD 00`）（契約 v1.11 §6）。"""
+
+    _install = staticmethod(TestQueryReaderCount._install_fake_pyscard)
+
+    def test_ready_mask_lists_the_initialised_readers(self, monkeypatch):
+        reader = _FakeReader(bytes([0xFF, 0x05]), name="mask reader")   # 0..7 と 8・10（9 が初期化できなかった）
+        self._install(monkeypatch, reader)
+        assert query_ready_readers("mask reader") == {0, 1, 2, 3, 4, 5, 6, 7, 8, 10}
+        assert reader.apdus == [[0xFF, 0xCA, 0x00, 0xFE, 0x00]]
+
+    def test_old_firmware_has_no_ready_mask(self, monkeypatch):
+        reader = _FakeReader(b"", sw=(0x6A, 0x86), name="old firmware")
+        self._install(monkeypatch, reader)
+        assert query_ready_readers("old firmware") is None
+
+    def test_restart_request(self, monkeypatch):
+        reader = _FakeReader(b"", name="restart reader")
+        self._install(monkeypatch, reader)
+        assert request_device_restart("restart reader") is True
+        assert reader.apdus == [[0xFF, 0xCA, 0x00, 0xFD, 0x00]]
+
+    def test_old_firmware_cannot_restart(self, monkeypatch):
+        reader = _FakeReader(b"", sw=(0x6A, 0x86), name="old firmware")
+        self._install(monkeypatch, reader)
+        assert request_device_restart("old firmware") is False
+
+    def test_restart_without_the_reader(self, monkeypatch):
+        reader = _FakeReader(b"", name="present reader")
+        self._install(monkeypatch, reader)
+        assert request_device_restart("some other reader") is None
 
 
 class TestCallBridgeFactory:

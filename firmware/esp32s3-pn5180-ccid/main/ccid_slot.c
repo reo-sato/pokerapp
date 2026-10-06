@@ -18,6 +18,8 @@
 //    （例: 8B × 2 枚 = 16 byte + 90 00）。host 側は応答長から枚数を割り出して分割する必要がある。
 #include <string.h>
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "ccid_slot.h"
 #include "app_config.h"
 #include "pn5180_reader.h"
@@ -122,8 +124,42 @@ static size_t put_header(uint8_t *out, uint8_t type, uint32_t data_len,
 // 常に 1 つ（CCID_SLOT_COUNT=1）にして、11 台の物理リーダーは pseudo-APDU の P2 で指定する。
 //   FF CA 00 <k> 00  (k = 0..PN5180_READER_COUNT-1) → reader k の UID 連結 + 90 00 / 無しは 6A 81
 //   FF CA 00 FF 00                                  → <N>(1 byte = 物理 reader 数) + 90 00
-//   k >= PN5180_READER_COUNT                        → 6A 86（P1/P2 不正）
-// k=0 は v1.0/1.1 の `FF CA 00 00 00` と同一バイト列（後方互換）。
+//   FF CA 00 FE 00                                  → 使える reader の一覧（2 byte, little endian,
+//                                                     bit k = reader k が起動時に初期化でき、いまも SPI/BUSY が
+//                                                     答える）+ 90 00（v1.11）。起動時の init が終わる前は 69 85
+//   FF CA 00 FD 00                                  → 90 00 を返してから ESP32 を再起動する（v1.11。USB は
+//                                                     いったん切れて列挙し直し、全 PN5180 は起動時の共有 RST で
+//                                                     リセットされる = USB を挿し直したときと同じ。電源は切れない）
+//   k >= PN5180_READER_COUNT（上の 3 つを除く）     → 6A 86（P1/P2 不正）
+// k=0 は v1.0/1.1 の `FF CA 00 00 00` と同一バイト列（後方互換）。旧 firmware は 0xFE / 0xFD に 6A 86 を返すので、
+// host はそれで「この命令が無い firmware」と分かる。
+
+#define READY_MASK_P2 0xFE
+#define RESTART_P2 0xFD
+// 物理 reader の index が予約した P2 と重ならないこと・一覧が 2 byte に収まること（メッセージは ASCII 固定）
+_Static_assert(PN5180_READER_COUNT < RESTART_P2, "reader index must stay below the reserved P2 values 0xFD-0xFF");
+_Static_assert(PN5180_READER_COUNT <= 16, "the ready mask (P2=0xFE) is 2 bytes: at most 16 readers");
+// 再起動を応答のあとにする（応答の bulk IN を送り終える時間）
+#define RESTART_DELAY_MS 300
+
+static void restart_cb(void *arg) {
+    (void)arg;
+    esp_restart();
+}
+
+static void schedule_restart(void) {
+    static esp_timer_handle_t timer;
+    if (!timer) {
+        const esp_timer_create_args_t args = {.callback = restart_cb, .name = "ccid_restart"};
+        if (esp_timer_create(&args, &timer) != ESP_OK) {
+            esp_restart();               // タイマーが作れなければすぐ（応答は届かないが host は再列挙で分かる）
+            return;
+        }
+    }
+    esp_timer_stop(timer);               // 2 回目の要求は時間を延ばすだけ
+    esp_timer_start_once(timer, (uint64_t)RESTART_DELAY_MS * 1000);
+}
+
 static size_t handle_apdu(const uint8_t *apdu, size_t apdu_len,
                           uint8_t *resp, size_t resp_max) {
     // Get UID: CLA=FF INS=CA P1=00 P2=<reader index>（末尾 Le は省略され 4 byte のこともある）
@@ -142,6 +178,37 @@ static size_t handle_apdu(const uint8_t *apdu, size_t apdu_len,
             }
             resp[0] = 0x6A;
             resp[1] = 0x81;
+            return 2;
+        }
+        // 使える reader の一覧（P2=0xFE, 契約 v1.11 §6）: 起動時に未通電・init 失敗で飛ばした reader（dev=NULL）と、
+        // 実行中に SPI/BUSY が答えなくなった reader は「札なし」と答え続けるので、host が知らせる・再起動を決められる
+        // ようにする。
+        if (k == READY_MASK_P2) {
+            if (!pn5180_reader_init_done()) {
+                // 起動直後（USB は上がったが PN5180 の init 中）。一覧はまだ無い = 69 85（host はあとで聞き直す）。
+                resp[0] = 0x69;
+                resp[1] = 0x85;
+                return 2;
+            }
+            if (resp_max >= 4) {
+                const uint16_t mask = pn5180_reader_ready_mask();
+                resp[0] = (uint8_t)(mask & 0xFF);
+                resp[1] = (uint8_t)(mask >> 8);
+                resp[2] = 0x90;
+                resp[3] = 0x00;
+                return 4;
+            }
+            resp[0] = 0x6A;
+            resp[1] = 0x81;
+            return 2;
+        }
+        // 再起動（P2=0xFD, 契約 v1.11 §6）: 応答を返してから esp_restart()。host は卓に札が無いとき（ハンドの間）に
+        // だけ送る（再起動中は全 reader が読めない）。
+        if (k == RESTART_P2) {
+            ESP_LOGW(TAG, "host の要求で再起動します（%d ms 後）", RESTART_DELAY_MS);
+            schedule_restart();
+            resp[0] = 0x90;
+            resp[1] = 0x00;
             return 2;
         }
         // 範囲外の reader index → 6A 86（config の reader が firmware の台数を超えている）。

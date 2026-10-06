@@ -470,6 +470,16 @@ def _make_rfid_source(rfid_cfg: dict):
     return AutoRFIDSource(RelayClient(port=relay_port(rfid_cfg)))
 
 
+def _rfid_device_kwargs(rfid_cfg: dict, source, on_notice=None) -> dict:
+    """読み取り装置（ESP32）の見張りと再起動（店舗 2026-10-06, 契約 v1.11 §6）。`rfid.auto_restart`（既定 true）=
+    使えないリーダーがあれば卓に札が無いときに自動で再起動を頼む。`rr` はいつでも頼める（卓が空いてから送る）。"""
+    return {
+        "device": source,
+        "on_notice": on_notice,
+        "auto_restart": bool(rfid_cfg.get("auto_restart", True)),
+    }
+
+
 def _rfid_not_connected_message(configured: int) -> str:
     task = Path(__file__).resolve().parent / "installer" / "rfid_relay_task.ps1"
     return (
@@ -491,6 +501,8 @@ def _rfid_status_message(health: dict, source) -> str | None:
         return _rfid_not_connected_message(int(health.get("configured") or 0))
     if state == "stopped":
         return "⚠ RFID の読み取りが止まりました。ロガーを起動し直してください。"
+    if state == "restarting":
+        return "RFID: 読み取り装置を再起動しています（数秒、札が読めません）…"
     if state != "running":
         return None
     if getattr(source, "mode", "") != "relay":
@@ -499,6 +511,8 @@ def _rfid_status_message(health: dict, source) -> str | None:
     if snap is None:
         return ("⚠ RFID: 中継（RDP の外の読み取り）が止まっています。札が読めません。管理者で "
                 "installer\\rfid_relay_task.ps1 をもう一度実行してください。")
+    if snap.get("restarting"):
+        return "RFID: 読み取り装置を再起動しています（数秒、札が読めません）…"
     connected, configured = snap.get("connected", 0), snap.get("configured", 0)
     if not connected:
         return (f"⚠ RFID: 中継は動いていますが、リーダーにつながっていません（設定 {configured} 台）。"
@@ -745,6 +759,7 @@ def run_cli(script: str | None = None) -> None:
                 bridge_factory=rfid_source.bridge,
                 reader_present=rfid_source.present,
                 **_rfid_tracking_kwargs(rfid_cfg),
+                **_rfid_device_kwargs(rfid_cfg, rfid_source, on_notice=_print_notice),
             )
             print("RFID pyscardスレッド起動。")
         rfid_thread.start()
@@ -836,6 +851,7 @@ def run_cli(script: str | None = None) -> None:
               "役名もマックも 8 秒無ければ手札から判定。決まらないときは w <席>。")
     print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー（分けたら w <席> <席>）  [r <席> <金額>]=リバイ")
     print("ミスディール訂正: [cb <位置>]=ボードの N 枚目を取り消し  [cs <席>]=その席の札を読み直し")
+    print("リーダー: [rr]=読み取り装置（ESP32）を再起動（卓に札が無いときに送ります。読めないリーダーがあるとき）")
     print("席: [name <席> <名前>]=その席の人（参加）  [name <席> -]=空席（次のハンドから配られない）"
           "  スタック 0 の席は r で買い足すまで配られません")
     print("ブラインド: [blinds <SB> <BB>]=次のハンドからブラインドを変える（例: blinds 200 400）")
@@ -953,6 +969,13 @@ def run_cli(script: str | None = None) -> None:
                     action="set_blinds", amount=bb, timestamp=_time.time(), raw_text=f"{sb}/{bb}",
                 ))
                 print(f"ブラインド {sb}/{bb} を送信しました（次のハンドから）")
+            elif cmd == "rr":
+                # 読み取り装置の再起動（契約 v1.11 §6）。卓に札が無くなったら RFID のスレッドが送る（結果は ● で出る）
+                if rfid_thread is None or not hasattr(rfid_thread, "request_restart"):
+                    print("RFID のリーダー（PC/SC）を使っていないので再起動できません")
+                else:
+                    rfid_thread.request_restart()
+                    print("読み取り装置の再起動を頼みました（卓に札が無いときに送ります）")
             elif cmd in ("cb", "cs") and len(parts) >= 2:
                 # ミスディール訂正（ADR-0054）。状態変更は他と同じく queue 経由。
                 try:
@@ -1127,6 +1150,7 @@ def run_gui() -> None:
                 bridge_factory=rfid_source.bridge,
                 reader_present=rfid_source.present,
                 **_rfid_tracking_kwargs(rfid_cfg),
+                **_rfid_device_kwargs(rfid_cfg, rfid_source),
             )
 
     # HTTP transport の場合、rfid_receiver を GUI に渡してステータス表示する

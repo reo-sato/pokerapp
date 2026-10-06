@@ -494,7 +494,23 @@ static pn5180_spi_t *spi_recreate_after_init_failure(void) {
     return spi;
 }
 
+// 起動時の初期化が終わったか（成功・失敗とも）。終わるまでは使える reader の一覧を返さない（USB は init の
+// 前に上がるので、その間の一覧は 0 = 全台使えないに見えてしまう）。init のタスクが書き、CCID のタスクが読む。
+static volatile bool s_init_done;
+
+static bool reader_init_impl(void);
+
 bool pn5180_reader_init(void) {
+    const bool ok = reader_init_impl();
+    s_init_done = true;
+    return ok;
+}
+
+bool pn5180_reader_init_done(void) {
+    return s_init_done;
+}
+
+static bool reader_init_impl(void) {
     s_lock = xSemaphoreCreateMutex();
     if (!s_lock) return false;
     memset(s_cache, 0, sizeof(s_cache));
@@ -1047,6 +1063,8 @@ static int s_fast_targeted_hits;
 
 // 直近に読んだ reader 1 台が「簡略サイクル」だったか（1 = 狙い撃ちだけで終えた。poll 統計用）。
 static int s_fast_last_cheap;
+// 直前の fast inventory が SPI / BUSY の失敗（RF 設定のロード・RF ON）で終わったか（実行中の不調の見張り）。
+static bool s_fast_last_spi_fault;
 
 #if !PN5180_FAST_TARGETED_PROBE
 // 1 ラウンド目で見つけた集合が前回 cache と同じか（実装 B の判定）。
@@ -1093,11 +1111,18 @@ static uint8_t fast_inventory_15693(int slot, slot_reader_t *r, const pn5180_car
     s_fast_targeted_hits = 0;
     s_fast_rx_wait_max_us = 0;
     s_fast_last_cheap = 0;
+    s_fast_last_spi_fault = false;
     if (!r->rf_loaded) {
-        if (!pn5180_loadRFConfig(dev, PN5180_FAST_RF_CONFIG)) return 0;
+        if (!pn5180_loadRFConfig(dev, PN5180_FAST_RF_CONFIG)) {
+            s_fast_last_spi_fault = true;
+            return 0;
+        }
         r->rf_loaded = true;
     }
-    if (!pn5180_setRF_on(dev)) return 0;  // is_rf_on はドライバが持つので二重 ON にはならない
+    if (!pn5180_setRF_on(dev)) {  // is_rf_on はドライバが持つので二重 ON にはならない
+        s_fast_last_spi_fault = true;
+        return 0;
+    }
     esp_rom_delay_us(PN5180_FAST_FIELD_SETTLE_US);
 
     dfs_node_t stack[FAST_DFS_STACK];
@@ -1430,14 +1455,39 @@ static uint8_t merge_presence(int slot, const pn5180_card_t *prev,
 // 失敗（SPI/BUSY 不調）は毎 poll 出すと UART を埋めるので reader ごと最初の 3 回だけ WARN。
 static uint8_t s_rf_off_fail[PN5180_READER_COUNT];
 
-static void rf_off_after_read(int i) {
-    if (pn5180_setRF_off(s_readers[i].dev)) return;
+static bool rf_off_after_read(int i) {
+    if (pn5180_setRF_off(s_readers[i].dev)) return true;
     if (s_rf_off_fail[i] < 3) {
         s_rf_off_fail[i]++;
         ESP_LOGW(TAG, "pn5180_setRF_off 失敗 reader %d (%u 回目) — 磁界が ON のまま次の reader へ",
                  i, (unsigned)s_rf_off_fail[i]);
     } else {
         ESP_LOGD(TAG, "pn5180_setRF_off 失敗 reader %d", i);
+    }
+    return false;
+}
+#endif
+
+// ── 実行中の不調の見張り（契約 v1.11 §6）──
+// RF の ON / OFF・RF 設定のロード（どれも SPI と BUSY を通る）が続けて失敗した回数。PN5180_FAULT_STREAK_LIMIT に
+// 達した reader は使える reader の一覧（pn5180_reader_ready_mask）から外す。poll のタスクが書き、CCID のタスクが
+// 読む（16 bit の読み書きは 1 命令なので lock は要らない）。
+static volatile uint16_t s_fault_streak[PN5180_READER_COUNT];
+
+#if PN5180_FAST_INVENTORY
+static void note_reader_fault(int i, bool fault) {
+    if (!fault) {
+        if (s_fault_streak[i] >= PN5180_FAULT_STREAK_LIMIT) {
+            ESP_LOGW(TAG, "reader %d: SPI/BUSY がまた答えるようになりました（使える reader に戻します）", i);
+        }
+        s_fault_streak[i] = 0;
+        return;
+    }
+    if (s_fault_streak[i] < UINT16_MAX) s_fault_streak[i]++;
+    if (s_fault_streak[i] == PN5180_FAULT_STREAK_LIMIT) {
+        ESP_LOGE(TAG, "reader %d: SPI/BUSY が %d 回続けて答えません — 使えない reader として host に知らせます"
+                      "（Get UID P2=0xFE の一覧から外す。直すには再起動 = host の P2=0xFD か USB の挿し直し）",
+                 i, PN5180_FAULT_STREAK_LIMIT);
     }
 }
 #endif
@@ -1525,9 +1575,15 @@ void pn5180_reader_poll_once(void) {
 #endif
 #endif
 
+        bool rf_off_ok = true;
 #if PN5180_RF_OFF_BETWEEN_READERS
         // inventory 直後に磁界を落とす（次の reader を読む前に = 同時 RF ON は 1 台だけ）。
-        rf_off_after_read(i);
+        rf_off_ok = rf_off_after_read(i);
+#endif
+#if PN5180_FAST_INVENTORY
+        note_reader_fault(i, s_fast_last_spi_fault || !rf_off_ok);
+#else
+        (void)rf_off_ok;
 #endif
         s_readers[i].dev->timeout_ms = saved_timeout_ms;
 
@@ -1632,6 +1688,15 @@ void pn5180_reader_poll_once(void) {
     // 限り位相が 1 段ずれるだけで、周期・被覆は崩れない（≈ 50 ms 周期で 6.8 年に 1 回）。
     s_poll_cycle++;
 #endif
+}
+
+uint16_t pn5180_reader_ready_mask(void) {
+    // dev は起動時の init でだけ書く（init が終わってから呼ばれる = 以降は読むだけ）ので lock は要らない。
+    uint16_t mask = 0;
+    for (int i = 0; i < PN5180_READER_COUNT && i < 16; i++) {
+        if (s_readers[i].dev && s_fault_streak[i] < PN5180_FAULT_STREAK_LIMIT) mask |= (uint16_t)(1u << i);
+    }
+    return mask;
 }
 
 bool pn5180_reader_get_card(uint8_t reader_index, pn5180_card_t *out) {
