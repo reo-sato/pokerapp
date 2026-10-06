@@ -150,6 +150,11 @@ SPOKEN_FOLD_WINDOW_SEC = 15.0
 HELD_FOLD_STAYED_SEC = 5.0
 # 「フォールド」と、もう行動を済ませた席の札の離脱を結びつける時間の幅（語の話し始めの前後）
 FOLD_WORD_DEPARTURE_SEC = 3.0
+# 「これで終わりです」（ディーラーは言わない = ほかの語の聞き違い, オーナー 2026-10-06）の前後でこの幅に札が離れた席が
+# あれば、その語はその席の「フォールド」（降りた人の札は言葉とほぼ同時に離れる。コールのあとのショーダウンのマックは
+# 2 秒ほどあと）。店舗: フォールドの 2 回は離脱が語の -0.1 / +0.1 秒、コールの 3 回は +1.8 / +2.0 / +12 秒
+GARBLED_FOLD_BEFORE_SEC = 2.0
+GARBLED_FOLD_AFTER_SEC = 1.0
 # 札の離脱で組み直す（取り消す）ときに入力として残す音声のアクション
 _REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin", "heads_up", "players_left"})
 # 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
@@ -494,6 +499,7 @@ class IntegrationThread(threading.Thread):
         self._showdown_at: Optional[float] = None
         # ショーダウンで見せた席 → ディーラーが言った役名（見せる順はアウトオブポジションから）
         self._showdown_shown: dict[int, Optional[str]] = {}
+        self._showdown_hit: dict[int, str] = {}      # 「Nヒット」で見せた席 → N（2 ペアのこともある）
         # 直前に確定したハンド（自動で決めた勝者のあとに届いた `w` / 「ウィナー」を扱う）。
         self._last_result: Optional[dict] = None
         # ディーラーがショーダウンで言った勝った役の名前（pokerkit の役名, 2026-09-26）。ハンドごとに捨てる。
@@ -1086,6 +1092,12 @@ class IntegrationThread(threading.Thread):
             self._handle_set_button(event)
             return
 
+        if "garbled_call" in event.parse_flags and self._rules_aware and self._hand_open:
+            resolved = self._resolve_garbled_call(event)
+            if resolved is None:
+                return
+            event, action = resolved, resolved.action
+
         # ベッティングアクション。rules-aware backend（pokerkit）は境界で actor 推定 + 合法手
         # 射影、legacy（空 legal_context）は従来経路で挙動不変（ADR-0009 §1）。
         if action == "fold" and self._rfid_folds and self._hand_open:
@@ -1141,6 +1153,12 @@ class IntegrationThread(threading.Thread):
                 # 「コールします、コール」, 店舗の実測）
                 self._notice(f"「{event.raw_text}」は前のストリートのコール（言い直し）とみなして記録しませんでした")
                 return
+            if (event.action == "check" and "check_around" not in event.parse_flags
+                    and self._leftover_of_closed_round(event)):
+                # 「コール2千、ロック、チェック」のコールでラウンドが閉じた: 同じ発話の「チェック」は次のストリートの
+                # 最初の人のチェックではない（札を配る前。店舗 2026-10-06 e82f5005 ハンド 9 で次の人のベットがずれた）
+                self._notice(f"「{event.raw_text}」のチェックは前のラウンドを閉じた発話の余りとみなして記録しませんでした")
+                return
             if "check_around" in event.parse_flags:
                 if self._check_around_of_closed_street(event):
                     confirmed = self._confirm_implied_checks(event)
@@ -1162,6 +1180,45 @@ class IntegrationThread(threading.Thread):
                     self._count_held_betting_word()
         else:
             self._handle_legacy_action(event)
+
+    def _resolve_garbled_call(self, event: AudioEvent) -> Optional[AudioEvent]:
+        """「これで終わりです」= ほかの語の聞き違い（ディーラーは言わない, オーナー 2026-10-06）を決め直す。
+
+        その語の前後（`GARBLED_FOLD_BEFORE_SEC` 前〜`GARBLED_FOLD_AFTER_SEC` 後）に札が離れた席があれば、その席の
+        「フォールド」: 札の離脱でもう降ろした席なら、その離脱と組にして記録しない（replay も記録した離脱の信号から同じ）。
+        まだ降ろしていなければ「フォールド」の語として扱う（札の離脱と組にする。在否は live だけ）。そうでなく手番の人が
+        ベットに向き合っていればコール（要確認）。どちらでもなければアクションにしない。
+        """
+        spoken = _spoken_at(event)
+
+        def near(t: float) -> bool:
+            return -GARBLED_FOLD_BEFORE_SEC <= t - spoken <= GARBLED_FOLD_AFTER_SEC
+
+        for seat, dep in self._departures.items():
+            if dep.get("applied") and dep.get("action") == "fold" and not dep.get("word") and near(dep["t"]):
+                dep["word"] = True               # この語と組になった離脱（次の「フォールド」は吸わない）
+                self._notice(f"「{event.raw_text}」は席{seat} のフォールド（札が同じころ離れた）の聞き違いとみました")
+                return None
+        if not self._rebuilding and self._seat_presence is not None and not self._betting_over():
+            try:
+                snapshot = self._seat_presence() or {}
+            except Exception:  # noqa: BLE001 — 在否が取れなければコールとみる
+                snapshot = {}
+            for seat in self._game_state.seats_to_act():
+                info = snapshot.get(seat) or {}
+                dep = self._departures.get(seat)
+                since = dep["t"] if dep is not None else info.get("absent_since")
+                if (not info.get("present") and since is not None and near(since)
+                        and self._hole_cards.get(seat) and not (dep or {}).get("applied")):
+                    self._notice(f"「{event.raw_text}」は席{seat} のフォールド（札が同じころ離れた）の聞き違いとみました")
+                    return replace(event, action="fold", parse_flags=())
+        ctx = self._game_state.legal_context()
+        if ctx.actor_seat is not None and ctx.amount_to_call > 0 and not self._betting_over():
+            if not self._rebuilding:
+                self._notice(f"「{event.raw_text}」はディーラーが言わない言葉なので、コールの聞き違いとみました（要確認）")
+            return event
+        self._notice(f"「{event.raw_text}」は聞き違いの言葉ですが、いまはベットに向き合った手番が無いので記録しませんでした")
+        return None
 
     def _choose_amount(self, event: AudioEvent, ctx: LegalContext, *, flag: Optional[str] = None,
                        max_gap: Optional[float] = None) -> Optional[AudioEvent]:
@@ -1247,6 +1304,18 @@ class IntegrationThread(threading.Thread):
             return False
         last = self._current_actions[-1]
         return last.street != self._game_state.street and self._last_action_at == event.utterance_start_ts
+
+    def _leftover_of_closed_round(self, event: AudioEvent) -> bool:
+        """チェックが、前のラウンドを閉じた発話の余りか。いまのストリートの札が見えていれば、その札より前に話し始めた
+        とき（札が先に全部出ていれば、続けて言った「チェック チェック …」は次のストリートのもの = オールインのあとの
+        ランアウトなど）。札がまだ見えていなければ（確定を待っている）、RFID の卓で閉じたアクションと同じ発話のとき
+        （札を配るあいだ話が途切れる。声だけの台本は続けて読むので、次のストリートのチェックが同じ発話に入る）。"""
+        if self._game_state.street not in ("flop", "turn", "river"):
+            return False
+        started = self._street_started_at()
+        if started is not None:
+            return _spoken_at(event) < started - STALE_CALL_MARGIN_SEC
+        return self._rfid_folds and self._said_with_round_closer(event)
 
     def _street_started_at(self) -> Optional[float]:
         """いまのストリートの最初の札が見えた時刻（フロップは 3 枚のうち最初）。読めていなければ None。"""
@@ -1762,6 +1831,7 @@ class IntegrationThread(threading.Thread):
             "actions": len(self._current_actions), "mucks": list(self._showdown_mucks),
             "notice": self._showdown_notice_shown, "last": self._last_action_at,
             "showdown_at": self._showdown_at, "shown": dict(self._showdown_shown),
+            "shown_hit": dict(self._showdown_hit),
             "foldout": dict(self._foldout_pending) if self._foldout_pending else None,
             "applied": {s: d.get("applied", False) for s, d in self._departures.items()},
             "review": self._hand_needs_review,
@@ -1783,6 +1853,7 @@ class IntegrationThread(threading.Thread):
         self._showdown_notice_shown = checkpoint["notice"]
         self._showdown_at = checkpoint.get("showdown_at")
         self._showdown_shown = dict(checkpoint.get("shown", {}))
+        self._showdown_hit = dict(checkpoint.get("shown_hit", {}))
         self._last_action_at = checkpoint["last"]
         self._foldout_pending = checkpoint["foldout"]
         self._spoken_folds = dict(checkpoint.get("spoken", {}))
@@ -2998,6 +3069,28 @@ class IntegrationThread(threading.Thread):
                 )
         return False
 
+    def _names_a_remaining_hand(self, name: str, hit_rank: Optional[str]) -> bool:
+        """役名が、残っている人の手札とボードの役に合うか（聞き取れなかったコールのあと、残った人が見せた）。
+        ボード・手札が読めていず判定できなければ True（役名でショーダウンとみる、これまでの扱い）。"""
+        from core.showdown import evaluate_hands
+
+        board = [c for c in self._board_cards if c != UNKNOWN_CARD]
+        remaining = self._remaining_seats()
+        if len(board) != 5 or any(len(self._hole_cards.get(s, [])) != 2 for s in remaining):
+            return True
+        try:
+            hands = evaluate_hands({s: self._hole_cards[s] for s in remaining}, board)
+        except Exception:  # noqa: BLE001 — 読めた札が重なっている など
+            return True
+        if hit_rank:
+            return any(self._hit_matches(s, hands[s].name, hit_rank, board) for s in remaining)
+        return any(hands[s].name == name for s in remaining)
+
+    def _first_to_show(self, departed: int) -> Optional[int]:
+        """札が離れた席と残った席のうち、ショーダウンで最初に見せる席（アウトオブポジション）。"""
+        seats = set(self._remaining_seats()) | {departed}
+        return next((s for s in self._game_state.acting_order() if s in seats), None)
+
     def _showdown_turn(self) -> list[int]:
         """ショーダウンでまだ見せても降りてもいない席（見せる順 = アウトオブポジションから）。"""
         remaining = self._remaining_seats()
@@ -3017,9 +3110,11 @@ class IntegrationThread(threading.Thread):
             if self._hand_open and self._game_state.is_hand_active() and len(self._board_cards) >= 5:
                 # 全員がボードの出る前に手を開いた（オールイン）。いま言った役名はその役の席のもの。手札で決める
                 unnamed = [s for s in self._remaining_seats() if not self._showdown_shown.get(s)]
-                seat = self._seat_with_hand(unnamed, name)
+                seat = self._seat_with_hand(unnamed, name, event.hit_rank)
                 if seat is not None:
                     self._showdown_shown[seat] = name
+                    if event.hit_rank:
+                        self._showdown_hit[seat] = event.hit_rank
                 self._finish_by_rules(event, explicit=True)
                 return
             self._check_announced_after_end(name)
@@ -3034,16 +3129,19 @@ class IntegrationThread(threading.Thread):
             if not self._showdown_turn():
                 self._finish_by_rules(event, explicit=True)
             return
-        seat = self._seat_with_hand(turn, name) or turn[0]
+        seat = self._seat_with_hand(turn, name, event.hit_rank) or turn[0]
         self._showdown_shown[seat] = name
+        if event.hit_rank:
+            self._showdown_hit[seat] = event.hit_rank
         self._announced_hand = name
         self._showdown_at = _spoken_at(event)
         self._notice(f"席{seat} が見せました（{HAND_NAMES_JA.get(name, name)}）")
         if not self._showdown_turn():
             self._finish_by_rules(event, explicit=True)
 
-    def _seat_with_hand(self, seats: list[int], name: str) -> Optional[int]:
-        """手札とボードで役が `name` になる席が `seats` の中に 1 つだけあればその席。"""
+    def _seat_with_hand(self, seats: list[int], name: str, hit_rank: Optional[str] = None) -> Optional[int]:
+        """手札とボードで役が `name` になる席が `seats` の中に 1 つだけあればその席。「Nヒット」（`hit_rank`）は、その
+        数字を手札とボードで組にした席（`_hit_matches`）。"""
         from core.showdown import evaluate_hands
 
         board = [c for c in self._board_cards if c != UNKNOWN_CARD]
@@ -3054,8 +3152,17 @@ class IntegrationThread(threading.Thread):
             hands = evaluate_hands(readable, board)
         except Exception:  # noqa: BLE001 — 読めた札が重なっている など
             return None
-        matching = [s for s in seats if s in hands and hands[s].name == name]
+        if hit_rank:
+            matching = [s for s in seats if s in hands and self._hit_matches(s, hands[s].name, hit_rank, board)]
+        else:
+            matching = [s for s in seats if s in hands and hands[s].name == name]
         return matching[0] if len(matching) == 1 else None
+
+    def _hit_matches(self, seat: int, judged: str, rank: str, board: list[str]) -> bool:
+        """「Nヒット」がその席の手札の判定に合うか: 手札の N とボードの N で組（ワンペア）。ボードにペアがあれば、それを
+        無視して N だけを言うこともある = 2 ペア（オーナー 2026-10-06）。"""
+        hole = [c[0].upper() for c in self._hole_cards.get(seat, [])]
+        return judged in ("One pair", "Two pair") and rank in hole and rank in [c[0].upper() for c in board]
 
     def _check_showdown_timeout(self) -> None:
         """ショーダウンで見せる・マックが `SHOWDOWN_MUCK_SEC` 無ければ、残った全員が見せたとして手札で決める
@@ -3251,8 +3358,11 @@ class IntegrationThread(threading.Thread):
         """
         from core.showdown import HAND_NAMES_JA, best_by_names
 
+        board = [c for c in self._board_cards if c != UNKNOWN_CARD]
         mismatched = [(s, n) for s, n in self._showdown_shown.items()
-                      if n and s in hands and hands[s].name != n]
+                      if n and s in hands and hands[s].name != n
+                      and not (s in self._showdown_hit
+                               and self._hit_matches(s, hands[s].name, self._showdown_hit[s], board))]
         for seat, name in mismatched:
             self._hand_needs_review = True
             judged = hands[seat].name
@@ -3400,7 +3510,18 @@ class IntegrationThread(threading.Thread):
             return
         if name:
             spoken = _spoken_at(event)
-            if self._foldout_pending is not None and spoken >= self._foldout_pending["t"]:
+            pending = self._foldout_pending
+            if pending is not None and spoken >= pending["t"]:
+                first = self._first_to_show(pending["seat"])
+                if first != pending["seat"] and not self._names_a_remaining_hand(name, event.hit_rank):
+                    # 先に見せるはずの席（アウトオブポジション）が見せる前に札が離れ、役名も残った人の手ではない =
+                    # 見せたのではなく降りた。役名は降りた手札のこと（見せながら降りた・ディーラーが降りた手を見て
+                    # 言った）とみて、フォールドのまま確定を待つ（店舗 2026-10-06 e82f5005 ハンド 15:「5ヒット」で
+                    # 取り消して勝者が逆になった。店舗のログで役名がフォールドを取り消したのはこの 1 回だけ）
+                    self._hand_needs_review = True
+                    self._notice(f"「{event.raw_text}」— 先に見せる席{first} より前に席{pending['seat']} の札が"
+                                 f"離れたので、席{pending['seat']} は降りたままにします（降りた手札の役名とみました, 要確認）")
+                    return
                 # 最後のフォールドとみた札の離脱は、ショーダウンで前に出したものだった
                 self._showdown_after_foldout(spoken, "役名が言われた（ショーダウン）ので")
             if not self._betting_over() and len(self._board_cards) >= 5 and len(self._remaining_seats()) >= 2:
@@ -4269,6 +4390,7 @@ class IntegrationThread(threading.Thread):
         self._showdown_notice_shown = False
         self._showdown_at = None
         self._showdown_shown = {}
+        self._showdown_hit = {}
         self._shown_holes = {}
         self._shown_board = 0
         self._seat_setup_warned = False

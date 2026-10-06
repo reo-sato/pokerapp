@@ -431,6 +431,76 @@ class TestOrderingAndReplay:
         assert replayed[0].winner_seat == live.winner_seat == 6
 
 
+class TestGarbledCall:
+    """「これで終わりです」はディーラーが言わない = 常にほかの語の聞き違い（オーナー 2026-10-06）。言葉と同じころ
+    （`GARBLED_FOLD_BEFORE_SEC` 前〜`GARBLED_FOLD_AFTER_SEC` 後）に札が離れた席があれば、その席のフォールドの語。
+    そうでなく手番の人がベットに向き合っていればコール（要確認）。どちらでもなければ記録しない。"""
+
+    def _replayed(self, tb: _Table, tmp_path: Path) -> list[tuple]:
+        replayed = replay_events(
+            tb.recorder.events, backend="pokerkit",
+            players=[PlayerState(seat=s, name=f"P{s}", stack=10000) for s in (4, 5, 6)],
+            sb=100, bb=200, session_id="replay", out_dir=tmp_path / "replay",
+            auto_new_hand=True, auto_winner=True, rfid_folds=True,
+        )
+        return [(a.street, a.seat, a.action, a.amount) for h in replayed for a in h.actions]
+
+    def test_facing_a_bet_it_is_a_call(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")                        # 席6
+        tb.say("これで終わりです。")                # 席4
+        assert tb.played()[-1] == ("preflop", 4, "call", 500)
+        record = tb.t._current_actions[-1]          # noqa: SLF001
+        assert record.needs_review and "garbled_call" in record.reason
+
+    def test_cards_leaving_with_the_word_make_it_that_seats_fold(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")
+        tb.lift(4)                                  # 席4 の札が離れた
+        spoken = tb.now + 0.1
+        tb.tick(tb.now + 1.5)
+        tb.say("これで終わりです。", spoken_at=spoken)
+        assert tb.played()[-1] == ("preflop", 4, "fold", 0)
+        tb.say("コール")
+        assert tb.played()[-1] == ("preflop", 5, "call", 400)
+        tb.lift(5)                                  # フロップの前に席5 も降りた → 席6 の勝ち
+        tb.tick(tb.now + 3.5 + FOLDOUT_CONFIRM_SEC)
+        (live,) = tb.hands
+        assert self._replayed(tb, tmp_path) == [(a.street, a.seat, a.action, a.amount) for a in live.actions]
+
+    def test_a_fold_already_taken_from_the_cards_takes_the_word(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")
+        tb.lift(4)
+        lifted = tb.now
+        tb.tick(tb.now + 3.5)                       # 席4 は札の離脱でフォールド
+        assert tb.played()[-1] == ("preflop", 4, "fold", 0)
+        tb.say("これで終わりです。", spoken_at=lifted + 0.5)
+        assert tb.played()[-1] == ("preflop", 4, "fold", 0) and "席4 のフォールド" in tb.notices[-1]
+        tb.say("コール")
+        assert tb.played()[-1] == ("preflop", 5, "call", 400)
+
+    def test_cards_leaving_later_are_the_showdown(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")
+        tb.lift(4)
+        tb.tick(tb.now + 1.0)
+        tb.say("これで終わりです。", spoken_at=tb.now - 3.0)   # 札が離れる 2 秒前の言葉 = 別の語
+        assert tb.played()[-1] == ("preflop", 4, "call", 500)
+
+    def test_with_nothing_to_call_it_is_not_recorded(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        for text in ("コール", "コール", "チェック"):
+            tb.say(text)
+        tb.say("これで終わりです。")
+        assert [p for p in tb.played() if p[0] == "flop"] == [] and "記録しませんでした" in tb.notices[-1]
+
+
 def test_recorded_seat_signals_match_the_schema(tmp_path):
     import json
 

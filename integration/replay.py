@@ -96,6 +96,7 @@ def event_from_envelope(d: dict) -> Event:
             parse_flags=tuple(d.get("parse_flags") or ()),
             utterance_start_ts=d.get("utterance_start_ts"),
             hand_name=d.get("hand_name"),             # 勝った役名（0.6 additive）
+            hit_rank=d.get("hit_rank"),               # 「Nヒット」の N（0.16 additive）
             amount_options=tuple(d.get("amount_options") or ()),   # 音で読んだ額の候補（0.13 additive）
             amount_scores=tuple((int(a), float(s)) for a, s in d.get("amount_scores") or ()),   # 0.14 additive
         )

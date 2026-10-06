@@ -174,3 +174,18 @@ class TestAmountOwnership:
     def test_control_words_keep_their_amounts(self):
         """勝者・ハンドの終わりの額（ポットの読み上げなど）は別の賭けにしない。"""
         assert [e.action for e in parse_actions("シート3 ウィナー 1万2000")] == ["winner"]
+
+
+class TestWordsTheDealerNeverSays:
+    """「これで終わりです」はディーラーが言わない = 常にほかの語の聞き違い（オーナー 2026-10-06）。コールとして読み、
+    印 `garbled_call` で engine が札の離脱から決め直す（tests/test_rfid_folds.py の TestGarbledCall）。"""
+
+    @pytest.mark.parametrize("text", ["これで終わりです。", "これで終わります", "ここで終わりです。", "これで終わり"])
+    def test_it_is_a_garbled_call(self, text):
+        (event,) = parse_actions(text, confidence=0.5)
+        assert (event.action, event.parse_flags) == ("call", ("garbled_call",))
+
+    @pytest.mark.parametrize("text", ["これで終わりにしましょう", "今日はこれで終わりですね、お疲れ様"])
+    def test_only_the_whole_utterance(self, text):
+        assert all("garbled_call" not in e.parse_flags for e in parse_actions(text, confidence=0.5))
+

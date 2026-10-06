@@ -31,6 +31,9 @@ _KANJI_PATTERN = re.compile(r"[一二三四五六七八九〇十百千万]+")
 # 算用数字 + 単位パターン（すべての候補を収集し、最左・同位置なら大きい値を採用）。
 # パースは NFKC 正規化済みテキストに対して行う（全角数字・全角ピリオドは半角化済み）。
 _MIXED_MAN_SEN = re.compile(r"(\d[\d,]*)万(\d+)千")            # 1万2千
+# 万・千のあとに続けた百の位（店舗 2026-10-06:「1万6千100」「レイズ1万1千300」を 16000・11000 と読んでいた）。
+# 続けた数は千のあとと同じ（3 桁はそのまま、1〜2 桁は百・十の位の省略で曖昧）、「1万6千1百」も
+_MAN_SEN_TAIL  = re.compile(r"(\d[\d,]*)万(\d+)千(?:(\d*)百|(\d{1,3})(?![\d,.千百十万Kk]))")  # 1万6千100
 _MAN_DECIMAL   = re.compile(r"(\d[\d,]*)\.(\d+)万")            # 1.5万 (ADR-A S1)
 _MAN_TRAILING  = re.compile(r"(\d[\d,]*)万(\d)(?![\d,.千百十万Kk])")  # 4万2 (曖昧, ADR-A S1)
 _MAN_ONLY      = re.compile(r"(\d[\d,]*)万")                   # 3万
@@ -203,6 +206,14 @@ def parse_amount_ex(text: str) -> AmountParse:
         man = int(m.group(1).replace(",", ""))
         sen = int(m.group(2))
         candidates.append((m.start(), man * 10000 + sen * 1000, False))
+
+    for m in _MAN_SEN_TAIL.finditer(text):
+        base = int(m.group(1).replace(",", "")) * 10000 + int(m.group(2)) * 1000
+        if m.group(4) is None:
+            candidates.append((m.start(), base + int(m.group(3) or 1) * 100, False))
+        else:
+            tail = m.group(4)
+            candidates.append((m.start(), base + int(tail) * {1: 100, 2: 10, 3: 1}[len(tail)], len(tail) < 3))
 
     for m in _MAN_DECIMAL.finditer(text):
         man = int(m.group(1).replace(",", ""))
@@ -499,6 +510,11 @@ _AMOUNT_OWNERSHIP: dict[str, Optional[str]] = {
 }
 # 「千」「万」のすぐあとの意味の通らない語（下の桁が読めない, `_open_digits`）の印
 GARBLED_DIGITS = "garbled_digits"
+# 「これで終わりです」「ここで終わります」: ディーラーは言わない = 常にほかの語の聞き違い（オーナー 2026-10-06）。店舗の
+# 書き起こしではベットに向き合った手番の 8 回のうち 6 回がコール、2 回がフォールド（その席の札が言葉とほぼ同時に
+# 離れた）。コールとして読み、engine が札の離脱で決め直す（要確認）
+GARBLED_CALL = "garbled_call"
+_GARBLED_CALL_PHRASE = re.compile(r"(?:コレ|ココ)デ(?:終ワ|オワ)リ(?:デス|マス)?")
 # 自分の額にした部分の読みの印（額の読みが確かでない）。アクションの語の読みにも付け替える
 _AMOUNT_READ_FLAGS = ("ambiguous_amount", GARBLED_DIGITS)
 # 「チェックアラウンド」= まだ動いていない全員がチェックした（オーナーの説明, 2026-09-25）。チェックの語に続く
@@ -1224,9 +1240,11 @@ def _parse_utterance(
     text: str, confidence: Optional[float], utterance_start_ts: Optional[float],
 ) -> list[AudioEvent]:
     """`parse_actions` の本体（疑問形の文を除いたあとの 1 つの発話 / 文）。"""
-    alias = _WHOLE_UTTERANCE_ALIASES.get(
-        _to_katakana(unicodedata.normalize("NFKC", text)).strip(_TRAILING_PUNCTUATION)
-    )
+    whole = _to_katakana(unicodedata.normalize("NFKC", text)).strip(_TRAILING_PUNCTUATION)
+    if _GARBLED_CALL_PHRASE.fullmatch(whole):
+        return [AudioEvent(action="call", amount=0, timestamp=time.time(), raw_text=text, confidence=confidence,
+                           utterance_start_ts=utterance_start_ts, parse_flags=(GARBLED_CALL,))]
+    alias = _WHOLE_UTTERANCE_ALIASES.get(whole)
     if alias is not None:
         text = alias
     nfkc = unicodedata.normalize("NFKC", text)
@@ -1399,8 +1417,9 @@ _HAND_PHRASES: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(_NOT_LETTER + r"(?!サンセット)" + _RANK + r"[\sノ・]*セット(?!アップ)", re.IGNORECASE),
      "Three of a kind"),
     (re.compile(r"セット[\s・]*オブ[\s・]*" + _RANK, re.IGNORECASE), "Three of a kind"),
-    # 「キングヒット」= ボードの札と組になったワンペア
-    (re.compile(_NOT_LETTER + _RANK + r"[\sノ・]*ヒット", re.IGNORECASE), "One pair"),
+    # 「キングヒット」= ボードの札と組になったワンペア。ボードにペアがあれば、それを無視して手札とボードで組にした数字
+    # + ヒットと言うこともある = 2 ペア（オーナー 2026-10-06）。数字は `hit_rank` で engine が手札と突き合わせる
+    (re.compile(_NOT_LETTER + "(?P<rank>" + _RANK + r")[\sノ・]*ヒット", re.IGNORECASE), "One pair"),
     # ポケットペア: 「ポケットキングス」「ポケットエース」「ナナポケ」「キングのポケット」
     (re.compile(r"ポケット[\s・]*(?:" + _RANK_PLURAL + "|" + _RANK + ")", re.IGNORECASE), "One pair"),
     (re.compile(_NOT_LETTER + _RANK + r"(?:" + _RANK + r")?[\sノ・]*ポケ(?:ット)?", re.IGNORECASE), "One pair"),
@@ -1422,6 +1441,7 @@ class _HandPhrase:
     start: int
     end: int
     name: str
+    hit_rank: Optional[str] = None       # 「Nヒット」の N（A K Q J T 9..2）
 
 
 def _find_hand_phrase(norm: str) -> Optional[_HandPhrase]:
@@ -1429,26 +1449,27 @@ def _find_hand_phrase(norm: str) -> Optional[_HandPhrase]:
 
     手札の名前だけの言い方は、発話に役の語（「ストレート」など）が無いときだけ（「キングハイ、ストレート」と
     区切って書き起こされた「キングハイ」をハイカードにしない）。"""
-    found: list[tuple[int, int, int, str]] = []
+    found: list[tuple[int, int, int, str, Optional[str]]] = []
     for order, (pattern, name) in enumerate(_HAND_PHRASES):
         hit = pattern.search(norm)
         if hit is not None:
-            found.append((hit.start(), order, hit.end(), name))
+            rank = hit.groupdict().get("rank")
+            found.append((hit.start(), order, hit.end(), name, _hit_rank(rank) if rank else None))
     if not found and not _has_hand_name_keyword(norm):
         pocket = _POCKET_NAMED.search(norm)
         if pocket is not None:
-            found.append((pocket.start(), 0, pocket.end(), "One pair"))
+            found.append((pocket.start(), 0, pocket.end(), "One pair", None))
         for hit in _HOLE_CARDS_NAMED.finditer(norm):
             r1, r2 = hit.group("r1"), hit.group("r2")
             if r2 is None and hit.group("high") is None:
                 continue                         # 札の名前 1 つだけ（「エース」）は役の言い方ではない
             pair = r2 is not None and _rank_of(r1) == _rank_of(r2)
-            found.append((hit.start(), 0, hit.end(), "One pair" if pair else "High card"))
+            found.append((hit.start(), 0, hit.end(), "One pair" if pair else "High card", None))
             break
     if not found:
         return None
-    start, _, end, name = min(found)
-    return _HandPhrase(start, end, name)
+    start, _, end, name, hit_rank = min(found, key=lambda f: f[:2])
+    return _HandPhrase(start, end, name, hit_rank)
 
 
 _RANK_LETTERS = {"エース": "A", "キング": "K", "クイーン": "Q", "クィーン": "Q", "ジャック": "J", "テン": "T",
@@ -1458,6 +1479,18 @@ _RANK_LETTERS = {"エース": "A", "キング": "K", "クイーン": "Q", "ク�
 
 def _rank_of(word: str) -> str:
     return _RANK_LETTERS.get(word, word.upper())
+
+
+# 数の読み・漢数字・算用数字の札の数字（「ナナヒット」「5ヒット」「十ヒット」）
+_RANK_NUMBERS = {"ナナ": "7", "シチ": "7", "ハチ": "8", "キュウ": "9", "キュー": "9", "ジュウ": "T", "ジュー": "T",
+                 "ロク": "6", "ヨン": "4", "サン": "3", "ゴ": "5", "ニ": "2", "10": "T", "二": "2", "三": "3", "四": "4",
+                 "五": "5", "六": "6", "七": "7", "八": "8", "九": "9", "十": "T"}
+
+
+def _hit_rank(word: str) -> Optional[str]:
+    """「Nヒット」の N を札の数字（A K Q J T 9..2）に。分からなければ None。"""
+    rank = _RANK_NUMBERS.get(word) or _rank_of(word)
+    return rank if rank in "AKQJT98765432" and len(rank) == 1 else None
 
 
 def _has_hand_name_keyword(norm: str) -> bool:
@@ -1473,6 +1506,7 @@ def _around_hand_phrase(
     shown = AudioEvent(
         action="end_hand", amount=0, timestamp=time.time(), raw_text=source[found.start:found.end],
         confidence=confidence, utterance_start_ts=utterance_start_ts, hand_name=found.name,
+        hit_rank=found.hit_rank,
     )
     before = source[:found.start].rstrip("".join(_SPLIT_DELIMITERS))
     after = source[found.end:].lstrip("".join(_SPLIT_DELIMITERS))

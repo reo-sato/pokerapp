@@ -8,6 +8,9 @@
 - 「チェック、アンド」「チェック、ハンド」はチェックアラウンドの聞き違い（オーナー / 台本の読み上げ 2026-10-01）。
 - 前のラウンドを閉じた発話の中のコール（払う額が無い）は言い直し（「コールします、コール」）。
 - ベットの途中（チェックできる手番の人がいる）の「チョップ」はチェックの聞き違い（要確認）。
+- 前のラウンドを閉じた発話の中の「チェック」（店舗 2026-10-06 e82f5005 ハンド 9:「コール2千、ロック、チェック」）と、
+  いまのストリートの札が見えるより前に話し始めた「チェック」は、次のストリートの最初の人のチェックではない。札が
+  読めていなければ決めない（読めないボードで本当のチェックを捨てない）。
 """
 from __future__ import annotations
 
@@ -138,3 +141,42 @@ class TestChopHeardAsCheck:
         tb.say("シート4 シート5 チョップ")
         (hand,) = tb.hands                              # 分けた（チェックにしない）
         assert [a for a in hand.actions if a.street == "turn"] == []
+
+
+class TestCheckLeftOverFromTheClosedRound:
+    def test_a_check_in_the_closing_utterance_is_not_the_flops(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")                            # 席6（BTN）
+        tb.say("コール")                                # 席4
+        tb.say("コール、ロック、チェック")              # 席5 のコールでプリフロップが閉じる（余りのチェック）
+        assert _street(tb, "flop") == [] and "余り" in tb.notices[-1]
+        _board(tb, ["Jd", "9d", "3d"])
+        tb.say("1800")
+        assert _street(tb, "flop") == [(4, "bet", 1800)]
+
+    def test_a_check_said_before_the_card_is_the_closed_rounds(self, tmp_path):
+        tb = _Table(tmp_path)
+        _checks_through_flop(tb)
+        _board(tb, ["Kc"])
+        tb.say("チェック", spoken_at=tb.now - 2.5)      # ターンの札（1 秒前）より前に話し始めた
+        assert _street(tb, "turn") == []
+        tb.say("ベット 600")
+        assert _street(tb, "turn") == [(4, "bet", 600)]
+
+    def test_a_check_after_the_card_is_the_streets(self, tmp_path):
+        tb = _Table(tmp_path)
+        _checks_through_flop(tb)
+        _board(tb, ["Kc"])
+        tb.say("チェック")
+        assert _street(tb, "turn") == [(4, "check", 0)]
+
+    def test_without_the_board_cards_a_check_is_kept(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        for text in ("コール", "コール", "チェック"):   # プリフロップ（ボードの札は読めていない）
+            tb.say(text)
+        tb.tick(tb.now + 5.0)
+        tb.say("チェック", spoken_at=tb.now - 3.0)
+        assert _street(tb, "flop") == [(4, "check", 0)]
+

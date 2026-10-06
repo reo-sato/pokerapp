@@ -105,6 +105,20 @@ class TestParsing:
         assert [(e.action, e.hand_name) for e in parse_actions("キングヒット、フォールド")] == [
             ("end_hand", "One pair"), ("fold", None)]
 
+    @pytest.mark.parametrize("text, rank", [
+        ("5ヒット", "5"), ("ナナヒット", "7"), ("キングヒット", "K"), ("十ヒット", "T"), ("エースヒット", "A"),
+    ])
+    def test_a_hit_carries_the_paired_rank(self, text, rank):
+        (event,) = parse_actions(text)
+        assert (event.action, event.hand_name, event.hit_rank) == ("end_hand", "One pair", rank)
+
+    def test_the_hit_rank_is_recorded_and_replayed(self):
+        (event,) = parse_actions("5ヒット", utterance_start_ts=5.0)
+        envelope = event_to_envelope(event)
+        jsonschema.Draft202012Validator(json.loads(_SCHEMA.read_text(encoding="utf-8"))).validate(envelope)
+        assert envelope["hit_rank"] == "5" and event_from_envelope(envelope).hit_rank == "5"
+        assert "hit_rank" not in event_to_envelope(parse_action("ワンペア"))
+
     def test_recorded_and_replayed(self):
         event = parse_action("フラッシュ", confidence=0.7, utterance_start_ts=5.0)
         envelope = event_to_envelope(event)
@@ -361,6 +375,98 @@ class TestHeadsUp:
         assert (hand.winner_seat, hand.winner_source) == (6, "cards") and not hand.review_required
         assert [(s["seat"], s.get("announced")) for s in hand.to_dict()["showdown"]] == [
             (4, "One pair"), (6, "Flush")]
+
+
+class TestHits:
+    """「Nヒット」= 手札の N とボードの N で組にした（ワンペア）。ボードにペアがあれば、それを無視して N だけを言う
+    こともある = 2 ペア（オーナー 2026-10-06）。言った N で、見せた席を手札と突き合わせる。"""
+
+    def _river(self, tb: _Table, holes: dict, board: list[str]) -> None:
+        tb.deal(holes)
+        tb.say("コール チェック" if len(holes) == 2 else "コール コール チェック")
+        for cards in (board[:3], board[3:4], board[4:]):
+            _board(tb, cards)
+            tb.say(" ".join(["チェック"] * len(holes)))
+            tb.tick(tb.now + 1.0)
+
+    def test_a_hit_with_the_board_pair_ignored_is_two_pair(self, tmp_path):
+        tb = _Table(tmp_path, seats=(4, 6))
+        self._river(tb, {4: ["Jc", "Ac"], 6: ["Kd", "Qd"]}, ["Jd", "9d", "3d", "9c", "2s"])
+        tb.say("ジャックヒット")                       # 席4 = ジャックと 9 の 2 ペア（ボードの 9 のペアは言わない）
+        tb.say("キングハイフラッシュ")
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (6, "cards") and not hand.review_required
+        assert not any("違います" in n for n in tb.notices)
+
+    def test_the_rank_says_who_showed(self, tmp_path):
+        # 席4（3 のワンペア）より先に席5（5 のワンペア）が見せた: 役の名前だけでは 2 人に合う
+        tb = _Table(tmp_path)
+        self._river(tb, {4: ["3c", "Ks"], 5: ["5c", "Ah"], 6: ["Kd", "Qd"]}, FLUSH_BOARD)
+        tb.say("5ヒット")
+        assert tb.t._showdown_shown == {5: "One pair"}   # noqa: SLF001
+        tb.say("3ヒット")
+        tb.say("フラッシュ")
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (6, "cards") and not hand.review_required
+
+
+class TestHandNameAfterTheLastFold:
+    """ベットに向き合った人の札が離れて最後のフォールドを待っているときの役名。ショーダウンではアウトオブポジションが
+    先に見せる（オーナー 2026-09-30）ので、先に見せる人が見せる前に離れた札は、見せたのではなく降りた = 役名は降りた
+    手のこと（見せながら降りた・ディーラーが降りた手を見て言った）。店舗 2026-10-06 e82f5005 ハンド 15:「5ヒット」で
+    フォールドを取り消して、降りた人の勝ちにしていた。"""
+
+    HOLES = {4: ["Kc", "Qs"], 6: ["5c", "Ah"]}       # 席4（BB = アウトオブポジション）キングハイ / 席6 5 のワンペア
+
+    def _river(self, tb: _Table) -> None:
+        tb.deal(self.HOLES)
+        tb.say("コール チェック")
+        for cards in (FLUSH_BOARD[:3], FLUSH_BOARD[3:4], FLUSH_BOARD[4:]):
+            _board(tb, cards)
+            if len(tb.t._board_positions) < 5:        # noqa: SLF001
+                tb.say("チェック チェック")
+                tb.tick(tb.now + 1.0)
+
+    def test_in_position_left_first_so_the_name_is_the_folded_hand(self, tmp_path):
+        tb = _Table(tmp_path, seats=(4, 6))
+        self._river(tb)
+        tb.say("ベット 1000")                          # 席4
+        tb.lift(6)                                     # 席6 は降りた（札を前へ）
+        tb.tick(tb.now + 3.5)
+        assert tb.t._foldout_pending is not None       # noqa: SLF001
+        tb.say("5ヒット")                              # 降りた手を見て言った
+        assert tb.hands == [] and "降りたまま" in tb.notices[-1]
+        tb.tick(tb.now + 11.0)
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (4, "fold") and hand.review_required
+        assert [(a.seat, a.action) for a in hand.actions if a.street == "river"] == [(4, "bet"), (6, "fold")]
+
+    def test_a_name_of_the_remaining_hand_is_a_show(self, tmp_path):
+        # コールが聞き取れず、降りたとみた席6 の札が先に離れたが、ディーラーは残った席4 の手を言った = ショーダウン
+        tb = _Table(tmp_path, seats=(4, 6))
+        self._river(tb)
+        tb.say("ベット 1000")
+        tb.lift(6)
+        tb.tick(tb.now + 3.5)
+        tb.say("キングハイ")                           # 席4 の手
+        tb.say("5ヒット")                              # 席6 の手
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (6, "cards")
+        assert [(a.seat, a.action) for a in hand.actions if a.street == "river"] == [(4, "bet"), (6, "call")]
+
+    def test_out_of_position_left_first_so_the_name_is_a_show(self, tmp_path):
+        tb = _Table(tmp_path, seats=(4, 6))
+        self._river(tb)
+        tb.say("チェック")                             # 席4
+        tb.say("ベット 1000")                          # 席6
+        tb.lift(4)                                     # 席4 はコールして見せた（コールは聞き取れなかった）
+        tb.tick(tb.now + 3.5)
+        tb.say("キングハイ")
+        tb.say("5ヒット")
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (6, "cards")
+        assert [(a.seat, a.action) for a in hand.actions if a.street == "river"] == [
+            (4, "check"), (6, "bet"), (4, "call")]
 
 
 class TestAllInBeforeTheRiver:

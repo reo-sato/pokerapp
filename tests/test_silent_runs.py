@@ -249,7 +249,7 @@ class TestWinnerToss:
         tb.tick(tb.now + 1.0)
         tb.lift(4)
         tb.tick(tb.now + 4.0)
-        tb.say("ツーペア")                     # ショーダウン（見せた）。もう 1 人の役名・マックを待つ
+        tb.say("クイーンハイ")                 # 残った席4 の手 = ショーダウン（見せた）。もう 1 人の役名・マックを待つ
         assert tb.hands == []
         tb.tick(tb.now + SHOWDOWN_MUCK_SEC + 0.5)
         (hand,) = tb.hands

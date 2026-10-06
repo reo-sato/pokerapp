@@ -157,7 +157,7 @@ def _keys(events: list) -> tuple:
 def _flag_penalty(events: list, params: dict) -> float:
     flags = {f for e in events for f in e.parse_flags}
     return params["fuzzy"] if flags & {"fuzzy_keyword", "ambiguous_amount", "garbled_digits",
-                                       "sentence_after_chatter"} else 0.0
+                                       "sentence_after_chatter", "garbled_call"} else 0.0
 
 
 def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
