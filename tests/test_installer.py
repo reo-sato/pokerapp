@@ -215,6 +215,8 @@ class TestFieldFindings:
             assert '$ProgressPreference = "SilentlyContinue"' in text, rel
 
 
+# pwsh を起動するので 1 件 1〜5 秒（CI だけで走る。手元は pwsh が無ければ skip）。遅い組で回す（テストのダイエット）
+@pytest.mark.slow
 @pytest.mark.skipif(_powershell() is None, reason="pwsh / powershell が無い環境")
 class TestPowerShell:
     @pytest.mark.parametrize("rel", PS1_FILES)
