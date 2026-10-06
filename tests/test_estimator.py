@@ -183,7 +183,7 @@ class TestDepartures:
 
 class TestDepartureEvidence:
     """店舗 2026-10-06 の見直し（Fable 5.1 の助言 P2〜P5）: 聞き違いのコールと札の離脱の組・片付けの一瞬の読み取り・
-    フォールドのあとも札が残る・ベットの無いところのフォールド・札は語のあとに離れることが多い。"""
+    フォールドのあとも札が残る・ベットの無いところのフォールド・記録上の離脱は読み取りのラグで語のあとになりやすい。"""
 
     def test_a_blip_does_not_end_an_absence(self):
         seats = {s: [SeatObservation(T0, True, None, None)] for s in (4, 5, 6)}
@@ -242,7 +242,10 @@ class TestDepartureEvidence:
                   _Row("flop", 5, "fold", T0 + 25, None, source="rfid_departure")]
         assert not any(name == "ベットの無いところのフォールド" for name, _ in est._action_terms(hand, facing, []))
 
-    def test_cards_leave_after_the_word_more_often_than_before(self):
+    def test_a_recorded_departure_after_the_word_is_read_lag(self):
+        """ディーラーは札が離れるのを見てから「フォールド」と言う（オーナー 2026-10-06）。記録上の離脱が語のあとに
+        なるのは読み取りのラグ（3 周続けて読めなかったら離れたとする ≈ 1 秒 + 札がリーダーの近くに残る）なので、
+        語のあとの離脱は、同じだけ前の離脱より起こりやすい。"""
         est = _estimator(_presence({5: T0 + 31.5}))
         late, _ = TestDepartures()._terms(est, 5, T0 + 30.0, caller=4)
         early_est = _estimator(_presence({5: T0 + 28.5}))
