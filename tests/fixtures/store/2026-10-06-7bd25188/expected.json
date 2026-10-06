@@ -211,82 +211,88 @@
   {
    "hand_id": 2,
    "truth": {
-    "board": [],
+    "board": [
+     "Kh",
+     "Ks",
+     "4s",
+     "5h",
+     "Ts"
+    ],
     "actions": [
      {
-      "seat": 8,
+      "seat": 5,
       "action": "raise",
       "amount": 700,
       "street": "preflop"
      },
      {
-      "seat": 5,
+      "seat": 6,
       "action": "call",
       "amount": 700,
       "street": "preflop"
      },
      {
-      "seat": 6,
+      "seat": 7,
       "action": "fold",
       "amount": 0,
       "street": "preflop"
      },
      {
-      "seat": 7,
+      "seat": 8,
       "action": "call",
       "amount": 500,
       "street": "preflop"
      },
      {
-      "seat": 7,
+      "seat": 8,
       "action": "check",
       "amount": 0,
       "street": "flop"
      },
      {
-      "seat": 8,
+      "seat": 5,
       "action": "bet",
       "amount": 700,
       "street": "flop"
      },
      {
-      "seat": 5,
+      "seat": 6,
       "action": "call",
       "amount": 700,
       "street": "flop"
      },
      {
-      "seat": 7,
+      "seat": 8,
       "action": "fold",
       "amount": 0,
       "street": "flop"
      },
      {
-      "seat": 8,
-      "action": "check",
-      "amount": 0,
-      "street": "turn"
-     },
-     {
       "seat": 5,
       "action": "check",
       "amount": 0,
       "street": "turn"
      },
      {
-      "seat": 8,
+      "seat": 6,
+      "action": "check",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 5,
       "action": "check",
       "amount": 0,
       "street": "river"
      },
      {
-      "seat": 5,
+      "seat": 6,
       "action": "bet",
       "amount": 3000,
       "street": "river"
      },
      {
-      "seat": 8,
+      "seat": 5,
       "action": "fold",
       "amount": 0,
       "street": "river"
@@ -330,108 +336,107 @@
       "name": "8"
      }
     ],
-    "winner_seat": 5,
+    "winner_seat": 6,
     "blind": true,
     "entry_sec": 45.1,
     "blind_entry": {
      "actions": [
       {
-       "seat": 8,
+       "seat": 5,
        "action": "raise",
        "amount": 700,
        "street": "preflop"
       },
       {
-       "seat": 5,
+       "seat": 6,
        "action": "call",
        "amount": 700,
        "street": "preflop"
       },
       {
-       "seat": 6,
+       "seat": 7,
        "action": "fold",
        "amount": 0,
        "street": "preflop"
       },
       {
-       "seat": 7,
+       "seat": 8,
        "action": "call",
        "amount": 500,
        "street": "preflop"
       },
       {
-       "seat": 7,
+       "seat": 8,
        "action": "check",
        "amount": 0,
        "street": "flop"
       },
       {
-       "seat": 8,
+       "seat": 5,
        "action": "bet",
        "amount": 700,
        "street": "flop"
       },
       {
-       "seat": 5,
+       "seat": 6,
        "action": "call",
        "amount": 700,
        "street": "flop"
       },
       {
-       "seat": 7,
+       "seat": 8,
        "action": "fold",
        "amount": 0,
        "street": "flop"
       },
       {
-       "seat": 8,
-       "action": "check",
-       "amount": 0,
-       "street": "turn"
-      },
-      {
        "seat": 5,
        "action": "check",
        "amount": 0,
        "street": "turn"
       },
       {
-       "seat": 8,
+       "seat": 6,
+       "action": "check",
+       "amount": 0,
+       "street": "turn"
+      },
+      {
+       "seat": 5,
        "action": "check",
        "amount": 0,
        "street": "river"
       },
       {
-       "seat": 5,
+       "seat": 6,
        "action": "bet",
        "amount": 3000,
        "street": "river"
       },
       {
-       "seat": 8,
+       "seat": 5,
        "action": "fold",
        "amount": 0,
        "street": "river"
       }
      ],
-     "winner_seat": 5,
+     "winner_seat": 6,
      "entry_sec": 45.1
     },
     "hand_id": 2,
-    "excluded": true,
-    "excluded_reason": "記録のボタンが 1 席ずれていた疑い（オーナーに確認中）"
+    "correction": "ボタンは席6（記録・真のアクションとも席5 = 1 席ずれていた。札の離れた順 席7→席8→席5 と合う）。席を 1 つ回した（オーナー確認 2026-10-06 夜）"
    },
    "baseline": {
-    "action_correct": 4,
-    "action_total": 14,
-    "winner_match": true,
-    "board_match": false
+    "action_correct": 6,
+    "action_total": 15,
+    "winner_match": false,
+    "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 4,
-    "action_total": 14,
-    "winner_match": true,
-    "board_match": false
+    "action_correct": 6,
+    "action_total": 15,
+    "winner_match": false,
+    "board_match": true
    }
   },
   {

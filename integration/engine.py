@@ -87,7 +87,7 @@ _CONF_CAMERA_ONLY       = 0.30
 _BOARD_STREET_THRESHOLDS = {3: "flop", 4: "turn", 5: "river"}
 
 # G1（ADR-0049）: 状態を大きく動かす制御語。config の閾値 > 0 のとき低信頼 ASR を保留する。
-_CONTROL_ACTIONS = frozenset({"new_hand", "winner", "showdown", "end_hand"})
+_CONTROL_ACTIONS = frozenset({"new_hand", "winner", "showdown", "end_hand", "reset_actions"})
 
 # ――― 手札が配られたら新しいハンド / 勝者の自動判定（ADR-0062）―――
 # 次のハンドの配布とみなす時間窓（秒）。この間に 2 席以上へ札が配られたら配布と判断する。
@@ -1097,6 +1097,10 @@ class IntegrationThread(threading.Thread):
 
         if action == "set_button":
             self._handle_set_button(event)
+            return
+
+        if action == "reset_actions":
+            self._handle_reset_actions(event)
             return
 
         if "garbled_call" in event.parse_flags and self._rules_aware and self._hand_open:
@@ -3843,6 +3847,48 @@ class IntegrationThread(threading.Thread):
             return
         if self._rules_aware:
             self._notice(f"次のハンドのボタンを席{seat} にします（その席が配られなければ通常どおり進めます）")
+
+    def _handle_reset_actions(self, event: AudioEvent) -> None:
+        """「アクションリセット」: このハンドのアクションを捨てて、始め（ブラインドを置いた直後）からやり直す。
+
+        手札・ボード・ボタン・持ち点はそのまま。ディーラーはこのあとアクションを最初から言い直す（オーナー 2026-10-06:
+        口頭で直す。店舗 e82f5005 ハンド 11: ボタンの話し合いのあと「もう一度アクションをやり直して」と言い直したが、
+        記録を戻す手段が無く 1 回目と 2 回目のアクションが混ざった）。
+
+        - 捨てる: 声のアクション・「フォールド」と言われた席の保留・ボードの札で閉じたラウンド（言い直しで閉じる）。
+        - 残す: 札が離れた席（降りた人）。その人の手番が来たらフォールドにする。間の人のアクションは補わない
+          （離れたのは合図より前 = 言い直しより前なので、`_last_action_at` を合図の時刻にして「手番より先の席が離れた
+          = 間を補う」に使わせない）。
+        - 合図はハンドの入力の先頭に置く（札が戻った・ボタンを直したときの組み直しでも同じ結果になる）。
+        - 合図の聞き違いで正しい記録を消さないよう、そのハンドは要確認にする。
+        """
+        gs = self._game_state
+        origin = self._hand_origin
+        if not (self._rules_aware and self._hand_open and origin is not None and gs.is_hand_active()):
+            self._notice("「アクションリセット」— やり直す進行中のハンドがありません")
+            return
+        if self._rebuilding:
+            self._last_action_at = _spoken_at(event)   # 組み直しの中: 残す入力はもう選んである = 時刻だけ置く
+            return
+        dropped = len(self._current_actions)
+        kept = [(kind, item) for kind, item in self._hand_inputs if kind == "leave"]
+        self._hand_inputs = []
+        self._restore_checkpoint(origin)
+        # 入力から作り直す状態（チェックポイントに無いもの）
+        self._last_wager = None
+        self._last_wager_point = None
+        self._recap = None
+        self._spoken_fold_raw = {}
+        self._foldout_winner_left = False
+        self._replay_inputs([("audio", event), *kept])
+        self._hand_needs_review = True
+        logger.info("アクションのやり直し（ハンド %d）: 記録した %d 件を捨てました（「%s」）",
+                    gs.hand_id, dropped, event.raw_text)
+        self._notice(
+            f"「アクションリセット」— ハンド {gs.hand_id} のアクションを最初からやり直します（記録した {dropped} 件を"
+            "消しました。手札・ボタン・ボードはそのまま。要確認）"
+        )
+        self._publish_table_state()
 
     def _handle_set_blinds(self, event: AudioEvent) -> None:
         """ブラインドの変更（トーナメントのレベル上昇）。`raw_text` の「SB/BB」。次のハンドから。"""
