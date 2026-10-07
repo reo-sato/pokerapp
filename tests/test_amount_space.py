@@ -343,6 +343,43 @@ class TestReadingOptions:
         raised = utterance_options({"utterance_start_ts": 5.0, "text": "レイズ 300", "confidence": 0.6, "ear": ear})
         assert [o.text for o in raised if o.source == "ear_amount"][:1] == ["レイズ 1300"]   # 言い方をそろえる
 
+    def test_a_disputed_amount_is_priced_by_the_ear(self):
+        """Whisper「レイズ2千点」・耳「レーズ千点」（耳がはっきり 1000 と聞き、2000 も採点して低い）: 1000 の読みは Whisper の
+        読みから耳の点数の差で値付け（`price_disputed_amount`、店舗 782c457d ハンド 5）。耳の自由な読みが額でなければ
+        （「零点」）これまでどおり。"""
+        from tools.estimate import PARAMS as V0
+        from tools.estimate import utterance_options
+
+        params = dict(V0, price_disputed_amount=1.0)
+        amounts = [[1000, -0.1], [2000, -2.5], [3000, -4.0]]
+        ear = {"text": "レーズ千点", "logp": -0.1, "candidates": [{"text": "千点", "logp": -0.1}], "amounts": amounts}
+        row = {"utterance_start_ts": 4.0, "text": "レイズ2千点", "confidence": 0.6, "ear": ear}
+        options = utterance_options(row, params)
+        assert (options[0].source, options[0].keys[0][:2]) == ("whisper", ("raise", 2000))
+        extra = {o.text: o.logp for o in options if o.source == "ear_amount"}
+        weight = V0["ear_diff_weight"]
+        assert extra["レイズ 1000"] == pytest.approx(options[0].logp + weight * (-0.1 - -2.5))     # Whisper の読みより上
+        assert extra["レイズ 3000"] == pytest.approx(V0["ear_base"] + weight * (-4.0 - -0.1))       # 1 番以外はこれまでどおり
+        assert {o.text: o.logp for o in utterance_options(row) if o.source == "ear_amount"}["レイズ 1000"] < 0   # v0
+        unclear = dict(row, ear=dict(ear, text="零点"))
+        assert {o.text: o.logp for o in utterance_options(unclear, params)
+                if o.source == "ear_amount"}["レイズ 1000"] == pytest.approx(V0["ear_base"])
+
+    def test_a_clear_ear_amount_is_not_priced_by_a_garbled_word(self):
+        """Whisper が意味のない語（「どのセンテンス?」）、耳がはっきり「七千点」: 耳の額に Whisper の語との音の距離の項を
+        付けない（`ear_clean_sound`、店舗 782c457d ハンド 6）。"""
+        from tools.estimate import PARAMS as V0
+        from tools.estimate import utterance_options
+
+        ear = {"text": "七千点", "logp": -0.08, "candidates": [{"text": "七千点", "logp": -0.08}],
+               "amounts": [[7000, -0.08], [1000, -7.3]]}
+        row = {"utterance_start_ts": 4.0, "text": "どのセンテンス?", "confidence": 0.5, "ear": ear, "ear_wanted": False}
+        params = dict(V0, all_ears=1.0, ear_empty_text=1.0, price_ear_phonetic=1.0)
+        priced = {o.text: o.logp for o in utterance_options(row, params) if o.source == "ear"}
+        clean = {o.text: o.logp for o in utterance_options(row, dict(params, ear_clean_sound=1.0)) if o.source == "ear"}
+        assert clean["七千点"] == pytest.approx(V0["ear_base"])
+        assert priced["七千点"] < clean["七千点"] - 1.0                  # 前: 音の距離の項で下がっていた
+
     def test_not_for_two_wagers_or_old_records(self):
         from tools.estimate import utterance_options
 

@@ -111,6 +111,8 @@ PARAMS: dict[str, float] = {
     "p_undetermined": 0.20,      # 勝者が決まらない・推し量った
     # 探し方・事後確率
     "beam": 4, "depth": 3, "expand": 12,
+    "polish_top": 8,             # 探索のあと、点の良い記録の上からこの数に、探索中に記録の説明を良くした直しを足して
+                                 # 仕上げる（深さの上限で説明の直しまで届かない記録がある = 店舗 782c457d ハンド 5。0 = しない）
     "canned_near_sec": 15.0,     # 決まり文句の発話をアクションと読む直しは、読めた賭けの語からこの秒数以内の発話だけ（全
                                  # セッションで、穴を埋めた決まり文句 20 のうち 17 が 13 秒以内。遠い 3 つは 58〜286 秒 =
                                  # 偶然。ハンドの途中の長い雑談まで広げると 1 ハンドの推定が 3 分になった = 店舗 9d1d8536#4）
@@ -150,9 +152,14 @@ EXPLANATION_MARK = "（記録は変えない説明）"    # 記録を変えな�
 # （`short_cap`。どの読みかは主にハンドの筋で決める）。学習のラベルをオーナーの聞き取りで直す前は 0（上限なしだと、
 # 雑談の混じったラベルで学んだ分類器が言われなかったアクションを近くの発話で説明しすぎた）、直したあとは 1 と上限なしで
 # 良くなったハンドが同じ（782c457d#14 が加わる）・要確認は 1 のほうが少ない（2026-10-07）。
+# 第 2 の耳がはっきり聞いた額（2026-10-07, 店舗 782c457d ハンド 5・6）: 耳の自由な読みが額そのものなら Whisper の崩れた語との
+# 音の距離の項を付けない（`ear_clean_sound`）・Whisper と耳が別の額を聞いた食い違いは耳の点数の差で値付けする
+# （`price_disputed_amount`）。開発データの数え: 前者 53/53、後者は食い違い 4 のうち耳が正しい 3（作業ログ
+# `2026-10-07-latest-session-remaining-hands.md`）。
 READING_OVERRIDES: dict[str, float] = {"canned_action": 0.27, "canned_ear_temp": 2.0, "ear_empty_text": 1.0,
                                        "price_overridden_whisper": 1.0, "price_ear_phonetic": 1.0,
-                                       "all_ears": 1.0, "short_words": 1.0, "short_cap": 1.0}
+                                       "all_ears": 1.0, "short_words": 1.0, "short_cap": 1.0,
+                                       "ear_clean_sound": 1.0, "price_disputed_amount": 1.0}
 
 
 def reading_params() -> dict:
@@ -980,16 +987,29 @@ class SessionEstimator:
         _hand, _records, base_info = self.replay(w, ())
         pool = self.candidate_edits(w, base_info)
         distinct: dict[tuple, Candidate] = {base.key(): base}
+        explainers: set[Edit] = set()           # 記録を変えずに説明を良くした直し（仕上げに使う）
 
         def keep(c: Candidate, parent: Candidate) -> bool:
-            """同じ記録になる直しは得点の良い 1 つ。記録を変えない直しは候補を広げないが、得点が良ければその記録の
-            説明としては残す（エンジンが補ったコールを、近くの決まり文句の発話の読みで説明する = 店舗 42f7b964
-            ハンド 2）。"""
+            """同じ記録になる直しは得点の良い 1 つ。記録を変えない直しは、得点が良ければその記録の説明として残し
+            （エンジンが補ったコールを、近くの決まり文句の発話の読みで説明する = 店舗 42f7b964 ハンド 2）、親の代わりに
+            広げる（記録のより良い説明から先に届く記録がある = 店舗 782c457d ハンド 17: 「これで。」を声のフォールドと
+            読む説明は記録を変えないが、それを足した候補に「チェック＋ベット」を足すと正解。前は広げなかったので、正解の
+            記録は言われないフォールドの説明のまま点で負けた）。"""
             if not c.hand:
                 return False
             if c.key() not in distinct or c.score > distinct[c.key()].score:
                 distinct[c.key()] = c
-            return c.key() != parent.key()
+            if c.key() == parent.key() and c.score > parent.score:
+                explainers.update(e for e in c.edits if e not in parent.edits)
+            return c.key() != parent.key() or c.score > parent.score
+
+        def best_per_record(cands: list[Candidate]) -> list[Candidate]:
+            """記録ごとに得点の良い 1 つ（ビームを同じ記録の説明違いで埋めない）、得点の順。"""
+            out: dict[tuple, Candidate] = {}
+            for c in cands:
+                if c.key() not in out or c.score > out[c.key()].score:
+                    out[c.key()] = c
+            return sorted(out.values(), key=lambda c: -c.score)
 
         def search(root: Candidate, edits: list[Edit]) -> None:
             """root の直しに 1 つずつ足すビーム。"""
@@ -1002,7 +1022,7 @@ class SessionEstimator:
                     singles[c.key()] = c
             ranked = sorted(singles.values(), key=lambda c: -c.score)
             useful = [next(x for x in c.edits if x not in root.edits) for c in ranked[:int(p["expand"])]]
-            beam = sorted([root, *ranked], key=lambda c: -c.score)[:int(p["beam"])]
+            beam = best_per_record([root, *ranked])[:int(p["beam"])]
             for _depth in range(2, int(p["depth"]) + 1):
                 grown: list[Candidate] = []
                 for rank, c in enumerate(beam):
@@ -1016,7 +1036,7 @@ class SessionEstimator:
                             grown.append(child)
                 if not grown:
                     break
-                beam = sorted({c.key(): c for c in [*beam, *grown]}.values(), key=lambda c: -c.score)[:int(p["beam"])]
+                beam = best_per_record([*beam, *grown])[:int(p["beam"])]
 
         # ボタンはハンド全体の手番を変えるので、ボタンごとに直しを探す（単独では点が低くても、ほかの直しと
         # 合わせて正しくなる = 店舗 9d1d8536 ハンド 4: ボタンの置き忘れ + 「チェック、チェック」の言い直し）。
@@ -1028,6 +1048,17 @@ class SessionEstimator:
             if root.hand and root.score >= base.score - p["button_explore"]:
                 keep(root, base)
                 search(root, others)
+        # 仕上げ: 点の良い記録に、記録を変えずに説明を良くした直しを足す（深さの上限で届かなかった説明。足しても記録が
+        # 変わる直しは使わない = 記録どうしを同じ条件で比べる）
+        ordered_explainers = _ordered(tuple(explainers))
+        for c in sorted(distinct.values(), key=lambda c: -c.score)[:int(p.get("polish_top", 0))]:
+            for e in ordered_explainers:
+                if e in c.edits or any(e.conflicts(x) for x in c.edits):
+                    continue
+                child = evaluate(_ordered((*c.edits, e)))
+                if child.hand and child.key() == c.key() and child.score > c.score:
+                    keep(child, c)
+                    c = child
         groups = sorted(distinct.values(), key=lambda c: -c.score)
         tau = p["temperature"]
         top = groups[0].score / tau if groups else 0.0

@@ -666,7 +666,7 @@ def _session(prefix: str) -> tuple[SessionEstimator, dict]:
     return est, {h["hand_id"]: h["truth"] for h in expected["hands"]}
 
 
-@pytest.mark.slow       # 本番と同じ探索の幅で店舗のハンドを推定する（合わせて約 85 秒。幅は変えない = 監査 1 D2）
+@pytest.mark.slow       # 本番と同じ探索の幅で店舗のハンドを推定する（並べて回して合わせて約 3 分。幅は変えない = 監査 1 D2）
 @pytest.mark.parametrize("prefix,hand_id,correct,review", [
     # ボタンの置き忘れ + 「チェック、チェック」の言い直し: 記録の再生では崩れ、推定で丸ごと正しい（直しを使った = 要確認）
     ("9d1d8536", 4, True, True),
@@ -675,6 +675,13 @@ def _session(prefix: str) -> tuple[SessionEstimator, dict]:
     # 聞き違いの「フォールド」と「ヘッドゾップ」がそろって誤りを指す。席4 の札は最後まで離れない → 要確認
     ("027e4b15", 1, False, True),
     ("7b897671", 2, True, False),
+    # 正解には「チェック」（プロンプトの繰り返しの下）・「ベット 1500」・「これで。」= フォールドの 3 つの直しが要る。
+    # 「これで。」は記録を変えない説明の直しで、前は探索で広げなかったので正解に届かなかった（ボタンを動かす誤りが 1 番）
+    ("782c457d", 17, True, True),
+    # プリフロップの「レイズ2千点」は第 2 の耳が「千点」とはっきり聞いた = 1000（額の食い違い）。正解には「ご覧いただき
+    # ありがとうございます。」「ご視聴ありがとうございました。」= コールと、4 つ目の説明の直し「それでは。」= フォールドが
+    # 要る（深さ 3 では届かず、探索のあとの仕上げで足す）
+    ("782c457d", 5, True, True),
 ])
 def test_store_hands(prefix, hand_id, correct, review):
     pytest.importorskip("pokerkit")
