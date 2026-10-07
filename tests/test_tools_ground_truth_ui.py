@@ -373,6 +373,14 @@ class TestShowdownMuck:
         status, html = _req(base, "GET", "/")
         assert status == 200 and "function addMuck(seat)" in html and "が見せずに降りた" in html
 
+    def test_page_fills_the_board_from_the_record(self, base):
+        """ボードは記録（RFID）の札で自動で入れる（オーナー 2026-10-07）: 進行中のハンドは数秒ごとに読み直してターン・
+        リバーも入れる。手で選んだ位置と保存した真のアクションの札は変えない。"""
+        status, html = _req(base, "GET", "/")
+        assert status == 200 and "function followRecordBoard(capBoard)" in html
+        assert "setInterval(pollBoard, 3000)" in html and "S.followBoard = !!d.in_progress" in html
+        assert "S.boardTouched.add(p.a)" in html                             # 手で選んだ位置
+
 
 class TestShowdownWinner:
     """ショーダウンの勝者は、入れたボードと手札で判定して入れる（オーナー 2026-09-29 9d1d8536 ハンド 3: 勝った席が
