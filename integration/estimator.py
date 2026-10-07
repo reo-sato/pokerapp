@@ -146,11 +146,13 @@ EXPLANATION_MARK = "（記録は変えない説明）"    # 記録を変えな�
 # 監査 3 回目（2026-10-03, オーナーが推奨の案を採用）: 第 2 の耳が否定した Whisper の読みを第 2 の耳の候補と同じ式で
 # 値付けする（下の桁の読みの値の逆転）・意味のない語の額（第 2 の耳あり）を候補と同じ式 + 音の距離で。
 # 短い語の聞き間違いの進め方 2（2026-10-07, オーナー承諾）: 全発話の第 2 の耳を別の読みに使い（`all_ears`）、短い語の分類器
-# （`audio/short_words.py`）の読みを選択肢にする（`short_words`）。分類器の読みは既定の読みより高くしない（`short_cap` 0 =
-# どの読みかはハンドの筋で決める。上限なし・重み 0.5 より、良くなったハンドが同じで要確認が少ない）。
+# （`audio/short_words.py`）の読みを選択肢にする（`short_words`）。分類器の読みが既定の読みより高くなるのは log で 1 まで
+# （`short_cap`。どの読みかは主にハンドの筋で決める）。学習のラベルをオーナーの聞き取りで直す前は 0（上限なしだと、
+# 雑談の混じったラベルで学んだ分類器が言われなかったアクションを近くの発話で説明しすぎた）、直したあとは 1 と上限なしで
+# 良くなったハンドが同じ（782c457d#14 が加わる）・要確認は 1 のほうが少ない（2026-10-07）。
 READING_OVERRIDES: dict[str, float] = {"canned_action": 0.27, "canned_ear_temp": 2.0, "ear_empty_text": 1.0,
                                        "price_overridden_whisper": 1.0, "price_ear_phonetic": 1.0,
-                                       "all_ears": 1.0, "short_words": 1.0, "short_cap": 0.0}
+                                       "all_ears": 1.0, "short_words": 1.0, "short_cap": 1.0}
 
 
 def reading_params() -> dict:

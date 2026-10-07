@@ -67,6 +67,71 @@ class TestTraining:
         assert tsw._label(["call"]) == "call" and tsw._label(["raise"]) == "amount" and tsw._label([]) == "none"
         assert tsw._label(["call", "fold"]) == "multi" and tsw._label(["allin"]) == "other"
 
+    def test_a_garbled_call_word_can_carry_the_fold(self):
+        """聞き違えたコールの語（「コールド」）はフォールドの行も受け持つ（店舗 b7f32031 ハンド 2: 「コーデー」= コール・
+        「コールド」= フォールドで、チェック 3 つのあとのチェックアラウンドは言い直し）。"""
+        from tools import short_words as tsw
+
+        items = [{"u": 0, "kind": "token", "tok": ("call", 0), "hint": None},
+                 {"u": 1, "kind": "unreadable", "tok": None, "hint": ("call", 0)},
+                 {"u": 2, "kind": "token", "tok": ("call", 0), "hint": None, "garbled": True},
+                 *({"u": 3 + k, "kind": "token", "tok": ("check", 0), "hint": None} for k in range(3)),
+                 {"u": 6, "kind": "token", "tok": ("check_around", 0), "hint": None}]
+        truth = [("call", 0), ("call", 0), ("fold", 0), ("check", 0), ("check", 0), ("check", 0)]
+        assert tsw.align(truth, items, [False] * 6) == [0, 1, 2, 3, 4, 5]
+
+    def test_owner_labels_are_the_answer(self):
+        """オーナーが聞いたラベルの発話は、その語として突き合わせる（雑談なら行を受け持たない = 隣の「アクション」に
+        フォールドを付けない、店舗 05cccd6c ハンド 19）。"""
+        from tools import short_words as tsw
+
+        rows = [{"utterance_start_ts": 10.0, "text": "アクション"}, {"utterance_start_ts": 13.0, "text": "ご覧いただき"}]
+        items = tsw.heard_items(rows, {13.0: "fold"})
+        assert [it["kind"] for it in items] == ["unreadable", "owner"]
+        assert tsw.align([("fold", 0)], items, [False]) == [1]
+        items = tsw.heard_items(rows, {10.0: "none", 13.0: "fold"})
+        assert items[0]["kind"] == "other" and tsw.align([("fold", 0)], items, [False]) == [1]
+
+    def test_owner_labels_file(self, tmp_path):
+        from tools import short_words as tsw
+
+        (tmp_path / tsw.LABELS_FILE).write_text(
+            '{"labels": {"1791283703.5776863": {"label": "call", "item": 2}, "5.0": {"label": "allin"}}}',
+            encoding="utf-8")
+        assert tsw.owner_labels(tmp_path) == {1791283703.5776863: "call"}
+        assert tsw.owner_labels(tmp_path / "none") == {} and tsw.owner_labels(None) == {}
+
+    def test_the_hand_ending_fold_is_the_next_utterance(self):
+        """ハンドを終わらせるフォールドは、最後のベットの次の発話（読めない・聞き違えたコール、6 秒以内）。後ろの雑談の
+        「フォールドして、フォールドじゃねーよ」には付けない（店舗 7b897671 ハンド 1）。"""
+        from tools import short_words as tsw
+
+        rows = [{"utterance_start_ts": t} for t in (0.0, 2.4, 11.0)]
+        items = [{"u": 0, "kind": "token", "tok": ("wager", 2400), "hint": None},
+                 {"u": 1, "kind": "unreadable", "tok": None, "hint": None},
+                 {"u": 2, "kind": "token", "tok": ("fold", 0), "hint": None}]
+        truth = [{"action": "bet", "amount": 2400, "optional": False}, {"action": "fold", "optional": True}]
+        assert tsw.end_fold(truth, items, [0, 2], rows) == [0, 1]
+        assert tsw.end_fold(truth, items, [0, None], rows) == [0, 1]
+        late = [dict(r, utterance_start_ts=r["utterance_start_ts"] + (7.0 if i else 0.0)) for i, r in enumerate(rows)]
+        assert tsw.end_fold(truth, items, [0, None], late) == [0, None]          # 6 秒より後 = 言われていない
+        chat = [items[0], {"u": 1, "kind": "token", "tok": ("check", 0), "hint": None}, items[2]]
+        assert tsw.end_fold(truth, chat, [0, 2], rows) == [0, 2]                  # 次の発話がほかの語
+        same = [items[0], {"u": 0, "kind": "token", "tok": ("fold", 0), "hint": None}, *items[1:]]
+        assert tsw.end_fold(truth, same, [0, 1], rows) == [0, 1]                  # ベットと同じ発話で言った
+
+    def test_restated_words_take_the_label_of_the_word(self):
+        """言い直し（同じ語を 15 秒以内にもう一度・読めない発話は隣の語と第 2 の耳の候補が同じ）は、その語のラベル。"""
+        from tools import short_words as tsw
+
+        rows = [{"utterance_start_ts": t} for t in (0.0, 1.0, 3.0, 40.0)]
+        items = [{"u": 0, "kind": "unreadable", "tok": None, "hint": ("call", 0)},       # 「コーナー」
+                 {"u": 1, "kind": "token", "tok": ("call", 0), "hint": None},            # 「コール7400点。」
+                 {"u": 2, "kind": "token", "tok": ("call", 0), "hint": None},            # 「コール」
+                 {"u": 3, "kind": "token", "tok": ("call", 0), "hint": None}]            # 40 秒後
+        truth = [{"action": "call", "amount": 7400, "optional": False}]
+        assert tsw.restated(truth, items, [1], rows) == {0: "call", 2: "call"}
+
     def test_training_separates_and_is_repeatable(self):
         from tools import short_words as tsw
 
@@ -154,17 +219,21 @@ class TestEstimatorOptions:
         assert [o.text for o in short] == ["コール"]
         assert short[0].logp == pytest.approx(math.log(0.8 / 0.1) + math.log(0.2 / 0.8))
 
-    def test_v1_never_reads_above_the_default(self, monkeypatch):
-        """v1 は分類器の読みを既定の読みより高くしない（`short_cap` 0 = どの読みかはハンドの筋で決める）。"""
+    def test_v1_reads_at_most_one_above_the_default(self, monkeypatch):
+        """v1 は分類器の読みを既定の読みより log で 1 までしか高くしない（`short_cap` 1 = どの読みかは主にハンドの筋で
+        決める）。"""
         from integration.estimator import reading_params
 
         params = reading_params()
-        assert params["all_ears"] == 1.0 and params["short_words"] == 1.0 and params["short_cap"] == 0.0
+        assert params["all_ears"] == 1.0 and params["short_words"] == 1.0 and params["short_cap"] == 1.0
         row = {"utterance_start_ts": 1.0, "text": "撮れないからね。", "no_speech": False, "ear_wanted": False,
                "ear": _ear({"コール": -3.0, "これ": -1.0})}
-        probs = {"none": 0.1, "call": 0.8, "check": 0.04, "fold": 0.04, "amount": 0.02}
+        probs = {"none": 0.01, "call": 0.97, "check": 0.01, "fold": 0.005, "amount": 0.005}
         opts = self._options(monkeypatch, row, probs, params)
-        assert [(o.source, o.logp) for o in opts if o.source == "short"] == [("short", 0.0)]
+        assert [(o.source, o.logp) for o in opts if o.source == "short"] == [("short", 1.0)]
+        weak = {"none": 0.1, "call": 0.8, "check": 0.04, "fold": 0.04, "amount": 0.02}     # 上限より下 = 式のまま
+        opts = self._options(monkeypatch, row, weak, params)
+        assert [o.logp for o in opts if o.source == "short"] == [pytest.approx(params["short_none_penalty"] + math.log(8))]
 
     def test_not_for_questions_or_words_the_engine_reads_by_the_table(self, monkeypatch, v1_params):
         """確認の問い（「これでいいですか?」）と、engine が札の離脱・手番で読む語（「これで終わりです」= garbled_call）には
