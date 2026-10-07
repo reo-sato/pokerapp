@@ -1324,7 +1324,7 @@
      {
       "seat": 5,
       "action": "bet",
-      "amount": 1000,
+      "amount": 1100,
       "street": "flop"
      },
      {
@@ -1342,7 +1342,7 @@
      {
       "seat": 5,
       "action": "call",
-      "amount": 3000,
+      "amount": 2900,
       "street": "flop"
      },
      {
@@ -1549,16 +1549,17 @@
      "winner_seat": 5,
      "entry_sec": 72.5
     },
-    "hand_id": 6
+    "hand_id": 6,
+    "correction": "フロップの席5 のベットは「せんひゃく」= 1100（録音をオーナーが聞いて確認 2026-10-07。第 2 の耳も「千百」）、席5 のコールは 2900"
    },
    "baseline": {
-    "action_correct": 10,
+    "action_correct": 12,
     "action_total": 18,
     "winner_match": false,
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 10,
+    "action_correct": 12,
     "action_total": 18,
     "winner_match": false,
     "board_match": true
