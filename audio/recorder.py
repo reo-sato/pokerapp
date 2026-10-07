@@ -330,8 +330,16 @@ class AudioThread(threading.Thread):
         chunk_size = 1024
         stream = self._open_stream(pa, pyaudio, chunk_size)
         if stream is None:
-            pa.terminate()
-            return
+            # 起動のときに開けなくても（受信機が抜けている・RDP の音声が接続元に回っている等）あきらめず、開けるように
+            # なったら聞き取りを始める（店舗 2026-10-07: 起動のときだけ RDP の音声が接続元に回っていて開けず、その
+            # あと開けるようになってもロガーは最後まで音声なしだった）。
+            pa, stream = self._reopen(pa, pyaudio, chunk_size, None)
+            if stream is None:
+                try:
+                    pa.terminate()
+                except Exception:  # noqa: BLE001 — 終わるときの片付けの失敗は無視する
+                    pass
+                return
         logger.info("AudioThread started (device_id=%d %r, rate=%d)",
                     self._device_id, self._device_name, self._sample_rate)
         self.health = {"state": "running", "level": 0.0, "last_chunk_at": None,
@@ -405,18 +413,21 @@ class AudioThread(threading.Thread):
                                "rdp_audio": self._rdp_audio(pa, pyaudio_mod, devices)}
             return None
 
-    def _reopen(self, pa, pyaudio_mod, chunk_size: int, reason: str):
+    def _reopen(self, pa, pyaudio_mod, chunk_size: int, reason: Optional[str]):
         """切れたマイクを開き直す。待ちを倍々に延ばしながら、開けるか止めるまで繰り返す。
 
         PortAudio はデバイスの一覧を初期化のときにしか読まないので、毎回 PyAudio を作り直す（Bluetooth を
         つなぎ直すとマイクの番号が変わる。名前で選んでいれば同じマイクを探し直す）。(pa, stream) を返す
-        （止めたときは stream = None）。
+        （止めたときは stream = None）。`reason` が None = 起動のときに開けなかった: 開けなかった理由は起動時の
+        表示のため死活表示に残し、「切れました」とは知らせない。
         """
-        message = f"マイクが切れました（{reason}）— つながり直すのを待っています"
-        logger.warning("%s", message)
-        self._status(f"{message}。Bluetooth・電源を確かめてください（つながれば自動で再開します）")
-        self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": message,
-                       "device_name": self._device_name, "reconnecting": True}
+        at_start = reason is None
+        if not at_start:
+            message = f"マイクが切れました（{reason}）— つながり直すのを待っています"
+            logger.warning("%s", message)
+            self._status(f"{message}。Bluetooth・電源を確かめてください（つながれば自動で再開します）")
+            self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": message,
+                           "device_name": self._device_name, "reconnecting": True}
         delay = _REOPEN_FIRST_SEC
         attempts = 0
         noted_at = time.monotonic()
@@ -436,7 +447,10 @@ class AudioThread(threading.Thread):
             if stream is not None:
                 logger.info("マイクを開き直しました（%d 回目, device_id=%d %r）",
                             attempts, self._device_id, self._device_name)
-                self._status(f"マイクを開き直しました（{self._device_name or self._device_id}）— 聞き取りを再開します")
+                if at_start:
+                    self._status(f"マイクを開けました（{self._device_name or self._device_id}）— 聞き取りを始めます")
+                else:
+                    self._status(f"マイクを開き直しました（{self._device_name or self._device_id}）— 聞き取りを再開します")
                 self.health = {"state": "running", "level": 0.0, "last_chunk_at": None,
                                "device_name": self._device_name, "device_index": self._device_id}
                 return pa, stream

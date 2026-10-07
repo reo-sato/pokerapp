@@ -153,9 +153,13 @@ def rdp_pyaudio(monkeypatch):
 
 
 def _run(names, device_id: int = 0) -> AudioThread:
+    """起動のときに 1 回だけ開いてみる（開けなければ開き直しを待つが、止める合図を先に立てておくので待たずに
+    返る = 同じスレッドで走らせてよい）。"""
+    stop = threading.Event()
+    stop.set()
     thread = AudioThread(audio_queue=make_audio_queue(), device_id=device_id, device_names=names,
-                         transcriber=SimpleNamespace(ready=True), stop_event=threading.Event())
-    thread.run()              # open で止まるので同じスレッドで走らせてよい
+                         transcriber=SimpleNamespace(ready=True), stop_event=stop)
+    thread.run()
     return thread
 
 
@@ -322,3 +326,56 @@ class TestMicDrop:
         thread.run()
         assert len(tries) == 3 and thread.health["state"] == "stopped"
         assert len(notes) == 1                                      # 切れたことを 1 回だけ知らせる
+
+
+class TestMicAtStart:
+    """店舗 2026-10-07: 起動のときだけ RDP の音声が接続元に回っていてマイクを開けず、そのあと開けるようになっても
+    ロガーは最後まで音声なしだった。起動のときに開けなくても開き直しを続け、開けたら聞き取りを始める。"""
+
+    def test_a_mic_that_appears_later_is_opened(self, dropping_pyaudio):
+        dropping_pyaudio.streams = []                               # 起動のときは開けない
+        notes: list[str] = []
+        thread = AudioThread(audio_queue=make_audio_queue(), device_names=["DJI Mic Mini 2"],
+                             transcriber=SimpleNamespace(ready=True), stop_event=threading.Event(),
+                             on_status=notes.append)
+        original = thread._open_stream                             # noqa: SLF001
+        reasons = []
+
+        def connect_after_the_first_try(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if result is None and not kwargs.get("reopening"):
+                reasons.append(thread.health.get("error"))          # 起動時の表示に出す理由は残っている
+                dropping_pyaudio.streams = [_Stream([b"\x00" * 2048])]   # このあとつながる
+            return result
+
+        thread._open_stream = connect_after_the_first_try          # noqa: SLF001
+        thread.run()                                                # ストリームが尽きたら止まる
+        assert reasons and "Invalid input device" in reasons[0]
+        assert _FakePA.opened == [1, 1] and dropping_pyaudio.created == 2   # 作り直して名前で探した
+        assert len(notes) == 1 and "マイクを開けました" in notes[0] and "聞き取りを始めます" in notes[0]
+        assert thread.health["state"] == "stopped"
+
+    def test_the_reason_at_start_stays_while_waiting(self, rdp_pyaudio, monkeypatch):
+        import audio.recorder as recorder
+
+        monkeypatch.setattr(recorder, "_REOPEN_FIRST_SEC", 0.0)
+        stop = threading.Event()
+        notes: list[str] = []
+        thread = AudioThread(audio_queue=make_audio_queue(), device_names=["Wireless Mic Rx"],
+                             transcriber=SimpleNamespace(ready=True), stop_event=stop, on_status=notes.append)
+        original = thread._open_stream                             # noqa: SLF001
+        tries = []
+
+        def open_and_maybe_stop(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if kwargs.get("reopening"):
+                tries.append(1)
+                if len(tries) >= 2:
+                    stop.set()
+            return result
+
+        thread._open_stream = open_and_maybe_stop                  # noqa: SLF001
+        thread.run()
+        assert len(tries) == 2                                      # 起動のあとも開き直しを続けた
+        assert thread.health["state"] == "error" and thread.health["rdp_audio"]   # 起動時の理由のまま
+        assert notes == []                                          # 「切れました」とは知らせない

@@ -356,13 +356,16 @@ def _report_audio_start(audio_thread, device_id: int, wait_sec: float = 3.0) -> 
         from audio.devices import RDP_AUDIO_FIX
 
         print("音声入力: リモートデスクトップの音声が接続元の端末に回っているため、PC のマイクを開けません。"
-              f"{RDP_AUDIO_FIX}、ロガーを起動し直してください（音声なしで続けます）。")
+              f"{RDP_AUDIO_FIX}てください。開けるようになったら自動で聞き取りを始めます（ロガーの起動し直しは"
+              "要りません。それまでは音声なしで続けます）。")
     elif state == "error" and health.get("missing_names"):
-        print(f"音声入力: {health.get('error', '')}。受信機の差し込み・Bluetooth の接続を確かめて、ロガーを"
-              r"起動し直してください（名前は tools\audio_check.py list で確かめられます。音声なしで続けます）。")
+        print(f"音声入力: {health.get('error', '')}。受信機の差し込み・Bluetooth の接続を確かめてください。見つかったら"
+              r"自動で聞き取りを始めます（名前は tools\audio_check.py list で確かめられます。それまでは音声なしで"
+              "続けます）。")
     elif state == "error":
-        print(f"音声入力: マイク（番号 {index}）を開けませんでした — {health.get('error', '')}。"
-              r"番号は tools\audio_check.py list で確かめてください（音声なしで続けます）。")
+        print(f"音声入力: マイク（番号 {index}）を開けませんでした — {health.get('error', '')}。開けるようになったら"
+              r"自動で聞き取りを始めます（番号は tools\audio_check.py list で確かめてください。それまでは音声なしで"
+              "続けます）。")
     else:
         print(f"音声入力: マイクの状態を確認できません（{state}）。")
 
