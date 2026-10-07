@@ -1657,6 +1657,20 @@ def _has_hand_name_keyword(norm: str) -> bool:
     return any(_to_katakana(unicodedata.normalize("NFKC", k)).lower() in lower for k in HAND_NAME_KEYWORDS)
 
 
+def mentions_hand_name(text: str) -> bool:
+    """発話のどこかに役の名前があるか（ショーダウンで手を読み上げた）。確認型の文（「キングハイですね。」）も見る:
+    `parse_actions` はアクションにしないが、手を見せたことの証拠にはなる（推定器のショーダウンの声, 2026-10-07）。"""
+    for sentence in _SENTENCE_SPLIT.split(text or ""):
+        norm = _to_katakana(unicodedata.normalize("NFKC", sentence)).rstrip(_TRAILING_PUNCTUATION)
+        for ending in _QUESTION_ENDINGS:
+            if norm.endswith(ending):
+                norm = norm[:-len(ending)]
+                break
+        if norm.strip() and (_find_hand_phrase(norm) is not None or _has_hand_name_keyword(norm)):
+            return True
+    return False
+
+
 def _around_hand_phrase(
     text: str, nfkc: str, found: _HandPhrase, confidence: Optional[float], utterance_start_ts: Optional[float],
 ) -> list[AudioEvent]:

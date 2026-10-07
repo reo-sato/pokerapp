@@ -112,6 +112,20 @@ class TestParsing:
     def test_card_names_alone_or_in_talk_are_not_hand_names(self, text):
         assert all(e.action != "end_hand" for e in parse_actions(text))
 
+    @pytest.mark.parametrize("text, said", [
+        ("キングハイですね。", True), ("ツーペアですね", True), ("Sヒット、Sフォーム、2ペアです。", True),
+        ("エースヒットエースホーム二ペアですね", True), ("フラッシュ", True),
+        ("そうですね", False), ("コール", False), ("ありがとうございます", False), ("", False),
+    ])
+    def test_a_hand_name_mentioned_anywhere(self, text, said):
+        """推定器のショーダウンの声（2026-10-07）: 確認型の文（「キングハイですね。」）はアクションにしないが、役の名前を
+        言った = 手を見せた証拠にはなる。"""
+        from audio.recognizer import mentions_hand_name
+
+        assert mentions_hand_name(text) is said
+        if text == "キングハイですね。":
+            assert parse_actions(text) == []                  # 読み取りは変えない（確認型の文）
+
     def test_a_hand_name_then_a_muck_in_one_utterance(self):
         assert [(e.action, e.hand_name) for e in parse_actions("キングヒット、フォールド")] == [
             ("end_hand", "One pair"), ("fold", None)]

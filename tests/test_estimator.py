@@ -405,9 +405,46 @@ class TestHandTerms:
         assert [v for n, v in terms if n.startswith("ショーダウンの声")] == [
             pytest.approx(math.log(PARAMS["p_showdown_word"]))]
         assert "ショーダウンの声があるのに全員降りて終わった" in flags and not shown_flags
-        assert shown - folded == pytest.approx(math.log(1 - PARAMS["p_showdown_word"])
+        assert shown - folded == pytest.approx(math.log(PARAMS["p_showdown_heard"])
                                                - math.log(PARAMS["p_showdown_word"]), abs=1e-3)
-        assert quiet - folded == pytest.approx(-math.log(PARAMS["p_showdown_word"]), abs=1e-3)
+        assert quiet - folded == pytest.approx(math.log(1 - PARAMS["p_showdown_word"])
+                                               - math.log(PARAMS["p_showdown_word"]), abs=1e-3)
+
+    def test_a_showdown_without_the_voice_leans_to_a_fold_out(self):
+        """ショーダウンでは必ず「ショウダウン」と言う（オーナー 2026-10-07）: 声が聞き取れないハンドは、全員降りて終わった
+        記録の方が確からしい。声は崩れて聞き取れないこともある（`p_showdown_heard`）ので、要確認の理由にはしない。"""
+        est = _estimator()
+        shown, terms, flags = est.score(_window(), self._hand(winner_source="cards"), [], self._INFO, ())
+        folded, _, _ = est.score(_window(), self._hand(), [], self._INFO, ())
+        assert [v for n, v in terms if n.startswith("ショーダウンの声")] == [
+            pytest.approx(math.log(1 - PARAMS["p_showdown_heard"]))]
+        assert folded - shown == pytest.approx(math.log(1 - PARAMS["p_showdown_word"])
+                                               - math.log(1 - PARAMS["p_showdown_heard"]), abs=1e-3)
+        assert not flags
+
+    @pytest.mark.parametrize("text, ear, at, heard", [
+        ("それでは。", "ソラン", 31.0, True),             # Whisper は崩れ、第 2 の耳は「ショーダウン」に近い音
+        ("ご覧いただきありがとうございます。", "これそら", 30.5, True),   # 定型の幻聴でも第 2 の耳の文は見る
+        ("コール、ショーだ!", "", 30.0, True),
+        ("キングハイですね。", "", 33.0, True),           # 確認型の文の役の名前も手を見せた証拠
+        ("", "エースヒットエースホーム二ペアですね", 34.0, True),
+        ("それでは。", "これだ", 31.0, False),            # フォールドの声（第 2 の耳の「これだ」）
+        ("シート4 レイズ 2千、コール、チェック、フォールド、オールイン、ショーダウン", "", 31.0, False),   # プロンプトの幻聴
+        ("それでは。", "ソラン", 60.0, False),            # 最後のアクションから遠い
+    ])
+    def test_the_garbled_showdown_voice_near_the_end(self, text, ear, at, heard):
+        """崩れた「ショーダウン」の音（Whisper「それでは。」・第 2 の耳「ソラン」）・読み取りの語にならない役の名前を、
+        記録の最後のアクションの前後（3 秒前〜12 秒あと）で見る（直しによらない観測）。"""
+        row = {"utterance_start_ts": T0 + at, "text": text}
+        if ear:
+            row["ear"] = {"text": ear, "logp": -1.0, "candidates": []}
+        est = _estimator(transcripts=(row,))
+        w = _window()
+        w.base["actions"] = [_row("river", 5, "call", T0 + 30.0)]
+        assert est._showdown_sound(w) is heard
+        shown, terms, _ = est.score(w, self._hand(winner_source="cards"), [], self._INFO, ())
+        want = math.log(PARAMS["p_showdown_heard"]) if heard else math.log(1 - PARAMS["p_showdown_heard"])
+        assert [v for n, v in terms if n.startswith("ショーダウンの声")] == [pytest.approx(want)]
 
     def test_an_amount_the_second_ear_also_heard_differently_is_reviewed(self):
         """賭けの額の発話に、選んだ読みから `review_margin` 以内の別の額の読みがあれば要確認（採点は変えない）。

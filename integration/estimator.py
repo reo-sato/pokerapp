@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -93,6 +94,10 @@ PARAMS: dict[str, float] = {
                                  # 要る。手の事前の −log 2 の代わり。2026-10-06）
     "p_showdown_word": 0.03,     # ショーダウンの声（「ショーダウン」・役の名前）があるのに全員降りて終わった（真のアクションの
                                  # 92 ハンド: 声のあった 23 ハンドはすべてショーダウン、全員降りて終わった 45 ハンドで声 0）
+    "p_showdown_heard": 0.76,    # ショーダウンになったハンドで、その声（語・役の名前・`_showdown_sound`）が聞き取れた。オーナー
+                                 # 2026-10-07: ショーダウンでは必ず「ショウダウン」と言う = 声が無ければ全員降りて終わった。
+                                 # ただし声は崩れやすい（開発データのショーダウンになったハンド 52 で聞き取れた 40 = (40+1)/(52+2)。
+                                 # 全員降りて終わった 47 では 1 = 真のアクションを確かめている e82f5005 ハンド 15）
     "p_unread_board": 0.03,      # 次のストリートのアクションなのにボードの札が読めていない（店舗 1 回 / 約 40）
     "p_street_time": 0.02,       # アクションの時刻がそのストリートの札の配布と合わない（次のストリートの札よりあと・
                                  # 札の時刻が当てにならないハンドの札より前。札の読み取りの遅れ `street_slack_sec` は許す）
@@ -134,6 +139,13 @@ _INSERTABLE = ("fold", "check", "call")
 _INSERT_LEAD_SEC = 0.3          # 聞こえなかったアクションは次の語の少し前に置く
 _STREETS = ("preflop", "flop", "turn", "river")
 EXPLANATION_MARK = "（記録は変えない説明）"    # 記録を変えない説明だけの直しの要確認の理由に付ける
+# ショーダウンの声の音（`SessionEstimator._showdown_sound`）。ディーラーは「コール、ショウダウン」と続けて早く言うことが多く、
+# 読み取りの語にならないことが多い: Whisper は「コール、ショーだ!」「チェック ショー」「それでは。」「これで終わりです。」、
+# 第 2 の耳は「ショナン」「ショロン」「ソラン」「ソロン」「コルソナン」「これでしょな」「初段」「空」と書く（開発データの
+# ショーダウンになったハンド 52）。全員降りて終わったハンドの最後のフォールドは、第 2 の耳が「これだ」「あれだ」「俺だ」と書く
+_SHOWDOWN_WHISPER = re.compile(r"ショー(?!ト)|ショウダ|ソーダウン")
+_SHOWDOWN_EAR = re.compile(r"ショ[ナロラダー]|ソ[ラロナ]|しょ[なだらー]|そら|空|初段|相談|初夏")
+_SHOWDOWN_SOUND_SEC = (3.0, 12.0)   # 記録の最後のアクションの前後（この秒数前から、この秒数あとまで）の発話だけを見る
 
 
 # 発話の読みの確からしさ（`tools/estimate.py` の `utterance_options`, v0 と共通）のうち v1 で置き直す値。
@@ -411,6 +423,33 @@ class SessionEstimator:
         self._text_at = {r["utterance_start_ts"]: (r.get("text") or "").strip() for r in self.transcripts}
         self._row_at = {r["utterance_start_ts"]: r for r in self.transcripts}
         self._options_cache: dict[float, list] = {}
+        self._sound_cache: dict[tuple[float, float], bool] = {}
+
+    def _showdown_sound(self, w: HandWindow) -> bool:
+        """記録の最後のアクションの近くに、崩れた「ショーダウン」の音の発話があるか（読み取りの語にならなかった声。
+        `_SHOWDOWN_WHISPER`・`_SHOWDOWN_EAR`）か、読み取りの語にならなかった役の名前（「キングハイですね。」= 確認型の文、
+        第 2 の耳の「エースヒット…二ペアですね」）があるか。直しによらない（候補どうしで同じ観測）。Whisper のプロンプトの
+        繰り返し・定型の幻聴の文は見ない（第 2 の耳の文は見る）。"""
+        key = (w.start, w.end)
+        if key not in self._sound_cache:
+            from audio.recognizer import is_prompt_echo, mentions_hand_name
+
+            stamps = [_epoch(a.get("timestamp")) for a in w.base.get("actions") or [] if a.get("street") != "showdown"]
+            last = max((t for t in stamps if t is not None), default=w.start)
+            before, after = _SHOWDOWN_SOUND_SEC
+            found = False
+            for r in self.transcripts:
+                start = r["utterance_start_ts"]
+                if not (w.start - 0.5 <= start < w.end and last - before <= start <= last + after):
+                    continue
+                text = r.get("text") or ""
+                ear = (r.get("ear") or {}).get("text") or ""
+                heard = not is_prompt_echo(text) and (_SHOWDOWN_WHISPER.search(text) or mentions_hand_name(text))
+                if heard or _SHOWDOWN_EAR.search(ear) or mentions_hand_name(ear):
+                    found = True
+                    break
+            self._sound_cache[key] = found
+        return self._sound_cache[key]
 
     def _options(self, start: float) -> list:
         """発話の読みの選択肢（[0] が既定, v0 と同じ `utterance_options`）。"""
@@ -628,15 +667,20 @@ class SessionEstimator:
                               _log(1 - p["p_players"]) if ok else _log(p["p_players"])))
                 if not ok:
                     flags.append(f"人数の宣言が合わない（{want} 人と言ったが {have} 人）")
-        # ショーダウンの声（「ショーダウン」・役の名前）は全員降りて終わったハンドでは言われない（声の数によらず 1 つ。
-        # 店舗 42f7b964 ハンド 2: リバーのコールが決まり文句になり、言われないフォールドで終わる別解が役の名前を
-        # 説明しないまま 1 番だった）
-        if any(t.action == "showdown" or (t.action == "end_hand" and t.hand_name) for t in info["tokens"]):
-            foldout = hand.get("winner_source") == "fold"
+        # ショーダウンの声（「ショーダウン」・役の名前・崩れた「ショーダウン」の音）は全員降りて終わったハンドでは言われず
+        # （声の数によらず 1 つ。店舗 42f7b964 ハンド 2: リバーのコールが決まり文句になり、言われないフォールドで終わる別解が
+        # 役の名前を説明しないまま 1 番だった）、ショーダウンでは必ず言われる（オーナー 2026-10-07。聞き取れるのは
+        # `p_showdown_heard`）= 声が無ければ全員降りて終わった方へ寄せる
+        foldout = hand.get("winner_source") == "fold"
+        if any(t.action == "showdown" or (t.action == "end_hand" and t.hand_name) for t in info["tokens"]) \
+                or self._showdown_sound(w):
             terms.append(("ショーダウンの声" + ("があるのに全員降りて終わった" if foldout else ""),
-                          _log(p["p_showdown_word"]) if foldout else _log(1 - p["p_showdown_word"])))
+                          _log(p["p_showdown_word"]) if foldout else _log(p["p_showdown_heard"])))
             if foldout:
                 flags.append("ショーダウンの声があるのに全員降りて終わった")
+        else:
+            terms.append(("ショーダウンの声" + ("が無い" if foldout else "が無いのにショーダウン"),
+                          _log(1 - p["p_showdown_word"]) if foldout else _log(1 - p["p_showdown_heard"])))
         terms += self._departure_terms(w, hand, betting, flags)
         terms += self._board_terms(hand, flags)
         terms += self._street_time_terms(hand, betting, flags, w)
