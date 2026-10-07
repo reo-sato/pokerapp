@@ -223,7 +223,7 @@
      },
      {
       "seat": 5,
-      "action": "fold",
+      "action": "check",
       "amount": 0,
       "street": "turn"
      },
@@ -238,6 +238,12 @@
       "action": "check",
       "amount": 0,
       "street": "turn"
+     },
+     {
+      "seat": 5,
+      "action": "check",
+      "amount": 0,
+      "street": "river"
      },
      {
       "seat": 6,
@@ -248,6 +254,12 @@
      {
       "seat": 8,
       "action": "bet",
+      "amount": 1500,
+      "street": "river"
+     },
+     {
+      "seat": 5,
+      "action": "call",
       "amount": 1500,
       "street": "river"
      },
@@ -296,20 +308,21 @@
       "name": "8"
      }
     ],
-    "winner_seat": 6,
+    "winner_seat": 5,
     "entry_sec": 40.1,
-    "hand_id": 1
+    "hand_id": 1,
+    "correction": "ターンのフォールドは誤りでチェックアラウンド、リバーの席8 のベット 1500 に席5・席6 がコール、勝者は席5（見せて勝った）。ライブの記録の誤り（ターンの「フォールドです。」を席5 のフォールドにした）に合わせて入っていた。オーナー確認 2026-10-07"
    },
    "baseline": {
-    "action_correct": 14,
-    "action_total": 14,
-    "winner_match": true,
+    "action_correct": 13,
+    "action_total": 16,
+    "winner_match": false,
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 14,
-    "action_total": 14,
-    "winner_match": true,
+    "action_correct": 13,
+    "action_total": 16,
+    "winner_match": false,
     "board_match": true
    }
   },
