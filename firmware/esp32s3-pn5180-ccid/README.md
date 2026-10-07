@@ -35,8 +35,9 @@ firmware/esp32s3-pn5180-ccid/
 
 ## 必要環境
 
-- ESP-IDF v5.1 以降（`idf.py`）。`esp_tinyusb` と `jef-sure/esp32-component-pn5180` は
-  `main/idf_component.yml` で自動取得。
+- ESP-IDF **v5.3.5**（実機で確かめた版。`idf.py`）。`esp_tinyusb` と `jef-sure/esp32-component-pn5180` は
+  `main/idf_component.yml` で自動取得し、版は実機で確かめた組み合わせ（esp_tinyusb 1.7.6・tinyusb 0.19）に固定している
+  （tinyusb 0.21 は `usbd_edpt_xfer` の引数が増えていてビルドできない = 店舗 PC 2026-10-07）。
 - ESP32-S3 ボード（**native USB ポート**を PC に接続。CP2102N の UART 側ではない＝§0）。
 - PN5180 ×N（SPI 接続。NSS/BUSY は reader ごと、SCK/MOSI/MISO/RST は共有）。
 
@@ -52,15 +53,29 @@ idf.py -p <PORT> flash monitor   # フラッシュは UART でも native USB(USB
 
 ### 書き換え（店舗 PC に ESP-IDF がある場合, v1.11 の再起動の命令を入れるとき）
 
-ロガーを更新すると `C:\PokerHandLogger\firmware\esp32s3-pn5180-ccid` にこのフォルダが入る。スタートメニューの
-「ESP-IDF 5.3 PowerShell」（ESP-IDF の環境が入った PowerShell）で、卓の読み取り装置を書き込み用の口につないでから:
+ESP-IDF が無ければ、公式のオフライン版インストーラ（v5.3.5, 1.15 GB, Git・Python 込み）を入れる（既定のまま進める。
+`C:\Espressif` に入り、スタートメニューに「ESP-IDF 5.3 CMD」と「ESP-IDF 5.3 PowerShell」ができる）:
 
 ```powershell
-cd C:\PokerHandLogger\firmware\esp32s3-pn5180-ccid; idf.py set-target esp32s3; idf.py build; idf.py flash
+curl.exe -L -o "$env:USERPROFILE\Downloads\esp-idf-tools-setup-offline-5.3.5.exe" https://github.com/espressif/idf-installer/releases/download/offline-5.3.5/esp-idf-tools-setup-offline-5.3.5.exe; Start-Process "$env:USERPROFILE\Downloads\esp-idf-tools-setup-offline-5.3.5.exe"
 ```
 
+ロガーを更新すると `C:\PokerHandLogger\firmware\esp32s3-pn5180-ccid` にこのフォルダが入る。卓の読み取り装置の
+UART 側の口（CP2102N）を PC につないでから、「ESP-IDF 5.3 CMD」で（前のビルドで取得した部品と版の記録は消してから
+取り直す）:
+
+```bat
+cd /d C:\PokerHandLogger\firmware\esp32s3-pn5180-ccid && rmdir /s /q managed_components 2>nul & del dependencies.lock 2>nul & python "%IDF_PATH%\tools\idf.py" set-target esp32s3 && python "%IDF_PATH%\tools\idf.py" build && python "%IDF_PATH%\tools\idf.py" flash
+```
+
+「ESP-IDF 5.3 PowerShell」なら `cd C:\PokerHandLogger\firmware\esp32s3-pn5180-ccid; idf.py set-target esp32s3; idf.py build; idf.py flash`。
+
+- CMD では `idf.py` が DOSKEY の別名で、行の先頭でしか効かないので、`&&` でつなぐときは `python "%IDF_PATH%\tools\idf.py"` と書く。
 - 書き込みの口とつなぎ方（UART 側 = CP2102N か、native USB を書き込みモードにするか）は 2026-09 の実機の立ち上げと同じ。
-  ポートが自動で見つからないときは `idf.py -p COM5 flash` のように番号を付ける。
+  ポートが自動で見つからないときは `-p COM5` のように番号を付ける（CMD から UART 側の番号を自動で選ぶなら
+  `powershell -NoProfile -Command "cd C:\PokerHandLogger\firmware\esp32s3-pn5180-ccid; $p = [regex]::Match((Get-PnpDevice -Class Ports -PresentOnly | Where-Object FriendlyName -match 'CP210').FriendlyName, 'COM\d+').Value; python (Join-Path $env:IDF_PATH 'tools\idf.py') -p $p flash"`）。
+- ビルド中の「detected dubious ownership in repository」は、ESP-IDF のフォルダを管理者が作ったための git の警告で、
+  版の文字列が取れないだけ（ビルドには関係しない）。
 - 書き込んだら卓の USB（native USB 側）を挿し直し、`python tools/probe_pcsc.py list`（RDP なら中継を通した
   `python tools/rfid_relay.py status`）で「使えるリーダー」の一覧が出ることを確かめる。
 

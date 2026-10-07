@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Fixed (ファームウェア: 店舗 PC でビルドできるよう部品の版を固定, 2026-10-07)
+
+作業ログ `docs/worklog/2026-10-07-firmware-build-store-pc.md`。
+
+- 店舗 PC の最初のビルドで、USB の部品 tinyusb に新しい 0.21.0 が入り、関数の引数が増えていてビルドできなかった。
+  実機で確かめた組み合わせ（esp_tinyusb 1.7.6・tinyusb 0.19）に固定した（`main/idf_component.yml`）。
+- ファームウェアの README に、店舗 PC への ESP-IDF v5.3.5 の入れ方と「ESP-IDF 5.3 CMD」で使える 1 行の手順を書いた。
+
 ### Changed (開発データ: オーナーの回答で真のアクションを直す, 2026-10-07)
 
 作業ログ `docs/worklog/2026-10-07-gt-answers.md`。
