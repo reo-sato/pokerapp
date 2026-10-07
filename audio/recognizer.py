@@ -332,16 +332,54 @@ def _kana_number_at(text: str, pos: int) -> Optional[tuple[int, int, str]]:
     return pos, i, kanji
 
 
+_DIGIT_KANJI = {**dict(zip("123456789", "一二三四五六七八九")), **{k: k for k in "一二三四五六七八九"}}
+
+
+def _digit_kana_unit_at(norm: str, pos: int) -> Optional[tuple[int, int, str]]:
+    """`pos` の数字 1 桁と、すぐあと（空白は挟んでよい）の仮名の単位の読み（店舗 2026-10-07 61eda7bd:「2センテン」=
+    2千点。残りの人数の「ウェイ」の崩れと読んでヘッズアップにしていた）。(開始, 終了, 漢数字) か None。
+
+    単位（千・百・万）から始まる読みだけ（「2センゴヒャク」= 二千五百）。前にも数字がある（「12セン」）・単位でない
+    片仮名（「2センス」）は None。
+    """
+    if not (0 <= pos < len(norm)) or norm[pos] not in _DIGIT_KANJI:
+        return None
+    if pos > 0 and (norm[pos - 1].isdigit() or norm[pos - 1] in _DIGIT_KANJI or norm[pos - 1] in ",."):
+        return None
+    i = pos + 1
+    while i < len(norm) and norm[i] in " 　":
+        i += 1
+    found = _kana_number_at(norm, i)
+    if found is None or found[2][0] not in "千百万":
+        return None
+    return pos, found[1], _DIGIT_KANJI[norm[pos]] + found[2]
+
+
+def _join_digit_kana_units(text: str) -> str:
+    """数字 1 桁 + 仮名の単位の読みを漢数字にした文字列（NFKC・片仮名に寄せた形。「2センテン。」→「二千テン。」）。"""
+    norm = _to_katakana(unicodedata.normalize("NFKC", text))
+    out, i = [], 0
+    while i < len(norm):
+        found = _digit_kana_unit_at(norm, i)
+        if found is None:
+            out.append(norm[i])
+            i += 1
+        else:
+            out.append(found[2])
+            i = found[1]
+    return "".join(out)
+
+
 def _kana_amount_to_kanji(norm: str, keyword_end: int) -> str:
     """アクションの語の直後にある仮名の数の読みを漢数字に置き換えた文字列を返す（ADR-0062）。
 
     「ベトナナ」→「ベト七」、「ベット にじゅうさん」→「ベット 二十三」。語の直後だけを見るのは、
-    ほかの言葉の中の「ゴ」「ニ」を金額と取り違えないため。
+    ほかの言葉の中の「ゴ」「ニ」を金額と取り違えないため。数字 1 桁 + 仮名の単位（「レイズ2センテン」）も。
     """
     i = keyword_end
     while i < len(norm) and norm[i] in _SPLIT_DELIMITERS:
         i += 1
-    found = _kana_number_at(norm, i)
+    found = _digit_kana_unit_at(norm, i) or _kana_number_at(norm, i)
     if found is None:
         return norm
     start, end, kanji = found
@@ -674,6 +712,12 @@ def parse_amount_only(
     event = _amount_only(text, confidence, utterance_start_ts)
     if event is not None:
         return event
+    joined = _join_digit_kana_units(text)
+    if joined != _to_katakana(unicodedata.normalize("NFKC", text)):
+        event = _amount_only(joined, confidence, utterance_start_ts)   # 「2センテン」= 二千点
+        if event is not None:
+            event.raw_text = text
+            return event
     opened = _open_digits(text)
     if opened is None:
         return None
@@ -1453,6 +1497,8 @@ def _garbled_way(nfkc: str, norm: str) -> Optional[_WayMatch]:
     for count in _PLAYERS_COUNT.finditer(norm):
         if any(a <= count.start() < b for a, b in seats):
             continue                            # 席番号（「シート3 レイズ」）
+        if _digit_kana_unit_at(norm, count.start()) is not None:
+            continue                            # 数 + 仮名の単位（「2センテン」= 2千点）は額
         start = count.end()
         if start >= len(norm) or not _is_katakana(norm[start]):
             continue

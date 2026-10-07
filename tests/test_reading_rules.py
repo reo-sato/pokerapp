@@ -128,6 +128,20 @@ class TestGarbledWayAfterACount:
     def test_other_words_after_a_number_are_unchanged(self, text, expected):
         assert _read(text) == expected
 
+    @pytest.mark.parametrize("text, expected", [
+        ("2センテン。", [("bet", 2000)]),        # 店舗 2026-10-07 61eda7bd ハンド 1（ヘッズアップにしていた）
+        ("3ゼンテン", [("bet", 3000)]),
+        ("2 センテン", [("bet", 2000)]),
+        ("2セン", [("bet", 2000)]),
+        ("2センゴヒャクテン", [("bet", 2500)]),
+        ("5ヒャクテン", [("bet", 500)]),
+        ("レイズ2センテン", [("raise", 2000)]),
+        ("ベット 3ゼン", [("bet", 3000)]),
+    ])
+    def test_a_digit_with_a_kana_unit_is_an_amount(self, text, expected):
+        assert _read(text) == expected
+        assert parse_actions(text)[0].raw_text == text            # 記録には聞こえたままの文
+
     def test_a_seat_number_is_not_a_count(self):
         assert ("players_left", 3) not in _read("シート3 レイズ")
 

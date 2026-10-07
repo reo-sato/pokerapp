@@ -47,6 +47,8 @@ def _in_replay_order(events: list[Event]) -> list[Event]:
     ただし発話の処理の中で出した信号（発話と同じ時刻で、その直後に記録したもの）は、live はその発話のアクションを
     入れる前に反映したので、発話の前に流す。engine の信号が無い記録（信号を記録する前の記録・手で書いた
     fixture）は従来どおり時刻順（同じ時刻は camera → rfid → audio）。
+    「フォールド」の語を札の離脱と組にした信号は、live では語のあとに出したもの（語の働きはその信号がすべて）。語の前に
+    流れても engine が語の直前の組の信号を見て語を流さない（`IntegrationThread._fold_word_already_signalled`）。
     """
     if not any(_is_signal(e) for e in events):
         return sorted(events, key=lambda e: (e.timestamp, _ORDER[type(e)]))

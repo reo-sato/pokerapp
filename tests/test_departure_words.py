@@ -273,3 +273,46 @@ class TestAbsenceBeforeTheDeal:
         tb.say("コール")
         assert tb.played() == [("preflop", 6, "raise", 600), ("preflop", 4, "call", 500),
                                ("preflop", 5, "call", 400)]
+
+
+class TestFoldWordPairedWithTheLastDeparture:
+    """店舗 2026-10-07 782c457d ハンド 6・20: リバーの最後の人の札が「フォールド」の語の話し始めのあとに離れ、語を処理した
+    ときに語と組にした（札の離脱のフォールド / ベットの無いリバーではチェック）。それでベッティングが終わり、ショーダウン。
+    replay は語の処理の中で出した離脱の信号を語の前に流すので、語が来たときにはもうショーダウンで、残った人のマックに
+    なっていた（記録 = live にはマックが無い）。"""
+
+    def _to_the_river(self, tb: _Table) -> None:
+        tb.deal()                                   # ボタン 席6: プリフロップは 6, 4, 5、フロップからは 4, 5, 6
+        for text in ("コール", "コール", "チェック"):
+            tb.say(text)
+        for cards, start in ((["2c", "7d", "9s"], 1), (["Th"], 4), (["3d"], 5)):
+            _board(tb, cards, start=start)
+            tb.tick(tb.now + 2.0)
+            if start < 5:
+                for _ in range(3):
+                    tb.say("チェック")
+
+    def _last_seat_leaves_after_the_word(self, tb: _Table) -> None:
+        spoken = tb.now
+        tb.speech_since = spoken                    # 語を認識しているあいだ（語より後の離脱は語のあとで入れる）
+        tb.tick(tb.now + 0.4)
+        tb.lift(6)
+        tb.tick(tb.now + 3.5)
+        tb.speech_since = None
+        tb.say("フォールド、ショーダウン", spoken_at=spoken)
+        tb.tick(tb.now + 9.0)                       # マックが無いまま 8 秒 → 手札で決める
+
+    @pytest.mark.parametrize("river, last", [
+        (("ベット 1000", "コール"), ("river", 6, "fold", 0)),       # ハンド 20: ベット・コールのあとの降り
+        (("チェック", "チェック"), ("river", 6, "check", 0)),        # ハンド 6: ベットの無いリバーの離脱 = チェック
+    ])
+    def test_the_word_is_the_departures_and_replay_matches_live(self, tmp_path, river, last):
+        tb = _Table(tmp_path)
+        self._to_the_river(tb)
+        for text in river:
+            tb.say(text)
+        self._last_seat_leaves_after_the_word(tb)
+        (live,) = tb.hands
+        rows = [(a.street, a.seat, a.action, a.amount) for a in live.actions]
+        assert rows[-1] == last and not any(a.street == "showdown" for a in live.actions)
+        assert _replayed(tb, tmp_path) == rows

@@ -639,6 +639,10 @@ class IntegrationThread(threading.Thread):
         # 最初に処理したときに札の離脱と組にした聞き違いのコールの語（id → 語）。組み直しでは記録した離脱の入力が降ろす
         # ので、語はもう何もしない（組み直しの入力の並び = live は語のあと、replay は語の前に離脱 = によらず同じにする）
         self._garbled_absorbed: dict[int, AudioEvent] = {}
+        # 最初に処理したときに働きを信号（札の離脱と組にした leave / 保留の spoken_fold）で済ませたベッティング中の
+        # 「フォールド」の語（id → 語）。組み直しでは信号の入力が同じことをするので、語はもう何もしない（`_garbled_absorbed`
+        # と同じ理由）
+        self._fold_words_done: dict[int, AudioEvent] = {}
         # ストリートの札（ストリート, 札の時刻）: 発話の処理のあと・ハンドを終わらせる前に、札より前に話した声の行がその
         # ストリート以降に入っていないか見て組み直す（`_fix_spoken_before_card`）
         self._before_card: list[tuple[str, float]] = []
@@ -1213,6 +1217,9 @@ class IntegrationThread(threading.Thread):
 
         if action == "correction":
             self._handle_correction(event)
+            return
+
+        if self._fold_word_already_signalled(event):
             return
 
         if "garbled_call" in event.parse_flags and self._rules_aware and self._hand_open:
@@ -2615,6 +2622,40 @@ class IntegrationThread(threading.Thread):
             self._maybe_finish_hand()
         return True
 
+    def _fold_word_already_signalled(self, event: AudioEvent) -> bool:
+        """この「フォールド」の語（聞き違いの語）の働きは、もう記録した信号で入っているか（入っていれば語は何もしない）。
+
+        live は語の処理の中で、札の離脱と組にした信号（leave / muck）を語のあとに出す（`_handle_fold_word`）。replay は
+        発話と同じ時刻の信号を発話の前に流すので、語が来たときにはもう離脱で降ろしてあり、そのまま語を流すと、離脱で
+        ベッティングが終わっていればショーダウンのマックに、最後のフォールドならその確定になって live と違っていた（店舗
+        2026-10-07 782c457d ハンド 6・20: 再生だけ残った人がマックした）。語より後に離れた札（離脱の時刻 ≥ 語の話し始め）の
+        信号が、語と同じ時刻で語の直前に入っていれば、その語と組にした信号（live で発話の前に入れる観測は、話し始めより
+        前の離脱だけ）。組み直しでは、最初に信号で済ませた語を流さない（入力の並びは live = 語のあと、replay = 語の前）。
+        """
+        if not (self._rfid_folds and self._rules_aware and self._hand_open):
+            return False
+        if event.action != "fold" and "garbled_call" not in event.parse_flags:
+            return False
+        if self._rebuilding:
+            return self._fold_words_done.get(id(event)) is event
+        index = self._current_input_index
+        if index is None or index >= len(self._hand_inputs) or self._hand_inputs[index][1] is not event:
+            return False
+        spoken = _spoken_at(event)
+        for kind, item in reversed(self._hand_inputs[:index]):
+            if kind == "audio" or getattr(item, "timestamp", None) != event.timestamp:
+                break
+            observed = getattr(item, "observed_at", None)
+            if kind != "leave" or observed is None or observed < spoken:
+                continue
+            dep = self._departures.get(item.seat)
+            if dep is None or not dep.get("applied"):
+                continue
+            dep["word"] = True                   # この語と組になった離脱（次の「フォールド」は吸わない）
+            self._fold_words_done[id(event)] = event
+            return True
+        return False
+
     def _handle_fold_word(self, event: AudioEvent) -> None:
         """ベッティング中の「フォールド」: 手番の人にすぐには付けない。札が離れかけている席があれば、その席の
         フォールドをいま入れる（3 秒待たない）。札が残っていれば手番の席を覚えておき、札が離れたとき
@@ -2623,6 +2664,7 @@ class IntegrationThread(threading.Thread):
         店舗 2026-09-27: 札が席に残ったままの「フォールド、コール」で「コール」が降りた人に付いていた）。"""
         if self._rebuilding:
             return                               # 記録した信号（leave / spoken_fold）の流し直しで再現する
+        self._fold_words_done[id(event)] = event   # 語の働きはここで出す信号がすべて（組み直しでは流さない）
         spoken_at = _spoken_at(event)
         if self._restated_fold_word(spoken_at, event):
             return
@@ -4671,6 +4713,7 @@ class IntegrationThread(threading.Thread):
     def _reset_corrections(self) -> None:
         self._departed_calls = []
         self._garbled_absorbed = {}
+        self._fold_words_done = {}
         self._before_card = []
         self._dropped_inputs = {}
         self._before_card_tags = {}
