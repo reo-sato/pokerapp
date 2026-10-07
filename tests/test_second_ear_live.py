@@ -72,11 +72,42 @@ class TestRecorder:
         assert transcript.ear["text"] == "六百" and transcript.ear["sec"] >= 0
         assert len(ear.heard[0]) == 1600 and ear.heard[0].dtype == np.float32
 
-    @pytest.mark.parametrize("text", ["コール", "コールですか？"])
-    def test_what_whisper_read_is_not_heard_again(self, text):
+    @pytest.mark.parametrize("text, expected", [("コール", [("call", 0)]), ("コールですか？", [])])
+    def test_what_whisper_read_is_heard_but_not_used(self, text, expected):
+        """2026-10-07 から全発話を第 2 の耳で聞いて記録する。使うのは今までどおり Whisper が読めなかった発話・額のある
+        発話だけ（`ear_wanted`）。"""
         ear = FakeEar(SIX_HUNDRED)
-        _, (transcript,) = _run(text, ear)
-        assert ear.heard == [] and transcript.ear is None and transcript.ear_text is None
+        events, (transcript,) = _run(text, ear)
+        assert [(e.action, e.amount) for e in events] == expected
+        assert all("second_ear" not in e.parse_flags and not e.amount_scores for e in events)
+        assert len(ear.heard) == 1 and transcript.ear["text"] == "六百" and transcript.ear["sec"] >= 0
+        assert transcript.ear_wanted is False and transcript.ear_text is None
+
+    def test_what_the_second_ear_was_used_for_is_marked(self):
+        _, (transcript,) = _run("のっぴょく", FakeEar(SIX_HUNDRED))
+        assert transcript.ear_wanted is True
+        scored = se.EarResult("ベット六百", -0.2, [("ベット 六百", -0.2)], amounts=[(600, -0.2), (100, -9.0)])
+        _, (wager,) = _run("ベット 600", FakeEar(scored))                # 額ごとの点数を付ける発話
+        assert wager.ear_wanted is True and wager.events[0].amount_scores == ((600, -0.2), (100, -9.0))
+
+    def test_sounds_that_are_not_voices_are_heard_for_the_record(self):
+        """声ではない音（VAD で Whisper にかけなかった音）も第 2 の耳で聞いて記録だけする（声の検出が落とした短い語を
+        あとで数えるため）。アクションにはしない。"""
+        class NoVoice:
+            ready = True
+
+            def recognize(self, audio_bytes):
+                return types.SimpleNamespace(text="", confidence=None, no_speech=True)
+
+        audio_q: queue.Queue = queue.Queue()
+        seen: list[Transcript] = []
+        ear = FakeEar(SIX_HUNDRED)
+        thread = AudioThread(audio_queue=audio_q, stop_event=threading.Event(), transcriber=NoVoice(),
+                             on_transcript=seen.append, second_ear=ear)
+        thread._process_chunk(b"\x10\x00" * 1600, utterance_start_ts=5.0)   # noqa: SLF001
+        (transcript,) = seen
+        assert audio_q.empty() and transcript.no_speech and transcript.events == ()
+        assert transcript.ear["text"] == "六百" and transcript.ear_wanted is False and len(ear.heard) == 1
 
     def test_the_second_ear_must_agree_with_itself(self):
         # 雑談「お願いしま」の中でいちばん近い候補は「千」だが、自由に聞いた文は千と読めない = 使わない
@@ -103,12 +134,16 @@ class TestRecord:
         log = TranscriptLog(tmp_path / "s.transcripts.jsonl")
         _, (rescued,) = _run("のっぴょく", FakeEar(SIX_HUNDRED))
         _, (plain,) = _run("コール", FakeEar(SIX_HUNDRED))
+        _, (no_ear,) = _run("コール", None)
         log.write(rescued)
         log.write(plain)
-        first, second = [json.loads(line) for line in log.path.read_text(encoding="utf-8").splitlines()]
+        log.write(no_ear)
+        first, second, third = [json.loads(line) for line in log.path.read_text(encoding="utf-8").splitlines()]
         assert first["ear_text"] == "六百" and first["ear"]["candidates"][0] == {"text": "六百", "logp": -1.0}
-        assert first["events"][0]["parse_flags"] == ["amount_only", "second_ear"]
-        assert "ear" not in second
+        assert first["events"][0]["parse_flags"] == ["amount_only", "second_ear"] and first["ear_wanted"] is True
+        # Whisper が読めた発話も、第 2 の耳の結果を記録だけする（ライブは使っていない）
+        assert second["ear"]["text"] == "六百" and second["ear_wanted"] is False and second["ear_text"] is None
+        assert "ear" not in third and "ear_wanted" not in third           # 第 2 の耳が無い
 
     def test_the_cli_line(self, capsys):
         import main
@@ -136,6 +171,22 @@ class TestRecord:
         assert "second_ear" in out[0].parse_flags and len(out) == 2               # 雑談・確認の発話は読まない
         # 別の文で置き換えた発話には使わない（方式の比べ）
         assert eval_store.reparse_events(live, rows, {"a.wav": "えっと"}) == live
+
+    def test_reading_again_uses_only_the_ears_the_live_used(self):
+        """記録だけの耳（`ear_wanted` = 偽）は、読み直しでも使わない（ライブと同じ。読み取りの規則が変わってその発話が
+        聞き直す発話になっても、ライブはその耳を使っていない）。`ear_wanted` の無い古い記録は、耳があれば使った。"""
+        from core.events import AudioEvent
+
+        agreeing = se.EarResult("六百", -1.0, [("六百", -1.0)]).to_dict()
+        row = {"utterance_start_ts": 1.0, "heard_at": 2.0, "text": "撮れないからね。", "audio_file": "a.wav",
+               "ear": agreeing}
+        live = [AudioEvent(action="call", amount=0, timestamp=9.0, raw_text="コール")]
+        used = eval_store.reparse_events(live, [row])
+        assert [(e.action, e.amount) for e in used[:1]] == [("bet", 600)]
+        assert eval_store.reparse_events(live, [{**row, "ear_wanted": True}])[0].amount == 600
+        assert eval_store.reparse_events(live, [{**row, "ear_wanted": False}]) == live
+        assert se.used_ear({**row, "ear_wanted": False}) is None and se.used_ear(row) is agreeing
+        assert se.used_ear({"text": "コール"}) is None and se.used_ear(None) is None
 
 
 class TestAgreement:
@@ -244,10 +295,11 @@ class TestAmountFromTheEar:
 
 class TestAnnouncements:
     def test_a_pot_announcement_is_not_heard_again(self):
-        """「ポット1万2000です。」を第 2 の耳が「一万二千です」と聞いて額にしていた。"""
+        """「ポット1万2000です。」を第 2 の耳が「一万二千です」と聞いて額にしていた。2026-10-07 から全発話を聞くが、
+        記録だけ（使わない）。"""
         ear = FakeEar(POT)
-        events, _ = _run("ポット1万2000です。", ear)
-        assert events == [] and ear.heard == []
+        events, (transcript,) = _run("ポット1万2000です。", ear)
+        assert events == [] and len(ear.heard) == 1 and transcript.ear_wanted is False and transcript.ear_text is None
 
     def test_a_blind_announcement_is_not_an_action(self):
         """Whisper が間に「オールイン」を足した（「ブラインド200、オールイン400です。」）。"""

@@ -76,6 +76,16 @@ class TestOptions:
                    "ear": _ear("六百", [("六百", -0.6), ("二百", -9.0)])}
         assert utterance_options(rescued, params)[0].source == "rescue"
 
+    def test_an_ear_kept_only_for_the_record_is_not_used(self):
+        """2026-10-07 からライブは全発話を第 2 の耳で聞いて記録する。推定器は、ライブが使った発話の耳だけを使う
+        （`ear_wanted` が偽の耳は無いものとする。`ear_wanted` の無い古い記録は、耳があれば使った）。"""
+        row = {"utterance_start_ts": 1.0, "text": "ご覧いただきありがとうございます。", "no_speech": False,
+               "ear": _ear("る空", [("コール", -5.3), ("千", -12.0)], logp=-0.5)}
+        assert utterance_options({**row, "ear_wanted": True}) == utterance_options(row)
+        opts = utterance_options({**row, "ear_wanted": False})
+        assert [(o.source, o.logp) for o in opts] == [("drop", 0.0)]          # 耳の無い発話と同じ
+        assert opts == utterance_options({k: v for k, v in row.items() if k != "ear"})
+
     def test_the_live_rule_is_the_default_when_the_ears_agree(self):
         row = {"utterance_start_ts": 1.0, "text": "のっぴょく", "no_speech": False,
                "ear": _ear("六百", [("六百", -0.6), ("二百", -9.0)])}

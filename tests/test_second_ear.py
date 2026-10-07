@@ -112,7 +112,31 @@ class TestGreedy:
         assert result.candidates[0][1] >= result.candidates[1][1]
         assert set(result.text) <= set("".join(VOCAB[1:]))
         row = result.to_dict()
-        assert set(row) == {"text", "logp", "candidates"} and row["candidates"][0]["text"].endswith("!")
+        assert set(row) == {"text", "logp", "candidates", "words", "frames"} and row["frames"] == 5
+        assert row["candidates"][0]["text"].endswith("!")
+
+    def test_short_words_are_scored_on_their_own(self):
+        """短い語（`SHORT_WORDS`）は全部の発話で採点して記録する（2026-10-07）。読み取りの候補とは別の木なので、
+        候補の上位・額の表は変わらない。モデルの文字に無い語は採点しない。"""
+        model = FakeModel(frames=5, seed=2)
+        candidates = [se.Candidate(s, s) for s in ("コール", "チェック", "六百", "千")]
+        plain = se.SecondEar(model, candidates, words=()).hear(np.zeros(16000))
+        heard = se.SecondEar(model, candidates).hear(np.zeros(16000))
+        assert plain.words == {} and "words" not in plain.to_dict()
+        assert (heard.text, heard.logp, heard.candidates, heard.amounts) == (
+            plain.text, plain.logp, plain.candidates, plain.amounts)
+        written = [w for w in se.SHORT_WORDS if set(w) <= set(VOCAB[1:])]
+        assert set(heard.words) == set(written) and {"コール", "コル", "コー", "チェック"} <= set(written)
+        h = se.Heard(model, model.encode(np.zeros(1)))
+        for word in written:
+            assert heard.words[word] == pytest.approx(h.score(_ids(word), 2), abs=1e-6)
+        assert heard.to_dict()["words"]["コール"] == round(heard.words["コール"], 3)
+
+    def test_every_short_word_can_be_written_by_the_model(self):
+        """短い語はどれも句読点・記号を含まない（モデルの文字に無いと黙って採点されない）。"""
+        for word in se.SHORT_WORDS:
+            assert word and not set(word) & set("、。！？～ ・")
+        assert len(set(se.SHORT_WORDS)) == len(se.SHORT_WORDS)
 
 
 class TestCandidates:

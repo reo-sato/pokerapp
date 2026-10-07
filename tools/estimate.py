@@ -42,7 +42,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from audio.recognizer import garbled_word, is_prompt_echo, is_question, parse_actions  # noqa: E402
-from audio.second_ear import apply_ear  # noqa: E402
+from audio.second_ear import apply_ear, used_ear  # noqa: E402
 from integration.replay import load_events  # noqa: E402
 from tools.eval_store import (  # noqa: E402
     _epoch,
@@ -169,7 +169,7 @@ def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
     text = (row.get("text") or "").strip()
     whisper = [] if _is_noise(row, text) else parse_actions(
         text, confidence=row.get("confidence"), utterance_start_ts=start)
-    ear = row.get("ear") or None
+    ear = used_ear(row)
     # ライブの規則（読めない発話の聞き直し・額の無いベット / レイズの額, `second_ear.apply_ear`）
     live, used = apply_ear(whisper, text, ear, question=is_question(text), utterance_start_ts=start)
     if any(e.action not in _BETTING for e in whisper + live):

@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from audio.recognizer import is_implausibly_long, is_prompt_echo, is_question, parse_actions
-from audio.second_ear import apply_ear
+from audio.second_ear import apply_ear, used_ear
 from core.event_queue import make_audio_queue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import PlayerState
@@ -245,7 +245,7 @@ def read_utterance(row: dict, text: Optional[str] = None) -> list[AudioEvent]:
     events = [] if is_noise(row, text) else parse_actions(
         text, confidence=row.get("confidence"), utterance_start_ts=start)
     if not overridden:      # 第 2 の耳が無い発話も（意味のない単発の語を音の近さで額と読む, ライブと同じ）
-        events, _ = apply_ear(events, text, row.get("ear"), question=is_question(text), utterance_start_ts=start,
+        events, _ = apply_ear(events, text, used_ear(row), question=is_question(text), utterance_start_ts=start,
                               confidence=row.get("confidence"))
     return events
 
