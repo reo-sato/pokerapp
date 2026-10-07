@@ -10,7 +10,7 @@
   （次の人のこと）。
 - 「コールド」「コード」は聞き違いのコール: その語のころに札が離れた席があればフォールド、無ければコール（要確認）。
 - 配る前からの不在（前のハンドの札が離れたまま）は、このハンドのフォールドにしない。
-- チェックで閉じたラウンドのあと、次のストリートの札より 3 秒以上前に話した賭けは要確認（記録は変えない）。
+- （次のストリートの札より前に話した賭けは `tests/test_street_timeline.py`）
 """
 from __future__ import annotations
 
@@ -273,42 +273,3 @@ class TestAbsenceBeforeTheDeal:
         tb.say("コール")
         assert tb.played() == [("preflop", 6, "raise", 600), ("preflop", 4, "call", 500),
                                ("preflop", 5, "call", 400)]
-
-
-class TestWagerBeforeTheStreetCard:
-    """店舗 05cccd6c ハンド 19: フロップの「チェック」が 1 つ多く聞こえ（聞き直しの重複）、フロップのベット「千二百」が
-    ターンの札の 13.5 秒前なのにターンのベットになった。記録は変えず要確認にする。"""
-
-    def _to_flop(self, tb: _Table) -> None:
-        tb.deal()
-        tb.say("コール")
-        tb.say("コール")
-        tb.say("チェック")
-        _board(tb, ["2c", "7d", "9s"])
-        tb.tick(tb.now + 2.0)
-
-    def test_flagged_when_spoken_well_before_the_card(self, tmp_path):
-        tb = _Table(tmp_path)
-        self._to_flop(tb)
-        for _ in range(3):
-            tb.say("チェック")
-        tb.tick(tb.now + 1.0)
-        tb.say("1200")                              # ターンの札の前
-        assert tb.played()[-1] == ("turn", 4, "bet", 1200)
-        tb.tick(tb.now + 5.0)
-        _board(tb, ["Jc"], start=4)
-        tb.tick(tb.now + 1.0)
-        record = tb.t._current_actions[-1]          # noqa: SLF001
-        assert (record.street, record.action) == ("turn", "bet")
-        assert "wager_before_street_card" in record.reason and record.needs_review
-
-    def test_not_flagged_after_the_card(self, tmp_path):
-        tb = _Table(tmp_path)
-        self._to_flop(tb)
-        for _ in range(3):
-            tb.say("チェック")
-        _board(tb, ["Jc"], start=4)
-        tb.tick(tb.now + 1.0)
-        tb.say("1200")
-        record = tb.t._current_actions[-1]          # noqa: SLF001
-        assert "wager_before_street_card" not in (record.reason or "")

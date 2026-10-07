@@ -2680,13 +2680,13 @@
     "hand_id": 11
    },
    "baseline": {
-    "action_correct": 4,
+    "action_correct": 9,
     "action_total": 17,
     "winner_match": null,
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 4,
+    "action_correct": 9,
     "action_total": 17,
     "winner_match": null,
     "board_match": true

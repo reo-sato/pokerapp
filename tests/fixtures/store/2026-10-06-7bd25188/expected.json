@@ -428,17 +428,18 @@
     "correction": "ボタンは席6（記録・真のアクションとも席5 = 1 席ずれていた。札の離れた順 席7→席8→席5 と合う）。席を 1 つ回した（オーナー確認 2026-10-06 夜）"
    },
    "baseline": {
-    "action_correct": 6,
+    "action_correct": 3,
     "action_total": 15,
     "winner_match": false,
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 6,
+    "action_correct": 3,
     "action_total": 15,
     "winner_match": false,
     "board_match": true
-   }
+   },
+   "baseline_note": "2026-10-07: ストリートの札より前に話したアクションをそのストリートに入れない直しで、フロップの札の約 6 秒前の「コール」（プリフロップのコール）をフロップのチェックにしなくなった。このハンドは記録のボタンが 1 席ずれていて、前はその語がフロップのチェックになってずれを打ち消し、たまたま 6 行が合っていた（下がったのは想定どおり）"
   },
   {
    "hand_id": 3,

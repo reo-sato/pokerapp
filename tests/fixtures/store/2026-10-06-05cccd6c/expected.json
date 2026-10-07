@@ -1642,15 +1642,15 @@
     "hand_id": 7
    },
    "baseline": {
-    "action_correct": 5,
+    "action_correct": 7,
     "action_total": 9,
-    "winner_match": false,
+    "winner_match": true,
     "board_match": false
    },
    "reparse_baseline": {
-    "action_correct": 5,
+    "action_correct": 7,
     "action_total": 9,
-    "winner_match": false,
+    "winner_match": true,
     "board_match": false
    }
   },
@@ -3139,8 +3139,8 @@
     "hand_id": 14
    },
    "baseline": {
-    "action_correct": 11,
-    "action_total": 14,
+    "action_correct": 13,
+    "action_total": 13,
     "winner_match": null,
     "board_match": false
    },
@@ -4292,14 +4292,14 @@
     "hand_id": 19
    },
    "baseline": {
-    "action_correct": 10,
-    "action_total": 19,
+    "action_correct": 16,
+    "action_total": 17,
     "winner_match": null,
     "board_match": false
    },
    "reparse_baseline": {
-    "action_correct": 10,
-    "action_total": 19,
+    "action_correct": 16,
+    "action_total": 17,
     "winner_match": null,
     "board_match": false
    }

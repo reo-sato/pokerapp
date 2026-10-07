@@ -904,6 +904,23 @@ def is_question(text: str) -> bool:
 _BLIND_ANNOUNCEMENT = re.compile(r"^ブラインド[\s、,。]*[0-9〇一二三四五六七八九十百千万]")
 
 
+# ディーラーのストリートの宣言（「ターンです」「ラストカード」「リバーです」）。札を置きながら言う（店舗の書き起こしの
+# 51 回: 札が読めたのは宣言の中央値 0.8 秒あと、47 回が ±5 秒）。ターンのアクションはターンの札・宣言より前に言わない
+# （オーナー 2026-10-07）ので、ストリートの境目に使う（推定器: その札が読めなかったとき）。アクションではないので
+# `parse_actions` には出さない。「パターン」と「ラストターン」（店舗で札の 10 秒前 = 何の宣言か分からない）は除く。
+_STREET_CALL = re.compile(r"(ラストカード)|(?<!パ)(?<!ラスト)(ターン|リバー)(?=デス|カード|[ヲ。、,.!！?？\s]|$)")
+
+
+def street_call(text: str) -> Optional[tuple[int, float]]:
+    """発話にストリートの宣言があれば (その札の位置 4 = ターン / 5 = リバー, 発話の中の位置 0〜1)。"""
+    norm = _to_katakana(unicodedata.normalize("NFKC", text or ""))
+    m = _STREET_CALL.search(norm)
+    if m is None:
+        return None
+    index = 4 if m.group(2) == "ターン" else 5
+    return index, m.start() / max(1, len(norm))
+
+
 def is_announcement(text: str) -> bool:
     """ディーラーがポットの額・ブラインドを読み上げた発話（アクションではない）。第 2 の耳でも聞き直さない
     （読み上げ集 2026-09-30:「ポット1万2000です。」を第 2 の耳が「一万二千です」と聞いて額にしていた）。"""

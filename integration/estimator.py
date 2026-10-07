@@ -94,9 +94,19 @@ PARAMS: dict[str, float] = {
     "p_showdown_word": 0.03,     # ショーダウンの声（「ショーダウン」・役の名前）があるのに全員降りて終わった（真のアクションの
                                  # 92 ハンド: 声のあった 23 ハンドはすべてショーダウン、全員降りて終わった 45 ハンドで声 0）
     "p_unread_board": 0.03,      # 次のストリートのアクションなのにボードの札が読めていない（店舗 1 回 / 約 40）
-    "p_street_time": 0.02,       # アクションの時刻がそのストリートの札の配布と合わない（前のストリートの札より
-                                 # 前・次のストリートの札よりあと。札の読み取りの遅れ `street_slack_sec` は許す）
+    "p_street_time": 0.02,       # アクションの時刻がそのストリートの札の配布と合わない（次のストリートの札よりあと・
+                                 # 札の時刻が当てにならないハンドの札より前。札の読み取りの遅れ `street_slack_sec` は許す）
+    "p_before_street_card": 0.01,    # そのストリートの札より前のアクション = 札が配られてから読めるまでが遅れた（札 1 枚に
+                                 # 1 回。オーナー 2026-10-07: ターンの札・宣言より前にターンのアクションは言わない。店舗の
+                                 # 正しいハンドで 0 回 = 声は札の 0.5 秒以上あと、札の離脱は 5.5 秒以上あと。ライブの規則の
+                                 # まま札より前の行があった 10 ハンドはすべて誤り。読み取りの遅れは宣言から最大 2.5 秒
+                                 # （45 回）、長く読めない札は 09-27 のターン 1 回）
+    "before_card_slack_sec": 3.0,    # 強い項は札よりこの秒数以上前だけ（札が読めるのは宣言から最大 2.5 秒遅れる。engine の
+                                 # `BEFORE_CARD_FIX_MARGIN_SEC`）。`street_slack_sec` からここまでは `p_street_time`
     "street_slack_sec": 2.0,
+    "flop_spread_sec": 8.0,      # フロップの札がこれより離れて読めた（か 3 枚読めていない）ハンドは札の位置がずれた疑い
+                                 # （engine の `FLOP_CARDS_SPREAD_SEC`。店舗 89 ハンドのうち 88 が 5.5 秒以内）: 札より前も
+                                 # `p_street_time`
     "p_board_after_end": 0.02,   # 全員降りて終わったのに、そのあとのストリートの札が配られた
     "p_undetermined": 0.20,      # 勝者が決まらない・推し量った
     # 探し方・事後確率
@@ -615,7 +625,7 @@ class SessionEstimator:
                 flags.append("ショーダウンの声があるのに全員降りて終わった")
         terms += self._departure_terms(w, hand, betting, flags)
         terms += self._board_terms(hand, flags)
-        terms += self._street_time_terms(hand, betting, flags)
+        terms += self._street_time_terms(hand, betting, flags, w)
         if hand.get("winner_source") in ("estimated", "undetermined") or hand.get("winner_seat") is None:
             terms.append(("勝者が決まらない", _log(p["p_undetermined"])))
             flags.append("勝者が決まらない")
@@ -831,9 +841,27 @@ class SessionEstimator:
             flags.append("全員降りたあとに札が配られた")
         return terms
 
-    def _street_time_terms(self, hand: dict, betting: list[_Row], flags: list[str]) -> list[tuple[str, float]]:
+    def _street_calls(self, w: Optional[HandWindow]) -> dict[int, float]:
+        """ハンドの中のディーラーのストリートの宣言（`audio.recognizer.street_call`）: 札の位置 → 宣言の時刻（最初のもの）。"""
+        if w is None:
+            return {}
+        from audio.recognizer import street_call
+
+        calls: dict[int, float] = {}
+        for start in sorted(self._window_starts(w)):
+            row = self._row_at[start]
+            found = street_call(str(row.get("text") or ""))
+            if found is not None and found[0] not in calls:
+                calls[found[0]] = start + float(row.get("audio_sec") or 0.0) * found[1]
+        return calls
+
+    def _street_time_terms(self, hand: dict, betting: list[_Row], flags: list[str],
+                           w: Optional[HandWindow] = None) -> list[tuple[str, float]]:
         """時刻の分かる行（言われた語・札の離脱）が、そのストリートの札が配られてから次のストリートの札が配られる
-        までの間にあるか（ディーラーはベッティングが終わってから次の札を配る）。"""
+        までの間にあるか（ディーラーはベッティングが終わってから次の札を配る）。札より前は、札が配られてから読めるまでが
+        遅れたときだけ（オーナー 2026-10-07。札 1 枚に 1 回 `p_before_street_card`）。札が読めなかったストリートは
+        ディーラーの宣言（「ターンです」「ラストカード」）の時刻を境目にする（宣言の時刻は札より不確か: `p_street_time`）。
+        フロップの札が離れて読めた（か 3 枚読めていない）ハンドは札の位置がずれた疑いなので、札より前も `p_street_time`。"""
         p = self.params
         dealt: dict[int, float] = {}
         for item in hand.get("board_timeline") or []:
@@ -842,20 +870,35 @@ class SessionEstimator:
                 dealt[item["index"]] = t
         opened = {"preflop": None, "flop": _street_open(dealt, 3), "turn": _street_open(dealt, 4),
                   "river": _street_open(dealt, 5)}
+        flop = [dealt[i] for i in (1, 2, 3) if i in dealt]
+        reliable = len(flop) == 3 and max(flop) - min(flop) <= p["flop_spread_sec"]   # engine の `_board_times_reliable`
+        by_card = {s for s, t in opened.items() if t is not None}
+        for index, at in self._street_calls(w).items():
+            street = "turn" if index == 4 else "river"
+            if opened[street] is None:
+                opened[street] = at
         closes = {"preflop": opened["flop"], "flop": opened["turn"], "turn": opened["river"], "river": None}
         slack = p["street_slack_sec"]
         terms = []
+        early: dict[str, float] = {}             # ストリート → 札より前の行の、札からのいちばん長い秒数
         for r in betting:
             if r.word is None and r.source not in _RFID_FOLDS:
                 continue                          # 言われない行の時刻は分からない
             at = _word_start(r)
             start, end = opened.get(r.street), closes.get(r.street)
             if start is not None and at < start - slack:
-                terms.append((f"{r.street} の{r.action}（席{r.seat}）が札より前", _log(p["p_street_time"])))
+                early[r.street] = max(early.get(r.street, 0.0), start - at)
                 flags.append(f"{r.street} のアクションが札より前（席{r.seat} {r.action}）")
             elif end is not None and at > end + slack:
                 terms.append((f"{r.street} の{r.action}（席{r.seat}）が次の札よりあと", _log(p["p_street_time"])))
                 flags.append(f"{r.street} のアクションが次の札よりあと（席{r.seat} {r.action}）")
+        # 札より前の行は、札が配られてから読めるまでが遅れた（札 1 枚の出来事。読めない札は店舗でまれ）ときだけありうる。
+        # 同じ札の前の行を 1 行ずつ数えない（店舗 09-27: ターンの札が 13 秒遅れて読め、その前のターンの 4 つのアクション
+        # が正しかった）
+        for street, lead in early.items():
+            strict = reliable and street in by_card and lead > p["before_card_slack_sec"]
+            terms.append((f"{street} の札より前のアクション（{lead:.0f} 秒）",
+                          _log(p["p_before_street_card"] if strict else p["p_street_time"])))
         return terms
 
     # ――― 直しの候補 ―――

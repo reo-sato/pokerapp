@@ -2659,7 +2659,7 @@
     "board_match": false
    },
    "reparse_baseline": {
-    "action_correct": 11,
+    "action_correct": 14,
     "action_total": 14,
     "winner_match": true,
     "board_match": false
@@ -4467,7 +4467,7 @@
     "board_match": false
    },
    "reparse_baseline": {
-    "action_correct": 5,
+    "action_correct": 10,
     "action_total": 18,
     "winner_match": true,
     "board_match": false

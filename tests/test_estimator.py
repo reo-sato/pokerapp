@@ -603,10 +603,48 @@ class TestStreetTime:
         early = [_Row("turn", 4, "fold", T0 + 30, None, source="rfid_departure")]
         on_time = [_Row("flop", 4, "fold", T0 + 30, None, source="rfid_departure")]
         flags: list[str] = []
+        # 札より前は起きない（オーナー 2026-10-07: ターンの札・宣言より前にターンのアクションは言わない）
         assert sum(v for _, v in est._street_time_terms(hand, early, flags)) == pytest.approx(
-            math.log(PARAMS["p_street_time"]))
+            math.log(PARAMS["p_before_street_card"]))
         assert flags == ["turn のアクションが札より前（席4 fold）"]
         assert est._street_time_terms(hand, on_time, []) == []
+        # 札の 2〜3 秒前は弱い項（札が読めるのは宣言から最大 2.5 秒遅れる = `before_card_slack_sec`）
+        near = [_Row("turn", 4, "fold", T0 + 37.5, None, source="rfid_departure")]
+        assert sum(v for _, v in est._street_time_terms(hand, near, [])) == pytest.approx(
+            math.log(PARAMS["p_street_time"]))
+        # 同じ札の前の行は札 1 枚に 1 回（札が遅れて読めた = 1 つの出来事。店舗 09-27 のターン）
+        two = [_Row("turn", 4, "fold", T0 + 30, None, source="rfid_departure"),
+               _Row("turn", 5, "fold", T0 + 33, None, source="rfid_departure")]
+        flags2: list[str] = []
+        assert sum(v for _, v in est._street_time_terms(hand, two, flags2)) == pytest.approx(
+            math.log(PARAMS["p_before_street_card"]))
+        assert len(flags2) == 2
+
+    def test_a_spread_out_flop_keeps_the_soft_term(self):
+        """フロップの札が離れて読めた（3 枚目が 13 秒あと = 札の位置がずれた疑い, 09-29 d0f055fb ハンド 5）ハンドでは、
+        札より前も弱い項のまま。"""
+        est = _estimator()
+        timeline = [{"index": i, "card": c, "dealt_at": _iso(T0 + t)}
+                    for i, c, t in ((1, "Kd", 10), (2, "7c", 10), (3, "9h", 23), (4, "2h", 40))]
+        early = [_Row("turn", 4, "fold", T0 + 30, None, source="rfid_departure")]
+        assert sum(v for _, v in est._street_time_terms({"board_timeline": timeline}, early, [])) == pytest.approx(
+            math.log(PARAMS["p_street_time"]))
+        # フロップの 1 枚が読めていない（読めなかった札の代わりに次の札が数えられたかもしれない）も同じ
+        two = [item for item in timeline if item["index"] != 3]
+        assert sum(v for _, v in est._street_time_terms({"board_timeline": two}, early, [])) == pytest.approx(
+            math.log(PARAMS["p_street_time"]))
+
+    def test_the_dealers_street_call_opens_an_unread_street(self):
+        """ターンの札が読めなかった: ディーラーの「ターンです」をターンの始まりにする（宣言の時刻は札より不確かなので
+        弱い項）。"""
+        transcripts = [{"utterance_start_ts": T0 + 38.0, "heard_at": T0 + 40.0, "text": "ターンです。", "audio_sec": 1.0}]
+        est = _estimator(transcripts=transcripts)
+        timeline = [{"index": i, "card": c, "dealt_at": _iso(T0 + t)}
+                    for i, c, t in ((1, "Kd", 10), (2, "7c", 10), (3, "9h", 10))]
+        early = [_Row("turn", 4, "fold", T0 + 30, None, source="rfid_departure")]
+        assert sum(v for _, v in est._street_time_terms({"board_timeline": timeline}, early, [], _window())) == (
+            pytest.approx(math.log(PARAMS["p_street_time"])))
+        assert est._street_time_terms({"board_timeline": timeline}, early, []) == []   # 窓が無ければ宣言は見ない
 
 
 # ───────────────────────── 店舗の真のアクションのあるハンド（開発データ）─────────────────────────

@@ -137,6 +137,7 @@ SPOKEN_FOLD_CONFIDENCE = 0.5
 # ボードの枚数 → ストリートと、その始まりの札の位置（ボードの札が置かれたら前のラウンドは終わっている）
 _BOARD_STREETS = {3: ("flop", (1, 2, 3)), 4: ("turn", (4,)), 5: ("river", (5,))}
 _STREET_RANK = {"preflop": 0, "flop": 1, "turn": 2, "river": 3, "showdown": 4}
+_BOARD_STREET_NAMES = frozenset({"flop", "turn", "river"})
 _STREET_JA = {"preflop": "プリフロップ", "flop": "フロップ", "turn": "ターン", "river": "リバー"}
 # プレー中にこの秒数、マイクに声が入らなければ知らせる（ワイヤレスマイクの電池切れ等, 2026-09-25）
 SILENT_MIC_SEC = 60.0
@@ -165,10 +166,29 @@ GARBLED_FOLD_AFTER_SEC = 1.0
 # ずれはもっと前 = ボタン・持ち上げ・前のハンドの札。店舗 2026-10-06 の 5 回とも。付け直すとずれが隠れる）
 DEPARTED_CALL_BEFORE_SEC = 0.5
 DEPARTED_CALL_AFTER_SEC = 6.0
-# チェックで閉じたラウンドのあと、次のストリートの札よりこの秒数以上前に話した賭けは、次のストリートのものと言い切れない
-# （閉じたチェックが同じ語の聞き直し = 2 回目なら前のストリートの賭け。店舗 2026-10-06 05cccd6c ハンド 19: ターンの札の
-# 13.5 秒前の「千二百」がターンのベットになった）。記録は変えず要確認にする（推定器が札の時刻と合わせて読み直す）
-WAGER_BEFORE_CARD_SEC = 3.0
+# ストリートの札より前（`STALE_CALL_MARGIN_SEC`）に話し始めた声のアクションは、そのストリートのものではない（オーナー
+# 2026-10-07:「ターンカードのディールや、ターンカード/チェックアラウンドの宣言に先立ってターンのアクションが宣言されることは
+# ありません」）。店舗の全データで、正しいハンドの声のアクションは札の 0.5 秒以上あと・札の離脱のフォールドは 5.5 秒以上あと。
+# ライブの規則のまま札より前の行があった 10 ハンドはすべて誤り（声は札の 4.4〜13.5 秒前、離脱は 4.6〜16 秒前。05cccd6c
+# ハンド 19: フロップの「チェック」が 1 つ多く聞こえてラウンドが閉じ、ターンの札の 13.5 秒前の「千二百」がターンのベットに
+# なって以降すべて 1 席ずれた）。札の離脱は読み取りのラグ（約 1 秒）があるので `FOLD_BEFORE_CARD_SEC` より前だけ数える
+FOLD_BEFORE_CARD_SEC = 2.0
+# 記録を書き換える（言い直しとして外す・前のストリートを開き直す）のは札よりこの秒数以上前に話し始めた声だけ（印は
+# `STALE_CALL_MARGIN_SEC` から）。札が読めるのは配ってから少し遅れる（ディーラーの宣言から札が読めるまで中央値 0.9 秒・
+# 最大 2.5 秒）ので、読み取りが遅れた札の直前の本当のアクションを書き換えない。店舗で直した行はどれも札の 3.2 秒以上前
+BEFORE_CARD_FIX_MARGIN_SEC = 3.0
+# 札より前に話した語を、閉じたラウンドの余り・言い直し（または前のラウンドの続き）とみるのは、そのラウンドを閉じた
+# アクションからこの秒数のうちに話したときだけ。ディーラーが次の札を配るには時間がかかる（店舗の正しいハンドで、
+# ストリートが変わるときの声の間は 3.5 秒以上・中央値 10 秒）ので、それより離れた語は次のストリートの札を配ったあと
+# = 札の読み取りが遅れた（店舗 09-27: ターンの札が 13 秒遅れて読め、その前のターンのアクションを外していた）。札の時刻で
+# 余りとして外した語は、店舗のデータでどれも閉じたアクションから 4.3 秒以内
+LEFTOVER_AFTER_CLOSE_SEC = 6.0
+# 札より前の行を直す組み直しの上限（1 つのストリートの札について）
+BEFORE_CARD_MAX_FIXES = 3
+# フロップの 3 枚はいっしょに置く（店舗の 89 ハンドのうち 88 で 3 枚が 5.5 秒以内に読めた）。それより離れて読めた札が
+# あれば、読めなかったフロップの札の代わりに次のストリートの札が数えられたかもしれない（09-29 d0f055fb ハンド 5:
+# 3 枚目が 13 秒あと = 本当はターンの札で、ターンの位置にリバーの札）。そのハンドでは札の時刻で直さない・印も付けない
+FLOP_CARDS_SPREAD_SEC = 8.0
 # ディーラーがここまでのアクションを言い直す（「センテン、コール」= 1000 のレイズとそのコール, 店舗 2026-10-06 05cccd6c
 # ハンド 7 のオーナーのメモ）: いまのベットと同じ額だけを言ったあと、この秒数のうちに話し始めた「コール」は、その賭けの
 # あとに記録したコールの言い直し
@@ -194,6 +214,8 @@ CORRECTION_PENALTY_SPILLED = 2.0
 CORRECTION_WINDOW_INPUTS = 8
 # 言った額・アクションがいま使えず直した記録の印（`apply_corrections` の額の寄せ・使える額の選び直し）
 _ADJUSTED_REASONS = frozenset({"amount_snapped", "legal_amount", "no_amount_heard"})
+# 確かでない賭けの読み（あいまいな語・額の聞こえない賭け）: 札より前に話していても、前のラウンドを開き直す根拠にしない
+_WEAK_WAGER_REASONS = frozenset({"fuzzy_keyword", "no_amount_heard"})
 # 訂正の対象にする声のアクション（効いたもの = 記録になった / 「フォールド」を手番の人に保留した）
 _CORRECTION_UNIT_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin"})
 # 声のアクションの記録（合成したフォールド・補ったアクション・札の離脱は除く）
@@ -617,6 +639,12 @@ class IntegrationThread(threading.Thread):
         # 最初に処理したときに札の離脱と組にした聞き違いのコールの語（id → 語）。組み直しでは記録した離脱の入力が降ろす
         # ので、語はもう何もしない（組み直しの入力の並び = live は語のあと、replay は語の前に離脱 = によらず同じにする）
         self._garbled_absorbed: dict[int, AudioEvent] = {}
+        # ストリートの札（ストリート, 札の時刻）: 発話の処理のあと・ハンドを終わらせる前に、札より前に話した声の行がその
+        # ストリート以降に入っていないか見て組み直す（`_fix_spoken_before_card`）
+        self._before_card: list[tuple[str, float]] = []
+        # 札より前に話したので外した入力（id → 入力。組み直しでも流さない）と、前のストリートに戻した賭けの語の印
+        self._dropped_inputs: dict[int, object] = {}
+        self._before_card_tags: dict[int, tuple[AudioEvent, str]] = {}
         # 合図のあとの最初の声のアクションに付ける印（いまの解釈）
         self._correction_tag: Optional[str] = None
         # 処理中のイベントの入れ子の深さ（訂正の解釈は、いちばん外の発話を反映し終えてから選び直す）
@@ -1455,13 +1483,17 @@ class IntegrationThread(threading.Thread):
     def _leftover_of_closed_round(self, event: AudioEvent) -> bool:
         """チェックが、前のラウンドを閉じた発話の余りか。いまのストリートの札が見えていれば、その札より前に話し始めた
         とき（札が先に全部出ていれば、続けて言った「チェック チェック …」は次のストリートのもの = オールインのあとの
-        ランアウトなど）。札がまだ見えていなければ（確定を待っている）、RFID の卓で閉じたアクションと同じ発話のとき
-        （札を配るあいだ話が途切れる。声だけの台本は続けて読むので、次のストリートのチェックが同じ発話に入る）。"""
+        ランアウトなど）。ただし閉じたアクションから `LEFTOVER_AFTER_CLOSE_SEC` より離れて話したチェックは余りではない
+        （札を配ったあと = 札の読み取りが遅れた）。札がまだ見えていなければ（確定を待っている）、RFID の卓で閉じた
+        アクションと同じ発話のとき（札を配るあいだ話が途切れる。声だけの台本は続けて読むので、次のストリートのチェックが
+        同じ発話に入る）。"""
         if self._game_state.street not in ("flop", "turn", "river"):
             return False
         started = self._street_started_at()
         if started is not None:
-            return _spoken_at(event) < started - STALE_CALL_MARGIN_SEC
+            spoken = _spoken_at(event)
+            return spoken < started - STALE_CALL_MARGIN_SEC and (
+                self._last_action_at is None or spoken - self._last_action_at <= LEFTOVER_AFTER_CLOSE_SEC)
         return self._rfid_folds and self._said_with_round_closer(event)
 
     def _street_started_at(self) -> Optional[float]:
@@ -1914,12 +1946,17 @@ class IntegrationThread(threading.Thread):
     def _run_input(self, kind: str, item) -> None:
         """ハンドの入力を記録してから反映する（札が戻ったとき、同じ順に流し直して組み直すため）。
 
-        訂正（「失礼しました」）のいまの解釈で取り消した入力は、記録に残すが反映しない（`_retracted`）。
+        訂正（「失礼しました」）のいまの解釈で取り消した入力と、ストリートの札より前に話したので外した入力
+        （`_dropped_inputs`）は、記録に残すが反映しない。
         """
         index = len(self._hand_inputs)
         self._hand_inputs.append((kind, item))
         self._activate_departure_floor(item)
         if self._retracted.get(id(item)) is item:
+            return
+        if self._dropped_inputs.get(id(item)) is item:
+            self._input_voice.pop(id(item), None)     # 外す前の記録の行を残さない
+            self._hand_needs_review = True
             return
         if not self._rebuilding:
             self._note_input_after_cue(kind, item)
@@ -1946,6 +1983,12 @@ class IntegrationThread(threading.Thread):
             records = [r for r in self._current_actions[mark:]
                        if r.actor_source in _VOICE_SOURCES and r.reason != "synth_silent_fold"]
             self._input_voice[id(item)] = (item, records)
+            tag = self._before_card_tags.get(id(item))
+            if tag is not None and tag[0] is item:
+                for record in records:           # 札より前に話したので前のストリートに戻した賭け（組み直しでも付ける）
+                    if tag[1] not in (record.reason or "").split("+"):
+                        record.reason = "+".join(r for r in (record.reason, tag[1]) if r)
+                    record.needs_review = True
             if records and self._correction_tag is not None:
                 first = records[0]
                 tag, self._correction_tag = self._correction_tag, None
@@ -1988,29 +2031,200 @@ class IntegrationThread(threading.Thread):
             else:
                 self._imply_action(actor, ctx, t, f"implied_before_{target}")
         self._resolve_departures()
-        self._flag_wager_before_card(target, t)
+        self._flag_spoken_before_card(target, t)
+        if not self._rebuilding:
+            self._before_card.append((target, t))   # 直すかどうかは発話の処理のあと（`_fix_spoken_before_card`）
 
-    def _flag_wager_before_card(self, street: str, t: float) -> None:
-        """チェックで閉じたラウンドのあと、このストリートの札より `WAGER_BEFORE_CARD_SEC` 以上前に話した賭けをこの
-        ストリートの最初のアクションにしていたら要確認にする（記録は変えない）。"""
-        index = next((i for i, r in enumerate(self._current_actions) if r.street == street), None)
-        if index is None or index == 0:
+    def _voice_words(self) -> dict[int, AudioEvent]:
+        """声の行 → その行を作った発話の入力（`id(record)` で引く）。"""
+        words: dict[int, AudioEvent] = {}
+        for kind, item in self._hand_inputs:
+            entry = self._input_voice.get(id(item)) if kind == "audio" else None
+            if entry is not None and entry[0] is item:
+                for record in entry[1]:
+                    words[id(record)] = item
+        return words
+
+    def _board_times_reliable(self) -> bool:
+        """ボードの札の時刻でストリートの境目を決めてよいか: フロップの 3 枚が `FLOP_CARDS_SPREAD_SEC` 以内に読めた。
+        3 枚目がまだ（読めない札がある）なら分からないので使わない（読めなかった札の代わりに次のストリートの札が数えられる
+        ことがある。09-29 d0f055fb ハンド 5 は 2 枚が読めた時点では幅 1 秒、3 枚目が 13 秒あと）。"""
+        flop = [self._board_dealt_at[i] for i in (1, 2, 3) if i in self._board_dealt_at]
+        return len(flop) == 3 and max(flop) - min(flop) <= FLOP_CARDS_SPREAD_SEC
+
+    def _spoken_before_card(self, street: str, t: float, margin: float = STALE_CALL_MARGIN_SEC
+                            ) -> list[tuple[ActionRecord, AudioEvent]]:
+        """このストリート（とそれより先）の声の行のうち、このストリートの札（時刻 `t`）より `margin` 秒以上前に話し始めた
+        もの（記録の順）。ボードの札の時刻が当てにならないハンドでは空。"""
+        if not self._board_times_reliable():
+            return []
+        rank = _STREET_RANK[street]
+        words = self._voice_words()
+        found = []
+        for record in self._current_actions:
+            if record.street not in _BOARD_STREET_NAMES or _STREET_RANK[record.street] < rank:
+                continue
+            if record.actor_source not in _VOICE_SOURCES:
+                continue
+            word = words.get(id(record))
+            if word is not None and _spoken_at(word) < t - margin:
+                found.append((record, word))
+        return found
+
+    def _flag_spoken_before_card(self, street: str, t: float) -> None:
+        """札より前に話し始めた声の行をこのストリート以降に入れていたら要確認にする（組み直しで直せないときに残る印。
+        組み直しの流し直しでも付け直す）。"""
+        reason = f"spoken_before_{street}_card"
+        for record, _ in self._spoken_before_card(street, t):
+            if reason not in (record.reason or "").split("+"):
+                record.reason = "+".join(r for r in (record.reason, reason) if r)
+            record.needs_review = True
+            self._hand_needs_review = True
+
+    def _fix_spoken_before_card(self, before_end: bool = False) -> None:
+        """ストリートの札より前に話した声の行が、そのストリート以降に入っていたら組み直す（オーナー 2026-10-07: ターンの札・
+        宣言・チェックアラウンドより前にターンのアクションは言わない）。
+
+        - チェック・コール → 閉じたラウンドの言い直し: その語を外す（次のストリートの手番がずれない）。
+        - ベット・レイズ・オールイン → 前のストリートは閉じていなかった: そのラウンドを閉じた声のチェック / コール（多く
+          聞こえた語）を外す（`_before_card_target` の条件のとき）。
+        組み直して札より前の行が減り、反映できない語が増えないときだけ採る（ほかは `_flag_spoken_before_card` の印だけ）。
+        書き換えるのは札より `BEFORE_CARD_FIX_MARGIN_SEC` 以上前に話し始めた行だけ（札の読み取りの遅れ）。
+        発話の処理のあと（live と replay で同じ時点）とハンドを終わらせる前に呼ぶ（`_retract_departed_calls` と同じ）。
+        「失礼しました」の解釈を決めるまでは待つ（解釈を選ぶときに札より前の語を数える = `_correction_penalty`。先に
+        直すと、別の解釈 + 語を外した形で同じ行になる）。フロップの 3 枚目が読めるまでも待つ（`_board_times_reliable`）。
+        """
+        if self._rebuilding or (self._event_depth and not before_end) or not self._before_card:
             return
-        first, before = self._current_actions[index], self._current_actions[index - 1]
-        if (first.action not in ("bet", "raise", "allin") or first.actor_source not in _VOICE_SOURCES
-                or before.action != "check" or before.actor_source not in _VOICE_SOURCES):
+        if self._open_correction() is not None:
             return
-        word = next((item for kind, item in self._hand_inputs if kind == "audio"
-                     and (entry := self._input_voice.get(id(item))) is not None and entry[0] is item
-                     and any(r is first for r in entry[1])), None)
-        if word is None or t - _spoken_at(word) < WAGER_BEFORE_CARD_SEC:
+        if not before_end and sum(1 for i in (1, 2, 3) if i in self._board_dealt_at) < 3:
             return
-        if "wager_before_street_card" not in (first.reason or "").split("+"):
-            first.reason = "+".join(r for r in (first.reason, "wager_before_street_card") if r)
-        first.needs_review = True
+        pending, self._before_card = self._before_card, []
+        if not (self._hand_open and self._hand_origin is not None and self._game_state.is_hand_active()
+                and self._board_times_reliable()):
+            return
+        margin = BEFORE_CARD_FIX_MARGIN_SEC
+        shown: Optional[list[ActionRecord]] = None     # 知らせずに組み直したとき、画面に出ている記録（最後に流し直す）
+        for street, t in pending:
+            for _ in range(BEFORE_CARD_MAX_FIXES):
+                found = self._spoken_before_card(street, t, margin)
+                if not found:
+                    break
+                record, word = found[0]
+                if shown is None:
+                    shown = list(self._current_actions)
+                illegal = sum(1 for r in self._current_actions if not r.apply_ok)
+                # 札の時刻が分かったので、組み直すだけで閉じたラウンドの余り・言い直しとして外れることがある
+                # （`_leftover_of_closed_round` / `_said_before_street`）
+                mark = self._unresolved_count
+                self._rebuild_hand()
+                rebuilt = self._spoken_before_card(street, t, margin)   # 組み直しで行は作り直されている
+                base = (len(rebuilt), self._failures_since(mark))
+                if base[0] < len(found) and sum(1 for r in self._current_actions if not r.apply_ok) <= illegal:
+                    self._announce_before_card_fix(street, t, word, None, shown)
+                    shown = None
+                    continue
+                if not rebuilt:
+                    break
+                record, word = rebuilt[0]
+                target, closer = self._before_card_target(record, word)
+                if target is None or not self._try_dropping(target, street, t, base, margin):
+                    break
+                self._announce_before_card_fix(street, t, word, closer, shown)
+                shown = None
+            self._flag_spoken_before_card(street, t)       # 直せずに残った行（組み直しの流し直しでも付け直す）
+        if shown is not None:
+            self._emit_rebuilt(shown)                       # 採らなかった組み直しでも、札の時刻を入れた記録にする
+            self._publish_table_state()
+
+    def _before_card_target(self, record: ActionRecord, word: AudioEvent
+                            ) -> tuple[Optional[AudioEvent], Optional[ActionRecord]]:
+        """外す語と、外す語が前のラウンドを閉じたアクションならその行。直せなければ (None, None)。
+
+        前のラウンドを閉じた語を外すのは、賭けの読みが確かで（あいまいな語・額の聞こえない賭けではない）、閉じた語が
+        別の発話のときだけ（同じ発話の中の順は確か。09-29 d0f055fb ハンド 5:「コール、コール、スリーベン」の
+        「スリーベン」= 残りの人数の聞き違いを賭けとみて、正しいコールを外していた）。どちらも、前のラウンドを閉じた
+        アクションから `LEFTOVER_AFTER_CLOSE_SEC` のうちに話した語だけ（それより離れていれば次の札は配られていて、読み取りが
+        遅れた = 書き換えない）。"""
+        if record.action not in ("check", "call", "bet", "raise", "allin"):
+            return None, None                    # フォールドの語など: 印だけ（間の聞き落としはライブでは分からない）
+        words = self._voice_words()
+        index = next(i for i, r in enumerate(self._current_actions) if r is record)
+        closer = self._current_actions[index - 1] if index > 0 else None
+        closed_at = self._record_time(closer, words) if closer is not None else None
+        if closed_at is None or _spoken_at(word) - closed_at > LEFTOVER_AFTER_CLOSE_SEC:
+            return None, None
+        if record.action in ("check", "call"):
+            return word, None
+        if (_WEAK_WAGER_REASONS & set((record.reason or "").split("+"))
+                or _WEAK_WAGER_REASONS & set(word.parse_flags)):
+            return None, None
+        if (closer.street == record.street or closer.action not in ("check", "call")
+                or closer.actor_source not in _VOICE_SOURCES or "check_around" in (closer.reason or "")):
+            return None, None
+        target = words.get(id(closer))
+        if target is None or _spoken_at(target) == _spoken_at(word):
+            return None, None
+        return target, closer
+
+    def _record_time(self, record: ActionRecord, words: dict[int, AudioEvent]) -> Optional[float]:
+        """行の時刻: 声の行は話し始め、ほかは記録の時刻（札の離脱・補った行）。"""
+        word = words.get(id(record))
+        if word is not None:
+            return _spoken_at(word)
+        try:
+            return datetime.fromisoformat(record.timestamp).timestamp()
+        except (TypeError, ValueError):
+            return None
+
+    def _failures_since(self, mark: int) -> int:
+        """組み直しで反映できなかった語（`mark` = 組み直す前の数）と、合法でなかった行の数。"""
+        return (self._unresolved_count - mark) + sum(1 for r in self._current_actions if not r.apply_ok)
+
+    def _try_dropping(self, target: AudioEvent, street: str, t: float, base: tuple[int, int], margin: float) -> bool:
+        """`target` を外して組み直し、外す前の組み直し（`base` = 札より前の行の数, 反映できない語の数）より札より前の行が
+        減り、反映できない語が増えなければ True（外したまま）。そうでなければ外さずに組み直して False。"""
+        mark = self._unresolved_count
+        self._dropped_inputs[id(target)] = target
+        self._rebuild_hand()
+        fixed = (len(self._spoken_before_card(street, t, margin)), self._failures_since(mark))
+        if fixed[0] < base[0] and fixed[1] <= base[1]:
+            return True
+        del self._dropped_inputs[id(target)]
+        self._rebuild_hand()
+        return False
+
+    def _announce_before_card_fix(self, street: str, t: float, word: AudioEvent, closer: Optional[ActionRecord],
+                                  before: list[ActionRecord]) -> None:
         self._hand_needs_review = True
-        self._notice(f"「{first.raw_text}」は{_STREET_JA.get(street, street)}の札が置かれる {t - _spoken_at(word):.0f} 秒前に"
-                     f"聞こえました — 前のストリートの賭けかもしれません（要確認）")
+        gap = t - _spoken_at(word)
+        street_ja = _STREET_JA.get(street, street)
+        moved = self._voice_records_of(word)
+        if closer is None and moved:
+            message = (f"「{word.raw_text}」は{street_ja}の札が置かれる {gap:.0f} 秒前に話されていたので、"
+                       f"{_STREET_JA.get(moved[0].street, moved[0].street)}のアクションとみて組み直しました（要確認）")
+        elif closer is None:
+            message = (f"「{word.raw_text}」は{street_ja}の札が置かれる {gap:.0f} 秒前に話されていたので、前のストリートの"
+                       "言い直しとみて外しました（要確認）")
+        else:
+            reason = f"reopened_before_{street}_card"
+            self._before_card_tags[id(word)] = (word, reason)
+            for record in self._voice_records_of(word):
+                if reason not in (record.reason or "").split("+"):
+                    record.reason = "+".join(r for r in (record.reason, reason) if r)
+                record.needs_review = True
+            message = (f"「{word.raw_text}」は{street_ja}の札が置かれる {gap:.0f} 秒前に話されていたので、"
+                       f"{_STREET_JA.get(closer.street, closer.street)}のアクションとみて組み直しました"
+                       f"（席{closer.seat} の「{closer.raw_text}」を外しました, 要確認）")
+        self._notice(message)                               # ログにも残る
+        self._emit_rebuilt(before)
+        self._publish_table_state()
+
+    def _voice_records_of(self, word: AudioEvent) -> list[ActionRecord]:
+        entry = self._input_voice.get(id(word))
+        live = {id(r) for r in self._current_actions}
+        return [r for r in entry[1] if id(r) in live] if entry is not None and entry[0] is word else []
 
     def _apply_leave(self, ev: RFIDEvent, index: int) -> None:
         seat = ev.seat
@@ -2165,6 +2379,7 @@ class IntegrationThread(threading.Thread):
         dep = self._departures[seat]
         muck = bool(dep.get("muck"))
         street = gs.street
+        started = self._street_started_at()     # 反映する前に（ラウンドが閉じると次のストリートになる）
         can_fold = "fold" in ctx.legal_actions
         # ベットが無いときに札が離れた: リバーならショーダウンに向けて札を前に出した（チェック）。それより前は
         # 降りた（フォールド。pokerkit はチェックできるときのフォールドを受け付けないので force_fold）。
@@ -2189,6 +2404,12 @@ class IntegrationThread(threading.Thread):
             reasons.append("river_check" if action == "check" else "no_bet")
         if dep.get("moved"):
             reasons.append("late_departure_retracted_call")    # 札が離れたあとのコールを次の人に付け直した
+        before_card = (started is not None and dep["t"] < started - FOLD_BEFORE_CARD_SEC
+                       and self._board_times_reliable())
+        if before_card:
+            # このストリートの札より前に離れた札（前のストリートで降りた）。間の聞き落とし（ボタン・持ち上げ・聞こえ
+            # なかったレイズ）はライブでは分からないので、記録は変えず要確認にする（推定器が直しを探す）
+            reasons.append(f"left_before_{street}_card")
         self._append_rfid_record(ActionRecord(
             hand_id=gs.hand_id,
             timestamp=self._iso(dep["t"]),
@@ -2200,7 +2421,7 @@ class IntegrationThread(threading.Thread):
             pot_after=gs.pot,
             stack_after=gs.get_stack(seat),
             source={"camera": False, "audio": False, "rfid": True},
-            needs_review=not can_fold or bool(dep.get("moved")),
+            needs_review=not can_fold or bool(dep.get("moved")) or before_card,
             confidence=RFID_MUCK_CONFIDENCE if muck else RFID_FOLD_CONFIDENCE,
             position=self._position_of(seat),
             actor_source="rfid_muck" if muck else "rfid_departure",
@@ -4409,6 +4630,7 @@ class IntegrationThread(threading.Thread):
             if corr["dirty"] and self._hand_open and self._hand_origin is not None:
                 self._review_correction(corr, final=True)
             corr["frozen"] = True
+        self._fix_spoken_before_card(before_end=True)    # 訂正の解釈を決めてから
 
     def _after_hand_change(self) -> None:
         """発話を反映したあと: 札の離脱のあとのコールを付け直す。訂正の解釈を選び直す（決める条件なら決める）。決めるのを
@@ -4422,6 +4644,7 @@ class IntegrationThread(threading.Thread):
             final = (self._finish_wanted or corr["street_seen"] or corr["post"] >= CORRECTION_WINDOW_INPUTS
                      or self._foldout_pending is not None or self._betting_over())
             self._review_correction(corr, final=final)
+        self._fix_spoken_before_card()                   # 訂正の解釈を決めたあと（決めていなければ待つ）
         self._finish_after_correction()
 
     def _finish_after_correction(self) -> None:
@@ -4448,6 +4671,9 @@ class IntegrationThread(threading.Thread):
     def _reset_corrections(self) -> None:
         self._departed_calls = []
         self._garbled_absorbed = {}
+        self._before_card = []
+        self._dropped_inputs = {}
+        self._before_card_tags = {}
         self._corrections = []
         self._retracted = {}
         self._input_voice = {}
