@@ -145,8 +145,12 @@ EXPLANATION_MARK = "（記録は変えない説明）"    # 記録を変えな�
 # 何も書かなかっただけで、候補の確からしさはその空の文と比べられる。v0 が空を除いていた理由は記録に無い）。
 # 監査 3 回目（2026-10-03, オーナーが推奨の案を採用）: 第 2 の耳が否定した Whisper の読みを第 2 の耳の候補と同じ式で
 # 値付けする（下の桁の読みの値の逆転）・意味のない語の額（第 2 の耳あり）を候補と同じ式 + 音の距離で。
+# 短い語の聞き間違いの進め方 2（2026-10-07, オーナー承諾）: 全発話の第 2 の耳を別の読みに使い（`all_ears`）、短い語の分類器
+# （`audio/short_words.py`）の読みを選択肢にする（`short_words`）。分類器の読みは既定の読みより高くしない（`short_cap` 0 =
+# どの読みかはハンドの筋で決める。上限なし・重み 0.5 より、良くなったハンドが同じで要確認が少ない）。
 READING_OVERRIDES: dict[str, float] = {"canned_action": 0.27, "canned_ear_temp": 2.0, "ear_empty_text": 1.0,
-                                       "price_overridden_whisper": 1.0, "price_ear_phonetic": 1.0}
+                                       "price_overridden_whisper": 1.0, "price_ear_phonetic": 1.0,
+                                       "all_ears": 1.0, "short_words": 1.0, "short_cap": 0.0}
 
 
 def reading_params() -> dict:
@@ -167,7 +171,8 @@ def params_hash(params: dict[str, float] = PARAMS) -> str:
 CONTENT_FILES = (
     "integration/estimator.py", "integration/world_replay.py", "integration/engine.py", "integration/replay.py",
     "tools/estimate.py", "tools/eval_store.py", "tools/measure_capture_accuracy.py",
-    "audio/recognizer.py", "audio/phonetic.py", "audio/second_ear.py",
+    "audio/recognizer.py", "audio/phonetic.py", "audio/second_ear.py", "audio/short_words.py",
+    "audio/short_word_model.json",
     "core/bet_sizing.py", "core/poker_engine.py", "core/showdown.py", "core/positions.py", "core/constants.py",
     "core/game_state.py", "core/engine_types.py", "core/events.py", "core/hand_log.py", "core/control_queue.py",
 )
