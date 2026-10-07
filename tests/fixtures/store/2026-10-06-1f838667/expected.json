@@ -2046,15 +2046,21 @@
     "board": [],
     "actions": [
      {
-      "seat": 8,
+      "seat": 7,
       "action": "raise",
       "amount": 1100,
       "street": "preflop"
      },
      {
-      "seat": 5,
+      "seat": 8,
       "action": "call",
       "amount": 1100,
+      "street": "preflop"
+     },
+     {
+      "seat": 5,
+      "action": "fold",
+      "amount": 0,
       "street": "preflop"
      },
      {
@@ -2065,48 +2071,42 @@
      },
      {
       "seat": 7,
-      "action": "fold",
-      "amount": 0,
-      "street": "preflop"
-     },
-     {
-      "seat": 8,
       "action": "bet",
       "amount": 1200,
       "street": "flop"
      },
      {
-      "seat": 5,
+      "seat": 8,
       "action": "call",
       "amount": 1200,
       "street": "flop"
      },
      {
-      "seat": 8,
+      "seat": 7,
       "action": "check",
       "amount": 0,
       "street": "turn"
      },
      {
-      "seat": 5,
+      "seat": 8,
       "action": "bet",
       "amount": 2200,
       "street": "turn"
      },
      {
-      "seat": 8,
+      "seat": 7,
       "action": "call",
       "amount": 2200,
       "street": "turn"
      },
      {
-      "seat": 8,
+      "seat": 7,
       "action": "check",
       "amount": 0,
       "street": "river"
      },
      {
-      "seat": 5,
+      "seat": 8,
       "action": "check",
       "amount": 0,
       "street": "river"
@@ -2155,15 +2155,21 @@
     "blind_entry": {
      "actions": [
       {
-       "seat": 8,
+       "seat": 7,
        "action": "raise",
        "amount": 1100,
        "street": "preflop"
       },
       {
-       "seat": 5,
+       "seat": 8,
        "action": "call",
        "amount": 1100,
+       "street": "preflop"
+      },
+      {
+       "seat": 5,
+       "action": "fold",
+       "amount": 0,
        "street": "preflop"
       },
       {
@@ -2174,48 +2180,42 @@
       },
       {
        "seat": 7,
-       "action": "fold",
-       "amount": 0,
-       "street": "preflop"
-      },
-      {
-       "seat": 8,
        "action": "bet",
        "amount": 1200,
        "street": "flop"
       },
       {
-       "seat": 5,
+       "seat": 8,
        "action": "call",
        "amount": 1200,
        "street": "flop"
       },
       {
-       "seat": 8,
+       "seat": 7,
        "action": "check",
        "amount": 0,
        "street": "turn"
       },
       {
-       "seat": 5,
+       "seat": 8,
        "action": "bet",
        "amount": 2200,
        "street": "turn"
       },
       {
-       "seat": 8,
+       "seat": 7,
        "action": "call",
        "amount": 2200,
        "street": "turn"
       },
       {
-       "seat": 8,
+       "seat": 7,
        "action": "check",
        "amount": 0,
        "street": "river"
       },
       {
-       "seat": 5,
+       "seat": 8,
        "action": "check",
        "amount": 0,
        "street": "river"
@@ -2224,16 +2224,18 @@
      "winner_seat": null,
      "entry_sec": 55.9
     },
-    "hand_id": 10
+    "hand_id": 10,
+    "button_seat": 8,
+    "correction": "ボタンは席8（記録は席5 = 1 席ずれていて、真のアクションもそれに合わせて入っていた）。席を 1 つ回した（オーナー確認 2026-10-07）"
    },
    "baseline": {
-    "action_correct": 4,
+    "action_correct": 8,
     "action_total": 13,
     "winner_match": null,
     "board_match": false
    },
    "reparse_baseline": {
-    "action_correct": 4,
+    "action_correct": 8,
     "action_total": 13,
     "winner_match": null,
     "board_match": false

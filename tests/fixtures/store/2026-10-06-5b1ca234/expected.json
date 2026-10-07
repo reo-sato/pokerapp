@@ -102,12 +102,18 @@
      },
      {
       "seat": 6,
+      "action": "check",
+      "amount": 0,
+      "street": "turn"
+     },
+     {
+      "seat": 7,
       "action": "bet",
       "amount": 2200,
       "street": "turn"
      },
      {
-      "seat": 7,
+      "seat": 6,
       "action": "fold",
       "amount": 0,
       "street": "turn"
@@ -151,7 +157,7 @@
       "name": "8"
      }
     ],
-    "winner_seat": 6,
+    "winner_seat": 7,
     "blind": true,
     "entry_sec": 112.7,
     "blind_entry": {
@@ -214,18 +220,19 @@
      "winner_seat": 6,
      "entry_sec": 112.7
     },
-    "hand_id": 1
+    "hand_id": 1,
+    "correction": "ターンは聞き取りどおり 席6 チェック → 席7 ベット 2200 → 席6 フォールド、勝者 席7（書き起こし「チェック」→「2200」→「オールド」、「オールド」と同時に席6 の札が離れた。真のアクションの入力誤り。オーナー確認 2026-10-07）"
    },
    "baseline": {
-    "action_correct": 6,
+    "action_correct": 9,
     "action_total": 11,
-    "winner_match": false,
+    "winner_match": true,
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 6,
+    "action_correct": 9,
     "action_total": 11,
-    "winner_match": false,
+    "winner_match": true,
     "board_match": true
    }
   }
