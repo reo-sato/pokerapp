@@ -49,6 +49,7 @@
 - `integration/world_replay.py`・`tools/eval_store.py`・`tools/estimate.py`・`tools/voice_style.py` — `used_ear`。
 - `tests/test_second_ear.py`・`tests/test_second_ear_live.py`・`tests/test_estimate.py`・`tests/test_garbled_amount.py`。
 - `CHANGELOG.md`・本作業ログ・`docs/estimator.md` §5（内容の指紋）。
+- 進め方 2 の準備: `tools/fixture_ears.py`・`tests/test_fixture_ears.py`・`tests/fixtures/store/*/transcripts.jsonl`。
 
 ## Test Results
 
@@ -62,10 +63,20 @@
   （8a0d58d。読み直しも誤りになって「悪くなった」から外れ、推定の正解はまだ候補に無い）。ハンドごとの一覧はほかに
   1 つも変わらない = 今回の変更は推定に影響しない。
 
+## 進め方 2 の準備: 開発データの全発話に第 2 の耳を足した
+
+- `tools/fixture_ears.py`: 開発データ（`tests/fixtures/store/*/transcripts.jsonl`）の各行に、保存した発話の音声
+  （店舗の logs、ファイル名 = 話し始めの時刻のミリ秒）から第 2 の耳の結果を足す。耳の無い行は記録だけの耳
+  （`ear_wanted` = 偽、`ear.offline` = 真）、ライブの耳の行は短い語（`words`・`frames`）だけを足す（候補・額の表は
+  ライブのまま）。もう足した行は聞かない（何度流してもよい）。店舗の音声はリポジトリに入れない。
+- 開発データ 16 セッション 2,738 発話をすべて聞いた（足した 1,278・短い語を足した 1,460・音声なし 0・失敗 0、この
+  開発環境で約 18 分）。記録だけの耳は使わないので、読み直し・再生・物差しは変わらない（開発データのテストはそのまま
+  通る）。開発データの大きさ 3.6 MB → 7.9 MB。
+
 ## Remaining Gaps
 
 - Whisper が空の文を返し、第 2 の耳でも読めなかった発話は、今までどおり記録しない（開発データ 2738 行に 1 行も無い）。
-- 進め方 2（開発データの全発話を第 2 の耳で採点 → 分類器 → 推定器）はこのあと。
+- 進め方 2 の分類器と推定器への組み込みはこのあと（別の作業ログ）。
 
 ## Related Commits
 
