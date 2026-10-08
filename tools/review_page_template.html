@@ -1,0 +1,339 @@
+<title>真のアクションの見直し</title>
+<style>
+/* 真のアクションの入力画面（tools/ground_truth_ui.py）と同じ暗い配色・同じ部品。左 = 記録と推定と時系列、右 = 真のアクションの編集 */
+:root {
+  color-scheme: dark;
+  --bg: #12151a; --panel: #161a20; --field: #1e232b; --line: #2d333b; --line2: #3a414d;
+  --fg: #e8eaed; --sub: #c9d1d9; --muted: #9aa0a6; --blue: #1f6feb; --link: #58a6ff;
+  --green: #238636; --red: #ff7b72; --redbg: #3a1f1f; --amber: #e3b341; --ambbg: #2a2416;
+  --diffbg: #2b2a12; --difffg: #e3d341; --qbg: #1f2a3a; --qline: #2d4a6e; --danger: #6e3b3b;
+  --font: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding-block: 12px 48px; padding-inline: 16px; font: 16px/1.5 var(--font); background: var(--bg); color: var(--fg); }
+h1 { font-size: 18px; margin: 0 0 8px; text-wrap: balance; }
+h2 { font-size: 15px; margin: 18px 0 6px; color: var(--sub); }
+.muted { color: var(--muted); } .small { font-size: 13px; }
+.top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 10px; }
+select, input[type=text], input[type=number] { font: inherit; color: var(--fg); background: var(--field);
+  border: 1px solid var(--line2); border-radius: 8px; padding: 8px 10px; min-height: 44px; max-width: 100%; }
+input[type=number] { width: 104px; }
+button { font: inherit; color: var(--fg); background: #2d333b; border: 1px solid var(--line2); border-radius: 8px;
+  padding: 8px 14px; min-height: 44px; cursor: pointer; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+button.primary { background: var(--blue); border-color: var(--blue); }
+button.danger { background: var(--danger); border-color: var(--danger); }
+button:disabled { opacity: .45; cursor: default; }
+button.sm { min-height: 36px; padding: 4px 10px; font-size: 14px; }
+button.on { background: var(--blue); border-color: var(--blue); }
+button.unsure.on { background: #9e6a03; border-color: #9e6a03; }
+table { border-collapse: collapse; width: 100%; }
+.tbl { overflow-x: auto; max-width: 100%; }
+td, th { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+th { color: var(--muted); font-weight: 400; font-size: 13px; }
+td select { padding: 6px 4px; }
+td input[type=number] { width: 88px; }
+td.street { color: var(--muted); font-size: 13px; white-space: nowrap; }
+td.tools { white-space: nowrap; }
+.cap td { font-size: 14px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cap td.raw { white-space: normal; min-width: 120px; }
+tr.diffrow td { background: var(--diffbg); }
+tr.err td { background: var(--redbg); }
+.tag { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 999px; margin-right: 4px; white-space: nowrap; }
+.t-diff { background: #3a3514; color: var(--difffg); }
+.t-warn { background: #3a2f1f; color: var(--amber); }
+.t-ok { background: #1f3a24; color: #7ee787; }
+.t-none { background: #23262b; color: var(--muted); }
+.t-snd { background: #1f2f3a; color: var(--link); }
+.card { display: inline-block; background: var(--field); border: 1px solid var(--line2); border-radius: 8px; padding: 6px 8px;
+  font-size: 20px; font-weight: 700; min-width: 48px; text-align: center; margin: 2px; cursor: pointer; }
+.card.sm { font-size: 15px; padding: 2px 5px; min-width: 34px; cursor: default; }
+.card.red { color: var(--red); }
+.card.empty { color: var(--muted); border-style: dashed; font-weight: 400; }
+.cols { display: grid; grid-template-columns: 1fr 1.25fr; gap: 18px; }
+.cols > * { min-width: 0; }
+@media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+@media (max-width: 480px) { body { font-size: 15px; } .card { font-size: 17px; min-width: 40px; padding: 5px 6px; } td, th { padding: 5px 4px; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.q { background: var(--qbg); border: 1px solid var(--qline); border-radius: 12px; padding: 10px 12px; margin: 0 0 12px; white-space: pre-wrap; }
+.seatrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.seatrow .no { min-width: 92px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border-radius: 999px; padding: 6px 14px; }
+.lint { background: var(--ambbg); border: 1px solid #6b5a2e; border-radius: 12px; padding: 10px 12px; margin-top: 10px; color: var(--amber); font-size: 14px; }
+.saved { background: #1f3a24; border: 1px solid #2e6b3a; border-radius: 12px; padding: 8px 12px; margin-top: 10px; color: #7ee787; font-size: 14px; }
+.bad { background: var(--redbg); border: 1px solid #6e3b3b; border-radius: 12px; padding: 8px 12px; margin-top: 10px; color: var(--red); font-size: 14px; }
+.rowadd, .actions-bottom { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; align-items: center; }
+.tl { max-height: 60vh; overflow-y: auto; margin-top: 6px; }
+.tl .item { display: flex; gap: 8px; align-items: flex-start; padding: 5px 0; border-bottom: 1px solid #23272e; font-size: 14px; }
+.tl .t { color: var(--muted); min-width: 58px; font-variant-numeric: tabular-nums; font-size: 13px; padding-top: 2px; }
+.tl .no { min-width: 44px; }
+.tl .body { min-width: 0; overflow-wrap: anywhere; }
+.tl .ear { color: var(--sub); font-size: 13px; }
+.tl .sys { color: var(--muted); }
+.tl .hl { background: #1f2f3a; }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+#modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: flex-end; justify-content: center; z-index: 10; }
+#modal[hidden] { display: none; }
+.sheet { background: var(--panel); border: 1px solid var(--line2); border-radius: 16px 16px 0 0; padding: 12px 14px calc(24px + env(safe-area-inset-bottom, 0px)); width: 100%; max-width: 720px; }
+.sheet-h { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.sheet-h span { flex: 1; font-weight: 700; }
+.suitrow { display: grid; grid-template-columns: repeat(13, 1fr); gap: 4px; margin: 4px 0; }
+.suitrow.red button { color: var(--red); }
+button.pick { padding: 0; min-height: 44px; min-width: 0; font-weight: 700; font-size: 14px; }
+button.pick.used { opacity: .3; } button.pick.cur { background: var(--blue); border-color: var(--blue); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+<div id="app">読み込み中…</div>
+<div id="modal" hidden></div>
+<script id="review-data" type="application/json">/*REVIEW_DATA*/null</script>
+<script>
+const DATA = JSON.parse(document.getElementById("review-data").textContent || "null") || {hands: []};
+const RANKS = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"];
+const SUITS = ["s","h","d","c"];
+const SUIT_SYM = {s:"♠", h:"♥", d:"♦", c:"♣"};
+const GT_ACTIONS = ["fold","check","call","bet","raise","allin"];
+const ACTION_JA = {fold:"フォールド", check:"チェック", call:"コール", bet:"ベット", raise:"レイズ", allin:"オールイン",
+  showdown:"ショーダウン", end_hand:"ハンド終了", heads_up:"ヘッズアップ", players_left:"残り人数"};
+const STREETS = ["preflop","flop","turn","river","showdown"];
+const STREET_JA = {preflop:"プリフロップ", flop:"フロップ", turn:"ターン", river:"リバー", showdown:"ショーダウン"};
+const BOARD_LABEL = ["フロップ","フロップ","フロップ","ターン","リバー"];
+const LABEL_JA = {none:"アクションではない", call:"コール", check:"チェック", fold:"フォールド", amount:"額", check_around:"チェックアラウンド"};
+const S = {idx: 0, gts: {}, saved: {}, db: null, dbState: "wait", status: {}, picker: null};
+const $ = (id) => document.getElementById(id);
+function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function clone(x){ return JSON.parse(JSON.stringify(x)); }
+function cardHtml(c, cls, onclick){
+  const cl = cls || "";
+  if (!c) return `<span class="card empty ${cl}" ${onclick?`onclick="${onclick}"`:""}>＋</span>`;
+  const red = c[1] === "h" || c[1] === "d";
+  const rank = c[0] === "T" ? "10" : c[0];
+  return `<span class="card ${red?"red":""} ${cl}" ${onclick?`onclick="${onclick}"`:""}>${rank}${SUIT_SYM[c[1]]||c[1]}</span>`;
+}
+function hand(){ return DATA.hands[S.idx]; }
+function blankGt(h){
+  const t = clone(h.truth || {});
+  const seats = h.seats.map(s => s.seat);
+  const players = seats.map(seat => {
+    const p = (t.players || []).find(x => x.seat === seat) || {};
+    return {seat, hole_cards: (p.hole_cards || []).slice(0, 2), showed_down: !!p.showed_down, name: p.name || String(seat)};
+  });
+  const board = (t.board || []).slice(0, 5); while (board.length < 5) board.push(null);
+  return {board, players, actions: (t.actions || []).map(a => Object.assign({}, a)),
+          winner_seat: t.winner_seat ?? null, button_seat: t.button_seat ?? h.record.button_seat ?? null,
+          notes: t.notes || t.note || "", excluded: !!t.excluded, excluded_reason: t.excluded_reason || ""};
+}
+function gt(){ const h = hand(); if (!S.gts[h.key]) S.gts[h.key] = blankGt(h); return S.gts[h.key]; }
+function rowKey(a){ const amt = (a.action === "fold" || a.action === "check") ? 0 : Number(a.amount || 0);
+  return [a.street || "", a.seat, a.action, amt].join("|"); }
+// 記録と真のアクションの行の対応（入力画面の matchRows と同じ LCS）。対応の無い行が「違う」
+function matchRows(a, b){
+  const n = a.length, m = b.length, L = Array.from({length: n + 1}, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    L[i][j] = rowKey(a[i]) === rowKey(b[j]) ? L[i+1][j+1] + 1 : Math.max(L[i+1][j], L[i][j+1]);
+  const ma = new Set(), mb = new Set(); let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (rowKey(a[i]) === rowKey(b[j])) { ma.add(i); mb.add(j); i++; j++; }
+    else if (L[i+1][j] >= L[i][j+1]) i++; else j++;
+  }
+  return {ma, mb};
+}
+function lint(g){
+  const out = [], folded = new Set(); let si = 0;
+  g.actions.forEach((a, k) => {
+    const s = STREETS.indexOf(a.street || "preflop");
+    if (s < si) out.push(`${k+1} 行目: ストリートが前の行より前に戻っています`);
+    si = Math.max(si, s);
+    if (folded.has(a.seat) && a.street !== "showdown") out.push(`${k+1} 行目: 席${a.seat} はもう降りています`);
+    if (a.action === "fold") folded.add(a.seat);
+    if ((a.action === "bet" || a.action === "raise") && !(Number(a.amount) > 0)) out.push(`${k+1} 行目: 額が入っていません`);
+  });
+  const board = g.board.filter(Boolean), cards = [...board];
+  g.players.forEach(p => cards.push(...p.hole_cards.filter(Boolean)));
+  const dup = cards.filter((c, i) => cards.indexOf(c) !== i);
+  if (dup.length) out.push(`同じ札が 2 か所にあります: ${[...new Set(dup)].join(" ")}`);
+  if (g.winner_seat == null && !g.excluded) out.push("勝者が入っていません");
+  return out;
+}
+function actTable(rows, other, title){
+  const {ma} = matchRows(rows, other);
+  const body = rows.map((a, i) => `<tr class="${ma.has(i) ? "" : "diffrow"}">
+      <td class="street">${esc(STREET_JA[a.street] || a.street || "")}</td><td>席${esc(a.seat)}</td>
+      <td>${esc(ACTION_JA[a.action] || a.action)}</td><td>${a.amount ? esc(a.amount) : ""}</td>
+      <td class="raw">${a.heard ? esc(a.heard) : ""}${a.review ? ' <span class="tag t-warn">要確認</span>' : ""}</td></tr>`).join("");
+  return `<div class="tbl"><table class="cap"><tr><th>ストリート</th><th>席</th><th>アクション</th><th>額</th><th>聞き取り</th></tr>${body ||
+    '<tr><td colspan="5" class="muted">アクションなし</td></tr>'}</table></div>
+    <div class="muted small">黄色 = ${esc(title)}と違う行</div>`;
+}
+function recordBlock(r, label){
+  const holes = (r.players || []).filter(p => p.hole_cards && p.hole_cards.length).map(p =>
+    `<span class="muted small">席${p.seat}</span> ${p.hole_cards.map(c => cardHtml(c, "sm")).join("")}`).join(" ");
+  return `<div>${(r.board || []).map(c => cardHtml(c, "sm")).join("") || '<span class="muted small">ボードなし</span>'}</div>
+    <div class="small" style="margin:4px 0">${holes}</div>
+    <div class="small">勝者 <b>${r.winner_seat != null ? "席" + esc(r.winner_seat) : "なし"}</b>
+      <span class="muted">${esc(r.winner_source || "")}</span>${r.button_seat != null ? ` ・ボタン 席${esc(r.button_seat)}` : ""}</div>`;
+}
+function timelineHtml(h){
+  return h.timeline.map(it => {
+    const t = `<span class="t">+${it.t.toFixed(1)}s</span>`;
+    if (it.kind === "board") return `<div class="item sys">${t}<span class="no"></span><span class="body">ボード ${esc(it.index)} 枚目 ${cardHtml(it.card, "sm")}</span></div>`;
+    if (it.kind === "leave") return `<div class="item sys">${t}<span class="no"></span><span class="body">席${esc(it.seat)} の札が離れた${it.back != null ? `（+${it.back.toFixed(1)}s に戻った）` : ""}</span></div>`;
+    const label = it.label ? `<span class="tag t-ok">聞き取り #${esc(it.label_item)}: ${esc(LABEL_JA[it.label] || it.label)}${it.label_note ? " ・" + esc(it.label_note) : ""}</span>` : "";
+    const parsed = it.parsed && it.parsed.length ? `<span class="tag t-none">${esc(it.parsed.map(p => { const [a, ...rest] = p.split(" "); return (ACTION_JA[a] || a) + (rest.length ? " " + rest.join(" ") : ""); }).join("・"))}</span>` : "";
+    return `<div class="item ${it.label ? "hl" : ""}">${t}<span class="no"><span class="tag t-snd" title="${esc(it.wav)}">音 ${it.no}</span></span>
+      <span class="body">${esc(it.text) || '<span class="muted">（Whisper は空）</span>'} ${parsed} ${label}
+      ${it.ear ? `<div class="ear">耳: ${esc(it.ear)}</div>` : ""}</span></div>`;
+  }).join("") || '<div class="muted small">発話なし</div>';
+}
+function seatOptions(h, cur){ return h.seats.map(s => `<option value="${s.seat}" ${s.seat === cur ? "selected" : ""}>席${s.seat}</option>`).join(""); }
+function render(){
+  const h = hand(), g = gt();
+  const tabs = DATA.hands.map((x, i) => `<button class="sm ${i === S.idx ? "on" : ""}" onclick="pick(${i})">${esc(x.key.replace("_", " ハンド "))}${S.saved[x.key] ? " ✓" : ""}</button>`).join("");
+  const {mb} = matchRows(h.record.actions, g.actions);
+  const lines = lint(g);
+  const rows = g.actions.map((a, i) => `<tr class="${lines.some(l => l.startsWith((i+1) + " 行目")) ? "err" : ""}">
+      <td><select id="st${i}" onchange="setRow(${i},'street',this.value)">${STREETS.map(s => `<option value="${s}" ${a.street === s ? "selected" : ""}>${STREET_JA[s]}</option>`).join("")}</select></td>
+      <td><select id="se${i}" onchange="setRow(${i},'seat',+this.value)">${seatOptions(h, a.seat)}</select></td>
+      <td><select id="ac${i}" onchange="setRow(${i},'action',this.value)">${GT_ACTIONS.map(x => `<option value="${x}" ${a.action === x ? "selected" : ""}>${ACTION_JA[x]}</option>`).join("")}</select></td>
+      <td><input id="am${i}" type="number" min="0" step="100" value="${a.action === "fold" || a.action === "check" ? "" : esc(a.amount || 0)}"
+          ${a.action === "fold" || a.action === "check" ? "disabled" : ""} onchange="setRow(${i},'amount',+this.value)"></td>
+      <td class="tools">${mb.has(i) ? "" : '<span class="tag t-diff">記録と違う</span>'}
+        <button class="sm unsure ${a.unsure ? "on" : ""}" title="自信なし" onclick="setRow(${i},'unsure',${!a.unsure})">?</button>
+        <button class="sm" title="上に行を入れる" onclick="insertRow(${i})">＋上</button>
+        <button class="sm danger" title="この行を消す" onclick="delRow(${i})">✕</button></td></tr>`).join("");
+  const players = g.players.map((p, i) => `<div class="seatrow"><span class="no">席${p.seat} <span class="muted small">${esc(h.seats.find(s => s.seat === p.seat)?.stack ?? "")}</span></span>
+      ${[0,1].map(k => cardHtml(p.hole_cards[k], "", `openPicker('hole',${i},${k})`)).join("")}
+      <button class="sm ${p.showed_down ? "on" : ""}" onclick="toggleShow(${i})">見せた</button></div>`).join("");
+  const st = S.status[h.key];
+  const dbNote = S.dbState === "none" ? '<div class="bad">保存はこのページを claude.ai で開いたときだけ使えます（直した内容はチャットで送ってください）。</div>'
+    : S.dbState === "wait" ? '<div class="muted small">保存の準備中…</div>' : "";
+  $("app").innerHTML = `
+  <div class="top"><h1>真のアクションの見直し</h1><span class="muted small">開発データ ${esc(h.folder)} ・ブラインド ${esc(h.blinds.sb)}/${esc(h.blinds.bb)}</span></div>
+  <div class="tabs">${tabs}</div>
+  ${h.question ? `<div class="q"><b>確認してほしいこと</b>\n${esc(h.question)}</div>` : ""}
+  <div class="cols">
+    <div class="panel">
+      <h2 style="margin-top:0">記録（いまの規則で読み直し）</h2>${recordBlock(h.record)}
+      ${actTable(h.record.actions, g.actions, "右の真のアクション")}
+      ${h.estimate ? `<h2>推定（推定器の 1 番）</h2>${recordBlock(h.estimate)}${actTable(h.estimate.actions, g.actions, "右の真のアクション")}
+        ${h.estimate.reasons && h.estimate.reasons.length ? `<details><summary>要確認の理由 ${h.estimate.reasons.length}</summary><div class="small muted">${h.estimate.reasons.map(esc).join("<br>")}</div></details>` : ""}` : ""}
+      <h2>時系列（音の番号 = チャットで送った音声のファイル名の番号）</h2>
+      <div class="tl">${timelineHtml(h)}</div>
+    </div>
+    <div class="panel">
+      <h2 style="margin-top:0">真のアクション</h2>
+      <div class="muted small">ボード</div>
+      <div>${g.board.map((c, k) => `<span title="${BOARD_LABEL[k]}">${cardHtml(c, "", `openPicker('board',${k},0)`)}</span>`).join("")}</div>
+      <h2>手札</h2>${players}
+      <h2>ボタン</h2><div class="chips">${h.seats.map(s => `<button class="chip sm ${g.button_seat === s.seat ? "on" : ""}" onclick="setField('button_seat',${s.seat})">席${s.seat}</button>`).join("")}</div>
+      <h2>アクション <span class="muted small">額: コールは足す分・ベット / レイズは合計（入力画面と同じ）</span></h2>
+      <div class="tbl"><table><tr><th>ストリート</th><th>席</th><th>アクション</th><th>額</th><th></th></tr>${rows}</table></div>
+      <div class="rowadd"><button class="sm" onclick="addRow()">＋ 行を足す</button></div>
+      ${lines.length ? `<div class="lint">${lines.map(esc).join("<br>")}</div>` : ""}
+      <h2>勝者</h2><div class="chips">${h.seats.map(s => `<button class="chip sm ${g.winner_seat === s.seat ? "on" : ""}" onclick="setField('winner_seat',${s.seat})">席${s.seat}</button>`).join("")}
+        <button class="chip sm ${g.winner_seat == null ? "on" : ""}" onclick="setField('winner_seat',null)">なし</button></div>
+      <h2>メモ</h2><input id="notes" type="text" style="width:100%" maxlength="2000" value="${esc(g.notes)}" placeholder="気づいたこと・聞いた内容" oninput="setNotes(this.value)">
+      <div class="rowadd"><label><input id="excl" type="checkbox" ${g.excluded ? "checked" : ""} onchange="setField('excluded',this.checked)"> 評価から外す</label></div>
+      <div class="actions-bottom">
+        <button class="primary" onclick="save()" ${S.dbState === "ready" ? "" : "disabled"}>保存</button>
+        <button onclick="resetTo('truth')">元の真のアクションに戻す</button>
+        <button onclick="resetTo('record')">記録の内容を写す</button>
+        ${h.estimate ? `<button onclick="resetTo('estimate')">推定の内容を写す</button>` : ""}
+      </div>
+      ${dbNote}
+      ${st ? `<div class="${st.ok ? "saved" : "bad"}">${esc(st.msg)}</div>` : S.saved[h.key] ? `<div class="saved">保存済み（${esc(fmt(S.saved[h.key].saved_at))}）。開いている内容は保存したものです。</div>` : ""}
+    </div>
+  </div>`;
+}
+function fmt(iso){ try { return new Date(iso).toLocaleString("ja-JP"); } catch (e) { return iso; } }
+function pick(i){ S.idx = i; render(); }
+function changed(){ delete S.status[hand().key]; render(); }
+function setRow(i, k, v){ const a = gt().actions[i]; a[k] = v; if (k === "action" && (v === "fold" || v === "check")) a.amount = 0; if (k === "unsure" && !v) delete a.unsure; changed(); }
+function lastStreet(i){ const acts = gt().actions; return (acts[i] || acts[acts.length - 1] || {}).street || "preflop"; }
+function addRow(){ const g = gt(), h = hand(); g.actions.push({street: lastStreet(), seat: h.seats[0].seat, action: "check", amount: 0}); changed(); }
+function insertRow(i){ const g = gt(), h = hand(); g.actions.splice(i, 0, {street: lastStreet(i), seat: h.seats[0].seat, action: "check", amount: 0}); changed(); }
+function delRow(i){ gt().actions.splice(i, 1); changed(); }
+function setField(k, v){ gt()[k] = v; changed(); }
+function setNotes(v){ gt().notes = v; delete S.status[hand().key]; }
+function toggleShow(i){ const p = gt().players[i]; p.showed_down = !p.showed_down; changed(); }
+function resetTo(src){
+  const h = hand();
+  if (src === "truth") { S.gts[h.key] = blankGt(h); changed(); return; }
+  const r = src === "record" ? h.record : h.estimate, g = gt();
+  g.actions = r.actions.map(a => ({street: a.street, seat: a.seat, action: a.action, amount: a.amount || 0}));
+  g.winner_seat = r.winner_seat ?? null;
+  if (r.board && r.board.length) { g.board = r.board.slice(0, 5); while (g.board.length < 5) g.board.push(null); }
+  changed();
+}
+function usedCards(){ const g = gt(); const used = new Set(g.board.filter(Boolean)); g.players.forEach(p => p.hole_cards.forEach(c => c && used.add(c))); return used; }
+function openPicker(kind, i, k){
+  const g = gt(), cur = kind === "board" ? g.board[i] : g.players[i].hole_cards[k], used = usedCards();
+  S.picker = {kind, i, k};
+  const rows = SUITS.map(s => `<div class="suitrow ${s === "h" || s === "d" ? "red" : ""}">${RANKS.map(r => {
+    const c = r + s; return `<button class="pick ${c === cur ? "cur" : used.has(c) ? "used" : ""}" onclick="setCard('${c}')">${r === "T" ? "10" : r}${SUIT_SYM[s]}</button>`; }).join("")}</div>`).join("");
+  const title = kind === "board" ? `ボード ${i + 1} 枚目（${BOARD_LABEL[i]}）` : `席${g.players[i].seat} の手札 ${k + 1} 枚目`;
+  const m = $("modal");
+  m.innerHTML = `<div class="sheet" role="dialog" aria-label="${esc(title)}"><div class="sheet-h"><span>${esc(title)}</span>
+    <button class="sm" onclick="setCard(null)">外す</button><button class="sm" onclick="closePicker()">閉じる</button></div>${rows}</div>`;
+  m.hidden = false;
+}
+function closePicker(){ $("modal").hidden = true; S.picker = null; }
+function setCard(c){
+  const p = S.picker, g = gt(); if (!p) return;
+  if (p.kind === "board") g.board[p.i] = c;
+  else { const hc = g.players[p.i].hole_cards.slice(); hc[p.k] = c; g.players[p.i].hole_cards = [hc[0] || null, hc[1] || null]; }
+  closePicker(); changed();
+}
+document.addEventListener("keydown", e => { if (e.key === "Escape" && S.picker) closePicker(); });
+$("modal").addEventListener("click", e => { if (e.target.id === "modal") closePicker(); });
+function payload(){
+  const g = gt(), h = hand();
+  let board = g.board.slice(); while (board.length && !board[board.length - 1]) board.pop();
+  return {
+    board: board.filter(Boolean),
+    actions: g.actions.map(a => Object.assign({seat: a.seat, action: a.action, amount: (a.action === "fold" || a.action === "check") ? 0 : Number(a.amount || 0), street: a.street}, a.unsure ? {unsure: true} : {})),
+    players: g.players.map(p => ({seat: p.seat, hole_cards: p.hole_cards.filter(Boolean), showed_down: !!p.showed_down, name: p.name})),
+    winner_seat: g.winner_seat, button_seat: g.button_seat, notes: g.notes || "", excluded: !!g.excluded,
+    excluded_reason: g.excluded ? (g.excluded_reason || g.notes || "") : "",
+  };
+}
+async function save(){
+  const h = hand();
+  if (!S.db) return;
+  const body = {key: h.key, session_id: h.session_id, hand_id: h.hand_id, hand: payload(), saved_at: new Date().toISOString(),
+                lint: lint(gt())};
+  try {
+    await S.db.collection("reviews").doc(h.key).set(body);
+    S.saved[h.key] = body;
+    S.status[h.key] = {ok: true, msg: `保存しました（${fmt(body.saved_at)}）${body.lint.length ? "。確かめの指摘が残っています（このまま受け取り、こちらで確かめます）" : ""}`};
+  } catch (e) {
+    S.status[h.key] = {ok: false, msg: "保存できませんでした: " + (e && e.code === "invalid_argument" ? "このページを直す権限がありません" : (e && e.message) || e)};
+  }
+  render();
+}
+async function start(){
+  render();
+  let db = null;
+  try { db = window.claude && window.claude.use ? await window.claude.use("db") : null; } catch (e) { db = null; }
+  if (!db) { S.dbState = "none"; render(); return; }
+  S.db = db; S.dbState = "ready";
+  try {
+    const snap = await db.collection("reviews").get();
+    snap.docs.forEach(d => {
+      const v = d.data(); if (!v || !v.hand) return;
+      S.saved[d.id] = v;
+      const h = DATA.hands.find(x => x.key === d.id);
+      if (h) { const g = blankGt(h), x = v.hand;
+        g.board = (x.board || []).slice(0, 5); while (g.board.length < 5) g.board.push(null);
+        g.actions = (x.actions || []).map(a => Object.assign({}, a));
+        g.players = g.players.map(p => Object.assign(p, (x.players || []).find(q => q.seat === p.seat) || {}));
+        g.winner_seat = x.winner_seat ?? null; g.button_seat = x.button_seat ?? g.button_seat;
+        g.notes = x.notes || ""; g.excluded = !!x.excluded; g.excluded_reason = x.excluded_reason || "";
+        S.gts[h.key] = g; }
+    });
+  } catch (e) { /* 読めなくても編集はできる */ }
+  render();
+}
+start();
+</script>
