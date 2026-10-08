@@ -154,6 +154,7 @@ function lint(g){
   const dup = cards.filter((c, i) => cards.indexOf(c) !== i);
   if (dup.length) out.push(`同じ札が 2 か所にあります: ${[...new Set(dup)].join(" ")}`);
   if (g.winner_seat == null && !g.excluded) out.push("勝者が入っていません");
+  else if (g.winner_seat != null && folded.has(g.winner_seat)) out.push(`勝者の席${g.winner_seat} は降りています`);
   return out;
 }
 function actTable(rows, other, title){

@@ -25,7 +25,7 @@ def hand():
 def test_the_hand_material(hand):
     assert hand["key"] == "e82f5005_15" and hand["hand_id"] == 15
     assert [s["seat"] for s in hand["seats"]] == [5, 6, 7, 8]
-    assert hand["truth"]["winner_seat"] == 5 and hand["truth"]["actions"][-1]["action"] == "fold"
+    assert hand["truth"]["winner_seat"] == 6 and hand["truth"]["actions"][-1]["action"] == "call"   # オーナーの見直し
     assert hand["record"]["actions"] and hand["record"]["board"]
     assert hand["estimate"] is None                         # 推定器を回さない指定
 

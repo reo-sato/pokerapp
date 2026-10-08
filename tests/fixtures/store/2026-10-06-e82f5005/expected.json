@@ -3431,8 +3431,8 @@
      },
      {
       "seat": 6,
-      "action": "fold",
-      "amount": 0,
+      "action": "call",
+      "amount": 8100,
       "street": "river"
      }
     ],
@@ -3474,7 +3474,7 @@
       "name": "8"
      }
     ],
-    "winner_seat": 5,
+    "winner_seat": 6,
     "blind": true,
     "entry_sec": 136.5,
     "blind_entry": {
@@ -3561,18 +3561,20 @@
      "winner_seat": 5,
      "entry_sec": 136.5
     },
-    "hand_id": 15
+    "hand_id": 15,
+    "button_seat": 7,
+    "correction": "リバーは席6 のコール（「コール、ショウダウン」・役名「5ヒット」）で、勝者は 5 のワンペアの席6。前は席6 フォールド・勝者 席5。オーナー確認 2026-10-08（見直しのページ）"
    },
    "baseline": {
-    "action_correct": 11,
+    "action_correct": 10,
     "action_total": 13,
-    "winner_match": true,
+    "winner_match": false,
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 12,
+    "action_correct": 11,
     "action_total": 14,
-    "winner_match": true,
+    "winner_match": false,
     "board_match": true
    }
   }

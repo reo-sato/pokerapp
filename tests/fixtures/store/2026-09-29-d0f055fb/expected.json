@@ -711,14 +711,8 @@
      },
      {
       "seat": 5,
-      "action": "allin",
-      "amount": 13800,
-      "street": "preflop"
-     },
-     {
-      "seat": 4,
-      "action": "call",
-      "amount": 4800,
+      "action": "fold",
+      "amount": 0,
       "street": "preflop"
      }
     ],
@@ -751,21 +745,23 @@
       "name": "C"
      }
     ],
-    "winner_seat": 5,
+    "winner_seat": 4,
     "notes": "次のハンドがなければセッションの終わりで判断",
     "entry_sec": 289.2,
-    "hand_id": 8
+    "hand_id": 8,
+    "button_seat": 4,
+    "correction": "最後の「これで終わりです。」は席5 のフォールド（オールイン 13800 ではない）。残った席4・席6 のショーダウンで勝者は席4。前は席5 オールイン → 席4 コール・勝者 席5。オーナー確認 2026-10-08（見直しのページ）"
    },
    "baseline": {
-    "action_correct": 6,
+    "action_correct": 4,
     "action_total": 6,
-    "winner_match": true,
+    "winner_match": false,
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 6,
+    "action_correct": 4,
     "action_total": 6,
-    "winner_match": true,
+    "winner_match": false,
     "board_match": true
    }
   }
