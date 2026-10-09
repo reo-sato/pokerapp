@@ -30,9 +30,9 @@ _FINGERPRINT = ("from integration.estimator import params_hash; import integrati
                 "print(params_hash(), getattr(m, 'content_hash', lambda: '-')())")
 
 
-def run_bench(tree: Path, logs: list[Path], workers: int) -> list[dict]:
+def run_bench(tree: Path, logs: list[Path], workers: int, extra: tuple[str, ...] = ()) -> list[dict]:
     """`tree` の版の物差し（`bench_hands.py --json`）を回す。"""
-    cmd = [sys.executable, str(tree / "tools" / "bench_hands.py"), "--json", "--workers", str(workers),
+    cmd = [sys.executable, str(tree / "tools" / "bench_hands.py"), "--json", "--workers", str(workers), *extra,
            *[str(p) for p in logs]]
     env = dict(os.environ, PYTHONPATH=str(tree))
     done = subprocess.run(cmd, cwd=tree, env=env, capture_output=True, text=True, encoding="utf-8")
