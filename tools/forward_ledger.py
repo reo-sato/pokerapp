@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import shutil
 import sys
@@ -65,11 +64,10 @@ def _session(folder: Path) -> tuple[str, dict]:
 
 
 def gt_fingerprint(expected: dict, hand_ids: list[int]) -> str:
-    """数えるハンドの真のアクションの指紋。"""
-    truths = [h.get("truth") for h in sorted(expected.get("hands") or [], key=lambda h: h["hand_id"])
-              if h["hand_id"] in set(hand_ids)]
-    blob = json.dumps(truths, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    return hashlib.sha256(blob).hexdigest()[:8]
+    """数えるハンドの真のアクションの指紋（物差しの前の記録と同じ式）。"""
+    from tools.bench_hands import gt_fingerprint as fingerprint_of
+
+    return fingerprint_of([h for h in expected.get("hands") or [] if h["hand_id"] in set(hand_ids)])
 
 
 def _source(results: list[dict]) -> dict:

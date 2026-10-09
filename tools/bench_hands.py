@@ -445,6 +445,64 @@ def format_v1(r: V1Result) -> list[str]:
     return lines
 
 
+RECORD = ROOT / "tests" / "fixtures" / "store" / "bench_record.json"
+
+
+def gt_fingerprint(hands: list[dict]) -> str:
+    """真のアクションの指紋（`[{hand_id, truth}]` のハンド番号順の truth の sha256 の先頭 8 桁）。"""
+    import hashlib
+
+    truths = [h.get("truth") for h in sorted(hands, key=lambda h: h["hand_id"])]
+    return hashlib.sha256(json.dumps(truths, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:8]
+
+
+def store_gt_fingerprints(folder: Optional[Path] = None) -> dict[str, str]:
+    """開発データのセッション → 真のアクションの指紋（物差しの点の変化が真のアクションの直しから来たかを分ける）。"""
+    from tools.estimate import FIXTURES
+
+    out = {}
+    for exp in sorted((folder or FIXTURES).glob("*/expected.json")):
+        data = json.loads(exp.read_text(encoding="utf-8"))
+        if data.get("setup"):
+            out[short_id(str(data.get("session_id") or exp.parent.name))] = gt_fingerprint(data.get("hands") or [])
+    return out
+
+
+def make_record(results: list[V1Result], gt: dict[str, str]) -> dict:
+    return {"_about": "物差し（開発データ）の前の記録: 要確認の付かない誤りと真のアクションの指紋（tools/bench_hands.py "
+                      "--update-record で書き直す。テスト方針 2026-10-08）",
+            "unflagged_errors": {r.name: sorted(r.unflagged_errors) for r in results},
+            "gt": dict(sorted(gt.items()))}
+
+
+def format_record_check(results: list[V1Result], record: dict, gt: dict[str, str]) -> tuple[list[str], bool]:
+    """前の記録と比べる: 新しく要確認の付かない誤りになったハンド（合格を左右する数）と、真のアクションが変わった
+    セッション。返り値: (行, 新しい要確認なしの誤りがあるか)。"""
+    lines, worse = [], False
+    known = record.get("unflagged_errors") or {}
+    for r in results:
+        if r.name not in known:
+            continue
+        before, now = set(known[r.name]), set(r.unflagged_errors)
+        new, gone = sorted(now - before), sorted(before - now)
+        worse = worse or bool(new)
+        lines.append(f"{r.name}: 前の記録と比べて 要確認なしの誤り {len(before)} → {len(now)}"
+                     f"（新しく {len(new)}{': ' + ' '.join(new) if new else ''}"
+                     f"・なくなった {len(gone)}{': ' + ' '.join(gone) if gone else ''}）")
+    old_gt = record.get("gt") or {}
+    changed = sorted(k for k in gt if k in old_gt and gt[k] != old_gt[k])
+    added = sorted(set(gt) - set(old_gt))
+    removed = sorted(set(old_gt) - set(gt))
+    if changed or added or removed:
+        parts = [f"変わった {' '.join(changed)}" if changed else "", f"増えた {' '.join(added)}" if added else "",
+                 f"なくなった {' '.join(removed)}" if removed else ""]
+        lines.append("真のアクションが前の記録から変わったセッション（点の変化はコードでなくこちらから来ることがある）: "
+                     + "・".join(p for p in parts if p))
+    else:
+        lines.append("真のアクション: 前の記録と同じ")
+    return lines, worse
+
+
 def format_chain(r: V1Result) -> list[str]:
     """持ち点の連鎖のあるハンド（前のハンドの推定が勝者・ポットを変えた次のハンド）を別に数える（監査 3 回目の推奨 13:
     1709932e ハンド 3 は、前のハンドの誤りが連鎖した持ち点で推定が誤った額へ導かれた）。"""
@@ -478,6 +536,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--workers", type=int, default=default_workers(),
                     help="v1: ハンドを並べて推定するプロセスの数（結果は同じ。既定 = CPU の数 − 1、最大 4）")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--update-record", action="store_true",
+                    help="v1: 前の記録（要確認の付かない誤り・真のアクションの指紋, tests/fixtures/store/bench_record.json）を"
+                         "今回の結果で書き直す")
     args = ap.parse_args(argv)
     logging.disable(logging.CRITICAL)          # 候補の再生で出るエンジンのログは要らない
     if not args.v0:
@@ -493,27 +554,28 @@ def main(argv: Optional[list[str]] = None) -> int:
                                 workers=args.workers)
 
         results_v1 = run()
-        if args.twice and not args.json:
-            again = run()
-            for r in results_v1:
-                print("\n".join(format_v1(r)))
-            print("\n".join(format_repeat_check(results_v1, again)))
-            if not args.search_check:
-                return 0
-        if args.search_check:
-            wide = run(wide_params())
-            if not args.json:
-                if not args.twice:
-                    for r in results_v1:
-                        print("\n".join(format_v1(r)))
-                print("\n".join(format_search_check(results_v1, wide)))
-                return 0
         if args.json:
             print(json.dumps([asdict(r) for r in results_v1], ensure_ascii=False, indent=1))
-        else:
-            for r in results_v1:
-                print("\n".join(format_v1(r)))
-        return 0
+            return 0
+        for r in results_v1:
+            print("\n".join(format_v1(r)))
+        if args.twice:
+            print("\n".join(format_repeat_check(results_v1, run())))
+        if args.search_check:
+            print("\n".join(format_search_check(results_v1, run(wide_params()))))
+        if args.logs:
+            return 0
+        # 開発データ: 前の記録と比べる（テスト方針 2026-10-08）。新しい要確認なしの誤りは終了コード 1
+        gt = store_gt_fingerprints()
+        record = json.loads(RECORD.read_text(encoding="utf-8")) if RECORD.exists() else {}
+        lines, worse = format_record_check(results_v1, record, gt)
+        print("\n".join(lines))
+        if args.update_record:
+            RECORD.write_text(json.dumps(make_record(results_v1, gt), ensure_ascii=False, indent=1) + "\n",
+                              encoding="utf-8")
+            print(f"前の記録を書き直しました: {RECORD.relative_to(ROOT)}")
+            return 0
+        return 1 if worse else 0
     sessions = 0 if args.no_sim else (1 if args.quick else args.sessions)
     results = run_bench(sim_sessions=sessions)
     if args.json:
