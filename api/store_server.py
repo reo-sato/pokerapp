@@ -52,7 +52,7 @@ LOG_PATH = Path(__file__).resolve().parent.parent / "logs" / "store_server.log"
 
 def create_store_app(cfg: dict, *, player_repo: PlayerRepository, session_repo: SessionRepository,
                      ledger_repo: LedgerRepository, order_repo: OrderRequestRepository,
-                     menu: MenuMaster):
+                     menu: MenuMaster, cloud_status: Optional[Callable[[], dict]] = None):
     """会計の書き手の API（注文 write・スタッフの会計 write が有効）を作る。
 
     会計画面（`--ledger` + `viewer_api.enabled`）と店舗サーバー（`--serve`）の両方がこれを使い、
@@ -68,6 +68,7 @@ def create_store_app(cfg: dict, *, player_repo: PlayerRepository, session_repo: 
         buyin_presets=cfg.get("ledger", {}).get("buyin_presets", []) or [],   # ADR-0026
         player_web_dir=PLAYER_WEB_DIR,   # お客さん向け画面（ADR-0059）
         staff_web_dir=STAFF_WEB_DIR,     # スタッフ用 iPad 画面（ADR-0064）
+        cloud_status=cloud_status,       # クラウドへの送信の状態（ADR-0067 2b, 店舗サーバーだけ）
         **auth_kwargs_from_config(api_cfg),   # L1 PIN（ADR-0027）
     )
 
@@ -158,6 +159,25 @@ def _side_servers(settings: dict, stop: threading.Event) -> list[threading.Threa
     return threads
 
 
+def start_cloud_sync(cfg: dict, stop: threading.Event, **kwargs):
+    """クラウドへの送り手（ADR-0067 2b）を別スレッドで動かす。使わない設定なら None。
+
+    店舗サーバーの中だけで動かす（会計を書くプロセスは 1 つ = 送り手も 1 つ）。落ちても起動し直す。
+    """
+    from core.cloud_sync import syncer_from_config
+
+    try:
+        syncer = syncer_from_config(cfg, **kwargs)
+    except Exception:  # noqa: BLE001 — クラウドの設定の不備で店舗サーバーを止めない
+        logger.exception("クラウドへの送信の準備に失敗しました（店内の運用は続けます）。")
+        return None
+    if syncer is None:
+        return None
+    keep_running("クラウド同期", lambda: syncer.run_forever(stop), stop)
+    logger.info("クラウドへの送信を始めます: %s（%.0f 秒ごと）", syncer.url, syncer.interval_sec)
+    return syncer
+
+
 def run_store_server(cfg: dict, host: Optional[str] = None, port: Optional[int] = None,
                      lock: Optional[StoreWriterLock] = None, log_to_file: bool = True) -> int:
     """店舗サーバーを foreground で動かす。戻り値は終了コード（0 = 正常に止めた / 1 = 止まった・起動できない）。"""
@@ -178,11 +198,13 @@ def run_store_server(cfg: dict, host: Optional[str] = None, port: Optional[int] 
     try:
         player_repo = PlayerRepository()
         session_repo = SessionRepository(player_repo=player_repo)
+        syncer = start_cloud_sync(cfg, stop)
         app = create_store_app(
             cfg, player_repo=player_repo, session_repo=session_repo,
             ledger_repo=LedgerRepository(session_repo=session_repo, player_repo=player_repo),
             order_repo=OrderRequestRepository(session_repo=session_repo, player_repo=player_repo),
             menu=MenuMaster(),
+            cloud_status=syncer.status if syncer else (lambda: {"enabled": False}),
         )
         _side_servers(settings, stop)
         logger.info("店舗サーバーを起動します: %s:%s（%s）", settings["host"], settings["port"], describe_version())

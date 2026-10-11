@@ -26,6 +26,7 @@ DEFAULT_BACKUP_SOURCES: list[Path] = [
     _ROOT / "player_credentials.json",
     _ROOT / "auth_identity.json",
     _ROOT / "rfid_cards.json",
+    _ROOT / "cloud_credentials.json",   # クラウドの端末トークン（ADR-0067）
 ]
 
 

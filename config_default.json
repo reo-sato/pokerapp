@@ -149,6 +149,11 @@
     "ground_truth_port": 8791,
     "_comment": "ADR-0065: 店舗サーバー（python main.py --serve。サインイン時に installer/store_server_task.ps1 で自動起動）。会計の書き手の API（お客さん向け画面 / スタッフ用画面 /staff/ / 注文）と卓モニタを 1 プロセスで動かす。bind_port が null なら viewer_api.bind_port（8788）。staff_token・player_auth などは viewer_api の値を使う。会計を書くのは 1 プロセスだけなので、店舗サーバーが動いている間は会計画面（--ledger）は起動しない（会計は iPad の /staff/ で）。受け付けは Windows のファイアウォールで店内の LAN に限る（docs/installation.md）。"
   },
+  "cloud": {
+    "enabled": false,
+    "interval_sec": 60,
+    "_comment": "ADR-0067: 店舗サーバー（--serve）の中で、変わったデータだけをクラウドへ送る（一方向。クラウドからは何も受け取らない）。つなぐのは python tools/cloud_link.py（端末トークンとクラウドの URL を cloud_credentials.json に保存し、enabled を true にする）。interval_sec ごとに送り、失敗したら最大 15 分まで間を空ける。お客さんの音声の聞き取り文・監査用の項目は送らない。"
+  },
   "backup": {
     "on_startup": true,
     "dir": "./backups",

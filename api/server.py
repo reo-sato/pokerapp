@@ -15,6 +15,7 @@ import logging
 import secrets
 from importlib import metadata
 from pathlib import Path
+from typing import Callable
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -358,6 +359,7 @@ def create_app(
     ground_truth_repo: GroundTruthRepository | None = None,
     player_web_dir: str | Path | None = None,
     staff_web_dir: str | Path | None = None,
+    cloud_status: Callable[[], dict] | None = None,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -447,8 +449,11 @@ def create_app(
     def health() -> dict:
         # branch / commit / release は ADR-0066（どの店がどの版で動いているか）。additive。
         info = version_info()
-        return {"status": "ok", "version": _app_version(), "branch": info["branch"],
+        body = {"status": "ok", "version": _app_version(), "branch": info["branch"],
                 "commit": info["commit"], "release": info["release"]}
+        if cloud_status is not None:   # 店舗サーバーだけ: クラウドへの送信の状態（ADR-0067 2b, additive）
+            body["cloud"] = cloud_status()
+        return body
 
     @app.get("/api/players")
     def players() -> dict:

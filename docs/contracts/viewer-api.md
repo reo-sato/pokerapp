@@ -33,7 +33,7 @@ player 向け参照 front-end（WS3, Expo）が消費する **読み取り専用
 
 | Method | Path | 200 response | error |
 |--------|------|--------------|-------|
-| GET | `/api/health` | `{"status": "ok", "version": "<app version>", "branch": "<取得元のブランチ \| null>", "commit": "<コミット \| null>", "release": <リリース版か \| null>}`（branch 以降は ADR-0066 で additive） | — |
+| GET | `/api/health` | `{"status": "ok", "version": "<app version>", "branch": "<取得元のブランチ \| null>", "commit": "<コミット \| null>", "release": <リリース版か \| null>}`（branch 以降は ADR-0066 で additive）。店舗サーバー（`--serve`）だけ `"cloud": {"enabled", "last_ok_at", "last_attempt_at", "last_error", "pending", "rejected"}` も（ADR-0067 2b, additive） | — |
 | GET | `/api/players` | `{"players": [player, ...]}`（作成順。player = `player.schema.json` v1.0） | — |
 | GET | `/api/players/{player_id}` | player | 404 `not_found` |
 | GET | `/api/players/{player_id}/sessions` | `{"sessions": [player_session_summary, ...]}`（player が 1 hand 以上着席した session のみ。`player_session_summary.schema.json` v0.x） | 404 `not_found`（unknown player） |

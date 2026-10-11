@@ -71,6 +71,7 @@ $PreservedFiles = @(
     "config.json", "rfid_cards.json", "menu.json",
     "players.json", "sessions.json", "ledger.json", "order_requests.json",
     "player_credentials.json", "auth_identity.json", "hand_corrections.json",
+    "cloud_credentials.json", "cloud_sync_state.json",
     "install.log"
 )
 $PreservedDirs = @("venv", "logs", "backups", "models")

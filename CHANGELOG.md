@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### Added (店舗 PC からクラウドへの送信 = フェーズ 2b, 2026-10-11)
+
+ADR-0067 追記 2、作業ログ `docs/worklog/2026-10-11-cloud-2b-sender.md`。つながない限り店舗 PC の動きは変わらない（既定 `cloud.enabled=false`）。
+
+- 店舗サーバー（`--serve`）が 60 秒ごとに、変わったデータだけをクラウドへ送る（一方向。聞き取った文・監査用の項目は送らない。
+  ネットが切れていても店内はそのまま、失敗したら最大 15 分おきに試す）。状態は `/api/health` の `cloud`。
+- つなぐ道具 `python tools/cloud_link.py`（`link` / `status` / `push` / `reissue` / `unlink`）。端末トークンは
+  `cloud_credentials.json`（更新で保持・バックアップ対象）。手順は `docs/cloud-setup.md` §3。
+
 ### Added (クラウドの骨組み = フェーズ 2a, 2026-10-11)
 
 ADR-0067 の 2a（追記 1、作業ログ `docs/worklog/2026-10-11-cloud-2a-skeleton.md`）。店舗 PC の動きは変わらない。

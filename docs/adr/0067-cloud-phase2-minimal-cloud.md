@@ -203,6 +203,24 @@ LAN の 2 台を前提にしている。クラウドに向けるには、(a) 店
 - 管理の受け口は回数制限（IP ごと、Cloud Run が `X-Forwarded-For` の最後に足す接続元で数える）。端末トークンの
   失敗にも回数制限。説明のページ（`/docs`・`/openapi.json`）は出さない。
 
+## 追記 2（2026-10-11, 2b の実装で決めた細部）
+
+- クラウドの URL は config ではなく `cloud_credentials.json`（端末トークンと一緒）に置く。config は `cloud.enabled` と
+  `cloud.interval_sec`（既定 60）だけ。つなぐ・外すは `tools/cloud_link.py`（`link --name` = 管理トークンで店舗を作る /
+  `link --token` = 発行済みの端末トークン / `reissue` / `status` / `push` / `unlink`）。管理トークンは保存しない。
+- 送り手は `core/cloud_sync.py:CloudSyncer`。`SyncScheduler`（ADR-0032）は失敗のときに間を空けないので使わず、
+  送り手が自分で待つ（60 秒 → 倍々 → 最大 15 分）。店舗サーバーの中で `keep_running` が動かす（落ちたら起動し直す）。
+- ハンドは **sessions.json に載っているセッションのものだけ**、店舗 PC が見せる形（ライブ ⊕ 推定 = `load_record`）で送る。
+- 送り手の番号（seq）= max(前の番号 + 1, いまの時刻（マイクロ秒）)。**起動して最初に送る前にクラウドの最大の番号に
+  合わせる**（`cloud_sync_state.json` が消えた・時計が戻ったときに、ハンドの変更が「古い」と捨てられないように）。
+  クラウドが「古い」と答えた種類は受け取ってもらえていないとみなし、次の回に送り直す。
+- 本文が大きすぎる（413）ときは半分に分けて送り直す。1 件で上限を超えるものは、変わるまで送らない。
+  クラウドが断ったレコードも、変わるまで送らない（状態の `rejected` に理由）。
+- `/api/health` に `cloud`（`enabled` / 最後に送れた時刻 / 最後のエラー / 送れていない件数 / 断られた件数）を additive
+  で出す（店舗サーバーだけ。トークンは出さない）。スタッフ画面への表示は後で。
+- `cloud_credentials.json` / `cloud_sync_state.json` は git 管理外で、更新（`update.cmd`）で保持する。端末トークンは
+  起動時のバックアップの対象（`core/backup.py`）。
+
 ## Alternatives Considered
 
 - **今の snapshot/merge（ADR-0022）をそのままクラウドに向ける** — 新しく書くものが最も少ない。

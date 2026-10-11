@@ -33,3 +33,6 @@ models/
 
 # 会計の書き手のロック（ADR-0065）
 store_writer.lock
+# クラウドの端末トークン・送信の状態（ADR-0067, 店舗 PC ごと）
+cloud_credentials.json
+cloud_sync_state.json

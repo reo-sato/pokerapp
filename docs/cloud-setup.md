@@ -69,8 +69,29 @@
 - Cloud Build のトリガー（GitHub の `stable` に進んだら自動でデプロイ）
 - Supabase 側: 専用のデータベースユーザー、`pokerapp` スキーマ、RLS の確認
 
-## 3. 店舗 PC をつなぐ（2b で書き足す）
+## 3. 店舗 PC をつなぐ（クラウドに置いたあと, 1 回だけ）
 
-- `python tools/cloud_link.py`（店舗の登録と端末トークンの保存）
-- `config.json` の `cloud.enabled` / `cloud.url`
-- つながっているかの確認（`/api/health` の `cloud`）
+店舗 PC で、RDP でつないで PowerShell を開き、フォルダ（`C:\PokerHandLogger`）で実行します。
+
+1. 店舗を作ってつなぐ（**管理トークン**を聞かれます。入力しても画面には出ません。保存もされません）:
+
+   ```
+   venv\Scripts\python tools\cloud_link.py link --url https://<クラウドの URL> --name "店名"
+   ```
+
+   クラウドが発行した**端末トークン**が `cloud_credentials.json` に保存され、`config.json` の `cloud.enabled` が true になります。
+2. いますぐ 1 回送って確かめる:
+
+   ```
+   venv\Scripts\python tools\cloud_link.py push
+   ```
+
+3. 店舗サーバーを起動し直す（PC の再起動でも可）。以後 60 秒ごとに、変わったものだけを送ります。
+4. 状態を見る: `venv\Scripts\python tools\cloud_link.py status`（最後に送れた時刻・送れていない件数・クラウドにある件数）。
+   iPad などからは `http://<PC の IP>:8788/api/health` の `cloud` でも見られます。
+
+困ったとき:
+
+- 「端末トークンが違うか取り消されています」→ `tools\cloud_link.py reissue`（管理トークンで発行し直し。前のものは使えなくなる）。
+- ネットが切れているとき → 店内はそのまま使えます。送れなかった分は、つながったときにまとめて送ります（最大 15 分おきに試す）。
+- この PC のつながりを外す → `tools\cloud_link.py unlink`（クラウドの記録は残ります）。
