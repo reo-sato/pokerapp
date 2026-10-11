@@ -30,6 +30,8 @@ class Session:
         label:      任意の表示名（識別には使わない）。
         ended_at:   終了時刻。``open`` の間は None。``closed`` では必須（core が enforce）。
         blinds:     任意の参考値 ``{"sb": int, "bb": int}``。
+        hole_card_visibility: お客さんの画面に出すホールカードの範囲（ADR-0067 D6）。
+                    ``"all"`` | ``"own_and_shown"`` | None（= 店の設定に従う）。
     """
 
     session_id: str
@@ -38,6 +40,7 @@ class Session:
     label: str | None = None
     ended_at: str | None = None
     blinds: dict | None = None
+    hole_card_visibility: str | None = None
 
     def to_dict(self) -> dict:
         d: dict = {
@@ -51,6 +54,8 @@ class Session:
             d["ended_at"] = self.ended_at
         if self.blinds is not None:
             d["blinds"] = dict(self.blinds)
+        if self.hole_card_visibility is not None:
+            d["hole_card_visibility"] = self.hole_card_visibility
         return d
 
     @classmethod
@@ -62,6 +67,7 @@ class Session:
             label=d.get("label"),
             ended_at=d.get("ended_at"),
             blinds=d.get("blinds"),
+            hole_card_visibility=d.get("hole_card_visibility"),
         )
 
 

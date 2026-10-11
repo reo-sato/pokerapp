@@ -209,3 +209,29 @@ def test_the_player_page_is_served_when_built(tmp_path):
     res = client.get("/")
     assert res.status_code == 200 and "player" in res.text and res.headers["cache-control"] == "no-cache"
     assert client.get("/api/unknown").json()["code"] == "not_found"
+
+
+def test_hole_card_visibility_in_the_cloud(env):
+    """公開範囲（ADR-0067 D6）: 店舗の設定 own_and_shown → 自分の手札だけ。セッションの設定 all が優先。"""
+    headers, _, _ = _login(env, env["ids"]["alice"])
+    client, alice, sid = env["client"], env["ids"]["alice"], env["ids"]["session_id"]
+    shop_hand = client.get(f"/api/sessions/{sid}/hands/1", headers=headers).json()
+    seats = {p["seat"] for p in shop_hand["players"]}
+    # 記録に手札を入れて送り直す（フィクスチャのハンドは手札が無い）
+    hand = env["storage"].get_record(env["store_id"], "hands", f"{sid}:1")
+    for p, cards in zip(hand["players"], (["Ah", "Ad"], ["Kh", "Kd"], ["Qh", "Qd"])):
+        p["hole_cards"] = cards
+    session = env["storage"].get_record(env["store_id"], "sessions", sid)
+    env["storage"].apply(env["store_id"], [("hands", f"{sid}:1", hand),
+                                           ("store_settings", "settings", {"hole_cards": "own_and_shown"})],
+                         seq=10**7)
+    alice_seat = next(int(s["seat_no"]) for s in session["hands"]["1"]["seats"] if s["player_id"] == alice)
+    got = client.get(f"/api/sessions/{sid}/hands/1", headers=headers).json()
+    visible = {p["seat"] for p in got["players"] if p["hole_cards"]}
+    assert visible == {alice_seat} and seats
+    listed = client.get(f"/api/players/{alice}/sessions/{sid}/hands", headers=headers).json()["hands"][0]
+    assert {p["seat"] for p in listed["players"] if p["hole_cards"]} == {alice_seat}
+    env["storage"].apply(env["store_id"], [("sessions", sid, {**session, "hole_card_visibility": "all"})],
+                         seq=10**7 + 1)
+    got = client.get(f"/api/sessions/{sid}/hands/1", headers=headers).json()
+    assert all(p["hole_cards"] for p in got["players"])

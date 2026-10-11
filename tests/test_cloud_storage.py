@@ -60,19 +60,23 @@ def test_ledger_entries_are_append_only(storage):
     assert storage.get_record(sid, "ledger_entries", "e1")["cash_amount"] == 5000
 
 
-def test_sessions_use_the_sync_rules_with_the_store_pc_first(storage):
+def test_sessions_take_the_store_pcs_latest_whole_state(storage):
+    """店舗 PC はセッション（席の割り当て込み）の全体をいつも送る → 新しい番号の方がそのまま正しい（追記 4）。"""
     sid = storage.create_store("店")["store_id"]
     base = {"session_id": "s1", "started_at": "2026-10-11T10:00:00", "status": "open", "label": "旧",
+            "hole_card_visibility": "own_and_shown",
             "hands": {"1": {"started_at": "2026-10-11T10:01:00", "seats": [{"seat_no": 1, "player_id": "p1"}]}}}
     storage.apply(sid, [("sessions", "s1", base)], seq=1)
-    closed = {**base, "status": "closed", "ended_at": "2026-10-11T12:00:00", "label": "新",
-              "hands": {"2": {"started_at": "2026-10-11T10:05:00", "seats": [{"seat_no": 2, "player_id": "p2"}]}}}
+    closed = {k: v for k, v in base.items() if k != "hole_card_visibility"}   # 「店の設定に従う」に戻した
+    closed.update(status="closed", ended_at="2026-10-11T12:00:00", label="新")
+    closed["hands"] = {**base["hands"],
+                       "2": {"started_at": "2026-10-11T10:05:00", "seats": [{"seat_no": 2, "player_id": "p2"}]}}
     assert storage.apply(sid, [("sessions", "s1", closed)], seq=2) == [CHANGED]
     got = storage.get_record(sid, "sessions", "s1")
-    assert got["label"] == "新" and got["status"] == "closed"     # 店舗 PC の変更が写しに入る
-    assert set(got["hands"]) == {"1", "2"}                         # ハンドは足し合わせ
-    # 閉じたセッションは、遅れて届いた「開いている」で戻らない
-    storage.apply(sid, [("sessions", "s1", {**base, "label": "新"})], seq=3)
+    assert got["label"] == "新" and got["status"] == "closed" and set(got["hands"]) == {"1", "2"}
+    assert "hole_card_visibility" not in got          # 項目が無いことも写しに伝わる
+    # 遅れて届いた古い push（「開いている」）では戻らない
+    assert storage.apply(sid, [("sessions", "s1", base)], seq=1) == [STALE]
     assert storage.get_record(sid, "sessions", "s1")["status"] == "closed"
 
 

@@ -29,6 +29,8 @@ import {
   StaffApiError,
   type StaffLedgerEntryBody,
   type StaffSeating,
+  type HoleCardVisibility,
+  type HoleCardVisibilityResult,
   type StaffSession,
   type ViewerLink,
 } from "./types";
@@ -261,6 +263,23 @@ export class MockStaffRepository implements StaffRepository {
     absorbed.merged_into = survivorId;
     absorbed.merged_at = new Date().toISOString();
     return { survivor_id: survivorId, absorbed_id: absorbedId };
+  }
+
+  // 手札の公開範囲（ADR-0067 D6）。mock の店の設定は「全員分」。
+  async getHoleCardDefault(): Promise<HoleCardVisibility> {
+    this.requireAuth();
+    return "all";
+  }
+
+  async setHoleCardVisibility(
+    sessionId: string,
+    value: HoleCardVisibility | null,
+  ): Promise<HoleCardVisibilityResult> {
+    this.requireAuth();
+    const session = this.requireSession(sessionId);
+    if (value === null) delete session.hole_card_visibility;
+    else session.hole_card_visibility = value;
+    return { session: clone(session), store_default: "all", effective: value ?? "all" };
   }
 
   // 閲覧リンク（ADR-0067 D5）。mock は 1 人 1 本の「発行し直すと前のものは使えない」だけを真似る。

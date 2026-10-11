@@ -296,8 +296,8 @@ def _resolve_session(a: dict, b: dict) -> dict:
     else:
         merged["status"] = "open"
 
-    # label/blinds は local 優先、無ければ peer。
-    for field in ("label", "blinds"):
+    # label/blinds/公開範囲は local 優先、無ければ peer（公開範囲は ADR-0067 D6）。
+    for field in ("label", "blinds", "hole_card_visibility"):
         if a.get(field) is not None:
             merged[field] = a[field]
         elif b.get(field) is not None:

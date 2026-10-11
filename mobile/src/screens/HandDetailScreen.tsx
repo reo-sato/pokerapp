@@ -34,8 +34,8 @@ export function HandDetailScreen({
   repository, player, session, handId, onBack, onCorrect,
 }: Props): React.JSX.Element {
   const { data: hand, loading, errorCode, errorMessage, reload } = useAsync(
-    () => repository.getHand(session.session_id, handId),
-    [repository, session.session_id, handId],
+    () => repository.getHand(session.session_id, handId, player.player_id),
+    [repository, session.session_id, handId, player.player_id],
   );
   const [shareMsg, setShareMsg] = useState<string | null>(null);
 

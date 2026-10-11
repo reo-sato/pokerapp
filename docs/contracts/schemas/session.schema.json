@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pokerapp.local/contracts/session.schema.json",
   "title": "Session",
-  "version": "1.0",
-  "description": "S2。1.0 freeze 済 (ADR-0019)。1 卓 1 回の運営単位。player membership は持たず seat_assignment (hand-based) から導出する。状態遷移・cross-field (closed なら ended_at 必須) は core が enforce。詳細は docs/contracts/session-seating.md / ADR-0006。",
+  "version": "1.1",
+  "description": "S2。1.0 freeze 済 (ADR-0019)。1.1 で任意の hole_card_visibility を追加 (additive, ADR-0067 D6)。1 卓 1 回の運営単位。player membership は持たず seat_assignment (hand-based) から導出する。状態遷移・cross-field (closed なら ended_at 必須) は core が enforce。詳細は docs/contracts/session-seating.md / ADR-0006。",
   "type": "object",
   "additionalProperties": false,
   "required": ["session_id", "started_at", "status"],
@@ -40,6 +40,11 @@
       "type": "string",
       "enum": ["open", "closed"],
       "description": "open=進行中 / closed=終了 (session_settlement 確定対象)。状態遷移は core が enforce。"
+    },
+    "hole_card_visibility": {
+      "type": "string",
+      "enum": ["all", "own_and_shown"],
+      "description": "1.1 additive (ADR-0067 D6)。お客さんの画面に出すホールカードの範囲。all = 記録した手札を全員分 / own_and_shown = 自分の手札 + ショーダウンで見せた手札だけ。無ければ店の設定 (config viewer_api.hole_cards) に従う。"
     }
   }
 }

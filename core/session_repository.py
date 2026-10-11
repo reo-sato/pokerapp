@@ -76,6 +76,13 @@ class UnknownPlayerError(SessionError):
     """指定 player_id が registry に実在しない（error code: unknown_player）。"""
 
 
+class InvalidHoleCardVisibilityError(SessionError, ValueError):
+    """公開範囲の値が不正（error code: invalid_visibility, ADR-0067 D6）。"""
+
+
+HOLE_CARD_VISIBILITY = ("all", "own_and_shown")
+
+
 class InvalidSeatError(SessionError):
     """seat_no が範囲外（1..9 外）（error code: invalid_seat）。"""
 
@@ -265,6 +272,21 @@ class SessionRepository:
         session.ended_at = ended_at if ended_at is not None else _now_iso()
         self._flush()
         logger.info("Closed session %s", session_id)
+        return session
+
+    @_locked
+    def set_hole_card_visibility(self, session_id: str, value: str | None) -> Session:
+        """お客さんの画面に出すホールカードの範囲を決める（None = 店の設定に従う, ADR-0067 D6）。
+
+        表示の設定なので closed の session でも変えられる。
+        """
+        if value is not None and value not in HOLE_CARD_VISIBILITY:
+            raise InvalidHoleCardVisibilityError(
+                f"hole_card_visibility は {list(HOLE_CARD_VISIBILITY)} か null です（{value!r}）。")
+        session = self.get_session(session_id)
+        session.hole_card_visibility = value
+        self._flush()
+        logger.info("Session %s hole_card_visibility=%s", session_id, value)
         return session
 
     # ――― hand-based seating ―――

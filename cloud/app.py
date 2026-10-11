@@ -46,6 +46,9 @@ from cloud.views import ViewCache
 from api.read_models import (
     HandNotFoundError,
     get_hand,
+    hide_hole_cards,
+    hole_card_mode,
+    viewer_seats,
     get_player_session_ledger,
     list_player_hands,
     list_player_sessions,
@@ -383,6 +386,11 @@ def create_cloud_app(storage: Storage, settings: Optional[CloudSettings] = None)
         me = _own(request, player_id)
         return JSONResponse({"sessions": list_player_sessions(player_id, me["view"].sessions)})
 
+    def _visible(view, session_id: str, hand: dict, player_id: str) -> dict:
+        """公開範囲（セッションの設定 > 店舗の設定）に合わせて手札を隠す（ADR-0067 D6, 店内と同じ関数）。"""
+        mode = hole_card_mode(view.sessions, session_id, view.settings.get("hole_cards", "all"))
+        return hide_hole_cards(hand, viewer_seats(view.sessions, session_id, hand["hand_id"], player_id), mode)
+
     @app.get("/api/players/{player_id}/sessions/{session_id}/hands")
     def player_hands(player_id: str, session_id: str, request: Request) -> JSONResponse:
         view = _own(request, player_id)["view"]
@@ -391,7 +399,7 @@ def create_cloud_app(storage: Storage, settings: Optional[CloudSettings] = None)
             hands = list_player_hands(player_id, session_id, view.sessions, view.log_dir, view.corrections)
         except _MISSING:
             raise _Fail(404, "not_found", "見つかりません") from None
-        return JSONResponse({"hands": hands})
+        return JSONResponse({"hands": [_visible(view, session_id, h, player_id) for h in hands]})
 
     @app.get("/api/sessions/{session_id}/hands/{hand_id}")
     def hand(session_id: str, hand_id: int, request: Request) -> JSONResponse:
@@ -408,7 +416,8 @@ def create_cloud_app(storage: Storage, settings: Optional[CloudSettings] = None)
             raise _Fail(404, "not_found", "見つかりません")   # 座っていなかったハンドは見せない
         view.ensure_hands(session_id)
         try:
-            return JSONResponse(get_hand(session_id, hand_id, view.log_dir, view.corrections))
+            found = get_hand(session_id, hand_id, view.log_dir, view.corrections)
+            return JSONResponse(_visible(view, session_id, found, me["player_id"]))
         except _MISSING:
             raise _Fail(404, "not_found", "見つかりません") from None
 

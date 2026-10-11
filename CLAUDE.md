@@ -391,8 +391,11 @@ ADR-0017）。**player 向け desktop viewer は作らない**（desktop = ス�
 - **別プロセスの hand logger が書いた `sessions.json` / `players.json` を読み直す**（ADR-0059）: `/api/` の要求
   ごとに `SessionRepository.reload_if_changed()`（player も連鎖）が (mtime_ns, size) を比べ、変わっていれば
   読み直す（読めない瞬間は今の内容を保つ）。Windows の共有違反は `core/atomic_io.py` が短く再試行。
-- 公開範囲: 当面は**記録したホールカードを全員分**見せる（オーナー決定, ADR-0059 D7）。**セッションごとの
-  公開範囲は future scope**（session 属性 + read model で適用する想定）。
+- **ホールカードの公開範囲**（ADR-0067 D6, 実装済）: `all`（記録した手札を全員分 = 既定）/ `own_and_shown`（自分の手札 +
+  ショーダウンで見せた手札だけ）。店の設定 `viewer_api.hole_cards`、セッションごとの上書き（session schema `1.1` の
+  `hole_card_visibility`, スタッフ API `PUT /api/staff/sessions/{sid}/hole-card-visibility` + スタッフ用画面の卓の上）。
+  適用は `api/read_models.py:hide_hole_cards` の 1 か所（店内の viewer API とクラウド。スタッフの読み取りには効かない）。
+  店内の `/api/sessions/{sid}/hands/{hid}` は `?player_id=`（選んだ人）で自分の手札を出す。
 
 ### staff write API（S5, `api/server.py` の `/api/staff/...`, ADR-0021）
 
@@ -575,7 +578,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **settlement partial-paid (S4)** | ✅ 実装済 | `SessionSettlement.paid_amount`（additive, 既定 0）+ `payment_status` 導出（paid/unpaid/partial, ADR-0023）。core `record_payment` / staff API `PUT .../payment` / `ViewerApiClient.record_payment` / GUI 受領額入力 / mobile 一部支払い表示。schema `1.0`→`1.1`（optional field + enum 値, additive） |
 | **settlement / cashflow CSV export (S3.3)** | ✅ 実装済 | `output/ledger_csv_exporter.py`（`main.py --export-ledger`, utf-8-sig） |
 | **viewer API (M1)** | ✅ 実装済 | `api/read_models.py`, `api/server.py`（`main.py --viewer-api`, read-only GET, `[api]` extra, ADR-0017。ledger summary は `compute_settlement` 由来 = ADR-0016。`/` でお客さん向け画面を配信 + 要求ごとに `sessions.json` / `players.json` を変わっていれば読み直す + `--host` / `--port`, ADR-0059） |
-| **お客さん向けハンド閲覧の店舗運用 (ADR-0059)** | ✅ 実装済（店舗 PC 未確認） | `--cli` が席とお客さんを記録（`session_layer.enabled=true`。起動時の名前 → player、`name <席> <名前>` / `name <席> -` で次のハンドから席替え、`q` で session close）→ `start_viewer.cmd`（`--viewer-api --host 0.0.0.0 --port 8788`, ショートカット「お客さん用 ハンド履歴 (スマホ)」）→ お客さんは `http://<PC の IP>:8788/` で名前を選ぶだけ。画面のビルドは `api/static/player/` にコミット（`scripts/build_player_web.py`、API = `/`、`EXPO_PUBLIC_PLAYER_AUTH=off`、staff token なし、drift は CI）。記録したホールカードは全員分表示（公開範囲の設定は future）。`tools/set_config.py` で config の 1 項目を変更（BOM なし）。ISSUE-0036 |
+| **お客さん向けハンド閲覧の店舗運用 (ADR-0059)** | ✅ 実装済（店舗 PC 未確認） | `--cli` が席とお客さんを記録（`session_layer.enabled=true`。起動時の名前 → player、`name <席> <名前>` / `name <席> -` で次のハンドから席替え、`q` で session close）→ `start_viewer.cmd`（`--viewer-api --host 0.0.0.0 --port 8788`, ショートカット「お客さん用 ハンド履歴 (スマホ)」）→ お客さんは `http://<PC の IP>:8788/` で名前を選ぶだけ。画面のビルドは `api/static/player/` にコミット（`scripts/build_player_web.py`、API = `/`、`EXPO_PUBLIC_PLAYER_AUTH=off`、staff token なし、drift は CI）。記録したホールカードの公開範囲は店の設定 + セッションごと（ADR-0067 D6）。`tools/set_config.py` で config の 1 項目を変更（BOM なし）。ISSUE-0036 |
 | **mobile viewer (M2)** | ✅ 実装済 | `mobile/`（Expo/RN。PlayerSelect→MySessions→MyHands→HandDetail + 会計（**精算状況: 確定/未確定・支払済み/未払い** 表示, S4）+ 注文画面。`ViewerRepository` に mock/HTTP 注入, `EXPO_PUBLIC_API_URL` 切替（`/` = 画面と同じ origin の API, ADR-0059）, ADR-0017。`EXPO_PUBLIC_STAFF_TOKEN` が無ければハンド訂正、`EXPO_PUBLIC_PLAYER_AUTH=off` なら PIN / サインアップの導線を出さない（ADR-0059）。HandDetail は**ストリート単位リプレイ**表示 = ADR-0044（URL に `?test` を付けた端末は聞き取った文と補正の理由も出す = ADR-0060）。全画面に手動再読込（↻）+ エラー再試行、選択 player / ログイントークンを永続化 = web localStorage・native は in-memory fallback, `src/storage.ts`。注文の**本人キャンセル**（ADR-0045）+ **品切れ表示/注文不可**（ADR-0046）+ ハンドの**テキスト共有/コピー**（`shared/hand_replay/handReplayText.ts`, Phase B「書き出し」導線）+ **PIN の自己設定/変更**（AuthScreen, `setPin` = ADR-0027 D6。初回 = pin_self_enroll 会場・変更 = 現 PIN 必須）） |
 | **ハンドリプレイ UI (ADR-0044)** | ✅ 実装済 | GG 風ストリート単位リプレイ（board スライス 3/4/5・4 色スート・ポット推移・needs_review/訂正済バッジ・記録がある席は全員分ホールカード・main/side pot）。正本 `shared/hand_replay/`（`handReplayModel.ts` 純関数 + `HandReplay.tsx` + TS tests 8）を `scripts/sync_shared_ui.py` で mobile/staff 両アプリへコピー配布（monorepo 化しない）、drift は `tests/test_shared_ui_sync.py`（CI）。mobile HandDetail + staff ハンドタブ履歴 drill-in に搭載。staff hands read = `GET /api/staff/sessions/{sid}/hands`（訂正適用済, `list_session_hands` + `ViewerApiClient.list_session_hands`）。BTN/ポジション推定は scope 外（M1 の spot_config_builder） |
 | **ハンド訂正 (B4, ADR-0036)** | ✅ 実装済 | 音声自動記録の誤認識を append-only オーバーレイで訂正。`core/hand_correction*.py`（store + `apply_hand_corrections`: 元値 `_original` 保持・`corrected`・needs_review 解除・監査痕、元 hand log は不変）+ viewer get_hand/list_player_hands に適用 + staff API `POST .../hands/{hid}/corrections` + `ViewerApiClient.add_hand_correction` + mobile `addHandCorrection` + **iPad 訂正画面 `mobile/src/screens/CorrectionScreen.tsx`**（HandDetail から導線、`EXPO_PUBLIC_STAFF_TOKEN` で staff write。typecheck + web export green）+ **staff アプリ内の訂正パネル**（`staff/src/screens/HandCorrectionPanel.tsx`, ハンドタブのリプレイ詳細から action/amount/winner_seat を訂正）。**残**: PHH overlay / 訂正取消 / board・hole 訂正 |
@@ -811,7 +814,7 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    （staff 画面の店舗 PC 配信 = ADR-0064 で実装済 / 自動起動 = ADR-0065 で実装済（店舗サーバー `--serve`）/ リリース版での更新 = ADR-0066 で実装済（`stable`）/ `SyncScheduler` の常駐結線）→
    2 クラウド最小（**設計済 = ADR-0067**: Cloud Run 東京 + **Supabase** Postgres 東京 / 店舗 PC → クラウドの一方向で変わった分だけ送る
    （`SyncScheduler` の常駐もここ）/ 主キーは店舗 ID + 元の ID / 許可リストのアプリ `cloud/app.py`（スタッフ・会計の受け口なし）/
-   店外閲覧は店で渡す閲覧リンク / 公開範囲 `all`・`own_and_shown`。**2a クラウドの骨組み = 実装済**（`cloud/`、受け口・保存・push・端末トークン・管理）/ **2b 店舗 PC の送り手 = 実装済**（`core/cloud_sync.py` を店舗サーバーの中で常駐 = `SyncScheduler` の常駐結線の代わり、`tools/cloud_link.py`、`/api/health` の `cloud`）/ **2c 閲覧リンク = 実装済**（スタッフ画面「プレイヤー管理」の「閲覧リンク (QR)」→ お客さんは店外から自分の記録だけ。`mobile/` のクラウド用ビルド `EXPO_PUBLIC_CLOUD=1`）、2d・2e は planned、登録手順 `docs/cloud-setup.md`）→
+   店外閲覧は店で渡す閲覧リンク / 公開範囲 `all`・`own_and_shown`。**2a クラウドの骨組み = 実装済**（`cloud/`、受け口・保存・push・端末トークン・管理）/ **2b 店舗 PC の送り手 = 実装済**（`core/cloud_sync.py` を店舗サーバーの中で常駐 = `SyncScheduler` の常駐結線の代わり、`tools/cloud_link.py`、`/api/health` の `cloud`）/ **2c 閲覧リンク = 実装済**（スタッフ画面「プレイヤー管理」の「閲覧リンク (QR)」→ お客さんは店外から自分の記録だけ。`mobile/` のクラウド用ビルド `EXPO_PUBLIC_CLOUD=1`）/ **2d 公開範囲 = 実装済**（§ viewer API の「ホールカードの公開範囲」）、2e は planned、登録手順 `docs/cloud-setup.md`）→
    3 ログインと会員 → 4 外販の準備。製品化の作業は推論・音声（`integration/`・`audio/`）に触れない。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。

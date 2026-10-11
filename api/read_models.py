@@ -25,6 +25,55 @@ from core.session_repository import SessionRepository
 logger = logging.getLogger(__name__)
 
 
+# ――― ホールカードの公開範囲（ADR-0067 D6）―――
+# all = 記録した手札を全員分（ADR-0059 D7 のいまの動き）/ own_and_shown = 自分の手札 + ショーダウンで見せた手札だけ。
+# お客さんの読み取り（店内の viewer API とクラウド）にだけ適用する。スタッフの読み取りには適用しない。
+HOLE_CARD_VISIBILITY = ("all", "own_and_shown")
+
+
+def hole_card_mode(session_repo: SessionRepository, session_id: str, default: str = "all") -> str:
+    """そのセッションの公開範囲（セッションの設定 > 店の設定 > all）。"""
+    try:
+        value = session_repo.get_session(session_id).hole_card_visibility
+    except Exception:  # noqa: BLE001 — セッションが無ければ店の設定
+        value = None
+    value = value or default
+    return value if value in HOLE_CARD_VISIBILITY else "all"
+
+
+def viewer_seats(session_repo: SessionRepository, session_id: str, hand_id: int,
+                 player_id: "str | None") -> set[int]:
+    """そのハンドで、見ている人（merge で 1 人になった player を含む）が座っていた席。"""
+    if not player_id:
+        return set()
+    try:
+        cls = session_repo.player_repo.equivalence_class(player_id)
+        seat_map = session_repo.resolve_seat_map_for_hand(session_id, hand_id)
+    except Exception:  # noqa: BLE001 — 座席の記録が無いハンドは誰の席でもない
+        return set()
+    return {int(seat) for seat, pid in seat_map.items() if pid in cls}
+
+
+def hide_hole_cards(hand: dict, own_seats: set[int], mode: str) -> dict:
+    """公開範囲に合わせて手札を隠した写し（all ならそのまま返す）。
+
+    手札が入る項目: `players[].hole_cards`（隠す）と `showdown[].hole_cards`（見せた手札 = そのまま）。
+    ほかに手札が入る項目を足したら、ここと `tests/test_hole_card_visibility.py` の列挙を直す。
+    """
+    if mode != "own_and_shown":
+        return hand
+    shown = {e.get("seat") for e in hand.get("showdown") or [] if isinstance(e, dict)}
+    visible = set(own_seats) | shown
+    out = dict(hand)
+    players = []
+    for player in hand.get("players") or []:
+        if isinstance(player, dict) and player.get("hole_cards") and player.get("seat") not in visible:
+            player = {**player, "hole_cards": None, "hole_cards_hidden": True}
+        players.append(player)
+    out["players"] = players
+    return out
+
+
 class HandNotFoundError(Exception):
     """指定 (session_id, hand_id) の hand log が存在しない（error code: not_found）。"""
 

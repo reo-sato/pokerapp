@@ -45,6 +45,16 @@ export interface StaffSession {
   ended_at?: string;
   blinds?: Blinds;
   status: "open" | "closed";
+  /** お客さんの画面に出す手札の範囲（ADR-0067 D6）。無ければ店の設定に従う。 */
+  hole_card_visibility?: HoleCardVisibility;
+}
+
+export type HoleCardVisibility = "all" | "own_and_shown";
+
+export interface HoleCardVisibilityResult {
+  session: StaffSession;
+  store_default: HoleCardVisibility;
+  effective: HoleCardVisibility;
 }
 
 /** core/session.py SeatAssignment.to_dict（hand-based seating, ADR-0006/0007）。 */

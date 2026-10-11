@@ -241,6 +241,24 @@ LAN の 2 台を前提にしている。クラウドに向けるには、(a) 店
   スタッフ用画面の「プレイヤー管理」に「閲覧リンク (QR)」。
 - 開いたままのページで別のリンクを開いた（`#` だけが変わった）ときも、そのリンクで入り直す。リンクはアドレスバーから消す。
 
+## 追記 4（2026-10-11, 2d の実装で決めた細部）
+
+- 店の設定は `config.json` の **`viewer_api.hole_cards`**（D6 の `viewer.hole_cards` から変更。お客さんの画面の設定が
+  まとまっている節）。クラウドへは `store_settings.hole_cards` で送る。
+- 適用は `api/read_models.py` の `hide_hole_cards`（隠した手札は `hole_cards: null` + `hole_cards_hidden: true`。画面は
+  カードの裏で出す = 画面の変更なし）・`hole_card_mode`（セッション > 店 > all）・`viewer_seats`（座席の記録 + merge）。
+  店内の viewer API とクラウドの両方がこの 1 か所を使う。スタッフの読み取りには適用しない。
+- 店内の `/api/sessions/{sid}/hands/{hid}` は見ている人を知らないので、画面が `?player_id=`（選んだ人）を付ける。
+  付いていなければ見せた手札だけ。
+- 手札が入る項目は `players[].hole_cards` と `showdown[].hole_cards` だけ。本物のエンジンが作ったハンドで、それ以外に札が
+  入っていないことをテストで確かめる（`tests/test_hole_card_visibility.py`。新しい項目に札が入ると落ちる）。
+- セッションの設定はスタッフ API `PUT /api/staff/sessions/{sid}/hole-card-visibility`（null = 店の設定に戻す）と、
+  スタッフ用画面の卓の上の「お客さんの画面の手札」。表示の設定なので閉じたセッションでも変えられる。
+- **クラウドのセッションの merge を「送り手の番号が新しい方」に変更**（追記 1 では `core/sync.py` の解決関数）。店舗 PC は
+  席の割り当て込みのセッションの全体をいつも送るので新しい方がそのまま正しく、「店の設定に従う」に戻した（項目が無い）
+  ことも写しに伝わる（解決関数は「片方にあれば残す」ので伝わらない）。店内の 2 台のあいだの同期（`core/sync.py`）は
+  解決関数のまま（公開範囲の項目も同じ規則で残す）。
+
 ## Alternatives Considered
 
 - **今の snapshot/merge（ADR-0022）をそのままクラウドに向ける** — 新しく書くものが最も少ない。

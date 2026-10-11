@@ -14,6 +14,8 @@ import type {
   ControlCommand,
   GroundTruthEditPayload,
   GroundTruthHand,
+  HoleCardVisibility,
+  HoleCardVisibilityResult,
   HandControlInput,
   HandCorrection,
   HandCorrectionInput,
@@ -80,6 +82,15 @@ export interface StaffRepository {
   issueViewerLink(playerId: string): Promise<ViewerLink>;
   /** 閲覧リンクを取り消す（スマホをなくした・人に見られた）。 */
   revokeViewerLink(playerId: string): Promise<{ player_id: string; revoked: number }>;
+
+  // ――― お客さんの画面に出す手札の範囲（ADR-0067 D6）―――
+  /** 店の設定（config viewer_api.hole_cards）。 */
+  getHoleCardDefault(): Promise<HoleCardVisibility>;
+  /** セッションごとに決める。null = 店の設定に従う。 */
+  setHoleCardVisibility(
+    sessionId: string,
+    value: HoleCardVisibility | null,
+  ): Promise<HoleCardVisibilityResult>;
 
   // ――― 座席（hand-based seating, ADR-0038 §B）―――
   /** 現在の seating（最新 hand 由来）+ 記録済 hand_id 一覧。 */

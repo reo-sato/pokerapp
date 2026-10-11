@@ -163,8 +163,9 @@ export class HttpRepository implements ViewerRepository {
     return body.hands;
   }
 
-  getHand(sessionId: string, handId: number): Promise<HandSummary> {
-    return this.get(`/api/sessions/${encodeURIComponent(sessionId)}/hands/${handId}`);
+  getHand(sessionId: string, handId: number, playerId?: string): Promise<HandSummary> {
+    const query = playerId ? `?player_id=${encodeURIComponent(playerId)}` : "";
+    return this.get(`/api/sessions/${encodeURIComponent(sessionId)}/hands/${handId}${query}`);
   }
 
   getPlayerLedger(playerId: string, sessionId: string): Promise<PlayerSessionLedger> {

@@ -29,9 +29,11 @@ SCHEMA_DIR = Path(__file__).resolve().parent.parent / "docs" / "contracts" / "sc
 #   resolve: core/sync の解決関数（incoming, existing）
 #   union:   append-only（既にあれば既存のまま）
 #   seq:     送り手の番号が新しい（同じも含む）なら置き換える
+# sessions は seq: 店舗 PC が席の割り当て込みの全体をいつも送るので、新しい方がそのまま正しい（設定を
+# 「店の設定に従う」に戻したときに、項目が無いことも写しに伝わる。ADR-0067 追記 4）。
 MERGE_MODE: dict[str, str] = {
     "players": "resolve",
-    "sessions": "resolve",
+    "sessions": "seq",
     "ledger_entries": "union",
     "point_entries": "union",
     "settlements": "resolve",
@@ -43,7 +45,6 @@ MERGE_MODE: dict[str, str] = {
 
 _RESOLVERS: dict[str, Callable[[dict, dict], dict]] = {
     "players": sync._resolve_player,
-    "sessions": sync._resolve_session,
     "settlements": sync._resolve_settlement,
     "order_requests": sync._resolve_order,
 }

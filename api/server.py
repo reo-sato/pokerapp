@@ -25,8 +25,12 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from api.read_models import (
+    HOLE_CARD_VISIBILITY,
     HandNotFoundError,
     get_hand,
+    hide_hole_cards,
+    hole_card_mode,
+    viewer_seats,
     get_player_session_ledger,
     list_measurement_rows,
     list_player_hands,
@@ -85,6 +89,7 @@ from core.player_repository import (
     PlayerValidationError,
 )
 from core.session_repository import (
+    InvalidHoleCardVisibilityError,
     InvalidSeatError,
     PlayerAlreadySeatedError,
     SeatTakenError,
@@ -370,6 +375,7 @@ def create_app(
     staff_web_dir: str | Path | None = None,
     cloud_status: Callable[[], dict] | None = None,
     cloud_links: Any = None,
+    hole_cards_default: str = "all",
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -481,12 +487,18 @@ def create_app(
     @app.get("/api/players/{player_id}/sessions/{session_id}/hands")
     def player_hands(player_id: str, session_id: str) -> dict:
         player_repo.get(player_id)
-        return {"hands": list_player_hands(
-            player_id, session_id, session_repo, log_dir, correction_repo)}
+        hands = list_player_hands(player_id, session_id, session_repo, log_dir, correction_repo)
+        mode = hole_card_mode(session_repo, session_id, hole_cards_default)   # ADR-0067 D6
+        return {"hands": [
+            hide_hole_cards(h, viewer_seats(session_repo, session_id, h["hand_id"], player_id), mode)
+            for h in hands]}
 
     @app.get("/api/sessions/{session_id}/hands/{hand_id}")
-    def hand(session_id: str, hand_id: int) -> dict:
-        return get_hand(session_id, hand_id, log_dir, correction_repo)
+    def hand(session_id: str, hand_id: int, player_id: str | None = None) -> dict:
+        # player_id = 見ている人（店内は名前選びなので「選んだ人」, ADR-0067 D6）。無ければ見せた手札だけ。
+        found = get_hand(session_id, hand_id, log_dir, correction_repo)
+        mode = hole_card_mode(session_repo, session_id, hole_cards_default)
+        return hide_hole_cards(found, viewer_seats(session_repo, session_id, hand_id, player_id), mode)
 
     @app.get("/api/players/{player_id}/sessions/{session_id}/ledger")
     def player_ledger(player_id: str, session_id: str) -> dict:
@@ -990,6 +1002,36 @@ def create_app(
                                 content={"code": "already_closed", "message": str(e)})
         return session.to_dict()
 
+    @app.put("/api/staff/sessions/{session_id}/hole-card-visibility", response_model=None)
+    async def staff_set_hole_card_visibility(session_id: str, request: Request) -> "JSONResponse | dict":
+        """お客さんの画面に出すホールカードの範囲（ADR-0067 D6）。value = all / own_and_shown / null（店の設定）。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or "value" not in body:
+            return JSONResponse(status_code=400, content={
+                "code": "invalid_visibility", "message": "value（all / own_and_shown / null）が必要です。"})
+        try:
+            session = await run_in_threadpool(session_repo.set_hole_card_visibility, session_id, body["value"])
+        except SessionNotFoundError as e:
+            return JSONResponse(status_code=404, content={"code": "not_found", "message": str(e)})
+        except InvalidHoleCardVisibilityError as e:
+            return JSONResponse(status_code=400, content={"code": "invalid_visibility", "message": str(e)})
+        return {"session": session.to_dict(), "store_default": hole_cards_default,
+                "effective": hole_card_mode(session_repo, session_id, hole_cards_default)}
+
+    @app.get("/api/staff/hole-card-visibility", response_model=None)
+    def staff_hole_card_default(request: Request) -> "JSONResponse | dict":
+        """店の設定（config viewer_api.hole_cards）。スタッフ画面が「店の設定に従う」の中身を出すため。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        return {"store_default": hole_cards_default}
+
     @app.post("/api/staff/sessions/{session_id}/settlement/commit", response_model=None)
     def staff_commit_settlement(
         session_id: str, request: Request
@@ -1315,7 +1357,9 @@ def auth_kwargs_from_config(api_cfg: dict) -> dict:
     main.py の `--ledger`（in-process）と `--viewer-api`（standalone）で共通に使い、
     挙動が分岐しないようにする。既定は player_auth='off'（name-pick, 後方互換）。
     """
+    hole = api_cfg.get("hole_cards", "all")
     return {
+        "hole_cards_default": hole if hole in HOLE_CARD_VISIBILITY else "all",   # ADR-0067 D6
         "player_auth": api_cfg.get("player_auth", "off"),
         "player_token_secret": api_cfg.get("player_token_secret") or None,
         "player_token_ttl_sec": int(api_cfg.get("player_token_ttl_sec", 43_200)),

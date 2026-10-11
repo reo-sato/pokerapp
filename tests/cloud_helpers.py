@@ -92,8 +92,10 @@ def make_storage(kind: str):
     dsn = postgres_dsn()
     if not dsn:
         pytest.skip("POKERAPP_TEST_DATABASE_URL が無いので Postgres の試験は飛ばします（CI では設定）")
-    pytest.importorskip("psycopg")
+    psycopg = pytest.importorskip("psycopg")
     from cloud.postgres import PostgresStorage
+
+    psycopg.connect(dsn, connect_timeout=3).close()   # つながらなければすぐ失敗させる（待ち続けない）
 
     storage = PostgresStorage(dsn, schema=f"t_{uuid.uuid4().hex[:12]}", max_size=2)
     storage.migrate()

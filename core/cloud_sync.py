@@ -111,7 +111,7 @@ def collect(paths: SourcePaths) -> dict[str, list[dict]]:
 
 def store_settings(cfg: dict) -> dict:
     """クラウドに送る店舗の設定（ADR-0067 D6）。"""
-    hole = (cfg.get("viewer") or {}).get("hole_cards", "all")
+    hole = (cfg.get("viewer_api") or {}).get("hole_cards", "all")
     return {"hole_cards": hole if hole in HOLE_CARD_VISIBILITY else "all"}
 
 
