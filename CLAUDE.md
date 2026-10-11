@@ -52,10 +52,12 @@ pokerapp/
 ├── claude_v4.docx                 ← 旧仕様書（参考）
 ├── install.cmd / update.cmd / uninstall.cmd   ← Windows ワンステップインストーラの入口 (ダブルクリック, ADR-0057)
 ├── start_logger.cmd / start_monitor.cmd / start_viewer.cmd / start_ledger.cmd / rfid_check.cmd ← 店舗 PC 用ランチャ (venv 経由。デスクトップのショートカットが指す。ASCII のみ。start_viewer = お客さん向けハンド閲覧, ADR-0059)
+├── server_autostart.cmd / start_server.cmd ← 店舗サーバー（`--serve`）の自動起動の登録（`installer/store_server_task.ps1`, `remove` で消す）/ 手で起動して確かめる (ADR-0065)
 ├── installer/
 │   ├── install.ps1                ← 本体: Python 3.12 導入 → venv → pip install -e .[pcsc,api] → config → モデル先読み → ショートカット → 動作確認 (-Update / -Uninstall / -DryRun)
-│   └── bootstrap.ps1              ← 1 行インストール (irm … | iex): zip を C:\PokerHandLogger に展開して install.ps1 を実行
-├── main.py                        ← エントリーポイント (--cli / GUI / --players / --sessions / --ledger / --export-ledger / --viewer-api)
+│   ├── bootstrap.ps1              ← 1 行インストール (irm … | iex): zip を C:\PokerHandLogger に展開して install.ps1 を実行
+│   └── store_server_task.ps1      ← 店舗サーバーをタスク PokerStoreServer に登録（サインイン時 + 5 分ごと、pythonw、管理者不要、-Remove で消す, ADR-0065）
+├── main.py                        ← エントリーポイント (--cli / GUI / --players / --sessions / --ledger / --export-ledger / --viewer-api / --serve)
 ├── config_default.json            ← デフォルト設定テンプレート
 ├── rfid_cards.json                ← tag_id → card_code マスタ
 ├── players.json                   ← player registry 永続ファイル (.gitignore, S1)
@@ -94,6 +96,7 @@ pokerapp/
 │   ├── auth_identity_repository.py ← AuthIdentityRepository (node-local, sync 非対象, L2, ADR-0031)
 │   ├── oidc.py                    ← OidcProvider 抽象 + FakeOidcProvider + resolve_player_for_claim (L2, ADR-0031)
 │   ├── atomic_io.py               ← atomic_write_json(fsync) + read_json_file(破損退避) (B2/B7)
+│   ├── store_lock.py              ← StoreWriterLock: 会計の書き手を 1 プロセスに限る OS のファイルロック（`--serve` / `--ledger`, `store_writer.lock`, ADR-0065）
 │   ├── backup.py                  ← データ JSON のバックアップ (B2)
 │   ├── positions.py               ← ディーラーボタン / ポジション名の純粋ロジック (FR-05b, ISSUE-0032)
 │   ├── table_state.py             ← TableState (RFID だけから導く 卓状態: カード/有効席/ストリート, ADR-0056 D5)
@@ -124,6 +127,7 @@ pokerapp/
 │   ├── read_models.py             ← viewer read model (seat_assignment 起点 join + settlement 由来 summary, fastapi 非依存, M1)
 │   ├── server.py                  ← viewer API server (FastAPI app factory + uvicorn, M1, ADR-0017。`/` でお客さん向け画面も配信, ADR-0059)
 │   ├── client.py                  ← ViewerApiClient (viewer API の Python client = local↔API 分離点, S5, ADR-0020)
+│   ├── store_server.py            ← 店舗サーバー（`main.py --serve`, 画面なし）: 会計の書き手の API（`create_store_app` = `--ledger` と共通）+ 卓モニタ（+ 任意で真のアクション入力）を 1 プロセスで、落ちたら起動し直す (ADR-0065)
 │   ├── static/player/             ← お客さん向け画面 (mobile/ の web 版) のビルド。コミット済 = 店舗 PC に Node 不要。scripts/build_player_web.py が作り、tests/test_player_web_build.py が mobile/ との drift を CI 検知 (ADR-0059)
 │   └── static/staff/              ← スタッフ用 iPad 画面 (staff/ の web 版) のビルド。`/staff/` で配信。scripts/build_staff_web.py が作り、tests/test_staff_web.py が staff/ との drift を CI 検知 (ADR-0064)
 │
@@ -370,6 +374,10 @@ ADR-0017）。**player 向け desktop viewer は作らない**（desktop = ス�
   `api/static/player/`（`mobile/` の web 版、API = 同じ origin の `/api/`、PIN / LINE・Google と staff 訂正の
   導線なし）を mount する（全 API ルートの後。未知の `/api/...` は JSON 404 のまま）。入口は
   `Cache-Control: no-cache`、hash 入りの `_expo/` はキャッシュ可。`--viewer-api` と `--ledger` の両方が配信する。
+- **店舗サーバー**（ADR-0065）: `python main.py --serve` = 画面を持たない会計の書き手（`api/store_server.py:create_store_app`。
+  `--ledger` の組み込み API も同じ関数）+ 卓モニタ。待ち受けは `--host`/`--port` > `store_server.bind_host`/`bind_port` >
+  `viewer_api.bind_port` > `0.0.0.0:8788`。店舗 PC のサインイン時（通電 → 自動サインイン）にタスク `PokerStoreServer`（`server_autostart.cmd`）で動かす。
+  **会計を書くのは 1 プロセスだけ**: `--serve` と `--ledger` は `core/store_lock.py` のロックを取り、取れなければ起動しない。
 - **スタッフ用 iPad 画面も配信する**（ADR-0064）: `create_app(staff_web_dir=STAFF_WEB_DIR)` が `/staff` に
   `api/static/staff/`（`staff/` の web 版、API = 同じ origin、置き場所 `/staff` = Expo `experiments.baseUrl` を
   `staff/app.config.js` がビルドのときだけ足す）を mount する（`/` より先。`/staff` は `/staff/` へ転送）。スタッフ
@@ -585,7 +593,7 @@ inspection UI**（desktop, WS2 の最初の一歩 = WS2-α）。hand logger dash
 | **ディーラーボタン回転 + ポジション名 (P0b)** | ✅ 実装済 | `core/positions.py`（純粋ロジック）+ `PokerkitGameState` がハンドごとにボタンを 1 つ回す（§ ディーラーボタン / ポジション名, ADR-0056 P0b, ISSUE-0032 Fixed）。SB/BB の自動 post は pokerkit backend が元から行う。**legacy backend はボタンを持たない**（単純ラウンドロビンのまま = rollback path 不変） |
 | schema `1.0` freeze (S4) | ✅ 実装済 | 全 model（session/seat/hand_ref・ledger/point・settlement・order_request/player_session_summary）を `1.0` freeze（ADR-0019, ISSUE-0005 Resolved）。code↔contract test 全 model カバー |
 | 実機 E2E (Phase H) | 🟡 RFID 実機 + `--cli` 1 ハンド通し 済（JSON 検証まで）+ 店舗 PC 導入済 | **2026-09-24 店舗 PC（GEEKOM A8 / Windows 11 Pro / HDMI ダミープラグで画面なし・RDP 操作）**: 1 行インストール（ADR-0057）→ RFID（卓の ESP32-S3 を USB 直結）→ `--cli` + 卓モニタを起動し、iPhone から卓モニタの反映まで確認。RDP 運用に要る PC 側設定（スマートカード転送の停止 / Wi-Fi をプライベート + 8788・8790 を LAN 限定で許可）は `docs/installation.md` §0。**2026-09-12 実機（11 reader / pokerkit backend / `audio.enabled=false`）**: `n` → 席 1・2 のホールカード各 2 枚 → flop(pos 1,2,3) → turn(pos 4) → river(pos 5) → キーボードのアクション（`チェック` / `ベット５` / `コール` / `ベット`）→ `w 1` → JSON 保存まで通り、**保存された JSON を検証済**: `street` が実際の進行と一致（preflop×2 / flop×3 / turn×3 / river×2, ISSUE-0029 修正確認）、`pots` に side-pot 情報あり（`{"amount":44,"eligible_seats":[1,2]}`）、`confidence` は派生値（keyboard 投入 = 合法 + audio のみ・裏付けなしで一律 0.575。legacy 固定 0.5 ではない）、金額を言わない `ベット` は最小ベットに snap + `needs_review`。**board 位置は安定**（同じ札の再発火が同じ位置に収まり付け替え無し = ISSUE-0025/0026 の修正確認。ただし 1 台で同じ札の再検出が繰り返し出る = 結合が弱い台の間欠読み。位置が固定なので記録は無害）。残りはクリーン環境の通し確認（§ ロードマップ 残作業）。**PN5180 firmware 契約は凍結済（ADR-0034, ISSUE-0015 Fixed）**= `docs/contracts/rfid-usb-ccid.md` **v1.2**（ADR-0051 で §2/§5/§8 を additive 追記、ADR-0052 で §3/§4/§6/§8 = 1 slot + P2 選択, ISSUE-0022）。**実機 RFID の bring-up 診断ツール + 手順は実装済**: `tools/probe_pcsc.py`（list/check/watch/**raw**, 契約 §3-8 を production の `PCSCBridge`/`RFIDThread` で検査。list は物理リーダー台数も表示、raw は pyscard 直叩きで OS の slot 状態と connect の hresult を表示）+ `docs/hardware-qa-checklist.md`。**2026-09-10**: 1 台で `raw`（`SW=9000`+UID）と `watch`（再発火 2 件）まで実機確認。**残**: `rfid_cards.json` の実カード登録は **1 デッキ 52 枚 済**（ジョーカー 2 枚のみ未登録）。**運用手順: ハンドが終わったらボードを下げて `n` で新ハンド**（engine と RFID の位置が揃う唯一の同期点, ISSUE-0026。`n` 前のアクションは記録されず WARN が出る, ISSUE-0028）。マイク有りの音声→JSON/PHH の通し、`--export-phh`、`--ledger`（`viewer_api.enabled`）+ スマホ注文の通し。**`config.json` に `engine.backend="pokerkit"` を明示**すること（既存 config に `engine` セクションが無いと legacy にフォールバックし side-pot / 派生 confidence / actor 推定が無効 = `pots: []`・`confidence: 0.5` 固定がその状態） |
-| **Windows ワンステップインストーラ (ADR-0057)** | ✅ 実装済 (Stage 1) | 店舗 PC 向け。`install.cmd`（ダブルクリック）→ `installer/install.ps1`: **Python 3.12** を `py` → winget（`--source winget` 固定。msstore の証明書エラー 0x8a15005e で止まるため）→ 入らなければ python.org の順で確保 → フォルダ内 `venv` → `pip install -e ".[pcsc,api]"`（データが `Path(__file__).parent.parent` 直下にある前提なので **フォルダ in-place + editable**。site-packages に入れない）→ `config.json` 生成（既存は不変）→ Whisper モデル先読み（任意）→ デスクトップにショートカット 5 つ（`start_*.cmd` / `rfid_check.cmd`）→ import と `main.py --help` で動作確認 → `install.log`。`update.cmd` = GitHub の zip を robocopy で上書き（`.git` があれば `git pull --ff-only`）したあと、**更新後のインストーラで続きを実行し直す**（取得元のブランチは `installer\branch.txt` に覚え、`-Branch` 無しの更新はそれを使う）、**`$PreservedFiles` = `core/backup.py` のデータ一覧 + config/rfid_cards/menu、`$PreservedDirs` = venv/logs/backups** は保持（`tests/test_installer.py` が整合を固定）。`uninstall.cmd` = ショートカットと venv のみ削除。1 行版 `installer/bootstrap.ps1`（`irm … \| iex`、既導入なら更新）。`install.ps1` は UTF-8 BOM（PowerShell 5.1 の `-File`）、`bootstrap.ps1` は **BOM 無し + `exit` 無し + `& { }` 包み**（`irm \| iex` でユーザーの対話コンソールの中で走る。exit はウィンドウを閉じ、BOM は irm の戻り値に残る）、.cmd は ASCII + CRLF（CP932 の cmd.exe）。CI は pwsh で構文解析 + `-DryRun` 通し。**Stage 2**: iPad 画面の API 配信は **ADR-0064 で実装済**（`/staff/` = `api/static/staff/`。お客さん向け画面は ADR-0059 = `api/static/player/`）。未着手 = データフォルダ分離 / release zip / PyInstaller + Inno Setup の exe / 自動起動 |
+| **Windows ワンステップインストーラ (ADR-0057)** | ✅ 実装済 (Stage 1) | 店舗 PC 向け。`install.cmd`（ダブルクリック）→ `installer/install.ps1`: **Python 3.12** を `py` → winget（`--source winget` 固定。msstore の証明書エラー 0x8a15005e で止まるため）→ 入らなければ python.org の順で確保 → フォルダ内 `venv` → `pip install -e ".[pcsc,api]"`（データが `Path(__file__).parent.parent` 直下にある前提なので **フォルダ in-place + editable**。site-packages に入れない）→ `config.json` 生成（既存は不変）→ Whisper モデル先読み（任意）→ デスクトップにショートカット 5 つ（`start_*.cmd` / `rfid_check.cmd`）→ import と `main.py --help` で動作確認 → `install.log`。`update.cmd` = GitHub の zip を robocopy で上書き（`.git` があれば `git pull --ff-only`）したあと、**更新後のインストーラで続きを実行し直す**（取得元のブランチは `installer\branch.txt` に覚え、`-Branch` 無しの更新はそれを使う）、**`$PreservedFiles` = `core/backup.py` のデータ一覧 + config/rfid_cards/menu、`$PreservedDirs` = venv/logs/backups** は保持（`tests/test_installer.py` が整合を固定）。`uninstall.cmd` = ショートカットと venv のみ削除。1 行版 `installer/bootstrap.ps1`（`irm … \| iex`、既導入なら更新）。`install.ps1` は UTF-8 BOM（PowerShell 5.1 の `-File`）、`bootstrap.ps1` は **BOM 無し + `exit` 無し + `& { }` 包み**（`irm \| iex` でユーザーの対話コンソールの中で走る。exit はウィンドウを閉じ、BOM は irm の戻り値に残る）、.cmd は ASCII + CRLF（CP932 の cmd.exe）。CI は pwsh で構文解析 + `-DryRun` 通し。**Stage 2**: iPad 画面の API 配信は **ADR-0064 で実装済**（`/staff/` = `api/static/staff/`。お客さん向け画面は ADR-0059 = `api/static/player/`）。**自動起動は ADR-0065 で実装済**（店舗サーバー `--serve` をタスク `PokerStoreServer` でサインイン時に。録音は対象外）。未着手 = データフォルダ分離 / release zip / PyInstaller + Inno Setup の exe |
 | **cross-app boundary (S5 read)** | ✅ 実装済 | repository interface frozen（ADR-0020）+ `api/client.py:ViewerApiClient`（Python の local↔API 分離点）+ round-trip test。read boundary を二言語で実証（mobile + Python） |
 | **staff 会計 write API (S5 write)** | ✅ 実装済 | `api/server.py` の `/api/staff/...`（ledger 追加 / settlement 確定 / paid-unpaid / 注文確定・却下 + staff read）を **staff shared token**（`Authorization: Bearer <viewer_api.staff_token>`）で公開（ADR-0021）。`LedgerRepository` を RLock で thread-safe 化。単一書き手維持（read-only は 503）。`ViewerApiClient(staff_token=...)` の staff メソッド + `tests/test_viewer_api_staff.py` |
 | **staff iPad app（会計/注文/座席/ハンド, WS4）** | 🟡 一部実装済 (preview) | `staff/`（Expo/RN, player `mobile/` とは別アプリ, ADR-0037）。**会計タブ**（エントリ追加 / buy-in プリセット / ポイント付与 / 中間集計 / 精算確定・paid-unpaid-partial / エントリ一覧 + 取消(reversal)）+ **注文タブ**（pending 確定→order entry / 却下）+ **座席タブ**（現在 seating / 次 hand への seat→player 割当 / その場 player 作成）+ **ハンドタブ**（hand logger 遠隔制御 = 新ハンド/ウィナー/リバイ, ADR-0039）+ **SessionList**（session 作成・close）を staff API（`/api/staff/...`, ADR-0021/0038/0039）上に実装。`StaffRepository`（mock/HTTP）。**ハンドタブにハンド履歴一覧 + ストリート単位リプレイ drill-in + アクション/勝者席の訂正パネル**（ADR-0044 + B4/ADR-0036 の staff アプリ内導線 = `HandCorrectionPanel`, 訂正→hands read 再読込で即反映）。**注文 pending バッジ・ハンド履歴・座席は open 卓で 5 秒 polling 自動更新**（useAsync は再取得中 stale data 保持でちらつかない）。**SessionList に営業日サマリ**（当日全卓の中間集計をクライアント合算 = 締め目安）+ **プレイヤー管理画面**（作成/リネーム/merge = `PlayersScreen`, `StaffRepository.mergePlayers`） + **メニュー管理画面**（価格改定/品切れ/追加削除 = `MenuScreen`, ADR-0046）。座席タブは**「現在の座席をコピー」→ 行単位で外して次 hand へ**（退席の明示反映）。typecheck + 38 mock tests + web export + **Playwright E2E 8 件**（`staff/e2e/`, headless Chromium。browser 取得はネットワーク要）。**残**: 実機タッチの手動 QA、open question = ISSUE-0020 |
@@ -794,7 +802,7 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    お客さんの店外閲覧・LINE / Google ログイン・注文受付と、運営の店舗管理を行う。新しい概念は店舗（store）のみ
    （店舗 PC の JSON と契約 schema は変えず、クラウドが同期受信時に端末トークンから店舗 ID を付ける）。会員は店舗を
    またいで同一人物、手札の公開範囲は設定で切り替え、プレイヤー課金なし。順番は フェーズ 1 店舗内の仕上げ
-   （staff 画面の店舗 PC 配信 = ADR-0064 で実装済 / 自動起動 / リリース版での更新 / `SyncScheduler` の常駐結線）→
+   （staff 画面の店舗 PC 配信 = ADR-0064 で実装済 / 自動起動 = ADR-0065 で実装済（店舗サーバー `--serve`）/ リリース版での更新 / `SyncScheduler` の常駐結線）→
    2 クラウド最小 → 3 ログインと会員 → 4 外販の準備。製品化の作業は推論・音声（`integration/`・`audio/`）に触れない。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。
@@ -1133,6 +1141,7 @@ python main.py --sessions                    # Session / Seating Viewer (WS2-α,
 python main.py --ledger                      # Ledger Viewer/Editor + 注文確定 画面 (S3.2/M5, 別画面)
 python main.py --export-ledger logs/ledger_export  # settlement / cashflow CSV 出力 (S3.3)
 python main.py --viewer-api                  # player 向け読み取り専用 viewer API (M1, ADR-0017)
+python main.py --serve                       # 店舗サーバー（画面なし）: 会計の書き手の API + お客さん / スタッフ画面 + 卓モニタ (ADR-0065。自動起動は server_autostart.cmd)
 python main.py --viewer-api --host 0.0.0.0 --port 8788   # 店の Wi-Fi のスマホから http://<PCのIP>:8788/ (画面 + API, ADR-0059)
 python scripts/build_player_web.py            # mobile/ を変えたらお客さん向け画面を作り直す (api/static/player/, 要 Node, ADR-0059)
 python scripts/build_staff_web.py             # staff/ を変えたらスタッフ用画面を作り直す (api/static/staff/ = http://<PCのIP>:8788/staff/, 要 Node, ADR-0064)

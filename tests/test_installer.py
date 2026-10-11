@@ -28,6 +28,7 @@ CMD_FILES = [
     "install.cmd", "update.cmd", "uninstall.cmd",
     "start_logger.cmd", "start_monitor.cmd", "start_viewer.cmd", "start_ledger.cmd", "rfid_check.cmd",
     "start_truth.cmd", "pack_logs.cmd", "pack_logs_audio.cmd", "start_script.cmd", "start_cards.cmd",
+    "server_autostart.cmd", "start_server.cmd",
 ]
 PS1_FILES = ["installer/install.ps1", "installer/bootstrap.ps1"]
 

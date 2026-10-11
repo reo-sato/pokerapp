@@ -59,7 +59,7 @@
 |---|------|--------|------|------|
 | C1 | hand logger 操作 + 会計/注文/registry/session 閲覧 | — | ✅ | 既存 5 画面（iPad と並存, ADR-0037） |
 | C2 | 録音系の死活表示（マイクレベル / RFID 接続数） | ○ | ✅ | dashboard ヘッダー。`AudioThread.health` / `RFIDThread.health`（Phase H の切り分けに使用） |
-| C3 | プロセス監視・自動再起動（systemd/runbook） | ◎(運用) | 🟡 | コードでなく運用手順（launch review B10）。dogfood 開始前に必要 |
+| C3 | プロセス監視・自動再起動（systemd/runbook） | ◎(運用) | 🟡 | 店舗サーバー（`--serve`: API・画面・注文・卓モニタ）はサインイン時（店舗 PC は通電 → 自動サインイン）に自動起動 + 止まれば 5 分以内に起動し直す = ADR-0065（2026-10-11, 店舗 PC 未確認）。録音（ハンドロガー）は対話式のため手動のまま |
 | C4 | バックアップのリストア導線 | △ | 🟡 | バックアップ自体は B2 で自動化済。リストアは手動手順 |
 | C5 | config 編集 UI | △ | ❌ | 維持最小方針のため docs（usage.md）で代替 |
 

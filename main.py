@@ -1267,6 +1267,17 @@ def run_ledger_view() -> None:
         print("customtkinter が見つかりません。pip install customtkinter でインストールしてください。")
         sys.exit(1)
 
+    from core.store_lock import StoreWriterLock, describe_holder
+
+    # 会計を書くのは 1 プロセスだけ（ADR-0065）。店舗サーバー（--serve, 自動起動）が動いていれば
+    # 会計はスタッフ用画面（iPad の /staff/）で操作する。
+    writer_lock = StoreWriterLock()
+    if not writer_lock.acquire("ledger"):
+        print(f"会計を書くプロセスが既に動いています: {describe_holder(writer_lock.holder())}。\n"
+              "店舗サーバーが動いているときは、会計・注文の操作は iPad のスタッフ用画面"
+              "（http://<この PC の IP>:8788/staff/）で行ってください。")
+        sys.exit(1)
+
     cfg = load_config()
     players = PlayerRepository()
     sessions = SessionRepository(player_repo=players)
@@ -1281,25 +1292,18 @@ def run_ledger_view() -> None:
     if api_cfg.get("enabled", False):
         try:
             import uvicorn
-            from api.server import (
-                PLAYER_WEB_DIR, STAFF_WEB_DIR, STAFF_WEB_PATH, auth_kwargs_from_config, create_app,
-            )
+            from api.server import STAFF_WEB_DIR, STAFF_WEB_PATH
+            from api.store_server import create_store_app
         except ImportError:
             print("viewer_api.enabled=true ですが fastapi/uvicorn が未導入のため "
                   "API なしで起動します（pip install \".[api]\"）。")
         else:
             bind_host = api_cfg.get("bind_host", "127.0.0.1")
             bind_port = api_cfg.get("bind_port", 8788)
-            app = create_app(
-                players, sessions,
-                cfg.get("session", {}).get("log_dir", "./logs"),
+            # 店舗サーバー（--serve）と同じ API・同じ画面（お客さん /・スタッフ /staff/, ADR-0059/0064/0065）
+            app = create_store_app(
+                cfg, player_repo=players, session_repo=sessions,
                 ledger_repo=ledger, order_repo=order_repo, menu=menu,
-                orders_writable=True,
-                staff_token=api_cfg.get("staff_token") or None,
-                buyin_presets=buyin_presets,
-                player_web_dir=PLAYER_WEB_DIR,  # お客さん向け画面も同じポートで（ADR-0059）
-                staff_web_dir=STAFF_WEB_DIR,    # スタッフ用 iPad 画面は /staff/（ADR-0064）
-                **auth_kwargs_from_config(api_cfg),  # L1 PIN, ADR-0027
             )
             api_server = uvicorn.Server(uvicorn.Config(
                 app, host=bind_host, port=bind_port, log_level="warning"))
@@ -1320,6 +1324,19 @@ def run_ledger_view() -> None:
     if api_server is not None:
         api_server.should_exit = True
         api_thread.join(timeout=3)
+    writer_lock.release()
+
+
+def run_store_server(host: str | None = None, port: int | None = None) -> None:
+    """店舗サーバー（画面なし, ADR-0065）: 会計の書き手の API + 卓モニタ。サインイン時に自動で動かす。"""
+    from core.config import load_config
+
+    try:
+        from api.store_server import run_store_server as _run
+    except ImportError:
+        print("fastapi/uvicorn が見つかりません。pip install \".[api]\" でインストールしてください。")
+        sys.exit(1)
+    sys.exit(_run(load_config(), host=host, port=port))
 
 
 def run_viewer_api(host: str | None = None, port: int | None = None) -> None:
@@ -1499,13 +1516,21 @@ def main() -> None:
     )
     parser.add_argument(
         "--host",
-        help="--viewer-api の待ち受けアドレス（config の viewer_api.bind_host より優先。"
-             "店舗の LAN に出すなら 0.0.0.0, ADR-0059）",
+        help="--viewer-api / --serve の待ち受けアドレス（config の viewer_api.bind_host / "
+             "store_server.bind_host より優先。店舗の LAN に出すなら 0.0.0.0, ADR-0059）",
     )
     parser.add_argument(
         "--port",
         type=int,
-        help="--viewer-api の待ち受けポート（config の viewer_api.bind_port より優先）",
+        help="--viewer-api / --serve の待ち受けポート（config の viewer_api.bind_port / "
+             "store_server.bind_port より優先）",
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="店舗サーバー（画面なし, ADR-0065）: 会計の書き手の API（お客さん向け画面 / スタッフ用画面 /staff/ / "
+             "注文）+ 卓モニタ。サインイン時に installer/store_server_task.ps1 で自動起動する。"
+             "--host / --port は config の store_server より優先。ログは logs/store_server.log",
     )
     parser.add_argument(
         "--log-file",
@@ -1551,6 +1576,10 @@ def main() -> None:
     if args.export_ledger:
         export_ledger(args.export_ledger)
         sys.exit(0)
+
+    if args.serve:
+        run_store_server(host=args.host, port=args.port)
+        return
 
     if args.viewer_api:
         run_viewer_api(host=args.host, port=args.port)

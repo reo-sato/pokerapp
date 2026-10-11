@@ -260,29 +260,56 @@ cd C:\PokerHandLogger
 画面は `mobile/`（Expo）の web 版で、ビルドを `api/static/player/` に同梱しています（店舗 PC に Node は
 不要）。`mobile/` を変えたら `python scripts/build_player_web.py` で作り直してコミットします。
 
+## 店舗サーバー（サインイン時に自動で動かす）
+
+**店舗サーバー**は、お客さんのスマホの画面・スタッフの iPad の画面・注文の受付・卓モニタを、画面を持たずに
+動かします（`python main.py --serve`, ADR-0065）。一度登録すると、**店舗 PC がサインインしたときに自動で動き**
+（店舗 PC は通電で起動して自動サインインします）、止まっても 5 分以内に起動し直します。窓は出ません。
+録音（ハンドロガー）は含みません（今までどおり RDP で起動）。**サインアウトすると止まります**（RDP は右上の × で閉じる）。
+
+### 登録する（最初に 1 回）
+
+1. デスクトップの「**店舗サーバー 自動起動の登録**」（`server_autostart.cmd`）をダブルクリックします。
+2. 「動いています」と出れば完了です。表示された IPv4 アドレスを使います。
+3. 止めて登録を消すには、PowerShell で `C:\PokerHandLogger\server_autostart.cmd remove`。
+
+店舗サーバーが動いている間は、次のショートカットは要りません（同じ画面を店舗サーバーが出しているので、起動しても
+断られます）: 「会計 + スマホ注文 API」・「お客さん用 ハンド履歴 (スマホ)」・「卓モニタ (iPad から閲覧)」。
+会計の操作は iPad のスタッフ用画面で行います（会計を書くのは 1 か所だけ）。
+
+うまく動かないときはログ `logs\store_server.log` を見ます。手で起動して確かめるなら `start_server.cmd`
+（この窓を閉じると止まります。自動起動が動いているときは断られます）。
+
 ## スタッフが iPad で会計・注文を操作する
 
 スタッフは iPad（Safari）から、会計・注文の確定・座席・ハンドの操作ができます（スタッフ用画面, ADR-0064）。
-店舗 PC の会計画面と同じ API を使うので、iPad 用に別の PC や設定は要りません。
+iPad 用に別の PC は要りません。
 
 ### 準備（最初に 1 回）
 
-店舗 PC のインストール先のフォルダで次の 3 行を実行します。`<トークン>` はスタッフだけが知る合言葉に
-置き換えます（英字を含めてください。数字だけだと数値として保存されます）。
+スタッフだけが知る合言葉（トークン）を決めて、店舗 PC のインストール先のフォルダで次を実行します
+（`<トークン>` を置き換える。英字を含めてください。数字だけだと数値として保存されます）。
 
 ```
 cd C:\PokerHandLogger
+.\venv\Scripts\python.exe tools\set_config.py viewer_api.staff_token <トークン>
+```
+
+店舗サーバー（上）を使わず会計画面から出す場合は、さらに次の 2 行も実行します。
+
+```
 .\venv\Scripts\python.exe tools\set_config.py viewer_api.enabled true
 .\venv\Scripts\python.exe tools\set_config.py viewer_api.bind_host 0.0.0.0
-.\venv\Scripts\python.exe tools\set_config.py viewer_api.staff_token <トークン>
 ```
 
 ### 使う
 
-1. 店舗 PC でデスクトップの「**会計 + スマホ注文 API**」（`start_ledger.cmd`）を起動します。
+1. 店舗サーバーが動いていること（上）。使っていなければ、店舗 PC で「**会計 + スマホ注文 API**」
+   （`start_ledger.cmd`）を起動します。
 2. iPad の Safari で **`http://<PC の IPv4>:8788/staff/`** を開き、トークンを入れてログインします。
    共有ボタンの「ホーム画面に追加」でアプリのように開けます。
-3. 会計画面を閉じると、iPad からの操作もできなくなります（画面は開けても書き込みは 503 になります）。
+3. 会計画面から出している場合、会計画面を閉じると iPad からの操作もできなくなります（画面は開けても
+   書き込みは 503 になります）。
 
 画面は `staff/`（Expo）の web 版で、ビルドを `api/static/staff/` に同梱しています（店舗 PC に Node は
 不要）。`staff/` を変えたら `python scripts/build_staff_web.py` で作り直してコミットします。

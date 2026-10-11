@@ -29,3 +29,6 @@ venv/
 install.log
 installer/branch.txt
 models/
+
+# 会計の書き手のロック（ADR-0065）
+store_writer.lock

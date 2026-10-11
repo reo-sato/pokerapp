@@ -140,6 +140,15 @@
     "sync_auto_interval_sec": 0,
     "_sync_auto_interval_comment": "ADR-0032: 双方向 sync の定期 auto-trigger 間隔（秒）。0=無効（既定=on-demand pull のまま）。>0 で SyncScheduler が peer と定期同期（会場主導, ADR-0029）。"
   },
+  "store_server": {
+    "bind_host": "0.0.0.0",
+    "bind_port": null,
+    "table_monitor": true,
+    "table_monitor_port": 8790,
+    "ground_truth_ui": false,
+    "ground_truth_port": 8791,
+    "_comment": "ADR-0065: 店舗サーバー（python main.py --serve。サインイン時に installer/store_server_task.ps1 で自動起動）。会計の書き手の API（お客さん向け画面 / スタッフ用画面 /staff/ / 注文）と卓モニタを 1 プロセスで動かす。bind_port が null なら viewer_api.bind_port（8788）。staff_token・player_auth などは viewer_api の値を使う。会計を書くのは 1 プロセスだけなので、店舗サーバーが動いている間は会計画面（--ledger）は起動しない（会計は iPad の /staff/ で）。受け付けは Windows のファイアウォールで店内の LAN に限る（docs/installation.md）。"
+  },
   "backup": {
     "on_startup": true,
     "dir": "./backups",

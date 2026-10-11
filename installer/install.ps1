@@ -83,6 +83,7 @@ $Shortcuts = @(
     @{ Name = "ログをまとめる (送付用)";     Target = "pack_logs.cmd" },
     @{ Name = "ログをまとめる (音声付き・送付用)"; Target = "pack_logs_audio.cmd" },
     @{ Name = "会計 + スマホ注文 API";      Target = "start_ledger.cmd" },
+    @{ Name = "店舗サーバー 自動起動の登録"; Target = "server_autostart.cmd" },
     @{ Name = "RFID リーダー チェック";     Target = "rfid_check.cmd" }
 )
 
@@ -374,8 +375,49 @@ function Remove-RelayTask {
     }
 }
 
+$StoreServerTask = "PokerStoreServer"
+
+function Test-StoreServerTask {
+    if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return $false }
+    return [bool](Get-ScheduledTask -TaskName $StoreServerTask -ErrorAction SilentlyContinue)
+}
+
+function Stop-StoreServer {
+    # 店舗サーバー（installer\store_server_task.ps1, ADR-0065）が venv の python を使っている間は、依存の入れ替えが
+    # 失敗し得る（読み込み中のファイル）。更新の前に止め、終わったら Start-StoreServer で新しい版を起動する。
+    if (-not (Test-StoreServerTask)) { return }
+    Write-Log "店舗サーバーのタスク $StoreServerTask を止めます（更新のあとで起動し直します）"
+    if ($DryRun) { return }
+    try { Stop-ScheduledTask -TaskName $StoreServerTask -ErrorAction Stop; Start-Sleep -Seconds 2 }
+    catch { Write-Log "店舗サーバーを止められませんでした（続けます）: $($_.Exception.Message)" "WARN" }
+}
+
+function Start-StoreServer {
+    if (-not (Test-StoreServerTask)) { return }
+    Write-Log "店舗サーバーのタスク $StoreServerTask を起動します（新しい版）"
+    if ($DryRun) { return }
+    try { Start-ScheduledTask -TaskName $StoreServerTask -ErrorAction Stop }
+    catch {
+        Write-Log ("店舗サーバーを起動できませんでした。5 分以内に自動で起動します。すぐに起動するには " +
+            "「店舗サーバー 自動起動の登録」（server_autostart.cmd）をもう一度実行してください。") "WARN"
+    }
+}
+
+function Remove-StoreServerTask {
+    if (-not (Test-StoreServerTask)) { return }
+    Write-Log "削除: 店舗サーバーのタスク $StoreServerTask"
+    if ($DryRun) { return }
+    try {
+        Stop-ScheduledTask -TaskName $StoreServerTask -ErrorAction Stop
+        Unregister-ScheduledTask -TaskName $StoreServerTask -Confirm:$false -ErrorAction Stop
+    } catch {
+        throw ("店舗サーバーのタスクを消せません。先に server_autostart.cmd remove を実行してください。")
+    }
+}
+
 function Invoke-Uninstall {
     Remove-Shortcuts
+    Remove-StoreServerTask
     Remove-RelayTask
     if (Test-Path $VenvDir) {
         Write-Log "削除: $VenvDir"
@@ -425,6 +467,7 @@ try {
     Write-Log "Python: $py"
 
     Write-Log "venv と依存パッケージ" "STEP"
+    Stop-StoreServer
     Initialize-Venv $py
     Install-Dependencies
 
@@ -440,6 +483,7 @@ try {
 
     Write-Log "動作確認" "STEP"
     Test-Installation
+    Start-StoreServer
 
     Write-Log "完了" "STEP"
     Write-Log "デスクトップのショートカットから起動できます。"
