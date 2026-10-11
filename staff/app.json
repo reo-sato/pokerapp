@@ -11,6 +11,10 @@
     "android": {
       "predictiveBackGestureEnabled": false
     },
-    "web": {}
+    "web": {
+      "name": "店舗スタッフ",
+      "lang": "ja",
+      "themeColor": "#101418"
+    }
   }
 }

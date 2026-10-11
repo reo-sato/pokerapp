@@ -1281,7 +1281,9 @@ def run_ledger_view() -> None:
     if api_cfg.get("enabled", False):
         try:
             import uvicorn
-            from api.server import PLAYER_WEB_DIR, auth_kwargs_from_config, create_app
+            from api.server import (
+                PLAYER_WEB_DIR, STAFF_WEB_DIR, STAFF_WEB_PATH, auth_kwargs_from_config, create_app,
+            )
         except ImportError:
             print("viewer_api.enabled=true ですが fastapi/uvicorn が未導入のため "
                   "API なしで起動します（pip install \".[api]\"）。")
@@ -1296,6 +1298,7 @@ def run_ledger_view() -> None:
                 staff_token=api_cfg.get("staff_token") or None,
                 buyin_presets=buyin_presets,
                 player_web_dir=PLAYER_WEB_DIR,  # お客さん向け画面も同じポートで（ADR-0059）
+                staff_web_dir=STAFF_WEB_DIR,    # スタッフ用 iPad 画面は /staff/（ADR-0064）
                 **auth_kwargs_from_config(api_cfg),  # L1 PIN, ADR-0027
             )
             api_server = uvicorn.Server(uvicorn.Config(
@@ -1305,6 +1308,8 @@ def run_ledger_view() -> None:
             api_thread.start()
             print(f"viewer API を組み込み起動しました: http://{bind_host}:{bind_port} "
                   "（注文リクエスト受付 有効）")
+            if (STAFF_WEB_DIR / "index.html").is_file():
+                print(f"スタッフ用画面（iPad）: http://<この PC の IP>:{bind_port}{STAFF_WEB_PATH}/")
 
     win = LedgerViewWindow(
         ledger_repo=ledger, session_repo=sessions, player_repo=players,

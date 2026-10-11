@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+### Added (スタッフ用 iPad 画面を店舗 PC から配信, 2026-10-11)
+
+製品化のフェーズ 1 の最初の作業（ADR-0064、作業ログ `docs/worklog/2026-10-11-staff-web-serving.md`）。
+
+- 店舗 PC の API（会計画面 `--ledger` / `--viewer-api`）が、スタッフ用画面を **`http://<PC の IP>:8788/staff/`** で
+  配信する。iPad は Safari で開いてスタッフトークンでログインするだけ（Node・別の PC は不要）。
+- ビルドは `api/static/staff/` に同梱（`python scripts/build_staff_web.py`）。トークンは画面に埋め込まない。
+  `staff/` を変えて作り直し忘れると CI（`tests/test_staff_web.py`）が落とす。
+- ログイン画面の「demo-staff-token でログインできます」の案内は、模擬データで動いているときだけ出す。
+- 準備と使い方は `docs/usage.md`「スタッフが iPad で会計・注文を操作する」。
+
 ### Added (製品化の方針, 2026-10-11)
 
 他店へ販売するためのアプリ化・サーバー側の整備の方針を決めた（ADR-0063、作業ログ

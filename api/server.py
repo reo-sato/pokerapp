@@ -18,7 +18,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -100,10 +100,13 @@ logger = logging.getLogger(__name__)
 
 # お客さん向け画面（mobile/ の web 版）のビルド。`scripts/build_player_web.py` が作る（ADR-0059）。
 PLAYER_WEB_DIR = Path(__file__).parent / "static" / "player"
+# スタッフ用 iPad 画面（staff/ の web 版）のビルド。`scripts/build_staff_web.py` が作る（ADR-0064）。
+STAFF_WEB_DIR = Path(__file__).parent / "static" / "staff"
+STAFF_WEB_PATH = "/staff"
 
 
 class _PlayerWebFiles(StaticFiles):
-    """お客さん向け画面の静的配信。入口（index.html 等）は毎回確かめさせる。
+    """画面（お客さん向け `/`・スタッフ用 `/staff/`）の静的配信。入口（index.html 等）は毎回確かめさせる。
 
     更新で JS のファイル名（hash 入り）が変わるので、古い index.html がスマホに残ると消えた JS を
     読みに行って画面が真っ白になる。hash 入りの `_expo/` 配下はそのまま（変わらない）。
@@ -353,6 +356,7 @@ def create_app(
     correction_repo: HandCorrectionRepository | None = None,
     ground_truth_repo: GroundTruthRepository | None = None,
     player_web_dir: str | Path | None = None,
+    staff_web_dir: str | Path | None = None,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -374,6 +378,9 @@ def create_app(
     `/api/` のまま。スマホは「PC の IP:ポート」を開くだけでよい（画面と API が同じ origin）。
     `sessions.json` / `players.json` は hand logger が別プロセスで書くので、`/api/` の要求ごとに
     変わっていれば読み直す。
+
+    staff_web_dir（ADR-0064）: スタッフ用 iPad 画面（staff/ の web 版）を `/staff/` で配信する。
+    スタッフトークンは画面に埋め込まず、ログイン画面で入力する（`/api/staff/...` の認可は従来どおり）。
     """
     if ledger_repo is None:
         ledger_repo = LedgerRepository(session_repo=session_repo, player_repo=player_repo)
@@ -1230,6 +1237,16 @@ def create_app(
         order_repo.reload()
         return summary
 
+    # スタッフ用画面（ADR-0064）。`/` の mount より先に置く（`/` はそれ以外の全パスを受ける）。
+    # `/staff`（末尾の / なし）は `/staff/` へ送る: 画面の JS は `/staff/_expo/...` を読む。
+    if staff_web_dir is not None and (Path(staff_web_dir) / "index.html").is_file():
+        @app.get(STAFF_WEB_PATH, include_in_schema=False)
+        def staff_web_root() -> RedirectResponse:
+            return RedirectResponse(STAFF_WEB_PATH + "/")
+
+        app.mount(STAFF_WEB_PATH,
+                  _PlayerWebFiles(directory=str(staff_web_dir), html=True), name="staff-web")
+
     # お客さん向け画面（ADR-0059）。API のルートより後に置く（`/` はそれ以外の全パスを受ける）。
     if player_web_dir is not None and (Path(player_web_dir) / "index.html").is_file():
         app.mount("/", _PlayerWebFiles(directory=str(player_web_dir), html=True), name="player-web")
@@ -1257,6 +1274,14 @@ def auth_kwargs_from_config(api_cfg: dict) -> dict:
     }
 
 
+def log_web_addresses(port: int) -> None:
+    """配信する画面の開き方をログに出す（店舗 PC の端末・ログで確かめられるように）。"""
+    if (PLAYER_WEB_DIR / "index.html").is_file():
+        logger.info("お客さん向け画面: http://<この PC の IP>:%s/", port)
+    if (STAFF_WEB_DIR / "index.html").is_file():
+        logger.info("スタッフ用画面（iPad）: http://<この PC の IP>:%s%s/", port, STAFF_WEB_PATH)
+
+
 def run_server(cfg: dict, host: str | None = None, port: int | None = None) -> None:
     """config に従って viewer API を foreground で起動する（main.py --viewer-api）。
 
@@ -1279,9 +1304,9 @@ def run_server(cfg: dict, host: str | None = None, port: int | None = None) -> N
     app = create_app(player_repo, session_repo, log_dir, ledger_repo=ledger_repo,
                      staff_token=api_cfg.get("staff_token") or None,
                      player_web_dir=PLAYER_WEB_DIR,
+                     staff_web_dir=STAFF_WEB_DIR,
                      **auth_kwargs_from_config(api_cfg))
 
     logger.info("Starting viewer API on %s:%s (log_dir=%s)", bind_host, bind_port, log_dir)
-    if (PLAYER_WEB_DIR / "index.html").is_file():
-        logger.info("お客さん向け画面: http://<この PC の IP>:%s/", bind_port)
+    log_web_addresses(bind_port)
     uvicorn.run(app, host=bind_host, port=bind_port)

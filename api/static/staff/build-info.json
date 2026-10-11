@@ -1,0 +1,6 @@
+{
+  "api_url": "/",
+  "base_url": "/staff",
+  "staff_token": false,
+  "source_hash": "sha256:371a88a1d1e47e37bb4d05ad196f086a0e111dae8291999f195b636cd57b03b0"
+}

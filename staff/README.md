@@ -66,11 +66,22 @@ write が 503）:
 python main.py --ledger
 ```
 
-## LAN 配布（web export）
+## 店舗での配布（店舗 PC が `/staff/` で配信, ADR-0064）
+
+店舗 PC の API（`python main.py --ledger`）が、リポジトリに含めたビルド（`api/static/staff/`）を
+`http://<PC の IP>:8788/staff/` で配信する。iPad は Safari で開いてスタッフトークンでログインするだけ
+（Node・別サーバー不要）。`staff/` を変えたらリポジトリの直下で作り直してコミットする:
 
 ```bash
-EXPO_PUBLIC_API_URL=http://<運営PCのLAN IP>:8788 npm run export:web   # dist/ に静的ビルド
-# dist/ を任意の静的サーバーで LAN 配信（例: python -m http.server -d dist 8080）
+python scripts/build_staff_web.py          # api/static/staff/ を作り直す（要 staff/node_modules）
+python scripts/build_staff_web.py --check  # ソースとビルドが揃っているか（CI は tests/test_staff_web.py）
+```
+
+ビルドは API の URL を `/`（画面と同じ origin）、置き場所を `/staff`（`app.config.js` の
+`STAFF_WEB_BASE_URL`）にし、トークンは埋め込まない。開発用の別配信が要るときは従来どおり:
+
+```bash
+EXPO_PUBLIC_API_URL=http://<運営PCのLAN IP>:8788 npm run export:web   # dist/ に静的ビルド（/ で配信）
 ```
 
 **無認証ではなく staff token 認可だが、LAN 限定前提**（ADR-0021）。信頼できる店内ネットワークでのみ

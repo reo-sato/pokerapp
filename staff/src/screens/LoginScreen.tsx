@@ -12,6 +12,8 @@ import { Button, colors, Field, styles } from "./common";
 export function LoginScreen(props: {
   repository: StaffRepository;
   onAuthed: () => void;
+  /** 模擬データ（mock repository）で動いているときだけ demo トークンの案内を出す。 */
+  showDemoHint?: boolean;
 }): React.JSX.Element {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
@@ -65,9 +67,11 @@ export function LoginScreen(props: {
         />
         {error ? <Text style={[styles.status, { color: colors.neg }]}>{error}</Text> : null}
       </View>
-      <Text style={[styles.cardMeta, { marginTop: 8 }]}>
-        mock モード（EXPO_PUBLIC_API_URL 未設定）では「demo-staff-token」でログインできます。
-      </Text>
+      {props.showDemoHint ? (
+        <Text style={[styles.cardMeta, { marginTop: 8 }]}>
+          mock モード（EXPO_PUBLIC_API_URL 未設定）では「demo-staff-token」でログインできます。
+        </Text>
+      ) : null}
     </View>
   );
 }

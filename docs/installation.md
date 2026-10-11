@@ -23,7 +23,7 @@ Python が入っていない Windows 10/11 の PC を前提にしています。
 | お客さん用 ハンド履歴 (スマホ) | `main.py --viewer-api --host 0.0.0.0 --port 8788`（お客さんが `http://<PC の IPv4>:8788/` を開く） |
 | 真のアクション入力 (iPad から) | `tools\ground_truth_ui.py --host 0.0.0.0 --port 8791`（ハンドごとに実際のアクション列を入れる = `docs/usage.md`） |
 | ログをまとめる (送付用) | `tools\pack_logs.py`（直近 12 時間のテストのログをデスクトップの zip 1 つに = レビューに送る） |
-| 会計 + スマホ注文 API | `main.py --ledger --log-file`（API は `config.json` の `viewer_api.enabled=true` で有効） |
+| 会計 + スマホ注文 API | `main.py --ledger --log-file`（API は `config.json` の `viewer_api.enabled=true` で有効。スタッフの iPad は `http://<PC の IPv4>:8788/staff/` = `docs/usage.md`） |
 | RFID リーダー チェック | `tools\probe_pcsc.py list` → `check` |
 
 PowerShell を開ける人は、展開の手間なく **1 行**でも入ります（既に入っていれば更新になります）:

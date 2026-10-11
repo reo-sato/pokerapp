@@ -260,6 +260,33 @@ cd C:\PokerHandLogger
 画面は `mobile/`（Expo）の web 版で、ビルドを `api/static/player/` に同梱しています（店舗 PC に Node は
 不要）。`mobile/` を変えたら `python scripts/build_player_web.py` で作り直してコミットします。
 
+## スタッフが iPad で会計・注文を操作する
+
+スタッフは iPad（Safari）から、会計・注文の確定・座席・ハンドの操作ができます（スタッフ用画面, ADR-0064）。
+店舗 PC の会計画面と同じ API を使うので、iPad 用に別の PC や設定は要りません。
+
+### 準備（最初に 1 回）
+
+店舗 PC のインストール先のフォルダで次の 3 行を実行します。`<トークン>` はスタッフだけが知る合言葉に
+置き換えます（英字を含めてください。数字だけだと数値として保存されます）。
+
+```
+cd C:\PokerHandLogger
+.\venv\Scripts\python.exe tools\set_config.py viewer_api.enabled true
+.\venv\Scripts\python.exe tools\set_config.py viewer_api.bind_host 0.0.0.0
+.\venv\Scripts\python.exe tools\set_config.py viewer_api.staff_token <トークン>
+```
+
+### 使う
+
+1. 店舗 PC でデスクトップの「**会計 + スマホ注文 API**」（`start_ledger.cmd`）を起動します。
+2. iPad の Safari で **`http://<PC の IPv4>:8788/staff/`** を開き、トークンを入れてログインします。
+   共有ボタンの「ホーム画面に追加」でアプリのように開けます。
+3. 会計画面を閉じると、iPad からの操作もできなくなります（画面は開けても書き込みは 503 になります）。
+
+画面は `staff/`（Expo）の web 版で、ビルドを `api/static/staff/` に同梱しています（店舗 PC に Node は
+不要）。`staff/` を変えたら `python scripts/build_staff_web.py` で作り直してコミットします。
+
 ## ドリンク注文（任意）
 
 注文受付を有効にするには、`config.json` で `viewer_api.enabled` を `true` にして
