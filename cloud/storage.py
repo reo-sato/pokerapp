@@ -45,6 +45,11 @@ class Storage(Protocol):
                      player_id: Optional[str] = None) -> list[dict]: ...
     def max_seq(self, store_id: str) -> Optional[int]: ...
     def counts(self, store_id: str) -> dict[str, int]: ...
+    def create_link(self, store_id: str, player_id: str, token_hash: str) -> dict: ...
+    def find_link(self, token_hash: str) -> Optional[dict]: ...
+    def get_link(self, link_id: str) -> Optional[dict]: ...
+    def touch_link(self, link_id: str) -> None: ...
+    def revoke_links(self, store_id: str, player_id: str) -> int: ...
 
 
 def decide(kind: str, existing: Optional[dict], existing_seq: Optional[int], incoming: dict,
@@ -68,6 +73,7 @@ class MemoryStorage:
         self._stores: dict[str, dict] = {}
         self._devices: dict[str, dict] = {}
         self._records: dict[tuple[str, str, str], tuple[dict, int]] = {}
+        self._links: dict[str, dict] = {}
 
     def migrate(self) -> None:
         return None
@@ -77,7 +83,8 @@ class MemoryStorage:
 
     def create_store(self, name: str) -> dict:
         with self._lock:
-            store = {"store_id": uuid.uuid4().hex, "name": name, "status": "active", "created_at": now_iso()}
+            store = {"store_id": uuid.uuid4().hex, "name": name, "status": "active", "created_at": now_iso(),
+                     "last_seq": None}
             self._stores[store["store_id"]] = store
             return dict(store)
 
@@ -133,6 +140,9 @@ class MemoryStorage:
                 if new_body is not None:
                     self._records[(store_id, kind, key)] = (copy.deepcopy(new_body), seq)
                 outcomes.append(outcome)
+            store = self._stores[store_id]
+            if any(o in (ADDED, CHANGED) for o in outcomes):
+                store["last_seq"] = max(store["last_seq"] or 0, seq)
             return outcomes
 
     def get_record(self, store_id: str, kind: str, key: str) -> Optional[dict]:
@@ -167,3 +177,41 @@ class MemoryStorage:
                 if sid == store_id:
                     out[kind] = out.get(kind, 0) + 1
             return out
+
+    # ――― 閲覧リンク（ADR-0067 D5）―――
+
+    def create_link(self, store_id: str, player_id: str, token_hash: str) -> dict:
+        with self._lock:
+            if store_id not in self._stores:
+                raise StoreNotFound(store_id)
+            self.revoke_links(store_id, player_id)          # 1 人 1 本
+            link = {"link_id": uuid.uuid4().hex, "store_id": store_id, "player_id": player_id,
+                    "token_hash": token_hash, "created_at": now_iso(), "last_used_at": None, "revoked_at": None}
+            self._links[link["link_id"]] = link
+            return {k: v for k, v in link.items() if k != "token_hash"}
+
+    def find_link(self, token_hash: str) -> Optional[dict]:
+        with self._lock:
+            for link in self._links.values():
+                if link["token_hash"] == token_hash:
+                    return {k: v for k, v in link.items() if k != "token_hash"}
+            return None
+
+    def get_link(self, link_id: str) -> Optional[dict]:
+        with self._lock:
+            link = self._links.get(link_id)
+            return {k: v for k, v in link.items() if k != "token_hash"} if link else None
+
+    def touch_link(self, link_id: str) -> None:
+        with self._lock:
+            if link_id in self._links:
+                self._links[link_id]["last_used_at"] = now_iso()
+
+    def revoke_links(self, store_id: str, player_id: str) -> int:
+        with self._lock:
+            n = 0
+            for link in self._links.values():
+                if link["store_id"] == store_id and link["player_id"] == player_id and link["revoked_at"] is None:
+                    link["revoked_at"] = now_iso()
+                    n += 1
+            return n

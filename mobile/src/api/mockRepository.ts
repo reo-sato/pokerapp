@@ -81,6 +81,21 @@ export class MockRepository implements ViewerRepository {
     return session;
   }
 
+  /** mock の閲覧リンク: `pkl_` で始まれば最初の player として入る（それ以外は invalid_link）。 */
+  async linkLogin(link: string): Promise<AuthSession> {
+    if (!link.startsWith("pkl_")) {
+      throw new ViewerApiError({ code: "invalid_link", message: "このリンクは使えません。" });
+    }
+    const player = fx.players[0];
+    this.principal = player.player_id;
+    const session = {
+      token: `mock-link-${player.player_id}`, player_id: player.player_id, expires_at: 0,
+      display_name: player.display_name, store_name: "テスト店",
+    };
+    saveStoredAuth(session);
+    return session;
+  }
+
   async oidcExchange(provider: string, code: string): Promise<AuthSession> {
     if (code !== MOCK_OIDC_CODE) {
       throw new ViewerApiError({ code: "invalid_idp_code", message: "認可コードが無効です。" });

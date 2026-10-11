@@ -28,9 +28,15 @@ export class HttpRepository implements ViewerRepository {
   // staff token (ADR-0021)。staff write（ハンド訂正等, B4/ADR-0036）に Bearer で付与する。
   private staffToken: string | null;
 
-  constructor(baseUrl: string, staffToken: string | null = null) {
+  // クラウド（ADR-0067 D5）では読み取りにもログインのトークンが要る。店舗 PC では付けない（名前選び）。
+  private readonly authReads: boolean;
+
+  constructor(
+    baseUrl: string, staffToken: string | null = null, options: { authReads?: boolean } = {},
+  ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.staffToken = staffToken;
+    this.authReads = options.authReads ?? false;
     // 保存済みログインを復元する（web 再読込対策。期限切れは loadStoredAuth が破棄）。
     const stored = loadStoredAuth();
     if (stored) {
@@ -44,9 +50,16 @@ export class HttpRepository implements ViewerRepository {
   }
 
   private async get<T>(path: string): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`);
+    const headers: Record<string, string> = {};
+    if (this.authReads && this.playerToken) {
+      headers.Authorization = `Bearer ${this.playerToken}`;
+    }
+    const res = await fetch(`${this.baseUrl}${path}`, { headers });
     const body = await res.json();
     if (!res.ok) {
+      if (this.authReads && res.status === 401) {
+        this.clearAuth(); // 取り消された・期限切れ → 入り直してもらう
+      }
       throw new ViewerApiError({
         code: body?.code ?? "unknown_error",
         message: body?.message ?? `HTTP ${res.status}`,
@@ -106,6 +119,14 @@ export class HttpRepository implements ViewerRepository {
     const session = await this.post<AuthSession>(
       `/api/auth/${encodeURIComponent(provider)}/exchange`, { code }, false,
     );
+    this.playerToken = session.token;
+    this.principal = session.player_id;
+    saveStoredAuth(session);
+    return session;
+  }
+
+  async linkLogin(link: string): Promise<AuthSession> {
+    const session = await this.post<AuthSession>("/api/cloud/v1/auth/link", { link }, false);
     this.playerToken = session.token;
     this.principal = session.player_id;
     saveStoredAuth(session);

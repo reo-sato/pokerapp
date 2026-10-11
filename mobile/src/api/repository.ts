@@ -35,6 +35,11 @@ export interface ViewerRepository {
    * 変更は current_pin が必要（player_auth=off は player_auth_disabled で reject）。
    */
   setPin(playerId: string, pin: string, currentPin?: string): Promise<void>;
+  /**
+   * 店でもらった閲覧リンク（URL の `#link=` の後ろ）で入る（クラウド, ADR-0067 D5）。
+   * 使えないリンクは invalid_link で reject。成功すると以後の読み取りにトークンを付ける。
+   */
+  linkLogin(link: string): Promise<AuthSession>;
   /** 現在の principal (ログイン済み player_id) / 未ログインは null。 */
   currentPrincipal(): string | null;
   /** トークンを破棄する (ログアウト / player 切替時)。 */

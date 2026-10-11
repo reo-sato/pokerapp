@@ -341,3 +341,56 @@ def test_sync_state_tolerates_garbage(tmp_path):
     state = SyncState.load(path)
     assert state.acked == {} and state.last_seq == 0
     Path(path).unlink()
+
+
+class TestViewerLinkFromTheStore:
+    """スタッフが iPad（店舗サーバーのスタッフ API）から閲覧リンク（QR）を出す（ADR-0067 2c）。"""
+
+    def _store_app(self, shop, links):
+        from api import store_server
+        from core.menu import MenuMaster
+        from core.order_request_repository import OrderRequestRepository
+
+        players = PlayerRepository(shop["root"] / "players.json")
+        sessions = SessionRepository(shop["root"] / "sessions.json", player_repo=players)
+        app = store_server.create_store_app(
+            {"session": {"log_dir": str(shop["root"] / "logs")}, "viewer_api": {"staff_token": "staff"}},
+            player_repo=players, session_repo=sessions,
+            ledger_repo=LedgerRepository(shop["root"] / "ledger.json", session_repo=sessions),
+            order_repo=OrderRequestRepository(shop["root"] / "order_requests.json", session_repo=sessions),
+            menu=MenuMaster(shop["root"] / "menu.json"), cloud_links=links)
+        return TestClient(app), players
+
+    def test_issue_login_and_revoke(self, cloud, shop):
+        syncer = _syncer(cloud, shop)                       # まだ何も送っていない → 発行の前に送る
+        store, _ = self._store_app(shop, syncer)
+        staff = {"Authorization": "Bearer staff"}
+        alice = shop["ids"]["alice"]
+        res = store.post(f"/api/staff/players/{alice}/viewer-link", headers=staff)
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["url"].startswith("http") and "#link=pkl_" in body["url"]
+        assert body["qr_image"].startswith("data:image/svg+xml")
+        login = cloud["client"].post("/api/cloud/v1/auth/link", json={"link": body["url"].split("#link=")[1]})
+        assert login.json()["player_id"] == alice
+        res = store.post(f"/api/staff/players/{alice}/viewer-link/revoke", headers=staff)
+        assert res.json() == {"player_id": alice, "revoked": 1}
+        assert store.post(f"/api/staff/players/{alice}/viewer-link").status_code == 401   # スタッフだけ
+
+    def test_merged_players_get_the_survivors_link(self, cloud, shop):
+        store, players = self._store_app(shop, _syncer(cloud, shop))
+        players.merge_players(shop["ids"]["bob"], shop["ids"]["alice"])
+        res = store.post(f"/api/staff/players/{shop['ids']['alice']}/viewer-link",
+                         headers={"Authorization": "Bearer staff"})
+        assert res.json()["player_id"] == shop["ids"]["bob"]
+
+    def test_errors(self, cloud, shop):
+        staff = {"Authorization": "Bearer staff"}
+        store, _ = self._store_app(shop, None)
+        res = store.post(f"/api/staff/players/{shop['ids']['alice']}/viewer-link", headers=staff)
+        assert res.status_code == 409 and res.json()["code"] == "cloud_not_linked"
+        store, _ = self._store_app(shop, _syncer(cloud, shop))
+        assert store.post(f"/api/staff/players/{'f' * 32}/viewer-link", headers=staff).status_code == 404
+        cloud["bridge"].fail_with = TransportError("ConnectError")
+        res = store.post(f"/api/staff/players/{shop['ids']['alice']}/viewer-link", headers=staff)
+        assert res.status_code == 502 and res.json()["code"] == "cloud_unavailable"

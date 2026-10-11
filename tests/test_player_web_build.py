@@ -36,6 +36,24 @@ def test_the_bundle_carries_no_staff_token():
         assert "EXPO_PUBLIC_" not in bundle   # 未展開の環境変数が残っていない
 
 
+def test_the_cloud_build_is_complete_and_for_link_login():
+    """クラウド用（ADR-0067 D5）: 名前選びではなく閲覧リンクで入り、読み取りにトークンを付ける。"""
+    assert bpw.check_build(bpw.CLOUD_OUTPUT_DIR, bpw.CLOUD_BUILD_SETTINGS) == []
+    info = json.loads((bpw.CLOUD_OUTPUT_DIR / bpw.BUILD_INFO_NAME).read_text(encoding="utf-8"))
+    assert info["cloud"] is True and info["staff_token"] is False and info["player_auth"] == "off"
+    index = (bpw.CLOUD_OUTPUT_DIR / "index.html").read_text(encoding="utf-8")
+    for src in bpw.script_sources(index):
+        bundle = (bpw.CLOUD_OUTPUT_DIR / src.lstrip("/")).read_text(encoding="utf-8")
+        assert 'HttpRepository("/",null,' in bundle.replace(" ", "")   # スタッフのトークンは決して載せない
+        assert "/api/cloud/v1/auth/link" in bundle
+        assert "EXPO_PUBLIC_" not in bundle
+
+
+def test_the_cloud_build_env_turns_on_cloud_mode():
+    assert bpw._build_env(bpw.CLOUD_BUILD_SETTINGS)["EXPO_PUBLIC_CLOUD"] == "1"
+    assert "EXPO_PUBLIC_CLOUD" not in bpw._build_env(bpw.BUILD_SETTINGS)
+
+
 def test_the_build_matches_the_mobile_sources():
     problems = bpw.check()
     assert problems == [], (

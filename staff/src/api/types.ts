@@ -21,6 +21,14 @@ export interface Player {
   merged_at?: string;
 }
 
+/** 店外で見るための閲覧リンク（ADR-0067 D5）。url の `#link=` の後ろが本人の鍵（人に渡さない）。 */
+export interface ViewerLink {
+  player_id: string; // merge 済みなら統合先
+  url: string;
+  created_at?: string | null;
+  qr_image?: string | null; // QR コード（画像の data URI）。無ければ URL だけを出す
+}
+
 export interface Blinds {
   sb?: number;
   bb?: number;

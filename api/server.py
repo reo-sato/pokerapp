@@ -15,7 +15,7 @@ import logging
 import secrets
 from importlib import metadata
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -119,6 +119,15 @@ class _PlayerWebFiles(StaticFiles):
         if not path.replace("\\", "/").startswith("_expo/"):   # Windows は区切りが "\"
             response.headers["Cache-Control"] = "no-cache"
         return response
+
+
+def _qr_image(text: str) -> str | None:
+    """QR コード（画像の data URI。SVG）。segno が無ければ None（画面は URL だけを出す）。"""
+    try:
+        import segno
+    except ImportError:
+        return None
+    return segno.make(text, error="m").svg_data_uri(scale=8, border=2, dark="#000", light="#fff")
 
 
 def _app_version() -> str:
@@ -360,6 +369,7 @@ def create_app(
     player_web_dir: str | Path | None = None,
     staff_web_dir: str | Path | None = None,
     cloud_status: Callable[[], dict] | None = None,
+    cloud_links: Any = None,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -747,6 +757,42 @@ def create_app(
             "merged_into": absorbed.merged_into,
             "merged_at": absorbed.merged_at,
         }
+
+    # ――― 店外で見るための閲覧リンク（ADR-0067 D5, 2c。店舗サーバーがクラウドにつながっているときだけ）―――
+
+    def _viewer_link(request: Request, player_id: str, revoke: bool) -> "JSONResponse | dict":
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        if cloud_links is None:
+            return JSONResponse(status_code=409, content={
+                "code": "cloud_not_linked",
+                "message": "この店舗はクラウドにつながっていません（docs/cloud-setup.md の 3）。"})
+        try:
+            canonical = player_repo.resolve_canonical(player_id)
+            player_repo.get(canonical)
+        except PlayerNotFoundError as e:
+            return JSONResponse(status_code=404, content={"code": "not_found", "message": str(e)})
+        from core.cloud_sync import CloudLinkError
+
+        try:
+            if revoke:
+                return {"player_id": canonical, "revoked": cloud_links.revoke_viewer_link(canonical)}
+            link = cloud_links.issue_viewer_link(canonical)
+        except CloudLinkError as e:
+            return JSONResponse(status_code=e.status, content={"code": e.code, "message": e.message})
+        return {"player_id": canonical, "url": link["url"], "created_at": link.get("created_at"),
+                "qr_image": _qr_image(link["url"])}
+
+    @app.post("/api/staff/players/{player_id}/viewer-link", response_model=None)
+    def staff_issue_viewer_link(player_id: str, request: Request) -> "JSONResponse | dict":
+        """その人の閲覧リンク（QR）を発行する。前のリンクは使えなくなる。"""
+        return _viewer_link(request, player_id, revoke=False)
+
+    @app.post("/api/staff/players/{player_id}/viewer-link/revoke", response_model=None)
+    def staff_revoke_viewer_link(player_id: str, request: Request) -> "JSONResponse | dict":
+        """その人の閲覧リンクを取り消す（スマホをなくした・人に見られた）。"""
+        return _viewer_link(request, player_id, revoke=True)
 
     @app.post("/api/staff/sessions/{session_id}/hands/{hand_id}/corrections",
               response_model=None)

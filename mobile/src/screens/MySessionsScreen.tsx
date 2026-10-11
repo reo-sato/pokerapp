@@ -11,9 +11,12 @@ interface Props {
   player: Player;
   onSelect: (session: PlayerSessionSummary) => void;
   onBack: () => void;
+  backLabel?: string; // 既定「player 選択」（クラウドでは「ログアウト」, ADR-0067）
 }
 
-export function MySessionsScreen({ repository, player, onSelect, onBack }: Props): React.JSX.Element {
+export function MySessionsScreen({
+  repository, player, onSelect, onBack, backLabel,
+}: Props): React.JSX.Element {
   const { data, loading, errorCode, errorMessage, reload } = useAsync(
     () => repository.listPlayerSessions(player.player_id),
     [repository, player.player_id],
@@ -22,7 +25,7 @@ export function MySessionsScreen({ repository, player, onSelect, onBack }: Props
   return (
     <View style={styles.screen}>
       <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-        <BackLink onPress={onBack} label="player 選択" />
+        <BackLink onPress={onBack} label={backLabel ?? "player 選択"} />
         <ReloadLink onPress={reload} />
       </View>
       <Text style={styles.title}>{player.display_name} のセッション</Text>

@@ -194,6 +194,8 @@ export interface AuthSession {
   token: string;
   player_id: string; // merge 済みなら survivor の player_id (canonical, ADR-0030)
   expires_at: number; // unix 秒
+  display_name?: string | null; // 閲覧リンクでのログイン（クラウド, ADR-0067 D5）のとき
+  store_name?: string | null;
 }
 
 export class ViewerApiError extends Error {

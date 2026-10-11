@@ -5,6 +5,8 @@
 - `CLOUD_DB_SCHEMA`    テーブルを置くスキーマ（既定 pokerapp）
 - `CLOUD_ADMIN_TOKEN`  管理トークン（32 文字以上。無ければ管理の受け口は無効）
 - `CLOUD_MAX_BODY_BYTES` push の本文の上限（既定 4 MB）
+- `CLOUD_TOKEN_SECRET` お客さんのログインの署名の鍵（固定する。無いと再起動のたびに全員ログアウト）
+- `CLOUD_PUBLIC_URL`   閲覧リンクの URL の頭（例 https://pokerapp-xxxx.a.run.app。無ければ要求の URL から）
 - `PORT`               待ち受けるポート（Cloud Run が渡す。既定 8080）
 - `CLOUD_DEV_MEMORY=1` 手元の確認用: Postgres の代わりにメモリに保存（再起動で消える）
 
@@ -16,7 +18,7 @@ import logging
 import os
 import sys
 
-from cloud.app import DEFAULT_MAX_BODY, CloudSettings, create_cloud_app
+from cloud.app import DEFAULT_MAX_BODY, PLAYER_WEB_DIR, CloudSettings, create_cloud_app
 
 
 def build_app():
@@ -38,6 +40,9 @@ def build_app():
     settings = CloudSettings(
         admin_token=os.environ.get("CLOUD_ADMIN_TOKEN") or None,
         max_body_bytes=int(os.environ.get("CLOUD_MAX_BODY_BYTES", DEFAULT_MAX_BODY)),
+        token_secret=os.environ.get("CLOUD_TOKEN_SECRET") or None,
+        public_url=os.environ.get("CLOUD_PUBLIC_URL") or None,
+        player_web_dir=PLAYER_WEB_DIR,
     )
     return create_cloud_app(storage, settings)
 

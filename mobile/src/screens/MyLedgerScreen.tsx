@@ -11,7 +11,7 @@ interface Props {
   player: Player;
   session: PlayerSessionSummary;
   onBack: () => void;
-  onOpenOrder: () => void;
+  onOpenOrder?: () => void; // 無ければ注文の導線を出さない（クラウド = 店の外, ADR-0067）
 }
 
 const KIND_LABELS: Record<LedgerEntry["kind"], string> = {
@@ -42,9 +42,11 @@ export function MyLedgerScreen({
       <Text style={styles.subtitle}>
         {session.label ?? session.started_at} ・ 中間集計（確定値ではありません）
       </Text>
-      <Pressable onPress={onOpenOrder}>
-        <Text style={styles.back}>ドリンクを注文する →</Text>
-      </Pressable>
+      {onOpenOrder ? (
+        <Pressable onPress={onOpenOrder}>
+          <Text style={styles.back}>ドリンクを注文する →</Text>
+        </Pressable>
+      ) : null}
       {loading ? (
         <Loading />
       ) : errorCode || !data ? (

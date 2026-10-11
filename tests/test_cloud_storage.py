@@ -140,8 +140,34 @@ def test_postgres_migrations_are_idempotent_and_enable_rls():
                 "where n.nspname = %s and c.relkind = 'r' and c.relname <> 'schema_migrations'",
                 (st.schema,)).fetchall()
             conn.rollback()
-        assert dict(rows) == {"stores": True, "store_devices": True, "records": True}
+        assert dict(rows) == {"stores": True, "store_devices": True, "records": True, "viewer_links": True}
         assert st.ping()
     finally:
         st.drop_schema()
         st.close()
+
+
+def test_viewer_links(storage):
+    sid = storage.create_store("店")["store_id"]
+    first = storage.create_link(sid, "p1", "h1")
+    assert "token_hash" not in first and storage.find_link("h1")["player_id"] == "p1"
+    second = storage.create_link(sid, "p1", "h2")            # 1 人 1 本: 前のものは取り消し
+    assert storage.find_link("h1")["revoked_at"] is not None
+    assert storage.get_link(second["link_id"])["revoked_at"] is None
+    storage.create_link(sid, "p2", "h3")
+    storage.touch_link(second["link_id"])
+    assert storage.get_link(second["link_id"])["last_used_at"] is not None
+    assert storage.revoke_links(sid, "p1") == 1
+    assert storage.find_link("h3")["revoked_at"] is None       # 別の人のリンクはそのまま
+    assert storage.find_link("nope") is None and storage.get_link("nope") is None
+    with pytest.raises(StoreNotFound):
+        storage.create_link("missing", "p1", "h4")
+
+
+def test_store_last_seq_moves_only_on_changes(storage):
+    sid = storage.create_store("店")["store_id"]
+    assert storage.get_store(sid)["last_seq"] is None
+    storage.apply(sid, [("hands", "s1:1", _hand())], seq=5)
+    assert storage.get_store(sid)["last_seq"] == 5
+    storage.apply(sid, [("hands", "s1:1", _hand())], seq=9)      # 変わらなければ動かない
+    assert storage.get_store(sid)["last_seq"] == 5

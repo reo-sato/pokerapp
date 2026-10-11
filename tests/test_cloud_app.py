@@ -68,6 +68,15 @@ def test_only_the_allowed_routes_exist():
         ("POST", "/api/cloud/v1/admin/stores"),
         ("POST", "/api/cloud/v1/admin/stores/{store_id}/devices"),
         ("POST", "/api/cloud/v1/admin/stores/{store_id}/devices/revoke"),
+        # 店外での閲覧（2c）: リンクの発行・取り消し（店舗 PC）、リンクでのログイン、自分の記録の読み取り
+        ("POST", "/api/cloud/v1/viewer-links"),
+        ("POST", "/api/cloud/v1/viewer-links/revoke"),
+        ("POST", "/api/cloud/v1/auth/link"),
+        ("GET", "/api/players/{player_id}"),
+        ("GET", "/api/players/{player_id}/sessions"),
+        ("GET", "/api/players/{player_id}/sessions/{session_id}/hands"),
+        ("GET", "/api/players/{player_id}/sessions/{session_id}/ledger"),
+        ("GET", "/api/sessions/{session_id}/hands/{hand_id}"),
     }
     assert not any(p.startswith("/api/staff") for _, p in paths)
     for path in ("/docs", "/openapi.json", "/redoc", "/api/staff/sync/snapshot", "/api/players"):

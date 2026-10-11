@@ -92,24 +92,25 @@ class PostgresStorage:
         store_id = uuid.uuid4().hex
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(self._q("insert into {s} (store_id, name) values (%s, %s) "
-                                       "returning store_id, name, status, created_at", s="stores"),
+                                       "returning store_id, name, status, created_at, last_seq", s="stores"),
                                (store_id, name)).fetchone()
         return self._store(row)
 
     @staticmethod
     def _store(row) -> dict:
-        return {"store_id": row[0], "name": row[1], "status": row[2], "created_at": _iso(row[3])}
+        return {"store_id": row[0], "name": row[1], "status": row[2], "created_at": _iso(row[3]),
+                "last_seq": row[4]}
 
     def get_store(self, store_id: str) -> Optional[dict]:
         with self._pool.connection() as conn:
-            row = conn.execute(self._q("select store_id, name, status, created_at from {s} where store_id = %s",
+            row = conn.execute(self._q("select store_id, name, status, created_at, last_seq from {s} where store_id = %s",
                                        s="stores"), (store_id,)).fetchone()
             conn.rollback()
         return self._store(row) if row else None
 
     def list_stores(self) -> list[dict]:
         with self._pool.connection() as conn:
-            rows = conn.execute(self._q("select store_id, name, status, created_at from {s} "
+            rows = conn.execute(self._q("select store_id, name, status, created_at, last_seq from {s} "
                                         "order by created_at, store_id", s="stores")).fetchall()
             conn.rollback()
         return [self._store(r) for r in rows]
@@ -179,6 +180,8 @@ class PostgresStorage:
                     player_id, session_id = records.index_columns(kind, new_body)
                     writes.append((store_id, kind, key, Jsonb(new_body), seq, player_id, session_id))
             if writes:
+                conn.execute(self._q("update {s} set last_seq = greatest(coalesce(last_seq, 0), %s) "
+                                     "where store_id = %s", s="stores"), (seq, store_id))
                 with conn.cursor() as cur:
                     cur.executemany(self._q(
                         "insert into {r} (store_id, kind, key, body, src_seq, player_id, session_id) "
@@ -223,3 +226,47 @@ class PostgresStorage:
                                         r="records"), (store_id,)).fetchall()
             conn.rollback()
         return {k: int(n) for k, n in rows}
+
+    # ――― 閲覧リンク（ADR-0067 D5）―――
+
+    _LINK_COLS = "link_id, store_id, player_id, created_at, last_used_at, revoked_at"
+
+    @staticmethod
+    def _link(row) -> dict:
+        return {"link_id": row[0], "store_id": row[1], "player_id": row[2], "created_at": _iso(row[3]),
+                "last_used_at": _iso(row[4]), "revoked_at": _iso(row[5])}
+
+    def create_link(self, store_id: str, player_id: str, token_hash: str) -> dict:
+        if self.get_store(store_id) is None:
+            raise StoreNotFound(store_id)
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(self._q("update {v} set revoked_at = now() where store_id = %s and player_id = %s "
+                                 "and revoked_at is null", v="viewer_links"), (store_id, player_id))
+            row = conn.execute(self._q("insert into {v} (link_id, store_id, player_id, token_hash) "
+                                       f"values (%s, %s, %s, %s) returning {self._LINK_COLS}", v="viewer_links"),
+                               (uuid.uuid4().hex, store_id, player_id, token_hash)).fetchone()
+        return self._link(row)
+
+    def _one_link(self, where: str, value: str) -> Optional[dict]:
+        with self._pool.connection() as conn:
+            row = conn.execute(self._q(f"select {self._LINK_COLS} from {{v}} where {where} = %s",
+                                       v="viewer_links"), (value,)).fetchone()
+            conn.rollback()
+        return self._link(row) if row else None
+
+    def find_link(self, token_hash: str) -> Optional[dict]:
+        return self._one_link("token_hash", token_hash)
+
+    def get_link(self, link_id: str) -> Optional[dict]:
+        return self._one_link("link_id", link_id)
+
+    def touch_link(self, link_id: str) -> None:
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(self._q("update {v} set last_used_at = now() where link_id = %s", v="viewer_links"),
+                         (link_id,))
+
+    def revoke_links(self, store_id: str, player_id: str) -> int:
+        with self._pool.connection() as conn, conn.transaction():
+            cur = conn.execute(self._q("update {v} set revoked_at = now() where store_id = %s and player_id = %s "
+                                       "and revoked_at is null", v="viewer_links"), (store_id, player_id))
+            return cur.rowcount

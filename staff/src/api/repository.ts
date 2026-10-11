@@ -29,6 +29,7 @@ import type {
   StaffLedgerEntryBody,
   StaffSeating,
   StaffSession,
+  ViewerLink,
 } from "./types";
 
 export interface StaffRepository {
@@ -72,6 +73,13 @@ export interface StaffRepository {
     survivorId: string,
     absorbedId: string,
   ): Promise<{ survivor_id: string; absorbed_id: string }>;
+  /**
+   * 店外で見るための閲覧リンク（QR）を発行する（ADR-0067 D5）。前のリンクは使えなくなる。
+   * クラウドにつながっていない店舗は cloud_not_linked、クラウドに届かなければ cloud_unavailable。
+   */
+  issueViewerLink(playerId: string): Promise<ViewerLink>;
+  /** 閲覧リンクを取り消す（スマホをなくした・人に見られた）。 */
+  revokeViewerLink(playerId: string): Promise<{ player_id: string; revoked: number }>;
 
   // ――― 座席（hand-based seating, ADR-0038 §B）―――
   /** 現在の seating（最新 hand 由来）+ 記録済 hand_id 一覧。 */

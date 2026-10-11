@@ -52,7 +52,8 @@ LOG_PATH = Path(__file__).resolve().parent.parent / "logs" / "store_server.log"
 
 def create_store_app(cfg: dict, *, player_repo: PlayerRepository, session_repo: SessionRepository,
                      ledger_repo: LedgerRepository, order_repo: OrderRequestRepository,
-                     menu: MenuMaster, cloud_status: Optional[Callable[[], dict]] = None):
+                     menu: MenuMaster, cloud_status: Optional[Callable[[], dict]] = None,
+                     cloud_links=None):
     """会計の書き手の API（注文 write・スタッフの会計 write が有効）を作る。
 
     会計画面（`--ledger` + `viewer_api.enabled`）と店舗サーバー（`--serve`）の両方がこれを使い、
@@ -69,6 +70,7 @@ def create_store_app(cfg: dict, *, player_repo: PlayerRepository, session_repo: 
         player_web_dir=PLAYER_WEB_DIR,   # お客さん向け画面（ADR-0059）
         staff_web_dir=STAFF_WEB_DIR,     # スタッフ用 iPad 画面（ADR-0064）
         cloud_status=cloud_status,       # クラウドへの送信の状態（ADR-0067 2b, 店舗サーバーだけ）
+        cloud_links=cloud_links,         # 閲覧リンクの発行（ADR-0067 2c, 店舗サーバーだけ）
         **auth_kwargs_from_config(api_cfg),   # L1 PIN（ADR-0027）
     )
 
@@ -205,6 +207,7 @@ def run_store_server(cfg: dict, host: Optional[str] = None, port: Optional[int] 
             order_repo=OrderRequestRepository(session_repo=session_repo, player_repo=player_repo),
             menu=MenuMaster(),
             cloud_status=syncer.status if syncer else (lambda: {"enabled": False}),
+            cloud_links=syncer,
         )
         _side_servers(settings, stop)
         logger.info("店舗サーバーを起動します: %s:%s（%s）", settings["host"], settings["port"], describe_version())

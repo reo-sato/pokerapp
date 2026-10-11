@@ -65,7 +65,7 @@
 ## 2. クラウドに置く（2e で書き足す）
 
 - API の有効化（Cloud Run・Cloud Build・Secret Manager・Artifact Registry）
-- Secret Manager に入れるもの: データベースの接続文字列 / トークン署名の鍵 / 管理トークン
+- Secret Manager に入れるもの: データベースの接続文字列（`DATABASE_URL`）/ お客さんのログインの署名の鍵（`CLOUD_TOKEN_SECRET`）/ 管理トークン（`CLOUD_ADMIN_TOKEN`）。ほかに環境変数 `CLOUD_PUBLIC_URL`（閲覧リンクの URL の頭）
 - Cloud Build のトリガー（GitHub の `stable` に進んだら自動でデプロイ）
 - Supabase 側: 専用のデータベースユーザー、`pokerapp` スキーマ、RLS の確認
 

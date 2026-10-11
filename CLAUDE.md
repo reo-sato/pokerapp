@@ -142,7 +142,7 @@ pokerapp/
 │   ├── session_viewer.py          ← SessionViewerWindow (session/seating read-only inspection 画面, WS2-α, 別画面)
 │   └── ledger_view.py             ← LedgerViewWindow (ledger viewer/editor + 精算確定/paid-unpaid + 注文確定/却下 + buy-in 金額プリセット, S3.2 + S4 + M5 + ADR-0026, dashboard とは別画面)
 │
-├── cloud/                         ← クラウド（Cloud Run + Supabase の Postgres, ADR-0067。店舗 PC には不要）: `app.py` = 許可した受け口だけのアプリ `create_cloud_app`（health / 店舗 PC からの push・status / 運営の店舗・端末トークン）/ `ingest.py` = push の検査と保存 / `records.py` = 種類ごとの検査と merge（`core/sync.py` の解決関数・append-only・送り手の番号）/ `storage.py` = 保存の約束 + メモリ版 / `postgres.py` = Postgres 版 / `migrations/` / `tokens.py` / `python -m cloud` で起動（2a 実装済。閲覧・送り手・置き方は 2b〜2e）
+├── cloud/                         ← クラウド（Cloud Run + Supabase の Postgres, ADR-0067。店舗 PC には不要）: `app.py` = 許可した受け口だけのアプリ `create_cloud_app`（health / 店舗 PC からの push・status / 運営の店舗・端末トークン / 閲覧リンクの発行・ログイン / お客さんの自分だけの読み取り）/ `views.py` = 店舗ごとの読み取りの写し（店内と同じ `read_models` を使う）/ `static/player/` = お客さん向け画面のクラウド用ビルド（`scripts/build_player_web.py`）/ `ingest.py` = push の検査と保存 / `records.py` = 種類ごとの検査と merge（`core/sync.py` の解決関数・append-only・送り手の番号）/ `storage.py` = 保存の約束 + メモリ版 / `postgres.py` = Postgres 版 / `migrations/` / `tokens.py` / `python -m cloud` で起動（2a 実装済。閲覧・送り手・置き方は 2b〜2e）
 │
 ├── mobile/                        ← Poker Hand Viewer (Expo/RN, M2, ADR-0017。mock/HTTP repository 切替, web export 配布。L1 PIN / L2 サインアップ UI = AuthScreen, ADR-0027/0031。HandDetail はストリート単位リプレイ表示, ADR-0044)
 │
@@ -811,7 +811,7 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    （staff 画面の店舗 PC 配信 = ADR-0064 で実装済 / 自動起動 = ADR-0065 で実装済（店舗サーバー `--serve`）/ リリース版での更新 = ADR-0066 で実装済（`stable`）/ `SyncScheduler` の常駐結線）→
    2 クラウド最小（**設計済 = ADR-0067**: Cloud Run 東京 + **Supabase** Postgres 東京 / 店舗 PC → クラウドの一方向で変わった分だけ送る
    （`SyncScheduler` の常駐もここ）/ 主キーは店舗 ID + 元の ID / 許可リストのアプリ `cloud/app.py`（スタッフ・会計の受け口なし）/
-   店外閲覧は店で渡す閲覧リンク / 公開範囲 `all`・`own_and_shown`。**2a クラウドの骨組み = 実装済**（`cloud/`、受け口・保存・push・端末トークン・管理）/ **2b 店舗 PC の送り手 = 実装済**（`core/cloud_sync.py` を店舗サーバーの中で常駐 = `SyncScheduler` の常駐結線の代わり、`tools/cloud_link.py`、`/api/health` の `cloud`）、2c〜2e は planned、登録手順 `docs/cloud-setup.md`）→
+   店外閲覧は店で渡す閲覧リンク / 公開範囲 `all`・`own_and_shown`。**2a クラウドの骨組み = 実装済**（`cloud/`、受け口・保存・push・端末トークン・管理）/ **2b 店舗 PC の送り手 = 実装済**（`core/cloud_sync.py` を店舗サーバーの中で常駐 = `SyncScheduler` の常駐結線の代わり、`tools/cloud_link.py`、`/api/health` の `cloud`）/ **2c 閲覧リンク = 実装済**（スタッフ画面「プレイヤー管理」の「閲覧リンク (QR)」→ お客さんは店外から自分の記録だけ。`mobile/` のクラウド用ビルド `EXPO_PUBLIC_CLOUD=1`）、2d・2e は planned、登録手順 `docs/cloud-setup.md`）→
    3 ログインと会員 → 4 外販の準備。製品化の作業は推論・音声（`integration/`・`audio/`）に触れない。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。
@@ -1155,7 +1155,7 @@ python main.py --export-ledger logs/ledger_export  # settlement / cashflow CSV �
 python main.py --viewer-api                  # player 向け読み取り専用 viewer API (M1, ADR-0017)
 python main.py --serve                       # 店舗サーバー（画面なし）: 会計の書き手の API + お客さん / スタッフ画面 + 卓モニタ (ADR-0065。自動起動は server_autostart.cmd)
 python main.py --viewer-api --host 0.0.0.0 --port 8788   # 店の Wi-Fi のスマホから http://<PCのIP>:8788/ (画面 + API, ADR-0059)
-python scripts/build_player_web.py            # mobile/ を変えたらお客さん向け画面を作り直す (api/static/player/, 要 Node, ADR-0059)
+python scripts/build_player_web.py            # mobile/ を変えたらお客さん向け画面を作り直す (店舗用 api/static/player/ + クラウド用 cloud/static/player/, 要 Node, ADR-0059/0067)
 python scripts/build_staff_web.py             # staff/ を変えたらスタッフ用画面を作り直す (api/static/staff/ = http://<PCのIP>:8788/staff/, 要 Node, ADR-0064)
 python tools/set_config.py session_layer.enabled true   # config.json の 1 項目を変える (BOM なし。値を省くと表示)
 pytest tests/ -v --ignore=tests/test_vision.py   # CI と同じ（vision レガシー除外）

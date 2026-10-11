@@ -1,0 +1,7 @@
+{
+  "api_url": "/",
+  "player_auth": "off",
+  "staff_token": false,
+  "cloud": true,
+  "source_hash": "sha256:f03c0028c38335eeee671365cc1b8cb5cfbea1a56ca0577b12a9b8d9a59f09c3"
+}

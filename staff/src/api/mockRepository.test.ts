@@ -593,3 +593,14 @@ test("updateMenu replaces items, validates, and requires staff token (ADR-0046)"
     return true;
   });
 });
+
+test("issueViewerLink makes a new link each time and revoke ends it (ADR-0067 D5)", async () => {
+  const repo = authed();
+  const [player] = await repo.listPlayers();
+  const first = await repo.issueViewerLink(player.player_id);
+  const second = await repo.issueViewerLink(player.player_id);
+  assert.match(first.url, /#link=pkl_/);
+  assert.notEqual(first.url, second.url);
+  assert.deepEqual(await repo.revokeViewerLink(player.player_id), { player_id: player.player_id, revoked: 1 });
+  await assert.rejects(repo.issueViewerLink("missing"), (e: unknown) => (e as StaffApiError).code === "not_found");
+});

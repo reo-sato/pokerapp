@@ -411,6 +411,35 @@ class CloudSyncer:
         """クラウドの側の件数（`tools/cloud_link.py status`）。"""
         return self.transport.request("GET", self.url + STATUS_PATH, self.token)
 
+    # ――― 閲覧リンク（ADR-0067 D5, 2c）―――
+
+    def _link_call(self, path: str, player_id: str) -> tuple[int, Any]:
+        try:
+            return self.transport.request("POST", self.url + path, self.token, {"player_id": player_id})
+        except TransportError as exc:
+            raise CloudLinkError("cloud_unavailable", f"クラウドにつながりません（{exc}）") from None
+
+    def issue_viewer_link(self, player_id: str) -> dict:
+        """その人の閲覧リンクを発行する（前のものは使えなくなる）。まだ送っていない人なら先に送る。"""
+        if f"players:{player_id}" not in self.state.acked:
+            result = self.run_once()
+            if not result["ok"]:
+                raise CloudLinkError("cloud_unavailable", result["error"] or "クラウドに送れませんでした")
+        status, body = self._link_call(VIEWER_LINKS_PATH, player_id)
+        if status == 201 and isinstance(body, dict) and body.get("url"):
+            return body
+        code = body.get("code") if isinstance(body, dict) else None
+        if code == "unknown_player":
+            raise CloudLinkError("unknown_player", "この人はまだクラウドに届いていません（少し待ってからもう一度）", 409)
+        raise CloudLinkError("cloud_error", _ERROR_HINTS.get(status) or f"クラウドが {status} を返しました（{code}）")
+
+    def revoke_viewer_link(self, player_id: str) -> int:
+        status, body = self._link_call(VIEWER_LINKS_PATH + "/revoke", player_id)
+        if status == 200 and isinstance(body, dict):
+            return int(body.get("revoked") or 0)
+        code = body.get("code") if isinstance(body, dict) else None
+        raise CloudLinkError("cloud_error", _ERROR_HINTS.get(status) or f"クラウドが {status} を返しました（{code}）")
+
     def run_forever(self, stop: threading.Event) -> None:
         while not stop.is_set():
             self.run_once()
@@ -420,6 +449,17 @@ class CloudSyncer:
 
 class _Failure(Exception):
     pass
+
+
+class CloudLinkError(Exception):
+    """閲覧リンクの発行・取り消しができない（スタッフ API が {code, message} で返す）。"""
+
+    def __init__(self, code: str, message: str, status: int = 502) -> None:
+        super().__init__(message)
+        self.code, self.message, self.status = code, message, status
+
+
+VIEWER_LINKS_PATH = "/api/cloud/v1/viewer-links"
 
 
 def syncer_from_config(cfg: dict, *, credentials_path: Path = CREDENTIALS_PATH,

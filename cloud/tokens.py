@@ -11,11 +11,16 @@ import secrets
 from typing import Optional
 
 DEVICE_TOKEN_PREFIX = "pkd_"     # 見て何のトークンか分かるように（ログに出ていないか探すときにも使える）
+LINK_TOKEN_PREFIX = "pkl_"       # 閲覧リンクの乱数（URL の # の後ろ, ADR-0067 D5）
 MIN_ADMIN_TOKEN_LEN = 32
 
 
 def new_device_token() -> str:
     return DEVICE_TOKEN_PREFIX + secrets.token_urlsafe(32)
+
+
+def new_link_token() -> str:
+    return LINK_TOKEN_PREFIX + secrets.token_urlsafe(32)
 
 
 def hash_token(token: str) -> str:

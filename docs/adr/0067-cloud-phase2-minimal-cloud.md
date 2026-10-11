@@ -221,6 +221,26 @@ LAN の 2 台を前提にしている。クラウドに向けるには、(a) 店
 - `cloud_credentials.json` / `cloud_sync_state.json` は git 管理外で、更新（`update.cmd`）で保持する。端末トークンは
   起動時のバックアップの対象（`core/backup.py`）。
 
+## 追記 3（2026-10-11, 2c の実装で決めた細部）
+
+- **お客さんの読み取りは店内と同じ中身で作る**: クラウドに保存したレコードを店舗 PC と同じ形のファイルに書き出し、
+  そこから repository を作って `api/read_models.py` をそのまま使う（`cloud/views.py`。会計の集計・merge の解決を
+  二重に書かない）。写しは店舗ごとに 1 つで、店舗 PC から何か届いて店舗の番号（`stores.last_seq`, migration 0002）が
+  変わったら作り直す。ハンドはセッションを開いたときにその分だけ書き出す。店舗 PC の read model と同じ結果になることを
+  テストで突き合わせる（`tests/test_cloud_viewer.py`）。
+- 受け口の形は店内の viewer API と同じ（`/api/players/{id}/…`・`/api/sessions/{sid}/hands/{hid}`）なので、お客さん向け
+  画面は同じソース（`mobile/`）のクラウド用ビルド（`EXPO_PUBLIC_CLOUD=1`, `cloud/static/player/`。
+  `scripts/build_player_web.py` が店舗用と両方作る）で、違いは「名前選びを出さず閲覧リンクで入る / 読み取りにトークンを
+  付ける / 注文の導線を出さない / 戻るはログアウト」だけ。
+- `/api/sessions/{sid}/hands/{hid}` は**その人が座っていたハンドだけ**（座席の記録で確かめる）。他人の player は 404
+  （いるかどうかも教えない）。
+- ログインのトークンは ADR-0027 の署名付きトークン（`core/auth_token.py`）の中身を「店舗 ID:リンク ID:player_id」にしたもの
+  （鍵は `CLOUD_TOKEN_SECRET`）。読み取りのたびにリンクが取り消されていないかを確かめる。リンクの乱数は `pkl_` で始まる。
+- 閲覧リンクの発行は店舗サーバーのスタッフ API `POST /api/staff/players/{id}/viewer-link`（と `/revoke`）がクラウドに頼む。
+  まだクラウドに送っていない人なら先に送る。QR は店舗 PC で作る（`segno`, `[api]` の依存に追加。SVG の data URI）。
+  スタッフ用画面の「プレイヤー管理」に「閲覧リンク (QR)」。
+- 開いたままのページで別のリンクを開いた（`#` だけが変わった）ときも、そのリンクで入り直す。リンクはアドレスバーから消す。
+
 ## Alternatives Considered
 
 - **今の snapshot/merge（ADR-0022）をそのままクラウドに向ける** — 新しく書くものが最も少ない。

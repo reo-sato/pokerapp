@@ -30,6 +30,7 @@ import {
   type StaffLedgerEntryBody,
   type StaffSeating,
   type StaffSession,
+  type ViewerLink,
 } from "./types";
 
 const E = encodeURIComponent;
@@ -132,6 +133,14 @@ export class HttpStaffRepository implements StaffRepository {
       survivor_id: survivorId,
       absorbed_id: absorbedId,
     });
+  }
+
+  issueViewerLink(playerId: string): Promise<ViewerLink> {
+    return this.send("POST", `/api/staff/players/${E(playerId)}/viewer-link`, {});
+  }
+
+  revokeViewerLink(playerId: string): Promise<{ player_id: string; revoked: number }> {
+    return this.send("POST", `/api/staff/players/${E(playerId)}/viewer-link/revoke`, {});
   }
 
   getSeating(sessionId: string): Promise<StaffSeating> {
