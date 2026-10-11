@@ -60,3 +60,11 @@ ADR-0067 D10 の 2a。クラウドのアプリ・保存（メモリ / Postgres�
 ## Related Commits
 
 - 本 worklog と同じ commit
+
+## 追記（CI）
+
+- CI が ADR-0065 の commit から落ちていた: `tests/test_store_server.py` の 2 件が `uvicorn` を import するが、CI の
+  `requirements-dev.txt` に無かった（手元には入っていた）→ `uvicorn` を追加。
+- 手元で落ちる golden `postflop-street-transition` は CI（Python 3.11）では通っている = 手元の環境（3.13 / 依存の版）の差。
+  製品化の変更とは無関係。
+- CI の Postgres 16 でクラウドの保存の試験が走ったこと（skip なし）を確認。
