@@ -45,6 +45,7 @@ pokerapp/
 │   ├── ui-feature-inventory.md    ← UI 実運用機能の棚卸し台帳（◎/○/△ 優先度 + 着手状態。◎○ は 2026-07-12 全消化、残は △ 群）
 │   ├── estimator.md               ← 推定器（事後推定, ADR-0056）のいまの設計・監査の推奨ごとの対応・文書の地図
 │   ├── installation.md            ← エンドユーザー: インストール手順 (Phase I)
+│   ├── cloud-setup.md             ← クラウドの準備（Google Cloud・Supabase の登録 → 置く → 店舗 PC をつなぐ, ADR-0067。進み具合に合わせて書き足す）
 │   ├── usage.md                   ← エンドユーザー: 使い方・読み上げ語彙・設定 (Phase I)
 │   ├── troubleshooting.md         ← エンドユーザー: 困りごと対処 (Phase I)
 │   └── decision-log.md            ← ADR / 主要 issue の索引
@@ -804,7 +805,10 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    （店舗 PC の JSON と契約 schema は変えず、クラウドが同期受信時に端末トークンから店舗 ID を付ける）。会員は店舗を
    またいで同一人物、手札の公開範囲は設定で切り替え、プレイヤー課金なし。順番は フェーズ 1 店舗内の仕上げ
    （staff 画面の店舗 PC 配信 = ADR-0064 で実装済 / 自動起動 = ADR-0065 で実装済（店舗サーバー `--serve`）/ リリース版での更新 = ADR-0066 で実装済（`stable`）/ `SyncScheduler` の常駐結線）→
-   2 クラウド最小 → 3 ログインと会員 → 4 外販の準備。製品化の作業は推論・音声（`integration/`・`audio/`）に触れない。
+   2 クラウド最小（**設計済 = ADR-0067**: Cloud Run 東京 + **Supabase** Postgres 東京 / 店舗 PC → クラウドの一方向で変わった分だけ送る
+   （`SyncScheduler` の常駐もここ）/ 主キーは店舗 ID + 元の ID / 許可リストのアプリ `cloud/app.py`（スタッフ・会計の受け口なし）/
+   店外閲覧は店で渡す閲覧リンク / 公開範囲 `all`・`own_and_shown`。実装 2a〜2e は planned、登録手順 `docs/cloud-setup.md`）→
+   3 ログインと会員 → 4 外販の準備。製品化の作業は推論・音声（`integration/`・`audio/`）に触れない。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。
 
