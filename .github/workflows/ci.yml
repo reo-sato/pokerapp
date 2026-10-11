@@ -8,6 +8,17 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # クラウドの保存（cloud/postgres.py, ADR-0067）の試験に使う Postgres。無ければその試験は飛ばす（手元）
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      POKERAPP_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
 

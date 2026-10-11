@@ -96,6 +96,7 @@ pokerapp/
 │   ├── auth_identity.py           ← AuthIdentity ((provider,sub)→player_id, L2, ADR-0031)
 │   ├── auth_identity_repository.py ← AuthIdentityRepository (node-local, sync 非対象, L2, ADR-0031)
 │   ├── oidc.py                    ← OidcProvider 抽象 + FakeOidcProvider + resolve_player_for_claim (L2, ADR-0031)
+│   ├── cloud_payload.py           ← 店舗 PC → クラウドの同期で送る形（種類・キー・送る前に落とす項目・指紋, ADR-0067。送り手と受け手で共通）
 │   ├── atomic_io.py               ← atomic_write_json(fsync) + read_json_file(破損退避) (B2/B7)
 │   ├── version.py                 ← いま動いている版（`installer/installed.json` か git → branch / commit / release）。`/api/health`・`main.py --version`・店舗サーバーのログ (ADR-0066)
 │   ├── store_lock.py              ← StoreWriterLock: 会計の書き手を 1 プロセスに限る OS のファイルロック（`--serve` / `--ledger`, `store_writer.lock`, ADR-0065）
@@ -139,6 +140,8 @@ pokerapp/
 │   ├── seat_selection.py          ← SeatSelectionDialog (seat→player_id 選択モーダル, S2.x E3)
 │   ├── session_viewer.py          ← SessionViewerWindow (session/seating read-only inspection 画面, WS2-α, 別画面)
 │   └── ledger_view.py             ← LedgerViewWindow (ledger viewer/editor + 精算確定/paid-unpaid + 注文確定/却下 + buy-in 金額プリセット, S3.2 + S4 + M5 + ADR-0026, dashboard とは別画面)
+│
+├── cloud/                         ← クラウド（Cloud Run + Supabase の Postgres, ADR-0067。店舗 PC には不要）: `app.py` = 許可した受け口だけのアプリ `create_cloud_app`（health / 店舗 PC からの push・status / 運営の店舗・端末トークン）/ `ingest.py` = push の検査と保存 / `records.py` = 種類ごとの検査と merge（`core/sync.py` の解決関数・append-only・送り手の番号）/ `storage.py` = 保存の約束 + メモリ版 / `postgres.py` = Postgres 版 / `migrations/` / `tokens.py` / `python -m cloud` で起動（2a 実装済。閲覧・送り手・置き方は 2b〜2e）
 │
 ├── mobile/                        ← Poker Hand Viewer (Expo/RN, M2, ADR-0017。mock/HTTP repository 切替, web export 配布。L1 PIN / L2 サインアップ UI = AuthScreen, ADR-0027/0031。HandDetail はストリート単位リプレイ表示, ADR-0044)
 │
@@ -807,7 +810,7 @@ ISSUE-0013→**ISSUE-0019** に振り替え済み（§ decision-log）。
    （staff 画面の店舗 PC 配信 = ADR-0064 で実装済 / 自動起動 = ADR-0065 で実装済（店舗サーバー `--serve`）/ リリース版での更新 = ADR-0066 で実装済（`stable`）/ `SyncScheduler` の常駐結線）→
    2 クラウド最小（**設計済 = ADR-0067**: Cloud Run 東京 + **Supabase** Postgres 東京 / 店舗 PC → クラウドの一方向で変わった分だけ送る
    （`SyncScheduler` の常駐もここ）/ 主キーは店舗 ID + 元の ID / 許可リストのアプリ `cloud/app.py`（スタッフ・会計の受け口なし）/
-   店外閲覧は店で渡す閲覧リンク / 公開範囲 `all`・`own_and_shown`。実装 2a〜2e は planned、登録手順 `docs/cloud-setup.md`）→
+   店外閲覧は店で渡す閲覧リンク / 公開範囲 `all`・`own_and_shown`。**2a クラウドの骨組み = 実装済**（`cloud/`、受け口・保存・push・端末トークン・管理）、2b〜2e は planned、登録手順 `docs/cloud-setup.md`）→
    3 ログインと会員 → 4 外販の準備。製品化の作業は推論・音声（`integration/`・`audio/`）に触れない。
 
 各 Phase の着手前に対応する ADR / issue を起こすこと（traceability rules を参照）。
@@ -1155,6 +1158,8 @@ python scripts/build_player_web.py            # mobile/ を変えたらお客さ
 python scripts/build_staff_web.py             # staff/ を変えたらスタッフ用画面を作り直す (api/static/staff/ = http://<PCのIP>:8788/staff/, 要 Node, ADR-0064)
 python tools/set_config.py session_layer.enabled true   # config.json の 1 項目を変える (BOM なし。値を省くと表示)
 pytest tests/ -v --ignore=tests/test_vision.py   # CI と同じ（vision レガシー除外）
+#   クラウドの保存の試験は POKERAPP_TEST_DATABASE_URL（Postgres）があるときだけ（CI はサービスの Postgres 16）
+CLOUD_DEV_MEMORY=1 CLOUD_ADMIN_TOKEN=<32 文字以上> python -m cloud   # クラウドのアプリを手元で（メモリに保存, ADR-0067。本番は DATABASE_URL）
 python tools/replay_hand.py tests/fixtures/reconstruction/silent-fold  # 決定的 replay (F1)
 python tools/calibrate_confidence.py            # 派生 confidence 較正サーフェス + P1〜P8 検証 (ADR-0033)
 python tools/bench_hands.py --twice --search-check --workers 3   # 推定器の物差し: 開発データの全部正しいハンド (docs/estimator.md)

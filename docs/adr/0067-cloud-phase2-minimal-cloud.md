@@ -188,6 +188,21 @@ LAN の 2 台を前提にしている。クラウドに向けるには、(a) 店
 
 推論・音声（`integration/`・`audio/`・推定器の `tools/`）には触れない（ADR-0063 D8）。
 
+## 追記 1（2026-10-11, 2a の実装で決めた細部）
+
+- 本文の形: ハンド・訂正も `records` の種類にした（`records.hands` / `records.corrections`）。店舗の設定は
+  `store_settings`（本文の別の項目）。本文の `seq` = 送り手の番号（正の整数）。共通の定義は `core/cloud_payload.py`
+  （種類・キー・落とす項目・指紋）で、送り手（2b）と受け手が同じものを使う。
+- merge の方法は 3 つ: `core/sync.py` の解決関数（players / sessions / settlements / order_requests。**店舗 PC から
+  届いた方を先に渡す** = label などは店舗 PC の値、closed・受領額は単調）/ append-only（ledger・point・訂正）/
+  **送り手の番号が新しい方**（ハンド・店舗の設定。店舗 PC だけが書き、中身が変わり得る。遅れて届いた古い push で
+  戻らない）。
+- テーブルは種類ごとに分けず 1 つ（`records`: 店舗 ID・種類・キー・body jsonb・送り手の番号・検索用の
+  player_id / session_id）。同じ店舗の push はトランザクションの中の lock で 1 つずつ。
+- 受け手でも聞き取った文・監査用の項目を落とす（送り手が落とし忘れても保存しない）。
+- 管理の受け口は回数制限（IP ごと、Cloud Run が `X-Forwarded-For` の最後に足す接続元で数える）。端末トークンの
+  失敗にも回数制限。説明のページ（`/docs`・`/openapi.json`）は出さない。
+
 ## Alternatives Considered
 
 - **今の snapshot/merge（ADR-0022）をそのままクラウドに向ける** — 新しく書くものが最も少ない。
