@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### Added (リリース版と、いま動いている版の記録, 2026-10-11)
+
+製品化のフェーズ 1 の 3 つ目（ADR-0066、作業ログ `docs/worklog/2026-10-11-release-channel.md`）。
+
+- **リリース版 = `stable` ブランチ**: 店で確かめた版だけを置く（前に進めるだけ・日付のタグ `release-YYYYMMDD`）。
+  出すのは `python tools/release.py promote`（`status` でまだ出していないコミットを見る）。店舗 PC をリリース版に
+  するのは `update.cmd -Branch stable` を 1 回だけ。テスト中の店は今までどおり `verify-v1`。
+- **いま動いている版**: 更新のときに取ってきたコミットを固定し `installer/installed.json` に記録する。
+  `main.py --version`・`/api/health`（`branch` / `commit` / `release` を追加）・店舗サーバーの起動ログに出す。
+
 ### Added (店舗サーバーをサインイン時に自動で動かす, 2026-10-11)
 
 製品化のフェーズ 1 の 2 つ目（ADR-0065、作業ログ `docs/worklog/2026-10-11-store-server-autostart.md`）。

@@ -1526,6 +1526,11 @@ def main() -> None:
              "store_server.bind_port より優先）",
     )
     parser.add_argument(
+        "--version",
+        action="store_true",
+        help="いま動いている版（リリース版 / 開発版・ブランチ・コミット）を表示して終わる（ADR-0066）",
+    )
+    parser.add_argument(
         "--serve",
         action="store_true",
         help="店舗サーバー（画面なし, ADR-0065）: 会計の書き手の API（お客さん向け画面 / スタッフ用画面 /staff/ / "
@@ -1549,6 +1554,11 @@ def main() -> None:
              "台本は真のアクション入力の画面の「台本」（:8791/script）に出る",
     )
     args = parser.parse_args()
+
+    if args.version:
+        from core.version import describe
+        print(describe())
+        return
 
     if args.log_file:
         _route_logs_to_file(args.log_file)

@@ -37,6 +37,7 @@ from core.order_request_repository import OrderRequestRepository
 from core.player_repository import PlayerRepository
 from core.session_repository import SessionRepository
 from core.store_lock import StoreWriterLock, describe_holder
+from core.version import describe as describe_version
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +185,7 @@ def run_store_server(cfg: dict, host: Optional[str] = None, port: Optional[int] 
             menu=MenuMaster(),
         )
         _side_servers(settings, stop)
-        logger.info("店舗サーバーを起動します: %s:%s", settings["host"], settings["port"])
+        logger.info("店舗サーバーを起動します: %s:%s（%s）", settings["host"], settings["port"], describe_version())
         log_web_addresses(settings["port"])
         print(f"店舗サーバー: http://<この PC の IP>:{settings['port']}/（スタッフ用は /staff/）。"
               f"ログ: {LOG_PATH}")

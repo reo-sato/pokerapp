@@ -28,6 +28,7 @@ dist/
 venv/
 install.log
 installer/branch.txt
+installer/installed.json
 models/
 
 # 会計の書き手のロック（ADR-0065）

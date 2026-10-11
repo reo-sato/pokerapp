@@ -95,6 +95,7 @@ from core.session_repository import (
     UnknownPlayerError as SessionUnknownPlayerError,
 )
 from core.sync import build_snapshot, merge_snapshot_into
+from core.version import version_info
 
 logger = logging.getLogger(__name__)
 
@@ -444,7 +445,10 @@ def create_app(
 
     @app.get("/api/health")
     def health() -> dict:
-        return {"status": "ok", "version": _app_version()}
+        # branch / commit / release は ADR-0066（どの店がどの版で動いているか）。additive。
+        info = version_info()
+        return {"status": "ok", "version": _app_version(), "branch": info["branch"],
+                "commit": info["commit"], "release": info["release"]}
 
     @app.get("/api/players")
     def players() -> dict:

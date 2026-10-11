@@ -46,7 +46,11 @@ irm https://raw.githubusercontent.com/reo-sato/pokerapp/verify-v1/installer/boot
 
 ### 更新 / アンインストール
 
-- **更新**: `update.cmd` をダブルクリック。GitHub の最新（`verify-v1`）を上書き展開します。
+- **更新**: `update.cmd` をダブルクリック。GitHub の最新（覚えたブランチ。既定は開発版 `verify-v1`）を上書き展開します。
+  **リリース版**（店で確かめた版だけ = `stable`, ADR-0066）にするときは、一度だけ PowerShell で
+  `C:\PokerHandLogger\update.cmd -Branch stable` を実行します（以後の `update.cmd` は `stable` から取ります。
+  開発版に戻すときは `-Branch verify-v1`）。いま入っている版は `.\venv\Scripts\python.exe main.py --version`
+  か、ブラウザで `http://<PC の IPv4>:8788/api/health` で見られます。
   **`config.json` / `rfid_cards.json` / `menu.json` / 会計データ（`*.json`）/ `logs\` / `backups\` は保持**
   （`core/backup.py` のデータ一覧と同じ集合。テストで整合を固定）。削除されたファイルは残ります。
 - **アンインストール**: `uninstall.cmd`。ショートカットと `venv` を消し、データは残します。

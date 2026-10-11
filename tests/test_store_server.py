@@ -231,6 +231,7 @@ class TestAutostartScripts:
         text = (REPO_ROOT / "installer" / "install.ps1").read_bytes().decode("utf-8-sig")   # CRLF のまま
         assert '"PokerStoreServer"' in text
         venv = text.index("    Stop-StoreServer\r\n    Initialize-Venv")
-        restart = text.index("    Test-Installation\r\n    Start-StoreServer")
-        assert venv < restart
+        checked = text.index("    Test-Installation\r\n")
+        restart = text.index("    Start-StoreServer\r\n")
+        assert venv < checked < restart   # 依存を入れ替える前に止め、動作確認のあとで起動し直す
         assert "Remove-StoreServerTask" in text and "server_autostart.cmd" in text

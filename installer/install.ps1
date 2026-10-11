@@ -15,6 +15,8 @@
     通常は install.cmd をダブルクリックすれば済む（PowerShell の実行ポリシーは .cmd 側で Bypass する）。
 
     -Update      GitHub の zip（-Branch）を上書き展開して更新する。設定・データ・rfid_cards.json は保持。
+                 リリース版は -Branch stable（一度指定すると以後の update.cmd はそれを使う, ADR-0066）。
+                 取ってきたブランチとコミットは installer\installed.json に記録する（API の /api/health に出る）。
                  .git があり git が使えるなら git pull --ff-only。
     -Uninstall   ショートカットと venv を削除する（データは残す）。
     -PrefetchModel / -SkipModel   音声認識モデルの先読みを 質問せずに 行う / 行わない。
@@ -33,6 +35,7 @@ param(
     [switch]$NonInteractive,
     [switch]$DryRun,
     [string]$Branch = "verify-v1",
+    [string]$Commit = "",
     [string]$Repo = "reo-sato/pokerapp",
     [string]$PythonInstallerUrl = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe"
 )
@@ -322,6 +325,36 @@ function Test-Installation {
 
 # ───────────────────────── 更新 / アンインストール ─────────────────────────
 
+function Resolve-Commit {
+    # ブランチの先頭のコミット（40 桁）。取れなければ空（従来どおりブランチの zip を取る）。ADR-0066
+    param([string]$Ref)
+    try {
+        $res = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/commits/$Ref" -UseBasicParsing `
+            -Headers @{ "User-Agent" = "pokerapp-installer"; "Accept" = "application/vnd.github+json" } -TimeoutSec 20
+        $sha = [string]$res.sha
+        if ($sha -match '^[0-9a-f]{40}$') { return $sha }
+    } catch {
+        Write-Log ("ブランチ $Ref のコミットを確かめられませんでした（ブランチの zip を取ります）: " + $_.Exception.Message) "WARN"
+    }
+    return ""
+}
+
+function Write-InstalledVersion {
+    # いま入っている版（どの店がどの版で動いているか）。API の /api/health・main.py --version が読む。ADR-0066
+    $sha = $Commit
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $sha -and $git -and (Test-Path (Join-Path $AppDir ".git"))) {
+        try { $sha = (& $git.Source -C $AppDir rev-parse HEAD).Trim() } catch { $sha = "" }
+    }
+    if (-not $sha -and -not $DryRun) { $sha = Resolve-Commit $Branch }
+    $info = [ordered]@{ branch = $Branch; commit = $sha; installed_at = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss") }
+    $kind = if ($Branch -eq "stable") { "リリース版" } else { "開発版" }
+    Write-Log ("版: $kind $Branch @ " + $(if ($sha) { $sha.Substring(0, 7) } else { "?" }))
+    if ($DryRun) { return }
+    try { $info | ConvertTo-Json | Set-Content -Path (Join-Path $PSScriptRoot "installed.json") -Encoding UTF8 }
+    catch { Write-Log ("版を記録できませんでした: " + $_.Exception.Message) "WARN" }
+}
+
 function Invoke-Update {
     $git = Get-Command git -ErrorAction SilentlyContinue
     if ($git -and (Test-Path (Join-Path $AppDir ".git"))) {
@@ -330,7 +363,12 @@ function Invoke-Update {
         try { Invoke-Checked $git.Source @("pull", "--ff-only") "git pull" } finally { Pop-Location }
         return
     }
+    # 先にコミットを確かめ、そのコミットの zip を取る（取っている間にブランチが進んでも、記録と中身が一致する）
     $zipUrl = "https://codeload.github.com/$Repo/zip/refs/heads/$Branch"
+    if (-not $DryRun) {
+        $script:Commit = Resolve-Commit $Branch
+        if ($script:Commit) { $zipUrl = "https://codeload.github.com/$Repo/zip/$($script:Commit)" }
+    }
     Write-Log "GitHub から取得: $zipUrl"
     Write-Log ("保持するもの: " + (($PreservedFiles + $PreservedDirs) -join ", "))
     if ($DryRun) { return }
@@ -443,6 +481,7 @@ try {
             # このプロセスは更新前のスクリプトを実行し続けるので、続き（Python / 依存 / 設定 …）は
             # 更新後のインストーラで行う。-Update を外し、それ以外の指定は引き継いで起動し直す。
             $pass = @("-Branch", $Branch, "-Repo", $Repo, "-PythonInstallerUrl", $PythonInstallerUrl)
+            if ($Commit) { $pass += @("-Commit", $Commit) }
             if ($PrefetchModel) { $pass += "-PrefetchModel" }
             if ($SkipModel) { $pass += "-SkipModel" }
             if ($NoShortcuts) { $pass += "-NoShortcuts" }
@@ -483,6 +522,7 @@ try {
 
     Write-Log "動作確認" "STEP"
     Test-Installation
+    Write-InstalledVersion
     Start-StoreServer
 
     Write-Log "完了" "STEP"
