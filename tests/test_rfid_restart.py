@@ -294,7 +294,7 @@ class TestAutoRestart:
         t.run(AUTO_RESTART_GAP_SEC * 4, step=1.0)
         assert len(device.restarts) == 1                 # 命令が無いなら自動では繰り返さない
         assert _has(t.notices, "ファームウェアに再起動の命令がありません")
-        assert _has(t.notices, "USB を抜いて挿し直して")
+        assert _has(t.notices, "給電アダプタを抜いて")
 
     def test_an_outdated_relay_is_told_to_reregister(self, tmp_path):
         device = Device(ready=ALL - {MIDDLE}, status="relay_outdated")
@@ -316,7 +316,7 @@ class TestNoDevice:
         t.thread.request_restart()
         t.run(1.0)
         assert _has(t.notices, "再起動できません")
-        assert _has(t.notices, "USB を抜いて挿し直して")
+        assert _has(t.notices, "給電アダプタを抜いて")
 
 
 class TestSilentBoardReader:
@@ -330,7 +330,7 @@ class TestSilentBoardReader:
         assert not _has(t.notices, "読んでいません")
         t.deal_hand(self.BROKEN)
         assert _has(t.notices, "ボードの左から 2 台目のリーダー（reader 9）が 2 ハンド続けて 1 枚も札を読んでいません")
-        assert _has(t.notices, "USB を抜いて挿し直して")   # 再起動の命令が無い卓
+        assert _has(t.notices, "給電アダプタを抜いて")   # 再起動の命令が無い卓
 
     def test_a_reading_hand_resets_the_count(self, tmp_path):
         t = Table(tmp_path, device=None)
@@ -641,4 +641,4 @@ class TestProbeTool:
         rc = probe._cmd_restart(argparse.Namespace(wait=5.0), lister=lambda: [NAME],
                                 restarter=lambda _n: False, sleep=lambda _s: None)
         out = capsys.readouterr().out
-        assert rc == 1 and "USB を抜いて挿し直す" in out
+        assert rc == 1 and "給電し直すと再起動" in out

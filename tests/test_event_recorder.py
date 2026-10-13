@@ -120,3 +120,37 @@ def test_audio_envelope_round_trips_position():
     env = event_to_envelope(ev)
     assert env["position"] == "BTN"
     assert event_from_envelope(env) == ev
+
+
+def test_store_fixture_events_match_schema():
+    """店舗で録った記録（開発データの events.jsonl）が schema を通る。新しい parse_flags や kind を足したのに schema に
+    書き忘れると、ここで分かる（10/02 の garbled_digits は schema に無いまま記録していた, 2026-10-13）。"""
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads(_SCHEMA.read_text(encoding="utf-8"))
+    validator = jsonschema.Draft202012Validator(schema)
+    store = Path(__file__).parent / "fixtures" / "store"
+    bad: dict[str, set[str]] = {}
+    for path in sorted(store.glob("*/events.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            env = json.loads(line)
+            for err in validator.iter_errors(env):
+                bad.setdefault(path.parent.name, set()).add(f"{list(err.path)}: {err.message[:80]}")
+    assert not bad, bad
+
+
+def test_every_parse_flag_the_reader_writes_is_in_the_schema():
+    """読み取りが付ける印（audio/recognizer.py の定数と、文字列で付ける印）がすべて schema の parse_flags にある。"""
+    from audio import recognizer
+
+    schema = json.loads(_SCHEMA.read_text(encoding="utf-8"))
+    allowed = set(schema["properties"]["parse_flags"]["items"]["enum"])
+    written = {recognizer.GARBLED_DIGITS, recognizer.GARBLED_CALL, recognizer.BEFORE_CHECK_AROUND,
+               "ambiguous_amount", "multi_action_keywords", "too_many_actions", "amount_only", "check_around",
+               "fuzzy_keyword", "second_ear", "sentence_after_chatter", "phonetic_amount", "legal_amount"}
+    assert written <= allowed, written - allowed
+    env = event_to_envelope(AudioEvent(action="bet", amount=7000, timestamp=1.0, raw_text="ベット7千ドップ",
+                                       parse_flags=(recognizer.GARBLED_DIGITS,)))
+    jsonschema = pytest.importorskip("jsonschema")
+    assert not list(jsonschema.Draft202012Validator(schema).iter_errors(env))

@@ -121,6 +121,9 @@ _FLOP_SLOTS: tuple[int, ...] = (1, 2, 3)
 DEFAULT_COMMIT_SEC = 2.0    # ボードの札はこの秒数載り続けてから確定（フォールドした札の通過を除く）
 DEFAULT_GAP_SEC = 1.5       # この秒数までの途切れは「載り続けている」とみなす（間欠読みの許容）
 DEFAULT_RELEASE_SEC = 6.0   # 前の札がこの秒数以上見えないときだけ、新しい札で差し替える（配り直し）
+# 読み取り装置を再起動する案内。店の卓の ESP32 は給電アダプタから電源を取るので、PC との USB を抜き挿ししても
+# 再起動しない（2026-10-06 の店舗: 給電アダプタを抜いて再起動したら真ん中のボードのリーダーが読めた）
+_POWER_CYCLE = "給電アダプタを抜いて数秒待ってから挿し直してください（給電アダプタで動かしている卓では、USB の抜き挿しでは再起動しません）"
 DEFAULT_REDEAL_WINDOW_SEC = 30.0  # ボードの札が消えてからこの秒数以内に同じリーダーへ置かれた札は差し直し
 DEFAULT_REDEAL_CONFIRM_SEC = 3.0  # ボードの差し直しで、前の札が見えないことを確かめる秒数
 # フロップは 3 枚が同時に出る（オーナー, 2026-09-29）。フロップの最初の札からこの秒数より後に見え始めた札は、
@@ -508,7 +511,7 @@ class RFIDThread(threading.Thread):
 
     def _remedy(self) -> str:
         if self._device is None:
-            return "読み取り装置（ESP32）の USB を抜いて挿し直してください（卓に札が無いときに）。"
+            return f"読み取り装置（ESP32）の{_POWER_CYCLE}（卓に札が無いときに）。"
         if self._auto_restart and not self._auto_gave_up:
             return "卓に札が無くなったら読み取り装置を自動で再起動します（すぐなら rr）。"
         return "卓に札が無いときに rr で読み取り装置を再起動できます（直らなければ配線・電源）。"
@@ -617,8 +620,7 @@ class RFIDThread(threading.Thread):
             except queue.Empty:
                 return
             if self._device is None:
-                self._notice("RFID: この読み取りでは読み取り装置を再起動できません。読み取り装置（ESP32）の USB を"
-                             "抜いて挿し直してください。")
+                self._notice(f"RFID: この読み取りでは読み取り装置を再起動できません。読み取り装置（ESP32）の{_POWER_CYCLE}。")
             elif self._restart_phase is not None:
                 self._notice("RFID: いま読み取り装置を再起動しています。", logging.INFO)
             elif self._manual_pending:
@@ -670,7 +672,7 @@ class RFIDThread(threading.Thread):
                            "installer\\rfid_relay_task.ps1 をもう一度実行して、中継を新しい版で動かし直してください。")
             elif any(st == "old_firmware" for st in statuses.values()):
                 message = ("⚠ RFID: 読み取り装置のファームウェアに再起動の命令がありません（古い版）。読み取り装置"
-                           "（ESP32）の USB を抜いて挿し直してください（ファームウェアを書き換えるとロガーから再起動できます）。")
+                           f"（ESP32）の{_POWER_CYCLE}。ファームウェアを書き換えるとロガーから再起動できます。")
             else:
                 message = "⚠ RFID: 読み取り装置に再起動の命令を送れませんでした。USB のつながりを確かめてください。"
             self._notice(message)

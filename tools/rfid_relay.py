@@ -198,7 +198,9 @@ def cmd_restart(args: argparse.Namespace) -> int:
     if not result.get("ok"):
         per = result.get("results") or {}
         if per and all(v is False for v in per.values()):
-            print("読み取り装置のファームウェアに再起動の命令がありません（古い版）。USB を抜いて挿し直してください。")
+            print("読み取り装置のファームウェアに再起動の命令がありません（古い版）。読み取り装置（ESP32）の"
+                  "給電アダプタを抜いて数秒待ってから挿し直してください（給電アダプタで動かしている卓では USB の抜き挿しでは"
+                  "再起動しません）。")
         else:
             print(f"再起動の命令を送れませんでした: {per or result}")
         return 1

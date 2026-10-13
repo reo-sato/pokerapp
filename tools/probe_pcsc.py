@@ -493,7 +493,8 @@ def _cmd_restart(
         print(f"  - {name!r}  {state}")
     if not any(ok is True for ok in results.values()):
         if any(ok is False for ok in results.values()):
-            print("\n古い firmware は USB を抜いて挿し直すと再起動します。")
+            print("\n古い firmware は給電し直すと再起動します（給電アダプタで動かしている卓は給電アダプタを、USB だけで動かして"
+              "いる卓は USB を抜き挿し）。")
         return 1
     print("読み取り装置を再起動しています…（全リーダーが数秒読めません）")
     sleep(2.0)                                      # USB から外れるまで（すぐ聞くと古い列挙が残っている）
