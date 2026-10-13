@@ -174,6 +174,47 @@ class TestAmountOnly:
         assert tb.played()[-2:] == [("flop", 4, "bet", 600), ("flop", 5, "call", 600)]
 
 
+class TestRecap:
+    """ディーラーがここまでのアクションを言い直す（「センテン、コール」= 1000 のレイズとそのコール, 店舗 2026-10-06
+    05cccd6c ハンド 7 のオーナーのメモ）: いまのベットと同じ額のあと `RECAP_SEC` のうちの「コール」は記録しない。"""
+
+    def test_the_bet_and_its_call_said_again(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("1000")                                    # 席6（BTN）
+        tb.say("コール")                                  # 席4（SB）
+        tb.now += 4.0
+        tb.say("千点")                                    # 言い直し（いまのベットと同じ額）
+        tb.now += 1.5
+        tb.say("コール")                                  # 言い直し（席4 のコール）
+        assert tb.played() == [("preflop", 6, "raise", 1000), ("preflop", 4, "call", 900)]
+        assert "言い直し" in tb.notices[-1]
+        tb.say("レイズ 3500")
+        assert tb.played()[-1] == ("preflop", 5, "raise", 3500)
+
+    def test_a_call_after_the_bet_said_again_right_away_is_the_next_players(self, tmp_path):
+        # 賭けのすぐあとの言い直しの次の「コール」は次の人のコール（店舗 7b897671 ハンド 3・d0f055fb ハンド 8）
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("1000")
+        tb.now += 1.0
+        tb.say("千点")
+        tb.now += 1.5
+        tb.say("コール")
+        assert tb.played()[-1] == ("preflop", 4, "call", 900)
+
+    def test_a_late_call_is_not_part_of_it(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("1000")
+        tb.say("コール")
+        tb.now += 4.0
+        tb.say("千点")
+        tb.now += 5.0                                     # RECAP_SEC より後
+        tb.say("コール")
+        assert tb.played()[-1] == ("preflop", 5, "call", 800)
+
+
 class TestCheckAround:
     def test_everyone_left_checks(self, tmp_path):
         tb = _Table(tmp_path)
@@ -339,8 +380,8 @@ class TestStoreHandB:
 
     def test_check_around_after_a_comma(self):
         events = parse_actions("チェック、チェック、アランド")
-        assert [(e.action, e.parse_flags) for e in events] == [
-            ("check", ()), ("check", ("check_around",))]
+        assert [(e.action, e.parse_flags) for e in events] == [   # 直前のチェックには印（読み方の情報）
+            ("check", ("before_check_around",)), ("check", ("check_around",))]
 
     def test_stock_hallucination(self):
         assert is_prompt_echo("次回もお楽しみに!")

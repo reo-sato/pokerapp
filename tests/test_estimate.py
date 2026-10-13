@@ -19,7 +19,13 @@ from tools.estimate import (  # noqa: E402
 )
 from tools.simulate import Noise, ear_form, observe, run, simulate_session  # noqa: E402
 
-logging.disable(logging.CRITICAL)
+@pytest.fixture(autouse=True)
+def _quiet():
+    """推定の候補の再生で出るエンジンのログを止める（このファイルのテストのあいだだけ。モジュールの頭で止めると
+    ほかのファイルのログの検査まで止まる = 監査 1 D14）。"""
+    logging.disable(logging.CRITICAL)
+    yield
+    logging.disable(logging.NOTSET)
 
 
 def _ear(text: str, cands: list[tuple[str, float]], logp: float = -0.5) -> dict:
@@ -69,6 +75,16 @@ class TestOptions:
         rescued = {"utterance_start_ts": 3.0, "text": "ご視聴ありがとうございました。", "no_speech": False,
                    "ear": _ear("六百", [("六百", -0.6), ("二百", -9.0)])}
         assert utterance_options(rescued, params)[0].source == "rescue"
+
+    def test_an_ear_kept_only_for_the_record_is_not_used(self):
+        """2026-10-07 からライブは全発話を第 2 の耳で聞いて記録する。推定器は、ライブが使った発話の耳だけを使う
+        （`ear_wanted` が偽の耳は無いものとする。`ear_wanted` の無い古い記録は、耳があれば使った）。"""
+        row = {"utterance_start_ts": 1.0, "text": "ご覧いただきありがとうございます。", "no_speech": False,
+               "ear": _ear("る空", [("コール", -5.3), ("千", -12.0)], logp=-0.5)}
+        assert utterance_options({**row, "ear_wanted": True}) == utterance_options(row)
+        opts = utterance_options({**row, "ear_wanted": False})
+        assert [(o.source, o.logp) for o in opts] == [("drop", 0.0)]          # 耳の無い発話と同じ
+        assert opts == utterance_options({k: v for k, v in row.items() if k != "ear"})
 
     def test_the_live_rule_is_the_default_when_the_ears_agree(self):
         row = {"utterance_start_ts": 1.0, "text": "のっぴょく", "no_speech": False,
@@ -130,6 +146,7 @@ class TestSimulation:
         result = run(noise, sessions=1, hands=6, seats=6)
         assert result.default_exact == result.estimate_exact == result.hands == 6
 
+    @pytest.mark.slow                    # シミュレーションの 1 セッション（約 10 秒）
     def test_the_estimator_rescues_hallucinated_actions(self):
         """幻聴になった発話を、第 2 の耳の候補とハンドの筋から戻す（シミュレーションの 1 セッション）。"""
         noise = Noise(misread=0, hallucinate=0.2, garble=0, missing=0, chatter=0, ear_agree=0.3)
@@ -150,6 +167,7 @@ def results():
     return out
 
 
+@pytest.mark.slow                        # 店舗の 2 セッションを推定する fixture（約 7 秒）を共有する
 class TestStoreFixtures:
     """店舗の真のアクションのあるハンドで、推定が読み直し（既定）より悪くならない（ADR-0056 追記 1 の S3 の条件）。"""
 

@@ -114,3 +114,31 @@ def test_bench_format():
                      default_rows=[158, 188], estimate_rows=[159, 188], better=["7b897671#3"])
     text = "\n".join(format_result(r))
     assert "全部正しいハンド 読み直し 12/18（67%） → 推定 13/18（72%）" in text and "7b897671#3" in text
+
+
+def test_record_check_shows_new_unflagged_errors_and_changed_ground_truth():
+    """テスト方針 2026-10-08: 物差しは前の記録と比べて、新しい要確認なしの誤り（合格を左右する数）と、真のアクションが
+    変わったセッション（点の変化がコードでなく真のアクションの直しから来ることがある）を出す。"""
+    from tools.bench_hands import V1Result, format_record_check
+
+    record = {"unflagged_errors": {"店舗（実卓）": ["a#1", "b#2"]}, "gt": {"a": "11111111", "b": "22222222"}}
+    r = V1Result("店舗（実卓）", unflagged_errors=["b#2", "c#3"])
+    lines, worse = format_record_check([r], record, {"a": "11111111", "b": "33333333", "c": "44444444"})
+    text = "\n".join(lines)
+    assert worse
+    assert "要確認なしの誤り 2 → 2（新しく 1: c#3・なくなった 1: a#1）" in text
+    assert "変わった b・増えた c" in text
+    lines, worse = format_record_check([V1Result("店舗（実卓）", unflagged_errors=["a#1"])], record,
+                                       {"a": "11111111", "b": "22222222"})
+    assert not worse and lines[-1] == "真のアクション: 前の記録と同じ"
+
+
+def test_the_bench_record_matches_the_current_ground_truth():
+    """開発データの真のアクションを直したら、物差しを回して前の記録も書き直す（`bench_hands.py --update-record`）。
+    直しが記録に残らないまま点だけ変わるのを防ぐ。"""
+    import json
+
+    from tools.bench_hands import RECORD, store_gt_fingerprints
+
+    record = json.loads(RECORD.read_text(encoding="utf-8"))
+    assert record["gt"] == store_gt_fingerprints()

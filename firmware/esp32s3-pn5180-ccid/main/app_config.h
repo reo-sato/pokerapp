@@ -134,6 +134,15 @@ static const pn5180_reader_cfg_t PN5180_READERS[] = {
 //   （狙い撃ち + 簡略サイクルで 1 周が縮んだぶんを遅延の短縮に回す, ISSUE-0021）。
 #define CARD_POLL_INTERVAL_MS 50
 
+// ───────── 実行中の不調の見張り（契約 v1.11 §6）─────────
+// 起動のときに初期化できた reader でも、途中で SPI / BUSY が答えなくなる（chip が固まる・BUSY 線が浮く）と、
+// inventory は「札なし」で返り続け、host からは札が載っていないのと区別できない（店舗 2026-10-06: 真ん中の
+// ボードの reader が 1 時間読まず、ESP32 の再起動で直った）。RF の ON / OFF・RF 設定のロードがこの回数続けて
+// 失敗した reader は、使える reader の一覧（Get UID の P2=0xFE）から外す（host が知らせて、卓に札が無いときに
+// 再起動の命令 P2=0xFD を送る）。成功した inventory で 0 に戻る。1 周 ≈ 300 ms なので 20 回 ≈ 6 秒。
+// fast 経路（PN5180_FAST_INVENTORY=1）だけで数える。
+#define PN5180_FAULT_STREAK_LIMIT 20
+
 // ───────── poll 周期の計測ログ ─────────
 // この間隔（ms）ごとに「1 周の min/avg/max・最長 reader・ready reader 数」を INFO で出して統計を
 // リセットする。11 台化したときに 1 周が何 ms かかるか（= カード検出の遅れ）を実測するための計測。

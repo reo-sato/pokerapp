@@ -184,7 +184,7 @@
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 12,
+    "action_correct": 15,
     "action_total": 16,
     "winner_match": true,
     "board_match": true

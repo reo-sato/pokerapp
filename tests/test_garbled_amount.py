@@ -147,6 +147,9 @@ class TestRecord:
                 {"utterance_start_ts": 4.0, "text": "ナイス"}]
         assert [[e.amount for e in read_utterance(row)] for row in rows] == [[1200], [1200], [], []]
         assert read_utterance(rows[0], text="コール")[0].action == "call"    # 文を置き換えた読み直しには重ねない
+        # 記録だけの耳（ライブが使わなかった発話, 2026-10-07）は再生でも使わない = 耳の無い発話と同じ
+        assert [e.amount for e in read_utterance({**rows[1], "ear_wanted": True})] == [1200]
+        assert read_utterance({**rows[1], "ear_wanted": False}) == []           # rows[2] と同じ
 
     def test_the_v0_estimator_takes_it_as_the_default(self):
         from tools.estimate import utterance_options

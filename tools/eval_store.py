@@ -48,14 +48,16 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from audio.recognizer import is_implausibly_long, is_prompt_echo, is_question, parse_actions  # noqa: E402
-from audio.second_ear import agreed_candidate, apply_ear  # noqa: E402
+from audio.second_ear import agreed_candidate, apply_ear, used_ear  # noqa: E402
 from core.events import AudioEvent, RFIDEvent  # noqa: E402
 from core.game_state import PlayerState  # noqa: E402
 from integration.replay import load_events, replay_events  # noqa: E402
 from integration.world_replay import PresenceTimeline  # noqa: E402
 from tools.measure_capture_accuracy import (  # noqa: E402
     _align_actions,
+    excluded_reason,
     hand_fully_correct,
+    is_excluded,
     measure_hand,
     measure_session,
     row_correct,
@@ -276,7 +278,7 @@ def script_order_events(script: dict, marks: list[dict], transcripts: list[dict]
         text = (row.get("text") or "").strip()
         parsed = [] if _is_noise(row, text) else parse_actions(
             text, confidence=row.get("confidence"), utterance_start_ts=start)
-        parsed, _ = apply_ear(parsed, text, row.get("ear"), question=is_question(text), utterance_start_ts=start,
+        parsed, _ = apply_ear(parsed, text, used_ear(row), question=is_question(text), utterance_start_ts=start,
                               confidence=row.get("confidence"))
         for i, ev in enumerate(parsed):
             ev.timestamp = float(start) + 0.001 * (i + 1)
@@ -343,7 +345,7 @@ def reparse_events(events: list, transcripts: list[dict], texts: Optional[dict[A
         parsed = [] if _is_noise(row, text) else parse_actions(
             text, confidence=row.get("confidence"), utterance_start_ts=start)
         if not overridden:      # 第 2 の耳が無い発話も（意味のない単発の語を音の近さで額と読む, ライブと同じ）
-            parsed, _ = apply_ear(parsed, text, row.get("ear"), question=is_question(text), utterance_start_ts=start,
+            parsed, _ = apply_ear(parsed, text, used_ear(row), question=is_question(text), utterance_start_ts=start,
                                   confidence=row.get("confidence"))
         at = live_time.get(start, row.get("heard_at") or start)
         for ev in parsed:
@@ -459,7 +461,7 @@ def heard_tokens(transcripts: list[dict], window: tuple[float, float]) -> list[t
         at = row["utterance_start_ts"]
         parsed = [] if _is_noise(row, text) else parse_actions(
             text, confidence=row.get("confidence"), utterance_start_ts=at)
-        parsed, _ = apply_ear(parsed, text, row.get("ear"), question=is_question(text), utterance_start_ts=at,
+        parsed, _ = apply_ear(parsed, text, used_ear(row), question=is_question(text), utterance_start_ts=at,
                               confidence=row.get("confidence"))
         out.extend(t for t in (_speech_token(e.action, e.amount) for e in parsed) if t is not None)
     return out
@@ -727,7 +729,13 @@ def _pct(num: int, den: int) -> Optional[float]:
 
 
 def evaluate_against_truth(truth: dict, captured_hands: list[dict]) -> dict:
-    """真のアクションとの一致率・要確認の精度と再現率・出所ごとの正誤・聞き取りの自信。"""
+    """真のアクションとの一致率・要確認の精度と再現率・出所ごとの正誤・聞き取りの自信。
+
+    「評価から外す」のハンド（オーナーのメモ・入力画面の印）は数えず、理由つきで `excluded` に出す。
+    """
+    excluded = [{"hand_id": h.get("hand_id"), "reason": excluded_reason(h)}
+                for h in truth.get("hands") or [] if is_excluded(h)]
+    truth = {**truth, "hands": [h for h in truth.get("hands") or [] if not is_excluded(h)]}
     captured = {"hands": captured_hands}
     acc = measure_session(captured, truth)
     cap_by_id = {h.get("hand_id"): h for h in captured_hands}
@@ -763,6 +771,7 @@ def evaluate_against_truth(truth: dict, captured_hands: list[dict]) -> dict:
     return {
         "hands": len(truth.get("hands") or []),
         "exact_hands": exact,
+        "excluded": excluded,
         # 記録を見ずに入れたハンドとそれ以外の一致率（大きく違えば、入れる人が記録に引きずられている）
         "blind_hands": len(blind_ids),
         "blind_accuracy": _pct(*split[True]), "seen_accuracy": _pct(*split[False]),
@@ -1103,8 +1112,10 @@ def compare_rows(gt_hand: Optional[dict], live_hand: Optional[dict], rep_hand: O
 
 # ――― 回帰テスト用の書き出し ―――
 
-# fixture に残す書き起こしの項目（いまの読み取りで読み直して再生するのに要るものだけ）
-_FIXTURE_TRANSCRIPT_KEYS = ("utterance_start_ts", "heard_at", "text", "audio_sec", "confidence", "no_speech", "ear")
+# fixture に残す書き起こしの項目（いまの読み取りで読み直して再生するのに要るものだけ。`ear_wanted` = ライブが第 2 の
+# 耳を使った発話か = 読み直しで使う耳, `second_ear.used_ear`）
+_FIXTURE_TRANSCRIPT_KEYS = ("utterance_start_ts", "heard_at", "text", "audio_sec", "confidence", "no_speech", "ear",
+                            "ear_wanted")
 
 
 def _baseline(truth: dict, hand: Optional[dict]) -> dict:
@@ -1288,6 +1299,10 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
             print("  方式ごとに読み直すと変わるハンド（書き起こしの読み直しと比べて）: " + " / ".join(changed))
         if r.truth:
             print(f"  真のアクション: {r.truth['record']['hands']} ハンド")
+            excluded = r.truth["record"].get("excluded") or []
+            if excluded:
+                print(f"  数えないハンド {len(excluded)}: "
+                      + " ／ ".join(f"ハンド {e['hand_id']}（{e['reason']}）" for e in excluded))
             for key, label in labels:
                 if key not in r.truth:
                     continue

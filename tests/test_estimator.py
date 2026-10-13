@@ -181,6 +181,97 @@ class TestDepartures:
         assert q > s
 
 
+class TestDepartureEvidence:
+    """店舗 2026-10-06 の見直し（Fable 5.1 の助言 P2〜P5）: 聞き違いのコールと札の離脱の組・片付けの一瞬の読み取り・
+    フォールドのあとも札が残る・ベットの無いところのフォールド・記録上の離脱は読み取りのラグで語のあとになりやすい。"""
+
+    def test_a_blip_does_not_end_an_absence(self):
+        seats = {s: [SeatObservation(T0, True, None, None)] for s in (4, 5, 6)}
+        seats[5] += [SeatObservation(T0 + 30.5, False, T0 + 30.0, None),
+                     SeatObservation(T0 + 50.0, True, None, None),          # 片付けで 0.1 秒だけ読めた
+                     SeatObservation(T0 + 50.1, False, T0 + 50.1, None)]
+        presence = PresenceTimeline(seats)
+        assert presence.departures(T0, T0 + 120) == [(5, T0 + 30.0, T0 + 50.0), (5, T0 + 50.1, None)]
+        assert presence.departures(T0, T0 + 120, blip_sec=1.0, settle_sec=3.0) == [(5, T0 + 30.0, None)]
+        _, flags = TestDepartures()._terms(_estimator(presence), 5, T0 + 30.0, caller=4)
+        assert flags == []
+
+    def test_a_flicker_is_still_a_flicker(self):
+        """短い不在のあとの短い読み取り（読み取りのちらつき）はつなげない。"""
+        seats = {5: [SeatObservation(T0, True, None, None), SeatObservation(T0 + 10.5, False, T0 + 10.0, None),
+                     SeatObservation(T0 + 11.0, True, None, None), SeatObservation(T0 + 11.2, False, T0 + 11.2, None),
+                     SeatObservation(T0 + 12.0, True, None, None)]}
+        assert PresenceTimeline(seats).departures(T0, T0 + 60, blip_sec=1.0, settle_sec=3.0) == [
+            (5, T0 + 10.0, T0 + 11.0), (5, T0 + 11.2, T0 + 12.0)]
+
+    def test_cards_still_on_the_seat_long_after_the_fold(self):
+        """フォールドから 10 秒たっても札が席にある（店舗の真のフォールド 0/172）は、離脱が見えないだけより重い。"""
+        est = _estimator(_presence({}))
+        _, flags = TestDepartures()._terms(est, 4, T0 + 30.0, caller=5)
+        hand = {"players": [{"seat": 4}, {"seat": 5}, {"seat": 6}], "winner_source": "fold"}
+        betting = [_Row("river", 6, "bet", T0 + 25, _word("bet", T0 + 25, T0 + 26, amount=2000)),
+                   _Row("river", 4, "fold", T0 + 30.0, _word("fold", T0 + 30.0, T0 + 30.8), source="spoken_fold")]
+        terms = dict(est._departure_terms(_window(), hand, betting, []))
+        assert terms["席4 はフォールドのあとも札が席に載っていた"] == pytest.approx(math.log(PARAMS["p_present_after_fold"]))
+        assert "札が離れないフォールド（river 席4）" in flags
+        ending = HandWindow(hand_id=1, start=T0, end=T0 + 120.0,
+                            base={"players": hand["players"], "button_seat": 6, "ended_at": _iso(T0 + 35.0)})
+        short = dict(est._departure_terms(ending, dict(hand, ended_at=_iso(T0 + 35.0)), betting, []))
+        assert short["席4 のフォールドに札の離脱が無い"] == pytest.approx(math.log(PARAMS["p_nodepart"]))
+
+    def test_a_momentary_read_after_the_fold_is_not_cards_staying(self):
+        """フォールドの 10 秒後に一瞬だけ読めた（片付けの札がかすめた）のは「札が残っていた」にしない。"""
+        seats = {s: [SeatObservation(T0, True, None, None)] for s in (4, 5, 6)}
+        seats[4] = [SeatObservation(T0, True, None, None), SeatObservation(T0 + 25.5, False, T0 + 25.0, None),
+                    SeatObservation(T0 + 39.8, True, None, None), SeatObservation(T0 + 40.3, False, T0 + 40.3, None)]
+        est = _estimator(PresenceTimeline(seats))
+        assert est._present_at(4, T0 + 40.0, T0 + 120.0) is False
+        assert est._present_at(5, T0 + 40.0, T0 + 120.0) is True
+        assert est._present_at(5, T0 + 40.0, T0 + 30.0) is False          # ハンドの終わりのあと
+
+    def test_an_open_fold_is_unlikely(self):
+        est = _estimator()
+        hand = {"players": [{"seat": 4}, {"seat": 5}, {"seat": 6}], "winner_source": "fold"}
+        open_fold = [_Row("flop", 4, "check", T0 + 20, _word("check", T0 + 20, T0 + 21)),
+                     _Row("flop", 5, "fold", T0 + 25, None, source="rfid_departure", reasons=frozenset({"no_bet"}))]
+        flags: list[str] = []
+        terms = est._action_terms(hand, open_fold, flags)
+        assert ("ベットの無いところのフォールド", math.log(PARAMS["p_open_fold"])) in terms
+        assert "ベットの無いところのフォールド（flop 席5）" in flags
+        facing = [_Row("flop", 4, "bet", T0 + 20, _word("bet", T0 + 20, T0 + 21, amount=400)),
+                  _Row("flop", 5, "fold", T0 + 25, None, source="rfid_departure")]
+        assert not any(name == "ベットの無いところのフォールド" for name, _ in est._action_terms(hand, facing, []))
+
+    def test_a_recorded_departure_after_the_word_is_read_lag(self):
+        """ディーラーは札が離れるのを見てから「フォールド」と言う（オーナー 2026-10-06）。記録上の離脱が語のあとに
+        なるのは読み取りのラグ（3 周続けて読めなかったら離れたとする ≈ 1 秒 + 札がリーダーの近くに残る）なので、
+        語のあとの離脱は、同じだけ前の離脱より起こりやすい。"""
+        est = _estimator(_presence({5: T0 + 31.5}))
+        late, _ = TestDepartures()._terms(est, 5, T0 + 30.0, caller=4)
+        early_est = _estimator(_presence({5: T0 + 28.5}))
+        early, _ = TestDepartures()._terms(early_est, 5, T0 + 30.0, caller=4)
+        assert late > early
+
+    def test_a_garbled_call_word_pairs_with_the_departure(self):
+        garbled = _word("call", T0 + 30.0, T0 + 31.0, "これで終わります")
+        garbled.parse_flags = ("garbled_call",)
+        actions = [_row("river", 6, "bet", T0 + 26, amount=2000),
+                   _row("river", 5, "fold", T0 + 30.1, source="rfid_departure")]
+        rows, unused = align_words(actions, [_word("bet", T0 + 25, T0 + 26, amount=2000), garbled], {})
+        assert rows[1].word is garbled and unused == []
+        far = _row("river", 5, "fold", T0 + 33.0, source="rfid_departure")     # 語の 3 秒あとの離脱は組にしない
+        _, unused = align_words([actions[0], far], [_word("bet", T0 + 25, T0 + 26, amount=2000), garbled], {})
+        assert unused == [garbled]
+
+    def test_a_garbled_call_used_as_a_call_is_not_taken_by_a_fold(self):
+        garbled = _word("call", T0 + 30.0, T0 + 31.0, "コールド")
+        garbled.parse_flags = ("garbled_call",)
+        actions = [_row("river", 5, "fold", T0 + 30.2, source="rfid_departure"),
+                   _row("river", 6, "call", T0 + 31.0, amount=2000)]
+        rows, _ = align_words(actions, [garbled], {})
+        assert rows[0].word is None and rows[1].word is garbled
+
+
 class TestWords:
     def test_the_last_fold_is_often_not_announced(self):
         est = _estimator()
@@ -314,9 +405,46 @@ class TestHandTerms:
         assert [v for n, v in terms if n.startswith("ショーダウンの声")] == [
             pytest.approx(math.log(PARAMS["p_showdown_word"]))]
         assert "ショーダウンの声があるのに全員降りて終わった" in flags and not shown_flags
-        assert shown - folded == pytest.approx(math.log(1 - PARAMS["p_showdown_word"])
+        assert shown - folded == pytest.approx(math.log(PARAMS["p_showdown_heard"])
                                                - math.log(PARAMS["p_showdown_word"]), abs=1e-3)
-        assert quiet - folded == pytest.approx(-math.log(PARAMS["p_showdown_word"]), abs=1e-3)
+        assert quiet - folded == pytest.approx(math.log(1 - PARAMS["p_showdown_word"])
+                                               - math.log(PARAMS["p_showdown_word"]), abs=1e-3)
+
+    def test_a_showdown_without_the_voice_leans_to_a_fold_out(self):
+        """ショーダウンでは必ず「ショウダウン」と言う（オーナー 2026-10-07）: 声が聞き取れないハンドは、全員降りて終わった
+        記録の方が確からしい。声は崩れて聞き取れないこともある（`p_showdown_heard`）ので、要確認の理由にはしない。"""
+        est = _estimator()
+        shown, terms, flags = est.score(_window(), self._hand(winner_source="cards"), [], self._INFO, ())
+        folded, _, _ = est.score(_window(), self._hand(), [], self._INFO, ())
+        assert [v for n, v in terms if n.startswith("ショーダウンの声")] == [
+            pytest.approx(math.log(1 - PARAMS["p_showdown_heard"]))]
+        assert folded - shown == pytest.approx(math.log(1 - PARAMS["p_showdown_word"])
+                                               - math.log(1 - PARAMS["p_showdown_heard"]), abs=1e-3)
+        assert not flags
+
+    @pytest.mark.parametrize("text, ear, at, heard", [
+        ("それでは。", "ソラン", 31.0, True),             # Whisper は崩れ、第 2 の耳は「ショーダウン」に近い音
+        ("ご覧いただきありがとうございます。", "これそら", 30.5, True),   # 定型の幻聴でも第 2 の耳の文は見る
+        ("コール、ショーだ!", "", 30.0, True),
+        ("キングハイですね。", "", 33.0, True),           # 確認型の文の役の名前も手を見せた証拠
+        ("", "エースヒットエースホーム二ペアですね", 34.0, True),
+        ("それでは。", "これだ", 31.0, False),            # フォールドの声（第 2 の耳の「これだ」）
+        ("シート4 レイズ 2千、コール、チェック、フォールド、オールイン、ショーダウン", "", 31.0, False),   # プロンプトの幻聴
+        ("それでは。", "ソラン", 60.0, False),            # 最後のアクションから遠い
+    ])
+    def test_the_garbled_showdown_voice_near_the_end(self, text, ear, at, heard):
+        """崩れた「ショーダウン」の音（Whisper「それでは。」・第 2 の耳「ソラン」）・読み取りの語にならない役の名前を、
+        記録の最後のアクションの前後（3 秒前〜12 秒あと）で見る（直しによらない観測）。"""
+        row = {"utterance_start_ts": T0 + at, "text": text}
+        if ear:
+            row["ear"] = {"text": ear, "logp": -1.0, "candidates": []}
+        est = _estimator(transcripts=(row,))
+        w = _window()
+        w.base["actions"] = [_row("river", 5, "call", T0 + 30.0)]
+        assert est._showdown_sound(w) is heard
+        shown, terms, _ = est.score(w, self._hand(winner_source="cards"), [], self._INFO, ())
+        want = math.log(PARAMS["p_showdown_heard"]) if heard else math.log(1 - PARAMS["p_showdown_heard"])
+        assert [v for n, v in terms if n.startswith("ショーダウンの声")] == [pytest.approx(want)]
 
     def test_an_amount_the_second_ear_also_heard_differently_is_reviewed(self):
         """賭けの額の発話に、選んだ読みから `review_margin` 以内の別の額の読みがあれば要確認（採点は変えない）。
@@ -512,10 +640,48 @@ class TestStreetTime:
         early = [_Row("turn", 4, "fold", T0 + 30, None, source="rfid_departure")]
         on_time = [_Row("flop", 4, "fold", T0 + 30, None, source="rfid_departure")]
         flags: list[str] = []
+        # 札より前は起きない（オーナー 2026-10-07: ターンの札・宣言より前にターンのアクションは言わない）
         assert sum(v for _, v in est._street_time_terms(hand, early, flags)) == pytest.approx(
-            math.log(PARAMS["p_street_time"]))
+            math.log(PARAMS["p_before_street_card"]))
         assert flags == ["turn のアクションが札より前（席4 fold）"]
         assert est._street_time_terms(hand, on_time, []) == []
+        # 札の 2〜3 秒前は弱い項（札が読めるのは宣言から最大 2.5 秒遅れる = `before_card_slack_sec`）
+        near = [_Row("turn", 4, "fold", T0 + 37.5, None, source="rfid_departure")]
+        assert sum(v for _, v in est._street_time_terms(hand, near, [])) == pytest.approx(
+            math.log(PARAMS["p_street_time"]))
+        # 同じ札の前の行は札 1 枚に 1 回（札が遅れて読めた = 1 つの出来事。店舗 09-27 のターン）
+        two = [_Row("turn", 4, "fold", T0 + 30, None, source="rfid_departure"),
+               _Row("turn", 5, "fold", T0 + 33, None, source="rfid_departure")]
+        flags2: list[str] = []
+        assert sum(v for _, v in est._street_time_terms(hand, two, flags2)) == pytest.approx(
+            math.log(PARAMS["p_before_street_card"]))
+        assert len(flags2) == 2
+
+    def test_a_spread_out_flop_keeps_the_soft_term(self):
+        """フロップの札が離れて読めた（3 枚目が 13 秒あと = 札の位置がずれた疑い, 09-29 d0f055fb ハンド 5）ハンドでは、
+        札より前も弱い項のまま。"""
+        est = _estimator()
+        timeline = [{"index": i, "card": c, "dealt_at": _iso(T0 + t)}
+                    for i, c, t in ((1, "Kd", 10), (2, "7c", 10), (3, "9h", 23), (4, "2h", 40))]
+        early = [_Row("turn", 4, "fold", T0 + 30, None, source="rfid_departure")]
+        assert sum(v for _, v in est._street_time_terms({"board_timeline": timeline}, early, [])) == pytest.approx(
+            math.log(PARAMS["p_street_time"]))
+        # フロップの 1 枚が読めていない（読めなかった札の代わりに次の札が数えられたかもしれない）も同じ
+        two = [item for item in timeline if item["index"] != 3]
+        assert sum(v for _, v in est._street_time_terms({"board_timeline": two}, early, [])) == pytest.approx(
+            math.log(PARAMS["p_street_time"]))
+
+    def test_the_dealers_street_call_opens_an_unread_street(self):
+        """ターンの札が読めなかった: ディーラーの「ターンです」をターンの始まりにする（宣言の時刻は札より不確かなので
+        弱い項）。"""
+        transcripts = [{"utterance_start_ts": T0 + 38.0, "heard_at": T0 + 40.0, "text": "ターンです。", "audio_sec": 1.0}]
+        est = _estimator(transcripts=transcripts)
+        timeline = [{"index": i, "card": c, "dealt_at": _iso(T0 + t)}
+                    for i, c, t in ((1, "Kd", 10), (2, "7c", 10), (3, "9h", 10))]
+        early = [_Row("turn", 4, "fold", T0 + 30, None, source="rfid_departure")]
+        assert sum(v for _, v in est._street_time_terms({"board_timeline": timeline}, early, [], _window())) == (
+            pytest.approx(math.log(PARAMS["p_street_time"])))
+        assert est._street_time_terms({"board_timeline": timeline}, early, []) == []   # 窓が無ければ宣言は見ない
 
 
 # ───────────────────────── 店舗の真のアクションのあるハンド（開発データ）─────────────────────────
@@ -537,6 +703,7 @@ def _session(prefix: str) -> tuple[SessionEstimator, dict]:
     return est, {h["hand_id"]: h["truth"] for h in expected["hands"]}
 
 
+@pytest.mark.slow       # 本番と同じ探索の幅で店舗のハンドを推定する（並べて回して合わせて約 3 分。幅は変えない = 監査 1 D2）
 @pytest.mark.parametrize("prefix,hand_id,correct,review", [
     # ボタンの置き忘れ + 「チェック、チェック」の言い直し: 記録の再生では崩れ、推定で丸ごと正しい（直しを使った = 要確認）
     ("9d1d8536", 4, True, True),
@@ -545,6 +712,13 @@ def _session(prefix: str) -> tuple[SessionEstimator, dict]:
     # 聞き違いの「フォールド」と「ヘッドゾップ」がそろって誤りを指す。席4 の札は最後まで離れない → 要確認
     ("027e4b15", 1, False, True),
     ("7b897671", 2, True, False),
+    # 正解には「チェック」（プロンプトの繰り返しの下）・「ベット 1500」・「これで。」= フォールドの 3 つの直しが要る。
+    # 「これで。」は記録を変えない説明の直しで、前は探索で広げなかったので正解に届かなかった（ボタンを動かす誤りが 1 番）
+    ("782c457d", 17, True, True),
+    # プリフロップの「レイズ2千点」は第 2 の耳が「千点」とはっきり聞いた = 1000（額の食い違い）。正解には「ご覧いただき
+    # ありがとうございます。」「ご視聴ありがとうございました。」= コールと、4 つ目の説明の直し「それでは。」= フォールドが
+    # 要る（深さ 3 では届かず、探索のあとの仕上げで足す）
+    ("782c457d", 5, True, True),
 ])
 def test_store_hands(prefix, hand_id, correct, review):
     pytest.importorskip("pokerkit")

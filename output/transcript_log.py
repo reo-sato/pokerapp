@@ -49,10 +49,12 @@ class TranscriptLog:
         }
         ear = getattr(transcript, "ear", None)
         if ear is not None:
-            # 第 2 の耳で聞き直した結果（Whisper が読めなかった発話だけ）と、それで読んだ候補の文（使わなければ null）。
-            # 評価（tools/eval_store.py）は、いまの規則でこれを読み直す
+            # 第 2 の耳で聞いた結果と、それで読んだ候補の文（使わなければ null）。評価（tools/eval_store.py）は、いまの規則で
+            # これを読み直す。2026-10-07 から全発話を聞く: ライブが使った発話か（`ear_wanted`）。偽なら記録だけ
+            # （読み直し・再生・推定器も使わない, `second_ear.used_ear`）
             line["ear"] = ear
             line["ear_text"] = getattr(transcript, "ear_text", None)
+            line["ear_wanted"] = bool(getattr(transcript, "ear_wanted", True))
         try:
             with self._lock:
                 self._path.parent.mkdir(parents=True, exist_ok=True)

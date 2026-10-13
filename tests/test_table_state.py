@@ -17,7 +17,7 @@ import pytest
 from core.event_queue import make_audio_queue, make_rfid_queue
 from core.events import AudioEvent, RFIDEvent
 from core.game_state import GameStateManager, PlayerState
-from core.table_state import DEFAULT_FOLD_HINT_SEC, build_table_state, derive_street
+from core.table_state import DEFAULT_FOLD_HINT_SEC, SeatState, TableState, build_table_state, derive_street
 from integration.engine import IntegrationThread
 from output.json_writer import JsonWriter
 from output.table_state_writer import TableStateWriter
@@ -258,6 +258,27 @@ class TestWriterAndPublish:
         t._publish_table_state()                              # noqa: SLF001
         after = len(writer.history_path.read_text(encoding="utf-8").strip().split("\n"))
         assert after == before
+
+    def test_history_does_not_grow_while_only_seconds_tick(self, tmp_path: Path):
+        """店舗 2026-10-06〜07: ボードの札が外れたまま一晩、`board_away_sec` の秒が毎秒変わって履歴が 109 MB になった。
+        秒だけが動くあいだは 1 行のまま。どの札が外れたか・数える前の札が変わったら書く。スナップショットは毎回書く。"""
+        writer = TableStateWriter(tmp_path, "tick")
+
+        def state(sec: float, away: dict, pending: list) -> TableState:
+            seat = SeatState(seat=1, dealt_in=True, present=False, cards=["Ah", "Kd"], away_sec=sec,
+                             likely_folded=True)
+            return TableState(session_id="tick", hand_id=3, updated_at=f"t{sec}", seats=[seat],
+                              board=["2c", "7d", "9s"], board_away_sec=away, board_pending=pending)
+
+        for i in range(60):
+            writer.publish(state(30.0 + i, {"9s": 10.0 + i}, [{"card": "Th", "sec": 1.0 + i, "swap": False}]))
+        lines = writer.history_path.read_text(encoding="utf-8").strip().split("\n")
+        assert len(lines) == 1
+        snapshot = json.loads(writer.snapshot_path.read_text(encoding="utf-8"))
+        assert snapshot["board_away_sec"] == {"9s": 69.0}            # モニタには秒が届く
+        writer.publish(state(91.0, {"9s": 71.0, "7d": 1.0}, [{"card": "Th", "sec": 62.0, "swap": False}]))
+        writer.publish(state(92.0, {"9s": 72.0, "7d": 2.0}, [{"card": "Th", "sec": 63.0, "swap": True}]))
+        assert len(writer.history_path.read_text(encoding="utf-8").strip().split("\n")) == 3
 
     def test_fold_shows_up_without_any_new_event(self, tmp_path: Path):
         """札が外れても RFIDEvent は出ない。定期 publish で有効席が更新されること。"""

@@ -66,10 +66,24 @@ config の記載順で決まるため。1 台に複数枚載ったぶんの左�
 
 既定値（`commit_sec=0` / `release_sec=None`）は従来の挙動（最初に見えた瞬間に確定・ハンド内は
 append-only・差し替えは明示の訂正コマンドだけ）で、`tools/probe_pcsc.py` の検査が使う。
+
+**読み取り装置（ESP32）の再起動（店舗 2026-10-06, 契約 v1.11 §6）**: 真ん中のボードのリーダーが 1 時間「札なし」と
+答え続け（エラーは出ない）、読み取り装置の再起動で直った。`device`（`AutoRFIDSource`）を渡すと:
+
+- 使えるリーダーの一覧（firmware が起動のときに初期化できた・いまも答える reader）を `READY_CHECK_SEC` おきに聞き、
+  設定のリーダーが一覧に無ければ知らせる（`on_notice`）。
+- **ボードのリーダーの見張り**: ボードに 3 枚以上配ったハンドで 1 枚も読まなかったボードのリーダー（いちばん右は 4 枚
+  以上のハンドだけ数える）が `SILENT_HANDS` ハンド続いたら知らせる（店舗 10/06 の健全な 59 ハンドでは、どの
+  ボードのリーダーも毎ハンド札を読んでいた。不調の 4 ハンドは真ん中が 1 枚も読まなかった）。一覧に出ない不調用。
+- `request_restart()`（CLI の `rr`）: 卓に札が無くなったら再起動を頼み、つなぎ直して一覧を聞き直す。
+- `auto_restart`: 使えないリーダーがあり、卓に札が無い状態が `AUTO_RESTART_EMPTY_SEC` 続いたら自動で頼む
+  （1 つの不調につき `AUTO_RESTART_MAX` 回まで）。再起動のあいだは全リーダーが読めないので、卓に札が無いとき
+  （ハンドの間）だけにする。
 """
 from __future__ import annotations
 
 import logging
+import queue
 import threading
 import time
 from dataclasses import dataclass, field
@@ -131,6 +145,19 @@ _PENDING_GAP_SEC = 3.0
 # 見て戻した札は測り直さない。
 _CARD_SINCE_FORGET_SEC = 10.0
 
+# ――― 読み取り装置（ESP32）の見張りと再起動（契約 v1.11 §6, 店舗 2026-10-06）―――
+READY_CHECK_SEC = 10.0          # 使えるリーダーの一覧を聞く間隔
+SILENT_HANDS = 2                # ボードのリーダーがこのハンド数続けて 1 枚も読まなければ知らせる
+_SILENT_EVAL_EMPTY_SEC = 3.0    # 卓に札が無い状態がこの秒数続いたら、そのハンドのボードのリーダーを数える
+RESTART_EMPTY_SEC = 2.0         # rr: 卓に札が無い状態がこの秒数続いたら再起動を頼む
+AUTO_RESTART_EMPTY_SEC = 10.0   # 自動: 使えないリーダーがあり、卓に札が無い状態がこの秒数続いたら頼む
+AUTO_RESTART_MAX = 2            # 自動の再起動は 1 つの不調につきこの回数まで
+AUTO_RESTART_GAP_SEC = 60.0     # 自動の再起動の間隔
+RESTART_SETTLE_SEC = 2.0        # 再起動を頼んでから、つなぎ直しを試し始めるまで（読み取り装置が USB から外れる時間）
+RESTART_RETRY_SEC = 1.0         # 再起動のあと、つなぎ直し・一覧の問い合わせを試す間隔
+RESTART_RECONNECT_SEC = 40.0    # 再起動のあと、つながるまで待つ上限
+RESTART_READY_SEC = 20.0        # つながったあと、使えるリーダーの一覧が届くまで待つ上限
+
 
 @dataclass
 class _Run:
@@ -181,6 +208,9 @@ class RFIDThread(threading.Thread):
         flop_window_sec: Optional[float] = None,
         reconnect_sec: Optional[float] = DEFAULT_RECONNECT_SEC,
         reader_present: Optional[Callable[[str], bool]] = None,
+        device: Optional[object] = None,
+        on_notice: Optional[Callable[[str], None]] = None,
+        auto_restart: bool = False,
     ) -> None:
         """
         Args:
@@ -217,6 +247,11 @@ class RFIDThread(threading.Thread):
                               None = 試し直さずに終える（従来）。
             reader_present:   リーダー名が PC/SC に見えているか（試し直すのは見えたときだけ = つながらない間に
                               ログを埋めない）。既定は pyscard の一覧。
+            device:           読み取り装置の管理（`AutoRFIDSource`: `ready_readers(names)` / `restart(names)` /
+                              `manages_connection()` / `restarting()`）。None = 一覧も再起動も扱わない（`rr` は
+                              「できません」と知らせる。ボードのリーダーの見張りは知らせるだけ）。
+            on_notice:        知らせ（日本語 1 文）を出す先（CLI の「● …」）。None = ログだけ。
+            auto_restart:     使えないリーダーがあれば、卓に札が無いときに自動で再起動を頼む。
         """
         super().__init__(daemon=True, name="RFIDThread")
         self._queue = rfid_queue
@@ -308,8 +343,40 @@ class RFIDThread(threading.Thread):
         self._board_replacements: list[tuple[float, int, str, float, str, str]] = []
         self._board_swept = False
 
+        # ――― 読み取り装置の見張りと再起動（契約 v1.11 §6）。poll のスレッドだけが触る（rr は queue で受ける）―――
+        self._device = device
+        self._on_notice = on_notice
+        self._auto_restart = bool(auto_restart)
+        self._bridges: dict[str, tuple] = {}
+        self._restart_requests: "queue.Queue[str]" = queue.Queue()
+        self._manual_pending = False                   # rr を受けて、卓に札が無くなるのを待っている
+        self._raw_present: dict[str, bool] = {}        # reader_id → いま 1 枚以上読んでいるか（記録とは無関係）
+        self._table_empty_since: Optional[float] = None
+        self._deal_board_seen: set[str] = set()        # このハンドで 1 枚でも読んだボードのリーダー
+        self._deal_board_uids: set[str] = set()        # このハンドで位置を与えたボードの札
+        self._silent_streak: dict[str, int] = {}       # ボードのリーダー → 続けて 1 枚も読まなかったハンド数
+        self._silent: set[str] = set()                 # 見張りで「読んでいない」とみたボードのリーダー
+        # 「読んでいない」で再起動したボードのリーダー。また札を読むまで自動の再起動の回数を戻さない（店の置き方で
+        # 読まないだけのときに、2 ハンドごとに再起動を繰り返さない）
+        self._awaiting_proof: set[str] = set()
+        self._unusable: list[str] = []                 # 一覧に無い設定のリーダー（reader_id）
+        self._next_ready_check = 0.0
+        self._next_reconnect = 0.0
+        self._auto_attempts = 0
+        self._auto_gave_up = False
+        self._last_restart_at: Optional[float] = None
+        self._restart_phase: Optional[str] = None      # None | "settle" | "reconnect" | "ready"
+        self._restart_deadline = 0.0
+        self._restart_next_try = 0.0
+        self._restart_reason = ""
+
     def stop(self) -> None:
         self._stop_event.set()
+
+    def request_restart(self) -> None:
+        """読み取り装置の再起動を頼む（CLI の `rr`。別スレッドから呼ばれるので queue で渡す）。卓に札が無くなったら
+        poll のスレッドが命令を送る。"""
+        self._restart_requests.put("manual")
 
     def _reader_names(self) -> set[str]:
         return {str(cfg.get("name", "")) for cfg in self._reader_configs if cfg.get("name")}
@@ -343,7 +410,7 @@ class RFIDThread(threading.Thread):
 
     def run(self) -> None:
         logger.info("RFIDThread started (%d reader(s))", len(self._reader_configs))
-        bridges = self._connect_readers()
+        bridges = self._bridges = self._connect_readers()
         if not bridges:
             self.health = {
                 "state": "no_readers",
@@ -360,7 +427,7 @@ class RFIDThread(threading.Thread):
             )
         while not bridges and not self._stop_event.wait(self._reconnect_sec or 0):
             if any(self._reader_present(name) for name in self._reader_names()):
-                bridges = self._connect_readers()
+                bridges = self._bridges = self._connect_readers()
         if not bridges:
             return
         self.health = {
@@ -372,11 +439,14 @@ class RFIDThread(threading.Thread):
 
         try:
             while not self._stop_event.is_set():
-                for reader_id, (bridge, cfg) in bridges.items():
-                    self._poll_reader(bridge, cfg, reader_id)
+                self.step_device(self._clock())
+                if self._restart_phase is None:
+                    for reader_id, (bridge, cfg) in list(self._bridges.items()):
+                        self._poll_reader(bridge, cfg, reader_id)
+                    self._note_table(self._clock())
                 time.sleep(self._poll_interval)
         finally:
-            for reader_id, (bridge, _) in bridges.items():
+            for reader_id, (bridge, _) in self._bridges.items():
                 bridge.close()
             self.health = {**self.health, "state": "stopped"}
             logger.info("RFIDThread stopped")
@@ -389,12 +459,17 @@ class RFIDThread(threading.Thread):
         """
         uids = bridge_read_uids(bridge)   # 旧 bridge（read_uid のみ）互換シム
         current: set[str] = set(uids)
+        self._raw_present[reader_id] = bool(current)
+        if current and cfg.get("role") == "board":
+            self._deal_board_seen.add(reader_id)
         with self._lock:
             if self._tracking:
                 events = self._poll_tracked(cfg, reader_id, uids, current)
             else:
                 events = self._poll_immediate(cfg, reader_id, uids, current)
         for event in events:
+            if event.role == "board" and event.board_index is not None:
+                self._deal_board_uids.add(event.tag_id)
             self._queue.put(event)
             logger.debug(
                 "RFIDEvent: reader=%s role=%s seat=%s board_index=%s tag=%s card=%r replaces=%r",
@@ -403,6 +478,298 @@ class RFIDThread(threading.Thread):
             )
         if events:
             self.health = {**self.health, "last_event_at": time.time()}
+
+    # ――― 読み取り装置の見張りと再起動（契約 v1.11 §6, 店舗 2026-10-06）―――
+
+    def _notice(self, message: str, level: int = logging.WARNING) -> None:
+        logger.log(level, "%s", message)
+        if self._on_notice is not None:
+            try:
+                self._on_notice(message)
+            except Exception:  # noqa: BLE001 — 知らせの失敗で読み取りを止めない
+                logger.exception("on_notice failed")
+
+    def _reader_desc(self, reader_id: str) -> str:
+        """「ボードの左から 2 台目のリーダー（reader 9）」「席3 のリーダー（reader 2）」。"""
+        try:
+            i = int(reader_id.rsplit("_", 1)[1])
+            cfg = self._reader_configs[i]
+        except (IndexError, ValueError):
+            return reader_id
+        index = _reader_index_of(cfg, i)
+        if cfg.get("role") == "board":
+            k = self._board_order.get(reader_id)
+            where = f"ボードの左から {k + 1} 台目" if k is not None else "ボード"
+        elif isinstance(cfg.get("seat"), int):
+            where = f"席{cfg['seat']} "
+        else:
+            where = reader_id + " "
+        return f"{where}のリーダー（reader {index}）"
+
+    def _remedy(self) -> str:
+        if self._device is None:
+            return "読み取り装置（ESP32）の USB を抜いて挿し直してください（卓に札が無いときに）。"
+        if self._auto_restart and not self._auto_gave_up:
+            return "卓に札が無くなったら読み取り装置を自動で再起動します（すぐなら rr）。"
+        return "卓に札が無いときに rr で読み取り装置を再起動できます（直らなければ配線・電源）。"
+
+    def _table_empty_for(self, now: float) -> float:
+        return 0.0 if self._table_empty_since is None else max(0.0, now - self._table_empty_since)
+
+    def _note_table(self, now: float) -> None:
+        """卓に札が無い時間を測り、ハンドが終わって札が片付いたらそのハンドのボードのリーダーを数える。"""
+        if any(self._raw_present.values()):
+            self._table_empty_since = None
+            return
+        if self._table_empty_since is None:
+            self._table_empty_since = now
+        if now - self._table_empty_since >= _SILENT_EVAL_EMPTY_SEC and len(self._deal_board_uids) >= 3:
+            self._evaluate_board_readers()
+
+    def _evaluate_board_readers(self) -> None:
+        """ボードに 3 枚以上配ったハンドで、1 枚も読まなかったボードのリーダーを数える（いちばん右はターン・リバー
+        だけを読むので 4 枚以上のハンドだけ）。`SILENT_HANDS` ハンド続いたら知らせる（一覧に出ない不調）。"""
+        placed, seen = len(self._deal_board_uids), self._deal_board_seen
+        self._deal_board_uids, self._deal_board_seen = set(), set()
+        board_ids = sorted(self._board_order, key=self._board_order.__getitem__)
+        if len(board_ids) < 2:
+            return                       # 1 台なら記録した札はその台が読んだ
+        newly: list[str] = []
+        for k, rid in enumerate(board_ids):
+            if rid not in self._raw_present:
+                continue                 # つながっていない（別に知らせる）
+            if placed < (4 if k == len(board_ids) - 1 else 3):
+                continue
+            if rid in seen:
+                self._silent_streak[rid] = 0
+                if rid in self._silent or rid in self._awaiting_proof:
+                    self._silent.discard(rid)
+                    self._awaiting_proof.discard(rid)
+                    self._notice(f"RFID: {self._reader_desc(rid)}がまた札を読みました。", logging.INFO)
+                continue
+            self._silent_streak[rid] = self._silent_streak.get(rid, 0) + 1
+            if self._silent_streak[rid] >= SILENT_HANDS and rid not in self._silent:
+                self._silent.add(rid)
+                newly.append(rid)
+        if newly:
+            self._notice(
+                "⚠ RFID: " + "・".join(self._reader_desc(r) for r in newly)
+                + f"が {SILENT_HANDS} ハンド続けて 1 枚も札を読んでいません。" + self._remedy()
+            )
+        self._maybe_reset_attempts()
+
+    def _maybe_reset_attempts(self) -> None:
+        """直った証拠（一覧で全台使える・読んでいなかったリーダーがまた読んだ）があれば、自動の再起動の回数を戻す。"""
+        if not self._unusable and not self._silent and not self._awaiting_proof:
+            self._auto_attempts, self._auto_gave_up = 0, False
+
+    def _ready_map(self) -> Optional[dict]:
+        try:
+            return self._device.ready_readers(sorted(self._reader_names()))
+        except Exception:  # noqa: BLE001
+            logger.exception("使えるリーダーの一覧を聞けませんでした")
+            return None
+
+    def _unusable_from(self, ready: dict) -> list[str]:
+        """一覧（リーダー名 → 使える物理リーダーの番号 / None）に無い設定のリーダー。"""
+        unusable = []
+        for i, cfg in enumerate(self._reader_configs):
+            listed = ready.get(str(cfg.get("name", "")))
+            if listed is not None and _reader_index_of(cfg, i) not in listed:
+                unusable.append(f"reader_{i}")
+        return unusable
+
+    def _set_unusable(self, unusable: list[str], announce: bool = True) -> None:
+        added = [r for r in unusable if r not in self._unusable]
+        changed = unusable != self._unusable
+        self._unusable = unusable
+        self.health = {**self.health, "unusable": [self._reader_desc(r) for r in unusable]}
+        self._maybe_reset_attempts()
+        if not (announce and changed):
+            return
+        if added:
+            self._notice("⚠ RFID: 使えないリーダーがあります: " + "・".join(self._reader_desc(r) for r in added)
+                         + "（札を置いても読めません）。" + self._remedy())
+        elif not unusable:
+            self._notice("RFID: 使えないリーダーはありません（全台使えます）。", logging.INFO)
+
+    def _check_ready(self, now: float) -> None:
+        if self._device is None or now < self._next_ready_check:
+            return
+        self._next_ready_check = now + READY_CHECK_SEC
+        ready = self._ready_map()
+        if not ready or any(v is None for v in ready.values()):
+            return                       # 分からない（旧 firmware・旧中継・起動の途中）= いまの見立てのまま
+        self._set_unusable(self._unusable_from(ready))
+
+    def _device_call(self, name: str) -> bool:
+        method = getattr(self._device, name, None)
+        try:
+            return bool(method()) if callable(method) else False
+        except Exception:  # noqa: BLE001
+            logger.exception("device.%s failed", name)
+            return False
+
+    def _take_restart_requests(self, now: float) -> None:
+        while True:
+            try:
+                self._restart_requests.get_nowait()
+            except queue.Empty:
+                return
+            if self._device is None:
+                self._notice("RFID: この読み取りでは読み取り装置を再起動できません。読み取り装置（ESP32）の USB を"
+                             "抜いて挿し直してください。")
+            elif self._restart_phase is not None:
+                self._notice("RFID: いま読み取り装置を再起動しています。", logging.INFO)
+            elif self._manual_pending:
+                self._notice("RFID: 卓の札が片付くのを待っています（片付けたら再起動します）。", logging.INFO)
+            else:
+                self._manual_pending = True
+                if self._table_empty_for(now) < RESTART_EMPTY_SEC:
+                    self._notice("RFID: 卓に札が載っています。札を片付けたら読み取り装置を再起動します"
+                                 "（数秒、札が読めません）。", logging.INFO)
+
+    def step_device(self, now: float) -> None:
+        """rr の要求・再起動の進み・使えるリーダーの一覧・自動の再起動（poll のスレッドが 1 周ごとに呼ぶ）。"""
+        self._take_restart_requests(now)
+        if self._restart_phase is not None:
+            self._step_restart(now)
+            return
+        self._reconnect_if_needed(now)
+        self._check_ready(now)
+        empty_for = self._table_empty_for(now)
+        if self._manual_pending and empty_for >= RESTART_EMPTY_SEC:
+            self._manual_pending = False
+            self._begin_restart(now, "manual")
+            return
+        if not (self._auto_restart and self._device is not None and not self._auto_gave_up
+                and (self._unusable or self._silent) and empty_for >= AUTO_RESTART_EMPTY_SEC):
+            return
+        if self._last_restart_at is not None and now - self._last_restart_at < AUTO_RESTART_GAP_SEC:
+            return
+        if self._auto_attempts >= AUTO_RESTART_MAX:
+            self._auto_gave_up = True
+            self._notice(f"⚠ RFID: 読み取り装置を {AUTO_RESTART_MAX} 回自動で再起動しても直りません: "
+                         + "・".join(self._reader_desc(r) for r in self._unusable or sorted(self._silent))
+                         + "。配線・電源を確かめてください（rr でもう一度試せます）。")
+            return
+        self._auto_attempts += 1
+        self._begin_restart(now, "auto")
+
+    def _begin_restart(self, now: float, reason: str) -> None:
+        names = sorted(self._reader_names())
+        self._last_restart_at = now
+        try:
+            statuses = self._device.restart(names)
+        except Exception:  # noqa: BLE001
+            logger.exception("読み取り装置に再起動を頼めませんでした")
+            statuses = {name: "failed" for name in names}
+        if not any(st == "accepted" for st in statuses.values()):
+            if any(st == "relay_outdated" for st in statuses.values()):
+                message = ("⚠ RFID: 中継が古い版で、読み取り装置の再起動の命令がありません。管理者で "
+                           "installer\\rfid_relay_task.ps1 をもう一度実行して、中継を新しい版で動かし直してください。")
+            elif any(st == "old_firmware" for st in statuses.values()):
+                message = ("⚠ RFID: 読み取り装置のファームウェアに再起動の命令がありません（古い版）。読み取り装置"
+                           "（ESP32）の USB を抜いて挿し直してください（ファームウェアを書き換えるとロガーから再起動できます）。")
+            else:
+                message = "⚠ RFID: 読み取り装置に再起動の命令を送れませんでした。USB のつながりを確かめてください。"
+            self._notice(message)
+            if reason == "auto":
+                self._auto_gave_up = True      # 命令が無い・送れないなら自動では繰り返さない
+            return
+        self._restart_reason = reason
+        self._restart_phase = "settle"
+        self._restart_deadline = now + RESTART_SETTLE_SEC
+        self._restart_next_try = now
+        # 読んでいなかったリーダーは数え直す（また 2 ハンド読まなければ知らせる）。また読むまでは直ったとみない
+        self._awaiting_proof |= self._silent
+        self._silent, self._silent_streak = set(), {}
+        self._deal_board_seen, self._deal_board_uids = set(), set()
+        # CLI はつながり具合の行（health の state）で「再起動しています」と出す（知らせと二重にしない）
+        self.health = {**self.health, "state": "restarting"}
+        logger.warning("RFID: 読み取り装置を%s再起動しています（数秒、札が読めません）",
+                       "自動で" if reason == "auto" else "")
+
+    def _step_restart(self, now: float) -> None:
+        if self._restart_phase == "settle":
+            if now < self._restart_deadline:
+                return
+            if self._device_call("manages_connection"):
+                # 中継から読んでいる: つなぎ直しは中継がする。一覧が届くのを待つ
+                self._restart_phase = "ready"
+                self._restart_deadline = now + RESTART_RECONNECT_SEC + RESTART_READY_SEC
+            else:
+                # 直接読んでいる: USB が列挙し直すので、接続を捨ててからつなぎ直す
+                for bridge, _cfg in self._bridges.values():
+                    bridge.close()
+                self._bridges = {}
+                self._restart_phase = "reconnect"
+                self._restart_deadline = now + RESTART_RECONNECT_SEC
+            self._restart_next_try = now
+            return
+        if now < self._restart_next_try:
+            return
+        self._restart_next_try = now + RESTART_RETRY_SEC
+        if self._restart_phase == "reconnect":
+            if any(self._reader_present(name) for name in self._reader_names()):
+                bridges = self._connect_readers()
+                if bridges:
+                    self._bridges = bridges
+                    self._restart_phase = "ready"
+                    self._restart_deadline = now + RESTART_READY_SEC
+                    return
+            if now >= self._restart_deadline:
+                self._finish_restart(now, connected=False)
+            return
+        # "ready": 使えるリーダーの一覧が届くのを待つ（起動直後の firmware は初期化が終わるまで返さない）
+        if self._device_call("restarting"):
+            if now >= self._restart_deadline:
+                self._finish_restart(now, connected=False)
+            return
+        ready = self._ready_map()
+        complete = bool(ready) and all(v is not None for v in ready.values())
+        if complete or now >= self._restart_deadline:
+            self._finish_restart(now, connected=True, ready=ready if complete else None)
+
+    def _finish_restart(self, now: float, connected: bool, ready: Optional[dict] = None) -> None:
+        self._restart_phase = None
+        self._next_ready_check = now + READY_CHECK_SEC
+        self._next_reconnect = now + (self._reconnect_sec or 0.0)
+        self._table_empty_since = None
+        self._raw_present = {}
+        state = "running" if connected and (self._bridges or self._device_call("manages_connection")) else "no_readers"
+        self.health = {**self.health, "state": state, "connected": len(self._bridges)}
+        if state != "running":
+            self._notice("⚠ RFID: 読み取り装置の再起動のあと、リーダーにつながりません。USB を確かめてください"
+                         "（つながれば読み始めます）。")
+            return
+        if ready is None:
+            self._notice("RFID: 読み取り装置を再起動しました（使えるリーダーの一覧は届いていません）。", logging.INFO)
+            return
+        unusable = self._unusable_from(ready)
+        self._set_unusable(unusable, announce=False)
+        if not unusable:
+            self._notice(f"RFID: 読み取り装置を再起動しました — {len(self._reader_configs)} 台とも使えます。")
+            return
+        again = self._auto_restart and self._auto_attempts < AUTO_RESTART_MAX
+        self._notice("⚠ RFID: 読み取り装置を再起動しましたが、まだ使えないリーダーがあります: "
+                     + "・".join(self._reader_desc(r) for r in unusable) + "。"
+                     + ("卓に札が無くなったらもう一度試します。" if again
+                        else "配線・電源を確かめてください（rr でもう一度試せます）。"))
+
+    def _reconnect_if_needed(self, now: float) -> None:
+        """再起動のあとにつながらなかったリーダーを、つながるまで試し直す（`reconnect_sec` おき）。"""
+        if self._bridges or self._reconnect_sec is None or now < self._next_reconnect:
+            return
+        self._next_reconnect = now + self._reconnect_sec
+        if not any(self._reader_present(name) for name in self._reader_names()):
+            return
+        bridges = self._connect_readers()
+        if bridges:
+            self._bridges = bridges
+            self.health = {**self.health, "state": "running", "connected": len(bridges)}
+            self._next_ready_check = now
+            self._notice(f"RFID: リーダーにつながりました（{len(bridges)} 台）。", logging.INFO)
 
     def _learn_role(self, cfg: dict, reader_id: str) -> None:
         if cfg.get("role") == "board":

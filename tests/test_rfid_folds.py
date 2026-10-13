@@ -22,7 +22,7 @@ from audio.recognizer import parse_actions
 from core.event_queue import make_audio_queue
 from core.events import RFIDEvent
 from core.game_state import PlayerState
-from integration.engine import FOLDOUT_CONFIRM_SEC, IntegrationThread
+from integration.engine import FOLDOUT_CONFIRM_SEC, POST_FOLDOUT_LISTEN_SEC, IntegrationThread
 from output.json_writer import JsonWriter
 
 pytest.importorskip("pokerkit")
@@ -106,6 +106,7 @@ class _Table:
             self.t._apply_idle_observations()    # noqa: SLF001
             self.t._check_foldout_timeout()      # noqa: SLF001
             self.t._check_showdown_timeout()     # noqa: SLF001
+            self.t._check_post_hand_listening()  # noqa: SLF001
 
     def say(self, text: str, spoken_at: float | None = None) -> None:
         start = self.now if spoken_at is None else spoken_at
@@ -353,6 +354,49 @@ class TestLastFold:
         assert tb.t._betting_over() and tb.hands == []   # noqa: SLF001
 
 
+class TestListeningAfterAFoldOut:
+    """全員フォールドで確定したのに 2 席以上に札が載っていれば（降りた判断が早すぎた疑い）、`POST_FOLDOUT_LISTEN_SEC`
+    まで聞き取りを続けて書き起こしに残す（記録には入れない）。札が片付く・次の配布で止める。"""
+
+    def _fold_out(self, tb: _Table, *, cards_back: bool) -> None:
+        tb.t._listen_gate = threading.Event()       # noqa: SLF001
+        tb.deal()
+        assert tb.t._listen_gate.is_set()           # noqa: SLF001
+        tb.lift(6)
+        tb.tick(tb.now + 3.5)                       # 席6 フォールド
+        tb.lift(4)
+        tb.tick(tb.now + 3.5)                       # 席4 フォールド → 席5 だけ（確定待ち）
+        if cards_back:
+            tb.put(4, HOLES[4])                     # 席4 の札が載ったまま確定する
+        tb.say("フォールド")                        # ディーラーの宣言で確定
+        assert len(tb.hands) == 1 and tb.hands[0].winner_source == "fold"
+
+    def test_it_keeps_listening_while_two_seats_hold_cards(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._fold_out(tb, cards_back=True)
+        gate = tb.t._listen_gate                    # noqa: SLF001
+        assert gate.is_set()
+        tb.say("ベット 2000")                       # ハンドの外 = 記録には入らない
+        assert tb.actions[-1].actor_source == "unresolved" and len(tb.hands) == 1
+        tb.tick(tb.now + POST_FOLDOUT_LISTEN_SEC - 1.0)
+        assert gate.is_set()
+        tb.tick(tb.now + 2.0)
+        assert not gate.is_set()                   # 時間切れ
+
+    def test_it_stops_when_the_cards_are_collected(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._fold_out(tb, cards_back=True)
+        tb.lift(4)
+        tb.lift(5)
+        tb.tick(tb.now + 0.2)
+        assert not tb.t._listen_gate.is_set()      # noqa: SLF001
+
+    def test_a_clean_fold_out_stops_listening_at_once(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._fold_out(tb, cards_back=False)        # 札が残っているのは勝った 席5 だけ
+        assert not tb.t._listen_gate.is_set()      # noqa: SLF001
+
+
 class TestOrderingAndReplay:
     def test_speech_before_the_departure_goes_first(self, tmp_path):
         tb = _Table(tmp_path)
@@ -385,6 +429,95 @@ class TestOrderingAndReplay:
         assert ([(a.street, a.seat, a.action, a.amount) for a in replayed[0].actions]
                 == [(a.street, a.seat, a.action, a.amount) for a in live.actions])
         assert replayed[0].winner_seat == live.winner_seat == 6
+
+
+class TestGarbledCall:
+    """「これで終わりです」はディーラーが言わない = 常にほかの語の聞き違い（オーナー 2026-10-06）。言葉と同じころ
+    （`GARBLED_FOLD_BEFORE_SEC` 前〜`GARBLED_FOLD_AFTER_SEC` 後）に札が離れた席があれば、その席のフォールドの語。
+    そうでなく手番の人がベットに向き合っていればコール（要確認）。どちらでもなければ記録しない。"""
+
+    def _replayed(self, tb: _Table, tmp_path: Path) -> list[tuple]:
+        replayed = replay_events(
+            tb.recorder.events, backend="pokerkit",
+            players=[PlayerState(seat=s, name=f"P{s}", stack=10000) for s in (4, 5, 6)],
+            sb=100, bb=200, session_id="replay", out_dir=tmp_path / "replay",
+            auto_new_hand=True, auto_winner=True, rfid_folds=True,
+        )
+        return [(a.street, a.seat, a.action, a.amount) for h in replayed for a in h.actions]
+
+    def test_facing_a_bet_it_is_a_call(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")                        # 席6
+        tb.say("これで終わりです。")                # 席4
+        assert tb.played()[-1] == ("preflop", 4, "call", 500)
+        record = tb.t._current_actions[-1]          # noqa: SLF001
+        assert record.needs_review and "garbled_call" in record.reason
+
+    def test_cards_leaving_with_the_word_make_it_that_seats_fold(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")
+        tb.lift(4)                                  # 席4 の札が離れた
+        spoken = tb.now + 0.1
+        tb.tick(tb.now + 1.5)
+        tb.say("これで終わりです。", spoken_at=spoken)
+        assert tb.played()[-1] == ("preflop", 4, "fold", 0)
+        tb.say("コール")
+        assert tb.played()[-1] == ("preflop", 5, "call", 400)
+        tb.lift(5)                                  # フロップの前に席5 も降りた → 席6 の勝ち
+        tb.tick(tb.now + 3.5 + FOLDOUT_CONFIRM_SEC)
+        (live,) = tb.hands
+        assert self._replayed(tb, tmp_path) == [(a.street, a.seat, a.action, a.amount) for a in live.actions]
+
+    def test_a_fold_already_taken_from_the_cards_takes_the_word(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")
+        tb.lift(4)
+        lifted = tb.now
+        tb.tick(tb.now + 3.5)                       # 席4 は札の離脱でフォールド
+        assert tb.played()[-1] == ("preflop", 4, "fold", 0)
+        tb.say("これで終わりです。", spoken_at=lifted + 0.5)
+        assert tb.played()[-1] == ("preflop", 4, "fold", 0) and "席4 のフォールド" in tb.notices[-1]
+        tb.say("コール")
+        assert tb.played()[-1] == ("preflop", 5, "call", 400)
+
+    def test_a_bare_fall_word_facing_a_bet_is_a_call(self, tmp_path):
+        # 「フォール」（語尾の「ド」が無い）: 店舗の書き起こしの 3 回とも、札が席に残ったコールだった
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")
+        tb.say("フォール")
+        assert tb.played()[-1] == ("preflop", 4, "call", 500)
+        assert "garbled_call" in tb.t._current_actions[-1].reason   # noqa: SLF001
+
+    def test_a_bare_fall_word_with_the_cards_leaving_is_a_fold(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")
+        tb.lift(4)
+        spoken = tb.now
+        tb.tick(tb.now + 1.5)
+        tb.say("フォール", spoken_at=spoken)
+        assert tb.played()[-1] == ("preflop", 4, "fold", 0)
+
+    def test_cards_leaving_later_are_the_showdown(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")
+        tb.lift(4)
+        tb.tick(tb.now + 1.0)
+        tb.say("これで終わりです。", spoken_at=tb.now - 3.0)   # 札が離れる 2 秒前の言葉 = 別の語
+        assert tb.played()[-1] == ("preflop", 4, "call", 500)
+
+    def test_with_nothing_to_call_it_is_not_recorded(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        for text in ("コール", "コール", "チェック"):
+            tb.say(text)
+        tb.say("これで終わりです。")
+        assert [p for p in tb.played() if p[0] == "flop"] == [] and "記録しませんでした" in tb.notices[-1]
 
 
 def test_recorded_seat_signals_match_the_schema(tmp_path):

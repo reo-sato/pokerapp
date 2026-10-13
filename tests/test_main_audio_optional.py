@@ -174,13 +174,14 @@ class TestCliAudioStatus:
         out = self._report(capsys, {"state": "error", "error": "[Errno -9999] Unanticipated host error",
                                     "device_index": 13, "rdp_audio": True, "missing_names": False})
         assert "リモートデスクトップの音声が接続元の端末に回っている" in out
-        assert "リモート PC で再生" in out and "起動し直して" in out
+        assert "リモート PC で再生" in out and "つなぎ直してください" in out
+        assert "自動で聞き取りを始めます" in out          # 店舗 2026-10-07: 起動し直さなくても開けたら聞き取る
 
     def test_named_mic_not_found(self, capsys):
         out = self._report(capsys, {"state": "error", "missing_names": True,
                                     "error": "設定したマイク（「Wireless Mic Rx」）が見つかりません"})
         assert "設定したマイク（「Wireless Mic Rx」）が見つかりません" in out
-        assert "Bluetooth" in out and "起動し直して" in out and r"tools\audio_check.py list" in out
+        assert "Bluetooth" in out and "自動で聞き取りを始めます" in out and r"tools\audio_check.py list" in out
         assert "開けませんでした" not in out
 
     def test_missing_pyaudio(self, capsys):

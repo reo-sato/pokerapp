@@ -282,9 +282,9 @@ def rank(heard: str) -> list[tuple[float, str, Optional[str]]]:
     return sorted((distance(seq, list(t.morae)), t.word, t.rewrite) for t in _TARGETS)
 
 
-def sounds_like(heard: str, word: str, after: str = "") -> bool:
+def sounds_like(heard: str, word: str, after: str = "", *, compete: bool = True) -> bool:
     """書き起こしの語 heard が、音の近さで word と読めるか（アクションでない語 = ターン・ハンド…のほうが近ければ
-    読まない）。
+    読まない。`compete=False` ならその比べをしない = しきい値の内側なら読む）。
 
     アクションの語（辞書で読めた語 `after`）に続けて言う部分 = 「チェックアラウンド」の「アラウンド」、「チェックレイズ」の
     「レイズ」を、書き起こしゆれ（「ラウンド」「アランド」「アウンド」「ランド」「レース」）を並べずに照合する。
@@ -302,7 +302,9 @@ def sounds_like(heard: str, word: str, after: str = "") -> bool:
         return distance(seq, full) * len(full) / len(to)
 
     d = cost(target)
-    return d <= _threshold(len(target)) and all(d < cost(t.morae) for t in _TARGETS if t.rewrite is None)
+    if d > _threshold(len(target)):
+        return False
+    return not compete or all(d < cost(t.morae) for t in _TARGETS if t.rewrite is None)
 
 
 # 残りの人数の言い方（「フォープレイヤーズ」）の数の語。

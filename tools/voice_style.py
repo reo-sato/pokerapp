@@ -49,7 +49,7 @@ import numpy as np  # noqa: E402
 from audio.recognizer import is_announcement, is_question, parse_actions  # noqa: E402
 # 語の位置と残りの言葉はライブの読み取りと同じ見方で（会話の中の語として捨てた語も位置は分かる）
 from audio.recognizer import _AMOUNT_TOKEN, _distinct_keywords, _keyword_matches, _residue, _to_katakana  # noqa: E402
-from audio.second_ear import apply_ear  # noqa: E402
+from audio.second_ear import apply_ear, used_ear  # noqa: E402
 from tools.eval_store import _is_noise, _read_json, _read_jsonl, hand_windows, truth_hands  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -443,7 +443,7 @@ def classify(row: dict, rules: int = 2) -> str:
         return "D" if short else "mixed"
     if actions or spans:
         return "mixed"
-    rescued, _ = apply_ear([], text, row.get("ear"), question=False, utterance_start_ts=at,
+    rescued, _ = apply_ear([], text, used_ear(row), question=False, utterance_start_ts=at,
                            confidence=row.get("confidence"))
     if rescued:
         return "rescued"
@@ -463,7 +463,7 @@ def betting_times(rows: Sequence[dict]) -> list[float]:
         if at is None or _is_noise(row, text):
             continue
         events = parse_actions(text, confidence=row.get("confidence"), utterance_start_ts=at)
-        events, _ = apply_ear(events, text, row.get("ear"), question=is_question(text), utterance_start_ts=at,
+        events, _ = apply_ear(events, text, used_ear(row), question=is_question(text), utterance_start_ts=at,
                               confidence=row.get("confidence"))
         if any(e.action in BETTING for e in events):
             out.append(float(at))

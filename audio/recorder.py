@@ -87,10 +87,12 @@ class Transcript:
     audio_file: Optional[str] = None       # 保存した発話の音声（`audio_dir` があるとき, ファイル名）
     no_speech: bool = False                # 声が無い音（VAD）なので Whisper にかけなかった（text は空）
     question: bool = False                 # 確認型の発話（「コールですか？」）= アクションにしない（仕様 FR-17）
-    # 第 2 の耳で聞き直した結果（Whisper がアクションとして読めなかった発話だけ, `EarResult.to_dict()` + 秒数）と、
-    # それで読んだ候補の文（使わなかったら None）。events はその候補から読んだもの（2026-09-29）
+    # 第 2 の耳で聞いた結果（`EarResult.to_dict()` + 秒数）と、それで読んだ候補の文（使わなかったら None）。events は
+    # その候補から読んだもの（2026-09-29）。2026-10-07 から全発話を聞いて記録する。ライブが使うのは今までどおり
+    # Whisper が読めなかった発話・額のある発話だけ（`ear_wanted`。偽なら記録だけ, `second_ear.used_ear`）
     ear: Optional[dict] = None
     ear_text: Optional[str] = None
+    ear_wanted: bool = True
 
 
 # 確認型の発話の表示（CLI / audio_check / ログで共通）
@@ -121,6 +123,8 @@ def describe_event(event: Optional[AudioEvent]) -> str:
         action = "ヘッズアップ（残り 2 人）"
     elif event.action == "players_left":
         action = f"残り {event.amount} 人"
+    elif event.action == "correction":
+        action = "訂正の合図（直前のアクションか、ストリートの最初から言い直す）"
     else:
         action = event.action
     parts = [action]
@@ -328,8 +332,16 @@ class AudioThread(threading.Thread):
         chunk_size = 1024
         stream = self._open_stream(pa, pyaudio, chunk_size)
         if stream is None:
-            pa.terminate()
-            return
+            # 起動のときに開けなくても（受信機が抜けている・RDP の音声が接続元に回っている等）あきらめず、開けるように
+            # なったら聞き取りを始める（店舗 2026-10-07: 起動のときだけ RDP の音声が接続元に回っていて開けず、その
+            # あと開けるようになってもロガーは最後まで音声なしだった）。
+            pa, stream = self._reopen(pa, pyaudio, chunk_size, None)
+            if stream is None:
+                try:
+                    pa.terminate()
+                except Exception:  # noqa: BLE001 — 終わるときの片付けの失敗は無視する
+                    pass
+                return
         logger.info("AudioThread started (device_id=%d %r, rate=%d)",
                     self._device_id, self._device_name, self._sample_rate)
         self.health = {"state": "running", "level": 0.0, "last_chunk_at": None,
@@ -403,18 +415,21 @@ class AudioThread(threading.Thread):
                                "rdp_audio": self._rdp_audio(pa, pyaudio_mod, devices)}
             return None
 
-    def _reopen(self, pa, pyaudio_mod, chunk_size: int, reason: str):
+    def _reopen(self, pa, pyaudio_mod, chunk_size: int, reason: Optional[str]):
         """切れたマイクを開き直す。待ちを倍々に延ばしながら、開けるか止めるまで繰り返す。
 
         PortAudio はデバイスの一覧を初期化のときにしか読まないので、毎回 PyAudio を作り直す（Bluetooth を
         つなぎ直すとマイクの番号が変わる。名前で選んでいれば同じマイクを探し直す）。(pa, stream) を返す
-        （止めたときは stream = None）。
+        （止めたときは stream = None）。`reason` が None = 起動のときに開けなかった: 開けなかった理由は起動時の
+        表示のため死活表示に残し、「切れました」とは知らせない。
         """
-        message = f"マイクが切れました（{reason}）— つながり直すのを待っています"
-        logger.warning("%s", message)
-        self._status(f"{message}。Bluetooth・電源を確かめてください（つながれば自動で再開します）")
-        self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": message,
-                       "device_name": self._device_name, "reconnecting": True}
+        at_start = reason is None
+        if not at_start:
+            message = f"マイクが切れました（{reason}）— つながり直すのを待っています"
+            logger.warning("%s", message)
+            self._status(f"{message}。Bluetooth・電源を確かめてください（つながれば自動で再開します）")
+            self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": message,
+                           "device_name": self._device_name, "reconnecting": True}
         delay = _REOPEN_FIRST_SEC
         attempts = 0
         noted_at = time.monotonic()
@@ -434,7 +449,10 @@ class AudioThread(threading.Thread):
             if stream is not None:
                 logger.info("マイクを開き直しました（%d 回目, device_id=%d %r）",
                             attempts, self._device_id, self._device_name)
-                self._status(f"マイクを開き直しました（{self._device_name or self._device_id}）— 聞き取りを再開します")
+                if at_start:
+                    self._status(f"マイクを開けました（{self._device_name or self._device_id}）— 聞き取りを始めます")
+                else:
+                    self._status(f"マイクを開き直しました（{self._device_name or self._device_id}）— 聞き取りを再開します")
                 self.health = {"state": "running", "level": 0.0, "last_chunk_at": None,
                                "device_name": self._device_name, "device_index": self._device_id}
                 return pa, stream
@@ -629,11 +647,13 @@ class AudioThread(threading.Thread):
             infer_sec = heard_at - started
             if no_speech:
                 # 声が無い音（札を混ぜる音など）は Whisper にかけていない。記録にだけ残す（CLI には出さない）。
+                # 第 2 の耳の結果も記録だけ（声の検出が落とした短い語を、あとで数えるため）
                 logger.info("声ではない音 %.1f 秒 — 聞き取りに回さず（VAD）", audio_sec)
                 self._report(Transcript(
                     text="", confidence=None, events=(), audio_sec=audio_sec, infer_sec=infer_sec,
                     utterance_start_ts=utterance_start_ts, heard_at=heard_at, noise=True,
                     audio_file=audio_file, no_speech=True,
+                    ear=self._hear_again(audio_bytes) if self._second_ear is not None else None, ear_wanted=False,
                 ))
                 return
             noise = bool(text) and (is_prompt_echo(text) or is_implausibly_long(text, audio_sec))
@@ -644,12 +664,13 @@ class AudioThread(threading.Thread):
             ))
             from audio.second_ear import apply_ear, wants_amount_scores, wants_ear
 
-            ear = None
-            # 額を読んだ発話も聞き直す（額ごとの点数 = いま使えない額だったときに使える額から選び直す, 2026-10-01）
-            if self._second_ear is not None and (wants_ear(events, text, question) or wants_amount_scores(events)):
-                ear = self._hear_again(audio_bytes)
+            # 第 2 の耳は全発話で聞いて記録する（2026-10-07。短い語の分類器・推定器のため）。ライブで使うのは、Whisper が
+            # 読めなかった発話と、額を読んだ発話（額ごとの点数 = いま使えない額だったときに使える額から選び直す,
+            # 2026-10-01）だけ（今までどおり）
+            wanted = wants_ear(events, text, question) or wants_amount_scores(events)
+            ear = self._hear_again(audio_bytes) if self._second_ear is not None else None
             # 第 2 の耳が無い・聞き直せなかったときも通す（意味のない単発の語を音の近さで額と読む, 2026-10-01）
-            used, ear_text = apply_ear(events, text, ear, question=question,
+            used, ear_text = apply_ear(events, text, ear if wanted else None, question=question,
                                        utterance_start_ts=utterance_start_ts, confidence=confidence)
             events = tuple(used)
             if not text and not events:
@@ -669,7 +690,7 @@ class AudioThread(threading.Thread):
                 audio_sec=audio_sec,
                 infer_sec=infer_sec, utterance_start_ts=utterance_start_ts,
                 heard_at=heard_at, noise=noise, audio_file=audio_file, question=question,
-                ear=ear, ear_text=ear_text,
+                ear=ear, ear_text=ear_text, ear_wanted=wanted,
             ))
             for event in events:
                 self._audio_queue.put(event)
@@ -677,8 +698,8 @@ class AudioThread(threading.Thread):
             logger.exception("Error in _process_chunk (chunk size=%d bytes)", len(audio_bytes))
 
     def _hear_again(self, audio_bytes: bytes) -> Optional[dict]:
-        """発話を第 2 の耳で聞き直す（2026-09-29）。結果（`EarResult.to_dict()`）か、聞き直せなければ None。
-        どの発話を聞き直し、結果をどう使うかは `second_ear.wants_ear` / `apply_ear`。"""
+        """発話を第 2 の耳で聞く（2026-09-29。2026-10-07 から全発話）。結果（`EarResult.to_dict()`）か、聞けなければ
+        None。結果をどの発話で使うかは `second_ear.wants_ear` / `wants_amount_scores` / `apply_ear`。"""
         from audio.second_ear import pcm16_samples
 
         started = time.time()

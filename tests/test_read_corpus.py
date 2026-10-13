@@ -606,7 +606,7 @@ class TestServedFromGroundTruthUi:
         log_dir = tmp_path / "logs"
         log_dir.mkdir()
         server = make_server(log_dir, "127.0.0.1", 0, corpus_factory=_app)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
         base = f"http://127.0.0.1:{server.server_address[1]}"
         try:
             status, body, _ = _req(base, "GET", "/corpus")

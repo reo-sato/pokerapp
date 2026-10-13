@@ -78,7 +78,7 @@ def log_dir(tmp_path: Path) -> Path:
 def _serve(log_dir: Path, blind_every: int):
     # 練習のセッション（リポジトリの config.json の評価のモードに左右されない）
     server = make_server(log_dir, "127.0.0.1", 0, blind_every=blind_every, evaluation=False)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_address[1]}"
@@ -220,6 +220,22 @@ class TestSave:
         gt = json.loads((log_dir / f"{SID}.ground_truth.json").read_text(encoding="utf-8"))
         assert len(gt["hands"]) == 1
 
+    def test_exclude_from_evaluation_is_saved(self, base, log_dir):
+        """「評価から外す」の印（オーナーのメモ「除外」, 2026-10-06）は保存され、一覧にも出る。"""
+        hand = {"board": [], "actions": [], "players": [], "notes": "中断", "excluded": True}
+        status, d = _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "manual-edit", "hand": hand})
+        assert status == 200, d
+        gt = json.loads((log_dir / f"{SID}.ground_truth.json").read_text(encoding="utf-8"))
+        saved = next(h for h in gt["hands"] if h["hand_id"] == 1)
+        assert saved["excluded"] is True and saved["notes"] == "中断"
+        status, rows = _req(base, "GET", f"/api/sessions/{SID}/hands")
+        row = next(r for r in rows["hands"] if r["hand_id"] == 1)
+        assert row["ground_truth"]["excluded"] is True
+        hand["excluded"] = False                  # 外したのを戻す
+        assert _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "manual-edit", "hand": hand})[0] == 200
+        gt = json.loads((log_dir / f"{SID}.ground_truth.json").read_text(encoding="utf-8"))
+        assert "excluded" not in next(h for h in gt["hands"] if h["hand_id"] == 1)
+
     @pytest.mark.parametrize("hand, fragment", [
         ({"board": ["Xx"], "actions": []}, "カード"),
         ({"board": [], "actions": [{"seat": 4, "action": "limp"}]}, "不正"),
@@ -356,6 +372,14 @@ class TestShowdownMuck:
     def test_page_offers_a_muck_button(self, base):
         status, html = _req(base, "GET", "/")
         assert status == 200 and "function addMuck(seat)" in html and "が見せずに降りた" in html
+
+    def test_page_fills_the_board_from_the_record(self, base):
+        """ボードは記録（RFID）の札で自動で入れる（オーナー 2026-10-07）: 進行中のハンドは数秒ごとに読み直してターン・
+        リバーも入れる。手で選んだ位置と保存した真のアクションの札は変えない。"""
+        status, html = _req(base, "GET", "/")
+        assert status == 200 and "function followRecordBoard(capBoard)" in html
+        assert "setInterval(pollBoard, 3000)" in html and "S.followBoard = !!d.in_progress" in html
+        assert "S.boardTouched.add(p.a)" in html                             # 手で選んだ位置
 
 
 class TestShowdownWinner:
@@ -652,7 +676,7 @@ class TestEvaluationMode:
     def eval_base(self, log_dir: Path):
         # ブラインドの割合（0 = しない）によらず、評価のセッションは全部のハンドをブラインドで入れる
         server = make_server(log_dir, "127.0.0.1", 0, blind_every=0, evaluation=True)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
         thread.start()
         try:
             yield f"http://127.0.0.1:{server.server_address[1]}"

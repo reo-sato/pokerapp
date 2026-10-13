@@ -37,9 +37,17 @@ _SW_WRONG_P1P2 = (0x6A, 0x86)
 # 物理 reader 台数の問い合わせ（契約 v1.2 §6）: `FF CA 00 FF 00` → <N> + 90 00。
 READER_COUNT_P2 = 0xFF
 _READER_COUNT_APDU = [0xFF, 0xCA, 0x00, READER_COUNT_P2, 0x00]
+# 使える reader の一覧（契約 v1.11 §6）: `FF CA 00 FE 00` → 2 byte（little endian, bit k = reader k が起動時に
+# 初期化できた）+ 90 00。旧 firmware は 6A 86（範囲外の P2）。
+READY_MASK_P2 = 0xFE
+_READY_MASK_APDU = [0xFF, 0xCA, 0x00, READY_MASK_P2, 0x00]
+# 読み取り装置（ESP32）の再起動（契約 v1.11 §6）: `FF CA 00 FD 00` → 90 00 を返してから再起動する（USB はいったん
+# 切れて列挙し直す）。旧 firmware は 6A 86。
+RESTART_P2 = 0xFD
+_RESTART_APDU = [0xFF, 0xCA, 0x00, RESTART_P2, 0x00]
 
-# reader_index として指定できる最大値（255=0xFF は台数問い合わせ用に予約）。
-MAX_READER_INDEX = 0xFE
+# reader_index として指定できる最大値（0xFD〜0xFF は再起動・一覧・台数の問い合わせ用に予約）。
+MAX_READER_INDEX = 0xFC
 
 # 契約 v1.1 §6: 8B UID × k 枚（k ≤ 4）の連結。この長さのときだけ複数枚として分割する。
 # 8（1 枚）/ 4 / 7（ISO 14443A）は単一 UID として扱う（16=2 枚, 24=3 枚, 32=4 枚）。
@@ -219,6 +227,57 @@ def query_reader_count(reader_name: str) -> Optional[int]:
         return None
 
 
+def _send_control(reader_name: str, apdu: list[int]) -> Optional[tuple[bytes, int, int]]:
+    """共有接続で制御の APDU を 1 回送る。(データ, SW1, SW2)。送れなければ None。"""
+    try:
+        reader = find_reader(reader_name)
+        if reader is None:
+            return None
+        shared = acquire_shared_connection(reader_name)
+        try:
+            data, sw1, sw2 = shared.transmit(reader, list(apdu))
+        except Exception:
+            shared.invalidate()   # 壊れた接続を他の持ち主に残さない
+            raise
+        finally:
+            release_shared_connection(shared)
+        return bytes(data), sw1, sw2
+    except Exception as e:
+        logger.debug("control APDU %s on %r: %s", apdu, reader_name, e)
+        return None
+
+
+def query_ready_readers(reader_name: str) -> Optional[set[int]]:
+    """firmware が起動時に初期化できた物理 reader の index の集合（契約 v1.11 §6）。
+
+    初期化できなかった reader は「札なし」と答え続け、Get UID からは区別できない（店舗 2026-10-06: 真ん中のボードの
+    reader が 1 時間読めなかった）。旧 firmware（6A 86）・送れないときは None。
+    """
+    got = _send_control(reader_name, _READY_MASK_APDU)
+    if got is None:
+        return None
+    data, sw1, sw2 = got
+    if (sw1, sw2) != _SW_OK or len(data) != 2:
+        logger.debug("ready mask query on %r: SW=%02X%02X len=%d（旧 firmware は非対応）",
+                     reader_name, sw1, sw2, len(data))
+        return None
+    mask = data[0] | (data[1] << 8)
+    return {k for k in range(16) if mask & (1 << k)}
+
+
+def request_device_restart(reader_name: str) -> Optional[bool]:
+    """読み取り装置（ESP32）に再起動を頼む（契約 v1.11 §6）。受け付けたら True、この命令の無い旧 firmware は False、
+    送れなければ None。再起動のあいだ（数秒）は全 reader が読めず、USB の列挙し直しのあと次の poll でつなぎ直す。"""
+    got = _send_control(reader_name, _RESTART_APDU)
+    if got is None:
+        return None
+    _data, sw1, sw2 = got
+    if (sw1, sw2) == _SW_OK:
+        return True
+    logger.debug("restart request on %r: SW=%02X%02X（旧 firmware は非対応）", reader_name, sw1, sw2)
+    return False
+
+
 class PCSCBridge:
     """単一 PC/SC リーダー上の**物理 reader 1 台**との接続を管理する。
 
@@ -238,7 +297,7 @@ class PCSCBridge:
         if not 0 <= reader_index <= MAX_READER_INDEX:
             raise ValueError(
                 f"reader_index must be 0..{MAX_READER_INDEX} "
-                f"(0xFF は台数問い合わせ用に予約): {reader_index!r}"
+                f"(0xFD〜0xFF は再起動・一覧・台数の問い合わせ用に予約): {reader_index!r}"
             )
         self._reader_name = reader_name
         self._reader_index = reader_index

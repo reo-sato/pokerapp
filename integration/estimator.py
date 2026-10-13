@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -59,12 +60,26 @@ PARAMS: dict[str, float] = {
     "amount_prior_weight": 1.0,  # 賭けの額のポットに対する大きさの重み（`core.bet_sizing.size_prior` に掛ける。オーナー
                                  # 2026-10-01: 多くはポット以下、多くても 3 倍。真のアクションの賭け 92 のうちポット以下 75%）
     # 札の離脱（卓状態の履歴）。時刻の密度で比べる（どの仮説でも離脱 1 つに密度 1 つ）
-    "p_nodepart": 0.03,          # フォールドしたのに札が離れない（店舗 0/25。その席の札がハンドで一度も読めなければ数えない）
-    "fold_lag_mu": 0.1,          # 「フォールド」の話し始めから札が離れるまで（店舗 20 回の中央値 0.1 秒、[−1.35, +1.02]）
-    "fold_lag_b": 0.4,           # その広がり（ラプラス分布の尺度, 秒。最尤は 0.3、狭いと崩れるので広め = 監査 2 回目）
+    "p_nodepart": 0.01,          # フォールドしたのに札が離れない（店舗の真のアクションのフォールド 0/172、2026-10-06 に
+                                 # 0.03 から。その席の札がハンドで一度も読めなければ数えない）
+    "p_present_after_fold": 0.002,  # フォールドから `present_after_sec` 秒たっても札が席に載っている（0/172。言われない
+                                 # フォールドを入れて札が残ったままのハンドの読みを止める = 店舗 05cccd6c ハンド 1）
+    "present_after_sec": 10.0,
+    # 「フォールド」の話し始めから、記録上の札の離脱まで: 左右で幅の違うラプラス分布。ディーラーは札が離れるのを見てから
+    # 言う（オーナー 2026-10-06）が、記録上の離脱は読み取りのラグのぶん遅れる（ファームウェアは 3 周続けて読めなかったら
+    # 離れたとする = 約 0.7〜1.1 秒。札がリーダーの近くに残るとさらに遅れる）。見てから言うまでとラグがほぼ打ち消し合い、
+    # 店舗の真のフォールド 111 回: ±0.5 秒に 67%・+0.5〜+1.5 秒に 23%・+2.5 秒より遅い 3 回（札が近くに残った）。
+    # 2026-10-06 に語よりあとの側の幅だけ 0.4 → 0.55（最尤。ブートストラップの 90% 区間 0.4〜0.7）。中心と語より前の側は
+    # 最尤（0.08 / 0.35）が前の値と見分けられない（90% 区間 0.25〜0.45）ので据え置き。+2.8 秒の離脱が −5.6 → −4.7（店舗
+    # 7bd25188 ハンド 2）。長いラグを別の裾にした混合を当てはめても、あとの側の値の変化は 0.3 以下なので入れない
+    "fold_lag_mu": 0.1,          # 中心（秒。店舗 20 回の中央値 0.1 秒）
+    "fold_lag_b": 0.4,           # 記録上の離脱が語より前の側の幅（秒。見てから言うまでが長かった）
+    "fold_lag_b_late": 0.55,     # 記録上の離脱が語よりあとの側の幅（秒。読み取りのラグが長かった）
     "fold_early_mix": 0.1,       # フォールドの札の離脱の裾（語が発話の後ろの方・手番より前に投げた札）の重み
     "fold_tail_sec": 20.0,       # その裾の幅（± 秒、一様）
     "flicker_sec": 3.0,          # これより早く戻った離脱（ちらつき・のぞき見）は数えない（engine がフォールドにしない 3 秒と同じ）
+    "blip_sec": 1.0,             # `flicker_sec` 以上消えていた札がこれより短く読めただけ（片付けでリーダーをかすめた）は戻った
+                                 # とみない（店舗 05cccd6c ハンド 16: 0.1 秒。ハンドの途中のこの形は全データで 3 回）
     "departure_after_end_sec": 60.0,   # 離脱を数える窓: 直しの無い再生のハンドの終わりからこの秒数まで
     "silent_fold_wait": 30.0,    # 言われないフォールドは前後の言われたアクションの間（最後なら前からこの秒数まで）
     "silent_fold_mean": 2.5,     # 言われないフォールドの札が離れるまでの考える時間（前の言われたアクションから, 指数分布
@@ -75,16 +90,34 @@ PARAMS: dict[str, float] = {
     "p_button": 0.05,            # ボタンが記録（ライブが回したボタン）と違う（隣の席 = 動かし忘れ・動かしすぎを 4 倍厚く）
     "p_unclosed": 0.01,          # ベッティングのラウンドが閉じないまま（手番の人が残ったまま）ハンドが終わった
     "p_players": 0.05,           # 残り人数の宣言（ヘッズアップ・N プレイヤーズ）が合わない
+    "p_open_fold": 0.005,        # ベットに向き合っていないのに降りた（店舗の真のアクションで 0/171。pokerkit も force_fold が
+                                 # 要る。手の事前の −log 2 の代わり。2026-10-06）
     "p_showdown_word": 0.03,     # ショーダウンの声（「ショーダウン」・役の名前）があるのに全員降りて終わった（真のアクションの
                                  # 92 ハンド: 声のあった 23 ハンドはすべてショーダウン、全員降りて終わった 45 ハンドで声 0）
+    "p_showdown_heard": 0.76,    # ショーダウンになったハンドで、その声（語・役の名前・`_showdown_sound`）が聞き取れた。オーナー
+                                 # 2026-10-07: ショーダウンでは必ず「ショウダウン」と言う = 声が無ければ全員降りて終わった。
+                                 # ただし声は崩れやすい（開発データのショーダウンになったハンド 52 で聞き取れた 40 = (40+1)/(52+2)。
+                                 # 全員降りて終わった 47 では 1 = 真のアクションを確かめている e82f5005 ハンド 15）
     "p_unread_board": 0.03,      # 次のストリートのアクションなのにボードの札が読めていない（店舗 1 回 / 約 40）
-    "p_street_time": 0.02,       # アクションの時刻がそのストリートの札の配布と合わない（前のストリートの札より
-                                 # 前・次のストリートの札よりあと。札の読み取りの遅れ `street_slack_sec` は許す）
+    "p_street_time": 0.02,       # アクションの時刻がそのストリートの札の配布と合わない（次のストリートの札よりあと・
+                                 # 札の時刻が当てにならないハンドの札より前。札の読み取りの遅れ `street_slack_sec` は許す）
+    "p_before_street_card": 0.01,    # そのストリートの札より前のアクション = 札が配られてから読めるまでが遅れた（札 1 枚に
+                                 # 1 回。オーナー 2026-10-07: ターンの札・宣言より前にターンのアクションは言わない。店舗の
+                                 # 正しいハンドで 0 回 = 声は札の 0.5 秒以上あと、札の離脱は 5.5 秒以上あと。ライブの規則の
+                                 # まま札より前の行があった 10 ハンドはすべて誤り。読み取りの遅れは宣言から最大 2.5 秒
+                                 # （45 回）、長く読めない札は 09-27 のターン 1 回）
+    "before_card_slack_sec": 3.0,    # 強い項は札よりこの秒数以上前だけ（札が読めるのは宣言から最大 2.5 秒遅れる。engine の
+                                 # `BEFORE_CARD_FIX_MARGIN_SEC`）。`street_slack_sec` からここまでは `p_street_time`
     "street_slack_sec": 2.0,
+    "flop_spread_sec": 8.0,      # フロップの札がこれより離れて読めた（か 3 枚読めていない）ハンドは札の位置がずれた疑い
+                                 # （engine の `FLOP_CARDS_SPREAD_SEC`。店舗 89 ハンドのうち 88 が 5.5 秒以内）: 札より前も
+                                 # `p_street_time`
     "p_board_after_end": 0.02,   # 全員降りて終わったのに、そのあとのストリートの札が配られた
     "p_undetermined": 0.20,      # 勝者が決まらない・推し量った
     # 探し方・事後確率
     "beam": 4, "depth": 3, "expand": 12,
+    "polish_top": 8,             # 探索のあと、点の良い記録の上からこの数に、探索中に記録の説明を良くした直しを足して
+                                 # 仕上げる（深さの上限で説明の直しまで届かない記録がある = 店舗 782c457d ハンド 5。0 = しない）
     "canned_near_sec": 15.0,     # 決まり文句の発話をアクションと読む直しは、読めた賭けの語からこの秒数以内の発話だけ（全
                                  # セッションで、穴を埋めた決まり文句 20 のうち 17 が 13 秒以内。遠い 3 つは 58〜286 秒 =
                                  # 偶然。ハンドの途中の長い雑談まで広げると 1 ハンドの推定が 3 分になった = 店舗 9d1d8536#4）
@@ -106,6 +139,13 @@ _INSERTABLE = ("fold", "check", "call")
 _INSERT_LEAD_SEC = 0.3          # 聞こえなかったアクションは次の語の少し前に置く
 _STREETS = ("preflop", "flop", "turn", "river")
 EXPLANATION_MARK = "（記録は変えない説明）"    # 記録を変えない説明だけの直しの要確認の理由に付ける
+# ショーダウンの声の音（`SessionEstimator._showdown_sound`）。ディーラーは「コール、ショウダウン」と続けて早く言うことが多く、
+# 読み取りの語にならないことが多い: Whisper は「コール、ショーだ!」「チェック ショー」「それでは。」「これで終わりです。」、
+# 第 2 の耳は「ショナン」「ショロン」「ソラン」「ソロン」「コルソナン」「これでしょな」「初段」「空」と書く（開発データの
+# ショーダウンになったハンド 52）。全員降りて終わったハンドの最後のフォールドは、第 2 の耳が「これだ」「あれだ」「俺だ」と書く
+_SHOWDOWN_WHISPER = re.compile(r"ショー(?!ト)|ショウダ|ソーダウン")
+_SHOWDOWN_EAR = re.compile(r"ショ[ナロラダー]|ソ[ラロナ]|しょ[なだらー]|そら|空|初段|相談|初夏")
+_SHOWDOWN_SOUND_SEC = (3.0, 12.0)   # 記録の最後のアクションの前後（この秒数前から、この秒数あとまで）の発話だけを見る
 
 
 # 発話の読みの確からしさ（`tools/estimate.py` の `utterance_options`, v0 と共通）のうち v1 で置き直す値。
@@ -119,8 +159,19 @@ EXPLANATION_MARK = "（記録は変えない説明）"    # 記録を変えな�
 # 何も書かなかっただけで、候補の確からしさはその空の文と比べられる。v0 が空を除いていた理由は記録に無い）。
 # 監査 3 回目（2026-10-03, オーナーが推奨の案を採用）: 第 2 の耳が否定した Whisper の読みを第 2 の耳の候補と同じ式で
 # 値付けする（下の桁の読みの値の逆転）・意味のない語の額（第 2 の耳あり）を候補と同じ式 + 音の距離で。
+# 短い語の聞き間違いの進め方 2（2026-10-07, オーナー承諾）: 全発話の第 2 の耳を別の読みに使い（`all_ears`）、短い語の分類器
+# （`audio/short_words.py`）の読みを選択肢にする（`short_words`）。分類器の読みが既定の読みより高くなるのは log で 1 まで
+# （`short_cap`。どの読みかは主にハンドの筋で決める）。学習のラベルをオーナーの聞き取りで直す前は 0（上限なしだと、
+# 雑談の混じったラベルで学んだ分類器が言われなかったアクションを近くの発話で説明しすぎた）、直したあとは 1 と上限なしで
+# 良くなったハンドが同じ（782c457d#14 が加わる）・要確認は 1 のほうが少ない（2026-10-07）。
+# 第 2 の耳がはっきり聞いた額（2026-10-07, 店舗 782c457d ハンド 5・6）: 耳の自由な読みが額そのものなら Whisper の崩れた語との
+# 音の距離の項を付けない（`ear_clean_sound`）・Whisper と耳が別の額を聞いた食い違いは耳の点数の差で値付けする
+# （`price_disputed_amount`）。開発データの数え: 前者 53/53、後者は食い違い 4 のうち耳が正しい 3（作業ログ
+# `2026-10-07-latest-session-remaining-hands.md`）。
 READING_OVERRIDES: dict[str, float] = {"canned_action": 0.27, "canned_ear_temp": 2.0, "ear_empty_text": 1.0,
-                                       "price_overridden_whisper": 1.0, "price_ear_phonetic": 1.0}
+                                       "price_overridden_whisper": 1.0, "price_ear_phonetic": 1.0,
+                                       "all_ears": 1.0, "short_words": 1.0, "short_cap": 1.0,
+                                       "ear_clean_sound": 1.0, "price_disputed_amount": 1.0}
 
 
 def reading_params() -> dict:
@@ -141,7 +192,8 @@ def params_hash(params: dict[str, float] = PARAMS) -> str:
 CONTENT_FILES = (
     "integration/estimator.py", "integration/world_replay.py", "integration/engine.py", "integration/replay.py",
     "tools/estimate.py", "tools/eval_store.py", "tools/measure_capture_accuracy.py",
-    "audio/recognizer.py", "audio/phonetic.py", "audio/second_ear.py",
+    "audio/recognizer.py", "audio/phonetic.py", "audio/second_ear.py", "audio/short_words.py",
+    "audio/short_word_model.json",
     "core/bet_sizing.py", "core/poker_engine.py", "core/showdown.py", "core/positions.py", "core/constants.py",
     "core/game_state.py", "core/engine_types.py", "core/events.py", "core/hand_log.py", "core/control_queue.py",
 )
@@ -306,6 +358,9 @@ def align_words(actions: list[dict], tokens: list[AudioEvent], inserted: dict[st
     by_ts: dict[str, AudioEvent] = {}
     for t in betting:
         by_ts.setdefault(_iso(t.timestamp), t)
+    # 語から作った行が使う語（札の離脱のフォールドが聞き違いのコールを取らないように）
+    claimed = {id(by_ts[a.get("timestamp") or ""]) for a in actions if (a.get("timestamp") or "") in by_ts
+               and (str(a.get("actor_source") or "") in _WORD_SOURCES or "check_around" in str(a.get("reason") or ""))}
     used: set[int] = set()
     rows: list[_Row] = []
     for a in actions:
@@ -324,8 +379,12 @@ def align_words(actions: list[dict], tokens: list[AudioEvent], inserted: dict[st
                         and abs((x.utterance_start_ts or x.timestamp) - t) <= 1.0),
                        key=lambda x: abs((x.utterance_start_ts or x.timestamp) - t), default=None)
         elif src in _RFID_FOLDS:
-            word = min((x for x in betting if x.action == "fold" and id(x) not in used
-                        and -4.0 <= (x.utterance_start_ts or x.timestamp) - t <= 6.0),
+            # 聞き違いのコール（「これで終わりです」「コールド」）は、engine と同じ幅で札の離脱と組になる
+            # （`engine.GARBLED_FOLD_BEFORE_SEC` / `GARBLED_FOLD_AFTER_SEC`: 離脱が語の 2 秒前〜1 秒後）
+            word = min((x for x in betting if id(x) not in used and (
+                            (x.action == "fold" and -4.0 <= (x.utterance_start_ts or x.timestamp) - t <= 6.0)
+                            or (x.action == "call" and "garbled_call" in x.parse_flags and id(x) not in claimed
+                                and -1.0 <= (x.utterance_start_ts or x.timestamp) - t <= 2.0))),
                        key=lambda x: abs((x.utterance_start_ts or x.timestamp) - t), default=None)
         if word is not None and (id(word) not in used or collective):
             used.add(id(word))
@@ -364,6 +423,33 @@ class SessionEstimator:
         self._text_at = {r["utterance_start_ts"]: (r.get("text") or "").strip() for r in self.transcripts}
         self._row_at = {r["utterance_start_ts"]: r for r in self.transcripts}
         self._options_cache: dict[float, list] = {}
+        self._sound_cache: dict[tuple[float, float], bool] = {}
+
+    def _showdown_sound(self, w: HandWindow) -> bool:
+        """記録の最後のアクションの近くに、崩れた「ショーダウン」の音の発話があるか（読み取りの語にならなかった声。
+        `_SHOWDOWN_WHISPER`・`_SHOWDOWN_EAR`）か、読み取りの語にならなかった役の名前（「キングハイですね。」= 確認型の文、
+        第 2 の耳の「エースヒット…二ペアですね」）があるか。直しによらない（候補どうしで同じ観測）。Whisper のプロンプトの
+        繰り返し・定型の幻聴の文は見ない（第 2 の耳の文は見る）。"""
+        key = (w.start, w.end)
+        if key not in self._sound_cache:
+            from audio.recognizer import is_prompt_echo, mentions_hand_name
+
+            stamps = [_epoch(a.get("timestamp")) for a in w.base.get("actions") or [] if a.get("street") != "showdown"]
+            last = max((t for t in stamps if t is not None), default=w.start)
+            before, after = _SHOWDOWN_SOUND_SEC
+            found = False
+            for r in self.transcripts:
+                start = r["utterance_start_ts"]
+                if not (w.start - 0.5 <= start < w.end and last - before <= start <= last + after):
+                    continue
+                text = r.get("text") or ""
+                ear = (r.get("ear") or {}).get("text") or ""
+                heard = not is_prompt_echo(text) and (_SHOWDOWN_WHISPER.search(text) or mentions_hand_name(text))
+                if heard or _SHOWDOWN_EAR.search(ear) or mentions_hand_name(ear):
+                    found = True
+                    break
+            self._sound_cache[key] = found
+        return self._sound_cache[key]
 
     def _options(self, start: float) -> list:
         """発話の読みの選択肢（[0] が既定, v0 と同じ `utterance_options`）。"""
@@ -581,18 +667,23 @@ class SessionEstimator:
                               _log(1 - p["p_players"]) if ok else _log(p["p_players"])))
                 if not ok:
                     flags.append(f"人数の宣言が合わない（{want} 人と言ったが {have} 人）")
-        # ショーダウンの声（「ショーダウン」・役の名前）は全員降りて終わったハンドでは言われない（声の数によらず 1 つ。
-        # 店舗 42f7b964 ハンド 2: リバーのコールが決まり文句になり、言われないフォールドで終わる別解が役の名前を
-        # 説明しないまま 1 番だった）
-        if any(t.action == "showdown" or (t.action == "end_hand" and t.hand_name) for t in info["tokens"]):
-            foldout = hand.get("winner_source") == "fold"
+        # ショーダウンの声（「ショーダウン」・役の名前・崩れた「ショーダウン」の音）は全員降りて終わったハンドでは言われず
+        # （声の数によらず 1 つ。店舗 42f7b964 ハンド 2: リバーのコールが決まり文句になり、言われないフォールドで終わる別解が
+        # 役の名前を説明しないまま 1 番だった）、ショーダウンでは必ず言われる（オーナー 2026-10-07。聞き取れるのは
+        # `p_showdown_heard`）= 声が無ければ全員降りて終わった方へ寄せる
+        foldout = hand.get("winner_source") == "fold"
+        if any(t.action == "showdown" or (t.action == "end_hand" and t.hand_name) for t in info["tokens"]) \
+                or self._showdown_sound(w):
             terms.append(("ショーダウンの声" + ("があるのに全員降りて終わった" if foldout else ""),
-                          _log(p["p_showdown_word"]) if foldout else _log(1 - p["p_showdown_word"])))
+                          _log(p["p_showdown_word"]) if foldout else _log(p["p_showdown_heard"])))
             if foldout:
                 flags.append("ショーダウンの声があるのに全員降りて終わった")
+        else:
+            terms.append(("ショーダウンの声" + ("が無い" if foldout else "が無いのにショーダウン"),
+                          _log(1 - p["p_showdown_word"]) if foldout else _log(1 - p["p_showdown_heard"])))
         terms += self._departure_terms(w, hand, betting, flags)
         terms += self._board_terms(hand, flags)
-        terms += self._street_time_terms(hand, betting, flags)
+        terms += self._street_time_terms(hand, betting, flags, w)
         if hand.get("winner_source") in ("estimated", "undetermined") or hand.get("winner_seat") is None:
             terms.append(("勝者が決まらない", _log(p["p_undetermined"])))
             flags.append("勝者が決まらない")
@@ -617,7 +708,11 @@ class SessionEstimator:
                                     hand.get("position_map") or {}) if p.get("amount_prior_weight") else {})
         for i, r in enumerate(betting):
             n_legal = 3 if facing.get(r.street, False) else 2
-            terms.append(("手の事前", -math.log(n_legal)))
+            if r.action == "fold" and not facing.get(r.street, False):
+                terms.append(("ベットの無いところのフォールド", _log(p["p_open_fold"])))
+                flags.append(f"ベットの無いところのフォールド（{r.street} 席{r.seat}）")
+            else:
+                terms.append(("手の事前", -math.log(n_legal)))
             size = p.get("amount_prior_weight", 0.0) * size_prior(ratios.get(i))
             if size < 0:
                 terms.append(("賭けの大きさ", size))      # ポットに対して大きすぎる額ほど低い（弱い事前）
@@ -691,7 +786,7 @@ class SessionEstimator:
         # または次のハンドの始まりまで）。すぐ戻った離脱（ちらつき・のぞき見 = engine が 3 秒でフォールドにしない
         # のと同じ）はどの仮説でも数えない（監査 2 回目: フォールドの証拠に流用されない）
         stop = min(w.end, (_epoch(w.base.get("ended_at")) or w.end) + p["departure_after_end_sec"])
-        deps = [d for d in self.presence.departures(w.start, stop)
+        deps = [d for d in self.presence.departures(w.start, stop, p["blip_sec"], p["flicker_sec"])
                 if d[0] in seats and not (d[2] is not None and d[2] - d[1] < p["flicker_sec"])]
         end = _epoch(hand.get("ended_at")) or stop
         terms: list[tuple[str, float]] = []
@@ -725,7 +820,10 @@ class SessionEstimator:
                         and lo <= d[1] <= hi and (d[2] is None or d[2] >= end)),
                        key=lambda k: abs(deps[k][1] - at), default=None)
             if best is None:
-                terms.append((f"席{r.seat} のフォールドに札の離脱が無い", _log(p["p_nodepart"])))
+                if self._present_at(r.seat, at + p["present_after_sec"], end):
+                    terms.append((f"席{r.seat} はフォールドのあとも札が席に載っていた", _log(p["p_present_after_fold"])))
+                else:
+                    terms.append((f"席{r.seat} のフォールドに札の離脱が無い", _log(p["p_nodepart"])))
                 flags.append(f"札が離れないフォールド（{r.street} 席{r.seat}）")
                 continue
             explained.add(best)
@@ -734,9 +832,11 @@ class SessionEstimator:
                 bet_end = max(bet_end, deps[best][1])   # 言われないフォールドの時刻 = 札が離れた時刻
             t_dep = deps[best][1]
             if spoken:
-                # 話し始めのほぼ同時（ラプラス）+ 裾（語が発話の後ろの方・早いマック: ±`fold_tail_sec` の一様）
+                # 話し始めのほぼ同時（左右で幅の違うラプラス）+ 裾（語が発話の後ろの方・早いマック: ±`fold_tail_sec` の一様）
                 lag = t_dep - at
-                core = math.exp(-abs(lag - p["fold_lag_mu"]) / p["fold_lag_b"]) / (2 * p["fold_lag_b"])
+                early, late = p["fold_lag_b"], p["fold_lag_b_late"]
+                core = math.exp(-(p["fold_lag_mu"] - lag) / early if lag < p["fold_lag_mu"]
+                                else -(lag - p["fold_lag_mu"]) / late) / (early + late)
                 density = (1 - eps) * core + eps / (2 * tail)
                 terms.append((f"席{r.seat} の離脱 = 声のフォールド（{lag:+.1f} 秒）", _log(density)))
             else:
@@ -759,6 +859,18 @@ class SessionEstimator:
                 if back is None or back >= end:
                     flags.append(f"残っている席{seat} の札が離れた")
         return terms
+
+    def _present_at(self, seat: int, t: float, end: float) -> bool:
+        """その席の札が時刻 `t`（ハンドの終わりより前）に席に載っていて、そのまま `flicker_sec` 以上（またはハンドの
+        終わりまで）載り続けたか（片付けの札がリーダーを一瞬かすめたのを「札が残っていた」にしない）。"""
+        if self.presence is None or t >= end:
+            return False
+        o = self.presence._at(seat, t)                 # noqa: SLF001
+        if o is None or not o.present:
+            return False
+        later = [x for x in self.presence._seats.get(seat, []) if x.t > t]   # noqa: SLF001
+        gone = next((x.t for x in later if not x.present), None)
+        return gone is None or gone >= min(end, t + self.params["flicker_sec"])
 
     def _seat_read(self, seat: int, t0: float, t1: float) -> bool:
         """その席の札がハンドの中で一度でも載っていたか（読めない席のフォールドを札の離脱で罰しない）。"""
@@ -787,9 +899,27 @@ class SessionEstimator:
             flags.append("全員降りたあとに札が配られた")
         return terms
 
-    def _street_time_terms(self, hand: dict, betting: list[_Row], flags: list[str]) -> list[tuple[str, float]]:
+    def _street_calls(self, w: Optional[HandWindow]) -> dict[int, float]:
+        """ハンドの中のディーラーのストリートの宣言（`audio.recognizer.street_call`）: 札の位置 → 宣言の時刻（最初のもの）。"""
+        if w is None:
+            return {}
+        from audio.recognizer import street_call
+
+        calls: dict[int, float] = {}
+        for start in sorted(self._window_starts(w)):
+            row = self._row_at[start]
+            found = street_call(str(row.get("text") or ""))
+            if found is not None and found[0] not in calls:
+                calls[found[0]] = start + float(row.get("audio_sec") or 0.0) * found[1]
+        return calls
+
+    def _street_time_terms(self, hand: dict, betting: list[_Row], flags: list[str],
+                           w: Optional[HandWindow] = None) -> list[tuple[str, float]]:
         """時刻の分かる行（言われた語・札の離脱）が、そのストリートの札が配られてから次のストリートの札が配られる
-        までの間にあるか（ディーラーはベッティングが終わってから次の札を配る）。"""
+        までの間にあるか（ディーラーはベッティングが終わってから次の札を配る）。札より前は、札が配られてから読めるまでが
+        遅れたときだけ（オーナー 2026-10-07。札 1 枚に 1 回 `p_before_street_card`）。札が読めなかったストリートは
+        ディーラーの宣言（「ターンです」「ラストカード」）の時刻を境目にする（宣言の時刻は札より不確か: `p_street_time`）。
+        フロップの札が離れて読めた（か 3 枚読めていない）ハンドは札の位置がずれた疑いなので、札より前も `p_street_time`。"""
         p = self.params
         dealt: dict[int, float] = {}
         for item in hand.get("board_timeline") or []:
@@ -798,20 +928,35 @@ class SessionEstimator:
                 dealt[item["index"]] = t
         opened = {"preflop": None, "flop": _street_open(dealt, 3), "turn": _street_open(dealt, 4),
                   "river": _street_open(dealt, 5)}
+        flop = [dealt[i] for i in (1, 2, 3) if i in dealt]
+        reliable = len(flop) == 3 and max(flop) - min(flop) <= p["flop_spread_sec"]   # engine の `_board_times_reliable`
+        by_card = {s for s, t in opened.items() if t is not None}
+        for index, at in self._street_calls(w).items():
+            street = "turn" if index == 4 else "river"
+            if opened[street] is None:
+                opened[street] = at
         closes = {"preflop": opened["flop"], "flop": opened["turn"], "turn": opened["river"], "river": None}
         slack = p["street_slack_sec"]
         terms = []
+        early: dict[str, float] = {}             # ストリート → 札より前の行の、札からのいちばん長い秒数
         for r in betting:
             if r.word is None and r.source not in _RFID_FOLDS:
                 continue                          # 言われない行の時刻は分からない
             at = _word_start(r)
             start, end = opened.get(r.street), closes.get(r.street)
             if start is not None and at < start - slack:
-                terms.append((f"{r.street} の{r.action}（席{r.seat}）が札より前", _log(p["p_street_time"])))
+                early[r.street] = max(early.get(r.street, 0.0), start - at)
                 flags.append(f"{r.street} のアクションが札より前（席{r.seat} {r.action}）")
             elif end is not None and at > end + slack:
                 terms.append((f"{r.street} の{r.action}（席{r.seat}）が次の札よりあと", _log(p["p_street_time"])))
                 flags.append(f"{r.street} のアクションが次の札よりあと（席{r.seat} {r.action}）")
+        # 札より前の行は、札が配られてから読めるまでが遅れた（札 1 枚の出来事。読めない札は店舗でまれ）ときだけありうる。
+        # 同じ札の前の行を 1 行ずつ数えない（店舗 09-27: ターンの札が 13 秒遅れて読め、その前のターンの 4 つのアクション
+        # が正しかった）
+        for street, lead in early.items():
+            strict = reliable and street in by_card and lead > p["before_card_slack_sec"]
+            terms.append((f"{street} の札より前のアクション（{lead:.0f} 秒）",
+                          _log(p["p_before_street_card"] if strict else p["p_street_time"])))
         return terms
 
     # ――― 直しの候補 ―――
@@ -862,7 +1007,8 @@ class SessionEstimator:
         # 札の離脱を持ち上げとみる
         if self.presence is not None:
             end = _epoch(w.base.get("ended_at")) or w.end
-            for seat, t, back in self.presence.departures(w.start, end):
+            for seat, t, back in self.presence.departures(w.start, end, self.params["blip_sec"],
+                                                          self.params["flicker_sec"]):
                 edits.append(Edit("lift", t, (seat, back if back is not None else end + 60.0),
                                   label=f"席{seat} の離脱（{_iso(t)[11:19]}）は持ち上げ"))
         return edits
@@ -885,16 +1031,29 @@ class SessionEstimator:
         _hand, _records, base_info = self.replay(w, ())
         pool = self.candidate_edits(w, base_info)
         distinct: dict[tuple, Candidate] = {base.key(): base}
+        explainers: set[Edit] = set()           # 記録を変えずに説明を良くした直し（仕上げに使う）
 
         def keep(c: Candidate, parent: Candidate) -> bool:
-            """同じ記録になる直しは得点の良い 1 つ。記録を変えない直しは候補を広げないが、得点が良ければその記録の
-            説明としては残す（エンジンが補ったコールを、近くの決まり文句の発話の読みで説明する = 店舗 42f7b964
-            ハンド 2）。"""
+            """同じ記録になる直しは得点の良い 1 つ。記録を変えない直しは、得点が良ければその記録の説明として残し
+            （エンジンが補ったコールを、近くの決まり文句の発話の読みで説明する = 店舗 42f7b964 ハンド 2）、親の代わりに
+            広げる（記録のより良い説明から先に届く記録がある = 店舗 782c457d ハンド 17: 「これで。」を声のフォールドと
+            読む説明は記録を変えないが、それを足した候補に「チェック＋ベット」を足すと正解。前は広げなかったので、正解の
+            記録は言われないフォールドの説明のまま点で負けた）。"""
             if not c.hand:
                 return False
             if c.key() not in distinct or c.score > distinct[c.key()].score:
                 distinct[c.key()] = c
-            return c.key() != parent.key()
+            if c.key() == parent.key() and c.score > parent.score:
+                explainers.update(e for e in c.edits if e not in parent.edits)
+            return c.key() != parent.key() or c.score > parent.score
+
+        def best_per_record(cands: list[Candidate]) -> list[Candidate]:
+            """記録ごとに得点の良い 1 つ（ビームを同じ記録の説明違いで埋めない）、得点の順。"""
+            out: dict[tuple, Candidate] = {}
+            for c in cands:
+                if c.key() not in out or c.score > out[c.key()].score:
+                    out[c.key()] = c
+            return sorted(out.values(), key=lambda c: -c.score)
 
         def search(root: Candidate, edits: list[Edit]) -> None:
             """root の直しに 1 つずつ足すビーム。"""
@@ -907,7 +1066,7 @@ class SessionEstimator:
                     singles[c.key()] = c
             ranked = sorted(singles.values(), key=lambda c: -c.score)
             useful = [next(x for x in c.edits if x not in root.edits) for c in ranked[:int(p["expand"])]]
-            beam = sorted([root, *ranked], key=lambda c: -c.score)[:int(p["beam"])]
+            beam = best_per_record([root, *ranked])[:int(p["beam"])]
             for _depth in range(2, int(p["depth"]) + 1):
                 grown: list[Candidate] = []
                 for rank, c in enumerate(beam):
@@ -921,7 +1080,7 @@ class SessionEstimator:
                             grown.append(child)
                 if not grown:
                     break
-                beam = sorted({c.key(): c for c in [*beam, *grown]}.values(), key=lambda c: -c.score)[:int(p["beam"])]
+                beam = best_per_record([*beam, *grown])[:int(p["beam"])]
 
         # ボタンはハンド全体の手番を変えるので、ボタンごとに直しを探す（単独では点が低くても、ほかの直しと
         # 合わせて正しくなる = 店舗 9d1d8536 ハンド 4: ボタンの置き忘れ + 「チェック、チェック」の言い直し）。
@@ -933,6 +1092,17 @@ class SessionEstimator:
             if root.hand and root.score >= base.score - p["button_explore"]:
                 keep(root, base)
                 search(root, others)
+        # 仕上げ: 点の良い記録に、記録を変えずに説明を良くした直しを足す（深さの上限で届かなかった説明。足しても記録が
+        # 変わる直しは使わない = 記録どうしを同じ条件で比べる）
+        ordered_explainers = _ordered(tuple(explainers))
+        for c in sorted(distinct.values(), key=lambda c: -c.score)[:int(p.get("polish_top", 0))]:
+            for e in ordered_explainers:
+                if e in c.edits or any(e.conflicts(x) for x in c.edits):
+                    continue
+                child = evaluate(_ordered((*c.edits, e)))
+                if child.hand and child.key() == c.key() and child.score > c.score:
+                    keep(child, c)
+                    c = child
         groups = sorted(distinct.values(), key=lambda c: -c.score)
         tau = p["temperature"]
         top = groups[0].score / tau if groups else 0.0

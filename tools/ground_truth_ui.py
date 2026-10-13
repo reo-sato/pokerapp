@@ -79,7 +79,7 @@ _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 _AUDIO_RE = re.compile(r"^[0-9]{6,16}\.wav$")
 # 台本のハンドのセッション（`tools/test_script.py`）。正解は台本なので入力は要らない
 _SCRIPT_SUFFIX = ".script.json"
-# 進行中のハンド（ロガーがフロップから書く。ハンドが終わると消える, オーナー 2026-09-30）
+# 進行中のハンド（ロガーが手札を配ったときから書く。ハンドが終わると消える, オーナー 2026-09-30 / 2026-10-06）
 _LIVE_SUFFIX = ".live_hand.json"
 # タイムラインに出す範囲: ハンドの始まり（配布）の少し前から、次のハンドの始まりまで
 _TIMELINE_BEFORE_SEC = 10.0
@@ -182,7 +182,7 @@ def _hand_row(hand: dict, gt) -> dict:
         "ground_truth": (
             {"source": gt.source, "annotated_at": gt.annotated_at, "annotator": gt.annotator,
              "blind": bool(gt.hand.get("blind")), "reconciled": bool(gt.hand.get("reconciled")),
-             "entry_sec": gt.hand.get("entry_sec")}
+             "entry_sec": gt.hand.get("entry_sec"), "excluded": bool(gt.hand.get("excluded"))}
             if gt is not None else None
         ),
         "accuracy": accuracy,
@@ -233,7 +233,8 @@ def list_hands(
 def _load_live_hand(log_dir: Path, session_id: str) -> Optional[dict]:
     """進行中のハンド（`logs/{session_id}.live_hand.json`, `in_progress` 付き）。無い・壊れている・もう確定したなら None。
 
-    ハンドの途中で真のアクションを入れるため、ロガーがフロップが配られた時点から書く（オーナー 2026-09-30）。
+    ハンドの途中で真のアクションを入れるため、ロガーが手札を配った時点から書く（オーナー 2026-09-30 はフロップから、
+    2026-10-06 にプリフロップの配布から）。
     """
     path = log_dir / f"{session_id}{_LIVE_SUFFIX}"
     if not path.is_file():
@@ -730,6 +731,12 @@ def validate_gt_hand(hand: Any) -> dict:
         out["notes"] = notes.strip()[:2000]
     if hand.get("blind") is True:
         out["blind"] = True                  # 記録を見ずに入れた
+    if hand.get("excluded") is True:
+        # 評価から外す（理由はメモ。オーナーのメモ「除外」, 2026-10-06）。物差し・eval_store が数えない
+        out["excluded"] = True
+        reason = hand.get("excluded_reason")
+        if isinstance(reason, str) and reason.strip():
+            out["excluded_reason"] = reason.strip()[:500]
     return out
 
 
@@ -1395,7 +1402,8 @@ const BOARD_LABEL = ["フロップ","フロップ","フロップ","ターン","�
 // 選んだら移らない。
 const S = {sessions:[], sid:null, follow:true, hands:null, summary:null, view:"list", hand:null, gt:null, legal:null,
            dirty:false, annotator:"", picker:null, busy:false,
-           openedAt:0, confirmed:new Set(), confirmedHand:false, revealed:false, audio:null};
+           openedAt:0, confirmed:new Set(), confirmedHand:false, revealed:false, audio:null,
+           boardTouched:new Set(), followBoard:false};
 const $ = (id) => document.getElementById(id);
 function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 // 文字の欄・ロールダウンを触っている間は、裏で届いた結果（一覧の 5 秒ごとの読み直し・手番の確認）で画面を作り直さない。
@@ -1484,15 +1492,16 @@ function renderList(){
       : '<span class="tag t-none">未入力</span>';
     const rv = h.has_needs_review ? '<span class="tag t-warn">要確認</span>' : "";
     const acc = h.accuracy ? (h.accuracy.all_match ? '<span class="tag t-ok">一致</span>' : `<span class="tag t-bad">差分 ${h.accuracy.mismatches}</span>`) : "";
+    const ex = h.ground_truth && h.ground_truth.excluded ? '<span class="tag t-warn">評価から外す</span>' : "";
     const bl = h.ground_truth && h.ground_truth.blind && !h.in_progress
       ? (h.ground_truth.reconciled ? '<span class="tag t-edit">ブラインド→照合済</span>' : '<span class="tag t-warn">照らし合わせ待ち</span>') : "";
-    // 進行中のハンド（フロップから出る）: 入れたところまで保存でき、ハンドが終わってから照らし合わせる
+    // 進行中のハンド（手札を配ったときから出る）: 入れたところまで保存でき、ハンドが終わってから照らし合わせる
     const live = h.in_progress
       ? `<span class="tag t-live">進行中（${esc(STREET_JA[h.street] || h.street || "")}）</span>`
         + (h.ground_truth ? '<span class="tag t-edit">途中まで保存</span>' : "") : "";
     return `<tr class="row" onclick="openHand(${h.hand_id})"><td>#${h.hand_id}</td><td>${fmtTime(h.started_at)}</td>
       <td>${(h.seats||[]).join(" ")}</td><td>${(h.board||[]).map(c => cardHtml(c, "sm")).join("")}</td>
-      <td>${h.winner_seat != null ? "席 " + h.winner_seat : "—"}</td><td>${live || `${rv} ${st} ${bl} ${acc}`}</td></tr>`;
+      <td>${h.winner_seat != null ? "席 " + h.winner_seat : "—"}</td><td>${live || `${rv} ${st} ${bl} ${ex} ${acc}`}</td></tr>`;
   }).join("");
   $("app").innerHTML = `<div class="top"><h1>真のアクション入力</h1><span class="small"><a href="/script">台本 →</a>　<a href="/corpus">読み上げ集 →</a></span></div>
     <div class="bar">
@@ -1510,6 +1519,26 @@ function renderList(){
 
 // ――― 編集 ―――
 function normCards(arr, n){ const out = []; for (let i = 0; i < n; i++) out.push((arr && arr[i] && arr[i] !== "??") ? arr[i] : null); return out; }
+// 進行中に保存したハンドのボードは、そのときの枚数のまま残る（プリフロップなら空）。入れた最後の札より後ろは記録の札で補う
+function boardWithRecord(gtBoard, capBoard){
+  const out = normCards(gtBoard, 5), rec = normCards(capBoard, 5);
+  let last = -1; out.forEach((c, i) => { if (c) last = i; });
+  for (let i = last + 1; i < 5; i++) if (!out[i] && rec[i] && !out.includes(rec[i])) out[i] = rec[i];
+  return out;
+}
+// ボードは記録（RFID）の札で自動で入れる（オーナー 2026-10-07）。手で選んだ位置（`S.boardTouched`・保存した真のアクションの札）
+// は変えない。ほかの位置は記録に合わせる（進行中のハンドは数秒ごとに読み直してターン・リバーも入れる, `pollBoard`）
+function followRecordBoard(capBoard){
+  const g = S.gt, rec = normCards(capBoard, 5);
+  let changed = false;
+  for (let i = 0; i < 5; i++) {
+    if (S.boardTouched.has(i) || g.board[i] === rec[i]) continue;
+    const c = rec[i];
+    if (c && (g.board.some((x, j) => j !== i && x === c) || g.players.some(p => p.hole_cards.includes(c)))) continue;
+    g.board[i] = c; changed = true;
+  }
+  return changed;
+}
 function buildGt(d){
   const cap = d.captured, g = d.ground_truth, src = g || cap;
   const players = (cap.players || []).filter(p => typeof p.seat === "number").map(p => {
@@ -1521,14 +1550,20 @@ function buildGt(d){
                   .map(a => ({seat:a.seat, action:a.action, amount:a.amount || 0, unsure: !!a.unsure}));
   // ボタン: 入れた真のアクションで選んだ席（ディーラーが動かし忘れたハンド）か、記録のボタン
   const button = (g && g.button_seat != null) ? g.button_seat : (cap.button_seat ?? null);
-  return {board: normCards(src.board, 5), players, actions, button_seat: button,
-          winner_seat: blind ? null : (src.winner_seat === undefined ? null : src.winner_seat), notes: (g && g.notes) || ""};
+  return {board: g ? boardWithRecord(g.board, cap.board) : normCards(src.board, 5), players, actions, button_seat: button,
+          winner_seat: blind ? null : (src.winner_seat === undefined ? null : src.winner_seat), notes: (g && g.notes) || "",
+          excluded: !!(g && g.excluded)};
 }
 async function openHand(hid){
   try {
     const d = await api(sidPath() + "/hands/" + hid);
     S.hand = d; S.gt = buildGt(d); S.legal = d.legal; S.dirty = false; S.view = "edit";
     S.openedAt = Date.now(); S.confirmed = new Set(); S.confirmedHand = false; S.revealed = false;
+    // 保存した真のアクションのボードの札は手で入れたもの（記録に合わせて変えない）
+    S.boardTouched = new Set(normCards(d.ground_truth ? d.ground_truth.board : [], 5)
+                             .map((c, i) => c ? i : -1).filter(i => i >= 0));
+    S.followBoard = !!d.in_progress;
+    followRecordBoard(d.captured.board);
     applyLegal();
     renderEdit();
     window.scrollTo(0, 0);
@@ -1657,9 +1692,10 @@ function setWinner(seat){ S.gt.winner_seat = seat; S.dirty = true; renderEdit();
 function setButton(seat){ S.gt.button_seat = seat; touch(); }
 function setShowed(seat){ const p = S.gt.players.find(x => x.seat === seat); p.showed_down = !p.showed_down; S.dirty = true; renderEdit(); }
 function setNotes(v){ S.gt.notes = v; S.dirty = true; }
+function setExcluded(v){ S.gt.excluded = !!v; S.dirty = true; }
 function resetToCaptured(){
   if (!confirm("入力した内容を捨てて、記録の内容に戻しますか？")) return;
-  S.gt = buildGt({captured: S.hand.captured, ground_truth: null}); touch();
+  S.gt = buildGt({captured: S.hand.captured, ground_truth: null}); S.boardTouched = new Set(); touch();
 }
 
 function renderEdit(){
@@ -1736,7 +1772,7 @@ function renderEdit(){
   const lint = (L.lint || []).map(m => `<div class="lint">⚠ ${esc(m)}</div>`).join("");
   const gtd = d.ground_truth;
   const reconcile = d.in_progress
-    ? `<div class="reconcile">このハンドは<b>進行中</b>です（${esc(STREET_JA[cap.street] || cap.street || "")}）。入れたところまで「保存」でき、あとで開き直して続きを入れられます。記録との照らし合わせはハンドが終わってからです（ボードの札は開いた時点のもの）。</div>`
+    ? `<div class="reconcile">このハンドは<b>進行中</b>です（${esc(STREET_JA[cap.street] || cap.street || "")}）。入れたところまで「保存」でき、あとで開き直して続きを入れられます。記録との照らし合わせはハンドが終わってからです（ボードの札は記録から自動で入ります。手で選んだ札はそのまま）。</div>`
     : gtd && gtd.blind && !gtd.reconciled
     ? `<div class="reconcile">ブラインドで入れた内容を保存しました。<b>記録と違う行（黄色）</b>を左の ▶ の音声で確かめ、正しい方に直して「保存」してください（直すところが無ければ、そのまま「保存」）。</div>`
     : "";
@@ -1786,6 +1822,7 @@ function renderEdit(){
         ${quick}${lint}
         <h2>勝った席</h2>${winnerHtml}
         <h2>メモ</h2><input type="text" style="width:100%" value="${esc(g.notes)}" placeholder="気づいたこと（任意）" oninput="setNotes(this.value)" onchange="setNotes(this.value)">
+        <label class="small" style="display:inline-flex;gap:6px;align-items:center;margin-top:6px"><input type="checkbox" ${g.excluded ? "checked" : ""} onchange="setExcluded(this.checked)"> 評価から外す（理由はメモに。入力不全・中断・ボタンが動いていない など）</label>
         <div class="actions-bottom">
           ${blind || d.in_progress ? "" : `<button class="ok" onclick="savePassthrough()" ${canPass?"":"disabled"}>✓ 記録どおり</button>`}
           <button class="primary" onclick="saveEdited()">保存（この内容が真）</button>
@@ -1817,8 +1854,12 @@ function closePicker(){ $("modal").classList.add("hidden"); S.picker = null; }
 function pickCard(c){
   const p = S.picker; if (!p) return;
   const g = S.gt;
-  if (c) { g.board = g.board.map(x => x === c ? null : x); g.players.forEach(pl => { pl.hole_cards = pl.hole_cards.map(x => x === c ? null : x); }); }
-  if (p.kind === "board") g.board[p.a] = c; else g.players.find(pl => pl.seat === p.a).hole_cards[p.b] = c;
+  if (c) {
+    g.board = g.board.map((x, i) => { if (x === c) { S.boardTouched.add(i); return null; } return x; });
+    g.players.forEach(pl => { pl.hole_cards = pl.hole_cards.map(x => x === c ? null : x); });
+  }
+  if (p.kind === "board") { g.board[p.a] = c; S.boardTouched.add(p.a); }   // 手で選んだ位置は記録に合わせない
+  else g.players.find(pl => pl.seat === p.a).hole_cards[p.b] = c;
   S.dirty = true; closePicker(); renderEdit(); refreshLegal();   // 札が変わればショーダウンの判定も変わる
 }
 $("modal").addEventListener("click", (e) => { if (e.target === $("modal")) closePicker(); });
@@ -1830,6 +1871,7 @@ function gtPayload(){
           actions: g.actions.map(a => ({seat:a.seat, action:a.action, amount:a.amount || 0, street:a.street, unsure: a.unsure || undefined})),
           players: g.players.map(p => ({seat:p.seat, name:p.name, hole_cards: p.hole_cards.filter(Boolean), showed_down: p.showed_down})),
           winner_seat: g.winner_seat, notes: g.notes || "", blind: isBlind() || undefined,
+          excluded: g.excluded || undefined,
           button_seat: g.button_seat != null && g.button_seat !== S.hand.captured.button_seat ? g.button_seat : undefined};
 }
 async function saveWith(body){
@@ -1881,6 +1923,19 @@ setInterval(async () => {
   try { await loadSessions(); } catch (e) {}
   loadHands(true);
 }, 5000);
+// 開いているハンドが進行中なら、記録のボードを読み直して手で選んでいない位置に入れる（ターン・リバーも自動で入る）
+async function pollBoard(){
+  if (S.view !== "edit" || !S.hand || !S.followBoard || S.busy || S.picker) return;
+  const hid = S.hand.captured.hand_id;
+  try {
+    const d = await api(sidPath() + "/hands/" + hid);
+    if (S.view !== "edit" || !S.hand || S.hand.captured.hand_id !== hid) return;
+    S.hand.captured.board = d.captured.board;
+    if (!d.in_progress) S.followBoard = false;          // ハンドが終わった: ボードはこれでそろう
+    if (followRecordBoard(d.captured.board)) refreshLegal();
+  } catch (e) {}
+}
+setInterval(pollBoard, 3000);
 </script></body></html>
 """
 

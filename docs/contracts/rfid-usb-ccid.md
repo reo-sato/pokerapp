@@ -1,6 +1,6 @@
 # RFID USB CCID firmware ↔ host (PC/SC) contract
 
-**version: 1.10 (ADR-0058 追記 5。1.0 frozen 起点、以降は additive)** ／ canonical RFID transport（ADR-0015）の
+**version: 1.11 (読み取り装置の一覧・再起動。1.0 frozen 起点、以降は additive)** ／ canonical RFID transport（ADR-0015）の
 firmware↔Python 境界。v1.1 の追加点（1 reader 複数枚の Get UID 連結 / UID MSB-first）、
 **v1.2 の変更点（CCID slot は 1 つだけ / 物理リーダーは Get UID の P2 で選ぶ / 台数問い合わせ）**、
 **v1.3 の変更点（board reader 全台で 1 つの論理ボードを共有し、位置は検出順で決める =
@@ -9,7 +9,8 @@ board の `index` / `cards` を廃止）**、**v1.4 の追加点（ミスディ�
 **v1.6 の変更点（board の 1 枚だけの差し直し）**、**v1.7 の変更点（turn / river の差し直し・確認 3 秒）**、
 **v1.8 の変更点（確定前の board の札の途切れを 3 秒まで許す・「確認中」の表示）**、
 **v1.9 の変更点（読み落ちたことのある札は差し直しの対象にしない・戻った札で差し替えを取り消す）**、
-**v1.10 の変更点（5 枚埋まったボードの差し直しは消えた札の位置に入れる・消えるのを待つ）** は §10 を参照。v1.2 は「slot ごとに reader 名を分ける」規約を
+**v1.10 の変更点（5 枚埋まったボードの差し直しは消えた札の位置に入れる・消えるのを待つ）**、
+**v1.11 の追加点（使える物理リーダーの一覧 `FF CA 00 FE 00` / 読み取り装置の再起動 `FF CA 00 FD 00`）** は §10 を参照。v1.2 は「slot ごとに reader 名を分ける」規約を
 廃止し（Windows の汎用 CCID ドライバが 1 インターフェース 1 slot しか公開しないため。ISSUE-0022 /
 ADR-0052）、v1.3 は「board reader = ストリート専用」という前提を廃止する（実機は board reader が
 並んでいるだけで、どの台がどのストリートを受けるかは置き方次第。ISSUE-0024 / ADR-0053）。
@@ -102,7 +103,7 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 }
 ```
 
-- 各要素 = `{"name": <PC/SC reader_name 完全一致文字列>, "reader": 0..254 (任意・既定 0),
+- 各要素 = `{"name": <PC/SC reader_name 完全一致文字列>, "reader": 0..252 (任意・既定 0。0xFD〜0xFF は予約, v1.11),
   "role": "seat"|"board", "seat": 1..9 (role=seat)}`。**role=board に位置指定は無い**（v1.3）。
 - **`reader`（v1.2 追加）** = **物理リーダー index**（= Get UID の P2, §6）。省略時 0 なので、
   1 台構成の v1.0/1.1 の config はそのまま動く。**`(name, reader)` の組が一意**であること **MUST**
@@ -229,7 +230,7 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
   - **k が範囲外（k ≥ N）のときは `6A 86`（Incorrect P1/P2）** を返す **MUST**（v1.2）。host は空扱いに
     加えて **WARN を 1 回だけ**出す（config の `reader` 誤りの検出。`probe_pcsc check` は FAIL 扱い）。
 - **物理リーダー台数の問い合わせ（v1.2 additive, MUST）**: host が `FF CA 00 FF 00` を送ったら、
-  firmware は **台数 N を 1 バイト + `90 00`** で返す **MUST**（N ≤ 254）。`0xFF` は台数問い合わせ用に
+  firmware は **台数 N を 1 バイト + `90 00`** で返す **MUST**（N ≤ 253。v1.11 で 0xFD・0xFE も予約）。`0xFF` は台数問い合わせ用に
   予約された P2 で、物理リーダー選択には使えない。**v1.1 以前の firmware は非対応**で `6A 81` /
   `6D 00` 等を返すため、host は「非対応 = None」として扱い機能を落とさない
   （`rfid/bridge.py:query_reader_count`、`probe_pcsc list` が表示）。
@@ -243,9 +244,27 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
     実装は `rfid/bridge.py:split_uid_response` / `PCSCBridge.read_uids`。
   - anti-collision（複数カードの個別読み出し）は firmware 側の責務（ISSUE-0021）。host は連結された
     応答をパースするだけで、枚数・順序に業務的意味を持たせない。
-- v1.2 で host が依存する pseudo-APDU は **Get UID（`FF CA 00 <k> 00`）と台数問い合わせ
-  （`FF CA 00 FF 00`）のみ**。ATS/historical bytes（`FF CA 01 00 00`）等は **本契約の対象外**
-  （additive に v1.3+ で追加可能）。
+- **使える物理リーダーの一覧（v1.11 additive, SHOULD）**: host が `FF CA 00 FE 00` を送ったら、firmware は
+  **2 バイト（little endian）のビット列 + `90 00`** を返す。bit k = 物理リーダー k が**使える**（起動のときに
+  初期化でき、いまも SPI/BUSY が答える）。起動のときに未通電・初期化に失敗したリーダー、実行中に SPI/BUSY が
+  続けて答えなくなったリーダー（firmware の実装では RF の ON/OFF・RF 設定のロードが 20 回続けて失敗 ≈ 6 秒）は 0。
+  こうしたリーダーは Get UID に「札なし」と答え続けるので、host はこの一覧でしか区別できない（店舗 2026-10-06:
+  真ん中の board reader が 1 時間「札なし」と答え、読み取り装置の再起動で直った）。
+  - 起動直後（USB は上がったが PN5180 の初期化の途中）は一覧が無いので **`69 85`** を返す（host はあとで聞き直す）。
+  - 物理リーダーは 16 台まで（2 バイト）。**v1.10 以前の firmware は `6A 86`**（範囲外の P2）を返し、host は
+    「一覧なし = None」として扱う（`rfid/bridge.py:query_ready_readers`）。
+- **読み取り装置の再起動（v1.11 additive, SHOULD）**: host が `FF CA 00 FD 00` を送ったら、firmware は **`90 00` を
+  返してから**（300 ms 後に）自分を再起動する（`esp_restart`。USB はいったん切れて列挙し直し、起動のときの共有
+  RST で全 PN5180 がリセットされる = USB を挿し直したのと同じ。電源は切れない）。v1.10 以前の firmware は `6A 86`
+  を返す（host は「命令なし」= USB の挿し直しを案内する, `rfid/bridge.py:request_device_restart`）。
+  - **host MUST**: 再起動のあいだ（数秒）は全リーダーが読めない（read_uids が空 = 札が消えたのと同じに見える）ので、
+    **卓に札が無い状態（全リーダーが空）が続いたときだけ**送る（`RFIDThread`: `rr` は 2 秒、自動は 10 秒）。送ったら
+    接続を捨て、列挙し直したあとにつなぎ直して一覧を聞き直す。中継（`rfid/relay.py`）から読んでいるときは中継に
+    頼む（`POST /restart`。RDP のセッションの中からはリーダーに命令を送れない）。
+- `0xFD`〜`0xFF` は host の予約 P2（物理リーダー選択には使えない。物理リーダーの番号は 0〜252）。
+- v1.11 で host が依存する pseudo-APDU は **Get UID（`FF CA 00 <k> 00`）・台数（`FF CA 00 FF 00`）・一覧
+  （`FF CA 00 FE 00`）・再起動（`FF CA 00 FD 00`）のみ**。ATS/historical bytes（`FF CA 01 00 00`）等は
+  **本契約の対象外**（additive に追加可能）。
 
 ## 7. UID 長と正規化（host MUST）
 
@@ -297,6 +316,13 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 
 ## 10. versioning / freeze
 
+- **v1.11（2026-10-06, 店舗）** — 真ん中の board reader が 1 時間「札なし」と答え続け（エラーは出ない）、読み取り装置
+  （ESP32）の再起動で直った。firmware に **使える物理リーダーの一覧**（`FF CA 00 FE 00` → 2 byte LE + `90 00`、初期化の
+  途中は `69 85`）と **再起動の命令**（`FF CA 00 FD 00` → `90 00` を返してから `esp_restart`）を加えた（§6）。host は
+  一覧に無いリーダーを知らせ、`rr` / 自動（`rfid.auto_restart`）で、卓に札が無いときだけ再起動を頼む。一覧に出ない
+  不調には、board reader が 2 ハンド続けて 1 枚も読まなければ知らせる（`RFIDThread`）。中継は一覧を読み取りと一緒に
+  渡し、`POST /restart` で命令を送ってつなぎ直す。**firmware の書き換えが要る**（旧 firmware は両方 `6A 86` = host は
+  一覧なし・命令なしとして動き、USB の挿し直しを案内する）。物理リーダーの番号の上限は 254 → 252。
 - **v1.10（2026-09-25, ADR-0058 追記 5 / ISSUE-0035）** — 店舗で river のあとに turn を差し直すと、5 枚埋まった
   ボードの規則（消えた札を抜いて詰め、新しい札を 5 枚目）で turn と river が逆になった。取ってすぐ置くと
   6 枚目の WARN で位置なしのまま確定していた。見逃した差し直し（消えたあとに空き位置へ入れた札）が無ければ

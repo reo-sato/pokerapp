@@ -214,6 +214,13 @@ HAND_NAME_WORDS = (("ワンペア", "ワンペア"), ("二ペア", "ツーペア
                    ("スリーカード", "スリーカード"), ("ストレート", "ストレート"), ("フラッシュ", "フラッシュ"),
                    ("フルハウス", "フルハウス"), ("フォーカード", "フォーカード"),
                    ("ストレートフラッシュ", "ストレートフラッシュ"))
+# 札の名前を使った役の言い方（「十ヒット」= 10 のワンペア、「キングハイ」= ハイカード）。ショーダウンで見せた手の言い方で、
+# 書き起こしが崩れても第 2 の耳がこう聞ければ役名になる（店舗 2026-10-06 05cccd6c ハンド 18:「転筆と」を自由に「十ヒット」
+# と聞いたが、候補に無く「百点」になっていた。同じセッションの 429 発話で、足して変わる救いはこの 1 つ・額の読みは同じ）
+_RANK_SPOKEN = ("エース", "キング", "クイーン", "ジャック", "テン", "ナイン", "エイト", "セブン", "シックス", "ファイブ",
+                "フォー", "スリー", "ツー")
+HAND_NAME_WORDS += tuple((r + "ヒット", r + "ヒット") for r in _RANK_SPOKEN + ("十", "九", "八", "七", "六", "五", "四", "三", "二"))
+HAND_NAME_WORDS += tuple((r + "ハイ", r + "ハイ") for r in _RANK_SPOKEN)
 # 2 つ続けて言うことがある語（「フォールド、コール」）
 _PAIR_WORDS = ("フォールド", "コール", "チェック", "オールイン")
 AMOUNTS = tuple(range(100, 20001, 100)) + (25000, 30000, 40000, 50000)
@@ -242,6 +249,22 @@ def build_candidates(amounts: Iterable[int] = AMOUNTS) -> list[Candidate]:
         for second in _PAIR_WORDS:
             out.append(Candidate(first + second, first + "、" + second))
     return out
+
+
+# 全発話で採点して記録する短い語（2026-10-07。ライブの読みには使わない = 分類器・推定器のためのデータ）。Whisper は短く
+# 崩したアクションの語を読めないことが多く、第 2 の耳の自由に聞いた文も崩れる（開発データ 98 ハンドの突き合わせ:
+# 「これ」108/115・「る」62/64・「コル」27/28 がコール、「これだ」「あれだ」「俺だ」がフォールド）。オーナー 2026-10-07:
+# 「こる～」「こる」「こぅ」のような発音が頻発・ストリートは「ターン / ターンカード / リバー / リバーカード / ラストカード」
+# のどれも使う（782c457d ハンド 1 の「フォールドです。」は「ターンです」）。雑談・決まり文句の語は比べるための基準。
+SHORT_WORDS = (
+    "コール", "コールです", "コールね", "コル", "こる", "コー", "こう", "こぅ", "る", "これ", "これです",
+    "チェック", "チェックです", "チェックアラウンド",
+    "フォールド", "フォールドです", "これだ", "あれだ", "俺だ",
+    "オールイン", "ショーダウン", "ヘッズアップ", "二プレーヤーズ", "三プレーヤーズ", "四プレーヤーズ",
+    "フロップ", "ターン", "ターンです", "ターンカード", "リバー", "リバーです", "リバーカード", "ラストカード",
+    "です", "はい", "どう", "どうぞ", "オーケー", "すいません", "失礼しました", "ありがとうございます",
+    "ご覧いただきありがとうございます",
+)
 
 
 # ――― 採点（RNN-T の前向きアルゴリズム）―――
@@ -404,12 +427,19 @@ class EarResult:
     # 額ごとの点数（その額のどの言い方でもいちばん確からしいもの）の上位 `AMOUNT_TABLE_SIZE`。engine がその場面で
     # 使える額だけに絞って選ぶ（オーナー 2026-10-01「可能なベット / レイズ額の空間を事前に用意しておけば」）
     amounts: list[tuple[int, float]] = field(default_factory=list)
+    # 短い語（`SHORT_WORDS`）ごとの確からしさと、エンコーダの出力のフレーム数（発話の長さ）。記録だけ（2026-10-07）
+    words: dict[str, float] = field(default_factory=dict)
+    frames: int = 0
 
     def to_dict(self) -> dict:
         out = {"text": self.text, "logp": _round(self.logp),
                "candidates": [{"text": t, "logp": _round(s)} for t, s in self.candidates]}
         if self.amounts:
             out["amounts"] = [[a, _round(s)] for a, s in self.amounts if np.isfinite(s)]
+        if self.words:
+            out["words"] = {w: _round(s) for w, s in self.words.items()}
+        if self.frames:
+            out["frames"] = int(self.frames)
         return out
 
 
@@ -447,10 +477,13 @@ def amount_table(ear: Optional[dict]) -> dict[int, float]:
 class SecondEar:
     """発話の音声 → 自由に聞いた文と、候補ごとの確からしさ。"""
 
-    def __init__(self, model: Model, candidates: Optional[list[Candidate]] = None) -> None:
+    def __init__(self, model: Model, candidates: Optional[list[Candidate]] = None,
+                 words: Optional[Iterable[str]] = SHORT_WORDS) -> None:
         self.model = model
         self.trie = CandidateTrie(candidates if candidates is not None else build_candidates(),
                                   model.tokens, model.context_size)
+        # 短い語は読み取りの候補とは別の木（候補の上位・額の表は変えない）
+        self.word_trie = CandidateTrie([Candidate(w, w) for w in words or ()], model.tokens, model.context_size)
 
     @classmethod
     def load(cls, folder: Path, threads: int = 4) -> "SecondEar":
@@ -463,8 +496,11 @@ class SecondEar:
         free = heard.score(ids, self.model.context_size)
         scores = heard.score_trie(self.trie)
         order = np.argsort(-scores)[:top]
+        words = {}
+        if self.word_trie.candidates:
+            words = {c.spoken: float(s) for c, s in zip(self.word_trie.candidates, heard.score_trie(self.word_trie))}
         return EarResult(text, free, [(self.trie.candidates[i].text, float(scores[i])) for i in order],
-                         amounts=amount_scores_of(self.trie.candidates, scores))
+                         amounts=amount_scores_of(self.trie.candidates, scores), words=words, frames=heard.frames)
 
 
 # ――― ライブの聞き直し ―――
@@ -703,6 +739,18 @@ def garbled_amount_events(text: str, ear: Optional[dict], *,
     event = phonetic_amount_event(text, options, EAR_CONFIDENCE, utterance_start_ts, flags=(EAR_FLAG,),
                                   scores=tuple((amount, round(score, 3)) for amount, (score, _) in order))
     return [event], order[0][1][1]
+
+
+def used_ear(row: Optional[dict]) -> Optional[dict]:
+    """書き起こしの記録の 1 行（transcripts.jsonl）の第 2 の耳のうち、ライブが聞き直しに使った発話のもの。
+
+    2026-10-07 からライブは全発話を第 2 の耳で聞いて記録する（`ear_wanted` = ライブが使う発話だったか。短い語の分類器と
+    推定器のためのデータ）。読み直し・再生・推定器は、いままでどおりライブが使った発話の耳だけを使う（記録の
+    `ear_wanted` が偽の耳は無いものとする）。それより前の記録は使った発話にだけ耳がある（`ear_wanted` なし = 使った）。
+    """
+    if not row or not row.get("ear_wanted", True):
+        return None
+    return row.get("ear") or None
 
 
 def apply_ear(events: Iterable, text: str, ear: Optional[dict], *, question: bool = False,

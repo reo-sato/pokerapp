@@ -88,6 +88,12 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+@pytest.fixture(autouse=True)
+def _short_poll(monkeypatch):
+    """止める合図を見に行く間隔を短くする（既定 0.5 秒のままだと 1 件ごとに止めるのを待つ）。"""
+    monkeypatch.setattr(RFIDHTTPReceiver, "POLL_INTERVAL", 0.02)
+
+
 @pytest.fixture()
 def live_receiver(tmp_path):
     """合成デッキを読んだ実 CardMaster で RFIDHTTPReceiver を起動して yield する。"""
@@ -117,6 +123,7 @@ def live_receiver(tmp_path):
     stop.set()
     receiver.stop()
     receiver.join(timeout=3)
+    assert not receiver.is_alive()
 
 
 class TestPostEvent:

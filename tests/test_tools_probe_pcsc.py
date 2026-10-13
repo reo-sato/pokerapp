@@ -131,12 +131,13 @@ class TestLint:
         assert any("重複" in p for p in lint_pcsc_readers(cfgs))
 
     def test_reader_index_range_and_type(self):
-        for bad in (-1, 255, 300, "3", 1.5, True):
+        # 0xFD〜0xFF は再起動・使える reader の一覧・台数の問い合わせ用に予約（契約 v1.4 §6）
+        for bad in (-1, 253, 254, 255, 300, "3", 1.5, True):
             problems = lint_pcsc_readers([{"name": "R0", "reader": bad, "role": "seat", "seat": 1}])
-            assert any("reader は 0..254" in p for p in problems), bad
+            assert any("reader は 0..252" in p for p in problems), bad
 
     def test_reader_index_valid_bounds(self):
-        assert lint_pcsc_readers([{"name": "R0", "reader": 254, "role": "seat", "seat": 1}]) == []
+        assert lint_pcsc_readers([{"name": "R0", "reader": 252, "role": "seat", "seat": 1}]) == []
         assert lint_pcsc_readers([{"name": "R0", "reader": 0, "role": "seat", "seat": 1}]) == []
 
     def test_duplicate_seat(self):

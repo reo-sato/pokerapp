@@ -29,12 +29,15 @@ PC/SC スタック越しに、production と同じ `rfid.bridge.PCSCBridge` / `r
   raw     pyscard を直接叩く低レベル診断: OS が見ているスロット状態（PRESENT/EMPTY/MUTE…）と、
           connect → Get UID の結果 or 例外（hresult 付き）を時系列表示。`watch` が 0 件のとき
           「OS がカードを認識していない」「power-on で失敗」「ATR/プロトコル」を切り分ける
+  restart 読み取り装置（ESP32）を再起動し（Get UID の P2=0xFD, 契約 v1.11 §6）、列挙し直したあとの使える
+          リーダーの一覧（P2=0xFE）を出す。卓に札が無いときに使う。中継が動いていれば中継を通す
 
 使用例:
   python tools/probe_pcsc.py list
   python tools/probe_pcsc.py check
   python tools/probe_pcsc.py watch --seconds 30
   python tools/probe_pcsc.py raw --seconds 20 --reader 3
+  python tools/probe_pcsc.py restart
 """
 from __future__ import annotations
 
@@ -58,6 +61,8 @@ from rfid.bridge import (  # noqa: E402
     get_uid_apdu,
     list_readers,
     query_reader_count,
+    query_ready_readers,
+    request_device_restart,
     split_uid_response,
 )
 from rfid.card_master import CardMaster, normalize_tag_id  # noqa: E402
@@ -74,6 +79,7 @@ _CONFIG_DEFAULT_JSON = _REPO_ROOT / "config_default.json"
 BridgeFactory = Callable[..., object]
 ReadersLister = Callable[[], "list[str]"]
 ReaderCounter = Callable[[str], "Optional[int]"]
+ReadyQuery = Callable[[str], "Optional[set[int]]"]
 
 
 def cfg_reader_index(cfg: dict) -> int:
@@ -401,11 +407,18 @@ def _require_pyscard() -> bool:
 
 # ――― サブコマンド ―――
 
+def _ready_detail(ready: "Optional[set[int]]") -> str:
+    if ready is None:
+        return "使えるリーダーの一覧: 非対応（v1.11 より前の firmware）"
+    return "使えるリーダー: " + (", ".join(str(k) for k in sorted(ready)) or "なし")
+
+
 def _cmd_list(
     args: argparse.Namespace,
     *,
     lister: ReadersLister = list_readers,
     counter: ReaderCounter = query_reader_count,
+    ready_query: ReadyQuery = query_ready_readers,
 ) -> int:
     if not _require_pyscard():
         return 2
@@ -413,12 +426,14 @@ def _cmd_list(
     print(f"接続中の PC/SC reader: {len(present)} 件"
           f"（v1.2: CCID slot は 1 つだけ = reader 名も 1 つ, ADR-0052）")
     counts: dict[str, Optional[int]] = {}
+    ready: dict[str, Optional[set[int]]] = {}
     for name in present:
         n = counter(name)
         counts[name] = n
+        ready[name] = ready_query(name)
         detail = (f"physical readers: {n}" if isinstance(n, int)
                   else "(v1.1 firmware: 台数問い合わせ非対応)")
-        print(f"  - {name!r}  {detail}")
+        print(f"  - {name!r}  {detail} / {_ready_detail(ready[name])}")
     if not present:
         print("  （0 件。pcscd / USB 接続 / ドライバを確認。ESP32-S3 が CCID class で見えているか）")
 
@@ -427,13 +442,18 @@ def _cmd_list(
     print(f"\nconfig.rfid.pcsc_readers: {len(pcsc_readers)} 件 (transport={rfid_cfg.get('transport')!r})")
     report = match_readers(present, pcsc_readers)
     over = 0
+    unusable = 0
     for cfg in report.matched:
         k = cfg_reader_index(cfg)
         n = counts.get(cfg.get("name", ""))
+        listed = ready.get(cfg.get("name", ""))
         warn = ""
         if isinstance(n, int) and k >= n:
             warn = f"  ⚠ reader {k} は firmware の台数 {n} を超えている"
             over += 1
+        elif listed is not None and k not in listed:
+            warn = "  ⚠ 使えません（起動のときに初期化できなかった・途中で答えなくなった = 札を置いても「札なし」）"
+            unusable += 1
         print(f"  [matched]      {reader_label(cfg):<14} ← {cfg.get('name')!r}{warn}")
     for cfg in report.missing:
         print(f"  [MISSING]      {reader_label(cfg):<14} ← {cfg.get('name')!r}  （config にあるが未接続）")
@@ -444,7 +464,50 @@ def _cmd_list(
     if over:
         print("\nヒント: reader は Get UID の P2（物理リーダー index, 0 起点）。firmware の台数に"
               "合わせて config.rfid.pcsc_readers[].reader を直す（§6）。")
+    if unusable:
+        print("\nヒント: 使えないリーダーは、卓に札が無いときに読み取り装置を再起動すると直ることがあります: "
+              "python tools/probe_pcsc.py restart（直らなければ配線・電源, v1.11 §6）。")
     return 0
+
+
+def _cmd_restart(
+    args: argparse.Namespace,
+    *,
+    lister: ReadersLister = list_readers,
+    restarter: Callable[[str], "Optional[bool]"] = request_device_restart,
+    ready_query: ReadyQuery = query_ready_readers,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.time,
+) -> int:
+    """読み取り装置を再起動し、列挙し直したあとの使えるリーダーの一覧を出す（契約 v1.11 §6）。"""
+    if not _require_pyscard():
+        return 2
+    present = lister()
+    if not present:
+        print("接続中の PC/SC reader がありません（USB を確かめてください）。")
+        return 1
+    results = {name: restarter(name) for name in present}
+    for name, ok in results.items():
+        state = {True: "再起動を受け付けました", False: "再起動の命令がありません（v1.11 より前の firmware）"}.get(
+            ok, "命令を送れませんでした")
+        print(f"  - {name!r}  {state}")
+    if not any(ok is True for ok in results.values()):
+        if any(ok is False for ok in results.values()):
+            print("\n古い firmware は USB を抜いて挿し直すと再起動します。")
+        return 1
+    print("読み取り装置を再起動しています…（全リーダーが数秒読めません）")
+    sleep(2.0)                                      # USB から外れるまで（すぐ聞くと古い列挙が残っている）
+    deadline = clock() + max(5.0, float(getattr(args, "wait", 40.0)))
+    while clock() < deadline:
+        names = lister()
+        ready = {name: ready_query(name) for name in names}
+        if names and all(v is not None for v in ready.values()):
+            for name, v in ready.items():
+                print(f"  - {name!r}  {_ready_detail(v)}")
+            return 0
+        sleep(1.0)
+    print("再起動のあと、使えるリーダーの一覧が届きません（python tools/probe_pcsc.py list で確かめてください）。")
+    return 1
 
 
 def _cmd_check(args: argparse.Namespace, *, bridge_factory: BridgeFactory = PCSCBridge) -> int:
@@ -734,6 +797,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="対象 reader_name（既定: config の先頭で接続中のもの、無ければ最初の reader）")
     p_raw.set_defaults(func=_cmd_raw)
 
+    p_restart = sub.add_parser(
+        "restart", help="読み取り装置（ESP32）を再起動して使えるリーダーの一覧を出す（卓に札が無いときに, v1.11 §6）")
+    p_restart.add_argument("--wait", type=float, default=40.0, help="列挙し直すのを待つ秒数（既定 40）")
+    p_restart.set_defaults(func=_cmd_restart)
+
     return parser
 
 
@@ -770,9 +838,14 @@ def _relay_command(args: argparse.Namespace, client) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command in ("list", "check", "watch"):
+    if args.command in ("list", "check", "watch", "restart"):
         client = _running_relay(args)
         if client is not None:
+            if args.command == "restart":
+                # RDP のセッションの中からは命令を送れないので、中継に頼む（tools/rfid_relay.py restart と同じ）
+                from tools.rfid_relay import cmd_restart
+
+                return cmd_restart(argparse.Namespace(port=None, wait=args.wait))
             return _relay_command(args, client)
     return args.func(args)
 

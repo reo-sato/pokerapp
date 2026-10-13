@@ -47,6 +47,8 @@ def _in_replay_order(events: list[Event]) -> list[Event]:
     ただし発話の処理の中で出した信号（発話と同じ時刻で、その直後に記録したもの）は、live はその発話のアクションを
     入れる前に反映したので、発話の前に流す。engine の信号が無い記録（信号を記録する前の記録・手で書いた
     fixture）は従来どおり時刻順（同じ時刻は camera → rfid → audio）。
+    「フォールド」の語を札の離脱と組にした信号は、live では語のあとに出したもの（語の働きはその信号がすべて）。語の前に
+    流れても engine が語の直前の組の信号を見て語を流さない（`IntegrationThread._fold_word_already_signalled`）。
     """
     if not any(_is_signal(e) for e in events):
         return sorted(events, key=lambda e: (e.timestamp, _ORDER[type(e)]))
@@ -96,6 +98,7 @@ def event_from_envelope(d: dict) -> Event:
             parse_flags=tuple(d.get("parse_flags") or ()),
             utterance_start_ts=d.get("utterance_start_ts"),
             hand_name=d.get("hand_name"),             # 勝った役名（0.6 additive）
+            hit_rank=d.get("hit_rank"),               # 「Nヒット」の N（0.16 additive）
             amount_options=tuple(d.get("amount_options") or ()),   # 音で読んだ額の候補（0.13 additive）
             amount_scores=tuple((int(a), float(s)) for a, s in d.get("amount_scores") or ()),   # 0.14 additive
         )
@@ -116,14 +119,11 @@ def event_from_envelope(d: dict) -> Event:
 
 
 def load_events(path: str | Path) -> list[Event]:
-    """events.jsonl (1 行 1 envelope) を Event 列に復元する。空行は無視。"""
-    events: list[Event] = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        events.append(event_from_envelope(json.loads(line)))
-    return events
+    """events.jsonl (1 行 1 envelope) を Event 列に復元する。空行と JSON として読めない行（電源断のあとの
+    書きかけ・NUL の末尾）は飛ばす。形の合わない envelope は今まで通り例外（記録の誤り）。"""
+    from core.atomic_io import read_jsonl
+
+    return [event_from_envelope(d) for d in read_jsonl(path)]
 
 
 def replay_events(

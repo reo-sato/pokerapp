@@ -26,7 +26,7 @@ from typing import Callable, Optional
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from core.atomic_io import atomic_write_json  # noqa: E402
+from core.atomic_io import atomic_write_json, read_jsonl  # noqa: E402
 from core.hand_estimate import ESTIMATE_SUFFIX  # noqa: E402
 from integration.estimator import (  # noqa: E402
     ESTIMATOR_VERSION,
@@ -44,7 +44,7 @@ MATCH_SEC = 10.0          # 推定のハンドとライブの記録のハンド�
 
 
 def _jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return read_jsonl(path)              # 電源断のあとの読めない末尾の行は飛ばす
 
 
 def _default_workers() -> int:

@@ -12,6 +12,9 @@ uvicorn>=0.29,<1
 # 閲覧リンクの QR（api/server.py, ADR-0067 2c）
 segno>=1.5,<2
 pytest>=7.0
+# テストのダイエット（docs/worklog/2026-10-06-test-diet.md）: 速い組を並べて回す（-n auto）・遅いテストを落として知らせる
+pytest-xdist>=3.5,<4
+pytest-timeout>=2.3,<3
 ruff>=0.4,<1
 # クラウドの保存（cloud/postgres.py, ADR-0067）。CI はサービスの Postgres で試験する
 psycopg[binary]>=3.1,<4

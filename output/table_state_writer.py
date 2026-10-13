@@ -29,11 +29,18 @@ logger = logging.getLogger(__name__)
 def _material(payload: dict) -> dict:
     """履歴の重複判定に使う「実質的な状態」（時刻と経過秒数を除いたもの）。
 
-    定期 publish では `updated_at` と `away_sec` だけが動くので、それらを落として比較する。
+    定期 publish では `updated_at` と経過秒数（席の `away_sec`・ボードの `board_away_sec` の秒・数える前の札の
+    `sec`）だけが動くので、それらを落として比較する（どの札が外れているか・確かめ中かは残す）。店舗 2026-10-06〜07:
+    ボードの札を外したまま一晩つけっぱなしにしたロガーで、`board_away_sec` の秒が毎秒変わり、履歴が 5.5 万行・109 MB に
+    なった。
     """
     out = {k: v for k, v in payload.items() if k != "updated_at"}
     out["seats"] = [
         {k: v for k, v in seat.items() if k != "away_sec"} for seat in payload.get("seats", [])
+    ]
+    out["board_away_sec"] = sorted(payload.get("board_away_sec") or {})
+    out["board_pending"] = [
+        {k: v for k, v in p.items() if k != "sec"} for p in payload.get("board_pending") or []
     ]
     return out
 

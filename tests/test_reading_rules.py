@@ -63,18 +63,22 @@ class TestCheckAroundBySound:
         "チェックラウンド",                                          # 台本 2026-09-30
         "チェック、アワンド", "チェックアラン", "チェック、ラウンズ",       # まだ出ていない言い方
         "check around",
+        # 終わりの「ンド」が残った語は、卓の用語（ハンド）のほうが音が近くてもアラウンド（店舗の「チェック、アンド」7 回・
+        # 台本 2026-10-01 で読んだ「チェックアラウンド」の書き起こし「チェック、ハンド」。オーナー 2026-10-06）
+        "チェック、アンド", "チェック アンド", "チェック、ハンド",
     ])
     def test_check_around(self, text):
         assert _read(text) == [("check", 0, "around")]
 
     @pytest.mark.parametrize("text", [
-        "チェック", "チェック、ターンカード", "チェック、ターン", "チェック、ラストカード", "チェック、ハンド",
+        "チェック", "チェック、ターンカード", "チェック、ターン", "チェック、ラストカード", "チェック、ラスト",
     ])
     def test_a_street_word_after_check_is_not_around(self, text):
         assert _read(text) == [("check", 0)]
 
     def test_the_word_after_check_is_compared_as_said_after_check(self):
-        """「チェック」の「ク」に続く「アラウンド」の「ア」は消えやすい（「ランド」= アラウンド、「ハンド」ではない）。"""
+        """「チェック」の「ク」に続く「アラウンド」の「ア」は消えやすい（「ランド」= アラウンド。音だけなら「ハンド」は
+        卓の用語のほう。チェックのすぐあとの「ハンド」は終わりの「ンド」で読む = `_is_check_around`）。"""
         assert sounds_like("ランド", "アラウンド", after="チェック")
         assert not sounds_like("ランド", "アラウンド")
         assert not sounds_like("ハンド", "アラウンド", after="チェック")
@@ -96,6 +100,50 @@ class TestCheckRaiseBySound:
     @pytest.mark.parametrize("tail", ["リスト", "レート", "ライズ", "リレイズ"])
     def test_other_words_after_check_are_not_raise(self, tail):
         assert not sounds_like(tail, "レイズ", after="チェック")
+
+
+class TestGarbledWayAfterACount:
+    """コールでラウンドが閉じた直後の「N ウェイ」が崩れて聞こえる（店舗 2026-09-29・10-06 の 5 回。オーナー 2026-10-06
+    「コールでストリート遷移が確定した直後に N ウェイを宣言することで、コール 3 レイなどの聞き間違いが生まれている」）。
+    数のすぐあとの、エ段の音に「イ」（伸ばす音）か「ン」が続く語は残りの人数。"""
+
+    @pytest.mark.parametrize("text, expected", [
+        ("コール 3 レイ", [("call", 0), ("players_left", 3)]),
+        ("コール3レイズ", [("call", 0), ("players_left", 3)]),      # 第 2 の耳は「コールスリーウェイ」
+        ("ポールスリーベイク", [("players_left", 3)]),              # 第 2 の耳は「ホールスリーウェイ」
+        ("コール、コール、スリーベン", [("call", 0), ("call", 0), ("players_left", 3)]),
+        ("フォーレイ", [("players_left", 4)]),
+        ("ツーベイ", [("heads_up", 0)]),
+    ])
+    def test_it_is_players_left(self, text, expected):
+        assert _read(text) == expected
+
+    @pytest.mark.parametrize("text, expected", [
+        ("3ベット", [("bet", 3)]),                                # 「ベット」はこの形ではない
+        ("レイズ3", [("raise", 3)]),                              # 数が前に無い
+        ("3千レイズ", [("raise", 3000)]),
+        ("コール3レイズ 2千", [("call", 3), ("raise", 2000)]),     # あとに額が続く
+        ("フォールド", [("fold", 0)]),                            # 「フォー」の語ではない
+    ])
+    def test_other_words_after_a_number_are_unchanged(self, text, expected):
+        assert _read(text) == expected
+
+    @pytest.mark.parametrize("text, expected", [
+        ("2センテン。", [("bet", 2000)]),        # 店舗 2026-10-07 61eda7bd ハンド 1（ヘッズアップにしていた）
+        ("3ゼンテン", [("bet", 3000)]),
+        ("2 センテン", [("bet", 2000)]),
+        ("2セン", [("bet", 2000)]),
+        ("2センゴヒャクテン", [("bet", 2500)]),
+        ("5ヒャクテン", [("bet", 500)]),
+        ("レイズ2センテン", [("raise", 2000)]),
+        ("ベット 3ゼン", [("bet", 3000)]),
+    ])
+    def test_a_digit_with_a_kana_unit_is_an_amount(self, text, expected):
+        assert _read(text) == expected
+        assert parse_actions(text)[0].raw_text == text            # 記録には聞こえたままの文
+
+    def test_a_seat_number_is_not_a_count(self):
+        assert ("players_left", 3) not in _read("シート3 レイズ")
 
 
 class TestAmountOwnership:
@@ -140,3 +188,29 @@ class TestAmountOwnership:
     def test_control_words_keep_their_amounts(self):
         """勝者・ハンドの終わりの額（ポットの読み上げなど）は別の賭けにしない。"""
         assert [e.action for e in parse_actions("シート3 ウィナー 1万2000")] == ["winner"]
+
+
+class TestWordsTheDealerNeverSays:
+    """「これで終わりです」はディーラーが言わない = 常にほかの語の聞き違い（オーナー 2026-10-06）。コールとして読み、
+    印 `garbled_call` で engine が札の離脱から決め直す（tests/test_rfid_folds.py の TestGarbledCall）。"""
+
+    @pytest.mark.parametrize("text", ["これで終わりです。", "これで終わります", "ここで終わりです。", "これで終わり"])
+    def test_it_is_a_garbled_call(self, text):
+        (event,) = parse_actions(text, confidence=0.5)
+        assert (event.action, event.parse_flags) == ("call", ("garbled_call",))
+
+    @pytest.mark.parametrize("text", ["これで終わりにしましょう", "今日はこれで終わりですね、お疲れ様"])
+    def test_only_the_whole_utterance(self, text):
+        assert all("garbled_call" not in e.parse_flags for e in parse_actions(text, confidence=0.5))
+
+    @pytest.mark.parametrize("text, expected", [
+        ("フォール", [("call", 0, ("garbled_call",))]),
+        ("センテン、フォール", [("bet", 1000, ("amount_only",)), ("call", 0, ("garbled_call",))]),
+        ("フォールド、フォール", [("fold", 0, ()), ("fold", 0, ("fuzzy_keyword",))]),   # 続けて言った 2 つ目はフォールド
+        ("フォールド", [("fold", 0, ())]),
+    ])
+    def test_a_fall_without_do_is_a_garbled_call(self, text, expected):
+        # 語尾の「ド」が無い「フォール」: 店舗の書き起こしの 3 回とも、札が席に残ったコール（2026-10-06 の 1f838667
+        # ハンド 15・20、05cccd6c ハンド 1）
+        assert [(e.action, e.amount, e.parse_flags) for e in parse_actions(text, confidence=0.5)] == expected
+
