@@ -170,6 +170,20 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
   - 記録したボードの札がいま読めていなければ、host は表示用に「外れた」と出してよい
     （`RFIDThread.board_presence()["absent"]`。記録は変えない, v1.7）。読めているが位置を与える前の札は
     「確認中」と出してよい（`["pending"]`, v1.8）。
+  - **フロップの札が読めないとき**（host, 2026-09-29, ADR-0068 R3。オーナー「フロップは必ず 3 枚出るので、
+    同時に出てなかった場合に、ターンカードをフロップに充当してはいけない」）: フロップの位置に空きがあっても
+    （1〜2 枚しか読めていない）、新しい札を次のどれかでフロップに入れず 4 枚目以降にする
+    （`RFIDThread._not_a_flop_card`）。
+    - board reader の左右の位置の目安は config の並び（左から k 台目, 0 始まり / 台数 n）: 右端 `(k+1)/n ≤ 0.6` の
+      reader は**フロップだけ**を読む、左端 `k/n ≥ 0.6` の reader は**ターン・リバーだけ**を読む（`_FLOP_EDGE`。
+      店舗の 3 台 = 左はフロップだけ・右はターン・リバーだけ・真ん中はどちらも, 20 ハンドの実測で例外なし）。
+    - その札を読んだ reader がすべて右側（ターン・リバーだけ）なら 4 枚目以降。左側の reader が読んでいれば
+      フロップ（遅れて読めたフロップの札）。
+    - どちらでもなければ時刻で決める: フロップの最初の札から `flop_window_sec`（既定 10 秒, config
+      `rfid.flop_window_sec`）より後に見え始めた札は 4 枚目以降（店舗の実測: フロップの 3 枚は最初の札から
+      5.5 秒以内、ターンは早いと 7 秒）。
+    - `flop_window_sec=null` は従来どおり（空き位置の若い順。本番の起動経路の既定は 10 秒 = 有効）。engine は
+      読めなかった位置を `??` としてハンドの記録に残し（`hand` schema 1.6）、枚数ではなく位置でストリートを決める。
 - **位置割り当ての全解放は「新ハンド」、1 位置の解放は「明示のミスディール訂正」** **MUST**
   （ISSUE-0026 / ADR-0054）。どちらも位置と board reader のデバウンス状態をまとめて落とす
   （盤上に残っているカードは改めて検出し直す）。
@@ -199,6 +213,14 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 - 役割→`RFIDEvent.role`/`.seat` は host config が **唯一の source of truth**。firmware は物理リーダー
   index（P2）の順序のみ保証。`RFIDEvent.reader_id` は従来どおり config の**並び順**（`reader_{i}`）で、
   P2 の値ではない（既存の event 契約は不変, §9）。
+- **中継から読むことがある**（host, 2026-09-30, ADR-0070）: RDP で操作する店舗 PC では、RDP のセッションの中の
+  アプリから PC/SC に届かない（`SCardEstablishContext` = `0x8010001D`。スマートカードの転送を両側で止めても同じ）。
+  そのときは中継（`rfid/relay.py` + `tools/rfid_relay.py serve`、システムの権限のタスク `PokerRFIDRelay` =
+  `installer/rfid_relay_task.ps1`）が `pcsc_readers` の `(name, reader)` を本契約どおりに読み、最新の UID を PC の中
+  （`127.0.0.1:8792`, config `rfid.relay_port`）だけに渡す。ロガーは中継が動いていれば中継から（`RelayBridge`）、
+  無ければ直接（`PCSCBridge`）読む（`AutoRFIDSource`）。**firmware から見た APDU 列・本契約の規則は同じ**で、
+  在否・位置・配り直しの解釈もロガーの `RFIDThread` が同じ規則で行う。中継の読み取りが 3 秒より古ければ「札なし」と
+  同じ扱い。
 - HTTP 経路の `config.rfid.readers`（**dict**, `{reader_id: {role,seat}}`）とは **別キー**であり混同しない
   **MUST**（list=pcsc / dict=http）。
 
@@ -255,8 +277,13 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
     「一覧なし = None」として扱う（`rfid/bridge.py:query_ready_readers`）。
 - **読み取り装置の再起動（v1.11 additive, SHOULD）**: host が `FF CA 00 FD 00` を送ったら、firmware は **`90 00` を
   返してから**（300 ms 後に）自分を再起動する（`esp_restart`。USB はいったん切れて列挙し直し、起動のときの共有
-  RST で全 PN5180 がリセットされる = USB を挿し直したのと同じ。電源は切れない）。v1.10 以前の firmware は `6A 86`
-  を返す（host は「命令なし」= USB の挿し直しを案内する, `rfid/bridge.py:request_device_restart`）。
+  RST で全 PN5180 がリセットされる = PC の USB から給電している構成で USB を挿し直したのと同じ。電源は切れない）。v1.10 以前の firmware は
+  `6A 86` を返す（host は「命令なし」= 手で再起動するよう案内する, `rfid/bridge.py:request_device_restart`）。
+  - **給電アダプタで動かしている卓の注意**（店舗 2026-10-06, ADR-0070）: ESP32 が PC の USB ではなく給電アダプタから
+    電源を取っていると、**PC との USB を抜き挿ししても ESP32 は再起動しない**（PN5180 の初期化 `pn5180_init` は起動の
+    ときだけなので、読めなくなったリーダーは読めないまま）。手で再起動するときは**給電アダプタを抜いて数秒待って
+    挿し直す**。host の案内（旧 firmware・命令が届かないとき・再起動で直らないとき）はこれを出す
+    （`rfid/reader_thread.py:_POWER_CYCLE`, 2026-10-13）。
   - **host MUST**: 再起動のあいだ（数秒）は全リーダーが読めない（read_uids が空 = 札が消えたのと同じに見える）ので、
     **卓に札が無い状態（全リーダーが空）が続いたときだけ**送る（`RFIDThread`: `rr` は 2 秒、自動は 10 秒）。送ったら
     接続を捨て、列挙し直したあとにつなぎ直して一覧を聞き直す。中継（`rfid/relay.py`）から読んでいるときは中継に
@@ -322,7 +349,12 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
   一覧に無いリーダーを知らせ、`rr` / 自動（`rfid.auto_restart`）で、卓に札が無いときだけ再起動を頼む。一覧に出ない
   不調には、board reader が 2 ハンド続けて 1 枚も読まなければ知らせる（`RFIDThread`）。中継は一覧を読み取りと一緒に
   渡し、`POST /restart` で命令を送ってつなぎ直す。**firmware の書き換えが要る**（旧 firmware は両方 `6A 86` = host は
-  一覧なし・命令なしとして動き、USB の挿し直しを案内する）。物理リーダーの番号の上限は 254 → 252。
+  一覧なし・命令なしとして動き、手での再起動を案内する）。物理リーダーの番号の上限は 254 → 252。
+  - 2026-10-13 の注記（版は変えない）: 「再起動 = USB の挿し直しと同じ」は PC の USB から給電している構成でのこと。
+    店舗の卓は ESP32 を給電アダプタで動かしており、USB の抜き挿しでは再起動しない（2026-10-06 の店舗で、案内どおりに
+    USB を抜き挿ししても直らず、給電アダプタの抜き挿しで直った）。host の案内を「給電アダプタを抜いて数秒待ってから
+    挿し直す」に改めた（§6, ADR-0070）。あわせて §4 に、host 側の 2 つの規則（フロップの札が読めないときの位置の
+    決め方 = 2026-09-29、中継から読む構成 = 2026-09-30）を書き足した（どちらも host のみ・firmware の要求は不変）。
 - **v1.10（2026-09-25, ADR-0058 追記 5 / ISSUE-0035）** — 店舗で river のあとに turn を差し直すと、5 枚埋まった
   ボードの規則（消えた札を抜いて詰め、新しい札を 5 枚目）で turn と river が逆になった。取ってすぐ置くと
   6 枚目の WARN で位置なしのまま確定していた。見逃した差し直し（消えたあとに空き位置へ入れた札）が無ければ
@@ -421,5 +453,6 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
   **ADR-0052（1 slot + Get UID の P2 で物理リーダー選択 = v1.2）** /
   ISSUE-0015（本契約の出所）/ ISSUE-0021（複数枚 anti-collision + poll 周期。v1.1 の firmware 側）/
   **ISSUE-0022（Windows usbccid の single-slot 制限 = v1.2 の出所）**
+  / **ADR-0070（中継・使えるリーダーの一覧・再起動 = v1.11）** / ADR-0068 R3（フロップの札が読めないとき）
 - `rfid/bridge.py`（Get UID / UID 正規化）/ `rfid/reader_thread.py`（pcsc_readers / polling / debounce）
 - `rfid/card_master.py`（`normalize_tag_id` / `bytes_to_tag_id`）/ `tests/test_rfid.py`

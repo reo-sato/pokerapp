@@ -95,3 +95,4 @@ firmware が手元に無くても、(1) 境界契約の凍結、(2) host 側の�
 
 - Supersedes: —（ADR-0015 の follow-up = ISSUE-0015 を解決。関連: ADR-0015 / ISSUE-0015 / ISSUE-0014(Superseded)）
 - Superseded by: —
+- 追記（2026-10-13）: 契約 v1.11（使えるリーダーの一覧・読み取り装置の再起動）と、RDP の外の中継から読む構成は ADR-0070。

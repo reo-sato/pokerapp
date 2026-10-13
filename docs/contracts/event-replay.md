@@ -1,6 +1,6 @@
 # Deterministic record / replay and golden fixtures (design draft)
 
-> **Status: R1 (record + `reconstruction_event` schema) 実装済 / replayer・golden fixtures は planned**。本 doc は ADR-0010（hand core の
+> **Status: R1 (record + `reconstruction_event` schema) 実装済 / replayer・golden fixtures も実装済（§4・§5）**。本 doc は ADR-0010（hand core の
 > contract 化と決定的 record/replay）の **設計詳細**。`reconstruction_event` envelope の inline schema
 > sketch を含む。再構築アルゴリズム本体は `hand-reconstruction.md`（ADR-0009）。
 >
@@ -26,10 +26,42 @@ fixtures-as-oracle（他層が既に持つ規律）が付く。
 - **camera frame は記録しない**: `CameraEvent.frame`（`core/events.py`, `repr=False`）は重く非決定的なので
   envelope から除外し、`seat` と `timestamp` のみ残す。
 
-## 3. `reconstruction_event` envelope schema sketch
+## 3. `reconstruction_event` envelope（いまは `0.18`）
 
 `type` で判別する discriminated union。我々が新設する surface なので `additionalProperties: false` で締める
-（replay 決定性の要）。`core/events.py` の 3 データクラスを直列化したもの（`frame` 除外）。
+（replay 決定性の要）。`core/events.py` の 3 データクラスを直列化したもの（`frame` 除外）。直列化は
+`output/event_recorder.py:event_to_envelope`。**正本は `schemas/reconstruction_event.schema.json`**（version と
+各フィールドの説明・版ごとの追加は schema の `description`、版の一覧は `versioning-and-freeze.md` §6）。
+draft のまま（未 freeze）で、0.1 以降の変更はすべて **optional フィールド / enum 値の追加 = additive**。
+
+### 3.1 いまのフィールド（0.18）
+
+- **共通**（required）: `type`（`audio` / `rfid` / `camera`）・`timestamp`（`time.time()` 由来の秒 = replay の clock 源, §4）。
+- **audio**（required: `action` / `amount` / `raw_text`）:
+  - `seat` / `confidence`（0.1, ADR-0009 additive）・`position`（読み上げたポジション名, 0.3）。
+  - `utterance_start_ts`（発話の話し始め = 照合窓の始端）・`parse_flags`（パースで見つけた曖昧さ, 0.2）。
+  - `hand_name`（ショーダウンで言った役名, 0.6）・`hit_rank`（「Nヒット」の N, 0.16）。
+  - `amount_options`（意味のない単発の語を額の音で読んだときの額の候補, 0.13）・`amount_scores`（額の候補ごとの音の点数
+    `[額, log の確からしさ]`, 0.14）。
+  - `parse_flags` の値: `ambiguous_amount` / `multi_action_keywords`（0.2）・`too_many_actions` / `amount_only` /
+    `check_around`・`fuzzy_keyword`（0.10）・`second_ear` / `sentence_after_chatter`（0.11）・`phonetic_amount`（0.13）・
+    `legal_amount`（0.14）・`garbled_call`（0.16）・`before_check_around`（0.17）・`garbled_digits`（0.18）。非空なら
+    needs_review。ただし `amount_only` / `check_around` / `before_check_around` は読み方の情報で review の理由にしない。
+- **rfid**（required: `tag_id` / `card` / `reader_id` / `role`）:
+  - `seat` / `board_index` / `raw_tag_id`（0.1）・`replaces`（配り直しで差し替えた前の札, 0.4, ADR-0058）。
+  - `kind`（0.5。省略 = `card` = 札を読んだ）と `observed_at`（離れた時刻）。`kind` の値: `leave` / `muck` / `return` /
+    `confirm` / `street` / `showdown`（0.5 = 札の離脱でフォールド）・`reinterpret`（0.7。2026-09-29 から新しい記録には出ない
+    = 旧記録を読むために残す）・`spoken_fold`（0.8）・`deal` / `hand_start` と `cards`（0.9）・`deal_order` と `times`
+    （0.11）・`showdown_end`（0.12）・`spoken_fold_drop`（0.15）。`card` 以外は engine が在否・ボード・発話から作って記録
+    する**信号**で、replay はセンサーの読みから決め直さずにこれに従う（live と同じ時点・同じ判断になる）。
+- **camera**（required: `seat`）: `frame` は記録しない（§2）。
+
+既定値のフィールドは recorder が省略して書くので、古い replay 実装でも読める。古い `events.jsonl` は新しい実装で欠損
+fallback（従来の照合窓・flag なし・信号なし）により無変更で再生できる。schema との整合は `tests/test_contracts.py`
+（`fixtures/reconstruction_event/`）、旧記録の再生は golden fixtures（§5, `tests/test_reconstruction.py`）と店舗の
+開発データ（`tests/fixtures/store/`）で見る。
+
+### 3.2 最初の sketch（0.1, 履歴として残す）
 
 ```jsonc
 {
@@ -142,10 +174,9 @@ tests/fixtures/reconstruction/<case>/
   stack_start/end・winner・review 理由を**手計算で検証**すること（ADR-0047 の差分表が前例:
   S5/S6 の誤値が 5 fixtures に pin されたまま「緑」であり続けた）。
 - pin 値を変更する場合は、旧値→新値の差分表と原因を ADR / worklog に記録する。
-- envelope `reconstruction_event` は **0.2**（ADR-0047/0048, additive）: audio に
-  `utterance_start_ts`（発話開始時刻 = 照合窓の始端）と `parse_flags`（`ambiguous_amount` /
-  `multi_action_keywords`）。既定値のとき recorder は省略して書くため、旧 replay 実装でも読める。
-  旧 events.jsonl は新実装で欠損 fallback（従来窓 / flag なし）により無変更で再生できる。
+- envelope `reconstruction_event` は 0.2（ADR-0047/0048）で audio に `utterance_start_ts`（発話開始時刻 = 照合窓の
+  始端）と `parse_flags` を足した。いまは **0.18**（フィールドの一覧は §3.1）。既定値のとき recorder は省略して書くため、
+  旧 replay 実装でも読める。旧 events.jsonl は新実装で欠損 fallback（従来窓 / flag なし）により無変更で再生できる。
 
 ## 7. open 論点（→ issues）
 
