@@ -76,7 +76,9 @@ cd /d C:\PokerHandLogger\firmware\esp32s3-pn5180-ccid && rmdir /s /q managed_com
   `powershell -NoProfile -Command "cd C:\PokerHandLogger\firmware\esp32s3-pn5180-ccid; $p = [regex]::Match((Get-PnpDevice -Class Ports -PresentOnly | Where-Object FriendlyName -match 'CP210').FriendlyName, 'COM\d+').Value; python (Join-Path $env:IDF_PATH 'tools\idf.py') -p $p flash"`）。
 - ビルド中の「detected dubious ownership in repository」は、ESP-IDF のフォルダを管理者が作ったための git の警告で、
   版の文字列が取れないだけ（ビルドには関係しない）。
-- 書き込んだら卓の USB（native USB 側）を挿し直し、`python tools/probe_pcsc.py list`（RDP なら中継を通した
+- 書き込んだら読み取り装置を再起動する（給電アダプタで動かしている卓は給電アダプタを数秒抜いて挿し直す。USB だけで
+  動かしている卓は native USB 側を挿し直す。2026-10-06 の店舗: 給電アダプタの卓では USB の抜き挿しでは再起動しない）。
+  そのあと `python tools/probe_pcsc.py list`（RDP なら中継を通した
   `python tools/rfid_relay.py status`）で「使えるリーダー」の一覧が出ることを確かめる。
 
 ## 読み取り装置の再起動と使えるリーダーの一覧（契約 v1.11 §6, 2026-10-06）
@@ -89,7 +91,7 @@ cd /d C:\PokerHandLogger\firmware\esp32s3-pn5180-ccid && rmdir /s /q managed_com
   終わる前（USB は init の前に上がる）は `69 85`。
 - **`FF CA 00 FD 00`** → `90 00` を返してから 300 ms 後に `esp_restart()`（USB は列挙し直し、init の共有 RST で
   全 PN5180 がリセットされる）。host は卓に札が無いときだけ送る（ロガーの `rr` / 自動, `rfid/reader_thread.py`）。
-- 旧 firmware は両方 `6A 86`（範囲外の P2）= host は「一覧なし・命令なし」として動き、USB の挿し直しを案内する。
+- 旧 firmware は両方 `6A 86`（範囲外の P2）= host は「一覧なし・命令なし」として動き、給電し直し（給電アダプタの抜き挿し）を案内する。
 
 ## アーキテクチャ（実機: 本番 11 reader / CCID slot は 1 つ / 配線は 13 台ぶん + CD74HC4067 MUX）
 
