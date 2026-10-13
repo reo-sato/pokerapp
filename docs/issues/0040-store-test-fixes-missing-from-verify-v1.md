@@ -59,8 +59,8 @@ ADR-0066: リリース版 `stable` は `origin/verify-v1` の先頭（または�
 - `python tools/release.py promote` の前に、店舗テストの作業ブランチが verify-v1 に入っているかを確かめる:
   `git fetch origin && git log --oneline origin/verify-v1..origin/<作業ブランチ>` が空であること（空でなければ先にマージする）。
 - 作業ブランチで店舗の直しを続けている間は、区切り（店舗のログの 1 回分）ごとに verify-v1 へマージする。
-- 注意（2026-10-13 時点）: 作業ブランチの `183cb4b`（reconstruction_event 0.18・給電アダプタの案内）はマージ `d3e9071` の
-  あとのコミットで、`origin/verify-v1`（= `d3e9071`）にはまだ無い。promote の前に同じ確かめが要る。
+- 2026-10-13: マージ `d3e9071` のあとの文書の追いつき（`183cb4b` 〜 `c5eaa87`）も、作業ブランチと verify-v1 の両方に push した
+  （2 つの先頭は同じ）。
 - （任意の後続）`tools/release.py promote` に、指定したブランチの未マージのコミットを出して止める確かめを足す。
 
 ## Regression Test
