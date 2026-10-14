@@ -106,10 +106,13 @@ DEAL_GAP_SEC = 0.6
 # ハンドの途中でも、卓（席とボードのリーダー）に札が 1 枚も無い状態がこの秒数続いたらプレーは
 # 終わったとみなし、音声を聞き流す（片付け・シャッフル中の会話を認識に回さない, ADR-0063）。
 TABLE_CLEAR_SEC = 15.0
-# 全員フォールドでハンドを確定したのに 2 席以上に札が載っている（降りた判断が早すぎた疑い）あいだは、この秒数まで
-# 聞き取りを続けて書き起こしに残す（記録には入れない = ハンドの外。店舗 2026-10-06: 早く終わったあとのリバーの
-# ベット・レイズ・コールが聞き流されて失われ、あとから推定にも使えなかった）。次の配布・札が片付いたら止める。
-POST_FOLDOUT_LISTEN_SEC = 30.0
+# ハンドを確定したのに 2 席以上に札が載っている（確定が早すぎた疑い）あいだは、この秒数まで聞き取りを続けて
+# 書き起こしに残す（記録には入れない = ハンドの外。店舗 2026-10-06: 全員フォールドで早く終わったあとのリバーの
+# ベット・レイズ・コールが聞き流されて失われた。2026-10-14 15cad555 ハンド 3: ショーダウンで早く閉じたあとの
+# ターン・リバーの賭けが確定から 46 秒まで続き、聞き流されて推定にも使えなかった = 終わり方によらない）。
+# 次の配布・札が片付いたら止める。
+POST_HAND_LISTEN_SEC = 90.0
+POST_FOLDOUT_LISTEN_SEC = POST_HAND_LISTEN_SEC     # 旧名
 # いまのストリートの最初の札が見える前にこの秒数以上早く話し始めた「コール」は、前のストリートで
 # 言われたもの（言い直し）とみなす（店舗の実測: 「コール」のあとの「600点コールです」がターンの札の 3 秒前）。
 STALE_CALL_MARGIN_SEC = 1.0
@@ -551,7 +554,7 @@ class IntegrationThread(threading.Thread):
         if listen_gate is not None:
             listen_gate.clear()
         self._table_empty_since: Optional[float] = None
-        self._listen_after_hand_until: Optional[float] = None   # `POST_FOLDOUT_LISTEN_SEC`
+        self._listen_after_hand_until: Optional[float] = None   # `POST_HAND_LISTEN_SEC`
         self._voice_heard_at = voice_heard_at
         self._silent_mic_warned = False
         # いまのハンドを配布の検出で始めたか（直後の「ハンド開始」/ `n` を二重に数えない）。
@@ -1137,7 +1140,7 @@ class IntegrationThread(threading.Thread):
                 self._notice(f"ハンド {gs.hand_id} は手札が配られた時点で始めています（「ハンド開始」は不要です）")
                 return
             # G1: 勝者未宣言のまま新ハンドが宣言された → 進行中の記録を捨てず異常確定する。
-            if self._hand_open and self._current_actions and not self._finish_by_rules(event):
+            if self._hand_open and self._current_actions and not self._finish_by_rules(event, final=True):
                 logger.warning(
                     "new_hand mid-hand (hand_id=%d): 勝者未宣言のため異常確定してから開始する",
                     gs.hand_id,
@@ -2941,6 +2944,11 @@ class IntegrationThread(threading.Thread):
             return
 
         winner_seat = seats[0] if seats else None
+        if winner_seat is None and self._showdown_before_full_board():
+            # ボードがそろう前のショーダウンで勝者は言わない（オーナー 2026-10-14）= 聞き違い・雑音。決めずに待つ
+            self._notice(f"「{event.raw_text}」— ボードが {len(self._board_cards)} 枚でまだそろっていないので、"
+                         "勝者は決めずに待ちます")
+            return
         if winner_seat is None:
             # 席を言わない「ウィナー」: ショーダウンなら残った全員が見せたとして手札で決める（ADR-0062）
             if self._finish_by_rules(event):
@@ -3305,8 +3313,8 @@ class IntegrationThread(threading.Thread):
         game = set(self._game_seats())
         return sorted(s for s, info in seats.items() if s in game and info.get("present"))
 
-    def _keep_listening_after_foldout(self) -> bool:
-        """全員フォールドで確定したのに 2 席以上に札が載っていれば、聞き取りを続ける（`POST_FOLDOUT_LISTEN_SEC`）。
+    def _keep_listening_after_hand(self) -> bool:
+        """ハンドを確定したのに 2 席以上に札が載っていれば、聞き取りを続ける（`POST_HAND_LISTEN_SEC`）。
 
         フォールドを札の離脱で決める卓だけ（声でフォールドを決める卓では、降りた人の札が席に残る）。
         """
@@ -3315,13 +3323,13 @@ class IntegrationThread(threading.Thread):
         holding = self._seats_holding_cards()
         if len(holding) < 2:
             return False
-        self._listen_after_hand_until = self._clock() + POST_FOLDOUT_LISTEN_SEC
-        logger.info("全員フォールドで確定しましたが席%s に札が残っています — %.0f 秒まで聞き取りを続けます"
-                    "（書き起こしに残すだけで、記録には入れません）", holding, POST_FOLDOUT_LISTEN_SEC)
+        self._listen_after_hand_until = self._clock() + POST_HAND_LISTEN_SEC
+        logger.info("ハンドを確定しましたが席%s に札が残っています — %.0f 秒まで聞き取りを続けます"
+                    "（書き起こしに残すだけで、記録には入れません）", holding, POST_HAND_LISTEN_SEC)
         return True
 
     def _check_post_hand_listening(self) -> None:
-        """全員フォールドのあとの聞き取りを、時間切れか札が片付いたら止める（次の配布でも止まる）。"""
+        """確定のあとの聞き取りを、時間切れか札が片付いたら止める（次の配布でも止まる）。"""
         until = self._listen_after_hand_until
         if until is None or self._hand_open:
             return
@@ -3552,7 +3560,7 @@ class IntegrationThread(threading.Thread):
         self._settle_corrections()
         if self._rfid_folds and self._hand_open:
             self._close_rounds_at_hand_end()
-        if self._finish_by_rules(ended_ts=ended):
+        if self._finish_by_rules(ended_ts=ended, final=True):
             return
         gs = self._game_state
         remaining = self._remaining_seats()
@@ -3616,6 +3624,13 @@ class IntegrationThread(threading.Thread):
             return gs.is_hand_active() and gs.legal_context().actor_seat is None
         except Exception:  # noqa: BLE001
             return False
+
+    def _showdown_before_full_board(self) -> bool:
+        """ショーダウン（2 人以上残りベッティングが終わった）なのに、ボードがまだ 5 枚配られていない（オールインの
+        ランアウトの途中）。オーナー 2026-10-14: ショーダウンでボードがすべて配られる前に勝者が宣言されることはない
+        = この間の席の無い勝者・チョップ・「ハンド終了」・全員が見せた、では決めない（読めなかった位置 `??` は配られた
+        として数える）。決めるのはボードがそろってから、か次の配布・`n`・終了のとき。"""
+        return (self._betting_over() and len(self._remaining_seats()) >= 2 and len(self._board_cards) < 5)
 
     def _maybe_finish_hand(self, event: Optional[AudioEvent] = None) -> bool:
         """ほかが全員フォールド（マック）したら、残った人の勝ちで確定する。
@@ -3755,6 +3770,8 @@ class IntegrationThread(threading.Thread):
             return
         deadline = self._showdown_at + SHOWDOWN_MUCK_SEC
         river = self._board_dealt_at.get(5)
+        if river is None and len(self._board_cards) < 5:
+            return            # オールインのランアウトの途中: リバーが配られてから数える（オーナー 2026-10-14）
         if river is not None:
             deadline = max(deadline, river + SHOWDOWN_MUCK_SEC)   # オールインのあとのリバーから数える
         oldest = self._oldest_speech()
@@ -3777,9 +3794,11 @@ class IntegrationThread(threading.Thread):
 
     def _finish_by_rules(
         self, event: Optional[AudioEvent] = None, *, explicit: bool = False,
-        ended_ts: Optional[float] = None,
+        ended_ts: Optional[float] = None, final: bool = False,
     ) -> bool:
-        """ルールで勝者が決まるなら確定する（1 人残り / ショーダウンを手札で）。決まったら True。"""
+        """ルールで勝者が決まるなら確定する（1 人残り / ショーダウンを手札で）。決まったら True。
+
+        `final` = 次の配布・`n`・終了でハンドを閉じる。そうでなければ、ボードがそろう前のショーダウンは決めない。"""
         if not (self._auto_winner and self._rules_aware and self._hand_open):
             return False
         if not self._game_state.is_hand_active():
@@ -3788,6 +3807,8 @@ class IntegrationThread(threading.Thread):
         if len(remaining) == 1:
             self._finalize_hand(remaining[0], event, winner_source="fold", ended_ts=ended_ts)
             return True
+        if not final and self._showdown_before_full_board():
+            return False
         if len(remaining) >= 2 and self._betting_over():
             return self._finish_showdown(event, explicit=explicit, ended_ts=ended_ts)
         return False
@@ -5620,7 +5641,7 @@ class IntegrationThread(threading.Thread):
         self._street_marks = {}
         self._streets_synced = set()
         self._reset_corrections()
-        if self._deal_at is None and not (winner_source == "fold" and self._keep_listening_after_foldout()):
+        if self._deal_at is None and not self._keep_listening_after_hand():
             self._set_in_play(False)            # 次の配布まで音声を聞き流す（ADR-0063）
 
     def _describe_result(self, summary: HandSummary, awards: Optional[dict[int, int]]) -> str:

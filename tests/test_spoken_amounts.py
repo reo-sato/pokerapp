@@ -355,6 +355,7 @@ class TestNoise:
         "ご視聴ありがとうございました。",
         "この動画をご覧頂きましてありがとうございます。",
         "ご覧いただきありがとうございます。",
+        "チェック、フォールド、オールイン、チョップ",       # 店舗 2026-10-14 15cad555 ハンド 3（チップの音の中）
     ])
     def test_store_hallucinations_are_noise(self, text):
         assert is_prompt_echo(text)

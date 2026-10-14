@@ -396,6 +396,18 @@ class TestListeningAfterAFoldOut:
         self._fold_out(tb, cards_back=False)        # 札が残っているのは勝った 席5 だけ
         assert not tb.t._listen_gate.is_set()      # noqa: SLF001
 
+    def test_it_keeps_listening_after_any_ending_while_two_seats_hold_cards(self, tmp_path):
+        """終わり方によらない（2026-10-14 15cad555 ハンド 3: ショーダウンで早く閉じたあとのターン・リバーの賭けが
+        聞き流されて失われた）。勝者を宣言して確定しても、2 席以上に札が載っていれば聞き取りを続ける。"""
+        tb = _Table(tmp_path)
+        tb.t._listen_gate = threading.Event()       # noqa: SLF001
+        tb.deal()
+        tb.say("シート4 ウィナー")                  # 3 席とも札が載ったまま確定
+        assert len(tb.hands) == 1
+        assert tb.t._listen_gate.is_set()          # noqa: SLF001
+        tb.tick(tb.now + POST_FOLDOUT_LISTEN_SEC + 1.0)
+        assert not tb.t._listen_gate.is_set()      # noqa: SLF001
+
 
 class TestOrderingAndReplay:
     def test_speech_before_the_departure_goes_first(self, tmp_path):
@@ -681,3 +693,42 @@ class TestSilentMic:
             heard["at"] = tb.now - 5
             tb.t._check_silent_mic()                 # noqa: SLF001
         assert not any("マイクに声が入っていません" in n for n in tb.notices)
+
+
+class TestNoWinnerBeforeTheFullBoard:
+    """ショーダウンでボードがすべて配られる前に勝者が宣言されることはない（オーナー 2026-10-14）。オールインのあと、
+    ボードがそろう前に聞こえた「チョップ」・席の無い勝者・8 秒の時計ではハンドを閉じない（店舗 15cad555 ハンド 3:
+    チップの音の中の幻聴「…オールイン、チョップ」でハンドを閉じ、そのあとの賭けを聞き流した）。"""
+
+    def _all_in(self, tb: _Table) -> None:
+        tb.deal()
+        tb.lift(6)
+        tb.tick(tb.now + 3.5)                       # 席6（BTN）フォールド
+        tb.say("オールイン")                        # 席4
+        tb.say("コール")                            # 席5 → ベッティングは終わり、2 人残り
+        assert tb.t._betting_over() and len(tb.t._remaining_seats()) == 2   # noqa: SLF001
+
+    def test_a_chop_before_the_board_is_not_a_winner(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._all_in(tb)
+        tb.say("チョップ")
+        assert tb.hands == [] and tb.t._hand_open   # noqa: SLF001
+        assert any("ボードが 0 枚" in n for n in tb.notices)
+        tb.tick(tb.now + 20.0)                      # リバーが配られるまで 8 秒の時計は動かない
+        assert tb.hands == []
+
+    def test_the_hand_is_decided_by_the_cards_after_the_river(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._all_in(tb)
+        for i, card in enumerate(["2c", "7d", "9s", "Kh", "3d"], start=1):
+            TestStoreSessions()._board(tb, i, card)
+            tb.tick(tb.now + 1.0)
+        tb.tick(tb.now + 9.0)                       # リバーから 8 秒 → 手札で決める
+        assert len(tb.hands) == 1 and tb.hands[0].winner_source == "cards"
+
+    def test_the_next_deal_still_closes_the_hand(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._all_in(tb)
+        tb.say("チョップ")
+        tb.t._close_hand_for_next_deal(ended_ts=tb.now)   # noqa: SLF001
+        assert len(tb.hands) == 1
