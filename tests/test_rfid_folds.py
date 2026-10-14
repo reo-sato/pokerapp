@@ -784,3 +784,19 @@ class TestFoldWordThatEndedTheBetting:
         (hand,) = tb.hands
         assert ("showdown", 4, "fold") in [(a.street, a.seat, a.action) for a in hand.actions]
         assert hand.winner_seat == 5
+
+
+class TestButtonAfterTheBetting:
+    """ベッティングが終わったあと（ショーダウン待ち）のボタンの指定は次のハンドのもの（店舗 2026-10-06 e82f5005:
+    ショーダウンを閉じずに待つハンドで、次のハンドへの「シート7 ボタン」がそのハンドを組み直していた）。"""
+
+    def test_it_is_for_the_next_hand(self, tmp_path):
+        from core.events import AudioEvent
+
+        tb = _Table(tmp_path)
+        TestShowdown()._to_showdown(tb)
+        before = tb.played()
+        tb.t._handle_audio_event(AudioEvent(action="set_button", amount=0, timestamp=tb.now, raw_text="シート4 ボタン",
+                                            seat=4))   # noqa: SLF001
+        assert tb.played() == before and tb.gs.button_seat == 6
+        assert any("次のハンドのボタンを席4" in n for n in tb.notices)

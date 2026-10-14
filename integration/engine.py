@@ -4445,14 +4445,17 @@ class IntegrationThread(threading.Thread):
         """ボタンを手で指定する（`button <席>`, 仕様 FR-05g）。
 
         ハンドの途中なら、そのハンドのボタンを直して記録を組み直す（ディーラーがボタンを動かし忘れた,
-        2026-09-29）。ハンドが無ければ次のハンドのボタン。
+        2026-09-29）。ハンドが無いとき・ベッティングが終わったあと（ショーダウン待ち = 次のハンドの準備でボタンを
+        動かす。店舗 2026-10-06 e82f5005: ボードがそろうまで・「ショーダウン」の宣言まで閉じずに待つハンドで、次の
+        ハンドへの「シート7 ボタン」がそのハンドを組み直していた）は次のハンドのボタン。
         """
         gs = self._game_state
         seat = event.seat
         if seat is None:
             logger.warning("set_button without seat: %r", event.raw_text)
             return
-        if self._hand_open and self._hand_origin is not None and gs.is_hand_active():
+        if (self._hand_open and self._hand_origin is not None and gs.is_hand_active()
+                and not self._betting_over()):
             if seat == getattr(gs, "button_seat", None):
                 self._notice(f"このハンドのボタンは席{seat} です（変えません）")
             elif seat in self._seats_in_hand():
