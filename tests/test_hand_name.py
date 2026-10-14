@@ -375,6 +375,7 @@ class TestHeadsUp:
     def test_a_fold_before_any_show_is_out_of_position(self, tmp_path):
         tb = _Table(tmp_path, seats=(4, 6))
         self._to_river(tb)
+        tb.say("ショーダウン")                        # マックの「フォールド」は宣言のあと（オーナー 2026-10-14）
         tb.say("フォールド")
         (hand,) = tb.hands
         assert (hand.winner_seat, hand.winner_source) == (6, "fold")

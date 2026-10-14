@@ -576,6 +576,8 @@ class IntegrationThread(threading.Thread):
         self._hand_auto_started = False
         # ショーダウンでマックした席（見せずに降りた = ポットを受け取れない）。
         self._showdown_mucks: list[int] = []
+        # このハンドで「ショーダウン」と聞こえたか（マックの「フォールド」はその宣言のあとに言う, オーナー 2026-10-14）
+        self._showdown_declared = False
         # ショーダウンを手札で判定できなかった理由（次の配布でチップを動かさずに終えるときの表示）
         self._showdown_gaps: list[str] = []
         self._showdown_notice_shown = False
@@ -1170,6 +1172,8 @@ class IntegrationThread(threading.Thread):
             return
 
         if action == "showdown":
+            if self._hand_open:
+                self._showdown_declared = True
             if self._foldout_pending is not None and _spoken_at(event) >= self._foldout_pending["t"]:
                 # 札の離脱を最後のフォールドとみていたが、ショーダウン（札を前に出した）だった
                 self._showdown_after_foldout(_spoken_at(event), "「ショーダウン」と聞こえたので")
@@ -1256,6 +1260,13 @@ class IntegrationThread(threading.Thread):
                 self._handle_fold_word(event)   # 次の手番の人には付けない（オーナー決定）
                 return
             if self._closing_fold_word(event):
+                return
+            if not (self._showdown_declared or self._showdown_shown):
+                # マックの「フォールド」は「ショーダウン」の宣言（か、誰かが見せた役名）のあとに言う（オーナー 2026-10-14）。
+                # 宣言の前（同じ発話の「フォールド、ショーダウン」も）はベッティングのフォールドの声が遅れて届いたもの
+                self._fold_words_done[id(event)] = event
+                if not self._rebuilding:
+                    self._notice(f"「{event.raw_text}」—「ショーダウン」の宣言の前なので、ショーダウンのマックにはしません")
                 return
             # ベッティングが終わったあと（ショーダウン）は従来どおり: 見せずにマック（ディーラーが宣言する）
         if action in ("allin", "bet", "raise") and self._rules_aware and self._hand_open and self._is_restated(event):
@@ -2300,6 +2311,7 @@ class IntegrationThread(threading.Thread):
         return {
             "index": index, "seat": seat, "gs": self._game_state.snapshot(),
             "actions": len(self._current_actions), "mucks": list(self._showdown_mucks),
+            "declared": self._showdown_declared,
             "notice": self._showdown_notice_shown, "last": self._last_action_at,
             "showdown_at": self._showdown_at, "shown": dict(self._showdown_shown),
             "shown_hit": dict(self._showdown_hit),
@@ -2324,6 +2336,7 @@ class IntegrationThread(threading.Thread):
         self._game_state.restore(checkpoint["gs"])
         del self._current_actions[checkpoint["actions"]:]
         self._showdown_mucks = list(checkpoint["mucks"])
+        self._showdown_declared = checkpoint.get("declared", False)
         self._showdown_notice_shown = checkpoint["notice"]
         self._showdown_at = checkpoint.get("showdown_at")
         self._showdown_shown = dict(checkpoint.get("shown", {}))
@@ -5409,6 +5422,7 @@ class IntegrationThread(threading.Thread):
         self._hand_open = True
         self._hand_auto_started = auto
         self._showdown_mucks = []
+        self._showdown_declared = False
         self._showdown_gaps = []
         self._showdown_notice_shown = False
         self._showdown_at = None
@@ -5698,6 +5712,7 @@ class IntegrationThread(threading.Thread):
         self._hand_open = False
         self._hand_auto_started = False
         self._showdown_mucks = []
+        self._showdown_declared = False
         self._showdown_gaps = []
         self._foldout_pending = None
         self._departures = {}

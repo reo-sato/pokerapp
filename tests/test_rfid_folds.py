@@ -305,9 +305,22 @@ class TestShowdown:
         tb.lift(4)
         tb.lift(5)
         tb.tick(tb.now + 5.0)
+        tb.say("ショーダウン")
         tb.say("フォールド")                        # 見せずにマック（アウトオブポジションから）
         (hand,) = tb.hands
         assert hand.winner_source == "fold"
+
+    def test_a_fold_before_the_showdown_call_is_not_a_muck(self, tmp_path):
+        # マックの「フォールド」は「ショーダウン」の宣言のあとに言う（オーナー 2026-10-14）。同じ発話の
+        # 「フォールド、ショーダウン」のフォールドも宣言の前
+        tb = _Table(tmp_path, seats=(4, 5))
+        tb.deal({4: ["6s", "Qc"], 5: ["4s", "7c"]})
+        tb.say("コール チェック")
+        for _ in range(3):
+            tb.say("チェックアラウンド")
+        tb.say("フォールド、ショーダウン")
+        assert tb.hands == [] and [a for a in tb.played() if a[0] == "showdown"] == []
+        assert any("宣言の前" in n for n in tb.notices)
 
 
 class TestLastFold:
@@ -766,7 +779,8 @@ class TestFoldWordThatEndedTheBetting:
         tb = _Table(tmp_path)
         left = self._river_fold(tb)
         tb.tick(tb.now + 5.0)
-        tb.say("フォールド", spoken_at=left + 8.5)  # 見せ合いのあと = 見せずにマック（アウトオブポジションの席4）
+        tb.say("ショーダウン", spoken_at=left + 7.0)
+        tb.say("フォールド", spoken_at=left + 8.5)  # 宣言のあと = 見せずにマック（アウトオブポジションの席4）
         (hand,) = tb.hands
         assert ("showdown", 4, "fold") in [(a.street, a.seat, a.action) for a in hand.actions]
         assert hand.winner_seat == 5

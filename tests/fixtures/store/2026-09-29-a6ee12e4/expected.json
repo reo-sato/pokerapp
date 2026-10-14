@@ -140,17 +140,18 @@
     "note": "洗い直し 2026-09-30: 最後の行が勝者の席5（トリップス）の「フォールド」になっていた → 負けた席4 がショーダウンで見せずに降りた（勝者 席5・RFID の札の離脱と合う）"
    },
    "baseline": {
-    "action_correct": 11,
+    "action_correct": 10,
     "action_total": 11,
     "winner_match": true,
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 11,
+    "action_correct": 10,
     "action_total": 11,
     "winner_match": true,
     "board_match": true
-   }
+   },
+   "baseline_note": "2026-10-14: マックの「フォールド」は「ショーダウン」の宣言のあとだけ（オーナー）。このハンド（09/29 = 宣言の決まりより前）は宣言なしの「フォールド」で席4 がマックした（真のアクションのショーダウンの行）。その 1 行を失う（勝者は同じ）"
   }
  ]
 }
