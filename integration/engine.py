@@ -1265,8 +1265,11 @@ class IntegrationThread(threading.Thread):
                 # マックの「フォールド」は「ショーダウン」の宣言（か、誰かが見せた役名）のあとに言う（オーナー 2026-10-14）。
                 # 宣言の前（同じ発話の「フォールド、ショーダウン」も）はベッティングのフォールドの声が遅れて届いたもの
                 self._fold_words_done[id(event)] = event
+                # 宣言が聞き取れなかった本当のマックかもしれない（「ショーダウン」の声を聞き取れるのは 52 中 40）= 黙って
+                # 捨てない（2026-10-15 の見直し, Fable 5.1 の監査）
+                self._hand_needs_review = True
                 if not self._rebuilding:
-                    self._notice(f"「{event.raw_text}」—「ショーダウン」の宣言の前なので、ショーダウンのマックにはしません")
+                    self._notice(f"「{event.raw_text}」—「ショーダウン」の宣言の前なので、ショーダウンのマックにはしません（要確認）")
                 return
             # ベッティングが終わったあと（ショーダウン）は従来どおり: 見せずにマック（ディーラーが宣言する）
         if action in ("allin", "bet", "raise") and self._rules_aware and self._hand_open and self._is_restated(event):
@@ -3638,6 +3641,10 @@ class IntegrationThread(threading.Thread):
         self._settle_corrections()
         if self._rfid_folds and self._hand_open:
             self._close_rounds_at_hand_end()
+        if self._hand_open and self._showdown_before_full_board():
+            # ボードがそろうのを待っていたショーダウン（リバーの札が読めなかった）を閉じる = 要確認（2026-10-15 の見直し）
+            self._hand_needs_review = True
+            self._notice(f"ボードが {len(self._board_cards)} 枚のままショーダウンを閉じます（{when}）— 要確認")
         if self._finish_by_rules(ended_ts=ended, final=True):
             return
         gs = self._game_state

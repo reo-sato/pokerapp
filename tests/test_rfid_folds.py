@@ -321,6 +321,7 @@ class TestShowdown:
         tb.say("フォールド、ショーダウン")
         assert tb.hands == [] and [a for a in tb.played() if a[0] == "showdown"] == []
         assert any("宣言の前" in n for n in tb.notices)
+        assert tb.t._hand_needs_review                     # noqa: SLF001 — 聞き取れなかった宣言の本当のマックかもしれない
 
 
 class TestLastFold:
@@ -745,6 +746,8 @@ class TestNoWinnerBeforeTheFullBoard:
         tb.say("チョップ")
         tb.t._close_hand_for_next_deal(ended_ts=tb.now)   # noqa: SLF001
         assert len(tb.hands) == 1
+        assert tb.hands[0].review_required                # ボードがそろわないまま閉じた（2026-10-15 の見直し）
+        assert any("ボードが 0 枚のままショーダウンを閉じます" in n for n in tb.notices)
 
 
 class TestFoldWordThatEndedTheBetting:
