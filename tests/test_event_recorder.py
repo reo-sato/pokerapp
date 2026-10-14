@@ -146,7 +146,7 @@ def test_every_parse_flag_the_reader_writes_is_in_the_schema():
 
     schema = json.loads(_SCHEMA.read_text(encoding="utf-8"))
     allowed = set(schema["properties"]["parse_flags"]["items"]["enum"])
-    written = {recognizer.GARBLED_DIGITS, recognizer.GARBLED_CALL, recognizer.BEFORE_CHECK_AROUND,
+    written = {recognizer.GARBLED_DIGITS, recognizer.GARBLED_CALL, recognizer.BEFORE_CHECK_AROUND, recognizer.RESTATEMENT,
                "ambiguous_amount", "multi_action_keywords", "too_many_actions", "amount_only", "check_around",
                "fuzzy_keyword", "second_ear", "sentence_after_chatter", "phonetic_amount", "legal_amount"}
     assert written <= allowed, written - allowed

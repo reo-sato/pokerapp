@@ -386,3 +386,53 @@ class TestStoreHandB:
 
     def test_stock_hallucination(self):
         assert is_prompt_echo("次回もお楽しみに!")
+
+
+class TestSpokenRestatement:
+    """「N 足りないから M」= 直前の賭けを M に言い直した（オーナー 2026-10-14 のメモ: 15cad555 ハンド 16 の「2万800
+    足りないから2万2000!」は「失礼しました」を言わない言い直し）。8 秒を過ぎていても、次の人のレイズになる額でも、
+    その賭けの額を直す（要確認）。"""
+
+    def test_the_phrase_is_read_as_the_new_amount(self):
+        (event,) = parse_actions("2万800足りないから2万2000!")
+        assert (event.amount, "restatement" in event.parse_flags) == (22000, True)
+        assert parse_actions("足りないからね") == []
+
+    def test_it_restates_the_last_wager_after_a_pause(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")                        # 席6（BTN）
+        tb.now += 14.0                              # あいだは雑談だけ
+        tb.say("600足りないから1200")
+        record = [(a.street, a.seat, a.action, a.amount) for a in tb.t._current_actions]   # noqa: SLF001
+        assert record == [("preflop", 6, "raise", 1200)]     # 組み直した記録（次の人のレイズではない）
+        assert tb.t._current_actions[-1].needs_review   # noqa: SLF001
+
+
+class TestEarAmountAfterTheWord:
+    """額の無い「レイズ」の後ろに意味の通らない語があり、第 2 の耳がはっきり額を聞いたら、その額にする（店舗 2026-10-14
+    15cad555 ハンド 11:「レイズ 生活!」= 第 2 の耳「レッズ千五百」。最小レイズにしていた）。"""
+
+    def _raise(self, tb, text, scores):
+        from dataclasses import replace as _replace
+
+        (event,) = parse_actions(text, confidence=0.4, utterance_start_ts=tb.now)
+        event = _replace(event, amount_scores=tuple(scores), timestamp=tb.now)
+        tb.t._handle_audio_event(event)             # noqa: SLF001
+
+    def test_a_clear_ear_amount_is_used(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        self._raise(tb, "レイズ 生活!", [(1500, -2.7), (100, -6.4), (2500, -7.4)])
+        assert tb.played()[-1] == ("preflop", 6, "raise", 1500)
+        assert "second_ear" in tb.t._current_actions[-1].reason   # noqa: SLF001
+
+    @pytest.mark.parametrize("text,scores", [
+        ("レイズ", [(1500, -2.7), (2500, -7.4)]),                   # 額の位置に何も無い = 次の発話の額を待つ
+        ("レイズお願いします。", [(20000, -15.5), (2000, -15.7)]),  # 点数が弱い
+    ])
+    def test_otherwise_it_is_left_as_before(self, tmp_path, text, scores):
+        tb = _Table(tmp_path)
+        tb.deal()
+        self._raise(tb, text, scores)
+        assert all(a[3] != 1500 and a[3] != 20000 for a in tb.played())

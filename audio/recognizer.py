@@ -4,7 +4,7 @@ import logging
 import re
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Optional
 
 from core.constants import (
@@ -588,6 +588,11 @@ def _after_fold_word(norm: str, pos: int) -> bool:
 # 「失礼しました。これでお願いします。」（2300 → 2800 の言い直し）。会話の「失礼失礼」「失礼します」は合図にしない。
 # 発話のどこにあってもよい（前は直す前のアクション、後ろは直したあとのアクション）
 CORRECTION = "correction"
+# 「N 足りないから M」= 直前に言った賭けの額 N を M に言い直した（オーナー 2026-10-14 のメモ: 15cad555 ハンド 16 のリバーの
+# 「2万800足りないから2万2000!」は「失礼しました」を言わない言い直し）。M を額とし、`RESTATEMENT` の印を付ける。
+# 店舗の書き起こしで「足りない」はこの 1 回だけ（雑談に出る「ごめん」「すみません」は合図にしない = 35 回ほど雑談）
+RESTATEMENT = "restatement"
+_SHORT_RESTATE_CUE = re.compile(r"(?:足りない|タリナイ|たりない)(?:から|ので|カラ|ノデ)")
 _CORRECTION_CUE = re.compile(r"(?:大変|タイヘン)?(?:失礼|シツレイ)(?:イタ|致)?シマシタ")
 # 自分の額にした部分の読みの印（額の読みが確かでない）。アクションの語の読みにも付け替える
 _AMOUNT_READ_FLAGS = ("ambiguous_amount", GARBLED_DIGITS)
@@ -1381,6 +1386,14 @@ def _parse_utterance(
 ) -> list[AudioEvent]:
     """`parse_actions` の本体（疑問形の文を除いたあとの 1 つの発話 / 文）。"""
     full = unicodedata.normalize("NFKC", text)
+    short = _SHORT_RESTATE_CUE.search(full)
+    if short is not None:
+        # 「N 足りないから M」: 言い直したあとの額 M だけを読む（N は前に言った額）
+        after = [e for e in _parse_utterance(full[short.end():].strip(_TRAILING_PUNCTUATION), confidence,
+                                             utterance_start_ts) if e.amount]
+        if len(after) == 1:
+            return [replace(after[0], raw_text=text,
+                            parse_flags=tuple(dict.fromkeys((*after[0].parse_flags, RESTATEMENT))))]
     cue = _CORRECTION_CUE.search(_to_katakana(full))
     if cue is not None:
         # 訂正の合図。前に言ったアクションは合図の前、続けて言ったアクション（「失礼しました。800点。」）は直したあと

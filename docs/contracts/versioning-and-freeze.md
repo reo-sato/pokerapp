@@ -97,8 +97,9 @@ schema を変更する PR は、同じ PR で以下を更新する（漏れは c
 >   / `0.16` = audio の `hit_rank`（「Nヒット」の N）+ parse_flags に `garbled_call`（「これで終わりです」= ほかの語の聞き違い, 2026-10-06, ADR-0068 R8・R9）
 >   / `0.17` = parse_flags に `before_check_around`（チェックアラウンドの直前に続けて言ったチェック。review の理由にしない）。`garbled_call` は語尾の「ド」が無い「フォール」にも付ける（2026-10-06, ADR-0068 R6）
 >   / `0.18` = parse_flags に `garbled_digits`（数のあとの意味の通らない語 = 前の数だけを額にした。10/02 から記録していたが schema に無かった = 書き忘れの補い, 2026-10-13）
+>   / `0.19` = parse_flags に `restatement`（「N 足りないから M」= 直前の賭けの額を M に言い直した。オーナーのメモ, 2026-10-14）
 >
-> 0.12〜0.18 の文言は `schemas/reconstruction_event.schema.json` の `description` から取った。
+> 0.12〜0.19 の文言は `schemas/reconstruction_event.schema.json` の `description` から取った。
 > いまの envelope の全体は `event-replay.md` §3。
 >
 > **全 domain schema + repository interface が frozen**。残るのは write/sync 拡張（双方向同期,

@@ -237,12 +237,22 @@ HELD_WORDS_TO_DROP_ALLIN = 2
 # 同じ額のベット・レイズ（「ベット 2000」→「ベット 2000です」）も同じ: 次の人は同じ額をベット・レイズできない
 # （同じ額ならコール）ので、言い直しを次の人のレイズにしていた。
 ALLIN_RESTATE_SEC = 8.0
+# 「N 足りないから M」（言い直しを言葉で示した, `recognizer.RESTATEMENT`）は、直前の賭けからこの秒数までその賭けの
+# 言い直しとみる（店舗 2026-10-14 15cad555 ハンド 16: レイズから 14 秒後。あいだは雑談と幻聴だけ）
+SPOKEN_RESTATE_SEC = 30.0
 _BETTING_WORDS = frozenset({"check", "call", "bet", "raise", "allin"})
 # 額の候補から選ぶとき（`_choose_amount`）、使える額の 1 番と 2 番の点数の差がこれ未満なら「額があいまい」（要確認）
 AMOUNT_CLOSE = 1.0
 # 読んだ額がいま使えない（最小ベット・レイズに届かない）とき、第 2 の耳の額ごとの点数から使える額を選び直すのは、
 # その額の点数がいちばん確からしい額（使えない額も含む）からこの差以内のときだけ（音がどの使える額にも遠ければ選ばない）
 LEGAL_AMOUNT_MAX_GAP = 5.0
+# 額の無い「レイズ」「ベット」のあとに意味の通らない語があり（額の位置に何か聞こえた）、第 2 の耳の額ごとの点数の 1 番が
+# この値以上で 2 番よりこの差以上はっきりしていれば、その額にする（店舗 2026-10-14 15cad555 ハンド 11:「レイズ 生活!」を
+# 第 2 の耳は「レッズ千五百」と聞き 1500 が -2.7・2 番 -6.4。最小レイズにしていた。開発データで同じ形はこの 1 回、
+# ほかの「レイズお願いします。」「レイズーズ」は点数が -9 以下で当たらない）
+EAR_AMOUNT_MIN_SCORE = -5.0
+EAR_AMOUNT_MARGIN = 2.0
+_WAGER_WORD_THEN_MORE = re.compile(r"(?:レイズ|レイス|ベット|ベッド)\s*(\S.*)$")
 
 # review の理由にしない parse flag（読み方の情報。「数字だけ」「チェックアラウンド」「チェックアラウンドの前のチェック」は
 # 運用どおりの言い方）
@@ -1259,6 +1269,13 @@ class IntegrationThread(threading.Thread):
                     self._count_held_betting_word()
                 return
             event = picked
+        elif self._garbled_amount_after_word(event, legal_ctx):
+            picked = self._choose_amount(event, legal_ctx, flag="second_ear")
+            if picked is not None:
+                if not self._rebuilding:
+                    self._notice(f"「{event.raw_text}」の額は聞き取れませんでしたが、第 2 の耳ははっきり {picked.amount} と"
+                                 "聞いたので、その額にしました（要確認）")
+                event = picked
         elif self._amount_needs_choice(event, legal_ctx):
             # 「レイズ 300」（最小レイズ 1000）のように読んだ額がいま使えない: 第 2 の耳の額ごとの点数から、使える額を
             # 選び直す（オーナー 2026-10-01: 可能な額は最小 1bb〜持ち点、チップの刻みしか無い）
@@ -1404,6 +1421,22 @@ class IntegrationThread(threading.Thread):
             logger.info("「%s」の額を %d にしました（使える額の候補 %s）", event.raw_text, best,
                         [(a, round(sc, 2)) for sc, _, a in ranked[:3]])
         return replace(event, amount=best, parse_flags=tuple(flags))
+
+    def _garbled_amount_after_word(self, event: AudioEvent, ctx: LegalContext) -> bool:
+        """額の無い「レイズ」「ベット」の後ろに意味の通らない語があり、第 2 の耳がはっきり額を聞いたか
+        （`EAR_AMOUNT_MIN_SCORE` / `EAR_AMOUNT_MARGIN`）。額の無い語だけ（「レイズ」）は次の発話の額を待つ（従来どおり）。"""
+        if (event.action not in ("bet", "raise") or event.amount or not event.amount_scores
+                or not (self._rules_aware and self._hand_open) or ctx.actor_seat is None
+                or not ({"bet", "raise"} & ctx.legal_actions)):
+            return False
+        text = unicodedata.normalize("NFKC", event.raw_text or "")
+        match = _WAGER_WORD_THEN_MORE.search(text)
+        if match is None or not re.sub(r"[、。！!？?,.・ー\s]", "", match.group(1)):
+            return False
+        ranked = sorted((score for amount, score in event.amount_scores
+                         if ctx.min_raise <= amount <= ctx.max_raise), reverse=True)
+        return bool(ranked) and ranked[0] >= EAR_AMOUNT_MIN_SCORE and (
+            len(ranked) == 1 or ranked[0] - ranked[1] >= EAR_AMOUNT_MARGIN)
 
     def _amount_needs_choice(self, event: AudioEvent, ctx: LegalContext) -> bool:
         """読んだ額がいまの最小ベット・レイズに届かない（使えない）ので、第 2 の耳の額ごとの点数から選び直すか。
@@ -1570,7 +1603,9 @@ class IntegrationThread(threading.Thread):
                 or self._current_actions[-1] is not last[0] or "phonetic_amount" in event.parse_flags):
             return False      # 音で読んだ額（意味のない語）で、はっきり聞こえた額を言い直さない
         record, spoken, said = last
-        if record.action not in ("bet", "raise") or not 0.0 <= _spoken_at(event) - spoken <= ALLIN_RESTATE_SEC:
+        spoken_restatement = "restatement" in event.parse_flags      # 「N 足りないから M」
+        window = SPOKEN_RESTATE_SEC if spoken_restatement else ALLIN_RESTATE_SEC
+        if record.action not in ("bet", "raise") or not 0.0 <= _spoken_at(event) - spoken <= window:
             return False
         if self._fold_word_between(spoken, event):
             return False                     # あいだに「フォールド」（席に付ける前）= あいだのアクション
@@ -1590,7 +1625,7 @@ class IntegrationThread(threading.Thread):
             return True
         if event.amount in (record.amount, said):
             return False                     # 同じ額は `_is_restated` と `_amount_only_problem` が扱う
-        if said:
+        if said and not spoken_restatement:
             ctx = self._game_state.legal_context()
             if "raise" in ctx.legal_actions and ctx.min_raise <= event.amount <= ctx.max_raise:
                 return False                 # 次の人のレイズになる額 = 別の人のレイズ
@@ -1603,7 +1638,8 @@ class IntegrationThread(threading.Thread):
         rest = [(kind, item) for kind, item in between
                 if not (kind == "audio" and item.action in ("bet", "raise"))]
         flags = [f for f in original.parse_flags if f != "ambiguous_amount"]
-        for flag in (*(f for f in event.parse_flags if f in ("ambiguous_amount", "second_ear")), "amount_restated"):
+        for flag in (*(f for f in event.parse_flags if f in ("ambiguous_amount", "second_ear", "restatement")),
+                     "amount_restated"):
             if flag not in flags:
                 flags.append(flag)
         restated = replace(
