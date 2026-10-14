@@ -252,3 +252,21 @@ class TestStoreLogs1014:
                                       "クラブ、クラブ、S9、K9、S9、6、3、S9、ストレート"])
     def test_announced_hand_names_are_still_read(self, text):
         assert [e.action for e in parse_actions(text, confidence=0.5)] == ["end_hand"]
+
+
+class TestStoreLogs1014Evening:
+    """店舗ログ 2026-10-14 18:56（65c412b2・845da8e6）で見つけた読み取り。"""
+
+    def test_hoohru_without_do_is_a_garbled_call(self):
+        # 65c412b2 ハンド 11: フロップのコールを「ホール」と書き起こした（「フォール」と同じ = 札の離脱で決め直す）
+        assert [(e.action, e.parse_flags) for e in parse_actions("ホール", confidence=0.5)] == [
+            ("call", ("garbled_call",))]
+        assert [e.action for e in parse_actions("ホールド", confidence=0.5)] == ["fold"]
+
+    @pytest.mark.parametrize("text, expected", [
+        ("失礼します。7番先天。", [("bet", 1000, 7)]),          # 845da8e6 ハンド 9（失礼します = 合図ではない）
+        ("ご先天。", [("bet", 5000, None)]),                     # 62cad44b ハンド 5 = 5千点
+        ("先天のお釣りです。", []),
+    ])
+    def test_senten_written_in_kanji_is_a_thousand(self, text, expected):
+        assert [(e.action, e.amount, e.seat) for e in parse_actions(text, confidence=0.5)] == expected

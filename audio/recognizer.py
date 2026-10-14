@@ -583,7 +583,8 @@ _GARBLED_CALL_PHRASE = re.compile(r"(?:コレ|ココ)デ(?:終ワ|オワ)リ(?:�
 # 語尾の「ド」が無い「フォール」も同じ: 店舗の書き起こしの 3 回とも、ベットに向き合った手番のコールで、札は席に
 # 残った（2026-10-06 の 1f838667 ハンド 15・20、05cccd6c ハンド 1）。音の近さでは「フォールド」に近いが、コールとして
 # 読み、engine が札の離脱で決め直す
-_GARBLED_FOLD_WORD = re.compile(r"フォール(?:デス)?")
+# 「ホール」も同じ（店舗 2026-10-14 65c412b2 ハンド 11 = フロップのコール。「ホールド」は続けて言ったフォールドの書き起こし）
+_GARBLED_FOLD_WORD = re.compile(r"(?:フォール|ホール)(?:デス)?")
 # ただし「フォールド」に続けて言った 2 つ目は語尾が落ちたフォールド（読み上げ集 2026-09-30:「フォールド、フォールド」を
 # 「フォールド、フォール」と書き起こした）
 _FOLD_WORD_BEFORE = re.compile(r"(?:フォールド|ホールド)[\s、。,.・]*$")
@@ -1263,6 +1264,7 @@ def parse_actions(
     text = _drop_question_sentences(text)
     if not text:
         return []
+    text = _KANJI_SENTEN.sub("センテン", text)
     events = _parse_utterance(text, confidence, utterance_start_ts)
     if events:
         return _mark_garbled_calls(_mark_before_check_around(events))
@@ -1282,6 +1284,12 @@ def parse_actions(
     for event in salvaged:
         event.parse_flags = (*event.parse_flags, "sentence_after_chatter")
     return _mark_garbled_calls(salvaged)
+
+
+# 「センテン」（千点）を Whisper が同じ読みの漢字で書く（店舗 2026-10-14 845da8e6 ハンド 9「失礼します。7番先天。」
+# = 席7 千点、開発データの「ご先天」= 5千点 2 回）。仮名に戻して仮名の数の読みで読む。席（「番」）か数の読み（「ご」）の
+# すぐあとだけ: 「先天」だけの発話は崩れた額（第 2 の耳の「先天」= 本当は 4000 の「よっしゃんてん」, 42f7b964 ハンド 2）
+_KANJI_SENTEN = re.compile(r"(?<=[番ごゴ])(?:先天|宣伝)")
 
 
 def _mark_garbled_calls(events: list[AudioEvent]) -> list[AudioEvent]:
