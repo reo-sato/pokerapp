@@ -30,6 +30,7 @@ from typing import Any, Callable, Optional
 
 from core.events import AudioEvent, RFIDEvent
 from core.game_state import PlayerState
+from integration.engine import word_key
 from integration.replay import Event
 from integration.world_replay import PresenceTimeline, SeatObservation, delivered_at, replay_world, world_events
 
@@ -587,13 +588,14 @@ class SessionEstimator:
         stacks = {p["seat"]: p["stack_start"] for p in w.base.get("players") or [] if "stack_start" in p}
         blinds = w.base.get("blinds") or {}
         records: list = []
+        labels: dict[str, str] = {}
         world = world_events(events, rows, texts, extra=extra, drops=drops, cache=self._parse_cache)
         hands = replay_world(
             world, presence, players=self.players, sb=int(blinds.get("sb") or self.setup["sb"]),
             bb=int(blinds.get("bb") or self.setup["bb"]), session_id=self.session_id,
             hand_stacks={1: stacks} if stacks else None,
             hand_buttons={1: button} if button is not None else None,
-            on_action=records.append, **self.flags,
+            on_action=records.append, word_labels=labels, **self.flags,
         )
         self.replays += 1
         hand = next((h for h in hands if _epoch(h.get("started_at")) is not None
@@ -602,7 +604,7 @@ class SessionEstimator:
             hand = dict(hand, hand_id=w.hand_id)
         tokens = [e for e in world if isinstance(e, AudioEvent) and e.utterance_start_ts is not None
                   and w.start - 0.5 <= e.utterance_start_ts < w.end and not _is_inserted(e, inserted)]
-        return hand, records, {"tokens": tokens, "inserted": inserted, "button": button}
+        return hand, records, {"tokens": tokens, "inserted": inserted, "button": button, "labels": labels}
 
     # ――― 採点 ―――
 
@@ -651,25 +653,20 @@ class SessionEstimator:
             same = by_utt.get(t.utterance_start_ts) or [t]
             k = next((i for i, x in enumerate(same) if x is t), -1)
             p_ph = self._p_phantom(t.utterance_start_ts, tuple((x.action, x.raw_text) for x in same), k)
-            later = _restated_later(t, rows, info["tokens"])
-            if _restates(t, rows) or later or (
+            # engine が記録にしなかった理由（言い直し・要約・訂正で取り消した, `IntegrationThread.word_labels`）
+            label = (info.get("labels") or {}).get(word_key(t))
+            if label in ("restate", "recap") or _restates(t, rows) or (
                     showdown and t.action == "fold" and (t.utterance_start_ts or t.timestamp) > said_end):
                 p_ph = max(p_ph, p["p_restate"])   # 前の語の言い直し・ショーダウンのあとのマックの声
-            if later == "corrected":
+            if label == "corrected":
                 p_ph = max(p_ph, p["p_corrected"])
             terms.append((f"余計な語「{t.raw_text}」", _log(p_ph)))
             if (t.action in _WAGER or t.action == "fold") and p_ph < p["p_restate"]:
                 flags.append(f"使えなかった語「{t.raw_text}」")
         for e in edits:
             if e.kind == "drop":
-                words = self._parse_cache.get((e.at, None)) or ()
-                parsed = tuple((x.action, x.raw_text) for x in words)
-                p_drop = self._p_phantom(e.at, parsed, int(e.value))
-                later = _restated_later(words[int(e.value)], rows, info["tokens"]) \
-                    if 0 <= int(e.value) < len(words) else None
-                if later:
-                    p_drop = max(p_drop, p["p_corrected" if later == "corrected" else "p_restate"])
-                terms.append((f"捨てた語: {e.label}", _log(p_drop)))
+                parsed = tuple((x.action, x.raw_text) for x in self._parse_cache.get((e.at, None)) or ())
+                terms.append((f"捨てた語: {e.label}", _log(self._p_phantom(e.at, parsed, int(e.value)))))
             elif e.kind == "read" and not (e.value or "").strip():
                 terms.append((f"捨てた語: {e.label}", _log(self._p_phantom(e.at))))
         # 残り人数の宣言
@@ -1209,31 +1206,6 @@ def _restates(t: AudioEvent, rows: list[_Row]) -> bool:
         if not wager and r.action == t.action:
             return True
     return False
-
-
-# 言いかけた額の無い賭けの語のすぐあとに、額つきの賭けを言った（「レイズ」→ 1 秒後に「レイズ400」）
-RESTATE_BARE_WAGER_SEC = 3.0
-# 「失礼しました」の前の語は、そのあと言い直した（「7200…」→「失礼しました。7番 8200」）
-RESTATE_CORRECTED_SEC = 10.0
-
-
-def _restated_later(t: AudioEvent, rows: list[_Row], tokens: list[AudioEvent]) -> Optional[str]:
-    """使われなかった（捨てた）語が、すぐあとに言い直された語か（"bare" = 額の無い賭けの語のあとの額つきの賭け、
-    "corrected" =「失礼しました」の前の語、None = どちらでもない）。ライブはどちらも 1 つのアクションとして扱う。
-    余計な語（雑談・幻聴）の値で罰さない（店舗 2026-10-14 845da8e6 ハンド 15・20: 正解が余計な語の値 1 つで次点に
-    負け、ライブより悪くなった）。"""
-    start = t.utterance_start_ts if t.utterance_start_ts is not None else t.timestamp
-    used = [_word_start(r) for r in rows if r.word is not None and r.word is not t]
-    if t.action in ("bet", "raise") and not t.amount:
-        if any(r.word is not None and r.word is not t and r.action in _WAGER
-               and 0.0 < _word_start(r) - start <= RESTATE_BARE_WAGER_SEC for r in rows):
-            return "bare"
-    for c in tokens:
-        cue = c.utterance_start_ts if c.utterance_start_ts is not None else c.timestamp
-        if c.action == "correction" and 0.0 <= cue - start <= RESTATE_CORRECTED_SEC \
-                and any(u >= cue for u in used):
-            return "corrected"
-    return None
 
 
 def _ordered(edits: tuple[Edit, ...]) -> tuple[Edit, ...]:

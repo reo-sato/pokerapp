@@ -643,6 +643,11 @@ class IntegrationThread(threading.Thread):
         self._corrections: list[dict] = []
         # いまの解釈で取り消した入力（id → 入力。組み直しでも流さない）
         self._retracted: dict[int, object] = {}
+        # 語の扱い（記録にしなかった声の語の理由: "restate" = 同じ賭け・額の言い直し、"recap" = 要約のコール、
+        # "corrected" =「失礼しました」で取り消した）。推定器が、使われなかった語を余計な語（雑談・幻聴）と区別して値付け
+        # する（言い直しのモデルを engine 1 つに, 2026-10-15 の見直し）。`word_labels` で読む。キーは `word_key`
+        self._word_labels: dict[str, str] = {}
+        self._hand_word_labels: dict[str, str] = {}
         # 声の入力ごとの、その入力でできた声の記録（id → (入力, [記録])。訂正の対象と辻褄を見る）
         self._input_voice: dict[int, tuple[object, list[ActionRecord]]] = {}
         # 訂正で取り消した範囲の札の離脱は、合図の時刻より前なので「間の人の聞き落とし」の補いに使わない（その時刻）
@@ -1502,6 +1507,7 @@ class IntegrationThread(threading.Thread):
                 or not 0.0 <= _spoken_at(event) - recap["t"] <= RECAP_SEC):
             return False
         record, rest = recap["records"][0], recap["records"][1:]
+        self._label_word(event, "recap")
         if rest:
             self._recap = {**recap, "records": rest}
         if "restated" not in (record.reason or "").split("+"):
@@ -1585,6 +1591,10 @@ class IntegrationThread(threading.Thread):
             return False      # 記録した額（寄せたあと）か、言った額と同じときだけ
         if not 0.0 <= _spoken_at(event) - spoken <= ALLIN_RESTATE_SEC or self._fold_word_between(spoken, event):
             return False
+        if event.action != "allin" and event.amount and "no_amount_heard" in (record.reason or "").split("+"):
+            # 額の無い賭け（最小の額に寄せた）を、言い直しが同じ額で言った = 額は聞こえた（店舗 2026-10-14 845da8e6
+            # ハンド 15:「レイズ」→「レイズ400」。推定器が「額の聞き違い」で罰していた）
+            record.reason = "+".join(r for r in (record.reason or "").split("+") if r != "no_amount_heard")
         self._mark_restated(record, event, "allin_restated" if record.action == "allin" else "restated")
         return True
 
@@ -1594,7 +1604,28 @@ class IntegrationThread(threading.Thread):
         （店舗 7b897671 ハンド 3:「1600」→「フォールド」→「2千3百」の「2千3百」は次の人の額）。"""
         return any(since <= t <= _spoken_at(event) for t in self._spoken_folds.values())
 
+    @property
+    def word_labels(self) -> dict[str, str]:
+        """記録にしなかった声の語の扱い（`word_key` → "restate" / "recap" / "corrected"）。確定したハンドの分と、いまの
+        ハンドの分。"""
+        return {**self._word_labels, **self._current_word_labels()}
+
+    def _current_word_labels(self) -> dict[str, str]:
+        labels = dict(self._hand_word_labels)
+        for item in self._retracted.values():
+            if isinstance(item, AudioEvent):
+                labels[word_key(item)] = "corrected"
+        return labels
+
+    def _commit_word_labels(self) -> None:
+        self._word_labels.update(self._current_word_labels())
+        self._hand_word_labels = {}
+
+    def _label_word(self, event: AudioEvent, label: str) -> None:
+        self._hand_word_labels[word_key(event)] = label
+
     def _mark_restated(self, record: ActionRecord, event: AudioEvent, reason: str) -> None:
+        self._label_word(event, "restate")
         if reason not in (record.reason or "").split("+"):
             record.reason = "+".join(r for r in (record.reason, reason) if r)
         if not self._rebuilding:
@@ -1670,6 +1701,8 @@ class IntegrationThread(threading.Thread):
         self._hand_inputs = self._hand_inputs[:index]
         self._restore_checkpoint(checkpoint)
         self._replay_inputs([("audio", restated), *rest])
+        for word in (*absorbed, event):
+            self._label_word(word, "restate")
         if not self._rebuilding:
             logger.info("「%s」は席%d の %s %s（「%s」）の額の言い直しとみて、%s に組み直しました",
                         event.raw_text, record.seat, record.action, record.amount, record.raw_text, event.amount)
@@ -4692,6 +4725,7 @@ class IntegrationThread(threading.Thread):
 
     def _rebuild_hand(self) -> None:
         """ハンドの入力を始め（ブラインドを置いた直後）から、いまの訂正の解釈で流し直す。"""
+        self._hand_word_labels = {}             # 流し直しで付け直す
         inputs = list(self._hand_inputs)
         self._hand_inputs = []
         self._restore_checkpoint(self._hand_origin)
@@ -4820,6 +4854,7 @@ class IntegrationThread(threading.Thread):
             self._on_action(record)
 
     def _reset_corrections(self) -> None:
+        self._commit_word_labels()
         self._departed_calls = []
         self._garbled_absorbed = {}
         self._fold_words_done = {}
@@ -5768,6 +5803,11 @@ class IntegrationThread(threading.Thread):
 
 
 # ――― ユーティリティ ―――
+
+def word_key(event: AudioEvent) -> str:
+    """声の語の識別（記録の時刻 = ミリ秒で語を見分ける, `world_replay.world_events` と同じ）とアクション。"""
+    return f"{float(event.timestamp):.3f}|{event.action}"
+
 
 def _spoken_at(event: AudioEvent) -> float:
     """発話が始まった時刻（無ければ処理時刻 = 打った入力）。配布の前後を比べるのに使う（ADR-0062）。"""
