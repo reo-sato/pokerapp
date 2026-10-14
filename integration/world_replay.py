@@ -41,11 +41,13 @@ from output.json_writer import JsonWriter
 
 # ライブのロガーがその場の解釈・聞き取りの遅れの下で作った席の信号（生の観測から作り直すので入力にしない）
 DERIVED_SIGNALS = frozenset({
-    "hand_start", "deal_order", "leave", "muck", "return", "spoken_fold", "spoken_fold_drop", "confirm", "showdown",
+    "hand_start", "leave", "muck", "return", "spoken_fold", "spoken_fold_drop", "confirm", "showdown",
     "showdown_end", "street", "reinterpret",
 })
 # 配布の信号（`deal`）は残す: ライブが席の在否だけで決めたもの（聞き取りの遅れ・解釈に依らない）。卓状態の履歴には
 # ボードのリーダーの生の枚数が無く（記録した札からの推定はハンドの切り替わりで狂う）、配布を決め直せないため。
+# 配った順の信号（`deal_order`）も残す: 札ごとに最初に読んだ時刻（生の観測。卓状態の履歴には無い）。ボタンを組み直す
+# のは `button_from_deal` のときだけ（推定器のセッション全体の再生）。
 # 配布の信号の無い古い記録（schema 0.9 より前）だけ、席の札の読み取りから決め直す。
 TICK_SEC = 0.25          # 定期の確認の間隔（ライブのループは発話を 0.1 秒待つ）
 FLUSH_SEC = 30.0         # 最後の入力のあと、確定の待ち（フォールドの確定・片付け）を流す時間
@@ -316,11 +318,14 @@ def replay_world(
     on_action: Optional[Callable[[Any], None]] = None,
     close_open_hand: bool = True,
     tick: float = TICK_SEC,
+    button_from_deal: bool = False,
 ) -> list[dict]:
     """`world_events` の入力を、ライブのループと同じ順の定期の確認を挟みながら流し、ハンド（記録と同じ形）を返す。
 
     `hand_stacks` / `hand_buttons`: hand_id → そのハンドの持ち点 / ボタン（推定器はハンドを互いに独立に扱う）。
     `button_seat`: 1 ハンド目のボタンの 1 つ手前の席（`create_game_state` と同じ）。
+    `button_from_deal`: 記録した配った順（`deal_order` の信号）でボタンを組み直す（ライブ・replay と同じ。推定器の
+    セッション全体の再生 = ハンドごとのボタンの出所だけが使う。ハンドごとの再生ではボタンは推定器の選択肢）。
     """
     gs = create_game_state("pokerkit", players, sb, bb, button_seat=button_seat)
     clock = _ReplayClock()
@@ -364,7 +369,7 @@ def replay_world(
             auto_winner=auto_winner,
             rfid_folds=rfid_folds,
             recorded_deals=False,
-            button_from_deal=False,
+            button_from_deal=button_from_deal,
             seat_presence=(lambda: presence.snapshot(clock.now)) if presence is not None else None,
             seat_cards_absent_since=(lambda seat: presence.absent_since(seat, clock.now))
             if presence is not None else None,

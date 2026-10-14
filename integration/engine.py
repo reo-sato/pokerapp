@@ -150,6 +150,11 @@ SEAT_SETUP_CHECK_SEC = 5.0
 # 「フォールド」と聞こえたが手番の人の札がまだ席にあるとき、この秒数以内に札が離れたら、その発話の時刻の
 # フォールドにする（勝った人が先に札を投げても、降りた人の方が先になる）。
 SPOKEN_FOLD_WINDOW_SEC = 15.0
+# ベッティングを終えた札の離脱のあとに届いた「フォールド」を、その離脱の声とみる窓（離脱の時刻から。記録上の
+# 離脱はファームウェアの判定で 0.7〜1.1 秒遅れるので、語が少し前に始まってもよい。ショーダウンのマックの
+# 「フォールド」は見せ合いのあとなので、これより遅い）
+CLOSING_FOLD_WORD_BEFORE_SEC = 1.5
+CLOSING_FOLD_WORD_AFTER_SEC = 3.0
 # 「フォールド」と言われてから、この秒数たっても手番の人の札が席から離れなければ、その人は降りていない（札が離れる
 # のを `FOLD_ABSENT_SEC` 待つ + 在否を見る間隔のぶん）。次のストリートの札のときだけ使う（店舗 2026-10-06）
 HELD_FOLD_STAYED_SEC = 5.0
@@ -1249,6 +1254,8 @@ class IntegrationThread(threading.Thread):
                 return
             if not self._betting_over():
                 self._handle_fold_word(event)   # 次の手番の人には付けない（オーナー決定）
+                return
+            if self._closing_fold_word(event):
                 return
             # ベッティングが終わったあと（ショーダウン）は従来どおり: 見せずにマック（ディーラーが宣言する）
         if action in ("allin", "bet", "raise") and self._rules_aware and self._hand_open and self._is_restated(event):
@@ -2741,6 +2748,28 @@ class IntegrationThread(threading.Thread):
         self._emit_seat_signal(self._seat_signal(
             "muck" if dep.get("muck") else "leave", seat, event.timestamp, observed_at=dep["t"],
         ))
+
+    def _closing_fold_word(self, event: AudioEvent) -> bool:
+        """ベッティングを終えた札の離脱の「フォールド」が、離脱でショーダウンになったあとに届いた（認識の遅れ）。
+
+        ディーラーは札の離脱を見て「フォールド」と言う。語の話し始めが、語と組になっていない離脱のフォールドの
+        時刻の近く（`CLOSING_FOLD_WORD_BEFORE_SEC` 前〜`CLOSING_FOLD_WORD_AFTER_SEC` 後）なら、その離脱の語。
+        ショーダウンのマックにしない（店舗 2026-10-14 62cad44b ハンド 2, オーナーのメモ「リバーのフォールドは
+        ショーダウンではなくベッティングラウンドのアクション」: 席5 の札が離れた 0.4 秒後の「フォールド」が、
+        認識に 5.7 秒かかって離脱の確定のあとに届き、残った席7 のマックになっていた）。
+        """
+        spoken_at = _spoken_at(event)
+        for seat, dep in self._departures.items():
+            if (dep.get("applied") and dep.get("action") == "fold" and not dep.get("spoken")
+                    and not dep.get("word")
+                    and -CLOSING_FOLD_WORD_BEFORE_SEC <= spoken_at - dep["t"] <= CLOSING_FOLD_WORD_AFTER_SEC):
+                dep["word"] = True
+                self._fold_words_done[id(event)] = event   # 組み直しでは流さない（離脱の信号で済んでいる）
+                if not self._rebuilding:
+                    self._notice(f"「{event.raw_text}」— 席{seat} の札が離れたときのフォールドの声とみます"
+                                 "（ショーダウンのマックにはしません）")
+                return True
+        return False
 
     def _has_fold_word(self, seat: int, spoken_at: float) -> bool:
         """その席に、この語より前の「フォールド」の語がもうある（覚えている語・離脱と組にした語）。"""

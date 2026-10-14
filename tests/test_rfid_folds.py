@@ -732,3 +732,41 @@ class TestNoWinnerBeforeTheFullBoard:
         tb.say("チョップ")
         tb.t._close_hand_for_next_deal(ended_ts=tb.now)   # noqa: SLF001
         assert len(tb.hands) == 1
+
+
+class TestFoldWordThatEndedTheBetting:
+    """札の離脱でベッティングが終わったあとに届いた「フォールド」は、離脱の近くで話し始めていれば、その離脱の声
+    （ショーダウンのマックにしない）。店舗 2026-10-14 62cad44b ハンド 2（オーナーのメモ「リバーのフォールドは
+    ショーダウンではなくベッティングラウンドのアクション」）: 席5 の札が離れた 0.4 秒後の「フォールド」が、認識に
+    5.7 秒かかって離脱の確定のあとに届き、残った席7 のマックになっていた。"""
+
+    def _river_fold(self, tb: _Table) -> float:
+        tb.deal()
+        tb.say("コール コール チェック")
+        tb.say("チェックアラウンド")
+        tb.say("チェックアラウンド")              # リバー
+        tb.say("ベット 1000")                       # 席4
+        tb.say("コール")                            # 席5
+        left = tb.now
+        tb.lift(6)
+        tb.tick(tb.now + 3.5)                       # 札の離脱で席6 フォールド → ベッティングは終わり
+        assert tb.t._betting_over()                 # noqa: SLF001
+        assert tb.played()[-1] == ("river", 6, "fold", 0)
+        return left
+
+    def test_a_late_fold_word_for_that_departure_is_not_a_muck(self, tmp_path):
+        tb = _Table(tmp_path)
+        left = self._river_fold(tb)
+        tb.say("フォールド", spoken_at=left + 0.4)
+        assert [a for a in tb.played() if a[0] == "showdown"] == []
+        assert tb.hands == []
+        assert any("ショーダウンのマックにはしません" in n for n in tb.notices)
+
+    def test_a_fold_word_well_after_the_departure_is_a_muck(self, tmp_path):
+        tb = _Table(tmp_path)
+        left = self._river_fold(tb)
+        tb.tick(tb.now + 5.0)
+        tb.say("フォールド", spoken_at=left + 8.5)  # 見せ合いのあと = 見せずにマック（アウトオブポジションの席4）
+        (hand,) = tb.hands
+        assert ("showdown", 4, "fold") in [(a.street, a.seat, a.action) for a in hand.actions]
+        assert hand.winner_seat == 5

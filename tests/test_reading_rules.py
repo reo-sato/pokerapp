@@ -214,3 +214,41 @@ class TestWordsTheDealerNeverSays:
         # ハンド 15・20、05cccd6c ハンド 1）
         assert [(e.action, e.amount, e.parse_flags) for e in parse_actions(text, confidence=0.5)] == expected
 
+
+
+class TestStoreLogs1014:
+    """店舗ログ 2026-10-14 16:20（62cad44b）で見つけた読み取り。"""
+
+    @pytest.mark.parametrize("text, amount", [
+        ("レイズ2万千", 21000),          # ハンド 19（前は 20000 = 要確認の付かない誤り）
+        ("2万千500", 21500),
+        ("2千百", 2100),
+        ("2万1千", 21000),
+        ("2万", 20000),
+    ])
+    def test_a_bare_thousand_after_ten_thousand_is_one_thousand(self, text, amount):
+        (event,) = parse_actions(text, confidence=0.5)
+        assert event.amount == amount
+
+    @pytest.mark.parametrize("text, expected", [
+        ("7500、8番7500", [("bet", 7500, 8)]),                   # ハンド 8:「8番」= 席8
+        ("6番がコール", [("call", 0, 6)]),
+        ("5番がオールイン。", [("allin", 0, 5)]),
+        ("5番はホールドリージャー、6番がコール。", [("call", 0, 6)]),   # 語の前でいちばん近い席
+        ("シート3番 コール", [("call", 0, 3)]),
+    ])
+    def test_a_number_and_ban_is_a_seat(self, text, expected):
+        assert [(e.action, e.amount, e.seat) for e in parse_actions(text, confidence=0.5)] == expected
+
+    @pytest.mark.parametrize("text", ["一番いいコール", "2番目にコール", "18番 コール"])
+    def test_ichiban_and_ordinals_are_not_seats(self, text):
+        assert all(e.seat is None for e in parse_actions(text, confidence=0.5))
+
+    def test_hand_names_in_chat_are_not_announcements(self):
+        # ハンド 17: ショーダウンのあとの雑談の「ストレート」を席8 の役名と読み、手札の判定より優先して勝者を誤った
+        assert parse_actions("なかなか出ないんだよね、ストレートもフラッシュも。", confidence=0.5) == []
+
+    @pytest.mark.parametrize("text", ["キング、フルハウス。", "おー ハートハートのフラッシュ", "そのトリップス",
+                                      "クラブ、クラブ、S9、K9、S9、6、3、S9、ストレート"])
+    def test_announced_hand_names_are_still_read(self, text):
+        assert [e.action for e in parse_actions(text, confidence=0.5)] == ["end_hand"]

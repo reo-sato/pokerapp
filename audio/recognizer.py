@@ -67,8 +67,12 @@ def _to_katakana(text: str) -> str:
 # 席番号表現。strip（金額パース前の除去）と抽出の両方が同一パターンを共有する
 # （ADR-0047 S2: 従来は strip 側が「シート 3」(空白) / 漢数字席を取りこぼし、席番号が金額に流入した）。
 # 呼び出し側が生テキストを渡すこともある（engine の rebuy / winner）ので、照合前にひらがなを寄せる。
+# 算用数字 1 桁 +「番」（「7番が4400」「6番がコール」「8番7500」）も席（店舗の書き起こしの「N番」12 回のうち、
+# アクションと一緒のものはどれもディーラーの席の言い方）。漢数字の「一番」（いちばん）・「2番目」・前に数の続く
+# 「18番」は席にしない。
 _SEAT_PATTERN = re.compile(
-    r"(?:シート|seat)\s*([0-9０-９]+|[一二三四五六七八九])",
+    r"(?:(?:シート|seat)\s*|(?<![0-9０-９.,万千百])(?=[0-9０-９]番(?!目)))"
+    r"([0-9０-９]+|[一二三四五六七八九])(?:(?<=[0-9０-９])番(?!目))?",
     re.IGNORECASE,
 )
 _FW_TO_ASCII_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
@@ -103,6 +107,17 @@ def _extract_seat_no(text: str) -> Optional[int]:
         return None
     n = _seat_token_to_int(m.group(1))
     return n if n is not None and 1 <= n <= 9 else None
+
+
+def _seat_before(norm: str, pos: int) -> Optional[int]:
+    """アクションの語（`pos`）の主語の席: 語より前でいちばん近い席の表現、無ければ最初の席の表現。
+
+    「5番はホールドリージャー、6番がコール。」のコールは席6（店舗 2026-09-29 fded6f75。前は最初の席 5 を付けていた）。
+    """
+    found = [m for m in _SEAT_PATTERN.finditer(norm) if (n := _seat_token_to_int(m.group(1))) and 1 <= n <= 9]
+    before = [m for m in found if m.start() < pos]
+    m = before[-1] if before else (found[0] if found else None)
+    return None if m is None else _seat_token_to_int(m.group(1))
 
 
 def _extract_all_seat_nos(text: str) -> list[int]:
@@ -174,6 +189,11 @@ def _kanji_amount(kanji: str) -> tuple[int, bool]:
     return _kanji_to_int(kanji), False
 
 
+# 算用数字の「万」のあとの数字の無い「千」、「千」のあとの「百」は 1（「2万千」= 21000・「2千百」= 2100。店舗
+# 2026-10-14 62cad44b ハンド 19 の「レイズ2万千」を 20000 と読んでいた）。漢数字だけの額は `_kanji_amount` が読む。
+_IMPLICIT_ONE = re.compile(r"(?<=[0-9]万)(?=千)|(?<=[0-9]千)(?=百)")
+
+
 @dataclass(frozen=True)
 class AmountParse:
     """parse_amount_ex の結果。ambiguous=True は「N万M」型の桁省略が疑われる読み。"""
@@ -196,6 +216,7 @@ def parse_amount_ex(text: str) -> AmountParse:
       （呼び出し側が needs_review を付ける）
     """
     candidates: list[tuple[int, int, bool]] = []  # (start, value, ambiguous)
+    text = _IMPLICIT_ONE.sub("1", text)
 
     for m in _KANJI_PATTERN.finditer(text):
         val, amb = _kanji_amount(m.group())
@@ -747,7 +768,7 @@ def _amount_only(
     """`parse_amount_only` の本体（「千」「万」のあとの語を読む前）。"""
     from core.positions import _ALIAS_PATTERN
 
-    norm = _to_katakana(unicodedata.normalize("NFKC", text))
+    norm = _IMPLICIT_ONE.sub("1", _to_katakana(unicodedata.normalize("NFKC", text)))   # 「2万千」= 2万1千
     body = _ALIAS_PATTERN.sub(" ", _SEAT_PATTERN.sub(" ", norm))
     tokens = [m.group() for m in _AMOUNT_TOKEN.finditer(body)]
     if not tokens:
@@ -1442,10 +1463,25 @@ def _parse_utterance(
             return events
     if not keywords:
         return []
-    if _is_conversation(norm, keywords):
+    if _is_conversation(norm, keywords) or _is_hand_name_chat(norm, keywords):
         logger.debug("会話の中のアクションの語とみなして読みません: %r", text)
         return []
     return [e for e, _, _ in _parse_keyword_parts(text, nfkc, norm, keywords, confidence, utterance_start_ts)]
+
+
+# 役名の語だけの発話でも、札の名前・スート・「ヒット」・卓の用語を除いて会話の言葉が長く残れば、ディーラーが見せた
+# 手の役名ではなく会話の中の役名（店舗 2026-10-14 62cad44b ハンド 17: ショーダウンのあとの「なかなか出ないんだよね、
+# ストレートもフラッシュも。」を席8 の役名「ストレート」と読み、手札の判定より役名を優先して勝者を誤った）。
+# 開発データの役名の発話 22 回で、残りはこの発話の 8 文字のほかは 4 文字以下（「おー ハートハートのフラッシュ」）。
+_HAND_CHAT_MIN_CHARS = 6
+
+
+def _is_hand_name_chat(norm: str, keywords: list[tuple[int, int, str]]) -> bool:
+    if not keywords or any(action != "end_hand" for _, _, action in keywords):
+        return False
+    card_words = re.compile(_CARD + r"|クラブ|ハート|スペード|ダイヤ|ヒット|S", re.IGNORECASE)   # 札の名前は下で定義
+    residue = card_words.sub("", _residue(norm, keywords))
+    return len(residue) >= _HAND_CHAT_MIN_CHARS
 
 
 # 「スリープレイヤーズ」「3ウェイ」= 残りの人数（ディーラーがストリートの移りに言う。言わないこともある,
@@ -1779,7 +1815,8 @@ def parse_action(
         amount=amount.value,
         timestamp=time.time(),
         raw_text=text,
-        seat=_extract_seat_no(norm),
+        # 勝者の席は最初の席（チョップの「シート3 シート5」は `_extract_all_seat_nos` で全部）
+        seat=_extract_seat_no(norm) if found_action == "winner" else _seat_before(norm, found_pos),
         confidence=confidence,
         position=parse_position(norm),
         parse_flags=tuple(flags),

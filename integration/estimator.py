@@ -496,13 +496,17 @@ class SessionEstimator:
     # ――― ハンドの窓 ―――
 
     def baseline(self) -> list[dict]:
-        """直しの無い再生（セッション全体）。ハンドの窓と、持ち点・ボタンの出所。"""
+        """直しの無い再生（セッション全体）。ハンドの窓と、持ち点・ボタンの出所。
+
+        ボタンは記録した配った順の信号で組み直す（ライブと同じ）。使わないと、ライブが配った順でボタンを直した
+        ハンドから先のボタンが 1 席ずれ、どのハンドもボタンの直しを払っていた（店舗 2026-10-14 62cad44b ハンド 5〜20,
+        要確認の付かない誤り 2）。"""
         stacks = {int(h): {int(s): int(v) for s, v in seats.items()}
                   for h, seats in (self.setup.get("hand_stacks") or {}).items()}
         return replay_world(world_events(self.events, self.transcripts, cache=self._parse_cache), self.presence,
                             players=self.players, sb=self.setup["sb"], bb=self.setup["bb"],
                             session_id=self.session_id, button_seat=self.setup.get("button_prior"),
-                            hand_stacks=stacks or None, **self.flags)
+                            hand_stacks=stacks or None, button_from_deal=True, **self.flags)
 
     def windows(self, hands: Optional[list[dict]] = None) -> list[HandWindow]:
         hands = [h for h in (hands if hands is not None else self.baseline()) if _epoch(h.get("started_at"))]
