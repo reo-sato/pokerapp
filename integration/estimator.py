@@ -813,6 +813,11 @@ class SessionEstimator:
         anchors = [(_word_start(r) if r.word is not None else r.t)
                    if (r.word is not None or r.collective or r.source in _RFID_FOLDS) else None for r in betting]
         bet_end = max((a for a in anchors if a is not None), default=w.start)
+        # フォールドした札が「戻った」とみるのはベッティングの間だけ。最後の時刻の分かるアクションより後に読まれた札
+        # （次のハンドの配布・片付けでリーダーをかすめた札）は戻りではない（店舗 2026-10-14 845da8e6 ハンド 2: ショーダウンが
+        # 次の配布まで閉じない仮説で、プリフロップの声と同時の離脱が次の配布の札で「戻った」とされ、フォールドに結び付かず
+        # 明瞭な声の正解が負けた）
+        returns_until = min(end, bet_end)
         for i, r in enumerate(betting):
             if r.action != "fold":
                 continue
@@ -832,7 +837,7 @@ class SessionEstimator:
                 at = r.t
             # フォールドした札はそのハンドの中では戻らない（戻った離脱は持ち上げ）
             best = min((k for k, d in enumerate(deps) if d[0] == r.seat and k not in explained
-                        and lo <= d[1] <= hi and (d[2] is None or d[2] >= end)),
+                        and lo <= d[1] <= hi and (d[2] is None or d[2] >= returns_until)),
                        key=lambda k: abs(deps[k][1] - at), default=None)
             if best is None:
                 if self._present_at(r.seat, at + p["present_after_sec"], end):
