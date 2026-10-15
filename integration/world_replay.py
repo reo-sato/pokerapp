@@ -320,12 +320,15 @@ def replay_world(
     tick: float = TICK_SEC,
     button_from_deal: bool = False,
     word_labels: Optional[dict[str, str]] = None,
+    open_gates: frozenset = frozenset(),
+    gate_events: Optional[dict[str, tuple[str, float]]] = None,
 ) -> list[dict]:
     """`world_events` の入力を、ライブのループと同じ順の定期の確認を挟みながら流し、ハンド（記録と同じ形）を返す。
 
     `hand_stacks` / `hand_buttons`: hand_id → そのハンドの持ち点 / ボタン（推定器はハンドを互いに独立に扱う）。
     `button_seat`: 1 ハンド目のボタンの 1 つ手前の席（`create_game_state` と同じ）。
     `word_labels`: 渡すと、engine が記録にしなかった声の語の扱い（`IntegrationThread.word_labels`）を入れて返す。
+    `open_gates` / `gate_events`: 推定器が開けた門（`IntegrationThread` に渡す）/ 渡すと門が働いた語を入れて返す。
     `button_from_deal`: 記録した配った順（`deal_order` の信号）でボタンを組み直す（ライブ・replay と同じ。推定器の
     セッション全体の再生 = ハンドごとのボタンの出所だけが使う。ハンドごとの再生ではボタンは推定器の選択肢）。
     """
@@ -372,6 +375,7 @@ def replay_world(
             rfid_folds=rfid_folds,
             recorded_deals=False,
             button_from_deal=button_from_deal,
+            open_gates=open_gates,
             seat_presence=(lambda: presence.snapshot(clock.now)) if presence is not None else None,
             seat_cards_absent_since=(lambda seat: presence.absent_since(seat, clock.now))
             if presence is not None else None,
@@ -435,6 +439,8 @@ def replay_world(
             thread._close_open_hand_at_stop()     # noqa: SLF001
         if word_labels is not None:
             word_labels.update(thread.word_labels)
+        if gate_events is not None:
+            gate_events.update(thread.gate_events)
         import json
         path = Path(tmp) / f"{session_id}.json"
         data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}

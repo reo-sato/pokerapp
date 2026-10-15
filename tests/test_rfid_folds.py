@@ -44,7 +44,7 @@ class _Recorder:
 class _Table:
     """席の在否（札を置く・持ち上げる・中央を通す）と時刻を手で動かす卓。"""
 
-    def __init__(self, tmp_path: Path, seats=(4, 5, 6)):
+    def __init__(self, tmp_path: Path, seats=(4, 5, 6), open_gates=frozenset()):
         self.seats = seats
         self.gs = PokerkitGameState(
             [PlayerState(seat=s, name=f"P{s}", stack=10000) for s in seats], sb=100, bb=200)
@@ -64,7 +64,7 @@ class _Table:
             stop_event=threading.Event(), clock=lambda: self.now, event_recorder=self.recorder,
             auto_new_hand=True, auto_winner=True, rfid_folds=True,
             seat_presence=self._presence, board_presence=lambda: {"present_count": 0},
-            speech_pending_since=lambda: self.speech_since,
+            speech_pending_since=lambda: self.speech_since, open_gates=open_gates,
         )
 
     def _presence(self) -> dict:
@@ -322,6 +322,27 @@ class TestShowdown:
         assert tb.hands == [] and [a for a in tb.played() if a[0] == "showdown"] == []
         assert any("宣言の前" in n for n in tb.notices)
         assert tb.t._hand_needs_review                     # noqa: SLF001 — 聞き取れなかった宣言の本当のマックかもしれない
+
+    def _fold_before_the_call(self, tmp_path, open_gates=frozenset()) -> _Table:
+        tb = _Table(tmp_path, seats=(4, 5), open_gates=open_gates)
+        tb.deal({4: ["6s", "Qc"], 5: ["4s", "7c"]})
+        tb.say("コール チェック")
+        for _ in range(3):
+            tb.say("チェックアラウンド")
+        tb.say("フォールド、ショーダウン")
+        return tb
+
+    def test_the_gate_is_recorded_for_the_estimator(self, tmp_path):
+        # 推定器が「宣言が聞き取れなかった本当のマック」の筋を選べるように、門が働いた語を出す
+        tb = self._fold_before_the_call(tmp_path / "closed")
+        assert list(tb.t.gate_events.values()) == [("showdown_fold", 2.0)]
+
+    def test_an_opened_gate_makes_it_a_muck(self, tmp_path):
+        gates = frozenset(self._fold_before_the_call(tmp_path / "closed").t.gate_events)
+        tb = self._fold_before_the_call(tmp_path / "open", open_gates=gates)
+        (hand,) = tb.hands
+        assert hand.winner_seat == 5 and hand.winner_source == "fold"    # アウトオブポジションの席4 のマック
+        assert tb.t.gate_events == {}
 
 
 class TestLastFold:

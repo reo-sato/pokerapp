@@ -56,6 +56,9 @@ PARAMS: dict[str, float] = {
                                  # 繰り返した・ショーダウンのあとのマックの声
     "p_restate_same": 0.05,      # 同じ語をそのまま繰り返した（「チェック、チェック。」店舗 1/2 が 1 つ、台本 0/15 = 合わせて
                                  # 1/17。掃引で店舗・台本の正誤が動かない 0.03〜0.1 の中）
+    "p_muck_before_declare": 0.15,  # ベッティングが終わったあとの「フォールド」が、「ショーダウン」の宣言（・見せた役名）の前でも本当の
+                                    # マックだった（門 "showdown_fold" を開ける, 2026-10-15 の見直し手順 3。開発データで門が働いた 7 語中
+                                    # 真のアクションにマックがあるのは 1 = a6ee12e4#1、宣言の決まり（10/07）より前のハンド）
     "p_corrected": 0.8,          # 「失礼しました」の前の語を言い直した（取り消した）: ディーラーは言い間違えたら「失礼しました」と
                                  # 言って言い直す（オーナー 2026-10-06）= その語は使われないのがふつう（ライブも取り消す）
     "p_sub": 0.02,               # 語の種類の取り違え（チェック ↔ コール など）
@@ -236,9 +239,9 @@ def _iso(t: float) -> str:
 
 @dataclass(frozen=True)
 class Edit:
-    kind: str            # "read" | "drop" | "insert" | "button" | "lift"
+    kind: str            # "read" | "drop" | "insert" | "button" | "lift" | "gate"
     at: float            # 発話の始まり（read / drop）・入れる時刻（insert）・ハンドの始まり（button）・離れた時刻（lift）
-    value: Any = None    # 読む文 / 捨てる語の番号 / アクション / 席 / (席, 戻った時刻)
+    value: Any = None    # 読む文 / 捨てる語の番号 / アクション / 席 / (席, 戻った時刻) / 開ける門の語（`word_key`）
     logp: float = 0.0    # 直しそのものの確からしさ（read の読みの確からしさ。ほかは採点で数える）
     label: str = ""
 
@@ -589,13 +592,15 @@ class SessionEstimator:
         blinds = w.base.get("blinds") or {}
         records: list = []
         labels: dict[str, str] = {}
+        gates: dict[str, tuple[str, float]] = {}
+        opened = frozenset(e.value for e in edits if e.kind == "gate")
         world = world_events(events, rows, texts, extra=extra, drops=drops, cache=self._parse_cache)
         hands = replay_world(
             world, presence, players=self.players, sb=int(blinds.get("sb") or self.setup["sb"]),
             bb=int(blinds.get("bb") or self.setup["bb"]), session_id=self.session_id,
             hand_stacks={1: stacks} if stacks else None,
             hand_buttons={1: button} if button is not None else None,
-            on_action=records.append, word_labels=labels, **self.flags,
+            on_action=records.append, word_labels=labels, open_gates=opened, gate_events=gates, **self.flags,
         )
         self.replays += 1
         hand = next((h for h in hands if _epoch(h.get("started_at")) is not None
@@ -604,7 +609,8 @@ class SessionEstimator:
             hand = dict(hand, hand_id=w.hand_id)
         tokens = [e for e in world if isinstance(e, AudioEvent) and e.utterance_start_ts is not None
                   and w.start - 0.5 <= e.utterance_start_ts < w.end and not _is_inserted(e, inserted)]
-        return hand, records, {"tokens": tokens, "inserted": inserted, "button": button, "labels": labels}
+        return hand, records, {"tokens": tokens, "inserted": inserted, "button": button, "labels": labels,
+                               "gates": gates, "opened": opened}
 
     # ――― 採点 ―――
 
@@ -669,6 +675,12 @@ class SessionEstimator:
                 terms.append((f"捨てた語: {e.label}", _log(self._p_phantom(e.at, parsed, int(e.value)))))
             elif e.kind == "read" and not (e.value or "").strip():
                 terms.append((f"捨てた語: {e.label}", _log(self._p_phantom(e.at))))
+        # ライブの門（証拠の語を捨てる規則）: 閉じたまま捨てた語・開けて使った語のどちらにも、その決まりが破れる確率
+        for key in sorted(info.get("gates") or {}):
+            terms.append(("門: 宣言の前の「フォールド」をマックにしない", _log(1 - p["p_muck_before_declare"])))
+        for key in sorted(info.get("opened") or ()):
+            terms.append(("門を開けた: 宣言の前の「フォールド」をマックにする", _log(p["p_muck_before_declare"])))
+            flags.append("宣言の前の「フォールド」をマックにした")
         # 残り人数の宣言
         for t in info["tokens"]:
             if t.action in ("heads_up", "players_left"):
@@ -1021,6 +1033,10 @@ class SessionEstimator:
             for seat in seats:
                 if seat != w.button:
                     edits.append(Edit("button", w.start, seat, label=f"ボタン 席{seat}"))
+        # ライブの門を開ける（直しの無い再生で門が働いた語）
+        for key, (kind, at) in sorted((base_info.get("gates") or {}).items()):
+            if kind == "showdown_fold":
+                edits.append(Edit("gate", at, key, label=f"「フォールド」（{_iso(at)[11:19]}）をショーダウンのマックにする"))
         # 札の離脱を持ち上げとみる
         if self.presence is not None:
             end = _epoch(w.base.get("ended_at")) or w.end

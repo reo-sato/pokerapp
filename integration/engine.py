@@ -395,6 +395,7 @@ class IntegrationThread(threading.Thread):
         recorded_deals: bool = False,
         before_new_hand: Optional[Callable[[int], None]] = None,
         button_from_deal: bool = True,
+        open_gates: frozenset = frozenset(),
         live_hand: bool = False,
     ) -> None:
         """
@@ -632,6 +633,10 @@ class IntegrationThread(threading.Thread):
         self._streets_synced: set[str] = set()
         # ――― ボタンの置き忘れの救済（2026-09-29）―――
         self._button_from_deal = bool(button_from_deal)
+        # 推定器が開けた門（`word_key` の集まり。ライブは空 = 門は閉じたまま）と、門が働いた語（`gate_events`）。
+        # 門 = 証拠（語）を捨てるライブの規則。推定器は門を開ける直しを選べる（2026-10-15 の見直し, 手順 3）
+        self._open_gates = frozenset(open_gates)
+        self._gate_events: dict[str, tuple[str, float]] = {}
         self._live_hand = bool(live_hand)
         self._live_signature: Optional[tuple] = None     # 最後に書いた進行中のハンド（変わったときだけ書く）
         # このハンドで配った順を見たか（1 ハンドに 1 回）
@@ -1264,9 +1269,14 @@ class IntegrationThread(threading.Thread):
             if not self._betting_over():
                 self._handle_fold_word(event)   # 次の手番の人には付けない（オーナー決定）
                 return
-            if self._closing_fold_word(event):
+            gate = word_key(event)
+            if gate in self._open_gates:
+                pass                            # 推定器が門を開けた = 見せずにマック（下）
+            elif self._closing_fold_word(event):
+                self._gate_events[gate] = ("showdown_fold", _spoken_at(event))
                 return
-            if not (self._showdown_declared or self._showdown_shown):
+            elif not (self._showdown_declared or self._showdown_shown):
+                self._gate_events[gate] = ("showdown_fold", _spoken_at(event))
                 # マックの「フォールド」は「ショーダウン」の宣言（か、誰かが見せた役名）のあとに言う（オーナー 2026-10-14）。
                 # 宣言の前（同じ発話の「フォールド、ショーダウン」も）はベッティングのフォールドの声が遅れて届いたもの
                 self._fold_words_done[id(event)] = event
@@ -1603,6 +1613,12 @@ class IntegrationThread(threading.Thread):
         = 次のアクションの前に手番の人のフォールドにする）か。あいだのアクションなので、この発話は言い直しではない
         （店舗 7b897671 ハンド 3:「1600」→「フォールド」→「2千3百」の「2千3百」は次の人の額）。"""
         return any(since <= t <= _spoken_at(event) for t in self._spoken_folds.values())
+
+    @property
+    def gate_events(self) -> dict[str, tuple[str, float]]:
+        """門が働いた語（`word_key` → (門の種類, 話し始め)）。"showdown_fold" = ベッティングが終わったあとの「フォールド」を
+        ショーダウンのマックにしなかった（離脱の声とみた・「ショーダウン」の宣言の前）。"""
+        return dict(self._gate_events)
 
     @property
     def word_labels(self) -> dict[str, str]:
