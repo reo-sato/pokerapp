@@ -12,6 +12,7 @@ fastapi に依存しない純関数群 (HTTP なしで単体テスト可能)。
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from core.ground_truth import hand_has_needs_review
@@ -75,6 +76,44 @@ def hide_hole_cards(hand: dict, own_seats: set[int], mode: str) -> dict:
     return out
 
 
+# ――― お客さんの画面に今日の分だけを出す（config `viewer_api.today_only`, 2026-10-19 オーナー）―――
+# 「今日」= 営業日。日付の切り替わりは朝 6 時（深夜 0 時をまたぐセッションを途中で消さない）。
+DAY_START_HOUR = 6
+
+
+def business_day_start(now: datetime, day_start_hour: int = DAY_START_HOUR) -> datetime:
+    """`now` の営業日の始まり（その日の `day_start_hour` 時。それより前なら前の日の）。"""
+    start = now.replace(hour=day_start_hour, minute=0, second=0, microsecond=0)
+    return start if now >= start else start - timedelta(days=1)
+
+
+def _started_since(session, since: datetime) -> bool:
+    try:
+        started = datetime.fromisoformat(session.started_at)
+    except (TypeError, ValueError):
+        return False
+    if started.tzinfo is not None:                      # 店の PC の時刻（タイムゾーンなし）にそろえる
+        started = started.astimezone().replace(tzinfo=None)
+    return started >= since
+
+
+def recent_session_ids(session_repo: SessionRepository, since: datetime) -> set[str]:
+    """`since` 以降に始まったセッション。"""
+    return {s.session_id for s in session_repo.list_sessions() if _started_since(s, since)}
+
+
+def recent_players(session_repo: SessionRepository, since: datetime) -> list:
+    """`since` 以降に始まったセッションで席に着いた player（merge 後の代表）。"""
+    player_repo = session_repo.player_repo
+    seated: set[str] = set()
+    for sid in recent_session_ids(session_repo, since):
+        for hand_id in session_repo.list_hand_ids(sid):
+            for pid in session_repo.resolve_seat_map_for_hand(sid, hand_id).values():
+                if pid:
+                    seated.add(player_repo.resolve_canonical(pid))
+    return [p for p in player_repo.list_players() if p.player_id in seated]
+
+
 class HandNotFoundError(Exception):
     """指定 (session_id, hand_id) の hand log が存在しない（error code: not_found）。"""
 
@@ -85,15 +124,19 @@ def _load_hand_log(log_dir: str | Path, session_id: str) -> dict | None:
     return load_record(log_dir, session_id)
 
 
-def list_player_sessions(player_id: str, session_repo: SessionRepository) -> list[dict]:
+def list_player_sessions(player_id: str, session_repo: SessionRepository,
+                         since: "datetime | None" = None) -> list[dict]:
     """player が 1 hand 以上着席した session の player_session_summary を返す（作成順）。
 
     形は docs/contracts/schemas/player_session_summary.schema.json (0.x)。
+    `since` があれば、それ以降に始まった session だけ（`viewer_api.today_only`）。
     """
     # merge を考慮し、survivor + 全 absorbed の equivalence class で seat 突合する（ADR-0030 D2）。
     cls = session_repo.player_repo.equivalence_class(player_id)
     summaries: list[dict] = []
     for session in session_repo.list_sessions():
+        if since is not None and not _started_since(session, since):
+            continue
         hands_played = sum(
             1
             for hand_id in session_repo.list_hand_ids(session.session_id)

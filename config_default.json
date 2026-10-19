@@ -127,6 +127,8 @@
     "bind_port": 8788,
     "hole_cards": "all",
     "show_truth": false,
+    "today_only": false,
+    "_today_only_comment": "2026-10-19: true なら、お客さんの画面の名前の一覧とセッションの一覧を、今日（営業日 = 朝 6 時から）始まったセッションの分だけにする。スタッフの画面には効かない。viewer の起動のときに読む。",
     "_show_truth_comment": "2026-10-19: true なら、お客さんの画面のハンドは真のアクション（logs/<sid>.ground_truth.json、真のアクション入力の画面で保存したもの）だけ。保存していないハンドは見せない。スタッフの画面には効かない。viewer（店舗サーバー / start_viewer）の起動のときに読む。",
     "_hole_cards_comment": "ADR-0067 D6: お客さんの画面に出すホールカードの範囲（店の設定）。all = 記録した手札を全員分 / own_and_shown = 自分の手札 + ショーダウンで見せた手札だけ。セッションごとにスタッフ画面で上書きできる。店内（名前選び）では誰でも誰を選べるので目安。店外（クラウド, 閲覧リンク）では本人が決まるので守られる。スタッフの画面には効かない。",
     "_comment": "M1/M5 (ADR-0017/0018): player 向け read-only viewer API。'python main.py --viewer-api' で単独起動（注文 POST は 503）。enabled=true で 'python main.py --ledger' が API を in-process 起動し注文リクエスト受付（write）を有効にする（単一プロセス所有）。要 [api] extra。",

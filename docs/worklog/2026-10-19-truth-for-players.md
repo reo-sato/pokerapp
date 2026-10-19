@@ -40,3 +40,10 @@
 
 `session_layer.enabled`・`viewer_api.show_truth`・`ground_truth.feed_stacks` を true にして、ロガー・入力画面・お客さんの
 画面（店舗サーバーか `start_viewer.cmd`）を起動し直す。
+
+## 追記: お客さんの画面に今日の分だけを出す（同日, オーナー）
+
+`viewer_api.today_only`（`create_app(today_only=, clock=)`）: `/api/players` は今日始まったセッションで席に着いた人だけ
+（`recent_players`）、`/api/players/{id}/sessions` は今日始まったセッションだけ、前の日のセッションのハンドの一覧は空。
+「今日」は営業日 = 朝 6 時から（`business_day_start`, 深夜 0 時をまたぐセッションを途中で消さない）。スタッフの読み取り
+（`/api/staff/...`）は変えない。テスト `tests/test_viewer_today_only.py`。

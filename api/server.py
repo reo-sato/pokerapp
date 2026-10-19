@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from datetime import datetime
 from importlib import metadata
 from pathlib import Path
 from typing import Any, Callable
@@ -25,6 +26,9 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from api.read_models import (
+    business_day_start,
+    recent_players,
+    recent_session_ids,
     HOLE_CARD_VISIBILITY,
     HandNotFoundError,
     get_hand,
@@ -377,6 +381,8 @@ def create_app(
     cloud_links: Any = None,
     hole_cards_default: str = "all",
     show_truth: bool = False,
+    today_only: bool = False,
+    clock: Callable[[], datetime] = datetime.now,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -404,6 +410,9 @@ def create_app(
     
     show_truth（config `viewer_api.show_truth`, 2026-10-19）: お客さんのハンドの読み取りを真のアクション
     （`logs/<sid>.ground_truth.json`）だけにする。真のアクションを保存していないハンドは見せない。スタッフの読み取りは変えない。
+
+    today_only（config `viewer_api.today_only`, 2026-10-19）: お客さんの名前の一覧とセッションの一覧を、今日（営業日 =
+    朝 6 時から）始まったセッションの分だけにする。前の日のセッションは開いても空。スタッフの読み取りは変えない。
     """
     if ledger_repo is None:
         ledger_repo = LedgerRepository(session_repo=session_repo, player_repo=player_repo)
@@ -475,9 +484,14 @@ def create_app(
             body["cloud"] = cloud_status()
         return body
 
+    def _since() -> "datetime | None":
+        return business_day_start(clock()) if today_only else None
+
     @app.get("/api/players")
     def players() -> dict:
-        return {"players": [p.to_dict() for p in player_repo.list_players()]}
+        since = _since()
+        listed = player_repo.list_players() if since is None else recent_players(session_repo, since)
+        return {"players": [p.to_dict() for p in listed]}
 
     @app.get("/api/players/{player_id}")
     def player(player_id: str) -> dict:
@@ -486,11 +500,14 @@ def create_app(
     @app.get("/api/players/{player_id}/sessions")
     def player_sessions(player_id: str) -> dict:
         player_repo.get(player_id)
-        return {"sessions": list_player_sessions(player_id, session_repo)}
+        return {"sessions": list_player_sessions(player_id, session_repo, since=_since())}
 
     @app.get("/api/players/{player_id}/sessions/{session_id}/hands")
     def player_hands(player_id: str, session_id: str) -> dict:
         player_repo.get(player_id)
+        since = _since()
+        if since is not None and session_id not in recent_session_ids(session_repo, since):
+            return {"hands": []}                     # 前の日のセッション（today_only）
         hands = list_player_hands(player_id, session_id, session_repo, log_dir, correction_repo,
                                   truth=show_truth)
         mode = hole_card_mode(session_repo, session_id, hole_cards_default)   # ADR-0067 D6
@@ -1366,6 +1383,7 @@ def auth_kwargs_from_config(api_cfg: dict) -> dict:
     return {
         "hole_cards_default": hole if hole in HOLE_CARD_VISIBILITY else "all",   # ADR-0067 D6
         "show_truth": bool(api_cfg.get("show_truth", False)),                     # 真のアクションだけ見せる
+        "today_only": bool(api_cfg.get("today_only", False)),                     # 今日のセッションだけ
         "player_auth": api_cfg.get("player_auth", "off"),
         "player_token_secret": api_cfg.get("player_token_secret") or None,
         "player_token_ttl_sec": int(api_cfg.get("player_token_ttl_sec", 43_200)),
