@@ -47,3 +47,9 @@
 （`recent_players`）、`/api/players/{id}/sessions` は今日始まったセッションだけ、前の日のセッションのハンドの一覧は空。
 「今日」は営業日 = 朝 6 時から（`business_day_start`, 深夜 0 時をまたぐセッションを途中で消さない）。スタッフの読み取り
 （`/api/staff/...`）は変えない。テスト `tests/test_viewer_today_only.py`。
+
+## 追記: スタックを減らすコマンド（同日, オーナー）
+
+CLI の `d <席> <金額>` → `AudioEvent(action="reduce_stack")` → engine `_handle_reduce_stack`: ハンドの外ならすぐ
+`update_stack`（0 より下にはしない）、その席が進行中のハンドに入っていれば `_stack_corrections` でハンドのあとに。
+テスト `tests/test_reduce_stack.py`。

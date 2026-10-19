@@ -230,7 +230,7 @@ _CORRECTION_UNIT_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "
 _VOICE_SOURCES = frozenset({"spoken_seat", "spoken_position", "engine_prior"})
 # 解釈を決める前に届いても、組み直しを待たなくてよい（ハンドを終わらせない）制御
 _CONTROL_KEEPS_CORRECTION = frozenset({"rename_seat", "set_blinds", "sit_out", "sit_in", "rebuy", "set_button",
-                                       "correct_board", "correct_seat", "truth_stacks"})
+                                       "correct_board", "correct_seat", "truth_stacks", "reduce_stack"})
 # 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
 # 言葉がこの数だけ聞こえたら、そのオールインを聞き違いとみて外す（店舗 2026-09-27: 自信 0.27 の「オールイン」の
 # あとのチェック 5 回と「2700」がすべて保留になり、全員オールインの 59700 のポットになった）
@@ -1229,6 +1229,9 @@ class IntegrationThread(threading.Thread):
 
         if action == "rebuy":
             self._handle_rebuy(event)
+            return
+        if action == "reduce_stack":
+            self._handle_reduce_stack(event)
             return
 
         if action == "correct_board":
@@ -4408,6 +4411,37 @@ class IntegrationThread(threading.Thread):
                 needs_review=False,
                 confidence=1.0,
             ))
+
+    def _handle_reduce_stack(self, event: AudioEvent) -> None:
+        """席のスタックを減らす（CLI の `d <席> <金額>`, 2026-10-19 オーナー: スタックを減らすコマンドも欲しい）。
+
+        0 より下にはしない。その席が進行中のハンドに入っていれば、そのハンドのあとに減らす（ハンドの記録は変えない =
+        リバイと同じ考え方）。ハンドの外・ハンドに入っていない席はすぐ減らす。
+        """
+        gs = self._game_state
+        seat = event.seat if event.seat is not None else _extract_seat_no(event.raw_text)
+        amount = int(event.amount or 0)
+        if seat is None or amount <= 0:
+            logger.warning("reduce_stack event without seat or amount: %r", event.raw_text)
+            return
+        try:
+            current = gs.get_stack(seat)
+        except (KeyError, ValueError):
+            self._notice(f"席{seat} はこの卓にありません")
+            return
+        in_play = self._hand_open and gs.is_hand_active() and seat in self._seats_in_hand()
+        if in_play:
+            self._stack_corrections[seat] = self._stack_corrections.get(seat, 0) - amount
+            self._notice(f"席{seat} のスタックを {amount} 減らします（いまのハンドのあとに）")
+            return
+        left = max(0, current - amount)
+        try:
+            gs.update_stack(seat, left)
+        except ValueError:
+            logger.exception("reduce_stack failed (seat=%s amount=%s)", seat, amount)
+            return
+        self._notice(f"席{seat} のスタックを {current - left} 減らしました（残り {left}）"
+                     + ("— スタック 0 なので r <席> <金額> で買い足すまで配られません" if left == 0 else ""))
 
     def _rebuy_instead_of_restored(self, seat: int, amount: int, restored: int) -> bool:
         """手札が配られたときに最初の持ち点に戻した席の買い足し = 戻した額の代わりにする（二重にしない）。

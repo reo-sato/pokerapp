@@ -25,7 +25,7 @@ _FULLWIDTH_TO_ASCII = str.maketrans(
 
 # 引数がくっついたコマンド（`w1` / `r1 500`）を分ける。ログが入力行に割り込む環境では
 # 空白を打ち損ねやすく、実機で `w1` が 2 回弾かれた（ISSUE-0034）。引数を取る w/r のみ。
-_GLUED_COMMAND = re.compile(r"^([wr])(\d+)$")
+_GLUED_COMMAND = re.compile(r"^([wrd])(\d+)$")
 
 
 def _normalize_cli_command(line: str) -> str:
@@ -854,7 +854,8 @@ def run_cli(script: str | None = None) -> None:
         print("勝者: ほかが全員フォールドしたら自動。ショーダウンは、見せたら役名（見せるたびに必ず）、"
               "見せずにマックしたら「フォールド」（どちらもアウトオブポジションから順）。全員見せたか、"
               "役名もマックも 8 秒無ければ手札から判定。決まらないときは w <席>。")
-    print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー（分けたら w <席> <席>）  [r <席> <金額>]=リバイ")
+    print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー（分けたら w <席> <席>）  [r <席> <金額>]=リバイ"
+          "  [d <席> <金額>]=スタックを減らす")
     print("ミスディール訂正: [cb <位置>]=ボードの N 枚目を取り消し  [cs <席>]=その席の札を読み直し")
     print("リーダー: [rr]=読み取り装置（ESP32）を再起動（卓に札が無いときに送ります。読めないリーダーがあるとき）")
     print("席: [name <席> <名前>]=その席の人（参加）  [name <席> -]=空席（次のハンドから配られない）"
@@ -918,6 +919,19 @@ def run_cli(script: str | None = None) -> None:
                     print(f"リバイを送信しました: 席{seat} +{amount}（反映はアクション表示で確認）")
                 except ValueError as e:
                     print(f"エラー: {e}")
+            elif cmd == "d" and len(parts) >= 3:
+                # スタックを減らす（0 より下にはしない。ハンドに入っている席はそのハンドのあとに, 2026-10-19）
+                try:
+                    seat = int(parts[1])
+                    amount = int(parts[2])
+                    if amount <= 0:
+                        raise ValueError("金額は 1 以上")
+                    audio_q.put(AudioEvent(
+                        action="reduce_stack", amount=amount, timestamp=_time.time(),
+                        raw_text=f"シート{seat} スタック減 {amount}", seat=seat,
+                    ))
+                except ValueError as e:
+                    print(f"使い方: d <席> <金額>（{e}）")
             elif cmd == "name":
                 parsed = _parse_name_command(line.translate(_FULLWIDTH_TO_ASCII).split())
                 if parsed is None:
@@ -1011,7 +1025,7 @@ def run_cli(script: str | None = None) -> None:
                 # 続けて打った複数のアクション（「フォールド フォールド コール」）は順に分ける（ADR-0061）
                 events = parse_actions(line, confidence=1.0)
                 if not events:
-                    print("認識できません。コマンド: q / n / w <席> / r <席> <金額>、"
+                    print("認識できません。コマンド: q / n / w <席> / r <席> <金額> / d <席> <金額>、"
                           "または読み上げ文（例: チェック / シート3 コール / ベット 500 / 600）")
                 for ev in events:
                     audio_q.put(ev)
