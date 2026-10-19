@@ -461,6 +461,29 @@ export function seatRingLayout(count: number): SeatSlot[] {
   return slots;
 }
 
+/** 卓の席の数（店の卓は 8 席, オーナー 2026-10-19）。 */
+export const TABLE_SEATS = 8;
+
+/** テーブル図の 1 席: そのハンドに居た人（`player`）か空席（`player` = null）。 */
+export interface TableSeat {
+  seat: number;
+  player: ReplayPlayer | null;
+}
+
+/**
+ * テーブル図に並べる席 = 席 1〜`TABLE_SEATS` を**席番号の位置に固定**し、そのハンドに居ない席は空席にする
+ * （オーナー 2026-10-19: 席数を 8 で固定、空いている席番号は空席として表示）。席番号が 8 を超える席が
+ * あるときだけ、その番号まで広げる。`seatRingLayout(返り値の長さ)` の i 番目が席 i+1 の位置（席 1 が手前）。
+ */
+export function tableSeats(players: ReplayPlayer[], minSeats: number = TABLE_SEATS): TableSeat[] {
+  const bySeat = new Map(players.map((p) => [p.seat, p]));
+  const maxSeat = players.reduce((m, p) => (Number.isInteger(p.seat) && p.seat > m ? p.seat : m), 0);
+  const count = Math.max(minSeats, maxSeat);
+  const out: TableSeat[] = [];
+  for (let seat = 1; seat <= count; seat += 1) out.push({ seat, player: bySeat.get(seat) ?? null });
+  return out;
+}
+
 /**
  * プリフロップで fold した席（ADR-0051 追記）。
  *

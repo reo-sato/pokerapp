@@ -29,6 +29,7 @@ import {
   shownAmount,
   streetFlow,
   streetTotals,
+  tableSeats,
   visibleColumnActions,
   type ReplayHand,
 } from "./handReplayModel";
@@ -417,4 +418,15 @@ test("heardDetails: heard text, correction, and synthesized fold", () => {
 
   const plain = heardDetails({ street: "river", seat: 1, action: "check", raw_text: "チェック" });
   assert.deepEqual(plain, { heard: "チェック", notes: [] });
+});
+
+test("tableSeats: 8 fixed seats by seat number, missing seats are empty", () => {
+  const p = (seat: number) => ({ seat, name: `P${seat}` });
+  const seats = tableSeats([p(5), p(2), p(7)]);
+  assert.deepEqual(seats.map((s) => s.seat), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.deepEqual(seats.filter((s) => s.player).map((s) => s.seat), [2, 5, 7]);
+  assert.equal(seats[0].player, null);
+  // 8 を超える席番号があれば、その番号まで広げる
+  assert.equal(tableSeats([p(1), p(9)]).length, 9);
+  assert.equal(tableSeats([]).length, 8);
 });

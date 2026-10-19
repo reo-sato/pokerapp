@@ -37,6 +37,7 @@ import {
   seatRingLayout,
   shownAmount,
   STREET_LABELS,
+  tableSeats,
   SUIT_COLORS,
   SUIT_SYMBOLS,
   type ReplayAction,
@@ -160,6 +161,17 @@ function SeatChip(props: {
           {formatChipsCompact(player.stack_end)}
         </Text>
       ) : null}
+    </View>
+  );
+}
+
+/** 空席（そのハンドに居ない席番号）。席の位置を実際の卓と同じに保つために出す。 */
+function EmptySeat(props: { seat: number; top: number; left: number }): React.JSX.Element {
+  return (
+    <View style={[s.seat, s.seatEmpty, { top: `${props.top}%`, left: `${props.left}%` }]}>
+      <Text style={s.seatEmptyText} numberOfLines={1}>
+        {props.seat} 空席
+      </Text>
     </View>
   );
 }
@@ -292,7 +304,9 @@ export function HandReplay(props: {
   const model = buildReplayModel(props.hand);
   const board = props.hand.board ?? [];
   const foldedPreflop = new Set(preflopFoldedSeats(props.hand.actions ?? []));
-  const slots = seatRingLayout(model.seats.length);
+  // 席は 1〜8 を席番号の位置に固定（空いている席番号は空席, オーナー 2026-10-19）
+  const ring = tableSeats(model.seats);
+  const slots = seatRingLayout(ring.length);
   const sectionByStreet = new Map(model.streets.map((st) => [st.street, st]));
   // アクションに player_name が無い記録もあるので、席→参加者名で補う（最後は「席N」）。
   const nameBySeat = new Map(model.seats.map((p) => [p.seat, p.name]));
@@ -350,17 +364,21 @@ export function HandReplay(props: {
           ) : null}
         </View>
 
-        {model.seats.map((p, i) => (
-          <SeatChip
-            key={p.seat}
-            player={p}
-            isWinner={p.seat === model.winnerSeat}
-            isSelf={p.seat === props.selfSeat}
-            dimmed={foldedPreflop.has(p.seat)}
-            top={slots[i]?.top ?? 50}
-            left={slots[i]?.left ?? 50}
-          />
-        ))}
+        {ring.map(({ seat, player: p }, i) =>
+          p ? (
+            <SeatChip
+              key={seat}
+              player={p}
+              isWinner={p.seat === model.winnerSeat}
+              isSelf={p.seat === props.selfSeat}
+              dimmed={foldedPreflop.has(p.seat)}
+              top={slots[i]?.top ?? 50}
+              left={slots[i]?.left ?? 50}
+            />
+          ) : (
+            <EmptySeat key={seat} seat={seat} top={slots[i]?.top ?? 50} left={slots[i]?.left ?? 50} />
+          ),
+        )}
       </View>
 
       {/* 下半分: 4 ストリートを 4 列で */}
@@ -427,6 +445,8 @@ const s = StyleSheet.create({
     justifyContent: "center",
   },
   seatWinner: { borderColor: c.pos },
+  seatEmpty: { backgroundColor: "transparent", borderStyle: "dashed", height: 28, marginTop: -14 },
+  seatEmptyText: { color: c.muted, fontSize: 10 },
   seatSelf: { backgroundColor: c.selfFill, borderColor: c.selfEdge },
   seatName: { color: c.text, fontSize: 11, fontWeight: "600", maxWidth: SEAT_W - 8 },
   seatResult: { color: c.muted, fontSize: 10, fontWeight: "700", marginTop: 1 },
