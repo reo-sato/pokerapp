@@ -66,6 +66,19 @@ def test_unpack_lays_out_the_entry_page_folder(tmp_path):
     assert not (dest / "pokerapp.log").exists() and not (dest / "config.json").exists()
     assert not (tmp_path / "evil.json").exists() and not (tmp_path / "evil2.json").exists()
     assert json.loads((dest / f"{SID}.ground_truth.store.json").read_text())["hands"][0]["notes"] == "store"
+    # 既定は最初から入れ直す: 店の分は入力の出発点にしない
+    assert not (dest / f"{SID}.ground_truth.json").exists()
+
+
+def test_continue_starts_from_the_store_entries(tmp_path):
+    zips = _write_set(tmp_path / "in")
+    dest = tmp_path / "logs"
+    sessions = home_truth.unpack(zips, dest, keep_store=True)
+    assert sessions[SID]["from_store"]
+    assert json.loads((dest / f"{SID}.ground_truth.json").read_text())["hands"][0]["notes"] == "store"
+    # あとから最初から入れ直すことにしたら、手つかずの店の分は外す
+    home_truth.unpack(zips, dest)
+    assert not (dest / f"{SID}.ground_truth.json").exists()
 
 
 def test_unpack_again_keeps_what_was_entered_at_home(tmp_path):
@@ -104,8 +117,17 @@ def test_pack_truth_without_entries(tmp_path):
 def test_main_serves_and_packs_on_enter(tmp_path, monkeypatch):
     zips = _write_set(tmp_path / "in")
     monkeypatch.setattr("builtins.input", lambda *_: "")
+    seen = {}
+    real = home_truth.make_server
+
+    def spy(*a, **kw):
+        seen["evaluation"] = kw.get("evaluation")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(home_truth, "make_server", spy)
     rc = home_truth.main([*map(str, zips), "--dest", str(tmp_path / "home"), "--out", str(tmp_path / "out"),
-                          "--no-browser"])
+                          "--no-browser", "--continue"])
+    assert seen["evaluation"] is False
     assert rc == 0
     assert (tmp_path / "home" / STAMP / f"{SID}.json").is_file()
     assert (tmp_path / "out" / f"pokertruth_{STAMP}.zip").is_file()

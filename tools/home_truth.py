@@ -3,9 +3,11 @@
 店では真のアクションの入力が間に合わないので、家で発話の音声を聞きながら入れる（オーナー, 2026-10-19）。
 
 1. `pack_logs` の zip（分けた `_1of6.zip` … は全部）を、入力画面が読む形（平らな logs = `<sid>.json`・
-   `audio/<sid>/*.wav`）で `home_logs/<zip の日時>/` に置く。2 回目からは置いてある真のアクションを上書きしない
-   （家で入れた分を守る）。初めて置くときは店で入れた分を `<sid>.ground_truth.store.json` に写して残す。
-2. 入力画面（`tools/ground_truth_ui.py` と同じもの）をこの PC だけで開き、ブラウザで開く。
+   `audio/<sid>/*.wav`）で `home_logs/<zip の日時>/` に置く。店で入れた分は `<sid>.ground_truth.store.json` に
+   写して残すだけで、入力には使わない = 音を聞いて最初から入れ直す（オーナー, 2026-10-19）。`--continue` なら店で
+   入れた分から続ける。2 回目からは家で入れた分を上書きしない。
+2. 入力画面（`tools/ground_truth_ui.py` と同じもの）をこの PC だけで開き、ブラウザで開く。最初から入れ直すときは
+   評価のモード（保存するまで記録を見られない）。
 3. ウィンドウで Enter を押すと、入れた真のアクションだけを `pokertruth_<日時>.zip` にまとめてデスクトップに置く
    （中は pack_logs と同じ並び = `<sid>/<sid>.ground_truth.json`。`eval_store.py <ログの zip…> <この zip>` の順で
    渡すと店で入れた分の代わりに読む）。
@@ -104,8 +106,12 @@ def _target(name: str) -> Optional[tuple[str, str]]:
     return None
 
 
-def unpack(zips: list[Path], dest: Path) -> dict:
-    """zip の組を入力画面の形で `dest` に置く。すでに置いてある真のアクションは上書きしない。"""
+def unpack(zips: list[Path], dest: Path, keep_store: bool = False) -> dict:
+    """zip の組を入力画面の形で `dest` に置く。家で入れた真のアクションは上書きしない。
+
+    店で入れた分は `<sid>.ground_truth.store.json` にだけ置く。`keep_store` なら入力の出発点にもする（まだ家の分が
+    無いとき）。`keep_store` でないときに、前に出発点として置いた店の分が手つかずで残っていれば外す。
+    """
     dest.mkdir(parents=True, exist_ok=True)
     sessions: dict[str, dict] = {}
     for z in zips:
@@ -121,12 +127,18 @@ def unpack(zips: list[Path], dest: Path) -> dict:
                 out = dest / rel
                 if rel.endswith(GT_SUFFIX) and "/" not in rel:
                     s["store_truth"] = True
+                    data = zf.read(info)
                     store_copy = dest / (sid + STORE_GT_SUFFIX)
                     if not store_copy.exists():
-                        store_copy.write_bytes(zf.read(info))
+                        store_copy.write_bytes(data)
+                    if out.exists() and not keep_store and out.read_bytes() == data:
+                        out.unlink()                  # 前に出発点として置いた店の分（家では手つかず）
                     if out.exists():
                         s["kept_truth"] = True
-                        continue
+                    elif keep_store:
+                        out.write_bytes(data)
+                        s["from_store"] = True
+                    continue
                 out.parent.mkdir(parents=True, exist_ok=True)
                 if out.exists() and out.stat().st_size == info.file_size and rel.startswith("audio/"):
                     s["audio"] += 1
@@ -165,11 +177,11 @@ def pack_truth(log_dir: Path, stamp: str, out_dir: Path) -> Optional[Path]:
     return out
 
 
-def _serve(log_dir: Path):
+def _serve(log_dir: Path, evaluation: bool = True):
     last: Optional[OSError] = None
     for port in PORTS:
         try:
-            return make_server(log_dir, "127.0.0.1", port, None, evaluation=False), port
+            return make_server(log_dir, "127.0.0.1", port, None, evaluation=evaluation), port
         except OSError as e:     # ほかのものが使っている
             last = e
     raise SetError(f"入力画面を開けません（ポート {PORTS.start}〜{PORTS.stop - 1} が使えません: {last}）")
@@ -181,6 +193,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--dest", type=Path, default=ROOT / "home_logs", help="置き場所（既定 home_logs/）")
     ap.add_argument("--out", type=Path, default=None, help="入れた分の zip を置く場所（既定 デスクトップ）")
     ap.add_argument("--no-browser", action="store_true", help="ブラウザを開かない")
+    ap.add_argument("--continue", dest="keep_store", action="store_true",
+                    help="店で入れた分から続ける（既定は音を聞いて最初から入れ直す = 評価のモード）")
     args = ap.parse_args(argv)
 
     try:
@@ -191,12 +205,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
     log_dir = args.dest / stamp
     print(f"[家で入力] pokerlogs_{stamp}（zip {len(parts)} 個）を {log_dir} に置いています…")
-    sessions = unpack(parts, log_dir)
+    sessions = unpack(parts, log_dir, keep_store=args.keep_store)
     for sid, s in sorted(sessions.items()):
-        note = "家で入れた分を使います" if s["kept_truth"] else ("店で入れた分から続けます" if s["store_truth"] else "")
+        note = ("家で入れた分から続けます" if s["kept_truth"] else "店で入れた分から続けます" if s.get("from_store")
+                else "最初から入れます（店で入れた分は別のファイルに残してあります）" if s["store_truth"] else "")
         print(f"  セッション {sid[:8]}: 音声 {s['audio']} 件 {note}")
     try:
-        server, port = _serve(log_dir)
+        server, port = _serve(log_dir, evaluation=not args.keep_store)
     except SetError as e:
         print(f"[家で入力] {e}")
         return 1
