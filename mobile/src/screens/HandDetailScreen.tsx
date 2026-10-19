@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Pressable, ScrollView, Share, Text, View } from "react-native";
+import { Pressable, Share, Text, View } from "react-native";
 
 import type { ViewerRepository } from "../api/repository";
 import type { Player, PlayerSessionSummary } from "../api/types";
@@ -64,54 +64,57 @@ export function HandDetailScreen({
     setShareMsg("この環境では共有できませんでした。");
   };
 
+  const own = hand ? findOwnRow(hand, player) : null;
+
   return (
     <View style={styles.screen}>
-      <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
         <BackLink onPress={onBack} label="ハンド一覧" />
         <ReloadLink onPress={reload} />
       </View>
-      <Text style={styles.title}>Hand #{handId}</Text>
+      {/* 1 画面に収めるため、ハンド番号と自分の収支は 1 行に畳む（ADR-0051） */}
+      <View style={{ flexDirection: "row", alignItems: "baseline", marginBottom: 6 }}>
+        <Text style={[styles.title, { marginBottom: 0 }]}>Hand #{handId}</Text>
+        {own ? (
+          <Text style={[styles.subtitle, { marginLeft: 10, marginBottom: 0 }]}>
+            自分: 席{own.seat} 収支 {formatResult(own.result)}
+          </Text>
+        ) : null}
+      </View>
       {loading ? (
         <Loading />
       ) : errorCode || !hand ? (
         <ErrorView code={errorCode} message={errorMessage} onRetry={reload} />
       ) : (
-        <ScrollView>
-          <Text style={styles.subtitle}>
-            {hand.started_at}
-            {(() => {
-              const own = findOwnRow(hand, player);
-              if (!own) return "";
-              return ` ・ 自分: 席${own.seat} 収支 ${formatResult(own.result)}`;
-            })()}
-          </Text>
-
+        <>
           {/* 音声テスト用の表示（URL に ?test を付けた端末だけ, ADR-0060） */}
           {TEST_MODE ? (
-            <Text style={[styles.cardMeta, { color: "#ffb74d", marginBottom: 8 }]}>
+            <Text style={[styles.cardMeta, { color: "#ffb74d", marginBottom: 6 }]}>
               テスト表示: 各アクションの下に聞き取った文と補正の理由を出しています
             </Text>
           ) : null}
 
-          {/* ストリート単位リプレイ（共有コンポーネント, ADR-0044。訂正適用済みビュー） */}
-          <HandReplay hand={hand} showHeard={TEST_MODE} />
+          {/* テーブル + 4 ストリート列（共有コンポーネント, ADR-0051。訂正適用済みビュー）。お客さんの画面には
+              要確認・訂正済の印を出さない（オーナー 2026-10-19） */}
+          <HandReplay hand={hand} selfSeat={own?.seat} showHeard={TEST_MODE} reviewMarks={false} />
 
-          <Pressable style={styles.card} onPress={() => void onShare()}>
-            <Text style={[styles.cardTitle, { color: "#5ab0f0" }]}>📤 このハンドを共有 / コピー</Text>
-            <Text style={styles.cardMeta}>
-              テキストで書き出します（SNS・メモへの貼り付け用）
-              {shareMsg ? ` ・ ${shareMsg}` : ""}
-            </Text>
-          </Pressable>
-
-          {onCorrect ? (
-            <Pressable style={styles.card} onPress={onCorrect}>
-              <Text style={[styles.cardTitle, { color: "#5ab0f0" }]}>✎ このハンドを訂正（スタッフ）</Text>
-              <Text style={styles.cardMeta}>誤認識のアクション種別・金額を訂正します</Text>
+          {/* フッタ: 画面を食わないよう横並びの小ボタンにする */}
+          <View style={{ flexDirection: "row", alignItems: "center", paddingVertical: 10 }}>
+            <Pressable onPress={() => void onShare()}>
+              <Text style={[styles.back, { marginRight: 18, marginBottom: 0 }]}>📤 共有 / コピー</Text>
             </Pressable>
-          ) : null}
-          <View style={{ height: 40 }} />
-        </ScrollView>
+            {onCorrect ? (
+              <Pressable onPress={onCorrect}>
+                <Text style={[styles.back, { marginBottom: 0 }]}>✎ 訂正（スタッフ）</Text>
+              </Pressable>
+            ) : null}
+            {shareMsg ? (
+              <Text style={[styles.cardMeta, { marginLeft: "auto" }]} numberOfLines={1}>
+                {shareMsg}
+              </Text>
+            ) : null}
+          </View>
+        </>
       )}
     </View>
   );

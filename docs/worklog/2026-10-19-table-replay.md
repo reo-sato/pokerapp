@@ -1,0 +1,29 @@
+# 2026-10-19 ハンドの画面をテーブル表示に・お客さんの画面に要確認の印を出さない
+
+## Goal
+
+オーナー: 以前 GGPoker の UI を参考に作った「テーブル上にハンドが表示される」ハンドログの UI にレイアウトを直す。
+お客さんの画面に要確認などのタグは要らない。
+
+## 経緯
+
+テーブル表示は 2026-09-11 にブランチ `claude/project-plan-review-byn3lm` で作った（コミット efbaa6b・9b3dd50・1868b5f、
+ADR の草稿は同ブランチの `docs/adr/0051-hand-replay-single-screen-table-view.md`。番号 0051 はその後ファームウェアの ADR に
+使われたので、文書を追いつかせるときに番号を振り直す）。開発版には入っていなかった。
+
+## 変更
+
+| ファイル | 内容 |
+|---|---|
+| `shared/hand_replay/HandReplay.tsx` | ブランチの最終版（テーブル図 + 4 列）を土台に、その後の変更を足した: コールはトータルの額（`shownAmount`）・「勝者なし」（`noWinner`）・`showHeard`（聞き取った文と補正の理由を各行の下に）。新しい `reviewMarks`（既定 true）= 要確認・訂正済のストライプと `!` / `✎` |
+| `shared/hand_replay/handReplayModel.ts` / `.test.ts` | 3-way マージ（席の配置 `seatRingLayout`・短縮表記・アクションの色・プリフロップで降りた席 + 今の版の額・聞き取り）。テストはブランチの版に今の版の 6 つを足した |
+| `mobile/src/screens/HandDetailScreen.tsx` | 1 画面（ScrollView なし）。`selfSeat` = 自分の席、`reviewMarks={false}`、`?test` の表示 |
+| `staff/src/screens/HandTab.tsx` / `staff/e2e/staff.spec.ts` | ブランチのとおり（固定の高さ・E2E の文言） |
+| `api/static/player/`・`cloud/static/player/`・`api/static/staff/` | 作り直し（`scripts/build_player_web.py`・`--target cloud`・`scripts/build_staff_web.py`） |
+
+## 確かめ
+
+- mobile: tsc・`npm test` 51 pass。staff: tsc・`npm test` 57 pass・E2E 8 passed（Chromium は `/opt/pw-browsers/chromium-1194`）。
+- pytest 速い組 3307 passed（画面のビルドと共有の部品の写しのずれのテストを含む）・ruff。
+- 見本のセッション（開発データ 845da8e6 + 真のアクション）で iPhone の幅のスクリーンショット: ハンド 4・9 がテーブル表示で
+  1 画面に収まる、自分の席が琥珀色、要確認の印なし。

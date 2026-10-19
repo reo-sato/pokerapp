@@ -4,23 +4,32 @@
  * **正本は `shared/hand_replay/`** — 編集後は `python scripts/sync_shared_ui.py` で再配布。
  *
  * 検査対象: ストリート分割 / board スライス (3/4/5) / ポット境界 (potStart = 前 street の
- * 最終 pot_after) / all-in ランアウト (アクション無し street の表示) / カードパース。
+ * 最終 pot_after) / all-in ランアウト (アクション無し street の表示) / カードパース /
+ * 席リング配置と短縮金額表記 (テーブル UI, ADR-0051)。
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  actionColor,
   actionLabel,
+  ALL_STREETS,
   buildReplayModel,
+  compactActionLabel,
   formatChips,
+  formatChipsCompact,
   formatSigned,
+  formatSignedCompact,
   heardDetails,
   parseCard,
+  preflopFoldedSeats,
   reasonLabels,
   recordedAmount,
+  seatRingLayout,
   shownAmount,
   streetFlow,
   streetTotals,
+  visibleColumnActions,
   type ReplayHand,
 } from "./handReplayModel";
 
@@ -140,7 +149,111 @@ test("labels and formatters", () => {
   assert.equal(formatSigned(0), "±0");
 });
 
-// ――― 音声テスト用の表示 (ADR-0060) ―――
+test("seatRingLayout puts the first seat at bottom center and walks clockwise", () => {
+  const slots = seatRingLayout(4);
+  assert.equal(slots.length, 4);
+  // 先頭は下中央（見ている人の手前）。
+  assert.deepEqual(slots[0], { top: 88, left: 50 });
+  // 下 → 左 → 上 → 右 の順（画面座標なので top が小さいほど上）。
+  assert.deepEqual(slots[1], { top: 50, left: 15 });
+  assert.deepEqual(slots[2], { top: 12, left: 50 });
+  assert.deepEqual(slots[3], { top: 50, left: 85 });
+});
+
+test("seatRingLayout keeps every seat inside the container for 2..9 seats", () => {
+  for (let n = 2; n <= 9; n += 1) {
+    const slots = seatRingLayout(n);
+    assert.equal(slots.length, n);
+    for (const slot of slots) {
+      // 中心が 12%..88% に収まっていれば、チップ半分をずらしても外へ出ない。
+      assert.ok(slot.top >= 12 && slot.top <= 88, `top out of range: ${slot.top} (n=${n})`);
+      assert.ok(slot.left >= 15 && slot.left <= 85, `left out of range: ${slot.left} (n=${n})`);
+    }
+  }
+  // 不正な席数は空（描画側で落ちない）。
+  assert.deepEqual(seatRingLayout(0), []);
+  assert.deepEqual(seatRingLayout(-1), []);
+});
+
+test("ALL_STREETS is the fixed four-column order", () => {
+  assert.deepEqual([...ALL_STREETS], ["preflop", "flop", "turn", "river"]);
+});
+
+test("compact formatters shorten amounts for narrow columns", () => {
+  assert.equal(formatChipsCompact(600), "600");
+  assert.equal(formatChipsCompact(1000), "1k");
+  assert.equal(formatChipsCompact(1500), "1.5k");
+  assert.equal(formatChipsCompact(12200), "12.2k");
+  assert.equal(formatChipsCompact(120000), "120k");
+  assert.equal(formatSignedCompact(8200), "+8.2k");
+  assert.equal(formatSignedCompact(-600), "-600");
+  assert.equal(formatSignedCompact(0), "±0");
+});
+
+test("compactActionLabel uses the narrow poker vernacular for the 4 columns", () => {
+  assert.equal(compactActionLabel("raise"), "Raise");
+  assert.equal(compactActionLabel("allin"), "All-in");
+  assert.equal(compactActionLabel("all_in"), "All-in");
+  assert.equal(compactActionLabel("limp?"), "limp?"); // 未知は raw のまま
+  // 日本語ラベル（共有テキスト・詳細表示側）は据え置き。
+  assert.equal(actionLabel("allin"), "オールイン");
+});
+
+test("preflopFoldedSeats lists only seats that folded preflop", () => {
+  const actions = [
+    { street: "preflop", seat: 3, action: "fold" },
+    { street: "preflop", seat: 4, action: "raise", amount: 600 },
+    { street: "preflop", seat: 1, action: "call", amount: 600 },
+    { street: "flop", seat: 4, action: "fold" }, // ポストフロップ fold は対象外
+  ];
+  assert.deepEqual(preflopFoldedSeats(actions), [3]);
+  assert.deepEqual(preflopFoldedSeats([]), []);
+});
+
+test("visibleColumnActions hides folds in the preflop column only", () => {
+  const preflop = [
+    { street: "preflop", seat: 3, action: "fold" },
+    { street: "preflop", seat: 4, action: "raise", amount: 600 },
+  ];
+  assert.deepEqual(
+    visibleColumnActions("preflop", preflop).map((a) => a.seat),
+    [4],
+  );
+  // 他ストリートは素通し（フロップ以降の fold は残す）。
+  const flop = [
+    { street: "flop", seat: 4, action: "fold" },
+    { street: "flop", seat: 1, action: "call", amount: 1000 },
+  ];
+  assert.deepEqual(visibleColumnActions("flop", flop), flop);
+});
+
+test("hiding preflop folds does not change the pot the column shows", () => {
+  // 描画専用フィルタなので、fold を隠しても potEnd は全アクション由来のまま。
+  const hand = makeHand({
+    actions: [
+      { street: "preflop", seat: 3, action: "fold", amount: 0, pot_after: 300 },
+      { street: "preflop", seat: 1, action: "raise", amount: 600, pot_after: 900 },
+      { street: "preflop", seat: 2, action: "call", amount: 600, pot_after: 1500 },
+    ],
+  });
+  const preflop = buildReplayModel(hand).streets.find((st) => st.street === "preflop");
+  assert.ok(preflop);
+  assert.equal(preflop.potEnd, 1500);
+  assert.deepEqual(
+    visibleColumnActions("preflop", preflop.actions).map((a) => a.action),
+    ["raise", "call"],
+  );
+});
+
+test("actionColor maps each action to its own hue and falls back for unknown", () => {
+  const colors = ["fold", "check", "call", "bet", "raise", "allin"].map(actionColor);
+  // 6 種別がすべて異なる色（色で種別が読み分けられる）。
+  assert.equal(new Set(colors).size, 6);
+  assert.equal(actionColor("all_in"), actionColor("allin"));
+  assert.equal(actionColor("limp?"), "#f2f5f7"); // 未知は通常テキスト色
+});
+
+// ――― 表示の額・音声テスト用の表示（ADR-0060 / 2026-09-29〜）―――
 
 test("reasonLabels: known codes, patterns, and unknown codes", () => {
   assert.deepEqual(reasonLabels(undefined), []);
