@@ -811,9 +811,11 @@ def run_cli(script: str | None = None) -> None:
     if audio_thread is not None:
         audio_thread.start()
     integration_thread.start()
-    if test_script is not None:
+    feed_stacks = bool((cfg.get("ground_truth") or {}).get("feed_stacks", False))
+    if test_script is not None or feed_stacks:
         # 画面の操作（台本のハンドを始める）は制御で受け取る。先に言われた発話の聞き取りを待ってから積む
-        # （前のハンドの最後のアクションを次のハンドに入れない = CLI の入力と同じ）
+        # （前のハンドの最後のアクションを次のハンドに入れない = CLI の入力と同じ）。真のアクションの収支で持ち点を
+        # 直す（`ground_truth.feed_stacks`, 2026-10-19）のも同じ制御で受け取る
         from core.control_queue import ControlCommandLog
         from integration.control_consumer import ControlConsumerThread
 

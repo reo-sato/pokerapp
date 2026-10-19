@@ -38,7 +38,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Optional
 
 from audio.recognizer import _extract_all_seat_nos, _extract_seat_no, apply_corrections
-from core.control_queue import parse_script_hand
+from core.control_queue import parse_script_hand, parse_truth_stacks
 from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
@@ -230,7 +230,7 @@ _CORRECTION_UNIT_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "
 _VOICE_SOURCES = frozenset({"spoken_seat", "spoken_position", "engine_prior"})
 # 解釈を決める前に届いても、組み直しを待たなくてよい（ハンドを終わらせない）制御
 _CONTROL_KEEPS_CORRECTION = frozenset({"rename_seat", "set_blinds", "sit_out", "sit_in", "rebuy", "set_button",
-                                       "correct_board", "correct_seat"})
+                                       "correct_board", "correct_seat", "truth_stacks"})
 # 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
 # 言葉がこの数だけ聞こえたら、そのオールインを聞き違いとみて外す（店舗 2026-09-27: 自信 0.27 の「オールイン」の
 # あとのチェック 5 回と「2700」がすべて保留になり、全員オールインの 59700 のポットになった）
@@ -520,6 +520,11 @@ class IntegrationThread(threading.Thread):
         self._provisional_stacks: dict[int, tuple[int, int]] = {}
         # ハンドのあとに直す持ち点（席 → 差）。戻した額の代わりの買い足しがハンドの途中に届いたとき
         self._stack_corrections: dict[int, int] = {}
+        # 真のアクションで持ち点を直す（`truth_stacks`, 2026-10-19）: ハンド → 席 → 収支（真のアクション / 記録）と、
+        # 足した差（同じハンドを保存し直したら、前に足した分との差だけを足す）
+        self._truth_results: dict[int, dict[int, int]] = {}
+        self._recorded_results: dict[int, dict[int, int]] = {}
+        self._truth_applied: dict[int, dict[int, int]] = {}
         # new_hand 済みで勝者未確定のハンドが進行中か（G1 の状態妥当性チェック /
         # ハンド外イベントの unresolved 記録に使う）。
         self._hand_open: bool = False
@@ -1159,6 +1164,9 @@ class IntegrationThread(threading.Thread):
 
         if action == "script_hand":
             self._handle_script_hand(event)
+            return
+        if action == "truth_stacks":
+            self._handle_truth_stacks(event)
             return
 
         if action == "new_hand":
@@ -4497,6 +4505,46 @@ class IntegrationThread(threading.Thread):
             self._notice(f"台本のハンドのボタン・持ち点を使えません（{e}）")
         self._dispatch_audio_event(replace(event, action="new_hand"))
 
+    def _handle_truth_stacks(self, event: AudioEvent) -> None:
+        """真のアクションの収支でロガーの持ち点を直す（真のアクション入力の画面が保存したとき, 2026-10-19 オーナー:
+        次のアクションの推定に使う持ち点を真のアクションに合わせる）。
+
+        直す量は席ごとに「真のアクションの収支 − 記録の収支」（同じハンドの同じ持ち点から出した差）。前のハンドの
+        持ち点が違っていても・ハンドの間に買い足しがあっても、足し算で真のアクションに合う。そのハンドがまだ
+        終わっていなければ、終わったときに直す。
+        """
+        hand_id, results = parse_truth_stacks(event.raw_text)
+        if hand_id is None:
+            logger.warning("truth_stacks without hand id: %r", event.raw_text)
+            return
+        self._truth_results[hand_id] = results
+        self._apply_truth_stacks(hand_id)
+
+    def _apply_truth_stacks(self, hand_id: int) -> None:
+        truth = self._truth_results.get(hand_id)
+        recorded = self._recorded_results.get(hand_id)
+        if truth is None or recorded is None:
+            return                                # ハンドが終わったときに直す
+        target = {s: truth.get(s, 0) - recorded.get(s, 0) for s in set(truth) | set(recorded)}
+        before = self._truth_applied.get(hand_id, {})
+        change = {s: d - before.get(s, 0) for s, d in target.items() if d - before.get(s, 0)}
+        self._truth_applied[hand_id] = {s: d for s, d in target.items() if d}
+        if not change:
+            return
+        gs = self._game_state
+        in_play = self._hand_open and gs.is_hand_active()
+        for seat, delta in sorted(change.items()):
+            if in_play and seat in self._seats_in_hand():
+                self._stack_corrections[seat] = self._stack_corrections.get(seat, 0) + delta
+                continue
+            try:
+                gs.update_stack(seat, max(0, gs.get_stack(seat) + delta))
+            except (ValueError, KeyError):
+                logger.warning("真のアクションで持ち点を直せません（席 %s）", seat)
+        parts = " / ".join(f"席{s} {d:+d}" for s, d in sorted(change.items()))
+        later = "（いまのハンドのあとに）" if in_play and any(s in self._seats_in_hand() for s in change) else ""
+        self._notice(f"真のアクション（ハンド {hand_id}）でスタックを直しました{later}: {parts}")
+
     def _handle_set_button(self, event: AudioEvent) -> None:
         """ボタンを手で指定する（`button <席>`, 仕様 FR-05g）。
 
@@ -5753,6 +5801,8 @@ class IntegrationThread(threading.Thread):
         if self._on_hand:
             self._on_hand(summary)
         self._apply_stack_corrections()       # そのハンドの結果には入れない
+        self._recorded_results[summary.hand_id] = {p["seat"]: p["result"] for p in players_info}
+        self._apply_truth_stacks(summary.hand_id)   # 先に届いた真のアクションの収支（ハンドが閉じる前に保存した）
         logger.info("Hand %d finalized. Winner: seat %s", gs.hand_id, winner_seat)
         self._notice(self._describe_result(summary, awards))
         cards = self._describe_cards(summary)

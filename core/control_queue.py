@@ -31,9 +31,10 @@ logger = logging.getLogger(__name__)
 # set_blinds = ブラインドの変更（トーナメントのレベル上昇）/ sit_out・sit_in = 席の休み・参加（次のハンドから, 2026-09-26）。
 # set_button = 次のハンドのボタンを手で直す（仕様 FR-05g）。
 # script_hand = 台本のハンドを台本のボタンと持ち点で始める（`tools/test_script.py` の画面, 2026-09-30）。
+# truth_stacks = 真のアクションの収支でロガーの持ち点を直す（真のアクション入力の画面が保存したとき, 2026-10-19）。
 VALID_CONTROL_TYPES = (
     "new_hand", "winner", "rebuy", "correct_board", "correct_seat", "set_blinds", "sit_out", "sit_in",
-    "set_button", "script_hand",
+    "set_button", "script_hand", "truth_stacks",
 )
 
 
@@ -52,6 +53,23 @@ def parse_script_hand(text: str) -> tuple[Optional[int], dict[int, int]]:
         if seat.isdigit() and stack.isdigit():
             stacks[int(seat)] = int(stack)
     return (int(button_m.group(1)) if button_m else None), stacks
+
+
+def truth_stacks_text(hand_id: int, results: dict[int, int]) -> str:
+    """真のアクションの収支（`truth_stacks`）を 1 行にする（AudioEvent の raw_text = 記録と再生に残る）。"""
+    return f"hand={int(hand_id)} results=" + ",".join(f"{int(s)}:{int(v)}" for s, v in sorted(results.items()))
+
+
+def parse_truth_stacks(text: str) -> tuple[Optional[int], dict[int, int]]:
+    """`truth_stacks_text` の逆（読めない部分は無視: ハンド None / 収支 空）。"""
+    hand_m = re.search(r"hand=(\d+)", text or "")
+    results: dict[int, int] = {}
+    results_m = re.search(r"results=([-\d:,]+)", text or "")
+    for part in (results_m.group(1).split(",") if results_m else []):
+        seat, _, value = part.partition(":")
+        if seat.isdigit() and re.fullmatch(r"-?\d+", value):
+            results[int(seat)] = int(value)
+    return (int(hand_m.group(1)) if hand_m else None), results
 
 
 def _now_iso() -> str:
@@ -240,5 +258,14 @@ def command_to_audio_event(command: ControlCommand, clock: Callable[[], float]):
             return None
         return AudioEvent(action="script_hand", amount=0, timestamp=clock(),
                           raw_text=script_hand_text(button, {int(k): v for k, v in stacks.items()}))
+    if t == "truth_stacks":
+        hand_id, results = args.get("hand_id"), args.get("results")
+        if (not isinstance(hand_id, int) or isinstance(hand_id, bool) or not isinstance(results, dict)
+                or not all(str(k).isdigit() and isinstance(v, int) and not isinstance(v, bool)
+                           for k, v in results.items())):
+            logger.warning("control truth_stacks with invalid args: %r", args)
+            return None
+        return AudioEvent(action="truth_stacks", amount=0, timestamp=clock(),
+                          raw_text=truth_stacks_text(hand_id, {int(k): v for k, v in results.items()}))
     logger.warning("unknown control type: %r", t)
     return None

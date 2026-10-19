@@ -126,6 +126,8 @@
     "_bind_host_comment": "player スマホから LAN 参照する場合は PC の LAN IP（または 0.0.0.0）に変更する。無認証のため信頼できるネットワークでのみ（ISSUE-0019 プライバシーモデル）。",
     "bind_port": 8788,
     "hole_cards": "all",
+    "show_truth": false,
+    "_show_truth_comment": "2026-10-19: true なら、お客さんの画面のハンドは真のアクション（logs/<sid>.ground_truth.json、真のアクション入力の画面で保存したもの）だけ。保存していないハンドは見せない。スタッフの画面には効かない。viewer（店舗サーバー / start_viewer）の起動のときに読む。",
     "_hole_cards_comment": "ADR-0067 D6: お客さんの画面に出すホールカードの範囲（店の設定）。all = 記録した手札を全員分 / own_and_shown = 自分の手札 + ショーダウンで見せた手札だけ。セッションごとにスタッフ画面で上書きできる。店内（名前選び）では誰でも誰を選べるので目安。店外（クラウド, 閲覧リンク）では本人が決まるので守られる。スタッフの画面には効かない。",
     "_comment": "M1/M5 (ADR-0017/0018): player 向け read-only viewer API。'python main.py --viewer-api' で単独起動（注文 POST は 503）。enabled=true で 'python main.py --ledger' が API を in-process 起動し注文リクエスト受付（write）を有効にする（単一プロセス所有）。要 [api] extra。",
     "staff_token": "",
@@ -170,6 +172,8 @@
   },
   "ground_truth": {
     "evaluation": false,
+    "feed_stacks": false,
+    "_feed_stacks_comment": "2026-10-19: true なら、真のアクション入力の画面で保存したハンドの収支をロガーに送り、ロガーは記録の収支との差を持ち点に足す（次のアクションの推定に使う持ち点を真のアクションに合わせる。制御 truth_stacks = events.jsonl に残る）。ロガー（--cli）は起動のときに読む。",
     "_evaluation_comment": "評価のセッション（docs/dogfood/estimator-v1-preregistration.md）では true。真のアクションの入力画面で、記録を見ずに保存するまで「記録を見る」「記録どおり」が使えない（オーナー決定 2026-10-02）。練習のセッションは false（押せるが、押さないことを勧める）。画面を開き直すだけで効く。"
   }
 }

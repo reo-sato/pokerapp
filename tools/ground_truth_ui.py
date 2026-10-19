@@ -44,7 +44,6 @@ from urllib.parse import unquote, urlsplit
 # リポジトリ直下を import path に入れる（他の tools/ と同じ規約）。
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.game_state import PlayerState  # noqa: E402
 from core.ground_truth import (  # noqa: E402
     SOURCE_PASSTHROUGH,
     GroundTruthError,
@@ -56,17 +55,15 @@ from core.hand_correction import apply_hand_corrections  # noqa: E402
 from core.hand_estimate import load_estimates, overlay_log  # noqa: E402
 from core.hand_correction_repository import HandCorrectionRepository  # noqa: E402
 from core.hand_log import hand_street_flow  # noqa: E402
-from core.poker_engine import PokerkitGameState  # noqa: E402
+from core.truth_hand import (  # noqa: E402
+    GT_ACTIONS, active_seats, apply_rows, players_for_replay, showdown_winner, start_state,
+)
 from tools.measure_capture_accuracy import HandAccuracy, measure_hand  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-GT_ACTIONS = ("fold", "check", "call", "bet", "raise", "allin")
 _CARD_RE = re.compile(r"^[2-9TJQKA][shdc]$")
 _SESSION_RE = re.compile(r"^[A-Za-z0-9_\-]{1,120}$")
-# スタックが記録に無い / 0 の席の再現用（pokerkit はスタック 0 を受け付けない。GT の目的は手番と
-# ストリートの補完なので、十分大きければよい）
-_FALLBACK_STACK = 10_000_000
 _MAX_BODY = 1_000_000
 # ブラインドで入れるハンドの割合（N ハンドに 1 つ。0 = しない）。テスト方針 週 1（2026-09-30）: 全部のハンドを先に
 # 記録を見ずに入れ、保存したあとで記録と照らし合わせて直す（ADR-0056 追記 1 の 2 割から変更。記憶で入れると誤るので、
@@ -381,16 +378,44 @@ def hand_timeline(log_dir: Path, session_id: str, hand: dict, next_started_at: O
     return items
 
 
-def evaluation_mode(config_path: Optional[Path] = None) -> bool:
-    """config.json の `ground_truth.evaluation` が true か（評価のセッション）。読めなければ false（練習）。
-    リクエストごとに読むので、`tools/set_config.py ground_truth.evaluation true` は画面を開き直すだけで効く。"""
+def _ground_truth_flag(name: str, config_path: Optional[Path] = None) -> bool:
     path = config_path or _CONFIG_PATH
     try:
         cfg = json.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else {}
     except (OSError, ValueError):
         return False
     section = cfg.get("ground_truth") if isinstance(cfg, dict) else None
-    return isinstance(section, dict) and section.get("evaluation") is True
+    return isinstance(section, dict) and section.get(name) is True
+
+
+def evaluation_mode(config_path: Optional[Path] = None) -> bool:
+    """config.json の `ground_truth.evaluation` が true か（評価のセッション）。読めなければ false（練習）。
+    リクエストごとに読むので、`tools/set_config.py ground_truth.evaluation true` は画面を開き直すだけで効く。"""
+    return _ground_truth_flag("evaluation", config_path)
+
+
+def feed_stacks_mode(config_path: Optional[Path] = None) -> bool:
+    """config.json の `ground_truth.feed_stacks` が true か（保存した真のアクションの収支でロガーの持ち点を直す,
+    2026-10-19）。リクエストごとに読む。ロガーは起動のときに読む（制御を受け取るかどうか）。"""
+    return _ground_truth_flag("feed_stacks", config_path)
+
+
+def send_truth_stacks(log_dir: Path, session_id: str, hand_id: int, gt_hand: dict, captured: dict) -> Optional[dict]:
+    """保存した真のアクションの収支をロガーに送る（制御 `truth_stacks` = `logs/<sid>.control.jsonl`）。
+
+    ロガーはそのハンドの記録の収支との差を持ち点に足す（ハンドがまだ終わっていなければ終わったときに）。真のアクションが
+    終わっていない（途中まで・勝者が決まらない）ときは送らない。送った収支を返す。
+    """
+    from core.control_queue import ControlCommandLog
+    from core.truth_hand import materialize_truth
+
+    truth = materialize_truth(gt_hand, captured)
+    if truth is None:
+        return None
+    results = {str(p["seat"]): int(p["result"]) for p in truth["players"]}
+    ControlCommandLog(log_dir / f"{session_id}.control.jsonl").append(
+        "truth_stacks", {"hand_id": int(hand_id), "results": results})
+    return results
 
 
 def is_blind(session_id: str, hand_id: int, every: int = BLIND_EVERY) -> bool:
@@ -457,32 +482,6 @@ def _add_street_totals(captured: dict) -> None:
 # ───────────────────────── pokerkit で手番・ストリート・額を補う ─────────────────────────
 
 
-def _players_for_replay(captured: dict) -> list[PlayerState]:
-    players: list[PlayerState] = []
-    for p in captured.get("players") or []:
-        if not isinstance(p, dict) or not isinstance(p.get("seat"), int):
-            continue
-        stack = p.get("stack_start")
-        stack = int(stack) if isinstance(stack, (int, float)) and stack > 0 else _FALLBACK_STACK
-        players.append(PlayerState(seat=p["seat"], name=str(p.get("name") or f"席{p['seat']}"), stack=stack))
-    return sorted(players, key=lambda p: p.seat)
-
-
-def _showdown_muck_error(active: list[int], seat: int, act: str) -> Optional[str]:
-    """ベッティングが終わったあとの行を入れられない理由（入れられるなら None）。
-
-    入れられるのは、ショーダウンに残っている人が手札を見せずに降りた（マック）フォールドだけ（ADR-0062。
-    ライブの記録も street=showdown の fold として残す）。最後の 1 人は降りられない（その人の勝ち）。
-    """
-    if act != "fold":
-        return "ベッティングは終わっています（この行は入りません。ショーダウンで見せずに降りた人はフォールド）"
-    if len(active) < 2:
-        return "ほかの人はもう降りています（この行は入りません）"
-    if seat not in active:
-        return f"席{seat} はショーダウンに残っていません（残っているのは席 {'・'.join(map(str, active))}）"
-    return None
-
-
 def replay_legal(
     captured: dict, actions: list[dict], *, board: Optional[list] = None, holes: Optional[dict] = None,
     button: Optional[int] = None,
@@ -497,106 +496,21 @@ def replay_legal(
     ベッティングが終わったあとのフォールドは、ショーダウンで手札を見せずに降りた（マック）として
     street=showdown で入る（ライブの記録と同じ形, ADR-0062）。
     `button` はこのハンドのボタンの席（無ければ記録のボタン。ディーラーがボタンを動かし忘れたハンドは、
-    実際のボタンを選ぶと手番の順がそれに合う, 2026-09-29）。
+    実際のボタンを選ぶと手番の順がそれに合う, 2026-09-29）。流し方は `core/truth_hand.py`（お客さんの画面・
+    ロガーのスタックの直しと共通）。
     """
-    players = _players_for_replay(captured)
-    if len(players) < 2:
+    if len(players_for_replay(captured)) < 2:
         return {"actions": [], "next": None, "error": {"index": -1, "message": "記録に席が 2 つ未満です"}}
-    blinds = captured.get("blinds") if isinstance(captured.get("blinds"), dict) else {}
     try:
-        sb = max(1, int(blinds.get("sb") or 1))
-        bb = max(sb, int(blinds.get("bb") or 2))
-    except (TypeError, ValueError):
-        sb, bb = 1, 2
-    try:
-        gs = PokerkitGameState(players, sb, bb)
-        if button is None:
-            button = captured.get("button_seat")
-        if isinstance(button, int) and any(p.seat == button for p in players):
-            gs.set_button(button)
-        gs.new_hand()
+        gs = start_state(captured, button)
     except (ImportError, ValueError, RuntimeError) as e:
         return {"actions": [], "next": None,
                 "error": {"index": -1, "message": f"pokerkit で再現できません: {e}"}}
 
-    out: list[dict] = []
-    error: Optional[dict] = None
-    mucked: list[int] = []                   # ショーダウンで手札を見せずに降りた席
-
-    def showdown_seats() -> list[int]:
-        try:
-            return [s for s in gs.get_active_seats() if s not in mucked]
-        except Exception:  # noqa: BLE001
-            return []
-
-    for i, raw in enumerate(actions):
-        if not isinstance(raw, dict):
-            error = {"index": i, "message": "行の形が不正です"}
-            break
-        act = str(raw.get("action") or "").lower()
-        try:
-            seat = int(raw.get("seat"))
-        except (TypeError, ValueError):
-            error = {"index": i, "message": "席が要ります"}
-            break
-        if act not in GT_ACTIONS:
-            error = {"index": i, "message": f"不明なアクション: {act!r}"}
-            break
-        ctx = gs.legal_context()
-        if ctx.actor_seat is None:
-            reason = _showdown_muck_error(showdown_seats(), seat, act)
-            if reason is not None:
-                error = {"index": i, "message": reason}
-                break
-            mucked.append(seat)
-            out.append({"seat": seat, "action": "fold", "amount": 0, "street": "showdown"})
-            continue
-        if seat != ctx.actor_seat:
-            error = {"index": i, "message": f"手番は席{ctx.actor_seat} です（席{seat} の番ではありません）"}
-            break
-        street = gs.street
-        amount = 0
-        total = 0
-        try:
-            if act == "fold":
-                if "fold" in ctx.legal_actions:
-                    gs.apply_action(seat, "fold")
-                else:
-                    gs.force_fold(seat)              # チェックできるときに降りた（実際にある）
-            elif act in ("check", "call"):
-                act = "call" if ctx.amount_to_call > 0 else "check"
-                amount = ctx.amount_to_call
-                total = ctx.committed + ctx.amount_to_call if act == "call" else 0
-                gs.apply_action(seat, act)
-            elif act == "allin":
-                amount = ctx.max_raise if ctx.max_raise else ctx.amount_to_call
-                total = ctx.max_raise if ctx.max_raise else ctx.committed + ctx.amount_to_call
-                gs.apply_action(seat, "allin")
-            else:
-                try:
-                    amount = int(raw.get("amount") or 0)
-                except (TypeError, ValueError):
-                    amount = 0
-                if "raise" in ctx.legal_actions:
-                    act = "raise"
-                elif "bet" in ctx.legal_actions:
-                    act = "bet"
-                else:
-                    raise ValueError("ここではベット / レイズできません")
-                if amount <= 0:
-                    raise ValueError(f"額（トータル）を入れてください（最小 {ctx.min_raise} / 最大 {ctx.max_raise}）")
-                try:
-                    gs.apply_action(seat, act, amount)
-                except ValueError:
-                    raise ValueError(f"額 {amount} は使えません（最小 {ctx.min_raise} / 最大 {ctx.max_raise}）") from None
-                total = amount
-        except ValueError as e:
-            error = {"index": i, "message": str(e)}
-            break
-        out.append({"seat": seat, "action": act, "amount": amount, "total": total, "street": street})
-
+    rows, mucked, error = apply_rows(gs, actions)
+    out = [{k: v for k, v in r.items() if k not in ("pot_after", "stack_after")} for r in rows]
     ctx = gs.legal_context()
-    active = showdown_seats()
+    active = active_seats(gs, mucked)
     nxt = {
         "street": gs.street,
         "actor_seat": ctx.actor_seat,
@@ -613,37 +527,14 @@ def replay_legal(
         "button_seat": gs.button_seat,
     }
     if ctx.actor_seat is None and len(active) >= 2:
-        nxt["showdown_winner"] = _showdown_winner(captured, gs, active, board, holes)
+        nxt["showdown_winner"] = showdown_winner(captured, gs, active, board, holes)
     if ctx.actor_seat is None and mucked and len(active) == 1:
         # 見せずに降りた人のほうが手札が強い = 降りた席の入れ間違いのことが多い（店舗 a6ee12e4 ハンド 1: トリップスの
         # 勝者を「フォールド」にしていた）。ショーダウンの行は手番の順に縛られないので画面では止まらない
-        strongest = _showdown_winner(captured, gs, active + mucked, board, holes)
+        strongest = showdown_winner(captured, gs, active + mucked, board, holes)
         if strongest is not None and strongest in mucked:
             nxt["mucked_stronger"] = strongest
     return {"actions": out, "next": nxt, "error": error}
-
-
-def _showdown_winner(
-    captured: dict, gs: Any, active: list[int], board: Optional[list], holes: Optional[dict],
-) -> Optional[int]:
-    """ショーダウンの勝者を入力したボードと手札（無ければ記録の札）で判定する（オーナー 2026-09-29:
-    勝った席が未定になってしまう。実際には確定している）。読めていない札があっても、どの札でも同じ勝者なら決める。"""
-    from core.hand_log import UNKNOWN_CARD
-    from core.showdown import award_with_unknown_cards
-
-    cards = [c for c in (board if board is not None else captured.get("board") or [])
-             if isinstance(c, str) and c and c != UNKNOWN_CARD]
-    recorded = {p.get("seat"): p.get("hole_cards") or [] for p in captured.get("players") or []
-                if isinstance(p, dict)}
-    hands = {s: [c for c in ((holes or {}).get(s) if holes and s in holes else recorded.get(s)) or []
-                 if isinstance(c, str) and c] for s in active}
-    try:
-        pots = gs.current_pots() or [{"amount": gs.pot, "eligible_seats": active}]
-        decided = award_with_unknown_cards(hands, cards, pots, gs.acting_order())
-    except Exception:  # noqa: BLE001 — 判定できなければ未定のまま（人が選ぶ）
-        return None
-    winners = decided[1][0] if decided and decided[1] else []
-    return winners[0] if len(winners) == 1 else None   # 引き分けは 1 席を選べないので人が選ぶ
 
 
 # ───────────────────────── 保存 ─────────────────────────
@@ -750,9 +641,11 @@ def _entry_sec(body: dict) -> Optional[float]:
 def save_ground_truth(
     log_dir: Path, session_id: str, hand_id: int, body: Any,
     gt_repo: GroundTruthRepository, corr_repo: Optional[HandCorrectionRepository] = None,
-    evaluation: bool = False,
+    evaluation: bool = False, feed_stacks: bool = False,
 ) -> tuple[int, dict]:
     """PUT の本体。staff API（ADR-0043）と同じ規則: passthrough は要確認のハンドを拒む。
+
+    `feed_stacks`（`ground_truth.feed_stacks`）なら、保存した真のアクションの収支をロガーに送る（`send_truth_stacks`）。
 
     評価のセッション（`evaluation`）では、最初の保存（進行中のハンドはハンドが終わるまで）は記録を見ずに入れた内容
     （`hand.blind` = true）だけを受け付ける（古い画面・押し間違いでも記録を初期値にした真のアクションが入らない）。
@@ -808,6 +701,11 @@ def save_ground_truth(
     if evaluation:
         hand_body["evaluation"] = True          # 評価のセッションで入れた（記録を見ずに入れた内容は blind_entry）
     entry = gt_repo.upsert(session_id, hand_id, hand_body, annotator=annotator, source=source)
+    if feed_stacks:
+        try:
+            send_truth_stacks(log_dir, session_id, hand_id, entry.hand, captured)
+        except Exception:  # noqa: BLE001 — 送れなくても保存は済んでいる
+            logger.exception("真のアクションの収支をロガーに送れません（ハンド %s）", hand_id)
     if in_progress:
         return 200, {"saved": entry.to_dict(), "accuracy": None, "in_progress": True}
     accuracy = _accuracy_dict(measure_hand(dict(entry.hand, hand_id=hand_id), captured))
@@ -1230,6 +1128,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         status, payload = save_ground_truth(
             srv.log_dir, sid, int(m.group(2)), body, srv.gt_repo, srv.corr_repo, evaluation=srv.evaluation(),
+            feed_stacks=feed_stacks_mode(srv._config_path),   # noqa: SLF001
         )
         self._send_json(status, payload)
 

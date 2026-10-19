@@ -376,6 +376,7 @@ def create_app(
     cloud_status: Callable[[], dict] | None = None,
     cloud_links: Any = None,
     hole_cards_default: str = "all",
+    show_truth: bool = False,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -400,6 +401,9 @@ def create_app(
 
     staff_web_dir（ADR-0064）: スタッフ用 iPad 画面（staff/ の web 版）を `/staff/` で配信する。
     スタッフトークンは画面に埋め込まず、ログイン画面で入力する（`/api/staff/...` の認可は従来どおり）。
+    
+    show_truth（config `viewer_api.show_truth`, 2026-10-19）: お客さんのハンドの読み取りを真のアクション
+    （`logs/<sid>.ground_truth.json`）だけにする。真のアクションを保存していないハンドは見せない。スタッフの読み取りは変えない。
     """
     if ledger_repo is None:
         ledger_repo = LedgerRepository(session_repo=session_repo, player_repo=player_repo)
@@ -487,7 +491,8 @@ def create_app(
     @app.get("/api/players/{player_id}/sessions/{session_id}/hands")
     def player_hands(player_id: str, session_id: str) -> dict:
         player_repo.get(player_id)
-        hands = list_player_hands(player_id, session_id, session_repo, log_dir, correction_repo)
+        hands = list_player_hands(player_id, session_id, session_repo, log_dir, correction_repo,
+                                  truth=show_truth)
         mode = hole_card_mode(session_repo, session_id, hole_cards_default)   # ADR-0067 D6
         return {"hands": [
             hide_hole_cards(h, viewer_seats(session_repo, session_id, h["hand_id"], player_id), mode)
@@ -496,7 +501,7 @@ def create_app(
     @app.get("/api/sessions/{session_id}/hands/{hand_id}")
     def hand(session_id: str, hand_id: int, player_id: str | None = None) -> dict:
         # player_id = 見ている人（店内は名前選びなので「選んだ人」, ADR-0067 D6）。無ければ見せた手札だけ。
-        found = get_hand(session_id, hand_id, log_dir, correction_repo)
+        found = get_hand(session_id, hand_id, log_dir, correction_repo, truth=show_truth)
         mode = hole_card_mode(session_repo, session_id, hole_cards_default)
         return hide_hole_cards(found, viewer_seats(session_repo, session_id, hand_id, player_id), mode)
 
@@ -1360,6 +1365,7 @@ def auth_kwargs_from_config(api_cfg: dict) -> dict:
     hole = api_cfg.get("hole_cards", "all")
     return {
         "hole_cards_default": hole if hole in HOLE_CARD_VISIBILITY else "all",   # ADR-0067 D6
+        "show_truth": bool(api_cfg.get("show_truth", False)),                     # 真のアクションだけ見せる
         "player_auth": api_cfg.get("player_auth", "off"),
         "player_token_secret": api_cfg.get("player_token_secret") or None,
         "player_token_ttl_sec": int(api_cfg.get("player_token_ttl_sec", 43_200)),
