@@ -73,6 +73,7 @@ class PokerEngine(Protocol):
     def sit_in(self, seat: int) -> bool: ...
     def seats_in_hand(self) -> list[int]: ...
     def set_blinds(self, sb: int, bb: int) -> None: ...
+    def set_bb_ante(self, on: bool) -> None: ...
     def set_button(self, seat: int) -> None: ...
 
     @property
@@ -155,6 +156,10 @@ class PokerkitGameState:
         self._hand_seats: list[int] = list(self._seats)
         # 次のハンドから使うブラインド（ハンドの途中に変えたとき）
         self._pending_blinds: Optional[tuple[int, int]] = None
+        # BB アンティ（BB の人が BB と同額のアンティを出す, CLI の `ante on/off`, 2026-10-19）。ハンドの途中に
+        # 切り替えたら次のハンドから（`_pending_bb_ante`）
+        self._bb_ante_on: bool = False
+        self._pending_bb_ante: Optional[bool] = None
         # 次のハンドのボタンを手で指定（仕様 FR-05g）。使ったら (通常の進み方の席, 指定した席) を残す。
         self._forced_button: Optional[int] = None
         self.last_button_override: Optional[tuple[int, int]] = None
@@ -206,6 +211,9 @@ class PokerkitGameState:
         if self._pending_blinds is not None:
             self._sb, self._bb = self._pending_blinds
             self._pending_blinds = None
+        if self._pending_bb_ante is not None:
+            self._bb_ante_on = self._pending_bb_ante
+            self._pending_bb_ante = None
         self._hand_id += 1
         # ボタンを 1 つ進めてから並びを作る（ボタンの次が SB, 末尾が BTN）。前のボタンの席が
         # 抜けていたら（バースト・休み）、その次の席にボタンを置く（仕様 FR-05b）。
@@ -229,7 +237,7 @@ class PokerkitGameState:
         stacks = [self._stacks[s] for s in self._order]
         self._hand_start_stacks = list(stacks)
         self._state = NoLimitTexasHoldem.create_state(
-            self._automations, True, 0, (self._sb, self._bb), self._bb, stacks, len(stacks),
+            self._automations, False, self._raw_antes(), (self._sb, self._bb), self._bb, stacks, len(stacks),
         )
         self._hand_active = True
         self._final_pots = []
@@ -259,7 +267,7 @@ class PokerkitGameState:
         self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
         self._hand_start_stacks = [start[s] for s in self._order]
         self._state = NoLimitTexasHoldem.create_state(
-            self._automations, True, 0, (self._sb, self._bb), self._bb,
+            self._automations, False, self._raw_antes(), (self._sb, self._bb), self._bb,
             list(self._hand_start_stacks), len(self._order),
         )
         self._final_pots = []
@@ -391,7 +399,7 @@ class PokerkitGameState:
     # 組み直しで戻さない、ハンドの外から変える設定（買い足し・休み・次のハンドのブラインドとボタン）。
     # 組み直しはハンドの入力だけを流し直すので、戻すとスナップショットのあとの操作が消える。
     _KEEP_ON_RESTORE = ("_stacks", "_pending_rebuys", "_sitting_out", "_pending_blinds", "_forced_button",
-                        "_forced_stacks")
+                        "_forced_stacks", "_pending_bb_ante")
 
     def restore(self, snapshot: dict) -> None:
         """`snapshot()` の時点に戻す（同じオブジェクトのまま = 参照している側はそのまま使える）。
@@ -702,6 +710,28 @@ class PokerkitGameState:
         else:
             self._sb, self._bb = sb, bb
             self._pending_blinds = None
+
+    def set_bb_ante(self, on: bool) -> None:
+        """BB アンティ（BB の人が BB と同額のアンティを出す）を入れる・外す。ハンドの途中なら次のハンドから。"""
+        if self._hand_active:
+            self._pending_bb_ante = bool(on)
+        else:
+            self._bb_ante_on = bool(on)
+            self._pending_bb_ante = None
+
+    @property
+    def bb_ante(self) -> int:
+        """いまの（最後の）ハンドの BB アンティの額（無ければ 0）。"""
+        return self._bb if self._bb_ante_on else 0
+
+    def bb_ante_next_hand(self) -> bool:
+        """次のハンドで BB アンティが入っているか（保留の切り替えを含む）。"""
+        return self._bb_ante_on if self._pending_bb_ante is None else self._pending_bb_ante
+
+    def _raw_antes(self):
+        """pokerkit の `raw_antes`: BB アンティは {1: 額}（インデックス 1 = BB。heads-up も pokerkit が BB に付ける）。
+        アンティの返金（`ante_trimming_status`）は切って渡す（切らないと BB だけのアンティが返される）。"""
+        return {1: self._bb} if self._bb_ante_on else 0
 
     def set_button(self, seat: int) -> None:
         """次のハンドのボタンを手で指定する（ディーラーの手違い等の修正, 仕様 FR-05g）。"""

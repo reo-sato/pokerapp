@@ -211,11 +211,16 @@ def street_flow(
     begin: dict[int, int] = {}
     put: dict[int, int] = {}                           # このストリートで出した額（記録どおり）
     street: Any = object()
+    # BB アンティ（`blinds.bb_ante`, 2026-10-19）: BB の人の持ち点はアンティの分も減るが、出した額（賭け）には入らない
+    ante = (blinds or {}).get("bb_ante") if isinstance(blinds, Mapping) else None
+    bb_seat = next((int(k) for k, v in (position_map or {}).items() if v == "BB" and str(k).isdigit()), None)
     out: list[tuple[Optional[int], Optional[int]]] = []
     for a in actions:
         if _field(a, "street") != street:
             street = _field(a, "street")
             begin, put = dict(last), {}
+            if street == "preflop" and isinstance(ante, int) and ante > 0 and bb_seat in begin:
+                begin[bb_seat] -= ante
         seat, after, action = _field(a, "seat"), _field(a, "stack_after"), _field(a, "action")
         if not isinstance(seat, int):
             out.append((None, None))
@@ -246,9 +251,12 @@ def street_flow(
     return out
 
 
-def street_totals(actions: Sequence[Any], stack_start: Mapping[Any, Any]) -> list[Optional[int]]:
+def street_totals(
+    actions: Sequence[Any], stack_start: Mapping[Any, Any], *,
+    blinds: Optional[Mapping[str, Any]] = None, position_map: Optional[Mapping[Any, Any]] = None,
+) -> list[Optional[int]]:
     """各アクションのあと、その人がそのストリートで出した額の合計（`street_flow` の合計だけ）。"""
-    return [total for _, total in street_flow(actions, stack_start)]
+    return [total for _, total in street_flow(actions, stack_start, blinds=blinds, position_map=position_map)]
 
 
 def hand_street_flow(hand: Mapping[str, Any]) -> list[tuple[Optional[int], Optional[int]]]:

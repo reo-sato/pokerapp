@@ -14,7 +14,8 @@
     "ended_at": {"type": "string"},
     "blinds": {
       "type": "object",
-      "properties": {"sb": {"type": "integer", "minimum": 0}, "bb": {"type": "integer", "minimum": 0}}
+      "properties": {"sb": {"type": "integer", "minimum": 0}, "bb": {"type": "integer", "minimum": 0},
+                     "bb_ante": {"type": "integer", "minimum": 0, "description": "BB アンティ（BB の人が BB と同額のアンティを出したハンドだけ。CLI の `ante on`, 2026-10-19, additive）"}}
     },
     "board": {"type": "array", "items": {"type": "string"}, "description": "ボードの札を位置の順に（1〜3 = フロップ・4 = ターン・5 = リバー）。読めた一番後ろの位置まで。途中の位置が読めなかったときは `??`（1.6。PHH の未知の札と同じ表記）。"},
     "board_source": {"type": "string", "enum": ["rfid", "ocr", "manual", ""]},

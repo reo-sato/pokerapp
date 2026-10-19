@@ -860,7 +860,8 @@ def run_cli(script: str | None = None) -> None:
     print("リーダー: [rr]=読み取り装置（ESP32）を再起動（卓に札が無いときに送ります。読めないリーダーがあるとき）")
     print("席: [name <席> <名前>]=その席の人（参加）  [name <席> -]=空席（次のハンドから配られない）"
           "  スタック 0 の席は r で買い足すまで配られません")
-    print("ブラインド: [blinds <SB> <BB>]=次のハンドからブラインドを変える（例: blinds 200 400）")
+    print("ブラインド: [blinds <SB> <BB>]=次のハンドからブラインドを変える（例: blinds 200 400）"
+          "  [ante on] / [ante off]=BB アンティ（BB の人が BB と同額）を入れる・外す")
     print("ボタン: [button <席>]=ボタンを手で直す（ハンドの途中ならそのハンドを組み直す・ハンドの外なら次のハンド。"
           "ディーラーがボタンを動かし忘れたときなど）")
     print("訂正: ディーラーが「失礼しました」と言う（打っても可）と、続けて言うアクションで直します — 直前のアクションの"
@@ -990,6 +991,15 @@ def run_cli(script: str | None = None) -> None:
                     action="set_blinds", amount=bb, timestamp=_time.time(), raw_text=f"{sb}/{bb}",
                 ))
                 print(f"ブラインド {sb}/{bb} を送信しました（次のハンドから）")
+            elif cmd == "ante":
+                # BB アンティ（BB の人が BB と同額のアンティ）。入れたら以後ずっと、BB を変えればアンティも変わる
+                choice = parts[1].lower() if len(parts) >= 2 else ""
+                if choice not in ("on", "off"):
+                    print("使い方: ante on（BB アンティを入れる）/ ante off（外す）")
+                    continue
+                audio_q.put(AudioEvent(
+                    action="set_bb_ante", amount=0, timestamp=_time.time(), raw_text=choice,
+                ))
             elif cmd == "rr":
                 # 読み取り装置の再起動（契約 v1.11 §6）。卓に札が無くなったら RFID のスレッドが送る（結果は ● で出る）
                 if rfid_thread is None or not hasattr(rfid_thread, "request_restart"):
@@ -1025,7 +1035,7 @@ def run_cli(script: str | None = None) -> None:
                 # 続けて打った複数のアクション（「フォールド フォールド コール」）は順に分ける（ADR-0061）
                 events = parse_actions(line, confidence=1.0)
                 if not events:
-                    print("認識できません。コマンド: q / n / w <席> / r <席> <金額> / d <席> <金額>、"
+                    print("認識できません。コマンド: q / n / w <席> / r <席> <金額> / d <席> <金額> / ante on|off、"
                           "または読み上げ文（例: チェック / シート3 コール / ベット 500 / 600）")
                 for ev in events:
                     audio_q.put(ev)

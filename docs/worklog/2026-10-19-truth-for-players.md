@@ -53,3 +53,21 @@
 CLI の `d <席> <金額>` → `AudioEvent(action="reduce_stack")` → engine `_handle_reduce_stack`: ハンドの外ならすぐ
 `update_stack`（0 より下にはしない）、その席が進行中のハンドに入っていれば `_stack_corrections` でハンドのあとに。
 テスト `tests/test_reduce_stack.py`。
+
+## 追記: BB アンティ（同日, オーナー）
+
+オーナーの答え: BB の人だけが払う（BB と同額）、コマンドは `ante on` / `ante off`。
+
+- `core/poker_engine.py`: `set_bb_ante(on)`（ハンドの途中なら次のハンドから、`_KEEP_ON_RESTORE` に保留の値）、`bb_ante`
+  （オンなら BB の額）。`create_state` に `ante_trimming_status=False, raw_antes={1: bb}`（True のままだとアンティが返金されて
+  消える。オフは `raw_antes=0` で今と同じ）。heads-up でも BB の人に付く。legacy は受けるだけ（アンティを置かない）。
+- `integration/engine.py`: アクション `set_bb_ante`（`raw_text` = on/off）→ `_handle_set_bb_ante` のお知らせ、
+  `_CONTROL_KEEPS_CORRECTION` に追加。記録の `blinds` にオンのときだけ `bb_ante`（hand schema の blinds に optional）。
+- 表示: `core/hand_log.py:street_flow` / `shared/hand_replay/handReplayModel.ts:streetFlow` は BB の人のプリフロップの始まりから
+  アンティを引く（「出した合計」にアンティを入れない）。中央のブラインドに「(BBA X)」、テキスト・入力画面に「BB アンティ X」。
+- 再生: `core/truth_hand.py:start_state`・`integration/world_replay.py:replay_world(bb_ante=)`（推定器はハンドの記録の
+  `blinds.bb_ante` を渡す = 切り替えの event が前の窓にあっても合う）。
+- **短いスタックの BB**: pokerkit はアンティをブラインドより先に取る（TDA はブラインドが先）。持ち点が BB + アンティに足りない
+  ときの配り方は TDA と違いうる。今回は手を入れていない。
+- 確かめ: `tests/test_bb_ante.py`（7）・TS の `streetFlow` のテスト、速い組 3322 passed、ruff、staff E2E 8、開発データの
+  ライブの再生は変わらない（`score_live.py`）、推定器の物差し（アンティなし = 結果は前と同じ、内容の指紋は変わる = estimator.md §6）。

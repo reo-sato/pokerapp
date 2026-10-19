@@ -318,6 +318,14 @@ class GameStateManager:
             raise ValueError(f"Invalid blinds: sb={sb} bb={bb}")
         self._sb, self._bb = sb, bb
 
+
+    def set_bb_ante(self, on: bool) -> None:
+        """BB アンティ（legacy は持たない = 何もしない。pokerkit backend だけ, 2026-10-19）。"""
+        logger.info("BB ante is not supported by the legacy backend (on=%s)", on)
+
+    @property
+    def bb_ante(self) -> int:
+        return 0
     def set_button(self, seat: int) -> None:
         """legacy はボタンを持たない（ISSUE-0032）。受け付けるだけで何もしない。"""
         if seat not in self._players:

@@ -27,6 +27,7 @@ export function buildHandText(hand: ReplayHand): string {
   if (hand.started_at) header += ` ・ ${hand.started_at}`;
   if (m.blinds?.sb != null) {
     header += ` ・ ブラインド ${formatChips(m.blinds.sb)}/${formatChips(m.blinds.bb ?? 0)}`;
+    if (m.blinds.bb_ante) header += `（BB アンティ ${formatChips(m.blinds.bb_ante)}）`;
   }
   lines.push(header);
 

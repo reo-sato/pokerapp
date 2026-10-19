@@ -362,6 +362,7 @@ export function HandReplay(props: {
           {model.blinds?.sb != null ? (
             <Text style={s.blinds}>
               {formatChips(model.blinds.sb)}/{formatChips(model.blinds.bb ?? 0)}
+              {model.blinds.bb_ante ? ` (BBA ${formatChips(model.blinds.bb_ante)})` : ""}
             </Text>
           ) : null}
         </View>

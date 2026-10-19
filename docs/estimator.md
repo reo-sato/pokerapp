@@ -335,6 +335,7 @@
 | （10/15） | フォールドした札の「戻り」はベッティングの間だけ（`_departure_terms` の `returns_until` = ハンドの終わりと最後の時刻の分かるアクションの早い方） | 値の指紋 `74014020eefd` は同じ、内容の指紋 `9a4c6264cd60` → `d4061ac94fde`。結果は §5 |
 | （10/15 2） | 言い直しのモデルを engine 1 つに: engine が記録にしなかった語の扱い（`IntegrationThread.word_labels` = 言い直し・要約のコール・訂正で取り消した）を推定器に渡し、使われなかった語をその扱いで値付け。推定器だけの `_restated_later` を外した。額の無い賭けを同じ額で言い直したら `no_amount_heard` を外す | 値の指紋 `74014020eefd` は同じ、内容の指紋 `d4061ac94fde` → `5da60333c0a3`。物差し: 推定 140/174 のまま・正しいハンドも同じ（`compare_versions.py bd36597` で変わった 0）、悪くなった 0、要確認なしの誤り 2（前から）、台本 29/30、2 回とも同じ、探索 2 倍で変わる 0 |
 | （10/15 3） | ショーダウンの「フォールド」の門を選択点に（`IntegrationThread(open_gates=)`・`gate_events`、`world_replay(open_gates=, gate_events=)`、`Edit` の `gate`） | `PARAMS` に `p_muck_before_declare` → 値の指紋 `74014020eefd` → `ace16aaa3de7`、内容の指紋 `5da60333c0a3` → `4e9bc9649e8c`。結果は §5 |
+| （10/19） | 真のアクションの持ち点をロガーに渡す（`truth_stacks`）・スタックを減らす `d` コマンド（ライブだけ）/ BB アンティ（`ante on`、ハンドの記録の `blinds.bb_ante` を `replay_world(bb_ante=)` に渡す。アンティの無い記録では今と同じ） | 値の指紋 `ace16aaa3de7` は同じ、内容の指紋 `4e9bc9649e8c` → `710504671ab1`。物差しは前と同じ（店舗 140/174・台本 29/30・要確認なしの誤り 2 → 2） |
 
 ## 7. 監査の推奨と対応（2026-10-03 時点）
 

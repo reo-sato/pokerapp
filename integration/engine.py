@@ -230,7 +230,8 @@ _CORRECTION_UNIT_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "
 _VOICE_SOURCES = frozenset({"spoken_seat", "spoken_position", "engine_prior"})
 # 解釈を決める前に届いても、組み直しを待たなくてよい（ハンドを終わらせない）制御
 _CONTROL_KEEPS_CORRECTION = frozenset({"rename_seat", "set_blinds", "sit_out", "sit_in", "rebuy", "set_button",
-                                       "correct_board", "correct_seat", "truth_stacks", "reduce_stack"})
+                                       "correct_board", "correct_seat", "truth_stacks", "reduce_stack",
+                                       "set_bb_ante"})
 # 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
 # 言葉がこの数だけ聞こえたら、そのオールインを聞き違いとみて外す（店舗 2026-09-27: 自信 0.27 の「オールイン」の
 # あとのチェック 5 回と「2700」がすべて保留になり、全員オールインの 59700 のポットになった）
@@ -1246,6 +1247,9 @@ class IntegrationThread(threading.Thread):
             self._handle_rename_seat(event)
             return
 
+        if action == "set_bb_ante":
+            self._handle_set_bb_ante(event)
+            return
         if action == "set_blinds":
             self._handle_set_blinds(event)
             return
@@ -2494,7 +2498,8 @@ class IntegrationThread(threading.Thread):
         index = next((i for i, r in enumerate(self._current_actions) if r is record), None)
         if index is None:
             return None
-        return street_totals(self._current_actions[:index + 1], self._stack_start or {})[index]
+        return street_totals(self._current_actions[:index + 1], self._stack_start or {},
+                             blinds=self._blinds_record(), position_map=self._game_state.position_map())[index]
 
     def _append_rfid_record(self, record: ActionRecord) -> None:
         self._current_actions.append(record)
@@ -4982,6 +4987,35 @@ class IntegrationThread(threading.Thread):
         later = self._hand_open and gs.is_hand_active()
         self._notice(f"ブラインドを {sb}/{bb} にしました" + ("（次のハンドから）" if later else ""))
 
+    def _handle_set_bb_ante(self, event: AudioEvent) -> None:
+        """BB アンティ（BB の人が BB と同額のアンティを出す）を入れる・外す（CLI の `ante on/off`, 2026-10-19）。
+        `raw_text` の on / off。次のハンドから（ハンドの外ならすぐ）。BB を変えるとアンティも一緒に変わる。"""
+        gs = self._game_state
+        text = (event.raw_text or "").strip().lower()
+        if text not in ("on", "off"):
+            logger.warning("set_bb_ante without on/off: %r", event.raw_text)
+            return
+        if not hasattr(gs, "set_bb_ante"):
+            self._notice("BB アンティはこのゲームの状態では使えません")
+            return
+        gs.set_bb_ante(text == "on")
+        later = self._hand_open and gs.is_hand_active()
+        if not self._rules_aware:
+            self._notice("BB アンティは pokerkit backend だけで使えます（legacy では置きません）")
+        elif text == "on":
+            self._notice("BB アンティをオンにしました（BB の人が BB と同額）" + ("（次のハンドから）" if later else ""))
+        else:
+            self._notice("BB アンティをオフにしました" + ("（次のハンドから）" if later else ""))
+
+    def _blinds_record(self) -> dict:
+        """記録の `blinds`（BB アンティがあれば `bb_ante` を足す = additive）。"""
+        gs = self._game_state
+        out = {"sb": gs._sb, "bb": gs._bb}  # noqa: SLF001
+        ante = int(getattr(gs, "bb_ante", 0) or 0)
+        if ante:
+            out["bb_ante"] = ante
+        return out
+
     # ――― ミスディール訂正（ADR-0054） ―――
 
     def _handle_correct_board(self, event: AudioEvent) -> None:
@@ -5134,7 +5168,7 @@ class IntegrationThread(threading.Thread):
             "session_id": self._json_writer._session_id,  # noqa: SLF001
             "started_at": self._hand_started_at,
             "ended_at": None,
-            "blinds": {"sb": gs._sb, "bb": gs._bb},  # noqa: SLF001
+            "blinds": self._blinds_record(),
             "board": list(self._board_cards),
             "board_source": self._board_source,
             "board_timeline": self._build_board_timeline(),
@@ -5804,7 +5838,7 @@ class IntegrationThread(threading.Thread):
             session_id=self._json_writer._session_id,
             started_at=self._hand_started_at,
             ended_at=self._iso(ended_ts) if ended_ts is not None else self._now_iso(),
-            blinds={"sb": gs._sb, "bb": gs._bb},  # noqa: SLF001
+            blinds=self._blinds_record(),
             board=list(self._board_cards),
             board_source=self._board_source,
             board_timeline=self._build_board_timeline(),

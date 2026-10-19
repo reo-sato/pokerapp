@@ -444,3 +444,22 @@ test("seatRingLayout front: the spot between seats 4 and 5 is at the bottom cent
   // 既定（front = 0）は先頭の席が下中央のまま
   assert.deepEqual(seatRingLayout(4)[0], { top: 88, left: 50 });
 });
+
+test("streetFlow: a BB ante is not counted in the BB's preflop total", () => {
+  const hand: ReplayHand = {
+    hand_id: 9,
+    blinds: { sb: 100, bb: 200, bb_ante: 200 },
+    position_map: { "1": "SB", "2": "BB", "3": "BTN" },
+    players: [
+      { seat: 1, name: "A", stack_start: 10000 },
+      { seat: 2, name: "B", stack_start: 10000 },
+      { seat: 3, name: "C", stack_start: 10000 },
+    ],
+    actions: [
+      { street: "preflop", seat: 3, action: "call", amount: 200, stack_after: 9800 },
+      { street: "preflop", seat: 1, action: "call", amount: 100, stack_after: 9800 },
+      { street: "preflop", seat: 2, action: "check", amount: 0, stack_after: 9600 },
+    ],
+  };
+  assert.deepEqual(streetFlow(hand).map((f) => f.total), [200, 200, 200]);
+});

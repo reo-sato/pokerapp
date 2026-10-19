@@ -49,7 +49,7 @@ export interface ReplayPot {
 export interface ReplayHand {
   hand_id: number;
   started_at?: string;
-  blinds?: { sb?: number; bb?: number };
+  blinds?: { sb?: number; bb?: number; bb_ante?: number };
   board?: string[];
   players: ReplayPlayer[];
   pot_total?: number;
@@ -73,7 +73,7 @@ export interface StreetSection {
 
 export interface ReplayModel {
   handId: number;
-  blinds?: { sb?: number; bb?: number };
+  blinds?: { sb?: number; bb?: number; bb_ante?: number };
   /** seat 昇順の参加者 (ホールカードは記録がある席は全員分そのまま)。 */
   seats: ReplayPlayer[];
   streets: StreetSection[];
@@ -247,12 +247,19 @@ export function streetFlow(hand: ReplayHand): StreetFlow[] {
   let put = new Map<number, number>(); // このストリートで出した額 (記録どおり)
   let street: string | undefined;
   let first = true;
+  // BB アンティ（blinds.bb_ante, 2026-10-19）: BB の人の持ち点はアンティの分も減るが、出した額（賭け）には入らない
+  const ante = hand.blinds?.bb_ante ?? 0;
+  const bbEntry = Object.entries(hand.position_map ?? {}).find(([, pos]) => pos === "BB");
+  const bbSeat = bbEntry ? Number(bbEntry[0]) : undefined;
   return (hand.actions ?? []).map((a) => {
     if (first || a.street !== street) {
       first = false;
       street = a.street;
       begin = new Map(last);
       put = new Map();
+      if (street === "preflop" && ante > 0 && bbSeat != null && begin.has(bbSeat)) {
+        begin.set(bbSeat, (begin.get(bbSeat) ?? 0) - ante);
+      }
     }
     const original = a._original ?? {};
     const wasAction = original.action ?? a.action;

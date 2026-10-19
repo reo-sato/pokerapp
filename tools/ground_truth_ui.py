@@ -1704,7 +1704,7 @@ function renderEdit(){
       </div>`;
   $("app").innerHTML = `
     <div class="bar"><button onclick="backToList()">← 一覧</button><h1 style="margin:0">ハンド #${cap.hand_id}</h1>
-      <span class="muted small">${fmtTime(cap.started_at)} ／ ボタン 席 ${cap.button_seat ?? "—"} ／ ブラインド ${(cap.blinds||{}).sb ?? "?"}/${(cap.blinds||{}).bb ?? "?"}</span> ${gtMeta}
+      <span class="muted small">${fmtTime(cap.started_at)} ／ ボタン 席 ${cap.button_seat ?? "—"} ／ ブラインド ${(cap.blinds||{}).sb ?? "?"}/${(cap.blinds||{}).bb ?? "?"}${(cap.blinds||{}).bb_ante ? `（BB アンティ ${cap.blinds.bb_ante}）` : ""}</span> ${gtMeta}
       ${d.evaluation ? '<span class="tag t-warn">評価のセッション</span>' : ""}</div>
     <div class="cols">
       ${leftPanel}

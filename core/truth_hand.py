@@ -65,6 +65,8 @@ def start_state(captured: dict, button: Optional[int] = None) -> PokerkitGameSta
     except (TypeError, ValueError):
         sb, bb = 1, 2
     gs = PokerkitGameState(players, sb, bb)
+    if blinds.get("bb_ante"):
+        gs.set_bb_ante(True)               # 記録のハンドに BB アンティがあった（BB の人が BB と同額）
     if button is None:
         button = captured.get("button_seat")
     if isinstance(button, int) and any(p.seat == button for p in players):
