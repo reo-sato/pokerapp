@@ -181,7 +181,8 @@ def _serve(log_dir: Path, evaluation: bool = True):
     last: Optional[OSError] = None
     for port in PORTS:
         try:
-            return make_server(log_dir, "127.0.0.1", port, None, evaluation=evaluation), port
+            server = make_server(log_dir, "127.0.0.1", port, None, evaluation=evaluation)
+            return server, server.server_address[1]
         except OSError as e:     # ほかのものが使っている
             last = e
     raise SetError(f"入力画面を開けません（ポート {PORTS.start}〜{PORTS.stop - 1} が使えません: {last}）")

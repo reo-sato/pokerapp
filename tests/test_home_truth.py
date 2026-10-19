@@ -114,6 +114,12 @@ def test_pack_truth_without_entries(tmp_path):
     assert home_truth.pack_truth(tmp_path, STAMP, tmp_path / "out") is None
 
 
+@pytest.fixture(autouse=True)
+def _free_port(monkeypatch):
+    # 8791 はほかの試験も使う（並列で取り合わない）
+    monkeypatch.setattr(home_truth, "PORTS", range(0, 1))
+
+
 def test_main_serves_and_packs_on_enter(tmp_path, monkeypatch):
     zips = _write_set(tmp_path / "in")
     monkeypatch.setattr("builtins.input", lambda *_: "")
