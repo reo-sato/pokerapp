@@ -37,6 +37,7 @@ import {
   seatRingLayout,
   shownAmount,
   STREET_LABELS,
+  TABLE_FRONT,
   tableSeats,
   SUIT_COLORS,
   SUIT_SYMBOLS,
@@ -304,9 +305,9 @@ export function HandReplay(props: {
   const model = buildReplayModel(props.hand);
   const board = props.hand.board ?? [];
   const foldedPreflop = new Set(preflopFoldedSeats(props.hand.actions ?? []));
-  // 席は 1〜8 を席番号の位置に固定（空いている席番号は空席, オーナー 2026-10-19）
+  // 席は 1〜8 を席番号の位置に固定（空いている席番号は空席）。手前は席 4 と席 5 の間（オーナー 2026-10-19）
   const ring = tableSeats(model.seats);
-  const slots = seatRingLayout(ring.length);
+  const slots = seatRingLayout(ring.length, TABLE_FRONT);
   const sectionByStreet = new Map(model.streets.map((st) => [st.street, st]));
   // アクションに player_name が無い記録もあるので、席→参加者名で補う（最後は「席N」）。
   const nameBySeat = new Map(model.seats.map((p) => [p.seat, p.name]));

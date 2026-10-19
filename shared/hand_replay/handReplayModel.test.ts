@@ -29,6 +29,7 @@ import {
   shownAmount,
   streetFlow,
   streetTotals,
+  TABLE_FRONT,
   tableSeats,
   visibleColumnActions,
   type ReplayHand,
@@ -429,4 +430,17 @@ test("tableSeats: 8 fixed seats by seat number, missing seats are empty", () => 
   // 8 を超える席番号があれば、その番号まで広げる
   assert.equal(tableSeats([p(1), p(9)]).length, 9);
   assert.equal(tableSeats([]).length, 8);
+});
+
+test("seatRingLayout front: the spot between seats 4 and 5 is at the bottom center", () => {
+  const slots = seatRingLayout(8, TABLE_FRONT);
+  // 席 4（index 3）が右下、席 5（index 4）が左下で、下中央をはさんで左右対称
+  assert.equal(slots[3].top, slots[4].top);
+  assert.ok(slots[3].top > 80 && slots[3].left > 50 && slots[4].left < 50);
+  assert.equal(Math.round(slots[3].left + slots[4].left), 100);
+  // 奥（上中央）をはさむのは席 8 と席 1
+  assert.equal(slots[7].top, slots[0].top);
+  assert.ok(slots[0].top < 20 && slots[0].left > 50 && slots[7].left < 50);
+  // 既定（front = 0）は先頭の席が下中央のまま
+  assert.deepEqual(seatRingLayout(4)[0], { top: 88, left: 50 });
 });

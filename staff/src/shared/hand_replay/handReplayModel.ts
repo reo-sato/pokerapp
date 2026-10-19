@@ -448,11 +448,12 @@ function round1(n: number): number {
  * ボタン位置はデータに無いため（ADR-0044 D3 で推定は scope 外）、並びは
  * **席番号順**であってポジション順ではない。
  */
-export function seatRingLayout(count: number): SeatSlot[] {
+export function seatRingLayout(count: number, front: number = 0): SeatSlot[] {
   if (!Number.isFinite(count) || count <= 0) return [];
   const slots: SeatSlot[] = [];
   for (let i = 0; i < count; i += 1) {
-    const rad = ((90 + (360 / count) * i) * Math.PI) / 180;
+    // `front` = 手前（下中央）に来る位置（0 = 先頭の席、3.5 = 4 番目と 5 番目の席の間）
+    const rad = ((90 + (360 / count) * (i - front)) * Math.PI) / 180;
     slots.push({
       top: round1(50 + RING_RY * Math.sin(rad)),
       left: round1(50 + RING_RX * Math.cos(rad)),
@@ -463,6 +464,9 @@ export function seatRingLayout(count: number): SeatSlot[] {
 
 /** 卓の席の数（店の卓は 8 席, オーナー 2026-10-19）。 */
 export const TABLE_SEATS = 8;
+
+/** テーブル図で手前（下中央）に来る位置 = 席 4 と席 5 の間（`seatRingLayout` の `front`, オーナー 2026-10-19）。 */
+export const TABLE_FRONT = 3.5;
 
 /** テーブル図の 1 席: そのハンドに居た人（`player`）か空席（`player` = null）。 */
 export interface TableSeat {

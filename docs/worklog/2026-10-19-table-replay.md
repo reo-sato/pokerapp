@@ -33,3 +33,5 @@ ADR の草稿は同ブランチの `docs/adr/0051-hand-replay-single-screen-tabl
 テーブル図の席を 1〜8 の席番号の位置に固定し（`tableSeats` / `TABLE_SEATS` = 8、席番号が 8 を超えるときだけ広げる）、そのハンドに
 居ない席番号は破線の「空席」にした（実際の卓と同じ並び）。前は居る人だけを詰めて並べていた。mobile 52 / staff 58 tests、E2E 8、
 pytest 3307、見本の 4 人卓（席 5〜8）と 8 人卓で iPhone 13 の幅のスクリーンショットを確かめた。
+
+手前は席 4 と席 5 の間にした（`seatRingLayout(count, front)` の `front` = `TABLE_FRONT` 3.5、奥は席 8 と席 1 の間。オーナー）。
