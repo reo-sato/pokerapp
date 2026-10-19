@@ -35,3 +35,5 @@ ADR の草稿は同ブランチの `docs/adr/0051-hand-replay-single-screen-tabl
 pytest 3307、見本の 4 人卓（席 5〜8）と 8 人卓で iPhone 13 の幅のスクリーンショットを確かめた。
 
 手前は席 4 と席 5 の間にした（`seatRingLayout(count, front)` の `front` = `TABLE_FRONT` 3.5、奥は席 8 と席 1 の間。オーナー）。
+
+8 人そろったハンドで横の席（席 2・7）の枠がボードの端の札にかかったので、席の枠を 78 → 70px（高さ 58 → 54）、中央のボードの札を 1 段小さく（`size="sm"`）した。iPhone 13 / SE（第 3 世代）の幅で重ならない。

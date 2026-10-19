@@ -72,8 +72,9 @@ const c = {
 /** プリフロップで降りた席の減光率（ADR-0051 追記）。 */
 const FOLDED_OPACITY = 0.4;
 
-const SEAT_W = 78;
-const SEAT_H = 58;
+// 8 席でも横の席がボードの札にかからない大きさ（オーナー 2026-10-19）
+const SEAT_W = 70;
+const SEAT_H = 54;
 
 /** 1 枚のカードチップ ("As" 等)。不正形式は raw 文字列で灰色表示。 */
 export function CardChip(props: { card: string; size?: "xs" | "sm" | "md" }): React.JSX.Element {
@@ -329,7 +330,7 @@ export function HandReplay(props: {
           {board.length > 0 ? (
             <View style={s.cardRow}>
               {board.map((card, i) => (
-                <CardChip key={i} card={card} />
+                <CardChip key={i} card={card} size="sm" />
               ))}
             </View>
           ) : (
