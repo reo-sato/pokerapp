@@ -1279,6 +1279,8 @@ _PAGE = r"""<!doctype html>
  .tl .noise { opacity:.5; }
  .tl .sys { color:#9aa0a6; }
  .tl .gap { min-width:44px; }
+ .tl .playing { background:#1f2f3a; }
+ .tlbar { display:flex; gap:8px; align-items:center; margin-top:4px; }
  button.play { min-height:34px; min-width:44px; padding:2px 8px; }
  button.chk { min-height:34px; min-width:44px; padding:2px 8px; }
  button.chk.on { background:#238636; border-color:#238636; }
@@ -1454,6 +1456,7 @@ function buildGt(d){
           excluded: !!(g && g.excluded)};
 }
 async function openHand(hid){
+  stopPlayAll();
   try {
     const d = await api(sidPath() + "/hands/" + hid);
     S.hand = d; S.gt = buildGt(d); S.legal = d.legal; S.dirty = false; S.view = "edit";
@@ -1470,7 +1473,7 @@ async function openHand(hid){
 }
 function backToList(){
   if (S.dirty && !confirm("保存していない変更があります。一覧に戻りますか？")) return;
-  S.view = "list"; S.hand = null; renderList(); loadHands();
+  stopPlayAll(); S.view = "list"; S.hand = null; renderList(); loadHands();
 }
 function applyLegal(){
   // 反映できた行は pokerkit の正規形（チェック / コールの別・コールの額）に揃える
@@ -1567,20 +1570,53 @@ function matchRows(xs, ys){
   return [a, b];
 }
 function toggleUnsure(i){ const a = S.gt.actions[i]; a.unsure = !a.unsure; S.dirty = true; renderEdit(); }
+// 行の ▶ = その発話だけ。「続けて再生」中に押すと、そこから続ける（家で音を聞きながら入れる, 2026-10-19）
 function playAudio(name){
-  try { if (S.audio) S.audio.pause(); } catch (e) {}
+  try { if (S.audio) { S.audio.onended = null; S.audio.pause(); } } catch (e) {}
   S.audio = new Audio(sidPath() + "/audio/" + encodeURIComponent(name));
-  S.audio.play().catch(e => toast("再生できません: " + e.message, true));
+  markPlaying(name);
+  S.audio.onended = () => {
+    if (!S.playAll) { markPlaying(null); return; }
+    const list = S.tlAudio || [], i = list.indexOf(name);
+    if (i >= 0 && i + 1 < list.length) playAudio(list[i + 1]); else stopPlayAll();
+  };
+  S.audio.play().catch(e => { markPlaying(null); S.playAll = false; updatePlayAll(); toast("再生できません: " + e.message, true); });
+}
+function markPlaying(name){
+  S.playing = name;
+  document.querySelectorAll(".tl .item.playing").forEach(el => el.classList.remove("playing"));
+  if (!name) return;
+  const el = Array.from(document.querySelectorAll(".tl .item[data-audio]")).find(x => x.dataset.audio === name);
+  if (el) { el.classList.add("playing"); el.scrollIntoView({block: "nearest"}); }
+}
+function togglePlayAll(){
+  if (S.playAll) { stopPlayAll(); return; }
+  const list = S.tlAudio || [];
+  if (!list.length) { toast("このハンドに聞ける発話はありません", true); return; }
+  S.playAll = true; updatePlayAll();
+  playAudio(S.playing && list.includes(S.playing) ? S.playing : list[0]);
+}
+function stopPlayAll(){
+  S.playAll = false; updatePlayAll();
+  try { if (S.audio) { S.audio.onended = null; S.audio.pause(); } } catch (e) {}
+  markPlaying(null);
+}
+function updatePlayAll(){
+  document.querySelectorAll(".playall").forEach(b => { b.textContent = S.playAll ? "■ 止める" : "▶ 続けて再生"; });
 }
 function renderTimeline(items, blind){
   if (!items || !items.length) return "<p class='muted small'>このハンドの間の発話・札の記録はありません。</p>";
-  return `<div class="tl">${items.map(it => {
+  S.tlAudio = items.filter(it => it.kind === "speech" && it.audio).map(it => it.audio);
+  const bar = S.tlAudio.length ? `<div class="tlbar"><button class="sm playall" onclick="togglePlayAll()">${S.playAll ? "■ 止める" : "▶ 続けて再生"}</button><span class="muted small">発話 ${S.tlAudio.length} 件を順に</span></div>` : "";
+  return `${bar}<div class="tl">${items.map(it => {
     const t = (it.t >= 0 ? "+" : "") + Number(it.t).toFixed(1) + "s";
     if (it.kind === "speech") {
       const play = it.audio ? `<button class="play sm" onclick="playAudio('${esc(it.audio)}')" title="音声を聞く">▶</button>` : '<span class="gap"></span>';
       const conf = it.confidence != null ? ` <span class="muted small">${Number(it.confidence).toFixed(2)}</span>` : "";
       const parsed = blind ? "" : ` <span class="muted small">→ ${it.parsed && it.parsed.length ? esc(it.parsed.join("、")) : (it.noise ? "雑音" : "（読まない）")}</span>`;
-      return `<div class="item ${it.noise ? "noise" : ""}"><span class="t">${t}</span>${play}<span>「${esc(it.text)}」${conf}${parsed}</span></div>`;
+      const audioAttr = it.audio ? ` data-audio="${esc(it.audio)}"` : "";
+      const playing = it.audio && it.audio === S.playing ? " playing" : "";
+      return `<div class="item ${it.noise ? "noise" : ""}${playing}"${audioAttr}><span class="t">${t}</span>${play}<span>「${esc(it.text)}」${conf}${parsed}</span></div>`;
     }
     return `<div class="item sys"><span class="t">${t}</span><span class="gap"></span><span>${esc(it.text)}</span></div>`;
   }).join("")}</div>`;

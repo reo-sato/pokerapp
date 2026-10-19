@@ -28,7 +28,7 @@ CMD_FILES = [
     "install.cmd", "update.cmd", "uninstall.cmd",
     "start_logger.cmd", "start_monitor.cmd", "start_viewer.cmd", "start_ledger.cmd", "rfid_check.cmd",
     "start_truth.cmd", "pack_logs.cmd", "pack_logs_audio.cmd", "start_script.cmd", "start_cards.cmd",
-    "server_autostart.cmd", "start_server.cmd",
+    "server_autostart.cmd", "start_server.cmd", "home_truth.cmd",
 ]
 PS1_FILES = ["installer/install.ps1", "installer/bootstrap.ps1"]
 
@@ -94,7 +94,7 @@ class TestLaunchers:
     def test_launchers_reference_existing_entry_points(self):
         for rel in ("start_logger.cmd", "start_monitor.cmd", "start_viewer.cmd", "start_ledger.cmd",
                     "rfid_check.cmd", "start_truth.cmd", "pack_logs.cmd", "pack_logs_audio.cmd",
-                    "start_script.cmd", "start_cards.cmd"):
+                    "start_script.cmd", "start_cards.cmd", "home_truth.cmd"):
             text = (ROOT / rel).read_text(encoding="ascii")
             assert r"venv\Scripts\python.exe" in text, rel
             for m in re.finditer(r'^"venv\\Scripts\\python\.exe" (\S+)', text, re.M):
