@@ -1273,7 +1273,7 @@ _PAGE = r"""<!doctype html>
  .summary b { font-size:18px; }
  .cap td { font-size:14px; }
  .err { color:#ff7b72; }
- .tl { max-height:52vh; overflow-y:auto; -webkit-overflow-scrolling:touch; margin-top:6px; }
+ .tl { position:relative; max-height:52vh; overflow-y:auto; -webkit-overflow-scrolling:touch; margin-top:6px; }
  .tl .item { display:flex; gap:8px; align-items:center; padding:4px 0; border-bottom:1px solid #23272e; font-size:14px; }
  .tl .t { color:#9aa0a6; min-width:56px; font-variant-numeric:tabular-nums; font-size:13px; }
  .tl .noise { opacity:.5; }
@@ -1587,7 +1587,15 @@ function markPlaying(name){
   document.querySelectorAll(".tl .item.playing").forEach(el => el.classList.remove("playing"));
   if (!name) return;
   const el = Array.from(document.querySelectorAll(".tl .item[data-audio]")).find(x => x.dataset.audio === name);
-  if (el) { el.classList.add("playing"); el.scrollIntoView({block: "nearest"}); }
+  if (!el) return;
+  el.classList.add("playing");
+  // ページは動かさず、発話の枠の中だけ（見えていないときだけ）動かす（オーナー 2026-10-22: 次の発話のたびに画面が動く）
+  const box = el.closest(".tl");
+  if (box) {
+    const top = el.offsetTop, bottom = top + el.offsetHeight;
+    if (top < box.scrollTop) box.scrollTop = top;
+    else if (bottom > box.scrollTop + box.clientHeight) box.scrollTop = bottom - box.clientHeight;
+  }
 }
 function togglePlayAll(){
   if (S.playAll) { stopPlayAll(); return; }
@@ -1649,14 +1657,14 @@ function renderEdit(){
     const differs = !hidden && !isErr && !gtSame.has(i);
     const street = l ? (STREET_JA[l.street] || l.street) : (isErr ? "" : (replayOk ? "?" : ""));
     const streetCell = replayOk ? `<td class="street">${street}</td>`
-      : `<td class="street"><select onchange="setRowStreet(${i}, this.value)">${["preflop","flop","turn","river"].map(s => `<option value="${s}" ${a.street===s?"selected":""}>${STREET_JA[s]}</option>`).join("")}</select></td>`;
+      : `<td class="street"><select onchange="this.blur(); setRowStreet(${i}, this.value)">${["preflop","flop","turn","river"].map(s => `<option value="${s}" ${a.street===s?"selected":""}>${STREET_JA[s]}</option>`).join("")}</select></td>`;
     const needAmt = ["bet","raise","allin"].includes(a.action);
     const amtCell = needAmt
-      ? `<input type="number" inputmode="numeric" value="${(a.action === "allin" && l && l.total) || a.amount || ""}" onchange="setRowAmount(${i}, this.value)" ${a.action==="allin"?"disabled":""}>`
+      ? `<input type="number" inputmode="numeric" value="${(a.action === "allin" && l && l.total) || a.amount || ""}" onchange="setRowAmount(${i}, this.value)" onkeydown="if(event.key==='Enter'){this.blur()}" ${a.action==="allin"?"disabled":""}>`
       : (a.action === "call" ? `<span class="muted">${(l && l.total) || a.amount || ""}</span>` : "");
     return `<tr class="${isErr?"err":(differs?"diffrow":"")}">${streetCell}
-      <td><select onchange="setRowSeat(${i}, this.value)">${seats.map(s => `<option value="${s}" ${s===a.seat?"selected":""}>席 ${s}</option>`).join("")}</select></td>
-      <td><select onchange="setRowAction(${i}, this.value)">${GT_ACTIONS.map(x => `<option value="${x}" ${x===a.action?"selected":""}>${ACTION_JA[x]}</option>`).join("")}</select></td>
+      <td><select onchange="this.blur(); setRowSeat(${i}, this.value)">${seats.map(s => `<option value="${s}" ${s===a.seat?"selected":""}>席 ${s}</option>`).join("")}</select></td>
+      <td><select onchange="this.blur(); setRowAction(${i}, this.value)">${GT_ACTIONS.map(x => `<option value="${x}" ${x===a.action?"selected":""}>${ACTION_JA[x]}</option>`).join("")}</select></td>
       <td>${amtCell}</td>
       <td class="tools">${differs ? '<span class="tag t-diff">記録と違う</span>' : ""}<button class="sm unsure ${a.unsure?"on":""}" onclick="toggleUnsure(${i})" title="自信なし">?</button> <button class="sm" onclick="insRow(${i})" title="この前に挿入">＋</button> <button class="sm danger" onclick="delRow(${i})">✕</button></td></tr>
       ${isErr ? `<tr class="errmsg"><td colspan="5">⚠ ${esc(err.message)}</td></tr>` : ""}`;
