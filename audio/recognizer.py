@@ -1265,7 +1265,7 @@ def parse_actions(
     if not text:
         return []
     text = _KANJI_SENTEN.sub("センテン", text)
-    events = _drop_counting(_parse_utterance(text, confidence, utterance_start_ts))
+    events = _join_lower_digits(_drop_counting(_parse_utterance(text, confidence, utterance_start_ts)))
     if events:
         return _mark_garbled_calls(_mark_before_check_around(events))
     # 雑談に続けて言ったアクション（店舗 2026-09-29 7b897671 ハンド 2:「それが撮りづらくなります。 そんな機能入れて
@@ -1313,6 +1313,31 @@ def _drop_counting(events: list[AudioEvent]) -> list[AudioEvent]:
             out.append(event)
     flush()
     return out
+
+
+def _join_lower_digits(events: list[AudioEvent]) -> list[AudioEvent]:
+    """賭けの額のすぐあとの、下の桁だけの額（額だけの語）をつなぐ: 「1万、2千、フォールド」= 12000、「レイズ2千、500点」=
+    2500（Whisper が額の途中に読点を入れた。10/19 の 5 回）。賭けのあとにそれより小さい額の賭けは無い（レイズは前の額より
+    大きい）ので、前の額の端の桁より下に収まる額だけをつなぐ（「2万、4万」「800、1600」はつながない）。"""
+    out: list[AudioEvent] = []
+    for event in events:
+        prev = out[-1] if out else None
+        if (prev is not None and prev.action in ("bet", "raise", "allin") and prev.amount > 0
+                and "amount_only" in event.parse_flags and 0 < event.amount < _lowest_unit(prev.amount)):
+            prev.amount += event.amount
+            prev.raw_text = f"{prev.raw_text or ''}、{event.raw_text or ''}".strip("、")
+            prev.parse_flags = (*prev.parse_flags, "joined_lower_digits")
+            continue
+        out.append(event)
+    return out
+
+
+def _lowest_unit(amount: int) -> int:
+    """額のいちばん下の 0 でない桁の位（12000 → 1000、10000 → 10000）。"""
+    unit = 1
+    while amount % (unit * 10) == 0:
+        unit *= 10
+    return unit
 
 
 # 「センテン」（千点）を Whisper が同じ読みの漢字で書く（店舗 2026-10-14 845da8e6 ハンド 9「失礼します。7番先天。」

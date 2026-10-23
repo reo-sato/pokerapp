@@ -18,7 +18,6 @@ def test_the_actions_around_the_counting_stay():
 
 @pytest.mark.parametrize("text, expected", [
     ("2万、4万", [("bet", 20000), ("bet", 40000)]),               # 2 つはベットとレイズのことがある
-    ("1万、2千、フォールド。", [("bet", 10000), ("bet", 2000), ("fold", 0)]),   # 大きくなっていかない
     ("レイズ800、8000", [("raise", 800), ("bet", 8000)]),
 ])
 def test_other_amounts_are_read(text, expected):
@@ -39,3 +38,20 @@ def test_n_people_is_the_players_left(text, expected):
 @pytest.mark.parametrize("text", ["7人", "はい、10人です。", "12人です", "犬2人と子供2人だから。"])
 def test_other_n_people_is_not(text):
     assert [e.action for e in parse_actions(text)] == []
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("1万、2千、フォールド。", [("bet", 12000), ("fold", 0)]),
+    ("レイズ2千、500点。", [("raise", 2500)]),
+    ("レイズ 1万、5千、チェック", [("raise", 15000), ("check", 0)]),
+])
+def test_lower_digits_after_a_comma_join_the_amount(text, expected):
+    """Whisper が額の途中に読点を入れた（10/19 の 5 回）: 前の額の端の桁より下の額だけをつなぐ。"""
+    events = parse_actions(text)
+    assert [(e.action, e.amount) for e in events] == expected
+    assert "joined_lower_digits" in events[0].parse_flags
+
+
+@pytest.mark.parametrize("text", ["2万、4万", "800、1600", "レイズ 1万5千、5千"])
+def test_larger_or_same_unit_amounts_do_not_join(text):
+    assert len(parse_actions(text)) == 2
