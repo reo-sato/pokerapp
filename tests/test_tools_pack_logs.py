@@ -133,6 +133,20 @@ class TestZip:
         assert "old session line" not in log and "much later line" not in log
         assert manifest["app_log_lines"] == 4
 
+    def test_relay_log_is_cut_to_the_session_too(self, root, tmp_path):
+        """RFID の中継のログ（札が読めなくなった理由の手がかり）も同じ時間帯の行だけ入れる。"""
+        (root / "logs" / "rfid_relay.log").write_text(
+            _log_line(datetime(2026, 9, 25, 13, 40), "old relay line")
+            + _log_line(START + timedelta(seconds=10), "RFID relay: reader ready r3"),
+            encoding="utf-8",
+        )
+        out, manifest = _pack(root, tmp_path)
+        with zipfile.ZipFile(out) as zf:
+            log = zf.read("rfid_relay.log").decode("utf-8")
+        assert "reader ready r3" in log and "old relay line" not in log
+        assert manifest["relay_log_lines"] == 1
+        assert NEW in find_sessions(root / "logs")                 # 中継のログはセッションに数えない
+
     def test_repeated_lines_are_folded(self, root, tmp_path):
         """店舗 2026-10-01: 閉じたマイクの警告が 9 分で 3470 万行 → 最初の 1 行と「さらに N 回」に畳む。"""
         warn = "2026-09-27 13:47:{:02d},{:03d} [AudioThread] WARNING audio.recorder: Audio read error: Stream closed\n"

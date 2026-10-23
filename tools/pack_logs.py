@@ -15,7 +15,7 @@
   結果, `tools/rescore_audio.py`）/ `.control.jsonl` など `<sid>.*` の全部
 - `logs/audio/<sid>/*.wav`（発話の音声。合計 25 MB までなら自動で入れる。`--audio` で必ず入れる（大きければ zip を
   分ける）/ `--no-audio` で入れない）
-- `pokerapp.log` はそのセッションの時間帯の行だけ / `config.json`（トークン類は伏せる）/ `rfid_cards.json` /
+- `pokerapp.log` と `rfid_relay.log`（RFID の中継）はそのセッションの時間帯の行だけ / `config.json`（トークン類は伏せる）/ `rfid_cards.json` /
   `manifest.json`（入れたもの・インストールしたコードの指紋）
 - 読み上げ集（`logs/corpus/<フォルダ>/`, `tools/read_corpus.py`）: 同じ時間帯に録ったものを `corpus/<フォルダ>/` に
   （`meta.json`・`labels.jsonl`・`transcripts.jsonl` と句ごとの音声。ずっと録った `full_*.wav` は大きいので入れない。
@@ -48,6 +48,8 @@ from typing import Any, Optional
 ROOT = Path(__file__).resolve().parent.parent
 
 APP_LOG = "pokerapp.log"
+# RFID の中継のログ（`tools/rfid_relay.py serve` が `<root>/logs/` に書く, ADR-0070）。同じ時間帯の行だけ入れる
+RELAY_LOG = "rfid_relay.log"
 # 音声はこの合計サイズまでなら既定で入れる（チャットに添付できる大きさに収める）
 AUDIO_AUTO_LIMIT = 25 * 1024 * 1024
 # 1 つの zip の大きさの上限（チャットに添付できる大きさ）。超えるときは音声を 2 つ目以降の zip に分ける
@@ -450,6 +452,10 @@ def pack(
     log_text = slice_app_log(app_log, windows)
     if log_text:
         entries.append((APP_LOG, log_text.encode("utf-8")))
+    relay_log = next((p for p in (log_dir / RELAY_LOG, root / "logs" / RELAY_LOG) if p.is_file()), None)
+    relay_text = slice_app_log(relay_log, windows) if relay_log is not None else ""
+    if relay_text:
+        entries.append((RELAY_LOG, relay_text.encode("utf-8")))
     config_path = root / "config.json"
     if config_path.is_file():
         try:
@@ -480,6 +486,7 @@ def pack(
         "audio_bytes": audio_bytes,
         "audio_included": include_audio,
         "app_log_lines": log_text.count("\n"),
+        "relay_log_lines": relay_text.count("\n"),
         "branch": branch.read_text(encoding="utf-8").strip() if branch.is_file() else None,
         "code_fingerprint": code_fingerprint(root),
         "python": sys.version.split()[0],

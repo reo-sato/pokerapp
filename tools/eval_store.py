@@ -884,6 +884,7 @@ class SessionReport:
     memos: list[dict] = field(default_factory=list)      # 真のアクションのメモ（truth_memos）
     script: dict = field(default_factory=dict)           # 台本のハンド（tools/test_script.py）を真のアクションにした
     stop: dict = field(default_factory=dict)             # 音声の改善を終える目安（listening_stop_metrics）
+    cards_read: dict = field(default_factory=dict)       # ハンドのあいだに手札を 2 枚とも読めた席（hole_cards_read）
 
     def to_json(self) -> dict:
         return {
@@ -892,7 +893,7 @@ class SessionReport:
             "truth": self.truth, "setup": self.setup, "flags": self.flags, "listening": self.listening,
             "stop": self.stop,
             "reparse_differences": diff_record(self.replayed, self.reparsed) if self.reparsed else [],
-            "ear": self.ear, "memos": self.memos, "script": self.script,
+            "ear": self.ear, "memos": self.memos, "script": self.script, "cards_read": self.cards_read,
             "route_differences": {k: diff_record(self.reparsed, v) for k, v in self.routes.items()},
         }
 
@@ -960,6 +961,7 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
         if ear_rows:
             report.ear = ear_summary(transcripts, ear_rows)
     if report.gt["hands"]:
+        report.cards_read = hole_cards_read(report.gt, report.live, events)
         report.truth = {
             "record": evaluate_against_truth(report.gt, report.live),
             "replay": evaluate_against_truth(report.gt, report.replayed),
@@ -981,6 +983,51 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
         elif transcripts:
             report.stop = listening_stop_metrics(report.gt, report.reparsed or report.replayed, transcripts)
     return report
+
+
+# 手札を数え始めるのはハンドの始まり（2 席に 2 枚そろって 1.5 秒）のこれだけ前から（配るのにかかる時間）
+DEAL_LEAD_SEC = 15.0
+
+
+def hole_cards_read(truth: dict, hands: list[dict], events: list) -> dict:
+    """真のアクションで動いた席のうち、ハンドのあいだ（配る少し前〜ハンドの終わり）に手札を 2 枚とも読めた席。
+
+    記録の手札はハンドが終わってから（片付けで）読めた札も入るので、読んだ時刻で数える（10/19: プレイヤーが
+    ぴったり重ねた手札が読めず、8 人卓で 88〜91%。開発データは 97%）。`missing` = (ハンド, 席, 読めた枚数)。
+    """
+    offset = record_utc_offset(hands, events)
+
+    def epoch(iso: Any) -> Optional[float]:
+        try:
+            naive = datetime.fromisoformat(str(iso))
+        except ValueError:
+            return None
+        if naive.tzinfo is not None or offset is None:
+            return naive.timestamp()
+        return naive.replace(tzinfo=timezone.utc).timestamp() - offset
+
+    reads = [(e.timestamp, e.seat, e.card) for e in events
+             if isinstance(e, RFIDEvent) and e.role == "seat" and e.kind == "card" and e.seat and e.card]
+    by_id = {h.get("hand_id"): h for h in hands}
+    acted = ok = 0
+    missing: list[tuple[int, int, int]] = []
+    for gt in truth.get("hands") or []:
+        cap = by_id.get(gt.get("hand_id"))
+        start, end = epoch((cap or {}).get("started_at")), epoch((cap or {}).get("ended_at"))
+        if start is None or end is None:
+            continue
+        cards: dict[int, set] = {}
+        for t, seat, card in reads:
+            if start - DEAL_LEAD_SEC <= t <= end:
+                cards.setdefault(seat, set()).add(card)
+        for seat in sorted({a.get("seat") for a in gt.get("actions") or [] if isinstance(a.get("seat"), int)}):
+            acted += 1
+            n = len(cards.get(seat, ()))
+            if n >= 2:
+                ok += 1
+            else:
+                missing.append((gt.get("hand_id"), seat, n))
+    return {"acted_seats": acted, "both_read": ok, "missing": missing}
 
 
 def record_utc_offset(hands: list[dict], events: list) -> Optional[float]:
@@ -1340,6 +1387,13 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
             print("  方式ごとに読み直すと変わるハンド（書き起こしの読み直しと比べて）: " + " / ".join(changed))
         if r.truth:
             print(f"  真のアクション: {r.truth['record']['hands']} ハンド")
+            cr = r.cards_read
+            if cr.get("acted_seats"):
+                print(f"  手札をハンドのあいだに 2 枚とも読めた席（真のアクションで動いた席）: {cr['both_read']}/{cr['acted_seats']}"
+                      f"（{cr['both_read'] / cr['acted_seats']:.0%}）"
+                      + ("　読めなかった: " + "・".join(f"ハンド {h} 席{s}（{n} 枚）" for h, s, n in cr["missing"][:12])
+                         + (f" ほか {len(cr['missing']) - 12}" if len(cr["missing"]) > 12 else "")
+                         if cr["missing"] else ""))
             excluded = r.truth["record"].get("excluded") or []
             if excluded:
                 print(f"  数えないハンド {len(excluded)}: "

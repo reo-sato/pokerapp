@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 import zipfile
 from pathlib import Path
 
@@ -592,3 +593,26 @@ class TestStopRule:
         marks = [{"event": "start", "hand": 1, "t": 100.0}, {"event": "start", "hand": 2, "t": 200.0},
                  {"event": "start", "hand": 2, "t": 260.0}, {"event": "winner", "seat": 4, "t": 300.0}]
         assert eval_store.script_windows(script, marks) == {1: (100.0, 200.0), 2: (260.0, 860.0)}
+
+
+
+def test_hole_cards_read_counts_cards_read_during_the_hand():
+    """10/19: 8 人卓でぴったり重ねた手札が読めない席が多かった（開発データ 97%、10/19 は 88〜91%）。
+    ハンドが終わってから（片付けで）読めた札は数えない。"""
+    from core.events import RFIDEvent
+
+    def read(t, seat, card):
+        return RFIDEvent(timestamp=t, tag_id="t", card=card, reader_id="r", role="seat", seat=seat, raw_tag_id="t")
+
+    start = datetime(2026, 10, 19, 22, 9, 30)
+    t0 = start.timestamp()
+    cap = {"hand_id": 1, "started_at": start.isoformat(), "ended_at": (start + timedelta(seconds=60)).isoformat(),
+           "actions": []}
+    gt = {"hand_id": 1, "actions": [{"seat": 1, "action": "fold"}, {"seat": 2, "action": "call"},
+                                     {"seat": 3, "action": "check"}]}
+    events = [read(t0 - 8, 1, "As"), read(t0 - 4, 1, "Kd"),        # 配ったとき
+              read(t0 - 7, 2, "7c"),                                 # 2 枚目は読めない
+              read(t0 + 70, 3, "6s"), read(t0 + 71, 3, "7d")]        # ハンドが終わってから
+    r = eval_store.hole_cards_read({"hands": [gt]}, [cap], events)
+    assert (r["both_read"], r["acted_seats"]) == (1, 3)
+    assert r["missing"] == [(1, 2, 1), (1, 3, 0)]
