@@ -316,3 +316,40 @@ class TestFoldWordPairedWithTheLastDeparture:
         rows = [(a.street, a.seat, a.action, a.amount) for a in live.actions]
         assert rows[-1] == last and not any(a.street == "showdown" for a in live.actions)
         assert _replayed(tb, tmp_path) == rows
+
+
+class TestVoiceAfterTheDepartures:
+    """10/19 a64ec4ad ハンド 5（オーナーの注釈）: 席6・7・8 の札が離れてから 1〜2 秒あとに「レイズ8千、フォールド×3」。
+    ディーラーの声はプレイヤーの動きより遅れる。離脱の時点で間の席に言われないコールを補い、レイズを次の人に付けていた。"""
+
+    def _hand(self, tb: _Table, folds: str = "フォールド、フォールド") -> None:
+        tb.deal(HOLES4)                             # 手番は 6, 7, 4, 5
+        tb.lift(7)
+        tb.lift(4)
+        tb.tick(tb.now + 3.5)                       # 離脱が確定: 席6 にコールを補い、席7・4 のフォールド
+        tb.say(f"レイズ 600、{folds}", spoken_at=tb.now - 1.5)
+
+    def test_the_wager_belongs_to_the_seat_before_the_departures(self, tmp_path):
+        tb = _Table(tmp_path, seats=FOUR)
+        self._hand(tb)
+        tb.say("コール")
+        assert tb.played() == [("preflop", 6, "raise", 600), ("preflop", 7, "fold", 0),
+                               ("preflop", 4, "fold", 0), ("preflop", 5, "call", 400)]
+        assert tb.t._hand_needs_review              # noqa: SLF001
+
+    def test_without_the_fold_words_the_implied_call_stays(self, tmp_path):
+        # 補ったコールは本物のことも多い（声が聞き取れなかっただけ）: 先に降りた人の分を言わない発話は付け直さない
+        tb = _Table(tmp_path, seats=FOUR)
+        self._hand(tb, folds="")
+        tb.say("コール")
+        assert tb.played()[:4] == [("preflop", 6, "call", 200), ("preflop", 7, "fold", 0),
+                                   ("preflop", 4, "fold", 0), ("preflop", 5, "raise", 600)]
+
+    def test_replay_matches_live(self, tmp_path):
+        tb = _Table(tmp_path, seats=FOUR)
+        self._hand(tb)
+        tb.say("コール")
+        tb.say("ベット 1000")                       # フロップ: 席5
+        _finish_by_folds(tb, 6)
+        (live,) = tb.hands
+        assert _replayed(tb, tmp_path) == [(a.street, a.seat, a.action, a.amount) for a in live.actions]
