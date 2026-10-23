@@ -589,6 +589,10 @@ class SessionEstimator:
             presence = _masked(presence, [(e.value[0], e.at, e.value[1]) for e in lifts])
         button = next((e.value for e in edits if e.kind == "button"), w.button)
         stacks = {p["seat"]: p["stack_start"] for p in w.base.get("players") or [] if "stack_start" in p}
+        if stacks:
+            # このハンドに配られなかった席（バストして抜けた・休み）は持ち点 0 = 配らない。入れないと最初の持ち点のまま
+            # 全席でハンドを組み直していた（店舗 2026-10-19 a64ec4ad: 2 人だけ残った終盤を 8 人で, 推定の 15 ハンドが 1 に）
+            stacks.update({p.seat: 0 for p in self.players if p.seat not in stacks})
         blinds = w.base.get("blinds") or {}
         records: list = []
         labels: dict[str, str] = {}
