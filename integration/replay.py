@@ -62,10 +62,15 @@ def _in_replay_order(events: list[Event]) -> list[Event]:
         signals = events[i + 1:j]
         if isinstance(ev, AudioEvent):
             # 発話と同じ時刻の信号 = その発話の処理の中で出したもの（アクションを入れる前に反映した）
-            same = [s for s in signals if s.timestamp == ev.timestamp]
-            ordered.extend(same)
+            # その前にこの発話で始めたハンドの始まり（hand_start）も先に: live は発話を受けてハンドを始め、待つあいだに
+            # 離れた札をそのハンドに入れてから発話を反映した（店舗 2026-10-19 d01277f8 ハンド 33: 離脱だけを先に流すと
+            # 前のハンドに入った）
+            last_same = max((k for k, s in enumerate(signals) if s.timestamp == ev.timestamp), default=-1)
+            before = [s for k, s in enumerate(signals) if s.timestamp == ev.timestamp
+                      or (s.kind == "hand_start" and k < last_same)]
+            ordered.extend(before)
             ordered.append(ev)
-            ordered.extend(s for s in signals if s.timestamp != ev.timestamp)
+            ordered.extend(s for s in signals if not any(s is b for b in before))
         else:
             ordered.append(ev)
             ordered.extend(signals)

@@ -788,7 +788,48 @@ def evaluate_against_truth(truth: dict, captured_hands: list[dict]) -> dict:
         "review_precision": _pct(flagged_wrong, flagged), "review_recall": _pct(flagged_wrong, wrong),
         "by_source": {k: {"correct": v[0], "wrong": v[1]} for k, v in sorted(by_source.items())},
         "asr_confidence": {"correct": _summary(conf_ok), "wrong": _summary(conf_ng)},
+        **table_match(truth.get("hands") or [], cap_by_id),
     }
+
+
+def truth_seats(gt: dict) -> list[int]:
+    """真のアクションでそのハンドに配られた席（「いなかった」= `absent` の席を除く）。"""
+    return sorted(p["seat"] for p in gt.get("players") or []
+                  if isinstance(p, dict) and isinstance(p.get("seat"), int) and not p.get("absent"))
+
+
+def table_match(truth_hands_: list[dict], cap_by_id: dict) -> dict:
+    """ボタンの席・配られた席が真と同じハンドの数（10/19: ボタンが 1 席先に進んだまま 30 ハンド続いた）。
+
+    真のボタン = 入力画面で選んだ席（選ばなければ入れたときの記録の席 = `fill_truth_table` が入れる）。"""
+    button = seats = n = 0
+    wrong: list[dict] = []
+    for gt in truth_hands_:
+        cap = cap_by_id.get(gt.get("hand_id"))
+        if not cap or gt.get("button_seat") is None:
+            continue
+        n += 1
+        cap_seats = sorted(p.get("seat") for p in cap.get("players") or [] if isinstance(p.get("seat"), int))
+        ok_b = cap.get("button_seat") == gt["button_seat"]
+        ok_s = cap_seats == truth_seats(gt)
+        button += ok_b
+        seats += ok_s
+        if not (ok_b and ok_s):
+            wrong.append({"hand_id": gt.get("hand_id"), "button": [cap.get("button_seat"), gt["button_seat"]],
+                          "seats": None if ok_s else [cap_seats, truth_seats(gt)]})
+    return {"table_hands": n, "button_ok": button, "seats_ok": seats, "table_wrong": wrong}
+
+
+def fill_truth_table(truth: dict, record: list[dict]) -> dict:
+    """真のアクションにボタンの席が無ければ、入れたときの記録の席を入れる（入力画面は記録のボタンを出し、
+    違うときだけ選び直す）。"""
+    rec = {h.get("hand_id"): h for h in record}
+    hands = []
+    for h in truth.get("hands") or []:
+        if h.get("button_seat") is None and (rec.get(h.get("hand_id")) or {}).get("button_seat") is not None:
+            h = {**h, "button_seat": rec[h["hand_id"]]["button_seat"]}
+        hands.append(h)
+    return {**truth, "hands": hands}
 
 
 def _summary(values: list[float]) -> Optional[dict]:
@@ -868,7 +909,7 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
     report.setup = session_setup(record)
     report.sources = dict(action_sources(report.live))
     gt_file = _read_json(files.path(".ground_truth.json"))
-    report.gt = truth_hands(gt_file)
+    report.gt = fill_truth_table(truth_hands(gt_file), report.live)
     report.memos = truth_memos(gt_file)
     script = _read_json(files.path(SCRIPT_SUFFIX))
     events = load_events(files.events) if files.events.exists() else []
@@ -1311,7 +1352,9 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                       f"・一致率 {_fmt_pct(t['action_accuracy'])}・ボード {_fmt_pct(t['board_accuracy'])}"
                       f"・勝者 {_fmt_pct(t['winner_accuracy'])} ／ 誤った行 {t['wrong_rows']}・取りこぼし "
                       f"{t['missed_rows']} ／ 要確認 {t['flagged_rows']} 行（うち誤り {t['flagged_wrong']}）"
-                      f" = 精度 {_fmt_pct(t['review_precision'])}・再現率 {_fmt_pct(t['review_recall'])}")
+                      f" = 精度 {_fmt_pct(t['review_precision'])}・再現率 {_fmt_pct(t['review_recall'])}"
+                      + (f" ／ ボタン {t['button_ok']}/{t['table_hands']}・配られた席 {t['seats_ok']}/{t['table_hands']}"
+                         if t.get("table_hands") else ""))
                 for ph in t["per_hand"]:
                     totals[key]["correct"] += ph["correct"]
                     totals[key]["total"] += ph["total"]

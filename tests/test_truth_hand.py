@@ -249,3 +249,32 @@ class TestSendFromTheInputScreen:
         (cmd,), _ = ControlCommandLog(tmp_path / "s.control.jsonl").read_from(0)
         assert cmd.type == "truth_stacks" and cmd.args["hand_id"] == 1
         assert send_truth_stacks(tmp_path, "s", 2, {"actions": gt["actions"][:1]}, _captured()) is None
+
+
+class TestTable:
+    """真のアクションで席の有無・始めの持ち点を直す（`with_table`, 店舗 2026-10-19: 記録が席を誤った）。"""
+
+    def test_no_table_fields_keeps_the_record(self):
+        from core.truth_hand import with_table
+        cap = _captured()
+        assert with_table(cap, [{"seat": 1, "hole_cards": ["As", "Ah"]}]) is cap
+
+    def test_absent_seat_and_added_seat(self):
+        from core.truth_hand import with_table
+        cap = _captured()
+        out = with_table(cap, [{"seat": 2, "absent": True}, {"seat": 4, "name": "P4", "stack_start": 5000}])
+        assert [(p["seat"], p["stack_start"]) for p in out["players"]] == [(1, 10000), (3, 10000), (4, 5000)]
+        assert [p["seat"] for p in cap["players"]] == [1, 2, 3]        # 元は変えない
+
+    def test_materialize_uses_the_table(self):
+        # 席2 はいなかった: ボタン 席3 の 2 人 = 席3 が SB で先、席1 が BB
+        gt = {"actions": [{"seat": 3, "action": "call", "amount": 0}, {"seat": 1, "action": "check", "amount": 0},
+                          *_checks_to_river(1, 3)],
+              "players": [{"seat": 2, "absent": True},
+                          {"seat": 1, "stack_start": 3000, "hole_cards": ["As", "Ah"], "showed_down": True}],
+              "winner_seat": 1}
+        hand = materialize_truth(gt, _captured())
+        assert hand is not None
+        assert sorted(p["seat"] for p in hand["players"]) == [1, 3]
+        start = {p["seat"]: p["stack_start"] for p in hand["players"]}
+        assert start[1] == 3000

@@ -83,8 +83,14 @@ class TestReplayOrder:
         assert _in_replay_order([allin, fold, leave]) == [allin, leave, fold]
 
     def test_a_later_signal_stays_after(self):
-        fold, start, leave = _audio("fold", 13.61), _signal("hand_start", 13.63), _signal("leave", 13.61, seat=6)
-        assert _in_replay_order([fold, start, leave]) == [leave, fold, start]
+        fold, start, order = _audio("fold", 13.61), _signal("hand_start", 13.63), _signal("deal_order", 13.64)
+        assert _in_replay_order([fold, start, order]) == [fold, start, order]
+
+    def test_the_hand_this_utterance_started_goes_before_it(self):
+        """発話を受けてハンドを始め（hand_start）、待つあいだに離れた札をそのハンドに入れてから発話を反映した
+        （店舗 2026-10-19 d01277f8 ハンド 33）。離脱だけを先に流すと前のハンドに入る。"""
+        speech, start, leave = _audio("call", 13.61), _signal("hand_start", 13.63), _signal("leave", 13.61, seat=6)
+        assert _in_replay_order([speech, start, leave]) == [start, leave, speech]
 
     def test_a_record_without_signals_is_in_time_order(self):
         speech, card = _audio("call", 5.0), _card(5.0)

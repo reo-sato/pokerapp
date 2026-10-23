@@ -6,7 +6,8 @@
   に使う（2026-10-19, オーナー: 実践環境のテストで全部のハンドに真のアクションを入れ、お客さんに見せる）。
 
 真のアクションの行は席・アクション・額（ベット / レイズはトータル、コールは自動）だけを持つ。持ち点・ブラインド・ボタンは
-同じハンドのライブの記録から取る（真のアクションの `button_seat` があればそれ）。
+同じハンドのライブの記録から取る（真のアクションの `button_seat` があればそれ）。席は真のアクションの `players` で直せる
+（`absent` = そのハンドにいなかった・`stack_start` = 始めの持ち点, `with_table`, 2026-10-23）。
 """
 from __future__ import annotations
 
@@ -25,6 +26,38 @@ logger = logging.getLogger(__name__)
 GT_ACTIONS = ("fold", "check", "call", "bet", "raise", "allin")
 # 記録に持ち点が無いハンド（台本・古い記録）は十分大きい持ち点で流す（額の範囲で弾かない）
 FALLBACK_STACK = 10_000_000
+
+
+def with_table(captured: dict, players: Any) -> dict:
+    """真のアクションの席（いた / いなかった・始めの持ち点）で直したハンド（元は変えない）。
+
+    ライブの記録が席を誤ることがある（店舗 2026-10-19: 持ち点 0 と誤って記録した人に配られた・空いた席を入れた）。
+    真のアクションの `players` に `absent`（いなかった）・`stack_start`（始めの持ち点）・記録に無い席が無ければ、
+    記録のまま。言及の無い記録の席はそのまま残す。
+    """
+    if not isinstance(players, list):
+        return captured
+    live = {p["seat"]: p for p in captured.get("players") or []
+            if isinstance(p, dict) and isinstance(p.get("seat"), int)}
+    given = {p["seat"]: p for p in players
+             if isinstance(p, dict) and isinstance(p.get("seat"), int) and not isinstance(p.get("seat"), bool)}
+    if not any(p.get("absent") is True or _stack(p) is not None or seat not in live for seat, p in given.items()):
+        return captured
+    out = []
+    for seat in sorted(set(live) | set(given)):
+        p = given.get(seat, {})
+        if p.get("absent") is True:
+            continue
+        base = dict(live.get(seat) or {"seat": seat, "name": p.get("name") or f"席{seat}", "hole_cards": None})
+        if _stack(p) is not None:
+            base["stack_start"] = _stack(p)
+        out.append(base)
+    return {**captured, "players": out}
+
+
+def _stack(p: dict) -> Optional[int]:
+    v = p.get("stack_start")
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
 
 
 def players_for_replay(captured: dict) -> list[PlayerState]:
@@ -211,6 +244,7 @@ def materialize_truth(gt: dict, captured: dict) -> Optional[dict]:
     actions = gt.get("actions")
     if not isinstance(actions, list) or not actions:
         return None
+    captured = with_table(captured, gt.get("players"))
     button = gt.get("button_seat") if isinstance(gt.get("button_seat"), int) else None
     try:
         gs = start_state(captured, button)

@@ -2039,9 +2039,13 @@ class IntegrationThread(threading.Thread):
             self._end_showdown(ev)
             return
         if ev.kind == "hand_start":
-            if self._recorded_deals:
-                self._hand_start_due = True      # live がこの時点でハンドを始めた（発話を待ったあと）
-                self._start_dealt_hand_if_ready()
+            if self._recorded_deals and self._deal_at is not None:
+                # live がこの時点でハンドを始めた（配る前の発話を待ったあと）。replay は発話の待ちを見直さずに
+                # ここで始める。すでに始めていれば（配る前の発話を反映し終えた時点で始めた）何もしない: 「始める」を
+                # 残すと次のハンドを配った瞬間に始めてしまう（店舗 2026-10-19 d01277f8 ハンド 6: 発話を待つあいだの
+                # 札の離脱がハンド 6 に入り、席5 を降ろした）
+                self._hand_start_due = True
+                self._start_dealt_hand_if_ready(force=True)
             return
         if ev.kind == "deal_order":
             self._apply_deal_order(ev)

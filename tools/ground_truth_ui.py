@@ -56,7 +56,7 @@ from core.hand_estimate import load_estimates, overlay_log  # noqa: E402
 from core.hand_correction_repository import HandCorrectionRepository  # noqa: E402
 from core.hand_log import hand_street_flow  # noqa: E402
 from core.truth_hand import (  # noqa: E402
-    GT_ACTIONS, active_seats, apply_rows, players_for_replay, showdown_winner, start_state,
+    GT_ACTIONS, active_seats, apply_rows, players_for_replay, showdown_winner, start_state, with_table,
 )
 from tools.measure_capture_accuracy import HandAccuracy, measure_hand  # noqa: E402
 
@@ -452,9 +452,10 @@ def hand_detail(
     initial = _gt_actions(gt.hand) if gt is not None else ([] if blind else _gt_actions(captured))
     board, holes = _gt_cards(gt.hand) if gt is not None else (None, None)
     button = _gt_button(gt.hand) if gt is not None else None
-    legal = replay_legal(captured, initial, board=board, holes=holes, button=button)
+    table = with_table(captured, gt.hand.get("players")) if gt is not None else captured
+    legal = replay_legal(table, initial, board=board, holes=holes, button=button)
     # 開いた時点で食い違いを見せる（入れ終わったハンドを見直すときに、編集しなくても出る）
-    legal["lint"] = hand_lint(captured, legal["actions"], legal["next"], board, holes, show_record=not blind)
+    legal["lint"] = hand_lint(table, legal["actions"], legal["next"], board, holes, show_record=not blind)
     return {
         "session_id": session_id,
         "captured": captured,
@@ -467,7 +468,31 @@ def hand_detail(
         "script": script,
         "in_progress": in_progress,
         "timeline": hand_timeline(log_dir, session_id, captured, _next_started_at(log_dir, session_id, hand_id)),
+        "table_seats": table_seats(log_dir, session_id, hand_id),
     }
+
+
+def table_seats(log_dir: Path, session_id: str, hand_id: int) -> list[dict]:
+    """このセッションで卓にいた席と、このハンドの始めの持ち点の見込み（入力画面で「いた」にした席の既定）。
+
+    見込み = 前のハンドの始めの持ち点 + 収支（このハンドに記録があればその持ち点、前に無ければあとのハンドの持ち点）。"""
+    log = _load_hand_log(log_dir, session_id)
+    seats: dict[int, dict] = {}
+    for h in sorted(_hands_of(log) if log else [], key=lambda x: x.get("hand_id") or 0):
+        hid = h.get("hand_id") or 0
+        for p in h.get("players") or []:
+            seat, start = p.get("seat"), p.get("stack_start")
+            if not isinstance(seat, int) or not isinstance(start, (int, float)):
+                continue
+            row = seats.setdefault(seat, {"seat": seat, "name": p.get("name") or f"席{seat}", "stack": None})
+            if hid < hand_id:
+                result = p.get("result") if isinstance(p.get("result"), (int, float)) else 0
+                row["stack"] = int(start + result)
+            elif hid == hand_id or row["stack"] is None:
+                row["stack"] = int(start)
+            if hid <= hand_id:
+                row["name"] = p.get("name") or row["name"]
+    return [seats[s] for s in sorted(seats)]
 
 
 def _add_street_totals(captured: dict) -> None:
@@ -602,6 +627,15 @@ def validate_gt_hand(hand: Any) -> dict:
         }
         if isinstance(p.get("name"), str):
             entry["name"] = p["name"]
+        if p.get("absent") is True:
+            if holes:
+                raise GroundTruthError(f"席{seat} は「いなかった」なのに手札があります")
+            entry["absent"] = True           # このハンドにいなかった（記録が誤って入れた席, 2026-10-23）
+        stack = p.get("stack_start")
+        if stack is not None:
+            if not isinstance(stack, int) or isinstance(stack, bool) or stack <= 0:
+                raise GroundTruthError(f"席{seat} の始めの持ち点が不正です")
+            entry["stack_start"] = stack     # 始めの持ち点（記録の持ち点が誤っているとき）
         players.append(entry)
     winner = hand.get("winner_seat")
     if winner is not None:
@@ -759,7 +793,8 @@ def gt_lint(captured: dict, hand: dict) -> list[str]:
         if a["action"] == "fold":
             folded.setdefault(a["seat"], i)
     board, holes = _gt_cards(hand)
-    legal = replay_legal(captured, rows, board=board, holes=holes, button=_gt_button(hand))
+    legal = replay_legal(with_table(captured, hand.get("players")), rows, board=board, holes=holes,
+                         button=_gt_button(hand))
     err = legal.get("error") or {}
     if isinstance(err.get("index"), int) and err["index"] >= 0:
         msgs.append(f"{err['index'] + 1} 行目から先は反映できません（ストリートが付きません）: {err.get('message')}")
@@ -1101,6 +1136,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"code": "invalid_amount", "message": "actions が要ります"})
                 return
             board, holes = _gt_cards(body)
+            captured = with_table(captured, body.get("players"))
             result = replay_legal(captured, actions, board=board, holes=holes, button=_gt_button(body))
             result["lint"] = hand_lint(captured, result["actions"], result["next"], board, holes,
                                        show_record=body.get("blind") is not True)
@@ -1240,6 +1276,8 @@ _PAGE = r"""<!doctype html>
  .panel { background:#161a20; border:1px solid #2d333b; border-radius:12px; padding:12px 14px; }
  .seatrow { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #2d333b; }
  .seatrow .no { min-width:120px; }
+ .seatrow.absent .no { opacity:.5; }
+ .seatrow .stack input { width:110px; min-height:36px; padding:4px 8px; }
  .chips { display:flex; flex-wrap:wrap; gap:6px; }
  .chip { border-radius:999px; padding:6px 14px; }
  .chip.on { background:#1f6feb; border-color:#1f6feb; }
@@ -1442,9 +1480,18 @@ function followRecordBoard(capBoard){
 }
 function buildGt(d){
   const cap = d.captured, g = d.ground_truth, src = g || cap;
-  const players = (cap.players || []).filter(p => typeof p.seat === "number").map(p => {
-    const gp = (g && (g.players || []).find(x => x.seat === p.seat)) || p;
-    return {seat:p.seat, name:p.name || "", hole_cards: normCards(gp.hole_cards, 2), showed_down: !!gp.showed_down};
+  // 席: 記録の席 + このセッションで卓にいた席（「いた」にできる）。記録が席を誤ることがある（2026-10-23）
+  const capP = (cap.players || []).filter(p => typeof p.seat === "number");
+  const gP = ((g && g.players) || []).filter(p => typeof p.seat === "number");
+  const table = d.table_seats || [];
+  const all = [...new Set([...capP, ...gP, ...table].map(p => p.seat))].sort((a, b) => a - b);
+  const players = all.map(seat => {
+    const cp = capP.find(x => x.seat === seat), gp = gP.find(x => x.seat === seat), tp = table.find(x => x.seat === seat);
+    const src2 = gp || cp || {};
+    return {seat, name: (cp || gp || tp || {}).name || "", hole_cards: normCards(src2.hole_cards, 2),
+            showed_down: !!(gp && gp.showed_down), absent: gp ? !!gp.absent : !cp,
+            stack_start: gp && gp.stack_start != null ? gp.stack_start : null,
+            record_stack: cp ? (cp.stack_start ?? null) : null, default_stack: (cp && cp.stack_start) ?? (tp && tp.stack) ?? null};
   });
   const blind = !!d.blind && !g;              // 記録を見ずに入れる（アクションと勝者は空から）
   const actions = blind ? [] : (src.actions || []).filter(a => GT_ACTIONS.includes(a.action) && typeof a.seat === "number")
@@ -1492,7 +1539,7 @@ function refreshLegal(){
       const body = {actions: S.gt.actions.map(a => ({seat:a.seat, action:a.action, amount:a.amount})),
                     button_seat: S.gt.button_seat,
                     board: S.gt.board.map(c => c || "??"),
-                    players: S.gt.players.map(p => ({seat: p.seat, hole_cards: p.hole_cards.filter(Boolean)})),
+                    players: S.gt.players.map(tablePlayer),
                     blind: isBlind()};
       S.legal = await api(sidPath() + "/hands/" + S.hand.captured.hand_id + "/legal", {method:"POST", body: JSON.stringify(body)});
       applyLegal();
@@ -1501,16 +1548,31 @@ function refreshLegal(){
   }, 60);
 }
 function touch(){ S.dirty = true; refreshLegal(); }
+// 席の有無・始めの持ち点（記録に無い席を「いた」にしたら、見込みの持ち点で始める）
+function tablePlayer(p){
+  const out = {seat: p.seat, hole_cards: p.absent ? [] : p.hole_cards.filter(Boolean)};
+  if (p.absent) out.absent = true;
+  const stack = p.stack_start != null ? p.stack_start : (p.record_stack == null && !p.absent ? p.default_stack : null);
+  if (stack > 0 && !p.absent) out.stack_start = stack;
+  return out;
+}
+function presentSeats(){ return S.gt.players.filter(p => !p.absent).map(p => p.seat); }
+function setAbsent(seat){
+  const p = S.gt.players.find(x => x.seat === seat); p.absent = !p.absent;
+  if (p.absent) { p.hole_cards = [null, null]; p.showed_down = false; }
+  touch(); renderEdit();
+}
+function setStack(seat, v){ const p = S.gt.players.find(x => x.seat === seat); const n = parseInt(v, 10); p.stack_start = n > 0 ? n : null; touch(); }
 function setRowSeat(i, v){ S.gt.actions[i].seat = parseInt(v, 10); touch(); }
 function setRowAction(i, v){ const a = S.gt.actions[i]; a.action = v; if (!["bet","raise","allin"].includes(v)) a.amount = 0; touch(); }
 function setRowAmount(i, v){ S.gt.actions[i].amount = parseInt(v, 10) || 0; touch(); }
 function setRowStreet(i, v){ S.gt.actions[i].street = v; S.dirty = true; renderEdit(); }
 function delRow(i){ S.gt.actions.splice(i, 1); touch(); }
-function insRow(i){ const a = S.gt.actions[i]; S.gt.actions.splice(i, 0, {seat: a ? a.seat : S.gt.players[0].seat, action:"check", amount:0}); touch(); }
+function insRow(i){ const a = S.gt.actions[i]; S.gt.actions.splice(i, 0, {seat: a ? a.seat : presentSeats()[0], action:"check", amount:0}); touch(); }
 function addRow(){
   // 最後に 1 行足す（次の手番が分かればその席、分からなければ最後の行の次の席）
   const g = S.gt, L = S.legal || {}, n = L.next;
-  const seats = (g.players || []).map(p => p.seat);
+  const seats = presentSeats();
   let seat = seats.length ? seats[0] : 1;
   if (n && n.actor_seat != null && !L.error) seat = n.actor_seat;
   else if (g.actions.length && seats.length) {
@@ -1638,12 +1700,12 @@ function setNotes(v){ S.gt.notes = v; S.dirty = true; }
 function setExcluded(v){ S.gt.excluded = !!v; S.dirty = true; }
 function resetToCaptured(){
   if (!confirm("入力した内容を捨てて、記録の内容に戻しますか？")) return;
-  S.gt = buildGt({captured: S.hand.captured, ground_truth: null}); S.boardTouched = new Set(); touch();
+  S.gt = buildGt({captured: S.hand.captured, ground_truth: null, table_seats: S.hand.table_seats}); S.boardTouched = new Set(); touch();
 }
 
 function renderEdit(){
   const d = S.hand, cap = d.captured, g = S.gt, L = S.legal || {};
-  const seats = g.players.map(p => p.seat);
+  const seats = presentSeats();
   const la = L.actions || [], err = L.error, n = L.next;
   const replayOk = !!n;
   const hidden = isBlind();
@@ -1697,9 +1759,11 @@ function renderEdit(){
       </div></div>`;
   }
   const boardHtml = g.board.map((c, i) => `<div style="text-align:center">${cardHtml(c, "", `openPicker('board',${i})`)}<div class="small muted">${BOARD_LABEL[i]}</div></div>`).join("");
-  const playersHtml = g.players.map(p => `<div class="seatrow"><div class="no">席 ${p.seat} <span class="muted small">${esc(p.name)}</span></div>
-      <div>${cardHtml(p.hole_cards[0], "", `openPicker('hole',${p.seat},0)`)}${cardHtml(p.hole_cards[1], "", `openPicker('hole',${p.seat},1)`)}</div>
-      <button class="sm chip ${p.showed_down?"on":""}" onclick="setShowed(${p.seat})">見せた</button></div>`).join("");
+  const playersHtml = g.players.map(p => `<div class="seatrow ${p.absent ? "absent" : ""}"><div class="no">席 ${p.seat} <span class="muted small">${esc(p.name)}</span></div>
+      <button class="sm chip ${p.absent?"":"on"}" onclick="setAbsent(${p.seat})" title="このハンドに配られたか">${p.absent ? "いない" : "いた"}</button>
+      ${p.absent ? "" : `<div>${cardHtml(p.hole_cards[0], "", `openPicker('hole',${p.seat},0)`)}${cardHtml(p.hole_cards[1], "", `openPicker('hole',${p.seat},1)`)}</div>
+      <button class="sm chip ${p.showed_down?"on":""}" onclick="setShowed(${p.seat})">見せた</button>
+      <label class="small muted stack">持ち点 <input type="number" inputmode="numeric" value="${p.stack_start ?? ""}" placeholder="${p.default_stack > 0 ? p.default_stack : "入れてください"}" onchange="setStack(${p.seat}, this.value)" onkeydown="if(event.key==='Enter'){this.blur()}"></label>`}</div>`).join("");
   const buttonHtml = `<div class="chips">${seats.map(s => `<button class="chip ${g.button_seat===s?"on":""}" onclick="setButton(${s})">席 ${s}</button>`).join("")}
       <span class="muted small" style="align-self:center">${g.button_seat !== cap.button_seat ? `記録は席 ${cap.button_seat ?? "—"}（ディーラーがボタンを動かし忘れた）` : "記録どおり。ディーラーがボタンを動かし忘れたときは実際の席を選ぶ（手番の順が変わります）"}</span></div>`;
   const sdw = L.next && L.next.hand_over && L.next.foldout_winner == null ? L.next.showdown_winner : null;
@@ -1756,7 +1820,7 @@ function renderEdit(){
         ${reconcile}
         <h2 style="margin-top:0">実際（真のアクション）</h2>
         <h2>ボード</h2><div style="display:flex;gap:6px;flex-wrap:wrap">${boardHtml}</div>
-        <h2>手札（分かる席だけ）</h2>${playersHtml}
+        <h2>席と手札 <span class="muted small">いなかった席は「いた」を押して外す。記録に無い席も「いない」を押すと入る。持ち点は記録と違うときだけ</span></h2>${playersHtml}
         <h2>ボタン</h2>${buttonHtml}
         <h2>アクション <span class="muted small">コールの額とストリートは自動。ベット / レイズはトータルの額</span></h2>
         <div class="tbl"><table><tr><th>ストリート</th><th>席</th><th>アクション</th><th>額</th><th></th></tr>${rows || "<tr><td colspan='5' class='muted'>まだありません（下のボタンで足す）</td></tr>"}</table></div>
@@ -1812,7 +1876,8 @@ function gtPayload(){
   const g = S.gt;
   return {board: g.board.filter(Boolean),
           actions: g.actions.map(a => ({seat:a.seat, action:a.action, amount:a.amount || 0, street:a.street, unsure: a.unsure || undefined})),
-          players: g.players.map(p => ({seat:p.seat, name:p.name, hole_cards: p.hole_cards.filter(Boolean), showed_down: p.showed_down})),
+          players: g.players.map(p => Object.assign({seat:p.seat, name:p.name, hole_cards: p.absent ? [] : p.hole_cards.filter(Boolean),
+                                                     showed_down: !p.absent && p.showed_down}, tablePlayer(p), {hole_cards: p.absent ? [] : p.hole_cards.filter(Boolean)})),
           winner_seat: g.winner_seat, notes: g.notes || "", blind: isBlind() || undefined,
           excluded: g.excluded || undefined,
           button_seat: g.button_seat != null && g.button_seat !== S.hand.captured.button_seat ? g.button_seat : undefined};
