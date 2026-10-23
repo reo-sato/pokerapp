@@ -22,6 +22,9 @@ TAGS = (
     "声の読み違い", "声が無い・聞こえない", "声の遅れ・順番", "雑談をアクションに", "札の離脱（フォールド）",
     "補ったコール・チェック", "額", "ボタン・席", "持ち点", "ショーダウン・勝者", "ボード",
     "推定の選び方", "真のアクションの誤り", "その他",
+    # 監査 4 回目（2026-10-23）の推奨: 10/19 で数えた具体的な機構
+    "本物の賭けの語を捨てた", "離脱を持ち上げと誤った", "言われないフォールド（声なし）", "オールインの額",
+    "手番の見立て（人数）", "真の順が分からない",
 )
 
 
@@ -97,8 +100,12 @@ def _truth_hand(captured: dict, gt: dict) -> dict:
     holes = {p.get("seat"): p.get("hole_cards") for p in gt.get("players") or [] if isinstance(p, dict)}
     players = [{"seat": p.get("seat"), "stack_start": p.get("stack_start"), "hole_cards": holes.get(p.get("seat"))}
                for p in table.get("players") or []]
+    # 始めの持ち点を入れた席（ほかは記録の持ち点のまま = オールインの額は記録と記録を比べている, 監査 4 回目）
+    entered = sorted(p.get("seat") for p in gt.get("players") or []
+                     if isinstance(p, dict) and p.get("stack_start") is not None)
     return {**gt, "actions": actions, "board": gt.get("board") or captured.get("board") or [],
-            "button_seat": button, "players": players}
+            "button_seat": button, "players": players, "stack_entered": entered,
+            "button_entered": gt.get("button_seat") is not None}
 
 
 def _compare(truth: dict, hand: Optional[dict]) -> dict:
@@ -111,18 +118,63 @@ def _compare(truth: dict, hand: Optional[dict]) -> dict:
     ok_cap = {id(c) for g, c in pairs if row_correct(g, c)}
     ok_gt = {id(g) for g, c in pairs if row_correct(g, c)}
     m = measure_hand(truth, hand)
+    rows_ok = [id(r) in ok_cap for r in rows]
+    truth_ok = [id(r) in ok_gt for r in gt_rows]
     return {
         "exact": hand_fully_correct(truth, hand),
         "correct": m.action_correct, "total": m.action_total,
-        "rows_ok": [id(r) in ok_cap for r in rows],
-        "truth_ok": [id(r) in ok_gt for r in gt_rows],
+        "rows_ok": rows_ok, "truth_ok": truth_ok,
         "winner_ok": m.winner_match, "board_ok": m.board_match,
+        "first": _first_error(gt_rows, rows, pairs, truth_ok, rows_ok),
     }
 
 
+def source_of(row: dict) -> str:
+    """推定・記録の行の出どころ（監査 4 回目: 声 / 札の離脱 / 補い の 3 つで誤りの割合が大きく違う）。"""
+    src = row.get("actor_source") or ""
+    if src in ("rfid_departure", "rfid_muck"):
+        return "札の離脱"
+    if src == "implied" or str(row.get("reason") or "").startswith("implied"):
+        return "補い"
+    if row.get("raw_text") or src == "spoken_fold":
+        return "声"
+    return "他"
+
+
+def _first_error(gt_rows: list[dict], rows: list[dict], pairs: list, truth_ok: list[bool],
+                 rows_ok: list[bool]) -> Optional[dict]:
+    """ハンドで最初に崩れた行（監査 4 回目: 誤りの 7 割はその後ろの連鎖なので、直す順は最初の誤りで決める）。
+
+    真の行の順で最初に合わなかった行と、それに並んだ側の行。真の行が全部合って余計な行だけなら、その最初の行。
+    """
+    partner = {id(g): c for g, c in pairs}
+    index = {id(r): j for j, r in enumerate(rows)}
+    for i, g in enumerate(gt_rows):
+        if truth_ok[i]:
+            continue
+        c = partner.get(id(g))
+        if c is None:
+            kind = "取りこぼし"
+        elif (c.get("seat"), c.get("street")) != (g.get("seat"), g.get("street")):
+            kind = "ずれ"
+        elif c.get("action") != g.get("action"):
+            kind = f"{g.get('action')}→{c.get('action')}"
+        else:
+            kind = "額"
+        return {"truth_index": i, "row_index": index.get(id(c)) if c is not None else None, "kind": kind,
+                "street": g.get("street"), "source": source_of(c) if c is not None else None}
+    for j, ok in enumerate(rows_ok):
+        if not ok:
+            return {"truth_index": None, "row_index": j, "kind": "余計", "street": rows[j].get("street"),
+                    "source": source_of(rows[j])}
+    return None
+
+
 def _rows(hand: Optional[dict]) -> list[dict]:
-    keep = ("street", "seat", "action", "amount", "raw_text", "reason", "actor_source", "needs_review", "position")
-    return [{k: a.get(k) for k in keep if a.get(k) is not None} for a in (hand or {}).get("actions") or []]
+    keep = ("street", "seat", "action", "amount", "raw_text", "reason", "actor_source", "needs_review", "position",
+            "unsure")
+    return [{**{k: a.get(k) for k in keep if a.get(k) is not None}, "source": source_of(a)}
+            for a in (hand or {}).get("actions") or []]
 
 
 def _side(hand: Optional[dict]) -> Optional[dict]:
@@ -132,6 +184,7 @@ def _side(hand: Optional[dict]) -> Optional[dict]:
             "board": hand.get("board") or [], "pot_total": hand.get("pot_total"),
             "seats": [p.get("seat") for p in hand.get("players") or []],
             "stacks": {str(p.get("seat")): p.get("stack_start") for p in hand.get("players") or []},
+            "stack_entered": hand.get("stack_entered"), "button_entered": hand.get("button_entered"),
             "rows": _rows(hand)}
 
 
@@ -172,7 +225,7 @@ def review_summary(log_dir: Path, session_id: str, gt_repo: Any, corr_repo: Any 
             row["live"] = {k: live[k] for k in ("exact", "correct", "total")}
             if entry is not None:
                 est = _compare(truth, entry["hand"])
-                row["est"] = {k: est[k] for k in ("exact", "correct", "total")}
+                row["est"] = {k: est[k] for k in ("exact", "correct", "total", "first")}
         if entry is not None:
             row["margin"] = entry.get("margin")
             row["review"] = bool(entry.get("review"))
@@ -226,7 +279,7 @@ REVIEW_PAGE = r"""<!doctype html>
  button { font:inherit; color:#e8eaed; background:#2d333b; border:1px solid #3a414d; border-radius:8px; padding:6px 12px; cursor:pointer; }
  button.primary { background:#1f6feb; border-color:#1f6feb; }
  button.sm { padding:2px 8px; font-size:13px; }
- .layout { display:grid; grid-template-columns: minmax(250px, 330px) 1fr; gap:14px; }
+ .layout { display:grid; grid-template-columns: minmax(280px, 440px) 1fr; gap:14px; }
  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
  .list { max-height:85vh; overflow-y:auto; border:1px solid #2d333b; border-radius:10px; }
  table { border-collapse:collapse; width:100%; }
@@ -238,6 +291,8 @@ REVIEW_PAGE = r"""<!doctype html>
  @media (max-width: 1200px) { .cols { grid-template-columns: 1fr; } }
  .panel { border:1px solid #2d333b; border-radius:10px; padding:8px 10px; background:#161a20; overflow-x:auto; }
  .rowok td { background:rgba(46,160,67,.10); } .rowng td { background:rgba(248,81,73,.14); }
+ .first td { box-shadow: inset 0 2px 0 #f0b72f, inset 0 -2px 0 #f0b72f; } .first td:first-child { box-shadow: inset 2px 2px 0 #f0b72f, inset 0 -2px 0 #f0b72f; }
+ .firstmark { color:#f0b72f; font-size:12px; } .inh { color:#6e7681; font-size:11px; }
  .why { color:#9aa0a6; font-size:12px; white-space:normal; }
  .chips { display:flex; flex-wrap:wrap; gap:6px; }
  .chip { border-radius:999px; padding:3px 10px; font-size:13px; }
@@ -251,6 +306,7 @@ REVIEW_PAGE = r"""<!doctype html>
 </style></head><body>
 <div class="bar"><h1>推定の見直し</h1><select id="sess" onchange="pickSession(this.value)"></select>
  <label class="small"><input type="checkbox" id="onlyBad" onchange="renderList()"> 推定が真と違うハンドだけ</label>
+ <select id="firstKind" onchange="renderList()" class="small"><option value="">最初の誤り: すべて</option></select>
  <span id="sum" class="small muted"></span>
  <a class="small" href="/">← 真のアクションの入力</a></div>
 <div class="layout"><div class="list" id="list"></div><div id="detail" class="muted">左のハンドを選んでください。</div></div>
@@ -268,33 +324,41 @@ async function start(){
   if (sessions.length) pickSession(sessions[0].session_id);
 }
 async function pickSession(sid){ R.sid = sid; R.sum = await api("/api/review/" + encodeURIComponent(sid)); renderList(); }
+const KIND = k => k ? k.replace(/(\w+)→(\w+)/, (_, a, b) => `${AC[a] || a}→${AC[b] || b}`) : "";
+function firstText(f){ return f ? `${ST[f.street] || f.street || ""} ${KIND(f.kind)}${f.source ? "（" + f.source + "）" : ""}` : ""; }
 function mark(x){ return x == null ? '<span class="na">—</span>' : (x.exact ? '<span class="ok">✓</span>' : '<span class="ng">✗</span>') + ` <span class="muted">${x.correct}/${x.total}</span>`; }
 function renderList(){
   const s = R.sum; if (!s) return;
-  const only = $("onlyBad").checked;
-  const rows = s.hands.filter(h => !only || (h.est && !h.est.exact));
+  const only = $("onlyBad").checked, kind = $("firstKind").value;
+  const kinds = {};
+  s.hands.forEach(h => { const f = h.est && h.est.first; if (f) kinds[f.kind] = (kinds[f.kind] || 0) + 1; });
+  const sel = $("firstKind"), keep = sel.value;
+  sel.innerHTML = '<option value="">最初の誤り: すべて</option>' + Object.entries(kinds).sort((a, b) => b[1] - a[1])
+    .map(([k, n]) => `<option value="${esc(k)}" ${k === keep ? "selected" : ""}>${esc(KIND(k))}（${n}）</option>`).join("");
+  const rows = s.hands.filter(h => (!only || (h.est && !h.est.exact)) && (!kind || (h.est && h.est.first && h.est.first.kind === kind)));
   const withT = s.hands.filter(h => h.est);
   $("sum").textContent = s.estimate ? `推定 ${withT.filter(h => h.est.exact).length}/${withT.length} ・ 記録 ${s.hands.filter(h => h.live && h.live.exact).length}/${s.hands.filter(h => h.live).length} が全部正しい（${s.estimate.file}・内容の指紋 ${s.estimate.content_hash || "—"}）`
                                     : "このセッションの推定のファイルがありません（pokerestimate の zip を一緒に渡してください）";
-  $("list").innerHTML = `<table><tr><th>ハンド</th><th>推定</th><th>記録</th><th>差</th><th>メモ</th></tr>${rows.map(h => `
+  $("list").innerHTML = `<table><tr><th>ハンド</th><th>推定</th><th>最初の誤り</th><th>記録</th><th>差</th><th>メモ</th></tr>${rows.map(h => `
     <tr class="pick ${R.hand && R.hand.hand_id === h.hand_id ? "sel" : ""}" onclick="openHand(${h.hand_id})">
      <td>#${h.hand_id} <span class="muted">${esc((h.started_at||"").slice(11,16))}</span>${h.excluded ? ' <span class="tag">外した</span>' : (h.truth ? "" : ' <span class="tag">真なし</span>')}</td>
-     <td>${mark(h.est)}${h.review ? ' <span class="tag">要確認</span>' : ""}</td><td>${mark(h.live)}</td>
+     <td>${mark(h.est)}${h.review ? ' <span class="tag">要確認</span>' : ""}</td><td class="small">${esc(firstText(h.est && h.est.first))}</td><td>${mark(h.live)}</td>
      <td class="muted">${h.margin == null ? "" : Number(h.margin).toFixed(1)}</td>
      <td>${h.note ? (h.note.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join("") || "✎" : ""}</td></tr>`).join("")}</table>`;
 }
-function rowsTable(side, oks, title, cmp){
+function rowsTable(side, oks, title, cmp, first, truthSide){
   if (!side) return `<div class="panel"><h2>${title}</h2><p class="muted small">ありません</p></div>`;
   const body = side.rows.map((a, i) => {
-    const ok = oks ? oks[i] : null;
-    return `<tr class="${ok === true ? "rowok" : ok === false ? "rowng" : ""}"><td>${ST[a.street] || esc(a.street)}</td><td>席${a.seat}${a.position ? ` <span class="muted">${esc(a.position)}</span>` : ""}</td>
+    const ok = oks ? oks[i] : null, isFirst = first != null && first === i;
+    return `<tr class="${ok === true ? "rowok" : ok === false ? "rowng" : ""} ${isFirst ? "first" : ""}"><td>${ST[a.street] || esc(a.street)}</td><td>席${a.seat}${a.position ? ` <span class="muted">${esc(a.position)}</span>` : ""}</td>
       <td>${AC[a.action] || esc(a.action)}</td><td>${a.amount || ""}</td>
-      <td class="why">${a.raw_text ? "「" + esc(a.raw_text) + "」 " : ""}${a.reason ? esc(a.reason) : ""}</td></tr>`;
+      <td class="why">${isFirst ? '<span class="firstmark">最初の誤り</span> ' : ""}${a.unsure ? '<span class="tag">自信なし</span>' : ""}${!truthSide && a.source ? `<span class="tag">${esc(a.source)}</span>` : ""}${a.raw_text ? "「" + esc(a.raw_text) + "」 " : ""}${a.reason ? esc(a.reason) : ""}</td></tr>`;
   }).join("");
-  const head = `ボタン 席${side.button_seat ?? "—"} ／ 勝者 ${side.winner_seat != null ? "席" + side.winner_seat : "—"} ／ ボード ${(side.board || []).join(" ") || "—"}`
+  const entered = side.stack_entered ? new Set(side.stack_entered) : null;
+  const head = `ボタン 席${side.button_seat ?? "—"}${truthSide && side.button_entered === false ? ' <span class="inh">(記録のまま)</span>' : ""} ／ 勝者 ${side.winner_seat != null ? "席" + side.winner_seat : "—"} ／ ボード ${(side.board || []).join(" ") || "—"}`
     + (cmp ? ` ／ 勝者 ${cmp.winner_ok === false ? '<span class="ng">✗</span>' : '<span class="ok">✓</span>'} ボード ${cmp.board_ok ? '<span class="ok">✓</span>' : '<span class="ng">✗</span>'}` : "");
   return `<div class="panel"><h2>${title} ${cmp ? (cmp.exact ? '<span class="ok">全部正しい</span>' : `<span class="ng">${cmp.correct}/${cmp.total}</span>`) : ""}</h2>
-    <div class="small muted">${head}</div><div class="small muted">席 ${(side.seats||[]).map(s => `${s}:${side.stacks[String(s)] ?? "—"}`).join(" ")}</div>
+    <div class="small muted">${head}</div><div class="small muted">席 ${(side.seats||[]).map(s => `${s}:${side.stacks[String(s)] ?? "—"}${entered && !entered.has(s) ? '<span class="inh">記</span>' : ""}`).join(" ")}${entered ? ' <span class="inh">（記 = 始めの持ち点は記録のまま）</span>' : ""}</div>
     <table>${body || "<tr><td class='muted'>行なし</td></tr>"}</table></div>`;
 }
 async function openHand(hid){
@@ -310,8 +374,9 @@ function renderDetail(){
   $("detail").innerHTML = `
     <div class="bar"><h1 style="font-size:16px">ハンド #${d.hand_id}</h1><span class="muted small">${esc(d.started_at)} ／ ブラインド ${d.blinds ? d.blinds.sb + "/" + d.blinds.bb : "—"}</span>
       ${d.truth_notes ? `<span class="small">真のアクションのメモ: ${esc(d.truth_notes)}</span>` : ""}</div>
-    <div class="cols">${rowsTable(d.truth, c.est ? c.est.truth_ok : null, "真のアクション（色 = 推定で合った行）", null)}
-      ${rowsTable(d.est, c.est ? c.est.rows_ok : null, "推定", c.est)}${rowsTable(d.live, c.live ? c.live.rows_ok : null, "ライブの記録", c.live)}</div>
+    ${c.est && c.est.first ? `<div class="small" style="margin-bottom:6px"><span class="firstmark">最初の誤り</span>: ${esc(firstText(c.est.first))} <span class="muted">— これより後ろの誤りの多くは連鎖です。タグはこの行の原因に付けてください。</span></div>` : ""}
+    <div class="cols">${rowsTable(d.truth, c.est ? c.est.truth_ok : null, "真のアクション（色 = 推定で合った行）", null, c.est && c.est.first ? c.est.first.truth_index : null, true)}
+      ${rowsTable(d.est, c.est ? c.est.rows_ok : null, "推定", c.est, c.est && c.est.first ? c.est.first.row_index : null)}${rowsTable(d.live, c.live ? c.live.rows_ok : null, "ライブの記録", c.live, c.live && c.live.first ? c.live.first.row_index : null)}</div>
     <div class="panel" style="margin-top:10px"><div class="meta">
       <span class="muted">推定の直し</span><span>${esc((e.edits || []).join("・") || "なし")}</span>
       <span class="muted">要確認の理由</span><span>${esc((e.notes || []).join("・") || "なし")}</span>

@@ -84,3 +84,18 @@ def test_served_by_the_entry_server(log_dir):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_first_error_is_the_first_truth_row_that_did_not_match(log_dir):
+    """監査 4 回目: 誤りの多くは最初の誤りの後ろの連鎖なので、ハンドで最初に崩れた行を出す。"""
+    s = review_summary(log_dir, SID, GroundTruthRepository(log_dir))
+    assert s["hands"][0]["est"]["first"] is None                  # 全部正しい
+    d = review_detail(log_dir, SID, 2, GroundTruthRepository(log_dir))
+    first = d["compare"]["live"]["first"]
+    assert (first["truth_index"], first["row_index"], first["kind"], first["street"]) == (4, 4, "額", "flop")
+    assert "source" in d["live"]["rows"][0]
+
+
+def test_truth_side_marks_stacks_kept_from_the_record(log_dir):
+    d = review_detail(log_dir, SID, 1, GroundTruthRepository(log_dir))
+    assert d["truth"]["stack_entered"] == [] and d["truth"]["button_entered"] is False
