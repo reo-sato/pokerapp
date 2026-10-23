@@ -898,6 +898,9 @@ _ROUTE_LEGAL = re.compile(r"^/api/sessions/([^/]+)/hands/(\d+)/legal/?$")
 _ROUTE_AUDIO = re.compile(r"^/api/sessions/([^/]+)/audio/([^/]+)$")
 _ROUTE_REVIEW = re.compile(r"^/api/review/([^/]+)/?$")
 _ROUTE_REVIEW_HAND = re.compile(r"^/api/review/([^/]+)/(\d+)/?$")
+_ROUTE_TABLE_CURRENT = re.compile(r"^/api/table/([^/]+)/current/?$")
+_ROUTE_TABLE_HAND = re.compile(r"^/api/table/([^/]+)/hands/(\d+)/?$")
+_ROUTE_TABLE_LEGAL = re.compile(r"^/api/table/([^/]+)/hands/(\d+)/legal/?$")
 _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
@@ -1067,6 +1070,24 @@ class _Handler(BaseHTTPRequestHandler):
 
             self._send_page(REVIEW_PAGE)
             return
+        if path in ("/table", "/table/"):
+            from tools.table_entry import TABLE_PAGE
+
+            self._send_page(TABLE_PAGE)
+            return
+        m = _ROUTE_TABLE_CURRENT.match(path) or _ROUTE_TABLE_HAND.match(path)
+        if m:
+            from tools.table_entry import current_hand_id, table_hand
+
+            sid = self._session(m.group(1))
+            if sid is None:
+                self._send_json(404, {"code": "not_found", "message": "セッションのログがありません"})
+            elif m.re is _ROUTE_TABLE_CURRENT:
+                self._send_json(200, {"hand_id": current_hand_id(srv.log_dir, sid, srv.corr_repo)})
+            else:
+                data = table_hand(srv.log_dir, sid, int(m.group(2)), srv.gt_repo, srv.corr_repo)
+                self._send_json(*((200, data) if data else (404, {"code": "not_found", "message": "ハンドがありません"})))
+            return
         m = _ROUTE_REVIEW.match(path) or _ROUTE_REVIEW_HAND.match(path)
         if m:
             from tools.estimate_review import review_detail, review_summary
@@ -1142,6 +1163,17 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/script/"):
             self._send_json(*srv.script.route("POST", path, self._read_json() or {}))
+            return
+        m = _ROUTE_TABLE_LEGAL.match(path)
+        if m:
+            from tools.table_entry import table_legal
+
+            sid = self._session(m.group(1))
+            if sid is None:
+                self._send_json(404, {"code": "not_found", "message": "セッションのログがありません"})
+            else:
+                self._send_json(*table_legal(srv.log_dir, sid, int(m.group(2)), self._read_json(), srv.gt_repo,
+                                             srv.corr_repo))
             return
         m = _ROUTE_LEGAL.match(path)
         if m:
@@ -1472,7 +1504,7 @@ function renderList(){
       <td>${(h.seats||[]).join(" ")}</td><td>${(h.board||[]).map(c => cardHtml(c, "sm")).join("")}</td>
       <td>${h.winner_seat != null ? "席 " + h.winner_seat : "—"}</td><td>${live || `${rv} ${st} ${bl} ${ex} ${acc}`}</td></tr>`;
   }).join("");
-  $("app").innerHTML = `<div class="top"><h1>真のアクション入力</h1><span class="small"><a href="/review">推定の見直し →</a>　<a href="/script">台本 →</a>　<a href="/corpus">読み上げ集 →</a></span></div>
+  $("app").innerHTML = `<div class="top"><h1>真のアクション入力</h1><span class="small"><a href="/table">卓の形で入れる (PC) →</a>　<a href="/review">推定の見直し →</a>　<a href="/script">台本 →</a>　<a href="/corpus">読み上げ集 →</a></span></div>
     <div class="bar">
       <select onchange="selectSession(this.value)">${sess || "<option>セッションがありません</option>"}</select>
       <button class="sm" onclick="refreshAll()">↻ 読み直す</button>
