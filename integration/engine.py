@@ -103,6 +103,9 @@ LATE_WINNER_SEC = 60.0
 DEAL_STABLE_SEC = 1.5
 # 手札を配り終えたとみる時間（フロップが出なくても）。ここまでに札が 1 枚も載らない席はハンドから外す（2026-10-23）
 HAND_SEATS_SETTLE_SEC = 20.0
+# 何人もの札がほぼ同時に離れたとき（リーダーごとに読み取りの間隔が違う）、離れて見えた順は手番の順と前後する。
+# 手番の先の席の札がこの秒数以内に離れていれば、その席を先に降ろす（間をコールで補わない, 店舗 2026-10-19）
+DEPARTURE_ORDER_SLACK_SEC = 6.0
 # 載り続けているとみなす途切れの上限（読み落ち 1〜2 周ぶん）
 DEAL_GAP_SEC = 0.6
 # ハンドの途中でも、卓（席とボードのリーダー）に札が 1 枚も無い状態がこの秒数続いたらプレーは
@@ -1989,11 +1992,38 @@ class IntegrationThread(threading.Thread):
             ))
             self._streets_synced.add(key)            # 反映できなくても同じ観測を何度も試さない
         else:
+            self._apply_earlier_departures(key, t, timestamp)
             dep = self._departures[key]
+            if dep.get("applied"):
+                return
             self._emit_seat_signal(self._seat_signal(
                 "muck" if dep.get("muck") else "leave", key, timestamp, observed_at=t,
             ))
             dep["applied"] = True
+
+    def _apply_earlier_departures(self, seat: int, t: float, timestamp: float) -> None:
+        """`seat` の離脱を入れる前に、手番がそれより先で、ほぼ同時（`DEPARTURE_ORDER_SLACK_SEC` 以内）に札が離れた席を
+        手番の順に降ろす（店舗 2026-10-19 d01277f8 ハンド 13: 席8 の札が 1.3 秒早く見えたので先に入れ、間の席4・5・6
+        にコールを補っていた。3 人ともすぐあとに札が離れている）。あいだにストリートの札が置かれていれば引き寄せない。"""
+        order = getattr(self._game_state, "seats_to_act", None)
+        if order is None:
+            return
+        try:
+            seats = list(order())
+        except Exception:  # noqa: BLE001
+            return
+        if seat not in seats or seats[0] == seat:
+            return
+        pending_streets = [m for street, m in self._street_marks.items() if street not in self._streets_synced]
+        for other in seats[:seats.index(seat)]:
+            dep = self._departures.get(other)
+            if dep is None or dep.get("applied") or dep.get("spoken"):
+                continue
+            if not t <= dep["t"] <= t + DEPARTURE_ORDER_SLACK_SEC:
+                continue
+            if any(t < m <= dep["t"] for m in pending_streets):
+                continue
+            self._apply_observation((dep["t"], 1, other), timestamp)
 
     def _apply_observations_before(self, spoken_at: float, timestamp: float) -> None:
         """この発話より前に起きたこと（ストリートの札・札の離脱）を、発話を反映する前に時刻順に入れる。
@@ -2386,6 +2416,8 @@ class IntegrationThread(threading.Thread):
     def _apply_leave(self, ev: RFIDEvent, index: int) -> None:
         seat = ev.seat
         t = ev.observed_at if ev.observed_at is not None else ev.timestamp
+        if not self._rebuilding and self._reorder_departure(seat, t, index):
+            return
         dep = self._departures.setdefault(seat, {"t": t, "muck": ev.kind == "muck", "applied": False})
         dep.update(t=t, muck=dep.get("muck") or ev.kind == "muck")
         try:
@@ -2398,6 +2430,42 @@ class IntegrationThread(threading.Thread):
         self._checkpoints.append(self._take_checkpoint(index, seat))
         dep["applied"] = True
         self._resolve_departures()
+
+    def _reorder_departure(self, seat: int, t: float, index: int) -> bool:
+        """この席の札の離脱が、少し前（`DEPARTURE_ORDER_SLACK_SEC` 以内）に入れた手番の後の席の離脱より手番が先なら、
+        その席を先に降ろして組み直す（組み直したら True）。
+
+        何人もの札がほぼ同時に離れると、リーダーごとの読み取りの間隔で見えた順が手番と前後する。後の席の離脱を先に
+        入れると、間の席（この席）にコールを補っていた（店舗 2026-10-19 d01277f8 ハンド 13: 席8 が 1.3 秒早く見え、
+        席4・5・6 にコール。離脱は 3 秒離れたままで確かめるので、入れる時点では席4〜6 の離脱はまだ分からない）。
+        live も replay も、入力を受けたこの時点で同じ判断をする。
+        """
+        for checkpoint in reversed(self._checkpoints):
+            other = checkpoint.get("seat")
+            if other is None or other == seat:
+                continue
+            dep = self._departures.get(other)
+            if dep is None or not dep["t"] <= t <= dep["t"] + DEPARTURE_ORDER_SLACK_SEC:
+                continue
+            tag = f"implied_before_fold(seat={other})"
+            later = self._current_actions[checkpoint["actions"]:]
+            if not any(r.seat == seat and r.actor_source == "implied" and tag in (r.reason or "") for r in later):
+                continue
+            start = checkpoint["index"]
+            item = self._hand_inputs.pop(index)
+            rest = self._hand_inputs[start:]
+            self._hand_inputs = self._hand_inputs[:start]
+            self._restore_checkpoint(checkpoint)
+            mark = len(self._current_actions)
+            self._replay_inputs([item, *rest])
+            self._hand_needs_review = True
+            logger.info("席%d の札が席%d と同じころに離れていました — 席%d を先に降ろして組み直しました",
+                        seat, other, seat)
+            if self._on_action:
+                for record in self._current_actions[mark:]:
+                    self._on_action(record)
+            return True
+        return False
 
     def _take_checkpoint(self, index: int, seat: Optional[int] = None) -> dict:
         """入力 `index` を反映する前の状態（あとで別の解釈で流し直すため）。"""
