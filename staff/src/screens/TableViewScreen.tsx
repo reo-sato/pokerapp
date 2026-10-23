@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 
 import type { StaffRepository } from "../api/repository";
-import type { Player, StaffSession } from "../api/types";
+import type { HoleCardVisibility, Player, StaffSession } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
 import { BackLink, colors, styles } from "./common";
 import { HandTab } from "./HandTab";
@@ -64,6 +64,8 @@ export function TableViewScreen(props: {
         </Text>
       </View>
 
+      <HoleCardVisibilityRow repository={repository} session={session} />
+
       <View style={[styles.row, { marginTop: 8, marginBottom: 12, flexWrap: "wrap" }]}>
         <TabButton label="会計" active={tab === "ledger"} onPress={() => setTab("ledger")} />
         <TabButton
@@ -122,5 +124,67 @@ function TabButton(props: {
         {props.label}
       </Text>
     </Pressable>
+  );
+}
+
+const VISIBILITY_LABEL: Record<HoleCardVisibility, string> = {
+  all: "全員分",
+  own_and_shown: "自分 + 見せた手札",
+};
+
+/**
+ * お客さんの画面に出す手札の範囲（ADR-0067 D6）。セッションごとに決め、決めなければ店の設定に従う。
+ * スタッフの画面には効かない（スタッフはすべて見る）。
+ */
+function HoleCardVisibilityRow(props: {
+  repository: StaffRepository;
+  session: StaffSession;
+}): React.JSX.Element {
+  const { repository, session } = props;
+  const defaultState = useAsync(() => repository.getHoleCardDefault(), [repository]);
+  const [value, setValue] = useState<HoleCardVisibility | null>(session.hole_card_visibility ?? null);
+  const [error, setError] = useState<string | null>(null);
+  const storeDefault = defaultState.data;
+
+  const choose = (next: HoleCardVisibility | null): void => {
+    setError(null);
+    repository
+      .setHoleCardVisibility(session.session_id, next)
+      .then((res) => setValue(res.session.hole_card_visibility ?? null))
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  };
+
+  const option = (label: string, target: HoleCardVisibility | null): React.JSX.Element => {
+    const active = value === target;
+    return (
+      <Pressable
+        key={label}
+        onPress={() => choose(target)}
+        style={{
+          paddingVertical: 4,
+          paddingHorizontal: 10,
+          marginRight: 6,
+          borderRadius: 6,
+          borderWidth: 1,
+          borderColor: active ? colors.accent : colors.cardAlt,
+          backgroundColor: active ? colors.cardAlt : "transparent",
+        }}
+      >
+        <Text style={{ color: active ? colors.text : colors.muted, fontSize: 12 }}>{label}</Text>
+      </Pressable>
+    );
+  };
+
+  return (
+    <View style={[styles.row, { marginTop: 6, flexWrap: "wrap", alignItems: "center" }]}>
+      <Text style={{ color: colors.muted, fontSize: 12, marginRight: 8 }}>お客さんの画面の手札:</Text>
+      {option(
+        storeDefault ? `店の設定（${VISIBILITY_LABEL[storeDefault]}）` : "店の設定",
+        null,
+      )}
+      {option(VISIBILITY_LABEL.all, "all")}
+      {option(VISIBILITY_LABEL.own_and_shown, "own_and_shown")}
+      {error ? <Text style={{ color: colors.neg, fontSize: 12 }}>{error}</Text> : null}
+    </View>
   );
 }

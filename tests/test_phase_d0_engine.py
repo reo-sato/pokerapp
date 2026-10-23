@@ -39,13 +39,10 @@ class TestFoldThrough:
     def test_synthesizes_intermediate_folds(self):
         gs = _pk(3)
         gs.new_hand()
-        a0 = gs.get_current_player()
-        # 通常 fold で「次の actor」を知る（button 固定なので新ハンドでも同順）。
-        gs.apply_action(a0, "fold", 0)
-        a1 = gs.get_current_player()
+        # 手番順は **ハンドごとに変わる**（ボタンが回る, ISSUE-0032）ので、当該ハンドの state
+        # から非破壊に取る。以前は「新ハンドでも同順」を前提に 2 ハンド目で観測していた。
+        a0, a1 = self._action_order(gs)[:2]
         assert a1 != a0
-
-        gs.new_hand()
         assert gs.get_current_player() == a0
         gs.fold_through(a1)
         assert gs.get_current_player() == a1

@@ -1,0 +1,1025 @@
+#!/usr/bin/env python3
+"""tools/estimate.py — 推定器 v0（ADR-0056 追記 1 の S3, テスト方針 週 1, 2026-09-30）
+
+記録した入力（events.jsonl・書き起こし・第 2 の耳の候補）から、ハンドごとに**いちばん筋の通るアクションの列**と
+次点を探す。影で回す（記録も画面も変えない）。開発側が店舗の zip / fixture に使い、ライブ（記録）・いまの読み直し
+と比べる。
+
+形（ADR-0056 追記 1 の 1.）: 別の実装を作らず、ライブと同じエンジンを**決定的な再生器**として使う。発話ごとの読みを
+**選択点**にする:
+
+- Whisper の書き起こしをいまの読み取りで読んだもの（読めれば既定）
+- 第 2 の耳の候補（閉じた語彙: アクション・額。音の確からしさつき）
+- 雑談・言い直しとして**捨てる**
+
+選択の組み合わせを山登り（1 つずつ変えて、いちばん良くなる変更を採る）で探す。採点 = 読みの確からしさの和 +
+ハンドとしての筋の通り方の罰（エンジンが補ったアクション・反映できなかった発話・額を合法な額に寄せた・言われた
+アクションを別のアクションに読み替えた・ボードとストリートの食い違い・勝者を推し量った など）。数値は v0 の
+手置き（`PARAMS`、較正は真のアクションが増えてから）。
+
+ハンドは記録の持ち点（`hand_stacks`）から始まるので互いに独立 → 1 回の再生で全部のハンドの候補を同時に採点する。
+
+使い方:
+
+    python tools/estimate.py pokerlogs_20261001_1of2.zip pokerlogs_20261001_2of2.zip   # 店舗の zip（真のアクションと比べる）
+    python tools/estimate.py --fixtures                                               # 回帰テストの店舗 fixture
+    python tools/estimate.py logs --session d0f055fb --write                          # <sid>.estimate.json を書く
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import logging
+import math
+import re
+import sys
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from audio.recognizer import garbled_word, is_prompt_echo, is_question, parse_actions  # noqa: E402
+from audio.second_ear import apply_ear, used_ear  # noqa: E402
+from integration.replay import load_events  # noqa: E402
+from tools.eval_store import (  # noqa: E402
+    _epoch,
+    _is_noise,
+    _read_json,
+    _read_jsonl,
+    find_config,
+    find_sessions,
+    open_input,
+    replay_flags,
+    replay_session,
+    reparse_events,
+    session_setup,
+    truth_hands,
+)
+from tools.measure_capture_accuracy import hand_fully_correct, measure_hand, row_correct  # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+ESTIMATOR_VERSION = "0.1"
+ESTIMATE_SUFFIX = ".estimate.json"
+FIXTURES = ROOT / "tests" / "fixtures" / "store"
+
+# v0 の手置きの数値（log の尺度。較正は真のアクションが 40 ハンドを超えてから, ADR-0056 追記 1）
+PARAMS: dict[str, float] = {
+    # 読みの確からしさ
+    "fuzzy": -1.0,              # 音の近さで読んだ・額があいまいな Whisper の読み
+    "rescue": -0.5,             # Whisper で読めず、第 2 の耳の候補を自由に聞いた文と合うので使った（ライブの規則）
+    "ear_base": -2.0,           # 第 2 の耳の候補を（ライブの規則に当てはまらないのに）使う
+    "ear_diff_weight": 0.4,     # 候補の確からしさ − 自由に聞いた文の確からしさ（0 以下）にかける重み
+    "ear_min_diff": -8.0,       # これより確からしさの低い候補は選択肢にしない（雑談に候補を当てはめない）
+    "ear_top": 3,               # 候補の上から何個を選択肢にするか
+    "ear_amount_top": 3,        # 額を読んだ発話に、第 2 の耳の額ごとの点数の上から何個の別の額を選択肢にするか
+                                # （確からしさは候補と同じ式。2026-10-01「額の空間を事前に用意」のステップ 2）
+    "ear_empty_text": 0.0,      # 1 = 第 2 の耳が自由に聞いた文が空でも候補を選択肢にする（v1 は `READING_OVERRIDES` で 1）
+    # 監査 3 回目（2026-10-03）の値の直し。v0 は 0（これまでどおり）、v1 は `READING_OVERRIDES` で 1
+    "price_overridden_whisper": 0.0,  # 1 = 第 2 の耳が否定した Whisper の読みを候補と同じ式で値付け（`_overridden_logp`）
+    "price_ear_phonetic": 0.0,  # 1 = 意味のない語の額（第 2 の耳あり）を候補と同じ式 + 音の距離で（`_rescue_logp`）
+    # 2026-10-07（店舗 782c457d ハンド 5・6）。v0 は 0、v1 は `READING_OVERRIDES` で 1
+    "ear_clean_sound": 0.0,     # 1 = 第 2 の耳の自由な読みがその額そのもの（耳がはっきり額を聞いた）なら、Whisper の
+                                # 意味のない語との音の距離の項を付けない（開発データ: 意味のない語の発話で耳の自由な読みが
+                                # 額そのものだった 53 回は、53 回とも真のアクションもその額）
+    "price_disputed_amount": 0.0,  # 1 = Whisper が額を 1 つ読み、第 2 の耳がその額も採点したうえで別の額を 1 番に聞いた
+                                # （食い違い）とき、耳の額の読みを Whisper の読みから耳の点数の差（`ear_diff_weight` を
+                                # 掛ける）で値付けする。前は耳の候補と同じ `ear_base` 込みで、Whisper の額が常に 2 以上
+                                # 強かった（開発データ: 両方が額を 1 つ読んだ 171 発話で食い違い 4、耳が正しい 3）
+    "drop_read": -4.0,          # Whisper で読めた発話を雑談・言い直しとして捨てる（長い文 = 雑談が混ざりうる）
+    "drop_short": -7.0,         # アクションの言葉だけの短い発話（`short_chars` 文字以下）を捨てる
+    "drop_heard": -4.0,         # Whisper が定型の幻聴を書いたが、第 2 の耳は何かを聞いた発話を捨てる（音はあった）
+    "short_chars": 15,
+    # 全発話の第 2 の耳（2026-10-07 からライブが記録する・開発データは `tools/fixture_ears.py` で足した）。0 = 使わない
+    # （v0）。v1 は `integration/estimator.py` の `READING_OVERRIDES` で置く。既定の読みはいつもライブが使った耳だけ
+    "all_ears": 0.0,            # 1 = 別の読み（第 2 の耳の候補・額・決まり文句の下のアクション）に記録だけの耳も使う
+    "short_words": 0.0,         # 1 = 短い語の分類器（`audio/short_words.py`）の読みを選択肢にする（`_short_word_options`）
+    "short_min_p": 0.3,         # 分類器の確率（ラベルが一様とした確率）がこれ以上のラベルだけ選択肢にする
+    "short_weight": 1.0,        # 分類器の確率の比（log）にかける重み
+    "short_read_penalty": -3.9,  # Whisper が別の賭けの語をはっきり読んだ発話を分類器のラベルに読む（log 0.02 = 語の取り違え）
+    "short_none_penalty": -1.5,  # Whisper が賭けの語を読めなかった発話を分類器のラベルに読む（Whisper が聞き落とす確からしさ）
+    "short_amount_top": 3,      # 額のラベルのとき、第 2 の耳の額ごとの点数の上から何個を選択肢にするか
+    "short_cap": 99.0,          # 分類器の読みの確からしさは既定の読みより最大これだけ高くできる（log。ハンドの筋で選ばせる）
+    # 決まり文句（Whisper の定型の幻聴）になった発話の状態: 雑談・雑音だった / アクションを言ったのに書き起こしが
+    # 決まり文句になった（`_canned_options`）。0 = 使わない（v0 は `drop_heard` のまま）。v1 は
+    # `integration/estimator.py` の `READING_OVERRIDES` で値を置く
+    "canned_action": 0.0,       # 決まり文句になった発話が実はアクションだった確率
+    "canned_ear_temp": 2.0,     # その発話のアクションの見込みに第 2 の耳の候補を使うときの温度（確からしさの差を割る）
+    # ハンドとしての筋の通り方
+    "implied": -1.5,            # エンジンが補ったチェック・コール（言われていない）
+    "silent_fold": -2.0,        # エンジンが補ったフォールド
+    "unresolved": -3.0,         # 反映できなかった発話（ハンドの外・ベッティングのあと・勝者の宣言のずれ）
+    "snapped": -2.0,            # 聞いた額を合法な額に寄せた・額の無いベット
+    "rounded": -0.5,            # 額を BB の単位に丸めた
+    "projected": -2.5,          # 言われたアクションを別のアクションに読み替えた（チェック → コール など）
+    "estimated_winner": -2.0,   # 勝者を推し量った（次の配布で決めた）
+    "missing_street": -5.0,     # ボードは先まで配ったのに、アクションがその前のストリートで全員降りて終わった
+    "extra_street": 0.0,        # ボードに無いストリートのアクション（札が無いのは読めていないだけのことがある = 使わない）
+    "mucked_stronger": -2.0,    # ショーダウンで一番強い手が見せずに降りた
+    # 探し方
+    "max_rounds": 4,            # 山登りの回数（1 回 = 1 つの選択点を変える）
+    "nbest": 5,                 # 残す候補の数
+    "max_points": 10,           # 1 ハンドの選択点の上限（多ければ既定との差が小さい順）
+    "after_hand_sec": 20.0,     # ハンドの終わりからこの秒数までの発話をそのハンドの選択点にする
+}
+
+# 選択肢にするアクション（ハンドの区切りを変える制御は選択肢にしない = ハンドどうしを独立に保つ）
+_BETTING = frozenset({"fold", "check", "call", "bet", "raise", "allin", "check_around", "heads_up", "players_left",
+                      "showdown", "end_hand"})
+_STREETS = ("preflop", "flop", "turn", "river")
+_BOARD_STREET = {3: "flop", 4: "turn", 5: "river"}
+
+
+def params_hash(params: dict[str, float] = PARAMS) -> str:
+    return hashlib.sha1(json.dumps(params, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+
+
+# ───────────────────────── 選択点 ─────────────────────────
+
+
+@dataclass(frozen=True)
+class Option:
+    source: str        # "whisper" | "rescue" | "ear" | "drop"
+    text: str          # 読み直す文（drop は空）
+    logp: float        # 読みの確からしさ（log）
+    keys: tuple        # 読んだアクション（同じ読みをまとめる）
+
+    def label(self) -> str:
+        what = "・".join(f"{a}{f' {m}' if m else ''}" for a, m, *_ in self.keys) or "捨てる"
+        return f"{what}（{_SOURCE_JA.get(self.source, self.source)}）"
+
+
+_SOURCE_JA = {"whisper": "Whisper", "rescue": "第 2 の耳・ライブの規則", "ear": "第 2 の耳の候補", "drop": "雑談",
+             "ear_amount": "第 2 の耳の額の点数", "phonetic": "音の近さの額", "canned": "決まり文句の下のアクション",
+             "short": "短い語の分類器", "short_amount": "短い語の分類器の額"}
+
+
+@dataclass
+class ChoicePoint:
+    start: float                 # 発話の始まり（utterance_start_ts）= 読み直しの鍵
+    at: float                    # 再生で入る時刻（ハンドの割り当てに使う）
+    heard: str                   # Whisper の書き起こし
+    options: list[Option]        # [0] = 既定（いまの読み直しと同じ）
+
+    def text_for(self, index: int) -> Optional[str]:
+        """読み直しに渡す文（既定なら None = 書き起こしのまま）。"""
+        return None if index == 0 else self.options[index].text
+
+
+def _keys(events: list) -> tuple:
+    return tuple((e.action, e.amount or 0, e.seat, e.position) for e in events)
+
+
+def _flag_penalty(events: list, params: dict) -> float:
+    flags = {f for e in events for f in e.parse_flags}
+    return params["fuzzy"] if flags & {"fuzzy_keyword", "ambiguous_amount", "garbled_digits",
+                                       "sentence_after_chatter", "garbled_call"} else 0.0
+
+
+def utterance_options(row: dict, params: dict = PARAMS) -> list[Option]:
+    """1 つの発話の読みの選択肢。[0] が既定（`reparse_events` と同じ規則: Whisper で読めればそれ（額の無いベット /
+    レイズには第 2 の耳の額）、読めなければ第 2 の耳のライブの規則、どちらも無ければ捨てる）。選択肢が 1 つしか
+    無ければ選択点にしない。決まり文句になってライブの規則でも読めなかった発話は、`canned_action` > 0 なら
+    `_canned_options`（雑談だった / アクションを言った）。"""
+    start = row.get("utterance_start_ts")
+    text = (row.get("text") or "").strip()
+    whisper = [] if _is_noise(row, text) else parse_actions(
+        text, confidence=row.get("confidence"), utterance_start_ts=start)
+    ear = used_ear(row)
+    # 別の読みに使う耳（`all_ears`: 記録だけの耳も。既定の読み = ライブの規則はライブが使った耳だけ）
+    alt_ear = (row.get("ear") or None) if params.get("all_ears", 0.0) > 0 else ear
+    # ライブの規則（読めない発話の聞き直し・額の無いベット / レイズの額, `second_ear.apply_ear`）
+    live, used = apply_ear(whisper, text, ear, question=is_question(text), utterance_start_ts=start)
+    controls = [e for e in whisper + live if e.action not in _BETTING]
+    if controls and not (params.get("short_words", 0.0) > 0 and all(_is_chop(e) for e in controls)):
+        # ハンドの区切り・勝者の宣言などの制御は選ばない（既定のまま = ハンドどうしを独立に保つ）。席を言わない
+        # 「チョップ」だけは選ぶ: 分けるのはショーダウンのあとだけで、ベットの途中の「チョップ」は聞き違い（オーナー
+        # 2026-10-07。engine はチェックと読む = `_chop_heard_as_check`。店舗 782c457d ハンド 13 の「センチョップ」は
+        # ベット 千百 = 第 2 の耳）
+        return [Option("whisper" if whisper and used is None else "rescue", text, 0.0, _keys(live))]
+    options: list[Option] = []
+    # 意味のない単発の語（第 2 の耳ありで額と読んだ）: 額の読みには、どれにも Whisper の語との音の距離の項を付ける
+    word = garbled_word(text) if params.get("price_ear_phonetic", 0.0) > 0 and not whisper else None
+    if used is not None:
+        options.append(Option("rescue", used, _rescue_logp(live, ear, word, params), _keys(live)))
+        if whisper:     # 第 2 の耳で額を入れる・読み直す前の Whisper の読み
+            options.append(Option("whisper", text, _overridden_logp(whisper, live, ear, start, params),
+                                  _keys(whisper)))
+    elif whisper:
+        options.append(Option("whisper", text, _flag_penalty(whisper, params), _keys(whisper)))
+    elif live:
+        # 意味のない単発の語を、第 2 の耳なしで音の近さだけで額と読んだ（`recognizer.parse_garbled_amount`）。
+        # 確からしさは音の近さ（−10 × 距離）: 遠い語ほど捨てる読みに近い（作業計画の監査 2026-10-01 §4 の (c)。前は
+        # 第 2 の耳が合った救い出しと同じ −0.5）。ほかの近い額も選択肢にする（engine は使える額から選ぶが、推定器は
+        # ハンド全体で選べる）
+        scores = dict(live[0].amount_scores) if len(live) == 1 else {}
+        best = max(scores.values()) if scores else params["rescue"]
+        options.append(Option("rescue", text, best, _keys(live)))
+        for amount, score in sorted(scores.items(), key=lambda kv: -kv[1]):
+            options.append(Option("phonetic", str(amount), score,
+                                  _keys(parse_actions(str(amount), utterance_start_ts=start))))
+    elif params.get("canned_action", 0.0) > 0 and is_prompt_echo(text) and not row.get("no_speech"):
+        options = _canned_options(alt_ear, start, params)
+        options.extend(_short_word_options(row, alt_ear, options[0], whisper, start, params))
+        return _dedupe(options)
+    else:
+        # 定型の幻聴（「ご覧いただきありがとうございます。」）の下で第 2 の耳が何かを聞いた = 何かを言った（店舗
+        # 7b897671 ハンド 3: オールインへのコールが幻聴になり、札の離脱でフォールドと記録した）
+        heard = bool(alt_ear and (alt_ear.get("text") or "").strip()) and not row.get("no_speech") and \
+            is_prompt_echo(text)
+        options.append(Option("drop", "", params["drop_heard"] if heard else 0.0, ()))
+    # 第 2 の耳の候補。自由に聞いた文が空（耳の貪欲な探索が何も書かなかった）でも、候補の確からしさはその空の文と
+    # 比べられる（v1, `ear_empty_text`。店舗 4c252c77 ハンド 2: SB のコールを Whisper は「コーナー」、耳は空の文
+    # −2.80・候補「コール」−4.73 と聞いた。v0 は空なら使わない）
+    heard_text = bool(alt_ear and (alt_ear.get("text") or "").strip())
+    if alt_ear and alt_ear.get("logp") is not None and (heard_text or params.get("ear_empty_text", 0.0) > 0):
+        cands = sorted((c for c in alt_ear.get("candidates") or [] if c.get("logp") is not None),
+                       key=lambda c: -c["logp"])[:int(params["ear_top"])]
+        for c in cands:
+            diff = min(0.0, float(c["logp"]) - float(alt_ear["logp"]))
+            if diff < params["ear_min_diff"]:
+                continue
+            events = parse_actions(c["text"], utterance_start_ts=start)
+            if not events or any(e.action not in _BETTING for e in events):
+                continue
+            logp = params["ear_base"] + params["ear_diff_weight"] * diff + _sound_logp(word, events, alt_ear, params)
+            options.append(Option("ear", c["text"], logp, _keys(events)))
+    options.extend(_ear_amount_options(live, alt_ear, start, params, word,
+                                       default=options[0] if used is None and whisper else None))
+    options.extend(_short_word_options(row, alt_ear, options[0], whisper, start, params))
+    if options[0].keys:
+        short = len(text) <= params["short_chars"] if options[0].source == "whisper" else False
+        options.append(Option("drop", "", params["drop_short"] if short else params["drop_read"], ()))
+    return _dedupe(options)
+
+
+def _dedupe(options: list[Option]) -> list[Option]:
+    """同じ読みは確からしさの高い方だけ（既定は必ず残す）。"""
+    kept: list[Option] = [options[0]]
+    for opt in sorted(options[1:], key=lambda o: -o.logp):
+        if all(opt.keys != k.keys for k in kept):
+            kept.append(opt)
+    return kept
+
+
+# Whisper が読んだ賭けの語（分類器のラベルと比べる）
+_WORDS = frozenset({"fold", "check", "call", "bet", "raise", "allin", "check_around"})
+_SHORT_TEXT = {"call": "コール", "check": "チェック", "fold": "フォールド"}
+
+
+def _whisper_short_label(whisper: list) -> str:
+    """Whisper だけの読み → 分類器のラベル（`tools/short_words.whisper_label` と同じ）。"""
+    events = [e for e in whisper if e.action in _WORDS]
+    if not events:
+        return "none"
+    if len(events) > 1:
+        return "other"
+    a = events[0].action
+    return "amount" if a in ("bet", "raise") else "check" if a == "check_around" else a if a in _SHORT_TEXT else "other"
+
+
+# 分ける語（`integration/engine.py` の `_SPLIT_WORDS` と同じ）
+_SPLIT = re.compile(r"チョップ|ちょっぷ|スプリット|split|chop", re.IGNORECASE)
+
+
+def _is_chop(event) -> bool:
+    """席を言わない「チョップ」（勝者の宣言に読んだ分ける語）。"""
+    return event.action == "winner" and event.seat is None and bool(_SPLIT.search(event.raw_text or ""))
+
+
+def _short_label(keys: tuple) -> Optional[str]:
+    """読み（`_keys`）→ 短い語の分類器のラベル。何も無い読み・席を言わない「チョップ」= 雑談（賭けの語ではない）、
+    賭けの語 1 つならその種類、ほかは None（比べない）。"""
+    if not keys or all(k[0] == "winner" and k[2] is None for k in keys):
+        return "none"
+    if len(keys) != 1:
+        return None
+    action, amount = keys[0][0], keys[0][1]
+    if action in ("bet", "raise"):
+        return "amount" if amount else None
+    return action if action in _SHORT_TEXT else None
+
+
+def _short_word_options(row: dict, ear: Optional[dict], default: Option, whisper: list,
+                        start: Optional[float], params: dict) -> list[Option]:
+    """短い語の分類器（`audio/short_words.py`）の読み（短い語の聞き間違いの進め方 2, 2026-10-07）。
+
+    分類器はラベル（雑談 / コール / チェック / フォールド / 額）が一様に起きるとした確率 p を出す = 2 つのラベルの p の
+    比は、第 2 の耳の音がそのラベルから出た確からしさの比。既定の読みのラベル L0 と違うラベル L の p が `short_min_p`
+    以上なら、L の読みを選択肢にする。確からしさ = 既定の読みの確からしさ + `short_weight` × (log p(L) / p(L0) +
+    Whisper の読みの項)。Whisper の読みの項 = log P(Whisper の読み | L) − log P(Whisper の読み | L0)（開発データの
+    取り違えの表 `Model.whisper`。表が無ければ、Whisper が賭けの語を読んだ = `short_read_penalty`、読めなかった =
+    `short_none_penalty`）。額のラベルは、第 2 の耳の額ごとの点数の上から `short_amount_top` 個（その額の点数の割合を
+    掛ける）。どのアクションだったかは、推定器が流し直したハンドの筋（合法か・言われない賭け・札の離脱）で決まる。"""
+    if params.get("short_words", 0.0) <= 0 or row.get("no_speech") or is_question(row.get("text") or ""):
+        return []           # 確認の問い（「コールですか？」）のあとは確定の言い方をする（オーナー 2026-10-07）
+    if any("garbled_call" in e.parse_flags for e in whisper):
+        # 「これで終わりです」「コールド」など: engine が札の離脱・手番で読む（離れた席のフォールド / ベットに向き合った
+        # 手番のコール / 何もしない, オーナー 2026-10-06）。分類器の読みを重ねると、ショーダウンで言われないマックを作る
+        # （店舗 d0f055fb ハンド 8: オールインのあとの「これで終わりです。」をフォールドと読んだ）
+        return []
+    from audio import short_words
+    from audio.second_ear import amount_table
+
+    model = short_words.load()
+    probs = model.predict(ear) if model is not None else None
+    base = _short_label(default.keys)
+    if probs is None or base is None:
+        return []
+    heard = _whisper_short_label(whisper)
+
+    def whisper_term(label: str) -> float:
+        logp = getattr(model, "whisper_logp", lambda *_: None)
+        new, old = logp(heard, label), logp(heard, base)
+        if new is None or old is None:
+            return params["short_none_penalty"] if heard == "none" else params["short_read_penalty"]
+        return new - old
+
+    lp0 = math.log(max(probs[base], 1e-9))
+    weight = float(params["short_weight"])
+    cap = float(params.get("short_cap", 99.0))
+
+    def logp_of(label: str) -> float:
+        return default.logp + min(cap, weight * (math.log(probs[label]) - lp0 + whisper_term(label)))
+
+    out: list[Option] = []
+    for label, text in _SHORT_TEXT.items():
+        if label != base and probs[label] >= params["short_min_p"]:
+            out.append(Option("short", text, logp_of(label), _keys(parse_actions(text, utterance_start_ts=start))))
+    table = amount_table(ear)
+    if base != "amount" and probs["amount"] >= params["short_min_p"] and table:
+        top = max(table.values())
+        norm = top + math.log(sum(math.exp(v - top) for v in table.values()))
+        lead = logp_of("amount")
+        for amount, logp in sorted(table.items(), key=lambda kv: (-kv[1], kv[0]))[:int(params["short_amount_top"])]:
+            text = str(amount)
+            out.append(Option("short_amount", text, lead + (logp - norm),
+                              _keys(parse_actions(text, utterance_start_ts=start))))
+    return out
+
+
+def _ear_diff(events: list, ear: Optional[dict], start: Optional[float], params: dict) -> Optional[float]:
+    """第 2 の耳の記録で、読み `events` の確からしさ − 自由に聞いた文（0 以下、`ear_min_diff` 以上に丸める）。
+
+    同じ読みになる候補（記録は上位だけ）、額だけの賭け 1 つなら額ごとの点数から。記録に無ければ、記録した候補の最下位
+    より低い = 最下位の差を上限として使う。第 2 の耳の記録が無ければ None。"""
+    from audio.second_ear import amount_table
+
+    if not ear or ear.get("logp") is None:
+        return None
+    free = float(ear["logp"])
+    keys = _keys(events)
+    cands = [c for c in ear.get("candidates") or [] if c.get("logp") is not None]
+    found = [float(c["logp"]) for c in cands if _keys(parse_actions(c["text"], utterance_start_ts=start)) == keys]
+    table = amount_table(ear)
+    if not found and len(events) == 1 and events[0].action in ("bet", "raise") and events[0].amount in table:
+        found = [table[events[0].amount]]
+    if found:
+        logp = max(found)
+    else:
+        lowest = [float(c["logp"]) for c in cands] + list(table.values())
+        if not lowest:
+            return None
+        logp = min(lowest)
+    return max(params["ear_min_diff"], min(0.0, logp - free))
+
+
+def _only_filled(whisper: list, live: list) -> bool:
+    """ライブの規則が Whisper の読みに額を入れただけ（額の無いベット・レイズ, `second_ear.fill_amounts`）か。"""
+    from audio.second_ear import EAR_MIN_AMOUNT
+
+    if len(whisper) != len(live):
+        return False
+    return all(w.action == lv.action and (w.amount == lv.amount or (w.amount or 0) < EAR_MIN_AMOUNT)
+               for w, lv in zip(whisper, live))
+
+
+def _overridden_logp(whisper: list, live: list, ear: Optional[dict], start: Optional[float], params: dict) -> float:
+    """ライブの規則が第 2 の耳で読み直した発話の、もとの Whisper の読みの確からしさ。
+
+    監査 3 回目（2026-10-03）: 第 2 の耳と食い違う Whisper の読み（「2千、コール。」の 2000 + コール）が 0 で、第 2 の耳の
+    読み（既定 = 救い出し −0.5）より安い逆転があった。第 2 の耳がその読みを否定したときは、第 2 の耳の候補と同じ式
+    （`ear_base` + `ear_diff_weight` × 差）で値付けする（`price_overridden_whisper`）。額を入れただけ（額の無いベット）は
+    これまでどおり（足りない額は採点の「額の聞き違い」で数える）。"""
+    base = _flag_penalty(whisper, params)
+    if params.get("price_overridden_whisper", 0.0) <= 0 or _only_filled(whisper, live):
+        return base
+    diff = _ear_diff(whisper, ear, start, params)
+    if diff is None:
+        return base
+    return min(base, params["ear_base"] + params["ear_diff_weight"] * diff)
+
+
+def _ear_reads(ear: Optional[dict], events: list) -> bool:
+    """第 2 の耳が自由に聞いた文が、そのまま `events` の額の賭け 1 つに読める（耳がはっきりその額を聞いた）か。"""
+    if not ear or len(events) != 1 or not events[0].amount:
+        return False
+    return [e.amount for e in parse_actions(ear.get("text") or "") if e.amount] == [events[0].amount]
+
+
+def _sound_logp(word: Optional[str], events: list, ear: Optional[dict] = None, params: Optional[dict] = None) -> float:
+    """意味のない単発の語 `word` を額と読むときの音の項（−10 × 音の距離, `recognizer.PHONETIC_AMOUNT_SCORE_WEIGHT`）。
+    語が無い・額の賭け 1 つでなければ 0。第 2 の耳がその額をそのまま聞いたときも 0（`ear_clean_sound`: 耳の
+    はっきりした額は、Whisper の崩れた語との音の距離より確か = 店舗 782c457d ハンド 6 の「どのセンテンス?」= 耳「七千点」）。"""
+    from audio.phonetic import amount_distance
+    from audio.recognizer import PHONETIC_AMOUNT_SCORE_WEIGHT
+
+    if word is None or len(events) != 1 or events[0].action not in ("bet", "raise") or not events[0].amount:
+        return 0.0
+    if params is not None and params.get("ear_clean_sound", 0.0) > 0 and _ear_reads(ear, events):
+        return 0.0
+    return -PHONETIC_AMOUNT_SCORE_WEIGHT * amount_distance(word, events[0].amount)
+
+
+def _rescue_logp(live: list, ear: Optional[dict], word: Optional[str], params: dict) -> float:
+    """ライブの規則（第 2 の耳）の読みの確からしさ。救い出しは `rescue`（−0.5）。
+
+    監査 3 回目（2026-10-03）: 意味のない単発の語を第 2 の耳ありで額と読んだ読み（`phonetic_amount`）は、救い出しと同じ
+    −0.5 では強すぎる（「ゼニューク」は第 2 の耳自身が空の文の方を確からしいと聞いた）→ 第 2 の耳の候補と同じ式に音の
+    距離の項を足す（`price_ear_phonetic`）。"""
+    if word is None or len(live) != 1 or "phonetic_amount" not in live[0].parse_flags:
+        return params["rescue"]
+    diff = _ear_diff(live, ear, None, params)
+    if diff is None:
+        return params["rescue"]
+    return params["ear_base"] + params["ear_diff_weight"] * diff + _sound_logp(word, live, ear, params)
+
+
+def _ear_amount_options(live: list, ear: Optional[dict], start: Optional[float], params: dict,
+                        garbled: Optional[str] = None, default: Optional[Option] = None) -> list[Option]:
+    """額を読んだベット・レイズがちょうど 1 つの発話に、第 2 の耳の額ごとの点数（`ear.amounts`）の上から
+    `ear_amount_top` 個の別の額を選択肢にする（その場面で使える額かは、推定器が流し直したときに engine が決める）。
+    確からしさは第 2 の耳の候補と同じ式（`ear_base` + `ear_diff_weight` × (その額の確からしさ − 自由に聞いた文)）。
+    文は既定の読みと同じ言い方（数字だけなら数字、語と一緒なら「レイズ 1300」）。意味のない単発の語を額と読んだ発話は
+    音の項も足す（`_sound_logp`）。
+
+    既定の読みが Whisper の読み（`default`）で、耳がその額も採点したうえで別の額を 1 番に聞いた（食い違い）なら、
+    `price_disputed_amount` > 0 で、別の額は既定の読みの確からしさ + `ear_diff_weight` × (その額 − Whisper の額の耳の
+    点数) とする（どちらの額かは耳の聞き分けとハンドの筋で決める。店舗 782c457d ハンド 5・6: ディーラーは「レイズ
+    千点」と言う = オーナー、Whisper は「レイズ2千点」、耳は「千点」）。"""
+    from audio.second_ear import amount_table
+
+    table = amount_table(ear)
+    wagers = [e for e in live if e.action in ("bet", "raise") and e.amount]
+    if not table or len(wagers) != 1 or len(live) != 1 or (ear or {}).get("logp") is None:
+        return []
+    event = wagers[0]
+    word = "" if "amount_only" in event.parse_flags else ("レイズ " if event.action == "raise" else "ベット ")
+    top = min(table, key=lambda a: (-table[a], a))
+    # 食い違い: 耳が自由に聞いた文がそのまま 1 番の額で（耳がはっきり聞いた。自由な読みが「零点」などなら表の順は
+    # あてにならない）、Whisper の額も耳の表にある
+    disputed = (default is not None and params.get("price_disputed_amount", 0.0) > 0 and event.amount in table
+                and top != event.amount and _ear_reads(ear, parse_actions(str(top), utterance_start_ts=start)))
+    out: list[Option] = []
+    for amount, logp in sorted(table.items(), key=lambda kv: (-kv[1], kv[0])):
+        if len(out) >= int(params["ear_amount_top"]):
+            break
+        diff = min(0.0, logp - float(ear["logp"]))
+        if amount == event.amount or diff < params["ear_min_diff"]:
+            continue
+        text = f"{word}{amount}"
+        events = parse_actions(text, utterance_start_ts=start)
+        if disputed and amount == top:
+            price = default.logp + params["ear_diff_weight"] * (logp - table[event.amount])
+        else:
+            price = params["ear_base"] + params["ear_diff_weight"] * diff
+        out.append(Option("ear_amount", text, price + _sound_logp(garbled, events, ear, params), _keys(events)))
+    return out
+
+
+# 決まり文句の下のアクションの見込みの土台（額は分からないので賭けは第 2 の耳の候補からだけ）
+_CANNED_WORDS = ("フォールド", "チェック", "コール")
+_CANNED_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin"})
+
+
+def _canned_options(ear: Optional[dict], start: Optional[float], params: dict) -> list[Option]:
+    """書き起こしが決まり文句（Whisper の定型の幻聴）になり、ライブの規則でも読めなかった発話の読み（発話単位の
+    状態: 監査 1 回目の推奨・作業計画の監査 2026-10-01 の最優先）。
+
+    - 既定 = 雑談・雑音だった: log(1 − r)。r = `canned_action`（オーナーが読めた賭けの語から 15 秒以内の決まり文句
+      51 発話を聞いて数えた 14/51 = 0.27, 2026-10-03。`integration/estimator.py` の `READING_OVERRIDES`）。
+    - アクションを言ったのに決まり文句になった: log r + log q(a)。q = フォールド・チェック・コールに一様 +
+      第 2 の耳の候補（1 つのアクションに読める・自由に聞いた文との差が `ear_min_diff` 以上）の重み
+      exp(差 / `canned_ear_temp`)。自由に聞いた文も重み 1 の候補として分母に入れる（耳が自由に聞いた文の方が確からしい
+      ほど、候補の重みは小さい）。賭けは候補の額だけ（上から `ear_top` 個）。どのアクションかは、推定器が流し直した
+      ハンドの筋（閉じないラウンド・言われない賭け・札の離脱）で決まる。
+    """
+    r = float(params["canned_action"])
+    temp = float(params["canned_ear_temp"])
+    found: dict[tuple, tuple[float, str]] = {}          # 読み → (重み, 文)
+    free = (ear or {}).get("logp")
+    if ear and free is not None:
+        for c in ear.get("candidates") or []:
+            if c.get("logp") is None:
+                continue
+            diff = min(0.0, float(c["logp"]) - float(free))
+            if diff < params["ear_min_diff"]:
+                continue
+            events = parse_actions(c["text"], utterance_start_ts=start)
+            if len(events) != 1 or events[0].action not in _CANNED_ACTIONS:
+                continue
+            key, weight = _keys(events), math.exp(diff / temp)
+            if key not in found or weight > found[key][0]:
+                found[key] = (weight, c["text"])
+    wagers = sorted((k for k in found if k[0][0] in ("bet", "raise", "allin")), key=lambda k: -found[k][0])
+    for key in wagers[int(params["ear_top"]):]:
+        del found[key]
+    total = 1.0 + sum(w for w, _ in found.values())
+    rest = 1.0 / total                                   # 耳の候補に当たらない分 = 一様
+    q: dict[tuple, list] = {}
+    for word in _CANNED_WORDS:
+        q[_keys(parse_actions(word, utterance_start_ts=start))] = [rest / len(_CANNED_WORDS), word]
+    for key, (weight, text) in found.items():
+        if key in q:
+            q[key][0] += weight / total
+        else:
+            q[key] = [weight / total, text]
+    options = [Option("drop", "", math.log(1.0 - r), ())]
+    for key, (prob, text) in sorted(q.items(), key=lambda kv: -kv[1][0]):
+        options.append(Option("canned", text, math.log(r) + math.log(prob), key))
+    return options
+
+
+def choice_points(events: list, transcripts: list[dict], params: dict = PARAMS) -> list[ChoicePoint]:
+    """書き起こしの発話のうち、読みが 2 通り以上あるもの（`reparse_events` と同じ時刻の置き方）。"""
+    from core.events import AudioEvent
+
+    live_time: dict[float, float] = {}
+    for e in events:
+        if isinstance(e, AudioEvent) and e.utterance_start_ts is not None:
+            live_time.setdefault(e.utterance_start_ts, e.timestamp)
+    points = []
+    for row in transcripts:
+        start = row.get("utterance_start_ts")
+        if start is None:
+            continue
+        options = utterance_options(row, params)
+        if len(options) < 2:
+            continue
+        at = live_time.get(start, row.get("heard_at") or start)
+        points.append(ChoicePoint(start=float(start), at=float(at), heard=(row.get("text") or "").strip(),
+                                  options=options))
+    return sorted(points, key=lambda p: p.at)
+
+
+# ───────────────────────── 採点 ─────────────────────────
+
+
+@dataclass
+class Scored:
+    score: float
+    hand: dict
+    penalties: list[str]
+    assignment: tuple[int, ...]
+
+
+def _hand_key(hand: dict) -> tuple:
+    rows = tuple((a.get("street"), a.get("seat"), a.get("action"), a.get("amount") or 0)
+                 for a in hand.get("actions") or [])
+    return rows, hand.get("winner_seat")
+
+
+def structure_penalties(hand: dict, unresolved: list[dict], params: dict = PARAMS) -> list[tuple[str, float]]:
+    """ハンドとしての筋の通らなさ（罰の名前と値）。"""
+    out: list[tuple[str, float]] = []
+    for a in hand.get("actions") or []:
+        src = a.get("actor_source")
+        reasons = set(str(a.get("reason") or "").split("+")) - {""}
+        if src == "implied":
+            out.append(("補ったアクション", params["implied"]))
+        if "synth_silent_fold" in reasons:
+            out.append(("補ったフォールド", params["silent_fold"]))
+        if reasons & {"amount_snapped", "no_amount_heard"}:
+            out.append(("額を寄せた", params["snapped"]))
+        if "rounded_to_bb" in reasons:
+            out.append(("額を丸めた", params["rounded"]))
+        if (reasons & {"check_facing_bet", "check_illegal_fold"}
+                or any(r.endswith(("_illegal_to_call", "_illegal_to_fold")) for r in reasons)):
+            out.append(("読み替えた", params["projected"]))
+        if "mucked_stronger_hand" in reasons:
+            out.append(("強い手が降りた", params["mucked_stronger"]))
+    for u in unresolved:
+        out.append((f"反映できない発話（{u.get('reason') or '?'}）", params["unresolved"]))
+    if hand.get("winner_source") == "estimated":
+        out.append(("勝者を推し量った", params["estimated_winner"]))
+    board = [c for c in hand.get("board") or [] if isinstance(c, str) and c]
+    dealt = _BOARD_STREET.get(len(board))
+    betting = [a.get("street") for a in hand.get("actions") or [] if a.get("street") in _STREETS]
+    last = betting[-1] if betting else "preflop"
+    if dealt is not None and hand.get("winner_source") == "fold" and _STREETS.index(dealt) > _STREETS.index(last):
+        out.append(("ボードより前のストリートで終わった", params["missing_street"]))
+    if params["extra_street"]:
+        limit = _STREETS.index(dealt) if dealt is not None else 0
+        for _ in {s for s in betting if _STREETS.index(s) > limit}:
+            out.append(("ボードに無いストリートのアクション", params["extra_street"]))
+    return out
+
+
+# ───────────────────────── 探索 ─────────────────────────
+
+
+@dataclass
+class HandEstimate:
+    hand_id: int
+    started_at: str
+    points: list[ChoicePoint]
+    default: Scored
+    candidates: list[Scored] = field(default_factory=list)     # 良い順・同じ列は 1 つ
+
+    @property
+    def best(self) -> Scored:
+        return self.candidates[0] if self.candidates else self.default
+
+    @property
+    def margin(self) -> Optional[float]:
+        return round(self.candidates[0].score - self.candidates[1].score, 2) if len(self.candidates) > 1 else None
+
+    @property
+    def changed(self) -> bool:
+        return _hand_key(self.best.hand) != _hand_key(self.default.hand)
+
+
+class Estimator:
+    """1 セッションの推定。`replay(texts, on_action) -> hands` は読み直しの文を渡して再生する関数。"""
+
+    def __init__(self, events: list, transcripts: list[dict], setup: dict, flags: dict, session_id: str,
+                 params: dict = PARAMS) -> None:
+        self.events = events
+        self.transcripts = transcripts
+        self.setup = setup
+        self.flags = flags
+        self.session_id = session_id
+        self.params = params
+        self.replays = 0
+
+    def _replay(self, texts: dict[float, str]) -> tuple[dict[str, dict], dict[str, list[dict]]]:
+        """読み直しの文で再生し、ハンドの始まり → ハンド、ハンドの始まり → 反映できなかった発話 を返す。"""
+        unresolved: list[Any] = []
+
+        def on_action(record: Any) -> None:
+            if getattr(record, "actor_source", None) == "unresolved":
+                unresolved.append(record)
+
+        events = reparse_events(self.events, self.transcripts, texts)
+        hands = replay_session(events, self.setup, self.flags, self.session_id, on_action=on_action)
+        self.replays += 1
+        by_start = {h.get("started_at"): h for h in hands}
+        id_to_start = {h.get("hand_id"): h.get("started_at") for h in hands}
+        bad: dict[str, list[dict]] = {}
+        for r in unresolved:
+            start = id_to_start.get(getattr(r, "hand_id", None))
+            if start is not None:
+                bad.setdefault(start, []).append({"reason": getattr(r, "reason", ""), "action": r.action})
+        return by_start, bad
+
+    def _score(self, hand: dict, bad: list[dict], points: list[ChoicePoint], assignment: tuple[int, ...]) -> Scored:
+        reading = sum(p.options[i].logp for p, i in zip(points, assignment))
+        penalties = structure_penalties(hand, bad, self.params)
+        chosen = [f"{p.heard or '（無音）'} → {p.options[i].label()}" for p, i in zip(points, assignment) if i]
+        return Scored(round(reading + sum(v for _, v in penalties), 3), hand,
+                      [f"{name} {v:+.1f}" for name, v in penalties] + chosen, assignment)
+
+    def run(self) -> list[HandEstimate]:
+        base, bad = self._replay({})
+        starts = sorted(base, key=lambda s: _epoch(s) or 0.0)
+        windows = []
+        for i, s in enumerate(starts):
+            lo = _epoch(s) or 0.0
+            end = _epoch(base[s].get("ended_at"))
+            hi = (end + self.params["after_hand_sec"]) if end is not None else lo + 600.0
+            if i + 1 < len(starts):
+                hi = min(hi, _epoch(starts[i + 1]) or hi)      # 次のハンドの配布まで
+            windows.append((s, lo, hi))
+        all_points = choice_points(self.events, self.transcripts, self.params)
+        per_hand: dict[str, list[ChoicePoint]] = {s: [] for s in starts}
+        known = {int(h) for h in (self.setup.get("hand_stacks") or {})}
+        for p in all_points:
+            for s, lo, hi in windows:
+                if known and base[s].get("hand_id") not in known:
+                    continue                  # 持ち点の分からないハンド（記録に無い）は選ばない
+                # 再生でそのハンドの間に入る発話（最初のハンドより前の発話は選ばない = どのハンドにも入らない）
+                if lo <= p.at < hi:
+                    per_hand[s].append(p)
+                    break
+        for s, pts in per_hand.items():
+            if len(pts) > self.params["max_points"]:
+                # 既定と次点の差が小さい選択点から（迷いの大きいところ）
+                pts.sort(key=lambda p: p.options[0].logp - max(o.logp for o in p.options[1:]))
+                per_hand[s] = sorted(pts[:int(self.params["max_points"])], key=lambda p: p.at)
+        estimates: dict[str, HandEstimate] = {}
+        pools: dict[str, dict[tuple, Scored]] = {}
+        current: dict[str, tuple[int, ...]] = {}
+        for s in starts:
+            pts = per_hand[s]
+            assignment = tuple(0 for _ in pts)
+            scored = self._score(base[s], bad.get(s, []), pts, assignment)
+            estimates[s] = HandEstimate(hand_id=base[s].get("hand_id"), started_at=s, points=pts, default=scored)
+            pools[s] = {assignment: scored}
+            current[s] = assignment
+        for _ in range(int(self.params["max_rounds"])):
+            neighbors: dict[str, list[tuple[int, ...]]] = {}
+            for s in starts:
+                cur = current[s]
+                opts = []
+                for i, p in enumerate(per_hand[s]):
+                    for j in range(len(p.options)):
+                        if j != cur[i]:
+                            cand = cur[:i] + (j,) + cur[i + 1:]
+                            if cand not in pools[s]:
+                                opts.append(cand)
+                neighbors[s] = opts
+            width = max((len(v) for v in neighbors.values()), default=0)
+            if width == 0:
+                break
+            for k in range(width):
+                texts: dict[float, str] = {}
+                used: dict[str, tuple[int, ...]] = {}
+                for s in starts:
+                    assignment = neighbors[s][k] if k < len(neighbors[s]) else current[s]
+                    used[s] = assignment
+                    for p, i in zip(per_hand[s], assignment):
+                        text = p.text_for(i)
+                        if text is not None:
+                            texts[p.start] = text
+                hands, bad = self._replay(texts)
+                for s in starts:
+                    if k >= len(neighbors[s]) or s not in hands:
+                        continue
+                    pools[s][used[s]] = self._score(hands[s], bad.get(s, []), per_hand[s], used[s])
+            moved = False
+            for s in starts:
+                best = max(pools[s].values(), key=lambda x: x.score)
+                if best.score > pools[s][current[s]].score + 1e-9:
+                    current[s] = best.assignment
+                    moved = True
+            if not moved:
+                break
+        out = []
+        for s in starts:
+            seen: dict[tuple, Scored] = {}
+            for sc in sorted(pools[s].values(), key=lambda x: -x.score):
+                seen.setdefault(_hand_key(sc.hand), sc)
+            est = estimates[s]
+            est.candidates = list(seen.values())[:int(self.params["nbest"])]
+            out.append(est)
+        return out
+
+
+# ───────────────────────── 入出力 ─────────────────────────
+
+
+def _action_row(a: dict) -> dict:
+    return {k: a.get(k) for k in ("street", "seat", "action", "amount", "actor_source", "needs_review", "reason")}
+
+
+def estimate_dict(session_id: str, estimates: list[HandEstimate], params: dict = PARAMS) -> dict:
+    """`<sid>.estimate.json` の中身（影の推定。記録は変えない）。"""
+    hands = []
+    for est in estimates:
+        hands.append({
+            "hand_id": est.hand_id, "started_at": est.started_at, "changed": est.changed, "margin": est.margin,
+            "choices": [{"utterance_start_ts": p.start, "heard": p.heard,
+                         "options": [asdict(o) for o in p.options]} for p in est.points],
+            "best": {"score": est.best.score, "assignment": list(est.best.assignment),
+                     "actions": [_action_row(a) for a in est.best.hand.get("actions") or []],
+                     "winner_seat": est.best.hand.get("winner_seat"), "board": est.best.hand.get("board"),
+                     "notes": est.best.penalties},
+            "default_score": est.default.score,
+            "nbest": [{"score": c.score, "assignment": list(c.assignment), "notes": c.penalties,
+                       "actions": [_action_row(a) for a in c.hand.get("actions") or []],
+                       "winner_seat": c.hand.get("winner_seat")} for c in est.candidates],
+        })
+    return {"tool": "estimator", "estimator_version": ESTIMATOR_VERSION, "params_hash": params_hash(params),
+            "tier": "session", "session_id": session_id,
+            "created_at": datetime.now().isoformat(timespec="seconds"), "hands": hands}
+
+
+@dataclass
+class TruthResult:
+    hand_id: int
+    default: tuple[int, int]
+    estimate: tuple[int, int]
+    in_nbest: bool
+    changed: bool
+    default_exact: bool = False       # 読み直し（既定）がハンドとして丸ごと正しい
+    estimate_exact: bool = False      # 推定がハンドとして丸ごと正しい
+
+
+def exact(truth: dict, hand: dict) -> bool:
+    """ハンドが丸ごと正しいか（`measure_capture_accuracy.hand_fully_correct`）。"""
+    return hand_fully_correct(truth, hand)
+
+
+def compare_with_truth(estimates: list[HandEstimate], truth: dict) -> list[TruthResult]:
+    by_id = {e.hand_id: e for e in estimates}
+    out = []
+    for t in truth.get("hands") or []:
+        est = by_id.get(t.get("hand_id"))
+        if est is None:
+            continue
+        d = measure_hand(t, est.default.hand)
+        b = measure_hand(t, est.best.hand)
+        out.append(TruthResult(t["hand_id"], (d.action_correct, d.action_total), (b.action_correct, b.action_total),
+                               any(exact(t, c.hand) for c in est.candidates), est.changed,
+                               exact(t, est.default.hand), exact(t, est.best.hand)))
+    return out
+
+
+@dataclass
+class SessionInput:
+    session_id: str
+    events: list
+    transcripts: list[dict]
+    setup: dict
+    flags: dict
+    truth: dict
+    folder: Optional[Path] = None
+
+
+def inputs_from_logs(paths: list[Path], only: Optional[list[str]] = None) -> tuple[list[SessionInput], Optional[Path]]:
+    root, tmp = open_input(paths)
+    config = find_config(root)
+    out = []
+    for files in find_sessions(root, only):
+        record = _read_json(files.path(".json")) or {}
+        setup = session_setup(record)
+        if setup is None:
+            continue
+        events = load_events(files.events)
+        truth = truth_hands(_read_json(files.path(".ground_truth.json")))
+        out.append(SessionInput(files.session_id, events, _read_jsonl(files.path(".transcripts.jsonl")), setup,
+                                replay_flags(config, events), truth, files.folder))
+    return out, tmp
+
+
+def inputs_from_fixtures(folder: Path = FIXTURES) -> list[SessionInput]:
+    out = []
+    for exp in sorted(folder.glob("*/expected.json")):
+        data = json.loads(exp.read_text(encoding="utf-8"))
+        setup = data.get("setup")
+        if not setup:
+            continue
+        flags = {k: bool(setup.get(k)) for k in ("auto_new_hand", "auto_winner", "rfid_folds")}
+        transcripts = _read_jsonl(exp.parent / "transcripts.jsonl") if (exp.parent / "transcripts.jsonl").exists() else []
+        truth = {"hands": [dict(h["truth"], hand_id=h["hand_id"]) for h in data.get("hands") or []]}
+        out.append(SessionInput(data.get("session_id") or exp.parent.name, load_events(exp.parent / "events.jsonl"),
+                                transcripts, setup, flags, truth, exp.parent))
+    return out
+
+
+SCRIPT_FIXTURES = ROOT / "tests" / "fixtures" / "script"
+SCRIPT_FLAGS = {"auto_new_hand": False, "auto_winner": True, "rfid_folds": False}   # 声だけ = 札なし
+
+
+def script_input(script: dict, marks: list[dict], transcripts: list[dict], session_id: str,
+                 folder: Optional[Path] = None) -> SessionInput:
+    """声だけの台本のセッションを推定器の入力にする（台本の画面を押した順 = `eval_store.script_order_events` と同じ
+    並べ方: 発話は話し始めの時刻に置く）。正解は台本（やり直したハンドは後の回）。"""
+    from core.control_queue import ControlCommand, command_to_audio_event, script_hand_text
+    from core.events import AudioEvent
+    from tools.eval_store import script_setup
+
+    by_n = {int(h["n"]): h for h in script.get("hands") or []}
+    events: list = []
+    starts = []
+    for m in marks:
+        t = m.get("t")
+        if not isinstance(t, (int, float)):
+            continue
+        if m.get("event") == "start" and m.get("hand") in by_n:
+            spec = by_n[m["hand"]]
+            stacks = {int(k): int(v) for k, v in spec["stacks"].items()}
+            events.append(AudioEvent(action="script_hand", amount=0, timestamp=float(t),
+                                     raw_text=script_hand_text(int(spec["button"]), stacks)))
+            starts.append(m["hand"])
+        elif m.get("event") == "winner":
+            args = {k: m[k] for k in ("seat", "seats") if k in m}
+            ev = command_to_audio_event(ControlCommand("script", "winner", args, ""), lambda: float(t) - 0.001)
+            if ev is not None:
+                events.append(ev)
+    events.sort(key=lambda e: e.timestamp)
+    rows = [dict(r, heard_at=r["utterance_start_ts"]) for r in transcripts if r.get("utterance_start_ts") is not None]
+    latest = {n: k + 1 for k, n in enumerate(starts)}
+    truth = {"hands": [{"hand_id": k, "actions": by_n[n]["actions"], "winner_seat": by_n[n].get("winner_seat"),
+                        "board": [], "players": []} for n, k in sorted(latest.items())]}
+    setup = dict(script_setup(script), hand_stacks={})
+    return SessionInput(session_id, events, rows, setup, dict(SCRIPT_FLAGS), truth, folder)
+
+
+def inputs_from_script_fixtures(folder: Path = SCRIPT_FIXTURES) -> list[SessionInput]:
+    """回帰テストの台本のセッション（`tests/fixtures/script/*/`: script.json・script_marks.jsonl・transcripts.jsonl）。"""
+    out = []
+    for script_path in sorted(folder.glob("*/script.json")):
+        base = script_path.parent
+        script = json.loads(script_path.read_text(encoding="utf-8"))
+        out.append(script_input(script, _read_jsonl(base / "script_marks.jsonl"),
+                                _read_jsonl(base / "transcripts.jsonl"),
+                                script.get("session_id") or base.name, base))
+    return out
+
+
+def estimate_session(inp: SessionInput, params: dict = PARAMS) -> tuple[list[HandEstimate], int]:
+    est = Estimator(inp.events, inp.transcripts, inp.setup, inp.flags, inp.session_id, params)
+    return est.run(), est.replays
+
+
+def _fmt(a: dict) -> str:
+    amount = f" {a.get('amount')}" if a.get("amount") else ""
+    return f"{a.get('street')} 席{a.get('seat')} {a.get('action')}{amount}"
+
+
+def print_session(inp: SessionInput, estimates: list[HandEstimate], replays: int, verbose: bool) -> list[TruthResult]:
+    changed = [e for e in estimates if e.changed]
+    print(f"=== {inp.session_id[:8]}: {len(estimates)} ハンド・選択点 {sum(len(e.points) for e in estimates)}"
+          f"・変えたハンド {len(changed)}・再生 {replays} 回")
+    results = compare_with_truth(estimates, inp.truth) if inp.truth.get("hands") else []
+    by_id = {r.hand_id: r for r in results}
+    for e in estimates:
+        r = by_id.get(e.hand_id)
+        if not (e.changed or verbose or (r is not None and r.estimate != r.default)):
+            continue
+        truth_note = ""
+        if r is not None:
+            truth_note = (f" ／ 真のアクション: 読み直し {r.default[0]}/{r.default[1]} → 推定 {r.estimate[0]}/{r.estimate[1]}"
+                          f"{'・候補に正解あり' if r.in_nbest else ''}")
+        print(f"  ハンド {e.hand_id}: 得点 {e.default.score:+.1f} → {e.best.score:+.1f}"
+              f"（次点との差 {e.margin if e.margin is not None else '—'}）{truth_note}")
+        for note in e.best.penalties:
+            print(f"      {note}")
+        if e.changed:
+            before = [_fmt(a) for a in e.default.hand.get("actions") or []]
+            after = [_fmt(a) for a in e.best.hand.get("actions") or []]
+            print("      読み直し: " + " / ".join(before))
+            print("      推定　　: " + " / ".join(after))
+    return results
+
+
+def print_totals(results: list[TruthResult]) -> None:
+    if not results:
+        return
+    d = sum(r.default[0] for r in results), sum(r.default[1] for r in results)
+    b = sum(r.estimate[0] for r in results), sum(r.estimate[1] for r in results)
+    worse = [r.hand_id for r in results if r.estimate[0] < r.default[0]]
+    better = [r.hand_id for r in results if r.estimate[0] > r.default[0]]
+    n = len(results)
+    print(f"合計（真のアクションのあるハンド {n}）: 全部正しいハンド 読み直し {sum(r.default_exact for r in results)}/{n}"
+          f" → 推定 {sum(r.estimate_exact for r in results)}/{n} ／ 行 読み直し {d[0]}/{d[1]}（{d[0] / max(d[1], 1):.0%}）"
+          f" → 推定 {b[0]}/{b[1]}（{b[0] / max(b[1], 1):.0%}）・良くなった {len(better)}・悪くなった {len(worse)}"
+          f"・正解が候補に入った {sum(r.in_nbest for r in results)}/{n}")
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description="推定器 v0（影で回す。記録は変えない）")
+    ap.add_argument("path", type=Path, nargs="*", help="店舗の zip（分けたものは全部）/ logs フォルダ")
+    ap.add_argument("--fixtures", action="store_true", help="回帰テストの店舗 fixture で回す")
+    ap.add_argument("--session", action="append", help="セッション ID（先頭の数文字でよい）")
+    ap.add_argument("--write", action="store_true", help="<sid>.estimate.json を書く（ログのフォルダ / fixture のフォルダ）")
+    ap.add_argument("--json", action="store_true", help="推定を JSON で出す")
+    ap.add_argument("--verbose", action="store_true", help="変えなかったハンドも出す")
+    args = ap.parse_args(argv)
+    logging.basicConfig(level=logging.ERROR)
+    logging.disable(logging.CRITICAL)      # 候補の再生で出るエンジンのログは要らない
+    if not args.path and not args.fixtures:
+        ap.error("zip / logs フォルダか --fixtures を指定してください")
+    tmp = None
+    inputs = inputs_from_fixtures() if args.fixtures else []
+    if args.path:
+        more, tmp = inputs_from_logs(args.path, args.session)
+        inputs.extend(more)
+    if args.session:
+        inputs = [i for i in inputs if any(i.session_id.startswith(s) for s in args.session)]
+    all_results: list[TruthResult] = []
+    dumped = []
+    try:
+        for inp in inputs:
+            estimates, replays = estimate_session(inp)
+            data = estimate_dict(inp.session_id, estimates)
+            if args.json:
+                dumped.append(data)
+            else:
+                all_results.extend(print_session(inp, estimates, replays, args.verbose))
+            if args.write and inp.folder is not None and tmp is None:
+                (inp.folder / f"{inp.session_id}{ESTIMATE_SUFFIX}").write_text(
+                    json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    finally:
+        if tmp is not None:
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+    if args.json:
+        print(json.dumps(dumped, ensure_ascii=False, indent=1))
+    else:
+        print_totals(all_results)
+    return 0
+
+
+__all__ = ["ESTIMATOR_VERSION", "PARAMS", "Estimator", "HandEstimate", "Option", "ChoicePoint", "choice_points",
+           "utterance_options", "structure_penalties", "estimate_dict", "compare_with_truth", "estimate_session",
+           "inputs_from_fixtures", "inputs_from_logs", "row_correct"]
+
+if __name__ == "__main__":
+    raise SystemExit(main())

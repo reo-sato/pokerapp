@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "mobile",
+    "name": "Poker Hand Viewer",
     "slug": "mobile",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -19,7 +19,9 @@
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/favicon.png",
+      "lang": "ja",
+      "themeColor": "#101418"
     }
   }
 }

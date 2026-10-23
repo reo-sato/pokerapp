@@ -1,0 +1,359 @@
+"""tests/test_seats_and_blinds.py
+
+席の参加・休みとブラインドの変更（オーナーの回答 2026-09-26: 席は操作で決める / 離席は無い / ブラインドは
+店舗の操作で上がる）:
+
+- `name <席> -` = 休み（次のハンドから配られない）、`name <席> <名前>` = 参加。
+- スタック 0 の席（バースト）は買い足す（`r`）まで配られない。pokerkit はスタック 0 を受け付けないので、
+  そのまま配ると新しいハンドが始まらず、integration スレッドが止まっていた。ただし手札が**配られた**スタック 0 の
+  席は、記録の誤りか買い足しの入れ忘れとみて最初の持ち点に戻して配る（店舗 2026-09-27）。あとから届いた `r` は
+  戻した額の代わり（二重にしない）。
+- ハンドの途中の買い足しは次のハンドから（そのハンドの結果に入れない。以前はハンドの終わりに消えていた）。
+- ボタンはハンドに参加する席の中で回る（抜けた席は飛ばす）。
+- 配られる席が 2 つ未満ならハンドを始めない（1 回だけ知らせる）。買い足し・参加で始まる。
+- `blinds <SB> <BB>` は次のハンドから。ハンドの記録の blinds はそのハンドのもの。
+"""
+from __future__ import annotations
+
+import pytest
+
+from core.events import AudioEvent
+from core.game_state import PlayerState
+
+pytest.importorskip("pokerkit")
+
+from core.poker_engine import PokerkitGameState  # noqa: E402
+from tests.test_rfid_folds import _Table  # noqa: E402
+
+
+def _engine(stacks: dict[int, int], button=None) -> PokerkitGameState:
+    return PokerkitGameState(
+        [PlayerState(seat=s, name=f"P{s}", stack=st) for s, st in stacks.items()],
+        sb=100, bb=200, button_seat=button,
+    )
+
+
+class TestEngineSeats:
+    def test_a_seat_sitting_out_is_not_dealt(self):
+        gs = _engine({1: 10000, 2: 10000, 3: 10000})
+        assert gs.sit_out(2) is True and gs.sit_out(2) is False
+        gs.new_hand()
+        assert gs.seats_in_hand() == [1, 3]
+        assert set(gs.position_map()) == {1, 3} and set(gs.get_stacks()) == {1, 2, 3}
+        assert gs.get_stacks()[2] == 10000            # スタックは持ち越し
+        gs.end_hand(1)
+        assert gs.sit_in(2) is True
+        gs.new_hand()
+        assert gs.seats_in_hand() == [1, 2, 3]
+
+    def test_a_busted_seat_is_skipped_until_it_rebuys(self):
+        gs = _engine({1: 10000, 2: 0, 3: 10000})
+        gs.new_hand()
+        assert gs.seats_in_hand() == [1, 3] and gs.playing_seats() == [1, 3]
+        gs.end_hand(3)
+        gs.rebuy(2, 5000)
+        gs.new_hand()
+        assert gs.seats_in_hand() == [1, 2, 3]
+
+    def test_a_rebuy_during_a_hand_counts_from_the_next_hand(self):
+        gs = _engine({1: 10000, 2: 10000, 3: 10000})
+        gs.new_hand()
+        gs.rebuy(2, 5000)                               # ハンドの途中（席2 はこのハンドに参加）
+        gs.end_hand(1)
+        assert gs.get_stacks()[2] < 10000               # このハンドの結果には入れない
+        before = gs.get_stacks()[2]
+        gs.new_hand()
+        assert gs.get_stacks()[2] + gs.committed(2) == before + 5000
+
+    def test_a_busted_seat_rebuying_during_a_hand_is_dealt_next(self):
+        gs = _engine({1: 10000, 2: 0, 3: 10000})
+        gs.new_hand()
+        gs.rebuy(2, 5000)                               # 休みの席 = すぐ足す
+        assert gs.playing_seats() == [1, 2, 3]
+        gs.end_hand(1)
+        gs.new_hand()
+        assert gs.seats_in_hand() == [1, 2, 3]
+
+    def test_restore_keeps_what_was_changed_from_outside_the_hand(self):
+        gs = _engine({1: 10000, 2: 10000, 3: 10000})
+        gs.new_hand()
+        snap = gs.snapshot()
+        gs.apply_action(gs.legal_context().actor_seat, "call", 200)
+        gs.sit_out(2)
+        gs.set_blinds(200, 400)
+        gs.set_button(1)
+        gs.rebuy(3, 5000)
+        gs.restore(snap)                                # 組み直し: ハンドの入力だけ戻す
+        assert gs.pot == 300 and gs.is_sitting_out(2)
+        gs.end_hand(1)
+        before = gs.get_stacks()[3]
+        gs.new_hand()
+        assert gs.seats_in_hand() == [1, 3] and gs.legal_context().bb == 400
+        assert gs.get_stacks()[3] + gs.committed(3) == before + 5000
+
+    def test_the_button_skips_a_seat_that_left(self):
+        gs = _engine({1: 10000, 2: 10000, 3: 10000})
+        buttons = []
+        for step in (None, None, "out2", "swap"):
+            if step == "out2":
+                gs.sit_out(2)
+            elif step == "swap":
+                gs.sit_in(2)
+                gs.sit_out(3)
+            gs.new_hand()
+            buttons.append(gs.button_seat)
+            gs.end_hand(gs.seats_in_hand()[0])
+        # 3（初回は最大の席）→ 1 → 3（席2 は休み）→ 1（ボタンの席3 が抜けた = その次の席）
+        assert buttons == [3, 1, 3, 1]
+
+    def test_fewer_than_two_seats_refuses_without_changing_state(self):
+        gs = _engine({1: 10000, 2: 10000})
+        gs.sit_out(2)
+        with pytest.raises(ValueError):
+            gs.new_hand()
+        assert gs.hand_id == 0 and not gs.is_hand_active()
+        gs.sit_in(2)
+        gs.new_hand()
+        assert gs.hand_id == 1
+
+    def test_end_hand_rejects_a_seat_that_was_not_dealt(self):
+        gs = _engine({1: 10000, 2: 10000, 3: 0})
+        gs.new_hand()
+        with pytest.raises(ValueError):
+            gs.end_hand(3)
+        gs.end_hand(1)
+
+
+class TestEngineButton:
+    """ディーラーボタンの手動移動（仕様 FR-05g）。次のハンドのボタンを指定し、通常の進み方と違えば知らせる。"""
+
+    def test_the_next_hand_starts_at_the_given_seat(self):
+        gs = _engine({1: 10000, 2: 10000, 3: 10000})
+        gs.new_hand()                       # ボタン 3
+        gs.end_hand(1)
+        gs.set_button(3)                    # 通常なら 1 に進むところを 3 のまま
+        gs.new_hand()
+        assert gs.button_seat == 3 and gs.last_button_override == (1, 3)
+        gs.end_hand(1)
+        gs.new_hand()
+        assert gs.button_seat == 1 and gs.last_button_override is None   # 指定は 1 回だけ
+
+    def test_a_seat_that_is_not_dealt_is_ignored(self):
+        gs = _engine({1: 10000, 2: 0, 3: 10000})
+        gs.set_button(2)
+        gs.new_hand()
+        assert gs.button_seat == 3 and gs.last_button_override is None
+
+    def test_unknown_seat(self):
+        gs = _engine({1: 10000, 2: 10000})
+        with pytest.raises(ValueError):
+            gs.set_button(9)
+
+
+class TestEngineBlinds:
+    def test_a_change_during_a_hand_applies_to_the_next(self):
+        gs = _engine({1: 10000, 2: 10000, 3: 10000})
+        gs.new_hand()
+        gs.set_blinds(200, 400)
+        assert gs.legal_context().bb == 200
+        gs.end_hand(1)
+        before = gs.get_stacks()
+        gs.new_hand()
+        assert gs.legal_context().bb == 400
+        posted = sorted(before[s] - st for s, st in gs.get_stacks().items())
+        assert posted == [0, 200, 400]              # SB 200 / BB 400 を post
+
+    def test_a_change_between_hands_applies_at_once(self):
+        gs = _engine({1: 10000, 2: 10000})
+        gs.set_blinds(300, 600)
+        gs.new_hand()
+        assert gs.legal_context().bb == 600
+
+    @pytest.mark.parametrize("sb, bb", [(0, 200), (400, 200), (-100, 200)])
+    def test_invalid_blinds(self, sb, bb):
+        gs = _engine({1: 10000, 2: 10000})
+        with pytest.raises(ValueError):
+            gs.set_blinds(sb, bb)
+
+
+HOLES_A = {4: ["Jd", "2s"], 5: ["5s", "6h"], 6: ["8s", "Qd"]}
+HOLES_B = {4: ["As", "Ad"], 5: ["Ks", "Kd"], 6: ["Qs", "Qh"]}
+
+
+def _send(tb: _Table, **fields) -> None:
+    event = AudioEvent(timestamp=tb.now, **{"amount": 0, "raw_text": "", **fields})
+    tb.recorder.record(event)
+    tb.t._handle_audio_event(event)          # noqa: SLF001
+
+
+def _win(tb: _Table, seat: int) -> None:
+    """アクションを 1 つ入れてから勝者を宣言する（配った直後の「ウィナー」は前のハンドへの遅れとみるため）。"""
+    tb.say("コール")
+    _send(tb, action="winner", raw_text=f"シート{seat} ウィナー")
+
+
+class _LiveTable(_Table):
+    """run() と同じく、配布を検出したハンドの開始を毎周試す卓。"""
+
+    def tick(self, until: float, step: float = 0.1) -> None:
+        while self.now < until - 1e-9:
+            super().tick(self.now + step, step)
+            self.t._start_dealt_hand_if_ready()  # noqa: SLF001
+
+
+def _deal_without_assert(tb: _Table, holes) -> None:
+    from core.events import RFIDEvent
+
+    for seat, cards in holes.items():
+        tb.put(seat, cards)
+        for card in cards:
+            ev = RFIDEvent(tag_id=card, card=card, reader_id=f"r{seat}", role="seat", seat=seat,
+                           timestamp=tb.now, raw_tag_id=card)
+            tb.recorder.record(ev)
+            tb.t._process_rfid_event(ev)     # noqa: SLF001
+    tb.tick(tb.now + 2.0)
+
+
+class TestTable:
+    def test_a_vacated_seat_is_not_dealt_from_the_next_hand(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal(HOLES_A)
+        _send(tb, action="sit_out", seat=4, raw_text="シート4 休み")
+        assert tb.t._seats_in_hand() == [4, 5, 6]          # noqa: SLF001 — いまのハンドはそのまま
+        assert any("席4 は次のハンドから休み" in n for n in tb.notices)
+        _win(tb, 5)
+        tb.cards = {}
+        tb.deal({5: HOLES_B[5], 6: HOLES_B[6]})
+        assert tb.gs.seats_in_hand() == [5, 6]
+        assert any("休み: 席4" in n for n in tb.notices)
+        _win(tb, 6)
+        assert [p["seat"] for p in tb.hands[1].players] == [5, 6]
+        assert [p["seat"] for p in tb.hands[0].players] == [4, 5, 6]
+
+    def test_a_named_seat_comes_back(self, tmp_path):
+        tb = _Table(tmp_path)
+        _send(tb, action="sit_out", seat=4, raw_text="シート4 休み")
+        _send(tb, action="sit_in", seat=4, raw_text="シート4 参加")
+        _send(tb, action="sit_in", seat=5, raw_text="シート5 参加")   # もともと参加 = 何も言わない
+        assert sum("席4 は次のハンドから参加" in n for n in tb.notices) == 1
+        assert not any("席5" in n for n in tb.notices)
+        tb.deal(HOLES_A)
+        assert tb.gs.seats_in_hand() == [4, 5, 6]
+
+    def test_a_busted_seat_is_skipped(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.gs.update_stack(4, 0)
+        tb.deal({5: HOLES_A[5], 6: HOLES_A[6]})            # バーストした人には配らない
+        assert tb.gs.seats_in_hand() == [5, 6] and any("休み: 席4" in n for n in tb.notices)
+
+    def test_the_deal_waits_until_two_seats_can_play(self, tmp_path):
+        tb = _LiveTable(tmp_path)
+        _send(tb, action="sit_out", seat=4, raw_text="シート4 休み")
+        _send(tb, action="sit_out", seat=5, raw_text="シート5 休み")
+        _deal_without_assert(tb, HOLES_A)
+        tb.tick(tb.now + 5.0)
+        assert not tb.t._hand_open                          # noqa: SLF001
+        refusals = [n for n in tb.notices if "ハンドを始められません" in n]
+        assert len(refusals) == 1 and "r <席> <金額>" in refusals[0]
+        _send(tb, action="sit_in", seat=4, raw_text="シート4 参加")
+        tb.tick(tb.now + 1.0)
+        assert tb.t._hand_open and tb.gs.seats_in_hand() == [4, 6]   # noqa: SLF001
+        assert tb.t._hole_cards == {4: ["Jd", "2s"], 5: ["5s", "6h"], 6: ["8s", "Qd"]}  # noqa: SLF001
+
+    def test_a_busted_seat_that_is_dealt_cards_plays_with_its_starting_stack(self, tmp_path):
+        tb = _LiveTable(tmp_path)
+        tb.gs.update_stack(4, 0)
+        tb.gs.update_stack(5, 0)
+        _deal_without_assert(tb, HOLES_A)
+        tb.tick(tb.now + 1.0)
+        assert tb.t._hand_open and tb.gs.seats_in_hand() == [4, 5, 6]   # noqa: SLF001
+        assert sum("持ち点 10000 に戻して配ります" in n for n in tb.notices) == 2
+        _send(tb, action="rebuy", seat=4, amount=5000, raw_text="シート4 リバイ 5000")   # 実際は 5000 の買い足し
+        assert any("戻した持ち点 10000 の代わりにします（差はこのハンドのあとに直します）" in n for n in tb.notices)
+        _win(tb, 6)
+        (hand,) = tb.hands
+        players = {p["seat"]: p for p in hand.players}
+        assert players[4]["stack_start"] == 10000 and hand.review_required
+        assert tb.gs.get_stacks()[4] == players[4]["stack_end"] - 5000   # 10000 → 5000 に直す
+        _send(tb, action="rebuy", seat=5, amount=10000, raw_text="シート5 リバイ 10000")  # 戻した額と同じ
+        assert tb.gs.get_stacks()[5] == players[5]["stack_end"]            # 二重に足さない
+
+    def test_blinds_change_from_the_next_hand(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal(HOLES_A)
+        _send(tb, action="set_blinds", amount=400, raw_text="200/400")
+        assert any("ブラインドを 200/400 にしました（次のハンドから）" in n for n in tb.notices)
+        _win(tb, 5)
+        assert tb.hands[0].blinds == {"sb": 100, "bb": 200}
+        tb.cards = {}
+        tb.deal(HOLES_B)
+        _send(tb, action="winner", raw_text="シート6 ウィナー")   # まだアクションが無い = 前のハンドへの遅れ
+        assert len(tb.hands) == 1
+        _win(tb, 6)
+        assert tb.hands[1].blinds == {"sb": 200, "bb": 400}
+        assert tb.hands[1].pot_total == 1000                # SB 200 + BB 400 + BTN のコール 400
+
+    def test_button_moved_by_hand_is_reported(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal(HOLES_A)                                    # ボタン 席6
+        _win(tb, 5)
+        _send(tb, action="set_button", seat=6, raw_text="シート6 ボタン")
+        assert any("次のハンドのボタンを席6 にします" in n for n in tb.notices)
+        tb.cards = {}
+        tb.deal(HOLES_B)
+        assert tb.gs.button_seat == 6
+        assert any("ボタンを席6 に動かしました（通常の進み方なら席4）" in n for n in tb.notices)
+
+    def test_invalid_blinds_are_reported(self, tmp_path):
+        tb = _Table(tmp_path)
+        _send(tb, action="set_blinds", amount=100, raw_text="400/100")
+        assert any("ブラインドを変えられません" in n for n in tb.notices)
+
+
+class TestLateCardsForABustedSeat:
+    """手札が 2 席に載った時点でハンドを始めるので、あとから札が載った席（前のハンドで持ち点 0 と誤って記録した人）
+    を入れてハンドを組み直す（店舗 2026-10-19 d01277f8: 席が抜けたぶんボタンが 1 席先に進んだまま 30 ハンド）。"""
+
+    def _table(self, tmp_path):
+        tb = _LiveTable(tmp_path, seats=(4, 5, 6, 7))
+        tb.gs.update_stack(7, 0)
+        tb.t._prev_hand_seats = {4, 5, 6, 7}             # noqa: SLF001 — 前のハンドに配られた
+        tb.t._last_positive_stack[7] = 8000              # noqa: SLF001 — 0 になる前の持ち点
+        return tb
+
+    def test_the_seat_is_added_with_its_last_stack(self, tmp_path):
+        tb = self._table(tmp_path)
+        _deal_without_assert(tb, HOLES_A)
+        assert tb.gs.seats_in_hand() == [4, 5, 6]
+        _deal_without_assert(tb, {7: ["Tc", "Th"]})
+        assert tb.gs.seats_in_hand() == [4, 5, 6, 7]
+        assert any("札が載った席 席7 を入れ" in n and "8000 に戻しました" in n for n in tb.notices)
+        _win(tb, 6)
+        players = {p["seat"]: p for p in tb.hands[0].players}
+        assert players[7]["stack_start"] == 8000 and tb.hands[0].review_required
+
+    def test_a_seat_that_was_away_is_not_added(self, tmp_path):
+        tb = self._table(tmp_path)
+        tb.t._prev_hand_seats = {4, 5, 6}                # noqa: SLF001 — 前のハンドにいなかった（新しく座った）
+        _deal_without_assert(tb, HOLES_A)
+        _deal_without_assert(tb, {7: ["Tc", "Th"]})
+        assert tb.gs.seats_in_hand() == [4, 5, 6]
+
+    def test_the_decision_is_recorded_for_replay(self, tmp_path):
+        tb = self._table(tmp_path)
+        _deal_without_assert(tb, HOLES_A)
+        _deal_without_assert(tb, {7: ["Tc", "Th"]})
+        signals = [e for e in tb.recorder.events if getattr(e, "kind", None) == "hand_seats"]
+        assert len(signals) == 1 and list(signals[0].cards) == ["4:dealt", "5:dealt", "6:dealt", "7:dealt"]
+
+
+def test_a_sixth_board_card_is_not_added(tmp_path):
+    from core.events import RFIDEvent
+
+    tb = _LiveTable(tmp_path)
+    _deal_without_assert(tb, HOLES_A)
+    for card in ("2c", "3c", "4c", "5c", "6c", "7c"):
+        ev = RFIDEvent(tag_id=card, card=card, reader_id="b", role="board", seat=None, timestamp=tb.now,
+                       raw_tag_id=card)
+        tb.t._process_rfid_event(ev)                     # noqa: SLF001
+    assert tb.t._board_cards == ["2c", "3c", "4c", "5c", "6c"]   # noqa: SLF001

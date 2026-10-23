@@ -78,6 +78,7 @@ class HandCorrectionRepository:
         action_index: int | None = None,
         corrected_by: str = "staff",
         note: str | None = None,
+        target: dict | None = None,
     ) -> HandCorrection:
         """訂正を 1 件追記する（append-only）。field と value の基本 validation を行う。
 
@@ -95,6 +96,7 @@ class HandCorrectionRepository:
                 corrected_by=corrected_by or "staff",
                 corrected_at=_now_iso(),
                 note=note,
+                target=target,
             )
             self._corrections.append(c)
             self._flush()

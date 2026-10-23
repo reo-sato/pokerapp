@@ -89,8 +89,27 @@ class TestGUIDashboardLogic:
         dash.on_action(record)
 
         assert not dash._update_queue.empty()
-        got = dash._update_queue.get_nowait()
-        assert got is record
+        got, shown = dash._update_queue.get_nowait()
+        assert got is record and shown == 500           # ベットの額はそのまま（コールはトータル）
+
+    def test_a_call_is_shown_as_the_street_total(self, tmp_path: Path):
+        """コールの額は追加額ではなくトータル（そのストリートで出した合計）で見せる（オーナー, 2026-09-29）。"""
+        from core.hand_log import ActionRecord
+
+        dash, gs, audio_q, stop = _make_mock_dashboard(tmp_path)
+
+        class Engine:
+            def street_total(self, record):
+                return 600                               # BB が 600 のレイズにコール（追加 400）
+
+        dash._integration_thread = Engine()
+        record = ActionRecord(
+            hand_id=1, timestamp="2026-04-02T12:00:00", street="preflop", seat=2, player_name="Bob",
+            action="call", amount=400, pot_after=1200, stack_after=9400,
+            source={"camera": False, "audio": True, "rfid": False}, needs_review=False, confidence=0.5,
+        )
+        dash.on_action(record)
+        assert dash._update_queue.get_nowait() == (record, 600)
 
     def test_cmd_new_hand_puts_audio_event(self, tmp_path: Path):
         dash, gs, audio_q, stop = _make_mock_dashboard(tmp_path)

@@ -8,8 +8,13 @@ player 向け参照 front-end（WS3, Expo）が消費する **読み取り専用
   - `python main.py --ledger`（`viewer_api.enabled=true`）= スタッフ会計画面に **in-process 組み込み**。
     注文 write が有効になる（単一プロセス所有, ADR-0018 §3）。
 - bind 既定: `127.0.0.1:8788`（無認証のため。LAN 公開は `config.viewer_api.bind_host` を明示変更。
-  rfid receiver と同じ前例）。プライバシーモデルは **v1 = name-pick で確定**（ISSUE-0019 Fixed,
+  rfid receiver と同じ前例）。`--viewer-api --host / --port` は config より優先する（店舗 PC のランチャ,
+  ADR-0059）。プライバシーモデルは **v1 = name-pick で確定**（ISSUE-0019 Fixed,
   ADR-0018。注文はスタッフ確定を挟むため対面で検証される）。
+- **API 以外のパス（`/` 以下）はお客さん向け画面**（`mobile/` の web 版, ADR-0059）。API は `/api/` の下だけで、
+  未知の `/api/...` は JSON の 404。画面は同じ origin の `/api/` を読む。
+- **要求ごとに `sessions.json` / `players.json` を読み直す**（前回から変わっていれば, ADR-0059）。hand logger が
+  別プロセスで書いたセッション・席・player は、API を再起動せずに次の要求から見える。
 - **M1 は GET のみ／M5 で注文リクエストの write を追加**（ledger への直接 write は無い —
   本 doc § 注文リクエスト / verify-v1 ledger は `ledger-overview.md` / `ledger-schema.md`）。
 - version: **0.x draft**。session 系 model（session / seat_assignment / hand_ref）が draft（0.x,
@@ -28,12 +33,12 @@ player 向け参照 front-end（WS3, Expo）が消費する **読み取り専用
 
 | Method | Path | 200 response | error |
 |--------|------|--------------|-------|
-| GET | `/api/health` | `{"status": "ok", "version": "<app version>"}` | — |
+| GET | `/api/health` | `{"status": "ok", "version": "<app version>", "branch": "<取得元のブランチ \| null>", "commit": "<コミット \| null>", "release": <リリース版か \| null>}`（branch 以降は ADR-0066 で additive）。店舗サーバー（`--serve`）だけ `"cloud": {"enabled", "last_ok_at", "last_attempt_at", "last_error", "pending", "rejected"}` も（ADR-0067 2b, additive） | — |
 | GET | `/api/players` | `{"players": [player, ...]}`（作成順。player = `player.schema.json` v1.0） | — |
 | GET | `/api/players/{player_id}` | player | 404 `not_found` |
 | GET | `/api/players/{player_id}/sessions` | `{"sessions": [player_session_summary, ...]}`（player が 1 hand 以上着席した session のみ。`player_session_summary.schema.json` v0.x） | 404 `not_found`（unknown player） |
 | GET | `/api/players/{player_id}/sessions/{session_id}/hands` | `{"hands": [hand, ...]}`（player が着席していた hand の HandSummary。hand = `hand.schema.json` v1.0。hand_id 昇順） | 404 `not_found`（unknown player / unknown session） |
-| GET | `/api/sessions/{session_id}/hands/{hand_id}` | hand（HandSummary 全体） | 404 `not_found`（log 不在 / hand 不在） |
+| GET | `/api/sessions/{session_id}/hands/{hand_id}` | hand（HandSummary 全体）。任意の `?player_id=` = 見ている人（公開範囲 `own_and_shown` で自分の手札を出す, ADR-0067 D6）。隠した手札は `hole_cards: null` + `hole_cards_hidden: true`（`.../players/{id}/sessions/{sid}/hands` も同じ） | 404 `not_found`（log 不在 / hand 不在） |
 | GET | `/api/players/{player_id}/sessions/{session_id}/ledger` | `{"entries": [ledger_entry, ...], "summary": {cash_in_total, order_total, entry_fee, point_spent_total, point_credited_total, net_due_to_store, settled, payment_status, settled_at, paid_amount}}`（ledger_entry = `ledger_entry.schema.json` v0.x。totals は `SessionSettlement` を当該 player に絞った値。`settled`(bool)/`payment_status`/`settled_at` は確定状態 = `list_settlements` 由来で、未確定なら settled=false・payment_status=null。`payment_status` は `partial` を取り得る・`paid_amount`(累計受領額, 未確定は 0) も additive（ADR-0023）。S4 mobile 表示用 additive） | 404 `not_found`（unknown player / unknown session） |
 | GET | `/api/menu` | `{"items": [{"item_name", "unit_amount", "sold_out"?}, ...]}`（menu.json master, M5。`sold_out` は additive = ADR-0046。空なら `[]`） | — |
 | GET | `/api/players/{player_id}/sessions/{session_id}/order-requests` | `{"requests": [order_request, ...]}`（自分のもののみ、requested_at 順。`order_request.schema.json` v0.x） | 404 `not_found` |
@@ -116,6 +121,10 @@ player 本人の self-write（注文 POST 等）を **PIN ログイン**で本�
 | PUT  | `/api/staff/menu` | yes | `{"items": [{item_name, unit_amount, sold_out?}, ...]}` | menu master の全量置換（価格改定・品切れ, ADR-0046。last-write-wins・sync 非対象）→ 保存後 `{"items": [...]}`。400 `invalid_menu` |
 | GET  | `/api/staff/buyin-presets` | no | — | `{"presets": [int, ...]}`（config `ledger.buyin_presets` 由来。buy-in 金額メニュー, ADR-0026） |
 | POST | `/api/staff/players/merge` | yes | `{"survivor_id", "absorbed_id"}` | absorbed を survivor に統合（player merge, ADR-0030）。`{"survivor_id", "absorbed_id", "merged_into", "merged_at"}`。404 `not_found` / 400 `invalid_merge`（自己 merge / サイクル）。registry 書き込みのため write 所有プロセスのみ |
+| POST | `/api/staff/players/{player_id}/viewer-link` | yes | — | 店外で見るための閲覧リンクを発行（ADR-0067 D5, 店舗サーバーがクラウドにつながっているときだけ）。merge 済みなら統合先。`{"player_id", "url", "created_at", "qr_image"}`（qr_image = QR の SVG の data URI、無ければ null）。前のリンクは使えなくなる。409 `cloud_not_linked` / 404 `not_found` / 409 `unknown_player`（まだクラウドに届いていない）/ 502 `cloud_unavailable`・`cloud_error` |
+| POST | `/api/staff/players/{player_id}/viewer-link/revoke` | yes | — | 閲覧リンクを取り消す。`{"player_id", "revoked"}`。エラーは上と同じ |
+| GET | `/api/staff/hole-card-visibility` | read | — | 店の設定 `{"store_default"}`（config `viewer_api.hole_cards`, ADR-0067 D6） |
+| PUT | `/api/staff/sessions/{session_id}/hole-card-visibility` | yes | `{"value": "all" \| "own_and_shown" \| null}` | セッションごとの公開範囲（null = 店の設定）。`{"session", "store_default", "effective"}`。400 `invalid_visibility` / 404 `not_found` |
 | POST | `/api/staff/sessions/{session_id}/close` | yes | — | session を close（精算確定の前提, B1）。closed session を返す。404 `not_found` / 409 `already_closed`。reopen は提供しない |
 | POST | `/api/staff/sessions/{session_id}/hands/{hand_id}/corrections` | yes | `{"field", "new_value", "action_index"?, "corrected_by"?, "note"?}` | ハンド訂正を追記（append-only overlay, ADR-0036）。`field`=action/amount（action_index あり）または winner_seat（hand レベル, action_index 省略）。404 `not_found`（unknown hand）/ 400 `invalid_correction`。元 hand log は不変。`GET .../hands/{hid}` と player hands 一覧は**訂正済みビュー**を返す（`_original`/`corrected`/`_corrections` 付与, needs_review 解除） |
 | GET  | `/api/staff/sessions/{session_id}/settlement` | no | — | `{"settlements": [session_settlement, ...]}`（compute_settlement, speculative） |

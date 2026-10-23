@@ -21,6 +21,14 @@ export interface Player {
   merged_at?: string;
 }
 
+/** 店外で見るための閲覧リンク（ADR-0067 D5）。url の `#link=` の後ろが本人の鍵（人に渡さない）。 */
+export interface ViewerLink {
+  player_id: string; // merge 済みなら統合先
+  url: string;
+  created_at?: string | null;
+  qr_image?: string | null; // QR コード（画像の data URI）。無ければ URL だけを出す
+}
+
 export interface Blinds {
   sb?: number;
   bb?: number;
@@ -37,6 +45,16 @@ export interface StaffSession {
   ended_at?: string;
   blinds?: Blinds;
   status: "open" | "closed";
+  /** お客さんの画面に出す手札の範囲（ADR-0067 D6）。無ければ店の設定に従う。 */
+  hole_card_visibility?: HoleCardVisibility;
+}
+
+export type HoleCardVisibility = "all" | "own_and_shown";
+
+export interface HoleCardVisibilityResult {
+  session: StaffSession;
+  store_default: HoleCardVisibility;
+  effective: HoleCardVisibility;
 }
 
 /** core/session.py SeatAssignment.to_dict（hand-based seating, ADR-0006/0007）。 */

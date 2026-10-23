@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Optional, Protocol, runtime_checkable
+import math
+from typing import Any, Optional, Protocol, runtime_checkable
 
 from core.constants import STREET_ORDER
 from core.engine_types import LegalContext
 from core.game_state import GameStateManager, PlayerState, Street
+from core.positions import next_button, position_map, seat_order_from_button
 
 logger = logging.getLogger(__name__)
 
@@ -43,16 +45,36 @@ class PokerEngine(Protocol):
     def get_stacks(self) -> dict[int, int]: ...
     def get_stack(self, seat: int) -> int: ...
     def get_player_name(self, seat: int) -> str: ...
+    def set_player_name(self, seat: int, name: str) -> None: ...
     def get_active_seats(self) -> list[int]: ...
     def update_stack(self, seat: int, new_stack: int) -> None: ...
     def rebuy(self, seat: int, amount: int) -> None: ...
 
     # additive（R3 推定/訂正が読む, ADR-0009 §2）。legacy は rules-aware でない stub を返す。
     def legal_context(self) -> LegalContext: ...
+    def is_hand_active(self) -> bool: ...
+    def position_map(self) -> dict[int, str]: ...
+
+    @property
+    def button_seat(self) -> Optional[int]: ...
     def is_legal_actor(self, seat: int) -> bool: ...
     def fold_through(self, until_seat: int, max_folds: Optional[int] = None) -> list[int]: ...
     def pots(self) -> list[dict]: ...
     def committed(self, seat: int) -> int: ...
+
+    # additive（勝者の自動判定, ADR-0062）。`rules_aware` が False の backend では使わない。
+    rules_aware: bool
+    def acting_order(self) -> list[int]: ...
+    def current_pots(self) -> list[dict]: ...
+    def end_hand_awards(self, awards: dict[int, int]) -> None: ...
+
+    # additive（席の参加・休み、ブラインドの変更, 2026-09-26）。次のハンドから反映する。
+    def sit_out(self, seat: int) -> bool: ...
+    def sit_in(self, seat: int) -> bool: ...
+    def seats_in_hand(self) -> list[int]: ...
+    def set_blinds(self, sb: int, bb: int) -> None: ...
+    def set_bb_ante(self, on: bool) -> None: ...
+    def set_button(self, seat: int) -> None: ...
 
     @property
     def hand_id(self) -> int: ...
@@ -62,17 +84,29 @@ class PokerEngine(Protocol):
     def pot(self) -> int: ...
 
 
+def _advance_button(playing: list[int], button: Optional[int]) -> int:
+    """前のボタンから 1 つ進めたボタン（前のボタンの席が抜けていたら、その次の席, 仕様 FR-05b）。"""
+    if button is None or button in playing:
+        return next_button(playing, button)
+    later = [s for s in playing if s > button]
+    return later[0] if later else playing[0]
+
+
 def create_game_state(
-    backend: str, players: list[PlayerState], sb: int, bb: int
+    backend: str, players: list[PlayerState], sb: int, bb: int,
+    button_seat: Optional[int] = None,
 ) -> PokerEngine:
     """backend 文字列から game-state 実装を生成する。
 
     - "pokerkit": `PokerkitGameState`（preview）
     - それ以外（既定 "legacy"）: 既存 `GameStateManager`
+
+    `button_seat` は **最初のハンドで使うボタンの 1 つ手前**の席（省略時は最大の席番号 =
+    ボタン導入前と同じ並び, ISSUE-0032）。legacy はボタンを持たないので無視される。
     """
     if backend == "pokerkit":
         try:
-            engine = PokerkitGameState(players, sb, bb)
+            engine = PokerkitGameState(players, sb, bb, button_seat=button_seat)
         except ImportError:
             # 既定 backend が pokerkit (Phase G) のため、未導入環境でも起動だけは
             # 落とさない。rules-aware 機能（actor 推定/合法手射影等）は無効になる。
@@ -96,7 +130,14 @@ class PokerkitGameState:
     - mid-hand の `update_stack` / `rebuy` は次ハンドから反映（pokerkit state は hand 単位）。
     """
 
-    def __init__(self, players: list[PlayerState], sb: int, bb: int) -> None:
+    # ルールの状態機械を持つ（手番・ベッティングの終わり・side pot が分かる）。勝者の自動判定は
+    # これが True の backend だけで行う（ADR-0062）。
+    rules_aware = True
+
+    def __init__(
+        self, players: list[PlayerState], sb: int, bb: int,
+        button_seat: Optional[int] = None,
+    ) -> None:
         from pokerkit import Automation  # 遅延 import（backend 選択時のみ pokerkit 必須）
 
         if not players:
@@ -105,9 +146,37 @@ class PokerkitGameState:
         self._bb = bb
         self._players: dict[int, PlayerState] = {p.seat: p for p in players}
         self._seats: list[int] = sorted(self._players)          # 安定 seat 順
-        self._seat_to_idx: dict[int, int] = {s: i for i, s in enumerate(self._seats)}
-        self._idx_to_seat: dict[int, int] = {i: s for i, s in enumerate(self._seats)}
+        # ボタン（ISSUE-0032 / 仕様 FR-05b）。**次の `new_hand` で使う**席を持ち、ハンド開始時に
+        # 1 つ進める。初期値 None は「最大の席番号から始める」= ボタン導入前と同じ並びになる
+        # （`next_button` 参照。golden fixtures の 1 ハンド目が不変）。
+        self._button_seat: Optional[int] = button_seat
+        # pokerkit へ渡す並び（index 0=SB … 末尾=BTN）。`new_hand` で作り直す。
+        self._order: list[int] = list(self._seats)
+        self._seat_to_idx: dict[int, int] = {s: i for i, s in enumerate(self._order)}
+        self._idx_to_seat: dict[int, int] = {i: s for i, s in enumerate(self._order)}
         self._stacks: dict[int, int] = {s: self._players[s].stack for s in self._seats}  # 永続（hand 跨ぎ）
+        # ハンドの途中に買い足した額（ハンドの席）。ハンドの終わりに席のスタックを書き直すので、次のハンドの
+        # 始めに足す（そのハンドの結果には入れない）
+        self._pending_rebuys: dict[int, int] = {}
+        # 休みの席（操作で外した。次のハンドから配られない）。スタック 0 の席も配られない。
+        self._sitting_out: set[int] = set()
+        # いまのハンド（最後のハンド）に配られた席。ボタン・ブラインド・手番はこの席だけで回す。
+        self._hand_seats: list[int] = list(self._seats)
+        # 次のハンドから使うブラインド（ハンドの途中に変えたとき）
+        self._pending_blinds: Optional[tuple[int, int]] = None
+        # BB アンティ（BB の人が BB と同額のアンティを出す, CLI の `ante on/off`, 2026-10-19）。ハンドの途中に
+        # 切り替えたら次のハンドから（`_pending_bb_ante`）
+        self._bb_ante_on: bool = False
+        self._pending_bb_ante: Optional[bool] = None
+        # 次のハンドのボタンを手で指定（仕様 FR-05g）。使ったら (通常の進み方の席, 指定した席) を残す。
+        self._forced_button: Optional[int] = None
+        # 前のハンドのボタン（このハンドの席を組み直すときに、そこから進め直す）と、このハンドのボタンを手で
+        # （か配った順で）直したか
+        self._prev_button: Optional[int] = button_seat
+        self._button_by_hand: bool = False
+        self.last_button_override: Optional[tuple[int, int]] = None
+        # 次のハンドの持ち点を決める（台本のハンド = 台本どおりの持ち点で始める, 2026-09-30）
+        self._forced_stacks: Optional[dict[int, int]] = None
         self._hand_id: int = 0
         self._state = None
         self._hand_active: bool = False
@@ -125,19 +194,139 @@ class PokerkitGameState:
 
     # ――― ハンド管理 ―――
 
+    def playing_seats(self) -> list[int]:
+        """次のハンドに配られる席（休みでなく、チップがある席。ハンドの途中の買い足しも数える）。"""
+        return [s for s in self._seats
+                if s not in self._sitting_out and self._stacks[s] + self._pending_rebuys.get(s, 0) > 0]
+
     def new_hand(self) -> int:
+        """新しいハンドを始める。配られる席が 2 つ未満なら ValueError（状態は変えない）。"""
         from pokerkit import NoLimitTexasHoldem
 
+        forced, saved = self._forced_stacks, (dict(self._stacks), dict(self._pending_rebuys))
+        if forced is not None:
+            # 台本の持ち点（前のハンドの結果・買い足しの保留より優先）
+            for seat, stack in forced.items():
+                self._stacks[seat] = stack
+                self._pending_rebuys.pop(seat, None)
+            self._forced_stacks = None
+        playing = self.playing_seats()
+        if len(playing) < 2:
+            self._stacks, self._pending_rebuys = saved
+            self._forced_stacks = forced
+            raise ValueError(
+                "配られる席が 2 つ未満です（休み: "
+                f"{sorted(self._sitting_out) or 'なし'} / スタック 0: "
+                f"{[s for s in self._seats if self._stacks[s] <= 0] or 'なし'}）"
+            )
+        self._apply_pending_rebuys()
+        if self._pending_blinds is not None:
+            self._sb, self._bb = self._pending_blinds
+            self._pending_blinds = None
+        if self._pending_bb_ante is not None:
+            self._bb_ante_on = self._pending_bb_ante
+            self._pending_bb_ante = None
         self._hand_id += 1
-        stacks = [self._stacks[s] for s in self._seats]
+        # ボタンを 1 つ進めてから並びを作る（ボタンの次が SB, 末尾が BTN）。前のボタンの席が
+        # 抜けていたら（バースト・休み）、その次の席にボタンを置く（仕様 FR-05b）。
+        self._prev_button = self._button_seat
+        natural = _advance_button(playing, self._button_seat)
+        forced = self._forced_button
+        self._forced_button = None
+        self.last_button_override = None
+        self._button_by_hand = False
+        if forced is not None and forced in playing and forced != natural:
+            self._button_seat = forced                  # 手動移動（仕様 FR-05g）
+            self.last_button_override = (natural, forced)
+            self._button_by_hand = True
+        else:
+            self._button_seat = natural
+        self._hand_seats = list(playing)
+        self._order = seat_order_from_button(playing, self._button_seat)
+        self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
+        self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
+        stacks = [self._stacks[s] for s in self._order]
         self._hand_start_stacks = list(stacks)
         self._state = NoLimitTexasHoldem.create_state(
-            self._automations, True, 0, (self._sb, self._bb), self._bb, stacks, len(stacks),
+            self._automations, False, self._raw_antes(), (self._sb, self._bb), self._bb, stacks, len(stacks),
         )
         self._hand_active = True
         self._final_pots = []
-        logger.info("New hand (pokerkit) started: hand_id=%d", self._hand_id)
+        logger.info(
+            "New hand (pokerkit) started: hand_id=%d button=seat %d (%s)",
+            self._hand_id, self._button_seat,
+            " ".join(f"{s}:{n}" for s, n in self.position_map().items()),
+        )
         return self._hand_id
+
+    def restart_hand_with_button(self, seat: int) -> None:
+        """いまのハンドを、同じ席・同じ持ち点・同じブラインドのままボタンだけ変えて始め直す（アクションは空に戻る）。
+
+        ディーラーがボタンを動かし忘れたハンドの組み直しに使う（呼ぶ側がハンドの入力を流し直す, 2026-09-29）。
+        次のハンドのボタンはここから進む。ハンドの席でなければ ValueError（状態は変えない）。
+        """
+        from pokerkit import NoLimitTexasHoldem
+
+        if not self._hand_active or self._state is None:
+            raise RuntimeError("restart_hand_with_button called without an active hand")
+        if seat not in self._hand_seats:
+            raise ValueError(f"席{seat} はこのハンドに配られていません")
+        start = {s: self._hand_start_stacks[self._seat_to_idx[s]] for s in self._hand_seats}
+        self._button_seat = seat
+        self._button_by_hand = True                     # 手で・配った順で直したボタン（席を組み直しても保つ）
+        self._order = seat_order_from_button(self._hand_seats, seat)
+        self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
+        self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
+        self._hand_start_stacks = [start[s] for s in self._order]
+        self._state = NoLimitTexasHoldem.create_state(
+            self._automations, False, self._raw_antes(), (self._sb, self._bb), self._bb,
+            list(self._hand_start_stacks), len(self._order),
+        )
+        self._final_pots = []
+        logger.info(
+            "Hand %d restarted (pokerkit) with button=seat %d (%s)",
+            self._hand_id, seat, " ".join(f"{s}:{n}" for s, n in self.position_map().items()),
+        )
+
+    def restart_hand_with_seats(self, seats: list[int], stacks: dict[int, int]) -> None:
+        """いまのハンドを、配られた席を `seats` にして始め直す（同じブラインド。アクションは空に戻る, 2026-10-23）。
+
+        手札が載る前にハンドを始めるので、あとから札が載った席（持ち点 0 と誤って記録した人）・札が 1 枚も
+        載らない席（空いた席）を配った席に合わせる（店舗 2026-10-19: ボタンが 1 席先に進んだまま 30 ハンド）。
+        ボタンは前のハンドのボタンからこの席で進め直す（手で・配った順で直したボタンがこの席にあれば保つ）。
+        `stacks` = 新しく入れる席の始めの持ち点（無ければいまの持ち点）。席が 2 つ未満なら ValueError。
+        """
+        from pokerkit import NoLimitTexasHoldem
+
+        if not self._hand_active or self._state is None:
+            raise RuntimeError("restart_hand_with_seats called without an active hand")
+        playing = sorted(s for s in set(seats) if s in self._players)
+        if len(playing) < 2:
+            raise ValueError("配られる席が 2 つ未満です")
+        start = {s: self._hand_start_stacks[self._seat_to_idx[s]] for s in self._hand_seats}
+        for s in playing:
+            if s not in start:
+                start[s] = int(stacks.get(s, self._stacks[s]))
+                self._stacks[s] = start[s]
+            if start[s] <= 0:
+                raise ValueError(f"席{s} の持ち点がありません")
+        if not (self._button_by_hand and self._button_seat in playing):
+            self._button_seat = _advance_button(playing, self._prev_button)
+        self._hand_seats = playing
+        self._order = seat_order_from_button(playing, self._button_seat)
+        self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
+        self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
+        self._hand_start_stacks = [start[s] for s in self._order]
+        self._state = NoLimitTexasHoldem.create_state(
+            self._automations, False, self._raw_antes(), (self._sb, self._bb), self._bb,
+            list(self._hand_start_stacks), len(self._order),
+        )
+        self._final_pots = []
+        logger.info(
+            "Hand %d restarted (pokerkit) with seats %s, button=seat %d (%s)",
+            self._hand_id, playing, self._button_seat,
+            " ".join(f"{s}:{n}" for s, n in self.position_map().items()),
+        )
 
     def advance_street(self, street: Street) -> None:
         # pokerkit は betting 完了で自動進行する。外部シグナル（RFID/audio）は cross-check 扱いで no-op。
@@ -156,13 +345,15 @@ class PokerkitGameState:
     def end_hand(self, winner_seat: int) -> None:
         if winner_seat not in self._players:
             raise ValueError(f"Unknown seat: {winner_seat}")
+        if winner_seat not in self._hand_seats:
+            raise ValueError(f"Seat {winner_seat} is not in this hand")
         st = self._state
         if st is None:
             raise RuntimeError("end_hand called without an active hand")
         pot_total = sum(self._hand_start_stacks) - sum(st.stacks)
         # side-pot スナップショット（HandSummary 用 additive 情報）
         self._final_pots = self._snapshot_pots(pot_total)
-        for s in self._seats:
+        for s in self._hand_seats:
             self._stacks[s] = st.stacks[self._seat_to_idx[s]]
         self._stacks[winner_seat] += pot_total
         self._hand_active = False
@@ -180,14 +371,14 @@ class PokerkitGameState:
         if not winner_seats:
             raise ValueError("winner_seats must not be empty")
         for seat in winner_seats:
-            if seat not in self._players:
+            if seat not in self._hand_seats:
                 raise ValueError(f"Unknown seat: {seat}")
         st = self._state
         if st is None:
             raise RuntimeError("end_hand_split called without an active hand")
         pot_total = sum(self._hand_start_stacks) - sum(st.stacks)
         self._final_pots = self._snapshot_pots(pot_total)
-        for s in self._seats:
+        for s in self._hand_seats:
             self._stacks[s] = st.stacks[self._seat_to_idx[s]]
         share, remainder = divmod(pot_total, len(winner_seats))
         awards: dict[int, int] = {}
@@ -199,7 +390,109 @@ class PokerkitGameState:
         logger.info("Hand %d ended (pokerkit, chop). Awards: %s", self._hand_id, awards)
         return awards
 
+    def end_hand_awards(self, awards: dict[int, int]) -> None:
+        """ショーダウンの判定どおりに pot を配って確定する（席 → 受け取る額, ADR-0062）。
+
+        side pot の勝者が main pot と違う場合（短いスタックのオールイン）も正しく配れる。
+        合計は pot と一致しなければならない（ずれていたら何も変えずに ValueError）。
+        """
+        st = self._state
+        if st is None or not self._hand_active:
+            raise RuntimeError("end_hand_awards called without an active hand")
+        for seat in awards:
+            if seat not in self._hand_seats:
+                raise ValueError(f"Unknown seat: {seat}")
+        pot_total = sum(self._hand_start_stacks) - sum(st.stacks)
+        if sum(awards.values()) != pot_total or any(a < 0 for a in awards.values()):
+            raise ValueError(f"awards {awards} do not add up to the pot {pot_total}")
+        self._final_pots = self._snapshot_pots(pot_total)
+        for s in self._hand_seats:
+            self._stacks[s] = st.stacks[self._seat_to_idx[s]]
+        for seat, amount in awards.items():
+            self._stacks[seat] += amount
+        self._hand_active = False
+        logger.info("Hand %d ended (pokerkit, showdown). Awards: %s", self._hand_id, awards)
+
+    def end_hand_refund(self) -> dict[int, int]:
+        """勝者が決まらないハンドを、チップを動かさずに終える（各席に出した額を返す = 持ち点はハンドの前のまま）。
+
+        ショーダウンで札が読めず勝者が分からないとき（オーナー 2026-09-29: チップ移動は無し）。席 → 返した額。
+        """
+        st = self._state
+        if st is None or not self._hand_active:
+            raise RuntimeError("end_hand_refund called without an active hand")
+        refunds = {
+            s: self._hand_start_stacks[self._seat_to_idx[s]] - st.stacks[self._seat_to_idx[s]]
+            for s in self._hand_seats
+        }
+        self.end_hand_awards({s: amount for s, amount in refunds.items() if amount > 0})
+        logger.info("Hand %d ended (pokerkit) without a winner — chips returned: %s", self._hand_id, refunds)
+        return refunds
+
+    def acting_order(self) -> list[int]:
+        """このハンドのフロップ以降の手番の順（一番アウトオブポジション = ボタンの次の席が先頭、
+        ボタンが最後。heads-up はボタンでない方が先頭）。"""
+        return list(self._order)
+
+    def current_pots(self) -> list[dict]:
+        """進行中のハンドの main / side pot（`[{"amount", "eligible_seats"}]`, main pot が先頭）。
+        フォールドした席は対象に入らない。状態は変えない。"""
+        st = self._state
+        if st is None or not self._hand_active:
+            return []
+        return self._snapshot_pots(sum(self._hand_start_stacks) - sum(st.stacks))
+
     # ――― アクション適用 ―――
+
+    def snapshot(self) -> dict:
+        """いまの状態の複製（札の離脱で入れたフォールドを取り消して組み直すため）。"""
+        return copy.deepcopy(self.__dict__)
+
+    # 組み直しで戻さない、ハンドの外から変える設定（買い足し・休み・次のハンドのブラインドとボタン）。
+    # 組み直しはハンドの入力だけを流し直すので、戻すとスナップショットのあとの操作が消える。
+    _KEEP_ON_RESTORE = ("_stacks", "_pending_rebuys", "_sitting_out", "_pending_blinds", "_forced_button",
+                        "_forced_stacks", "_pending_bb_ante")
+
+    def restore(self, snapshot: dict) -> None:
+        """`snapshot()` の時点に戻す（同じオブジェクトのまま = 参照している側はそのまま使える）。
+
+        ハンドの外から変える設定（`_KEEP_ON_RESTORE`）はいまの値のまま。
+        """
+        kept = {key: copy.deepcopy(self.__dict__[key]) for key in self._KEEP_ON_RESTORE if key in self.__dict__}
+        self.__dict__.clear()
+        self.__dict__.update(copy.deepcopy(snapshot))
+        self.__dict__.update(kept)
+
+    def seats_to_act(self) -> list[int]:
+        """このベッティングラウンドでまだ行動する席（手番の順。先頭が actor）。"""
+        st = self._state
+        if st is None or not self._hand_active:
+            return []
+        return [self._idx_to_seat[i] for i in st.actor_indices]
+
+    def force_fold(self, seat: int) -> None:
+        """チェックできる場面でもフォールドにする（席の札が離れた = 降りた, 2026-09-25）。
+
+        pokerkit はトーナメントの扱いではチェックできるときのフォールドを受け付けないので、その 1 回だけ
+        キャッシュゲームの扱い（警告だけ）にする。
+        """
+        import warnings
+
+        from pokerkit import Mode
+
+        st = self._state
+        if st is None or not self._hand_active:
+            raise ValueError("No active hand")
+        if seat != self.get_current_player():
+            raise ValueError(f"Seat {seat} is not the actor")
+        mode = st.mode
+        st.mode = Mode.CASH_GAME
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                st.fold()
+        finally:
+            st.mode = mode
 
     def apply_action(self, seat: int, action: str, amount: int = 0) -> None:
         st = self._state
@@ -238,14 +531,30 @@ class PokerkitGameState:
 
     def get_current_player(self) -> int:
         st = self._state
-        if st is None or st.actor_index is None:
+        if st is None or not self._hand_active or st.actor_index is None:
             raise RuntimeError("No actor (no active hand or hand over)")
         return self._idx_to_seat[st.actor_index]
 
     def legal_context(self) -> LegalContext:
-        """合法手プリオール（ADR-0009 §B / R3 が読む）。"""
+        """合法手プリオール（ADR-0009 §B / R3 が読む）。
+
+        `end_hand` 後の state は actor_index を持ったままなので、`_hand_active` を見ないと
+        「終わったハンドに合法手がある」と答えてしまう（ISSUE-0028）。
+
+        状態が変わらないあいだは同じ答えを返す（engine の定期の確認が毎回呼ぶ。pokerkit の state は操作のたびに
+        `operations` が伸び、ハンドの作り直し・巻き戻しでは別の state になる）。
+        """
         st = self._state
-        if st is None or st.actor_index is None:
+        key = (len(st.operations), self._hand_active) if st is not None else None
+        cached = getattr(self, "_legal_cache", None)
+        if cached is not None and cached[0] is st and cached[1] == key:
+            return cached[2]
+        ctx = self._legal_context(st)
+        self._legal_cache = (st, key, ctx)
+        return ctx
+
+    def _legal_context(self, st: Any) -> LegalContext:
+        if st is None or not self._hand_active or st.actor_index is None:
             return LegalContext(None, frozenset(), 0, 0, 0)
         legal: set[str] = set()
         if st.can_fold():
@@ -263,15 +572,36 @@ class PokerkitGameState:
             max_raise=st.max_completion_betting_or_raising_to_amount or 0,
             bb=self._bb,
             committed=st.bets[st.actor_index] if st.actor_index < len(st.bets) else 0,
+            chip=math.gcd(self._sb, self._bb),
         )
 
     def is_legal_actor(self, seat: int) -> bool:
         st = self._state
         return (
             st is not None
+            and self._hand_active
             and st.actor_index is not None
             and self._idx_to_seat.get(st.actor_index) == seat
         )
+
+    @property
+    def button_seat(self) -> Optional[int]:
+        """現ハンドのボタン席（`new_hand` 前は None, ISSUE-0032）。"""
+        return self._button_seat
+
+    def position_map(self) -> dict[int, str]:
+        """seat → ポジション名（BTN/SB/BB/UTG…, 仕様 §6.1）。ボタン未確定なら空。"""
+        if self._button_seat is None:
+            return {}
+        return position_map(self._hand_seats, self._button_seat)
+
+    def is_hand_active(self) -> bool:
+        """ハンドが進行中か（新ハンド前 / `end_hand` 後は False, ISSUE-0028）。
+
+        actor の有無とは別物: 全員オールインの runout 中は actor が居なくてもハンドは
+        進行中で、winner 宣言を受け付ける必要がある。
+        """
+        return self._state is not None and self._hand_active
 
     def fold_through(self, until_seat: int, max_folds: Optional[int] = None) -> list[int]:
         """現 actor から until_seat が手番になるまで中間席を silent fold 合成し、folded した席列を返す（ADR-0009 §4）。
@@ -325,7 +655,7 @@ class PokerkitGameState:
         ]
         collected = sum(p["amount"] for p in pots)
         if pot_total > 0 and collected < pot_total:
-            eligible = [s for s in self._seats if st.statuses[self._seat_to_idx[s]]]
+            eligible = [s for s in self._hand_seats if st.statuses[self._seat_to_idx[s]]]
             if pots:
                 # 回収済み pot + 未回収 bet の残差を最後の pot 相当として追記。
                 pots.append({"amount": pot_total - collected, "eligible_seats": eligible})
@@ -342,8 +672,8 @@ class PokerkitGameState:
         st = self._state
         if st is None:
             return 0
-        idx = self._seat_to_idx[seat]
-        return st.bets[idx] if idx < len(st.bets) else 0
+        idx = self._seat_to_idx.get(seat)
+        return st.bets[idx] if idx is not None and idx < len(st.bets) else 0
 
     @property
     def hand_id(self) -> int:
@@ -371,21 +701,95 @@ class PokerkitGameState:
         return self.get_stacks()[seat]
 
     def get_stacks(self) -> dict[int, int]:
+        """全席のスタック（ハンドに入っていない席は持ち越しの値）。"""
+        stacks = dict(self._stacks)
         st = self._state
         if st is not None and self._hand_active:
-            return {s: st.stacks[self._seat_to_idx[s]] for s in self._seats}
-        return dict(self._stacks)
+            stacks.update({s: st.stacks[self._seat_to_idx[s]] for s in self._hand_seats})
+        return stacks
 
     def get_player_name(self, seat: int) -> str:
         if seat not in self._players:
             raise ValueError(f"Unknown seat: {seat}")
         return self._players[seat].name
 
+    def set_player_name(self, seat: int, name: str) -> None:
+        """席のプレイヤー名を変える（席替え, ADR-0059）。スタックとハンドの状態は変えない。"""
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        self._players[seat].name = name
+
     def get_active_seats(self) -> list[int]:
         st = self._state
         if st is None or not self._hand_active:
-            return list(self._seats)
-        return [s for s in self._seats if st.statuses[self._seat_to_idx[s]]]
+            return list(self._hand_seats)
+        return [s for s in self._hand_seats if st.statuses[self._seat_to_idx[s]]]
+
+    # ――― 席の参加・休み、ブラインドの変更（次のハンドから, 2026-09-26） ―――
+
+    def seats_in_hand(self) -> list[int]:
+        """いまのハンド（まだ無ければ最後のハンド / 全席）に配られた席。"""
+        return list(self._hand_seats)
+
+    def sit_out(self, seat: int) -> bool:
+        """席を休みにする（次のハンドから配られない。スタックは持ち越す）。変わったら True。"""
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        if seat in self._sitting_out:
+            return False
+        self._sitting_out.add(seat)
+        return True
+
+    def is_sitting_out(self, seat: int) -> bool:
+        """操作で休みにした席か（スタック 0 で配られない席は含まない）。"""
+        return seat in self._sitting_out
+
+    def sit_in(self, seat: int) -> bool:
+        """休みの席を戻す（次のハンドから配られる。スタック 0 なら買い足すまで配られない）。変わったら True。"""
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        if seat not in self._sitting_out:
+            return False
+        self._sitting_out.discard(seat)
+        return True
+
+    def set_blinds(self, sb: int, bb: int) -> None:
+        """ブラインドを変える（トーナメントのレベル上昇）。ハンドの途中なら次のハンドから。"""
+        if sb <= 0 or bb <= 0 or sb > bb:
+            raise ValueError(f"Invalid blinds: sb={sb} bb={bb}")
+        if self._hand_active:
+            self._pending_blinds = (sb, bb)
+        else:
+            self._sb, self._bb = sb, bb
+            self._pending_blinds = None
+
+    def set_bb_ante(self, on: bool) -> None:
+        """BB アンティ（BB の人が BB と同額のアンティを出す）を入れる・外す。ハンドの途中なら次のハンドから。"""
+        if self._hand_active:
+            self._pending_bb_ante = bool(on)
+        else:
+            self._bb_ante_on = bool(on)
+            self._pending_bb_ante = None
+
+    @property
+    def bb_ante(self) -> int:
+        """いまの（最後の）ハンドの BB アンティの額（無ければ 0）。"""
+        return self._bb if self._bb_ante_on else 0
+
+    def bb_ante_next_hand(self) -> bool:
+        """次のハンドで BB アンティが入っているか（保留の切り替えを含む）。"""
+        return self._bb_ante_on if self._pending_bb_ante is None else self._pending_bb_ante
+
+    def _raw_antes(self):
+        """pokerkit の `raw_antes`: BB アンティは {1: 額}（インデックス 1 = BB。heads-up も pokerkit が BB に付ける）。
+        アンティの返金（`ante_trimming_status`）は切って渡す（切らないと BB だけのアンティが返される）。"""
+        return {1: self._bb} if self._bb_ante_on else 0
+
+    def set_button(self, seat: int) -> None:
+        """次のハンドのボタンを手で指定する（ディーラーの手違い等の修正, 仕様 FR-05g）。"""
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        self._forced_button = seat
 
     # ――― 手動修正（pokerkit は hand 単位のため次ハンドから反映） ―――
 
@@ -403,6 +807,42 @@ class PokerkitGameState:
             raise ValueError(f"Unknown seat: {seat}")
         if amount <= 0:
             raise ValueError(f"Rebuy amount must be positive, got {amount}")
-        if self._hand_active:
+        if self._hand_active and seat in self._hand_seats:
+            # ハンドの席のスタックはハンドの終わりに書き直すので、いま足すと消える → 次のハンドの始めに足す
             logger.warning("rebuy mid-hand (pokerkit): 次ハンドから反映 (seat=%d)", seat)
+            self._pending_rebuys[seat] = self._pending_rebuys.get(seat, 0) + amount
+            return
         self._stacks[seat] += amount
+
+    def stacks_before_next_hand(self) -> dict[int, int]:
+        """次のハンドの始めの持ち点（ブラインドの前）: いまの持ち点に、台本で決めた持ち点（`force_next_stacks`）を
+        重ねたもの。記録の `stack_start` に使う。"""
+        stacks = self.get_stacks()
+        if self._forced_stacks:
+            stacks.update(self._forced_stacks)
+        return stacks
+
+    def force_next_stacks(self, stacks: dict[int, int]) -> None:
+        """次のハンドを、この持ち点で始める（台本のハンド。前のハンドがまだ確定していなくても、その結果より
+        優先する）。卓に無い席・負の値は ValueError（何も変えない）。"""
+        for seat, stack in stacks.items():
+            if seat not in self._players:
+                raise ValueError(f"Unknown seat: {seat}")
+            if stack < 0:
+                raise ValueError(f"Stack must be non-negative, got {stack}")
+        self._forced_stacks = {int(s): int(v) for s, v in stacks.items()}
+
+    def set_stacks(self, stacks: dict[int, int]) -> None:
+        """次のハンドの持ち点を決める（評価で各ハンドを記録の持ち点から始める = `replay_events(hand_stacks=...)`）。
+
+        ハンドの途中の買い足しの保留は捨てる（記録の持ち点に入っている）。
+        """
+        for seat, stack in stacks.items():
+            if seat in self._players and stack >= 0:
+                self._stacks[seat] = int(stack)
+                self._pending_rebuys.pop(seat, None)
+
+    def _apply_pending_rebuys(self) -> None:
+        for seat, amount in self._pending_rebuys.items():
+            self._stacks[seat] += amount
+        self._pending_rebuys = {}

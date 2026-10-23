@@ -5,20 +5,146 @@ PC/SC (pyscard) ラッパー。NFC リーダーからカード UID を読み取�
 設計方針:
 - pyscard は実行時に遅延インポートする。インポートできない環境でも
   このモジュール自体はインポート可能にする（テスト・GUI での import エラー防止）。
-- UID 取得 APDU: FF CA 00 00 00 (ISO 7816 Get UID)
-- レスポンス末尾 2 バイト: SW1=0x90, SW2=0x00 が成功を示す。
+- UID 取得 APDU: `FF CA 00 <k> 00`（ISO 7816 Get UID）。**P2 = 物理 reader index k**
+  （契約 `docs/contracts/rfid-usb-ccid.md` v1.2 §6 / ADR-0052）。Windows の汎用 CCID ドライバは
+  1 インターフェース 1 slot しか公開しないため、PC/SC の reader（slot）は 1 つだけにして、
+  物理リーダー N 台は P2 で選ぶ。`k=0` は v1.0/1.1 の `FF CA 00 00 00` と同一。
+- レスポンス末尾 2 バイト: SW1=0x90, SW2=0x00 が成功を示す。`6A 86` = P2 が firmware の
+  台数を超えている（config の `reader` が誤り）。
+- **1 reader に複数枚**（席の hole card 2 枚重ね / flop 3 枚重ね）に対応する
+  （契約 v1.1 §6）。firmware は該当 reader 上の ISO 15693 カードの 8 バイト UID を
+  枚数ぶん連結して返すので、host は応答長が 16/24/32 のときだけ 8 バイトずつ
+  分割する（4/7/8 バイトは従来どおり単一 UID）。
+- **接続は reader_name ごとに 1 本を持続**させる（ADR-0051 で slot は仮想カード常時挿入なので
+  接続は切れない / ADR-0052 で 1 接続に N 個の APDU を流す）。同じ reader_name を使う複数の
+  `PCSCBridge` はモジュール内の共有接続（参照カウント）を使い、transmit を lock で直列化する。
 """
 from __future__ import annotations
 
 import logging
-from typing import Optional
+import threading
+import time
+from typing import Callable, Optional
+
+from rfid.card_master import bytes_to_tag_id
 
 logger = logging.getLogger(__name__)
 
-# UID 取得 APDU コマンド
-_GET_UID_APDU = [0xFF, 0xCA, 0x00, 0x00, 0x00]
 # 成功ステータスワード
 _SW_OK = (0x90, 0x00)
+# P2（物理 reader index）が firmware の台数を超えている（契約 v1.2 §6）
+_SW_WRONG_P1P2 = (0x6A, 0x86)
+
+# 物理 reader 台数の問い合わせ（契約 v1.2 §6）: `FF CA 00 FF 00` → <N> + 90 00。
+READER_COUNT_P2 = 0xFF
+_READER_COUNT_APDU = [0xFF, 0xCA, 0x00, READER_COUNT_P2, 0x00]
+# 使える reader の一覧（契約 v1.11 §6）: `FF CA 00 FE 00` → 2 byte（little endian, bit k = reader k が起動時に
+# 初期化できた）+ 90 00。旧 firmware は 6A 86（範囲外の P2）。
+READY_MASK_P2 = 0xFE
+_READY_MASK_APDU = [0xFF, 0xCA, 0x00, READY_MASK_P2, 0x00]
+# 読み取り装置（ESP32）の再起動（契約 v1.11 §6）: `FF CA 00 FD 00` → 90 00 を返してから再起動する（USB はいったん
+# 切れて列挙し直す）。旧 firmware は 6A 86。
+RESTART_P2 = 0xFD
+_RESTART_APDU = [0xFF, 0xCA, 0x00, RESTART_P2, 0x00]
+
+# reader_index として指定できる最大値（0xFD〜0xFF は再起動・一覧・台数の問い合わせ用に予約）。
+MAX_READER_INDEX = 0xFC
+
+# 契約 v1.1 §6: 8B UID × k 枚（k ≤ 4）の連結。この長さのときだけ複数枚として分割する。
+# 8（1 枚）/ 4 / 7（ISO 14443A）は単一 UID として扱う（16=2 枚, 24=3 枚, 32=4 枚）。
+UID_CHUNK_BYTES = 8
+MULTI_UID_LENGTHS = (16, 24, 32)
+
+
+# 読み取りの 1 周の間隔（PollGapMonitor）: これ以上空いた周を数える / これ以上はその場で残す / まとめて残す間隔
+POLL_GAP_SEC = 1.0
+POLL_GAP_WARN_SEC = 3.0
+POLL_GAP_REPORT_SEC = 60.0
+
+
+class PollGapMonitor:
+    """札を読む 1 周の間隔を測り、空いたらログに残す（2026-10-23, オーナー:「PC の処理が遅れて時系列が同期できて
+    いない可能性は」）。
+
+    いつもは 0.1〜0.4 秒で 1 周する。PC が忙しくて間隔が空くと、その間に離れた札・置いた札は次の周でまとめて見え、
+    時刻が遅れて順番も分からなくなる（ほぼ同時の離脱）。`POLL_GAP_SEC` 以上空いた回数と最長を `POLL_GAP_REPORT_SEC`
+    ごとに 1 行、`POLL_GAP_WARN_SEC`（札の離脱を確かめる 3 秒）以上はその場で 1 行。ループの頭で `tick()` を呼ぶ。
+    """
+
+    def __init__(self, label: str, *, clock: Callable[[], float] = time.monotonic,
+                 log: logging.Logger = logger) -> None:
+        self._label = label
+        self._clock = clock
+        self._log = log
+        self._last: Optional[float] = None
+        self._window_start: Optional[float] = None
+        self._count = 0
+        self._longest = 0.0
+
+    def tick(self) -> None:
+        now = self._clock()
+        if self._window_start is None:
+            self._window_start = now
+        if self._last is not None:
+            gap = now - self._last
+            if gap >= POLL_GAP_SEC:
+                self._count += 1
+                self._longest = max(self._longest, gap)
+                if gap >= POLL_GAP_WARN_SEC:
+                    self._log.warning("%s: 札を %.1f 秒読めませんでした（PC の処理の遅れ）— この間に置いた・離れた札の"
+                                      "時刻は遅れ、順番は分かりません", self._label, gap)
+        self._last = now
+        if now - self._window_start >= POLL_GAP_REPORT_SEC:
+            if self._count:
+                self._log.info("%s: 直近 %.0f 秒で読み取りの間隔が %.0f 秒以上空いた回数 %d（最長 %.1f 秒）",
+                               self._label, now - self._window_start, POLL_GAP_SEC, self._count, self._longest)
+            self._window_start, self._count, self._longest = now, 0, 0.0
+
+
+def get_uid_apdu(reader_index: int = 0) -> list[int]:
+    """物理 reader `reader_index` に対する Get UID APDU（契約 v1.2 §6）。"""
+    return [0xFF, 0xCA, 0x00, reader_index, 0x00]
+
+
+def split_uid_response(data: bytes) -> list[str]:
+    """Get UID 応答のデータ部を UID 文字列のリストにする（契約 v1.1 §6）。
+
+    長さが 16/24/32 バイトのときのみ 8 バイトずつ分割し、それ以外（4/7/8 等）は単一 UID。
+    空データは空リスト。
+    """
+    if not data:
+        return []
+    if len(data) in MULTI_UID_LENGTHS:
+        return [
+            bytes_to_tag_id(data[i:i + UID_CHUNK_BYTES])
+            for i in range(0, len(data), UID_CHUNK_BYTES)
+        ]
+    return [bytes_to_tag_id(data)]
+
+
+def bridge_read_uids(bridge: object) -> list[str]:
+    """bridge から現在載っている UID を読む（旧 bridge 互換シム）。
+
+    `read_uids()` を持つ bridge はそれを使い、`read_uid()` しか無い旧実装は 0/1 件に正規化する。
+    """
+    read_uids = getattr(bridge, "read_uids", None)
+    if callable(read_uids):
+        return [u for u in (read_uids() or []) if u]
+    uid = bridge.read_uid()  # type: ignore[attr-defined]
+    return [uid] if uid else []
+
+
+def call_bridge_factory(factory: Callable, reader_name: str, reader_index: int = 0) -> object:
+    """bridge factory を `(reader_name, reader_index)` で呼ぶ（旧 1 引数 factory 互換）。
+
+    既存の注入 factory（`lambda name: ...`）は `reader_index` を受けないので `TypeError` を
+    捕まえて 1 引数で呼び直す。factory 内部の `TypeError` と区別できないため、2 引数呼び出しが
+    TypeError になったときだけ 1 引数で再試行する（呼び直しでも失敗すれば例外はそのまま）。
+    """
+    try:
+        return factory(reader_name, reader_index)
+    except TypeError:
+        return factory(reader_name)
 
 
 def list_readers() -> list[str]:
@@ -37,38 +163,219 @@ def list_readers() -> list[str]:
         return []
 
 
-class PCSCBridge:
-    """単一 PC/SC リーダーとの接続を管理する。
+def pcsc_reader_present(reader_name: str) -> bool:
+    """PC/SC にそのリーダー名が見えているか。見えない・pyscard が無い・サービスが動いていない（RDP のセッションの中 =
+    0x8010001D）ときは、ログを出さずに False（つながるまで試し直す間にログを埋めない）。"""
+    try:
+        from smartcard.System import readers as sc_readers
 
-    使い方:
-        bridge = PCSCBridge("ACS ACR122U 0")
-        uid = bridge.read_uid()   # "04:AB:CD:EF:12:34" or None
-        bridge.close()
+        return any(str(r) == reader_name for r in sc_readers())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def find_reader(reader_name: str):
+    """接続中の PC/SC reader のうち reader_name と**等値**のものを返す（無ければ None）。"""
+    from smartcard.System import readers as sc_readers
+    return next((r for r in sc_readers() if str(r) == reader_name), None)
+
+
+# ――― reader_name ごとの共有接続（契約 v1.2 §8 / ADR-0052） ―――
+
+class _SharedConnection:
+    """1 つの reader_name に対する PC/SC 接続 1 本（複数 `PCSCBridge` で共有）。
+
+    ADR-0051 で slot は仮想カード常時挿入になったため、接続は poll ごとに張り直さず持続させる
+    （11 台ぶんの Get UID を 1 接続で流す）。USB 抜け等で transmit が失敗したら `invalidate()`
+    して次回の transmit で張り直す。
     """
 
     def __init__(self, reader_name: str) -> None:
+        self.reader_name = reader_name
+        self.refs = 0
+        self.lock = threading.RLock()
+        self._conn = None
+
+    def transmit(self, reader, apdu: list[int]):
+        """APDU を送る（未接続なら connect してから）。呼び出しは lock で直列化される。"""
+        with self.lock:
+            if self._conn is None:
+                conn = reader.createConnection()
+                conn.connect()
+                self._conn = conn
+            return self._conn.transmit(apdu)
+
+    def invalidate(self) -> None:
+        """接続を破棄する（次回 transmit で再接続）。"""
+        with self.lock:
+            conn, self._conn = self._conn, None
+        if conn is None:
+            return
+        try:
+            conn.disconnect()
+        except Exception as e:  # 切断済み USB 等。破棄が目的なので握りつぶす
+            logger.debug("disconnect on %r: %s", self.reader_name, e)
+
+
+_shared_connections: dict[str, _SharedConnection] = {}
+_shared_registry_lock = threading.Lock()
+
+
+def acquire_shared_connection(reader_name: str) -> _SharedConnection:
+    """reader_name の共有接続を取得する（参照カウント +1）。"""
+    with _shared_registry_lock:
+        shared = _shared_connections.get(reader_name)
+        if shared is None:
+            shared = _SharedConnection(reader_name)
+            _shared_connections[reader_name] = shared
+        shared.refs += 1
+        return shared
+
+
+def release_shared_connection(shared: _SharedConnection) -> None:
+    """共有接続を返す（参照カウント -1。0 で切断して登録を落とす）。"""
+    with _shared_registry_lock:
+        shared.refs -= 1
+        if shared.refs > 0:
+            return
+        if _shared_connections.get(shared.reader_name) is shared:
+            del _shared_connections[shared.reader_name]
+    shared.invalidate()
+
+
+def query_reader_count(reader_name: str) -> Optional[int]:
+    """firmware が公開する**物理 reader 台数 N** を問い合わせる（契約 v1.2 §6）。
+
+    `FF CA 00 FF 00` に 1 バイト + `90 00` が返れば int、それ以外（旧 v1.1 firmware は
+    `6A 81` / `6D 00` を返す）や例外は None。
+    """
+    try:
+        reader = find_reader(reader_name)
+        if reader is None:
+            return None
+        shared = acquire_shared_connection(reader_name)
+        try:
+            data, sw1, sw2 = shared.transmit(reader, list(_READER_COUNT_APDU))
+        except Exception:
+            shared.invalidate()   # 壊れた接続を他の持ち主に残さない
+            raise
+        finally:
+            release_shared_connection(shared)
+        if (sw1, sw2) != _SW_OK or len(data) != 1:
+            logger.debug(
+                "reader count query on %r: SW=%02X%02X len=%d（v1.1 firmware は非対応）",
+                reader_name, sw1, sw2, len(data),
+            )
+            return None
+        return int(data[0])
+    except Exception as e:
+        logger.debug("query_reader_count on %r: %s", reader_name, e)
+        return None
+
+
+def _send_control(reader_name: str, apdu: list[int]) -> Optional[tuple[bytes, int, int]]:
+    """共有接続で制御の APDU を 1 回送る。(データ, SW1, SW2)。送れなければ None。"""
+    try:
+        reader = find_reader(reader_name)
+        if reader is None:
+            return None
+        shared = acquire_shared_connection(reader_name)
+        try:
+            data, sw1, sw2 = shared.transmit(reader, list(apdu))
+        except Exception:
+            shared.invalidate()   # 壊れた接続を他の持ち主に残さない
+            raise
+        finally:
+            release_shared_connection(shared)
+        return bytes(data), sw1, sw2
+    except Exception as e:
+        logger.debug("control APDU %s on %r: %s", apdu, reader_name, e)
+        return None
+
+
+def query_ready_readers(reader_name: str) -> Optional[set[int]]:
+    """firmware が起動時に初期化できた物理 reader の index の集合（契約 v1.11 §6）。
+
+    初期化できなかった reader は「札なし」と答え続け、Get UID からは区別できない（店舗 2026-10-06: 真ん中のボードの
+    reader が 1 時間読めなかった）。旧 firmware（6A 86）・送れないときは None。
+    """
+    got = _send_control(reader_name, _READY_MASK_APDU)
+    if got is None:
+        return None
+    data, sw1, sw2 = got
+    if (sw1, sw2) != _SW_OK or len(data) != 2:
+        logger.debug("ready mask query on %r: SW=%02X%02X len=%d（旧 firmware は非対応）",
+                     reader_name, sw1, sw2, len(data))
+        return None
+    mask = data[0] | (data[1] << 8)
+    return {k for k in range(16) if mask & (1 << k)}
+
+
+def request_device_restart(reader_name: str) -> Optional[bool]:
+    """読み取り装置（ESP32）に再起動を頼む（契約 v1.11 §6）。受け付けたら True、この命令の無い旧 firmware は False、
+    送れなければ None。再起動のあいだ（数秒）は全 reader が読めず、USB の列挙し直しのあと次の poll でつなぎ直す。"""
+    got = _send_control(reader_name, _RESTART_APDU)
+    if got is None:
+        return None
+    _data, sw1, sw2 = got
+    if (sw1, sw2) == _SW_OK:
+        return True
+    logger.debug("restart request on %r: SW=%02X%02X（旧 firmware は非対応）", reader_name, sw1, sw2)
+    return False
+
+
+class PCSCBridge:
+    """単一 PC/SC リーダー上の**物理 reader 1 台**との接続を管理する。
+
+    使い方:
+        bridge = PCSCBridge("PokerRFID PN5180-CCID 0", reader_index=3)
+        uids = bridge.read_uids()  # ["04:AB:CD:EF:12:34", ...]（重ね置きは複数件）
+        uid = bridge.read_uid()    # "04:AB:CD:EF:12:34" or None（先頭 1 件・後方互換）
+        bridge.close()
+
+    `reader_index`（= Get UID の P2）は 0..254。同じ reader_name の bridge は PC/SC 接続を
+    共有する（接続本数を reader 名ごとに 1 本に保つ, ADR-0052）。
+    """
+
+    def __init__(self, reader_name: str, reader_index: int = 0) -> None:
+        if isinstance(reader_index, bool) or not isinstance(reader_index, int):
+            raise ValueError(f"reader_index must be int 0..{MAX_READER_INDEX}: {reader_index!r}")
+        if not 0 <= reader_index <= MAX_READER_INDEX:
+            raise ValueError(
+                f"reader_index must be 0..{MAX_READER_INDEX} "
+                f"(0xFD〜0xFF は再起動・一覧・台数の問い合わせ用に予約): {reader_index!r}"
+            )
         self._reader_name = reader_name
-        self._connection = None
+        self._reader_index = reader_index
+        self._apdu = get_uid_apdu(reader_index)
         self._reader = None
+        self._shared: Optional[_SharedConnection] = None
         self._connected = False
+        self._warned_wrong_index = False
+        self._last_failure: Optional[str] = None
 
     @property
     def reader_name(self) -> str:
         return self._reader_name
 
+    @property
+    def reader_index(self) -> int:
+        return self._reader_index
+
     def connect(self) -> bool:
         """リーダーに接続する。成功時 True、失敗時 False。"""
         try:
-            from smartcard.System import readers as sc_readers
-
-            all_readers = sc_readers()
-            matched = [r for r in all_readers if str(r) == self._reader_name]
-            if not matched:
+            reader = find_reader(self._reader_name)
+            if reader is None:
                 logger.warning("Reader not found: %r", self._reader_name)
                 return False
-            self._reader = matched[0]
+            self._reader = reader
             self._connected = True
-            logger.info("Connected to reader: %s", self._reader_name)
+            self._acquire()
+            logger.info(
+                "Connected to reader: %s (physical reader %d)",
+                self._reader_name, self._reader_index,
+            )
             return True
         except ImportError:
             logger.debug("pyscard not installed.")
@@ -77,48 +384,110 @@ class PCSCBridge:
             logger.warning("Failed to connect to reader %r: %s", self._reader_name, e)
             return False
 
-    def read_uid(self) -> Optional[str]:
-        """現在タッチされているカードの UID を正規化済み文字列で返す。
+    def _acquire(self) -> _SharedConnection:
+        if self._shared is None:
+            self._shared = acquire_shared_connection(self._reader_name)
+        return self._shared
 
-        カードがなければ None。エラー時も None。
-        """
+    def _transmit(self, apdu: list[int]):
+        """共有接続で APDU を 1 回送る（失敗時は接続を破棄して例外を上げる）。"""
+        shared = self._acquire()
+        try:
+            return shared.transmit(self._reader, apdu)
+        except Exception:
+            # USB 抜け / 再列挙 / 占有など。接続を捨てて次回 poll で張り直す。
+            shared.invalidate()
+            raise
+
+    def probe(self) -> Optional[tuple[int, int]]:
+        """Get UID を 1 回だけ送り SW を返す（診断用。送れなければ None）。"""
         if not self._connected or self._reader is None:
             return None
         try:
+            _data, sw1, sw2 = self._transmit(self._apdu)
+        except Exception as e:
+            logger.debug("probe on %r r%d: %s", self._reader_name, self._reader_index, e)
+            return None
+        return (sw1, sw2)
 
-            conn = self._reader.createConnection()
-            conn.connect()
-            data, sw1, sw2 = conn.transmit(_GET_UID_APDU)
-            conn.disconnect()
+    def read_uids(self) -> list[str]:
+        """この物理 reader に載っている全カードの UID を正規化済み文字列のリストで返す。
 
-            if (sw1, sw2) != _SW_OK:
-                logger.debug("UID APDU returned SW=%02X%02X", sw1, sw2)
-                return None
-
-            from rfid.card_master import bytes_to_tag_id
-            return bytes_to_tag_id(bytes(data))
-
+        重ね置き（席 2 枚 / flop 3 枚）は firmware が 8B UID を連結して返すので、
+        `split_uid_response` で分割する（契約 v1.1 §6）。カードなし・エラー時は空リスト。
+        """
+        if not self._connected or self._reader is None:
+            return []
+        try:
+            data, sw1, sw2 = self._transmit(self._apdu)
         except Exception as e:
             # NoCardException も含むすべての例外を統一処理
-            # (カード未タッチは正常状態なのでログレベルは debug)
-            logger.debug("read_uid on %r: %s", self._reader_name, e)
-            return None
+            # (カード未タッチは正常状態なのでログレベルは debug。同一原因の連打は 1 回だけ出す)
+            self._log_failure_once(f"read_uids: {e}")
+            return []
+
+        if (sw1, sw2) == _SW_WRONG_P1P2:
+            # P2 が firmware の台数を超えている = config の `reader` が誤り（契約 v1.2 §6）。
+            if not self._warned_wrong_index:
+                logger.warning(
+                    "Get UID SW=6A86 on %r: 物理 reader %d は firmware の範囲外です"
+                    "（config.rfid.pcsc_readers[].reader を確認, 契約 v1.2 §6）",
+                    self._reader_name, self._reader_index,
+                )
+                self._warned_wrong_index = True
+            return []
+
+        if (sw1, sw2) != _SW_OK:
+            self._log_failure_once(f"UID APDU returned SW={sw1:02X}{sw2:02X}")
+            return []
+
+        self._last_failure = None
+        return split_uid_response(bytes(data))
+
+    def _log_failure_once(self, message: str) -> None:
+        """同一内容の失敗が続く間はログを 1 回だけ出す（100ms poll の連打を避ける）。"""
+        if message == self._last_failure:
+            return
+        self._last_failure = message
+        logger.debug("%r r%d: %s", self._reader_name, self._reader_index, message)
+
+    def read_uid(self) -> Optional[str]:
+        """現在タッチされているカードの UID を 1 件だけ返す（後方互換の薄いラッパ）。
+
+        重ね置きのときは先頭 1 件のみ。全件が要るときは `read_uids()` を使う。
+        カードがなければ None。エラー時も None。
+        """
+        uids = self.read_uids()
+        return uids[0] if uids else None
 
     def close(self) -> None:
-        """リーダーとの接続をクリーンアップする。"""
+        """リーダーとの接続をクリーンアップする（共有接続は最後の 1 本で切断）。"""
         self._connected = False
         self._reader = None
-        self._connection = None
+        shared, self._shared = self._shared, None
+        if shared is not None:
+            release_shared_connection(shared)
 
 
 class MockPCSCBridge:
     """テスト・デモ用のモック PC/SC ブリッジ。
 
-    uid_sequence に UID 文字列 (or None) を渡すと read_uid() がその順に返す。
+    uid_sequence の各要素は 1 poll ぶんの状態で、次のいずれでもよい:
+      - `str`       … その UID 1 枚
+      - `None`      … カードなし
+      - `list[str]` … 重ね置き（複数枚, 契約 v1.1 §6）
+    `read_uids()` は常に list、`read_uid()` は先頭 1 件 or None を返す。
+    `reader_index`（契約 v1.2 §6 の P2）は受け取るだけで使わない。
     """
 
-    def __init__(self, reader_name: str, uid_sequence: list[Optional[str]] | None = None) -> None:
+    def __init__(
+        self,
+        reader_name: str,
+        uid_sequence: list[Optional[str] | list[str]] | None = None,
+        reader_index: int = 0,
+    ) -> None:
         self._reader_name = reader_name
+        self._reader_index = reader_index
         self._sequence = list(uid_sequence or [])
         self._index = 0
 
@@ -126,18 +495,30 @@ class MockPCSCBridge:
     def reader_name(self) -> str:
         return self._reader_name
 
+    @property
+    def reader_index(self) -> int:
+        return self._reader_index
+
     def connect(self) -> bool:
         return True
 
-    def read_uid(self) -> Optional[str]:
+    def read_uids(self) -> list[str]:
         if not self._sequence:
-            return None
+            return []
         # シーケンス終端に達したら最後の値を返し続ける（循環しない）
         idx = min(self._index, len(self._sequence) - 1)
-        uid = self._sequence[idx]
+        entry = self._sequence[idx]
         if self._index < len(self._sequence) - 1:
             self._index += 1
-        return uid
+        if entry is None:
+            return []
+        if isinstance(entry, str):
+            return [entry]
+        return [u for u in entry if u]
+
+    def read_uid(self) -> Optional[str]:
+        uids = self.read_uids()
+        return uids[0] if uids else None
 
     def close(self) -> None:
         pass

@@ -17,6 +17,7 @@ from core.event_queue import make_audio_queue, make_camera_queue, make_rfid_queu
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, PlayerState
 from core.hand_log import ActionRecord
+from tests.harness import HandledAudio, stop_thread
 from integration.engine import (
     MATCH_WINDOW,
     IntegrationThread,
@@ -78,11 +79,13 @@ def _make_game() -> GameStateManager:
     return gs
 
 
-def _run_thread(thread: IntegrationThread, stop: threading.Event, sleep: float = 0.3) -> None:
+def _run_thread(thread: IntegrationThread, stop: threading.Event) -> None:
+    """入れた音声のイベントがすべて処理されるまで動かして止める（決まった時間は待たない）。"""
+    handled = HandledAudio(thread)
+    expected = thread._audio_queue.qsize()
     thread.start()
-    time.sleep(sleep)
-    stop.set()
-    thread.join(timeout=2.0)
+    handled.wait(expected)
+    stop_thread(thread, stop)
 
 
 # ――― RFID シートマッチング ―――
@@ -223,7 +226,7 @@ class TestRFIDSeatMatching:
         audio_q.put(AudioEvent(action="bet",  amount=300, timestamp=now, raw_text="ベット300"))
         audio_q.put(AudioEvent(action="call", amount=300, timestamp=now, raw_text="コール300"))
 
-        _run_thread(thread, stop, sleep=0.5)
+        _run_thread(thread, stop)
 
         assert len(captured) == 2
         assert captured[0].source["rfid"] is True
@@ -250,8 +253,8 @@ class TestBoardRFIDEvents:
             rfid_queue=rfid_q, stop_event=stop,
         )
 
+        handled = HandledAudio(thread)
         thread.start()
-        time.sleep(0.05)
 
         now = time.time()
         for ev in board_events:
@@ -261,9 +264,8 @@ class TestBoardRFIDEvents:
         audio_q.put(AudioEvent(action="winner", amount=0,   timestamp=now + 0.01,
                                raw_text="シート1 ウィナー"))
 
-        time.sleep(0.3)
-        stop.set()
-        thread.join(timeout=2)
+        handled.wait(2)
+        stop_thread(thread, stop)
 
         import json
         data = json.loads(writer.path.read_text(encoding="utf-8"))
@@ -309,8 +311,8 @@ class TestBoardRFIDEvents:
             audio_queue=audio_q, game_state=gs, json_writer=writer,
             rfid_queue=rfid_q, stop_event=stop,
         )
+        handled = HandledAudio(thread)
         thread.start()
-        time.sleep(0.05)
 
         now = time.time()
         # ハンド1: ボードカードあり
@@ -318,16 +320,15 @@ class TestBoardRFIDEvents:
         audio_q.put(AudioEvent("bet", 100, now, ""))
         audio_q.put(AudioEvent("winner", 0, now + 0.01, "シート1 ウィナー"))
 
-        time.sleep(0.3)
+        handled.wait(2)
 
         # ハンド2: ボードカードなし
         audio_q.put(AudioEvent("new_hand", 0, now + 0.4, ""))
         audio_q.put(AudioEvent("bet", 200, now + 0.41, ""))
         audio_q.put(AudioEvent("winner", 0, now + 0.42, "シート1 ウィナー"))
 
-        time.sleep(0.3)
-        stop.set()
-        thread.join(timeout=2)
+        handled.wait(5)
+        stop_thread(thread, stop)
 
         import json
         data = json.loads(writer.path.read_text(encoding="utf-8"))

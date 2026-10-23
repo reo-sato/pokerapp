@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import re
 import sys
 import threading
 from datetime import datetime
@@ -13,32 +15,75 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 全角 ASCII（U+FF01..U+FF5E）→ 半角 + 全角スペース → 半角スペース。日本語 IME のまま
+# `ｎ` と打ってもコマンドとして通るようにする（ISSUE-0030）。読み上げ文の経路は通さない
+# （`raw_text` は入力そのまま。全角数字は `parse_amount` が既に解釈する）。
+_FULLWIDTH_TO_ASCII = str.maketrans(
+    {chr(c): chr(c - 0xFEE0) for c in range(0xFF01, 0xFF5F)} | {"　": " "}
+)
+
+
+# 引数がくっついたコマンド（`w1` / `r1 500`）を分ける。ログが入力行に割り込む環境では
+# 空白を打ち損ねやすく、実機で `w1` が 2 回弾かれた（ISSUE-0034）。引数を取る w/r のみ。
+_GLUED_COMMAND = re.compile(r"^([wrd])(\d+)$")
+
+
+def _normalize_cli_command(line: str) -> str:
+    """CLI コマンド照合用に全角英数字・全角スペースを半角へ寄せ、`w1` を `w 1` に分ける。"""
+    normalized = line.translate(_FULLWIDTH_TO_ASCII)
+    parts = normalized.split()
+    if parts:
+        m = _GLUED_COMMAND.match(parts[0].lower())
+        if m:
+            parts[0:1] = [m.group(1), m.group(2)]
+            return " ".join(parts)
+    return normalized
+
+
+def _parse_seat_list(raw: str) -> "list[int] | None":
+    """使う席の入力を席番号の昇順リストにする。不正なら None。
+
+    - 数字 1 つ（2〜9）= 人数。1 番から順に使う（従来どおり。例 `6` → 1〜6 番）。
+    - 数字 2 つ以上 = 使う席番号（1〜9、重複なし。例 `2 4 5 8`）。卓の空いている席を飛ばして座るとき。
+      全角の数字・空白、「、」「,」区切りも可。
+    """
+    text = raw.translate(_FULLWIDTH_TO_ASCII).replace("、", " ").replace(",", " ")
+    try:
+        numbers = [int(tok) for tok in text.split()]
+    except ValueError:
+        return None
+    if len(numbers) == 1:
+        return list(range(1, numbers[0] + 1)) if 2 <= numbers[0] <= 9 else None
+    if len(numbers) < 2 or len(set(numbers)) != len(numbers) or not all(1 <= n <= 9 for n in numbers):
+        return None
+    return sorted(numbers)
+
 
 def _prompt_session_config() -> dict:
-    """CLIで席数・プレイヤー名・スタック・ブラインドを入力する。"""
+    """CLIで使う席・プレイヤー名・スタック・ブラインドを入力する。"""
     print("=== ポーカーハンドロガー セッション設定 ===")
 
     while True:
-        try:
-            num_seats = int(input("席数 (2〜9): ").strip())
-            if 2 <= num_seats <= 9:
-                break
-        except ValueError:
-            pass
-        print("2〜9 の整数を入力してください。")
+        seats = _parse_seat_list(input(
+            "席（人数か、札を置く席の番号。例: 6 = 1〜6 番 / 2 4 5 8 = その番号の席）: "))
+        if seats is not None:
+            break
+        print("人数（2〜9）か、使う席番号を 2 つ以上（1〜9、空白区切り）入力してください。")
 
     players = []
-    for i in range(1, num_seats + 1):
-        name = input(f"席{i} プレイヤー名: ").strip() or f"Player{i}"
+    for seat in seats:
+        typed = input(f"席{seat} プレイヤー名: ").strip()
+        name = typed or f"Player{seat}"
         while True:
             try:
-                stack = int(input(f"席{i} 初期スタック: ").strip())
+                stack = int(input(f"席{seat} 初期スタック: ").strip())
                 if stack > 0:
                     break
             except ValueError:
                 pass
             print("正の整数を入力してください。")
-        players.append({"seat": i, "name": name, "stack": stack})
+        # named = 名前を入力した席。空 Enter の席（PlayerN）はお客さんに結び付けない（ADR-0059）。
+        players.append({"seat": seat, "name": name, "stack": stack, "named": bool(typed)})
 
     while True:
         try:
@@ -50,9 +95,29 @@ def _prompt_session_config() -> dict:
             pass
         print("正の整数を入力してください。")
 
+    # 1 ハンド目のボタン席（FR-05b / ISSUE-0032）。以降はハンドごとに 1 つずつ回る。
+    # 内部表現は「次の new_hand で 1 つ進める前の席」なので、入力された席の **1 つ手前**を渡す。
+    seat_list = "/".join(str(n) for n in seats)
+    while True:
+        raw = input(f"1ハンド目のボタン席 ({seat_list}, 空Enterで{seats[-1]}): ").strip()
+        if not raw:
+            first_button = seats[-1]
+            break
+        try:
+            first_button = int(_normalize_cli_command(raw))
+            if first_button in seats:
+                break
+        except ValueError:
+            pass
+        print(f"使う席（{seat_list}）のどれかを入力してください。")
+    button_seat = seats[(seats.index(first_button) - 1) % len(seats)]
+
     log_dir = input("ログ保存先 (空Enterで ./logs): ").strip() or "./logs"
 
-    return {"players": players, "sb": sb, "bb": bb, "log_dir": log_dir}
+    return {
+        "players": players, "sb": sb, "bb": bb,
+        "button_seat": button_seat, "log_dir": log_dir,
+    }
 
 
 def _make_event_recorder(cfg: dict, log_dir: str, session_id: str):
@@ -68,62 +133,579 @@ def _make_event_recorder(cfg: dict, log_dir: str, session_id: str):
     return EventRecorder(Path(log_dir) / f"{session_id}.events.jsonl")
 
 
-def _make_game_state(cfg: dict, players: list, sb: int, bb: int):
+def _make_table_state_writer(cfg: dict, log_dir: str, session_id: str):
+    """config.table_state.enabled（既定 true）なら TableStateWriter を返す。
+
+    RFID だけから導く卓状態（カード / 有効席 / ストリート）を
+    `logs/{session}.table_state.json` に publish する。`tools/table_monitor.py` が読む。
+    """
+    if not cfg.get("table_state", {}).get("enabled", True):
+        return None
+    from output.table_state_writer import TableStateWriter
+
+    return TableStateWriter(
+        log_dir, session_id,
+        history=cfg.get("table_state", {}).get("history", True),
+    )
+
+
+def _make_card_correction_hook(rfid_thread):
+    """ミスディール訂正で RFID 側の割り当て・デバウンスも落とすフック（ADR-0054）。
+
+    engine は `("board", 位置)` / `("seat", 席)` で呼ぶ。RFID を使っていない構成では None
+    （engine 内の記録だけを取り消す = 訂正自体は成立する）。
+    """
+    if rfid_thread is None:
+        return None
+    forget_board = getattr(rfid_thread, "forget_board_position", None)
+    forget_seat = getattr(rfid_thread, "forget_seat_cards", None)
+    if forget_board is None or forget_seat is None:
+        return None
+
+    def hook(kind: str, key: int) -> None:
+        if kind == "board":
+            forget_board(key)
+        elif kind == "seat":
+            forget_seat(key)
+
+    return hook
+
+
+def _rfid_tracking_kwargs(rfid_cfg: dict) -> dict:
+    """卓の流れに合わせた RFID の解釈（ADR-0058）の設定。config に無ければ本番の既定値。
+
+    店舗 PC の config.json はこの設定が入る前に作られていることがあるので、キーが無いときも
+    既定で有効にする（フォールドした札がボードに入る / 配り直しが入力なしで反映されない、を防ぐ）。
+    `release_sec: null` で自動の差し替えを止め、`commit_sec: 0` で最初に見えた瞬間に確定する。
+    `redeal_window_sec: null` でボードの 1 枚だけの差し直しを扱わない（flop 全体と 6 枚目の詰め直しだけ）。
+    `redeal_confirm_sec` はボードの差し直しで前の札が見えないことを確かめる秒数（null = `release_sec`）。
+    `flop_window_sec` はフロップの最初の札からこの秒数より後に出た札をフロップにしない（null = 従来どおり）。
+    """
+    from rfid.reader_thread import (
+        DEFAULT_COMMIT_SEC,
+        DEFAULT_FLOP_WINDOW_SEC,
+        DEFAULT_GAP_SEC,
+        DEFAULT_REDEAL_CONFIRM_SEC,
+        DEFAULT_REDEAL_WINDOW_SEC,
+        DEFAULT_RELEASE_SEC,
+    )
+    release = rfid_cfg.get("release_sec", DEFAULT_RELEASE_SEC)
+    window = rfid_cfg.get("redeal_window_sec", DEFAULT_REDEAL_WINDOW_SEC)
+    confirm = rfid_cfg.get("redeal_confirm_sec", DEFAULT_REDEAL_CONFIRM_SEC)
+    flop_window = rfid_cfg.get("flop_window_sec", DEFAULT_FLOP_WINDOW_SEC)
+    return {
+        "commit_sec": float(rfid_cfg.get("commit_sec", DEFAULT_COMMIT_SEC)),
+        "gap_sec": float(rfid_cfg.get("gap_sec", DEFAULT_GAP_SEC)),
+        "release_sec": None if release is None else float(release),
+        "redeal_window_sec": None if window is None else float(window),
+        "redeal_confirm_sec": None if confirm is None else float(confirm),
+        "flop_window_sec": None if flop_window is None else float(flop_window),
+    }
+
+
+def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, listen_gate=None,
+                       audio_dir=None, second_ear=None, on_status=None):
+    """config.audio.enabled が true（既定）なら AudioThread を返す。false なら None。
+
+    false はマイクを繋がない実機テスト（RFID のカード読み取りだけを見る / ダミーアクションを
+    キーボードで投入する）用。アクションは CLI の入力ループが読み上げ文を `parse_action` に
+    通して AudioEvent にするので、音声と同じ語彙・同じ経路で進行できる。
+    `on_transcript` は聞き取った文ごとに呼ばれる（CLI の表示, ADR-0060）。
+    `listen_gate` はプレー中だけ set される Event（ハンドの間の発話は認識に回さない, ADR-0063）。
+    `audio_dir` は発話の音声を WAV で保存するフォルダ（`audio.save_audio` のとき）。
+    `second_ear` は Whisper が読めなかった発話を聞き直す第 2 の耳（`audio.second_ear.load_live`）。
+    `on_status` は録音の途中でマイクが切れた・開き直せたときのお知らせ（CLI の「●」行）。
+    """
+    audio_cfg = cfg.get("audio", {})
+    if not audio_cfg.get("enabled", True):
+        return None
+    from audio.devices import parse_device_names
+    from audio.recorder import _MIN_BUFFER_SECONDS, _SILENCE_RMS_THRESHOLD, AudioThread
+
+    return AudioThread(
+        audio_queue=audio_queue,
+        device_id=audio_cfg.get("device_id", 0),
+        device_names=parse_device_names(audio_cfg.get("device_name")),
+        sample_rate=audio_cfg.get("sample_rate", 16000),
+        model_size=audio_cfg.get("whisper_model", "medium"),
+        language=audio_cfg.get("language", "ja"),
+        stop_event=stop_event,
+        on_transcript=on_transcript,
+        on_status=on_status,
+        min_speech_sec=float(audio_cfg.get("min_speech_sec", _MIN_BUFFER_SECONDS)),
+        listen_gate=listen_gate,
+        speech_rms=float(audio_cfg.get("speech_rms", _SILENCE_RMS_THRESHOLD)),
+        beam_size=int(audio_cfg.get("beam_size", 5)),
+        temperature_fallback=bool(audio_cfg.get("temperature_fallback", False)),
+        audio_dir=audio_dir,
+        vad_threshold=float(audio_cfg.get("vad_threshold", 0.5)),
+        cpu_threads=int(audio_cfg.get("cpu_threads", 0) or 0),
+        second_ear=second_ear,
+    )
+
+
+def _load_second_ear(audio_cfg: dict):
+    """第 2 の耳を読み込み、どうなったかを CLI に出す（使えなくても Whisper だけで続ける, 2026-09-29）。"""
+    from audio.second_ear import load_live
+
+    ear, message = load_live(Path(__file__).resolve().parent, audio_cfg)
+    print(message, flush=True)
+    return ear
+
+
+def _make_listen_gate(cfg: dict):
+    """手札の配布でハンドを始める運用（RFID + `engine.auto_new_hand`）なら、プレー中だけ音声を認識に
+    回すための Event を返す（ADR-0063）。それ以外（RFID なし等）は None = 常に聞く
+    （配る前の「ハンド開始」で始める運用を止めない）。"""
+    if not cfg.get("rfid", {}).get("enabled", False):
+        return None
+    if not cfg.get("engine", {}).get("auto_new_hand", True):
+        return None
+    return threading.Event()
+
+
+# 雑音（聞き違い）として捨てた文は、CLI では頭だけ出す（幻聴のループは数百文字になる。全文は transcripts.jsonl）
+_NOISE_SHOWN_CHARS = 20
+
+
+def _print_transcript(transcript) -> None:
+    """聞き取った文とアクションとしての読みを CLI に出す（音声テスト用, ADR-0060）。
+
+    声ではない音（VAD で Whisper にかけなかった音）は出さない（記録 transcripts.jsonl にだけ残る）。
+    """
+    from audio.recorder import QUESTION_NOTE, describe_events
+
+    if getattr(transcript, "no_speech", False):
+        return
+    text = transcript.text
+    if getattr(transcript, "noise", False) and len(text) > _NOISE_SHOWN_CHARS:
+        text = text[:_NOISE_SHOWN_CHARS] + "…"
+    if getattr(transcript, "ear_text", None):
+        # Whisper が読めず、第 2 の耳で読んだ（2026-09-29）
+        heard = f"第 2 の耳「{transcript.ear_text}」→ {describe_events(transcript.events)}"
+    elif getattr(transcript, "noise", False):
+        heard = "雑音（聞き違い）として無視"
+    elif getattr(transcript, "question", False):
+        heard = QUESTION_NOTE
+    else:
+        heard = describe_events(transcript.events)
+    lag = ""
+    if transcript.utterance_start_ts is not None:
+        delay = transcript.heard_at - transcript.utterance_start_ts
+        if delay >= 10:
+            lag = f"  （{delay:.0f} 秒前の発話）"
+    print(f"  [聞き取り] 「{text}」→ {heard}{lag}", flush=True)
+
+
+def _wait_for_backlog(audio_thread, timeout_sec: float = 60.0, since: float | None = None) -> None:
+    """打った入力が、先に言われてまだ認識中の発話を追い越さないよう待つ（ADR-0061）。
+
+    認識は発話より遅れることがある（遅れても全部処理する）。`n` / `w` などを先に積むと、
+    前のハンドのアクションが次のハンドに入ってしまうので、打つより前（`since`）に話し始めた発話の認識を待つ。
+    あとから話し始めた発話は待たない（待つと話し続けている間は終わらない, 店舗 2026-09-30）。認識が進んで
+    いるあいだは待ち、`timeout_sec` 秒進まなければ入力を先に反映する。
+    """
+    import time as _time
+
+    if audio_thread is None:
+        return
+    pending_before = getattr(audio_thread, "pending_before", None)
+    if pending_before is None:
+        count = audio_thread.backlog
+    else:
+        since = _time.time() if since is None else since
+
+        def count() -> int:
+            return pending_before(since)
+    pending = count()
+    if pending == 0:
+        return
+    print(f"  （聞き取った発話を先に反映しています… 残り {pending} 件）", flush=True)
+    last, moved_at = pending, _time.time()
+    shown_at = moved_at
+    while pending > 0:
+        _time.sleep(0.1)
+        pending = count()
+        if _time.time() - shown_at >= 10.0 and pending > 0:
+            shown_at = _time.time()
+            print(f"  （残り {pending} 件。聞き取りが追いつくまでお待ちください）", flush=True)
+        if pending < last:
+            last, moved_at = pending, _time.time()
+        elif _time.time() - moved_at >= timeout_sec:
+            print(f"  （{timeout_sec:.0f} 秒待っても聞き取りが進みません（残り {pending} 件）。入力を先に反映します）",
+                  flush=True)
+            return
+
+
+def _report_audio_start(audio_thread, device_id: int, wait_sec: float = 3.0) -> None:
+    """マイクを開けたかを CLI に出す（ログはファイルに行くので、失敗に気づけるように）。"""
+    import time as _time
+
+    deadline = _time.time() + wait_sec
+    while audio_thread.health.get("state") == "starting" and _time.time() < deadline:
+        _time.sleep(0.05)
+    health = audio_thread.health
+    state = health.get("state")
+    index = health.get("device_index", device_id)     # 名前で選んだときは、いま見つけた番号
+    if state == "running":
+        print(f"音声入力: マイク 番号 {index}（{health.get('device_name') or '?'}）で聞き取っています。"
+              "聞き取った文は [聞き取り] と表示します。")
+    elif state == "unavailable":
+        print("音声入力: PyAudio が無いため使えません（キーボードの読み上げ文で進行できます）。")
+    elif state == "error" and health.get("rdp_audio"):
+        from audio.devices import RDP_AUDIO_FIX
+
+        print("音声入力: リモートデスクトップの音声が接続元の端末に回っているため、PC のマイクを開けません。"
+              f"{RDP_AUDIO_FIX}てください。開けるようになったら自動で聞き取りを始めます（ロガーの起動し直しは"
+              "要りません。それまでは音声なしで続けます）。")
+    elif state == "error" and health.get("missing_names"):
+        print(f"音声入力: {health.get('error', '')}。受信機の差し込み・Bluetooth の接続を確かめてください。見つかったら"
+              r"自動で聞き取りを始めます（名前は tools\audio_check.py list で確かめられます。それまでは音声なしで"
+              "続けます）。")
+    elif state == "error":
+        print(f"音声入力: マイク（番号 {index}）を開けませんでした — {health.get('error', '')}。開けるようになったら"
+              r"自動で聞き取りを始めます（番号は tools\audio_check.py list で確かめてください。それまでは音声なしで"
+              "続けます）。")
+    else:
+        print(f"音声入力: マイクの状態を確認できません（{state}）。")
+
+
+def _open_session_layer(cfg: dict, session_cfg: dict):
+    """`session_layer.enabled` なら session を作り、起動時に入力した名前を席に結び付ける（ADR-0059）。
+
+    戻り値は (session_repo, player_repo, session_id, 席 → player_id)。無効なら None（従来どおり
+    timestamp の session_id で、席とお客さんの対応を記録しない）。名前は同じ表示名の player に
+    結び付き、無ければ作る。名前を入れなかった席（PlayerN）は結び付けない。
+    """
+    if not cfg.get("session_layer", {}).get("enabled", False):
+        return None
+    from core.player_repository import PlayerRepository
+    from core.session_repository import SessionRepository
+
+    player_repo = PlayerRepository()
+    session_repo = SessionRepository(player_repo=player_repo)
+    session = session_repo.create_session(
+        label=datetime.now().strftime("%Y-%m-%d_%H%M%S"),
+        blinds={"sb": session_cfg["sb"], "bb": session_cfg["bb"]},
+    )
+    seat_player_map = {
+        p["seat"]: player_repo.find_or_create(p["name"]).player_id
+        for p in session_cfg["players"] if p.get("named", True)
+    }
+    return session_repo, player_repo, session.session_id, seat_player_map
+
+
+def _close_session_layer(session_repo, session_id: str) -> None:
+    """hand logger の終了で session を閉じる（お客さんの画面で「進行中」のまま残さない, ADR-0059）。"""
+    from core.session_repository import SessionAlreadyClosedError
+
+    try:
+        session_repo.close_session(session_id)
+    except SessionAlreadyClosedError:
+        pass
+    except Exception:
+        logger.exception("session を閉じられませんでした: %s", session_id)
+
+
+def _parse_name_command(parts: list[str]) -> "tuple[int, str | None] | None":
+    """`name <席> <名前>` / `name <席> -`（空席にする）を (席, 名前 or None) にする。不正なら None。
+
+    `seat` にしないのは、`seat 3 call` が読み上げ文（英語の席表現）として既に通るため。
+    """
+    if len(parts) < 3:
+        return None
+    try:
+        seat = int(parts[1])
+    except ValueError:
+        return None
+    name = " ".join(parts[2:]).strip()
+    if name == "-":
+        return seat, None
+    return (seat, name) if name else None
+
+
+def _make_game_state(cfg: dict, players: list, sb: int, bb: int, button_seat=None):
     """config.engine.backend で game-state 実装を選ぶ (R2, ADR-0009)。
 
     既定 "legacy" = 従来の `GameStateManager`（挙動不変）。"pokerkit" は preview backend
-    （要 pokerkit, default-off）。
+    （要 pokerkit, default-off）。`button_seat` は **1 ハンド目のボタンの 1 つ手前**の席
+    （省略時は最大の席番号 = ボタン導入前と同じ並び, ISSUE-0032）。legacy は無視する。
     """
     from core.poker_engine import create_game_state
 
     backend = cfg.get("engine", {}).get("backend", "legacy")
-    return create_game_state(backend, players, sb, bb)
+    return create_game_state(backend, players, sb, bb, button_seat=button_seat)
 
 
-def run_cli() -> None:
-    """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。"""
+def _auto_hand_kwargs(cfg: dict, audio_thread) -> dict:
+    """手札が配られたら新しいハンド / 勝者の自動判定（ADR-0062）の設定。
+
+    `engine.auto_new_hand` / `engine.auto_winner` は既定で有効（config に無い既存の店舗 PC も有効）。
+    認識待ちの発話の数を渡し、配る前に話された発話を前のハンドへ先に反映させる。
+    """
+    engine_cfg = cfg.get("engine", {})
+    return {
+        "auto_new_hand": bool(engine_cfg.get("auto_new_hand", True)),
+        "auto_winner": bool(engine_cfg.get("auto_winner", True)),
+        "speech_backlog": audio_thread.backlog if audio_thread is not None else None,
+        "speech_pending_since": audio_thread.oldest_pending_start if audio_thread is not None else None,
+        "voice_heard_at": (lambda: audio_thread.last_voice_at) if audio_thread is not None else None,
+        "fold_absent_sec": float(engine_cfg.get("fold_absent_sec", 3.0)),
+        # 手札を読んだ順からボタンの置き忘れを見つけて直す（2026-09-29）
+        "button_from_deal": bool(engine_cfg.get("button_from_deal", True)),
+    }
+
+
+def _rfid_folds_enabled(cfg: dict, seat_presence) -> bool:
+    """フォールドを席の札の離脱で決めるか（オーナー決定 2026-09-25, `engine.rfid_folds` 既定 true）。
+
+    席の在否が取れる RFID（PC/SC の RFIDThread）があるときだけ。無ければ従来どおり音声の「フォールド」を
+    次の手番の人に付ける（キーボードだけの進行も止めない）。
+    """
+    return bool(cfg.get("engine", {}).get("rfid_folds", True)) and seat_presence is not None
+
+
+def _make_rfid_source(rfid_cfg: dict):
+    """RFID の読み取り元（店舗 2026-09-30）: 中継（RDP のセッションの外でリーダーを読む `tools/rfid_relay.py`）が
+    動いていれば中継から、無ければリーダーを直接読む。リーダーにつなぐたびに選び直す。"""
+    from rfid.relay import AutoRFIDSource, RelayClient, relay_port
+
+    return AutoRFIDSource(RelayClient(port=relay_port(rfid_cfg)))
+
+
+def _rfid_device_kwargs(rfid_cfg: dict, source, on_notice=None) -> dict:
+    """読み取り装置（ESP32）の見張りと再起動（店舗 2026-10-06, 契約 v1.11 §6）。`rfid.auto_restart`（既定 true）=
+    使えないリーダーがあれば卓に札が無いときに自動で再起動を頼む。`rr` はいつでも頼める（卓が空いてから送る）。"""
+    return {
+        "device": source,
+        "on_notice": on_notice,
+        "auto_restart": bool(rfid_cfg.get("auto_restart", True)),
+    }
+
+
+def _rfid_not_connected_message(configured: int) -> str:
+    task = Path(__file__).resolve().parent / "installer" / "rfid_relay_task.ps1"
+    return (
+        f"⚠ RFID: リーダーにつながりません（設定 {configured} 台）。手札を配ってもハンドが始まらず、声も聞き取りません。\n"
+        "  RDP で操作しているときは、RDP の中からリーダーは見えません。RFID の中継を一度だけ登録してください"
+        "（PowerShell に貼る。管理者の確認には「はい」）:\n"
+        f"  Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File {task}'\n"
+        "  つながれば自動で使い始めます（ロガーの起動し直しは要りません）。"
+    )
+
+
+def _rfid_status_message(health: dict, source) -> str | None:
+    """RFID のつながり具合（CLI に出す 1 文。まだ分からなければ None）。
+
+    中継から読んでいるときの台数は中継が実際につないでいる台数（ロガーの側は中継につながれば全台「つながった」になる）。
+    """
+    state = health.get("state")
+    if state == "no_readers":
+        return _rfid_not_connected_message(int(health.get("configured") or 0))
+    if state == "stopped":
+        return "⚠ RFID の読み取りが止まりました。ロガーを起動し直してください。"
+    if state == "restarting":
+        return "RFID: 読み取り装置を再起動しています（数秒、札が読めません）…"
+    if state != "running":
+        return None
+    if getattr(source, "mode", "") != "relay":
+        return f"RFID: リーダー {health.get('connected')}/{health.get('configured')} 台を直接読んでいます。"
+    snap = source.client.snapshot(max_age=1.0)
+    if snap is None:
+        return ("⚠ RFID: 中継（RDP の外の読み取り）が止まっています。札が読めません。管理者で "
+                "installer\\rfid_relay_task.ps1 をもう一度実行してください。")
+    if snap.get("restarting"):
+        return "RFID: 読み取り装置を再起動しています（数秒、札が読めません）…"
+    connected, configured = snap.get("connected", 0), snap.get("configured", 0)
+    if not connected:
+        return (f"⚠ RFID: 中継は動いていますが、リーダーにつながっていません（設定 {configured} 台）。"
+                "卓の USB を確かめてください（つながれば自動で読み始めます）。")
+    return f"RFID: リーダー {connected}/{configured} 台を中継（RDP の外の読み取り）から読んでいます。"
+
+
+def _report_rfid_status(rfid_thread, source, stop_event: threading.Event, wait_sec: float = 3.0) -> None:
+    """RFID のリーダーにつながったかを CLI に出し、あとで変わったとき（つながった・止まった）も出す。
+
+    店舗 2026-09-30: RDP のセッションの中からリーダーが見えず、RFID のスレッドはログのファイルにだけ書いて止まって
+    いた（画面には何も出ず、手札を配ってもハンドが始まらないまま 2 ハンドが記録されなかった）。
+    """
+    import time as _time
+
+    def health() -> dict:
+        return dict(getattr(rfid_thread, "health", None) or {})
+
+    deadline = _time.time() + wait_sec
+    while health().get("state") == "starting" and _time.time() < deadline:
+        _time.sleep(0.05)
+    last: list = [None]
+
+    def show() -> None:
+        h = health()
+        if h.get("state") == "stopped" and stop_event.is_set():
+            return                                   # 終了（q）で止めた
+        message = _rfid_status_message(h, source)
+        if message is None or message == last[0]:
+            return
+        last[0] = message
+        print(message, flush=True)
+
+    show()
+
+    def watch() -> None:
+        while not stop_event.wait(1.0):
+            show()
+
+    threading.Thread(target=watch, daemon=True, name="RFIDStatus").start()
+
+
+def _print_notice(message: str) -> None:
+    """ハンドの開始・勝者・判定待ちのお知らせ（integration スレッドから呼ばれる）。"""
+    print(f"  ● {message}", flush=True)
+
+
+def _print_cards(message: str) -> None:
+    """RFID で読んだ札（手札・ボード・確定時のまとめ）。integration スレッドから呼ばれる。"""
+    print(f"  [カード] {message}", flush=True)
+
+
+def _load_test_script(spec: str) -> dict:
+    """`--script` の指定: `voice`（声だけの台本を作る。`voice:8` で 8 人の卓）/ `cards`（札の確認）/ 台本のファイル。"""
+    import random
+
+    from tools.test_script import DEFAULT_SEATS, cards_script, generate_voice_script
+
+    kind, _, arg = spec.partition(":")
+    if kind == "voice":
+        seats = int(arg) if arg.isdigit() else DEFAULT_SEATS
+        return generate_voice_script(random.randrange(1_000_000), seats=seats)
+    if kind == "cards":
+        return cards_script()
+    data = json.loads(Path(spec).read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("kind") not in ("voice", "cards"):
+        raise ValueError(f"台本のファイルではありません: {spec}")
+    return data
+
+
+def run_cli(script: str | None = None) -> None:
+    """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。
+
+    `script`（`--script`）: 台本のハンド（`tools/test_script.py`, テスト方針 週 1）。卓の設定は台本から取り（入力なし）、
+    真のアクション入力の画面の「台本」から制御（`script_hand`）を受け取る。声だけの台本は RFID を使わない。
+    お客さんの記録（session_layer）にはしない。
+    """
     from core.config import load_config
     from core.event_queue import make_audio_queue
     from core.game_state import PlayerState
-    from audio.recorder import AudioThread
     from integration.engine import IntegrationThread
     from output.json_writer import JsonWriter
 
     cfg = load_config()
-    session_cfg = _prompt_session_config()
+    test_script = _load_test_script(script) if script else None
+    if test_script is not None:
+        from tools.test_script import session_table
+
+        session_cfg = session_table(test_script)
+        cfg.setdefault("session_layer", {})["enabled"] = False
+        if test_script["kind"] == "voice":
+            cfg.setdefault("rfid", {})["enabled"] = False       # 声だけの台本は札を置かない
+    else:
+        session_cfg = _prompt_session_config()
 
     players = [
         PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
         for p in session_cfg["players"]
     ]
-    game_state = _make_game_state(cfg, players, session_cfg["sb"], session_cfg["bb"])
+    game_state = _make_game_state(
+        cfg, players, session_cfg["sb"], session_cfg["bb"],
+        button_seat=session_cfg.get("button_seat"),
+    )
 
-    session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
+    # 席とお客さんの対応（ADR-0059）。お客さん向け画面はこの記録からハンドを探す。
+    session_layer = _open_session_layer(cfg, session_cfg)
+    if session_layer is not None:
+        session_repo, player_repo, session_id, seat_player_map = session_layer
+    else:
+        session_repo = player_repo = None
+        seat_player_map = {}
+        suffix = f"_script_{test_script['kind']}" if test_script is not None else "_session1"
+        session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + suffix
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
+    json_writer.ensure_created()        # 真のアクション入力の画面に、最初のハンドが終わる前から出す
 
     audio_q = make_audio_queue()
     stop_event = threading.Event()
     camera_q = None
+    control_thread = None
+    if test_script is not None:
+        # 台本は画面（真のアクション入力の「台本」）が読むので logs に置く
+        from tools.test_script import write_session_script
+
+        write_session_script(Path(session_cfg["log_dir"]), session_id, test_script)
 
     def on_action(record):
+        if getattr(record, "actor_source", None) == "unresolved":
+            # 状態に適用できなかった入力（ハンド外 / 低信頼の制御語 など, ADR-0047 B2）。
+            # 黙って捨てず、何が保留されたかを見せる（ゲーム状態は変わっていない）。
+            print(f"  [未適用] {record.action} ({record.reason})  ← 状態は変わっていません")
+            return
+        # どこから決めたか（札の離脱 / 聞き取れなかったとみて補った）
+        origin = {
+            "rfid_departure": "  ← 札が離れた",
+            "rfid_muck": "  ← 札が中央を通過",
+            "implied": "  ← 聞き取れなかったとみて補完",
+        }.get(getattr(record, "actor_source", None), "")
+        if getattr(record, "actor_source", None) == "rfid_departure" and record.action == "check":
+            origin = "  ← 札を前に出した（ショーダウン）"
+        # コールの額は追加額ではなくトータル（そのストリートで出した合計）で見せる（オーナー, 2026-09-29。
+        # 記録の amount は追加額のまま）
+        from core.hand_log import shown_amount
+
+        amount = shown_amount(record.action, record.amount, integration_thread.street_total(record))
         print(
             f"  [{record.street}] 席{record.seat}({record.player_name}) "
-            f"{record.action} {record.amount or ''}"
+            f"{record.action} {amount or ''}"
             f"  pot={record.pot_after}"
             + (" [要確認]" if record.needs_review else "")
+            + origin
         )
 
-    audio_cfg = cfg.get("audio", {})
     cam_cfg = cfg.get("camera", {})
 
-    audio_thread = AudioThread(
-        audio_queue=audio_q,
-        device_id=audio_cfg.get("device_id", 0),
-        sample_rate=audio_cfg.get("sample_rate", 16000),
-        model_size=audio_cfg.get("whisper_model", "medium"),
-        language=audio_cfg.get("language", "ja"),
-        stop_event=stop_event,
-    )
+    audio_cfg = cfg.get("audio", {})
+    if audio_cfg.get("enabled", True):
+        # 初回は音声認識モデル（medium ≈ 1.5 GB）をダウンロードする。ログはファイルに行くので
+        # 何も出ないと固まったように見える（ADR-0060）。
+        import time as _time
+
+        print(f"音声認識モデル（{audio_cfg.get('whisper_model', 'medium')}）を読み込んでいます…"
+              "（初回はダウンロードで数分かかります）", flush=True)
+        loading_since = _time.time()
+    listen_gate = _make_listen_gate(cfg)
+    # 聞き取った発話はすべて記録する（読めなかったもの・雑音も）。音声は audio.save_audio のときだけ保存。
+    from output.transcript_log import TranscriptLog
+
+    transcript_log = TranscriptLog(Path(session_cfg["log_dir"]) / f"{session_id}.transcripts.jsonl")
+
+    def on_transcript(transcript):
+        _print_transcript(transcript)
+        transcript_log.write(transcript)
+
+    audio_dir = (Path(session_cfg["log_dir"]) / "audio" / session_id
+                 if audio_cfg.get("save_audio", False) else None)
+    second_ear = _load_second_ear(audio_cfg) if audio_cfg.get("enabled", True) else None
+    audio_thread = _make_audio_thread(cfg, audio_q, stop_event, on_transcript=on_transcript,
+                                      listen_gate=listen_gate, audio_dir=audio_dir, second_ear=second_ear,
+                                      on_status=_print_notice)
+    if audio_thread is None:
+        print("音声入力は無効です (audio.enabled=false)。"
+              "アクションはキーボードから読み上げ文で投入してください。")
+    elif not audio_thread.asr_ready:
+        error = getattr(audio_thread._transcriber, "load_error", None)  # noqa: SLF001
+        print(f"音声認識モデルを読み込めませんでした（{error}）。音声は使わずに続けます"
+              "（キーボードの読み上げ文で進行できます）。")
+        audio_thread = None
+    else:
+        print(f"音声認識モデルの読み込み完了（{_time.time() - loading_since:.0f} 秒）。")
     # Phase 2/3: カメラが設定済みの場合のみ CameraThread を起動する
     # Phase 3: camera_q を IntegrationThread に渡すことで ±2秒マッチングが有効になる
     camera_thread = None
@@ -144,6 +726,7 @@ def run_cli() -> None:
 
     # Phase 6/7: RFID が有効な場合のみ起動する (transport に応じてスレッドを選択)
     rfid_thread = None
+    rfid_source = None
     rfid_cfg = cfg.get("rfid", {})
     if rfid_cfg.get("enabled", False):
         from core.event_queue import make_rfid_queue
@@ -169,17 +752,37 @@ def run_cli() -> None:
             pcsc_readers = rfid_cfg.get("pcsc_readers", rfid_cfg.get("readers", []))
             if not isinstance(pcsc_readers, list):
                 pcsc_readers = []
+            rfid_source = _make_rfid_source(rfid_cfg)
             rfid_thread = RFIDThread(
                 rfid_queue=rfid_q,
                 card_master=card_master,
                 reader_configs=pcsc_readers,
                 poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
                 stop_event=stop_event,
+                bridge_factory=rfid_source.bridge,
+                reader_present=rfid_source.present,
+                **_rfid_tracking_kwargs(rfid_cfg),
+                **_rfid_device_kwargs(rfid_cfg, rfid_source, on_notice=_print_notice),
             )
             print("RFID pyscardスレッド起動。")
         rfid_thread.start()
+        if rfid_source is not None:
+            _report_rfid_status(rfid_thread, rfid_source, stop_event)
 
     event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
+    # 新ハンドで RFID の board 位置もリセットする（engine の board と同じ同期点。
+    # 片方だけが番号を振り直すと同じ札が 2 か所に出る, ISSUE-0026）。
+    # 新ハンドは board 位置 + マック観測をまとめてリセットする（ADR-0026 / ADR-0055）。
+    on_new_hand = (
+        getattr(rfid_thread, "reset_for_new_hand", None)
+        or getattr(rfid_thread, "reset_board_positions", None)
+    ) if rfid_thread else None
+    on_card_correction = _make_card_correction_hook(rfid_thread)
+    seat_absent_since = getattr(rfid_thread, "seat_cards_absent_since", None) if rfid_thread else None
+    seat_presence = getattr(rfid_thread, "presence_snapshot", None) if rfid_thread else None
+    board_presence = getattr(rfid_thread, "board_presence", None) if rfid_thread else None
+    table_state_writer = _make_table_state_writer(cfg, session_cfg["log_dir"], session_id)
+
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
         game_state=game_state,
@@ -189,26 +792,100 @@ def run_cli() -> None:
         on_action=on_action,
         stop_event=stop_event,
         event_recorder=event_recorder,
+        on_new_hand=on_new_hand,
+        on_card_correction=on_card_correction,
+        seat_cards_absent_since=seat_absent_since,
+        seat_presence=seat_presence,
+        rfid_folds=_rfid_folds_enabled(cfg, seat_presence),
+        board_presence=board_presence,
+        table_state_writer=table_state_writer,
         control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
+        session_repo=session_repo,
+        seat_player_map=seat_player_map,
+        on_notice=_print_notice,
+        on_cards=_print_cards,
+        listen_gate=listen_gate,
+        live_hand=True,        # 手札を配ったときから進行中のハンドを真のアクション入力の画面へ
+        **_auto_hand_kwargs(cfg, audio_thread),
     )
-    audio_thread.start()
+    if audio_thread is not None:
+        audio_thread.start()
     integration_thread.start()
+    feed_stacks = bool((cfg.get("ground_truth") or {}).get("feed_stacks", False))
+    if test_script is not None or feed_stacks:
+        # 画面の操作（台本のハンドを始める）は制御で受け取る。先に言われた発話の聞き取りを待ってから積む
+        # （前のハンドの最後のアクションを次のハンドに入れない = CLI の入力と同じ）。真のアクションの収支で持ち点を
+        # 直す（`ground_truth.feed_stacks`, 2026-10-19）のも同じ制御で受け取る
+        from core.control_queue import ControlCommandLog
+        from integration.control_consumer import ControlConsumerThread
+
+        control_thread = ControlConsumerThread(
+            ControlCommandLog(Path(session_cfg["log_dir"]) / f"{session_id}.control.jsonl"), audio_q, stop_event,
+            backlog=audio_thread.backlog if audio_thread is not None else None,
+            pending_before=audio_thread.pending_before if audio_thread is not None else None)
+        control_thread.start()
+    if audio_thread is not None:
+        _report_audio_start(audio_thread, audio_cfg.get("device_id", 0))
 
     print(f"\nセッション開始。ログ: {json_writer.path}")
-    print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー  [r <席> <金額>]=リバイ")
+    if test_script is not None and test_script["kind"] == "voice":
+        print(f"台本のハンド（声だけ）: {len(test_script['table']['seats'])} 人の卓・{len(test_script['hands'])} ハンド。"
+              "RFID は使いません。")
+        print("iPad で真のアクション入力の画面の「台本」（http://<この PC の IP>:8791/script）を開き、"
+              "「このハンドを始める」を押してから、出てくる行を順に読んでください。")
+    elif test_script is not None:
+        print("札の確認（席 4・5・6、1 ハンド目のボタンは席 6）。手順は iPad の「台本」"
+              "（http://<この PC の IP>:8791/script）に出ます。")
+    if session_repo is not None:
+        seated = ", ".join(
+            f"席{p['seat']}={p['name']}" for p in session_cfg["players"] if p.get("named", True)
+        )
+        print(f"お客さんの記録: {seated or 'なし（名前を入力した席がありません）'}")
+    auto = _auto_hand_kwargs(cfg, None)
+    if auto["auto_new_hand"] and rfid_thread is not None:
+        print("手札を配ると新しいハンドが始まります（2 席以上に 2 枚ずつ置いたとき。n は不要）。"
+              "音声はプレー中だけ聞き取ります。")
+    if _rfid_folds_enabled(cfg, seat_presence):
+        print(f"フォールドは席の札で決めます（{auto['fold_absent_sec']:.0f} 秒離れたまま / 卓の中央を通過）。"
+              "札が戻れば取り消します。音声の「フォールド」は次の手番の人には付けません。")
+    if audio_dir is not None:
+        print(f"発話の音声を保存しています: {audio_dir}")
+    if auto["auto_winner"]:
+        print("勝者: ほかが全員フォールドしたら自動。ショーダウンは、見せたら役名（見せるたびに必ず）、"
+              "見せずにマックしたら「フォールド」（どちらもアウトオブポジションから順）。全員見せたか、"
+              "役名もマックも 8 秒無ければ手札から判定。決まらないときは w <席>。")
+    print("コマンド: [q]=終了  [n]=新ハンド  [w <席>]=ウィナー（分けたら w <席> <席>）  [r <席> <金額>]=リバイ"
+          "  [d <席> <金額>]=スタックを減らす")
+    print("ミスディール訂正: [cb <位置>]=ボードの N 枚目を取り消し  [cs <席>]=その席の札を読み直し")
+    print("リーダー: [rr]=読み取り装置（ESP32）を再起動（卓に札が無いときに送ります。読めないリーダーがあるとき）")
+    print("席: [name <席> <名前>]=その席の人（参加）  [name <席> -]=空席（次のハンドから配られない）"
+          "  スタック 0 の席は r で買い足すまで配られません")
+    print("ブラインド: [blinds <SB> <BB>]=次のハンドからブラインドを変える（例: blinds 200 400）"
+          "  [ante on] / [ante off]=BB アンティ（BB の人が BB と同額）を入れる・外す")
+    print("ボタン: [button <席>]=ボタンを手で直す（ハンドの途中ならそのハンドを組み直す・ハンドの外なら次のハンド。"
+          "ディーラーがボタンを動かし忘れたときなど）")
+    print("訂正: ディーラーが「失礼しました」と言う（打っても可）と、続けて言うアクションで直します — 直前のアクションの"
+          "言い直しか、ストリートの最初からの言い直しかは、そのあとのアクションとの辻褄で選びます（要確認）")
+    print("上記以外の入力は読み上げ文として解釈します"
+          "（例: チェック / シート3 コール / ベット 500）。マイクが無くてもこれで進行できます。")
     print("ディーラーがアナウンスすると自動検出されます。\n")
 
     # GameStateManager はロックを持たないため、状態変更コマンド (n/w/r) はすべて
     # audio_q 経由で IntegrationThread に処理させる（直接呼ぶと apply_action とレースする）。
+    from audio.recognizer import parse_actions
+    from audio.recorder import describe_event
     from core.events import AudioEvent
     import time as _time
 
     try:
         while True:
             line = input("> ").strip()
+            typed_at = _time.time()
             if not line:
                 continue
-            parts = line.split()
+            # 先に言われた発話がまだ認識中なら、その反映を待ってから入力を積む（順序を保つ）
+            _wait_for_backlog(audio_thread, since=typed_at)
+            parts = _normalize_cli_command(line).split()
             cmd = parts[0].lower()
 
             if cmd == "q":
@@ -220,15 +897,18 @@ def run_cli() -> None:
                 print("新ハンド開始を送信しました。")
             elif cmd == "w" and len(parts) >= 2:
                 try:
-                    seat = int(parts[1])
+                    seats = [int(p) for p in parts[1:]]
+                    # 2 席以上 = 分けた（チョップ。engine が席をすべて拾って等分する）
+                    raw = (" ".join(f"シート{s}" for s in seats) + " チョップ" if len(seats) > 1
+                           else f"シート{seats[0]} ウィナー")
                     audio_q.put(AudioEvent(
                         action="winner",
                         amount=0,
                         timestamp=_time.time(),
-                        raw_text=f"シート{seat} ウィナー",
+                        raw_text=raw,
                     ))
                 except ValueError:
-                    print("使い方: w <席番号>")
+                    print("使い方: w <席番号>（分けたときは w <席> <席>）")
             elif cmd == "r" and len(parts) >= 3:
                 try:
                     seat = int(parts[1])
@@ -240,19 +920,142 @@ def run_cli() -> None:
                     print(f"リバイを送信しました: 席{seat} +{amount}（反映はアクション表示で確認）")
                 except ValueError as e:
                     print(f"エラー: {e}")
+            elif cmd == "d" and len(parts) >= 3:
+                # スタックを減らす（0 より下にはしない。ハンドに入っている席はそのハンドのあとに, 2026-10-19）
+                try:
+                    seat = int(parts[1])
+                    amount = int(parts[2])
+                    if amount <= 0:
+                        raise ValueError("金額は 1 以上")
+                    audio_q.put(AudioEvent(
+                        action="reduce_stack", amount=amount, timestamp=_time.time(),
+                        raw_text=f"シート{seat} スタック減 {amount}", seat=seat,
+                    ))
+                except ValueError as e:
+                    print(f"使い方: d <席> <金額>（{e}）")
+            elif cmd == "name":
+                parsed = _parse_name_command(line.translate(_FULLWIDTH_TO_ASCII).split())
+                if parsed is None:
+                    print("使い方: name <席> <名前> / name <席> -（空席）")
+                else:
+                    seat, name = parsed
+                    if seat not in {p["seat"] for p in session_cfg["players"]}:
+                        print(f"席{seat} はこの卓にありません")
+                        continue
+                    vacate = name is None
+                    if session_repo is None:
+                        print("（席とお客さんの記録は無効です: config の session_layer.enabled=true で有効。"
+                              "席の参加・休みだけ反映します）")
+                    else:
+                        new_map = dict(seat_player_map)
+                        if vacate:
+                            new_map.pop(seat, None)
+                        else:
+                            new_map[seat] = player_repo.find_or_create(name).player_id
+                        seat_player_map = new_map
+                        # 席 → player は次のハンドの開始時に書かれる。名前はゲーム状態を持つ
+                        # integration スレッドで変える（ハンドの途中なら次のハンドから）。
+                        integration_thread.set_seat_player_map(seat_player_map)
+                    shown = f"Player{seat}" if vacate else name
+                    audio_q.put(AudioEvent(
+                        action="rename_seat", amount=0, timestamp=_time.time(),
+                        raw_text=shown, seat=seat,
+                    ))
+                    # 空席は次のハンドから配られない（休み）。名前を付けた席は参加（休みなら戻す）。
+                    audio_q.put(AudioEvent(
+                        action="sit_out" if vacate else "sit_in", amount=0, timestamp=_time.time(),
+                        raw_text=f"シート{seat} {'休み' if vacate else '参加'}", seat=seat,
+                    ))
+                    if vacate:
+                        print(f"席{seat} を空席にしました（次のハンドから配られません）")
+                    else:
+                        print(f"席{seat} を {shown} にしました（次のハンドから）")
+            elif cmd in ("button", "btn") and len(parts) >= 2:
+                try:
+                    seat = int(parts[1])
+                except ValueError:
+                    print("使い方: button <席番号>")
+                    continue
+                audio_q.put(AudioEvent(
+                    action="set_button", amount=0, timestamp=_time.time(),
+                    raw_text=f"シート{seat} ボタン", seat=seat,
+                ))
+                print(f"ボタン 席{seat} を送信しました")
+            elif cmd == "blinds":
+                numbers = re.findall(r"\d+", " ".join(parts[1:]))    # `blinds 200 400` / `blinds 200/400`
+                if len(numbers) != 2 or int(numbers[0]) <= 0 or int(numbers[0]) > int(numbers[1]):
+                    print("使い方: blinds <SB> <BB>（例: blinds 200 400）")
+                    continue
+                sb, bb = int(numbers[0]), int(numbers[1])
+                audio_q.put(AudioEvent(
+                    action="set_blinds", amount=bb, timestamp=_time.time(), raw_text=f"{sb}/{bb}",
+                ))
+                print(f"ブラインド {sb}/{bb} を送信しました（次のハンドから）")
+            elif cmd == "ante":
+                # BB アンティ（BB の人が BB と同額のアンティ）。入れたら以後ずっと、BB を変えればアンティも変わる
+                choice = parts[1].lower() if len(parts) >= 2 else ""
+                if choice not in ("on", "off"):
+                    print("使い方: ante on（BB アンティを入れる）/ ante off（外す）")
+                    continue
+                audio_q.put(AudioEvent(
+                    action="set_bb_ante", amount=0, timestamp=_time.time(), raw_text=choice,
+                ))
+            elif cmd == "rr":
+                # 読み取り装置の再起動（契約 v1.11 §6）。卓に札が無くなったら RFID のスレッドが送る（結果は ● で出る）
+                if rfid_thread is None or not hasattr(rfid_thread, "request_restart"):
+                    print("RFID のリーダー（PC/SC）を使っていないので再起動できません")
+                else:
+                    rfid_thread.request_restart()
+                    print("読み取り装置の再起動を頼みました（卓に札が無いときに送ります）")
+            elif cmd in ("cb", "cs") and len(parts) >= 2:
+                # ミスディール訂正（ADR-0054）。状態変更は他と同じく queue 経由。
+                try:
+                    key = int(parts[1])
+                except ValueError:
+                    print(f"使い方: {cmd} <{'位置' if cmd == 'cb' else '席番号'}>")
+                    continue
+                if cmd == "cb":
+                    audio_q.put(AudioEvent(
+                        action="correct_board", amount=key, timestamp=_time.time(),
+                        raw_text=f"ボード{key} 訂正",
+                    ))
+                    print(f"ボード {key} 枚目の取り消しを送信しました（正しいカードを置いてください）")
+                else:
+                    audio_q.put(AudioEvent(
+                        action="correct_seat", amount=0, timestamp=_time.time(),
+                        raw_text=f"シート{key} 訂正", seat=key,
+                    ))
+                    print(f"席 {key} の札の読み直しを送信しました（正しいカードを置き直してください）")
             else:
-                print("不明なコマンドです。q / n / w <席> / r <席> <金額>")
+                # 上のコマンド以外は **ディーラーのアナウンスとして解釈**する（マイク無しで
+                # アクションを投入する経路。音声と同じ `parse_actions` を通すので語彙は共通 =
+                # 二重管理にならない）。例: 「チェック」「シート3 コール」「ベット 500」。
+                # キーボード入力は ASR ではなく操作者の意図的な入力なので信頼度 1.0 を明示する
+                # （None は「Whisper 欠測」の意味で保守的既定 0.5 = 要レビューに倒れる, ADR-0047 B3）。
+                # 続けて打った複数のアクション（「フォールド フォールド コール」）は順に分ける（ADR-0061）
+                events = parse_actions(line, confidence=1.0)
+                if not events:
+                    print("認識できません。コマンド: q / n / w <席> / r <席> <金額> / d <席> <金額> / ante on|off、"
+                          "または読み上げ文（例: チェック / シート3 コール / ベット 500 / 600）")
+                for ev in events:
+                    audio_q.put(ev)
+                    print(f"  → {describe_event(ev)}")
 
     except (KeyboardInterrupt, EOFError):
         pass
     finally:
         stop_event.set()
-        audio_thread.join(timeout=3)
+        if audio_thread is not None:
+            audio_thread.join(timeout=3)
         integration_thread.join(timeout=3)
         if camera_thread is not None:
             camera_thread.join(timeout=3)
         if rfid_thread is not None:
             rfid_thread.join(timeout=3)
+        if control_thread is not None:
+            control_thread.join(timeout=3)
+        if session_repo is not None:
+            _close_session_layer(session_repo, session_id)
         print(f"\nセッション終了。ログ保存先: {json_writer.path}")
 
 
@@ -261,7 +1064,6 @@ def run_gui() -> None:
     from core.config import load_config
     from core.event_queue import make_audio_queue
     from core.game_state import PlayerState
-    from audio.recorder import AudioThread
     from integration.engine import IntegrationThread
     from output.json_writer import JsonWriter
     from gui.dashboard import GUIDashboard
@@ -280,7 +1082,10 @@ def run_gui() -> None:
         PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
         for p in session_cfg["players"]
     ]
-    game_state = _make_game_state(cfg, players, session_cfg["sb"], session_cfg["bb"])
+    game_state = _make_game_state(
+        cfg, players, session_cfg["sb"], session_cfg["bb"],
+        button_seat=session_cfg.get("button_seat"),
+    )
 
     # E3 (ADR-0008 / ISSUE-0006): session レイヤ接続。既定 off では従来どおり timestamp session_id。
     session_layer_enabled = cfg.get("session_layer", {}).get("enabled", False)
@@ -298,13 +1103,13 @@ def run_gui() -> None:
     else:
         session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + "_session1"
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
+    json_writer.ensure_created()
 
     audio_q = make_audio_queue()
     stop_event = threading.Event()
     camera_q = None
     rfid_q = None
 
-    audio_cfg = cfg.get("audio", {})
     cam_cfg = cfg.get("camera", {})
     rfid_cfg = cfg.get("rfid", {})
 
@@ -319,14 +1124,13 @@ def run_gui() -> None:
         session_layer_enabled=session_layer_enabled,
     )
 
-    audio_thread = AudioThread(
-        audio_queue=audio_q,
-        device_id=audio_cfg.get("device_id", 0),
-        sample_rate=audio_cfg.get("sample_rate", 16000),
-        model_size=audio_cfg.get("whisper_model", "medium"),
-        language=audio_cfg.get("language", "ja"),
-        stop_event=stop_event,
-    )
+    listen_gate = _make_listen_gate(cfg)
+    audio_cfg = cfg.get("audio", {})
+    second_ear = _load_second_ear(audio_cfg) if audio_cfg.get("enabled", True) else None
+    audio_thread = _make_audio_thread(cfg, audio_q, stop_event, listen_gate=listen_gate, second_ear=second_ear)
+    if audio_thread is None:
+        print("音声入力は無効です (audio.enabled=false)。"
+              "アクションはキーボードから読み上げ文で投入してください。")
 
     camera_thread = None
     if cam_cfg.get("roi"):
@@ -362,12 +1166,22 @@ def run_gui() -> None:
             )
         else:
             from rfid.reader_thread import RFIDThread
+            # CLI 経路と同じく canonical PC/SC は pcsc_readers (list) を使う。readers (dict) は
+            # HTTP 用なので list でない場合は空にフォールバックする（ADR-0034 / 契約 §4）。
+            pcsc_readers = rfid_cfg.get("pcsc_readers", rfid_cfg.get("readers", []))
+            if not isinstance(pcsc_readers, list):
+                pcsc_readers = []
+            rfid_source = _make_rfid_source(rfid_cfg)
             rfid_thread = RFIDThread(
                 rfid_queue=rfid_q,
                 card_master=card_master,
-                reader_configs=rfid_cfg.get("readers", []),
+                reader_configs=pcsc_readers,
                 poll_interval_ms=rfid_cfg.get("poll_interval_ms", 100),
                 stop_event=stop_event,
+                bridge_factory=rfid_source.bridge,
+                reader_present=rfid_source.present,
+                **_rfid_tracking_kwargs(rfid_cfg),
+                **_rfid_device_kwargs(rfid_cfg, rfid_source),
             )
 
     # HTTP transport の場合、rfid_receiver を GUI に渡してステータス表示する
@@ -375,6 +1189,19 @@ def run_gui() -> None:
         dash._rfid_receiver = rfid_thread
 
     event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
+    # 新ハンドで RFID の board 位置もリセットする（engine の board と同じ同期点。
+    # 片方だけが番号を振り直すと同じ札が 2 か所に出る, ISSUE-0026）。
+    # 新ハンドは board 位置 + マック観測をまとめてリセットする（ADR-0026 / ADR-0055）。
+    on_new_hand = (
+        getattr(rfid_thread, "reset_for_new_hand", None)
+        or getattr(rfid_thread, "reset_board_positions", None)
+    ) if rfid_thread else None
+    on_card_correction = _make_card_correction_hook(rfid_thread)
+    seat_absent_since = getattr(rfid_thread, "seat_cards_absent_since", None) if rfid_thread else None
+    seat_presence = getattr(rfid_thread, "presence_snapshot", None) if rfid_thread else None
+    board_presence = getattr(rfid_thread, "board_presence", None) if rfid_thread else None
+    table_state_writer = _make_table_state_writer(cfg, session_cfg["log_dir"], session_id)
+
     integration_thread = IntegrationThread(
         audio_queue=audio_q,
         game_state=game_state,
@@ -386,7 +1213,17 @@ def run_gui() -> None:
         stop_event=stop_event,
         event_recorder=event_recorder,
         session_repo=session_repo,
+        on_new_hand=on_new_hand,
+        on_card_correction=on_card_correction,
+        seat_cards_absent_since=seat_absent_since,
+        seat_presence=seat_presence,
+        rfid_folds=_rfid_folds_enabled(cfg, seat_presence),
+        board_presence=board_presence,
+        table_state_writer=table_state_writer,
         control_conf_threshold=cfg.get("engine", {}).get("control_conf_threshold", 0.0),
+        listen_gate=listen_gate,
+        live_hand=True,        # 手札を配ったときから進行中のハンドを真のアクション入力の画面へ
+        **_auto_hand_kwargs(cfg, audio_thread),
     )
 
     dash.start_threads(
@@ -410,6 +1247,7 @@ def run_gui() -> None:
             audio_queue=audio_q,
             stop_event=stop_event,
             poll_interval_ms=cfg.get("hand_control", {}).get("poll_interval_ms", 200),
+            pending_before=audio_thread.pending_before if audio_thread is not None else None,
         )
         control_thread.start()
         print(f"hand 遠隔制御を有効化しました: {control_log.path}（staff iPad から操作可）")
@@ -418,7 +1256,8 @@ def run_gui() -> None:
 
     # mainloop 終了後のクリーンアップ
     stop_event.set()
-    audio_thread.join(timeout=3)
+    if audio_thread is not None:
+        audio_thread.join(timeout=3)
     integration_thread.join(timeout=3)
     if camera_thread is not None:
         camera_thread.join(timeout=3)
@@ -483,6 +1322,17 @@ def run_ledger_view() -> None:
         print("customtkinter が見つかりません。pip install customtkinter でインストールしてください。")
         sys.exit(1)
 
+    from core.store_lock import StoreWriterLock, describe_holder
+
+    # 会計を書くのは 1 プロセスだけ（ADR-0065）。店舗サーバー（--serve, 自動起動）が動いていれば
+    # 会計はスタッフ用画面（iPad の /staff/）で操作する。
+    writer_lock = StoreWriterLock()
+    if not writer_lock.acquire("ledger"):
+        print(f"会計を書くプロセスが既に動いています: {describe_holder(writer_lock.holder())}。\n"
+              "店舗サーバーが動いているときは、会計・注文の操作は iPad のスタッフ用画面"
+              "（http://<この PC の IP>:8788/staff/）で行ってください。")
+        sys.exit(1)
+
     cfg = load_config()
     players = PlayerRepository()
     sessions = SessionRepository(player_repo=players)
@@ -497,21 +1347,18 @@ def run_ledger_view() -> None:
     if api_cfg.get("enabled", False):
         try:
             import uvicorn
-            from api.server import auth_kwargs_from_config, create_app
+            from api.server import STAFF_WEB_DIR, STAFF_WEB_PATH
+            from api.store_server import create_store_app
         except ImportError:
             print("viewer_api.enabled=true ですが fastapi/uvicorn が未導入のため "
                   "API なしで起動します（pip install \".[api]\"）。")
         else:
             bind_host = api_cfg.get("bind_host", "127.0.0.1")
             bind_port = api_cfg.get("bind_port", 8788)
-            app = create_app(
-                players, sessions,
-                cfg.get("session", {}).get("log_dir", "./logs"),
+            # 店舗サーバー（--serve）と同じ API・同じ画面（お客さん /・スタッフ /staff/, ADR-0059/0064/0065）
+            app = create_store_app(
+                cfg, player_repo=players, session_repo=sessions,
                 ledger_repo=ledger, order_repo=order_repo, menu=menu,
-                orders_writable=True,
-                staff_token=api_cfg.get("staff_token") or None,
-                buyin_presets=buyin_presets,
-                **auth_kwargs_from_config(api_cfg),  # L1 PIN, ADR-0027
             )
             api_server = uvicorn.Server(uvicorn.Config(
                 app, host=bind_host, port=bind_port, log_level="warning"))
@@ -520,6 +1367,8 @@ def run_ledger_view() -> None:
             api_thread.start()
             print(f"viewer API を組み込み起動しました: http://{bind_host}:{bind_port} "
                   "（注文リクエスト受付 有効）")
+            if (STAFF_WEB_DIR / "index.html").is_file():
+                print(f"スタッフ用画面（iPad）: http://<この PC の IP>:{bind_port}{STAFF_WEB_PATH}/")
 
     win = LedgerViewWindow(
         ledger_repo=ledger, session_repo=sessions, player_repo=players,
@@ -530,10 +1379,27 @@ def run_ledger_view() -> None:
     if api_server is not None:
         api_server.should_exit = True
         api_thread.join(timeout=3)
+    writer_lock.release()
 
 
-def run_viewer_api() -> None:
-    """Phase M1: player 向け読み取り専用 viewer API を起動する (ADR-0017)。"""
+def run_store_server(host: str | None = None, port: int | None = None) -> None:
+    """店舗サーバー（画面なし, ADR-0065）: 会計の書き手の API + 卓モニタ。サインイン時に自動で動かす。"""
+    from core.config import load_config
+
+    try:
+        from api.store_server import run_store_server as _run
+    except ImportError:
+        print("fastapi/uvicorn が見つかりません。pip install \".[api]\" でインストールしてください。")
+        sys.exit(1)
+    sys.exit(_run(load_config(), host=host, port=port))
+
+
+def run_viewer_api(host: str | None = None, port: int | None = None) -> None:
+    """Phase M1: player 向け読み取り専用 viewer API を起動する (ADR-0017)。
+
+    お客さん向け画面（mobile/ の web 版）も同じポートの `/` で配信する（ADR-0059）。
+    `host` / `port` は config の `viewer_api.bind_host` / `bind_port` より優先する。
+    """
     from core.config import load_config
 
     try:
@@ -544,11 +1410,12 @@ def run_viewer_api() -> None:
 
     cfg = load_config()
     api_cfg = cfg.get("viewer_api", {})
-    print(
-        f"Viewer API を起動します: http://{api_cfg.get('bind_host', '127.0.0.1')}:"
-        f"{api_cfg.get('bind_port', 8788)}/api/health (Ctrl+C で終了)"
-    )
-    run_server(cfg)
+    shown_host = host or api_cfg.get("bind_host", "127.0.0.1")
+    shown_port = port or api_cfg.get("bind_port", 8788)
+    print(f"Viewer API を起動します: http://{shown_host}:{shown_port}/api/health (Ctrl+C で終了)")
+    if shown_host == "0.0.0.0":
+        print(f"お客さんのスマホからは http://<この PC の IP アドレス>:{shown_port}/ を開きます")
+    run_server(cfg, host=host, port=port)
 
 
 def export_ledger(out_dir: str) -> None:
@@ -585,6 +1452,11 @@ def export_phh(json_path: str) -> None:
         sys.exit(1)
 
     data = json.loads(src.read_text(encoding="utf-8"))
+    # 記録の本体 = ライブの記録 ⊕ 推定（ADR-0056 D1）。推定のファイルが隣にあれば重ねる。
+    from core.hand_estimate import load_estimates, overlay_log
+
+    if src.name.endswith(".json") and src.stem.count(".") == 0:
+        data = overlay_log(data, load_estimates(src.parent, src.stem))
     hands_raw = data.get("hands", [])
     if not hands_raw:
         print("ハンドデータがありません。")
@@ -633,6 +1505,26 @@ def export_phh(json_path: str) -> None:
         print(f"  {p}")
 
 
+def _route_logs_to_file(path: str) -> None:
+    """ログの出力先を端末からファイルへ切り替える（ISSUE-0034）。
+
+    `--cli` は 1 つの端末で「入力プロンプト」と「別スレッドのログ」を共有しているため、
+    RFID の検出ログがタイプ中の行に割り込むとコマンドが壊れる（実機で `w 1` が通らなかった）。
+    卓の状態は `tools/table_monitor.py` で見られるので、ログは落としてしまってよい。
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    handler = logging.FileHandler(p, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(threadName)s] %(levelname)s %(name)s: %(message)s"
+    ))
+    root.addHandler(handler)
+    print(f"ログは {p} に出します（端末には出ません）。")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ポーカーハンドロガー")
     parser.add_argument(
@@ -677,7 +1569,54 @@ def main() -> None:
         action="store_true",
         help="player 向け読み取り専用 viewer API を起動する（Phase M1, ADR-0017, 要 [api] extra）",
     )
+    parser.add_argument(
+        "--host",
+        help="--viewer-api / --serve の待ち受けアドレス（config の viewer_api.bind_host / "
+             "store_server.bind_host より優先。店舗の LAN に出すなら 0.0.0.0, ADR-0059）",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        help="--viewer-api / --serve の待ち受けポート（config の viewer_api.bind_port / "
+             "store_server.bind_port より優先）",
+    )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="いま動いている版（リリース版 / 開発版・ブランチ・コミット）を表示して終わる（ADR-0066）",
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="店舗サーバー（画面なし, ADR-0065）: 会計の書き手の API（お客さん向け画面 / スタッフ用画面 /staff/ / "
+             "注文）+ 卓モニタ。サインイン時に installer/store_server_task.ps1 で自動起動する。"
+             "--host / --port は config の store_server より優先。ログは logs/store_server.log",
+    )
+    parser.add_argument(
+        "--log-file",
+        metavar="PATH",
+        nargs="?",
+        const="logs/pokerapp.log",
+        help="ログを端末ではなくファイルへ出す（既定 logs/pokerapp.log）。"
+             "--cli では RFID の検出ログが入力行に割り込んでコマンドが壊れるため、"
+             "実機テスト時はこれを付ける（卓の状態は tools/table_monitor.py で見る, ISSUE-0034）",
+    )
+    parser.add_argument(
+        "--script",
+        metavar="KIND",
+        help="--cli を台本のハンドで起動する（テスト方針 週 1）: voice = 声だけの台本（RFID なし、voice:8 で 8 人）/ "
+             "cards = 札の確認（席 4・5・6）/ 台本のファイル。卓の設定は入力しない。"
+             "台本は真のアクション入力の画面の「台本」（:8791/script）に出る",
+    )
     args = parser.parse_args()
+
+    if args.version:
+        from core.version import describe
+        print(describe())
+        return
+
+    if args.log_file:
+        _route_logs_to_file(args.log_file)
 
     # 起動時バックアップ（B2 / v1.0 ローンチレビュー）。会計データ消失の最大リスク対策。
     # best-effort: 失敗してもアプリ起動は止めない。config.backup.on_startup=false で無効化可。
@@ -703,8 +1642,12 @@ def main() -> None:
         export_ledger(args.export_ledger)
         sys.exit(0)
 
+    if args.serve:
+        run_store_server(host=args.host, port=args.port)
+        return
+
     if args.viewer_api:
-        run_viewer_api()
+        run_viewer_api(host=args.host, port=args.port)
         sys.exit(0)
 
     if args.sessions:
@@ -724,7 +1667,10 @@ def main() -> None:
         sys.exit(0)
 
     if args.cli:
-        run_cli()
+        run_cli(script=args.script)
+    elif args.script:
+        print("--script は --cli と一緒に使います（例: python main.py --cli --log-file --script voice）")
+        sys.exit(2)
     else:
         run_gui()
 

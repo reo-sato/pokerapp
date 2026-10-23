@@ -219,6 +219,41 @@ def test_board_order_insensitive():
     assert result.board_accuracy == 1.0
 
 
+def test_board_saved_mid_hand_is_not_a_mismatch():
+    """進行中のハンドを途中で保存した真のアクションのボード（記録のボードの頭）は合う（店舗 2026-10-06）。"""
+    full = ["3d", "5h", "2s", "5c"]
+    for saved in (["3d", "5h", "2s"], ["5h", "3d", "2s"]):
+        gt = _gt_hand(board=saved)
+        captured = _captured_hand(gt)
+        captured["board"] = list(full)
+        assert measure_hand(gt, captured).board_match is True
+    gt = _gt_hand(board=["3d", "5h", "9c"])          # 入れた札が記録と違えば合わない
+    captured = _captured_hand(gt)
+    captured["board"] = list(full)
+    assert measure_hand(gt, captured).board_match is False
+
+
+def test_board_accuracy_counts_only_entered_boards():
+    entered = _gt_hand(hand_id=1)
+    empty = _gt_hand(hand_id=2, board=[])
+    cap_empty = _captured_hand(empty)
+    cap_empty["board"] = ["As", "Kc", "Qd"]
+    result = measure_session(_session([_captured_hand(entered), cap_empty]), _gt_session([entered, empty]))
+    assert result.board_accuracy == 1.0
+
+
+def test_excluded_hand_is_not_counted():
+    """「評価から外す」のハンドは数えない（記録だけにあるハンドにもしない, オーナーのメモ 2026-10-06）。"""
+    good = _gt_hand(hand_id=1)
+    bad = _gt_hand(hand_id=2, actions=[{"street": "preflop", "seat": 2, "action": "fold", "amount": 0}])
+    bad["excluded"] = True
+    captured_bad = _captured_hand(_gt_hand(hand_id=2))
+    result = measure_session(_session([_captured_hand(good), captured_bad]), _gt_session([good, bad]))
+    assert result.action_accuracy == 1.0
+    assert [h.hand_id for h in result.per_hand] == [1]
+    assert result.phantom_hands == []
+
+
 def test_hole_cards_none_in_gt_not_counted():
     gt = _gt_hand(players=[
         {"seat": 2, "hole_cards": ["Ah", "Ad"], "showed_down": True},
@@ -446,3 +481,53 @@ def test_g6_missed_action_counts_once():
     result = measure_session(_session([captured]), _gt_session([gt]))
 
     assert result.action_accuracy == 2 / 3
+
+
+def test_allin_equals_a_call_bet_or_raise_of_the_same_amount():
+    """持ち点を全部出すコール（オールインになるコール）を、真のアクションが「オールイン」、記録が「コール」で書いても
+    同じ額なら一致（店舗 9d1d8536 ハンド 3 で不一致に数えていた, 2026-09-30）。額が違えば別のアクション。"""
+    from tools.measure_capture_accuracy import same_action_type
+
+    gt = _gt_hand(actions=[
+        {"street": "preflop", "seat": 2, "action": "raise", "amount": 600},
+        {"street": "preflop", "seat": 4, "action": "allin", "amount": 3400},
+        {"street": "preflop", "seat": 2, "action": "allin", "amount": 9000},
+    ])
+    cap = _gt_hand(actions=[
+        {"street": "preflop", "seat": 2, "action": "raise", "amount": 600},
+        {"street": "preflop", "seat": 4, "action": "call", "amount": 3400},
+        {"street": "preflop", "seat": 2, "action": "raise", "amount": 9000},
+    ])
+    acc = measure_hand(gt, cap)
+    assert (acc.action_correct, acc.action_total) == (3, 3)
+    assert same_action_type("allin", "call", 3400, 3400) and same_action_type("bet", "allin", 500, 500)
+    assert not same_action_type("allin", "call", 3400, 400)
+    assert not same_action_type("allin", "fold", 0, 0) and not same_action_type("allin", "check", 0, 0)
+
+
+def test_a_row_of_another_seat_or_street_is_not_correct():
+    """アライメントの置き換えの区間で並んだ行は、種類と額が同じでも別の人・別のストリートなら誤り（店舗 a6ee12e4
+    ハンド 1: 真のアクション「席5 フォールド」と記録「席4 フォールド」を一致に数えていた, 2026-09-30）。
+    ストリートの無い真のアクションの行は、ストリートを比べない。"""
+    from tools.measure_capture_accuracy import row_correct
+
+    gt = _gt_hand(actions=[
+        {"street": "preflop", "seat": 2, "action": "raise", "amount": 600},
+        {"street": "preflop", "seat": 4, "action": "call", "amount": 400},
+        {"street": "flop", "seat": 4, "action": "check", "amount": 0},
+        {"seat": 2, "action": "fold", "amount": 0},
+    ])
+    cap = _gt_hand(actions=[
+        {"street": "preflop", "seat": 2, "action": "raise", "amount": 600},
+        {"street": "preflop", "seat": 4, "action": "call", "amount": 400},
+        {"street": "turn", "seat": 4, "action": "check", "amount": 0},
+        {"street": "showdown", "seat": 4, "action": "fold", "amount": 0},
+    ])
+    acc = measure_hand(gt, cap)
+    assert (acc.action_correct, acc.action_total) == (2, 4)
+    assert (acc.action_type_correct, acc.action_amount_correct) == (2, 2)
+    fold = {"seat": 2, "action": "fold", "amount": 0}
+    assert row_correct(fold, {"street": "showdown", "seat": 2, "action": "fold", "amount": 0})
+    assert not row_correct(fold, {"street": "showdown", "seat": 4, "action": "fold", "amount": 0})
+    assert not row_correct({"street": "flop", "seat": 4, "action": "check", "amount": 0},
+                           {"street": "turn", "seat": 4, "action": "check", "amount": 0})

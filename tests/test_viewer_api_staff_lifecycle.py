@@ -235,6 +235,56 @@ def test_hand_control_appends_commands(env: dict, tmp_path: Path):
     assert ei.value.code == "invalid_control"
 
 
+def test_hand_control_misdeal_corrections(env: dict, tmp_path: Path):
+    """ミスディール訂正も同じ control queue で送れる（ADR-0054）。"""
+    from core.control_queue import ControlCommandLog
+
+    staff = env["staff"]
+    sid = staff.create_session(label="Misdeal")["session_id"]
+
+    assert staff.send_control(sid, "correct_board", index=3)["type"] == "correct_board"
+    assert staff.send_control(sid, "correct_seat", seat=2)["type"] == "correct_seat"
+
+    log = ControlCommandLog(tmp_path / "logs" / f"{sid}.control.jsonl")
+    cmds, _ = log.read_from(0)
+    assert [c.type for c in cmds] == ["correct_board", "correct_seat"]
+    assert cmds[0].args == {"index": 3}
+    assert cmds[1].args == {"seat": 2}
+
+    for kwargs in ({}, {"index": 0}, {"index": 6}):
+        with pytest.raises(ViewerApiError) as ei:
+            staff.send_control(sid, "correct_board", **kwargs)
+        assert ei.value.code == "invalid_control"
+    with pytest.raises(ViewerApiError) as ei:
+        staff.send_control(sid, "correct_seat")
+    assert ei.value.code == "invalid_control"
+
+
+def test_hand_control_blinds_and_seats(env: dict, tmp_path: Path):
+    """ブラインドの変更・席の参加と休みも control queue で送れる（次のハンドから, 2026-09-26）。"""
+    from core.control_queue import ControlCommandLog
+
+    staff = env["staff"]
+    sid = staff.create_session(label="Blinds")["session_id"]
+
+    assert staff.send_control(sid, "set_blinds", sb=200, bb=400)["args"] == {"sb": 200, "bb": 400}
+    assert staff.send_control(sid, "sit_out", seat=3)["args"] == {"seat": 3}
+    assert staff.send_control(sid, "sit_in", seat=3)["type"] == "sit_in"
+    assert staff.send_control(sid, "set_button", seat=6)["args"] == {"seat": 6}
+
+    log = ControlCommandLog(tmp_path / "logs" / f"{sid}.control.jsonl")
+    cmds, _ = log.read_from(0)
+    assert [c.type for c in cmds] == ["set_blinds", "sit_out", "sit_in", "set_button"]
+
+    for kwargs in ({}, {"sb": 400, "bb": 200}, {"sb": 0, "bb": 200}):
+        with pytest.raises(ViewerApiError) as ei:
+            staff.send_control(sid, "set_blinds", **kwargs)
+        assert ei.value.code == "invalid_control"
+    with pytest.raises(ViewerApiError) as ei:
+        staff.send_control(sid, "sit_out")
+    assert ei.value.code == "invalid_control"
+
+
 # ――― 認可 ―――
 
 def test_authz_for_new_endpoints(tmp_path: Path):

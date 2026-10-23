@@ -5,6 +5,7 @@ import type { ViewerRepository } from "../api/repository";
 import type { ActionRecord, PlayerSessionSummary } from "../api/types";
 import { ViewerApiError } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
+import { recordedAmount, shownAmount, streetFlow } from "../shared/hand_replay/handReplayModel";
 import { BackLink, ErrorView, Loading, styles } from "./common";
 
 interface Props {
@@ -48,15 +49,28 @@ export function CorrectionScreen({ repository, session, handId, onBack }: Props)
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [statusError, setStatusError] = useState(false);
+  // 金額はトータルで見せて入力も受ける (コールもそのストリートで出した合計, オーナー 2026-09-29)
+  const flow = hand ? streetFlow(hand) : [];
+  const shownOf = (i: number, a: ActionRecord) => shownAmount({ ...a, total: flow[i]?.total }) ?? 0;
 
   const beginEdit = (i: number, a: ActionRecord) => {
     setEditingIndex(i);
     setDraftAction(a.action);
-    setDraftAmount(String(a.amount ?? 0));
+    setDraftAmount(String(shownOf(i, a)));
     setStatus(null);
   };
 
   const submit = async (i: number, current: ActionRecord) => {
+    const typed = parseInt(draftAmount, 10);
+    // 記録のコールは追加額: 前に出していた額を引いて戻す
+    const amt = Number.isFinite(typed) && typed >= 0
+      ? recordedAmount(draftAction || current.action, typed, flow[i]?.prior)
+      : undefined;
+    if (Number.isFinite(typed) && typed >= 0 && amt === undefined) {
+      setStatusError(true);
+      setStatus(`コールの額はこのストリートの合計です（${flow[i]?.prior} 以上）。`);
+      return;
+    }
     setBusy(true);
     setStatus(null);
     try {
@@ -67,8 +81,7 @@ export function CorrectionScreen({ repository, session, handId, onBack }: Props)
         });
         applied += 1;
       }
-      const amt = parseInt(draftAmount, 10);
-      if (Number.isFinite(amt) && amt >= 0 && amt !== (current.amount ?? 0)) {
+      if (amt !== undefined && amt !== (current.amount ?? 0)) {
         await repository.addHandCorrection(session.session_id, handId, {
           field: "amount", new_value: amt, action_index: i,
         });
@@ -114,7 +127,7 @@ export function CorrectionScreen({ repository, session, handId, onBack }: Props)
                     [{a.street}] 席{a.seat} {a.player_name}
                   </Text>
                   <Text style={styles.cardMeta}>
-                    {a.action}{a.amount ? ` ${a.amount}` : ""}
+                    {a.action}{shownOf(i, a) ? ` ${shownOf(i, a)}` : ""}
                     {a.needs_review ? "  ・ ⚠ 要確認" : ""}
                     {corrected ? "  ・ ✎ 訂正済" : ""}
                   </Text>
@@ -144,6 +157,7 @@ export function CorrectionScreen({ repository, session, handId, onBack }: Props)
                         keyboardType="number-pad"
                         editable={!busy}
                       />
+                      <Text style={styles.cardMeta}>金額はトータル（コールもこのストリートで出した合計）</Text>
                       <View style={local.row}>
                         <Pressable
                           style={[local.btn, busy && local.btnOff]}

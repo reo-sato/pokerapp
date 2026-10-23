@@ -144,4 +144,4 @@ client secret・サーバ側トークン検証**を要し、現行の **LAN 限�
 ## Supersedes / Superseded by
 
 - Supersedes: —（ADR-0028 §D7 が委譲した運用判断を確定。関連: ADR-0028 / ADR-0025 / ADR-0022 / ADR-0020）
-- Superseded by: —
+- Superseded by: ADR-0063（D2 ホスティングのみ。Cloud Run 東京 + マネージド Postgres 東京に置き換え。D1・D3〜D6 は ADR-0063 が引き継ぐ）

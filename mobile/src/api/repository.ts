@@ -35,13 +35,19 @@ export interface ViewerRepository {
    * 変更は current_pin が必要（player_auth=off は player_auth_disabled で reject）。
    */
   setPin(playerId: string, pin: string, currentPin?: string): Promise<void>;
+  /**
+   * 店でもらった閲覧リンク（URL の `#link=` の後ろ）で入る（クラウド, ADR-0067 D5）。
+   * 使えないリンクは invalid_link で reject。成功すると以後の読み取りにトークンを付ける。
+   */
+  linkLogin(link: string): Promise<AuthSession>;
   /** 現在の principal (ログイン済み player_id) / 未ログインは null。 */
   currentPrincipal(): string | null;
   /** トークンを破棄する (ログアウト / player 切替時)。 */
   clearAuth(): void;
   listPlayerSessions(playerId: string): Promise<PlayerSessionSummary[]>;
   listPlayerHands(playerId: string, sessionId: string): Promise<HandSummary[]>;
-  getHand(sessionId: string, handId: number): Promise<HandSummary>;
+  /** playerId = 見ている人（手札の公開範囲 own_and_shown で自分の手札を出すため, ADR-0067 D6）。 */
+  getHand(sessionId: string, handId: number, playerId?: string): Promise<HandSummary>;
   /** 会計参照 (ADR-0016 ledger): 自分の会計参照（entries + 中間集計, read-only）。 */
   getPlayerLedger(playerId: string, sessionId: string): Promise<PlayerSessionLedger>;
   /** M5 (ADR-0018): 注文メニュー / 自分のリクエスト一覧 / 注文リクエスト送信。

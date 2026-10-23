@@ -80,8 +80,30 @@ schema を変更する PR は、同じ PR で以下を更新する（漏れは c
 | 5b | order_request / player_session_summary | viewer (M1/M5) | **frozen `1.0`（ADR-0019。ADR-0017/0018）** |
 | 6 | repository / service interface | S5 | **frozen（ADR-0020）**。read boundary は二言語で実証（mobile `ViewerRepository` + Python `ViewerApiClient`）。write/sync 拡張は後続 ADR |
 
-> hand / action schema も `1.0` frozen（ISSUE-0011）。**全 domain schema + repository interface が
-> frozen**。残るのは write/sync 拡張（双方向同期, S5 後続）のみ。
+> hand / action schema も `1.0` frozen（ISSUE-0011）。以後の bump はすべて **optional フィールドの
+> 追加 = additive**（required も既存フィールドの意味も不変）:
+> - `action` `1.1` = `street` の意味を明文化（description のみ, ISSUE-0029）/ `1.2` = `position`（ISSUE-0032）/
+>   `1.3` = 監査フィールド `reason` / `apply_ok`（ADR-0047 G2。verify-v1 系列では `1.1` だったものを 2026-09-22 のマージで統合）/
+>   `1.4` = `raw_text`（聞き取った発話, ADR-0060）/ `1.5` = action に `end_hand`（「ハンド終了」, ADR-0062）
+> - `hand` `1.1` = `board_timeline`（ADR-0055）/ `1.2` = `button_seat` + `position_map`（ISSUE-0032）/
+>   `1.3` = `pot_awards`（ADR-0050 S7。同上）/ `1.4` = `winner_source` + `showdown`（勝者の自動判定, ADR-0062）/ `1.5` = `announced_hand` + winner_source の `announced`（ディーラーの役名, 2026-09-26）/
+>   `1.6` = board に読めなかった位置の `??`（読めた一番後ろの位置まで。フロップの 1 枚が読めずにターンが読めたとき、ターンの札をフロップに詰めない）+ winner_source の `undetermined`（ショーダウンで札が読めず、読めていない札しだいで勝者が変わる = チップを動かさない。`winner_seat` は null も可, 2026-09-29, ADR-0068 R3）/
+>   `1.7` = `showdown[].announced`（その席が見せたときにディーラーが言った役名。`announced_hand` は勝った人に言った役名, 2026-09-30, ADR-0068 R5）
+> - `reconstruction_event`（draft, 未 freeze）`0.2` = `utterance_start_ts` + `parse_flags`（ADR-0047/0048）/ `0.3` = `position`（ISSUE-0032）/ `0.4` = rfid の `replaces`（配り直しの差し替え, ADR-0058） / `0.5` = rfid の `kind`・`observed_at`（札の離脱でフォールド, 2026-09-25）/ `0.6` = audio の `hand_name`（ディーラーの役名, 2026-09-26）/ `0.7` = rfid の kind `reinterpret`（無言の連続の解釈し直し, 2026-09-26） / `0.8` = rfid の kind `spoken_fold`（「フォールド」と言われて札が残った手番の席, 2026-09-27） / `0.9` = rfid の kind `deal`・`hand_start` と `cards`（在否で決めた配布を replay で同じにする, 2026-09-27） / `0.10` = audio の parse_flags に `fuzzy_keyword`（辞書に無い書き起こしを音の近さで読んだ, ADR-0056 追記 1 の S2, 2026-09-27） / `0.11` = rfid の kind `deal_order` と `times`（手札を最初に読んだ時刻 = 配った順からボタンの置き忘れを見つける）+ audio の parse_flags に `second_ear`・`sentence_after_chatter`（2026-09-29）
+>   / `0.12` = rfid の kind `showdown_end`（ショーダウンで見せる・マックが `SHOWDOWN_MUCK_SEC` 無かった = 残った全員が見せたとして手札で決めた。`observed_at` = 期限の時刻, 2026-09-30, ADR-0068 R5）
+>   / `0.13` = audio の `amount_options`（意味のない単発の語を額の音で読んだときの額の候補）+ parse_flags に `phonetic_amount`（2026-10-01）
+>   / `0.14` = audio の `amount_scores`（額の候補ごとの音の点数 `[額, log の確からしさ]`。engine がその場面で使える額に絞り、ポットに対する大きさの重みを足して選ぶ）+ parse_flags に `legal_amount`（2026-10-01）
+>   / `0.15` = rfid の kind `spoken_fold_drop`（「フォールド」と言われたのに手番の人の札が席に残ったまま別の席の札が離れたので、その語では手番の人を降ろさないと決めた, 2026-10-06, ADR-0068 R1）
+>   / `0.16` = audio の `hit_rank`（「Nヒット」の N）+ parse_flags に `garbled_call`（「これで終わりです」= ほかの語の聞き違い, 2026-10-06, ADR-0068 R8・R9）
+>   / `0.17` = parse_flags に `before_check_around`（チェックアラウンドの直前に続けて言ったチェック。review の理由にしない）。`garbled_call` は語尾の「ド」が無い「フォール」にも付ける（2026-10-06, ADR-0068 R6）
+>   / `0.18` = parse_flags に `garbled_digits`（数のあとの意味の通らない語 = 前の数だけを額にした。10/02 から記録していたが schema に無かった = 書き忘れの補い, 2026-10-13）
+>   / `0.19` = parse_flags に `restatement`（「N 足りないから M」= 直前の賭けの額を M に言い直した。オーナーのメモ, 2026-10-14）
+>
+> 0.12〜0.19 の文言は `schemas/reconstruction_event.schema.json` の `description` から取った。
+> いまの envelope の全体は `event-replay.md` §3。
+>
+> **全 domain schema + repository interface が frozen**。残るのは write/sync 拡張（双方向同期,
+> S5 後続）のみ。
 
 ## 7. drift detection（最小方針）
 

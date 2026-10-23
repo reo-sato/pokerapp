@@ -7,7 +7,7 @@ Phase F1 (#8) — golden-fixture replay 回帰 + round-trip 決定性 (R4)。
   - events.jsonl: 記録済み reconstruction_event 列（replay 入力）
   - expected_hand.json: replay 後の HandSummary.to_dict() を正規化したもの
 
-green ケースは D1/D2a で既に正しく再構築できる挙動を固定する。silent-fold / out-of-turn-rfid は
+green ケースは D1/D2a で既に正しく再構築できる挙動を固定する。silent-fold / rfid-appear-is-not-an-action は
 D2b（fold_through 合成）、unequal-allin は F3（side-pot 連携）で fixtures + 実装を追加する。
 """
 from __future__ import annotations
@@ -35,12 +35,13 @@ GREEN_CASES = [
     "check-facing-bet",      # D1/D2a: 非合法 check → call + review
     "call-amount-from-state",  # D1/D2a: heard 額無視 → state の call 額
     "silent-fold",           # D2b: 明示席へ向け中間席を fold 合成（audio 駆動）
-    "out-of-turn-rfid",      # D2b: RFID seat で prior を上書きし fold 合成（RFID 駆動）
+    "rfid-appear-is-not-an-action",  # ISSUE-0033: RFID の検出は actor を動かさない
     "unequal-allin",         # F3: スタック差 all-in → main/side pot を HandSummary.pots に
     "postflop-street-transition",  # RFID board でストリート遷移 + postflop アクション
     "full-ring-6max",        # 6 人卓の fold 回し + explicit seat raise
     "multi-hand-session",    # 2 ハンド連続（stack_start がブラインド post 前 = S5 の跨ぎ検証）
-    "rfid-vs-spoken-seat-conflict",  # RFID > 明示発話席 の優先順位（ADR-0009 §4）
+    "rfid-vs-spoken-seat-conflict",  # 明示発話席 > RFID（RFID の検出は actor 証拠にしない = ISSUE-0033。
+                                     #   seat3 の読みがあっても「シート1 コール」が actor を決め、3 は fold 合成）
     "camera-corroboration",  # camera 照合で confidence 向上
     "low-whisper-confidence",  # 低信頼 ASR → REVIEW_THRESHOLD 未満で needs_review
     "cap-exceeded-negative",   # SILENT_FOLD_CAP 超過 → prior 維持 + review（負例）
@@ -80,6 +81,16 @@ def test_round_trip_determinism(case: str, tmp_path: Path):
     s1 = replay_fixture(_FIXTURES / case, tmp_path)
     s2 = replay_fixture(_FIXTURES / case, tmp_path)
     assert [s.to_dict() for s in s1] == [s.to_dict() for s in s2]
+
+
+def test_actions_keep_what_was_heard():
+    """ADR-0060: 各アクションに「そのアクションになった発話」を残す。合成した fold には無い。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        summaries = replay_fixture(_FIXTURES / "silent-fold", d)
+    fold, raise_ = summaries[0].to_dict()["actions"]
+    assert fold["reason"] == "synth_silent_fold" and "raw_text" not in fold
+    assert raise_["raw_text"] == "シート1 レイズ 600"
 
 
 def test_check_facing_bet_corrected_to_call():

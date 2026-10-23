@@ -1,8 +1,8 @@
 import React, { useState } from "react";
-import { Pressable, ScrollView, Text, View } from "react-native";
+import { Image, Pressable, ScrollView, Text, View } from "react-native";
 
 import type { StaffRepository } from "../api/repository";
-import type { Player } from "../api/types";
+import type { Player, ViewerLink } from "../api/types";
 import { StaffApiError } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
 import { BackLink, Button, colors, ErrorView, Field, Loading, styles } from "./common";
@@ -14,6 +14,9 @@ function errText(err: unknown): string {
       duplicate_display_name: "その表示名は既に存在します。",
       invalid_merge: "その組み合わせでは統合できません（自己統合など）。",
       not_found: "player が見つかりません。",
+      cloud_not_linked: "この店舗はクラウドにつながっていません（店外で見るリンクは使えません）。",
+      cloud_unavailable: "クラウドにつながりません。ネットを確かめて、もう一度押してください。",
+      unknown_player: "この人はまだクラウドに届いていません。1 分ほど待ってからもう一度。",
     };
     return map[err.code] ?? err.message;
   }
@@ -39,6 +42,29 @@ export function PlayersScreen(props: {
   // merge は「統合先（survivor）を選ぶ → 吸収される側（absorbed）を選ぶ」の 2 段。
   const [mergeSurvivor, setMergeSurvivor] = useState<Player | null>(null);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  // 店外で見るための閲覧リンク（QR, ADR-0067 D5）。発行し直すと前のリンクは使えなくなる。
+  const [link, setLink] = useState<{ player: Player; link: ViewerLink } | null>(null);
+  const [linkBusy, setLinkBusy] = useState(false);
+
+  const onIssueLink = (player: Player): void => {
+    setMsg(null);
+    setLinkBusy(true);
+    repository
+      .issueViewerLink(player.player_id)
+      .then((issued) => setLink({ player, link: issued }))
+      .catch((err) => setMsg({ text: errText(err), ok: false }))
+      .finally(() => setLinkBusy(false));
+  };
+
+  const onRevokeLink = (): void => {
+    const current = link;
+    if (!current) return;
+    void run(async () => {
+      await repository.revokeViewerLink(current.link.player_id);
+      setLink(null);
+      return `${current.player.display_name} さんの閲覧リンクを取り消しました（前のリンクでは見られません）。`;
+    });
+  };
 
   const run = async (fn: () => Promise<string>): Promise<void> => {
     try {
@@ -110,6 +136,29 @@ export function PlayersScreen(props: {
         </View>
       ) : null}
 
+      {link ? (
+        <View style={[styles.card, { borderWidth: 1, borderColor: colors.accent, alignItems: "center" }]}>
+          <Text style={styles.cardTitle}>{link.player.display_name} さんの閲覧リンク</Text>
+          <Text style={[styles.cardMeta, { textAlign: "center", marginVertical: 6 }]}>
+            お客さんのスマホのカメラで読み取ってもらってください。店の外からでも自分の記録だけが見られます。
+            {"\n"}このリンクは本人以外に渡さないでください（スマホをなくしたら「取り消す」）。
+          </Text>
+          {link.link.qr_image ? (
+            <Image
+              accessibilityLabel="閲覧リンクの QR コード"
+              source={{ uri: link.link.qr_image }}
+              style={{ width: 240, height: 240, backgroundColor: "#fff", marginVertical: 8 }}
+            />
+          ) : null}
+          <Text selectable style={[styles.cardMeta, { fontSize: 11 }]}>{link.link.url}</Text>
+          <View style={[styles.row, { marginTop: 10 }]}>
+            <Button label="取り消す" kind="danger" onPress={onRevokeLink} />
+            <View style={{ width: 8 }} />
+            <Button label="閉じる" kind="ghost" onPress={() => setLink(null)} />
+          </View>
+        </View>
+      ) : null}
+
       {msg ? (
         <Text style={[styles.status, { color: msg.ok ? colors.ok : colors.neg, marginBottom: 8 }]}>
           {msg.text}
@@ -148,6 +197,12 @@ export function PlayersScreen(props: {
                       setRenameDraft(p.display_name);
                       setMsg(null);
                     }}
+                  />
+                  <View style={{ width: 8 }} />
+                  <Button
+                    label={linkBusy ? "発行中…" : "閲覧リンク (QR)"}
+                    kind="neutral"
+                    onPress={() => onIssueLink(p)}
                   />
                   <View style={{ width: 8 }} />
                   {mergeSurvivor === null ? (

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,8 +26,50 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-# staff から受け付ける制御コマンド種別（GUI/CLI の new_hand / winner / rebuy に対応）。
-VALID_CONTROL_TYPES = ("new_hand", "winner", "rebuy")
+# staff から受け付ける制御コマンド種別（GUI/CLI の new_hand / winner / rebuy / 訂正に対応）。
+# correct_board / correct_seat = ミスディール訂正（CLI の `cb` / `cs`, ADR-0054）。
+# set_blinds = ブラインドの変更（トーナメントのレベル上昇）/ sit_out・sit_in = 席の休み・参加（次のハンドから, 2026-09-26）。
+# set_button = 次のハンドのボタンを手で直す（仕様 FR-05g）。
+# script_hand = 台本のハンドを台本のボタンと持ち点で始める（`tools/test_script.py` の画面, 2026-09-30）。
+# truth_stacks = 真のアクションの収支でロガーの持ち点を直す（真のアクション入力の画面が保存したとき, 2026-10-19）。
+VALID_CONTROL_TYPES = (
+    "new_hand", "winner", "rebuy", "correct_board", "correct_seat", "set_blinds", "sit_out", "sit_in",
+    "set_button", "script_hand", "truth_stacks",
+)
+
+
+def script_hand_text(button: int, stacks: dict[int, int]) -> str:
+    """台本のハンドの開始（`script_hand`）を 1 行にする（AudioEvent の raw_text = 記録と再生に残る）。"""
+    return f"button={int(button)} stacks=" + ",".join(f"{int(s)}:{int(v)}" for s, v in sorted(stacks.items()))
+
+
+def parse_script_hand(text: str) -> tuple[Optional[int], dict[int, int]]:
+    """`script_hand_text` の逆（読めない部分は無視: ボタン None / 持ち点 空）。"""
+    button_m = re.search(r"button=(\d+)", text or "")
+    stacks: dict[int, int] = {}
+    stacks_m = re.search(r"stacks=([\d:,]+)", text or "")
+    for part in (stacks_m.group(1).split(",") if stacks_m else []):
+        seat, _, stack = part.partition(":")
+        if seat.isdigit() and stack.isdigit():
+            stacks[int(seat)] = int(stack)
+    return (int(button_m.group(1)) if button_m else None), stacks
+
+
+def truth_stacks_text(hand_id: int, results: dict[int, int]) -> str:
+    """真のアクションの収支（`truth_stacks`）を 1 行にする（AudioEvent の raw_text = 記録と再生に残る）。"""
+    return f"hand={int(hand_id)} results=" + ",".join(f"{int(s)}:{int(v)}" for s, v in sorted(results.items()))
+
+
+def parse_truth_stacks(text: str) -> tuple[Optional[int], dict[int, int]]:
+    """`truth_stacks_text` の逆（読めない部分は無視: ハンド None / 収支 空）。"""
+    hand_m = re.search(r"hand=(\d+)", text or "")
+    results: dict[int, int] = {}
+    results_m = re.search(r"results=([-\d:,]+)", text or "")
+    for part in (results_m.group(1).split(",") if results_m else []):
+        seat, _, value = part.partition(":")
+        if seat.isdigit() and re.fullmatch(r"-?\d+", value):
+            results[int(seat)] = int(value)
+    return (int(hand_m.group(1)) if hand_m else None), results
 
 
 def _now_iso() -> str:
@@ -40,22 +84,29 @@ class ControlCommand:
     type: str
     args: dict
     created_at: str
+    # 作った時刻（epoch 秒, additive）。consumer はこれより前に話し始めた発話を先に反映してから積む
+    created_ts: Optional[float] = None
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "command_id": self.command_id,
             "type": self.type,
             "args": dict(self.args),
             "created_at": self.created_at,
         }
+        if self.created_ts is not None:
+            data["created_ts"] = self.created_ts
+        return data
 
     @classmethod
     def from_dict(cls, d: dict) -> "ControlCommand":
+        ts = d.get("created_ts")
         return cls(
             command_id=d["command_id"],
             type=d["type"],
             args=dict(d.get("args") or {}),
             created_at=d.get("created_at", ""),
+            created_ts=float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else None,
         )
 
 
@@ -71,7 +122,8 @@ class ControlCommandLog:
         self.path = Path(path)
 
     def append(
-        self, type: str, args: Optional[dict] = None, clock: Callable[[], str] = _now_iso
+        self, type: str, args: Optional[dict] = None, clock: Callable[[], str] = _now_iso,
+        ts_clock: Callable[[], float] = time.time,
     ) -> ControlCommand:
         """コマンドを 1 行 append して返す。type は VALID_CONTROL_TYPES のみ。"""
         if type not in VALID_CONTROL_TYPES:
@@ -81,6 +133,7 @@ class ControlCommandLog:
             type=type,
             args=dict(args or {}),
             created_at=clock(),
+            created_ts=round(ts_clock(), 3),
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(command.to_dict(), ensure_ascii=False) + "\n"
@@ -139,6 +192,14 @@ def command_to_audio_event(command: ControlCommand, clock: Callable[[], float]):
     if t == "new_hand":
         return AudioEvent(action="new_hand", amount=0, timestamp=clock(), raw_text="")
     if t == "winner":
+        # seats（2 席以上）= 分ける（チョップ。台本のハンドの画面が送る, 2026-09-30）
+        seats = args.get("seats")
+        if isinstance(seats, list) and len(seats) >= 2 and all(
+                isinstance(s, int) and not isinstance(s, bool) for s in seats):
+            return AudioEvent(
+                action="winner", amount=0, timestamp=clock(),
+                raw_text=" ".join(f"シート{s}" for s in seats) + " チョップ", seat=seats[0],
+            )
         seat = args.get("seat")
         if not isinstance(seat, int):
             logger.warning("control winner without int seat: %r", args)
@@ -157,5 +218,54 @@ def command_to_audio_event(command: ControlCommand, clock: Callable[[], float]):
             action="rebuy", amount=amount, timestamp=clock(),
             raw_text=f"シート{seat} リバイ {amount}", seat=seat,
         )
+    if t == "correct_board":
+        # ミスディール訂正（ADR-0054）: ボード N 枚目の記録を取り消す。
+        index = args.get("index")
+        if not isinstance(index, int) or isinstance(index, bool) or not 1 <= index <= 5:
+            logger.warning("control correct_board with invalid index: %r", args)
+            return None
+        return AudioEvent(
+            action="correct_board", amount=index, timestamp=clock(),
+            raw_text=f"ボード{index} 訂正",
+        )
+    if t == "correct_seat":
+        seat = args.get("seat")
+        if not isinstance(seat, int) or isinstance(seat, bool):
+            logger.warning("control correct_seat without int seat: %r", args)
+            return None
+        return AudioEvent(
+            action="correct_seat", amount=0, timestamp=clock(),
+            raw_text=f"シート{seat} 訂正", seat=seat,
+        )
+    if t == "set_blinds":
+        sb, bb = args.get("sb"), args.get("bb")
+        if not all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in (sb, bb)) or sb > bb:
+            logger.warning("control set_blinds with invalid args: %r", args)
+            return None
+        return AudioEvent(action="set_blinds", amount=bb, timestamp=clock(), raw_text=f"{sb}/{bb}")
+    if t in ("sit_out", "sit_in", "set_button"):
+        seat = args.get("seat")
+        if not isinstance(seat, int) or isinstance(seat, bool):
+            logger.warning("control %s without int seat: %r", t, args)
+            return None
+        label = {"sit_out": "休み", "sit_in": "参加", "set_button": "ボタン"}[t]
+        return AudioEvent(action=t, amount=0, timestamp=clock(), raw_text=f"シート{seat} {label}", seat=seat)
+    if t == "script_hand":
+        button, stacks = args.get("button"), args.get("stacks")
+        if (not isinstance(button, int) or isinstance(button, bool) or not isinstance(stacks, dict)
+                or not all(str(k).isdigit() and isinstance(v, int) and v >= 0 for k, v in stacks.items())):
+            logger.warning("control script_hand with invalid args: %r", args)
+            return None
+        return AudioEvent(action="script_hand", amount=0, timestamp=clock(),
+                          raw_text=script_hand_text(button, {int(k): v for k, v in stacks.items()}))
+    if t == "truth_stacks":
+        hand_id, results = args.get("hand_id"), args.get("results")
+        if (not isinstance(hand_id, int) or isinstance(hand_id, bool) or not isinstance(results, dict)
+                or not all(str(k).isdigit() and isinstance(v, int) and not isinstance(v, bool)
+                           for k, v in results.items())):
+            logger.warning("control truth_stacks with invalid args: %r", args)
+            return None
+        return AudioEvent(action="truth_stacks", amount=0, timestamp=clock(),
+                          raw_text=truth_stacks_text(hand_id, {int(k): v for k, v in results.items()}))
     logger.warning("unknown control type: %r", t)
     return None

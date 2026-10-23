@@ -4,7 +4,7 @@
 マイク / Whisper モデルなしで、再構築パイプライン全体（parse → rules-aware engine → JSON）を
 テキストから検証するドライバ CLI。
 
-各入力行を `audio/recognizer.py:parse_action`（live の `audio/recorder.py` と同じ呼び出し）で
+各入力行を `audio/recognizer.py:parse_actions`（live の `audio/recorder.py` と同じ呼び出し）で
 `AudioEvent` 化し、`integration/replay.py:replay_events`（決定的 driver, clock 注入）に流す。
 `tools/replay_hand.py` が「記録済み events.jsonl」を replay するのに対し、本ツールは
 「ディーラーの読み上げ相当の生テキスト」から同じ live 経路（actor 推定 / 合法手射影 / silent-fold /
@@ -33,7 +33,7 @@ from pathlib import Path
 # repo ルートを import パスに追加（スクリプト直接実行のため）。
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from audio.recognizer import parse_action  # noqa: E402
+from audio.recognizer import parse_actions  # noqa: E402
 from core.events import AudioEvent  # noqa: E402
 from core.game_state import PlayerState  # noqa: E402
 from core.hand_log import HandSummary  # noqa: E402
@@ -57,12 +57,13 @@ def utterances_to_events(
         # 意図的なテキスト入力（ASR ノイズなし）なので信頼度は満点を明示する。
         # None のままだと欠測扱い（MISSING_WHISPER_CONF=0.5, ADR-0033 追記）で
         # 全アクションが needs_review になってしまう。
-        ev = parse_action(line, confidence=1.0)
-        if ev is None:
+        parsed = parse_actions(line, confidence=1.0)   # 1 行に続けて書いた複数のアクションも分ける
+        if not parsed:
             print(f"[skip] 認識できない行: {line!r}", file=sys.stderr)
             continue
-        ev.timestamp = start_ts + len(events) * step
-        events.append(ev)
+        for ev in parsed:
+            ev.timestamp = start_ts + len(events) * step
+            events.append(ev)
     return events
 
 

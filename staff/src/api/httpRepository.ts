@@ -29,7 +29,10 @@ import {
   StaffApiError,
   type StaffLedgerEntryBody,
   type StaffSeating,
+  type HoleCardVisibility,
+  type HoleCardVisibilityResult,
   type StaffSession,
+  type ViewerLink,
 } from "./types";
 
 const E = encodeURIComponent;
@@ -132,6 +135,26 @@ export class HttpStaffRepository implements StaffRepository {
       survivor_id: survivorId,
       absorbed_id: absorbedId,
     });
+  }
+
+  async getHoleCardDefault(): Promise<HoleCardVisibility> {
+    const body = await this.get<{ store_default: HoleCardVisibility }>("/api/staff/hole-card-visibility");
+    return body.store_default;
+  }
+
+  setHoleCardVisibility(
+    sessionId: string,
+    value: HoleCardVisibility | null,
+  ): Promise<HoleCardVisibilityResult> {
+    return this.send("PUT", `/api/staff/sessions/${E(sessionId)}/hole-card-visibility`, { value });
+  }
+
+  issueViewerLink(playerId: string): Promise<ViewerLink> {
+    return this.send("POST", `/api/staff/players/${E(playerId)}/viewer-link`, {});
+  }
+
+  revokeViewerLink(playerId: string): Promise<{ player_id: string; revoked: number }> {
+    return this.send("POST", `/api/staff/players/${E(playerId)}/viewer-link/revoke`, {});
   }
 
   getSeating(sessionId: string): Promise<StaffSeating> {

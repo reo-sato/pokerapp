@@ -1,0 +1,538 @@
+﻿#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Poker Hand Logger — Windows ワンステップインストーラ（店舗 PC 向け）
+
+.DESCRIPTION
+    このスクリプトがあるフォルダの親（= アプリのフォルダ）に対して次を行う。
+      1. Python 3.12 を確認（無ければ winget → python.org のサイレントインストールで導入）
+      2. venv を作成し、依存パッケージを導入（pip install -e ".[pcsc,api]"。第 2 の耳の部品 ".[ear]" は失敗しても続ける）
+      3. config.json を雛形（config_default.json）から生成（既存は上書きしない）
+      4. 音声認識モデルを先読み（任意。あとでも可）と、第 2 の耳のモデルの取得（失敗しても続ける）
+      5. デスクトップにショートカットを作成
+      6. 動作確認（import と main.py --help）
+
+    通常は install.cmd をダブルクリックすれば済む（PowerShell の実行ポリシーは .cmd 側で Bypass する）。
+
+    -Update      GitHub の zip（-Branch）を上書き展開して更新する。設定・データ・rfid_cards.json は保持。
+                 リリース版は -Branch stable（一度指定すると以後の update.cmd はそれを使う, ADR-0066）。
+                 取ってきたブランチとコミットは installer\installed.json に記録する（API の /api/health に出る）。
+                 .git があり git が使えるなら git pull --ff-only。
+    -Uninstall   ショートカットと venv を削除する（データは残す）。
+    -PrefetchModel / -SkipModel   音声認識モデルの先読みを 質問せずに 行う / 行わない。
+    -NonInteractive               質問しない（CI / 無人インストール用）。
+    -DryRun      何をするかを表示するだけで何も変更しない。
+
+    ログ: <アプリフォルダ>\install.log
+#>
+[CmdletBinding()]
+param(
+    [switch]$Update,
+    [switch]$Uninstall,
+    [switch]$PrefetchModel,
+    [switch]$SkipModel,
+    [switch]$NoShortcuts,
+    [switch]$NonInteractive,
+    [switch]$DryRun,
+    [string]$Branch = "verify-v1",
+    [string]$Commit = "",
+    [string]$Repo = "reo-sato/pokerapp",
+    [string]$PythonInstallerUrl = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe"
+)
+
+$ErrorActionPreference = "Stop"
+# Windows PowerShell 5.1 の Invoke-WebRequest は進捗表示のせいで極端に遅くなる（数十 MB で数分）ので切る。
+$ProgressPreference = "SilentlyContinue"
+# Windows PowerShell 5.1 は既定で TLS 1.2 を使わないことがある（python.org / GitHub は TLS 1.2 必須）。
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch { }
+
+# 3.12 に固定する理由: PyAudio / pyscard / ctranslate2（faster-whisper）の Windows wheel が揃っている版。
+$PythonMajorMinor = "3.12"
+$AppDir     = Split-Path -Parent $PSScriptRoot
+$VenvDir    = Join-Path $AppDir "venv"
+$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+$LogPath    = Join-Path $AppDir "install.log"
+
+# 取得元のブランチを覚える（installer\branch.txt, git 管理外）。update.cmd は -Branch を渡さないので、
+# 覚えたブランチが無いと既定の verify-v1 を取りに行き、別ブランチで入れた店舗 PC を古い版で上書きしてしまう。
+$BranchFile = Join-Path $PSScriptRoot "branch.txt"
+if ($PSBoundParameters.ContainsKey("Branch")) {
+    if (-not $DryRun) { try { Set-Content -Path $BranchFile -Value $Branch -Encoding ASCII } catch { } }
+} elseif (Test-Path $BranchFile) {
+    $saved = ([string](Get-Content -Path $BranchFile -Raw)).Trim()
+    if ($saved) { $Branch = $saved }
+}
+
+# 更新時に保持するもの（店舗固有の設定・データ）。core/backup.py のデータ一覧と揃える
+# （tests/test_installer.py が両者の整合を検査する）。
+$PreservedFiles = @(
+    "config.json", "rfid_cards.json", "menu.json",
+    "players.json", "sessions.json", "ledger.json", "order_requests.json",
+    "player_credentials.json", "auth_identity.json", "hand_corrections.json",
+    "cloud_credentials.json", "cloud_sync_state.json",
+    "install.log"
+)
+$PreservedDirs = @("venv", "logs", "backups", "models")
+
+# デスクトップに作るショートカット（表示名 → 起動する .cmd）
+$Shortcuts = @(
+    @{ Name = "ハンドロガー (CLI)";        Target = "start_logger.cmd" },
+    @{ Name = "卓モニタ (iPad から閲覧)";   Target = "start_monitor.cmd" },
+    @{ Name = "お客さん用 ハンド履歴 (スマホ)"; Target = "start_viewer.cmd" },
+    @{ Name = "真のアクション入力 (iPad から)"; Target = "start_truth.cmd" },
+    @{ Name = "台本のハンド (声だけ)";      Target = "start_script.cmd" },
+    @{ Name = "札の確認 (RFID)";           Target = "start_cards.cmd" },
+    @{ Name = "ログをまとめる (送付用)";     Target = "pack_logs.cmd" },
+    @{ Name = "ログをまとめる (音声付き・送付用)"; Target = "pack_logs_audio.cmd" },
+    @{ Name = "会計 + スマホ注文 API";      Target = "start_ledger.cmd" },
+    @{ Name = "店舗サーバー 自動起動の登録"; Target = "server_autostart.cmd" },
+    @{ Name = "RFID リーダー チェック";     Target = "rfid_check.cmd" }
+)
+
+# ───────────────────────── ユーティリティ ─────────────────────────
+
+function Write-Log {
+    param([string]$Message, [string]$Level = "INFO")
+    $line = "{0} [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
+    if (-not $DryRun) {
+        try { Add-Content -Path $LogPath -Value $line -Encoding UTF8 } catch { }
+    }
+    switch ($Level) {
+        "WARN"  { Write-Host $Message -ForegroundColor Yellow }
+        "ERROR" { Write-Host $Message -ForegroundColor Red }
+        "STEP"  { Write-Host ""; Write-Host ("== " + $Message) -ForegroundColor Cyan }
+        default { Write-Host $Message }
+    }
+}
+
+function Invoke-Checked {
+    # ネイティブコマンドを実行し、exit code が 0 でなければ throw する。
+    # stderr は端末にそのまま出す（2>&1 で success stream に混ぜると 5.1 では NativeCommandError になるため）。
+    param([string]$Exe, [string[]]$Arguments, [string]$What)
+    Write-Log ("$ " + $Exe + " " + ($Arguments -join " "))
+    if ($DryRun) { return }
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Exe @Arguments
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    if ($code -ne 0) { throw "$What に失敗しました（exit code $code）" }
+}
+
+function Get-TempDir {
+    return [System.IO.Path]::GetTempPath()
+}
+
+function Get-DesktopDir {
+    $d = [Environment]::GetFolderPath("Desktop")
+    if (-not $d) { $d = "<Desktop>" }
+    return $d
+}
+
+function Update-ProcessPath {
+    # インストーラが書いた PATH は現在のプロセスに反映されないので、レジストリから読み直す。
+    $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $user    = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = ($machine, $user, $env:Path) -join ";"
+}
+
+# ───────────────────────── Python ─────────────────────────
+
+function Get-PythonCandidates {
+    $c = @()
+    $py = Get-Command py -ErrorAction SilentlyContinue
+    if ($py) { $c += @{ Exe = $py.Source; Prefix = @("-$PythonMajorMinor") } }
+    $known = @()
+    if ($env:LOCALAPPDATA) { $known += (Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe") }
+    if ($env:ProgramFiles) { $known += (Join-Path $env:ProgramFiles "Python312\python.exe") }
+    foreach ($p in $known) { if (Test-Path $p) { $c += @{ Exe = $p; Prefix = @() } } }
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($python) { $c += @{ Exe = $python.Source; Prefix = @() } }
+    return $c
+}
+
+function Find-Python {
+    # 3.12 の python.exe の絶対パスを返す。見つからなければ $null。
+    # ESP-IDF 等の別バージョンや Microsoft Store のスタブ（exit code 9009）はここで弾かれる。
+    $wanted = "(" + $PythonMajorMinor.Replace(".", ", ") + ")"
+    $probe = "import sys; print(sys.executable) if sys.version_info[:2] == $wanted else sys.exit(1)"
+    foreach ($cand in Get-PythonCandidates) {
+        try {
+            $prev = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $arguments = @($cand.Prefix) + @("-c", $probe)
+            $out = & $cand.Exe @arguments 2>$null
+            $code = $LASTEXITCODE
+            $ErrorActionPreference = $prev
+            if ($code -eq 0 -and $out) {
+                return ([string](@($out) | Select-Object -Last 1)).Trim()
+            }
+        } catch {
+            $ErrorActionPreference = "Stop"
+        }
+    }
+    return $null
+}
+
+function Install-PythonFromPythonOrg {
+    $tmp = Join-Path (Get-TempDir) ("python-" + $PythonMajorMinor + "-installer.exe")
+    Write-Log "python.org からインストーラを取得します: $PythonInstallerUrl"
+    if ($DryRun) { return }
+    Invoke-WebRequest -Uri $PythonInstallerUrl -OutFile $tmp -UseBasicParsing
+    # 現在のユーザーだけに入れる（管理者権限が要らない）。ランチャ (py) も per-user にしないと
+    # 全ユーザー向けの導入で昇格を求められ、/quiet では黙って失敗することがある。
+    $p = Start-Process -FilePath $tmp -Wait -PassThru -ArgumentList @(
+        "/quiet", "InstallAllUsers=0", "InstallLauncherAllUsers=0", "PrependPath=1",
+        "Include_launcher=1", "Include_test=0", "Include_doc=0"
+    )
+    if ($p.ExitCode -ne 0) { throw "Python のインストールに失敗しました（exit code $($p.ExitCode)）" }
+}
+
+function Install-Python {
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Log "winget で Python $PythonMajorMinor を導入します（数分かかります）..."
+        if ($DryRun) { return }
+        # --source winget: 初期状態の Windows では msstore ソースの検索が証明書エラー（0x8a15005e）で
+        # 失敗しやすく、そのとき winget は「--source で指定せよ」と言って何も入れずに終わる（店舗 PC で実測）。
+        $wingetArgs = @(
+            "install", "--id", "Python.Python.$PythonMajorMinor", "--exact", "--source", "winget",
+            "--silent", "--accept-package-agreements", "--accept-source-agreements"
+        )
+        Write-Log ("$ winget " + ($wingetArgs -join " "))
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & $winget.Source @wingetArgs
+        $ErrorActionPreference = $prev
+        # winget の exit code は「既に導入済み」等でも 0 以外になるので、成否は Find-Python で判定する。
+        Update-ProcessPath
+        if (Find-Python) { return }
+        Write-Log "winget では導入できませんでした。python.org のインストーラに切り替えます。" "WARN"
+    } else {
+        Write-Log "winget が無いので python.org のインストーラを使います。"
+    }
+    Install-PythonFromPythonOrg
+    Update-ProcessPath
+}
+
+# ───────────────────────── venv / 依存 / 設定 ─────────────────────────
+
+function Initialize-Venv {
+    param([string]$SystemPython)
+    if (Test-Path $VenvPython) { Write-Log "venv は既にあります: $VenvDir"; return }
+    Invoke-Checked $SystemPython @("-m", "venv", $VenvDir) "venv の作成"
+}
+
+function Install-Dependencies {
+    Push-Location $AppDir
+    try {
+        Invoke-Checked $VenvPython @("-m", "pip", "install", "--upgrade", "pip") "pip の更新"
+        # -e（editable）: データファイルや tools/ はアプリのフォルダ直下にある前提なので、
+        # site-packages にコピーせずこのフォルダを指したまま入れる。
+        Invoke-Checked $VenvPython @("-m", "pip", "install", "-e", ".[pcsc,api]") "依存パッケージの導入"
+        # 第 2 の耳（聞き直しの測定 tools/second_ear.py）の部品。入らなくても本体は動くので、失敗しても止めない。
+        try {
+            Invoke-Checked $VenvPython @("-m", "pip", "install", "-e", ".[ear]") "第 2 の耳の部品の導入"
+        } catch {
+            Write-Log ("第 2 の耳の部品を入れられませんでした（本体の動作には影響しません）: " + $_.Exception.Message) "WARN"
+        }
+    } finally { Pop-Location }
+}
+
+function Initialize-Config {
+    $cfg = Join-Path $AppDir "config.json"
+    if (Test-Path $cfg) { Write-Log "config.json は既にあります（上書きしません）"; return }
+    Write-Log "config.json を config_default.json から作成します"
+    if (-not $DryRun) { Copy-Item (Join-Path $AppDir "config_default.json") $cfg }
+}
+
+function Get-ConfiguredModel {
+    $cfg = Join-Path $AppDir "config.json"
+    if (-not (Test-Path $cfg)) { return "medium" }
+    try {
+        $j = Get-Content $cfg -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($j.audio -and $j.audio.whisper_model) { return [string]$j.audio.whisper_model }
+    } catch { }
+    return "medium"
+}
+
+function Invoke-ModelPrefetch {
+    if ($SkipModel) { Write-Log "モデルの先読みはスキップ（初回起動時に自動ダウンロードされます）"; return }
+    $model = Get-ConfiguredModel
+    $do = [bool]$PrefetchModel
+    if (-not $do -and -not $NonInteractive) {
+        $ans = Read-Host "音声認識モデル '$model'（medium は約 1.5 GB）を今ダウンロードしますか？ ネット接続が必要です [Y/n]"
+        $do = ($ans -eq "" -or $ans -match "^[Yy]")
+    }
+    if (-not $do) { Write-Log "モデルの先読みはスキップ（初回起動時に自動ダウンロードされます）"; return }
+    $code = "from faster_whisper import WhisperModel; WhisperModel('$model', device='cpu', compute_type='int8'); print('model ready: $model')"
+    Invoke-Checked $VenvPython @("-c", $code) "音声認識モデルの取得"
+}
+
+function Invoke-EarModel {
+    # 第 2 の耳（Whisper が読めなかった発話の聞き直し）のモデル（約 170 MB。GitHub の配布物 約 713 MB を読みながら
+    # 取り出す。取得済みなら何もしない）。取れなくても本体は動く（Whisper だけで聞く）ので、失敗しても止めない。
+    if ($SkipModel) { Write-Log "第 2 の耳のモデルの取得はスキップ（-SkipModel）"; return }
+    try {
+        Invoke-Checked $VenvPython @((Join-Path $AppDir "tools\second_ear.py"), "--model-only") "第 2 の耳のモデルの取得"
+    } catch {
+        Write-Log ("第 2 の耳のモデルを取得できませんでした（Whisper だけで聞き取ります。次の更新でもう一度試します）: " + $_.Exception.Message) "WARN"
+    }
+}
+
+# ───────────────────────── ショートカット / 動作確認 ─────────────────────────
+
+function New-Shortcuts {
+    if ($NoShortcuts) { return }
+    $desktop = Get-DesktopDir
+    $ws = $null
+    if (-not $DryRun) { $ws = New-Object -ComObject WScript.Shell }
+    foreach ($s in $Shortcuts) {
+        $lnk = Join-Path $desktop ($s.Name + ".lnk")
+        $target = Join-Path $AppDir $s.Target
+        Write-Log ("ショートカット: " + $lnk + " -> " + $target)
+        if ($DryRun) { continue }
+        $sc = $ws.CreateShortcut($lnk)
+        $sc.TargetPath = $target
+        $sc.WorkingDirectory = $AppDir
+        $sc.Description = "Poker Hand Logger"
+        $sc.Save()
+    }
+}
+
+function Remove-Shortcuts {
+    $desktop = Get-DesktopDir
+    foreach ($s in $Shortcuts) {
+        $lnk = Join-Path $desktop ($s.Name + ".lnk")
+        if (Test-Path $lnk) {
+            Write-Log "削除: $lnk"
+            if (-not $DryRun) { Remove-Item $lnk -Force }
+        }
+    }
+}
+
+function Test-Installation {
+    $code = "import pokerkit, customtkinter, faster_whisper, pyaudio, smartcard, fastapi, uvicorn; print('imports ok')"
+    Invoke-Checked $VenvPython @("-c", $code) "動作確認（import）"
+    Push-Location $AppDir
+    try { Invoke-Checked $VenvPython @("main.py", "--help") "動作確認（main.py --help）" }
+    finally { Pop-Location }
+}
+
+# ───────────────────────── 更新 / アンインストール ─────────────────────────
+
+function Resolve-Commit {
+    # ブランチの先頭のコミット（40 桁）。取れなければ空（従来どおりブランチの zip を取る）。ADR-0066
+    param([string]$Ref)
+    try {
+        $res = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/commits/$Ref" -UseBasicParsing `
+            -Headers @{ "User-Agent" = "pokerapp-installer"; "Accept" = "application/vnd.github+json" } -TimeoutSec 20
+        $sha = [string]$res.sha
+        if ($sha -match '^[0-9a-f]{40}$') { return $sha }
+    } catch {
+        Write-Log ("ブランチ $Ref のコミットを確かめられませんでした（ブランチの zip を取ります）: " + $_.Exception.Message) "WARN"
+    }
+    return ""
+}
+
+function Write-InstalledVersion {
+    # いま入っている版（どの店がどの版で動いているか）。API の /api/health・main.py --version が読む。ADR-0066
+    $sha = $Commit
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $sha -and $git -and (Test-Path (Join-Path $AppDir ".git"))) {
+        try { $sha = (& $git.Source -C $AppDir rev-parse HEAD).Trim() } catch { $sha = "" }
+    }
+    if (-not $sha -and -not $DryRun) { $sha = Resolve-Commit $Branch }
+    $info = [ordered]@{ branch = $Branch; commit = $sha; installed_at = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss") }
+    $kind = if ($Branch -eq "stable") { "リリース版" } else { "開発版" }
+    Write-Log ("版: $kind $Branch @ " + $(if ($sha) { $sha.Substring(0, 7) } else { "?" }))
+    if ($DryRun) { return }
+    try { $info | ConvertTo-Json | Set-Content -Path (Join-Path $PSScriptRoot "installed.json") -Encoding UTF8 }
+    catch { Write-Log ("版を記録できませんでした: " + $_.Exception.Message) "WARN" }
+}
+
+function Invoke-Update {
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if ($git -and (Test-Path (Join-Path $AppDir ".git"))) {
+        Write-Log "git で更新します（git pull --ff-only）"
+        Push-Location $AppDir
+        try { Invoke-Checked $git.Source @("pull", "--ff-only") "git pull" } finally { Pop-Location }
+        return
+    }
+    # 先にコミットを確かめ、そのコミットの zip を取る（取っている間にブランチが進んでも、記録と中身が一致する）
+    $zipUrl = "https://codeload.github.com/$Repo/zip/refs/heads/$Branch"
+    if (-not $DryRun) {
+        $script:Commit = Resolve-Commit $Branch
+        if ($script:Commit) { $zipUrl = "https://codeload.github.com/$Repo/zip/$($script:Commit)" }
+    }
+    Write-Log "GitHub から取得: $zipUrl"
+    Write-Log ("保持するもの: " + (($PreservedFiles + $PreservedDirs) -join ", "))
+    if ($DryRun) { return }
+    $tmpRoot = Join-Path (Get-TempDir) ("pokerapp-update-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $tmpRoot | Out-Null
+    try {
+        $zip = Join-Path $tmpRoot "src.zip"
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing
+        Expand-Archive -Path $zip -DestinationPath $tmpRoot -Force
+        $src = Get-ChildItem -Path $tmpRoot -Directory | Select-Object -First 1   # pokerapp-<branch>
+        if (-not $src) { throw "zip の展開結果が見つかりません" }
+        # robocopy: 追加・上書きのみ（削除はしない）。/XD /XF で店舗固有のものを除外。
+        $arguments = @($src.FullName, $AppDir, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/R:2", "/W:2", "/XD") `
+            + $PreservedDirs + @("/XF") + $PreservedFiles
+        Write-Log ("$ robocopy " + ($arguments -join " "))
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & robocopy @arguments | Out-Null
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = $prev
+        if ($code -ge 8) { throw "robocopy に失敗しました（exit code $code）" }
+        Write-Log "ファイルを更新しました（設定・データは保持）"
+    } finally {
+        Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
+    }
+}
+
+function Remove-RelayTask {
+    # RFID の中継（installer\rfid_relay_task.ps1, システムの権限）が venv の python を使っている間は venv を消せない。
+    $name = "PokerRFIDRelay"
+    if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return }
+    if (-not (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) { return }
+    Write-Log "削除: RFID の中継のタスク $name"
+    if ($DryRun) { return }
+    try {
+        Stop-ScheduledTask -TaskName $name -ErrorAction Stop
+        Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction Stop
+    } catch {
+        $script = Join-Path $AppDir "installer\rfid_relay_task.ps1"
+        throw ("RFID の中継のタスクを消せません（管理者の権限が要ります）。先に次を PowerShell に貼ってください: " +
+            "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File $script -Remove'")
+    }
+}
+
+$StoreServerTask = "PokerStoreServer"
+
+function Test-StoreServerTask {
+    if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return $false }
+    return [bool](Get-ScheduledTask -TaskName $StoreServerTask -ErrorAction SilentlyContinue)
+}
+
+function Stop-StoreServer {
+    # 店舗サーバー（installer\store_server_task.ps1, ADR-0065）が venv の python を使っている間は、依存の入れ替えが
+    # 失敗し得る（読み込み中のファイル）。更新の前に止め、終わったら Start-StoreServer で新しい版を起動する。
+    if (-not (Test-StoreServerTask)) { return }
+    Write-Log "店舗サーバーのタスク $StoreServerTask を止めます（更新のあとで起動し直します）"
+    if ($DryRun) { return }
+    try { Stop-ScheduledTask -TaskName $StoreServerTask -ErrorAction Stop; Start-Sleep -Seconds 2 }
+    catch { Write-Log "店舗サーバーを止められませんでした（続けます）: $($_.Exception.Message)" "WARN" }
+}
+
+function Start-StoreServer {
+    if (-not (Test-StoreServerTask)) { return }
+    Write-Log "店舗サーバーのタスク $StoreServerTask を起動します（新しい版）"
+    if ($DryRun) { return }
+    try { Start-ScheduledTask -TaskName $StoreServerTask -ErrorAction Stop }
+    catch {
+        Write-Log ("店舗サーバーを起動できませんでした。5 分以内に自動で起動します。すぐに起動するには " +
+            "「店舗サーバー 自動起動の登録」（server_autostart.cmd）をもう一度実行してください。") "WARN"
+    }
+}
+
+function Remove-StoreServerTask {
+    if (-not (Test-StoreServerTask)) { return }
+    Write-Log "削除: 店舗サーバーのタスク $StoreServerTask"
+    if ($DryRun) { return }
+    try {
+        Stop-ScheduledTask -TaskName $StoreServerTask -ErrorAction Stop
+        Unregister-ScheduledTask -TaskName $StoreServerTask -Confirm:$false -ErrorAction Stop
+    } catch {
+        throw ("店舗サーバーのタスクを消せません。先に server_autostart.cmd remove を実行してください。")
+    }
+}
+
+function Invoke-Uninstall {
+    Remove-Shortcuts
+    Remove-StoreServerTask
+    Remove-RelayTask
+    if (Test-Path $VenvDir) {
+        Write-Log "削除: $VenvDir"
+        if (-not $DryRun) { Remove-Item -Recurse -Force $VenvDir }
+    }
+    Write-Log "データ（logs\ / *.json / config.json）は残しています: $AppDir"
+    Write-Log "完全に消すにはこのフォルダごと削除してください。"
+}
+
+# ───────────────────────── main ─────────────────────────
+
+$mode = "install"
+if ($Uninstall) { $mode = "uninstall" } elseif ($Update) { $mode = "update" }
+Write-Log "Poker Hand Logger インストーラ (mode: $mode, app: $AppDir)" "STEP"
+if ($DryRun) { Write-Log "DryRun: 表示のみで何も変更しません" "WARN" }
+
+try {
+    if ($Uninstall) { Invoke-Uninstall; exit 0 }
+    if ($Update) {
+        Write-Log "ファイルの更新" "STEP"
+        Invoke-Update
+        if (-not $DryRun) {
+            # このプロセスは更新前のスクリプトを実行し続けるので、続き（Python / 依存 / 設定 …）は
+            # 更新後のインストーラで行う。-Update を外し、それ以外の指定は引き継いで起動し直す。
+            $pass = @("-Branch", $Branch, "-Repo", $Repo, "-PythonInstallerUrl", $PythonInstallerUrl)
+            if ($Commit) { $pass += @("-Commit", $Commit) }
+            if ($PrefetchModel) { $pass += "-PrefetchModel" }
+            if ($SkipModel) { $pass += "-SkipModel" }
+            if ($NoShortcuts) { $pass += "-NoShortcuts" }
+            if ($NonInteractive) { $pass += "-NonInteractive" }
+            Write-Log "更新後のインストーラで続きを実行します"
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath @pass
+            exit $LASTEXITCODE
+        }
+    }
+
+    Write-Log "Python $PythonMajorMinor を確認" "STEP"
+    $py = Find-Python
+    if (-not $py) {
+        Write-Log "Python $PythonMajorMinor が見つかりません。導入します。" "WARN"
+        Install-Python
+        $py = Find-Python
+        if (-not $py -and $DryRun) { $py = "<python.exe>" }
+    }
+    if (-not $py) {
+        throw "Python $PythonMajorMinor を用意できませんでした。https://www.python.org/downloads/ から 3.12 を入れて（「Add python.exe to PATH」にチェック）再実行してください。"
+    }
+    Write-Log "Python: $py"
+
+    Write-Log "venv と依存パッケージ" "STEP"
+    Stop-StoreServer
+    Initialize-Venv $py
+    Install-Dependencies
+
+    Write-Log "設定ファイル" "STEP"
+    Initialize-Config
+
+    Write-Log "音声認識モデル" "STEP"
+    Invoke-ModelPrefetch
+    Invoke-EarModel
+
+    Write-Log "ショートカット" "STEP"
+    New-Shortcuts
+
+    Write-Log "動作確認" "STEP"
+    Test-Installation
+    Write-InstalledVersion
+    Start-StoreServer
+
+    Write-Log "完了" "STEP"
+    Write-Log "デスクトップのショートカットから起動できます。"
+    Write-Log "RFID を使う場合は config.json の rfid.enabled を true にし、「RFID リーダー チェック」で接続を確認してください。"
+    Write-Log "iPad / スマホから見る場合は config.json の viewer_api.bind_host を 0.0.0.0 に（信頼できる店内 Wi-Fi のみ）。"
+    exit 0
+} catch {
+    Write-Log ("失敗: " + $_.Exception.Message) "ERROR"
+    Write-Log "詳細は $LogPath を確認してください。" "ERROR"
+    exit 1
+}

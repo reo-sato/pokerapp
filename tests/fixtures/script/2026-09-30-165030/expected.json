@@ -1,0 +1,10 @@
+{
+ "session_id": "2026-09-30_165030_script_voice",
+ "note": "店舗 2026-09-30 の台本のハンド（声だけ, 版 2 = 店の言い方, 6 人・30 ハンド）。ロガーはハンドの開始を最大 60 秒遅らせていた（記録は評価に使えない）ので、台本の画面を押した順に並べ直して再生する（tools/eval_store.script_order_events）。baseline より悪くならないこと。",
+ "baseline": {
+  "rows": 316,
+  "total": 339,
+  "winners": 30,
+  "exact": 27
+ }
+}

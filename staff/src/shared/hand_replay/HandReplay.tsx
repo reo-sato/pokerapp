@@ -14,6 +14,11 @@
  *
  * mobile / staff 両アプリから使うため、各アプリの common.tsx / types.ts に依存しない
  * 自己完結コンポーネント。ロジックは handReplayModel.ts の純関数に置き、ここは描画のみ。
+ *
+ * 表示の切り替え（props）:
+ *   `reviewMarks`（既定 true）= 要確認 / 訂正済の印（左のストライプ + `!` / `✎`）。お客さんの画面は false
+ *   （オーナー 2026-10-19: お客さんの画面にタグは要らない）。スタッフの画面は true のまま。
+ *   `showHeard` = 音声テスト用に、各アクションの下に聞き取った文と補正の理由を出す（URL の ?test, ADR-0060）。
  */
 import React from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
@@ -26,10 +31,14 @@ import {
   formatChips,
   formatChipsCompact,
   formatSignedCompact,
+  heardDetails,
   parseCard,
   preflopFoldedSeats,
   seatRingLayout,
+  shownAmount,
   STREET_LABELS,
+  TABLE_FRONT,
+  tableSeats,
   SUIT_COLORS,
   SUIT_SYMBOLS,
   type ReplayAction,
@@ -63,8 +72,9 @@ const c = {
 /** プリフロップで降りた席の減光率（ADR-0051 追記）。 */
 const FOLDED_OPACITY = 0.4;
 
-const SEAT_W = 78;
-const SEAT_H = 58;
+// 8 席でも横の席がボードの札にかからない大きさ（オーナー 2026-10-19）
+const SEAT_W = 70;
+const SEAT_H = 54;
 
 /** 1 枚のカードチップ ("As" 等)。不正形式は raw 文字列で灰色表示。 */
 export function CardChip(props: { card: string; size?: "xs" | "sm" | "md" }): React.JSX.Element {
@@ -157,6 +167,17 @@ function SeatChip(props: {
   );
 }
 
+/** 空席（そのハンドに居ない席番号）。席の位置を実際の卓と同じに保つために出す。 */
+function EmptySeat(props: { seat: number; top: number; left: number }): React.JSX.Element {
+  return (
+    <View style={[s.seat, s.seatEmpty, { top: `${props.top}%`, left: `${props.left}%` }]}>
+      <Text style={s.seatEmptyText} numberOfLines={1}>
+        {props.seat} 空席
+      </Text>
+    </View>
+  );
+}
+
 /**
  * 4 列の 1 行。列幅が狭い (約 88px) ので **2 段**に分ける:
  *   1 段目 = 席番号 + プレーヤー名（誰のアクションか）
@@ -167,9 +188,14 @@ function ActionLine(props: {
   action: ReplayAction;
   isSelf: boolean;
   name: string;
+  reviewMarks: boolean;
+  showHeard?: boolean;
 }): React.JSX.Element {
   const a = props.action;
-  const stripe = a.needs_review ? c.warn : a.corrected ? c.accent : "transparent";
+  const marks = props.reviewMarks;
+  const stripe = marks && a.needs_review ? c.warn : marks && a.corrected ? c.accent : "transparent";
+  const shown = shownAmount(a); // コールはトータル（そのストリートで出した合計, オーナー 2026-09-29）
+  const heard = props.showHeard ? heardDetails(a) : null;
   return (
     <View
       style={[s.actionLine, props.isSelf && s.actionLineSelf, { borderLeftColor: stripe }]}
@@ -181,14 +207,24 @@ function ActionLine(props: {
         <Text style={[s.actionLabel, { color: actionColor(a.action) }]} numberOfLines={1}>
           {compactActionLabel(a.action)}
         </Text>
-        {a.amount ? (
+        {shown ? (
           <Text style={s.actionAmount} numberOfLines={1}>
-            {formatChipsCompact(a.amount)}
+            {formatChipsCompact(shown)}
           </Text>
         ) : null}
-        {a.needs_review ? <Text style={[s.mark, { color: c.warn }]}>!</Text> : null}
-        {a.corrected ? <Text style={[s.mark, { color: c.accent }]}>✎</Text> : null}
+        {marks && a.needs_review ? <Text style={[s.mark, { color: c.warn }]}>!</Text> : null}
+        {marks && a.corrected ? <Text style={[s.mark, { color: c.accent }]}>✎</Text> : null}
       </View>
+      {heard ? (
+        <>
+          <Text style={s.heardText}>{heard.heard ? `「${heard.heard}」` : "（発話なし）"}</Text>
+          {heard.notes.map((note, i) => (
+            <Text key={i} style={[s.heardText, { color: c.warn }]}>
+              {note}
+            </Text>
+          ))}
+        </>
+      ) : null}
     </View>
   );
 }
@@ -200,6 +236,8 @@ function StreetColumn(props: {
   newCards: string[];
   selfSeat?: number;
   nameOf: (action: ReplayAction) => string;
+  reviewMarks: boolean;
+  showHeard?: boolean;
 }): React.JSX.Element {
   const { section, newCards } = props;
   // プリフロップの fold は出さない（降りた席はテーブル図側で減光して示す）。
@@ -233,6 +271,8 @@ function StreetColumn(props: {
               action={a}
               isSelf={a.seat === props.selfSeat}
               name={props.nameOf(a)}
+              reviewMarks={props.reviewMarks}
+              showHeard={props.showHeard}
             />
           ))
         )}
@@ -257,11 +297,18 @@ export function HandReplay(props: {
   hand: ReplayHand;
   /** 見ている本人の席（mobile のみ。staff は「本人」が居ないので未指定 = 強調なし）。 */
   selfSeat?: number;
+  /** 要確認 / 訂正済の印を出すか（既定 true。お客さんの画面は false）。 */
+  reviewMarks?: boolean;
+  /** 音声テスト用: 各アクションの下に聞き取った文と補正の理由を出す（ADR-0060）。 */
+  showHeard?: boolean;
 }): React.JSX.Element {
+  const reviewMarks = props.reviewMarks ?? true;
   const model = buildReplayModel(props.hand);
   const board = props.hand.board ?? [];
   const foldedPreflop = new Set(preflopFoldedSeats(props.hand.actions ?? []));
-  const slots = seatRingLayout(model.seats.length);
+  // 席は 1〜8 を席番号の位置に固定（空いている席番号は空席）。手前は席 4 と席 5 の間（オーナー 2026-10-19）
+  const ring = tableSeats(model.seats);
+  const slots = seatRingLayout(ring.length, TABLE_FRONT);
   const sectionByStreet = new Map(model.streets.map((st) => [st.street, st]));
   // アクションに player_name が無い記録もあるので、席→参加者名で補う（最後は「席N」）。
   const nameBySeat = new Map(model.seats.map((p) => [p.seat, p.name]));
@@ -283,7 +330,7 @@ export function HandReplay(props: {
           {board.length > 0 ? (
             <View style={s.cardRow}>
               {board.map((card, i) => (
-                <CardChip key={i} card={card} />
+                <CardChip key={i} card={card} size="sm" />
               ))}
             </View>
           ) : (
@@ -307,25 +354,34 @@ export function HandReplay(props: {
             <Text style={s.winner} numberOfLines={1}>
               🏆 席{model.winnerSeat} {winnerName ?? ""}
             </Text>
+          ) : model.noWinner ? (
+            <Text style={s.centerMuted} numberOfLines={2}>
+              勝者なし（札が読めずチップは動かしていません）
+            </Text>
           ) : null}
           {model.blinds?.sb != null ? (
             <Text style={s.blinds}>
               {formatChips(model.blinds.sb)}/{formatChips(model.blinds.bb ?? 0)}
+              {model.blinds.bb_ante ? ` (BBA ${formatChips(model.blinds.bb_ante)})` : ""}
             </Text>
           ) : null}
         </View>
 
-        {model.seats.map((p, i) => (
-          <SeatChip
-            key={p.seat}
-            player={p}
-            isWinner={p.seat === model.winnerSeat}
-            isSelf={p.seat === props.selfSeat}
-            dimmed={foldedPreflop.has(p.seat)}
-            top={slots[i]?.top ?? 50}
-            left={slots[i]?.left ?? 50}
-          />
-        ))}
+        {ring.map(({ seat, player: p }, i) =>
+          p ? (
+            <SeatChip
+              key={seat}
+              player={p}
+              isWinner={p.seat === model.winnerSeat}
+              isSelf={p.seat === props.selfSeat}
+              dimmed={foldedPreflop.has(p.seat)}
+              top={slots[i]?.top ?? 50}
+              left={slots[i]?.left ?? 50}
+            />
+          ) : (
+            <EmptySeat key={seat} seat={seat} top={slots[i]?.top ?? 50} left={slots[i]?.left ?? 50} />
+          ),
+        )}
       </View>
 
       {/* 下半分: 4 ストリートを 4 列で */}
@@ -338,6 +394,8 @@ export function HandReplay(props: {
             newCards={newCardsFor(street, board)}
             selfSeat={props.selfSeat}
             nameOf={nameOf}
+            reviewMarks={reviewMarks}
+            showHeard={props.showHeard}
           />
         ))}
       </View>
@@ -390,6 +448,8 @@ const s = StyleSheet.create({
     justifyContent: "center",
   },
   seatWinner: { borderColor: c.pos },
+  seatEmpty: { backgroundColor: "transparent", borderStyle: "dashed", height: 28, marginTop: -14 },
+  seatEmptyText: { color: c.muted, fontSize: 10 },
   seatSelf: { backgroundColor: c.selfFill, borderColor: c.selfEdge },
   seatName: { color: c.text, fontSize: 11, fontWeight: "600", maxWidth: SEAT_W - 8 },
   seatResult: { color: c.muted, fontSize: 10, fontWeight: "700", marginTop: 1 },
@@ -447,4 +507,5 @@ const s = StyleSheet.create({
   actionLabel: { fontSize: 10, fontWeight: "700", flexShrink: 1 },
   actionAmount: { color: c.text, fontSize: 10, fontWeight: "700", marginLeft: 3 },
   mark: { fontSize: 10, fontWeight: "700", marginLeft: 2 },
+  heardText: { color: c.muted, fontSize: 9 },
 });

@@ -67,3 +67,15 @@
 - fold 済みプレイヤーのカード読みで actor が飛ぶ誤検出がなくなる。
 - ガード閾値 > 0 の運用では、低信頼の本物 winner も保留される。ディーラーの再読み上げ（または
   staff iPad のハンドタブ）が回復手段で、保留はレコードとして GUI に可視化される。
+
+## Status update（2026-09-22, verify-v1 へのマージ時）
+
+- **G3 の「RFID 最近傍読みを actor 証拠として採用する（active 席に限定）」部分は
+  ADR-0056 / ISSUE-0033（P0a）が supersede した。** 「fold 済み席を除外」では配布直後
+  （全席 active・数秒で最大 16 件の seat 検出）の誤 actor 化を防げないため、RFID の seat 読みは
+  actor 推定の証拠から**完全に外す**（同席の裏付け `source.rfid` としてのみ使う）。
+  `_pop_nearest_rfid_seat` は削除、`actor_source="rfid"` は新規には emit されない
+  （旧記録にのみ現れる）。golden `out-of-turn-rfid` は `rfid-appear-is-not-an-action` に、
+  `rfid-vs-spoken-seat-conflict` は「明示発話席 > RFID」の期待値に作り直した。
+- G3 のもう一方（採用しなかった sensed 席を監査 reason `actor_conflict_capped(sensed=N)` /
+  `actor_sensed_over_prior` に残す）は維持。G1 / G4 / T4 は不変。

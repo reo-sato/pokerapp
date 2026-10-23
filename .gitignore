@@ -23,3 +23,17 @@ mobile/dist/
 build/
 dist/
 .venv/
+
+# Windows ワンステップインストーラ（installer/install.ps1）が作るもの
+venv/
+install.log
+installer/branch.txt
+installer/installed.json
+models/
+
+# 会計の書き手のロック（ADR-0065）
+store_writer.lock
+# クラウドの端末トークン・送信の状態（ADR-0067, 店舗 PC ごと）
+cloud_credentials.json
+cloud_sync_state.json
+home_logs/

@@ -1,0 +1,17 @@
+{"t": 1790487204.59, "seat": 4, "present": false, "absent_since": null, "mucked_at": null}
+{"t": 1790487204.59, "seat": 5, "present": false, "absent_since": null, "mucked_at": null}
+{"t": 1790487204.59, "seat": 6, "present": false, "absent_since": null, "mucked_at": null}
+{"t": 1790487213.261, "seat": 4, "present": true, "absent_since": null, "mucked_at": null}
+{"t": 1790487214.88, "seat": 5, "present": true, "absent_since": null, "mucked_at": null}
+{"t": 1790487216.874, "seat": 4, "present": false, "absent_since": null, "mucked_at": null}
+{"t": 1790487216.874, "seat": 5, "present": false, "absent_since": null, "mucked_at": null}
+{"t": 1790487216.995, "seat": 4, "present": true, "absent_since": null, "mucked_at": null}
+{"t": 1790487216.995, "seat": 5, "present": true, "absent_since": null, "mucked_at": null}
+{"t": 1790487217.124, "seat": 6, "present": true, "absent_since": null, "mucked_at": null}
+{"t": 1790487223.176, "seat": 4, "present": false, "absent_since": 1790487223.176, "mucked_at": null}
+{"t": 1790487223.2, "seat": 4, "present": false, "absent_since": 1790487223.2, "mucked_at": 1790487285.208}
+{"t": 1790487258.007, "seat": 5, "present": false, "absent_since": 1790487258.007, "mucked_at": null}
+{"t": 1790487278.989, "seat": 6, "present": false, "absent_since": 1790487278.989, "mucked_at": null}
+{"t": 1790487279.0, "seat": 6, "present": false, "absent_since": 1790487279.0, "mucked_at": 1790487283.486}
+{"t": 1790487279.189, "seat": 5, "present": false, "absent_since": 1790487279.189, "mucked_at": null}
+{"t": 1790487279.2, "seat": 5, "present": false, "absent_since": 1790487279.2, "mucked_at": 1790487283.486}

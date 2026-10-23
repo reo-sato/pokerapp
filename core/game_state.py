@@ -49,6 +49,8 @@ class GameStateManager:
         # is_active な席番号を昇順で保持（フォールドで除外）
         self._active_seats: list[int] = sorted(self._players.keys())
         self._turn_idx: int = 0  # _active_seats 上のインデックス
+        # 休みの席（次のハンドから配られない）。legacy はスタック 0 でも配る（挙動不変）。
+        self._sitting_out: set[int] = set()
 
     # ――― ハンド管理 ―――
 
@@ -65,8 +67,8 @@ class GameStateManager:
         self._pot = 0
         self._turn_idx = 0
         for ps in self._players.values():
-            ps.is_active = True
-        self._active_seats = sorted(self._players.keys())
+            ps.is_active = ps.seat not in self._sitting_out
+        self._active_seats = sorted(s for s in self._players if s not in self._sitting_out)
         logger.info("New hand started: hand_id=%d", self._hand_id)
         return self._hand_id
 
@@ -223,6 +225,12 @@ class GameStateManager:
             raise ValueError(f"Unknown seat: {seat}")
         return self._players[seat].name
 
+    def set_player_name(self, seat: int, name: str) -> None:
+        """席のプレイヤー名を変える（席替え, ADR-0059）。スタックとハンドの状態は変えない。"""
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        self._players[seat].name = name
+
     def get_active_seats(self) -> list[int]:
         return list(self._active_seats)
 
@@ -240,14 +248,89 @@ class GameStateManager:
     def is_legal_actor(self, seat: int) -> bool:
         return bool(self._active_seats) and seat == self.get_current_player()
 
+    def is_hand_active(self) -> bool:
+        """legacy はハンドのライフサイクルを持たない（常に受け付ける = 挙動不変, ISSUE-0028）。"""
+        return True
+
+    @property
+    def button_seat(self):
+        """legacy は**ボタンを持たない**（rollback path, ISSUE-0032）。
+
+        ボタン回転は rules-aware backend（pokerkit）だけに入れた。legacy の単純ラウンドロビンを
+        変えると既存の挙動不変契約が崩れるため。呼び出し側は None を「ボタン不明」として扱う。
+        """
+        return None
+
+    def position_map(self) -> dict[int, str]:
+        """legacy はポジション名を持たない（ボタン不明のため, ISSUE-0032）。"""
+        return {}
+
     def fold_through(self, until_seat: int, max_folds: int | None = None) -> list[int]:
         raise NotImplementedError("fold_through is not supported by the legacy backend")
 
     def pots(self) -> list[dict]:
         return []  # legacy はサイドポットを扱わない
 
+    # 勝者の自動判定（ADR-0062）は rules-aware backend だけ。legacy は手番の終わりも side pot も
+    # 分からないので使わない（以下は Protocol を満たすための最小実装）。
+    rules_aware = False
+
+    def acting_order(self) -> list[int]:
+        return sorted(self._players)
+
+    def current_pots(self) -> list[dict]:
+        return [{"amount": self._pot, "eligible_seats": list(self._active_seats)}] if self._pot else []
+
+    def end_hand_awards(self, awards: dict[int, int]) -> None:
+        if sum(awards.values()) != self._pot:
+            raise ValueError(f"awards {awards} do not add up to the pot {self._pot}")
+        for seat, amount in awards.items():
+            if seat not in self._players:
+                raise ValueError(f"Unknown seat: {seat}")
+            self._players[seat].stack += amount
+        self._pot = 0
+
     def committed(self, seat: int) -> int:
         return 0  # legacy はストリート別コミット額を追跡しない
+
+    # 席の参加・休み、ブラインドの変更（2026-09-26）。legacy は次のハンドの並びだけ変える。
+    def seats_in_hand(self) -> list[int]:
+        return sorted(s for s in self._players if s not in self._sitting_out)
+
+    def sit_out(self, seat: int) -> bool:
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        if seat in self._sitting_out:
+            return False
+        self._sitting_out.add(seat)
+        return True
+
+    def sit_in(self, seat: int) -> bool:
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        if seat not in self._sitting_out:
+            return False
+        self._sitting_out.discard(seat)
+        return True
+
+    def set_blinds(self, sb: int, bb: int) -> None:
+        if sb <= 0 or bb <= 0 or sb > bb:
+            raise ValueError(f"Invalid blinds: sb={sb} bb={bb}")
+        self._sb, self._bb = sb, bb
+
+
+    def set_bb_ante(self, on: bool) -> None:
+        """BB アンティ（legacy は持たない = 何もしない。pokerkit backend だけ, 2026-10-19）。"""
+        logger.info("BB ante is not supported by the legacy backend (on=%s)", on)
+
+    @property
+    def bb_ante(self) -> int:
+        return 0
+    def set_button(self, seat: int) -> None:
+        """legacy はボタンを持たない（ISSUE-0032）。受け付けるだけで何もしない。"""
+        if seat not in self._players:
+            raise ValueError(f"Unknown seat: {seat}")
+        logger.warning("set_button: legacy backend はボタンを持ちません（席 %d は無視）", seat)
 
     # ――― 手動修正 ―――
 

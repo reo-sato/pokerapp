@@ -40,15 +40,27 @@ def event_to_envelope(event: RecordableEvent) -> dict:
             "raw_text": event.raw_text,
             "seat": event.seat,              # additive (R3/R4)。未設定なら null。
             "confidence": event.confidence,  # additive (Whisper 信頼度)。未設定なら null。
+            # 読み上げられたポジション名（"BTN、コール"）。席番号と同じく actor 推定の
+            # 明示証拠なので、記録しないと replay が別の actor を選びうる（ISSUE-0032）。
+            "position": event.position,
         }
         # additive (ADR-A/B): 既定値のときは省略し、旧 replay 実装でもそのまま読める形を保つ。
         if event.utterance_start_ts is not None:
             envelope["utterance_start_ts"] = event.utterance_start_ts
         if event.parse_flags:
             envelope["parse_flags"] = list(event.parse_flags)
+        if event.hand_name is not None:
+            envelope["hand_name"] = event.hand_name   # 勝った役名（0.6 additive）
+        if event.hit_rank is not None:
+            envelope["hit_rank"] = event.hit_rank     # 「Nヒット」の N（0.16 additive）
+        if event.amount_options:
+            envelope["amount_options"] = list(event.amount_options)   # 音で読んだ額の候補（0.13 additive）
+        if event.amount_scores:
+            # 額の候補ごとの音の点数（0.14 additive）
+            envelope["amount_scores"] = [[int(a), float(s)] for a, s in event.amount_scores]
         return envelope
     if isinstance(event, RFIDEvent):
-        return {
+        envelope = {
             "type": "rfid",
             "timestamp": event.timestamp,
             "tag_id": event.tag_id,
@@ -59,6 +71,19 @@ def event_to_envelope(event: RecordableEvent) -> dict:
             "board_index": event.board_index,
             "raw_tag_id": event.raw_tag_id,
         }
+        # 配り直しの差し替え（ADR-0058, schema 0.4 additive）。通常の配布では省略 = 旧 replay 互換。
+        if event.replaces:
+            envelope["replaces"] = event.replaces
+        # 席の札の離脱・戻り（フォールドの判断, schema 0.5 additive）。札の読み取りでは省略。
+        if event.kind != "card":
+            envelope["kind"] = event.kind
+        if event.observed_at is not None:
+            envelope["observed_at"] = event.observed_at
+        if event.cards:
+            envelope["cards"] = list(event.cards)   # 配布の手札（schema 0.9 additive）
+        if event.times:
+            envelope["times"] = list(event.times)   # 手札を最初に読んだ時刻（schema 0.11 additive）
+        return envelope
     if isinstance(event, CameraEvent):
         return {
             "type": "camera",

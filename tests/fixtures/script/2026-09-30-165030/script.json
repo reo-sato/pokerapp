@@ -1,0 +1,6869 @@
+{
+ "tool": "test_script",
+ "version": 2,
+ "kind": "voice",
+ "seed": 676499,
+ "created_at": "2026-09-30T16:50:30",
+ "table": {
+  "seats": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6
+  ],
+  "stacks": {
+   "1": 7000,
+   "2": 20000,
+   "3": 40000,
+   "4": 4000,
+   "5": 20000,
+   "6": 20000
+  },
+  "sb": 100,
+  "bb": 200,
+  "first_button": 6,
+  "names": {
+   "1": "P1",
+   "2": "P2",
+   "3": "P3",
+   "4": "P4",
+   "5": "P5",
+   "6": "P6"
+  }
+ },
+ "hands": [
+  {
+   "n": 1,
+   "button": 6,
+   "stacks": {
+    "1": 7000,
+    "2": 20000,
+    "3": 40000,
+    "4": 4000,
+    "5": 20000,
+    "6": 20000
+   },
+   "positions": {
+    "1": "SB",
+    "2": "BB",
+    "3": "UTG",
+    "4": "HJ",
+    "5": "CO",
+    "6": "BTN"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "600",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、コール",
+     "seats": [
+      2,
+      5
+     ],
+     "positions": [
+      "BB",
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "ヘッズアップ",
+     "note": "残り 2 人",
+     "seats": [],
+     "positions": [],
+     "street": "flop",
+     "actions": 0
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "800",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "flop",
+     "actions": 1
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "raise",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "call",
+     "amount": 400
+    },
+    {
+     "street": "flop",
+     "seat": 5,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 6,
+     "action": "bet",
+     "amount": 800
+    },
+    {
+     "street": "flop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 6,
+   "winner_seats": [
+    6
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 6900,
+    "2": 19800,
+    "3": 40000,
+    "4": 4000,
+    "5": 19400,
+    "6": 20900
+   }
+  },
+  {
+   "n": 2,
+   "button": 1,
+   "stacks": {
+    "1": 6900,
+    "2": 19800,
+    "3": 40000,
+    "4": 4000,
+    "5": 19400,
+    "6": 20900
+   },
+   "positions": {
+    "1": "BTN",
+    "2": "SB",
+    "3": "BB",
+    "4": "UTG",
+    "5": "HJ",
+    "6": "CO"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "600",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール、フォールド",
+     "seats": [
+      2,
+      3
+     ],
+     "positions": [
+      "SB",
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "500",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "ヘッズアップ",
+     "note": "残り 2 人",
+     "seats": [],
+     "positions": [],
+     "street": "river",
+     "actions": 0
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "800",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "スリーカード",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "showdown",
+     "actions": 0,
+     "note": "勝った役（勝った席は画面が送る）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "raise",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "call",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 2,
+     "action": "bet",
+     "amount": 500
+    },
+    {
+     "street": "flop",
+     "seat": 1,
+     "action": "call",
+     "amount": 500
+    },
+    {
+     "street": "turn",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 1,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 1,
+     "action": "bet",
+     "amount": 800
+    },
+    {
+     "street": "river",
+     "seat": 2,
+     "action": "call",
+     "amount": 800
+    }
+   ],
+   "winner_seat": 2,
+   "winner_seats": [
+    2
+   ],
+   "showdown": true,
+   "needs_winner": true,
+   "end_stacks": {
+    "1": 5000,
+    "2": 21900,
+    "3": 39800,
+    "4": 4000,
+    "5": 19400,
+    "6": 20900
+   }
+  },
+  {
+   "n": 3,
+   "button": 2,
+   "stacks": {
+    "1": 5000,
+    "2": 21900,
+    "3": 39800,
+    "4": 4000,
+    "5": 19400,
+    "6": 20900
+   },
+   "positions": {
+    "1": "CO",
+    "2": "BTN",
+    "3": "SB",
+    "4": "BB",
+    "5": "UTG",
+    "6": "HJ"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "600点",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、コール",
+     "seats": [
+      4,
+      6
+     ],
+     "positions": [
+      "BB",
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "800点",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "1600点",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "チェック、チェック",
+     "seats": [
+      6,
+      2
+     ],
+     "positions": [
+      "HJ",
+      "BTN"
+     ],
+     "street": "river",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "スリーカード",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "showdown",
+     "actions": 0,
+     "note": "勝った役（勝った席は画面が送る）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "raise",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "call",
+     "amount": 400
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 6,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 2,
+     "action": "bet",
+     "amount": 800
+    },
+    {
+     "street": "flop",
+     "seat": 6,
+     "action": "call",
+     "amount": 800
+    },
+    {
+     "street": "turn",
+     "seat": 6,
+     "action": "bet",
+     "amount": 1600
+    },
+    {
+     "street": "turn",
+     "seat": 2,
+     "action": "call",
+     "amount": 1600
+    },
+    {
+     "street": "river",
+     "seat": 6,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 2,
+   "winner_seats": [
+    2
+   ],
+   "showdown": true,
+   "needs_winner": true,
+   "end_stacks": {
+    "1": 4800,
+    "2": 25400,
+    "3": 39700,
+    "4": 3800,
+    "5": 19400,
+    "6": 17900
+   }
+  },
+  {
+   "n": 4,
+   "button": 3,
+   "stacks": {
+    "1": 4800,
+    "2": 25400,
+    "3": 39700,
+    "4": 3800,
+    "5": 19400,
+    "6": 17900
+   },
+   "positions": {
+    "1": "HJ",
+    "2": "CO",
+    "3": "BTN",
+    "4": "SB",
+    "5": "BB",
+    "6": "UTG"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "500",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール、コール",
+     "seats": [
+      1,
+      2
+     ],
+     "positions": [
+      "HJ",
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      3,
+      4
+     ],
+     "positions": [
+      "BTN",
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "チェック、チェック",
+     "seats": [
+      1,
+      2
+     ],
+     "positions": [
+      "HJ",
+      "CO"
+     ],
+     "street": "flop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "1200",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "turn",
+     "actions": 1
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "raise",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "call",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "call",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 6,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 1,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 6,
+     "action": "bet",
+     "amount": 1200
+    },
+    {
+     "street": "turn",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 6,
+   "winner_seats": [
+    6
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 4300,
+    "2": 24900,
+    "3": 39700,
+    "4": 3700,
+    "5": 19200,
+    "6": 19200
+   }
+  },
+  {
+   "n": 5,
+   "button": 4,
+   "stacks": {
+    "1": 4300,
+    "2": 24900,
+    "3": 39700,
+    "4": 3700,
+    "5": 19200,
+    "6": 19200
+   },
+   "positions": {
+    "1": "UTG",
+    "2": "HJ",
+    "3": "CO",
+    "4": "BTN",
+    "5": "SB",
+    "6": "BB"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      1,
+      2
+     ],
+     "positions": [
+      "UTG",
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "500点",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール、フォールド",
+     "seats": [
+      4,
+      5
+     ],
+     "positions": [
+      "BTN",
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "ヘッズアップ",
+     "note": "残り 2 人",
+     "seats": [],
+     "positions": [],
+     "street": "flop",
+     "actions": 0
+    },
+    {
+     "say": "600",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "flop",
+     "actions": 1
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "raise",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "call",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 3,
+     "action": "bet",
+     "amount": 600
+    },
+    {
+     "street": "flop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 3,
+   "winner_seats": [
+    3
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 4300,
+    "2": 24900,
+    "3": 40500,
+    "4": 3200,
+    "5": 19100,
+    "6": 19000
+   }
+  },
+  {
+   "n": 6,
+   "button": 5,
+   "stacks": {
+    "1": 4300,
+    "2": 24900,
+    "3": 40500,
+    "4": 3200,
+    "5": 19100,
+    "6": 19000
+   },
+   "positions": {
+    "1": "BB",
+    "2": "UTG",
+    "3": "HJ",
+    "4": "CO",
+    "5": "BTN",
+    "6": "SB"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "500点",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール、フォールド",
+     "seats": [
+      6,
+      1
+     ],
+     "positions": [
+      "SB",
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "800",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "コール、コール",
+     "seats": [
+      3,
+      4
+     ],
+     "positions": [
+      "HJ",
+      "CO"
+     ],
+     "street": "flop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "チェック、チェック",
+     "seats": [
+      6,
+      3
+     ],
+     "positions": [
+      "SB",
+      "HJ"
+     ],
+     "street": "turn",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "オールイン",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "turn",
+     "actions": 1
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "raise",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "call",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "call",
+     "amount": 400
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 6,
+     "action": "bet",
+     "amount": 800
+    },
+    {
+     "street": "flop",
+     "seat": 3,
+     "action": "call",
+     "amount": 800
+    },
+    {
+     "street": "flop",
+     "seat": 4,
+     "action": "call",
+     "amount": 800
+    },
+    {
+     "street": "turn",
+     "seat": 6,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 3,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 4,
+     "action": "allin",
+     "amount": 1900
+    },
+    {
+     "street": "turn",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 4,
+   "winner_seats": [
+    4
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 4100,
+    "2": 24900,
+    "3": 39200,
+    "4": 6000,
+    "5": 19100,
+    "6": 17700
+   }
+  },
+  {
+   "n": 7,
+   "button": 6,
+   "stacks": {
+    "1": 4100,
+    "2": 24900,
+    "3": 39200,
+    "4": 6000,
+    "5": 19100,
+    "6": 17700
+   },
+   "positions": {
+    "1": "SB",
+    "2": "BB",
+    "3": "UTG",
+    "4": "HJ",
+    "5": "CO",
+    "6": "BTN"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "400点",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      4,
+      5
+     ],
+     "positions": [
+      "HJ",
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "コール",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      1,
+      2
+     ],
+     "positions": [
+      "SB",
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "ヘッズアップ",
+     "note": "残り 2 人",
+     "seats": [],
+     "positions": [],
+     "street": "flop",
+     "actions": 0
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "ラストカード",
+     "note": "札の言葉（読まなくてもよい）",
+     "seats": [],
+     "positions": [],
+     "street": "river",
+     "actions": 0
+    },
+    {
+     "say": "チェック、チェック",
+     "seats": [
+      3,
+      6
+     ],
+     "positions": [
+      "UTG",
+      "BTN"
+     ],
+     "street": "river",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フラッシュ",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "showdown",
+     "actions": 0,
+     "note": "勝った役（勝った席は画面が送る）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "raise",
+     "amount": 400
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "call",
+     "amount": 400
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 3,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 6,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 3,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 6,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 3,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 6,
+     "action": "check",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 3,
+   "winner_seats": [
+    3
+   ],
+   "showdown": true,
+   "needs_winner": true,
+   "end_stacks": {
+    "1": 4000,
+    "2": 24700,
+    "3": 39900,
+    "4": 6000,
+    "5": 19100,
+    "6": 17300
+   }
+  },
+  {
+   "n": 8,
+   "button": 1,
+   "stacks": {
+    "1": 4000,
+    "2": 24700,
+    "3": 39900,
+    "4": 6000,
+    "5": 19100,
+    "6": 17300
+   },
+   "positions": {
+    "1": "BTN",
+    "2": "SB",
+    "3": "BB",
+    "4": "UTG",
+    "5": "HJ",
+    "6": "CO"
+   },
+   "scenario": "showdown_muck",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "600",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、コール",
+     "seats": [
+      1,
+      2
+     ],
+     "positions": [
+      "BTN",
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "700",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "ターンカード",
+     "note": "札の言葉（読まなくてもよい）",
+     "seats": [],
+     "positions": [],
+     "street": "turn",
+     "actions": 0
+    },
+    {
+     "say": "ヘッズアップ",
+     "note": "残り 2 人",
+     "seats": [],
+     "positions": [],
+     "street": "turn",
+     "actions": 0
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "1800",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "チェックアラウンド",
+     "seats": [
+      2,
+      5
+     ],
+     "positions": [
+      "SB",
+      "HJ"
+     ],
+     "street": "river",
+     "actions": 2,
+     "note": "全員チェック"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "showdown",
+     "actions": 1,
+     "note": "見せずに降りる（マック）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "raise",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "call",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 2,
+     "action": "bet",
+     "amount": 700
+    },
+    {
+     "street": "flop",
+     "seat": 5,
+     "action": "call",
+     "amount": 700
+    },
+    {
+     "street": "turn",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 5,
+     "action": "bet",
+     "amount": 1800
+    },
+    {
+     "street": "turn",
+     "seat": 2,
+     "action": "call",
+     "amount": 1800
+    },
+    {
+     "street": "river",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 5,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "showdown",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 5,
+   "winner_seats": [
+    5
+   ],
+   "showdown": true,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 4000,
+    "2": 21600,
+    "3": 39700,
+    "4": 6000,
+    "5": 22400,
+    "6": 17300
+   }
+  },
+  {
+   "n": 9,
+   "button": 2,
+   "stacks": {
+    "1": 4000,
+    "2": 21600,
+    "3": 39700,
+    "4": 6000,
+    "5": 22400,
+    "6": 17300
+   },
+   "positions": {
+    "1": "CO",
+    "2": "BTN",
+    "3": "SB",
+    "4": "BB",
+    "5": "UTG",
+    "6": "HJ"
+   },
+   "scenario": "showdown_muck",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "600",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      2,
+      3
+     ],
+     "positions": [
+      "BTN",
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "コール",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "900",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "ラストカード",
+     "note": "札の言葉（読まなくてもよい）",
+     "seats": [],
+     "positions": [],
+     "street": "river",
+     "actions": 0
+    },
+    {
+     "say": "ヘッズアップ",
+     "note": "残り 2 人",
+     "seats": [],
+     "positions": [],
+     "street": "river",
+     "actions": 0
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "1600点",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "showdown",
+     "actions": 1,
+     "note": "見せずに降りる（マック）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "raise",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "call",
+     "amount": 400
+    },
+    {
+     "street": "flop",
+     "seat": 4,
+     "action": "bet",
+     "amount": 900
+    },
+    {
+     "street": "flop",
+     "seat": 1,
+     "action": "call",
+     "amount": 900
+    },
+    {
+     "street": "turn",
+     "seat": 4,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 1,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 4,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 1,
+     "action": "bet",
+     "amount": 1600
+    },
+    {
+     "street": "river",
+     "seat": 4,
+     "action": "call",
+     "amount": 1600
+    },
+    {
+     "street": "showdown",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 1,
+   "winner_seats": [
+    1
+   ],
+   "showdown": true,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 7200,
+    "2": 21600,
+    "3": 39600,
+    "4": 2900,
+    "5": 22400,
+    "6": 17300
+   }
+  },
+  {
+   "n": 10,
+   "button": 3,
+   "stacks": {
+    "1": 7200,
+    "2": 21600,
+    "3": 39600,
+    "4": 2900,
+    "5": 22400,
+    "6": 17300
+   },
+   "positions": {
+    "1": "HJ",
+    "2": "CO",
+    "3": "BTN",
+    "4": "SB",
+    "5": "BB",
+    "6": "UTG"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "500点",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "1200",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール、コール",
+     "seats": [
+      6,
+      2
+     ],
+     "positions": [
+      "UTG",
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "3700",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "1万1100",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "コール、フォールド",
+     "seats": [
+      5,
+      6
+     ],
+     "positions": [
+      "BB",
+      "UTG"
+     ],
+     "street": "flop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "ターンカード",
+     "note": "札の言葉（読まなくてもよい）",
+     "seats": [],
+     "positions": [],
+     "street": "turn",
+     "actions": 0
+    },
+    {
+     "say": "ヘッズアップ",
+     "note": "残り 2 人",
+     "seats": [],
+     "positions": [],
+     "street": "turn",
+     "actions": 0
+    },
+    {
+     "say": "チェック、チェック",
+     "seats": [
+      5,
+      2
+     ],
+     "positions": [
+      "BB",
+      "CO"
+     ],
+     "street": "turn",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "ツーペア",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "showdown",
+     "actions": 0,
+     "note": "勝った役（勝った席は画面が送る）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "raise",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "call",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "raise",
+     "amount": 1200
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "call",
+     "amount": 700
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "call",
+     "amount": 700
+    },
+    {
+     "street": "flop",
+     "seat": 5,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 6,
+     "action": "bet",
+     "amount": 3700
+    },
+    {
+     "street": "flop",
+     "seat": 2,
+     "action": "raise",
+     "amount": 11100
+    },
+    {
+     "street": "flop",
+     "seat": 5,
+     "action": "call",
+     "amount": 11100
+    },
+    {
+     "street": "flop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 5,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 5,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 2,
+   "winner_seats": [
+    2
+   ],
+   "showdown": true,
+   "needs_winner": true,
+   "end_stacks": {
+    "1": 7200,
+    "2": 38900,
+    "3": 39600,
+    "4": 2800,
+    "5": 10100,
+    "6": 12400
+   }
+  },
+  {
+   "n": 11,
+   "button": 4,
+   "stacks": {
+    "1": 7200,
+    "2": 38900,
+    "3": 39600,
+    "4": 2800,
+    "5": 10100,
+    "6": 12400
+   },
+   "positions": {
+    "1": "UTG",
+    "2": "HJ",
+    "3": "CO",
+    "4": "BTN",
+    "5": "SB",
+    "6": "BB"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "500",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、コール",
+     "seats": [
+      2,
+      3
+     ],
+     "positions": [
+      "HJ",
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      4,
+      5
+     ],
+     "positions": [
+      "BTN",
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "ヘッズアップ",
+     "note": "残り 2 人",
+     "seats": [],
+     "positions": [],
+     "street": "flop",
+     "actions": 0
+    },
+    {
+     "say": "チェック、チェック",
+     "seats": [
+      1,
+      3
+     ],
+     "positions": [
+      "UTG",
+      "CO"
+     ],
+     "street": "flop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "ターンカード",
+     "note": "札の言葉（読まなくてもよい）",
+     "seats": [],
+     "positions": [],
+     "street": "turn",
+     "actions": 0
+    },
+    {
+     "say": "600",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "turn",
+     "actions": 1
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "raise",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "call",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 1,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 3,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 1,
+     "action": "bet",
+     "amount": 600
+    },
+    {
+     "street": "turn",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 1,
+   "winner_seats": [
+    1
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 8000,
+    "2": 38900,
+    "3": 39100,
+    "4": 2800,
+    "5": 10000,
+    "6": 12200
+   }
+  },
+  {
+   "n": 12,
+   "button": 5,
+   "stacks": {
+    "1": 8000,
+    "2": 38900,
+    "3": 39100,
+    "4": 2800,
+    "5": 10000,
+    "6": 12200
+   },
+   "positions": {
+    "1": "BB",
+    "2": "UTG",
+    "3": "HJ",
+    "4": "CO",
+    "5": "BTN",
+    "6": "SB"
+   },
+   "scenario": "allin",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "オールイン",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      6,
+      1
+     ],
+     "positions": [
+      "SB",
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フルハウス",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "showdown",
+     "actions": 0,
+     "note": "勝った役（勝った席は画面が送る）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "allin",
+     "amount": 2800
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "call",
+     "amount": 2800
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 4,
+   "winner_seats": [
+    4
+   ],
+   "showdown": true,
+   "needs_winner": true,
+   "end_stacks": {
+    "1": 7800,
+    "2": 38900,
+    "3": 38900,
+    "4": 6100,
+    "5": 7200,
+    "6": 12100
+   }
+  },
+  {
+   "n": 13,
+   "button": 6,
+   "stacks": {
+    "1": 7800,
+    "2": 38900,
+    "3": 38900,
+    "4": 6100,
+    "5": 7200,
+    "6": 12100
+   },
+   "positions": {
+    "1": "SB",
+    "2": "BB",
+    "3": "UTG",
+    "4": "HJ",
+    "5": "CO",
+    "6": "BTN"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "コール",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "600",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      2,
+      3
+     ],
+     "positions": [
+      "BB",
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "raise",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 6,
+   "winner_seats": [
+    6
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 7700,
+    "2": 38700,
+    "3": 38700,
+    "4": 6100,
+    "5": 7200,
+    "6": 12600
+   }
+  },
+  {
+   "n": 14,
+   "button": 1,
+   "stacks": {
+    "1": 7700,
+    "2": 38700,
+    "3": 38700,
+    "4": 6100,
+    "5": 7200,
+    "6": 12600
+   },
+   "positions": {
+    "1": "BTN",
+    "2": "SB",
+    "3": "BB",
+    "4": "UTG",
+    "5": "HJ",
+    "6": "CO"
+   },
+   "scenario": "allin",
+   "lines": [
+    {
+     "say": "オールイン",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール、フォールド",
+     "seats": [
+      5,
+      6
+     ],
+     "positions": [
+      "HJ",
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フラッシュ",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "showdown",
+     "actions": 0,
+     "note": "勝った役（勝った席は画面が送る）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "allin",
+     "amount": 6100
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "call",
+     "amount": 6100
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 4,
+   "winner_seats": [
+    4
+   ],
+   "showdown": true,
+   "needs_winner": true,
+   "end_stacks": {
+    "1": 7700,
+    "2": 38600,
+    "3": 38500,
+    "4": 12500,
+    "5": 1100,
+    "6": 12600
+   }
+  },
+  {
+   "n": 15,
+   "button": 2,
+   "stacks": {
+    "1": 7700,
+    "2": 38600,
+    "3": 38500,
+    "4": 12500,
+    "5": 1100,
+    "6": 12600
+   },
+   "positions": {
+    "1": "CO",
+    "2": "BTN",
+    "3": "SB",
+    "4": "BB",
+    "5": "UTG",
+    "6": "HJ"
+   },
+   "scenario": "heads_up",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "600点",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "700点",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "1800点",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "flop",
+     "actions": 1
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "raise",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "call",
+     "amount": 400
+    },
+    {
+     "street": "flop",
+     "seat": 3,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 2,
+     "action": "bet",
+     "amount": 700
+    },
+    {
+     "street": "flop",
+     "seat": 3,
+     "action": "raise",
+     "amount": 1800
+    },
+    {
+     "street": "flop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 3,
+   "winner_seats": [
+    3
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 7700,
+    "2": 37300,
+    "3": 40000,
+    "4": 12300,
+    "5": 1100,
+    "6": 12600
+   }
+  },
+  {
+   "n": 16,
+   "button": 3,
+   "stacks": {
+    "1": 7700,
+    "2": 37300,
+    "3": 40000,
+    "4": 12300,
+    "5": 1100,
+    "6": 12600
+   },
+   "positions": {
+    "1": "HJ",
+    "2": "CO",
+    "3": "BTN",
+    "4": "SB",
+    "5": "BB",
+    "6": "UTG"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      1,
+      2
+     ],
+     "positions": [
+      "HJ",
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "400点",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "300",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "flop",
+     "actions": 1
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "raise",
+     "amount": 400
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "flop",
+     "seat": 4,
+     "action": "bet",
+     "amount": 300
+    },
+    {
+     "street": "flop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 4,
+   "winner_seats": [
+    4
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 7700,
+    "2": 37300,
+    "3": 40000,
+    "4": 12700,
+    "5": 700,
+    "6": 12600
+   }
+  },
+  {
+   "n": 17,
+   "button": 4,
+   "stacks": {
+    "1": 7700,
+    "2": 37300,
+    "3": 40000,
+    "4": 12700,
+    "5": 700,
+    "6": 12600
+   },
+   "positions": {
+    "1": "UTG",
+    "2": "HJ",
+    "3": "CO",
+    "4": "BTN",
+    "5": "SB",
+    "6": "BB"
+   },
+   "scenario": "heads_up",
+   "lines": [
+    {
+     "say": "コール",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "600",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      5,
+      6
+     ],
+     "positions": [
+      "SB",
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "コール",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "ヘッズアップ",
+     "note": "残り 2 人",
+     "seats": [],
+     "positions": [],
+     "street": "flop",
+     "actions": 0
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "1000",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "ターンカード",
+     "note": "札の言葉（読まなくてもよい）",
+     "seats": [],
+     "positions": [],
+     "street": "turn",
+     "actions": 0
+    },
+    {
+     "say": "チェックアラウンド",
+     "seats": [
+      1,
+      4
+     ],
+     "positions": [
+      "UTG",
+      "BTN"
+     ],
+     "street": "turn",
+     "actions": 2,
+     "note": "全員チェック"
+    },
+    {
+     "say": "チェックアラウンド",
+     "seats": [
+      1,
+      4
+     ],
+     "positions": [
+      "UTG",
+      "BTN"
+     ],
+     "street": "river",
+     "actions": 2,
+     "note": "全員チェック"
+    },
+    {
+     "say": "フラッシュ",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "showdown",
+     "actions": 0,
+     "note": "勝った役（勝った席は画面が送る）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "raise",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "call",
+     "amount": 400
+    },
+    {
+     "street": "flop",
+     "seat": 1,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 4,
+     "action": "bet",
+     "amount": 1000
+    },
+    {
+     "street": "flop",
+     "seat": 1,
+     "action": "call",
+     "amount": 1000
+    },
+    {
+     "street": "turn",
+     "seat": 1,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 4,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 1,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 4,
+     "action": "check",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 4,
+   "winner_seats": [
+    4
+   ],
+   "showdown": true,
+   "needs_winner": true,
+   "end_stacks": {
+    "1": 6100,
+    "2": 37300,
+    "3": 40000,
+    "4": 14600,
+    "5": 600,
+    "6": 12400
+   }
+  },
+  {
+   "n": 18,
+   "button": 5,
+   "stacks": {
+    "1": 6100,
+    "2": 37300,
+    "3": 40000,
+    "4": 14600,
+    "5": 600,
+    "6": 12400
+   },
+   "positions": {
+    "1": "BB",
+    "2": "UTG",
+    "3": "HJ",
+    "4": "CO",
+    "5": "BTN",
+    "6": "SB"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "600点",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      5,
+      6
+     ],
+     "positions": [
+      "BTN",
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "1800",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール、フォールド",
+     "seats": [
+      2,
+      3
+     ],
+     "positions": [
+      "UTG",
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "オールイン",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      1,
+      2
+     ],
+     "positions": [
+      "BB",
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "raise",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "call",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "call",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "raise",
+     "amount": 1800
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "call",
+     "amount": 1200
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "allin",
+     "amount": 14600
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 4,
+   "winner_seats": [
+    4
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 4300,
+    "2": 35500,
+    "3": 39400,
+    "4": 18900,
+    "5": 600,
+    "6": 12300
+   }
+  },
+  {
+   "n": 19,
+   "button": 6,
+   "stacks": {
+    "1": 4300,
+    "2": 35500,
+    "3": 39400,
+    "4": 18900,
+    "5": 600,
+    "6": 12300
+   },
+   "positions": {
+    "1": "SB",
+    "2": "BB",
+    "3": "UTG",
+    "4": "HJ",
+    "5": "CO",
+    "6": "BTN"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "フォールド、コール",
+     "seats": [
+      3,
+      4
+     ],
+     "positions": [
+      "UTG",
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "600",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "1500",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "raise",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "raise",
+     "amount": 1500
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 2,
+   "winner_seats": [
+    2
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 4200,
+    "2": 36400,
+    "3": 39400,
+    "4": 18700,
+    "5": 600,
+    "6": 11700
+   }
+  },
+  {
+   "n": 20,
+   "button": 1,
+   "stacks": {
+    "1": 4200,
+    "2": 36400,
+    "3": 39400,
+    "4": 18700,
+    "5": 600,
+    "6": 11700
+   },
+   "positions": {
+    "1": "BTN",
+    "2": "SB",
+    "3": "BB",
+    "4": "UTG",
+    "5": "HJ",
+    "6": "CO"
+   },
+   "scenario": "showdown_muck",
+   "lines": [
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      4,
+      5
+     ],
+     "positions": [
+      "UTG",
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "500点",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "ヘッズアップ",
+     "note": "残り 2 人",
+     "seats": [],
+     "positions": [],
+     "street": "flop",
+     "actions": 0
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "400",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "1400点",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "showdown",
+     "actions": 1,
+     "note": "見せずに降りる（マック）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "raise",
+     "amount": 500
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "call",
+     "amount": 300
+    },
+    {
+     "street": "flop",
+     "seat": 3,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 1,
+     "action": "bet",
+     "amount": 400
+    },
+    {
+     "street": "flop",
+     "seat": 3,
+     "action": "call",
+     "amount": 400
+    },
+    {
+     "street": "turn",
+     "seat": 3,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 1,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 3,
+     "action": "bet",
+     "amount": 1400
+    },
+    {
+     "street": "river",
+     "seat": 1,
+     "action": "call",
+     "amount": 1400
+    },
+    {
+     "street": "showdown",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 1,
+   "winner_seats": [
+    1
+   ],
+   "showdown": true,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 6600,
+    "2": 36300,
+    "3": 37100,
+    "4": 18700,
+    "5": 600,
+    "6": 11700
+   }
+  },
+  {
+   "n": 21,
+   "button": 2,
+   "stacks": {
+    "1": 6600,
+    "2": 36300,
+    "3": 37100,
+    "4": 18700,
+    "5": 600,
+    "6": 11700
+   },
+   "positions": {
+    "1": "CO",
+    "2": "BTN",
+    "3": "SB",
+    "4": "BB",
+    "5": "UTG",
+    "6": "HJ"
+   },
+   "scenario": "multiway",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール、フォールド",
+     "seats": [
+      6,
+      1
+     ],
+     "positions": [
+      "HJ",
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "コール",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール、チェック",
+     "seats": [
+      3,
+      4
+     ],
+     "positions": [
+      "SB",
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォープレイヤーズ",
+     "note": "残り 4 人",
+     "seats": [],
+     "positions": [],
+     "street": "flop",
+     "actions": 0
+    },
+    {
+     "say": "チェックアラウンド",
+     "seats": [
+      3,
+      4,
+      6,
+      2
+     ],
+     "positions": [
+      "SB",
+      "BB",
+      "HJ",
+      "BTN"
+     ],
+     "street": "flop",
+     "actions": 4,
+     "note": "全員チェック"
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "ラストカード",
+     "note": "札の言葉（読まなくてもよい）",
+     "seats": [],
+     "positions": [],
+     "street": "river",
+     "actions": 0
+    },
+    {
+     "say": "フォープレイヤーズ",
+     "note": "残り 4 人",
+     "seats": [],
+     "positions": [],
+     "street": "river",
+     "actions": 0
+    },
+    {
+     "say": "400点",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "ツーペア",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "showdown",
+     "actions": 0,
+     "note": "勝った役（勝った席は画面が送る）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "call",
+     "amount": 100
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 3,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 4,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 6,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 3,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 4,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 6,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 3,
+     "action": "bet",
+     "amount": 400
+    },
+    {
+     "street": "river",
+     "seat": 4,
+     "action": "call",
+     "amount": 400
+    },
+    {
+     "street": "river",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 2,
+     "action": "call",
+     "amount": 400
+    }
+   ],
+   "winner_seat": 3,
+   "winner_seats": [
+    3
+   ],
+   "showdown": true,
+   "needs_winner": true,
+   "end_stacks": {
+    "1": 6600,
+    "2": 35700,
+    "3": 38500,
+    "4": 18100,
+    "5": 600,
+    "6": 11500
+   }
+  },
+  {
+   "n": 22,
+   "button": 3,
+   "stacks": {
+    "1": 6600,
+    "2": 35700,
+    "3": 38500,
+    "4": 18100,
+    "5": 600,
+    "6": 11500
+   },
+   "positions": {
+    "1": "HJ",
+    "2": "CO",
+    "3": "BTN",
+    "4": "SB",
+    "5": "BB",
+    "6": "UTG"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "オールイン",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、コール",
+     "seats": [
+      3,
+      4
+     ],
+     "positions": [
+      "BTN",
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フルハウス",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "showdown",
+     "actions": 0,
+     "note": "勝った役（勝った席は画面が送る）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "call",
+     "amount": 100
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "allin",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "call",
+     "amount": 400
+    }
+   ],
+   "winner_seat": 4,
+   "winner_seats": [
+    4
+   ],
+   "showdown": true,
+   "needs_winner": true,
+   "end_stacks": {
+    "1": 6600,
+    "2": 35700,
+    "3": 38300,
+    "4": 18900,
+    "5": 0,
+    "6": 11500
+   }
+  },
+  {
+   "n": 23,
+   "button": 4,
+   "stacks": {
+    "1": 6600,
+    "2": 35700,
+    "3": 38300,
+    "4": 18900,
+    "5": 20000,
+    "6": 11500
+   },
+   "positions": {
+    "1": "UTG",
+    "2": "HJ",
+    "3": "CO",
+    "4": "BTN",
+    "5": "SB",
+    "6": "BB"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "600点",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール、フォールド",
+     "seats": [
+      3,
+      4
+     ],
+     "positions": [
+      "CO",
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "1100点",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "flop",
+     "actions": 1
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "raise",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "call",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 2,
+     "action": "bet",
+     "amount": 1100
+    },
+    {
+     "street": "flop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 2,
+   "winner_seats": [
+    2
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 6600,
+    "2": 36600,
+    "3": 37700,
+    "4": 18900,
+    "5": 19900,
+    "6": 11300
+   }
+  },
+  {
+   "n": 24,
+   "button": 5,
+   "stacks": {
+    "1": 6600,
+    "2": 36600,
+    "3": 37700,
+    "4": 18900,
+    "5": 19900,
+    "6": 11300
+   },
+   "positions": {
+    "1": "BB",
+    "2": "UTG",
+    "3": "HJ",
+    "4": "CO",
+    "5": "BTN",
+    "6": "SB"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "400",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      3,
+      4
+     ],
+     "positions": [
+      "HJ",
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "コール",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "1200",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "raise",
+     "amount": 400
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "call",
+     "amount": 400
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "raise",
+     "amount": 1200
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 1,
+   "winner_seats": [
+    1
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 7500,
+    "2": 36200,
+    "3": 37700,
+    "4": 18900,
+    "5": 19500,
+    "6": 11200
+   }
+  },
+  {
+   "n": 25,
+   "button": 6,
+   "stacks": {
+    "1": 7500,
+    "2": 36200,
+    "3": 37700,
+    "4": 18900,
+    "5": 19500,
+    "6": 11200
+   },
+   "positions": {
+    "1": "SB",
+    "2": "BB",
+    "3": "UTG",
+    "4": "HJ",
+    "5": "CO",
+    "6": "BTN"
+   },
+   "scenario": "multiway",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "スリープレイヤーズ",
+     "note": "残り 3 人",
+     "seats": [],
+     "positions": [],
+     "street": "flop",
+     "actions": 0
+    },
+    {
+     "say": "チェックアラウンド",
+     "seats": [
+      2,
+      4,
+      5
+     ],
+     "positions": [
+      "BB",
+      "HJ",
+      "CO"
+     ],
+     "street": "flop",
+     "actions": 3,
+     "note": "全員チェック"
+    },
+    {
+     "say": "700点",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "1800",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "チェック、チェック",
+     "seats": [
+      4,
+      5
+     ],
+     "positions": [
+      "HJ",
+      "CO"
+     ],
+     "street": "river",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "ツーペア",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "showdown",
+     "actions": 0,
+     "note": "勝った役（勝った席は画面が送る）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 4,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 5,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 2,
+     "action": "bet",
+     "amount": 700
+    },
+    {
+     "street": "turn",
+     "seat": 4,
+     "action": "raise",
+     "amount": 1800
+    },
+    {
+     "street": "turn",
+     "seat": 5,
+     "action": "call",
+     "amount": 1800
+    },
+    {
+     "street": "turn",
+     "seat": 2,
+     "action": "call",
+     "amount": 1100
+    },
+    {
+     "street": "river",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 4,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 5,
+     "action": "check",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 2,
+   "winner_seats": [
+    2
+   ],
+   "showdown": true,
+   "needs_winner": true,
+   "end_stacks": {
+    "1": 7400,
+    "2": 40300,
+    "3": 37700,
+    "4": 16900,
+    "5": 17500,
+    "6": 11200
+   }
+  },
+  {
+   "n": 26,
+   "button": 1,
+   "stacks": {
+    "1": 7400,
+    "2": 40300,
+    "3": 37700,
+    "4": 16900,
+    "5": 17500,
+    "6": 11200
+   },
+   "positions": {
+    "1": "BTN",
+    "2": "SB",
+    "3": "BB",
+    "4": "UTG",
+    "5": "HJ",
+    "6": "CO"
+   },
+   "scenario": "heads_up",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "400",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "チェック、チェック",
+     "seats": [
+      3,
+      5
+     ],
+     "positions": [
+      "BB",
+      "HJ"
+     ],
+     "street": "flop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "ヘッズアップ",
+     "note": "残り 2 人",
+     "seats": [],
+     "positions": [],
+     "street": "turn",
+     "actions": 0
+    },
+    {
+     "say": "400",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "turn",
+     "actions": 1
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "raise",
+     "amount": 400
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "flop",
+     "seat": 3,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 5,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 3,
+     "action": "bet",
+     "amount": 400
+    },
+    {
+     "street": "turn",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 3,
+   "winner_seats": [
+    3
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 7400,
+    "2": 40200,
+    "3": 38200,
+    "4": 16900,
+    "5": 17100,
+    "6": 11200
+   }
+  },
+  {
+   "n": 27,
+   "button": 2,
+   "stacks": {
+    "1": 7400,
+    "2": 40200,
+    "3": 38200,
+    "4": 16900,
+    "5": 17100,
+    "6": 11200
+   },
+   "positions": {
+    "1": "CO",
+    "2": "BTN",
+    "3": "SB",
+    "4": "BB",
+    "5": "UTG",
+    "6": "HJ"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "400",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "raise",
+     "amount": 400
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 2,
+   "winner_seats": [
+    2
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 7400,
+    "2": 40500,
+    "3": 38100,
+    "4": 16700,
+    "5": 17100,
+    "6": 11200
+   }
+  },
+  {
+   "n": 28,
+   "button": 3,
+   "stacks": {
+    "1": 7400,
+    "2": 40500,
+    "3": 38100,
+    "4": 16700,
+    "5": 17100,
+    "6": 11200
+   },
+   "positions": {
+    "1": "HJ",
+    "2": "CO",
+    "3": "BTN",
+    "4": "SB",
+    "5": "BB",
+    "6": "UTG"
+   },
+   "scenario": "multiway",
+   "lines": [
+    {
+     "say": "フォールド",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール、コール",
+     "seats": [
+      2,
+      3
+     ],
+     "positions": [
+      "CO",
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォープレイヤーズ",
+     "note": "残り 4 人",
+     "seats": [],
+     "positions": [],
+     "street": "flop",
+     "actions": 0
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "チェック、チェック",
+     "seats": [
+      1,
+      2
+     ],
+     "positions": [
+      "HJ",
+      "CO"
+     ],
+     "street": "flop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "900",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "HJ"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "turn",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "turn",
+     "actions": 1
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 5,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 1,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 2,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 3,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 5,
+     "action": "bet",
+     "amount": 900
+    },
+    {
+     "street": "turn",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 5,
+   "winner_seats": [
+    5
+   ],
+   "showdown": false,
+   "needs_winner": false,
+   "end_stacks": {
+    "1": 7200,
+    "2": 40300,
+    "3": 37900,
+    "4": 16600,
+    "5": 17800,
+    "6": 11200
+   }
+  },
+  {
+   "n": 29,
+   "button": 4,
+   "stacks": {
+    "1": 7200,
+    "2": 40300,
+    "3": 37900,
+    "4": 16600,
+    "5": 17800,
+    "6": 11200
+   },
+   "positions": {
+    "1": "UTG",
+    "2": "HJ",
+    "3": "CO",
+    "4": "BTN",
+    "5": "SB",
+    "6": "BB"
+   },
+   "scenario": "normal",
+   "lines": [
+    {
+     "say": "600",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド、コール",
+     "seats": [
+      2,
+      3
+     ],
+     "positions": [
+      "HJ",
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド、フォールド",
+     "seats": [
+      4,
+      5
+     ],
+     "positions": [
+      "BTN",
+      "SB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "コール",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "1000",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      3
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "2500",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "オールイン",
+     "seats": [
+      1
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "flop",
+     "actions": 1
+    },
+    {
+     "say": "ツーペア",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "BB"
+     ],
+     "street": "showdown",
+     "actions": 0,
+     "note": "勝った役（勝った席は画面が送る）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "raise",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "call",
+     "amount": 600
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "call",
+     "amount": 400
+    },
+    {
+     "street": "flop",
+     "seat": 6,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 1,
+     "action": "bet",
+     "amount": 1000
+    },
+    {
+     "street": "flop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 6,
+     "action": "raise",
+     "amount": 2500
+    },
+    {
+     "street": "flop",
+     "seat": 1,
+     "action": "allin",
+     "amount": 6600
+    },
+    {
+     "street": "flop",
+     "seat": 6,
+     "action": "call",
+     "amount": 4100
+    }
+   ],
+   "winner_seat": 6,
+   "winner_seats": [
+    6
+   ],
+   "showdown": true,
+   "needs_winner": true,
+   "end_stacks": {
+    "1": 0,
+    "2": 40300,
+    "3": 37300,
+    "4": 16600,
+    "5": 17700,
+    "6": 19100
+   }
+  },
+  {
+   "n": 30,
+   "button": 5,
+   "stacks": {
+    "1": 20000,
+    "2": 40300,
+    "3": 37300,
+    "4": 16600,
+    "5": 17700,
+    "6": 19100
+   },
+   "positions": {
+    "1": "BB",
+    "2": "UTG",
+    "3": "HJ",
+    "4": "CO",
+    "5": "BTN",
+    "6": "SB"
+   },
+   "scenario": "side_pot",
+   "lines": [
+    {
+     "say": "コール、フォールド",
+     "seats": [
+      2,
+      3
+     ],
+     "positions": [
+      "UTG",
+      "HJ"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "オールイン",
+     "seats": [
+      4
+     ],
+     "positions": [
+      "CO"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "コール、フォールド",
+     "seats": [
+      6,
+      1
+     ],
+     "positions": [
+      "SB",
+      "BB"
+     ],
+     "street": "preflop",
+     "actions": 2,
+     "note": "続けて言う"
+    },
+    {
+     "say": "フォールド",
+     "seats": [
+      2
+     ],
+     "positions": [
+      "UTG"
+     ],
+     "street": "preflop",
+     "actions": 1
+    },
+    {
+     "say": "スリープレイヤーズ",
+     "note": "残り 3 人",
+     "seats": [],
+     "positions": [],
+     "street": "flop",
+     "actions": 0
+    },
+    {
+     "say": "チェックアラウンド",
+     "seats": [
+      6,
+      5
+     ],
+     "positions": [
+      "SB",
+      "BTN"
+     ],
+     "street": "flop",
+     "actions": 2,
+     "note": "全員チェック"
+    },
+    {
+     "say": "スリープレイヤーズ",
+     "note": "残り 3 人",
+     "seats": [],
+     "positions": [],
+     "street": "turn",
+     "actions": 0
+    },
+    {
+     "say": "チェックアラウンド",
+     "seats": [
+      6,
+      5
+     ],
+     "positions": [
+      "SB",
+      "BTN"
+     ],
+     "street": "turn",
+     "actions": 2,
+     "note": "全員チェック"
+    },
+    {
+     "say": "ラストカード",
+     "note": "札の言葉（読まなくてもよい）",
+     "seats": [],
+     "positions": [],
+     "street": "river",
+     "actions": 0
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "チェック",
+     "seats": [
+      5
+     ],
+     "positions": [
+      "BTN"
+     ],
+     "street": "river",
+     "actions": 1
+    },
+    {
+     "say": "フラッシュ",
+     "seats": [
+      6
+     ],
+     "positions": [
+      "SB"
+     ],
+     "street": "showdown",
+     "actions": 0,
+     "note": "勝った役（勝った席は画面が送る）"
+    }
+   ],
+   "actions": [
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "call",
+     "amount": 200
+    },
+    {
+     "street": "preflop",
+     "seat": 3,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 4,
+     "action": "allin",
+     "amount": 16600
+    },
+    {
+     "street": "preflop",
+     "seat": 5,
+     "action": "call",
+     "amount": 16600
+    },
+    {
+     "street": "preflop",
+     "seat": 6,
+     "action": "call",
+     "amount": 16500
+    },
+    {
+     "street": "preflop",
+     "seat": 1,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "preflop",
+     "seat": 2,
+     "action": "fold",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 6,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "flop",
+     "seat": 5,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 6,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "turn",
+     "seat": 5,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 6,
+     "action": "check",
+     "amount": 0
+    },
+    {
+     "street": "river",
+     "seat": 5,
+     "action": "check",
+     "amount": 0
+    }
+   ],
+   "winner_seat": 6,
+   "winner_seats": [
+    6
+   ],
+   "showdown": true,
+   "needs_winner": true,
+   "end_stacks": {
+    "1": 19800,
+    "2": 40100,
+    "3": 37300,
+    "4": 0,
+    "5": 1100,
+    "6": 52700
+   }
+  }
+ ],
+ "session_id": "2026-09-30_165030_script_voice",
+ "started_at": "2026-09-30T16:50:30"
+}

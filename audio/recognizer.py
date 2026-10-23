@@ -4,16 +4,18 @@ import logging
 import re
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Optional
 
 from core.constants import (
     ACTION_KEYWORDS,
+    HAND_NAME_KEYWORDS,
     KANJI_DIGIT,
     KANJI_UNIT,
     WHISPER_PROMPT_JA,
 )
 from core.events import AudioEvent
+from core.positions import parse_position
 
 if TYPE_CHECKING:
     from core.engine_types import LegalContext
@@ -29,10 +31,18 @@ _KANJI_PATTERN = re.compile(r"[一二三四五六七八九〇十百千万]+")
 # 算用数字 + 単位パターン（すべての候補を収集し、最左・同位置なら大きい値を採用）。
 # パースは NFKC 正規化済みテキストに対して行う（全角数字・全角ピリオドは半角化済み）。
 _MIXED_MAN_SEN = re.compile(r"(\d[\d,]*)万(\d+)千")            # 1万2千
+# 万・千のあとに続けた百の位（店舗 2026-10-06:「1万6千100」「レイズ1万1千300」を 16000・11000 と読んでいた）。
+# 続けた数は千のあとと同じ（3 桁はそのまま、1〜2 桁は百・十の位の省略で曖昧）、「1万6千1百」も
+_MAN_SEN_TAIL  = re.compile(r"(\d[\d,]*)万(\d+)千(?:(\d*)百|(\d{1,3})(?![\d,.千百十万Kk]))")  # 1万6千100
 _MAN_DECIMAL   = re.compile(r"(\d[\d,]*)\.(\d+)万")            # 1.5万 (ADR-A S1)
 _MAN_TRAILING  = re.compile(r"(\d[\d,]*)万(\d)(?![\d,.千百十万Kk])")  # 4万2 (曖昧, ADR-A S1)
 _MAN_ONLY      = re.compile(r"(\d[\d,]*)万")                   # 3万
 _SEN_HYAKU     = re.compile(r"(\d+)千(\d+)百")                 # 2千5百 (ADR-A S1)
+# 単位のあとに続けた算用数字（店舗 2026-09-29:「2千500」を 2000 と読んでいた）。千のあとは 3 桁ならそのまま足す。
+# 1〜2 桁（「2千5」）は「4万2」と同じく百・十の位の省略とみて曖昧にする。
+_SEN_DIGITS    = re.compile(r"(\d+)千(\d{1,3})(?![\d,.千百十万Kk])")        # 2千500
+_MAN_DIGITS    = re.compile(r"(\d[\d,]*)万(\d{3,4})(?![\d,.千百十万Kk])")   # 1万2000 / 1万500
+_KANJI_DIGITS  = re.compile(r"([一二三四五六七八九十百千万]*[千万])(\d{3,4})(?![\d,.千百十万Kk])")  # 千500
 _SEN_ONLY      = re.compile(r"(\d+)千")                        # 2千 (ADR-A S1: 従来 2 と誤読)
 _HYAKU_ONLY    = re.compile(r"(\d+)百")                        # 5百 (ADR-A S1)
 _K_DECIMAL     = re.compile(r"(\d[\d,]*)\.(\d+)[Kk]")          # 1.5K (ADR-A S1)
@@ -40,10 +50,29 @@ _K_UNIT        = re.compile(r"(\d[\d,]*)[Kk]")                 # 5K
 _DIGIT_ONLY    = re.compile(r"\d[\d,]*")                       # 800 / 1,200
 
 
+# ひらがな → カタカナ（`ACTION_KEYWORDS` / 席表現はカタカナ + 英字で書かれているため, ISSUE-0027）。
+# ASR が「ちぇっく」と書き起こす場合と、CLI で IME 変換せずに「ちぇっく」と打った場合の両方を拾う。
+# U+3041..U+3096（ぁ..ゖ）を +0x60 してカタカナ帯に移す 1:1 写像なので **文字位置が保たれる**
+# （NFKC はひらがなを変えないので、NFKC の後に重ねて使う）。
+_HIRAGANA_TO_KATAKANA = str.maketrans(
+    {chr(c): chr(c + 0x60) for c in range(0x3041, 0x3097)}
+)
+
+
+def _to_katakana(text: str) -> str:
+    """ひらがなをカタカナに正規化する（長さ・文字位置は不変）。"""
+    return text.translate(_HIRAGANA_TO_KATAKANA)
+
+
 # 席番号表現。strip（金額パース前の除去）と抽出の両方が同一パターンを共有する
-# （ADR-A S2: 従来は strip 側が「シート 3」(空白) / 漢数字席を取りこぼし、席番号が金額に流入した）。
+# （ADR-0047 S2: 従来は strip 側が「シート 3」(空白) / 漢数字席を取りこぼし、席番号が金額に流入した）。
+# 呼び出し側が生テキストを渡すこともある（engine の rebuy / winner）ので、照合前にひらがなを寄せる。
+# 算用数字 1 桁 +「番」（「7番が4400」「6番がコール」「8番7500」）も席（店舗の書き起こしの「N番」12 回のうち、
+# アクションと一緒のものはどれもディーラーの席の言い方）。漢数字の「一番」（いちばん）・「2番目」・前に数の続く
+# 「18番」は席にしない。
 _SEAT_PATTERN = re.compile(
-    r"(?:シート|seat)\s*([0-9０-９]+|[一二三四五六七八九])",
+    r"(?:(?:シート|seat)\s*|(?<![0-9０-９.,万千百])(?=[0-9０-９]番(?!目)))"
+    r"([0-9０-９]+|[一二三四五六七八九])(?:(?<=[0-9０-９])番(?!目))?",
     re.IGNORECASE,
 )
 _FW_TO_ASCII_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
@@ -55,7 +84,7 @@ def _strip_seat_references(text: str) -> str:
     parse_amount() が席番号の数字を金額として誤認識することを防ぐ。
     例: "シート1 レイズ 800" → " レイズ 800"
     """
-    return _SEAT_PATTERN.sub("", text)
+    return _SEAT_PATTERN.sub("", _to_katakana(text))
 
 
 def _seat_token_to_int(token: str) -> Optional[int]:
@@ -73,11 +102,22 @@ def _extract_seat_no(text: str) -> Optional[int]:
 
     actor 推定 (R3) ではなく「明示的に読み上げられた席」だけを拾う additive 仕様。
     """
-    m = _SEAT_PATTERN.search(text)
+    m = _SEAT_PATTERN.search(_to_katakana(text))
     if not m:
         return None
     n = _seat_token_to_int(m.group(1))
     return n if n is not None and 1 <= n <= 9 else None
+
+
+def _seat_before(norm: str, pos: int) -> Optional[int]:
+    """アクションの語（`pos`）の主語の席: 語より前でいちばん近い席の表現、無ければ最初の席の表現。
+
+    「5番はホールドリージャー、6番がコール。」のコールは席6（店舗 2026-09-29 fded6f75。前は最初の席 5 を付けていた）。
+    """
+    found = [m for m in _SEAT_PATTERN.finditer(norm) if (n := _seat_token_to_int(m.group(1))) and 1 <= n <= 9]
+    before = [m for m in found if m.start() < pos]
+    m = before[-1] if before else (found[0] if found else None)
+    return None if m is None else _seat_token_to_int(m.group(1))
 
 
 def _extract_all_seat_nos(text: str) -> list[int]:
@@ -86,7 +126,7 @@ def _extract_all_seat_nos(text: str) -> list[int]:
     "シート3 シート5 チョップ" のような split-pot 読み上げで複数勝者席を拾う。
     """
     seats: list[int] = []
-    for m in _SEAT_PATTERN.finditer(text):
+    for m in _SEAT_PATTERN.finditer(_to_katakana(text)):
         n = _seat_token_to_int(m.group(1))
         if n is not None and 1 <= n <= 9 and n not in seats:
             seats.append(n)
@@ -149,6 +189,11 @@ def _kanji_amount(kanji: str) -> tuple[int, bool]:
     return _kanji_to_int(kanji), False
 
 
+# 算用数字の「万」のあとの数字の無い「千」、「千」のあとの「百」は 1（「2万千」= 21000・「2千百」= 2100。店舗
+# 2026-10-14 62cad44b ハンド 19 の「レイズ2万千」を 20000 と読んでいた）。漢数字だけの額は `_kanji_amount` が読む。
+_IMPLICIT_ONE = re.compile(r"(?<=[0-9]万)(?=千)|(?<=[0-9]千)(?=百)")
+
+
 @dataclass(frozen=True)
 class AmountParse:
     """parse_amount_ex の結果。ambiguous=True は「N万M」型の桁省略が疑われる読み。"""
@@ -171,6 +216,7 @@ def parse_amount_ex(text: str) -> AmountParse:
       （呼び出し側が needs_review を付ける）
     """
     candidates: list[tuple[int, int, bool]] = []  # (start, value, ambiguous)
+    text = _IMPLICIT_ONE.sub("1", text)
 
     for m in _KANJI_PATTERN.finditer(text):
         val, amb = _kanji_amount(m.group())
@@ -181,6 +227,14 @@ def parse_amount_ex(text: str) -> AmountParse:
         man = int(m.group(1).replace(",", ""))
         sen = int(m.group(2))
         candidates.append((m.start(), man * 10000 + sen * 1000, False))
+
+    for m in _MAN_SEN_TAIL.finditer(text):
+        base = int(m.group(1).replace(",", "")) * 10000 + int(m.group(2)) * 1000
+        if m.group(4) is None:
+            candidates.append((m.start(), base + int(m.group(3) or 1) * 100, False))
+        else:
+            tail = m.group(4)
+            candidates.append((m.start(), base + int(tail) * {1: 100, 2: 10, 3: 1}[len(tail)], len(tail) < 3))
 
     for m in _MAN_DECIMAL.finditer(text):
         man = int(m.group(1).replace(",", ""))
@@ -200,6 +254,20 @@ def parse_amount_ex(text: str) -> AmountParse:
         candidates.append(
             (m.start(), int(m.group(1)) * 1000 + int(m.group(2)) * 100, False)
         )
+
+    for m in _SEN_DIGITS.finditer(text):
+        tail = m.group(2)
+        scale = {1: 100, 2: 10, 3: 1}[len(tail)]
+        candidates.append((m.start(), int(m.group(1)) * 1000 + int(tail) * scale, len(tail) < 3))
+
+    for m in _MAN_DIGITS.finditer(text):
+        candidates.append((m.start(), int(m.group(1).replace(",", "")) * 10000 + int(m.group(2)), False))
+
+    for m in _KANJI_DIGITS.finditer(text):
+        base, amb = _kanji_amount(m.group(1))
+        tail = int(m.group(2))
+        if base > 0 and tail < (1000 if m.group(1).endswith("千") else 10000):
+            candidates.append((m.start(), base + tail, amb))
 
     for m in _SEN_ONLY.finditer(text):
         candidates.append((m.start(), int(m.group(1)) * 1000, False))
@@ -232,6 +300,1462 @@ def parse_amount(text: str) -> int:
     return parse_amount_ex(text).value
 
 
+# 仮名で書き起こされた数の読み → 漢数字（ADR-0062）。Whisper は「ベット なな」を「ベトナナ」のように
+# 仮名で書くことがある。照合前にひらがなはカタカナへ寄せてあるので、カタカナだけを持つ。
+# 同じ位置では長い読みを先に試す（「キュウ」「ナナ」を「キュ」「ナ」…と切らない）。
+_KANA_NUMBER_WORDS: tuple[tuple[str, str], ...] = tuple(sorted((
+    ("イチ", "一"), ("イッ", "一"), ("ニ", "二"), ("サン", "三"), ("ヨン", "四"),
+    ("ゴ", "五"), ("ロク", "六"), ("ロッ", "六"), ("ナナ", "七"), ("シチ", "七"),
+    ("ハチ", "八"), ("ハッ", "八"), ("キュウ", "九"), ("キュー", "九"),
+    ("ジュウ", "十"), ("ジュー", "十"),
+    ("ヒャク", "百"), ("ビャク", "百"), ("ピャク", "百"),
+    ("セン", "千"), ("ゼン", "千"), ("マン", "万"),
+), key=lambda w: -len(w[0])))
+# 促音の形（イッ / ロッ / ハッ）は単位（セン / ピャク）の前にしか来ない
+_KANA_NUMBER_CLIPPED = frozenset({"イッ", "ロッ", "ハッ"})
+# 数の読みのあとに続いてよいカタカナ（ひらがなの「です」「で」「まい」もカタカナに寄っている）
+_KANA_NUMBER_SUFFIXES = ("デス", "デ", "ダ", "マイ", "ポイント", "エン", "テン")
+_KANJI_DIGITS_ONLY = frozenset("一二三四五六七八九")
+
+
+def _is_katakana(ch: str) -> bool:
+    return "ァ" <= ch <= "ヺ"
+
+
+def _kana_number_at(text: str, pos: int) -> Optional[tuple[int, int, str]]:
+    """`pos` から始まる仮名の数の読みを漢数字にする。(開始, 終了, 漢数字) か、数でなければ None。
+
+    「ニシマス」（〜にします）の「ニ」や「ゴール」の「ゴ」のように、続きがほかの言葉なら数と
+    みなさない（読みの直後が文の終わり・区切り・カタカナ以外・「です」等のときだけ数）。
+    """
+    i, words = pos, []
+    while i < len(text):
+        for kana, kanji in _KANA_NUMBER_WORDS:
+            if text.startswith(kana, i):
+                words.append((kana, kanji))
+                i += len(kana)
+                while i < len(text) and text[i] == "ー":   # 「ゴー」「ニー」のように伸ばした読み
+                    i += 1
+                break
+        else:
+            break
+    if not words:
+        return None
+    rest = text[i:]
+    if rest and _is_katakana(rest[0]) and not rest.startswith(_KANA_NUMBER_SUFFIXES):
+        return None
+    kanji = "".join(k for _, k in words)
+    for (kana, _), nxt in zip(words, [*kanji[1:], ""]):
+        if kana in _KANA_NUMBER_CLIPPED and nxt not in ("千", "百"):
+            return None
+    if any(a in _KANJI_DIGITS_ONLY and b in _KANJI_DIGITS_ONLY for a, b in zip(kanji, kanji[1:])):
+        return None                                          # 「ニサン」のように数字が 2 つ並ぶ
+    return pos, i, kanji
+
+
+_DIGIT_KANJI = {**dict(zip("123456789", "一二三四五六七八九")), **{k: k for k in "一二三四五六七八九"}}
+
+
+def _digit_kana_unit_at(norm: str, pos: int) -> Optional[tuple[int, int, str]]:
+    """`pos` の数字 1 桁と、すぐあと（空白は挟んでよい）の仮名の単位の読み（店舗 2026-10-07 61eda7bd:「2センテン」=
+    2千点。残りの人数の「ウェイ」の崩れと読んでヘッズアップにしていた）。(開始, 終了, 漢数字) か None。
+
+    単位（千・百・万）から始まる読みだけ（「2センゴヒャク」= 二千五百）。前にも数字がある（「12セン」）・単位でない
+    片仮名（「2センス」）は None。
+    """
+    if not (0 <= pos < len(norm)) or norm[pos] not in _DIGIT_KANJI:
+        return None
+    if pos > 0 and (norm[pos - 1].isdigit() or norm[pos - 1] in _DIGIT_KANJI or norm[pos - 1] in ",."):
+        return None
+    i = pos + 1
+    while i < len(norm) and norm[i] in " 　":
+        i += 1
+    found = _kana_number_at(norm, i)
+    if found is None or found[2][0] not in "千百万":
+        return None
+    return pos, found[1], _DIGIT_KANJI[norm[pos]] + found[2]
+
+
+def _join_digit_kana_units(text: str) -> str:
+    """数字 1 桁 + 仮名の単位の読みを漢数字にした文字列（NFKC・片仮名に寄せた形。「2センテン。」→「二千テン。」）。"""
+    norm = _to_katakana(unicodedata.normalize("NFKC", text))
+    out, i = [], 0
+    while i < len(norm):
+        found = _digit_kana_unit_at(norm, i)
+        if found is None:
+            out.append(norm[i])
+            i += 1
+        else:
+            out.append(found[2])
+            i = found[1]
+    return "".join(out)
+
+
+def _kana_amount_to_kanji(norm: str, keyword_end: int) -> str:
+    """アクションの語の直後にある仮名の数の読みを漢数字に置き換えた文字列を返す（ADR-0062）。
+
+    「ベトナナ」→「ベト七」、「ベット にじゅうさん」→「ベット 二十三」。語の直後だけを見るのは、
+    ほかの言葉の中の「ゴ」「ニ」を金額と取り違えないため。数字 1 桁 + 仮名の単位（「レイズ2センテン」）も。
+    """
+    i = keyword_end
+    while i < len(norm) and norm[i] in _SPLIT_DELIMITERS:
+        i += 1
+    found = _digit_kana_unit_at(norm, i) or _kana_number_at(norm, i)
+    if found is None:
+        return norm
+    start, end, kanji = found
+    return norm[:start] + kanji + norm[end:]
+
+
+# 書き起こしゆれとして足した短い語は、ほかの言葉の一部として現れやすい（「なべとなって」の「ベト」、
+# 「ゴールド」の「ゴール」）。前後が区切り・数・別のアクションの語のときだけアクションとみなす（ADR-0063）。
+_BOUNDARY_KEYWORDS = frozenset({"ベト", "ゴール", "ホールド", "ベッド", "オーリン", "オーリー", "ソーダウン"})
+# 同じ種類の仮名が続いていても区切りとみなす言い方: 「です」（「おーりんです」）と「を」（語の中には出ない）。
+# 「です」のあとに片仮名が続く（「ホールドデスク」）ときは区切りにしない。
+_BOUNDARY_SUFFIX = re.compile(r"(?:デス|デース|デシタ)(?:ネ|ヨ)?(?![ァ-ヺー])")
+
+# 速く言うと伸ばす音が落ちる（読み上げ集 2026-09-30:「コール、コール」を「コル コル」、「フォールド、フォールド、
+# コール」を「ホルドフォルドコル」と書き起こした）。賭けのアクションの語から「ー」を除いた形も同じ語として読む。
+# 短い形はほかの言葉の一部やひらがなの語（「起こる」の「こる」）と重なるので、片仮名で書かれていて前後が区切りの
+# ときだけ（`_BOUNDARY_KEYWORDS` と同じ）。
+_CLIPPED_ACTIONS = frozenset({"bet", "call", "raise", "check", "fold", "allin", "showdown"})
+
+
+def _clipped_keywords() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for keyword, action in ACTION_KEYWORDS.items():
+        word = unicodedata.normalize("NFKC", keyword)
+        # 伸ばす音が 1 つの語だけ（2 つ落ちた形 =「オーリー」→「オリ」は元の語から遠すぎる）
+        if action not in _CLIPPED_ACTIONS or word.count("ー") != 1 or not all(
+            "ァ" <= ch <= "ヺ" or ch == "ー" for ch in word
+        ):
+            continue
+        clipped = word.replace("ー", "")
+        if len(clipped) >= 2 and clipped not in ACTION_KEYWORDS:
+            out.setdefault(clipped, action)
+    return out
+
+
+_CLIPPED_KEYWORDS = _clipped_keywords()
+
+
+def _kana_script(ch: str) -> Optional[str]:
+    if "ぁ" <= ch <= "ゖ":
+        return "hiragana"
+    if _is_katakana(ch):
+        return "katakana"
+    return None
+
+
+def _keyword_matches(norm: str, script: Optional[str] = None) -> list[tuple[int, int, str]]:
+    """正規化済みテキスト中のアクションキーワードの出現 (位置, 長さ, action) を返す。
+
+    最左優先・同位置なら長いキーワードを先（より具体的な表現を採用するため）に並べる。
+
+    script: 片仮名に寄せる前の文字列（NFKC, norm と同じ長さ）。短い語の区切りを元の文字の種類で見る
+    （Whisper は外来語 = アクションの語を片仮名で、助詞・「です」「する」をひらがなで書く。片仮名の語の隣の
+    ひらがなは語の区切り: 「フォールドをホールド」「オーリンです」「ゴールします」）。
+    """
+    lower = norm.lower()
+    matches: list[tuple[int, int, str, str]] = []
+    for keyword, action in ACTION_KEYWORDS.items():
+        # キーワード側にも同じ正規化を掛ける（「降ります」のようにひらがなを含む語彙が、
+        # カタカナ化した入力と食い違わないように）。
+        kw = _to_katakana(unicodedata.normalize("NFKC", keyword)).lower()
+        start = 0
+        while True:
+            pos = lower.find(kw, start)
+            if pos == -1:
+                break
+            matches.append((pos, len(kw), action, kw))
+            start = pos + 1
+    if script is not None:
+        for kw, action in _CLIPPED_KEYWORDS.items():
+            start = 0
+            while (pos := lower.find(kw, start)) != -1:
+                start = pos + 1
+                if all(_kana_script(ch) == "katakana" for ch in script[pos:pos + len(kw)]):
+                    matches.append((pos, len(kw), action, kw))
+    starts = {m[0] for m in matches}
+    matches += _check_raise_compounds(norm, script, matches, starts)
+    ends = {m[0] + m[1] for m in matches}
+
+    def same_word(i: int, edge: int) -> bool:
+        """位置 i の文字が、語の端（位置 edge）の文字と同じ語の続きか = 同じ種類の仮名（「を」は除く）。"""
+        if not _is_katakana(lower[i]) or lower[i] == "ヲ":
+            return False
+        return script is None or _kana_script(script[i]) == _kana_script(script[edge])
+
+    def isolated(pos: int, end: int) -> bool:
+        before_ok = pos == 0 or not same_word(pos - 1, pos) or pos in ends
+        after_ok = (
+            end == len(lower) or not same_word(end, end - 1) or end in starts
+            or _kana_number_at(norm, end) is not None or _BOUNDARY_SUFFIX.match(norm, end) is not None
+        )
+        return before_ok and after_ok
+
+    kept = [
+        (pos, length, action) for pos, length, action, kw in matches
+        if (kw not in _BOUNDARY_KEYWORDS and kw not in _CLIPPED_KEYWORDS) or isolated(pos, pos + length)
+    ]
+    kept.sort(key=lambda t: (t[0], -t[1]))
+    return kept
+
+
+# Whisper は雑音や聞き取れない音に対して initial_prompt（WHISPER_PROMPT_JA）をそのまま書き起こすことがある
+# （店舗の実測: 「シート3 レイズ 2千、コール、チョップ などの言葉が含まれます」が信頼度 0.1〜0.2 で出て、
+# レイズ・コール・ウィナーとして記録された, ADR-0063）。ディーラーが言うはずのない部分で見分ける。
+_PROMPT_ECHO_MARKERS = ("言葉が含まれ", "読み上げています", "ウィナー、ハンド開始", "ハンド開始、チョップ")
+# プロンプトの語をその順に 4 つ以上並べたもの（「コール、チェック、フォールド、オールイン、…」を繰り返す幻聴。
+# 店舗の 3 回目の通しテストで「シート4 レイズ 2千」として記録された）。ディーラーはこの順には言わない。
+_PROMPT_WORD_ORDER = ("コール", "チェック", "フォールド", "オールイン", "ショーダウン", "ウィナー", "ハンド")
+_PROMPT_WORD_RUNS = tuple(
+    "、".join(_PROMPT_WORD_ORDER[i:i + 4]) for i in range(len(_PROMPT_WORD_ORDER) - 3)
+) + (
+    # 3 語でも「チェック、フォールド、オールイン」はプロンプトの繰り返し（チェックの直後のフォールドからのオールイン =
+    # 賭けの無いところでフォールドしてからオールインする並びは卓で起きない）。店舗 2026-10-14 15cad555 ハンド 3: チップの
+    # 音の中の「チェック、フォールド、オールイン、チョップ」がオールインとチョップでハンドを閉じた。店舗の書き起こしで
+    # これに当たる発話はすべて幻聴（「コール、チェック、フォールド」は本物の並びとして残す = 下のテスト）
+    "チェック、フォールド、オールイン",
+)
+# 無音・雑音に対する Whisper の定型の幻聴（動画の字幕に多い締めの言葉）。
+_STOCK_HALLUCINATIONS = ("ご視聴", "視聴して", "ご覧いただ", "ご覧頂", "チャンネル登録", "お楽しみに")
+
+
+def is_prompt_echo(text: str) -> bool:
+    """書き起こしが雑音への幻聴（initial_prompt の繰り返し・字幕の定型句）か。"""
+    norm = unicodedata.normalize("NFKC", text).replace(" ", "").replace("　", "").replace(",", "、")
+    return any(marker in norm for marker in (
+        *_PROMPT_ECHO_MARKERS, *_PROMPT_WORD_RUNS, *_STOCK_HALLUCINATIONS,
+    ))
+
+
+# 発話の長さで言える文字数の上限（空白を除く）。人は 1 秒に 10 文字も言わない。幻聴のループ（「…ウィナー、
+# ハンド、チェック、フォールド、…」を繰り返す）は 1 秒の音から数十文字が出る（店舗の 5 回目の通しテスト:
+# 3.6 秒の音から 250 文字）。書き起こしを長さの上限で打ち切ったものもここで捨てる（`WhisperTranscriber`）。
+_TEXT_CHARS_BASE = 12
+_TEXT_CHARS_PER_SEC = 12
+
+
+def is_implausibly_long(text: str, audio_sec: float) -> bool:
+    """書き起こしが発話の長さでは言えない量か（雑音への幻聴のループ）。
+
+    切り出した音は語頭の前 0.3 秒と語尾の無音を含むので 1 秒より短くはならない（1 秒として数える）。
+    """
+    chars = len(re.sub(r"\s", "", text))
+    return chars > _TEXT_CHARS_BASE + _TEXT_CHARS_PER_SEC * max(1.0, audio_sec)
+
+
+# 数字だけの発話（「600点」「2千点です」）はベットかレイズ（店のディーラーは語を省いて額だけ言う。店舗の
+# 3 回目の通しテストで「600点」「2千点」がベットだった）。どちらかは engine が状態から決め、額がいまのベット
+# 以下・最小ベット未満なら使わない。額の前後に付いてよいのは下の語だけ — 「ポット 2千点」「残り 1500」
+# 「7ヒット」（役名 = 7 のワンペア, `_HAND_PHRASES`）のような発話や、違う数が並ぶ発話（「5 6 7」）は額のアクションにしない。
+_AMOUNT_TOKEN = re.compile(r"(?:\d[\d,]*(?:\.\d+)?[万千百Kk]?)+|[一二三四五六七八九〇十百千万]+(?:\d[\d,]*)?")
+_AMOUNT_ONLY_REST = re.compile(
+    r"(?:[\s、。・!?,.ー〜~]|点|円|エン|テン|ポイント|トータル|デス|デース|ニナリマス|ハイ|エー|エット|エート|エ|アー|ア"
+    r"|ジャア|ジャ|デハ|アクション|ネ|ヨ)*"
+)
+# 数字だけの部分を区切る文字（空白では区切らない: 「シート3 600点」「5 6 7」を 1 まとまりに見る）
+_AMOUNT_CHUNK = re.compile(r"[^、。・!?]+")
+_CHUNK_DELIMITERS = frozenset("、。・!?")
+# アクションの語が、発話のどの額を自分の額にするか（ほかの額 = 別の人のベット・レイズ。額だけの運用では 1 つでも
+# 落とすと以降の手番がずれる, オーナー 2026-09-30）。区切り = 「、」など・語のすぐ隣の空白。
+#   None      額を持たない: フォールド・チェック・ヘッズアップ（「フォールド600」「チェック、800」「ヘッズアップ、600」の
+#             額は次の人の賭け）
+#   "glued"   区切らずに続けた額だけ: コール（「600点コールです」「コール600」= コールの額の言い直し。「2千点、コール」
+#             「コール 3000」は別の人の賭け）
+#   "nearest" 語のあとの最初の額、無ければ前の最後の額: ベット・レイズ・オールイン（「600、レイズ 1800」= 600 の賭けの
+#             あとに 1800 へのレイズ）
+# 自分の額と同じ額は言い直し（「レイズ 2000、2000です」）。表に無いアクション（勝者・ハンドの始まりと終わり・
+# ショーダウン）の額は分けない。
+_AMOUNT_OWNERSHIP: dict[str, Optional[str]] = {
+    "fold": None, "check": None, "heads_up": None,
+    "call": "glued",
+    "bet": "nearest", "raise": "nearest", "allin": "nearest",
+}
+# 「千」「万」のすぐあとの意味の通らない語（下の桁が読めない, `_open_digits`）の印
+GARBLED_DIGITS = "garbled_digits"
+# 「これで終わりです」「ここで終わります」: ディーラーは言わない = 常にほかの語の聞き違い（オーナー 2026-10-06）。店舗の
+# 書き起こしではベットに向き合った手番の 8 回のうち 6 回がコール、2 回がフォールド（その席の札が言葉とほぼ同時に
+# 離れた）。コールとして読み、engine が札の離脱で決め直す（要確認）
+GARBLED_CALL = "garbled_call"
+_GARBLED_CALL_PHRASE = re.compile(r"(?:コレ|ココ)デ(?:終ワ|オワ)リ(?:デス|マス)?")
+# 語尾の「ド」が無い「フォール」も同じ: 店舗の書き起こしの 3 回とも、ベットに向き合った手番のコールで、札は席に
+# 残った（2026-10-06 の 1f838667 ハンド 15・20、05cccd6c ハンド 1）。音の近さでは「フォールド」に近いが、コールとして
+# 読み、engine が札の離脱で決め直す
+# 「ホール」も同じ（店舗 2026-10-14 65c412b2 ハンド 11 = フロップのコール。「ホールド」は続けて言ったフォールドの書き起こし）
+_GARBLED_FOLD_WORD = re.compile(r"(?:フォール|ホール)(?:デス)?")
+# ただし「フォールド」に続けて言った 2 つ目は語尾が落ちたフォールド（読み上げ集 2026-09-30:「フォールド、フォールド」を
+# 「フォールド、フォール」と書き起こした）
+_FOLD_WORD_BEFORE = re.compile(r"(?:フォールド|ホールド)[\s、。,.・]*$")
+# 「コールド」=「コール」と「フォールド」の聞き分けられない語: 店舗の書き起こしの 5 回とも、その語のころ（前 1.1 秒〜
+# あと 0.9 秒）に手番の人の札が離れていて、フォールドだった（2026-10-06 の 05cccd6c ハンド 11・13、1f838667 ハンド 6・
+# 12、b7f32031 ハンド 2）。「コード」だけの発話はコールの崩れ（2 回とも札は離れずコール: 1f838667 ハンド 3、
+# b7f32031 ハンド 3）。どちらも聞き違いのコールとして読み、engine が札の離脱で決め直す
+_GARBLED_CALL_WORD = re.compile(r"コールド")
+_GARBLED_CALL_WHOLE = re.compile(r"コード(?:デス)?")
+# 「チュック」「チョック」だけの発話 = チェックの崩れ（店舗の書き起こしの 15 回のうち 14 回、第 2 の耳がその場で
+# 「チェック」と聞いた。残る 1 回も候補の 1 番はチェック）。音の近さでは「チョップ」とも同じくらい近いので（チョップは
+# 勝者の語）、この 2 語だけを要確認のチェックとして読む
+_GARBLED_CHECK_WHOLE = re.compile(r"(?:チュック|チョック)(?:デス)?")
+
+
+def _after_fold_word(norm: str, pos: int) -> bool:
+    return bool(_FOLD_WORD_BEFORE.search(norm[:pos]))
+
+
+# 「失礼しました」: ディーラーが言い間違えたときの訂正の合図（オーナー 2026-10-06: ハンドのアクションを最初からやり直す
+# ことはない。ストリートの最初からやり直すか、直前のアクションを訂正する。どちらかは、そのあとのアクションとの辻褄で
+# engine が選ぶ）。店舗の書き起こしでは、台本の「600点」→「失礼しました。800点。」（直前の額の訂正）と、7b897671 ハンド 3 の
+# 「失礼しました。これでお願いします。」（2300 → 2800 の言い直し）。会話の「失礼失礼」「失礼します」は合図にしない。
+# 発話のどこにあってもよい（前は直す前のアクション、後ろは直したあとのアクション）
+CORRECTION = "correction"
+# 「N 足りないから M」= 直前に言った賭けの額 N を M に言い直した（オーナー 2026-10-14 のメモ: 15cad555 ハンド 16 のリバーの
+# 「2万800足りないから2万2000!」は「失礼しました」を言わない言い直し）。M を額とし、`RESTATEMENT` の印を付ける。
+# 店舗の書き起こしで「足りない」はこの 1 回だけ（雑談に出る「ごめん」「すみません」は合図にしない = 35 回ほど雑談）
+RESTATEMENT = "restatement"
+_SHORT_RESTATE_CUE = re.compile(r"(?:足りない|タリナイ|たりない)(?:から|ので|カラ|ノデ)")
+_CORRECTION_CUE = re.compile(r"(?:大変|タイヘン)?(?:失礼|シツレイ)(?:イタ|致)?シマシタ")
+# 自分の額にした部分の読みの印（額の読みが確かでない）。アクションの語の読みにも付け替える
+_AMOUNT_READ_FLAGS = ("ambiguous_amount", GARBLED_DIGITS)
+# 「チェックアラウンド」= まだ動いていない全員がチェックした（オーナーの説明, 2026-09-25）。チェックの語に続く
+# 「アラウンド」は音の近さで読む（書き起こしゆれを並べない: 店舗・台本で「チェック、アランド」「チェックアウンド」
+# 「チェックラウンド」があった）。区切って言ってもよい（「アラウンド」だけでは別のアクションにならない）。
+_AROUND = "アラウンド"
+_CHECK_AROUND_GAP = frozenset(" 　、。,.・")
+_CHECK_AROUND_EN = re.compile(r"around", re.IGNORECASE)
+# 「チェックレイズ」= 一度チェックした人のレイズ（1 つのレイズ）。チェックの語に**続けて**言った「レイズ」を音の近さで
+# 読む（「チェックレーズ」「チェックレース」）。区切った「チェック、レイズ」は 2 人のアクション（ADR-0061）。
+_CHECK_RAISE_TAIL = "レイズ"
+
+
+def _word_end(norm: str, script: Optional[str], start: int, stop: int) -> int:
+    """`start` から続く、同じ種類の仮名の語（長音「ー」を含む）の終わり（`stop` まで）。仮名でなければ `start`。"""
+    end = start
+    while end < stop and (_is_katakana(norm[end]) or norm[end] == "ー") and norm[end] != "ヲ" and (
+        script is None or norm[end] == "ー" or _kana_script(script[end]) == _kana_script(script[start])
+    ):
+        end += 1
+    return end
+
+
+def _check_raise_compounds(
+    norm: str, script: Optional[str], matches: list[tuple[int, int, str, str]], starts: set[int],
+) -> list[tuple[int, int, str, str]]:
+    """チェックの語に続けて（同じ語の中で）言った「レイズ」を 1 つのレイズの語にした出現。"""
+    from audio.phonetic import sounds_like
+
+    found: list[tuple[int, int, str, str]] = []
+    for pos, length, action, _ in matches:
+        end = pos + length
+        if action != "check" or end >= len(norm):
+            continue
+        if script is not None and _kana_script(script[end]) != _kana_script(script[end - 1]):
+            continue
+        stop = min((s for s in starts if s >= end), default=len(norm))
+        tail_end = _word_end(norm, script, end, stop)
+        if tail_end > end and sounds_like(norm[end:tail_end], _CHECK_RAISE_TAIL, after=norm[pos:end]):
+            found.append((pos, tail_end - pos, "raise", norm[pos:tail_end].lower()))
+    return found
+
+
+def _is_check_around(norm: str, script: Optional[str], pos: int, end: int, stop: int) -> bool:
+    """位置 pos のチェックの語（norm[pos:end]）が「チェックアラウンド」か。`stop` = 次のアクションの語の位置。"""
+    from audio.phonetic import match_keyword, sounds_like
+
+    whole = match_keyword(norm[pos:end])
+    if whole is not None and whole.rewrite == "チェックアラウンド":   # 語全体がゆれた「チッカーランド」
+        return True
+    i = end
+    while i < stop and norm[i] in _CHECK_AROUND_GAP:
+        i += 1
+    if _CHECK_AROUND_EN.match(norm, i):
+        return True
+    tail = norm[i:_word_end(norm, script, i, stop)]
+    # 終わりの「ンド」が残った語（「アンド」「ハンド」）は、卓の用語（ハンド）のほうが音が近くてもアラウンド: チェックの
+    # すぐあとで頭がつぶれても語の終わりは残る（店舗の「チェック、アンド」7 回・台本の「チェックアラウンド」が
+    # 「チェック、ハンド」, 2026-10-01。オーナー 2026-10-06「チェック、アンドは多分チェックアラウンドの聞き違い」）
+    return bool(tail) and sounds_like(tail, _AROUND, after=norm[pos:end], compete=not tail.endswith(_AROUND[-2:]))
+
+
+# 下の桁を続けて言える位置（「千」「万」のすぐあと）に、続けて書いた片仮名の語（オーナー 2026-10-02「数字の後に、
+# 残りの桁などを発声できるタイミングで意味の通らない単語が入った際には、読み直す」。店舗 0f7705c8 ハンド 1:
+# 「7千ドップチェック」= 七千六百。額が読めずに 7000 がチェックに付いて消えていた）。仮名で書いた数（「7千ロッピャク」）は
+# その桁として読む。どの言葉でもない語は、前の数だけを額にして `GARBLED_DIGITS`（要確認）を付ける。「千」「万」で
+# 終わる数の額は、第 2 の耳が下の桁まで聞いていればそれを使う（`second_ear.fill_lower_digits`, `open_amount_range`）。
+# 音の近さだけでは下の桁を決めない（「ドップ」は 600 の読みより卓の用語「トップ」に近い）。
+_OPEN_UNITS = {"千": 1000, "万": 10000}
+
+
+def _open_digits(text: str) -> Optional[tuple[str, bool, int, int]]:
+    """「千」「万」のすぐあとに続けた片仮名の語を読んだ文。(読んだ文, 意味の通らない語か, 額の下限, 上限) か None。
+
+    仮名の数（その桁に入る 100 点刻みの数）なら数字にした文、意味の通らない語ならその語を除いた文（額は前の数だけ）。
+    額の言い方に付く語（「テン」「ポイント」）・アクションの語に音で読める語・卓の用語そのもの（「千チップ」）は読まない。
+    """
+    from audio.phonetic import match_keyword, rank
+
+    nfkc = unicodedata.normalize("NFKC", text)
+    norm = _to_katakana(nfkc)
+    for m in _AMOUNT_TOKEN.finditer(norm):
+        unit = _OPEN_UNITS.get(m.group()[-1])
+        if unit is None:
+            continue
+        start = end = m.end()
+        while end < len(nfkc) and (_is_katakana(nfkc[end]) or nfkc[end] == "ー"):
+            end += 1                            # ひらがなは言葉の続き（「2千になっちゃって」）
+        if end == start or _AMOUNT_ONLY_REST.fullmatch(norm[start:end]):
+            continue
+        base = parse_amount_ex(m.group()).value
+        if base <= 0:
+            continue
+        found = _kana_number_at(norm, start)
+        if found is not None and found[1] <= end:
+            value = _kanji_to_int(found[2])
+            if 0 < value < unit and value % 100 == 0:
+                return nfkc[:m.start()] + str(base + value) + nfkc[found[1]:], False, base, base + unit
+        word = norm[start:end]
+        if match_keyword(word) is not None or rank(word)[0][0] == 0.0:
+            return None
+        return nfkc[:start] + " " + nfkc[end:], True, base, base + unit
+    return None
+
+
+def open_amount_range(text: str, amount: int) -> Optional[tuple[int, int]]:
+    """額 `amount` を「千」「万」で終わる数（下の桁を言っていない: 「7千」「2千、コール」「7千ドップ」）で言った発話なら、
+    その数から言える額の範囲 [下限, 上限)（7000〜7999）。そうでなければ None（「7600」「2千5百」・千や万の無い数）。"""
+    norm = _to_katakana(unicodedata.normalize("NFKC", text))
+    for m in _AMOUNT_TOKEN.finditer(norm):
+        unit = _OPEN_UNITS.get(m.group()[-1])
+        if unit is not None and amount > 0 and amount % unit == 0 and parse_amount_ex(m.group()).value == amount:
+            return amount, amount + unit
+    return None
+
+
+def parse_amount_only(
+    text: str,
+    confidence: Optional[float] = None,
+    utterance_start_ts: Optional[float] = None,
+) -> Optional[AudioEvent]:
+    """額だけを言った発話を、ベットかレイズの候補（action="bet" + flag "amount_only"）にする。
+
+    席番号・ポジション名は付いていてもよい。額でなければ None。「千」「万」のすぐあとに続けた片仮名の語は
+    `_open_digits`（仮名の数ならその桁、意味の通らない語なら前の数だけ + `GARBLED_DIGITS`）。
+    """
+    event = _amount_only(text, confidence, utterance_start_ts)
+    if event is not None:
+        return event
+    joined = _join_digit_kana_units(text)
+    if joined != _to_katakana(unicodedata.normalize("NFKC", text)):
+        event = _amount_only(joined, confidence, utterance_start_ts)   # 「2センテン」= 二千点
+        if event is not None:
+            event.raw_text = text
+            return event
+    opened = _open_digits(text)
+    if opened is None:
+        return None
+    event = _amount_only(opened[0], confidence, utterance_start_ts)
+    if event is None:
+        return None
+    event.raw_text = text
+    if opened[1]:
+        event.parse_flags = (*event.parse_flags, GARBLED_DIGITS)
+    return event
+
+
+def _amount_only(
+    text: str, confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> Optional[AudioEvent]:
+    """`parse_amount_only` の本体（「千」「万」のあとの語を読む前）。"""
+    from core.positions import _ALIAS_PATTERN
+
+    norm = _IMPLICIT_ONE.sub("1", _to_katakana(unicodedata.normalize("NFKC", text)))   # 「2万千」= 2万1千
+    body = _ALIAS_PATTERN.sub(" ", _SEAT_PATTERN.sub(" ", norm))
+    tokens = [m.group() for m in _AMOUNT_TOKEN.finditer(body)]
+    if not tokens:
+        # 仮名で書き起こされた額（「ロッピャク」「センゴヒャクテン」）。発話が額だけのときに限る
+        for start in range(len(body) + 1):
+            if not _AMOUNT_ONLY_REST.fullmatch(body[:start]):
+                continue
+            found = _kana_number_at(body, start)
+            if found is not None and _AMOUNT_ONLY_REST.fullmatch(body[found[1]:]):
+                tokens = [found[2]]
+                body = body[:start] + found[2] + body[found[1]:]
+                break
+        if not tokens:
+            return None
+    amounts = [parse_amount_ex(token) for token in tokens]
+    if len({a.value for a in amounts}) != 1 or amounts[0].value <= 0:
+        return None                         # 違う数が並ぶ（「5 6 7」）
+    if not _AMOUNT_ONLY_REST.fullmatch(_AMOUNT_TOKEN.sub(" ", body)):
+        return None                         # 額のほかに言葉がある（「ポット 2千点」）
+    flags = ["amount_only"]
+    if amounts[0].ambiguous:
+        flags.append("ambiguous_amount")
+    return AudioEvent(
+        action="bet",
+        amount=amounts[0].value,
+        timestamp=time.time(),
+        raw_text=text,
+        seat=_extract_seat_no(norm),
+        confidence=confidence,
+        position=parse_position(norm),
+        parse_flags=tuple(flags),
+        utterance_start_ts=utterance_start_ts,
+    )
+
+
+def _pieces_around(norm: str, start: int, end: int) -> list[tuple[int, int, str, bool]]:
+    """アクションの語（norm[start:end]）の前後の言葉を区切りで分けた (開始, 終了, "before"/"after", 語に続けたか)。
+
+    区切り = 「、」「。」など（`_CHUNK_DELIMITERS`）と、語のすぐ隣の空白（Whisper は「、」の代わりに空白で書くことが
+    ある。額の中の空白「1万 2000」・席の「シート 3」は区切らない）。
+    """
+    before_end = start
+    while before_end > 0 and norm[before_end - 1].isspace():
+        before_end -= 1
+    after_start = end
+    while after_start < len(norm) and norm[after_start].isspace():
+        after_start += 1
+    pieces: list[tuple[int, int, str, bool]] = []
+    for side, lo, hi in (("before", 0, before_end), ("after", after_start, len(norm))):
+        i = lo
+        while i < hi:
+            j = i
+            while j < hi and norm[j] not in _CHUNK_DELIMITERS:
+                j += 1
+            if norm[i:j].strip():
+                pieces.append((i, j, side, j == start if side == "before" else i == end))
+            i = j + 1
+    return pieces
+
+
+def _split_off_amounts(
+    part: str, event: AudioEvent,
+    confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> list[AudioEvent]:
+    """アクションの語が自分の額にしない額（`_AMOUNT_OWNERSHIP`）を、別の人のベット・レイズとして前後に分ける。
+
+    「2千点、コール」→ 2000 / コール、「フォールド600」→ フォールド / 600、「600、レイズ 1800」→ 600 / 1800 へのレイズ。
+    別の人の賭けにした額が使えない額（いまのベット以下など）なら engine が記録しない。
+    """
+    if event.action not in _AMOUNT_OWNERSHIP:
+        return [event]
+    rule = _AMOUNT_OWNERSHIP[event.action]
+    nfkc = unicodedata.normalize("NFKC", part)
+    norm = _to_katakana(nfkc)
+    source = part if len(nfkc) == len(part) else nfkc
+    matches = _keyword_matches(norm, nfkc)
+    if not matches:
+        return [event]
+    start, end = matches[0][0], matches[0][0] + matches[0][1]
+    pieces = _pieces_around(norm, start, end)
+    amounts = {p: parse_amount_only(source[p[0]:p[1]], confidence, utterance_start_ts) for p in pieces}
+    amount_pieces = [p for p in pieces if amounts[p] is not None]
+    if rule == "glued":
+        owned = [p for p in amount_pieces if p[3]]
+    elif rule == "nearest":
+        owned = [p for p in amount_pieces if p[2] == "after"][:1] or [p for p in amount_pieces if p[2] == "before"][-1:]
+    else:
+        owned = []
+    others = [p for p in amount_pieces if p not in owned]
+    own = amounts[owned[0]] if rule == "nearest" and owned else None
+    own_flags = [f for f in (own.parse_flags if own is not None else ()) if f in _AMOUNT_READ_FLAGS]
+    if not others and (own is None or (own.amount == event.amount and set(own_flags) <= set(event.parse_flags))):
+        return [event]
+    own_values = {amounts[p].amount for p in owned}
+    split = {"before": [], "after": []}
+    for p in others:
+        if amounts[p].amount not in own_values:          # 自分の額と同じ額は言い直し
+            split[p[2]].append(amounts[p])
+    kept = sorted([p for p in pieces if p not in others] + [(start, end, "keyword", True)])
+    text = source[kept[0][0]:kept[0][1]]
+    for prev, cur in zip(kept, kept[1:]):
+        removed_between = any(prev[1] <= p[0] < cur[0] for p in others)
+        text += ("、" if removed_between else source[prev[1]:cur[0]]) + source[cur[0]:cur[1]]
+    main = parse_action(text, confidence=confidence, utterance_start_ts=utterance_start_ts) or event
+    if own is not None:
+        main.amount = own.amount
+        main.parse_flags = tuple([f for f in main.parse_flags if f not in _AMOUNT_READ_FLAGS] + own_flags)
+    return [*split["before"], main, *split["after"]]
+
+
+# 区切って続けて言った額（「500、1500」= ベットのあとにレイズ）は、額が上がっていくときだけ別々の賭けにする
+# （額だけの運用, オーナー 2026-09-30。どちらも読まずに捨てていた）。ブラインドより小さい額（「5、6、7」）は使わない。
+_MIN_WAGER_IN_TURN = 100
+
+
+def _wagers_in_turn(
+    text: str, nfkc: str, confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> list[AudioEvent]:
+    source = text if len(nfkc) == len(text) else nfkc
+    events: list[AudioEvent] = []
+    for m in _AMOUNT_CHUNK.finditer(source):
+        if not m.group().strip():
+            continue
+        event = parse_amount_only(m.group(), confidence, utterance_start_ts)
+        if event is None or event.amount < _MIN_WAGER_IN_TURN:
+            return []
+        if events and event.amount == events[-1].amount:
+            continue                                   # 同じ額の言い直し
+        if events and event.amount < events[-1].amount:
+            return []
+        events.append(event)
+    return events if len(events) >= 2 else []
+
+
+# 1 回の発話から分けるアクションの上限。9 人卓の 1 ラウンドは最大 8 アクションで足り、
+# これを超えるのは Whisper の繰り返し（同じ語が何十回も並ぶ幻聴）とみなして分けない。
+_MAX_ACTIONS_PER_UTTERANCE = 8
+# アクションの区切りとみなす文字（Whisper は間の短い発話を「、」や空白でつなぐ）。
+_SPLIT_DELIMITERS = frozenset("、。，,.・ 　")
+
+
+def _distinct_keywords(matches: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
+    """重なり（「スリーベット」⊃「ベット」等の包含）を除いた、左から順のキーワード出現。"""
+    kept: list[tuple[int, int, str]] = []
+    for m in matches:
+        if kept and m[0] < kept[-1][0] + kept[-1][1]:
+            continue
+        kept.append(m)
+    return kept
+
+
+def _split_points(norm: str, keywords: list[tuple[int, int, str]]) -> list[int]:
+    """隣り合うキーワードの間で、発話をどこで切るか（次のアクションの始まり）を返す。
+
+    1. 間に席番号・ポジション名（次のアクションの主語）があれば、その直前で切る。
+    2. 無ければ最後の区切り文字（「、」・空白など）の直後で切る（金額は前のアクションに残る:
+       「レイズ 600、コール」→「レイズ 600、」「コール」）。
+    3. 区切りも無ければ次のキーワードの直前で切る（「フォールドフォールド」）。
+    """
+    from core.positions import _ALIAS_PATTERN
+
+    cuts: list[int] = []
+    for prev, nxt in zip(keywords, keywords[1:]):
+        lo, hi = prev[0] + prev[1], nxt[0]
+        between = norm[lo:hi]
+        subjects = [m.start() for m in _SEAT_PATTERN.finditer(between)]
+        subjects += [m.start() for m in _ALIAS_PATTERN.finditer(between)]
+        if subjects:
+            cuts.append(lo + min(subjects))
+            continue
+        delims = [i for i, ch in enumerate(between) if ch in _SPLIT_DELIMITERS]
+        cuts.append(lo + delims[-1] + 1 if delims else hi)
+    return cuts
+
+
+# 確認型の発話（仕様 FR-16/17, §7）: 「コールですか？」「レイズ 2400 でよろしいですか？」はディーラーがプレイヤーに
+# 確かめている言葉で、アクションではない。確認のあとに言う確定の発話（「コール」）だけを読む。疑問形は文末で見る
+# （Whisper は上がり調子に「？」を付ける。書き起こしの語尾はカタカナに寄せてから比べる）。
+_QUESTION_ENDINGS = ("デスカ", "デショウカ", "マスカ", "デスヨネ", "ダヨネ", "デスネ")
+_TRAILING_PUNCTUATION = "？?。、！!．.・ 　…"
+
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[?？!！。])")
+
+
+def _is_question_sentence(sentence: str) -> bool:
+    nfkc = unicodedata.normalize("NFKC", sentence).strip()
+    if nfkc.endswith("?"):
+        return True
+    norm = _to_katakana(nfkc).rstrip(_TRAILING_PUNCTUATION)
+    return norm.endswith(_QUESTION_ENDINGS)
+
+
+def _drop_question_sentences(text: str) -> str:
+    """確認型（疑問形）の文だけを除く。後ろに続けて言った確定の発話は読む（店舗 2026-09-27:
+    「600だけもう一回言ってもらっていいですか? 600」の最後の「600」が、文全体が疑問形とみなされて落ちていた）。"""
+    sentences = [s for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+    return "".join(s for s in sentences if not _is_question_sentence(s)).strip()
+
+
+def is_question(text: str) -> bool:
+    """発話が確認型（疑問形）だけか。アクションにしない（仕様 FR-17）。疑問形の文のあとに別の文が続けば False。"""
+    return bool(text.strip()) and not _drop_question_sentences(text)
+
+
+# ブラインドの額の読み上げ（「ブラインド 200 400 です」）。Whisper が間に「オールイン」を足した（読み上げ集
+# 2026-09-30:「ブラインド200、オールイン400です。」）ので、ブラインドで始まり額が続く発話はアクションにしない。
+# 席のポジション（「ビッグブラインド」「スモールブラインド」）は文頭が「ブラインド」にならないので当たらない。
+_BLIND_ANNOUNCEMENT = re.compile(r"^ブラインド[\s、,。]*[0-9〇一二三四五六七八九十百千万]")
+
+
+# ディーラーのストリートの宣言（「ターンです」「ラストカード」「リバーです」）。札を置きながら言う（店舗の書き起こしの
+# 51 回: 札が読めたのは宣言の中央値 0.8 秒あと、47 回が ±5 秒）。ターンのアクションはターンの札・宣言より前に言わない
+# （オーナー 2026-10-07）ので、ストリートの境目に使う（推定器: その札が読めなかったとき）。アクションではないので
+# `parse_actions` には出さない。「パターン」と「ラストターン」（店舗で札の 10 秒前 = 何の宣言か分からない）は除く。
+_STREET_CALL = re.compile(r"(ラストカード)|(?<!パ)(?<!ラスト)(ターン|リバー)(?=デス|カード|[ヲ。、,.!！?？\s]|$)")
+
+
+def street_call(text: str) -> Optional[tuple[int, float]]:
+    """発話にストリートの宣言があれば (その札の位置 4 = ターン / 5 = リバー, 発話の中の位置 0〜1)。"""
+    norm = _to_katakana(unicodedata.normalize("NFKC", text or ""))
+    m = _STREET_CALL.search(norm)
+    if m is None:
+        return None
+    index = 4 if m.group(2) == "ターン" else 5
+    return index, m.start() / max(1, len(norm))
+
+
+def is_announcement(text: str) -> bool:
+    """ディーラーがポットの額・ブラインドを読み上げた発話（アクションではない）。第 2 の耳でも聞き直さない
+    （読み上げ集 2026-09-30:「ポット1万2000です。」を第 2 の耳が「一万二千です」と聞いて額にしていた）。"""
+    norm = _to_katakana(unicodedata.normalize("NFKC", text)).strip()
+    return "ポット" in norm or _BLIND_ANNOUNCEMENT.match(norm) is not None
+
+
+# 発話全体がこの語だけのときの書き起こしゆれ（店舗の実測 2026-09-27。どれも「チェック」と「コール」の間など、
+# 額が言われるはずの所で出た）。単語としてはほかの意味もあるので、発話全体が一致するときだけ読み替える。
+_WHOLE_UTTERANCE_ALIASES = {
+    "シーン": "千",        # 「千（セン）」（2 回。「セン」は既に千として読める）
+    "参戦": "3千",         # 「三千（サンゼン）」
+    "発表": "8百",         # 「八百（ハッピャク）」
+}
+
+# 会話の中にアクションの語が紛れているだけの発話（店舗 2026-09-27:「結構コールとか迷路に発音してますよね」を
+# コールとして記録した）。アクションの語・額・席・ポットの用語・つなぎの言葉を除いても長い言葉が残り、それが
+# 発話の大半なら、ディーラーのアクションの読み上げではないとみる。
+_CONVERSATION_MIN_CHARS = 8
+_CONVERSATION_MIN_RATIO = 0.6
+_TABLE_WORDS = re.compile(
+    r"シート|セキ|席|番|フロップ|ターン|リバー|ラストカード|ポット|サイド|メイン|ボタン|アクション|オッケー|"
+    r"ハイ|エート|エット|エー|アー|デス|マス|ネ|ヨ|点|テン|ポイント|ニナリマス|ジャア|デハ|デ|ハ"
+)
+_NON_TEXT = re.compile(r"[\s、。,.・!?！？ー〜~…「」()（）]+")
+
+
+def _residue(norm: str, keywords: list[tuple[int, int, str]]) -> str:
+    """アクションの語・額・席・ポジション・卓の用語・つなぎの言葉を除いて残る言葉。"""
+    from core.positions import _ALIAS_PATTERN
+
+    chars = list(norm)
+    for pos, length, _ in keywords:
+        chars[pos:pos + length] = [" "] * length
+    rest = "".join(chars)
+    rest = _AMOUNT_TOKEN.sub(" ", _ALIAS_PATTERN.sub(" ", _SEAT_PATTERN.sub(" ", rest)))
+    rest = _TABLE_WORDS.sub(" ", rest)
+    return _NON_TEXT.sub("", rest)
+
+
+def _is_conversation(norm: str, keywords: list[tuple[int, int, str]]) -> bool:
+    residue = _residue(norm, keywords)
+    total = len(_NON_TEXT.sub("", norm))
+    return len(residue) >= _CONVERSATION_MIN_CHARS and len(residue) >= _CONVERSATION_MIN_RATIO * total
+
+
+# 音の近さで読む片仮名の語（ADR-0056 追記 1 の S2, `audio/phonetic.py`）。「ヘッズ・アップ」「ヘッズ アップ」の
+# ように区切って書き起こされた語は続けて照合する。ひらがなの語は候補にしない（Whisper は外来語を片仮名で書く。
+# ひらがなの語は日本語の会話）。
+_KATAKANA_RUN = re.compile(r"[ァ-ヺー]+")
+_RUN_JOINERS = frozenset("・ 　")
+# 音の近さで読んだ発話は、アクションの語が言葉の半分以上を占めること（席・額・卓の用語・つなぎの言葉は数えない）。
+# 会話の中の片仮名の語をアクションとして読まない（「かわいいペット」）。
+_FUZZY_MIN_SHARE = 0.5
+
+
+@dataclass(frozen=True)
+class _PhoneticRewrite:
+    """音の近さで読んだ語を正準のアクションの語に置き換えた発話（NFKC）。"""
+
+    text: str
+    # 置き換えた区間: (元の開始, 元の終了, 置き換え後の開始, 置き換え後の終了)
+    spans: tuple[tuple[int, int, int, int], ...]
+    # 区間ごとに、表記が違うだけの同じ音か（「レーズ」「ヘッズ・アップ」= 要確認にしない）
+    same_sound: tuple[bool, ...]
+    # 区間ごとに、聞き違いの語をコールに読んだか（「フォール」, `_GARBLED_FOLD_WORD`）
+    garbled: tuple[bool, ...] = ()
+
+    def to_original(self, pos: int) -> int:
+        """置き換え後の位置を元の発話の位置に戻す。"""
+        shift = 0
+        for start, end, new_start, new_end in self.spans:
+            if pos < new_start:
+                break
+            if pos <= new_end:
+                return start if pos == new_start else end
+            shift = end - new_end
+        return pos + shift
+
+    def fuzzy_in(self, start: int, end: int) -> bool:
+        """置き換え後の区間 [start, end) に、音の近さで読んだ（同じ音ではない）語があるか。"""
+        return any(
+            start < new_end and new_start < end and not same
+            for (_, _, new_start, new_end), same in zip(self.spans, self.same_sound)
+        )
+
+    def garbled_in(self, start: int, end: int) -> bool:
+        """置き換え後の区間 [start, end) に、聞き違いの語をコールに読んだ語があるか。"""
+        return any(
+            start < new_end and new_start < end and bad
+            for (_, _, new_start, new_end), bad in zip(self.spans, self.garbled)
+        )
+
+
+# この拍数以下の語は、ほかの言葉の一部として現れやすい（「ホールドする」「ゴールド」）。辞書の短い語と同じく、
+# 前後が区切り・数のときだけアクションとみなす（`_BOUNDARY_KEYWORDS`, ADR-0063）。
+_SHORT_WORD_MORAE = 4
+
+
+def _isolated(norm: str, start: int, end: int) -> bool:
+    before = start == 0 or not _is_katakana(norm[start - 1])
+    after = end == len(norm) or not _is_katakana(norm[end]) or _kana_number_at(norm, end) is not None
+    return before and after
+
+
+def _phonetic_span(norm: str, start: int, end: int):
+    """片仮名の語 norm[start:end] が音の近さでアクションの語と読めれば (終了, 照合結果)。
+
+    語の直後に仮名の数が続いていれば（「ペットナナ」）数の前までで照合する。語全体が数の読みなら照合しない。
+    """
+    from audio.phonetic import match_keyword
+
+    found = _kana_number_at(norm, start)
+    if found is not None and found[1] == end:
+        return None
+    ends = [end]
+    for k in range(end - 1, start + 1, -1):
+        found = _kana_number_at(norm, k)
+        if found is not None and found[1] == end:
+            ends.append(k)
+    for stop in ends:
+        match = match_keyword(norm[start:stop])
+        if match is not None:
+            if match.word_morae <= _SHORT_WORD_MORAE and not _isolated(norm, start, stop):
+                return None
+            return stop, match
+    return None
+
+
+def _phonetic_rewrite(
+    nfkc: str, norm: str, keywords: list[tuple[int, int, str]],
+) -> Optional[_PhoneticRewrite]:
+    """辞書の語を含まない片仮名の語を音の近さで読み、正準のアクションの語に置き換える。読めなければ None。"""
+    covered = [(pos, pos + length) for pos, length, _ in keywords]
+    runs = [(m.start(), m.end()) for m in _KATAKANA_RUN.finditer(nfkc)]
+    found: list[tuple[int, int, str, bool, bool]] = []
+    i = 0
+    while i < len(runs):
+        start, end = runs[i]
+        candidates = [(start, end, 1)]
+        if i + 1 < len(runs) and runs[i + 1][0] == end + 1 and nfkc[end] in _RUN_JOINERS:
+            candidates.insert(0, (start, runs[i + 1][1], 2))
+        used = 1
+        for c_start, c_end, count in candidates:
+            if any(c_start < e and s < c_end for s, e in covered):
+                continue
+            hit = _phonetic_span(norm, c_start, c_end)
+            if hit is not None:
+                stop, match = hit
+                logger.debug("音の近さで読みました: %r → %s（距離 %.2f / 次 %.2f）",
+                             match.heard, match.rewrite, match.distance, match.runner_up)
+                if (match.rewrite == "フォールド" and _GARBLED_FOLD_WORD.fullmatch(norm[c_start:stop])
+                        and not _after_fold_word(norm, c_start)):
+                    found.append((c_start, stop, "コール", False, True))
+                else:
+                    found.append((c_start, stop, match.rewrite, match.distance == 0, False))
+                used = count
+                break
+        i += used
+    if not found:
+        return None
+    pieces: list[str] = []
+    spans: list[tuple[int, int, int, int]] = []
+    prev = offset = 0
+    for start, end, word, _, _ in found:
+        pieces.append(nfkc[prev:start])
+        pieces.append(word)
+        new_start = start + offset
+        spans.append((start, end, new_start, new_start + len(word)))
+        offset += len(word) - (end - start)
+        prev = end
+    pieces.append(nfkc[prev:])
+    return _PhoneticRewrite("".join(pieces), tuple(spans), tuple(f[3] for f in found), tuple(f[4] for f in found))
+
+
+def phonetic_reading(text: str) -> Optional[str]:
+    """片仮名の語を音の近さでアクションの語に読み替えた文（NFKC）。読み替えが無ければ None。
+
+    事後の採点（`tools/rescore_audio.py`）で、ライブの書き起こしと並べて確からしさを測る候補に使う。
+    """
+    nfkc = unicodedata.normalize("NFKC", text)
+    norm = _to_katakana(nfkc)
+    rewrite = _phonetic_rewrite(nfkc, norm, _distinct_keywords(_keyword_matches(norm, nfkc)))
+    return rewrite.text if rewrite is not None and rewrite.text != nfkc else None
+
+
+def _parse_phonetic(
+    text: str, nfkc: str, rewrite: _PhoneticRewrite,
+    confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> Optional[list[AudioEvent]]:
+    """音の近さで置き換えた発話を読む。読んだ語から出たアクションに `fuzzy_keyword`（要確認）を付け、
+    `raw_text` は聞こえたままの言葉にする。会話・アクションの語が少ない発話は None。"""
+    norm = _to_katakana(rewrite.text)
+    keywords = _distinct_keywords(_keyword_matches(norm, rewrite.text))
+    if not keywords or _is_conversation(norm, keywords):
+        return None
+    keyword_chars = sum(length for _, length, _ in keywords)
+    if keyword_chars < _FUZZY_MIN_SHARE * (keyword_chars + len(_residue(norm, keywords))):
+        return None
+    source = text if len(nfkc) == len(text) else nfkc
+    events: list[AudioEvent] = []
+    for event, start, end in _parse_keyword_parts(
+        rewrite.text, rewrite.text, norm, keywords, confidence, utterance_start_ts,
+    ):
+        if "amount_only" not in event.parse_flags and rewrite.fuzzy_in(start, end):
+            event.parse_flags = (*event.parse_flags, "fuzzy_keyword")
+        if (start, end) == (0, len(norm)):
+            event.raw_text = text
+        else:
+            heard = source[rewrite.to_original(start):rewrite.to_original(end)]
+            event.raw_text = heard.strip("".join(_SPLIT_DELIMITERS)) or event.raw_text
+        if event.action == "call" and rewrite.garbled_in(start, end):
+            event.parse_flags = tuple(f for f in event.parse_flags if f != "fuzzy_keyword") + (GARBLED_CALL,)
+        events.append(event)
+    return events
+
+
+def _parse_keyword_parts(
+    text: str, nfkc: str, norm: str, keywords: list[tuple[int, int, str]],
+    confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> list[tuple[AudioEvent, int, int]]:
+    """アクションの語を含む発話を読み、(アクション, 区間の開始, 区間の終了) を言った順に返す。"""
+    if len(keywords) == 1 or len(keywords) > _MAX_ACTIONS_PER_UTTERANCE:
+        event = parse_action(text, confidence=confidence, utterance_start_ts=utterance_start_ts)
+        if event is None:
+            return []
+        if len(keywords) > _MAX_ACTIONS_PER_UTTERANCE:
+            # 繰り返しの聞き違いの疑い。分けずに 1 件にして要レビューにする。
+            event.parse_flags = (*event.parse_flags, "too_many_actions")
+            return [(event, 0, len(norm))]
+        return [(e, 0, len(norm)) for e in _split_off_amounts(text, event, confidence, utterance_start_ts)]
+    cuts = _split_points(norm, keywords)
+    # 区間を原文から切り出す（NFKC で長さが変わった入力だけは正規化後の文字列から切る）。
+    source = text if len(nfkc) == len(text) else nfkc
+    bounds = [0, *cuts, len(norm)]
+    parts: list[tuple[AudioEvent, int, int]] = []
+    for start, end in zip(bounds, bounds[1:]):
+        part = source[start:end].strip("".join(_SPLIT_DELIMITERS))
+        event = parse_action(part, confidence=confidence, utterance_start_ts=utterance_start_ts)
+        if event is not None:
+            parts.extend(
+                (e, start, end) for e in _split_off_amounts(part, event, confidence, utterance_start_ts)
+            )
+    return parts
+
+
+def parse_actions(
+    text: str,
+    confidence: Optional[float] = None,
+    utterance_start_ts: Optional[float] = None,
+) -> list[AudioEvent]:
+    """1 回の発話からアクションを**言った順にすべて**返す（ADR-0061）。確認型（疑問形）は空（仕様 FR-17）。
+
+    ディーラーが間を空けずに続けて言うと（「フォールド、フォールド、コール」）、1 つの発話として
+    書き起こされる。席番号を言わない運用では手番の順でアクターを決めるので、1 つでも落とすと
+    以降のアクターがすべてずれる。キーワードが 2 つ以上あれば `_split_points` で切り分け、
+    それぞれを `parse_action` で読む（切り分けた各アクションには複数アクションの flag は付かない）。
+    キーワードが 1 つ、または多すぎる（繰り返しの幻聴）ときは従来どおり `parse_action` 1 件。
+
+    辞書に無い書き起こしゆれ（「ヘッドゾップ」）は、片仮名の語を音の近さでアクションの語と照合して読む
+    （`audio/phonetic.py`。読んだアクションは `fuzzy_keyword` = 要確認）。音の近さは辞書で読めるアクションを
+    減らさない（読めなければ辞書だけの読みに戻る）。
+    """
+    text = _drop_question_sentences(text)
+    if not text:
+        return []
+    text = _KANJI_SENTEN.sub("センテン", text)
+    events = _parse_utterance(text, confidence, utterance_start_ts)
+    if events:
+        return _mark_garbled_calls(_mark_before_check_around(events))
+    # 雑談に続けて言ったアクション（店舗 2026-09-29 7b897671 ハンド 2:「それが撮りづらくなります。 そんな機能入れて
+    # ないんですよ、まだ。 1300」）は、発話全体では会話とみて読まない。最後の文から前へ、アクションとして読める文
+    # だけを読み直す（つなぎの言葉だけの文は飛ばす）。雑談に挟まれた文は読まない（d0f055fb:「ラッシャーに4とか
+    # 書いちゃってたよ。4番レイズとかね。最悪ね。」）。
+    sentences = [s.strip() for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+    groups: list[list[AudioEvent]] = []
+    for sentence in reversed(sentences[1:]):
+        found = _parse_utterance(sentence, confidence, utterance_start_ts)
+        if found:
+            groups.append(found)
+        elif not _is_filler(sentence):
+            break
+    salvaged = [event for found in reversed(groups) for event in found]
+    for event in salvaged:
+        event.parse_flags = (*event.parse_flags, "sentence_after_chatter")
+    return _mark_garbled_calls(salvaged)
+
+
+# 「センテン」（千点）を Whisper が同じ読みの漢字で書く（店舗 2026-10-14 845da8e6 ハンド 9「失礼します。7番先天。」
+# = 席7 千点、開発データの「ご先天」= 5千点 2 回）。仮名に戻して仮名の数の読みで読む。席（「番」）か数の読み（「ご」）の
+# すぐあとだけ: 「先天」だけの発話は崩れた額（第 2 の耳の「先天」= 本当は 4000 の「よっしゃんてん」, 42f7b964 ハンド 2）
+_KANJI_SENTEN = re.compile(r"(?<=[番ごゴ])(?:先天|宣伝)")
+
+
+def _mark_garbled_calls(events: list[AudioEvent]) -> list[AudioEvent]:
+    """「コールド」と書き起こしたコールに聞き違いのコールの印を付ける（`_GARBLED_CALL_WORD`）。"""
+    for event in events:
+        if (event.action == "call" and GARBLED_CALL not in event.parse_flags
+                and _GARBLED_CALL_WORD.search(_to_katakana(unicodedata.normalize("NFKC", event.raw_text or "")))):
+            event.parse_flags = tuple(f for f in event.parse_flags if f != "fuzzy_keyword") + (GARBLED_CALL,)
+    return events
+
+
+# チェックアラウンドの直前に続けて言ったチェック（「チェック、チェックアラウンド、ラストカード」）の印。チェックアラウンドが
+# 閉じたストリートの言い直しなら、その前のチェックも同じ言い直し（engine。店舗 2026-10-06 05cccd6c ハンド 14: ターンを
+# 閉じた「チェック、チェック」のあとのこの発話の最初のチェックがリバーの最初の人のチェックになった）
+BEFORE_CHECK_AROUND = "before_check_around"
+
+
+def _mark_before_check_around(events: list[AudioEvent]) -> list[AudioEvent]:
+    """チェックアラウンドの直前に続く（ほかのアクションを挟まない）チェックに `BEFORE_CHECK_AROUND` を付ける。"""
+    for i, event in enumerate(events):
+        if event.action != "check" or "check_around" not in event.parse_flags:
+            continue
+        j = i - 1
+        while j >= 0 and events[j].action == "check" and "check_around" not in events[j].parse_flags:
+            if BEFORE_CHECK_AROUND not in events[j].parse_flags:
+                events[j].parse_flags = (*events[j].parse_flags, BEFORE_CHECK_AROUND)
+            j -= 1
+    return events
+
+
+def _is_filler(sentence: str) -> bool:
+    """つなぎの言葉だけの文（「はい。」「えー、」）。"""
+    return not _residue(_to_katakana(unicodedata.normalize("NFKC", sentence)), [])
+
+
+# ――― 意味のない単発の語を額と読む（オーナー 2026-10-01）―――
+# 「会話として意味のない単語（ゼニューク）などを単発で宣言したとき、額の発声を疑う」。Whisper は額の読み（セン・ヒャク・
+# テン）を崩して仮名の語にする（店舗:「センニハク」= 1200・「にせんたん」= 2000・「さんびょくてん」= 300・「よっしゃん
+# てん」= 4000・「ゼニューク」= 1200、読み上げ集:「ロックセンテン」= 6000・「ニモン」= 2 万）。発話全体が仮名だけの 1 語で、
+# アクションとして読めず、笑い声・繰り返しでないときだけ、額の読みに音が近いか調べる（要確認 `phonetic_amount`）。
+# 第 2 の耳があればその額の候補と合わせて（`second_ear.garbled_amount_events`）、無ければ音の近さだけで
+# （`parse_garbled_amount`）読む。どちらも `second_ear.apply_ear` から（ライブ・読み直し・推定器が同じ規則）。
+GARBLED_MIN_MORAE = 3
+GARBLED_MAX_MORAE = 12
+# 音の近さだけで読むときの距離の上限。店舗の単発の仮名の語 189 種・読み上げ集で、これ以下は（笑い声を除いて）全部が
+# 額の崩れで、額も合っていた。これより遠いと「はい」「ナイス」「これで」など意味のある語が混ざる。
+PHONETIC_AMOUNT_MAX_DISTANCE = 0.4
+# いちばん近い額からこの差までの額も候補にする（「よっしゃんてん」= 4 万 0.22 / 4000 0.25）。場面で使える額を engine が選ぶ
+PHONETIC_AMOUNT_OPTION_SPAN = 0.1
+# 候補の点数 = −（この重み）× 距離（第 2 の耳の確からしさと同じ尺度。`second_ear.EAR_AMOUNT_PHONETIC_WEIGHT` と同じ値）
+PHONETIC_AMOUNT_SCORE_WEIGHT = 10.0
+_GARBLED_STRIP = re.compile(r"[\s、。,.!?！？・…〜~「」]+")
+_GARBLED_TRAILERS = ("デース", "デス", "デシタ")
+
+
+def _is_repetition(word: str) -> bool:
+    """笑い声・同じ言葉の繰り返し（「ハッハッハッハ」「アハハハ」「ゴメンゴメン」「ハイハイ」）。"""
+    w = word.replace("ッ", "").replace("ー", "")
+    return bool(re.fullmatch(r"(.{1,4}?)\1+.?", w)) or re.search(r"(.)\1\1", w) is not None
+
+
+def garbled_word(text: str) -> Optional[str]:
+    """発話全体が仮名だけの 1 語（額の崩れかもしれない語）なら、その語（片仮名）。そうでなければ None。
+
+    拍の数が `GARBLED_MIN_MORAE`〜`GARBLED_MAX_MORAE`（「はい」「でん」のような短い語は額と区別できない）で、
+    笑い声・繰り返しでないこと。語のあとの「です」は除く（「センペンです」）。
+    """
+    from audio.phonetic import morae
+
+    body = _to_katakana(_GARBLED_STRIP.sub("", unicodedata.normalize("NFKC", text)))
+    for trailer in _GARBLED_TRAILERS:
+        if body.endswith(trailer) and len(body) > len(trailer):
+            body = body[:-len(trailer)]
+            break
+    if not body or not all(_is_katakana(ch) or ch == "ー" for ch in body):
+        return None
+    if not GARBLED_MIN_MORAE <= len(morae(body)) <= GARBLED_MAX_MORAE or _is_repetition(body):
+        return None
+    return body
+
+
+def phonetic_amount_event(
+    text: str, options: tuple[int, ...], confidence: Optional[float],
+    utterance_start_ts: Optional[float], flags: tuple[str, ...] = (),
+    scores: tuple[tuple[int, float], ...] = (),
+) -> AudioEvent:
+    """音で読んだ額（候補 `options` の先頭）のベット・レイズ。engine がその場面で使える候補を選ぶ
+    （候補の点数 `scores` = 音の近さ・第 2 の耳の確からしさに、ポットに対する大きさの重みを足して）。"""
+    return AudioEvent(
+        action="bet", amount=options[0], timestamp=time.time(), raw_text=text, confidence=confidence,
+        parse_flags=("amount_only", "phonetic_amount", *flags), utterance_start_ts=utterance_start_ts,
+        amount_options=tuple(options), amount_scores=tuple(scores),
+    )
+
+
+def parse_garbled_amount(
+    text: str, confidence: Optional[float] = None, utterance_start_ts: Optional[float] = None,
+) -> Optional[AudioEvent]:
+    """意味のない単発の語を、音の近さだけで額と読む（第 2 の耳の無いとき）。読めなければ None。
+
+    いちばん近い額が `PHONETIC_AMOUNT_MAX_DISTANCE` 以下で、アクションの語・卓の用語のほうが近くないとき。
+    """
+    from audio.phonetic import rank_amounts, word_closer_than
+
+    if is_question(text) or is_announcement(text) or parse_actions(text):
+        return None
+    word = garbled_word(text)
+    if word is None:
+        return None
+    ranked = rank_amounts(word)
+    best = ranked[0][0]
+    if best > PHONETIC_AMOUNT_MAX_DISTANCE or word_closer_than(word, best):
+        return None
+    near = [(amount, d) for d, amount in ranked if d <= best + PHONETIC_AMOUNT_OPTION_SPAN]
+    return phonetic_amount_event(
+        text, tuple(amount for amount, _ in near), confidence, utterance_start_ts,
+        scores=tuple((amount, round(-PHONETIC_AMOUNT_SCORE_WEIGHT * d, 3)) for amount, d in near),
+    )
+
+
+def _parse_utterance(
+    text: str, confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> list[AudioEvent]:
+    """`parse_actions` の本体（疑問形の文を除いたあとの 1 つの発話 / 文）。"""
+    full = unicodedata.normalize("NFKC", text)
+    short = _SHORT_RESTATE_CUE.search(full)
+    if short is not None:
+        # 「N 足りないから M」: 言い直したあとの額 M だけを読む（N は前に言った額）
+        after = [e for e in _parse_utterance(full[short.end():].strip(_TRAILING_PUNCTUATION), confidence,
+                                             utterance_start_ts) if e.amount]
+        if len(after) == 1:
+            return [replace(after[0], raw_text=text,
+                            parse_flags=tuple(dict.fromkeys((*after[0].parse_flags, RESTATEMENT))))]
+    cue = _CORRECTION_CUE.search(_to_katakana(full))
+    if cue is not None:
+        # 訂正の合図。前に言ったアクションは合図の前、続けて言ったアクション（「失礼しました。800点。」）は直したあと
+        before = full[:cue.start()].strip(_TRAILING_PUNCTUATION)
+        after = full[cue.end():].strip(_TRAILING_PUNCTUATION)
+        event = AudioEvent(action=CORRECTION, amount=0, timestamp=time.time(), raw_text=text,
+                           confidence=confidence, utterance_start_ts=utterance_start_ts)
+        return [
+            *(_parse_utterance(before, confidence, utterance_start_ts) if before else []),
+            event,
+            *(_parse_utterance(after, confidence, utterance_start_ts) if after else []),
+        ]
+    whole = _to_katakana(full).strip(_TRAILING_PUNCTUATION)
+    if _GARBLED_CALL_PHRASE.fullmatch(whole) or _GARBLED_CALL_WHOLE.fullmatch(whole):
+        return [AudioEvent(action="call", amount=0, timestamp=time.time(), raw_text=text, confidence=confidence,
+                           utterance_start_ts=utterance_start_ts, parse_flags=(GARBLED_CALL,))]
+    if _GARBLED_CHECK_WHOLE.fullmatch(whole):
+        return [AudioEvent(action="check", amount=0, timestamp=time.time(), raw_text=text, confidence=confidence,
+                           utterance_start_ts=utterance_start_ts, parse_flags=("fuzzy_keyword",))]
+    alias = _WHOLE_UTTERANCE_ALIASES.get(whole)
+    if alias is not None:
+        text = alias
+    nfkc = unicodedata.normalize("NFKC", text)
+    norm = _to_katakana(nfkc)
+    if _BLIND_ANNOUNCEMENT.match(norm.strip()):
+        return []
+    players_left = _find_players_left(nfkc, norm)
+    if players_left is not None:
+        return _around_players_left(text, nfkc, players_left, confidence, utterance_start_ts)
+    hand_phrase = _find_hand_phrase(norm)
+    if hand_phrase is not None:
+        return _around_hand_phrase(text, nfkc, hand_phrase, confidence, utterance_start_ts)
+    keywords = _distinct_keywords(_keyword_matches(norm, nfkc))
+    if not keywords:
+        # アクションの語が無くても、額だけを言っていればベットかレイズ（「600点」）
+        event = parse_amount_only(text, confidence=confidence, utterance_start_ts=utterance_start_ts)
+        if event is not None:
+            return [event]
+        wagers = _wagers_in_turn(text, nfkc, confidence, utterance_start_ts)
+        if wagers:
+            return wagers
+    rewrite = _phonetic_rewrite(nfkc, norm, keywords)
+    if rewrite is not None:
+        events = _parse_phonetic(text, nfkc, rewrite, confidence, utterance_start_ts)
+        if events is not None:
+            return events
+    if not keywords:
+        return []
+    if _is_conversation(norm, keywords) or _is_hand_name_chat(norm, keywords):
+        logger.debug("会話の中のアクションの語とみなして読みません: %r", text)
+        return []
+    return [e for e, _, _ in _parse_keyword_parts(text, nfkc, norm, keywords, confidence, utterance_start_ts)]
+
+
+# 役名の語だけの発話でも、札の名前・スート・「ヒット」・卓の用語を除いて会話の言葉が長く残れば、ディーラーが見せた
+# 手の役名ではなく会話の中の役名（店舗 2026-10-14 62cad44b ハンド 17: ショーダウンのあとの「なかなか出ないんだよね、
+# ストレートもフラッシュも。」を席8 の役名「ストレート」と読み、手札の判定より役名を優先して勝者を誤った）。
+# 開発データの役名の発話 22 回で、残りはこの発話の 8 文字のほかは 4 文字以下（「おー ハートハートのフラッシュ」）。
+_HAND_CHAT_MIN_CHARS = 6
+
+
+def _is_hand_name_chat(norm: str, keywords: list[tuple[int, int, str]]) -> bool:
+    if not keywords or any(action != "end_hand" for _, _, action in keywords):
+        return False
+    card_words = re.compile(_CARD + r"|クラブ|ハート|スペード|ダイヤ|ヒット|S", re.IGNORECASE)   # 札の名前は下で定義
+    residue = card_words.sub("", _residue(norm, keywords))
+    return len(residue) >= _HAND_CHAT_MIN_CHARS
+
+
+# 「スリープレイヤーズ」「3ウェイ」= 残りの人数（ディーラーがストリートの移りに言う。言わないこともある,
+# オーナー 2026-09-30）。数を額と読まない（「コール 3プレイヤーズ」がコール 3 になっていた）。2 人は「ヘッズアップ」
+_PLAYERS_WORDS = {"ツー": 2, "スリー": 3, "フォー": 4, "ファイブ": 5, "シックス": 6, "セブン": 7, "エイト": 8, "ナイン": 9}
+_PLAYERS_LEFT = re.compile(
+    r"(?P<count>[2-9二三四五六七八九]|" + "|".join(_PLAYERS_WORDS) + r")[\s・]*"
+    r"(?:プレ[イー]?ヤー?[ズス]?|ウ[ェエ]イ|players?|ways?)",
+    re.IGNORECASE,
+)
+# 数の語が崩れた言い方（読み上げ集・台本 2026-09-30:「フォープレイヤーズ」を「フォールプレイヤー」）。「プレイヤー」の
+# 前の片仮名を音の近さで数の語と比べる（`phonetic.match_count`）。
+_PLAYERS_WORD = re.compile(r"プレ[イー]?ヤー?[ズス]?")
+# 「ウェイ」が崩れた言い方: 数のすぐあとの、エ段の音に「イ」（伸ばす音）か「ン」が続く語（「コール 3 レイ」「コール3レイズ」
+# 「スリーベイク」「スリーベン」, 店舗 2026-09-29・10-06 の 5 回。第 2 の耳は同じ音を「スリーウェイ」と聞いた）。
+# 「3 ベット」「スリーカード」「ツーペア」はこの形ではない。店のディーラーは賭けを額で言う（「スリーベット」は出ていない）。
+_PLAYERS_COUNT = re.compile(r"(?P<count>[2-9二三四五六七八九]|" + "|".join(_PLAYERS_WORDS) + r")[\s・]*")
+
+
+@dataclass(frozen=True)
+class _PlayersLeft:
+    start: int
+    end: int
+    count: int
+
+
+def _find_players_left(nfkc: str, norm: str) -> Optional[_PlayersLeft]:
+    """残りの人数の言い方（「スリープレイヤーズ」「3ウェイ」）の位置と人数。無ければ None。"""
+    from audio.phonetic import match_count
+
+    found = _PLAYERS_LEFT.search(norm) or _garbled_way(nfkc, norm)
+    if found is not None:
+        word = found.group("count")
+        count = _PLAYERS_WORDS.get(word) or (int(word) if word.isdigit() else KANJI_DIGIT[word])
+        return _PlayersLeft(found.start(), found.end(), count)
+    for tail in _PLAYERS_WORD.finditer(norm):
+        start = tail.start()
+        while start > 0 and (nfkc[start - 1] == "ー" or _kana_script(nfkc[start - 1]) == "katakana"):
+            start -= 1
+        count = match_count(norm[start:tail.start()]) if start < tail.start() else None
+        if count is not None:
+            return _PlayersLeft(start, tail.end(), count)
+    return None
+
+
+class _WayMatch:
+    """`_garbled_way` の見つけた位置（`re.Match` と同じ読み方: start / end / group("count")）。"""
+
+    def __init__(self, count: re.Match, end: int) -> None:
+        self._count = count
+        self._end = end
+
+    def start(self) -> int:
+        return self._count.start()
+
+    def end(self) -> int:
+        return self._end
+
+    def group(self, name: str) -> str:
+        return self._count.group(name)
+
+
+def _garbled_way(nfkc: str, norm: str) -> Optional[_WayMatch]:
+    """数のすぐあとの「ウェイ」が崩れた語（`_PLAYERS_COUNT` の説明）。あとに額が続くなら読まない。"""
+    from audio.phonetic import morae
+
+    seats = [m.span(1) for m in _SEAT_PATTERN.finditer(norm)]
+    for count in _PLAYERS_COUNT.finditer(norm):
+        if any(a <= count.start() < b for a, b in seats):
+            continue                            # 席番号（「シート3 レイズ」）
+        if _digit_kana_unit_at(norm, count.start()) is not None:
+            continue                            # 数 + 仮名の単位（「2センテン」= 2千点）は額
+        start = count.end()
+        if start >= len(norm) or not _is_katakana(norm[start]):
+            continue
+        end = start
+        while end < len(norm) and (_is_katakana(norm[end]) or norm[end] == "ー"):
+            end += 1
+        sounds = morae(norm[start:end])
+        if len(sounds) < 2 or sounds[0][1] != "e" or sounds[1] not in (("", "e", "long"), ("N", "", "N")):
+            continue
+        rest = norm[end:].lstrip(" 　、,")
+        if rest and _AMOUNT_TOKEN.match(rest):
+            continue
+        return _WayMatch(count, end)
+    return None
+
+
+def _around_players_left(
+    text: str, nfkc: str, found: _PlayersLeft, confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> list[AudioEvent]:
+    """残りの人数を 1 つの合図（2 人は heads_up、3 人以上は players_left + 人数）にし、前後は別に読む。"""
+    source = text if len(nfkc) == len(text) else nfkc
+    count = found.count
+    left = AudioEvent(
+        action="heads_up" if count == 2 else "players_left", amount=0 if count == 2 else count,
+        timestamp=time.time(), raw_text=source[found.start:found.end], confidence=confidence,
+        utterance_start_ts=utterance_start_ts,
+    )
+    before = source[:found.start].rstrip("".join(_SPLIT_DELIMITERS))
+    after = source[found.end:]
+    if _HAND_NAME_JOINER.match(_to_katakana(unicodedata.normalize("NFKC", source[:found.end] + after)), found.end):
+        after = after[1:]                                 # 「キングハイにクイーンハイ」の「に」
+    after = after.lstrip("".join(_SPLIT_DELIMITERS))
+    return [
+        *(_parse_utterance(before, confidence, utterance_start_ts) if before.strip() else []),
+        left,
+        *(_parse_utterance(after, confidence, utterance_start_ts) if after.strip() else []),
+    ]
+
+
+# ショーダウンの役を札の名前で言う言い方（オーナー 2026-10-01）。札の名前 + 役の言い方を 1 つの役名として読む:
+#   ワンペア     「キングヒット」/ ポケットペアは呼び名「エーシーズ」「キングス」・「ナナポケ」・「ポケットキングス」
+#   スリーカード 「ナナのセット」「セットオブセブン」（「トリップス」「スリーカード」は役の語）
+#   フルハウス   「エースキングフル」
+#   役が無い     手札の名前「クイーンジャック」
+# 「エースファイブツーペア」「キングハイストレート」「エースハイフラッシュ」「クワッズ」は役の語 = HAND_NAME_KEYWORDS。
+_RANK_WORDS = ("エース", "キング", "クイーン", "クィーン", "ジャック", "テン", "ナイン", "エイト", "セブン", "シックス",
+               "ファイブ", "フォー", "スリー", "ツー", "トゥー", "デュース")
+# 日本語の数の読み（「ナナのセット」）。ほかの語と紛れる 1 文字の読み（シ・ク）は入れない
+_RANK_KANA = ("ナナ", "シチ", "ハチ", "キュウ", "キュー", "ジュウ", "ジュー", "ロク", "ヨン", "サン", "ゴ", "ニ")
+_RANK_WORD = "(?:" + "|".join(_RANK_WORDS) + ")"
+_RANK = (r"(?:" + "|".join(_RANK_WORDS + _RANK_KANA)
+         + r"|10|[2-9]|[二三四五六七八九十]|[AKQJT])")       # 役の言い方が続くときは数・英字も
+# ポケットペアの呼び名（英語の複数形のカタカナ読み）
+_RANK_PLURALS = ("エーシーズ", "エーシズ", "エースィズ", "キングス", "キングズ", "クイーンズ", "クィーンズ", "クイーンス",
+                 "ジャックス", "ジャックズ", "テンズ", "テンス", "ナインズ", "ナインス", "エイツ", "セブンズ", "セブンス",
+                 "シックシーズ", "シクシーズ", "シックスィーズ", "シックスズ", "ファイブズ", "ファイヴズ", "フォーズ",
+                 "スリーズ", "ツーズ", "デューシーズ", "デュースィズ")
+_RANK_PLURAL = "(?:" + "|".join(_RANK_PLURALS) + ")"
+_NOT_LETTER = r"(?<![A-Za-z])"
+_CHUNK_START = r"(?:^|(?<=[、。,.・!?\s]))"
+_CHUNK_END = r"(?=$|[、。,.・!?\s]|デス|デシタ)"
+_CARD = r"(?:" + _RANK_PLURAL + "|" + _RANK + r"[ズス]?)"      # 札の名前（複数形も）
+_HAND_PHRASES: tuple[tuple[re.Pattern, str], ...] = (
+    # 「エースファイブツーペア」「キングスアンドセブンズ、ツーペア」= ツーペア（札の名前が長くても会話とみない）
+    (re.compile(_NOT_LETTER + _CARD + r"[\s・]*(?:(?:アンド|ト)[\s・]*)?" + _CARD + r"[\s・、]*(?:ツー|トゥー|2|二)ペア",
+                re.IGNORECASE), "Two pair"),
+    # 「エースキングフル」「セブンフル」「エーシーズフルオブキングス」= フルハウス（「…フルハウス」は役の語で読む）
+    (re.compile(_NOT_LETTER + _CARD + r"[\s・、]*(?:" + _CARD + r"[\s・、]*)?(?:フル|フール)(?!ハウス)"
+                r"(?:[\s・]*オブ[\s・]*" + _CARD + ")?", re.IGNORECASE), "Full house"),
+    # 「ナナのセット」「セットオブセブン」= スリーカード（「セットアップ」「サンセット」は違う）
+    (re.compile(_NOT_LETTER + r"(?!サンセット)" + _RANK + r"[\sノ・]*セット(?!アップ)", re.IGNORECASE),
+     "Three of a kind"),
+    (re.compile(r"セット[\s・]*オブ[\s・]*" + _RANK, re.IGNORECASE), "Three of a kind"),
+    # 「キングヒット」= ボードの札と組になったワンペア。ボードにペアがあれば、それを無視して手札とボードで組にした数字
+    # + ヒットと言うこともある = 2 ペア（オーナー 2026-10-06）。数字は `hit_rank` で engine が手札と突き合わせる
+    (re.compile(_NOT_LETTER + "(?P<rank>" + _RANK + r")[\sノ・]*ヒット", re.IGNORECASE), "One pair"),
+    # ポケットペア: 「ポケットキングス」「ポケットエース」「ナナポケ」「キングのポケット」
+    (re.compile(r"ポケット[\s・]*(?:" + _RANK_PLURAL + "|" + _RANK + ")", re.IGNORECASE), "One pair"),
+    (re.compile(_NOT_LETTER + _RANK + r"(?:" + _RANK + r")?[\sノ・]*ポケ(?:ット)?", re.IGNORECASE), "One pair"),
+    # 「キングのペア」= ワンペア（「ツーペア」「2ペア」「二ペア」は役の語 = ツーペア）
+    (re.compile(_NOT_LETTER + r"(?!(?:ツー|トゥー|2|二)ペア)" + _RANK + r"[\sノ・]*ペア", re.IGNORECASE), "One pair"),
+)
+# 手札の名前だけ（「クイーンジャック」「エースキングハイ」「エースハイ」）= 役が無い。発話の区切りから区切りまでが
+# 札の名前だけのとき（会話の中の札の名前は読まない）。「エースエース」はワンペア。
+_HOLE_CARDS_NAMED = re.compile(
+    _CHUNK_START + r"(?P<r1>" + _RANK_WORD + r"|[AKQJT])[\s・]*(?P<r2>" + _RANK_WORD + r"|[AKQJT])?[\s・]*"
+    r"(?P<high>ハイ)?" + _CHUNK_END, re.IGNORECASE,
+)
+# ポケットペアの呼び名だけ（「エーシーズ」「キングス」）= ワンペア
+_POCKET_NAMED = re.compile(_CHUNK_START + _RANK_PLURAL + _CHUNK_END, re.IGNORECASE)
+# 2 人の手を続けて言う（店舗 2026-10-06 05cccd6c ハンド 16:「キングハイにクイーンハイ」= キングハイ対クイーンハイ）。
+# 「ハイ」に続く「に」「と」は、次が札の名前なら区切りと同じに読む
+_HAND_NAME_JOINER = re.compile(r"(?<=ハイ)[ニト](?=(?:" + _RANK_WORD + r"|[AKQJT]))", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class _HandPhrase:
+    start: int
+    end: int
+    name: str
+    hit_rank: Optional[str] = None       # 「Nヒット」の N（A K Q J T 9..2）
+
+
+def _find_hand_phrase(norm: str) -> Optional[_HandPhrase]:
+    """札の名前を使った役の言い方の、いちばん左のもの（同じ位置なら上の表の順）。無ければ None。
+
+    手札の名前だけの言い方は、発話に役の語（「ストレート」など）が無いときだけ（「キングハイ、ストレート」と
+    区切って書き起こされた「キングハイ」をハイカードにしない）。"""
+    norm = _HAND_NAME_JOINER.sub("、", norm)            # 同じ長さの置き換え（位置は変わらない）
+    found: list[tuple[int, int, int, str, Optional[str]]] = []
+    for order, (pattern, name) in enumerate(_HAND_PHRASES):
+        hit = pattern.search(norm)
+        if hit is not None:
+            rank = hit.groupdict().get("rank")
+            found.append((hit.start(), order, hit.end(), name, _hit_rank(rank) if rank else None))
+    if not found and not _has_hand_name_keyword(norm):
+        pocket = _POCKET_NAMED.search(norm)
+        if pocket is not None:
+            found.append((pocket.start(), 0, pocket.end(), "One pair", None))
+        for hit in _HOLE_CARDS_NAMED.finditer(norm):
+            r1, r2 = hit.group("r1"), hit.group("r2")
+            if r2 is None and hit.group("high") is None:
+                continue                         # 札の名前 1 つだけ（「エース」）は役の言い方ではない
+            pair = r2 is not None and _rank_of(r1) == _rank_of(r2)
+            found.append((hit.start(), 0, hit.end(), "One pair" if pair else "High card", None))
+            break
+    if not found:
+        return None
+    start, _, end, name, hit_rank = min(found, key=lambda f: f[:2])
+    return _HandPhrase(start, end, name, hit_rank)
+
+
+_RANK_LETTERS = {"エース": "A", "キング": "K", "クイーン": "Q", "クィーン": "Q", "ジャック": "J", "テン": "T",
+                 "ナイン": "9", "エイト": "8", "セブン": "7", "シックス": "6", "ファイブ": "5", "フォー": "4",
+                 "スリー": "3", "ツー": "2", "トゥー": "2", "デュース": "2"}
+
+
+def _rank_of(word: str) -> str:
+    return _RANK_LETTERS.get(word, word.upper())
+
+
+# 数の読み・漢数字・算用数字の札の数字（「ナナヒット」「5ヒット」「十ヒット」）
+_RANK_NUMBERS = {"ナナ": "7", "シチ": "7", "ハチ": "8", "キュウ": "9", "キュー": "9", "ジュウ": "T", "ジュー": "T",
+                 "ロク": "6", "ヨン": "4", "サン": "3", "ゴ": "5", "ニ": "2", "10": "T", "二": "2", "三": "3", "四": "4",
+                 "五": "5", "六": "6", "七": "7", "八": "8", "九": "9", "十": "T"}
+
+
+def _hit_rank(word: str) -> Optional[str]:
+    """「Nヒット」の N を札の数字（A K Q J T 9..2）に。分からなければ None。"""
+    rank = _RANK_NUMBERS.get(word) or _rank_of(word)
+    return rank if rank in "AKQJT98765432" and len(rank) == 1 else None
+
+
+def _has_hand_name_keyword(norm: str) -> bool:
+    lower = norm.lower()
+    return any(_to_katakana(unicodedata.normalize("NFKC", k)).lower() in lower for k in HAND_NAME_KEYWORDS)
+
+
+def mentions_hand_name(text: str) -> bool:
+    """発話のどこかに役の名前があるか（ショーダウンで手を読み上げた）。確認型の文（「キングハイですね。」）も見る:
+    `parse_actions` はアクションにしないが、手を見せたことの証拠にはなる（推定器のショーダウンの声, 2026-10-07）。"""
+    for sentence in _SENTENCE_SPLIT.split(text or ""):
+        norm = _to_katakana(unicodedata.normalize("NFKC", sentence)).rstrip(_TRAILING_PUNCTUATION)
+        for ending in _QUESTION_ENDINGS:
+            if norm.endswith(ending):
+                norm = norm[:-len(ending)]
+                break
+        if norm.strip() and (_find_hand_phrase(norm) is not None or _has_hand_name_keyword(norm)):
+            return True
+    return False
+
+
+def _around_hand_phrase(
+    text: str, nfkc: str, found: _HandPhrase, confidence: Optional[float], utterance_start_ts: Optional[float],
+) -> list[AudioEvent]:
+    """札の名前を使った役の言い方を 1 つの役名（end_hand + hand_name）にし、前後は別に読む。"""
+    source = text if len(nfkc) == len(text) else nfkc
+    shown = AudioEvent(
+        action="end_hand", amount=0, timestamp=time.time(), raw_text=source[found.start:found.end],
+        confidence=confidence, utterance_start_ts=utterance_start_ts, hand_name=found.name,
+        hit_rank=found.hit_rank,
+    )
+    before = source[:found.start].rstrip("".join(_SPLIT_DELIMITERS))
+    after = source[found.end:]
+    if _HAND_NAME_JOINER.match(_to_katakana(unicodedata.normalize("NFKC", source[:found.end] + after)), found.end):
+        after = after[1:]                                 # 「キングハイにクイーンハイ」の「に」
+    after = after.lstrip("".join(_SPLIT_DELIMITERS))
+    return [
+        *(_parse_utterance(before, confidence, utterance_start_ts) if before.strip() else []),
+        shown,
+        *(_parse_utterance(after, confidence, utterance_start_ts) if after.strip() else []),
+    ]
+
+
 def parse_action(
     text: str,
     confidence: Optional[float] = None,
@@ -250,28 +1774,23 @@ def parse_action(
     3. 採用キーワードの span と重ならない位置に**別アクション**のキーワードがあれば
        parse_flags に "multi_action_keywords" を立てる（V1: 先頭のみ採用 + 要レビュー。
        "スリーベット" 内の "ベット" のような包含マッチは flag しない）。
+    4. **NFKC + ひらがな→カタカナ**に正規化してから照合する（`ACTION_KEYWORDS` はカタカナ + 英字）。
+       ASR が「ちぇっく」と書き起こす場合と、CLI で IME 変換せずに打った場合の両方を拾う
+       （ISSUE-0027）。`raw_text` は元のテキストをそのまま残す。
+    5. 席番号（"シート3"）に加え **ポジション名**（"BTN、コール"）も拾う（仕様 §7 / FR-26,
+       ISSUE-0032）。どちらも「誰が行動したか」の明示証拠だが、席への解決はボタンを知っている
+       engine 側の責務なので、ここでは正準名を持ち回るだけにする。
     """
-    # 全角数字・全角英字・半角カナ等を正規化してからパースする（raw_text は原文を保持）。
-    norm = unicodedata.normalize("NFKC", text)
-    lower = norm.lower()
-
-    matches: list[tuple[int, int, str]] = []  # (pos, kw_len, action)
-    for keyword, action in ACTION_KEYWORDS.items():
-        kw = keyword.lower()
-        start = 0
-        while True:
-            pos = lower.find(kw, start)
-            if pos == -1:
-                break
-            matches.append((pos, len(kw), action))
-            start = pos + 1
+    # 全角数字・全角英字・半角カナ等を正規化し、ひらがなをカタカナに寄せてからパースする
+    # （raw_text は原文を保持）。どちらも文字位置を保つ 1:1 の写像。
+    nfkc = unicodedata.normalize("NFKC", text)
+    norm = _to_katakana(nfkc)
+    matches = _keyword_matches(norm, nfkc)
 
     if not matches:
         logger.debug("No action keyword found in: %r", text)
         return None
 
-    # 最左優先。同位置なら長いキーワードを優先（より具体的な表現を採用するため）
-    matches.sort(key=lambda t: (t[0], -t[1]))
     found_pos, found_len, found_action = matches[0]
     span_end = found_pos + found_len
 
@@ -283,10 +1802,19 @@ def parse_action(
             continue  # 採用キーワードと重なる包含マッチ（例: スリーベット ⊃ ベット）
         flags.append("multi_action_keywords")
         break
+    if found_action == "check":
+        next_keyword = min((pos for pos, _, _ in matches if pos >= span_end), default=len(norm))
+        if _is_check_around(norm, nfkc, found_pos, span_end, next_keyword):
+            flags.append("check_around")
+    # ショーダウンで言った勝った役名（「ツーペア」= ハンドの終わり + 判定との突き合わせ, 2026-09-26）
+    hand_name = _hand_name_for(norm[found_pos:span_end]) if found_action == "end_hand" else None
 
     # 席番号表現（シート1 / seat 3 等）を除去してから金額を抽出する。
     # 除去しないと parse_amount() が席番号の数字を最初の金額候補として拾ってしまう。
-    amount = parse_amount_ex(_strip_seat_references(norm))
+    # 語の直後の仮名の数（「ベトナナ」の「ナナ」）は漢数字にしてから読む（ADR-0062）。
+    # 役名に額は無い（「2ペア」の 2 を額にしない）。
+    amount = (AmountParse(0) if hand_name else
+              parse_amount_ex(_strip_seat_references(_kana_amount_to_kanji(norm, span_end))))
     if amount.ambiguous:
         flags.append("ambiguous_amount")
 
@@ -295,28 +1823,92 @@ def parse_action(
         amount=amount.value,
         timestamp=time.time(),
         raw_text=text,
-        seat=_extract_seat_no(norm),
+        # 勝者の席は最初の席（チョップの「シート3 シート5」は `_extract_all_seat_nos` で全部）
+        seat=_extract_seat_no(norm) if found_action == "winner" else _seat_before(norm, found_pos),
         confidence=confidence,
+        position=parse_position(norm),
         parse_flags=tuple(flags),
         utterance_start_ts=utterance_start_ts,
+        hand_name=hand_name,
     )
+
+
+def _hand_name_for(keyword_text: str) -> Optional[str]:
+    """照合に使った語（正規化済み）が役名なら pokerkit の役名を返す。"""
+    kw = keyword_text.lower()
+    for keyword, name in HAND_NAME_KEYWORDS.items():
+        if _to_katakana(unicodedata.normalize("NFKC", keyword)).lower() == kw:
+            return name
+    return None
+
+
+# 1 発話の書き起こしに使うトークン数の上限 = 基本 + 音の長さ（秒）あたり。人の発話（1 秒に 10 トークン前後）
+# の倍以上を残し、雑音への幻聴のループ（プロンプトの語を 448 トークンまで繰り返して 1 回 15〜18 秒かかった,
+# 店舗の 5 回目の通しテスト）を早く打ち切る。打ち切った書き起こしは `is_implausibly_long` で雑音になる。
+_TOKENS_BASE = 40
+_TOKENS_PER_SEC = 20
+_TOKENS_MAX = 200     # プロンプトと合わせてモデルの上限（448）を超えない
+
+
+@dataclass(frozen=True)
+class Recognition:
+    """1 発話の書き起こし（`WhisperTranscriber.recognize`）。"""
+
+    text: str
+    confidence: Optional[float]
+    no_speech: bool = False     # 声が無い（VAD）ので Whisper にかけなかった
 
 
 class WhisperTranscriber:
     """faster-whisper を使ってマイク音声をテキストに変換するクラス。"""
 
-    def __init__(self, model_size: str = "medium", language: str = "ja") -> None:
+    def __init__(
+        self, model_size: str = "medium", language: str = "ja",
+        beam_size: int = 5, temperature_fallback: bool = False,
+        vad_threshold: float = 0.5, cpu_threads: int = 0,
+    ) -> None:
+        """
+        Args:
+            beam_size: ビーム幅（小さいほど速い）。config `audio.beam_size`。
+            temperature_fallback: 自信の低い書き起こしを温度を上げて最大 5 回やり直すか（faster-whisper の
+                既定）。雑音では毎回やり直しになり 1 発話に 10〜80 秒かかって認識が数分遅れたので、
+                既定では行わない（店舗の実測, ADR-0063）。config `audio.temperature_fallback`。
+            vad_threshold: 声か（Silero VAD, faster-whisper に同梱）の閾値。声が見つからない音（札を混ぜる音・
+                チップの音）は Whisper にかけない（雑音にプロンプトを繰り返す幻聴と、その認識待ちを防ぐ）。
+                0 で使わない。config `audio.vad_threshold`。
+            cpu_threads: Whisper が使う CPU のスレッド数。0 = faster-whisper の既定（4）。8 コアの PC では増やすと
+                速くなることがある（`python tools/audio_check.py bench` で測ってから決める）。config `audio.cpu_threads`。
+        """
         self._language = language
-        logger.info("Loading Whisper model: %s", model_size)
+        self._beam_size = max(1, int(beam_size))
+        self._temperature = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0) if temperature_fallback else 0.0
+        self._vad_threshold = max(0.0, float(vad_threshold))
+        # 読み込めなかった理由（CLI / audio_check が表示する）。読み込めたら None。
+        self.load_error: Optional[str] = None
+        self.cpu_threads = max(0, int(cpu_threads))
+        logger.info("Loading Whisper model: %s (cpu_threads=%s)", model_size, self.cpu_threads or "既定")
         try:
             from faster_whisper import WhisperModel  # type: ignore[import]
 
-            self._model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            self._model = WhisperModel(model_size, device="cpu", compute_type="int8",
+                                       cpu_threads=self.cpu_threads)
         except ImportError:
             logger.warning(
                 "faster-whisper not installed. WhisperTranscriber will not function."
             )
             self._model = None
+            self.load_error = "faster-whisper が入っていません"
+        except Exception as e:
+            # 初回のモデル取得（約 1.5 GB）がネットワーク不通で失敗した等。起動は止めない
+            # （キーボードからの読み上げ文でアクションを入れられる）。
+            logger.exception("Could not load Whisper model %r", model_size)
+            self._model = None
+            self.load_error = f"{type(e).__name__}: {e}"
+
+    @property
+    def ready(self) -> bool:
+        """モデルを読み込めたか。"""
+        return self._model is not None
 
     def transcribe(self, audio_bytes: bytes) -> str:
         """PCM16 音声バイト列をテキストに変換して返す（信頼度を捨てる後方互換版）。"""
@@ -325,8 +1917,26 @@ class WhisperTranscriber:
     def transcribe_with_confidence(
         self, audio_bytes: bytes
     ) -> tuple[str, Optional[float]]:
-        """PCM16 音声バイト列を (テキスト, 信頼度[0,1]) に変換する。
-        変換失敗・モデル未ロード時は ("", None) を返す（クラッシュしない）。
+        """PCM16 音声バイト列を (テキスト, 信頼度[0,1]) に変換する（`recognize` の後方互換版）。"""
+        result = self.recognize(audio_bytes)
+        return result.text, result.confidence
+
+    def has_speech(self, audio_array) -> bool:
+        """音に声が含まれるか（Silero VAD）。VAD を使わない・使えないときは True（Whisper にかける）。"""
+        if self._vad_threshold <= 0:
+            return True
+        try:
+            from faster_whisper.vad import VadOptions, get_speech_timestamps  # type: ignore[import]
+
+            options = VadOptions(threshold=self._vad_threshold, min_speech_duration_ms=100)
+            return bool(get_speech_timestamps(audio_array, options))
+        except Exception:  # noqa: BLE001 — VAD が動かなければ従来どおり全部かける
+            logger.warning("VAD が使えないので、有音の音をすべて Whisper にかけます", exc_info=True)
+            self._vad_threshold = 0.0
+            return True
+
+    def recognize(self, audio_bytes: bytes) -> Recognition:
+        """PCM16 音声バイト列を書き起こす。変換失敗・モデル未ロード時は空（クラッシュしない）。
 
         入力は 16kHz モノラル PCM16 固定を前提とする（faster-whisper は配列長から
         16kHz を仮定するため sample_rate は受け取らない）。
@@ -336,7 +1946,7 @@ class WhisperTranscriber:
         高く出るため、制御語ガードの入力として意味を持つ）。segment が無ければ None。
         """
         if self._model is None:
-            return "", None
+            return Recognition("", None)
         try:
             import math
 
@@ -345,10 +1955,18 @@ class WhisperTranscriber:
             audio_array = (
                 np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             )
+            if not self.has_speech(audio_array):
+                return Recognition("", None, no_speech=True)
+            seconds = len(audio_array) / 16000
+            max_new_tokens = min(_TOKENS_MAX, _TOKENS_BASE + math.ceil(_TOKENS_PER_SEC * seconds))
             segments, _ = self._model.transcribe(
                 audio_array,
                 language=self._language,
                 initial_prompt=WHISPER_PROMPT_JA,
+                beam_size=self._beam_size,
+                temperature=self._temperature,
+                condition_on_previous_text=False,
+                max_new_tokens=max_new_tokens,
             )
             texts: list[str] = []
             logprobs: list[float] = []
@@ -370,10 +1988,10 @@ class WhisperTranscriber:
                 if no_speech:
                     mean_nsp = sum(no_speech) / len(no_speech)
                     confidence *= max(0.0, 1.0 - mean_nsp)
-            return text, confidence
+            return Recognition(text, confidence)
         except Exception:
             logger.exception("Whisper transcription failed")
-            return "", None
+            return Recognition("", None)
 
 
 # ――― R3: 合法手への射影（apply_corrections, ADR-0009 §5）―――
@@ -424,7 +2042,7 @@ def apply_corrections(
     - S4: 金額 snap の review 閾値を同次元比較（gap >= bb）に修正（従来の gap > min_raise_to は
       「2千→2 誤読 → min へ clamp」を無警告で通していた）。bb 不明（=0）は従来閾値に fallback。
     - S3: heard 額が to 解釈では非合法だが「追加額(by)解釈」なら合法という場合、
-      by 読み上げの可能性を reason="raise_to_vs_by_ambiguous" で明示（採用は従来どおり to 解釈 + snap）。
+      レイズの額は常にトータル（by 読み上げの疑いは立てない = オーナー確認 2026-09-26。採用は to 解釈 + snap）。
       両解釈とも合法な通常レイズは慣例（to 読み上げ）を信頼し flag しない。
     - V4: heard 額が bb の倍数でない場合、bb 倍数への丸めが合法レンジ内なら丸める
       （reason="rounded_to_bb"。ASR の端数誤認識対策）。
@@ -508,17 +2126,15 @@ def apply_corrections(
 
     val = amount
 
-    # S3: raise の to/by 曖昧性。to 解釈が非合法（min 未満）だが「追加額」解釈
-    # （現最高額 committed+c に heard を上乗せ）なら合法 → by 読み上げの可能性を flag。
-    if target == "raise" and val < m:
-        by_total = ctx.committed + c + val
-        if m <= by_total <= s:
-            review = True
-            reasons.append("raise_to_vs_by_ambiguous")
+    # レイズの額は常にトータル（「レイズ 2500」= 2500 にする。上乗せ分は言わない = オーナー確認 2026-09-26）。
+    # 最小レイズ未満は聞き違いとして、下の snap + review に任せる（「追加額」とは読み替えない）。
 
-    # V4: bb 倍数への round 寄せ（合法レンジ内に収まる場合のみ）。
-    if bb > 0 and val % bb != 0:
-        rounded = int(round(val / bb)) * bb
+    # V4: チップの最小単位への round 寄せ（合法レンジ内に収まる場合のみ）。単位は SB と BB の最大公約数
+    # （100/200 の卓の「2500」を 2400 にしない = 言った数字どおり, ADR-0062）。chip が無い（legacy）なら bb。
+    # reason 名は画面の説明文（shared/hand_replay）と合わせて従来の rounded_to_bb のまま。
+    unit = ctx.chip or bb
+    if unit > 0 and val % unit != 0:
+        rounded = int(round(val / unit)) * unit
         if m <= rounded <= s:
             reasons.append("rounded_to_bb")
             val = rounded

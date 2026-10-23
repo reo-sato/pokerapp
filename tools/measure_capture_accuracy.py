@@ -111,11 +111,75 @@ def _normalize_amount(value: Any, action_type: str) -> int:
         return 0
 
 
+# オールインと同じ額なら同じアクションとみなす種類（持ち点を全部出すコール・ベット・レイズ = オールイン。
+# 真のアクションの画面・記録のどちらで「オールイン」と書いても、出したチップが同じなら同じ, 2026-09-30）
+_ALLIN_EQUIVALENT = frozenset({"call", "bet", "raise"})
+
+
+def same_action_type(gt_type: str, cap_type: str, gt_amount: int, cap_amount: int) -> bool:
+    """種類が同じか。オールインは、同じ額（0 でない）のコール / ベット / レイズと同じ。"""
+    if gt_type == cap_type:
+        return True
+    pair = {gt_type, cap_type}
+    return "allin" in pair and bool(pair & _ALLIN_EQUIVALENT) and gt_amount == cap_amount and gt_amount > 0
+
+
+def same_place(gt_action: dict, cap_action: dict) -> bool:
+    """同じ人の同じストリートの行か。
+
+    アライメントの「置き換え」の区間では、席やストリートの違う行どうしが並ぶ（店舗 a6ee12e4 ハンド 1: 真のアクション
+    「席5 フォールド」と記録「席4 フォールド」が種類と額だけで一致扱いになっていた, 2026-09-30）。ストリートは
+    どちらかが無ければ比べない（ストリートの無い古い真のアクションの行）。
+    """
+    if gt_action.get("seat") != cap_action.get("seat"):
+        return False
+    gt_street = str(gt_action.get("street") or "").strip().lower()
+    cap_street = str(cap_action.get("street") or "").strip().lower()
+    return not gt_street or not cap_street or gt_street == cap_street
+
+
+def row_correct(gt_action: dict, cap_action: dict) -> bool:
+    """1 行が正しいか: 同じ人・同じストリートで、種類（オールインの扱いは `same_action_type`）と額が一致。"""
+    if not same_place(gt_action, cap_action):
+        return False
+    gt_type = _normalize_action_type(gt_action.get("action"))
+    cap_type = _normalize_action_type(cap_action.get("action"))
+    gt_amount = _normalize_amount(gt_action.get("amount"), gt_type)
+    cap_amount = _normalize_amount(cap_action.get("amount"), cap_type)
+    return same_action_type(gt_type, cap_type, gt_amount, cap_amount) and gt_amount == cap_amount
+
+
 def _normalize_board(board: Any) -> list[str]:
     if not isinstance(board, list):
         return []
     cards = [str(c).strip() for c in board if c]
     return sorted(cards, key=str.lower)
+
+
+def _board_matches(gt_board: Any, cap_board: Any) -> bool:
+    """ボードが合うか（順は問わない）。真のアクションのボードが記録のボードの頭の何枚かと同じなら合うとみる:
+    進行中のハンドを途中で保存すると、そのときのボード（プリフロップなら空・フロップなら 3 枚）のまま残る
+    （店舗 2026-10-06: プリフロップから入力できるようにした日に「ボード 0%」）。入れた札だけを比べる。"""
+    gt, cap = _normalize_board(gt_board), _normalize_board(cap_board)
+    if gt == cap:
+        return True
+    head = [str(c).strip() for c in (cap_board if isinstance(cap_board, list) else []) if c][:len(gt)]
+    return bool(gt) and len(gt) < len(cap) and gt == _normalize_board(head)
+
+
+def board_entered(gt_hand: dict) -> bool:
+    """真のアクションにボードを入れたか（空 = 入れていない = ボードは比べない）。"""
+    return bool(_normalize_board(gt_hand.get("board")))
+
+
+def is_excluded(gt_hand: dict) -> bool:
+    """「評価から外す」の印のあるハンド（真のアクションの入力画面・オーナーのメモ, 2026-10-06）。"""
+    return bool(gt_hand.get("excluded"))
+
+
+def excluded_reason(gt_hand: dict) -> str:
+    """外した理由（入れた理由か、メモ）。"""
+    return str(gt_hand.get("excluded_reason") or gt_hand.get("notes") or "理由なし").strip()
 
 
 def _index_by_hand_id(hands: list[dict]) -> dict[int, dict]:
@@ -201,8 +265,10 @@ def measure_hand(
         cap_type = _normalize_action_type(cap_a.get("action"))
         gt_amount = _normalize_amount(gt_a.get("amount"), gt_type)
         cap_amount = _normalize_amount(cap_a.get("amount"), cap_type)
-        t_ok = gt_type == cap_type
-        a_ok = gt_amount == cap_amount
+        # 別の人・別のストリートの行は、種類や額がたまたま同じでも正しくない
+        place_ok = same_place(gt_a, cap_a)
+        t_ok = place_ok and same_action_type(gt_type, cap_type, gt_amount, cap_amount)
+        a_ok = place_ok and gt_amount == cap_amount
         if t_ok:
             type_correct += 1
         if a_ok:
@@ -210,9 +276,7 @@ def measure_hand(
         if t_ok and a_ok:
             both_correct += 1
 
-    board_match = _normalize_board(gt_hand.get("board")) == _normalize_board(
-        (captured_hand or {}).get("board")
-    )
+    board_match = _board_matches(gt_hand.get("board"), (captured_hand or {}).get("board"))
 
     gt_hole = _seat_to_hole_cards(gt_hand.get("players") or [])
     cap_hole = _seat_to_hole_cards((captured_hand or {}).get("players") or [])
@@ -239,6 +303,28 @@ def measure_hand(
     )
 
 
+def _without_showdown_rows(hand: dict) -> dict:
+    return dict(hand, actions=[a for a in hand.get("actions") or [] if a.get("street") != "showdown"])
+
+
+def hand_fully_correct(gt_hand: dict, captured_hand: dict | None) -> bool:
+    """ハンドが丸ごと正しいか（ハンドの整合, オーナー 2026-09-30: 発話の読みが 9 割当たっても、ハンドが丸ごと
+    正しい割合は全然足りない）: 真のアクションの行が全部正しく・余計な行が無く・勝者が合い・真のアクションにボードが
+    あればボードも合う。
+
+    ショーダウンのマックの行（street = showdown）は比べない: 真のアクションの入力では入れても入れなくてもよく
+    （入れ方がハンドごとに違う）、結果は勝者で見ている。
+    """
+    if captured_hand is None:
+        return False
+    gt_hand, captured_hand = _without_showdown_rows(gt_hand), _without_showdown_rows(captured_hand)
+    m = measure_hand(gt_hand, captured_hand)
+    rows = len(gt_hand.get("actions") or [])
+    if not (m.action_correct == m.action_total == rows) or m.winner_match is False:
+        return False
+    return m.board_match or not board_entered(gt_hand)
+
+
 def measure_session(
     session_log: dict,
     ground_truth: dict,
@@ -251,7 +337,9 @@ def measure_session(
     `apply_hand_corrections` を通す（ADR-0036 と同じ read-time オーバーレイ）。
     """
     captured_by_id = _index_by_hand_id(session_log.get("hands") or [])
-    gt_hands = ground_truth.get("hands") or []
+    # 「評価から外す」ハンドは数えない（記録だけにあるハンドにも数えない）
+    excluded_ids = {h.get("hand_id") for h in ground_truth.get("hands") or [] if is_excluded(h)}
+    gt_hands = [h for h in ground_truth.get("hands") or [] if not is_excluded(h)]
 
     corrections = corrections or []
     by_hand: dict[int, list[HandCorrection]] = {}
@@ -275,7 +363,7 @@ def measure_session(
             captured = apply_hand_corrections(captured, by_hand[hid])
         per_hand.append(measure_hand(gt, captured))
 
-    phantom = sorted(set(captured_by_id) - gt_ids)
+    phantom = sorted(set(captured_by_id) - gt_ids - excluded_ids)
 
     n_gt = len(gt_ids)
     coverage = (n_gt - len(missed)) / n_gt if n_gt else 1.0
@@ -294,8 +382,11 @@ def measure_session(
         if total_actions else 1.0
     )
 
+    # ボードを入れたハンドだけで比べる（入れていない = 記録のボードを確かめていない）
+    entered = {h.get("hand_id") for h in gt_hands if board_entered(h)}
+    board_hands = [h for h in per_hand if h.hand_id in entered]
     board_acc = (
-        sum(1 for h in per_hand if h.board_match) / n_gt if n_gt else 1.0
+        sum(1 for h in board_hands if h.board_match) / len(board_hands) if board_hands else 1.0
     )
 
     total_hole = sum(h.hole_total for h in per_hand)

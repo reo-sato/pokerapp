@@ -13,17 +13,28 @@ from __future__ import annotations
 
 import logging
 import secrets
+from datetime import datetime
 from importlib import metadata
 from pathlib import Path
+from typing import Any, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from api.read_models import (
+    business_day_start,
+    recent_players,
+    recent_session_ids,
+    HOLE_CARD_VISIBILITY,
     HandNotFoundError,
     get_hand,
+    hide_hole_cards,
+    hole_card_mode,
+    viewer_seats,
     get_player_session_ledger,
     list_measurement_rows,
     list_player_hands,
@@ -41,6 +52,7 @@ from core.ground_truth import (
     validate_source,
 )
 from core.ground_truth_repository import GroundTruthRepository
+from core.hand_correction import row_target
 from core.hand_correction_repository import (
     HandCorrectionError,
     HandCorrectionRepository,
@@ -81,6 +93,7 @@ from core.player_repository import (
     PlayerValidationError,
 )
 from core.session_repository import (
+    InvalidHoleCardVisibilityError,
     InvalidSeatError,
     PlayerAlreadySeatedError,
     SeatTakenError,
@@ -92,8 +105,38 @@ from core.session_repository import (
     UnknownPlayerError as SessionUnknownPlayerError,
 )
 from core.sync import build_snapshot, merge_snapshot_into
+from core.version import version_info
 
 logger = logging.getLogger(__name__)
+
+# お客さん向け画面（mobile/ の web 版）のビルド。`scripts/build_player_web.py` が作る（ADR-0059）。
+PLAYER_WEB_DIR = Path(__file__).parent / "static" / "player"
+# スタッフ用 iPad 画面（staff/ の web 版）のビルド。`scripts/build_staff_web.py` が作る（ADR-0064）。
+STAFF_WEB_DIR = Path(__file__).parent / "static" / "staff"
+STAFF_WEB_PATH = "/staff"
+
+
+class _PlayerWebFiles(StaticFiles):
+    """画面（お客さん向け `/`・スタッフ用 `/staff/`）の静的配信。入口（index.html 等）は毎回確かめさせる。
+
+    更新で JS のファイル名（hash 入り）が変わるので、古い index.html がスマホに残ると消えた JS を
+    読みに行って画面が真っ白になる。hash 入りの `_expo/` 配下はそのまま（変わらない）。
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if not path.replace("\\", "/").startswith("_expo/"):   # Windows は区切りが "\"
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+def _qr_image(text: str) -> str | None:
+    """QR コード（画像の data URI。SVG）。segno が無ければ None（画面は URL だけを出す）。"""
+    try:
+        import segno
+    except ImportError:
+        return None
+    return segno.make(text, error="m").svg_data_uri(scale=8, border=2, dark="#000", light="#fff")
 
 
 def _app_version() -> str:
@@ -216,6 +259,9 @@ class _StaffControlBody(BaseModel):
     type: str
     seat: int | None = None
     amount: int | None = None
+    index: int | None = None      # correct_board のボード位置 1..5（ADR-0054）
+    sb: int | None = None         # set_blinds（次のハンドからのブラインド, 2026-09-26）
+    bb: int | None = None
 
 
 class _OidcExchangeBody(BaseModel):
@@ -329,6 +375,14 @@ def create_app(
     identity_repo: AuthIdentityRepository | None = None,
     correction_repo: HandCorrectionRepository | None = None,
     ground_truth_repo: GroundTruthRepository | None = None,
+    player_web_dir: str | Path | None = None,
+    staff_web_dir: str | Path | None = None,
+    cloud_status: Callable[[], dict] | None = None,
+    cloud_links: Any = None,
+    hole_cards_default: str = "all",
+    show_truth: bool = False,
+    today_only: bool = False,
+    clock: Callable[[], datetime] = datetime.now,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -345,6 +399,20 @@ def create_app(
     （PIN 登録済 player の write のみ本人トークンを要求）/ 'required'（全 player write に
     本人トークンを要求）。PIN 検証成功で stateless 署名トークン（player_token_secret、
     未設定なら起動ごとに ephemeral 生成）を発行し、self-write の principal を解決する。
+
+    player_web_dir（ADR-0059）: お客さん向け画面（mobile/ の web 版）を `/` で配信する。API は
+    `/api/` のまま。スマホは「PC の IP:ポート」を開くだけでよい（画面と API が同じ origin）。
+    `sessions.json` / `players.json` は hand logger が別プロセスで書くので、`/api/` の要求ごとに
+    変わっていれば読み直す。
+
+    staff_web_dir（ADR-0064）: スタッフ用 iPad 画面（staff/ の web 版）を `/staff/` で配信する。
+    スタッフトークンは画面に埋め込まず、ログイン画面で入力する（`/api/staff/...` の認可は従来どおり）。
+    
+    show_truth（config `viewer_api.show_truth`, 2026-10-19）: お客さんのハンドの読み取りを真のアクション
+    （`logs/<sid>.ground_truth.json`）だけにする。真のアクションを保存していないハンドは見せない。スタッフの読み取りは変えない。
+
+    today_only（config `viewer_api.today_only`, 2026-10-19）: お客さんの名前の一覧とセッションの一覧を、今日（営業日 =
+    朝 6 時から）始まったセッションの分だけにする。前の日のセッションは開いても空。スタッフの読み取りは変えない。
     """
     if ledger_repo is None:
         ledger_repo = LedgerRepository(session_repo=session_repo, player_repo=player_repo)
@@ -397,13 +465,33 @@ def create_app(
             return _handler
         app.add_exception_handler(exc_type, _make_handler())
 
+    reload_shared = getattr(session_repo, "reload_if_changed", None)
+
+    @app.middleware("http")
+    async def _reload_shared_files(request: Request, call_next):
+        # hand logger（別プロセス）が書いた席とお客さんの記録を取り込む（ADR-0059）。
+        if reload_shared is not None and request.url.path.startswith("/api/"):
+            await run_in_threadpool(reload_shared)
+        return await call_next(request)
+
     @app.get("/api/health")
     def health() -> dict:
-        return {"status": "ok", "version": _app_version()}
+        # branch / commit / release は ADR-0066（どの店がどの版で動いているか）。additive。
+        info = version_info()
+        body = {"status": "ok", "version": _app_version(), "branch": info["branch"],
+                "commit": info["commit"], "release": info["release"]}
+        if cloud_status is not None:   # 店舗サーバーだけ: クラウドへの送信の状態（ADR-0067 2b, additive）
+            body["cloud"] = cloud_status()
+        return body
+
+    def _since() -> "datetime | None":
+        return business_day_start(clock()) if today_only else None
 
     @app.get("/api/players")
     def players() -> dict:
-        return {"players": [p.to_dict() for p in player_repo.list_players()]}
+        since = _since()
+        listed = player_repo.list_players() if since is None else recent_players(session_repo, since)
+        return {"players": [p.to_dict() for p in listed]}
 
     @app.get("/api/players/{player_id}")
     def player(player_id: str) -> dict:
@@ -412,17 +500,27 @@ def create_app(
     @app.get("/api/players/{player_id}/sessions")
     def player_sessions(player_id: str) -> dict:
         player_repo.get(player_id)
-        return {"sessions": list_player_sessions(player_id, session_repo)}
+        return {"sessions": list_player_sessions(player_id, session_repo, since=_since())}
 
     @app.get("/api/players/{player_id}/sessions/{session_id}/hands")
     def player_hands(player_id: str, session_id: str) -> dict:
         player_repo.get(player_id)
-        return {"hands": list_player_hands(
-            player_id, session_id, session_repo, log_dir, correction_repo)}
+        since = _since()
+        if since is not None and session_id not in recent_session_ids(session_repo, since):
+            return {"hands": []}                     # 前の日のセッション（today_only）
+        hands = list_player_hands(player_id, session_id, session_repo, log_dir, correction_repo,
+                                  truth=show_truth)
+        mode = hole_card_mode(session_repo, session_id, hole_cards_default)   # ADR-0067 D6
+        return {"hands": [
+            hide_hole_cards(h, viewer_seats(session_repo, session_id, h["hand_id"], player_id), mode)
+            for h in hands]}
 
     @app.get("/api/sessions/{session_id}/hands/{hand_id}")
-    def hand(session_id: str, hand_id: int) -> dict:
-        return get_hand(session_id, hand_id, log_dir, correction_repo)
+    def hand(session_id: str, hand_id: int, player_id: str | None = None) -> dict:
+        # player_id = 見ている人（店内は名前選びなので「選んだ人」, ADR-0067 D6）。無ければ見せた手札だけ。
+        found = get_hand(session_id, hand_id, log_dir, correction_repo, truth=show_truth)
+        mode = hole_card_mode(session_repo, session_id, hole_cards_default)
+        return hide_hole_cards(found, viewer_seats(session_repo, session_id, hand_id, player_id), mode)
 
     @app.get("/api/players/{player_id}/sessions/{session_id}/ledger")
     def player_ledger(player_id: str, session_id: str) -> dict:
@@ -694,6 +792,42 @@ def create_app(
             "merged_at": absorbed.merged_at,
         }
 
+    # ――― 店外で見るための閲覧リンク（ADR-0067 D5, 2c。店舗サーバーがクラウドにつながっているときだけ）―――
+
+    def _viewer_link(request: Request, player_id: str, revoke: bool) -> "JSONResponse | dict":
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        if cloud_links is None:
+            return JSONResponse(status_code=409, content={
+                "code": "cloud_not_linked",
+                "message": "この店舗はクラウドにつながっていません（docs/cloud-setup.md の 3）。"})
+        try:
+            canonical = player_repo.resolve_canonical(player_id)
+            player_repo.get(canonical)
+        except PlayerNotFoundError as e:
+            return JSONResponse(status_code=404, content={"code": "not_found", "message": str(e)})
+        from core.cloud_sync import CloudLinkError
+
+        try:
+            if revoke:
+                return {"player_id": canonical, "revoked": cloud_links.revoke_viewer_link(canonical)}
+            link = cloud_links.issue_viewer_link(canonical)
+        except CloudLinkError as e:
+            return JSONResponse(status_code=e.status, content={"code": e.code, "message": e.message})
+        return {"player_id": canonical, "url": link["url"], "created_at": link.get("created_at"),
+                "qr_image": _qr_image(link["url"])}
+
+    @app.post("/api/staff/players/{player_id}/viewer-link", response_model=None)
+    def staff_issue_viewer_link(player_id: str, request: Request) -> "JSONResponse | dict":
+        """その人の閲覧リンク（QR）を発行する。前のリンクは使えなくなる。"""
+        return _viewer_link(request, player_id, revoke=False)
+
+    @app.post("/api/staff/players/{player_id}/viewer-link/revoke", response_model=None)
+    def staff_revoke_viewer_link(player_id: str, request: Request) -> "JSONResponse | dict":
+        """その人の閲覧リンクを取り消す（スマホをなくした・人に見られた）。"""
+        return _viewer_link(request, player_id, revoke=True)
+
     @app.post("/api/staff/sessions/{session_id}/hands/{hand_id}/corrections",
               response_model=None)
     def staff_add_hand_correction(
@@ -715,11 +849,14 @@ def create_app(
                     "code": "invalid_correction",
                     "message": f"action_index={body.action_index} が範囲外です（0..{len(actions) - 1}）。",
                 })
+        # 訂正した行を宛先として残す（記録の本体 = 推定が推定し直しで変わっても、同じ行に当てる）
+        target = (row_target((hand.get("actions") or [])[body.action_index])
+                  if body.action_index is not None else None)
         try:
             c = correction_repo.add_correction(
                 session_id, hand_id, body.field, body.new_value,
                 action_index=body.action_index,
-                corrected_by=body.corrected_by or "staff", note=body.note,
+                corrected_by=body.corrected_by or "staff", note=body.note, target=target,
             )
         except HandCorrectionError as e:
             return JSONResponse(status_code=400,
@@ -886,6 +1023,36 @@ def create_app(
             return JSONResponse(status_code=409,
                                 content={"code": "already_closed", "message": str(e)})
         return session.to_dict()
+
+    @app.put("/api/staff/sessions/{session_id}/hole-card-visibility", response_model=None)
+    async def staff_set_hole_card_visibility(session_id: str, request: Request) -> "JSONResponse | dict":
+        """お客さんの画面に出すホールカードの範囲（ADR-0067 D6）。value = all / own_and_shown / null（店の設定）。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or "value" not in body:
+            return JSONResponse(status_code=400, content={
+                "code": "invalid_visibility", "message": "value（all / own_and_shown / null）が必要です。"})
+        try:
+            session = await run_in_threadpool(session_repo.set_hole_card_visibility, session_id, body["value"])
+        except SessionNotFoundError as e:
+            return JSONResponse(status_code=404, content={"code": "not_found", "message": str(e)})
+        except InvalidHoleCardVisibilityError as e:
+            return JSONResponse(status_code=400, content={"code": "invalid_visibility", "message": str(e)})
+        return {"session": session.to_dict(), "store_default": hole_cards_default,
+                "effective": hole_card_mode(session_repo, session_id, hole_cards_default)}
+
+    @app.get("/api/staff/hole-card-visibility", response_model=None)
+    def staff_hole_card_default(request: Request) -> "JSONResponse | dict":
+        """店の設定（config viewer_api.hole_cards）。スタッフ画面が「店の設定に従う」の中身を出すため。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        return {"store_default": hole_cards_default}
 
     @app.post("/api/staff/sessions/{session_id}/settlement/commit", response_model=None)
     def staff_commit_settlement(
@@ -1123,6 +1290,30 @@ def create_app(
                     "message": "rebuy には seat と正の amount が必要です。"})
             args["seat"] = body.seat
             args["amount"] = body.amount
+        elif body.type == "correct_board":
+            if not isinstance(body.index, int) or not 1 <= body.index <= 5:
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_control",
+                    "message": "correct_board には index（1..5）が必要です。"})
+            args["index"] = body.index
+        elif body.type == "correct_seat":
+            if not isinstance(body.seat, int):
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_control", "message": "correct_seat には seat が必要です。"})
+            args["seat"] = body.seat
+        elif body.type == "set_blinds":
+            if (not isinstance(body.sb, int) or not isinstance(body.bb, int)
+                    or body.sb <= 0 or body.bb <= 0 or body.sb > body.bb):
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_control",
+                    "message": "set_blinds には正の sb と bb（sb <= bb）が必要です。"})
+            args["sb"] = body.sb
+            args["bb"] = body.bb
+        elif body.type in ("sit_out", "sit_in", "set_button"):
+            if not isinstance(body.seat, int):
+                return JSONResponse(status_code=400, content={
+                    "code": "invalid_control", "message": f"{body.type} には seat が必要です。"})
+            args["seat"] = body.seat
         control_log = ControlCommandLog(Path(log_dir) / f"{session_id}.control.jsonl")
         command = control_log.append(body.type, args)
         return JSONResponse(status_code=201, content=command.to_dict())
@@ -1165,6 +1356,20 @@ def create_app(
         order_repo.reload()
         return summary
 
+    # スタッフ用画面（ADR-0064）。`/` の mount より先に置く（`/` はそれ以外の全パスを受ける）。
+    # `/staff`（末尾の / なし）は `/staff/` へ送る: 画面の JS は `/staff/_expo/...` を読む。
+    if staff_web_dir is not None and (Path(staff_web_dir) / "index.html").is_file():
+        @app.get(STAFF_WEB_PATH, include_in_schema=False)
+        def staff_web_root() -> RedirectResponse:
+            return RedirectResponse(STAFF_WEB_PATH + "/")
+
+        app.mount(STAFF_WEB_PATH,
+                  _PlayerWebFiles(directory=str(staff_web_dir), html=True), name="staff-web")
+
+    # お客さん向け画面（ADR-0059）。API のルートより後に置く（`/` はそれ以外の全パスを受ける）。
+    if player_web_dir is not None and (Path(player_web_dir) / "index.html").is_file():
+        app.mount("/", _PlayerWebFiles(directory=str(player_web_dir), html=True), name="player-web")
+
     return app
 
 
@@ -1174,7 +1379,11 @@ def auth_kwargs_from_config(api_cfg: dict) -> dict:
     main.py の `--ledger`（in-process）と `--viewer-api`（standalone）で共通に使い、
     挙動が分岐しないようにする。既定は player_auth='off'（name-pick, 後方互換）。
     """
+    hole = api_cfg.get("hole_cards", "all")
     return {
+        "hole_cards_default": hole if hole in HOLE_CARD_VISIBILITY else "all",   # ADR-0067 D6
+        "show_truth": bool(api_cfg.get("show_truth", False)),                     # 真のアクションだけ見せる
+        "today_only": bool(api_cfg.get("today_only", False)),                     # 今日のセッションだけ
         "player_auth": api_cfg.get("player_auth", "off"),
         "player_token_secret": api_cfg.get("player_token_secret") or None,
         "player_token_ttl_sec": int(api_cfg.get("player_token_ttl_sec", 43_200)),
@@ -1188,13 +1397,25 @@ def auth_kwargs_from_config(api_cfg: dict) -> dict:
     }
 
 
-def run_server(cfg: dict) -> None:
-    """config に従って viewer API を foreground で起動する（main.py --viewer-api）。"""
+def log_web_addresses(port: int) -> None:
+    """配信する画面の開き方をログに出す（店舗 PC の端末・ログで確かめられるように）。"""
+    if (PLAYER_WEB_DIR / "index.html").is_file():
+        logger.info("お客さん向け画面: http://<この PC の IP>:%s/", port)
+    if (STAFF_WEB_DIR / "index.html").is_file():
+        logger.info("スタッフ用画面（iPad）: http://<この PC の IP>:%s%s/", port, STAFF_WEB_PATH)
+
+
+def run_server(cfg: dict, host: str | None = None, port: int | None = None) -> None:
+    """config に従って viewer API を foreground で起動する（main.py --viewer-api）。
+
+    `host` / `port` は config の `viewer_api.bind_host` / `bind_port` より優先する（店舗 PC の
+    ショートカットが config を書き換えずに LAN へ公開するため, ADR-0059）。
+    """
     import uvicorn
 
     api_cfg = cfg.get("viewer_api", {})
-    bind_host = api_cfg.get("bind_host", "127.0.0.1")
-    bind_port = api_cfg.get("bind_port", 8788)
+    bind_host = host or api_cfg.get("bind_host", "127.0.0.1")
+    bind_port = port or api_cfg.get("bind_port", 8788)
     log_dir = cfg.get("session", {}).get("log_dir", "./logs")
 
     player_repo = PlayerRepository()
@@ -1205,7 +1426,10 @@ def run_server(cfg: dict) -> None:
     # player_auth が有効でも write（注文 POST）は 503 が先に返るが、login / PIN 設定は可能。
     app = create_app(player_repo, session_repo, log_dir, ledger_repo=ledger_repo,
                      staff_token=api_cfg.get("staff_token") or None,
+                     player_web_dir=PLAYER_WEB_DIR,
+                     staff_web_dir=STAFF_WEB_DIR,
                      **auth_kwargs_from_config(api_cfg))
 
     logger.info("Starting viewer API on %s:%s (log_dir=%s)", bind_host, bind_port, log_dir)
+    log_web_addresses(bind_port)
     uvicorn.run(app, host=bind_host, port=bind_port)

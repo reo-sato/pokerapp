@@ -112,7 +112,8 @@ class CardMaster:
     def _save(self) -> None:
         data = {
             "description": "RFID tag to poker card mapping. "
-                           "Register each physical card with its NFC tag UID.",
+                           "Register each physical card with its NFC tag UID "
+                           "(python tools/register_cards.py run --deck N).",
             "cards": self._mapping,
         }
         try:

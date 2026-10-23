@@ -593,3 +593,26 @@ test("updateMenu replaces items, validates, and requires staff token (ADR-0046)"
     return true;
   });
 });
+
+test("issueViewerLink makes a new link each time and revoke ends it (ADR-0067 D5)", async () => {
+  const repo = authed();
+  const [player] = await repo.listPlayers();
+  const first = await repo.issueViewerLink(player.player_id);
+  const second = await repo.issueViewerLink(player.player_id);
+  assert.match(first.url, /#link=pkl_/);
+  assert.notEqual(first.url, second.url);
+  assert.deepEqual(await repo.revokeViewerLink(player.player_id), { player_id: player.player_id, revoked: 1 });
+  await assert.rejects(repo.issueViewerLink("missing"), (e: unknown) => (e as StaffApiError).code === "not_found");
+});
+
+test("setHoleCardVisibility stores a session override and null goes back to the store setting (ADR-0067 D6)", async () => {
+  const repo = authed();
+  const [session] = await repo.listSessions();
+  assert.equal(await repo.getHoleCardDefault(), "all");
+  const set = await repo.setHoleCardVisibility(session.session_id, "own_and_shown");
+  assert.equal(set.session.hole_card_visibility, "own_and_shown");
+  assert.equal(set.effective, "own_and_shown");
+  const back = await repo.setHoleCardVisibility(session.session_id, null);
+  assert.equal(back.session.hole_card_visibility, undefined);
+  assert.equal(back.effective, "all");
+});

@@ -46,6 +46,10 @@ export interface ActionRecord {
   source: { camera: boolean; audio: boolean; rfid: boolean };
   needs_review: boolean;
   confidence: number;
+  // 音声テスト用の表示で使う（action schema 1.4 / ADR-0047 G2, 省略可）
+  raw_text?: string; // そのアクションになった発話（書き起こし / CLI で打った読み上げ文）
+  reason?: string; // 補正・合成の理由コード（"+" 区切り）
+  corrected_from?: string | null; // 補正前に聞き取った action
 }
 
 export interface HandPlayer {
@@ -190,6 +194,8 @@ export interface AuthSession {
   token: string;
   player_id: string; // merge 済みなら survivor の player_id (canonical, ADR-0030)
   expires_at: number; // unix 秒
+  display_name?: string | null; // 閲覧リンクでのログイン（クラウド, ADR-0067 D5）のとき
+  store_name?: string | null;
 }
 
 export class ViewerApiError extends Error {

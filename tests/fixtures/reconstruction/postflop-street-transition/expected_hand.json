@@ -13,6 +13,29 @@
     "Qs"
   ],
   "board_source": "rfid",
+  "board_timeline": [
+    {
+      "index": 1,
+      "card": "Ah",
+      "dealt_at": "1970-01-01T00:50:04.000"
+    },
+    {
+      "index": 2,
+      "card": "Kd",
+      "dealt_at": "1970-01-01T00:50:04.500"
+    },
+    {
+      "index": 3,
+      "card": "Qs",
+      "dealt_at": "1970-01-01T00:50:05.000"
+    }
+  ],
+  "button_seat": 3,
+  "position_map": {
+    "1": "SB",
+    "2": "BB",
+    "3": "BTN"
+  },
   "players": [
     {
       "seat": 1,
@@ -76,9 +99,11 @@
       },
       "needs_review": false,
       "confidence": 0.532,
+      "position": "BTN",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "コール"
     },
     {
       "hand_id": 1,
@@ -97,14 +122,16 @@
       },
       "needs_review": false,
       "confidence": 0.532,
+      "position": "SB",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "コール"
     },
     {
       "hand_id": 1,
       "timestamp": null,
-      "street": "flop",
+      "street": "preflop",
       "seat": 2,
       "player_name": "P2",
       "action": "check",
@@ -118,9 +145,11 @@
       },
       "needs_review": false,
       "confidence": 0.532,
+      "position": "BB",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "チェック"
     },
     {
       "hand_id": 1,
@@ -139,9 +168,11 @@
       },
       "needs_review": false,
       "confidence": 0.532,
+      "position": "SB",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "ベット 400"
     },
     {
       "hand_id": 1,
@@ -160,14 +191,16 @@
       },
       "needs_review": false,
       "confidence": 0.532,
+      "position": "BB",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "フォールド"
     },
     {
       "hand_id": 1,
       "timestamp": null,
-      "street": "showdown",
+      "street": "flop",
       "seat": 3,
       "player_name": "P3",
       "action": "fold",
@@ -181,9 +214,11 @@
       },
       "needs_review": false,
       "confidence": 0.532,
+      "position": "BTN",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "フォールド"
     }
   ],
   "review_required": false

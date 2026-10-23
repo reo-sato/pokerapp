@@ -4,6 +4,7 @@
  * repository は StaffRepository interface 越しに注入する (contract-first, ADR-0037 §6):
  * - EXPO_PUBLIC_API_URL が設定されていれば HttpStaffRepository (staff API, ADR-0021)
  *   例: EXPO_PUBLIC_API_URL=http://192.168.1.10:8788 npx expo start
+ *   店舗 PC の配信版（`/staff/`）は `/` = 画面と同じ origin の API（scripts/build_staff_web.py, ADR-0064）
  * - 未設定なら MockStaffRepository (契約 fixtures 相当の in-memory データ)
  *
  * navigation は依存を増やさない最小 stack (useState)。
@@ -33,10 +34,11 @@ type Route =
   | { name: "table"; session: StaffSession };
 
 export default function App(): React.JSX.Element {
-  const repository: StaffRepository = useMemo(() => {
-    const apiUrl = process.env.EXPO_PUBLIC_API_URL;
-    return apiUrl ? new HttpStaffRepository(apiUrl) : new MockStaffRepository();
-  }, []);
+  const apiUrl = process.env.EXPO_PUBLIC_API_URL;
+  const repository: StaffRepository = useMemo(
+    () => (apiUrl ? new HttpStaffRepository(apiUrl) : new MockStaffRepository()),
+    [apiUrl],
+  );
 
   const [route, setRoute] = useState<Route>({ name: "login" });
 
@@ -47,6 +49,7 @@ export default function App(): React.JSX.Element {
         <LoginScreen
           repository={repository}
           onAuthed={() => setRoute({ name: "sessions" })}
+          showDemoHint={!apiUrl}
         />
       )}
       {route.name === "sessions" && (

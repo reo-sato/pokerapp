@@ -4,6 +4,7 @@ import { Pressable, Text, View } from "react-native";
 import type { StaffRepository } from "../api/repository";
 import type { ActionRecord, HandSummary } from "../api/types";
 import { StaffApiError } from "../api/types";
+import { recordedAmount, shownAmount, streetFlow } from "../shared/hand_replay/handReplayModel";
 import { Button, Chip, colors, Field, styles } from "./common";
 
 // 訂正で選べるアクション種別（B4/ADR-0036。合法手の射影は core/pokerkit が権威）。
@@ -40,15 +41,28 @@ export function HandCorrectionPanel(props: {
   const [draftWinner, setDraftWinner] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  // 金額はトータルで見せて入力も受ける (コールもそのストリートで出した合計, オーナー 2026-09-29)
+  const flow = streetFlow(hand);
+  const shownOf = (i: number, a: ActionRecord): number =>
+    shownAmount({ ...a, total: flow[i]?.total }) ?? 0;
 
   const beginEdit = (i: number, a: ActionRecord): void => {
     setEditingIndex(i);
     setDraftAction(a.action);
-    setDraftAmount(String(a.amount ?? 0));
+    setDraftAmount(String(shownOf(i, a)));
     setMsg(null);
   };
 
   const submitAction = async (i: number, current: ActionRecord): Promise<void> => {
+    const typed = parseInt(draftAmount, 10);
+    // 記録のコールは追加額: 前に出していた額を引いて戻す
+    const amt = Number.isFinite(typed) && typed >= 0
+      ? recordedAmount(draftAction || current.action, typed, flow[i]?.prior)
+      : undefined;
+    if (Number.isFinite(typed) && typed >= 0 && amt === undefined) {
+      setMsg({ text: `コールの額はこのストリートの合計です（${flow[i]?.prior} 以上）。`, ok: false });
+      return;
+    }
     setBusy(true);
     setMsg(null);
     try {
@@ -59,8 +73,7 @@ export function HandCorrectionPanel(props: {
         });
         applied += 1;
       }
-      const amt = parseInt(draftAmount, 10);
-      if (Number.isFinite(amt) && amt >= 0 && amt !== (current.amount ?? 0)) {
+      if (amt !== undefined && amt !== (current.amount ?? 0)) {
         await repository.addHandCorrection(sessionId, hand.hand_id, {
           field: "amount", new_value: amt, action_index: i,
         });
@@ -123,7 +136,7 @@ export function HandCorrectionPanel(props: {
             <View style={[styles.row, { justifyContent: "space-between" }]}>
               <Text style={styles.cardMeta}>
                 [{a.street}] 席{a.seat} {a.player_name} {a.action}
-                {a.amount ? ` ${a.amount}` : ""}
+                {shownOf(i, a) ? ` ${shownOf(i, a)}` : ""}
                 {a.needs_review ? <Text style={{ color: colors.warn }}>  要確認</Text> : null}
                 {a.corrected ? <Text style={{ color: colors.accent }}>  訂正済</Text> : null}
               </Text>
@@ -147,7 +160,7 @@ export function HandCorrectionPanel(props: {
                 </View>
                 <View style={[styles.row, { marginTop: 8 }]}>
                   <Field
-                    label="金額"
+                    label="金額（トータル。コールもストリートの合計）"
                     value={draftAmount}
                     onChangeText={setDraftAmount}
                     keyboardType="number-pad"

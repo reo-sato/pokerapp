@@ -9,6 +9,16 @@
   },
   "board": [],
   "board_source": "",
+  "board_timeline": [],
+  "button_seat": 6,
+  "position_map": {
+    "1": "SB",
+    "2": "BB",
+    "3": "UTG",
+    "4": "HJ",
+    "5": "CO",
+    "6": "BTN"
+  },
   "players": [
     {
       "seat": 1,
@@ -98,10 +108,12 @@
       },
       "needs_review": true,
       "confidence": 0.0,
+      "position": "UTG",
       "actor_source": "engine_prior",
-      "reason": "actor_conflict_capped(sensed=6)",
+      "reason": "actor_conflict_capped(sensed=6)+low_asr_confidence",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "シート6 レイズ 600"
     }
   ],
   "review_required": true

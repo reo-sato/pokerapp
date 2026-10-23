@@ -39,7 +39,8 @@ def test_golden_archetype_values_stable():
     # call-amount-from-state: audio-only, whisper≈0.7 → 0.448（閾値超え=非 review）。
     assert _conf(whisper_conf=0.7) == pytest.approx(0.448, abs=0.001)
     assert _conf(whisper_conf=0.7) >= REVIEW_THRESHOLD
-    # out-of-turn-rfid call: rfid+audio agree, whisper≈0.9 → 0.888。
+    # 同席 RFID の裏付けがある call: rfid+audio agree, whisper≈0.9 → 0.888
+    # （ISSUE-0033 以降、RFID は actor を動かさず**同席の裏付け**としてのみ効く）。
     rfid_audio = _conf(whisper_conf=0.9, rfid_present=True, rfid_agree=True)
     assert rfid_audio == pytest.approx(0.897, abs=0.01)
 

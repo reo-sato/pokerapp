@@ -6,8 +6,11 @@ import type { Player, PlayerSessionSummary } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
 import { HandReplay } from "../shared/hand_replay/HandReplay";
 import { buildHandText } from "../shared/hand_replay/handReplayText";
+import { isTestMode } from "../testMode";
 import { BackLink, ErrorView, Loading, ReloadLink, formatResult, styles } from "./common";
 import { findOwnRow } from "./MyHandsScreen";
+
+const TEST_MODE = isTestMode();
 
 /** navigator.clipboard（web）への安全な参照。native / 非対応環境では null。 */
 function clipboardOrNull(): { writeText(text: string): Promise<void> } | null {
@@ -31,8 +34,8 @@ export function HandDetailScreen({
   repository, player, session, handId, onBack, onCorrect,
 }: Props): React.JSX.Element {
   const { data: hand, loading, errorCode, errorMessage, reload } = useAsync(
-    () => repository.getHand(session.session_id, handId),
-    [repository, session.session_id, handId],
+    () => repository.getHand(session.session_id, handId, player.player_id),
+    [repository, session.session_id, handId, player.player_id],
   );
   const [shareMsg, setShareMsg] = useState<string | null>(null);
 
@@ -84,8 +87,16 @@ export function HandDetailScreen({
         <ErrorView code={errorCode} message={errorMessage} onRetry={reload} />
       ) : (
         <>
-          {/* テーブル + 4 ストリート列（共有コンポーネント, ADR-0051。訂正適用済みビュー） */}
-          <HandReplay hand={hand} selfSeat={own?.seat} />
+          {/* 音声テスト用の表示（URL に ?test を付けた端末だけ, ADR-0060） */}
+          {TEST_MODE ? (
+            <Text style={[styles.cardMeta, { color: "#ffb74d", marginBottom: 6 }]}>
+              テスト表示: 各アクションの下に聞き取った文と補正の理由を出しています
+            </Text>
+          ) : null}
+
+          {/* テーブル + 4 ストリート列（共有コンポーネント, ADR-0051。訂正適用済みビュー）。お客さんの画面には
+              要確認・訂正済の印を出さない（オーナー 2026-10-19） */}
+          <HandReplay hand={hand} selfSeat={own?.seat} showHeard={TEST_MODE} reviewMarks={false} />
 
           {/* フッタ: 画面を食わないよう横並びの小ボタンにする */}
           <View style={{ flexDirection: "row", alignItems: "center", paddingVertical: 10 }}>

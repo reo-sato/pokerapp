@@ -22,36 +22,46 @@ Confidence 行列 (legacy backend):
 
 アクション照合 (role="seat"):
   発話区間 [utterance_start_ts, timestamp] ± MATCH_WINDOW 秒以内の同席イベントと照合して
-  confidence 向上（ADR-B T1/T2: ASR デコード遅延が照合窓を食い潰さないよう、窓は発話区間
+  confidence 向上（ADR-0048 T1/T2: ASR デコード遅延が照合窓を食い潰さないよう、窓は発話区間
   ベースの両側窓。utterance_start_ts 欠損時は従来どおり timestamp ± MATCH_WINDOW）。
 """
 from __future__ import annotations
 
 import logging
 import queue
+import re
 import threading
 import time
+import unicodedata
+from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Optional
 
 from audio.recognizer import _extract_all_seat_nos, _extract_seat_no, apply_corrections
+from core.control_queue import parse_script_hand, parse_truth_stacks
 from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
-from core.hand_log import ActionRecord, HandSummary
+from core.hand_log import UNKNOWN_CARD, ActionRecord, HandSummary, street_totals
+from core.positions import DEAL_ORDER_TIE_SEC, button_from_deal
+from core.table_state import build_table_state
 from output.event_recorder import EventRecorder
 from output.json_writer import JsonWriter
 
 if TYPE_CHECKING:
     from core.engine_types import LegalContext
     from core.session_repository import SessionRepository
+    from output.table_state_writer import TableStateWriter
 
 logger = logging.getLogger(__name__)
 
 MATCH_WINDOW = 2.0
+# 卓状態を定期 publish する間隔（秒）。カードが外れても RFIDEvent は出ないので、
+# 有効席（= 札が載っている席）の変化はこの間隔で UI に届く。
+TABLE_STATE_INTERVAL = 1.0
 # センサーイベントの保持期間。照合窓（MATCH_WINDOW）とは独立で、ASR デコード遅延
 # （チャンク 5 秒 + 推論）で audio イベントが遅れて届いても RFID/camera 証拠が
-# expire で消えないだけの余裕を持たせる（ADR-B T1）。
+# expire で消えないだけの余裕を持たせる（ADR-0048 T1）。
 CAMERA_BUFFER_TTL = 12.0
 
 # silent-fold 合成で許す最大席数（ISSUE-0009）。超過は合成せず prior 維持 + needs_review。
@@ -76,8 +86,211 @@ _CONF_CAMERA_ONLY       = 0.30
 # board_index → street 推移しきい値 (1-indexed, ≥N 枚でその street)
 _BOARD_STREET_THRESHOLDS = {3: "flop", 4: "turn", 5: "river"}
 
-# G1（ADR-C）: 状態を大きく動かす制御語。config の閾値 > 0 のとき低信頼 ASR を保留する。
-_CONTROL_ACTIONS = frozenset({"new_hand", "winner", "showdown"})
+# G1（ADR-0049）: 状態を大きく動かす制御語。config の閾値 > 0 のとき低信頼 ASR を保留する。
+_CONTROL_ACTIONS = frozenset({"new_hand", "winner", "showdown", "end_hand", "correction"})
+
+# ――― 手札が配られたら新しいハンド / 勝者の自動判定（ADR-0062）―――
+# 次のハンドの配布とみなす時間窓（秒）。この間に 2 席以上へ札が配られたら配布と判断する。
+# 片付けの途中で 1 枚だけ別の席のリーダーに触れた札は、窓を過ぎると捨てる。
+DEAL_WINDOW_SEC = 15.0
+# 配布を検出してから、それより前に話された発話の認識を待つ上限（秒）。認識が遅れていても、
+# 前のハンドのアクション（最後のコールやマック）を新しいハンドに入れないため。
+DEAL_SPEECH_WAIT_SEC = 60.0
+# 配った直後（アクション前）のハンドに届いた `w` / 「ウィナー」を、前のハンドへの宣言とみなす時間（秒）。
+LATE_WINNER_SEC = 60.0
+# RFID の在否で配布を検出する（ADR-0063）: 2 席以上に手札 2 枚ずつがこの秒数載り続け、ボードの
+# リーダーが空なら配布。シャッフル・ウォッシュで一瞬リーダーを通った札では始めない。
+DEAL_STABLE_SEC = 1.5
+# 手札を配り終えたとみる時間（フロップが出なくても）。ここまでに札が 1 枚も載らない席はハンドから外す（2026-10-23）
+HAND_SEATS_SETTLE_SEC = 20.0
+# 何人もの札がほぼ同時に離れたとき（リーダーごとに読み取りの間隔が違う）、離れて見えた順は手番の順と前後する。
+# 手番の先の席の札がこの秒数以内に離れていれば、その席を先に降ろす（間をコールで補わない, 店舗 2026-10-19）
+DEPARTURE_ORDER_SLACK_SEC = 6.0
+# 載り続けているとみなす途切れの上限（読み落ち 1〜2 周ぶん）
+DEAL_GAP_SEC = 0.6
+# ハンドの途中でも、卓（席とボードのリーダー）に札が 1 枚も無い状態がこの秒数続いたらプレーは
+# 終わったとみなし、音声を聞き流す（片付け・シャッフル中の会話を認識に回さない, ADR-0063）。
+TABLE_CLEAR_SEC = 15.0
+# ハンドを確定したのに 2 席以上に札が載っている（確定が早すぎた疑い）あいだは、この秒数まで聞き取りを続けて
+# 書き起こしに残す（記録には入れない = ハンドの外。店舗 2026-10-06: 全員フォールドで早く終わったあとのリバーの
+# ベット・レイズ・コールが聞き流されて失われた。2026-10-14 15cad555 ハンド 3: ショーダウンで早く閉じたあとの
+# ターン・リバーの賭けが確定から 46 秒まで続き、聞き流されて推定にも使えなかった = 終わり方によらない）。
+# 次の配布・札が片付いたら止める。
+POST_HAND_LISTEN_SEC = 90.0
+POST_FOLDOUT_LISTEN_SEC = POST_HAND_LISTEN_SEC     # 旧名
+# いまのストリートの最初の札が見える前にこの秒数以上早く話し始めた「コール」は、前のストリートで
+# 言われたもの（言い直し）とみなす（店舗の実測: 「コール」のあとの「600点コールです」がターンの札の 3 秒前）。
+STALE_CALL_MARGIN_SEC = 1.0
+# 「チェックアラウンド」はストリートが変わるときに言う（オーナー 2026-10-06）。いまのストリートでまだ誰も動いていず、
+# その札が見えてからこの秒数より前に話し始めたチェックアラウンドは、閉じた前のストリートのこと（札の直後に全員が
+# チェックし終えることはない。店舗のログ: 前のストリートのこと = 札の 1.2〜1.8 秒前に話し始め、いまのストリートの
+# こと = 札の 4.4 秒以上あと）。
+CHECK_AROUND_STREET_CHANGE_SEC = 3.0
+
+# ――― フォールドは札の離脱から（オーナー決定 2026-09-25）―――
+# 席の札が離れたまま戻らなければフォールド（札を持ち上げて見るのと区別する秒数）。卓の中央を通過したら待たない。
+FOLD_ABSENT_SEC = 3.0
+# 最後の 1 人を残すフォールド（札の離脱）を確定するまでの待ち。札が戻る・「ショーダウン」なら取り消す
+# （ショーダウンでは札を前に出すのでリーダーから離れる）。音声の「フォールド」・中央の通過・次の配布でも確定。
+FOLDOUT_CONFIRM_SEC = 10.0
+# ショーダウンで見せずにマックする人は素早くマックし、ディーラーが「フォールド」と言う（オーナー, 2026-09-30）。
+# ベッティングが終わって（リバーの札があとならその札から）この秒数マックが無ければ、残った全員が見せたとして
+# 手札で勝者を決める（次の配布まで待たない）。
+SHOWDOWN_MUCK_SEC = 8.0
+# 札の離脱・中央の通過で決めたフォールドの confidence（物理観測。通過の方が確か）
+RFID_FOLD_CONFIDENCE = 0.8
+RFID_MUCK_CONFIDENCE = 0.95
+# 「フォールド」と言われたのに札が席に残っていた席を、次のアクションの前にフォールドにしたとき（音声だけ）
+SPOKEN_FOLD_CONFIDENCE = 0.5
+# ボードの枚数 → ストリートと、その始まりの札の位置（ボードの札が置かれたら前のラウンドは終わっている）
+_BOARD_STREETS = {3: ("flop", (1, 2, 3)), 4: ("turn", (4,)), 5: ("river", (5,))}
+_STREET_RANK = {"preflop": 0, "flop": 1, "turn": 2, "river": 3, "showdown": 4}
+_BOARD_STREET_NAMES = frozenset({"flop", "turn", "river"})
+_STREET_JA = {"preflop": "プリフロップ", "flop": "フロップ", "turn": "ターン", "river": "リバー"}
+# プレー中にこの秒数、マイクに声が入らなければ知らせる（ワイヤレスマイクの電池切れ等, 2026-09-25）
+SILENT_MIC_SEC = 60.0
+# ハンドを始めてからこの秒数たったら、卓で使っていない席に手札が無いかを確かめる（配っている途中の席を
+# 「手札が無い」と言わないため）
+SEAT_SETUP_CHECK_SEC = 5.0
+# 「フォールド」と聞こえたが手番の人の札がまだ席にあるとき、この秒数以内に札が離れたら、その発話の時刻の
+# フォールドにする（勝った人が先に札を投げても、降りた人の方が先になる）。
+SPOKEN_FOLD_WINDOW_SEC = 15.0
+# ベッティングを終えた札の離脱のあとに届いた「フォールド」を、その離脱の声とみる窓（離脱の時刻から。記録上の
+# 離脱はファームウェアの判定で 0.7〜1.1 秒遅れるので、語が少し前に始まってもよい。ショーダウンのマックの
+# 「フォールド」は見せ合いのあとなので、これより遅い）
+CLOSING_FOLD_WORD_BEFORE_SEC = 1.5
+CLOSING_FOLD_WORD_AFTER_SEC = 3.0
+# 「フォールド」と言われてから、この秒数たっても手番の人の札が席から離れなければ、その人は降りていない（札が離れる
+# のを `FOLD_ABSENT_SEC` 待つ + 在否を見る間隔のぶん）。次のストリートの札のときだけ使う（店舗 2026-10-06）
+HELD_FOLD_STAYED_SEC = 5.0
+# 「フォールド」と、もう行動を済ませた席の札の離脱を結びつける時間の幅（語の話し始めの前後）
+FOLD_WORD_DEPARTURE_SEC = 3.0
+# 「これで終わりです」（ディーラーは言わない = ほかの語の聞き違い, オーナー 2026-10-06）の前後でこの幅に札が離れた席が
+# あれば、その語はその席の「フォールド」（ディーラーは札が離れるのを見てから言い、記録上の離脱は読み取りのラグ = 約 1 秒
+# 遅れるので、記録では語とほぼ同時になる。コールのあとのショーダウンのマックは記録で 2 秒ほどあと）。店舗: フォールドの
+# 2 回は離脱が語の -0.1 / +0.1 秒、コールの 3 回は +1.8 / +2.0 / +12 秒
+GARBLED_FOLD_BEFORE_SEC = 2.0
+GARBLED_FOLD_AFTER_SEC = 1.0
+# ベットに向き合っていない席の札が離れた（離れてもフォールドにならない）とき、その席の最後の声のコールが札の離れた
+# あと（語の話し始めが離脱の `DEPARTED_CALL_BEFORE_SEC` 前〜`DEPARTED_CALL_AFTER_SEC` 後。記録上の離脱は読み取りの
+# ラグで実際より約 1 秒遅れるので、少し前に話し始めたコールも離れたあと）なら、そのコールは次の人の
+# もので、その席はコールの前のベットに降りていた（ベットの無いところで降りることは無い: 店舗の真のアクションの
+# フォールド 171 のうち 0）。コールが札の離れるより前なら付け直さない: そのコールはその席より前の人のもの（手番の
+# ずれはもっと前 = ボタン・持ち上げ・前のハンドの札。店舗 2026-10-06 の 5 回とも。付け直すとずれが隠れる）
+DEPARTED_CALL_BEFORE_SEC = 0.5
+DEPARTED_CALL_AFTER_SEC = 6.0
+# ストリートの札より前（`STALE_CALL_MARGIN_SEC`）に話し始めた声のアクションは、そのストリートのものではない（オーナー
+# 2026-10-07:「ターンカードのディールや、ターンカード/チェックアラウンドの宣言に先立ってターンのアクションが宣言されることは
+# ありません」）。店舗の全データで、正しいハンドの声のアクションは札の 0.5 秒以上あと・札の離脱のフォールドは 5.5 秒以上あと。
+# ライブの規則のまま札より前の行があった 10 ハンドはすべて誤り（声は札の 4.4〜13.5 秒前、離脱は 4.6〜16 秒前。05cccd6c
+# ハンド 19: フロップの「チェック」が 1 つ多く聞こえてラウンドが閉じ、ターンの札の 13.5 秒前の「千二百」がターンのベットに
+# なって以降すべて 1 席ずれた）。札の離脱は読み取りのラグ（約 1 秒）があるので `FOLD_BEFORE_CARD_SEC` より前だけ数える
+FOLD_BEFORE_CARD_SEC = 2.0
+# 記録を書き換える（言い直しとして外す・前のストリートを開き直す）のは札よりこの秒数以上前に話し始めた声だけ（印は
+# `STALE_CALL_MARGIN_SEC` から）。札が読めるのは配ってから少し遅れる（ディーラーの宣言から札が読めるまで中央値 0.9 秒・
+# 最大 2.5 秒）ので、読み取りが遅れた札の直前の本当のアクションを書き換えない。店舗で直した行はどれも札の 3.2 秒以上前
+BEFORE_CARD_FIX_MARGIN_SEC = 3.0
+# 札より前に話した語を、閉じたラウンドの余り・言い直し（または前のラウンドの続き）とみるのは、そのラウンドを閉じた
+# アクションからこの秒数のうちに話したときだけ。ディーラーが次の札を配るには時間がかかる（店舗の正しいハンドで、
+# ストリートが変わるときの声の間は 3.5 秒以上・中央値 10 秒）ので、それより離れた語は次のストリートの札を配ったあと
+# = 札の読み取りが遅れた（店舗 09-27: ターンの札が 13 秒遅れて読め、その前のターンのアクションを外していた）。札の時刻で
+# 余りとして外した語は、店舗のデータでどれも閉じたアクションから 4.3 秒以内
+LEFTOVER_AFTER_CLOSE_SEC = 6.0
+# 札より前の行を直す組み直しの上限（1 つのストリートの札について）
+BEFORE_CARD_MAX_FIXES = 3
+# フロップの 3 枚はいっしょに置く（店舗の 89 ハンドのうち 88 で 3 枚が 5.5 秒以内に読めた）。それより離れて読めた札が
+# あれば、読めなかったフロップの札の代わりに次のストリートの札が数えられたかもしれない（09-29 d0f055fb ハンド 5:
+# 3 枚目が 13 秒あと = 本当はターンの札で、ターンの位置にリバーの札）。そのハンドでは札の時刻で直さない・印も付けない
+FLOP_CARDS_SPREAD_SEC = 8.0
+# ディーラーがここまでのアクションを言い直す（「センテン、コール」= 1000 のレイズとそのコール, 店舗 2026-10-06 05cccd6c
+# ハンド 7 のオーナーのメモ）: いまのベットと同じ額だけを言ったあと、この秒数のうちに話し始めた「コール」は、その賭けの
+# あとに記録したコールの言い直し
+RECAP_SEC = 3.0
+# 札の離脱で組み直す（取り消す）ときに入力として残す音声のアクション（訂正の合図「失礼しました」も）
+_REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin", "heads_up", "players_left",
+                                 "correction"})
+# ――― 口頭の訂正「失礼しました」（オーナー 2026-10-06）―――
+# ハンドのアクションを最初からやり直すことはない。ハンドの進行を優先して、ストリートの最初からやり直すか、直前の
+# アクションを訂正する。どちらか（どちらでもない = 会話）は、そのあとのアクションとの辻褄で選ぶ: 解釈ごとにハンドを
+# 組み直し、合図のあとの記録の不自然さ（下の重み）+ 解釈の重みのいちばん小さいものを採る。
+# 解釈の重み: 直前の訂正がいちばん多い（言い間違いは 1 つのことが多い）。ストリートの言い直しは、直前の訂正で
+# 辻褄が合わないとき。訂正なしは、どちらの訂正でも辻褄が合わないとき
+CORRECTION_PRIOR = {"prev": 0.0, "street": 0.6, "none": 0.9}
+_CORRECTION_ORDER = {"prev": 0, "street": 1, "none": 2}
+# 合図のあとの記録の不自然さ: 適用できない・ハンドの外 = 2、言った額・アクションが使えず直した・聞こえなかった
+# アクションを補った・言った語が何にもならなかった = 1、ストリートの札が配られる前に話した語がそのストリートの
+# アクションになった = 2
+CORRECTION_PENALTY_FAILED = 2.0
+CORRECTION_PENALTY_ADJUSTED = 1.0
+CORRECTION_PENALTY_SPILLED = 2.0
+# 合図のあと、この数の声のアクションか、次のストリートの札・ハンドの終わりで解釈を決める（それまでは入力ごとに選び直す）
+CORRECTION_WINDOW_INPUTS = 8
+# 言った額・アクションがいま使えず直した記録の印（`apply_corrections` の額の寄せ・使える額の選び直し）
+_ADJUSTED_REASONS = frozenset({"amount_snapped", "legal_amount", "no_amount_heard"})
+# 確かでない賭けの読み（あいまいな語・額の聞こえない賭け）: 札より前に話していても、前のラウンドを開き直す根拠にしない
+_WEAK_WAGER_REASONS = frozenset({"fuzzy_keyword", "no_amount_heard"})
+# 訂正の対象にする声のアクション（効いたもの = 記録になった / 「フォールド」を手番の人に保留した）
+_CORRECTION_UNIT_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin"})
+# 声のアクションの記録（合成したフォールド・補ったアクション・札の離脱は除く）
+_VOICE_SOURCES = frozenset({"spoken_seat", "spoken_position", "engine_prior"})
+# 解釈を決める前に届いても、組み直しを待たなくてよい（ハンドを終わらせない）制御
+_CONTROL_KEEPS_CORRECTION = frozenset({"rename_seat", "set_blinds", "sit_out", "sit_in", "rebuy", "set_button",
+                                       "correct_board", "correct_seat", "truth_stacks", "reduce_stack",
+                                       "set_bb_ante"})
+# 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
+# 言葉がこの数だけ聞こえたら、そのオールインを聞き違いとみて外す（店舗 2026-09-27: 自信 0.27 の「オールイン」の
+# あとのチェック 5 回と「2700」がすべて保留になり、全員オールインの 59700 のポットになった）
+HELD_WORDS_TO_DROP_ALLIN = 2
+# ディーラーはオールインを言い直す（店舗 2026-09-29: 「オーリー」→「オールイン、コール」/「オールインフォールド」、
+# 「オールイン」→「オールイン、コール、ショーダウン」。間は 2.1〜6.5 秒）。直前の記録がオールインで、その発話から
+# この秒数以内に「オールイン」と聞こえたら、同じオールインの言い直しとみて次の人のオールインにしない。同じ発話の
+# 「オールイン、オールインです」も言い直し（間を置かずに 2 人が続けてオールインすることはまず無い, オーナー 2026-09-30）。
+# 同じ額のベット・レイズ（「ベット 2000」→「ベット 2000です」）も同じ: 次の人は同じ額をベット・レイズできない
+# （同じ額ならコール）ので、言い直しを次の人のレイズにしていた。
+ALLIN_RESTATE_SEC = 8.0
+# 「N 足りないから M」（言い直しを言葉で示した, `recognizer.RESTATEMENT`）は、直前の賭けからこの秒数までその賭けの
+# 言い直しとみる（店舗 2026-10-14 15cad555 ハンド 16: レイズから 14 秒後。あいだは雑談と幻聴だけ）
+SPOKEN_RESTATE_SEC = 30.0
+_BETTING_WORDS = frozenset({"check", "call", "bet", "raise", "allin"})
+# 額の候補から選ぶとき（`_choose_amount`）、使える額の 1 番と 2 番の点数の差がこれ未満なら「額があいまい」（要確認）
+AMOUNT_CLOSE = 1.0
+# 読んだ額がいま使えない（最小ベット・レイズに届かない）とき、第 2 の耳の額ごとの点数から使える額を選び直すのは、
+# その額の点数がいちばん確からしい額（使えない額も含む）からこの差以内のときだけ（音がどの使える額にも遠ければ選ばない）
+LEGAL_AMOUNT_MAX_GAP = 5.0
+# 額の無い「レイズ」「ベット」のあとに意味の通らない語があり（額の位置に何か聞こえた）、第 2 の耳の額ごとの点数の 1 番が
+# この値以上で 2 番よりこの差以上はっきりしていれば、その額にする（店舗 2026-10-14 15cad555 ハンド 11:「レイズ 生活!」を
+# 第 2 の耳は「レッズ千五百」と聞き 1500 が -2.7・2 番 -6.4。最小レイズにしていた。開発データで同じ形はこの 1 回、
+# ほかの「レイズお願いします。」「レイズーズ」は点数が -9 以下で当たらない）
+EAR_AMOUNT_MIN_SCORE = -5.0
+EAR_AMOUNT_MARGIN = 2.0
+_WAGER_WORD_THEN_MORE = re.compile(r"(?:レイズ|レイス|ベット|ベッド)\s*(\S.*)$")
+
+# review の理由にしない parse flag（読み方の情報。「数字だけ」「チェックアラウンド」「チェックアラウンドの前のチェック」は
+# 運用どおりの言い方）
+_INFO_PARSE_FLAGS = frozenset({"amount_only", "check_around", "before_check_around"})
+
+# 分けた（勝者が 2 人以上）ことを言う語（`core.constants.ACTION_KEYWORDS` の winner のうち）
+_SPLIT_WORDS = re.compile(r"チョップ|ちょっぷ|スプリット|split|chop", re.IGNORECASE)
+
+_SUIT_MARKS = {"s": "♠", "h": "♥", "d": "♦", "c": "♣"}
+
+
+def _card_text(card: str) -> str:
+    """"Td" → "10♦"（CLI の表示用）。読めなかった位置は "?"。形の違う札（未登録の UID 等）はそのまま。"""
+    if card == UNKNOWN_CARD:
+        return "?"
+    if len(card) == 2 and card[1].lower() in _SUIT_MARKS:
+        rank = "10" if card[0] in "Tt" else card[0].upper()
+        return rank + _SUIT_MARKS[card[1].lower()]
+    return card
+
+
+def _cards_text(cards) -> str:
+    return " ".join(_card_text(c) for c in cards)
+
+
+def _seats_text(seats) -> str:
+    return "・".join(str(s) for s in seats)
 
 
 def calc_confidence(has_rfid: bool, has_audio: bool, has_camera: bool) -> float:
@@ -168,7 +381,29 @@ class IntegrationThread(threading.Thread):
         clock: Optional[Callable[[], float]] = None,
         session_repo: "Optional[SessionRepository]" = None,
         seat_player_map: Optional[dict[int, str]] = None,
+        on_new_hand: Optional[Callable[[], None]] = None,
+        on_card_correction: Optional[Callable[[str, int], None]] = None,
+        seat_cards_absent_since: Optional[Callable[[int], Optional[float]]] = None,
+        seat_presence: Optional[Callable[[], dict]] = None,
+        table_state_writer: "Optional[TableStateWriter]" = None,
         control_conf_threshold: float = 0.0,
+        board_presence: Optional[Callable[[], dict]] = None,
+        auto_new_hand: bool = False,
+        auto_winner: bool = False,
+        speech_backlog: Optional[Callable[[], int]] = None,
+        on_notice: Optional[Callable[[str], None]] = None,
+        listen_gate: Optional[threading.Event] = None,
+        on_cards: Optional[Callable[[str], None]] = None,
+        rfid_folds: bool = False,
+        fold_absent_sec: float = FOLD_ABSENT_SEC,
+        speech_pending_since: Optional[Callable[[], Optional[float]]] = None,
+        voice_heard_at: Optional[Callable[[], Optional[float]]] = None,
+        recorded_deals: bool = False,
+        recorded_hand_seats: bool = False,
+        before_new_hand: Optional[Callable[[int], None]] = None,
+        button_from_deal: bool = True,
+        open_gates: frozenset = frozenset(),
+        live_hand: bool = False,
     ) -> None:
         """
         Args:
@@ -180,14 +415,69 @@ class IntegrationThread(threading.Thread):
                      on_rfid_card 同様 integration スレッドで発火するためスレッド安全に扱うこと。
             clock: epoch 秒を返す時計 (既定 time.time)。決定的 replay 用に注入する (F1)。
                    buffer 期限はこの時計に従う（ActionRecord/HandSummary の時刻は
-                   event.timestamp 由来 = ADR-B T3 で live/replay 同義）。
+                   event.timestamp 由来 = ADR-0048 T3 で live/replay 同義）。
             session_repo: S2.x session レイヤ (ADR-0008 Pattern A)。`seat_player_map` と共に与えると
                           hand 開始時に assign_seat（write-through）し、HandSummary.players に player_id を
                           additive 埋め込む。None なら従来動作（session 未接続・挙動不変, rollback path）。
             seat_player_map: seat_no → player_id（registry の UUID hex）。session_repo と対で有効。
+            on_new_hand: 新ハンド開始時に呼ぶフック（additive, 既定 None = 従来動作）。
+                         RFID の board 位置を **engine と同じタイミングでリセット**するために使う
+                         （`RFIDThread.reset_board_positions`, ISSUE-0026）。integration スレッドで
+                         発火するのでスレッド安全に実装すること。
+            before_new_hand: 新しいハンドの持ち点を取る直前に、そのハンドの hand_id で呼ぶフック（additive,
+                         既定 None）。評価の replay が各ハンドを記録の持ち点から始めるのに使う
+                         （`replay_events(hand_stacks=...)`）。
+            on_card_correction: ミスディール訂正フック（additive, 既定 None = 訂正は engine 内のみ）。
+                         `("board", 位置)` / `("seat", 席)` で呼ぶので、RFID 側の割り当て・
+                         デバウンスも同じタイミングで落とす（`RFIDThread.forget_board_position` /
+                         `forget_seat_cards`, ADR-0054）。integration スレッドで発火する。
+            seat_cards_absent_since: 席のカードが消えたまま戻っていない時刻（epoch）を返す関数
+                         （additive, 既定 None = 従来どおり処理時刻を使う）。**fold の判定には
+                         使わない**（プレイヤーはカードを持ち上げるので不在は fold を意味しない）。
+                         合成 silent-fold に **実際に札が席から離れた時刻**を与えるためだけに読む
+                         （音声の時系列と突き合わせて履歴を再生するため, ADR-0055）。
+            seat_presence: 席ごとのカード在否を返す関数（`RFIDThread.presence_snapshot`）。
+                         `table_state_writer` と対で、**RFID だけから導く卓状態**（カード / 有効席 /
+                         ストリート）を publish するのに使う。None なら卓状態は在否なしで作られる。
+            table_state_writer: 卓状態スナップショットの書き出し先（`output/table_state_writer.py`）。
+                         None なら publish しない（= 挙動不変）。
             control_conf_threshold: 制御語（new_hand/winner/showdown）を受理する Whisper 信頼度の
-                          下限（ADR-C G1）。0.0（既定）で無効 = 従来挙動。閾値未満の制御語は
+                          下限（ADR-0049 G1）。0.0（既定）で無効 = 従来挙動。閾値未満の制御語は
                           状態を動かさず保留レコード（needs_review）として on_action にのみ流す。
+            board_presence: ボードの読み取り状況（外れた札 / 数える前の札）を返す関数
+                         （`RFIDThread.board_presence`, ADR-0058）。卓状態の「外れた」「確認中」表示にだけ
+                         使い、ボードの記録は変えない。None なら表示しない。
+            auto_new_hand: 手札が配られたら新しいハンドを始める（ADR-0062, 既定 False = 従来どおり
+                         `n` / 「ハンド開始」だけ）。前のハンドが終わっていなければ先に確定する。
+            auto_winner: 勝者を自動で決める（ADR-0062, 既定 False）。rules-aware backend のみ。
+                         ほかが全員フォールドしたら残った人。ベッティングが終わったあとの「フォールド」は
+                         ショーダウンでのマック（一番アウトオブポジションから順）。マックが無ければ
+                         「ハンド終了」か次の配布のときに手札とボードで判定する。
+            speech_backlog: 認識待ちの発話の数を返す関数（`AudioThread.backlog`）。配布を検出しても、
+                         それより前に話された発話を先に反映してから新しいハンドを始めるために使う。
+                         None なら待たない（音声なし・replay）。
+            on_notice: 操作する人へのお知らせ（ハンドの開始・勝者・判定待ち）を受け取る関数。
+                         integration スレッドで呼ばれる。None なら logger だけ。
+            listen_gate: プレー中だけ set される Event（ADR-0063）。`AudioThread` が見て、プレー中で
+                         ない間の発話を認識に回さない。None なら常に聞く。
+            on_cards: RFID で読んだ札（手札・フロップ / ターン / リバー・確定時のまとめ）を 1 行ずつ
+                         受け取る関数（CLI の表示用）。integration スレッドで呼ばれる。None なら logger だけ。
+            rfid_folds: フォールドを**席の札の離脱**で決める（オーナー決定 2026-09-25）。音声の「フォールド」を
+                         次の手番の人に付けない。rules-aware backend のみ。在否（`seat_presence`）から離脱を
+                         観測して leave / muck / return / confirm の RFIDEvent を記録する（replay はそれで再現）。
+            fold_absent_sec: 札が離れたまま何秒でフォールドとみなすか（config `engine.fold_absent_sec`）。
+            speech_pending_since: まだアクションになっていない発話の一番早い話し始め（`AudioThread.
+                         oldest_pending_start`）。札の離脱は、それより前に話された発話を反映してから入れる。
+            voice_heard_at: マイクに最後に声が入った時刻（`AudioThread.last_voice_at`）。プレー中に
+                         `SILENT_MIC_SEC` 入らなければ、マイクの電池・受信機・音量を確かめるよう知らせる。
+            button_from_deal: 手札を最初に読んだ順（配った順）が別の席をボタンとした配り方にだけ合うなら、
+                         ディーラーがボタンを動かし忘れたとみて、そのハンドのボタンを直して組み直す（config
+                         `engine.button_from_deal`, 既定 True, 2026-09-29）。読んだ時刻は在否（`seat_presence` の
+                         `since`）から取り、`deal_order` の信号として記録する（replay も同じ判断）。False でも記録はする。
+            live_hand: 手札が配られたら、進行中のハンド（ここまでの記録）を `JsonWriter.write_live_hand` に
+                         書き、ハンドが終わったら消す（真のアクション入力の画面がハンドの途中で入力する, オーナー
+                         2026-09-30 はフロップから → 2026-10-06 にプリフロップの配布から）。ライブのロガーだけ True
+                         （既定 False = replay・テストは書かない）。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -206,6 +496,16 @@ class IntegrationThread(threading.Thread):
         self._session_repo = session_repo
         self._seat_player_map: dict[int, str] = dict(seat_player_map or {})
         self._session_layer_active = session_repo is not None and bool(self._seat_player_map)
+        self._on_new_hand = on_new_hand
+        self._before_new_hand = before_new_hand
+        self._on_card_correction = on_card_correction
+        self._seat_cards_absent_since = seat_cards_absent_since
+        self._seat_presence = seat_presence
+        self._board_presence = board_presence
+        self._table_state_writer = table_state_writer
+        # 定期 publish の最終時刻。カードが**外れた**ときは RFIDEvent が出ないので
+        # （デバウンスは増えた UID にしか反応しない）、fold を卓状態に映すには定期更新が要る。
+        self._table_state_published_at: float = 0.0
 
         # センサーイベントのバッファ
         self._camera_buffer: list[CameraEvent] = []
@@ -214,20 +514,195 @@ class IntegrationThread(threading.Thread):
         # ハンド内の一時バッファ
         self._current_actions: list[ActionRecord] = []
         self._hand_started_at: str = self._now_iso()
+        # ハンド開始の epoch。マック観測をハンド内にクランプするのに使う（ADR-0055）。
+        self._hand_started_epoch: Optional[float] = None
         self._stack_start: dict[int, int] = {}
+        # 卓の最初の持ち点（持ち点 0 の席に手札が配られたときに戻す, 店舗 2026-09-27）
+        try:
+            self._initial_stacks: dict[int, int] = dict(game_state.get_stacks())
+        except Exception:  # noqa: BLE001
+            self._initial_stacks = {}
+        # 持ち点 0 で手札が配られて最初の持ち点に戻した席 → (戻した額, そのハンドの番号)。そのハンドが終わって
+        # 次のハンドが始まるまでに届いた買い足し（`r`）は、戻した額の代わりにする（二重にしない）
+        self._provisional_stacks: dict[int, tuple[int, int]] = {}
+        # 席ごとの 0 でない最後の持ち点（持ち点 0 と誤って記録した人に配られたとき、そこに戻す, 2026-10-23）
+        self._last_positive_stack: dict[int, int] = {}
+        # ハンドのあとに直す持ち点（席 → 差）。戻した額の代わりの買い足しがハンドの途中に届いたとき
+        self._stack_corrections: dict[int, int] = {}
+        # 真のアクションで持ち点を直す（`truth_stacks`, 2026-10-19）: ハンド → 席 → 収支（真のアクション / 記録）と、
+        # 足した差（同じハンドを保存し直したら、前に足した分との差だけを足す）
+        self._truth_results: dict[int, dict[int, int]] = {}
+        self._recorded_results: dict[int, dict[int, int]] = {}
+        self._truth_applied: dict[int, dict[int, int]] = {}
         # new_hand 済みで勝者未確定のハンドが進行中か（G1 の状態妥当性チェック /
         # ハンド外イベントの unresolved 記録に使う）。
         self._hand_open: bool = False
+        # ハンドの途中に届いた席替えの名前（席 → 名前）。次のハンドの開始時に反映する（ADR-0059）。
+        self._pending_renames: dict[int, str] = {}
 
         # RFID カード情報
         self._board_cards: list[str] = []          # 順序付きボードカード（表示用）
         self._board_positions: dict[int, str] = {} # board_index → card
+        # board_index → **最初に検出した時刻**（epoch）。ターン/リバーの配布時刻はベッティング
+        # ラウンドの区切りとしてアクションの時刻に対応するため記録する（ADR-0055）。
+        # 再検出（結合の弱いリーダーの間欠読み）では上書きしない = 配布の瞬間を保つ。
+        self._board_dealt_at: dict[int, float] = {}
         self._board_source: str = ""
         self._hole_cards: dict[int, list[str]] = {}  # seat → [card1, card2]
 
         # RFID カードがマスター未解決のままハンドが進んだ場合、ハンド全体を
         # 要レビューにする（個々の ActionRecord では捕捉できないため）。
         self._hand_needs_review: bool = False
+
+        # ――― 手札が配られたら新しいハンド / 勝者の自動判定（ADR-0062）―――
+        self._auto_new_hand = auto_new_hand
+        self._auto_winner = auto_winner
+        self._speech_backlog = speech_backlog
+        self._on_notice = on_notice
+        self._rules_aware = bool(getattr(game_state, "rules_aware", False))
+        # 次のハンドとして読んだ札 (席, 札, 時刻)。在否が無いとき（replay 等）はこれで配布を判断する。
+        self._deal_events: list[tuple[int, str, float]] = []
+        # 配布と判断したハンドの手札（席 → 札）。ハンドを始めるときに手札として入れる。
+        self._deal_hands: dict[int, list[str]] = {}
+        # 在否による配布の検出: 席 → (手札 2 枚が載り始めた時刻, 最後に載っていた時刻)（ADR-0063）
+        self._deal_since: dict[int, tuple[float, float]] = {}
+        self._deal_at: Optional[float] = None          # 最初の札が見えた時刻
+        self._deal_detected_at: Optional[float] = None  # 検出した時刻（engine の時計）
+        # 配布の検出で RFID をリセット済み（ハンド開始時に二重にリセットしない）
+        self._rfid_reset_for_deal = False
+        # replay: 記録に配布（deal）とハンド開始（hand_start）の信号がある。札の読み取りから配布を決め直さず、
+        # live が在否で決めた配布と、発話を待って始めた時点に従う（ADR-0056 追記 1, S0）。
+        self._recorded_deals = recorded_deals
+        # replay: 記録に配った席の組み直し（hand_seats）がある = その判断に従う（決め直さない）
+        self._recorded_hand_seats = recorded_hand_seats
+        self._hand_start_due = False
+        self._hand_seats_settled = False
+        # このセッションで手札を読んだことのある席（札が 1 枚も載らない席を外すのは、読めるリーダーの席だけ）
+        self._seats_ever_dealt: set[int] = set()
+        self._prev_hand_seats: set[int] = set()     # 前のハンドに配られた席
+        # replay: 配布を検出してからハンドを始めるまでに届いた、そのハンドの札の信号（始めてから反映する）
+        self._signals_before_start: list[RFIDEvent] = []
+        # 手札が配られる前のボードの札を読まなかった（最初の手札で RFID のボード位置を捨てる）
+        self._board_before_deal = False
+        # プレー中か（配布〜確定、または卓が空になるまで）。音声の聞き取りとボードの受付に使う。
+        self._listen_gate = listen_gate
+        self._in_play = False
+        if listen_gate is not None:
+            listen_gate.clear()
+        self._table_empty_since: Optional[float] = None
+        self._listen_after_hand_until: Optional[float] = None   # `POST_HAND_LISTEN_SEC`
+        self._voice_heard_at = voice_heard_at
+        self._silent_mic_warned = False
+        # いまのハンドを配布の検出で始めたか（直後の「ハンド開始」/ `n` を二重に数えない）。
+        self._hand_auto_started = False
+        # ショーダウンでマックした席（見せずに降りた = ポットを受け取れない）。
+        self._showdown_mucks: list[int] = []
+        # このハンドで「ショーダウン」と聞こえたか（マックの「フォールド」はその宣言のあとに言う, オーナー 2026-10-14）
+        self._showdown_declared = False
+        # ショーダウンを手札で判定できなかった理由（次の配布でチップを動かさずに終えるときの表示）
+        self._showdown_gaps: list[str] = []
+        self._showdown_notice_shown = False
+        # ショーダウンの最後の出来事（ベッティングの終わり・役名・マック）を話した時刻。`SHOWDOWN_MUCK_SEC` 何も
+        # 無ければ手札で決める
+        self._showdown_at: Optional[float] = None
+        # ショーダウンで見せた席 → ディーラーが言った役名（見せる順はアウトオブポジションから）
+        self._showdown_shown: dict[int, Optional[str]] = {}
+        self._showdown_hit: dict[int, str] = {}      # 「Nヒット」で見せた席 → N（2 ペアのこともある）
+        # 直前に確定したハンド（自動で決めた勝者のあとに届いた `w` / 「ウィナー」を扱う）。
+        self._last_result: Optional[dict] = None
+        # ディーラーがショーダウンで言った勝った役の名前（pokerkit の役名, 2026-09-26）。ハンドごとに捨てる。
+        self._announced_hand: Optional[str] = None
+        # ハンドを始められなかった理由（同じ理由を繰り返し知らせない。始められたら None）
+        self._start_refused: Optional[str] = None
+        self._current_input_index: Optional[int] = None
+        # 「フォールド」と聞こえたが札がまだ席にある席 → 発話の時刻（札が離れたらこの時刻のフォールドにする）
+        self._spoken_folds: dict[int, float] = {}
+        self._spoken_fold_raw: dict[int, str] = {}     # その「フォールド」の聞き取った文（記録用）
+        # CLI に出した札（同じ札を何度も出さない）: 席 → 手札、ボードは出した枚数
+        self._on_cards = on_cards
+        self._shown_holes: dict[int, tuple[str, ...]] = {}
+        self._shown_board = 0
+        self._seat_setup_warned = False   # このハンドで席の設定の食い違いを知らせたか
+        # ――― フォールドは札の離脱から ―――
+        self._rfid_folds = bool(rfid_folds) and self._rules_aware
+        self._fold_absent_sec = float(fold_absent_sec)
+        self._speech_pending_since = speech_pending_since
+        # 席 → {"t": 離れた時刻, "muck": 中央を通過, "applied": ハンドの記録に入れた}
+        self._departures: dict[int, dict] = {}
+        # このハンドの入力（組み直しで同じ順に流し直す）: ("audio", AudioEvent) / ("leave", RFIDEvent)
+        self._hand_inputs: list[tuple[str, object]] = []
+        # 札の離脱を入れる直前の状態（戻ったら取り消して組み直す）。聞こえたベット・レイズ・オールインの
+        # 直前の状態も持つ（オールインは記録を "allin" に入れる = 聞き違いなら外して組み直す）
+        self._checkpoints: list[dict] = []
+        # ベッティングが終わったあとに聞こえたベッティングの言葉の数（聞き違いのオールインを見つける）
+        self._held_betting_words = 0
+        # 最後に記録した賭け（オールイン・ベット・レイズ）(記録, 話し始めた時刻, 言った額)（言い直しを見分ける）
+        self._last_wager: Optional[tuple[ActionRecord, float, int]] = None
+        # そのベット・レイズの前の状態と、そのときの合法手（額の言い直しで組み直す, `_restate_wager_amount`）
+        self._last_wager_point: Optional[tuple[dict, LegalContext]] = None
+        # いまのベットの額の言い直しのあとに続く「コール」の言い直しを待つ {"t", "records", "text"}（`RECAP_SEC`）
+        self._recap: Optional[dict] = None
+        # 最後の 1 人を残すフォールドの確定待ち {"seat", "t"}
+        self._foldout_pending: Optional[dict] = None
+        self._foldout_winner_left = False
+        self._rebuilding = False
+        # 直前のアクションの時刻（手番でない席の離脱を「前の人の聞き落とし」とみなしてよいかの判断）
+        self._last_action_at: Optional[float] = None
+        # ボードの札で分かったストリートの始まり（street → 最初の札が見えた時刻）と、前のラウンドを閉じたか
+        self._street_marks: dict[str, float] = {}
+        self._streets_synced: set[str] = set()
+        # ――― ボタンの置き忘れの救済（2026-09-29）―――
+        self._button_from_deal = bool(button_from_deal)
+        # 推定器が開けた門（`word_key` の集まり。ライブは空 = 門は閉じたまま）と、門が働いた語（`gate_events`）。
+        # 門 = 証拠（語）を捨てるライブの規則。推定器は門を開ける直しを選べる（2026-10-15 の見直し, 手順 3）
+        self._open_gates = frozenset(open_gates)
+        self._gate_events: dict[str, tuple[str, float]] = {}
+        self._live_hand = bool(live_hand)
+        self._live_signature: Optional[tuple] = None     # 最後に書いた進行中のハンド（変わったときだけ書く）
+        # このハンドで配った順を見たか（1 ハンドに 1 回）
+        self._deal_order_checked = False
+        # ハンドを始めた直後の状態（ボタンを直して始め直すとき、ここから入力を流し直す）
+        self._hand_origin: Optional[dict] = None
+        # ――― 口頭の訂正「失礼しました」（`_handle_correction`）―――
+        # このハンドの訂正（合図ごと）: {"cue", "t", "targets", "floor_from", "choices", "choice", "frozen", ...}
+        self._corrections: list[dict] = []
+        # いまの解釈で取り消した入力（id → 入力。組み直しでも流さない）
+        self._retracted: dict[int, object] = {}
+        # 語の扱い（記録にしなかった声の語の理由: "restate" = 同じ賭け・額の言い直し、"recap" = 要約のコール、
+        # "corrected" =「失礼しました」で取り消した）。推定器が、使われなかった語を余計な語（雑談・幻聴）と区別して値付け
+        # する（言い直しのモデルを engine 1 つに, 2026-10-15 の見直し）。`word_labels` で読む。キーは `word_key`
+        self._word_labels: dict[str, str] = {}
+        self._hand_word_labels: dict[str, str] = {}
+        # 声の入力ごとの、その入力でできた声の記録（id → (入力, [記録])。訂正の対象と辻褄を見る）
+        self._input_voice: dict[int, tuple[object, list[ActionRecord]]] = {}
+        # 訂正で取り消した範囲の札の離脱は、合図の時刻より前なので「間の人の聞き落とし」の補いに使わない（その時刻）
+        self._departure_floor: Optional[float] = None
+        # チェックポイントに戻した回数（入力の処理の途中で組み直したか）
+        self._restore_generation = 0
+        # 適用できなかった発話の数（訂正の辻褄を見る）
+        self._unresolved_count = 0
+        # 訂正の解釈を決めるまで、全員フォールドでのハンドの確定を待っている
+        self._finish_wanted = False
+        # ベットに向き合っていない席の札の離脱と、その席に付けた直前のコール（離脱の入力, コールの入力, 席）。発話の
+        # 処理のあと・ハンドを終わらせる前に、離脱をコールの前に移して組み直す（`_retract_departed_calls`）
+        self._departed_calls: list[tuple[object, object, int]] = []
+        # 最初に処理したときに札の離脱と組にした聞き違いのコールの語（id → 語）。組み直しでは記録した離脱の入力が降ろす
+        # ので、語はもう何もしない（組み直しの入力の並び = live は語のあと、replay は語の前に離脱 = によらず同じにする）
+        self._garbled_absorbed: dict[int, AudioEvent] = {}
+        # 最初に処理したときに働きを信号（札の離脱と組にした leave / 保留の spoken_fold）で済ませたベッティング中の
+        # 「フォールド」の語（id → 語）。組み直しでは信号の入力が同じことをするので、語はもう何もしない（`_garbled_absorbed`
+        # と同じ理由）
+        self._fold_words_done: dict[int, AudioEvent] = {}
+        # ストリートの札（ストリート, 札の時刻）: 発話の処理のあと・ハンドを終わらせる前に、札より前に話した声の行がその
+        # ストリート以降に入っていないか見て組み直す（`_fix_spoken_before_card`）
+        self._before_card: list[tuple[str, float]] = []
+        # 札より前に話したので外した入力（id → 入力。組み直しでも流さない）と、前のストリートに戻した賭けの語の印
+        self._dropped_inputs: dict[int, object] = {}
+        self._before_card_tags: dict[int, tuple[AudioEvent, str]] = {}
+        # 合図のあとの最初の声のアクションに付ける印（いまの解釈）
+        self._correction_tag: Optional[str] = None
+        # 処理中のイベントの入れ子の深さ（訂正の解釈は、いちばん外の発話を反映し終えてから選び直す）
+        self._event_depth = 0
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -255,9 +730,24 @@ class IntegrationThread(threading.Thread):
             self._drain_camera_queue()
             self._drain_rfid_queue()
 
+            self._publish_table_state_if_due()
+            self._publish_live_hand()       # 進行中のハンド（手札を配ったときから, 真のアクション入力の画面）
+            self._check_deal_presence()     # 手札の配布（ADR-0063）
+            self._check_deal_order()        # 配った順（ボタンの置き忘れ）
+            self._check_table_cleared()     # 片付け（プレーの終わり）
+            self._check_post_hand_listening()   # 全員フォールドのあとも札が残っているあいだの聞き取り
+            self._check_silent_mic()        # マイクに声が入っているか
+            self._check_seat_setup()        # 起動時の席と札を置いた席の食い違い
+            self._poll_departures()         # 席の札の離脱・戻り（フォールド）
+
             try:
                 event = self._audio_queue.get(timeout=0.1)
             except queue.Empty:
+                # 配布を検出していて、それより前の発話がもう無ければ新しいハンドを始める（ADR-0062）
+                self._start_dealt_hand_if_ready()
+                self._apply_idle_observations()
+                self._check_foldout_timeout()
+                self._check_showdown_timeout()
                 self._expire_buffers()
                 continue
 
@@ -265,7 +755,31 @@ class IntegrationThread(threading.Thread):
             self._handle_audio_event(event)
             self._expire_buffers()
 
+        self._close_open_hand_at_stop()
         logger.info("IntegrationThread stopped")
+
+    def _close_open_hand_at_stop(self) -> None:
+        """終了（`q`）のとき、届いている発話を反映してから確定していないハンドを保存する。
+
+        店舗 2026-09-27: ハンドの途中で終了して 2 ハンドが記録に残らなかった。次の手札が配られたときと
+        同じ規則で閉じる（ショーダウンなら手札で判定、決まらなければ仮の勝者 + 要確認）。終了も記録に残す
+        （replay で同じハンドが保存される）。
+        """
+        try:
+            self._drain_rfid_queue()
+            while True:
+                try:
+                    event = self._audio_queue.get_nowait()
+                except queue.Empty:
+                    break
+                self._record(event)
+                self._handle_audio_event(event)
+            if self._hand_open and self._hand_in_play():
+                end = AudioEvent(action="session_end", amount=0, timestamp=self._clock(), raw_text="（終了）")
+                self._record(end)
+                self._handle_audio_event(end)
+        except Exception:  # noqa: BLE001 — 終了の途中の失敗で止まらない（記録は events.jsonl に残っている）
+            logger.exception("終了時にハンドを保存できませんでした")
 
     # ――― バッファ管理 ―――
 
@@ -292,14 +806,74 @@ class IntegrationThread(threading.Thread):
             self._process_rfid_event(ev)
 
     def _process_rfid_event(self, ev: RFIDEvent) -> None:
-        """受信した RFIDEvent を役割に応じて振り分ける。"""
+        """受信した RFIDEvent を役割に応じて振り分ける。
+
+        訂正（「失礼しました」）の解釈は札の入力では選び直さない（次の発話・ハンドの終わりで。live では発話の処理の
+        中で出した信号を、replay は発話の前に流すので、札のたびに選ぶと live と replay で選ぶ時点がずれる）。
+        """
+        self._event_depth += 1
+        try:
+            self._dispatch_rfid_event(ev)
+            if ev.kind == "card":
+                self._check_hand_seats(ev.timestamp)
+        finally:
+            self._event_depth -= 1
+        self._finish_after_correction()
+        # 卓状態はカードが動くたびに publish する（UI への反映経路, ADR-0056 D5）。
+        self._publish_table_state(observed_at=ev.timestamp)
+
+    def _dispatch_rfid_event(self, ev: RFIDEvent) -> None:
+        if ev.kind != "card":
+            self._handle_seat_signal(ev)    # 札の離脱・戻り・確定（フォールド）
+            return
         if ev.role == "board":
             self._handle_board_rfid(ev)
         else:
             self._handle_seat_rfid(ev)
 
+    def _warn_duplicate_board_cards(self) -> None:
+        """ボードに同じカードが 2 枚以上ある = 物理的にあり得ない（1 組のデッキ）。
+
+        起こり得る原因は **`rfid_cards.json` の重複登録**（同じカード名に 2 つの UID）か
+        誤読み。どちらもハンドログが壊れるので WARN + needs_review を立てる（ISSUE-0026）。
+        枚数判定によるストリート自動遷移も水増しされるため、黙って進めない。
+        """
+        dupes = sorted({c for c in self._board_cards
+                        if c != UNKNOWN_CARD and self._board_cards.count(c) > 1})
+        if not dupes:
+            return
+        logger.warning(
+            "ボードに同じカードが複数あります: %s（board=%s）— 1 組のデッキではあり得ません。"
+            "rfid_cards.json の重複登録を疑ってください（`python tools/register_cards.py list`）。"
+            "needs_review を立てます",
+            ", ".join(dupes), self._board_cards,
+        )
+        self._hand_needs_review = True
+
     def _handle_board_rfid(self, ev: RFIDEvent) -> None:
         """ボードカードの RFID イベントを処理する。"""
+        if self._deal_at is not None and ev.timestamp >= self._deal_at:
+            # 配ったあとのボードの札は新しいハンドのもの（ADR-0062）
+            self._start_dealt_hand_if_ready(force=True)
+            if not self._hand_open:
+                return                       # ハンドを始められていない（参加できる席が 2 つ未満）
+        elif self._auto_new_hand and not (self._hand_open and self._in_play):
+            # 手札が配られる前・プレーが終わったあと（シャッフル・片付け）のボードは読まない（ADR-0063）
+            logger.debug("プレー中でないボードの札を無視しました: %s (tag=%s)", ev.card, ev.tag_id)
+            return
+        elif self._auto_new_hand and self._waiting_for_deal():
+            # 「ハンド開始」/ n で先に始めたハンドで、まだ手札が配られていない = 配る前のウォッシュ。
+            # RFID が振ったボードの位置は、最初の手札が届いたときに捨てる（本物の flop を 1 枚目から数える）。
+            self._board_before_deal = True
+            logger.debug("手札が配られる前のボードの札を無視しました: %s (tag=%s)", ev.card, ev.tag_id)
+            return
+        if self._auto_new_hand and self._betting_over() and (
+            ev.replaces or ev.board_index not in self._board_positions
+            and self._board_top() >= 5
+        ):
+            # ショーダウン待ちのボードは変えない（次のハンドのウォッシュで差し替わるのを防ぐ, ADR-0063）
+            logger.info("ショーダウン待ちのボードの差し替えを無視しました: %s", ev.card)
+            return
         if not ev.card:
             logger.warning(
                 "Board RFID event has no card (tag=%s reader=%s) — needs_review",
@@ -310,23 +884,50 @@ class IntegrationThread(threading.Thread):
 
         if ev.board_index is not None:
             # 位置指定あり: board_positions に格納して順序保証
+            previous = self._board_positions.get(ev.board_index)
+            unchanged = previous == ev.card
             self._board_positions[ev.board_index] = ev.card
-            self._board_cards = [
-                self._board_positions[i]
-                for i in sorted(self._board_positions)
-            ]
-            logger.info(
-                "Board card [pos=%d]: %s — board so far: %s",
-                ev.board_index, ev.card, self._board_cards,
+            if previous is not None and not unchanged:
+                # 配り直しで同じ位置の札が替わった（ADR-0058）。配布時刻も新しい札のものにする。
+                self._board_dealt_at[ev.board_index] = ev.timestamp
+                self._hand_needs_review = True
+                logger.info(
+                    "配り直し: ボード %d 枚目を差し替えました（%s → %s）",
+                    ev.board_index, previous, ev.card,
+                )
+            else:
+                # 配布時刻は **最初の検出**を採る（再発火で上書きしない, ADR-0055）。
+                self._board_dealt_at.setdefault(ev.board_index, ev.timestamp)
+            self._board_cards = self._board_list()
+            # tag を出すのは、同じカード名が別 UID で 2 枚登録されている（= rfid_cards.json の
+            # 重複登録）ケースを名前だけのログから切り分けられないため（ISSUE-0026）。
+            # 同じ位置に同じ札の再検出は新しい情報ではない。結合の弱いリーダーは載っている札を
+            # 何度も読み直すので、INFO のままだと端末が埋まって CLI の入力が壊れる（ISSUE-0034）。
+            logger.log(
+                logging.DEBUG if unchanged else logging.INFO,
+                "Board card [pos=%d]: %s (tag=%s) — board so far: %s",
+                ev.board_index, ev.card, ev.tag_id, self._board_cards,
             )
+            self._warn_duplicate_board_cards()
             self._try_advance_street_from_rfid()
+            self._show_board(
+                replaced=(ev.board_index, previous, ev.card)
+                if previous is not None and not unchanged else None
+            )
+            self._note_street_marks()
         else:
-            # board_index なし: 末尾に追記
+            # board_index なし: 末尾に追記。ボードは 5 枚まで: 6 枚目は片付け・次のハンドの札（リバーのあとに
+            # ボードのリーダーに載った札）。足すと手札の判定ができなくなる（店舗 2026-10-19: 5 ハンドで 6〜7 枚）
+            if len(self._board_cards) >= 5:
+                logger.info("ボードはもう 5 枚です — %s はボードに足しません（片付け・次のハンドの札）", ev.card)
+                return
             self._board_cards.append(ev.card)
             logger.info(
-                "Board card (no index): %s — board so far: %s",
-                ev.card, self._board_cards,
+                "Board card (no index): %s (tag=%s) — board so far: %s",
+                ev.card, ev.tag_id, self._board_cards,
             )
+            self._warn_duplicate_board_cards()
+            self._show_board()
 
         if not self._board_source:
             self._board_source = "rfid"
@@ -336,10 +937,34 @@ class IntegrationThread(threading.Thread):
 
     def _handle_seat_rfid(self, ev: RFIDEvent) -> None:
         """座席カードの RFID イベントを処理する (ホールカード蓄積 + アクション照合用)。"""
+        if self._auto_new_hand and ev.card and ev.seat is not None and (
+            (self._deal_at is not None and ev.timestamp >= self._deal_at) or self._is_next_deal(ev)
+        ):
+            self._collect_deal(ev)   # 次のハンドの札（ADR-0062）。いまのハンドには入れない
+            return
         # ホールカード蓄積 (カード情報がある場合のみ)
         if ev.card and ev.seat is not None:
             seat_cards = self._hole_cards.setdefault(ev.seat, [])
-            if ev.card not in seat_cards and len(seat_cards) < 2:
+            # デッキ整合: 同じ札を別の席に記録していたら外す（配り直しで席が変わった, ADR-0058）。
+            moved = False
+            for other_seat, other_cards in self._hole_cards.items():
+                if other_seat != ev.seat and ev.card in other_cards:
+                    other_cards.remove(ev.card)
+                    moved = True
+                    logger.info(
+                        "配り直し: %s を席 %d から席 %d に移しました", ev.card, other_seat, ev.seat,
+                    )
+            if ev.replaces and ev.replaces in seat_cards and ev.card not in seat_cards:
+                # 配り直しで前の札が消え、新しい札が載り続けた（RFIDThread が確かめてから送る）。
+                seat_cards[seat_cards.index(ev.replaces)] = ev.card
+                self._hand_needs_review = True
+                logger.info(
+                    "配り直し: 席 %d の %s を %s に差し替えました（cards: %s）",
+                    ev.seat, ev.replaces, ev.card, seat_cards,
+                )
+                if self._on_rfid_card:
+                    self._on_rfid_card(ev)
+            elif ev.card not in seat_cards and len(seat_cards) < 2:
                 seat_cards.append(ev.card)
                 logger.info(
                     "Hole card detected: seat=%d card=%s (cards so far: %s)",
@@ -347,6 +972,11 @@ class IntegrationThread(threading.Thread):
                 )
                 if self._on_rfid_card:
                     self._on_rfid_card(ev)
+                if self._board_before_deal:
+                    self._forget_board_before_deal()
+            if moved:
+                self._hand_needs_review = True
+            self._show_hole_cards()
         elif not ev.card:
             logger.warning(
                 "Seat RFID event has no card (tag=%s reader=%s seat=%s) — needs_review",
@@ -357,9 +987,24 @@ class IntegrationThread(threading.Thread):
         # アクション照合バッファに追加
         self._rfid_seat_buffer.append(ev)
 
+    def _board_list(self) -> list[str]:
+        """ボードを位置どおりに（読めなかった位置は `??`）。最後に読めた位置まで。
+
+        フロップの 1 枚が読めずにターン・リバーが読めたとき、読めた札だけを詰めるとターンの札がフロップに
+        並ぶ（オーナー 2026-09-29: 充当してはいけない）。位置を保てば、枚数 = いまのストリートになる。
+        """
+        if not self._board_positions:
+            return []
+        top = max(self._board_positions)
+        return [self._board_positions.get(i, UNKNOWN_CARD) for i in range(1, top + 1)]
+
+    def _board_top(self) -> int:
+        """ボードの読めた一番後ろの位置（3 = フロップ・4 = ターン・5 = リバー）。途中の位置が読めていなくてもよい。"""
+        return max(self._board_positions, default=0)
+
     def _try_advance_street_from_rfid(self) -> None:
         """ボードカード枚数に応じてストリートを自動推移する (RFID 優先証拠)。"""
-        n = len(self._board_positions)
+        n = self._board_top()
         gs = self._game_state
         target_street = _BOARD_STREET_THRESHOLDS.get(n)
         if target_street is None:
@@ -375,10 +1020,18 @@ class IntegrationThread(threading.Thread):
             return  # 既にそのストリート
         try:
             gs.advance_street(street_enum)
-            logger.info(
-                "Street auto-advanced to %s by RFID board cards (%d cards detected)",
-                target_street, n,
-            )
+            if gs.street == street_enum.value:
+                logger.info(
+                    "Street auto-advanced to %s by RFID board cards (%d cards detected)",
+                    target_street, n,
+                )
+            else:
+                # rules-aware backend（pokerkit）はベッティング完了で進むので、ここは no-op に
+                # なる（契約どおり）。毎回 INFO を出すと端末が埋まるので DEBUG に落とす。
+                logger.debug(
+                    "RFID street hint %s (%d cards) — backend keeps %s",
+                    target_street, n, gs.street,
+                )
         except ValueError:
             # 後退遷移など無効な場合は無視
             logger.debug(
@@ -393,15 +1046,47 @@ class IntegrationThread(threading.Thread):
     @staticmethod
     def _iso(ts: float) -> str:
         """epoch 秒を ISO 文字列に。ActionRecord/HandSummary の時刻は event.timestamp 由来で
-        統一する（ADR-B T3: live と replay で同じ envelope から同じ時刻が出る）。"""
+        統一する（ADR-0048 T3: live と replay で同じ envelope から同じ時刻が出る）。"""
         return datetime.fromtimestamp(ts).isoformat(timespec="milliseconds")
+
+    def _synth_fold_timestamp(self, seat: int, event: AudioEvent) -> tuple[str, bool]:
+        """合成 silent-fold の時刻（ADR-0055）。
+
+        既定は推定を引き起こした後続アクション（`event`）の時刻だが、RFID が
+        「その席のカードが消えたまま戻っていない時刻」を持っていればそれを使う。
+        ディーラーが fold を宣言しない席の**実時刻**は他に手掛かりがないため、
+        音声の時系列と突き合わせて履歴を再生するにはこれが唯一の情報源になる。
+
+        **不在そのものを fold の判定に使わない**のが要点（プレイヤーはカードを持ち上げて
+        見るので、不在 ≠ fold）。fold の判定は従来どおり合法手・actor 推定が行い、
+        ここは時刻だけを差し替える。時刻はハンド開始〜現在にクランプする
+        （前ハンドの観測や未来時刻が混ざらないように）。
+        """
+        fallback = self._iso(event.timestamp)
+        now = self._clock()
+        if self._seat_cards_absent_since is None:
+            return fallback, False
+        try:
+            absent = self._seat_cards_absent_since(seat)
+        except Exception:  # noqa: BLE001 — 観測が取れなくても記録は続ける
+            logger.exception("seat_cards_absent_since failed (seat=%s)", seat)
+            return fallback, False
+        if absent is None or self._hand_started_epoch is None:
+            return fallback, False
+        if not self._hand_started_epoch <= absent <= max(now, event.timestamp):
+            logger.debug(
+                "muck 観測 %.3f がハンド範囲外（開始 %.3f, 現在 %.3f）— イベント時刻を使います",
+                absent, self._hand_started_epoch, now,
+            )
+            return fallback, False
+        return self._iso(absent), True
 
     def _expire_buffers(self) -> None:
         cutoff = self._clock() - CAMERA_BUFFER_TTL
         self._camera_buffer = [e for e in self._camera_buffer if e.timestamp >= cutoff]
         self._rfid_seat_buffer = [e for e in self._rfid_seat_buffer if e.timestamp >= cutoff]
 
-    # ――― 照合窓（ADR-B T1/T2: 発話区間ベースの両側窓）―――
+    # ――― 照合窓（ADR-0048 T1/T2: 発話区間ベースの両側窓）―――
 
     @staticmethod
     def _event_window(event: AudioEvent) -> tuple[float, float]:
@@ -451,10 +1136,37 @@ class IntegrationThread(threading.Thread):
 
     def _handle_audio_event(self, event: AudioEvent) -> None:
         """audio イベントの入口。例外はここで捕捉して unresolved レコードに変換する
-        （ADR-A B4: live の run() 捕捉と replay の直接呼び出しで同一セマンティクス。
+        （ADR-0047 B4: live の run() 捕捉と replay の直接呼び出しで同一セマンティクス。
         イベントの無音消失を全廃する = B2）。"""
+        self._event_depth += 1
         try:
-            self._dispatch_audio_event(event)
+            self._handle_audio_event_inner(event)
+        finally:
+            self._event_depth -= 1
+        self._after_hand_change()
+
+    def _handle_audio_event_inner(self, event: AudioEvent) -> None:
+        if self._hand_open and self._deal_at is None:
+            self._check_hand_seats(event.timestamp)
+        if self._deal_at is not None and _spoken_at(event) >= self._deal_at:
+            # 配ったあとに話されたアクションは新しいハンドのもの。前に話されたもの（前のハンドの
+            # 最後のコールやマック）は、認識が遅れて届いても前のハンドに入れる（ADR-0062）。
+            self._start_dealt_hand_if_ready(force=True)
+            if self._deal_at is None:
+                # いま始めた: 始めるのを待っていたあいだに札が離れた席（降りた人）を、この発話より先に見る
+                # （店舗 b0a27270 ハンド 2: 配って 5 秒で降りた席6 に、始めるきっかけの「八百」が付いた）
+                self._poll_departures()
+        if self._rfid_folds and self._hand_open:
+            # この発話より前に離れた札を先に反映する（フォールドのあとの人のアクションとして読む）
+            self._apply_observations_before(_spoken_at(event), event.timestamp)
+        try:
+            # ハンドの入力として残す（札が戻ったとき・ボタンを直したときに同じ順に流し直す）
+            if self._rules_aware and self._hand_open and event.action in _REPLAYABLE_ACTIONS:
+                self._run_input("audio", event)
+            else:
+                if event.action not in _CONTROL_KEEPS_CORRECTION:
+                    self._settle_corrections()   # 勝者・ハンドの終わりの前に、訂正の解釈を決める
+                self._dispatch_audio_event(event)
         except Exception:
             logger.exception("Error handling audio event: %s", event)
             self._emit_unresolved(event, reason="handler_error")
@@ -463,7 +1175,7 @@ class IntegrationThread(threading.Thread):
         action = event.action
         gs = self._game_state
 
-        # G1（ADR-C）: 低信頼 ASR の制御語は状態を動かさず保留（閾値 0 = 無効が既定）。
+        # G1（ADR-0049）: 低信頼 ASR の制御語は状態を動かさず保留（閾値 0 = 無効が既定）。
         if (
             action in _CONTROL_ACTIONS
             and self._control_conf_threshold > 0.0
@@ -473,9 +1185,20 @@ class IntegrationThread(threading.Thread):
             self._emit_unresolved(event, reason="low_conf_control_held")
             return
 
+        if action == "script_hand":
+            self._handle_script_hand(event)
+            return
+        if action == "truth_stacks":
+            self._handle_truth_stacks(event)
+            return
+
         if action == "new_hand":
+            if self._hand_auto_started and self._hand_open and not self._current_actions:
+                # 手札を配った時点で始めている（ADR-0062）。二重に始めるとボタンが 2 つ進む。
+                self._notice(f"ハンド {gs.hand_id} は手札が配られた時点で始めています（「ハンド開始」は不要です）")
+                return
             # G1: 勝者未宣言のまま新ハンドが宣言された → 進行中の記録を捨てず異常確定する。
-            if self._hand_open and self._current_actions:
+            if self._hand_open and self._current_actions and not self._finish_by_rules(event, final=True):
                 logger.warning(
                     "new_hand mid-hand (hand_id=%d): 勝者未宣言のため異常確定してから開始する",
                     gs.hand_id,
@@ -485,33 +1208,1966 @@ class IntegrationThread(threading.Thread):
             self._start_new_hand(event)
             return
 
+        if action == "end_hand":
+            self._handle_end_hand(event)
+            return
+
         if action == "showdown":
+            if self._hand_open:
+                self._showdown_declared = True
+            if self._foldout_pending is not None and _spoken_at(event) >= self._foldout_pending["t"]:
+                # 札の離脱を最後のフォールドとみていたが、ショーダウン（札を前に出した）だった
+                self._showdown_after_foldout(_spoken_at(event), "「ショーダウン」と聞こえたので")
+                return
+            if (self._rules_aware and self._hand_open and not self._betting_over()
+                    and len(self._remaining_seats()) >= 2):
+                # ディーラーがショーダウンと言った = ベッティングは終わっている。閉じていないラウンドは
+                # 聞き取れなかったとみて閉じる（このあと札を前に出してもフォールドにしない, 店舗 2026-09-27）
+                self._close_betting(_spoken_at(event))
+                self._notice("「ショーダウン」— 閉じていないベッティングは聞き取れなかったとみて閉じました（要確認）")
             gs.advance_street(Street.SHOWDOWN)
             return
 
-        if action == "winner":
-            self._handle_winner(event)
+        if action == "heads_up":
+            self._handle_players_left(event, 2)
             return
+
+        if action == "players_left":
+            self._handle_players_left(event, event.amount)
+            return
+
+        if action == "session_end":
+            # 終了（q）: 確定していないハンドを次の配布と同じ規則で閉じて保存する
+            if self._hand_open and self._hand_in_play():
+                self._close_hand_for_next_deal(ended_ts=event.timestamp, when="終了しました")
+            return
+
+        if action == "winner":
+            check = self._chop_heard_as_check(event)
+            if check is not None:
+                event, action = check, "check"     # ベットの途中の「チョップ」= チェックの聞き違い（下の経路へ）
+            else:
+                self._handle_winner(event)
+                return
 
         if action == "rebuy":
             self._handle_rebuy(event)
             return
+        if action == "reduce_stack":
+            self._handle_reduce_stack(event)
+            return
+
+        if action == "correct_board":
+            self._handle_correct_board(event)
+            return
+
+        if action == "correct_seat":
+            self._handle_correct_seat(event)
+            return
+
+        if action == "rename_seat":
+            self._handle_rename_seat(event)
+            return
+
+        if action == "set_bb_ante":
+            self._handle_set_bb_ante(event)
+            return
+        if action == "set_blinds":
+            self._handle_set_blinds(event)
+            return
+
+        if action in ("sit_out", "sit_in"):
+            self._handle_sit(event)
+            return
+
+        if action == "set_button":
+            self._handle_set_button(event)
+            return
+
+        if action == "correction":
+            self._handle_correction(event)
+            return
+
+        if self._fold_word_already_signalled(event):
+            return
+
+        if "garbled_call" in event.parse_flags and self._rules_aware and self._hand_open:
+            resolved = self._resolve_garbled_call(event)
+            if resolved is None:
+                return
+            event, action = resolved, resolved.action
 
         # ベッティングアクション。rules-aware backend（pokerkit）は境界で actor 推定 + 合法手
         # 射影、legacy（空 legal_context）は従来経路で挙動不変（ADR-0009 §1）。
+        if action == "fold" and self._rfid_folds and self._hand_open:
+            if self._foldout_pending is not None:
+                self._confirm_foldout()      # 札の離脱で決めた最後のフォールドを、ディーラーの宣言で確定
+                return
+            if not self._betting_over():
+                self._handle_fold_word(event)   # 次の手番の人には付けない（オーナー決定）
+                return
+            gate = word_key(event)
+            if gate in self._open_gates:
+                pass                            # 推定器が門を開けた = 見せずにマック（下）
+            elif self._closing_fold_word(event):
+                self._gate_events[gate] = ("showdown_fold", _spoken_at(event))
+                return
+            elif not (self._showdown_declared or self._showdown_shown):
+                self._gate_events[gate] = ("showdown_fold", _spoken_at(event))
+                # マックの「フォールド」は「ショーダウン」の宣言（か、誰かが見せた役名）のあとに言う（オーナー 2026-10-14）。
+                # 宣言の前（同じ発話の「フォールド、ショーダウン」も）はベッティングのフォールドの声が遅れて届いたもの
+                self._fold_words_done[id(event)] = event
+                # 宣言が聞き取れなかった本当のマックかもしれない（「ショーダウン」の声を聞き取れるのは 52 中 40）= 黙って
+                # 捨てない（2026-10-15 の見直し, Fable 5.1 の監査）
+                self._hand_needs_review = True
+                if not self._rebuilding:
+                    self._notice(f"「{event.raw_text}」—「ショーダウン」の宣言の前なので、ショーダウンのマックにはしません（要確認）")
+                return
+            # ベッティングが終わったあと（ショーダウン）は従来どおり: 見せずにマック（ディーラーが宣言する）
+        if action in ("allin", "bet", "raise") and self._rules_aware and self._hand_open and self._is_restated(event):
+            return
+        if action in ("bet", "raise") and self._rules_aware and self._hand_open and self._restate_wager_amount(event):
+            return
         legal_ctx = gs.legal_context()
+        if "phonetic_amount" in event.parse_flags:
+            # 意味のない単発の語を音で読んだ額: 候補のうち、いま使える額（最小ベット・レイズ以上・持ち点まで）から
+            # 音の点数とポットに対する大きさの重みで選ぶ
+            picked = self._choose_amount(event, legal_ctx)
+            if picked is None:
+                options = event.amount_options or tuple(a for a, _ in event.amount_scores) or (event.amount,)
+                shown = "・".join(str(a) for a in options[:3])
+                self._notice(f"「{event.raw_text}」は額（{shown}）の言い間違いに聞こえますが、いまは使えない額なので"
+                             "記録しませんでした")
+                if self._betting_over():
+                    self._count_held_betting_word()
+                return
+            event = picked
+        elif self._garbled_amount_after_word(event, legal_ctx):
+            picked = self._choose_amount(event, legal_ctx, flag="second_ear")
+            if picked is not None:
+                if not self._rebuilding:
+                    self._notice(f"「{event.raw_text}」の額は聞き取れませんでしたが、第 2 の耳ははっきり {picked.amount} と"
+                                 "聞いたので、その額にしました（要確認）")
+                event = picked
+        elif self._amount_needs_choice(event, legal_ctx):
+            # 「レイズ 300」（最小レイズ 1000）のように読んだ額がいま使えない: 第 2 の耳の額ごとの点数から、使える額を
+            # 選び直す（オーナー 2026-10-01: 可能な額は最小 1bb〜持ち点、チップの刻みしか無い）
+            picked = self._choose_amount(event, legal_ctx, flag="legal_amount", max_gap=LEGAL_AMOUNT_MAX_GAP)
+            if picked is not None:
+                if not self._rebuilding:
+                    self._notice(f"「{event.raw_text}」の {event.amount} はいま使えない額なので、音の近い使える額 "
+                                 f"{picked.amount} にしました（要確認）")
+                event = picked
+        if self._recap is not None and self._is_recap_call(event):
+            return
+        if "amount_only" in event.parse_flags:
+            # 数字だけの発話 = ベットかレイズ。使えない額なら記録しない（「7」「いまのベットと同じ額」）
+            problem = self._amount_only_problem(event, legal_ctx)
+            if problem is None and self._said_with_round_closer(event):
+                problem = f"前のラウンドを閉じた「{self._current_actions[-1].raw_text}」と同じ発話の額です"
+            if problem is not None:
+                self._remember_recap(event, legal_ctx)
+                self._notice(f"数字だけの「{event.raw_text}」は記録しませんでした（{problem}）")
+                if self._betting_over():
+                    self._count_held_betting_word()
+                return
+            event = replace(event, action="raise" if "raise" in legal_ctx.legal_actions else "bet")
         if legal_ctx.legal_actions:
+            if event.action == "call" and legal_ctx.amount_to_call == 0 and (
+                    self._said_before_street(event) or self._said_with_round_closer(event)):
+                # チェックとして次の人の手番を食わない（言い直しの「600点コールです」、前のラウンドを閉じた発話の中の
+                # 「コールします、コール」, 店舗の実測）
+                self._notice(f"「{event.raw_text}」は前のストリートのコール（言い直し）とみなして記録しませんでした")
+                return
+            if (event.action == "check" and "check_around" not in event.parse_flags
+                    and self._leftover_of_closed_round(event)):
+                # 「コール2千、ロック、チェック」のコールでラウンドが閉じた: 同じ発話の「チェック」は次のストリートの
+                # 最初の人のチェックではない（札を配る前。店舗 2026-10-06 e82f5005 ハンド 9 で次の人のベットがずれた）
+                self._notice(f"「{event.raw_text}」のチェックは前のラウンドを閉じた発話の余りとみなして記録しませんでした")
+                return
+            if "before_check_around" in event.parse_flags and self._check_around_of_closed_street(event):
+                # 「チェック、チェックラウンド、ラストカード」: 続くチェックアラウンドが閉じたストリートの言い直しなら、
+                # その前のチェックも同じ言い直し（店舗 2026-10-06 05cccd6c ハンド 14）
+                self._notice(f"「{event.raw_text}」は前のストリートのチェックアラウンドの言い直しとみなして記録しませんでした")
+                return
+            if "check_around" in event.parse_flags:
+                if self._check_around_of_closed_street(event):
+                    confirmed = self._confirm_implied_checks(event)
+                    self._notice(
+                        f"「{event.raw_text}」は前のストリートのチェックアラウンドとみなして記録しませんでした"
+                        + (f"（札で補ったチェック {confirmed} つの裏付けにしました）" if confirmed else "")
+                    )
+                    return
+                self._handle_check_around(event, legal_ctx)
+                return
             self._handle_rules_aware_action(event, legal_ctx)
+        elif self._betting_over():
+            # ベッティングが終わってショーダウンを待っている。ここでの「フォールド」はマック（ADR-0062）
+            if action == "fold" and self._auto_winner:
+                self._apply_showdown_muck(event)
+            else:
+                self._emit_unresolved(event, reason="betting_over")
+                if action in _BETTING_WORDS:
+                    self._count_held_betting_word()
         else:
             self._handle_legacy_action(event)
 
+    def _resolve_garbled_call(self, event: AudioEvent) -> Optional[AudioEvent]:
+        """「これで終わりです」= ほかの語の聞き違い（ディーラーは言わない, オーナー 2026-10-06）と、語尾の「ド」が無い
+        「フォール」（店舗では 3 回ともコール）を決め直す。
+
+        その語の前後（`GARBLED_FOLD_BEFORE_SEC` 前〜`GARBLED_FOLD_AFTER_SEC` 後）に札が離れた席があれば、その席の
+        「フォールド」: 札の離脱でもう降ろした席なら、その離脱と組にして記録しない（replay も記録した離脱の信号から同じ）。
+        まだ降ろしていなければ「フォールド」の語として扱う（札の離脱と組にする。在否は live だけ）。そうでなく手番の人が
+        ベットに向き合っていればコール（要確認）。どちらでもなければアクションにしない。
+        """
+        spoken = _spoken_at(event)
+        if self._rebuilding and self._garbled_absorbed.get(id(event)) is event:
+            return None
+
+        def near(t: float) -> bool:
+            return -GARBLED_FOLD_BEFORE_SEC <= t - spoken <= GARBLED_FOLD_AFTER_SEC
+
+        for seat, dep in self._departures.items():
+            if dep.get("applied") and dep.get("action") == "fold" and not dep.get("word") and near(dep["t"]):
+                dep["word"] = True               # この語と組になった離脱（次の「フォールド」は吸わない）
+                if not self._rebuilding:
+                    self._garbled_absorbed[id(event)] = event
+                self._notice(f"「{event.raw_text}」は席{seat} のフォールド（札が同じころ離れた）の聞き違いとみました")
+                return None
+        if not self._rebuilding and self._seat_presence is not None and not self._betting_over():
+            try:
+                snapshot = self._seat_presence() or {}
+            except Exception:  # noqa: BLE001 — 在否が取れなければコールとみる
+                snapshot = {}
+            for seat in self._game_state.seats_to_act():
+                info = snapshot.get(seat) or {}
+                dep = self._departures.get(seat)
+                since = dep["t"] if dep is not None else info.get("absent_since")
+                if (not info.get("present") and since is not None and near(since)
+                        and self._hole_cards.get(seat) and not (dep or {}).get("applied")):
+                    self._garbled_absorbed[id(event)] = event
+                    self._notice(f"「{event.raw_text}」は席{seat} のフォールド（札が同じころ離れた）の聞き違いとみました")
+                    return replace(event, action="fold", parse_flags=())
+        ctx = self._game_state.legal_context()
+        if ctx.actor_seat is not None and ctx.amount_to_call > 0 and not self._betting_over():
+            if not self._rebuilding:
+                self._notice(f"「{event.raw_text}」はコールの聞き違いとみました（要確認）")
+            return event
+        self._notice(f"「{event.raw_text}」は聞き違いの言葉ですが、いまはベットに向き合った手番が無いので記録しませんでした")
+        return None
+
+    def _choose_amount(self, event: AudioEvent, ctx: LegalContext, *, flag: Optional[str] = None,
+                       max_gap: Optional[float] = None) -> Optional[AudioEvent]:
+        """額の候補（音の点数 `amount_scores`、無ければ `amount_options` の順）のうち、いまの手番でベット・レイズに使える
+        額（最小ベット・レイズ〜オールイン）から、音の点数 + ポットに対する大きさの重み（`core.bet_sizing`）が最も高い額。
+
+        使える額が無い（`max_gap` があれば、その額の音の点数がいちばん確からしい額からその差より遠い）なら None。
+        使える額の 1 番と 2 番の差が `AMOUNT_CLOSE` 未満なら `ambiguous_amount` も付ける（要確認）。`flag` は付ける印。
+        """
+        from core.bet_sizing import amount_prior
+
+        if ctx.actor_seat is None or not ({"bet", "raise"} & ctx.legal_actions):
+            return None
+        scores = dict(event.amount_scores)
+        if not scores:
+            options = event.amount_options or ((event.amount,) if event.amount else ())
+            scores = {a: -float(i) for i, a in enumerate(options)}
+        if not scores:
+            return None
+        top = max(scores.values())
+        pot = self._game_state.pot
+        ranked = sorted(
+            ((s + amount_prior(a, ctx, pot), -i, a) for i, (a, s) in enumerate(scores.items())
+             if ctx.min_raise <= a <= ctx.max_raise and (max_gap is None or s >= top - max_gap)),
+            reverse=True,
+        )
+        if not ranked:
+            return None
+        best_score, _, best = ranked[0]
+        flags = list(event.parse_flags)
+        close = len(ranked) > 1 and best_score - ranked[1][0] < AMOUNT_CLOSE
+        for extra in (flag, "ambiguous_amount" if close else None):
+            if extra and extra not in flags:
+                flags.append(extra)
+        if not self._rebuilding:
+            logger.info("「%s」の額を %d にしました（使える額の候補 %s）", event.raw_text, best,
+                        [(a, round(sc, 2)) for sc, _, a in ranked[:3]])
+        return replace(event, amount=best, parse_flags=tuple(flags))
+
+    def _garbled_amount_after_word(self, event: AudioEvent, ctx: LegalContext) -> bool:
+        """額の無い「レイズ」「ベット」の後ろに意味の通らない語があり、第 2 の耳がはっきり額を聞いたか
+        （`EAR_AMOUNT_MIN_SCORE` / `EAR_AMOUNT_MARGIN`）。額の無い語だけ（「レイズ」）は次の発話の額を待つ（従来どおり）。"""
+        if (event.action not in ("bet", "raise") or event.amount or not event.amount_scores
+                or not (self._rules_aware and self._hand_open) or ctx.actor_seat is None
+                or not ({"bet", "raise"} & ctx.legal_actions)):
+            return False
+        text = unicodedata.normalize("NFKC", event.raw_text or "")
+        match = _WAGER_WORD_THEN_MORE.search(text)
+        if match is None or not re.sub(r"[、。！!？?,.・ー\s]", "", match.group(1)):
+            return False
+        ranked = sorted((score for amount, score in event.amount_scores
+                         if ctx.min_raise <= amount <= ctx.max_raise), reverse=True)
+        return bool(ranked) and ranked[0] >= EAR_AMOUNT_MIN_SCORE and (
+            len(ranked) == 1 or ranked[0] - ranked[1] >= EAR_AMOUNT_MARGIN)
+
+    def _amount_needs_choice(self, event: AudioEvent, ctx: LegalContext) -> bool:
+        """読んだ額がいまの最小ベット・レイズに届かない（使えない）ので、第 2 の耳の額ごとの点数から選び直すか。
+
+        語と一緒に言った額（「レイズ 300」）は最小に届かなければ選び直す。数字だけの発話（店の言い方 = 額だけ）は、
+        いまのベットより大きく最小レイズに届かないとき（これまでは最小レイズに寄せていた）だけ。いまのベット以下の
+        数字（コールの額の言い直し・ポットの読み上げ・役の「7」など）は従来どおり記録しない（`_amount_only_problem`）。
+        額が無い語（「レイズ」だけ）は選ばない（次の発話の額を待つ）。第 2 の耳の点数が無ければ従来どおり。
+        """
+        if (event.action not in ("bet", "raise") or not event.amount or not event.amount_scores
+                or not (self._rules_aware and self._hand_open) or ctx.actor_seat is None
+                or not ({"bet", "raise"} & ctx.legal_actions) or event.amount >= ctx.min_raise):
+            return False
+        if "amount_only" in event.parse_flags:
+            return "raise" in ctx.legal_actions and event.amount > ctx.committed + ctx.amount_to_call
+        return True
+
+    def _remember_recap(self, event: AudioEvent, ctx: LegalContext) -> None:
+        """いまのベットと同じ額だけの発話（記録しない）が、ディーラーがここまでのアクションを言い直した最初の語なら、続く
+        「コール」を待つ（`RECAP_SEC`, `_is_recap_call`）。最後の賭けのあとに同じストリートでコールだけが記録されている
+        とき（店舗 05cccd6c ハンド 7:「センテー」「ごめんなさい、コール」→「センテン。」「コール」→ 次の人の「レイズ3500」。
+        賭けのすぐあとの言い直しの次の「コール」は次の人のコール = 7b897671 ハンド 3・d0f055fb ハンド 8）。"""
+        self._recap = None
+        last = self._last_wager
+        if last is None or "raise" not in ctx.legal_actions or event.amount != ctx.committed + ctx.amount_to_call:
+            return
+        if self._last_action_at == _spoken_at(event):
+            return              # 「コール 600」= コールと同じ発話の額（コールの額の言い直し。言い直しの始まりではない）
+        record, _, said = last
+        if event.amount not in (record.amount, said):
+            return
+        index = next((i for i, a in enumerate(self._current_actions) if a is record), None)
+        after = self._current_actions[index + 1:] if index is not None else []
+        if after and all(a.action == "call" and a.street == record.street for a in after):
+            self._recap = {"t": _spoken_at(event), "records": list(after), "text": event.raw_text}
+
+    def _is_recap_call(self, event: AudioEvent) -> bool:
+        """`_remember_recap` のあとの「コール」（額なし）なら、言い直したコールとして記録しない（要確認の印は付けない
+        = 言い直しの印 `restated` を言い直されたコールに付ける）。それ以外の発話が来たら待つのをやめる。"""
+        recap, self._recap = self._recap, None
+        if (event.action != "call" or event.amount or "garbled_call" in event.parse_flags
+                or not 0.0 <= _spoken_at(event) - recap["t"] <= RECAP_SEC):
+            return False
+        record, rest = recap["records"][0], recap["records"][1:]
+        self._label_word(event, "recap")
+        if rest:
+            self._recap = {**recap, "records": rest}
+        if "restated" not in (record.reason or "").split("+"):
+            record.reason = "+".join(r for r in (record.reason, "restated") if r)
+        if not self._rebuilding:
+            logger.info("「%s」「%s」は、ここまでのアクション（席%d のコール）の言い直しとみなしました",
+                        recap["text"], event.raw_text, record.seat)
+            self._notice(f"「{recap['text']}」「{event.raw_text}」は、ここまでのアクション（席{record.seat} のコール）の"
+                         "言い直しとみなして記録しませんでした")
+        return True
+
+    def _amount_only_problem(self, event: AudioEvent, ctx: LegalContext) -> Optional[str]:
+        """数字だけの発話をベット・レイズにできない理由（できるなら None）。
+
+        レイズはいまのベットより大きい額、ベットは最小ベット以上の額だけ（ショーダウンで手を読み上げた
+        「7」や、コールの額を言い直した「600点」をアクションにしない）。
+        """
+        legal = ctx.legal_actions
+        if not legal or ctx.actor_seat is None:
+            return "ベッティングは終わっています" if self._betting_over() else "ベッティング中ではありません"
+        if "raise" in legal:
+            current = ctx.committed + ctx.amount_to_call
+            if event.amount <= current:
+                return f"いまのベット {current} 以下の額です"
+        elif "bet" in legal:
+            if event.amount < ctx.min_raise:
+                return f"最小ベット {ctx.min_raise} より少ない額です"
+        else:
+            return "ベット・レイズできる手番ではありません"
+        return None
+
+    def _said_with_round_closer(self, event: AudioEvent) -> bool:
+        """数字だけの発話が、前のラウンドを閉じたアクションと同じ発話か。
+
+        次のストリートは札を配ってからなので、同じ発話の額は次のストリートのベットではない（「コール 2千5百」=
+        2500 へのコールの額の言い直し。コールがラウンドを閉じるとフロップのベットにしていた, 店舗 2026-09-29）。
+        """
+        if not self._current_actions or event.utterance_start_ts is None:
+            return False
+        last = self._current_actions[-1]
+        return last.street != self._game_state.street and self._last_action_at == event.utterance_start_ts
+
+    def _leftover_of_closed_round(self, event: AudioEvent) -> bool:
+        """チェックが、前のラウンドを閉じた発話の余りか。いまのストリートの札が見えていれば、その札より前に話し始めた
+        とき（札が先に全部出ていれば、続けて言った「チェック チェック …」は次のストリートのもの = オールインのあとの
+        ランアウトなど）。ただし閉じたアクションから `LEFTOVER_AFTER_CLOSE_SEC` より離れて話したチェックは余りではない
+        （札を配ったあと = 札の読み取りが遅れた）。札がまだ見えていなければ（確定を待っている）、RFID の卓で閉じた
+        アクションと同じ発話のとき（札を配るあいだ話が途切れる。声だけの台本は続けて読むので、次のストリートのチェックが
+        同じ発話に入る）。"""
+        if self._game_state.street not in ("flop", "turn", "river"):
+            return False
+        started = self._street_started_at()
+        if started is not None:
+            spoken = _spoken_at(event)
+            return spoken < started - STALE_CALL_MARGIN_SEC and (
+                self._last_action_at is None or spoken - self._last_action_at <= LEFTOVER_AFTER_CLOSE_SEC)
+        return self._rfid_folds and self._said_with_round_closer(event)
+
+    def _street_started_at(self) -> Optional[float]:
+        """いまのストリートの最初の札が見えた時刻（フロップは 3 枚のうち最初）。読めていなければ None。"""
+        indices = {"flop": (1, 2, 3), "turn": (4,), "river": (5,)}.get(self._game_state.street, ())
+        times = [self._board_dealt_at[i] for i in indices if i in self._board_dealt_at]
+        return min(times) if times else None
+
+    def _is_restated(self, event: AudioEvent) -> bool:
+        """オールイン・ベット・レイズが、直前に記録した同じ賭けの言い直しか（`ALLIN_RESTATE_SEC`）。
+
+        直前の記録がその賭けで（あいだにほかのアクションが無い）、話し始めがその発話から `ALLIN_RESTATE_SEC` 以内
+        （同じ発話の中の 2 つ目も）のとき。オールインはオールインの、ベット・レイズは同じ額（額を言ったとき。数字だけの
+        発話は `_amount_only_problem` が扱う）のベット・レイズの言い直し。
+        """
+        last = self._last_wager
+        if last is None or not self._current_actions or self._current_actions[-1] is not last[0]:
+            return False
+        record, spoken, said_amount = last
+        if event.action == "allin":
+            if record.action != "allin":
+                return False
+        elif ("amount_only" in event.parse_flags or not event.amount
+              or event.amount not in (record.amount, said_amount)):
+            return False      # 記録した額（寄せたあと）か、言った額と同じときだけ
+        if not 0.0 <= _spoken_at(event) - spoken <= ALLIN_RESTATE_SEC or self._fold_word_between(spoken, event):
+            return False
+        if event.action != "allin" and event.amount and "no_amount_heard" in (record.reason or "").split("+"):
+            # 額の無い賭け（最小の額に寄せた）を、言い直しが同じ額で言った = 額は聞こえた（店舗 2026-10-14 845da8e6
+            # ハンド 15:「レイズ」→「レイズ400」。推定器が「額の聞き違い」で罰していた）
+            record.reason = "+".join(r for r in (record.reason or "").split("+") if r != "no_amount_heard")
+        self._mark_restated(record, event, "allin_restated" if record.action == "allin" else "restated")
+        return True
+
+    def _fold_word_between(self, since: float, event: AudioEvent) -> bool:
+        """`since`（賭けの話し始め）からこの発話までに「フォールド」と聞こえて、まだ席に付けていない（札が席に残っている
+        = 次のアクションの前に手番の人のフォールドにする）か。あいだのアクションなので、この発話は言い直しではない
+        （店舗 7b897671 ハンド 3:「1600」→「フォールド」→「2千3百」の「2千3百」は次の人の額）。"""
+        return any(since <= t <= _spoken_at(event) for t in self._spoken_folds.values())
+
+    @property
+    def gate_events(self) -> dict[str, tuple[str, float]]:
+        """門が働いた語（`word_key` → (門の種類, 話し始め)）。"showdown_fold" = ベッティングが終わったあとの「フォールド」を
+        ショーダウンのマックにしなかった（離脱の声とみた・「ショーダウン」の宣言の前）。"""
+        return dict(self._gate_events)
+
+    @property
+    def word_labels(self) -> dict[str, str]:
+        """記録にしなかった声の語の扱い（`word_key` → "restate" / "recap" / "corrected"）。確定したハンドの分と、いまの
+        ハンドの分。"""
+        return {**self._word_labels, **self._current_word_labels()}
+
+    def _current_word_labels(self) -> dict[str, str]:
+        labels = dict(self._hand_word_labels)
+        for item in self._retracted.values():
+            if isinstance(item, AudioEvent):
+                labels[word_key(item)] = "corrected"
+        return labels
+
+    def _commit_word_labels(self) -> None:
+        self._word_labels.update(self._current_word_labels())
+        self._hand_word_labels = {}
+
+    def _label_word(self, event: AudioEvent, label: str) -> None:
+        self._hand_word_labels[word_key(event)] = label
+
+    def _mark_restated(self, record: ActionRecord, event: AudioEvent, reason: str) -> None:
+        self._label_word(event, "restate")
+        if reason not in (record.reason or "").split("+"):
+            record.reason = "+".join(r for r in (record.reason, reason) if r)
+        if not self._rebuilding:
+            logger.info("「%s」は席%d の %s（「%s」）の言い直しとみなしました",
+                        event.raw_text, record.seat, record.action, record.raw_text)
+            self._notice(f"「{event.raw_text}」は、直前の「{record.raw_text}」（席{record.seat}）の言い直しとみなしました")
+
+    def _restate_wager_amount(self, event: AudioEvent) -> bool:
+        """直前に記録したベット・レイズの額の言い直し: あとから言った額で組み直す（オーナー 2026-10-01）。
+
+        店舗 42f7b964 ハンド 1: 「せーのっ!」（第 2 の耳が 千八百）→「1700」→「コール 1700点」で、1800 のレイズと
+        1400 のコールになった（正しくは 1700 と 1300）。1709932e ハンド 3: プレイヤーの「レイズにします。」とディーラーの
+        「レイズ」「レイズ 1 千点」が 3 つのレイズになった。
+
+        直前の記録がそのベット・レイズで（あいだにほかのアクションが無い）、話し始めがその発話から `ALLIN_RESTATE_SEC`
+        以内のとき:
+        - 額の無いベット・レイズのあとの、同じ語の額の無い発話 = 宣言と復唱（同じ賭け。記録しない）。
+        - 額の無いベット・レイズのあとの額 = その賭けの額（ただし額の無い「ベット」のあとの「レイズ N」は次の人のレイズ）。
+        - 額を言った賭けのあとの違う額で、次の人のレイズにならない額（いまのベット以下・最小レイズに届かない）=
+          言い直し（次の人のレイズになる額なら、別の人のレイズとして従来どおり）。
+        言い直した額が前の人に使える額のときだけ、その賭けの前に戻って言い直した額で組み直す（要確認）。言い直しの発話と、
+        あいだの記録しなかったベット・レイズの語（復唱・同じ額の言い直し）は、その賭けの入力に取り込む（組み直しで
+        流し直すと、額を言った賭けのあとの「レイズ」= 次の人のレイズ、前の額 = 言い直し、と読み違えるため）。
+        """
+        last, point = self._last_wager, self._last_wager_point
+        if (last is None or point is None or not self._current_actions
+                or self._current_actions[-1] is not last[0] or "phonetic_amount" in event.parse_flags):
+            return False      # 音で読んだ額（意味のない語）で、はっきり聞こえた額を言い直さない
+        record, spoken, said = last
+        spoken_restatement = "restatement" in event.parse_flags      # 「N 足りないから M」
+        window = SPOKEN_RESTATE_SEC if spoken_restatement else ALLIN_RESTATE_SEC
+        if record.action not in ("bet", "raise") or not 0.0 <= _spoken_at(event) - spoken <= window:
+            return False
+        if self._fold_word_between(spoken, event):
+            return False                     # あいだに「フォールド」（席に付ける前）= あいだのアクション
+        if any(spoken < c["t"] <= _spoken_at(event) for c in self._corrections):
+            return False                     # あいだに「失礼しました」= 訂正の解釈で直す（`_handle_correction`）
+        checkpoint, wager_ctx = point
+        index, current = checkpoint["index"], self._current_input_index
+        if (current is None or not index < current < len(self._hand_inputs)
+                or self._hand_inputs[index][0] != "audio"):
+            return False
+        original: AudioEvent = self._hand_inputs[index][1]
+        word = None if "amount_only" in event.parse_flags else event.action    # 言った語（数字だけなら無し）
+        if not event.amount:
+            if said or word != original.action:
+                return False      # 額を言った賭け・「ベット」のあとの「レイズ」= 次の人のレイズ（額は聞こえなかった）
+            self._mark_restated(record, event, "restated")
+            return True
+        if event.amount in (record.amount, said):
+            return False                     # 同じ額は `_is_restated` と `_amount_only_problem` が扱う
+        if said and not spoken_restatement:
+            ctx = self._game_state.legal_context()
+            if "raise" in ctx.legal_actions and ctx.min_raise <= event.amount <= ctx.max_raise:
+                return False                 # 次の人のレイズになる額 = 別の人のレイズ
+        elif original.action == "bet" and word == "raise":
+            return False                     # 額の無い「ベット」のあとの「レイズ N」= 次の人のレイズ
+        if not wager_ctx.min_raise <= event.amount <= wager_ctx.max_raise:
+            return False                     # 前の人にも使えない額
+        between = self._hand_inputs[index + 1:current]
+        absorbed = [item for kind, item in between if kind == "audio" and item.action in ("bet", "raise")]
+        rest = [(kind, item) for kind, item in between
+                if not (kind == "audio" and item.action in ("bet", "raise"))]
+        flags = [f for f in original.parse_flags if f != "ambiguous_amount"]
+        for flag in (*(f for f in event.parse_flags if f in ("ambiguous_amount", "second_ear", "restatement")),
+                     "amount_restated"):
+            if flag not in flags:
+                flags.append(flag)
+        restated = replace(
+            original, amount=event.amount, parse_flags=tuple(flags),
+            raw_text=" → ".join(t for t in (original.raw_text, *(a.raw_text for a in absorbed), event.raw_text) if t),
+        )
+        self._hand_inputs = self._hand_inputs[:index]
+        self._restore_checkpoint(checkpoint)
+        self._replay_inputs([("audio", restated), *rest])
+        for word in (*absorbed, event):
+            self._label_word(word, "restate")
+        if not self._rebuilding:
+            logger.info("「%s」は席%d の %s %s（「%s」）の額の言い直しとみて、%s に組み直しました",
+                        event.raw_text, record.seat, record.action, record.amount, record.raw_text, event.amount)
+            self._notice(
+                f"「{event.raw_text}」は、直前の「{record.raw_text}」（席{record.seat} の {record.amount}）の額の"
+                f"言い直しとみて、{event.amount} に直しました（要確認）"
+            )
+            if self._on_action:
+                for rebuilt in self._current_actions[checkpoint["actions"]:]:
+                    self._on_action(rebuilt)
+            if self._foldout_pending is None:
+                self._maybe_finish_hand()
+        return True
+
+    def _said_before_street(self, event: AudioEvent) -> bool:
+        """発話がいまのストリートの札より前に始まった（= 前のストリートのラウンドの発話）か。
+
+        ボードを RFID で読んでいるハンドのターン・リバーで、その札がまだ見えていなければ前（配る前）。
+        フロップは札がまだ 1 枚も読めていないと RFID の有無が分からないので、見えたときだけ比べる。
+        """
+        street = self._game_state.street
+        if street not in ("flop", "turn", "river"):
+            return False
+        started = self._street_started_at()
+        if started is None:
+            return street != "flop" and self._board_source == "rfid"
+        return _spoken_at(event) < started - STALE_CALL_MARGIN_SEC
+
+    def _check_around_of_closed_street(self, event: AudioEvent) -> bool:
+        """チェックアラウンドが、もう閉じた前のストリートのことか（`CHECK_AROUND_STREET_CHANGE_SEC`）。
+
+        チェックアラウンドはストリートが変わるときに言い、前のストリートの一人ひとりのチェックは言わないこともある
+        （オーナー 2026-10-06）。前のストリートがまだ閉じていなければ、いまのストリートのこととして残りの全員のチェックに
+        する（`_handle_check_around`）。閉じていれば（一人ひとりのチェックが聞こえた・次の札で補った）言い直し。
+        """
+        if self._said_before_street(event):
+            return True
+        street = self._game_state.street
+        if street not in ("flop", "turn", "river") or any(r.street == street for r in self._current_actions):
+            return False
+        started = self._street_started_at()
+        return started is not None and _spoken_at(event) < started + CHECK_AROUND_STREET_CHANGE_SEC
+
+    def _confirm_implied_checks(self, event: AudioEvent) -> int:
+        """前のストリートを次の札で閉じたときに補ったチェック（要確認）を、ディーラーのチェックアラウンドで裏付ける。
+
+        いまのストリートにまだアクションが無く、前のストリートの最後に続く補ったチェックだけ。裏付けた数を返す。
+        """
+        street = self._game_state.street
+        records = self._current_actions
+        if not records or records[-1].street == street:
+            return 0
+        closed = records[-1].street
+        confirmed = 0
+        for record in reversed(records):
+            if record.street != closed or record.actor_source != "implied" or record.action != "check":
+                break
+            if record.needs_review:
+                record.needs_review = False
+                record.reason = "+".join(r for r in (record.reason, "check_around") if r)
+                record.raw_text = record.raw_text or event.raw_text
+                confirmed += 1
+        return confirmed
+
+    def _handle_check_around(self, event: AudioEvent, legal_ctx: LegalContext) -> None:
+        """「チェックアラウンド」= このラウンドでまだ動いていない全員がチェックした（オーナーの説明）。
+
+        手番の人から順に、ラウンドが閉じる（ストリートが進む / ベッティングが終わる）までチェックを入れる。
+        最初の人がチェックできない（ベットがある）ときは、1 つのチェックとして読む（合法手へ射影して要確認）。
+        """
+        gs = self._game_state
+        if "check" not in legal_ctx.legal_actions:
+            self._handle_rules_aware_action(event, legal_ctx)
+            return
+        street = gs.street
+        each = replace(event, seat=None, position=None)
+        ctx = legal_ctx
+        for _ in range(max(len(self._game_seats()), 1)):
+            self._handle_rules_aware_action(each, ctx)
+            ctx = gs.legal_context()
+            if gs.street != street or ctx.actor_seat is None or "check" not in ctx.legal_actions:
+                return
+
+    # ――― フォールドは札の離脱から（オーナー決定 2026-09-25）―――
+    #
+    # - 席の札が `fold_absent_sec` 離れたまま戻らない / 卓の中央を通過 → その席のフォールド。
+    # - 離脱は、それより前に話し始めた発話を反映し終えてから入れる（認識は数秒遅れる。ショーダウンで前に出した
+    #   札や、アクションのあとの覗き見をフォールドと取り違えないため）。手番の人の離脱は待たずに入れ、手番で
+    #   ない人の離脱は、次に聞こえたアクションの前に入れる。
+    # - 手番でない席が離れた = その前の人のアクションが聞き取れなかった（オーナー決定）。間の人をチェック /
+    #   コール（要確認）で補ってからフォールドを入れる。
+    # - 札が戻ったら、少なくともその時刻まではフォールドではない（オーナー決定）→ 入れたフォールドを取り消し、
+    #   そのあとの入力を流し直して記録を組み直す。
+    # - ベッティングが終わったあと（ショーダウン）は札を前に出すので、離脱はマックにしない。見せずに
+    #   マックしたときはディーラーが「フォールド」と言う（従来の扱い）。
+
+    def _seat_signal(self, kind: str, seat: int, timestamp: float,
+                     observed_at: Optional[float] = None) -> RFIDEvent:
+        return RFIDEvent(
+            tag_id="", card="", reader_id="", role="seat", seat=seat, timestamp=timestamp,
+            raw_tag_id="", kind=kind, observed_at=observed_at,
+        )
+
+    def _emit_seat_signal(self, ev: RFIDEvent) -> None:
+        """在否から作った札の離脱・戻り・確定を記録してから反映する（replay が同じ順で再現する）。"""
+        if self._rebuilding:
+            return
+        self._record(ev)
+        self._process_rfid_event(ev)
+
+    def _oldest_speech(self) -> Optional[float]:
+        if self._speech_pending_since is None:
+            return None
+        try:
+            return self._speech_pending_since()
+        except Exception:  # noqa: BLE001 — 分からなければ待たない
+            return None
+
+    def _poll_departures(self) -> None:
+        """席の在否から、札の離脱（フォールドの候補）と戻りを見つける（live のみ）。"""
+        if not (self._rfid_folds and self._hand_open) or self._seat_presence is None or self._rebuilding:
+            return
+        try:
+            snapshot = self._seat_presence() or {}
+            active = set(self._game_state.get_active_seats())
+        except Exception:  # noqa: BLE001 — 在否が取れなければ判断しない
+            return
+        now = self._clock()
+        for seat in sorted(set(self._hole_cards) | set(self._departures)):
+            info = snapshot.get(seat) or {}
+            dep = self._departures.get(seat)
+            if info.get("present"):
+                # このハンドの手札が戻った（次のハンドの札を置いたのは「戻った」ではない）。「フォールド」の
+                # 発話で降ろした席の札は元から席にある（戻ったのではない）
+                if (dep is not None and not dep.get("spoken")
+                        and set(info.get("cards") or ()) & set(self._hole_cards.get(seat, ()))):
+                    self._observe_return(seat, now)
+                continue
+            since, mucked = info.get("absent_since"), info.get("mucked_at")
+            if dep is not None:
+                pending = self._foldout_pending
+                if pending is not None and pending["seat"] == seat and mucked is not None:
+                    self._emit_seat_signal(self._seat_signal("confirm", seat, now))   # 中央を通過 = 確定
+                continue
+            if seat not in active or seat in self._showdown_mucks:
+                continue
+            if self._before_deal(since if since is not None else mucked):
+                continue                     # 配る前からの不在（前のハンドの札。このハンドの札はまだ見えていない）
+            if mucked is not None and (since is None or mucked >= since - 1.0):
+                t = since if since is not None else mucked
+                t, word = self._fold_time(seat, t)
+                self._departures[seat] = {"t": t, "muck": True, "applied": False, "word": word}
+            elif since is not None and now - since >= self._fold_absent_sec:
+                t, word = self._fold_time(seat, since)
+                self._departures[seat] = {"t": t, "muck": False, "applied": False, "word": word}
+        pending = self._foldout_pending
+        if pending is not None and not self._foldout_winner_left:
+            for seat in self._remaining_seats():
+                info = snapshot.get(seat) or {}
+                since = info.get("absent_since")
+                if not info.get("present") and since is not None and now - since >= self._fold_absent_sec:
+                    self._foldout_winner_left = True
+                    folder = self._departures.get(pending["seat"], {})
+                    if folder.get("facing_bet"):
+                        # ベットに全員が降りた = 勝った人がポットを取って札を前に出した（オーナー: 素早く投げる）。
+                        # リバーでは「コール」を聞き落としたショーダウンの可能性もあるので、役名・「ショーダウン」を
+                        # 待ってから確定する（確定までの時間をこの離脱から数え直す）。
+                        if self._board_top() >= 5:
+                            pending["t"] = max(pending["t"], since)
+                            logger.info("席%d の札も離れました（リバー）— 役名か「ショーダウン」が無ければ %.0f 秒後に確定",
+                                        seat, FOLDOUT_CONFIRM_SEC)
+                        else:
+                            logger.info("席%d の札も離れました（勝ってポットを取った）", seat)
+                    elif self._board_top() >= 5 and not folder.get("muck"):
+                        # リバーでベットが無いのに残った人の札も離れた = ショーダウンで札を前に出した
+                        self._emit_seat_signal(self._seat_signal("showdown", pending["seat"], now))
+                    else:
+                        self._hand_needs_review = True
+                        self._notice(f"席{seat} の札も離れました — フォールドかショーダウンか確認してください（要確認）")
+
+    def _before_deal(self, t: Optional[float]) -> bool:
+        """このハンドの札を配る前の時刻か（前のハンドの札の離脱・マックは、このハンドのフォールドではない。店舗
+        2026-10-06 e82f5005 ハンド 13: 前のハンドのマックが、在否の読み直しの間にこのハンドの席5 のフォールドになった）。"""
+        start = self._hand_started_epoch
+        return t is not None and start is not None and t < start
+
+    def _observe_return(self, seat: int, now: float) -> None:
+        dep = self._departures.get(seat)
+        if dep is None:
+            return
+        if not dep.get("applied") or dep.get("action") == "check":
+            del self._departures[seat]           # 記録に入れていない / チェック（リバー）だった離脱は消すだけ
+            return
+        self._emit_seat_signal(self._seat_signal("return", seat, now))
+
+    def _note_street_marks(self) -> None:
+        """ボードの札が置かれた時刻を、そのストリートの始まりとして覚える（前のラウンドはそこで終わっている）。"""
+        if not (self._rfid_folds and self._hand_open):
+            return
+        for count, (street, indices) in _BOARD_STREETS.items():
+            if street in self._street_marks:
+                continue
+            # フロップは 2 枚読めれば始まっている（3 枚目が読めないことがある。ボードに 2 枚だけ載ることはない）
+            flop_seen = street == "flop" and sum(i in self._board_positions for i in indices) >= 2
+            if self._board_top() < count and not flop_seen:
+                continue
+            times = [self._board_dealt_at[i] for i in indices if i in self._board_dealt_at]
+            if times:
+                self._street_marks[street] = min(times)
+
+    def _pending_observations(self, bound: float) -> list[tuple[float, int, object]]:
+        """`bound` より前に起きた、まだ記録に入れていない観測（時刻順）: ストリートの始まり / 札の離脱。"""
+        items: list[tuple[float, int, object]] = [
+            (t, 0, street) for street, t in self._street_marks.items()
+            if street not in self._streets_synced
+        ]
+        items += [(d["t"], 1, seat) for seat, d in self._departures.items() if not d.get("applied")]
+        return sorted(i for i in items if i[0] < bound)
+
+    def _observation_pending(self, item: tuple[float, int, object]) -> bool:
+        _, kind, key = item
+        if kind == 0:
+            return key not in self._streets_synced
+        dep = self._departures.get(key)
+        return dep is not None and not dep.get("applied")
+
+    def _apply_observation(self, item: tuple[float, int, object], timestamp: float) -> None:
+        t, kind, key = item
+        if kind == 0:
+            index = next(n for n, (street, _) in _BOARD_STREETS.items() if street == key)
+            self._emit_seat_signal(RFIDEvent(
+                tag_id="", card="", reader_id="", role="board", seat=None, timestamp=timestamp,
+                raw_tag_id="", board_index=index, kind="street", observed_at=t,
+            ))
+            self._streets_synced.add(key)            # 反映できなくても同じ観測を何度も試さない
+        else:
+            self._apply_earlier_departures(key, t, timestamp)
+            dep = self._departures[key]
+            if dep.get("applied"):
+                return
+            self._emit_seat_signal(self._seat_signal(
+                "muck" if dep.get("muck") else "leave", key, timestamp, observed_at=t,
+            ))
+            dep["applied"] = True
+
+    def _apply_earlier_departures(self, seat: int, t: float, timestamp: float) -> None:
+        """`seat` の離脱を入れる前に、手番がそれより先で、ほぼ同時（`DEPARTURE_ORDER_SLACK_SEC` 以内）に札が離れた席を
+        手番の順に降ろす（店舗 2026-10-19 d01277f8 ハンド 13: 席8 の札が 1.3 秒早く見えたので先に入れ、間の席4・5・6
+        にコールを補っていた。3 人ともすぐあとに札が離れている）。あいだにストリートの札が置かれていれば引き寄せない。"""
+        order = getattr(self._game_state, "seats_to_act", None)
+        if order is None:
+            return
+        try:
+            seats = list(order())
+        except Exception:  # noqa: BLE001
+            return
+        if seat not in seats or seats[0] == seat:
+            return
+        pending_streets = [m for street, m in self._street_marks.items() if street not in self._streets_synced]
+        for other in seats[:seats.index(seat)]:
+            dep = self._departures.get(other)
+            if dep is None or dep.get("applied") or dep.get("spoken"):
+                continue
+            if not t <= dep["t"] <= t + DEPARTURE_ORDER_SLACK_SEC:
+                continue
+            if any(t < m <= dep["t"] for m in pending_streets):
+                continue
+            self._apply_observation((dep["t"], 1, other), timestamp)
+
+    def _apply_observations_before(self, spoken_at: float, timestamp: float) -> None:
+        """この発話より前に起きたこと（ストリートの札・札の離脱）を、発話を反映する前に時刻順に入れる。
+
+        ストリートの札は 1 秒の余裕を見る（札を置く直前に話し始めた前のラウンドの最後のアクションを先に入れる）。
+        """
+        for item in self._pending_observations(spoken_at):
+            if item[1] == 0 and item[0] > spoken_at - STALE_CALL_MARGIN_SEC:
+                continue
+            if self._observation_pending(item):
+                self._apply_observation(item, min(self._clock(), timestamp))
+
+    def _apply_idle_observations(self) -> None:
+        """発話が途切れているとき: ストリートの札（とその前の離脱）と、手番の人の離脱を入れる。
+
+        手番でない人の離脱は「前の人の聞き落とし」の補完を伴うので、次に聞こえたアクションか次の
+        ストリートの札まで待つ。認識中の発話より後に起きたことは、その発話を反映してから入れる。
+        """
+        if not (self._rfid_folds and self._hand_open) or self._rebuilding:
+            return
+        oldest = self._oldest_speech()
+        bound = float("inf") if oldest is None else oldest
+        for _ in range(4 * max(1, len(self._departures) + len(self._street_marks))):
+            if not self._hand_open:
+                return
+            items = self._pending_observations(bound)
+            if not items:
+                return
+            if any(kind == 0 for _, kind, _ in items):
+                item = items[0]                       # ストリートの札まで、時刻順に
+            else:
+                actor = self._game_state.legal_context().actor_seat
+                held = self._spoken_folds.get(actor) if actor is not None else None
+                if held is not None and held <= bound and any(i[2] != actor for i in items):
+                    # 「フォールド」と言われたのに手番の人の札は席に残り、別の席の札が離れた = その語は離れた席の
+                    # こと（手番の見立てがずれている）。手番の人は降ろさない（店舗 2026-10-06: この形で手番の人を
+                    # 降ろした 3 回はすべて誤り）。判断は信号として記録し、再生も同じにする
+                    self._emit_seat_signal(self._seat_signal("spoken_fold_drop", actor, self._clock()))
+                    continue
+                item = next((i for i in items if i[2] == actor), None)
+                if item is None:
+                    return
+            self._apply_observation(item, self._clock())
+
+    def _check_foldout_timeout(self) -> None:
+        pending = self._foldout_pending
+        if pending is None or self._rebuilding:
+            return
+        now = self._clock()
+        deadline = pending["t"] + FOLDOUT_CONFIRM_SEC
+        oldest = self._oldest_speech()
+        if now >= deadline and (oldest is None or oldest > deadline):
+            self._emit_seat_signal(self._seat_signal("confirm", pending["seat"], now))
+
+    def _handle_seat_signal(self, ev: RFIDEvent) -> None:
+        if ev.kind in ("deal", "showdown_end", "hand_start", "confirm", "showdown"):
+            self._settle_corrections()           # ハンドを終わらせる前に、訂正の解釈を決める
+        if ev.kind == "deal":
+            self._apply_deal_signal(ev)
+            return
+        if ev.kind == "showdown_end":
+            self._end_showdown(ev)
+            return
+        if ev.kind == "hand_start":
+            if self._recorded_deals and self._deal_at is not None:
+                # live がこの時点でハンドを始めた（配る前の発話を待ったあと）。replay は発話の待ちを見直さずに
+                # ここで始める。すでに始めていれば（配る前の発話を反映し終えた時点で始めた）何もしない: 「始める」を
+                # 残すと次のハンドを配った瞬間に始めてしまう（店舗 2026-10-19 d01277f8 ハンド 6: 発話を待つあいだの
+                # 札の離脱がハンド 6 に入り、席5 を降ろした）
+                self._hand_start_due = True
+                self._start_dealt_hand_if_ready(force=True)
+            return
+        if ev.kind == "deal_order":
+            self._apply_deal_order(ev)
+            return
+        if ev.kind == "hand_seats":
+            self._apply_hand_seats(ev)
+            return
+        if not (self._rfid_folds and self._hand_open):
+            if self._rfid_folds and self._recorded_deals and self._deal_at is not None and (
+                    ev.observed_at if ev.observed_at is not None else ev.timestamp) >= self._deal_at:
+                # replay: live は配った直後の発話でハンドを始め、その発話の処理の中で出した信号を発話と同じ時刻で
+                # 記録した。同じ時刻は札（信号）を発話より先に流すので、ハンドの開始より前に届く → 始めてから
+                # 反映する（店舗 2026-09-29 d0f055fb ハンド 1: 配った直後の「フォールド」と、その席の札の離脱）
+                self._signals_before_start.append(ev)
+            return
+        if ev.kind == "street":
+            self._run_input("street", ev)
+            return
+        if ev.seat is None:
+            return
+        # "reinterpret"（無言の連続の解釈し直し, reconstruction_event 0.7）は、コール・チェックを毎回言う運用に
+        # したので出さない（2026-09-29）。前の記録にあっても何もしない。
+        if ev.kind in ("leave", "muck"):
+            self._run_input("leave", ev)
+        elif ev.kind == "spoken_fold":
+            self._run_input("spoken_fold", ev)
+        elif ev.kind == "spoken_fold_drop":
+            self._run_input("spoken_fold_drop", ev)
+        elif ev.kind == "return":
+            self._retract_departure(ev.seat, f"席{ev.seat} の札が戻ったので")
+        elif ev.kind == "confirm":
+            self._confirm_foldout()
+        elif ev.kind == "showdown" and self._foldout_pending is not None:
+            self._showdown_after_foldout(ev.timestamp, "残った人の札も離れた（ショーダウン）ので")
+
+    def _run_input(self, kind: str, item) -> None:
+        """ハンドの入力を記録してから反映する（札が戻ったとき、同じ順に流し直して組み直すため）。
+
+        訂正（「失礼しました」）のいまの解釈で取り消した入力と、ストリートの札より前に話したので外した入力
+        （`_dropped_inputs`）は、記録に残すが反映しない。
+        """
+        index = len(self._hand_inputs)
+        self._hand_inputs.append((kind, item))
+        self._activate_departure_floor(item)
+        if self._retracted.get(id(item)) is item:
+            return
+        if self._dropped_inputs.get(id(item)) is item:
+            self._input_voice.pop(id(item), None)     # 外す前の記録の行を残さない
+            self._hand_needs_review = True
+            return
+        if not self._rebuilding:
+            self._note_input_after_cue(kind, item)
+        previous = self._current_input_index     # 入れ子（発話の処理中に作った信号）でも外側の index を保つ
+        self._current_input_index = index
+        mark, generation = len(self._current_actions), self._restore_generation
+        if kind == "audio":
+            self._input_voice.pop(id(item), None)
+        try:
+            if kind == "audio":
+                self._dispatch_audio_event(item)
+            elif kind == "street":
+                self._sync_to_street(item)
+            elif kind == "spoken_fold":
+                self._register_spoken_fold(item)
+            elif kind == "spoken_fold_drop":
+                self._drop_spoken_fold(item.seat, "別の席の札が離れた")
+            else:
+                self._apply_leave(item, index)
+        finally:
+            self._current_input_index = previous
+        if kind == "audio" and generation == self._restore_generation:
+            # この発話でできた声の記録（途中で組み直したときは、組み直しの中で入れてある）
+            records = [r for r in self._current_actions[mark:]
+                       if r.actor_source in _VOICE_SOURCES and r.reason != "synth_silent_fold"]
+            self._input_voice[id(item)] = (item, records)
+            tag = self._before_card_tags.get(id(item))
+            if tag is not None and tag[0] is item:
+                for record in records:           # 札より前に話したので前のストリートに戻した賭け（組み直しでも付ける）
+                    if tag[1] not in (record.reason or "").split("+"):
+                        record.reason = "+".join(r for r in (record.reason, tag[1]) if r)
+                    record.needs_review = True
+            if records and self._correction_tag is not None:
+                first = records[0]
+                tag, self._correction_tag = self._correction_tag, None
+                if tag not in (first.reason or "").split("+"):
+                    first.reason = "+".join(r for r in (first.reason, tag) if r)
+                first.needs_review = True
+
+    def _sync_to_street(self, ev: RFIDEvent) -> None:
+        """ボードの札が置かれた = 前のラウンドは終わっている。閉じていなければ、札が離れていた人は
+        フォールド、残っている人はチェック / コール（聞き取れなかったとみる, 要確認）で閉じる。"""
+        target = _BOARD_STREETS.get(ev.board_index or 0, (None, ()))[0]
+        if target is None:
+            return
+        t = ev.observed_at if ev.observed_at is not None else ev.timestamp
+        for street, _ in _BOARD_STREETS.values():
+            if _STREET_RANK[street] <= _STREET_RANK[target]:
+                self._streets_synced.add(street)
+        gs = self._game_state
+        for _ in range(8 * max(1, len(self._game_seats()))):
+            if not self._hand_open or _STREET_RANK.get(gs.street, 4) >= _STREET_RANK[target]:
+                break
+            ctx = gs.legal_context()
+            actor = ctx.actor_seat
+            if actor is None:
+                break
+            spoken = self._spoken_folds.get(actor)
+            if (spoken is not None and spoken <= t and self._hole_cards.get(actor)
+                    and ev.timestamp - spoken >= HELD_FOLD_STAYED_SEC):
+                # 「フォールド」と言われてから札が離れないまま次のストリートの札が置かれた = その人は降りていない
+                # （降りた人の札はほぼ必ず離れる。店舗 2026-10-06: 次の札でこう入れた 2 回はどちらも「フォール」=
+                # コールの聞き違いで、ヘッズアップではハンドがそこで終わり、リバーのアクションが失われた）
+                raw = self._drop_spoken_fold(actor, "次のストリートの札が置かれた")
+                self._imply_action(actor, ctx, t, f"fold_word_but_cards_stayed_before_{target}", raw_text=raw)
+                continue
+            if self._apply_pending_spoken_fold(t, f"spoken_fold+implied_before_{target}"):
+                continue                         # 「フォールド」と言われたまま札が残っていた手番の席
+            dep = self._departed().get(actor)
+            if dep is not None and dep["t"] < t and actor not in self._showdown_mucks:
+                self._fold_departed(actor, ctx)
+            else:
+                self._imply_action(actor, ctx, t, f"implied_before_{target}")
+        self._resolve_departures()
+        self._flag_spoken_before_card(target, t)
+        if not self._rebuilding:
+            self._before_card.append((target, t))   # 直すかどうかは発話の処理のあと（`_fix_spoken_before_card`）
+
+    def _voice_words(self) -> dict[int, AudioEvent]:
+        """声の行 → その行を作った発話の入力（`id(record)` で引く）。"""
+        words: dict[int, AudioEvent] = {}
+        for kind, item in self._hand_inputs:
+            entry = self._input_voice.get(id(item)) if kind == "audio" else None
+            if entry is not None and entry[0] is item:
+                for record in entry[1]:
+                    words[id(record)] = item
+        return words
+
+    def _board_times_reliable(self) -> bool:
+        """ボードの札の時刻でストリートの境目を決めてよいか: フロップの 3 枚が `FLOP_CARDS_SPREAD_SEC` 以内に読めた。
+        3 枚目がまだ（読めない札がある）なら分からないので使わない（読めなかった札の代わりに次のストリートの札が数えられる
+        ことがある。09-29 d0f055fb ハンド 5 は 2 枚が読めた時点では幅 1 秒、3 枚目が 13 秒あと）。"""
+        flop = [self._board_dealt_at[i] for i in (1, 2, 3) if i in self._board_dealt_at]
+        return len(flop) == 3 and max(flop) - min(flop) <= FLOP_CARDS_SPREAD_SEC
+
+    def _spoken_before_card(self, street: str, t: float, margin: float = STALE_CALL_MARGIN_SEC
+                            ) -> list[tuple[ActionRecord, AudioEvent]]:
+        """このストリート（とそれより先）の声の行のうち、このストリートの札（時刻 `t`）より `margin` 秒以上前に話し始めた
+        もの（記録の順）。ボードの札の時刻が当てにならないハンドでは空。"""
+        if not self._board_times_reliable():
+            return []
+        rank = _STREET_RANK[street]
+        words = self._voice_words()
+        found = []
+        for record in self._current_actions:
+            if record.street not in _BOARD_STREET_NAMES or _STREET_RANK[record.street] < rank:
+                continue
+            if record.actor_source not in _VOICE_SOURCES:
+                continue
+            word = words.get(id(record))
+            if word is not None and _spoken_at(word) < t - margin:
+                found.append((record, word))
+        return found
+
+    def _flag_spoken_before_card(self, street: str, t: float) -> None:
+        """札より前に話し始めた声の行をこのストリート以降に入れていたら要確認にする（組み直しで直せないときに残る印。
+        組み直しの流し直しでも付け直す）。"""
+        reason = f"spoken_before_{street}_card"
+        for record, _ in self._spoken_before_card(street, t):
+            if reason not in (record.reason or "").split("+"):
+                record.reason = "+".join(r for r in (record.reason, reason) if r)
+            record.needs_review = True
+            self._hand_needs_review = True
+
+    def _fix_spoken_before_card(self, before_end: bool = False) -> None:
+        """ストリートの札より前に話した声の行が、そのストリート以降に入っていたら組み直す（オーナー 2026-10-07: ターンの札・
+        宣言・チェックアラウンドより前にターンのアクションは言わない）。
+
+        - チェック・コール → 閉じたラウンドの言い直し: その語を外す（次のストリートの手番がずれない）。
+        - ベット・レイズ・オールイン → 前のストリートは閉じていなかった: そのラウンドを閉じた声のチェック / コール（多く
+          聞こえた語）を外す（`_before_card_target` の条件のとき）。
+        組み直して札より前の行が減り、反映できない語が増えないときだけ採る（ほかは `_flag_spoken_before_card` の印だけ）。
+        書き換えるのは札より `BEFORE_CARD_FIX_MARGIN_SEC` 以上前に話し始めた行だけ（札の読み取りの遅れ）。
+        発話の処理のあと（live と replay で同じ時点）とハンドを終わらせる前に呼ぶ（`_retract_departed_calls` と同じ）。
+        「失礼しました」の解釈を決めるまでは待つ（解釈を選ぶときに札より前の語を数える = `_correction_penalty`。先に
+        直すと、別の解釈 + 語を外した形で同じ行になる）。フロップの 3 枚目が読めるまでも待つ（`_board_times_reliable`）。
+        """
+        if self._rebuilding or (self._event_depth and not before_end) or not self._before_card:
+            return
+        if self._open_correction() is not None:
+            return
+        if not before_end and sum(1 for i in (1, 2, 3) if i in self._board_dealt_at) < 3:
+            return
+        pending, self._before_card = self._before_card, []
+        if not (self._hand_open and self._hand_origin is not None and self._game_state.is_hand_active()
+                and self._board_times_reliable()):
+            return
+        margin = BEFORE_CARD_FIX_MARGIN_SEC
+        shown: Optional[list[ActionRecord]] = None     # 知らせずに組み直したとき、画面に出ている記録（最後に流し直す）
+        for street, t in pending:
+            for _ in range(BEFORE_CARD_MAX_FIXES):
+                found = self._spoken_before_card(street, t, margin)
+                if not found:
+                    break
+                record, word = found[0]
+                if shown is None:
+                    shown = list(self._current_actions)
+                illegal = sum(1 for r in self._current_actions if not r.apply_ok)
+                # 札の時刻が分かったので、組み直すだけで閉じたラウンドの余り・言い直しとして外れることがある
+                # （`_leftover_of_closed_round` / `_said_before_street`）
+                mark = self._unresolved_count
+                self._rebuild_hand()
+                rebuilt = self._spoken_before_card(street, t, margin)   # 組み直しで行は作り直されている
+                base = (len(rebuilt), self._failures_since(mark))
+                if base[0] < len(found) and sum(1 for r in self._current_actions if not r.apply_ok) <= illegal:
+                    self._announce_before_card_fix(street, t, word, None, shown)
+                    shown = None
+                    continue
+                if not rebuilt:
+                    break
+                record, word = rebuilt[0]
+                target, closer = self._before_card_target(record, word)
+                if target is None or not self._try_dropping(target, street, t, base, margin):
+                    break
+                self._announce_before_card_fix(street, t, word, closer, shown)
+                shown = None
+            self._flag_spoken_before_card(street, t)       # 直せずに残った行（組み直しの流し直しでも付け直す）
+        if shown is not None:
+            self._emit_rebuilt(shown)                       # 採らなかった組み直しでも、札の時刻を入れた記録にする
+            self._publish_table_state()
+
+    def _before_card_target(self, record: ActionRecord, word: AudioEvent
+                            ) -> tuple[Optional[AudioEvent], Optional[ActionRecord]]:
+        """外す語と、外す語が前のラウンドを閉じたアクションならその行。直せなければ (None, None)。
+
+        前のラウンドを閉じた語を外すのは、賭けの読みが確かで（あいまいな語・額の聞こえない賭けではない）、閉じた語が
+        別の発話のときだけ（同じ発話の中の順は確か。09-29 d0f055fb ハンド 5:「コール、コール、スリーベン」の
+        「スリーベン」= 残りの人数の聞き違いを賭けとみて、正しいコールを外していた）。どちらも、前のラウンドを閉じた
+        アクションから `LEFTOVER_AFTER_CLOSE_SEC` のうちに話した語だけ（それより離れていれば次の札は配られていて、読み取りが
+        遅れた = 書き換えない）。"""
+        if record.action not in ("check", "call", "bet", "raise", "allin"):
+            return None, None                    # フォールドの語など: 印だけ（間の聞き落としはライブでは分からない）
+        words = self._voice_words()
+        index = next(i for i, r in enumerate(self._current_actions) if r is record)
+        closer = self._current_actions[index - 1] if index > 0 else None
+        closed_at = self._record_time(closer, words) if closer is not None else None
+        if closed_at is None or _spoken_at(word) - closed_at > LEFTOVER_AFTER_CLOSE_SEC:
+            return None, None
+        if record.action in ("check", "call"):
+            return word, None
+        if (_WEAK_WAGER_REASONS & set((record.reason or "").split("+"))
+                or _WEAK_WAGER_REASONS & set(word.parse_flags)):
+            return None, None
+        if (closer.street == record.street or closer.action not in ("check", "call")
+                or closer.actor_source not in _VOICE_SOURCES or "check_around" in (closer.reason or "")):
+            return None, None
+        target = words.get(id(closer))
+        if target is None or _spoken_at(target) == _spoken_at(word):
+            return None, None
+        return target, closer
+
+    def _record_time(self, record: ActionRecord, words: dict[int, AudioEvent]) -> Optional[float]:
+        """行の時刻: 声の行は話し始め、ほかは記録の時刻（札の離脱・補った行）。"""
+        word = words.get(id(record))
+        if word is not None:
+            return _spoken_at(word)
+        try:
+            return datetime.fromisoformat(record.timestamp).timestamp()
+        except (TypeError, ValueError):
+            return None
+
+    def _failures_since(self, mark: int) -> int:
+        """組み直しで反映できなかった語（`mark` = 組み直す前の数）と、合法でなかった行の数。"""
+        return (self._unresolved_count - mark) + sum(1 for r in self._current_actions if not r.apply_ok)
+
+    def _try_dropping(self, target: AudioEvent, street: str, t: float, base: tuple[int, int], margin: float) -> bool:
+        """`target` を外して組み直し、外す前の組み直し（`base` = 札より前の行の数, 反映できない語の数）より札より前の行が
+        減り、反映できない語が増えなければ True（外したまま）。そうでなければ外さずに組み直して False。"""
+        mark = self._unresolved_count
+        self._dropped_inputs[id(target)] = target
+        self._rebuild_hand()
+        fixed = (len(self._spoken_before_card(street, t, margin)), self._failures_since(mark))
+        if fixed[0] < base[0] and fixed[1] <= base[1]:
+            return True
+        del self._dropped_inputs[id(target)]
+        self._rebuild_hand()
+        return False
+
+    def _announce_before_card_fix(self, street: str, t: float, word: AudioEvent, closer: Optional[ActionRecord],
+                                  before: list[ActionRecord]) -> None:
+        self._hand_needs_review = True
+        gap = t - _spoken_at(word)
+        street_ja = _STREET_JA.get(street, street)
+        moved = self._voice_records_of(word)
+        if closer is None and moved:
+            message = (f"「{word.raw_text}」は{street_ja}の札が置かれる {gap:.0f} 秒前に話されていたので、"
+                       f"{_STREET_JA.get(moved[0].street, moved[0].street)}のアクションとみて組み直しました（要確認）")
+        elif closer is None:
+            message = (f"「{word.raw_text}」は{street_ja}の札が置かれる {gap:.0f} 秒前に話されていたので、前のストリートの"
+                       "言い直しとみて外しました（要確認）")
+        else:
+            reason = f"reopened_before_{street}_card"
+            self._before_card_tags[id(word)] = (word, reason)
+            for record in self._voice_records_of(word):
+                if reason not in (record.reason or "").split("+"):
+                    record.reason = "+".join(r for r in (record.reason, reason) if r)
+                record.needs_review = True
+            message = (f"「{word.raw_text}」は{street_ja}の札が置かれる {gap:.0f} 秒前に話されていたので、"
+                       f"{_STREET_JA.get(closer.street, closer.street)}のアクションとみて組み直しました"
+                       f"（席{closer.seat} の「{closer.raw_text}」を外しました, 要確認）")
+        self._notice(message)                               # ログにも残る
+        self._emit_rebuilt(before)
+        self._publish_table_state()
+
+    def _voice_records_of(self, word: AudioEvent) -> list[ActionRecord]:
+        entry = self._input_voice.get(id(word))
+        live = {id(r) for r in self._current_actions}
+        return [r for r in entry[1] if id(r) in live] if entry is not None and entry[0] is word else []
+
+    def _apply_leave(self, ev: RFIDEvent, index: int) -> None:
+        seat = ev.seat
+        t = ev.observed_at if ev.observed_at is not None else ev.timestamp
+        if not self._rebuilding and self._reorder_departure(seat, t, index):
+            return
+        dep = self._departures.setdefault(seat, {"t": t, "muck": ev.kind == "muck", "applied": False})
+        dep.update(t=t, muck=dep.get("muck") or ev.kind == "muck")
+        try:
+            active = self._game_state.get_active_seats()
+        except Exception:  # noqa: BLE001
+            active = []
+        if seat not in active or seat in self._showdown_mucks or self._betting_over():
+            dep["applied"] = True                # ショーダウンでは札を前に出す（マックはディーラーの宣言で）
+            return
+        self._checkpoints.append(self._take_checkpoint(index, seat))
+        dep["applied"] = True
+        self._resolve_departures()
+
+    def _reorder_departure(self, seat: int, t: float, index: int) -> bool:
+        """この席の札の離脱が、少し前（`DEPARTURE_ORDER_SLACK_SEC` 以内）に入れた手番の後の席の離脱より手番が先なら、
+        その席を先に降ろして組み直す（組み直したら True）。
+
+        何人もの札がほぼ同時に離れると、リーダーごとの読み取りの間隔で見えた順が手番と前後する。後の席の離脱を先に
+        入れると、間の席（この席）にコールを補っていた（店舗 2026-10-19 d01277f8 ハンド 13: 席8 が 1.3 秒早く見え、
+        席4・5・6 にコール。離脱は 3 秒離れたままで確かめるので、入れる時点では席4〜6 の離脱はまだ分からない）。
+        live も replay も、入力を受けたこの時点で同じ判断をする。
+        """
+        for checkpoint in reversed(self._checkpoints):
+            other = checkpoint.get("seat")
+            if other is None or other == seat:
+                continue
+            dep = self._departures.get(other)
+            if dep is None or not dep["t"] <= t <= dep["t"] + DEPARTURE_ORDER_SLACK_SEC:
+                continue
+            tag = f"implied_before_fold(seat={other})"
+            later = self._current_actions[checkpoint["actions"]:]
+            if not any(r.seat == seat and r.actor_source == "implied" and tag in (r.reason or "") for r in later):
+                continue
+            start = checkpoint["index"]
+            item = self._hand_inputs.pop(index)
+            rest = self._hand_inputs[start:]
+            self._hand_inputs = self._hand_inputs[:start]
+            self._restore_checkpoint(checkpoint)
+            mark = len(self._current_actions)
+            self._replay_inputs([item, *rest])
+            self._hand_needs_review = True
+            logger.info("席%d の札が席%d と同じころに離れていました — 席%d を先に降ろして組み直しました",
+                        seat, other, seat)
+            if self._on_action:
+                for record in self._current_actions[mark:]:
+                    self._on_action(record)
+            return True
+        return False
+
+    def _take_checkpoint(self, index: int, seat: Optional[int] = None) -> dict:
+        """入力 `index` を反映する前の状態（あとで別の解釈で流し直すため）。"""
+        return {
+            "index": index, "seat": seat, "gs": self._game_state.snapshot(),
+            "actions": len(self._current_actions), "mucks": list(self._showdown_mucks),
+            "declared": self._showdown_declared,
+            "notice": self._showdown_notice_shown, "last": self._last_action_at,
+            "showdown_at": self._showdown_at, "shown": dict(self._showdown_shown),
+            "shown_hit": dict(self._showdown_hit),
+            "foldout": dict(self._foldout_pending) if self._foldout_pending else None,
+            "applied": {s: d.get("applied", False) for s, d in self._departures.items()},
+            "review": self._hand_needs_review,
+            "synced": set(self._streets_synced),
+            "spoken": dict(self._spoken_folds),
+            "held": self._held_betting_words,
+            "recap": dict(self._recap) if self._recap else None,
+            "floor": self._departure_floor,
+        }
+
+    def _checkpoint_at(self, index: int) -> Optional[dict]:
+        return next((c for c in self._checkpoints if c["index"] == index), None)
+
+    def _restore_checkpoint(self, checkpoint: dict) -> None:
+        """`_take_checkpoint` の時点に戻す（それ以降の記録・仮説・チェックポイントは捨てる）。"""
+        index = checkpoint["index"]
+        self._restore_generation += 1
+        self._checkpoints = [c for c in self._checkpoints if c["index"] < index]
+        self._game_state.restore(checkpoint["gs"])
+        del self._current_actions[checkpoint["actions"]:]
+        self._showdown_mucks = list(checkpoint["mucks"])
+        self._showdown_declared = checkpoint.get("declared", False)
+        self._showdown_notice_shown = checkpoint["notice"]
+        self._showdown_at = checkpoint.get("showdown_at")
+        self._showdown_shown = dict(checkpoint.get("shown", {}))
+        self._showdown_hit = dict(checkpoint.get("shown_hit", {}))
+        self._last_action_at = checkpoint["last"]
+        self._foldout_pending = checkpoint["foldout"]
+        self._spoken_folds = dict(checkpoint.get("spoken", {}))
+        # 「フォールド」の発話から作った離脱はチェックポイントより後なら捨てる（流し直しで作り直す）
+        self._departures = {s: d for s, d in self._departures.items()
+                            if not (d.get("spoken") and s not in checkpoint["applied"])}
+        for other, d in self._departures.items():
+            d["applied"] = checkpoint["applied"].get(other, False)
+            if not d["applied"]:
+                d.pop("restated", None)
+        self._streets_synced = set(checkpoint["synced"])
+        self._held_betting_words = checkpoint.get("held", 0)
+        self._recap = checkpoint.get("recap")
+        self._departure_floor = checkpoint.get("floor")
+
+    def _replay_inputs(self, rest: list, reassign_spoken_folds: bool = False) -> None:
+        """記録した入力を同じ順に流し直す（お知らせ・画面は止めて、終わってから記録だけ流す）。
+
+        `reassign_spoken_folds`: 「フォールド」と言われた席（spoken_fold）を、流し直した時点の手番の席にする。
+        記録の席は前の手番の順で決めた席なので、ボタンを直して流し直すときに使う。
+        """
+        callbacks = (self._on_action, self._on_notice, self._on_cards)
+        self._on_action = self._on_notice = self._on_cards = None
+        rebuilding = self._rebuilding         # 組み直しの中の組み直し（額の言い直し）でも外側の流し直しを続ける
+        self._rebuilding = True
+        try:
+            for kind, item in rest:
+                if (reassign_spoken_folds and kind in ("spoken_fold", "spoken_fold_drop")
+                        and self._retracted.get(id(item)) is not item):
+                    # 手番の見立て（ボタン・訂正の解釈）が変わった: 「フォールド」の保留とその取り消しは、流し直した
+                    # 時点の手番の席のこと
+                    actor = self._game_state.legal_context().actor_seat
+                    if actor is None:
+                        continue
+                    item = replace(item, seat=actor)
+                try:
+                    self._run_input(kind, item)
+                except Exception:  # noqa: BLE001 — 組み直しの 1 件の失敗で残りを止めない
+                    logger.exception("組み直しで入力を反映できませんでした: %s", item)
+        finally:
+            self._rebuilding = rebuilding
+            self._on_action, self._on_notice, self._on_cards = callbacks
+
+    def _departed(self) -> dict[int, dict]:
+        return {s: d for s, d in self._departures.items() if d.get("applied")}
+
+    def _resolve_departures(self) -> None:
+        """札が離れた席をフォールドにする（手番が来た席）。手番より先の席が離れていたら、間の人の
+        アクションが聞き取れなかったとみてチェック / コールで補う。"""
+        if self._rebuilding and not self._hand_open:
+            return
+        gs = self._game_state
+        for _ in range(4 * max(1, len(self._game_seats()))):
+            if not self._hand_open:
+                return
+            ctx = gs.legal_context()
+            actor = ctx.actor_seat
+            if actor is None:
+                break
+            departed = self._departed()
+            if actor in departed and actor not in self._showdown_mucks:
+                self._fold_departed(actor, ctx)
+                continue
+            # 訂正で取り消した範囲の離脱（合図より前）は、言い直すアクションの前の「聞き落とし」の補いに使わない
+            since = max(self._last_action_at or 0.0, self._street_started_at() or 0.0, self._departure_floor or 0.0)
+            later = [s for s in gs.seats_to_act()
+                     if s != actor and s in departed and s not in self._showdown_mucks
+                     and departed[s]["t"] >= since]
+            if not later:
+                break
+            self._imply_action(actor, ctx, departed[later[0]]["t"],
+                               f"implied_before_fold(seat={later[0]})")
+        remaining = self._remaining_seats()
+        if len(remaining) == 1 and self._foldout_pending is None and self._hand_open:
+            folder = max(self._departed().items(), key=lambda item: item[1]["t"], default=(None, {}))
+            self._foldout_pending = {"seat": folder[0], "t": folder[1].get("t", self._clock())}
+            self._foldout_winner_left = False
+            self._notice(
+                f"席{folder[0]} の札が離れたので、席{remaining[0]} の勝ちとみます — "
+                f"{FOLDOUT_CONFIRM_SEC:.0f} 秒後に確定（札が戻る・「ショーダウン」なら取り消し）"
+            )
+        elif len(remaining) >= 2 and not self._rebuilding:
+            self._maybe_finish_hand()
+
+    def street_total(self, record: ActionRecord) -> Optional[int]:
+        """表示用: そのアクションのあと、その人がこのストリートで出した額の合計（CLI がコールをトータルで見せる,
+        オーナー 2026-09-29）。いまのハンドの記録に無い行（未適用など）は None。integration スレッドから呼ぶ。"""
+        index = next((i for i, r in enumerate(self._current_actions) if r is record), None)
+        if index is None:
+            return None
+        return street_totals(self._current_actions[:index + 1], self._stack_start or {},
+                             blinds=self._blinds_record(), position_map=self._game_state.position_map())[index]
+
+    def _append_rfid_record(self, record: ActionRecord) -> None:
+        self._current_actions.append(record)
+        if self._on_action:
+            self._on_action(record)
+
+    def _fold_departed(self, seat: int, ctx: LegalContext) -> None:
+        """札が離れた手番の人のフォールド。チェックできる（ベットが無い）ときはチェックにして、以降は
+        勝敗の対象から外す（pokerkit はベットが無いときのフォールドを受け付けない）。"""
+        gs = self._game_state
+        dep = self._departures[seat]
+        muck = bool(dep.get("muck"))
+        street = gs.street
+        started = self._street_started_at()     # 反映する前に（ラウンドが閉じると次のストリートになる）
+        can_fold = "fold" in ctx.legal_actions
+        # ベットが無いときに札が離れた: リバーならショーダウンに向けて札を前に出した（チェック）。それより前は
+        # 降りた（フォールド。pokerkit はチェックできるときのフォールドを受け付けないので force_fold）。
+        action = "fold" if can_fold or street != "river" else "check"
+        if not can_fold and street != "river" and not self._rebuilding:
+            self._note_departed_call(seat, dep)
+        try:
+            if can_fold or action == "check":
+                gs.apply_action(seat, action, 0)
+            else:
+                gs.force_fold(seat)
+        except ValueError:
+            logger.exception("札の離脱によるフォールドを反映できませんでした（席 %s）", seat)
+            self._showdown_mucks.append(seat)
+            return
+        dep["action"] = action
+        dep["facing_bet"] = can_fold
+        if self._departure_floor is not None and dep["t"] < self._departure_floor:
+            dep["restated"] = True   # 訂正の合図より前に離れた札を、言い直しの手番で降ろした
+        reasons = ["rfid_muck" if muck else "rfid_departure"]
+        if not can_fold:
+            reasons.append("river_check" if action == "check" else "no_bet")
+        if dep.get("moved"):
+            reasons.append("late_departure_retracted_call")    # 札が離れたあとのコールを次の人に付け直した
+        before_card = (started is not None and dep["t"] < started - FOLD_BEFORE_CARD_SEC
+                       and self._board_times_reliable())
+        if before_card:
+            # このストリートの札より前に離れた札（前のストリートで降りた）。間の聞き落とし（ボタン・持ち上げ・聞こえ
+            # なかったレイズ）はライブでは分からないので、記録は変えず要確認にする（推定器が直しを探す）
+            reasons.append(f"left_before_{street}_card")
+        self._append_rfid_record(ActionRecord(
+            hand_id=gs.hand_id,
+            timestamp=self._iso(dep["t"]),
+            street=street,
+            seat=seat,
+            player_name=gs.get_player_name(seat),
+            action=action,
+            amount=0,
+            pot_after=gs.pot,
+            stack_after=gs.get_stack(seat),
+            source={"camera": False, "audio": False, "rfid": True},
+            needs_review=not can_fold or bool(dep.get("moved")) or before_card,
+            confidence=RFID_MUCK_CONFIDENCE if muck else RFID_FOLD_CONFIDENCE,
+            position=self._position_of(seat),
+            actor_source="rfid_muck" if muck else "rfid_departure",
+            reason="+".join(reasons),
+            apply_ok=True,
+        ))
+        self._last_action_at = dep["t"]
+
+    def _note_departed_call(self, seat: int, dep: dict) -> None:
+        """ベットに向き合っていない席の札が離れた: その席の最後の記録が、離脱の少し前〜あとに聞いた手番の推定の
+        コールなら、そのコールは次の人のもの（この席は札の離れたときに、コールの前のベットに降りていた）。組み直しは
+        発話の処理のあと（`_retract_departed_calls`）。"""
+        mine = [r for r in self._current_actions if r.seat == seat]
+        last = mine[-1] if mine else None
+        if last is None or last.action != "call" or last.actor_source != "engine_prior":
+            return
+        word = next((item for kind, item in self._hand_inputs if kind == "audio"
+                     and (entry := self._input_voice.get(id(item))) is not None and entry[0] is item
+                     and any(r is last for r in entry[1])), None)
+        if word is None or not -DEPARTED_CALL_BEFORE_SEC <= _spoken_at(word) - dep["t"] <= DEPARTED_CALL_AFTER_SEC:
+            return
+        leave = next((item for kind, item in reversed(self._hand_inputs)
+                      if kind == "leave" and item.seat == seat), None)
+        if leave is not None:
+            self._departed_calls.append((leave, word, seat))
+
+    def _retract_departed_calls(self, before_end: bool = False) -> None:
+        """`_note_departed_call` で見つけた離脱を、その席に付けたコールの入力の前に移して、ハンドを組み直す（コールは
+        次の人のものになる。要確認）。発話の処理のあと（live と replay で同じ時点）とハンドを終わらせる前に呼ぶ。
+
+        `before_end`: ハンドを終わらせる前（勝者・配布・確定の信号。どれもハンドの入力ではないので、処理の途中でも
+        組み直してよい = 訂正の解釈を決めるのと同じ）。"""
+        if self._rebuilding or (self._event_depth and not before_end) or not self._departed_calls:
+            return
+        pending, self._departed_calls = self._departed_calls, []
+        if not (self._hand_open and self._hand_origin is not None and self._game_state.is_hand_active()):
+            return
+        moved: list[int] = []
+        for leave, word, seat in pending:
+            at = {id(item): i for i, (_, item) in enumerate(self._hand_inputs)}
+            li, wi = at.get(id(leave)), at.get(id(word))
+            if li is None or wi is None or wi >= li or self._hand_inputs[li][1] is not leave:
+                continue
+            self._hand_inputs.insert(wi, self._hand_inputs.pop(li))
+            dep = self._departures.get(seat)
+            if dep is not None:
+                dep["moved"] = True
+            moved.append(seat)
+        if not moved:
+            return
+        before = list(self._current_actions)
+        self._rebuild_hand()
+        self._hand_needs_review = True
+        for seat in moved:
+            logger.info("席%d の札は直前のコールのころに離れていたので、そのコールを次の人に付け直しました", seat)
+            self._notice(f"席{seat} の札は「コール」のころに離れていたので、席{seat} はその前のベットに降りたとみて、"
+                         "「コール」を次の人に付け直しました（要確認）")
+        self._emit_rebuilt(before)
+        self._publish_table_state()
+        if self._foldout_pending is None and not before_end:
+            self._maybe_finish_hand()            # ハンドを終わらせる前に呼ばれたときは、呼んだ側が終わらせる
+
+    def _handle_players_left(self, event: AudioEvent, count: int) -> None:
+        """「ヘッズアップ」/「スリープレイヤーズ」= 残りが `count` 人（ディーラーが次のストリートへ進むときに言う。
+        言わないこともある, 店舗 2026-09-27 / オーナー 2026-09-30）。
+
+        その人数が残っていて、ベットに向き合っている人がいれば、その人は降りずに次へ進んだ = コールした（レイズなら
+        額が言われる）。言われなかった「コール」をこれで補い、要確認にしない。次のストリートの札で先に閉じた
+        ラウンドの補ったコールも裏付ける。多く残っていればフォールドの聞き落とし、少なければ聞き違いを知らせる。
+        """
+        if not (self._rules_aware and self._hand_open) or count < 2:
+            return
+        gs = self._game_state
+        spoken = _spoken_at(event)
+        self._apply_pending_spoken_fold(spoken, "spoken_fold_before_heads_up")
+        remaining = self._remaining_seats()
+        if len(remaining) > count:
+            self._hand_needs_review = True
+            self._notice(f"「{event.raw_text}」— まだ {len(remaining)} 人残っています（フォールドの聞き落とし？ 要確認）")
+            return
+        if len(remaining) < 2:
+            return
+        if len(remaining) < count:
+            self._hand_needs_review = True
+            self._notice(f"「{event.raw_text}」— 記録では {len(remaining)} 人です（フォールドの聞き違い？ 要確認）")
+            return
+        reason = "heads_up_call" if count == 2 else "players_left_call"
+        street = gs.street
+        implied = False
+        for _ in range(len(remaining)):
+            ctx = gs.legal_context()
+            if gs.street != street or ctx.actor_seat is None or ctx.amount_to_call <= 0:
+                break
+            self._imply_action(ctx.actor_seat, ctx, spoken, reason, confirmed=True)
+            implied = True
+        if implied:
+            return
+        last = self._current_actions[-1] if self._current_actions else None
+        if (last is not None and last.street != gs.street and last.actor_source == "implied"
+                and last.action == "call" and last.needs_review):
+            last.needs_review = False
+            last.reason = "+".join(r for r in (last.reason, "heads_up" if count == 2 else "players_left") if r)
+
+    def _imply_action(self, seat: int, ctx: LegalContext, t: float, reason: str,
+                      confirmed: bool = False, raw_text: Optional[str] = None) -> None:
+        """言われなかったアクション（チェック / コール）を入れる。
+
+        コール・チェックは毎回言う運用なので（オーナー, 2026-09-29。それまでの「同じアクションの 2 回目以降は
+        言わない」運用は廃止）、言われなかった = 聞き取れなかったとみて要確認。`confirmed` はディーラーの別の
+        言葉で裏付けられた場合（「ヘッズアップ」）。
+        """
+        gs = self._game_state
+        action = "check" if ctx.amount_to_call == 0 else "call"
+        amount = 0 if action == "check" else ctx.amount_to_call
+        street = gs.street
+        gs.apply_action(seat, action, amount)
+        self._append_rfid_record(ActionRecord(
+            hand_id=gs.hand_id,
+            timestamp=self._iso(t),
+            street=street,
+            seat=seat,
+            player_name=gs.get_player_name(seat),
+            action=action,
+            amount=amount,
+            pot_after=gs.pot,
+            stack_after=gs.get_stack(seat),
+            source={"camera": False, "audio": False, "rfid": False},
+            needs_review=not confirmed,
+            confidence=SYNTH_FOLD_CONFIDENCE,
+            position=self._position_of(seat),
+            actor_source="implied",
+            reason=reason,
+            apply_ok=True,
+            raw_text=raw_text,
+        ))
+        self._last_action_at = t
+
+    # ――― 聞き違いのオールイン（店舗 2026-09-27）―――
+    #
+    # 「オールイン」に誰も応えていない（コールは次のストリートの札で補っただけ）のに、全員オールインで
+    # ベッティングが終わったあとも「チェック」「コール」や額が聞こえ続けるなら、オールインは聞き違い。
+    # 外して、そのあとの入力を流し直して記録を組み直す。
+
+    def _count_held_betting_word(self) -> None:
+        """ベッティングが終わっていて保留にしたベッティングの言葉を数える（`HELD_WORDS_TO_DROP_ALLIN` で判断）。"""
+        self._held_betting_words += 1
+        if self._held_betting_words >= HELD_WORDS_TO_DROP_ALLIN and not self._rebuilding:
+            self._drop_unanswered_allin()
+
+    def _unanswered_allin(self) -> Optional[dict]:
+        """いちばん新しい聞こえたオールインのチェックポイント。誰の応答も聞こえていない（そのあとの記録が、
+        補ったコール・チェックと札の離脱のフォールドだけで、補ったコールがある）ときだけ。"""
+        checkpoint = next((c for c in reversed(self._checkpoints) if c.get("allin") is not None), None)
+        if checkpoint is None:
+            return None
+        record = checkpoint["allin"]
+        at = next((i for i, r in enumerate(self._current_actions) if r is record), None)
+        if at is None:
+            return None
+        later = self._current_actions[at + 1:]
+        if not any(r.actor_source == "implied" and r.action == "call" for r in later):
+            return None
+        if any(r.actor_source not in ("implied", "rfid_departure", "rfid_muck") for r in later):
+            return None                       # 誰かのコール・フォールドが聞こえている = オールインの裏付け
+        return checkpoint
+
+    def _drop_unanswered_allin(self) -> bool:
+        """誰も応えていないオールインを聞き違いとみて外し、そのあとの入力から記録を組み直す。外したら True。"""
+        checkpoint = self._unanswered_allin()
+        if checkpoint is None:
+            return False
+        record = checkpoint["allin"]
+        index = checkpoint["index"]
+        rest = self._hand_inputs[index + 1:]
+        self._hand_inputs = self._hand_inputs[:index]
+        self._restore_checkpoint(checkpoint)
+        self._replay_inputs(rest)
+        self._hand_needs_review = True
+        logger.warning(
+            "席%d の「%s」（オールイン）に誰も応えていないのに、ベッティングの言葉が続きました — "
+            "聞き違いとみて外し、記録を組み直しました", record.seat, record.raw_text,
+        )
+        self._notice(
+            f"「{record.raw_text}」（席{record.seat} のオールイン）に誰も応えていないのに「チェック」などが続くので、"
+            "聞き違いとみて外し、記録を組み直しました（要確認）"
+        )
+        if self._on_action:
+            for rebuilt in self._current_actions[checkpoint["actions"]:]:
+                self._on_action(rebuilt)
+        if self._foldout_pending is None:
+            self._maybe_finish_hand()
+        return True
+
+    def _fold_word_already_signalled(self, event: AudioEvent) -> bool:
+        """この「フォールド」の語（聞き違いの語）の働きは、もう記録した信号で入っているか（入っていれば語は何もしない）。
+
+        live は語の処理の中で、札の離脱と組にした信号（leave / muck）を語のあとに出す（`_handle_fold_word`）。replay は
+        発話と同じ時刻の信号を発話の前に流すので、語が来たときにはもう離脱で降ろしてあり、そのまま語を流すと、離脱で
+        ベッティングが終わっていればショーダウンのマックに、最後のフォールドならその確定になって live と違っていた（店舗
+        2026-10-07 782c457d ハンド 6・20: 再生だけ残った人がマックした）。語より後に離れた札（離脱の時刻 ≥ 語の話し始め）の
+        信号が、語と同じ時刻で語の直前に入っていれば、その語と組にした信号（live で発話の前に入れる観測は、話し始めより
+        前の離脱だけ）。組み直しでは、最初に信号で済ませた語を流さない（入力の並びは live = 語のあと、replay = 語の前）。
+        """
+        if not (self._rfid_folds and self._rules_aware and self._hand_open):
+            return False
+        if event.action != "fold" and "garbled_call" not in event.parse_flags:
+            return False
+        if self._rebuilding:
+            return self._fold_words_done.get(id(event)) is event
+        index = self._current_input_index
+        if index is None or index >= len(self._hand_inputs) or self._hand_inputs[index][1] is not event:
+            return False
+        spoken = _spoken_at(event)
+        for kind, item in reversed(self._hand_inputs[:index]):
+            if kind == "audio" or getattr(item, "timestamp", None) != event.timestamp:
+                break
+            observed = getattr(item, "observed_at", None)
+            if kind != "leave" or observed is None or observed < spoken:
+                continue
+            dep = self._departures.get(item.seat)
+            if dep is None or not dep.get("applied"):
+                continue
+            dep["word"] = True                   # この語と組になった離脱（次の「フォールド」は吸わない）
+            self._fold_words_done[id(event)] = event
+            return True
+        return False
+
+    def _handle_fold_word(self, event: AudioEvent) -> None:
+        """ベッティング中の「フォールド」: 手番の人にすぐには付けない。札が離れかけている席があれば、その席の
+        フォールドをいま入れる（3 秒待たない）。札が残っていれば手番の席を覚えておき、札が離れたとき
+        （その発話の時刻のフォールド）か、同じ人の番のまま次のアクションが聞こえたとき・次のストリートの
+        札が置かれたときに、その席のフォールドにする（「フォールド、コール」と続けて言った = 別の人。
+        店舗 2026-09-27: 札が席に残ったままの「フォールド、コール」で「コール」が降りた人に付いていた）。"""
+        if self._rebuilding:
+            return                               # 記録した信号（leave / spoken_fold）の流し直しで再現する
+        self._fold_words_done[id(event)] = event   # 語の働きはここで出す信号がすべて（組み直しでは流さない）
+        spoken_at = _spoken_at(event)
+        if self._restated_fold_word(spoken_at, event):
+            return
+        if any(d.get("applied") and d.get("action") == "fold" and not d.get("spoken") and not d.get("word")
+               and 0 <= spoken_at - d["t"] <= SPOKEN_FOLD_WINDOW_SEC
+               for d in self._departures.values()):
+            # 札の離脱で降ろしたばかりの人のこと（言うのが遅れた）。その離脱がもう「フォールド」の語と組になって
+            # いれば、この語は別の人のこと（店舗 2026-10-06 9db1e032 ハンド 5:「フォールド」「フォールド、コール」の
+            # 2 つ目が席8 の離脱に吸われ、コールが降りた人に付いた）
+            return
+        seat, since = self._absent_seat_for_fold_word(spoken_at)
+        if seat is not None and self._has_fold_word(seat, spoken_at):
+            # その席はもう「フォールド」と言われていて（札が残っていたので覚えておいた / 札の離脱と組にした）、札は
+            # そのあと離れた = その語の札。この語は次の人のこと（1 つの席に「フォールド」は 1 つ。店舗の全データで
+            # この形の 3 回はどれも次の人のフォールドだった: 2026-10-06 5b1ca234 ハンド 1・9db1e032 ハンド 5・
+            # 80078377 ハンド 1）
+            self._apply_worded_departure(seat, since, event)
+            seat, since = self._absent_seat_for_fold_word(spoken_at)
+        if seat is None:
+            actor = self._game_state.legal_context().actor_seat
+            if actor is not None and self._seat_presence is not None:
+                # 記録して反映する（replay も同じ順で再現する）。札が離れたらその席のフォールドをこの発話の
+                # 時刻にする（オーナー: 勝った人が先に札を投げても、降りた人の方が先になる）
+                self._spoken_fold_raw[actor] = event.raw_text or ""
+                self._emit_seat_signal(self._seat_signal(
+                    "spoken_fold", actor, event.timestamp, observed_at=_spoken_at(event),
+                ))
+            self._notice(f"「{event.raw_text}」— 手番の人の札が席に残っているのでまだフォールドにしません"
+                         "（札が離れるか、次のアクションで入れます）")
+            return
+        dep = self._departures.setdefault(seat, {"t": since, "muck": False, "applied": False})
+        if dep.get("applied"):
+            return
+        dep["word"] = True                       # この語と組になった離脱（次の「フォールド」は吸わない）
+        self._emit_seat_signal(self._seat_signal(
+            "muck" if dep.get("muck") else "leave", seat, event.timestamp, observed_at=dep["t"],
+        ))
+
+    def _closing_fold_word(self, event: AudioEvent) -> bool:
+        """ベッティングを終えた札の離脱の「フォールド」が、離脱でショーダウンになったあとに届いた（認識の遅れ）。
+
+        ディーラーは札の離脱を見て「フォールド」と言う。語の話し始めが、語と組になっていない離脱のフォールドの
+        時刻の近く（`CLOSING_FOLD_WORD_BEFORE_SEC` 前〜`CLOSING_FOLD_WORD_AFTER_SEC` 後）なら、その離脱の語。
+        ショーダウンのマックにしない（店舗 2026-10-14 62cad44b ハンド 2, オーナーのメモ「リバーのフォールドは
+        ショーダウンではなくベッティングラウンドのアクション」: 席5 の札が離れた 0.4 秒後の「フォールド」が、
+        認識に 5.7 秒かかって離脱の確定のあとに届き、残った席7 のマックになっていた）。
+        """
+        spoken_at = _spoken_at(event)
+        for seat, dep in self._departures.items():
+            if (dep.get("applied") and dep.get("action") == "fold" and not dep.get("spoken")
+                    and not dep.get("word")
+                    and -CLOSING_FOLD_WORD_BEFORE_SEC <= spoken_at - dep["t"] <= CLOSING_FOLD_WORD_AFTER_SEC):
+                dep["word"] = True
+                self._fold_words_done[id(event)] = event   # 組み直しでは流さない（離脱の信号で済んでいる）
+                if not self._rebuilding:
+                    self._notice(f"「{event.raw_text}」— 席{seat} の札が離れたときのフォールドの声とみます"
+                                 "（ショーダウンのマックにはしません）")
+                return True
+        return False
+
+    def _has_fold_word(self, seat: int, spoken_at: float) -> bool:
+        """その席に、この語より前の「フォールド」の語がもうある（覚えている語・離脱と組にした語）。"""
+        held = self._spoken_folds.get(seat)
+        if held is not None and held < spoken_at:
+            return True
+        dep = self._departures.get(seat)
+        return bool(dep and dep.get("word") and not dep.get("applied") and dep["t"] < spoken_at)
+
+    def _apply_worded_departure(self, seat: int, since: float, event: AudioEvent) -> None:
+        """前の「フォールド」の語と組にして、その席の札の離脱をいま入れる（時刻はその語の時刻）。"""
+        t, _ = self._fold_time(seat, since)
+        dep = self._departures.setdefault(seat, {"t": t, "muck": False, "applied": False})
+        if dep.get("applied"):
+            return
+        if not dep.get("word"):
+            dep["t"] = t
+        dep["word"] = True
+        self._notice(f"「{event.raw_text}」— 席{seat} はもう「フォールド」と言われて札が離れたので、次の人のこととみます")
+        self._emit_seat_signal(self._seat_signal(
+            "muck" if dep.get("muck") else "leave", seat, event.timestamp, observed_at=dep["t"],
+        ))
+
+    def _fold_time(self, seat: int, t: float) -> tuple[float, bool]:
+        """離脱の時刻と、「フォールド」の語と組になったか。語がその少し前に聞こえていれば、発話の時刻にする。"""
+        spoken = self._spoken_folds.pop(seat, None)
+        self._spoken_fold_raw.pop(seat, None)
+        if spoken is not None and 0 <= t - spoken <= SPOKEN_FOLD_WINDOW_SEC:
+            return spoken, True
+        return t, False
+
+    def _register_spoken_fold(self, ev: RFIDEvent) -> None:
+        """「フォールド」と言われたのに札が席に残っていた手番の席を覚える（記録した信号から。replay も同じ）。"""
+        if ev.seat is not None:
+            self._spoken_folds[ev.seat] = ev.observed_at if ev.observed_at is not None else ev.timestamp
+
+    def _drop_spoken_fold(self, seat: Optional[int], why: str) -> Optional[str]:
+        """覚えている「フォールド」（手番の人の札は席にあった）を捨てる（その人は降ろさない）。言った文を返す。
+
+        ハンドに要確認は付けない: 別の席の札が離れたなら、その語は離れた席のこと（札を持ったまま口頭で降りることは
+        基本的に無い, オーナー 2026-10-06）。次のストリートの札なら、補ったチェック / コールに要確認が付く。
+        """
+        if seat is None or self._spoken_folds.pop(seat, None) is None:
+            return None
+        raw = self._spoken_fold_raw.pop(seat, "") or "フォールド"
+        self._notice(f"「{raw}」— 席{seat} の札は席に残ったまま{why}ので、席{seat} はフォールドにしません")
+        return raw
+
+    def _apply_pending_spoken_fold(self, before: float, reason: str) -> bool:
+        """覚えている「フォールド」の席がまだ手番のままなら、その席をフォールドにする。
+
+        次のアクション・次のストリートの札の前に呼ぶ。ディーラーが「フォールド、コール」と続けて言ったときの
+        「フォールド」は手番の人、「コール」はその次の人（札が席に残っていても）。反映したら True。
+        """
+        gs = self._game_state
+        ctx = gs.legal_context()
+        seat = ctx.actor_seat
+        if seat is None:
+            return False
+        spoken = self._spoken_folds.get(seat)
+        if spoken is None or spoken > before:
+            return False
+        del self._spoken_folds[seat]
+        raw = self._spoken_fold_raw.pop(seat, "")
+        street = gs.street
+        can_fold = "fold" in ctx.legal_actions
+        try:
+            if can_fold:
+                gs.apply_action(seat, "fold")
+            else:
+                gs.force_fold(seat)              # チェックできるときに降りた
+        except ValueError:
+            logger.exception("「フォールド」の席をフォールドにできませんでした（席 %s）", seat)
+            return False
+        # 札の離脱で決めたフォールドと同じ扱い（勝った人の離脱の判断・候補の絞り込み）。札はまだ席にある
+        self._departures[seat] = {"t": spoken, "muck": False, "applied": True, "action": "fold",
+                                  "facing_bet": can_fold, "spoken": True}
+        self._append_rfid_record(ActionRecord(
+            hand_id=gs.hand_id,
+            timestamp=self._iso(spoken),
+            street=street,
+            seat=seat,
+            player_name=gs.get_player_name(seat),
+            action="fold",
+            amount=0,
+            pot_after=gs.pot,
+            stack_after=gs.get_stack(seat),
+            source={"camera": False, "audio": True, "rfid": False},
+            needs_review=False,
+            confidence=SPOKEN_FOLD_CONFIDENCE,
+            position=self._position_of(seat),
+            actor_source="spoken_fold",
+            reason=reason,
+            apply_ok=True,
+            raw_text=raw or None,
+        ))
+        self._last_action_at = spoken
+        logger.info("「%s」の席%d をフォールドにしました（札は席に残ったまま, %s）", raw or "フォールド", seat, reason)
+        self._resolve_departures()
+        return True
+
+    def _absent_seat_for_fold_word(self, spoken_at: Optional[float] = None) -> tuple[Optional[int], float]:
+        """「フォールド」と聞こえたときに、札が席から離れた席を探す。まだ行動する席を手番の順に見て、無ければ
+        このラウンドで行動を済ませた席のうち、その語の前後（`FOLD_WORD_DEPARTURE_SEC`）に札が離れた席。
+
+        札を持ったまま口頭で降りることは基本的に無い（オーナー 2026-10-06）。手番の人の札が残っていて別の席の札が
+        語と同じころ離れたなら、その語は離れた席のこと = 手番の見立てがずれている（店舗 9db1e032 ハンド 4: 聞き
+        落としたベットのあと「フォールド、コール」の「フォールド」が、もう動いた席5 の札の離脱と同時だった）。
+
+        このハンドで札が一度も読めていない席は数えない（札が席に無いのか、読めていないだけか分からない）。
+        2026-10-01 のリハーサル: 席の設定が 1 つずれて席 7 のリーダーに札が無く、各ハンドの最初の「フォールド」が
+        席 7 に付いて、その前の人がコールで補われた。読めていない席が手番なら、ふつうの手番の人の「フォールド」に
+        なる（札が離れるか、次のアクションで入れる）。
+        """
+        if self._seat_presence is None:
+            return None, 0.0
+        try:
+            snapshot = self._seat_presence() or {}
+        except Exception:  # noqa: BLE001
+            return None, 0.0
+        to_act = list(self._game_state.seats_to_act())
+        for seat in to_act:
+            info = snapshot.get(seat) or {}
+            if info.get("present") or seat in self._showdown_mucks:
+                continue
+            since = info.get("absent_since")
+            if since is not None and self._hole_cards.get(seat) and not self._before_deal(since):
+                return seat, since
+        if spoken_at is None:
+            return None, 0.0
+        for seat in self._remaining_seats():
+            if seat in to_act or seat in self._departures:
+                continue
+            info = snapshot.get(seat) or {}
+            since = info.get("absent_since")
+            if (not info.get("present") and since is not None and self._hole_cards.get(seat)
+                    and abs(since - spoken_at) <= FOLD_WORD_DEPARTURE_SEC):
+                return seat, since
+        return None, 0.0
+
+    def _confirm_foldout(self) -> None:
+        pending = self._foldout_pending
+        if pending is None or self._rebuilding:
+            return
+        self._foldout_pending = None
+        remaining = self._remaining_seats()
+        if len(remaining) == 1 and self._hand_open:
+            self._finalize_hand(remaining[0], winner_source="fold", ended_ts=pending["t"])
+
+    def _showdown_after_foldout(self, t: float, why: str) -> None:
+        """最後のフォールドとみた札の離脱は、ショーダウンで札を前に出したものだった → 取り消し、
+        そのプレイヤーの最後のアクション（コール / チェック）を聞き取れなかったとみて補う。"""
+        seat = self._foldout_pending["seat"]
+        self._retract_departure(seat, why)
+        self._close_betting(t)
+        self._hand_needs_review = True
+        self._maybe_finish_hand()
+
+    def _close_betting(self, t: float) -> None:
+        """ベッティングを最後まで閉じる（残っている人のチェック / コール = 聞き取れなかったとみる）。"""
+        gs = self._game_state
+        for _ in range(8 * max(1, len(self._game_seats()))):
+            ctx = gs.legal_context()
+            if ctx.actor_seat is None or not self._hand_open:
+                break
+            self._imply_action(ctx.actor_seat, ctx, t, "implied_before_showdown")
+
+    def _retract_departure(self, seat: int, why: str) -> None:
+        """札が戻った（または取り消す理由がある）席の離脱を、ハンドの記録から取り消して組み直す。"""
+        dep = self._departures.pop(seat, None)
+        if self._foldout_pending is not None and self._foldout_pending["seat"] == seat:
+            self._foldout_pending = None
+        index = next((i for i, (kind, item) in enumerate(self._hand_inputs)
+                      if kind == "leave" and item.seat == seat), None)
+        if dep is None or index is None:
+            return
+        checkpoint = self._checkpoint_at(index)
+        rest = [(kind, item) for kind, item in self._hand_inputs[index:]
+                if not (kind == "leave" and item.seat == seat)]
+        self._hand_inputs = self._hand_inputs[:index]
+        if checkpoint is None:                       # 記録を変えなかった離脱（ショーダウン中など）
+            self._hand_inputs.extend(rest)
+            return
+        self._restore_checkpoint(checkpoint)
+        self._replay_inputs(rest)
+        self._hand_needs_review = True
+        corr = self._open_correction()
+        if corr is not None:
+            corr["dirty"] = True                 # 訂正の解釈は次の発話で選び直す
+        self._notice(f"{why}、席{seat} のフォールドを取り消して記録を組み直しました")
+        if self._on_action:
+            for record in self._current_actions[checkpoint["actions"]:]:
+                self._on_action(record)
+        if self._foldout_pending is None:
+            self._maybe_finish_hand()
+
     def _handle_winner(self, event: AudioEvent) -> None:
-        """winner 宣言の処理。複数席の読み上げは split pot（ADR-D S7）、席が読めない場合は
-        fallback 連鎖（ADR-A B5: 単独 active 席 → 最後のアグレッサー + review → 手番席）。"""
+        """winner 宣言の処理。複数席の読み上げは split pot（ADR-0050 S7）、席が読めない場合は
+        fallback 連鎖（ADR-0047 B5: 単独 active 席 → 最後のアグレッサー + review → 手番席）。"""
         seats = _extract_all_seat_nos(event.raw_text)
 
+        if (
+            self._hand_auto_started and self._hand_open and not self._current_actions
+            and self._last_result
+            and _spoken_at(event) - (self._hand_started_epoch or 0.0) <= LATE_WINNER_SEC
+        ):
+            # 配ったばかりのハンドに勝者は無い = 前のハンドへの宣言が遅れて届いた（ADR-0062）
+            self._late_winner(event, seats)
+            return
+
+        # 進行中のハンドが無い（新ハンド前 / 確定済み）winner は保留する（ISSUE-0028）。
+        # pokerkit は end_hand 後に actor を持たず、確定済みハンドへの再宣言を通すとポットの
+        # 二重加算か（end_hand が例外になり）空 summary の量産になる。legacy は
+        # is_hand_active が常に True なので従来どおり下の判定に進む。
+        if not self._game_state.is_hand_active():
+            if self._auto_winner and self._last_result:
+                self._late_winner(event, seats)
+                return
+            self._emit_unresolved(event, reason="no_active_hand")
+            return
+
         # 確定対象が何も無い winner（進行中ハンドなし・アクションもカードも review 状態も無い）
-        # はハルシネーション疑い → 保留（空 summary を書かない, ADR-A B5）。
+        # はハルシネーション疑い → 保留（空 summary を書かない, ADR-0047 B5）。
         # 何かしら記録があれば従来どおり確定する（明示 new_hand なしの運用も従来サポート）。
         if (
             not self._hand_open
@@ -528,7 +3184,20 @@ class IntegrationThread(threading.Thread):
             return
 
         winner_seat = seats[0] if seats else None
+        if winner_seat is None and self._showdown_before_full_board():
+            # ボードがそろう前のショーダウンで勝者は言わない（オーナー 2026-10-14）= 聞き違い・雑音。決めずに待つ
+            self._notice(f"「{event.raw_text}」— ボードが {len(self._board_cards)} 枚でまだそろっていないので、"
+                         "勝者は決めずに待ちます")
+            return
         if winner_seat is None:
+            # 席を言わない「ウィナー」: ショーダウンなら残った全員が見せたとして手札で決める（ADR-0062）
+            if self._finish_by_rules(event):
+                return
+            if _SPLIT_WORDS.search(event.raw_text or "") and len(self._remaining_seats()) >= 2:
+                # 「チョップ」= 2 人以上で分けた。手札で決められないとき 1 人を推定しない（最後に賭けた人にしていた）
+                self._hand_needs_review = True
+                self._notice(f"「{event.raw_text}」— 分けた席を手札で決められません。w <席> <席> で入力してください")
+                return
             winner_seat = self._fallback_winner_seat()
             if winner_seat is None:
                 self._emit_unresolved(event, reason="winner_seat_unresolved")
@@ -539,8 +3208,25 @@ class IntegrationThread(threading.Thread):
             )
         self._finalize_hand(winner_seat, event)
 
+    def _chop_heard_as_check(self, event: AudioEvent) -> Optional[AudioEvent]:
+        """席を言わない「チョップ」が、ベットの途中（チェックできる手番の人がいる）で聞こえたらチェックの聞き違い。
+
+        分けるのはショーダウンのあとだけなので、ベットの途中の「チョップ」は勝者ではない。店舗のログ全体の短い
+        「チョップ」6 回はすべてベットの途中で、真のアクションはチェックだった（2026-10-06 1f838667 ハンド 3・16 は
+        これを読めずにチェックが抜け、以降の手番がずれた）。チェックできない（ベットに直面）ときは今まで通り。
+        """
+        if not (self._rules_aware and self._hand_open and _SPLIT_WORDS.search(event.raw_text or "")):
+            return None
+        if _extract_all_seat_nos(event.raw_text) or self._betting_over():
+            return None
+        ctx = self._game_state.legal_context()
+        if ctx.actor_seat is None or "check" not in ctx.legal_actions:
+            return None
+        self._notice(f"「{event.raw_text}」— ベットの途中なのでチェックの聞き違いとみます（要確認）")
+        return replace(event, action="check", amount=0, parse_flags=(*event.parse_flags, "chop_heard_as_check"))
+
     def _fallback_winner_seat(self) -> Optional[int]:
-        """勝者席が読み上げから取れないときの推定連鎖（ADR-A B5）。
+        """勝者席が読み上げから取れないときの推定連鎖（ADR-0047 B5）。
 
         1. active 席が 1 つ → その席（全員 fold の決定的ケース、review 不要）。
         2. 最後のアグレッサー（bet/raise/allin）→ 推定なので hand を review に。
@@ -548,14 +3234,11 @@ class IntegrationThread(threading.Thread):
         4. どれも取れなければ None（呼び出し側が保留レコード化）。
         """
         gs = self._game_state
-        try:
-            active = gs.get_active_seats()
-        except Exception:
-            active = []
+        active = self._remaining_seats()   # ショーダウンでマックした席は除く（ADR-0062）
         if len(active) == 1:
             return active[0]
         for rec in reversed(self._current_actions):
-            if rec.action in ("bet", "raise", "allin"):
+            if rec.action in ("bet", "raise", "allin") and (not active or rec.seat in active):
                 self._hand_needs_review = True
                 return rec.seat
         try:
@@ -565,10 +3248,1267 @@ class IntegrationThread(threading.Thread):
         self._hand_needs_review = True
         return seat
 
+    # ――― 手札が配られたら新しいハンド（ADR-0062）―――
+
+    def _notice(self, message: str) -> None:
+        """操作する人へのお知らせ（CLI に出す）。logger にも残す。"""
+        logger.info("%s", message)
+        if self._on_notice is not None:
+            try:
+                self._on_notice(message)
+            except Exception:  # noqa: BLE001 — 表示の失敗で記録を止めない
+                logger.exception("on_notice failed")
+
+    # ――― 読んだ札の表示（CLI）―――
+
+    def _card_info(self, message: str) -> None:
+        """RFID で読んだ札を 1 行で知らせる（CLI の [カード] 行）。logger にも残す。"""
+        logger.info("カード: %s", message)
+        if self._on_cards is not None:
+            try:
+                self._on_cards(message)
+            except Exception:  # noqa: BLE001 — 表示の失敗で記録を止めない
+                logger.exception("on_cards failed")
+
+    def _show_hole_cards(self) -> None:
+        """2 枚そろった席の手札を出す（まだ出していない席・配り直しで変わった席だけ）。"""
+        if not self._hand_open:
+            return
+        shown = []
+        for seat in sorted(self._hole_cards):
+            cards = tuple(self._hole_cards[seat])
+            if len(cards) != 2 or self._shown_holes.get(seat) == cards:
+                continue
+            redeal = seat in self._shown_holes
+            self._shown_holes[seat] = cards
+            shown.append(f"席{seat} {_cards_text(cards)}" + ("（配り直し）" if redeal else ""))
+        if shown:
+            self._card_info("手札 " + " ／ ".join(shown))
+
+    def _check_seat_setup(self) -> None:
+        """卓で使っていない席に手札が 2 枚ある = 起動時の席の設定が違う見込みを知らせる（ハンドごとに 1 回, live のみ）。
+
+        2026-10-01 のリハーサル: ロガーは席 4〜7、札は席 3〜6 のリーダー（1 つずつずれていた）で、札の離脱・マックが
+        隣の人のフォールドになり、手札の読めない席 7 に「フォールド」が付いて 4 ハンドとも崩れた（席をずらして
+        推定し直すと 4/4）。配り終わるのを待ってから確かめる（配っている途中の席を「手札が無い」と言わない）。
+        お知らせだけで記録は変えない（replay は在否を持たず、同じ記録を再現するため）。
+        """
+        if (not self._hand_open or self._seat_setup_warned or self._hand_started_epoch is None
+                or self._clock() - self._hand_started_epoch < SEAT_SETUP_CHECK_SEC):
+            return
+        game = self._game_seats()
+        extra = [s for s, cards in sorted(self._hole_cards.items()) if len(cards) >= 2 and s not in game]
+        if not game or not extra:
+            return
+        self._seat_setup_warned = True
+        with_cards = sorted(s for s, cards in self._hole_cards.items() if cards)
+        missing = [s for s in game if not self._hole_cards.get(s)]
+        if missing:
+            self._notice(
+                f"席の設定が違うかもしれません: 手札は 席{_seats_text(with_cards)} にありますが、ロガーの席は "
+                f"{_seats_text(game)} です（席{_seats_text(missing)} に手札がありません）。札の離脱・マックが別の人の"
+                "ものになります — q で終了して、札を置く席の番号で起動し直してください"
+            )
+        else:
+            self._notice(
+                f"席{_seats_text(extra)} に手札がありますが、ロガーの席（{_seats_text(game)}）に入っていません — "
+                "席の設定を確かめてください"
+            )
+
+    def _show_board(self, replaced: Optional[tuple[int, str, str]] = None) -> None:
+        """フロップ（3 枚）・ターン・リバーがそろったとき、配り直しで替わったときにボードを出す。"""
+        if not self._hand_open:
+            return
+        board = self._board_cards
+        if replaced is not None:
+            index, old, new = replaced
+            self._card_info(
+                f"ボード {index} 枚目を差し替え {_card_text(old)} → {_card_text(new)}"
+                f"（{_cards_text(board)}）"
+            )
+        elif len(board) > self._shown_board and len(board) >= 3:
+            if len(board) == 3:
+                self._card_info(f"フロップ {_cards_text(board)}")
+            else:
+                name = "ターン" if len(board) == 4 else "リバー"
+                self._card_info(f"{name} {_card_text(board[-1])}（ボード {_cards_text(board)}）")
+        self._shown_board = len(board)
+
+    def _describe_cards(self, summary: HandSummary) -> str:
+        """確定したハンドの札をまとめて 1 行にする（ボード / 席ごとの手札と、見せた手の役）。"""
+        from core.showdown import HAND_NAMES_JA
+
+        hands = {h["seat"]: HAND_NAMES_JA.get(h["hand"], h["hand"]) for h in summary.showdown or []}
+        parts = [f"ボード {_cards_text(summary.board)}"] if summary.board else []
+        for player in summary.players:
+            if player.get("hole_cards"):
+                text = f"席{player['seat']} {_cards_text(player['hole_cards'])}"
+                if player["seat"] in hands:
+                    text += f"（{hands[player['seat']]}）"
+                parts.append(text)
+        return " ／ ".join(parts)
+
+    def _hand_in_play(self) -> bool:
+        """配り終えてプレーが始まっているか（アクション・ボードがある / ベッティングが終わった）。
+
+        まだ何も起きていないハンドに届いた札は、同じハンドの配り直しとして扱う（ADR-0058）。
+        """
+        return bool(self._current_actions or self._board_positions or self._betting_over())
+
+    def _seat_readers_live(self) -> bool:
+        """この卓の席に RFID のリーダーがつながっているか（live のみ。replay は在否を持たない）。"""
+        if self._seat_presence is None:
+            return False
+        try:
+            snapshot = self._seat_presence() or {}
+        except Exception:  # noqa: BLE001
+            return False
+        return any(seat in snapshot for seat in self._game_seats())
+
+    def _forget_board_before_deal(self) -> None:
+        """配る前にボードのリーダーが読んだ札（ウォッシュ）の位置を、RFID 側でも捨てる。
+
+        RFID はハンドの中でボードの位置を解放しない（ISSUE-0026）ので、捨てないと本物の flop が
+        4 枚目から数えられる。新しいハンドと同じ同期点を使う（engine のボードはまだ空）。
+        """
+        self._board_before_deal = False
+        if self._on_new_hand is None:
+            return
+        try:
+            self._on_new_hand()
+        except Exception:  # noqa: BLE001 — フックの失敗でハンドを止めない
+            logger.exception("on_new_hand hook failed (board before deal)")
+            return
+        logger.info("手札が配られたので、配る前にボードのリーダーが読んだ札の位置を捨てました")
+
+    def _waiting_for_deal(self) -> bool:
+        """配る前に「ハンド開始」/ n で始めたハンドで、まだ手札が 1 枚も届いていないか。
+
+        席のリーダーがあるときだけそう判断する（無い構成では手札が届かないので、ボードを待たせない）。
+        """
+        return (
+            self._hand_open and not any(self._hole_cards.values())
+            and not self._hand_in_play() and self._seat_readers_live()
+        )
+
+    def _is_next_deal(self, ev: RFIDEvent) -> bool:
+        """この席の札が **次のハンドの配布**か（ADR-0062）。
+
+        - ハンドが無い（前のハンドは確定済み / まだ始めていない）ときに卓の席へ置かれた札。
+        - プレー中のハンドで、手札 2 枚がそろっている席に来た別の札・差し替え・別の席の札。
+          手札がそろっていない席に来た新しい札は、読み遅れた手札としていまのハンドに入れる。
+        """
+        try:
+            seats = self._game_state.get_stacks()
+        except Exception:  # noqa: BLE001
+            return False
+        if ev.seat not in seats:
+            return False                     # 卓で使っていない席のリーダー
+        if not self._hand_open:
+            return True
+        cards = self._hole_cards.get(ev.seat, [])
+        if ev.card in cards or not self._hand_in_play():
+            return False                     # 同じ札の読み直し / まだ配っている（配り直し）
+        return (
+            ev.replaces is not None
+            or len(cards) >= 2
+            or ev.card in self._board_cards
+            or any(ev.card in other for seat, other in self._hole_cards.items() if seat != ev.seat)
+        )
+
+    def _collect_deal(self, ev: RFIDEvent) -> None:
+        """次のハンドの札を集める。
+
+        配布と判断したあと（`_deal_at` あり）の札は、そのハンドの手札にする。判断の前は、RFID の在否が
+        あれば在否で判断し（`_check_deal_presence`, シャッフルで一瞬通った札では始めない）、無ければ
+        （replay・HTTP 受信）2 席以上に 2 枚ずつ読めたら配布とする。
+        """
+        if self._deal_at is not None:
+            self._add_deal_card(ev.seat, ev.card)
+            return
+        # 片付けの途中で触れた札などは、窓を過ぎたら捨てる
+        self._deal_events = [
+            e for e in self._deal_events if ev.timestamp - e[2] <= DEAL_WINDOW_SEC
+        ]
+        if not any(s == ev.seat and c == ev.card for s, c, _ in self._deal_events):
+            self._deal_events.append((ev.seat, ev.card, ev.timestamp))
+        if self._seat_presence is not None:
+            self._check_deal_presence()
+            return
+        if self._recorded_deals:
+            return                           # replay: 記録した配布の信号を待つ
+        hands: dict[int, list[str]] = {}
+        for seat, card, _ in self._deal_events:
+            hands.setdefault(seat, []).append(card)
+        dealt = [s for s, cards in hands.items() if len(cards) >= 2]
+        if len(dealt) >= 2:
+            self._deal_detected(min(ts for _, _, ts in self._deal_events), hands)
+
+    def _add_deal_card(self, seat: int, card: str) -> None:
+        cards = self._deal_hands.setdefault(seat, [])
+        if len(cards) < 2 and not any(card in c for c in self._deal_hands.values()):
+            cards.append(card)
+
+    def _game_seats(self) -> list[int]:
+        try:
+            return sorted(self._game_state.get_stacks())
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _check_deal_presence(self) -> None:
+        """RFID の在否から次のハンドの配布を検出する（ADR-0063）。
+
+        配布 = 卓の 2 席以上に、前のハンドと違う手札 2 枚が `DEAL_STABLE_SEC` 載り続け、ボードの
+        リーダーが空。シャッフル・ウォッシュでリーダーを一瞬通った札や、ショーダウンのあと残っている
+        前のハンドの札では始めない。
+        """
+        if not self._auto_new_hand or self._seat_presence is None or self._deal_at is not None:
+            return
+        if self._hand_open and not self._hand_in_play():
+            self._deal_since = {}          # 始めたばかりのハンド（配り直しは同じハンド）
+            return
+        now = self._clock()
+        try:
+            snapshot = self._seat_presence() or {}
+            board = (self._board_presence() or {}) if self._board_presence is not None else {}
+        except Exception:  # noqa: BLE001 — 在否が取れなければ判断しない
+            return
+        hands: dict[int, list[str]] = {}
+        for seat in self._game_seats():
+            cards = list((snapshot.get(seat) or {}).get("cards") or [])
+            previous = self._hole_cards.get(seat, [])
+            if len(cards) >= 2 and any(c not in previous for c in cards):
+                since = self._deal_since.get(seat, (now, now))[0]
+                self._deal_since[seat] = (since, now)
+                hands[seat] = cards[:2]
+            elif seat in self._deal_since and now - self._deal_since[seat][1] > DEAL_GAP_SEC:
+                del self._deal_since[seat]
+        stable = [
+            s for s, (since, last) in self._deal_since.items()
+            if now - since >= DEAL_STABLE_SEC and now - last <= DEAL_GAP_SEC and s in hands
+        ]
+        if len(stable) < 2 or (board.get("present_count") or 0) > 0:
+            return
+        # 記録してから反映する（replay は在否を持たないので、この信号で同じ配布を再現する）
+        deal_at = min(self._deal_since[s][0] for s in stable)
+        self._emit_seat_signal(RFIDEvent(
+            tag_id="", card="", reader_id="", role="seat", seat=None, timestamp=now, raw_tag_id="",
+            kind="deal", observed_at=deal_at,
+            cards=tuple(f"{seat}:{card}" for seat, cards in sorted(hands.items()) for card in cards),
+        ))
+
+    def _apply_deal_signal(self, ev: RFIDEvent) -> None:
+        """記録した配布（在否で決めた live の判断, `cards` = "席:札"）を反映する。"""
+        if self._deal_at is not None:
+            return
+        hands: dict[int, list[str]] = {}
+        for item in ev.cards:
+            seat, _, card = item.partition(":")
+            if seat.isdigit() and card:
+                hands.setdefault(int(seat), []).append(card)
+        self._deal_detected(ev.observed_at if ev.observed_at is not None else ev.timestamp, hands)
+
+    def _deal_detected(self, deal_at: float, hands: dict[int, list[str]]) -> None:
+        """配布と判断した。RFID のボード位置をいま捨て（シャッフル中に読んだ札を持ち越さない）、
+        プレー中にして、配る前の発話を反映し終えたら新しいハンドを始める。"""
+        self._deal_at = deal_at
+        self._deal_detected_at = self._clock()
+        self._deal_since = {}
+        self._deal_hands = {}
+        for seat, cards in sorted(hands.items()):
+            for card in cards:
+                self._add_deal_card(seat, card)
+        logger.info("手札の配布を検出しました（%s）", self._deal_hands)
+        self._set_in_play(True)
+        if self._on_new_hand is not None:
+            try:
+                self._on_new_hand()
+                self._rfid_reset_for_deal = True
+            except Exception:  # noqa: BLE001
+                logger.exception("on_new_hand hook failed at deal")
+        self._start_dealt_hand_if_ready()
+
+    def _set_in_play(self, in_play: bool) -> None:
+        """プレー中かを切り替える（音声の聞き取りとボードの受付, ADR-0063）。"""
+        self._listen_after_hand_until = None
+        if self._in_play == in_play:
+            return
+        self._in_play = in_play
+        self._table_empty_since = None
+        if self._listen_gate is not None:
+            if in_play:
+                self._listen_gate.set()
+            else:
+                self._listen_gate.clear()
+        logger.info("プレー中: %s", "はい（聞き取りを再開）" if in_play else "いいえ（次の配布まで音声を聞き流す）")
+
+    def _seats_holding_cards(self) -> list[int]:
+        """いま札が載っている、卓で使っている席。在否が分からなければ空。"""
+        if self._seat_presence is None:
+            return []
+        try:
+            seats = self._seat_presence() or {}
+        except Exception:  # noqa: BLE001
+            return []
+        game = set(self._game_seats())
+        return sorted(s for s, info in seats.items() if s in game and info.get("present"))
+
+    def _keep_listening_after_hand(self) -> bool:
+        """ハンドを確定したのに 2 席以上に札が載っていれば、聞き取りを続ける（`POST_HAND_LISTEN_SEC`）。
+
+        フォールドを札の離脱で決める卓だけ（声でフォールドを決める卓では、降りた人の札が席に残る）。
+        """
+        if not self._rfid_folds:
+            return False
+        holding = self._seats_holding_cards()
+        if len(holding) < 2:
+            return False
+        self._listen_after_hand_until = self._clock() + POST_HAND_LISTEN_SEC
+        logger.info("ハンドを確定しましたが席%s に札が残っています — %.0f 秒まで聞き取りを続けます"
+                    "（書き起こしに残すだけで、記録には入れません）", holding, POST_HAND_LISTEN_SEC)
+        return True
+
+    def _check_post_hand_listening(self) -> None:
+        """確定のあとの聞き取りを、時間切れか札が片付いたら止める（次の配布でも止まる）。"""
+        until = self._listen_after_hand_until
+        if until is None or self._hand_open:
+            return
+        if self._clock() >= until or len(self._seats_holding_cards()) < 2:
+            self._set_in_play(False)
+
+    def _check_table_cleared(self) -> None:
+        """ハンドが確定していなくても、卓に札が無い状態が続いたらプレーは終わったとみなす。
+
+        まだ何も起きていないハンド（配る前に「ハンド開始」/ n で始めた・配り直し）の空の卓は片付けでは
+        ない。ここでプレーを終えると、配ったあとのボードの札と声を読まなくなる（店舗の 5 回目の通しテスト:
+        n のあと配るまでの 19 秒で聞き流しに入り、ボードを読まずにショーダウンの札をフォールドにした）。
+        """
+        if not (self._in_play and self._hand_open and self._deal_at is None) or self._seat_presence is None:
+            return
+        if not self._hand_in_play():
+            self._table_empty_since = None
+            return
+        try:
+            seats = self._seat_presence() or {}
+            board = (self._board_presence() or {}) if self._board_presence is not None else {}
+        except Exception:  # noqa: BLE001
+            return
+        if any(info.get("present") for info in seats.values()) or (board.get("present_count") or 0):
+            self._table_empty_since = None
+            return
+        now = self._clock()
+        if self._table_empty_since is None:
+            self._table_empty_since = now
+        elif now - self._table_empty_since >= TABLE_CLEAR_SEC:
+            self._set_in_play(False)
+
+    def _check_silent_mic(self) -> None:
+        """プレー中に `SILENT_MIC_SEC` 声が入らなければ 1 ハンドに 1 回知らせる（マイクの電池切れ等）。"""
+        if self._voice_heard_at is None or self._silent_mic_warned or not (self._hand_open and self._in_play):
+            return
+        started = self._hand_started_epoch
+        now = self._clock()
+        if started is None or now - started < SILENT_MIC_SEC:
+            return
+        try:
+            last = self._voice_heard_at()
+        except Exception:  # noqa: BLE001
+            return
+        if last is not None and now - last < SILENT_MIC_SEC:
+            return
+        self._silent_mic_warned = True
+        self._notice(
+            f"{SILENT_MIC_SEC:.0f} 秒以上、マイクに声が入っていません — マイクの電池・受信機・音量を確かめて"
+            r"ください（tools\audio_check.py level で入力の大きさを見られます）"
+        )
+
+    def _speech_pending_before_deal(self) -> bool:
+        """配る前に話された発話が、まだ認識中か（先に前のハンドへ反映する）。"""
+        if self._speech_backlog is None:
+            return False
+        waited = self._clock() - (self._deal_detected_at if self._deal_detected_at is not None
+                                  else self._clock())
+        if waited > DEAL_SPEECH_WAIT_SEC:
+            logger.warning(
+                "配布の検出から %.0f 秒たっても認識待ちの発話があります — 新しいハンドを先に始めます",
+                waited,
+            )
+            return False
+        try:
+            if self._speech_pending_since is not None and self._deal_at is not None:
+                # 配ってから話し始めた発話は新しいハンドのものなので待たない。全部を待つと、話し声が続くあいだ
+                # 始まらない（店舗 2026-10-01 b0a27270 ハンド 2: 配ってから 20 秒始まらず、そのあいだに降りた
+                # 席6 に「八百」が付いた。7b897671 も 16〜26 秒が 3 回）
+                oldest = self._speech_pending_since()
+                pending = int(oldest is not None and oldest < self._deal_at)
+            else:
+                pending = int(self._speech_backlog())
+        except Exception:  # noqa: BLE001 — 待てないなら始める
+            return False
+        return pending > 0 or not self._audio_queue.empty()
+
+    def _start_dealt_hand_if_ready(self, force: bool = False) -> None:
+        """配布を検出していれば、そのハンドを始める（前のハンドが終わっていなければ先に確定する）。"""
+        if self._deal_at is None:
+            return
+        if not force and self._speech_pending_before_deal():
+            return
+        if self._recorded_deals and not force and not self._hand_start_due:
+            return                           # replay: live が始めた時点（記録した hand_start）まで待つ
+        self._hand_start_due = False
+        if self._hand_open and self._hand_in_play():
+            self._close_hand_for_next_deal()
+        if self._hand_open:
+            # 配る前に「ハンド開始」/ n で始めていたハンド → 配った札をこのハンドの手札にする
+            self._adopt_deal_cards()
+            started = True
+        else:
+            # 始められなければ（参加できる席が 2 つ未満）配布は保留のまま = 買い足し・参加の操作で始まる
+            started = self._start_new_hand(started_at=self._deal_at, auto=True)
+        if started and not self._recorded_deals and not self._rebuilding:
+            self._record(RFIDEvent(
+                tag_id="", card="", reader_id="", role="seat", seat=None, timestamp=self._clock(),
+                raw_tag_id="", kind="hand_start",
+            ))
+        early, self._signals_before_start = self._signals_before_start, []
+        if started:
+            for ev in early:
+                self._handle_seat_signal(ev)
+
+    # ――― ボタンの置き忘れの救済（2026-09-29, 店舗 9d1d8536 ハンド 4）―――
+    # ディーラーはボタンの次の席から 1 枚ずつ 2 周配る。手札を最初に読んだ順がほかの席をボタンとした配り方にだけ
+    # 合うなら、ボタンを動かし忘れたとみてそのハンドを組み直す（`core.positions.button_from_deal`）。手で直すときは
+    # ハンドの途中でも `button <席>`。
+
+    # ――― 配った席でハンドを組み直す（2026-10-23, 店舗 2026-10-19）―――
+    # 手札が 2 席に載った時点でハンドを始めるので、あとから札が載った席（持ち点 0 と誤って記録した人）が入らず、
+    # 札が 1 枚も載らない席（空いた席）が入ったままになる。ボタンはハンドの席で回るので 1 席ずれたまま続いた
+    # （d01277f8 で 30 ハンド）。配り終えたら（フロップか `HAND_SEATS_SETTLE_SEC`）配った席に合わせて組み直す。
+    # 判断は信号（`hand_seats`）として記録し、replay も同じにする。
+
+    def _check_hand_seats(self, now: float) -> None:
+        if (self._hand_seats_settled or not self._hand_open or not self._hand_auto_started or self._rebuilding
+                or self._recorded_hand_seats):
+            return
+        gs = self._game_state
+        if not hasattr(gs, "restart_hand_with_seats") or not gs.is_hand_active():
+            return
+        in_hand = set(self._seats_in_hand())
+        is_out = getattr(gs, "is_sitting_out", None)
+        # 入れるのは、前のハンドにいて持ち点 0 になった席だけ（誤ったバスト）。しばらくいなかった席に札が載ったのは
+        # 新しく座った人 = ディーラーはボタンを進めるときに数えないことがある（店舗 d01277f8 ハンド 9: 席2）
+        stacks = gs.get_stacks()
+        add = {s for s, cards in self._hole_cards.items()
+               if s not in in_hand and len(cards) >= 2 and s in self._prev_hand_seats and stacks.get(s, 0) <= 0
+               and not (is_out is not None and is_out(s))}
+        if self._board_top() >= 3 or now - self._hand_started_epoch >= HAND_SEATS_SETTLE_SEC:
+            self._hand_seats_settled = True      # 配り終えた（このあとに載った札は入れない）
+        seats = sorted(in_hand | add)
+        if not add or len(seats) < 2:
+            return
+        self._emit_seat_signal(RFIDEvent(
+            tag_id="", card="", reader_id="", role="seat", seat=None, timestamp=self._clock(),
+            raw_tag_id="", kind="hand_seats", cards=tuple(f"{s}:dealt" for s in seats),
+        ))
+
+    def _apply_hand_seats(self, ev: RFIDEvent) -> None:
+        """記録した配った席（`hand_seats`）でいまのハンドを組み直す（live も replay も）。"""
+        seats = sorted(int(c.partition(":")[0]) for c in ev.cards if c.partition(":")[0].isdigit())
+        if not self._hand_open or len(seats) < 2:
+            return
+        current = set(self._seats_in_hand())
+        added = [s for s in seats if s not in current]
+        dropped = sorted(current - set(seats))
+        why = []
+        if added:
+            why.append("札が載った席 " + "・".join(f"席{s}" for s in added) + " を入れ")
+        if dropped:
+            why.append("札が 1 枚も載らない席 " + "・".join(f"席{s}" for s in dropped) + " を外し")
+        self._reseat(seats, "、".join(why))
+
+    def _restore_stack_for(self, seat: int) -> int:
+        """持ち点 0 と記録した席を入れるときの持ち点: 0 になる前の持ち点（無ければ最初の持ち点）。"""
+        return self._last_positive_stack.get(seat) or self._initial_stacks.get(seat, 0)
+
+    def _reseat(self, seats: list[int], why: str) -> bool:
+        gs = self._game_state
+        restart = getattr(gs, "restart_hand_with_seats", None)
+        origin = self._hand_origin
+        if restart is None or origin is None or not self._hand_open or not gs.is_hand_active():
+            return False
+        current = set(self._seats_in_hand())
+        stacks = gs.get_stacks()
+        restore = {s: self._restore_stack_for(s) for s in seats if s not in current and stacks.get(s, 0) <= 0}
+        if any(v <= 0 for v in restore.values()):
+            return False
+        inputs = list(self._hand_inputs)
+        self._hand_inputs = []
+        self._restore_checkpoint(origin)
+        self._last_wager = None
+        self._last_wager_point = None
+        self._recap = None
+        self._spoken_fold_raw = {}
+        self._foldout_winner_left = False
+        try:
+            restart(seats, restore)
+        except (ValueError, RuntimeError) as e:
+            logger.warning("配った席で組み直せませんでした: %s", e)
+            self._replay_inputs(inputs)
+            return False
+        for seat, amount in restore.items():
+            self._stack_start[seat] = amount
+            self._provisional_stacks[seat] = (amount, gs.hand_id + 1)
+        for seat in seats:
+            if seat not in current and seat not in self._stack_start:
+                self._stack_start[seat] = gs.get_stacks().get(seat, 0)
+        self._hand_origin = self._take_checkpoint(0)
+        self._departure_floor = self._origin_floor()
+        self._replay_inputs(inputs, reassign_spoken_folds=True)
+        self._hand_needs_review = True
+        positions = " ".join(f"席{s}={p}" for s, p in sorted(gs.position_map().items()))
+        restored = "".join(f"（席{s} は持ち点 0 の記録だったので {v} に戻しました）" for s, v in restore.items())
+        self._notice(f"配った席に合わせて{why}、このハンドを組み直しました — ボタン 席{gs.button_seat}"
+                     f"（{positions}）{restored}。要確認")
+        if self._on_action:
+            for record in self._current_actions:
+                self._on_action(record)
+        self._publish_table_state()
+        if self._foldout_pending is None:
+            self._maybe_finish_hand()
+        return True
+
+    def _check_deal_order(self) -> None:
+        """手札がそろったら 1 回だけ、札ごとに最初に読んだ時刻を記録してから反映する（live のみ）。
+
+        フロップが開いても手札がそろわなければ、読めた札だけで見る。比べられる組（違う席の札で、時刻の差が
+        `DEAL_ORDER_TIE_SEC` 以上）が無ければ記録しない（全員の札を同時に置いた = 順が分からない）。
+        """
+        if self._deal_order_checked or not self._hand_open or self._seat_presence is None or self._rebuilding:
+            return
+        gs = self._game_state
+        if getattr(gs, "button_seat", None) is None or not hasattr(gs, "restart_hand_with_button"):
+            self._deal_order_checked = True
+            return
+        seats = self._seats_in_hand()
+        if any(len(self._hole_cards.get(s, [])) < 2 for s in seats) and self._board_top() < 3:
+            return                               # 手札がそろうまで（フロップまで）待つ
+        try:
+            snapshot = self._seat_presence() or {}
+        except Exception:  # noqa: BLE001 — 在否が取れなければ見ない
+            return
+        self._deal_order_checked = True
+        items: list[str] = []
+        times: list[float] = []
+        for seat in seats:
+            since = (snapshot.get(seat) or {}).get("since") or {}
+            for card in self._hole_cards.get(seat, []):
+                if isinstance(since.get(card), (int, float)):
+                    items.append(f"{seat}:{card}")
+                    times.append(float(since[card]))
+        seat_of = [int(item.partition(":")[0]) for item in items]
+        if not any(seat_of[i] != seat_of[j] and abs(times[i] - times[j]) >= DEAL_ORDER_TIE_SEC
+                   for i in range(len(items)) for j in range(i + 1, len(items))):
+            return
+        self._emit_seat_signal(RFIDEvent(
+            tag_id="", card="", reader_id="", role="seat", seat=None, timestamp=self._clock(),
+            raw_tag_id="", kind="deal_order", cards=tuple(items), times=tuple(times),
+        ))
+
+    def _apply_deal_order(self, ev: RFIDEvent) -> None:
+        """記録した配った順（`deal_order`）から、ボタンの置き忘れを見つけたら組み直す（live も replay も）。"""
+        gs = self._game_state
+        current = getattr(gs, "button_seat", None)
+        if not (self._button_from_deal and self._hand_open and current is not None):
+            return
+        times: dict[int, list[float]] = {}
+        for item, t in zip(ev.cards, ev.times):
+            seat, _, _ = item.partition(":")
+            if seat.isdigit():
+                times.setdefault(int(seat), []).append(float(t))
+        found = button_from_deal(self._seats_in_hand(), times, current)
+        if found is None:
+            return
+        order = " → ".join(
+            f"席{int(i.partition(':')[0])}" for _, i in sorted(zip(ev.times, ev.cards))
+        )
+        self._rebutton(found, f"手札を読んだ順（{order}）は席{found} がボタンの配り方です（記録は席{current}）")
+
+    def _rebutton(self, seat: int, why: str) -> bool:
+        """いまのハンドのボタンを `seat` に直し、ハンドの入力を始めから流し直して記録を組み直す（要確認）。
+
+        ディーラーがボタンを動かし忘れると、手番の順がずれて声のアクションが別の席に付く（店舗 2026-09-29
+        9d1d8536 ハンド 4）。同じ持ち点・ブラインドでボタンだけ変えて始め直す。次のハンドのボタンはここから進む。
+        """
+        gs = self._game_state
+        restart = getattr(gs, "restart_hand_with_button", None)
+        origin = self._hand_origin
+        if restart is None or origin is None or not self._hand_open or not gs.is_hand_active():
+            return False
+        if seat == getattr(gs, "button_seat", None):
+            return False
+        if seat not in self._seats_in_hand():
+            self._notice(f"席{seat} はこのハンドに配られていません（ボタンは直しません）")
+            return False
+        inputs = list(self._hand_inputs)
+        self._hand_inputs = []
+        self._restore_checkpoint(origin)
+        # 入力から作り直す状態（チェックポイントに無いもの）
+        self._last_wager = None
+        self._last_wager_point = None
+        self._recap = None
+        self._spoken_fold_raw = {}
+        self._foldout_winner_left = False
+        restart(seat)
+        self._hand_origin = self._take_checkpoint(0)
+        self._departure_floor = self._origin_floor()
+        self._replay_inputs(inputs, reassign_spoken_folds=True)
+        self._hand_needs_review = True
+        corr = self._open_correction()
+        if corr is not None:
+            corr["dirty"] = True                 # 手番の順が変わった: 訂正の解釈は次の発話で選び直す
+        positions = " ".join(f"席{s}={p}" for s, p in sorted(gs.position_map().items()))
+        self._notice(f"{why} — ボタンを席{seat} に直して、このハンドの記録を組み直しました（{positions}。要確認）")
+        if self._on_action:
+            for record in self._current_actions:
+                self._on_action(record)
+        self._publish_table_state()
+        if self._foldout_pending is None:
+            self._maybe_finish_hand()
+        return True
+
+    def _adopt_deal_cards(self) -> None:
+        """配布の検出で集めた札を、いまのハンドの手札にする（配布と判断していない札は捨てる）。"""
+        if self._deal_at is not None:
+            for seat, dealt in self._deal_hands.items():
+                cards = self._hole_cards.setdefault(seat, [])
+                for card in dealt:
+                    if len(cards) < 2 and not any(card in c for c in self._hole_cards.values()):
+                        cards.append(card)
+            logger.info("配られた手札: %s", {s: c for s, c in self._hole_cards.items() if c})
+        self._deal_events = []
+        self._deal_hands = {}
+        self._deal_at = None
+        self._deal_detected_at = None
+
+    def _close_hand_for_next_deal(self, ended_ts: Optional[float] = None,
+                                  when: str = "次の手札が配られました") -> None:
+        """次の手札が配られた（または終了した）のに確定していないハンドを、確定してから次へ進む。"""
+        ended = self._deal_at if ended_ts is None else ended_ts
+        self._settle_corrections()
+        if self._rfid_folds and self._hand_open:
+            self._close_rounds_at_hand_end()
+        if self._hand_open and self._showdown_before_full_board():
+            # ボードがそろうのを待っていたショーダウン（リバーの札が読めなかった）を閉じる = 要確認（2026-10-15 の見直し）
+            self._hand_needs_review = True
+            self._notice(f"ボードが {len(self._board_cards)} 枚のままショーダウンを閉じます（{when}）— 要確認")
+        if self._finish_by_rules(ended_ts=ended, final=True):
+            return
+        gs = self._game_state
+        remaining = self._remaining_seats()
+        if len(remaining) == 1:   # 全員フォールド（勝者の自動判定が off でも決まっている）
+            self._finalize_hand(remaining[0], winner_source="fold", ended_ts=ended)
+            return
+        if (self._auto_winner and self._rules_aware and len(remaining) >= 2 and self._betting_over()
+                and hasattr(gs, "end_hand_refund")):
+            # ショーダウンで札が読めず勝者が分からない → チップは動かさない（オーナー 2026-09-29。仮の勝者にしない）
+            gaps = "・".join(self._showdown_gaps) or "札が読めていません"
+            self._hand_needs_review = True
+            self._notice(
+                f"ハンド {gs.hand_id} の勝者を手札で判定できないまま{when}（{gaps}）— "
+                "チップは動かしません（要確認）"
+            )
+            self._finalize_hand(None, winner_source="undetermined", ended_ts=ended)
+            return
+        winner = self._fallback_winner_seat()
+        if winner is None:
+            remaining = self._remaining_seats()
+            winner = remaining[0] if remaining else min(gs.get_stacks())
+        self._hand_needs_review = True
+        self._notice(
+            f"ハンド {gs.hand_id} の勝者が決まらないまま{when} — "
+            f"席{winner} を仮の勝者にします（要確認）"
+        )
+        self._finalize_hand(winner, winner_source="estimated", ended_ts=ended)
+
+    def _close_rounds_at_hand_end(self) -> None:
+        """次の配布の時点で、ボードの札まで進めていないラウンドを閉じる。ボードが 5 枚ならリバーも閉じて
+        ショーダウンにする（このあとの札の離脱はショーダウン・片付けなのでフォールドにしない）。
+        記録済みの観測だけで決まるので replay も同じになる。"""
+        for count, (street, _) in _BOARD_STREETS.items():
+            t = self._street_marks.get(street)
+            if t is not None and street not in self._streets_synced:
+                self._sync_to_street(RFIDEvent(
+                    tag_id="", card="", reader_id="", role="board", seat=None, timestamp=t,
+                    raw_tag_id="", board_index=count, kind="street", observed_at=t,
+                ))
+        river = self._board_top() >= 5 or self._game_state.street == "river"
+        if river and not self._betting_over() and self._hand_open:
+            # リバーまで配った（札が読めていなくても、ベッティングがリバーに進んでいる）= ショーダウン
+            self._close_betting(self._deal_at or self._clock())
+
+    # ――― 勝者の自動判定（ADR-0062）―――
+
+    def _remaining_seats(self) -> list[int]:
+        """まだポットを争っている席（フォールドもショーダウンでのマックもしていない）。"""
+        try:
+            active = self._game_state.get_active_seats()
+        except Exception:  # noqa: BLE001
+            return []
+        return [s for s in active if s not in self._showdown_mucks]
+
+    def _betting_over(self) -> bool:
+        """ハンドの途中でベッティングが終わっている（手番が無い = ショーダウン待ち）か。"""
+        if not (self._rules_aware and self._hand_open):
+            return False
+        gs = self._game_state
+        try:
+            return gs.is_hand_active() and gs.legal_context().actor_seat is None
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _showdown_before_full_board(self) -> bool:
+        """ショーダウン（2 人以上残りベッティングが終わった）なのに、ボードがまだ 5 枚配られていない（オールインの
+        ランアウトの途中）。オーナー 2026-10-14: ショーダウンでボードがすべて配られる前に勝者が宣言されることはない
+        = この間の席の無い勝者・チョップ・「ハンド終了」・全員が見せた、では決めない（読めなかった位置 `??` は配られた
+        として数える）。決めるのはボードがそろってから、か次の配布・`n`・終了のとき。"""
+        return (self._betting_over() and len(self._remaining_seats()) >= 2 and len(self._board_cards) < 5)
+
+    def _maybe_finish_hand(self, event: Optional[AudioEvent] = None) -> bool:
+        """ほかが全員フォールド（マック）したら、残った人の勝ちで確定する。
+
+        2 人以上が残ってベッティングが終わったとき（ショーダウン）は、ここでは決めない。見せずに
+        マックした人は手札が強くてもポットを失うので、手札で決めてよいのは誰もマックしなかった
+        ときだけ（残った全員が見せた（役名）/「ハンド終了」/ `SHOWDOWN_MUCK_SEC` マックが無い / 次の配布
+        = `_finish_showdown`）。
+        """
+        if not (self._auto_winner and self._rules_aware and self._hand_open) or self._rebuilding:
+            return False
+        if not self._game_state.is_hand_active():
+            return False
+        remaining = self._remaining_seats()
+        if len(remaining) == 1:
+            if self._foldout_pending is not None:
+                return False                     # 札の離脱で決めた最後のフォールドは確定待ち
+            if self._open_correction() is not None:
+                self._finish_wanted = True       # 訂正の解釈を決めてから確定する（`_after_hand_change`）
+                return False
+            self._finalize_hand(remaining[0], event, winner_source="fold")
+            return True
+        if len(remaining) >= 2 and self._betting_over():
+            if self._showdown_at is None:
+                self._showdown_at = self._last_action_at if self._last_action_at is not None else self._clock()
+            if not self._showdown_notice_shown:
+                self._showdown_notice_shown = True
+                self._notice(
+                    "ショーダウン（" + "・".join(f"席{s}" for s in remaining) + "）— 見せたら役名、"
+                    f"見せずにマックしたら「フォールド」（どちらも無いまま {SHOWDOWN_MUCK_SEC:.0f} 秒たったら"
+                    "手札で判定）"
+                )
+        return False
+
+    def _names_a_remaining_hand(self, name: str, hit_rank: Optional[str]) -> bool:
+        """役名が、残っている人の手札とボードの役に合うか（聞き取れなかったコールのあと、残った人が見せた）。
+        ボード・手札が読めていず判定できなければ True（役名でショーダウンとみる、これまでの扱い）。"""
+        from core.showdown import evaluate_hands
+
+        board = [c for c in self._board_cards if c != UNKNOWN_CARD]
+        remaining = self._remaining_seats()
+        if len(board) != 5 or any(len(self._hole_cards.get(s, [])) != 2 for s in remaining):
+            return True
+        try:
+            hands = evaluate_hands({s: self._hole_cards[s] for s in remaining}, board)
+        except Exception:  # noqa: BLE001 — 読めた札が重なっている など
+            return True
+        if hit_rank:
+            return any(self._hit_matches(s, hands[s].name, hit_rank, board) for s in remaining)
+        return any(hands[s].name == name for s in remaining)
+
+    def _first_to_show(self, departed: int) -> Optional[int]:
+        """札が離れた席と残った席のうち、ショーダウンで最初に見せる席（アウトオブポジション）。"""
+        seats = set(self._remaining_seats()) | {departed}
+        return next((s for s in self._game_state.acting_order() if s in seats), None)
+
+    def _showdown_turn(self) -> list[int]:
+        """ショーダウンでまだ見せても降りてもいない席（見せる順 = アウトオブポジションから）。"""
+        remaining = self._remaining_seats()
+        return [s for s in self._game_state.acting_order() if s in remaining and s not in self._showdown_shown]
+
+    def _showdown_show(self, event: AudioEvent, name: str) -> None:
+        """ショーダウンの役名 = 次に見せる人が見せた（オーナー 2026-09-30: アウトオブポジションが見せ、ディーラーが
+        役名を言う。見せると札がリーダーから外れるので、役名は見せるたびに必ず言う運用）。
+
+        誰が見せたかは見せる順（アウトオブポジションから）。手札で役名に合う席が見せていない中に 1 つだけあれば
+        その席。残った全員が見せたら手札で決める。そうでなければ次の人（役名 / 「フォールド」）を待つ。
+        """
+        from core.showdown import HAND_NAMES_JA
+
+        turn = self._showdown_turn()
+        if not turn:
+            if self._hand_open and self._game_state.is_hand_active() and len(self._board_cards) >= 5:
+                # 全員がボードの出る前に手を開いた（オールイン）。いま言った役名はその役の席のもの。手札で決める
+                unnamed = [s for s in self._remaining_seats() if not self._showdown_shown.get(s)]
+                seat = self._seat_with_hand(unnamed, name, event.hit_rank)
+                if seat is not None:
+                    self._showdown_shown[seat] = name
+                    if event.hit_rank:
+                        self._showdown_hit[seat] = event.hit_rank
+                self._finish_by_rules(event, explicit=True)
+                return
+            self._check_announced_after_end(name)
+            return
+        if len(self._board_cards) < 5:
+            # ボードが出る前（オールインで手を開いた）: 見せた順には数えるが、言った名前（「エースキング」）は
+            # 最後の役ではないので、判定との突き合わせ・役名での勝者には使わない（2026-10-01）
+            seat = turn[0]
+            self._showdown_shown[seat] = None
+            self._showdown_at = _spoken_at(event)
+            self._notice(f"席{seat} が手を開きました（ボードが出る前: {HAND_NAMES_JA.get(name, name)}）")
+            if not self._showdown_turn():
+                self._finish_by_rules(event, explicit=True)
+            return
+        seat = self._seat_with_hand(turn, name, event.hit_rank) or turn[0]
+        self._showdown_shown[seat] = name
+        if event.hit_rank:
+            self._showdown_hit[seat] = event.hit_rank
+        self._announced_hand = name
+        self._showdown_at = _spoken_at(event)
+        self._notice(f"席{seat} が見せました（{HAND_NAMES_JA.get(name, name)}）")
+        if not self._showdown_turn():
+            self._finish_by_rules(event, explicit=True)
+
+    def _seat_with_hand(self, seats: list[int], name: str, hit_rank: Optional[str] = None) -> Optional[int]:
+        """手札とボードで役が `name` になる席が `seats` の中に 1 つだけあればその席。「Nヒット」（`hit_rank`）は、その
+        数字を手札とボードで組にした席（`_hit_matches`）。"""
+        from core.showdown import evaluate_hands
+
+        board = [c for c in self._board_cards if c != UNKNOWN_CARD]
+        readable = {s: self._hole_cards[s] for s in seats if len(self._hole_cards.get(s, [])) == 2}
+        if len(board) != 5 or not readable:
+            return None
+        try:
+            hands = evaluate_hands(readable, board)
+        except Exception:  # noqa: BLE001 — 読めた札が重なっている など
+            return None
+        if hit_rank:
+            matching = [s for s in seats if s in hands and self._hit_matches(s, hands[s].name, hit_rank, board)]
+        else:
+            matching = [s for s in seats if s in hands and hands[s].name == name]
+        return matching[0] if len(matching) == 1 else None
+
+    def _hit_matches(self, seat: int, judged: str, rank: str, board: list[str]) -> bool:
+        """「Nヒット」がその席の手札の判定に合うか: 手札の N とボードの N で組（ワンペア）。ボードにペアがあれば、それを
+        無視して N だけを言うこともある = 2 ペア（オーナー 2026-10-06）。"""
+        hole = [c[0].upper() for c in self._hole_cards.get(seat, [])]
+        return judged in ("One pair", "Two pair") and rank in hole and rank in [c[0].upper() for c in board]
+
+    def _check_showdown_timeout(self) -> None:
+        """ショーダウンで見せる・マックが `SHOWDOWN_MUCK_SEC` 無ければ、残った全員が見せたとして手札で決める
+        （オーナー 2026-09-30: マックする人は素早くマックしてディーラーが「フォールド」と言うので、次の配布まで
+        待たない）。その時刻までに話し始めた発話（「フォールド」かもしれない）を聞き終えてから。
+        記録してから反映する（replay は記録した `showdown_end` で同じ時点に決める）。"""
+        if (self._showdown_at is None or self._rebuilding or not (self._auto_winner and self._hand_open)
+                or not self._betting_over() or len(self._remaining_seats()) < 2):
+            return
+        deadline = self._showdown_at + SHOWDOWN_MUCK_SEC
+        river = self._board_dealt_at.get(5)
+        if river is None and len(self._board_cards) < 5:
+            return            # オールインのランアウトの途中: リバーが配られてから数える（オーナー 2026-10-14）
+        if river is not None:
+            deadline = max(deadline, river + SHOWDOWN_MUCK_SEC)   # オールインのあとのリバーから数える
+        oldest = self._oldest_speech()
+        if self._clock() < deadline or (oldest is not None and oldest <= deadline):
+            return
+        self._showdown_at = None
+        self._emit_seat_signal(RFIDEvent(
+            tag_id="", card="", reader_id="", role="seat", seat=None, timestamp=self._clock(),
+            raw_tag_id="", kind="showdown_end", observed_at=deadline,
+        ))
+
+    def _end_showdown(self, ev: RFIDEvent) -> None:
+        """`showdown_end`: マックが無いまま時間がたった = 残った全員が見せた。手札で決める。"""
+        if not (self._auto_winner and self._hand_open) or not self._betting_over():
+            return
+        if len(self._remaining_seats()) < 2:
+            return
+        self._showdown_at = None
+        self._finish_by_rules(explicit=True, ended_ts=ev.observed_at if ev.observed_at is not None else ev.timestamp)
+
+    def _finish_by_rules(
+        self, event: Optional[AudioEvent] = None, *, explicit: bool = False,
+        ended_ts: Optional[float] = None, final: bool = False,
+    ) -> bool:
+        """ルールで勝者が決まるなら確定する（1 人残り / ショーダウンを手札で）。決まったら True。
+
+        `final` = 次の配布・`n`・終了でハンドを閉じる。そうでなければ、ボードがそろう前のショーダウンは決めない。"""
+        if not (self._auto_winner and self._rules_aware and self._hand_open):
+            return False
+        if not self._game_state.is_hand_active():
+            return False
+        remaining = self._remaining_seats()
+        if len(remaining) == 1:
+            self._finalize_hand(remaining[0], event, winner_source="fold", ended_ts=ended_ts)
+            return True
+        if not final and self._showdown_before_full_board():
+            return False
+        if len(remaining) >= 2 and self._betting_over():
+            return self._finish_showdown(event, explicit=explicit, ended_ts=ended_ts)
+        return False
+
+    def _finish_showdown(
+        self, event: Optional[AudioEvent] = None, *, explicit: bool = False,
+        ended_ts: Optional[float] = None,
+    ) -> bool:
+        """残った全員が手札を見せたとして、RFID の手札とボードで勝者を決める（side pot も）。"""
+        from core.showdown import award_pots, evaluate_hands
+
+        gs = self._game_state
+        remaining = self._remaining_seats()
+        board = list(self._board_cards)
+        known = [c for c in board if c != UNKNOWN_CARD]
+        gaps = [] if len(known) == 5 else [f"ボード {len(known)}/5 枚"]
+        for seat in remaining:
+            n = len(self._hole_cards.get(seat, []))
+            if n < 2:
+                gaps.append(f"席{seat} の手札 {n}/2 枚")
+        cards = known + [c for s in remaining for c in self._hole_cards.get(s, [])]
+        duplicated = len(set(cards)) != len(cards)
+        if duplicated:
+            gaps.append("同じ札が 2 か所にあります")
+        if gaps:
+            if self._showdown_shown and self._finish_by_announcement(remaining, board, event, ended_ts):
+                return True
+            if not duplicated and self._finish_despite_unknowns(remaining, board, gaps, event, ended_ts):
+                return True
+            self._showdown_gaps = gaps
+            message = (f"勝者を手札で判定できません（{'・'.join(gaps)}）— w <席> で入力してください"
+                       "（入力が無ければ次の手札が配られたときにチップを動かさずに終えます）")
+            if explicit:
+                self._notice(message)
+            else:
+                logger.info("%s", message)
+            return False
+        try:
+            hands = evaluate_hands({s: self._hole_cards[s] for s in remaining}, board)
+            pots = gs.current_pots() or [{"amount": gs.pot, "eligible_seats": remaining}]
+            awards, winners_by_pot = award_pots(pots, hands, gs.acting_order())
+        except Exception:  # noqa: BLE001 — 判定できなければ人に任せる
+            logger.exception("手札での勝者判定に失敗しました")
+            if explicit:
+                self._notice("勝者を手札で判定できませんでした — w <席> で入力してください")
+            return False
+        if not winners_by_pot:
+            return False
+        order = gs.acting_order()
+        showdown = [self._with_announced(hands[s].to_dict()) for s in sorted(
+            remaining, key=lambda s: order.index(s) if s in order else s)]
+        winner = winners_by_pot[0][0]
+        named_winner = self._check_shown_names(remaining, hands, winner)
+        if named_winner is not None:
+            self._finalize_hand(
+                named_winner, event, winner_source="announced", showdown=showdown, ended_ts=ended_ts,
+            )
+            return True
+        self._finalize_hand(
+            winner, event, awards=awards, winner_source="cards",
+            showdown=showdown, ended_ts=ended_ts,
+        )
+        return True
+
+    def _finish_despite_unknowns(
+        self, remaining: list[int], board: list[str], gaps: list[str],
+        event: Optional[AudioEvent], ended_ts: Optional[float],
+    ) -> bool:
+        """読めていない札があっても、どの札でも配当が同じなら（勝者は分かる）確定する（要確認）。"""
+        from core.showdown import award_with_unknown_cards
+
+        gs = self._game_state
+        others = [c for s, cards in self._hole_cards.items() if s not in remaining for c in cards]
+        try:
+            pots = gs.current_pots() or [{"amount": gs.pot, "eligible_seats": remaining}]
+            decided = award_with_unknown_cards(
+                {s: list(self._hole_cards.get(s, [])) for s in remaining}, board, pots,
+                gs.acting_order(), excluded=others,
+            )
+        except Exception:  # noqa: BLE001 — 判定できなければ人に任せる
+            logger.exception("読めていない札のある手札の判定に失敗しました")
+            return False
+        if decided is None:
+            return False
+        awards, winners_by_pot = decided
+        winner = winners_by_pot[0][0]
+        self._hand_needs_review = True
+        self._notice(
+            f"読めていない札があります（{'・'.join(gaps)}）が、どの札でも勝者は変わりません — "
+            f"席{winner} の勝ちにします（要確認）"
+        )
+        self._finalize_hand(winner, event, awards=awards, winner_source="cards", ended_ts=ended_ts)
+        return True
+
+    def _finish_by_announcement(
+        self, remaining: list[int], board: list[str],
+        event: Optional[AudioEvent], ended_ts: Optional[float],
+    ) -> bool:
+        """札が読めていないとき、見せた席の役名（見せていない席は読めた手札の判定）から勝者を決める（要確認）。
+
+        残った全員の役が分かり、役名だけで一番強い席が 1 つに決まるときだけ。それ以外は決めない（`w <席>` の
+        案内に戻る）。
+        """
+        from core.showdown import best_by_names, evaluate_hands
+
+        if len(board) < 5:
+            # ボードが出きる前（オールインで手を開いたときに手札の名前「エースキング」などを言う）。役名では決めない
+            return False
+        names: dict[int, str] = {s: n for s, n in self._showdown_shown.items() if s in remaining and n}
+        hands: dict = {}
+        if len(board) == 5 and UNKNOWN_CARD not in board:
+            readable = {s: self._hole_cards[s] for s in remaining if len(self._hole_cards.get(s, [])) == 2}
+            try:
+                hands = evaluate_hands(readable, board) if readable else {}
+            except Exception:  # noqa: BLE001 — 読めた札が重なっている など
+                hands = {}
+            for s, h in hands.items():
+                names.setdefault(s, h.name)
+        if set(names) != set(remaining):
+            return False
+        winner = best_by_names(names)
+        if winner is None:
+            return False
+        unreadable = [s for s in remaining if s not in hands]
+        self._hand_needs_review = True
+        self._notice(
+            f"読めていない札があります（席{'・'.join(map(str, unreadable)) or '—'}・ボード）— "
+            f"ディーラーの役名から席{winner} の勝ちにします（要確認）"
+        )
+        order = self._game_state.acting_order()
+        showdown = [self._with_announced(hands[s].to_dict()) for s in sorted(
+            hands, key=lambda s: order.index(s) if s in order else s)]
+        self._finalize_hand(winner, event, winner_source="announced", showdown=showdown or None,
+                            ended_ts=ended_ts)
+        return True
+
+    def _with_announced(self, entry: dict) -> dict:
+        """ショーダウンの席の記録に、ディーラーがその席に言った役名を足す（見せた席だけ）。"""
+        name = self._showdown_shown.get(entry.get("seat"))
+        if name:
+            entry["announced"] = name
+        return entry
+
+    def _check_shown_names(self, remaining: list[int], hands: dict, winner: int) -> Optional[int]:
+        """見せた席の役名を手札の判定と突き合わせる。違えば要確認（札の読み違い・読み落としの疑い）。
+
+        役名が残った全員にあり、役名だけで決まる一番強い席が判定の勝者と違えば、その席を返す（ディーラーが
+        見たものを優先）。それ以外は None（判定のまま）。
+        """
+        from core.showdown import HAND_NAMES_JA, best_by_names
+
+        board = [c for c in self._board_cards if c != UNKNOWN_CARD]
+        mismatched = [(s, n) for s, n in self._showdown_shown.items()
+                      if n and s in hands and hands[s].name != n
+                      and not (s in self._showdown_hit
+                               and self._hit_matches(s, hands[s].name, self._showdown_hit[s], board))]
+        for seat, name in mismatched:
+            self._hand_needs_review = True
+            judged = hands[seat].name
+            self._notice(
+                f"席{seat} の役名「{HAND_NAMES_JA.get(name, name)}」が手札の判定"
+                f"（{HAND_NAMES_JA.get(judged, judged)}）と違います — 札の読み違いの可能性があります（要確認）"
+            )
+        if not mismatched:
+            return None
+        names = {s: self._showdown_shown.get(s) for s in remaining}
+        if not all(names.values()):
+            return None
+        best = best_by_names({s: n for s, n in names.items() if n})
+        if best is None or best == winner:
+            return None
+        self._notice(f"ディーラーの役名では席{best} の勝ちです（手札の判定は席{winner}）— 席{best} の勝ちにします（要確認）")
+        return best
+
+    def _check_announced_after_end(self, name: str) -> None:
+        """確定したあとに届いた役名: 手札で判定した役と違えば知らせる（記録は訂正画面で）。"""
+        from core.showdown import HAND_NAMES_JA
+
+        last = self._last_result or {}
+        judged = last.get("hand")
+        shown = last.get("hands") or ([judged] if judged else [])
+        if last.get("source") == "cards" and judged and name not in shown:
+            self._notice(
+                f"ハンド {last.get('hand_id')} のディーラーの役名「{HAND_NAMES_JA.get(name, name)}」が"
+                f"判定（{HAND_NAMES_JA.get(judged, judged)}）と違います — スマホの訂正画面で確かめてください"
+            )
+            return
+        logger.info("役名 %s — ハンド %s は確定済み", name, last.get("hand_id"))
+
+    def _mucked_stronger_hand(self, seat: int, remaining: list[int]) -> bool:
+        """マックした席の手札が、残りの誰よりも強かったか（手札とボードが全部読めているときだけ）。"""
+        from core.showdown import evaluate_hands
+
+        board = list(self._board_cards)
+        if (len(board) != 5 or UNKNOWN_CARD in board
+                or any(len(self._hole_cards.get(s, [])) != 2 for s in remaining)):
+            return False
+        try:
+            hands = evaluate_hands({s: self._hole_cards[s] for s in remaining}, board)
+        except Exception:  # noqa: BLE001 — 参考情報
+            return False
+        others = [hands[s].value for s in remaining if s != seat]
+        return bool(others) and hands[seat].value > max(others)
+
+    def _apply_showdown_muck(self, event: AudioEvent) -> None:
+        """ベッティングが終わったあとの「フォールド」= ショーダウンでのマック。
+
+        見せずにマックした人は、手札が強くてもポットを受け取れない。席が言われなければ、まだ見せていない
+        人の中で一番アウトオブポジション（ボタンの次の席から）の人がマックしたとみなす（店の運用。見せた人には
+        ディーラーが役名を言う = `_showdown_show`。アウトオブポジションが見せたあとの「フォールド」は
+        インポジションのマック, オーナー 2026-09-30）。
+        手札で見るとマックした人の方が強かったときは、勝者はマックしなかった人のまま要確認にする。
+        """
+        gs = self._game_state
+        remaining = self._remaining_seats()
+        sensed = self._sensed_seat(event)
+        by_order = sensed is None or sensed not in remaining
+        turn = self._showdown_turn()
+        if by_order:
+            seat = turn[0] if turn else next((s for s in gs.acting_order() if s in remaining), None)
+        else:
+            seat = sensed
+        if seat is None or len(remaining) < 2:
+            self._emit_unresolved(event, reason="betting_over")
+            return
+        stronger = self._mucked_stronger_hand(seat, remaining)
+        self._showdown_mucks.append(seat)
+        confidence = derive_confidence(
+            apply_ok=True,
+            whisper_conf=(
+                event.confidence if event.confidence is not None else MISSING_WHISPER_CONF
+            ),
+            audio_agree=True,
+            rfid_present=False, rfid_agree=False,
+            camera_present=False, camera_agree=False,
+        )
+        reasons = ["showdown_muck"]
+        if by_order and len(remaining) > 2 and len(turn) > 1:
+            reasons.append("muck_order_assumed")   # 3 人以上: 順番どおりにマックしたとは限らない
+        if stronger:
+            reasons.append("mucked_stronger_hand")
+        reasons.extend(event.parse_flags)
+        needs_review = len(reasons) > 1 or confidence < REVIEW_THRESHOLD
+        if by_order:
+            actor_source = "engine_prior"
+        elif event.seat == seat:
+            actor_source = "spoken_seat"
+        else:
+            actor_source = "spoken_position"
+        record = ActionRecord(
+            hand_id=gs.hand_id,
+            timestamp=self._iso(event.timestamp),
+            street=Street.SHOWDOWN.value,
+            seat=seat,
+            player_name=gs.get_player_name(seat),
+            action="fold",
+            amount=0,
+            pot_after=gs.pot,
+            stack_after=gs.get_stack(seat),
+            source={"camera": False, "audio": True, "rfid": False},
+            needs_review=needs_review,
+            confidence=confidence,
+            position=self._position_of(seat),
+            actor_source=actor_source,
+            reason="+".join(reasons),
+            asr_confidence=event.confidence,
+            apply_ok=True,
+            raw_text=event.raw_text or None,
+        )
+        self._current_actions.append(record)
+        if self._on_action:
+            self._on_action(record)
+        if stronger:
+            self._notice(f"席{seat} がマック — 手札はこちらの方が強いので確認してください（要確認）")
+        self._showdown_at = _spoken_at(event)
+        if self._maybe_finish_hand(event):
+            return
+        if self._hand_open and self._betting_over() and len(self._remaining_seats()) >= 2 and not self._showdown_turn():
+            self._finish_by_rules(event, explicit=True)     # 残った全員が見せている
+
+    def _handle_end_hand(self, event: AudioEvent) -> None:
+        """「ハンド終了」: 残った全員が見せたとして勝者を決める。役名（「ツーペア」）: 次の人が見せた。
+
+        役名はディーラーがショーダウンで見せた手ごとに言う（オーナー 2026-09-30: アウトオブポジションが見せ、
+        見せると札がリーダーから外れるので、役名は必ず言う運用）。残った全員が見せたら手札で決め、役名は
+        見せた席の手札の判定と突き合わせる（`_finish_showdown`）。閉じていないベッティングは聞き取れなかったと
+        みて閉じる。決められなければ `w <席>` を案内する。
+        """
+        gs = self._game_state
+        name = event.hand_name
+        if not self._hand_open or not gs.is_hand_active():
+            if name:
+                self._check_announced_after_end(name)
+            else:
+                logger.info("「ハンド終了」— 進行中のハンドはありません（確定済み）")
+            return
+        if name:
+            self._announced_hand = name
+        if not (self._auto_winner and self._rules_aware):
+            self._notice("勝者を w <席> で入力してください")
+            return
+        if name:
+            spoken = _spoken_at(event)
+            pending = self._foldout_pending
+            if pending is not None and spoken >= pending["t"]:
+                first = self._first_to_show(pending["seat"])
+                if first != pending["seat"] and not self._names_a_remaining_hand(name, event.hit_rank):
+                    # 先に見せるはずの席（アウトオブポジション）が見せる前に札が離れ、役名も残った人の手ではない =
+                    # 見せたのではなく降りた。役名は降りた手札のこと（見せながら降りた・ディーラーが降りた手を見て
+                    # 言った）とみて、フォールドのまま確定を待つ（店舗 2026-10-06 e82f5005 ハンド 15:「5ヒット」で
+                    # 取り消して勝者が逆になった。店舗のログで役名がフォールドを取り消したのはこの 1 回だけ）
+                    self._hand_needs_review = True
+                    self._notice(f"「{event.raw_text}」— 先に見せる席{first} より前に席{pending['seat']} の札が"
+                                 f"離れたので、席{pending['seat']} は降りたままにします（降りた手札の役名とみました, 要確認）")
+                    return
+                # 最後のフォールドとみた札の離脱は、ショーダウンで前に出したものだった
+                self._showdown_after_foldout(spoken, "役名が言われた（ショーダウン）ので")
+            if not self._betting_over() and len(self._board_cards) >= 5 and len(self._remaining_seats()) >= 2:
+                self._close_betting(spoken)      # 役名を言った = ベッティングは終わっている（残りは聞き落とし）
+            if self._betting_over() and len(self._remaining_seats()) >= 2:
+                self._maybe_finish_hand(event)   # ショーダウンの始まり（時刻・お知らせ）
+                self._showdown_show(event, name)   # 役名 = 次の人が見せた（ハンドはまだ終わらない）
+                return
+        if self._finish_by_rules(event, explicit=True):
+            return
+        if not self._betting_over():
+            actor = gs.legal_context().actor_seat
+            self._notice(
+                f"ハンド {gs.hand_id} はまだベッティングの途中です（次は席{actor} の番）— "
+                "抜けたアクションが無いか確認し、勝者は w <席> で入力してください"
+            )
+
+    def _late_winner(self, event: AudioEvent, seats: list[int]) -> None:
+        """確定したハンドのあとに届いた `w` / 「ウィナー」（配ったばかりのハンドには勝者が無い）。"""
+        last = self._last_result or {}
+        winners = last.get("winners", [])
+        shown = "・".join(f"席{s}" for s in winners) or "?"
+        if last.get("source") == "undetermined":
+            self._notice(
+                f"ハンド {last.get('hand_id')} は勝者が分からず、チップを動かさずに確定しています — "
+                "勝者が分かっていればスマホの訂正画面で直してください"
+            )
+            if seats:
+                self._emit_unresolved(event, reason="winner_after_hand_end")
+            return
+        if not seats or set(seats) <= set(winners):
+            self._notice(f"ハンド {last.get('hand_id')} の勝者は {shown} で確定しています")
+            return
+        self._notice(
+            f"ハンド {last.get('hand_id')} は {shown} の勝ちで確定済みです — "
+            "違っていればスマホの訂正画面で直してください"
+        )
+        self._emit_unresolved(event, reason="winner_after_hand_end")
+
     def _emit_unresolved(self, event: AudioEvent, reason: str) -> None:
         """状態に適用できなかった audio イベントを「適用不能レコード」として必ず可視化する
-        （ADR-A B2: 無音消失の全廃）。ゲーム状態は変更しないため _current_actions には積まず
+        （ADR-0047 B2: 無音消失の全廃）。ゲーム状態は変更しないため _current_actions には積まず
         on_action（GUI/監査）にのみ流す。進行中ハンドがあればハンド全体を要レビューにする。"""
+        self._unresolved_count += 1
         gs = self._game_state
         seat = event.seat if event.seat is not None else 0
         try:
@@ -600,16 +4540,31 @@ class IntegrationThread(threading.Thread):
             source={"camera": False, "audio": True, "rfid": False},
             needs_review=True,
             confidence=0.0,
+            position=self._position_of(seat) if seat else "",
             actor_source="unresolved",
             reason=reason,
             asr_confidence=event.confidence,
             apply_ok=False,
+            raw_text=event.raw_text or None,
         )
         if self._hand_open:
             self._hand_needs_review = True
         if self._on_action:
             self._on_action(record)
-        logger.warning("Unresolved audio event (%s): %r", reason, event.raw_text)
+        if reason == "no_active_hand":
+            # 運用ミス（`n` の打ち忘れ / ハンド終了後の入力）なので次の操作を案内する（ISSUE-0028）。
+            logger.warning(
+                "進行中のハンド（手番）が無いため %s（raw=%r）を保留しました — "
+                "先に「新ハンド」（CLI の n）を実行してください",
+                event.action, event.raw_text,
+            )
+        elif reason == "betting_over":
+            logger.warning(
+                "ベッティングは終わっています（ショーダウン待ち）— %s（raw=%r）を保留しました",
+                event.action, event.raw_text,
+            )
+        else:
+            logger.warning("Unresolved audio event (%s): %r", reason, event.raw_text)
 
     def _handle_rebuy(self, event: AudioEvent) -> None:
         """GUI/CLI から queue 経由で届いた rebuy を integration スレッドで適用する。
@@ -624,11 +4579,19 @@ class IntegrationThread(threading.Thread):
         if seat is None:
             logger.warning("rebuy event without seat: %r", event.raw_text)
             return
-        try:
-            gs.rebuy(seat, event.amount)
-        except ValueError:
-            logger.exception("rebuy failed (seat=%s amount=%s)", seat, event.amount)
-            return
+        marker = self._provisional_stacks.pop(seat, None)
+        if marker is not None and gs.hand_id <= marker[1]:
+            if not self._rebuy_instead_of_restored(seat, event.amount, marker[0]):
+                return
+        else:
+            was_out = gs.get_stacks().get(seat, 0) <= 0
+            try:
+                gs.rebuy(seat, event.amount)
+            except ValueError:
+                logger.exception("rebuy failed (seat=%s amount=%s)", seat, event.amount)
+                return
+            if was_out:
+                self._notice(f"席{seat} に {event.amount} を買い足しました — 次のハンドから配られます")
         if self._on_action:
             self._on_action(ActionRecord(
                 hand_id=gs.hand_id,
@@ -645,6 +4608,833 @@ class IntegrationThread(threading.Thread):
                 confidence=1.0,
             ))
 
+    def _handle_reduce_stack(self, event: AudioEvent) -> None:
+        """席のスタックを減らす（CLI の `d <席> <金額>`, 2026-10-19 オーナー: スタックを減らすコマンドも欲しい）。
+
+        0 より下にはしない。その席が進行中のハンドに入っていれば、そのハンドのあとに減らす（ハンドの記録は変えない =
+        リバイと同じ考え方）。ハンドの外・ハンドに入っていない席はすぐ減らす。
+        """
+        gs = self._game_state
+        seat = event.seat if event.seat is not None else _extract_seat_no(event.raw_text)
+        amount = int(event.amount or 0)
+        if seat is None or amount <= 0:
+            logger.warning("reduce_stack event without seat or amount: %r", event.raw_text)
+            return
+        try:
+            current = gs.get_stack(seat)
+        except (KeyError, ValueError):
+            self._notice(f"席{seat} はこの卓にありません")
+            return
+        in_play = self._hand_open and gs.is_hand_active() and seat in self._seats_in_hand()
+        if in_play:
+            self._stack_corrections[seat] = self._stack_corrections.get(seat, 0) - amount
+            self._notice(f"席{seat} のスタックを {amount} 減らします（いまのハンドのあとに）")
+            return
+        left = max(0, current - amount)
+        try:
+            gs.update_stack(seat, left)
+        except ValueError:
+            logger.exception("reduce_stack failed (seat=%s amount=%s)", seat, amount)
+            return
+        self._notice(f"席{seat} のスタックを {current - left} 減らしました（残り {left}）"
+                     + ("— スタック 0 なので r <席> <金額> で買い足すまで配られません" if left == 0 else ""))
+
+    def _rebuy_instead_of_restored(self, seat: int, amount: int, restored: int) -> bool:
+        """手札が配られたときに最初の持ち点に戻した席の買い足し = 戻した額の代わりにする（二重にしない）。
+
+        ハンドの途中なら差はハンドのあとに直す（そのハンドの記録は戻した額のまま = 要確認）。
+        """
+        if amount <= 0:
+            logger.warning("rebuy amount must be positive: seat=%s amount=%s", seat, amount)
+            return False
+        gs = self._game_state
+        delta = amount - restored
+        in_play = self._hand_open and gs.is_hand_active() and seat in self._seats_in_hand()
+        if delta and in_play:
+            self._stack_corrections[seat] = self._stack_corrections.get(seat, 0) + delta
+        elif delta:
+            gs.update_stack(seat, max(0, gs.get_stack(seat) + delta))
+        self._notice(
+            f"席{seat} の買い足し {amount} は、手札が配られたときに戻した持ち点 {restored} の代わりにします"
+            + ("（差はこのハンドのあとに直します）" if delta and in_play else "")
+        )
+        return True
+
+    def _apply_stack_corrections(self) -> None:
+        """ハンドの途中に届いた「戻した額の代わりの買い足し」の差を、ハンドのあとに持ち点へ入れる。"""
+        gs = self._game_state
+        for seat, delta in self._stack_corrections.items():
+            try:
+                gs.update_stack(seat, max(0, gs.get_stack(seat) + delta))
+            except ValueError:
+                logger.exception("持ち点を直せませんでした（席 %s）", seat)
+        self._stack_corrections = {}
+
+    def _handle_rename_seat(self, event: AudioEvent) -> None:
+        """席替えで席のプレイヤー名を変える（CLI の `name`, ADR-0059）。名前は `raw_text`。
+
+        ハンドの途中なら次のハンドの開始時に反映する（ハンドの記録は 1 ハンドの中で名前が
+        揃うように。席と player_id の対応も次のハンドから切り替わる）。
+        """
+        seat = event.seat
+        name = (event.raw_text or "").strip()
+        if seat is None or not name:
+            logger.warning("rename_seat without seat or name: seat=%r raw=%r", seat, event.raw_text)
+            return
+        if self._hand_open:
+            self._pending_renames[seat] = name
+            logger.info("席 %d の名前を次のハンドから %s にします", seat, name)
+            return
+        self._apply_rename(seat, name)
+
+    def _apply_rename(self, seat: int, name: str) -> None:
+        try:
+            self._game_state.set_player_name(seat, name)
+        except ValueError:
+            logger.warning("rename_seat: 席 %d はありません（%s）", seat, name)
+            return
+        logger.info("席 %d の名前を %s にしました", seat, name)
+
+    # ――― 席の参加・休み、ブラインドの変更（次のハンドから, 2026-09-26） ―――
+
+    def _handle_sit(self, event: AudioEvent) -> None:
+        """`name <席> -`（休み = 配られない）/ `name <席> <名前>`（参加）。次のハンドから反映する。"""
+        gs = self._game_state
+        seat = event.seat
+        if seat is None:
+            logger.warning("%s without seat: %r", event.action, event.raw_text)
+            return
+        try:
+            changed = gs.sit_out(seat) if event.action == "sit_out" else gs.sit_in(seat)
+        except ValueError:
+            logger.warning("%s: 席 %d はありません", event.action, seat)
+            return
+        if changed is False:
+            return                            # もともとその状態（名前の変更だけ）
+        if event.action == "sit_out":
+            self._notice(f"席{seat} は次のハンドから休みです（配られません）")
+        elif gs.get_stacks().get(seat, 0) <= 0:
+            self._notice(f"席{seat} は次のハンドから参加です（スタック 0 — r <席> <金額> で買い足すまで配られません）")
+        else:
+            self._notice(f"席{seat} は次のハンドから参加です")
+
+    def _handle_script_hand(self, event: AudioEvent) -> None:
+        """台本のハンドを始める（`tools/test_script.py` の画面の「このハンドを始める」, 2026-09-30）。
+
+        台本のボタンと持ち点で新しいハンドにする（前のハンドの聞き違い・やり直しで持ち点やボタンがずれても、
+        台本の正解と同じ卓から始まる）。前のハンドが確定していなければ「ハンド開始」と同じく先に確定する。
+        """
+        gs = self._game_state
+        button, stacks = parse_script_hand(event.raw_text)
+        try:
+            if stacks and hasattr(gs, "force_next_stacks"):
+                gs.force_next_stacks(stacks)
+            if button is not None and hasattr(gs, "set_button"):
+                gs.set_button(button)
+        except ValueError as e:
+            self._notice(f"台本のハンドのボタン・持ち点を使えません（{e}）")
+        self._dispatch_audio_event(replace(event, action="new_hand"))
+
+    def _handle_truth_stacks(self, event: AudioEvent) -> None:
+        """真のアクションの収支でロガーの持ち点を直す（真のアクション入力の画面が保存したとき, 2026-10-19 オーナー:
+        次のアクションの推定に使う持ち点を真のアクションに合わせる）。
+
+        直す量は席ごとに「真のアクションの収支 − 記録の収支」（同じハンドの同じ持ち点から出した差）。前のハンドの
+        持ち点が違っていても・ハンドの間に買い足しがあっても、足し算で真のアクションに合う。そのハンドがまだ
+        終わっていなければ、終わったときに直す。
+        """
+        hand_id, results = parse_truth_stacks(event.raw_text)
+        if hand_id is None:
+            logger.warning("truth_stacks without hand id: %r", event.raw_text)
+            return
+        self._truth_results[hand_id] = results
+        self._apply_truth_stacks(hand_id)
+
+    def _apply_truth_stacks(self, hand_id: int) -> None:
+        truth = self._truth_results.get(hand_id)
+        recorded = self._recorded_results.get(hand_id)
+        if truth is None or recorded is None:
+            return                                # ハンドが終わったときに直す
+        target = {s: truth.get(s, 0) - recorded.get(s, 0) for s in set(truth) | set(recorded)}
+        before = self._truth_applied.get(hand_id, {})
+        change = {s: d - before.get(s, 0) for s, d in target.items() if d - before.get(s, 0)}
+        self._truth_applied[hand_id] = {s: d for s, d in target.items() if d}
+        if not change:
+            return
+        gs = self._game_state
+        in_play = self._hand_open and gs.is_hand_active()
+        for seat, delta in sorted(change.items()):
+            if in_play and seat in self._seats_in_hand():
+                self._stack_corrections[seat] = self._stack_corrections.get(seat, 0) + delta
+                continue
+            try:
+                gs.update_stack(seat, max(0, gs.get_stack(seat) + delta))
+            except (ValueError, KeyError):
+                logger.warning("真のアクションで持ち点を直せません（席 %s）", seat)
+        parts = " / ".join(f"席{s} {d:+d}" for s, d in sorted(change.items()))
+        later = "（いまのハンドのあとに）" if in_play and any(s in self._seats_in_hand() for s in change) else ""
+        self._notice(f"真のアクション（ハンド {hand_id}）でスタックを直しました{later}: {parts}")
+
+    def _handle_set_button(self, event: AudioEvent) -> None:
+        """ボタンを手で指定する（`button <席>`, 仕様 FR-05g）。
+
+        ハンドの途中なら、そのハンドのボタンを直して記録を組み直す（ディーラーがボタンを動かし忘れた,
+        2026-09-29）。ハンドが無いとき・ベッティングが終わったあと（ショーダウン待ち = 次のハンドの準備でボタンを
+        動かす。店舗 2026-10-06 e82f5005: ボードがそろうまで・「ショーダウン」の宣言まで閉じずに待つハンドで、次の
+        ハンドへの「シート7 ボタン」がそのハンドを組み直していた）は次のハンドのボタン。
+        """
+        gs = self._game_state
+        seat = event.seat
+        if seat is None:
+            logger.warning("set_button without seat: %r", event.raw_text)
+            return
+        if (self._hand_open and self._hand_origin is not None and gs.is_hand_active()
+                and not self._betting_over()):
+            if seat == getattr(gs, "button_seat", None):
+                self._notice(f"このハンドのボタンは席{seat} です（変えません）")
+            elif seat in self._seats_in_hand():
+                self._rebutton(seat, f"手で指定（{event.raw_text}）")
+            else:
+                self._notice(f"席{seat} はこのハンドに配られていません（ボタンは変えません）")
+            return
+        try:
+            gs.set_button(seat)
+        except ValueError:
+            self._notice(f"席{seat} はこの卓にありません")
+            return
+        if self._rules_aware:
+            self._notice(f"次のハンドのボタンを席{seat} にします（その席が配られなければ通常どおり進めます）")
+
+    # ――― 口頭の訂正「失礼しました」（オーナー 2026-10-06）―――
+    #
+    # ディーラーは言い間違えたら「失礼しました」と言って言い直す。ハンドのアクションを最初からやり直すことはなく、
+    # ハンドの進行を優先して、ストリートの最初から言い直すか、直前のアクションを言い直す（オーナー）。どちらかは
+    # そのあとのアクションとの辻褄で選ぶ:
+    # - 解釈ごとに取り消す声の入力を決める（直前 = 最後に効いた声のアクション、ストリート = そのストリートの声の
+    #   アクション全部、なし = 何も取り消さない = 会話の「失礼しました」）。
+    # - 解釈ごとにハンドを始めから組み直し、合図のあとの記録の不自然さ（`_correction_penalty`）+ 解釈の重み
+    #   （`CORRECTION_PRIOR`）のいちばん小さい解釈を採る。合図のあとの発話ごとに選び直し、次のストリートの札・
+    #   `CORRECTION_WINDOW_INPUTS` の声のアクション・ハンドの終わり・次の合図で決める（それ以降は変えない）。
+    # - 取り消した範囲の札の離脱（降りた人）は残し、言い直しの手番でフォールドにする。合図より前に離れた札は
+    #   「間の人の聞き落とし」の補いに使わない（`_departure_floor`）。言い直した「フォールド」はその離脱と組にする。
+    # - 解釈は入力だけから決まるので replay も同じ。合図の聞き違いもあり得るので、そのハンドは要確認。
+
+    def _handle_correction(self, event: AudioEvent) -> None:
+        """「失礼しました」（訂正の合図）。直前のアクションの訂正として取り消し、続くアクションで選び直す。"""
+        corr = next((c for c in self._corrections if c["cue"] is event), None)
+        if corr is not None:
+            # 組み直しの中: ここが合図の位置（このあとの記録の辻褄を数える）
+            corr["mark"] = len(self._current_actions)
+            corr["u_mark"] = self._unresolved_count
+            self._correction_tag = f"correction_{corr['choice']}" if corr["choice"] != "none" else None
+            return
+        if self._rebuilding:
+            return                               # 訂正するものが無かった合図
+        gs = self._game_state
+        if not (self._rules_aware and self._hand_open and self._hand_origin is not None and gs.is_hand_active()):
+            self._notice("「失礼しました」— 訂正する進行中のハンドがありません")
+            return
+        previous = self._open_correction()
+        if previous is not None and previous["post"] == 0:
+            # 合図のあとにまだアクションが無い = 同じ訂正の繰り返し（「失礼しました、失礼しました」）。もう 1 つ取り消さない
+            logger.info("「%s」: 直前の「失礼しました」の繰り返しとみました", event.raw_text)
+            return
+        self._settle_corrections()               # 前の訂正の解釈を決めてから
+        found = self._correction_targets()
+        if found is None:
+            self._notice("「失礼しました」— このストリートに訂正する声のアクションがありません（何も変えません）")
+            return
+        corr = {"cue": event, "t": _spoken_at(event), **found, "choice": "prev", "frozen": False, "post": 0,
+                "dirty": False, "street_seen": False, "mark": None, "u_mark": 0, "scores": {}}
+        self._corrections.append(corr)
+        before = list(self._current_actions)
+        self._set_correction_choice(corr, "prev")
+        self._rebuild_hand()
+        self._hand_needs_review = True
+        street = (f"{_STREET_JA.get(corr['street'], corr['street'])}の最初からの言い直しなら、続くアクションで"
+                  "組み直します。" if "street" in corr["choices"] else "")
+        logger.info("「%s」: 直前のアクション（%s）を取り消しました（解釈の候補 %s）",
+                    event.raw_text, self._describe_unit(found["last"]), corr["choices"])
+        self._notice(f"「失礼しました」— 直前のアクション（{self._describe_unit(found['last'])}）を取り消しました。"
+                     f"続けて言うアクションで直します（{street}要確認）")
+        self._emit_rebuilt(before)
+        self._publish_table_state()
+
+    def _correction_targets(self) -> Optional[dict]:
+        """訂正の候補: 解釈ごとに取り消す入力（`targets`）と、札の離脱を補いに使わなくなる入力（`floor_from`。None は
+        ハンドの始めから）。訂正する声のアクションが無ければ None。"""
+        units = self._voice_units()
+        if not units:
+            return None
+        last = units[-1]
+        street = self._correction_street(last)
+        if street is None:
+            return None
+        segment = [u for u in units if _STREET_RANK.get(u["street"], 4) >= _STREET_RANK[street]]
+        targets: dict[str, list] = {"prev": [last["item"], *last["signals"]], "none": []}
+        floor_from: dict[str, object] = {"prev": last["item"]}
+        choices = ["prev"]
+        if len(segment) >= 2:
+            targets["street"] = [x for u in segment for x in (u["item"], *u["signals"])]
+            floor_from["street"] = self._street_start_input(street, segment[0]["item"])
+            choices.append("street")
+        choices.append("none")
+        return {"targets": targets, "floor_from": floor_from, "choices": choices, "street": street,
+                "last": last, "segment_start": self._segment_start(street, units)}
+
+    def _voice_units(self) -> list[dict]:
+        """このハンドで効いた声のアクション（入力の順）: {"item", "signals", "street", "record"}。
+
+        記録になった発話と、手番の人に保留した「フォールド」（保留のまま / あとでフォールドにした）。言い直しとみて
+        記録しなかった語・札の離脱と組にした「フォールド」は効いていない（訂正の対象にしない）。
+        """
+        live = {id(r) for r in self._current_actions}
+        units: list[dict] = []
+        for kind, item in self._hand_inputs:
+            if (kind != "audio" or item.action not in _CORRECTION_UNIT_ACTIONS
+                    or self._retracted.get(id(item)) is item):
+                continue
+            entry = self._input_voice.get(id(item))
+            records = [r for r in entry[1] if id(r) in live] if entry is not None and entry[0] is item else []
+            if records:
+                units.append({"item": item, "signals": [], "street": records[-1].street, "record": records[-1]})
+                continue
+            if item.action != "fold":
+                continue
+            # 手番の人に保留した「フォールド」: その発話の時刻の spoken_fold の信号（replay では発話の前に流れる）
+            spoken = _spoken_at(item)
+            signals = [it for k, it in self._hand_inputs
+                       if k == "spoken_fold" and it.observed_at == spoken and self._retracted.get(id(it)) is not it]
+            if not signals:
+                continue
+            applied = next((r for r in self._current_actions
+                            if r.actor_source == "spoken_fold" and r.timestamp == self._iso(spoken)), None)
+            if applied is not None:
+                units.append({"item": item, "signals": signals, "street": applied.street, "record": applied})
+            elif self._spoken_folds.get(signals[-1].seat) == spoken:
+                units.append({"item": item, "signals": signals, "street": self._game_state.street,
+                              "record": None, "seat": signals[-1].seat})
+        return units
+
+    def _correction_street(self, last: dict) -> Optional[str]:
+        """訂正するストリート = 最後に効いた声のアクションのストリート。ボードの札を読んでいる卓では、そのあと次の
+        ストリートの札が配られていれば None（いまのストリートにはまだ声のアクションが無い）。その声のアクションが
+        ストリートの札より前に話された（ラウンドが早く閉じて先に進んだ）なら、札で分かる前のストリート。"""
+        street = last["street"]
+        if street not in ("preflop", "flop", "turn", "river"):
+            return None                          # ショーダウンのマックは訂正しない
+        if not self._rfid_folds or not self._board_dealt_at:
+            return street
+        spoken = _spoken_at(last["item"])
+        if any(_STREET_RANK[s] > _STREET_RANK[street] and t >= spoken for s, t in self._street_marks.items()):
+            return None
+        mark = self._street_marks.get(street)
+        if street != "preflop" and (mark is None or mark > spoken + STALE_CALL_MARGIN_SEC):
+            previous = {"flop": "preflop", "turn": "flop", "river": "turn"}[street]
+            if previous == "preflop" or previous in self._street_marks:
+                return previous
+        return street
+
+    def _street_start_input(self, street: str, first: object) -> Optional[object]:
+        """ストリートの言い直しで、札の離脱を補いに使わなくなる入力: そのストリートの札の入力（無ければ最初の声の
+        アクション）。プリフロップはハンドの始めから（None）。"""
+        if street == "preflop":
+            return None
+        index = _STREET_RANK[street] + 2         # flop → 3 枚目, turn → 4, river → 5
+        for kind, item in self._hand_inputs:
+            if item is first:
+                break
+            if kind == "street" and (item.board_index or 0) == index:
+                return item
+        return first
+
+    def _segment_start(self, street: str, units: list[dict]) -> float:
+        """訂正するストリートの始まりの時刻（言い直した「フォールド」と組にする札の離脱の範囲）。"""
+        if street == "preflop":
+            return self._hand_started_epoch or 0.0
+        mark = self._street_marks.get(street)
+        if mark is not None:
+            return mark
+        earlier = [_spoken_at(u["item"]) for u in units if _STREET_RANK.get(u["street"], 4) < _STREET_RANK[street]]
+        return max(earlier) if earlier else (self._hand_started_epoch or 0.0)
+
+    def _describe_unit(self, unit: dict) -> str:
+        record = unit.get("record")
+        raw = unit["item"].raw_text or ""
+        if record is None:
+            return f"席{unit.get('seat')} の「{raw}」"
+        amount = f" {record.amount}" if record.amount else ""
+        return f"席{record.seat} の {record.action}{amount}「{raw}」"
+
+    def _set_correction_choice(self, corr: dict, choice: str) -> None:
+        corr["choice"] = choice
+        self._retracted = {id(x): x for c in self._corrections for x in c["targets"][c["choice"]]}
+
+    def _open_correction(self) -> Optional[dict]:
+        """解釈をまだ決めていない訂正（このハンドの最後の合図）。"""
+        return next((c for c in reversed(self._corrections) if not c["frozen"]), None)
+
+    def _origin_floor(self) -> Optional[float]:
+        """ハンドの始めから効く `_departure_floor`（プリフロップの言い直しの合図の時刻）。"""
+        times = [c["t"] for c in self._corrections
+                 if c["choice"] != "none" and c["floor_from"].get(c["choice"], False) is None]
+        return max(times) if times else None
+
+    def _activate_departure_floor(self, item: object) -> None:
+        """訂正で取り消した範囲に入った: そこから合図までの札の離脱は「間の人の聞き落とし」の補いに使わない。"""
+        for corr in self._corrections:
+            choice = corr["choice"]
+            if choice != "none" and corr["floor_from"].get(choice) is item:
+                self._departure_floor = max(self._departure_floor or 0.0, corr["t"])
+
+    def _note_input_after_cue(self, kind: str, item: object) -> None:
+        """合図のあとに入った入力を数える（解釈の選び直しと、決める時期）。"""
+        corr = self._open_correction()
+        if corr is None or item is corr["cue"]:
+            return
+        corr["dirty"] = True
+        if kind == "audio" and item.action in _CORRECTION_UNIT_ACTIONS:
+            corr["post"] += 1
+        elif kind == "street":
+            target = _BOARD_STREETS.get(item.board_index or 0, (None, ()))[0]
+            if target is not None and _STREET_RANK[target] > _STREET_RANK[corr["street"]]:
+                corr["street_seen"] = True
+
+    def _restated_fold_word(self, spoken_at: float, event: AudioEvent) -> bool:
+        """合図のあとの「フォールド」が、合図より前（そのストリートの中）に札が離れた席の言い直しなら、その離脱と組に
+        する（手番の人に付けない）。ストリートを最初から言い直すと、もう降りた人の「フォールド」も言い直す。合図と
+        札の離脱の時刻だけで決まる（解釈によらない = replay も同じ）。"""
+        corr = self._open_correction()
+        if corr is None or spoken_at < corr["t"]:
+            return False
+        found = sorted((d["t"], seat) for seat, d in self._departures.items()
+                       if corr["segment_start"] <= d["t"] < corr["t"] and not d.get("word") and not d.get("spoken")
+                       and seat not in self._showdown_mucks)
+        if not found:
+            return False
+        seat = found[0][1]
+        self._departures[seat]["word"] = True
+        self._notice(f"「{event.raw_text}」は、「失礼しました」の前に札が離れた席{seat} のフォールドの言い直しとみました")
+        return True
+
+    def _rebuild_hand(self) -> None:
+        """ハンドの入力を始め（ブラインドを置いた直後）から、いまの訂正の解釈で流し直す。"""
+        self._hand_word_labels = {}             # 流し直しで付け直す
+        inputs = list(self._hand_inputs)
+        self._hand_inputs = []
+        self._restore_checkpoint(self._hand_origin)
+        # 入力から作り直す状態（チェックポイントに無いもの）
+        self._last_wager = None
+        self._last_wager_point = None
+        self._recap = None
+        self._spoken_fold_raw = {}
+        self._foldout_winner_left = False
+        self._correction_tag = None
+        self._departure_floor = self._origin_floor()
+        self._replay_inputs(inputs, reassign_spoken_folds=True)
+
+    def _correction_penalty(self, corr: dict) -> float:
+        """いまの組み直しで、合図のあとの記録がどれだけ不自然か（適用できない・ハンドの外・額やアクションを直した・
+        補った・何にもならなかった語・札が配られる前に話した語が次のストリートのアクションになった）。"""
+        mark = corr.get("mark")
+        if mark is None:
+            return 0.0
+        live = {id(r) for r in self._current_actions}
+        penalty = CORRECTION_PENALTY_FAILED * (self._unresolved_count - corr["u_mark"])
+        for record in self._current_actions[mark:]:
+            if not record.apply_ok:
+                penalty += CORRECTION_PENALTY_FAILED
+            elif record.corrected_from or _ADJUSTED_REASONS & set((record.reason or "").split("+")):
+                penalty += CORRECTION_PENALTY_ADJUSTED
+            if record.actor_source == "implied":
+                penalty += CORRECTION_PENALTY_ADJUSTED
+        position = next((i for i, (_, item) in enumerate(self._hand_inputs) if item is corr["cue"]), None)
+        for kind, item in self._hand_inputs[position + 1:] if position is not None else []:
+            if kind != "audio" or item.action not in _BETTING_WORDS or self._retracted.get(id(item)) is item:
+                continue
+            entry = self._input_voice.get(id(item))
+            records = [r for r in entry[1] if id(r) in live] if entry is not None and entry[0] is item else []
+            if not records:
+                penalty += CORRECTION_PENALTY_ADJUSTED       # 言い直し・前のラウンドの余りとみて記録しなかった
+            elif self._spoken_before_street(records[-1].street, item):
+                penalty += CORRECTION_PENALTY_SPILLED
+        return penalty
+
+    def _spoken_before_street(self, street: str, event: AudioEvent) -> bool:
+        """そのストリートの札が配られる前に話した語か（ボードの札を読んでいる卓だけ）。"""
+        if not self._rfid_folds or street not in ("flop", "turn", "river"):
+            return False
+        mark = self._street_marks.get(street)
+        return mark is not None and mark > _spoken_at(event) + STALE_CALL_MARGIN_SEC
+
+    def _review_correction(self, corr: dict, final: bool) -> None:
+        """訂正の解釈を、合図のあとの記録の辻褄で選び直す（解釈ごとにハンドを組み直して数える）。`final` なら決める。"""
+        corr["dirty"] = False
+        before = list(self._current_actions)
+        current = corr["choice"]
+        scores: dict[str, float] = {}
+        for choice in [c for c in corr["choices"] if c != current] + [current]:
+            self._set_correction_choice(corr, choice)
+            self._rebuild_hand()
+            scores[choice] = round(self._correction_penalty(corr) + CORRECTION_PRIOR[choice], 6)
+        best = min(corr["choices"], key=lambda c: (scores[c], _CORRECTION_ORDER[c]))
+        if best != current:
+            self._set_correction_choice(corr, best)
+            self._rebuild_hand()
+        corr["scores"] = scores
+        corr["frozen"] = corr["frozen"] or final
+        self._hand_needs_review = True
+        logger.info("「失礼しました」の解釈: %s（%s）%s", best, scores, " — 決めました" if final else "")
+        if best != current:
+            self._notice(f"「失礼しました」のあとのアクションに合わせて、{self._describe_choice(corr, best)}として"
+                         "組み直しました（要確認）")
+        self._emit_rebuilt(before)
+        self._publish_table_state()
+
+    def _describe_choice(self, corr: dict, choice: str) -> str:
+        if choice == "prev":
+            return f"直前のアクション（{self._describe_unit(corr['last'])}）の訂正"
+        if choice == "street":
+            return f"{_STREET_JA.get(corr['street'], corr['street'])}の最初からの言い直し"
+        return "訂正なし（「失礼しました」は会話）"
+
+    def _settle_corrections(self) -> None:
+        """訂正の解釈をいま決める（ハンドを終わらせる前・次の合図の前）。"""
+        if self._rebuilding:
+            return
+        self._retract_departed_calls(before_end=True)
+        for corr in self._corrections:
+            if corr["frozen"]:
+                continue
+            if corr["dirty"] and self._hand_open and self._hand_origin is not None:
+                self._review_correction(corr, final=True)
+            corr["frozen"] = True
+        self._fix_spoken_before_card(before_end=True)    # 訂正の解釈を決めてから
+
+    def _after_hand_change(self) -> None:
+        """発話を反映したあと: 札の離脱のあとのコールを付け直す。訂正の解釈を選び直す（決める条件なら決める）。決めるのを
+        待っていた確定をする。"""
+        if self._rebuilding or self._event_depth:
+            return
+        self._retract_departed_calls()
+        corr = self._open_correction()
+        if corr is not None and self._hand_open and self._hand_origin is not None and (
+                corr["dirty"] or self._finish_wanted):
+            final = (self._finish_wanted or corr["street_seen"] or corr["post"] >= CORRECTION_WINDOW_INPUTS
+                     or self._foldout_pending is not None or self._betting_over())
+            self._review_correction(corr, final=final)
+        self._fix_spoken_before_card()                   # 訂正の解釈を決めたあと（決めていなければ待つ）
+        self._finish_after_correction()
+
+    def _finish_after_correction(self) -> None:
+        """訂正の解釈を決めるまで待っていた、全員フォールドでのハンドの確定。"""
+        if not self._finish_wanted or self._rebuilding or self._event_depth:
+            return
+        self._settle_corrections()
+        self._finish_wanted = False
+        if self._hand_open and self._foldout_pending is None:
+            self._maybe_finish_hand()
+
+    def _emit_rebuilt(self, before: list[ActionRecord]) -> None:
+        """組み直しで変わった記録を画面に流し直す（同じところまでの記録は流さない）。"""
+        if not self._on_action:
+            return
+        same = 0
+        for old, new in zip(before, self._current_actions):
+            if (old.street, old.seat, old.action, old.amount) != (new.street, new.seat, new.action, new.amount):
+                break
+            same += 1
+        for record in self._current_actions[same:]:
+            self._on_action(record)
+
+    def _reset_corrections(self) -> None:
+        self._commit_word_labels()
+        self._departed_calls = []
+        self._garbled_absorbed = {}
+        self._fold_words_done = {}
+        self._before_card = []
+        self._dropped_inputs = {}
+        self._before_card_tags = {}
+        self._corrections = []
+        self._retracted = {}
+        self._input_voice = {}
+        self._departure_floor = None
+        self._finish_wanted = False
+        self._correction_tag = None
+
+    def _handle_set_blinds(self, event: AudioEvent) -> None:
+        """ブラインドの変更（トーナメントのレベル上昇）。`raw_text` の「SB/BB」。次のハンドから。"""
+        gs = self._game_state
+        m = re.search(r"(\d+)\s*/\s*(\d+)", unicodedata.normalize("NFKC", event.raw_text or ""))
+        if m is None:
+            logger.warning("set_blinds without SB/BB: %r", event.raw_text)
+            return
+        sb, bb = int(m.group(1)), int(m.group(2))
+        try:
+            gs.set_blinds(sb, bb)
+        except ValueError as e:
+            self._notice(f"ブラインドを変えられません: {e}")
+            return
+        later = self._hand_open and gs.is_hand_active()
+        self._notice(f"ブラインドを {sb}/{bb} にしました" + ("（次のハンドから）" if later else ""))
+
+    def _handle_set_bb_ante(self, event: AudioEvent) -> None:
+        """BB アンティ（BB の人が BB と同額のアンティを出す）を入れる・外す（CLI の `ante on/off`, 2026-10-19）。
+        `raw_text` の on / off。次のハンドから（ハンドの外ならすぐ）。BB を変えるとアンティも一緒に変わる。"""
+        gs = self._game_state
+        text = (event.raw_text or "").strip().lower()
+        if text not in ("on", "off"):
+            logger.warning("set_bb_ante without on/off: %r", event.raw_text)
+            return
+        if not hasattr(gs, "set_bb_ante"):
+            self._notice("BB アンティはこのゲームの状態では使えません")
+            return
+        gs.set_bb_ante(text == "on")
+        later = self._hand_open and gs.is_hand_active()
+        if not self._rules_aware:
+            self._notice("BB アンティは pokerkit backend だけで使えます（legacy では置きません）")
+        elif text == "on":
+            self._notice("BB アンティをオンにしました（BB の人が BB と同額）" + ("（次のハンドから）" if later else ""))
+        else:
+            self._notice("BB アンティをオフにしました" + ("（次のハンドから）" if later else ""))
+
+    def _blinds_record(self) -> dict:
+        """記録の `blinds`（BB アンティがあれば `bb_ante` を足す = additive）。"""
+        gs = self._game_state
+        out = {"sb": gs._sb, "bb": gs._bb}  # noqa: SLF001
+        ante = int(getattr(gs, "bb_ante", 0) or 0)
+        if ante:
+            out["bb_ante"] = ante
+        return out
+
+    # ――― ミスディール訂正（ADR-0054） ―――
+
+    def _handle_correct_board(self, event: AudioEvent) -> None:
+        """ボード `amount` 枚目の記録を取り消す（ミスディールしたカードの載せ替え）。
+
+        ストリートは戻さない。カードを 1 枚差し替えても「フロップはフロップ」であり、
+        ルール上の進行は変わらない（差し替え後に枚数が戻れば自動遷移は no-op になる）。
+        """
+        index = event.amount
+        if index not in self._board_positions:
+            logger.warning(
+                "ボード %s 枚目は記録されていません（board=%s）— 訂正は無効です",
+                index, self._board_cards,
+            )
+            return
+        removed = self._board_positions.pop(index)
+        self._board_dealt_at.pop(index, None)   # 差し替え後の配布時刻を採り直す（ADR-0055）
+        self._board_cards = self._board_list()
+        self._shown_board = len(self._board_cards)   # 置き直した札をもう一度出す
+        # 訂正が入ったハンドは人間が記録を確認できるようにする（監査痕）。
+        self._hand_needs_review = True
+        logger.info(
+            "ボード %d 枚目 %s を取り消しました（board=%s）— 正しいカードを置いてください",
+            index, removed, self._board_cards,
+        )
+        self._notify_card_correction("board", index)
+
+    def _handle_correct_seat(self, event: AudioEvent) -> None:
+        """席 `seat` のホールカード記録を取り消し、物理的に載っている札を読み直させる。"""
+        seat = event.seat
+        if seat is None:
+            logger.warning("席が指定されていないため訂正できません（raw=%r）", event.raw_text)
+            return
+        removed = self._hole_cards.pop(seat, [])
+        self._shown_holes.pop(seat, None)            # 読み直した札をもう一度出す
+        self._hand_needs_review = True
+        logger.info(
+            "席 %d のホールカード %s を取り消しました — 正しいカードを置き直してください",
+            seat, removed or "（記録なし）",
+        )
+        self._notify_card_correction("seat", seat)
+
+    # ――― 卓状態の publish（RFID 由来のみ。アクション推定に依存しない） ―――
+
+    def _publish_table_state_if_due(self) -> None:
+        """一定間隔で卓状態を publish する（カードが外れたことは event にならないため）。"""
+        if self._table_state_writer is None:
+            return
+        now = self._clock()
+        if now - self._table_state_published_at < TABLE_STATE_INTERVAL:
+            return
+        self._publish_table_state()
+
+    def _publish_table_state(self, observed_at: Optional[float] = None) -> None:
+        """RFID から導いた卓状態（カード / 有効席 / ストリート）を sidecar へ publish する。
+
+        アクション推定とは独立した経路。実プレイ環境で「カード読み取り・有効席・ストリート遷移が
+        プレイ速度で取れるか」「UI に反映されるか」を検証するための観測出力（ADR-0056 D4/D5）。
+        writer 未注入なら no-op（= 挙動不変）。
+        """
+        if self._table_state_writer is None:
+            return
+        gs = self._game_state
+        presence: dict = {}
+        if self._seat_presence is not None:
+            try:
+                presence = self._seat_presence() or {}
+            except Exception:  # noqa: BLE001 — 観測が取れなくても記録は続ける
+                logger.exception("seat_presence failed — 在否なしで卓状態を出します")
+        board_presence: dict = {}
+        if self._board_presence is not None:
+            try:
+                board_presence = self._board_presence() or {}
+            except Exception:  # noqa: BLE001 — 表示用。取れなくても卓状態は出す
+                logger.exception("board_presence failed — ボードの在否なしで卓状態を出します")
+        try:
+            seats = sorted(set(gs.get_stacks()) | set(presence))
+            state = build_table_state(
+                session_id=self._json_writer._session_id,  # noqa: SLF001
+                hand_id=gs.hand_id,
+                now=self._clock(),
+                updated_at=self._now_iso(),
+                seats=seats,
+                hole_cards=self._hole_cards,
+                presence=presence,
+                board=self._board_cards,
+                board_timeline=self._build_board_timeline(),
+                engine_street=gs.street,
+                button_seat=getattr(gs, "button_seat", None),
+                position_map=self._safe_position_map(),
+                board_absent_since=board_presence.get("absent"),
+                board_pending=board_presence.get("pending"),
+            )
+        except Exception:  # noqa: BLE001 — 表示用の派生。失敗でハンドを止めない
+            logger.exception("卓状態の組み立てに失敗しました — スキップします")
+            return
+        self._table_state_published_at = self._clock()
+        self._table_state_writer.publish(state, observed_at=observed_at)
+
+    # ――― 進行中のハンド（真のアクション入力の画面, オーナー 2026-09-30 / 2026-10-06）―――
+
+    def _publish_live_hand(self) -> None:
+        """手札が配られたハンドの、ここまでの記録を書く（変わったときだけ）。ハンドの外は消す。
+
+        RFID の自動開始では配った瞬間にハンドが開く。「ハンド開始」/ n で先に始めたハンドは、席のリーダーがあれば
+        最初の手札が届くまで待つ（`_waiting_for_deal`）。席のリーダーが無い構成では始めた時点から。
+        """
+        if not self._live_hand:
+            return
+        gs = self._game_state
+        if not self._hand_open or self._waiting_for_deal():
+            self._clear_live_hand()
+            return
+        signature = (
+            gs.hand_id, gs.street, len(self._current_actions), tuple(self._board_cards),
+            tuple(sorted((s, tuple(c)) for s, c in self._hole_cards.items())), getattr(gs, "button_seat", None),
+        )
+        if signature == self._live_signature:
+            return
+        try:
+            hand = self._live_hand_dict()
+        except Exception:  # noqa: BLE001 — 表示用。失敗でハンドを止めない
+            logger.exception("進行中のハンドの組み立てに失敗しました — スキップします")
+            return
+        self._json_writer.write_live_hand(hand)
+        self._live_signature = signature
+
+    def _clear_live_hand(self) -> None:
+        if self._live_hand and self._live_signature is not None:
+            self._json_writer.clear_live_hand()
+            self._live_signature = None
+
+    def _live_hand_dict(self) -> dict:
+        """進行中のハンドを、確定したハンド（`HandSummary.to_dict`）と同じ形で（勝者・結果は無し）。"""
+        gs = self._game_state
+        stacks = gs.get_stacks()
+        in_hand = set(self._seats_in_hand())
+        players = []
+        for seat in sorted(s for s in stacks if s in in_hand):
+            hole = self._hole_cards.get(seat, [])
+            players.append({
+                "seat": seat,
+                "name": gs.get_player_name(seat),
+                "hole_cards": list(hole) if hole else None,
+                "hole_cards_source": "rfid" if hole else "",
+                "stack_start": self._stack_start.get(seat, 0),
+            })
+        return {
+            "hand_id": gs.hand_id,
+            "session_id": self._json_writer._session_id,  # noqa: SLF001
+            "started_at": self._hand_started_at,
+            "ended_at": None,
+            "blinds": self._blinds_record(),
+            "board": list(self._board_cards),
+            "board_source": self._board_source,
+            "board_timeline": self._build_board_timeline(),
+            "button_seat": getattr(gs, "button_seat", None),
+            "position_map": {str(k): v for k, v in self._safe_position_map().items()},
+            "players": players,
+            "winner_seat": None,
+            "actions": [a.to_dict() for a in self._current_actions],
+            "review_required": self._hand_needs_review or any(a.needs_review for a in self._current_actions),
+            "street": gs.street,
+            "in_progress": True,
+            "updated_at": self._now_iso(),
+        }
+
+    def _safe_position_map(self) -> dict[int, str]:
+        try:
+            return self._game_state.position_map()
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _position_of(self, seat: int) -> str:
+        """席のポジション名（BTN/SB/BB/UTG…）。ボタンを持たない backend では空文字。"""
+        try:
+            return self._game_state.position_map().get(seat, "")
+        except Exception:  # noqa: BLE001 — 表示用の付随情報。失敗で記録を止めない
+            return ""
+
+    def _sensed_seat(self, event: AudioEvent) -> Optional[int]:
+        """発話が明示した席（= 「誰が行動したか」の明示証拠, 仕様 §7 / FR-26）。
+
+        席番号（"シート3"）が最優先。無ければ **ポジション名**（"BTN、コール"）を現ハンドの
+        `position_map` で席に解決する。ボタンを持たない backend（legacy）や、そのポジションが
+        卓に無い場合は None（= 明示証拠なし = engine の手番を維持）。
+
+        RFID の検出はここに入らない（カードの**存在**は**行動**ではない, ISSUE-0033）。
+        """
+        if event.seat is not None:
+            return event.seat
+        if not event.position:
+            return None
+        for seat, name in self._safe_position_map().items():
+            if name == event.position:
+                return seat
+        logger.debug(
+            "ポジション %r は現在の卓に無いため無視します（position_map=%s）",
+            event.position, self._safe_position_map(),
+        )
+        return None
+
+    def _build_board_timeline(self) -> list[dict]:
+        """ボード各枚の配布時刻を index 昇順で返す（ADR-0055）。
+
+        ターン（4 枚目）/ リバー（5 枚目）の配布時刻はベッティングラウンドの区切りとして
+        アクションの時刻に対応するため記録する。フロップは 3 枚の最小値がラウンドの開始
+        （フロップ内の順序自体は意味を持たない）。時刻が取れていない位置は落とす。
+        """
+        return [
+            {
+                "index": index,
+                "card": self._board_positions[index],
+                "dealt_at": self._iso(self._board_dealt_at[index]),
+            }
+            for index in sorted(self._board_positions)
+            if index in self._board_dealt_at
+        ]
+
+    def _notify_card_correction(self, kind: str, key: int) -> None:
+        """RFID 側（割り当て・デバウンス）も同じタイミングで落とす。失敗してもハンドは止めない。"""
+        if self._on_card_correction is None:
+            return
+        try:
+            self._on_card_correction(kind, key)
+        except Exception:  # noqa: BLE001
+            logger.exception("on_card_correction hook failed — ハンドは続行します")
+
     def _handle_legacy_action(self, event: AudioEvent) -> None:
         """rules-aware でない backend（legacy）の従来アクション処理（挙動不変）。
 
@@ -654,11 +5444,16 @@ class IntegrationThread(threading.Thread):
         action = event.action
         gs = self._game_state
 
+        # pokerkit backend でも「合法手が無い」= 手番なし（新ハンド前 / ハンド終了後 /
+        # 全員オールイン後）はここに落ちてくる。actor が無いのは運用ミスであってバグでは
+        # ないので、traceback ではなく unresolved レコード + 案内ログにする（ISSUE-0028 / B2）。
         try:
             seat = gs.get_current_player()
         except (RuntimeError, ValueError):
             self._emit_unresolved(event, reason="no_active_hand")
             return
+
+        street_at_action = gs.street   # 適用前のストリートを記録する（ISSUE-0029）
 
         try:
             gs.apply_action(seat, action, event.amount)
@@ -692,7 +5487,7 @@ class IntegrationThread(threading.Thread):
         record = ActionRecord(
             hand_id=gs.hand_id,
             timestamp=self._iso(event.timestamp),
-            street=gs.street,
+            street=street_at_action,
             seat=seat,
             player_name=gs.get_player_name(seat),
             action=action,
@@ -702,6 +5497,7 @@ class IntegrationThread(threading.Thread):
             source=source,
             needs_review=needs_review,
             confidence=confidence,
+            position=self._position_of(seat),
         )
         self._current_actions.append(record)
 
@@ -710,56 +5506,40 @@ class IntegrationThread(threading.Thread):
 
         logger.debug("ActionRecord: %s", record)
 
-    def _pop_nearest_rfid_seat(self, event: AudioEvent) -> Optional[RFIDEvent]:
-        """照合窓内で最も近い RFID seat イベントを 1 件取り出す（D2b actor 解決用）。
-
-        prior と異なる席を指しうるため `_pop_matching_rfid_event`（同席限定）とは別。取り出して
-        消費することで、actor 推定に使った読みが後続アクションへ滞留・連続誤検出しない。
-        G3（ADR-C）: fold 済み席・非実在席の読みは actor 証拠として採用しない
-        （チップ整理等で fold 済みプレイヤーのカードが読まれた場合の誤 actor 化を防ぐ）。
-        """
-        lo, hi = self._event_window(event)
-        try:
-            active = set(self._game_state.get_active_seats())
-        except Exception:
-            active = None
-        candidates = []
-        for e in self._rfid_seat_buffer:
-            if e.seat is None or not (lo <= e.timestamp <= hi):
-                continue
-            if active is not None and e.seat not in active:
-                logger.debug(
-                    "RFID seat read discarded as actor evidence (seat=%d not active)", e.seat
-                )
-                continue
-            candidates.append(e)
-        if not candidates:
-            return None
-        best = min(candidates, key=lambda e: abs(e.timestamp - event.timestamp))
-        self._rfid_seat_buffer.remove(best)
-        return best
-
     def _resolve_actor(
         self, event: AudioEvent, legal_ctx: LegalContext
-    ) -> tuple[int, Optional[RFIDEvent], bool, list[int], str]:
-        """物理/明示証拠から actor を推定する（ADR-0009 §4, ISSUE-0009）。
+    ) -> tuple[int, bool, list[int], str]:
+        """明示発話席から actor を推定する（ADR-0009 §4 を ISSUE-0033 で改訂）。
 
-        prior = engine の合法手番。優先順位 **RFID seat 読み > 明示発話席(event.seat)** で sensed を
-        決め、sensed が prior と異なれば silent-fold 合成（`fold_through`, cap=SILENT_FOLD_CAP・atomic）で
-        sensed まで手番を進める。合成成功なら actor=sensed、cap 超過/到達不可なら prior 維持（合成せず）。
-        いずれの競合（sensed≠prior）も needs_review。actor 推定に使った RFID 読みは消費して返す
-        （滞留防止 + corroboration 判定に再利用）。
+        prior = engine の合法手番。**明示発話（席番号 or ポジション名）だけ**を sensed とし
+        （`_sensed_seat`）、prior と異なれば silent-fold 合成（`fold_through`,
+        cap=SILENT_FOLD_CAP・atomic）で sensed まで手番を進める。合成成功なら actor=sensed、
+        cap 超過/到達不可なら prior 維持（合成せず）。いずれの競合（sensed≠prior）も needs_review。
 
-        Returns: (actor, 消費した RFID seat 読み or None, conflict, 合成 fold した席列, 競合理由)
+        **RFID の seat 読みは actor の証拠にしない**（ISSUE-0033 / ADR-0056。ADR-0049 G3 の
+        「active 席の読みだけ採用」も配布直後は全席 active なので防げず、この点は本方針が
+        supersede する）。RFID が観測するのは「その席に**カードがある**」であって「その席が
+        **行動した**」ではない。ホールカードの配布は数秒で最大 16 件の検出を生み、持ち上げた札を
+        置き直しても 1 件出るため、行動と区別できない。カメラ（chip motion = 行動の観測）を
+        廃止した結果、存在検出が「物理証拠」の座に繰り上がっていたのが誤りだった。RFID は
+        **同席の裏付け**（`_pop_matching_rfid_event`）としてのみ使う — こちらは actor を別席へ
+        動かす力を持たないので無害。
+
+        Returns: (actor, conflict, 合成 fold した席列, 競合理由 = 監査 reason, ADR-0049 G3)
         """
         prior = legal_ctx.actor_seat
-        rfid_ev = self._pop_nearest_rfid_seat(event)
-        sensed = rfid_ev.seat if rfid_ev is not None else event.seat
+        sensed = self._sensed_seat(event)
 
         if sensed is None or sensed == prior:
-            return prior, rfid_ev, False, [], ""
+            return prior, False, [], ""
 
-        # sensed != prior: 物理/明示証拠が別席 → silent-fold 合成を試みる（cap 内・atomic）。
+        if self._rfid_folds and sensed in self._game_state.seats_to_act():
+            # 手番より先の席・ポジションが言われた: 間の人は札が離れていればフォールド（フォールドは RFID で
+            # 決める。合成 fold で埋めない）、残っていればチェック / コールを聞き取れなかったとみる（要確認）。
+            self._walk_to_sensed(sensed, _spoken_at(event))
+            return sensed, False, [], "actor_sensed_over_prior"
+
+        # sensed != prior: 明示発話が別席を指す → silent-fold 合成を試みる（cap 内・atomic）。
         try:
             folded = self._game_state.fold_through(sensed, max_folds=SILENT_FOLD_CAP)
         except (ValueError, NotImplementedError):
@@ -768,16 +5548,38 @@ class IntegrationThread(threading.Thread):
                 prior, sensed, SILENT_FOLD_CAP,
             )
             # G3: 破棄した証拠（採用しなかった sensed 席）を監査 reason に残す。
-            return prior, rfid_ev, True, [], f"actor_conflict_capped(sensed={sensed})"
+            return prior, True, [], f"actor_conflict_capped(sensed={sensed})"
         logger.info("silent-fold 合成: prior=%s → actor=%s (folded=%s)", prior, sensed, folded)
-        return sensed, rfid_ev, True, folded, "actor_sensed_over_prior"
+        return sensed, True, folded, "actor_sensed_over_prior"
+
+    def _walk_to_sensed(self, sensed: int, t: float) -> None:
+        """手番を `sensed` まで進める: 札が離れている席はフォールド、残っている席は聞き取れなかったチェック /
+        コール（要確認）。"""
+        gs = self._game_state
+        for _ in range(len(self._game_seats()) + 1):
+            ctx = gs.legal_context()
+            actor = ctx.actor_seat
+            if actor is None or actor == sensed:
+                return
+            dep = self._departures.get(actor)
+            if dep is not None and actor not in self._showdown_mucks:
+                dep["applied"] = True
+                self._fold_departed(actor, ctx)
+            else:
+                self._imply_action(actor, ctx, t, "implied_before_spoken_seat")
 
     def _append_synth_fold(self, seat: int, event: AudioEvent) -> None:
-        """合成した silent-fold を fold アクションとして記録する（推定なので常に needs_review）。"""
+        """合成した silent-fold を fold アクションとして記録する（推定なので常に needs_review）。
+
+        時刻は RFID のマック観測があればそれを使う（ADR-0055）。`source.rfid` はその時刻が
+        物理観測由来であることを示す（confidence は据え置き = 判定材料にはしていない）。
+        無ければ推定を引き起こした `event` の時刻（ADR-0048 T3）。
+        """
         gs = self._game_state
+        timestamp, from_rfid = self._synth_fold_timestamp(seat, event)
         record = ActionRecord(
             hand_id=gs.hand_id,
-            timestamp=self._iso(event.timestamp),
+            timestamp=timestamp,
             street=gs.street,
             seat=seat,
             player_name=gs.get_player_name(seat),
@@ -785,7 +5587,8 @@ class IntegrationThread(threading.Thread):
             amount=0,
             pot_after=gs.pot,
             stack_after=gs.get_stack(seat),
-            source={"camera": False, "audio": False, "rfid": False},
+            source={"camera": False, "audio": False, "rfid": from_rfid},
+            position=self._position_of(seat),
             needs_review=True,
             confidence=SYNTH_FOLD_CONFIDENCE,
             actor_source="engine_prior",
@@ -803,24 +5606,40 @@ class IntegrationThread(threading.Thread):
         D2b: 物理/明示証拠から actor を推定し（必要なら silent-fold 合成）、apply_corrections で
         合法手へ射影して適用。合成 fold は fold アクションとして記録。
         D3: 派生 confidence（3 因子）+ needs_review 条件。
-        G2（ADR-A）: actor_source / corrected_from / reason / asr_confidence / apply_ok を
+        G2（ADR-0047）: actor_source / corrected_from / reason / asr_confidence / apply_ok を
         ActionRecord に配線し、review の理由を逆引き可能にする。
         """
         gs = self._game_state
-        actor, rfid_event, conflict, synthesized_seats, conflict_reason = (
-            self._resolve_actor(event, legal_ctx)
-        )
+        if self._apply_pending_spoken_fold(_spoken_at(event), "spoken_fold_before_next_action"):
+            legal_ctx = gs.legal_context()
+            if legal_ctx.actor_seat is None or not self._hand_open:
+                self._emit_unresolved(event, reason="betting_over")   # そのフォールドで残り 1 人になった
+                return
+        index = self._current_input_index
+        heard_raise = self._rfid_folds and index is not None and event.action in ("bet", "raise", "allin")
+        # オールインの聞き違いを外して組み直せるように、この入力の前の状態を残す（`_drop_unanswered_allin`）
+        checkpoint = self._take_checkpoint(index) if heard_raise else None
+        # 額の言い直しで組み直せるように、ベット・レイズの前の状態も残す（`_restate_wager_amount`）
+        wager_point = checkpoint
+        if wager_point is None and index is not None and event.action in ("bet", "raise"):
+            wager_point = self._take_checkpoint(index)
+        actor, conflict, synthesized_seats, conflict_reason = self._resolve_actor(event, legal_ctx)
 
         # 合成した silent-fold を先に記録（手番順: 中間席の fold → 当該 actor のアクション）。
         for fseat in synthesized_seats:
             self._append_synth_fold(fseat, event)
 
-        # B1（ADR-A）: fold 合成で盤面（min-raise / to-call / legal set）が変わるため、
+        # B1（ADR-0047）: fold 合成で盤面（min-raise / to-call / legal set）が変わるため、
         # 射影は必ず合成後の legal_context に対して行う（stale ctx の再利用禁止）。
         if synthesized_seats:
             legal_ctx = gs.legal_context()
 
         corrected = apply_corrections(event.action, event.amount, legal_ctx, event.confidence)
+
+        # ストリートは「適用前」を記録する。pokerkit はベッティングラウンドが閉じると
+        # apply_action の中で次ストリートへ自動進行するため、適用後を読むとラウンドを
+        # 閉じたアクション（BB のチェック等）が次ストリートに記録されてしまう（ISSUE-0029）。
+        street_at_action = gs.street
 
         try:
             gs.apply_action(actor, corrected.action, corrected.amount)
@@ -833,49 +5652,57 @@ class IntegrationThread(threading.Thread):
             apply_ok = False
 
         cam_event = self._pop_matching_camera_event(actor, event)
-        # actor 推定に使った RFID 読みが最終 actor と一致すれば corroboration（消費済み）。
-        has_rfid = rfid_event is not None and rfid_event.seat == actor
+        # RFID は **同席の裏付け**としてのみ使う（actor を動かさない, ISSUE-0033）。
+        rfid_event = self._pop_matching_rfid_event(actor, event)
+        has_rfid = rfid_event is not None
         has_camera = cam_event is not None
 
         source = {"camera": has_camera, "audio": True, "rfid": has_rfid}
         # D3: 3 因子の派生 confidence（ADR-0009 §6）。audio は当該アクションにつき常に存在。
-        # audio が actor と一致するか（明示席がないか同席なら一致）。
-        audio_agree = event.seat is None or event.seat == actor
+        # audio が actor と一致するか（明示の席/ポジションが無いか同席なら一致）。
+        sensed = self._sensed_seat(event)
+        audio_agree = sensed is None or sensed == actor
         confidence = derive_confidence(
             apply_ok=apply_ok,
             whisper_conf=(
                 event.confidence if event.confidence is not None else MISSING_WHISPER_CONF
             ),
             audio_agree=audio_agree,
-            rfid_present=rfid_event is not None, rfid_agree=has_rfid,
+            rfid_present=has_rfid, rfid_agree=has_rfid,
             camera_present=has_camera, camera_agree=has_camera,
         )
         # needs_review 条件（ADR-0009 §6）— ①非合法 ②高信頼 ASR×規則矛盾/④amount snap
         # （apply_corrections.needs_review が②④を内包）③actor 競合（prior↔sensor）
-        # ⑤低 confidence ⑥パース曖昧性（ambiguous_amount / multi_action_keywords, ADR-A S1/V1）。
+        # ⑤低 confidence ⑥パース曖昧性（ambiguous_amount / multi_action_keywords, ADR-0047 S1/V1）。
         needs_review = (
             (not apply_ok)
             or corrected.needs_review
             or conflict
-            or bool(event.parse_flags)
+            or any(flag not in _INFO_PARSE_FLAGS for flag in event.parse_flags)
             or confidence < REVIEW_THRESHOLD
         )
 
-        # G2: actor の根拠 = 採用した actor と一致する最優先の証拠。
-        if has_rfid:
-            actor_source = "rfid"
-        elif event.seat is not None and event.seat == actor:
+        # G2: actor の根拠 = 採用した actor と一致する最優先の**明示**証拠。RFID は actor を
+        # 決めない（裏付けは source.rfid に出る, ISSUE-0033）。ポジション名で決まった場合は
+        # "spoken_position"（ISSUE-0032）。
+        if event.seat is not None and event.seat == actor:
             actor_source = "spoken_seat"
+        elif sensed is not None and sensed == actor:
+            actor_source = "spoken_position"
         else:
             actor_source = "engine_prior"
 
         reasons = [r for r in (corrected.reason, conflict_reason) if r]
         reasons.extend(event.parse_flags)
+        if confidence < REVIEW_THRESHOLD:
+            # 要確認の本当の理由を残す（店舗 2026-09-27: 理由が「amount_only」だけに見えて、実は聞き取りの
+            # 自信の低さで要確認になっていた）
+            reasons.append("low_asr_confidence")
 
         record = ActionRecord(
             hand_id=gs.hand_id,
             timestamp=self._iso(event.timestamp),
-            street=gs.street,
+            street=street_at_action,
             seat=actor,
             player_name=gs.get_player_name(actor),
             action=corrected.action,
@@ -885,13 +5712,26 @@ class IntegrationThread(threading.Thread):
             source=source,
             needs_review=needs_review,
             confidence=confidence,
+            position=self._position_of(actor),
             actor_source=actor_source,
             corrected_from=corrected.corrected_from,
             reason="+".join(reasons),
             asr_confidence=event.confidence,
             apply_ok=apply_ok,
+            raw_text=event.raw_text or None,
         )
         self._current_actions.append(record)
+        self._last_action_at = _spoken_at(event)
+        if corrected.action in ("allin", "bet", "raise") and apply_ok:
+            self._last_wager = (record, _spoken_at(event), event.amount)
+            self._last_wager_point = (
+                (wager_point, legal_ctx) if corrected.action in ("bet", "raise") and wager_point is not None else None
+            )
+        if corrected.action == "allin" and apply_ok and checkpoint is not None:
+            # 聞き違いなら外して組み直せるように残す（誰も応えないまま「チェック」等が続いたとき）
+            checkpoint["allin"] = record
+            if not any(c is checkpoint for c in self._checkpoints):
+                self._checkpoints.append(checkpoint)
 
         if self._on_action:
             self._on_action(record)
@@ -902,26 +5742,177 @@ class IntegrationThread(threading.Thread):
             actor, corrected.action, corrected.amount, synthesized_seats, conflict,
             corrected.corrected_from, record.reason, needs_review,
         )
+        # ほかが全員フォールドしたら確定、ベッティングが終わったらショーダウンの案内（ADR-0062）
+        self._maybe_finish_hand(event)
+        if self._rfid_folds and self._hand_open:
+            self._resolve_departures()      # 次の手番の人の札が離れていればフォールド
 
     # ――― ハンド開始 / 終了 ―――
 
-    def _start_new_hand(self, event: Optional[AudioEvent] = None) -> None:
+    def _start_new_hand(
+        self, event: Optional[AudioEvent] = None, *,
+        started_at: Optional[float] = None, auto: bool = False,
+    ) -> bool:
+        """新しいハンドを始める。`auto` = 手札の配布を検出して始めた（ADR-0062）。
+
+        配られる席（休みでなく、チップがある席）が 2 つ未満なら始めない（False。知らせるのは理由が変わった
+        ときだけ）。買い足し（`r`）・参加（`name`）の操作で始められるようになる。
+        """
         gs = self._game_state
-        # S5（ADR-A）: stack_start はブラインド post 前に取る。pokerkit backend は new_hand() で
-        # ブラインドを自動 post するため、post 後に取ると result がブラインド分ずれる。
-        self._stack_start = gs.get_stacks()
-        gs.new_hand()
+        for seat, name in self._pending_renames.items():   # ハンドの途中に届いた席替え（ADR-0059）
+            self._apply_rename(seat, name)
+        self._pending_renames = {}
+        restored = self._restore_dealt_busted_seats() if auto else []
+        if self._before_new_hand is not None:
+            self._before_new_hand(gs.hand_id + 1)
+        # S5（ADR-0047）: stack_start はブラインド post 前に取る。pokerkit backend は new_hand() で
+        # ブラインドを自動 post するため、post 後に取ると result がブラインド分ずれる。台本のハンドは台本の持ち点。
+        next_stacks = getattr(gs, "stacks_before_next_hand", None)
+        self._stack_start = next_stacks() if next_stacks is not None else gs.get_stacks()
+        try:
+            gs.new_hand()
+        except ValueError as e:
+            self._refuse_start(str(e))
+            return False
+        self._start_refused = None
         self._current_actions = []
-        self._hand_started_at = self._iso(event.timestamp) if event is not None else self._now_iso()
+        if started_at is not None:
+            self._hand_started_epoch = started_at
+        else:
+            self._hand_started_epoch = event.timestamp if event is not None else self._clock()
+        self._hand_started_at = self._iso(self._hand_started_epoch)
         self._board_cards = []
         self._board_positions = {}
+        self._board_dealt_at = {}
         self._board_source = ""
         self._hole_cards = {}
-        self._hand_needs_review = False
+        self._hand_needs_review = bool(restored)
         self._hand_open = True
+        self._hand_auto_started = auto
+        self._showdown_mucks = []
+        self._showdown_declared = False
+        self._showdown_gaps = []
+        self._showdown_notice_shown = False
+        self._showdown_at = None
+        self._showdown_shown = {}
+        self._showdown_hit = {}
+        self._shown_holes = {}
+        self._shown_board = 0
+        self._seat_setup_warned = False
+        self._departures = {}
+        self._hand_inputs = []
+        self._checkpoints = []
+        self._held_betting_words = 0
+        self._last_wager = None
+        self._last_wager_point = None
+        self._recap = None
+        self._spoken_folds = {}
+        self._spoken_fold_raw = {}
+        self._foldout_pending = None
+        self._foldout_winner_left = False
+        self._last_action_at = self._hand_started_epoch
+        self._street_marks = {}
+        self._streets_synced = set()
+        self._silent_mic_warned = False
+        self._board_before_deal = False
+        self._announced_hand = None
+        self._deal_order_checked = False
+        self._hand_seats_settled = False
+        self._reset_corrections()
+        # ボタンを直して始め直すときに戻る状態（ブラインドを置いた直後、アクションは無い）
+        self._hand_origin = (
+            self._take_checkpoint(0) if hasattr(gs, "restart_hand_with_button") else None
+        )
+        self._set_in_play(True)
+        if self._rfid_reset_for_deal:
+            self._rfid_reset_for_deal = False   # 配布の検出でリセット済み（ADR-0063）
+        elif self._on_new_hand is not None:
+            # RFID の board 位置を engine と同じタイミングでリセットする（ISSUE-0026）。
+            # engine 側の board は「カードが外れても縮まない」ので、RFID だけが独自に位置を
+            # 振り直すと両者がずれて同じ札が 2 か所に出る。ハンドの切れ目を唯一の同期点にする。
+            try:
+                self._on_new_hand()
+            except Exception:  # noqa: BLE001 — フックの失敗でハンドを止めない
+                logger.exception("on_new_hand hook failed — ハンドは続行します")
+        # 配布の検出で集めた札をこのハンドの手札にする（RFID のリセット後に載っている札も読み直される）
+        self._adopt_deal_cards()
         if self._session_layer_active:
             self._assign_seats_for_hand(gs.hand_id)
         logger.info("New hand started: hand_id=%d", gs.hand_id)
+        button = getattr(gs, "button_seat", None)
+        override = getattr(gs, "last_button_override", None)
+        if override:
+            # 手動移動でボタンが通常の進み方と違う席になった（仕様 §9: 手違いの修正か、誤操作かを人が見る）
+            self._notice(f"ボタンを席{override[1]} に動かしました（通常の進み方なら席{override[0]}）")
+        out = [s for s in self._game_seats() if s not in self._seats_in_hand()]
+        details = [d for d in (
+            "手札が配られました" if auto else "",
+            f"ボタン 席{button}" if button is not None else "",
+            ("休み: " + "・".join(f"席{s}" for s in out)) if out else "",
+        ) if d]
+        self._notice(f"ハンド {gs.hand_id} 開始" + (f"（{' / '.join(details)}）" if details else ""))
+        self._show_hole_cards()
+        self._publish_table_state()
+        return True
+
+    def _refuse_start(self, why: str) -> None:
+        """ハンドを始められない（配られる席が 2 つ未満）。同じ理由は 1 回だけ知らせる。"""
+        message = (
+            f"ハンドを始められません — {why}。r <席> <金額> で買い足すか、"
+            "name <席> <名前> で参加させてください"
+        )
+        if message == self._start_refused:
+            logger.debug("%s", message)
+            return
+        self._start_refused = message
+        self._notice(message)
+
+    def _restore_dealt_busted_seats(self) -> list[int]:
+        """持ち点 0 の席に手札が配られた → 休みにせず、最初の持ち点に戻して配る（要確認）。戻した席を返す。
+
+        持ち点 0 の人に札は配られないので、記録の誤り（聞き違いのオールイン等）か買い足しの入れ忘れ。休みにすると
+        手番の順が狂い、そのハンドのアクションがすべてずれる（店舗 2026-09-27: 聞き違いのオールインで席4 が 0 に
+        なり、次のハンドで 2♣ 2♦ が配られたのに休み扱いになった）。
+        """
+        if not (self._rules_aware and self._deal_hands):
+            return []
+        gs = self._game_state
+        try:
+            stacks = gs.get_stacks()
+            playing = getattr(gs, "playing_seats", None)
+            # チップがある席（ハンドの途中に入れた買い足しを含む）
+            chips = set(playing()) if playing is not None else {s for s, st in stacks.items() if st > 0}
+        except Exception:  # noqa: BLE001
+            return []
+        is_out = getattr(gs, "is_sitting_out", None)
+        restored = []
+        for seat, cards in sorted(self._deal_hands.items()):
+            amount = self._restore_stack_for(seat)
+            if (len(cards) < 2 or seat not in stacks or seat in chips or amount <= 0
+                    or (is_out is not None and is_out(seat))):
+                continue
+            try:
+                gs.rebuy(seat, amount)
+            except ValueError:
+                logger.exception("持ち点を戻せませんでした（席 %s）", seat)
+                continue
+            restored.append(seat)
+            self._provisional_stacks[seat] = (amount, gs.hand_id + 1)
+            self._notice(
+                f"持ち点 0 の席{seat} に手札が配られました — 持ち点 {amount} に戻して配ります（記録の誤りか"
+                f"買い足しの入れ忘れ。要確認。買い足しなら r {seat} <額> で入れると、この額の代わりになります）"
+            )
+        return restored
+
+    def _seats_in_hand(self) -> list[int]:
+        """いまのハンドに配られた席（backend が区別しなければ全席）。"""
+        method = getattr(self._game_state, "seats_in_hand", None)
+        if method is None:
+            return self._game_seats()
+        try:
+            return list(method())
+        except Exception:  # noqa: BLE001
+            return self._game_seats()
 
     def _assign_seats_for_hand(self, hand_id: int) -> None:
         """S2.x: hand 開始時に seat→player を session レイヤへ write-through する（ADR-0008 §4）。
@@ -941,24 +5932,40 @@ class IntegrationThread(threading.Thread):
 
     def _finalize_hand(
         self,
-        winner_seat: int,
+        winner_seat: Optional[int],
         event: Optional[AudioEvent] = None,
         winner_seats: Optional[list[int]] = None,
+        *,
+        awards: Optional[dict[int, int]] = None,
+        winner_source: Optional[str] = None,
+        showdown: Optional[list[dict]] = None,
+        ended_ts: Optional[float] = None,
     ) -> None:
         """ハンドを確定して HandSummary を書き出す。
 
-        - winner_seats（複数）は split pot（ADR-D S7）: `end_hand_split` で pot を等分し
+        - winner_seats（複数）は split pot（ADR-0050 S7）: `end_hand_split` で pot を等分し
           `pot_awards` を additive に記録する（winner_seat は先頭勝者 = 従来互換）。
-        - engine の end_hand が失敗しても記録は捨てず、review 付きで書き出す（ADR-A B5:
+        - awards（席 → 額）はショーダウンを手札で判定した結果（ADR-0062）: side pot ごとの勝者どおりに
+          `end_hand_awards` で配る。`winner_source` は勝者の決まり方（fold / cards / estimated）、
+          `showdown` は見せた手札の役。
+        - engine の end_hand が失敗しても記録は捨てず、review 付きで書き出す（ADR-0047 B5:
           actions の持ち越し/消失を全廃）。
         """
         gs = self._game_state
-        awards: Optional[dict[int, int]] = None
+        if any(not c["frozen"] for c in self._corrections):
+            # 解釈を決める前に確定した（決める地点を通らない確定）: いまの解釈のまま
+            logger.info("「失礼しました」の解釈を決める前にハンド %d を確定しました（いまの解釈のまま）", gs.hand_id)
+            for corr in self._corrections:
+                corr["frozen"] = True
         ended = False
         try:
-            if winner_seats is not None and len(winner_seats) > 1:
+            if winner_seat is None:
+                gs.end_hand_refund()             # 勝者が分からない: チップを動かさない
+            elif awards is not None:
+                gs.end_hand_awards(awards)
+            elif winner_seats is not None and len(winner_seats) > 1:
                 awards = gs.end_hand_split(winner_seats)
-                self._hand_needs_review = True  # chop は必ず人の確認を通す（ADR-D）
+                self._hand_needs_review = True  # chop は必ず人の確認を通す（ADR-0050）
             else:
                 gs.end_hand(winner_seat)
             ended = True
@@ -979,8 +5986,9 @@ class IntegrationThread(threading.Thread):
                 logger.exception("resolve_seat_map_for_hand failed; player_id を省略")
 
         stacks_end = gs.get_stacks()
+        in_hand = set(self._seats_in_hand())
         players_info = []
-        for seat in sorted(stacks_end.keys()):
+        for seat in sorted(s for s in stacks_end if s in in_hand):   # 配られた席だけ
             hole = self._hole_cards.get(seat, [])
             info = {
                 "seat":              seat,
@@ -996,6 +6004,15 @@ class IntegrationThread(threading.Thread):
                 info["player_id"] = seat_player.get(seat)
             players_info.append(info)
 
+        for seat, cards in self._hole_cards.items():
+            if cards:
+                self._seats_ever_dealt.add(seat)
+        self._prev_hand_seats = set(in_hand)
+        for info in players_info:
+            if info["stack_start"] > 0:
+                self._last_positive_stack[info["seat"]] = info["stack_start"]
+            if info["stack_end"] > 0:
+                self._last_positive_stack[info["seat"]] = info["stack_end"]
         if self._hole_cards:
             logger.info(
                 "Hand %d: hole_cards from RFID — %s",
@@ -1003,7 +6020,7 @@ class IntegrationThread(threading.Thread):
                 {s: cards for s, cards in self._hole_cards.items()},
             )
 
-        # S6（ADR-A）: pot_total は engine の pot スナップショット（実コミット額）を優先する。
+        # S6（ADR-0047）: pot_total は engine の pot スナップショット（実コミット額）を優先する。
         # 従来の「bet/raise/call/allin の amount 加算」は rules-aware 経路では "to" 総額の
         # 多重加算になる。legacy（pots() が空）は従来加算に fallback = 挙動不変。
         pots = gs.pots() if ended else []
@@ -1015,42 +6032,123 @@ class IntegrationThread(threading.Thread):
                 if a.action in ("bet", "raise", "call", "allin")
             )
 
+        if ended_ts is None and event is not None:
+            ended_ts = event.timestamp
         summary = HandSummary(
             hand_id=gs.hand_id,
             session_id=self._json_writer._session_id,
             started_at=self._hand_started_at,
-            ended_at=self._iso(event.timestamp) if event is not None else self._now_iso(),
-            blinds={"sb": gs._sb, "bb": gs._bb},  # noqa: SLF001
+            ended_at=self._iso(ended_ts) if ended_ts is not None else self._now_iso(),
+            blinds=self._blinds_record(),
             board=list(self._board_cards),
             board_source=self._board_source,
+            board_timeline=self._build_board_timeline(),
+            button_seat=getattr(gs, "button_seat", None),
+            position_map=dict(self._safe_position_map()),
             players=players_info,
             pot_total=pot_total,
             pots=pots,
             winner_seat=winner_seat,
             pot_awards=(
                 [{"seat": s, "amount": amt} for s, amt in sorted(awards.items())]
-                if awards is not None else None
+                if awards is not None and (len(awards) > 1 or winner_seats) else None
             ),
             actions=list(self._current_actions),
             review_required=(
                 self._hand_needs_review
                 or any(a.needs_review for a in self._current_actions)
             ),
+            winner_source=winner_source,
+            showdown=showdown,
+            # 勝った人に言った役名（見せた人ごとに言う運用, オーナー 2026-09-30）
+            announced_hand=(self._showdown_shown.get(winner_seat) if self._showdown_shown
+                            else self._announced_hand),
         )
 
         self._json_writer.append_hand_summary(summary)
+        self._clear_live_hand()
         if self._on_hand:
             self._on_hand(summary)
-        logger.info("Hand %d finalized. Winner: seat %d", gs.hand_id, winner_seat)
+        self._apply_stack_corrections()       # そのハンドの結果には入れない
+        self._recorded_results[summary.hand_id] = {p["seat"]: p["result"] for p in players_info}
+        self._apply_truth_stacks(summary.hand_id)   # 先に届いた真のアクションの収支（ハンドが閉じる前に保存した）
+        logger.info("Hand %d finalized. Winner: seat %s", gs.hand_id, winner_seat)
+        self._notice(self._describe_result(summary, awards))
+        cards = self._describe_cards(summary)
+        if cards:
+            self._card_info(f"ハンド {summary.hand_id}: {cards}")
+        self._last_result = {
+            "hand_id": gs.hand_id,
+            "winners": sorted(awards) if awards else ([] if winner_seat is None else [winner_seat]),
+            "source": winner_source,
+            "hand": next((h.get("hand") for h in (showdown or []) if h.get("seat") == winner_seat), None),
+            "hands": [h.get("hand") for h in (showdown or []) if h.get("hand")],
+        }
+        self._publish_table_state()
         self._current_actions = []
         # _current_actions と対称にリセットし、stale フラグが次のサマリーへ
         # 漏れない（new_hand を挟まない再 finalize でも残らない）ようにする。
         self._hand_needs_review = False
         self._hand_open = False
+        self._hand_auto_started = False
+        self._showdown_mucks = []
+        self._showdown_declared = False
+        self._showdown_gaps = []
+        self._foldout_pending = None
+        self._departures = {}
+        self._hand_inputs = []
+        self._checkpoints = []
+        self._street_marks = {}
+        self._streets_synced = set()
+        self._reset_corrections()
+        if self._deal_at is None and not self._keep_listening_after_hand():
+            self._set_in_play(False)            # 次の配布まで音声を聞き流す（ADR-0063）
+
+    def _describe_result(self, summary: HandSummary, awards: Optional[dict[int, int]]) -> str:
+        """確定したハンドを 1 行で表す（CLI のお知らせ用）。"""
+        from core.showdown import HAND_NAMES_JA
+
+        gs = self._game_state
+
+        def who(seat: Optional[int]) -> str:
+            try:
+                return f"席{seat} {gs.get_player_name(seat)}"
+            except Exception:  # noqa: BLE001
+                return f"席{seat}"
+
+        if summary.winner_seat is None:
+            text = "勝者なし（チップは動かしていません）"
+        elif awards and len(awards) > 1:
+            text = "分配: " + "・".join(f"{who(s)} {amt}" for s, amt in sorted(awards.items()))
+        else:
+            text = f"勝ち: {who(summary.winner_seat)}"
+        hands = {h["seat"]: h["hand"] for h in (summary.showdown or [])}
+        detail = {
+            "fold": "ほかは全員フォールド",
+            "estimated": "勝者が決まらず仮",
+            "undetermined": "札が読めず手札で判定できない",
+        }.get(summary.winner_source or "", "")
+        if summary.winner_source == "cards" and summary.winner_seat in hands:
+            detail = HAND_NAMES_JA.get(hands[summary.winner_seat], hands[summary.winner_seat])
+        elif summary.winner_source == "announced" and summary.announced_hand:
+            detail = "ディーラーの役名 " + HAND_NAMES_JA.get(summary.announced_hand, summary.announced_hand)
+        tail = [d for d in (detail, f"ポット {summary.pot_total}",
+                            "要確認" if summary.review_required else "") if d]
+        return f"ハンド {summary.hand_id} 終了 — {text}（{' / '.join(tail)}）"
 
 
 # ――― ユーティリティ ―――
 
+def word_key(event: AudioEvent) -> str:
+    """声の語の識別（記録の時刻 = ミリ秒で語を見分ける, `world_replay.world_events` と同じ）とアクション。"""
+    return f"{float(event.timestamp):.3f}|{event.action}"
+
+
+def _spoken_at(event: AudioEvent) -> float:
+    """発話が始まった時刻（無ければ処理時刻 = 打った入力）。配布の前後を比べるのに使う（ADR-0062）。"""
+    return event.utterance_start_ts if event.utterance_start_ts is not None else event.timestamp
+
+
 def _extract_seat_from_text(text: str) -> Optional[int]:
-    """後方互換エイリアス。席抽出の実装は audio.recognizer に単一化（ADR-A S2）。"""
+    """後方互換エイリアス。席抽出の実装は audio.recognizer に単一化（ADR-0047 S2）。"""
     return _extract_seat_no(text)

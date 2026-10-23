@@ -12,6 +12,7 @@ import {
   buildReplayModel,
   formatChips,
   formatSigned,
+  shownAmount,
   type ReplayHand,
 } from "./handReplayModel";
 
@@ -26,6 +27,7 @@ export function buildHandText(hand: ReplayHand): string {
   if (hand.started_at) header += ` ・ ${hand.started_at}`;
   if (m.blinds?.sb != null) {
     header += ` ・ ブラインド ${formatChips(m.blinds.sb)}/${formatChips(m.blinds.bb ?? 0)}`;
+    if (m.blinds.bb_ante) header += `（BB アンティ ${formatChips(m.blinds.bb_ante)}）`;
   }
   lines.push(header);
 
@@ -54,7 +56,8 @@ export function buildHandText(hand: ReplayHand): string {
       const name = a.player_name || nameBySeat.get(a.seat);
       if (name) line += ` ${name}`;
       line += ` ${actionLabel(a.action)}`;
-      if (a.amount) line += ` ${formatChips(a.amount)}`;
+      const shown = shownAmount(a); // コールはトータル (そのストリートで出した合計)
+      if (shown) line += ` ${formatChips(shown)}`;
       if (a.needs_review) line += "（要確認）";
       lines.push(line);
     }
@@ -66,6 +69,8 @@ export function buildHandText(hand: ReplayHand): string {
     if (winner) result += ` ${winner.name}`;
     if (m.potTotal != null) result += ` ・ ポット合計 ${formatChips(m.potTotal)}`;
     lines.push(result);
+  } else if (m.noWinner) {
+    lines.push("結果: 勝者なし（札が読めず判定できないので、チップは動かしていません）");
   } else if (m.potTotal != null) {
     lines.push(`結果: ポット合計 ${formatChips(m.potTotal)}`);
   }

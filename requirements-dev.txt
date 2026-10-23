@@ -7,5 +7,15 @@ pokerkit>=0.7.0,<0.8.0
 jsonschema>=4.0,<5
 fastapi>=0.110,<1
 httpx>=0.27,<1
+# 店舗サーバー（api/store_server.py, ADR-0065）とクラウド（python -m cloud）の起動の試験
+uvicorn>=0.29,<1
+# 閲覧リンクの QR（api/server.py, ADR-0067 2c）
+segno>=1.5,<2
 pytest>=7.0
+# テストのダイエット（docs/worklog/2026-10-06-test-diet.md）: 速い組を並べて回す（-n auto）・遅いテストを落として知らせる
+pytest-xdist>=3.5,<4
+pytest-timeout>=2.3,<3
 ruff>=0.4,<1
+# クラウドの保存（cloud/postgres.py, ADR-0067）。CI はサービスの Postgres で試験する
+psycopg[binary]>=3.1,<4
+psycopg-pool>=3.2,<4

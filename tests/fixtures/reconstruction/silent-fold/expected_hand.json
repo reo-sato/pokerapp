@@ -9,6 +9,13 @@
   },
   "board": [],
   "board_source": "",
+  "board_timeline": [],
+  "button_seat": 3,
+  "position_map": {
+    "1": "SB",
+    "2": "BB",
+    "3": "BTN"
+  },
   "players": [
     {
       "seat": 1,
@@ -67,6 +74,7 @@
       },
       "needs_review": true,
       "confidence": 0.3,
+      "position": "BTN",
       "actor_source": "engine_prior",
       "reason": "synth_silent_fold",
       "apply_ok": true
@@ -88,10 +96,12 @@
       },
       "needs_review": true,
       "confidence": 0.511,
+      "position": "SB",
       "actor_source": "spoken_seat",
       "reason": "actor_sensed_over_prior",
       "asr_confidence": 0.85,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "シート1 レイズ 600"
     }
   ],
   "review_required": true

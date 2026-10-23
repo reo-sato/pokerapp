@@ -20,6 +20,8 @@ class LegalContext:
       legacy stub は 0 = 従来挙動）。
     - `committed` は actor の当ストリート既コミット額（レイズ額の to/by 曖昧性検知に使う,
       ADR-A S3。legacy stub は 0）。
+    - `chip` はチップの最小単位（SB と BB の最大公約数）。聞き取った額の端数を丸める単位
+      （0 なら `bb` = 従来どおり）。BB 単位だと 100/200 の卓の「2500」が 2400 になっていた。
     """
 
     actor_seat: Optional[int]
@@ -29,3 +31,4 @@ class LegalContext:
     max_raise: int
     bb: int = 0
     committed: int = 0
+    chip: int = 0

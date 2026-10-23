@@ -181,10 +181,16 @@ class TestVocabularyV1:
         assert ev is not None and ev.action == action
 
     def test_multi_keyword_flag(self):
-        ev = parse_action("チェックレイズ", confidence=0.9)
+        # parse_action は 1 件だけ返す（複数は parse_actions が分ける, ADR-0061）
+        ev = parse_action("チェック コール", confidence=0.9)
         assert ev is not None
         assert ev.action == "check"                       # 先頭のみ採用
         assert "multi_action_keywords" in ev.parse_flags  # + 要レビュー
+
+    def test_check_raise_is_one_raise(self):
+        # 「チェックレイズ」は一度チェックした人のレイズ = 1 アクション（ADR-0061）
+        ev = parse_action("チェックレイズ 1200", confidence=0.9)
+        assert (ev.action, ev.amount, ev.parse_flags) == ("raise", 1200, ())
 
     def test_containment_not_flagged(self):
         # スリーベット ⊃ ベット は包含マッチ → flag しない
@@ -238,13 +244,13 @@ class TestCorrectionsHardening:
         assert r.amount == 800
         assert r.reason == ""
 
-    def test_s3_raise_to_vs_by_ambiguous(self):
-        # heard 400 は to 解釈では min(600) 未満 = 非合法。だが「追加額」解釈なら
-        # committed(0)+call(300)+400=700 で合法 → by 読み上げの可能性を flag。
+    def test_s3_raise_below_the_minimum_is_a_mishearing_not_a_by_amount(self):
+        # heard 400 は to 解釈では min(600) 未満。レイズの額は常にトータル（上乗せ分は言わない = オーナー確認
+        # 2026-09-26）なので「追加額」とは読み替えず、聞き違いとして snap + review。
         r = apply_corrections("raise", 400, _facing_bet(bb=200))
-        assert r.amount == 600                     # 採用は従来どおり to 解釈 + snap
+        assert r.amount == 600
         assert r.needs_review is True
-        assert "raise_to_vs_by_ambiguous" in r.reason
+        assert "amount_snapped" in r.reason and "raise_to_vs_by" not in r.reason
 
     def test_s3_not_flagged_when_both_legal(self):
         # 両解釈とも合法な通常レイズは慣例（to 読み上げ）を信頼して flag しない。
@@ -412,7 +418,10 @@ class TestTimingT:
         ))
         rec = cap[-1]
         assert rec.source["rfid"] is True
-        assert rec.actor_source == "rfid"
+        # RFID は裏付け（source.rfid）にはなるが actor を決めない（ISSUE-0033 / ADR-0056。
+        # マージ前の verify-v1 では "rfid" だった）。actor は engine の手番 = seat 3。
+        assert rec.actor_source == "engine_prior"
+        assert rec.seat == 3
 
     def test_t2_without_start_ts_falls_back_to_old_window(self):
         gs = _pk(3, new_hand=False)
@@ -516,9 +525,10 @@ class TestRecorderT4:
         assert t._chunk_queue.empty()
 
     def test_short_blip_dropped(self):
-        # _MIN_BUFFER_SECONDS(0.3s = 約5チャンク)未満の短音は捨てる。
+        # _MIN_BUFFER_SECONDS(0.15s ≒ 2.3 チャンク)未満の短音は捨てる（ADR-0061 で 0.3 → 0.15）。ただし
+        # しきい値の 5 倍以上の大きさなら短い言葉として回す（読み上げ集 2026-09-30, test_multi_action_utterance）。
         t, _ = _make_audio_thread()
-        _run_capture(t, [_voiced_chunk()] * 2 + [_silent_chunk()] * 9)
+        _run_capture(t, [_voiced_chunk(amp=1000)] * 2 + [_silent_chunk()] * 9)
         assert t._chunk_queue.empty()
 
     def test_process_chunk_emits_event_with_utterance_start(self):
@@ -531,12 +541,13 @@ class TestRecorderT4:
         assert ev.confidence == 0.9
         assert ev.utterance_start_ts == 123.0
 
-    def test_inference_queue_drops_oldest_when_full(self):
+    def test_inference_queue_keeps_every_utterance_in_order(self):
+        # ADR-0061: 認識が遅れても発話は捨てない（プレーの切れ目で追いつく）。
         t, _ = _make_audio_thread()
-        for i in range(10):
+        for i in range(30):
             t._enqueue_utterance(bytes([i]) * 2, float(i))
+        assert t.backlog() == 30
         items = []
         while not t._chunk_queue.empty():
             items.append(t._chunk_queue.get_nowait())
-        assert len(items) == 8                      # _INFERENCE_QUEUE_MAX
-        assert items[-1][1] == 9.0                  # 新しい発話が残る
+        assert [ts for _, ts in items] == [float(i) for i in range(30)]

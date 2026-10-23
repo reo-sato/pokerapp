@@ -9,6 +9,13 @@
   },
   "board": [],
   "board_source": "",
+  "board_timeline": [],
+  "button_seat": 3,
+  "position_map": {
+    "1": "SB",
+    "2": "BB",
+    "3": "BTN"
+  },
   "players": [
     {
       "seat": 1,
@@ -68,9 +75,11 @@
       },
       "needs_review": false,
       "confidence": 0.532,
+      "position": "BTN",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "コール"
     },
     {
       "hand_id": 1,
@@ -89,14 +98,16 @@
       },
       "needs_review": false,
       "confidence": 0.532,
+      "position": "SB",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "コール"
     },
     {
       "hand_id": 1,
       "timestamp": null,
-      "street": "flop",
+      "street": "preflop",
       "seat": 2,
       "player_name": "P2",
       "action": "check",
@@ -110,9 +121,11 @@
       },
       "needs_review": false,
       "confidence": 0.532,
+      "position": "BB",
       "actor_source": "engine_prior",
       "asr_confidence": 0.9,
-      "apply_ok": true
+      "apply_ok": true,
+      "raw_text": "チェック"
     }
   ],
   "review_required": true,

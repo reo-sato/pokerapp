@@ -64,9 +64,41 @@ def test_command_to_audio_event_mapping():
     ev = command_to_audio_event(rb, clk)
     assert ev.action == "rebuy" and ev.seat == 2 and ev.amount == 3000
 
+    # ミスディール訂正（ADR-0054）。iPad から同じ control queue 経由で送れる。
+    cb = log_command("correct_board", {"index": 3})
+    ev = command_to_audio_event(cb, clk)
+    assert ev.action == "correct_board" and ev.amount == 3 and "ボード3" in ev.raw_text
+
+    cs = log_command("correct_seat", {"seat": 4})
+    ev = command_to_audio_event(cs, clk)
+    assert ev.action == "correct_seat" and ev.seat == 4 and "シート4" in ev.raw_text
+
+    # ブラインドの変更・席の参加と休み（次のハンドから, 2026-09-26）。
+    bl = log_command("set_blinds", {"sb": 200, "bb": 400})
+    ev = command_to_audio_event(bl, clk)
+    assert ev.action == "set_blinds" and ev.amount == 400 and ev.raw_text == "200/400"
+    so = log_command("sit_out", {"seat": 3})
+    ev = command_to_audio_event(so, clk)
+    assert ev.action == "sit_out" and ev.seat == 3 and "シート3" in ev.raw_text
+    si = log_command("sit_in", {"seat": 3})
+    ev = command_to_audio_event(si, clk)
+    assert ev.action == "sit_in" and ev.seat == 3
+    bt = log_command("set_button", {"seat": 6})
+    ev = command_to_audio_event(bt, clk)
+    assert ev.action == "set_button" and ev.seat == 6 and "ボタン" in ev.raw_text
+    assert command_to_audio_event(log_command("set_button", {}), clk) is None
+    assert command_to_audio_event(log_command("set_blinds", {"sb": 400, "bb": 200}), clk) is None
+    assert command_to_audio_event(log_command("set_blinds", {"sb": 0, "bb": 200}), clk) is None
+    assert command_to_audio_event(log_command("set_blinds", {"sb": "100", "bb": 200}), clk) is None
+    assert command_to_audio_event(log_command("sit_out", {}), clk) is None
+
     # 不正 args / unknown は None。
     assert command_to_audio_event(log_command("winner", {}), clk) is None
     assert command_to_audio_event(log_command("rebuy", {"seat": 1, "amount": 0}), clk) is None
+    assert command_to_audio_event(log_command("correct_board", {"index": 0}), clk) is None
+    assert command_to_audio_event(log_command("correct_board", {"index": 6}), clk) is None
+    assert command_to_audio_event(log_command("correct_board", {}), clk) is None
+    assert command_to_audio_event(log_command("correct_seat", {}), clk) is None
     assert command_to_audio_event(log_command("nope", {}), clk) is None
 
 

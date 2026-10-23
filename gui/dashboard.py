@@ -315,8 +315,9 @@ class GUIDashboard:
         """100ms ごとに _update_queue / _rfid_card_queue を消費して UI を更新する。"""
         try:
             while True:
-                record = self._update_queue.get_nowait()
-                self._apply_record(record)
+                item = self._update_queue.get_nowait()
+                record, shown = item if isinstance(item, tuple) else (item, None)
+                self._apply_record(record, shown)
         except queue.Empty:
             pass
         # RFID カードイベントを処理
@@ -331,8 +332,8 @@ class GUIDashboard:
         if not self._stop_event.is_set():
             self._root.after(100, self._poll_updates)
 
-    def _apply_record(self, record: "ActionRecord") -> None:
-        """ActionRecord を UI に反映する。"""
+    def _apply_record(self, record: "ActionRecord", shown: Optional[int] = None) -> None:
+        """ActionRecord を UI に反映する。`shown` は画面に出す額（コールはトータル, `on_action` が決める）。"""
         self._refresh_player_row(record.seat)
         self._refresh_header()
 
@@ -350,7 +351,7 @@ class GUIDashboard:
 
         line = (
             f"[{record.street:<8}] 席{record.seat} {record.player_name:<8} "
-            f"{record.action:<6} {record.amount:>6,}  "
+            f"{record.action:<6} {(record.amount if shown is None else shown):>6,}  "
             f"pot={record.pot_after:>7,}  conf={conf:.2f} ({src_str})"
         )
         if record.needs_review:
@@ -463,12 +464,15 @@ class GUIDashboard:
 
     def start_threads(
         self,
-        audio_thread: threading.Thread,
+        audio_thread: Optional[threading.Thread],
         integration_thread: threading.Thread,
         camera_thread: Optional[threading.Thread] = None,
         rfid_thread: Optional[threading.Thread] = None,
     ) -> None:
-        """外部で生成したスレッドを受け取って起動する。"""
+        """外部で生成したスレッドを受け取って起動する。
+
+        `audio_thread=None` は音声入力なし（config `audio.enabled=false`）。
+        """
         self._audio_thread = audio_thread
         self._integration_thread = integration_thread
         self._camera_thread = camera_thread
@@ -478,12 +482,21 @@ class GUIDashboard:
             camera_thread.start()
         if rfid_thread is not None:
             rfid_thread.start()
-        audio_thread.start()
+        if audio_thread is not None:
+            audio_thread.start()
         integration_thread.start()
 
     def on_action(self, record: "ActionRecord") -> None:
-        """IntegrationThread から呼ばれるコールバック。スレッド安全。"""
-        self._update_queue.put(record)
+        """IntegrationThread から呼ばれるコールバック。スレッド安全。
+
+        コールの額はトータル（そのストリートで出した合計）で見せる（オーナー, 2026-09-29）。integration スレッドの
+        うちに決めて一緒に渡す（GUI スレッドから engine を読まない）。
+        """
+        from core.hand_log import shown_amount
+
+        thread = self._integration_thread
+        total = thread.street_total(record) if hasattr(thread, "street_total") else None
+        self._update_queue.put((record, shown_amount(record.action, record.amount, total)))
 
     def on_rfid_card(self, rfid_ev: object) -> None:
         """IntegrationThread から呼ばれる RFID カードコールバック。スレッド安全。"""

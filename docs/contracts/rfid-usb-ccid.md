@@ -1,6 +1,21 @@
 # RFID USB CCID firmware ↔ host (PC/SC) contract
 
-**version: 1.0 (frozen, ADR-0034)** ／ canonical RFID transport（ADR-0015）の firmware↔Python 境界。
+**version: 1.11 (読み取り装置の一覧・再起動。1.0 frozen 起点、以降は additive)** ／ canonical RFID transport（ADR-0015）の
+firmware↔Python 境界。v1.1 の追加点（1 reader 複数枚の Get UID 連結 / UID MSB-first）、
+**v1.2 の変更点（CCID slot は 1 つだけ / 物理リーダーは Get UID の P2 で選ぶ / 台数問い合わせ）**、
+**v1.3 の変更点（board reader 全台で 1 つの論理ボードを共有し、位置は検出順で決める =
+board の `index` / `cards` を廃止）**、**v1.4 の追加点（ミスディール訂正 = 明示コマンドでの位置解放）**、
+**v1.5 の変更点（卓の流れに合わせた解釈 = 手札は board にならない / 滞留で確定 / 配り直しの自動反映）**、
+**v1.6 の変更点（board の 1 枚だけの差し直し）**、**v1.7 の変更点（turn / river の差し直し・確認 3 秒）**、
+**v1.8 の変更点（確定前の board の札の途切れを 3 秒まで許す・「確認中」の表示）**、
+**v1.9 の変更点（読み落ちたことのある札は差し直しの対象にしない・戻った札で差し替えを取り消す）**、
+**v1.10 の変更点（5 枚埋まったボードの差し直しは消えた札の位置に入れる・消えるのを待つ）**、
+**v1.11 の追加点（使える物理リーダーの一覧 `FF CA 00 FE 00` / 読み取り装置の再起動 `FF CA 00 FD 00`）** は §10 を参照。v1.2 は「slot ごとに reader 名を分ける」規約を
+廃止し（Windows の汎用 CCID ドライバが 1 インターフェース 1 slot しか公開しないため。ISSUE-0022 /
+ADR-0052）、v1.3 は「board reader = ストリート専用」という前提を廃止する（実機は board reader が
+並んでいるだけで、どの台がどのストリートを受けるかは置き方次第。ISSUE-0024 / ADR-0053）。
+**firmware 側の要求は v1.0 から一つも変わっていない**（firmware は UID を返すだけで役割・位置を
+知らない）。Get UID の `P2=0`・UID 正規化・デバウンスも v1.0/1.1 と同一なので **1 台構成の挙動は不変**。
 
 ESP32-S3（PN5180 ×N）firmware と host Python（pyscard / PC/SC, `rfid/bridge.py` /
 `rfid/reader_thread.py`）は別々に実装される。drift を防ぐため、host が依存する **USB descriptor /
@@ -15,16 +30,18 @@ HTTP 経路（`rfid/http_receiver.py`, ADR-0015 で optional secondary）は本�
 ## 1. 役割と全体像
 
 ```
-[PN5180 ×N] ──(SPI)── [ESP32-S3 native USB = USB CCID class] ──(USB)── [host PC]
-                                                                         OS PC/SC stack
-                                                                         (pcscd / WinSCard)
-                                                                            │ pyscard
-                                                                   rfid/bridge.py (PCSCBridge)
+[PN5180 ×N] ──(SPI)── [ESP32-S3 native USB = USB CCID class, slot 1 個] ──(USB)── [host PC]
+      ↑ 物理リーダー k は Get UID の P2 で選ぶ                                     OS PC/SC stack
+                                                                                  (WinSCard / pcscd)
+                                                                                     │ pyscard
+                                                                   rfid/bridge.py (PCSCBridge, 1 接続)
                                                                    rfid/reader_thread.py
 ```
 
-- firmware は PN5180 ×N を **1 つの USB CCID composite device の N slot** として host PC/SC に公開する。
-- host は OS 標準 PC/SC スタック越しに **pyscard** で各 slot（reader_name）を列挙・読み取る。WiFi/HTTP 不要。
+- firmware は PN5180 ×N を **1 つの USB CCID device の 1 slot**（reader_name 1 個）として公開し、
+  **物理リーダー k（0..N-1）は Get UID pseudo-APDU の P2 で選ばせる**（v1.2, §3/§6, ADR-0052）。
+- host は OS 標準 PC/SC スタック越しに **pyscard** でその reader を列挙し、1 本の接続に
+  N 個の Get UID を流して全リーダーを読む。WiFi/HTTP 不要。
 
 ## 2. USB descriptors（firmware MUST）
 
@@ -32,21 +49,41 @@ HTTP 経路（`rfid/http_receiver.py`, ADR-0015 で optional secondary）は本�
   での RFID 公開はしない（PC/SC スタックに自然に乗せるため）。
 - **VID/PID**: 製作時に確定し、確定値を本節に追記する **MUST**（host は VID/PID を直接見ず reader_name で
   マッチするが、衝突回避・ドライバ選択のため固定する）。テスト用途で実 VID を持たない場合も PID は固定。
-  - 例（確定後に記入）: `VID=0x____ PID=0x____`。
+  - **確定値（2026-06-22, 実機 bring-up）**: `VID=0x303A PID=0x8B5D`（Espressif VID、PID は本プロジェクト固定）。
 - **manufacturer / product 文字列**: 固定 **MUST**。product 文字列は host の reader_name に現れ、config の
   マッチ対象になるため **安定**（ファーム更新で変えない）**MUST**。
-  - 推奨: manufacturer=`PokerRFID`、product=`PN5180-CCID`（OS が slot 接尾辞を付与 → §3）。
+  - **確定値**: `manufacturer=PokerRFID`、`product=PN5180-CCID`（Windows PC/SC は `<manufacturer> <product> <slot index>` の体裁で描画 → §4 reader_name 参照）。
 - **serial 文字列**: device 単位で安定 **SHOULD**（複数台運用時の識別。reader_name に現れうる）。
+- **endpoint 構成（2026-09-10 実機で確定, ADR-0051）**: bulk OUT + bulk IN の **2 本のみ**とし、
+  interrupt-IN（`RDR_to_PC_NotifySlotChange`）は載せない **SHOULD**。Windows(usbccid) は interrupt-IN が
+  あると通知を読み取っても slot 状態に反映せず、無くても `GetSlotStatus` を polling しない（カード有無は
+  §8 の方式で伝える）。記述子の EP 構成を変えるときは `bcdDevice` を上げる（Windows は VID/PID/REV で
+  記述子をキャッシュする。現在 `0x0102` 系）。
+- **slot 数は 1 固定（v1.2 MUST）**: CCID functional descriptor の `bMaxSlotIndex` は **常に 0**
+  （= 1 slot）。物理リーダーの台数 N を増やしても **USB 記述子は変わらない**（N は §6 の APDU で
+  問い合わせる）ので、台数変更で `bcdDevice` を上げる必要はない。記述子そのものを変える場合のみ
+  `bcdDevice` を上げる **MUST**。
 
-## 3. CCID multi-slot と reader_name（firmware MUST / host MUST）
+## 3. CCID slot は 1 つだけ / 物理リーダーは P2 で選ぶ（firmware MUST / host MUST, v1.2）
 
-- firmware は PN5180 1 個 = CCID **1 slot** として公開する **MUST**。slot 数 N は config と一致させる。
-- 各 slot の reader_name は **slot ごとに一意で、再列挙・再起動を跨いで安定** **MUST**。OS が
-  `<product> [<iface/slot>] (<serial>) <NN> <MM>` 形式で描画する（OS 依存, §8）が、**安定部分（product 文字列
-  + slot index）が変わらない**こと **MUST**。
-- **slot 順序**は firmware 内で固定 **MUST**（slot 0,1,2,… が常に同じ物理リーダーに対応）。
-  - 推奨マッピング（firmware の slot index → 役割）: `0..(S-1)` = seat 1..S、続く `S..(S+4)` = board 1..5。
-    ただし **正準は host config**（§4）であり、firmware は順序の安定のみ保証する。
+- firmware は PN5180 が何台でも **CCID slot を 1 つだけ**公開する **MUST**（`bMaxSlotIndex=0`）。
+  **理由（実機で確定, ISSUE-0022 / ADR-0052）**: Windows の Microsoft 汎用 CCID ドライバ（usbccid）は
+  **1 インターフェース 1 slot** しかサポートせず、`bMaxSlotIndex=1` にしても PC/SC には
+  `PokerRFID PN5180-CCID 0` しか現れない（`… 1` は "Reader not found"）。slot ごとに USB
+  インターフェースを分ける回避策は ESP32-S3 の USB endpoint が 6 本しかなく最大 5 台までで、
+  本番 11 台に届かない。
+- **物理リーダー k（0..N-1）は Get UID pseudo-APDU の P2 で選ぶ** **MUST**（§6）。
+  k の割り当ては firmware 内で固定 **MUST**（k=0,1,2,… が常に同じ物理リーダー）。
+  - **本番構成（物理 11 台, v1.2）**: `k=0..7` = seat 1..8（各席に hole card **2 枚重ね**）、
+    `k=8..10` = **board reader 3 台**（ボード領域に左から右に並べる。**ストリート専用ではない** =
+    どの台がどのカードを受けるかは置き方次第, v1.3 §4）。board は「1 リーダー = 1 枚」ではなく
+    **1 リーダーに載った枚数ぶん**を読む（§6 の連結応答）。
+  - ただし **役割の正準は host config**（§4）であり、firmware は k の順序の安定のみ保証する。
+- reader_name（1 個）は **再列挙・再起動を跨いで安定** **MUST**。OS が
+  `<manufacturer> <product> <slot index>` 等の形式で描画する（OS 依存, §8）が、
+  **安定部分（product 文字列）が変わらない**こと **MUST**。
+- v1.1 までの「PN5180 1 個 = CCID 1 slot / slot ごとに一意な reader_name」規約は **廃止**する
+  （Linux/pcsc-lite では multi-slot が見えるが、本番 OS は Windows なので分岐を作らない）。
 
 ## 4. reader_name ↔ 役割（host config の正準形）
 
@@ -56,18 +93,134 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 "rfid": {
   "transport": "pcsc",
   "pcsc_readers": [
-    {"name": "PN5180-CCID [Interface 0]", "role": "seat",  "seat": 1},
-    {"name": "PN5180-CCID [Interface 1]", "role": "seat",  "seat": 2},
-    {"name": "PN5180-CCID [Interface 5]", "role": "board", "index": 1}
+    {"name": "PokerRFID PN5180-CCID 0", "reader": 0,  "role": "seat",  "seat": 1},
+    // … reader 1..7 = seat 2..8（name はすべて同じ = CCID slot は 1 つ, §3）…
+    // board は **左から右の順に並べて書く**。位置は config に書かない（検出順で決まる, v1.3）
+    {"name": "PokerRFID PN5180-CCID 0", "reader": 8,  "role": "board"},
+    {"name": "PokerRFID PN5180-CCID 0", "reader": 9,  "role": "board"},
+    {"name": "PokerRFID PN5180-CCID 0", "reader": 10, "role": "board"}
   ]
 }
 ```
 
-- 各要素 = `{"name": <PC/SC reader_name 完全一致文字列>, "role": "seat"|"board", "seat": 1..9 (role=seat),
-  "index": 1..5 (role=board, 任意)}`。
+- 各要素 = `{"name": <PC/SC reader_name 完全一致文字列>, "reader": 0..252 (任意・既定 0。0xFD〜0xFF は予約, v1.11),
+  "role": "seat"|"board", "seat": 1..9 (role=seat)}`。**role=board に位置指定は無い**（v1.3）。
+- **`reader`（v1.2 追加）** = **物理リーダー index**（= Get UID の P2, §6）。省略時 0 なので、
+  1 台構成の v1.0/1.1 の config はそのまま動く。**`(name, reader)` の組が一意**であること **MUST**
+  （v1.1 までの「`name` が一意」は廃止 — reader 名は 1 つだけになったため `name` は重複するのが正常）。
+  255（`0xFF`）は台数問い合わせ用に予約（§6）。`probe_pcsc check` が範囲・重複を検出する。
+- **board は全台で 1 つの論理ボード（v1.3, ADR-0053）**。物理配置は「ボード領域に board reader が
+  N 台並んでいるだけ」で、どの台がどのストリートを受けるかは **置き方次第**（flop 3 枚が 3 台に
+  散ることも、真ん中の 1 台に 2 枚載ることもある）。よって位置は reader 単位に固定できない。
+- **位置割り当て規則（host, v1.3）**: `RFIDEvent.board_index`（1..5）は **board reader 全台を
+  通した検出順** = ディーラーが配った順。新規 UID には空き位置の最小を与える。
+  **一度外して同じ UID を戻すと同じ位置に戻る**（誤って抜いた flop のカードを戻しても board の
+  並びが変わらない）。5 枚（flop 3 + turn + river）を超えたら WARN + `board_index=None`
+  （engine は末尾に追記）。
+- **1 枚 = 1 位置** **MUST**（ISSUE-0025）。**既に位置を持つ UID には常に同じ位置を返す**
+  （再割り当てしない）。隣接リーダーの磁界が重なって 1 枚を 2 台が読むと、デバウンスは reader
+  単位なので **同じ UID で 2 回発火する**が、位置が同じなら engine は同じスロットを上書きする
+  だけで無害。再割り当てすると 1 枚が 2 位置を占め、**枚数が水増しされてストリートが誤って進む**。
+- **ハンド内の位置は「消えただけでは」解放しない** **MUST**（ISSUE-0026）。**カードが盤上から
+  見えなくなったことだけを理由に位置を返さない。** ポーカーではハンド中にボードのカードが減る
+  ことはなく、host 側の board（`integration/engine.py` の `_board_positions`）も **カードが外れても
+  縮まない**（ハンド確定までボードを保持する設計）ので、両者を同じ規則にして構造的にずれないように
+  する。消えただけで解放すると、**一瞬の読み落ちや札の入れ替えで空いたスロットを別の札が奪い**、
+  戻ってきた札が別位置を取って「同じ札が 2 か所」「枚数の水増しでストリートが誤って進む」が起きる。
+  席 reader の抜き差しは board に影響しない。
+- **卓の流れに合わせた解釈（v1.5, ADR-0058, 本番の起動経路で有効）**:
+  - **そのハンドで席 reader が記録した UID は board の札にしない** **MUST**（常に有効）。フォールドした
+    手札は卓の中央へ押し出され、board reader の上を通る。位置は与えず、その席の「マック」として記録する。
+  - **board の札は `commit_sec`（既定 2 秒）載り続けてから位置を与える** **SHOULD**。一瞬の通過
+    （席で読めなかった手札など）は位置を取らない。`gap_sec`（既定 1.5 秒）以下の途切れは載り続けて
+    いるとみなす（**位置を与える前の board の札は 3 秒まで**, v1.8。reader の境目・重ね置きの札は途切れ
+    ながら読める）。`RFIDEvent.timestamp` は**最初に見えた時刻**のまま（配布時刻, ADR-0055）。
+  - **配り直しは入力なしで反映する** **SHOULD**。消えただけでは差し替えない。board は次のどれかに
+    当たったときだけ位置を差し替え、どれにも当たらなければ次の空き位置に入れる（v1.6）:
+    1. **1 枚だけの差し直し**: 前の札が見えなくなった近くへ新しい札が置かれて `commit_sec` 載り続け、
+       前の札が `redeal_confirm_sec`（既定 3 秒）以上見えない（v1.7）。前の札が戻れば読み落ちとみなし、
+       新しい札は次の位置。「近く」と時間の条件:
+       - **最後に配った turn / river**（いちばん後ろの 4・5 枚目）: **同じか隣の** board reader（config の
+         左からの並び）。時間は問わない（位置が reader の境目にある / 間を空けて配り直す）。
+       - **それ以外**（flop の札など）: 前の札を読んでいた board reader、かつ前の札が消えてから
+         `redeal_window_sec`（既定 30 秒）以内。別の reader の札が読み落ちている間に次のストリートの札が
+         来ても、次の位置のまま。
+       - **そのハンドで一度でも読めなくなって戻った札**（位置を与える前の途切れも含む）は差し直しの対象に
+         しない（v1.9。読みにくい位置の札は載ったまま長く読めなくなる）。本当に差し直していれば、新しい札は
+         次の位置に入り、下の 3 で直る。
+       - **差し替えの取り消し**（v1.9）: 差し替えられた札が戻って `commit_sec` 載り続け、差し替えた札が
+         いまも載っていて最後に配った札であり、戻った札が前と同じか隣の reader で読め、後ろに空き位置が
+         あれば、戻った札を元の位置（時刻も元のまま）、差し替えた札を次の空き位置にする。host の board へは
+         戻った札（`replaces` = 差し替えた札）→ 差し替えた札の順に送る。
+    2. **flop 全体の配り直し**: flop の札が全部見えず、新しい札が flop の札を読んでいた reader の上に
+       載り続けた（時間によらない）。全部が `redeal_confirm_sec` 以上見えないのを確かめてから差し替え、
+       続く新しい札が残りの flop の位置を順に取る。
+    3. **5 枚埋まったボード**: 新しい札が確定し、5 枚のうち**ちょうど 1 枚**が `release_sec` 以上見えない →
+       新しい札はその札の差し直し。その札が消えたあとに空き位置へ入れた札（差し替えで入った札は除く）が
+       あれば、それが見逃した差し直しなので、その札を消えた札の位置へ移して後ろを詰め、新しい札を 5 枚目に
+       する（早すぎた turn を外し、間を空けて配り直した等）。なければ新しい札を**消えた札の位置**に入れる
+       （river のあとで turn を差し直した, v1.10）。見えていない札がまだ `release_sec` に達していなければ待つ
+       （v1.10。戻れば 6 枚目 = WARN・位置なし）。host の board は位置の上書きしかできないので、**後ろの位置
+       から**送る。
+    席は、前の札が `release_sec` 以上見えず新しい札が載り続けたら差し替え、同じハンドで別の席に記録した
+    札は元の席から消えて新しい席に載り続けたら移す。差し替えは `RFIDEvent.replaces`（前の札）で伝え、
+    engine はそのハンドを `needs_review` にする。
+  - `release_sec=None` / `commit_sec=0` は従来の解釈（最初に見えた瞬間に確定・差し替えは明示の
+    訂正だけ）。`tools/probe_pcsc.py` の検査はこちら。`redeal_window_sec=None` は上の 1 を行わない。
+  - 記録したボードの札がいま読めていなければ、host は表示用に「外れた」と出してよい
+    （`RFIDThread.board_presence()["absent"]`。記録は変えない, v1.7）。読めているが位置を与える前の札は
+    「確認中」と出してよい（`["pending"]`, v1.8）。
+  - **フロップの札が読めないとき**（host, 2026-09-29, ADR-0068 R3。オーナー「フロップは必ず 3 枚出るので、
+    同時に出てなかった場合に、ターンカードをフロップに充当してはいけない」）: フロップの位置に空きがあっても
+    （1〜2 枚しか読めていない）、新しい札を次のどれかでフロップに入れず 4 枚目以降にする
+    （`RFIDThread._not_a_flop_card`）。
+    - board reader の左右の位置の目安は config の並び（左から k 台目, 0 始まり / 台数 n）: 右端 `(k+1)/n ≤ 0.6` の
+      reader は**フロップだけ**を読む、左端 `k/n ≥ 0.6` の reader は**ターン・リバーだけ**を読む（`_FLOP_EDGE`。
+      店舗の 3 台 = 左はフロップだけ・右はターン・リバーだけ・真ん中はどちらも, 20 ハンドの実測で例外なし）。
+    - その札を読んだ reader がすべて右側（ターン・リバーだけ）なら 4 枚目以降。左側の reader が読んでいれば
+      フロップ（遅れて読めたフロップの札）。
+    - どちらでもなければ時刻で決める: フロップの最初の札から `flop_window_sec`（既定 10 秒, config
+      `rfid.flop_window_sec`）より後に見え始めた札は 4 枚目以降（店舗の実測: フロップの 3 枚は最初の札から
+      5.5 秒以内、ターンは早いと 7 秒）。
+    - `flop_window_sec=null` は従来どおり（空き位置の若い順。本番の起動経路の既定は 10 秒 = 有効）。engine は
+      読めなかった位置を `??` としてハンドの記録に残し（`hand` schema 1.6）、枚数ではなく位置でストリートを決める。
+- **位置割り当ての全解放は「新ハンド」、1 位置の解放は「明示のミスディール訂正」** **MUST**
+  （ISSUE-0026 / ADR-0054）。どちらも位置と board reader のデバウンス状態をまとめて落とす
+  （盤上に残っているカードは改めて検出し直す）。
+  - **新ハンド**（全位置）: 運用手順は「ハンドが終わったらボードを下げて新ハンド」。
+  - **ミスディール訂正**（1 位置だけ）: `RFIDThread.forget_board_position(index)` /
+    `forget_seat_cards(seat)`。host のコマンド（CLI `cb`/`cs`、staff API の control
+    `correct_board`/`correct_seat`）で解放する。自動の差し替え（v1.5 / v1.6）を待てないとき・
+    確実に直したいときの手段として残す。解放後に載っているカードは再発火し、位置を持つ札は同じ位置に
+    戻り、空いた位置は次の新しい札が取る（取り消した札を先に外していなければ再実行でやり直せる）。
+- **ボードに同じカードが 2 枚以上見えたら WARN + `needs_review`** **SHOULD**（1 組のデッキでは
+  物理的にあり得ないので、`rfid_cards.json` の重複登録か誤読みのサイン。ISSUE-0026）。
+- **board reader は左から右の順に config へ並べて書く** **SHOULD**。同じ poll で台をまたいで
+  2 枚以上増えたときの位置順が記載順で決まる（host の poll ループが config 順に回る）。
+  **1 台に同時に載った複数枚の左右順は保証しない**（UID 順）= 既知の制約。street 遷移は枚数判定・
+  PHH は flop をまとめて出力なので実害は JSON ログの並びのみ（ISSUE-0024）。
+- **旧 `index` / `cards`（v1.1/v1.2）は廃止**。残っていても host は**無視**し、起動時に WARN する
+  **MUST**（`probe_pcsc check` の lint でも指摘）。「設定したのに効かない」状態を黙って作らない。
+- **board reader 1 台だけの構成は警告**する（5 枚を 1 台に重ねることになり給電不足で読めない
+  可能性が高い。推奨 3 台以上, ISSUE-0021 OQ6）。
+- 席 reader は位置を持たない（hole card は順不同）。2 枚重ねでも `RFIDEvent` が UID ごとに 1 件ずつ
+  出るだけで、engine が `seat` ごとに最大 2 枚蓄積する。
 - `name` は **OS が描画する reader_name と完全一致** **MUST**（host は前方一致でなく等値で照合,
   `rfid/bridge.py:PCSCBridge.connect`）。OS により文字列が異なるため、運用 OS の実値を入れる（§8）。
-- 役割→`RFIDEvent.role`/`.seat` は host config が **唯一の source of truth**。firmware は slot 順序のみ保証。
+- **確定値（Windows, 2026-06-22 実機）**: `PokerRFID PN5180-CCID 0`（manufacturer + product + slot index,
+  半角空白区切り）。**slot は常に 1 つなので末尾は常に ` 0`**（v1.2）。Linux/macOS の体裁は別なので、
+  運用 OS で `probe_pcsc list` を実行して実 reader_name を確認すること。
+- 役割→`RFIDEvent.role`/`.seat` は host config が **唯一の source of truth**。firmware は物理リーダー
+  index（P2）の順序のみ保証。`RFIDEvent.reader_id` は従来どおり config の**並び順**（`reader_{i}`）で、
+  P2 の値ではない（既存の event 契約は不変, §9）。
+- **中継から読むことがある**（host, 2026-09-30, ADR-0070）: RDP で操作する店舗 PC では、RDP のセッションの中の
+  アプリから PC/SC に届かない（`SCardEstablishContext` = `0x8010001D`。スマートカードの転送を両側で止めても同じ）。
+  そのときは中継（`rfid/relay.py` + `tools/rfid_relay.py serve`、システムの権限のタスク `PokerRFIDRelay` =
+  `installer/rfid_relay_task.ps1`）が `pcsc_readers` の `(name, reader)` を本契約どおりに読み、最新の UID を PC の中
+  （`127.0.0.1:8792`, config `rfid.relay_port`）だけに渡す。ロガーは中継が動いていれば中継から（`RelayBridge`）、
+  無ければ直接（`PCSCBridge`）読む（`AutoRFIDSource`）。**firmware から見た APDU 列・本契約の規則は同じ**で、
+  在否・位置・配り直しの解釈もロガーの `RFIDThread` が同じ規則で行う。中継の読み取りが 3 秒より古ければ「札なし」と
+  同じ扱い。
 - HTTP 経路の `config.rfid.readers`（**dict**, `{reader_id: {role,seat}}`）とは **別キー**であり混同しない
   **MUST**（list=pcsc / dict=http）。
 
@@ -79,36 +232,109 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 - ATR は card-type ごとに **安定** **SHOULD**（同一カード種別で毎回同じ）。
 - **host は UID 読み取りに特定 ATR バイトを前提にしない**（forward-compat）**MUST**。host は connect 成功後に
   §6 の Get UID pseudo-APDU のみで UID を取得する（`rfid/bridge.py` は ATR を解釈しない）。
+- **power-on は常に成功させる（firmware MUST, 2026-09-10 追記, ADR-0051）**: Windows(usbccid) は bind 直後に
+  `PC_to_RDR_IccPowerOn` を送り、`ICC_MUTE` を返すとカードを「無応答（`0x80100066`）」として latch し
+  再列挙まで再試行しない。よって firmware は物理カードの有無に関わらず IccPowerOn に固定 ATR を返す
+  （slot は常時 present, §8）。ATR 受理後に OS がカード種別探索の APDU（`00 A4 04 00 …` SELECT AID /
+  `00 CA 7F 68 00` GET DATA 等）を送ることがあるが、`6D 00`（INS 未対応）で応答してよい。
+  `Parameters` 応答は `bProtocolNum` と整合させる（T=1 は 7 byte / T=0 は 5 byte）。
+  - **確定 ATR（実機で受理）**: `3B 8F 80 01 80 4F 0C A0 00 00 03 06 03 00 01 00 00 00 00 6A`
+    （PC/SC v2.01 Part 3 storage-card proxy, T=0/T=1, TCK 整合）。
 
 ## 6. pseudo-APDU（firmware MUST / host 実装済）
 
-- **Get UID**: host は `FF CA 00 00 00`（PC/SC v2.01 Part 3 Get Data: UID）を送る。firmware/slot は
-  **応答に UID バイト列 + SW=`90 00`** を返す **MUST**（`rfid/bridge.py:_GET_UID_APDU` / `_SW_OK`）。
+- **Get UID（v1.2: P2 = 物理リーダー index）**: host は `FF CA 00 <k> 00` を送る（PC/SC v2.01 Part 3
+  Get Data: UID の P2 を物理リーダー選択に使う）。firmware は **リーダー k に載っている UID バイト列 +
+  SW=`90 00`** を返す **MUST**（`rfid/bridge.py:get_uid_apdu` / `_SW_OK`）。
+  - `k=0` は v1.0/1.1 の `FF CA 00 00 00` と**同一**（後方互換 MUST）。
   - カード不在・読み取り失敗時は `90 00` 以外（例 `6A 81` / `63 00`）を返す **SHOULD**（host は非 `90 00` を
-    「UID なし」として None 化）。
-- v1.0 で host が依存する pseudo-APDU は **Get UID のみ**。ATS/historical bytes（`FF CA 01 00 00`）等は
-  **本契約の対象外**（additive に v1.1+ で追加可能）。
+    「UID なし」として空扱い）。
+  - **k が範囲外（k ≥ N）のときは `6A 86`（Incorrect P1/P2）** を返す **MUST**（v1.2）。host は空扱いに
+    加えて **WARN を 1 回だけ**出す（config の `reader` 誤りの検出。`probe_pcsc check` は FAIL 扱い）。
+- **物理リーダー台数の問い合わせ（v1.2 additive, MUST）**: host が `FF CA 00 FF 00` を送ったら、
+  firmware は **台数 N を 1 バイト + `90 00`** で返す **MUST**（N ≤ 253。v1.11 で 0xFD・0xFE も予約）。`0xFF` は台数問い合わせ用に
+  予約された P2 で、物理リーダー選択には使えない。**v1.1 以前の firmware は非対応**で `6A 81` /
+  `6D 00` 等を返すため、host は「非対応 = None」として扱い機能を落とさない
+  （`rfid/bridge.py:query_reader_count`、`probe_pcsc list` が表示）。
+- **複数 UID の連結（v1.1 additive, MUST）**: 1 台のリーダーに ISO 15693 カードが**複数枚重ねて**置かれた場合
+  （席 = hole card 2 枚 / board1 = flop 3 枚）、firmware は載っている全カードの **8 バイト UID を枚数ぶん
+  連結**して返す（1 枚 = 8B、2 枚 = 16B、3 枚 = 24B、**最大 4 枚 = 32B**）+ `90 00`。0 枚は `6A 81`（従来どおり）。
+  - 並び順は firmware が **UID 昇順**に整列する（安定化のためであって、意味・位置は持たない。
+    位置は host が §4 の規則で割り当てる）。
+  - **host の分割規則 MUST**: 応答データ長が **16 / 24 / 32 のときだけ 8 バイトずつ分割**し、それ以外
+    （4 / 7 / 8 等）は単一 UID として扱う（ISO 14443A の 4/7B と衝突させないため）。
+    実装は `rfid/bridge.py:split_uid_response` / `PCSCBridge.read_uids`。
+  - anti-collision（複数カードの個別読み出し）は firmware 側の責務（ISSUE-0021）。host は連結された
+    応答をパースするだけで、枚数・順序に業務的意味を持たせない。
+- **使える物理リーダーの一覧（v1.11 additive, SHOULD）**: host が `FF CA 00 FE 00` を送ったら、firmware は
+  **2 バイト（little endian）のビット列 + `90 00`** を返す。bit k = 物理リーダー k が**使える**（起動のときに
+  初期化でき、いまも SPI/BUSY が答える）。起動のときに未通電・初期化に失敗したリーダー、実行中に SPI/BUSY が
+  続けて答えなくなったリーダー（firmware の実装では RF の ON/OFF・RF 設定のロードが 20 回続けて失敗 ≈ 6 秒）は 0。
+  こうしたリーダーは Get UID に「札なし」と答え続けるので、host はこの一覧でしか区別できない（店舗 2026-10-06:
+  真ん中の board reader が 1 時間「札なし」と答え、読み取り装置の再起動で直った）。
+  - 起動直後（USB は上がったが PN5180 の初期化の途中）は一覧が無いので **`69 85`** を返す（host はあとで聞き直す）。
+  - 物理リーダーは 16 台まで（2 バイト）。**v1.10 以前の firmware は `6A 86`**（範囲外の P2）を返し、host は
+    「一覧なし = None」として扱う（`rfid/bridge.py:query_ready_readers`）。
+- **読み取り装置の再起動（v1.11 additive, SHOULD）**: host が `FF CA 00 FD 00` を送ったら、firmware は **`90 00` を
+  返してから**（300 ms 後に）自分を再起動する（`esp_restart`。USB はいったん切れて列挙し直し、起動のときの共有
+  RST で全 PN5180 がリセットされる = PC の USB から給電している構成で USB を挿し直したのと同じ。電源は切れない）。v1.10 以前の firmware は
+  `6A 86` を返す（host は「命令なし」= 手で再起動するよう案内する, `rfid/bridge.py:request_device_restart`）。
+  - **給電アダプタで動かしている卓の注意**（店舗 2026-10-06, ADR-0070）: ESP32 が PC の USB ではなく給電アダプタから
+    電源を取っていると、**PC との USB を抜き挿ししても ESP32 は再起動しない**（PN5180 の初期化 `pn5180_init` は起動の
+    ときだけなので、読めなくなったリーダーは読めないまま）。手で再起動するときは**給電アダプタを抜いて数秒待って
+    挿し直す**。host の案内（旧 firmware・命令が届かないとき・再起動で直らないとき）はこれを出す
+    （`rfid/reader_thread.py:_POWER_CYCLE`, 2026-10-13）。
+  - **host MUST**: 再起動のあいだ（数秒）は全リーダーが読めない（read_uids が空 = 札が消えたのと同じに見える）ので、
+    **卓に札が無い状態（全リーダーが空）が続いたときだけ**送る（`RFIDThread`: `rr` は 2 秒、自動は 10 秒）。送ったら
+    接続を捨て、列挙し直したあとにつなぎ直して一覧を聞き直す。中継（`rfid/relay.py`）から読んでいるときは中継に
+    頼む（`POST /restart`。RDP のセッションの中からはリーダーに命令を送れない）。
+- `0xFD`〜`0xFF` は host の予約 P2（物理リーダー選択には使えない。物理リーダーの番号は 0〜252）。
+- v1.11 で host が依存する pseudo-APDU は **Get UID（`FF CA 00 <k> 00`）・台数（`FF CA 00 FF 00`）・一覧
+  （`FF CA 00 FE 00`）・再起動（`FF CA 00 FD 00`）のみ**。ATS/historical bytes（`FF CA 01 00 00`）等は
+  **本契約の対象外**（additive に追加可能）。
 
 ## 7. UID 長と正規化（host MUST）
 
 - UID は **4 / 7 / 8 バイト**を取り得る（4=Mifare Classic、7=Type A 7-byte、**8=ISO 15693**）。
+  複数枚重ね（§6）のときは 8B UID がその枚数ぶん連結される（16/24/32B）。
 - host は UID を **長さ非依存**で扱い、`bytes_to_tag_id` / `normalize_tag_id` で **大文字コロン区切り 16 進**に
   正規化する **MUST**（例: 8B `04 AB CD EF 12 34 56 78` → `04:AB:CD:EF:12:34:56:78`）。`rfid_cards.json` の
   tag_id も同正規化で照合する。
+- **バイト順（firmware MUST, v1.1 明文化）**: firmware は UID を **MSB-first**（先頭バイトが UID の最上位
+  = ICODE なら `E0:04:…` で始まる）で返す。ISO 15693 の inventory 生レスポンスは **LSB-first** なので、
+  firmware 側で反転してから返す（実装済）。host は受け取ったバイト列をそのまま正規化するだけで、
+  並べ替えない。カード登録（`tools/register_cards.py`）と `rfid_cards.json` もこの向きで固定される。
 
 ## 8. hot-plug / 再列挙 / multi-platform
 
-- **card present/removed**: host は各 slot を `poll_interval_ms`（既定 100ms）で polling し、UID の有無で
-  検出する（`RFIDThread`。同一 UID 連続はデバウンスで 1 回, 外れ→再タッチで再発火）。firmware は CCID の
-  card-present 状態を正しく報告する **MUST**（カード無しで Get UID が `90 00`+UID を返さない）。
+- **接続は reader 名ごとに 1 本を持続してよい（host, v1.2）**: slot は常時 present（ADR-0051）なので、
+  host は poll ごとに `SCardConnect/Disconnect` を繰り返さず、**reader_name につき 1 本の接続を保持**して
+  そこに N 個の Get UID を流す（`rfid/bridge.py` の共有接続 + transmit の直列化）。firmware から見ると
+  `IccPowerOn/Off` の往復が消え、11 台ぶんの poll が 1 接続の APDU 列になる。transmit が失敗したら
+  host は接続を捨てて次の poll で張り直す（USB 抜け・再列挙への耐性は下の項目のまま）。
+  firmware は **同一 slot に対する APDU が連続で来ること**を前提にしてよいが、**接続が切れても
+  状態を失わない**（次の接続でも同じ k が同じ物理リーダーを指す）**MUST**。
+- **card present/removed**: host は各リーダー（P2 = k）を `poll_interval_ms`（既定 100ms）で polling し、
+  UID の有無で検出する（`RFIDThread`。同一 UID 連続はデバウンスで 1 回, 外れ→再タッチで再発火）。**カード有無は
+  Get UID の SW だけで伝える**（あり: UID + `90 00` / なし: `6A 81` 等）**MUST**。host は CCID の slot 状態
+  （bmICCStatus / NotifySlotChange）に依存しないため、firmware は slot を **常時 present** として公開してよい
+  （**推奨・Windows では必須**, ADR-0051: 物理有無を slot 状態に反映すると Windows が bind 時に MUTE を
+  latch する）。**カード無しで Get UID が `90 00`+UID を返さない**ことが唯一の不変条件 **MUST**。
+- **デバウンスは UID 単位（host, v1.1）**: host は reader ごとに「現在載っている UID の**集合**」を保持し、
+  poll ごとに **増えた UID だけ** `RFIDEvent` を 1 件ずつ出す（2 枚同時に置けば 2 件）。減った UID は
+  イベントを出さず状態のみ更新する（board は §4 の offset を解放）。よって 1 枚だけ外して戻すと
+  **その UID だけ**再発火し、置きっぱなしの他の枚は再発火しない（v1.0 の「slot 単位で 1 枚」の
+  デバウンスを UID 単位に一般化したもので、1 枚運用時の挙動は同一）。
 - **USB 再列挙 / replug**: reader_name の安定部分（§3）が変わらない **MUST**。host の live 再列挙対応
-  （実行中の reader 追加・名称変化の追従）は **本 v1.0 では起動時 connect のみ**（live hot-add は future,
-  ISSUE 追跡）。
+  （実行中の reader 追加・名称変化の追従）は **起動時 connect のみ**（live hot-add は future, ISSUE 追跡）。
+  ただし v1.2 の持続接続は transmit 失敗時に自動で張り直すため、**同じ reader_name に戻る replug は
+  再起動なしで復帰しうる**（保証はしない）。
 - **rfid 切断時**: USB 切断・CCID 再列挙で connect 不能でも host はクラッシュしない（`rfid.enabled=false`
   相当の「RFID なしモード」で継続）**MUST**（エラーハンドリング方針, CLAUDE.md）。
 - **multi-platform**: Linux `pcscd` / macOS / Windows WinSCard で動作する **MUST**。reader_name の描画は OS
   依存（OS が product/slot/serial を異なる体裁で連結）。よって `pcsc_readers[].name` は **運用 OS の実 reader_name**
-  を入れる（`python -c "from smartcard.System import readers; print([str(r) for r in readers()])"` で確認）。
+  を入れる（`python tools/probe_pcsc.py list` で確認）。**本番 OS は Windows**（usbccid の single-slot 制限が
+  v1.2 の設計制約, §3）。他 OS でも 1 slot + P2 方式はそのまま動くので、OS ごとの分岐は持たない。
 
 ## 9. host 不変条件（hardware 非依存・既存契約）
 
@@ -117,12 +343,116 @@ host は canonical PC/SC 経路で `config.rfid.pcsc_readers` を **list** と�
 
 ## 10. versioning / freeze
 
+- **v1.11（2026-10-06, 店舗）** — 真ん中の board reader が 1 時間「札なし」と答え続け（エラーは出ない）、読み取り装置
+  （ESP32）の再起動で直った。firmware に **使える物理リーダーの一覧**（`FF CA 00 FE 00` → 2 byte LE + `90 00`、初期化の
+  途中は `69 85`）と **再起動の命令**（`FF CA 00 FD 00` → `90 00` を返してから `esp_restart`）を加えた（§6）。host は
+  一覧に無いリーダーを知らせ、`rr` / 自動（`rfid.auto_restart`）で、卓に札が無いときだけ再起動を頼む。一覧に出ない
+  不調には、board reader が 2 ハンド続けて 1 枚も読まなければ知らせる（`RFIDThread`）。中継は一覧を読み取りと一緒に
+  渡し、`POST /restart` で命令を送ってつなぎ直す。**firmware の書き換えが要る**（旧 firmware は両方 `6A 86` = host は
+  一覧なし・命令なしとして動き、手での再起動を案内する）。物理リーダーの番号の上限は 254 → 252。
+  - 2026-10-13 の注記（版は変えない）: 「再起動 = USB の挿し直しと同じ」は PC の USB から給電している構成でのこと。
+    店舗の卓は ESP32 を給電アダプタで動かしており、USB の抜き挿しでは再起動しない（2026-10-06 の店舗で、案内どおりに
+    USB を抜き挿ししても直らず、給電アダプタの抜き挿しで直った）。host の案内を「給電アダプタを抜いて数秒待ってから
+    挿し直す」に改めた（§6, ADR-0070）。あわせて §4 に、host 側の 2 つの規則（フロップの札が読めないときの位置の
+    決め方 = 2026-09-29、中継から読む構成 = 2026-09-30）を書き足した（どちらも host のみ・firmware の要求は不変）。
+- **v1.10（2026-09-25, ADR-0058 追記 5 / ISSUE-0035）** — 店舗で river のあとに turn を差し直すと、5 枚埋まった
+  ボードの規則（消えた札を抜いて詰め、新しい札を 5 枚目）で turn と river が逆になった。取ってすぐ置くと
+  6 枚目の WARN で位置なしのまま確定していた。見逃した差し直し（消えたあとに空き位置へ入れた札）が無ければ
+  新しい札を消えた札の位置に入れる、消えた札が `release_sec` に達するまで待つ、に改めた（§4）。host のみ。
+  **firmware の要求は変わらない**。
+- **v1.9（2026-09-24, ADR-0058 追記 4 / ISSUE-0035）** — 店舗の実卓で「turn を差し直したあと river を置くと
+  turn と river が逆になる」。turn の札が reader の境目で載ったまま 15 秒読めず、その間の river が turn の差し直し
+  とみなされた。そのハンドで一度でも読めなくなった札は 1 枚の差し直しの対象にしない、差し替えた札が戻ってきて
+  差し替えた札（最後に配った札）も載っていれば差し替えを取り消す、に改めた（§4）。host のみ。**firmware の要求は
+  変わらない**。
+- **v1.8（2026-09-24, ADR-0058 追記 3 / ISSUE-0035）** — 位置を与える前の board の札は 3 秒までの途切れを載り続けて
+  いるとみなす（reader の境目・重ね置きで途切れながら読める札の確定が遅れていた）。表示用に「確認中」
+  （`board_presence()["pending"]`）。host のみ。**firmware の要求は変わらない**。
+- **v1.7（2026-09-24, ADR-0058 追記 2 / ISSUE-0035）** — **turn / river の差し直しと確認 3 秒**（host のみ, §4）。
+  店舗の実卓で「turn の差し直しが river になる」「反映が遅い」。3 台の board reader で 5 枚を受けるため turn の
+  位置が reader の境目にあり、置き直した札を隣の台が読んでいた。最後に配った turn / river は同じか隣の reader・
+  時間は問わない、ボードの確認は `redeal_confirm_sec`（3 秒）、一度読めなくなった札は厳しい側、flop 全体は全部
+  消えるのを確かめてから、に改めた。表示用の `board_presence()`（「外れた」）を追加。**firmware の要求は変わらない**。
+- **v1.6（2026-09-24, ADR-0058 追記 / ISSUE-0035）** — **board の 1 枚だけの差し直し**（host のみ, §4）。
+  店舗では board の配り直しで flop 全体を外さず 1 枚だけ差し直すことがあり、v1.5 の「ストリートの札が
+  全部消えたときだけ」では、差し直した札が次のストリートの札（flop なら turn）として数えられた。
+  差し替えの根拠に「**前の札が消えた直後（`redeal_window_sec`）に、前の札を読んでいた reader の上へ
+  置かれた**」を加え、turn / river の 1 枚は「全部消えた」だけでは差し替えない（読み落ちとの区別に
+  時間と場所を使う）。間を空けた配り直しは 6 枚目が来た時点で消えた 1 枚を抜いて詰める。
+  **firmware の要求は変わらない**。
+- **v1.5（2026-09-24, ADR-0058 / ISSUE-0035）** — **卓の流れに合わせた解釈**（host のみ, §4）。店舗の
+  実卓で (1) **フォールドした手札が board reader の上を通って board の札として位置を取る**、(2) **配り直しを
+  ディーラーの入力なしで反映できない**、が分かったため: そのハンドで席に記録した UID は board の札にしない
+  MUST（マックとして記録）/ board の札は `commit_sec` 載り続けてから位置を与える SHOULD / 差し替えは
+  「ストリートの札が全部 `release_sec` 以上見えず、新しい札が載り続けた」ときだけ SHOULD（席は前の札が
+  消えて新しい札が載り続けたら差し替え・別席の札は元の席から消えたら移す）/ `RFIDEvent.replaces`
+  （additive）。「消えただけでは解放しない」（ISSUE-0026）は維持。**firmware の要求は変わらない**。
+- **v1.4（2026-09-12, ADR-0054）** — **ミスディール訂正**（additive, §4）。ハンド内 append-only
+  （v1.3 / ISSUE-0026）は「カードが見えなくなっただけでは位置を解放しない」規則だが、実運用では
+  **一度読ませた札を外して正しい札を読ませ直す**（ミスディール）ことがある。absence は一瞬の読み落ちと
+  区別できないので **推測で解放してはならない** MUST。代わりに **host の明示コマンド**で解放する:
+  `RFIDThread.forget_board_position(index)`（board 1 位置）/ `forget_seat_cards(seat)`（席の読み直し）。
+  操作面は CLI `cb <位置>` / `cs <席>` と staff API control `correct_board` / `correct_seat`。
+  **firmware の要求は変わらない**（host 側の状態管理のみ）。
+
 - 本契約は **v1.0 frozen**（ADR-0034）。後方互換な追加（新 pseudo-APDU、ATR 種別追加、live hot-add）は
   **minor bump**（1.1, 1.2…）。reader_name 規約・Get UID・UID 正規化の **意味変更は breaking（major）**。
 - firmware の確定値（VID/PID、実 reader_name）は確定し次第 §2/§4 に追記する（host コードは変更不要 = 契約安定）。
+- **v1.3（2026-09-11, ADR-0053 / ISSUE-0024）** — **board reader 全台で 1 つの論理ボードを共有し、
+  位置は検出順で決める**。v1.1 §4 は board reader を「ストリート専用」とし、`index`（先頭ボード位置）
+  \+ `cards`（その台に重ねる枚数）を config に書かせていたが、**実機の配置はボード領域に board reader が
+  並んでいるだけ**で、どの台がどのカードを受けるかは置き方次第（flop の 2・3 枚目は真ん中の台の方が
+  読みやすい）。前提が成立しないため v1.1 の位置モデルを差し替える。**firmware の要求は一つも変わらない**
+  （firmware は UID を返すだけで役割・位置を知らない）:
+  1. **board に位置指定は無い**（§4）: config は `role: "board"` だけ。旧 `index` / `cards` は
+     **廃止**し、残っていても host は無視して WARN する MUST。
+  2. **`board_index` は board reader 全台を通した検出順**（§4）= 配った順で 1..5。空き最小を与え、
+     外して戻せば同じ位置、**ボードが 0 枚になったら記憶をクリア** MUST（ハンドの切れ目）。
+     5 枚超過は WARN + `board_index=None`。
+  3. **board reader は左から右の順に config へ並べる** SHOULD（同一 poll で台をまたいだぶんの
+     位置順が記載順で決まる）。**1 台に同時に載った複数枚の左右順は保証しない**（既知の制約）。
+  4. **lint の変更**（§4）: 「位置の重なり」検査を廃止（概念が消えた）、代わりに **board reader
+     1 台だけの構成**を警告（5 枚を 1 台に重ねる = 給電不足の懸念, ISSUE-0021 OQ6）。
+  - host 実装: `rfid/reader_thread.py`（`_board_index_by_uid` をスレッドで 1 つ持つ /
+    `_warn_obsolete_board_fields`）/ `tools/probe_pcsc.py`（lint 差し替え・config ラベルは位置なし・
+    event ラベルは実位置）/ `config_default.json`（board 3 件から `index`/`cards` を削除）。
+    回帰テスト: `tests/test_rfid.py::TestBoardGroupPositions`。
+- **v1.2（2026-09-10, ADR-0052 / ISSUE-0022）** — **CCID slot は 1 つだけ、物理リーダーは Get UID の
+  P2 で選ぶ**。Windows の Microsoft 汎用 CCID ドライバが 1 インターフェース 1 slot しか公開しないことが
+  実機で確定したため（`bMaxSlotIndex=1` にしても `… 1` は "Reader not found"）、multi-slot による
+  11 台公開を諦め、reader は 1 つのまま P2 で切り替える。**Get UID の意味（P2=0）・UID・デバウンス・
+  役割 config の骨格は不変で、1 台構成の挙動は v1.0/1.1 と同一**だが、**「slot ごとに reader 名を分ける」
+  規約（v1.1 §3）は廃止**するため minor ではなく「1.1 の一部差し替え」を含む:
+  1. **1 slot 固定**（§2/§3）: `bMaxSlotIndex=0`。物理台数が変わっても USB 記述子は不変。
+  2. **P2 = 物理リーダー index**（§6）: `FF CA 00 <k> 00`。範囲外は `6A 86`。`k=0` は従来と同一。
+  3. **台数問い合わせ**（§6）: `FF CA 00 FF 00` → `<N>` + `90 00`。v1.1 firmware は非対応（host は None）。
+  4. **config に `reader`**（§4, 任意・既定 0）: 一意性は `name` から **`(name, reader)`** へ。
+  5. **host は reader_name ごとに 1 接続を持続**（§8）: 11 台 = 1 接続 × N APDU。
+  - host 実装: `rfid/bridge.py`（`get_uid_apdu` / 共有持続接続 / `query_reader_count` / `6A86` WARN）/
+    `rfid/reader_thread.py`（config `reader` → factory）/ `tools/probe_pcsc.py`（lint・`list` の台数表示・
+    `check` の SW 判定・`raw --reader`・`watch` の `[rk]`）/ `tools/register_cards.py`（`--reader` で
+    config 要素を選択）/ `config_default.json`（11 件・同一 name・`reader` 0..10）。firmware は ADR-0052。
+- **v1.1（2026-09-10, additive）** — 1 reader に複数枚を重ねて置く運用（席 = hole card 2 枚 /
+  board1 = flop 3 枚）に対応。v1.0 の要求は一つも変更していない（1 枚運用の挙動は同一）:
+  1. **Get UID の複数 UID 連結**（§6）: 8B UID × k 枚（k ≤ 4, UID 昇順）+ `90 00`。host は応答長
+     16/24/32 のときだけ 8B ずつ分割する。0 枚 = `6A 81` は不変。
+  2. **board の `cards`**（§3/§4）: config `pcsc_readers[]` に任意フィールド `cards`（1..5, 既定 1）と
+     位置割り当て規則（`index + offset`、検出順・外して戻せば同じ位置）。本番構成は 11 slot
+     （席 8 + board 3）。
+  3. **UID は MSB-first**（§7）: firmware が ISO 15693 の LSB-first を反転して返す MUST を明文化。
+  4. **UID 単位のデバウンス**（§8）: reader ごとの UID 集合差分で発火。
+  - host 実装: `rfid/bridge.py`（`split_uid_response` / `read_uids`）/ `rfid/reader_thread.py`
+    （集合デバウンス + offset 割り当て）/ `tools/probe_pcsc.py`（lint `cards` / `raw` 分割表示）/
+    `tools/register_cards.py`（複数枚検出中は登録しない）。firmware 実装は ISSUE-0021。
 
 ## Related
 
-- ADR-0015（PC/SC canonical）/ ADR-0034（本契約 freeze）/ ISSUE-0015（本契約の出所）
+- **`docs/rfid-ccid-firmware-checklist.md`** — 本契約の MUST を ESP32-S3 firmware 実装手順に落とした
+  implementer's guide（各項目を `tools/probe_pcsc.py` で受け入れ確認）。
+- ADR-0015（PC/SC canonical）/ ADR-0034（本契約 freeze）/ ADR-0051（slot 常時 present）/
+  **ADR-0052（1 slot + Get UID の P2 で物理リーダー選択 = v1.2）** /
+  ISSUE-0015（本契約の出所）/ ISSUE-0021（複数枚 anti-collision + poll 周期。v1.1 の firmware 側）/
+  **ISSUE-0022（Windows usbccid の single-slot 制限 = v1.2 の出所）**
+  / **ADR-0070（中継・使えるリーダーの一覧・再起動 = v1.11）** / ADR-0068 R3（フロップの札が読めないとき）
 - `rfid/bridge.py`（Get UID / UID 正規化）/ `rfid/reader_thread.py`（pcsc_readers / polling / debounce）
 - `rfid/card_master.py`（`normalize_tag_id` / `bytes_to_tag_id`）/ `tests/test_rfid.py`

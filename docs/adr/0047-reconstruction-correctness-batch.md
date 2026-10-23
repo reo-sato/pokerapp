@@ -167,3 +167,9 @@ cap-exceeded-negative / split-pot-chop）。
 HMM/particle filter 化（決定的修正で 95% に届くかを先に計測）、confidence 数値の実データ較正、
 複数アクション発話（V2）の本実装、camera actor 寄与の新規開発（vision 廃止方針）、
 legacy backend の挙動変更、schema 2.0。
+
+## 追記（2026-09-25）
+
+上の「やらないこと」のうち **複数アクション発話（V2）は ADR-0061 で実装した**（店舗の実測で、続けて言った
+アクションが 1 つの発話になることを確認。`parse_actions` が言った順に分ける）。`parse_action` 単体の
+「先頭のみ + multi_action_keywords」は従来どおり。

@@ -29,7 +29,10 @@ import {
   StaffApiError,
   type StaffLedgerEntryBody,
   type StaffSeating,
+  type HoleCardVisibility,
+  type HoleCardVisibilityResult,
   type StaffSession,
+  type ViewerLink,
 } from "./types";
 import {
   buyinPresets,
@@ -260,6 +263,50 @@ export class MockStaffRepository implements StaffRepository {
     absorbed.merged_into = survivorId;
     absorbed.merged_at = new Date().toISOString();
     return { survivor_id: survivorId, absorbed_id: absorbedId };
+  }
+
+  // 手札の公開範囲（ADR-0067 D6）。mock の店の設定は「全員分」。
+  async getHoleCardDefault(): Promise<HoleCardVisibility> {
+    this.requireAuth();
+    return "all";
+  }
+
+  async setHoleCardVisibility(
+    sessionId: string,
+    value: HoleCardVisibility | null,
+  ): Promise<HoleCardVisibilityResult> {
+    this.requireAuth();
+    const session = this.requireSession(sessionId);
+    if (value === null) delete session.hole_card_visibility;
+    else session.hole_card_visibility = value;
+    return { session: clone(session), store_default: "all", effective: value ?? "all" };
+  }
+
+  // 閲覧リンク（ADR-0067 D5）。mock は 1 人 1 本の「発行し直すと前のものは使えない」だけを真似る。
+  private viewerLinks = new Map<string, number>();
+
+  async issueViewerLink(playerId: string): Promise<ViewerLink> {
+    this.requireAuth();
+    const player = this.players.find((p) => p.player_id === playerId);
+    if (!player) {
+      throw new StaffApiError({ code: "not_found", message: "player が見つかりません。" });
+    }
+    const canonical = player.merged_into ?? player.player_id;
+    const n = (this.viewerLinks.get(canonical) ?? 0) + 1;
+    this.viewerLinks.set(canonical, n);
+    return {
+      player_id: canonical,
+      url: `https://cloud.example/#link=pkl_mock_${canonical.slice(0, 8)}_${n}`,
+      created_at: new Date().toISOString(),
+      qr_image: null,
+    };
+  }
+
+  async revokeViewerLink(playerId: string): Promise<{ player_id: string; revoked: number }> {
+    this.requireAuth();
+    const had = this.viewerLinks.has(playerId);
+    this.viewerLinks.delete(playerId);
+    return { player_id: playerId, revoked: had ? 1 : 0 };
   }
 
   async getSeating(sessionId: string): Promise<StaffSeating> {

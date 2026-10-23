@@ -36,7 +36,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from core.atomic_io import atomic_write_json, read_json_file
+from core.atomic_io import atomic_write_json, file_stat, read_json_file
 from core.player_repository import PlayerNotFoundError, PlayerRepository
 from core.session import HandRef, SeatAssignment, Session
 
@@ -74,6 +74,13 @@ class PlayerAlreadySeatedError(SessionError):
 
 class UnknownPlayerError(SessionError):
     """指定 player_id が registry に実在しない（error code: unknown_player）。"""
+
+
+class InvalidHoleCardVisibilityError(SessionError, ValueError):
+    """公開範囲の値が不正（error code: invalid_visibility, ADR-0067 D6）。"""
+
+
+HOLE_CARD_VISIBILITY = ("all", "own_and_shown")
 
 
 class InvalidSeatError(SessionError):
@@ -117,6 +124,7 @@ class SessionRepository:
         self._sessions: dict[str, Session] = {}
         # session_id -> {hand_id(int) -> {"started_at": str, "seats": list[SeatAssignment]}}
         self._hands: dict[str, dict[int, dict]] = {}
+        self._loaded_stat: tuple[int, int] | None = None
         self._load()
 
     @property
@@ -135,16 +143,23 @@ class SessionRepository:
     # ――― 永続化 ―――
 
     def _load(self) -> None:
+        self._loaded_stat = file_stat(self._path)
         data = read_json_file(self._path)  # 破損は退避して None（B7）
-        if data is None:
-            return
-        for raw in data.get("sessions", []):
+        sessions, hands = self._parse(data)
+        self._sessions.update(sessions)
+        self._hands.update(hands)
+
+    @staticmethod
+    def _parse(data: dict | None) -> tuple[dict[str, Session], dict[str, dict[int, dict]]]:
+        sessions_by_id: dict[str, Session] = {}
+        hands_by_session: dict[str, dict[int, dict]] = {}
+        for raw in (data or {}).get("sessions", []):
             try:
                 session = Session.from_dict(raw)
             except (KeyError, TypeError):
                 logger.warning("Skipping malformed session record: %r", raw)
                 continue
-            self._sessions[session.session_id] = session
+            sessions_by_id[session.session_id] = session
             hands: dict[int, dict] = {}
             for hand_key, hand_raw in raw.get("hands", {}).items():
                 try:
@@ -166,7 +181,8 @@ class SessionRepository:
                     "started_at": hand_raw.get("started_at", ""),
                     "seats": seats,
                 }
-            self._hands[session.session_id] = hands
+            hands_by_session[session.session_id] = hands
+        return sessions_by_id, hands_by_session
 
     def _flush(self) -> None:
         """アトミック + fsync で書き込む（ADR-0034/B2）。失敗してもクラッシュしない。"""
@@ -185,6 +201,7 @@ class SessionRepository:
             atomic_write_json(self._path, {"sessions": sessions_out})
         except OSError:
             logger.exception("Failed to write session DB: %s", self._path)
+        self._loaded_stat = file_stat(self._path)
 
     @_locked
     def reload(self) -> None:
@@ -196,6 +213,25 @@ class SessionRepository:
         self._sessions.clear()
         self._hands.clear()
         self._load()
+
+    @_locked
+    def reload_if_changed(self) -> bool:
+        """ディスクの `sessions.json` が前回読んだ後に変わっていれば再読込する（変わったら True）。
+
+        お客さん向け viewer API は hand logger とは別プロセスで動き、hand logger がハンドごとに
+        席を書き込む（ADR-0059）。ファイルはあるのに読めなかった（書き換えの最中など）ときは
+        今の内容を保ち、次の呼び出しで読み直す。player registry も同じく読み直す。
+        """
+        self._player_repo.reload_if_changed()
+        stat = file_stat(self._path)
+        if stat == self._loaded_stat:
+            return False
+        data = read_json_file(self._path)
+        if data is None and stat is not None:
+            return False
+        self._sessions, self._hands = self._parse(data)
+        self._loaded_stat = stat
+        return True
 
     # ――― session CRUD ―――
 
@@ -236,6 +272,21 @@ class SessionRepository:
         session.ended_at = ended_at if ended_at is not None else _now_iso()
         self._flush()
         logger.info("Closed session %s", session_id)
+        return session
+
+    @_locked
+    def set_hole_card_visibility(self, session_id: str, value: str | None) -> Session:
+        """お客さんの画面に出すホールカードの範囲を決める（None = 店の設定に従う, ADR-0067 D6）。
+
+        表示の設定なので closed の session でも変えられる。
+        """
+        if value is not None and value not in HOLE_CARD_VISIBILITY:
+            raise InvalidHoleCardVisibilityError(
+                f"hole_card_visibility は {list(HOLE_CARD_VISIBILITY)} か null です（{value!r}）。")
+        session = self.get_session(session_id)
+        session.hole_card_visibility = value
+        self._flush()
+        logger.info("Session %s hole_card_visibility=%s", session_id, value)
         return session
 
     # ――― hand-based seating ―――

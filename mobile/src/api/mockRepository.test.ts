@@ -287,3 +287,11 @@ test("setPin: first-time self-enroll, change requires current PIN, login uses ne
     return true;
   });
 });
+
+test("linkLogin signs in with a pkl_ link and rejects others (ADR-0067 D5)", async () => {
+  const repo = new MockRepository();
+  await assert.rejects(repo.linkLogin("nope"), (e: unknown) => (e as ViewerApiError).code === "invalid_link");
+  const session = await repo.linkLogin("pkl_mock_link");
+  assert.equal(repo.currentPrincipal(), session.player_id);
+  assert.equal(session.store_name, "テスト店");
+});
