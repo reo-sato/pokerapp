@@ -84,8 +84,8 @@ def _truth_hand(captured: dict, gt: dict) -> dict:
 
     rows = _gt_actions(gt)
     board, holes = _gt_cards(gt)
-    legal = replay_legal(with_table(captured, gt.get("players")), rows, board=board, holes=holes,
-                         button=_gt_button(gt))
+    table = with_table(captured, gt.get("players"))
+    legal = replay_legal(table, rows, board=board, holes=holes, button=_gt_button(gt))
     done = legal.get("actions") or []
     actions = []
     for i, a in enumerate(rows):
@@ -93,7 +93,12 @@ def _truth_hand(captured: dict, gt: dict) -> dict:
         if i < len(done):
             row.update(street=done[i].get("street"), amount=done[i].get("amount"), total=done[i].get("total"))
         actions.append(row)
-    return {**gt, "actions": actions, "board": gt.get("board") or captured.get("board") or []}
+    button = gt.get("button_seat") if gt.get("button_seat") is not None else captured.get("button_seat")
+    holes = {p.get("seat"): p.get("hole_cards") for p in gt.get("players") or [] if isinstance(p, dict)}
+    players = [{"seat": p.get("seat"), "stack_start": p.get("stack_start"), "hole_cards": holes.get(p.get("seat"))}
+               for p in table.get("players") or []]
+    return {**gt, "actions": actions, "board": gt.get("board") or captured.get("board") or [],
+            "button_seat": button, "players": players}
 
 
 def _compare(truth: dict, hand: Optional[dict]) -> dict:
