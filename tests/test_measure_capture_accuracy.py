@@ -531,3 +531,16 @@ def test_a_row_of_another_seat_or_street_is_not_correct():
     assert not row_correct(fold, {"street": "showdown", "seat": 4, "action": "fold", "amount": 0})
     assert not row_correct({"street": "flop", "seat": 4, "action": "check", "amount": 0},
                            {"street": "turn", "seat": 4, "action": "check", "amount": 0})
+
+
+def test_allin_is_scored_by_type_only():
+    """オールインの額は採点しない（オーナー 2026-10-23 の (b)）。持ち点の足りないコール（真 call）と記録の allin も同じ。"""
+    from tools.measure_capture_accuracy import allin_equal, row_correct
+
+    assert allin_equal("allin", "allin", 30000, 25000)
+    assert allin_equal("call", "allin", 19000, 12000) and allin_equal("allin", "call", 12000, 19000)
+    assert not allin_equal("call", "allin", 19000, 25000)      # コールより多く出した = レイズのオールイン
+    assert not allin_equal("raise", "allin", 19000, 12000)
+    row = {"street": "preflop", "seat": 3}
+    assert row_correct(dict(row, action="allin", amount=30000), dict(row, action="allin", amount=25000))
+    assert row_correct(dict(row, action="call", amount=19000), dict(row, action="allin", amount=12000))
