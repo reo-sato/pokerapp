@@ -121,5 +121,9 @@ KANJI_UNIT: dict[str, int] = {
 
 KANJI_ALL: frozenset[str] = frozenset(KANJI_DIGIT) | frozenset(KANJI_UNIT)
 
+# いちばん小さいチップ（店舗 = 100, オーナー 2026-10-23）。聞き取った額の端数はこの単位に丸める（SB / BB の最大公約数
+# だと 3000/6000 の卓で「2万」を 21000 にしてしまう = 10/19 a64ec4ad の 13 行）
+CHIP_UNIT = 100
+
 # ストリートの順序（advance_street の検証用）
 STREET_ORDER = ("preflop", "flop", "turn", "river", "showdown")

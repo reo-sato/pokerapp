@@ -21,7 +21,7 @@ import logging
 import math
 from typing import Any, Optional, Protocol, runtime_checkable
 
-from core.constants import STREET_ORDER
+from core.constants import CHIP_UNIT, STREET_ORDER
 from core.engine_types import LegalContext
 from core.game_state import GameStateManager, PlayerState, Street
 from core.positions import next_button, position_map, seat_order_from_button
@@ -572,7 +572,7 @@ class PokerkitGameState:
             max_raise=st.max_completion_betting_or_raising_to_amount or 0,
             bb=self._bb,
             committed=st.bets[st.actor_index] if st.actor_index < len(st.bets) else 0,
-            chip=math.gcd(self._sb, self._bb),
+            chip=math.gcd(self._sb, self._bb, CHIP_UNIT),
         )
 
     def is_legal_actor(self, seat: int) -> bool:

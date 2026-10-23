@@ -239,6 +239,23 @@ class TestCorrectionsHardening:
         assert "rounded_to_bb" in r.reason
         assert r.needs_review is False
 
+    def test_v4_rounds_to_the_smallest_chip_not_the_blinds(self):
+        # 10/19 a64ec4ad: 3000/6000 の卓で「2万」を 21000、「4万」を 39000 にしていた（単位 = SB と BB の最大公約数）。
+        # 単位はいちばん小さいチップ（100）: 言った額のまま。端数だけ 100 に丸める
+        pytest.importorskip("pokerkit")
+        from core.game_state import PlayerState
+        from core.poker_engine import PokerkitGameState
+
+        gs = PokerkitGameState([PlayerState(seat=s, name=f"P{s}", stack=200000) for s in (1, 2, 3)],
+                               sb=3000, bb=6000)
+        gs.new_hand()
+        ctx = gs.legal_context()
+        assert ctx.chip == 100
+        for heard, expected in ((20000, 20000), (40000, 40000), (25000, 25000), (20050, 20000)):
+            r = apply_corrections("raise", heard, ctx)
+            assert r.amount == expected
+            assert ("rounded_to_bb" in r.reason) == (heard != expected)
+
     def test_v4_no_round_when_multiple(self):
         r = apply_corrections("raise", 800, _facing_bet(bb=200))
         assert r.amount == 800
