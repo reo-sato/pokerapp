@@ -148,11 +148,15 @@ def award_with_unknown_cards(
     seen = set(known_board) | {c for cards in known_hole.values() for c in cards} | set(excluded)
     pool = [c for c in _DECK if c not in seen]
     missing = [(seat, 2 - len(cards)) for seat, cards in sorted(known_hole.items()) if len(cards) < 2]
+    if board_missing < 0 or any(len(cards) > 2 for cards in known_hole.values()):
+        return None                          # 6 枚以上のボード・3 枚以上の手札（読み違い）は判定しない
     count, left = comb(len(pool), board_missing), len(pool) - board_missing
     for _, n in missing:
+        if left < n:
+            return None
         count *= comb(left, n)
         left -= n
-    if board_missing < 0 or count == 0 or count > limit:
+    if count == 0 or count > limit:
         return None
 
     def fillings(rest: list[str], need: list[tuple[int, int]]):

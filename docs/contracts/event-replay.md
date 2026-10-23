@@ -52,7 +52,7 @@ draft のまま（未 freeze）で、0.1 以降の変更はすべて **optional 
   - `kind`（0.5。省略 = `card` = 札を読んだ）と `observed_at`（離れた時刻）。`kind` の値: `leave` / `muck` / `return` /
     `confirm` / `street` / `showdown`（0.5 = 札の離脱でフォールド）・`reinterpret`（0.7。2026-09-29 から新しい記録には出ない
     = 旧記録を読むために残す）・`spoken_fold`（0.8）・`deal` / `hand_start` と `cards`（0.9）・`deal_order` と `times`
-    （0.11）・`showdown_end`（0.12）・`spoken_fold_drop`（0.15）。`card` 以外は engine が在否・ボード・発話から作って記録
+    （0.11）・`showdown_end`（0.12）・`spoken_fold_drop`（0.15）・`hand_seats`（0.20 = 配った席に合わせてハンドを組み直した。`cards` = "席:dealt"）。`card` 以外は engine が在否・ボード・発話から作って記録
     する**信号**で、replay はセンサーの読みから決め直さずにこれに従う（live と同じ時点・同じ判断になる）。
 - **camera**（required: `seat`）: `frame` は記録しない（§2）。
 

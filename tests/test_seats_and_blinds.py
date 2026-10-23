@@ -267,7 +267,7 @@ class TestTable:
         _deal_without_assert(tb, HOLES_A)
         tb.tick(tb.now + 1.0)
         assert tb.t._hand_open and tb.gs.seats_in_hand() == [4, 5, 6]   # noqa: SLF001
-        assert sum("最初の持ち点 10000 に戻して配ります" in n for n in tb.notices) == 2
+        assert sum("持ち点 10000 に戻して配ります" in n for n in tb.notices) == 2
         _send(tb, action="rebuy", seat=4, amount=5000, raw_text="シート4 リバイ 5000")   # 実際は 5000 の買い足し
         assert any("戻した持ち点 10000 の代わりにします（差はこのハンドのあとに直します）" in n for n in tb.notices)
         _win(tb, 6)
@@ -308,3 +308,52 @@ class TestTable:
         tb = _Table(tmp_path)
         _send(tb, action="set_blinds", amount=100, raw_text="400/100")
         assert any("ブラインドを変えられません" in n for n in tb.notices)
+
+
+class TestLateCardsForABustedSeat:
+    """手札が 2 席に載った時点でハンドを始めるので、あとから札が載った席（前のハンドで持ち点 0 と誤って記録した人）
+    を入れてハンドを組み直す（店舗 2026-10-19 d01277f8: 席が抜けたぶんボタンが 1 席先に進んだまま 30 ハンド）。"""
+
+    def _table(self, tmp_path):
+        tb = _LiveTable(tmp_path, seats=(4, 5, 6, 7))
+        tb.gs.update_stack(7, 0)
+        tb.t._prev_hand_seats = {4, 5, 6, 7}             # noqa: SLF001 — 前のハンドに配られた
+        tb.t._last_positive_stack[7] = 8000              # noqa: SLF001 — 0 になる前の持ち点
+        return tb
+
+    def test_the_seat_is_added_with_its_last_stack(self, tmp_path):
+        tb = self._table(tmp_path)
+        _deal_without_assert(tb, HOLES_A)
+        assert tb.gs.seats_in_hand() == [4, 5, 6]
+        _deal_without_assert(tb, {7: ["Tc", "Th"]})
+        assert tb.gs.seats_in_hand() == [4, 5, 6, 7]
+        assert any("札が載った席 席7 を入れ" in n and "8000 に戻しました" in n for n in tb.notices)
+        _win(tb, 6)
+        players = {p["seat"]: p for p in tb.hands[0].players}
+        assert players[7]["stack_start"] == 8000 and tb.hands[0].review_required
+
+    def test_a_seat_that_was_away_is_not_added(self, tmp_path):
+        tb = self._table(tmp_path)
+        tb.t._prev_hand_seats = {4, 5, 6}                # noqa: SLF001 — 前のハンドにいなかった（新しく座った）
+        _deal_without_assert(tb, HOLES_A)
+        _deal_without_assert(tb, {7: ["Tc", "Th"]})
+        assert tb.gs.seats_in_hand() == [4, 5, 6]
+
+    def test_the_decision_is_recorded_for_replay(self, tmp_path):
+        tb = self._table(tmp_path)
+        _deal_without_assert(tb, HOLES_A)
+        _deal_without_assert(tb, {7: ["Tc", "Th"]})
+        signals = [e for e in tb.recorder.events if getattr(e, "kind", None) == "hand_seats"]
+        assert len(signals) == 1 and list(signals[0].cards) == ["4:dealt", "5:dealt", "6:dealt", "7:dealt"]
+
+
+def test_a_sixth_board_card_is_not_added(tmp_path):
+    from core.events import RFIDEvent
+
+    tb = _LiveTable(tmp_path)
+    _deal_without_assert(tb, HOLES_A)
+    for card in ("2c", "3c", "4c", "5c", "6c", "7c"):
+        ev = RFIDEvent(tag_id=card, card=card, reader_id="b", role="board", seat=None, timestamp=tb.now,
+                       raw_tag_id=card)
+        tb.t._process_rfid_event(ev)                     # noqa: SLF001
+    assert tb.t._board_cards == ["2c", "3c", "4c", "5c", "6c"]   # noqa: SLF001

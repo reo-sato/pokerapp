@@ -1240,8 +1240,8 @@ def check_fixture(folder: Path) -> list[str]:
         rep_by_id = {h.get("hand_id"): h for h in replayed}
         for hand in expected.get("hands") or []:
             base = hand.get(key)
-            if base is None:
-                continue
+            if base is None or is_excluded(hand["truth"]):
+                continue                     # 評価から外したハンド（真のアクションが記録の席の誤りを表せない など）
             m = measure_hand(hand["truth"], rep_by_id.get(hand["hand_id"]))
             where = f"{folder.name} ハンド {hand['hand_id']}{label_run}"
             if m.action_correct < base["action_correct"]:

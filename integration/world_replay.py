@@ -42,7 +42,7 @@ from output.json_writer import JsonWriter
 # ライブのロガーがその場の解釈・聞き取りの遅れの下で作った席の信号（生の観測から作り直すので入力にしない）
 DERIVED_SIGNALS = frozenset({
     "hand_start", "leave", "muck", "return", "spoken_fold", "spoken_fold_drop", "confirm", "showdown",
-    "showdown_end", "street", "reinterpret",
+    "showdown_end", "street", "reinterpret", "hand_seats",
 })
 # 配布の信号（`deal`）は残す: ライブが席の在否だけで決めたもの（聞き取りの遅れ・解釈に依らない）。卓状態の履歴には
 # ボードのリーダーの生の枚数が無く（記録した札からの推定はハンドの切り替わりで狂う）、配布を決め直せないため。

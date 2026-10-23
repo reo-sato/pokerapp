@@ -101,6 +101,8 @@ LATE_WINNER_SEC = 60.0
 # RFID の在否で配布を検出する（ADR-0063）: 2 席以上に手札 2 枚ずつがこの秒数載り続け、ボードの
 # リーダーが空なら配布。シャッフル・ウォッシュで一瞬リーダーを通った札では始めない。
 DEAL_STABLE_SEC = 1.5
+# 手札を配り終えたとみる時間（フロップが出なくても）。ここまでに札が 1 枚も載らない席はハンドから外す（2026-10-23）
+HAND_SEATS_SETTLE_SEC = 20.0
 # 載り続けているとみなす途切れの上限（読み落ち 1〜2 周ぶん）
 DEAL_GAP_SEC = 0.6
 # ハンドの途中でも、卓（席とボードのリーダー）に札が 1 枚も無い状態がこの秒数続いたらプレーは
@@ -394,6 +396,7 @@ class IntegrationThread(threading.Thread):
         speech_pending_since: Optional[Callable[[], Optional[float]]] = None,
         voice_heard_at: Optional[Callable[[], Optional[float]]] = None,
         recorded_deals: bool = False,
+        recorded_hand_seats: bool = False,
         before_new_hand: Optional[Callable[[int], None]] = None,
         button_from_deal: bool = True,
         open_gates: frozenset = frozenset(),
@@ -519,6 +522,8 @@ class IntegrationThread(threading.Thread):
         # 持ち点 0 で手札が配られて最初の持ち点に戻した席 → (戻した額, そのハンドの番号)。そのハンドが終わって
         # 次のハンドが始まるまでに届いた買い足し（`r`）は、戻した額の代わりにする（二重にしない）
         self._provisional_stacks: dict[int, tuple[int, int]] = {}
+        # 席ごとの 0 でない最後の持ち点（持ち点 0 と誤って記録した人に配られたとき、そこに戻す, 2026-10-23）
+        self._last_positive_stack: dict[int, int] = {}
         # ハンドのあとに直す持ち点（席 → 差）。戻した額の代わりの買い足しがハンドの途中に届いたとき
         self._stack_corrections: dict[int, int] = {}
         # 真のアクションで持ち点を直す（`truth_stacks`, 2026-10-19）: ハンド → 席 → 収支（真のアクション / 記録）と、
@@ -565,7 +570,13 @@ class IntegrationThread(threading.Thread):
         # replay: 記録に配布（deal）とハンド開始（hand_start）の信号がある。札の読み取りから配布を決め直さず、
         # live が在否で決めた配布と、発話を待って始めた時点に従う（ADR-0056 追記 1, S0）。
         self._recorded_deals = recorded_deals
+        # replay: 記録に配った席の組み直し（hand_seats）がある = その判断に従う（決め直さない）
+        self._recorded_hand_seats = recorded_hand_seats
         self._hand_start_due = False
+        self._hand_seats_settled = False
+        # このセッションで手札を読んだことのある席（札が 1 枚も載らない席を外すのは、読めるリーダーの席だけ）
+        self._seats_ever_dealt: set[int] = set()
+        self._prev_hand_seats: set[int] = set()     # 前のハンドに配られた席
         # replay: 配布を検出してからハンドを始めるまでに届いた、そのハンドの札の信号（始めてから反映する）
         self._signals_before_start: list[RFIDEvent] = []
         # 手札が配られる前のボードの札を読まなかった（最初の手札で RFID のボード位置を捨てる）
@@ -800,6 +811,8 @@ class IntegrationThread(threading.Thread):
         self._event_depth += 1
         try:
             self._dispatch_rfid_event(ev)
+            if ev.kind == "card":
+                self._check_hand_seats(ev.timestamp)
         finally:
             self._event_depth -= 1
         self._finish_after_correction()
@@ -900,7 +913,11 @@ class IntegrationThread(threading.Thread):
             )
             self._note_street_marks()
         else:
-            # board_index なし: 末尾に追記
+            # board_index なし: 末尾に追記。ボードは 5 枚まで: 6 枚目は片付け・次のハンドの札（リバーのあとに
+            # ボードのリーダーに載った札）。足すと手札の判定ができなくなる（店舗 2026-10-19: 5 ハンドで 6〜7 枚）
+            if len(self._board_cards) >= 5:
+                logger.info("ボードはもう 5 枚です — %s はボードに足しません（片付け・次のハンドの札）", ev.card)
+                return
             self._board_cards.append(ev.card)
             logger.info(
                 "Board card (no index): %s (tag=%s) — board so far: %s",
@@ -1126,6 +1143,8 @@ class IntegrationThread(threading.Thread):
         self._after_hand_change()
 
     def _handle_audio_event_inner(self, event: AudioEvent) -> None:
+        if self._hand_open and self._deal_at is None:
+            self._check_hand_seats(event.timestamp)
         if self._deal_at is not None and _spoken_at(event) >= self._deal_at:
             # 配ったあとに話されたアクションは新しいハンドのもの。前に話されたもの（前のハンドの
             # 最後のコールやマック）は、認識が遅れて届いても前のハンドに入れる（ADR-0062）。
@@ -2049,6 +2068,9 @@ class IntegrationThread(threading.Thread):
             return
         if ev.kind == "deal_order":
             self._apply_deal_order(ev)
+            return
+        if ev.kind == "hand_seats":
+            self._apply_hand_seats(ev)
             return
         if not (self._rfid_folds and self._hand_open):
             if self._rfid_folds and self._recorded_deals and self._deal_at is not None and (
@@ -3589,6 +3611,103 @@ class IntegrationThread(threading.Thread):
     # ディーラーはボタンの次の席から 1 枚ずつ 2 周配る。手札を最初に読んだ順がほかの席をボタンとした配り方にだけ
     # 合うなら、ボタンを動かし忘れたとみてそのハンドを組み直す（`core.positions.button_from_deal`）。手で直すときは
     # ハンドの途中でも `button <席>`。
+
+    # ――― 配った席でハンドを組み直す（2026-10-23, 店舗 2026-10-19）―――
+    # 手札が 2 席に載った時点でハンドを始めるので、あとから札が載った席（持ち点 0 と誤って記録した人）が入らず、
+    # 札が 1 枚も載らない席（空いた席）が入ったままになる。ボタンはハンドの席で回るので 1 席ずれたまま続いた
+    # （d01277f8 で 30 ハンド）。配り終えたら（フロップか `HAND_SEATS_SETTLE_SEC`）配った席に合わせて組み直す。
+    # 判断は信号（`hand_seats`）として記録し、replay も同じにする。
+
+    def _check_hand_seats(self, now: float) -> None:
+        if (self._hand_seats_settled or not self._hand_open or not self._hand_auto_started or self._rebuilding
+                or self._recorded_hand_seats):
+            return
+        gs = self._game_state
+        if not hasattr(gs, "restart_hand_with_seats") or not gs.is_hand_active():
+            return
+        in_hand = set(self._seats_in_hand())
+        is_out = getattr(gs, "is_sitting_out", None)
+        # 入れるのは、前のハンドにいて持ち点 0 になった席だけ（誤ったバスト）。しばらくいなかった席に札が載ったのは
+        # 新しく座った人 = ディーラーはボタンを進めるときに数えないことがある（店舗 d01277f8 ハンド 9: 席2）
+        stacks = gs.get_stacks()
+        add = {s for s, cards in self._hole_cards.items()
+               if s not in in_hand and len(cards) >= 2 and s in self._prev_hand_seats and stacks.get(s, 0) <= 0
+               and not (is_out is not None and is_out(s))}
+        if self._board_top() >= 3 or now - self._hand_started_epoch >= HAND_SEATS_SETTLE_SEC:
+            self._hand_seats_settled = True      # 配り終えた（このあとに載った札は入れない）
+        seats = sorted(in_hand | add)
+        if not add or len(seats) < 2:
+            return
+        self._emit_seat_signal(RFIDEvent(
+            tag_id="", card="", reader_id="", role="seat", seat=None, timestamp=self._clock(),
+            raw_tag_id="", kind="hand_seats", cards=tuple(f"{s}:dealt" for s in seats),
+        ))
+
+    def _apply_hand_seats(self, ev: RFIDEvent) -> None:
+        """記録した配った席（`hand_seats`）でいまのハンドを組み直す（live も replay も）。"""
+        seats = sorted(int(c.partition(":")[0]) for c in ev.cards if c.partition(":")[0].isdigit())
+        if not self._hand_open or len(seats) < 2:
+            return
+        current = set(self._seats_in_hand())
+        added = [s for s in seats if s not in current]
+        dropped = sorted(current - set(seats))
+        why = []
+        if added:
+            why.append("札が載った席 " + "・".join(f"席{s}" for s in added) + " を入れ")
+        if dropped:
+            why.append("札が 1 枚も載らない席 " + "・".join(f"席{s}" for s in dropped) + " を外し")
+        self._reseat(seats, "、".join(why))
+
+    def _restore_stack_for(self, seat: int) -> int:
+        """持ち点 0 と記録した席を入れるときの持ち点: 0 になる前の持ち点（無ければ最初の持ち点）。"""
+        return self._last_positive_stack.get(seat) or self._initial_stacks.get(seat, 0)
+
+    def _reseat(self, seats: list[int], why: str) -> bool:
+        gs = self._game_state
+        restart = getattr(gs, "restart_hand_with_seats", None)
+        origin = self._hand_origin
+        if restart is None or origin is None or not self._hand_open or not gs.is_hand_active():
+            return False
+        current = set(self._seats_in_hand())
+        stacks = gs.get_stacks()
+        restore = {s: self._restore_stack_for(s) for s in seats if s not in current and stacks.get(s, 0) <= 0}
+        if any(v <= 0 for v in restore.values()):
+            return False
+        inputs = list(self._hand_inputs)
+        self._hand_inputs = []
+        self._restore_checkpoint(origin)
+        self._last_wager = None
+        self._last_wager_point = None
+        self._recap = None
+        self._spoken_fold_raw = {}
+        self._foldout_winner_left = False
+        try:
+            restart(seats, restore)
+        except (ValueError, RuntimeError) as e:
+            logger.warning("配った席で組み直せませんでした: %s", e)
+            self._replay_inputs(inputs)
+            return False
+        for seat, amount in restore.items():
+            self._stack_start[seat] = amount
+            self._provisional_stacks[seat] = (amount, gs.hand_id + 1)
+        for seat in seats:
+            if seat not in current and seat not in self._stack_start:
+                self._stack_start[seat] = gs.get_stacks().get(seat, 0)
+        self._hand_origin = self._take_checkpoint(0)
+        self._departure_floor = self._origin_floor()
+        self._replay_inputs(inputs, reassign_spoken_folds=True)
+        self._hand_needs_review = True
+        positions = " ".join(f"席{s}={p}" for s, p in sorted(gs.position_map().items()))
+        restored = "".join(f"（席{s} は持ち点 0 の記録だったので {v} に戻しました）" for s, v in restore.items())
+        self._notice(f"配った席に合わせて{why}、このハンドを組み直しました — ボタン 席{gs.button_seat}"
+                     f"（{positions}）{restored}。要確認")
+        if self._on_action:
+            for record in self._current_actions:
+                self._on_action(record)
+        self._publish_table_state()
+        if self._foldout_pending is None:
+            self._maybe_finish_hand()
+        return True
 
     def _check_deal_order(self) -> None:
         """手札がそろったら 1 回だけ、札ごとに最初に読んだ時刻を記録してから反映する（live のみ）。
@@ -5630,6 +5749,7 @@ class IntegrationThread(threading.Thread):
         self._board_before_deal = False
         self._announced_hand = None
         self._deal_order_checked = False
+        self._hand_seats_settled = False
         self._reset_corrections()
         # ボタンを直して始め直すときに戻る状態（ブラインドを置いた直後、アクションは無い）
         self._hand_origin = (
@@ -5699,7 +5819,7 @@ class IntegrationThread(threading.Thread):
         is_out = getattr(gs, "is_sitting_out", None)
         restored = []
         for seat, cards in sorted(self._deal_hands.items()):
-            amount = self._initial_stacks.get(seat, 0)
+            amount = self._restore_stack_for(seat)
             if (len(cards) < 2 or seat not in stacks or seat in chips or amount <= 0
                     or (is_out is not None and is_out(seat))):
                 continue
@@ -5711,7 +5831,7 @@ class IntegrationThread(threading.Thread):
             restored.append(seat)
             self._provisional_stacks[seat] = (amount, gs.hand_id + 1)
             self._notice(
-                f"持ち点 0 の席{seat} に手札が配られました — 最初の持ち点 {amount} に戻して配ります（記録の誤りか"
+                f"持ち点 0 の席{seat} に手札が配られました — 持ち点 {amount} に戻して配ります（記録の誤りか"
                 f"買い足しの入れ忘れ。要確認。買い足しなら r {seat} <額> で入れると、この額の代わりになります）"
             )
         return restored
@@ -5816,6 +5936,15 @@ class IntegrationThread(threading.Thread):
                 info["player_id"] = seat_player.get(seat)
             players_info.append(info)
 
+        for seat, cards in self._hole_cards.items():
+            if cards:
+                self._seats_ever_dealt.add(seat)
+        self._prev_hand_seats = set(in_hand)
+        for info in players_info:
+            if info["stack_start"] > 0:
+                self._last_positive_stack[info["seat"]] = info["stack_start"]
+            if info["stack_end"] > 0:
+                self._last_positive_stack[info["seat"]] = info["stack_end"]
         if self._hole_cards:
             logger.info(
                 "Hand %d: hole_cards from RFID — %s",

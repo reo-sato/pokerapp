@@ -84,6 +84,14 @@ class PokerEngine(Protocol):
     def pot(self) -> int: ...
 
 
+def _advance_button(playing: list[int], button: Optional[int]) -> int:
+    """前のボタンから 1 つ進めたボタン（前のボタンの席が抜けていたら、その次の席, 仕様 FR-05b）。"""
+    if button is None or button in playing:
+        return next_button(playing, button)
+    later = [s for s in playing if s > button]
+    return later[0] if later else playing[0]
+
+
 def create_game_state(
     backend: str, players: list[PlayerState], sb: int, bb: int,
     button_seat: Optional[int] = None,
@@ -162,6 +170,10 @@ class PokerkitGameState:
         self._pending_bb_ante: Optional[bool] = None
         # 次のハンドのボタンを手で指定（仕様 FR-05g）。使ったら (通常の進み方の席, 指定した席) を残す。
         self._forced_button: Optional[int] = None
+        # 前のハンドのボタン（このハンドの席を組み直すときに、そこから進め直す）と、このハンドのボタンを手で
+        # （か配った順で）直したか
+        self._prev_button: Optional[int] = button_seat
+        self._button_by_hand: bool = False
         self.last_button_override: Optional[tuple[int, int]] = None
         # 次のハンドの持ち点を決める（台本のハンド = 台本どおりの持ち点で始める, 2026-09-30）
         self._forced_stacks: Optional[dict[int, int]] = None
@@ -217,17 +229,16 @@ class PokerkitGameState:
         self._hand_id += 1
         # ボタンを 1 つ進めてから並びを作る（ボタンの次が SB, 末尾が BTN）。前のボタンの席が
         # 抜けていたら（バースト・休み）、その次の席にボタンを置く（仕様 FR-05b）。
-        if self._button_seat is None or self._button_seat in playing:
-            natural = next_button(playing, self._button_seat)
-        else:
-            later = [s for s in playing if s > self._button_seat]
-            natural = later[0] if later else playing[0]
+        self._prev_button = self._button_seat
+        natural = _advance_button(playing, self._button_seat)
         forced = self._forced_button
         self._forced_button = None
         self.last_button_override = None
+        self._button_by_hand = False
         if forced is not None and forced in playing and forced != natural:
             self._button_seat = forced                  # 手動移動（仕様 FR-05g）
             self.last_button_override = (natural, forced)
+            self._button_by_hand = True
         else:
             self._button_seat = natural
         self._hand_seats = list(playing)
@@ -262,6 +273,7 @@ class PokerkitGameState:
             raise ValueError(f"席{seat} はこのハンドに配られていません")
         start = {s: self._hand_start_stacks[self._seat_to_idx[s]] for s in self._hand_seats}
         self._button_seat = seat
+        self._button_by_hand = True                     # 手で・配った順で直したボタン（席を組み直しても保つ）
         self._order = seat_order_from_button(self._hand_seats, seat)
         self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
         self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
@@ -274,6 +286,46 @@ class PokerkitGameState:
         logger.info(
             "Hand %d restarted (pokerkit) with button=seat %d (%s)",
             self._hand_id, seat, " ".join(f"{s}:{n}" for s, n in self.position_map().items()),
+        )
+
+    def restart_hand_with_seats(self, seats: list[int], stacks: dict[int, int]) -> None:
+        """いまのハンドを、配られた席を `seats` にして始め直す（同じブラインド。アクションは空に戻る, 2026-10-23）。
+
+        手札が載る前にハンドを始めるので、あとから札が載った席（持ち点 0 と誤って記録した人）・札が 1 枚も
+        載らない席（空いた席）を配った席に合わせる（店舗 2026-10-19: ボタンが 1 席先に進んだまま 30 ハンド）。
+        ボタンは前のハンドのボタンからこの席で進め直す（手で・配った順で直したボタンがこの席にあれば保つ）。
+        `stacks` = 新しく入れる席の始めの持ち点（無ければいまの持ち点）。席が 2 つ未満なら ValueError。
+        """
+        from pokerkit import NoLimitTexasHoldem
+
+        if not self._hand_active or self._state is None:
+            raise RuntimeError("restart_hand_with_seats called without an active hand")
+        playing = sorted(s for s in set(seats) if s in self._players)
+        if len(playing) < 2:
+            raise ValueError("配られる席が 2 つ未満です")
+        start = {s: self._hand_start_stacks[self._seat_to_idx[s]] for s in self._hand_seats}
+        for s in playing:
+            if s not in start:
+                start[s] = int(stacks.get(s, self._stacks[s]))
+                self._stacks[s] = start[s]
+            if start[s] <= 0:
+                raise ValueError(f"席{s} の持ち点がありません")
+        if not (self._button_by_hand and self._button_seat in playing):
+            self._button_seat = _advance_button(playing, self._prev_button)
+        self._hand_seats = playing
+        self._order = seat_order_from_button(playing, self._button_seat)
+        self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
+        self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
+        self._hand_start_stacks = [start[s] for s in self._order]
+        self._state = NoLimitTexasHoldem.create_state(
+            self._automations, False, self._raw_antes(), (self._sb, self._bb), self._bb,
+            list(self._hand_start_stacks), len(self._order),
+        )
+        self._final_pots = []
+        logger.info(
+            "Hand %d restarted (pokerkit) with seats %s, button=seat %d (%s)",
+            self._hand_id, playing, self._button_seat,
+            " ".join(f"{s}:{n}" for s, n in self.position_map().items()),
         )
 
     def advance_street(self, street: Street) -> None:

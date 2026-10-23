@@ -189,6 +189,7 @@ def replay_events(
         auto_winner=auto_winner,
         rfid_folds=rfid_folds,
         recorded_deals=any(isinstance(e, RFIDEvent) and e.kind == "deal" for e in events),
+        recorded_hand_seats=any(isinstance(e, RFIDEvent) and e.kind == "hand_seats" for e in events),
         before_new_hand=start_from_recorded_stacks if hand_stacks else None,
         on_action=on_action,
     )
