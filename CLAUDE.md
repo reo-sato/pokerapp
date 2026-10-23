@@ -1245,7 +1245,7 @@ python tools/bench_hands.py --twice --search-check --workers 3   # 推定器の�
 python tools/estimate_logs.py logs --latest --shadow --workers 1  # いちばん新しいセッションを推定して影のファイルに (ハンドごとの時間)
 python tools/bench_hands.py --update-record     # 開発データの物差しの前の記録（tests/fixtures/store/bench_record.json）を書き直す（新しい要確認なしの誤りは終了コード 1）
 TZ=Asia/Tokyo python tools/llm_candidates.py --split A --dry-run   # 実験: LLM に聞くハンドの数と費用の目安（API を呼ばない）
-TZ=Asia/Tokyo python tools/llm_candidates.py --split A --limit 10 --model claude-haiku-5-5   # 実験: LLM に聞いてキャッシュ（要 ".[llm]" と ANTHROPIC_API_KEY）
+TZ=Asia/Tokyo python tools/llm_candidates.py --split A --limit 10 --model claude-haiku-5-5   # 実験: LLM に聞いてキャッシュ（要 ".[llm]" と POKERAPP_ANTHROPIC_API_KEY。クラウドのセッションでは ANTHROPIC_API_KEY が外される）
 TZ=Asia/Tokyo python tools/bench_llm.py --split A --model claude-haiku-5-5   # 実験: 今の推定器 / 提案つき / LLM が選ぶ / LLM 単独を比べる（キャッシュだけ）
 TZ=Asia/Tokyo python tools/forward_ledger.py     # 前向きの成績表: 各セッションを初めて見たときの版で採点（精度はこれで見る, ADR-0056 追記 6。約 30 分）
 TZ=Asia/Tokyo python tools/compare_versions.py b2f1e5a <zip>   # 前の版と今の版でハンドごとに比べる（固定の前の前向きの確認, ADR-0056 追記 5）

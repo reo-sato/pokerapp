@@ -372,11 +372,14 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     import anthropic  # 遅延 import（`pip install ".[llm]"`）
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("ANTHROPIC_API_KEY がありません（環境の設定に入れて、新しいセッションで）", file=sys.stderr)
+    # クラウドのセッションは ANTHROPIC_API_KEY を実行環境の側で外すので、別の名前でも受ける
+    api_key = os.environ.get("POKERAPP_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("POKERAPP_ANTHROPIC_API_KEY がありません（環境の設定に入れて、新しいセッションで）", file=sys.stderr)
         return 2
     # クラウドのセッションでは ANTHROPIC_BASE_URL が実行環境のものを指すので、自分のキーは公式の API へ送る
     client = anthropic.Anthropic(
+        api_key=api_key,
         base_url=os.environ.get("POKERAPP_ANTHROPIC_BASE_URL", "https://api.anthropic.com"))
     spent = 0.0
     failed = 0
