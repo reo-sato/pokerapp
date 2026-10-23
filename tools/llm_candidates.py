@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -371,7 +372,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     import anthropic  # 遅延 import（`pip install ".[llm]"`）
 
-    client = anthropic.Anthropic()
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print("ANTHROPIC_API_KEY がありません（環境の設定に入れて、新しいセッションで）", file=sys.stderr)
+        return 2
+    # クラウドのセッションでは ANTHROPIC_BASE_URL が実行環境のものを指すので、自分のキーは公式の API へ送る
+    client = anthropic.Anthropic(
+        base_url=os.environ.get("POKERAPP_ANTHROPIC_BASE_URL", "https://api.anthropic.com"))
     spent = 0.0
     failed = 0
 
