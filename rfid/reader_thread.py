@@ -94,6 +94,7 @@ from core.events import RFIDEvent
 from rfid.bridge import (
     MAX_READER_INDEX,
     PCSCBridge,
+    PollGapMonitor,
     bridge_read_uids,
     call_bridge_factory,
     pcsc_reader_present,
@@ -440,8 +441,10 @@ class RFIDThread(threading.Thread):
             "last_event_at": None,
         }
 
+        gaps = PollGapMonitor("RFID", log=logger)
         try:
             while not self._stop_event.is_set():
+                gaps.tick()
                 self.step_device(self._clock())
                 if self._restart_phase is None:
                     for reader_id, (bridge, cfg) in list(self._bridges.items()):

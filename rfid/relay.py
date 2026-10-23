@@ -27,6 +27,7 @@ from typing import Any, Callable, Optional
 
 from rfid.bridge import (
     PCSCBridge,
+    PollGapMonitor,
     bridge_read_uids,
     call_bridge_factory,
     pcsc_reader_present,
@@ -251,8 +252,10 @@ class RelayPoller(threading.Thread):
 
     def run(self) -> None:
         logger.info("RFID relay: %d reader(s)", len(self._targets))
+        gaps = PollGapMonitor("RFID relay", log=logger)
         try:
             while not self._stop_event.is_set():
+                gaps.tick()
                 try:
                     self.poll_once()
                     self._last_error = None

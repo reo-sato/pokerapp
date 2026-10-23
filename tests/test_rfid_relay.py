@@ -328,3 +328,35 @@ class TestCheckTool:
         text = raw[3:].decode("utf-8")
         assert "\r\n" in text and r"tools\rfid_relay.py serve" in text and r"NT AUTHORITY\SYSTEM" in text
         assert "-AtStartup" in text and "PokerRFIDRelay" in text
+
+
+class TestPollGapMonitor:
+    """札を読む 1 周の間隔が空いたらログに残す（PC の処理の遅れで時刻と順番がずれたかを後で確かめる）。"""
+
+    def _monitor(self, caplog):
+        import logging
+
+        from rfid.bridge import PollGapMonitor
+
+        now = [0.0]
+        caplog.set_level(logging.INFO, logger="rfid.bridge")
+        return now, PollGapMonitor("RFID", clock=lambda: now[0])
+
+    def test_short_gaps_are_quiet_and_long_ones_are_logged(self, caplog):
+        now, m = self._monitor(caplog)
+        for t in (0.0, 0.3, 0.6, 1.8, 2.1, 6.0, 6.3):     # 1.2 秒・3.9 秒の空き
+            now[0] = t
+            m.tick()
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1 and "3.9 秒" in warnings[0]
+        now[0] = 61.0
+        m.tick()
+        info = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+        assert len(info) == 1 and "回数 3" in info[0] and "最長 54.7 秒" in info[0]
+
+    def test_nothing_is_reported_when_every_gap_is_short(self, caplog):
+        now, m = self._monitor(caplog)
+        for i in range(400):
+            now[0] = i * 0.3
+            m.tick()
+        assert not caplog.records

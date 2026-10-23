@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Callable, Optional
 
 from rfid.card_master import bytes_to_tag_id
@@ -53,6 +54,51 @@ MAX_READER_INDEX = 0xFC
 # 8（1 枚）/ 4 / 7（ISO 14443A）は単一 UID として扱う（16=2 枚, 24=3 枚, 32=4 枚）。
 UID_CHUNK_BYTES = 8
 MULTI_UID_LENGTHS = (16, 24, 32)
+
+
+# 読み取りの 1 周の間隔（PollGapMonitor）: これ以上空いた周を数える / これ以上はその場で残す / まとめて残す間隔
+POLL_GAP_SEC = 1.0
+POLL_GAP_WARN_SEC = 3.0
+POLL_GAP_REPORT_SEC = 60.0
+
+
+class PollGapMonitor:
+    """札を読む 1 周の間隔を測り、空いたらログに残す（2026-10-23, オーナー:「PC の処理が遅れて時系列が同期できて
+    いない可能性は」）。
+
+    いつもは 0.1〜0.4 秒で 1 周する。PC が忙しくて間隔が空くと、その間に離れた札・置いた札は次の周でまとめて見え、
+    時刻が遅れて順番も分からなくなる（ほぼ同時の離脱）。`POLL_GAP_SEC` 以上空いた回数と最長を `POLL_GAP_REPORT_SEC`
+    ごとに 1 行、`POLL_GAP_WARN_SEC`（札の離脱を確かめる 3 秒）以上はその場で 1 行。ループの頭で `tick()` を呼ぶ。
+    """
+
+    def __init__(self, label: str, *, clock: Callable[[], float] = time.monotonic,
+                 log: logging.Logger = logger) -> None:
+        self._label = label
+        self._clock = clock
+        self._log = log
+        self._last: Optional[float] = None
+        self._window_start: Optional[float] = None
+        self._count = 0
+        self._longest = 0.0
+
+    def tick(self) -> None:
+        now = self._clock()
+        if self._window_start is None:
+            self._window_start = now
+        if self._last is not None:
+            gap = now - self._last
+            if gap >= POLL_GAP_SEC:
+                self._count += 1
+                self._longest = max(self._longest, gap)
+                if gap >= POLL_GAP_WARN_SEC:
+                    self._log.warning("%s: 札を %.1f 秒読めませんでした（PC の処理の遅れ）— この間に置いた・離れた札の"
+                                      "時刻は遅れ、順番は分かりません", self._label, gap)
+        self._last = now
+        if now - self._window_start >= POLL_GAP_REPORT_SEC:
+            if self._count:
+                self._log.info("%s: 直近 %.0f 秒で読み取りの間隔が %.0f 秒以上空いた回数 %d（最長 %.1f 秒）",
+                               self._label, now - self._window_start, POLL_GAP_SEC, self._count, self._longest)
+            self._window_start, self._count, self._longest = now, 0, 0.0
 
 
 def get_uid_apdu(reader_index: int = 0) -> list[int]:
