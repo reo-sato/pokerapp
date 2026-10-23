@@ -143,3 +143,19 @@ def test_main_reports_a_missing_part(tmp_path, capsys):
     one, _ = _write_set(tmp_path / "in")
     assert home_truth.main([str(one), "--dest", str(tmp_path / "home"), "--no-browser"]) == 1
     assert "2of2" in capsys.readouterr().out
+
+
+def test_estimates_and_review_notes(tmp_path):
+    zips = _write_set(tmp_path / "in")
+    est = tmp_path / "in" / f"pokerestimate_{STAMP}.zip"
+    with zipfile.ZipFile(est, "w") as zf:
+        zf.writestr(f"{SID}/{SID}.estimate.shadow.json", json.dumps({"session_id": SID, "hands": {}}))
+        zf.writestr("../evil.json", "x")
+    dest = tmp_path / "logs"
+    home_truth.unpack(zips, dest)
+    assert home_truth.unpack_estimates([est], dest) == [SID]
+    assert (dest / f"{SID}.estimate.shadow.json").is_file()
+    (dest / f"{SID}.estimate_review.json").write_text(json.dumps({"hands": {"3": {"tags": ["額"]}}}))
+    out = home_truth.pack_truth(dest, STAMP, tmp_path / "out")
+    with zipfile.ZipFile(out) as zf:
+        assert f"{SID}/{SID}.estimate_review.json" in zf.namelist()

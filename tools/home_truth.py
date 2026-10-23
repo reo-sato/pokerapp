@@ -39,6 +39,9 @@ from tools.pack_logs import desktop_dir  # noqa: E402
 
 PORTS = range(8791, 8800)
 GT_SUFFIX = ".ground_truth.json"
+REVIEW_SUFFIX = ".estimate_review.json"            # 推定の見直しのメモ（`tools/estimate_review.py`）
+_ESTIMATE_ZIP = re.compile(r"pokerestimate_(\d{8}_\d{6})", re.IGNORECASE)
+_ESTIMATE_FILE = re.compile(r"^([A-Za-z0-9_\-]{1,120})/\1\.estimate(\.shadow)?\.json$")
 STORE_GT_SUFFIX = ".ground_truth.store.json"
 _ZIP_NAME = re.compile(r"pokerlogs_(\d{8}_\d{6})(?:_(\d+)of(\d+))?", re.IGNORECASE)
 _SID = re.compile(r"^[A-Za-z0-9_\-]{1,120}$")
@@ -149,10 +152,27 @@ def unpack(zips: list[Path], dest: Path, keep_store: bool = False) -> dict:
     return sessions
 
 
+def unpack_estimates(zips: list[Path], log_dir: Path) -> list[str]:
+    """推定の zip（`pokerestimate_<日時>.zip` = `<sid>/<sid>.estimate.shadow.json`）を置く。置いたセッションを返す。"""
+    placed = []
+    for z in zips:
+        with zipfile.ZipFile(z) as zf:
+            for info in zf.infolist():
+                m = _ESTIMATE_FILE.match(info.filename.replace("\\", "/"))
+                if m is None or info.is_dir():
+                    continue
+                log_dir.mkdir(parents=True, exist_ok=True)
+                (log_dir / info.filename.split("/")[-1]).write_bytes(zf.read(info))
+                placed.append(m.group(1))
+    return placed
+
+
 def pack_truth(log_dir: Path, stamp: str, out_dir: Path) -> Optional[Path]:
-    """入れた真のアクションだけを zip に（`<sid>/<sid>.ground_truth.json`）。無ければ None。"""
+    """入れた真のアクションと推定の見直しのメモを zip に（`<sid>/<sid>.ground_truth.json`・`<sid>.estimate_review.json`）。
+    無ければ None。"""
     files = sorted(p for p in log_dir.glob("*" + GT_SUFFIX) if not p.name.endswith(STORE_GT_SUFFIX))
-    if not files:
+    reviews = sorted(log_dir.glob("*" + REVIEW_SUFFIX))
+    if not files and not reviews:
         return None
     rows = []
     for p in files:
@@ -173,6 +193,8 @@ def pack_truth(log_dir: Path, stamp: str, out_dir: Path) -> Optional[Path]:
         for p in files:
             sid = p.name[: -len(GT_SUFFIX)]
             zf.write(p, f"{sid}/{p.name}")
+        for p in reviews:
+            zf.write(p, f"{p.name[: -len(REVIEW_SUFFIX)]}/{p.name}")
     tmp.replace(out)
     return out
 
@@ -198,8 +220,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="店で入れた分から続ける（既定は音を聞いて最初から入れ直す = 評価のモード）")
     args = ap.parse_args(argv)
 
+    given = [p for p in args.zips if p.is_file()]
+    estimate_zips = [p for p in given if _ESTIMATE_ZIP.search(p.name)]
     try:
-        zips = [p for p in args.zips if p.is_file()] or find_zips([desktop_dir(), Path.home() / "Downloads"])
+        zips = [p for p in given if p not in estimate_zips] or find_zips([desktop_dir(), Path.home() / "Downloads"])
         stamp, parts = pick_set(zips)
     except SetError as e:
         print(f"[家で入力] {e}")
@@ -211,6 +235,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         note = ("家で入れた分から続けます" if s["kept_truth"] else "店で入れた分から続けます" if s.get("from_store")
                 else "最初から入れます（店で入れた分は別のファイルに残してあります）" if s["store_truth"] else "")
         print(f"  セッション {sid[:8]}: 音声 {s['audio']} 件 {note}")
+    if not estimate_zips:
+        estimate_zips = [p for folder in (desktop_dir(), Path.home() / "Downloads") if folder.is_dir()
+                         for p in folder.glob(f"pokerestimate_{stamp}*.zip")]
+    for sid in unpack_estimates(estimate_zips, log_dir):
+        print(f"  セッション {sid[:8]}: 推定を置きました（推定の見直しの画面で使います）")
     try:
         server, port = _serve(log_dir, evaluation=not args.keep_store)
     except SetError as e:
@@ -219,6 +248,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     url = f"http://127.0.0.1:{port}/"
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"[家で入力] 入力画面: {url}  （開かなければブラウザにこのアドレスを入れてください）")
+    print(f"[家で入力] 推定の見直し: {url}review")
     if not args.no_browser:
         webbrowser.open(url)
     try:

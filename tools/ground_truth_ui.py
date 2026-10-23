@@ -896,6 +896,8 @@ _ROUTE_HANDS = re.compile(r"^/api/sessions/([^/]+)/hands/?$")
 _ROUTE_HAND = re.compile(r"^/api/sessions/([^/]+)/hands/(\d+)/?$")
 _ROUTE_LEGAL = re.compile(r"^/api/sessions/([^/]+)/hands/(\d+)/legal/?$")
 _ROUTE_AUDIO = re.compile(r"^/api/sessions/([^/]+)/audio/([^/]+)$")
+_ROUTE_REVIEW = re.compile(r"^/api/review/([^/]+)/?$")
+_ROUTE_REVIEW_HAND = re.compile(r"^/api/review/([^/]+)/(\d+)/?$")
 _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
@@ -1060,6 +1062,24 @@ class _Handler(BaseHTTPRequestHandler):
 
             self._send_page(SCRIPT_PAGE)
             return
+        if path in ("/review", "/review/"):
+            from tools.estimate_review import REVIEW_PAGE
+
+            self._send_page(REVIEW_PAGE)
+            return
+        m = _ROUTE_REVIEW.match(path) or _ROUTE_REVIEW_HAND.match(path)
+        if m:
+            from tools.estimate_review import review_detail, review_summary
+
+            sid = self._session(m.group(1))
+            if sid is None:
+                self._send_json(404, {"code": "not_found", "message": "セッションのログがありません"})
+            elif m.re is _ROUTE_REVIEW:
+                self._send_json(200, review_summary(srv.log_dir, sid, srv.gt_repo, srv.corr_repo))
+            else:
+                data = review_detail(srv.log_dir, sid, int(m.group(2)), srv.gt_repo, srv.corr_repo)
+                self._send_json(*((200, data) if data else (404, {"code": "not_found", "message": "ハンドがありません"})))
+            return
         if path.startswith("/api/script/"):
             self._send_json(*srv.script.route("GET", path))
             return
@@ -1150,6 +1170,16 @@ class _Handler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:          # noqa: N802
         path = urlsplit(self.path).path
         srv = self.server
+        m = _ROUTE_REVIEW_HAND.match(path)
+        if m:
+            from tools.estimate_review import save_note
+
+            sid = self._session(m.group(1))
+            if sid is None:
+                self._send_json(404, {"code": "not_found", "message": "セッションのログがありません"})
+            else:
+                self._send_json(*save_note(srv.log_dir, sid, int(m.group(2)), self._read_json()))
+            return
         m = _ROUTE_HAND.match(path)
         if not m:
             self._send_json(404, {"code": "not_found", "message": path})
@@ -1442,7 +1472,7 @@ function renderList(){
       <td>${(h.seats||[]).join(" ")}</td><td>${(h.board||[]).map(c => cardHtml(c, "sm")).join("")}</td>
       <td>${h.winner_seat != null ? "席 " + h.winner_seat : "—"}</td><td>${live || `${rv} ${st} ${bl} ${ex} ${acc}`}</td></tr>`;
   }).join("");
-  $("app").innerHTML = `<div class="top"><h1>真のアクション入力</h1><span class="small"><a href="/script">台本 →</a>　<a href="/corpus">読み上げ集 →</a></span></div>
+  $("app").innerHTML = `<div class="top"><h1>真のアクション入力</h1><span class="small"><a href="/review">推定の見直し →</a>　<a href="/script">台本 →</a>　<a href="/corpus">読み上げ集 →</a></span></div>
     <div class="bar">
       <select onchange="selectSession(this.value)">${sess || "<option>セッションがありません</option>"}</select>
       <button class="sm" onclick="refreshAll()">↻ 読み直す</button>
