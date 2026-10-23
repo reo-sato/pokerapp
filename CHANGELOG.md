@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### Added (LLM の提案を推定器の候補に足す実験, 2026-10-23)
+
+- 推定器の候補に外から直しの組を足す口（`HandWindow.seeds` / `SessionEstimator.evaluate_edits`）。既定は空で、推定の結果は
+  変わらない（開発データの物差しで確認）。
+- 実験の道具: `tools/llm_hand_prompt.py`（1 ハンドの観測を LLM に渡す形に。名前・真のアクション・メモ・音声は送らない）/
+  `tools/llm_candidates.py`（LLM にハンドの解釈を聞いて `logs/llm_cache/` にキャッシュ。`--dry-run` で件数と費用の目安。
+  Opus 5.5 と Haiku 5.5 を比べる）/ `tools/bench_llm.py`（今の推定器・提案つき・LLM が選ぶ・LLM 単独をハンドごとに比べる。
+  キャッシュだけを読む）。`pip install ".[llm]"`（`anthropic`）と `ANTHROPIC_API_KEY` が要る。本番の経路・店舗 PC では使わない。
+- 事前登録の草稿 `docs/dogfood/llm-proposer-preregistration.md`（開発 A で説明文を作り、固定してから開発 B と 10/19 を 1 回ずつ）。
+
 ### Added (RFID の手札の読み取りの見える化, 2026-10-23)
 
 - ログをまとめる道具（`pack_logs`）が RFID の中継のログ（`logs/rfid_relay.log`）も同じ時間帯の行だけ zip に入れる。

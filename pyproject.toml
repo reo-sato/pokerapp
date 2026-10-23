@@ -32,6 +32,8 @@ api = ["fastapi>=0.110,<1", "uvicorn>=0.29,<1", "httpx>=0.27,<1", "segno>=1.5,<2
 ear = ["kaldi-native-fbank>=1.20,<2", "onnxruntime>=1.14,<2"]
 # 開発/テスト/契約検証（CI が使用。実行時 core には不要）
 dev = ["pytest>=7.0", "pytest-xdist>=3.5,<4", "pytest-timeout>=2.3,<3", "jsonschema>=4.0,<5", "fastapi>=0.110,<1", "httpx>=0.27,<1"]
+# LLM の提案を推定器の候補に足すオフラインの実験（tools/llm_candidates.py）。開発 PC だけ・店舗 PC には不要
+llm = ["anthropic>=2.2,<3"]
 # クラウド（Cloud Run + Supabase の Postgres, ADR-0067）。店舗 PC には不要
 cloud = ["fastapi>=0.110,<1", "uvicorn>=0.29,<1", "jsonschema>=4.0,<5", "psycopg[binary]>=3.1,<4", "psycopg-pool>=3.2,<4"]
 
