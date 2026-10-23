@@ -695,6 +695,8 @@ class IntegrationThread(threading.Thread):
         # 先に離れた席の数)
         self._lagging_voice: list[tuple[object, object, int, int]] = []
         self._lag_moved: set[int] = set()
+        # 手札が読めていないので降ろした席（`_imply_action`）。あとからその席の手札が読めたら組み直す
+        self._unread_folded: set[int] = set()
         # 最初に処理したときに札の離脱と組にした聞き違いのコールの語（id → 語）。組み直しでは記録した離脱の入力が降ろす
         # ので、語はもう何もしない（組み直しの入力の並び = live は語のあと、replay は語の前に離脱 = によらず同じにする）
         self._garbled_absorbed: dict[int, AudioEvent] = {}
@@ -827,6 +829,8 @@ class IntegrationThread(threading.Thread):
                 self._check_hand_seats(ev.timestamp)
         finally:
             self._event_depth -= 1
+        if ev.kind == "card" and ev.role != "board" and ev.seat in self._unread_folded:
+            self._unfold_late_read(ev.seat)
         self._finish_after_correction()
         # 卓状態はカードが動くたびに publish する（UI への反映経路, ADR-0056 D5）。
         self._publish_table_state(observed_at=ev.timestamp)
@@ -2687,6 +2691,21 @@ class IntegrationThread(threading.Thread):
         if leave is not None:
             self._departed_calls.append((leave, word, seat))
 
+    def _unfold_late_read(self, seat: int) -> None:
+        """手札が読めていないので降ろした席の手札が、あとから読めた（8 人卓では配ってから 30 秒あとに読めることがある,
+        10/19 d01277f8 ハンド 50 の席8）: ハンドを組み直す（その席は降ろさない = 言われないコール / チェック）。"""
+        if self._rebuilding or not self._hole_cards.get(seat):
+            return
+        self._unread_folded.discard(seat)
+        if not (self._hand_open and self._hand_origin is not None and self._game_state.is_hand_active()):
+            return
+        before = list(self._current_actions)
+        self._rebuild_hand()
+        self._hand_needs_review = True
+        logger.info("席%d の手札があとから読めたので、降ろさずに組み直しました", seat)
+        self._emit_rebuilt(before)
+        self._publish_table_state()
+
     def _note_lagging_voice(self, word: AudioEvent, records: list[ActionRecord]) -> None:
         """賭け・コールの声が、少し前（`VOICE_LAG_SEC` 以内）に札が離れた手番の後の席より手番が前の人のものか: その離脱で
         間の席に言われないコール / チェックを補っていれば、その席のもの。決めて組み直すのは同じ発話の続きのフォールドを
@@ -2855,7 +2874,20 @@ class IntegrationThread(threading.Thread):
         action = "check" if ctx.amount_to_call == 0 else "call"
         amount = 0 if action == "check" else ctx.amount_to_call
         street = gs.street
-        gs.apply_action(seat, action, amount)
+        if (not confirmed and self._rfid_folds and not self._hole_cards.get(seat)
+                and any(self._hole_cards.values())):
+            # 手札が 1 枚も読めていない席は、札の離脱が無いまま降りている（配った時点で札が無い・始まりと同時に離れた・
+            # 空席）。オーナーの注釈（10/19 a64ec4ad ハンド 17・24・25）。10/19 の再生で、この席に補ったコール / チェック
+            # 23 行のうち真もコールは 1 行（降りていた 14・その席はハンドにいない 8）
+            action, amount = "fold", 0
+            reason = f"{reason}+unread_seat_fold"
+            self._unread_folded.add(seat)
+            if "fold" in ctx.legal_actions:
+                gs.apply_action(seat, "fold", 0)
+            else:
+                gs.force_fold(seat)
+        else:
+            gs.apply_action(seat, action, amount)
         self._append_rfid_record(ActionRecord(
             hand_id=gs.hand_id,
             timestamp=self._iso(t),
@@ -5244,6 +5276,7 @@ class IntegrationThread(threading.Thread):
         self._departed_calls = []
         self._lagging_voice = []
         self._lag_moved = set()
+        self._unread_folded = set()
         self._garbled_absorbed = {}
         self._fold_words_done = {}
         self._before_card = []
