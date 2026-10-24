@@ -115,8 +115,10 @@ TABLE_CLEAR_SEC = 15.0
 # 書き起こしに残す（記録には入れない = ハンドの外。店舗 2026-10-06: 全員フォールドで早く終わったあとのリバーの
 # ベット・レイズ・コールが聞き流されて失われた。2026-10-14 15cad555 ハンド 3: ショーダウンで早く閉じたあとの
 # ターン・リバーの賭けが確定から 46 秒まで続き、聞き流されて推定にも使えなかった = 終わり方によらない）。
-# 次の配布・札が片付いたら止める。
-POST_HAND_LISTEN_SEC = 90.0
+# 卓の証拠でプレーが終わった（ボードを回収し、手札も 1 席以下 = `_table_still_in_play`）・次の配布で止める。
+# この秒数は証拠が出ないとき（札を卓に残したまま）の上限（2026-10-24 オーナー: ハンドの終わりは
+# ボードの回収・全員の手札の離脱など複数の証拠で決める。90 → 180 秒）。
+POST_HAND_LISTEN_SEC = 180.0
 POST_FOLDOUT_LISTEN_SEC = POST_HAND_LISTEN_SEC     # 旧名
 # いまのストリートの最初の札が見える前にこの秒数以上早く話し始めた「コール」は、前のストリートで
 # 言われたもの（言い直し）とみなす（店舗の実測: 「コール」のあとの「600点コールです」がターンの札の 3 秒前）。
@@ -596,6 +598,7 @@ class IntegrationThread(threading.Thread):
             listen_gate.clear()
         self._table_empty_since: Optional[float] = None
         self._listen_after_hand_until: Optional[float] = None   # `POST_HAND_LISTEN_SEC`
+        self._board_seen_at: Optional[float] = None             # 確定のあとにボードの札を最後に見た時刻
         self._voice_heard_at = voice_heard_at
         self._silent_mic_warned = False
         # いまのハンドを配布の検出で始めたか（直後の「ハンド開始」/ `n` を二重に数えない）。
@@ -3687,27 +3690,50 @@ class IntegrationThread(threading.Thread):
 
         return sorted(s for s, info in seats.items() if s in game and holding(info))
 
+    def _table_still_in_play(self) -> bool:
+        """卓の札がまだプレーの続きを示しているか（確定のあとの聞き取りに使う）。
+
+        2 席以上に手札がある、またはボードに札があって 1 席以上に手札がある。ボードの読み落ちも手札と同じく
+        `fold_absent_sec` までは「ある」とみなす（`_seats_holding_cards`）。
+        """
+        holding = self._seats_holding_cards()
+        if len(holding) >= 2:
+            return True
+        if not holding or self._board_presence is None:
+            return False
+        try:
+            on_board = (self._board_presence() or {}).get("present_count") or 0
+        except Exception:  # noqa: BLE001
+            return False
+        now = self._clock()
+        if on_board:
+            self._board_seen_at = now
+            return True
+        seen = self._board_seen_at
+        return seen is not None and now - seen < self._fold_absent_sec
+
     def _keep_listening_after_hand(self) -> bool:
-        """ハンドを確定したのに 2 席以上に札が載っていれば、聞き取りを続ける（`POST_HAND_LISTEN_SEC`）。
+        """ハンドを確定したのに卓の札がプレーの続きを示していれば、聞き取りを続ける（`_table_still_in_play`）。
 
         フォールドを札の離脱で決める卓だけ（声でフォールドを決める卓では、降りた人の札が席に残る）。
         """
         if not self._rfid_folds:
             return False
-        holding = self._seats_holding_cards()
-        if len(holding) < 2:
+        self._board_seen_at = None
+        if not self._table_still_in_play():
             return False
         self._listen_after_hand_until = self._clock() + POST_HAND_LISTEN_SEC
-        logger.info("ハンドを確定しましたが席%s に札が残っています — %.0f 秒まで聞き取りを続けます"
-                    "（書き起こしに残すだけで、記録には入れません）", holding, POST_HAND_LISTEN_SEC)
+        logger.info("ハンドを確定しましたが卓に札が残っています（席%s）— ボードの回収と手札の離脱まで聞き取りを"
+                    "続けます（最長 %.0f 秒。書き起こしに残すだけで、記録には入れません）",
+                    self._seats_holding_cards(), POST_HAND_LISTEN_SEC)
         return True
 
     def _check_post_hand_listening(self) -> None:
-        """確定のあとの聞き取りを、時間切れか札が片付いたら止める（次の配布でも止まる）。"""
+        """確定のあとの聞き取りを、卓の札が片付いたか上限の時間で止める（次の配布でも止まる）。"""
         until = self._listen_after_hand_until
         if until is None or self._hand_open:
             return
-        if self._clock() >= until or len(self._seats_holding_cards()) < 2:
+        if self._clock() >= until or not self._table_still_in_play():
             self._set_in_play(False)
 
     def _check_table_cleared(self) -> None:
