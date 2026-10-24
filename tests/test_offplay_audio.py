@@ -136,3 +136,99 @@ class TestLiveProcessor:
 
         monkeypatch.setattr(recorder, "WhisperTranscriber", Missing)
         assert live_processor({"audio": {"second_ear": {"enabled": False}}}) == (None, "faster-whisper が入っていません")
+
+
+class _Thread:
+    """`AudioThread` の代わり（`transcribe_offline` と `backlog` だけ）。"""
+
+    asr_ready = True
+
+    def __init__(self, busy: int = 0):
+        self.busy = busy
+        self.calls = []
+
+    def backlog(self) -> int:
+        self.busy = max(0, self.busy - 1)
+        return self.busy
+
+    def transcribe_offline(self, audio_bytes, start):
+        self.calls.append(start)
+        return Transcript(text="コール", confidence=0.5, events=(), audio_sec=0.5, infer_sec=0.1,
+                          utterance_start_ts=start, heard_at=start)
+
+
+class TestAutomatic:
+    def test_after_the_session_it_transcribes_with_the_loaded_model(self, tmp_path):
+        from tools.offplay_audio import after_session
+
+        logs = _logs(tmp_path)
+        thread = _Thread(busy=3)
+        said = []
+        assert after_session(thread, logs, SID, {}, say=said.append, sleep=lambda _s: None) == 2
+        assert thread.calls == [1791000040.0, 1791000045.0]
+        assert (logs / f"{SID}{OFFPLAY_SUFFIX}").exists() and "2 件" in said[0]
+        # 2 回目は何もしない（書き起こし済み）
+        assert after_session(thread, logs, SID, {}, say=said.append) == 0
+
+    def test_it_can_be_turned_off_and_waits_for_the_worker(self, tmp_path):
+        from tools.offplay_audio import after_session
+
+        logs = _logs(tmp_path)
+        thread = _Thread()
+        assert after_session(thread, logs, SID, {"audio": {"transcribe_offplay": False}}) == 0 and thread.calls == []
+        now = [0.0]
+
+        def sleep(sec):
+            now[0] += sec
+
+        busy = _Thread(busy=10 ** 9)                 # 聞き取りの作業スレッドが止まらない
+        said = []
+        assert after_session(busy, logs, SID, {}, say=said.append, clock=lambda: now[0], sleep=sleep) == 0
+        assert busy.calls == [] and "ログをまとめる" in said[-1]
+
+    def test_catch_up_loads_whisper_only_when_needed(self, tmp_path):
+        from tools.offplay_audio import catch_up, processor_for
+
+        logs = _logs(tmp_path)
+        loads = []
+
+        def loader(config):
+            loads.append(config)
+            return processor_for(_Thread()), None
+
+        assert catch_up(logs, ["other"], {}, say=lambda _m: None, loader=loader) == 0 and loads == []
+        assert catch_up(logs, [SID], {}, say=lambda _m: None, loader=loader) == 2 and len(loads) == 1
+        assert catch_up(logs, [SID], {}, say=lambda _m: None, loader=loader) == 0 and len(loads) == 1
+
+    def test_catch_up_does_nothing_when_whisper_is_missing(self, tmp_path):
+        from tools.offplay_audio import catch_up
+
+        said = []
+        assert catch_up(_logs(tmp_path), [SID], {}, say=said.append,
+                        loader=lambda _c: (None, "faster-whisper が入っていません")) == 0
+        assert "音声だけ入れます" in said[-1]
+
+
+class TestTranscribeOffline:
+    def test_it_does_not_save_report_or_send_actions(self, tmp_path):
+        """ロガーの終わりに使う `AudioThread.transcribe_offline`: 読み方はライブと同じで、音声の保存・記録・送出をしない。"""
+        import queue
+        import threading
+
+        from audio.recognizer import Recognition
+        from audio.recorder import AudioThread
+
+        class Fake:
+            ready = True
+
+            def recognize(self, audio_bytes):
+                return Recognition(text="レイズ 3000", confidence=0.7)
+
+        heard, q = [], queue.Queue()
+        thread = AudioThread(audio_queue=q, stop_event=threading.Event(), transcriber=Fake(),
+                             on_transcript=heard.append, audio_dir=tmp_path)
+        t = thread.transcribe_offline(b"\x00\x00" * 8000, 12.0)
+        assert t.text == "レイズ 3000" and [(e.action, e.amount) for e in t.events] == [("raise", 3000)]
+        assert heard == [] and q.empty() and not list(tmp_path.glob("*.wav"))
+        thread._process_chunk(b"\x00\x00" * 8000, utterance_start_ts=13.0)   # noqa: SLF001 — ライブは今までどおり
+        assert len(heard) == 1 and q.qsize() == 1 and len(list(tmp_path.glob("*.wav"))) == 1

@@ -1,14 +1,18 @@
 """tools/offplay_audio.py
 
 聞き流した（ハンドの外の）発話の音声 `logs/audio/<sid>/off_<話し始めの ms>.wav` を、**ライブと同じ経路**
-（Whisper + 第 2 の耳 + 読み取り = `AudioThread._process_chunk`）で書き起こして `logs/<sid>.offplay.jsonl` に書く
+（Whisper + 第 2 の耳 + 読み取り = `AudioThread.transcribe_offline`）で書き起こして `logs/<sid>.offplay.jsonl` に書く
 （行の形は `<sid>.transcripts.jsonl` と同じ + `"offplay": true`）。
 
 ライブがハンドを早く閉じると、次の配布まで聞き取りを止める（ADR-0063）。そのあいだの発話は認識に回さないが、
 `audio.save_audio` なら音声だけは残す（2026-10-24）。これを書き起こすと、推定器（`tools/estimate.py` の
 `inputs_from_logs`）がその続きの賭けを使える。記録（ライブ）は変えない。
 
-使い方（店舗 PC で営業のあと = ロガーを閉じてから。モデルはライブと同じ config の audio.*）:
+**ふだんは自動**（2026-10-24）: ロガーを `q` で終えたとき（読み込んであるモデルをそのまま使う, `after_session`）と、
+「ログをまとめる」（`tools/pack_logs.py`, `catch_up`）のときに、まだ書き起こしていない音声を書き起こす。どちらも
+途中で止めてよい（次は続きから）。config `audio.transcribe_offplay`（既定 true）で止められる。
+
+手で回すとき（店舗 PC で営業のあと = ロガーを閉じてから。モデルはライブと同じ config の audio.*）:
 
     python tools/offplay_audio.py                      # logs/ の全セッション（書き起こし済みの音声は飛ばす）
     python tools/offplay_audio.py --session 8d08c010   # 1 セッション（ID の先頭でよい）
@@ -21,6 +25,7 @@ import dataclasses
 import queue
 import sys
 import threading
+import time
 import wave
 from pathlib import Path
 from typing import Callable, Optional
@@ -29,6 +34,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from core.offplay import OFFPLAY_PREFIX, OFFPLAY_SUFFIX, merge_offplay, offplay_start, read_rows  # noqa: E402,F401
+
+WORKER_WAIT_SEC = 120.0      # ロガーを終えたとき、聞き取りの作業スレッドが止まるのを待つ上限
 
 
 def _read_wav(path: Path) -> bytes:
@@ -85,25 +92,119 @@ def _silent(path: Path, start: Optional[float]):
                       utterance_start_ts=start, heard_at=start, noise=True, no_speech=True)
 
 
+def processor_for(thread) -> Callable[[bytes, float], list]:
+    """`AudioThread` で 1 発話を書き起こす関数（`transcribe_offline` = ライブと同じ読み方。保存・送出はしない）。"""
+
+    def process(audio_bytes: bytes, start: float) -> list:
+        transcript = thread.transcribe_offline(audio_bytes, start)
+        return [transcript] if transcript is not None else []
+
+    return process
+
+
 def live_processor(config: dict) -> tuple[Optional[Callable[[bytes, float], list]], Optional[str]]:
     """ライブと同じ設定の AudioThread（マイクは開かない）で書き起こす関数。読み込めなければ (None, 理由)。"""
     import main as app
 
     audio_cfg = dict(config.get("audio") or {}, enabled=True)
-    heard: list = []
     second_ear = app._load_second_ear(audio_cfg)
     thread = app._make_audio_thread(dict(config, audio=audio_cfg), queue.Queue(), threading.Event(),
-                                    on_transcript=heard.append, second_ear=second_ear)
+                                    second_ear=second_ear)
     transcriber = getattr(thread, "_transcriber", None)
     if transcriber is None or not getattr(transcriber, "ready", False):
         return None, getattr(transcriber, "load_error", None) or "Whisper を読み込めませんでした"
+    return processor_for(thread), None
 
-    def process(audio_bytes: bytes, start: float) -> list:
-        heard.clear()
-        thread._process_chunk(audio_bytes, utterance_start_ts=start)   # noqa: SLF001
-        return list(heard)
 
-    return process, None
+def session_audio(log_dir: Path, session_id: str):
+    """ログのフォルダ（`logs/`）の 1 セッション（`<sid>.transcripts.jsonl` の隣に書く・`audio/<sid>/` を読む）。"""
+    from tools.rescore_audio import SessionAudio
+
+    return SessionAudio(session_id, Path(log_dir) / f"{session_id}.transcripts.jsonl",
+                        (Path(log_dir) / "audio" / session_id,))
+
+
+def pending(session) -> int:
+    """まだ書き起こしていない `off_*.wav` の数。"""
+    out = session.transcripts.with_name(session.session_id + OFFPLAY_SUFFIX)
+    done = {r.get("audio_file") for r in read_rows(out)}
+    names = {p.name for folder in session.audio_dirs if folder.is_dir() for p in folder.glob(OFFPLAY_PREFIX + "*.wav")}
+    return len([n for n in names if n not in done and offplay_start(n) is not None])
+
+
+def enabled(config: dict) -> bool:
+    return bool((config.get("audio") or {}).get("transcribe_offplay", True))
+
+
+def _run(sessions: list, process: Callable[[bytes, float], list], say: Callable[[str], None]) -> tuple[int, int]:
+    """書き起こして、10 件ごとと最後に 1 行出す。Ctrl+C で止めてよい（次は続きから）。"""
+    total = failed = 0
+    count = sum(pending(s) for s in sessions)
+    done = 0
+
+    def log(_line: str) -> None:
+        nonlocal done
+        done += 1
+        if done % 10 == 0 and done < count:
+            say(f"[offplay]   {done}/{count}")
+
+    try:
+        for session in sessions:
+            n, bad = transcribe_session(session, process, log=log)
+            total, failed = total + n, failed + bad
+    except KeyboardInterrupt:
+        say(f"[offplay] 途中で止めました（{done}/{count}）。残りは「ログをまとめる」か "
+            "python tools/offplay_audio.py のときに続きから書き起こします")
+        return total, failed
+    say(f"[offplay] 聞き流した発話 {count} 件を書き起こしました（失敗 {failed}）")
+    return total, failed
+
+
+def after_session(audio_thread, log_dir: Path, session_id: str, config: dict,
+                  say: Callable[[str], None] = print, clock: Callable[[], float] = time.monotonic,
+                  sleep: Callable[[float], None] = time.sleep) -> int:
+    """ロガーを終えたとき: そのセッションの聞き流した発話を、読み込んであるモデルで書き起こす（書いた行の数）。"""
+    if audio_thread is None or not enabled(config) or not getattr(audio_thread, "asr_ready", True):
+        return 0
+    session = session_audio(log_dir, session_id)
+    count = pending(session)
+    if not count:
+        return 0
+    # 聞き取りの作業スレッドが残りの発話を片付けて止まるまで待つ（同じモデルを 2 つのスレッドから同時に使わない）
+    deadline = clock() + WORKER_WAIT_SEC
+    backlog = getattr(audio_thread, "backlog", None)
+    while callable(backlog) and backlog() > 0:
+        if clock() >= deadline:
+            say("[offplay] 聞き取りがまだ終わらないので、聞き流した発話は「ログをまとめる」のときに書き起こします")
+            return 0
+        sleep(0.2)
+    say(f"[offplay] ハンドの外で聞き流した発話 {count} 件を書き起こします（推定器が使う。Ctrl+C で後回しにできます）")
+    return _run([session], processor_for(audio_thread), say)[0]
+
+
+def catch_up(log_dir: Path, session_ids: list[str], config: dict, say: Callable[[str], None] = print,
+             loader: Callable[[dict], tuple] = live_processor) -> int:
+    """ログをまとめる前: 選んだセッションのまだ書き起こしていない音声を書き起こす（書いた行の数）。
+
+    書き起こすものが無ければモデルを読み込まない。読み込めなければ何もしない（まとめるのは止めない）。
+    """
+    if not enabled(config):
+        return 0
+    sessions = [s for s in (session_audio(log_dir, sid) for sid in session_ids) if pending(s)]
+    if not sessions:
+        return 0
+    count = sum(pending(s) for s in sessions)
+    say(f"[offplay] ハンドの外で聞き流した発話 {count} 件を先に書き起こします（Whisper を読み込みます。"
+        "Ctrl+C で後回しにできます）")
+    try:
+        process, error = loader(config)
+    except KeyboardInterrupt:
+        say("[offplay] 後回しにしました")
+        return 0
+    if process is None:
+        say(f"[offplay] 書き起こせないので、音声だけ入れます（{error}）")
+        return 0
+    return _run(sessions, process, say)[0]
 
 
 def main(argv: Optional[list[str]] = None) -> int:

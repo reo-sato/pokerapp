@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import io
 import json
 import platform
@@ -43,7 +44,7 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -409,8 +410,12 @@ def pack(
     log_dir: Path, out_dir: Path, *, root: Path = ROOT, session_ids: Optional[list[str]] = None,
     hours: float = DEFAULT_HOURS, all_sessions: bool = False, audio: Optional[bool] = None,
     text: bool = False, now: Optional[datetime] = None, part_bytes: Optional[int] = None,
+    prepare: Optional[Callable[[list[str]], Any]] = None,
 ) -> tuple[Path, dict]:
     """ログを zip（`text=True` ならテキスト 1 ファイル）にまとめ、(出力先, manifest) を返す。
+
+    `prepare` は選んだセッションの ID で、まとめる前に呼ぶ（聞き流した発話の書き起こし, `tools/offplay_audio.py`）。
+    呼んだあとはファイルを探し直す（書き足したファイルも入る）。
 
     zip が `part_bytes`（既定 `PART_LIMIT`、0 = 分けない）を超えるときは音声を 2 つ目以降の zip に分ける。
     出力先は 1 つ目の zip、全部の名前は `manifest["parts"]`。
@@ -422,6 +427,10 @@ def pack(
     now = now or datetime.now()
     chosen = (select_sessions(sessions, ids=session_ids, hours=hours, all_sessions=all_sessions, now=now)
               if sessions or session_ids else [])
+    if prepare is not None and chosen:
+        prepare([c.session_id for c in chosen])
+        refreshed = find_sessions(log_dir)
+        chosen = [refreshed.get(c.session_id, c) for c in chosen]
     # 読み上げ集は、セッションを指定しないとき直近の分を一緒に入れる（無ければいちばん新しい 1 つ、セッションも無いとき）
     chosen_corpora = [] if session_ids else select_corpora(corpora, hours=hours, all_sessions=all_sessions, now=now)
     if not chosen and not chosen_corpora:
@@ -590,6 +599,24 @@ def _mb(n: int) -> str:
     return f"{n / 1024 / 1024:.1f} MB"
 
 
+def _offplay_catch_up(log_dir: Path) -> Callable[[list[str]], Any]:
+    """まとめる前に、聞き流した発話の音声をまだなら書き起こす（`tools/offplay_audio.py:catch_up`）。失敗してもまとめる。"""
+
+    def prepare(session_ids: list[str]) -> None:
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))          # `python tools/pack_logs.py` で動かしたとき
+        try:
+            # 名前で読み込む: 推定器の入力を読む道具（`tools/eval_store.py`）がこのファイルを読み込むので、書き起こしの
+            # 道具（Whisper・main.py）を推定器が読むファイルの連鎖に入れない（`tests/test_estimator.py` の内容の指紋）
+            offplay = importlib.import_module("tools.offplay_audio")
+            config = importlib.import_module("tools.rescore_audio")._load_config()
+            offplay.catch_up(log_dir, session_ids, config)
+        except Exception as e:  # noqa: BLE001 — 書き起こせなくてもログはまとめる
+            print(f"[offplay] 書き起こせませんでした（{type(e).__name__}: {e}）。音声だけ入れます")
+
+    return prepare
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="テストのログを 1 つの zip にまとめる（レビューに送るため）")
     ap.add_argument("--log-dir", help="ログのフォルダ（既定: config の session.log_dir = logs）")
@@ -603,6 +630,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     audio.add_argument("--no-audio", dest="audio", action="store_false", help="音声を入れない")
     ap.add_argument("--text", action="store_true", help="zip ではなくテキスト 1 ファイル（音声なし）")
     ap.add_argument("--no-open", action="store_true", help="できたファイルをエクスプローラで開かない")
+    ap.add_argument("--no-offplay", action="store_true",
+                    help="聞き流した発話の音声（off_*.wav）を先に書き起こさない（既定: まだのものを書き起こしてから入れる）")
     ap.add_argument("--part-mb", type=float, default=PART_LIMIT / 1024 / 1024,
                     help="1 つの zip の大きさの上限（MB, 既定 25。0 = 分けない）")
     args = ap.parse_args(argv)
@@ -614,6 +643,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             log_dir, out_dir, session_ids=args.session or None, hours=args.hours,
             all_sessions=args.all, audio=args.audio, text=args.text,
             part_bytes=int(args.part_mb * 1024 * 1024),
+            prepare=None if args.no_offplay else _offplay_catch_up(log_dir),
         )
     except PackError as e:
         print(f"[pack] {e}")

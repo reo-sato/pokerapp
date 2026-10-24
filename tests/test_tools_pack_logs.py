@@ -88,6 +88,44 @@ def _names(path: Path) -> list[str]:
         return sorted(zf.namelist())
 
 
+class TestOffplayBeforePacking:
+    def test_prepare_runs_on_the_chosen_sessions_and_its_files_are_packed(self, root, tmp_path):
+        """まとめる前に聞き流した発話を書き起こす口（`prepare`）: 選んだセッションで呼び、書き足したファイルも入れる。"""
+        seen = []
+
+        def prepare(ids):
+            seen.append(ids)
+            (root / "logs" / f"{NEW}.offplay.jsonl").write_text('{"offplay": true}\n', encoding="utf-8")
+
+        out, _manifest = _pack(root, tmp_path, prepare=prepare)
+        assert seen == [[NEW]]
+        assert f"{NEW}/{NEW}.offplay.jsonl" in _names(out)
+
+    def test_without_whisper_it_still_packs(self, root, tmp_path, capsys, monkeypatch):
+        """本物の口（`_offplay_catch_up`）: Whisper が読み込めなくても、音声だけ入れてまとめる。"""
+        import audio.recorder as recorder
+
+        class Missing:
+            ready = False
+            load_error = "faster-whisper が入っていません"
+
+            def __init__(self, **_kw):
+                pass
+
+        monkeypatch.setattr(recorder, "WhisperTranscriber", Missing)
+        (root / "logs" / "audio" / NEW / "off_1790000000000.wav").write_bytes(b"RIFF" + bytes(100))
+        out, _manifest = _pack(root, tmp_path, prepare=pack_logs._offplay_catch_up(root / "logs"))
+        assert f"{NEW}/audio/off_1790000000000.wav" in _names(out)
+        assert "音声だけ入れます" in capsys.readouterr().out
+
+    def test_the_command_skips_it_with_no_offplay(self, root, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(pack_logs, "_offplay_catch_up", lambda log_dir: calls.append(log_dir) or (lambda ids: None))
+        args = ["--log-dir", str(root / "logs"), "--out-dir", str(tmp_path / "o"), "--no-open", "--all"]
+        assert pack_logs.main(args + ["--no-offplay"]) == 0 and calls == []
+        assert pack_logs.main(args) == 0 and len(calls) == 1
+
+
 class TestSelect:
     def test_sessions_are_grouped_by_id(self, root):
         sessions = find_sessions(root / "logs")
