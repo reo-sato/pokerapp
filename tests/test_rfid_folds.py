@@ -22,7 +22,7 @@ from audio.recognizer import parse_actions
 from core.event_queue import make_audio_queue
 from core.events import RFIDEvent
 from core.game_state import PlayerState
-from integration.engine import FOLDOUT_CONFIRM_SEC, POST_FOLDOUT_LISTEN_SEC, IntegrationThread
+from integration.engine import FOLDOUT_CONFIRM_SEC, POST_FOLDOUT_LISTEN_SEC, POST_HAND_LISTEN_SEC, IntegrationThread
 from output.json_writer import JsonWriter
 
 pytest.importorskip("pokerkit")
@@ -53,6 +53,7 @@ class _Table:
         self.absent_since: dict[int, float] = {}
         self.mucked_at: dict[int, float] = {}
         self.speech_since: float | None = None
+        self.board_count = 0                         # ボードのリーダーがいま読んでいる札の枚数
         self.hands: list = []
         self.actions: list = []
         self.notices: list[str] = []
@@ -63,7 +64,7 @@ class _Table:
             on_action=self.actions.append, on_notice=self.notices.append,
             stop_event=threading.Event(), clock=lambda: self.now, event_recorder=self.recorder,
             auto_new_hand=True, auto_winner=True, rfid_folds=True,
-            seat_presence=self._presence, board_presence=lambda: {"present_count": 0},
+            seat_presence=self._presence, board_presence=lambda: {"present_count": self.board_count},
             speech_pending_since=lambda: self.speech_since, open_gates=open_gates,
         )
 
@@ -423,12 +424,59 @@ class TestListeningAfterAFoldOut:
         self._fold_out(tb, cards_back=True)
         tb.lift(4)
         tb.lift(5)
-        tb.tick(tb.now + 0.2)
+        tb.tick(tb.now + 2.8)
+        assert tb.t._listen_gate.is_set()          # noqa: SLF001  離れて 3 秒までは持ち上げとみなす
+        tb.tick(tb.now + 0.4)
         assert not tb.t._listen_gate.is_set()      # noqa: SLF001
+
+    def test_a_momentary_lift_does_not_stop_listening(self, tmp_path):
+        """札を一瞬持ち上げた・読み落としただけでは止めない（止めると次の配布まで戻らない。開発データの離脱の
+        44% は 3 秒未満, 2026-10-24）。"""
+        tb = _Table(tmp_path)
+        self._fold_out(tb, cards_back=True)
+        tb.lift(4)
+        tb.tick(tb.now + 1.5)
+        tb.put(4, HOLES[4])
+        tb.tick(tb.now + 5.0)
+        assert tb.t._listen_gate.is_set()          # noqa: SLF001
 
     def test_a_clean_fold_out_stops_listening_at_once(self, tmp_path):
         tb = _Table(tmp_path)
         self._fold_out(tb, cards_back=False)        # 札が残っているのは勝った 席5 だけ
+        assert not tb.t._listen_gate.is_set()      # noqa: SLF001
+
+    def test_it_keeps_listening_while_the_board_and_a_hand_remain(self, tmp_path):
+        """ボードが卓にあり手札が 1 席でも残っていれば、ボードを回収するまで聞き取りを続ける（オーナー 2026-10-24:
+        ハンドの終わりはボードの回収・全員の手札の離脱など複数の証拠で決める）。"""
+        tb = _Table(tmp_path)
+        tb.t._listen_gate = threading.Event()       # noqa: SLF001
+        tb.deal()
+        tb.board_count = 3                          # フロップ（記録はしない = リーダーが読んでいる枚数だけ）
+        tb.lift(6)
+        tb.tick(tb.now + 3.5)
+        tb.lift(4)
+        tb.tick(tb.now + 3.5)
+        tb.say("フォールド")                        # 札が残っているのは 席5 だけ・ボードは卓の上
+        assert len(tb.hands) == 1
+        gate = tb.t._listen_gate                    # noqa: SLF001
+        assert gate.is_set()
+        tb.board_count = 0                          # ボードを一瞬読み落とした
+        tb.tick(tb.now + 1.0)
+        tb.board_count = 3
+        tb.tick(tb.now + 5.0)
+        assert gate.is_set()
+        tb.board_count = 0                          # ボードを回収した
+        tb.tick(tb.now + 2.8)
+        assert gate.is_set()
+        tb.tick(tb.now + 0.4)
+        assert not gate.is_set()
+
+    def test_it_stops_at_the_cap_when_cards_stay_on_the_table(self, tmp_path):
+        tb = _Table(tmp_path)
+        self._fold_out(tb, cards_back=True)
+        tb.tick(tb.now + POST_HAND_LISTEN_SEC - 1.0)
+        assert tb.t._listen_gate.is_set()          # noqa: SLF001
+        tb.tick(tb.now + 2.0)
         assert not tb.t._listen_gate.is_set()      # noqa: SLF001
 
     def test_it_keeps_listening_after_any_ending_while_two_seats_hold_cards(self, tmp_path):

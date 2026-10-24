@@ -508,8 +508,12 @@ class AudioThread(threading.Thread):
                 self.skipped += 1
                 started = (time.strftime("%H:%M:%S", time.localtime(utterance_start_ts))
                            if utterance_start_ts is not None else "?")
-                logger.info("ハンドの外の発話を聞き流しました（話し始め %s・%.1f 秒）",
-                            started, buffered_samples / self._sample_rate)
+                # 音声だけは残す（`audio.save_audio`）: 確定が早すぎたハンドの続きの賭けを、あとで書き起こして推定に
+                # 使えるように（2026-10-24 オーナー了承。認識はしない = CPU は増えない）
+                saved = (self._save_audio(b"".join(buffer), utterance_start_ts, prefix="off_")
+                         if long_enough and utterance_start_ts is not None else None)
+                logger.info("ハンドの外の発話を聞き流しました（話し始め %s・%.1f 秒%s）",
+                            started, buffered_samples / self._sample_rate, f"・音声 {saved}" if saved else "")
             elif voiced and long_enough and utterance_start_ts is not None:
                 self._enqueue_utterance(b"".join(buffer), utterance_start_ts)
             elif voiced and voiced_samples >= report_drop_samples:
@@ -719,11 +723,14 @@ class AudioThread(threading.Thread):
         except Exception:
             logger.exception("on_transcript callback failed")
 
-    def _save_audio(self, audio_bytes: bytes, started_at: float) -> Optional[str]:
-        """認識に回す発話を WAV で保存し、ファイル名を返す（`audio_dir` が無ければ何もしない）。"""
+    def _save_audio(self, audio_bytes: bytes, started_at: float, prefix: str = "") -> Optional[str]:
+        """発話を WAV で保存し、ファイル名を返す（`audio_dir` が無ければ何もしない）。
+
+        認識に回した発話は `<話し始めの ms>.wav`、聞き流した（ハンドの外の）発話は `off_<ms>.wav`。
+        """
         if self._audio_dir is None:
             return None
-        name = f"{int(started_at * 1000)}.wav"
+        name = f"{prefix}{int(started_at * 1000)}.wav"
         try:
             self._audio_dir.mkdir(parents=True, exist_ok=True)
             with wave.open(str(self._audio_dir / name), "wb") as out:

@@ -200,6 +200,24 @@ class TestListenGate:
         assert any("ハンドの外の発話を聞き流しました" in r.getMessage() and r.levelno == logging.INFO
                    for r in caplog.records)
 
+    def test_speech_outside_play_keeps_its_audio(self, tmp_path):
+        """聞き流した発話も音声だけは残す（`audio.save_audio`。確定が早すぎたハンドの続きをあとで書き起こす,
+        2026-10-24）。認識には回さない。"""
+        gate = threading.Event()
+        thread = AudioThread(audio_queue=queue.Queue(), stop_event=threading.Event(),
+                             transcriber=_Fake(), listen_gate=gate, audio_dir=tmp_path)
+        self._capture(thread, gate, open_at=99)
+        assert thread.backlog() == 0 and thread.skipped == 1
+        saved = list(tmp_path.glob("*.wav"))
+        assert len(saved) == 1 and saved[0].name.startswith("off_")
+
+    def test_speech_outside_play_saves_nothing_without_save_audio(self, tmp_path):
+        gate = threading.Event()
+        thread = AudioThread(audio_queue=queue.Queue(), stop_event=threading.Event(),
+                             transcriber=_Fake(), listen_gate=gate)
+        self._capture(thread, gate, open_at=99)
+        assert thread.skipped == 1 and not list(tmp_path.glob("*.wav"))
+
     def test_speech_that_runs_into_play_is_kept(self):
         gate = threading.Event()
         thread = AudioThread(audio_queue=queue.Queue(), stop_event=threading.Event(),
