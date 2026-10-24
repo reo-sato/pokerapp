@@ -354,6 +354,23 @@ def hand_fully_correct(gt_hand: dict, captured_hand: dict | None) -> bool:
     return m.board_match or not board_scored(gt_hand)
 
 
+def hand_correct_ignoring_amounts(gt_hand: dict, captured_hand: dict | None) -> bool:
+    """額を除けば丸ごと正しいか（だれがどの種類のアクションをしたか・勝者・ボード）。言われなかった賭けの額は声にも札にも
+    無く推し量るしかないので、流れが合っているかを別に数える（オーナー 2026-10-24）。オールインは額で決まるので
+    コール・ベット・レイズと同じ種類とみる。"""
+    if captured_hand is None:
+        return False
+
+    def strip(hand: dict) -> dict:
+        rows = []
+        for a in hand.get("actions") or []:
+            kind = _normalize_action_type(a.get("action"))
+            rows.append({**a, "action": "wager" if kind in ("bet", "raise", "allin") else kind, "amount": 0})
+        return {**hand, "actions": rows}
+
+    return hand_fully_correct(strip(gt_hand), strip(captured_hand))
+
+
 def measure_session(
     session_log: dict,
     ground_truth: dict,
