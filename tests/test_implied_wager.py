@@ -11,13 +11,15 @@ import logging
 import pytest
 
 from core.bet_sizing import pot_before
-from integration.estimator import _insert_value
+from integration.estimator import _insert_steps, _insert_value
 from tools.measure_capture_accuracy import hand_correct_ignoring_amounts, hand_fully_correct
 
 
 def test_insert_value():
     assert _insert_value("call") == ("call", 0)
     assert _insert_value("bet:1200") == ("bet", 1200)
+    assert _insert_steps("check,bet:800") == [("check", 0), ("bet", 800)]   # 札が離れた人のチェックのあとの賭け
+    assert _insert_value("check,bet:800") == ("bet", 800)
 
 
 def test_pot_before_street():
