@@ -210,6 +210,13 @@ BEFORE_CARD_MAX_FIXES = 3
 # あれば、読めなかったフロップの札の代わりに次のストリートの札が数えられたかもしれない（09-29 d0f055fb ハンド 5:
 # 3 枚目が 13 秒あと = 本当はターンの札で、ターンの位置にリバーの札）。そのハンドでは札の時刻で直さない・印も付けない
 FLOP_CARDS_SPREAD_SEC = 8.0
+# ベッティングが終わったあと（最後のフォールドの確定待ち・ショーダウン待ち）に、ボードの札がこの枚数以上、この秒数の
+# うちに初めて読めたら、配った札ではなく片付け・シャッフルの札（ディーラーがボードの上で札を集めた）。ボードから外し、
+# このハンドのボードはそれ以上変えない（オーナーの注釈 10/19 a64ec4ad ハンド 14・16・34「シャッフルの札とボードの
+# ディールを見分ける」。10/19 の 10 ハンドとも真はプリフロップだけ・開発データ 194 ハンドに 0 回。配るボードは
+# フロップの 3 枚のあとに間が空く）
+BOARD_SWEEP_CARDS = 4
+BOARD_SWEEP_SEC = 1.0
 # ディーラーがここまでのアクションを言い直す（「センテン、コール」= 1000 のレイズとそのコール, 店舗 2026-10-06 05cccd6c
 # ハンド 7 のオーナーのメモ）: いまのベットと同じ額だけを言ったあと、この秒数のうちに話し始めた「コール」は、その賭けの
 # あとに記録したコールの言い直し
@@ -564,6 +571,7 @@ class IntegrationThread(threading.Thread):
         # ラウンドの区切りとしてアクションの時刻に対応するため記録する（ADR-0055）。
         # 再検出（結合の弱いリーダーの間欠読み）では上書きしない = 配布の瞬間を保つ。
         self._board_dealt_at: dict[int, float] = {}
+        self._board_swept = False                  # このハンドのボードに片付けの札が載った（`_board_sweep`）
         self._board_source: str = ""
         self._hole_cards: dict[int, list[str]] = {}  # seat → [card1, card2]
 
@@ -867,6 +875,29 @@ class IntegrationThread(threading.Thread):
         else:
             self._handle_seat_rfid(ev)
 
+    def _play_settled(self) -> bool:
+        """ベッティングが終わっている（最後のフォールドの確定待ち・ショーダウン待ち）。"""
+        return self._foldout_pending is not None or self._betting_over()
+
+    def _board_sweep(self, t: float) -> bool:
+        """いま初めて読めたボードの札が、片付けの札の束（`BOARD_SWEEP_CARDS` 枚以上が `BOARD_SWEEP_SEC` 秒のうちに初めて
+        読めた）の一部か。そうならその札をボードから外して True。"""
+        if not self._play_settled():
+            return False
+        near = [i for i, at in self._board_dealt_at.items() if abs(at - t) < BOARD_SWEEP_SEC]
+        times = [self._board_dealt_at[i] for i in near]
+        if len(near) < BOARD_SWEEP_CARDS or max(times) - min(times) >= BOARD_SWEEP_SEC:
+            return False
+        cards = [self._board_positions.pop(i) for i in sorted(near)]
+        for i in near:
+            self._board_dealt_at.pop(i, None)
+        self._board_cards = self._board_list()
+        self._board_swept = True
+        logger.info("ボードの札 %d 枚（%s）が %.1f 秒のうちに読めました — 片付けの札とみてボードから外しました",
+                    len(cards), " ".join(cards), BOARD_SWEEP_SEC)
+        self._show_board()
+        return True
+
     def _warn_duplicate_board_cards(self) -> None:
         """ボードに同じカードが 2 枚以上ある = 物理的にあり得ない（1 組のデッキ）。
 
@@ -919,6 +950,9 @@ class IntegrationThread(threading.Thread):
             return
 
         if ev.board_index is not None:
+            if self._board_swept and self._play_settled():
+                logger.debug("片付けのあとのボードの札を無視しました: %s", ev.card)
+                return
             # 位置指定あり: board_positions に格納して順序保証
             previous = self._board_positions.get(ev.board_index)
             unchanged = previous == ev.card
@@ -944,6 +978,8 @@ class IntegrationThread(threading.Thread):
                 "Board card [pos=%d]: %s (tag=%s) — board so far: %s",
                 ev.board_index, ev.card, ev.tag_id, self._board_cards,
             )
+            if previous is None and self._board_sweep(ev.timestamp):
+                return
             self._warn_duplicate_board_cards()
             self._try_advance_street_from_rfid()
             self._show_board(
@@ -6121,6 +6157,7 @@ class IntegrationThread(threading.Thread):
         self._board_cards = []
         self._board_positions = {}
         self._board_dealt_at = {}
+        self._board_swept = False
         self._board_source = ""
         self._hole_cards = {}
         self._hand_needs_review = bool(restored)

@@ -265,9 +265,6 @@ class HandWindow:
     # `skip` はこの窓では流さない（`SessionEstimator._route_late_winners`）
     late: tuple[float, ...] = ()
     skip: tuple[float, ...] = ()
-    # 外から持ち込む直しの組（LLM の提案の実験 = `tools/llm_candidates.py`）。空なら推定は今と同じ。各組は今の
-    # 直しの語彙（read / drop / insert / button …）で表し、今の再生（合法性）と採点で比べる
-    seeds: tuple[tuple[Edit, ...], ...] = ()
 
     @property
     def button(self) -> Optional[int]:
@@ -1058,7 +1055,7 @@ class SessionEstimator:
     # ――― 探索 ―――
 
     def evaluate_edits(self, w: HandWindow, edits: tuple[Edit, ...]) -> Candidate:
-        """直しの組 1 つを再生して採点する（探索の 1 手と同じ。外から持ち込んだ候補の採点にも使う）。"""
+        """直しの組 1 つを再生して採点する（探索の 1 手と同じ。外の道具の採点にも使う）。"""
         hand, records, info = self.replay(w, edits)
         score, terms, flags = self.score(w, hand, records, info, edits)
         return Candidate(edits, hand or {}, score, terms, flags)
@@ -1133,14 +1130,6 @@ class SessionEstimator:
         # ボタンを変えた再生が既定より `button_explore` 以上悪ければ探さない
         others = [e for e in pool if e.kind != "button"]
         search(base, others)
-        # 外から持ち込んだ直しの組（既定は無し）。候補に入れ、`seed_search` なら良いものから今の直しでも広げる
-        seeded: list[Candidate] = []
-        for edits in w.seeds:
-            c = evaluate(_ordered(tuple(edits)))
-            if keep(c, base):
-                seeded.append(c)
-        for c in sorted(seeded, key=lambda c: -c.score)[:int(p.get("seed_search", 0))]:
-            search(c, others)
         for b in (e for e in pool if e.kind == "button"):
             root = evaluate((b,))
             if root.hand and root.score >= base.score - p["button_explore"]:
