@@ -63,7 +63,10 @@ CLI と PC の画面、iPad は第 2 段 / レベルの時間が来たら次の�
 ## 試験
 
 - `pytest -m "not slow" -n auto`: 3459 passed・22 skipped。`ruff check .`: 問題なし。
-- `pytest -m slow` と推定器の物差しは下の「物差し」。
+- `pytest -m slow`: 13 passed・5 skipped。E の聞き取りの直しを取り込んだあとの速い組: 3463 passed・22 skipped。
+- 推定器の物差し（`TZ=Asia/Tokyo python tools/bench_hands.py`、取り込み後）: 内容の指紋 `dc64e7513e33`（動いた）・値の指紋
+  `ace16aaa3de7`（同じ）。店舗 **140/174**・良くなった 28・悪くなった 0・要確認なしの誤り 2 → 2（新しく 0）、台本 **29/30**、
+  真のアクションは前の記録と同じ = **数字は変わらない**（モードの既定はリングゲーム・アンテなしで記録を変えない）。
 
 ## 残り（planned）
 
