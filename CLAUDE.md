@@ -48,6 +48,7 @@ pokerapp/
 │   ├── cloud-setup.md             ← クラウドの準備（Google Cloud・Supabase の登録 → 置く → 店舗 PC をつなぐ, ADR-0067。進み具合に合わせて書き足す）
 │   ├── usage.md                   ← エンドユーザー: 使い方・読み上げ語彙・設定 (Phase I)
 │   ├── troubleshooting.md         ← エンドユーザー: 困りごと対処 (Phase I)
+│   ├── plan-board.md              ← 並行している改善計画の台帳（トラック・ブランチ・オーナー待ちの決めごと・ぶつかり。状態が変わったら更新）
 │   └── decision-log.md            ← ADR / 主要 issue の索引
 ├── sprc_v4.docx                   ← 仕様書（要件定義）
 ├── claude_v4.docx                 ← 旧仕様書（参考）
