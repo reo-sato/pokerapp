@@ -46,6 +46,12 @@
   宣言・ボード・ボタン）を真のアクションと観測の対応づけで数え、今の値と並べる。段取り F1〜F5・値を変えるときの手順・
   セッションごとの作業記録。別のセッションで複数回に分けて進める。推定器の値はまだ変えない。
 
+### Removed (LLM の実験の道具, 2026-10-24)
+
+- 打ち切った LLM の実験の道具を消した（オーナー）: `tools/llm_hand_prompt.py`・`tools/llm_candidates.py`・`tools/bench_llm.py`・
+  `tests/test_llm_candidates.py`・推定器の `HandWindow.seeds`（既定は空だったので推定の結果は変わらない）・`pip install ".[llm]"`。
+  `SessionEstimator.evaluate_edits` はオラクルの採点が使うので残す。結果の記録は `docs/estimator.md` §9。
+
 ### Changed (LLM の実験を打ち切り, 2026-10-24)
 
 - LLM の提案を推定器の候補に足す実験を開発 A の時点で打ち切った（オーナー）。提案つきは今の推定器と同じか 1 ハンド悪く（34〜35/49 対 35/49）、

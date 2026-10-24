@@ -137,7 +137,6 @@
 | `tools/sweep_estimator.py` | 値の感度の掃引（事前登録の付録 B） |
 | `tools/estimate_logs.py` | 店舗のログを推定して書く（`--shadow` = 影、`--write` = 記録の本体。`--workers 1` でハンドごとの時間） |
 | `tools/estimate.py` | v0（読みの選択だけ）と、v0・v1 共通の発話の読みの選択肢 |
-| `tools/llm_candidates.py` / `tools/bench_llm.py`（10/23, 実験） | LLM の提案を候補に足す実験（§9）: ハンドの解釈を LLM に聞いてキャッシュ（`logs/llm_cache/`）し、直しの組（`HandWindow.seeds`）にして今の推定器と比べる。API を呼ぶのは `llm_candidates.py` だけ |
 | テスト | `tests/test_estimator.py`（総和則・店舗のハンドの正誤と要確認の固定・終わったあとの勝者・説明だけの直し・内容の指紋に入れるファイルの漏れ ほか）・`test_world_replay.py`・`test_estimate.py`・`test_hand_estimate.py`・`test_bench_hands.py`・`test_estimate_logs.py`・`test_amount_space.py`・`test_garbled_amount.py`・`test_lower_digits.py`・`test_compare_versions.py` |
 
 ## 4. ライブの規則と推定器
@@ -476,6 +475,10 @@
    ハンドの理由を必ず入れる。
 
 ## 9. 実験: LLM の提案を候補に足す（2026-10-23〜10-24, **打ち切り**, 事前登録 `docs/dogfood/llm-proposer-preregistration.md`）
+
+> **道具は 10/24 に消した（オーナー）**: `tools/llm_hand_prompt.py`・`tools/llm_candidates.py`・`tools/bench_llm.py`・
+> `tests/test_llm_candidates.py`・`HandWindow.seeds`・`.[llm]`。以下は記録として残す（書いてあるファイルはもう無い）。
+> `SessionEstimator.evaluate_edits` はオラクルの採点（`tools/oracle_estimator.py`）が使うので残した。
 
 > **10/24 に打ち切った（オーナー）**。開発 A の 49 ハンドで ① 今の推定器 35・② 提案つき Opus 34 / Haiku 35・③ LLM が選ぶ Opus 28 / Haiku 16・④ LLM 単独 Opus 28 / Haiku 17。提案で正解が新しく候補に入ったハンドは 0。推定器の誤りの中心は入力に発話が無いこと（作業ログ `docs/worklog/2026-10-23-llm-proposer-experiment.md`）。道具と `HandWindow.seeds` は残す（既定は空 = 推定は不変）。
 
