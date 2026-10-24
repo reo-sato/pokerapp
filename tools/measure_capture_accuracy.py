@@ -185,6 +185,21 @@ def board_entered(gt_hand: dict) -> bool:
     return bool(_normalize_board(gt_hand.get("board")))
 
 
+def won_by_fold(gt_hand: dict) -> bool:
+    """真のアクションで、ほかが全員降りて終わったハンド（ショーダウンが無い）。"""
+    actions = gt_hand.get("actions") or []
+    acted = {a.get("seat") for a in actions}
+    folded = {a.get("seat") for a in actions if a.get("action") == "fold" and a.get("street") != "showdown"}
+    return len(acted - folded) <= 1
+
+
+def board_scored(gt_hand: dict) -> bool:
+    """ボードを比べるハンド: 真のアクションにボードを入れていて、ショーダウンがある。全員降りて終わったハンドのボードは
+    勝者に関わらず、入力画面が記録から入れたボードには片付けの札が混じる（10/19 a64ec4ad の 8 ハンド = 真はプリフロップ
+    だけなのに 4〜5 枚）。"""
+    return board_entered(gt_hand) and not won_by_fold(gt_hand)
+
+
 def is_excluded(gt_hand: dict) -> bool:
     """「評価から外す」の印のあるハンド（真のアクションの入力画面・オーナーのメモ, 2026-10-06）。"""
     return bool(gt_hand.get("excluded"))
@@ -336,7 +351,7 @@ def hand_fully_correct(gt_hand: dict, captured_hand: dict | None) -> bool:
     rows = len(gt_hand.get("actions") or [])
     if not (m.action_correct == m.action_total == rows) or m.winner_match is False:
         return False
-    return m.board_match or not board_entered(gt_hand)
+    return m.board_match or not board_scored(gt_hand)
 
 
 def measure_session(
@@ -396,8 +411,8 @@ def measure_session(
         if total_actions else 1.0
     )
 
-    # ボードを入れたハンドだけで比べる（入れていない = 記録のボードを確かめていない）
-    entered = {h.get("hand_id") for h in gt_hands if board_entered(h)}
+    # ボードを入れたハンドだけで比べる（入れていない = 記録のボードを確かめていない）。全員降りて終わったハンドは比べない
+    entered = {h.get("hand_id") for h in gt_hands if board_scored(h)}
     board_hands = [h for h in per_hand if h.hand_id in entered]
     board_acc = (
         sum(1 for h in board_hands if h.board_match) / len(board_hands) if board_hands else 1.0

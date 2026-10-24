@@ -403,3 +403,40 @@ class TestUnreadSeat:
         _finish_by_folds(tb, *((6, 7) if late else (7,)))   # フロップの最初は 席4（読めた）か 席6
         (live,) = tb.hands
         assert _replayed(tb, tmp_path) == [(a.street, a.seat, a.action, a.amount) for a in live.actions]
+
+
+class TestBoardSweep:
+    """10/19 a64ec4ad ハンド 14・16・34 のオーナーの注釈「シャッフルの札とボードのディールを見分ける」: 最後のフォールドの
+    確定を待つあいだに、ディーラーがボードの上で札を集めた（4 枚以上が 1 秒のうちに初めて読めた）札をボードにしていた。"""
+
+    def _foldout(self, tb: _Table) -> None:
+        tb.deal()                                   # 3 人卓（ボタン 席6）
+        tb.lift(6)
+        tb.tick(tb.now + 3.5)
+        tb.lift(4)
+        tb.tick(tb.now + 3.5)                       # 席5 だけ → 確定待ち
+        assert tb.t._foldout_pending is not None    # noqa: SLF001
+
+    def test_cleanup_cards_are_not_the_board(self, tmp_path):
+        from integration.engine import FOLDOUT_CONFIRM_SEC as WAIT
+        tb = _Table(tmp_path)
+        self._foldout(tb)
+        _board(tb, ["2h", "3d", "9c", "Td", "Js"])    # 同じ時刻に 5 枚
+        tb.tick(tb.now + WAIT)
+        (hand,) = tb.hands
+        assert hand.board == [] and hand.winner_seat == 5 and hand.winner_source == "fold"
+
+    def test_a_dealt_board_stays(self, tmp_path):
+        # ショーダウン待ちでも、間を空けて配った札（ランアウト）はボード
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("オールイン")                         # 席4
+        tb.say("コール")
+        tb.say("コール")
+        for i, card in enumerate(["2h", "3d", "9c"], start=1):
+            _board(tb, [card], start=i)
+        tb.tick(tb.now + 2.0)
+        _board(tb, ["Td"], start=4)
+        tb.tick(tb.now + 2.0)
+        _board(tb, ["Js"], start=5)
+        assert tb.t._board_cards == ["2h", "3d", "9c", "Td", "Js"]   # noqa: SLF001

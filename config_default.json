@@ -45,7 +45,7 @@
     "_bind_host_comment": "ESP32 等 LAN 上の機器から受信する場合は PC の LAN IP（または 0.0.0.0）に変更する。受信は無認証のため、0.0.0.0 は信頼できるネットワークでのみ使用すること。",
     "bind_port": 8787,
     "card_master_file": "./rfid_cards.json",
-    "commit_sec": 2.0,
+    "commit_sec": 5.0,
     "gap_sec": 1.5,
     "release_sec": 6.0,
     "redeal_window_sec": 30.0,
