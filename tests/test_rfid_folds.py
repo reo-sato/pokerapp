@@ -423,8 +423,21 @@ class TestListeningAfterAFoldOut:
         self._fold_out(tb, cards_back=True)
         tb.lift(4)
         tb.lift(5)
-        tb.tick(tb.now + 0.2)
+        tb.tick(tb.now + 2.8)
+        assert tb.t._listen_gate.is_set()          # noqa: SLF001  離れて 3 秒までは持ち上げとみなす
+        tb.tick(tb.now + 0.4)
         assert not tb.t._listen_gate.is_set()      # noqa: SLF001
+
+    def test_a_momentary_lift_does_not_stop_listening(self, tmp_path):
+        """札を一瞬持ち上げた・読み落としただけでは止めない（止めると次の配布まで戻らない。開発データの離脱の
+        44% は 3 秒未満, 2026-10-24）。"""
+        tb = _Table(tmp_path)
+        self._fold_out(tb, cards_back=True)
+        tb.lift(4)
+        tb.tick(tb.now + 1.5)
+        tb.put(4, HOLES[4])
+        tb.tick(tb.now + 5.0)
+        assert tb.t._listen_gate.is_set()          # noqa: SLF001
 
     def test_a_clean_fold_out_stops_listening_at_once(self, tmp_path):
         tb = _Table(tmp_path)

@@ -3665,7 +3665,11 @@ class IntegrationThread(threading.Thread):
         logger.info("プレー中: %s", "はい（聞き取りを再開）" if in_play else "いいえ（次の配布まで音声を聞き流す）")
 
     def _seats_holding_cards(self) -> list[int]:
-        """いま札が載っている、卓で使っている席。在否が分からなければ空。"""
+        """札を持っている、卓で使っている席。在否が分からなければ空。
+
+        札が離れて `fold_absent_sec` 未満の席も数える（フォールドの判定と同じ猶予）。札を一瞬持ち上げた・読み落とした
+        だけで確定のあとの聞き取りを止めると、次の配布まで戻らない（開発データの離脱の 44% は 3 秒未満, 2026-10-24）。
+        """
         if self._seat_presence is None:
             return []
         try:
@@ -3673,7 +3677,15 @@ class IntegrationThread(threading.Thread):
         except Exception:  # noqa: BLE001
             return []
         game = set(self._game_seats())
-        return sorted(s for s, info in seats.items() if s in game and info.get("present"))
+        now = self._clock()
+
+        def holding(info: dict) -> bool:
+            if info.get("present"):
+                return True
+            since = info.get("absent_since")
+            return since is not None and now - since < self._fold_absent_sec
+
+        return sorted(s for s, info in seats.items() if s in game and holding(info))
 
     def _keep_listening_after_hand(self) -> bool:
         """ハンドを確定したのに 2 席以上に札が載っていれば、聞き取りを続ける（`POST_HAND_LISTEN_SEC`）。
