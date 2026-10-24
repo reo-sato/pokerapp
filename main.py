@@ -82,6 +82,28 @@ def _prompt_table_mode() -> dict:
             structure = structures[int(raw) - 1]
             break
         print(f"1〜{len(structures)} を入力してください。")
+    if structure.start_time:
+        # 時刻準拠: レベル 1 の開始時刻からの経過でいまのレベルを決める（オーナー 2026-10-24）
+        import time as _time
+
+        from core.blind_structure import StructureValidationError, parse_start_time, start_epoch
+
+        while True:
+            raw = input(f"レベル1の開始時刻 (空Enterで {structure.start_time} / - = レベルと経過分で指定): ").strip()
+            if raw == "-":
+                break
+            try:
+                start_time = parse_start_time(raw or structure.start_time)
+            except StructureValidationError as e:
+                print(e)
+                continue
+            now = _time.time()
+            start_at = start_epoch(start_time, now)
+            clock = TournamentClock.start_at(structure, start_at, now)
+            lv = clock.blinds
+            return {"mode": "tournament", "sb": lv.sb, "bb": lv.bb, "ante": lv.ante, "structure": structure.to_dict(),
+                    "level": lv.level, "elapsed_min": round(_elapsed_in_level(clock, now) / 60, 1),
+                    "start_time": start_time, "start_at": start_at}
     while True:
         raw = input("始めるレベル (空Enterで 1): ").strip() or "1"
         if raw.isdigit() and structure.playing_index(int(raw)) is not None:
@@ -100,6 +122,12 @@ def _prompt_table_mode() -> dict:
     lv = TournamentClock.start(structure, 0.0, level=level, elapsed_sec=elapsed_min * 60).blinds
     return {"mode": "tournament", "sb": lv.sb, "bb": lv.bb, "ante": lv.ante, "structure": structure.to_dict(),
             "level": level, "elapsed_min": elapsed_min}
+
+
+def _elapsed_in_level(clock, now: float) -> float:
+    """いまのブラインドのレベルの始めからの経過秒（ブレイク中はその前のレベルから数える）。"""
+    start = clock.structure.playing_index(clock.blinds.level)
+    return clock.elapsed(now) + sum(x.duration_sec for x in clock.structure.levels[start:clock.index])
 
 
 def _prompt_session_config() -> dict:
@@ -208,6 +236,9 @@ def _make_tournament(table: dict):
 
     from core.blind_structure import TournamentClock, parse_structure
 
+    if table.get("start_at") is not None:
+        # 時刻準拠: 開始時刻から数え直す（設定に掛かった時間・起動し直しでずれない）
+        return TournamentClock.start_at(parse_structure(table["structure"]), float(table["start_at"]), _time.time())
     return TournamentClock.start(parse_structure(table["structure"]), _time.time(), level=int(table["level"]),
                                  elapsed_sec=float(table.get("elapsed_min") or 0) * 60)
 
@@ -221,6 +252,7 @@ def _record_table(table: dict, session_cfg: dict, json_writer, event_recorder) -
     record = {
         "table_mode": table["mode"], "sb": table.get("sb"), "bb": table.get("bb"), "ante": table.get("ante", 0),
         "structure": table.get("structure"), "level": table.get("level"), "elapsed_min": table.get("elapsed_min"),
+        "start_time": table.get("start_time"), "start_at": table.get("start_at"),
         "seats": [{"seat": p["seat"], "name": p["name"], "stack": p["stack"]} for p in session_cfg["players"]],
         "first_button": session_cfg.get("first_button"),
     }
@@ -243,6 +275,8 @@ def _print_table(table: dict, tournament) -> None:
     print(f"トーナメント: {tournament.structure.name} {tournament.current.label} "
           f"{format_blinds(lv.sb, lv.bb, lv.ante)}・残り {format_remaining(tournament.remaining(_time.time()))}"
           "（時間が来たら次のハンドからブラインドを上げます）")
+    if table.get("start_time"):
+        print(f"  時刻準拠: レベル1 = {table['start_time']} 開始。時刻どおりにレベルが上がります。")
 
 
 def _make_event_recorder(cfg: dict, log_dir: str, session_id: str):

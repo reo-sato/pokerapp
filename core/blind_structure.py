@@ -8,6 +8,8 @@
 - ``BlindStructureStore``: リポジトリ直下の ``blind_structures.json``（名前つきで複数, 店が編集・更新で保持）の読み書き。
   無ければコミット済みのサンプル ``blind_structures_default.json`` を読む（``config_default.json`` と同じ形）。``core/menu.py``
   と同じ形（ロック・変われば読み直す・検証・atomic な書き込み）。
+- ``start_time``（任意, "HH:MM"）: レベル 1 を始める時刻。あれば時計は **時刻準拠**（その時刻からの経過でいまのレベルを
+  決める = 起動が遅れても・起動し直しても、壁の時計どおりに上がる, オーナー 2026-10-24）。
 - ``TournamentClock``: 締め切り方式で進む時計。時刻は呼ぶ側が渡す（ロガーの ``IntegrationThread`` の時計 = epoch 秒）。
   副作用を持たない（ブラインドを変えるのはロガー）。
 
@@ -17,8 +19,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Optional
 
@@ -32,6 +36,9 @@ _SAMPLE_FILE = Path(__file__).parent.parent / "blind_structures_default.json"
 _MAX_NAME = 60
 _MAX_LEVELS = 100
 _MAX_MINUTES = 600
+_START_TIME_RE = re.compile(r"^\s*(\d{1,2})\s*[:：]\s*(\d{2})\s*$")
+# 開始時刻がこれより先なら前の日の時刻とみなす（日付をまたいで続くトーナメント）
+_START_FUTURE_MAX_SEC = 12 * 3600
 
 
 class StructureValidationError(ValueError):
@@ -68,11 +75,14 @@ class BlindStructure:
     name: str
     levels: tuple[BlindLevel, ...]
     starting_stack: Optional[int] = None
+    start_time: Optional[str] = None       # "HH:MM" = レベル 1 を始める時刻（時刻準拠の時計）
 
     def to_dict(self) -> dict:
         out: dict = {"name": self.name, "levels": [lv.to_dict() for lv in self.levels]}
         if self.starting_stack:
             out["starting_stack"] = self.starting_stack
+        if self.start_time:
+            out["start_time"] = self.start_time
         return out
 
     def playing_index(self, level: int) -> Optional[int]:
@@ -90,6 +100,29 @@ class BlindStructure:
         raise StructureValidationError("通常のレベルがありません")
 
 
+def parse_start_time(value: object) -> Optional[str]:
+    """開始時刻（"18:30" / "18：30" / "9:05"）を "HH:MM" にする。空は None。違反は ``StructureValidationError``。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    m = _START_TIME_RE.match(str(value))
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+        raise StructureValidationError(f"開始時刻は 18:30 のように時:分で入れてください（{value!r}）")
+    return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+
+def start_epoch(start_time: str, now: float, tz: Optional[tzinfo] = None) -> float:
+    """開始時刻 "HH:MM" の、``now`` に近い回の epoch 秒（既定は PC の時間帯）。
+
+    今日のその時刻。ただし 12 時間より先なら前の日（18:30 開始で日付をまたいだ 1:00 に起動 = 昨日の 18:30）。
+    """
+    hh, mm = (int(x) for x in (parse_start_time(start_time) or "").split(":"))
+    base = datetime.fromtimestamp(now, tz) if tz is not None else datetime.fromtimestamp(now)
+    at = base.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if at.timestamp() - now > _START_FUTURE_MAX_SEC:
+        at -= timedelta(days=1)
+    return at.timestamp()
+
+
 def _int(raw: dict, key: str, where: str, *, minimum: int) -> int:
     value = raw.get(key, 0)
     if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
@@ -103,6 +136,7 @@ def parse_structure(raw: dict) -> BlindStructure:
     - 名前: 前後の空白を除いて 1〜60 文字。
     - レベル: 1〜100 行。通常のレベルは SB ≥ 1・SB ≤ BB・アンテ ≥ 0、時間は 1〜600 分。ブレイクは時間だけ。
     - 通常のレベルが 1 つ以上・BB は前のレベル以上（下がるストラクチャーは打ち間違い）。
+    - 開始時刻（任意）: "HH:MM"。
     """
     if not isinstance(raw, dict):
         raise StructureValidationError("ストラクチャーは object にしてください")
@@ -144,7 +178,8 @@ def parse_structure(raw: dict) -> BlindStructure:
         stack = None
     elif not isinstance(stack, int) or isinstance(stack, bool) or stack < 1:
         raise StructureValidationError(f"始めの持ち点は 1 以上の整数にしてください（{stack!r}）")
-    return BlindStructure(name=name, levels=tuple(levels), starting_stack=stack)
+    return BlindStructure(name=name, levels=tuple(levels), starting_stack=stack,
+                          start_time=parse_start_time(raw.get("start_time")))
 
 
 class BlindStructureStore:
@@ -281,6 +316,16 @@ class TournamentClock:
         clock.tick(now)
         return clock
 
+    @classmethod
+    def start_at(cls, structure: BlindStructure, start: float, now: float) -> "TournamentClock":
+        """時刻準拠: レベル 1 を時刻 ``start``（epoch 秒）に始めた時計を ``now`` まで進めて返す。
+
+        始まる前（``now < start``）はレベル 1 のまま、始まる時刻を待つ（``status`` の ``starts_at``）。
+        """
+        clock = cls(structure, index=0, started_at=start)
+        clock.tick(now)
+        return clock
+
     # ――― 状態 ―――
 
     @property
@@ -412,6 +457,9 @@ class TournamentClock:
             "next": ({"level": nxt.level, "sb": nxt.sb, "bb": nxt.bb, "ante": nxt.ante} if nxt is not None else None),
             "next_break_at": self.next_break_at(),
             "last": self.is_last,
+            # 時刻準拠でまだ始まっていない（レベル 1 を始める時刻）
+            "starts_at": (self.level_started_at if self.index == 0 and not self.paused
+                          and now < self.level_started_at else None),
         }
 
 

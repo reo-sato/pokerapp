@@ -34,6 +34,8 @@ from core.blind_structure import (  # noqa: E402
     StructureValidationError,
     TournamentClock,
     format_blinds,
+    parse_start_time,
+    start_epoch,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,6 +58,8 @@ DEFAULT_SETUP: dict = {
     "structure": "",
     "level": 1,
     "elapsed_min": 0,
+    # レベル 1 の開始時刻（時刻準拠）。None = ストラクチャーの開始時刻、"" = 始めるレベルと経過分で
+    "start_time": None,
     "button": None,
     "log_dir": "./logs",
 }
@@ -129,12 +133,32 @@ def build_session_config(raw: dict, store: BlindStructureStore, now: Optional[fl
         if structure is None:
             err("structure", "ストラクチャーを選んでください（無ければ「ストラクチャーの編集」で作ります）")
         else:
+            raw_start = raw.get("start_time")
+            try:
+                start_time = parse_start_time(structure.start_time if raw_start is None else raw_start)
+            except StructureValidationError as e:
+                err("start_time", str(e))
+                start_time = None
             level = _int(raw.get("level"))
             try:
                 elapsed_min = float(raw.get("elapsed_min") or 0)
             except (TypeError, ValueError):
                 elapsed_min = -1
-            if level is None or structure.playing_index(level) is None:
+            if any(e["field"] == "start_time" for e in errors):
+                pass
+            elif start_time:
+                # 時刻準拠: 開始時刻からの経過でいまのレベル（オーナー 2026-10-24）
+                now_ = now if now is not None else time.time()
+                start_at = start_epoch(start_time, now_)
+                clock = TournamentClock.start_at(structure, start_at, now_)
+                lv = clock.blinds
+                sb, bb = lv.sb, lv.bb
+                begin = structure.playing_index(lv.level)
+                elapsed = clock.elapsed(now_) + sum(x.duration_sec for x in structure.levels[begin:clock.index])
+                table.update({"sb": sb, "bb": bb, "ante": lv.ante, "structure": structure.to_dict(),
+                              "level": lv.level, "elapsed_min": round(elapsed / 60, 1),
+                              "start_time": start_time, "start_at": start_at})
+            elif level is None or structure.playing_index(level) is None:
                 err("level", "始めるレベルを選んでください")
             elif elapsed_min < 0:
                 err("elapsed_min", "経過分は 0 以上にしてください")
@@ -494,6 +518,7 @@ async function load() {
 
 function structure() { return structures.find(s => s.name === S.structure); }
 function playing(st) { let n = 0; return (st?.levels || []).map(lv => lv.break ? {...lv, level:null} : {...lv, level:++n}); }
+function startTime(st) { return S.start_time == null ? (st?.start_time || "") : S.start_time; }
 function errHtml(field) { return errors[field] ? `<span class="err">${esc(errors[field])}</span>` : ""; }
 
 function renderSetup() {
@@ -523,6 +548,10 @@ function renderSetup() {
       `<span class="err">ストラクチャーがありません。「ストラクチャーの編集」で作ってください。</span>`}
     ${errHtml("structure")}
     ${st ? `<div class="row">
+      <label>レベル 1 の開始時刻 <input type="text" id="start_time" placeholder="18:30" style="width:6em" value="${esc(startTime(st))}"></label>
+      <span class="muted">${startTime(st) ? "時刻から今のレベルを決め、時刻どおりに上がります" : "空 = 始めるレベルと経過分で"}</span>
+      ${errHtml("start_time")}</div>` : ""}
+    ${st && !startTime(st) ? `<div class="row">
       <label>始めるレベル <select id="level">${levels.filter(l => !l.break).map(l =>
         `<option value="${l.level}" ${l.level==S.level?"selected":""}>レベル ${l.level}（${fmt(l.sb,l.bb,l.ante)}）</option>`).join("")}</select></label>
       <label>そのレベルの経過 <input type="number" id="elapsed" min="0" step="0.5" value="${esc(S.elapsed_min||0)}"> 分</label>
@@ -563,7 +592,8 @@ function renderSetup() {
   });
   const bind = (id, key, num=true) => { const el = $("#"+id, root); if (el) el.oninput = () => { S[key] = num ? el.value : el.value; }; };
   bind("sb", "sb"); bind("bb", "bb"); bind("elapsed", "elapsed_min"); bind("default_stack", "default_stack");
-  const sel = $("#structure", root); if (sel) sel.onchange = () => { S.structure = sel.value; S.level = 1; S.elapsed_min = 0;
+  const stt = $("#start_time", root); if (stt) stt.onchange = () => { S.start_time = stt.value.trim(); renderSetup(); };
+  const sel = $("#structure", root); if (sel) sel.onchange = () => { S.structure = sel.value; S.level = 1; S.elapsed_min = 0; S.start_time = null;
     const s = structure(); if (s && s.starting_stack) S.default_stack = s.starting_stack; renderSetup(); };
   const lvl = $("#level", root); if (lvl) lvl.onchange = () => { S.level = Number(lvl.value); renderSetup(); };
   const btn = $("#button", root); btn.onchange = () => { S.button = Number(btn.value); };
@@ -576,7 +606,7 @@ function renderSetup() {
   root.querySelectorAll("[data-stack]").forEach(el => el.oninput = () => { S.stacks[el.dataset.stack] = el.value; });
   const ap = $("#apply_stack", root); ap.onclick = () => { S.stacks = {}; renderSetup(); };
   const rs = $("#resume", root); if (rs) rs.onclick = () => {
-    S.structure = resume.structure; S.level = resume.level; S.elapsed_min = resume.elapsed_min; renderSetup(); };
+    S.structure = resume.structure; S.level = resume.level; S.elapsed_min = resume.elapsed_min; S.start_time = ""; renderSetup(); };
   $("#start", root).onclick = start;
 }
 
@@ -600,7 +630,8 @@ function renderEdit() {
     <div class="row"><select id="pick"><option value="">（新しく作る）</option>${structures.map(s =>
       `<option ${s.name===editPrev?"selected":""}>${esc(s.name)}</option>`).join("")}</select></div>
     <div class="row"><label>名前 <input type="text" id="ename" maxlength="60" value="${esc(editing.name)}"></label>
-      <label>始めの持ち点 <input type="number" id="estack" min="1" value="${esc(editing.starting_stack ?? "")}"></label></div>
+      <label>始めの持ち点 <input type="number" id="estack" min="1" value="${esc(editing.starting_stack ?? "")}"></label>
+      <label>レベル 1 の開始時刻 <input type="text" id="estart" placeholder="18:30（空 = なし）" style="width:9em" value="${esc(editing.start_time ?? "")}"></label></div>
     <table><tr><th>レベル</th><th>SB</th><th>BB</th><th>アンテ（BB の人, 0 = なし）</th><th>分</th><th></th></tr>
     ${editing.levels.map((l, i) => l.break ? `<tr class="brk"><td>ブレイク</td><td></td><td></td><td></td>
       <td><input type="number" data-i="${i}" data-k="minutes" min="1" value="${esc(l.minutes)}"></td><td>${rowBtns(i)}</td></tr>` :
@@ -619,6 +650,7 @@ function renderEdit() {
     const s = structures.find(x => x.name === pick.value);
     editing = s ? JSON.parse(JSON.stringify(s)) : blankStructure(); editPrev = s ? s.name : null; editErr = editOk = ""; renderEdit(); };
   $("#ename", root).oninput = e => { editing.name = e.target.value; };
+  $("#estart", root).oninput = e => { editing.start_time = e.target.value.trim() || null; };
   $("#estack", root).oninput = e => { editing.starting_stack = e.target.value === "" ? null : Number(e.target.value); };
   root.querySelectorAll("input[data-i]").forEach(el => el.oninput = () => {
     editing.levels[Number(el.dataset.i)][el.dataset.k] = el.value === "" ? "" : Number(el.value); });
@@ -668,6 +700,7 @@ function renderClock() {
     <div class="muted">${esc(c.structure)}</div>
     <div class="row"><b style="font-size:20px">${esc(c.label)}</b> <span style="font-size:20px">${fmt(c.sb, c.bb, c.ante)}</span></div>
     <div class="clock"><span id="clockval">${mmss(remainingNow())}</span>${c.paused ? ' <span class="muted" style="font-size:18px">止まっています</span>' : ""}</div>
+    ${c.starts_at ? `<div class="muted">${new Date(c.starts_at * 1000).toTimeString().slice(0, 5)} に始まります（それまでは ${esc(c.label)} のまま）</div>` : ""}
     <div class="muted">${c.next ? `次: レベル ${c.next.level}（${fmt(c.next.sb, c.next.bb, c.next.ante)}）` : "最後のレベル"}</div>
     <div class="row">
       ${c.paused ? `<button class="small" data-cmd="resume">再開</button>` : `<button class="small" data-cmd="pause">一時停止</button>`}
