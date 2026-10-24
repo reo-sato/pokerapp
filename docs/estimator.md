@@ -137,6 +137,7 @@
 | `tools/sweep_estimator.py` | 値の感度の掃引（事前登録の付録 B） |
 | `tools/estimate_logs.py` | 店舗のログを推定して書く（`--shadow` = 影、`--write` = 記録の本体。`--workers 1` でハンドごとの時間） |
 | `tools/estimate.py` | v0（読みの選択だけ）と、v0・v1 共通の発話の読みの選択肢 |
+| `tools/oracle_estimator.py`（10/24） | オラクルの採点（台帳 B の ①）: 誤ったハンドを、推定器と同じ直しの候補で真に近い順に探して (i) 表せない・(ii) 探しきれない・(iii) 点で負けた に分け、点で負けたハンドは項の群ごとの差、表せないハンドは最初に違う行と「真の賭けの額がどの発話にも無い」かを出す。開発データ: (iii) 16・(ii) 0・(i) 18（うち額が発話に無い 10）。作業ログ `2026-10-24-oracle-scoring.md` |
 | `tools/llm_candidates.py` / `tools/bench_llm.py`（10/23, 実験） | LLM の提案を候補に足す実験（§9）: ハンドの解釈を LLM に聞いてキャッシュ（`logs/llm_cache/`）し、直しの組（`HandWindow.seeds`）にして今の推定器と比べる。API を呼ぶのは `llm_candidates.py` だけ |
 | テスト | `tests/test_estimator.py`（総和則・店舗のハンドの正誤と要確認の固定・終わったあとの勝者・説明だけの直し・内容の指紋に入れるファイルの漏れ ほか）・`test_world_replay.py`・`test_estimate.py`・`test_hand_estimate.py`・`test_bench_hands.py`・`test_estimate_logs.py`・`test_amount_space.py`・`test_garbled_amount.py`・`test_lower_digits.py`・`test_compare_versions.py` |
 

@@ -186,6 +186,7 @@ pokerapp/
 │   ├── short_words.py             ← 短い語の分類器を学ぶ・確かめる（eval / train / labels, ADR-0069）
 │   ├── estimate.py / estimate_logs.py / bench_hands.py / forward_ledger.py / compare_versions.py / sweep_estimator.py / simulate.py ← 推定器: 読みの選択肢 / ログの推定（`--shadow`）/ 開発データの物差し（前の記録 `tests/fixtures/store/bench_record.json`）/ 前向きの成績表（`first_look.json`）/ 前の版と比べる / 値の掃引 / 聞き取りのシミュレーション（`docs/estimator.md`）
 │   ├── llm_hand_prompt.py / llm_candidates.py / bench_llm.py ← 実験: LLM の提案を推定器の候補に足す（`HandWindow.seeds`、キャッシュ `logs/llm_cache/`、事前登録 `docs/dogfood/llm-proposer-preregistration.md`。本番・店舗 PC では使わない, `docs/estimator.md` §9）
+│   ├── oracle_estimator.py        ← 推定器 v1 のオラクルの採点（誤りを 表せない / 探しきれない / 点で負けた に分け、負けた項の群・足りない入力を出す。台帳 B の ①）
 │   ├── review_page.py             ← 開発データのハンドを入力画面と同じ形の HTML 1 枚に（店舗 PC を触れないときの見直し）
 │   ├── voice_style.py             ← 宣言の声と雑談の声を比べる（調べただけ・推定器には使わない）
 │   ├── replay_hand.py / play_hand_text.py / simulate_rfid.py / calibrate_confidence.py / measure_capture_accuracy.py ← replay・テキスト駆動・RFID 注入・confidence 較正・捕捉精度
@@ -1254,6 +1255,7 @@ python tools/replay_hand.py tests/fixtures/reconstruction/silent-fold  # 決定�
 python tools/calibrate_confidence.py            # 派生 confidence 較正サーフェス + P1〜P8 検証 (ADR-0033)
 python tools/bench_hands.py --twice --search-check --workers 3   # 推定器の物差し: 開発データの全部正しいハンド (docs/estimator.md)
 python tools/estimate_logs.py logs --latest --shadow --workers 1  # いちばん新しいセッションを推定して影のファイルに (ハンドごとの時間)
+TZ=Asia/Tokyo python tools/oracle_estimator.py --workers 4   # オラクルの採点: 推定器の誤りを 表せない / 探しきれない / 点で負けた に分ける（店舗の zip も渡せる。--dump で詳細）
 python tools/bench_hands.py --update-record     # 開発データの物差しの前の記録（tests/fixtures/store/bench_record.json）を書き直す（新しい要確認なしの誤りは終了コード 1）
 TZ=Asia/Tokyo python tools/llm_candidates.py --split A --dry-run   # 実験（打ち切り済）: LLM に聞くハンドの数と費用の目安（API を呼ばない）
 TZ=Asia/Tokyo python tools/llm_candidates.py --split A --limit 10 --model claude-haiku-5-5   # 実験: LLM に聞いてキャッシュ（要 ".[llm]" と POKERAPP_ANTHROPIC_API_KEY。クラウドのセッションでは ANTHROPIC_API_KEY が外される）
