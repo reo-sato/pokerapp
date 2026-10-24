@@ -373,6 +373,38 @@ def _live_record(inp: SessionInput) -> list[dict]:
         return []
 
 
+@dataclass
+class ScoredHand:
+    """物差しで数えるハンド 1 つ（真のアクションがあり、数えない理由が無い）。"""
+
+    session_id: str
+    key: str              # 物差しの名前（"15cad555#3"）
+    hand_id: int          # 真のアクションのハンド番号
+    window: object
+    truth: dict
+    live: Optional[dict]
+    has_live: bool = False    # ライブの記録があるセッション（店舗のログ）= ライブとも比べる
+
+
+def scored_hands(inp: SessionInput, est) -> list[ScoredHand]:
+    """真のアクションのあるハンドの窓（`run_bench_v1` と同じ選び方・同じ数えない理由）。LLM の実験・オラクルが使う。"""
+    from tools.estimate_logs import _live_hand
+
+    truth = {int(h["hand_id"]): h for h in inp.truth.get("hands") or []}
+    live_hands = _live_record(inp)
+    out = []
+    for w in est.windows():
+        live = _live_hand(live_hands, w.base.get("started_at")) if live_hands else None
+        hid = int(live["hand_id"]) if live is not None else w.hand_id
+        if hid not in truth:
+            continue
+        if truth_exclusions(truth[hid], live if live is not None else w.base, seat_warning(inp, w)):
+            continue
+        out.append(ScoredHand(inp.session_id, f"{short_id(inp.session_id)}#{hid}", hid, w, truth[hid], live,
+                              bool(live_hands)))
+    return out
+
+
 def wide_params(params: Optional[dict] = None) -> dict:
     """探索を広げた値（ビーム幅・広げる直しを 2 倍）。1 番が変わる率 = 探索の誤りの目安（監査 2026-09-30）。"""
     from integration.estimator import PARAMS as V1_PARAMS

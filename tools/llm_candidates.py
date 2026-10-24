@@ -27,7 +27,6 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -273,35 +272,7 @@ def direct_hands(answer: Optional[dict], w) -> list[dict]:
 # ───────────────────────── セッションとハンド ─────────────────────────
 
 
-@dataclass
-class ScoredHand:
-    session_id: str
-    key: str              # 物差しの名前（"15cad555#3"）
-    hand_id: int          # 真のアクションのハンド番号
-    window: Any
-    truth: dict
-    live: Any
-    has_live: bool = False    # ライブの記録があるセッション（店舗のログ）= ライブとも比べる
-
-
-def scored_hands(inp, est) -> list[ScoredHand]:
-    """真のアクションのあるハンドの窓（`bench_hands.run_bench_v1` と同じ選び方・同じ数えない理由）。"""
-    from tools.bench_hands import _live_record, seat_warning, short_id, truth_exclusions
-    from tools.estimate_logs import _live_hand
-
-    truth = {int(h["hand_id"]): h for h in inp.truth.get("hands") or []}
-    live_hands = _live_record(inp)
-    out = []
-    for w in est.windows():
-        live = _live_hand(live_hands, w.base.get("started_at")) if live_hands else None
-        hid = int(live["hand_id"]) if live is not None else w.hand_id
-        if hid not in truth:
-            continue
-        if truth_exclusions(truth[hid], live if live is not None else w.base, seat_warning(inp, w)):
-            continue
-        out.append(ScoredHand(inp.session_id, f"{short_id(inp.session_id)}#{hid}", hid, w, truth[hid], live,
-                              bool(live_hands)))
-    return out
+from tools.bench_hands import ScoredHand, scored_hands  # noqa: E402,F401 — 物差しと同じハンドの選び方
 
 
 def select_sessions(logs: Optional[list[Path]], split: Optional[str], names: Optional[list[str]]):
