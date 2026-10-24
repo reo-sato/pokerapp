@@ -107,3 +107,22 @@ VAD の閾値（`audio.vad_threshold` 0.5）を変える理由は無い。短す
 少なめの数だが、**いまの規則でライブが早く閉じるのは開発データでは目立たない**（10/06〜10/14 の早い確定は、その後の
 ライブの直しで減っている）。記録の確定に複数の証拠を使う直し（オーナー案）は、10/19 と次の店舗のセッションで聞き流した
 発話（`off_*.wav`）を書き起こして、確定のあとの賭けが残っているハンドを数えてから A と決める。
+
+## 書き起こしの自動化（10/24, オーナー「書き起こしの自動化をお願いします」）
+
+聞き流した発話の書き起こし（`tools/offplay_audio.py`）を手で回さなくてよいように、2 か所で自動で回す。
+
+- **ロガーを `q` で終えたとき**（`main.py:_transcribe_offplay` → `offplay_audio.after_session`、`--cli` だけ。GUI は音声を
+  保存していない）: 読み込んであるモデル（Whisper・第 2 の耳）をそのまま使う。聞き取りの作業スレッドが残りの発話を片付けて
+  止まるまで待ってから（最長 120 秒、同じモデルを 2 つのスレッドから同時に使わない）、そのセッションの `off_*.wav` を書き起こす。
+  10 件ごとに進み具合、Ctrl+C で後回し（次は続きから）。
+- **「ログをまとめる」のとき**（`tools/pack_logs.py` の `pack(prepare=)` → `offplay_audio.catch_up`）: 選んだセッションに
+  まだ書き起こしていない音声があるときだけ Whisper を読み込んで書き起こし、できた `<sid>.offplay.jsonl` も zip に入れる。
+  読み込めなければ音声だけ入れてまとめる。`--no-offplay` で飛ばす。推定器の内容の指紋の連鎖に Whisper と main.py を入れない
+  ように、`pack_logs` からは名前で読み込む（`importlib`）。
+- 止めるときは config `audio.transcribe_offplay=false`（既定 true、`config_default.json` に追加）。
+- `audio/recorder.py`: 認識の中身を `_recognize`（書き起こしを返すだけ）に切り出し、ライブの `_process_chunk`（保存・記録・送出）と
+  `transcribe_offline`（保存も記録も送出もしない）が同じ読み方を使う。
+- 試験: `tests/test_offplay_audio.py`（ロガーの終わり・作業スレッドを待つ・切る設定・まとめる前は要るときだけ読み込む・
+  Whisper が無いとき・`transcribe_offline` は保存も記録も送出もしない）、`tests/test_tools_pack_logs.py`（まとめる前の口・
+  書き足したファイルが入る・Whisper が無くてもまとめる・`--no-offplay`）。

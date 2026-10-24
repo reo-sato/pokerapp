@@ -638,68 +638,81 @@ class AudioThread(threading.Thread):
         """
         try:
             started = time.time()
-            audio_sec = len(audio_bytes) / 2 / self._sample_rate
             audio_file = self._save_audio(audio_bytes, utterance_start_ts or started)
-            recognize = getattr(self._transcriber, "recognize", None)
-            if callable(recognize):
-                result = recognize(audio_bytes)
-                text, confidence, no_speech = result.text, result.confidence, result.no_speech
-            else:   # テストの差し替え（`transcribe_with_confidence` だけを持つ）
-                text, confidence = self._transcriber.transcribe_with_confidence(audio_bytes)
-                no_speech = False
-            heard_at = time.time()
-            infer_sec = heard_at - started
-            if no_speech:
-                # 声が無い音（札を混ぜる音など）は Whisper にかけていない。記録にだけ残す（CLI には出さない）。
-                # 第 2 の耳の結果も記録だけ（声の検出が落とした短い語を、あとで数えるため）
-                logger.info("声ではない音 %.1f 秒 — 聞き取りに回さず（VAD）", audio_sec)
-                self._report(Transcript(
-                    text="", confidence=None, events=(), audio_sec=audio_sec, infer_sec=infer_sec,
-                    utterance_start_ts=utterance_start_ts, heard_at=heard_at, noise=True,
-                    audio_file=audio_file, no_speech=True,
-                    ear=self._hear_again(audio_bytes) if self._second_ear is not None else None, ear_wanted=False,
-                ))
-                return
-            noise = bool(text) and (is_prompt_echo(text) or is_implausibly_long(text, audio_sec))
-            question = bool(text) and not noise and is_question(text)   # 確認型はアクションにしない（仕様 FR-17）
-            # 続けて言った複数のアクションは言った順に分ける（ADR-0061）。雑音への幻聴は読まない（ADR-0063）。
-            events = () if noise or not text else tuple(parse_actions(
-                text, confidence=confidence, utterance_start_ts=utterance_start_ts
-            ))
-            from audio.second_ear import apply_ear, wants_amount_scores, wants_ear
-
-            # 第 2 の耳は全発話で聞いて記録する（2026-10-07。短い語の分類器・推定器のため）。ライブで使うのは、Whisper が
-            # 読めなかった発話と、額を読んだ発話（額ごとの点数 = いま使えない額だったときに使える額から選び直す,
-            # 2026-10-01）だけ（今までどおり）
-            wanted = wants_ear(events, text, question) or wants_amount_scores(events)
-            ear = self._hear_again(audio_bytes) if self._second_ear is not None else None
-            # 第 2 の耳が無い・聞き直せなかったときも通す（意味のない単発の語を音の近さで額と読む, 2026-10-01）
-            used, ear_text = apply_ear(events, text, ear if wanted else None, question=question,
-                                       utterance_start_ts=utterance_start_ts, confidence=confidence)
-            events = tuple(used)
-            if not text and not events:
+            transcript = self._recognize(audio_bytes, utterance_start_ts, audio_file)
+            if transcript is None:
                 return                      # 何も聞こえなかった（第 2 の耳でも）
-            if ear_text is not None:
-                heard = f"第 2 の耳「{ear_text}」→ {describe_events(events)}"
-            elif noise:
-                heard = "雑音（聞き違い）として無視"
-            else:
-                heard = QUESTION_NOTE if question else describe_events(events)
-            logger.info(
-                "聞き取り: %r (confidence=%s, 推論 %.2f 秒) → %s",
-                text, "-" if confidence is None else f"{confidence:.2f}", infer_sec, heard,
-            )
-            self._report(Transcript(
-                text=text, confidence=confidence, events=events,
-                audio_sec=audio_sec,
-                infer_sec=infer_sec, utterance_start_ts=utterance_start_ts,
-                heard_at=heard_at, noise=noise, audio_file=audio_file, question=question,
-                ear=ear, ear_text=ear_text, ear_wanted=wanted,
-            ))
-            for event in events:
+            self._report(transcript)
+            for event in transcript.events:
                 self._audio_queue.put(event)
         except Exception:
             logger.exception("Error in _process_chunk (chunk size=%d bytes)", len(audio_bytes))
+
+    def transcribe_offline(self, audio_bytes: bytes, utterance_start_ts: Optional[float]) -> Optional[Transcript]:
+        """ライブと同じ読み方で 1 発話を書き起こして返すだけ（音声を保存しない・`on_transcript` を呼ばない・
+        アクションを queue に送らない）。聞き流した発話の書き起こし（`tools/offplay_audio.py`, 2026-10-24）が使う。"""
+        return self._recognize(audio_bytes, utterance_start_ts, None)
+
+    def _recognize(self, audio_bytes: bytes, utterance_start_ts: Optional[float],
+                   audio_file: Optional[str]) -> Optional[Transcript]:
+        """1 発話を書き起こす（Whisper + 第 2 の耳 + 読み取り）。何も聞こえなければ None。"""
+        started = time.time()
+        audio_sec = len(audio_bytes) / 2 / self._sample_rate
+        recognize = getattr(self._transcriber, "recognize", None)
+        if callable(recognize):
+            result = recognize(audio_bytes)
+            text, confidence, no_speech = result.text, result.confidence, result.no_speech
+        else:   # テストの差し替え（`transcribe_with_confidence` だけを持つ）
+            text, confidence = self._transcriber.transcribe_with_confidence(audio_bytes)
+            no_speech = False
+        heard_at = time.time()
+        infer_sec = heard_at - started
+        if no_speech:
+            # 声が無い音（札を混ぜる音など）は Whisper にかけていない。記録にだけ残す（CLI には出さない）。
+            # 第 2 の耳の結果も記録だけ（声の検出が落とした短い語を、あとで数えるため）
+            logger.info("声ではない音 %.1f 秒 — 聞き取りに回さず（VAD）", audio_sec)
+            return Transcript(
+                text="", confidence=None, events=(), audio_sec=audio_sec, infer_sec=infer_sec,
+                utterance_start_ts=utterance_start_ts, heard_at=heard_at, noise=True,
+                audio_file=audio_file, no_speech=True,
+                ear=self._hear_again(audio_bytes) if self._second_ear is not None else None, ear_wanted=False,
+            )
+        noise = bool(text) and (is_prompt_echo(text) or is_implausibly_long(text, audio_sec))
+        question = bool(text) and not noise and is_question(text)   # 確認型はアクションにしない（仕様 FR-17）
+        # 続けて言った複数のアクションは言った順に分ける（ADR-0061）。雑音への幻聴は読まない（ADR-0063）。
+        events = () if noise or not text else tuple(parse_actions(
+            text, confidence=confidence, utterance_start_ts=utterance_start_ts
+        ))
+        from audio.second_ear import apply_ear, wants_amount_scores, wants_ear
+
+        # 第 2 の耳は全発話で聞いて記録する（2026-10-07。短い語の分類器・推定器のため）。ライブで使うのは、Whisper が
+        # 読めなかった発話と、額を読んだ発話（額ごとの点数 = いま使えない額だったときに使える額から選び直す,
+        # 2026-10-01）だけ（今までどおり）
+        wanted = wants_ear(events, text, question) or wants_amount_scores(events)
+        ear = self._hear_again(audio_bytes) if self._second_ear is not None else None
+        # 第 2 の耳が無い・聞き直せなかったときも通す（意味のない単発の語を音の近さで額と読む, 2026-10-01）
+        used, ear_text = apply_ear(events, text, ear if wanted else None, question=question,
+                                   utterance_start_ts=utterance_start_ts, confidence=confidence)
+        events = tuple(used)
+        if not text and not events:
+            return None                     # 何も聞こえなかった（第 2 の耳でも）
+        if ear_text is not None:
+            heard = f"第 2 の耳「{ear_text}」→ {describe_events(events)}"
+        elif noise:
+            heard = "雑音（聞き違い）として無視"
+        else:
+            heard = QUESTION_NOTE if question else describe_events(events)
+        logger.info(
+            "聞き取り: %r (confidence=%s, 推論 %.2f 秒) → %s",
+            text, "-" if confidence is None else f"{confidence:.2f}", infer_sec, heard,
+        )
+        return Transcript(
+            text=text, confidence=confidence, events=events,
+            audio_sec=audio_sec,
+            infer_sec=infer_sec, utterance_start_ts=utterance_start_ts,
+            heard_at=heard_at, noise=noise, audio_file=audio_file, question=question,
+            ear=ear, ear_text=ear_text, ear_wanted=wanted,
+        )
 
     def _hear_again(self, audio_bytes: bytes) -> Optional[dict]:
         """発話を第 2 の耳で聞く（2026-09-29。2026-10-07 から全発話）。結果（`EarResult.to_dict()`）か、聞けなければ

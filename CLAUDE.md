@@ -1264,7 +1264,7 @@ python tools/pack_logs.py --audio            # 店舗 PC: ログ（+ 発話の�
 python tools/eval_store.py pokerlogs_<日時>.zip   # 店舗のログをいまのコードで再生して評価（真のアクションのメモ・一致率・音声の改善を終える目安。分けた zip はまとめて渡す）
 python tools/eval_store.py logs --session <sid> --timeline   # ハンドごとに発話・札・信号の時系列と行の比較（--export-fixture tests/fixtures/store で開発データに）
 python tools/rescore_audio.py --session <sid>   # 店舗 PC: 保存した発話を Whisper で採点し直す（<sid>.rescored.jsonl, 営業のあとに）
-python tools/offplay_audio.py --session <sid>   # 店舗 PC: 聞き流した発話の音声（off_*.wav）を書き起こす（<sid>.offplay.jsonl, 営業のあとに。要 audio.save_audio）
+python tools/offplay_audio.py --session <sid>   # 聞き流した発話の音声（off_*.wav）を書き起こす（<sid>.offplay.jsonl。ふだんはロガーの q と「ログをまとめる」で自動 = audio.transcribe_offplay。要 audio.save_audio）
 python tools/second_ear.py --session <sid>      # 保存した発話を第 2 の耳で聞き直す（<sid>.ear.jsonl、--whisper で Whisper の別のやり方も, ADR-0069）
 python tools/short_words.py eval                 # 短い語の分類器をセッションを 1 つずつ抜いて確かめる（train で audio/short_word_model.json に, ADR-0069）
 python tools/review_page.py tests/fixtures/store/<日付-sid>:<ハンド> --out review.html   # 開発データのハンドを入力画面と同じ形の HTML 1 枚に（--audio / --audio-out で WAV）

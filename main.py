@@ -1222,6 +1222,21 @@ def run_cli(script: str | None = None) -> None:
         if session_repo is not None:
             _close_session_layer(session_repo, session_id)
         print(f"\nセッション終了。ログ保存先: {json_writer.path}")
+        if audio_dir is not None:
+            _transcribe_offplay(audio_thread, cfg, session_cfg["log_dir"], session_id)
+
+
+def _transcribe_offplay(audio_thread, cfg: dict, log_dir: str, session_id: str) -> None:
+    """ロガーを終えたあと、ハンドの外で聞き流した発話の音声（`off_*.wav`）を、読み込んであるモデルで書き起こす
+    （`tools/offplay_audio.py`。推定器が使う。Ctrl+C で後回し = 「ログをまとめる」のときに続きから, 2026-10-24）。"""
+    try:
+        from tools.offplay_audio import after_session
+
+        after_session(audio_thread, Path(log_dir), session_id, cfg)
+    except KeyboardInterrupt:
+        print("[offplay] 後回しにしました（「ログをまとめる」のときに書き起こします）")
+    except Exception:  # noqa: BLE001 — 書き起こせなくても終了は止めない
+        logger.exception("聞き流した発話を書き起こせませんでした")
 
 
 def run_gui() -> None:
