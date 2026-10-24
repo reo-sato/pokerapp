@@ -606,7 +606,7 @@ class SessionEstimator:
         hands = replay_world(
             world, presence, players=self.players, sb=int(blinds.get("sb") or self.setup["sb"]),
             bb=int(blinds.get("bb") or self.setup["bb"]), session_id=self.session_id,
-            bb_ante=bool(blinds.get("bb_ante")),
+            bb_ante=int(blinds.get("bb_ante") or 0),
             hand_stacks={1: stacks} if stacks else None,
             hand_buttons={1: button} if button is not None else None,
             on_action=records.append, word_labels=labels, open_gates=opened, gate_events=gates, **self.flags,

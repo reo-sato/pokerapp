@@ -59,9 +59,54 @@ def _parse_seat_list(raw: str) -> "list[int] | None":
     return sorted(numbers)
 
 
+def _prompt_table_mode() -> dict:
+    """端末の入力: モード（リングゲーム / トーナメント, ADR-0071）。トーナメントはストラクチャー・始めるレベル・経過分。"""
+    from core.blind_structure import BlindStructureStore, TournamentClock
+
+    structures = BlindStructureStore().list_structures()
+    while True:
+        raw = input("モード（空 Enter = リングゲーム / t = トーナメント）: ").strip().lower()
+        if raw in ("", "r", "ring"):
+            return {"mode": "ring"}
+        if raw in ("t", "tournament"):
+            if structures:
+                break
+            print("ストラクチャーがありません（ブラウザの設定画面の「ストラクチャーの編集」で作ってください）。")
+            continue
+        print("空 Enter か t を入力してください。")
+    for i, st in enumerate(structures, start=1):
+        print(f"  {i}. {st.name}（{sum(1 for lv in st.levels if not lv.is_break)} レベル）")
+    while True:
+        raw = input("ストラクチャーの番号 (空Enterで 1): ").strip() or "1"
+        if raw.isdigit() and 1 <= int(raw) <= len(structures):
+            structure = structures[int(raw) - 1]
+            break
+        print(f"1〜{len(structures)} を入力してください。")
+    while True:
+        raw = input("始めるレベル (空Enterで 1): ").strip() or "1"
+        if raw.isdigit() and structure.playing_index(int(raw)) is not None:
+            level = int(raw)
+            break
+        print("ストラクチャーにあるレベルの番号を入力してください。")
+    while True:
+        raw = input("そのレベルの経過分 (空Enterで 0): ").strip() or "0"
+        try:
+            elapsed_min = float(raw)
+            if elapsed_min >= 0:
+                break
+        except ValueError:
+            pass
+        print("0 以上の数を入力してください。")
+    lv = TournamentClock.start(structure, 0.0, level=level, elapsed_sec=elapsed_min * 60).blinds
+    return {"mode": "tournament", "sb": lv.sb, "bb": lv.bb, "ante": lv.ante, "structure": structure.to_dict(),
+            "level": level, "elapsed_min": elapsed_min}
+
+
 def _prompt_session_config() -> dict:
     """CLIで使う席・プレイヤー名・スタック・ブラインドを入力する。"""
     print("=== ポーカーハンドロガー セッション設定 ===")
+    table = _prompt_table_mode()
+    default_stack = (table.get("structure") or {}).get("starting_stack")
 
     while True:
         seats = _parse_seat_list(input(
@@ -75,8 +120,10 @@ def _prompt_session_config() -> dict:
         typed = input(f"席{seat} プレイヤー名: ").strip()
         name = typed or f"Player{seat}"
         while True:
+            typed_stack = input(f"席{seat} 初期スタック"
+                                + (f" (空Enterで {default_stack})" if default_stack else "") + ": ").strip()
             try:
-                stack = int(input(f"席{seat} 初期スタック: ").strip())
+                stack = int(typed_stack) if typed_stack or not default_stack else int(default_stack)
                 if stack > 0:
                     break
             except ValueError:
@@ -85,15 +132,19 @@ def _prompt_session_config() -> dict:
         # named = 名前を入力した席。空 Enter の席（PlayerN）はお客さんに結び付けない（ADR-0059）。
         players.append({"seat": seat, "name": name, "stack": stack, "named": bool(typed)})
 
-    while True:
+    while table["mode"] == "ring":
         try:
             sb = int(input("SB金額: ").strip())
             bb = int(input("BB金額: ").strip())
-            if sb > 0 and bb > 0:
+            if 0 < sb <= bb:
                 break
         except ValueError:
             pass
-        print("正の整数を入力してください。")
+        print("正の整数を入力してください（SB は BB 以下）。")
+    if table["mode"] == "ring":
+        table.update({"sb": sb, "bb": bb, "ante": 0})
+    else:
+        sb, bb = table["sb"], table["bb"]
 
     # 1 ハンド目のボタン席（FR-05b / ISSUE-0032）。以降はハンドごとに 1 つずつ回る。
     # 内部表現は「次の new_hand で 1 つ進める前の席」なので、入力された席の **1 つ手前**を渡す。
@@ -116,8 +167,82 @@ def _prompt_session_config() -> dict:
 
     return {
         "players": players, "sb": sb, "bb": bb,
-        "button_seat": button_seat, "log_dir": log_dir,
+        "button_seat": button_seat, "first_button": first_button, "log_dir": log_dir, "table": table,
     }
+
+
+def _session_config(cfg: dict):
+    """卓の設定（ADR-0071）: PC のブラウザの設定画面で入れる（端末で `t` = 今までの端末の入力）。
+
+    config `session_setup.enabled`（既定 true）/ `port`（既定 8794）/ `open_browser`（既定 true）。端末が対話でない起動
+    （入力を流し込む）は端末の入力。設定画面は始めたあとも時計の画面として動かし続ける。戻り値は (卓の設定, 設定画面の状態
+    or None)。
+    """
+    ui_cfg = cfg.get("session_setup") or {}
+    if not ui_cfg.get("enabled", True) or not sys.stdin.isatty():
+        # 入力を流し込んだ起動（テスト・スクリプト）は端末の入力のまま
+        return _prompt_session_config(), None
+    from core.blind_structure import BlindStructureStore
+    from tools import session_setup_ui as setup_ui
+
+    app = setup_ui.SetupApp(BlindStructureStore(), Path("./logs"))
+    try:
+        server = setup_ui.start_server(app, port=int(ui_cfg.get("port", setup_ui.DEFAULT_PORT)))
+    except OSError as e:
+        print(f"設定画面を開けません（{e}）。端末で入力します。")
+        return _prompt_session_config(), None
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    result = setup_ui.wait_for_setup(app, url, open_browser=bool(ui_cfg.get("open_browser", True)))
+    if result is None:
+        result = _prompt_session_config()
+        app.result = result
+        app.done.set()                 # 時計の画面はそのまま使える
+    return result, app
+
+
+def _make_tournament(table: dict):
+    """トーナメントの時計（ADR-0071）。リングゲーム・設定の無い起動（台本）は None。"""
+    if not table or table.get("mode") != "tournament":
+        return None
+    import time as _time
+
+    from core.blind_structure import TournamentClock, parse_structure
+
+    return TournamentClock.start(parse_structure(table["structure"]), _time.time(), level=int(table["level"]),
+                                 elapsed_sec=float(table.get("elapsed_min") or 0) * 60)
+
+
+def _record_table(table: dict, session_cfg: dict, json_writer, event_recorder) -> None:
+    """記録の先頭に卓の設定（events.jsonl の `session_setup` と `logs/<sid>.json` の `table`, ADR-0071）。"""
+    if not table:
+        return
+    import time as _time
+
+    record = {
+        "table_mode": table["mode"], "sb": table.get("sb"), "bb": table.get("bb"), "ante": table.get("ante", 0),
+        "structure": table.get("structure"), "level": table.get("level"), "elapsed_min": table.get("elapsed_min"),
+        "seats": [{"seat": p["seat"], "name": p["name"], "stack": p["stack"]} for p in session_cfg["players"]],
+        "first_button": session_cfg.get("first_button"),
+    }
+    json_writer.set_table(record)
+    if event_recorder is not None:
+        event_recorder.record_setup(record, _time.time())
+
+
+def _print_table(table: dict, tournament) -> None:
+    if not table:
+        return
+    if tournament is None:
+        print(f"リングゲーム: ブラインド {table['sb']}/{table['bb']}")
+        return
+    import time as _time
+
+    from core.blind_structure import format_blinds, format_remaining
+
+    lv = tournament.blinds
+    print(f"トーナメント: {tournament.structure.name} {tournament.current.label} "
+          f"{format_blinds(lv.sb, lv.bb, lv.ante)}・残り {format_remaining(tournament.remaining(_time.time()))}"
+          "（時間が来たら次のハンドからブラインドを上げます）")
 
 
 def _make_event_recorder(cfg: dict, log_dir: str, session_id: str):
@@ -437,6 +562,32 @@ def _make_game_state(cfg: dict, players: list, sb: int, bb: int, button_seat=Non
     return create_game_state(backend, players, sb, bb, button_seat=button_seat)
 
 
+def _table_kwargs(table, tournament, log_dir: str, session_id: str, setup_app, audio_q) -> dict:
+    """IntegrationThread の卓の種類と時計（ADR-0071）。設定画面の「時計」はロガーの queue に `clock` を積む。"""
+    import time as _time
+
+    from core.events import AudioEvent
+
+    on_clock_change = None
+    if tournament is not None:
+        from tools.session_setup_ui import save_clock
+
+        def on_clock_change(clock) -> None:
+            save_clock(Path(log_dir), session_id, clock)
+
+        on_clock_change(tournament)
+    if setup_app is not None:
+        def send_clock(cmd: str) -> None:
+            audio_q.put(AudioEvent(action="clock", amount=0, timestamp=_time.time(), raw_text=cmd))
+
+        setup_app.attach_session(session_id, send_clock if tournament is not None else None)
+    return {
+        "table_mode": (table or {}).get("mode"),
+        "tournament": tournament,
+        "on_clock_change": on_clock_change,
+    }
+
+
 def _auto_hand_kwargs(cfg: dict, audio_thread) -> dict:
     """手札が配られたら新しいハンド / 勝者の自動判定（ADR-0062）の設定。
 
@@ -608,8 +759,11 @@ def run_cli(script: str | None = None) -> None:
         cfg.setdefault("session_layer", {})["enabled"] = False
         if test_script["kind"] == "voice":
             cfg.setdefault("rfid", {})["enabled"] = False       # 声だけの台本は札を置かない
-    else:
-        session_cfg = _prompt_session_config()
+    setup_app = None
+    if test_script is None:
+        session_cfg, setup_app = _session_config(cfg)
+    table = session_cfg.get("table")
+    tournament = _make_tournament(table)
 
     players = [
         PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
@@ -770,6 +924,7 @@ def run_cli(script: str | None = None) -> None:
             _report_rfid_status(rfid_thread, rfid_source, stop_event)
 
     event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
+    _record_table(table, session_cfg, json_writer, event_recorder)
     # 新ハンドで RFID の board 位置もリセットする（engine の board と同じ同期点。
     # 片方だけが番号を振り直すと同じ札が 2 か所に出る, ISSUE-0026）。
     # 新ハンドは board 位置 + マック観測をまとめてリセットする（ADR-0026 / ADR-0055）。
@@ -789,6 +944,7 @@ def run_cli(script: str | None = None) -> None:
         json_writer=json_writer,
         camera_queue=camera_q,
         rfid_queue=rfid_q if rfid_cfg.get("enabled", False) else None,
+        **_table_kwargs(table, tournament, session_cfg["log_dir"], session_id, setup_app, audio_q),
         on_action=on_action,
         stop_event=stop_event,
         event_recorder=event_recorder,
@@ -828,6 +984,7 @@ def run_cli(script: str | None = None) -> None:
         _report_audio_start(audio_thread, audio_cfg.get("device_id", 0))
 
     print(f"\nセッション開始。ログ: {json_writer.path}")
+    _print_table(table, tournament)
     if test_script is not None and test_script["kind"] == "voice":
         print(f"台本のハンド（声だけ）: {len(test_script['table']['seats'])} 人の卓・{len(test_script['hands'])} ハンド。"
               "RFID は使いません。")
@@ -861,7 +1018,10 @@ def run_cli(script: str | None = None) -> None:
     print("席: [name <席> <名前>]=その席の人（参加）  [name <席> -]=空席（次のハンドから配られない）"
           "  スタック 0 の席は r で買い足すまで配られません")
     print("ブラインド: [blinds <SB> <BB>]=次のハンドからブラインドを変える（例: blinds 200 400）"
-          "  [ante on] / [ante off]=BB アンティ（BB の人が BB と同額）を入れる・外す")
+          "  [ante on] / [ante off]=BB アンティ（BB の人が BB と同額）を入れる・外す  [ante <額>]=BB アンティをその額に")
+    if tournament is not None:
+        print("時計: [clock]=いまのレベル  [clock pause] / [clock resume]=止める・動かす  [clock next] / [clock prev]"
+              "=次・前のレベル  [clock set <レベル> [経過分]]（ブラインドは次のハンドから）")
     print("ボタン: [button <席>]=ボタンを手で直す（ハンドの途中ならそのハンドを組み直す・ハンドの外なら次のハンド。"
           "ディーラーがボタンを動かし忘れたときなど）")
     print("訂正: ディーラーが「失礼しました」と言う（打っても可）と、続けて言うアクションで直します — 直前のアクションの"
@@ -992,13 +1152,18 @@ def run_cli(script: str | None = None) -> None:
                 ))
                 print(f"ブラインド {sb}/{bb} を送信しました（次のハンドから）")
             elif cmd == "ante":
-                # BB アンティ（BB の人が BB と同額のアンティ）。入れたら以後ずっと、BB を変えればアンティも変わる
+                # BB アンティ。on = BB と同額（BB を変えればアンティも変わる）/ 額 = その額（ADR-0071）/ off = 外す
                 choice = parts[1].lower() if len(parts) >= 2 else ""
-                if choice not in ("on", "off"):
-                    print("使い方: ante on（BB アンティを入れる）/ ante off（外す）")
+                if choice not in ("on", "off") and not choice.isdigit():
+                    print("使い方: ante on（BB と同額）/ ante <額> / ante off（外す）")
                     continue
                 audio_q.put(AudioEvent(
                     action="set_bb_ante", amount=0, timestamp=_time.time(), raw_text=choice,
+                ))
+            elif cmd == "clock":
+                # トーナメントの時計（ADR-0071）。状態の変更はロガーのスレッドで（queue 経由）
+                audio_q.put(AudioEvent(
+                    action="clock", amount=0, timestamp=_time.time(), raw_text=" ".join(parts[1:]) or "status",
                 ))
             elif cmd == "rr":
                 # 読み取り装置の再起動（契約 v1.11 §6）。卓に札が無くなったら RFID のスレッドが送る（結果は ● で出る）
@@ -1035,7 +1200,7 @@ def run_cli(script: str | None = None) -> None:
                 # 続けて打った複数のアクション（「フォールド フォールド コール」）は順に分ける（ADR-0061）
                 events = parse_actions(line, confidence=1.0)
                 if not events:
-                    print("認識できません。コマンド: q / n / w <席> / r <席> <金額> / d <席> <金額> / ante on|off、"
+                    print("認識できません。コマンド: q / n / w <席> / r <席> <金額> / d <席> <金額> / ante on|off|<額> / clock、"
                           "または読み上げ文（例: チェック / シート3 コール / ベット 500 / 600）")
                 for ev in events:
                     audio_q.put(ev)
@@ -1076,7 +1241,9 @@ def run_gui() -> None:
         sys.exit(1)
 
     cfg = load_config()
-    session_cfg = _prompt_session_config()
+    session_cfg, setup_app = _session_config(cfg)
+    table = session_cfg.get("table")
+    tournament = _make_tournament(table)
 
     players = [
         PlayerState(seat=p["seat"], name=p["name"], stack=p["stack"])
@@ -1189,6 +1356,7 @@ def run_gui() -> None:
         dash._rfid_receiver = rfid_thread
 
     event_recorder = _make_event_recorder(cfg, session_cfg["log_dir"], session_id)
+    _record_table(table, session_cfg, json_writer, event_recorder)
     # 新ハンドで RFID の board 位置もリセットする（engine の board と同じ同期点。
     # 片方だけが番号を振り直すと同じ札が 2 か所に出る, ISSUE-0026）。
     # 新ハンドは board 位置 + マック観測をまとめてリセットする（ADR-0026 / ADR-0055）。
@@ -1211,6 +1379,7 @@ def run_gui() -> None:
         on_action=dash.on_action,
         on_rfid_card=dash.on_rfid_card,
         stop_event=stop_event,
+        **_table_kwargs(table, tournament, session_cfg["log_dir"], session_id, setup_app, audio_q),
         event_recorder=event_recorder,
         session_repo=session_repo,
         on_new_hand=on_new_hand,

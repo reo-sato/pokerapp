@@ -319,7 +319,7 @@ class GameStateManager:
         self._sb, self._bb = sb, bb
 
 
-    def set_bb_ante(self, on: bool) -> None:
+    def set_bb_ante(self, on: "bool | int") -> None:
         """BB アンティ（legacy は持たない = 何もしない。pokerkit backend だけ, 2026-10-19）。"""
         logger.info("BB ante is not supported by the legacy backend (on=%s)", on)
 

@@ -421,3 +421,39 @@ class TestAnalyzeHistory:
             self._row("2026-09-12T10:02:00.000", street="turn"),
         ]
         assert [s[2] for s in ats.analyze(rows)["streets"]] == ["preflop", "flop", "turn"]
+
+
+class TestGameInfo:
+    """卓の種類とトーナメントの時計（ADR-0071）。モニタが PC の時計で残りを数える。"""
+
+    def _state(self, tmp_path: Path, game: dict) -> dict:
+        state = build_table_state(session_id="s", hand_id=1, now=0.0, updated_at="2026-10-24T12:00:00",
+                                  seats=[1, 2], hole_cards={}, presence={}, board=[], board_timeline=[], game=game)
+        (tmp_path / "s.table_state.json").write_text(json.dumps(state.to_dict()), encoding="utf-8")
+        return table_monitor.read_state(tmp_path, "s")
+
+    def test_remaining_counts_from_the_absolute_end(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(table_monitor.time, "time", lambda: 1000.0)
+        game = {"mode": "tournament", "blinds": {"sb": 100, "bb": 200},
+                "clock": {"structure": "標準", "label": "レベル 1", "sb": 100, "bb": 200, "ante": 0,
+                          "ends_at": 1090.0, "paused": False, "remaining_sec": None, "next_break_at": 2000.0,
+                          "next": {"level": 2, "sb": 200, "bb": 400, "ante": 400}}}
+        state = self._state(tmp_path, game)
+        assert state["game"]["clock"]["remaining_now"] == 90.0 and state["game"]["clock"]["break_in"] == 1000.0
+        assert "標準 レベル 1 100/200  残り 1:30" in table_monitor._format_text(state)
+
+    def test_paused_and_ring(self, tmp_path: Path):
+        game = {"mode": "tournament", "blinds": {"sb": 100, "bb": 200},
+                "clock": {"structure": "標準", "label": "レベル 1", "sb": 100, "bb": 200, "ante": 0, "ends_at": None,
+                          "paused": True, "remaining_sec": 42.0, "next_break_at": None, "next": None}}
+        assert self._state(tmp_path, game)["game"]["clock"]["remaining_now"] == 42.0
+        ring = self._state(tmp_path, {"mode": "ring", "blinds": {"sb": 100, "bb": 200}})
+        assert "リングゲーム 100/200" in table_monitor._format_text(ring)
+
+    def test_history_is_not_grown_by_the_clock(self, tmp_path: Path):
+        writer = TableStateWriter(tmp_path, "s")
+        game = {"mode": "tournament", "clock": {"ends_at": 1090.0, "next_break_at": 2000.0}}
+        for now in (0.0, 1.0, 2.0):
+            writer.publish(build_table_state(session_id="s", hand_id=1, now=now, updated_at=f"t{now}", seats=[1, 2],
+                                             hole_cards={}, presence={}, board=[], board_timeline=[], game=game))
+        assert len(writer.history_path.read_text(encoding="utf-8").splitlines()) == 1

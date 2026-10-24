@@ -171,7 +171,7 @@ class TestUpdatePreservesShopData:
         assert data_files, "core/backup.py のデータ一覧を読めない（パターン変更?）"
         files, dirs = self._preserved()
         assert data_files <= files, f"更新で消える恐れ: {sorted(data_files - files)}"
-        assert {"config.json", "rfid_cards.json", "menu.json"} <= files
+        assert {"config.json", "rfid_cards.json", "menu.json", "blind_structures.json"} <= files
         assert {"venv", "logs", "backups"} <= dirs
 
     def test_gitignored_runtime_files(self):

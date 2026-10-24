@@ -583,6 +583,7 @@ class TestContentFingerprint:
         "audio/devices.py": "マイクの一覧（再生では使わない）",
         "audio/recorder.py": "録音（再生では使わない）",
         "core/atomic_io.py": "ファイルの書き方",
+        "core/blind_structure.py": "トーナメントの時計と表示の文言（ライブのロガーだけ。再生は記録した set_level で同じ, ADR-0071）",
         "core/event_queue.py": "スレッド間のキュー",
         "core/hand_correction.py": "訂正の重ね方（読む側）",
         "core/player.py": "player registry", "core/player_repository.py": "player registry",

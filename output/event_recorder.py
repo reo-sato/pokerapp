@@ -109,6 +109,17 @@ class EventRecorder:
     def path(self) -> Path:
         return self._path
 
+    def record_setup(self, setup: dict, timestamp: float) -> None:
+        """卓の設定（モード・ブラインド・アンテ・ストラクチャー・席, ADR-0071）を 1 行書く（`type` = session_setup,
+        schema 0.19 additive）。再生の入力ではない（`integration.replay.load_events` は飛ばし、`load_session_setup` が読む）。"""
+        line = json.dumps({"type": "session_setup", "timestamp": timestamp, **setup}, ensure_ascii=False)
+        try:
+            with self._lock:
+                with self._path.open("a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+        except OSError:
+            logger.exception("Failed to record the session setup to %s", self._path)
+
     def record(self, event: RecordableEvent) -> None:
         """1 イベントを 1 行追記する。未対応型・I/O 失敗は warning に留め例外を投げない。"""
         try:

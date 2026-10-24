@@ -12,6 +12,8 @@
   （ボードのリーダーの上）を通過した席は「マック」と出す（ADR-0058）。
 - **ストリート遷移** — ボード枚数から導いたストリート（engine のストリートと並べて表示）。
 - **反映遅延** — 観測時刻とページ描画時刻の差を画面に出す。
+- **卓の種類とブラインド**（ADR-0071）— リングゲーム / トーナメント、いまのハンドのブラインド・アンテ、トーナメントは
+  レベル・**残り時間**・次のレベル・次のブレイクまで（時刻はロガーが絶対時刻で書き、残りはこのモニタが PC の時計で数える）。
 
 hand logger（`main.py --cli` / GUI）が書く `logs/{session}.table_state.json` を読むだけで、
 ゲーム状態は一切触らない（単一書き手 + reload-on-read, ADR-0020 の型）。
@@ -30,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -74,6 +77,12 @@ _PAGE = """<!doctype html>
  .err { color:#ff7b72; }
  table.tl { border-collapse:collapse; margin-top:18px; font-size:13px; color:#9aa0a6; }
  table.tl td { padding:2px 10px 2px 0; }
+ .game { display:flex; gap:18px; align-items:baseline; flex-wrap:wrap; background:#1a1f27; border:1px solid #2d333b;
+         border-radius:10px; padding:10px 14px; margin-bottom:14px; }
+ .game .blinds { font-size:26px; font-weight:700; }
+ .game .clock { font-size:30px; font-weight:700; font-variant-numeric:tabular-nums; color:#7ee787; }
+ .game .clock.soon { color:#e3b341; } .game .clock.paused { color:#9aa0a6; }
+ .game .sub { color:#9aa0a6; font-size:14px; }
 </style></head>
 <body>
 <div id="app">読み込み中…</div>
@@ -90,6 +99,22 @@ function pendingHtml(p){
   return `<div class="card pending${red?" red":""}">${p.card}<span class="sub">${label}</span></div>`;
 }
 function lagClass(s){ return s < 3 ? "ok" : (s < 15 ? "warn" : "bad"); }
+function mmss(sec){ sec = Math.max(0, Math.floor(sec)); return `${Math.floor(sec/60)}:${String(sec%60).padStart(2,"0")}`; }
+function blindsText(sb, bb, ante){ return `${sb}/${bb}` + (ante ? ` <span class="sub">アンテ ${ante}</span>` : ""); }
+function gameHtml(g){
+  if (!g || !g.mode) return "";
+  const b = g.blinds || {};
+  const c = g.clock;
+  if (!c) return `<div class="game"><span class="sub">リングゲーム</span><span class="blinds">${blindsText(b.sb, b.bb, b.bb_ante)}</span></div>`;
+  const rem = c.remaining_now;
+  const cls = c.paused ? "clock paused" : (rem != null && rem < 60 ? "clock soon" : "clock");
+  return `<div class="game"><span class="sub">${c.structure}</span>
+    <span class="blinds">${c.label} ${blindsText(c.sb, c.bb, c.ante)}</span>
+    <span class="${cls}">${rem == null ? "" : mmss(rem)}${c.paused ? " 停止中" : ""}</span>
+    <span class="sub">${c.next ? `次 ${blindsText(c.next.sb, c.next.bb, c.next.ante)}` : "最後のレベル"}
+      ${c.break_in != null ? ` ／ ブレイクまで ${mmss(c.break_in)}` : ""}
+      ${(b.sb !== c.sb || b.bb !== c.bb) && !c.is_break ? ` ／ このハンド ${blindsText(b.sb, b.bb, b.bb_ante)}` : ""}</span></div>`;
+}
 async function tick(){
   let d;
   try { d = await (await fetch("/state.json?_=" + Date.now())).json(); }
@@ -112,6 +137,7 @@ async function tick(){
   const tl = (d.board_timeline||[]).map(e =>
     `<tr><td>${e.index} 枚目</td><td>${e.card}</td><td>${e.dealt_at}</td></tr>`).join("");
   document.getElementById("app").innerHTML = `
+    ${gameHtml(d.game)}
     <h1>卓状態モニタ — ${d.session_id||""} / ハンド ${d.hand_id}</h1>
     <div class="meta">更新 ${d.updated_at||"—"}
       ${lag==null?"":`／ 反映遅延 <span class="lag ${lagClass(lag)}">${lag.toFixed(1)} 秒</span>`}
@@ -140,6 +166,19 @@ def find_snapshot(log_dir: Path, session: Optional[str]) -> Optional[Path]:
     return candidates[0] if candidates else None
 
 
+def _clock_now(game: dict, now: float) -> None:
+    """トーナメントの時計の残り・ブレイクまで（ロガーが書いた絶対時刻から、この PC の時計で数える, ADR-0071）。"""
+    clock = (game or {}).get("clock")
+    if not isinstance(clock, dict):
+        return
+    if clock.get("paused"):
+        clock["remaining_now"] = clock.get("remaining_sec")
+    elif isinstance(clock.get("ends_at"), (int, float)):
+        clock["remaining_now"] = max(0.0, clock["ends_at"] - now)
+    if isinstance(clock.get("next_break_at"), (int, float)):
+        clock["break_in"] = max(0.0, clock["next_break_at"] - now)
+
+
 def read_state(log_dir: Path, session: Optional[str]) -> dict:
     """スナップショットを読んで `age_sec`（反映遅延）を付けて返す。"""
     path = find_snapshot(log_dir, session)
@@ -155,6 +194,7 @@ def read_state(log_dir: Path, session: Optional[str]) -> dict:
         state["age_sec"] = max(0.0, (datetime.now() - updated).total_seconds())
     except ValueError:
         state["age_sec"] = None
+    _clock_now(state.get("game") or {}, time.time())
     return state
 
 
@@ -170,7 +210,19 @@ def _format_text(state: dict) -> str:
     away = state.get("board_away_sec") or {}
     board = [f"{c}(外れた {away[c]}s)" if c in away else c for c in state.get("board") or []]
     board += [f"[{p['card']} {_pending_label(p)}]" for p in state.get("board_pending") or []]
-    lines = [
+    lines = []
+    game = state.get("game") or {}
+    clock = game.get("clock")
+    if clock:
+        rem = clock.get("remaining_now")
+        lines.append(f"{clock.get('structure')} {clock.get('label')} {clock.get('sb')}/{clock.get('bb')}"
+                     + (f" アンテ {clock['ante']}" if clock.get("ante") else "")
+                     + (f"  残り {int(rem) // 60}:{int(rem) % 60:02d}" if rem is not None else "")
+                     + ("  停止中" if clock.get("paused") else ""))
+    elif game.get("mode"):
+        b = game.get("blinds") or {}
+        lines.append(f"リングゲーム {b.get('sb')}/{b.get('bb')}")
+    lines += [
         f"session {state.get('session_id')} / hand {state.get('hand_id')} "
         f"/ 更新 {state.get('updated_at')} (遅延 {state.get('age_sec')}s)",
         f"street(RFID) {state.get('rfid_street')}  engine {state.get('engine_street')}  "

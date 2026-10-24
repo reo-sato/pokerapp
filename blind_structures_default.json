@@ -1,0 +1,188 @@
+{
+  "structures": [
+    {
+      "name": "標準（20 分）",
+      "starting_stack": 20000,
+      "levels": [
+        {
+          "sb": 100,
+          "bb": 200,
+          "ante": 0,
+          "minutes": 20
+        },
+        {
+          "sb": 200,
+          "bb": 400,
+          "ante": 0,
+          "minutes": 20
+        },
+        {
+          "sb": 300,
+          "bb": 600,
+          "ante": 600,
+          "minutes": 20
+        },
+        {
+          "sb": 400,
+          "bb": 800,
+          "ante": 800,
+          "minutes": 20
+        },
+        {
+          "break": true,
+          "minutes": 10
+        },
+        {
+          "sb": 500,
+          "bb": 1000,
+          "ante": 1000,
+          "minutes": 20
+        },
+        {
+          "sb": 600,
+          "bb": 1200,
+          "ante": 1200,
+          "minutes": 20
+        },
+        {
+          "sb": 800,
+          "bb": 1600,
+          "ante": 1600,
+          "minutes": 20
+        },
+        {
+          "sb": 1000,
+          "bb": 2000,
+          "ante": 2000,
+          "minutes": 20
+        },
+        {
+          "break": true,
+          "minutes": 10
+        },
+        {
+          "sb": 1500,
+          "bb": 3000,
+          "ante": 3000,
+          "minutes": 20
+        },
+        {
+          "sb": 2000,
+          "bb": 4000,
+          "ante": 4000,
+          "minutes": 20
+        },
+        {
+          "sb": 3000,
+          "bb": 6000,
+          "ante": 6000,
+          "minutes": 20
+        },
+        {
+          "sb": 4000,
+          "bb": 8000,
+          "ante": 8000,
+          "minutes": 20
+        },
+        {
+          "sb": 5000,
+          "bb": 10000,
+          "ante": 10000,
+          "minutes": 20
+        }
+      ]
+    },
+    {
+      "name": "ターボ（10 分）",
+      "starting_stack": 20000,
+      "levels": [
+        {
+          "sb": 100,
+          "bb": 200,
+          "ante": 0,
+          "minutes": 10
+        },
+        {
+          "sb": 200,
+          "bb": 400,
+          "ante": 0,
+          "minutes": 10
+        },
+        {
+          "sb": 300,
+          "bb": 600,
+          "ante": 600,
+          "minutes": 10
+        },
+        {
+          "sb": 400,
+          "bb": 800,
+          "ante": 800,
+          "minutes": 10
+        },
+        {
+          "break": true,
+          "minutes": 5
+        },
+        {
+          "sb": 500,
+          "bb": 1000,
+          "ante": 1000,
+          "minutes": 10
+        },
+        {
+          "sb": 600,
+          "bb": 1200,
+          "ante": 1200,
+          "minutes": 10
+        },
+        {
+          "sb": 800,
+          "bb": 1600,
+          "ante": 1600,
+          "minutes": 10
+        },
+        {
+          "sb": 1000,
+          "bb": 2000,
+          "ante": 2000,
+          "minutes": 10
+        },
+        {
+          "break": true,
+          "minutes": 5
+        },
+        {
+          "sb": 1500,
+          "bb": 3000,
+          "ante": 3000,
+          "minutes": 10
+        },
+        {
+          "sb": 2000,
+          "bb": 4000,
+          "ante": 4000,
+          "minutes": 10
+        },
+        {
+          "sb": 3000,
+          "bb": 6000,
+          "ante": 6000,
+          "minutes": 10
+        },
+        {
+          "sb": 4000,
+          "bb": 8000,
+          "ante": 8000,
+          "minutes": 10
+        },
+        {
+          "sb": 5000,
+          "bb": 10000,
+          "ante": 10000,
+          "minutes": 10
+        }
+      ]
+    }
+  ]
+}

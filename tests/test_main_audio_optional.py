@@ -213,7 +213,7 @@ def test_cli_keeps_going_when_the_model_cannot_load(tmp_path, monkeypatch, capsy
     monkeypatch.setitem(sys.modules, "faster_whisper", None)   # import すると ImportError
     cfg = {"audio": {"enabled": True}, "rfid": {"enabled": False}, "engine": {"backend": "legacy"},
            "table_state": {"enabled": False}}
-    answers = iter(["2", "", "1000", "", "1000", "5", "10", "", str(tmp_path / "logs"), "q"])
+    answers = iter(["", "2", "", "1000", "", "1000", "5", "10", "", str(tmp_path / "logs"), "q"])
     monkeypatch.setattr("core.config.load_config", lambda path=None: cfg)
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     main.run_cli()

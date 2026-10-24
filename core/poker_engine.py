@@ -73,7 +73,7 @@ class PokerEngine(Protocol):
     def sit_in(self, seat: int) -> bool: ...
     def seats_in_hand(self) -> list[int]: ...
     def set_blinds(self, sb: int, bb: int) -> None: ...
-    def set_bb_ante(self, on: bool) -> None: ...
+    def set_bb_ante(self, on: "bool | int") -> None: ...
     def set_button(self, seat: int) -> None: ...
 
     @property
@@ -164,10 +164,12 @@ class PokerkitGameState:
         self._hand_seats: list[int] = list(self._seats)
         # 次のハンドから使うブラインド（ハンドの途中に変えたとき）
         self._pending_blinds: Optional[tuple[int, int]] = None
-        # BB アンティ（BB の人が BB と同額のアンティを出す, CLI の `ante on/off`, 2026-10-19）。ハンドの途中に
-        # 切り替えたら次のハンドから（`_pending_bb_ante`）
-        self._bb_ante_on: bool = False
-        self._pending_bb_ante: Optional[bool] = None
+        # BB アンティ（BB の人がアンティを出す, CLI の `ante on/off` 2026-10-19・トーナメントのレベル ADR-0071）。
+        # False = 無し / True = BB と同額（BB を変えればアンティも変わる）/ 整数 = その額。ハンドの途中に変えたら次の
+        # ハンドから（`_pending_bb_ante`）
+        self._bb_ante_on: "bool | int" = False
+        self._pending_bb_ante: "Optional[bool | int]" = None
+        self._posted_ante: int = 0          # いまのハンドで BB の人が払ったアンティ
         # 次のハンドのボタンを手で指定（仕様 FR-05g）。使ったら (通常の進み方の席, 指定した席) を残す。
         self._forced_button: Optional[int] = None
         # 前のハンドのボタン（このハンドの席を組み直すときに、そこから進め直す）と、このハンドのボタンを手で
@@ -248,7 +250,7 @@ class PokerkitGameState:
         stacks = [self._stacks[s] for s in self._order]
         self._hand_start_stacks = list(stacks)
         self._state = NoLimitTexasHoldem.create_state(
-            self._automations, False, self._raw_antes(), (self._sb, self._bb), self._bb, stacks, len(stacks),
+            self._automations, False, self._raw_antes(stacks), (self._sb, self._bb), self._bb, stacks, len(stacks),
         )
         self._hand_active = True
         self._final_pots = []
@@ -279,7 +281,7 @@ class PokerkitGameState:
         self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
         self._hand_start_stacks = [start[s] for s in self._order]
         self._state = NoLimitTexasHoldem.create_state(
-            self._automations, False, self._raw_antes(), (self._sb, self._bb), self._bb,
+            self._automations, False, self._raw_antes(self._hand_start_stacks), (self._sb, self._bb), self._bb,
             list(self._hand_start_stacks), len(self._order),
         )
         self._final_pots = []
@@ -318,7 +320,7 @@ class PokerkitGameState:
         self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
         self._hand_start_stacks = [start[s] for s in self._order]
         self._state = NoLimitTexasHoldem.create_state(
-            self._automations, False, self._raw_antes(), (self._sb, self._bb), self._bb,
+            self._automations, False, self._raw_antes(self._hand_start_stacks), (self._sb, self._bb), self._bb,
             list(self._hand_start_stacks), len(self._order),
         )
         self._final_pots = []
@@ -763,27 +765,53 @@ class PokerkitGameState:
             self._sb, self._bb = sb, bb
             self._pending_blinds = None
 
-    def set_bb_ante(self, on: bool) -> None:
-        """BB アンティ（BB の人が BB と同額のアンティを出す）を入れる・外す。ハンドの途中なら次のハンドから。"""
-        if self._hand_active:
-            self._pending_bb_ante = bool(on)
+    def set_bb_ante(self, on: "bool | int") -> None:
+        """BB アンティを入れる・外す: True = BB と同額 / 整数 = その額（トーナメントのレベル, ADR-0071）/ False・0 = 無し。
+        ハンドの途中なら次のハンドから。"""
+        if isinstance(on, bool):
+            value: "bool | int" = on
         else:
-            self._bb_ante_on = bool(on)
+            value = int(on)
+            if value < 0:
+                raise ValueError(f"Invalid ante: {on}")
+            value = value or False
+        if self._hand_active:
+            self._pending_bb_ante = value
+        else:
+            self._bb_ante_on = value
             self._pending_bb_ante = None
+
+    @staticmethod
+    def _ante_amount(setting: "bool | int", bb: int) -> int:
+        if isinstance(setting, bool):
+            return bb if setting else 0
+        return int(setting)
 
     @property
     def bb_ante(self) -> int:
-        """いまの（最後の）ハンドの BB アンティの額（無ければ 0）。"""
-        return self._bb if self._bb_ante_on else 0
+        """いまの（最後の）ハンドの BB アンティの額（無ければ 0）。BB の人の持ち点が足りず減らしたときは払った額。"""
+        if self._state is not None:
+            return self._posted_ante
+        return self._ante_amount(self._bb_ante_on, self._bb)
 
     def bb_ante_next_hand(self) -> bool:
         """次のハンドで BB アンティが入っているか（保留の切り替えを含む）。"""
-        return self._bb_ante_on if self._pending_bb_ante is None else self._pending_bb_ante
+        setting = self._bb_ante_on if self._pending_bb_ante is None else self._pending_bb_ante
+        return bool(setting)
 
-    def _raw_antes(self):
+    def _raw_antes(self, stacks: list[int]):
         """pokerkit の `raw_antes`: BB アンティは {1: 額}（インデックス 1 = BB。heads-up も pokerkit が BB に付ける）。
-        アンティの返金（`ante_trimming_status`）は切って渡す（切らないと BB だけのアンティが返される）。"""
-        return {1: self._bb} if self._bb_ante_on else 0
+        アンティの返金（`ante_trimming_status`）は切って渡す（切らないと BB だけのアンティが返される）。
+
+        BB の人の持ち点がブラインドとアンティの両方に足りなければ、ブラインドを先に払う（TDA の規則。pokerkit はアンティを
+        先に取るので、アンティを持ち点からブラインドを引いた残りまでに減らす, ADR-0071）。`stacks` は pokerkit の並び
+        （heads-up は 0 番 = BB、3 人以上は 1 番 = BB）。"""
+        ante = self._ante_amount(self._bb_ante_on, self._bb)
+        if ante and stacks:
+            bb_stack = stacks[0] if len(stacks) == 2 else stacks[1]
+            ante = min(ante, max(0, bb_stack - self._bb))
+        self._posted_ante = ante
+        return {1: ante} if ante else 0
 
     def set_button(self, seat: int) -> None:
         """次のハンドのボタンを手で指定する（ディーラーの手違い等の修正, 仕様 FR-05g）。"""
