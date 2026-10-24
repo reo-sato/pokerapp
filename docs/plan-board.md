@@ -20,7 +20,7 @@
 関連の文書:
 
 - A: `docs/worklog/2026-10-23-annotation-rules.md`・`2026-10-23-dealt-seats-button.md`・`2026-10-23-rfid-stacked-cards.md`（verify-v1）
-- B: 監査 4 回目 `docs/worklog/2026-10-23-estimator-audit-4.md`・改善案 `2026-10-23-estimator-improvement-plan.md`
+- B: 設計の議論 `docs/estimator-v2/README.md`（事前 P(H) の決定 3 点 = §3.6）・監査 4 回目 `docs/worklog/2026-10-23-estimator-audit-4.md`・改善案 `2026-10-23-estimator-improvement-plan.md`
 - C: `docs/worklog/2026-10-23-llm-proposer-experiment.md`（結果は末尾）・事前登録の草稿 `docs/dogfood/llm-proposer-preregistration.md`・`docs/estimator.md` §9
 - F: `docs/estimator-params/README.md`（立ち上げ文書・作業記録 §8）
 - D: `docs/estimator.md` の「評価に入るまでの手順」・事前登録 `docs/dogfood/estimator-v1-preregistration.md`
@@ -96,6 +96,7 @@ F（値を数える）の最初の段（F1 = 真の列と観測の対応づけ�
 | 2026-10-24 | 台帳を作った（A・B・C・D の 4 トラック） |
 | 2026-10-24 | C を打ち切り（オーナー）。同じセッションが E（音声の取りこぼし）に移った。§3・§4 を書き直した |
 | 2026-10-24 | F（罰の値をデータから数える）を別のセッションのサブプロジェクトとして追加。§3-6 |
+| 2026-10-24 | B の事前 P(H) の方針をオーナーが決めた（方策は開発データを使わない・一般の統計を弱い事前に・卓の種類を特徴に）。卓の種類の記録が無い = A と順番を決める |
 
 ## 6. 終わったトラックの結果
 
