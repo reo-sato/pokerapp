@@ -190,7 +190,7 @@ class GUIDashboard:
 
             seat_lbl   = ctk.CTkLabel(frame, text=str(seat), text_color=color)
             name_lbl   = ctk.CTkLabel(frame, text=name,      text_color=color, anchor="w")
-            stack_lbl  = ctk.CTkLabel(frame, text=f"{stack:,}", text_color=color, anchor="e")
+            stack_lbl  = ctk.CTkLabel(frame, text=self._stack_text(stack), text_color=color, anchor="e")
             status_lbl = ctk.CTkLabel(frame, text=status,    text_color=color)
             hole_lbl   = ctk.CTkLabel(frame, text="—",        text_color="#AAAAAA",
                                        font=("Courier", 10))
@@ -316,8 +316,8 @@ class GUIDashboard:
         try:
             while True:
                 item = self._update_queue.get_nowait()
-                record, shown = item if isinstance(item, tuple) else (item, None)
-                self._apply_record(record, shown)
+                record, shown, *rest = item if isinstance(item, tuple) else (item, None)
+                self._apply_record(record, shown, *rest)
         except queue.Empty:
             pass
         # RFID カードイベントを処理
@@ -332,7 +332,8 @@ class GUIDashboard:
         if not self._stop_event.is_set():
             self._root.after(100, self._poll_updates)
 
-    def _apply_record(self, record: "ActionRecord", shown: Optional[int] = None) -> None:
+    def _apply_record(self, record: "ActionRecord", shown: Optional[int] = None,
+                      unknown: tuple[bool, bool] = (False, False)) -> None:
         """ActionRecord を UI に反映する。`shown` は画面に出す額（コールはトータル, `on_action` が決める）。"""
         self._refresh_player_row(record.seat)
         self._refresh_header()
@@ -351,8 +352,8 @@ class GUIDashboard:
 
         line = (
             f"[{record.street:<8}] 席{record.seat} {record.player_name:<8} "
-            f"{record.action:<6} {(record.amount if shown is None else shown):>6,}  "
-            f"pot={record.pot_after:>7,}  conf={conf:.2f} ({src_str})"
+            f"{record.action:<6} {'—' if unknown[0] else format(record.amount if shown is None else shown, ','):>6}  "
+            f"pot={'—' if unknown[1] else format(record.pot_after, ','):>7}  conf={conf:.2f} ({src_str})"
         )
         if record.needs_review:
             line += "  ⚠要確認"
@@ -379,7 +380,8 @@ class GUIDashboard:
         gs = self._gs
         self._lbl_hand.configure(text=f"ハンド: #{gs.hand_id}")
         self._lbl_street.configure(text=f"ストリート: {gs.street}")
-        self._lbl_pot.configure(text=f"ポット: {gs.pot:,}")
+        pot_unknown = getattr(gs, "stackless", False) and bool(gs.allin_seats())
+        self._lbl_pot.configure(text="ポット: —" if pot_unknown else f"ポット: {gs.pot:,}")
         # RFID HTTP 受信機のステータスを表示
         if self._rfid_receiver is not None:
             try:
@@ -440,6 +442,10 @@ class GUIDashboard:
 
         self._lbl_health.configure(text=f"{mic}　{nfc}")
 
+    def _stack_text(self, stack: int) -> str:
+        """持ち点の表示（持ち点を数えないモードは出さない）。"""
+        return "—" if getattr(self._gs, "stackless", False) else f"{stack:,}"
+
     def _refresh_player_row(self, seat: int) -> None:
         if seat not in self._player_rows:
             return
@@ -447,7 +453,7 @@ class GUIDashboard:
         stack = self._gs.get_stack(seat)
         active = seat in self._gs.get_active_seats()
         color = "#CCCCCC" if active else "#888888"
-        row["stack_lbl"].configure(text=f"{stack:,}", text_color=color)
+        row["stack_lbl"].configure(text=self._stack_text(stack), text_color=color)
         row["status_lbl"].configure(text="○" if active else "×", text_color=color)
         row["name_lbl"].configure(text_color=color)
 
@@ -496,7 +502,10 @@ class GUIDashboard:
 
         thread = self._integration_thread
         total = thread.street_total(record) if hasattr(thread, "street_total") else None
-        self._update_queue.put((record, shown_amount(record.action, record.amount, total)))
+        unknown = thread.amount_unknown(record) if hasattr(thread, "amount_unknown") else (False, False)
+        shown = shown_amount(record.action, record.amount, total)
+        # 持ち点を数えないモードで分からない額・ポットがあるときだけ 3 つ目に付ける
+        self._update_queue.put((record, shown, unknown) if any(unknown) else (record, shown))
 
     def on_rfid_card(self, rfid_ev: object) -> None:
         """IntegrationThread から呼ばれる RFID カードコールバック。スレッド安全。"""

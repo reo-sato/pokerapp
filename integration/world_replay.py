@@ -323,6 +323,7 @@ def replay_world(
     open_gates: frozenset = frozenset(),
     gate_events: Optional[dict[str, tuple[str, float]]] = None,
     bb_ante: "bool | int" = False,
+    stackless: bool = False,
 ) -> list[dict]:
     """`world_events` の入力を、ライブのループと同じ順の定期の確認を挟みながら流し、ハンド（記録と同じ形）を返す。
 
@@ -333,7 +334,8 @@ def replay_world(
     `button_from_deal`: 記録した配った順（`deal_order` の信号）でボタンを組み直す（ライブ・replay と同じ。推定器の
     セッション全体の再生 = ハンドごとのボタンの出所だけが使う。ハンドごとの再生ではボタンは推定器の選択肢）。
     """
-    gs = create_game_state("pokerkit", players, sb, bb, button_seat=button_seat)
+    # stackless: 持ち点を数えないモードのセッション（`core/poker_engine.PokerkitGameState`, オーナー 2026-10-24）
+    gs = create_game_state("pokerkit", players, sb, bb, button_seat=button_seat, stackless=stackless)
     if bb_ante:
         gs.set_bb_ante(bb_ante)           # 記録の `blinds.bb_ante` = そのハンドの BB アンティの額（ハンドごとの再生用）
     clock = _ReplayClock()

@@ -41,7 +41,7 @@ class TestBuildConfig:
             (2, "あ", 20000, True), (4, "Player4", 15000, False), (5, "Player5", 20000, False)]
         assert (cfg["sb"], cfg["bb"]) == (100, 200)
         assert cfg["first_button"] == 4 and cfg["button_seat"] == 2      # 1 つ手前（端末の入力と同じ）
-        assert cfg["table"] == {"mode": "ring", "sb": 100, "bb": 200, "ante": 0}
+        assert cfg["table"] == {"mode": "ring", "stackless": False, "sb": 100, "bb": 200, "ante": 0}
 
     def test_tournament_mid_level(self, store):
         cfg = ui.build_session_config(_raw(mode="tournament", structure="標準", level=2, elapsed_min=5), store)

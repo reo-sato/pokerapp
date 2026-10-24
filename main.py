@@ -130,10 +130,15 @@ def _elapsed_in_level(clock, now: float) -> float:
     return clock.elapsed(now) + sum(x.duration_sec for x in clock.structure.levels[start:clock.index])
 
 
-def _prompt_session_config() -> dict:
-    """CLIで使う席・プレイヤー名・スタック・ブラインドを入力する。"""
+def _prompt_session_config(stackless: bool = False) -> dict:
+    """CLIで使う席・プレイヤー名・スタック・ブラインドを入力する。
+
+    `stackless`: 持ち点を数えないモード（オーナー 2026-10-24）。端末の入力では訊かず config の `engine.stackless`
+    （ブラウザの設定画面ではチェックボックスで選ぶ）。持ち点は訊かない。
+    """
     print("=== ポーカーハンドロガー セッション設定 ===")
     table = _prompt_table_mode()
+    table["stackless"] = stackless
     default_stack = (table.get("structure") or {}).get("starting_stack")
 
     while True:
@@ -147,7 +152,8 @@ def _prompt_session_config() -> dict:
     for seat in seats:
         typed = input(f"席{seat} プレイヤー名: ").strip()
         name = typed or f"Player{seat}"
-        while True:
+        stack = 0                                   # 持ち点を数えないモードは訊かない（0 = 分からない）
+        while not table.get("stackless"):
             typed_stack = input(f"席{seat} 初期スタック"
                                 + (f" (空Enterで {default_stack})" if default_stack else "") + ": ").strip()
             try:
@@ -206,10 +212,11 @@ def _session_config(cfg: dict):
     （入力を流し込む）は端末の入力。設定画面は始めたあとも時計の画面として動かし続ける。戻り値は (卓の設定, 設定画面の状態
     or None)。
     """
+    stackless = bool((cfg.get("engine") or {}).get("stackless", False))
     ui_cfg = cfg.get("session_setup") or {}
     if not ui_cfg.get("enabled", True) or not sys.stdin.isatty():
         # 入力を流し込んだ起動（テスト・スクリプト）は端末の入力のまま
-        return _prompt_session_config(), None
+        return _prompt_session_config(stackless), None
     from core.blind_structure import BlindStructureStore
     from tools import session_setup_ui as setup_ui
 
@@ -218,11 +225,11 @@ def _session_config(cfg: dict):
         server = setup_ui.start_server(app, port=int(ui_cfg.get("port", setup_ui.DEFAULT_PORT)))
     except OSError as e:
         print(f"設定画面を開けません（{e}）。端末で入力します。")
-        return _prompt_session_config(), None
+        return _prompt_session_config(stackless), None
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     result = setup_ui.wait_for_setup(app, url, open_browser=bool(ui_cfg.get("open_browser", True)))
     if result is None:
-        result = _prompt_session_config()
+        result = _prompt_session_config(stackless)
         app.result = result
         app.done.set()                 # 時計の画面はそのまま使える
     return result, app
@@ -253,6 +260,7 @@ def _record_table(table: dict, session_cfg: dict, json_writer, event_recorder) -
         "table_mode": table["mode"], "sb": table.get("sb"), "bb": table.get("bb"), "ante": table.get("ante", 0),
         "structure": table.get("structure"), "level": table.get("level"), "elapsed_min": table.get("elapsed_min"),
         "start_time": table.get("start_time"), "start_at": table.get("start_at"),
+        "stackless": bool(table.get("stackless")),
         "seats": [{"seat": p["seat"], "name": p["name"], "stack": p["stack"]} for p in session_cfg["players"]],
         "first_button": session_cfg.get("first_button"),
     }
@@ -583,7 +591,7 @@ def _parse_name_command(parts: list[str]) -> "tuple[int, str | None] | None":
     return (seat, name) if name else None
 
 
-def _make_game_state(cfg: dict, players: list, sb: int, bb: int, button_seat=None):
+def _make_game_state(cfg: dict, players: list, sb: int, bb: int, button_seat=None, stackless: bool = False):
     """config.engine.backend で game-state 実装を選ぶ (R2, ADR-0009)。
 
     既定 "legacy" = 従来の `GameStateManager`（挙動不変）。"pokerkit" は preview backend
@@ -593,7 +601,9 @@ def _make_game_state(cfg: dict, players: list, sb: int, bb: int, button_seat=Non
     from core.poker_engine import create_game_state
 
     backend = cfg.get("engine", {}).get("backend", "legacy")
-    return create_game_state(backend, players, sb, bb, button_seat=button_seat)
+    if stackless and backend != "pokerkit":
+        print("● 持ち点を数えないモードは engine.backend が pokerkit のときだけ使えます（数えるモードで続けます）")
+    return create_game_state(backend, players, sb, bb, button_seat=button_seat, stackless=stackless)
 
 
 def _table_kwargs(table, tournament, log_dir: str, session_id: str, setup_app, audio_q) -> dict:
@@ -805,7 +815,7 @@ def run_cli(script: str | None = None) -> None:
     ]
     game_state = _make_game_state(
         cfg, players, session_cfg["sb"], session_cfg["bb"],
-        button_seat=session_cfg.get("button_seat"),
+        button_seat=session_cfg.get("button_seat"), stackless=bool((table or {}).get("stackless")),
     )
 
     # 席とお客さんの対応（ADR-0059）。お客さん向け画面はこの記録からハンドを探す。
@@ -849,10 +859,14 @@ def run_cli(script: str | None = None) -> None:
         from core.hand_log import shown_amount
 
         amount = shown_amount(record.action, record.amount, integration_thread.street_total(record))
+        # 持ち点を数えないモード: オールインの額・それに向き合ったコールの額・オールインのあとのポットは出さない
+        amount_unknown, pot_unknown = integration_thread.amount_unknown(record)
+        if amount_unknown:
+            amount = None
         print(
             f"  [{record.street}] 席{record.seat}({record.player_name}) "
             f"{record.action} {amount or ''}"
-            f"  pot={record.pot_after}"
+            + ("" if pot_unknown else f"  pot={record.pot_after}")
             + (" [要確認]" if record.needs_review else "")
             + origin
         )
@@ -1300,7 +1314,7 @@ def run_gui() -> None:
     ]
     game_state = _make_game_state(
         cfg, players, session_cfg["sb"], session_cfg["bb"],
-        button_seat=session_cfg.get("button_seat"),
+        button_seat=session_cfg.get("button_seat"), stackless=bool((table or {}).get("stackless")),
     )
 
     # E3 (ADR-0008 / ISSUE-0006): session レイヤ接続。既定 off では従来どおり timestamp session_id。
@@ -1681,6 +1695,11 @@ def export_phh(json_path: str) -> None:
         sys.exit(0)
 
     summaries: list[HandSummary] = []
+    skipped = [h.get("hand_id") for h in hands_raw if h.get("stackless")]
+    if skipped:
+        # PHH は持ち点と額が要る。持ち点を数えないモードのハンドは書き出さない（オーナー 2026-10-24）
+        print(f"持ち点を数えないモードのハンドは PHH に書き出しません: {skipped}")
+        hands_raw = [h for h in hands_raw if not h.get("stackless")]
     for h in hands_raw:
         actions = [
             ActionRecord(

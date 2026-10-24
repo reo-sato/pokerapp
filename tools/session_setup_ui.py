@@ -62,6 +62,8 @@ DEFAULT_SETUP: dict = {
     "start_time": None,
     "button": None,
     "log_dir": "./logs",
+    # 持ち点を数えないモード（オールインは額を書かない, オーナー 2026-10-24。リングでもトーナメントでも）
+    "stackless": False,
 }
 
 
@@ -104,6 +106,7 @@ def build_session_config(raw: dict, store: BlindStructureStore, now: Optional[fl
     names = raw.get("names") or {}
     stacks = raw.get("stacks") or {}
     default_stack = _int(raw.get("default_stack"))
+    stackless = bool(raw.get("stackless"))
     players = []
     for seat in seats:
         name = str(names.get(str(seat)) or "").strip()
@@ -112,12 +115,14 @@ def build_session_config(raw: dict, store: BlindStructureStore, now: Optional[fl
         stack = _int(stacks.get(str(seat)))
         if stack is None:
             stack = default_stack
-        if stack is None or stack <= 0:
+        if stackless:
+            stack = 0                                   # 持ち点を数えない（0 = 分からない）
+        elif stack is None or stack <= 0:
             err(f"stack_{seat}", f"席{seat}: 持ち点は 1 以上の整数にしてください")
             stack = 0
         players.append({"seat": seat, "name": name or f"Player{seat}", "stack": stack, "named": bool(name)})
 
-    table: dict = {"mode": mode}
+    table: dict = {"mode": mode, "stackless": stackless}
     sb = bb = 0
     if mode == "ring":
         sb, bb = _int(raw.get("sb")), _int(raw.get("bb"))
@@ -562,17 +567,21 @@ function renderSetup() {
       `<tr class="brk"><td>ブレイク</td><td></td><td></td><td>${l.minutes}</td></tr>` :
       `<tr class="${l.level==S.level?"cur":""}"><td>${l.level}</td><td>${l.sb}/${l.bb}</td><td>${l.ante||"—"}</td><td>${l.minutes}</td></tr>`).join("")}</table>` : ""}
   </section>`}
+  <section><h2>持ち点</h2>
+    <label><input type="checkbox" id="stackless" ${S.stackless?"checked":""}> 持ち点を数えない（オールインはオールインとだけ記録し、額を書かない）</label>
+    <div class="muted">${S.stackless ? "持ち点は入れません。持ち点 0 で配られない席は無く、配られた席で回します。オールインのあとのポットも記録しません。" : "席ごとの持ち点を追います（オールインの額 = 残りの持ち点）。"}</div>
+  </section>
   <section><h2>席（使う席を押す）</h2>
     <div class="seatbtns">${[1,2,3,4,5,6,7,8,9].map(n =>
       `<button data-seat="${n}" class="${seats.includes(n)?"on":""}">${n}</button>`).join("")}</div>
     ${errHtml("seats")}
-    <div class="row"><label>持ち点（一括） <input type="number" id="default_stack" min="1" value="${esc(S.default_stack)}"></label>
+    ${S.stackless ? "" : `<div class="row"><label>持ち点（一括） <input type="number" id="default_stack" min="1" value="${esc(S.default_stack)}"></label>
       <button class="small" id="apply_stack">全席にこの持ち点</button>
-      ${st && st.starting_stack ? `<span class="muted">ストラクチャーの始めの持ち点 ${st.starting_stack}</span>` : ""}</div>
-    <table><tr><th>席</th><th>名前（空 = PlayerN）</th><th>持ち点（空 = 一括の値）</th></tr>
+      ${st && st.starting_stack ? `<span class="muted">ストラクチャーの始めの持ち点 ${st.starting_stack}</span>` : ""}</div>`}
+    <table><tr><th>席</th><th>名前（空 = PlayerN）</th>${S.stackless ? "" : "<th>持ち点（空 = 一括の値）</th>"}</tr>
     ${seats.map(n => `<tr><td>${n}</td>
       <td><input type="text" data-name="${n}" value="${esc(S.names[n]||"")}" maxlength="40">${errHtml("name_"+n)}</td>
-      <td><input type="number" data-stack="${n}" min="1" value="${esc(S.stacks[n]??"")}">${errHtml("stack_"+n)}</td></tr>`).join("")}
+      ${S.stackless ? "" : `<td><input type="number" data-stack="${n}" min="1" value="${esc(S.stacks[n]??"")}">${errHtml("stack_"+n)}</td>`}</tr>`).join("")}
     </table>
   </section>
   <section><h2>1 ハンド目のボタン席</h2>
@@ -604,7 +613,8 @@ function renderSetup() {
   });
   root.querySelectorAll("[data-name]").forEach(el => el.oninput = () => { S.names[el.dataset.name] = el.value; });
   root.querySelectorAll("[data-stack]").forEach(el => el.oninput = () => { S.stacks[el.dataset.stack] = el.value; });
-  const ap = $("#apply_stack", root); ap.onclick = () => { S.stacks = {}; renderSetup(); };
+  const ap = $("#apply_stack", root); if (ap) ap.onclick = () => { S.stacks = {}; renderSetup(); };
+  const sl = $("#stackless", root); sl.onchange = () => { S.stackless = sl.checked; renderSetup(); };
   const rs = $("#resume", root); if (rs) rs.onclick = () => {
     S.structure = resume.structure; S.level = resume.level; S.elapsed_min = resume.elapsed_min; S.start_time = ""; renderSetup(); };
   $("#start", root).onclick = start;

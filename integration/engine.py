@@ -5725,7 +5725,7 @@ class IntegrationThread(threading.Thread):
                 "hole_cards_source": "rfid" if hole else "",
                 "stack_start": self._stack_start.get(seat, 0),
             })
-        return {
+        hand = {
             "hand_id": gs.hand_id,
             "session_id": self._json_writer._session_id,  # noqa: SLF001
             "started_at": self._hand_started_at,
@@ -5745,6 +5745,23 @@ class IntegrationThread(threading.Thread):
             "in_progress": True,
             "updated_at": self._now_iso(),
         }
+        if getattr(gs, "stackless", False):
+            from core.stackless import strip_hand
+
+            strip_hand(hand)
+        return hand
+
+    def amount_unknown(self, record: ActionRecord) -> tuple[bool, bool]:
+        """持ち点を数えないモードで、このアクションの (額が分からない, ポットが分からない)（画面の表示用）。"""
+        if not getattr(self._game_state, "stackless", False):
+            return False, False
+        from core.stackless import unknown_amounts
+
+        actions = list(self._current_actions)
+        index = next((i for i, a in enumerate(actions) if a is record), None)
+        if index is None:
+            return record.action == "allin", True
+        return unknown_amounts(actions[:index + 1])[index]
 
     def _safe_position_map(self) -> dict[int, str]:
         try:
@@ -6415,6 +6432,7 @@ class IntegrationThread(threading.Thread):
             ended_at=self._iso(ended_ts) if ended_ts is not None else self._now_iso(),
             blinds=self._blinds_record(),
             table_mode=self._table_mode,
+            stackless=bool(getattr(gs, "stackless", False)),
             board=list(self._board_cards),
             board_source=self._board_source,
             board_timeline=self._build_board_timeline(),
