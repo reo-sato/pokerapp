@@ -45,7 +45,7 @@ LLM の実験の報告で「14 のうち少なくとも 4 は真のベット / �
 
 - `pytest -m "not slow" -n auto`: 3404 passed・22 skipped。`ruff check .`: 問題なし。
 - `pytest -m slow -n auto`: 13 passed・5 skipped。
-- 物差し（`tools/bench_hands.py`）: （下に追記）
+- 物差し（`TZ=Asia/Tokyo python tools/bench_hands.py --no-script`）: 内容の指紋 `f8aff11f9d8e`・値の指紋 `ace16aaa3de7`、店舗 **140/174**（前と同じ）・悪くなった 0・要確認なしの誤り 2 → 2（新しく 0）。開発データの書き起こしは店舗の当時のものなので、聞き取りの直しは物差しには出ない（効くのは次の店舗のセッションから）。
 
 ## 残り
 
