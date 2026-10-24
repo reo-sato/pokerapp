@@ -49,7 +49,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-opus-5-5"
 DEFAULT_CACHE = ROOT / "logs" / "llm_cache"
-MAX_TOKENS = 16000
+MAX_TOKENS = 32000   # Haiku 5.5 は思考が長く 16,000 で切れるハンドがあった（10/24 パイロット 2/14）
 # LLM の読み（read の直し）の確からしさ。今の読みの選択肢（第 2 の耳など）と同じ物差しの log 確率で、実験の値
 # （推定器の PARAMS は触らない）。`tools/bench_llm.py --read-logp` で変えて比べる
 DEFAULT_READ_LOGP = -1.0
@@ -132,6 +132,9 @@ def load_cached(path: Path, payload: dict) -> Optional[dict]:
         return None
     if record.get("prompt_hash") != prompt_hash() or record.get("input_hash") != input_hash(payload):
         return None
+    # 今より小さい上限で切れた答えは聞き直す
+    if record.get("stop_reason") == "max_tokens" and (record.get("max_tokens") or 0) < MAX_TOKENS:
+        return None
     return record
 
 
@@ -157,6 +160,7 @@ def ask(client, model: str, payload: dict, effort: str = "high") -> dict:
         "prompt_hash": prompt_hash(),
         "input_hash": input_hash(payload),
         "stop_reason": response.stop_reason,
+        "max_tokens": MAX_TOKENS,
         "seconds": round(time.time() - started, 1),
         "usage": {k: getattr(usage, k, None) for k in
                   ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")},
@@ -380,7 +384,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     # クラウドのセッションでは ANTHROPIC_BASE_URL が実行環境のものを指すので、自分のキーは公式の API へ送る
     client = anthropic.Anthropic(
         api_key=api_key,
-        base_url=os.environ.get("POKERAPP_ANTHROPIC_BASE_URL", "https://api.anthropic.com"))
+        base_url=os.environ.get("POKERAPP_ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+        timeout=900.0)   # 上限 32,000 の非ストリーミングは SDK が時間を見積もって拒むので明示する
     spent = 0.0
     failed = 0
 
