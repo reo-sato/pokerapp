@@ -1265,7 +1265,7 @@ def parse_actions(
     if not text:
         return []
     text = _KANJI_SENTEN.sub("センテン", text)
-    events = _parse_utterance(text, confidence, utterance_start_ts)
+    events = _join_lower_digits(_drop_counting(_parse_utterance(text, confidence, utterance_start_ts)))
     if events:
         return _mark_garbled_calls(_mark_before_check_around(events))
     # 雑談に続けて言ったアクション（店舗 2026-09-29 7b897671 ハンド 2:「それが撮りづらくなります。 そんな機能入れて
@@ -1284,6 +1284,60 @@ def parse_actions(
     for event in salvaged:
         event.parse_flags = (*event.parse_flags, "sentence_after_chatter")
     return _mark_garbled_calls(salvaged)
+
+
+# チップを数える声（「5万、6万、7万、8万」= オールインのあとのスタック・ショーダウンのあとのポット）はアクションではない
+# （オーナー 2026-10-23。10/19 a64ec4ad ハンド 11・d01277f8 の「1万、2万、…、20万」「7千、8千、9千」）。額だけの語が
+# この数以上、続けて大きくなっていく並びは数え上げとみて読まない（賭けの額を 3 回続けて上げて言うことはない）
+COUNTING_RUN = 3
+
+
+def _drop_counting(events: list[AudioEvent]) -> list[AudioEvent]:
+    """額だけの語が `COUNTING_RUN` 個以上続けて大きくなる並び（数え上げ）を除く。"""
+    out: list[AudioEvent] = []
+    run: list[AudioEvent] = []
+
+    def flush() -> None:
+        if len(run) < COUNTING_RUN:
+            out.extend(run)
+        run.clear()
+
+    for event in events:
+        if "amount_only" in event.parse_flags and event.amount > 0 and (not run or event.amount > run[-1].amount):
+            run.append(event)
+            continue
+        flush()
+        if "amount_only" in event.parse_flags and event.amount > 0:
+            run.append(event)
+        else:
+            out.append(event)
+    flush()
+    return out
+
+
+def _join_lower_digits(events: list[AudioEvent]) -> list[AudioEvent]:
+    """賭けの額のすぐあとの、下の桁だけの額（額だけの語）をつなぐ: 「1万、2千、フォールド」= 12000、「レイズ2千、500点」=
+    2500（Whisper が額の途中に読点を入れた。10/19 の 5 回）。賭けのあとにそれより小さい額の賭けは無い（レイズは前の額より
+    大きい）ので、前の額の端の桁より下に収まる額だけをつなぐ（「2万、4万」「800、1600」はつながない）。"""
+    out: list[AudioEvent] = []
+    for event in events:
+        prev = out[-1] if out else None
+        if (prev is not None and prev.action in ("bet", "raise", "allin") and prev.amount > 0
+                and "amount_only" in event.parse_flags and 0 < event.amount < _lowest_unit(prev.amount)):
+            prev.amount += event.amount
+            prev.raw_text = f"{prev.raw_text or ''}、{event.raw_text or ''}".strip("、")
+            prev.parse_flags = (*prev.parse_flags, "joined_lower_digits")
+            continue
+        out.append(event)
+    return out
+
+
+def _lowest_unit(amount: int) -> int:
+    """額のいちばん下の 0 でない桁の位（12000 → 1000、10000 → 10000）。"""
+    unit = 1
+    while amount % (unit * 10) == 0:
+        unit *= 10
+    return unit
 
 
 # 「センテン」（千点）を Whisper が同じ読みの漢字で書く（店舗 2026-10-14 845da8e6 ハンド 9「失礼します。7番先天。」
@@ -1500,6 +1554,9 @@ _PLAYERS_LEFT = re.compile(
     r"(?:プレ[イー]?ヤー?[ズス]?|ウ[ェエ]イ|players?|ways?)",
     re.IGNORECASE,
 )
+# 「3人です」も残りの人数（10/19 a64ec4ad ハンド 21 の注釈。店舗の書き起こしの「3人です」4 回・「4人です」2 回など）。
+# 「です」まで言ったときだけ（「7人」だけの発話は役名の聞き違いのことがある。「3人で」は雑談にも出る）
+_PLAYERS_NIN = re.compile(r"(?<![0-9])(?P<count>[2-9二三四五六七八九])[\s・]*人[\s・]*デー?ス")
 # 数の語が崩れた言い方（読み上げ集・台本 2026-09-30:「フォープレイヤーズ」を「フォールプレイヤー」）。「プレイヤー」の
 # 前の片仮名を音の近さで数の語と比べる（`phonetic.match_count`）。
 _PLAYERS_WORD = re.compile(r"プレ[イー]?ヤー?[ズス]?")
@@ -1520,7 +1577,7 @@ def _find_players_left(nfkc: str, norm: str) -> Optional[_PlayersLeft]:
     """残りの人数の言い方（「スリープレイヤーズ」「3ウェイ」）の位置と人数。無ければ None。"""
     from audio.phonetic import match_count
 
-    found = _PLAYERS_LEFT.search(norm) or _garbled_way(nfkc, norm)
+    found = _PLAYERS_LEFT.search(norm) or _PLAYERS_NIN.search(norm) or _garbled_way(nfkc, norm)
     if found is not None:
         word = found.group("count")
         count = _PLAYERS_WORDS.get(word) or (int(word) if word.isdigit() else KANJI_DIGIT[word])
@@ -2129,8 +2186,9 @@ def apply_corrections(
     # レイズの額は常にトータル（「レイズ 2500」= 2500 にする。上乗せ分は言わない = オーナー確認 2026-09-26）。
     # 最小レイズ未満は聞き違いとして、下の snap + review に任せる（「追加額」とは読み替えない）。
 
-    # V4: チップの最小単位への round 寄せ（合法レンジ内に収まる場合のみ）。単位は SB と BB の最大公約数
-    # （100/200 の卓の「2500」を 2400 にしない = 言った数字どおり, ADR-0062）。chip が無い（legacy）なら bb。
+    # V4: チップの最小単位への round 寄せ（合法レンジ内に収まる場合のみ）。単位はいちばん小さいチップ（`CHIP_UNIT`
+    # = 100。ブラインドがそれより小さい卓は SB と BB の最大公約数）= 言った数字どおり（100/200 の卓の「2500」、
+    # 3000/6000 の卓の「2万」をそのまま, ADR-0062・オーナー 2026-10-23）。chip が無い（legacy）なら bb。
     # reason 名は画面の説明文（shared/hand_replay）と合わせて従来の rounded_to_bb のまま。
     unit = ctx.chip or bb
     if unit > 0 and val % unit != 0:

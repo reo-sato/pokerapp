@@ -179,6 +179,11 @@ GARBLED_FOLD_AFTER_SEC = 1.0
 # ずれはもっと前 = ボタン・持ち上げ・前のハンドの札。店舗 2026-10-06 の 5 回とも。付け直すとずれが隠れる）
 DEPARTED_CALL_BEFORE_SEC = 0.5
 DEPARTED_CALL_AFTER_SEC = 6.0
+# ディーラーの声はプレイヤーの動きより遅れる（プレイヤーは復唱を待たずに動く = オーナー 2026-10-23。店舗 10/19 の
+# 「フォールド」1 語の発話の半分は、札の離脱が声より先）。手番の後の席の札の離脱で、間の席に言われないコール / チェックを
+# 補ったあと、その離脱からこの秒数以内に話し始めた賭け・コールの声は、補った席のもの（コール・チェックは毎回言う運用 =
+# 言われないコールは聞き取れなかったか、声がまだ届いていない）。10/19 の注釈: 離脱が声より 1.2〜3.9 秒先（ハンド 5・6・21・34）
+VOICE_LAG_SEC = 5.0
 # ストリートの札より前（`STALE_CALL_MARGIN_SEC`）に話し始めた声のアクションは、そのストリートのものではない（オーナー
 # 2026-10-07:「ターンカードのディールや、ターンカード/チェックアラウンドの宣言に先立ってターンのアクションが宣言されることは
 # ありません」）。店舗の全データで、正しいハンドの声のアクションは札の 0.5 秒以上あと・札の離脱のフォールドは 5.5 秒以上あと。
@@ -686,6 +691,12 @@ class IntegrationThread(threading.Thread):
         # ベットに向き合っていない席の札の離脱と、その席に付けた直前のコール（離脱の入力, コールの入力, 席）。発話の
         # 処理のあと・ハンドを終わらせる前に、離脱をコールの前に移して組み直す（`_retract_departed_calls`）
         self._departed_calls: list[tuple[object, object, int]] = []
+        # 札の離脱で補ったコールの席に、あとから届いた声を付け直す（`_place_lagging_voice`）: (発話, 離脱, 補った席,
+        # 先に離れた席の数)
+        self._lagging_voice: list[tuple[object, object, int, int]] = []
+        self._lag_moved: set[int] = set()
+        # 手札が読めていないので降ろした席（`_imply_action`）。あとからその席の手札が読めたら組み直す
+        self._unread_folded: set[int] = set()
         # 最初に処理したときに札の離脱と組にした聞き違いのコールの語（id → 語）。組み直しでは記録した離脱の入力が降ろす
         # ので、語はもう何もしない（組み直しの入力の並び = live は語のあと、replay は語の前に離脱 = によらず同じにする）
         self._garbled_absorbed: dict[int, AudioEvent] = {}
@@ -818,6 +829,8 @@ class IntegrationThread(threading.Thread):
                 self._check_hand_seats(ev.timestamp)
         finally:
             self._event_depth -= 1
+        if ev.kind == "card" and ev.role != "board" and ev.seat in self._unread_folded:
+            self._unfold_late_read(ev.seat)
         self._finish_after_correction()
         # 卓状態はカードが動くたびに publish する（UI への反映経路, ADR-0056 D5）。
         self._publish_table_state(observed_at=ev.timestamp)
@@ -2170,6 +2183,8 @@ class IntegrationThread(threading.Thread):
             records = [r for r in self._current_actions[mark:]
                        if r.actor_source in _VOICE_SOURCES and r.reason != "synth_silent_fold"]
             self._input_voice[id(item)] = (item, records)
+            if not self._rebuilding:
+                self._note_lagging_voice(item, records)
             tag = self._before_card_tags.get(id(item))
             if tag is not None and tag[0] is item:
                 for record in records:           # 札より前に話したので前のストリートに戻した賭け（組み直しでも付ける）
@@ -2676,6 +2691,100 @@ class IntegrationThread(threading.Thread):
         if leave is not None:
             self._departed_calls.append((leave, word, seat))
 
+    def _unfold_late_read(self, seat: int) -> None:
+        """手札が読めていないので降ろした席の手札が、あとから読めた（8 人卓では配ってから 30 秒あとに読めることがある,
+        10/19 d01277f8 ハンド 50 の席8）: ハンドを組み直す（その席は降ろさない = 言われないコール / チェック）。"""
+        if self._rebuilding or not self._hole_cards.get(seat):
+            return
+        self._unread_folded.discard(seat)
+        if not (self._hand_open and self._hand_origin is not None and self._game_state.is_hand_active()):
+            return
+        before = list(self._current_actions)
+        self._rebuild_hand()
+        self._hand_needs_review = True
+        logger.info("席%d の手札があとから読めたので、降ろさずに組み直しました", seat)
+        self._emit_rebuilt(before)
+        self._publish_table_state()
+
+    def _note_lagging_voice(self, word: AudioEvent, records: list[ActionRecord]) -> None:
+        """賭け・コールの声が、少し前（`VOICE_LAG_SEC` 以内）に札が離れた手番の後の席より手番が前の人のものか: その離脱で
+        間の席に言われないコール / チェックを補っていれば、その席のもの。決めて組み直すのは同じ発話の続きのフォールドを
+        数えてから（`_place_lagging_voice`）。
+
+        10/19 の注釈（a64ec4ad ハンド 5）: 席6・7・8 の札が離れてから 1〜2 秒あとに「レイズ8千、フォールド×3」。離脱の時点で
+        席5 にコールを補い、レイズを席1 に付けていた。"""
+        if not records or id(word) in self._lag_moved or records[0].action not in ("bet", "raise", "allin", "call"):
+            return
+        spoken = _spoken_at(word)
+        first = records[0]
+        for record in self._current_actions:
+            if record is first:
+                break
+            reason = record.reason or ""
+            if (record.actor_source != "implied" or not reason.startswith("implied_before_fold(seat=")
+                    or record.street != first.street or record.seat == first.seat):
+                continue
+            if not self._hole_cards.get(record.seat):
+                return                    # 手札が読めていない席は、離脱が無いまま降りていることが多い（重ねた札）
+            match = re.match(r"implied_before_fold\(seat=(\d+)\)", reason)
+            cause = int(match.group(1)) if match else None
+            dep = self._departures.get(cause) if cause is not None else None
+            if dep is None or dep.get("spoken") or not spoken - VOICE_LAG_SEC <= dep["t"] <= spoken:
+                continue
+            leave = next((item for kind, item in self._hand_inputs if kind == "leave" and item.seat == cause), None)
+            # 先に離れた席の数（この声の少し前に札が離れた、補った席より手番が後の席）
+            departed = {s for s, d in self._departures.items()
+                        if not d.get("spoken") and s != record.seat and spoken - VOICE_LAG_SEC <= d["t"] <= spoken}
+            if leave is not None:
+                self._lagging_voice.append((word, leave, record.seat, len(departed)))
+            return
+
+    def _place_lagging_voice(self, before_end: bool = False) -> None:
+        """`_note_lagging_voice` で見つけた発話を、その離脱の入力の前に移して組み直す（声は補った席のものになる。要確認）。
+
+        付け直すのは、ディーラーが先に降りた人の分も続けて言ったとき（同じ発話の賭けの声のあとの「フォールド」の数が、
+        先に離れた席の数以上）だけ。言われないコールを補った席は、聞き取れなかっただけで本当にコールしていることも多い
+        （10/19 d01277f8 の補ったコールの 57% は正しい。ハンド 49: 補った席3 のコールは本物で、「五千」は席8 のレイズ）。
+        発話の処理のあと（live と replay で同じ時点）とハンドを終わらせる前に呼ぶ（`_retract_departed_calls` と同じ）。"""
+        if self._rebuilding or (self._event_depth and not before_end) or not self._lagging_voice:
+            return
+        pending, self._lagging_voice = self._lagging_voice, []
+        if not (self._hand_open and self._hand_origin is not None and self._game_state.is_hand_active()):
+            return
+        moved: list[tuple[int, str]] = []
+        for word, leave, seat, departed in pending:
+            at = {id(item): i for i, (_, item) in enumerate(self._hand_inputs)}
+            li, wi = at.get(id(leave)), at.get(id(word))
+            if li is None or wi is None or li >= wi or self._hand_inputs[wi][1] is not word:
+                continue
+            same = [i for i in range(wi, len(self._hand_inputs)) if self._hand_inputs[i][0] == "audio"
+                    and _spoken_at(self._hand_inputs[i][1]) == _spoken_at(word)]
+            if same[-1] == len(self._hand_inputs) - 1 and not before_end:
+                self._lagging_voice.append((word, leave, seat, departed))   # 同じ発話の続きがまだ来るかもしれない
+                continue
+            folds = sum(1 for i in same if self._hand_inputs[i][1].action == "fold")
+            if folds < max(1, departed):
+                continue
+            group = [self._hand_inputs[i] for i in same]
+            for i in reversed(same):
+                self._hand_inputs.pop(i)
+            self._hand_inputs[li:li] = group
+            self._lag_moved.add(id(word))
+            moved.append((seat, word.raw_text or ""))
+        if not moved:
+            return
+        before = list(self._current_actions)
+        self._rebuild_hand()
+        self._hand_needs_review = True
+        for seat, text in moved:
+            logger.info("「%s」は札の離脱より少し遅れて言われた声とみて、席%d のアクションとして組み直しました", text, seat)
+            self._notice(f"「{text}」は先に離れた札より手番が前の人の声とみて、席{seat} のアクションとして組み直しました"
+                         "（ディーラーの声はプレイヤーより遅れる, 要確認）")
+        self._emit_rebuilt(before)
+        self._publish_table_state()
+        if self._foldout_pending is None and not before_end:
+            self._maybe_finish_hand()
+
     def _retract_departed_calls(self, before_end: bool = False) -> None:
         """`_note_departed_call` で見つけた離脱を、その席に付けたコールの入力の前に移して、ハンドを組み直す（コールは
         次の人のものになる。要確認）。発話の処理のあと（live と replay で同じ時点）とハンドを終わらせる前に呼ぶ。
@@ -2765,7 +2874,20 @@ class IntegrationThread(threading.Thread):
         action = "check" if ctx.amount_to_call == 0 else "call"
         amount = 0 if action == "check" else ctx.amount_to_call
         street = gs.street
-        gs.apply_action(seat, action, amount)
+        if (not confirmed and self._rfid_folds and not self._hole_cards.get(seat)
+                and any(self._hole_cards.values())):
+            # 手札が 1 枚も読めていない席は、札の離脱が無いまま降りている（配った時点で札が無い・始まりと同時に離れた・
+            # 空席）。オーナーの注釈（10/19 a64ec4ad ハンド 17・24・25）。10/19 の再生で、この席に補ったコール / チェック
+            # 23 行のうち真もコールは 1 行（降りていた 14・その席はハンドにいない 8）
+            action, amount = "fold", 0
+            reason = f"{reason}+unread_seat_fold"
+            self._unread_folded.add(seat)
+            if "fold" in ctx.legal_actions:
+                gs.apply_action(seat, "fold", 0)
+            else:
+                gs.force_fold(seat)
+        else:
+            gs.apply_action(seat, action, amount)
         self._append_rfid_record(ActionRecord(
             hand_id=gs.hand_id,
             timestamp=self._iso(t),
@@ -5103,6 +5225,7 @@ class IntegrationThread(threading.Thread):
         if self._rebuilding:
             return
         self._retract_departed_calls(before_end=True)
+        self._place_lagging_voice(before_end=True)
         for corr in self._corrections:
             if corr["frozen"]:
                 continue
@@ -5117,6 +5240,7 @@ class IntegrationThread(threading.Thread):
         if self._rebuilding or self._event_depth:
             return
         self._retract_departed_calls()
+        self._place_lagging_voice()
         corr = self._open_correction()
         if corr is not None and self._hand_open and self._hand_origin is not None and (
                 corr["dirty"] or self._finish_wanted):
@@ -5150,6 +5274,9 @@ class IntegrationThread(threading.Thread):
     def _reset_corrections(self) -> None:
         self._commit_word_labels()
         self._departed_calls = []
+        self._lagging_voice = []
+        self._lag_moved = set()
+        self._unread_folded = set()
         self._garbled_absorbed = {}
         self._fold_words_done = {}
         self._before_card = []

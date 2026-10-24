@@ -124,6 +124,17 @@ def same_action_type(gt_type: str, cap_type: str, gt_amount: int, cap_amount: in
     return "allin" in pair and bool(pair & _ALLIN_EQUIVALENT) and gt_amount == cap_amount and gt_amount > 0
 
 
+def allin_equal(gt_type: str, cap_type: str, gt_amount: int, cap_amount: int) -> bool:
+    """オールインは種類だけで比べる（額は採点しない = オーナー 2026-10-23 の (b)。オールインの額はディーラーがすぐには
+    言わない）。持ち点の足りないコール（真は call・記録は allin で額がコールの額以下）もオールインと同じ。"""
+    if gt_type == cap_type == "allin":
+        return True
+    if {gt_type, cap_type} == {"allin", "call"}:
+        allin, call = (gt_amount, cap_amount) if gt_type == "allin" else (cap_amount, gt_amount)
+        return 0 < allin <= call
+    return False
+
+
 def same_place(gt_action: dict, cap_action: dict) -> bool:
     """同じ人の同じストリートの行か。
 
@@ -146,6 +157,8 @@ def row_correct(gt_action: dict, cap_action: dict) -> bool:
     cap_type = _normalize_action_type(cap_action.get("action"))
     gt_amount = _normalize_amount(gt_action.get("amount"), gt_type)
     cap_amount = _normalize_amount(cap_action.get("amount"), cap_type)
+    if allin_equal(gt_type, cap_type, gt_amount, cap_amount):
+        return True
     return same_action_type(gt_type, cap_type, gt_amount, cap_amount) and gt_amount == cap_amount
 
 
@@ -267,8 +280,9 @@ def measure_hand(
         cap_amount = _normalize_amount(cap_a.get("amount"), cap_type)
         # 別の人・別のストリートの行は、種類や額がたまたま同じでも正しくない
         place_ok = same_place(gt_a, cap_a)
-        t_ok = place_ok and same_action_type(gt_type, cap_type, gt_amount, cap_amount)
-        a_ok = place_ok and gt_amount == cap_amount
+        allin = allin_equal(gt_type, cap_type, gt_amount, cap_amount)
+        t_ok = place_ok and (allin or same_action_type(gt_type, cap_type, gt_amount, cap_amount))
+        a_ok = place_ok and (allin or gt_amount == cap_amount)
         if t_ok:
             type_correct += 1
         if a_ok:
