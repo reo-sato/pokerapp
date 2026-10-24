@@ -544,3 +544,18 @@ def test_allin_is_scored_by_type_only():
     row = {"street": "preflop", "seat": 3}
     assert row_correct(dict(row, action="allin", amount=30000), dict(row, action="allin", amount=25000))
     assert row_correct(dict(row, action="call", amount=19000), dict(row, action="allin", amount=12000))
+
+
+def test_board_is_not_scored_when_everyone_folded():
+    """全員降りて終わったハンドのボードは比べない（入力画面が記録から入れたボードに片付けの札が混じる, 10/19）。"""
+    from tools.measure_capture_accuracy import board_scored, hand_fully_correct
+
+    folded = {"hand_id": 1, "winner_seat": 3, "board": ["2h", "3d", "9c", "Td"],
+              "actions": [{"street": "preflop", "seat": 1, "action": "fold"},
+                          {"street": "preflop", "seat": 2, "action": "fold"},
+                          {"street": "preflop", "seat": 3, "action": "raise", "amount": 600}]}
+    assert not board_scored(folded)
+    assert hand_fully_correct(folded, dict(folded, board=[]))
+    shown = dict(folded, actions=folded["actions"][1:] + [{"street": "preflop", "seat": 1, "action": "call",
+                                                          "amount": 600}])
+    assert board_scored(shown) and not hand_fully_correct(shown, dict(shown, board=[]))

@@ -387,7 +387,7 @@ class ScoredHand:
 
 
 def scored_hands(inp: SessionInput, est) -> list[ScoredHand]:
-    """真のアクションのあるハンドの窓（`run_bench_v1` と同じ選び方・同じ数えない理由）。LLM の実験・オラクルが使う。"""
+    """真のアクションのあるハンドの窓（`run_bench_v1` と同じ選び方・同じ数えない理由）。オラクルが使う。"""
     from tools.estimate_logs import _live_hand
 
     truth = {int(h["hand_id"]): h for h in inp.truth.get("hands") or []}
