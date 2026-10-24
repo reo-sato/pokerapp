@@ -139,6 +139,9 @@ class OracleHand:
     in_candidates: bool = False      # 物差しの「正解が候補に」
     closest_edits: list[str] = field(default_factory=list)
     difference: str = ""             # 表せないとき: いちばん近い候補と真の最初に違う行
+    # 真のベット / レイズのうち、その額がハンドの窓のどの発話のどの読み（第 2 の耳の額の候補も）にも無いもの
+    # （= 入力に情報が無い。直しの種類を増やしても取り戻せない）
+    unheard_wagers: list[str] = field(default_factory=list)
     replays: int = 0
     seconds: float = 0.0
 
@@ -233,6 +236,30 @@ def _better_explanation(found, pool, evaluate):
     return found
 
 
+def unheard_wagers(est, w, truth: dict) -> list[str]:
+    """真のベット / レイズで、その額を賭けとして読める発話が窓に 1 つも無いもの（どの読みの選択肢・音で読んだ額の候補にも
+    無い）。どのストリートの発話かは見ない（= 少なめに数える）。"""
+    from integration.world_replay import read_utterance
+
+    _events, rows = est._window_inputs(w)        # noqa: SLF001 — 推定器と同じ窓の発話
+    heard: set[int] = set()
+    for row in rows:
+        start = row.get("utterance_start_ts")
+        texts = [None] + [o.text for o in est._options(start)] if start is not None else [None]   # noqa: SLF001
+        for text in texts:
+            # 額の点数（`amount_scores`）は決まった額の並びをすべて採点したものなので数えない（どの額も「ある」になる）
+            for e in read_utterance(row, text):
+                if e.action in ("bet", "raise", "allin"):
+                    heard.add(int(e.amount or 0))
+                    heard.update(int(a) for a in e.amount_options or ())
+    out = []
+    for a in _strip(truth).get("actions") or []:
+        amount = int(a.get("amount") or 0)
+        if a.get("action") in ("bet", "raise") and amount and amount not in heard:
+            out.append(f"{a.get('street')} 席{a.get('seat')} {a.get('action')} {amount}")
+    return out
+
+
 def oracle_hand(est, h, **search) -> OracleHand:
     """1 ハンド: 推定器の 1 番と、真に寄せた探索の結果を比べて分ける。"""
     from integration.estimator import hand_from_key
@@ -254,6 +281,7 @@ def oracle_hand(est, h, **search) -> OracleHand:
         out.category = "unreachable"
         out.closest_edits = [e.label for e in closest.edits]
         out.difference = first_difference(h.truth, closest.hand)
+        out.unheard_wagers = unheard_wagers(est, h.window, h.truth)
     else:
         out.oracle_score = round(found.score, 3)
         out.oracle_edits = [e.label for e in found.edits]
@@ -279,7 +307,7 @@ def run_session(inp, presence, only: Optional[set[str]] = None, **search) -> lis
 
 
 def _run_job(job) -> list[dict]:
-    logging.disable(logging.WARNING)
+    logging.disable(logging.CRITICAL)        # 組み直しの失敗の記録（ライブと同じ）は出さない
     inp, presence, only, search = job
     return [asdict(r) for r in run_session(inp, presence, only, **search)]
 
@@ -318,7 +346,9 @@ def summarize(results: list[OracleHand]) -> list[str]:
                                    for g, ks in sorted(counts.items(), key=lambda x: -len(x[1]))))
     unr = [r for r in results if r.category == "unreachable"]
     if unr:
-        lines.append(f"  表せないハンド {len(unr)}（物差しでは「正解が候補に無い」）")
+        missing = [r.key for r in unr if r.unheard_wagers]
+        lines.append(f"  表せないハンド {len(unr)}: うち真のベット / レイズの額がどの発話にも無い {len(missing)}"
+                     f"（入力に情報が無い: {' '.join(missing)}）")
     in_cand = [r for r in results if r.category != "correct" and r.in_candidates]
     not_in = [r for r in results if r.category != "correct" and not r.in_candidates]
     lines.append(f"  物差しの分け方との対応: 候補にあった {len(in_cand)}（"
@@ -334,7 +364,8 @@ def hand_line(r: OracleHand) -> str:
     if r.category in ("outscored", "unsearched"):
         lost = "・".join(f"{g} {d:+.1f}" for g, d in r.lost_groups())
         return f"{r.key}: {SHORT_NAMES[r.category]} 差 {r.gap:+.1f}" + (f"（負けた群 {lost}）" if lost else "")
-    return f"{r.key}: {SHORT_NAMES[r.category]} — {r.difference}"
+    unheard = f"（額が発話に無い: {'・'.join(r.unheard_wagers)}）" if r.unheard_wagers else ""
+    return f"{r.key}: {SHORT_NAMES[r.category]} — {r.difference}{unheard}"
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -352,7 +383,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--dump", type=Path, help="ハンドごとの詳細（直し・群ごとの差）を JSON に書く")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING)
-    logging.disable(logging.WARNING)
+    logging.disable(logging.CRITICAL)
 
     only = {k.strip() for k in args.hands.split(",") if k.strip()} or None
     search = {"beam": args.beam, "depth": args.depth, "expand": args.expand}
