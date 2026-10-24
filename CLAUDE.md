@@ -1254,7 +1254,7 @@ python tools/replay_hand.py tests/fixtures/reconstruction/silent-fold  # 決定�
 python tools/calibrate_confidence.py            # 派生 confidence 較正サーフェス + P1〜P8 検証 (ADR-0033)
 python tools/bench_hands.py --twice --search-check --workers 3   # 推定器の物差し: 開発データの全部正しいハンド (docs/estimator.md)
 python tools/estimate_logs.py logs --latest --shadow --workers 1  # いちばん新しいセッションを推定して影のファイルに (ハンドごとの時間)
-TZ=Asia/Tokyo python tools/oracle_estimator.py --workers 4   # オラクルの採点: 推定器の誤りを 表せない / 探しきれない / 点で負けた に分ける（店舗の zip も渡せる。--dump で詳細）
+TZ=Asia/Tokyo python tools/oracle_estimator.py --workers 4   # オラクルの採点: 推定器の誤りを 表せない / 探しきれない / 点で負けた に分ける（店舗の zip も渡せる。--dump で詳細、--resume <jsonl> で止まっても続きから）
 python tools/bench_hands.py --update-record     # 開発データの物差しの前の記録（tests/fixtures/store/bench_record.json）を書き直す（新しい要確認なしの誤りは終了コード 1）
 TZ=Asia/Tokyo python tools/forward_ledger.py     # 前向きの成績表: 各セッションを初めて見たときの版で採点（精度はこれで見る, ADR-0056 追記 6。約 30 分）
 TZ=Asia/Tokyo python tools/compare_versions.py b2f1e5a <zip>   # 前の版と今の版でハンドごとに比べる（固定の前の前向きの確認, ADR-0056 追記 5）

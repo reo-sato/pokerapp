@@ -306,6 +306,15 @@ def run_session(inp, presence, only: Optional[set[str]] = None, **search) -> lis
     return [oracle_hand(est, h, **search) for h in scored_hands(inp, est) if only is None or h.key in only]
 
 
+def hand_keys(inp, presence) -> list[str]:
+    """物差しと同じ選び方で数えるハンドの鍵（ハンドごとに別のプロセスで回すため）。"""
+    from integration.estimator import PARAMS, SessionEstimator
+    from tools.bench_hands import scored_hands
+
+    est = SessionEstimator(inp.events, inp.transcripts, presence, inp.setup, inp.flags, inp.session_id, PARAMS)
+    return [h.key for h in scored_hands(inp, est)]
+
+
 def _run_job(job) -> list[dict]:
     logging.disable(logging.CRITICAL)        # 組み直しの失敗の記録（ライブと同じ）は出さない
     inp, presence, only, search = job
@@ -381,6 +390,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--expand", type=int, default=DEFAULT_EXPAND)
     ap.add_argument("--workers", type=int, default=default_workers())
     ap.add_argument("--dump", type=Path, help="ハンドごとの詳細（直し・群ごとの差）を JSON に書く")
+    ap.add_argument("--resume", type=Path,
+                    help="ハンドごとの結果を 1 行ずつ足す JSONL。あれば済んだハンドを飛ばす（長いログを何回かに分けて回す）")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING)
     logging.disable(logging.CRITICAL)
@@ -394,18 +405,36 @@ def main(argv: Optional[list[str]] = None) -> int:
         wanted = {k.split("#")[0] for k in only}
         pairs = [(i, p) for i, p in pairs if i.session_id[:8] in wanted]
     started = time.time()
-    jobs = [(inp, presence, only, search) for inp, presence in pairs]
-    results: list[OracleHand] = []
+    done: dict[str, dict] = {}
+    if args.resume and args.resume.exists():
+        for line in args.resume.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                d = json.loads(line)
+                done[d["key"]] = d
+    # ハンドごとに 1 つの仕事（セッションごとだと、ハンドの多いセッションが 1 つのプロセスに偏る = 10/19 の 8 人卓）
+    todo = [(inp, presence, k) for inp, presence in pairs for k in hand_keys(inp, presence) if only is None or k in only]
+    order = [k for _i, _p, k in todo]
+    jobs = [(inp, presence, {k}, search) for inp, presence, k in todo if k not in done]
+
+    def finished(out: list[dict]) -> None:
+        for d in out:
+            done[d["key"]] = d
+            if args.resume:
+                with args.resume.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(d, ensure_ascii=False) + "\n")
+
     if args.workers <= 1 or len(jobs) < 2:
         for job in jobs:
-            results += [OracleHand(**d) for d in _run_job(job)]
+            finished(_run_job(job))
     else:
         import multiprocessing
+        from concurrent.futures import as_completed
 
         with ProcessPoolExecutor(max_workers=min(args.workers, len(jobs)),
                                  mp_context=multiprocessing.get_context("spawn")) as pool:
-            for out in pool.map(_run_job, jobs):
-                results += [OracleHand(**d) for d in out]
+            for fut in as_completed([pool.submit(_run_job, job) for job in jobs]):
+                finished(fut.result())
+    results = [OracleHand(**done[k]) for k in order if k in done]
     print(f"推定器 v1: 値の指紋 {params_hash(PARAMS)}・内容の指紋 {content_hash()}"
           f" ／ 真に寄せた探索 幅 {args.beam}・深さ {args.depth}・広げる直し {args.expand}"
           f"（{time.time() - started:.0f} 秒）")
