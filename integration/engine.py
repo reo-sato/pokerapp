@@ -49,6 +49,7 @@ from output.event_recorder import EventRecorder
 from output.json_writer import JsonWriter
 
 if TYPE_CHECKING:
+    from core.blind_structure import TournamentClock
     from core.engine_types import LegalContext
     from core.session_repository import SessionRepository
     from output.table_state_writer import TableStateWriter
@@ -241,7 +242,7 @@ _VOICE_SOURCES = frozenset({"spoken_seat", "spoken_position", "engine_prior"})
 # 解釈を決める前に届いても、組み直しを待たなくてよい（ハンドを終わらせない）制御
 _CONTROL_KEEPS_CORRECTION = frozenset({"rename_seat", "set_blinds", "sit_out", "sit_in", "rebuy", "set_button",
                                        "correct_board", "correct_seat", "truth_stacks", "reduce_stack",
-                                       "set_bb_ante"})
+                                       "set_bb_ante", "set_level", "clock"})
 # 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
 # 言葉がこの数だけ聞こえたら、そのオールインを聞き違いとみて外す（店舗 2026-09-27: 自信 0.27 の「オールイン」の
 # あとのチェック 5 回と「2700」がすべて保留になり、全員オールインの 59700 のポットになった）
@@ -409,6 +410,9 @@ class IntegrationThread(threading.Thread):
         button_from_deal: bool = True,
         open_gates: frozenset = frozenset(),
         live_hand: bool = False,
+        table_mode: Optional[str] = None,
+        tournament: "Optional[TournamentClock]" = None,
+        on_clock_change: "Optional[Callable[[TournamentClock], None]]" = None,
     ) -> None:
         """
         Args:
@@ -483,6 +487,12 @@ class IntegrationThread(threading.Thread):
                          書き、ハンドが終わったら消す（真のアクション入力の画面がハンドの途中で入力する, オーナー
                          2026-09-30 はフロップから → 2026-10-06 にプリフロップの配布から）。ライブのロガーだけ True
                          （既定 False = replay・テストは書かない）。
+            table_mode: 卓の種類（"ring" / "tournament", ADR-0071）。ハンドの記録の `table_mode` に書く。None = 書かない
+                         （モードを決める前の記録・replay は従来どおり）。
+            tournament: トーナメントの時計（`core/blind_structure.TournamentClock`, ADR-0071）。ライブのロガーだけが持ち、
+                         周期の処理でレベルの終わりを見て、次のレベルのブラインド・アンテを `set_level` の入力として記録して
+                         反映する（ハンドの途中なら次のハンドから）。replay は記録した `set_level` で同じになる（時計を持たない）。
+            on_clock_change: 時計が変わったとき（レベル・一時停止）に呼ぶ（時計の状態の保存）。integration スレッドで呼ぶ。
         """
         super().__init__(daemon=True, name="IntegrationThread")
         self._audio_queue = audio_queue
@@ -663,6 +673,13 @@ class IntegrationThread(threading.Thread):
         self._open_gates = frozenset(open_gates)
         self._gate_events: dict[str, tuple[str, float]] = {}
         self._live_hand = bool(live_hand)
+        # 卓の種類とトーナメントの時計（ADR-0071）。`_level` = ゲームの状態のブラインドのレベル（次のハンドから使う分を
+        # 含む）、`_hand_level` = いまの（最後の）ハンドのレベル（記録の `blinds.level`）
+        self._table_mode = table_mode
+        self._tournament = tournament
+        self._on_clock_change = on_clock_change
+        self._level: Optional[int] = None
+        self._hand_level: Optional[int] = None
         self._live_signature: Optional[tuple] = None     # 最後に書いた進行中のハンド（変わったときだけ書く）
         # このハンドで配った順を見たか（1 ハンドに 1 回）
         self._deal_order_checked = False
@@ -737,9 +754,12 @@ class IntegrationThread(threading.Thread):
 
     def run(self) -> None:
         logger.info("IntegrationThread started")
+        if self._tournament is not None:
+            self._emit_level(self._clock())     # 始めのレベルのブラインド・アンテ（記録に残して replay も同じに）
         while not self._stop_event.is_set():
             self._drain_camera_queue()
             self._drain_rfid_queue()
+            self._check_tournament_clock()      # レベルの時間（ADR-0071）
 
             self._publish_table_state_if_due()
             self._publish_live_hand()       # 進行中のハンド（手札を配ったときから, 真のアクション入力の画面）
@@ -1284,6 +1304,12 @@ class IntegrationThread(threading.Thread):
 
         if action == "set_bb_ante":
             self._handle_set_bb_ante(event)
+            return
+        if action == "set_level":
+            self._handle_set_level(event)
+            return
+        if action == "clock":
+            self._handle_clock(event)
             return
         if action == "set_blinds":
             self._handle_set_blinds(event)
@@ -5318,24 +5344,165 @@ class IntegrationThread(threading.Thread):
         self._notice(f"ブラインドを {sb}/{bb} にしました" + ("（次のハンドから）" if later else ""))
 
     def _handle_set_bb_ante(self, event: AudioEvent) -> None:
-        """BB アンティ（BB の人が BB と同額のアンティを出す）を入れる・外す（CLI の `ante on/off`, 2026-10-19）。
-        `raw_text` の on / off。次のハンドから（ハンドの外ならすぐ）。BB を変えるとアンティも一緒に変わる。"""
+        """BB アンティを入れる・外す（CLI の `ante on/off` 2026-10-19・`ante <額>` ADR-0071）。`raw_text` の on（BB と
+        同額 = BB を変えるとアンティも変わる）/ off / 額。次のハンドから（ハンドの外ならすぐ）。"""
         gs = self._game_state
-        text = (event.raw_text or "").strip().lower()
-        if text not in ("on", "off"):
-            logger.warning("set_bb_ante without on/off: %r", event.raw_text)
+        text = unicodedata.normalize("NFKC", event.raw_text or "").strip().lower()
+        if text in ("on", "off"):
+            setting: "bool | int" = text == "on"
+        elif text.isdigit():
+            setting = int(text)
+        else:
+            logger.warning("set_bb_ante without on/off/amount: %r", event.raw_text)
             return
         if not hasattr(gs, "set_bb_ante"):
             self._notice("BB アンティはこのゲームの状態では使えません")
             return
-        gs.set_bb_ante(text == "on")
+        gs.set_bb_ante(setting)
         later = self._hand_open and gs.is_hand_active()
+        when = "（次のハンドから）" if later else ""
         if not self._rules_aware:
             self._notice("BB アンティは pokerkit backend だけで使えます（legacy では置きません）")
-        elif text == "on":
-            self._notice("BB アンティをオンにしました（BB の人が BB と同額）" + ("（次のハンドから）" if later else ""))
+        elif setting is True:
+            self._notice("BB アンティをオンにしました（BB の人が BB と同額）" + when)
+        elif setting:
+            self._notice(f"BB アンティを {setting} にしました" + when)
         else:
-            self._notice("BB アンティをオフにしました" + ("（次のハンドから）" if later else ""))
+            self._notice("BB アンティをオフにしました" + when)
+
+    # ――― トーナメントの時計とレベル（ADR-0071）―――
+
+    def _check_tournament_clock(self) -> None:
+        """レベルの時間が過ぎていれば次のレベルへ（ブラインドは次のハンドから）。"""
+        clock = self._tournament
+        if clock is None:
+            return
+        now = self._clock()
+        before = (clock.index, clock.blinds)
+        if clock.tick(now):
+            self._clock_moved(before, now)
+
+    def _clock_moved(self, before: tuple, now: float) -> None:
+        """時計のレベルが変わった: 保存し、ブラインドが変わればレベルの入力を出す（ブレイクは知らせるだけ）。"""
+        from core.blind_structure import format_remaining
+
+        clock = self._tournament
+        self._save_clock()
+        if clock.blinds != before[1]:
+            self._emit_level(now)
+        if clock.current.is_break and clock.index != before[0]:
+            self._notice(f"ブレイク（{clock.current.minutes} 分）です。残り {format_remaining(clock.remaining(now))}")
+
+    def _save_clock(self) -> None:
+        if self._on_clock_change is not None and self._tournament is not None:
+            try:
+                self._on_clock_change(self._tournament)
+            except Exception:  # noqa: BLE001 — 保存の失敗でハンドを止めない
+                logger.exception("トーナメントの時計を保存できませんでした")
+
+    def _emit_level(self, now: float) -> None:
+        """時計のいまのレベルのブラインド・アンテを `set_level` の入力として記録し、反映する（replay は記録で同じになる）。"""
+        lv = self._tournament.blinds
+        event = AudioEvent(action="set_level", amount=lv.level or 0, timestamp=now,
+                           raw_text=f"{lv.sb}/{lv.bb} ante={lv.ante}")
+        self._record(event)
+        self._handle_audio_event(event)
+
+    def _handle_set_level(self, event: AudioEvent) -> None:
+        """トーナメントのレベル（`amount` = レベルの番号、`raw_text` の「SB/BB ante=額」）。次のハンドから。"""
+        from core.blind_structure import format_blinds
+
+        gs = self._game_state
+        text = unicodedata.normalize("NFKC", event.raw_text or "")
+        m = re.search(r"(\d+)\s*/\s*(\d+)", text)
+        if m is None:
+            logger.warning("set_level without SB/BB: %r", event.raw_text)
+            return
+        sb, bb = int(m.group(1)), int(m.group(2))
+        ante_m = re.search(r"ante\s*=\s*(\d+)", text)
+        ante = int(ante_m.group(1)) if ante_m else 0
+        try:
+            gs.set_blinds(sb, bb)
+        except ValueError as e:
+            self._notice(f"レベルのブラインドを変えられません: {e}")
+            return
+        if hasattr(gs, "set_bb_ante"):
+            gs.set_bb_ante(ante)
+        self._level = event.amount or None
+        if not gs.is_hand_active():
+            self._hand_level = self._level
+        later = self._hand_open and gs.is_hand_active()
+        name = f"レベル {event.amount}" if event.amount else "ブラインド"
+        self._notice(f"{name}: {format_blinds(sb, bb, ante)}" + ("（次のハンドから）" if later else ""))
+
+    def _handle_clock(self, event: AudioEvent) -> None:
+        """時計の操作（CLI の `clock …` / 設定画面の「時計」, ADR-0071）: status / pause / resume / next / prev /
+        set <レベル> [経過分]。レベルが変わればブラインドも（次のハンドから）。replay では時計を持たないので知らせるだけ
+        （レベルの変化は記録した `set_level` で同じになる）。"""
+        from core.blind_structure import StructureValidationError, format_blinds, format_remaining
+
+        clock = self._tournament
+        if clock is None:
+            self._notice("トーナメントの時計はありません（リングゲーム、またはトーナメントで始めていません）")
+            return
+        parts = unicodedata.normalize("NFKC", event.raw_text or "").lower().split()
+        cmd = parts[0] if parts else "status"
+        now = self._clock()
+        before = (clock.index, clock.blinds)
+        if cmd == "pause":
+            if not clock.pause(now):
+                self._notice("時計はもう止まっています")
+                return
+            self._save_clock()
+            self._notice(f"時計を止めました（{clock.current.label} 残り {format_remaining(clock.remaining(now))}）")
+            return
+        if cmd == "resume":
+            if not clock.resume(now):
+                self._notice("時計は動いています")
+                return
+            self._save_clock()
+            self._notice(f"時計を動かしました（{clock.current.label} 残り {format_remaining(clock.remaining(now))}）")
+            return
+        try:
+            if cmd == "next":
+                if clock.is_last:
+                    self._notice("最後のレベルです")
+                    return
+                clock.goto(clock.index + 1, now)
+            elif cmd == "prev":
+                if clock.index == 0:
+                    self._notice("最初のレベルです")
+                    return
+                clock.goto(clock.index - 1, now)
+            elif cmd == "set" and len(parts) >= 2:
+                index = clock.structure.playing_index(int(parts[1]))
+                if index is None:
+                    self._notice(f"レベル {parts[1]} はありません")
+                    return
+                minutes = float(parts[2]) if len(parts) >= 3 else 0.0
+                clock.goto(index, now, elapsed_sec=minutes * 60)
+            elif cmd != "status":
+                self._notice("時計: clock / clock pause / clock resume / clock next / clock prev / clock set <レベル> [経過分]")
+                return
+        except (ValueError, StructureValidationError) as e:
+            self._notice(f"時計を動かせません: {e}")
+            return
+        if cmd != "status":
+            clock.tick(now)
+            self._clock_moved(before, now)
+        lv = clock.blinds
+        nxt = clock.next_level()
+        state = "止まっています" if clock.paused else f"残り {format_remaining(clock.remaining(now))}"
+        self._notice(
+            f"{clock.structure.name} {clock.current.label}: {format_blinds(lv.sb, lv.bb, lv.ante)}・{state}"
+            + (f"・次 {format_blinds(nxt.sb, nxt.bb, nxt.ante)}" if nxt is not None else "・最後のレベル"))
+
+    def table_info(self) -> dict:
+        """卓の種類・いまのハンドのブラインド・時計（卓モニタ・設定画面の表示, ADR-0071）。"""
+        info: dict = {"mode": self._table_mode, "blinds": self._blinds_record()}
+        if self._tournament is not None:
+            info["clock"] = self._tournament.status(self._clock())
+        return info
 
     def _blinds_record(self) -> dict:
         """記録の `blinds`（BB アンティがあれば `bb_ante` を足す = additive）。"""
@@ -5344,6 +5511,8 @@ class IntegrationThread(threading.Thread):
         ante = int(getattr(gs, "bb_ante", 0) or 0)
         if ante:
             out["bb_ante"] = ante
+        if self._hand_level is not None:
+            out["level"] = self._hand_level      # トーナメントのレベル（ADR-0071, additive）
         return out
 
     # ――― ミスディール訂正（ADR-0054） ―――
@@ -5438,6 +5607,7 @@ class IntegrationThread(threading.Thread):
                 position_map=self._safe_position_map(),
                 board_absent_since=board_presence.get("absent"),
                 board_pending=board_presence.get("pending"),
+                game=self.table_info(),
             )
         except Exception:  # noqa: BLE001 — 表示用の派生。失敗でハンドを止めない
             logger.exception("卓状態の組み立てに失敗しました — スキップします")
@@ -5499,6 +5669,7 @@ class IntegrationThread(threading.Thread):
             "started_at": self._hand_started_at,
             "ended_at": None,
             "blinds": self._blinds_record(),
+            **({"table_mode": self._table_mode} if self._table_mode else {}),
             "board": list(self._board_cards),
             "board_source": self._board_source,
             "board_timeline": self._build_board_timeline(),
@@ -5914,6 +6085,7 @@ class IntegrationThread(threading.Thread):
             self._refuse_start(str(e))
             return False
         self._start_refused = None
+        self._hand_level = self._level
         self._current_actions = []
         if started_at is not None:
             self._hand_started_epoch = started_at
@@ -6179,6 +6351,7 @@ class IntegrationThread(threading.Thread):
             started_at=self._hand_started_at,
             ended_at=self._iso(ended_ts) if ended_ts is not None else self._now_iso(),
             blinds=self._blinds_record(),
+            table_mode=self._table_mode,
             board=list(self._board_cards),
             board_source=self._board_source,
             board_timeline=self._build_board_timeline(),

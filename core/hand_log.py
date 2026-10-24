@@ -117,6 +117,8 @@ class HandSummary:
     # ディーラーが言った勝った役の名前（pokerkit の役名, 2026-09-26 additive）。言わなければ None = 出力に
     # 含めない。判定と違えば review_required。winner_source="announced" = 役名から勝者を決めた（要確認）。
     announced_hand: Optional[str] = None
+    # 卓の種類（"ring" / "tournament", ADR-0071, additive）。モードを決める前の記録・replay は None = 出力に含めない。
+    table_mode: Optional[str] = None
 
     def to_dict(self) -> dict:
         data = {
@@ -145,6 +147,8 @@ class HandSummary:
             data["showdown"] = self.showdown
         if self.announced_hand is not None:
             data["announced_hand"] = self.announced_hand
+        if self.table_mode is not None:
+            data["table_mode"] = self.table_mode
         return data
 
 

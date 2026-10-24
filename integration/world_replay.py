@@ -322,7 +322,7 @@ def replay_world(
     word_labels: Optional[dict[str, str]] = None,
     open_gates: frozenset = frozenset(),
     gate_events: Optional[dict[str, tuple[str, float]]] = None,
-    bb_ante: bool = False,
+    bb_ante: "bool | int" = False,
 ) -> list[dict]:
     """`world_events` の入力を、ライブのループと同じ順の定期の確認を挟みながら流し、ハンド（記録と同じ形）を返す。
 
@@ -335,7 +335,7 @@ def replay_world(
     """
     gs = create_game_state("pokerkit", players, sb, bb, button_seat=button_seat)
     if bb_ante:
-        gs.set_bb_ante(True)              # 記録の `blinds.bb_ante` = そのハンドは BB アンティあり（ハンドごとの再生用）
+        gs.set_bb_ante(bb_ante)           # 記録の `blinds.bb_ante` = そのハンドの BB アンティの額（ハンドごとの再生用）
     clock = _ReplayClock()
     if presence is not None:
         # 配布の信号が無い古い記録だけ、席に載っている札から配布を決め直す（信号があれば二重に検出しない）

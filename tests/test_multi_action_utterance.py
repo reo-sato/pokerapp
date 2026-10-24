@@ -170,7 +170,7 @@ class TestTypedInputWaitsForSpeech:
 def test_a_typed_line_with_several_actions_is_split(tmp_path, monkeypatch, capsys):
     cfg = {"audio": {"enabled": False}, "rfid": {"enabled": False},
            "engine": {"backend": "legacy"}, "table_state": {"enabled": False}}
-    answers = iter(["3", "", "1000", "", "1000", "", "1000", "5", "10", "",
+    answers = iter(["", "3", "", "1000", "", "1000", "", "1000", "5", "10", "",
                     str(tmp_path / "logs"), "フォールド フォールド コール", "q"])
     monkeypatch.setattr("core.config.load_config", lambda path=None: cfg)
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))

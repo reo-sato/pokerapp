@@ -88,6 +88,9 @@ class TableState:
     present_seats: list[int] = field(default_factory=list)
     likely_folded_seats: list[int] = field(default_factory=list)
     mucked_seats: list[int] = field(default_factory=list)
+    # 卓の種類・いまのハンドのブラインド・トーナメントの時計（ADR-0071, `IntegrationThread.table_info`）。時刻は絶対時刻
+    # （`clock.ends_at`）で持ち、残り時間は表示する側が数える（履歴が毎秒増えない）。
+    game: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -106,6 +109,7 @@ class TableState:
             "present_seats": list(self.present_seats),
             "likely_folded_seats": list(self.likely_folded_seats),
             "mucked_seats": list(self.mucked_seats),
+            "game": dict(self.game),
         }
 
 
@@ -126,6 +130,7 @@ def build_table_state(
     fold_hint_sec: float = DEFAULT_FOLD_HINT_SEC,
     board_absent_since: Optional[dict[str, float]] = None,
     board_pending: Optional[dict[str, dict]] = None,
+    game: Optional[dict] = None,
 ) -> TableState:
     """観測から `TableState` を組み立てる（純粋関数）。
 
@@ -194,4 +199,5 @@ def build_table_state(
         present_seats=[s.seat for s in seat_states if s.present],
         likely_folded_seats=[s.seat for s in seat_states if s.likely_folded],
         mucked_seats=[s.seat for s in seat_states if s.mucked],
+        game=dict(game or {}),
     )

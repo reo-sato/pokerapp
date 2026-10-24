@@ -68,7 +68,7 @@ if ($PSBoundParameters.ContainsKey("Branch")) {
 # 更新時に保持するもの（店舗固有の設定・データ）。core/backup.py のデータ一覧と揃える
 # （tests/test_installer.py が両者の整合を検査する）。
 $PreservedFiles = @(
-    "config.json", "rfid_cards.json", "menu.json",
+    "config.json", "rfid_cards.json", "menu.json", "blind_structures.json",
     "players.json", "sessions.json", "ledger.json", "order_requests.json",
     "player_credentials.json", "auth_identity.json", "hand_corrections.json",
     "cloud_credentials.json", "cloud_sync_state.json",

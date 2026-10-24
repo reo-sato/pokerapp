@@ -26,7 +26,7 @@ fixtures-as-oracle（他層が既に持つ規律）が付く。
 - **camera frame は記録しない**: `CameraEvent.frame`（`core/events.py`, `repr=False`）は重く非決定的なので
   envelope から除外し、`seat` と `timestamp` のみ残す。
 
-## 3. `reconstruction_event` envelope（いまは `0.18`）
+## 3. `reconstruction_event` envelope（いまは `0.21`）
 
 `type` で判別する discriminated union。我々が新設する surface なので `additionalProperties: false` で締める
 （replay 決定性の要）。`core/events.py` の 3 データクラスを直列化したもの（`frame` 除外）。直列化は
@@ -34,9 +34,12 @@ fixtures-as-oracle（他層が既に持つ規律）が付く。
 各フィールドの説明・版ごとの追加は schema の `description`、版の一覧は `versioning-and-freeze.md` §6）。
 draft のまま（未 freeze）で、0.1 以降の変更はすべて **optional フィールド / enum 値の追加 = additive**。
 
-### 3.1 いまのフィールド（0.18）
+### 3.1 いまのフィールド（0.18。0.19〜0.21 の追加は schema の description）
 
-- **共通**（required）: `type`（`audio` / `rfid` / `camera`）・`timestamp`（`time.time()` 由来の秒 = replay の clock 源, §4）。
+- **共通**（required）: `type`（`audio` / `rfid` / `camera` / `session_setup`）・`timestamp`（`time.time()` 由来の秒 = replay の clock 源, §4）。
+- **session_setup**（0.21, ADR-0071, required: `table_mode`）: 記録の先頭の卓の設定（`table_mode`・`sb`・`bb`・`ante`・`structure`・`level`・
+  `elapsed_min`・`seats`・`first_button`）。再生の入力ではない（`load_events` は飛ばし、`load_session_setup` が読む）。
+  トーナメントのレベルの変化は audio の `set_level`（`amount` = レベル、`raw_text` = `"SB/BB ante=額"`）として記録する。
 - **audio**（required: `action` / `amount` / `raw_text`）:
   - `seat` / `confidence`（0.1, ADR-0009 additive）・`position`（読み上げたポジション名, 0.3）。
   - `utterance_start_ts`（発話の話し始め = 照合窓の始端）・`parse_flags`（パースで見つけた曖昧さ, 0.2）。

@@ -84,8 +84,8 @@ def _run_cli(monkeypatch: pytest.MonkeyPatch, cfg: dict, answers: list[str]) -> 
 
 
 def _setup(names: list[str], log_dir: Path) -> list[str]:
-    """セッション設定の入力（席数・名前・スタック・SB/BB・ボタン・ログ保存先）。"""
-    answers = [str(len(names))]
+    """セッション設定の入力（モード・席数・名前・スタック・SB/BB・ボタン・ログ保存先）。"""
+    answers = ["", str(len(names))]          # モード（空 = リングゲーム, ADR-0071）・席数
     for name in names:
         answers += [name, "1000"]
     return answers + ["5", "10", "", str(log_dir)]
@@ -338,7 +338,7 @@ class TestArbitrarySeats:
         self, data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
     ):
         logs = data_dir / "logs"
-        answers = ["2 5 8", "太郎", "1000", "", "1000", "花子", "1000", "5", "10",
+        answers = ["", "2 5 8", "太郎", "1000", "", "1000", "花子", "1000", "5", "10",
                    "4", "5", str(logs),              # 4 は使わない席 → 聞き直し → 5
                    "n", "name 3 次郎", "name 8 次郎", "w 5", "n", "w 8", "q"]
         _run_cli(monkeypatch, _cfg(True), answers)
