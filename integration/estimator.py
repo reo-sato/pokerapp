@@ -202,6 +202,7 @@ CONTENT_FILES = (
     "audio/short_word_model.json",
     "core/bet_sizing.py", "core/poker_engine.py", "core/showdown.py", "core/positions.py", "core/constants.py",
     "core/game_state.py", "core/engine_types.py", "core/events.py", "core/hand_log.py", "core/control_queue.py",
+    "core/offplay.py",
 )
 
 

@@ -840,6 +840,14 @@ class SessionInput:
     folder: Optional[Path] = None
 
 
+def session_transcripts(files) -> list[dict]:
+    """推定器の入力の書き起こし: `<sid>.transcripts.jsonl` + 聞き流した発話の書き起こし `<sid>.offplay.jsonl`
+    （`tools/offplay_audio.py`。ライブがハンドを早く閉じたあとの続きの賭け, 2026-10-24）。"""
+    from core.offplay import OFFPLAY_SUFFIX, merge_offplay
+
+    return merge_offplay(_read_jsonl(files.path(".transcripts.jsonl")), _read_jsonl(files.path(OFFPLAY_SUFFIX)))
+
+
 def inputs_from_logs(paths: list[Path], only: Optional[list[str]] = None) -> tuple[list[SessionInput], Optional[Path]]:
     root, tmp = open_input(paths)
     config = find_config(root)
@@ -851,7 +859,7 @@ def inputs_from_logs(paths: list[Path], only: Optional[list[str]] = None) -> tup
             continue
         events = load_events(files.events)
         truth = truth_hands(_read_json(files.path(".ground_truth.json")))
-        out.append(SessionInput(files.session_id, events, _read_jsonl(files.path(".transcripts.jsonl")), setup,
+        out.append(SessionInput(files.session_id, events, session_transcripts(files), setup,
                                 replay_flags(config, events), truth, files.folder))
     return out, tmp
 
@@ -865,6 +873,10 @@ def inputs_from_fixtures(folder: Path = FIXTURES) -> list[SessionInput]:
             continue
         flags = {k: bool(setup.get(k)) for k in ("auto_new_hand", "auto_winner", "rfid_folds")}
         transcripts = _read_jsonl(exp.parent / "transcripts.jsonl") if (exp.parent / "transcripts.jsonl").exists() else []
+        if (exp.parent / "offplay.jsonl").exists():
+            from core.offplay import merge_offplay
+
+            transcripts = merge_offplay(transcripts, _read_jsonl(exp.parent / "offplay.jsonl"))
         truth = {"hands": [dict(h["truth"], hand_id=h["hand_id"]) for h in data.get("hands") or []]}
         out.append(SessionInput(data.get("session_id") or exp.parent.name, load_events(exp.parent / "events.jsonl"),
                                 transcripts, setup, flags, truth, exp.parent))

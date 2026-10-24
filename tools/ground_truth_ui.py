@@ -73,7 +73,7 @@ BLIND_EVERY = 1
 # （オーナー決定 2026-10-02。2026-10-01 は 14 ハンド中 8 ハンドで保存の前に「記録を見る」を押していた = 記録を初期値に
 # した真のアクションは評価に使えない）。config.json の `ground_truth.evaluation`（既定 false = 練習。押せるが勧めない）
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
-_AUDIO_RE = re.compile(r"^[0-9]{6,16}\.wav$")
+_AUDIO_RE = re.compile(r"^(?:off_)?[0-9]{6,16}\.wav$")   # off_ = 聞き流した発話（音声だけ, 2026-10-24）
 # 台本のハンドのセッション（`tools/test_script.py`）。正解は台本なので入力は要らない
 _SCRIPT_SUFFIX = ".script.json"
 # 進行中のハンド（ロガーが手札を配ったときから書く。ハンドが終わると消える, オーナー 2026-09-30 / 2026-10-06）
@@ -340,7 +340,12 @@ def hand_timeline(log_dir: Path, session_id: str, hand: dict, next_started_at: O
     lo = start - _TIMELINE_BEFORE_SEC
     audio_dir = log_dir / "audio" / session_id
     items: list[dict] = []
-    for x in _read_jsonl(log_dir / f"{session_id}.transcripts.jsonl"):
+    from core.offplay import OFFPLAY_PREFIX, OFFPLAY_SUFFIX, merge_offplay, offplay_start
+
+    rows = merge_offplay(_read_jsonl(log_dir / f"{session_id}.transcripts.jsonl"),
+                         _read_jsonl(log_dir / f"{session_id}{OFFPLAY_SUFFIX}"))
+    written = {x.get("audio_file") for x in rows}
+    for x in rows:
         t = x.get("utterance_start_ts")
         if not isinstance(t, (int, float)) or not lo <= t < end or x.get("no_speech"):
             continue
@@ -355,10 +360,20 @@ def hand_timeline(log_dir: Path, session_id: str, hand: dict, next_started_at: O
             "t": round(t - start, 1), "kind": "speech", "text": str(x.get("text") or ""),
             "confidence": round(float(x["confidence"]), 2) if isinstance(x.get("confidence"), (int, float)) else None,
             "noise": bool(x.get("noise")), "question": bool(x.get("question")), "parsed": parsed,
-            "lag": round(heard - t, 1) if isinstance(heard, (int, float)) else None,
+            "lag": round(heard - t, 1) if isinstance(heard, (int, float)) and not x.get("offplay") else None,
             "audio": audio if isinstance(audio, str) and _AUDIO_RE.match(audio) and (audio_dir / audio).is_file()
             else None,
+            "offplay": bool(x.get("offplay")),
         })
+    # 聞き流した発話の音声で、まだ書き起こしていないもの（`tools/offplay_audio.py` の前）も ▶ で聞けるように
+    if audio_dir.is_dir():
+        for wav in sorted(audio_dir.glob(OFFPLAY_PREFIX + "*.wav")):
+            t = offplay_start(wav.name)
+            if t is None or wav.name in written or not lo <= t < end or not _AUDIO_RE.match(wav.name):
+                continue
+            items.append({"t": round(t - start, 1), "kind": "speech", "text": "", "confidence": None,
+                          "noise": False, "question": False, "parsed": [], "lag": None, "audio": wav.name,
+                          "offplay": True})
     for x in _read_jsonl(log_dir / f"{session_id}.events.jsonl"):
         if x.get("type") != "rfid":
             continue
@@ -1745,10 +1760,13 @@ function renderTimeline(items, blind){
     if (it.kind === "speech") {
       const play = it.audio ? `<button class="play sm" onclick="playAudio('${esc(it.audio)}')" title="音声を聞く">▶</button>` : '<span class="gap"></span>';
       const conf = it.confidence != null ? ` <span class="muted small">${Number(it.confidence).toFixed(2)}</span>` : "";
-      const parsed = blind ? "" : ` <span class="muted small">→ ${it.parsed && it.parsed.length ? esc(it.parsed.join("、")) : (it.noise ? "雑音" : "（読まない）")}</span>`;
+      const parsed = blind || (it.offplay && !it.text) ? "" : ` <span class="muted small">→ ${it.parsed && it.parsed.length ? esc(it.parsed.join("、")) : (it.noise ? "雑音" : "（読まない）")}</span>`;
       const audioAttr = it.audio ? ` data-audio="${esc(it.audio)}"` : "";
       const playing = it.audio && it.audio === S.playing ? " playing" : "";
-      return `<div class="item ${it.noise ? "noise" : ""}${playing}"${audioAttr}><span class="t">${t}</span>${play}<span>「${esc(it.text)}」${conf}${parsed}</span></div>`;
+      // 聞き流した発話（ハンドを閉じたあと = 記録には入っていない）。書き起こす前は音声だけ
+      const off = it.offplay ? ' <span class="muted small">（聞き流した発話）</span>' : "";
+      const said = it.offplay && !it.text ? '<span class="muted">（書き起こし前）</span>' : `「${esc(it.text)}」`;
+      return `<div class="item ${it.noise ? "noise" : ""}${playing}"${audioAttr}><span class="t">${t}</span>${play}<span>${said}${conf}${parsed}${off}</span></div>`;
     }
     return `<div class="item sys"><span class="t">${t}</span><span class="gap"></span><span>${esc(it.text)}</span></div>`;
   }).join("")}</div>`;

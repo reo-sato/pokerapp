@@ -68,4 +68,29 @@ LLM の実験の報告で「14 のうち少なくとも 4 は真のベット / �
 2. ハンドを早く閉じる元（「フォール」→ フォールド、ヘッズアップの宣言での確定、ショーダウンの終わり）はライブの規則 =
    トラック A。聞き取りを続けても**記録**は早く閉じたまま（推定器は書き起こしを使えるようになる）。オーナーの案
    （ボードの回収・全員の手札の離脱など複数の証拠で閉じる）を記録の確定にも使うかは A とすり合わせる。
-3. `off_*.wav` を書き起こして書き起こしの記録に足す道具（Whisper + 第 2 の耳、`tools/rescore_audio.py` の形に合わせる）。
+3. ~~`off_*.wav` を書き起こして書き起こしの記録に足す道具~~ → 下の「聞き流した発話の書き起こし」で実装。
+
+## 聞き流した発話の書き起こし（10/24 続き）
+
+- `tools/offplay_audio.py`（新規）: `logs/audio/<sid>/off_*.wav` を**ライブと同じ組み立て**（`main._make_audio_thread` の
+  `AudioThread._process_chunk` = Whisper + 第 2 の耳 + 読み取り、マイクは開かない）で書き起こし、`logs/<sid>.offplay.jsonl`
+  に書く（行の形は書き起こしの記録と同じ + `"offplay": true`）。書き起こし済みの音声は飛ばす（途中で止めても続きから）・
+  声の無い音も「済み」の行を残す・1 つ読めなくても続ける。店舗 PC で営業のあと（ロガーを閉じてから）に回す想定。
+- `core/offplay.py`（新規）: `merge_offplay`（話し始めの順に足す・同じ時刻はライブの行を残す）。**推定器の内容の指紋に入れた**
+  （`CONTENT_FILES`）。推定器の入力 `tools/estimate.py:session_transcripts`（店舗のログ）と `inputs_from_fixtures`
+  （開発データの `offplay.jsonl`）が足す。ライブの読み直しの基準（`eval_store` の再生）には足さない。
+- `tools/eval_store.py --export-fixture`: `<sid>.offplay.jsonl` があれば開発データに `offplay.jsonl` として書く。
+- 真のアクションの入力画面（`tools/ground_truth_ui.py`）: 発話と札の流れに聞き流した発話を「（聞き流した発話）」と出す。
+  書き起こす前の `off_*.wav` も ▶ で聞ける（音声の名前の検査 `_AUDIO_RE` に `off_` を足した）。
+- `output/transcript_log.py`: `write(..., extra=)` で行に項目を足せるように。
+- `pack_logs` は `<sid>.*` を全部入れるので変更なし（`<sid>.offplay.jsonl` も zip に入る）。
+- 試験 `tests/test_offplay_audio.py`（7 件: 名前・書き起こしと続きから・壊れた音声・足し方・推定器の入力・ライブの経路
+  （Whisper を差し替え）・Whisper が無いときの理由）+ 入力画面の時系列 1 件。本物の Whisper はこの環境ではモデルを
+  取れない（Hugging Face が 403）ので、店舗 PC で初めて通す。
+
+## VAD（声かどうかの判定）での取りこぼしは無い
+
+開発データの書き起こしの記録 4,899 行のうち、VAD が声ではないとして Whisper にかけなかった音は 788。そのうち第 2 の耳が
+文を聞いたのは 316 で、**アクションの語・額を含むものは 0**（多いのは「うん」60・「ハハ」27・「え」20・「はい」16）。
+VAD の閾値（`audio.vad_threshold` 0.5）を変える理由は無い。短すぎて認識に回さなかった音（`audio.min_speech_sec`）は
+書き起こしの記録に残らないので数えられない（`audio_check listen` で見るもの）。

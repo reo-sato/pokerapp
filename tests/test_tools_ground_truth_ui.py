@@ -572,6 +572,25 @@ class TestTimelineAndAudio:
         assert items[1]["noise"] is True and items[1]["audio"] is None       # ファイルが無ければ再生しない
         assert items[2]["text"] == "ボード 1 枚目 As" and items[3]["text"] == "席6 の札が離れた"
 
+    def test_offplay_speech_is_shown_and_playable(self, with_speech, base):
+        """ハンドを閉じたあとに聞き流した発話（`off_<ms>.wav`, 2026-10-24）も時系列に出し ▶ で聞ける。
+        書き起こした行（`<sid>.offplay.jsonl`）は文も出す。"""
+        start = _epoch("2026-09-27T20:01:00")
+        audio_dir = with_speech / "audio" / SID
+        heard, raw = f"off_{int((start + 40.0) * 1000)}.wav", f"off_{int((start + 45.0) * 1000)}.wav"
+        for name in (heard, raw):
+            (audio_dir / name).write_bytes(b"RIFF" + bytes(8))
+        row = {"utterance_start_ts": start + 40.0, "heard_at": start + 900.0, "audio_sec": 1.0, "text": "ベット 2000",
+               "confidence": 0.5, "noise": False, "audio_file": heard, "offplay": True,
+               "events": [{"action": "bet", "amount": 2000, "seat": None}]}
+        (with_speech / f"{SID}.offplay.jsonl").write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+        items = _req(base, "GET", f"/api/sessions/{SID}/hands/1")[1]["timeline"]
+        off = [i for i in items if i.get("offplay")]
+        assert [(i["t"], i["text"], i["audio"], i["lag"]) for i in off] == [
+            (40.0, "ベット 2000", heard, None), (45.0, "", raw, None)]
+        with urllib.request.urlopen(f"{base}/api/sessions/{SID}/audio/{raw}", timeout=5) as resp:
+            assert resp.status == 200
+
     def test_audio_is_served_in_ranges_for_the_ipad(self, with_speech, base):
         url = f"{base}/api/sessions/{SID}/audio/{AUDIO}"
         with urllib.request.urlopen(url, timeout=5) as resp:

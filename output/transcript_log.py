@@ -12,6 +12,7 @@ import json
 import logging
 import threading
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,8 @@ class TranscriptLog:
     def path(self) -> Path:
         return self._path
 
-    def write(self, transcript) -> None:
+    def write(self, transcript, extra: Optional[dict] = None) -> None:
+        """1 発話を 1 行で追記する。`extra` は行に足す項目（聞き流した発話の書き起こしの `offplay` など）。"""
         line = {
             "utterance_start_ts": transcript.utterance_start_ts,
             "heard_at": transcript.heard_at,
@@ -55,6 +57,8 @@ class TranscriptLog:
             line["ear"] = ear
             line["ear_text"] = getattr(transcript, "ear_text", None)
             line["ear_wanted"] = bool(getattr(transcript, "ear_wanted", True))
+        if extra:
+            line.update(extra)
         try:
             with self._lock:
                 self._path.parent.mkdir(parents=True, exist_ok=True)

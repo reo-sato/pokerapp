@@ -1253,6 +1253,12 @@ def export_fixture(files: SessionFiles, report: SessionReport, out_root: Path) -
         rows = [{k: r[k] for k in _FIXTURE_TRANSCRIPT_KEYS if k in r} for r in transcripts]
         (folder / "transcripts.jsonl").write_text(
             "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    offplay = _read_jsonl(files.path(".offplay.jsonl"))
+    if offplay:
+        # 聞き流した発話の書き起こし（`tools/offplay_audio.py`）。推定器の入力にだけ足す（ライブの読み直しの基準は変えない）
+        rows = [dict({k: r[k] for k in _FIXTURE_TRANSCRIPT_KEYS if k in r}, offplay=True) for r in offplay]
+        (folder / "offplay.jsonl").write_text(
+            "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
     table_state = _read_jsonl(files.path(".table_state.jsonl"))
     if table_state:
         # 席の札の在否の変化だけ（推定器の再生の入力, `integration/world_replay.py`）
