@@ -41,7 +41,7 @@ class TestBuildConfig:
             (2, "あ", 20000, True), (4, "Player4", 15000, False), (5, "Player5", 20000, False)]
         assert (cfg["sb"], cfg["bb"]) == (100, 200)
         assert cfg["first_button"] == 4 and cfg["button_seat"] == 2      # 1 つ手前（端末の入力と同じ）
-        assert cfg["table"] == {"mode": "ring", "sb": 100, "bb": 200, "ante": 0}
+        assert cfg["table"] == {"mode": "ring", "stackless": False, "sb": 100, "bb": 200, "ante": 0}
 
     def test_tournament_mid_level(self, store):
         cfg = ui.build_session_config(_raw(mode="tournament", structure="標準", level=2, elapsed_min=5), store)
@@ -50,7 +50,21 @@ class TestBuildConfig:
         assert (t["mode"], t["ante"], t["level"], t["elapsed_min"]) == ("tournament", 400, 2, 5.0)
         assert parse_structure(t["structure"]).name == "標準"
 
+    def test_tournament_by_start_time(self, store):
+        # 時刻準拠: レベル 1 の開始時刻からの経過でいまのレベル（オーナー 2026-10-24）
+        store.save({**STRUCTURE, "name": "夜", "start_time": "18:30"})
+        start = ui.start_epoch("18:30", 2_000_000_000.0)
+        now = start + 55 * 60                       # 18:30 + 55 分 = レベル 3（ブレイクのあと）の 5 分目
+        cfg = ui.build_session_config(_raw(mode="tournament", structure="夜"), store, now=now)
+        t = cfg["table"]
+        assert (t["level"], t["elapsed_min"], t["start_time"], t["start_at"]) == (3, 5.0, "18:30", start)
+        assert (cfg["sb"], cfg["bb"], t["ante"]) == (300, 600, 600)
+        # 空 = 時刻を使わず、始めるレベルと経過分で
+        cfg = ui.build_session_config(_raw(mode="tournament", structure="夜", start_time="", level=2), store, now=now)
+        assert (cfg["table"]["level"], "start_at" in cfg["table"]) == (2, False)
+
     @pytest.mark.parametrize("over, field", [
+        ({"mode": "tournament", "structure": "標準", "start_time": "25:00"}, "start_time"),
         ({"seats": [3]}, "seats"),
         ({"seats": [3, 12]}, "seats"),
         ({"sb": 300, "bb": 200}, "sb"),

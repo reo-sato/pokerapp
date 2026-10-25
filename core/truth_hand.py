@@ -19,7 +19,7 @@ from typing import Any, Optional
 
 from core.game_state import PlayerState
 from core.hand_log import UNKNOWN_CARD
-from core.poker_engine import PokerkitGameState
+from core.poker_engine import STACKLESS_STACK, PokerkitGameState
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,8 @@ def start_state(captured: dict, button: Optional[int] = None) -> PokerkitGameSta
         bb = max(sb, int(blinds.get("bb") or 2))
     except (TypeError, ValueError):
         sb, bb = 1, 2
-    gs = PokerkitGameState(players, sb, bb)
+    # 持ち点を数えないモードのハンド（オーナー 2026-10-24）は同じ扱いで流す（オールインの額は無い）
+    gs = PokerkitGameState(players, sb, bb, stackless=bool(captured.get("stackless")))
     if blinds.get("bb_ante"):
         gs.set_bb_ante(int(blinds["bb_ante"]))   # 記録のハンドの BB アンティの額（ADR-0071 から BB と別の額もある）
     if button is None:
@@ -287,7 +288,7 @@ def materialize_truth(gt: dict, captured: dict) -> Optional[dict]:
         logger.info("真のアクションのハンドを閉じられません（ハンド %s）: %s", captured.get("hand_id"), e)
         return None
     end = gs.get_stacks()
-    stack_start = {p.seat: p.stack for p in players_for_replay(captured)}
+    stack_start = {p.seat: STACKLESS_STACK if gs.stackless else p.stack for p in players_for_replay(captured)}
 
     live_players = {p.get("seat"): p for p in captured.get("players") or [] if isinstance(p, dict)}
     shown = {p.get("seat") for p in gt.get("players") or [] if isinstance(p, dict) and p.get("showed_down")}
@@ -333,6 +334,10 @@ def materialize_truth(gt: dict, captured: dict) -> Optional[dict]:
     })
     if awards is not None and len([a for a in awards.values() if a]) > 1:
         hand["pot_awards"] = {str(s): a for s, a in awards.items() if a}
+    if gs.stackless:
+        from core.stackless import strip_hand
+
+        strip_hand(hand)
     return hand
 
 

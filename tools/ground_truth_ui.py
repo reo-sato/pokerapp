@@ -566,6 +566,21 @@ def replay_legal(
         "showdown_winner": None,
         "button_seat": gs.button_seat,
     }
+    if gs.stackless:
+        # 持ち点を数えないモード（オーナー 2026-10-24）: オールインの額・それに向き合ったコールの額・オールインのあとの
+        # ポット・最大の額は出さない（内部の仮の値だから）
+        from core.stackless import unknown_amounts
+
+        flags = unknown_amounts(out + [{"street": gs.street, "action": "call"}])
+        for row, (unknown, _) in zip(out, flags):
+            if unknown:
+                row["amount"] = row["total"] = None
+        nxt["max_raise"] = None
+        if gs.allin_seats():
+            nxt["pot"] = None
+        if flags[-1][0] and ctx.amount_to_call:
+            nxt["call_total"] = None
+            nxt["call_unknown"] = True
     if ctx.actor_seat is None and len(active) >= 2:
         nxt["showdown_winner"] = showdown_winner(captured, gs, active, board, holes)
     if ctx.actor_seat is None and mucked and len(active) == 1:
@@ -1577,7 +1592,7 @@ function buildGt(d){
   const button = (g && g.button_seat != null) ? g.button_seat : (cap.button_seat ?? null);
   return {board: g ? boardWithRecord(g.board, cap.board) : normCards(src.board, 5), players, actions, button_seat: button,
           winner_seat: blind ? null : (src.winner_seat === undefined ? null : src.winner_seat), notes: (g && g.notes) || "",
-          excluded: !!(g && g.excluded)};
+          excluded: !!(g && g.excluded), stackless: !!cap.stackless};
 }
 async function openHand(hid){
   stopPlayAll();
@@ -1825,17 +1840,17 @@ function renderEdit(){
     const mucks = showdown
       ? `<div class="btns">${(n.active_seats||[]).map(s => `<button onclick="addMuck(${s})">席 ${s} が見せずに降りた</button>`).join("")}</div>`
       : "";
-    quick = `<div class="quick"><div class="who">ベッティング終了 — ${who}</div>${mucks}<div class="small muted">ポット ${n.pot}。手札を見せずに降りた人がいれば、その席の「見せずに降りた」（ショーダウンのフォールド）。行が足りなければ「＋ 行を追加」、多ければ ✕ で直せます。</div></div>`;
+    quick = `<div class="quick"><div class="who">ベッティング終了 — ${who}</div>${mucks}<div class="small muted">ポット ${n.pot ?? "—"}。手札を見せずに降りた人がいれば、その席の「見せずに降りた」（ショーダウンのフォールド）。行が足りなければ「＋ 行を追加」、多ければ ✕ で直せます。</div></div>`;
   } else {
     const legal = n.legal_actions || [];
-    const cc = n.amount_to_call > 0 ? `コール ${n.call_total || n.amount_to_call}` : "チェック";
+    const cc = n.amount_to_call > 0 ? (n.call_unknown ? "コール" : `コール ${n.call_total || n.amount_to_call}`) : "チェック";
     const br = legal.includes("raise") ? "レイズ" : "ベット";
-    quick = `<div class="quick"><div class="who">次: 席 ${n.actor_seat} の番 <span class="muted small">${STREET_JA[n.street]||n.street} ／ ポット ${n.pot}</span></div>
+    quick = `<div class="quick"><div class="who">次: 席 ${n.actor_seat} の番 <span class="muted small">${STREET_JA[n.street]||n.street} ／ ポット ${n.pot ?? "—"}</span></div>
       <div class="btns">
         <button onclick="addQuick('fold')">フォールド</button>
         <button onclick="addQuick('check')">${cc}</button>
-        ${legal.includes("bet") || legal.includes("raise") ? `<input id="qamt" type="number" inputmode="numeric" placeholder="${n.min_raise}〜${n.max_raise}" onkeydown="if(event.key==='Enter'){addQuick('${legal.includes("raise")?"raise":"bet"}')}"><button class="primary" onclick="addQuick('${legal.includes("raise")?"raise":"bet"}')">${br}</button>` : ""}
-        ${legal.includes("allin") ? `<button onclick="addQuick('allin')">オールイン ${n.max_raise}</button>` : ""}
+        ${legal.includes("bet") || legal.includes("raise") ? `<input id="qamt" type="number" inputmode="numeric" placeholder="${n.min_raise}〜${n.max_raise ?? ""}" onkeydown="if(event.key==='Enter'){addQuick('${legal.includes("raise")?"raise":"bet"}')}"><button class="primary" onclick="addQuick('${legal.includes("raise")?"raise":"bet"}')">${br}</button>` : ""}
+        ${legal.includes("allin") ? `<button onclick="addQuick('allin')">オールイン ${n.max_raise ?? ""}</button>` : ""}
       </div></div>`;
   }
   const boardHtml = g.board.map((c, i) => `<div style="text-align:center">${cardHtml(c, "", `openPicker('board',${i})`)}<div class="small muted">${BOARD_LABEL[i]}</div></div>`).join("");
@@ -1843,7 +1858,7 @@ function renderEdit(){
       <button class="sm chip ${p.absent?"":"on"}" onclick="setAbsent(${p.seat})" title="このハンドに配られたか">${p.absent ? "いない" : "いた"}</button>
       ${p.absent ? "" : `<div>${cardHtml(p.hole_cards[0], "", `openPicker('hole',${p.seat},0)`)}${cardHtml(p.hole_cards[1], "", `openPicker('hole',${p.seat},1)`)}</div>
       <button class="sm chip ${p.showed_down?"on":""}" onclick="setShowed(${p.seat})">見せた</button>
-      <label class="small muted stack">持ち点 <input type="number" inputmode="numeric" value="${p.stack_start ?? ""}" placeholder="${p.default_stack > 0 ? p.default_stack : "入れてください"}" onchange="setStack(${p.seat}, this.value)" onkeydown="if(event.key==='Enter'){this.blur()}"></label>`}</div>`).join("");
+      ${g.stackless ? "" : `<label class="small muted stack">持ち点 <input type="number" inputmode="numeric" value="${p.stack_start ?? ""}" placeholder="${p.default_stack > 0 ? p.default_stack : "入れてください"}" onchange="setStack(${p.seat}, this.value)" onkeydown="if(event.key==='Enter'){this.blur()}"></label>`}`}</div>`).join("");
   const buttonHtml = `<div class="chips">${seats.map(s => `<button class="chip ${g.button_seat===s?"on":""}" onclick="setButton(${s})">席 ${s}</button>`).join("")}
       <span class="muted small" style="align-self:center">${g.button_seat !== cap.button_seat ? `記録は席 ${cap.button_seat ?? "—"}（ディーラーがボタンを動かし忘れた）` : "記録どおり。ディーラーがボタンを動かし忘れたときは実際の席を選ぶ（手番の順が変わります）"}</span></div>`;
   const sdw = L.next && L.next.hand_over && L.next.foldout_winner == null ? L.next.showdown_winner : null;

@@ -152,3 +152,60 @@ class TestClock:
         c.pause(100.0)
         back = TournamentClock.from_dict(json.loads(json.dumps(c.to_dict())))
         assert (back.index, back.paused_elapsed, back.structure) == (c.index, c.paused_elapsed, c.structure)
+
+
+class TestStartTime:
+    """時刻準拠の時計（レベル 1 の開始時刻, オーナー 2026-10-24）。"""
+
+    JST = __import__("datetime").timezone(__import__("datetime").timedelta(hours=9))
+
+    def _epoch(self, hh, mm, day=24):
+        from datetime import datetime
+        return datetime(2026, 10, day, hh, mm, tzinfo=self.JST).timestamp()
+
+    def test_parse(self):
+        from core.blind_structure import StructureValidationError, parse_start_time
+        assert parse_start_time("18:30") == "18:30"
+        assert parse_start_time(" 9：05 ") == "09:05"
+        assert parse_start_time("") is None and parse_start_time(None) is None
+        for bad in ("24:00", "18:60", "1830", "abc"):
+            with pytest.raises(StructureValidationError):
+                parse_start_time(bad)
+
+    def test_structure_round_trip(self):
+        from core.blind_structure import parse_structure
+        st = parse_structure({"name": "x", "start_time": "18:30", "levels": [{"sb": 1, "bb": 2, "minutes": 5}]})
+        assert st.start_time == "18:30"
+        assert parse_structure(st.to_dict()) == st
+        assert "start_time" not in parse_structure({"name": "y", "levels": [{"sb": 1, "bb": 2, "minutes": 5}]}).to_dict()
+
+    def test_start_epoch_picks_today_or_yesterday(self):
+        from core.blind_structure import start_epoch
+        assert start_epoch("18:30", self._epoch(19, 0), self.JST) == self._epoch(18, 30)
+        assert start_epoch("18:30", self._epoch(18, 0), self.JST) == self._epoch(18, 30)       # 始まる前
+        assert start_epoch("18:30", self._epoch(1, 0, day=25), self.JST) == self._epoch(18, 30)  # 日付をまたいだ
+
+    def test_sample_1830_by_wall_clock(self):
+        from pathlib import Path
+
+        from core.blind_structure import BlindStructureStore, TournamentClock, start_epoch
+        sample = Path(__file__).parent.parent / "blind_structures_default.json"
+        st = BlindStructureStore(Path("/nonexistent/structures.json"), sample=sample).get("18:30 開始トーナメント")
+        assert st is not None and st.start_time == "18:30"
+        start = start_epoch(st.start_time, self._epoch(18, 0), self.JST)
+
+        def at(hh, mm):
+            return TournamentClock.start_at(st, start, self._epoch(hh, mm))
+
+        c = at(18, 0)                                   # 始まる前はレベル 1 で待つ
+        assert c.blinds.level == 1 and c.status(self._epoch(18, 0))["starts_at"] == start
+        assert (c.blinds.sb, c.blinds.bb, c.blinds.ante) == (100, 100, 0)
+        assert at(18, 50).blinds.level == 2             # 18:30 + 20 分
+        assert at(19, 10).blinds.level == 3
+        assert at(20, 14).blinds.level == 6             # 6 は 25 分 = 20:10〜20:35
+        c = at(20, 36)
+        assert c.current.is_break and c.blinds.level == 6
+        c = at(20, 40)                                  # ブレイク 5 分のあと
+        assert (c.blinds.level, c.blinds.bb, c.blinds.ante) == (7, 1000, 1000)
+        assert at(23, 59).blinds.level == 24 and at(23, 59).is_last
+        assert at(20, 40).status(self._epoch(20, 40))["starts_at"] is None

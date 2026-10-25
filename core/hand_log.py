@@ -119,6 +119,8 @@ class HandSummary:
     announced_hand: Optional[str] = None
     # 卓の種類（"ring" / "tournament", ADR-0071, additive）。モードを決める前の記録・replay は None = 出力に含めない。
     table_mode: Optional[str] = None
+    # 持ち点を数えないモード（オーナー 2026-10-24）: 書くときに持ち点と分からない額を外す（`core/stackless.py`）
+    stackless: bool = False
 
     def to_dict(self) -> dict:
         data = {
@@ -149,6 +151,10 @@ class HandSummary:
             data["announced_hand"] = self.announced_hand
         if self.table_mode is not None:
             data["table_mode"] = self.table_mode
+        if self.stackless:
+            from core.stackless import strip_hand
+
+            strip_hand(data)
         return data
 
 
