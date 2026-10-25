@@ -186,7 +186,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--hands", default="", help="このハンドだけ（「15cad555#3,027e4b15#1」）")
     ap.add_argument("--workers", type=int, default=default_workers())
     ap.add_argument("--dump", type=Path, help="ハンドごとの差（真 − 候補の最高）を JSON に書く")
+    ap.add_argument("--sets", type=Path, help="値の組を JSON で（[[名前, 推定器の値, 発話の読みの値], …]）。省略 = `SETS`")
     args = ap.parse_args(argv)
+    sets = [tuple(x) for x in json.loads(args.sets.read_text(encoding="utf-8"))] if args.sets else SETS
     logging.disable(logging.CRITICAL)
     only = {k.strip() for k in args.hands.split(",") if k.strip()} or None
     jobs = []
@@ -195,7 +197,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             est = SessionEstimator(inp.events, inp.transcripts, presence, inp.setup, inp.flags, inp.session_id, PARAMS)
             keys = [h.key for h in scored_hands(inp, est) if only is None or h.key in only]
             for i in range(0, len(keys), HANDS_PER_JOB):
-                jobs.append((inp, presence, set(keys[i:i + HANDS_PER_JOB]), SETS))
+                jobs.append((inp, presence, set(keys[i:i + HANDS_PER_JOB]), sets))
     started = time.time()
     results: list[dict] = []
     if args.workers <= 1 or len(jobs) < 2:
@@ -209,7 +211,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             for out in pool.map(_run_job, jobs):
                 results += out
     print(f"推定器 v1: 値の指紋 {params_hash(PARAMS)}・内容の指紋 {content_hash()}（{time.time() - started:.0f} 秒）")
-    print("\n".join(summarize(results, SETS)))
+    print("\n".join(summarize(results, sets)))
     if args.dump:
         args.dump.write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
     return 0
