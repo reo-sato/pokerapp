@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -200,7 +201,7 @@ def align_words(rows: list[dict], utterances: list[tuple[float, list]], cards: d
     for (t, options), (pick, steps_by_option) in zip(reversed(utterances), reversed(history)):
         oi = pick[j]
         source, tokens = options[oi]
-        chosen.append({"start": t, "source": source, "default_source": options[0][0],
+        chosen.append({"start": t, "source": source, "default_source": options[0][0], "option": oi, "matched": 0,
                        "keys": [(tk.action, tk.amount) for tk in tokens]})
         for tok, (via, skip) in zip(reversed(tokens), reversed(steps_by_option[oi])):
             while j > 0 and skip[j]:
@@ -213,9 +214,11 @@ def align_words(rows: list[dict], utterances: list[tuple[float, list]], cards: d
             elif v[0] == "around":
                 for r in range(v[1], j):
                     words[r] = dict(word, kind="around")
+                chosen[-1]["matched"] += 1
                 j = v[1]
             else:
                 words[j - 1] = dict(word, kind=v[1])
+                chosen[-1]["matched"] += 1
                 j -= 1
     chosen.reverse()
     extra.reverse()
@@ -240,16 +243,21 @@ def align_hand(est, h, guesses: bool = False) -> HandAlignment:
     cards = street_cards(w.base)
     _events, transcript_rows = est._window_inputs(w)        # noqa: SLF001 — 推定器と同じ窓の発話
     utterances = []
+    logps: list[list[float]] = []
     for row in sorted(transcript_rows, key=lambda r: r["utterance_start_ts"]):
         start = row["utterance_start_ts"]
-        opts = [(o.source, tokens_of(start, o.keys)) for o in est._options(start)   # noqa: SLF001
-                if guesses or o.source not in GUESS_SOURCES]
+        kept = [o for o in est._options(start) if guesses or o.source not in GUESS_SOURCES]   # noqa: SLF001
+        opts = [(o.source, tokens_of(start, o.keys)) for o in kept]
         if not opts:
             continue
         if not any(toks for _s, toks in opts):
             continue
         utterances.append((start, opts))
+        logps.append([o.logp for o in kept])
     words, extra, chosen = align_words(rows, utterances, cards, w.start)
+    for c, (_t, opts), lp in zip(chosen, utterances, logps):
+        # 読みの値の当たりの割合（F2 の残り）: 発話の選択肢ごとの出所・確からしさ・語の数
+        c["options"] = [{"source": s, "logp": round(p, 3), "tokens": len(toks)} for (s, toks), p in zip(opts, lp)]
     seats = len(w.base.get("players") or []) or len({a.get("seat") for a in rows})
     out = HandAlignment(h.key, h.session_id, h.hand_id, seats, street_cards=cards, start=w.start, end=w.end,
                         extra=extra, utterances=chosen, truth_button=h.truth.get("button_seat"),
@@ -473,7 +481,82 @@ def count_all(alignments: list[dict]) -> dict:
         prop("p_button", sum(1 for a in with_button if a["truth_button"] != a.get("base_button")), len(with_button),
              P["p_button"])
         res["hands"] = {"n": len(hands)}
+        res["readings"] = count_readings(hands)
         out[f"{key[0]} / {key[1]}"] = res
+    return out
+
+
+def _softmax(logps: list[float]) -> list[float]:
+    top = max(logps)
+    e = [math.exp(x - top) for x in logps]
+    s = sum(e)
+    return [x / s for x in e]
+
+
+def logistic_fit(xs: list[float], ys: list[int], iters: int = 50) -> Optional[tuple[float, float]]:
+    """y ~ σ(a + b·x) の最尤（ニュートン法、弱い正則化つき）。点が少なすぎれば None。"""
+    if len(xs) < 10 or len(set(ys)) < 2:
+        return None
+    a = b = 0.0
+    lam = 1e-3
+    for _ in range(iters):
+        ga = gb = haa = hab = hbb = 0.0
+        for x, y in zip(xs, ys):
+            p = 1.0 / (1.0 + math.exp(-(a + b * x)))
+            ga += y - p
+            gb += (y - p) * x
+            w = p * (1 - p)
+            haa += w
+            hab += w * x
+            hbb += w * x * x
+        gb -= lam * b
+        hbb += lam
+        haa += lam
+        det = haa * hbb - hab * hab
+        if abs(det) < 1e-12:
+            break
+        da, db = (hbb * ga - hab * gb) / det, (haa * gb - hab * ga) / det
+        a, b = a + da, b + db
+        if abs(da) + abs(db) < 1e-8:
+            break
+    return a, b
+
+
+def count_readings(hands: list[dict]) -> dict:
+    """読みの出所ごとに「その読みが選択肢にあったとき、真の行を説明した割合」と、今の値の見込み（発話の選択肢の確からしさの
+    softmax）を並べる。既定の読みは「既定: <出所>」、捨てる読み（drop）は「何も説明しなかった」を当たりとする。別の読みは
+    既定の読みとの確からしさの差 Δ に対する当たりの割合をロジスティックで当てはめる（読みの値が当たっていれば a ≈ 0・b ≈ 1）。"""
+    from collections import defaultdict
+
+    stats: dict[str, dict] = defaultdict(lambda: {"n": 0, "x": 0, "model": 0.0, "dx": [], "dy": []})
+    for a in hands:
+        for u in a.get("utterances") or []:
+            opts = u.get("options")
+            if not opts:
+                continue
+            probs = _softmax([o["logp"] for o in opts])
+            explained = u.get("matched", 0) > 0
+            for i, (o, p) in enumerate(zip(opts, probs)):
+                if o["tokens"] == 0:
+                    name, hit = "捨てる", not explained
+                elif i == 0:
+                    name, hit = f"既定: {o['source']}", u["option"] == 0 and explained
+                else:
+                    name, hit = o["source"], u["option"] == i and explained
+                s = stats[name]
+                s["n"] += 1
+                s["x"] += int(hit)
+                s["model"] += p
+                if i > 0:
+                    s["dx"].append(o["logp"] - opts[0]["logp"])
+                    s["dy"].append(int(hit))
+    out = {}
+    for name, s in sorted(stats.items(), key=lambda kv: -kv[1]["n"]):
+        lo, hi = wilson(s["x"], s["n"])
+        fit = logistic_fit(s["dx"], s["dy"]) if s["dx"] else None
+        out[name] = {"n": s["n"], "x": s["x"], "p": s["x"] / s["n"] if s["n"] else None, "lo": lo, "hi": hi,
+                     "model": s["model"] / s["n"] if s["n"] else None,
+                     "fit": None if fit is None else {"a": round(fit[0], 2), "b": round(fit[1], 2)}}
     return out
 
 
@@ -485,7 +568,7 @@ def format_counts(counts: dict) -> list[str]:
         lines.append("| 値 | 今 | 数えた値 | 95% 区間 | x / n |")
         lines.append("|---|---|---|---|---|")
         for name, v in res.items():
-            if name in ("hands", "fold_lag", "lift_sec"):
+            if name in ("hands", "fold_lag", "lift_sec", "readings"):
                 continue
             now = "—" if v["now"] is None else f"{v['now']:g}"
             p = "—" if v["p"] is None else f"{v['p']:.3f}"
@@ -501,6 +584,18 @@ def format_counts(counts: dict) -> list[str]:
         per = "—" if lift["sec_per_lift"] is None else f"{lift['sec_per_lift']:.0f}"
         lines.append(f"| 持ち上げ（秒 / 1 席） | {lift['now']:g} | {per} | — | {lift['lifts']} 回 / {lift['seat_sec']} 席秒 |")
         lines.append("")
+        readings = res.get("readings") or {}
+        if readings:
+            lines.append("読みの出所ごと（その読みが選択肢にあった発話のうち、真の行を説明した割合 / 今の値の見込み）:")
+            lines.append("")
+            lines.append("| 読み | 当たり | 95% 区間 | x / n | 今の値の見込み | 既定との差 Δ への当てはめ σ(a + b·Δ) |")
+            lines.append("|---|---|---|---|---|---|")
+            for name, v in readings.items():
+                fit = "—" if v["fit"] is None else f"a {v['fit']['a']:+.2f}・b {v['fit']['b']:.2f}"
+                mark = "（目安）" if v["n"] < 20 else ""
+                lines.append(f"| {name} | {v['p']:.3f}{mark} | {v['lo']:.3f}〜{v['hi']:.3f} | {v['x']} / {v['n']} | "
+                             f"{v['model']:.3f} | {fit} |")
+            lines.append("")
     return lines
 
 

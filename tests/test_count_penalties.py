@@ -1,9 +1,12 @@
 """tools/count_penalties.py — 真のアクションと観測の対応づけ（台帳 F の F1）と数え上げ（F2）。"""
 from __future__ import annotations
 
+import math
+
 import pytest
 
-from tools.count_penalties import Token, align_words, count_all, match_kind, street_cards
+from tools.count_penalties import (Token, align_words, count_all, count_readings, logistic_fit, match_kind,
+                                   street_cards)
 
 T0 = 1_000_000.0
 
@@ -99,6 +102,37 @@ def test_count_unspoken_and_departures():
     assert (res["p_miss_last_fold"]["x"], res["p_miss_last_fold"]["n"]) == (1, 1)   # 最後のフォールドは言われない
     assert res["fold_lag"]["n"] == 1 and res["fold_lag"]["median"] == pytest.approx(0.2)
     assert res["lift_sec"]["lifts"] == 1
+
+
+def test_chosen_reading_counts_the_matched_words():
+    utts = [_opts(5, ("whisper", [("call", 0)]), ("ear", [("bet", 700)]))]
+    _words, _extra, chosen = align_words(ROWS[:1], utts, {}, T0)
+    assert chosen[0]["option"] == 1 and chosen[0]["matched"] == 1
+
+
+def test_count_readings():
+    def utt(option, matched, *opts):
+        return {"option": option, "matched": matched,
+                "options": [{"source": s, "logp": lp, "tokens": n} for s, lp, n in opts]}
+    a = {"utterances": [utt(0, 1, ("whisper", 0.0, 1), ("ear", -2.0, 1), ("drop", -4.0, 0)),
+                        utt(1, 1, ("whisper", 0.0, 1), ("ear", -2.0, 1)),
+                        utt(0, 0, ("whisper", 0.0, 1), ("drop", -4.0, 0))]}
+    res = count_readings([a])
+    assert (res["既定: whisper"]["x"], res["既定: whisper"]["n"]) == (1, 3)
+    assert (res["ear"]["x"], res["ear"]["n"]) == (1, 2)
+    assert (res["捨てる"]["x"], res["捨てる"]["n"]) == (1, 2)       # 何も説明しなかった発話の「捨てる」が当たり
+    assert res["ear"]["model"] == pytest.approx(math.exp(-2) / (1 + math.exp(-2) + math.exp(-4)) / 2
+                                                + math.exp(-2) / (1 + math.exp(-2)) / 2)
+
+
+def test_logistic_fit_recovers_the_slope():
+    import random
+
+    rng = random.Random(3)
+    xs = [rng.uniform(-6, 2) for _ in range(3000)]
+    ys = [int(rng.random() < 1 / (1 + math.exp(-(0.5 + 1.0 * x)))) for x in xs]
+    a, b = logistic_fit(xs, ys)
+    assert a == pytest.approx(0.5, abs=0.2) and b == pytest.approx(1.0, abs=0.15)
 
 
 @pytest.mark.slow
