@@ -62,3 +62,6 @@
 試験: `handReplayModel.test.ts` に 5 つ（mobile 61・staff 65 件）、両アプリの `tsc --noEmit`、Python の速い組。見本のハンド（6 人卓・
 BB アンティ・フロップで全員降りた・記録のボードは 5 枚）をお客さん向けの画面で開き、札・ポスト・ボードがフロップの 3 枚までに
 なることを目で確かめた。
+
+オーナー:「セッション内ハンド一覧のほうも隠して」→ `mobile/src/screens/MyHandsScreen.tsx`・`staff/src/screens/HandTab.tsx` の一覧の
+「board …」も `shownBoard` に。見本で一覧が「board Qs Jh 4d」（記録は 5 枚）になることを確かめた。

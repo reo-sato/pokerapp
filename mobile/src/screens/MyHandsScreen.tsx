@@ -6,6 +6,7 @@ import type { HandSummary, Player, PlayerSessionSummary } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
 import { BackLink, ErrorView, Loading, ReloadLink, formatResult, styles } from "./common";
 import { newestHandsFirst } from "../ordering";
+import { shownBoard } from "../shared/hand_replay/handReplayModel";
 
 interface Props {
   repository: ViewerRepository;
@@ -70,7 +71,7 @@ export function MyHandsScreen({
                 </Text>
                 <Text style={styles.cardMeta}>
                   {item.started_at}
-                  {item.board?.length ? ` ・ board ${item.board.join(" ")}` : ""}
+                  {shownBoard(item).length ? ` ・ board ${shownBoard(item).join(" ")}` : ""}
                   {item.pot_total != null ? ` ・ pot ${item.pot_total}` : ""}
                 </Text>
               </Pressable>
