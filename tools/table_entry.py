@@ -5,7 +5,8 @@
 
 真のアクションの入力画面のサーバー（`tools/ground_truth_ui.py`）が `/table` で出す。
 
-- 入れるハンド: ロガーが進めているハンド（`live_hand.json`）。終わっていれば次のハンド（まだ配っていない = `pending`）。
+- 開いたときに入れるハンド: ロガーのいちばん新しいハンド（進行中 = `live_hand.json` を含む）の次（まだ配っていない = `pending`）。
+  前のハンドが配られた時点で次のハンドに移る（2026-10-26）。進行中・終わったハンドは「← 前」で開ける。
   次のハンドの席・持ち点・ボタン・ブラインドは前のハンドから見込む（前のハンドの真のアクションがあればその収支）。
 - 行の手番・ストリート・額は入力画面と同じく pokerkit で流す（`replay_legal`）。手番より先の席を押したら、間の席は
   フォールド（フォールドは省略されることがある = オーナー 2026-10-23）として入れる（`auto`）。
@@ -117,11 +118,11 @@ def table_hand(log_dir: Path, session_id: str, hand_id: int, gt_repo: Any, corr_
 
 
 def current_hand_id(log_dir: Path, session_id: str, corr_repo: Any = None) -> Optional[int]:
-    """いま入れるハンド: 進行中のハンド、無ければ次のハンド（まだ配っていない）。"""
+    """いま入れるハンド: いちばん新しいハンドの次（まだ配っていない）。前のハンドが始まった（配られた）時点で次のハンドに
+    移る（オーナー 2026-10-26: 前のハンドが終わる = ロガーが勝者を決める・次の配布、まで待たない）。"""
     hands, live = _hand_of(log_dir, session_id, corr_repo)
-    if live is not None:
-        return live["hand_id"]
-    return (max(h["hand_id"] for h in hands) + 1) if hands else None
+    ids = [h["hand_id"] for h in hands] + ([live["hand_id"]] if live is not None else [])
+    return (max(ids) + 1) if ids else None
 
 
 def fill_folds(table: dict, rows: list[dict], button: Optional[int]) -> list[dict]:

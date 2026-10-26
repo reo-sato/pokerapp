@@ -82,6 +82,11 @@ def test_pending_entry_is_saved_once_the_logger_starts_the_hand(log_dir, tmp_pat
         (log_dir / f"{SID}.live_hand.json").write_text(json.dumps({"hand": live}), encoding="utf-8")
         with urllib.request.urlopen(f"{base}/api/table/{SID}/hands/2") as resp:
             assert json.loads(resp.read())["state"] == "in_progress"
+        # 前のハンド（2）が配られた時点で、開いたときに入れるハンドは次（3）に移る（終わるのを待たない, 2026-10-26）
+        with urllib.request.urlopen(f"{base}/api/table/{SID}/current") as resp:
+            assert json.loads(resp.read())["hand_id"] == 3
+        with urllib.request.urlopen(f"{base}/api/table/{SID}/hands/3") as resp:
+            assert json.loads(resp.read())["state"] == "pending"
         with urllib.request.urlopen(req) as resp:
             assert resp.status == 200
         req = urllib.request.Request(f"{base}/api/table/{SID}/hands/2/legal",
