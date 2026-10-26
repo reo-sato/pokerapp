@@ -65,3 +65,11 @@ BB アンティ・フロップで全員降りた・記録のボードは 5 枚�
 
 オーナー:「セッション内ハンド一覧のほうも隠して」→ `mobile/src/screens/MyHandsScreen.tsx`・`staff/src/screens/HandTab.tsx` の一覧の
 「board …」も `shownBoard` に。見本で一覧が「board Qs Jh 4d」（記録は 5 枚）になることを確かめた。
+
+## 追記: ロガーの起動で卓の形の入力画面を開く（同日）
+
+オーナー:「PC の真のアクション入力画面を、ロガー起動時に起動するようにして」。サーバーはロガーの中ではなく別のプロセス（ロガーを
+閉じたあとも真のアクションを入れ続けるため。台本の `start_script.cmd` と同じやり方）: `start_logger.cmd` が 8791 が空いていれば別の窓で
+`start_truth.cmd`。`main.py:_open_truth_table` がセッションを始めたあと（設定画面の「始める」のあと）にサーバーが立つのを 20 秒まで待ち、
+`webbrowser.open("http://127.0.0.1:8791/table")`。端末が対話でない起動・台本・札の確認・`ground_truth.open_table=false` では開かない。
+試験 `tests/test_main_truth_table.py`（開く・立っていなければ案内・切れる・cmd の順）。

@@ -182,6 +182,8 @@
     "_buyin_presets_comment": "ADR-0026: buy-in 記帳時にスタッフが選ぶ金額プリセット（整数円）。--ledger 画面でボタン表示、staff API GET /api/staff/buyin-presets でも取得。店が編集する。chips とは別単位・自動換算なし。"
   },
   "ground_truth": {
+    "open_table": true,
+    "_open_table_comment": "2026-10-26: true なら、ロガー（--cli）がセッションを始めたあとに、この PC のブラウザで真のアクション入力の卓の形の画面（http://127.0.0.1:8791/table）を開く。入力画面のサーバーは start_logger.cmd が別の窓で立てる（もう動いていれば立てない）。台本・札の確認の起動では開かない。",
     "evaluation": false,
     "feed_stacks": false,
     "_feed_stacks_comment": "2026-10-19: true なら、真のアクション入力の画面で保存したハンドの収支をロガーに送り、ロガーは記録の収支との差を持ち点に足す（次のアクションの推定に使う持ち点を真のアクションに合わせる。制御 truth_stacks = events.jsonl に残る）。ロガー（--cli）は起動のときに読む。",

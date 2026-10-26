@@ -235,6 +235,40 @@ def _session_config(cfg: dict):
     return result, app
 
 
+TRUTH_PORT = 8791   # 真のアクション入力の画面（tools/ground_truth_ui.py, start_truth.cmd）
+
+
+def _open_truth_table(cfg: dict, wait_sec: float = 20.0) -> None:
+    """セッションを始めたら、この PC のブラウザで真のアクション入力の卓の形の画面を開く（オーナー 2026-10-26）。
+
+    サーバーは start_logger.cmd が別の窓で立てる（ロガーを閉じても入力を続けられるように別のプロセス）。立ち上がるのを
+    `wait_sec` 秒まで待ち、立っていなければ案内だけ出す。config `ground_truth.open_table`（既定 true）。
+    """
+    import socket
+    import time as _time
+
+    if not bool((cfg.get("ground_truth") or {}).get("open_table", True)) or not sys.stdin.isatty():
+        return
+    url = f"http://127.0.0.1:{TRUTH_PORT}/table"
+    deadline = _time.time() + wait_sec
+    while True:
+        try:
+            with socket.create_connection(("127.0.0.1", TRUTH_PORT), timeout=1.0):
+                break
+        except OSError:
+            if _time.time() >= deadline:
+                print(f"真のアクション入力の画面が動いていません。start_truth.cmd を起動してから {url} を開いてください。")
+                return
+            _time.sleep(0.5)
+    print(f"真のアクション入力（卓の形）: {url}（この PC のブラウザで開きます）")
+    try:
+        import webbrowser
+
+        webbrowser.open(url)
+    except Exception:  # noqa: BLE001 — 開けなくてもロガーは続ける
+        pass
+
+
 def _make_tournament(table: dict):
     """トーナメントの時計（ADR-0071）。リングゲーム・設定の無い起動（台本）は None。"""
     if not table or table.get("mode") != "tournament":
@@ -1041,6 +1075,8 @@ def run_cli(script: str | None = None) -> None:
     elif test_script is not None:
         print("札の確認（席 4・5・6、1 ハンド目のボタンは席 6）。手順は iPad の「台本」"
               "（http://<この PC の IP>:8791/script）に出ます。")
+    else:
+        _open_truth_table(cfg)
     if session_repo is not None:
         seated = ", ".join(
             f"席{p['seat']}={p['name']}" for p in session_cfg["players"] if p.get("named", True)
