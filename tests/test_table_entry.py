@@ -158,3 +158,61 @@ def test_the_first_hand_can_be_entered_when_the_session_starts(tmp_path):
     # 卓の設定が無い記録（古い記録）は今までどおり何も出さない
     (d / f"{SID}.json").write_text(json.dumps({"session_id": SID, "hands": []}), encoding="utf-8")
     assert current_hand_id(d, SID) is None
+
+
+def test_table_entry_reaches_the_players_history_with_show_truth(tmp_path):
+    """卓の形の画面で保存した真のアクションが、お客さんの履歴（viewer の `show_truth`）に出る（2026-10-26 オーナーの確認）。
+
+    画面と同じ本文（行は `table_legal` の `actions`・席は番号だけ・`blind`）を同じ受け口（PUT）で保存し、
+    `list_player_hands` / `get_hand` の `truth=True` で真のアクションの形になって返ること。保存していないハンドは出ない。
+    """
+    from api.read_models import get_hand, list_player_hands
+    from core.player_repository import PlayerRepository
+    from core.session_repository import SessionRepository
+    from tests.test_tools_ground_truth_ui import _hand
+
+    pr = PlayerRepository(tmp_path / "players.json")
+    sr = SessionRepository(tmp_path / "sessions.json", player_repo=pr)
+    sid = sr.create_session(label="見本").session_id
+    ids = {s: pr.create_player(n).player_id for s, n in ((4, "A"), (5, "B"), (6, "C"))}
+    for hid in (1, 2):
+        for seat, pid in ids.items():
+            sr.assign_seat(sid, hid, seat, pid)
+    d = tmp_path / "logs"
+    d.mkdir()
+    hands = [dict(_hand(h), session_id=sid) for h in (1, 2)]
+    (d / f"{sid}.json").write_text(json.dumps({"session_id": sid, "hands": hands}), encoding="utf-8")
+
+    repo = GroundTruthRepository(d)
+    # 真: 席6 レイズ 600・席4 フォールド・席5 コール → フロップ 席5 チェック・席6 ベット 800・席5 フォールド（記録とは違う）
+    rows = [{"seat": 6, "action": "raise", "amount": 600}, {"seat": 4, "action": "fold"},
+            {"seat": 5, "action": "call"}, {"seat": 5, "action": "check"},
+            {"seat": 6, "action": "raise", "amount": 800}, {"seat": 5, "action": "fold"}]
+    status, r = table_legal(d, sid, 1, {"actions": rows, "button_seat": 6}, repo)
+    assert status == 200 and r["error"] is None and r["next"]["hand_over"]
+    hand = {"board": ["As", "Kd", "7h"], "players": [{"seat": s} for s in (4, 5, 6)], "button_seat": 6,
+            "notes": "", "blind": True, "winner_seat": r["next"]["foldout_winner"],
+            "actions": [{"seat": a["seat"], "action": a["action"], "amount": a.get("amount") or 0, "street": a["street"]}
+                        for a in r["actions"]]}
+    srv = make_server(d, "127.0.0.1", 0, tmp_path / "corr.json")
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{srv.server_address[1]}/api/sessions/{sid}/hands/1",
+            data=json.dumps({"source": "manual-edit", "annotator": "table", "hand": hand, "entry_sec": 30.0,
+                             "confirm_lint": True}).encode(),
+            method="PUT", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req) as resp:
+            assert resp.status == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    shown = list_player_hands(ids[5], sid, sr, d, truth=True)
+    assert [h["hand_id"] for h in shown] == [1]                       # 保存していないハンド 2 は出ない
+    got = get_hand(sid, 1, d, truth=True)
+    assert [(a["seat"], a["action"]) for a in got["actions"]] == [
+        (6, "raise"), (4, "fold"), (5, "call"), (5, "check"), (6, "bet"), (5, "fold")]
+    assert got["winner_seat"] == 6 and got["button_seat"] == 6
+    # show_truth が false（既定）なら記録のまま（真のアクションは出ない）
+    assert get_hand(sid, 1, d)["winner_seat"] == 5

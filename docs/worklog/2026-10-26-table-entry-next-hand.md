@@ -81,3 +81,10 @@ BB アンティ・フロップで全員降りた・記録のボードは 5 枚�
 セッションの始めに書く卓の設定）と `first_skeleton`（席・名前・持ち点 = 持ち点を数えないモードは 0・ブラインドと BB アンテ・
 `first_button`）。`current_hand_id` はハンドが無く卓の設定があれば 1、`table_hand(1)` はその見込みを `pending` で。ロガーは卓の設定を
 書いてから入力画面を開く（`_record_table` → `_open_truth_table`）。試験 `tests/test_table_entry.py` に 1 つ。
+
+## 追記: 卓の形の画面で入れたハンドはお客さんの履歴に出るか（同日）
+
+オーナー:「テーブル UI で入力後、履歴 UI に表示されるようになっていますか？」→ config `viewer_api.show_truth` が true のときだけ出る
+（既定 false = ロガーの記録を見せる）。出るのは、ロガーが確定したハンドで、真のアクションを保存して勝者まで入ったもの。通しの試験
+`tests/test_table_entry.py::test_table_entry_reaches_the_players_history_with_show_truth`（画面と同じ本文を同じ受け口で保存 →
+`list_player_hands` / `get_hand` の `truth=True`）を足した。コードの変更は無し。
