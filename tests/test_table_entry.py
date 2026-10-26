@@ -61,6 +61,45 @@ def test_skipped_seats_are_folded(log_dir):
     assert r["actions"][-1]["action"] == "call" and r["next"]["street"] == "flop"
 
 
+def _rows(r):
+    return [(a["seat"], a["action"], a.get("auto", False)) for a in r["rows"]]
+
+
+def test_skipped_seats_not_facing_a_bet_are_checked(log_dir):
+    """補うのはルールどおりのものだけ: ベットに向き合っていない席はチェック（チェックできるのに降りたことにしない）。"""
+    repo = GroundTruthRepository(log_dir)
+    pre = [{"seat": 4, "action": "call"}, {"seat": 5, "action": "call"}, {"seat": 6, "action": "check"}]
+    status, r = table_legal(log_dir, SID, 2, {"actions": pre + [{"seat": 6, "action": "raise", "amount": 400}]}, repo)
+    assert status == 200 and r["error"] is None
+    assert _rows(r)[3:] == [(5, "check", True), (6, "raise", False)]
+    assert r["next"]["actor_seat"] == 4
+
+
+def test_a_fill_that_ends_the_hand_is_not_made_and_the_click_is_rejected(log_dir):
+    """補うとほかが全員降りて押した席が動けなくなるなら補わない。押した行は入れずに理由を返す（前の行は変えない）。"""
+    repo = GroundTruthRepository(log_dir)
+    rows = [{"seat": 4, "action": "raise", "amount": 600}, {"seat": 5, "action": "fold"},
+            {"seat": 6, "action": "raise", "amount": 1800}]
+    body = {"actions": rows + [{"seat": 6, "action": "call"}], "check_last": True}
+    status, r = table_legal(log_dir, SID, 2, body, repo)
+    assert status == 200 and r["error"] is None
+    assert r["rejected"]["message"]
+    assert _rows(r) == [(4, "raise", False), (5, "fold", False), (6, "raise", False)]
+    assert r["next"]["actor_seat"] == 4
+    # check_last が無ければ従来どおり、その行で止まったことを見せる
+    status, r = table_legal(log_dir, SID, 2, {"actions": rows + [{"seat": 6, "action": "call"}]}, repo)
+    assert r["error"]["index"] == 3 and "rejected" not in r
+
+
+def test_filled_rows_are_redone_for_the_current_button(log_dir):
+    """前に補った行は捨てて、いまのボタンで補い直す（ボタンを直したとき合わない行が残らない）。"""
+    repo = GroundTruthRepository(log_dir)
+    rows = [{"seat": 4, "action": "fold", "auto": True}, {"seat": 5, "action": "raise", "amount": 600}]
+    status, r = table_legal(log_dir, SID, 2, {"actions": rows, "button_seat": 5}, repo)
+    assert status == 200 and r["error"] is None
+    assert _rows(r) == [(5, "raise", False)]          # ボタン 5 の 3 人卓は席5 から
+
+
 def test_pending_entry_is_saved_once_the_logger_starts_the_hand(log_dir, tmp_path):
     """まだ配っていないハンドは保存できない（404）。ロガーが始めたら保存できる。"""
     srv = make_server(log_dir, "127.0.0.1", 0, tmp_path / "corr.json")
@@ -90,11 +129,11 @@ def test_pending_entry_is_saved_once_the_logger_starts_the_hand(log_dir, tmp_pat
         with urllib.request.urlopen(req) as resp:
             assert resp.status == 200
         req = urllib.request.Request(f"{base}/api/table/{SID}/hands/2/legal",
-                                     data=json.dumps({"actions": [{"seat": 5, "action": "call"}]}).encode(),
+                                     data=json.dumps({"actions": [{"seat": 4, "action": "call"}]}).encode(),
                                      method="POST", headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req) as resp:
             r = json.loads(resp.read())
-        assert [a["seat"] for a in r["rows"]] == [6, 4, 5]      # ロガーのハンド 2 はボタン 6 → 手番は席6 から
+        assert [a["seat"] for a in r["rows"]] == [6, 4]         # ロガーのハンド 2 はボタン 6 → 手番は席6 から
     finally:
         srv.shutdown()
         srv.server_close()
@@ -216,3 +255,45 @@ def test_table_entry_reaches_the_players_history_with_show_truth(tmp_path):
     assert got["winner_seat"] == 6 and got["button_seat"] == 6
     # show_truth が false（既定）なら記録のまま（真のアクションは出ない）
     assert get_hand(sid, 1, d)["winner_seat"] == 5
+
+
+def _stackless_two_hands(tmp_path: Path) -> Path:
+    d = tmp_path / "logs_carry"
+    d.mkdir()
+    hands = [{"hand_id": h, "session_id": SID, "started_at": f"2026-10-26T20:0{h}:00", "ended_at": f"2026-10-26T20:0{h}:50",
+              "stackless": True, "blinds": {"sb": 400, "bb": 800}, "board": [], "button_seat": b,
+              "players": [{"seat": s, "name": f"player{s}"} for s in (2, 3, 4, 5, 8)], "actions": [], "winner_seat": 2}
+             for h, b in ((1, 8), (2, 2))]
+    (d / f"{SID}.json").write_text(json.dumps({"session_id": SID, "hands": hands}), encoding="utf-8")
+    return d
+
+
+def test_stackless_seating_set_on_the_table_carries_to_the_next_hands(tmp_path):
+    """持ち点を数えないモード: 画面で空席にした・席に入れた状態を次のハンド以降も引き継ぐ（ロガーにだけある席は
+    `captured_seats` で返し、画面は空席で出す。オーナー 2026-10-26）。"""
+    d = _stackless_two_hands(tmp_path)
+    repo = GroundTruthRepository(d)
+    # ハンド 1 の真のアクション: 席 7 に人が座った（席に戻した）・席 3 は空席
+    gt1 = {"button_seat": 8, "winner_seat": 2, "blind": True, "actions": [],
+           "players": [{"seat": 2}, {"seat": 3, "absent": True}, {"seat": 4}, {"seat": 5}, {"seat": 8},
+                       {"seat": 7, "name": "席7", "stack_start": None}]}
+    repo.upsert(SID, 1, gt1, annotator="table", source="manual-edit")
+    t2 = table_hand(d, SID, 2, repo)
+    assert [p["seat"] for p in t2["base"]["players"]] == [2, 4, 5, 7, 8]
+    assert t2["captured_seats"] == [2, 3, 4, 5, 8]
+    t3 = table_hand(d, SID, 3, repo)                    # まだ配っていない次のハンドも同じ席・ボタンは席 2 の次
+    assert t3["state"] == "pending" and [p["seat"] for p in t3["base"]["players"]] == [2, 4, 5, 7, 8]
+    assert t3["base"]["button_seat"] == 4
+
+
+def test_seat_toggle_is_sent_to_the_logger(tmp_path):
+    """画面の「空席にする / 席に戻す」は制御（sit_out / sit_in）でロガーへ（次のハンドから）。"""
+    from core.control_queue import ControlCommandLog
+    from tools.table_entry import send_seat
+
+    d = _stackless_two_hands(tmp_path)
+    assert send_seat(d, SID, {"seat": 7, "in": True})[0] == 200
+    assert send_seat(d, SID, {"seat": 3, "in": False})[0] == 200
+    assert send_seat(d, SID, {"seat": 12, "in": True})[0] == 400
+    cmds, _ = ControlCommandLog(d / f"{SID}.control.jsonl").read_from(0)
+    assert [(c.type, c.args) for c in cmds] == [("sit_in", {"seat": 7}), ("sit_out", {"seat": 3})]

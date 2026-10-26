@@ -1049,19 +1049,18 @@ def run_cli(script: str | None = None) -> None:
     if audio_thread is not None:
         audio_thread.start()
     integration_thread.start()
-    feed_stacks = bool((cfg.get("ground_truth") or {}).get("feed_stacks", False))
-    if test_script is not None or feed_stacks:
-        # 画面の操作（台本のハンドを始める）は制御で受け取る。先に言われた発話の聞き取りを待ってから積む
-        # （前のハンドの最後のアクションを次のハンドに入れない = CLI の入力と同じ）。真のアクションの収支で持ち点を
-        # 直す（`ground_truth.feed_stacks`, 2026-10-19）のも同じ制御で受け取る
-        from core.control_queue import ControlCommandLog
-        from integration.control_consumer import ControlConsumerThread
+    # 画面の操作（台本のハンドを始める）は制御で受け取る。先に言われた発話の聞き取りを待ってから積む
+    # （前のハンドの最後のアクションを次のハンドに入れない = CLI の入力と同じ）。真のアクションの収支で持ち点を
+    # 直す（`ground_truth.feed_stacks`, 2026-10-19）・卓の形の入力画面の空席 / 席に戻す（次のハンドの席,
+    # 2026-10-26）も同じ制御で受け取る（いつも動かす。画面が書かなければ何も来ない）
+    from core.control_queue import ControlCommandLog
+    from integration.control_consumer import ControlConsumerThread
 
-        control_thread = ControlConsumerThread(
-            ControlCommandLog(Path(session_cfg["log_dir"]) / f"{session_id}.control.jsonl"), audio_q, stop_event,
-            backlog=audio_thread.backlog if audio_thread is not None else None,
-            pending_before=audio_thread.pending_before if audio_thread is not None else None)
-        control_thread.start()
+    control_thread = ControlConsumerThread(
+        ControlCommandLog(Path(session_cfg["log_dir"]) / f"{session_id}.control.jsonl"), audio_q, stop_event,
+        backlog=audio_thread.backlog if audio_thread is not None else None,
+        pending_before=audio_thread.pending_before if audio_thread is not None else None)
+    control_thread.start()
     if audio_thread is not None:
         _report_audio_start(audio_thread, audio_cfg.get("device_id", 0))
 
@@ -1183,10 +1182,19 @@ def run_cli(script: str | None = None) -> None:
                     print("使い方: name <席> <名前> / name <席> -（空席）")
                 else:
                     seat, name = parsed
-                    if seat not in {p["seat"] for p in session_cfg["players"]}:
-                        print(f"席{seat} はこの卓にありません")
-                        continue
                     vacate = name is None
+                    adding = seat not in {p["seat"] for p in session_cfg["players"]}
+                    if adding:
+                        # 途中から座った人（次のハンドから席を足す, 2026-10-26。pokerkit の卓だけ = legacy は席を足せない）
+                        if vacate or not 1 <= seat <= 9 or not hasattr(game_state, "add_seat"):
+                            print(f"席{seat} はこの卓にありません")
+                            continue
+                        session_cfg["players"].append({"seat": seat, "name": name, "stack": 0, "named": True})
+                        print(f"席{seat} を足します（次のハンドから。持ち点を数えるなら r {seat} <金額> で買い込み）")
+                        audio_q.put(AudioEvent(            # 先に席を足す（名前の変更が席を見つけられるように）
+                            action="sit_in", amount=0, timestamp=_time.time(),
+                            raw_text=f"シート{seat} 参加", seat=seat,
+                        ))
                     if session_repo is None:
                         print("（席とお客さんの記録は無効です: config の session_layer.enabled=true で有効。"
                               "席の参加・休みだけ反映します）")
@@ -1206,10 +1214,11 @@ def run_cli(script: str | None = None) -> None:
                         raw_text=shown, seat=seat,
                     ))
                     # 空席は次のハンドから配られない（休み）。名前を付けた席は参加（休みなら戻す）。
-                    audio_q.put(AudioEvent(
-                        action="sit_out" if vacate else "sit_in", amount=0, timestamp=_time.time(),
-                        raw_text=f"シート{seat} {'休み' if vacate else '参加'}", seat=seat,
-                    ))
+                    if not adding:
+                        audio_q.put(AudioEvent(
+                            action="sit_out" if vacate else "sit_in", amount=0, timestamp=_time.time(),
+                            raw_text=f"シート{seat} {'休み' if vacate else '参加'}", seat=seat,
+                        ))
                     if vacate:
                         print(f"席{seat} を空席にしました（次のハンドから配られません）")
                     else:

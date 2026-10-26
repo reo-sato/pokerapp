@@ -931,6 +931,7 @@ _ROUTE_REVIEW_HAND = re.compile(r"^/api/review/([^/]+)/(\d+)/?$")
 _ROUTE_TABLE_CURRENT = re.compile(r"^/api/table/([^/]+)/current/?$")
 _ROUTE_TABLE_HAND = re.compile(r"^/api/table/([^/]+)/hands/(\d+)/?$")
 _ROUTE_TABLE_LEGAL = re.compile(r"^/api/table/([^/]+)/hands/(\d+)/legal/?$")
+_ROUTE_TABLE_SEAT = re.compile(r"^/api/table/([^/]+)/seat/?$")
 _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
@@ -1193,6 +1194,16 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/script/"):
             self._send_json(*srv.script.route("POST", path, self._read_json() or {}))
+            return
+        m = _ROUTE_TABLE_SEAT.match(path)
+        if m:
+            from tools.table_entry import send_seat
+
+            sid = self._session(m.group(1))
+            if sid is None:
+                self._send_json(404, {"code": "not_found", "message": "セッションのログがありません"})
+            else:
+                self._send_json(*send_seat(srv.log_dir, sid, self._read_json()))
             return
         m = _ROUTE_TABLE_LEGAL.match(path)
         if m:

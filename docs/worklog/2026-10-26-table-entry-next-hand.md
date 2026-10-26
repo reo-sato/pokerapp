@@ -88,3 +88,25 @@ BB アンティ・フロップで全員降りた・記録のボードは 5 枚�
 （既定 false = ロガーの記録を見せる）。出るのは、ロガーが確定したハンドで、真のアクションを保存して勝者まで入ったもの。通しの試験
 `tests/test_table_entry.py::test_table_entry_reaches_the_players_history_with_show_truth`（画面と同じ本文を同じ受け口で保存 →
 `list_player_hands` / `get_hand` の `truth=True`）を足した。コードの変更は無し。
+
+## 追記: 席の操作と補い方（同日、店舗 10/26 のログのあと）
+
+オーナー:「スタック無視モードでは卓 UI で空席や席へのアサインをしたら次以降のハンドでもそのままに」「UI での入力でアサインを
+操作できるように」「自動でフォールドを補ってそのあと矛盾が生じたときに違法なアクションですと言われても困るので、合法な補完だけ」
+「ルールと矛盾が生じたときに席のボタンクリックが効かなくなるのもおかしい」。10/26 のログでは席 7 が 5 ハンド目から座ったが、ロガーに
+席を足す手段が無く（`r 7` は Unknown seat）、ボタン・勝者の一致が大きく崩れていた。
+
+- `core/poker_engine.py`: `add_seat`（持ち点 0 で足す）。`sit_in` と `rebuy` は卓に無い席を足す。legacy は従来どおり（席を足せない）。
+- `main.py`: `name <席> <名前>` は卓に無い席を足す（pokerkit のときだけ。先に `sit_in` を積んでから名前）。遠隔制御は CLI でも常に読む。
+- `integration/engine.py:_apply_truth_stacks`: 持ち点を数えないモードでは何もしない（`int - None` の例外）。
+- `tools/table_entry.py`: `_carried_seating`（持ち点を数えないモードで、まだ真のアクションの無いハンドは前の真のアクションの席で始める・
+  ボタンもその席で回す）、`captured_seats`（ロガーの席。画面に無ければ空席で出す）、`send_seat`（`POST /api/table/<sid>/seat` →
+  `sit_in` / `sit_out`）。`fill_folds` はベットに向き合っていればフォールド・いなければチェックを補い、補うと押した行が合わない
+  （全員降りる・ストリートが変わる）なら補わない。届いた `auto` の行は捨てて補い直す。`table_legal` の `check_last` = 押した行が
+  合わなければその行を除いた結果と `rejected` を返す。
+- 画面: 合わない行で止まっていても席のボタンが効く（その行から先を外す + お知らせ）、↶ 戻すは履歴（行・勝者・ボタン）で 1 つずつ、
+  お知らせは 8 秒残す。
+
+試験: `tests/test_seats_and_blinds.py::TestAddSeat`（4）、`tests/test_table_entry.py`（引き継ぎ・席の送信・チェックを補う・全員降りる補いは
+しない・ボタンを直すと補い直す）、`tests/test_cli_session_layer.py::test_a_seat_can_be_added_mid_session`。ブラウザ（Playwright）で、
+合わない「コール」が入らずに理由が出ること、ボタンを直して止まった行のあと席を押すと外して入れ直し、↶ 戻すで戻ることを確かめた。

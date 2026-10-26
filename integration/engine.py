@@ -4973,6 +4973,8 @@ class IntegrationThread(threading.Thread):
         self._apply_truth_stacks(hand_id)
 
     def _apply_truth_stacks(self, hand_id: int) -> None:
+        if getattr(self._game_state, "stackless", False):
+            return                                # 持ち点を数えないモード: 記録に収支が無い（直すものも無い, 2026-10-26）
         truth = self._truth_results.get(hand_id)
         recorded = self._recorded_results.get(hand_id)
         if truth is None or recorded is None:

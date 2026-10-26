@@ -813,13 +813,29 @@ class PokerkitGameState:
         return seat in self._sitting_out
 
     def sit_in(self, seat: int) -> bool:
-        """休みの席を戻す（次のハンドから配られる。スタック 0 なら買い足すまで配られない）。変わったら True。"""
+        """休みの席を戻す（次のハンドから配られる。スタック 0 なら買い足すまで配られない）。変わったら True。
+
+        卓に無い席（1〜9）は足す（途中から座った人, オーナー 2026-10-26: 店舗 10/26 は席 7 を足せなかった）。持ち点を
+        数えないモードではそのまま配られ、数えるモードでは持ち点 0 = 買い足す（`rebuy`）まで配られない。
+        """
         if seat not in self._players:
-            raise ValueError(f"Unknown seat: {seat}")
+            self.add_seat(seat)
+            return True
         if seat not in self._sitting_out:
             return False
         self._sitting_out.discard(seat)
         return True
+
+    def add_seat(self, seat: int, name: Optional[str] = None) -> None:
+        """卓に無い席を足す（次のハンドから。持ち点 0、持ち点を数えないモードでは数えない）。1〜9 以外は ValueError。"""
+        if isinstance(seat, bool) or not isinstance(seat, int) or not 1 <= seat <= 9:
+            raise ValueError(f"Unknown seat: {seat}")
+        if seat in self._players:
+            return
+        self._players[seat] = PlayerState(seat=seat, name=name or f"Player{seat}", stack=0)
+        self._seats = sorted(self._players)
+        self._stacks[seat] = 0
+        logger.info("席 %d を足しました（次のハンドから）", seat)
 
     def set_blinds(self, sb: int, bb: int) -> None:
         """ブラインドを変える（トーナメントのレベル上昇）。ハンドの途中なら次のハンドから。"""
@@ -898,7 +914,7 @@ class PokerkitGameState:
 
     def rebuy(self, seat: int, amount: int) -> None:
         if seat not in self._players:
-            raise ValueError(f"Unknown seat: {seat}")
+            self.add_seat(seat)                 # 途中から座った人の買い込み（`r <席> <額>`, 2026-10-26）
         if amount <= 0:
             raise ValueError(f"Rebuy amount must be positive, got {amount}")
         if self._hand_active and seat in self._hand_seats:
