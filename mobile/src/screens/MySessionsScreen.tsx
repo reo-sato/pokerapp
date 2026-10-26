@@ -5,6 +5,7 @@ import type { ViewerRepository } from "../api/repository";
 import type { Player, PlayerSessionSummary } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
 import { BackLink, ErrorView, Loading, ReloadLink, styles } from "./common";
+import { newestSessionsFirst } from "../ordering";
 
 interface Props {
   repository: ViewerRepository;
@@ -36,7 +37,7 @@ export function MySessionsScreen({
         <ErrorView code={errorCode} message={errorMessage} onRetry={reload} />
       ) : (
         <FlatList
-          data={data ?? []}
+          data={newestSessionsFirst(data ?? [])}
           keyExtractor={(s) => s.session_id}
           ListEmptyComponent={
             <Text style={styles.empty}>まだ記録されたセッションがありません。</Text>

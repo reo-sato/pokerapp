@@ -5,6 +5,7 @@ import type { ViewerRepository } from "../api/repository";
 import type { HandSummary, Player, PlayerSessionSummary } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
 import { BackLink, ErrorView, Loading, ReloadLink, formatResult, styles } from "./common";
+import { newestHandsFirst } from "../ordering";
 
 interface Props {
   repository: ViewerRepository;
@@ -48,7 +49,7 @@ export function MyHandsScreen({
         <ErrorView code={errorCode} message={errorMessage} onRetry={reload} />
       ) : (
         <FlatList
-          data={data ?? []}
+          data={newestHandsFirst(data ?? [])}
           keyExtractor={(h) => String(h.hand_id)}
           ListEmptyComponent={
             <Text style={styles.empty}>

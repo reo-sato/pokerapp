@@ -39,3 +39,10 @@
 いつも 8 つの位置なので、席の位置がハンドごとに動かない。足した空席は保存する `players` に入れない（「席に戻す」を押せば入る）。
 ロガーがハンドを始めて記録に席が入ったら、その席は足した空席ではなくなり、空席のままなら「いなかった」として保存する（前と同じ）。
 見本のデータ（6 席）で 8 席が出ること・保存した真のアクションの席が 6 つのままであることを確かめた。
+
+## 追記: お客さん向けのハンド履歴を新しい順に（同日）
+
+オーナー:「プレイヤーのハンド履歴閲覧 UI について、新しいハンド、セッションは上に来るように」。`mobile/src/ordering.ts`
+（`newestSessionsFirst` = 始まった時刻の新しい順・`newestHandsFirst` = ハンド番号の大きい順）を `MySessionsScreen`・`MyHandsScreen` の
+一覧に。API（`api/read_models.py`）の並びはスタッフの画面・クライアントも使うので変えない。`scripts/build_player_web.py` で店内用と
+クラウド用のビルドを作り直した。試験: `mobile/src/ordering.test.ts`（mobile の `npm test` 56 件）、`tsc --noEmit`、Python の速い組。
