@@ -98,3 +98,42 @@ def test_pending_entry_is_saved_once_the_logger_starts_the_hand(log_dir, tmp_pat
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def _stackless_log(tmp_path: Path) -> Path:
+    """持ち点を数えないモードのセッション（記録に持ち点が無い = `core/stackless.py:strip_hand` のあと）。"""
+    d = tmp_path / "logs_stackless"
+    d.mkdir()
+    hand = {"hand_id": 1, "session_id": SID, "started_at": "2026-10-26T18:00:00", "ended_at": "2026-10-26T18:01:00",
+            "stackless": True, "blinds": {"sb": 100, "bb": 200}, "board": [], "button_seat": 6,
+            "players": [{"seat": s, "name": n} for s, n in ((4, "A"), (5, "B"), (6, "C"))],
+            "actions": [], "winner_seat": 5}
+    (d / f"{SID}.json").write_text(json.dumps({"session_id": SID, "hands": [hand]}), encoding="utf-8")
+    return d
+
+
+def test_stackless_next_hand_keeps_the_seats(tmp_path):
+    """持ち点を数えないモード: 記録に持ち点が無くても、次のハンドに前のハンドの席が並ぶ（前は席が 0 で入れられなかった）。"""
+    d = _stackless_log(tmp_path)
+    repo = GroundTruthRepository(d)
+    t = table_hand(d, SID, 2, repo)
+    assert t["state"] == "pending" and t["base"]["stackless"] is True
+    assert [p["seat"] for p in t["base"]["players"]] == [4, 5, 6] and t["base"]["button_seat"] == 4
+    # 真のアクションで「いなかった」席は次のハンドに入れない
+    gt = {"button_seat": 6, "actions": [], "players": [{"seat": 4}, {"seat": 5}, {"seat": 6, "absent": True}]}
+    assert [p["seat"] for p in skeleton_after(json.loads((d / f"{SID}.json").read_text())["hands"][0], gt)["players"]] == [4, 5]
+
+
+def test_stackless_hides_the_stacks_and_the_allin_amount(tmp_path):
+    """持ち点を数えないモード: 席の持ち点（内部の仮の値）と、オールインの額・それに向き合ったコールの額・ポットを出さない。"""
+    d = _stackless_log(tmp_path)
+    repo = GroundTruthRepository(d)
+    status, r = table_legal(d, SID, 2, {"actions": [{"seat": 4, "action": "allin"}]}, repo)
+    assert status == 200 and r["error"] is None
+    assert all(s["stack"] is None for s in r["seats"])
+    allin = next(s for s in r["seats"] if s["seat"] == 4)
+    assert allin["committed"] is None
+    assert r["actions"][0]["action"] == "allin" and r["actions"][0]["total"] is None
+    assert r["next"]["actor_seat"] == 5 and r["next"]["call_unknown"] is True and r["next"]["pot"] is None
+    status, r = table_legal(d, SID, 2, {"actions": r["rows"] + [{"seat": 5, "action": "call"}]}, repo)
+    assert next(s for s in r["seats"] if s["seat"] == 5)["committed"] is None   # オールインに向き合ったコールの額

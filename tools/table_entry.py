@@ -68,19 +68,32 @@ def _next_button(seats: list[int], button: Optional[int]) -> Optional[int]:
 
 
 def skeleton_after(prev: dict, gt: Optional[dict]) -> dict:
-    """前のハンドから見込んだ次のハンド（まだ配っていない）: 持ち点が残る席・ボタン・ブラインド。"""
-    stacks = _end_stacks(prev, gt)
+    """前のハンドから見込んだ次のハンド（まだ配っていない）: 持ち点が残る席・ボタン・ブラインド。
+
+    持ち点を数えないモード（`stackless`, オーナー 2026-10-24）のハンドは記録に持ち点が無いので、前のハンドの席（真の
+    アクションで「いなかった」席を除く）をそのまま並べる（持ち点 0 = 分からない）。"""
     absent = {p.get("seat") for p in (gt or {}).get("players") or [] if isinstance(p, dict) and p.get("absent")}
     names = {p.get("seat"): p.get("name") for p in prev.get("players") or [] if isinstance(p, dict)}
-    seats = sorted(s for s, v in stacks.items() if v > 0 and s not in absent)
+    stackless = bool(prev.get("stackless"))
+    if stackless:
+        table = with_table(prev, (gt or {}).get("players"))
+        stacks = {p["seat"]: 0 for p in table.get("players") or []
+                  if isinstance(p, dict) and isinstance(p.get("seat"), int)}
+        seats = sorted(s for s in stacks if s not in absent)
+    else:
+        stacks = _end_stacks(prev, gt)
+        seats = sorted(s for s, v in stacks.items() if v > 0 and s not in absent)
     button = (gt or {}).get("button_seat") if isinstance((gt or {}).get("button_seat"), int) else prev.get("button_seat")
-    return {
+    out = {
         "hand_id": prev["hand_id"] + 1,
         "players": [{"seat": s, "name": names.get(s) or f"席{s}", "stack_start": stacks[s]} for s in seats],
         "blinds": prev.get("blinds"),
         "button_seat": _next_button(seats, button),
         "board": [],
     }
+    if stackless:
+        out["stackless"] = True
+    return out
 
 
 def _base_of(hand: dict) -> dict:
@@ -91,6 +104,7 @@ def _base_of(hand: dict) -> dict:
         "blinds": hand.get("blinds"),
         "button_seat": hand.get("button_seat"),
         "board": [c for c in hand.get("board") or [] if isinstance(c, str)],
+        **({"stackless": True} if hand.get("stackless") else {}),
     }
 
 
@@ -170,6 +184,12 @@ def table_legal(log_dir: Path, session_id: str, hand_id: int, body: Any, gt_repo
     result = replay_legal(table, rows, board=board, button=button)
     result["rows"] = rows                      # フォールドを足した入力（画面はこれで置き換える）
     result["seats"] = seat_view(table, rows, button)
+    street = (result.get("next") or {}).get("street")
+    unknown = {a["seat"] for a in result.get("actions") or [] if a.get("total") is None and a.get("street") == street
+               and a.get("action") in ("call", "allin")}
+    for s in result["seats"]:
+        if s["seat"] in unknown:
+            s["committed"] = None              # 持ち点を数えないモード: オールインに向き合ったコールの額は分からない
     return 200, result
 
 
@@ -184,7 +204,10 @@ def seat_view(table: dict, rows: list[dict], button: Optional[int]) -> list[dict
     stacks = gs.get_stacks()
     seats = sorted(stacks)
     names = position_map(seats, gs.button_seat) if gs.button_seat in seats else {}
-    return [{"seat": s, "stack": stacks[s], "committed": gs.committed(s), "active": s in active,
+    # 持ち点を数えないモード: 持ち点は内部の仮の値なので出さない。オールインした席の出した額も分からない
+    allin = gs.allin_seats() if gs.stackless else set()
+    return [{"seat": s, "stack": None if gs.stackless else stacks[s],
+             "committed": None if s in allin else gs.committed(s), "active": s in active,
              "mucked": s in mucked, "position": names.get(s)} for s in seats]
 
 
@@ -451,6 +474,8 @@ function render(){
   $("title").textContent = `ハンド ${T.hid}`;
   $("state").textContent = st === "pending" ? "まだ配っていない" : st === "in_progress" ? "進行中" : "終わった";
   $("state").className = "pill " + (st === "pending" ? "pending" : st === "in_progress" ? "live" : "done");
+  // 持ち点を数えないモード（オーナー 2026-10-24）: 持ち点・オールインの額・オールインのあとのポットは出さない
+  const stackless = !!T.data.base.stackless;
   // 席: ディーラーを上に、席 1 をディーラーの左（画面の右上）から時計回り
   const seats = T.uiSeats, N = Math.max(seats.length, 1);
   const acted = {};
@@ -463,7 +488,7 @@ function render(){
     const out = !absent && info.active === false;
     const last = acted[p.seat];
     const lastText = last ? `${AC[last.a.action] || last.a.action}${last.a.total ? " " + fmt(last.a.total) : ""}${last.a.street === "showdown" ? "（見せずに）" : ""}` : "";
-    const xc = isActor ? (n.amount_to_call > 0 ? `コール ${fmt(n.call_total)}` : "チェック") : "X/C";
+    const xc = isActor ? (n.amount_to_call > 0 ? (n.call_unknown ? "コール" : `コール ${fmt(n.call_total)}`) : "チェック") : "X/C";
     const br = isActor ? ((n.legal_actions || []).includes("bet") ? "ベット" : "レイズ") : "B/R";
     const can = !absent && info.active && !err;
     const betting = can && !n.hand_over;
@@ -472,7 +497,7 @@ function render(){
     return `<div class="seat ${isActor ? "actor" : ""} ${out ? "out" : ""} ${absent ? "absent" : ""} ${T.winner === p.seat ? "winner" : ""}" style="left:${x}%;top:${y}%">
       <div class="sh"><b>席${p.seat}</b><span class="nm">${esc(p.name || "")}</span><span class="pos">${esc(info.position || "")}</span>
         <button class="dbtn ${T.button === p.seat ? "on" : ""}" title="ボタンをこの席に" onclick="setButton(${p.seat})">D</button></div>
-      <div class="st">${absent ? "空席" : `持ち点 ${fmt(info.stack)}${info.committed ? " ・ 出した " + fmt(info.committed) : ""}`}</div>
+      <div class="st">${absent ? "空席" : stackless ? (info.committed ? "出した " + fmt(info.committed) : "") : `持ち点 ${fmt(info.stack)}${info.committed ? " ・ 出した " + fmt(info.committed) : ""}`}</div>
       <div class="la ${last && last.auto ? "auto" : ""}">${esc(lastText)}${last && last.auto ? "（自動）" : ""}</div>
       ${typing ? `<div class="amt">${T.typing.digits ? fmt(T.typing.digits) : "額を入れて Enter"}</div>` : ""}
       ${absent ? "" : `<div class="acts">
@@ -493,7 +518,7 @@ function render(){
   else if (n.actor_seat != null) msg = `<div class="msg">手番: 席${n.actor_seat}</div>`;
   if (st === "pending") msg += `<div class="msg">まだ配っていません。席・持ち点・ボタンは前のハンドからの見込みです（違えば直してください）</div>`;
   $("center").innerHTML = `<div class="street">${esc(ST[n.street] || n.street || "")}</div>
-    <div class="pot">ポット ${fmt(n.pot)}　${T.data.base.blinds ? `ブラインド ${fmt(T.data.base.blinds.sb)}/${fmt(T.data.base.blinds.bb)}` : ""}</div>
+    <div class="pot">ポット ${n.pot == null ? "—" : fmt(n.pot)}　${T.data.base.blinds ? `ブラインド ${fmt(T.data.base.blinds.sb)}/${fmt(T.data.base.blinds.bb)}` : ""}</div>
     <div class="cards">${slots}</div>${msg}<div id="flash"></div>`;
   $("felt").querySelectorAll(".seat").forEach(el => el.remove());
   $("felt").insertAdjacentHTML("beforeend", html);
