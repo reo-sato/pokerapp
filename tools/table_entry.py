@@ -341,16 +341,26 @@ async function openHand(hid){
   for (const p of (gt ? gt.players || [] : [])) {
     if (!T.uiSeats.some(u => u.seat === p.seat)) T.uiSeats.push({seat:p.seat, name:p.name || `席${p.seat}`, stack:p.stack_start});
   }
-  T.uiSeats.sort((a, b) => a.seat - b.seat);
+  fillSeats();
   T.winner = src.winner_seat ?? src.winner ?? null;
   T.notes = src.notes || ""; T.excluded = !!src.excluded; T.started = (d && d.started) || null;
   $("notes").value = T.notes; $("excluded").checked = T.excluded;
   if (gt) T.savedJson = "loaded";
   await relegal(false);
 }
+// 卓の席はいつも 8 つ（オーナー 2026-10-26: アクション履歴の画面と同じく、空いている席も空席として出す）。記録にも真の
+// アクションにも無い席は「空席」（filler）で足し、席に戻さない限り保存する内容には入れない
+const TABLE_SEATS = 8;
+function fillSeats(){
+  const top = Math.max(TABLE_SEATS, ...T.uiSeats.map(p => p.seat));
+  for (let s = 1; s <= top; s++) {
+    if (!T.uiSeats.some(u => u.seat === s)) { T.uiSeats.push({seat:s, name:"", stack:null, filler:true}); T.absent.add(s); }
+  }
+  T.uiSeats.sort((a, b) => a.seat - b.seat);
+}
 function playersPayload(){
-  return T.uiSeats.map(p => T.absent.has(p.seat) ? {seat:p.seat, absent:true}
-    : (T.capSeats && !T.capSeats.has(p.seat) ? {seat:p.seat, name:p.name, stack_start:p.stack} : {seat:p.seat}));
+  return T.uiSeats.filter(p => !(p.filler && T.absent.has(p.seat))).map(p => T.absent.has(p.seat) ? {seat:p.seat, absent:true}
+    : (T.capSeats && !T.capSeats.has(p.seat) ? {seat:p.seat, name:p.name || `席${p.seat}`, stack_start:p.stack} : {seat:p.seat}));
 }
 async function relegal(save = true){
   const body = {actions: T.rows.map(r => ({seat:r.seat, action:r.action, amount:r.amount || 0, auto:r.auto || undefined})),
@@ -412,9 +422,11 @@ async function tick(){
       // ロガーがハンドを始めた: 画面の席はそのまま。ロガーだけが入れた席は「空席」で出す（押せば戻せる）
       T.capSeats = new Set((d.base.players || []).map(p => p.seat));
       for (const p of d.base.players || []) {
-        if (!T.uiSeats.some(u => u.seat === p.seat)) { T.uiSeats.push({seat:p.seat, name:p.name, stack:p.stack_start}); T.absent.add(p.seat); }
+        const u = T.uiSeats.find(x => x.seat === p.seat);
+        if (!u) { T.uiSeats.push({seat:p.seat, name:p.name, stack:p.stack_start}); T.absent.add(p.seat); }
+        else if (u.filler) { Object.assign(u, {name:p.name, stack:p.stack_start, filler:false}); }   // 空席のまま = いなかった
       }
-      T.uiSeats.sort((a, b) => a.seat - b.seat);
+      fillSeats();
       await relegal(true);
       return;
     }
