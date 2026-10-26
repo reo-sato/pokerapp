@@ -46,3 +46,19 @@
 （`newestSessionsFirst` = 始まった時刻の新しい順・`newestHandsFirst` = ハンド番号の大きい順）を `MySessionsScreen`・`MyHandsScreen` の
 一覧に。API（`api/read_models.py`）の並びはスタッフの画面・クライアントも使うので変えない。`scripts/build_player_web.py` で店内用と
 クラウド用のビルドを作り直した。試験: `mobile/src/ordering.test.ts`（mobile の `npm test` 56 件）、`tsc --noEmit`、Python の速い組。
+
+## 追記: ハンド履歴の画面のボタン・SB・BB・ポスト・終わったあとの札（同日）
+
+オーナー:「ハンド履歴画面で、上部のテーブルにボタンと SB・BB を表示」「下のタブで、プリフロップの SB・BB ポストを表示」「ハンドが
+終了した以降のストリートの札が表示されてしまう問題は解決したか」→ 最後の件は記録の側（A のボードの確定 5 秒・片付けの束）だけで、
+画面の側は直していなかった。
+
+`shared/hand_replay/handReplayModel.ts`: `blindSeats`（`position_map` → ボタン・SB・BB、ヘッズアップはボタン = SB、無ければ
+`button_seat`）・`seatBadge`・`preflopPosts`（表示だけの行 `post_sb` / `post_bb` / `post_ante`）・`shownBoard`（全員降りて 1 人が残った
+ハンドは最後のアクションのストリートまで。`street=showdown` のフォールド = 見せずに降りた行は数えない）。`ReplayModel.board` を足し、
+ストリートの列・テーブル図・共有の文章はこのボードを使う。`HandReplay.tsx`: 席の右上の札・プリフロップの列の先頭のポスト。
+`scripts/sync_shared_ui.py` で mobile / staff に配り、`build_player_web.py`・`build_staff_web.py` で作り直した。
+
+試験: `handReplayModel.test.ts` に 5 つ（mobile 61・staff 65 件）、両アプリの `tsc --noEmit`、Python の速い組。見本のハンド（6 人卓・
+BB アンティ・フロップで全員降りた・記録のボードは 5 枚）をお客さん向けの画面で開き、札・ポスト・ボードがフロップの 3 枚までに
+なることを目で確かめた。

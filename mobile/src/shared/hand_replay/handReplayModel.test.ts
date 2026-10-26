@@ -14,6 +14,7 @@ import {
   actionColor,
   actionLabel,
   ALL_STREETS,
+  blindSeats,
   buildReplayModel,
   compactActionLabel,
   formatChips,
@@ -23,10 +24,13 @@ import {
   heardDetails,
   parseCard,
   preflopFoldedSeats,
+  preflopPosts,
   reasonLabels,
   recordedAmount,
+  seatBadge,
   seatRingLayout,
   shownAmount,
+  shownBoard,
   streetFlow,
   streetTotals,
   TABLE_FRONT,
@@ -462,4 +466,94 @@ test("streetFlow: a BB ante is not counted in the BB's preflop total", () => {
     ],
   };
   assert.deepEqual(streetFlow(hand).map((f) => f.total), [200, 200, 200]);
+});
+
+// ――― ボタン・SB・BB の札とプリフロップのポスト（オーナー 2026-10-26） ―――
+
+const BLINDS_HAND = {
+  hand_id: 7,
+  blinds: { sb: 100, bb: 200 },
+  players: [4, 5, 6, 1].map((seat) => ({ seat, name: `P${seat}` })),
+  actions: [],
+  button_seat: 6,
+  position_map: { "6": "BTN", "1": "SB", "4": "BB", "5": "UTG" },
+};
+
+test("blindSeats: position_map からボタン・SB・BB、札は D / SB / BB", () => {
+  const seats = blindSeats(BLINDS_HAND);
+  assert.deepEqual(seats, { button: 6, sb: 1, bb: 4 });
+  assert.equal(seatBadge(seats, 6), "D");
+  assert.equal(seatBadge(seats, 1), "SB");
+  assert.equal(seatBadge(seats, 4), "BB");
+  assert.equal(seatBadge(seats, 5), undefined);
+});
+
+test("blindSeats: ヘッズアップはボタンが SB（札は D・SB）、position_map が無ければボタンだけ", () => {
+  const hu = { ...BLINDS_HAND, position_map: { "4": "BB", "6": "BTN" } };
+  const seats = blindSeats(hu);
+  assert.deepEqual(seats, { button: 6, sb: 6, bb: 4 });
+  assert.equal(seatBadge(seats, 6), "D・SB");
+  assert.deepEqual(blindSeats({ ...BLINDS_HAND, position_map: undefined }), { button: 6 });
+});
+
+test("preflopPosts: SB・BB（BB アンティがあればそのあと）、席か額が分からなければ出さない", () => {
+  assert.deepEqual(
+    preflopPosts(BLINDS_HAND).map((a) => [a.seat, a.action, a.amount]),
+    [[1, "post_sb", 100], [4, "post_bb", 200]],
+  );
+  const ante = { ...BLINDS_HAND, blinds: { sb: 100, bb: 200, bb_ante: 200 } };
+  assert.deepEqual(preflopPosts(ante).map((a) => a.action), ["post_sb", "post_bb", "post_ante"]);
+  assert.deepEqual(preflopPosts({ ...BLINDS_HAND, position_map: undefined }), []);
+  assert.deepEqual(preflopPosts({ ...BLINDS_HAND, blinds: undefined }), []);
+  assert.equal(compactActionLabel("post_sb"), "SB");
+  assert.equal(actionLabel("post_ante"), "アンティ");
+});
+
+// ――― 終わったあとのストリートの札を出さない（オーナー 2026-10-26） ―――
+
+test("shownBoard: 全員降りて終わったハンドは、最後のアクションのストリートまで", () => {
+  const players = [1, 2, 3].map((seat) => ({ seat, name: `P${seat}` }));
+  const board = ["As", "Kd", "7h", "2c", "9s"];
+  const preflopFold = {
+    hand_id: 1, players, board, winner_source: "fold",
+    actions: [
+      { street: "preflop", seat: 1, action: "raise", amount: 600 },
+      { street: "preflop", seat: 2, action: "fold" },
+      { street: "preflop", seat: 3, action: "fold" },
+    ],
+  };
+  assert.deepEqual(shownBoard(preflopFold), []);
+  const model = buildReplayModel(preflopFold);
+  assert.deepEqual(model.board, []);
+  assert.deepEqual(model.streets.map((st) => st.street), ["preflop"]);
+  const flopFold = {
+    ...preflopFold,
+    actions: [
+      { street: "preflop", seat: 1, action: "raise", amount: 600 },
+      { street: "preflop", seat: 2, action: "call", amount: 600 },
+      { street: "preflop", seat: 3, action: "fold" },
+      { street: "flop", seat: 1, action: "bet", amount: 800 },
+      { street: "flop", seat: 2, action: "fold" },
+    ],
+  };
+  assert.deepEqual(shownBoard(flopFold), ["As", "Kd", "7h"]);
+});
+
+test("shownBoard: 2 人以上が残ったハンド（ショーダウン・オールインのランアウト）は記録のボードのまま", () => {
+  const players = [1, 2].map((seat) => ({ seat, name: `P${seat}` }));
+  const board = ["As", "Kd", "7h", "2c", "9s"];
+  const allin = {
+    hand_id: 2, players, board, winner_source: "cards",
+    actions: [
+      { street: "preflop", seat: 1, action: "allin", amount: 20000 },
+      { street: "preflop", seat: 2, action: "call", amount: 19800 },
+    ],
+  };
+  assert.deepEqual(shownBoard(allin), board);
+  // ショーダウンで見せずに降りた行（street=showdown）は全員降りたことにしない
+  const muck = {
+    ...allin,
+    actions: [...allin.actions, { street: "showdown", seat: 2, action: "fold" }],
+  };
+  assert.deepEqual(shownBoard(muck), board);
 });
