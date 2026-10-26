@@ -18,6 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
+from core.hand_log import input_board
 from core.positions import position_map
 from core.truth_hand import active_seats, apply_rows, materialize_truth, start_state, with_table
 
@@ -136,7 +137,7 @@ def _base_of(hand: dict) -> dict:
                     for p in hand.get("players") or [] if isinstance(p, dict) and isinstance(p.get("seat"), int)],
         "blinds": hand.get("blinds"),
         "button_seat": hand.get("button_seat"),
-        "board": [c for c in hand.get("board") or [] if isinstance(c, str)],
+        "board": input_board(hand),            # 全員降りたあとに置かれた札があればそれも
         **({"stackless": True} if hand.get("stackless") else {}),
     }
 

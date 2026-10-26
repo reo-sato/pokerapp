@@ -121,6 +121,9 @@ class HandSummary:
     table_mode: Optional[str] = None
     # 持ち点を数えないモード（オーナー 2026-10-24）: 書くときに持ち点と分からない額を外す（`core/stackless.py`）
     stackless: bool = False
+    # 全員降りたことにして閉じたあと、次の配布までに置かれたボードの札（店舗 2026-10-26: 席の設定の違い・読めない手札で
+    # 早く閉じたハンドのフロップ以降）。ライブの勝者・持ち点には使わない。推定器・真のアクションの入力が使う（additive）。
+    board_after_end: Optional[list] = None
 
     def to_dict(self) -> dict:
         data = {
@@ -151,11 +154,21 @@ class HandSummary:
             data["announced_hand"] = self.announced_hand
         if self.table_mode is not None:
             data["table_mode"] = self.table_mode
+        if self.board_after_end:
+            data["board_after_end"] = list(self.board_after_end)
         if self.stackless:
             from core.stackless import strip_hand
 
             strip_hand(data)
         return data
+
+
+def input_board(hand: Mapping[str, Any]) -> list[str]:
+    """真のアクションを入れるときのボード: 記録のボード。全員降りたことにして閉じたあとに置かれた札（`board_after_end`）
+    のほうが長ければそちら（ハンドが続いていた見込み, 店舗 2026-10-26）。"""
+    board = [c for c in hand.get("board") or [] if isinstance(c, str)]
+    after = [c for c in hand.get("board_after_end") or [] if isinstance(c, str)]
+    return after if len(after) > len(board) else board
 
 
 # ――― 表示用: コールの額をトータルで見せる（オーナー, 2026-09-29）―――

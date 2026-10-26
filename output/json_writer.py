@@ -64,6 +64,20 @@ class JsonWriter:
         self._flush()
         logger.info("Hand %d saved to %s", summary.hand_id, self._path)
 
+    def update_hand(self, hand_id: int, fields: dict) -> bool:
+        """書き終えたハンド（いちばん新しい同じ番号のもの）に項目を足して書き直す（値が None の項目は消す）。
+        見つからなければ False。"""
+        for hand in reversed(self._data["hands"]):
+            if hand.get("hand_id") == hand_id:
+                for key, value in fields.items():
+                    if value is None:
+                        hand.pop(key, None)
+                    else:
+                        hand[key] = value
+                self._flush()
+                return True
+        return False
+
     @property
     def live_path(self) -> Path:
         """進行中のハンド（`write_live_hand`）の置き場所 `logs/{session_id}.live_hand.json`。"""

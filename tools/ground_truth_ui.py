@@ -54,7 +54,7 @@ from core.ground_truth_repository import GroundTruthRepository  # noqa: E402
 from core.hand_correction import apply_hand_corrections  # noqa: E402
 from core.hand_estimate import load_estimates, overlay_log  # noqa: E402
 from core.hand_correction_repository import HandCorrectionRepository  # noqa: E402
-from core.hand_log import hand_street_flow  # noqa: E402
+from core.hand_log import hand_street_flow, input_board  # noqa: E402
 from core.truth_hand import (  # noqa: E402
     GT_ACTIONS, active_seats, apply_rows, players_for_replay, showdown_winner, start_state, with_table,
 )
@@ -457,6 +457,7 @@ def hand_detail(
     captured = _get_hand(log_dir, session_id, hand_id, corr_repo)
     if captured is None:
         return None
+    captured["board"] = input_board(captured)   # 全員降りたあとに置かれた札があればそれも（入力の自動のボード）
     _add_street_totals(captured)
     gt = gt_repo.get(session_id, hand_id)
     script = (log_dir / f"{session_id}{_SCRIPT_SUFFIX}").is_file()   # 台本のハンドは正解が台本（入力は要らない）
