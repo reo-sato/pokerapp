@@ -33,6 +33,39 @@ def _hand_of(log_dir: Path, session_id: str, corr_repo: Any = None) -> tuple[lis
     return hands, _load_live_hand(log_dir, session_id)
 
 
+def _setup_table(log_dir: Path, session_id: str) -> Optional[dict]:
+    """セッションの始めの卓の設定（ロガーが記録の先頭に書く `table`, ADR-0071）。無ければ None。"""
+    from tools.ground_truth_ui import _load_hand_log
+
+    log = _load_hand_log(log_dir, session_id)
+    table = (log or {}).get("table")
+    return table if isinstance(table, dict) and table.get("seats") else None
+
+
+def first_skeleton(table: dict) -> dict:
+    """セッションの最初のハンド（まだ配っていない）: 卓の設定の席・名前・持ち点・ブラインド・1 ハンド目のボタン
+    （オーナー 2026-10-26: セッションが始まったら最初のハンドから入れる）。"""
+    seats = sorted((s for s in table.get("seats") or [] if isinstance(s, dict) and isinstance(s.get("seat"), int)),
+                   key=lambda s: s["seat"])
+    stackless = bool(table.get("stackless"))
+    blinds = {"sb": table.get("sb"), "bb": table.get("bb")}
+    if table.get("ante"):
+        blinds["bb_ante"] = table.get("ante")
+    button = table.get("first_button")
+    numbers = [s["seat"] for s in seats]
+    out = {
+        "hand_id": 1,
+        "players": [{"seat": s["seat"], "name": s.get("name") or f"席{s['seat']}",
+                     "stack_start": 0 if stackless else s.get("stack")} for s in seats],
+        "blinds": blinds,
+        "button_seat": button if button in numbers else (max(numbers) if numbers else None),
+        "board": [],
+    }
+    if stackless:
+        out["stackless"] = True
+    return out
+
+
 def latest_hand(log_dir: Path, session_id: str, corr_repo: Any = None) -> Optional[dict]:
     """いちばん新しいハンド（進行中のハンドがあればそれ）。"""
     hands, live = _hand_of(log_dir, session_id, corr_repo)
@@ -125,6 +158,8 @@ def table_hand(log_dir: Path, session_id: str, hand_id: int, gt_repo: Any, corr_
     elif latest is not None and hand_id == latest + 1:
         prev_gt = gt_repo.get(session_id, latest)
         base, state = skeleton_after(by_id[latest], prev_gt.hand if prev_gt else None), "pending"
+    elif latest is None and hand_id == 1 and (table := _setup_table(log_dir, session_id)) is not None:
+        base, state = first_skeleton(table), "pending"      # セッションが始まったばかり（まだ 1 ハンドも配っていない）
     else:
         return None
     return {"session_id": session_id, "hand_id": hand_id, "state": state, "base": base,
@@ -136,7 +171,9 @@ def current_hand_id(log_dir: Path, session_id: str, corr_repo: Any = None) -> Op
     移る（オーナー 2026-10-26: 前のハンドが終わる = ロガーが勝者を決める・次の配布、まで待たない）。"""
     hands, live = _hand_of(log_dir, session_id, corr_repo)
     ids = [h["hand_id"] for h in hands] + ([live["hand_id"]] if live is not None else [])
-    return (max(ids) + 1) if ids else None
+    if ids:
+        return max(ids) + 1
+    return 1 if _setup_table(log_dir, session_id) is not None else None   # セッションが始まったら最初のハンド
 
 
 def fill_folds(table: dict, rows: list[dict], button: Optional[int]) -> list[dict]:

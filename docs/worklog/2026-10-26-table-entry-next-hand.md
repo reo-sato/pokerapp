@@ -73,3 +73,11 @@ BB アンティ・フロップで全員降りた・記録のボードは 5 枚�
 `start_truth.cmd`。`main.py:_open_truth_table` がセッションを始めたあと（設定画面の「始める」のあと）にサーバーが立つのを 20 秒まで待ち、
 `webbrowser.open("http://127.0.0.1:8791/table")`。端末が対話でない起動・台本・札の確認・`ground_truth.open_table=false` では開かない。
 試験 `tests/test_main_truth_table.py`（開く・立っていなければ案内・切れる・cmd の順）。
+
+## 追記: セッションの最初のハンド（同日）
+
+オーナー:「セッションが始まったら最初のハンドのアクションを入力できるようにしてほしい」。次のハンドの見込みは前のハンドから作るので、
+まだハンドの無いセッションでは何も出なかった。`tools/table_entry.py`: `_setup_table`（記録の `table` = ロガーが `_record_table` で
+セッションの始めに書く卓の設定）と `first_skeleton`（席・名前・持ち点 = 持ち点を数えないモードは 0・ブラインドと BB アンテ・
+`first_button`）。`current_hand_id` はハンドが無く卓の設定があれば 1、`table_hand(1)` はその見込みを `pending` で。ロガーは卓の設定を
+書いてから入力画面を開く（`_record_table` → `_open_truth_table`）。試験 `tests/test_table_entry.py` に 1 つ。

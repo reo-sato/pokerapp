@@ -137,3 +137,24 @@ def test_stackless_hides_the_stacks_and_the_allin_amount(tmp_path):
     assert r["next"]["actor_seat"] == 5 and r["next"]["call_unknown"] is True and r["next"]["pot"] is None
     status, r = table_legal(d, SID, 2, {"actions": r["rows"] + [{"seat": 5, "action": "call"}]}, repo)
     assert next(s for s in r["seats"] if s["seat"] == 5)["committed"] is None   # オールインに向き合ったコールの額
+
+
+def test_the_first_hand_can_be_entered_when_the_session_starts(tmp_path):
+    """セッションが始まったら（まだ 1 ハンドも配っていなくても）、卓の設定から最初のハンドを入れられる（2026-10-26）。"""
+    d = tmp_path / "logs_new"
+    d.mkdir()
+    table = {"table_mode": "ring", "sb": 100, "bb": 200, "ante": 0, "stackless": False, "first_button": 6,
+             "seats": [{"seat": s, "name": n, "stack": 20000} for s, n in ((4, "A"), (5, "B"), (6, "C"))]}
+    (d / f"{SID}.json").write_text(json.dumps({"session_id": SID, "hands": [], "table": table}), encoding="utf-8")
+    repo = GroundTruthRepository(d)
+    assert current_hand_id(d, SID) == 1
+    t = table_hand(d, SID, 1, repo)
+    assert t["state"] == "pending"
+    assert [(p["seat"], p["name"], p["stack_start"]) for p in t["base"]["players"]] == [
+        (4, "A", 20000), (5, "B", 20000), (6, "C", 20000)]
+    assert t["base"]["button_seat"] == 6 and t["base"]["blinds"] == {"sb": 100, "bb": 200}
+    status, r = table_legal(d, SID, 1, {"actions": []}, repo)
+    assert status == 200 and r["next"]["actor_seat"] == 6          # ボタン 6 → SB 4・BB 5、3 人なので最初の手番はボタン
+    # 卓の設定が無い記録（古い記録）は今までどおり何も出さない
+    (d / f"{SID}.json").write_text(json.dumps({"session_id": SID, "hands": []}), encoding="utf-8")
+    assert current_hand_id(d, SID) is None
