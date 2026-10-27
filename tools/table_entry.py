@@ -385,7 +385,8 @@ TABLE_PAGE = r"""<!doctype html>
  .msg { font-size:13px; color:#ffd8a8; margin-top:6px; } .msg.bad { color:var(--bad); }
  .seat { position:absolute; transform:translate(-50%,-50%); width:200px; background:var(--panel); border:2px solid var(--line); border-radius:12px; padding:6px 8px; }
  .seat.actor { border-color:var(--actor); box-shadow:0 0 0 3px rgba(240,183,47,.25); }
- .seat.out { opacity:.45; } .seat.absent { opacity:.35; border-style:dashed; }
+ .seat.out { opacity:.45; } .seat.absent { border-style:dashed; } .seat.absent .sh, .seat.absent .st { opacity:.45; }
+ .seatin { width:100%; margin-top:4px; padding:6px 4px; font-size:14px; background:#123d6a; border-color:#1f6feb; }
  .seat.winner { border-color:var(--ok); }
  .sh { display:flex; align-items:center; gap:6px; } .sh b { font-size:15px; } .sh .nm { font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
  .pos { font-size:11px; color:#d2a8ff; }
@@ -640,6 +641,10 @@ function setButton(seat){ if (seat === T.button) return; snap(); T.button = seat
 function toggleAbsent(seat){
   const sitIn = T.absent.has(seat);
   if (sitIn) T.absent.delete(seat); else T.absent.add(seat);
+  const u = T.uiSeats.find(x => x.seat === seat);
+  if (sitIn && !T.data.base.stackless && u && u.stack == null) {
+    T.notice = `席${seat} は持ち点が分からないので、このハンドには入りません — 一覧の入力画面で始めの持ち点を入れてください`;
+  }
   markStart(); relegal();
   // いま入れているハンド（まだ配っていない / 進行中）なら、ロガーの席も次のハンドから同じにする（2026-10-26）
   if (T.data && T.data.state !== "done") {
@@ -698,7 +703,8 @@ function render(){
         <button class="xc" title="チェック / コール" ${betting ? "" : "disabled"} onclick="act(${p.seat},'xc')">${esc(xc)}</button>
         <button class="br" title="ベット / レイズ（額はテンキー）" ${betting ? "" : "disabled"} onclick="startBet(${p.seat})">${esc(br)}</button>
         <button class="ai" ${betting ? "" : "disabled"} onclick="act(${p.seat},'allin')">AI</button></div>`}
-      <div class="foot"><a onclick="toggleAbsent(${p.seat})">${absent ? "席に戻す" : "空席にする"}</a>
+      ${absent ? `<button class="seatin" onclick="toggleAbsent(${p.seat})">＋ この席に入れる</button>` : ""}
+      <div class="foot">${absent ? "<span></span>" : `<a onclick="toggleAbsent(${p.seat})">空席にする</a>`}
         ${showWin ? `<button class="win" onclick="setWinner(${p.seat})">${T.winner === p.seat ? "✓ 勝ち" : "勝ち"}</button>` : ""}</div>
     </div>`;
   }).join("");

@@ -1607,8 +1607,10 @@ function buildGt(d){
   // 真のアクションが無ければ、前のハンドの真のアクションで決めた席（いた / いない）から始める（2026-10-27）
   const carried = !g && d.carried ? d.carried : null;
   const carriedIn = new Set(carried ? carried.present : []), carriedOut = new Set(carried ? carried.absent : []);
-  const all = [...new Set([...capP, ...gP, ...table, ...[...carriedIn].map(seat => ({seat}))].map(p => p.seat))]
-    .sort((a, b) => a - b);
+  const known = [...capP, ...gP, ...table, ...[...carriedIn].map(seat => ({seat}))].map(p => p.seat);
+  // 空いている席も出す（「いた」にすると席を足せる = 途中から座った人, 2026-10-27）
+  const top = Math.max(8, ...known);
+  const all = [...new Set([...known, ...Array.from({length: top}, (_, i) => i + 1)])].sort((a, b) => a - b);
   const players = all.map(seat => {
     const cp = capP.find(x => x.seat === seat), gp = gP.find(x => x.seat === seat), tp = table.find(x => x.seat === seat);
     const src2 = gp || cp || {};
@@ -1889,7 +1891,7 @@ function renderEdit(){
   }
   const boardHtml = g.board.map((c, i) => `<div style="text-align:center">${cardHtml(c, "", `openPicker('board',${i})`)}<div class="small muted">${BOARD_LABEL[i]}</div></div>`).join("");
   const playersHtml = g.players.map(p => `<div class="seatrow ${p.absent ? "absent" : ""}"><div class="no">席 ${p.seat} <span class="muted small">${esc(p.name)}</span></div>
-      <button class="sm chip ${p.absent?"":"on"}" onclick="setAbsent(${p.seat})" title="このハンドに配られたか">${p.absent ? "いない" : "いた"}</button>
+      <button class="sm chip ${p.absent?"":"on"}" onclick="setAbsent(${p.seat})" title="このハンドに配られたか（押すと切り替え）">${p.absent ? "空席 ＋ 入れる" : "いた"}</button>
       ${p.absent ? "" : `<div>${cardHtml(p.hole_cards[0], "", `openPicker('hole',${p.seat},0)`)}${cardHtml(p.hole_cards[1], "", `openPicker('hole',${p.seat},1)`)}</div>
       <button class="sm chip ${p.showed_down?"on":""}" onclick="setShowed(${p.seat})">見せた</button>
       ${g.stackless ? "" : `<label class="small muted stack">持ち点 <input type="number" inputmode="numeric" value="${p.stack_start ?? ""}" placeholder="${p.default_stack > 0 ? p.default_stack : "入れてください"}" onchange="setStack(${p.seat}, this.value)" onkeydown="if(event.key==='Enter'){this.blur()}"></label>`}`}</div>`).join("");
@@ -1949,7 +1951,7 @@ function renderEdit(){
         ${reconcile}
         <h2 style="margin-top:0">実際（真のアクション）</h2>
         <h2>ボード</h2><div style="display:flex;gap:6px;flex-wrap:wrap">${boardHtml}</div>
-        <h2>席と手札 <span class="muted small">いなかった席は「いた」を押して外す。記録に無い席も「いない」を押すと入る。持ち点は記録と違うときだけ</span></h2>${playersHtml}
+        <h2>席と手札 <span class="muted small">いなかった席は「いた」を押して外す。空いている席に座った人は「空席 ＋ 入れる」。決めた席は次のハンドからも同じ。持ち点は記録と違うときだけ</span></h2>${playersHtml}
         <h2>ボタン</h2>${buttonHtml}
         <h2>アクション <span class="muted small">コールの額とストリートは自動。ベット / レイズはトータルの額</span></h2>
         <div class="tbl"><table><tr><th>ストリート</th><th>席</th><th>アクション</th><th>額</th><th></th></tr>${rows || "<tr><td colspan='5' class='muted'>まだありません（下のボタンで足す）</td></tr>"}</table></div>
