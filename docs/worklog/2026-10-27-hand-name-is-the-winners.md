@@ -33,7 +33,7 @@
 
 - `tests/test_hand_name.py` 126 passed。速い組 3540 passed・22 skipped、遅い組 15 passed・5 skipped（PowerShell の無い環境）。
   店舗の開発データの再生（`tests/test_store_fixtures.py`）も通る。
-- 推定器の物差し（開発データ）: 下に追記。
+- 推定器の物差し（`tools/bench_hands.py`, 内容の指紋 `79b0fa1442b9`）: 店舗 142/174（読み直し 114）・額を除けば 150・要確認なしの誤り 2 → 2（新しく 0）・台本 29/30 = 前と同じ。
 
 ## 残り
 
