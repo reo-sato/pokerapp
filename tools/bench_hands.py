@@ -150,6 +150,7 @@ class V1Result:
     hands: int = 0
     base_exact: int = 0           # 生の観測の再生（直し無し = 読み直し）
     exact: int = 0                # 推定器 v1 の 1 番
+    exact_no_amount: int = 0      # 額を除けば正しい（言われなかった賭けの額は推し量るしかない, 2026-10-24）
     in_candidates: int = 0        # 正解が候補に入った
     flagged: int = 0              # 要確認が付いた
     better: list[str] = field(default_factory=list)
@@ -184,7 +185,7 @@ class V1Result:
 
     def add_hand(self, key: str, truth: dict, result, live=None) -> None:
         from integration.estimator import hand_from_key, record_key
-        from tools.measure_capture_accuracy import hand_fully_correct
+        from tools.measure_capture_accuracy import hand_correct_ignoring_amounts, hand_fully_correct
 
         base = result.base or next((c for c in result.candidates if not c.edits), None)
         ok_base = hand_fully_correct(truth, base.hand if base else None)
@@ -216,6 +217,7 @@ class V1Result:
         self.hands += 1
         self.base_exact += ok_base
         self.exact += ok
+        self.exact_no_amount += ok or hand_correct_ignoring_amounts(truth, result.best.hand)
         self.in_candidates += found
         self.flagged += flagged
         n_edits = str(len(result.best.edits))
@@ -450,7 +452,8 @@ def format_v1(r: V1Result) -> list[str]:
         f" ／ 要確認 {r.flagged}（誤りに付かない {len(r.unflagged_errors)}・正しいのに付く {len(r.flagged_correct)}"
         f"・説明だけの直しだけで付く {len(r.explanation_flagged)}）"
         f"（{r.seconds:.0f} 秒）",
-        f"    誤り {len(r.failing)} の内訳: 正解が候補に無い {len(r.not_found)}・候補にあるが点で負けた {len(r.outscored)}"
+        f"    額を除けば正しい {r.exact_no_amount}/{r.hands}（{_pct(r.exact_no_amount, r.hands)}）"
+        f" ／ 誤り {len(r.failing)} の内訳: 正解が候補に無い {len(r.not_found)}・候補にあるが点で負けた {len(r.outscored)}"
         f" ／ 1 番の直しの数 {dict(sorted(r.edits.items()))}",
         f"    要確認の理由 1 ハンド平均 {sum(r.reasons) / max(1, len(r.reasons)):.1f}・最多 {max(r.reasons, default=0)}"
         f"・アクションあたり {sum(r.reasons) / max(1, sum(r.actions)):.0%}"

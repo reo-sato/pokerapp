@@ -95,3 +95,38 @@ def hand_wager_ratios(actions: list[dict], blinds: dict, position_map: dict) -> 
             committed[seat] = amount
             bet = amount
     return out
+
+
+def pot_before(actions: list[dict], blinds: dict, position_map: dict, index: int) -> Optional[int]:
+    """記録のハンドの行 `index` の前のポット（ブラインド + それまでに出た額。`hand_wager_ratios` と同じ数え方）。
+    ブラインドが分からなければ None。推定器が、言われなかった賭けの額を推し量るのに使う（2026-10-24）。"""
+    sb, bb = int((blinds or {}).get("sb") or 0), int((blinds or {}).get("bb") or 0)
+    pos = {int(k): v for k, v in (position_map or {}).items()}
+    sb_seat = next((s for s, v in pos.items() if v == "SB"), None)
+    if sb_seat is None and len(pos) == 2:
+        sb_seat = next((s for s, v in pos.items() if v == "BTN"), None)
+    bb_seat = next((s for s, v in pos.items() if v == "BB"), None)
+    if not bb or bb_seat is None:
+        return None
+    committed: dict[int, int] = {bb_seat: bb}
+    pot, bet, street = bb, bb, "preflop"
+    if sb_seat is not None:
+        committed[sb_seat] = sb
+        pot += sb
+    for a in actions[:index]:
+        st = a.get("street")
+        if st not in ("preflop", "flop", "turn", "river"):
+            continue
+        if st != street:
+            street, committed, bet = st, {}, 0
+        seat, act, amount = int(a.get("seat") or 0), a.get("action"), int(a.get("amount") or 0)
+        c = committed.get(seat, 0)
+        if act == "call":
+            inc = amount if amount > 0 else max(0, bet - c)
+            committed[seat] = c + inc
+            pot += inc
+        elif act in ("bet", "raise", "allin") and amount > c:
+            pot += amount - c
+            committed[seat] = amount
+            bet = max(bet, amount)
+    return pot

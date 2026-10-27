@@ -142,6 +142,10 @@ _RFID_FOLDS = frozenset({"rfid_departure", "rfid_muck"})
 _AMOUNT_READ_REASONS = frozenset({"phonetic_amount", "amount_restated", "legal_amount", "ambiguous_amount",
                                   "garbled_digits"})
 _INSERTABLE = ("fold", "check", "call")
+# 言われなかった賭け（前に賭けが無いのに聞こえたコール・フォールド・レイズの前に補う）の額: ポットのこの割合を
+# いちばん小さいチップ（100）に丸める。額は声に無いので推し量るだけ（いつも要確認）
+GUESSED_POT_FRACTIONS = (1 / 3, 1 / 2, 2 / 3, 1.0)
+_CHIP = 100
 _INSERT_LEAD_SEC = 0.3          # 聞こえなかったアクションは次の語の少し前に置く
 _STREETS = ("preflop", "flop", "turn", "river")
 EXPLANATION_MARK = "（記録は変えない説明）"    # 記録を変えない説明だけの直しの要確認の理由に付ける
@@ -581,10 +585,11 @@ class SessionEstimator:
         inserted: dict[str, str] = {}
         extra: list[Event] = []
         for k, e in enumerate(sorted((x for x in edits if x.kind == "insert"), key=lambda x: x.at)):
-            at = e.at + 0.0001 * k
-            extra.append(AudioEvent(action=e.value, amount=0, timestamp=at, raw_text="", confidence=1.0,
-                                    utterance_start_ts=at))
-            inserted[_iso(at)] = e.value
+            for j, (action, amount) in enumerate(_insert_steps(e.value)):
+                at = e.at + 0.0001 * k + 0.00001 * j
+                extra.append(AudioEvent(action=action, amount=amount, timestamp=at, raw_text="", confidence=1.0,
+                                        utterance_start_ts=at))
+                inserted[_iso(at)] = action
         presence = self.presence
         lifts = [e for e in edits if e.kind == "lift"]
         if presence is not None and lifts:
@@ -618,7 +623,7 @@ class SessionEstimator:
         tokens = [e for e in world if isinstance(e, AudioEvent) and e.utterance_start_ts is not None
                   and w.start - 0.5 <= e.utterance_start_ts < w.end and not _is_inserted(e, inserted)]
         return hand, records, {"tokens": tokens, "inserted": inserted, "button": button, "labels": labels,
-                               "gates": gates, "opened": opened}
+                               "gates": gates, "opened": opened, "hand": hand}
 
     # ――― 採点 ―――
 
@@ -640,6 +645,17 @@ class SessionEstimator:
                 terms.append((f"読み: {e.label}" if e is not None else f"既定の読み「{self._text_at.get(start, '')}」",
                               logp))
         terms.append(("ボタン", self._button_logp(w, info["button"])))
+        for e in edits:
+            # 言われなかった賭けの額は声に無い = どの額でも観測の説明は同じ。額ごとの確からしさは賭けの大きさの事前
+            # （`_action_terms`）だけで、額を選んだこと自体には罰を付けない（額で足し合わせれば構造の確からしさになる）。
+            # 推し量った額なのでいつも要確認
+            if e.kind == "insert" and _insert_value(e.value)[1]:
+                if _wager_before(hand, e.at) or self._wager_word_follows(info["tokens"], e.at):
+                    # ほかの直しで賭けと読んだ語が同じストリートの前か、補った賭けとコールの間にある = 補う理由が無い
+                    # （開発データ 845da8e6#17: 「五百」= ベット 500 のすぐあとの補った 800 が額の言い直しとして
+                    # 扱われ、推し量った額が聞こえた額をほぼ同じ点で上書きしていた）
+                    return -1e6, [("言われなかった賭けのあとに賭けの語", -1e6)], ["言われなかった賭けのあとに賭けの語"]
+                flags.append(f"言われなかった賭けの額を推し量った（{e.label}）")
         if hand.get("betting_open_at_end"):
             # 実卓のハンドは全員が降りるかショーダウンでしか終わらない（語を捨てて短くしたハンドが、最後の人が
             # 行動しないまま勝者の操作で終わるのを止める = 監査 2 回目の要約 2）
@@ -1035,6 +1051,7 @@ class SessionEstimator:
         for at in spots:
             for act in _INSERTABLE:
                 edits.append(Edit("insert", at, act, label=f"聞こえなかった {act}（{_iso(at)[11:19]} の前）"))
+        edits += self._implied_wagers(base_info)
         # ボタン
         seats = sorted({pl["seat"] for pl in w.base.get("players") or []})
         if w.button in seats and len(seats) > 2:
@@ -1053,6 +1070,68 @@ class SessionEstimator:
                 edits.append(Edit("lift", t, (seat, back if back is not None else end + 60.0),
                                   label=f"席{seat} の離脱（{_iso(t)[11:19]}）は持ち上げ"))
         return edits
+
+    def _implied_wagers(self, base_info: dict) -> list[Edit]:
+        """前に賭けが無いのに聞こえたコール・フォールド・レイズか、札の離脱のフォールド（フロップ以降）の前に、言われ
+        なかったベットを補う直し。額は声に無いので、そのストリートの始めのポットの `GUESSED_POT_FRACTIONS` を 100 に
+        丸めた額から選ぶ（オーナー 2026-10-24: 額の発話は有力な証拠だが、コール・フォールドなどが前のアクションを示す
+        なら、額をでっち上げて埋めてよい。札の離脱にも広げる = 10/19 の声の無い賭け 33 ストリートのうち語のあとは 1・
+        札の離脱だけは 9）。誰のベットかは手番の順で engine が決める。"""
+        from core.bet_sizing import pot_before
+
+        hand = base_info.get("hand") or {}
+        actions = [a for a in hand.get("actions") or [] if a.get("street") != "showdown"]
+        by_ts = {_iso(t.timestamp): t for t in base_info.get("tokens") or []
+                 if t.action in ("call", "fold", "raise") and t.utterance_start_ts is not None}
+        bb = int((hand.get("blinds") or {}).get("bb") or 0)
+        edits: list[Edit] = []
+        wagered: set[str] = set()
+        start_of: dict[str, int] = {}
+        done: set[str] = set()
+        for i, a in enumerate(actions):
+            street = a.get("street")
+            start_of.setdefault(street, i)
+            tok = by_ts.get(a.get("timestamp") or "")
+            source = str(a.get("actor_source") or "")
+            said = tok is not None and source in _WORD_SOURCES
+            left = a.get("action") == "fold" and source in _RFID_FOLDS
+            trigger = tok.utterance_start_ts if said else _epoch(a.get("timestamp")) if left else None
+            if (trigger is not None and street in ("flop", "turn", "river") and street not in wagered
+                    and street not in done):
+                done.add(street)                  # そのストリートの最初の証拠だけ（前に賭けが無いのはそこまで）
+                what = f"「{tok.raw_text}」" if said else f"席{a.get('seat')} の札の離脱"
+                pot = pot_before(actions, hand.get("blinds") or {}, hand.get("position_map") or {}, start_of[street])
+                if pot:
+                    # 語の前と、ストリートの始め（前のストリートの最後の行のすぐあと）: 語の前に読み違えた語・札の
+                    # 離脱が挟まると、語の前の賭けでは手番が合わない（開発データ 845da8e6#19: 「これで終わりです」
+                    # （コールの聞き違い）のあとの「レイズ1万5千」）
+                    spots = {trigger - _INSERT_LEAD_SEC}
+                    prev = _epoch(actions[start_of[street] - 1].get("timestamp")) if start_of[street] else None
+                    if prev is not None and prev + 0.5 < trigger - _INSERT_LEAD_SEC:
+                        spots.add(prev + 0.5)
+                    amounts = sorted({max(bb, _CHIP, int(round(pot * f / _CHIP)) * _CHIP) for f in GUESSED_POT_FRACTIONS})
+                    # 札が離れた人が先に動く席なら、賭けたのはそのあとの人 = 離れた人の言われなかったチェックを先に
+                    # 入れた組も（10/19 d01277f8#38: ターンで最初の席がチェック・次の席がベット・最初の席が降りた）
+                    leads = ("", "check,") if left else ("",)
+                    for at in sorted(spots):
+                        for lead in leads:
+                            for amount in amounts:
+                                edits.append(Edit("insert", at, f"{lead}bet:{amount}", label=(
+                                    f"聞こえなかった {lead.replace(',', ' → ')}bet {amount}"
+                                    f"（{street}・{_iso(at)[11:19]}・{what}の前）")))
+            if a.get("action") in _WAGER:
+                wagered.add(street)
+        return edits
+
+    @staticmethod
+    def _wager_word_follows(tokens: list, at: float) -> bool:
+        """`at` のあと最初のコール・フォールド・レイズの語より前に、賭けと読んだ語（ベット・オールイン）があるか。"""
+        for t in sorted((t for t in tokens if (t.utterance_start_ts or 0.0) > at), key=lambda t: t.utterance_start_ts):
+            if t.action in ("call", "fold", "raise"):
+                return False
+            if t.action in ("bet", "allin"):
+                return True
+        return False
 
     # ――― 探索 ―――
 
@@ -1137,7 +1216,20 @@ class SessionEstimator:
             if root.hand and root.score >= base.score - p["button_explore"]:
                 keep(root, base)
                 search(root, others)
-        # 仕上げ: 点の良い記録に、記録を変えずに説明を良くした直しを足す（深さの上限で届かなかった説明。足しても記録が
+        # 仕上げ 1: 点の良い記録に、言われなかった賭け（前に賭けが無いコール・フォールド・レイズの前）を足して試す。ほかの
+        # 直しのあとで要る（深さの上限で届かない）ことが多い（開発データ 9db1e032#3: 3 つの読みの直しのあとのリバー）
+        implied = [e for e in pool if e.kind == "insert" and _insert_value(e.value)[1]]
+        if implied:
+            for c in sorted(distinct.values(), key=lambda c: -c.score)[:int(p.get("polish_top", 0))]:
+                for _round in range(3):
+                    children = [evaluate(_ordered((*c.edits, e))) for e in implied
+                                if e not in c.edits and not any(e.conflicts(x) for x in c.edits)]
+                    children = [x for x in children if keep(x, c)]
+                    better = max(children, key=lambda x: x.score, default=None)
+                    if better is None or better.score <= c.score:
+                        break
+                    c = better
+        # 仕上げ 2: 点の良い記録に、記録を変えずに説明を良くした直しを足す（深さの上限で届かなかった説明。足しても記録が
         # 変わる直しは使わない = 記録どうしを同じ条件で比べる）
         ordered_explainers = _ordered(tuple(explainers))
         for c in sorted(distinct.values(), key=lambda c: -c.score)[:int(p.get("polish_top", 0))]:
@@ -1274,6 +1366,33 @@ def _last_fold(hand: dict, betting: list[_Row]) -> Optional[int]:
     if any(a.get("street") == "showdown" for a in hand.get("actions") or []):
         return None                            # ショーダウンのマックで終わった
     return len(betting) - 1
+
+
+def _insert_steps(value: Any) -> list[tuple[str, int]]:
+    """挿入の直しの値: アクション（"call"）、額つきの賭け（"bet:1200" = 言われなかった賭け）、続けて入れる組
+    （"check,bet:1200" = 言われなかったチェックのあとの言われなかった賭け）。"""
+    steps = []
+    for part in str(value).split(","):
+        action, _, amount = part.partition(":")
+        steps.append((action, int(amount) if amount else 0))
+    return steps
+
+
+def _insert_value(value: Any) -> tuple[str, int]:
+    """挿入の直しの最後のアクションと額（額があれば言われなかった賭け）。"""
+    return _insert_steps(value)[-1]
+
+
+def _wager_before(hand: dict, at: float) -> bool:
+    """`at` のストリート（`at` 以降の最初の行 = 補った行か、それが吸われたならコールの行のストリート）に、`at` より
+    前の賭けの行があるか。"""
+    rows = [(_epoch(a.get("timestamp")), a) for a in hand.get("actions") or [] if a.get("street") != "showdown"]
+    edge = at - 0.01             # 行の時刻は ms に丸めてある（補った行自身を「前」に数えない）
+    after = [a for t, a in rows if t is not None and t >= edge]
+    if not after:
+        return False
+    street = after[0].get("street")
+    return any(t is not None and t < edge and a.get("street") == street and a.get("action") in _WAGER for t, a in rows)
 
 
 def _is_inserted(e: AudioEvent, inserted: dict[str, str]) -> bool:
