@@ -188,7 +188,8 @@ def _to_river(tb: _Table, holes=HOLES, checks_on_river: bool = True) -> None:
 
 
 class TestShowdown:
-    """3 人: 席4 ハイカード / 席5 ツーペア / 席6 フラッシュ。見せる順は 4 → 5 → 6。"""
+    """3 人: 席4 ハイカード / 席5 ツーペア / 席6 フラッシュ。見せる順は 4 → 5 → 6。役名は勝っている手の宣言
+    （オーナー 2026-10-27）で、役名の席は手札で決める。全員の席が決まるか、8 秒たつか、マックで決まる。"""
 
     def test_each_show_is_announced_and_the_best_hand_wins(self, tmp_path):
         tb = _Table(tmp_path)
@@ -257,31 +258,69 @@ class TestShowdown:
         tb.say("フォールド")
         assert tb.t._showdown_mucks == [4]           # noqa: SLF001
 
-    def test_a_hand_name_that_differs_from_the_cards_is_flagged(self, tmp_path):
+    def test_a_stronger_hand_than_the_announced_one_wins_and_is_flagged(self, tmp_path):
+        # 役名は勝者の手の宣言。席6 のフラッシュの役名が聞こえないまま時間がたった = 判定のまま要確認
         tb = _Table(tmp_path)
         _to_river(tb)
-        for name in ("ハイカード", "ツーペア", "ツーペア"):      # 席6 は手札ではフラッシュ
+        for name in ("ハイカード", "ツーペア"):
             tb.say(name)
+        tb.tick(tb.now + SHOWDOWN_MUCK_SEC + 0.5)
         (hand,) = tb.hands
         assert (hand.winner_seat, hand.winner_source) == (6, "cards") and hand.review_required
-        assert any("席6 の役名「ツーペア」が手札の判定（フラッシュ）と違います" in n for n in tb.notices)
+        assert any("役名「ツーペア」が手札の判定の勝者（席6・フラッシュ）と違います — より強い手" in n
+                   for n in tb.notices)
 
-    def test_the_hand_names_decide_when_they_disagree_with_the_cards(self, tmp_path):
-        # 役名: 席4 ハイカード / 席5 ストレート / 席6 ツーペア → 役名では席5 の勝ち（札の読み違いの疑い）
+    def test_an_announced_hand_that_no_seat_makes_is_flagged(self, tmp_path):
+        # どの席の手札でもできない役（フルハウス）= 札の読み違いの疑い。勝者は判定のまま要確認
         tb = _Table(tmp_path)
         _to_river(tb)
-        for name in ("ハイカード", "ストレート", "ツーペア"):
-            tb.say(name)
+        tb.say("フルハウス")
+        assert tb.notices[-1].startswith("役名 フルハウス — どの席の手か")
+        tb.tick(tb.now + SHOWDOWN_MUCK_SEC + 0.5)
         (hand,) = tb.hands
-        assert (hand.winner_seat, hand.winner_source) == (5, "announced")
-        assert hand.review_required and hand.pot_total == 600
-        assert any("席5 の勝ちにします" in n for n in tb.notices)
+        assert (hand.winner_seat, hand.winner_source) == (6, "cards") and hand.review_required
+        assert any("札の読み違いの可能性" in n for n in tb.notices)
 
     def test_an_unreadable_seat_is_resolved_by_the_hand_names(self, tmp_path):
         tb = _Table(tmp_path)
         _to_river(tb, holes={4: HOLES[4], 5: HOLES[5], 6: ["Kd"]})    # 席6 の札は 1 枚しか読めていない
         for name in ("ハイカード", "ツーペア", "フラッシュ"):
             tb.say(name)
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source) == (6, "announced") and hand.review_required
+
+    def test_only_the_winners_hand_is_announced(self, tmp_path):
+        # ディーラーは勝者の手だけを言う（オーナー 2026-10-27）。ほかの人が見せても役名は無い
+        tb = _Table(tmp_path)
+        _to_river(tb)
+        tb.say("フラッシュ")
+        assert tb.hands == [] and tb.notices[-1] == "席6 が見せました（フラッシュ）"
+        tb.tick(tb.now + SHOWDOWN_MUCK_SEC + 0.5)
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source, hand.announced_hand) == (6, "cards", "Flush")
+        assert not hand.review_required
+
+    def test_a_stronger_hand_announced_later_is_the_winners(self, tmp_path):
+        # 席5 のツーペアを言ったあと、あとから見せた席6 のフラッシュを言った
+        tb = _Table(tmp_path)
+        _to_river(tb)
+        tb.say("ツーペア")
+        assert tb.notices[-1] == "席5 が見せました（ツーペア）"
+        tb.say("フラッシュ")
+        tb.tick(tb.now + SHOWDOWN_MUCK_SEC + 0.5)
+        (hand,) = tb.hands
+        assert (hand.winner_seat, hand.winner_source, hand.announced_hand) == (6, "cards", "Flush")
+        assert not hand.review_required
+        assert [(s["seat"], s.get("announced")) for s in hand.to_dict()["showdown"]] == [
+            (4, None), (5, "Two pair"), (6, "Flush")]
+
+    def test_the_announced_hand_names_an_unreadable_winner(self, tmp_path):
+        # 席6 の札が 1 枚しか読めていない。フラッシュはほかの読めた手札ではできない = 席6 の手
+        tb = _Table(tmp_path)
+        _to_river(tb, holes={4: HOLES[4], 5: HOLES[5], 6: ["Kd"]})
+        tb.say("フラッシュ")
+        assert tb.notices[-1] == "席6 が見せました（フラッシュ）"
+        tb.tick(tb.now + SHOWDOWN_MUCK_SEC + 0.5)
         (hand,) = tb.hands
         assert (hand.winner_seat, hand.winner_source) == (6, "announced") and hand.review_required
 
