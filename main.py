@@ -82,6 +82,28 @@ def _prompt_table_mode() -> dict:
             structure = structures[int(raw) - 1]
             break
         print(f"1〜{len(structures)} を入力してください。")
+    if structure.start_time:
+        # 時刻準拠: レベル 1 の開始時刻からの経過でいまのレベルを決める（オーナー 2026-10-24）
+        import time as _time
+
+        from core.blind_structure import StructureValidationError, parse_start_time, start_epoch
+
+        while True:
+            raw = input(f"レベル1の開始時刻 (空Enterで {structure.start_time} / - = レベルと経過分で指定): ").strip()
+            if raw == "-":
+                break
+            try:
+                start_time = parse_start_time(raw or structure.start_time)
+            except StructureValidationError as e:
+                print(e)
+                continue
+            now = _time.time()
+            start_at = start_epoch(start_time, now)
+            clock = TournamentClock.start_at(structure, start_at, now)
+            lv = clock.blinds
+            return {"mode": "tournament", "sb": lv.sb, "bb": lv.bb, "ante": lv.ante, "structure": structure.to_dict(),
+                    "level": lv.level, "elapsed_min": round(_elapsed_in_level(clock, now) / 60, 1),
+                    "start_time": start_time, "start_at": start_at}
     while True:
         raw = input("始めるレベル (空Enterで 1): ").strip() or "1"
         if raw.isdigit() and structure.playing_index(int(raw)) is not None:
@@ -102,10 +124,21 @@ def _prompt_table_mode() -> dict:
             "level": level, "elapsed_min": elapsed_min}
 
 
-def _prompt_session_config() -> dict:
-    """CLIで使う席・プレイヤー名・スタック・ブラインドを入力する。"""
+def _elapsed_in_level(clock, now: float) -> float:
+    """いまのブラインドのレベルの始めからの経過秒（ブレイク中はその前のレベルから数える）。"""
+    start = clock.structure.playing_index(clock.blinds.level)
+    return clock.elapsed(now) + sum(x.duration_sec for x in clock.structure.levels[start:clock.index])
+
+
+def _prompt_session_config(stackless: bool = False) -> dict:
+    """CLIで使う席・プレイヤー名・スタック・ブラインドを入力する。
+
+    `stackless`: 持ち点を数えないモード（オーナー 2026-10-24）。端末の入力では訊かず config の `engine.stackless`
+    （ブラウザの設定画面ではチェックボックスで選ぶ）。持ち点は訊かない。
+    """
     print("=== ポーカーハンドロガー セッション設定 ===")
     table = _prompt_table_mode()
+    table["stackless"] = stackless
     default_stack = (table.get("structure") or {}).get("starting_stack")
 
     while True:
@@ -119,7 +152,8 @@ def _prompt_session_config() -> dict:
     for seat in seats:
         typed = input(f"席{seat} プレイヤー名: ").strip()
         name = typed or f"Player{seat}"
-        while True:
+        stack = 0                                   # 持ち点を数えないモードは訊かない（0 = 分からない）
+        while not table.get("stackless"):
             typed_stack = input(f"席{seat} 初期スタック"
                                 + (f" (空Enterで {default_stack})" if default_stack else "") + ": ").strip()
             try:
@@ -178,10 +212,11 @@ def _session_config(cfg: dict):
     （入力を流し込む）は端末の入力。設定画面は始めたあとも時計の画面として動かし続ける。戻り値は (卓の設定, 設定画面の状態
     or None)。
     """
+    stackless = bool((cfg.get("engine") or {}).get("stackless", False))
     ui_cfg = cfg.get("session_setup") or {}
     if not ui_cfg.get("enabled", True) or not sys.stdin.isatty():
         # 入力を流し込んだ起動（テスト・スクリプト）は端末の入力のまま
-        return _prompt_session_config(), None
+        return _prompt_session_config(stackless), None
     from core.blind_structure import BlindStructureStore
     from tools import session_setup_ui as setup_ui
 
@@ -190,14 +225,48 @@ def _session_config(cfg: dict):
         server = setup_ui.start_server(app, port=int(ui_cfg.get("port", setup_ui.DEFAULT_PORT)))
     except OSError as e:
         print(f"設定画面を開けません（{e}）。端末で入力します。")
-        return _prompt_session_config(), None
+        return _prompt_session_config(stackless), None
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     result = setup_ui.wait_for_setup(app, url, open_browser=bool(ui_cfg.get("open_browser", True)))
     if result is None:
-        result = _prompt_session_config()
+        result = _prompt_session_config(stackless)
         app.result = result
         app.done.set()                 # 時計の画面はそのまま使える
     return result, app
+
+
+TRUTH_PORT = 8791   # 真のアクション入力の画面（tools/ground_truth_ui.py, start_truth.cmd）
+
+
+def _open_truth_table(cfg: dict, wait_sec: float = 20.0) -> None:
+    """セッションを始めたら、この PC のブラウザで真のアクション入力の卓の形の画面を開く（オーナー 2026-10-26）。
+
+    サーバーは start_logger.cmd が別の窓で立てる（ロガーを閉じても入力を続けられるように別のプロセス）。立ち上がるのを
+    `wait_sec` 秒まで待ち、立っていなければ案内だけ出す。config `ground_truth.open_table`（既定 true）。
+    """
+    import socket
+    import time as _time
+
+    if not bool((cfg.get("ground_truth") or {}).get("open_table", True)) or not sys.stdin.isatty():
+        return
+    url = f"http://127.0.0.1:{TRUTH_PORT}/table"
+    deadline = _time.time() + wait_sec
+    while True:
+        try:
+            with socket.create_connection(("127.0.0.1", TRUTH_PORT), timeout=1.0):
+                break
+        except OSError:
+            if _time.time() >= deadline:
+                print(f"真のアクション入力の画面が動いていません。start_truth.cmd を起動してから {url} を開いてください。")
+                return
+            _time.sleep(0.5)
+    print(f"真のアクション入力（卓の形）: {url}（この PC のブラウザで開きます）")
+    try:
+        import webbrowser
+
+        webbrowser.open(url)
+    except Exception:  # noqa: BLE001 — 開けなくてもロガーは続ける
+        pass
 
 
 def _make_tournament(table: dict):
@@ -208,6 +277,9 @@ def _make_tournament(table: dict):
 
     from core.blind_structure import TournamentClock, parse_structure
 
+    if table.get("start_at") is not None:
+        # 時刻準拠: 開始時刻から数え直す（設定に掛かった時間・起動し直しでずれない）
+        return TournamentClock.start_at(parse_structure(table["structure"]), float(table["start_at"]), _time.time())
     return TournamentClock.start(parse_structure(table["structure"]), _time.time(), level=int(table["level"]),
                                  elapsed_sec=float(table.get("elapsed_min") or 0) * 60)
 
@@ -221,6 +293,8 @@ def _record_table(table: dict, session_cfg: dict, json_writer, event_recorder) -
     record = {
         "table_mode": table["mode"], "sb": table.get("sb"), "bb": table.get("bb"), "ante": table.get("ante", 0),
         "structure": table.get("structure"), "level": table.get("level"), "elapsed_min": table.get("elapsed_min"),
+        "start_time": table.get("start_time"), "start_at": table.get("start_at"),
+        "stackless": bool(table.get("stackless")),
         "seats": [{"seat": p["seat"], "name": p["name"], "stack": p["stack"]} for p in session_cfg["players"]],
         "first_button": session_cfg.get("first_button"),
     }
@@ -243,6 +317,8 @@ def _print_table(table: dict, tournament) -> None:
     print(f"トーナメント: {tournament.structure.name} {tournament.current.label} "
           f"{format_blinds(lv.sb, lv.bb, lv.ante)}・残り {format_remaining(tournament.remaining(_time.time()))}"
           "（時間が来たら次のハンドからブラインドを上げます）")
+    if table.get("start_time"):
+        print(f"  時刻準拠: レベル1 = {table['start_time']} 開始。時刻どおりにレベルが上がります。")
 
 
 def _make_event_recorder(cfg: dict, log_dir: str, session_id: str):
@@ -549,7 +625,7 @@ def _parse_name_command(parts: list[str]) -> "tuple[int, str | None] | None":
     return (seat, name) if name else None
 
 
-def _make_game_state(cfg: dict, players: list, sb: int, bb: int, button_seat=None):
+def _make_game_state(cfg: dict, players: list, sb: int, bb: int, button_seat=None, stackless: bool = False):
     """config.engine.backend で game-state 実装を選ぶ (R2, ADR-0009)。
 
     既定 "legacy" = 従来の `GameStateManager`（挙動不変）。"pokerkit" は preview backend
@@ -559,7 +635,9 @@ def _make_game_state(cfg: dict, players: list, sb: int, bb: int, button_seat=Non
     from core.poker_engine import create_game_state
 
     backend = cfg.get("engine", {}).get("backend", "legacy")
-    return create_game_state(backend, players, sb, bb, button_seat=button_seat)
+    if stackless and backend != "pokerkit":
+        print("● 持ち点を数えないモードは engine.backend が pokerkit のときだけ使えます（数えるモードで続けます）")
+    return create_game_state(backend, players, sb, bb, button_seat=button_seat, stackless=stackless)
 
 
 def _table_kwargs(table, tournament, log_dir: str, session_id: str, setup_app, audio_q) -> dict:
@@ -771,7 +849,7 @@ def run_cli(script: str | None = None) -> None:
     ]
     game_state = _make_game_state(
         cfg, players, session_cfg["sb"], session_cfg["bb"],
-        button_seat=session_cfg.get("button_seat"),
+        button_seat=session_cfg.get("button_seat"), stackless=bool((table or {}).get("stackless")),
     )
 
     # 席とお客さんの対応（ADR-0059）。お客さん向け画面はこの記録からハンドを探す。
@@ -815,10 +893,14 @@ def run_cli(script: str | None = None) -> None:
         from core.hand_log import shown_amount
 
         amount = shown_amount(record.action, record.amount, integration_thread.street_total(record))
+        # 持ち点を数えないモード: オールインの額・それに向き合ったコールの額・オールインのあとのポットは出さない
+        amount_unknown, pot_unknown = integration_thread.amount_unknown(record)
+        if amount_unknown:
+            amount = None
         print(
             f"  [{record.street}] 席{record.seat}({record.player_name}) "
             f"{record.action} {amount or ''}"
-            f"  pot={record.pot_after}"
+            + ("" if pot_unknown else f"  pot={record.pot_after}")
             + (" [要確認]" if record.needs_review else "")
             + origin
         )
@@ -967,19 +1049,18 @@ def run_cli(script: str | None = None) -> None:
     if audio_thread is not None:
         audio_thread.start()
     integration_thread.start()
-    feed_stacks = bool((cfg.get("ground_truth") or {}).get("feed_stacks", False))
-    if test_script is not None or feed_stacks:
-        # 画面の操作（台本のハンドを始める）は制御で受け取る。先に言われた発話の聞き取りを待ってから積む
-        # （前のハンドの最後のアクションを次のハンドに入れない = CLI の入力と同じ）。真のアクションの収支で持ち点を
-        # 直す（`ground_truth.feed_stacks`, 2026-10-19）のも同じ制御で受け取る
-        from core.control_queue import ControlCommandLog
-        from integration.control_consumer import ControlConsumerThread
+    # 画面の操作（台本のハンドを始める）は制御で受け取る。先に言われた発話の聞き取りを待ってから積む
+    # （前のハンドの最後のアクションを次のハンドに入れない = CLI の入力と同じ）。真のアクションの収支で持ち点を
+    # 直す（`ground_truth.feed_stacks`, 2026-10-19）・卓の形の入力画面の空席 / 席に戻す（次のハンドの席,
+    # 2026-10-26）も同じ制御で受け取る（いつも動かす。画面が書かなければ何も来ない）
+    from core.control_queue import ControlCommandLog
+    from integration.control_consumer import ControlConsumerThread
 
-        control_thread = ControlConsumerThread(
-            ControlCommandLog(Path(session_cfg["log_dir"]) / f"{session_id}.control.jsonl"), audio_q, stop_event,
-            backlog=audio_thread.backlog if audio_thread is not None else None,
-            pending_before=audio_thread.pending_before if audio_thread is not None else None)
-        control_thread.start()
+    control_thread = ControlConsumerThread(
+        ControlCommandLog(Path(session_cfg["log_dir"]) / f"{session_id}.control.jsonl"), audio_q, stop_event,
+        backlog=audio_thread.backlog if audio_thread is not None else None,
+        pending_before=audio_thread.pending_before if audio_thread is not None else None)
+    control_thread.start()
     if audio_thread is not None:
         _report_audio_start(audio_thread, audio_cfg.get("device_id", 0))
 
@@ -993,6 +1074,8 @@ def run_cli(script: str | None = None) -> None:
     elif test_script is not None:
         print("札の確認（席 4・5・6、1 ハンド目のボタンは席 6）。手順は iPad の「台本」"
               "（http://<この PC の IP>:8791/script）に出ます。")
+    else:
+        _open_truth_table(cfg)
     if session_repo is not None:
         seated = ", ".join(
             f"席{p['seat']}={p['name']}" for p in session_cfg["players"] if p.get("named", True)
@@ -1099,10 +1182,19 @@ def run_cli(script: str | None = None) -> None:
                     print("使い方: name <席> <名前> / name <席> -（空席）")
                 else:
                     seat, name = parsed
-                    if seat not in {p["seat"] for p in session_cfg["players"]}:
-                        print(f"席{seat} はこの卓にありません")
-                        continue
                     vacate = name is None
+                    adding = seat not in {p["seat"] for p in session_cfg["players"]}
+                    if adding:
+                        # 途中から座った人（次のハンドから席を足す, 2026-10-26。pokerkit の卓だけ = legacy は席を足せない）
+                        if vacate or not 1 <= seat <= 9 or not hasattr(game_state, "add_seat"):
+                            print(f"席{seat} はこの卓にありません")
+                            continue
+                        session_cfg["players"].append({"seat": seat, "name": name, "stack": 0, "named": True})
+                        print(f"席{seat} を足します（次のハンドから。持ち点を数えるなら r {seat} <金額> で買い込み）")
+                        audio_q.put(AudioEvent(            # 先に席を足す（名前の変更が席を見つけられるように）
+                            action="sit_in", amount=0, timestamp=_time.time(),
+                            raw_text=f"シート{seat} 参加", seat=seat,
+                        ))
                     if session_repo is None:
                         print("（席とお客さんの記録は無効です: config の session_layer.enabled=true で有効。"
                               "席の参加・休みだけ反映します）")
@@ -1122,10 +1214,11 @@ def run_cli(script: str | None = None) -> None:
                         raw_text=shown, seat=seat,
                     ))
                     # 空席は次のハンドから配られない（休み）。名前を付けた席は参加（休みなら戻す）。
-                    audio_q.put(AudioEvent(
-                        action="sit_out" if vacate else "sit_in", amount=0, timestamp=_time.time(),
-                        raw_text=f"シート{seat} {'休み' if vacate else '参加'}", seat=seat,
-                    ))
+                    if not adding:
+                        audio_q.put(AudioEvent(
+                            action="sit_out" if vacate else "sit_in", amount=0, timestamp=_time.time(),
+                            raw_text=f"シート{seat} {'休み' if vacate else '参加'}", seat=seat,
+                        ))
                     if vacate:
                         print(f"席{seat} を空席にしました（次のハンドから配られません）")
                     else:
@@ -1266,7 +1359,7 @@ def run_gui() -> None:
     ]
     game_state = _make_game_state(
         cfg, players, session_cfg["sb"], session_cfg["bb"],
-        button_seat=session_cfg.get("button_seat"),
+        button_seat=session_cfg.get("button_seat"), stackless=bool((table or {}).get("stackless")),
     )
 
     # E3 (ADR-0008 / ISSUE-0006): session レイヤ接続。既定 off では従来どおり timestamp session_id。
@@ -1647,6 +1740,11 @@ def export_phh(json_path: str) -> None:
         sys.exit(0)
 
     summaries: list[HandSummary] = []
+    skipped = [h.get("hand_id") for h in hands_raw if h.get("stackless")]
+    if skipped:
+        # PHH は持ち点と額が要る。持ち点を数えないモードのハンドは書き出さない（オーナー 2026-10-24）
+        print(f"持ち点を数えないモードのハンドは PHH に書き出しません: {skipped}")
+        hands_raw = [h for h in hands_raw if not h.get("stackless")]
     for h in hands_raw:
         actions = [
             ActionRecord(

@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pokerapp.local/contracts/hand.schema.json",
   "title": "Hand",
-  "version": "1.8",
-  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。1.1 = board_timeline を optional 追加（ボード各枚の配布時刻。ADR-0055, additive）。1.2 = button_seat / position_map を optional 追加（ディーラーボタン回転。仕様 FR-05b/§6.1, ISSUE-0032, additive）。1.3 (ADR-0050 S7, additive) = split pot の pot_awards を追加（単独勝者ハンドでは absent。verify-v1 系列では 1.1 だったものを 2026-09-22 のマージで統合）。1.4 (ADR-0062, additive) = winner_source（勝者の自動判定の決まり方: fold / cards / estimated。宣言で決めたハンドでは absent）と showdown（ショーダウンを手札で判定したときの各席の役）を optional 追加。pot_awards は手札で判定して 2 人以上に配ったとき（引き分け・side pot の勝者が別）にも入る。1.5 (2026-09-26, additive) = announced_hand（ディーラーが言った勝った役の名前）を optional 追加、winner_source に announced（役名から勝者を決めた = 判定と違う / 手札が読めない席がある, review_required）を追加。1.6 (2026-09-29, additive) = board に読めなかった位置の `??` を入れる（読めた一番後ろの位置まで。フロップの 1 枚が読めずにターンが読めたとき、ターンの札をフロップに詰めない）。winner_source に undetermined（ショーダウンで札が読めず、読めていない札しだいで勝者が変わる = チップを動かさない, winner_seat は null, review_required）を追加し、winner_seat は null も可。1.7 (2026-09-30, additive) = showdown の各席に announced（その席が見せたときにディーラーが言った役名。オーナー: アウトオブポジションから見せ、見せるたびに役名を言う運用）。announced_hand は勝った人に言った役名。1.8 (2026-10-24, additive, ADR-0071) = table_mode（卓の種類）・blinds.level（トーナメントのレベル）、blinds.bb_ante は BB と別の額もありうる。",
+  "version": "1.10",
+  "description": "HandSummary.to_dict() の契約（hand core, ADR-0010 R5 + ADR-0008/0009 additive）。ISSUE-0011 の決定により additionalProperties:true で 1.0。required は安定 core キーのみ（additive な pots / player_id / committed 等は optional、legacy/fallback で absent/null 可）。1.1 = board_timeline を optional 追加（ボード各枚の配布時刻。ADR-0055, additive）。1.2 = button_seat / position_map を optional 追加（ディーラーボタン回転。仕様 FR-05b/§6.1, ISSUE-0032, additive）。1.3 (ADR-0050 S7, additive) = split pot の pot_awards を追加（単独勝者ハンドでは absent。verify-v1 系列では 1.1 だったものを 2026-09-22 のマージで統合）。1.4 (ADR-0062, additive) = winner_source（勝者の自動判定の決まり方: fold / cards / estimated。宣言で決めたハンドでは absent）と showdown（ショーダウンを手札で判定したときの各席の役）を optional 追加。pot_awards は手札で判定して 2 人以上に配ったとき（引き分け・side pot の勝者が別）にも入る。1.5 (2026-09-26, additive) = announced_hand（ディーラーが言った勝った役の名前）を optional 追加、winner_source に announced（役名から勝者を決めた = 判定と違う / 手札が読めない席がある, review_required）を追加。1.6 (2026-09-29, additive) = board に読めなかった位置の `??` を入れる（読めた一番後ろの位置まで。フロップの 1 枚が読めずにターンが読めたとき、ターンの札をフロップに詰めない）。winner_source に undetermined（ショーダウンで札が読めず、読めていない札しだいで勝者が変わる = チップを動かさない, winner_seat は null, review_required）を追加し、winner_seat は null も可。1.7 (2026-09-30, additive) = showdown の各席に announced（その席が見せたときにディーラーが言った役名。オーナー: アウトオブポジションから見せ、見せるたびに役名を言う運用）。announced_hand は勝った人に言った役名。1.8 (2026-10-24, additive, ADR-0071) = table_mode（卓の種類）・blinds.level（トーナメントのレベル）、blinds.bb_ante は BB と別の額もありうる。1.9 (2026-10-24, additive) = stackless（持ち点を数えないモード。オールインは額を書かない）。stackless のハンドは players の stack_start / stack_end が null、オールインのあるハンドは result・pot_total・pot_awards[].amount が null で pots は空。1.10 (2026-10-26, additive) = board_after_end（全員降りたことにして閉じたあと、次の配布までに置かれたボード。閉じたときのボード + そのあとの札）。",
   "type": "object",
   "additionalProperties": true,
   "required": ["hand_id", "session_id", "started_at", "ended_at", "players", "actions"],
@@ -59,7 +59,9 @@
         }
       }
     },
-    "pot_total": {"type": "integer", "minimum": 0},
+    "pot_total": {"type": ["integer", "null"], "minimum": 0, "description": "null = 持ち点を数えないモードでオールインのあったハンド（1.9）"},
+    "board_after_end": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 5, "description": "1.10 additive（店舗 2026-10-26）。ほかが全員降りたことにして閉じた（winner_source=fold）あと、次の配布までにボードのリーダーに置かれた札まで含めたボード（閉じたときの board + そのあとの札、3〜5 枚）。席の設定の違い・読めない手札でハンドを早く閉じた見込み。ライブの勝者・持ち点には使わない（推定器・真のアクションの入力が使う）。片付けの束（1 秒に 4 枚以上）は数えない。無ければ absent。"},
+    "stackless": {"type": "boolean", "description": "1.9 additive。持ち点を数えないモード（オーナー 2026-10-24）。持ち点と、オールインの額・オールインに向き合ったコールの額・オールインのあとのポットは記録しない（null）。数えるモードでは absent。"},
     "pots": {
       "type": "array",
       "description": "ADR-0009 additive。main/side pot（rules-aware のみ、legacy は []）。",
@@ -81,7 +83,7 @@
         "required": ["seat", "amount"],
         "properties": {
           "seat": {"type": "integer", "minimum": 1, "maximum": 9},
-          "amount": {"type": "integer", "minimum": 0}
+          "amount": {"type": ["integer", "null"], "minimum": 0}
         }
       }
     },

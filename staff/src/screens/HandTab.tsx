@@ -6,6 +6,7 @@ import type { HandControlInput, StaffSession } from "../api/types";
 import { StaffApiError } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
 import { HandReplay } from "../shared/hand_replay/HandReplay";
+import { shownBoard } from "../shared/hand_replay/handReplayModel";
 import { HandCorrectionPanel } from "./HandCorrectionPanel";
 import { Button, colors, ErrorView, Field, Loading, styles } from "./common";
 
@@ -196,7 +197,7 @@ export function HandTab(props: {
               </Text>
               <Text style={styles.cardMeta}>
                 {h.started_at}
-                {h.board?.length ? ` ・ board ${h.board.join(" ")}` : ""}
+                {shownBoard(h).length ? ` ・ board ${shownBoard(h).join(" ")}` : ""}
                 {h.pot_total != null ? ` ・ pot ${h.pot_total}` : ""}
               </Text>
             </Pressable>

@@ -28,6 +28,9 @@ from core.positions import next_button, position_map, seat_order_from_button
 
 logger = logging.getLogger(__name__)
 
+# 持ち点を数えないモード（`stackless`, オーナー 2026-10-24）で各席に持たせる持ち点。誰も足りなくならない大きさ
+STACKLESS_STACK = 10 ** 12
+
 # LegalContext は core.engine_types に移設（循環 import 回避）。後方互換のため再エクスポート。
 __all__ = ["LegalContext", "PokerEngine", "PokerkitGameState", "create_game_state"]
 
@@ -94,9 +97,11 @@ def _advance_button(playing: list[int], button: Optional[int]) -> int:
 
 def create_game_state(
     backend: str, players: list[PlayerState], sb: int, bb: int,
-    button_seat: Optional[int] = None,
+    button_seat: Optional[int] = None, *, stackless: bool = False,
 ) -> PokerEngine:
     """backend 文字列から game-state 実装を生成する。
+
+    `stackless`: 持ち点を数えないモード（pokerkit のみ。`PokerkitGameState` 参照）。legacy では無視する。
 
     - "pokerkit": `PokerkitGameState`（preview）
     - それ以外（既定 "legacy"）: 既存 `GameStateManager`
@@ -106,7 +111,7 @@ def create_game_state(
     """
     if backend == "pokerkit":
         try:
-            engine = PokerkitGameState(players, sb, bb, button_seat=button_seat)
+            engine = PokerkitGameState(players, sb, bb, button_seat=button_seat, stackless=stackless)
         except ImportError:
             # 既定 backend が pokerkit (Phase G) のため、未導入環境でも起動だけは
             # 落とさない。rules-aware 機能（actor 推定/合法手射影等）は無効になる。
@@ -128,6 +133,14 @@ class PokerkitGameState:
     - **合法手のみ受理**（不正 action/amount は ValueError）。raw ASR の射影は R3。
     - street は betting 完了で **自動進行**（`advance_street` の外部シグナルは cross-check 扱い）。
     - mid-hand の `update_stack` / `rebuy` は次ハンドから反映（pokerkit state は hand 単位）。
+
+    **持ち点を数えないモード**（`stackless=True`, オーナー 2026-10-24。リングでもトーナメントでも使う）: 持ち点は
+    分からないものとして扱い、オールインはオールインとだけ記録する（額は書かない）。内部では各席が
+    `STACKLESS_STACK` を持ってハンドを始める（誰も足りなくならない = 言った額のベットを持ち点で切らない・持ち点 0 で
+    配られない席が無い）。オールインは内部では最小のレイズ（仮の額）にして、その席を「オールインした席」にする。
+    オールインした席には以後手番を回さない（自動でコール / チェックする = 本物のオールインと同じ）。オールインして
+    いない人が 1 人だけになり、その人が出す額が無ければ、その人もチェックで進める（ボードを最後まで開く）。
+    記録の額・持ち点を書かないのは `HandSummary.to_dict`（`core/stackless.py`）。
     """
 
     # ルールの状態機械を持つ（手番・ベッティングの終わり・side pot が分かる）。勝者の自動判定は
@@ -136,7 +149,7 @@ class PokerkitGameState:
 
     def __init__(
         self, players: list[PlayerState], sb: int, bb: int,
-        button_seat: Optional[int] = None,
+        button_seat: Optional[int] = None, *, stackless: bool = False,
     ) -> None:
         from pokerkit import Automation  # 遅延 import（backend 選択時のみ pokerkit 必須）
 
@@ -144,6 +157,9 @@ class PokerkitGameState:
             raise ValueError("players must not be empty")
         self._sb = sb
         self._bb = bb
+        self._stackless = bool(stackless)
+        # このハンドでオールインした席（持ち点を数えないモード。以後手番を回さない）
+        self._allin_seats: set[int] = set()
         self._players: dict[int, PlayerState] = {p.seat: p for p in players}
         self._seats: list[int] = sorted(self._players)          # 安定 seat 順
         # ボタン（ISSUE-0032 / 仕様 FR-05b）。**次の `new_hand` で使う**席を持ち、ハンド開始時に
@@ -198,6 +214,8 @@ class PokerkitGameState:
 
     def playing_seats(self) -> list[int]:
         """次のハンドに配られる席（休みでなく、チップがある席。ハンドの途中の買い足しも数える）。"""
+        if self._stackless:
+            return [s for s in self._seats if s not in self._sitting_out]       # 持ち点を数えない
         return [s for s in self._seats
                 if s not in self._sitting_out and self._stacks[s] + self._pending_rebuys.get(s, 0) > 0]
 
@@ -247,6 +265,10 @@ class PokerkitGameState:
         self._order = seat_order_from_button(playing, self._button_seat)
         self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
         self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
+        if self._stackless:
+            for s in self._order:
+                self._stacks[s] = STACKLESS_STACK
+        self._allin_seats = set()
         stacks = [self._stacks[s] for s in self._order]
         self._hand_start_stacks = list(stacks)
         self._state = NoLimitTexasHoldem.create_state(
@@ -280,6 +302,7 @@ class PokerkitGameState:
         self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
         self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
         self._hand_start_stacks = [start[s] for s in self._order]
+        self._allin_seats = set()
         self._state = NoLimitTexasHoldem.create_state(
             self._automations, False, self._raw_antes(self._hand_start_stacks), (self._sb, self._bb), self._bb,
             list(self._hand_start_stacks), len(self._order),
@@ -308,7 +331,7 @@ class PokerkitGameState:
         start = {s: self._hand_start_stacks[self._seat_to_idx[s]] for s in self._hand_seats}
         for s in playing:
             if s not in start:
-                start[s] = int(stacks.get(s, self._stacks[s]))
+                start[s] = STACKLESS_STACK if self._stackless else int(stacks.get(s, self._stacks[s]))
                 self._stacks[s] = start[s]
             if start[s] <= 0:
                 raise ValueError(f"席{s} の持ち点がありません")
@@ -319,6 +342,7 @@ class PokerkitGameState:
         self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
         self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
         self._hand_start_stacks = [start[s] for s in self._order]
+        self._allin_seats = set()
         self._state = NoLimitTexasHoldem.create_state(
             self._automations, False, self._raw_antes(self._hand_start_stacks), (self._sb, self._bb), self._bb,
             list(self._hand_start_stacks), len(self._order),
@@ -470,7 +494,8 @@ class PokerkitGameState:
         st = self._state
         if st is None or not self._hand_active:
             return []
-        return [self._idx_to_seat[i] for i in st.actor_indices]
+        # オールインした席（持ち点を数えないモード）は自動で進めるので行動する席に数えない
+        return [self._idx_to_seat[i] for i in st.actor_indices if self._idx_to_seat[i] not in self._allin_seats]
 
     def force_fold(self, seat: int) -> None:
         """チェックできる場面でもフォールドにする（席の札が離れた = 降りた, 2026-09-25）。
@@ -495,6 +520,7 @@ class PokerkitGameState:
                 st.fold()
         finally:
             st.mode = mode
+        self._auto_act()
 
     def apply_action(self, seat: int, action: str, amount: int = 0) -> None:
         st = self._state
@@ -512,6 +538,15 @@ class PokerkitGameState:
             if not st.can_check_or_call():
                 raise ValueError("check/call not legal")
             st.check_or_call()
+        elif a == "allin" and self._stackless:
+            # 持ち点を数えない: 額は分からないので、内部では最小のレイズ（仮の額）にして、この席に以後手番を回さない
+            if st.can_complete_bet_or_raise_to():
+                st.complete_bet_or_raise_to(st.min_completion_betting_or_raising_to_amount)
+            elif st.can_check_or_call():
+                st.check_or_call()
+            else:
+                raise ValueError("allin not legal")
+            self._allin_seats.add(seat)
         elif a == "allin":
             # raise 可なら max へ raise。不可だが call 可ならショートスタックの call-all-in。
             # （両方不可は実質ありえないが安全側で error）。これにより desync を防ぐ。
@@ -528,6 +563,36 @@ class PokerkitGameState:
             st.complete_bet_or_raise_to(amount)
         else:
             raise ValueError(f"Unknown action: {action!r} (seat={seat})")
+        self._auto_act()
+
+    @property
+    def stackless(self) -> bool:
+        """持ち点を数えないモードか。"""
+        return self._stackless
+
+    def allin_seats(self) -> set[int]:
+        """このハンドでオールインした席（持ち点を数えないモードだけ。ほかは空）。"""
+        return set(self._allin_seats)
+
+    def _auto_act(self) -> None:
+        """持ち点を数えないモード: 手番を回さない席を自動で進める（本物のオールインで pokerkit が手番を飛ばすのと同じ）。
+
+        - オールインした席: コール / チェック（内部の額を合わせるだけ。記録には出ない）。
+        - オールインしていない人が手番の人だけで、出す額が無い: チェック（もう賭けられる相手がいない = ボードを開く）。
+        """
+        st = self._state
+        if not self._stackless or st is None or not self._hand_active:
+            return
+        for _ in range(64):                      # 1 回の操作で進めるのは高々 4 ストリート × 9 席
+            if st.actor_index is None:
+                return
+            seat = self._idx_to_seat[st.actor_index]
+            live = [s for s in self._hand_seats if st.statuses[self._seat_to_idx[s]]]
+            can_bet = [s for s in live if s not in self._allin_seats and s != seat]
+            if seat in self._allin_seats or (not can_bet and st.checking_or_calling_amount == 0):
+                st.check_or_call()
+            else:
+                return
 
     # ――― 照会 ―――
 
@@ -637,6 +702,7 @@ class PokerkitGameState:
                     raise ValueError(f"Cannot fold seat {cur} to reach {until_seat}")
                 st.fold()
                 folded.append(cur)
+                self._auto_act()
                 if len(folded) > len(self._seats):
                     raise ValueError("fold_through exceeded table size (no convergence)")
         except ValueError:
@@ -747,13 +813,29 @@ class PokerkitGameState:
         return seat in self._sitting_out
 
     def sit_in(self, seat: int) -> bool:
-        """休みの席を戻す（次のハンドから配られる。スタック 0 なら買い足すまで配られない）。変わったら True。"""
+        """休みの席を戻す（次のハンドから配られる。スタック 0 なら買い足すまで配られない）。変わったら True。
+
+        卓に無い席（1〜9）は足す（途中から座った人, オーナー 2026-10-26: 店舗 10/26 は席 7 を足せなかった）。持ち点を
+        数えないモードではそのまま配られ、数えるモードでは持ち点 0 = 買い足す（`rebuy`）まで配られない。
+        """
         if seat not in self._players:
-            raise ValueError(f"Unknown seat: {seat}")
+            self.add_seat(seat)
+            return True
         if seat not in self._sitting_out:
             return False
         self._sitting_out.discard(seat)
         return True
+
+    def add_seat(self, seat: int, name: Optional[str] = None) -> None:
+        """卓に無い席を足す（次のハンドから。持ち点 0、持ち点を数えないモードでは数えない）。1〜9 以外は ValueError。"""
+        if isinstance(seat, bool) or not isinstance(seat, int) or not 1 <= seat <= 9:
+            raise ValueError(f"Unknown seat: {seat}")
+        if seat in self._players:
+            return
+        self._players[seat] = PlayerState(seat=seat, name=name or f"Player{seat}", stack=0)
+        self._seats = sorted(self._players)
+        self._stacks[seat] = 0
+        logger.info("席 %d を足しました（次のハンドから）", seat)
 
     def set_blinds(self, sb: int, bb: int) -> None:
         """ブラインドを変える（トーナメントのレベル上昇）。ハンドの途中なら次のハンドから。"""
@@ -832,7 +914,7 @@ class PokerkitGameState:
 
     def rebuy(self, seat: int, amount: int) -> None:
         if seat not in self._players:
-            raise ValueError(f"Unknown seat: {seat}")
+            self.add_seat(seat)                 # 途中から座った人の買い込み（`r <席> <額>`, 2026-10-26）
         if amount <= 0:
             raise ValueError(f"Rebuy amount must be positive, got {amount}")
         if self._hand_active and seat in self._hand_seats:
@@ -845,6 +927,8 @@ class PokerkitGameState:
     def stacks_before_next_hand(self) -> dict[int, int]:
         """次のハンドの始めの持ち点（ブラインドの前）: いまの持ち点に、台本で決めた持ち点（`force_next_stacks`）を
         重ねたもの。記録の `stack_start` に使う。"""
+        if self._stackless:
+            return {s: STACKLESS_STACK for s in self._seats}       # 毎ハンド同じ持ち点で始める
         stacks = self.get_stacks()
         if self._forced_stacks:
             stacks.update(self._forced_stacks)

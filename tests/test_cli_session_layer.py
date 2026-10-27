@@ -334,6 +334,24 @@ class TestArbitrarySeats:
     def test_invalid_seat_list(self, raw: str):
         assert main._parse_seat_list(raw) is None   # noqa: SLF001
 
+    def test_a_seat_can_be_added_mid_session(
+        self, data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    ):
+        """途中から座った人: 卓に無い席に名前を付けると次のハンドから足す（pokerkit の卓, 店舗 10/26 の席 7）。"""
+        pytest.importorskip("pokerkit")
+        logs = data_dir / "logs"
+        cfg = dict(_cfg(True), engine={"backend": "pokerkit"})
+        answers = ["", "2 5 8", "太郎", "1000", "", "1000", "花子", "1000", "5", "10",
+                   "5", str(logs),
+                   "n", "name 3 次郎", "r 3 1000", "w 5", "n", "w 8", "q"]
+        _run_cli(monkeypatch, cfg, answers)
+        out = capsys.readouterr().out
+        assert "席3 を足します" in out
+        _, hands = _hands(logs)
+        assert [p["seat"] for p in hands[0]["players"]] == [2, 5, 8]
+        assert [(p["seat"], p["name"]) for p in hands[1]["players"]] == [
+            (2, "太郎"), (3, "次郎"), (5, "Player5"), (8, "花子")]
+
     def test_hands_are_played_on_the_chosen_seats(
         self, data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
     ):

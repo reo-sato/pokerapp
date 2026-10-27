@@ -168,12 +168,15 @@ def session_setup(record: dict) -> Optional[dict]:
     hands = [h for h in (record or {}).get("hands") or [] if isinstance(h, dict)]
     if not hands:
         return None
+    # 持ち点を数えないモードのセッション（記録に持ち点が無い, オーナー 2026-10-24）
+    stackless = any(h.get("stackless") for h in hands)
     players: dict[int, dict] = {}
     for hand in hands:
         for p in hand.get("players") or []:
             seat = p.get("seat")
-            if isinstance(seat, int) and seat not in players and p.get("stack_start") is not None:
-                players[seat] = {"seat": seat, "name": p.get("name") or f"P{seat}", "stack": int(p["stack_start"])}
+            if isinstance(seat, int) and seat not in players and (stackless or p.get("stack_start") is not None):
+                players[seat] = {"seat": seat, "name": p.get("name") or f"P{seat}",
+                                 "stack": 0 if stackless else int(p["stack_start"])}
     if len(players) < 2:
         return None
     first = hands[0]
@@ -191,6 +194,7 @@ def session_setup(record: dict) -> Optional[dict]:
         "sb": int(blinds.get("sb") or 100), "bb": int(blinds.get("bb") or 200),
         "button_prior": prior, "first_hand_id": first.get("hand_id"),
         "hand_stacks": {k: v for k, v in hand_stacks.items() if v},
+        **({"stackless": True} if stackless else {}),
     }
 
 
@@ -231,7 +235,7 @@ def replay_session(events: "list | Path", setup: dict, flags: dict, session_id: 
         replay_events(
             events, backend="pokerkit", players=players, sb=setup["sb"], bb=setup["bb"],
             session_id=session_id, out_dir=tmp, button_seat=setup.get("button_prior"), close_open_hand=True,
-            hand_stacks=hand_stacks or None, on_action=on_action, **flags,
+            hand_stacks=hand_stacks or None, on_action=on_action, stackless=bool(setup.get("stackless")), **flags,
         )
         data = _read_json(Path(tmp) / f"{session_id}.json") or {}
     return list(data.get("hands") or [])

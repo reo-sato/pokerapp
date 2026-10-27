@@ -26,6 +26,7 @@ import { ScrollView, StyleSheet, Text, View } from "react-native";
 import {
   actionColor,
   ALL_STREETS,
+  blindSeats,
   buildReplayModel,
   compactActionLabel,
   formatChips,
@@ -34,6 +35,8 @@ import {
   heardDetails,
   parseCard,
   preflopFoldedSeats,
+  preflopPosts,
+  seatBadge,
   seatRingLayout,
   shownAmount,
   STREET_LABELS,
@@ -126,10 +129,12 @@ function SeatChip(props: {
   isWinner: boolean;
   isSelf: boolean;
   dimmed: boolean;
+  /** ボタン・SB・BB の札（"D" / "SB" / "BB" / "D・SB"）。 */
+  badge?: string;
   top: number;
   left: number;
 }): React.JSX.Element {
-  const { player, isWinner, isSelf, dimmed } = props;
+  const { player, isWinner, isSelf, dimmed, badge } = props;
   const result = player.result;
   return (
     <View
@@ -162,6 +167,11 @@ function SeatChip(props: {
         <Text style={s.seatResult} numberOfLines={1}>
           {formatChipsCompact(player.stack_end)}
         </Text>
+      ) : null}
+      {badge ? (
+        <View style={[s.badge, badge.startsWith("D") ? s.badgeButton : s.badgeBlind]}>
+          <Text style={[s.badgeText, badge.startsWith("D") && { color: "#111" }]}>{badge}</Text>
+        </View>
       ) : null}
     </View>
   );
@@ -233,6 +243,8 @@ function ActionLine(props: {
 function StreetColumn(props: {
   street: string;
   section?: StreetSection;
+  /** プリフロップの頭に出すブラインドのポスト（表示だけ）。 */
+  posts?: ReplayAction[];
   newCards: string[];
   selfSeat?: number;
   nameOf: (action: ReplayAction) => string;
@@ -241,7 +253,7 @@ function StreetColumn(props: {
 }): React.JSX.Element {
   const { section, newCards } = props;
   // プリフロップの fold は出さない（降りた席はテーブル図側で減光して示す）。
-  const actions = visibleColumnActions(props.street, section?.actions ?? []);
+  const actions = [...(props.posts ?? []), ...visibleColumnActions(props.street, section?.actions ?? [])];
   return (
     <View style={s.column}>
       <View style={s.columnHead}>
@@ -304,8 +316,11 @@ export function HandReplay(props: {
 }): React.JSX.Element {
   const reviewMarks = props.reviewMarks ?? true;
   const model = buildReplayModel(props.hand);
-  const board = props.hand.board ?? [];
+  const board = model.board; // 全員降りて終わったハンドは終わったストリートまで（shownBoard）
   const foldedPreflop = new Set(preflopFoldedSeats(props.hand.actions ?? []));
+  // ボタン・SB・BB（テーブル図の札とプリフロップの列のポスト, オーナー 2026-10-26）
+  const blindsAt = blindSeats(props.hand);
+  const posts = preflopPosts(props.hand);
   // 席は 1〜8 を席番号の位置に固定（空いている席番号は空席）。手前は席 4 と席 5 の間（オーナー 2026-10-19）
   const ring = tableSeats(model.seats);
   const slots = seatRingLayout(ring.length, TABLE_FRONT);
@@ -375,6 +390,7 @@ export function HandReplay(props: {
               isWinner={p.seat === model.winnerSeat}
               isSelf={p.seat === props.selfSeat}
               dimmed={foldedPreflop.has(p.seat)}
+              badge={seatBadge(blindsAt, p.seat)}
               top={slots[i]?.top ?? 50}
               left={slots[i]?.left ?? 50}
             />
@@ -391,6 +407,7 @@ export function HandReplay(props: {
             key={street}
             street={street}
             section={sectionByStreet.get(street)}
+            posts={street === "preflop" ? posts : undefined}
             newCards={newCardsFor(street, board)}
             selfSeat={props.selfSeat}
             nameOf={nameOf}
@@ -453,6 +470,21 @@ const s = StyleSheet.create({
   seatSelf: { backgroundColor: c.selfFill, borderColor: c.selfEdge },
   seatName: { color: c.text, fontSize: 11, fontWeight: "600", maxWidth: SEAT_W - 8 },
   seatResult: { color: c.muted, fontSize: 10, fontWeight: "700", marginTop: 1 },
+  // ボタン・SB・BB の札: 席の枠の右上に重ねる（席の幅を広げない）
+  badge: {
+    position: "absolute",
+    top: -7,
+    right: -6,
+    minWidth: 16,
+    height: 16,
+    paddingHorizontal: 3,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  badgeButton: { backgroundColor: "#f4f1e8" },
+  badgeBlind: { backgroundColor: c.seatFill, borderWidth: 1, borderColor: c.muted },
+  badgeText: { color: c.text, fontSize: 9, fontWeight: "800" },
 
   // ――― カード ―――
   cardRow: { flexDirection: "row", alignItems: "center" },

@@ -357,3 +357,38 @@ def test_a_sixth_board_card_is_not_added(tmp_path):
                        raw_tag_id=card)
         tb.t._process_rfid_event(ev)                     # noqa: SLF001
     assert tb.t._board_cards == ["2c", "3c", "4c", "5c", "6c"]   # noqa: SLF001
+
+
+class TestAddSeat:
+    """途中から座った人の席を足す（店舗 2026-10-26: 席 7 を足せず `r 7 …` も Unknown seat で失敗した）。"""
+
+    def test_sit_in_adds_a_seat_from_the_next_hand_without_stacks(self):
+        gs = PokerkitGameState([PlayerState(seat=s, name=f"P{s}", stack=0) for s in (2, 3, 5)],
+                               sb=100, bb=200, stackless=True)
+        gs.new_hand()
+        assert gs.sit_in(7) is True                    # ハンドの途中でも次のハンドから
+        assert gs.seats_in_hand() == [2, 3, 5]
+        gs.end_hand(2)
+        gs.new_hand()
+        assert gs.seats_in_hand() == [2, 3, 5, 7]
+
+    def test_with_stacks_a_new_seat_is_dealt_after_the_buy_in(self):
+        gs = _engine({1: 10000, 2: 10000})
+        assert gs.sit_in(4) is True
+        gs.new_hand()
+        assert gs.seats_in_hand() == [1, 2]            # 持ち点 0 = まだ配らない
+        gs.end_hand(1)
+        gs.rebuy(4, 8000)
+        gs.new_hand()
+        assert gs.seats_in_hand() == [1, 2, 4]
+
+    def test_rebuy_to_a_new_seat_adds_it(self):
+        gs = _engine({1: 10000, 2: 10000})
+        gs.rebuy(6, 5000)
+        gs.new_hand()
+        assert gs.seats_in_hand() == [1, 2, 6]
+
+    def test_only_seats_one_to_nine(self):
+        gs = _engine({1: 10000, 2: 10000})
+        with pytest.raises(ValueError):
+            gs.sit_in(10)

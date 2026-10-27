@@ -206,7 +206,7 @@ CONTENT_FILES = (
     "audio/short_word_model.json",
     "core/bet_sizing.py", "core/poker_engine.py", "core/showdown.py", "core/positions.py", "core/constants.py",
     "core/game_state.py", "core/engine_types.py", "core/events.py", "core/hand_log.py", "core/control_queue.py",
-    "core/offplay.py",
+    "core/offplay.py", "core/stackless.py",
 )
 
 
@@ -517,7 +517,8 @@ class SessionEstimator:
         return replay_world(world_events(self.events, self.transcripts, cache=self._parse_cache), self.presence,
                             players=self.players, sb=self.setup["sb"], bb=self.setup["bb"],
                             session_id=self.session_id, button_seat=self.setup.get("button_prior"),
-                            hand_stacks=stacks or None, button_from_deal=True, **self.flags)
+                            hand_stacks=stacks or None, button_from_deal=True,
+                            stackless=bool(self.setup.get("stackless")), **self.flags)
 
     def windows(self, hands: Optional[list[dict]] = None) -> list[HandWindow]:
         hands = [h for h in (hands if hands is not None else self.baseline()) if _epoch(h.get("started_at"))]
@@ -594,7 +595,8 @@ class SessionEstimator:
         if presence is not None and lifts:
             presence = _masked(presence, [(e.value[0], e.at, e.value[1]) for e in lifts])
         button = next((e.value for e in edits if e.kind == "button"), w.button)
-        stacks = {p["seat"]: p["stack_start"] for p in w.base.get("players") or [] if "stack_start" in p}
+        stacks = {p["seat"]: p["stack_start"] for p in w.base.get("players") or []
+                  if p.get("stack_start") is not None}
         if stacks:
             # このハンドに配られなかった席（バストして抜けた・休み）は持ち点 0 = 配らない。入れないと最初の持ち点のまま
             # 全席でハンドを組み直していた（店舗 2026-10-19 a64ec4ad: 2 人だけ残った終盤を 8 人で, 推定の 15 ハンドが 1 に）
@@ -608,7 +610,7 @@ class SessionEstimator:
         hands = replay_world(
             world, presence, players=self.players, sb=int(blinds.get("sb") or self.setup["sb"]),
             bb=int(blinds.get("bb") or self.setup["bb"]), session_id=self.session_id,
-            bb_ante=int(blinds.get("bb_ante") or 0),
+            bb_ante=int(blinds.get("bb_ante") or 0), stackless=bool(self.setup.get("stackless")),
             hand_stacks={1: stacks} if stacks else None,
             hand_buttons={1: button} if button is not None else None,
             on_action=records.append, word_labels=labels, open_gates=opened, gate_events=gates, **self.flags,

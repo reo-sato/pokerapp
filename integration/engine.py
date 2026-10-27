@@ -155,6 +155,8 @@ SILENT_MIC_SEC = 60.0
 # ハンドを始めてからこの秒数たったら、卓で使っていない席に手札が無いかを確かめる（配っている途中の席を
 # 「手札が無い」と言わないため）
 SEAT_SETUP_CHECK_SEC = 5.0
+# 手札 2 枚が続けて読めない席を知らせるハンドの数（店舗 2026-10-26: 席 3 のリーダー）
+UNREAD_SEAT_HANDS = 2
 # 「フォールド」と聞こえたが手番の人の札がまだ席にあるとき、この秒数以内に札が離れたら、その発話の時刻の
 # フォールドにする（勝った人が先に札を投げても、降りた人の方が先になる）。
 SPOKEN_FOLD_WINDOW_SEC = 15.0
@@ -649,6 +651,10 @@ class IntegrationThread(threading.Thread):
         self._shown_holes: dict[int, tuple[str, ...]] = {}
         self._shown_board = 0
         self._seat_setup_warned = False   # このハンドで席の設定の食い違いを知らせたか
+        self._unread_checked = False      # このハンドで手札を読めない席を数えたか
+        self._unread_streak: dict[int, int] = {}   # 席 → 手札 2 枚が続けて読めなかったハンドの数
+        # 全員降りたことにして閉じたハンドと、そのあと置かれたボードの札（`_note_board_after_end`）
+        self._after_end: Optional[dict] = None
         # ――― フォールドは札の離脱から ―――
         self._rfid_folds = bool(rfid_folds) and self._rules_aware
         self._fold_absent_sec = float(fold_absent_sec)
@@ -780,7 +786,8 @@ class IntegrationThread(threading.Thread):
             self._check_post_hand_listening()   # 全員フォールドのあとも札が残っているあいだの聞き取り
             self._check_silent_mic()        # マイクに声が入っているか
             self._check_seat_setup()        # 起動時の席と札を置いた席の食い違い
-            self._poll_departures()         # 席の札の離脱・戻り（フォールド）
+            self._check_unread_seats()      # 手札を続けて読めない席
+            self._poll_departures()        # 席の札の離脱・戻り（フォールド）
 
             try:
                 event = self._audio_queue.get(timeout=0.1)
@@ -925,8 +932,11 @@ class IntegrationThread(threading.Thread):
             if not self._hand_open:
                 return                       # ハンドを始められていない（参加できる席が 2 つ未満）
         elif self._auto_new_hand and not (self._hand_open and self._in_play):
-            # 手札が配られる前・プレーが終わったあと（シャッフル・片付け）のボードは読まない（ADR-0063）
+            # 手札が配られる前・プレーが終わったあと（シャッフル・片付け）のボードは読まない（ADR-0063）。
+            # 全員降りたことにして閉じたあとの札は、そのハンドの記録に別に残す（ハンドが続いていたかもしれない）
             logger.debug("プレー中でないボードの札を無視しました: %s (tag=%s)", ev.card, ev.tag_id)
+            if not self._hand_open:
+                self._note_board_after_end(ev)
             return
         elif self._auto_new_hand and self._waiting_for_deal():
             # 「ハンド開始」/ n で先に始めたハンドで、まだ手札が配られていない = 配る前のウォッシュ。
@@ -3502,6 +3512,88 @@ class IntegrationThread(threading.Thread):
                 "席の設定を確かめてください"
             )
 
+    def _check_unread_seats(self) -> None:
+        """ハンドの席で、ほかの席は手札 2 枚が読めたのに `UNREAD_SEAT_HANDS` ハンド続けて 2 枚そろわない席を知らせる
+        （ハンドごとに 1 回, お知らせだけ）。
+
+        店舗 2026-10-26: 席 3 のリーダーが途中から手札を読めなくなり、空いた席 2 と一緒に「手札が読めない = 降りた」
+        になって、ハンド 32〜37 がボードの前に「全員降りた」で閉じた（ボードが記録されない）。ボードのリーダーの
+        「続けて読まない」知らせと同じく、早く気づけるようにする。
+        """
+        if (not self._hand_open or self._unread_checked or self._hand_started_epoch is None
+                or self._clock() - self._hand_started_epoch < SEAT_SETUP_CHECK_SEC):
+            return
+        self._unread_checked = True
+        seats = self._seats_in_hand()
+        read = [s for s in seats if len(self._hole_cards.get(s) or ()) >= 2]
+        if len(read) < 2:
+            return                                   # 配っていない（手で始めた）・RFID の無い卓
+        for seat in seats:
+            if seat in read:
+                self._unread_streak.pop(seat, None)
+                continue
+            self._unread_streak[seat] = self._unread_streak.get(seat, 0) + 1
+            if self._unread_streak[seat] == UNREAD_SEAT_HANDS:
+                self._notice(
+                    f"席{seat} のリーダーが手札を読めていません（{UNREAD_SEAT_HANDS} ハンド続けて）— 読めない席は降りたことに"
+                    "なります。座っていなければ空席に（name <席> -）、座っていれば札の置き方かリーダーを確かめてください"
+                    "（rr で読み取り装置を再起動）"
+                )
+
+    def _note_board_after_end(self, ev: RFIDEvent) -> None:
+        """全員降りたことにして閉じたハンドのあと、次の配布までに置かれたボードの札を、そのハンドの記録に
+        `board_after_end` として足す（ライブの勝者・持ち点は変えない, 店舗 2026-10-26）。
+
+        閉じたハンドのボードより先の位置だけを数える（読み直しは数えない）。`BOARD_SWEEP_SEC` 秒のうちに
+        `BOARD_SWEEP_CARDS` 枚以上が読めたら片付け・ウォッシュの札とみて、そこで数えるのをやめる。札の時刻
+        （`ev.timestamp`）だけで決めるので replay も同じになる。
+        """
+        after = self._after_end
+        if after is None or after["closed"] or ev.board_index is None or not ev.card or ev.replaces:
+            return
+        if ev.board_index <= after["base"] or ev.board_index in after["cards"]:
+            return
+        times = [t for t in after["times"].values() if abs(t - ev.timestamp) < BOARD_SWEEP_SEC]
+        if len(times) + 1 >= BOARD_SWEEP_CARDS:
+            after["closed"] = True                  # 片付けの束
+            for i in [i for i, t in after["times"].items() if abs(t - ev.timestamp) < BOARD_SWEEP_SEC]:
+                after["cards"].pop(i, None)
+                after["times"].pop(i, None)
+            logger.info("全員降りたあとのボードの札は片付けの札とみて、数えるのをやめました")
+            self._write_board_after_end()
+            return
+        after["cards"][ev.board_index] = ev.card
+        after["times"][ev.board_index] = ev.timestamp
+        self._write_board_after_end()
+
+    def _write_board_after_end(self) -> None:
+        after = self._after_end
+        if after is None:
+            return
+        summary: HandSummary = after["summary"]
+        board = list(summary.board[:after["base"]])
+        for i in range(after["base"] + 1, 6):
+            if i not in after["cards"]:
+                break
+            board.append(after["cards"][i])
+        if len(board) < 3 or len(board) <= after["base"]:
+            if summary.board_after_end:
+                summary.board_after_end = None
+                self._json_writer.update_hand(summary.hand_id, {"board_after_end": None})
+            return
+        if board == summary.board_after_end:
+            return
+        summary.board_after_end = board
+        self._json_writer.update_hand(summary.hand_id, {"board_after_end": board})
+        if not after["noticed"]:
+            after["noticed"] = True
+            street = {3: "フロップ", 4: "ターン", 5: "リバー"}[len(board)]
+            self._notice(
+                f"ハンド {summary.hand_id} は全員降りたことにしましたが、{street}が置かれました（{_cards_text(board)}）— "
+                "ハンドは続いているかもしれません。席の設定（name <席> <名前> / name <席> -）と読めていない手札を"
+                "確かめてください（記録は真のアクションで直せます）"
+            )
+
     def _show_board(self, replaced: Optional[tuple[int, str, str]] = None) -> None:
         """フロップ（3 枚）・ターン・リバーがそろったとき、配り直しで替わったときにボードを出す。"""
         if not self._hand_open:
@@ -4973,6 +5065,8 @@ class IntegrationThread(threading.Thread):
         self._apply_truth_stacks(hand_id)
 
     def _apply_truth_stacks(self, hand_id: int) -> None:
+        if getattr(self._game_state, "stackless", False):
+            return                                # 持ち点を数えないモード: 記録に収支が無い（直すものも無い, 2026-10-26）
         truth = self._truth_results.get(hand_id)
         recorded = self._recorded_results.get(hand_id)
         if truth is None or recorded is None:
@@ -5725,7 +5819,7 @@ class IntegrationThread(threading.Thread):
                 "hole_cards_source": "rfid" if hole else "",
                 "stack_start": self._stack_start.get(seat, 0),
             })
-        return {
+        hand = {
             "hand_id": gs.hand_id,
             "session_id": self._json_writer._session_id,  # noqa: SLF001
             "started_at": self._hand_started_at,
@@ -5745,6 +5839,23 @@ class IntegrationThread(threading.Thread):
             "in_progress": True,
             "updated_at": self._now_iso(),
         }
+        if getattr(gs, "stackless", False):
+            from core.stackless import strip_hand
+
+            strip_hand(hand)
+        return hand
+
+    def amount_unknown(self, record: ActionRecord) -> tuple[bool, bool]:
+        """持ち点を数えないモードで、このアクションの (額が分からない, ポットが分からない)（画面の表示用）。"""
+        if not getattr(self._game_state, "stackless", False):
+            return False, False
+        from core.stackless import unknown_amounts
+
+        actions = list(self._current_actions)
+        index = next((i for i, a in enumerate(actions) if a is record), None)
+        if index is None:
+            return record.action == "allin", True
+        return unknown_amounts(actions[:index + 1])[index]
 
     def _safe_position_map(self) -> dict[int, str]:
         try:
@@ -6173,6 +6284,8 @@ class IntegrationThread(threading.Thread):
         self._shown_holes = {}
         self._shown_board = 0
         self._seat_setup_warned = False
+        self._unread_checked = False
+        self._after_end = None
         self._departures = {}
         self._hand_inputs = []
         self._checkpoints = []
@@ -6415,6 +6528,7 @@ class IntegrationThread(threading.Thread):
             ended_at=self._iso(ended_ts) if ended_ts is not None else self._now_iso(),
             blinds=self._blinds_record(),
             table_mode=self._table_mode,
+            stackless=bool(getattr(gs, "stackless", False)),
             board=list(self._board_cards),
             board_source=self._board_source,
             board_timeline=self._build_board_timeline(),
@@ -6441,6 +6555,9 @@ class IntegrationThread(threading.Thread):
         )
 
         self._json_writer.append_hand_summary(summary)
+        self._after_end = ({"summary": summary, "base": len(summary.board), "cards": {}, "times": {},
+                            "closed": False, "noticed": False}
+                           if winner_source == "fold" and len(summary.board) < 5 else None)
         self._clear_live_hand()
         if self._on_hand:
             self._on_hand(summary)

@@ -156,6 +156,7 @@ def replay_events(
     hand_stacks: Optional[dict[int, dict[int, int]]] = None,
     on_action: Optional[Callable[[ActionRecord], None]] = None,
     table_mode: Optional[str] = None,
+    stackless: bool = False,
 ) -> list[HandSummary]:
     """Event 列を timestamp 昇順で再構築し、確定した HandSummary 群を返す。
 
@@ -175,11 +176,12 @@ def replay_events(
     `on_action`: live の画面と同じ通知（反映できなかった発話 = actor_source "unresolved" も来る。推定器が採点に使う）。
     `table_mode`: 卓の種類（記録の `session_setup` の `table_mode`, ADR-0071）。ハンドの記録に書く。トーナメントのレベルの
     ブラインド・アンテは記録した `set_level` で同じになる（replay は時計を持たない）。
+    `stackless`: 持ち点を数えないモードのセッション（記録の `session_setup` / ハンドの `stackless`, オーナー 2026-10-24）。
 
     記録に配布の信号（rfid kind `deal` / `hand_start`, schema 0.9）があれば、札の読み取りから配布を決め直さず、
     live が在否で決めた配布と、発話を待って始めた時点に従う（在否を持たない replay で live と同じにするため）。
     """
-    gs = create_game_state(backend, players, sb, bb, button_seat=button_seat)
+    gs = create_game_state(backend, players, sb, bb, button_seat=button_seat, stackless=stackless)
     json_writer = JsonWriter(out_dir, session_id)
     summaries: list[HandSummary] = []
     clock = _ReplayClock()

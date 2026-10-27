@@ -159,6 +159,10 @@ def row_correct(gt_action: dict, cap_action: dict) -> bool:
     cap_amount = _normalize_amount(cap_action.get("amount"), cap_type)
     if allin_equal(gt_type, cap_type, gt_amount, cap_amount):
         return True
+    if cap_type == "call" and "amount" in cap_action and cap_action["amount"] is None:
+        # 持ち点を数えないモード（オーナー 2026-10-24）: オールインに向き合ったコールは額を書かない = 種類だけ。
+        # 持ち点が足りずに全部出したコール（真はオールイン）も同じ
+        return gt_type in ("call", "allin")
     return same_action_type(gt_type, cap_type, gt_amount, cap_amount) and gt_amount == cap_amount
 
 

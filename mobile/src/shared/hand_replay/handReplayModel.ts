@@ -60,6 +60,7 @@ export interface ReplayHand {
   actions: ReplayAction[];
   review_required?: boolean;
   position_map?: Record<string, string>; // 席 → ポジション名 (pokerkit backend)
+  button_seat?: number | null; // ボタンの席 (pokerkit backend, ISSUE-0032)
 }
 
 export interface StreetSection {
@@ -73,6 +74,8 @@ export interface StreetSection {
 
 export interface ReplayModel {
   handId: number;
+  /** 画面に出すボード（全員降りて終わったハンドは、終わったストリートまで = `shownBoard`）。 */
+  board: string[];
   blinds?: { sb?: number; bb?: number; bb_ante?: number };
   /** seat 昇順の参加者 (ホールカードは記録がある席は全員分そのまま)。 */
   seats: ReplayPlayer[];
@@ -112,6 +115,9 @@ export const ACTION_LABELS: Record<string, string> = {
   allin: "オールイン",
   all_in: "オールイン",
   blind: "ブラインド",
+  post_sb: "SB",
+  post_bb: "BB",
+  post_ante: "アンティ",
 };
 
 /** アクション種別の表示名 (未知の種別は raw のまま表示する)。 */
@@ -152,7 +158,7 @@ export const SUIT_COLORS: Record<string, string> = {
  * - アクションは元配列の順序を保持する (street 内の時系列 = 記録順)。
  */
 export function buildReplayModel(hand: ReplayHand): ReplayModel {
-  const board = hand.board ?? [];
+  const board = shownBoard(hand);
   const totals = streetTotals(hand);
   const actions = (hand.actions ?? []).map((a, i) =>
     totals[i] == null ? a : { ...a, total: totals[i] },
@@ -186,6 +192,7 @@ export function buildReplayModel(hand: ReplayHand): ReplayModel {
   const seats = [...(hand.players ?? [])].sort((a, b) => a.seat - b.seat);
   return {
     handId: hand.hand_id,
+    board,
     blinds: hand.blinds,
     seats,
     streets,
@@ -194,6 +201,22 @@ export function buildReplayModel(hand: ReplayHand): ReplayModel {
     potTotal: hand.pot_total ?? null,
     pots: hand.pots ?? [],
   };
+}
+
+/**
+ * 画面に出すボード（オーナー 2026-10-26: ハンドが終わったあとのストリートの札を出さない）。全員降りて 1 人が残ったハンドは、
+ * 最後のアクションのストリートまでしか札は配られていない（そのあとに読めた札は片付け・次のハンドの札）。2 人以上が残った
+ * ハンド（ショーダウン・オールインのランアウト）は記録のボードをそのまま。ショーダウンで見せずに降りた行（street=showdown）は
+ * 数えない。
+ */
+export function shownBoard(hand: ReplayHand): string[] {
+  const board = hand.board ?? [];
+  const actions = (hand.actions ?? []).filter((a) => a.street !== "showdown");
+  const folded = new Set(actions.filter((a) => a.action === "fold").map((a) => a.seat));
+  const remaining = (hand.players ?? []).filter((p) => !folded.has(p.seat)).length;
+  if (remaining > 1 && hand.winner_source !== "fold") return board;
+  const last = actions.length ? actions[actions.length - 1].street : "preflop";
+  return board.slice(0, BOARD_VISIBLE[last] ?? board.length);
 }
 
 /** ベット・レイズ・オールインの額はトータル (記録どおり)。コールは追加額。 */
@@ -403,6 +426,9 @@ export const COMPACT_ACTION_LABELS: Record<string, string> = {
   allin: "All-in",
   all_in: "All-in",
   blind: "Blind",
+  post_sb: "SB",
+  post_bb: "BB",
+  post_ante: "Ante",
 };
 
 export function compactActionLabel(action: string): string {
@@ -425,6 +451,9 @@ export const ACTION_COLORS: Record<string, string> = {
   allin: "#ff5f6d",
   all_in: "#ff5f6d",
   blind: "#8a949e",
+  post_sb: "#8a949e",
+  post_bb: "#8a949e",
+  post_ante: "#8a949e",
 };
 
 /** 未知の action は通常のテキスト色（描画側の `c.text` と同値）にフォールバックする。 */
@@ -501,6 +530,57 @@ export function tableSeats(players: ReplayPlayer[], minSeats: number = TABLE_SEA
  * そのハンドに実質関与していない席を UI で沈めるための判定。ポストフロップの fold は
  * 含めない（フロップまで参加した席は通常表示）。
  */
+/** ボタン・SB・BB の席（テーブル図の札, オーナー 2026-10-26）。ヘッズアップ（SB が無く BTN と BB だけ）はボタンが SB。 */
+export interface BlindSeats {
+  button?: number;
+  sb?: number;
+  bb?: number;
+}
+
+export function blindSeats(hand: ReplayHand): BlindSeats {
+  const out: BlindSeats = {};
+  for (const [seat, pos] of Object.entries(hand.position_map ?? {})) {
+    const n = Number(seat);
+    if (!Number.isInteger(n)) continue;
+    if (pos === "BTN") out.button = n;
+    else if (pos === "SB") out.sb = n;
+    else if (pos === "BB") out.bb = n;
+  }
+  if (out.button == null && typeof hand.button_seat === "number") out.button = hand.button_seat;
+  if (out.sb == null && out.bb != null && out.button != null && hand.position_map?.[String(out.button)] === "BTN") {
+    out.sb = out.button; // ヘッズアップ
+  }
+  return out;
+}
+
+/** テーブル図の席に重ねる札（"D" / "SB" / "BB" / ヘッズアップのボタンは "D・SB"）。無ければ undefined。 */
+export function seatBadge(seats: BlindSeats, seat: number): string | undefined {
+  if (seat === seats.button) return seat === seats.sb ? "D・SB" : "D";
+  if (seat === seats.sb) return "SB";
+  if (seat === seats.bb) return "BB";
+  return undefined;
+}
+
+/**
+ * プリフロップの列の頭に出すブラインドのポスト（表示用, オーナー 2026-10-26）: SB・BB と BB アンティ。記録のアクションには
+ * 足さない（持ち点・ポットの計算は変えない）。席か額が分からない行は出さない。
+ */
+export function preflopPosts(hand: ReplayHand): ReplayAction[] {
+  const seats = blindSeats(hand);
+  const blinds = hand.blinds ?? {};
+  const out: ReplayAction[] = [];
+  if (seats.sb != null && typeof blinds.sb === "number" && blinds.sb > 0) {
+    out.push({ street: "preflop", seat: seats.sb, action: "post_sb", amount: blinds.sb });
+  }
+  if (seats.bb != null && typeof blinds.bb === "number" && blinds.bb > 0) {
+    out.push({ street: "preflop", seat: seats.bb, action: "post_bb", amount: blinds.bb });
+    if (typeof blinds.bb_ante === "number" && blinds.bb_ante > 0) {
+      out.push({ street: "preflop", seat: seats.bb, action: "post_ante", amount: blinds.bb_ante });
+    }
+  }
+  return out;
+}
+
 export function preflopFoldedSeats(actions: ReplayAction[]): number[] {
   const seats = new Set<number>();
   for (const a of actions ?? []) {
