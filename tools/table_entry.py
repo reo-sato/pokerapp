@@ -142,22 +142,46 @@ def _base_of(hand: dict) -> dict:
     }
 
 
-def _carried_seating(by_id: dict[int, dict], gt_repo: Any, session_id: str, hand_id: int) -> Optional[list[dict]]:
-    """前のハンドの真のアクションの席（空席にした席を除き、席に戻した・足した席を含む）。持ち点を数えないモードで、画面で
-    空席にした・席に入れた状態を次のハンド以降も引き継ぐ（オーナー 2026-10-26: 持ち点が 0 になったら自分で空席にする）。
-    真のアクションのある前のハンドが無ければ None。"""
+def carried_seats(by_id: dict[int, dict], gt_repo: Any, session_id: str, hand_id: int) -> Optional[dict]:
+    """前のハンドの真のアクションで決めた席。真のアクションの入力で空席にした・席に戻した・足した席を、真のアクションの無い
+    あとのハンドにも引き継ぐ（オーナー 2026-10-26・27: 一度アサインしたら毎ハンド入れ直さない。持ち点のモードによらず、
+    卓の形の画面と一覧の画面で同じ）。
+
+    返り値: `{"from_hand": 番号, "present": [席…], "absent": [席…], "names": {席: 名前}}`。このハンドより前に真のアクションの
+    あるハンドが無ければ None。"""
     for hid in sorted((h for h in by_id if h < hand_id), reverse=True):
         prev_gt = gt_repo.get(session_id, hid)
         if prev_gt is None:
             continue
         players = (prev_gt.hand or {}).get("players")
         table = with_table(by_id[hid], players)
-        absent = {p.get("seat") for p in players or [] if isinstance(p, dict) and p.get("absent")}
-        names = {p.get("seat"): p.get("name") for p in table.get("players") or [] if isinstance(p, dict)}
-        seats = sorted(p["seat"] for p in table.get("players") or []
-                       if isinstance(p, dict) and isinstance(p.get("seat"), int) and p["seat"] not in absent)
-        return [{"seat": s, "name": names.get(s) or f"席{s}", "stack_start": 0} for s in seats]
+        absent = sorted({p["seat"] for p in players or []
+                         if isinstance(p, dict) and isinstance(p.get("seat"), int) and p.get("absent")})
+        names = {p["seat"]: p.get("name") for p in table.get("players") or []
+                 if isinstance(p, dict) and isinstance(p.get("seat"), int) and p.get("name")}
+        present = sorted(s for s in names.keys() | {p["seat"] for p in table.get("players") or []
+                                                     if isinstance(p, dict) and isinstance(p.get("seat"), int)}
+                         if s not in absent)
+        return {"from_hand": hid, "present": present, "absent": absent, "names": names}
     return None
+
+
+def _carried_players(base: dict, carried: dict, by_id: dict[int, dict], gt_repo: Any, session_id: str) -> list[dict]:
+    """（記録の席 ∪ 引き継いだ席）− 引き継いだ空席。足した席の持ち点は、数えないモードは 0、数えるモードは前のハンドの
+    終わりの持ち点（分からなければ None）。"""
+    absent = set(carried["absent"])
+    mine = {p["seat"]: p for p in base.get("players") or [] if p["seat"] not in absent}
+    added = [s for s in carried["present"] if s not in mine]
+    stacks: dict[int, int] = {}
+    if added and not base.get("stackless"):
+        prev = gt_repo.get(session_id, carried["from_hand"])
+        stacks = _end_stacks(by_id[carried["from_hand"]], prev.hand if prev is not None else None)
+    for s in added:
+        if not base.get("stackless") and stacks.get(s) is not None and stacks[s] <= 0:
+            continue                               # 前のハンドで持ち点が無くなった（バスト）
+        mine[s] = {"seat": s, "name": carried["names"].get(s) or f"席{s}",
+                   "stack_start": 0 if base.get("stackless") else stacks.get(s)}
+    return [mine[s] for s in sorted(mine)]
 
 
 def table_hand(log_dir: Path, session_id: str, hand_id: int, gt_repo: Any, corr_repo: Any = None) -> Optional[dict]:
@@ -182,17 +206,16 @@ def table_hand(log_dir: Path, session_id: str, hand_id: int, gt_repo: Any, corr_
     else:
         return None
     captured_seats = [p["seat"] for p in base.get("players") or []] if state != "pending" else None
-    if base.get("stackless") and gt is None:
-        carried = _carried_seating(by_id, gt_repo, session_id, hand_id)
-        if carried is not None:
-            if state == "pending" and latest is not None:
-                # 前のハンドのボタン（真のアクション、無ければ記録）の次。足した席・空席にした席を数えて回す
-                prev = gt_repo.get(session_id, latest)
-                prev_button = (prev.hand or {}).get("button_seat") if prev is not None else None
-                if not isinstance(prev_button, int):
-                    prev_button = by_id[latest].get("button_seat")
-                base["button_seat"] = _next_button([p["seat"] for p in carried], prev_button)
-            base["players"] = carried
+    carried = carried_seats(by_id, gt_repo, session_id, hand_id) if gt is None else None
+    if carried is not None:
+        base["players"] = _carried_players(base, carried, by_id, gt_repo, session_id)
+        if state == "pending" and latest is not None:
+            # 前のハンドのボタン（真のアクション、無ければ記録）の次。足した席・空席にした席を数えて回す
+            prev = gt_repo.get(session_id, latest)
+            prev_button = (prev.hand or {}).get("button_seat") if prev is not None else None
+            if not isinstance(prev_button, int):
+                prev_button = by_id[latest].get("button_seat")
+            base["button_seat"] = _next_button([p["seat"] for p in base["players"]], prev_button)
     out = {"session_id": session_id, "hand_id": hand_id, "state": state, "base": base,
            "latest_id": latest, "ground_truth": gt.hand if gt is not None else None}
     if captured_seats is not None:

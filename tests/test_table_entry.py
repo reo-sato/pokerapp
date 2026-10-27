@@ -297,3 +297,33 @@ def test_seat_toggle_is_sent_to_the_logger(tmp_path):
     assert send_seat(d, SID, {"seat": 12, "in": True})[0] == 400
     cmds, _ = ControlCommandLog(d / f"{SID}.control.jsonl").read_from(0)
     assert [(c.type, c.args) for c in cmds] == [("sit_in", {"seat": 7}), ("sit_out", {"seat": 3})]
+
+
+def _counting_two_hands(tmp_path: Path) -> Path:
+    d = tmp_path / "logs_counting"
+    d.mkdir()
+    (d / f"{SID}.json").write_text(json.dumps({"session_id": SID, "hands": [_hand(1), _hand(2)]}), encoding="utf-8")
+    return d
+
+
+def test_seating_carries_in_counting_mode_on_both_screens(tmp_path):
+    """持ち点を数えるモードでも、真のアクションで決めた席（いない席・足した席）を、真のアクションの無いあとのハンドに
+    引き継ぐ（卓の形の画面も一覧の画面も, オーナー 2026-10-27）。"""
+    from tools.ground_truth_ui import hand_detail
+
+    d = _counting_two_hands(tmp_path)
+    repo = GroundTruthRepository(d)
+    gt1 = {"button_seat": 6, "actions": [{"seat": 4, "action": "fold"}], "winner_seat": 5,
+           "players": [{"seat": 4}, {"seat": 5}, {"seat": 6, "absent": True},
+                       {"seat": 7, "name": "席7", "stack_start": 5000}]}
+    repo.upsert(SID, 1, gt1, annotator="table", source="manual-edit")
+    t = table_hand(d, SID, 2, repo)
+    assert [p["seat"] for p in t["base"]["players"]] == [4, 5, 7]
+    assert next(p for p in t["base"]["players"] if p["seat"] == 7)["stack_start"] == 5000
+    assert t["captured_seats"] == [4, 5, 6]                  # ロガーにだけある席 6 は画面で空席
+    carried = hand_detail(d, SID, 2, repo)["carried"]
+    assert carried["present"] == [4, 5, 7] and carried["absent"] == [6] and carried["from_hand"] == 1
+    # このハンドで真のアクションを入れたら、それを使う（引き継がない）
+    repo.upsert(SID, 2, dict(gt1, players=[{"seat": s} for s in (4, 5, 6)]), annotator="table", source="manual-edit")
+    assert hand_detail(d, SID, 2, repo)["carried"] is None
+    assert [p["seat"] for p in table_hand(d, SID, 2, repo)["base"]["players"]] == [4, 5, 6]

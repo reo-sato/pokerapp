@@ -485,7 +485,23 @@ def hand_detail(
         "in_progress": in_progress,
         "timeline": hand_timeline(log_dir, session_id, captured, _next_started_at(log_dir, session_id, hand_id)),
         "table_seats": table_seats(log_dir, session_id, hand_id),
+        # 前のハンドの真のアクションで決めた席（いた / いない）を、真のアクションの無いハンドに引き継ぐ（2026-10-27）
+        "carried": _carried(log_dir, session_id, hand_id, gt_repo, corr_repo) if gt is None else None,
     }
+
+
+def _carried(log_dir: Path, session_id: str, hand_id: int, gt_repo: GroundTruthRepository,
+             corr_repo: Optional[HandCorrectionRepository]) -> Optional[dict]:
+    from tools.table_entry import _hand_of, carried_seats
+
+    hands, live = _hand_of(log_dir, session_id, corr_repo)
+    by_id = {h["hand_id"]: h for h in hands}
+    if live is not None:
+        by_id.setdefault(live["hand_id"], live)
+    carried = carried_seats(by_id, gt_repo, session_id, hand_id)
+    if carried is not None:
+        carried["names"] = {str(k): v for k, v in carried["names"].items()}
+    return carried
 
 
 def table_seats(log_dir: Path, session_id: str, hand_id: int) -> list[dict]:
@@ -1588,12 +1604,18 @@ function buildGt(d){
   const capP = (cap.players || []).filter(p => typeof p.seat === "number");
   const gP = ((g && g.players) || []).filter(p => typeof p.seat === "number");
   const table = d.table_seats || [];
-  const all = [...new Set([...capP, ...gP, ...table].map(p => p.seat))].sort((a, b) => a - b);
+  // 真のアクションが無ければ、前のハンドの真のアクションで決めた席（いた / いない）から始める（2026-10-27）
+  const carried = !g && d.carried ? d.carried : null;
+  const carriedIn = new Set(carried ? carried.present : []), carriedOut = new Set(carried ? carried.absent : []);
+  const all = [...new Set([...capP, ...gP, ...table, ...[...carriedIn].map(seat => ({seat}))].map(p => p.seat))]
+    .sort((a, b) => a - b);
   const players = all.map(seat => {
     const cp = capP.find(x => x.seat === seat), gp = gP.find(x => x.seat === seat), tp = table.find(x => x.seat === seat);
     const src2 = gp || cp || {};
-    return {seat, name: (cp || gp || tp || {}).name || "", hole_cards: normCards(src2.hole_cards, 2),
-            showed_down: !!(gp && gp.showed_down), absent: gp ? !!gp.absent : !cp,
+    const absent = gp ? !!gp.absent : carriedOut.has(seat) ? true : carriedIn.has(seat) ? false : !cp;
+    return {seat, name: (cp || gp || tp || {}).name || (carried && carried.names[seat]) || "",
+            hole_cards: normCards(src2.hole_cards, 2),
+            showed_down: !!(gp && gp.showed_down), absent,
             stack_start: gp && gp.stack_start != null ? gp.stack_start : null,
             record_stack: cp ? (cp.stack_start ?? null) : null, default_stack: (cp && cp.stack_start) ?? (tp && tp.stack) ?? null};
   });
