@@ -198,18 +198,35 @@ def cmd_run(args) -> int:
             seen.add(inp.session_id)
             picked.append((inp, presence))
     print(f"声の近さのあるセッション {len(picked)}: {', '.join(i.session_id[:8] for i, _p in picked)}")
-    jobs = [(inp, presence, sims_all[inp.session_id], k) for inp, presence in picked for k in VARIANTS]
-    started = time.time()
     results: list[dict] = []
+    done: set[tuple] = set()
+    if args.resume and args.resume.exists():
+        for line in args.resume.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                d = json.loads(line)
+                results.append(d)
+                done.add((d["key"].split("#")[0], d["k"]))
+    jobs = [(inp, presence, sims_all[inp.session_id], k) for inp, presence in picked for k in VARIANTS
+            if (inp.session_id[:8], k) not in done]
+
+    def finished(out: list[dict]) -> None:
+        results.extend(out)
+        if args.resume:
+            with args.resume.open("a", encoding="utf-8") as f:
+                for d in out:
+                    f.write(json.dumps(d, ensure_ascii=False) + "\n")
+
+    started = time.time()
     if args.workers <= 1:
         for job in jobs:
-            results.extend(_run(job))
+            finished(_run(job))
     else:
         import multiprocessing
+        from concurrent.futures import as_completed
 
         with ProcessPoolExecutor(max_workers=args.workers, mp_context=multiprocessing.get_context("spawn")) as pool:
-            for out in pool.map(_run, jobs):
-                results.extend(out)
+            for fut in as_completed([pool.submit(_run, job) for job in jobs]):
+                finished(fut.result())
     print(f"（{time.time() - started:.0f} 秒）")
     if args.dump:
         args.dump.write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -230,6 +247,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     r.add_argument("--logs", nargs="*", type=Path, help="店舗のログ（text の zip と真のアクションの zip）")
     r.add_argument("--workers", type=int, default=4)
     r.add_argument("--dump", type=Path)
+    r.add_argument("--resume", type=Path, help="セッション × k ごとの結果を足す JSONL。あれば済んだ分を飛ばす")
     args = ap.parse_args(argv)
     logging.disable(logging.CRITICAL)
     return cmd_sims(args) if args.cmd == "sims" else cmd_run(args)
