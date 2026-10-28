@@ -95,8 +95,10 @@ _CONTROL_ACTIONS = frozenset({"new_hand", "winner", "showdown", "end_hand", "cor
 # 片付けの途中で 1 枚だけ別の席のリーダーに触れた札は、窓を過ぎると捨てる。
 DEAL_WINDOW_SEC = 15.0
 # 配布を検出してから、それより前に話された発話の認識を待つ上限（秒）。認識が遅れていても、
-# 前のハンドのアクション（最後のコールやマック）を新しいハンドに入れないため。
-DEAL_SPEECH_WAIT_SEC = 60.0
+# 前のハンドのアクション（最後のコールやマック）を新しいハンドに入れないため。上限を過ぎて届いた配る前の
+# 賭けの語は、新しいハンドには入れない（`spoken_before_hand`）。前は 60 秒で、話し声の多い卓では聞き取りが
+# 数分遅れ、38 ハンドのうち 24 ハンドで始まるのが 20〜63 秒遅れた（店舗 2026-10-26）
+DEAL_SPEECH_WAIT_SEC = 15.0
 # 配った直後（アクション前）のハンドに届いた `w` / 「ウィナー」を、前のハンドへの宣言とみなす時間（秒）。
 LATE_WINNER_SEC = 60.0
 # RFID の在否で配布を検出する（ADR-0063）: 2 席以上に手札 2 枚ずつがこの秒数載り続け、ボードの
@@ -1248,6 +1250,14 @@ class IntegrationThread(threading.Thread):
                 # いま始めた: 始めるのを待っていたあいだに札が離れた席（降りた人）を、この発話より先に見る
                 # （店舗 b0a27270 ハンド 2: 配って 5 秒で降りた席6 に、始めるきっかけの「八百」が付いた）
                 self._poll_departures()
+        if (self._rules_aware and self._hand_open and self._hand_auto_started and event.action in _BETTING_WORDS
+                and self._hand_started_epoch is not None and _spoken_at(event) < self._hand_started_epoch):
+            # 配る前に話した賭けの語が、ハンドを始めたあとに届いた（聞き取りの遅れ）= 前のハンドのもの。新しい
+            # ハンドには入れない（前のハンドは閉じている。推定器は話した時刻で前のハンドに入れる）
+            self._notice(f"配る前に話した「{event.raw_text or event.action}」が遅れて届きました — このハンドには"
+                         "入れません（要確認）")
+            self._emit_unresolved(event, reason="spoken_before_hand")
+            return
         if self._rfid_folds and self._hand_open:
             # この発話より前に離れた札を先に反映する（フォールドのあとの人のアクションとして読む）
             self._apply_observations_before(_spoken_at(event), event.timestamp)

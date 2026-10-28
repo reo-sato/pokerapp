@@ -530,6 +530,12 @@ def is_prompt_echo(text: str) -> bool:
     ))
 
 
+def is_stock_hallucination(text: str) -> bool:
+    """幻聴のうち字幕の定型句（「ご視聴ありがとうございました」）か（評価で幻聴の種類を分けるため）。"""
+    norm = unicodedata.normalize("NFKC", text).replace(" ", "").replace("　", "")
+    return any(marker in norm for marker in _STOCK_HALLUCINATIONS)
+
+
 # 発話の長さで言える文字数の上限（空白を除く）。人は 1 秒に 10 文字も言わない。幻聴のループ（「…ウィナー、
 # ハンド、チェック、フォールド、…」を繰り返す）は 1 秒の音から数十文字が出る（店舗の 5 回目の通しテスト:
 # 3.6 秒の音から 250 文字）。書き起こしを長さの上限で打ち切ったものもここで捨てる（`WhisperTranscriber`）。

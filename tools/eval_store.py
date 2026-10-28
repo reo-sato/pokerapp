@@ -47,7 +47,9 @@ from typing import Any, Callable, Optional
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from audio.recognizer import is_implausibly_long, is_prompt_echo, is_question, parse_actions  # noqa: E402
+from audio.recognizer import (  # noqa: E402
+    is_implausibly_long, is_prompt_echo, is_question, is_stock_hallucination, parse_actions,
+)
 from audio.second_ear import agreed_candidate, apply_ear, used_ear  # noqa: E402
 from core.events import AudioEvent, RFIDEvent  # noqa: E402
 from core.game_state import PlayerState  # noqa: E402
@@ -486,6 +488,11 @@ def heard_tokens(transcripts: list[dict], window: tuple[float, float]) -> list[t
 def matched_tokens(truth: list[tuple], heard: list[tuple]) -> int:
     """真のアクションの行のうち、発話の読みと順に対応づけられた数（最長共通部分列。チェックアラウンドは続く
     チェック 1 つ以上と対応する）。"""
+    return len(matched_truth(truth, heard))
+
+
+def matched_truth(truth: list[tuple], heard: list[tuple]) -> set[int]:
+    """`matched_tokens` で対応づけた真のアクションの行の番号（種類ごとに読めた割合を出すため）。"""
     n, m = len(truth), len(heard)
     dp = [[0] * (m + 1) for _ in range(n + 1)]
     for i in range(1, n + 1):
@@ -499,7 +506,23 @@ def matched_tokens(truth: list[tuple], heard: list[tuple]) -> int:
                     k += 1
                     best = max(best, dp[i - k][j - 1] + k)
             dp[i][j] = best
-    return dp[n][m]
+    got: set[int] = set()
+    i, j = n, m
+    while i and j:
+        if dp[i][j] == dp[i - 1][j]:
+            i -= 1
+        elif dp[i][j] == dp[i][j - 1]:
+            j -= 1
+        elif heard[j - 1] == truth[i - 1]:
+            got.add(i - 1)
+            i, j = i - 1, j - 1
+        else:                                  # チェックアラウンド = 続くチェック k 個
+            k = 1
+            while dp[i - k][j - 1] + k != dp[i][j]:
+                k += 1
+            got.update(range(i - k, i))
+            i, j = i - k, j - 1
+    return got
 
 
 def script_windows(script: dict, marks: list[dict]) -> dict[int, tuple[float, float]]:
@@ -520,13 +543,18 @@ def listening_stop_metrics(gt: dict, hands: list[dict], transcripts: list[dict],
     台本のセッションは台本の画面を押した時刻から（`windows`）。"""
     windows = hand_windows(hands) if windows is None else windows
     per_hand = []
+    by_kind: dict[str, list[int]] = {}
     for h in gt.get("hands") or []:
         hid = h.get("hand_id")
         truth = truth_tokens(h)
         if hid not in windows or not truth:
             continue
-        per_hand.append({"hand_id": hid, "actions": len(truth),
-                         "read": matched_tokens(truth, heard_tokens(transcripts, windows[hid]))})
+        got = matched_truth(truth, heard_tokens(transcripts, windows[hid]))
+        per_hand.append({"hand_id": hid, "actions": len(truth), "read": len(got)})
+        for k, token in enumerate(truth):
+            pair = by_kind.setdefault(_KIND_OF.get(token[0], token[0]), [0, 0])
+            pair[0] += k in got
+            pair[1] += 1
     actions = sum(p["actions"] for p in per_hand)
     read = sum(p["read"] for p in per_hand)
     texts = [t for t in ((r.get("text") or "").strip() for r in transcripts) if t]
@@ -537,7 +565,7 @@ def listening_stop_metrics(gt: dict, hands: list[dict], transcripts: list[dict],
              and read_rate >= STOP_READ_RATE and canned_rate <= STOP_CANNED_RATE)
     return {"hands": len(per_hand), "actions": actions, "read": read, "read_rate": read_rate,
             "utterances": len(texts), "canned": canned, "canned_rate": canned_rate, "meets": meets,
-            "per_hand": per_hand}
+            "per_hand": per_hand, "by_kind": by_kind}
 
 
 def pooled_stop_metrics(sessions: list[tuple[str, float, dict]]) -> Optional[dict]:
@@ -561,6 +589,100 @@ def pooled_stop_metrics(sessions: list[tuple[str, float, dict]]) -> Optional[dic
     return {"sessions": [s[0] for s in recent], "short": [s[0] for s in sessions if s not in usable],
             "actions": actions, "read": read, "read_rate": read_rate, "utterances": utterances, "canned": canned,
             "canned_rate": canned_rate, "decided": decided, "meets": meets}
+
+
+# 種類ごとに読めた割合の並びと名前（`_speech_token` の種類。ベット・レイズは額）
+_KIND_OF = {"check_around": "check"}
+_KIND_LABELS = (("wager", "額"), ("check", "チェック"), ("call", "コール"), ("fold", "フォールド"),
+                ("allin", "オールイン"))
+
+
+def format_by_kind(by_kind: dict) -> str:
+    return "・".join(f"{label} {by_kind[k][0]}/{by_kind[k][1]}（{by_kind[k][0] / by_kind[k][1]:.0%}）"
+                     for k, label in _KIND_LABELS if by_kind.get(k) and by_kind[k][1])
+
+
+# ――― 聞き取りの量・遅れ・内訳（店舗 2026-10-26 のレビュー）―――
+# 話し声の多い卓では、全発話をその場で書き起こすと処理が話した長さを超え、聞き取りが数分遅れる。毎回、量と遅れと
+# 何が聞こえたか（アクション・雑談・声ではない音・幻聴）を出し、遅れでライブの記録から声が抜けた割合も出す。
+_AUDIO_KINDS = (("action", "アクション"), ("chatter", "雑談・読めない文"), ("empty", "声ではない"),
+                ("stock", "字幕の定型句"), ("echo", "プロンプトの繰り返し"))
+
+
+def utterance_kind(row: dict) -> str:
+    """書き起こしの 1 行の種類（いまの読み取りで）。"""
+    text = (row.get("text") or "").strip()
+    if row.get("no_speech") or not text:
+        return "empty"
+    if is_prompt_echo(text) or is_implausibly_long(text, float(row.get("audio_sec") or 0.0)):
+        return "stock" if is_stock_hallucination(text) else "echo"
+    return "action" if parse_actions(text, confidence=row.get("confidence")) else "chatter"
+
+
+def audio_load(transcripts: list[dict], hands: list[dict], utc_offset: Optional[float] = None) -> dict:
+    """プレー中に書き起こした発話の量・処理の時間・遅れ・種類と、ハンドを閉じたあとに届いたアクションの発話。
+
+    `hands`: ライブの記録のハンド（始まり・終わりの時刻）。`utc_offset`: 記録の時刻の時差（`record_utc_offset`）。
+    後回しで書き起こした行（`deferred`）は届いた時刻がライブと関係ないので、遅れには数えない。
+    """
+    rows = [r for r in transcripts if isinstance(r.get("utterance_start_ts"), (int, float))]
+    if not rows:
+        return {}
+    kinds = Counter(utterance_kind(r) for r in rows)
+    audio_sec = sum(float(r.get("audio_sec") or 0.0) for r in rows)
+    infer_sec = sum(float(r.get("infer_sec") or 0.0) for r in rows)
+    live = [r for r in rows if not r.get("deferred") and isinstance(r.get("heard_at"), (int, float))]
+    lags = sorted(r["heard_at"] - r["utterance_start_ts"] - float(r.get("audio_sec") or 0.0) for r in live)
+    spans = []
+    for h in hands:
+        start, end = _record_epoch(h.get("started_at"), utc_offset), _record_epoch(h.get("ended_at"), utc_offset)
+        if start is not None and end is not None:
+            spans.append((start, end))
+    spoken = late = 0
+    for r in live:
+        if utterance_kind(r) != "action":
+            continue
+        span = next((sp for sp in spans if sp[0] <= r["utterance_start_ts"] < sp[1]), None)
+        if span is None:
+            continue
+        spoken += 1
+        late += r["heard_at"] > span[1]
+    return {
+        "utterances": len(rows), "audio_sec": round(audio_sec), "infer_sec": round(infer_sec),
+        "kinds": dict(kinds), "deferred": len(rows) - len(live),
+        "lag_median": round(statistics.median(lags), 1) if lags else None,
+        "lag_max": round(lags[-1], 1) if lags else None,
+        "spoken_in_hand": spoken, "heard_after_close": late,
+    }
+
+
+def _record_epoch(iso: Optional[str], utc_offset: Optional[float]) -> Optional[float]:
+    """記録の時刻（時差の表記の無い店の PC の時刻）を epoch に。時差が分からなければこの PC の時差で。"""
+    if utc_offset is None or not iso:
+        return _epoch(iso)
+    try:
+        naive = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    if naive.tzinfo is not None:
+        return naive.timestamp()
+    return naive.replace(tzinfo=timezone.utc).timestamp() - utc_offset
+
+
+def format_audio_load(load: dict) -> list[str]:
+    ratio = f" = {load['infer_sec'] / load['audio_sec']:.2f} 倍" if load["audio_sec"] else ""
+    head = (f"  聞き取り: 発話 {load['utterances']}（声 {load['audio_sec']} 秒・Whisper {load['infer_sec']} 秒{ratio}）")
+    if load["lag_median"] is not None:
+        head += f"・遅れ 中央値 {load['lag_median']:.0f} 秒・最大 {load['lag_max']:.0f} 秒"
+        if load["spoken_in_hand"]:
+            head += (f"・ハンドの中で話したアクションの発話 {load['spoken_in_hand']} のうち {load['heard_after_close']}"
+                     f"（{load['heard_after_close'] / load['spoken_in_hand']:.0%}）がハンドを閉じたあとに届いた")
+    if load["deferred"]:
+        head += f"・後回しで書き起こした {load['deferred']}"
+    total = load["utterances"]
+    kinds = "・".join(f"{label} {load['kinds'].get(k, 0)}（{load['kinds'].get(k, 0) / total:.0%}）"
+                      for k, label in _AUDIO_KINDS)
+    return [head, f"    内訳: {kinds}"]
 
 
 def _short_sid(session_id: str) -> str:
@@ -902,13 +1024,14 @@ class SessionReport:
     stop: dict = field(default_factory=dict)             # 音声の改善を終える目安（listening_stop_metrics）
     cards_read: dict = field(default_factory=dict)       # ハンドのあいだに手札を 2 枚とも読めた席（hole_cards_read）
     deferred: int = 0                                    # 後回しで書き起こした発話（audio.live_transcribe=false）
+    audio: dict = field(default_factory=dict)            # 聞き取りの量・遅れ・内訳（audio_load）
 
     def to_json(self) -> dict:
         return {
             "session_id": self.session_id, "hands": self.hands, "note": self.note, "same_code": self.same_code,
             "changed_files": self.changed_files, "differences": self.differences, "sources": self.sources,
             "truth": self.truth, "setup": self.setup, "flags": self.flags, "listening": self.listening,
-            "stop": self.stop,
+            "stop": self.stop, "audio": self.audio,
             "reparse_differences": diff_record(self.replayed, self.reparsed) if self.reparsed else [],
             "ear": self.ear, "memos": self.memos, "script": self.script, "cards_read": self.cards_read,
             "route_differences": {k: diff_record(self.reparsed, v) for k, v in self.routes.items()},
@@ -960,6 +1083,7 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
                        "（起動時に卓に残っていた札・配る前の発話の待ち）")
     transcripts = _read_jsonl(files.path(".transcripts.jsonl"))
     report.deferred = sum(1 for r in transcripts if r.get("deferred"))
+    report.audio = audio_load(transcripts, report.live, record_utc_offset(report.live, events))
     transcripts = with_offplay(transcripts, _read_jsonl(files.path(".offplay.jsonl")))
     if transcripts:
         report.reparsed = replay_session(
@@ -1380,6 +1504,9 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                   "声を入れた結果は「読み直し」の行を見る")
         if r.sources:
             print("  記録された行の出所: " + " / ".join(f"{k} {v}" for k, v in sorted(r.sources.items())))
+        if r.audio:
+            for line in format_audio_load(r.audio):
+                print(line)
         if r.differences:
             print(f"  再生すると記録と違うハンド: {len(r.differences)}")
             for d in r.differences:
@@ -1466,6 +1593,8 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                       f"（{_fmt_pct(st['read_rate'])}）が正しく読めた・決まり文句 {st['canned']}/{st['utterances']}"
                       f"（{_fmt_pct(st['canned_rate'])}）。{st['hands']} ハンド"
                       + ("" if st["hands"] >= STOP_MIN_HANDS else f"（{STOP_MIN_HANDS} ハンド未満なので合算に入れない）"))
+                if st.get("by_kind"):
+                    print(f"    種類ごと: {format_by_kind(st['by_kind'])}")
         else:
             print("  真のアクション: なし")
         if show_timeline:

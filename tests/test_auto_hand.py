@@ -386,6 +386,25 @@ class TestShowdown:
         assert tb.gs.hand_id == 2
         assert tb.applied[-1].seat == 2                  # ボタンが 2 に移った 2 ハンド目の UTG
 
+    def test_the_wait_for_earlier_speech_ends_after_15_seconds(self, tmp_path):
+        """聞き取りが数分遅れても、配布から 15 秒で始める（店舗 2026-10-26: 60 秒まで待って 24 ハンドが 20〜63 秒遅れた）。
+        そのあと届いた、配る前に話した賭けの語は新しいハンドに入れない。"""
+        tb = _Table(tmp_path, backlog=lambda: 1)
+        tb.deal(HANDS, 1.0)
+        tb.say("フォールド、フォールド", 10)
+        tb.deal({2: "7s7d", 5: "8s8d", 8: "9s9d"}, 60.0)
+        tb.idle(70.0)
+        assert tb.gs.hand_id == 1                        # まだ前の発話を待つ
+        tb.idle(85.0)
+        assert tb.gs.hand_id == 2
+        before = len(tb.applied)
+        tb.say("コール", 90.0, spoken=55.0)               # 配る前に話した語が遅れて届いた
+        assert len(tb.applied) == before and tb.t._current_actions == []   # noqa: SLF001
+        assert tb.actions[-1].reason == "spoken_before_hand"
+        assert any("遅れて届きました" in n for n in tb.notices)
+        tb.say("コール", 92.0, spoken=91.0)               # 配ったあとに話した語は入る
+        assert tb.applied[-1].seat == 2
+
     def test_an_unfinished_hand_is_closed_when_the_next_hand_is_dealt(self, tmp_path):
         tb = _Table(tmp_path)
         tb.deal(HANDS, 1.0)
