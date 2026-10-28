@@ -182,6 +182,7 @@ pokerapp/
 │   ├── pack_logs.py               ← ログを 1 つの zip にまとめる（店舗 → 開発側）
 │   ├── eval_store.py              ← 店舗のログをいまのコードで再生して評価（真のアクションのメモ・一致率・音声の改善を終える目安・`--timeline` / `--export-fixture`）
 │   ├── rescore_audio.py / second_ear.py / fixture_ears.py ← 保存した発話を Whisper で採点し直す / 第 2 の耳で聞き直す / 開発データに耳の結果を足す
+│   ├── cloud_asr.py               ← 実験（台帳 H の H1）: 保存した発話をクラウドの音声認識 API に送り（run）、いまの Whisper と同じ物差しで比べる（compare）。店舗 PC では使わない
 │   ├── offplay_audio.py           ← 聞き流した発話の音声（`audio/<sid>/off_*.wav`）をライブと同じ経路で書き起こす → `<sid>.offplay.jsonl`（推定器の入力に足す = `core/offplay.py`）
 │   ├── short_words.py             ← 短い語の分類器を学ぶ・確かめる（eval / train / labels, ADR-0069）
 │   ├── estimate.py / estimate_logs.py / bench_hands.py / forward_ledger.py / compare_versions.py / sweep_estimator.py / simulate.py ← 推定器: 読みの選択肢 / ログの推定（`--shadow`）/ 開発データの物差し（前の記録 `tests/fixtures/store/bench_record.json`）/ 前向きの成績表（`first_look.json`）/ 前の版と比べる / 値の掃引 / 聞き取りのシミュレーション（`docs/estimator.md`）
