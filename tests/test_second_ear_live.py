@@ -304,7 +304,7 @@ class TestAnnouncements:
     def test_a_blind_announcement_is_not_an_action(self):
         """Whisper が間に「オールイン」を足した（「ブラインド200、オールイン400です。」）。"""
         events, _ = _run("ブラインド200、オールイン400です。", FakeEar(POT))
-        assert events == []
+        assert [e.action for e in events] == ["blind_up"]       # アクションではなく宣言（2026-10-28）
 
 
 class TestHandNames:

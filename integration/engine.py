@@ -95,8 +95,10 @@ _CONTROL_ACTIONS = frozenset({"new_hand", "winner", "showdown", "end_hand", "cor
 # 片付けの途中で 1 枚だけ別の席のリーダーに触れた札は、窓を過ぎると捨てる。
 DEAL_WINDOW_SEC = 15.0
 # 配布を検出してから、それより前に話された発話の認識を待つ上限（秒）。認識が遅れていても、
-# 前のハンドのアクション（最後のコールやマック）を新しいハンドに入れないため。
-DEAL_SPEECH_WAIT_SEC = 60.0
+# 前のハンドのアクション（最後のコールやマック）を新しいハンドに入れないため。上限を過ぎて届いた配る前の
+# 賭けの語は、新しいハンドには入れない（`spoken_before_hand`）。前は 60 秒で、話し声の多い卓では聞き取りが
+# 数分遅れ、38 ハンドのうち 24 ハンドで始まるのが 20〜63 秒遅れた（店舗 2026-10-26）
+DEAL_SPEECH_WAIT_SEC = 15.0
 # 配った直後（アクション前）のハンドに届いた `w` / 「ウィナー」を、前のハンドへの宣言とみなす時間（秒）。
 LATE_WINNER_SEC = 60.0
 # RFID の在否で配布を検出する（ADR-0063）: 2 席以上に手札 2 枚ずつがこの秒数載り続け、ボードの
@@ -155,6 +157,8 @@ SILENT_MIC_SEC = 60.0
 # ハンドを始めてからこの秒数たったら、卓で使っていない席に手札が無いかを確かめる（配っている途中の席を
 # 「手札が無い」と言わないため）
 SEAT_SETUP_CHECK_SEC = 5.0
+# ブラインド上昇の宣言は時計の遷移より少し前でも数える（店の時計とロガーの時計のずれ, 2026-10-28）
+LEVEL_ANNOUNCE_EARLY_SEC = 120.0
 # 手札 2 枚が続けて読めない席を知らせるハンドの数（店舗 2026-10-26: 席 3 のリーダー）
 UNREAD_SEAT_HANDS = 2
 # 「フォールド」と聞こえたが手番の人の札がまだ席にあるとき、この秒数以内に札が離れたら、その発話の時刻の
@@ -253,7 +257,7 @@ _VOICE_SOURCES = frozenset({"spoken_seat", "spoken_position", "engine_prior"})
 # 解釈を決める前に届いても、組み直しを待たなくてよい（ハンドを終わらせない）制御
 _CONTROL_KEEPS_CORRECTION = frozenset({"rename_seat", "set_blinds", "sit_out", "sit_in", "rebuy", "set_button",
                                        "correct_board", "correct_seat", "truth_stacks", "reduce_stack",
-                                       "set_bb_ante", "set_level", "clock"})
+                                       "set_bb_ante", "set_level", "clock", "blind_up"})
 # 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
 # 言葉がこの数だけ聞こえたら、そのオールインを聞き違いとみて外す（店舗 2026-09-27: 自信 0.27 の「オールイン」の
 # あとのチェック 5 回と「2700」がすべて保留になり、全員オールインの 59700 のポットになった）
@@ -658,6 +662,8 @@ class IntegrationThread(threading.Thread):
         self._unread_streak: dict[int, int] = {}   # 席 → 手札 2 枚が続けて読めなかったハンドの数
         # 全員降りたことにして閉じたハンドと、そのあと置かれたボードの札（`_note_board_after_end`）
         self._after_end: Optional[dict] = None
+        # リバーの前に言われた「ショーダウン」（言い間違いかもしれない, `_showdown_was_a_slip`, 2026-10-28）
+        self._pending_showdown: Optional[dict] = None
         # ――― フォールドは札の離脱から ―――
         self._rfid_folds = bool(rfid_folds) and self._rules_aware
         self._fold_absent_sec = float(fold_absent_sec)
@@ -699,6 +705,9 @@ class IntegrationThread(threading.Thread):
         self._tournament = tournament
         self._on_clock_change = on_clock_change
         self._level: Optional[int] = None
+        # 時計が次のレベルに入ったが、まだ上げていないレベル（2026-10-28 オーナー: 遷移のあと最初に始まるハンドの
+        # 最初のアクションまでにブラインド上昇の宣言があればそのハンドから、無ければその次のハンドから）
+        self._level_wait: Optional[dict] = None
         self._hand_level: Optional[int] = None
         self._live_signature: Optional[tuple] = None     # 最後に書いた進行中のハンド（変わったときだけ書く）
         # このハンドで配った順を見たか（1 ハンドに 1 回）
@@ -1241,9 +1250,20 @@ class IntegrationThread(threading.Thread):
                 # いま始めた: 始めるのを待っていたあいだに札が離れた席（降りた人）を、この発話より先に見る
                 # （店舗 b0a27270 ハンド 2: 配って 5 秒で降りた席6 に、始めるきっかけの「八百」が付いた）
                 self._poll_departures()
+        if (self._rules_aware and self._hand_open and self._hand_auto_started and event.action in _BETTING_WORDS
+                and self._hand_started_epoch is not None and _spoken_at(event) < self._hand_started_epoch):
+            # 配る前に話した賭けの語が、ハンドを始めたあとに届いた（聞き取りの遅れ）= 前のハンドのもの。新しい
+            # ハンドには入れない（前のハンドは閉じている。推定器は話した時刻で前のハンドに入れる）
+            self._notice(f"配る前に話した「{event.raw_text or event.action}」が遅れて届きました — このハンドには"
+                         "入れません（要確認）")
+            self._emit_unresolved(event, reason="spoken_before_hand")
+            return
         if self._rfid_folds and self._hand_open:
             # この発話より前に離れた札を先に反映する（フォールドのあとの人のアクションとして読む）
             self._apply_observations_before(_spoken_at(event), event.timestamp)
+        if (self._pending_showdown is not None and event.action in _BETTING_WORDS and self._hand_open
+                and _spoken_at(event) > self._pending_showdown["t"]):
+            self._showdown_was_a_slip(f"あとから「{event.raw_text}」と言われた")
         try:
             # ハンドの入力として残す（札が戻ったとき・ボタンを直したときに同じ順に流し直す）
             if self._rules_aware and self._hand_open and event.action in _REPLAYABLE_ACTIONS:
@@ -1298,6 +1318,15 @@ class IntegrationThread(threading.Thread):
             return
 
         if action == "showdown":
+            if (self._rules_aware and self._hand_open and not self._betting_over()
+                    and len(self._remaining_seats()) >= 2 and self._foldout_pending is None
+                    and len([c for c in self._board_cards if c != UNKNOWN_CARD]) < 5):
+                # リバーの前の「ショーダウン」: 宣言どおり閉じるが、閉じる前の状態を残す。あとから賭けの語が話されたら
+                # 言い間違いとみて閉じる前に戻す（オーナー 2026-10-28。10/26 ハンド 24。札が出るだけ = ランアウトは
+                # 言い間違いにしない）
+                index = len(self._hand_inputs)
+                self._pending_showdown = {"t": _spoken_at(event), "raw": event.raw_text, "index": index,
+                                          "checkpoint": self._take_checkpoint(index)}
             if self._hand_open:
                 self._showdown_declared = True
             if self._foldout_pending is not None and _spoken_at(event) >= self._foldout_pending["t"]:
@@ -1359,6 +1388,9 @@ class IntegrationThread(threading.Thread):
             return
         if action == "set_level":
             self._handle_set_level(event)
+            return
+        if action == "blind_up":
+            self._handle_blind_up(event)
             return
         if action == "clock":
             self._handle_clock(event)
@@ -4209,6 +4241,24 @@ class IntegrationThread(threading.Thread):
         self._deal_at = None
         self._deal_detected_at = None
 
+    def _showdown_was_a_slip(self, why: str) -> None:
+        """リバーの前の「ショーダウン」のあとに賭けの語が話された: 言い間違いとみて、閉じる前に戻して流し直す
+        （要確認, オーナー 2026-10-28）。"""
+        pending, self._pending_showdown = self._pending_showdown, None
+        if pending is None:
+            return
+        index = pending["index"]
+        rest = self._hand_inputs[index:]
+        self._hand_inputs = self._hand_inputs[:index]
+        checkpoint = pending["checkpoint"]
+        self._restore_checkpoint(checkpoint)
+        self._replay_inputs(rest)
+        self._hand_needs_review = True
+        self._notice(f"「{pending['raw']}」は言い間違いとみて、閉じたベッティングを戻しました（{why}）— 要確認")
+        if self._on_action:
+            for record in self._current_actions[checkpoint["actions"]:]:
+                self._on_action(record)
+
     def _close_hand_for_next_deal(self, ended_ts: Optional[float] = None,
                                   when: str = "次の手札が配られました") -> None:
         """次の手札が配られた（または終了した）のに確定していないハンドを、確定してから次へ進む。"""
@@ -5592,23 +5642,23 @@ class IntegrationThread(threading.Thread):
     # ――― トーナメントの時計とレベル（ADR-0071）―――
 
     def _check_tournament_clock(self) -> None:
-        """レベルの時間が過ぎていれば次のレベルへ（ブラインドは次のハンドから）。"""
+        """レベルの時間が過ぎていれば次のレベルへ（ブラインドは宣言を待って上げる, `_handle_set_level`）。"""
         clock = self._tournament
         if clock is None:
             return
         now = self._clock()
         before = (clock.index, clock.blinds)
         if clock.tick(now):
-            self._clock_moved(before, now)
+            self._clock_moved(before, now, wait=True)
 
-    def _clock_moved(self, before: tuple, now: float) -> None:
+    def _clock_moved(self, before: tuple, now: float, wait: bool = False) -> None:
         """時計のレベルが変わった: 保存し、ブラインドが変わればレベルの入力を出す（ブレイクは知らせるだけ）。"""
         from core.blind_structure import format_remaining
 
         clock = self._tournament
         self._save_clock()
         if clock.blinds != before[1]:
-            self._emit_level(now)
+            self._emit_level(now, wait=wait)
         if clock.current.is_break and clock.index != before[0]:
             self._notice(f"ブレイク（{clock.current.minutes} 分）です。残り {format_remaining(clock.remaining(now))}")
 
@@ -5619,11 +5669,14 @@ class IntegrationThread(threading.Thread):
             except Exception:  # noqa: BLE001 — 保存の失敗でハンドを止めない
                 logger.exception("トーナメントの時計を保存できませんでした")
 
-    def _emit_level(self, now: float) -> None:
-        """時計のいまのレベルのブラインド・アンテを `set_level` の入力として記録し、反映する（replay は記録で同じになる）。"""
+    def _emit_level(self, now: float, wait: bool = False) -> None:
+        """時計のいまのレベルのブラインド・アンテを `set_level` の入力として記録し、反映する（replay は記録で同じになる）。
+
+        時計の時間で入ったレベル（`wait`）は宣言を待って上げる。手で動かした時計・始めのレベルは印 `clock_now` を付けて
+        すぐ（次のハンドから）。"""
         lv = self._tournament.blinds
         event = AudioEvent(action="set_level", amount=lv.level or 0, timestamp=now,
-                           raw_text=f"{lv.sb}/{lv.bb} ante={lv.ante}")
+                           raw_text=f"{lv.sb}/{lv.bb} ante={lv.ante}", parse_flags=() if wait else ("clock_now",))
         self._record(event)
         self._handle_audio_event(event)
 
@@ -5640,19 +5693,109 @@ class IntegrationThread(threading.Thread):
         sb, bb = int(m.group(1)), int(m.group(2))
         ante_m = re.search(r"ante\s*=\s*(\d+)", text)
         ante = int(ante_m.group(1)) if ante_m else 0
+        current = (gs._sb, gs._bb, int(getattr(gs, "bb_ante", 0) or 0))  # noqa: SLF001
+        if "clock_now" not in event.parse_flags and (sb, bb, ante) != current and self._rules_aware:
+            # 時計の時間でレベルが変わった: 宣言を待つ（2026-10-28 オーナー）。遷移のあと最初に始まるハンドの最初の
+            # アクションまでに宣言（`blind_up`）があればそのハンドから、無ければその次のハンドから
+            from core.blind_structure import format_blinds
+
+            self._level_wait = {"sb": sb, "bb": bb, "ante": ante, "level": event.amount or None,
+                                "at": event.timestamp, "announced": False, "first_hand": None}
+            name = f"レベル {event.amount}" if event.amount else "ブラインド"
+            self._notice(f"{name}（{format_blinds(sb, bb, ante)}）の時間です — 上昇の宣言があればこのあと最初のハンドから、"
+                         "無ければその次のハンドから上げます")
+            return
+        self._level_wait = None
+        self._apply_level(event, sb, bb, ante)
+
+    def _apply_level(self, event: Optional[AudioEvent], sb: int, bb: int, ante: int,
+                     level: Optional[int] = None) -> bool:
+        from core.blind_structure import format_blinds
+
+        gs = self._game_state
+        if event is not None:
+            level = event.amount or None
         try:
             gs.set_blinds(sb, bb)
         except ValueError as e:
             self._notice(f"レベルのブラインドを変えられません: {e}")
-            return
+            return False
         if hasattr(gs, "set_bb_ante"):
             gs.set_bb_ante(ante)
-        self._level = event.amount or None
+        self._level = level
         if not gs.is_hand_active():
             self._hand_level = self._level
         later = self._hand_open and gs.is_hand_active()
-        name = f"レベル {event.amount}" if event.amount else "ブラインド"
+        name = f"レベル {level}" if level else "ブラインド"
         self._notice(f"{name}: {format_blinds(sb, bb, ante)}" + ("（次のハンドから）" if later else ""))
+        return True
+
+    def _handle_blind_up(self, event: AudioEvent) -> None:
+        """ブラインド上昇の宣言（「ブラインド上がります」など, 2026-10-28）。待っているレベルがあれば、遷移のあと最初の
+        ハンドがまだ最初のアクションの前なら、そのハンドを新しいブラインドで始め直す。ハンドの外なら次のハンドから。"""
+        wait = self._level_wait
+        if wait is None:
+            logger.info("ブラインド上昇の宣言（待っているレベルなし）: %r", event.raw_text)
+            return
+        spoken = _spoken_at(event)
+        if spoken < wait["at"] - LEVEL_ANNOUNCE_EARLY_SEC:
+            return                                   # 時計の遷移よりずっと前の宣言（前のレベルのもの）
+        gs = self._game_state
+        first = wait["first_hand"]
+        if first is not None and self._hand_open and gs.is_hand_active() and gs.hand_id == first:
+            if self._first_action_at() is None or spoken < self._first_action_at():
+                self._rebind_blinds(wait, "ブラインド上昇の宣言があったので")
+                return
+            wait["announced"] = True                 # 最初のアクションのあと = 次のハンドから（もともとそう）
+            return
+        wait["announced"] = True
+        self._notice("ブラインド上昇の宣言を聞きました（次のハンドから上げます）")
+
+    def _first_action_at(self) -> Optional[float]:
+        """いまのハンドの最初のアクション（声・札の離脱）の時刻。まだ無ければ None。"""
+        times = [_spoken_at(item) if isinstance(item, AudioEvent) else float(getattr(item, "timestamp", 0) or 0)
+                 for _kind, item in self._hand_inputs]
+        times = [t for t in times if t]
+        return min(times) if times else None
+
+    def _level_before_hand(self) -> None:
+        """ハンドを始める前: 待っているレベルを、宣言があれば（またはもう 1 ハンド待ったなら）上げる。"""
+        wait = self._level_wait
+        if wait is None:
+            return
+        if wait["announced"] or wait["first_hand"] is not None:
+            self._level_wait = None
+            self._apply_level(None, wait["sb"], wait["bb"], wait["ante"], level=wait["level"])
+            return
+        wait["first_hand"] = self._game_state.hand_id + 1      # 宣言が無ければ、このハンドは前のブラインド
+
+    def _rebind_blinds(self, wait: dict, why: str) -> None:
+        """遷移のあと最初のハンドを新しいブラインドで始め直す（入力は流し直す）。"""
+        gs = self._game_state
+        restart = getattr(gs, "restart_hand_with_blinds", None)
+        origin = self._hand_origin
+        self._level_wait = None
+        if restart is None or origin is None:
+            self._apply_level(None, wait["sb"], wait["bb"], wait["ante"], level=wait["level"])
+            return
+        inputs = list(self._hand_inputs)
+        self._hand_inputs = []
+        self._restore_checkpoint(origin)
+        try:
+            restart(wait["sb"], wait["bb"], wait["ante"])
+        except (ValueError, RuntimeError) as e:
+            logger.warning("新しいブラインドで組み直せませんでした: %s", e)
+            self._replay_inputs(inputs)
+            self._apply_level(None, wait["sb"], wait["bb"], wait["ante"], level=wait["level"])
+            return
+        self._level = self._hand_level = wait["level"]
+        self._hand_origin = self._take_checkpoint(0)
+        self._departure_floor = self._origin_floor()
+        self._replay_inputs(inputs)
+        from core.blind_structure import format_blinds
+
+        name = f"レベル {wait['level']}" if wait["level"] else "ブラインド"
+        self._notice(f"{why}、このハンドから{name}（{format_blinds(wait['sb'], wait['bb'], wait['ante'])}）にしました")
 
     def _handle_clock(self, event: AudioEvent) -> None:
         """時計の操作（CLI の `clock …` / 設定画面の「時計」, ADR-0071）: status / pause / resume / next / prev /
@@ -6311,6 +6454,7 @@ class IntegrationThread(threading.Thread):
         restored = self._restore_dealt_busted_seats() if auto else []
         if self._before_new_hand is not None:
             self._before_new_hand(gs.hand_id + 1)
+        self._level_before_hand()           # 時計のレベル（宣言を待つ, 2026-10-28）
         # S5（ADR-0047）: stack_start はブラインド post 前に取る。pokerkit backend は new_hand() で
         # ブラインドを自動 post するため、post 後に取ると result がブラインド分ずれる。台本のハンドは台本の持ち点。
         next_stacks = getattr(gs, "stacks_before_next_hand", None)
@@ -6350,6 +6494,7 @@ class IntegrationThread(threading.Thread):
         self._seat_setup_warned = False
         self._unread_checked = False
         self._after_end = None
+        self._pending_showdown = None
         self._departures = {}
         self._hand_inputs = []
         self._checkpoints = []
@@ -6649,6 +6794,7 @@ class IntegrationThread(threading.Thread):
         self._hand_auto_started = False
         self._showdown_mucks = []
         self._showdown_declared = False
+        self._pending_showdown = None
         self._showdown_gaps = []
         self._foldout_pending = None
         self._departures = {}

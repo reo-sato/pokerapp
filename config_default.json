@@ -37,6 +37,8 @@
     "_vad_threshold_comment": "声か（Silero VAD）の閾値。声が見つからない音（札を混ぜる音・チップの音）は Whisper にかけない（雑音にプロンプトを繰り返す幻聴と、その 15 秒以上の認識待ちを防ぐ）。短い言葉が「声ではない音」として落ちるなら下げる（0.3 など）。0 で使わない。`python tools/audio_check.py listen` で確かめる。",
     "save_audio": false,
     "transcribe_offplay": true,
+    "live_transcribe": true,
+    "_live_transcribe_comment": "false = 書き起こしを後回しにする（店舗テスト中, 2026-10-28）。その場ではプレー中の発話の音声を保存し、第 2 の耳でブラインド上昇の宣言だけを聞き分けてロガーに送る。Whisper は裏で順にかけて logs/<セッション>.transcripts.jsonl に書き、終了（q）と「ログをまとめる」で残りを書き起こす。ライブの記録は札（RFID）だけで作り、声は評価の読み直しと推定器が使う（全発話をその場で書き起こすと、話し声の多い卓で聞き取りが数分遅れた = 10/26）。",
     "_save_audio_comment": "true = 認識に回した発話の音声を logs/audio/<セッション>/ に WAV で保存する（聞き違いの原因を確かめるため。卓の会話も入るのでテスト中だけ）。聞き取った文は音声の保存と関係なく logs/<セッション>.transcripts.jsonl にすべて残る。",
     "second_ear": {"enabled": true, "threads": 4},
     "_second_ear_comment": "第 2 の耳（日本語専用の音声認識 ReazonSpeech, 約 170 MB を models/ に。更新で取得）。Whisper がアクションとして読めなかった発話（幻聴・読めない文）だけを聞き直し、第 2 の耳が聞いた文が額・アクションの候補と一致したときだけ使う（要確認の印が付く）。店舗 9/29 の評価で真のアクションとの一致 73% → 80%。false で使わない。この項目が無い config.json でも使う。threads = CPU のスレッド数。",

@@ -39,7 +39,8 @@ class TestWords:
 class TestAnnouncements:
     @pytest.mark.parametrize("text", ["ブラインド200、オールイン400です。", "ブラインド 200 400 です", "ブラインド二百、四百"])
     def test_a_blind_announcement_is_not_an_action(self, text):
-        assert parse_actions(text) == [] and is_announcement(text)
+        # アクションではなく、ブラインド上昇の宣言（engine がレベルを上げる時を決める, 2026-10-28）
+        assert [e.action for e in parse_actions(text)] == ["blind_up"] and is_announcement(text)
 
     @pytest.mark.parametrize("text", ["ポット1万2000です。", "ポット 3000"])
     def test_a_pot_announcement(self, text):

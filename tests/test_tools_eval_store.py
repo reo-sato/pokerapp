@@ -561,6 +561,43 @@ class TestStopRule:
         m = eval_store.listening_stop_metrics(gt, self._hands(), rows)
         assert m["read"] == 3 and m["actions"] == 4 and m["canned"] == 1 and m["meets"] is False
 
+    def test_read_rates_by_kind(self):
+        """種類ごとに読めた割合（店舗 2026-10-26: コール 54%・フォールド 44% = 言っていないか雑談に埋もれた）。"""
+        gt = self._gt([("preflop", 4, "raise", 600), ("preflop", 5, "call", 600), ("preflop", 6, "fold", 0),
+                       ("flop", 5, "check", 0), ("flop", 4, "check", 0)])
+        rows = self._rows(["600", "チェック", "チェック"])
+        m = eval_store.listening_stop_metrics(gt, self._hands(), rows)
+        assert m["by_kind"] == {"wager": [1, 1], "call": [0, 1], "fold": [0, 1], "check": [2, 2]}
+        assert eval_store.format_by_kind(m["by_kind"]) == "額 1/1（100%）・チェック 2/2（100%）・コール 0/1（0%）・フォールド 0/1（0%）"
+        assert eval_store.matched_truth([("check", 0), ("check", 0), ("wager", 5)],
+                                        [("check_around", 0), ("wager", 5)]) == {0, 1, 2}
+
+    def test_the_audio_load_counts_lag_kinds_and_words_heard_after_the_hand_closed(self):
+        rows = [
+            {"utterance_start_ts": self.START + 2, "audio_sec": 1.0, "infer_sec": 1.5, "heard_at": self.START + 4,
+             "text": "コール"},
+            {"utterance_start_ts": self.START + 50, "audio_sec": 1.0, "infer_sec": 2.0, "heard_at": self.START + 200,
+             "text": "チェック"},                                     # ハンドを閉じたあとに届いた
+            {"utterance_start_ts": self.START + 10, "audio_sec": 2.0, "infer_sec": 3.0, "heard_at": self.START + 20,
+             "text": "ご視聴ありがとうございました。"},
+            {"utterance_start_ts": self.START + 12, "audio_sec": 2.0, "infer_sec": 3.0, "heard_at": self.START + 25,
+             "text": "シート3 レイズ 2千、コール、チョップ などの言葉が含まれます。"},
+            {"utterance_start_ts": self.START + 14, "audio_sec": 1.0, "infer_sec": 0.5, "heard_at": self.START + 30,
+             "text": "", "no_speech": True},
+            {"utterance_start_ts": self.START + 16, "audio_sec": 3.0, "infer_sec": 4.0, "heard_at": self.START + 35,
+             "text": "今日は寒いですね"},
+            {"utterance_start_ts": self.START + 18, "audio_sec": 1.0, "heard_at": self.START + 19.0,
+             "text": "フォールド", "deferred": True},                  # 後回し = 遅れに数えない
+        ]
+        load = eval_store.audio_load(rows, self._hands())
+        assert load["kinds"] == {"action": 3, "stock": 1, "echo": 1, "empty": 1, "chatter": 1}
+        assert load["audio_sec"] == 11 and load["infer_sec"] == 14 and load["deferred"] == 1
+        assert load["lag_median"] == 13.0 and load["lag_max"] == 149.0
+        assert load["spoken_in_hand"] == 2 and load["heard_after_close"] == 1
+        head, kinds = eval_store.format_audio_load(load)
+        assert "1.27 倍" in head and "2 のうち 1（50%）がハンドを閉じたあとに届いた" in head
+        assert kinds.startswith("    内訳: アクション 3（43%）")
+
     @staticmethod
     def _stop(hands, actions, read, utterances, canned):
         return {"hands": hands, "actions": actions, "read": read, "utterances": utterances, "canned": canned}

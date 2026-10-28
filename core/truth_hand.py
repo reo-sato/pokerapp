@@ -103,8 +103,9 @@ def start_state(captured: dict, button: Optional[int] = None) -> PokerkitGameSta
         gs.set_bb_ante(int(blinds["bb_ante"]))   # 記録のハンドの BB アンティの額（ADR-0071 から BB と別の額もある）
     if button is None:
         button = captured.get("button_seat")
-    if isinstance(button, int) and any(p.seat == button for p in players):
-        gs.set_button(button)
+    if isinstance(button, int) and not isinstance(button, bool) and (
+            any(p.seat == button for p in players) or (len(players) >= 3 and 1 <= button <= 9)):
+        gs.set_button(button)                # 空いた席ならデッドボタン（3 人以上, 2026-10-28）
     gs.new_hand()
     return gs
 

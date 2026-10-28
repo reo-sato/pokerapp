@@ -93,20 +93,23 @@ class TestLevels:
         live.control(10, "new_hand")
         live.at(65)                                    # レベル 2 の時間（ハンドの途中）
         live.say(66, "フォールド フォールド")
+        live.say(68, "ブラインド上がります。SB200、BB400です")
         _fold_hand(live, 70)
         first, second = live.hands(tmp_path)
         assert first["blinds"] == {"sb": 100, "bb": 200, "level": 1} and first["table_mode"] == "tournament"
         assert second["blinds"] == {"sb": 200, "bb": 400, "bb_ante": 300, "level": 2}
         assert second["pot_total"] == 200 + 400 + 300
-        assert any("レベル 2" in n and "次のハンドから" in n for n in live.notes)
+        assert any("レベル 2" in n and "時間です" in n for n in live.notes)
         assert live.saved == [1]
 
     def test_break_keeps_blinds_then_next_level(self, tmp_path):
         live = Live(tmp_path)
         live.at(125)                                   # ブレイク
         assert any("ブレイク" in n for n in live.notes)
+        live.say(126, "ブラインド上がります")
         _fold_hand(live, 130)                          # ブレイク中のハンドはレベル 2 のまま
         live.at(185)
+        live.say(186, "ブラインド上がります")
         _fold_hand(live, 190)
         a, b = live.hands(tmp_path)
         assert a["blinds"]["level"] == 2 and b["blinds"] == {"sb": 300, "bb": 600, "bb_ante": 600, "level": 3}
@@ -140,11 +143,68 @@ class TestLevels:
         assert hand["blinds"]["bb_ante"] == 500 and hand["pot_total"] == 100 + 200 + 500
 
 
+class TestAnnouncement:
+    """時計がレベルを越えたあと、最初に始まるハンドの最初のアクションまでにブラインド上昇の宣言があればそのハンドから、
+    無ければその次のハンドから上げる（2026-10-28 オーナー。10/26 は時計がロガーのほうが 1〜2 分早かった）。"""
+
+    def _levels(self, live, tmp_path):
+        return [h["blinds"]["level"] for h in live.hands(tmp_path)]
+
+    def test_without_an_announcement_it_waits_one_more_hand(self, tmp_path):
+        live = Live(tmp_path)
+        live.at(65)
+        _fold_hand(live, 70)                            # 遷移のあと最初のハンド: 宣言なし → まだ前のレベル
+        _fold_hand(live, 80)                            # その次のハンドから上げる
+        assert self._levels(live, tmp_path) == [1, 2]
+
+    def test_announced_before_the_deal(self, tmp_path):
+        live = Live(tmp_path)
+        live.at(65)
+        live.say(66, "次のハンドからブラインドが上がります")
+        _fold_hand(live, 70)
+        assert self._levels(live, tmp_path) == [2]
+
+    def test_announced_after_the_deal_before_the_first_action(self, tmp_path):
+        live = Live(tmp_path)
+        live.at(65)
+        live.control(70, "new_hand")
+        live.say(71, "ブラインド上がってます。SB200、BB400")   # ハンドを新しいブラインドで始め直す
+        live.say(72, "フォールド フォールド")
+        (hand,) = live.hands(tmp_path)
+        assert hand["blinds"]["level"] == 2 and hand["pot_total"] == 200 + 400 + 300
+        assert any("このハンドからレベル 2" in n for n in live.notes)
+
+    def test_announced_after_the_first_action_is_for_the_next_hand(self, tmp_path):
+        live = Live(tmp_path)
+        live.at(65)
+        live.control(70, "new_hand")
+        live.say(71, "フォールド")
+        live.say(72, "ブラインド上がります")
+        live.say(73, "フォールド")
+        _fold_hand(live, 80)
+        assert self._levels(live, tmp_path) == [1, 2]
+
+    def test_the_replay_decides_the_same(self, tmp_path):
+        live = Live(tmp_path)
+        live.at(65)
+        live.control(70, "new_hand")
+        live.say(71, "ブラインド上がってます")
+        live.say(72, "フォールド フォールド")
+        _fold_hand(live, 80)
+        recorded = live.hands(tmp_path)
+        hands = replay_events(load_events(tmp_path / "s.events.jsonl"), backend="pokerkit", players=_players(),
+                              sb=100, bb=200, session_id="s", out_dir=tmp_path / "replay", auto_winner=True,
+                              table_mode="tournament")
+        assert [h.to_dict() for h in hands] == recorded
+        assert [h["blinds"]["level"] for h in recorded] == [2, 2]
+
+
 class TestReplay:
     def test_recorded_levels_replay_to_the_same_hands(self, tmp_path):
         live = Live(tmp_path)
         _fold_hand(live, 10)
         live.at(65)
+        live.say(66, "ブラインド上がります")
         _fold_hand(live, 70)
         live.control(80, "clock", "set 3")
         live.at(81)

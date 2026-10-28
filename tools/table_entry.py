@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from core.hand_log import input_board
-from core.positions import position_map
+from core.positions import next_hand_button, position_map
 from core.truth_hand import active_seats, apply_rows, materialize_truth, start_state, with_table
 
 # 手番より先の席を押したときに入れるフォールドの上限（1 周 = 席の数より多くはならない）
@@ -91,14 +91,25 @@ def _end_stacks(hand: dict, gt: Optional[dict]) -> dict[int, int]:
     return out
 
 
-def _next_button(seats: list[int], button: Optional[int]) -> Optional[int]:
-    """前のボタンの次の席（前のボタンの席が抜けていても、その次の席）。"""
+def _next_button(seats: list[int], button: Optional[int], prev_seats: Optional[list[int]] = None) -> Optional[int]:
+    """前のボタンの次の席（前のボタンの席が抜けていても、その次の席）。前のハンドの席（`prev_seats`）があれば、SB・BB の人が
+    抜けたときの店の決まり（デッドボタン / ボタンを動かさない, `core.positions.next_hand_button`, 2026-10-28）で。"""
     if not seats:
         return None
     if button is None:
         return max(seats)
+    if prev_seats:
+        return next_hand_button(prev_seats, button, seats)
     later = [s for s in sorted(seats) if s > button]
     return later[0] if later else min(seats)
+
+
+def _played_seats(hand: dict, gt: Optional[dict]) -> list[int]:
+    """ハンドに配られた席（真のアクションの席があればそれ。空席にした席を除く）。"""
+    absent = {p.get("seat") for p in (gt or {}).get("players") or [] if isinstance(p, dict) and p.get("absent")}
+    table = with_table(hand, (gt or {}).get("players"))
+    return sorted(p["seat"] for p in table.get("players") or []
+                  if isinstance(p, dict) and isinstance(p.get("seat"), int) and p["seat"] not in absent)
 
 
 def skeleton_after(prev: dict, gt: Optional[dict]) -> dict:
@@ -122,7 +133,7 @@ def skeleton_after(prev: dict, gt: Optional[dict]) -> dict:
         "hand_id": prev["hand_id"] + 1,
         "players": [{"seat": s, "name": names.get(s) or f"席{s}", "stack_start": stacks[s]} for s in seats],
         "blinds": prev.get("blinds"),
-        "button_seat": _next_button(seats, button),
+        "button_seat": _next_button(seats, button, _played_seats(prev, gt)),
         "board": [],
     }
     if stackless:
@@ -142,22 +153,58 @@ def _base_of(hand: dict) -> dict:
     }
 
 
-def _carried_seating(by_id: dict[int, dict], gt_repo: Any, session_id: str, hand_id: int) -> Optional[list[dict]]:
-    """前のハンドの真のアクションの席（空席にした席を除き、席に戻した・足した席を含む）。持ち点を数えないモードで、画面で
-    空席にした・席に入れた状態を次のハンド以降も引き継ぐ（オーナー 2026-10-26: 持ち点が 0 になったら自分で空席にする）。
-    真のアクションのある前のハンドが無ければ None。"""
+def carried_seats(by_id: dict[int, dict], gt_repo: Any, session_id: str, hand_id: int) -> Optional[dict]:
+    """前のハンドの真のアクションで決めた席。真のアクションの入力で空席にした・席に戻した・足した席を、真のアクションの無い
+    あとのハンドにも引き継ぐ（オーナー 2026-10-26・27: 一度アサインしたら毎ハンド入れ直さない。持ち点のモードによらず、
+    卓の形の画面と一覧の画面で同じ）。
+
+    返り値: `{"from_hand": 番号, "present": [席…], "absent": [席…], "names": {席: 名前}}`。このハンドより前に真のアクションの
+    あるハンドが無ければ None。"""
     for hid in sorted((h for h in by_id if h < hand_id), reverse=True):
         prev_gt = gt_repo.get(session_id, hid)
         if prev_gt is None:
             continue
         players = (prev_gt.hand or {}).get("players")
         table = with_table(by_id[hid], players)
-        absent = {p.get("seat") for p in players or [] if isinstance(p, dict) and p.get("absent")}
-        names = {p.get("seat"): p.get("name") for p in table.get("players") or [] if isinstance(p, dict)}
-        seats = sorted(p["seat"] for p in table.get("players") or []
-                       if isinstance(p, dict) and isinstance(p.get("seat"), int) and p["seat"] not in absent)
-        return [{"seat": s, "name": names.get(s) or f"席{s}", "stack_start": 0} for s in seats]
+        absent = sorted({p["seat"] for p in players or []
+                         if isinstance(p, dict) and isinstance(p.get("seat"), int) and p.get("absent")})
+        names = {p["seat"]: p.get("name") for p in table.get("players") or []
+                 if isinstance(p, dict) and isinstance(p.get("seat"), int) and p.get("name")}
+        present = sorted(s for s in names.keys() | {p["seat"] for p in table.get("players") or []
+                                                     if isinstance(p, dict) and isinstance(p.get("seat"), int)}
+                         if s not in absent)
+        return {"from_hand": hid, "present": present, "absent": absent, "names": names}
     return None
+
+
+def _effective_seats(by_id: dict[int, dict], gt_repo: Any, session_id: str, hand_id: int) -> list[int]:
+    """そのハンドに配られた席: 真のアクションがあればその席、無ければ引き継いだ席（`carried_seats`）を重ねた記録の席。"""
+    gt = gt_repo.get(session_id, hand_id)
+    if gt is not None:
+        return _played_seats(by_id[hand_id], gt.hand)
+    record = {p["seat"] for p in by_id[hand_id].get("players") or [] if isinstance(p, dict) and isinstance(p.get("seat"), int)}
+    carried = carried_seats(by_id, gt_repo, session_id, hand_id)
+    if carried is None:
+        return sorted(record)
+    return sorted((record | set(carried["present"])) - set(carried["absent"]))
+
+
+def _carried_players(base: dict, carried: dict, by_id: dict[int, dict], gt_repo: Any, session_id: str) -> list[dict]:
+    """（記録の席 ∪ 引き継いだ席）− 引き継いだ空席。足した席の持ち点は、数えないモードは 0、数えるモードは前のハンドの
+    終わりの持ち点（分からなければ None）。"""
+    absent = set(carried["absent"])
+    mine = {p["seat"]: p for p in base.get("players") or [] if p["seat"] not in absent}
+    added = [s for s in carried["present"] if s not in mine]
+    stacks: dict[int, int] = {}
+    if added and not base.get("stackless"):
+        prev = gt_repo.get(session_id, carried["from_hand"])
+        stacks = _end_stacks(by_id[carried["from_hand"]], prev.hand if prev is not None else None)
+    for s in added:
+        if not base.get("stackless") and stacks.get(s) is not None and stacks[s] <= 0:
+            continue                               # 前のハンドで持ち点が無くなった（バスト）
+        mine[s] = {"seat": s, "name": carried["names"].get(s) or f"席{s}",
+                   "stack_start": 0 if base.get("stackless") else stacks.get(s)}
+    return [mine[s] for s in sorted(mine)]
 
 
 def table_hand(log_dir: Path, session_id: str, hand_id: int, gt_repo: Any, corr_repo: Any = None) -> Optional[dict]:
@@ -182,17 +229,17 @@ def table_hand(log_dir: Path, session_id: str, hand_id: int, gt_repo: Any, corr_
     else:
         return None
     captured_seats = [p["seat"] for p in base.get("players") or []] if state != "pending" else None
-    if base.get("stackless") and gt is None:
-        carried = _carried_seating(by_id, gt_repo, session_id, hand_id)
-        if carried is not None:
-            if state == "pending" and latest is not None:
-                # 前のハンドのボタン（真のアクション、無ければ記録）の次。足した席・空席にした席を数えて回す
-                prev = gt_repo.get(session_id, latest)
-                prev_button = (prev.hand or {}).get("button_seat") if prev is not None else None
-                if not isinstance(prev_button, int):
-                    prev_button = by_id[latest].get("button_seat")
-                base["button_seat"] = _next_button([p["seat"] for p in carried], prev_button)
-            base["players"] = carried
+    carried = carried_seats(by_id, gt_repo, session_id, hand_id) if gt is None else None
+    if carried is not None:
+        base["players"] = _carried_players(base, carried, by_id, gt_repo, session_id)
+        if state == "pending" and latest is not None:
+            # 前のハンドのボタン（真のアクション、無ければ記録）の次。足した席・空席にした席を数えて回す
+            prev = gt_repo.get(session_id, latest)
+            prev_button = (prev.hand or {}).get("button_seat") if prev is not None else None
+            if not isinstance(prev_button, int):
+                prev_button = by_id[latest].get("button_seat")
+            base["button_seat"] = _next_button([p["seat"] for p in base["players"]], prev_button,
+                                               _effective_seats(by_id, gt_repo, session_id, latest))
     out = {"session_id": session_id, "hand_id": hand_id, "state": state, "base": base,
            "latest_id": latest, "ground_truth": gt.hand if gt is not None else None}
     if captured_seats is not None:
@@ -322,7 +369,7 @@ def seat_view(table: dict, rows: list[dict], button: Optional[int]) -> list[dict
     active = active_seats(gs, mucked)
     stacks = gs.get_stacks()
     seats = sorted(stacks)
-    names = position_map(seats, gs.button_seat) if gs.button_seat in seats else {}
+    names = position_map(seats, gs.button_seat) if gs.button_seat is not None else {}   # 空席ならデッドボタン
     # 持ち点を数えないモード: 持ち点は内部の仮の値なので出さない。オールインした席の出した額も分からない
     allin = gs.allin_seats() if gs.stackless else set()
     return [{"seat": s, "stack": None if gs.stackless else stacks[s],
@@ -362,7 +409,8 @@ TABLE_PAGE = r"""<!doctype html>
  .msg { font-size:13px; color:#ffd8a8; margin-top:6px; } .msg.bad { color:var(--bad); }
  .seat { position:absolute; transform:translate(-50%,-50%); width:200px; background:var(--panel); border:2px solid var(--line); border-radius:12px; padding:6px 8px; }
  .seat.actor { border-color:var(--actor); box-shadow:0 0 0 3px rgba(240,183,47,.25); }
- .seat.out { opacity:.45; } .seat.absent { opacity:.35; border-style:dashed; }
+ .seat.out { opacity:.45; } .seat.absent { border-style:dashed; } .seat.absent .sh, .seat.absent .st { opacity:.45; }
+ .seatin { width:100%; margin-top:4px; padding:6px 4px; font-size:14px; background:#123d6a; border-color:#1f6feb; }
  .seat.winner { border-color:var(--ok); }
  .sh { display:flex; align-items:center; gap:6px; } .sh b { font-size:15px; } .sh .nm { font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
  .pos { font-size:11px; color:#d2a8ff; }
@@ -617,6 +665,10 @@ function setButton(seat){ if (seat === T.button) return; snap(); T.button = seat
 function toggleAbsent(seat){
   const sitIn = T.absent.has(seat);
   if (sitIn) T.absent.delete(seat); else T.absent.add(seat);
+  const u = T.uiSeats.find(x => x.seat === seat);
+  if (sitIn && !T.data.base.stackless && u && u.stack == null) {
+    T.notice = `席${seat} は持ち点が分からないので、このハンドには入りません — 一覧の入力画面で始めの持ち点を入れてください`;
+  }
   markStart(); relegal();
   // いま入れているハンド（まだ配っていない / 進行中）なら、ロガーの席も次のハンドから同じにする（2026-10-26）
   if (T.data && T.data.state !== "done") {
@@ -675,7 +727,8 @@ function render(){
         <button class="xc" title="チェック / コール" ${betting ? "" : "disabled"} onclick="act(${p.seat},'xc')">${esc(xc)}</button>
         <button class="br" title="ベット / レイズ（額はテンキー）" ${betting ? "" : "disabled"} onclick="startBet(${p.seat})">${esc(br)}</button>
         <button class="ai" ${betting ? "" : "disabled"} onclick="act(${p.seat},'allin')">AI</button></div>`}
-      <div class="foot"><a onclick="toggleAbsent(${p.seat})">${absent ? "席に戻す" : "空席にする"}</a>
+      ${absent ? `<button class="seatin" onclick="toggleAbsent(${p.seat})">＋ この席に入れる</button>` : ""}
+      <div class="foot">${absent ? "<span></span>" : `<a onclick="toggleAbsent(${p.seat})">空席にする</a>`}
         ${showWin ? `<button class="win" onclick="setWinner(${p.seat})">${T.winner === p.seat ? "✓ 勝ち" : "勝ち"}</button>` : ""}</div>
     </div>`;
   }).join("");

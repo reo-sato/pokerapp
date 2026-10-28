@@ -485,7 +485,23 @@ def hand_detail(
         "in_progress": in_progress,
         "timeline": hand_timeline(log_dir, session_id, captured, _next_started_at(log_dir, session_id, hand_id)),
         "table_seats": table_seats(log_dir, session_id, hand_id),
+        # 前のハンドの真のアクションで決めた席（いた / いない）を、真のアクションの無いハンドに引き継ぐ（2026-10-27）
+        "carried": _carried(log_dir, session_id, hand_id, gt_repo, corr_repo) if gt is None else None,
     }
+
+
+def _carried(log_dir: Path, session_id: str, hand_id: int, gt_repo: GroundTruthRepository,
+             corr_repo: Optional[HandCorrectionRepository]) -> Optional[dict]:
+    from tools.table_entry import _hand_of, carried_seats
+
+    hands, live = _hand_of(log_dir, session_id, corr_repo)
+    by_id = {h["hand_id"]: h for h in hands}
+    if live is not None:
+        by_id.setdefault(live["hand_id"], live)
+    carried = carried_seats(by_id, gt_repo, session_id, hand_id)
+    if carried is not None:
+        carried["names"] = {str(k): v for k, v in carried["names"].items()}
+    return carried
 
 
 def table_seats(log_dir: Path, session_id: str, hand_id: int) -> list[dict]:
@@ -1588,12 +1604,20 @@ function buildGt(d){
   const capP = (cap.players || []).filter(p => typeof p.seat === "number");
   const gP = ((g && g.players) || []).filter(p => typeof p.seat === "number");
   const table = d.table_seats || [];
-  const all = [...new Set([...capP, ...gP, ...table].map(p => p.seat))].sort((a, b) => a - b);
+  // 真のアクションが無ければ、前のハンドの真のアクションで決めた席（いた / いない）から始める（2026-10-27）
+  const carried = !g && d.carried ? d.carried : null;
+  const carriedIn = new Set(carried ? carried.present : []), carriedOut = new Set(carried ? carried.absent : []);
+  const known = [...capP, ...gP, ...table, ...[...carriedIn].map(seat => ({seat}))].map(p => p.seat);
+  // 空いている席も出す（「いた」にすると席を足せる = 途中から座った人, 2026-10-27）
+  const top = Math.max(8, ...known);
+  const all = [...new Set([...known, ...Array.from({length: top}, (_, i) => i + 1)])].sort((a, b) => a - b);
   const players = all.map(seat => {
     const cp = capP.find(x => x.seat === seat), gp = gP.find(x => x.seat === seat), tp = table.find(x => x.seat === seat);
     const src2 = gp || cp || {};
-    return {seat, name: (cp || gp || tp || {}).name || "", hole_cards: normCards(src2.hole_cards, 2),
-            showed_down: !!(gp && gp.showed_down), absent: gp ? !!gp.absent : !cp,
+    const absent = gp ? !!gp.absent : carriedOut.has(seat) ? true : carriedIn.has(seat) ? false : !cp;
+    return {seat, name: (cp || gp || tp || {}).name || (carried && carried.names[seat]) || "",
+            hole_cards: normCards(src2.hole_cards, 2),
+            showed_down: !!(gp && gp.showed_down), absent,
             stack_start: gp && gp.stack_start != null ? gp.stack_start : null,
             record_stack: cp ? (cp.stack_start ?? null) : null, default_stack: (cp && cp.stack_start) ?? (tp && tp.stack) ?? null};
   });
@@ -1867,12 +1891,15 @@ function renderEdit(){
   }
   const boardHtml = g.board.map((c, i) => `<div style="text-align:center">${cardHtml(c, "", `openPicker('board',${i})`)}<div class="small muted">${BOARD_LABEL[i]}</div></div>`).join("");
   const playersHtml = g.players.map(p => `<div class="seatrow ${p.absent ? "absent" : ""}"><div class="no">席 ${p.seat} <span class="muted small">${esc(p.name)}</span></div>
-      <button class="sm chip ${p.absent?"":"on"}" onclick="setAbsent(${p.seat})" title="このハンドに配られたか">${p.absent ? "いない" : "いた"}</button>
+      <button class="sm chip ${p.absent?"":"on"}" onclick="setAbsent(${p.seat})" title="このハンドに配られたか（押すと切り替え）">${p.absent ? "空席 ＋ 入れる" : "いた"}</button>
       ${p.absent ? "" : `<div>${cardHtml(p.hole_cards[0], "", `openPicker('hole',${p.seat},0)`)}${cardHtml(p.hole_cards[1], "", `openPicker('hole',${p.seat},1)`)}</div>
       <button class="sm chip ${p.showed_down?"on":""}" onclick="setShowed(${p.seat})">見せた</button>
       ${g.stackless ? "" : `<label class="small muted stack">持ち点 <input type="number" inputmode="numeric" value="${p.stack_start ?? ""}" placeholder="${p.default_stack > 0 ? p.default_stack : "入れてください"}" onchange="setStack(${p.seat}, this.value)" onkeydown="if(event.key==='Enter'){this.blur()}"></label>`}`}</div>`).join("");
+  // 空席もボタンに選べる = デッドボタン（SB の人が抜けたハンド, 2026-10-28）
+  const deadChoices = g.players.filter(p => p.absent).map(p => p.seat);
   const buttonHtml = `<div class="chips">${seats.map(s => `<button class="chip ${g.button_seat===s?"on":""}" onclick="setButton(${s})">席 ${s}</button>`).join("")}
-      <span class="muted small" style="align-self:center">${g.button_seat !== cap.button_seat ? `記録は席 ${cap.button_seat ?? "—"}（ディーラーがボタンを動かし忘れた）` : "記録どおり。ディーラーがボタンを動かし忘れたときは実際の席を選ぶ（手番の順が変わります）"}</span></div>`;
+      ${deadChoices.map(s => `<button class="chip ${g.button_seat===s?"on":""}" title="空いた席のボタン（デッドボタン）" onclick="setButton(${s})">席 ${s}（空席）</button>`).join("")}
+      <span class="muted small" style="align-self:center">${g.button_seat !== cap.button_seat ? `記録は席 ${cap.button_seat ?? "—"}（ディーラーがボタンを動かし忘れた・デッドボタン）` : "記録どおり。ディーラーがボタンを動かし忘れたときは実際の席を、SB の人が抜けたハンドは空いた席（デッドボタン）を選ぶ（手番の順が変わります）"}</span></div>`;
   const sdw = L.next && L.next.hand_over && L.next.foldout_winner == null ? L.next.showdown_winner : null;
   const winnerHtml = `<div class="chips">${seats.map(s => `<button class="chip ${g.winner_seat===s?"on":""}" onclick="setWinner(${s})">席 ${s}</button>`).join("")}
       <button class="chip ${g.winner_seat==null?"on":""}" onclick="setWinner(null)">未定</button>
@@ -1927,7 +1954,7 @@ function renderEdit(){
         ${reconcile}
         <h2 style="margin-top:0">実際（真のアクション）</h2>
         <h2>ボード</h2><div style="display:flex;gap:6px;flex-wrap:wrap">${boardHtml}</div>
-        <h2>席と手札 <span class="muted small">いなかった席は「いた」を押して外す。記録に無い席も「いない」を押すと入る。持ち点は記録と違うときだけ</span></h2>${playersHtml}
+        <h2>席と手札 <span class="muted small">いなかった席は「いた」を押して外す。空いている席に座った人は「空席 ＋ 入れる」。決めた席は次のハンドからも同じ。持ち点は記録と違うときだけ</span></h2>${playersHtml}
         <h2>ボタン</h2>${buttonHtml}
         <h2>アクション <span class="muted small">コールの額とストリートは自動。ベット / レイズはトータルの額</span></h2>
         <div class="tbl"><table><tr><th>ストリート</th><th>席</th><th>アクション</th><th>額</th><th></th></tr>${rows || "<tr><td colspan='5' class='muted'>まだありません（下のボタンで足す）</td></tr>"}</table></div>

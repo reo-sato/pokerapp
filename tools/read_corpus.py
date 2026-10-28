@@ -252,8 +252,12 @@ def event_key(event: Any) -> str:
     return key
 
 
+# アクションではない入力（ブラインド上昇の宣言 = engine がレベルを上げる時を決める, 2026-10-28）は句の正解と比べない
+_NOT_ACTIONS = frozenset({"blind_up"})
+
+
 def parse_keys(text: str) -> list[str]:
-    return [event_key(e) for e in parse_actions(text)]
+    return [event_key(e) for e in parse_actions(text) if e.action not in _NOT_ACTIONS]
 
 
 _WAGER = re.compile(r"^(?:bet|raise|amount) (\d+)")
@@ -1222,7 +1226,7 @@ def reread_segment(seg: dict, route: str = "live") -> list[str]:
     events = [] if noise or not text else parse_actions(text, confidence=seg.get("confidence"))
     if route == "live":
         events, _ = apply_ear(events, text, seg.get("ear"), question=question)
-    return [event_key(e) for e in events]
+    return [event_key(e) for e in events if e.action not in _NOT_ACTIONS]
 
 
 ROUTES = (("live", "本番の経路"), ("whisper", "Whisper だけ"), ("ear", "第 2 の耳だけ"))

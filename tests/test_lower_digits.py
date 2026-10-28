@@ -112,6 +112,12 @@ class TestSecondEar:
         read, used = _apply("7千ドップチェック", SIX_SIX)
         assert read == [("bet", 7000, ("amount_only", GARBLED_DIGITS)), ("check", 0, ())] and used is None
 
+    def test_two_action_words_after_the_number_are_not_the_lower_digits(self):
+        """店舗 2026-10-26 2bbd480e ハンド 5: プリフロップの 2000・コール・BB のチェックを、第 2 の耳は「二千五百」とだけ
+        聞いた。数のあとに 2 つの語は下の桁の聞き違いでは言えない = Whisper の読みのまま。"""
+        read, used = _apply("2千、コール、チェック", TWO_FIVE)
+        assert [(a, n) for a, n, _ in read] == [("bet", 2000), ("call", 0), ("check", 0)] and used is None
+
     def test_only_the_amount_when_the_ear_heard_more(self):
         """第 2 の耳が自由に聞いた文に額のほかの語もあれば、額だけを入れる（Whisper のほかの語は残す）。"""
         read, used = _apply("7千ドップチェック", SEVEN_SIX_MORE)

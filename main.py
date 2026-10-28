@@ -405,7 +405,7 @@ def _rfid_tracking_kwargs(rfid_cfg: dict) -> dict:
 
 
 def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, listen_gate=None,
-                       audio_dir=None, second_ear=None, on_status=None):
+                       audio_dir=None, second_ear=None, on_status=None, live_transcribe=True):
     """config.audio.enabled が true（既定）なら AudioThread を返す。false なら None。
 
     false はマイクを繋がない実機テスト（RFID のカード読み取りだけを見る / ダミーアクションを
@@ -442,7 +442,14 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, l
         vad_threshold=float(audio_cfg.get("vad_threshold", 0.5)),
         cpu_threads=int(audio_cfg.get("cpu_threads", 0) or 0),
         second_ear=second_ear,
+        live_transcribe=live_transcribe,
     )
+
+
+def _live_transcribe(audio_cfg: dict) -> bool:
+    """その場で書き起こしてロガーに使うか（config `audio.live_transcribe`, 既定 true）。テスト中は false = 後回し
+    （聞き取りの遅れでロガーが待たない。書き起こしは裏で順に・終了と「ログをまとめる」で残りを, 2026-10-28）。"""
+    return bool(audio_cfg.get("live_transcribe", True))
 
 
 def _load_second_ear(audio_cfg: dict):
@@ -923,15 +930,24 @@ def run_cli(script: str | None = None) -> None:
     transcript_log = TranscriptLog(Path(session_cfg["log_dir"]) / f"{session_id}.transcripts.jsonl")
 
     def on_transcript(transcript):
-        _print_transcript(transcript)
+        if not getattr(transcript, "deferred", False):   # 後回しの書き起こしは画面に出さない（数分遅れて出るので）
+            _print_transcript(transcript)
         transcript_log.write(transcript)
 
+    live_transcribe = _live_transcribe(audio_cfg)
+    # 書き起こしを後回しにするなら、プレー中の発話の音声は保存する（あとで書き起こす元）
     audio_dir = (Path(session_cfg["log_dir"]) / "audio" / session_id
-                 if audio_cfg.get("save_audio", False) else None)
+                 if audio_cfg.get("save_audio", False) or not live_transcribe else None)
+    if not live_transcribe and audio_cfg.get("enabled", True):
+        from tools.offplay_audio import mark_deferred
+
+        mark_deferred(audio_dir, transcript_log.path)
+        print("書き起こしは後回しです（audio.live_transcribe=false）: その場では声をロガーに使いません。"
+              "書き起こしは裏で順に進め、終了（q）と「ログをまとめる」で残りを書き起こします", flush=True)
     second_ear = _load_second_ear(audio_cfg) if audio_cfg.get("enabled", True) else None
     audio_thread = _make_audio_thread(cfg, audio_q, stop_event, on_transcript=on_transcript,
                                       listen_gate=listen_gate, audio_dir=audio_dir, second_ear=second_ear,
-                                      on_status=_print_notice)
+                                      on_status=_print_notice, live_transcribe=live_transcribe)
     if audio_thread is None:
         print("音声入力は無効です (audio.enabled=false)。"
               "アクションはキーボードから読み上げ文で投入してください。")

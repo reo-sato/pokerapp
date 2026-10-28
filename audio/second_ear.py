@@ -547,6 +547,40 @@ def rescue_events(ear: Optional[dict], *, utterance_start_ts: Optional[float] = 
     return events
 
 
+# 短い語の分類器（`audio/short_words.py`）で読む（店舗 2026-10-26 の聞き取り: 読めなかったコール・フォールドのうち
+# ディーラーが言っていたのは 7 割、その 8 割を Whisper は雑談・幻聴・空に書き換えた。第 2 の耳の音は分類器で
+# フォールド 19/32・コール 9/22 を当てていた）。Whisper が幻聴（`is_prompt_echo`）か空に書き、第 2 の耳の候補でも読めない
+# 発話で、分類器がコール / フォールドをこの確率以上と出したときだけ、その語として読む（要確認 = `SHORT_WORD_FLAG`）。
+# 短い雑談の文（「これ」「ほね」）にも使うと開発データで 3 ハンドが悪くなり、0.9 でも 2 ハンドが悪くなった。
+# 幻聴・空と 0.95 なら悪くなるハンドは 0（一致する行 2146 → 2157）、10/26 は言った 54 のうち 9 を新しく読み誤り 0
+SHORT_WORD_FLAG = "short_word"
+SHORT_WORD_MIN_P = 0.95
+SHORT_WORD_LABELS = {"call": "コール", "fold": "フォールド"}
+
+
+def short_word_events(text: str, ear: Optional[dict], *, utterance_start_ts: Optional[float] = None) -> list:
+    """短い語の分類器の読み（コール / フォールド 1 つ）。使えなければ空。"""
+    import re
+
+    from audio import short_words
+    from audio.recognizer import is_prompt_echo, parse_actions
+
+    if re.sub(r"[\s、。,.!?！？・]", "", text or "") and not is_prompt_echo(text):
+        return []                            # Whisper が文を書いた（会話の中の音を語と読まない）
+    model = short_words.load()
+    probs = model.predict(ear) if model is not None and ear else None
+    if not probs:
+        return []
+    label = max(probs, key=probs.get)
+    if label not in SHORT_WORD_LABELS or probs[label] < SHORT_WORD_MIN_P:
+        return []
+    events = parse_actions(SHORT_WORD_LABELS[label], confidence=EAR_CONFIDENCE, utterance_start_ts=utterance_start_ts)
+    for event in events:
+        event.raw_text = text
+        event.parse_flags = (*event.parse_flags, SHORT_WORD_FLAG)
+    return events
+
+
 def _amountless(events: Iterable) -> list[int]:
     """ベット・レイズなのに額が無い・`EAR_MIN_AMOUNT` 未満の位置。"""
     return [i for i, e in enumerate(events) if e.action in ("bet", "raise") and (e.amount or 0) < EAR_MIN_AMOUNT]
@@ -645,6 +679,10 @@ def _wager_amounts(text: str) -> list[int]:
     return [e.amount for e in parse_actions(text) if e.action in ("bet", "raise", "allin") and e.amount]
 
 
+# 下の桁を埋めるのは、数のあとに続いたアクションの語がこれ以下のとき（10/01 の「2千、コール。」「7千ドップチェック」は 1 つ）
+LOWER_DIGITS_MAX_WORDS_AFTER = 1
+
+
 def fill_lower_digits(events: list, ear: Optional[dict], *,
                       utterance_start_ts: Optional[float] = None) -> Optional[tuple[list, str]]:
     """「千」「万」で終わる数で読んだ賭けがちょうど 1 つの発話で、第 2 の耳がその下の桁まで聞いていれば、それを使う
@@ -665,6 +703,11 @@ def fill_lower_digits(events: list, ear: Optional[dict], *,
     if len(opens) != 1:
         return None
     index, low, high = opens[0]
+    if len(events) - index - 1 >= LOWER_DIGITS_MAX_WORDS_AFTER + 1:
+        # 数のあとにアクションの語が 2 つ以上続く（「2千、コール、チェック」）: 下の桁の聞き違いでは言えない量。Whisper の
+        # 読みのまま（店舗 2026-10-26 2bbd480e ハンド 5: プリフロップの 2000・コール・BB のチェックを第 2 の耳が「二千五百」と
+        # だけ聞き、3 つのアクションが 2500 のベット 1 つになった）
+        return None
     text = agreed_candidate(ear)
     if text is not None:
         amounts = _wager_amounts(text)
@@ -795,7 +838,11 @@ def _apply_ear(events: Iterable, text: str, ear: Optional[dict], *, question: bo
         rescued = rescue_events(ear, utterance_start_ts=utterance_start_ts)
         if rescued:
             return rescued, agreed_candidate(ear)
-        return garbled_amount_events(text, ear, utterance_start_ts=utterance_start_ts)
+        garbled = garbled_amount_events(text, ear, utterance_start_ts=utterance_start_ts)
+        if garbled[0]:
+            return garbled
+        short = short_word_events(text, ear, utterance_start_ts=utterance_start_ts)
+        return (short, SHORT_WORD_LABELS.get(short[0].action) if short else None) if short else garbled
     digits = fill_lower_digits(events, ear, utterance_start_ts=utterance_start_ts)
     if digits is not None:
         return digits

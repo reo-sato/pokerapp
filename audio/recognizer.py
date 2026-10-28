@@ -530,6 +530,12 @@ def is_prompt_echo(text: str) -> bool:
     ))
 
 
+def is_stock_hallucination(text: str) -> bool:
+    """幻聴のうち字幕の定型句（「ご視聴ありがとうございました」）か（評価で幻聴の種類を分けるため）。"""
+    norm = unicodedata.normalize("NFKC", text).replace(" ", "").replace("　", "")
+    return any(marker in norm for marker in _STOCK_HALLUCINATIONS)
+
+
 # 発話の長さで言える文字数の上限（空白を除く）。人は 1 秒に 10 文字も言わない。幻聴のループ（「…ウィナー、
 # ハンド、チェック、フォールド、…」を繰り返す）は 1 秒の音から数十文字が出る（店舗の 5 回目の通しテスト:
 # 3.6 秒の音から 250 文字）。書き起こしを長さの上限で打ち切ったものもここで捨てる（`WhisperTranscriber`）。
@@ -998,11 +1004,36 @@ def street_call(text: str) -> Optional[tuple[int, float]]:
     return index, m.start() / max(1, len(norm))
 
 
+# ブラインド上昇の宣言（2026-10-28 オーナー: 時計がレベルを越えたあと、ハンドの最初のアクションまでに宣言があれば
+# そのハンドから上げる。無ければもう 1 ハンドあと）。店舗 10/26 の言い方:「ブラインド上がります。SB800 点、BB1600 点
+# です」「ブラインド上がってます」「次のハンドからブラインが上がります」「ブラインド 500、1000 です」。
+_BLIND_UP = re.compile(
+    r"ブライン(?:ド)?[^。]{0,8}?(?:上|ア)ガ"
+    r"|次ノハンドカラ[^。]{0,4}ブライン"
+    r"|(?:SB|エスビー|スモール)[^0-9。]{0,4}[0-9〇一二三四五六七八九十百千万][^。]{0,10}(?:BB|DB|ビービー|ビッグ)"
+)
+
+
+def is_blind_up(text: str) -> bool:
+    """ブラインド上昇の宣言か（額の読み上げ「ブラインド 800、1600」も含む）。"""
+    norm = _to_katakana(unicodedata.normalize("NFKC", text or "")).strip()
+    return bool(norm) and (_BLIND_UP.search(norm) is not None or _BLIND_ANNOUNCEMENT.match(norm) is not None)
+
+
+def blind_up_event(text: str, utterance_start_ts: Optional[float] = None,
+                   confidence: Optional[float] = None) -> Optional[AudioEvent]:
+    """ブラインド上昇の宣言なら `blind_up` の入力（アクションではない。engine がレベルを上げる時を決める）。"""
+    if not is_blind_up(text):
+        return None
+    return AudioEvent(action="blind_up", amount=0, timestamp=time.time(), raw_text=text, confidence=confidence,
+                      utterance_start_ts=utterance_start_ts)
+
+
 def is_announcement(text: str) -> bool:
     """ディーラーがポットの額・ブラインドを読み上げた発話（アクションではない）。第 2 の耳でも聞き直さない
     （読み上げ集 2026-09-30:「ポット1万2000です。」を第 2 の耳が「一万二千です」と聞いて額にしていた）。"""
     norm = _to_katakana(unicodedata.normalize("NFKC", text)).strip()
-    return "ポット" in norm or _BLIND_ANNOUNCEMENT.match(norm) is not None
+    return "ポット" in norm or _BLIND_ANNOUNCEMENT.match(norm) is not None or _BLIND_UP.search(norm) is not None
 
 
 # 発話全体がこの語だけのときの書き起こしゆれ（店舗の実測 2026-09-27。どれも「チェック」と「コール」の間など、
@@ -1261,6 +1292,7 @@ def parse_actions(
     （`audio/phonetic.py`。読んだアクションは `fuzzy_keyword` = 要確認）。音の近さは辞書で読めるアクションを
     減らさない（読めなければ辞書だけの読みに戻る）。
     """
+    original = text
     text = _drop_question_sentences(text)
     if not text:
         return []
@@ -1283,7 +1315,30 @@ def parse_actions(
     salvaged = [event for found in reversed(groups) for event in found]
     for event in salvaged:
         event.parse_flags = (*event.parse_flags, "sentence_after_chatter")
+    if not salvaged:
+        repeated = _repeated_amount(original, confidence, utterance_start_ts)
+        return [repeated] if repeated is not None else []
     return _mark_garbled_calls(salvaged)
+
+
+# 同じ額を 2 回以上、区切って言った発話（「1600? 1600。大丈夫です。」「どうする、あおりすぎ 3200 3200 ポールド」）は、
+# 会話が混ざっていてもその額のベットかレイズ（店舗 2026-10-26 2bbd480e ハンド 7: どちらも真のアクションのベット・レイズ
+# だったが、会話とみて読んでいなかった）。ディーラーは額を確かめて言い直す。会話に出る数は繰り返さない。違う額が
+# 混ざれば読まない。要確認（`REPEATED_AMOUNT`）
+REPEATED_AMOUNT = "repeated_amount"
+_REPEAT_SPLIT = re.compile(r"[\s、。,.・?？!！]+")
+
+
+def _repeated_amount(text: str, confidence: Optional[float], utterance_start_ts: Optional[float]) -> Optional[AudioEvent]:
+    found = [e for e in (parse_amount_only(chunk, confidence, utterance_start_ts)
+                         for chunk in _REPEAT_SPLIT.split(unicodedata.normalize("NFKC", text)) if chunk.strip())
+             if e is not None]
+    if len(found) < 2 or len({e.amount for e in found}) != 1 or found[0].amount < _MIN_WAGER_IN_TURN:
+        return None
+    event = found[0]
+    event.raw_text = text
+    event.parse_flags = (*event.parse_flags, REPEATED_AMOUNT)
+    return event
 
 
 # チップを数える声（「5万、6万、7万、8万」= オールインのあとのスタック・ショーダウンのあとのポット）はアクションではない
@@ -1501,8 +1556,9 @@ def _parse_utterance(
         text = alias
     nfkc = unicodedata.normalize("NFKC", text)
     norm = _to_katakana(nfkc)
-    if _BLIND_ANNOUNCEMENT.match(norm.strip()):
-        return []
+    if _BLIND_ANNOUNCEMENT.match(norm.strip()) or _BLIND_UP.search(norm):
+        return [AudioEvent(action="blind_up", amount=0, timestamp=time.time(), raw_text=text, confidence=confidence,
+                           utterance_start_ts=utterance_start_ts)]
     players_left = _find_players_left(nfkc, norm)
     if players_left is not None:
         return _around_players_left(text, nfkc, players_left, confidence, utterance_start_ts)

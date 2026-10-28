@@ -148,7 +148,8 @@ def test_every_parse_flag_the_reader_writes_is_in_the_schema():
     allowed = set(schema["properties"]["parse_flags"]["items"]["enum"])
     written = {recognizer.GARBLED_DIGITS, recognizer.GARBLED_CALL, recognizer.BEFORE_CHECK_AROUND, recognizer.RESTATEMENT,
                "ambiguous_amount", "multi_action_keywords", "too_many_actions", "amount_only", "check_around",
-               "fuzzy_keyword", "second_ear", "sentence_after_chatter", "phonetic_amount", "legal_amount"}
+               "fuzzy_keyword", "second_ear", "sentence_after_chatter", "phonetic_amount", "legal_amount",
+               recognizer.REPEATED_AMOUNT, "short_word"}
     assert written <= allowed, written - allowed
     env = event_to_envelope(AudioEvent(action="bet", amount=7000, timestamp=1.0, raw_text="ベット7千ドップ",
                                        parse_flags=(recognizer.GARBLED_DIGITS,)))
