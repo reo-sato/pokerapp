@@ -13,6 +13,12 @@
   `notes` = 入力画面の「気づいたこと」）を毎回すべて読み、要望・仕様として扱う**（オーナーの指示, 2026-09-29。
   メモに書かれた要望を読み落とし、あとで直接頼まれたことがある）。`python tools/eval_store.py <zip>` がセッションごとの
   先頭に全部出す。
+- 受け取ったログはリポジトリに置く（オーナーの指示, 2026-10-28）。どのセッションからも使えるようにするため。
+  - 文字のログ（音声を除く）・家で入れた真のアクション・聞き取りの印は、開発のブランチの `data/store/<日付>/` に置く。
+    一覧は `data/store/README.md`。
+  - 発話の音声は、データ専用のブランチ `store-data` に置く（`python tools/store_data.py audio <日付>` で取り出す）。
+  - 足すときは `python tools/store_data.py add …` と `stash-audio …`。
+  - 店舗の音声はこのブランチにだけ置き、公開（Artifact など）はしない。
 
 ## プロジェクト概要
 
@@ -191,6 +197,7 @@ pokerapp/
 │   ├── replay_hand.py / play_hand_text.py / simulate_rfid.py / calibrate_confidence.py / measure_capture_accuracy.py ← replay・テキスト駆動・RFID 注入・confidence 較正・捕捉精度
 │   └── set_config.py / backup_data.py / cloud_link.py / release.py ← config の 1 項目 / データのバックアップ / クラウドにつなぐ (ADR-0067) / リリース版 (ADR-0066)
 │
+├── data/store/                    ← 店舗のテスト記録（音声を除く。日付ごと・一覧は README。音声は store-data ブランチ, tools/store_data.py）
 ├── tests/                         ← pytest テストスイート（`fixtures/store/` = 店舗の開発データ = 真のアクションつきのセッション）
 └── vision/                        ← レガシー（未使用）
 ```
