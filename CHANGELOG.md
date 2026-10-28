@@ -13,6 +13,12 @@
   聞いて確かめる一覧に出す。話者のモデル（約 28 MB）は `python tools/dealer_voice.py fetch` で `models/speaker/` に。
   ライブの記録は変えない（台帳 I, 作業ログ `docs/worklog/2026-10-28-dealer-voice-plan.md`）。
 
+### Added (クラウドの音声認識と比べる道具 = 台帳 H の H1, 2026-10-28)
+
+- `tools/cloud_asr.py`: 保存した発話の音声をクラウドの音声認識 API（OpenAI・Groq・Deepgram・Google Chirp 3）に送り（`run`）、
+  いまの Whisper と同じ物差し（アクションの読み・額の行・全部正しいハンド・1 発話の時間・課金の目安、第 2 の耳あり / なし）で
+  比べる（`compare`）。オフラインの実験で、ライブ・店舗 PC は変えない。
+
 ### Changed (ショーダウンの役名は勝者の手の宣言, 2026-10-27)
 
 - ショーダウンでディーラーが言う役名を「次に見せた人の手」ではなく**勝っている手の宣言**として読む（オーナー: ディーラーは

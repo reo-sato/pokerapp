@@ -71,3 +71,33 @@ $3 前後。
 - https://iadecider.com/articles/speech-to-text-reference-2026
 - https://telenow.ai/blog/deepgram-speech-to-text-models-benchmarks-pricing-and-when-to-use-it/
 - https://www.gladia.io/blog/best-whisper-alternatives-2026
+
+## H1 の道具（10/28, オーナー「改善案H、whisperのapi利用の実験を行います」）
+
+この環境には音声認識の API の鍵も、音声付きの店舗ログ（開発データに WAV は無い）も無いので、まず比べる道具を作った。
+API はまだ 1 度も呼んでいない。
+
+- `tools/cloud_asr.py run <音声付きの zip…> --provider <方式>`: 書き起こしの記録に音声のある発話（声ではない音は既定で
+  送らない = ライブも Whisper にかけていない）を API に送り、`<sid>.asr.<方式>.jsonl`（文・秒数・課金の目安）に書く。
+  `--dry-run` で件数と課金の目安だけ、`--limit` で試し、途中で止めても続きから（失敗した発話は次に送り直す）。
+  方式: `openai-whisper-1` / `openai-4o` / `openai-4o-mini` / `groq-v3` / `groq-turbo` / `deepgram-nova3` / `google-chirp3`。
+  OpenAI と Groq にはライブと同じプロンプト（`WHISPER_PROMPT_JA`、`--no-prompt` で外す）・言語 ja。鍵は環境変数
+  （`OPENAI_API_KEY` か `POKERAPP_OPENAI_API_KEY` / `GROQ_API_KEY` / `DEEPGRAM_API_KEY` / Google は
+  `GOOGLE_CLOUD_PROJECT` と gcloud のトークン）。追加の部品は要らない（標準の urllib）。
+- `tools/cloud_asr.py compare <zip…> --results <run の出力>`: 方式ごとに書き起こしの文を置き換え、いまの Whisper と並べる:
+  - **アクションの読み**: 配る人が言うアクションのうち発話の読みと合った割合（音声の改善を終える目安と同じ
+    `eval_store.listening_stop_metrics` の数え方）と、そのうち**ベット / レイズの額の行**だけの割合
+  - **全部正しいハンド**: 置き換えた文をいまの読み取りで読み直して再生した記録の、真のアクションとの一致
+  - **第 2 の耳**: 重ねない / 重ねる（ライブと同じ規則）の両方
+  - **1 発話の時間**（中央値・最大）と**課金の目安**（料金表は第三者のまとめ = 公式で要確認。Groq は 1 回 10 秒の最低、
+    Google Chirp 3 は 15 秒単位として数える）
+- 試験 `tests/test_cloud_asr.py`（8 件: 課金の単位・各 API の要求と答えの読み方・鍵が無いとき・送って比べる通し
+  （記録の Whisper が聞き違えたレイズを API が正しく聞けば、読みが 1 行・額の行・全部正しいハンドが増える）・失敗した発話・
+  `--dry-run` は鍵が要らない・compare のコマンド）。速い組 3548 passed・22 skipped、ruff 問題なし。
+- 店舗 PC には入れない（verify-v1 に入れていない）。開発側（このクラウドのセッションか家の PC）で回す。
+
+### 回すのに要るもの（オーナー）
+
+1. 音声付きの zip（10/19・10/26、`pack_logs_audio.cmd` で作ったもの。分けた zip は全部）
+2. 試す API の鍵（推す順: OpenAI → Groq → Deepgram → Google）
+3. 送ってよいかの判断（H1 は保存した音声を開発側から API に送る。営業中には送らない）
