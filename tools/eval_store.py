@@ -458,6 +458,11 @@ def _speech_token(action: str, amount: Any) -> Optional[tuple]:
 
 
 def truth_tokens(hand: dict) -> list[tuple]:
+    """真のアクションのうち、配る人が言う行（`truth_rows`）の読みと比べる形。"""
+    return [_speech_token(a["action"], a.get("amount")) for a in truth_rows(hand)]
+
+
+def truth_rows(hand: dict) -> list[dict]:
     """真のアクションのうち、配る人が言う行。ショーダウンで見せずに降りた行と、ハンドを終わらせる最後のフォールド
     （札の離脱と勝者で分かるので言わないことが多い）は数えない。"""
     actions = [a for a in hand.get("actions") or [] if isinstance(a, dict)]
@@ -465,15 +470,20 @@ def truth_tokens(hand: dict) -> list[tuple]:
     rows = [a for a in actions if a.get("action") in _SPOKEN_ACTIONS and a.get("street") != "showdown"]
     if rows and rows[-1].get("action") == "fold" and not showdown:      # 全員降りて終わったハンドの最後のフォールド
         rows = rows[:-1]
-    return [_speech_token(a["action"], a.get("amount")) for a in rows]
+    return rows
 
 
 def heard_tokens(transcripts: list[dict], window: tuple[float, float]) -> list[tuple]:
     """ハンドの時間帯に話し始めた発話を、ライブと同じ規則（いまの読み取り + 第 2 の耳）で読んだアクション。"""
+    return [token for token, _row in heard_items(transcripts, window)]
+
+
+def heard_items(transcripts: list[dict], window: tuple[float, float]) -> list[tuple[tuple, dict]]:
+    """`heard_tokens` の読みと、それを読んだ発話の行（聞き取りのページで、読めなかった行の前後の発話を探すため）。"""
     start, end = window
     rows = sorted((r for r in transcripts if isinstance(r.get("utterance_start_ts"), (int, float))
                    and start <= r["utterance_start_ts"] < end), key=lambda r: r["utterance_start_ts"])
-    out: list[tuple] = []
+    out: list[tuple[tuple, dict]] = []
     for row in rows:
         text = (row.get("text") or "").strip()
         at = row["utterance_start_ts"]
@@ -481,7 +491,7 @@ def heard_tokens(transcripts: list[dict], window: tuple[float, float]) -> list[t
             text, confidence=row.get("confidence"), utterance_start_ts=at)
         parsed, _ = apply_ear(parsed, text, used_ear(row), question=is_question(text), utterance_start_ts=at,
                               confidence=row.get("confidence"))
-        out.extend(t for t in (_speech_token(e.action, e.amount) for e in parsed) if t is not None)
+        out.extend((t, row) for t in (_speech_token(e.action, e.amount) for e in parsed) if t is not None)
     return out
 
 
@@ -493,6 +503,11 @@ def matched_tokens(truth: list[tuple], heard: list[tuple]) -> int:
 
 def matched_truth(truth: list[tuple], heard: list[tuple]) -> set[int]:
     """`matched_tokens` で対応づけた真のアクションの行の番号（種類ごとに読めた割合を出すため）。"""
+    return set(matched_pairs(truth, heard))
+
+
+def matched_pairs(truth: list[tuple], heard: list[tuple]) -> dict[int, int]:
+    """`matched_tokens` の対応づけ: 真のアクションの行の番号 → 対応した読みの番号。"""
     n, m = len(truth), len(heard)
     dp = [[0] * (m + 1) for _ in range(n + 1)]
     for i in range(1, n + 1):
@@ -506,7 +521,7 @@ def matched_truth(truth: list[tuple], heard: list[tuple]) -> set[int]:
                     k += 1
                     best = max(best, dp[i - k][j - 1] + k)
             dp[i][j] = best
-    got: set[int] = set()
+    got: dict[int, int] = {}
     i, j = n, m
     while i and j:
         if dp[i][j] == dp[i - 1][j]:
@@ -514,13 +529,13 @@ def matched_truth(truth: list[tuple], heard: list[tuple]) -> set[int]:
         elif dp[i][j] == dp[i][j - 1]:
             j -= 1
         elif heard[j - 1] == truth[i - 1]:
-            got.add(i - 1)
+            got[i - 1] = j - 1
             i, j = i - 1, j - 1
         else:                                  # チェックアラウンド = 続くチェック k 個
             k = 1
             while dp[i - k][j - 1] + k != dp[i][j]:
                 k += 1
-            got.update(range(i - k, i))
+            got.update({x: j - 1 for x in range(i - k, i)})
             i, j = i - k, j - 1
     return got
 
