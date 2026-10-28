@@ -1,0 +1,73 @@
+# 2026-10-28 Whisper の書き起こしをクラウドの API で行う検討（台帳 H, 計画のみ）
+
+オーナー（10/28）:「改善計画として、Whisper による会話の書き起こしを何かの API を利用してクラウド上で行うことを考えたい」
+「第 2 の耳の代替は存在しませんか？」→「台帳にトラック H として載せて」。コードは変えていない。
+
+## いまの数字
+
+- 店舗 PC の Whisper（medium・CPU int8）は 1 発話あたり中央値 3.0 秒。10/19 は処理待ちが最大 37 件、聞き取りの遅れは
+  中央値 9.3 秒・最大 124 秒（作業ログ `2026-10-19-home-truth.md`・改善案 `2026-10-23-estimator-improvement-plan.md`）。
+- 開発データ（`tests/fixtures/store/*/transcripts.jsonl` の `audio_sec`）: プレー 1 時間あたり 500〜900 発話・音声 10〜25 分。
+  1〜2 秒の短い発話がほとんど。
+- 真のベット / レイズの額を Whisper が読めた 77%・第 2 の耳の上位 3 か文 17%・発話に無い 6%（10/19, 監査 4 回目）。
+- ADR-0063 D1: 推論は店舗 PC の CPU で行う。ライブでクラウドを使うならこの決まりを見直す ADR が要る。
+
+## クラウドでやる利点と注意
+
+- 利点: 遅れが無くなる（1 発話 1〜2 秒・並べて投げられる）／大きいモデル（large-v3 級・gpt-4o-transcribe・Chirp 3）／
+  店舗 PC が軽くなる（他の店に配るときの条件も下がる）。
+- 注意: 卓の会話（発話の半分近くが雑談）を外に送る = お客さんへの掲示と、保存・学習に使わない設定の API ／ ネットが切れたら
+  いまの Whisper に戻す二重の作り ／ API の鍵は店舗 PC に置かず、クラウド（ADR-0067 の Cloud Run）を中継に ／
+  **1 回ごとの最低課金**（短い発話が多いので、15 秒単位などの課金だと 10 倍以上になる）。
+
+## 料金の目安（第三者のまとめ, 2026-10 時点。公式ページで要確認）
+
+| サービス | 料金 | 注意 |
+|---|---|---|
+| OpenAI gpt-4o-transcribe / whisper-1 | 約 $0.006/分（mini 約 $0.003） | 旧モデルが 2027-02 に外れるという記述が一部にあり（未確認） |
+| Google Chirp 3（V2） | $0.016/分 | 15 秒単位で課金 |
+| Groq whisper-large-v3-turbo | 約 $0.04/時間 | 1 回あたりの最低課金は要確認 |
+| Deepgram Nova-3 | 約 $0.0043/分（多言語は高め） | 秒単位。日本語の精度は要確認 |
+| ElevenLabs Scribe | 約 $0.22/時間 | |
+
+月 30 時間ほどの音声（1 日 4 時間・25 日）で、秒単位の課金なら月 $1〜15 程度。Google の 15 秒単位ならプレー 1 時間あたり
+$3 前後。
+
+## 第 2 の耳（ReazonSpeech）の扱い
+
+第 2 の耳は書き起こしではなく、決まった候補ごとの log P(候補 | 音声) を出す（候補を当てはめて点を付ける）。推定器と短い語の
+分類器はこの点で値を決めている。クラウドの API はこの点を返さない（上位いくつかの文と自信・自分の書いた文字の logprobs・語の
+後押し・音声の LLM に選ばせる、はどれも部分的な代わり）。本当の代わりは自分で置くもの:
+
+1. 同じ ReazonSpeech を Cloud Run（CPU）に置く — 点がいまと同じで、分類器・推定器の値を作り直さなくてよい。
+2. Whisper large-v3 で候補を当てはめて点を付ける（第 3 の耳）— 精度が上がるかもしれないが、GPU と作り込みが要り、分類器・
+   推定器の値は数え直し。
+
+推す形: **第 2 の耳は店舗 PC に残し、クラウドに出すのは Whisper だけ**（重いのは Whisper。第 2 の耳は 1 発話 0.3 秒ほどで
+全発話にかけて回っている。ネットが切れても店内で回る）。全部をクラウドに寄せるときは 1。
+
+## 進め方（リスクの小さい順）
+
+- H1 保存した音声で比べる（オフライン・ライブは変えない）: 10/19・10/26 の音声付きの zip を 3〜4 社の API にかけ、いまの
+  Whisper・第 2 の耳と「アクションの発話を読めた割合」「額の正しさ」「1 発話の時間」「実際の課金額」で比べる。要るもの:
+  音声付きの zip（開発データには音声が無い）・試す API の鍵。
+- H2 営業のあとにまとめて書き起こす: 聞き流した発話の書き起こし（E）と同じ形で推定器の入力に足す。ライブは変えない。
+- H3 ライブで使う: クラウドを先に試し、だめならいまの Whisper に戻す二重の作り。ADR-0063 D1 の見直し（新しい ADR）。
+
+## オーナーに決めてほしいこと
+
+- H1 を始めるか・試す API（推す: OpenAI・Google Chirp 3・Groq・Deepgram）・鍵の用意
+- お客さんへの掲示を含めて、卓の会話をクラウドに送ってよいか
+
+## 出典（第三者のまとめ）
+
+- https://www.cartesia.ai/learn/openai-whisper-api-pricing
+- https://www.memetik.ai/guides/openai-whisper-api-pricing
+- https://costgoat.com/pricing/openai-transcription
+- https://cloud.google.com/speech-to-text
+- https://opentranscription.io/blog/google-cloud-chirp-3-capabilities-architecture-costs-and-com.html
+- https://tokenprice.fyi/models/cloud-speech-to-text-chirp-3
+- https://costperoutput.com/groq-whisper-pricing
+- https://iadecider.com/articles/speech-to-text-reference-2026
+- https://telenow.ai/blog/deepgram-speech-to-text-models-benchmarks-pricing-and-when-to-use-it/
+- https://www.gladia.io/blog/best-whisper-alternatives-2026
