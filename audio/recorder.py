@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import queue
@@ -93,6 +94,10 @@ class Transcript:
     ear: Optional[dict] = None
     ear_text: Optional[str] = None
     ear_wanted: bool = True
+    # 書き起こしを後回しにした発話（`audio.live_transcribe=false`, 2026-10-28）: ロガーには渡さない。`heard_at` は
+    # その場で聞けていた場合の時刻（話し始め + 長さ）、本当に書き起こした時刻は `transcribed_at`
+    deferred: bool = False
+    transcribed_at: Optional[float] = None
 
 
 # 確認型の発話の表示（CLI / audio_check / ログで共通）
@@ -193,6 +198,8 @@ class AudioThread(threading.Thread):
         second_ear=None,
         device_names: Optional[list[str]] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        live_transcribe: bool = True,
+        on_live_event: Optional[Callable[[AudioEvent], None]] = None,
     ) -> None:
         """
         Args:
@@ -217,6 +224,11 @@ class AudioThread(threading.Thread):
                          起動のたびに番号を探す（Bluetooth のつなぎ外しで番号がずれても同じマイク）。どれも
                          見つからなければマイクを開かない（別のマイクで録らない）。空なら `device_id` の番号。
             on_status: 録音の途中でマイクが切れた・開き直せたときに 1 行のお知らせで呼ぶ（CLI の「●」行）。
+            live_transcribe: False なら書き起こしを後回しにする（テスト中, config `audio.live_transcribe`, 2026-10-28）。
+                         プレー中の発話は捕まえた時点で音声を保存し、その場では第 2 の耳だけでブラインド上昇の宣言を
+                         聞き分けて送る。Whisper は裏の作業スレッドが順にかけて書き起こしの行だけを書く（アクションは
+                         ロガーに送らない = 認識の遅れでロガーが待たない）。残りは終了・「ログをまとめる」のときに
+                         `tools/offplay_audio.py` が書き起こす。音声の保存先（`audio_dir`）が要る。
         """
         super().__init__(daemon=True, name="AudioThread")
         self._audio_queue = audio_queue
@@ -239,6 +251,13 @@ class AudioThread(threading.Thread):
         self._capture_start: Optional[float] = None
         self._audio_dir = Path(audio_dir) if audio_dir is not None else None
         self._second_ear = second_ear
+        self._live_transcribe = bool(live_transcribe) or self._audio_dir is None
+        if not live_transcribe and self._audio_dir is None:
+            logger.warning("書き起こしの後回しには音声の保存先が要ります — その場で書き起こします")
+        # 後回しの書き起こしの待ち (発話バイト列, 話し始め, 音声のファイル名)。None は終了の sentinel。
+        self._deferred_queue: "queue.Queue[Optional[tuple[bytes, float, Optional[str]]]]" = queue.Queue()
+        self._deferring = 0
+        self._on_live_event = on_live_event
         # 最後に声（有音ゲートを越える音）が入った時刻。プレー中に長く入らなければ engine がマイクの
         # 電池・受信機を疑って知らせる（ワイヤレスマイクの電池切れでハンドが丸ごと記録されなかった, 2026-09-25）。
         self.last_voice_at: Optional[float] = None
@@ -296,6 +315,17 @@ class AudioThread(threading.Thread):
         return min(starts) if starts else None
 
     @property
+    def live_transcribe(self) -> bool:
+        """その場で書き起こしてロガーに送るか（False = 後回し, 2026-10-28）。"""
+        return self._live_transcribe
+
+    def worker_busy(self) -> int:
+        """作業スレッドが持っている発話の数（その場の分 + 後回しの書き起こしの最中）。終了のあと同じモデルで残りを
+        書き起こす前に、作業スレッドが手を離すのを待つ（`tools/offplay_audio.after_session`）。後回しの行列に残った
+        分は待たない（音声は保存済み = 続きから書き起こす）。"""
+        return self.backlog() + self._deferring
+
+    @property
     def asr_ready(self) -> bool:
         """音声認識モデルを読み込めたか（faster-whisper が無い・読み込みに失敗したら False）。"""
         return bool(getattr(self._transcriber, "ready", True))
@@ -351,6 +381,8 @@ class AudioThread(threading.Thread):
             target=self._inference_loop, daemon=True, name="AudioInference"
         )
         worker.start()
+        if not self._live_transcribe:
+            threading.Thread(target=self._deferred_loop, daemon=True, name="AudioDeferred").start()
 
         try:
             while stream is not None:
@@ -628,6 +660,62 @@ class AudioThread(threading.Thread):
                 self._inferring = 0
                 self._inferring_start = None
 
+    def _deferred_loop(self) -> None:
+        """後回しの書き起こし（`live_transcribe=False`）: 保存した発話を順に Whisper + 第 2 の耳で書き起こし、行だけを
+        書く（ロガーには送らない）。止めるときは手元の 1 件を終えて抜ける（残りは音声から続きを書き起こす）。"""
+        while not self._stop_event.is_set():
+            try:
+                item = self._deferred_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            self._deferring = 1
+            try:
+                self._process_deferred(*item)
+            finally:
+                self._deferring = 0
+
+    def _process_deferred(self, audio_bytes: bytes, utterance_start_ts: float, audio_file: Optional[str]) -> None:
+        try:
+            transcript = self.transcribe_deferred(audio_bytes, utterance_start_ts, audio_file)
+            self._report(transcript)
+        except Exception:
+            logger.exception("後回しの書き起こしに失敗しました（%s）", audio_file)
+
+    def transcribe_deferred(self, audio_bytes: bytes, utterance_start_ts: float,
+                            audio_file: Optional[str]) -> Transcript:
+        """後回しにした 1 発話を書き起こす（何も聞こえなくても行を返す = 書き起こし済みの印）。`heard_at` はその場で
+        聞けていた場合の時刻（話し始め + 長さ）にする: 評価の読み直しが、その時刻に発話を差し込むため。"""
+        audio_sec = len(audio_bytes) / 2 / self._sample_rate
+        transcript = self._recognize(audio_bytes, utterance_start_ts, audio_file, quiet=True)
+        now = time.time()
+        if transcript is None:
+            transcript = Transcript(text="", confidence=None, events=(), audio_sec=audio_sec, infer_sec=0.0,
+                                    utterance_start_ts=utterance_start_ts, heard_at=now, noise=True,
+                                    audio_file=audio_file, no_speech=True)
+        return dataclasses.replace(transcript, heard_at=utterance_start_ts + audio_sec, deferred=True,
+                                   transcribed_at=now)
+
+    def _process_live_ear(self, audio_bytes: bytes, utterance_start_ts: float) -> None:
+        """後回しのとき、その場でやること: 音声を保存し、第 2 の耳（1 発話 0.1 秒ほど）でブラインド上昇の宣言だけを
+        聞き分けてロガーに送り、Whisper は後回しの行列に積む。"""
+        try:
+            audio_file = self._save_audio(audio_bytes, utterance_start_ts)
+            if self._second_ear is not None:
+                from audio.recognizer import blind_up_event
+
+                ear = self._hear_again(audio_bytes)
+                event = blind_up_event((ear or {}).get("text") or "", utterance_start_ts)
+                if event is not None:
+                    logger.info("ブラインド上昇の宣言を聞きました（第 2 の耳「%s」）", (ear or {}).get("text"))
+                    self._audio_queue.put(event)
+                    if self._on_live_event is not None:
+                        self._on_live_event(event)
+            self._deferred_queue.put((audio_bytes, utterance_start_ts, audio_file))
+        except Exception:
+            logger.exception("発話を後回しにできませんでした")
+
     def _process_chunk(
         self, audio_bytes: bytes, utterance_start_ts: Optional[float] = None
     ) -> None:
@@ -636,6 +724,9 @@ class AudioThread(threading.Thread):
         文字になった発話はアクションとして読めなくても INFO で残し、`on_transcript` に渡す
         （実機の音声テストで「何と聞こえたか」を後から追えるように）。
         """
+        if not self._live_transcribe:
+            self._process_live_ear(audio_bytes, utterance_start_ts or time.time())
+            return
         try:
             started = time.time()
             audio_file = self._save_audio(audio_bytes, utterance_start_ts or started)
@@ -654,7 +745,7 @@ class AudioThread(threading.Thread):
         return self._recognize(audio_bytes, utterance_start_ts, None)
 
     def _recognize(self, audio_bytes: bytes, utterance_start_ts: Optional[float],
-                   audio_file: Optional[str]) -> Optional[Transcript]:
+                   audio_file: Optional[str], quiet: bool = False) -> Optional[Transcript]:
         """1 発話を書き起こす（Whisper + 第 2 の耳 + 読み取り）。何も聞こえなければ None。"""
         started = time.time()
         audio_sec = len(audio_bytes) / 2 / self._sample_rate
@@ -670,7 +761,7 @@ class AudioThread(threading.Thread):
         if no_speech:
             # 声が無い音（札を混ぜる音など）は Whisper にかけていない。記録にだけ残す（CLI には出さない）。
             # 第 2 の耳の結果も記録だけ（声の検出が落とした短い語を、あとで数えるため）
-            logger.info("声ではない音 %.1f 秒 — 聞き取りに回さず（VAD）", audio_sec)
+            logger.log(logging.DEBUG if quiet else logging.INFO, "声ではない音 %.1f 秒 — 聞き取りに回さず（VAD）", audio_sec)
             return Transcript(
                 text="", confidence=None, events=(), audio_sec=audio_sec, infer_sec=infer_sec,
                 utterance_start_ts=utterance_start_ts, heard_at=heard_at, noise=True,
@@ -702,7 +793,8 @@ class AudioThread(threading.Thread):
             heard = "雑音（聞き違い）として無視"
         else:
             heard = QUESTION_NOTE if question else describe_events(events)
-        logger.info(
+        logger.log(
+            logging.DEBUG if quiet else logging.INFO,
             "聞き取り: %r (confidence=%s, 推論 %.2f 秒) → %s",
             text, "-" if confidence is None else f"{confidence:.2f}", infer_sec, heard,
         )

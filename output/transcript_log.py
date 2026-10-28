@@ -57,6 +57,10 @@ class TranscriptLog:
             line["ear"] = ear
             line["ear_text"] = getattr(transcript, "ear_text", None)
             line["ear_wanted"] = bool(getattr(transcript, "ear_wanted", True))
+        if getattr(transcript, "deferred", False):
+            # 書き起こしを後回しにした発話（2026-10-28）: heard_at はその場で聞けていた場合の時刻、本当に書き起こした時刻は別に
+            line["deferred"] = True
+            line["transcribed_at"] = getattr(transcript, "transcribed_at", None)
         if extra:
             line.update(extra)
         try:

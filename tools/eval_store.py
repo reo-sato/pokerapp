@@ -219,6 +219,18 @@ def replay_flags(config: dict, events: list, script: Optional[dict] = None) -> d
     }
 
 
+def with_offplay(transcripts: list[dict], offplay: list[dict]) -> list[dict]:
+    """聞き流した（ハンドの外の）発話のうち、ブラインド上昇の宣言だけを読み直しに足す（宣言はハンドの間に言う。ほかの
+    聞き流した発話はいままでどおり推定器の入力にだけ足す, 2026-10-28）。あとで書き起こした行の `heard_at` は書き起こした
+    時刻なので、その場で聞けていた場合の時刻（話し始め + 長さ）に置く。"""
+    from audio.recognizer import is_blind_up
+    from core.offplay import merge_offplay
+
+    rows = [dict(r, heard_at=float(r["utterance_start_ts"]) + float(r.get("audio_sec") or 0.0))
+            for r in offplay if r.get("utterance_start_ts") is not None and is_blind_up(r.get("text") or "")]
+    return merge_offplay(transcripts, rows) if rows else transcripts
+
+
 def replay_session(events: "list | Path", setup: dict, flags: dict, session_id: str,
                    on_action: Optional[Callable[[Any], None]] = None) -> list[dict]:
     """events.jsonl（または読み込んだ入力の列）を再生して、記録（`<sid>.json`）と同じ形のハンドの辞書を返す。
@@ -889,6 +901,7 @@ class SessionReport:
     script: dict = field(default_factory=dict)           # 台本のハンド（tools/test_script.py）を真のアクションにした
     stop: dict = field(default_factory=dict)             # 音声の改善を終える目安（listening_stop_metrics）
     cards_read: dict = field(default_factory=dict)       # ハンドのあいだに手札を 2 枚とも読めた席（hole_cards_read）
+    deferred: int = 0                                    # 後回しで書き起こした発話（audio.live_transcribe=false）
 
     def to_json(self) -> dict:
         return {
@@ -946,6 +959,8 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
         report.note = ("配布の信号（schema 0.9）が無い記録です。在否で決めた配布は再生で違うことがあります"
                        "（起動時に卓に残っていた札・配る前の発話の待ち）")
     transcripts = _read_jsonl(files.path(".transcripts.jsonl"))
+    report.deferred = sum(1 for r in transcripts if r.get("deferred"))
+    transcripts = with_offplay(transcripts, _read_jsonl(files.path(".offplay.jsonl")))
     if transcripts:
         report.reparsed = replay_session(
             reparse_events(events, transcripts), report.setup, report.flags, files.session_id)
@@ -1360,6 +1375,9 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
         if r.note and r.setup is None:
             print(f"  {r.note}")
             continue
+        if r.deferred:
+            print(f"  書き起こしは後回し（{r.deferred} 発話, audio.live_transcribe=false）: 記録と再生には声が入っていません。"
+                  "声を入れた結果は「読み直し」の行を見る")
         if r.sources:
             print("  記録された行の出所: " + " / ".join(f"{k} {v}" for k, v in sorted(r.sources.items())))
         if r.differences:

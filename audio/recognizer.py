@@ -998,11 +998,36 @@ def street_call(text: str) -> Optional[tuple[int, float]]:
     return index, m.start() / max(1, len(norm))
 
 
+# ブラインド上昇の宣言（2026-10-28 オーナー: 時計がレベルを越えたあと、ハンドの最初のアクションまでに宣言があれば
+# そのハンドから上げる。無ければもう 1 ハンドあと）。店舗 10/26 の言い方:「ブラインド上がります。SB800 点、BB1600 点
+# です」「ブラインド上がってます」「次のハンドからブラインが上がります」「ブラインド 500、1000 です」。
+_BLIND_UP = re.compile(
+    r"ブライン(?:ド)?[^。]{0,8}?(?:上|ア)ガ"
+    r"|次ノハンドカラ[^。]{0,4}ブライン"
+    r"|(?:SB|エスビー|スモール)[^0-9。]{0,4}[0-9〇一二三四五六七八九十百千万][^。]{0,10}(?:BB|DB|ビービー|ビッグ)"
+)
+
+
+def is_blind_up(text: str) -> bool:
+    """ブラインド上昇の宣言か（額の読み上げ「ブラインド 800、1600」も含む）。"""
+    norm = _to_katakana(unicodedata.normalize("NFKC", text or "")).strip()
+    return bool(norm) and (_BLIND_UP.search(norm) is not None or _BLIND_ANNOUNCEMENT.match(norm) is not None)
+
+
+def blind_up_event(text: str, utterance_start_ts: Optional[float] = None,
+                   confidence: Optional[float] = None) -> Optional[AudioEvent]:
+    """ブラインド上昇の宣言なら `blind_up` の入力（アクションではない。engine がレベルを上げる時を決める）。"""
+    if not is_blind_up(text):
+        return None
+    return AudioEvent(action="blind_up", amount=0, timestamp=time.time(), raw_text=text, confidence=confidence,
+                      utterance_start_ts=utterance_start_ts)
+
+
 def is_announcement(text: str) -> bool:
     """ディーラーがポットの額・ブラインドを読み上げた発話（アクションではない）。第 2 の耳でも聞き直さない
     （読み上げ集 2026-09-30:「ポット1万2000です。」を第 2 の耳が「一万二千です」と聞いて額にしていた）。"""
     norm = _to_katakana(unicodedata.normalize("NFKC", text)).strip()
-    return "ポット" in norm or _BLIND_ANNOUNCEMENT.match(norm) is not None
+    return "ポット" in norm or _BLIND_ANNOUNCEMENT.match(norm) is not None or _BLIND_UP.search(norm) is not None
 
 
 # 発話全体がこの語だけのときの書き起こしゆれ（店舗の実測 2026-09-27。どれも「チェック」と「コール」の間など、
@@ -1501,8 +1526,9 @@ def _parse_utterance(
         text = alias
     nfkc = unicodedata.normalize("NFKC", text)
     norm = _to_katakana(nfkc)
-    if _BLIND_ANNOUNCEMENT.match(norm.strip()):
-        return []
+    if _BLIND_ANNOUNCEMENT.match(norm.strip()) or _BLIND_UP.search(norm):
+        return [AudioEvent(action="blind_up", amount=0, timestamp=time.time(), raw_text=text, confidence=confidence,
+                           utterance_start_ts=utterance_start_ts)]
     players_left = _find_players_left(nfkc, norm)
     if players_left is not None:
         return _around_players_left(text, nfkc, players_left, confidence, utterance_start_ts)

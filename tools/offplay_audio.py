@@ -8,6 +8,11 @@
 `audio.save_audio` なら音声だけは残す（2026-10-24）。これを書き起こすと、推定器（`tools/estimate.py` の
 `inputs_from_logs`）がその続きの賭けを使える。記録（ライブ）は変えない。
 
+**書き起こしを後回しにしたセッション**（`audio.live_transcribe=false`, 2026-10-28）: プレー中の発話の音声
+`<話し始めの ms>.wav` のうち、`<sid>.transcripts.jsonl` にまだ行の無いものも同じく書き起こし、`transcripts.jsonl` に
+足す（`"deferred": true`、`heard_at` はその場で聞けていた場合の時刻）。後回しのセッションは音声のフォルダの印
+`.deferred` で分かる（その場で書き起こすセッションは、何も聞こえなかった発話に行が無いので、印が無ければ見ない）。
+
 **ふだんは自動**（2026-10-24）: ロガーを `q` で終えたとき（読み込んであるモデルをそのまま使う, `after_session`）と、
 「ログをまとめる」（`tools/pack_logs.py`, `catch_up`）のときに、まだ書き起こしていない音声を書き起こす。どちらも
 途中で止めてよい（次は続きから）。config `audio.transcribe_offplay`（既定 true）で止められる。
@@ -23,6 +28,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import queue
+import re
 import sys
 import threading
 import time
@@ -36,6 +42,61 @@ sys.path.insert(0, str(ROOT))
 from core.offplay import OFFPLAY_PREFIX, OFFPLAY_SUFFIX, merge_offplay, offplay_start, read_rows  # noqa: E402,F401
 
 WORKER_WAIT_SEC = 120.0      # ロガーを終えたとき、聞き取りの作業スレッドが止まるのを待つ上限
+DEFERRED_MARK = ".deferred"  # 書き起こしを後回しにしたセッションの音声のフォルダの印
+_LIVE_WAV = re.compile(r"^(\d{10,})\.wav$")
+
+
+def mark_deferred(audio_dir: Optional[Path], transcripts: Path) -> None:
+    """書き起こしを後回しにするセッションの印（音声のフォルダの `.deferred`）を置き、書き起こしの記録を作っておく
+    （何も書き起こす前に「ログをまとめる」になってもセッションが見つかるように）。"""
+    try:
+        if audio_dir is not None:
+            Path(audio_dir).mkdir(parents=True, exist_ok=True)
+            (Path(audio_dir) / DEFERRED_MARK).touch()
+        Path(transcripts).parent.mkdir(parents=True, exist_ok=True)
+        Path(transcripts).touch()
+    except OSError:
+        pass
+
+
+def _live_start(name: str) -> Optional[float]:
+    m = _LIVE_WAV.match(name)
+    return int(m.group(1)) / 1000.0 if m else None
+
+
+def _deferred(session) -> bool:
+    return any((Path(folder) / DEFERRED_MARK).is_file() for folder in session.audio_dirs)
+
+
+def _deferred_todo(session) -> list[Path]:
+    """後回しのセッションの、まだ書き起こしの行の無いプレー中の発話の音声（話し始めの順）。"""
+    if not _deferred(session):
+        return []
+    done = {r.get("audio_file") for r in read_rows(session.transcripts)}
+    wavs = {p.name: p for folder in session.audio_dirs if Path(folder).is_dir()
+            for p in Path(folder).glob("*.wav") if _live_start(p.name) is not None}
+    return [wavs[n] for n in sorted(wavs) if n not in done]
+
+
+def transcribe_deferred(session, process: Callable[[bytes, float, str], object], *,
+                        log: Callable[[str], None] = print) -> tuple[int, int]:
+    """後回しにした発話を書き起こして `<sid>.transcripts.jsonl` に足す。(書いた行, 失敗) を返す。"""
+    from output.transcript_log import TranscriptLog
+
+    writer = TranscriptLog(session.transcripts)
+    todo = _deferred_todo(session)
+    written = failed = 0
+    for i, path in enumerate(todo, 1):
+        try:
+            transcript = process(_read_wav(path), _live_start(path.name), path.name)
+        except Exception as e:  # noqa: BLE001 — 1 つ読めなくても残りを続ける
+            failed += 1
+            log(f"  [{i}/{len(todo)}] {path.name}: 読めませんでした（{type(e).__name__}: {e}）")
+            continue
+        writer.write(transcript)
+        written += 1
+        log(f"  [{i}/{len(todo)}] {path.name} {getattr(transcript, 'text', '') or '（声なし）'}")
+    return written, failed
 
 
 def _read_wav(path: Path) -> bytes:
@@ -99,6 +160,8 @@ def processor_for(thread) -> Callable[[bytes, float], list]:
         transcript = thread.transcribe_offline(audio_bytes, start)
         return [transcript] if transcript is not None else []
 
+    # 後回しにしたプレー中の発話（`transcripts.jsonl` に書く。何も聞こえなくても行を返す）
+    process.deferred = lambda audio_bytes, start, name: thread.transcribe_deferred(audio_bytes, start, name)
     return process
 
 
@@ -125,11 +188,11 @@ def session_audio(log_dir: Path, session_id: str):
 
 
 def pending(session) -> int:
-    """まだ書き起こしていない `off_*.wav` の数。"""
+    """まだ書き起こしていない音声の数（`off_*.wav` + 後回しにしたプレー中の発話）。"""
     out = session.transcripts.with_name(session.session_id + OFFPLAY_SUFFIX)
     done = {r.get("audio_file") for r in read_rows(out)}
     names = {p.name for folder in session.audio_dirs if folder.is_dir() for p in folder.glob(OFFPLAY_PREFIX + "*.wav")}
-    return len([n for n in names if n not in done and offplay_start(n) is not None])
+    return len([n for n in names if n not in done and offplay_start(n) is not None]) + len(_deferred_todo(session))
 
 
 def enabled(config: dict) -> bool:
@@ -148,15 +211,19 @@ def _run(sessions: list, process: Callable[[bytes, float], list], say: Callable[
         if done % 10 == 0 and done < count:
             say(f"[offplay]   {done}/{count}")
 
+    deferred = getattr(process, "deferred", None)
     try:
         for session in sessions:
+            if deferred is not None:      # 後回しにしたプレー中の発話を先に（評価・推定器の主な入力）
+                n, bad = transcribe_deferred(session, deferred, log=log)
+                total, failed = total + n, failed + bad
             n, bad = transcribe_session(session, process, log=log)
             total, failed = total + n, failed + bad
     except KeyboardInterrupt:
         say(f"[offplay] 途中で止めました（{done}/{count}）。残りは「ログをまとめる」か "
             "python tools/offplay_audio.py のときに続きから書き起こします")
         return total, failed
-    say(f"[offplay] 聞き流した発話 {count} 件を書き起こしました（失敗 {failed}）")
+    say(f"[offplay] 書き起こしていない発話 {count} 件を書き起こしました（失敗 {failed}）")
     return total, failed
 
 
@@ -172,13 +239,13 @@ def after_session(audio_thread, log_dir: Path, session_id: str, config: dict,
         return 0
     # 聞き取りの作業スレッドが残りの発話を片付けて止まるまで待つ（同じモデルを 2 つのスレッドから同時に使わない）
     deadline = clock() + WORKER_WAIT_SEC
-    backlog = getattr(audio_thread, "backlog", None)
+    backlog = getattr(audio_thread, "worker_busy", None) or getattr(audio_thread, "backlog", None)
     while callable(backlog) and backlog() > 0:
         if clock() >= deadline:
             say("[offplay] 聞き取りがまだ終わらないので、聞き流した発話は「ログをまとめる」のときに書き起こします")
             return 0
         sleep(0.2)
-    say(f"[offplay] ハンドの外で聞き流した発話 {count} 件を書き起こします（推定器が使う。Ctrl+C で後回しにできます）")
+    say(f"[offplay] 書き起こしていない発話 {count} 件を書き起こします（推定器・評価が使う。Ctrl+C で後回しにできます）")
     return _run([session], processor_for(audio_thread), say)[0]
 
 
@@ -194,7 +261,7 @@ def catch_up(log_dir: Path, session_ids: list[str], config: dict, say: Callable[
     if not sessions:
         return 0
     count = sum(pending(s) for s in sessions)
-    say(f"[offplay] ハンドの外で聞き流した発話 {count} 件を先に書き起こします（Whisper を読み込みます。"
+    say(f"[offplay] 書き起こしていない発話 {count} 件を先に書き起こします（Whisper を読み込みます。"
         "Ctrl+C で後回しにできます）")
     try:
         process, error = loader(config)
@@ -219,7 +286,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     config = _load_config()
     root = Path(args.root) if args.root else ROOT / ((config.get("session") or {}).get("log_dir") or "logs")
     sessions = [s for s in find_sessions(root, args.session)
-                if any(f.is_dir() and any(f.glob(OFFPLAY_PREFIX + "*.wav")) for f in s.audio_dirs)]
+                if _deferred(s) or any(f.is_dir() and any(f.glob(OFFPLAY_PREFIX + "*.wav")) for f in s.audio_dirs)]
     if not sessions:
         print(f"[offplay] 聞き流した発話の音声（audio/<sid>/{OFFPLAY_PREFIX}*.wav）が {root} にありません"
               "（config の audio.save_audio が true のときだけ保存されます）")
@@ -232,6 +299,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     total = failed = 0
     for session in sessions:
         print(f"[offplay] {session.session_id}")
+        if _deferred(session):        # 書き起こしを後回しにしたプレー中の発話（transcripts.jsonl に足す）
+            n, bad = transcribe_deferred(session, process.deferred)
+            total += n
+            failed += bad
         n, bad = transcribe_session(session, process, limit=args.limit)
         total += n
         failed += bad

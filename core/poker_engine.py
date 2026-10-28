@@ -313,6 +313,28 @@ class PokerkitGameState:
             self._hand_id, seat, " ".join(f"{s}:{n}" for s, n in self.position_map().items()),
         )
 
+    def restart_hand_with_blinds(self, sb: int, bb: int, ante: int) -> None:
+        """いまのハンドを、同じ席・ボタン・持ち点のままブラインド（と BB アンテ）だけ変えて始め直す（アクションは空に
+        戻る）。時計がレベルを越えたあと最初のハンドで、最初のアクションの前にブラインド上昇の宣言があったとき
+        （2026-10-28 オーナー）。呼ぶ側がハンドの入力を流し直す。"""
+        from pokerkit import NoLimitTexasHoldem
+
+        if not self._hand_active or self._state is None:
+            raise RuntimeError("restart_hand_with_blinds called without an active hand")
+        if sb <= 0 or bb <= 0 or sb > bb or ante < 0:
+            raise ValueError(f"Invalid blinds: sb={sb} bb={bb} ante={ante}")
+        self._sb, self._bb = sb, bb
+        self._pending_blinds = None
+        self._bb_ante_on = int(ante) or False
+        self._pending_bb_ante = None
+        self._allin_seats = set()
+        self._state = NoLimitTexasHoldem.create_state(
+            self._automations, False, self._raw_antes(self._hand_start_stacks), (self._sb, self._bb), self._bb,
+            list(self._hand_start_stacks), len(self._order),
+        )
+        self._final_pots = []
+        logger.info("Hand %d restarted (pokerkit) with blinds %d/%d ante %d", self._hand_id, sb, bb, ante)
+
     def restart_hand_with_seats(self, seats: list[int], stacks: dict[int, int]) -> None:
         """いまのハンドを、配られた席を `seats` にして始め直す（同じブラインド。アクションは空に戻る, 2026-10-23）。
 
