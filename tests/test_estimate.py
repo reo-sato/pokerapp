@@ -179,12 +179,13 @@ class TestStoreFixtures:
                 assert r.estimate[0] >= r.default[0], (inp.session_id, r)
 
     def test_the_hallucinated_call_is_recovered(self, results):
-        """7b897671 ハンド 3: リバーのオールインへのコールが幻聴になり、札の離脱でフォールドと記録していた。"""
+        """7b897671 ハンド 3: リバーのオールインへのコールが幻聴になり、札の離脱でフォールドと記録していた。
+        2026-10-28 から既定の読みでも第 2 の耳の短い語で読める（前は既定 10/11 を推定で直していた）。"""
         from tools.estimate import compare_with_truth
 
         inp, estimates = results["7b897671"]
         r = next(r for r in compare_with_truth(estimates, inp.truth) if r.hand_id == 3)
-        assert r.default == (10, 11) and r.estimate == (11, 11) and r.in_nbest
+        assert r.default == (11, 11) and r.estimate == (11, 11) and r.in_nbest
 
     def test_estimate_file(self, results):
         inp, estimates = results["a6ee12e4"]
