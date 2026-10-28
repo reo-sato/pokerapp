@@ -96,6 +96,9 @@ PARAMS: dict[str, float] = {
     "p_button": 0.05,            # ボタンが記録（ライブが回したボタン）と違う（隣の席 = 動かし忘れ・動かしすぎを 4 倍厚く）
     "p_unclosed": 0.01,          # ベッティングのラウンドが閉じないまま（手番の人が残ったまま）ハンドが終わった
     "p_players": 0.05,           # 残り人数の宣言（ヘッズアップ・N プレイヤーズ）が合わない
+    "p_slip": 0.03,              # 制御の語（ショーダウン・ヘッズアップ・ハンド終了・ブラインド上昇）の言い間違い: 捨てる直し。
+                                 # 以降のアクションと矛盾する発話は言い間違いを考える（オーナー 2026-10-28。10/26 ハンド 24 =
+                                 # ターンの「ショーダウン」のあとにリバーのアクション）
     "p_open_fold": 0.005,        # ベットに向き合っていないのに降りた（店舗の真のアクションで 0/171。pokerkit も force_fold が
                                  # 要る。手の事前の −log 2 の代わり。2026-10-06）
     "p_showdown_word": 0.03,     # ショーダウンの声（「ショーダウン」・役の名前）があるのに全員降りて終わった（真のアクションの
@@ -135,6 +138,8 @@ PARAMS: dict[str, float] = {
 
 _WAGER = frozenset({"bet", "raise", "allin"})
 _BETTING = frozenset({"fold", "check", "call", "bet", "raise", "allin"})
+# 言い間違いとして捨てられる制御の語（`p_slip`）
+_SLIP_WORDS = frozenset({"showdown", "heads_up", "players_left", "end_hand", "blind_up"})
 _WORD_SOURCES = frozenset({"engine_prior", "spoken_seat", "spoken_position"})
 _RFID_FOLDS = frozenset({"rfid_departure", "rfid_muck"})
 # engine が額を決めた印（ライブの記録では要確認）。推定の要確認の理由にもする（作業計画の監査 2026-10-01 §4: 推定を
@@ -696,7 +701,12 @@ class SessionEstimator:
         for e in edits:
             if e.kind == "drop":
                 parsed = tuple((x.action, x.raw_text) for x in self._parse_cache.get((e.at, None)) or ())
-                terms.append((f"捨てた語: {e.label}", _log(self._p_phantom(e.at, parsed, int(e.value)))))
+                k = int(e.value)
+                if 0 <= k < len(parsed) and parsed[k][0] in _SLIP_WORDS:
+                    terms.append((f"言い間違い: {e.label}", _log(p["p_slip"])))
+                    flags.append(f"言い間違いとみた「{parsed[k][1]}」")
+                    continue
+                terms.append((f"捨てた語: {e.label}", _log(self._p_phantom(e.at, parsed, k))))
             elif e.kind == "read" and not (e.value or "").strip():
                 terms.append((f"捨てた語: {e.label}", _log(self._p_phantom(e.at))))
         # ライブの門（証拠の語を捨てる規則）: 閉じたまま捨てた語・開けて使った語のどちらにも、その決まりが破れる確率
@@ -1037,6 +1047,9 @@ class SessionEstimator:
         for t in sorted(base_info["tokens"], key=lambda x: x.timestamp):
             k = per_utt.get(t.utterance_start_ts, 0)
             per_utt[t.utterance_start_ts] = k + 1
+            if t.action in _SLIP_WORDS:
+                edits.append(Edit("drop", t.utterance_start_ts, k,
+                                  label=f"「{by_start.get(t.utterance_start_ts, {}).get('text')}」を言い間違いとみる"))
             if t.action not in _BETTING:
                 continue
             betting_times.append(t.utterance_start_ts)

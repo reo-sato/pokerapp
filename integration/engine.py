@@ -660,6 +660,8 @@ class IntegrationThread(threading.Thread):
         self._unread_streak: dict[int, int] = {}   # 席 → 手札 2 枚が続けて読めなかったハンドの数
         # 全員降りたことにして閉じたハンドと、そのあと置かれたボードの札（`_note_board_after_end`）
         self._after_end: Optional[dict] = None
+        # リバーの前に言われた「ショーダウン」（言い間違いかもしれない, `_showdown_was_a_slip`, 2026-10-28）
+        self._pending_showdown: Optional[dict] = None
         # ――― フォールドは札の離脱から ―――
         self._rfid_folds = bool(rfid_folds) and self._rules_aware
         self._fold_absent_sec = float(fold_absent_sec)
@@ -1249,6 +1251,9 @@ class IntegrationThread(threading.Thread):
         if self._rfid_folds and self._hand_open:
             # この発話より前に離れた札を先に反映する（フォールドのあとの人のアクションとして読む）
             self._apply_observations_before(_spoken_at(event), event.timestamp)
+        if (self._pending_showdown is not None and event.action in _BETTING_WORDS and self._hand_open
+                and _spoken_at(event) > self._pending_showdown["t"]):
+            self._showdown_was_a_slip(f"あとから「{event.raw_text}」と言われた")
         try:
             # ハンドの入力として残す（札が戻ったとき・ボタンを直したときに同じ順に流し直す）
             if self._rules_aware and self._hand_open and event.action in _REPLAYABLE_ACTIONS:
@@ -1303,6 +1308,15 @@ class IntegrationThread(threading.Thread):
             return
 
         if action == "showdown":
+            if (self._rules_aware and self._hand_open and not self._betting_over()
+                    and len(self._remaining_seats()) >= 2 and self._foldout_pending is None
+                    and len([c for c in self._board_cards if c != UNKNOWN_CARD]) < 5):
+                # リバーの前の「ショーダウン」: 宣言どおり閉じるが、閉じる前の状態を残す。あとから賭けの語が話されたら
+                # 言い間違いとみて閉じる前に戻す（オーナー 2026-10-28。10/26 ハンド 24。札が出るだけ = ランアウトは
+                # 言い間違いにしない）
+                index = len(self._hand_inputs)
+                self._pending_showdown = {"t": _spoken_at(event), "raw": event.raw_text, "index": index,
+                                          "checkpoint": self._take_checkpoint(index)}
             if self._hand_open:
                 self._showdown_declared = True
             if self._foldout_pending is not None and _spoken_at(event) >= self._foldout_pending["t"]:
@@ -4217,6 +4231,24 @@ class IntegrationThread(threading.Thread):
         self._deal_at = None
         self._deal_detected_at = None
 
+    def _showdown_was_a_slip(self, why: str) -> None:
+        """リバーの前の「ショーダウン」のあとに賭けの語が話された: 言い間違いとみて、閉じる前に戻して流し直す
+        （要確認, オーナー 2026-10-28）。"""
+        pending, self._pending_showdown = self._pending_showdown, None
+        if pending is None:
+            return
+        index = pending["index"]
+        rest = self._hand_inputs[index:]
+        self._hand_inputs = self._hand_inputs[:index]
+        checkpoint = pending["checkpoint"]
+        self._restore_checkpoint(checkpoint)
+        self._replay_inputs(rest)
+        self._hand_needs_review = True
+        self._notice(f"「{pending['raw']}」は言い間違いとみて、閉じたベッティングを戻しました（{why}）— 要確認")
+        if self._on_action:
+            for record in self._current_actions[checkpoint["actions"]:]:
+                self._on_action(record)
+
     def _close_hand_for_next_deal(self, ended_ts: Optional[float] = None,
                                   when: str = "次の手札が配られました") -> None:
         """次の手札が配られた（または終了した）のに確定していないハンドを、確定してから次へ進む。"""
@@ -6452,6 +6484,7 @@ class IntegrationThread(threading.Thread):
         self._seat_setup_warned = False
         self._unread_checked = False
         self._after_end = None
+        self._pending_showdown = None
         self._departures = {}
         self._hand_inputs = []
         self._checkpoints = []
@@ -6751,6 +6784,7 @@ class IntegrationThread(threading.Thread):
         self._hand_auto_started = False
         self._showdown_mucks = []
         self._showdown_declared = False
+        self._pending_showdown = None
         self._showdown_gaps = []
         self._foldout_pending = None
         self._departures = {}
