@@ -789,6 +789,10 @@ class SessionEstimator:
                     flags.append(f"額の聞き違い（{r.street} 席{r.seat}）")
                 if r.reasons & _AMOUNT_READ_REASONS:
                     flags.append(f"額の読み（{r.street} 席{r.seat} {(r.raw or {}).get('amount')}）")
+                if "short_word" in r.reasons:
+                    # Whisper が幻聴・空に書いた発話を第 2 の耳の短い語で読んだ（ライブでも要確認）。言われた語として
+                    # 数えると、ほかの理由の要確認が外れて誤りが見えなくなる（開発データ 65c412b2 ハンド 7, 2026-10-28）
+                    flags.append(f"第 2 の耳の短い語（{r.street} 席{r.seat} {r.action}）")
             else:
                 terms.append((f"言われない {r.action}", _log(miss)))
                 if i != last_fold and "players_left_call" not in r.reasons:     # 「N プレイヤーズ」で言われた
