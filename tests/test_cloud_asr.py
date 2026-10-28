@@ -31,6 +31,7 @@ class TestRequests:
             seen.update(url=url, body=body, headers=headers)
             return {"text": "レイズ 600"}
 
+        monkeypatch.delenv("POKERAPP_OPENAI_API_KEY", raising=False)   # 環境に本物の鍵があっても偽の鍵を使う
         monkeypatch.setenv("OPENAI_API_KEY", "k")
         monkeypatch.setattr(cloud_asr, "_post", post)
         assert cloud_asr.transcribe(PROVIDERS["openai-4o"], b"RIFFxx", "プロンプト") == "レイズ 600"
