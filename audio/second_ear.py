@@ -645,6 +645,10 @@ def _wager_amounts(text: str) -> list[int]:
     return [e.amount for e in parse_actions(text) if e.action in ("bet", "raise", "allin") and e.amount]
 
 
+# 下の桁を埋めるのは、数のあとに続いたアクションの語がこれ以下のとき（10/01 の「2千、コール。」「7千ドップチェック」は 1 つ）
+LOWER_DIGITS_MAX_WORDS_AFTER = 1
+
+
 def fill_lower_digits(events: list, ear: Optional[dict], *,
                       utterance_start_ts: Optional[float] = None) -> Optional[tuple[list, str]]:
     """「千」「万」で終わる数で読んだ賭けがちょうど 1 つの発話で、第 2 の耳がその下の桁まで聞いていれば、それを使う
@@ -665,6 +669,11 @@ def fill_lower_digits(events: list, ear: Optional[dict], *,
     if len(opens) != 1:
         return None
     index, low, high = opens[0]
+    if len(events) - index - 1 >= LOWER_DIGITS_MAX_WORDS_AFTER + 1:
+        # 数のあとにアクションの語が 2 つ以上続く（「2千、コール、チェック」）: 下の桁の聞き違いでは言えない量。Whisper の
+        # 読みのまま（店舗 2026-10-26 2bbd480e ハンド 5: プリフロップの 2000・コール・BB のチェックを第 2 の耳が「二千五百」と
+        # だけ聞き、3 つのアクションが 2500 のベット 1 つになった）
+        return None
     text = agreed_candidate(ear)
     if text is not None:
         amounts = _wager_amounts(text)
