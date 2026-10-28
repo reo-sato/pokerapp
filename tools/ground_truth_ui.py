@@ -1895,8 +1895,11 @@ function renderEdit(){
       ${p.absent ? "" : `<div>${cardHtml(p.hole_cards[0], "", `openPicker('hole',${p.seat},0)`)}${cardHtml(p.hole_cards[1], "", `openPicker('hole',${p.seat},1)`)}</div>
       <button class="sm chip ${p.showed_down?"on":""}" onclick="setShowed(${p.seat})">見せた</button>
       ${g.stackless ? "" : `<label class="small muted stack">持ち点 <input type="number" inputmode="numeric" value="${p.stack_start ?? ""}" placeholder="${p.default_stack > 0 ? p.default_stack : "入れてください"}" onchange="setStack(${p.seat}, this.value)" onkeydown="if(event.key==='Enter'){this.blur()}"></label>`}`}</div>`).join("");
+  // 空席もボタンに選べる = デッドボタン（SB の人が抜けたハンド, 2026-10-28）
+  const deadChoices = g.players.filter(p => p.absent).map(p => p.seat);
   const buttonHtml = `<div class="chips">${seats.map(s => `<button class="chip ${g.button_seat===s?"on":""}" onclick="setButton(${s})">席 ${s}</button>`).join("")}
-      <span class="muted small" style="align-self:center">${g.button_seat !== cap.button_seat ? `記録は席 ${cap.button_seat ?? "—"}（ディーラーがボタンを動かし忘れた）` : "記録どおり。ディーラーがボタンを動かし忘れたときは実際の席を選ぶ（手番の順が変わります）"}</span></div>`;
+      ${deadChoices.map(s => `<button class="chip ${g.button_seat===s?"on":""}" title="空いた席のボタン（デッドボタン）" onclick="setButton(${s})">席 ${s}（空席）</button>`).join("")}
+      <span class="muted small" style="align-self:center">${g.button_seat !== cap.button_seat ? `記録は席 ${cap.button_seat ?? "—"}（ディーラーがボタンを動かし忘れた・デッドボタン）` : "記録どおり。ディーラーがボタンを動かし忘れたときは実際の席を、SB の人が抜けたハンドは空いた席（デッドボタン）を選ぶ（手番の順が変わります）"}</span></div>`;
   const sdw = L.next && L.next.hand_over && L.next.foldout_winner == null ? L.next.showdown_winner : null;
   const winnerHtml = `<div class="chips">${seats.map(s => `<button class="chip ${g.winner_seat===s?"on":""}" onclick="setWinner(${s})">席 ${s}</button>`).join("")}
       <button class="chip ${g.winner_seat==null?"on":""}" onclick="setWinner(null)">未定</button>

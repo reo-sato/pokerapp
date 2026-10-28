@@ -24,7 +24,7 @@ from typing import Any, Optional, Protocol, runtime_checkable
 from core.constants import CHIP_UNIT, STREET_ORDER
 from core.engine_types import LegalContext
 from core.game_state import GameStateManager, PlayerState, Street
-from core.positions import next_button, position_map, seat_order_from_button
+from core.positions import advance_button, next_hand_button, position_map, seat_order_from_button
 
 logger = logging.getLogger(__name__)
 
@@ -89,10 +89,7 @@ class PokerEngine(Protocol):
 
 def _advance_button(playing: list[int], button: Optional[int]) -> int:
     """前のボタンから 1 つ進めたボタン（前のボタンの席が抜けていたら、その次の席, 仕様 FR-05b）。"""
-    if button is None or button in playing:
-        return next_button(playing, button)
-    later = [s for s in playing if s > button]
-    return later[0] if later else playing[0]
+    return advance_button(playing, button)
 
 
 def create_game_state(
@@ -248,14 +245,16 @@ class PokerkitGameState:
             self._pending_bb_ante = None
         self._hand_id += 1
         # ボタンを 1 つ進めてから並びを作る（ボタンの次が SB, 末尾が BTN）。前のボタンの席が
-        # 抜けていたら（バースト・休み）、その次の席にボタンを置く（仕様 FR-05b）。
+        # 抜けていたら（バースト・休み）、その次の席にボタンを置く（仕様 FR-05b）。SB・BB の人が抜けたときは
+        # デッドボタン / ボタンを動かさない（`next_hand_button`, オーナー 2026-10-28）。
         self._prev_button = self._button_seat
-        natural = _advance_button(playing, self._button_seat)
+        self._prev_hand_seats = list(self._hand_seats) if self._hand_id > 1 else []   # 前のハンドがあるときだけ
+        natural = next_hand_button(self._prev_hand_seats, self._button_seat, playing)
         forced = self._forced_button
         self._forced_button = None
         self.last_button_override = None
         self._button_by_hand = False
-        if forced is not None and forced in playing and forced != natural:
+        if forced is not None and forced != natural and (forced in playing or len(playing) >= 3):
             self._button_seat = forced                  # 手動移動（仕様 FR-05g）
             self.last_button_override = (natural, forced)
             self._button_by_hand = True
@@ -357,8 +356,8 @@ class PokerkitGameState:
                 self._stacks[s] = start[s]
             if start[s] <= 0:
                 raise ValueError(f"席{s} の持ち点がありません")
-        if not (self._button_by_hand and self._button_seat in playing):
-            self._button_seat = _advance_button(playing, self._prev_button)
+        if not (self._button_by_hand and (self._button_seat in playing or len(playing) >= 3)):
+            self._button_seat = next_hand_button(getattr(self, "_prev_hand_seats", []), self._prev_button, playing)
         self._hand_seats = playing
         self._order = seat_order_from_button(playing, self._button_seat)
         self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
@@ -918,8 +917,9 @@ class PokerkitGameState:
         return {1: ante} if ante else 0
 
     def set_button(self, seat: int) -> None:
-        """次のハンドのボタンを手で指定する（ディーラーの手違い等の修正, 仕様 FR-05g）。"""
-        if seat not in self._players:
+        """次のハンドのボタンを手で指定する（ディーラーの手違い等の修正, 仕様 FR-05g）。空いた席（1〜9）も指定できる
+        = デッドボタン（3 人以上のとき, 2026-10-28）。"""
+        if seat not in self._players and (isinstance(seat, bool) or not isinstance(seat, int) or not 1 <= seat <= 9):
             raise ValueError(f"Unknown seat: {seat}")
         self._forced_button = seat
 

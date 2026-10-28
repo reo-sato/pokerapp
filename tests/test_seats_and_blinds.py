@@ -147,7 +147,8 @@ class TestEngineButton:
     def test_unknown_seat(self):
         gs = _engine({1: 10000, 2: 10000})
         with pytest.raises(ValueError):
-            gs.set_button(9)
+            gs.set_button(10)
+        gs.set_button(9)                     # 空いた席 = デッドボタン（2026-10-28）
 
 
 class TestEngineBlinds:

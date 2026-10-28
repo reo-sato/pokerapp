@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from core.hand_log import input_board
-from core.positions import position_map
+from core.positions import next_hand_button, position_map
 from core.truth_hand import active_seats, apply_rows, materialize_truth, start_state, with_table
 
 # 手番より先の席を押したときに入れるフォールドの上限（1 周 = 席の数より多くはならない）
@@ -91,14 +91,25 @@ def _end_stacks(hand: dict, gt: Optional[dict]) -> dict[int, int]:
     return out
 
 
-def _next_button(seats: list[int], button: Optional[int]) -> Optional[int]:
-    """前のボタンの次の席（前のボタンの席が抜けていても、その次の席）。"""
+def _next_button(seats: list[int], button: Optional[int], prev_seats: Optional[list[int]] = None) -> Optional[int]:
+    """前のボタンの次の席（前のボタンの席が抜けていても、その次の席）。前のハンドの席（`prev_seats`）があれば、SB・BB の人が
+    抜けたときの店の決まり（デッドボタン / ボタンを動かさない, `core.positions.next_hand_button`, 2026-10-28）で。"""
     if not seats:
         return None
     if button is None:
         return max(seats)
+    if prev_seats:
+        return next_hand_button(prev_seats, button, seats)
     later = [s for s in sorted(seats) if s > button]
     return later[0] if later else min(seats)
+
+
+def _played_seats(hand: dict, gt: Optional[dict]) -> list[int]:
+    """ハンドに配られた席（真のアクションの席があればそれ。空席にした席を除く）。"""
+    absent = {p.get("seat") for p in (gt or {}).get("players") or [] if isinstance(p, dict) and p.get("absent")}
+    table = with_table(hand, (gt or {}).get("players"))
+    return sorted(p["seat"] for p in table.get("players") or []
+                  if isinstance(p, dict) and isinstance(p.get("seat"), int) and p["seat"] not in absent)
 
 
 def skeleton_after(prev: dict, gt: Optional[dict]) -> dict:
@@ -122,7 +133,7 @@ def skeleton_after(prev: dict, gt: Optional[dict]) -> dict:
         "hand_id": prev["hand_id"] + 1,
         "players": [{"seat": s, "name": names.get(s) or f"席{s}", "stack_start": stacks[s]} for s in seats],
         "blinds": prev.get("blinds"),
-        "button_seat": _next_button(seats, button),
+        "button_seat": _next_button(seats, button, _played_seats(prev, gt)),
         "board": [],
     }
     if stackless:
@@ -164,6 +175,18 @@ def carried_seats(by_id: dict[int, dict], gt_repo: Any, session_id: str, hand_id
                          if s not in absent)
         return {"from_hand": hid, "present": present, "absent": absent, "names": names}
     return None
+
+
+def _effective_seats(by_id: dict[int, dict], gt_repo: Any, session_id: str, hand_id: int) -> list[int]:
+    """そのハンドに配られた席: 真のアクションがあればその席、無ければ引き継いだ席（`carried_seats`）を重ねた記録の席。"""
+    gt = gt_repo.get(session_id, hand_id)
+    if gt is not None:
+        return _played_seats(by_id[hand_id], gt.hand)
+    record = {p["seat"] for p in by_id[hand_id].get("players") or [] if isinstance(p, dict) and isinstance(p.get("seat"), int)}
+    carried = carried_seats(by_id, gt_repo, session_id, hand_id)
+    if carried is None:
+        return sorted(record)
+    return sorted((record | set(carried["present"])) - set(carried["absent"]))
 
 
 def _carried_players(base: dict, carried: dict, by_id: dict[int, dict], gt_repo: Any, session_id: str) -> list[dict]:
@@ -215,7 +238,8 @@ def table_hand(log_dir: Path, session_id: str, hand_id: int, gt_repo: Any, corr_
             prev_button = (prev.hand or {}).get("button_seat") if prev is not None else None
             if not isinstance(prev_button, int):
                 prev_button = by_id[latest].get("button_seat")
-            base["button_seat"] = _next_button([p["seat"] for p in base["players"]], prev_button)
+            base["button_seat"] = _next_button([p["seat"] for p in base["players"]], prev_button,
+                                               _effective_seats(by_id, gt_repo, session_id, latest))
     out = {"session_id": session_id, "hand_id": hand_id, "state": state, "base": base,
            "latest_id": latest, "ground_truth": gt.hand if gt is not None else None}
     if captured_seats is not None:
@@ -345,7 +369,7 @@ def seat_view(table: dict, rows: list[dict], button: Optional[int]) -> list[dict
     active = active_seats(gs, mucked)
     stacks = gs.get_stacks()
     seats = sorted(stacks)
-    names = position_map(seats, gs.button_seat) if gs.button_seat in seats else {}
+    names = position_map(seats, gs.button_seat) if gs.button_seat is not None else {}   # 空席ならデッドボタン
     # 持ち点を数えないモード: 持ち点は内部の仮の値なので出さない。オールインした席の出した額も分からない
     allin = gs.allin_seats() if gs.stackless else set()
     return [{"seat": s, "stack": None if gs.stackless else stacks[s],

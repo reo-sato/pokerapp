@@ -82,15 +82,46 @@ def seat_order_from_button(seats: list[int], button_seat: int) -> list[int]:
 
     pokerkit の `create_state` はブラインドを index 0/1 に置き、ボタンは最終 index になる。
     したがって「ボタンの次の席を先頭にした並び」をそのまま渡せばボタン位置が反映される。
-    `button_seat` が `seats` に無ければ末尾の席をボタンとみなす（= 並びは `seats` のまま）。
+    `button_seat` が None なら末尾の席をボタンとみなす（= 並びは `seats` のまま）。`seats` に無い席なら
+    **デッドボタン**（空いた席のボタン, 2026-10-28）: その席番号の次の席から並べる（末尾はボタンではなく CO）。
     """
     ordered = sorted(seats)
     if not ordered:
         return []
-    if button_seat not in ordered:
+    if button_seat is None:
         button_seat = ordered[-1]
+    if button_seat not in ordered:
+        return [s for s in ordered if s > button_seat] + [s for s in ordered if s < button_seat]
     cut = ordered.index(button_seat) + 1
     return ordered[cut:] + ordered[:cut]
+
+
+def advance_button(playing: list[int], button: Optional[int]) -> int:
+    """前のボタンから 1 つ進めたボタン（前のボタンの席が抜けていたら、その次の席, 仕様 FR-05b）。"""
+    ordered = sorted(playing)
+    if button is None or button in ordered:
+        return next_button(ordered, button)
+    later = [s for s in ordered if s > button]
+    return later[0] if later else ordered[0]
+
+
+def next_hand_button(prev_seats: list[int], prev_button: Optional[int], next_seats: list[int]) -> int:
+    """次のハンドのボタン。SB か BB の人が抜けたときだけ、店の決まりで（オーナー 2026-10-28）:
+
+    - **SB の人が抜けた** → 空いた SB の席にボタン（**デッドボタン**）。SB = 前の BB、BB = その次の席。
+    - **BB の人が抜けた** → ボタンは動かさない。SB = 前の SB のまま、BB = 抜けた BB の次の席。
+    - それ以外 → 1 つ進める（`advance_button`）。前のハンドか次のハンドが 2 人（heads-up）なら使わない。
+    返すボタンは `next_seats` に無い席（デッドボタン）のことがある。
+    """
+    nxt = sorted(next_seats)
+    if prev_button is not None and len(prev_seats) >= 3 and len(nxt) >= 3:
+        order = seat_order_from_button(prev_seats, prev_button)
+        sb, bb = order[0], order[1]
+        if sb not in nxt and bb in nxt:
+            return sb
+        if bb not in nxt and sb in nxt and prev_button in nxt:
+            return prev_button
+    return advance_button(nxt, prev_button)
 
 
 def next_button(seats: list[int], button_seat: Optional[int]) -> int:
@@ -129,8 +160,11 @@ def position_names(num_seats: int) -> list[str]:
 
 
 def position_map(seats: list[int], button_seat: int) -> dict[int, str]:
-    """seat → ポジション名（仕様 §6.1 の `position_map`）。"""
+    """seat → ポジション名（仕様 §6.1 の `position_map`）。デッドボタン（`button_seat` が席にいない）のときは、
+    ボタンの席も数えた人数の名前から BTN を除いたもの（BTN の印は誰にも付かない）。"""
     order = seat_order_from_button(seats, button_seat)
+    if button_seat is not None and button_seat not in order and len(order) >= 3:
+        return dict(zip(order, position_names(len(order) + 1)[:-1]))
     return dict(zip(order, position_names(len(order))))
 
 
