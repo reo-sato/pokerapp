@@ -406,6 +406,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     run.add_argument("--limit", type=int)
     run.add_argument("--workers", type=int, default=4)
     run.add_argument("--no-prompt", action="store_true", help="ライブと同じプロンプトを付けない（OpenAI / Groq）")
+    run.add_argument("--prompt", help="ライブと違うプロンプトを付ける（OpenAI / Groq。結果は --out を分けて書く）")
     run.add_argument("--include-no-speech", action="store_true", help="声ではない音（VAD）も送る")
     run.add_argument("--dry-run", action="store_true", help="送らずに件数と課金の目安だけ")
     cmp = sub.add_parser("compare", help="方式ごとに、いまの Whisper と同じ物差しで比べる")
@@ -441,7 +442,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             from core.constants import WHISPER_PROMPT_JA
 
             n, bad = run_jobs(jobs, provider, out_dir, workers=args.workers,
-                              prompt=None if args.no_prompt else WHISPER_PROMPT_JA)
+                              prompt=None if args.no_prompt else (args.prompt or WHISPER_PROMPT_JA))
             print(f"[asr] {n} 発話を書きました（失敗 {bad}）→ {out_dir}")
             return 0 if bad < n or n == 0 else 1
         from tools.eval_store import find_config, find_sessions

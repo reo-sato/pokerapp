@@ -15,6 +15,7 @@
 
 ### Added (クラウドの音声認識と比べる道具 = 台帳 H の H1, 2026-10-28)
 
+- `tools/cloud_asr.py run --prompt <文>`: ライブと違うプロンプトで送る（台帳 H の H1。OpenAI の結果は作業ログ `2026-10-28-cloud-asr-plan.md`）。
 - `tools/cloud_asr.py`: 保存した発話の音声をクラウドの音声認識 API（OpenAI・Groq・Deepgram・Google Chirp 3）に送り（`run`）、
   いまの Whisper と同じ物差し（アクションの読み・額の行・全部正しいハンド・1 発話の時間・課金の目安、第 2 の耳あり / なし）で
   比べる（`compare`）。オフラインの実験で、ライブ・店舗 PC は変えない。
