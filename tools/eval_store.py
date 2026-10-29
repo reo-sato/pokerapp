@@ -191,12 +191,20 @@ def session_setup(record: dict) -> Optional[dict]:
                             if isinstance(p.get("seat"), int) and p.get("stack_start") is not None}
         for h in hands if isinstance(h.get("hand_id"), int)
     }
+    # 持ち点を数えないモードは持ち点で配る席が決まらない → ハンドごとの記録の席（推定器の再生, 店舗 2026-10-29）。
+    # デッドスモール（記録の `dead_sb_seat`）も同じくハンドごとに渡す
+    hand_seats = {str(h["hand_id"]): sorted(p["seat"] for p in h.get("players") or [] if isinstance(p.get("seat"), int))
+                  for h in hands if isinstance(h.get("hand_id"), int)} if stackless else {}
+    hand_dead_sb = {str(h["hand_id"]): int(h["dead_sb_seat"]) for h in hands
+                    if isinstance(h.get("hand_id"), int) and isinstance(h.get("dead_sb_seat"), int)}
     return {
         "players": [players[s] for s in seats],
         "sb": int(blinds.get("sb") or 100), "bb": int(blinds.get("bb") or 200),
         "button_prior": prior, "first_hand_id": first.get("hand_id"),
         "hand_stacks": {k: v for k, v in hand_stacks.items() if v},
         **({"stackless": True} if stackless else {}),
+        **({"hand_seats": {k: v for k, v in hand_seats.items() if v}} if hand_seats else {}),
+        **({"hand_dead_sb": hand_dead_sb} if hand_dead_sb else {}),
     }
 
 

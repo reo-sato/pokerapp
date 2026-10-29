@@ -372,6 +372,29 @@ class TestHandStacks:
                 == {p["seat"]: p["stack_start"] for p in record["hands"][1]["players"]})
 
 
+class TestStacklessSeats:
+    """持ち点を数えないモードは持ち点で配る席が決まらない → ハンドごとの記録の席を推定器に渡す（店舗 2026-10-29: 渡さず
+    休みの席も配っていたので、推定の手番が 1 席ずれ、全部正しいハンドが 0/120）。"""
+
+    def test_the_setup_has_the_dealt_seats_and_the_dead_small_blind(self):
+        record = {"hands": [
+            {"hand_id": 1, "stackless": True, "button_seat": 5, "blinds": {"sb": 200, "bb": 300},
+             "players": [{"seat": s, "stack_start": None} for s in (3, 4, 5, 6, 8)]},
+            {"hand_id": 2, "stackless": True, "button_seat": 5, "dead_sb_seat": 6,
+             "players": [{"seat": s, "stack_start": None} for s in (2, 4, 5, 7, 8)]},
+        ]}
+        setup = eval_store.session_setup(record)
+        assert setup["stackless"] and setup["hand_stacks"] == {}
+        assert setup["hand_seats"] == {"1": [3, 4, 5, 6, 8], "2": [2, 4, 5, 7, 8]}
+        assert setup["hand_dead_sb"] == {"2": 6}
+
+    def test_sessions_with_stacks_are_unchanged(self, tmp_path):
+        _two_hands(tmp_path)
+        record = json.loads((tmp_path / f"{SID}.json").read_text(encoding="utf-8"))
+        setup = eval_store.session_setup(record)
+        assert "hand_seats" not in setup and "hand_dead_sb" not in setup
+
+
 class TestFixtures:
     def _with_truth(self, tmp_path: Path) -> _Table:
         tb = _two_hands(tmp_path)

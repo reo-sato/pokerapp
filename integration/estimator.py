@@ -519,10 +519,13 @@ class SessionEstimator:
         要確認の付かない誤り 2）。"""
         stacks = {int(h): {int(s): int(v) for s, v in seats.items()}
                   for h, seats in (self.setup.get("hand_stacks") or {}).items()}
+        seats = {int(h): [int(s) for s in v] for h, v in (self.setup.get("hand_seats") or {}).items()}
+        dead_sb = {int(h): int(v) for h, v in (self.setup.get("hand_dead_sb") or {}).items()}
         return replay_world(world_events(self.events, self.transcripts, cache=self._parse_cache), self.presence,
                             players=self.players, sb=self.setup["sb"], bb=self.setup["bb"],
                             session_id=self.session_id, button_seat=self.setup.get("button_prior"),
-                            hand_stacks=stacks or None, button_from_deal=True,
+                            hand_stacks=stacks or None, hand_seats=seats or None, hand_dead_sb=dead_sb or None,
+                            button_from_deal=True,
                             stackless=bool(self.setup.get("stackless")), **self.flags)
 
     def windows(self, hands: Optional[list[dict]] = None) -> list[HandWindow]:
@@ -607,6 +610,7 @@ class SessionEstimator:
             # 全席でハンドを組み直していた（店舗 2026-10-19 a64ec4ad: 2 人だけ残った終盤を 8 人で, 推定の 15 ハンドが 1 に）
             stacks.update({p.seat: 0 for p in self.players if p.seat not in stacks})
         blinds = w.base.get("blinds") or {}
+        dealt = sorted(p["seat"] for p in w.base.get("players") or [] if isinstance(p.get("seat"), int))
         records: list = []
         labels: dict[str, str] = {}
         gates: dict[str, tuple[str, float]] = {}
@@ -618,6 +622,10 @@ class SessionEstimator:
             bb_ante=int(blinds.get("bb_ante") or 0), stackless=bool(self.setup.get("stackless")),
             hand_stacks={1: stacks} if stacks else None,
             hand_buttons={1: button} if button is not None else None,
+            # 持ち点を数えないモードは配られた席を席で渡す（持ち点では決まらない, 店舗 2026-10-29）
+            hand_seats={1: dealt} if self.setup.get("stackless") and dealt else None,
+            hand_dead_sb={1: w.base["dead_sb_seat"]} if (isinstance(w.base.get("dead_sb_seat"), int)
+                                                         and button == w.base.get("button_seat")) else None,
             on_action=records.append, word_labels=labels, open_gates=opened, gate_events=gates, **self.flags,
         )
         self.replays += 1

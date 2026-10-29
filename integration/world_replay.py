@@ -315,6 +315,8 @@ def replay_world(
     button_seat: Optional[int] = None,
     hand_stacks: Optional[dict[int, dict[int, int]]] = None,
     hand_buttons: Optional[dict[int, int]] = None,
+    hand_seats: Optional[dict[int, list[int]]] = None,
+    hand_dead_sb: Optional[dict[int, int]] = None,
     on_action: Optional[Callable[[Any], None]] = None,
     close_open_hand: bool = True,
     tick: float = TICK_SEC,
@@ -328,6 +330,9 @@ def replay_world(
     """`world_events` の入力を、ライブのループと同じ順の定期の確認を挟みながら流し、ハンド（記録と同じ形）を返す。
 
     `hand_stacks` / `hand_buttons`: hand_id → そのハンドの持ち点 / ボタン（推定器はハンドを互いに独立に扱う）。
+    `hand_seats`: hand_id → そのハンドに配られた席（ほかの席は休み）。持ち点を数えないモードは持ち点で配る席を決め
+    られないので、記録の席を渡す（店舗 2026-10-29: 渡さないと休みの席も配り、推定の手番がずれて 0/120）。
+    `hand_dead_sb`: hand_id → デッドスモールの席（記録の `dead_sb_seat`）。
     `button_seat`: 1 ハンド目のボタンの 1 つ手前の席（`create_game_state` と同じ）。
     `word_labels`: 渡すと、engine が記録にしなかった声の語の扱い（`IntegrationThread.word_labels`）を入れて返す。
     `open_gates` / `gate_events`: 推定器が開けた門（`IntegrationThread` に渡す）/ 渡すと門が働いた語を入れて返す。
@@ -367,6 +372,16 @@ def replay_world(
                 gs.set_button(button)
             except ValueError:
                 pass
+        seats = (hand_seats or {}).get(hand_id)
+        if seats and hasattr(gs, "sit_out"):
+            for p in players:
+                if p.seat in seats:
+                    gs.sit_in(p.seat)
+                else:
+                    gs.sit_out(p.seat)
+        dead_sb = (hand_dead_sb or {}).get(hand_id)
+        if dead_sb is not None and hasattr(gs, "set_dead_sb"):
+            gs.set_dead_sb(dead_sb)
 
     with tempfile.TemporaryDirectory(prefix="world_replay_") as tmp:
         thread = IntegrationThread(
@@ -387,7 +402,7 @@ def replay_world(
             board_presence=(lambda: presence.board_snapshot(clock.now)) if presence is not None else None,
             speech_pending_since=pending_since,
             speech_backlog=backlog,
-            before_new_hand=before_new_hand if (hand_stacks or hand_buttons) else None,
+            before_new_hand=before_new_hand if (hand_stacks or hand_buttons or hand_seats or hand_dead_sb) else None,
             on_action=on_action,
         )
 
