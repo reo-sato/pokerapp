@@ -685,6 +685,10 @@ class IntegrationThread(threading.Thread):
         self._recap: Optional[dict] = None
         # 最後の 1 人を残すフォールドの確定待ち {"seat", "t"}
         self._foldout_pending: Optional[dict] = None
+        # オールインのランアウト（店舗 2026-10-29 メモ ハンド 121「オールインコールはハンドを前に出してボードをディール」）:
+        # 最後の 1 人を残すフォールドの確定待ちのあいだにボードの札が置かれた = 札を前に出した席。札の離脱で降ろさず、
+        # ボードが揃ったら手札で決める（書き起こしを後回しにするとライブはオールインを知らない）
+        self._runout_seats: set[int] = set()
         self._foldout_winner_left = False
         self._rebuilding = False
         # 直前のアクションの時刻（手番でない席の離脱を「前の人の聞き落とし」とみなしてよいかの判断）
@@ -1430,7 +1434,7 @@ class IntegrationThread(threading.Thread):
         # 射影、legacy（空 legal_context）は従来経路で挙動不変（ADR-0009 §1）。
         if action == "fold" and self._rfid_folds and self._hand_open:
             if self._foldout_pending is not None:
-                self._confirm_foldout()      # 札の離脱で決めた最後のフォールドを、ディーラーの宣言で確定
+                self._confirm_foldout(declared=True)   # 札の離脱で決めた最後のフォールドを、ディーラーの宣言で確定
                 return
             if not self._betting_over():
                 self._handle_fold_word(event)   # 次の手番の人には付けない（オーナー決定）
@@ -2029,7 +2033,7 @@ class IntegrationThread(threading.Thread):
                 if pending is not None and pending["seat"] == seat and mucked is not None:
                     self._emit_seat_signal(self._seat_signal("confirm", seat, now))   # 中央を通過 = 確定
                 continue
-            if seat not in active or seat in self._showdown_mucks:
+            if seat not in active or seat in self._showdown_mucks or seat in self._runout_seats:
                 continue
             if self._before_deal(since if since is not None else mucked):
                 continue                     # 配る前からの不在（前のハンドの札。このハンドの札はまだ見えていない）
@@ -2062,6 +2066,9 @@ class IntegrationThread(threading.Thread):
                         # リバーでベットが無いのに残った人の札も離れた = ショーダウンで札を前に出した
                         self._emit_seat_signal(self._seat_signal("showdown", pending["seat"], now))
                     else:
+                        # 残った人も札を前に出した = オールインのランアウトかもしれない。ボードの札を待つため、確定までの
+                        # 時間をこの離脱から数え直す（ボードが置かれたら `_start_runout`, 店舗 2026-10-29）
+                        pending["t"] = max(pending["t"], since)
                         self._hand_needs_review = True
                         self._notice(f"席{seat} の札も離れました — フォールドかショーダウンか確認してください（要確認）")
 
@@ -2255,7 +2262,7 @@ class IntegrationThread(threading.Thread):
         elif ev.kind == "return":
             self._retract_departure(ev.seat, f"席{ev.seat} の札が戻ったので")
         elif ev.kind == "confirm":
-            self._confirm_foldout()
+            self._confirm_foldout(ev.timestamp)
         elif ev.kind == "showdown" and self._foldout_pending is not None:
             self._showdown_after_foldout(ev.timestamp, "残った人の札も離れた（ショーダウン）ので")
 
@@ -2344,11 +2351,15 @@ class IntegrationThread(threading.Thread):
             if self._apply_pending_spoken_fold(t, f"spoken_fold+implied_before_{target}"):
                 continue                         # 「フォールド」と言われたまま札が残っていた手番の席
             dep = self._departed().get(actor)
-            if dep is not None and dep["t"] < t and actor not in self._showdown_mucks:
+            if (dep is not None and dep["t"] < t and actor not in self._showdown_mucks
+                    and actor not in self._runout_seats):
                 self._fold_departed(actor, ctx)
             else:
                 self._imply_action(actor, ctx, t, f"implied_before_{target}")
         self._resolve_departures()
+        if self._runout_seats and self._hand_open:
+            self._close_betting(t)                   # ランアウトのあいだは賭けが無い
+            self._maybe_finish_hand()
         self._flag_spoken_before_card(target, t)
         if not self._rebuilding:
             self._before_card.append((target, t))   # 直すかどうかは発話の処理のあと（`_fix_spoken_before_card`）
@@ -2710,7 +2721,8 @@ class IntegrationThread(threading.Thread):
         remaining = self._remaining_seats()
         if len(remaining) == 1 and self._foldout_pending is None and self._hand_open:
             folder = max(self._departed().items(), key=lambda item: item[1]["t"], default=(None, {}))
-            self._foldout_pending = {"seat": folder[0], "t": folder[1].get("t", self._clock())}
+            self._foldout_pending = {"seat": folder[0], "t": folder[1].get("t", self._clock()),
+                                     "board": self._board_top()}
             self._foldout_winner_left = False
             self._notice(
                 f"席{folder[0]} の札が離れたので、席{remaining[0]} の勝ちとみます — "
@@ -3325,14 +3337,34 @@ class IntegrationThread(threading.Thread):
                 return seat, since
         return None, 0.0
 
-    def _confirm_foldout(self) -> None:
+    def _confirm_foldout(self, t: Optional[float] = None, declared: bool = False) -> None:
         pending = self._foldout_pending
         if pending is None or self._rebuilding:
+            return
+        if (not declared and self._rfid_folds and self._hand_open and not self._runout_seats
+                and self._board_top() > pending.get("board", self._board_top())
+                and not (self._departures.get(pending["seat"]) or {}).get("muck")):
+            # 確定を待つあいだにボードの札が配られた（片付けの束は外してある）= オールインのランアウト（2026-10-29）
+            self._start_runout(self._clock() if t is None else t)
             return
         self._foldout_pending = None
         remaining = self._remaining_seats()
         if len(remaining) == 1 and self._hand_open:
             self._finalize_hand(remaining[0], winner_source="fold", ended_ts=pending["t"])
+
+    def _start_runout(self, t: float) -> None:
+        """最後の 1 人を残すフォールドとみた札の離脱のあとにボードの札が置かれた = オールインのコールのあとで手札を前に
+        出してボードを配っている（店舗 2026-10-29 メモ ハンド 121）。その離脱を取り消し、残った人と一緒に札を前に出した
+        席として、ボードが揃ったら手札で決める（要確認）。"""
+        seat = self._foldout_pending["seat"]
+        self._runout_seats = set(self._remaining_seats()) | {seat}
+        self._notice(f"席{seat} の札が離れたあともボードが配られたので、オールインのショーダウン（ランアウト）とみます"
+                     "（要確認）")
+        for other in sorted(self._runout_seats - {seat}):
+            if other in self._departures:            # 残った人の札の離脱（札を前に出した）も降りたことにしない
+                self._retract_departure(other, "ボードの札が配られ続けたので")
+        if self._foldout_pending is not None:
+            self._showdown_after_foldout(t, "ボードの札が配られ続けたので")
 
     def _showdown_after_foldout(self, t: float, why: str) -> None:
         """最後のフォールドとみた札の離脱は、ショーダウンで札を前に出したものだった → 取り消し、
@@ -6512,6 +6544,7 @@ class IntegrationThread(threading.Thread):
         self._spoken_fold_raw = {}
         self._foldout_pending = None
         self._foldout_winner_left = False
+        self._runout_seats = set()
         self._last_action_at = self._hand_started_epoch
         self._street_marks = {}
         self._streets_synced = set()
@@ -6804,6 +6837,7 @@ class IntegrationThread(threading.Thread):
         self._pending_showdown = None
         self._showdown_gaps = []
         self._foldout_pending = None
+        self._runout_seats = set()
         self._departures = {}
         self._hand_inputs = []
         self._checkpoints = []
