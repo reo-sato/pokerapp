@@ -124,6 +124,8 @@ class HandSummary:
     # 全員降りたことにして閉じたあと、次の配布までに置かれたボードの札（店舗 2026-10-26: 席の設定の違い・読めない手札で
     # 早く閉じたハンドのフロップ以降）。ライブの勝者・持ち点には使わない。推定器・真のアクションの入力が使う（additive）。
     board_after_end: Optional[list] = None
+    # デッドスモール（BB の人が抜けたあと SB が空いたハンドの、空いた SB の席。BB だけを払う, 2026-10-29。additive）
+    dead_sb_seat: Optional[int] = None
 
     def to_dict(self) -> dict:
         data = {
@@ -156,6 +158,8 @@ class HandSummary:
             data["table_mode"] = self.table_mode
         if self.board_after_end:
             data["board_after_end"] = list(self.board_after_end)
+        if self.dead_sb_seat is not None:
+            data["dead_sb_seat"] = self.dead_sb_seat
         if self.stackless:
             from core.stackless import strip_hand
 

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from core.hand_log import input_board
-from core.positions import next_hand_button, position_map
+from core.positions import next_hand_seating, position_map
 from core.truth_hand import active_seats, apply_rows, materialize_truth, start_state, with_table
 
 # 手番より先の席を押したときに入れるフォールドの上限（1 周 = 席の数より多くはならない）
@@ -91,17 +91,27 @@ def _end_stacks(hand: dict, gt: Optional[dict]) -> dict[int, int]:
     return out
 
 
-def _next_button(seats: list[int], button: Optional[int], prev_seats: Optional[list[int]] = None) -> Optional[int]:
-    """前のボタンの次の席（前のボタンの席が抜けていても、その次の席）。前のハンドの席（`prev_seats`）があれば、SB・BB の人が
-    抜けたときの店の決まり（デッドボタン / ボタンを動かさない, `core.positions.next_hand_button`, 2026-10-28）で。"""
+def _next_seating(seats: list[int], button: Optional[int], prev_seats: Optional[list[int]] = None,
+                  prev_dead_sb: Optional[int] = None) -> tuple[Optional[int], Optional[int]]:
+    """(ボタン, デッドスモールの席)。前のボタンの次の席（前のボタンの席が抜けていても、その次の席）。前のハンドの席
+    （`prev_seats`）があれば、SB・BB の人が抜けたときの店の決まり（デッドボタン / デッドスモール,
+    `core.positions.next_hand_seating`, 2026-10-28・10-29）で。"""
     if not seats:
-        return None
+        return None, None
     if button is None:
-        return max(seats)
+        return max(seats), None
     if prev_seats:
-        return next_hand_button(prev_seats, button, seats)
+        return next_hand_seating(prev_seats, button, seats, prev_dead_sb)
     later = [s for s in sorted(seats) if s > button]
-    return later[0] if later else min(seats)
+    return (later[0] if later else min(seats)), None
+
+
+def _set_seating(base: dict, seating: tuple[Optional[int], Optional[int]]) -> None:
+    base["button_seat"] = seating[0]
+    if seating[1] is not None:
+        base["dead_sb_seat"] = seating[1]
+    else:
+        base.pop("dead_sb_seat", None)
 
 
 def _played_seats(hand: dict, gt: Optional[dict]) -> list[int]:
@@ -133,9 +143,10 @@ def skeleton_after(prev: dict, gt: Optional[dict]) -> dict:
         "hand_id": prev["hand_id"] + 1,
         "players": [{"seat": s, "name": names.get(s) or f"席{s}", "stack_start": stacks[s]} for s in seats],
         "blinds": prev.get("blinds"),
-        "button_seat": _next_button(seats, button, _played_seats(prev, gt)),
         "board": [],
     }
+    prev_dead_sb = prev.get("dead_sb_seat") if button == prev.get("button_seat") else None
+    _set_seating(out, _next_seating(seats, button, _played_seats(prev, gt), prev_dead_sb))
     if stackless:
         out["stackless"] = True
     return out
@@ -238,8 +249,10 @@ def table_hand(log_dir: Path, session_id: str, hand_id: int, gt_repo: Any, corr_
             prev_button = (prev.hand or {}).get("button_seat") if prev is not None else None
             if not isinstance(prev_button, int):
                 prev_button = by_id[latest].get("button_seat")
-            base["button_seat"] = _next_button([p["seat"] for p in base["players"]], prev_button,
-                                               _effective_seats(by_id, gt_repo, session_id, latest))
+            prev_dead_sb = (by_id[latest].get("dead_sb_seat")
+                            if prev_button == by_id[latest].get("button_seat") else None)
+            _set_seating(base, _next_seating([p["seat"] for p in base["players"]], prev_button,
+                                             _effective_seats(by_id, gt_repo, session_id, latest), prev_dead_sb))
     out = {"session_id": session_id, "hand_id": hand_id, "state": state, "base": base,
            "latest_id": latest, "ground_truth": gt.hand if gt is not None else None}
     if captured_seats is not None:

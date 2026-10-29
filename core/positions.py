@@ -105,23 +105,41 @@ def advance_button(playing: list[int], button: Optional[int]) -> int:
     return later[0] if later else ordered[0]
 
 
-def next_hand_button(prev_seats: list[int], prev_button: Optional[int], next_seats: list[int]) -> int:
-    """次のハンドのボタン。SB か BB の人が抜けたときだけ、店の決まりで（オーナー 2026-10-28）:
+def next_hand_seating(prev_seats: list[int], prev_button: Optional[int], next_seats: list[int],
+                      prev_dead_sb: Optional[int] = None) -> tuple[int, Optional[int]]:
+    """次のハンドの (ボタン, デッドスモールの席)。SB か BB の人が抜けたときは店の決まりで（オーナー 2026-10-28・10-29）:
 
     - **SB の人が抜けた** → 空いた SB の席にボタン（**デッドボタン**）。SB = 前の BB、BB = その次の席。
-    - **BB の人が抜けた** → ボタンは動かさない。SB = 前の SB のまま、BB = 抜けた BB の次の席。
-    - それ以外 → 1 つ進める（`advance_button`）。前のハンドか次のハンドが 2 人（heads-up）なら使わない。
-    返すボタンは `next_seats` に無い席（デッドボタン）のことがある。
+    - **BB の人が抜けた**（3 人以上残る）→ BB は抜けた BB の次の席へ進み、**SB は空き**（抜けた BB の席 = デッドスモール。
+      SB は払わない = 「シングルビッグブラインド」）、ボタンは前の SB の席。その次のハンドは空いた SB の席にボタン
+      （`prev_dead_sb` = デッドボタン）。10/29 ハンド 66→67→68: BB の 6 が抜けて、ボタン 5・BB 7（SB なし）→ ボタン 6（空席）・
+      SB 7・BB 1。
+    - **BB の人が抜けて heads-up になる** → ボタンは動かさない（10/29 ハンド 116→117）。
+    - それ以外 → 1 つ進める（`advance_button`）。
+    返すボタンは `next_seats` に無い席（デッドボタン）のことがある。デッドスモールの席は `next_seats` に無い席か None。
     """
     nxt = sorted(next_seats)
-    if prev_button is not None and len(prev_seats) >= 3 and len(nxt) >= 3:
+    if prev_button is None or not prev_seats:
+        return advance_button(nxt, prev_button), None
+    if prev_dead_sb is not None and len(nxt) >= 3 and prev_dead_sb not in nxt:
+        return prev_dead_sb, None
+    if len(prev_seats) >= 3 and prev_dead_sb is None:
         order = seat_order_from_button(prev_seats, prev_button)
         sb, bb = order[0], order[1]
-        if sb not in nxt and bb in nxt:
-            return sb
-        if bb not in nxt and sb in nxt and prev_button in nxt:
-            return prev_button
-    return advance_button(nxt, prev_button)
+        if len(nxt) >= 3:
+            if sb not in nxt and bb in nxt:
+                return sb, None
+            if bb not in nxt and sb in nxt:
+                return sb, bb
+        elif bb not in nxt and prev_button in nxt:
+            return prev_button, None
+    return advance_button(nxt, prev_button), None
+
+
+def next_hand_button(prev_seats: list[int], prev_button: Optional[int], next_seats: list[int],
+                     prev_dead_sb: Optional[int] = None) -> int:
+    """次のハンドのボタン（`next_hand_seating` のボタンだけ）。"""
+    return next_hand_seating(prev_seats, prev_button, next_seats, prev_dead_sb)[0]
 
 
 def next_button(seats: list[int], button_seat: Optional[int]) -> int:
@@ -159,10 +177,13 @@ def position_names(num_seats: int) -> list[str]:
     return ["SB", "BB"] + middle + ["BTN"]
 
 
-def position_map(seats: list[int], button_seat: int) -> dict[int, str]:
+def position_map(seats: list[int], button_seat: int, dead_sb: bool = False) -> dict[int, str]:
     """seat → ポジション名（仕様 §6.1 の `position_map`）。デッドボタン（`button_seat` が席にいない）のときは、
-    ボタンの席も数えた人数の名前から BTN を除いたもの（BTN の印は誰にも付かない）。"""
+    ボタンの席も数えた人数の名前から BTN を除いたもの（BTN の印は誰にも付かない）。デッドスモール（`dead_sb`）の
+    ときは、空いた SB の席も数えた人数の名前から SB を除いたもの（ボタンの次の席が BB）。"""
     order = seat_order_from_button(seats, button_seat)
+    if dead_sb and len(order) >= 3:
+        return dict(zip(order, position_names(len(order) + 1)[1:]))
     if button_seat is not None and button_seat not in order and len(order) >= 3:
         return dict(zip(order, position_names(len(order) + 1)[:-1]))
     return dict(zip(order, position_names(len(order))))

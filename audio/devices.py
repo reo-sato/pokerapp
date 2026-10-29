@@ -63,13 +63,28 @@ def _field(device: Any, key: str) -> Any:
     return device.get(key) if isinstance(device, dict) else getattr(device, key)
 
 
+# MME は名前を 31 文字で切る（「Microphone (USB PnP Audio Devic」）。名前（の一部）の頭が切れた名前の終わりと
+# 重なれば同じマイクとみる（10/29 店舗: 「USB PnP Audio Device」が MME の番号に当たらず、音の来ない DirectSound を選んだ）。
+MME_NAME_LEN = 31
+_MIN_OVERLAP = 6
+
+
+def _name_hits(device_name: str, key: str) -> bool:
+    name = device_name.casefold()
+    if key in name:
+        return True
+    if len(device_name) < MME_NAME_LEN:
+        return False
+    return any(name.endswith(key[:k]) for k in range(len(key) - 1, _MIN_OVERLAP - 1, -1))
+
+
 def choose_device(devices: list, names: list[str]) -> Optional[Any]:
     """名前の優先順に、その名前を含むマイク（大文字・小文字は区別しない）。同じマイクが方式（MME・DirectSound・
     WASAPI・WDM-KS）ごとに並ぶので、16 kHz で開けるもの・若い番号（Windows では MME が先に並ぶ）を選ぶ。
     どの名前も見つからなければ None（別のマイクで録らない）。"""
     for name in names:
         key = name.casefold()
-        hits = [d for d in devices if key in str(_field(d, "name")).casefold()]
+        hits = [d for d in devices if _name_hits(str(_field(d, "name")), key)]
         if hits:
             return min(hits, key=lambda d: (not _field(d, "rate_ok"), int(_field(d, "index"))))
     return None

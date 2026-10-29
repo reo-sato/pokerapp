@@ -6742,6 +6742,7 @@ class IntegrationThread(threading.Thread):
             board_source=self._board_source,
             board_timeline=self._build_board_timeline(),
             button_seat=getattr(gs, "button_seat", None),
+            dead_sb_seat=getattr(gs, "dead_sb_seat", None),
             position_map=dict(self._safe_position_map()),
             players=players_info,
             pot_total=pot_total,

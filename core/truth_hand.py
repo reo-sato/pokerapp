@@ -106,6 +106,9 @@ def start_state(captured: dict, button: Optional[int] = None) -> PokerkitGameSta
     if isinstance(button, int) and not isinstance(button, bool) and (
             any(p.seat == button for p in players) or (len(players) >= 3 and 1 <= button <= 9)):
         gs.set_button(button)                # 空いた席ならデッドボタン（3 人以上, 2026-10-28）
+        dead_sb = captured.get("dead_sb_seat")
+        if button == captured.get("button_seat") and isinstance(dead_sb, int) and not isinstance(dead_sb, bool):
+            gs.set_dead_sb(dead_sb)          # 記録のデッドスモール（SB なし・BB だけ, 2026-10-29）
     gs.new_hand()
     return gs
 

@@ -379,3 +379,28 @@ class TestMicAtStart:
         assert len(tries) == 2                                      # 起動のあとも開き直しを続けた
         assert thread.health["state"] == "error" and thread.health["rdp_audio"]   # 起動時の理由のまま
         assert notes == []                                          # 「切れました」とは知らせない
+
+
+class TestCutOffName:
+    """10/29 店舗: MME は「Microphone (USB PnP Audio Devic」と 31 文字で切る。名前の全部を書いても MME の番号を選ぶ
+    （DirectSound の番号は音が来なかった）。"""
+
+    _HEADSET = [
+        InputDevice(1, "Microphone (USB PnP Audio Devic", "MME", True, True),
+        InputDevice(7, "Microphone (USB PnP Audio Device)", "Windows DirectSound", True, False),
+        InputDevice(15, "Microphone (USB PnP Audio Device)", "Windows WASAPI", False, False),
+    ]
+
+    def test_the_full_name_finds_the_mme_number(self):
+        assert choose_device(self._HEADSET, ["USB PnP Audio Device"]).index == 1
+        assert choose_device(self._HEADSET, ["USB PnP Audio Devic"]).index == 1
+
+    def test_a_short_overlap_is_not_a_match(self):
+        """名前の終わりと 5 文字しか重ならない別のマイクは選ばない。"""
+        devices = [InputDevice(1, "Microphone (Realtek HD Audio Mi", "MME", True, False)]
+        assert choose_device(devices, ["USB PnP Audio Device"]) is None
+        assert choose_device(devices, ["o Mixer"]) is None
+
+    def test_an_uncut_name_needs_the_whole_key(self):
+        devices = [InputDevice(7, "Mic (USB PnP Audio Devic)", "Windows DirectSound", True, False)]
+        assert choose_device(devices, ["USB PnP Audio Device"]) is None

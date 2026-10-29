@@ -24,7 +24,7 @@ from typing import Any, Optional, Protocol, runtime_checkable
 from core.constants import CHIP_UNIT, STREET_ORDER
 from core.engine_types import LegalContext
 from core.game_state import GameStateManager, PlayerState, Street
-from core.positions import advance_button, next_hand_button, position_map, seat_order_from_button
+from core.positions import advance_button, next_hand_seating, position_map, seat_order_from_button
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +185,10 @@ class PokerkitGameState:
         self._posted_ante: int = 0          # いまのハンドで BB の人が払ったアンティ
         # 次のハンドのボタンを手で指定（仕様 FR-05g）。使ったら (通常の進み方の席, 指定した席) を残す。
         self._forced_button: Optional[int] = None
+        # デッドスモール（BB の人が抜けたあとのハンドで SB が空き, `next_hand_seating`, 2026-10-29）: 空いた SB の席。
+        # そのハンドは BB だけを払い、次のハンドのボタンはこの席（デッドボタン）。
+        self._dead_sb: Optional[int] = None
+        self._forced_dead_sb: Optional[int] = None
         # 前のハンドのボタン（このハンドの席を組み直すときに、そこから進め直す）と、このハンドのボタンを手で
         # （か配った順で）直したか
         self._prev_button: Optional[int] = button_seat
@@ -248,18 +252,25 @@ class PokerkitGameState:
         # 抜けていたら（バースト・休み）、その次の席にボタンを置く（仕様 FR-05b）。SB・BB の人が抜けたときは
         # デッドボタン / ボタンを動かさない（`next_hand_button`, オーナー 2026-10-28）。
         self._prev_button = self._button_seat
+        self._prev_dead_sb = self._dead_sb if self._hand_id > 1 else None
         self._prev_hand_seats = list(self._hand_seats) if self._hand_id > 1 else []   # 前のハンドがあるときだけ
-        natural = next_hand_button(self._prev_hand_seats, self._button_seat, playing)
+        natural, dead_sb = next_hand_seating(self._prev_hand_seats, self._button_seat, playing,
+                                             self._dead_sb if self._prev_hand_seats else None)
         forced = self._forced_button
         self._forced_button = None
+        forced_dead_sb, self._forced_dead_sb = self._forced_dead_sb, None
         self.last_button_override = None
         self._button_by_hand = False
         if forced is not None and forced != natural and (forced in playing or len(playing) >= 3):
             self._button_seat = forced                  # 手動移動（仕様 FR-05g）
             self.last_button_override = (natural, forced)
             self._button_by_hand = True
+            dead_sb = None
         else:
             self._button_seat = natural
+        if forced_dead_sb is not None:                  # 真のアクションの入力で決めたデッドスモール
+            dead_sb = forced_dead_sb
+        self._dead_sb = dead_sb if len(playing) >= 3 and (dead_sb is None or dead_sb not in playing) else None
         self._hand_seats = list(playing)
         self._order = seat_order_from_button(playing, self._button_seat)
         self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
@@ -271,7 +282,7 @@ class PokerkitGameState:
         stacks = [self._stacks[s] for s in self._order]
         self._hand_start_stacks = list(stacks)
         self._state = NoLimitTexasHoldem.create_state(
-            self._automations, False, self._raw_antes(stacks), (self._sb, self._bb), self._bb, stacks, len(stacks),
+            self._automations, False, self._raw_antes(stacks), self._blind_tuple(), self._bb, stacks, len(stacks),
         )
         self._hand_active = True
         self._final_pots = []
@@ -297,13 +308,14 @@ class PokerkitGameState:
         start = {s: self._hand_start_stacks[self._seat_to_idx[s]] for s in self._hand_seats}
         self._button_seat = seat
         self._button_by_hand = True                     # 手で・配った順で直したボタン（席を組み直しても保つ）
+        self._dead_sb = None
         self._order = seat_order_from_button(self._hand_seats, seat)
         self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
         self._idx_to_seat = {i: s for i, s in enumerate(self._order)}
         self._hand_start_stacks = [start[s] for s in self._order]
         self._allin_seats = set()
         self._state = NoLimitTexasHoldem.create_state(
-            self._automations, False, self._raw_antes(self._hand_start_stacks), (self._sb, self._bb), self._bb,
+            self._automations, False, self._raw_antes(self._hand_start_stacks), self._blind_tuple(), self._bb,
             list(self._hand_start_stacks), len(self._order),
         )
         self._final_pots = []
@@ -328,7 +340,7 @@ class PokerkitGameState:
         self._pending_bb_ante = None
         self._allin_seats = set()
         self._state = NoLimitTexasHoldem.create_state(
-            self._automations, False, self._raw_antes(self._hand_start_stacks), (self._sb, self._bb), self._bb,
+            self._automations, False, self._raw_antes(self._hand_start_stacks), self._blind_tuple(), self._bb,
             list(self._hand_start_stacks), len(self._order),
         )
         self._final_pots = []
@@ -357,7 +369,9 @@ class PokerkitGameState:
             if start[s] <= 0:
                 raise ValueError(f"席{s} の持ち点がありません")
         if not (self._button_by_hand and (self._button_seat in playing or len(playing) >= 3)):
-            self._button_seat = next_hand_button(getattr(self, "_prev_hand_seats", []), self._prev_button, playing)
+            self._button_seat, dead_sb = next_hand_seating(getattr(self, "_prev_hand_seats", []), self._prev_button,
+                                                           playing, getattr(self, "_prev_dead_sb", None))
+            self._dead_sb = dead_sb if len(playing) >= 3 else None
         self._hand_seats = playing
         self._order = seat_order_from_button(playing, self._button_seat)
         self._seat_to_idx = {s: i for i, s in enumerate(self._order)}
@@ -365,7 +379,7 @@ class PokerkitGameState:
         self._hand_start_stacks = [start[s] for s in self._order]
         self._allin_seats = set()
         self._state = NoLimitTexasHoldem.create_state(
-            self._automations, False, self._raw_antes(self._hand_start_stacks), (self._sb, self._bb), self._bb,
+            self._automations, False, self._raw_antes(self._hand_start_stacks), self._blind_tuple(), self._bb,
             list(self._hand_start_stacks), len(self._order),
         )
         self._final_pots = []
@@ -681,7 +695,7 @@ class PokerkitGameState:
         """seat → ポジション名（BTN/SB/BB/UTG…, 仕様 §6.1）。ボタン未確定なら空。"""
         if self._button_seat is None:
             return {}
-        return position_map(self._hand_seats, self._button_seat)
+        return position_map(self._hand_seats, self._button_seat, dead_sb=self.dead_sb_seat is not None)
 
     def is_hand_active(self) -> bool:
         """ハンドが進行中か（新ハンド前 / `end_hand` 後は False, ISSUE-0028）。
@@ -910,11 +924,28 @@ class PokerkitGameState:
         先に取るので、アンティを持ち点からブラインドを引いた残りまでに減らす, ADR-0071）。`stacks` は pokerkit の並び
         （heads-up は 0 番 = BB、3 人以上は 1 番 = BB）。"""
         ante = self._ante_amount(self._bb_ante_on, self._bb)
+        bb_index = 0 if self._dead_sb is not None and len(stacks) >= 3 else 1
         if ante and stacks:
-            bb_stack = stacks[0] if len(stacks) == 2 else stacks[1]
+            bb_stack = stacks[0] if len(stacks) == 2 else stacks[bb_index]
             ante = min(ante, max(0, bb_stack - self._bb))
         self._posted_ante = ante
-        return {1: ante} if ante else 0
+        return {bb_index: ante} if ante else 0
+
+    def _blind_tuple(self) -> tuple[int, int]:
+        """pokerkit の `raw_blinds_or_straddles`。デッドスモールのハンドは並びの先頭（ボタンの次）が BB で、BB だけを払う
+        （pokerkit は一番大きいブラインドの次の人から始める）。"""
+        if self._dead_sb is not None and len(self._order) >= 3:
+            return (self._bb, 0)
+        return (self._sb, self._bb)
+
+    @property
+    def dead_sb_seat(self) -> Optional[int]:
+        """このハンドのデッドスモール（空いた SB の席）。無ければ None。"""
+        return self._dead_sb if self._hand_seats and len(self._hand_seats) >= 3 else None
+
+    def set_dead_sb(self, seat: Optional[int]) -> None:
+        """次のハンドをデッドスモールで始める（真のアクションの入力・記録の再生で、記録のデッドスモールに合わせる）。"""
+        self._forced_dead_sb = seat
 
     def set_button(self, seat: int) -> None:
         """次のハンドのボタンを手で指定する（ディーラーの手違い等の修正, 仕様 FR-05g）。空いた席（1〜9）も指定できる
