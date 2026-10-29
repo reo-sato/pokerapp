@@ -54,6 +54,14 @@ _HEALTH_LEVEL_FULL_RMS = 8000.0
 # 店舗 2026-10-01: 「Unanticipated host error」のあと閉じたマイクを間を空けずに読み続け、9 分で 3470 万行の警告を
 # ログに書いた（ログが 3.7 GB になり、ログをまとめるのに長い時間がかかった。聞き取りもそのまま止まっていた）。
 _READ_FAILURES_TO_REOPEN = 3
+# ミュート（店舗 2026-10-29: ヘッドセットのミュートのボタンが押されたまま、4 回・計 2 時間近く何も録れていなかった。
+# 「60 秒以上、声が入っていません」は出ていたが、ミュートとは分からなかった）。入力がこの RMS 未満（ミュートは
+# デジタルの 0。口元のヘッドセットの静かなときは 15〜25）のまま `_MUTE_SEC` 続いたらミュートとみて知らせ、
+# ミュートのあいだは `_MUTE_REPEAT_SEC` ごとに繰り返す。
+_MUTE_RMS = 3.0
+_MUTE_SEC = 5.0
+_MUTE_REPEAT_SEC = 30.0
+_MUTED_MESSAGE = "マイクがミュートになっています — ヘッドセットのミュートを外してください"
 _READ_RETRY_SEC = 0.2
 # 開き直すまでの待ち（倍々にして上限まで）と、開けないままのときに知らせる間隔
 _REOPEN_FIRST_SEC = 1.0
@@ -496,6 +504,21 @@ class AudioThread(threading.Thread):
                 logger.warning("まだマイクを開けません（%d 回試しました）", attempts)
         return pa, None
 
+    def _mic_muted(self, muted: bool, at: float) -> None:
+        """ミュートになった / 解けた: 知らせ（CLI の「●」行）・ログ・記録の印（`mic_state`, amount 1 = ミュート / 0 = 解けた）。
+        記録の印で、評価が録れていない時間のハンドを聞き取りの物差しから外せる。"""
+        if muted:
+            logger.warning("マイクがミュートになっています（%s から無音の 0, %s）",
+                           time.strftime("%H:%M:%S", time.localtime(at)), self._device_name)
+            self._status(_MUTED_MESSAGE)
+        else:
+            logger.info("マイクのミュートが解けました（%s）", self._device_name)
+            self._status("マイクのミュートが解けました")
+        try:
+            self._audio_queue.put(AudioEvent(action="mic_state", amount=1 if muted else 0, timestamp=at, raw_text=""))
+        except Exception:  # noqa: BLE001 — 記録の失敗で録音を止めない
+            logger.exception("mic_state event failed")
+
     def _status(self, message: str) -> None:
         if self._on_status is None:
             return
@@ -569,6 +592,8 @@ class AudioThread(threading.Thread):
             self._capture_start = None
 
         failures = 0
+        mute_from: Optional[float] = None
+        muted_noted: Optional[float] = None
         while not self._stop_event.is_set():
             try:
                 data = read_chunk()
@@ -589,8 +614,21 @@ class AudioThread(threading.Thread):
 
             now = time.time()
             rms = _calc_rms(data)
+            if rms < _MUTE_RMS:
+                mute_from = now if mute_from is None else mute_from
+                if muted_noted is None and now - mute_from >= _MUTE_SEC:
+                    muted_noted = now
+                    self._mic_muted(True, mute_from)
+                elif muted_noted is not None and now - muted_noted >= _MUTE_REPEAT_SEC:
+                    muted_noted = now
+                    self._status(_MUTED_MESSAGE)
+            else:
+                mute_from = None
+                if muted_noted is not None:
+                    muted_noted = None
+                    self._mic_muted(False, now)
             self.health = {
-                "state": "running",
+                "state": "muted" if muted_noted is not None else "running",
                 "level": min(1.0, rms / _HEALTH_LEVEL_FULL_RMS),
                 "last_chunk_at": now,
                 "device_name": self._device_name,

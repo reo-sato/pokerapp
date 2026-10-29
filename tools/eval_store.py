@@ -551,18 +551,52 @@ def script_windows(script: dict, marks: list[dict]) -> dict[int, tuple[float, fl
     return out
 
 
+def unrecorded_hands(windows: dict[int, tuple[float, float]], transcripts: list[dict],
+                     events: list) -> tuple[set[int], set[int]]:
+    """声の録れていないハンド: マイクのミュートの印（`mic_state`, 2026-10-29）と重なるハンドと、発話が 1 つも無いハンド
+    （ミュートの印の無い記録 = 10/29 より前・ミュートの検出の前）。返り値 (声の録れていないハンド, うちミュートと重なるもの)。
+    10/29: ヘッドセットのミュートのボタンが押されたまま 4 回・計 2 時間近く録れておらず、聞き取りの物差しが 28% に出た。"""
+    muted: list[tuple[float, float]] = []
+    since: Optional[float] = None
+    for ev in sorted((e for e in events if isinstance(e, AudioEvent) and e.action == "mic_state"),
+                     key=lambda e: e.timestamp):
+        if ev.amount and since is None:
+            since = ev.timestamp
+        elif not ev.amount and since is not None:
+            muted.append((since, ev.timestamp))
+            since = None
+    if since is not None:
+        muted.append((since, float("inf")))
+    starts = [float(r["utterance_start_ts"]) for r in transcripts if r.get("utterance_start_ts") is not None]
+    silent: set[int] = set()
+    by_mute: set[int] = set()
+    for hid, (a, b) in windows.items():
+        if any(s < b and e > a for s, e in muted):
+            by_mute.add(hid)
+        elif not any(a <= t <= b for t in starts):
+            silent.add(hid)
+    return silent | by_mute, by_mute
+
+
 def listening_stop_metrics(gt: dict, hands: list[dict], transcripts: list[dict],
-                           windows: Optional[dict[int, tuple[float, float]]] = None) -> dict:
+                           windows: Optional[dict[int, tuple[float, float]]] = None,
+                           skip: Optional[set[int]] = None, muted: Optional[set[int]] = None) -> dict:
     """音声の改善を終える目安: 真のアクションのある各ハンドで、配る人が言うアクションのうち発話の読みと合った割合と、
     認識に回した発話のうち決まり文句（`is_prompt_echo`）になった割合。ハンドの時間帯は再生したハンド（`hands`）から、
     台本のセッションは台本の画面を押した時刻から（`windows`）。"""
     windows = hand_windows(hands) if windows is None else windows
     per_hand = []
     by_kind: dict[str, list[int]] = {}
+    skipped = 0
+    skipped_muted = 0
     for h in gt.get("hands") or []:
         hid = h.get("hand_id")
         truth = truth_tokens(h)
         if hid not in windows or not truth:
+            continue
+        if skip and hid in skip:
+            skipped += 1                            # 声の録れていないハンド（`unrecorded_hands`）
+            skipped_muted += bool(muted and hid in muted)
             continue
         got = matched_truth(truth, heard_tokens(transcripts, windows[hid]))
         per_hand.append({"hand_id": hid, "actions": len(truth), "read": len(got)})
@@ -578,7 +612,8 @@ def listening_stop_metrics(gt: dict, hands: list[dict], transcripts: list[dict],
     canned_rate = canned / len(texts) if texts else None
     meets = (read_rate is not None and canned_rate is not None
              and read_rate >= STOP_READ_RATE and canned_rate <= STOP_CANNED_RATE)
-    return {"hands": len(per_hand), "actions": actions, "read": read, "read_rate": read_rate,
+    return {"hands": len(per_hand), "skipped": skipped, "skipped_muted": skipped_muted,
+            "actions": actions, "read": read, "read_rate": read_rate,
             "utterances": len(texts), "canned": canned, "canned_rate": canned_rate, "meets": meets,
             "per_hand": per_hand, "by_kind": by_kind}
 
@@ -1139,7 +1174,9 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
                            for h in script.get("hands") or []]},
                 [], transcripts, windows=script_windows(script, marks))
         elif transcripts:
-            report.stop = listening_stop_metrics(report.gt, report.reparsed or report.replayed, transcripts)
+            scored = report.reparsed or report.replayed
+            silent, by_mute = unrecorded_hands(hand_windows(scored), transcripts, events)
+            report.stop = listening_stop_metrics(report.gt, scored, transcripts, skip=silent, muted=by_mute)
     return report
 
 
@@ -1608,6 +1645,9 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                       f"（{_fmt_pct(st['read_rate'])}）が正しく読めた・決まり文句 {st['canned']}/{st['utterances']}"
                       f"（{_fmt_pct(st['canned_rate'])}）。{st['hands']} ハンド"
                       + ("" if st["hands"] >= STOP_MIN_HANDS else f"（{STOP_MIN_HANDS} ハンド未満なので合算に入れない）"))
+                if st.get("skipped"):
+                    print(f"    声の録れていないハンド {st['skipped']} は数えない（うちマイクのミュート "
+                          f"{st.get('skipped_muted', 0)}・ほかは発話が 1 つも無いハンド）")
                 if st.get("by_kind"):
                     print(f"    種類ごと: {format_by_kind(st['by_kind'])}")
         else:

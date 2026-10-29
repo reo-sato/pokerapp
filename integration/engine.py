@@ -257,7 +257,7 @@ _VOICE_SOURCES = frozenset({"spoken_seat", "spoken_position", "engine_prior"})
 # 解釈を決める前に届いても、組み直しを待たなくてよい（ハンドを終わらせない）制御
 _CONTROL_KEEPS_CORRECTION = frozenset({"rename_seat", "set_blinds", "sit_out", "sit_in", "rebuy", "set_button",
                                        "correct_board", "correct_seat", "truth_stacks", "reduce_stack",
-                                       "set_bb_ante", "set_level", "clock", "blind_up"})
+                                       "set_bb_ante", "set_level", "clock", "blind_up", "mic_state"})
 # 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
 # 言葉がこの数だけ聞こえたら、そのオールインを聞き違いとみて外す（店舗 2026-09-27: 自信 0.27 の「オールイン」の
 # あとのチェック 5 回と「2700」がすべて保留になり、全員オールインの 59700 のポットになった）
@@ -708,6 +708,7 @@ class IntegrationThread(threading.Thread):
         # 時計が次のレベルに入ったが、まだ上げていないレベル（2026-10-28 オーナー: 遷移のあと最初に始まるハンドの
         # 最初のアクションまでにブラインド上昇の宣言があればそのハンドから、無ければその次のハンドから）
         self._level_wait: Optional[dict] = None
+        self._mic_muted = False                       # マイクがミュート（`mic_state`, 2026-10-29）
         self._hand_level: Optional[int] = None
         self._live_signature: Optional[tuple] = None     # 最後に書いた進行中のハンド（変わったときだけ書く）
         # このハンドで配った順を見たか（1 ハンドに 1 回）
@@ -1391,6 +1392,11 @@ class IntegrationThread(threading.Thread):
             return
         if action == "blind_up":
             self._handle_blind_up(event)
+            return
+        if action == "mic_state":
+            # マイクのミュート / 解けた（`audio/recorder.py`, 2026-10-29）。記録に残すだけ（評価が録れていない時間を
+            # 分ける）。知らせは録音のスレッドが出す。ゲームの状態は変えない
+            self._mic_muted = bool(event.amount)
             return
         if action == "clock":
             self._handle_clock(event)

@@ -212,7 +212,8 @@ def level_summary(stats: LevelStats, threshold: float) -> list[str]:
     lines = [f"最大 {stats.max_rms:.0f}（発話とみなす目安 {threshold:.0f} 以上）"
              f" / 発話の割合 {stats.voiced_share:.0%}"]
     if stats.max_rms < _NEAR_SILENT_RMS:
-        lines.append("ほぼ無音です。Windows の設定 →「プライバシーとセキュリティ」→「マイク」で"
+        lines.append("ほぼ無音です。ヘッドセットのミュートのボタンを確かめてください。"
+                     "Windows の設定 →「プライバシーとセキュリティ」→「マイク」で"
                      "「デスクトップ アプリがマイクにアクセスできるようにする」をオンに。"
                      "RDP でつないでいるなら音声の設定も確認（docs/troubleshooting.md）。")
     elif stats.max_rms < threshold:

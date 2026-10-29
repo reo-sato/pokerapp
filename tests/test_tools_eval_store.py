@@ -572,6 +572,25 @@ class TestStopRule:
         assert eval_store.matched_truth([("check", 0), ("check", 0), ("wager", 5)],
                                         [("check_around", 0), ("wager", 5)]) == {0, 1, 2}
 
+    def test_hands_without_audio_are_not_counted(self):
+        """10/29: ミュートのボタンが押されたまま録れていなかったハンドは、聞き取りの物差しに数えない（ミュートの印と重なる
+        ハンドと、発話が 1 つも無いハンド）。"""
+        from core.events import AudioEvent
+
+        windows = {1: (0.0, 60.0), 2: (60.0, 120.0), 3: (120.0, 180.0), 4: (180.0, 240.0)}
+        rows = [{"utterance_start_ts": 10.0, "text": "コール"}, {"utterance_start_ts": 130.0, "text": "チェック"},
+                {"utterance_start_ts": 200.0, "text": "チェック"}]
+        events = [AudioEvent(action="mic_state", amount=1, timestamp=170.0, raw_text=""),
+                  AudioEvent(action="mic_state", amount=0, timestamp=190.0, raw_text="")]
+        skip, muted = eval_store.unrecorded_hands(windows, rows, events)
+        assert skip == {2, 3, 4} and muted == {3, 4}       # 2 は発話なし、3・4 はミュートと重なる
+        open_ended = [AudioEvent(action="mic_state", amount=1, timestamp=100.0, raw_text="")]
+        assert eval_store.unrecorded_hands(windows, rows, open_ended) == ({2, 3, 4}, {2, 3, 4})
+        gt = {"hands": [{"hand_id": h, "actions": [{"street": "preflop", "seat": 4, "action": "call", "amount": 200}]}
+                        for h in windows]}
+        m = eval_store.listening_stop_metrics(gt, [], rows, windows=windows, skip=skip, muted=muted)
+        assert (m["hands"], m["skipped"], m["skipped_muted"], m["read"], m["actions"]) == (1, 3, 2, 1, 1)
+
     def test_the_audio_load_counts_lag_kinds_and_words_heard_after_the_hand_closed(self):
         rows = [
             {"utterance_start_ts": self.START + 2, "audio_sec": 1.0, "infer_sec": 1.5, "heard_at": self.START + 4,
