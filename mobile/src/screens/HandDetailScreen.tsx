@@ -7,7 +7,7 @@ import { useAsync } from "../hooks/useAsync";
 import { HandReplay } from "../shared/hand_replay/HandReplay";
 import { buildHandText } from "../shared/hand_replay/handReplayText";
 import { isTestMode } from "../testMode";
-import { BackLink, ErrorView, Loading, ReloadLink, formatResult, styles } from "./common";
+import { BackLink, ErrorView, Loading, ReloadLink, handResult, styles } from "./common";
 import { findOwnRow } from "./MyHandsScreen";
 
 const TEST_MODE = isTestMode();
@@ -77,7 +77,7 @@ export function HandDetailScreen({
         <Text style={[styles.title, { marginBottom: 0 }]}>Hand #{handId}</Text>
         {own ? (
           <Text style={[styles.subtitle, { marginLeft: 10, marginBottom: 0 }]}>
-            自分: 席{own.seat} 収支 {formatResult(own.result)}
+            自分: 席{own.seat} 収支 <Text style={handResult(own).style}>{handResult(own).text}</Text>
           </Text>
         ) : null}
       </View>

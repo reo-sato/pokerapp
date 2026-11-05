@@ -70,3 +70,16 @@ export function ReloadLink(props: { onPress: () => void }): React.JSX.Element {
 export function formatResult(result: number): string {
   return result > 0 ? `+${result}` : `${result}`;
 }
+
+/** ハンドの自分の収支の文と色。オールインに関わって額が分からない席は「all-in」（勝ち 緑・負け 赤, 2026-11-05）。 */
+export function handResult(row: { result?: number | null; allin?: string | null }): {
+  text: string;
+  style: object | undefined;
+} {
+  if (typeof row.result === "number") {
+    return { text: formatResult(row.result), style: row.result >= 0 ? styles.pos : styles.neg };
+  }
+  if (row.allin === "won") return { text: "all-in", style: styles.pos };
+  if (row.allin === "lost") return { text: "all-in", style: styles.neg };
+  return { text: row.allin ? "all-in" : "—", style: undefined };
+}

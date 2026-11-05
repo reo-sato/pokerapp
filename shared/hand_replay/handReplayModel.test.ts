@@ -27,6 +27,7 @@ import {
   preflopPosts,
   reasonLabels,
   recordedAmount,
+  resultLabel,
   seatBadge,
   seatRingLayout,
   shownAmount,
@@ -556,4 +557,13 @@ test("shownBoard: 2 人以上が残ったハンド（ショーダウン・オー
     actions: [...allin.actions, { street: "showdown", seat: 2, action: "fold" }],
   };
   assert.deepEqual(shownBoard(muck), board);
+});
+
+test("resultLabel: 収支は数、オールインで額が分からない席は all-in（勝ち 緑・負け 赤, 2026-11-05）", () => {
+  assert.deepEqual(resultLabel({ result: 1200 }), { text: "+1,200", tone: "pos" });
+  assert.deepEqual(resultLabel({ result: -600 }, true), { text: "-600", tone: "neg" });
+  assert.deepEqual(resultLabel({ result: null, allin: "won" }), { text: "all-in", tone: "pos" });
+  assert.deepEqual(resultLabel({ result: null, allin: "lost" }), { text: "all-in", tone: "neg" });
+  assert.deepEqual(resultLabel({ result: null, allin: "unknown" }), { text: "all-in", tone: "none" });
+  assert.deepEqual(resultLabel({ result: null }), { text: "", tone: "none" });
 });

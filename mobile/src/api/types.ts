@@ -60,7 +60,10 @@ export interface HandPlayer {
   hole_cards_source?: string;
   stack_start: number;
   stack_end: number;
-  result: number;
+  /** 持ち点を数えないモードのオールインに関わった席は null（額が分からない。`allin` を見る）。 */
+  result: number | null;
+  /** 持ち点を数えないモードのオールインに関わった席: won / lost / unknown（hand schema 1.12, 2026-11-05）。 */
+  allin?: "won" | "lost" | "unknown" | null;
   committed?: number;
 }
 

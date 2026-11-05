@@ -11,7 +11,7 @@ pytest.importorskip("pokerkit")
 
 from core.game_state import PlayerState  # noqa: E402
 from core.poker_engine import STACKLESS_STACK, create_game_state  # noqa: E402
-from core.stackless import strip_hand, unknown_amounts  # noqa: E402
+from core.stackless import allin_seats, mark_allin, strip_hand, unknown_amounts  # noqa: E402
 from integration.replay import replay_events  # noqa: E402
 from tools.measure_capture_accuracy import row_correct  # noqa: E402
 from tools.play_hand_text import utterances_to_events  # noqa: E402
@@ -78,6 +78,17 @@ class TestRecord:
         assert all(a["stack_after"] is None and a["pot_after"] is None for a in hand["actions"])
         assert all(p["stack_start"] is None and p["stack_end"] is None and p["result"] is None
                    for p in hand["players"])
+        assert {p["seat"]: p["allin"] for p in hand["players"]} == {1: "won", 2: "lost", 3: "lost"}
+
+    def test_a_seat_that_folded_before_the_allin_keeps_its_result(self, tmp_path):
+        """オールインより前に出しただけで降りた席の収支は分かる（ハンド履歴に「-200」, 2026-11-05）。"""
+        hands = _replay(tmp_path, ["ハンド開始", "レイズ 600", "コール", "フォールド", "オールイン", "コール",
+                                   "シート1 ウィナー"])
+        players = {p["seat"]: p for p in hands[0]["players"]}
+        folded = next(s for s, p in players.items() if p.get("allin") is None)
+        assert players[folded]["result"] == -200 and "allin" not in players[folded]
+        assert sorted(p["allin"] for s, p in players.items() if s != folded) == ["lost", "won"]
+        assert all(p["result"] is None for s, p in players.items() if s != folded)
 
     def test_hand_without_allin_keeps_amounts_pot_and_results(self, tmp_path):
         hands = _replay(tmp_path, ["ハンド開始", "レイズ 600", "コール", "フォールド", "ベット 900", "フォールド"])
@@ -117,6 +128,21 @@ class TestStrip:
                    {"street": "preflop", "action": "call"}, {"street": "flop", "action": "call"}]
         assert [u for u, _ in unknown_amounts(actions)] == [True, False, False, False]
         assert [p for _, p in unknown_amounts(actions)] == [True, True, True, True]
+
+    def test_allin_marks(self):
+        hand = {"winner_seat": 2, "actions": [{"street": "preflop", "seat": 1, "action": "raise", "amount": 600},
+                                              {"street": "preflop", "seat": 2, "action": "allin"},
+                                              {"street": "preflop", "seat": 3, "action": "fold"},
+                                              {"street": "preflop", "seat": 1, "action": "call"}],
+                "players": [{"seat": s, "result": None} for s in (1, 2, 3)]}
+        assert allin_seats(hand) == {1, 2}
+        once = mark_allin(hand)
+        assert {p["seat"]: p.get("allin") for p in once["players"]} == {1: "lost", 2: "won", 3: None}
+        assert mark_allin(once) == once                                  # 冪等
+        hand["winner_source"], hand["winner_seat"] = "undetermined", None
+        assert {p["seat"]: p.get("allin") for p in mark_allin(hand)["players"]} == {1: "unknown", 2: "unknown",
+                                                                                  3: None}
+        assert allin_seats({"actions": [{"seat": 1, "action": "raise"}]}) == set()
 
     def test_truth_style_pot_awards(self):
         data = strip_hand({"actions": [{"street": "preflop", "action": "allin", "amount": 5}],

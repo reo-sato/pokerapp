@@ -31,12 +31,12 @@ import {
   compactActionLabel,
   formatChips,
   formatChipsCompact,
-  formatSignedCompact,
   heardDetails,
   parseCard,
   preflopFoldedSeats,
   preflopPosts,
   seatBadge,
+  resultLabel,
   seatRingLayout,
   shownAmount,
   STREET_LABELS,
@@ -135,7 +135,7 @@ function SeatChip(props: {
   left: number;
 }): React.JSX.Element {
   const { player, isWinner, isSelf, dimmed, badge } = props;
-  const result = player.result;
+  const shown = resultLabel(player, true);
   return (
     <View
       style={[
@@ -159,9 +159,12 @@ function SeatChip(props: {
       ) : (
         <HiddenCards />
       )}
-      {result != null ? (
-        <Text style={[s.seatResult, { color: result >= 0 ? c.pos : c.neg }]} numberOfLines={1}>
-          {formatSignedCompact(result)}
+      {shown.text ? (
+        <Text
+          style={[s.seatResult, shown.tone !== "none" && { color: shown.tone === "pos" ? c.pos : c.neg }]}
+          numberOfLines={1}
+        >
+          {shown.text}
         </Text>
       ) : player.stack_end != null ? (
         <Text style={s.seatResult} numberOfLines={1}>

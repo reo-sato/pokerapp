@@ -120,8 +120,17 @@ class HandNotFoundError(Exception):
 
 def _load_hand_log(log_dir: str | Path, session_id: str) -> dict | None:
     """記録の本体 = logs/{session_id}.json（ライブの記録, 暫定）に推定（logs/{session_id}.estimate.json）を重ねたもの
-    （ADR-0056 D1: live ⊕ estimate ⊕ staff corrections。訂正は呼び出し側が重ねる）。不在・破損は None。"""
-    return load_record(log_dir, session_id)
+    （ADR-0056 D1: live ⊕ estimate ⊕ staff corrections。訂正は呼び出し側が重ねる）。不在・破損は None。
+
+    持ち点を数えないモードのオールインのハンドは、`allin` の印の無い古い記録（2026-11-05 より前）にも読むときに印を
+    付ける（画面が収支の代わりに「all-in」を出す。`core.stackless.mark_allin`）。"""
+    from core.stackless import mark_allin
+
+    record = load_record(log_dir, session_id)
+    for hand in (record or {}).get("hands") or []:
+        if isinstance(hand, dict) and hand.get("stackless"):
+            mark_allin(hand)
+    return record
 
 
 def list_player_sessions(player_id: str, session_repo: SessionRepository,

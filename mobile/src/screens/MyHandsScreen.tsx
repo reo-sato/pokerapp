@@ -4,7 +4,7 @@ import { FlatList, Pressable, Text, View } from "react-native";
 import type { ViewerRepository } from "../api/repository";
 import type { HandSummary, Player, PlayerSessionSummary } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
-import { BackLink, ErrorView, Loading, ReloadLink, formatResult, styles } from "./common";
+import { BackLink, ErrorView, Loading, ReloadLink, handResult, styles } from "./common";
 import { newestHandsFirst } from "../ordering";
 import { shownBoard } from "../shared/hand_replay/handReplayModel";
 
@@ -64,9 +64,7 @@ export function MyHandsScreen({
                 <Text style={styles.cardTitle}>
                   Hand #{item.hand_id}
                   {own ? (
-                    <Text style={own.result >= 0 ? styles.pos : styles.neg}>
-                      {`  ${formatResult(own.result)}`}
-                    </Text>
+                    <Text style={handResult(own).style}>{`  ${handResult(own).text}`}</Text>
                   ) : null}
                 </Text>
                 <Text style={styles.cardMeta}>

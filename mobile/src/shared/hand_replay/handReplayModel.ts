@@ -37,7 +37,12 @@ export interface ReplayPlayer {
   hole_cards?: string[] | null; // null = 不明 (RFID 取りこぼし / prefold)
   stack_start?: number;
   stack_end?: number;
-  result?: number;
+  result?: number | null;
+  /**
+   * 持ち点を数えないモードのオールインに関わった席 (hand schema 1.12): won / lost / unknown (勝者が決まらない)。
+   * 収支 (`result`) は分からないので null。画面は「all-in」を勝ち 緑・負け 赤で出す (2026-11-05)。
+   */
+  allin?: "won" | "lost" | "unknown" | null;
 }
 
 export interface ReplayPot {
@@ -609,6 +614,24 @@ export function formatChipsCompact(n: number): string {
   const k = n / 1000;
   const text = k.toFixed(Math.abs(k) < 100 ? 1 : 0).replace(/\.0$/, "");
   return `${text}k`;
+}
+
+/** 収支の表示の文と色 (pos = 緑 / neg = 赤 / none = 色なし)。数 → 符号付き、オールインに関わって数が分からない席
+ * (`allin`) → 「all-in」(勝ち 緑・負け 赤・分からない 色なし)、どちらも無ければ空 (2026-11-05)。 */
+export function resultLabel(
+  p: { result?: number | null; allin?: string | null },
+  compact: boolean = false,
+): { text: string; tone: "pos" | "neg" | "none" } {
+  if (typeof p.result === "number") {
+    return {
+      text: compact ? formatSignedCompact(p.result) : formatSigned(p.result),
+      tone: p.result >= 0 ? "pos" : "neg",
+    };
+  }
+  if (p.allin === "won") return { text: "all-in", tone: "pos" };
+  if (p.allin === "lost") return { text: "all-in", tone: "neg" };
+  if (p.allin === "unknown") return { text: "all-in", tone: "none" };
+  return { text: "", tone: "none" };
 }
 
 /** 収支の短縮表記 (+8.2k / -600 / ±0)。 */

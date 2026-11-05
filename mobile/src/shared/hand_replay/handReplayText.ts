@@ -11,7 +11,7 @@ import {
   actionLabel,
   buildReplayModel,
   formatChips,
-  formatSigned,
+  resultLabel,
   shownAmount,
   type ReplayHand,
 } from "./handReplayModel";
@@ -38,7 +38,8 @@ export function buildHandText(hand: ReplayHand): string {
     if (p.stack_start != null && p.stack_end != null) {
       line += ` ${formatChips(p.stack_start)}→${formatChips(p.stack_end)}`;
     }
-    if (p.result != null) line += ` (${formatSigned(p.result)})`;
+    const shown = resultLabel(p);
+    if (shown.text) line += ` (${shown.text})`;
     lines.push(line);
   }
 
