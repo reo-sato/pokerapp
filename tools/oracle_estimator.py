@@ -100,7 +100,8 @@ def closeness(truth: dict, hand: Optional[dict]) -> int:
 
 def first_difference(truth: dict, hand: Optional[dict]) -> str:
     """真と記録の最初に違う行（ショーダウンのマックの行は見ない）。勝者・ボードだけ違えばそれを書く。"""
-    from tools.measure_capture_accuracy import _board_matches, board_entered, row_correct
+    from core.ground_truth import truth_winners
+    from tools.measure_capture_accuracy import _board_matches, board_entered, row_correct, winner_matches
 
     t = _strip(truth).get("actions") or []
     h = _strip(hand).get("actions") or []
@@ -116,8 +117,9 @@ def first_difference(truth: dict, hand: Optional[dict]) -> str:
         ha = h[i] if i < len(h) else None
         if ta is None or ha is None or not row_correct(ta, ha):
             return f"{i + 1} 行目: 真 {row(ta)} / 得た {row(ha)}"
-    if truth.get("winner_seat") is not None and truth.get("winner_seat") != (hand or {}).get("winner_seat"):
-        return f"勝者: 真 席{truth.get('winner_seat')} / 得た 席{(hand or {}).get('winner_seat')}"
+    if winner_matches(truth, hand) is False:
+        seats = "・".join(f"席{s}" for s in truth_winners(truth))
+        return f"勝者: 真 {seats} / 得た 席{(hand or {}).get('winner_seat')}"
     if board_entered(truth) and not _board_matches(truth.get("board"), (hand or {}).get("board")):
         return f"ボード: 真 {truth.get('board')} / 得た {(hand or {}).get('board')}"
     return ""

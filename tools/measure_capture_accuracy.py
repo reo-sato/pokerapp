@@ -31,6 +31,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from core.ground_truth import record_winners, truth_winners  # noqa: E402
 from core.hand_correction import HandCorrection, apply_hand_corrections  # noqa: E402
 
 _DEFAULT_THRESHOLD = 0.95
@@ -316,11 +317,7 @@ def measure_hand(
     hole_total = len(gt_hole)
     hole_correct = sum(1 for seat, cards in gt_hole.items() if cap_hole.get(seat) == cards)
 
-    winner_match: bool | None
-    if "winner_seat" in gt_hand and gt_hand.get("winner_seat") is not None:
-        winner_match = gt_hand.get("winner_seat") == (captured_hand or {}).get("winner_seat")
-    else:
-        winner_match = None
+    winner_match = winner_matches(gt_hand, captured_hand)
 
     return HandAccuracy(
         hand_id=int(gt_hand.get("hand_id", -1)),
@@ -334,6 +331,20 @@ def measure_hand(
         hole_correct=hole_correct,
         winner_match=winner_match,
     )
+
+
+def winner_matches(gt_hand: dict, captured_hand: dict | None) -> bool | None:
+    """勝者が合っているか（真のアクションの勝者が未定なら None）。
+
+    チョップ・サイドポットで勝った人が 2 人以上（真のアクションの `winner_seats`, 2026-11-05）なら、記録で額を受けた席
+    （`pot_awards`）の組と比べる。1 人なら従来どおり記録の `winner_seat` と比べる。
+    """
+    gt_winners = truth_winners(gt_hand)
+    if len(gt_winners) > 1:
+        return gt_winners == record_winners(captured_hand or {})
+    if gt_winners:
+        return gt_winners[0] == (captured_hand or {}).get("winner_seat")
+    return None
 
 
 def _without_showdown_rows(hand: dict) -> dict:

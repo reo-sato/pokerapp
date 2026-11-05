@@ -559,3 +559,19 @@ def test_board_is_not_scored_when_everyone_folded():
     shown = dict(folded, actions=folded["actions"][1:] + [{"street": "preflop", "seat": 1, "action": "call",
                                                           "amount": 600}])
     assert board_scored(shown) and not hand_fully_correct(shown, dict(shown, board=[]))
+
+
+def test_winners_of_a_chop_are_compared_with_the_pot_awards():
+    """真のアクションの勝者が 2 人以上（`winner_seats` = チョップ・サイドポット, 2026-11-05）は記録の `pot_awards` と比べる。"""
+    from tools.measure_capture_accuracy import winner_matches
+
+    record = {"winner_seat": 3, "pot_awards": [{"seat": 3, "amount": 4500}, {"seat": 7, "amount": 4500}]}
+    assert winner_matches({"winner_seats": [7, 3]}, record) is True
+    assert winner_matches({"winner_seats": [3, 6]}, record) is False
+    assert winner_matches({"winner_seats": [3, 7]}, {"winner_seat": 3}) is False
+    # 持ち点を数えないモードのオールインは額が無い（core/stackless.py）
+    assert winner_matches({"winner_seats": [3, 7]}, {"pot_awards": [{"seat": 3, "amount": None},
+                                                                     {"seat": 7, "amount": None}]}) is True
+    # 1 人なら従来どおり winner_seat と
+    assert winner_matches({"winner_seat": 3}, record) is True
+    assert winner_matches({}, record) is None

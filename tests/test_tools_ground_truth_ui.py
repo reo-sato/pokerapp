@@ -419,6 +419,30 @@ class TestShowdownWinner:
         holes = {4: ["2c", "3c"], 5: ["2d", "3d"], 6: ["2h", "3h"]}
         r = replay_legal(_hand(1), CHECKDOWN, board=["As", "Ks", "Qs", "Js", "Ts"], holes=holes)
         assert r["next"]["hand_over"] and r["next"]["showdown_winner"] is None
+        # チョップ: 手札で額を受ける席は全部出す（画面は勝者を複数選んで入れる, 2026-11-05）
+        assert r["next"]["showdown_winners"] == [4, 5, 6]
+        assert replay_legal(_hand(1), CHECKDOWN, board=self.BOARD, holes=self.HOLES)["next"]["showdown_winners"] == [5]
+
+    def test_seats_without_entered_cards_use_the_recorded_cards(self):
+        """手札を入れていない席は記録の札で判定する（11/05 ハンド 51: 記録で読めていたチョップが判定されなかった）。"""
+        from tools.ground_truth_ui import _gt_cards
+
+        board, holes = _gt_cards({"board": self.BOARD, "players": [{"seat": 4, "hole_cards": None},
+                                                                   {"seat": 5, "hole_cards": ["Ah", "Ad"]}]})
+        assert board == self.BOARD and holes == {5: ["Ah", "Ad"]}
+        assert _gt_cards({"players": [{"seat": 4, "hole_cards": []}]}) == (None, None)
+
+    def test_a_chop_is_saved_with_the_winners(self, base):
+        """チョップ・サイドポットで勝った人が 2 人以上（メモ「チョップボタンがないな」, 2026-11-05）。"""
+        hand = {"board": self.BOARD, "actions": CHECKDOWN, "players": [], "winner_seats": [6, 5]}
+        status, saved = _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "manual-edit", "hand": hand})
+        assert status == 200 and saved["saved"]["winner_seats"] == [5, 6] and "winner_seat" not in saved["saved"]
+        one = dict(hand, winner_seats=[5])
+        status, saved = _req(base, "PUT", f"/api/sessions/{SID}/hands/1", {"source": "manual-edit", "hand": one})
+        assert status == 200 and saved["saved"]["winner_seat"] == 5 and "winner_seats" not in saved["saved"]
+        for bad in ([5, 5], "5,6", [0, 5], [True, 5]):
+            assert _req(base, "PUT", f"/api/sessions/{SID}/hands/1",
+                        {"source": "manual-edit", "hand": dict(hand, winner_seats=bad)})[0] == 400
 
     def test_the_endpoint_and_the_saved_cards(self, base):
         players = [{"seat": s, "hole_cards": c} for s, c in self.HOLES.items()]
@@ -456,8 +480,9 @@ class TestShowdownWinner:
         """選んである席をもう一度押しても外さない（確かめるつもりで押すと未定になっていた）。未定は専用のボタン。"""
         status, html = _req(base, "GET", "/")
         assert status == 200
-        assert "function setWinner(seat){ S.gt.winner_seat = seat;" in html
-        assert 'onclick="setWinner(null)">未定</button>' in html and "手札で判定: 席" in html
+        assert "else S.gt.winners = [seat];" in html                       # チョップでなければ押した席だけ
+        assert 'onclick="setWinner(null)">未定</button>' in html and "手札で判定: " in html
+        assert 'onclick="toggleChop()"' in html and "winner_seats: g.winners.length > 1" in html
 
 
 class TestNewLoggerSession:

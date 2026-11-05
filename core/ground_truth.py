@@ -77,3 +77,46 @@ def hand_has_needs_review(captured_hand: dict) -> bool:
         if isinstance(action, dict) and bool(action.get("needs_review")):
             return True
     return False
+
+
+def _seat_no(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def truth_winners(gt_hand: dict) -> list[int]:
+    """真のアクションの勝者（席の昇順）。`winner_seats`（チョップ・サイドポットで勝った人が 2 人以上, 2026-11-05）が
+    あればそれ、無ければ `winner_seat` の 1 席。未定なら空。"""
+    seats = gt_hand.get("winner_seats")
+    if isinstance(seats, list):
+        out = sorted({s for s in (_seat_no(v) for v in seats) if s is not None})
+        if out:
+            return out
+    seat = _seat_no(gt_hand.get("winner_seat"))
+    return [seat] if seat is not None else []
+
+
+def record_winners(hand: dict) -> list[int]:
+    """記録のハンドの勝者（席の昇順）: `pot_awards`（チョップ・サイドポット）で額を受けた席。無ければ `winner_seat`。
+    持ち点を数えないモードのオールインのハンドは額が ``None``（`core/stackless.py`）なので、額が無い行も勝者に数える。"""
+    awards = hand.get("pot_awards")
+    seats: set[int] = set()
+    if isinstance(awards, dict):
+        pairs = list(awards.items())
+    elif isinstance(awards, list):
+        pairs = [(a.get("seat"), a.get("amount")) for a in awards if isinstance(a, dict)]
+    else:
+        pairs = []
+    for key, amount in pairs:
+        seat = _seat_no(key)
+        if seat is not None and (amount is None or (isinstance(amount, int) and amount > 0)):
+            seats.add(seat)
+    if seats:
+        return sorted(seats)
+    seat = _seat_no(hand.get("winner_seat"))
+    return [seat] if seat is not None else []

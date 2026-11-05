@@ -438,6 +438,8 @@ TABLE_PAGE = r"""<!doctype html>
  .seat .foot { display:flex; justify-content:space-between; align-items:center; margin-top:3px; }
  .seat .foot a { font-size:11px; color:var(--muted); cursor:pointer; }
  .win { background:#1f3a2a; border-color:#2ea043; padding:2px 10px; font-size:12px; }
+ .chopbtn { padding:4px 10px; font-size:12px; }
+ .chopbtn.on { background:#1f3a2a; border-color:#2ea043; }
  .side { display:flex; flex-direction:column; gap:10px; }
  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:8px 10px; }
  .rows { max-height:46vh; overflow-y:auto; font-size:13px; font-variant-numeric:tabular-nums; }
@@ -473,7 +475,7 @@ TABLE_PAGE = r"""<!doctype html>
  </div>
 </div>
 <script>
-const T = {sid:null, hid:null, data:null, rows:[], button:null, absent:new Set(), winner:null, notes:"", excluded:false,
+const T = {sid:null, hid:null, data:null, rows:[], button:null, absent:new Set(), winners:[], chop:false, notes:"", excluded:false,
            legal:null, typing:null, started:null, uiSeats:[], capSeats:null, savedJson:"", saveTimer:null, busy:false,
            history:[], notice:null, flashMsg:null, flashAt:0};
 const $ = id => document.getElementById(id);
@@ -490,7 +492,7 @@ async function api(path, opt){
 }
 function draftKey(){ return `table_draft_${T.sid}_${T.hid}`; }
 function saveDraft(){ try { localStorage.setItem(draftKey(), JSON.stringify({rows:T.rows, button:T.button, absent:[...T.absent],
-  winner:T.winner, notes:T.notes, excluded:T.excluded, started:T.started})); } catch (e) {} }
+  winners:T.winners, notes:T.notes, excluded:T.excluded, started:T.started})); } catch (e) {} }
 function loadDraft(){ try { return JSON.parse(localStorage.getItem(draftKey()) || "null"); } catch (e) { return null; } }
 function dropDraft(){ try { localStorage.removeItem(draftKey()); } catch (e) {} }
 
@@ -527,7 +529,11 @@ async function openHand(hid){
     if (!T.uiSeats.some(u => u.seat === p.seat)) T.uiSeats.push({seat:p.seat, name:p.name || `席${p.seat}`, stack:p.stack_start});
   }
   fillSeats();
-  T.winner = src.winner_seat ?? src.winner ?? null;
+  // 勝った席: チョップ・サイドポットは 2 席以上（winner_seats, 2026-11-05）
+  T.winners = Array.isArray(src.winner_seats) && src.winner_seats.length ? [...src.winner_seats]
+    : Array.isArray(src.winners) ? [...src.winners]
+    : (src.winner_seat ?? src.winner) != null ? [src.winner_seat ?? src.winner] : [];
+  T.chop = T.winners.length > 1;
   T.notes = src.notes || ""; T.excluded = !!src.excluded; T.started = (d && d.started) || null;
   $("notes").value = T.notes; $("excluded").checked = T.excluded;
   if (gt) T.savedJson = "loaded";
@@ -558,9 +564,11 @@ async function relegal(save = true, checkLast = false){
     if (rejected && T.history.length && !T.notice) T.history.pop();   // 何も変わっていない（戻す先を増やさない）
     T.rows = (r.rows || []).map(x => ({seat:x.seat, action:x.action, amount:x.amount || 0, auto:!!x.auto}));
     const n = r.next || {};
-    if (n.hand_over && n.foldout_winner != null) T.winner = n.foldout_winner;
-    else if (n.hand_over && T.winner == null && n.showdown_winner != null) T.winner = n.showdown_winner;
-    else if (!n.hand_over) T.winner = null;
+    if (n.hand_over && n.foldout_winner != null) { T.winners = [n.foldout_winner]; T.chop = false; }
+    else if (n.hand_over && !T.winners.length && (n.showdown_winners || []).length) {
+      T.winners = [...n.showdown_winners]; T.chop = T.winners.length > 1;   // 手札で額を受ける席（チョップ・サイドポットは全部）
+    }
+    else if (!n.hand_over) { T.winners = []; T.chop = false; }
   } catch (e) { flash(e.message); }
   render();
   if (rejected) flash(`${rejected.message} — 入れませんでした`);
@@ -570,7 +578,7 @@ async function relegal(save = true, checkLast = false){
 }
 // ↶ 戻す の戻り先（入れた行・勝者・ボタン）。押したアクション・ボタン・全部消す・合わない行を外すたびに残す
 function snap(){
-  T.history.push({rows:T.rows.map(r => ({...r})), winner:T.winner, button:T.button});
+  T.history.push({rows:T.rows.map(r => ({...r})), winners:[...T.winners], chop:T.chop, button:T.button});
   if (T.history.length > 100) T.history.shift();
 }
 function normRows(){
@@ -584,7 +592,8 @@ function normRows(){
 function payload(){
   const h = {board:(T.data.base.board || []), actions:normRows(), players:playersPayload(), button_seat:T.button,
              notes:T.notes || "", blind:true};
-  if (T.winner != null) h.winner_seat = T.winner;
+  if (T.winners.length === 1) h.winner_seat = T.winners[0];
+  else if (T.winners.length > 1) h.winner_seats = [...T.winners];
   if (T.excluded) h.excluded = true;
   return h;
 }
@@ -667,13 +676,13 @@ function confirmBet(){
 function undo(){
   if (T.typing) { T.typing = null; render(); return; }
   const h = T.history.pop();
-  if (h) { T.rows = h.rows; T.winner = h.winner; T.button = h.button; relegal(); return; }
+  if (h) { T.rows = h.rows; T.winners = h.winners || []; T.chop = !!h.chop; T.button = h.button; relegal(); return; }
   if (!T.rows.length) return;
   T.rows.pop();
   while (T.rows.length && T.rows[T.rows.length - 1].auto) T.rows.pop();
-  T.winner = null; relegal();
+  T.winners = []; relegal();
 }
-function clearAll(){ if (!T.rows.length) return; snap(); T.rows = []; T.winner = null; relegal(); }
+function clearAll(){ if (!T.rows.length) return; snap(); T.rows = []; T.winners = []; T.chop = false; relegal(); }
 function setButton(seat){ if (seat === T.button) return; snap(); T.button = seat; markStart(); relegal(); }
 function toggleAbsent(seat){
   const sitIn = T.absent.has(seat);
@@ -691,7 +700,18 @@ function toggleAbsent(seat){
       .catch(e => setSaved("ロガーに席を送れません: " + e.message, true));
   }
 }
-function setWinner(seat){ if (seat !== T.winner) snap(); T.winner = seat; markStart(); render(); scheduleSave(); }
+function setWinner(seat){
+  snap();
+  if (T.chop) T.winners = T.winners.includes(seat) ? T.winners.filter(s => s !== seat) : [...T.winners, seat].sort((a, b) => a - b);
+  else T.winners = [seat];
+  markStart(); render(); scheduleSave();
+}
+// チョップ・サイドポット: 「勝ち」を押すたびに勝った席を足す / 外す（2 人以上が額を受けたハンド, 2026-11-05）
+function toggleChop(){
+  snap(); T.chop = !T.chop;
+  if (!T.chop && T.winners.length > 1) T.winners = T.winners.slice(0, 1);
+  render(); scheduleSave();
+}
 function setNotes(v){ T.notes = v; markStart(); scheduleSave(); }
 function setExcluded(v){ T.excluded = v; markStart(); scheduleSave(); }
 async function go(delta){ await saveNow(); await openHand(T.hid + delta); }
@@ -729,7 +749,7 @@ function render(){
     const betting = can && !n.hand_over;
     const typing = T.typing && T.typing.seat === p.seat;
     const showWin = !absent && n.hand_over && info.active;
-    return `<div class="seat ${isActor ? "actor" : ""} ${out ? "out" : ""} ${absent ? "absent" : ""} ${T.winner === p.seat ? "winner" : ""}" style="left:${x}%;top:${y}%">
+    return `<div class="seat ${isActor ? "actor" : ""} ${out ? "out" : ""} ${absent ? "absent" : ""} ${T.winners.includes(p.seat) ? "winner" : ""}" style="left:${x}%;top:${y}%">
       <div class="sh"><b>席${p.seat}</b><span class="nm">${esc(p.name || "")}</span><span class="pos">${esc(info.position || "")}</span>
         <button class="dbtn ${T.button === p.seat ? "on" : ""}" title="ボタンをこの席に" onclick="setButton(${p.seat})">D</button></div>
       <div class="st">${absent ? "空席" : stackless ? (info.committed ? "出した " + fmt(info.committed) : "") : `持ち点 ${fmt(info.stack)}${info.committed ? " ・ 出した " + fmt(info.committed) : ""}`}</div>
@@ -742,15 +762,16 @@ function render(){
         <button class="ai" ${betting ? "" : "disabled"} onclick="act(${p.seat},'allin')">AI</button></div>`}
       ${absent ? `<button class="seatin" onclick="toggleAbsent(${p.seat})">＋ この席に入れる</button>` : ""}
       <div class="foot">${absent ? "<span></span>" : `<a onclick="toggleAbsent(${p.seat})">空席にする</a>`}
-        ${showWin ? `<button class="win" onclick="setWinner(${p.seat})">${T.winner === p.seat ? "✓ 勝ち" : "勝ち"}</button>` : ""}</div>
+        ${showWin ? `<button class="win" onclick="setWinner(${p.seat})">${T.winners.includes(p.seat) ? "✓ 勝ち" : "勝ち"}</button>` : ""}</div>
     </div>`;
   }).join("");
   const board = (T.data.base.board || []);
   const slots = [0,1,2,3,4].map(i => board[i] ? card(board[i]) : "").join("");
   let msg = "";
   if (err) msg = `<div class="msg bad">${err.index + 1} 行目から反映できません: ${esc(err.message)}（席のボタンを押すとこの行から入れ直します・↶ 戻す）</div>`;
-  else if (n.hand_over && T.winner == null) msg = `<div class="msg">ショーダウン: 勝った席の「勝ち」を押してください（見せずに降りた人は F）</div>`;
-  else if (n.hand_over) msg = `<div class="msg" style="color:var(--ok)">勝ち: 席${T.winner}　→ <kbd>Enter</kbd> で次のハンド</div>`;
+  else if (n.hand_over && !T.winners.length) msg = `<div class="msg">ショーダウン: 勝った席の「勝ち」を押してください（見せずに降りた人は F）</div>`;
+  else if (n.hand_over) msg = `<div class="msg" style="color:var(--ok)">勝ち: ${T.winners.map(s => "席" + s).join("・")}${T.winners.length > 1 ? "（チョップ・サイドポット）" : ""}　→ <kbd>Enter</kbd> で次のハンド</div>`;
+  if (n.hand_over && !err && n.foldout_winner == null) msg += `<div class="msg"><button class="chopbtn ${T.chop ? "on" : ""}" onclick="toggleChop()">チョップ・サイドポット（勝った人を 2 人以上）${T.chop ? " ✓" : ""}</button></div>`;
   else if (n.actor_seat != null) msg = `<div class="msg">手番: 席${n.actor_seat}</div>`;
   if (st === "pending") msg += `<div class="msg">まだ配っていません。席・持ち点・ボタンは前のハンドからの見込みです（違えば直してください）</div>`;
   $("center").innerHTML = `<div class="street">${esc(ST[n.street] || n.street || "")}</div>
@@ -769,7 +790,7 @@ function render(){
     out += `<div class="r ${r.auto ? "auto" : ""} ${!a ? "err" : ""}"><span>${i + 1}.</span><span>席${r.seat}</span><span>${esc(name)}</span><span>${amt ? fmt(amt) : ""}</span>${r.auto ? "<span>（自動）</span>" : ""}</div>`;
   });
   $("rows").innerHTML = out || `<div class="muted">まだありません</div>`;
-  $("nextBtn").hidden = !(n.hand_over && T.winner != null);
+  $("nextBtn").hidden = !(n.hand_over && T.winners.length);
 }
 
 document.addEventListener("keydown", e => {
@@ -782,7 +803,7 @@ document.addEventListener("keydown", e => {
   }
   if (k === "+") { if (T.typing && T.typing.digits) { T.typing.digits += "000"; render(); } e.preventDefault(); return; }
   if (k === "Enter") {
-    if (T.typing) confirmBet(); else if (n.hand_over && T.winner != null) go(1);
+    if (T.typing) confirmBet(); else if (n.hand_over && T.winners.length) go(1);
     e.preventDefault(); return;
   }
   if (k === "Escape") { T.typing = null; render(); return; }

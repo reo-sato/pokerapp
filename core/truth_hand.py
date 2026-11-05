@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from core.game_state import PlayerState
+from core.ground_truth import truth_winners
 from core.hand_log import UNKNOWN_CARD
 from core.poker_engine import STACKLESS_STACK, PokerkitGameState
 
@@ -244,7 +245,8 @@ def materialize_truth(gt: dict, captured: dict) -> Optional[dict]:
 
     終わっていない（行が途中で止まる・ベッティングが終わっていない・ショーダウンの勝者が決まらない）ときは None。
     勝者は、ほかが全員降りた → その席 / ショーダウン → 手札とボードの判定（pot ごと）、判定が真のアクションの勝者と
-    違う・判定できないときは真のアクションの勝者に全部。
+    違う・判定できないときは真のアクションの勝者に全部。真のアクションの勝者が 2 人以上（`winner_seats` = チョップ・
+    サイドポット）なら、判定で額を受ける席がちょうどその人たちのときは判定どおり、違えば選んだ人で等分する。
     """
     actions = gt.get("actions")
     if not isinstance(actions, list) or not actions:
@@ -265,7 +267,8 @@ def materialize_truth(gt: dict, captured: dict) -> Optional[dict]:
     # ボードは入力画面が記録の札で自動に入れる（真のアクションに無ければ記録のボード）
     board = gt.get("board") if isinstance(gt.get("board"), list) and gt.get("board") else captured.get("board")
     holes = _gt_holes(gt)
-    winner = gt.get("winner_seat") if isinstance(gt.get("winner_seat"), int) else None
+    winners = truth_winners(gt)           # チョップ・サイドポットは 2 人以上（`winner_seats`, 2026-11-05）
+    winner = winners[0] if len(winners) == 1 else None
     pot = gs.pot
     awards: Optional[dict[int, int]] = None
     source = "fold"
@@ -274,18 +277,25 @@ def materialize_truth(gt: dict, captured: dict) -> Optional[dict]:
     else:
         decided = showdown_awards(captured, gs, active, board, holes)
         main = decided[1][0] if decided and decided[1] else []
-        if decided is not None and (winner is None or winner in main):
+        paid = {s for s, a in (decided[0] if decided else {}).items() if a}
+        if decided is not None and (not winners or (winner in main if winner is not None else set(winners) == paid)):
             awards = decided[0]
             source = "cards"
-            if winner is None and len(main) == 1:
+            if len(winners) > 1:
+                winner = winners[0]                # チョップの先頭の席（ライブの記録と同じ）
+            elif winner is None and len(main) == 1:
                 winner = main[0]
-        elif winner is not None and winner in active:
+        elif winners and set(winners) <= set(active):
             source = "truth"
+            if len(winners) > 1:
+                winner = winners[0]
         else:
             return None
     try:
         if awards is not None:
             gs.end_hand_awards(awards)
+        elif len(winners) > 1 and len(active) > 1:
+            awards = gs.end_hand_split(winners)    # 手札で決まらない: 選んだ人で等分（ライブのチョップと同じ）
         else:
             gs.end_hand(winner)
     except (ValueError, RuntimeError) as e:

@@ -103,6 +103,38 @@ class TestMaterialize:
         assert hand["winner_seat"] == 3 and hand["winner_source"] == "truth"
         assert materialize_truth(_showdown_gt(players=[]), captured) is None     # 勝者が決まらない
 
+    def test_a_chop_by_the_cards(self):
+        """チョップ（メモ「チョップボタンがないな」, 2026-11-05）: 選んだ人と手札で額を受ける人が同じなら手札どおり。"""
+        gt = _showdown_gt(players=[{"seat": 2, "hole_cards": ["Ah", "Kd"], "showed_down": True},
+                                   {"seat": 3, "hole_cards": ["As", "Kc"], "showed_down": True}],
+                          winner_seats=[2, 3])
+        hand = materialize_truth(gt, _captured())
+        assert hand["winner_source"] == "cards" and hand["winner_seat"] == 2
+        assert hand["pot_awards"] == {"2": 650, "3": 650}
+        assert {p["seat"]: p["result"] for p in hand["players"]} == {1: -100, 2: 50, 3: 50}
+
+    def test_a_chop_without_the_cards_splits_between_the_entered_winners(self):
+        hand = materialize_truth(_showdown_gt(players=[], winner_seats=[3, 2]), _captured())
+        assert hand["winner_source"] == "truth" and hand["winner_seat"] == 2
+        assert {p["seat"]: p["result"] for p in hand["players"]} == {1: -100, 2: 50, 3: 50}
+        # 手札では席2 の勝ち（AA 対 KK）でも、選んだ 2 人で等分する（入れた人の判断を優先）
+        assert materialize_truth(_showdown_gt(winner_seats=[2, 3]), _captured())["winner_source"] == "truth"
+        # 降りた人を選んだら出さない
+        assert materialize_truth(_showdown_gt(players=[], winner_seats=[1, 2]), _captured()) is None
+
+    def test_side_pot_winners_entered_together_follow_the_cards(self):
+        gt = {
+            "actions": [{"seat": 3, "action": "raise", "amount": 1000}, {"seat": 1, "action": "allin", "amount": 0},
+                        {"seat": 2, "action": "call", "amount": 0}, *_checks_to_river(2, 3)],
+            "players": [{"seat": 1, "hole_cards": ["As", "Ah"], "showed_down": True},
+                        {"seat": 2, "hole_cards": ["Ks", "Kh"], "showed_down": True},
+                        {"seat": 3, "hole_cards": ["Qs", "Qh"], "showed_down": True}],
+            "winner_seats": [1, 2],
+        }
+        hand = materialize_truth(gt, _captured({1: 300, 2: 10000, 3: 10000}))
+        assert hand["winner_source"] == "cards"
+        assert {p["seat"]: p["result"] for p in hand["players"]} == {1: 600, 2: 400, 3: -1000}
+
     def test_an_unfinished_hand_is_not_shown(self):
         gt = {"actions": [{"seat": 3, "action": "raise", "amount": 600}]}
         assert materialize_truth(gt, _captured()) is None

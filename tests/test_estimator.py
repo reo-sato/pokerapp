@@ -585,6 +585,7 @@ class TestContentFingerprint:
         "core/atomic_io.py": "ファイルの書き方",
         "core/blind_structure.py": "トーナメントの時計と表示の文言（ライブのロガーだけ。再生は記録した set_level で同じ, ADR-0071）",
         "core/event_queue.py": "スレッド間のキュー",
+        "core/ground_truth.py": "真のアクションの勝者の読み方（core/truth_hand.py の materialize_truth だけ。推定には使わない）",
         "core/hand_correction.py": "訂正の重ね方（読む側）",
         "core/player.py": "player registry", "core/player_repository.py": "player registry",
         "core/session.py": "session layer", "core/session_repository.py": "session layer",
