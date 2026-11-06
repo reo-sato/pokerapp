@@ -707,8 +707,10 @@ def _session(prefix: str) -> tuple[SessionEstimator, dict]:
 
 @pytest.mark.slow       # 本番と同じ探索の幅で店舗のハンドを推定する（並べて回して合わせて約 3 分。幅は変えない = 監査 1 D2）
 @pytest.mark.parametrize("prefix,hand_id,correct,review", [
-    # ボタンの置き忘れ + 「チェック、チェック」の言い直し: 記録の再生では崩れ、推定で丸ごと正しい（直しを使った = 要確認）
-    ("9d1d8536", 4, True, True),
+    # ボタンの置き忘れ + 「チェック、チェック」の言い直し: 記録の再生では崩れる。ボタンの直しの重みを 0.05 → 0.01 にして
+    # （2026-11-06, 11/05 で推定器がボタンを変えた 3 ハンドがすべて誤り）推定でも直らなくなった = 要確認。この記録（9/29）には
+    # 配った順の信号が無い。いまのライブは配った順でボタンの置き忘れを直す（`button_from_deal`）
+    ("9d1d8536", 4, False, True),
     # リバーの「フォールド」と同時に席5 の札が離れた → リバーは直る。フロップの無言のチェックは声でも札でも決まらない
     ("fded6f75", 1, False, True),
     # 聞き違いの「フォールド」と「ヘッドゾップ」がそろって誤りを指す。席4 の札は最後まで離れない → 要確認
@@ -732,8 +734,6 @@ def test_store_hands(prefix, hand_id, correct, review):
     assert hand_fully_correct(truth[hand_id], result.best.hand) is correct
     assert bool(result.reasons) is review
     assert 0.0 < result.posteriors[0] <= 1.0 - PARAMS["outside"] + 1e-9
-    if prefix == "9d1d8536":
-        assert result.best.hand["button_seat"] == 5
     if prefix == "fded6f75":
         river = [(a["seat"], a["action"]) for a in result.best.hand["actions"] if a["street"] == "river"]
         assert river[-1] == (5, "fold")

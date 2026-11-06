@@ -409,7 +409,8 @@ def _kana_amount_to_kanji(norm: str, keyword_end: int) -> str:
 
 # 書き起こしゆれとして足した短い語は、ほかの言葉の一部として現れやすい（「なべとなって」の「ベト」、
 # 「ゴールド」の「ゴール」）。前後が区切り・数・別のアクションの語のときだけアクションとみなす（ADR-0063）。
-_BOUNDARY_KEYWORDS = frozenset({"ベト", "ゴール", "ホールド", "ベッド", "オーリン", "オーリー", "ソーダウン"})
+_BOUNDARY_KEYWORDS = frozenset({"ベト", "ゴール", "ホールド", "ベッド", "オーリン", "オーリー", "ソーダウン", "メット",
+                                "レイザー"})
 # 同じ種類の仮名が続いていても区切りとみなす言い方: 「です」（「おーりんです」）と「を」（語の中には出ない）。
 # 「です」のあとに片仮名が続く（「ホールドデスク」）ときは区切りにしない。
 _BOUNDARY_SUFFIX = re.compile(r"(?:デス|デース|デシタ)(?:ネ|ヨ)?(?![ァ-ヺー])")
@@ -976,6 +977,29 @@ def _drop_question_sentences(text: str) -> str:
     return "".join(s for s in sentences if not _is_question_sentence(s)).strip()
 
 
+# 促しのせりふと声かけ（オーナー 2026-11-06, 11/05 の見直し）: アクションではない。
+# - 「コールが 400、レイズ 800 になります。」= 初心者に手番の人のできることを言う（アクションを促す）。アクションの語の
+#   すぐあとに「が」と額が続き「になります」と言う文（「コールが入りました」「ベットが 2000 点入ってます」は宣言なので読む）。
+#   「レイズは 1600 点からになります」（最小レイズ）・「600 が BB になります」（ブラインド）も同じ。
+# - 「ナイスオールイン」「ナイスベット」= 賭けで降ろした人への声かけ（オールイン・ベットではない）。
+_PROMPT_SUBJECT = re.compile(r"(?:コール|レイズ|レイザー|ベット|ベッド)[ガハ][0-9一二三四五六七八九十百千万]|カラニナリマス"
+                             r"|(?:BB|SB|ブラインド)ニナリマス")
+_COMPLIMENT = re.compile(r"ナイス[\s、,]*(?:オールイン|オーリン|ベット|ベッド|ベスト|レイズ)")
+
+
+def _is_prompt_sentence(sentence: str) -> bool:
+    norm = re.sub(r"\s", "", _to_katakana(unicodedata.normalize("NFKC", sentence)))
+    return "ニナリマス" in norm and bool(_PROMPT_SUBJECT.search(norm))
+
+
+def _drop_prompt_sentences(text: str) -> str:
+    """促しのせりふの文を除き、声かけ（「ナイスオールイン」）の語を除く。"""
+    sentences = [s for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+    kept = "".join(s for s in sentences if not _is_prompt_sentence(s))
+    norm = _to_katakana(unicodedata.normalize("NFKC", kept))
+    return _COMPLIMENT.sub("", norm) if _COMPLIMENT.search(norm) else kept
+
+
 def is_question(text: str) -> bool:
     """発話が確認型（疑問形）だけか。アクションにしない（仕様 FR-17）。疑問形の文のあとに別の文が続けば False。"""
     return bool(text.strip()) and not _drop_question_sentences(text)
@@ -1293,8 +1317,8 @@ def parse_actions(
     減らさない（読めなければ辞書だけの読みに戻る）。
     """
     original = text
-    text = _drop_question_sentences(text)
-    if not text:
+    text = _drop_prompt_sentences(_drop_question_sentences(text))
+    if not text.strip():
         return []
     text = _KANJI_SENTEN.sub("センテン", text)
     events = _join_lower_digits(_drop_counting(_parse_utterance(text, confidence, utterance_start_ts)))

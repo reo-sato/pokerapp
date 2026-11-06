@@ -44,7 +44,9 @@ PARAMS: dict[str, float] = {
     "p_miss_check": 0.04,        # 直前と違うチェック・コール（店舗 2/80 ほど）
     "p_miss_call": 0.04,
     "p_miss_repeat": 0.15,       # 直前の人と同じチェック・コール（店舗 7/50。2 回目を言わない旧い運用の名残）
-    "p_miss_fold": 0.04,         # ハンドを終わらせないフォールド（店舗 0/14）
+    "p_miss_fold": 0.15,         # ハンドを終わらせないフォールド。言わないのはコールより多い（オーナー 2026-11-06。開発データの
+                                 # 語の数で見ると フォールド 4 割・コール 1 割ほどが言われない。掃引: 0.04 → 0.15 で店舗 185 → 187/246、
+                                 # 悪くなったハンド 0。前は 0.04 = 店舗 0/14 の頃の値）
     "p_miss_last_fold": 0.45,    # ハンドを終わらせるフォールド（店舗 5/11。札の離脱と勝者で分かるので言わない）
     "p_miss_wager": 0.01,        # ベット・レイズ・オールイン（額は言う）
     "p_miss_muck": 0.05,         # ショーダウンで見せずに降りた（ディーラーは「フォールド」と言う = オーナー 2026-09-30）
@@ -59,6 +61,9 @@ PARAMS: dict[str, float] = {
     "p_muck_before_declare": 0.15,  # ベッティングが終わったあとの「フォールド」が、「ショーダウン」の宣言（・見せた役名）の前でも本当の
                                     # マックだった（門 "showdown_fold" を開ける, 2026-10-15 の見直し手順 3。開発データで門が働いた 7 語中
                                     # 真のアクションにマックがあるのは 1 = a6ee12e4#1、宣言の決まり（10/07）より前のハンド）
+    "p_allin_call_recap": 0.6,   # 前にオールインがあるハンドの「オールインコール」の「オールイン」は、ここまでの流れのまとめか
+                                 # 次のコールの前置き（新しいオールインではない）のことが多い（オーナー 2026-11-06, 11/05 の
+                                 # 7 ハンド。間を空けずに言う。前にオールインが無ければ、オールイン → コールの 2 行）
     "p_corrected": 0.8,          # 「失礼しました」の前の語を言い直した（取り消した）: ディーラーは言い間違えたら「失礼しました」と
                                  # 言って言い直す（オーナー 2026-10-06）= その語は使われないのがふつう（ライブも取り消す）
     "p_sub": 0.02,               # 語の種類の取り違え（チェック ↔ コール など）
@@ -93,7 +98,9 @@ PARAMS: dict[str, float] = {
     "other_departure_sec": 20.0,  # ショーダウン・片付けで札が離れる時刻の幅
     "lift_sec": 200.0,           # ベッティングの途中に残っている席の札が離れる（持ち上げ）の平均の間隔
     # そのほか
-    "p_button": 0.05,            # ボタンが記録（ライブが回したボタン）と違う（隣の席 = 動かし忘れ・動かしすぎを 4 倍厚く）
+    "p_button": 0.01,            # ボタンが記録（ライブが回したボタン）と違う（隣の席 = 動かし忘れ・動かしすぎを 4 倍厚く）。ライブは
+                                 # 配った順でボタンを直すので記録のボタンは当たりやすい（11/05: 71/73。推定器がボタンを変えた 3 ハンドは
+                                 # どれも誤り = オーナー 2026-11-06）。0.05 → 0.01（掃引: 店舗 184 → 185/246・悪くなった 0）
     "p_unclosed": 0.01,          # ベッティングのラウンドが閉じないまま（手番の人が残ったまま）ハンドが終わった
     "p_players": 0.05,           # 残り人数の宣言（ヘッズアップ・N プレイヤーズ）が合わない
     "p_slip": 0.03,              # 制御の語（ショーダウン・ヘッズアップ・ハンド終了・ブラインド上昇）の言い間違い: 捨てる直し。
@@ -486,9 +493,9 @@ class SessionEstimator:
         """ボタンの事前: 記録のボタン 1 − p_button、ほかの席に p_button を分ける（隣の席 = 動かし忘れ・動かしすぎを
         4 倍厚く）。席の数で割るので卓の大きさによらず足して 1（監査 2 回目）。"""
         p = self.params["p_button"]
+        seats = sorted({pl["seat"] for pl in w.base.get("players") or []})
         if button == w.button:
             return _log(1 - p)
-        seats = sorted({pl["seat"] for pl in w.base.get("players") or []})
         alts = [s for s in seats if s != w.button]
         if w.button not in seats or button not in alts:
             return _log(p / max(1, len(alts)))
@@ -703,6 +710,8 @@ class SessionEstimator:
                 p_ph = max(p_ph, p["p_restate"])   # 前の語の言い直し・ショーダウンのあとのマックの声
             if label == "corrected":
                 p_ph = max(p_ph, p["p_corrected"])
+            if t.action == "allin" and _allin_call_recap(t, same, rows):
+                p_ph = max(p_ph, p["p_allin_call_recap"])
             terms.append((f"余計な語「{t.raw_text}」", _log(p_ph)))
             if (t.action in _WAGER or t.action == "fold") and p_ph < p["p_restate"]:
                 flags.append(f"使えなかった語「{t.raw_text}」")
@@ -1333,15 +1342,34 @@ def _estimate_in_worker(w: HandWindow) -> HandResult:
     return r
 
 
+def _allin_call_recap(t: AudioEvent, same: list[AudioEvent], rows: list[_Row]) -> bool:
+    """使われなかった「オールイン」が「オールインコール」（同じ発話ですぐあとに「コール」）で、そのハンドで前に
+    オールインの行があるか。"""
+    k = next((i for i, x in enumerate(same) if x is t), -1)
+    if not (0 <= k < len(same) - 1 and same[k + 1].action == "call"):
+        return False
+    start = t.utterance_start_ts or t.timestamp
+    return any(r.action == "allin" and r.word is not None and r.word is not t and _word_start(r) < start
+               for r in rows)
+
+
+# オールインのあと、ディーラーが額を数えて言うまでの秒数（11/05: 16〜44 秒）
+ALLIN_AMOUNT_SEC = 60.0
+
+
 def _restates(t: AudioEvent, rows: list[_Row]) -> bool:
     """使われなかった語が、少し前に言われた行の言い直しか（同じアクション。ベット・レイズは額も同じ、オールインは
-    額を問わない。ディーラーは額や「オールイン」を次の発話で繰り返す）。"""
+    額を問わない。ディーラーは額や「オールイン」を次の発話で繰り返す。オールインのあとの額はその額の確かめ）。"""
     start = t.utterance_start_ts or t.timestamp
     wager = t.action in _WAGER
     for r in rows:
         if r.word is None or r.word is t:
             continue
         gap = start - _word_start(r)
+        if r.action == "allin" and wager and t.amount and 0.0 <= gap <= ALLIN_AMOUNT_SEC:
+            # オールインのあとに額を数えて確かめた声（「2万6千点です」「オールインは 4 万 8200 点」, オーナー
+            # 2026-11-06 = 11/05 ハンド 40・53・67・71）。ほかの人のレイズではない
+            return True
         if not 0.0 <= gap <= (30.0 if wager else 15.0):
             continue
         if t.action == "allin" and r.action == "allin":

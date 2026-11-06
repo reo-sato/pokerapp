@@ -111,9 +111,9 @@ def next_hand_seating(prev_seats: list[int], prev_button: Optional[int], next_se
 
     - **SB の人が抜けた** → 空いた SB の席にボタン（**デッドボタン**）。SB = 前の BB、BB = その次の席。
     - **BB の人が抜けた**（3 人以上残る）→ BB は抜けた BB の次の席へ進み、**SB は空き**（抜けた BB の席 = デッドスモール。
-      SB は払わない = 「シングルビッグブラインド」）、ボタンは前の SB の席。その次のハンドは空いた SB の席にボタン
-      （`prev_dead_sb` = デッドボタン）。10/29 ハンド 66→67→68: BB の 6 が抜けて、ボタン 5・BB 7（SB なし）→ ボタン 6（空席）・
-      SB 7・BB 1。
+      SB は払わない = 「シングルビッグブラインド」）、ボタンは前の SB の席。その次のハンドは、空いた席ではなく次の人に
+      ボタンを進める（オーナー 2026-11-06「いつも次の人」。11/05 ハンド 67→68→69: BB の 1 が抜けて、ボタン 7・BB 5（SB
+      なし）→ ボタン 5・SB 6・BB 7。前は空いた席にボタン = デッドボタンにしていた）。
     - **BB の人が抜けて heads-up になる** → ボタンは動かさない（10/29 ハンド 116→117）。
     - それ以外 → 1 つ進める（`advance_button`）。
     返すボタンは `next_seats` に無い席（デッドボタン）のことがある。デッドスモールの席は `next_seats` に無い席か None。
@@ -121,8 +121,6 @@ def next_hand_seating(prev_seats: list[int], prev_button: Optional[int], next_se
     nxt = sorted(next_seats)
     if prev_button is None or not prev_seats:
         return advance_button(nxt, prev_button), None
-    if prev_dead_sb is not None and len(nxt) >= 3 and prev_dead_sb not in nxt:
-        return prev_dead_sb, None
     if len(prev_seats) >= 3 and prev_dead_sb is None:
         order = seat_order_from_button(prev_seats, prev_button)
         sb, bb = order[0], order[1]

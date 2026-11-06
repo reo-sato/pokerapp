@@ -32,8 +32,10 @@ class TestRule:
     def test_bb_busted_is_a_dead_small_blind(self):
         # ボタン 8 → SB 2・BB 3。BB の 3 が抜けた → ボタン 2・SB なし（空いた 3）・BB 4
         assert next_hand_seating(SEATS, 8, [2, 4, 5, 7, 8]) == (2, 3)
-        # その次は空いた SB の席にボタン（デッドボタン）
-        assert next_hand_seating([2, 4, 5, 7, 8], 2, [2, 4, 5, 7, 8], prev_dead_sb=3) == (3, None)
+        # その次は次の人にボタン（空いた席に置かない = オーナー 2026-11-06「いつも次の人」）
+        assert next_hand_seating([2, 4, 5, 7, 8], 2, [2, 4, 5, 7, 8], prev_dead_sb=3) == (4, None)
+        # 11/05 ハンド 68→69: ボタン 7・BB 5（SB なし = 空いた 1）・席 [5, 6, 7] → ボタン 5・SB 6・BB 7
+        assert next_hand_seating([5, 6, 7], 7, [5, 6, 7], prev_dead_sb=1) == (5, None)
 
     def test_bb_busted_into_heads_up_keeps_the_button(self):
         # 10/29 ハンド 116 → 117: ボタン 5・SB 7・BB 4、BB の 4 が抜けて heads-up → ボタン 5 のまま
@@ -91,12 +93,12 @@ class TestEngine:
             gs.apply_action(seat, "call", 1600)
         assert gs.legal_context().actor_seat == 7       # BB のオプション
         gs.end_hand(1)
-        gs.new_hand()                                   # ハンド 68: ボタンは空いた 6・SB 7・BB 1
-        assert gs.button_seat == 6 and gs.dead_sb_seat is None
-        assert gs.position_map()[7] == "SB" and gs.position_map()[1] == "BB"
+        gs.new_hand()                                   # 次のハンド: 次の人 7 がボタン・SB 1・BB 2（空いた 6 には置かない）
+        assert gs.button_seat == 7 and gs.dead_sb_seat is None
+        assert gs.position_map()[1] == "SB" and gs.position_map()[2] == "BB"
         gs.end_hand(1)
-        gs.new_hand()                                   # ハンド 69: ボタン 7・SB 1・BB 2
-        assert gs.button_seat == 7 and gs.position_map()[1] == "SB" and gs.position_map()[2] == "BB"
+        gs.new_hand()                                   # その次: ボタン 1・SB 2・BB 4
+        assert gs.button_seat == 1 and gs.position_map()[2] == "SB" and gs.position_map()[4] == "BB"
 
 
 def test_the_truth_replay_takes_a_button_on_an_empty_seat():

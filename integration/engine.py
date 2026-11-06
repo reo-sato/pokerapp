@@ -237,6 +237,8 @@ _REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin
 # 解釈の重み: 直前の訂正がいちばん多い（言い間違いは 1 つのことが多い）。ストリートの言い直しは、直前の訂正で
 # 辻褄が合わないとき。訂正なしは、どちらの訂正でも辻褄が合わないとき
 CORRECTION_PRIOR = {"prev": 0.0, "street": 0.6, "none": 0.9}
+# 席を言わずにストリートの最初から言い直したとみる解釈の重み（ほぼ選ばない, オーナー 2026-11-06）
+CORRECTION_STREET_WITHOUT_SEAT = 50.0
 _CORRECTION_ORDER = {"prev": 0, "street": 1, "none": 2}
 # 合図のあとの記録の不自然さ: 適用できない・ハンドの外 = 2、言った額・アクションが使えず直した・聞こえなかった
 # アクションを補った・言った語が何にもならなかった = 1、ストリートの札が配られる前に話した語がそのストリートの
@@ -5349,6 +5351,15 @@ class IntegrationThread(threading.Thread):
         return {"targets": targets, "floor_from": floor_from, "choices": choices, "street": street,
                 "last": last, "segment_start": self._segment_start(street, units)}
 
+    def _correction_names_seat(self, corr: dict) -> bool:
+        """訂正の合図のあとに、席・ポジションを言ったアクションがあるか（ストリートの最初から言い直すときは席から言う）。"""
+        position = next((i for i, (_, item) in enumerate(self._hand_inputs) if item is corr["cue"]), None)
+        if position is None:
+            return False
+        return any(kind == "audio" and getattr(item, "action", None) in (_BETTING_WORDS | {"fold"})
+                   and (getattr(item, "seat", None) is not None or getattr(item, "position", None))
+                   for kind, item in self._hand_inputs[position + 1:])
+
     def _voice_units(self) -> list[dict]:
         """このハンドで効いた声のアクション（入力の順）: {"item", "signals", "street", "record"}。
 
@@ -5544,6 +5555,10 @@ class IntegrationThread(threading.Thread):
             self._set_correction_choice(corr, choice)
             self._rebuild_hand()
             scores[choice] = round(self._correction_penalty(corr) + CORRECTION_PRIOR[choice], 6)
+            if choice == "street" and not self._correction_names_seat(corr):
+                # 「失礼しました」で直すのは基本的に直前のアクション。席番号などを言わない限りストリートの最初まで
+                # さかのぼらない（オーナー 2026-11-06, 11/05 ハンド 11）
+                scores[choice] += CORRECTION_STREET_WITHOUT_SEAT
         best = min(corr["choices"], key=lambda c: (scores[c], _CORRECTION_ORDER[c]))
         if best != current:
             self._set_correction_choice(corr, best)

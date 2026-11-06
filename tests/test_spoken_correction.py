@@ -104,8 +104,8 @@ class TestPreviousAction:
 
 class TestStreetRestated:
     def test_words_spoken_before_the_next_card_choose_the_street(self, tmp_path):
-        """フロップの「チェック」「ベット 500」を言い直す（席5 のチェックを言い落とした）。直前の訂正だと言い直しが
-        ターンの札の前にターンのアクションになる → ターンの札でストリートの言い直しに組み直す。"""
+        """フロップの「チェック」「ベット 500」を席を言って言い直す（席5 のチェックを言い落とした）。直前の訂正だと
+        言い直しがターンの札の前にターンのアクションになる → ターンの札でストリートの言い直しに組み直す。"""
         tb = _Table(tmp_path)
         tb.deal()
         tb.say("コール")
@@ -119,7 +119,7 @@ class TestStreetRestated:
         tb.tick(tb.now + 2)
         tb.say("失礼しました")
         tb.tick(tb.now + 1)
-        tb.say("チェック、チェック、ベット 500")
+        tb.say("シート4 チェック、シート5 チェック、シート6 ベット 500")
         tb.tick(tb.now + 2)
         tb.say("コール")
         tb.tick(tb.now + 1)
@@ -138,8 +138,8 @@ class TestStreetRestated:
         assert any("フロップの最初からの言い直しとして組み直しました" in n for n in tb.notices)
 
     def test_a_seat_that_left_before_the_cue_folds_on_its_turn(self, tmp_path):
-        """プリフロップを言い直す。合図の前に札が離れた席4 は、言い直しの手番でフォールド。言い直した「フォールド」は
-        その離脱と組にして、次の人に付けない。"""
+        """プリフロップを席を言って言い直す。合図の前に札が離れた席4 は、言い直しの手番でフォールド。言い直した
+        「フォールド」はその離脱と組にして、次の人に付けない。"""
         tb = _Table(tmp_path)
         tb.deal()
         tb.say("レイズ 600")                        # 席6
@@ -150,13 +150,30 @@ class TestStreetRestated:
         tb.tick(tb.now + 2)
         tb.say("失礼しました")
         tb.tick(tb.now + 1)
-        tb.say("レイズ 600")
+        tb.say("シート6 レイズ 600")
         tb.say("フォールド")
         tb.say("コール")
         assert tb.played() == [("preflop", 6, "raise", 600), ("preflop", 4, "fold", 0),
                                ("preflop", 5, "call", 400)]
         assert _choice(tb) == "street"
         assert any("札が離れた席4 のフォールドの言い直し" in n for n in tb.notices)
+
+    def test_without_a_seat_only_the_previous_action_is_corrected(self, tmp_path):
+        """席を言わない「失礼しました」で直すのは直前のアクションだけ（オーナー 2026-11-06, 11/05 ハンド 11）。前の
+        決まり（10/06）ではこの言い直しをストリートの最初からと読んでいた。"""
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ 600")                        # 席6
+        tb.tick(tb.now + 1)
+        tb.say("コール")                            # 席4
+        tb.tick(tb.now + 2)
+        tb.say("失礼しました")
+        tb.tick(tb.now + 1)
+        tb.say("レイズ 1800")                       # 席4 の直前のアクションの言い直し
+        tb.say("コール")
+        tb.say("コール")
+        assert tb.played()[:2] == [("preflop", 6, "raise", 600), ("preflop", 4, "raise", 1800)]
+        assert _choice(tb) != "street"
 
 
 class TestConversation:
@@ -209,7 +226,7 @@ class TestReplay:
         tb.tick(tb.now + 2)
         tb.say("失礼しました")
         tb.tick(tb.now + 1)
-        tb.say("レイズ 600")
+        tb.say("シート6 レイズ 600")
         tb.say("フォールド")
         tb.say("コール")
         tb.tick(tb.now + 2)
