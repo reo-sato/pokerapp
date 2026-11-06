@@ -75,3 +75,11 @@
 - `tests/test_spoken_correction.py`: ストリートの最初からの言い直しの試験を「席を言う」形に直し、席を言わない形を足した。
 - `tests/test_estimator.py`: 9d1d8536#4 は推定でも直らない(要確認)に直した。
 - 速い組 3636 passed / 22 skipped。遅い組 16 passed / 5 skipped。ruff OK。
+
+## 追記: 見直しの画面用のデータ（11/05 を今の版で・10/29 の声の録れていたハンド）
+
+- 11/05: 今の版（23c1432）で全 73 ハンドを推し直した。真のアクションは開発データで直した版（ハンド 2・6・26・36・43・51・57）を
+  推定の zip に入れた。
+- 10/29: 評価の道具（`eval_store.unrecorded_hands`）が数える声の録れていたハンド 37 個（9・17〜20・24〜55）だけを残した。
+  真のアクションは店で入れたもののまま。
+- `tools/home_truth.py` の `unpack_estimates` が推定の zip の真のアクションも置くようにした（試験 `test_estimate_zip_can_carry_the_corrected_truth`）。

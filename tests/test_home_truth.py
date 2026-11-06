@@ -159,3 +159,27 @@ def test_estimates_and_review_notes(tmp_path):
     out = home_truth.pack_truth(dest, STAMP, tmp_path / "out")
     with zipfile.ZipFile(out) as zf:
         assert f"{SID}/{SID}.estimate_review.json" in zf.namelist()
+
+
+def test_estimate_zip_can_carry_the_corrected_truth(tmp_path):
+    zips = _write_set(tmp_path / "in")
+    est = tmp_path / "in" / f"pokerestimate_{STAMP}.zip"
+    with zipfile.ZipFile(est, "w") as zf:
+        zf.writestr(f"{SID}/{SID}.estimate.shadow.json", json.dumps({"session_id": SID, "hands": {}}))
+        zf.writestr(f"{SID}/{SID}.ground_truth.json", _gt("fixed"))
+        zf.writestr(f"other/{SID}.ground_truth.json", _gt("evil"))
+    dest = tmp_path / "logs"
+    # 店の分のまま: 直した版に替え、残さない
+    home_truth.unpack(zips, dest, keep_store=True)
+    assert home_truth.unpack_estimates([est], dest) == [SID]
+    assert json.loads((dest / f"{SID}.ground_truth.json").read_text())["hands"][0]["notes"] == "fixed"
+    assert not (dest / f"{SID}.ground_truth.home.json").exists()
+    # 家で入れていた分は残す
+    (dest / f"{SID}.ground_truth.json").write_bytes(_gt("home"))
+    home_truth.unpack_estimates([est], dest)
+    assert json.loads((dest / f"{SID}.ground_truth.json").read_text())["hands"][0]["notes"] == "fixed"
+    assert json.loads((dest / f"{SID}.ground_truth.home.json").read_text())["hands"][0]["notes"] == "home"
+    # 家の分の控えは送り返さない
+    out = home_truth.pack_truth(dest, STAMP, tmp_path / "out")
+    with zipfile.ZipFile(out) as zf:
+        assert f"{SID}/{SID}.ground_truth.home.json" not in zf.namelist()

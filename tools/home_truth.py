@@ -43,6 +43,8 @@ REVIEW_SUFFIX = ".estimate_review.json"            # 推定の見直しのメモ
 _ESTIMATE_ZIP = re.compile(r"pokerestimate_(\d{8}_\d{6})", re.IGNORECASE)
 _ESTIMATE_FILE = re.compile(r"^([A-Za-z0-9_\-]{1,120})/\1\.estimate(\.shadow)?\.json$")
 STORE_GT_SUFFIX = ".ground_truth.store.json"
+HOME_GT_SUFFIX = ".ground_truth.home.json"
+_ESTIMATE_GT_FILE = re.compile(r"^([A-Za-z0-9_\-]{1,120})/\1\.ground_truth\.json$")
 _ZIP_NAME = re.compile(r"pokerlogs_(\d{8}_\d{6})(?:_(\d+)of(\d+))?", re.IGNORECASE)
 _SID = re.compile(r"^[A-Za-z0-9_\-]{1,120}$")
 _FILE = re.compile(r"^[A-Za-z0-9_\-.]{1,200}$")
@@ -153,17 +155,36 @@ def unpack(zips: list[Path], dest: Path, keep_store: bool = False) -> dict:
 
 
 def unpack_estimates(zips: list[Path], log_dir: Path) -> list[str]:
-    """推定の zip（`pokerestimate_<日時>.zip` = `<sid>/<sid>.estimate.shadow.json`）を置く。置いたセッションを返す。"""
+    """推定の zip（`pokerestimate_<日時>.zip` = `<sid>/<sid>.estimate.shadow.json`）を置く。置いたセッションを返す。
+
+    開発データで直した真のアクション（`<sid>/<sid>.ground_truth.json`）が入っていれば、それも置く。家で入れていた分は
+    `<sid>.ground_truth.home.json` に残す（上書きで消さない。店の分そのままなら残さない）。"""
     placed = []
     for z in zips:
         with zipfile.ZipFile(z) as zf:
             for info in zf.infolist():
-                m = _ESTIMATE_FILE.match(info.filename.replace("\\", "/"))
-                if m is None or info.is_dir():
+                name = info.filename.replace("\\", "/")
+                if info.is_dir():
                     continue
+                m = _ESTIMATE_FILE.match(name)
+                if m is not None:
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    (log_dir / name.split("/")[-1]).write_bytes(zf.read(info))
+                    placed.append(m.group(1))
+                    continue
+                g = _ESTIMATE_GT_FILE.match(name)
+                if g is None:
+                    continue
+                sid = g.group(1)
                 log_dir.mkdir(parents=True, exist_ok=True)
-                (log_dir / info.filename.split("/")[-1]).write_bytes(zf.read(info))
-                placed.append(m.group(1))
+                data = zf.read(info)
+                dest = log_dir / (sid + GT_SUFFIX)
+                store = log_dir / (sid + STORE_GT_SUFFIX)
+                if dest.is_file():
+                    old = dest.read_bytes()
+                    if old != data and not (store.is_file() and store.read_bytes() == old):
+                        (log_dir / (sid + HOME_GT_SUFFIX)).write_bytes(old)
+                dest.write_bytes(data)
     return placed
 
 
@@ -236,8 +257,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 else "最初から入れます（店で入れた分は別のファイルに残してあります）" if s["store_truth"] else "")
         print(f"  セッション {sid[:8]}: 音声 {s['audio']} 件 {note}")
     if not estimate_zips:
-        estimate_zips = [p for folder in (desktop_dir(), Path.home() / "Downloads") if folder.is_dir()
-                         for p in folder.glob(f"pokerestimate_{stamp}*.zip")]
+        # 同じ日の推定を 2 回取ってきたら「… (1).zip」ができる: 新しいものを後に置いて勝たせる
+        estimate_zips = sorted((p for folder in (desktop_dir(), Path.home() / "Downloads") if folder.is_dir()
+                                for p in folder.glob(f"pokerestimate_{stamp}*.zip")), key=lambda p: p.stat().st_mtime)
     for sid in unpack_estimates(estimate_zips, log_dir):
         print(f"  セッション {sid[:8]}: 推定を置きました（推定の見直しの画面で使います）")
     try:
