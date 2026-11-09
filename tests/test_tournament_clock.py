@@ -154,7 +154,26 @@ class TestAnnouncement:
         live = Live(tmp_path)
         live.at(65)
         _fold_hand(live, 70)                            # 遷移のあと最初のハンド: 宣言なし → まだ前のレベル
-        _fold_hand(live, 80)                            # その次のハンドから上げる
+        _fold_hand(live, 160)                           # その次のハンド（遷移から 90 秒より後）から上げる
+        assert self._levels(live, tmp_path) == [1, 2]
+
+    def test_without_an_announcement_a_quick_second_hand_keeps_the_level(self, tmp_path):
+        """店舗 2026-11-09（メモ h60・h69）: 終盤はハンドが短く、遷移の 48・59 秒後に始まった 2 つ目のハンドを 1 ハンド
+        早く上げていた。宣言が聞こえなければ、遷移から 90 秒たって始まるハンドから上げる。"""
+        live = Live(tmp_path)
+        live.at(65)
+        _fold_hand(live, 70)
+        _fold_hand(live, 100)                           # 遷移から 90 秒未満: まだ前のレベル
+        _fold_hand(live, 160)
+        assert self._levels(live, tmp_path) == [1, 1, 2]
+
+    def test_an_announcement_in_the_second_hand_restarts_it(self, tmp_path):
+        live = Live(tmp_path)
+        live.at(65)
+        _fold_hand(live, 70)
+        live.control(100, "new_hand")
+        live.say(101, "ブラインド上がってます")              # 2 つ目のハンドの最初のアクションの前
+        live.say(102, "フォールド フォールド")
         assert self._levels(live, tmp_path) == [1, 2]
 
     def test_announced_before_the_deal(self, tmp_path):

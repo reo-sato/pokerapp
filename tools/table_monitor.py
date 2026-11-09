@@ -83,6 +83,7 @@ _PAGE = """<!doctype html>
  .game .clock { font-size:30px; font-weight:700; font-variant-numeric:tabular-nums; color:#7ee787; }
  .game .clock.soon { color:#e3b341; } .game .clock.paused { color:#9aa0a6; }
  .game .sub { color:#9aa0a6; font-size:14px; }
+ .warnbar { background:#da3633; color:#fff; font-size:22px; font-weight:700; padding:10px 14px; border-radius:8px; margin:0 0 10px; }
 </style></head>
 <body>
 <div id="app">読み込み中…</div>
@@ -101,6 +102,10 @@ function pendingHtml(p){
 function lagClass(s){ return s < 3 ? "ok" : (s < 15 ? "warn" : "bad"); }
 function mmss(sec){ sec = Math.max(0, Math.floor(sec)); return `${Math.floor(sec/60)}:${String(sec%60).padStart(2,"0")}`; }
 function blindsText(sb, bb, ante){ return `${sb}/${bb}` + (ante ? ` <span class="sub">アンテ ${ante}</span>` : ""); }
+function warnHtml(g){
+  const w = (g && g.warnings) || [];
+  return w.map(t => `<div class="warnbar">${t}</div>`).join("");
+}
 function gameHtml(g){
   if (!g || !g.mode) return "";
   const b = g.blinds || {};
@@ -137,7 +142,7 @@ async function tick(){
   const tl = (d.board_timeline||[]).map(e =>
     `<tr><td>${e.index} 枚目</td><td>${e.card}</td><td>${e.dealt_at}</td></tr>`).join("");
   document.getElementById("app").innerHTML = `
-    ${gameHtml(d.game)}
+    ${warnHtml(d.game)}${gameHtml(d.game)}
     <h1>卓状態モニタ — ${d.session_id||""} / ハンド ${d.hand_id}</h1>
     <div class="meta">更新 ${d.updated_at||"—"}
       ${lag==null?"":`／ 反映遅延 <span class="lag ${lagClass(lag)}">${lag.toFixed(1)} 秒</span>`}

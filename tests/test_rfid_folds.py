@@ -777,6 +777,20 @@ class TestSilentMic:
             tb.t._check_silent_mic()                 # noqa: SLF001
         assert not any("マイクに声が入っていません" in n for n in tb.notices)
 
+    def test_the_table_monitor_shows_it(self, tmp_path):
+        """店舗 2026-11-09: 端末の知らせは 50 分気づかれなかった。卓モニタ（iPad）の上の段にも出す。"""
+        heard = {"at": None}
+        tb = self._table(tmp_path, heard)
+        tb.deal()
+        heard["at"] = tb.now - 1200                  # 20 分前から声が無い（電池切れ）
+        tb.now += 5
+        assert "warnings" not in tb.t._table_game()  # noqa: SLF001 — 配った直後はまだ出さない
+        tb.now += 20
+        (warning,) = tb.t._table_game()["warnings"]  # noqa: SLF001
+        assert warning.startswith("マイクに声が入っていません（20 分 25 秒）")
+        heard["at"] = tb.now - 2                     # 声が戻った
+        assert "warnings" not in tb.t._table_game()  # noqa: SLF001
+
 
 class TestNoWinnerBeforeTheFullBoard:
     """ショーダウンでボードがすべて配られる前に勝者が宣言されることはない（オーナー 2026-10-14）。オールインのあと、

@@ -154,11 +154,17 @@ _BOARD_STREET_NAMES = frozenset({"flop", "turn", "river"})
 _STREET_JA = {"preflop": "プリフロップ", "flop": "フロップ", "turn": "ターン", "river": "リバー"}
 # プレー中にこの秒数、マイクに声が入らなければ知らせる（ワイヤレスマイクの電池切れ等, 2026-09-25）
 SILENT_MIC_SEC = 60.0
+# 卓モニタのマイクの知らせは、配ってからこの秒数たってから（配った直後はまだ話していないだけのことがある）
+MIC_WARN_AFTER_DEAL_SEC = 15.0
 # ハンドを始めてからこの秒数たったら、卓で使っていない席に手札が無いかを確かめる（配っている途中の席を
 # 「手札が無い」と言わないため）
 SEAT_SETUP_CHECK_SEC = 5.0
 # ブラインド上昇の宣言は時計の遷移より少し前でも数える（店の時計とロガーの時計のずれ, 2026-10-28）
 LEVEL_ANNOUNCE_EARLY_SEC = 120.0
+# 上昇の宣言が聞こえないとき、時計の遷移からこの秒数たって始まったハンドから上げる（遷移のあと最初のハンドは前のレベル）。
+# 店のディーラーは遷移の 50〜70 秒後に「次回ブラインド上がります」と言い、その次のハンドから上げる（店舗 2026-11-09:
+# 終盤はハンドが 1 分ほどで、遷移の 48・59 秒後に始まった 2 つ目のハンドを 1 ハンド早く上げていた = メモ h60・h69）
+LEVEL_NO_ANNOUNCE_SEC = 90.0
 # 手札 2 枚が続けて読めない席を知らせるハンドの数（店舗 2026-10-26: 席 3 のリーダー）
 UNREAD_SEAT_HANDS = 2
 # 「フォールド」と聞こえたが手番の人の札がまだ席にあるとき、この秒数以内に札が離れたら、その発話の時刻の
@@ -5874,16 +5880,20 @@ class IntegrationThread(threading.Thread):
         times = [t for t in times if t]
         return min(times) if times else None
 
-    def _level_before_hand(self) -> None:
-        """ハンドを始める前: 待っているレベルを、宣言があれば（またはもう 1 ハンド待ったなら）上げる。"""
+    def _level_before_hand(self, at: Optional[float] = None) -> None:
+        """ハンドを始める前: 待っているレベルを、宣言があれば上げる。宣言が無ければ、遷移のあと最初のハンドは前の
+        ブラインドのまま、そのあとは遷移から `LEVEL_NO_ANNOUNCE_SEC` たって始まるハンドから上げる。"""
         wait = self._level_wait
         if wait is None:
             return
-        if wait["announced"] or wait["first_hand"] is not None:
+        deferred = wait["first_hand"] is not None
+        long_enough = at is None or at - wait["at"] >= LEVEL_NO_ANNOUNCE_SEC
+        if wait["announced"] or (deferred and long_enough):
             self._level_wait = None
             self._apply_level(None, wait["sb"], wait["bb"], wait["ante"], level=wait["level"])
             return
-        wait["first_hand"] = self._game_state.hand_id + 1      # 宣言が無ければ、このハンドは前のブラインド
+        # 宣言が無ければ、このハンドは前のブラインド（このハンドの最初のアクションまでに宣言があれば始め直す）
+        wait["first_hand"] = self._game_state.hand_id + 1
 
     def _rebind_blinds(self, wait: dict, why: str) -> None:
         """遷移のあと最初のハンドを新しいブラインドで始め直す（入力は流し直す）。"""
@@ -5981,6 +5991,35 @@ class IntegrationThread(threading.Thread):
         if self._tournament is not None:
             info["clock"] = self._tournament.status(self._clock())
         return info
+
+    def _table_game(self) -> dict:
+        """卓モニタの上の段: 卓の種類・ブラインド・時計と、見落とすと困る知らせ（`warnings`）。"""
+        info = self.table_info()
+        silent = self._mic_silent_sec()
+        if silent is not None:
+            # 店舗 2026-11-09: 22:00 ごろからマイクが無音（送信機の電池切れらしい）。端末の知らせは 3 回出たが 50 分
+            # 気づかれず、29 ハンドに声が入らなかった。iPad で見ている卓モニタにも出す
+            info["warnings"] = [f"マイクに声が入っていません（{int(silent // 60)} 分 {int(silent % 60)} 秒）"
+                                " — マイクの電池・受信機を確かめてください"]
+        return info
+
+    def _mic_silent_sec(self) -> Optional[float]:
+        """プレー中に `SILENT_MIC_SEC` 以上マイクに声が入っていなければ、その秒数（入っていれば None）。"""
+        if self._voice_heard_at is None or not (self._hand_open and self._in_play):
+            return None
+        started = self._hand_started_epoch
+        now = self._clock()
+        if started is None:
+            return None
+        try:
+            last = self._voice_heard_at()
+        except Exception:  # noqa: BLE001
+            return None
+        silent = now - (last if last is not None else started)
+        # 配った直後は話し始めを待つ（ハンドの間が静かだっただけで出さない）
+        if now - started < MIC_WARN_AFTER_DEAL_SEC or silent < SILENT_MIC_SEC:
+            return None
+        return silent
 
     def _blinds_record(self) -> dict:
         """記録の `blinds`（BB アンティがあれば `bb_ante` を足す = additive）。"""
@@ -6085,7 +6124,7 @@ class IntegrationThread(threading.Thread):
                 position_map=self._safe_position_map(),
                 board_absent_since=board_presence.get("absent"),
                 board_pending=board_presence.get("pending"),
-                game=self.table_info(),
+                game=self._table_game(),
             )
         except Exception:  # noqa: BLE001 — 表示用の派生。失敗でハンドを止めない
             logger.exception("卓状態の組み立てに失敗しました — スキップします")
@@ -6570,7 +6609,8 @@ class IntegrationThread(threading.Thread):
         restored = self._restore_dealt_busted_seats() if auto else []
         if self._before_new_hand is not None:
             self._before_new_hand(gs.hand_id + 1)
-        self._level_before_hand()           # 時計のレベル（宣言を待つ, 2026-10-28）
+        self._level_before_hand(started_at if started_at is not None
+                                else (event.timestamp if event is not None else None))   # 時計のレベル（宣言を待つ）
         # S5（ADR-0047）: stack_start はブラインド post 前に取る。pokerkit backend は new_hand() で
         # ブラインドを自動 post するため、post 後に取ると result がブラインド分ずれる。台本のハンドは台本の持ち点。
         next_stacks = getattr(gs, "stacks_before_next_hand", None)
