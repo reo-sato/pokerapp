@@ -227,9 +227,12 @@ BOARD_SWEEP_SEC = 1.0
 # ハンド 7 のオーナーのメモ）: いまのベットと同じ額だけを言ったあと、この秒数のうちに話し始めた「コール」は、その賭けの
 # あとに記録したコールの言い直し
 RECAP_SEC = 3.0
+# オールインの額を数える（オーナー 2026-11-09）: 「カウント」「カウントします」で数え始め、「オールインは〜点」で終える。
+# 頼んだ人が撤回して、数え終わらないうちにアクションを言うこともある。数えるのにかかる秒数の上限（11/05: 16〜44 秒）
+COUNT_MAX_SEC = 120.0
 # 札の離脱で組み直す（取り消す）ときに入力として残す音声のアクション（訂正の合図「失礼しました」も）
 _REPLAYABLE_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "allin", "heads_up", "players_left",
-                                 "correction"})
+                                 "correction", "count"})
 # ――― 口頭の訂正「失礼しました」（オーナー 2026-10-06）―――
 # ハンドのアクションを最初からやり直すことはない。ハンドの進行を優先して、ストリートの最初からやり直すか、直前の
 # アクションを訂正する。どちらか（どちらでもない = 会話）は、そのあとのアクションとの辻褄で選ぶ: 解釈ごとにハンドを
@@ -685,6 +688,8 @@ class IntegrationThread(threading.Thread):
         self._last_wager_point: Optional[tuple[dict, LegalContext]] = None
         # いまのベットの額の言い直しのあとに続く「コール」の言い直しを待つ {"t", "records", "text"}（`RECAP_SEC`）
         self._recap: Optional[dict] = None
+        # オールインの額を数えている {"t", "street", "allin"}（「カウント」の合図から, `_handle_count`）
+        self._counting: Optional[dict] = None
         # 最後の 1 人を残すフォールドの確定待ち {"seat", "t"}
         self._foldout_pending: Optional[dict] = None
         # オールインのランアウト（店舗 2026-10-29 メモ ハンド 121「オールインコールはハンドを前に出してボードをディール」）:
@@ -1423,6 +1428,13 @@ class IntegrationThread(threading.Thread):
             self._handle_correction(event)
             return
 
+        if action == "count":
+            self._handle_count(event)
+            return
+
+        if self._counting is not None and (action in _BETTING_WORDS or action == "fold") and self._count_word(event):
+            return
+
         if self._fold_word_already_signalled(event):
             return
 
@@ -1808,6 +1820,52 @@ class IntegrationThread(threading.Thread):
     def _commit_word_labels(self) -> None:
         self._word_labels.update(self._current_word_labels())
         self._hand_word_labels = {}
+
+    def _handle_count(self, event: AudioEvent) -> None:
+        """「カウント」= オールインの額を数え始める合図（オーナー 2026-11-09）。そのストリートの最後のオールインを数える。
+        数える声（数字だけ）は記録しない・「オールインは〜点」はそのオールインの言い直し・ほかのアクションの語は撤回して
+        言ったアクション（`_count_word`）。"""
+        self._counting = None
+        if not (self._rules_aware and self._hand_open):
+            return
+        street = self._game_state.street
+        allin = next((a for a in reversed(self._current_actions) if a.action == "allin" and a.street == street), None)
+        if allin is None:
+            if not self._rebuilding:
+                self._notice(f"「{event.raw_text}」— このストリートにオールインが無いので、カウントとみなしません")
+            return
+        self._counting = {"t": _spoken_at(event), "street": street, "allin": allin}
+        if not self._rebuilding:
+            self._notice(f"「{event.raw_text}」— 席{allin.seat} のオールインの額を数えます（数える声は記録しません）")
+
+    def _count_word(self, event: AudioEvent) -> bool:
+        """数えているあいだの賭けの語。数える声（いまのベット以下の数字だけの発話）と、数え終わりの「オールインは〜点」は
+        記録しない（True）。ほかの語は数えるのをやめて（撤回）今までどおり扱う（False）。"""
+        counting = self._counting
+        allin = counting["allin"]
+        spoken = _spoken_at(event)
+        if (not self._hand_open or self._game_state.street != counting["street"]
+                or not any(a is allin for a in self._current_actions)
+                or not 0.0 <= spoken - counting["t"] <= COUNT_MAX_SEC):
+            self._counting = None
+            return False
+        if event.action == "allin" and event.amount:
+            # 「オールインは 2万6千点」: 数えたオールインの言い直し（あいだにコールがあっても・時間がたっていても）
+            self._counting = None
+            self._mark_restated(allin, event, "allin_restated")
+            self._label_word(event, "count")
+            return True
+        if "amount_only" in event.parse_flags and event.amount:
+            ctx = self._game_state.legal_context()
+            current = ctx.committed + ctx.amount_to_call
+            if ctx.actor_seat is None or "raise" not in ctx.legal_actions or event.amount <= current:
+                self._label_word(event, "count")
+                self._recap = None
+                if not self._rebuilding:
+                    self._notice(f"「{event.raw_text}」は席{allin.seat} のオールインを数える声とみて記録しませんでした")
+                return True
+        self._counting = None                     # 撤回して言ったアクション（いまのベットより大きい数字はレイズ）
+        return False
 
     def _label_word(self, event: AudioEvent, label: str) -> None:
         self._hand_word_labels[word_key(event)] = label
@@ -2628,6 +2686,7 @@ class IntegrationThread(threading.Thread):
             "spoken": dict(self._spoken_folds),
             "held": self._held_betting_words,
             "recap": dict(self._recap) if self._recap else None,
+            "counting": dict(self._counting) if self._counting else None,
             "floor": self._departure_floor,
         }
 
@@ -2661,6 +2720,7 @@ class IntegrationThread(threading.Thread):
         self._streets_synced = set(checkpoint["synced"])
         self._held_betting_words = checkpoint.get("held", 0)
         self._recap = checkpoint.get("recap")
+        self._counting = checkpoint.get("counting")
         self._departure_floor = checkpoint.get("floor")
 
     def _replay_inputs(self, rest: list, reassign_spoken_folds: bool = False) -> None:
@@ -4138,6 +4198,7 @@ class IntegrationThread(threading.Thread):
         self._last_wager = None
         self._last_wager_point = None
         self._recap = None
+        self._counting = None
         self._spoken_fold_raw = {}
         self._foldout_winner_left = False
         try:
@@ -4247,6 +4308,7 @@ class IntegrationThread(threading.Thread):
         self._last_wager = None
         self._last_wager_point = None
         self._recap = None
+        self._counting = None
         self._spoken_fold_raw = {}
         self._foldout_winner_left = False
         restart(seat)
@@ -5505,6 +5567,7 @@ class IntegrationThread(threading.Thread):
         self._last_wager = None
         self._last_wager_point = None
         self._recap = None
+        self._counting = None
         self._spoken_fold_raw = {}
         self._foldout_winner_left = False
         self._correction_tag = None
@@ -6555,6 +6618,7 @@ class IntegrationThread(threading.Thread):
         self._last_wager = None
         self._last_wager_point = None
         self._recap = None
+        self._counting = None
         self._spoken_folds = {}
         self._spoken_fold_raw = {}
         self._foldout_pending = None
@@ -6850,6 +6914,7 @@ class IntegrationThread(threading.Thread):
         self._showdown_mucks = []
         self._showdown_declared = False
         self._pending_showdown = None
+        self._counting = None
         self._showdown_gaps = []
         self._foldout_pending = None
         self._runout_seats = set()

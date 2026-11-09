@@ -66,6 +66,9 @@ PARAMS: dict[str, float] = {
                                  # 7 ハンド。間を空けずに言う。前にオールインが無ければ、オールイン → コールの 2 行）
     "p_corrected": 0.8,          # 「失礼しました」の前の語を言い直した（取り消した）: ディーラーは言い間違えたら「失礼しました」と
                                  # 言って言い直す（オーナー 2026-10-06）= その語は使われないのがふつう（ライブも取り消す）
+    "p_count": 0.9,              # 「カウント」の合図のあとの数える声（数字だけ）・数え終わりの「オールインは〜点」（オーナー
+                                 # 2026-11-09）: ディーラーは数えるたびに言う = その語は使われないのがふつう（ライブも記録しない,
+                                 # engine の印 "count"）
     "p_sub": 0.02,               # 語の種類の取り違え（チェック ↔ コール など）
     "p_amount": 0.05,            # 額の聞き違い（寄せた・丸めた）
     "amount_prior_weight": 1.0,  # 賭けの額のポットに対する大きさの重み（`core.bet_sizing.size_prior` に掛ける。オーナー
@@ -710,6 +713,8 @@ class SessionEstimator:
                 p_ph = max(p_ph, p["p_restate"])   # 前の語の言い直し・ショーダウンのあとのマックの声
             if label == "corrected":
                 p_ph = max(p_ph, p["p_corrected"])
+            if label == "count":
+                p_ph = max(p_ph, p["p_count"])
             if t.action == "allin" and _allin_call_recap(t, same, rows):
                 p_ph = max(p_ph, p["p_allin_call_recap"])
             terms.append((f"余計な語「{t.raw_text}」", _log(p_ph)))

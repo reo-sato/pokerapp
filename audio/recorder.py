@@ -138,6 +138,8 @@ def describe_event(event: Optional[AudioEvent]) -> str:
         action = f"残り {event.amount} 人"
     elif event.action == "correction":
         action = "訂正の合図（直前のアクションか、ストリートの最初から言い直す）"
+    elif event.action == "count":
+        action = "カウントの合図（オールインの額を数える）"
     else:
         action = event.action
     parts = [action]

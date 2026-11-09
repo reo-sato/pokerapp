@@ -623,6 +623,28 @@ CORRECTION = "correction"
 RESTATEMENT = "restatement"
 _SHORT_RESTATE_CUE = re.compile(r"(?:足りない|タリナイ|たりない)(?:から|ので|カラ|ノデ)")
 _CORRECTION_CUE = re.compile(r"(?:大変|タイヘン)?(?:失礼|シツレイ)(?:イタ|致)?シマシタ")
+# 「カウント」「カウントします」「カウントいたします」: オールインの額を数え始める合図（オーナー 2026-11-09）。続けて数え、
+# 「オールインは〜点」で終える。頼んだ人が撤回して、数え終わらないうちにアクションを言うこともある。数える声の扱いは
+# engine が決める（`_handle_count`）。申し出の「お声掛けでカウントいたします」（11/05 に 4 回）は合図にしない。
+# 語の続き（「カウントしてくれてる」「アカウント」）・数えないと言う形（「カウント大丈夫です」）も合図にしない
+COUNT = "count"
+_COUNT_CUE = re.compile(r"カウント(?:(?:イタ|致)?シマス|オ?(?:願イ|ネガイ)(?:シマス)?)?ネ?")
+_COUNT_OFFER = re.compile(r"声(?:掛|ガ|カ)ケデ[\s、,]*$")
+_COUNT_NEXT_OK = re.compile(r"[\s、。,.・!！?？…\d一二三四五六七八九十百千万]")
+
+
+def _count_cue(norm: str) -> Optional[re.Match]:
+    """片仮名に寄せた文の中の、数え始める合図（`_COUNT_CUE`）。無ければ None。"""
+    for m in _COUNT_CUE.finditer(norm):
+        before, after = norm[:m.start()], norm[m.end():]
+        if before and re.match(r"[ァ-ヶー]", before[-1]):
+            continue                                     # 「アカウント」・「お声掛けでカウント」
+        if _COUNT_OFFER.search(before):
+            continue                                     # 「お声掛けで、カウントいたします」= 申し出
+        if after and not _COUNT_NEXT_OK.match(after):
+            continue                                     # 「カウントしてくれてる」「カウント大丈夫です」
+        return m
+    return None
 # 自分の額にした部分の読みの印（額の読みが確かでない）。アクションの語の読みにも付け替える
 _AMOUNT_READ_FLAGS = ("ambiguous_amount", GARBLED_DIGITS)
 # 「チェックアラウンド」= まだ動いていない全員がチェックした（オーナーの説明, 2026-09-25）。チェックの語に続く
@@ -1562,6 +1584,19 @@ def _parse_utterance(
         before = full[:cue.start()].strip(_TRAILING_PUNCTUATION)
         after = full[cue.end():].strip(_TRAILING_PUNCTUATION)
         event = AudioEvent(action=CORRECTION, amount=0, timestamp=time.time(), raw_text=text,
+                           confidence=confidence, utterance_start_ts=utterance_start_ts)
+        return [
+            *(_parse_utterance(before, confidence, utterance_start_ts) if before else []),
+            event,
+            *(_parse_utterance(after, confidence, utterance_start_ts) if after else []),
+        ]
+    count = _count_cue(_to_katakana(full))
+    if count is not None:
+        # 数え始める合図。前は合図の前のアクション、後ろは数える声（「カウントします。1万、2万。」）か撤回したあとの
+        # アクション。どちらも engine が合図との順で扱う（`_to_katakana` は文字数を変えない）
+        before = full[:count.start()].strip(_TRAILING_PUNCTUATION)
+        after = full[count.end():].strip(_TRAILING_PUNCTUATION)
+        event = AudioEvent(action=COUNT, amount=0, timestamp=time.time(), raw_text=text,
                            confidence=confidence, utterance_start_ts=utterance_start_ts)
         return [
             *(_parse_utterance(before, confidence, utterance_start_ts) if before else []),
