@@ -1299,7 +1299,18 @@ class SessionEstimator:
         for e in r.best.edits:
             reasons.append((e.label or e.kind) + mark)
         reasons += r.best.flags
+        if self._voiceless(r.window):
+            # 店舗 2026-11-09: 22:00 からマイクが無音。ヘッズアップで先に札が離れた人をフォールドにして勝者を外し、
+            # 要確認が付かなかった（559af646 ハンド 67・74）。声が無ければ札だけの推し量りなので、いつも確かめてもらう
+            reasons.append("声が 1 つも無い（札だけで推定）")
         return list(dict.fromkeys(reasons))
+
+    def _voiceless(self, w: HandWindow) -> bool:
+        """書き起こしのあるセッションで、このハンドの窓に文になった発話が 1 つも無い（マイクの電池切れ・ミュート）。"""
+        if not any((r.get("text") or "").strip() for r in self.transcripts):
+            return False                      # 声を使わないセッション（RFID だけ）は数えない
+        _events, rows = self._window_inputs(w)
+        return not any((r.get("text") or "").strip() and not r.get("no_speech") for r in rows)
 
     def estimate(self, on_hand: Optional[Callable[[HandResult], None]] = None, workers: int = 1,
                  windows: Optional[list[HandWindow]] = None) -> list[HandResult]:

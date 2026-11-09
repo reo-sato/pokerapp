@@ -562,6 +562,23 @@ class TestWinnerAfterTheHand:
         assert [(a["seat"], a["action"]) for a in hand2["actions"]][:2] == [(5, "call"), (4, "check")]
 
 
+class TestVoiceless:
+    """声が 1 つも無いハンドは札だけの推し量りなので、いつも要確認（店舗 2026-11-09: マイクの電池切れのあいだ、
+    ヘッズアップで先に札が離れた人をフォールドにして勝者を外し、要確認が付かなかった = 559af646 ハンド 67・74）。"""
+
+    def test_a_hand_without_speech_is_reviewed(self):
+        heard = ({"utterance_start_ts": T0 - 600, "text": "コール"},)          # 前のハンドには声があった
+        est = _estimator(transcripts=heard)
+        assert est._voiceless(_window())                                        # noqa: SLF001
+        noise = heard + ({"utterance_start_ts": T0 + 5, "text": "", "no_speech": True},)
+        assert _estimator(transcripts=noise)._voiceless(_window())             # noqa: SLF001
+        spoken = heard + ({"utterance_start_ts": T0 + 5, "text": "チェック"},)
+        assert not _estimator(transcripts=spoken)._voiceless(_window())        # noqa: SLF001
+
+    def test_a_session_without_voice_is_not_flagged(self):
+        assert not _estimator()._voiceless(_window())                           # noqa: SLF001 — RFID だけの記録
+
+
 class TestContentFingerprint:
     """推定器まわりのファイルの内容の指紋（監査 3 回目の必須 4: `params_hash` は値だけ）。"""
 
