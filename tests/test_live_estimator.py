@@ -163,9 +163,13 @@ class TestWhen:
         runner = _Runner(fail=True)
         est = _estimator(tmp_path, runner, [T0 + 200])
         assert est.step() == 2 and runner.calls == [1, 2]
-        est.step()
-        est.step()
-        assert est.step() == 0 and runner.calls == [1, 2] * 3      # 失敗も 1 回に数える（使い続けない）
+        assert est.step() == 0                                      # 同じ入力で失敗したら推し直さない（決定的）
+        logs.said(T0 + 10)                                          # 入力が変われば推し直す
+        assert est.step() == 1 and runner.calls == [1, 2, 1]
+        logs.said(T0 + 11)
+        assert est.step() == 1
+        logs.said(T0 + 12)
+        assert est.step() == 0 and runner.calls == [1, 2, 1, 1]     # 失敗も 1 回に数える（3 回まで）
 
     def test_an_old_session_is_left_alone(self, tmp_path):
         logs = _Logs(tmp_path)

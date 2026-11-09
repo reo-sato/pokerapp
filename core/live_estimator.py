@@ -8,7 +8,7 @@
   次のハンドが無いまま確定から `IDLE_SEC` たったときも推す（休憩・セッションの終わり）。
 - **推し直す**: そのハンドの窓の中の書き起こしの行・events の数、窓が閉じたかどうか（`hand_marker`）が、推した
   ときと変わったら推し直す（API につながらず後で書き起こした発話・あとから始まった次のハンド・セッションの後の
-  ハンドの間の発話）。1 ハンド `MAX_RUNS` 回まで。
+  ハンドの間の発話）。1 ハンド `MAX_RUNS` 回まで。失敗したハンドは、入力が変わるまで推し直さない（推定は決定的）。
 - **重くしない**: 推定は子プロセス（`tools/estimate_logs.py --hands N --write`）で、低い優先度で 1 本ずつ動かす。
   会計の API や卓モニタの応答を邪魔しない。落ちても店舗サーバーは止めない。
 
@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RECHECK_SEC = 5.0
 IDLE_SEC = 60.0               # 次のハンドが無いまま確定からこの秒数たったら推す
 MAX_RUNS = 3                  # 1 ハンドを推す回数の上限（入力が変わり続けても CPU を使い続けない）
-RUN_TIMEOUT_SEC = 300.0
+RUN_TIMEOUT_SEC = 900.0       # 重いハンド（11/05 のハンド 4 など）でも打ち切らない長さ
 ACTIVE_SEC = 12 * 3600.0      # events を最後に書いてからこの秒数のうちは「いまのセッション」
 ROW_BEFORE_SEC = 0.5          # 推定器の窓（`SessionEstimator._window_inputs`）と同じ幅
 EVENT_BEFORE_SEC = 2.0
@@ -211,6 +211,7 @@ class LiveEstimator:
         self._max_runs = max_runs
         self._active_sec = active_sec
         self._runs: dict[tuple[str, object], int] = {}
+        self._tried: dict[tuple[str, object], dict] = {}     # 最後に推したときの目印（失敗しても）
         self._tails: dict[str, tuple[_Tail, _Tail, _Tail]] = {}
 
     def current_session(self) -> Optional[str]:
@@ -250,6 +251,9 @@ class LiveEstimator:
 
     def due(self, session_id: str) -> list[int]:
         """いま推すハンド（古い順）。"""
+        return [hid for hid, _ in self._due(session_id)]
+
+    def _due(self, session_id: str) -> list[tuple[int, dict]]:
         record = read_json(self.log_dir / f"{session_id}.json")
         if record is None:
             return []
@@ -271,7 +275,9 @@ class LiveEstimator:
             marker = hand_marker(started, nxt, marks)
             if (done.get(str(hid)) or {}).get("inputs") == marker:
                 continue                  # 推したときと入力が同じ
-            out.append(hid)
+            if self._tried.get((session_id, hid)) == marker:
+                continue                  # 同じ入力で失敗した（推定は決定的 = 推し直しても同じ）
+            out.append((hid, marker))
         return out
 
     def step(self, stop: Optional[threading.Event] = None) -> int:
@@ -280,11 +286,12 @@ class LiveEstimator:
         if session_id is None:
             return 0
         ran = 0
-        for hid in self.due(session_id):
+        for hid, marker in self._due(session_id):
             if stop is not None and stop.is_set():
                 break
             key = (session_id, hid)
             self._runs[key] = self._runs.get(key, 0) + 1
+            self._tried[key] = marker
             started = time.monotonic()
             ok = False
             try:
