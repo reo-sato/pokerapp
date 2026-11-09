@@ -173,7 +173,8 @@ def list_player_hands(
 
     seat assignment はあるが hand log に対応 hand が無いものは除外する。
     `correction_repo` があれば訂正オーバーレイを適用した訂正済みビューを返す（ADR-0036）。
-    `truth`（`viewer_api.show_truth`）なら、真のアクションを保存したハンドだけを真のアクションで返す（訂正は重ねない）。
+    `truth`（`viewer_api.show_truth`）なら、真のアクションを保存したハンドは真のアクションで、無いハンドは推定があれば
+    推定で返す（どちらも無いハンドは外す。訂正は重ねない, 2026-11-09）。
     unknown session は SessionNotFoundError（session_repo 経由）。
     """
     cls = session_repo.player_repo.equivalence_class(player_id)
@@ -280,7 +281,7 @@ def get_hand(
     """hand log から HandSummary dict を 1 件返す。
 
     `correction_repo` があれば訂正オーバーレイを適用した訂正済みビューを返す（ADR-0036）。
-    `truth` なら真のアクションの形で返す（真のアクションが無い・終わっていないハンドは HandNotFoundError）。
+    `truth` なら真のアクションの形で返す（無ければ推定。どちらも無いハンドは HandNotFoundError）。
     session レイヤ未登録の legacy session_id（timestamp 形式）でも log が存在すれば返す
     （viewer-api.md 備考）。不在は HandNotFoundError（code: not_found）。
     """

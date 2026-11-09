@@ -154,6 +154,16 @@ class TestViewer:
         shown = truth_view(live, load_truth(tmp_path, "s"))
         assert [h["hand_id"] for h in shown] == [1] and shown[0]["winner_seat"] == 2
 
+    def test_a_hand_without_truth_shows_the_estimate(self, tmp_path):
+        """2026-11-09（ADR-0072 D3）: 真のアクションが無いハンドは推定を見せる。ライブの記録だけのハンドは見せない。"""
+        self._write(tmp_path, [{"hand_id": 1, "actions": [{"seat": 3, "action": "fold"}, {"seat": 1, "action": "fold"}]}])
+        estimated = dict(_captured(), hand_id=2, estimate={"posterior": 0.9})
+        live = [dict(_captured(), estimate={"posterior": 0.5}), estimated, dict(_captured(), hand_id=3)]
+        shown = truth_view(live, load_truth(tmp_path, "s"))
+        assert [h["hand_id"] for h in shown] == [1, 2]
+        assert shown[0]["truth"] is True and "estimate" not in shown[0]        # 真のアクションが先
+        assert shown[1] is estimated
+
     def test_the_file_is_read_again_when_it_changes(self, tmp_path):
         path = self._write(tmp_path, [])
         assert load_truth(tmp_path, "s") == {}
@@ -191,6 +201,13 @@ class TestViewer:
         assert [h["hand_id"] for h in hands] == [1] and hands[0]["truth"] is True
         assert on.get(f"/api/sessions/{sid}/hands/1").json()["winner_seat"] == 2
         assert on.get(f"/api/sessions/{sid}/hands/2").status_code == 404
+        # ハンド 2 を推定したら、真のアクションが無くても推定を見せる
+        est = {"session_id": sid, "hands": {"2": {"hand_id": 2, "started_at": live[1].get("started_at"), "review": True,
+                                                   "hand": dict(live[1], winner_seat=3)}}}
+        (tmp_path / f"{sid}.estimate.json").write_text(json.dumps(est), encoding="utf-8")
+        hands = on.get(f"/api/players/{a}/sessions/{sid}/hands").json()["hands"]
+        assert [h["hand_id"] for h in hands] == [1, 2] and hands[1]["winner_seat"] == 3
+        assert on.get(f"/api/sessions/{sid}/hands/2").json()["estimate"]["posterior"] is None
         off = client(False)
         assert len(off.get(f"/api/players/{a}/sessions/{sid}/hands").json()["hands"]) == 2
 

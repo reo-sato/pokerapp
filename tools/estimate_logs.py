@@ -11,6 +11,11 @@
     python tools/estimate_logs.py logs --latest --shadow               # いちばん新しいセッションだけ（所要を測る）
     python tools/estimate_logs.py logs --latest --shadow --workers 1   # 1 ハンドずつ順に（ハンドごとの時間を出す）
     python tools/estimate_logs.py C:\\PokerHandLogger\\logs --write    # 記録の本体にする（評価に通ってから）
+    python tools/estimate_logs.py logs --session <sid> --hands 12 --write   # ハンド 12 だけ推して書き足す（プレー中）
+
+`--hands` はプレー中にハンドごとに推すとき（店舗サーバーの `core/live_estimator.py`, ADR-0072 段階 1）。指定した
+ハンドの窓だけ推し、推定のファイルのほかのハンドは残す。各ハンドに推したときの入力の目印 `inputs`（窓の中の
+書き起こしの行と events の数・窓が閉じたか）を残し、変わったら店舗サーバーが推し直す。
 """
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ sys.path.insert(0, str(ROOT))
 
 from core.atomic_io import atomic_write_json, read_jsonl  # noqa: E402
 from core.hand_estimate import ESTIMATE_SUFFIX  # noqa: E402
+from core.live_estimator import SHADOW_SUFFIX, read_json, session_markers  # noqa: E402
 from integration.estimator import (  # noqa: E402
     ESTIMATOR_VERSION,
     PARAMS,
@@ -39,7 +45,6 @@ from integration.estimator import (  # noqa: E402
 )
 from integration.world_replay import PresenceTimeline  # noqa: E402
 
-SHADOW_SUFFIX = ".estimate.shadow.json"
 MATCH_SEC = 10.0          # 推定のハンドとライブの記録のハンドを、始まりの時刻がこの秒数以内なら同じとみる
 
 
@@ -132,23 +137,49 @@ def entry_for(result: HandResult, live: Optional[dict]) -> dict:
     }
 
 
+def merge_hands(old: Optional[dict], new: dict) -> dict:
+    """推定のファイルに、推したハンドだけ書き足す（ほかのハンドは残す。同じセッションのときだけ）。"""
+    if not old or old.get("session_id") != new.get("session_id"):
+        return new
+    hands = dict(old.get("hands") or {})
+    hands.update(new.get("hands") or {})
+    ordered = dict(sorted(hands.items(), key=lambda kv: (not str(kv[0]).isdigit(), int(kv[0]) if str(kv[0]).isdigit()
+                                                          else 0, str(kv[0]))))
+    return {**new, "hands": ordered}
+
+
 def estimate_session(events: list, transcripts: list[dict], presence: Optional[PresenceTimeline], setup: dict,
                      flags: dict, session_id: str, live_hands: list[dict], params: dict = PARAMS,
                      on_hand: Optional[Callable[[HandResult, Optional[dict]], None]] = None,
-                     workers: int = 1) -> dict:
-    """セッションの全ハンドの推定（推定のファイルの中身）。`workers` > 1 ならハンドを並べて回す（結果は同じ）。"""
+                     workers: int = 1, only_hands: Optional[set] = None,
+                     inputs: Optional[dict] = None) -> dict:
+    """セッションの全ハンドの推定（推定のファイルの中身）。`workers` > 1 ならハンドを並べて回す（結果は同じ）。
+
+    `only_hands`: このハンド（ライブの記録の hand_id）だけ推す。`inputs`: hand_id → 推したときの入力の目印
+    （`core/live_estimator.hand_marker`）。各ハンドの項目に `inputs` として残す。"""
     est = SessionEstimator(events, transcripts, presence, setup, flags, session_id, params)
     hands: dict[str, dict] = {}
+
+    def hand_id_of(w) -> object:
+        live = _live_hand(live_hands, w.base.get("started_at"))
+        if live is not None:
+            return live.get("hand_id")
+        return None if live_hands else w.hand_id       # ライブの記録があれば、合うハンドだけ
 
     def add(result: HandResult) -> None:
         live = _live_hand(live_hands, result.window.base.get("started_at"))
         entry = entry_for(result, live)
+        if inputs is not None and entry["hand_id"] in inputs:
+            entry["inputs"] = inputs[entry["hand_id"]]
         if entry["hand_id"] is not None:
             hands[str(entry["hand_id"])] = entry
         if on_hand:
             on_hand(result, live)
 
-    est.estimate(on_hand=add, workers=workers)
+    windows = None
+    if only_hands is not None:
+        windows = [w for w in est.windows() if hand_id_of(w) in only_hands]
+    est.estimate(on_hand=add, workers=workers, windows=windows)
     return {"tool": "estimator", "estimator_version": ESTIMATOR_VERSION, "params_hash": params_hash(params),
             "content_hash": content_hash(), "session_id": session_id, "hands": hands}
 
@@ -160,6 +191,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("paths", nargs="+", type=Path, help="ログのフォルダ・pack_logs の zip（分けた zip は全部）")
     ap.add_argument("--session", action="append", help="このセッション（ID の頭）だけ")
     ap.add_argument("--latest", action="store_true", help="いちばん新しいセッションだけ（ログのフォルダを渡したとき）")
+    ap.add_argument("--hands", help="このハンド（ライブの記録の番号、カンマ区切り）だけ推し、推定のファイルに書き足す")
     ap.add_argument("--workers", type=int, default=_default_workers(),
                     help="ハンドを並べて推定するプロセスの数（結果は同じ。既定 = CPU の数 − 1、最大 4）")
     group = ap.add_mutually_exclusive_group()
@@ -168,6 +200,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                        help=f"推定を <sid>{ESTIMATE_SUFFIX} に書く（読む側が記録の本体として使う。評価に通ってから）")
     args = ap.parse_args(argv)
     logging.disable(logging.CRITICAL)
+    only_hands = None
+    if args.hands:
+        try:
+            only_hands = {int(x) for x in args.hands.replace(" ", "").split(",") if x}
+        except ValueError:
+            print("--hands はハンドの番号をカンマ区切りで（例: --hands 12,13）")
+            return 2
     only = args.session
     if args.latest:
         newest = newest_session(args.paths)
@@ -182,6 +221,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     # 店舗 PC の影のファイルとこちらで回した結果を比べるときの目印（同じ指紋 = 同じ推定のコードと値）
     print(f"推定器 v{ESTIMATOR_VERSION}: 値の指紋 {params_hash()}・内容の指紋 {content_hash()}")
     for inp in inputs:
+        # 推したときの入力の目印（推す前に数える: 推している間に足された行があれば、次の見回りで推し直す）
+        marks = session_markers(inp.folder, inp.session_id) if inp.folder is not None else None
         record_path = inp.folder / f"{inp.session_id}.json" if inp.folder is not None else None
         live = []
         if record_path is not None and record_path.exists():
@@ -210,13 +251,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         started = time.time()
         data = estimate_session(inp.events, inp.transcripts, presence_for(inp.folder, inp.session_id), inp.setup,
-                                inp.flags, inp.session_id, live, on_hand=show, workers=args.workers)
+                                inp.flags, inp.session_id, live, on_hand=show, workers=args.workers,
+                                only_hands=only_hands, inputs=marks)
         print(f"  所要 {time.time() - started:.0f} 秒（{len(data['hands'])} ハンド・{args.workers} プロセス）")
         if hand_secs:
             # 評価の条件（事前登録 4. の 6.）: 1 ハンドの推定の中央値と最長
             print("  " + format_hand_times(hand_secs))
         if args.shadow or args.write:
             out = inp.folder / f"{inp.session_id}{SHADOW_SUFFIX if args.shadow else ESTIMATE_SUFFIX}"
+            if only_hands is not None:
+                data = merge_hands(read_json(out), data)
             atomic_write_json(out, data)
             print(f"  → {out}")
     return 0

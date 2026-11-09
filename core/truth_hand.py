@@ -376,7 +376,7 @@ def truth_deltas(gt: dict, captured: dict) -> Optional[dict[int, int]]:
     return deltas
 
 
-# ――― お客さんの画面に真のアクションだけを見せる（`viewer_api.show_truth`, 2026-10-19）―――
+# ――― お客さんの画面に真のアクション（無ければ推定）だけを見せる（`viewer_api.show_truth`, 2026-10-19 / 11-09）―――
 
 _TRUTH_CACHE: dict[str, tuple[tuple[int, int], dict[int, dict]]] = {}
 
@@ -407,12 +407,18 @@ def load_truth(log_dir: "str | Path", session_id: str) -> dict[int, dict]:
 
 
 def truth_view(hands: list[dict], truth: dict[int, dict]) -> list[dict]:
-    """真のアクションを保存して終わっているハンドだけを、真のアクションの形にして返す（ほかは外す。オーナー
-    2026-10-19: お客さんには真のアクションだけを見せる）。"""
+    """真のアクションを保存して終わっているハンドは真のアクションの形に、無いハンドは推定を重ねたもの
+    （`core/hand_estimate.apply_estimate` が付ける `estimate` のあるハンド）を返す。どちらも無いハンド（ライブの記録
+    だけ）は外す。
+
+    オーナー 2026-10-19: お客さんには真のアクションだけを見せる（ライブの記録は誤りが多い）。2026-11-09: 推定は
+    ライブより成績が良いので、真のアクションが無いハンドは推定を見せる（ADR-0072 D3。プレー中にハンドごとに推す）。"""
     out = []
     for hand in hands:
         entry = truth.get(hand.get("hand_id"))
         made = materialize_truth(entry, hand) if entry else None
         if made is not None:
             out.append(made)
+        elif isinstance(hand.get("estimate"), dict):
+            out.append(hand)
     return out

@@ -428,6 +428,35 @@ cd C:\PokerHandLogger
 うまく動かないときはログ `logs\store_server.log` を見ます。手で起動して確かめるなら `start_server.cmd`
 （この窓を閉じると止まります。自動起動が動いているときは断られます）。
 
+### ハンドごとの推定（プレー中に推定を見せる, ADR-0072）
+
+店舗サーバーは、ハンドが終わって次のハンドが始まると（次のハンドが無ければ確定から 60 秒で）、そのハンドを推定器で
+推して `logs\<セッション>.estimate.json` に書き足します（設定 `estimator.live`、既定 true）。1 ハンド数秒〜30 秒、
+低い優先度で 1 つずつ動かすので、会計や画面の操作を邪魔しません。あとから届いた書き起こし（API につながらなかった間の
+発話など）や、ハンドの間の発話の書き起こしで入力が増えたら推し直します（1 ハンド 3 回まで）。
+
+- お客さん・スタッフの画面とクラウドは、推定をライブの記録に重ねて見せます。
+- `viewer_api.show_truth` が true（お客さんには真のアクションだけ）のときも、真のアクションをまだ入れていないハンドは
+  推定を見せます（推定も無いハンドは今までどおり見せません）。
+- 推した様子は `logs\store_server.log` に「ハンド N を推定しました（成功・8.2 秒・1 回目）」と出ます。
+
+### 書き起こしを API にする（ADR-0072）
+
+店舗 PC の Whisper の代わりに、OpenAI の whisper-1 で 1 発話ずつ書き起こせます。1 発話 1 秒ほどで、店舗 PC の CPU を
+使いません（プレー中にロガーへ声が入り、店舗 PC が重くなりません）。費用は 1 セッション 100 円以下の見込みです。
+
+1. 鍵を店舗 PC に 1 回だけ登録します（PowerShell。鍵はリポジトリ・`config.json`・ログには置きません）:
+   `setx POKERAPP_OPENAI_API_KEY "sk-..."`（登録したあとに開いた窓から効きます）
+2. `.\venv\Scripts\python.exe tools\set_config.py audio.transcriber openai`
+3. 音声を残す設定にします（つながらない間の発話を後で送り直すため）: `.\venv\Scripts\python.exe tools\set_config.py audio.save_audio true`
+
+- 声かどうかは店舗 PC で判定し、声でない音は送りません。第 2 の耳は今までどおり店舗 PC で動きます。
+- つながらないときは、ロガーに「● 書き起こしの API につながりません（音声は保存して、つながったら送り直します）」と
+  出ます。その間もブラインドの宣言は第 2 の耳で聞き分けます。つながると「● 書き起こしの API にまたつながりました」。
+  送り直した行はロガーには使わず、推定に使います。
+- 鍵が無いと、起動したときに知らせて店舗 PC の Whisper に戻ります。
+- 音声は国外（米国）で処理されます。紙の告知に書いています。
+
 ## スタッフが iPad で会計・注文を操作する
 
 スタッフは iPad（Safari）から、会計・注文の確定・座席・ハンドの操作ができます（スタッフ用画面, ADR-0064）。
@@ -610,6 +639,9 @@ claude.ai に出すことがあります（`tools/review_page.py`）。発話に
 | | `temperature_fallback` | `false` | 自信の低い書き起こしをやり直すか（雑音で数分遅れたので既定 off） |
 | | `cpu_threads` | `0` | Whisper の CPU スレッド数（0 = faster-whisper の既定 4）。`python tools/audio_check.py bench` で測って決める |
 | | `save_audio` | `false` | 認識に回した発話の音声を `logs/audio/<セッション>/` に保存（テスト中だけ） |
+| | `keep_days` | `90` | 発話の音声をこの日数で消す（店舗サーバーが 1 日 1 回。書き起こしの文・記録は残す。`0` = 消さない） |
+| | `transcriber` | `local` | 書き起こしの方式。`local` = 店舗 PC の Whisper / `openai` = OpenAI の whisper-1（鍵は環境変数、下の「書き起こしを API にする」） |
+| | `live_transcribe` | `true` | プレー中に書き起こしてロガーに使う（`false` = セッションのあとで書き起こす。`openai` のときは常に true 扱い） |
 | | `second_ear.enabled` | `true` | 第 2 の耳（Whisper が読めなかった発話を聞き直す。モデル約 170 MB は更新で取得） |
 | `rfid` | `enabled` | `false` | RFID を使うか（任意） |
 | | `transport` | `http` | `http`（ESP32）/ `pcsc`（リーダー直結） |
@@ -631,6 +663,7 @@ claude.ai に出すことがあります（`tools/review_page.py`）。発話に
 | | `rfid_folds` | `true` | フォールドを席の札の離脱で決める（席の在否が取れる `pcsc` のとき） |
 | | `fold_absent_sec` | `3.0` | 札がこの秒数離れたままならフォールド |
 | | `button_from_deal` | `true` | 手札を読んだ順からボタンの動かし忘れを見つけて直す |
+| `estimator` | `live` | `true` | 店舗サーバーがハンドごとに推定して `logs/<セッション>.estimate.json` に書き足す（`"shadow"` = 影のファイル / `false` = 推さない） |
 | `session_layer` | `enabled` | `false` | 誰がどの席かを記録する（お客さん向けのハンド閲覧に必要） |
 | `viewer_api` | `bind_host` / `bind_port` | `127.0.0.1` / `8788` | お客さん向け画面の待ち受け（`--host` / `--port` が優先） |
 | `ground_truth` | `evaluation` | `false` | 評価のセッション（真のアクションの入力画面で、最初に保存するまで記録を見られない） |

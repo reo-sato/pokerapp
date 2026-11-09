@@ -6,6 +6,8 @@
 - **会計の書き手の API**（会計画面 `--ledger` に組み込まれていた API と同じ = `create_store_app`）。
   お客さん向け画面 `/`・スタッフ用画面 `/staff/`・注文の受付・スタッフの会計操作（ADR-0059/0064/0021）。
 - **卓モニタ**（`tools/table_monitor.py`, 既定 8790）と、任意で**真のアクション入力**（`tools/ground_truth_ui.py`, 8791）。
+- **ハンドごとの推定**（`core/live_estimator.py`, 設定 `estimator.live`。ADR-0072 段階 1）。
+- **古い発話の音声の削除**（`core/audio_retention.py`, 設定 `audio.keep_days` 既定 90 日、1 日 1 回）。
 
 録音（ハンドロガー `--cli`）は含めない。席と名前をスタッフが入れる対話式で、RDP のセッションの中で動かす。
 
@@ -180,6 +182,30 @@ def start_cloud_sync(cfg: dict, stop: threading.Event, **kwargs):
     return syncer
 
 
+def start_live_estimator(cfg: dict, log_dir: Path, stop: threading.Event):
+    """プレー中にハンドごとに推定する見回り（ADR-0072 段階 1）を別スレッドで。使わない設定なら None。"""
+    from core.live_estimator import LiveEstimator, live_target
+
+    target = live_target(cfg)
+    if target is None:
+        return None
+    estimator = LiveEstimator(log_dir, target=target)
+    keep_running("ハンドごとの推定", lambda: estimator.run_forever(stop), stop)
+    logger.info("ハンドごとの推定を始めます（%s に書く）", "影のファイル" if target == "shadow" else "推定のファイル")
+    return estimator
+
+
+def start_audio_retention(cfg: dict, log_dir: Path, stop: threading.Event) -> Optional[int]:
+    """発話の音声を `audio.keep_days`（既定 90）日で消す見回り（1 日 1 回）。消さない設定なら None。"""
+    from core import audio_retention
+
+    days = audio_retention.keep_days(cfg)
+    if days <= 0:
+        return None
+    keep_running("古い音声の削除", lambda: audio_retention.run_forever(log_dir, days, stop), stop)
+    return days
+
+
 def run_store_server(cfg: dict, host: Optional[str] = None, port: Optional[int] = None,
                      lock: Optional[StoreWriterLock] = None, log_to_file: bool = True) -> int:
     """店舗サーバーを foreground で動かす。戻り値は終了コード（0 = 正常に止めた / 1 = 止まった・起動できない）。"""
@@ -210,6 +236,8 @@ def run_store_server(cfg: dict, host: Optional[str] = None, port: Optional[int] 
             cloud_links=syncer,
         )
         _side_servers(settings, stop)
+        start_live_estimator(cfg, Path(settings["log_dir"]), stop)
+        start_audio_retention(cfg, Path(settings["log_dir"]), stop)
         logger.info("店舗サーバーを起動します: %s:%s（%s）", settings["host"], settings["port"], describe_version())
         log_web_addresses(settings["port"])
         print(f"店舗サーバー: http://<この PC の IP>:{settings['port']}/（スタッフ用は /staff/）。"

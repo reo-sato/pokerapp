@@ -91,12 +91,22 @@ def transcribe_deferred(session, process: Callable[[bytes, float, str], object],
             transcript = process(_read_wav(path), _live_start(path.name), path.name)
         except Exception as e:  # noqa: BLE001 — 1 つ読めなくても残りを続ける
             failed += 1
+            if _api_down(e):
+                log(f"  書き起こしの API につながらないので、残り {len(todo) - i} 件はあとで書き起こします（{e}）")
+                break
             log(f"  [{i}/{len(todo)}] {path.name}: 読めませんでした（{type(e).__name__}: {e}）")
             continue
         writer.write(transcript)
         written += 1
         log(f"  [{i}/{len(todo)}] {path.name} {getattr(transcript, 'text', '') or '（声なし）'}")
     return written, failed
+
+
+def _api_down(error: Exception) -> bool:
+    """書き起こしの API につながらない（ADR-0072）: 残りも同じなので、1 件ずつタイムアウトを待たずに止める。"""
+    from core.remote_asr import RemoteAsrError
+
+    return isinstance(error, RemoteAsrError)
 
 
 def _read_wav(path: Path) -> bytes:
@@ -127,6 +137,9 @@ def transcribe_session(session, process: Callable[[bytes, float], list], *, limi
             transcripts = process(_read_wav(path), offplay_start(path.name))
         except Exception as e:  # noqa: BLE001 — 1 つ読めなくても残りを続ける
             failed += 1
+            if _api_down(e):
+                log(f"  書き起こしの API につながらないので、残り {len(todo) - i} 件はあとで書き起こします（{e}）")
+                break
             log(f"  [{i}/{len(todo)}] {path.name}: 読めませんでした（{type(e).__name__}: {e}）")
             continue
         if not transcripts:

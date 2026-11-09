@@ -42,7 +42,6 @@ import sys
 import time
 import urllib.error
 import urllib.request
-import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -125,14 +124,9 @@ def _post(url: str, body: bytes, headers: dict[str, str]) -> dict:
 
 
 def _multipart(fields: dict[str, str], wav: bytes) -> tuple[bytes, str]:
-    boundary = uuid.uuid4().hex
-    parts = []
-    for key, value in fields.items():
-        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode())
-    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\n'
-                 "Content-Type: audio/wav\r\n\r\n".encode() + wav + b"\r\n")
-    parts.append(f"--{boundary}--\r\n".encode())
-    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+    from core.remote_asr import multipart   # ライブの書き起こし（ADR-0072）と同じ組み立て
+
+    return multipart(fields, wav)
 
 
 def _google_token() -> str:

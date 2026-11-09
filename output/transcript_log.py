@@ -61,6 +61,9 @@ class TranscriptLog:
             # 書き起こしを後回しにした発話（2026-10-28）: heard_at はその場で聞けていた場合の時刻、本当に書き起こした時刻は別に
             line["deferred"] = True
             line["transcribed_at"] = getattr(transcript, "transcribed_at", None)
+        asr = getattr(transcript, "asr", None)
+        if asr:
+            line["asr"] = asr               # 書き起こした方式（書き起こしの API, ADR-0072。店舗 PC の Whisper は無し）
         if extra:
             line.update(extra)
         try:

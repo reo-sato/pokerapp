@@ -21,6 +21,7 @@ from audio.recognizer import (
 )
 from core.event_queue import EventQueue
 from core.events import AudioEvent
+from core.remote_asr import RemoteAsrError
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,9 @@ _PREROLL_SECONDS = 0.3
 # 推論待ちがこの件数を超えたら WARN する（捨てはしない。認識が発話に追いつかないときは
 # 遅れても全部処理する = 記録を落とさない方を取る, ADR-0061）。
 _BACKLOG_WARN = 20
+# 書き起こしの API につながらないとき、送り直すまでの間（倍々に延ばす, ADR-0072）
+REMOTE_RETRY_MIN_SEC = 5.0
+REMOTE_RETRY_MAX_SEC = 60.0
 
 # 死活表示のレベル正規化に使う RMS 上限（これ以上は 1.0 に飽和。発話時の実測オーダー）
 _HEALTH_LEVEL_FULL_RMS = 8000.0
@@ -106,6 +110,8 @@ class Transcript:
     # その場で聞けていた場合の時刻（話し始め + 長さ）、本当に書き起こした時刻は `transcribed_at`
     deferred: bool = False
     transcribed_at: Optional[float] = None
+    # 書き起こした方式（書き起こしの API = "openai-whisper-1" など, ADR-0072。店舗 PC の Whisper は None）
+    asr: Optional[str] = None
 
 
 # 確認型の発話の表示（CLI / audio_check / ログで共通）
@@ -279,6 +285,13 @@ class AudioThread(threading.Thread):
                                     beam_size=beam_size, temperature_fallback=temperature_fallback,
                                     vad_threshold=vad_threshold, cpu_threads=cpu_threads)
         )
+        # 書き起こしの API（ADR-0072, 2026-11-09）: 失敗した発話は音声を保存したまま後回しの列へ回し、つながったら
+        # 送り直す。つながらない間（`_remote_down_until` まで）はその場で呼ばずに後回しにする（1 発話ごとにタイムアウトを
+        # 待って、ロガーが声を待ち続けないように）
+        self._remote = bool(getattr(self._transcriber, "remote", False))
+        self._remote_down_until = 0.0
+        self._remote_backoff = REMOTE_RETRY_MIN_SEC
+        self._remote_notified = False
         # 推論待ちの (発話バイト列, 発話開始時刻)。None は worker 終了の sentinel。
         # 上限なし: 認識が遅れても発話を捨てない（プレーの切れ目で追いつく, ADR-0061）。
         self._chunk_queue: "queue.Queue[Optional[tuple[bytes, float]]]" = queue.Queue()
@@ -393,7 +406,7 @@ class AudioThread(threading.Thread):
             target=self._inference_loop, daemon=True, name="AudioInference"
         )
         worker.start()
-        if not self._live_transcribe:
+        if not self._live_transcribe or self._remote:
             threading.Thread(target=self._deferred_loop, daemon=True, name="AudioDeferred").start()
 
         try:
@@ -719,11 +732,38 @@ class AudioThread(threading.Thread):
                 self._deferring = 0
 
     def _process_deferred(self, audio_bytes: bytes, utterance_start_ts: float, audio_file: Optional[str]) -> None:
+        if self._remote:
+            wait = self._remote_down_until - time.time()
+            if wait > 0 and self._stop_event.wait(wait):
+                self._deferred_queue.put((audio_bytes, utterance_start_ts, audio_file))   # 止めるとき: 音声は保存済み
+                return
         try:
             transcript = self.transcribe_deferred(audio_bytes, utterance_start_ts, audio_file)
             self._report(transcript)
+            if self._remote:
+                self._remote_ok()
+        except RemoteAsrError as e:
+            # つながらない: 列に戻して間を空ける（5 → 60 秒）。音声は保存済みなので、止めても終了・「ログをまとめる」で続きから
+            self._remote_failed(e)
+            self._deferred_queue.put((audio_bytes, utterance_start_ts, audio_file))
         except Exception:
             logger.exception("後回しの書き起こしに失敗しました（%s）", audio_file)
+
+    def _remote_failed(self, error: Exception) -> None:
+        self._remote_down_until = time.time() + self._remote_backoff
+        self._remote_backoff = min(self._remote_backoff * 2, REMOTE_RETRY_MAX_SEC)
+        logger.warning("書き起こしの API につながりません（%s）", error)
+        if not self._remote_notified and self._on_status is not None:
+            self._remote_notified = True
+            self._on_status("書き起こしの API につながりません（音声は保存して、つながったら送り直します）")
+
+    def _remote_ok(self) -> None:
+        self._remote_backoff = REMOTE_RETRY_MIN_SEC
+        self._remote_down_until = 0.0
+        if self._remote_notified:
+            self._remote_notified = False
+            if self._on_status is not None:
+                self._on_status("書き起こしの API にまたつながりました")
 
     def transcribe_deferred(self, audio_bytes: bytes, utterance_start_ts: float,
                             audio_file: Optional[str]) -> Transcript:
@@ -739,11 +779,13 @@ class AudioThread(threading.Thread):
         return dataclasses.replace(transcript, heard_at=utterance_start_ts + audio_sec, deferred=True,
                                    transcribed_at=now)
 
-    def _process_live_ear(self, audio_bytes: bytes, utterance_start_ts: float) -> None:
+    def _process_live_ear(self, audio_bytes: bytes, utterance_start_ts: float,
+                          audio_file: Optional[str] = None) -> None:
         """後回しのとき、その場でやること: 音声を保存し、第 2 の耳（1 発話 0.1 秒ほど）でブラインド上昇の宣言だけを
-        聞き分けてロガーに送り、Whisper は後回しの行列に積む。"""
+        聞き分けてロガーに送り、Whisper は後回しの行列に積む。書き起こしの API につながらないときも同じ。"""
         try:
-            audio_file = self._save_audio(audio_bytes, utterance_start_ts)
+            if audio_file is None:
+                audio_file = self._save_audio(audio_bytes, utterance_start_ts)
             if self._second_ear is not None:
                 from audio.recognizer import blind_up_event
 
@@ -769,15 +811,25 @@ class AudioThread(threading.Thread):
         if not self._live_transcribe:
             self._process_live_ear(audio_bytes, utterance_start_ts or time.time())
             return
+        audio_file = None
         try:
             started = time.time()
             audio_file = self._save_audio(audio_bytes, utterance_start_ts or started)
+            if self._remote and time.time() < self._remote_down_until:
+                # 書き起こしの API につながらない間: その場では呼ばず、後回しにする（ブラインドの宣言は第 2 の耳で）
+                self._process_live_ear(audio_bytes, utterance_start_ts or started, audio_file)
+                return
             transcript = self._recognize(audio_bytes, utterance_start_ts, audio_file)
+            if self._remote:
+                self._remote_ok()
             if transcript is None:
                 return                      # 何も聞こえなかった（第 2 の耳でも）
             self._report(transcript)
             for event in transcript.events:
                 self._audio_queue.put(event)
+        except RemoteAsrError as e:
+            self._remote_failed(e)
+            self._process_live_ear(audio_bytes, utterance_start_ts or time.time(), audio_file)
         except Exception:
             logger.exception("Error in _process_chunk (chunk size=%d bytes)", len(audio_bytes))
 
@@ -809,6 +861,7 @@ class AudioThread(threading.Thread):
                 utterance_start_ts=utterance_start_ts, heard_at=heard_at, noise=True,
                 audio_file=audio_file, no_speech=True,
                 ear=self._hear_again(audio_bytes) if self._second_ear is not None else None, ear_wanted=False,
+                asr=getattr(self._transcriber, "asr_name", None),
             )
         noise = bool(text) and (is_prompt_echo(text) or is_implausibly_long(text, audio_sec))
         question = bool(text) and not noise and is_question(text)   # 確認型はアクションにしない（仕様 FR-17）
@@ -845,7 +898,7 @@ class AudioThread(threading.Thread):
             audio_sec=audio_sec,
             infer_sec=infer_sec, utterance_start_ts=utterance_start_ts,
             heard_at=heard_at, noise=noise, audio_file=audio_file, question=question,
-            ear=ear, ear_text=ear_text, ear_wanted=wanted,
+            ear=ear, ear_text=ear_text, ear_wanted=wanted, asr=getattr(self._transcriber, "asr_name", None),
         )
 
     def _hear_again(self, audio_bytes: bytes) -> Optional[dict]:

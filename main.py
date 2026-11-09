@@ -424,6 +424,7 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, l
     from audio.recorder import _MIN_BUFFER_SECONDS, _SILENCE_RMS_THRESHOLD, AudioThread
 
     return AudioThread(
+        transcriber=_remote_transcriber(audio_cfg),
         audio_queue=audio_queue,
         device_id=audio_cfg.get("device_id", 0),
         device_names=parse_device_names(audio_cfg.get("device_name")),
@@ -442,8 +443,30 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, l
         vad_threshold=float(audio_cfg.get("vad_threshold", 0.5)),
         cpu_threads=int(audio_cfg.get("cpu_threads", 0) or 0),
         second_ear=second_ear,
-        live_transcribe=live_transcribe,
+        live_transcribe=live_transcribe or _wants_remote(audio_cfg),
     )
+
+
+def _wants_remote(audio_cfg: dict) -> bool:
+    """書き起こしを API（OpenAI の whisper-1）で行うか（config `audio.transcriber` = "openai" で、鍵があるとき, ADR-0072）。
+    鍵が無ければ店舗 PC の Whisper に戻す（音声なしにはしない）。"""
+    if str(audio_cfg.get("transcriber", "local")).lower() != "openai":
+        return False
+    from core.remote_asr import api_key
+
+    return bool(api_key())
+
+
+def _remote_transcriber(audio_cfg: dict):
+    """書き起こしの API の Transcriber（使わないなら None = 店舗 PC の Whisper）。"""
+    if not _wants_remote(audio_cfg):
+        return None
+    from core.remote_asr import OpenAITranscriber
+
+    return OpenAITranscriber(model=str(audio_cfg.get("remote_model", "whisper-1")),
+                             language=audio_cfg.get("language", "ja"),
+                             vad_threshold=float(audio_cfg.get("vad_threshold", 0.5)),
+                             sample_rate=int(audio_cfg.get("sample_rate", 16000)))
 
 
 def _live_transcribe(audio_cfg: dict) -> bool:
@@ -920,8 +943,9 @@ def run_cli(script: str | None = None) -> None:
         # 何も出ないと固まったように見える（ADR-0060）。
         import time as _time
 
-        print(f"音声認識モデル（{audio_cfg.get('whisper_model', 'medium')}）を読み込んでいます…"
-              "（初回はダウンロードで数分かかります）", flush=True)
+        if not _wants_remote(audio_cfg):
+            print(f"音声認識モデル（{audio_cfg.get('whisper_model', 'medium')}）を読み込んでいます…"
+                  "（初回はダウンロードで数分かかります）", flush=True)
         loading_since = _time.time()
     listen_gate = _make_listen_gate(cfg)
     # 聞き取った発話はすべて記録する（読めなかったもの・雑音も）。音声は audio.save_audio のときだけ保存。
@@ -934,14 +958,22 @@ def run_cli(script: str | None = None) -> None:
             _print_transcript(transcript)
         transcript_log.write(transcript)
 
-    live_transcribe = _live_transcribe(audio_cfg)
-    # 書き起こしを後回しにするなら、プレー中の発話の音声は保存する（あとで書き起こす元）
+    remote = audio_cfg.get("enabled", True) and _wants_remote(audio_cfg)
+    live_transcribe = _live_transcribe(audio_cfg) or remote
+    if str(audio_cfg.get("transcriber", "local")).lower() == "openai" and not remote and audio_cfg.get("enabled", True):
+        _print_notice("書き起こしの API の鍵がありません（POKERAPP_OPENAI_API_KEY）。店舗 PC の Whisper で書き起こします")
+    # 書き起こしを後回しにする・API で書き起こすなら、プレー中の発話の音声は保存する（あとで書き起こす元・送り直す元）
     audio_dir = (Path(session_cfg["log_dir"]) / "audio" / session_id
-                 if audio_cfg.get("save_audio", False) or not live_transcribe else None)
-    if not live_transcribe and audio_cfg.get("enabled", True):
+                 if audio_cfg.get("save_audio", False) or not live_transcribe or remote else None)
+    if (not live_transcribe or remote) and audio_cfg.get("enabled", True):
         from tools.offplay_audio import mark_deferred
 
+        # 書き起こしの行の無いプレー中の発話を、終了と「ログをまとめる」で書き起こす印（API のときは送れなかった発話）
         mark_deferred(audio_dir, transcript_log.path)
+    if remote:
+        print("書き起こしは API（OpenAI の whisper-1）です: 声は 1 秒ほどでロガーに入ります。"
+              "つながらない間は音声を保存して、あとで送り直します", flush=True)
+    elif not live_transcribe and audio_cfg.get("enabled", True):
         print("書き起こしは後回しです（audio.live_transcribe=false）: その場では声をロガーに使いません。"
               "書き起こしは裏で順に進め、終了（q）と「ログをまとめる」で残りを書き起こします", flush=True)
     second_ear = _load_second_ear(audio_cfg) if audio_cfg.get("enabled", True) else None
@@ -956,7 +988,7 @@ def run_cli(script: str | None = None) -> None:
         print(f"音声認識モデルを読み込めませんでした（{error}）。音声は使わずに続けます"
               "（キーボードの読み上げ文で進行できます）。")
         audio_thread = None
-    else:
+    elif not getattr(audio_thread._transcriber, "remote", False):  # noqa: SLF001
         print(f"音声認識モデルの読み込み完了（{_time.time() - loading_since:.0f} 秒）。")
     # Phase 2/3: カメラが設定済みの場合のみ CameraThread を起動する
     # Phase 3: camera_q を IntegrationThread に渡すことで ±2秒マッチングが有効になる

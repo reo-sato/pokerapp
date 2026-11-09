@@ -587,6 +587,7 @@ class TestContentFingerprint:
         "core/event_queue.py": "スレッド間のキュー",
         "core/ground_truth.py": "真のアクションの勝者の読み方（core/truth_hand.py の materialize_truth だけ。推定には使わない）",
         "core/hand_correction.py": "訂正の重ね方（読む側）",
+        "core/remote_asr.py": "書き起こしの API（録音だけが使う。推定器は書き起こした文を読む, ADR-0072）",
         "core/player.py": "player registry", "core/player_repository.py": "player registry",
         "core/session.py": "session layer", "core/session_repository.py": "session layer",
         "core/table_state.py": "卓状態の表示",
