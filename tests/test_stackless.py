@@ -55,6 +55,24 @@ class TestGameState:
         gs.apply_action(gs.get_current_player(), "call")
         assert gs.legal_context().actor_seat is None and gs.is_hand_active()   # ショーダウン待ち
 
+    def test_no_raise_when_every_other_seat_is_allin(self):
+        """相手が全員オールインなら、手番の人はコールかフォールドだけ（内部ではオールインを最小のレイズにしているので
+        pokerkit はレイズを許していた。店舗 2026-11-05 8b89a609 ハンド 59: 「24,200点です。」を席5 のレイズにしていた）。"""
+        gs = create_game_state("pokerkit", _players(), 100, 200, stackless=True)
+        gs.new_hand()
+        first = gs.get_current_player()
+        gs.apply_action(first, "fold")
+        gs.apply_action(gs.get_current_player(), "allin")
+        ctx = gs.legal_context()
+        assert ctx.legal_actions == frozenset({"fold", "call"})
+        with pytest.raises(ValueError):
+            gs.apply_action(ctx.actor_seat, "raise", 24200)
+
+    def test_an_allin_against_an_allin_is_recorded_as_a_call(self, tmp_path):
+        hands = _replay(tmp_path, ["ハンド開始", "フォールド", "オールイン", "オールイン、コール", "シート1 ウィナー"])
+        actions = [(a["seat"], a["action"]) for a in hands[0]["actions"]]
+        assert actions[-1][1] == "call" and [a for _, a in actions].count("allin") == 1
+
     def test_a_bet_is_never_cut_by_a_stack_and_no_seat_busts(self):
         gs = create_game_state("pokerkit", _players(stack=0), 100, 200, stackless=True)
         assert gs.playing_seats() == [1, 2, 3]           # 持ち点 0 でも配る

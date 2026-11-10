@@ -575,7 +575,8 @@ class PokerkitGameState:
             st.check_or_call()
         elif a == "allin" and self._stackless:
             # 持ち点を数えない: 額は分からないので、内部では最小のレイズ（仮の額）にして、この席に以後手番を回さない
-            if st.can_complete_bet_or_raise_to():
+            # （相手が全員オールインならコール = オールインのコール）
+            if st.can_complete_bet_or_raise_to() and not self._opponents_all_in(st):
                 st.complete_bet_or_raise_to(st.min_completion_betting_or_raising_to_amount)
             elif st.can_check_or_call():
                 st.check_or_call()
@@ -593,7 +594,7 @@ class PokerkitGameState:
                 raise ValueError("allin not legal")
         elif a in ("bet", "raise"):
             # R2: amount は "to" 総額前提（raw ASR からの射影は R3 apply_corrections）。
-            if amount is None or not st.can_complete_bet_or_raise_to(amount):
+            if amount is None or not st.can_complete_bet_or_raise_to(amount) or self._opponents_all_in(st):
                 raise ValueError(f"bet/raise to {amount!r} not legal")
             st.complete_bet_or_raise_to(amount)
         else:
@@ -663,7 +664,7 @@ class PokerkitGameState:
             legal.add("fold")
         if st.can_check_or_call():
             legal.add("check" if st.checking_or_calling_amount == 0 else "call")
-        if st.can_complete_bet_or_raise_to():
+        if st.can_complete_bet_or_raise_to() and not self._opponents_all_in(st):
             legal.add("raise" if any(st.bets) else "bet")
             legal.add("allin")
         return LegalContext(
@@ -676,6 +677,16 @@ class PokerkitGameState:
             committed=st.bets[st.actor_index] if st.actor_index < len(st.bets) else 0,
             chip=math.gcd(self._sb, self._bb, CHIP_UNIT),
         )
+
+    def _opponents_all_in(self, st: Any) -> bool:
+        """持ち点を数えないモードで、手番の人のほかに残っている席が全員オールインか（もう賭けられない = コールか
+        フォールドだけ。内部ではオールインを最小のレイズにしているので pokerkit はレイズを許す。店舗 2026-11-05
+        8b89a609 ハンド 59: 席7 のオールインのあとの「24,200点です。」（オールインの額の読み上げ）を席5 のレイズにしていた）。"""
+        if not self._stackless or not self._allin_seats or st.actor_index is None:
+            return False
+        actor = self._idx_to_seat[st.actor_index]
+        live = [s for s in self._hand_seats if s != actor and st.statuses[self._seat_to_idx[s]]]
+        return bool(live) and all(s in self._allin_seats for s in live)
 
     def is_legal_actor(self, seat: int) -> bool:
         st = self._state

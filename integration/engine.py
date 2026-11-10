@@ -6547,6 +6547,11 @@ class IntegrationThread(threading.Thread):
             legal_ctx = gs.legal_context()
 
         corrected = apply_corrections(event.action, event.amount, legal_ctx, event.confidence)
+        if (corrected.action == "allin" and "allin" not in legal_ctx.legal_actions
+                and "call" in legal_ctx.legal_actions and getattr(gs, "stackless", False)):
+            # 持ち点を数えないモードで相手が全員オールイン = 「オールイン」はオールインへのコール（店舗 2026-11-05
+            # 8b89a609 ハンド 59 の「オールイン、コール」）
+            corrected = replace(corrected, action="call", amount=legal_ctx.amount_to_call)
 
         # ストリートは「適用前」を記録する。pokerkit はベッティングラウンドが閉じると
         # apply_action の中で次ストリートへ自動進行するため、適用後を読むとラウンドを

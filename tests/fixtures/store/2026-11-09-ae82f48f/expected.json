@@ -2192,7 +2192,7 @@
     "board_match": true
    },
    "reparse_baseline": {
-    "action_correct": 7,
+    "action_correct": 6,
     "action_total": 16,
     "winner_match": true,
     "board_match": true
