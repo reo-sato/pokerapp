@@ -526,10 +526,14 @@ def _canned_options(ear: Optional[dict], start: Optional[float], params: dict) -
             if c.get("logp") is None:
                 continue
             diff = min(0.0, float(c["logp"]) - float(free))
-            if diff < params["ear_min_diff"]:
-                continue
             events = parse_actions(c["text"], utterance_start_ts=start)
             if len(events) != 1 or events[0].action not in _CANNED_ACTIONS:
+                continue
+            if _free_sounds_like(ear, c["text"], events[0]):
+                # 自由に聞いた文がその語の音の聞き違い（「オレイン」= オールイン）: 同じ語を聞いたので自由な文と同じ重み
+                # （店舗 2026-11-09 559af646 ハンド 29: Whisper は決まり文句・耳「オレイン」・候補「オールイン」は −8.5）
+                diff = 0.0
+            elif diff < params["ear_min_diff"]:
                 continue
             key, weight = _keys(events), math.exp(diff / temp)
             if key not in found or weight > found[key][0]:
@@ -551,6 +555,17 @@ def _canned_options(ear: Optional[dict], start: Optional[float], params: dict) -
     for key, (prob, text) in sorted(q.items(), key=lambda kv: -kv[1][0]):
         options.append(Option("canned", text, math.log(r) + math.log(prob), key))
     return options
+
+
+def _free_sounds_like(ear: Optional[dict], text: str, event) -> bool:
+    """第 2 の耳が自由に聞いた文が、額の無いアクションの語 1 つの候補 `text` の音の聞き違い（`phonetic.sounds_like`）か。"""
+    from audio.phonetic import sounds_like
+
+    free = re.sub(r"[\s、。,.!?！？]", "", (ear or {}).get("text") or "")
+    word = re.sub(r"[\s、。,.!?！？]", "", text or "")
+    if not free or not word or event.amount or free == word:
+        return False
+    return sounds_like(free, word)
 
 
 def choice_points(events: list, transcripts: list[dict], params: dict = PARAMS) -> list[ChoicePoint]:

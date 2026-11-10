@@ -2283,6 +2283,8 @@ class IntegrationThread(threading.Thread):
                 return
             if any(kind == 0 for _, kind, _ in items):
                 item = items[0]                       # ストリートの札まで、時刻順に
+                if item[1] == 0 and self._absence_before(item[0]):
+                    return                            # 札より前に離れた札の離脱が決まるのを待つ
             else:
                 actor = self._game_state.legal_context().actor_seat
                 held = self._spoken_folds.get(actor) if actor is not None else None
@@ -2296,6 +2298,28 @@ class IntegrationThread(threading.Thread):
                 if item is None:
                     return
             self._apply_observation(item, self._clock())
+
+    def _absence_before(self, t: float) -> bool:
+        """ストリートの札（時刻 `t`）より前から札が離れていて、まだ離脱（`fold_absent_sec`）にも戻りにもなっていない、
+        残っている席があるか。あれば札の反映を待つ（長くても `fold_absent_sec`）: 離脱になれば札より前の時刻なので前の
+        ストリートのフォールドになる（店舗 2026-11-09 559af646 ハンド 33: 席1 の札がターンの札の 1.3 秒前に離れ、
+        札の時点ではまだ離脱でなかったのでコールで閉じ、3 秒後の離脱をターンのフォールド = オープンフォールドにしていた）。"""
+        if self._seat_presence is None:
+            return False
+        try:
+            snapshot = self._seat_presence() or {}
+            active = set(self._game_state.get_active_seats())
+        except Exception:  # noqa: BLE001 — 在否が取れなければ待たない
+            return False
+        now = self._clock()
+        for seat in active:
+            info = snapshot.get(seat) or {}
+            since = info.get("absent_since")
+            if (seat in self._hole_cards and seat not in self._departures and not info.get("present")
+                    and since is not None and since < t and now - since < self._fold_absent_sec
+                    and not self._before_deal(since)):
+                return True
+        return False
 
     def _check_foldout_timeout(self) -> None:
         pending = self._foldout_pending

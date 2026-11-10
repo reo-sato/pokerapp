@@ -248,6 +248,31 @@ class TestMissedActions:
         assert implied.actor_source == "implied" and implied.needs_review
         assert tb.gs.pot == 5100
 
+    def test_cards_that_left_just_before_the_next_street_fold_on_the_earlier_street(self, tmp_path):
+        """札が次のストリートの札の少し前（3 秒たつ前）に離れたら、離脱が決まるのを待ってから札を反映する = 前の
+        ストリートのフォールド（店舗 2026-11-09 559af646 ハンド 33: 席1 の札がターンの札の 1.3 秒前に離れ、札の時点では
+        まだ離脱でなかったのでコールで閉じ、3 秒後の離脱をターンのフォールド = オープンフォールドにしていた）。"""
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("コール コール チェック")            # フロップへ（席4 が先）
+        for i, card in enumerate(["2c", "7d", "9s"], start=1):
+            tb.t._process_rfid_event(RFIDEvent(     # noqa: SLF001
+                tag_id=card, card=card, reader_id="b", role="board", seat=None,
+                timestamp=tb.now, raw_tag_id=card, board_index=i))
+        tb.tick(tb.now + 1.0)
+        tb.say("チェック")
+        tb.say("ベット 600")
+        tb.say("コール")
+        tb.tick(tb.now + 2.0)
+        tb.lift(4)                                  # 席4 がベットに降りた（声なし）
+        tb.tick(tb.now + 1.3)
+        tb.t._process_rfid_event(RFIDEvent(         # noqa: SLF001
+            tag_id="Kh", card="Kh", reader_id="b", role="board", seat=None,
+            timestamp=tb.now, raw_tag_id="Kh", board_index=4))
+        tb.tick(tb.now + 5.0)
+        assert ("flop", 4, "fold", 0) in tb.played()
+        assert not any(a[1] == 4 and a[0] == "turn" for a in tb.played())
+
     def test_a_departure_from_an_earlier_street_waits_for_its_turn(self, tmp_path):
         tb = _Table(tmp_path)
         tb.deal()
