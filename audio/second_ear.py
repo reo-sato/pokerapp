@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import re
 import shutil
 import tarfile
 import urllib.request
@@ -531,7 +532,39 @@ def agreed_candidate(ear: Optional[dict]) -> Optional[str]:
         return None
     best = (cands[0].get("text") or "").strip()
     keys = _action_keys(best) if best else []
-    return best if keys and _action_keys(free) == keys else None
+    if keys and _action_keys(free) == keys:
+        return best
+    # 自由に聞いた文が「崩れた語 + 額」（「レジ八千」）で、いちばん確からしい候補が同じ額の語つきのベット・レイズ
+    # （「レイズ 八千」= 耳が頭の音をその語と聞いた）なら、その候補（店舗 2026-11-09 559af646 ハンド 25: Whisper
+    # 「ディーラー セン」・耳「レジ八千」・候補「レイズ 八千」。正しくは席7 のレイズ 8000）。候補が額だけなら使わない
+    # （「あと五百」のような雑談を額にしない）
+    if (len(keys) == 1 and keys[0][0] in ("bet", "raise") and keys[0][1]
+            and not _amount_only(best) and prefix_amount(free) == keys[0][1]):
+        return best
+    return None
+
+
+# 耳の文の頭の崩れた語（「レジ八千」の「レジ」）の長さの上限
+EAR_PREFIX_MAX = 4
+_EAR_DIGIT = re.compile(r"[0-9０-９一二三四五六七八九十百千万]")
+
+
+def prefix_amount(text: str) -> Optional[int]:
+    """文が「`EAR_PREFIX_MAX` 文字までの読めない語 + 額」（「レジ八千」「レージ八千」）なら、その額。違えば None。"""
+    from audio.recognizer import parse_actions
+
+    m = _EAR_DIGIT.search(text or "")
+    if m is None or not 0 < m.start() <= EAR_PREFIX_MAX or parse_actions(text[:m.start()]):
+        return None
+    events = parse_actions(text[m.start():])
+    return events[0].amount if len(events) == 1 and events[0].amount else None
+
+
+def _amount_only(text: str) -> bool:
+    from audio.recognizer import parse_actions
+
+    events = parse_actions(text)
+    return any("amount_only" in e.parse_flags for e in events)
 
 
 def rescue_events(ear: Optional[dict], *, utterance_start_ts: Optional[float] = None) -> list:

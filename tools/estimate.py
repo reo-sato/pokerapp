@@ -416,10 +416,18 @@ def _overridden_logp(whisper: list, live: list, ear: Optional[dict], start: Opti
 
 
 def _ear_reads(ear: Optional[dict], events: list) -> bool:
-    """第 2 の耳が自由に聞いた文が、そのまま `events` の額の賭け 1 つに読める（耳がはっきりその額を聞いた）か。"""
+    """第 2 の耳が自由に聞いた文が、そのまま `events` の額の賭け 1 つに読める（耳がはっきりその額を聞いた）か。
+    文の頭に短い崩れた語があって読めなければ、それを除いた額で読む（`second_ear.prefix_amount`。店舗 2026-11-09
+    559af646 ハンド 19: Whisper「レイズ4千」・耳「レージ八千」= 額の表も 8000 が 1 番。正しくは 8000）。"""
+    from audio.second_ear import prefix_amount
+
     if not ear or len(events) != 1 or not events[0].amount:
         return False
-    return [e.amount for e in parse_actions(ear.get("text") or "") if e.amount] == [events[0].amount]
+    text = ear.get("text") or ""
+    amounts = [e.amount for e in parse_actions(text) if e.amount]
+    if not amounts and prefix_amount(text) is not None:
+        amounts = [prefix_amount(text)]
+    return amounts == [events[0].amount]
 
 
 def _sound_logp(word: Optional[str], events: list, ear: Optional[dict] = None, params: Optional[dict] = None) -> float:

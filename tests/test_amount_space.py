@@ -389,3 +389,17 @@ class TestReadingOptions:
         old = utterance_options({"utterance_start_ts": 7.0, "text": "500", "confidence": 0.6,
                                  "ear": {k: v for k, v in ear.items() if k != "amounts"}})
         assert not any(o.source == "ear_amount" for o in old)
+
+
+def test_a_disputed_amount_with_a_garbled_word_in_front():
+    """Whisper と第 2 の耳で額が食い違い、耳の文の頭に崩れた語がある（「レージ八千」）ときも、耳の額を食い違いとして
+    値付けする（店舗 2026-11-09 559af646 ハンド 19: Whisper「レイズ4千」・耳の額の表は 8000 が 1 番。正しくは 8000）。"""
+    from integration.estimator import READING_OVERRIDES
+    from tools.estimate import PARAMS, utterance_options
+
+    row = {"utterance_start_ts": 100.0, "text": "レイズ4千", "confidence": 0.45,
+           "ear": {"text": "レージ八千", "logp": -1.246,
+                   "candidates": [{"text": "八千", "logp": -2.617}, {"text": "レイズ 八千", "logp": -6.793}],
+                   "amounts": [[8000, -2.617], [2000, -7.26], [4000, -8.373]]}}
+    options = {o.keys: o.logp for o in utterance_options(row, {**PARAMS, **READING_OVERRIDES})}
+    assert options[(("raise", 8000, None, None),)] > options[(("raise", 4000, None, None),)]

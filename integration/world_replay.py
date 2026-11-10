@@ -345,9 +345,12 @@ def replay_world(
         gs.set_bb_ante(bb_ante)           # 記録の `blinds.bb_ante` = そのハンドの BB アンティの額（ハンドごとの再生用）
     clock = _ReplayClock()
     if presence is not None:
-        # 配布の信号が無い古い記録だけ、席に載っている札から配布を決め直す（信号があれば二重に検出しない）
+        # 配布の信号が無い古い記録だけ、席に載っている札から配布を決め直す（信号があれば二重に検出しない = 在否からの
+        # 配布の検出を止める）。読んだ札はどちらでも付ける: 札が戻ったとき、このハンドの手札が戻ったと分かるように
+        # （ライブと同じく、降ろした席の札が戻ればフォールドを取り消す。前は信号のある記録で札を付けず、戻りを見落として
+        # 降ろしたままにしていた = 店舗 2026-11-09 559af646 ハンド 12・19）
         recorded = any(isinstance(e, RFIDEvent) and e.kind == "deal" for e in events)
-        presence.attach_reads([] if recorded else events)
+        presence.attach_reads(events)
     speech = sorted({(e.utterance_start_ts, e.timestamp) for e in events
                      if isinstance(e, AudioEvent) and e.utterance_start_ts is not None})
     starts = [s for s, _ in speech]
@@ -420,6 +423,8 @@ def replay_world(
             finalize(*args, **kwargs)
 
         thread._finalize_hand = finalize_and_note        # noqa: SLF001
+        if presence is not None and recorded:
+            thread._check_deal_presence = lambda: None   # noqa: SLF001 — 配布は記録の信号で決まる
 
         def periodic() -> None:
             thread._check_deal_presence()     # noqa: SLF001 — ライブの run() と同じ順

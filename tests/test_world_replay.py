@@ -130,3 +130,22 @@ def test_store_sessions_are_rebuilt_from_the_raw_observations():
         hands = {h["hand_id"]: h for h in replay_world(world_events(events, transcripts), presence, **kwargs, **flags)}
         correct += sum(hand_fully_correct(h["truth"], hands.get(h["hand_id"])) for h in expected["hands"])
     assert correct >= 12
+
+
+
+@pytest.mark.slow                        # 店舗の 1 セッションのハンド 2 つを生の観測から再生する
+def test_cards_that_came_back_retract_the_fold():
+    """配布の信号のある記録でも、降ろした席の札が戻ればフォールドを取り消す（ライブと同じ）。前は信号のある記録で読んだ
+    札を在否に付けず、戻りを見落として降ろしたままだった（店舗 2026-11-09 559af646 ハンド 12・19: 席2 が札を持ち上げて
+    7〜9 秒あとに戻した）。推定器の直しの無い再生で確かめる。"""
+    from integration.estimator import SessionEstimator
+    from tools.bench_hands import v1_inputs
+
+    inp, presence = next((i, p) for _name, items in v1_inputs(script=False) for i, p in items
+                         if i.session_id.startswith("559af646"))
+    est = SessionEstimator(inp.events, inp.transcripts, presence, inp.setup, inp.flags, inp.session_id)
+    windows = {w.hand_id: w for w in est.windows()}
+    for hand_id in (12, 19):
+        hand = est.replay(windows[hand_id], ())[0]
+        preflop = [(a["seat"], a["action"]) for a in hand["actions"] if a["street"] == "preflop"]
+        assert (2, "call") in preflop and (2, "fold") not in preflop

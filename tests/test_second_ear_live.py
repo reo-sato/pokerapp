@@ -198,6 +198,11 @@ class TestAgreement:
         ({"text": "三万四千四百点", "logp": -5.0, "candidates": [{"text": "四千四百点", "logp": -2.5}]}, None),
         ({"text": "六百", "logp": -1.0, "candidates": []}, None),
         (None, None),
+        # 崩れた語 + 額で、候補が同じ額の語つきのレイズ（店舗 2026-11-09 559af646 ハンド 25: 耳「レジ八千」）
+        ({"text": "レジ八千", "logp": -1.0, "candidates": [{"text": "レイズ 八千", "logp": -2.2}]}, "レイズ 八千"),
+        ({"text": "レジ八千", "logp": -1.0, "candidates": [{"text": "レイズ 六千", "logp": -2.2}]}, None),   # 額が違う
+        ({"text": "あと五百", "logp": -1.0, "candidates": [{"text": "五百", "logp": -2.2}]}, None),      # 候補が額だけ
+        ({"text": "なんだかね八千", "logp": -1.0, "candidates": [{"text": "レイズ 八千", "logp": -2.2}]}, None),  # 頭が長い
     ])
     def test_the_free_text_must_read_as_the_candidate(self, ear, expected):
         assert se.agreed_candidate(ear) == expected
