@@ -415,6 +415,23 @@ class TestHandTerms:
         assert any(name.startswith("戻らない札の持ち上げ") for name, _ in terms)
         assert returned == pytest.approx(plain, abs=1e-3)
 
+    def test_no_board_is_likelier_when_everyone_folded(self):
+        """ボードの札が 1 枚も読めていないのは、ショーダウンでは少なく（6/171）、全員降りて終わったハンドでは多い（35/190）
+        = 両側の証拠（店舗 2026-11-09 559af646 ハンド 35: ボードの無いショーダウンの読みが全員降りた正解に勝っていた）。
+        札を読んでいるセッション（席の札の在否がある）だけ。"""
+        est = _estimator(_presence({}))
+        assert not any(name.startswith("ボード") for name, _ in _estimator().score(_window(), self._hand(), [],
+                                                                                  self._INFO, ())[1])
+        folded = dict(self._hand(), board=[])
+        shown = dict(self._hand(), board=[], winner_source="cards")
+        _, fold_terms, _ = est.score(_window(), folded, [], self._INFO, ())
+        _, show_terms, _ = est.score(_window(), shown, [], self._INFO, ())
+        assert ("ボードが読めていない", pytest.approx(math.log(PARAMS["p_board_none_fold"]))) in fold_terms
+        assert ("ボードが読めていないのにショーダウン",
+                pytest.approx(math.log(PARAMS["p_board_none_showdown"]))) in show_terms
+        _, dealt, _ = est.score(_window(), dict(shown, board=["Ah", "Kd", "2c"]), [], self._INFO, ())
+        assert ("ボードが読めた", pytest.approx(math.log(1 - PARAMS["p_board_none_showdown"]))) in dealt
+
     def test_every_utterance_adds_the_reading_it_takes(self):
         """各発話でちょうど 1 つの読みを選び、その確からしさを足す: 直しの無い候補にも既定の読み（決まり文句になった
         発話 = 雑談だった log(1 − r)）の確からしさが入る（監査 2 回目）。"""

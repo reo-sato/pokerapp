@@ -2979,7 +2979,7 @@ class IntegrationThread(threading.Thread):
             return
         spoken = _spoken_at(word)
         first = records[0]
-        for record in self._current_actions:
+        for position, record in enumerate(self._current_actions):
             if record is first:
                 break
             reason = record.reason or ""
@@ -2994,9 +2994,13 @@ class IntegrationThread(threading.Thread):
             if dep is None or dep.get("spoken") or not spoken - VOICE_LAG_SEC <= dep["t"] <= spoken:
                 continue
             leave = next((item for kind, item in self._hand_inputs if kind == "leave" and item.seat == cause), None)
-            # 先に離れた席の数（この声の少し前に札が離れた、補った席より手番が後の席）
+            # 先に離れた席の数（この声の少し前に札が離れた、補った席より手番が後の席）。補った行より前に記録した席（手番
+            # どおりに降りた席）は数えない（店舗 2026-11-09 559af646 ハンド 35: 「フォールド」と同時に札を中央に通した席6 を
+            # 数え、「オールイン、ホールド」のフォールド 1 つでは足りないとして、オールインを席7 に付け直さなかった）
+            earlier = {r.seat for r in self._current_actions[:position]}
             departed = {s for s, d in self._departures.items()
-                        if not d.get("spoken") and s != record.seat and spoken - VOICE_LAG_SEC <= d["t"] <= spoken}
+                        if not d.get("spoken") and s != record.seat and s not in earlier
+                        and spoken - VOICE_LAG_SEC <= d["t"] <= spoken}
             if leave is not None:
                 self._lagging_voice.append((word, leave, record.seat, len(departed)))
             return

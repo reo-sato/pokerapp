@@ -149,3 +149,21 @@ def test_cards_that_came_back_retract_the_fold():
         hand = est.replay(windows[hand_id], ())[0]
         preflop = [(a["seat"], a["action"]) for a in hand["actions"] if a["street"] == "preflop"]
         assert (2, "call") in preflop and (2, "fold") not in preflop
+    # ハンド 35: マックした席6 を次のハンドの札で「戻った」としない・「オールイン、ホールド」（席8 の札はその 0.5 秒前に
+    # 中央を通過）のオールインは席7（声は札の動きより遅れる。手番どおりに降りた席6 を「先に離れた席」に数えない）
+    hand = est.replay(windows[35], ())[0]
+    assert [(a["seat"], a["action"]) for a in hand["actions"]] == [
+        (6, "fold"), (7, "allin"), (8, "fold"), (1, "fold"), (2, "fold"), (3, "fold")]
+
+
+def test_the_cards_on_a_seat_start_with_the_current_presence():
+    """いま載っている札は、いま載り始めた時刻（の 1 秒前）からの読み取り。履歴は変わったときだけ行があるので、最後に
+    消えた行から数えると前のハンドの手札まで入り、降ろした席の札が「戻った」とみていた（店舗 2026-11-09 559af646 ハンド 35）。"""
+    from integration.world_replay import SeatObservation
+
+    p = PresenceTimeline({6: [SeatObservation(0.0, True, None, None), SeatObservation(10.0, False, 9.9, None),
+                              SeatObservation(40.0, True, None, None)]})
+    p.attach_reads([RFIDEvent(tag_id=c, card=c, reader_id="r", role="seat", seat=6, timestamp=t, raw_tag_id=c)
+                    for t, c in ((0.5, "7s"), (9.5, "Td"), (39.8, "6s"), (40.5, "6d"))])
+    assert p.snapshot(5.0)[6]["cards"] == ["7s"]
+    assert p.snapshot(41.0)[6]["cards"] == ["6d", "6s"]           # 前の手札（9.5 秒の Td）は入らない

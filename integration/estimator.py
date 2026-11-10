@@ -118,6 +118,10 @@ PARAMS: dict[str, float] = {
                                  # ターンの「ショーダウン」のあとにリバーのアクション）
     "p_open_fold": 0.005,        # ベットに向き合っていないのに降りた（店舗の真のアクションで 0/171。pokerkit も force_fold が
                                  # 要る。手の事前の −log 2 の代わり。2026-10-06）
+    # ボードの札が 1 枚も読めていない（直しの無い再生のボード）: ショーダウン 6/171・全員降りて終わった 35/190（開発データの
+    # 真のアクション, 2026-11-10）
+    "p_board_none_showdown": 0.035,
+    "p_board_none_fold": 0.18,
     "p_showdown_word": 0.03,     # ショーダウンの声（「ショーダウン」・役の名前）があるのに全員降りて終わった（真のアクションの
                                  # 92 ハンド: 声のあった 23 ハンドはすべてショーダウン、全員降りて終わった 45 ハンドで声 0）
     "p_showdown_heard": 0.76,    # ショーダウンになったハンドで、その声（語・役の名前・`_showdown_sound`）が聞き取れた。オーナー
@@ -787,6 +791,15 @@ class SessionEstimator:
         else:
             terms.append(("ショーダウンの声" + ("が無い" if foldout else "が無いのにショーダウン"),
                           _log(1 - p["p_showdown_word"]) if foldout else _log(1 - p["p_showdown_heard"])))
+        # ボードの札が 1 枚も読めていないこと: ショーダウンでは少なく、全員降りて終わったハンドでは多い（両側の証拠。
+        # 店舗 2026-11-09 559af646 ハンド 35: プリフロップのオールインに声の無いコールを補い、ボードの無いショーダウンに
+        # する読みが、全員降りた正解に勝っていた）
+        # 札を読んでいるセッション（席の札の在否がある）だけ
+        if self.presence is not None:
+            no_board = not any(c and c != "??" for c in hand.get("board") or [])
+            rate = p["p_board_none_fold"] if foldout else p["p_board_none_showdown"]
+            terms.append(("ボードが読めていない" + ("" if foldout else "のにショーダウン") if no_board else "ボードが読めた",
+                          _log(rate) if no_board else _log(1 - rate)))
         terms += self._departure_terms(w, hand, betting, flags)
         terms += self._board_terms(hand, flags)
         terms += self._street_time_terms(hand, betting, flags, w)

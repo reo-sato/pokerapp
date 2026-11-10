@@ -108,8 +108,11 @@ class PresenceTimeline:
             return []
         obs = self._seats[seat]
         i = bisect.bisect_right(self._times[seat], t) - 1
-        gone = next((obs[j].t for j in range(i, -1, -1) if not obs[j].present), None)
-        since = (gone - 1.0) if gone is not None else float("-inf")
+        # いま載っている間の始まり（最後に札が消えた行の次の行）。履歴は変わったときだけ行があるので、消えた行の時刻から
+        # 数えると、消える直前の読み取り（前のハンドの手札）まで入る（店舗 2026-11-09 559af646 ハンド 35: 次のハンドの札が
+        # 置かれた時点で、降ろした席6 の前の手札が「戻った」とみてフォールドを取り消していた）
+        gone = next((j for j in range(i, -1, -1) if not obs[j].present), None)
+        since = (obs[gone + 1].t - 1.0) if gone is not None else float("-inf")
         cards: list[str] = []
         for at, card in self._reads.get(seat, []):
             if since < at <= t and card not in cards:
