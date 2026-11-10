@@ -2315,6 +2315,12 @@ class IntegrationThread(threading.Thread):
         if ev.kind == "street":
             self._run_input("street", ev)
             return
+        if ev.kind == "confirm":
+            # 最後の 1 人を残すフォールドの確定は席を問わない: 手札が読めていない席を降ろして残りが 1 人になったときは
+            # 離脱の席が無い（店舗 2026-11-09 559af646 ハンド 69・72: 席の無い確定を捨てて、ハンドが次の配布まで閉じず、
+            # 真のアクションの入力画面に次のハンドが出なかった）。記録に残っている席の無い確定も、再生で同じく効く
+            self._confirm_foldout(ev.timestamp)
+            return
         if ev.seat is None:
             return
         # "reinterpret"（無言の連続の解釈し直し, reconstruction_event 0.7）は、コール・チェックを毎回言う運用に
@@ -2327,8 +2333,6 @@ class IntegrationThread(threading.Thread):
             self._run_input("spoken_fold_drop", ev)
         elif ev.kind == "return":
             self._retract_departure(ev.seat, f"席{ev.seat} の札が戻ったので")
-        elif ev.kind == "confirm":
-            self._confirm_foldout(ev.timestamp)
         elif ev.kind == "showdown" and self._foldout_pending is not None:
             self._showdown_after_foldout(ev.timestamp, "残った人の札も離れた（ショーダウン）ので")
 
@@ -2792,8 +2796,17 @@ class IntegrationThread(threading.Thread):
             self._foldout_pending = {"seat": folder[0], "t": folder[1].get("t", self._clock()),
                                      "board": self._board_top()}
             self._foldout_winner_left = False
+            if folder[0] is not None:
+                why = f"席{folder[0]} の札が離れたので"
+            else:
+                # 札の離脱の無いまま残りが 1 人（手札が読めていない席を降ろした・口頭の「フォールド」）。札で確かめていない
+                # 勝ちなので要確認
+                self._hand_needs_review = True
+                folded = next((r.seat for r in reversed(self._current_actions) if r.action == "fold"), None)
+                why = (f"席{folded} を降りたことにしたので（手札が読めていない）" if folded in self._unread_folded
+                       else f"席{folded} が降りたので" if folded is not None else "ほかの人が降りたので")
             self._notice(
-                f"席{folder[0]} の札が離れたので、席{remaining[0]} の勝ちとみます — "
+                f"{why}、席{remaining[0]} の勝ちとみます — "
                 f"{FOLDOUT_CONFIRM_SEC:.0f} 秒後に確定（札が戻る・「ショーダウン」なら取り消し）"
             )
         elif len(remaining) >= 2 and not self._rebuilding:
@@ -3425,9 +3438,9 @@ class IntegrationThread(threading.Thread):
         出してボードを配っている（店舗 2026-10-29 メモ ハンド 121）。その離脱を取り消し、残った人と一緒に札を前に出した
         席として、ボードが揃ったら手札で決める（要確認）。"""
         seat = self._foldout_pending["seat"]
-        self._runout_seats = set(self._remaining_seats()) | {seat}
-        self._notice(f"席{seat} の札が離れたあともボードが配られたので、オールインのショーダウン（ランアウト）とみます"
-                     "（要確認）")
+        self._runout_seats = set(self._remaining_seats()) | ({seat} if seat is not None else set())
+        self._notice((f"席{seat} の札が離れたあとも" if seat is not None else "")
+                     + "ボードが配られたので、オールインのショーダウン（ランアウト）とみます（要確認）")
         for other in sorted(self._runout_seats - {seat}):
             if other in self._departures:            # 残った人の札の離脱（札を前に出した）も降りたことにしない
                 self._retract_departure(other, "ボードの札が配られ続けたので")

@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from audio.recognizer import parse_actions
-from core.events import RFIDEvent
+from core.events import AudioEvent, RFIDEvent
 from core.game_state import PlayerState
 from integration.engine import FOLDOUT_CONFIRM_SEC
 
@@ -401,6 +401,45 @@ class TestUnreadSeat:
                 tb.t._process_rfid_event(ev)        # noqa: SLF001
         tb.say("ベット 1000")
         _finish_by_folds(tb, *((6, 7) if late else (7,)))   # フロップの最初は 席4（読めた）か 席6
+        (live,) = tb.hands
+        assert _replayed(tb, tmp_path) == [(a.street, a.seat, a.action, a.amount) for a in live.actions]
+
+
+class TestHeadsUpUnreadSeat:
+    """店舗 2026-11-09 559af646 ハンド 69・72（終盤のヘッズアップ）: 席 2 の手札が読めず、フロップの札で降ろした（規則 E）。
+    札の離脱の無いまま残りが 1 人になり「席None の札が離れたので、席3 の勝ちとみます」と出たが、席の無い確定の信号を
+    捨てていたので、ハンドが次の配布まで閉じなかった（真のアクションの入力画面に次のハンドが出ず、'n' を連打した）。"""
+
+    def _hand(self, tb: _Table) -> None:
+        ev = AudioEvent(action="new_hand", amount=0, timestamp=tb.now, raw_text="n")   # 手札がそろわないので n
+        tb.recorder.record(ev)
+        tb.t._handle_audio_event(ev)                # noqa: SLF001
+        assert tb.t._hand_open                      # noqa: SLF001
+        tb.put(3, ["6c", "3c"])                     # 席3 の手札だけ読めた（席2 は読めていない）
+        for card in ("6c", "3c"):
+            ev = RFIDEvent(tag_id=card, card=card, reader_id="r3", role="seat", seat=3,
+                           timestamp=tb.now, raw_tag_id=card)
+            tb.recorder.record(ev)
+            tb.t._process_rfid_event(ev)            # noqa: SLF001
+        tb.tick(tb.now + 4.0)
+        _board(tb, ["5s", "3d", "8h"])              # フロップ: 席3 のコールを補い、言われない席2 は手札が読めていないので降りた
+        tb.tick(tb.now + 3.0)
+
+    def test_the_hand_closes_after_the_confirm_time(self, tmp_path):
+        tb = _Table(tmp_path, seats=(2, 3))
+        self._hand(tb)
+        assert ("preflop", 2, "fold", 0) in tb.played()
+        notice = next(n for n in tb.notices if "勝ちとみます" in n)
+        assert "None" not in notice and "席2" in notice and "席3 の勝ち" in notice
+        assert tb.hands == []
+        tb.tick(tb.now + FOLDOUT_CONFIRM_SEC + 1.0)
+        (hand,) = tb.hands
+        assert hand.winner_seat == 3 and not tb.t._hand_open   # noqa: SLF001
+
+    def test_replay_closes_the_same_hand(self, tmp_path):
+        tb = _Table(tmp_path, seats=(2, 3))
+        self._hand(tb)
+        tb.tick(tb.now + FOLDOUT_CONFIRM_SEC + 1.0)
         (live,) = tb.hands
         assert _replayed(tb, tmp_path) == [(a.street, a.seat, a.action, a.amount) for a in live.actions]
 
