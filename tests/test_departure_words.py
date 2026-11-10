@@ -405,6 +405,32 @@ class TestUnreadSeat:
         assert _replayed(tb, tmp_path) == [(a.street, a.seat, a.action, a.amount) for a in live.actions]
 
 
+class TestRestatedAmountAfterAMuck:
+    """店舗 2026-11-09 559af646 ハンド 1: 席7「レイズ」→ 席8 の札が中央を通過（38.0 秒）→「7500、フォールド」（38.3 秒）。
+    声は札の動きより遅れるので、額の言い直しの前に次の人の札の離脱が入る。それでも「7500」は席7 のレイズの額
+    （前は離脱が先に入ったので言い直しにできず、「7500」を捨てるか別の席のレイズにしていた）。"""
+
+    def test_the_amount_after_a_muck_restates_the_raise(self, tmp_path):
+        tb = _Table(tmp_path)                       # ボタン 席6 → プリフロップの最初は 席6
+        tb.deal()
+        tb.say("レイズ")                            # 席6（額は聞こえなかった）
+        tb.tick(tb.now + 1.0)
+        tb.muck(4)                                  # 席4 の札が中央を通過（声より先）
+        tb.tick(tb.now + 0.3)
+        tb.say("1000、フォールド")                  # 席6 のレイズの額と、席4 のフォールド
+        assert tb.played()[:2] == [("preflop", 6, "raise", 1000), ("preflop", 4, "fold", 0)]
+
+    def test_a_much_older_departure_is_another_players_action(self, tmp_path):
+        tb = _Table(tmp_path)
+        tb.deal()
+        tb.say("レイズ")
+        tb.tick(tb.now + 1.0)
+        tb.muck(4)
+        tb.tick(tb.now + 6.0)                       # 声の遅れ（5 秒）より前の離脱 = 言い直しではない
+        tb.say("1000")
+        assert ("preflop", 6, "raise", 1000) not in tb.played()
+
+
 class TestHeadsUpUnreadSeat:
     """店舗 2026-11-09 559af646 ハンド 69・72（終盤のヘッズアップ）: 席 2 の手札が読めず、フロップの札で降ろした（規則 E）。
     札の離脱の無いまま残りが 1 人になり「席None の札が離れたので、席3 の勝ちとみます」と出たが、席の無い確定の信号を

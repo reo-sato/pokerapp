@@ -16,6 +16,7 @@ import pytest
 from core.events import AudioEvent
 from integration.estimator import (
     CONTENT_FILES,
+    Edit,
     EXPLANATION_MARK,
     PARAMS,
     READING_OVERRIDES,
@@ -94,6 +95,20 @@ class TestAlignWords:
         assert rows[3].collective and rows[4].collective
         assert unused == [chatter]
 
+    def test_departure_folds_take_the_nearest_word(self):
+        """札の離脱のフォールドと「フォールド」の語は時間の近い組から決める。先に離れた人が幅の端の語を取り、その語の
+        本当の持ち主を次の語に押し出さない（店舗 2026-11-09 559af646 ハンド 1）。"""
+        first = _word("fold", T0 + 20.2, T0 + 21)        # 席5 の離脱（20.0 秒）と同時
+        second = _word("fold", T0 + 23.0, T0 + 24)       # 席6 の離脱（22.8 秒）と同時
+        actions = [
+            _row("preflop", 4, "fold", T0 + 16.0, source="rfid_departure"),   # 誰も言っていない早い離脱
+            _row("preflop", 5, "fold", T0 + 20.0, source="rfid_departure"),
+            _row("preflop", 6, "fold", T0 + 22.8, source="rfid_departure"),
+        ]
+        rows, unused = align_words(actions, [first, second], {})
+        assert [r.word for r in rows] == [None, first, second]
+        assert unused == []
+
     def test_record_key_ignores_showdown_mucks(self):
         hand = {"actions": [_row("river", 4, "call", T0 + 1, amount=500)], "winner_seat": 4, "board": []}
         muck = dict(hand, actions=hand["actions"] + [_row("showdown", 5, "fold", T0 + 5)])
@@ -124,12 +139,28 @@ class TestDepartures:
 
     def test_the_word_long_before_the_departure_is_unlikely_but_not_impossible(self):
         """声から 10 秒離れた離脱は裾（語が発話の後ろの方・早いマック, ±20 秒）で受ける = ほぼ同時よりずっと低いが、
-        「離脱が無い + 残っている席の離脱」（−8.8）ほどは罰しない（監査 2 回目）。"""
+        「離脱が無い + 残っている席の離脱」（−8.8）ほどは罰しない（監査 2 回目）。最後のフォールド（片付けまで札が残る）でない
+        ときの話なので、あとに席4 のコールを置く。"""
         est = _estimator(_presence({5: T0 + 40.0}))
-        near, _ = self._terms(est, 5, T0 + 39.9)
-        far, flags = self._terms(est, 5, T0 + 30.0)
+        near, _ = self._terms(est, 5, T0 + 39.9, caller=4)
+        far, flags = self._terms(est, 5, T0 + 30.0, caller=4)
         assert near - far > 5.0 and flags == []
         assert far > math.log(PARAMS["p_nodepart"]) + math.log(1 / PARAMS["lift_sec"])
+
+    def test_the_last_folders_cards_may_stay_until_the_cleanup(self):
+        """ハンドを終わらせる最後のフォールドの札は、ディーラーの片付けまで卓に残ることがある（店舗 2026-11-09 559af646
+        ハンド 9・10）。声から遅れた離脱は片付けの離脱と同じ密度より低くしない。最後でないフォールドは声の遅れのまま。"""
+        est = _estimator(_presence({5: T0 + 41.0}))
+        last, _ = self._terms(est, 5, T0 + 30.0)
+        word = _word("fold", T0 + 30.0, T0 + 30.8)
+        hand = {"players": [{"seat": 4}, {"seat": 5}, {"seat": 6}], "winner_source": "fold"}
+        betting = [_Row("river", 6, "bet", T0 + 25, _word("bet", T0 + 25, T0 + 26, amount=2000)),
+                   _Row("river", 5, "fold", T0 + 30.0, word, source="spoken_fold")]
+        terms = est._departure_terms(_window(), hand, betting, [])
+        assert ("席5 の離脱 = 最後のフォールドの札を片付け（+11.0 秒）",
+                pytest.approx(math.log(1 / PARAMS["other_departure_sec"]))) in terms
+        middle, _ = self._terms(est, 5, T0 + 30.0, caller=4)
+        assert last > middle + 1.0
 
     def test_a_flicker_is_not_a_fold(self):
         """すぐ戻った離脱（ちらつき・のぞき見）はどの仮説でも数えない。"""
@@ -352,6 +383,20 @@ class TestHandTerms:
         opened, _, open_flags = est.score(_window(), self._hand(betting_open_at_end=True), [], self._INFO, ())
         assert opened - closed == pytest.approx(math.log(PARAMS["p_unclosed"]), abs=1e-3)
         assert "ベッティングが閉じないまま終わった" in open_flags and not closed_flags
+
+    def test_a_lift_that_never_returns_is_unlikely(self):
+        """ハンドの終わりまで戻らない札の離脱を持ち上げとみるのは重い（戻らない札はふつう降りた札。店舗 2026-11-09
+        559af646 ハンド 1: 戻らない席6 の離脱を持ち上げにして、その席にレイズを付けていた）。戻った離脱には付けない。"""
+        est = _estimator()
+        hand = self._hand(ended_at=_iso(T0 + 60))
+        never = Edit("lift", T0 + 20, (5, T0 + 180), label="席5 の離脱は持ち上げ")
+        back = Edit("lift", T0 + 20, (5, T0 + 25), label="席5 の離脱は持ち上げ")
+        plain, _, _ = est.score(_window(), hand, [], self._INFO, ())
+        gone, terms, _ = est.score(_window(), hand, [], self._INFO, (never,))
+        returned, _, _ = est.score(_window(), hand, [], self._INFO, (back,))
+        assert gone - plain == pytest.approx(math.log(PARAMS["p_lift_no_return"]), abs=1e-3)
+        assert any(name.startswith("戻らない札の持ち上げ") for name, _ in terms)
+        assert returned == pytest.approx(plain, abs=1e-3)
 
     def test_every_utterance_adds_the_reading_it_takes(self):
         """各発話でちょうど 1 つの読みを選び、その確からしさを足す: 直しの無い候補にも既定の読み（決まり文句になった

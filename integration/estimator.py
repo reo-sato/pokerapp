@@ -99,6 +99,9 @@ PARAMS: dict[str, float] = {
     "silent_fold_mean": 2.5,     # 言われないフォールドの札が離れるまでの考える時間（前の言われたアクションから, 指数分布
                                  # の平均。店舗の 5 回: 2.1〜4.7 秒・中央値 2.4。掃引で店舗の正誤が動かない 1〜3 の中）
     "other_departure_sec": 20.0,  # ショーダウン・片付けで札が離れる時刻の幅
+    # 札がハンドの終わりまで戻らない離脱を持ち上げとみる確率（戻らない札はふつう降りた札。店舗 2026-11-09 559af646
+    # ハンド 1: 戻らない席6 の離脱を持ち上げにして、その席にレイズを付けていた）
+    "p_lift_no_return": 0.05,
     "lift_sec": 200.0,           # ベッティングの途中に残っている席の札が離れる（持ち上げ）の平均の間隔
     # そのほか
     "p_button": 0.01,            # ボタンが記録（ライブが回したボタン）と違う（隣の席 = 動かし忘れ・動かしすぎを 4 倍厚く）。ライブは
@@ -389,6 +392,7 @@ def align_words(actions: list[dict], tokens: list[AudioEvent], inserted: dict[st
                and (str(a.get("actor_source") or "") in _WORD_SOURCES or "check_around" in str(a.get("reason") or ""))}
     used: set[int] = set()
     rows: list[_Row] = []
+    deferred: list[int] = []          # 札の離脱のフォールドの行（語はあとで、時間の近い組から決める）
     for a in actions:
         ts = a.get("timestamp") or ""
         t = _epoch(ts) or 0.0
@@ -405,13 +409,7 @@ def align_words(actions: list[dict], tokens: list[AudioEvent], inserted: dict[st
                         and abs((x.utterance_start_ts or x.timestamp) - t) <= 1.0),
                        key=lambda x: abs((x.utterance_start_ts or x.timestamp) - t), default=None)
         elif src in _RFID_FOLDS:
-            # 聞き違いのコール（「これで終わりです」「コールド」）は、engine と同じ幅で札の離脱と組になる
-            # （`engine.GARBLED_FOLD_BEFORE_SEC` / `GARBLED_FOLD_AFTER_SEC`: 離脱が語の 2 秒前〜1 秒後）
-            word = min((x for x in betting if id(x) not in used and (
-                            (x.action == "fold" and -4.0 <= (x.utterance_start_ts or x.timestamp) - t <= 6.0)
-                            or (x.action == "call" and "garbled_call" in x.parse_flags and id(x) not in claimed
-                                and -1.0 <= (x.utterance_start_ts or x.timestamp) - t <= 2.0))),
-                       key=lambda x: abs((x.utterance_start_ts or x.timestamp) - t), default=None)
+            deferred.append(len(rows))
         if word is not None and (id(word) not in used or collective):
             used.add(id(word))
         else:
@@ -419,6 +417,26 @@ def align_words(actions: list[dict], tokens: list[AudioEvent], inserted: dict[st
         rows.append(_Row(street=str(a.get("street") or ""), seat=int(a.get("seat") or 0),
                          action=str(a.get("action") or ""), t=t, word=word, collective=collective,
                          source=src, reasons=reasons, raw=a))
+    # 札の離脱のフォールドと「フォールド」の語: 時間の近い組から決める（アクションの順に近い語を取ると、先に離れた人が
+    # 幅の端の語を取り、その語の本当の持ち主が次の語に押し出される。店舗 2026-11-09 559af646 ハンド 1: 席6（32.4 秒）が
+    # 38.3 秒の語を取り、38.0 秒に札を投げた席8 が 41.1 秒の語に、その語の席2 が語なしになった）。聞き違いのコール
+    # （「これで終わりです」「コールド」）は、engine と同じ幅で札の離脱と組になる（`engine.GARBLED_FOLD_BEFORE_SEC` /
+    # `GARBLED_FOLD_AFTER_SEC`: 離脱が語の 2 秒前〜1 秒後）
+    pairs = []
+    for k in deferred:
+        t = rows[k].t
+        for j, x in enumerate(betting):
+            start = x.utterance_start_ts or x.timestamp
+            if id(x) in used:
+                continue
+            if ((x.action == "fold" and -4.0 <= start - t <= 6.0)
+                    or (x.action == "call" and "garbled_call" in x.parse_flags and id(x) not in claimed
+                        and -1.0 <= start - t <= 2.0)):
+                pairs.append((abs(start - t), k, j, x))
+    for _dist, k, _j, x in sorted(pairs, key=lambda q: q[:3]):
+        if rows[k].word is None and id(x) not in used:
+            rows[k].word = x
+            used.add(id(x))
     return rows, [t for t in betting if id(t) not in used]
 
 
@@ -731,6 +749,10 @@ class SessionEstimator:
                 terms.append((f"捨てた語: {e.label}", _log(self._p_phantom(e.at, parsed, k))))
             elif e.kind == "read" and not (e.value or "").strip():
                 terms.append((f"捨てた語: {e.label}", _log(self._p_phantom(e.at))))
+            elif e.kind == "lift":
+                end = _epoch(hand.get("ended_at")) or w.end
+                if e.value[1] >= end:
+                    terms.append((f"戻らない札の持ち上げ: {e.label}", _log(p["p_lift_no_return"])))
         # ライブの門（証拠の語を捨てる規則）: 閉じたまま捨てた語・開けて使った語のどちらにも、その決まりが破れる確率
         for key in sorted(info.get("gates") or {}):
             terms.append(("門: 宣言の前の「フォールド」をマックにしない", _log(1 - p["p_muck_before_declare"])))
@@ -887,6 +909,13 @@ class SessionEstimator:
         # 次の配布まで閉じない仮説で、プリフロップの声と同時の離脱が次の配布の札で「戻った」とされ、フォールドに結び付かず
         # 明瞭な声の正解が負けた）
         returns_until = min(end, bet_end)
+        # ハンドを終わらせる最後のフォールド: 降りた人の札がディーラーの片付けまで卓に残ることがある（店舗 2026-11-09
+        # 559af646 ハンド 9: ベット 4000 のあと勝った席2 が先に札を返し、降りた席1 の札はボードの片付けの 10 秒後に離れた。
+        # 遅い離脱を声の遅れの裾だけで受けると、勝った人を降ろして「チェック」の語を捨てる読みが勝っていた）。遅い離脱は
+        # 片付けの離脱と同じ密度より低くしない
+        final = (len(betting) - 1 if betting and betting[-1].action == "fold"
+                 and hand.get("winner_source") == "fold" else None)
+        cleanup = 1 / p["other_departure_sec"]
         for i, r in enumerate(betting):
             if r.action != "fold":
                 continue
@@ -927,7 +956,10 @@ class SessionEstimator:
                 core = math.exp(-(p["fold_lag_mu"] - lag) / early if lag < p["fold_lag_mu"]
                                 else -(lag - p["fold_lag_mu"]) / late) / (early + late)
                 density = (1 - eps) * core + eps / (2 * tail)
-                terms.append((f"席{r.seat} の離脱 = 声のフォールド（{lag:+.1f} 秒）", _log(density)))
+                if i == final and lag > p["fold_lag_mu"] and density < cleanup:
+                    terms.append((f"席{r.seat} の離脱 = 最後のフォールドの札を片付け（{lag:+.1f} 秒）", _log(cleanup)))
+                else:
+                    terms.append((f"席{r.seat} の離脱 = 声のフォールド（{lag:+.1f} 秒）", _log(density)))
             else:
                 # 前の言われたアクションからの考える時間（指数分布、次の言われたアクションで打ち切る。打ち切りの
                 # 幅は 3 秒より狭くしない）+ 裾（早いマック）
@@ -936,7 +968,10 @@ class SessionEstimator:
                 span = max(3.0, (after - prev)) if nxt else math.inf
                 core = math.exp(-max(0.0, wait) / mean) / mean / (1 - math.exp(-span / mean)) if wait >= -1.0 else 0.0
                 density = (1 - eps) * core + eps / max(1.0, hi - lo)
-                terms.append((f"席{r.seat} の離脱 = 言われないフォールド（{wait:+.1f} 秒）", _log(density)))
+                if i == final and wait > 0 and density < cleanup:
+                    terms.append((f"席{r.seat} の離脱 = 最後のフォールドの札を片付け（{wait:+.1f} 秒）", _log(cleanup)))
+                else:
+                    terms.append((f"席{r.seat} の離脱 = 言われないフォールド（{wait:+.1f} 秒）", _log(density)))
             terms.append(("フォールドの札が離れた", _log(1 - p["p_nodepart"])))
         for k, (seat, t, back) in enumerate(deps):
             if k in explained:

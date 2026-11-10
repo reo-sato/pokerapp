@@ -1885,6 +1885,33 @@ class IntegrationThread(threading.Thread):
                         event.raw_text, record.seat, record.action, record.raw_text)
             self._notice(f"「{event.raw_text}」は、直前の「{record.raw_text}」（席{record.seat}）の言い直しとみなしました")
 
+    def _only_card_folds_after(self, wager: ActionRecord, event: AudioEvent) -> bool:
+        """賭けの記録のあとに入ったのが、この発話の少し前（`VOICE_LAG_SEC` 以内）の札の離脱のフォールドだけか（何も無い
+        ときも真）。声は札の動きより遅れるので、ディーラーが賭けの額を言い直す前に、次の人が札を投げていることがある
+        （店舗 2026-11-09 559af646 ハンド 1: 席7「レイズ」→ 席8 の札が中央を通過（38.0 秒）→「7500、フォールド」（38.3 秒）。
+        離脱が先に入ったので「7500」を席7 のレイズの額にできず、推定器は席6 の離脱を持ち上げにしてレイズを付けていた）。
+        あいだに「フォールド」の声（この発話より前に話し始めた語）があれば、その離脱は声で言ったあいだのアクションなので
+        偽（店舗 7b897671 ハンド 3:「1600」→「フォールド」と席4 の離脱 →「2千3百」は次の人の額）。"""
+        records = self._current_actions
+        index = next((i for i in range(len(records) - 1, -1, -1) if records[i] is wager), None)
+        if index is None:
+            return False
+        spoken = _spoken_at(event)
+        if index + 1 < len(records) and self._last_wager is not None and any(
+                kind == "audio" and item is not event and item.action == "fold"
+                and self._last_wager[1] < _spoken_at(item) < spoken for kind, item in self._hand_inputs):
+            return False
+        for record in records[index + 1:]:
+            if record.action != "fold" or record.actor_source not in ("rfid_departure", "rfid_muck"):
+                return False
+            try:
+                t = datetime.fromisoformat(record.timestamp).timestamp()
+            except (TypeError, ValueError):
+                return False
+            if not spoken - VOICE_LAG_SEC <= t <= spoken:
+                return False
+        return True
+
     def _restate_wager_amount(self, event: AudioEvent) -> bool:
         """直前に記録したベット・レイズの額の言い直し: あとから言った額で組み直す（オーナー 2026-10-01）。
 
@@ -1892,8 +1919,8 @@ class IntegrationThread(threading.Thread):
         1400 のコールになった（正しくは 1700 と 1300）。1709932e ハンド 3: プレイヤーの「レイズにします。」とディーラーの
         「レイズ」「レイズ 1 千点」が 3 つのレイズになった。
 
-        直前の記録がそのベット・レイズで（あいだにほかのアクションが無い）、話し始めがその発話から `ALLIN_RESTATE_SEC`
-        以内のとき:
+        直前の記録がそのベット・レイズで（あいだにほかのアクションが無い。この発話の少し前の札の離脱のフォールドだけなら
+        よい = `_only_card_folds_after`）、話し始めがその発話から `ALLIN_RESTATE_SEC` 以内のとき:
         - 額の無いベット・レイズのあとの、同じ語の額の無い発話 = 宣言と復唱（同じ賭け。記録しない）。
         - 額の無いベット・レイズのあとの額 = その賭けの額（ただし額の無い「ベット」のあとの「レイズ N」は次の人のレイズ）。
         - 額を言った賭けのあとの違う額で、次の人のレイズにならない額（いまのベット以下・最小レイズに届かない）=
@@ -1904,7 +1931,7 @@ class IntegrationThread(threading.Thread):
         """
         last, point = self._last_wager, self._last_wager_point
         if (last is None or point is None or not self._current_actions
-                or self._current_actions[-1] is not last[0] or "phonetic_amount" in event.parse_flags):
+                or not self._only_card_folds_after(last[0], event) or "phonetic_amount" in event.parse_flags):
             return False      # 音で読んだ額（意味のない語）で、はっきり聞こえた額を言い直さない
         record, spoken, said = last
         spoken_restatement = "restatement" in event.parse_flags      # 「N 足りないから M」

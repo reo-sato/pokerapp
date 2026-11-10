@@ -593,8 +593,8 @@
           },
           {
             "seat": 2,
-            "action": "fold",
-            "amount": 0,
+            "action": "call",
+            "amount": 2200,
             "street": "preflop"
           },
           {
@@ -618,7 +618,7 @@
           {
             "seat": 7,
             "action": "raise",
-            "amount": 6500,
+            "amount": 7500,
             "street": "preflop"
           },
           {
@@ -630,7 +630,13 @@
           {
             "seat": 1,
             "action": "call",
-            "amount": 4300,
+            "amount": 5300,
+            "street": "preflop"
+          },
+          {
+            "seat": 2,
+            "action": "fold",
+            "amount": 0,
             "street": "preflop"
           },
           {
@@ -790,7 +796,8 @@
           "winner_seat": 1,
           "entry_sec": 6.0
         },
-        "hand_id": 1
+        "hand_id": 1,
+        "fixture_note": "2026-11-10 オーナーの直したとおり（席2 はコールしてから降りた・席7 のレイズは 7500。店舗で入れた真のアクションが誤っていた）"
       },
       "baseline": {
         "action_correct": 5,
