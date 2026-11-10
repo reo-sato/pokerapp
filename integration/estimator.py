@@ -79,6 +79,10 @@ PARAMS: dict[str, float] = {
     "p_present_after_fold": 0.002,  # フォールドから `present_after_sec` 秒たっても札が席に載っている（0/172。言われない
                                  # フォールドを入れて札が残ったままのハンドの読みを止める = 店舗 05cccd6c ハンド 1）
     "present_after_sec": 10.0,
+    # 降りた席の札が離れたあと戻ってくる（オーナー 2026-11-10「フォールドされた札が戻ってくる事象は全く起きない。札が
+    # 戻ったことは、フォールドされていないことのいちばん強い証拠」。店舗 559af646 ハンド 12: 戻った席2 の離脱を降りたあとの
+    # 片付けとみて、プリフロップで降ろす読みが 0.3 差の次点だった）
+    "p_fold_return": 0.0001,
     # 「フォールド」の話し始めから、記録上の札の離脱まで: 左右で幅の違うラプラス分布。ディーラーは札が離れるのを見てから
     # 言う（オーナー 2026-10-06）が、記録上の離脱は読み取りのラグのぶん遅れる（ファームウェアは 3 周続けて読めなかったら
     # 離れたとする = 約 0.7〜1.1 秒。札がリーダーの近くに残るとさらに遅れる）。見てから言うまでとラグがほぼ打ち消し合い、
@@ -976,7 +980,10 @@ class SessionEstimator:
         for k, (seat, t, back) in enumerate(deps):
             if k in explained:
                 continue
-            if (seat in folded_at and folded_at[seat] <= t) or t >= bet_end - 2.0:
+            if seat in folded_at and folded_at[seat] <= t and back is not None and back < returns_until:
+                terms.append((f"席{seat} の札が降りたあとに戻った", _log(p["p_fold_return"])))
+                flags.append(f"降りた席{seat} の札が戻った")
+            elif (seat in folded_at and folded_at[seat] <= t) or t >= bet_end - 2.0:
                 terms.append((f"席{seat} の離脱（ショーダウン・片付け）", _log(1 / p["other_departure_sec"])))
             else:
                 terms.append((f"席{seat} の離脱（残っているのに）", _log(1 / p["lift_sec"])))

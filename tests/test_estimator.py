@@ -162,6 +162,23 @@ class TestDepartures:
         middle, _ = self._terms(est, 5, T0 + 30.0, caller=4)
         assert last > middle + 1.0
 
+    def test_cards_that_came_back_were_not_folded(self):
+        """降りた札が離れたあと戻ってくることは無い（オーナー 2026-11-10: 札が戻ったことは、フォールドされていないことの
+        いちばん強い証拠）。降りたあとの離脱が戻ったら片付けではなく、ほぼあり得ない（店舗 559af646 ハンド 12）。"""
+        seats = {s: [SeatObservation(T0, True, None, None)] for s in (4, 5, 6)}
+        seats[5] += [SeatObservation(T0 + 31.0, False, T0 + 30.5, None), SeatObservation(T0 + 40.0, True, None, None),
+                     SeatObservation(T0 + 61.0, False, T0 + 60.5, None)]
+        est = _estimator(PresenceTimeline(seats))
+        word = _word("fold", T0 + 30.0, T0 + 30.8)
+        hand = {"players": [{"seat": 4}, {"seat": 5}, {"seat": 6}], "winner_source": "fold"}
+        early = [_Row("river", 6, "bet", T0 + 25, _word("bet", T0 + 25, T0 + 26, amount=2000)),
+                 _Row("river", 5, "fold", T0 + 30.0, word, source="spoken_fold"),
+                 _Row("river", 4, "call", T0 + 50, _word("call", T0 + 50, T0 + 51))]
+        flags: list[str] = []
+        terms = est._departure_terms(_window(), hand, early, flags)
+        assert ("席5 の札が降りたあとに戻った", pytest.approx(math.log(PARAMS["p_fold_return"]))) in terms
+        assert "降りた席5 の札が戻った" in flags
+
     def test_a_flicker_is_not_a_fold(self):
         """すぐ戻った離脱（ちらつき・のぞき見）はどの仮説でも数えない。"""
         seats = {s: [SeatObservation(T0, True, None, None)] for s in (4, 5, 6)}
