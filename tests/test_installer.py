@@ -28,9 +28,11 @@ CMD_FILES = [
     "install.cmd", "update.cmd", "uninstall.cmd",
     "start_logger.cmd", "start_monitor.cmd", "start_viewer.cmd", "start_ledger.cmd", "rfid_check.cmd",
     "start_truth.cmd", "pack_logs.cmd", "pack_logs_audio.cmd", "start_script.cmd", "start_cards.cmd",
-    "server_autostart.cmd", "start_server.cmd", "home_truth.cmd",
+    "server_autostart.cmd", "start_server.cmd", "home_truth.cmd", "console_probe.cmd",
 ]
 PS1_FILES = ["installer/install.ps1", "installer/bootstrap.ps1"]
+# -File で実行するタスクの登録（BOM 付き・CRLF。構文は CI の pwsh で）
+TASK_PS1_FILES = ["installer/store_server_task.ps1", "installer/rfid_relay_task.ps1", "installer/console_probe_task.ps1"]
 
 
 def _powershell() -> list[str] | None:
@@ -50,6 +52,12 @@ class TestFilesAndEncodings:
     def test_cmd_is_ascii_crlf(self, rel):
         raw = (ROOT / rel).read_bytes()
         assert raw.isascii(), f"{rel}: cmd.exe は CP932 で読むので ASCII 以外を書かない"
+        assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b""), f"{rel}: CRLF 固定"
+
+    @pytest.mark.parametrize("rel", TASK_PS1_FILES)
+    def test_task_ps1_has_bom_and_crlf(self, rel):
+        raw = (ROOT / rel).read_bytes()
+        assert raw.startswith(b"\xef\xbb\xbf"), f"{rel}: PowerShell 5.1 向けに UTF-8 BOM が要る"
         assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b""), f"{rel}: CRLF 固定"
 
     @pytest.mark.parametrize("rel", PS1_FILES)
@@ -220,7 +228,7 @@ class TestFieldFindings:
 @pytest.mark.slow
 @pytest.mark.skipif(_powershell() is None, reason="pwsh / powershell が無い環境")
 class TestPowerShell:
-    @pytest.mark.parametrize("rel", PS1_FILES)
+    @pytest.mark.parametrize("rel", PS1_FILES + TASK_PS1_FILES)
     def test_parses(self, rel):
         ps = _powershell()
         script = (
