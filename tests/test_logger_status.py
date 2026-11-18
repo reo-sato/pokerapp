@@ -126,3 +126,46 @@ def test_a_second_logger_does_not_start(data_dir: Path, monkeypatch, capsys):  #
     finally:
         held.release()
     assert "別のロガーが動いています" in capsys.readouterr().out
+
+
+def test_a_session_change_reopens_the_mic_once():
+    """RDP の接続・切断（セッションの種類が変わった）とき、マイクの開き直しを 1 回だけ頼む。変わらなければ何もしない。"""
+    console = {"session": 1, "console": True, "remote": False, "state": "active"}
+    rdp = {"session": 1, "console": False, "remote": True, "state": "active"}
+    gone = {"session": 1, "console": False, "remote": False, "state": "disconnected"}
+    now = [console]
+    reopened: list[str] = []
+    notes: list[str] = []
+    check = ls.session_watcher(lambda: now[0], notes.append, reopen=reopened.append)
+    check()
+    assert reopened == []
+    now[0] = rdp
+    check()
+    check()
+    now[0] = gone
+    check()
+    assert reopened == ["RDP でつながりました", "RDP が閉じられました（切断）"] and notes == []
+    # マイクを使わないときは知らせるだけ・Windows 以外（種類が分からない）は何もしない
+    only = ls.session_watcher(lambda: now[0], notes.append)
+    now[0] = console
+    only()
+    assert notes == ["コンソールに戻りました"]
+    other = ls.session_watcher(lambda: {"platform": "linux"}, notes.append, reopen=reopened.append)
+    other()
+    assert len(notes) == 1 and len(reopened) == 2
+
+
+def test_hooks_run_with_the_heartbeat(tmp_path, monkeypatch):
+    monkeypatch.setattr(ls, "HEARTBEAT_SEC", 0.01)
+    calls: list[int] = []
+    status = ls.LoggerStatus("cli", directory=tmp_path)
+    status.add_hook(lambda: calls.append(1))
+    status.add_hook(lambda: 1 / 0)                       # 失敗しても止まらない
+    status.start()
+    import time
+
+    deadline = time.time() + 2
+    while len(calls) < 3 and time.time() < deadline:
+        time.sleep(0.01)
+    status.close()
+    assert len(calls) >= 3

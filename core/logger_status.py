@@ -115,6 +115,7 @@ class LoggerStatus:
         self._clock = clock
         self._lock = threading.Lock()
         self._sources: dict[str, Callable[[], Any]] = {}
+        self._hooks: list[Callable[[], None]] = []        # 心拍ごとに呼ぶ（セッションの見張りなど）
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._seq = 0
@@ -132,6 +133,11 @@ class LoggerStatus:
     def attach(self, name: str, source: Callable[[], Any]) -> None:
         with self._lock:
             self._sources[name] = source
+
+    def add_hook(self, hook: Callable[[], None]) -> None:
+        """心拍ごと（3 秒）に呼ぶ関数を足す（例外はログに残して続ける）。"""
+        with self._lock:
+            self._hooks.append(hook)
 
     def set(self, **fields: Any) -> None:
         with self._lock:
@@ -163,6 +169,13 @@ class LoggerStatus:
 
     def _beat(self) -> None:
         while not self._stop.wait(HEARTBEAT_SEC):
+            with self._lock:
+                hooks = list(self._hooks)
+            for hook in hooks:
+                try:
+                    hook()
+                except Exception:  # noqa: BLE001 — 見張りの失敗でロガーを止めない
+                    logger.warning("ロガーの見張りに失敗しました", exc_info=True)
             self.write()
 
     def close(self) -> None:
@@ -171,6 +184,7 @@ class LoggerStatus:
             self._thread.join(timeout=2)
         with self._lock:
             self._sources.clear()
+            self._hooks.clear()
             self.state.update(phase="stopped", ended_at=_now_iso())
         self.write()
 
@@ -246,3 +260,34 @@ def read_notices(directory: Optional[Path] = None, since: int = 0, limit: int = 
     start = 0 if reset else since
     rows = [r for r in parsed if r["seq"] > start]
     return {"notices": rows[-limit:], "last_seq": rows[-1]["seq"] if rows else start, "reset": reset}
+
+
+# ───────────────────────── Windows のセッションの見張り（ADR-0073 段階 0） ─────────────────────────
+
+SESSION_CHANGE_TEXT = {"rdp": "RDP でつながりました", "disconnected": "RDP が閉じられました（切断）",
+                       "console": "コンソールに戻りました"}
+
+
+def session_watcher(get_info: Callable[[], dict], notify: Callable[[str], None],
+                    reopen: Optional[Callable[[str], None]] = None) -> Callable[[], None]:
+    """セッションの種類（コンソール / RDP / 切断）が変わったら、知らせてマイクの開き直しを頼む関数を作る。
+
+    セッションが変わると、開いたままのマイクが無音になることがある（新しく開けば聞こえる）。`reopen` があれば
+    開き直しを頼み（録音の側が「マイクを開き直します（…）」と知らせる）、無ければ知らせるだけ。Windows 以外では何もしない。
+    """
+    from core.win_session import session_kind
+
+    last = [session_kind(get_info())]
+
+    def check() -> None:
+        kind = session_kind(get_info())
+        if kind == "unknown" or kind == last[0]:
+            return
+        last[0] = kind
+        text = SESSION_CHANGE_TEXT.get(kind, f"セッションが変わりました（{kind}）")
+        if reopen is not None:
+            reopen(text)
+        else:
+            notify(text)
+
+    return check

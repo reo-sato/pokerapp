@@ -41,6 +41,8 @@
     "transcribe_offplay": true,
     "live_transcribe": true,
     "transcriber": "local",
+    "reopen_on_session_change": true,
+    "_reopen_on_session_change_comment": "Windows のセッションが変わったら（RDP でつないだ・閉じた・コンソールに戻した）マイクを開き直す（ADR-0073 段階 0）。開いたままのマイクが無音になることがあるため。開き直しの間の 1 秒ほどの音は落ちる。",
     "_transcriber_comment": "書き起こしの方式（ADR-0072）。\"local\" = 店舗 PC の Whisper（今まで）。\"openai\" = OpenAI の書き起こし（既定 gpt-transcribe）で 1 発話ずつ書き起こす（1 秒ほど・店舗 PC の CPU を使わない。鍵は環境変数 POKERAPP_OPENAI_API_KEY、無ければ local に戻す）。openai のときは live_transcribe を true 扱いにして声をその場でロガーに使い、つながらない間は音声を保存してあとで送り直す。第 2 の耳は店舗 PC のまま。\"remote_model\" で API のモデルを変えられる（既定 gpt-transcribe。whisper-1 は 2027-02-26 に提供終了とされる。前の whisper-1 に戻すなら \"whisper-1\"）。\"cloud\" = クラウドの中継に頼む（他の店に配る形。店舗 PC に鍵を置かない。tools/cloud_link.py でつないであるとき。モデルはクラウドの CLOUD_ASR_MODEL。docs/cloud-setup.md の 4）。",
     "_live_transcribe_comment": "false = 書き起こしを後回しにする（店舗テスト中, 2026-10-28）。その場ではプレー中の発話の音声を保存し、第 2 の耳でブラインド上昇の宣言だけを聞き分けてロガーに送る。Whisper は裏で順にかけて logs/<セッション>.transcripts.jsonl に書き、終了（q）と「ログをまとめる」で残りを書き起こす。ライブの記録は札（RFID）だけで作り、声は評価の読み直しと推定器が使う（全発話をその場で書き起こすと、話し声の多い卓で聞き取りが数分遅れた = 10/26）。",
     "_save_audio_comment": "true = 認識に回した発話の音声を logs/audio/<セッション>/ に WAV で保存する（聞き違いの原因を確かめるため。卓の会話も入るのでテスト中だけ）。聞き取った文は音声の保存と関係なく logs/<セッション>.transcripts.jsonl にすべて残る。",

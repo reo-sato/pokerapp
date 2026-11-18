@@ -9,6 +9,7 @@ import {
   micLine,
   noticeLabel,
   rfidLine,
+  sessionWarning,
   sessionLine,
   statusLine,
   type Tone,
@@ -58,6 +59,7 @@ export function LoggerPanel(props: { repository: StaffRepository }): React.JSX.E
   const lines = [micLine(status), rfidLine(status)].filter((x): x is { text: string; tone: Tone } => x !== null);
   const sub = sessionLine(status);
   const backlog = backlogLine(status);
+  const rdp = sessionWarning(status);
   const shown = open ? notices : notices.slice(0, SHOWN);
   return (
     <View style={styles.card} testID="logger-panel">
@@ -73,6 +75,7 @@ export function LoggerPanel(props: { repository: StaffRepository }): React.JSX.E
           {l.text}
         </Text>
       ))}
+      {rdp ? <Text style={[styles.cardMeta, { color: colors.warn }]}>{rdp}</Text> : null}
       {backlog ? <Text style={[styles.cardMeta, { color: colors.warn }]}>{backlog}</Text> : null}
       {error ? <Text style={[styles.cardMeta, { color: colors.neg }]}>読めません: {error}</Text> : null}
       {notices.length ? (

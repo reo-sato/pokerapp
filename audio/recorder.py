@@ -304,6 +304,9 @@ class AudioThread(threading.Thread):
         self._on_status = on_status
         # 読み取りが続けて失敗した理由（`_capture_loop` が入れて抜け、`run` がマイクを開き直す）
         self._stream_failed: Optional[str] = None
+        # 開き直しの依頼（Windows のセッションが変わったとき = RDP の接続・切断, ADR-0073）。録音のスレッドが受け取る
+        self._reopen_request: Optional[str] = None
+        self._reopen_requested = False
 
     def backlog(self) -> int:
         """まだアクションになっていない発話の数（推論待ち + 推論中）。
@@ -419,10 +422,11 @@ class AudioThread(threading.Thread):
                 )
                 if self._stream_failed is None or self._stop_event.is_set():
                     break
-                # 録音の途中でマイクが切れた（Bluetooth の切断・電源・ドライバ）: 待って開き直す
+                # 録音の途中でマイクが切れた（Bluetooth の切断・電源・ドライバ）か、開き直しを頼まれた: 待って開き直す
+                requested, self._reopen_requested = self._reopen_requested, False
                 _close_quietly(stream)
                 stream = None
-                pa, stream = self._reopen(pa, pyaudio, chunk_size, self._stream_failed)
+                pa, stream = self._reopen(pa, pyaudio, chunk_size, self._stream_failed, requested=requested)
         finally:
             if stream is not None:
                 _close_quietly(stream)
@@ -472,7 +476,15 @@ class AudioThread(threading.Thread):
                                "rdp_audio": self._rdp_audio(pa, pyaudio_mod, devices)}
             return None
 
-    def _reopen(self, pa, pyaudio_mod, chunk_size: int, reason: Optional[str]):
+    def request_reopen(self, reason: str) -> None:
+        """マイクを開き直す（Windows のセッションが変わったとき = RDP の接続・切断, ADR-0073）。
+
+        セッションが変わると、開いたままのマイクが無音になることがある（新しく開けば聞こえる）。フラグを立てるだけで、
+        録音のスレッドが次の読み取りで受け取り、切れたときと同じ道（PyAudio を作り直して名前で探す）で開き直す。
+        """
+        self._reopen_request = str(reason)
+
+    def _reopen(self, pa, pyaudio_mod, chunk_size: int, reason: Optional[str], *, requested: bool = False):
         """切れたマイクを開き直す。待ちを倍々に延ばしながら、開けるか止めるまで繰り返す。
 
         PortAudio はデバイスの一覧を初期化のときにしか読まないので、毎回 PyAudio を作り直す（Bluetooth を
@@ -481,7 +493,13 @@ class AudioThread(threading.Thread):
         表示のため死活表示に残し、「切れました」とは知らせない。
         """
         at_start = reason is None
-        if not at_start:
+        if requested:
+            message = f"マイクを開き直します（{reason}）"
+            logger.info("%s", message)
+            self._status(message)
+            self.health = {"state": "error", "level": 0.0, "last_chunk_at": None, "error": message,
+                           "device_name": self._device_name, "reconnecting": True}
+        elif not at_start:
             message = f"マイクが切れました（{reason}）— つながり直すのを待っています"
             logger.warning("%s", message)
             self._status(f"{message}。Bluetooth・電源を確かめてください（つながれば自動で再開します）")
@@ -610,6 +628,10 @@ class AudioThread(threading.Thread):
         mute_from: Optional[float] = None
         muted_noted: Optional[float] = None
         while not self._stop_event.is_set():
+            if self._reopen_request is not None:
+                self._stream_failed, self._reopen_request = self._reopen_request, None
+                self._reopen_requested = True
+                break
             try:
                 data = read_chunk()
             except OSError as e:

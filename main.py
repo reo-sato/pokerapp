@@ -1193,6 +1193,16 @@ def _run_cli(script: str | None, status) -> None:
     status.attach("rfid", lambda: dict(getattr(rfid_thread, "health", None) or {"state": "unknown"})
                   if rfid_thread is not None else {"state": "disabled"})
     status.attach("speech_backlog", lambda: audio_thread.backlog() if audio_thread is not None else 0)
+    # Windows のセッション（コンソール / RDP / 切断）。変わったらマイクを開き直す（RDP の接続・切断で、開いたままの
+    # マイクが無音になることがある, ADR-0073 段階 0。`audio.reopen_on_session_change`, 既定 true）
+    from core.logger_status import session_watcher
+    from core.win_session import session_info
+
+    status.attach("win_session", session_info)
+    status.add_hook(session_watcher(
+        session_info, _print_notice,
+        reopen=audio_thread.request_reopen
+        if audio_thread is not None and audio_cfg.get("reopen_on_session_change", True) else None))
     status.set(phase="running", transcriber=mode if audio_cfg.get("enabled", True) else "off",
                remote_transcriber=bool(remote))
 

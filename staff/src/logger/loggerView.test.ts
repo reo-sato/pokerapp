@@ -12,6 +12,7 @@ import {
   NOTICES_KEPT,
   rfidLine,
   sessionLine,
+  sessionWarning,
   statusLine,
 } from "./loggerView";
 
@@ -44,6 +45,14 @@ test("sessionLine / micLine / rfidLine / backlogLine", () => {
   assert.equal(backlogLine(running()), null);
   assert.match(backlogLine(running({ speech_backlog: 3 }))!, /聞き取り待ち 3 件/);
   assert.equal(micLine({ ...running(), status: "stopped" }), null);
+});
+
+test("sessionWarning: RDP でつないでいる・切断・コンソール", () => {
+  assert.equal(sessionWarning(running({ win_session: { console: true, remote: false, state: "active" } })), null);
+  assert.match(sessionWarning(running({ win_session: { console: false, remote: true, state: "active" } }))!, /RDP でつながっています/);
+  assert.match(sessionWarning(running({ win_session: { console: false, remote: false, state: "disconnected" } }))!, /コンソールに戻す/);
+  assert.equal(sessionWarning(running({ win_session: { platform: "linux" } })), null);
+  assert.equal(sessionWarning(running()), null);
 });
 
 test("mergeNotices: 新しい順・重複なし・起動し直したら捨てる・件数の上限", () => {

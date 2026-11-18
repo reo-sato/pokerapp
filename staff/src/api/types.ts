@@ -330,6 +330,8 @@ export interface LoggerState {
   rfid?: { state?: string; connected?: number; configured?: number; error?: string };
   speech_backlog?: number;
   transcriber?: string;
+  /** Windows のセッション（ADR-0073 段階 0）: console / remote（RDP）/ state（disconnected = RDP を閉じたまま）。 */
+  win_session?: { session?: number; console?: boolean; remote?: boolean; state?: string | null; platform?: string };
   notice_seq?: number;
 }
 

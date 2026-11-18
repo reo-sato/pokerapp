@@ -46,54 +46,13 @@ CHUNK = 1600              # 0.1 秒（16 kHz）
 REOPEN_FIRST_SEC = 1.0
 REOPEN_MAX_SEC = 10.0
 VOICE_RMS = 300.0         # 声とみなす大きさ（ロガーの audio.speech_rms の既定と同じ）
+FRESH_SEC = 1.0           # 一覧を数えるときに、マイクを新しく開いて聞く秒数
 STALL_SEC = 3.0           # 読み取りがこれだけ返らなければ「固まった」と記録する
-
-# WTS_CONNECTSTATE_CLASS（wtsapi32）
-_WTS_STATES = {0: "active", 1: "connected", 2: "connect_query", 3: "shadow", 4: "disconnected", 5: "idle",
-               6: "listen", 7: "reset", 8: "down", 9: "init"}
-STATE_JA = {"active": "使用中", "disconnected": "切断", "connected": "接続中"}
-
 
 # ───────────────────────── Windows のセッション ─────────────────────────
 
 
-def session_info() -> dict:
-    """このプロセスのセッション: 番号・コンソールか・RDP か・接続の状態。Windows 以外は {"platform": ...}。"""
-    if sys.platform != "win32":
-        return {"platform": sys.platform}
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.windll.kernel32
-    user32 = ctypes.windll.user32
-    wtsapi32 = ctypes.windll.wtsapi32
-    sid = wintypes.DWORD()
-    kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId(), ctypes.byref(sid))
-    console = int(kernel32.WTSGetActiveConsoleSessionId())
-    remote = bool(user32.GetSystemMetrics(0x1000))          # SM_REMOTESESSION
-    state = None
-    buf = ctypes.c_void_p()
-    size = wintypes.DWORD()
-    # WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSConnectState = 8)
-    if wtsapi32.WTSQuerySessionInformationW(None, wintypes.DWORD(0xFFFFFFFF), 8, ctypes.byref(buf), ctypes.byref(size)):
-        try:
-            state = _WTS_STATES.get(ctypes.cast(buf, ctypes.POINTER(ctypes.c_int)).contents.value)
-        finally:
-            wtsapi32.WTSFreeMemory(buf)
-    return {"session": int(sid.value), "console": int(sid.value) == console, "remote": remote, "state": state}
-
-
-def describe_session(info: dict) -> str:
-    """セッションを日本語で 1 語に（コンソール / RDP / 切断）。"""
-    if "platform" in info:
-        return f"Windows 以外（{info['platform']}）"
-    if info.get("state") == "disconnected":
-        return "切断（RDP を閉じたまま）"
-    if info.get("remote"):
-        return "RDP でつないでいる"
-    if info.get("console"):
-        return "コンソール（RDP なし）"
-    return f"その他（{STATE_JA.get(info.get('state'), info.get('state'))}）"
+from core.win_session import describe_session, session_info  # noqa: E402,F401 — ロガーの状態と共通
 
 
 # ───────────────────────── マイク ─────────────────────────
@@ -119,15 +78,41 @@ def device_summary(cfg: Optional[dict] = None) -> dict:
     pa = pyaudio.PyAudio()
     try:
         devices = list_input_devices(pa, pyaudio, rate)
+        names = parse_device_names(cfg.get("device_name"))
+        chosen = choose_device(devices, names) if names else next(
+            (d for d in devices if d.index == int(cfg.get("device_id", 0))), None)
+        fresh = fresh_listen(pa, pyaudio, chosen.index, rate) if chosen is not None else {"fresh_error": "マイクが一覧に無い"}
     finally:
         pa.terminate()
-    names = parse_device_names(cfg.get("device_name"))
-    chosen = choose_device(devices, names) if names else next(
-        (d for d in devices if d.index == int(cfg.get("device_id", 0))), None)
     return {"inputs": len(devices), "wdm_ks_only": bool(devices) and only_wdm_ks(devices),
             "chosen": chosen.name if chosen is not None else None,
             "chosen_index": chosen.index if chosen is not None else None,
-            "default": next((d.name for d in devices if d.default), None)}
+            "default": next((d.name for d in devices if d.default), None), **fresh}
+
+
+def fresh_listen(pa: Any, pyaudio_mod: Any, index: int, rate: int, seconds: float = FRESH_SEC) -> dict:
+    """マイクを新しく開いて `seconds` 秒読み、いちばん大きい音を返す（`fresh_rms`）。開けなければ `fresh_error`。
+
+    途中の録音が無音のとき、「開き直せば聞こえる」のか「このセッションでは聞こえない」のかを分けるため。
+    """
+    try:
+        stream = pa.open(format=pyaudio_mod.paInt16, channels=1, rate=rate, input=True,
+                         input_device_index=index, frames_per_buffer=CHUNK)
+    except Exception as e:  # noqa: BLE001 — 開けなかった理由を記録する
+        return {"fresh_error": f"{type(e).__name__}: {e}"[:200]}
+    try:
+        top = 0.0
+        for _ in range(max(1, int(seconds * rate / CHUNK))):
+            top = max(top, rms(stream.read(CHUNK, exception_on_overflow=False)))
+        return {"fresh_rms": round(top)}
+    except Exception as e:  # noqa: BLE001
+        return {"fresh_error": f"{type(e).__name__}: {e}"[:200]}
+    finally:
+        try:
+            stream.stop_stream()
+            stream.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def devices_in_new_process(timeout: float = 20.0) -> dict:
@@ -263,7 +248,7 @@ def run_probe(seconds: float, out: Path, *, mic: Any, sessions: Callable[[], dic
     while clock() - start < seconds:
         now = clock()
         if now >= next_devices:
-            dev = devices()
+            dev = {**devices(), "at": round(now, 1)}
             next_devices = now + DEVICES_SEC
         if is_open:
             try:
@@ -362,9 +347,17 @@ def summarize(rows: list[dict], child_rows: Optional[list[dict]] = None) -> list
                 extra.append("一覧が WDM-KS だけ（RDP の音声が接続元に回っている）")
             if dev and not dev.get("chosen"):
                 extra.append("新しく起動すると設定のマイクが見つからない")
+        if seg["fresh_tries"]:
+            if seg["fresh_voice"]:
+                extra.append(f"新しく開くと: 声あり（{seg['fresh_voice']}/{seg['fresh_tries']} 回・最大 {seg['fresh_max']}）")
+            elif seg["fresh_open"]:
+                extra.append(f"新しく開くと: 無音（最大 {seg['fresh_max']}）")
+            else:
+                extra.append(f"新しく開くと: 開けない（{seg['fresh_error'] or '理由不明'}）")
         lines.append(f"{_hm(seg['from'])}〜{_hm(seg['to'])}  {seg['where']}: {mic}・{voice}"
                      + (f"（{'・'.join(extra)}）" if extra else ""))
 
+    fresh_seen: set = set()
     for r in rows:
         if r.get("kind") != "row":
             continue
@@ -374,7 +367,8 @@ def summarize(rows: list[dict], child_rows: Optional[list[dict]] = None) -> list
             flush()
             seg = {"key": key, "where": where, "open": bool(r.get("open")), "mic": r.get("mic"),
                    "error": r.get("error"), "from": r["t"], "to": r["t"], "voiced_rows": 0, "rms_max": 0,
-                   "read_errors": 0, "reopened": 0, "devices": r.get("devices")}
+                   "read_errors": 0, "reopened": 0, "devices": r.get("devices"),
+                   "fresh_tries": 0, "fresh_open": 0, "fresh_voice": 0, "fresh_max": 0, "fresh_error": None}
         seg["to"] = r["t"]
         seg["voiced_rows"] += 1 if r.get("voiced") else 0
         seg["rms_max"] = max(seg["rms_max"], int(r.get("rms_max") or 0))
@@ -382,6 +376,17 @@ def summarize(rows: list[dict], child_rows: Optional[list[dict]] = None) -> list
         seg["reopened"] += int(r.get("reopened") or 0)
         if r.get("devices"):
             seg["devices"] = r["devices"]
+            dev = r["devices"]
+            stamp = id(dev) if dev.get("at") is None else dev.get("at")
+            if ("fresh_rms" in dev or "fresh_error" in dev) and stamp not in fresh_seen:
+                fresh_seen.add(stamp)                 # 30 秒ごとの 1 回を 1 回と数える（同じ結果が 6 行に入る）
+                seg["fresh_tries"] += 1
+                if "fresh_rms" in dev:
+                    seg["fresh_open"] += 1
+                    seg["fresh_max"] = max(seg["fresh_max"], int(dev["fresh_rms"]))
+                    seg["fresh_voice"] += 1 if dev["fresh_rms"] >= VOICE_RMS else 0
+                else:
+                    seg["fresh_error"] = dev["fresh_error"]
         if not r.get("open") and r.get("error"):
             seg["error"] = r["error"]
     flush()

@@ -28,7 +28,7 @@ CMD_FILES = [
     "install.cmd", "update.cmd", "uninstall.cmd",
     "start_logger.cmd", "start_monitor.cmd", "start_viewer.cmd", "start_ledger.cmd", "rfid_check.cmd",
     "start_truth.cmd", "pack_logs.cmd", "pack_logs_audio.cmd", "start_script.cmd", "start_cards.cmd",
-    "server_autostart.cmd", "start_server.cmd", "home_truth.cmd", "console_probe.cmd",
+    "server_autostart.cmd", "start_server.cmd", "home_truth.cmd", "console_probe.cmd", "rdp_to_console.cmd",
 ]
 PS1_FILES = ["installer/install.ps1", "installer/bootstrap.ps1"]
 # -File で実行するタスクの登録（BOM 付き・CRLF。構文は CI の pwsh で）

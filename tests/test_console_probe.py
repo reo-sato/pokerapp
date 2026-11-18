@@ -52,13 +52,17 @@ class FakeMic:
         pass
 
 
-def _run(tmp_path: Path, plan, where, seconds: float = 60.0) -> list[dict]:
+def _run(tmp_path: Path, plan, where, seconds: float = 60.0, fresh=None) -> list[dict]:
     clock = Clock()
     start = clock()
     out = tmp_path / "probe.jsonl"
+
+    def devices() -> dict:
+        extra = fresh(clock() - start) if fresh else {}
+        return {"inputs": 3, "wdm_ks_only": False, "chosen": "Wireless Mic Rx", **extra}
+
     cp.run_probe(seconds, out, mic=FakeMic(clock, lambda t: plan(t - start)), sessions=lambda: where(clock() - start),
-                 devices=lambda: {"inputs": 3, "wdm_ks_only": False, "chosen": "Wireless Mic Rx"},
-                 clock=clock, sleep=clock.sleep)
+                 devices=devices, clock=clock, sleep=clock.sleep)
     return [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
 
 
@@ -127,3 +131,16 @@ def test_describe_session():
     assert cp.describe_session(CONSOLE) == "コンソール（RDP なし）"
     assert cp.describe_session(RDP) == "RDP でつないでいる"
     assert cp.describe_session(GONE) == "切断（RDP を閉じたまま）"
+
+
+def test_a_fresh_open_tells_whether_reopening_would_help(tmp_path):
+    """途中の録音が無音のとき、新しく開くと聞こえるか（開き直せば直る）・無音か・開けないかを区間ごとに出す。"""
+    where = lambda t: CONSOLE if t < 61 else GONE                               # noqa: E731
+    plan = lambda t: "voice" if t < 58 else "quiet"                            # noqa: E731
+    fresh = lambda t: {"fresh_rms": 1800} if t < 59 else {"fresh_error": "OSError: Unanticipated host error"}  # noqa: E731
+    joined = "\n".join(cp.summarize(_run(tmp_path, plan, where, seconds=120, fresh=fresh)))
+    assert "新しく開くと: 声あり（2/2 回・最大 1800）" in joined          # 30 秒ごと = 60 秒で 2 回
+    assert "新しく開くと: 開けない（OSError: Unanticipated host error）" in joined
+    quiet = "\n".join(cp.summarize(_run(tmp_path / "q", plan, lambda t: RDP, seconds=40,
+                                          fresh=lambda t: {"fresh_rms": 5})))
+    assert "新しく開くと: 無音（最大 5）" in quiet

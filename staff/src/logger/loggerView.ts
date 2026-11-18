@@ -65,6 +65,15 @@ export function rfidLine(r: LoggerStatusResponse | null): { text: string; tone: 
   return { text: `RFID: ${f.state ?? "不明"}`, tone: "muted" };
 }
 
+/** RDP でつないでいる・RDP を閉じたまま（切断）のときの注意（マイクの行き先が変わることがある, ADR-0073 段階 0）。 */
+export function sessionWarning(r: LoggerStatusResponse | null): string | null {
+  const w = r?.state?.win_session;
+  if (!w || r?.status !== "running" || w.platform) return null;
+  if (w.state === "disconnected") return "RDP を閉じた状態です（声が取れないときは PC で「コンソールに戻す」）";
+  if (w.remote) return "RDP でつながっています（マイクの行き先が変わることがあります）";
+  return null;
+}
+
 /** 聞き取り待ちの件数（多いと iPad の操作が遅れて効く）。 */
 export function backlogLine(r: LoggerStatusResponse | null): string | null {
   const n = r?.state?.speech_backlog;
