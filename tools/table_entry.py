@@ -477,7 +477,8 @@ TABLE_PAGE = r"""<!doctype html>
 <script>
 const T = {sid:null, hid:null, data:null, rows:[], button:null, absent:new Set(), winners:[], chop:false, notes:"", excluded:false,
            legal:null, typing:null, started:null, uiSeats:[], capSeats:null, savedJson:"", saveTimer:null, busy:false,
-           history:[], notice:null, flashMsg:null, flashAt:0};
+           history:[], notice:null, flashMsg:null, flashAt:0,
+           known:new Set(), nextSid:null, carry:null, sessOpts:"", sessAt:0};
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt = n => Number(n || 0).toLocaleString("ja-JP");
@@ -496,19 +497,53 @@ function saveDraft(){ try { localStorage.setItem(draftKey(), JSON.stringify({row
 function loadDraft(){ try { return JSON.parse(localStorage.getItem(draftKey()) || "null"); } catch (e) { return null; } }
 function dropDraft(){ try { localStorage.removeItem(draftKey()); } catch (e) {} }
 
+async function loadSessions(){
+  const list = (await api("/api/sessions")).sessions || [];
+  const opts = list.map(x => `<option value="${esc(x.session_id)}">${esc(x.session_id.slice(0,8))}（${x.hands} ハンド）</option>`).join("");
+  if (opts !== T.sessOpts) { T.sessOpts = opts; $("sess").innerHTML = opts; }
+  if (T.sid) $("sess").value = T.sid;
+  return list;
+}
 async function start(){
-  const s = await api("/api/sessions");
-  const list = s.sessions || [];
-  $("sess").innerHTML = list.map(x => `<option value="${esc(x.session_id)}">${esc(x.session_id.slice(0,8))}（${x.hands} ハンド）</option>`).join("");
+  const list = await loadSessions();
+  T.known = new Set(list.map(x => x.session_id));
   if (list.length) await pickSession(list[0].session_id);
   setInterval(tick, 2000);
 }
-async function pickSession(sid){
-  T.sid = sid;
-  const c = await api(`/api/table/${encodeURIComponent(sid)}/current`);
-  if (c.hand_id != null) await openHand(c.hand_id);
+async function pickSession(sid, carry){
+  T.sid = sid; T.data = null; T.hid = null; T.carry = carry || null; T.nextSid = null;
+  $("sess").value = sid;
+  await openCurrent();
 }
-async function openHand(hid){
+// 開いたセッションのいま入れるハンド。卓の設定がまだ書かれていなければ、次の読み直しでもう一度
+async function openCurrent(){
+  const sid = T.sid;
+  const c = await api(`/api/table/${encodeURIComponent(sid)}/current`);
+  if (T.sid !== sid) return;
+  if (c.hand_id != null) { const carry = T.carry; T.carry = null; await openHand(c.hand_id, carry); }
+  else { $("title").textContent = "—"; flash(`セッション ${sid.slice(0, 8)}: 卓の設定を待っています`); }
+}
+// 新しいセッション（ロガーを起動し直した）に移る。前は一覧を開いたときにしか読まず、画面を開き直すまで前のセッションの
+// ままだった（店舗 2026-11-09: 2 つのセッションとも、最初の 2 ハンドを入れられなかった）。入れていて保存していない
+// ハンドがあれば保存してから移る。まだ配っていないハンドに入れかけていたアクションは、新しいセッションの最初のハンドへ
+async function followNewSession(){
+  const list = await loadSessions();
+  for (const x of list) {
+    if (T.known.has(x.session_id)) continue;
+    T.known.add(x.session_id);
+    if (!T.nextSid) T.nextSid = x.session_id;          // 一覧は新しい順 = 最初の 1 つがいちばん新しい
+  }
+  if (!T.nextSid || T.nextSid === T.sid) { T.nextSid = null; return false; }
+  if (T.data && T.started && T.data.state !== "pending" && JSON.stringify(payload()) !== T.savedJson) {
+    flash(`新しいセッション ${T.nextSid.slice(0, 8)} が始まりました — このハンドを保存したら移ります`);
+    return false;
+  }
+  const pend = T.data && T.data.state === "pending" && T.started;
+  const carry = pend ? {rows:T.rows.map(r => ({...r})), winners:[...T.winners], notes:T.notes, started:T.started} : null;
+  await pickSession(T.nextSid, carry);
+  return true;
+}
+async function openHand(hid, carry){
   let data;
   try { data = await api(`/api/table/${encodeURIComponent(T.sid)}/hands/${hid}`); }
   catch (e) { flash(e.status === 404 ? `ハンド ${hid} はまだありません` : e.message); return; }
@@ -537,6 +572,12 @@ async function openHand(hid){
   T.notes = src.notes || ""; T.excluded = !!src.excluded; T.started = (d && d.started) || null;
   $("notes").value = T.notes; $("excluded").checked = T.excluded;
   if (gt) T.savedJson = "loaded";
+  if (carry && !gt && data.state === "pending") {
+    T.rows = carry.rows; T.winners = carry.winners; T.chop = T.winners.length > 1;
+    T.notes = carry.notes; T.started = carry.started; $("notes").value = T.notes;
+    saveDraft();
+    flash("新しいセッションに移りました（入れかけていたアクションを引き継ぎました）");
+  }
   await relegal(false);
 }
 // 卓の席はいつも 8 つ（オーナー 2026-10-26: アクション履歴の画面と同じく、空いている席も空席として出す）。記録にも真の
@@ -616,7 +657,13 @@ async function saveNow(){
 }
 function setSaved(t, bad){ const el = $("saved"); el.textContent = t; el.style.color = bad ? "var(--bad)" : ""; }
 async function tick(){
-  if (!T.data || T.busy) return;
+  if (T.busy) return;
+  if (Date.now() - (T.sessAt || 0) >= 5000) {          // セッションの一覧は 5 秒ごと
+    T.sessAt = Date.now();
+    try { if (await followNewSession()) return; } catch (e) {}
+  }
+  if (!T.sid) return;
+  if (!T.data) { try { await openCurrent(); } catch (e) {} return; }
   if (T.data.state === "done") return;
   try {
     const d = await api(`/api/table/${encodeURIComponent(T.sid)}/hands/${T.hid}`);

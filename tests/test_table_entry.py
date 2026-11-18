@@ -327,3 +327,17 @@ def test_seating_carries_in_counting_mode_on_both_screens(tmp_path):
     repo.upsert(SID, 2, dict(gt1, players=[{"seat": s} for s in (4, 5, 6)]), annotator="table", source="manual-edit")
     assert hand_detail(d, SID, 2, repo)["carried"] is None
     assert [p["seat"] for p in table_hand(d, SID, 2, repo)["base"]["players"]] == [4, 5, 6]
+
+
+def test_the_page_follows_a_new_session():
+    """画面は 2 秒ごとの読み直しで、5 秒ごとにセッションの一覧も読み、新しいセッション（ロガーを起動し直した）に移る。
+    前は開いたときにしか一覧を読まず、開き直すまで前のセッションのままだった（店舗 2026-11-09: 最初の 2 ハンドを
+    入れられなかった）。実際の動き（設定待ち・入れかけのアクションの引き継ぎ・保存してから移る）は Playwright で確かめた。"""
+    import re
+
+    from tools.table_entry import TABLE_PAGE
+
+    tick = re.search(r"async function tick\(\)\{(.*?)\n\}", TABLE_PAGE, re.S).group(1)
+    assert "followNewSession()" in tick and "openCurrent()" in tick
+    follow = re.search(r"async function followNewSession\(\)\{(.*?)\n\}", TABLE_PAGE, re.S).group(1)
+    assert "loadSessions()" in follow and "T.known" in follow and "carry" in follow
