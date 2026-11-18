@@ -695,3 +695,17 @@ def test_hole_cards_read_counts_cards_read_during_the_hand():
     r = eval_store.hole_cards_read({"hands": [gt]}, [cap], events)
     assert (r["both_read"], r["acted_seats"]) == (1, 3)
     assert r["missing"] == [(1, 2, 1), (1, 3, 0)]
+
+
+def test_asr_usage_by_method():
+    """書き起こしの方式（行の `asr`）ごとの発話の数・音声の秒数・API の課金の目安（ADR-0072。店舗 PC の Whisper は 0）。"""
+    from tools.eval_store import LOCAL_ASR, asr_usage, format_asr_usage
+
+    rows = [{"text": "コール", "audio_sec": 60.0, "asr": "openai-whisper-1"},
+            {"text": "フォールド", "audio_sec": 30.0, "asr": "openai-whisper-1"},
+            {"text": "チェック", "audio_sec": 2.0},
+            {"text": "", "audio_sec": 5.0, "no_speech": True}]
+    usage = asr_usage(rows)
+    assert usage["openai-whisper-1"] == {"utterances": 2, "audio_sec": 90.0, "cost_usd": 0.009}
+    assert usage[LOCAL_ASR] == {"utterances": 1, "audio_sec": 2.0, "cost_usd": 0.0}
+    assert format_asr_usage(usage).startswith("openai-whisper-1 2 発話（音声 1.5 分・課金の目安 $0.01）")

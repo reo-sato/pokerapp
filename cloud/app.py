@@ -22,6 +22,11 @@
   `GET /api/players/{id}` / `.../sessions` / `.../sessions/{sid}/hands` / `.../sessions/{sid}/ledger` /
   `GET /api/sessions/{sid}/hands/{hid}`（その人が座っていたハンドだけ）
 - `/`（お客さん向け画面のクラウド用ビルド `cloud/static/player/`。あれば）
+
+書き起こしの中継（ADR-0072 D1 = 他の店に配る形。店舗 PC に API の鍵を置かない, 2026-11-18）:
+- `POST /api/cloud/v1/asr/transcriptions`            店舗 PC（端末トークン）→ 1 発話の WAV を OpenAI で書き起こした文
+  鍵はクラウドの環境変数（Secret Manager）`OPENAI_API_KEY`。無ければ 503。店ごとに 1 日の音声の秒数の上限（429）。
+  音声と文はクラウドに保存せず、ログにも書かない（店舗・秒数だけ）。
 """
 from __future__ import annotations
 
@@ -64,6 +69,43 @@ API_PREFIX = "/api/cloud/v1"
 DEFAULT_MAX_BODY = 4 * 1024 * 1024
 DEFAULT_LOGIN_TTL_SEC = 30 * 24 * 3600
 PLAYER_WEB_DIR = Path(__file__).resolve().parent / "static" / "player"
+DEFAULT_ASR_MAX_BYTES = 2 * 1024 * 1024        # 16 kHz・16 bit・モノラルで約 65 秒
+DEFAULT_ASR_DAILY_SEC = 8 * 3600.0             # 1 セッションの声のある発話は 1.5 時間ほど（ADR-0072 D6）
+
+
+class AsrQuota:
+    """店ごとの 1 日（UTC）の書き起こしの音声の秒数（インスタンスの記憶の中。Cloud Run の最大インスタンス数を 1 にする
+    前提の上限。複数にするならデータベースに数える = 段階 2）。"""
+
+    def __init__(self, daily_sec: float, clock: Callable[[], float]) -> None:
+        self.daily_sec = float(daily_sec)
+        self.clock = clock
+        self._used: dict[str, tuple[str, float]] = {}
+        self._lock = threading.Lock()
+
+    def take(self, store_id: str, sec: float) -> bool:
+        day = time.strftime("%Y-%m-%d", time.gmtime(self.clock()))
+        with self._lock:
+            used_day, used = self._used.get(store_id, (day, 0.0))
+            if used_day != day:
+                used = 0.0
+            if used + sec > self.daily_sec:
+                return False
+            self._used[store_id] = (day, used + sec)
+            return True
+
+
+def wav_seconds(data: bytes) -> Optional[float]:
+    """WAV の長さ（秒）。WAV でなければ None。"""
+    import io
+    import wave
+
+    try:
+        with wave.open(io.BytesIO(data), "rb") as f:
+            rate = f.getframerate()
+            return f.getnframes() / float(rate) if rate else None
+    except (wave.Error, EOFError, OSError):
+        return None
 
 
 @dataclass
@@ -78,6 +120,12 @@ class CloudSettings:
     login_ttl_sec: int = DEFAULT_LOGIN_TTL_SEC
     public_url: Optional[str] = None                    # リンクの URL の頭（無ければ要求の URL から）
     player_web_dir: Optional[Path] = None               # お客さん向け画面（無ければ配信しない）
+    asr_key: Optional[str] = None                       # 書き起こしの API の鍵（無ければ中継の受け口は 503）
+    asr_model: str = "whisper-1"                        # 書き起こしのモデル（whisper-1 は 2027-02-26 に提供終了とされる）
+    asr_max_bytes: int = DEFAULT_ASR_MAX_BYTES          # 1 発話の WAV の上限
+    asr_daily_sec: float = DEFAULT_ASR_DAILY_SEC        # 店ごとの 1 日（UTC）の音声の秒数の上限
+    asr_call: Optional[Callable[..., str]] = None       # 試験で差し替える（既定 core.remote_asr.transcribe_openai）
+    wall_clock: Callable[[], float] = field(default=time.time)
     view_root: Optional[Path] = None                    # 読み取りの写しの置き場（無ければ一時ディレクトリ）
     wall_clock: Callable[[], float] = field(default=time.time)
 
@@ -124,6 +172,14 @@ class _Fail(Exception):
 
 
 async def _read_json(request: Request, limit: int) -> object:
+    data = await _read_bytes(request, limit)
+    try:
+        return json.loads(data or b"null")
+    except (ValueError, UnicodeDecodeError):
+        raise _Fail(400, "invalid_payload", "本文が JSON ではありません") from None
+
+
+async def _read_bytes(request: Request, limit: int) -> bytes:
     length = request.headers.get("content-length")
     if length is not None:
         try:
@@ -137,10 +193,7 @@ async def _read_json(request: Request, limit: int) -> object:
         if size > limit:
             raise _Fail(413, "payload_too_large", f"本文は {limit} バイトまでです")
         chunks.append(chunk)
-    try:
-        return json.loads(b"".join(chunks) or b"null")
-    except (ValueError, UnicodeDecodeError):
-        raise _Fail(400, "invalid_payload", "本文が JSON ではありません") from None
+    return b"".join(chunks)
 
 
 def create_cloud_app(storage: Storage, settings: Optional[CloudSettings] = None) -> FastAPI:
@@ -216,6 +269,31 @@ def create_cloud_app(storage: Storage, settings: Optional[CloudSettings] = None)
         logger.info("push store=%s seq=%s results=%s rejected=%d", device["store_id"], result["seq"],
                     result["results"], len(result["rejected"]))
         return JSONResponse(result)
+
+    asr_quota = AsrQuota(settings.asr_daily_sec, settings.wall_clock)
+
+    @app.post(f"{API_PREFIX}/asr/transcriptions")
+    async def asr_transcriptions(request: Request) -> JSONResponse:
+        device = await run_in_threadpool(_device, request)
+        if not settings.asr_key:
+            raise _Fail(503, "asr_unavailable", "書き起こしの中継は使えません（鍵が設定されていません）")
+        wav = await _read_bytes(request, settings.asr_max_bytes)
+        sec = wav_seconds(wav)
+        if sec is None:
+            raise _Fail(400, "invalid_audio", "本文が WAV ではありません")
+        if not asr_quota.take(device["store_id"], sec):
+            raise _Fail(429, "asr_quota", "今日の書き起こしの上限に達しました")
+        from core.remote_asr import RemoteAsrError, transcribe_openai
+
+        call = settings.asr_call or transcribe_openai
+        try:
+            text = await run_in_threadpool(lambda: call(wav, key=settings.asr_key, model=settings.asr_model))
+        except RemoteAsrError as exc:
+            # 鍵・音声・文はログに書かない（例外の文にも鍵は入らない = core.remote_asr.post）
+            logger.warning("asr failed store=%s sec=%.1f: %s", device["store_id"], sec, str(exc)[:120])
+            raise _Fail(502, "asr_failed", "書き起こしに失敗しました（あとで送り直してください）") from None
+        logger.info("asr store=%s sec=%.1f", device["store_id"], sec)
+        return JSONResponse({"text": text, "asr": f"openai-{settings.asr_model}", "audio_sec": round(sec, 3)})
 
     @app.get(f"{API_PREFIX}/sync/status")
     def sync_status(request: Request) -> JSONResponse:

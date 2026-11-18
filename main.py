@@ -448,19 +448,42 @@ def _make_audio_thread(cfg: dict, audio_queue, stop_event, on_transcript=None, l
 
 
 def _wants_remote(audio_cfg: dict) -> bool:
-    """書き起こしを API（OpenAI の whisper-1）で行うか（config `audio.transcriber` = "openai" で、鍵があるとき, ADR-0072）。
-    鍵が無ければ店舗 PC の Whisper に戻す（音声なしにはしない）。"""
-    if str(audio_cfg.get("transcriber", "local")).lower() != "openai":
-        return False
-    from core.remote_asr import api_key
+    """書き起こしを API で行うか（ADR-0072）。config `audio.transcriber`:
+    - "openai": 店舗 PC から OpenAI を直接呼ぶ（テスト中の形）。鍵（`POKERAPP_OPENAI_API_KEY`）があるとき。
+    - "cloud": クラウドの中継に頼む（他の店に配る形。店舗 PC に鍵を置かない）。クラウドにつないであるとき。
+    どちらも使えなければ店舗 PC の Whisper に戻す（音声なしにはしない）。"""
+    mode = str(audio_cfg.get("transcriber", "local")).lower()
+    if mode == "openai":
+        from core.remote_asr import api_key
 
-    return bool(api_key())
+        return bool(api_key())
+    if mode == "cloud":
+        return _cloud_credentials() is not None
+    return False
+
+
+def _cloud_credentials():
+    """クラウドにつないだときの url と端末トークン（`tools/cloud_link.py link`, ADR-0067 2b）。無ければ None。"""
+    from core.cloud_sync import load_credentials
+
+    try:
+        return load_credentials()
+    except Exception:  # noqa: BLE001 — 読めなければつないでいないのと同じ
+        return None
 
 
 def _remote_transcriber(audio_cfg: dict):
     """書き起こしの API の Transcriber（使わないなら None = 店舗 PC の Whisper）。"""
     if not _wants_remote(audio_cfg):
         return None
+    if str(audio_cfg.get("transcriber", "local")).lower() == "cloud":
+        from core.remote_asr import CloudTranscriber
+
+        creds = _cloud_credentials() or {}
+        return CloudTranscriber(creds.get("url", ""), creds.get("device_token", ""),
+                                language=audio_cfg.get("language", "ja"),
+                                vad_threshold=float(audio_cfg.get("vad_threshold", 0.5)),
+                                sample_rate=int(audio_cfg.get("sample_rate", 16000)))
     from core.remote_asr import OpenAITranscriber
 
     return OpenAITranscriber(model=str(audio_cfg.get("remote_model", "whisper-1")),
@@ -960,8 +983,11 @@ def run_cli(script: str | None = None) -> None:
 
     remote = audio_cfg.get("enabled", True) and _wants_remote(audio_cfg)
     live_transcribe = _live_transcribe(audio_cfg) or remote
-    if str(audio_cfg.get("transcriber", "local")).lower() == "openai" and not remote and audio_cfg.get("enabled", True):
+    mode = str(audio_cfg.get("transcriber", "local")).lower()
+    if mode == "openai" and not remote and audio_cfg.get("enabled", True):
         _print_notice("書き起こしの API の鍵がありません（POKERAPP_OPENAI_API_KEY）。店舗 PC の Whisper で書き起こします")
+    if mode == "cloud" and not remote and audio_cfg.get("enabled", True):
+        _print_notice("クラウドにつないでいないので（python tools/cloud_link.py link）、店舗 PC の Whisper で書き起こします")
     # 書き起こしを後回しにする・API で書き起こすなら、プレー中の発話の音声は保存する（あとで書き起こす元・送り直す元）
     audio_dir = (Path(session_cfg["log_dir"]) / "audio" / session_id
                  if audio_cfg.get("save_audio", False) or not live_transcribe or remote else None)
@@ -971,7 +997,8 @@ def run_cli(script: str | None = None) -> None:
         # 書き起こしの行の無いプレー中の発話を、終了と「ログをまとめる」で書き起こす印（API のときは送れなかった発話）
         mark_deferred(audio_dir, transcript_log.path)
     if remote:
-        print("書き起こしは API（OpenAI の whisper-1）です: 声は 1 秒ほどでロガーに入ります。"
+        where = "クラウドの中継" if mode == "cloud" else "OpenAI の API"
+        print(f"書き起こしは {where} です: 声は 1 秒ほどでロガーに入ります。"
               "つながらない間は音声を保存して、あとで送り直します", flush=True)
     elif not live_transcribe and audio_cfg.get("enabled", True):
         print("書き起こしは後回しです（audio.live_transcribe=false）: その場では声をロガーに使いません。"

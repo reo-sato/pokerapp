@@ -77,6 +77,8 @@ def test_only_the_allowed_routes_exist():
         ("GET", "/api/players/{player_id}/sessions/{session_id}/hands"),
         ("GET", "/api/players/{player_id}/sessions/{session_id}/ledger"),
         ("GET", "/api/sessions/{session_id}/hands/{hand_id}"),
+        # 書き起こしの中継（ADR-0072 D1: 店舗 PC に API の鍵を置かない）
+        ("POST", "/api/cloud/v1/asr/transcriptions"),
     }
     assert not any(p.startswith("/api/staff") for _, p in paths)
     for path in ("/docs", "/openapi.json", "/redoc", "/api/staff/sync/snapshot", "/api/players"):

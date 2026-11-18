@@ -172,6 +172,24 @@ class TestMain:
         t = main._remote_transcriber({"transcriber": "openai", "vad_threshold": 0.8})   # noqa: SLF001
         assert t.ready and t.asr_name == "openai-whisper-1"
 
+    def test_cloud_needs_the_cloud_link_and_no_key(self, monkeypatch):
+        """`audio.transcriber=cloud`（他の店に配る形, ADR-0072 D1）: クラウドにつないであれば中継に頼む（店舗 PC に鍵は
+        要らない）。つないでいなければ店舗 PC の Whisper に戻す。"""
+        import main
+        from core import remote_asr
+
+        monkeypatch.delenv("POKERAPP_OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setattr(main, "_cloud_credentials", lambda: None)
+        assert not main._wants_remote({"transcriber": "cloud"})          # noqa: SLF001
+        assert main._remote_transcriber({"transcriber": "cloud"}) is None   # noqa: SLF001
+        monkeypatch.setattr(main, "_cloud_credentials",
+                            lambda: {"url": "https://cloud.example", "device_token": "dev-token"})
+        assert main._wants_remote({"transcriber": "cloud"})              # noqa: SLF001
+        t = main._remote_transcriber({"transcriber": "cloud"})            # noqa: SLF001
+        assert isinstance(t, remote_asr.CloudTranscriber) and t.ready
+        assert t._url == "https://cloud.example" + remote_asr.CLOUD_ASR_PATH   # noqa: SLF001
+
 
 class TestAfterSession:
     def test_the_rest_stops_when_the_api_is_down(self, tmp_path):

@@ -623,7 +623,42 @@ def listening_stop_metrics(gt: dict, hands: list[dict], transcripts: list[dict],
     return {"hands": len(per_hand), "skipped": skipped, "skipped_muted": skipped_muted,
             "actions": actions, "read": read, "read_rate": read_rate,
             "utterances": len(texts), "canned": canned, "canned_rate": canned_rate, "meets": meets,
-            "per_hand": per_hand, "by_kind": by_kind}
+            "per_hand": per_hand, "by_kind": by_kind, "asr": asr_usage(transcripts)}
+
+
+LOCAL_ASR = "local"
+
+
+def asr_usage(transcripts: list[dict]) -> dict[str, dict]:
+    """書き起こしの方式（行の `asr`。無ければ店舗 PC の Whisper = `LOCAL_ASR`）ごとの発話の数・音声の秒数・API の課金の
+    目安（ドル。`core.remote_asr.USD_PER_MIN`。店舗 PC の Whisper は 0）。声ではない音（VAD）は数えない。"""
+    from core.remote_asr import USD_PER_MIN
+
+    prices = {f"openai-{model}": usd for model, usd in USD_PER_MIN.items()}
+    out: dict[str, dict] = {}
+    for r in transcripts:
+        if r.get("no_speech"):
+            continue
+        name = str(r.get("asr") or LOCAL_ASR)
+        sec = float(r.get("audio_sec") or 0.0)
+        row = out.setdefault(name, {"utterances": 0, "audio_sec": 0.0, "cost_usd": 0.0})
+        row["utterances"] += 1
+        row["audio_sec"] += sec
+        if name in prices:
+            row["cost_usd"] += prices[name] * sec / 60.0
+    for row in out.values():
+        row["audio_sec"] = round(row["audio_sec"], 1)
+        row["cost_usd"] = round(row["cost_usd"], 4)
+    return out
+
+
+def format_asr_usage(usage: dict[str, dict]) -> str:
+    parts = []
+    for name, row in sorted(usage.items(), key=lambda kv: -kv[1]["utterances"]):
+        label = "店舗 PC の Whisper" if name == LOCAL_ASR else name
+        cost = f"・課金の目安 ${row['cost_usd']:.2f}" if name != LOCAL_ASR else ""
+        parts.append(f"{label} {row['utterances']} 発話（音声 {row['audio_sec'] / 60:.1f} 分{cost}）")
+    return "・".join(parts)
 
 
 def pooled_stop_metrics(sessions: list[tuple[str, float, dict]]) -> Optional[dict]:
@@ -1658,6 +1693,9 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
                           f"{st.get('skipped_muted', 0)}・ほかは発話が 1 つも無いハンド）")
                 if st.get("by_kind"):
                     print(f"    種類ごと: {format_by_kind(st['by_kind'])}")
+                if st.get("asr"):
+                    # 書き起こしの方式（ADR-0072: OpenAI の API / 店舗 PC の Whisper）。方式ごとの読めた割合はセッションの単位で比べる
+                    print(f"    書き起こしの方式: {format_asr_usage(st['asr'])}")
         else:
             print("  真のアクション: なし")
         if show_timeline:

@@ -65,7 +65,7 @@
 ## 2. クラウドに置く（2e で書き足す）
 
 - API の有効化（Cloud Run・Cloud Build・Secret Manager・Artifact Registry）
-- Secret Manager に入れるもの: データベースの接続文字列（`DATABASE_URL`）/ お客さんのログインの署名の鍵（`CLOUD_TOKEN_SECRET`）/ 管理トークン（`CLOUD_ADMIN_TOKEN`）。ほかに環境変数 `CLOUD_PUBLIC_URL`（閲覧リンクの URL の頭）
+- Secret Manager に入れるもの: データベースの接続文字列（`DATABASE_URL`）/ お客さんのログインの署名の鍵（`CLOUD_TOKEN_SECRET`）/ 管理トークン（`CLOUD_ADMIN_TOKEN`）/ 書き起こしの API の鍵（`OPENAI_API_KEY`, 下の 4）。ほかに環境変数 `CLOUD_PUBLIC_URL`（閲覧リンクの URL の頭）
 - Cloud Build のトリガー（GitHub の `stable` に進んだら自動でデプロイ）
 - Supabase 側: 専用のデータベースユーザー、`pokerapp` スキーマ、RLS の確認
 
@@ -95,3 +95,34 @@
 - 「端末トークンが違うか取り消されています」→ `tools\cloud_link.py reissue`（管理トークンで発行し直し。前のものは使えなくなる）。
 - ネットが切れているとき → 店内はそのまま使えます。送れなかった分は、つながったときにまとめて送ります（最大 15 分おきに試す）。
 - この PC のつながりを外す → `tools\cloud_link.py unlink`（クラウドの記録は残ります）。
+
+## 4. 書き起こしをクラウドの中継に切り替える（他の店に配る前, ADR-0072 D1）
+
+テスト中は、店舗 PC が OpenAI を直接呼んでいます（`audio.transcriber=openai`、鍵は店舗 PC の環境変数）。他の店に配る前に、
+店舗 PC には鍵を置かず、クラウドが OpenAI を呼ぶ形（中継）に切り替えます。店舗 PC は、同期と同じ**端末トークン**で 1 発話の
+音声をクラウドに送ります。音声と書き起こした文は、クラウドに保存しません（ログにも書きません。店舗と秒数だけ）。
+
+クラウドの側（2e のあと）:
+
+1. Secret Manager に `OPENAI_API_KEY`（OpenAI の鍵）を入れ、Cloud Run の環境変数として渡す。鍵が無ければ、中継の受け口は
+   「使えません」（503）と答えます。そのあいだ店舗 PC は、音声を残して後で送り直します（下の困ったとき）。
+2. 必要なら環境変数:
+   - `CLOUD_ASR_MODEL`: 書き起こしのモデル（既定 `whisper-1`）。**whisper-1 は 2027-02-26 に提供終了とされています**。後継の
+     `gpt-transcribe` を物差しで確かめたら、ここを変えるだけで全部の店が切り替わります（店舗 PC の更新は要りません）。
+   - `CLOUD_ASR_DAILY_SEC`: 店ごとの 1 日（UTC）の音声の秒数の上限（既定 28800 = 8 時間。1 セッションの声のある発話は
+     1.5 時間ほど）。超えると「今日の上限」（429）で、店舗 PC は音声を残して後で送り直します。
+3. Cloud Run の最大インスタンス数は 1 にする（上限の数え方がインスタンスの記憶の中のため。増やすときはデータベースで数える）。
+
+店舗 PC の側（クラウドにつないだあと = 3 の手順のあと）:
+
+1. `venv\Scripts\python tools\set_config.py audio.transcriber cloud`
+2. 店舗 PC の環境変数の鍵を消す: PowerShell で `[Environment]::SetEnvironmentVariable("POKERAPP_OPENAI_API_KEY", $null, "User")`
+   （消したら、OpenAI の管理画面でその鍵も無効にする）。
+3. ロガーを起動し直す。起動の表示が「書き起こしは クラウドの中継 です」になっていれば切り替わっています。
+   書き起こしの行の `asr` は、クラウドが使ったモデル（`openai-whisper-1` など）になります。
+
+困ったとき:
+
+- 「クラウドにつないでいないので、店舗 PC の Whisper で書き起こします」→ `tools\cloud_link.py status` でつながりを確かめる。
+- クラウドが落ちている・上限に達した → 店内はそのまま使えます。書き起こせなかった発話は音声を残し、つながったら送り直します
+  （終了のときと「ログをまとめる」でも残りを送ります）。

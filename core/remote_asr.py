@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 OPENAI_URL = "https://api.openai.com/v1/audio/transcriptions"
 KEY_ENV = ("POKERAPP_OPENAI_API_KEY", "OPENAI_API_KEY")
 DEFAULT_MODEL = "whisper-1"
+# 1 分あたりの料金（ドル。公式の価格表で要確認, 2026-11）。whisper-1・gpt-4o 系は 2027-02-26 に提供終了とされる
+USD_PER_MIN = {"whisper-1": 0.006, "gpt-transcribe": 0.006, "gpt-4o-transcribe": 0.006, "gpt-4o-mini-transcribe": 0.003}
 TIMEOUT_SEC = 15.0
 
 
@@ -143,12 +145,40 @@ class OpenAITranscriber:
             audio_array = None
         if audio_array is not None and not self.has_speech(audio_array):
             return Recognition("", None, no_speech=True)
-        text = transcribe_openai(wav_bytes(audio_bytes, self._sample_rate), key=self._key, model=self.model,
-                                 prompt=self._prompt, language=self._language, timeout=self._timeout,
-                                 post_fn=self._post)
-        return Recognition(text, None)
+        return Recognition(self._request(wav_bytes(audio_bytes, self._sample_rate)), None)
+
+    def _request(self, wav: bytes) -> str:
+        return transcribe_openai(wav, key=self._key, model=self.model, prompt=self._prompt, language=self._language,
+                                 timeout=self._timeout, post_fn=self._post)
 
     # 古い差し替えの約束（`transcribe_with_confidence`）も満たす
     def transcribe_with_confidence(self, audio_bytes: bytes) -> tuple[str, Optional[float]]:
         result = self.recognize(audio_bytes)
         return result.text, result.confidence
+
+
+# ――― クラウドの中継（ADR-0072 D1 の元の形 = 他の店に配る前, 2026-11-18）―――
+
+CLOUD_ASR_PATH = "/api/cloud/v1/asr/transcriptions"
+
+
+class CloudTranscriber(OpenAITranscriber):
+    """書き起こしをクラウド（Cloud Run）に頼む。クラウドが OpenAI を呼ぶので、店舗 PC に API の鍵を置かない
+    （ADR-0072 D1）。認証は店舗の端末トークン（同期と同じ）。約束は `OpenAITranscriber` と同じ（声かどうかは店舗 PC で
+    判定し、失敗は `RemoteAsrError` = 録音側が音声を残して後で送り直す）。方式の名前はクラウドが返す（`openai-<モデル>`）。"""
+
+    def __init__(self, url: str, token: str, language: str = "ja", vad_threshold: float = 0.5,
+                 sample_rate: int = 16000, timeout: float = TIMEOUT_SEC,
+                 post_fn: Optional[Callable[..., dict]] = None) -> None:
+        super().__init__(model="cloud", language=language, vad_threshold=vad_threshold, sample_rate=sample_rate,
+                         timeout=timeout, key=token or "", post_fn=post_fn, prompt=None)
+        self._url = url.rstrip("/") + CLOUD_ASR_PATH
+        self.asr_name = "openai-whisper-1"            # クラウドが返す名前で置き換える
+        self.load_error = None if token else "クラウドにつないでいません（python tools/cloud_link.py link）"
+
+    def _request(self, wav: bytes) -> str:
+        data = (self._post or post)(self._url, wav, {"Authorization": f"Bearer {self._key}",
+                                                     "Content-Type": "audio/wav"}, timeout=self._timeout)
+        if (data or {}).get("asr"):
+            self.asr_name = str(data["asr"])
+        return str((data or {}).get("text") or "").strip()

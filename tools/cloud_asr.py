@@ -79,6 +79,9 @@ PROVIDERS: dict[str, Provider] = {p.name: p for p in (
     Provider("openai-whisper-1", "openai", "whisper-1", 0.006, label="OpenAI whisper-1"),
     Provider("openai-4o", "openai", "gpt-4o-transcribe", 0.006, label="OpenAI gpt-4o-transcribe"),
     Provider("openai-4o-mini", "openai", "gpt-4o-mini-transcribe", 0.003, label="OpenAI gpt-4o-mini-transcribe"),
+    # whisper-1・gpt-4o 系は 2027-02-26 に提供終了とされ、後継は gpt-transcribe（2026-11-18 調べ。料金は未確認 = whisper-1
+    # と同じ値を仮に置く）。もう 1 つの後継 gpt-live-transcribe は /v1/audio/transcriptions に無い（Realtime API 専用, 404）
+    Provider("openai-transcribe", "openai", "gpt-transcribe", 0.006, label="OpenAI gpt-transcribe（料金は要確認）"),
     Provider("groq-v3", "groq", "whisper-large-v3", 0.111 / 60, min_bill_sec=10.0, label="Groq whisper-large-v3"),
     Provider("groq-turbo", "groq", "whisper-large-v3-turbo", 0.04 / 60, min_bill_sec=10.0,
              label="Groq whisper-large-v3-turbo"),
