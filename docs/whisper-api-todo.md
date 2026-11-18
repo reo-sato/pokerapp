@@ -12,6 +12,9 @@
   - 音声は 90 日で消す（`audio.keep_days`）。
 - **店舗ではまだ試していない**。11/09 の店舗テストは前の設定（店舗 PC の Whisper・書き起こしは後回し）だった。
 - 既定の設定は `audio.transcriber=local` のまま。
+- **他の店に配る形（クラウドの中継）も実装済み**（2026-11-18）: `audio.transcriber=cloud`。鍵はクラウドにだけ置く。
+  クラウドのイメージ（`cloud/Dockerfile`・`cloud/cloudbuild.yaml`）も用意した。Google Cloud への登録はまだ（オーナーの作業）。
+- **whisper-1 は 2027-02-26 に提供終了と告知されている**（下の D）。後継の `gpt-transcribe` を同じ物差しで測った。
 
 ## A. 店舗テストの前の準備
 
@@ -36,18 +39,39 @@
 
 ## C. 道具・記録の足りないところ
 
-- [ ] `tools/eval_store.py` に、書き起こしの方式（`transcripts.jsonl` の `asr`）ごとの「アクションの発話が読めた割合」を出す。
-  - いまは方式を区別していない。
-- [ ] セッションごとに、API に送った音声の秒数の合計をログに出す（費用の見積もりに使う）。
+- [x] `tools/eval_store.py` に、書き起こしの方式（`transcripts.jsonl` の `asr`）ごとの数を出す（2026-11-18）。
+  - セッションごとの行「書き起こしの方式: …」に、方式ごとの発話の数・音声の秒数・API の費用の目安が出る。
+- [x] セッションごとの、API に送った音声の秒数の合計（2026-11-18、上の行に含めた）。
 
 ## D. 方針の確認（オーナー・公式の資料）
 
-- [ ] whisper-1 の提供の終わりを公式で確かめる（一部の資料に 2027-02 とある。未確認）。
-- [ ] 後継のモデルが出たら、同じ物差しで測る: `tools/cloud_asr.py` で書き起こし直し、`tools/bench_hands.py` に通す（ADR-0072 追記 1 の方法）。
-- [ ] 代わりの候補 gpt-4o-mini-transcribe に、`audio.remote_model` で切り替えられることを確かめる。
-  - 費用は whisper-1 の半分。成績は 11/05 で同じ、10/29 で少し下。
+- [ ] whisper-1 の提供の終わり: **2027-02-26 に終了**と告知されている（2026-08-26 の告知。whisper-1・gpt-4o-transcribe・
+  gpt-4o-mini-transcribe の 3 つ。後継は `gpt-transcribe`）。
+  - 検索で見た告知の要約による。OpenAI の開発者向けのページ（developers.openai.com）はこの開発の環境から開けず、本文は
+    まだ見ていない。オーナーが OpenAI の管理画面か告知のメールで確かめる。
+  - **2027-02-26 より前に、使うモデルを gpt-transcribe に切り替える必要がある**。切り替えは設定 1 つ:
+    テスト中の形は `python tools/set_config.py audio.remote_model gpt-transcribe`、中継はクラウドの `CLOUD_ASR_MODEL`。
+  - gpt-transcribe の料金は未確認（費用の目安は whisper-1 と同じ 1 分 $0.006 で仮に数えている）。
+- [x] 後継の gpt-transcribe を同じ物差しで測った（2026-11-18。`tools/cloud_asr.py` の `openai-transcribe` で 10/29・11/05 の発話
+  1,848 件を書き起こし直し、いまのコードの推定器に通した。全部正しいハンドの数）:
+
+  | 日 | 店舗 PC の Whisper | whisper-1 | gpt-transcribe |
+  |---|---|---|---|
+  | 10/29 | 24/120 | 25/120（+2 / −1） | 25/120（+2 / −1） |
+  | 11/05 | 46/72 | 45/72（+3 / −4） | **47/72**（+2 / −1） |
+  | 要確認の印なしの誤り | 0 | 0 | **1**（10/29 のハンド 35） |
+
+  - 書き起こし: 1 発話の時間の中央値は whisper-1 1.05 秒 → gpt-transcribe 0.51 秒。空の出力は 39 → 99 件（雑談や短い音を
+    文にしない）。費用は同じ数え方で 59.5 分・$0.46。
+  - [ ] 切り替える前に、10/29 のハンド 35 の要確認の印なしの誤りを調べる（推定器の規則で印を付けられるか）。
+  - [ ] 店舗テストで 1 回、gpt-transcribe で録る（`audio.remote_model gpt-transcribe`）。
+- [x] 代わりの候補 gpt-4o-mini-transcribe → **候補から外す**（2026-11-18。whisper-1 と同じ日に提供終了と告知されている）。
 - [ ] OpenAI の API のデータの扱いを公式で確かめ、ディーラー用・プレイヤー用の紙の文面と合っているかを見る。
   - 確かめる点: 学習に使わない・保存は不正利用の監視のための最長 30 日。
+  - 検索で見た範囲（2026-11-18、公式のページの本文は未確認）: API のデータは既定で学習に使わない・不正利用の監視の記録は
+    既定で最長 30 日。書き起こしの受け口は保存しない扱い（Zero Data Retention）の対象とされる。紙の文面（最長 30 日）は
+    安全側に合っている。
+  - 公式で確かめるには、この開発の環境から developers.openai.com と openai.com を開けるようにするか、オーナーが読む。
 - [ ] 保存しない申請（Zero Data Retention）をするか → **保留**（オーナー 2026-11-18「分からない」）。
   - 推奨: 当面は申請しない。
     - 既定でも、API に送った音声は学習に使われず、保存は不正利用の監視のための最長 30 日。紙の文面もそれに合わせてある。
@@ -64,11 +88,18 @@
 
 ## E. 他の店に配る前（段階 2 = ADR-0072 D1 の元の形）
 
-- [ ] ADR-0067 の 2e: Dockerfile・Cloud Build・Secret Manager・予算・D9 の確認。
-- [ ] クラウドの中継: 店舗 PC → Cloud Run → OpenAI。
-  - 鍵はクラウドの Secret Manager に置く。
-  - 店舗の端末トークン（ADR-0067）で認証し、店ごとに上限を設ける。
-  - 店舗 PC 側は `core/remote_asr.py` の送り先を切り替えるだけにする（同じ約束 = `OpenAITranscriber`）。
-- [ ] 店舗 PC から鍵を消す手順を `docs/cloud-setup.md` に書く。
+- [ ] ADR-0067 の 2e。
+  - [x] イメージ（`cloud/Dockerfile`・`.dockerignore`）と Cloud Build の設定（`cloud/cloudbuild.yaml`）（2026-11-18）。
+    手元で作って起動し、health・中継の受け口・画面を確かめた。
+  - [ ] Google Cloud 側（オーナー）: API の有効化・Artifact Registry・Secret Manager・Cloud Run のサービス・トリガー・予算・
+    D9 の確認（`docs/cloud-setup.md` の 2）。
+- [x] クラウドの中継: 店舗 PC → Cloud Run → OpenAI（2026-11-18）。
+  - 鍵はクラウドの `OPENAI_API_KEY` だけ。店舗 PC は同期と同じ端末トークンで 1 発話の音声を送る（`audio.transcriber=cloud`、
+    `core/remote_asr.CloudTranscriber`）。音声と文はクラウドに保存しない。
+  - 店ごとの 1 日の上限（`CLOUD_ASR_DAILY_SEC`, 既定 8 時間）。モデルは `CLOUD_ASR_MODEL` で全部の店をまとめて切り替える。
+- [x] 店舗 PC から鍵を消す手順（`docs/cloud-setup.md` の 4, 2026-11-18）。
 - [ ] 段階 2 の仕上げ: クラウドが落ちたときの扱い・API の失敗と再送・複数の店の上限。
+  - 落ちたとき・失敗・上限は、店舗 PC が直接呼ぶときと同じ扱い（音声を残して送り直す）にしてある。
+  - 上限はクラウドのインスタンスの記憶の中で数える（Cloud Run は最大 1 インスタンス）。店・インスタンスが増えたら
+    データベースで数える。
 - [ ] 推定をクラウドで回すかを決める（いまは店舗 PC でハンドごと。卓・店が増えたら比べ直す）。
