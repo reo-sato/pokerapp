@@ -1,0 +1,23 @@
+# クラウドのイメージ（cloud/Dockerfile）に入れないもの。店舗のデータ・音声・秘密は決して入れない
+.git
+**/__pycache__
+**/*.pyc
+venv
+logs
+backups
+models
+data
+tests
+mobile
+staff
+shared
+firmware
+installer
+vision
+*.json
+!docs/contracts/schemas/*.json
+!api/static/**/*.json
+!cloud/static/**/*.json
+cloud_credentials.json
+config.json
+.env

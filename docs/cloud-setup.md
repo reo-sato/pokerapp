@@ -1,7 +1,7 @@
 # クラウドの準備（フェーズ 2, ADR-0067）
 
 店外からお客さんが自分の履歴を見られるようにするための、クラウド側の登録と設定の手順です。
-**この文書は進み具合に合わせて書き足します**（いまは「1. 登録」まで）。
+**この文書は進み具合に合わせて書き足します**（いまは「1. 登録」と、2 のイメージの作り方・3・4 まで）。
 
 > 大事な約束: パスワード・接続文字列・キー・トークンは**チャットに貼らないでください**。
 > 必要になったら、Google Cloud の「Secret Manager」に入れる手順をこの文書に書きます。
@@ -31,7 +31,7 @@
    - 左上のメニュー →「お支払い」→「予算とアラート」→「予算を作成」。
    - 対象のプロジェクト = 上で作ったもの、金額 = 例えば **月 3,000 円**、通知のしきい値 = 50% / 90% / 100%（初期値のままで可）。
    - 通知はお支払いのアカウントの管理者のメールに届きます。
-   - ※ 予算アラートは「知らせる」だけで、自動で止めはしません。Cloud Run の上限（同時に動く数 2）を設定で付けるので、
+   - ※ 予算アラートは「知らせる」だけで、自動で止めはしません。Cloud Run の上限（同時に動く数 1、下の 2・4）を設定で付けるので、
      大きくは増えない作りにします。
 5. 教えてほしいこと: **プロジェクト ID**（例 `pokerapp-cloud-123456`。プロジェクトを選ぶ画面に出る英数字）。これは秘密ではありません。
 
@@ -62,11 +62,31 @@
 最初は Google が用意する `https://〜.run.app` のアドレスを使います（HTTPS は自動）。
 お店の名前の入ったアドレス（独自ドメイン）は、他の店に売る前に決めれば十分です。
 
-## 2. クラウドに置く（2e で書き足す）
+## 2. クラウドに置く（2e。イメージの作り方まで用意済み）
+
+用意してあるもの（2026-11-18）:
+
+- `cloud/Dockerfile`: クラウドのアプリのイメージ。入れるのはクラウドの部品（pyproject.toml の `[cloud]`）と
+  `core/`・`api/`・`cloud/`・契約の schema だけ（音声認識・RFID・店のデータ・`config.json`・端末トークンは入れない。
+  `.dockerignore`）。root では動かさない。手元で作って確かめる:
+
+  ```
+  docker build -f cloud/Dockerfile -t pokerapp-cloud .
+  docker run --rm -p 8080:8080 -e CLOUD_DEV_MEMORY=1 pokerapp-cloud
+  ```
+
+  `http://localhost:8080/api/health` が `{"status":"ok"}` なら起きています（メモリに保存 = 再起動で消える確認用）。
+  Docker Hub の回数制限で止まるときは `--build-arg BASE=mirror.gcr.io/library/python:3.12-slim`。
+- `cloud/cloudbuild.yaml`: Cloud Build でイメージを作り、Artifact Registry（東京）に置き、Cloud Run のサービス
+  `pokerapp-cloud` のイメージだけを差し替える（環境変数・秘密・上限はサービスに付けたものが残る）。
+
+オーナーの作業（Google Cloud の画面。順に書き足します）:
 
 - API の有効化（Cloud Run・Cloud Build・Secret Manager・Artifact Registry）
+- Artifact Registry に Docker のリポジトリ `pokerapp`（リージョン asia-northeast1）を作る
 - Secret Manager に入れるもの: データベースの接続文字列（`DATABASE_URL`）/ お客さんのログインの署名の鍵（`CLOUD_TOKEN_SECRET`）/ 管理トークン（`CLOUD_ADMIN_TOKEN`）/ 書き起こしの API の鍵（`OPENAI_API_KEY`, 下の 4）。ほかに環境変数 `CLOUD_PUBLIC_URL`（閲覧リンクの URL の頭）
-- Cloud Build のトリガー（GitHub の `stable` に進んだら自動でデプロイ）
+- Cloud Run のサービス `pokerapp-cloud` を最初の 1 回だけ手で作る（東京、秘密を環境変数として渡す、最大インスタンス数 1）
+- Cloud Build のトリガー（GitHub の `stable` に進んだら `cloud/cloudbuild.yaml` で自動でデプロイ）
 - Supabase 側: 専用のデータベースユーザー、`pokerapp` スキーマ、RLS の確認
 
 ## 3. 店舗 PC をつなぐ（クラウドに置いたあと, 1 回だけ）

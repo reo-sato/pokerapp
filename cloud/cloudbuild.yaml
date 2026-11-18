@@ -1,0 +1,28 @@
+# クラウドのアプリを作って Cloud Run（東京）に置く（ADR-0067 2e）。
+# Cloud Build のトリガー（GitHub の stable に進んだとき）から使う。手で 1 回動かすとき:
+#   gcloud builds submit --config cloud/cloudbuild.yaml .
+# 前もって用意するもの（docs/cloud-setup.md の「2. クラウドに置く」）:
+#   Artifact Registry のリポジトリ `pokerapp`（asia-northeast1）/ Secret Manager の 4 つの秘密 /
+#   Cloud Run のサービス `pokerapp-cloud`（最初の 1 回は手で作り、環境変数と秘密・最大インスタンス数 1 を付ける）
+substitutions:
+  _REGION: asia-northeast1
+  _SERVICE: pokerapp-cloud
+  _REPO: pokerapp
+  _IMAGE: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/pokerapp-cloud
+options:
+  logging: CLOUD_LOGGING_ONLY
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "cloud/Dockerfile", "-t", "${_IMAGE}:${SHORT_SHA}", "-t", "${_IMAGE}:latest", "."]
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "--all-tags", "${_IMAGE}"]
+  # 置き換えるのはイメージだけ。環境変数・秘密・上限はサービスに付けたものがそのまま残る
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args: ["run", "deploy", "${_SERVICE}", "--image", "${_IMAGE}:${SHORT_SHA}", "--region", "${_REGION}", "--quiet"]
+images:
+  - ${_IMAGE}:${SHORT_SHA}
+  - ${_IMAGE}:latest

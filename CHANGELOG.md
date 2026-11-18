@@ -12,6 +12,18 @@
   約束に合わせる」）。期限を過ぎた日付の音声を除いた木で、ブランチを親の無い 1 つのコミットに作り直す（前の履歴にも残さない）。
   push は表示されるコマンド（`--force-with-lease`）。いちばん古い 10/14 の音声の期限は 2027-01-12。
 - `docs/whisper-api-todo.md`: Whisper の外部 API（whisper-1）の利用の残りの作業の一覧。
+- **書き起こしのクラウドの中継**（ADR-0072 D1 の元の形、他の店に配る前の形）: `audio.transcriber=cloud` で、店舗 PC は同期と同じ
+  端末トークンで 1 発話の音声をクラウド（`POST /api/cloud/v1/asr/transcriptions`）に送り、クラウドが OpenAI を呼ぶ（鍵はクラウドの
+  `OPENAI_API_KEY` だけ = 店舗 PC に鍵を置かない）。音声と文はクラウドに保存しない（ログは店舗と秒数だけ）。店ごとの 1 日の
+  上限（`CLOUD_ASR_DAILY_SEC`, 既定 8 時間）、モデルは `CLOUD_ASR_MODEL`（既定 whisper-1。全部の店をクラウドの設定 1 つで切り替え
+  られる）。失敗・上限は店舗 PC の Whisper の API と同じ扱い（音声を残して送り直す）。手順は `docs/cloud-setup.md` の 4。
+- `tools/eval_store.py`: セッションごとに「書き起こしの方式」（`asr` ごとの発話の数・音声の秒数・API の費用の目安）を出す。
+- `tools/cloud_asr.py`: 後継の書き起こし `gpt-transcribe`（`openai-transcribe`）を比べる候補に足した（whisper-1・gpt-4o-transcribe・
+  gpt-4o-mini-transcribe は 2027-02-26 に提供終了と告知されている）。
+- **クラウドのイメージ**（ADR-0067 2e の一部）: `cloud/Dockerfile`（`[cloud]` の部品と core・api・cloud・schema だけ、root で
+  動かさない）・`.dockerignore`（店のデータ・`config.json`・端末トークンを入れない）・`cloud/cloudbuild.yaml`（Artifact Registry
+  東京 → Cloud Run のイメージだけ差し替え）。手元で作って起動し、health・中継の受け口（鍵なしで 503）・画面を確かめた。
+  Google Cloud 側の登録はオーナーの作業（`docs/cloud-setup.md` の 2）。
 
 ### Changed (11/09 のハンド 1 の見直しから, 2026-11-10)
 
