@@ -169,6 +169,16 @@ player 本人の self-write（注文 POST 等）を **PIN ログイン**で本�
 |--------|------|-------|------|--------|
 | POST | `/api/staff/sessions/{session_id}/control` | yes | `{type: "new_hand"\|"winner"\|"rebuy", seat?, amount?}` | 201 `control_command` = `{command_id, type, args, created_at}`（`logs/{session_id}.control.jsonl` に append。適用は hand logger プロセスの consumer = `hand_control.enabled`）。400 `invalid_control`（type 不正 / winner に seat 無し / rebuy に seat・正の amount 無し） |
 
+#### ロガーの様子（ADR-0073 D3。読むだけ）
+
+ロガー（端末・GUI・台本）が書く `logs/logger_state.json` / `logs/logger_notices.jsonl`（`core/logger_status.py`）を読む。
+read-only の `--viewer-api` でも読める（スタッフトークンは要る）。
+
+| method | path | write | body | 返り値 |
+|--------|------|-------|------|--------|
+| GET | `/api/staff/logger` | no | — | 200 `{status: "running"\|"unresponsive"\|"crashed"\|"stopped", state, holder, heartbeat_age_sec, holder_text}`。`state` = `{phase: "starting"\|"setup"\|"running"\|"stopping"\|"stopped", mode, pid, session_id, started_at, updated_at, table, mic, rfid, speech_backlog, transcriber, notice_seq, …}`（無ければ null）。ロックは取ってみず、持ち主の pid と心拍（15 秒）で判断 |
+| GET | `/api/staff/logger/notices?since=&limit=` | no | — | 200 `{notices: [{seq, t, kind, text, session_id, hand_id?}], last_seq, reset}`。`kind` = notice / unapplied / action / heard / cards。`since` が今の最大の番号より大きい（ロガーが起動し直した）なら初めから返して `reset: true` |
+
 ### error code（再利用 + 新規）
 
 ledger / settlement の error は `error-shapes.md` の ledger セクションを **再利用**:

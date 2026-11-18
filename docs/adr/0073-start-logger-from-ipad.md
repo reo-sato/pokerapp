@@ -282,7 +282,13 @@ Proposed（2026-11-18。オーナー「最終的に、iPad アプリからの操
 
 - [x] Fable の監査 2 回（2026-11-18）
 - [ ] オーナーの確認（段階の順番・段階 0 の実測の日）
-- [ ] 段階 0〜E
+- [x] 段階 0 の道具（`console_probe.cmd`・`tools/console_probe.py`・`docs/console-probe.md`, 2026-11-18）。実測はオーナー（2026-11-19 予定）
+- [x] 単独: `sessions.json` / `players.json` の読み直しとロック（D5, `core/records_lock.py`, 2026-11-18）
+- [x] A1: ロガーのロック・状態とお知らせのファイル・読む API・スタッフ画面のパネル（D2・D3, `core/logger_status.py`, 2026-11-18）
+  - お知らせは、草稿の `<sid>.notices.jsonl` ではなく、起動ごとの `logs/logger_notices.jsonl`（前の起動は `.prev`）にした。
+    各行に session_id を持つ。セッションが決まる前のお知らせも同じファイルに書ける。
+  - GUI のロガーは、ロックと状態の段階だけ（セッション・マイク・お知らせは CLI のみ）。
+- [ ] 段階 A2〜E
 
 ## Related
 

@@ -310,3 +310,49 @@ export class StaffApiError extends Error {
     this.field = err.field;
   }
 }
+
+// ――― ロガーの様子（ADR-0073 D3。GET /api/staff/logger, /api/staff/logger/notices）―――
+
+/** ロガーのプロセス: running = 動作中 / unresponsive = 心拍が古い / crashed = 終わらずに止まった / stopped。 */
+export type LoggerRunStatus = "running" | "unresponsive" | "crashed" | "stopped";
+
+/** ロガーが書く状態（`logs/logger_state.json`）。段階は starting / setup / running / stopping / stopped。 */
+export interface LoggerState {
+  phase: string;
+  mode: string;
+  pid?: number;
+  session_id: string | null;
+  started_at?: string;
+  updated_at?: string;
+  ended_at?: string;
+  table?: { mode?: string | null; seats?: number[]; sb?: number | null; bb?: number | null };
+  mic?: { state?: string; level?: number; device_name?: string | null; error?: string };
+  rfid?: { state?: string; connected?: number; configured?: number; error?: string };
+  speech_backlog?: number;
+  transcriber?: string;
+  notice_seq?: number;
+}
+
+export interface LoggerStatusResponse {
+  status: LoggerRunStatus;
+  state: LoggerState | null;
+  heartbeat_age_sec: number | null;
+  holder_text: string | null;
+}
+
+/** 端末に出たお知らせ 1 行（kind = notice / unapplied / action / heard / cards）。 */
+export interface LoggerNotice {
+  seq: number;
+  t: number;
+  kind: string;
+  text: string;
+  session_id: string | null;
+  hand_id?: number | null;
+}
+
+export interface LoggerNoticesResponse {
+  notices: LoggerNotice[];
+  last_seq: number;
+  /** ロガーが起動し直した（番号が 1 から）: 手元のお知らせを捨てて読み直す。 */
+  reset: boolean;
+}

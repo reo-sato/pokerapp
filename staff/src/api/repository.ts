@@ -12,6 +12,8 @@
  */
 import type {
   ControlCommand,
+  LoggerNoticesResponse,
+  LoggerStatusResponse,
   GroundTruthEditPayload,
   GroundTruthHand,
   HoleCardVisibility,
@@ -51,6 +53,12 @@ export interface StaffRepository {
    * unauthorized / staff_writes_disabled で reject。ログイン画面で使う。
    */
   verifyToken(): Promise<void>;
+
+  // ――― ロガーの様子（ADR-0073 D3。読むだけ）―――
+  /** ロガーが動いているか・段階・セッション・マイクと RFID（GET /api/staff/logger）。 */
+  getLoggerStatus(): Promise<LoggerStatusResponse>;
+  /** 端末に出たお知らせ（`since` の番号より後, GET /api/staff/logger/notices）。 */
+  listLoggerNotices(since: number): Promise<LoggerNoticesResponse>;
 
   // ――― セッション（卓選択 / ライフサイクル, ADR-0038 §B）―――
   /** 全 session 一覧（staff の卓選択用, GET /api/staff/sessions）。 */

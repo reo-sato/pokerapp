@@ -16,3 +16,10 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if item.get_closest_marker("slow") and not item.get_closest_marker("timeout"):
             item.add_marker(pytest.mark.timeout(SLOW_TIMEOUT_SEC))
+
+
+@pytest.fixture(autouse=True)
+def _logger_state_dir(tmp_path_factory, monkeypatch):
+    """ロガーのロック・状態・お知らせのファイル（`core/logger_status.py`）は、試験ごとの一時フォルダに書く
+    （リポジトリの logs/ を汚さない・並列の試験でロックを取り合わない, ADR-0073 D2）。"""
+    monkeypatch.setenv("POKERAPP_LOGGER_STATE_DIR", str(tmp_path_factory.mktemp("logger_state")))

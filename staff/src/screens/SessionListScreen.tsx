@@ -6,6 +6,7 @@ import type { StaffSession } from "../api/types";
 import { StaffApiError } from "../api/types";
 import { useAsync } from "../hooks/useAsync";
 import { BackLink, Button, colors, ErrorView, Field, Loading, styles, yen } from "./common";
+import { LoggerPanel } from "./LoggerPanel";
 
 /** 営業日サマリ 1 卓分（compute_settlement のクライアント側集計, 中間値）。 */
 interface DaySessionRow {
@@ -106,6 +107,9 @@ export function SessionListScreen(props: {
         </View>
       </View>
       <Text style={styles.subtitle}>卓を選んで会計・注文・座席を操作します。</Text>
+
+      {/* ハンドロガーの様子（ADR-0073 D3。RDP で起動したロガーも見える） */}
+      <LoggerPanel repository={repository} />
 
       {/* 本日の集計（締め作業の目安。確定は各卓の精算 commit） */}
       <View style={styles.card}>

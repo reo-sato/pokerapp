@@ -1170,6 +1170,28 @@ def create_app(
 
     # ――― session / 座席 / player ライフサイクル（ADR-0038 §B）―――
 
+    # ――― ロガーの様子（ADR-0073 D3。読むだけ。ロガーが書く状態とお知らせのファイル）―――
+
+    @app.get("/api/staff/logger", response_model=None)
+    def staff_logger(request: Request) -> "JSONResponse | dict":
+        """ロガーが動いているか・段階・セッション・マイクと RFID の状態（`core/logger_status.read_logger`）。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        from core.logger_status import read_logger
+
+        return read_logger()
+
+    @app.get("/api/staff/logger/notices", response_model=None)
+    def staff_logger_notices(request: Request, since: int = 0, limit: int = 100) -> "JSONResponse | dict":
+        """端末に出たお知らせ（`since` の番号より後。ロガーが起動し直したら初めから = `reset`）。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        from core.logger_status import read_notices
+
+        return read_notices(since=max(0, since), limit=max(1, min(limit, 500)))
+
     @app.get("/api/staff/sessions", response_model=None)
     def staff_list_sessions(request: Request) -> "JSONResponse | dict":
         """全 session 一覧（staff の卓選択用）。"""

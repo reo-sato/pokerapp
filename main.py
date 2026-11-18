@@ -522,6 +522,17 @@ def _make_listen_gate(cfg: dict):
 _NOISE_SHOWN_CHARS = 20
 
 
+# ロガーの状態とお知らせのファイル（ADR-0073 D3, `core/logger_status.py`）。run_cli / run_gui の間だけ入る
+_LOGGER_STATUS = None
+
+
+def _notify(kind: str, text: str, **fields) -> None:
+    """端末に出した行を、iPad（店舗サーバーの API）でも見られるようにお知らせのファイルに足す。"""
+    status = _LOGGER_STATUS
+    if status is not None:
+        status.notice(kind, text, **fields)
+
+
 def _print_transcript(transcript) -> None:
     """聞き取った文とアクションとしての読みを CLI に出す（音声テスト用, ADR-0060）。
 
@@ -549,6 +560,7 @@ def _print_transcript(transcript) -> None:
         if delay >= 10:
             lag = f"  （{delay:.0f} 秒前の発話）"
     print(f"  [聞き取り] 「{text}」→ {heard}{lag}", flush=True)
+    _notify("heard", f"「{text}」→ {heard}{lag}")
 
 
 def _wait_for_backlog(audio_thread, timeout_sec: float = 60.0, since: float | None = None) -> None:
@@ -843,11 +855,13 @@ def _report_rfid_status(rfid_thread, source, stop_event: threading.Event, wait_s
 def _print_notice(message: str) -> None:
     """ハンドの開始・勝者・判定待ちのお知らせ（integration スレッドから呼ばれる）。"""
     print(f"  ● {message}", flush=True)
+    _notify("notice", message)
 
 
 def _print_cards(message: str) -> None:
     """RFID で読んだ札（手札・ボード・確定時のまとめ）。integration スレッドから呼ばれる。"""
     print(f"  [カード] {message}", flush=True)
+    _notify("cards", message)
 
 
 def _load_test_script(spec: str) -> dict:
@@ -869,6 +883,36 @@ def _load_test_script(spec: str) -> dict:
 
 
 def run_cli(script: str | None = None) -> None:
+    """CLI のロガー。ロガーを 1 つに限るロックを取り、状態とお知らせのファイルを書きながら `_run_cli` を動かす
+    （ADR-0073 D2・D3。iPad でロガーの様子を見るため）。ロックが取れなければ起動しない。"""
+    global _LOGGER_STATUS
+    from core.logger_status import LoggerLock, LoggerStatus, describe_logger_holder
+
+    mode = "script" if script else "cli"
+    lock = LoggerLock()
+    if not lock.acquire_with_retries(mode):
+        print(f"別のロガーが動いています: {describe_logger_holder(lock.holder())}。"
+              "そちらを終了（q）してから起動してください。")
+        return
+    try:
+        from core.version import describe as describe_version
+
+        version = describe_version()
+    except Exception:  # noqa: BLE001 — 版が分からなくても起動する
+        version = None
+    status = LoggerStatus(mode, version=version)
+    _LOGGER_STATUS = status
+    try:
+        status.set(phase="setup")
+        status.start()
+        _run_cli(script, status)
+    finally:
+        _LOGGER_STATUS = None
+        status.close()
+        lock.release()
+
+
+def _run_cli(script: str | None, status) -> None:
     """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。
 
     `script`（`--script`）: 台本のハンド（`tools/test_script.py`, テスト方針 週 1）。卓の設定は台本から取り（入力なし）、
@@ -916,6 +960,9 @@ def run_cli(script: str | None = None) -> None:
         session_id = datetime.now().strftime("%Y-%m-%d_%H%M%S") + suffix
     json_writer = JsonWriter(log_dir=session_cfg["log_dir"], session_id=session_id)
     json_writer.ensure_created()        # 真のアクション入力の画面に、最初のハンドが終わる前から出す
+    status.set(phase="starting", session_id=session_id, log_dir=str(Path(session_cfg["log_dir"]).resolve()),
+               table={"mode": (table or {}).get("table_mode"), "seats": [p["seat"] for p in session_cfg["players"]],
+                      "sb": session_cfg.get("sb"), "bb": session_cfg.get("bb")})
 
     audio_q = make_audio_queue()
     stop_event = threading.Event()
@@ -932,6 +979,7 @@ def run_cli(script: str | None = None) -> None:
             # 状態に適用できなかった入力（ハンド外 / 低信頼の制御語 など, ADR-0047 B2）。
             # 黙って捨てず、何が保留されたかを見せる（ゲーム状態は変わっていない）。
             print(f"  [未適用] {record.action} ({record.reason})  ← 状態は変わっていません")
+            _notify("unapplied", f"{record.action}（{record.reason}）— 状態は変わっていません")
             return
         # どこから決めたか（札の離脱 / 聞き取れなかったとみて補った）
         origin = {
@@ -950,13 +998,15 @@ def run_cli(script: str | None = None) -> None:
         amount_unknown, pot_unknown = integration_thread.amount_unknown(record)
         if amount_unknown:
             amount = None
-        print(
-            f"  [{record.street}] 席{record.seat}({record.player_name}) "
+        line = (
+            f"[{record.street}] 席{record.seat}({record.player_name}) "
             f"{record.action} {amount or ''}"
             + ("" if pot_unknown else f"  pot={record.pot_after}")
             + (" [要確認]" if record.needs_review else "")
             + origin
         )
+        print("  " + line)
+        _notify("action", line, hand_id=getattr(record, "hand_id", None))
 
     cam_cfg = cfg.get("camera", {})
 
@@ -1138,6 +1188,13 @@ def run_cli(script: str | None = None) -> None:
     control_thread.start()
     if audio_thread is not None:
         _report_audio_start(audio_thread, audio_cfg.get("device_id", 0))
+    # iPad に出すロガーの状態（ADR-0073 D3）: マイク・RFID・聞き取り待ちの件数
+    status.attach("mic", lambda: dict(audio_thread.health) if audio_thread is not None else {"state": "disabled"})
+    status.attach("rfid", lambda: dict(getattr(rfid_thread, "health", None) or {"state": "unknown"})
+                  if rfid_thread is not None else {"state": "disabled"})
+    status.attach("speech_backlog", lambda: audio_thread.backlog() if audio_thread is not None else 0)
+    status.set(phase="running", transcriber=mode if audio_cfg.get("enabled", True) else "off",
+               remote_transcriber=bool(remote))
 
     print(f"\nセッション開始。ログ: {json_writer.path}")
     _print_table(table, tournament)
@@ -1377,6 +1434,7 @@ def run_cli(script: str | None = None) -> None:
     except (KeyboardInterrupt, EOFError):
         pass
     finally:
+        status.set(phase="stopping")
         stop_event.set()
         if audio_thread is not None:
             audio_thread.join(timeout=3)
@@ -1408,6 +1466,24 @@ def _transcribe_offplay(audio_thread, cfg: dict, log_dir: str, session_id: str) 
 
 
 def run_gui() -> None:
+    """GUI のロガー。CLI と同じくロガーを 1 つに限るロックを取り、状態のファイルを書く（ADR-0073 D2・D3）。"""
+    from core.logger_status import LoggerLock, LoggerStatus, describe_logger_holder
+
+    lock = LoggerLock()
+    if not lock.acquire_with_retries("gui"):
+        print(f"別のロガーが動いています: {describe_logger_holder(lock.holder())}。そちらを終了してから起動してください。")
+        return
+    status = LoggerStatus("gui")
+    try:
+        status.set(phase="running")
+        status.start()
+        _run_gui()
+    finally:
+        status.close()
+        lock.release()
+
+
+def _run_gui() -> None:
     """Phase 4 GUIモード: customtkinter ダッシュボードを起動する。"""
     from core.config import load_config
     from core.event_queue import make_audio_queue

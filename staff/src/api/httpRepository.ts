@@ -12,6 +12,8 @@
 import type { StaffRepository } from "./repository";
 import {
   type ControlCommand,
+  type LoggerNoticesResponse,
+  type LoggerStatusResponse,
   type GroundTruthEditPayload,
   type GroundTruthHand,
   type HandControlInput,
@@ -96,6 +98,14 @@ export class HttpStaffRepository implements StaffRepository {
   async verifyToken(): Promise<void> {
     // 安価な staff read を叩いて token を検証する（unauthorized/staff_writes_disabled が propagate）。
     await this.get("/api/staff/buyin-presets");
+  }
+
+  getLoggerStatus(): Promise<LoggerStatusResponse> {
+    return this.get<LoggerStatusResponse>("/api/staff/logger");
+  }
+
+  listLoggerNotices(since: number): Promise<LoggerNoticesResponse> {
+    return this.get<LoggerNoticesResponse>(`/api/staff/logger/notices?since=${Math.max(0, Math.floor(since))}`);
   }
 
   async listSessions(): Promise<StaffSession[]> {

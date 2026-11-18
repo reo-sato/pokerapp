@@ -10,6 +10,8 @@
 import type { StaffRepository } from "./repository";
 import {
   type ControlCommand,
+  type LoggerNoticesResponse,
+  type LoggerStatusResponse,
   type GroundTruthEditPayload,
   type GroundTruthHand,
   type ActionRecord,
@@ -172,6 +174,45 @@ export class MockStaffRepository implements StaffRepository {
   }
 
   // ――― セッション / player ―――
+
+  /** 偽物のロガー: 最初のセッションで動作中（試験で `logger` / `loggerNotices` を書き換えられる）。 */
+  logger: LoggerStatusResponse = {
+    status: "running",
+    heartbeat_age_sec: 1.2,
+    holder_text: "端末（RDP）で起動したロガー（pid 4242）",
+    state: {
+      phase: "running",
+      mode: "cli",
+      pid: 4242,
+      session_id: sessions[0]?.session_id ?? null,
+      started_at: "2026-11-18T19:30:00",
+      table: { mode: "ring", seats: [1, 2, 3, 4, 5, 6], sb: 100, bb: 200 },
+      mic: { state: "running", level: 0.35, device_name: "Wireless Mic Rx" },
+      rfid: { state: "running", connected: 11, configured: 11 },
+      speech_backlog: 0,
+      transcriber: "openai",
+    },
+  };
+
+  loggerNotices: LoggerNoticesResponse["notices"] = [
+    { seq: 1, t: 1795000000, kind: "notice", text: "マイクを開きました（Wireless Mic Rx）", session_id: null },
+    { seq: 2, t: 1795000060, kind: "notice", text: "手札が配られました（ハンド 1）", session_id: null, hand_id: 1 },
+    { seq: 3, t: 1795000065, kind: "action", text: "[preflop] 席3(C) raise 600  pot=900", session_id: null, hand_id: 1 },
+  ];
+
+  async getLoggerStatus(): Promise<LoggerStatusResponse> {
+    this.requireAuth();
+    return clone(this.logger);
+  }
+
+  async listLoggerNotices(since: number): Promise<LoggerNoticesResponse> {
+    this.requireAuth();
+    const newest = this.loggerNotices.length ? this.loggerNotices[this.loggerNotices.length - 1].seq : 0;
+    const reset = since > newest;
+    const start = reset ? 0 : since;
+    const rows = this.loggerNotices.filter((n) => n.seq > start);
+    return { notices: clone(rows), last_seq: rows.length ? rows[rows.length - 1].seq : start, reset };
+  }
 
   async listSessions(): Promise<StaffSession[]> {
     this.requireAuth();
