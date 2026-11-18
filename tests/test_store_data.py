@@ -71,3 +71,43 @@ def test_names():
     assert store_data.stamp_of("pokerlogs_20261026_215250_3of9.zip") == ("pokerlogs", "2026-10-26", "20261026_215250")
     assert store_data.clean_name(Path("/x/f9f3586b-pokerlogs_20261026_215250_1of9.zip")) == \
         "pokerlogs_20261026_215250_1of9.zip"
+
+
+def test_expired_audio_dates():
+    """音声は 90 日で消す（その日から 90 日たった日に消す。店舗 PC と同じ約束 = ADR-0072 D2）。"""
+    dates = ["2026-08-19", "2026-08-20", "2026-08-21", "README.md"]
+    assert store_data.expired_dates(dates, "2026-11-18") == ["2026-08-19", "2026-08-20"]
+
+
+def test_prune_audio_rewrites_the_data_branch_without_the_old_audio(tmp_path):
+    """期限を過ぎた日付の音声を除いた木で、store-data を親の無い 1 つのコミットに作り直す（前の履歴に音声を残さない）。"""
+    import subprocess
+
+    def git(*args, cwd=tmp_path, **kw):
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, check=True, **kw).stdout.decode().strip()
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    git("checkout", "-q", "--orphan", "store-data")
+    for date in ("2026-08-01", "2026-11-01"):
+        folder = tmp_path / "audio" / date
+        folder.mkdir(parents=True)
+        (folder / f"pokerlogs_{date.replace('-', '')}_1of1.zip").write_bytes(date.encode())
+    (tmp_path / "README.md").write_text("data", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-q", "-m", "1")
+    (tmp_path / "audio" / "2026-11-01" / "extra.zip").write_bytes(b"x")
+    git("add", ".")
+    git("commit", "-q", "-m", "2")
+    old_blob = git("rev-parse", "store-data:audio/2026-08-01/pokerlogs_20260801_1of1.zip")
+
+    assert store_data.prune_audio("2026-11-18", cwd=tmp_path, dry_run=True)[0] == ["2026-08-01"]
+    gone, old, new = store_data.prune_audio("2026-11-18", cwd=tmp_path)
+    assert gone == ["2026-08-01"] and new == git("rev-parse", "store-data") and old != new
+    assert git("ls-tree", "--name-only", "-r", "store-data").split("\n") == [
+        "README.md", "audio/2026-11-01/extra.zip", "audio/2026-11-01/pokerlogs_20261101_1of1.zip"]
+    assert git("rev-list", "store-data").split("\n") == [new]              # 親の無い 1 つのコミット
+    reachable = git("rev-list", "--objects", "store-data")
+    assert old_blob not in reachable
+    assert store_data.prune_audio("2026-11-18", cwd=tmp_path) == ([], new, None)    # 2 回目は何もしない

@@ -10,6 +10,11 @@
     python tools/store_data.py stash-audio <pokerlogs の zip…>     # 音声の zip を store-data に入れてコミット（push は別）
     python tools/store_data.py audio 2026-10-26 --out <フォルダ>     # 音声の zip を取り出す
     python tools/store_data.py list
+    python tools/store_data.py prune-audio [--days 90] [--dry-run]   # 90 日を過ぎた音声を履歴ごと消す（push は別）
+
+音声は 90 日で消す（店舗 PC と同じ約束 = ADR-0072 D2、オーナー 2026-11-18「store-data も合わせる」）。`prune-audio` は
+期限を過ぎた日付の音声を除いた木で store-data を親の無い 1 つのコミットに作り直す（前の履歴に音声が残らない）。
+push は `git push --force-with-lease=store-data:<前の先頭> origin store-data`（表示されるコマンド）。
 
 使うときは zip を並べて渡す（真のアクションは後に並べた方が上書きする）:
     TZ=Asia/Tokyo python tools/eval_store.py data/store/2026-10-26/*.zip
@@ -257,6 +262,52 @@ def stash_audio(zips: list[Path]) -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+KEEP_DAYS = 90
+_DATE_DIR = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def expired_dates(dates: list[str], today: str, days: int = KEEP_DAYS) -> list[str]:
+    """日付のフォルダ（YYYY-MM-DD = テストの日）のうち、`days` 日を過ぎたもの（その日から `days` 日たった日に消す）。"""
+    from datetime import date, timedelta
+
+    limit = date.fromisoformat(today) - timedelta(days=days)
+    return sorted(d for d in dates if _DATE_DIR.match(d) and date.fromisoformat(d) <= limit)
+
+
+def prune_audio(today: str, days: int = KEEP_DAYS, *, ref: Optional[str] = None, cwd: Path = ROOT,
+                dry_run: bool = False) -> tuple[list[str], Optional[str], Optional[str]]:
+    """期限を過ぎた日付の音声を除き、store-data を親の無い 1 つのコミットに作り直す（手元の `refs/heads/store-data`）。
+    (消した日付, 前の先頭, 新しい先頭)。消すものが無ければ (空, 前の先頭, None)。push はしない。"""
+    if ref is None:
+        for cand in (AUDIO_BRANCH, f"origin/{AUDIO_BRANCH}"):
+            if _git("rev-parse", "--verify", "--quiet", cand, cwd=cwd, check=False).returncode == 0:
+                ref = cand
+                break
+        else:
+            raise SystemExit(f"{AUDIO_BRANCH} ブランチがありません（git fetch origin {AUDIO_BRANCH}）")
+    old = _git("rev-parse", ref, cwd=cwd).stdout.decode().strip()
+    root = _git("ls-tree", old, cwd=cwd).stdout.decode().splitlines()
+    audio = next((line for line in root if line.endswith("\taudio")), None)
+    if audio is None:
+        return [], old, None
+    entries = _git("ls-tree", f"{old}:audio", cwd=cwd).stdout.decode().splitlines()
+    gone = expired_dates([e.split("\t", 1)[1] for e in entries], today, days)
+    if not gone or dry_run:
+        return gone, old, None
+    kept = [e for e in entries if e.split("\t", 1)[1] not in gone]
+    lines = [line for line in root if not line.endswith("\taudio")]
+    if kept:
+        audio_tree = subprocess.run(["git", "mktree"], cwd=cwd, input=("\n".join(kept) + "\n").encode(),
+                                    capture_output=True, check=True).stdout.decode().strip()
+        lines.append(f"040000 tree {audio_tree}\taudio")
+    tree = subprocess.run(["git", "mktree"], cwd=cwd, input=("\n".join(lines) + "\n").encode() if lines else b"",
+                          capture_output=True, check=True).stdout.decode().strip()
+    message = f"音声: {days} 日を過ぎた音声を消した（{'・'.join(gone)}）。前の履歴は残さない"
+    new = _git("commit-tree", tree, "-m", message, cwd=cwd).stdout.decode().strip()
+    _git("update-ref", f"refs/heads/{AUDIO_BRANCH}", new, cwd=cwd)
+    return gone, old, new
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="店舗のテスト記録をリポジトリに置く・取り出す")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -270,6 +321,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     g.add_argument("date", help="YYYY-MM-DD")
     g.add_argument("--out", type=Path, default=Path("store_audio"))
     sub.add_parser("list", help="一覧を出す")
+    pr = sub.add_parser("prune-audio", help=f"{KEEP_DAYS} 日を過ぎた音声を {AUDIO_BRANCH} から履歴ごと消す")
+    pr.add_argument("--days", type=int, default=KEEP_DAYS)
+    pr.add_argument("--today", default=None, help="YYYY-MM-DD（既定 = 今日）")
+    pr.add_argument("--dry-run", action="store_true", help="消す日付を出すだけ")
     args = ap.parse_args(argv)
     if args.cmd == "add":
         add(args.logs, args.truth, args.labels)
@@ -278,6 +333,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     elif args.cmd == "audio":
         got = fetch_audio(args.date, args.out)
         print(f"{args.out}: {len(got)} 個" if got else f"{args.date} の音声はありません")
+    elif args.cmd == "prune-audio":
+        from datetime import date
+
+        _git("fetch", "origin", f"{AUDIO_BRANCH}:refs/remotes/origin/{AUDIO_BRANCH}", check=False)
+        gone, old, new = prune_audio(args.today or date.today().isoformat(), args.days, dry_run=args.dry_run)
+        if not gone:
+            print(f"{args.days} 日を過ぎた音声はありません")
+        elif new is None:
+            print(f"消す日付（--dry-run）: {'・'.join(gone)}")
+        else:
+            print(f"消した日付: {'・'.join(gone)}（{AUDIO_BRANCH} を親の無いコミット {new[:8]} に作り直した）")
+            print(f"push: git push --force-with-lease={AUDIO_BRANCH}:{old} origin {AUDIO_BRANCH}")
     else:
         print(index_table(session_rows()))
     return 0

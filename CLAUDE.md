@@ -19,6 +19,8 @@
   - 発話の音声は、データ専用のブランチ `store-data` に置く（`python tools/store_data.py audio <日付>` で取り出す）。
   - 足すときは `python tools/store_data.py add …` と `stash-audio …`。
   - 店舗の音声はこのブランチにだけ置き、公開（Artifact など）はしない。
+  - 音声は 90 日で消す（オーナー 2026-11-18。店舗 PC と同じ約束）: `python tools/store_data.py prune-audio`（期限を過ぎた日付を
+    履歴ごと消す。push は表示されるコマンド）。
 
 ## プロジェクト概要
 
