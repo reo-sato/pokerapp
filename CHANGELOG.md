@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Changed (2026-11-18)
+
+- **書き起こしの API の既定のモデルを gpt-transcribe に**（オーナー 2026-11-18）。whisper-1 は 2027-02-26 に提供終了と告知されて
+  いる。10/29・11/05 の発話で同じ物差しにかけて、whisper-1 と同等以上（11/05 47/72 対 45/72）・速い（1 発話 0.5 秒）。
+  `audio.transcriber=openai`（テスト中の形）・`cloud`（中継）のどちらも、`audio.remote_model` / `CLOUD_ASR_MODEL` を書かなければ
+  gpt-transcribe。戻すなら `python tools/set_config.py audio.remote_model whisper-1`。書き起こしの行の `asr` は
+  `openai-gpt-transcribe`。店舗 PC の既定（`audio.transcriber=local`）は変わらない。
+
 ### Added (2026-11-18)
 
 - **`tools/store_data.py prune-audio`**: 開発用の `store-data` ブランチの音声も 90 日で消す（オーナー 2026-11-18「店舗 PC と同じ

@@ -1,12 +1,12 @@
-# TODO: Whisper の外部 API（OpenAI whisper-1）の利用
+# TODO: Whisper の外部 API（OpenAI の書き起こし。既定 gpt-transcribe）の利用
 
-書き起こしを OpenAI の whisper-1 に移す計画（ADR-0072）の、残りの作業の一覧。決めたことと経緯は ADR-0072、並行している
+書き起こしを OpenAI の API（はじめ whisper-1、2026-11-18 から既定 gpt-transcribe）に移す計画（ADR-0072）の、残りの作業の一覧。決めたことと経緯は ADR-0072、並行している
 ほかの作業は `docs/plan-board.md`（トラック H）。項目を済ませたら `[x]` にして日付を書く。
 
 ## いまの状態（2026-11-18）
 
 - **段階 1 の「テスト中の形」は実装済み**（2026-11-09, ADR-0072 追記 2）:
-  - 店舗 PC が whisper-1 を直接呼ぶ（`audio.transcriber=openai`。鍵は環境変数 `POKERAPP_OPENAI_API_KEY`）。
+  - 店舗 PC が OpenAI の API を直接呼ぶ（`audio.transcriber=openai`。鍵は環境変数 `POKERAPP_OPENAI_API_KEY`）。
   - 失敗した発話は音声を残して、あとで送り直す。
   - 推定器は店舗サーバーでハンドごとに回す（`estimator.live`）。
   - 音声は 90 日で消す（`audio.keep_days`）。
@@ -14,7 +14,8 @@
 - 既定の設定は `audio.transcriber=local` のまま。
 - **他の店に配る形（クラウドの中継）も実装済み**（2026-11-18）: `audio.transcriber=cloud`。鍵はクラウドにだけ置く。
   クラウドのイメージ（`cloud/Dockerfile`・`cloud/cloudbuild.yaml`）も用意した。Google Cloud への登録はまだ（オーナーの作業）。
-- **whisper-1 は 2027-02-26 に提供終了と告知されている**（下の D）。後継の `gpt-transcribe` を同じ物差しで測った。
+- **既定のモデルを gpt-transcribe に変えた**（オーナー 2026-11-18「変更して構いません」）。whisper-1 は 2027-02-26 に提供終了と
+  告知されている（下の D）。
 
 ## A. 店舗テストの前の準備
 
@@ -30,12 +31,12 @@
 ## B. 店舗テストで確かめる
 
 - [ ] プレー中に声の入った記録が出るか。
-  - `transcripts.jsonl` の `asr`（`openai-whisper-1`）の行で、話し始めから `heard_at` までの秒数を測る（目安 1 秒前後）。
+  - `transcripts.jsonl` の `asr`（`openai-gpt-transcribe`）の行で、話し始めから `heard_at` までの秒数を測る（目安 1 秒前後）。
 - [ ] ハンドの数分後に推定が出るか。ハンドごとの秒数は `logs/store_server.log` で見る。
 - [ ] 店舗 PC が重くならないか（Whisper を止めたぶん CPU が空くはず）。
 - [ ] API の失敗と送り直し。テストの途中で Wi-Fi を一度切って戻し、残した音声が送り直されて記録に入るかを見る。
 - [ ] 1 セッションあたりの費用の実績を、OpenAI の使用量の画面で見て D6 の目安と比べる。
-- [ ] 精度: whisper-1 で録ったセッションを前向きの成績表（`tools/forward_ledger.py`）に足し、店舗 PC の Whisper のセッションと比べる。
+- [ ] 精度: API（gpt-transcribe）で録ったセッションを前向きの成績表（`tools/forward_ledger.py`）に足し、店舗 PC の Whisper のセッションと比べる。
 
 ## C. 道具・記録の足りないところ
 
@@ -49,8 +50,9 @@
   gpt-4o-mini-transcribe の 3 つ。後継は `gpt-transcribe`）。
   - 検索で見た告知の要約による。OpenAI の開発者向けのページ（developers.openai.com）はこの開発の環境から開けず、本文は
     まだ見ていない。オーナーが OpenAI の管理画面か告知のメールで確かめる。
-  - **2027-02-26 より前に、使うモデルを gpt-transcribe に切り替える必要がある**。切り替えは設定 1 つ:
-    テスト中の形は `python tools/set_config.py audio.remote_model gpt-transcribe`、中継はクラウドの `CLOUD_ASR_MODEL`。
+  - [x] **既定を gpt-transcribe に切り替えた**（オーナー 2026-11-18）。テスト中の形（`audio.remote_model` を書かなければ既定）も
+    中継（クラウドの `CLOUD_ASR_MODEL` を書かなければ既定）も。前の whisper-1 に戻すなら
+    `python tools/set_config.py audio.remote_model whisper-1`。
   - gpt-transcribe の料金は未確認（費用の目安は whisper-1 と同じ 1 分 $0.006 で仮に数えている）。
 - [x] 後継の gpt-transcribe を同じ物差しで測った（2026-11-18。`tools/cloud_asr.py` の `openai-transcribe` で 10/29・11/05 の発話
   1,848 件を書き起こし直し、いまのコードの推定器に通した。全部正しいハンドの数）:
@@ -63,8 +65,8 @@
 
   - 書き起こし: 1 発話の時間の中央値は whisper-1 1.05 秒 → gpt-transcribe 0.51 秒。空の出力は 39 → 99 件（雑談や短い音を
     文にしない）。費用は同じ数え方で 59.5 分・$0.46。
-  - [ ] 切り替える前に、10/29 のハンド 35 の要確認の印なしの誤りを調べる（推定器の規則で印を付けられるか）。
-  - [ ] 店舗テストで 1 回、gpt-transcribe で録る（`audio.remote_model gpt-transcribe`）。
+  - [ ] 10/29 のハンド 35 の要確認の印なしの誤りを調べる（推定器の規則で印を付けられるか）。
+  - [ ] 店舗テストで gpt-transcribe で録った最初のセッションを、上と同じ物差しで確かめる。
 - [x] 代わりの候補 gpt-4o-mini-transcribe → **候補から外す**（2026-11-18。whisper-1 と同じ日に提供終了と告知されている）。
 - [ ] OpenAI の API のデータの扱いを公式で確かめ、ディーラー用・プレイヤー用の紙の文面と合っているかを見る。
   - 確かめる点: 学習に使わない・保存は不正利用の監視のための最長 30 日。

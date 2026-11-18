@@ -484,9 +484,9 @@ def _remote_transcriber(audio_cfg: dict):
                                 language=audio_cfg.get("language", "ja"),
                                 vad_threshold=float(audio_cfg.get("vad_threshold", 0.5)),
                                 sample_rate=int(audio_cfg.get("sample_rate", 16000)))
-    from core.remote_asr import OpenAITranscriber
+    from core.remote_asr import DEFAULT_MODEL, OpenAITranscriber
 
-    return OpenAITranscriber(model=str(audio_cfg.get("remote_model", "whisper-1")),
+    return OpenAITranscriber(model=str(audio_cfg.get("remote_model") or DEFAULT_MODEL),
                              language=audio_cfg.get("language", "ja"),
                              vad_threshold=float(audio_cfg.get("vad_threshold", 0.5)),
                              sample_rate=int(audio_cfg.get("sample_rate", 16000)))

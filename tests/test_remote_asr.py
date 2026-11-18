@@ -1,4 +1,4 @@
-"""書き起こしの API（ADR-0072, 2026-11-09）: OpenAI の whisper-1 で 1 発話ずつ書き起こす。
+"""書き起こしの API（ADR-0072, 2026-11-09）: OpenAI の書き起こし（既定 gpt-transcribe, 2026-11-18 から）で 1 発話ずつ書き起こす。
 
 - 店舗 PC の Whisper と同じ約束（`recognize` → 文・自信・声なし）。声でなければ API を呼ばない。
 - 失敗（ネット・API）は `RemoteAsrError`。録音側は音声を保存したまま後回しの列へ回し、つながったら送り直す。
@@ -48,7 +48,7 @@ class TestRequest:
         assert transcribe_openai(wav_bytes(PCM), key="sk-test", post_fn=post) == "レイズ 3200"
         url, body, headers, timeout = post.calls[0]
         assert url == OPENAI_URL and headers["Authorization"] == "Bearer sk-test" and timeout == 15.0
-        assert b'name="model"\r\n\r\nwhisper-1' in body and b'name="language"\r\n\r\nja' in body
+        assert b'name="model"\r\n\r\ngpt-transcribe' in body and b'name="language"\r\n\r\nja' in body
         assert "ポーカーのディーラー".encode() in body                      # ライブの Whisper と同じプロンプト
         start = body.index(b"RIFF")
         with wave.open(BytesIO(body[start:]), "rb") as f:
@@ -111,7 +111,7 @@ class TestLogger:
         event = q.get_nowait()
         assert (event.action, event.amount, event.utterance_start_ts) == ("raise", 3200, 100.0)
         (row,) = seen
-        assert row.asr == "openai-whisper-1" and not row.deferred and row.ear is not None
+        assert row.asr == "openai-gpt-transcribe" and not row.deferred and row.ear is not None
         assert (tmp_path / "audio" / SID / "100000.wav").is_file()
 
     def test_a_failed_utterance_is_kept_and_sent_later(self, tmp_path):
@@ -134,7 +134,7 @@ class TestLogger:
         item = thread._deferred_queue.get_nowait()                      # noqa: SLF001
         thread._process_deferred(*item)                                  # noqa: SLF001
         (row,) = seen
-        assert row.deferred and row.text == "コール" and row.audio_file == "100000.wav" and row.asr == "openai-whisper-1"
+        assert row.deferred and row.text == "コール" and row.audio_file == "100000.wav" and row.asr == "openai-gpt-transcribe"
         assert q.empty()
         assert notices[-1] == "書き起こしの API にまたつながりました"
 
@@ -155,7 +155,7 @@ class TestLogger:
         log = TranscriptLog(tmp_path / f"{SID}.transcripts.jsonl")
         log.write(seen[0])
         row = json.loads(log.path.read_text(encoding="utf-8"))
-        assert row["asr"] == "openai-whisper-1" and row["confidence"] is None
+        assert row["asr"] == "openai-gpt-transcribe" and row["confidence"] is None
 
 
 class TestMain:
@@ -170,7 +170,9 @@ class TestMain:
         assert main._wants_remote({"transcriber": "openai"})            # noqa: SLF001
         assert not main._wants_remote({"transcriber": "local"})         # noqa: SLF001
         t = main._remote_transcriber({"transcriber": "openai", "vad_threshold": 0.8})   # noqa: SLF001
-        assert t.ready and t.asr_name == "openai-whisper-1"
+        assert t.ready and t.asr_name == "openai-gpt-transcribe"
+        old = main._remote_transcriber({"transcriber": "openai", "remote_model": "whisper-1"})   # noqa: SLF001
+        assert old.asr_name == "openai-whisper-1"                         # 前のモデルにも戻せる
 
     def test_cloud_needs_the_cloud_link_and_no_key(self, monkeypatch):
         """`audio.transcriber=cloud`（他の店に配る形, ADR-0072 D1）: クラウドにつないであれば中継に頼む（店舗 PC に鍵は

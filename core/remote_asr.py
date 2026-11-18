@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 
 OPENAI_URL = "https://api.openai.com/v1/audio/transcriptions"
 KEY_ENV = ("POKERAPP_OPENAI_API_KEY", "OPENAI_API_KEY")
-DEFAULT_MODEL = "whisper-1"
+# 既定は gpt-transcribe（オーナー 2026-11-18。whisper-1 は 2027-02-26 に提供終了とされる。同じ物差しで同等以上, ADR-0072 追記 3）
+DEFAULT_MODEL = "gpt-transcribe"
 # 1 分あたりの料金（ドル。公式の価格表で要確認, 2026-11）。whisper-1・gpt-4o 系は 2027-02-26 に提供終了とされる
 USD_PER_MIN = {"whisper-1": 0.006, "gpt-transcribe": 0.006, "gpt-4o-transcribe": 0.006, "gpt-4o-mini-transcribe": 0.003}
 TIMEOUT_SEC = 15.0
@@ -173,7 +174,7 @@ class CloudTranscriber(OpenAITranscriber):
         super().__init__(model="cloud", language=language, vad_threshold=vad_threshold, sample_rate=sample_rate,
                          timeout=timeout, key=token or "", post_fn=post_fn, prompt=None)
         self._url = url.rstrip("/") + CLOUD_ASR_PATH
-        self.asr_name = "openai-whisper-1"            # クラウドが返す名前で置き換える
+        self.asr_name = f"openai-{DEFAULT_MODEL}"     # クラウドが返す名前で置き換える
         self.load_error = None if token else "クラウドにつないでいません（python tools/cloud_link.py link）"
 
     def _request(self, wav: bytes) -> str:

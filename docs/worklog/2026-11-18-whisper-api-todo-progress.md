@@ -81,3 +81,11 @@
 ## Related Commits
 
 - e9c8aa6・b0112d6・c7af66f・この作業ログのコミット。
+
+## 追記: 既定のモデルを gpt-transcribe に（オーナー 2026-11-18「変更して構いません」）
+
+- `core/remote_asr.DEFAULT_MODEL = "gpt-transcribe"`。`main.py`（`audio.remote_model` が無ければ既定）・`cloud/app.py`・
+  `cloud/__main__.py`（`CLOUD_ASR_MODEL` が無ければ既定）・中継の仮の名前も同じ値から。`config_default.json` の説明。
+- 試験: 書き起こしの行の `asr` は `openai-gpt-transcribe`、`remote_model: whisper-1` で前のモデルに戻せること。
+- 店舗 PC の `config.json` には `remote_model` が無い（既定の雛形にも無い）ので、`audio.transcriber=openai` にすれば
+  そのまま gpt-transcribe になる。

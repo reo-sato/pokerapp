@@ -137,7 +137,8 @@ ADR-0063 D1（推論は店舗 PC の CPU）・D8（製品化の作業は推論�
 - [x] 書き起こしの担当を API にする（2026-11-09, 追記 1）
 - [x] 段階 0: whisper-1 に決めた・`tools/cloud_asr.py` を開発のブランチに入れた（2026-11-09）
 - [x] 後継の gpt-transcribe を同じ物差しで測った（2026-11-18, 追記 3）
-- [ ] whisper-1 は 2027-02-26 に提供終了と告知（追記 3）。公式の本文で確かめ、それより前に gpt-transcribe に切り替える
+- [x] 既定のモデルを gpt-transcribe に（オーナー 2026-11-18, 追記 3）
+- [ ] whisper-1 の提供終了（2027-02-26）と gpt-transcribe の料金を公式の本文で確かめる
 - [ ] ADR-0067 の 2e（Dockerfile・Cloud Build は 2026-11-18 に用意。Secret Manager・Cloud Run・D9 は Google Cloud の登録のあと）
 - [x] 段階 1（テスト中の形, 追記 2）: `core/remote_asr.py`・ロガーの `audio.transcriber=openai`・`core/live_estimator.py`・音声の 90 日の削除（2026-11-09）
 - [ ] 店舗テストで確かめる: プレー中の画面に声の入った記録と推定が数分で出るか・店舗 PC が重くならないか・API の失敗と送り直し
@@ -219,9 +220,10 @@ whisper-1 と mini は今の Whisper と同じ成績で、速く安い。精度�
 gpt-transcribe は whisper-1 と同等以上で、速い（1 発話の中央値 0.51 秒 対 1.05 秒）。雑談や短い音を文にしないことが多い
 （空の出力 99 件 対 39 件）。ただし、要確認の印なしの誤りが 1 つ出た。
 
-**決めたこと（提案。切り替えはオーナーの確認のあと）.**
-- 2027-02-26 より前に gpt-transcribe に切り替える。切り替えは設定 1 つ（`audio.remote_model` / クラウドの `CLOUD_ASR_MODEL`）。
-- その前に、10/29 のハンド 35 の印なしの誤りを調べ、店舗テストで 1 回 gpt-transcribe で録る。料金を公式で確かめる。
+**決めたこと（オーナー 2026-11-18「変更して構いません」）.**
+- 既定のモデルを gpt-transcribe にした（`core/remote_asr.DEFAULT_MODEL`。テスト中の形の `audio.remote_model`・クラウドの
+  `CLOUD_ASR_MODEL` を書かなければこれ。whisper-1 には設定 1 つで戻せる）。
+- 10/29 のハンド 35 の印なしの誤りは続けて調べ、店舗テストの最初のセッションを同じ物差しで確かめる。料金を公式で確かめる。
 - gpt-4o-mini-transcribe は同じ日に終わるので候補から外す。
 
 **クラウドの中継（D1 の元の形）を実装した.**

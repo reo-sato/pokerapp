@@ -114,7 +114,7 @@ def test_the_store_pc_sends_the_utterance_through_the_cloud():
     assert tr.ready and tr.remote
     result = tr.recognize(b"\x01\x00" * 16000)
     assert result.text == SPOKEN and result.confidence is None
-    assert tr.asr_name == "openai-whisper-1" and fake.calls[0][1] == SECRET
+    assert tr.asr_name == "openai-gpt-transcribe" and fake.calls[0][1] == SECRET
     assert not CloudTranscriber("https://cloud.example", "").ready      # つないでいない
 
 

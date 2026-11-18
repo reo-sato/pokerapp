@@ -61,6 +61,7 @@ from api.read_models import (
 from core.auth_token import issue_player_token, verify_player_token
 from core.ledger_repository import LedgerNotFoundError
 from core.player_repository import PlayerNotFoundError
+from core.remote_asr import DEFAULT_MODEL
 from core.session_repository import SessionNotFoundError
 
 logger = logging.getLogger("cloud")
@@ -70,6 +71,7 @@ DEFAULT_MAX_BODY = 4 * 1024 * 1024
 DEFAULT_LOGIN_TTL_SEC = 30 * 24 * 3600
 PLAYER_WEB_DIR = Path(__file__).resolve().parent / "static" / "player"
 DEFAULT_ASR_MAX_BYTES = 2 * 1024 * 1024        # 16 kHz・16 bit・モノラルで約 65 秒
+DEFAULT_ASR_MODEL = DEFAULT_MODEL                # gpt-transcribe（core.remote_asr と同じ, ADR-0072 追記 3）
 DEFAULT_ASR_DAILY_SEC = 8 * 3600.0             # 1 セッションの声のある発話は 1.5 時間ほど（ADR-0072 D6）
 
 
@@ -121,7 +123,7 @@ class CloudSettings:
     public_url: Optional[str] = None                    # リンクの URL の頭（無ければ要求の URL から）
     player_web_dir: Optional[Path] = None               # お客さん向け画面（無ければ配信しない）
     asr_key: Optional[str] = None                       # 書き起こしの API の鍵（無ければ中継の受け口は 503）
-    asr_model: str = "whisper-1"                        # 書き起こしのモデル（whisper-1 は 2027-02-26 に提供終了とされる）
+    asr_model: str = DEFAULT_ASR_MODEL                  # 書き起こしのモデル（既定 gpt-transcribe, ADR-0072 追記 3）
     asr_max_bytes: int = DEFAULT_ASR_MAX_BYTES          # 1 発話の WAV の上限
     asr_daily_sec: float = DEFAULT_ASR_DAILY_SEC        # 店ごとの 1 日（UTC）の音声の秒数の上限
     asr_call: Optional[Callable[..., str]] = None       # 試験で差し替える（既定 core.remote_asr.transcribe_openai）
