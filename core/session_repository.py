@@ -38,6 +38,7 @@ from pathlib import Path
 
 from core.atomic_io import atomic_write_json, file_stat, read_json_file
 from core.player_repository import PlayerNotFoundError, PlayerRepository
+from core.records_lock import records_lock
 from core.session import HandRef, SeatAssignment, Session
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,21 @@ def _locked(method):
     def wrapper(self, *args, **kwargs):
         with self._lock:
             return method(self, *args, **kwargs)
+
+    return wrapper
+
+
+def _mutating(method):
+    """書き込み: プロセスをまたぐロック（`core/records_lock.py`）のもとで、ディスクから読み直してから変更して書く
+    （ADR-0073 D5）。別のプロセス（ロガー / 店舗サーバー）の変更を消さない。取る順は「ファイルのロック → `self._lock`」
+    （逆の順で取る場所を作らない = デッドロックしない）。"""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with records_lock(*self._record_files()):
+            with self._lock:
+                self.reload_if_changed()
+                return method(self, *args, **kwargs)
 
     return wrapper
 
@@ -201,7 +217,14 @@ class SessionRepository:
             atomic_write_json(self._path, {"sessions": sessions_out})
         except OSError:
             logger.exception("Failed to write session DB: %s", self._path)
+            # 書けなかった変更はメモリにだけある。次の読み直しでファイルの内容に戻す（メモリとファイルをずらさない）
+            self._loaded_stat = None
+            return
         self._loaded_stat = file_stat(self._path)
+
+    def _record_files(self) -> tuple[Path, Path]:
+        """書き込みのロックを取るファイル（セッションとお客さんの記録。同じフォルダなら 1 つのロック）。"""
+        return self._path, self._player_repo.path
 
     @_locked
     def reload(self) -> None:
@@ -235,7 +258,7 @@ class SessionRepository:
 
     # ――― session CRUD ―――
 
-    @_locked
+    @_mutating
     def create_session(self, label: str | None = None, blinds: dict | None = None) -> Session:
         session_id = uuid.uuid4().hex
         session = Session(
@@ -263,7 +286,7 @@ class SessionRepository:
             raise SessionNotFoundError(f"session_id={session_id} は存在しません。")
         return session
 
-    @_locked
+    @_mutating
     def close_session(self, session_id: str, ended_at: str | None = None) -> Session:
         session = self.get_session(session_id)
         if session.status == "closed":
@@ -274,7 +297,7 @@ class SessionRepository:
         logger.info("Closed session %s", session_id)
         return session
 
-    @_locked
+    @_mutating
     def set_hole_card_visibility(self, session_id: str, value: str | None) -> Session:
         """お客さんの画面に出すホールカードの範囲を決める（None = 店の設定に従う, ADR-0067 D6）。
 
@@ -291,7 +314,7 @@ class SessionRepository:
 
     # ――― hand-based seating ―――
 
-    @_locked
+    @_mutating
     def assign_seat(
         self, session_id: str, hand_id: int, seat_no: int, player_id: str
     ) -> SeatAssignment:

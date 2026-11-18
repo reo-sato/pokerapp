@@ -434,6 +434,26 @@ def merge_snapshot_into(
 ) -> dict:
     """ピア snapshot をこのノードの各ストアファイルに merge し、アトミックに書き戻す。
 
+    `players.json` / `sessions.json` は、ロガーと同じ記録のロックのもとで読み直してから書く（ADR-0073 D5）。
+    """
+    from core.records_lock import records_lock
+
+    with records_lock(players_path, sessions_path):
+        return _merge_snapshot_into(players_path=players_path, sessions_path=sessions_path,
+                                    ledger_path=ledger_path, orders_path=orders_path, log_dir=log_dir, peer=peer)
+
+
+def _merge_snapshot_into(
+    *,
+    players_path: str | Path,
+    sessions_path: str | Path,
+    ledger_path: str | Path,
+    orders_path: str | Path,
+    log_dir: "str | Path | None" = None,
+    peer: dict,
+) -> dict:
+    """`merge_snapshot_into` の中身（ロックの中で呼ぶ）。
+
     各ファイルの既存 top-level 構造を保つ（players/sessions/ledger 3 キー/requests）。
     返り値は new-or-changed のカウント summary。
     """

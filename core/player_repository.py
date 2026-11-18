@@ -24,6 +24,7 @@ from pathlib import Path
 
 from core.atomic_io import atomic_write_json, file_stat, read_json_file
 from core.player import Player
+from core.records_lock import records_lock
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,21 @@ def _locked(method):
     return wrapper
 
 
+def _mutating(method):
+    """書き込み: プロセスをまたぐロック（`core/records_lock.py`）のもとで、ディスクから読み直してから変更して書く
+    （ADR-0073 D5）。別のプロセス（ロガー / 店舗サーバー）の変更を消さない。取る順は「ファイルのロック → `self._lock`」
+    （逆の順で取る場所を作らない = デッドロックしない）。"""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with records_lock(*self._record_files()):
+            with self._lock:
+                self.reload_if_changed()
+                return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class PlayerRepository:
     """player の永続ストア。アプリ再起動を跨いで player_id が安定する。"""
 
@@ -110,7 +126,12 @@ class PlayerRepository:
             atomic_write_json(self._path, data)
         except OSError:
             logger.exception("Failed to write player DB: %s", self._path)
+            self._loaded_stat = None      # 次の読み直しでファイルの内容に戻す（メモリとファイルをずらさない）
+            return
         self._loaded_stat = file_stat(self._path)
+
+    def _record_files(self) -> tuple[Path]:
+        return (self._path,)
 
     @_locked
     def reload(self) -> None:
@@ -217,7 +238,7 @@ class PlayerRepository:
                 cls.add(pid)
         return cls
 
-    @_locked
+    @_mutating
     def merge_players(self, survivor_id: str, absorbed_id: str) -> Player:
         """`absorbed_id` を `survivor_id` に統合する（alias/tombstone, ADR-0030）。
 
@@ -245,7 +266,7 @@ class PlayerRepository:
         logger.info("Merged player %s into %s", absorbed_id, canonical_survivor)
         return absorbed
 
-    @_locked
+    @_mutating
     def unmerge(self, player_id: str) -> Player:
         """merge を取り消す（`merged_into` を除去, ADR-0030 D4。破壊していないので可逆）。"""
         if player_id not in self._players:
@@ -257,7 +278,7 @@ class PlayerRepository:
         logger.info("Unmerged player %s", player_id)
         return player
 
-    @_locked
+    @_mutating
     def create_player(self, display_name: str) -> Player:
         name = self._validate_name(display_name, exclude_id=None)
         player_id = uuid.uuid4().hex
@@ -269,7 +290,7 @@ class PlayerRepository:
         logger.info("Created player %s (%s)", player_id, name)
         return player
 
-    @_locked
+    @_mutating
     def find_or_create(self, display_name: str) -> Player:
         """表示名が一致する player を返し、無ければ作る（hand logger の席入力, ADR-0059）。
 
@@ -286,7 +307,7 @@ class PlayerRepository:
                 return self._players.get(self.resolve_canonical(player.player_id), player)
         return self.create_player(name)
 
-    @_locked
+    @_mutating
     def rename_player(self, player_id: str, new_display_name: str) -> Player:
         if player_id not in self._players:
             raise PlayerNotFoundError(f"player_id={player_id} は存在しません。")

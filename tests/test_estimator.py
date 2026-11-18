@@ -685,6 +685,7 @@ class TestContentFingerprint:
         "core/hand_correction.py": "訂正の重ね方（読む側）",
         "core/remote_asr.py": "書き起こしの API（録音だけが使う。推定器は書き起こした文を読む, ADR-0072）",
         "core/player.py": "player registry", "core/player_repository.py": "player registry",
+        "core/records_lock.py": "記録のファイルのロック（推定の結果に効かない）",
         "core/session.py": "session layer", "core/session_repository.py": "session layer",
         "core/table_state.py": "卓状態の表示",
         "output/event_recorder.py": "観測の記録（ライブ）", "output/json_writer.py": "記録の書き出し",
