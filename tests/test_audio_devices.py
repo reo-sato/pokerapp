@@ -319,6 +319,19 @@ class TestMicDrop:
         assert notes[0] == "マイクを開き直します（RDP でつながりました）" and "開き直しました" in notes[1]
         assert thread._reopen_request is None and not thread._reopen_requested     # noqa: SLF001
 
+    def test_a_request_right_after_a_reopen_is_skipped(self, dropping_pyaudio):
+        """RDP を閉じた瞬間に読めなくなって開き直した直後に、見張りが同じ変化で頼んでも、もう一度は開き直さない。"""
+        first, second = _Stream(_closed_errors(3)), _Stream([b"\x00" * 2048] * 3)
+        dropping_pyaudio.streams = [first, second]
+        notes: list[str] = []
+        thread = AudioThread(audio_queue=make_audio_queue(), device_names=["DJI Mic Mini 2"],
+                             transcriber=SimpleNamespace(ready=True), stop_event=threading.Event(),
+                             on_status=lambda m: (notes.append(m), "開き直しました" in m
+                                                  and thread.request_reopen("RDP が閉じられました（切断）")))
+        thread.run()
+        assert dropping_pyaudio.created == 2 and second.reads == 4      # 3 チャンク + 終端（開き直さずに読み続けた）
+        assert not any("マイクを開き直します" in m for m in notes)
+
     def test_waiting_for_the_mic_stops_when_the_logger_stops(self, dropping_pyaudio):
         dropping_pyaudio.streams = [_Stream(_closed_errors(3))]     # 開き直しはずっと失敗する
         stop = threading.Event()

@@ -69,6 +69,9 @@ _MUTED_MESSAGE = "マイクがミュートになっています — ヘッドセ
 _READ_RETRY_SEC = 0.2
 # 開き直すまでの待ち（倍々にして上限まで）と、開けないままのときに知らせる間隔
 _REOPEN_FIRST_SEC = 1.0
+# 開き直したばかりなら、セッションの変化での開き直しの依頼は省く（RDP を閉じた瞬間に読めなくなって開き直したあと、
+# 3 秒ごとの見張りが同じ変化でもう一度頼むと、音をもう 1 秒落とすだけになる。店舗 2026-11-19）
+_REQUEST_SKIP_SEC = 5.0
 _REOPEN_MAX_SEC = 10.0
 _REOPEN_NOTE_SEC = 60.0
 
@@ -307,6 +310,7 @@ class AudioThread(threading.Thread):
         # 開き直しの依頼（Windows のセッションが変わったとき = RDP の接続・切断, ADR-0073）。録音のスレッドが受け取る
         self._reopen_request: Optional[str] = None
         self._reopen_requested = False
+        self._reopened_at: Optional[float] = None      # 最後に開き直せた時刻（monotonic）
 
     def backlog(self) -> int:
         """まだアクションになっていない発話の数（推論待ち + 推論中）。
@@ -522,6 +526,7 @@ class AudioThread(threading.Thread):
                 continue
             stream = self._open_stream(pa, pyaudio_mod, chunk_size, reopening=True)
             if stream is not None:
+                self._reopened_at = time.monotonic()
                 logger.info("マイクを開き直しました（%d 回目, device_id=%d %r）",
                             attempts, self._device_id, self._device_name)
                 if at_start:
@@ -629,9 +634,13 @@ class AudioThread(threading.Thread):
         muted_noted: Optional[float] = None
         while not self._stop_event.is_set():
             if self._reopen_request is not None:
-                self._stream_failed, self._reopen_request = self._reopen_request, None
-                self._reopen_requested = True
-                break
+                reason, self._reopen_request = self._reopen_request, None
+                if self._reopened_at is not None and time.monotonic() - self._reopened_at < _REQUEST_SKIP_SEC:
+                    logger.info("開き直したばかりなので、開き直しの依頼を省きます（%s）", reason)
+                else:
+                    self._stream_failed = reason
+                    self._reopen_requested = True
+                    break
             try:
                 data = read_chunk()
             except OSError as e:
