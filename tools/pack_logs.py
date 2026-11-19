@@ -15,7 +15,7 @@
   結果, `tools/rescore_audio.py`）/ `.control.jsonl` など `<sid>.*` の全部
 - `logs/audio/<sid>/*.wav`（発話の音声。合計 25 MB までなら自動で入れる。`--audio` で必ず入れる（大きければ zip を
   分ける）/ `--no-audio` で入れない）
-- `pokerapp.log` と `rfid_relay.log`（RFID の中継）はそのセッションの時間帯の行だけ / `config.json`（トークン類は伏せる）/ `rfid_cards.json` /
+- `pokerapp.log`・`rfid_relay.log`（RFID の中継）・`store_server.log`（店舗サーバー）はそのセッションの時間帯の行だけ / `config.json`（トークン類は伏せる）/ `rfid_cards.json` /
   `manifest.json`（入れたもの・インストールしたコードの指紋）
 - 読み上げ集（`logs/corpus/<フォルダ>/`, `tools/read_corpus.py`）: 同じ時間帯に録ったものを `corpus/<フォルダ>/` に
   （`meta.json`・`labels.jsonl`・`transcripts.jsonl` と句ごとの音声。ずっと録った `full_*.wav` は大きいので入れない。
@@ -51,6 +51,8 @@ ROOT = Path(__file__).resolve().parent.parent
 APP_LOG = "pokerapp.log"
 # RFID の中継のログ（`tools/rfid_relay.py serve` が `<root>/logs/` に書く, ADR-0070）。同じ時間帯の行だけ入れる
 RELAY_LOG = "rfid_relay.log"
+# 店舗サーバー（`main.py --serve`）のログ。ハンドごとの推定の時間・失敗が分かる（2026-11-19）。同じ時間帯の行だけ
+STORE_LOG = "store_server.log"
 # 音声はこの合計サイズまでなら既定で入れる（チャットに添付できる大きさに収める）
 AUDIO_AUTO_LIMIT = 25 * 1024 * 1024
 # 1 つの zip の大きさの上限（チャットに添付できる大きさ）。超えるときは音声を 2 つ目以降の zip に分ける
@@ -73,6 +75,7 @@ _SECRET = re.compile(r"token|secret|password|passwd|api_?key", re.I)
 _SESSION_SUFFIXES = (
     ".json", ".events.jsonl", ".transcripts.jsonl", ".table_state.json", ".table_state.jsonl",
     ".control.jsonl", ".ground_truth.json",
+    ".estimate.json",      # 店舗サーバーのハンドごとの推定（`estimator.live`, 2026-11-19 から入れる）
 )
 # 読み上げ集（`tools/read_corpus.py`）の置き場所（logs の下）
 CORPUS_DIR = "corpus"
@@ -465,6 +468,10 @@ def pack(
     relay_text = slice_app_log(relay_log, windows) if relay_log is not None else ""
     if relay_text:
         entries.append((RELAY_LOG, relay_text.encode("utf-8")))
+    store_log = next((p for p in (log_dir / STORE_LOG, root / "logs" / STORE_LOG) if p.is_file()), None)
+    store_text = slice_app_log(store_log, windows) if store_log is not None else ""
+    if store_text:
+        entries.append((STORE_LOG, store_text.encode("utf-8")))
     config_path = root / "config.json"
     if config_path.is_file():
         try:

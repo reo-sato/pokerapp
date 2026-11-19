@@ -38,7 +38,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Optional
 
 from audio.recognizer import _extract_all_seat_nos, _extract_seat_no, apply_corrections
-from core.control_queue import parse_script_hand, parse_truth_stacks
+from core.control_queue import parse_script_hand, parse_truth_button, parse_truth_stacks
 from core.event_queue import EventQueue
 from core.events import AudioEvent, CameraEvent, RFIDEvent
 from core.game_state import GameStateManager, Street
@@ -267,7 +267,7 @@ _CORRECTION_UNIT_ACTIONS = frozenset({"fold", "check", "call", "bet", "raise", "
 _VOICE_SOURCES = frozenset({"spoken_seat", "spoken_position", "engine_prior"})
 # 解釈を決める前に届いても、組み直しを待たなくてよい（ハンドを終わらせない）制御
 _CONTROL_KEEPS_CORRECTION = frozenset({"rename_seat", "set_blinds", "sit_out", "sit_in", "rebuy", "set_button",
-                                       "correct_board", "correct_seat", "truth_stacks", "reduce_stack",
+                                       "correct_board", "correct_seat", "truth_stacks", "truth_button", "reduce_stack",
                                        "set_bb_ante", "set_level", "clock", "blind_up", "mic_state"})
 # 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
 # 言葉がこの数だけ聞こえたら、そのオールインを聞き違いとみて外す（店舗 2026-09-27: 自信 0.27 の「オールイン」の
@@ -1313,6 +1313,9 @@ class IntegrationThread(threading.Thread):
             return
         if action == "truth_stacks":
             self._handle_truth_stacks(event)
+            return
+        if action == "truth_button":
+            self._handle_truth_button(event)
             return
 
         if action == "new_hand":
@@ -3478,7 +3481,7 @@ class IntegrationThread(threading.Thread):
         if pending is None or self._rebuilding:
             return
         if (not declared and self._rfid_folds and self._hand_open and not self._runout_seats
-                and self._board_top() > pending.get("board", self._board_top())
+                and self._runout_board_dealt(pending)
                 and not (self._departures.get(pending["seat"]) or {}).get("muck")):
             # 確定を待つあいだにボードの札が配られた（片付けの束は外してある）= オールインのランアウト（2026-10-29）
             self._start_runout(self._clock() if t is None else t)
@@ -3487,6 +3490,33 @@ class IntegrationThread(threading.Thread):
         remaining = self._remaining_seats()
         if len(remaining) == 1 and self._hand_open:
             self._finalize_hand(remaining[0], winner_source="fold", ended_ts=pending["t"])
+
+    def _runout_board_dealt(self, pending: dict) -> bool:
+        """フォールドの確定待ちのあいだに、次のストリートの札が配られたか（オールインのランアウトの印）。
+
+        - ストリートが 1 つそろった（プリフロップからはフロップの 3 枚、それ以降は 1 枚）→ 配られた。
+        - 最後のフォールドとみた札の離脱より**あと**に置かれた札 → 配られた（ランアウトは札を前に出してから配る）。
+        - オールインが聞こえている → どの札でも（札を前に出したのが読めた時刻がボードより遅いこともある, 店舗 2026-11-09
+          559af646 ハンド 38: リバーの札のあとに離脱が読めた）。
+        離脱より前から載っていた 1 枚は片付けの札（店舗 2026-11-19 2e598110 ハンド 20: 席7 が降りる 0.2 秒前からボードの
+        リーダーに載っていた片付けの Jh でランアウトとみて、フォールドを取り消し、勝者が仮になった。閉じないあいだに次の
+        ハンドの札が席5 の手札に入った）。
+        """
+        top = self._board_top()
+        base = pending.get("board", top)
+        if top <= base:
+            return False
+        if top >= (3 if base < 3 else base + 1):
+            return True
+        since = pending.get("t")
+        if any(r.action in ("allin", "all_in") for r in self._current_actions) or any(
+                kind == "audio" and getattr(item, "action", None) in ("allin", "all_in")
+                for kind, item in self._hand_inputs):
+            return True
+        return any(
+            index > base and (self._board_dealt_at.get(index) is None or since is None
+                              or self._board_dealt_at[index] >= since)
+            for index in self._board_positions)
 
     def _start_runout(self, t: float) -> None:
         """最後の 1 人を残すフォールドとみた札の離脱のあとにボードの札が置かれた = オールインのコールのあとで手札を前に
@@ -5316,7 +5346,8 @@ class IntegrationThread(threading.Thread):
             return                            # もともとその状態（名前の変更だけ）
         if event.action == "sit_out":
             self._notice(f"席{seat} は次のハンドから休みです（配られません）")
-        elif gs.get_stacks().get(seat, 0) <= 0:
+        elif gs.get_stacks().get(seat, 0) <= 0 and not getattr(gs, "stackless", False):
+            # 持ち点を数えないモードは持ち点 0 でも配られる（店舗 2026-11-19 dc91ded2: 足した席に「買い足すまで配られません」と出た）
             self._notice(f"席{seat} は次のハンドから参加です（スタック 0 — r <席> <金額> で買い足すまで配られません）")
         else:
             self._notice(f"席{seat} は次のハンドから参加です")
@@ -5379,6 +5410,44 @@ class IntegrationThread(threading.Thread):
         parts = " / ".join(f"席{s} {d:+d}" for s, d in sorted(change.items()))
         later = "（いまのハンドのあとに）" if in_play and any(s in self._seats_in_hand() for s in change) else ""
         self._notice(f"真のアクション（ハンド {hand_id}）でスタックを直しました{later}: {parts}")
+
+    def _handle_truth_button(self, event: AudioEvent) -> None:
+        """真のアクションのボタン（卓 UI で選んだ席 = 卓で実際に置いたボタン）でロガーのボタンを直す（`ground_truth.feed_button`,
+        オーナー 2026-11-19: ディーラーがボタンを置き違えたハンド 48〜50 で、ロガーのボタンが実際とずれた）。
+
+        - そのハンドがいま進行中 → そのハンドのボタンを直して記録を組み直す（要確認）。
+        - その次のハンドが進行中 → 次のハンドのボタンを、真のボタンから 1 つ進めた席にして組み直す（ずれは次のハンドにも続く）。
+        - ハンドの間（そのハンドが最後のハンド）→ 次のハンドは真のボタンから 1 つ進める。
+        - それより前のハンド → お知らせだけ。
+        ベッティングが終わったあと（ショーダウン待ち）のハンドは組み直さない（`_handle_set_button` と同じ）。
+        """
+        from core.positions import advance_button
+
+        hand_id, seat = parse_truth_button(event.raw_text)
+        gs = self._game_state
+        current = getattr(gs, "hand_id", None)
+        if hand_id is None or seat is None or not isinstance(current, int):
+            logger.warning("truth_button without hand / seat: %r", event.raw_text)
+            return
+        open_hand = (self._hand_open and self._hand_origin is not None and gs.is_hand_active()
+                     and not self._betting_over())
+        if open_hand and hand_id in (current, current - 1):
+            target = seat if hand_id == current else advance_button(self._seats_in_hand(), seat)
+            if target == getattr(gs, "button_seat", None):
+                return
+            self._rebutton(target, f"真のアクション（ハンド {hand_id}）のボタンは席{seat}")
+            return
+        if not self._hand_open and hand_id == current and hasattr(gs, "rebase_button"):
+            if seat == getattr(gs, "button_seat", None):
+                return
+            try:
+                gs.rebase_button(seat)
+            except ValueError:
+                return
+            self._notice(f"真のアクション（ハンド {hand_id}）のボタン 席{seat} から、次のハンドのボタンを進めます")
+            return
+        if hand_id < current:
+            self._notice(f"真のアクション（ハンド {hand_id}）のボタンは席{seat} でした（前のハンドなので、ボタンは直しません）")
 
     def _handle_set_button(self, event: AudioEvent) -> None:
         """ボタンを手で指定する（`button <席>`, 仕様 FR-05g）。

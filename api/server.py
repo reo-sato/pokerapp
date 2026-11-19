@@ -1295,7 +1295,7 @@ def create_app(
         def fail(message: str) -> "tuple[dict, JSONResponse]":
             return {}, JSONResponse(status_code=400, content={"code": "invalid_control", "message": message})
 
-        if body.type not in VALID_CONTROL_TYPES or body.type in ("script_hand", "truth_stacks"):
+        if body.type not in VALID_CONTROL_TYPES or body.type in ("script_hand", "truth_stacks", "truth_button"):
             return fail(f"未対応の control type です: {body.type!r}")
         fields = {"seat": body.seat, "amount": body.amount, "index": body.index, "sb": body.sb, "bb": body.bb,
                   "seats": body.seats, "name": body.name, "value": body.value, "op": body.op, "text": body.text}

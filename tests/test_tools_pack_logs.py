@@ -185,6 +185,20 @@ class TestZip:
         assert manifest["relay_log_lines"] == 1
         assert NEW in find_sessions(root / "logs")                 # 中継のログはセッションに数えない
 
+    def test_store_server_log_and_the_estimate_are_packed(self, root, tmp_path):
+        """店舗サーバーのログ（ハンドごとの推定の時間・失敗）と推定（`<sid>.estimate.json`）も入れる（2026-11-19）。"""
+        (root / "logs" / "store_server.log").write_text(
+            _log_line(datetime(2026, 9, 25, 13, 40), "old server line")
+            + _log_line(START + timedelta(seconds=20), "ハンド 1 を推定しました（3.2 秒）"),
+            encoding="utf-8",
+        )
+        (root / "logs" / f"{NEW}.estimate.json").write_text('{"hands": {}}', encoding="utf-8")
+        out, _ = _pack(root, tmp_path)
+        with zipfile.ZipFile(out) as zf:
+            log = zf.read("store_server.log").decode("utf-8")
+            assert f"{NEW}/{NEW}.estimate.json" in zf.namelist()
+        assert "推定しました" in log and "old server line" not in log
+
     def test_repeated_lines_are_folded(self, root, tmp_path):
         """店舗 2026-10-01: 閉じたマイクの警告が 9 分で 3470 万行 → 最初の 1 行と「さらに N 回」に畳む。"""
         warn = "2026-09-27 13:47:{:02d},{:03d} [AudioThread] WARNING audio.recorder: Audio read error: Stream closed\n"

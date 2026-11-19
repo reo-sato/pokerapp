@@ -232,6 +232,20 @@ def showdown_winner(
     return winners[0] if len(winners) == 1 else None
 
 
+def truth_board(gt: dict, captured: dict) -> list:
+    """真のアクションのハンドのボード。入力画面は記録の札を自動で入れる（進行中は 3 秒ごとに読み直す）ので、保存したときの
+    ボードがリバーを読む前の 4 枚のまま残ることがある（店舗 2026-11-19 dc91ded2 ハンド 2: アクションはリバーまで入っているのに、
+    お客さんの履歴にリバーの札が出なかった）。真のアクションのボードが記録のボードの先頭と同じで短ければ、記録のボードを使う
+    （違う札を入れて直したボードはそのまま）。真のアクションに無ければ記録のボード。"""
+    recorded = captured.get("board") if isinstance(captured.get("board"), list) else []
+    saved = gt.get("board") if isinstance(gt.get("board"), list) and gt.get("board") else None
+    if saved is None:
+        return list(recorded)
+    if len(saved) < len(recorded) and list(recorded[:len(saved)]) == list(saved):
+        return list(recorded)
+    return list(saved)
+
+
 def _gt_holes(gt: dict) -> dict[int, list[str]]:
     holes: dict[int, list[str]] = {}
     for p in gt.get("players") or []:
@@ -265,7 +279,7 @@ def materialize_truth(gt: dict, captured: dict) -> Optional[dict]:
     hand_seats = set(gs.seats_in_hand())
     active = active_seats(gs, mucked)
     # ボードは入力画面が記録の札で自動に入れる（真のアクションに無ければ記録のボード）
-    board = gt.get("board") if isinstance(gt.get("board"), list) and gt.get("board") else captured.get("board")
+    board = truth_board(gt, captured)
     holes = _gt_holes(gt)
     winners = truth_winners(gt)           # チョップ・サイドポットは 2 人以上（`winner_seats`, 2026-11-05）
     winner = winners[0] if len(winners) == 1 else None

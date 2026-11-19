@@ -204,3 +204,17 @@ def test_control_to_the_running_logger(tmp_path):
     assert [(c.type, c.args) for c in commands] == [
         ("seat_player", {"seat": 2, "name": "太郎"}), ("clock", {"op": "set 3 5"}), ("text", {"text": "コール"})]
     status.close()
+
+
+def test_writes_from_many_threads_do_not_fail(tmp_path, caplog):
+    """心拍とお知らせ・状態の更新が同時に書いても、置き換えが失敗しない（店舗 2026-11-19 の起動直後に FileNotFoundError）。"""
+    import threading
+
+    status = ls.LoggerStatus("cli", directory=tmp_path)
+    threads = [threading.Thread(target=lambda: [status.write() for _ in range(30)]) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert "ロガーの状態を書けません" not in caplog.text
+    assert ls.read_logger(tmp_path)["state"]["mode"] == "cli"

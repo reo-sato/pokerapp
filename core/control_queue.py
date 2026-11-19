@@ -32,11 +32,12 @@ logger = logging.getLogger(__name__)
 # set_button = 次のハンドのボタンを手で直す（仕様 FR-05g）。
 # script_hand = 台本のハンドを台本のボタンと持ち点で始める（`tools/test_script.py` の画面, 2026-09-30）。
 # truth_stacks = 真のアクションの収支でロガーの持ち点を直す（真のアクション入力の画面が保存したとき, 2026-10-19）。
+# truth_button = 真のアクションのボタン（卓 UI で選んだ席）でロガーのボタンを直す（`ground_truth.feed_button`, 2026-11-19）。
 # seat_player / reduce_stack / set_ante / clock / reader_restart / text = 端末の name / d / ante / clock / rr / 読み上げ文
 # （ADR-0073 D4。ロガーの中で端末と同じ処理を通す = `integration/logger_commands.py`。GUI のロガーでは使えない）。
 VALID_CONTROL_TYPES = (
     "new_hand", "winner", "rebuy", "correct_board", "correct_seat", "set_blinds", "sit_out", "sit_in",
-    "set_button", "script_hand", "truth_stacks",
+    "set_button", "script_hand", "truth_stacks", "truth_button",
     "seat_player", "reduce_stack", "set_ante", "clock", "reader_restart", "text",
     "stop",       # 終了（画面なしのロガーだけ。端末の q と同じ手順, ADR-0073 D6）
 )
@@ -74,6 +75,18 @@ def parse_truth_stacks(text: str) -> tuple[Optional[int], dict[int, int]]:
         if seat.isdigit() and re.fullmatch(r"-?\d+", value):
             results[int(seat)] = int(value)
     return (int(hand_m.group(1)) if hand_m else None), results
+
+
+def truth_button_text(hand_id: int, seat: int) -> str:
+    """真のアクションのボタン（`truth_button`）を 1 行にする（AudioEvent の raw_text = 記録と再生に残る）。"""
+    return f"hand={int(hand_id)} button={int(seat)}"
+
+
+def parse_truth_button(text: str) -> tuple[Optional[int], Optional[int]]:
+    """`truth_button_text` の逆（読めなければ None）。"""
+    hand_m = re.search(r"hand=(\d+)", text or "")
+    seat_m = re.search(r"button=(\d+)", text or "")
+    return (int(hand_m.group(1)) if hand_m else None), (int(seat_m.group(1)) if seat_m else None)
 
 
 def _now_iso() -> str:
@@ -271,5 +284,12 @@ def command_to_audio_event(command: ControlCommand, clock: Callable[[], float]):
             return None
         return AudioEvent(action="truth_stacks", amount=0, timestamp=clock(),
                           raw_text=truth_stacks_text(hand_id, {int(k): v for k, v in results.items()}))
+    if t == "truth_button":
+        hand_id, seat = args.get("hand_id"), args.get("seat")
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (hand_id, seat)) or not 1 <= seat <= 9:
+            logger.warning("control truth_button with invalid args: %r", args)
+            return None
+        return AudioEvent(action="truth_button", amount=0, timestamp=clock(), seat=seat,
+                          raw_text=truth_button_text(hand_id, seat))
     logger.warning("unknown control type: %r", t)
     return None

@@ -179,6 +179,12 @@ def session_setup(record: dict) -> Optional[dict]:
             if isinstance(seat, int) and seat not in players and (stackless or p.get("stack_start") is not None):
                 players[seat] = {"seat": seat, "name": p.get("name") or f"P{seat}",
                                  "stack": 0 if stackless else int(p["stack_start"])}
+    # 持ち点を数えないモードで途中から足した席（卓の形の画面の「席に戻す」・`name <席> <名前>`）は、記録の sit_in で
+    # 足す（ライブと同じ）。卓の設定（記録の `table.seats` = 起動のときの席）に無い席を最初から座らせると、再生だけ
+    # その席が 1 ハンド目から配られる（店舗 2026-11-19 dc91ded2: 席 1・2・8 を途中から足し、再生は全ハンドが違った）
+    table_seats = {s.get("seat") for s in ((record or {}).get("table") or {}).get("seats") or [] if isinstance(s, dict)}
+    if stackless and len(table_seats & set(players)) >= 2:
+        players = {s: p for s, p in players.items() if s in table_seats}
     if len(players) < 2:
         return None
     first = hands[0]
@@ -1117,6 +1123,7 @@ class SessionReport:
     stop: dict = field(default_factory=dict)             # 音声の改善を終える目安（listening_stop_metrics）
     cards_read: dict = field(default_factory=dict)       # ハンドのあいだに手札を 2 枚とも読めた席（hole_cards_read）
     deferred: int = 0                                    # 後回しで書き起こした発話（audio.live_transcribe=false）
+    live_rows: int = 0                                   # その場で書き起こした（文のある）発話
     audio: dict = field(default_factory=dict)            # 聞き取りの量・遅れ・内訳（audio_load）
 
     def to_json(self) -> dict:
@@ -1176,6 +1183,7 @@ def evaluate_session(files: SessionFiles, config: dict, recorded_code: Optional[
                        "（起動時に卓に残っていた札・配る前の発話の待ち）")
     transcripts = _read_jsonl(files.path(".transcripts.jsonl"))
     report.deferred = sum(1 for r in transcripts if r.get("deferred"))
+    report.live_rows = sum(1 for r in transcripts if not r.get("deferred") and (r.get("text") or "").strip())
     report.audio = audio_load(transcripts, report.live, record_utc_offset(report.live, events))
     transcripts = with_offplay(transcripts, _read_jsonl(files.path(".offplay.jsonl")))
     if transcripts:
@@ -1594,7 +1602,11 @@ def print_report(reports: list[SessionReport], show_timeline: bool, only_hand: O
         if r.note and r.setup is None:
             print(f"  {r.note}")
             continue
-        if r.deferred:
+        if r.deferred and r.live_rows:
+            # 書き起こしの API（ADR-0072）: その場で書き起こし、つながらなかった発話だけ後で送り直した
+            print(f"  書き起こしはその場で（{r.live_rows} 発話）・あとで送り直した {r.deferred} 発話は記録と再生に"
+                  "入っていません（「読み直し」の行に入る）")
+        elif r.deferred:
             print(f"  書き起こしは後回し（{r.deferred} 発話, audio.live_transcribe=false）: 記録と再生には声が入っていません。"
                   "声を入れた結果は「読み直し」の行を見る")
         if r.sources:

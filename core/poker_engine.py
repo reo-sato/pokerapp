@@ -958,6 +958,14 @@ class PokerkitGameState:
         """次のハンドをデッドスモールで始める（真のアクションの入力・記録の再生で、記録のデッドスモールに合わせる）。"""
         self._forced_dead_sb = seat
 
+    def rebase_button(self, seat: int) -> None:
+        """いま（終わったハンド）のボタンを `seat` だったことにする。次のハンドはここから 1 つ進める（真のアクションの
+        ボタン = 卓で実際に置いたボタン, 2026-11-19）。手で指定した次のボタン（`set_button`）は消す。"""
+        if isinstance(seat, bool) or not isinstance(seat, int) or not 1 <= seat <= 9:
+            raise ValueError(f"Unknown seat: {seat}")
+        self._button_seat = seat
+        self._forced_button = None
+
     def set_button(self, seat: int) -> None:
         """次のハンドのボタンを手で指定する（ディーラーの手違い等の修正, 仕様 FR-05g）。空いた席（1〜9）も指定できる
         = デッドボタン（3 人以上のとき, 2026-10-28）。"""

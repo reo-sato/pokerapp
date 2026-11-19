@@ -114,6 +114,9 @@ class LoggerStatus:
         self.mode = mode
         self._clock = clock
         self._lock = threading.Lock()
+        # ファイルに書くのは 1 本ずつ（心拍とお知らせ・状態の更新が同時に書くと同じ `.tmp` を奪い合い、置き換えが
+        # FileNotFoundError になった, 店舗 2026-11-19 の起動直後）
+        self._write_lock = threading.Lock()
         self._sources: dict[str, Callable[[], Any]] = {}
         self._hooks: list[Callable[[], None]] = []        # 心拍ごとに呼ぶ（セッションの見張りなど）
         self._stop = threading.Event()
@@ -157,7 +160,9 @@ class LoggerStatus:
         snapshot["updated_ts"] = self._clock()
         snapshot["notice_seq"] = self._seq
         try:
-            atomic_write_json(self.dir / STATE_FILE, json.loads(json.dumps(snapshot, ensure_ascii=False, default=str)))
+            data = json.loads(json.dumps(snapshot, ensure_ascii=False, default=str))
+            with self._write_lock:
+                atomic_write_json(self.dir / STATE_FILE, data)
         except (OSError, TypeError, ValueError):
             logger.warning("ロガーの状態を書けません: %s", self.dir / STATE_FILE, exc_info=True)
 

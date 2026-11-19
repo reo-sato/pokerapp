@@ -420,6 +420,25 @@ def feed_stacks_mode(config_path: Optional[Path] = None) -> bool:
     return _ground_truth_flag("feed_stacks", config_path)
 
 
+def feed_button_mode(config_path: Optional[Path] = None) -> bool:
+    """config.json の `ground_truth.feed_button` が true か（保存したハンドのボタン = 卓で実際に置いたボタンをロガーに送る,
+    2026-11-19）。リクエストごとに読む。"""
+    return _ground_truth_flag("feed_button", config_path)
+
+
+def send_truth_button(log_dir: Path, session_id: str, hand_id: int, gt_hand: dict, captured: dict) -> Optional[int]:
+    """保存したハンドのボタンが記録のボタンと違えば、ロガーに送る（制御 `truth_button` = `logs/<sid>.control.jsonl`）。
+    ロガーはそのハンド（進行中なら）か次のハンドのボタンを直す（`IntegrationThread._handle_truth_button`）。送った席を返す。"""
+    from core.control_queue import ControlCommandLog
+
+    seat = gt_hand.get("button_seat")
+    if isinstance(seat, bool) or not isinstance(seat, int) or seat == captured.get("button_seat"):
+        return None
+    ControlCommandLog(log_dir / f"{session_id}.control.jsonl").append(
+        "truth_button", {"hand_id": int(hand_id), "seat": int(seat)})
+    return seat
+
+
 def send_truth_stacks(log_dir: Path, session_id: str, hand_id: int, gt_hand: dict, captured: dict) -> Optional[dict]:
     """保存した真のアクションの収支をロガーに送る（制御 `truth_stacks` = `logs/<sid>.control.jsonl`）。
 
@@ -745,11 +764,12 @@ def _entry_sec(body: dict) -> Optional[float]:
 def save_ground_truth(
     log_dir: Path, session_id: str, hand_id: int, body: Any,
     gt_repo: GroundTruthRepository, corr_repo: Optional[HandCorrectionRepository] = None,
-    evaluation: bool = False, feed_stacks: bool = False,
+    evaluation: bool = False, feed_stacks: bool = False, feed_button: bool = False,
 ) -> tuple[int, dict]:
     """PUT の本体。staff API（ADR-0043）と同じ規則: passthrough は要確認のハンドを拒む。
 
     `feed_stacks`（`ground_truth.feed_stacks`）なら、保存した真のアクションの収支をロガーに送る（`send_truth_stacks`）。
+    `feed_button`（`ground_truth.feed_button`）なら、記録と違うボタンをロガーに送る（`send_truth_button`）。
 
     評価のセッション（`evaluation`）では、最初の保存（進行中のハンドはハンドが終わるまで）は記録を見ずに入れた内容
     （`hand.blind` = true）だけを受け付ける（古い画面・押し間違いでも記録を初期値にした真のアクションが入らない）。
@@ -793,6 +813,11 @@ def save_ground_truth(
             hand_body = validate_gt_hand(body.get("hand"))
         except GroundTruthError as e:
             return 400, {"code": "invalid_amount", "message": str(e)}
+        from core.truth_hand import truth_board
+
+        if captured.get("board"):
+            # 入力画面のボードはリバーを読む前の枚数のことがある（記録の札の先頭と同じなら記録の最新に, 店舗 2026-11-19）
+            hand_body["board"] = truth_board(hand_body, captured)
         problems = gt_lint(captured, hand_body)
         if problems and body.get("confirm_lint") is not True:
             return 409, {"code": "gt_lint", "message": "／".join(problems), "problems": problems}
@@ -805,6 +830,11 @@ def save_ground_truth(
     if evaluation:
         hand_body["evaluation"] = True          # 評価のセッションで入れた（記録を見ずに入れた内容は blind_entry）
     entry = gt_repo.upsert(session_id, hand_id, hand_body, annotator=annotator, source=source)
+    if feed_button:
+        try:
+            send_truth_button(log_dir, session_id, hand_id, entry.hand, captured)
+        except Exception:  # noqa: BLE001 — 送れなくても保存は済んでいる
+            logger.exception("真のアクションのボタンをロガーに送れません（ハンド %s）", hand_id)
     if feed_stacks:
         try:
             send_truth_stacks(log_dir, session_id, hand_id, entry.hand, captured)
@@ -1309,6 +1339,7 @@ class _Handler(BaseHTTPRequestHandler):
         status, payload = save_ground_truth(
             srv.log_dir, sid, int(m.group(2)), body, srv.gt_repo, srv.corr_repo, evaluation=srv.evaluation(),
             feed_stacks=feed_stacks_mode(srv._config_path),   # noqa: SLF001
+            feed_button=feed_button_mode(srv._config_path),   # noqa: SLF001
         )
         self._send_json(status, payload)
 

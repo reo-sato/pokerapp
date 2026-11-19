@@ -76,3 +76,21 @@ def test_it_is_the_same_on_replay(tmp_path):
     )
     assert (replayed[0].winner_seat, replayed[0].winner_source) == (tb.hands[0].winner_seat, "cards")
     assert [(a.seat, a.action) for a in replayed[0].actions] == [(a.seat, a.action) for a in tb.hands[0].actions]
+
+
+
+def test_a_cleanup_card_already_on_the_board_is_not_a_runout(tmp_path):
+    """店舗 2026-11-19 2e598110 ハンド 20: 席7 が降りる 0.2 秒前からボードのリーダーに載っていた片付けの札でランアウトと
+    みてフォールドを取り消し、勝者が仮になった（閉じないあいだに次のハンドの札が席5 の手札に入った）。数えるのは、最後の
+    フォールドとみた札の離脱より**あと**に置かれた札だけ。"""
+    tb = _Table(tmp_path)
+    tb.deal()
+    tb.lift(6)
+    tb.tick(tb.now + 3.5)
+    _board(tb, 1, BOARD[0])                        # 片付けの札（離脱より前から載っている）
+    tb.tick(tb.now + 0.2)
+    tb.lift(4)
+    tb.tick(tb.now + 15.0)
+    hand = tb.hands[0]
+    assert (hand.winner_seat, hand.winner_source) == (5, "fold")
+    assert not any("ランアウト" in n for n in tb.notices)

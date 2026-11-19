@@ -327,3 +327,15 @@ class TestTable:
         assert sorted(p["seat"] for p in hand["players"]) == [1, 3]
         start = {p["seat"]: p["stack_start"] for p in hand["players"]}
         assert start[1] == 3000
+
+
+def test_a_board_saved_before_the_river_uses_the_record():
+    """保存したときのボードがリバーを読む前の 4 枚でも、記録のボードの先頭と同じならリバーまで出す（店舗 2026-11-19
+    dc91ded2 ハンド 2「履歴 UI にリバーカードが映っていない」）。違う札に直したボードはそのまま。"""
+    from core.truth_hand import truth_board
+
+    made = materialize_truth(_showdown_gt(board=BOARD[:4]), _captured())
+    assert made is not None and made["board"] == BOARD
+    assert truth_board({"board": ["2c", "7d", "9h", "Ac"]}, _captured()) == ["2c", "7d", "9h", "Ac"]
+    assert truth_board({}, _captured()) == BOARD
+    assert truth_board({"board": BOARD}, {"board": BOARD[:3]}) == BOARD
