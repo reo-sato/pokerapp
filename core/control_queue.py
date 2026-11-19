@@ -32,9 +32,12 @@ logger = logging.getLogger(__name__)
 # set_button = 次のハンドのボタンを手で直す（仕様 FR-05g）。
 # script_hand = 台本のハンドを台本のボタンと持ち点で始める（`tools/test_script.py` の画面, 2026-09-30）。
 # truth_stacks = 真のアクションの収支でロガーの持ち点を直す（真のアクション入力の画面が保存したとき, 2026-10-19）。
+# seat_player / reduce_stack / set_ante / clock / reader_restart / text = 端末の name / d / ante / clock / rr / 読み上げ文
+# （ADR-0073 D4。ロガーの中で端末と同じ処理を通す = `integration/logger_commands.py`。GUI のロガーでは使えない）。
 VALID_CONTROL_TYPES = (
     "new_hand", "winner", "rebuy", "correct_board", "correct_seat", "set_blinds", "sit_out", "sit_in",
     "set_button", "script_hand", "truth_stacks",
+    "seat_player", "reduce_stack", "set_ante", "clock", "reader_restart", "text",
 )
 
 

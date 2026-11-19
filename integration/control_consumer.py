@@ -17,9 +17,9 @@ import logging
 import queue
 import threading
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
-from core.control_queue import ControlCommandLog, command_to_audio_event
+from core.control_queue import ControlCommand, ControlCommandLog, command_to_audio_event
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,8 @@ class ControlConsumerThread(threading.Thread):
         backlog: Optional[Callable[[], int]] = None,
         backlog_wait_sec: float = 60.0,
         pending_before: Optional[Callable[[float], int]] = None,
+        commands: Optional[Any] = None,
+        on_result: Optional[Callable[[ControlCommand, Any], None]] = None,
     ) -> None:
         super().__init__(daemon=True, name="ControlConsumerThread")
         self._log = control_log
@@ -54,6 +56,10 @@ class ControlConsumerThread(threading.Thread):
         self._backlog_wait_sec = backlog_wait_sec
         # コマンドを作った時刻より前に話し始めた発話の数（`AudioThread.pending_before`）。あればこちらで待つ
         self._pending_before = pending_before
+        # 端末と共通の操作（`integration/logger_commands.LoggerCommands`, ADR-0073 D4）。あれば、行の形がある制御は
+        # 同じ意味の端末の 1 行に直して同じ処理を通す（同じ記録になる・副作用のある操作も届く）。結果は `on_result` へ
+        self._commands = commands
+        self._on_result = on_result
 
     def _wait_for_speech(self, since: Optional[float]) -> None:
         """コマンドより前に話し始めた発話（`since` より前）の聞き取りを待つ。
@@ -98,12 +104,46 @@ class ControlConsumerThread(threading.Thread):
                 continue
             self._seen.add(command.command_id)
             self._wait_for_speech(command.created_ts if command.created_ts is not None else self._clock())
+            if self._commands is not None:
+                handled = self._run_command(command)
+                if handled is not None:
+                    n += handled
+                    continue
             event = command_to_audio_event(command, self._clock)
             if event is not None:
                 self._audio_queue.put(event)
                 n += 1
                 logger.info("control → audio_queue: %s %s", command.type, command.args)
         return n
+
+    def _run_command(self, command: ControlCommand) -> Optional[int]:
+        """端末と共通の処理で扱う（積んだ件数）。行の形が無い制御（休み / 参加・台本・持ち点）は None = 今までの翻訳。"""
+        from integration.logger_commands import CommandResult, control_line
+
+        args = command.args or {}
+        if command.type == "text":
+            text = args.get("text")
+            result = (self._commands.run_text(text) if isinstance(text, str) and text.strip()
+                      else CommandResult(messages=["text には読み上げ文が要ります"], ok=False))
+        else:
+            try:
+                line = control_line(command.type, args)
+            except ValueError as e:
+                result = CommandResult(messages=[str(e)], ok=False)
+            else:
+                if line is None:
+                    return None
+                result = self._commands.run_line(line)
+        for event in result.events:
+            self._audio_queue.put(event)
+        logger.info("control → %s %s: %d event(s)%s", command.type, args, len(result.events),
+                    "" if result.ok else f"（未適用: {' / '.join(result.messages)}）")
+        if self._on_result is not None:
+            try:
+                self._on_result(command, result)
+            except Exception:  # noqa: BLE001 — 知らせの失敗で制御を止めない
+                logger.exception("control on_result failed")
+        return len(result.events)
 
     def run(self) -> None:
         while not self._stop_event.is_set():

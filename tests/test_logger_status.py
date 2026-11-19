@@ -169,3 +169,38 @@ def test_hooks_run_with_the_heartbeat(tmp_path, monkeypatch):
         time.sleep(0.01)
     status.close()
     assert len(calls) >= 3
+
+
+def test_control_to_the_running_logger(tmp_path):
+    """いま動いているロガー宛ての制御（ADR-0073 D4）: 宛先はロガーの状態のファイルから。動いていなければ 409。"""
+    from fastapi.testclient import TestClient
+
+    from api.server import create_app
+    from core.control_queue import ControlCommandLog
+    from core.player_repository import PlayerRepository
+    from core.session_repository import SessionRepository
+
+    players = PlayerRepository(tmp_path / "players.json")
+    app = create_app(players, SessionRepository(tmp_path / "sessions.json", player_repo=players), tmp_path,
+                     staff_token="tok", orders_writable=True)
+    http = TestClient(app)
+    head = {"Authorization": "Bearer tok"}
+    assert http.post("/api/staff/logger/control", json={"type": "new_hand"}, headers=head).status_code == 409
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    status = ls.LoggerStatus("cli")
+    status.set(phase="setup")
+    r = http.post("/api/staff/logger/control", json={"type": "new_hand"}, headers=head)
+    assert r.status_code == 409 and "卓の設定待ち" in r.json()["message"]
+    status.set(phase="running", session_id="2026-11-19_190000_session1", log_dir=str(logs))
+    r = http.post("/api/staff/logger/control", json={"type": "seat_player", "seat": 2, "name": "太郎"}, headers=head)
+    assert r.status_code == 201 and r.json()["session_id"] == "2026-11-19_190000_session1"
+    assert http.post("/api/staff/logger/control", json={"type": "clock", "op": "set 3 5"}, headers=head).status_code == 201
+    assert http.post("/api/staff/logger/control", json={"type": "text", "text": "コール"}, headers=head).status_code == 201
+    bad = http.post("/api/staff/logger/control", json={"type": "set_ante", "value": "x"}, headers=head)
+    assert bad.status_code == 400 and bad.json()["code"] == "invalid_control"
+    assert http.post("/api/staff/logger/control", json={"type": "truth_stacks"}, headers=head).status_code == 400
+    commands, _ = ControlCommandLog(logs / "2026-11-19_190000_session1.control.jsonl").read_from(0)
+    assert [(c.type, c.args) for c in commands] == [
+        ("seat_player", {"seat": 2, "name": "太郎"}), ("clock", {"op": "set 3 5"}), ("text", {"text": "コール"})]
+    status.close()

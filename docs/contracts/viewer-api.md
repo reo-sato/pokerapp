@@ -168,6 +168,25 @@ player 本人の self-write（注文 POST 等）を **PIN ログイン**で本�
 | method | path | write | body | 返り値 |
 |--------|------|-------|------|--------|
 | POST | `/api/staff/sessions/{session_id}/control` | yes | `{type: "new_hand"\|"winner"\|"rebuy", seat?, amount?}` | 201 `control_command` = `{command_id, type, args, created_at}`（`logs/{session_id}.control.jsonl` に append。適用は hand logger プロセスの consumer = `hand_control.enabled`）。400 `invalid_control`（type 不正 / winner に seat 無し / rebuy に seat・正の amount 無し） |
+| POST | `/api/staff/logger/control` | yes | 上と同じ body | 201 `control_command` + `session_id`。**いま動いているロガー宛て**（ADR-0073 D4。宛先はロガーの状態のファイル `logs/logger_state.json` の session_id と log_dir。`session_layer` が無効で起動したロガーにも届く）。409 `logger_not_running`（止まっている・卓の設定待ち）/ 400 `invalid_control` |
+
+制御の type と body（ADR-0039 + ADR-0073 D4。ロガーは端末の同じ 1 行に直して端末と同じ処理を通す = 同じ記録。検査は
+`integration/logger_commands.control_line`）:
+
+| type | body | 端末の同じ行 |
+|---|---|---|
+| `new_hand` | — | `n` |
+| `winner` | `seat` か `seats`（2 席以上 = チョップ） | `w 3` / `w 1 3` |
+| `rebuy` / `reduce_stack` | `seat`, `amount`（正） | `r 3 500` / `d 3 500` |
+| `correct_board` / `correct_seat` | `index`（1..5）/ `seat` | `cb 4` / `cs 3` |
+| `set_blinds` | `sb`, `bb`（sb ≤ bb） | `blinds 200 400` |
+| `set_button` | `seat` | `button 3` |
+| `seat_player` | `seat`, `name`（空 = 空席） | `name 3 太郎` / `name 3 -` |
+| `set_ante` | `value`（on / off / 額） | `ante on` |
+| `clock` | `op`（status / pause / resume / next / prev / set <レベル> [経過分]） | `clock pause` |
+| `reader_restart` | — | `rr` |
+| `text` | `text`（読み上げ文。コマンドとしては読まない） | — |
+| `sit_out` / `sit_in` | `seat` | —（席の休み / 参加だけ。名前は変えない） |
 
 #### ロガーの様子（ADR-0073 D3。読むだけ）
 

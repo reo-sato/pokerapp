@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import sys
 import threading
 from datetime import datetime
@@ -18,26 +17,10 @@ logger = logging.getLogger(__name__)
 # 全角 ASCII（U+FF01..U+FF5E）→ 半角 + 全角スペース → 半角スペース。日本語 IME のまま
 # `ｎ` と打ってもコマンドとして通るようにする（ISSUE-0030）。読み上げ文の経路は通さない
 # （`raw_text` は入力そのまま。全角数字は `parse_amount` が既に解釈する）。
-_FULLWIDTH_TO_ASCII = str.maketrans(
-    {chr(c): chr(c - 0xFEE0) for c in range(0xFF01, 0xFF5F)} | {"　": " "}
+from integration.logger_commands import (  # noqa: E402 — 端末と iPad の制御で共通（ADR-0073 D4）
+    FULLWIDTH_TO_ASCII as _FULLWIDTH_TO_ASCII,
+    normalize_command as _normalize_cli_command,
 )
-
-
-# 引数がくっついたコマンド（`w1` / `r1 500`）を分ける。ログが入力行に割り込む環境では
-# 空白を打ち損ねやすく、実機で `w1` が 2 回弾かれた（ISSUE-0034）。引数を取る w/r のみ。
-_GLUED_COMMAND = re.compile(r"^([wrd])(\d+)$")
-
-
-def _normalize_cli_command(line: str) -> str:
-    """CLI コマンド照合用に全角英数字・全角スペースを半角へ寄せ、`w1` を `w 1` に分ける。"""
-    normalized = line.translate(_FULLWIDTH_TO_ASCII)
-    parts = normalized.split()
-    if parts:
-        m = _GLUED_COMMAND.match(parts[0].lower())
-        if m:
-            parts[0:1] = [m.group(1), m.group(2)]
-            return " ".join(parts)
-    return normalized
 
 
 def _parse_seat_list(raw: str) -> "list[int] | None":
@@ -673,23 +656,6 @@ def _close_session_layer(session_repo, session_id: str) -> None:
         logger.exception("session を閉じられませんでした: %s", session_id)
 
 
-def _parse_name_command(parts: list[str]) -> "tuple[int, str | None] | None":
-    """`name <席> <名前>` / `name <席> -`（空席にする）を (席, 名前 or None) にする。不正なら None。
-
-    `seat` にしないのは、`seat 3 call` が読み上げ文（英語の席表現）として既に通るため。
-    """
-    if len(parts) < 3:
-        return None
-    try:
-        seat = int(parts[1])
-    except ValueError:
-        return None
-    name = " ".join(parts[2:]).strip()
-    if name == "-":
-        return seat, None
-    return (seat, name) if name else None
-
-
 def _make_game_state(cfg: dict, players: list, sb: int, bb: int, button_seat=None, stackless: bool = False):
     """config.engine.backend で game-state 実装を選ぶ (R2, ADR-0009)。
 
@@ -1180,11 +1146,25 @@ def _run_cli(script: str | None, status) -> None:
     # 2026-10-26）も同じ制御で受け取る（いつも動かす。画面が書かなければ何も来ない）
     from core.control_queue import ControlCommandLog
     from integration.control_consumer import ControlConsumerThread
+    from integration.logger_commands import LoggerCommands
+
+    # 端末の 1 行と iPad の制御を同じ処理にする（同じ操作なら同じ記録, ADR-0073 D4）
+    commands = LoggerCommands(session_cfg=session_cfg, game_state=game_state, integration_thread=integration_thread,
+                              rfid_thread=rfid_thread, session_repo=session_repo, player_repo=player_repo,
+                              seat_player_map=seat_player_map)
+
+    def on_control(command, result) -> None:
+        # iPad から届いた操作の結果を、端末とお知らせ（iPad のパネル）に出す（届いた / 未適用）
+        text = " / ".join(result.messages) if result.messages else f"{command.type} を受け付けました"
+        print(f"  [iPad] {text}")
+        _notify("control" if result.ok else "unapplied", f"iPad: {text}", command_id=command.command_id,
+                control=command.type)
 
     control_thread = ControlConsumerThread(
         ControlCommandLog(Path(session_cfg["log_dir"]) / f"{session_id}.control.jsonl"), audio_q, stop_event,
         backlog=audio_thread.backlog if audio_thread is not None else None,
-        pending_before=audio_thread.pending_before if audio_thread is not None else None)
+        pending_before=audio_thread.pending_before if audio_thread is not None else None,
+        commands=commands, on_result=on_control)
     control_thread.start()
     if audio_thread is not None:
         _report_audio_start(audio_thread, audio_cfg.get("device_id", 0))
@@ -1257,9 +1237,7 @@ def _run_cli(script: str | None, status) -> None:
 
     # GameStateManager はロックを持たないため、状態変更コマンド (n/w/r) はすべて
     # audio_q 経由で IntegrationThread に処理させる（直接呼ぶと apply_action とレースする）。
-    from audio.recognizer import parse_actions
-    from audio.recorder import describe_event
-    from core.events import AudioEvent
+    # 1 行の解釈は iPad の制御と共通（`integration/logger_commands.py`, ADR-0073 D4）
     import time as _time
 
     try:
@@ -1270,176 +1248,13 @@ def _run_cli(script: str | None, status) -> None:
                 continue
             # 先に言われた発話がまだ認識中なら、その反映を待ってから入力を積む（順序を保つ）
             _wait_for_backlog(audio_thread, since=typed_at)
-            parts = _normalize_cli_command(line).split()
-            cmd = parts[0].lower()
-
-            if cmd == "q":
+            result = commands.run_line(line)
+            if result.stop:
                 break
-            elif cmd == "n":
-                audio_q.put(AudioEvent(
-                    action="new_hand", amount=0, timestamp=_time.time(), raw_text="",
-                ))
-                print("新ハンド開始を送信しました。")
-            elif cmd == "w" and len(parts) >= 2:
-                try:
-                    seats = [int(p) for p in parts[1:]]
-                    # 2 席以上 = 分けた（チョップ。engine が席をすべて拾って等分する）
-                    raw = (" ".join(f"シート{s}" for s in seats) + " チョップ" if len(seats) > 1
-                           else f"シート{seats[0]} ウィナー")
-                    audio_q.put(AudioEvent(
-                        action="winner",
-                        amount=0,
-                        timestamp=_time.time(),
-                        raw_text=raw,
-                    ))
-                except ValueError:
-                    print("使い方: w <席番号>（分けたときは w <席> <席>）")
-            elif cmd == "r" and len(parts) >= 3:
-                try:
-                    seat = int(parts[1])
-                    amount = int(parts[2])
-                    audio_q.put(AudioEvent(
-                        action="rebuy", amount=amount, timestamp=_time.time(),
-                        raw_text=f"シート{seat} リバイ {amount}", seat=seat,
-                    ))
-                    print(f"リバイを送信しました: 席{seat} +{amount}（反映はアクション表示で確認）")
-                except ValueError as e:
-                    print(f"エラー: {e}")
-            elif cmd == "d" and len(parts) >= 3:
-                # スタックを減らす（0 より下にはしない。ハンドに入っている席はそのハンドのあとに, 2026-10-19）
-                try:
-                    seat = int(parts[1])
-                    amount = int(parts[2])
-                    if amount <= 0:
-                        raise ValueError("金額は 1 以上")
-                    audio_q.put(AudioEvent(
-                        action="reduce_stack", amount=amount, timestamp=_time.time(),
-                        raw_text=f"シート{seat} スタック減 {amount}", seat=seat,
-                    ))
-                except ValueError as e:
-                    print(f"使い方: d <席> <金額>（{e}）")
-            elif cmd == "name":
-                parsed = _parse_name_command(line.translate(_FULLWIDTH_TO_ASCII).split())
-                if parsed is None:
-                    print("使い方: name <席> <名前> / name <席> -（空席）")
-                else:
-                    seat, name = parsed
-                    vacate = name is None
-                    adding = seat not in {p["seat"] for p in session_cfg["players"]}
-                    if adding:
-                        # 途中から座った人（次のハンドから席を足す, 2026-10-26。pokerkit の卓だけ = legacy は席を足せない）
-                        if vacate or not 1 <= seat <= 9 or not hasattr(game_state, "add_seat"):
-                            print(f"席{seat} はこの卓にありません")
-                            continue
-                        session_cfg["players"].append({"seat": seat, "name": name, "stack": 0, "named": True})
-                        print(f"席{seat} を足します（次のハンドから。持ち点を数えるなら r {seat} <金額> で買い込み）")
-                        audio_q.put(AudioEvent(            # 先に席を足す（名前の変更が席を見つけられるように）
-                            action="sit_in", amount=0, timestamp=_time.time(),
-                            raw_text=f"シート{seat} 参加", seat=seat,
-                        ))
-                    if session_repo is None:
-                        print("（席とお客さんの記録は無効です: config の session_layer.enabled=true で有効。"
-                              "席の参加・休みだけ反映します）")
-                    else:
-                        new_map = dict(seat_player_map)
-                        if vacate:
-                            new_map.pop(seat, None)
-                        else:
-                            new_map[seat] = player_repo.find_or_create(name).player_id
-                        seat_player_map = new_map
-                        # 席 → player は次のハンドの開始時に書かれる。名前はゲーム状態を持つ
-                        # integration スレッドで変える（ハンドの途中なら次のハンドから）。
-                        integration_thread.set_seat_player_map(seat_player_map)
-                    shown = f"Player{seat}" if vacate else name
-                    audio_q.put(AudioEvent(
-                        action="rename_seat", amount=0, timestamp=_time.time(),
-                        raw_text=shown, seat=seat,
-                    ))
-                    # 空席は次のハンドから配られない（休み）。名前を付けた席は参加（休みなら戻す）。
-                    if not adding:
-                        audio_q.put(AudioEvent(
-                            action="sit_out" if vacate else "sit_in", amount=0, timestamp=_time.time(),
-                            raw_text=f"シート{seat} {'休み' if vacate else '参加'}", seat=seat,
-                        ))
-                    if vacate:
-                        print(f"席{seat} を空席にしました（次のハンドから配られません）")
-                    else:
-                        print(f"席{seat} を {shown} にしました（次のハンドから）")
-            elif cmd in ("button", "btn") and len(parts) >= 2:
-                try:
-                    seat = int(parts[1])
-                except ValueError:
-                    print("使い方: button <席番号>")
-                    continue
-                audio_q.put(AudioEvent(
-                    action="set_button", amount=0, timestamp=_time.time(),
-                    raw_text=f"シート{seat} ボタン", seat=seat,
-                ))
-                print(f"ボタン 席{seat} を送信しました")
-            elif cmd == "blinds":
-                numbers = re.findall(r"\d+", " ".join(parts[1:]))    # `blinds 200 400` / `blinds 200/400`
-                if len(numbers) != 2 or int(numbers[0]) <= 0 or int(numbers[0]) > int(numbers[1]):
-                    print("使い方: blinds <SB> <BB>（例: blinds 200 400）")
-                    continue
-                sb, bb = int(numbers[0]), int(numbers[1])
-                audio_q.put(AudioEvent(
-                    action="set_blinds", amount=bb, timestamp=_time.time(), raw_text=f"{sb}/{bb}",
-                ))
-                print(f"ブラインド {sb}/{bb} を送信しました（次のハンドから）")
-            elif cmd == "ante":
-                # BB アンティ。on = BB と同額（BB を変えればアンティも変わる）/ 額 = その額（ADR-0071）/ off = 外す
-                choice = parts[1].lower() if len(parts) >= 2 else ""
-                if choice not in ("on", "off") and not choice.isdigit():
-                    print("使い方: ante on（BB と同額）/ ante <額> / ante off（外す）")
-                    continue
-                audio_q.put(AudioEvent(
-                    action="set_bb_ante", amount=0, timestamp=_time.time(), raw_text=choice,
-                ))
-            elif cmd == "clock":
-                # トーナメントの時計（ADR-0071）。状態の変更はロガーのスレッドで（queue 経由）
-                audio_q.put(AudioEvent(
-                    action="clock", amount=0, timestamp=_time.time(), raw_text=" ".join(parts[1:]) or "status",
-                ))
-            elif cmd == "rr":
-                # 読み取り装置の再起動（契約 v1.11 §6）。卓に札が無くなったら RFID のスレッドが送る（結果は ● で出る）
-                if rfid_thread is None or not hasattr(rfid_thread, "request_restart"):
-                    print("RFID のリーダー（PC/SC）を使っていないので再起動できません")
-                else:
-                    rfid_thread.request_restart()
-                    print("読み取り装置の再起動を頼みました（卓に札が無いときに送ります）")
-            elif cmd in ("cb", "cs") and len(parts) >= 2:
-                # ミスディール訂正（ADR-0054）。状態変更は他と同じく queue 経由。
-                try:
-                    key = int(parts[1])
-                except ValueError:
-                    print(f"使い方: {cmd} <{'位置' if cmd == 'cb' else '席番号'}>")
-                    continue
-                if cmd == "cb":
-                    audio_q.put(AudioEvent(
-                        action="correct_board", amount=key, timestamp=_time.time(),
-                        raw_text=f"ボード{key} 訂正",
-                    ))
-                    print(f"ボード {key} 枚目の取り消しを送信しました（正しいカードを置いてください）")
-                else:
-                    audio_q.put(AudioEvent(
-                        action="correct_seat", amount=0, timestamp=_time.time(),
-                        raw_text=f"シート{key} 訂正", seat=key,
-                    ))
-                    print(f"席 {key} の札の読み直しを送信しました（正しいカードを置き直してください）")
-            else:
-                # 上のコマンド以外は **ディーラーのアナウンスとして解釈**する（マイク無しで
-                # アクションを投入する経路。音声と同じ `parse_actions` を通すので語彙は共通 =
-                # 二重管理にならない）。例: 「チェック」「シート3 コール」「ベット 500」。
-                # キーボード入力は ASR ではなく操作者の意図的な入力なので信頼度 1.0 を明示する
-                # （None は「Whisper 欠測」の意味で保守的既定 0.5 = 要レビューに倒れる, ADR-0047 B3）。
-                # 続けて打った複数のアクション（「フォールド フォールド コール」）は順に分ける（ADR-0061）
-                events = parse_actions(line, confidence=1.0)
-                if not events:
-                    print("認識できません。コマンド: q / n / w <席> / r <席> <金額> / d <席> <金額> / ante on|off|<額> / clock、"
-                          "または読み上げ文（例: チェック / シート3 コール / ベット 500 / 600）")
-                for ev in events:
-                    audio_q.put(ev)
-                    print(f"  → {describe_event(ev)}")
+            for ev in result.events:
+                audio_q.put(ev)
+            for message in result.messages:
+                print(("  " if message.startswith("→") else "") + message)
 
     except (KeyboardInterrupt, EOFError):
         pass

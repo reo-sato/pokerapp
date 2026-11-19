@@ -317,7 +317,13 @@ Proposed（2026-11-18。オーナー「最終的に、iPad アプリからの操
   - お知らせは、草稿の `<sid>.notices.jsonl` ではなく、起動ごとの `logs/logger_notices.jsonl`（前の起動は `.prev`）にした。
     各行に session_id を持つ。セッションが決まる前のお知らせも同じファイルに書ける。
   - GUI のロガーは、ロックと状態の段階だけ（セッション・マイク・お知らせは CLI のみ）。
-- [ ] 段階 A2〜E
+- [x] A2: 端末の 1 行を端末と制御の共通の処理に（`integration/logger_commands.py`）・制御の種類（seat_player / reduce_stack /
+  set_ante / clock / reader_restart / text）・同じ記録の試験（`tests/test_logger_commands.py`）・いま動いているロガー宛ての受け口
+  `POST /api/staff/logger/control`（2026-11-19）
+  - 制御の結果（届いた / 未適用）は端末に `[iPad] …` で、お知らせのファイル（iPad のパネル）に kind `control` / `unapplied` で出る。
+  - 勝者の制御も端末と同じ行（席の項目なし）になった。前の記録の再生は記録どおり（変わらない）。
+  - 真のアクション入力（8791）の制御の書き方を 1 つにするのは段階 C で（店舗サーバーの中で動かすのを標準にするとき）。
+- [ ] 段階 B〜E
 
 ## Related
 

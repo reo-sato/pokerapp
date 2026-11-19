@@ -262,6 +262,11 @@ class _StaffControlBody(BaseModel):
     index: int | None = None      # correct_board のボード位置 1..5（ADR-0054）
     sb: int | None = None         # set_blinds（次のハンドからのブラインド, 2026-09-26）
     bb: int | None = None
+    seats: list[int] | None = None  # winner を 2 席以上で分けた（チョップ）
+    name: str | None = None       # seat_player（空 = 空席, ADR-0073 D4）
+    value: str | None = None      # set_ante（on / off / 額）
+    op: str | None = None         # clock（status / pause / resume / next / prev / set <レベル> [経過分]）
+    text: str | None = None       # text（打ち込みのアクション = 読み上げ文）
 
 
 class _OidcExchangeBody(BaseModel):
@@ -1281,6 +1286,53 @@ def create_app(
 
     # ――― hand logger 遠隔制御（control queue, ADR-0039 §C）―――
 
+    def _control_args(body: _StaffControlBody) -> "tuple[dict, JSONResponse | None]":
+        """制御の本文 → 引数。検査はロガーの中と同じ（端末の 1 行への変換 `control_line`, ADR-0073 D4）。"""
+        from integration.logger_commands import control_line
+
+        def fail(message: str) -> "tuple[dict, JSONResponse]":
+            return {}, JSONResponse(status_code=400, content={"code": "invalid_control", "message": message})
+
+        if body.type not in VALID_CONTROL_TYPES or body.type in ("script_hand", "truth_stacks"):
+            return fail(f"未対応の control type です: {body.type!r}")
+        fields = {"seat": body.seat, "amount": body.amount, "index": body.index, "sb": body.sb, "bb": body.bb,
+                  "seats": body.seats, "name": body.name, "value": body.value, "op": body.op, "text": body.text}
+        args = {k: v for k, v in fields.items() if v is not None}
+        if body.type in ("sit_out", "sit_in"):
+            if not isinstance(body.seat, int):
+                return fail(f"{body.type} には seat が必要です。")
+            return {"seat": body.seat}, None
+        if body.type == "text":
+            if not (body.text or "").strip() or len(body.text) > 200:
+                return fail("text には読み上げ文（200 文字まで）が要ります。")
+            return {"text": body.text.strip()}, None
+        try:
+            control_line(body.type, args)
+        except ValueError as e:
+            return fail(str(e))
+        return args, None
+
+    @app.post("/api/staff/logger/control", status_code=201, response_model=None)
+    def staff_logger_control(request: Request, body: _StaffControlBody) -> "JSONResponse | dict":
+        """いま動いているロガー宛ての制御（ADR-0073 D4）。宛先のセッションはロガーの状態のファイルから決める
+        （`session_layer` が無効で起動したロガーにも届く）。動いていなければ 409 `logger_not_running`。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        from core.logger_status import read_logger
+
+        got = read_logger()
+        state = got.get("state") or {}
+        if got["status"] != "running" or not state.get("session_id"):
+            reason = "卓の設定待ちです" if got["status"] == "running" else "ロガーが動いていません"
+            return JSONResponse(status_code=409, content={"code": "logger_not_running", "message": reason})
+        args, bad = _control_args(body)
+        if bad is not None:
+            return bad
+        target_dir = Path(state.get("log_dir") or log_dir)
+        command = ControlCommandLog(target_dir / f"{state['session_id']}.control.jsonl").append(body.type, args)
+        return JSONResponse(status_code=201, content={**command.to_dict(), "session_id": state["session_id"]})
+
     @app.post("/api/staff/sessions/{session_id}/control", status_code=201,
               response_model=None)
     def staff_hand_control(
@@ -1294,48 +1346,9 @@ def create_app(
         err = _staff_guard(request, need_write=True)
         if err is not None:
             return err
-        if body.type not in VALID_CONTROL_TYPES:
-            return JSONResponse(status_code=400, content={
-                "code": "invalid_control",
-                "message": f"未対応の control type です: {body.type!r}",
-            })
-        args: dict = {}
-        if body.type == "winner":
-            if not isinstance(body.seat, int):
-                return JSONResponse(status_code=400, content={
-                    "code": "invalid_control", "message": "winner には seat が必要です。"})
-            args["seat"] = body.seat
-        elif body.type == "rebuy":
-            if not isinstance(body.seat, int) or not isinstance(body.amount, int) or body.amount <= 0:
-                return JSONResponse(status_code=400, content={
-                    "code": "invalid_control",
-                    "message": "rebuy には seat と正の amount が必要です。"})
-            args["seat"] = body.seat
-            args["amount"] = body.amount
-        elif body.type == "correct_board":
-            if not isinstance(body.index, int) or not 1 <= body.index <= 5:
-                return JSONResponse(status_code=400, content={
-                    "code": "invalid_control",
-                    "message": "correct_board には index（1..5）が必要です。"})
-            args["index"] = body.index
-        elif body.type == "correct_seat":
-            if not isinstance(body.seat, int):
-                return JSONResponse(status_code=400, content={
-                    "code": "invalid_control", "message": "correct_seat には seat が必要です。"})
-            args["seat"] = body.seat
-        elif body.type == "set_blinds":
-            if (not isinstance(body.sb, int) or not isinstance(body.bb, int)
-                    or body.sb <= 0 or body.bb <= 0 or body.sb > body.bb):
-                return JSONResponse(status_code=400, content={
-                    "code": "invalid_control",
-                    "message": "set_blinds には正の sb と bb（sb <= bb）が必要です。"})
-            args["sb"] = body.sb
-            args["bb"] = body.bb
-        elif body.type in ("sit_out", "sit_in", "set_button"):
-            if not isinstance(body.seat, int):
-                return JSONResponse(status_code=400, content={
-                    "code": "invalid_control", "message": f"{body.type} には seat が必要です。"})
-            args["seat"] = body.seat
+        args, bad = _control_args(body)
+        if bad is not None:
+            return bad
         control_log = ControlCommandLog(Path(log_dir) / f"{session_id}.control.jsonl")
         command = control_log.append(body.type, args)
         return JSONResponse(status_code=201, content=command.to_dict())

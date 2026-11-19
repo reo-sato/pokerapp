@@ -22,6 +22,7 @@ import pytest
 import core.player_repository as player_repository
 import core.session_repository as session_repository
 import main
+from integration.logger_commands import parse_name_command
 from core.event_queue import make_audio_queue
 from core.events import AudioEvent
 from core.game_state import GameStateManager, PlayerState
@@ -196,7 +197,7 @@ class TestNameCommandParsing:
         (["name", "x", "山田"], None),
     ])
     def test_parse(self, parts: list[str], expected):
-        assert main._parse_name_command(parts) == expected
+        assert parse_name_command(parts) == expected
 
 
 class TestEngineRenameSeat:

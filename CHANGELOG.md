@@ -29,6 +29,15 @@
   gpt-transcribe。戻すなら `python tools/set_config.py audio.remote_model whisper-1`。書き起こしの行の `asr` は
   `openai-gpt-transcribe`。店舗 PC の既定（`audio.transcriber=local`）は変わらない。
 
+### Added (2026-11-19)
+
+- **端末だけだった操作を iPad（スタッフの API）からも送れる**（ADR-0073 A2）。名前（`name`）・持ち点を減らす（`d`）・BB アンテ
+  （`ante`）・時計（`clock`）・読み取り装置の再起動（`rr`）・打ち込みのアクション（読み上げ文）。ロガーは制御を端末の同じ 1 行に
+  直して、端末と同じ処理（`integration/logger_commands.py`）を通す = 同じ操作なら同じ記録。結果（届いた / 未適用）は端末に
+  `[iPad] …`、iPad のパネルのお知らせに出る。
+  - `POST /api/staff/logger/control`: いま動いているロガー宛て（宛先のセッションはロガーの状態から。動いていなければ 409）。
+  - iPad の画面のボタンは段階 A3 で足す（いまは API だけ）。
+
 ### Added (2026-11-18)
 
 - **RDP の接続・切断でマイクを開き直す**（ADR-0073 段階 0 の結果に備えて）。ロガーは 3 秒ごとに Windows のセッション
