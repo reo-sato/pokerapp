@@ -46,7 +46,12 @@ Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -Command tscon.ex
 
 ## 結果を送る
 
-最後に `console_probe.cmd report` をダブルクリックし、出てきたまとめをチャットに貼ってください。
+最後に、RDP の中の PowerShell で次の 1 行を実行し、出てきたまとめをチャットに貼ってください（`report` は付ける指定なので、
+ダブルクリックでは渡せません。PowerShell の窓では、ドラッグで選んで右クリックするとコピーできます）。
+
+```
+C:\PokerHandLogger\console_probe.cmd report
+```
 
 まとめは、状態ごとの区間に 1 行ずつ出ます。例:
 
