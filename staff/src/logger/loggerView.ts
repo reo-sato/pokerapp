@@ -14,6 +14,7 @@ export function statusLine(r: LoggerStatusResponse | null): { text: string; tone
       if (phase === "setup") return { text: "卓の設定待ち（PC の設定画面で「始める」を押してください）", tone: "warn" };
       if (phase === "starting") return { text: "起動中", tone: "warn" };
       if (phase === "stopping") return { text: "終了中（確定していないハンドを閉じて保存しています）", tone: "warn" };
+      if (phase === "transcribing") return { text: "終了中（記録は保存済み。聞き流した発話を書き起こしています）", tone: "warn" };
       return { text: "動作中", tone: "ok" };
     case "unresponsive":
       return { text: `応答なし（心拍が ${Math.round(r.heartbeat_age_sec ?? 0)} 秒来ていません）`, tone: "bad" };
@@ -24,7 +25,7 @@ export function statusLine(r: LoggerStatusResponse | null): { text: string; tone
   }
 }
 
-const MODE: Record<string, string> = { cli: "端末（RDP）", gui: "画面（RDP）", script: "台本", headless: "iPad" };
+const MODE: Record<string, string> = { cli: "端末（RDP）", gui: "画面（RDP）", script: "台本", headless: "画面なし（iPad）" };
 
 /** 2 行目: 起動の入口・セッション・卓。 */
 export function sessionLine(r: LoggerStatusResponse | null): string | null {

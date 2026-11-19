@@ -167,14 +167,14 @@ def list_player_hands(
     session_repo: SessionRepository,
     log_dir: str | Path,
     correction_repo: "HandCorrectionRepository | None" = None,
-    truth: bool = False,
+    truth: "bool | str" = False,
 ) -> list[dict]:
     """player が着席していた hand の HandSummary dict を hand_id 昇順で返す。
 
     seat assignment はあるが hand log に対応 hand が無いものは除外する。
     `correction_repo` があれば訂正オーバーレイを適用した訂正済みビューを返す（ADR-0036）。
     `truth`（`viewer_api.show_truth`）なら、真のアクションを保存したハンドは真のアクションで、無いハンドは推定があれば
-    推定で返す（どちらも無いハンドは外す。訂正は重ねない, 2026-11-09）。
+    推定で返す（どちらも無いハンドは外す。訂正は重ねない, 2026-11-09）。`"only"` なら真のアクションのハンドだけ（2026-11-19）。
     unknown session は SessionNotFoundError（session_repo 経由）。
     """
     cls = session_repo.player_repo.equivalence_class(player_id)
@@ -191,7 +191,7 @@ def list_player_hands(
     hands = [h for h in log.get("hands", []) if h.get("hand_id") in seated_hand_ids]
     hands = sorted(hands, key=lambda h: h["hand_id"])
     if truth:
-        return truth_view(hands, load_truth(log_dir, session_id))
+        return truth_view(hands, load_truth(log_dir, session_id), estimate=truth != "only")
     if correction_repo is not None:
         hands = [
             apply_hand_corrections(h, correction_repo.list_for_hand(session_id, h["hand_id"]))
@@ -276,7 +276,7 @@ def list_session_hands(
 def get_hand(
     session_id: str, hand_id: int, log_dir: str | Path,
     correction_repo: "HandCorrectionRepository | None" = None,
-    truth: bool = False,
+    truth: "bool | str" = False,
 ) -> dict:
     """hand log から HandSummary dict を 1 件返す。
 
@@ -290,7 +290,7 @@ def get_hand(
         for hand in log.get("hands", []):
             if hand.get("hand_id") == hand_id:
                 if truth:
-                    found = truth_view([hand], load_truth(log_dir, session_id))
+                    found = truth_view([hand], load_truth(log_dir, session_id), estimate=truth != "only")
                     if found:
                         return found[0]
                     break

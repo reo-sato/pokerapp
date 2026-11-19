@@ -30,6 +30,7 @@ const running = (over: Partial<NonNullable<LoggerStatusResponse["state"]>> = {})
 test("statusLine: 動作中・設定待ち・応答なし・落ちた・止まっている", () => {
   assert.deepEqual(statusLine(running()), { text: "動作中", tone: "ok" });
   assert.equal(statusLine(running({ phase: "setup" })).tone, "warn");
+  assert.match(statusLine(running({ phase: "transcribing" })).text, /記録は保存済み/);
   assert.match(statusLine({ ...running(), status: "unresponsive", heartbeat_age_sec: 21.4 }).text, /21 秒/);
   assert.equal(statusLine({ ...running(), status: "crashed" }).tone, "bad");
   assert.equal(statusLine({ status: "stopped", state: null, heartbeat_age_sec: null, holder_text: null }).tone, "muted");

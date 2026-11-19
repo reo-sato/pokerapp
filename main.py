@@ -848,13 +848,13 @@ def _load_test_script(spec: str) -> dict:
     return data
 
 
-def run_cli(script: str | None = None) -> None:
+def run_cli(script: str | None = None, setup: str | Path | None = None) -> None:
     """CLI のロガー。ロガーを 1 つに限るロックを取り、状態とお知らせのファイルを書きながら `_run_cli` を動かす
     （ADR-0073 D2・D3。iPad でロガーの様子を見るため）。ロックが取れなければ起動しない。"""
     global _LOGGER_STATUS
     from core.logger_status import LoggerLock, LoggerStatus, describe_logger_holder
 
-    mode = "script" if script else "cli"
+    mode = "headless" if setup is not None else "script" if script else "cli"
     lock = LoggerLock()
     if not lock.acquire_with_retries(mode):
         print(f"別のロガーが動いています: {describe_logger_holder(lock.holder())}。"
@@ -871,14 +871,29 @@ def run_cli(script: str | None = None) -> None:
     try:
         status.set(phase="setup")
         status.start()
-        _run_cli(script, status)
+        _run_cli(script, status, setup)
     finally:
         _LOGGER_STATUS = None
         status.close()
         lock.release()
 
 
-def _run_cli(script: str | None, status) -> None:
+def _headless_session_config(path: str | Path) -> dict:
+    """画面なしのロガー（`--headless --setup`, ADR-0073 D2）の卓の設定: 設定画面と同じ形の JSON を同じ規則で検証する
+    （`tools/session_setup_ui.build_session_config`。時刻準拠の時計はここで今の時刻から）。ログの場所は受け取らない。"""
+    from core.blind_structure import BlindStructureStore
+    from tools.session_setup_ui import build_session_config, save_last_setup
+
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("卓の設定は JSON のオブジェクトにしてください")
+    raw.pop("log_dir", None)
+    config = build_session_config(raw, BlindStructureStore())
+    save_last_setup(Path(config["log_dir"]), raw)
+    return config
+
+
+def _run_cli(script: str | None, status, setup: str | Path | None = None) -> None:
     """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。
 
     `script`（`--script`）: 台本のハンド（`tools/test_script.py`, テスト方針 週 1）。卓の設定は台本から取り（入力なし）、
@@ -901,7 +916,14 @@ def _run_cli(script: str | None, status) -> None:
         if test_script["kind"] == "voice":
             cfg.setdefault("rfid", {})["enabled"] = False       # 声だけの台本は札を置かない
     setup_app = None
-    if test_script is None:
+    if test_script is None and setup is not None:
+        try:
+            session_cfg = _headless_session_config(setup)
+        except (OSError, ValueError) as e:            # 読めない・検証の誤り（SetupError も ValueError）
+            print(f"卓の設定が使えません: {e}")
+            status.notice("notice", f"卓の設定が使えません: {e}")
+            return
+    elif test_script is None:
         session_cfg, setup_app = _session_config(cfg)
     table = session_cfg.get("table")
     tournament = _make_tournament(table)
@@ -1153,6 +1175,20 @@ def _run_cli(script: str | None, status) -> None:
                               rfid_thread=rfid_thread, session_repo=session_repo, player_repo=player_repo,
                               seat_player_map=seat_player_map)
 
+    quit_event = threading.Event()
+
+    def on_stop(command) -> None:
+        # iPad の「終了」（ADR-0073 D6）。画面なしのロガーは終了の手順（端末の q と同じ）へ。端末のロガーは端末の入力を
+        # 待っているので止められない: 未適用として知らせる
+        if setup is not None:
+            print("  [iPad] 終了します")
+            _notify("control", "iPad: 終了します", command_id=command.command_id, control="stop")
+            quit_event.set()
+        else:
+            print("  [iPad] 終了の操作が届きました（端末で起動したロガーは、端末で q を押して終えてください）")
+            _notify("unapplied", "iPad: 端末で起動したロガーは、端末で q を押して終えてください",
+                    command_id=command.command_id, control="stop")
+
     def on_control(command, result) -> None:
         # iPad から届いた操作の結果を、端末とお知らせ（iPad のパネル）に出す（届いた / 未適用）
         text = " / ".join(result.messages) if result.messages else f"{command.type} を受け付けました"
@@ -1164,7 +1200,9 @@ def _run_cli(script: str | None, status) -> None:
         ControlCommandLog(Path(session_cfg["log_dir"]) / f"{session_id}.control.jsonl"), audio_q, stop_event,
         backlog=audio_thread.backlog if audio_thread is not None else None,
         pending_before=audio_thread.pending_before if audio_thread is not None else None,
-        commands=commands, on_result=on_control)
+        commands=commands, on_result=on_control, on_stop=on_stop,
+        # セッションは毎回新しいので、ファイルの最初から読む（モデルの読み込み中に iPad から送った操作も落とさない）
+        start_offset=0)
     control_thread.start()
     if audio_thread is not None:
         _report_audio_start(audio_thread, audio_cfg.get("device_id", 0))
@@ -1196,7 +1234,7 @@ def _run_cli(script: str | None, status) -> None:
     elif test_script is not None:
         print("札の確認（席 4・5・6、1 ハンド目のボタンは席 6）。手順は iPad の「台本」"
               "（http://<この PC の IP>:8791/script）に出ます。")
-    else:
+    elif setup is None:                       # 画面なしでは PC のブラウザを開かない（標準入力も無い）
         _open_truth_table(cfg)
     if session_repo is not None:
         seated = ", ".join(
@@ -1241,7 +1279,12 @@ def _run_cli(script: str | None, status) -> None:
     import time as _time
 
     try:
-        while True:
+        if setup is not None:
+            # 画面なし: iPad の「終了」（stop の制御）か Ctrl+C まで待つ。操作は iPad の制御で届く
+            print("画面なしで動いています（iPad の「終了」か Ctrl+C で終わります）")
+            while not quit_event.wait(0.5):
+                pass
+        while setup is None:
             line = input("> ").strip()
             typed_at = _time.time()
             if not line:
@@ -1272,6 +1315,8 @@ def _run_cli(script: str | None, status) -> None:
             control_thread.join(timeout=3)
         if session_repo is not None:
             _close_session_layer(session_repo, session_id)
+        # ここから先（聞き流した発話の書き起こし）は止めても記録は壊れない（残りは「ログをまとめる」で書き起こせる）
+        status.set(phase="transcribing")
         print(f"\nセッション終了。ログ保存先: {json_writer.path}")
         if audio_dir is not None:
             _transcribe_offplay(audio_thread, cfg, session_cfg["log_dir"], session_id)
@@ -1860,6 +1905,18 @@ def main() -> None:
              "実機テスト時はこれを付ける（卓の状態は tools/table_monitor.py で見る, ISSUE-0034）",
     )
     parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="画面なしのロガー（標準入力を使わない）。--setup の卓の設定で始め、iPad の「終了」（stop の制御）か "
+             "Ctrl+C で終わる。店舗サーバーが iPad の操作で起動する形（ADR-0073）",
+    )
+    parser.add_argument(
+        "--setup",
+        metavar="FILE",
+        help="--headless の卓の設定（設定画面と同じ形の JSON: mode / seats / names / stacks / default_stack / sb / bb / "
+             "structure / level / elapsed_min / button / stackless）",
+    )
+    parser.add_argument(
         "--script",
         metavar="KIND",
         help="--cli を台本のハンドで起動する（テスト方針 週 1）: voice = 声だけの台本（RFID なし、voice:8 で 8 人）/ "
@@ -1924,6 +1981,12 @@ def main() -> None:
         export_phh(args.export_phh)
         sys.exit(0)
 
+    if args.headless:
+        if not args.setup:
+            print("--headless には --setup <卓の設定の JSON> が要ります")
+            sys.exit(2)
+        run_cli(setup=args.setup)
+        return
     if args.cli:
         run_cli(script=args.script)
     elif args.script:

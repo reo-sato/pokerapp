@@ -41,7 +41,7 @@ HEARTBEAT_SEC = 3.0
 STALE_SEC = 15.0            # 心拍がこれより古ければ「応答なし」
 LOCK_RETRIES = 4            # 起動のときのやり直し（0.5 秒おき。見張りや別の起動と重なった一瞬を避ける）
 
-PHASES = ("starting", "setup", "running", "stopping", "stopped")
+PHASES = ("starting", "setup", "running", "stopping", "transcribing", "stopped")
 MODE_JA = {"cli": "端末（RDP）", "gui": "画面（RDP）", "script": "台本", "headless": "iPad から"}
 
 

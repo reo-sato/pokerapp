@@ -40,6 +40,7 @@ class ControlConsumerThread(threading.Thread):
         pending_before: Optional[Callable[[float], int]] = None,
         commands: Optional[Any] = None,
         on_result: Optional[Callable[[ControlCommand, Any], None]] = None,
+        on_stop: Optional[Callable[[ControlCommand], None]] = None,
     ) -> None:
         super().__init__(daemon=True, name="ControlConsumerThread")
         self._log = control_log
@@ -60,6 +61,8 @@ class ControlConsumerThread(threading.Thread):
         # 同じ意味の端末の 1 行に直して同じ処理を通す（同じ記録になる・副作用のある操作も届く）。結果は `on_result` へ
         self._commands = commands
         self._on_result = on_result
+        # iPad の「終了」（stop, ADR-0073 D6）。発話の聞き取り待ちを通さずにすぐ渡す（先の操作の後ろに並ばせない）
+        self._on_stop = on_stop
 
     def _wait_for_speech(self, since: Optional[float]) -> None:
         """コマンドより前に話し始めた発話（`since` より前）の聞き取りを待つ。
@@ -103,6 +106,11 @@ class ControlConsumerThread(threading.Thread):
             if command.command_id in self._seen:
                 continue
             self._seen.add(command.command_id)
+            if command.type == "stop":
+                logger.info("control stop (%s)", command.command_id)
+                if self._on_stop is not None:
+                    self._on_stop(command)
+                continue
             self._wait_for_speech(command.created_ts if command.created_ts is not None else self._clock())
             if self._commands is not None:
                 handled = self._run_command(command)

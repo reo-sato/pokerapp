@@ -104,6 +104,7 @@ from core.session_repository import (
     SessionRepository,
     UnknownPlayerError as SessionUnknownPlayerError,
 )
+from core.truth_hand import truth_mode
 from core.sync import build_snapshot, merge_snapshot_into
 from core.version import version_info
 
@@ -267,6 +268,7 @@ class _StaffControlBody(BaseModel):
     value: str | None = None      # set_ante（on / off / 額）
     op: str | None = None         # clock（status / pause / resume / next / prev / set <レベル> [経過分]）
     text: str | None = None       # text（打ち込みのアクション = 読み上げ文）
+    session_id: str | None = None  # stop（いま動いているロガー宛てでは必須 = 取り違えを防ぐ, ADR-0073 D8）
 
 
 class _OidcExchangeBody(BaseModel):
@@ -385,7 +387,7 @@ def create_app(
     cloud_status: Callable[[], dict] | None = None,
     cloud_links: Any = None,
     hole_cards_default: str = "all",
-    show_truth: bool = False,
+    show_truth: "bool | str" = False,
     today_only: bool = False,
     clock: Callable[[], datetime] = datetime.now,
 ) -> FastAPI:
@@ -1302,6 +1304,8 @@ def create_app(
             if not isinstance(body.seat, int):
                 return fail(f"{body.type} には seat が必要です。")
             return {"seat": body.seat}, None
+        if body.type == "stop":
+            return {}, None
         if body.type == "text":
             if not (body.text or "").strip() or len(body.text) > 200:
                 return fail("text には読み上げ文（200 文字まで）が要ります。")
@@ -1329,6 +1333,10 @@ def create_app(
         args, bad = _control_args(body)
         if bad is not None:
             return bad
+        if body.type == "stop" and body.session_id != state["session_id"]:
+            return JSONResponse(status_code=409, content={
+                "code": "session_mismatch",
+                "message": "終了するセッションが、いま動いているロガーのセッションと違います（画面を読み直してください）"})
         target_dir = Path(state.get("log_dir") or log_dir)
         command = ControlCommandLog(target_dir / f"{state['session_id']}.control.jsonl").append(body.type, args)
         return JSONResponse(status_code=201, content={**command.to_dict(), "session_id": state["session_id"]})
@@ -1417,7 +1425,7 @@ def auth_kwargs_from_config(api_cfg: dict) -> dict:
     hole = api_cfg.get("hole_cards", "all")
     return {
         "hole_cards_default": hole if hole in HOLE_CARD_VISIBILITY else "all",   # ADR-0067 D6
-        "show_truth": bool(api_cfg.get("show_truth", False)),                     # 真のアクションだけ見せる
+        "show_truth": truth_mode(api_cfg.get("show_truth", False)),               # 真のアクション（"only" = 推定も出さない）
         "today_only": bool(api_cfg.get("today_only", False)),                     # 今日のセッションだけ
         "player_auth": api_cfg.get("player_auth", "off"),
         "player_token_secret": api_cfg.get("player_token_secret") or None,

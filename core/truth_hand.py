@@ -406,7 +406,7 @@ def load_truth(log_dir: "str | Path", session_id: str) -> dict[int, dict]:
     return hands
 
 
-def truth_view(hands: list[dict], truth: dict[int, dict]) -> list[dict]:
+def truth_view(hands: list[dict], truth: dict[int, dict], estimate: bool = True) -> list[dict]:
     """真のアクションを保存して終わっているハンドは真のアクションの形に、無いハンドは推定を重ねたもの
     （`core/hand_estimate.apply_estimate` が付ける `estimate` のあるハンド）を返す。どちらも無いハンド（ライブの記録
     だけ）は外す。
@@ -419,6 +419,14 @@ def truth_view(hands: list[dict], truth: dict[int, dict]) -> list[dict]:
         made = materialize_truth(entry, hand) if entry else None
         if made is not None:
             out.append(made)
-        elif isinstance(hand.get("estimate"), dict):
+        elif estimate and isinstance(hand.get("estimate"), dict):
             out.append(hand)
     return out
+
+
+def truth_mode(value: object) -> "bool | str":
+    """`viewer_api.show_truth` の値: False（ライブの記録）/ True（真のアクション、無ければ推定）/ "only"（真のアクションだけ。
+    推定も出さない = オーナー 2026-11-19「今回のテスト中は、卓 UI で入力した真のアクションのみ」）。"""
+    if isinstance(value, str) and value.strip().lower() == "only":
+        return "only"
+    return bool(value) and value not in ("false", "0", "off")

@@ -38,6 +38,7 @@ VALID_CONTROL_TYPES = (
     "new_hand", "winner", "rebuy", "correct_board", "correct_seat", "set_blinds", "sit_out", "sit_in",
     "set_button", "script_hand", "truth_stacks",
     "seat_player", "reduce_stack", "set_ante", "clock", "reader_restart", "text",
+    "stop",       # 終了（画面なしのロガーだけ。端末の q と同じ手順, ADR-0073 D6）
 )
 
 
