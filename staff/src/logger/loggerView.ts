@@ -54,6 +54,26 @@ export function micLine(r: LoggerStatusResponse | null): { text: string; tone: T
   return { text: `マイク: ${m.state ?? "不明"}`, tone: "muted" };
 }
 
+/** 書き起こし（OpenAI の API か店舗 PC の Whisper か・API につながらない間, ADR-0072）。 */
+export function asrLine(r: LoggerStatusResponse | null): { text: string; tone: Tone } | null {
+  const st = r?.state;
+  if (!st || r?.status !== "running" || st.transcriber === "off" || st.transcriber === undefined) return null;
+  const a = st.asr ?? {};
+  if (a.remote) {
+    const where = st.transcriber === "cloud" ? "クラウドの中継" : "OpenAI の API";
+    const model = (a.name ?? "").replace(/^openai-/, "");
+    if (a.down) {
+      const waiting = a.waiting ? `・送り直し待ち ${a.waiting} 件` : "";
+      return { text: `書き起こし: ${where}につながりません（音声は保存して送り直します${waiting}）`, tone: "bad" };
+    }
+    const waiting = a.waiting ? `（送り直し ${a.waiting} 件）` : "";
+    return { text: `書き起こし: ${where}${model ? `・${model}` : ""}${waiting}`, tone: a.waiting ? "warn" : "ok" };
+  }
+  if (st.transcriber === "openai") return { text: "書き起こし: 店舗 PC の Whisper（API の鍵がありません）", tone: "warn" };
+  if (st.transcriber === "cloud") return { text: "書き起こし: 店舗 PC の Whisper（クラウドにつないでいません）", tone: "warn" };
+  return { text: "書き起こし: 店舗 PC の Whisper", tone: "muted" };
+}
+
 /** RFID（つながったリーダーの数）。 */
 export function rfidLine(r: LoggerStatusResponse | null): { text: string; tone: Tone } | null {
   const f = r?.state?.rfid;

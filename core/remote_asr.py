@@ -18,6 +18,7 @@ import io
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 import uuid
@@ -41,9 +42,72 @@ class RemoteAsrError(Exception):
     """書き起こしの API を呼べなかった（ネット・API の失敗・鍵が無い）。"""
 
 
+USER_ENV_KEY = r"Environment"      # Windows のユーザーの環境変数（`setx` と `tools/asr_check.py set-key` が書く所）
+
+
+def read_user_env(name: str) -> Optional[str]:
+    """Windows に登録したユーザーの環境変数（HKCU\\Environment）。Windows 以外・無ければ None。
+
+    `setx` の前から開いている窓・動いているタスクの子には、登録した値が環境変数として届かない。ロガーが直接ここを
+    読めば、店舗 PC を再起動しなくても新しく起動したロガーが鍵を使える。"""
+    if os.name != "nt":
+        return None
+    try:
+        import winreg  # type: ignore[import]
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, USER_ENV_KEY) as key:
+            value, _kind = winreg.QueryValueEx(key, name)
+        return str(value).strip() or None
+    except OSError:
+        return None
+
+
+def write_user_env(name: str, value: Optional[str]) -> None:
+    """Windows のユーザーの環境変数を書く（None で消す）。あとで開く窓に届くよう、変わったことを知らせる。"""
+    import winreg  # type: ignore[import]  # Windows だけ（呼ぶ側が確かめる）
+
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, USER_ENV_KEY, 0, winreg.KEY_SET_VALUE) as key:
+        if value is None:
+            try:
+                winreg.DeleteValue(key, name)
+            except FileNotFoundError:
+                pass
+        else:
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+    try:
+        import ctypes
+
+        result = ctypes.c_ulong()
+        # HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG, 5 秒
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0x0002, 5000,
+                                                 ctypes.byref(result))
+    except Exception:  # noqa: BLE001 — 知らせられなくても、ロガーは登録を直接読む
+        pass
+
+
+def key_source() -> Optional[str]:
+    """鍵がどこにあるか: "env"（この窓・プロセスの環境変数）/ "registry"（Windows に登録済み）/ None。値は返さない。"""
+    if any(os.environ.get(n) for n in KEY_ENV):
+        return "env"
+    if any(read_user_env(n) for n in KEY_ENV):
+        return "registry"
+    return None
+
+
 def api_key() -> Optional[str]:
-    """書き起こしの API の鍵（環境変数）。無ければ None。"""
-    return next((os.environ[n] for n in KEY_ENV if os.environ.get(n)), None)
+    """書き起こしの API の鍵（環境変数 → Windows に登録したユーザーの環境変数）。無ければ None。"""
+    found = next((os.environ[n] for n in KEY_ENV if os.environ.get(n)), None)
+    if found:
+        return found
+    return next((v for v in (read_user_env(n) for n in KEY_ENV) if v), None)
+
+
+_KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-*]{4,}")
+
+
+def redact(text: str) -> str:
+    """API の返す文に鍵の一部が入っていても、ログ・画面に出さない。"""
+    return _KEY_RE.sub("sk-…", text)
 
 
 def wav_bytes(pcm16: bytes, sample_rate: int = 16000) -> bytes:
@@ -75,7 +139,7 @@ def post(url: str, body: bytes, headers: dict[str, str], timeout: float = TIMEOU
         with urllib.request.urlopen(request, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:300]
+        detail = redact(e.read().decode("utf-8", "replace")[:300])
         raise RemoteAsrError(f"HTTP {e.code}: {detail}") from e
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise RemoteAsrError(f"書き起こしの API につながりません: {getattr(e, 'reason', e)}") from e

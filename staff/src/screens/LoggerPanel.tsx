@@ -6,6 +6,7 @@ import type { LoggerNotice, LoggerStatusResponse } from "../api/types";
 import {
   backlogLine,
   mergeNotices,
+  asrLine,
   micLine,
   noticeLabel,
   rfidLine,
@@ -56,7 +57,7 @@ export function LoggerPanel(props: { repository: StaffRepository }): React.JSX.E
   }, [repository]);
 
   const head = statusLine(status);
-  const lines = [micLine(status), rfidLine(status)].filter((x): x is { text: string; tone: Tone } => x !== null);
+  const lines = [micLine(status), asrLine(status), rfidLine(status)].filter((x): x is { text: string; tone: Tone } => x !== null);
   const sub = sessionLine(status);
   const backlog = backlogLine(status);
   const rdp = sessionWarning(status);

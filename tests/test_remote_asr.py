@@ -138,6 +138,16 @@ class TestLogger:
         assert q.empty()
         assert notices[-1] == "書き起こしの API にまたつながりました"
 
+    def test_the_ipad_sees_when_the_api_is_down(self, tmp_path):
+        """iPad のロガーの欄（`asr_health`）: API か・つながらない間か・送り直し待ちの数。"""
+        post = _Post("コール", fail=True)
+        thread, _q, _seen, _ = _thread(tmp_path, post)
+        thread._live_transcribe = True                                   # noqa: SLF001
+        assert thread.asr_health() == {"name": "openai-gpt-transcribe", "remote": True, "down": False, "waiting": 0}
+        thread._process_chunk(PCM, utterance_start_ts=100.0)            # noqa: SLF001
+        health = thread.asr_health()
+        assert health["down"] and health["waiting"] == 1
+
     def test_a_retry_that_fails_goes_back_to_the_queue(self, tmp_path):
         post = _Post(fail=True)
         thread, _q, seen, _ = _thread(tmp_path, post)

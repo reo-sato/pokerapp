@@ -191,6 +191,7 @@ export class MockStaffRepository implements StaffRepository {
       rfid: { state: "running", connected: 11, configured: 11 },
       speech_backlog: 0,
       transcriber: "openai",
+      asr: { name: "openai-gpt-transcribe", remote: true, down: false, waiting: 0 },
       win_session: { session: 1, console: true, remote: false, state: "active" },
     },
   };

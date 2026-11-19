@@ -1211,6 +1211,8 @@ def _run_cli(script: str | None, status, setup: str | Path | None = None) -> Non
     status.attach("rfid", lambda: dict(getattr(rfid_thread, "health", None) or {"state": "unknown"})
                   if rfid_thread is not None else {"state": "disabled"})
     status.attach("speech_backlog", lambda: audio_thread.backlog() if audio_thread is not None else 0)
+    # 書き起こし（API か店舗 PC の Whisper か・API につながらない間か, ADR-0072。iPad のロガーの欄）
+    status.attach("asr", lambda: audio_thread.asr_health() if audio_thread is not None else {"remote": False})
     # Windows のセッション（コンソール / RDP / 切断）。変わったらマイクを開き直す（RDP の接続・切断で、開いたままの
     # マイクが無音になることがある, ADR-0073 段階 0。`audio.reopen_on_session_change`, 既定 true）
     from core.logger_status import session_watcher

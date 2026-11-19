@@ -330,6 +330,8 @@ export interface LoggerState {
   rfid?: { state?: string; connected?: number; configured?: number; error?: string };
   speech_backlog?: number;
   transcriber?: string;
+  /** 書き起こしの様子（ADR-0072）: 方式の名前（openai-gpt-transcribe など）・API か・API につながらない間か・送り直し待ち。 */
+  asr?: { name?: string | null; remote?: boolean; down?: boolean; waiting?: number };
   /** Windows のセッション（ADR-0073 段階 0）: console / remote（RDP）/ state（disconnected = RDP を閉じたまま）。 */
   win_session?: { session?: number; console?: boolean; remote?: boolean; state?: string | null; platform?: string };
   notice_seq?: number;

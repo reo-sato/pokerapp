@@ -6,6 +6,7 @@ import type { LoggerStatusResponse } from "../api/types";
 import { MockStaffRepository } from "../api/mockRepository";
 import { VALID_STAFF_TOKEN } from "../mocks/fixtures";
 import {
+  asrLine,
   backlogLine,
   mergeNotices,
   micLine,
@@ -46,6 +47,21 @@ test("sessionLine / micLine / rfidLine / backlogLine", () => {
   assert.equal(backlogLine(running()), null);
   assert.match(backlogLine(running({ speech_backlog: 3 }))!, /聞き取り待ち 3 件/);
   assert.equal(micLine({ ...running(), status: "stopped" }), null);
+});
+
+test("asrLine: API・つながらない・鍵が無くて Whisper・Whisper", () => {
+  const api = (asr: object, transcriber = "openai") => running({ transcriber, asr });
+  assert.deepEqual(asrLine(api({ name: "openai-gpt-transcribe", remote: true, down: false, waiting: 0 })),
+    { text: "書き起こし: OpenAI の API・gpt-transcribe", tone: "ok" });
+  const down = asrLine(api({ name: "openai-gpt-transcribe", remote: true, down: true, waiting: 4 }))!;
+  assert.equal(down.tone, "bad");
+  assert.match(down.text, /つながりません.*送り直し待ち 4 件/);
+  assert.equal(asrLine(api({ name: "openai-gpt-transcribe", remote: true, down: false, waiting: 2 }))!.tone, "warn");
+  assert.match(asrLine(api({ remote: false }))!.text, /鍵がありません/);
+  assert.match(asrLine(api({ remote: true, name: "openai-gpt-transcribe" }, "cloud"))!.text, /クラウドの中継/);
+  assert.equal(asrLine(api({ remote: false }, "local"))!.tone, "muted");
+  assert.equal(asrLine(running({ transcriber: "off" })), null);
+  assert.equal(asrLine(running()), null);
 });
 
 test("sessionWarning: RDP でつないでいる・切断・コンソール", () => {

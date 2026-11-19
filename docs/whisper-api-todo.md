@@ -3,7 +3,7 @@
 書き起こしを OpenAI の API（はじめ whisper-1、2026-11-18 から既定 gpt-transcribe）に移す計画（ADR-0072）の、残りの作業の一覧。決めたことと経緯は ADR-0072、並行している
 ほかの作業は `docs/plan-board.md`（トラック H）。項目を済ませたら `[x]` にして日付を書く。
 
-## いまの状態（2026-11-18）
+## いまの状態（2026-11-19）
 
 - **段階 1 の「テスト中の形」は実装済み**（2026-11-09, ADR-0072 追記 2）:
   - 店舗 PC が OpenAI の API を直接呼ぶ（`audio.transcriber=openai`。鍵は環境変数 `POKERAPP_OPENAI_API_KEY`）。
@@ -19,14 +19,28 @@
 
 ## A. 店舗テストの前の準備
 
-- [ ] 店舗 PC に鍵を入れる。PowerShell で 1 回 `setx POKERAPP_OPENAI_API_KEY "<鍵>"` を実行し、ロガーを起動し直す。
-  - 鍵はリポジトリ・`config.json`・ログ・チャットに置かない。
-- [ ] 書き起こしの方式を切り替える: `python tools/set_config.py audio.transcriber openai`。
-- [ ] ハンドごとの推定が有効か確かめる: `python tools/set_config.py estimator.live`（true のはず）。
+道具 `asr_check.cmd`（フォルダ `C:\PokerHandLogger`、2026-11-19）で、鍵を入れて API に届くかを確かめる。
+コマンドは RDP の中の PowerShell で 1 行ずつ。
+
+- [ ] 店舗 PC に鍵を入れる: `C:\PokerHandLogger\asr_check.cmd set-key`
+  - 鍵を貼り付けて Enter（入力は画面に出ず、PowerShell の履歴にも残らない）。Windows のユーザーの環境変数
+    `POKERAPP_OPENAI_API_KEY` に登録し（`setx` と同じ所）、続けて下の確かめを行う。
+  - ロガーは環境変数に無ければ Windows の登録を直接読むので、PC を再起動しなくても、このあと起動したロガーから使える。
+  - 鍵はリポジトリ・`config.json`・ログ・チャットに置かない。消すときは `asr_check.cmd remove-key`。
+- [ ] API に届くかを確かめる: `asr_check.cmd` をダブルクリック（= `check`）。
+  - いちばん新しいセッションの保存した発話を 3 つ送り、1 つごとにかかった秒数と書き起こした文を出す
+    （保存した発話が無ければ 1 秒の無音 = 文は空）。
+  - 失敗は次にやることの文で出る: 鍵が違う（401）・上限や残高（429）・モデルの名前（404）・ネットにつながらない。
+- [ ] 書き起こしの方式を切り替える: `C:\PokerHandLogger\asr_check.cmd use openai`（戻すときは `use local`）。
+  - ロガーを起動すると「書き起こしは OpenAI の API です…」と出る。iPad のロガーの欄にも「書き起こし: OpenAI の API・
+    gpt-transcribe」と出て、つながらない間は「つながりません（送り直し待ち N 件）」に変わる。
+- [ ] ハンドごとの推定が有効か確かめる: `C:\PokerHandLogger\venv\Scripts\python.exe C:\PokerHandLogger\tools\set_config.py estimator.live`（true のはず）。
 - [ ] OpenAI の管理画面で、月の使用上限とアラートを設定する（ADR-0072 D6 の目安: 月 8 セッションで 1,000 円前後）。
-- [ ] 鍵が無いとき・つながらないときの動きを、家で確かめる（鍵を外して起動する）。
-  - 鍵が無い: 知らせを出して、店舗 PC の Whisper に戻る。
-  - つながらない: 音声を残し、5〜60 秒おきに試し直す。そのあいだもブラインドの宣言は第 2 の耳で聞き分ける。
+- [x] 鍵が無いとき・つながらないときの動き（2026-11-19、試験と開発の環境で確かめた）。
+  - 鍵が無い: 知らせを出して、店舗 PC の Whisper に戻る（`tests/test_remote_asr.py`・`asr_check` の「鍵: ありません」）。
+  - つながらない: 音声を残し、5〜60 秒おきに試し直す。そのあいだもブラインドの宣言は第 2 の耳で聞き分ける
+    （`tests/test_remote_asr.py`。iPad の欄に「つながりません」）。
+  - 開発の環境から `asr_check` で実際の API に送り、gpt-transcribe に届くこと（1 秒の音声で 0.9〜1.7 秒）を確かめた。
 
 ## B. 店舗テストで確かめる
 

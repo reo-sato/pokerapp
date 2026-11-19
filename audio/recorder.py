@@ -312,6 +312,13 @@ class AudioThread(threading.Thread):
         self._reopen_requested = False
         self._reopened_at: Optional[float] = None      # 最後に開き直せた時刻（monotonic）
 
+    def asr_health(self) -> dict:
+        """書き起こしの様子（iPad のロガーの欄が読む）: 方式の名前・API か・API につながらない間か・送り直し待ちの数。"""
+        remote = self._remote
+        return {"name": getattr(self._transcriber, "asr_name", None), "remote": remote,
+                "down": bool(remote and time.time() < self._remote_down_until),
+                "waiting": self._deferred_queue.qsize() + self._deferring if remote else 0}
+
     def backlog(self) -> int:
         """まだアクションになっていない発話の数（推論待ち + 推論中）。
 
