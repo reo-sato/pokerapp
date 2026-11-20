@@ -60,7 +60,7 @@ def replace_fixtures(tree: Path, folders: list[str], store: Path = STORE) -> Non
 
 def _session(folder: Path) -> tuple[str, dict]:
     data = json.loads((folder / "expected.json").read_text(encoding="utf-8"))
-    return str(data["session_id"])[:8], data
+    return str(data.get("session_id") or "")[:8], data
 
 
 def gt_fingerprint(expected: dict, hand_ids: list[int]) -> str:
@@ -83,6 +83,8 @@ def ledger_rows(first_look: dict[str, dict], now: list[dict], first: dict[str, l
         if not (store / folder / "expected.json").exists():
             continue
         sid8, expected = _session(store / folder)
+        if not sid8:            # セッションの記録でない古い形（1 ハンドだけの fixture）は数えない
+            continue
         keys = sorted((k for k in cur if k.split("#")[0] == sid8), key=lambda k: int(k.split("#")[1]))
         old = per_hand(_source(first.get(entry.get("commit") or "", [])))
         both = [k for k in keys if k in old]
