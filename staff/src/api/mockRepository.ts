@@ -922,8 +922,14 @@ export class MockStaffRepository implements StaffRepository {
   async sendControl(sessionId: string, input: HandControlInput): Promise<ControlCommand> {
     this.requireAuth();
     this.requireSession(sessionId);
-    const args: { seat?: number; amount?: number } = {};
-    if (input.type === "winner") {
+    const args: { seat?: number; amount?: number; name?: string } = {};
+    if (input.type === "set_dealer") {
+      const name = (input.name ?? "").trim();
+      if (name.length > 40) {
+        throw new StaffApiError({ code: "invalid_control", message: "名前は 40 文字まで" });
+      }
+      args.name = name;
+    } else if (input.type === "winner") {
       if (!Number.isInteger(input.seat)) {
         throw new StaffApiError({ code: "invalid_control", message: "winner には seat が必要です。" });
       }

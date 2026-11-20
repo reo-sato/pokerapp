@@ -250,6 +250,8 @@ test("sendControl: validates type/args and returns a command (ADR-0039)", async 
   assert.deepEqual(win.args, { seat: 3 });
   const rb = await repo.sendControl(s.session_id, { type: "rebuy", seat: 1, amount: 5000 });
   assert.deepEqual(rb.args, { seat: 1, amount: 5000 });
+  const dl = await repo.sendControl(s.session_id, { type: "set_dealer", name: " 佐藤 " });
+  assert.deepEqual(dl.args, { name: "佐藤" });
 
   await assert.rejects(repo.sendControl(s.session_id, { type: "winner" }), (err: unknown) => {
     assert.ok(err instanceof StaffApiError);

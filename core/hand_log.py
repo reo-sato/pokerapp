@@ -126,6 +126,8 @@ class HandSummary:
     board_after_end: Optional[list] = None
     # デッドスモール（BB の人が抜けたあと SB が空いたハンドの、空いた SB の席。BB だけを払う, 2026-10-29。additive）
     dead_sb_seat: Optional[int] = None
+    # 配っていたディーラーの名前（ハンドの開始時, ADR-0074, additive）。入れていなければ None = 出力に含めない。
+    dealer: Optional[str] = None
 
     def to_dict(self) -> dict:
         data = {
@@ -160,6 +162,8 @@ class HandSummary:
             data["board_after_end"] = list(self.board_after_end)
         if self.dead_sb_seat is not None:
             data["dead_sb_seat"] = self.dead_sb_seat
+        if self.dealer:
+            data["dealer"] = self.dealer
         if self.stackless:
             from core.stackless import strip_hand
 

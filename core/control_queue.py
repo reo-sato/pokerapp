@@ -39,6 +39,7 @@ VALID_CONTROL_TYPES = (
     "new_hand", "winner", "rebuy", "correct_board", "correct_seat", "set_blinds", "sit_out", "sit_in",
     "set_button", "script_hand", "truth_stacks", "truth_button",
     "seat_player", "reduce_stack", "set_ante", "clock", "reader_restart", "text",
+    "set_dealer",  # 配っているディーラーの名前（端末の dealer, 次のハンドから, ADR-0074）
     "stop",       # 終了（画面なしのロガーだけ。端末の q と同じ手順, ADR-0073 D6）
 )
 
@@ -260,6 +261,10 @@ def command_to_audio_event(command: ControlCommand, clock: Callable[[], float]):
             logger.warning("control set_blinds with invalid args: %r", args)
             return None
         return AudioEvent(action="set_blinds", amount=bb, timestamp=clock(), raw_text=f"{sb}/{bb}")
+    if t == "set_dealer":
+        name = args.get("name")
+        name = name.strip()[:40] if isinstance(name, str) else ""
+        return AudioEvent(action="set_dealer", amount=0, timestamp=clock(), raw_text=name or "-")
     if t in ("sit_out", "sit_in", "set_button"):
         seat = args.get("seat")
         if not isinstance(seat, int) or isinstance(seat, bool):

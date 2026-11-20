@@ -280,10 +280,22 @@ def _record_table(table: dict, session_cfg: dict, json_writer, event_recorder) -
         "stackless": bool(table.get("stackless")),
         "seats": [{"seat": p["seat"], "name": p["name"], "stack": p["stack"]} for p in session_cfg["players"]],
         "first_button": session_cfg.get("first_button"),
+        "dealer": table.get("dealer"),
     }
     json_writer.set_table(record)
     if event_recorder is not None:
         event_recorder.record_setup(record, _time.time())
+
+
+def _queue_dealer(table: "dict | None", audio_q) -> None:
+    """卓の設定のディーラー（ADR-0074）を最初の入力として積む（記録に残り、replay でも同じ名前になる）。"""
+    dealer = (table or {}).get("dealer")
+    if dealer:
+        import time as _time
+
+        from core.events import AudioEvent
+
+        audio_q.put(AudioEvent(action="set_dealer", amount=0, timestamp=_time.time(), raw_text=str(dealer)))
 
 
 def _print_table(table: dict, tournament) -> None:
@@ -1159,6 +1171,7 @@ def _run_cli(script: str | None, status, setup: str | Path | None = None) -> "in
         live_hand=True,        # 手札を配ったときから進行中のハンドを真のアクション入力の画面へ
         **_auto_hand_kwargs(cfg, audio_thread),
     )
+    _queue_dealer(table, audio_q)
     if audio_thread is not None:
         audio_thread.start()
     integration_thread.start()
@@ -1525,6 +1538,7 @@ def _run_gui() -> None:
         live_hand=True,        # 手札を配ったときから進行中のハンドを真のアクション入力の画面へ
         **_auto_hand_kwargs(cfg, audio_thread),
     )
+    _queue_dealer(table, audio_q)
 
     dash.start_threads(
         audio_thread=audio_thread,

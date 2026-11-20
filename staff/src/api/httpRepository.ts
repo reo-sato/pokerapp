@@ -294,9 +294,10 @@ export class HttpStaffRepository implements StaffRepository {
   }
 
   sendControl(sessionId: string, input: HandControlInput): Promise<ControlCommand> {
-    const payload: { type: string; seat?: number; amount?: number } = { type: input.type };
+    const payload: { type: string; seat?: number; amount?: number; name?: string } = { type: input.type };
     if (input.seat !== undefined) payload.seat = input.seat;
     if (input.amount !== undefined) payload.amount = input.amount;
+    if (input.name !== undefined) payload.name = input.name;
     return this.send("POST", `/api/staff/sessions/${E(sessionId)}/control`, payload);
   }
 

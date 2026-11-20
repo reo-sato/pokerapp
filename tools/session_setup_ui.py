@@ -64,6 +64,8 @@ DEFAULT_SETUP: dict = {
     "log_dir": "./logs",
     # 持ち点を数えないモード（オールインは額を書かない, オーナー 2026-10-24。リングでもトーナメントでも）
     "stackless": False,
+    # 配っているディーラー（任意, ADR-0074）。交代は端末の `dealer <名前>` / iPad
+    "dealer": "",
 }
 
 
@@ -123,6 +125,11 @@ def build_session_config(raw: dict, store: BlindStructureStore, now: Optional[fl
         players.append({"seat": seat, "name": name or f"Player{seat}", "stack": stack, "named": bool(name)})
 
     table: dict = {"mode": mode, "stackless": stackless}
+    dealer = str(raw.get("dealer") or "").strip()
+    if len(dealer) > _MAX_NAME:
+        err("dealer", f"ディーラーの名前は {_MAX_NAME} 文字までです")
+    elif dealer:
+        table["dealer"] = dealer
     sb = bb = 0
     if mode == "ring":
         sb, bb = _int(raw.get("sb")), _int(raw.get("bb"))
@@ -584,6 +591,11 @@ function renderSetup() {
       ${S.stackless ? "" : `<td><input type="number" data-stack="${n}" min="1" value="${esc(S.stacks[n]??"")}">${errHtml("stack_"+n)}</td>`}</tr>`).join("")}
     </table>
   </section>
+  <section><h2>ディーラー（任意）</h2>
+    <input type="text" id="dealer" value="${esc(S.dealer||"")}" maxlength="40" placeholder="配っている人の名前">
+    ${errHtml("dealer")}
+    <span class="muted">ディーラーごとの聞き取りの振り返りに使います。交代は端末で <code>dealer 名前</code>（次のハンドから）。</span>
+  </section>
   <section><h2>1 ハンド目のボタン席</h2>
     <select id="button">${seats.map(n => `<option ${n===button?"selected":""}>${n}</option>`).join("")}</select>
     ${errHtml("button")}
@@ -600,6 +612,7 @@ function renderSetup() {
     renderSetup();
   });
   const bind = (id, key, num=true) => { const el = $("#"+id, root); if (el) el.oninput = () => { S[key] = num ? el.value : el.value; }; };
+  bind("dealer", "dealer", false);
   bind("sb", "sb"); bind("bb", "bb"); bind("elapsed", "elapsed_min"); bind("default_stack", "default_stack");
   const stt = $("#start_time", root); if (stt) stt.onchange = () => { S.start_time = stt.value.trim(); renderSetup(); };
   const sel = $("#structure", root); if (sel) sel.onchange = () => { S.structure = sel.value; S.level = 1; S.elapsed_min = 0; S.start_time = null;

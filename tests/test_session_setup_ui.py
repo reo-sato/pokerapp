@@ -43,6 +43,13 @@ class TestBuildConfig:
         assert cfg["first_button"] == 4 and cfg["button_seat"] == 2      # 1 つ手前（端末の入力と同じ）
         assert cfg["table"] == {"mode": "ring", "stackless": False, "sb": 100, "bb": 200, "ante": 0}
 
+    def test_the_dealer_is_optional(self, store):
+        assert ui.build_session_config(_raw(dealer=" 佐藤 "), store)["table"]["dealer"] == "佐藤"
+        assert "dealer" not in ui.build_session_config(_raw(dealer=""), store)["table"]
+        with pytest.raises(ui.SetupError) as e:
+            ui.build_session_config(_raw(dealer="x" * 41), store)
+        assert [x["field"] for x in e.value.errors] == ["dealer"]
+
     def test_tournament_mid_level(self, store):
         cfg = ui.build_session_config(_raw(mode="tournament", structure="標準", level=2, elapsed_min=5), store)
         assert (cfg["sb"], cfg["bb"]) == (200, 400)

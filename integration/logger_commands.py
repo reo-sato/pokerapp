@@ -141,6 +141,13 @@ class LoggerCommands:
             return CommandResult([self._event("reduce_stack", amount, f"シート{seat} スタック減 {amount}", seat)])
         if cmd == "name":
             return self._name(line)
+        if cmd == "dealer":
+            # 配っているディーラー（ADR-0074）。`dealer -` = 名前を消す。ハンドの途中なら次のハンドから
+            name = line.translate(FULLWIDTH_TO_ASCII).strip()[len("dealer"):].strip()
+            if not name or len(name) > 40:
+                return CommandResult(messages=["使い方: dealer <名前>（40 文字まで）/ dealer -（消す）"], ok=False)
+            return CommandResult([self._event("set_dealer", 0, name)],
+                                 ["ディーラーの名前を消しました" if name == "-" else f"ディーラー {name} を送信しました"])
         if cmd in ("button", "btn") and len(parts) >= 2:
             try:
                 seat = int(parts[1])
@@ -303,4 +310,10 @@ def control_line(command_type: str, args: dict) -> Optional[str]:
         return f"clock {op}"
     if t == "reader_restart":
         return "rr"
+    if t == "set_dealer":
+        name = args.get("name")
+        name = name.strip() if isinstance(name, str) else ""
+        if len(name) > 40 or "\n" in name:
+            raise ValueError("名前は 40 文字まで")
+        return f"dealer {name or '-'}"
     return None

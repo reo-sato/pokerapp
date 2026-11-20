@@ -179,6 +179,14 @@ export function LoggerStartScreen(props: {
       </View>
 
       <View style={styles.card}>
+        <Text style={styles.cardTitle}>ディーラー（任意）</Text>
+        <Field label="配っている人の名前" value={form.dealer ?? ""} placeholder="名前" style={{ marginTop: 4 }}
+               onChangeText={(t) => update({ ...form, dealer: t })} />
+        <Text style={styles.cardMeta}>ディーラーごとの聞き取りの振り返りに使います。交代はハンドのタブから（次のハンドから）。</Text>
+        <Err text={errors.dealer} />
+      </View>
+
+      <View style={styles.card}>
         <Text style={styles.cardTitle}>1 ハンド目のボタン</Text>
         <View style={[styles.row, { flexWrap: "wrap", marginTop: 8 }]}>
           {form.seats.map((seat) => (

@@ -226,19 +226,21 @@ export interface HandCorrectionInput {
 }
 
 /** hand logger 遠隔制御コマンド（control queue, ADR-0039）。 */
-export type HandControlType = "new_hand" | "winner" | "rebuy";
+export type HandControlType = "new_hand" | "winner" | "rebuy" | "set_dealer";
 
 export interface HandControlInput {
   type: HandControlType;
   seat?: number;
   amount?: number;
+  /** set_dealer: 配っているディーラーの名前（空 = 消す, ADR-0074）。 */
+  name?: string;
 }
 
 /** POST /api/staff/sessions/{sid}/control の応答（append された 1 コマンド）。 */
 export interface ControlCommand {
   command_id: string;
   type: string;
-  args: { seat?: number; amount?: number };
+  args: { seat?: number; amount?: number; name?: string };
   created_at: string;
 }
 
@@ -374,6 +376,8 @@ export interface LoggerSetup {
   start_time: string | null;
   button: number | null;
   stackless: boolean;
+  /** 配っているディーラー（任意, ADR-0074）。 */
+  dealer?: string;
 }
 
 export interface StructureLevel {

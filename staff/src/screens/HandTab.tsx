@@ -24,6 +24,7 @@ export function HandTab(props: {
   const { repository, session } = props;
   const [seat, setSeat] = useState("");
   const [amount, setAmount] = useState("");
+  const [dealer, setDealer] = useState("");
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [sent, setSent] = useState<string[]>([]);
   // 選択は hand_id で保持し、本体は常に handsState（訂正適用済ビュー）から引く。
@@ -143,6 +144,24 @@ export function HandTab(props: {
           <Button label="ウィナー確定" onPress={onWinner} kind="neutral" />
           <View style={{ width: 8 }} />
           <Button label="リバイ適用" onPress={onRebuy} kind="neutral" />
+        </View>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>ディーラー交代</Text>
+        <Text style={styles.cardMeta}>次のハンドから記録します（ディーラーごとの聞き取りの振り返り用, ADR-0074）。</Text>
+        <View style={[styles.row, { marginTop: 4 }]}>
+          <Field label="ディーラーの名前" value={dealer} onChangeText={setDealer} placeholder="名前" />
+          <View style={{ width: 8 }} />
+          <Button label="交代" kind="neutral" style={{ alignSelf: "flex-end" }}
+                  onPress={() => {
+                    const name = dealer.trim();
+                    if (!name) {
+                      setMsg({ text: "ディーラーの名前を入れてください。", ok: false });
+                      return;
+                    }
+                    void send({ type: "set_dealer", name }, `ディーラー ${name}`);
+                  }} />
         </View>
       </View>
 

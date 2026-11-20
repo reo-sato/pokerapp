@@ -268,7 +268,8 @@ _VOICE_SOURCES = frozenset({"spoken_seat", "spoken_position", "engine_prior"})
 # 解釈を決める前に届いても、組み直しを待たなくてよい（ハンドを終わらせない）制御
 _CONTROL_KEEPS_CORRECTION = frozenset({"rename_seat", "set_blinds", "sit_out", "sit_in", "rebuy", "set_button",
                                        "correct_board", "correct_seat", "truth_stacks", "truth_button", "reduce_stack",
-                                       "set_bb_ante", "set_level", "clock", "blind_up", "mic_state"})
+                                       "set_bb_ante", "set_level", "clock", "blind_up", "mic_state",
+                                       "set_dealer"})
 # 誰の応答も聞こえていないオールイン（コールは補っただけ）のあと、ベッティングが終わっているのにベッティングの
 # 言葉がこの数だけ聞こえたら、そのオールインを聞き違いとみて外す（店舗 2026-09-27: 自信 0.27 の「オールイン」の
 # あとのチェック 5 回と「2700」がすべて保留になり、全員オールインの 59700 のポットになった）
@@ -580,6 +581,10 @@ class IntegrationThread(threading.Thread):
         self._hand_open: bool = False
         # ハンドの途中に届いた席替えの名前（席 → 名前）。次のハンドの開始時に反映する（ADR-0059）。
         self._pending_renames: dict[int, str] = {}
+        # 配っているディーラー（`dealer <名前>` / 制御 `set_dealer`, ADR-0074）。`_dealer` = 次のハンドから使う名前、
+        # `_hand_dealer` = いまの（最後の）ハンドの名前（記録の `dealer`）。ハンドの途中の交代は次のハンドから
+        self._dealer: Optional[str] = None
+        self._hand_dealer: Optional[str] = None
 
         # RFID カード情報
         self._board_cards: list[str] = []          # 順序付きボードカード（表示用）
@@ -1402,6 +1407,9 @@ class IntegrationThread(threading.Thread):
 
         if action == "rename_seat":
             self._handle_rename_seat(event)
+            return
+        if action == "set_dealer":
+            self._handle_set_dealer(event)
             return
 
         if action == "set_bb_ante":
@@ -5320,6 +5328,22 @@ class IntegrationThread(threading.Thread):
             return
         self._apply_rename(seat, name)
 
+    def _handle_set_dealer(self, event: AudioEvent) -> None:
+        """配っているディーラーを変える（`dealer <名前>` / `dealer -` = 消す, ADR-0074）。名前は `raw_text`。
+
+        記録の `dealer` はハンドの開始時の名前（ハンドの途中の交代は次のハンドから = 1 ハンドの記録は 1 人）。
+        ディーラーごとの聞き取りの振り返り（`tools/dealer_report.py`）に使う。ゲームの状態・推定は変えない。
+        """
+        name = (event.raw_text or "").strip()
+        name = None if name in ("", "-") else name[:40]
+        if name == self._dealer:
+            return
+        self._dealer = name
+        if not self._hand_open:
+            self._hand_dealer = name
+        when = "次のハンドから" if self._hand_open else "このあとのハンドは"
+        self._notice(f"ディーラー: {when} {name}" if name else f"ディーラー: {when} 名前なし")
+
     def _apply_rename(self, seat: int, name: str) -> None:
         try:
             self._game_state.set_player_name(seat, name)
@@ -6324,6 +6348,7 @@ class IntegrationThread(threading.Thread):
             "ended_at": None,
             "blinds": self._blinds_record(),
             **({"table_mode": self._table_mode} if self._table_mode else {}),
+            **({"dealer": self._hand_dealer} if self._hand_dealer else {}),
             "board": list(self._board_cards),
             "board_source": self._board_source,
             "board_timeline": self._build_board_timeline(),
@@ -6764,6 +6789,7 @@ class IntegrationThread(threading.Thread):
             return False
         self._start_refused = None
         self._hand_level = self._level
+        self._hand_dealer = self._dealer
         self._current_actions = []
         if started_at is not None:
             self._hand_started_epoch = started_at
@@ -7043,6 +7069,7 @@ class IntegrationThread(threading.Thread):
             board_timeline=self._build_board_timeline(),
             button_seat=getattr(gs, "button_seat", None),
             dead_sb_seat=getattr(gs, "dead_sb_seat", None),
+            dealer=self._hand_dealer,
             position_map=dict(self._safe_position_map()),
             players=players_info,
             pot_total=pot_total,

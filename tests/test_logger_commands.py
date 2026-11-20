@@ -70,6 +70,8 @@ CASES = [
     ("set_ante", {"value": "on"}, "ante on"),
     ("clock", {"op": "set 3 5"}, "clock set 3 5"),
     ("reader_restart", {}, "rr"),
+    ("set_dealer", {"name": "佐藤"}, "dealer 佐藤"),
+    ("set_dealer", {}, "dealer -"),
 ]
 
 
@@ -84,7 +86,8 @@ def test_the_control_records_the_same_as_the_terminal(ctype, args, line):
 def test_bad_arguments_are_rejected_the_same_way():
     for ctype, args in [("winner", {}), ("rebuy", {"seat": 1, "amount": 0}), ("correct_board", {"index": 6}),
                         ("set_blinds", {"sb": 400, "bb": 200}), ("set_ante", {"value": "x"}),
-                        ("clock", {"op": "rm -rf"}), ("seat_player", {"seat": 10, "name": "a"})]:
+                        ("clock", {"op": "rm -rf"}), ("seat_player", {"seat": 10, "name": "a"}),
+                        ("set_dealer", {"name": "x" * 41})]:
         with pytest.raises(ValueError):
             control_line(ctype, args)
     assert control_line("sit_out", {"seat": 1}) is None          # 行の形が無い制御は今までの翻訳
@@ -124,3 +127,9 @@ def test_the_consumer_uses_the_shared_commands(tmp_path: Path):
     actions = [q.get_nowait().action for _ in range(q.qsize())]
     assert actions == ["rename_seat", "sit_in", "check", "sit_out"]
     assert [(t, ok) for t, ok, _ in results] == [("seat_player", True), ("text", True), ("rebuy", False)]
+
+
+def test_the_dealer_command():
+    r = _commands().run_line("dealer 佐藤 花子")
+    assert [(e.action, e.raw_text) for e in r.events] == [("set_dealer", "佐藤 花子")] and r.ok
+    assert not _commands().run_line("dealer").ok

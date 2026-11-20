@@ -18,6 +18,7 @@ export const DEFAULT_SETUP: LoggerSetup = {
   start_time: null,
   button: null,
   stackless: false,
+  dealer: "",
 };
 
 /** 前回の設定で開く（無い項目は既定。ストラクチャーが一覧に無ければ一覧の先頭）。 */
