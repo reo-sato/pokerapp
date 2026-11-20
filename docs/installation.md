@@ -36,6 +36,22 @@ PowerShell を開ける人は、展開の手間なく **1 行**でも入りま�
 irm https://raw.githubusercontent.com/reo-sato/pokerapp/verify-v1/installer/bootstrap.ps1 | iex
 ```
 
+**リポジトリが非公開のとき**（2026-11-20 から。ISSUE-0041）は、読み取りだけのトークンを使います。
+
+- 作り方: GitHub → Settings → Developer settings → Fine-grained tokens。このリポジトリだけ・Contents: Read only・期限つき。
+- トークンはチャットやファイルに貼らない。
+- 次の 1 行は、初回だけトークンを伏せ字で訊き、Windows のユーザーの環境変数 `POKERAPP_GITHUB_TOKEN` に登録します。
+  あとは `update.cmd` も同じトークンで取ります。
+- `<ブランチ>` と `<コミット>` は、更新のたびにチャットで渡す値です。
+
+```powershell
+& { $env:POKERAPP_INSTALL_DIR="C:\PokerHandLogger"; $env:POKERAPP_BRANCH="<ブランチ>"; $t=[Environment]::GetEnvironmentVariable("POKERAPP_GITHUB_TOKEN","User"); if(-not $t){ $s=Read-Host "GitHub のトークン（表示されません）" -AsSecureString; $t=[Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s)); [Environment]::SetEnvironmentVariable("POKERAPP_GITHUB_TOKEN",$t,"User") }; $env:POKERAPP_GITHUB_TOKEN=$t; irm -Headers @{Authorization="Bearer $t"; Accept="application/vnd.github.raw"; "User-Agent"="pokerapp"} "https://api.github.com/repos/reo-sato/pokerapp/contents/installer/bootstrap.ps1?ref=<コミット>" | iex }
+```
+
+- トークンを替える・消す: `[Environment]::SetEnvironmentVariable("POKERAPP_GITHUB_TOKEN",$null,"User")` のあと、上の 1 行
+  （次の更新でまた訊きます）。
+- 期限が切れると更新が「取得できませんでした」で止まります。新しいトークンを作って入れ直してください。
+
 ### インストーラがやること（`installer\install.ps1`）
 
 1. **Python 3.12** を探し、無ければ `winget` で導入（winget が無い古い Windows では python.org の

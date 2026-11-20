@@ -26,6 +26,11 @@
     $Branch     = if ($env:POKERAPP_BRANCH) { $env:POKERAPP_BRANCH } else { "verify-v1" }
     $Repo       = if ($env:POKERAPP_REPO) { $env:POKERAPP_REPO } else { "reo-sato/pokerapp" }
     $installer  = Join-Path $InstallDir "installer\install.ps1"
+    # 非公開のリポジトリから取るための読み取りだけのトークン（2026-11-20）。Windows のユーザーの環境変数
+    # POKERAPP_GITHUB_TOKEN。無ければ認証なし（公開のリポジトリ）。値は表示しない。
+    $Token = if ($env:POKERAPP_GITHUB_TOKEN) { $env:POKERAPP_GITHUB_TOKEN } else { [Environment]::GetEnvironmentVariable("POKERAPP_GITHUB_TOKEN", "User") }
+    $headers = @{ "User-Agent" = "pokerapp-installer" }
+    if ($Token) { $headers["Authorization"] = "Bearer $Token" }
     # 取得元のブランチを覚えさせる（update.cmd が同じブランチから更新するため）。展開済みの install.ps1 が
     # 古い版（覚える機能が無い）でも効くように、ここで書く。
     $rememberBranch = {
@@ -35,21 +40,30 @@
     if (Test-Path $installer) {
         Write-Host "既にインストール済みです ($InstallDir)。更新モードで実行します。" -ForegroundColor Cyan
         & $rememberBranch
+        if ($Token) {
+            # 展開済みのインストーラが古い版（トークンを知らない）でも非公開のリポジトリから更新できるよう、先に
+            # 取得元のブランチのインストーラに入れ替える（バイトのまま保存 = UTF-8 の BOM を保つ）
+            $rawHeaders = $headers.Clone()
+            $rawHeaders["Accept"] = "application/vnd.github.raw"
+            Invoke-WebRequest -Uri "https://api.github.com/repos/$Repo/contents/installer/install.ps1?ref=$Branch" `
+                -Headers $rawHeaders -OutFile $installer -UseBasicParsing
+        }
         # .ps1 の直接実行は実行ポリシーに引っかかるので、明示的に Bypass で起動する。
         & powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Update -Branch $Branch -Repo $Repo
     } else {
-        $zipUrl  = "https://codeload.github.com/$Repo/zip/refs/heads/$Branch"
+        $zipUrl  = if ($Token) { "https://api.github.com/repos/$Repo/zipball/$Branch" } else { "https://codeload.github.com/$Repo/zip/refs/heads/$Branch" }
         $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("pokerapp-bootstrap-" + [guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Path $tmpRoot | Out-Null
         try {
             Write-Host "取得中: $zipUrl" -ForegroundColor Cyan
             $zip = Join-Path $tmpRoot "src.zip"
             try {
-                Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing
+                Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing -Headers $headers
             } catch {
                 # 店舗 PC で実測: 固定 IP にデフォルトゲートウェイが無いと、IPv6 だけ通ってこの 1 行目は取れるのに、
                 # IPv4 しか持たない GitHub の zip 配布だけが「リモート名を解決できませんでした」で失敗する。
-                throw ("GitHub から取得できませんでした: " + $_.Exception.Message +
+                $hint = if ($Token) { " / トークンの期限・権限（このリポジトリの Contents: Read）も確かめてください" } else { " / 非公開のリポジトリなら、更新の 1 行のコマンド（トークンを訊く形）を使ってください" }
+                throw ("GitHub から取得できませんでした: " + $_.Exception.Message + $hint +
                     " / 固定 IP にしている場合はデフォルトゲートウェイが入っているか確認してください（docs/installation.md §0 のトラブル表）。")
             }
             Expand-Archive -Path $zip -DestinationPath $tmpRoot -Force

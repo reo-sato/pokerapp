@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### Security (2026-11-20)
+
+- **リポジトリが公開で、店舗の音声と書き起こしが誰でも取り出せた**（ISSUE-0041）。オーナーが非公開にする。
+  - インストーラ（`bootstrap.ps1`・`install.ps1`）は、読み取りだけのトークン（Windows のユーザーの環境変数
+    `POKERAPP_GITHUB_TOKEN`）があれば、認証つきで取得する（commits・zipball・contents の API）。
+  - 更新の 1 行のコマンドは、初回だけトークンを伏せ字で訊く形にした（`docs/installation.md`）。
+  - 店舗 PC の今の版はトークンを知らないので、bootstrap が先に新しいインストーラに入れ替える。
+  - トークンが無ければ今までどおり認証なし。
+
 ### Added (2026-11-20)
 
 - **iPad だけでハンドロガーを始める・終える**（ADR-0073 段階 C）。

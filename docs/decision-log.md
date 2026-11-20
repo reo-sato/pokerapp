@@ -146,6 +146,7 @@ Note: ADR-0001 / ADR-0002 は本リポジトリの spec expansion phase (S0) 時
 | ISSUE-0038 | 店舗の通しテストでハンドが一度も始まらなかった（`n` を言わない運用・勝者が決まらない・仮名の金額） | Fixed | 2026-09-25 | integration / audio / cli | `docs/issues/0038-store-test-no-hand-started.md` | 聞き取ったアクションがすべて `no_active_hand` で保留 / 席を言わない「ウィナー」で勝者が決まらない / 「ベトナナ」「レイズ ゴール」が読めない。Fix = ADR-0062。回帰 `tests/test_auto_hand.py` |
 | ISSUE-0039 | 店舗テスト 09/26〜10/07 の不一致（索引） | Fixed | 2026-10-13 | integration / audio / rfid / tools | `docs/issues/0039-store-test-mismatch-index-0926-1007.md` | 回ごと（09-26 回答 / 09-27 c2cd4a53・6 セッション・8d08c010 / 09-29 / 09-30 / 10-01 / 10-06 16:58・19:29・20:20・夜 / 10-07 16:38）に「ログ → 作業ログ → おもな不一致の型 → 直したこと」の表。直しは ADR-0068 / 0069 / 0070 / ADR-0043 追記。ライブの規則で直せない残り（要確認が多い・語の無いハンド・店舗 PC での確かめ）は Open。回帰 `tests/test_store_fixtures.py` ほか |
 | ISSUE-0040 | 10/04〜10/08 の店舗テストの直しが開発版 verify-v1 に入っていなかった | Fixed | 2026-10-13 | release / git | `docs/issues/0040-store-test-fixes-missing-from-verify-v1.md` | 作業ブランチ `claude/confident-hawking-5e4hff` だけに 40 コミット（10/06〜10/09）、製品化の 10 コミットは 10/11 に verify-v1 の `f14671b` から。マージ `d3e9071` を両方に push。防ぎ方: `tools/release.py promote` の前に `git log origin/verify-v1..origin/<作業ブランチ>` が空か確かめる（`183cb4b` はまだ verify-v1 に無い） |
+| ISSUE-0041 | リポジトリが公開で、店舗の音声（store-data）と書き起こし（data/store・tests/fixtures/store）が誰でも取り出せた | Mitigating | 2026-11-20 | privacy / release | `docs/issues/0041-public-repository-store-data.md` | 計画の Fable の監査で見つけ、API で `visibility: public` を確認。オーナーが非公開にする。インストーラは読み取りだけのトークン（`POKERAPP_GITHUB_TOKEN`）で認証つきの取得に対応 |
 
 ## 運用の決定（ADR にしていないもの）
 

@@ -217,6 +217,20 @@ class TestFieldFindings:
         guard = text.index("(Test-LoggerRunning) -and -not $Force")
         assert guard < text.index("        Invoke-Update\r\n"), "ファイルを入れ替える前に断る"
 
+    def test_a_private_repository_is_fetched_with_the_token(self):
+        """リポジトリを非公開にした（2026-11-20）: 読み取りだけのトークン（ユーザーの環境変数 POKERAPP_GITHUB_TOKEN）が
+        あれば、コミットの確かめも zip の取得も認証つき（API の zipball）。無ければ今までどおり認証なし。"""
+        text = self._install_ps1()
+        assert 'GetEnvironmentVariable("POKERAPP_GITHUB_TOKEN", "User")' in text
+        assert '$headers["Authorization"] = "Bearer $token"' in text
+        assert "/zipball/$ref" in text and "-Headers (Get-GitHubHeaders)" in text
+        assert "Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing -Headers (Get-GitHubHeaders)" in text
+        boot = (ROOT / "installer/bootstrap.ps1").read_text(encoding="utf-8")
+        assert 'GetEnvironmentVariable("POKERAPP_GITHUB_TOKEN", "User")' in boot
+        # 展開済みの古いインストーラ（トークンを知らない）を、取得元のブランチの版に入れ替えてから更新する
+        assert "contents/installer/install.ps1?ref=$Branch" in boot and "application/vnd.github.raw" in boot
+        assert "-OutFile $installer" in boot, "バイトのまま保存する（BOM を保つ）"
+
     def test_update_remembers_the_branch_it_was_installed_from(self):
         """update.cmd は -Branch を渡さない。覚えていないと既定の verify-v1 で別ブランチの導入を上書きする。"""
         text = self._install_ps1()

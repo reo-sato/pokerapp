@@ -327,12 +327,26 @@ function Test-Installation {
 
 # ───────────────────────── 更新 / アンインストール ─────────────────────────
 
+function Get-GitHubToken {
+    # 非公開のリポジトリから取るための読み取りだけのトークン（2026-11-20）。Windows のユーザーの環境変数
+    # POKERAPP_GITHUB_TOKEN（更新の 1 行のコマンドが伏せ字で訊いて登録する）。無ければ認証なし（公開のリポジトリ）。
+    if ($env:POKERAPP_GITHUB_TOKEN) { return $env:POKERAPP_GITHUB_TOKEN }
+    try { return [Environment]::GetEnvironmentVariable("POKERAPP_GITHUB_TOKEN", "User") } catch { return $null }
+}
+
+function Get-GitHubHeaders {
+    $headers = @{ "User-Agent" = "pokerapp-installer"; "Accept" = "application/vnd.github+json" }
+    $token = Get-GitHubToken
+    if ($token) { $headers["Authorization"] = "Bearer $token" }   # 値はログに出さない
+    return $headers
+}
+
 function Resolve-Commit {
     # ブランチの先頭のコミット（40 桁）。取れなければ空（従来どおりブランチの zip を取る）。ADR-0066
     param([string]$Ref)
     try {
         $res = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/commits/$Ref" -UseBasicParsing `
-            -Headers @{ "User-Agent" = "pokerapp-installer"; "Accept" = "application/vnd.github+json" } -TimeoutSec 20
+            -Headers (Get-GitHubHeaders) -TimeoutSec 20
         $sha = [string]$res.sha
         if ($sha -match '^[0-9a-f]{40}$') { return $sha }
     } catch {
@@ -371,6 +385,12 @@ function Invoke-Update {
         $script:Commit = Resolve-Commit $Branch
         if ($script:Commit) { $zipUrl = "https://codeload.github.com/$Repo/zip/$($script:Commit)" }
     }
+    if (Get-GitHubToken) {
+        # 非公開のリポジトリ: API の zipball（認証つき。GitHub が一時的な URL へ転送する）
+        $ref = if ($script:Commit) { $script:Commit } else { $Branch }
+        $zipUrl = "https://api.github.com/repos/$Repo/zipball/$ref"
+        Write-Log "GitHub のトークンを使います（値は表示しません）"
+    }
     Write-Log "GitHub から取得: $zipUrl"
     Write-Log ("保持するもの: " + (($PreservedFiles + $PreservedDirs) -join ", "))
     if ($DryRun) { return }
@@ -378,9 +398,9 @@ function Invoke-Update {
     New-Item -ItemType Directory -Path $tmpRoot | Out-Null
     try {
         $zip = Join-Path $tmpRoot "src.zip"
-        Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing
+        Invoke-WebRequest -Uri $zipUrl -OutFile $zip -UseBasicParsing -Headers (Get-GitHubHeaders)
         Expand-Archive -Path $zip -DestinationPath $tmpRoot -Force
-        $src = Get-ChildItem -Path $tmpRoot -Directory | Select-Object -First 1   # pokerapp-<branch>
+        $src = Get-ChildItem -Path $tmpRoot -Directory | Select-Object -First 1   # pokerapp-<branch> / <owner>-pokerapp-<sha>
         if (-not $src) { throw "zip の展開結果が見つかりません" }
         # robocopy: 追加・上書きのみ（削除はしない）。/XD /XF で店舗固有のものを除外。
         $arguments = @($src.FullName, $AppDir, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/R:2", "/W:2", "/XD") `
