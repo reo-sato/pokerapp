@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 
-from tools.listen_missed import build_page, missed_spots, read_labels, with_streets
+from tools.listen_missed import (
+    build_page, departures, fold_voice, missed_spots, read_labels, summarize_spots, with_streets,
+)
 
 T0 = 1_793_000_000.0
 
@@ -52,3 +54,20 @@ def test_the_page_and_the_labels(tmp_path):
         {"action": "fold", "label": "not_said"}, {"action": "fold", "label": "not_said"}]}), encoding="utf-8")
     out = read_labels(labels)
     assert "コール: 言った 1" in out and "フォールド: 言っていない 2" in out and "幻聴（定型句） 1" in out
+
+
+def test_the_voice_around_a_departure_splits_unread_folds_before_listening():
+    events = [{"type": "rfid", "kind": "leave", "seat": 5, "observed_at": T0 + 6},
+              {"type": "rfid", "kind": "leave", "seat": 5, "observed_at": T0 + 9},    # 最初の離脱だけ
+              {"type": "rfid", "kind": "muck", "seat": 2, "observed_at": T0 + 30},
+              {"type": "rfid", "kind": "leave", "seat": 7, "observed_at": T0 + 99}]   # 窓の外
+    gone = departures(events, (T0, T0 + 60))
+    assert gone == {5: T0 + 6, 2: T0 + 30}
+    rows = _rows([(7, "フォー")]) + [{"utterance_start_ts": T0 + 31, "text": "", "noise": True}]
+    assert fold_voice(rows, gone[5]) == "voice"
+    assert fold_voice(rows, gone[2]) == "noise"
+    assert fold_voice(rows, T0 + 50) == "none"
+    assert fold_voice(rows, None) == "no_depart"
+    spots = missed_spots(HAND, _rows([(2, "600"), (12, "チェック"), (15, "1000")]), (T0, T0 + 60))
+    out = summarize_spots("abcdef0123", spots, {(3, 1): "none"})
+    assert "abcdef01: 読めなかった" in out and "フォールド 1" in out and "発話なし 1" in out

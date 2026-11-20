@@ -8,7 +8,11 @@
 分けるため。店舗の音声が入るので公開しない（チャットで送る）。
 
     TZ=Asia/Tokyo python tools/listen_missed.py pokerlogs_<日時>_1of9.zip … --truth pokertruth_<日時>.zip --out listen.html
+    TZ=Asia/Tokyo python tools/listen_missed.py pokerlogs_<日時>_text.zip --summary   # 聞く前の自動の数（音声なしで可）
     python tools/listen_missed.py --read listen_<sid8>.json
+
+`--summary` は、読めなかった行ごとに前後の発話を声の有無で分ける: 発話が 1 つも無い（= ほぼ確実に言っていない）/
+声ではない音・空の書き起こしだけ / 声がある（言ったのに落ちたか、言っていないかは聞いて決める）。時間帯（1 時間ごと）にも分ける。
 """
 from __future__ import annotations
 
@@ -99,7 +103,7 @@ def missed_spots(hand: dict, transcripts: list[dict], window: tuple[float, float
             hi = nxt["utterance_start_ts"] + 0.001
         else:
             hi = window[1]
-        missed = {"index": k, "text": _row_text(action), "action": action.get("action")}
+        missed = {"index": k, "text": _row_text(action), "action": action.get("action"), "seat": action.get("seat")}
         if spots and spots[-1]["lo"] == lo and spots[-1]["hi"] == hi:
             spots[-1]["missed"].append(missed)
             continue
@@ -127,6 +131,67 @@ def _utterance(row: dict, hand_start: float) -> dict:
         "ear": ((row.get("ear") or {}).get("text") or "").strip(),
         "kind": utterance_kind(row), "noise": _is_noise(row, text),
     }
+
+
+# 札が離れてから「フォールド」を言うまで（決まり A: 1〜3 秒あと。少し広く取る）
+DEPART_BEFORE_SEC = 1.0
+DEPART_AFTER_SEC = 6.0
+
+
+def departures(events: list[dict], window: tuple[float, float]) -> dict[int, float]:
+    """ハンドの窓の中で、席ごとに札が最初に離れた（leave）・中央を通った（muck）時刻。"""
+    out: dict[int, float] = {}
+    for e in events:
+        if e.get("type") != "rfid" or e.get("kind") not in ("leave", "muck") or not isinstance(e.get("seat"), int):
+            continue
+        at = e.get("observed_at") or e.get("timestamp")
+        if isinstance(at, (int, float)) and window[0] <= at <= window[1] and e["seat"] not in out:
+            out[e["seat"]] = float(at)
+    return out
+
+
+def fold_voice(transcripts: list[dict], depart_at: Optional[float]) -> str:
+    """読めなかったフォールドの、札が離れた前後（−1〜+6 秒）の声: no_depart（離脱の記録なし）/ none（発話なし）/
+    noise（声ではない音・空だけ）/ voice（声あり = 言ったのに落ちたか、ほかの話し声）。"""
+    if depart_at is None:
+        return "no_depart"
+    near = [r for r in transcripts if isinstance(r.get("utterance_start_ts"), (int, float))
+            and depart_at - DEPART_BEFORE_SEC <= r["utterance_start_ts"] <= depart_at + DEPART_AFTER_SEC]
+    if not near:
+        return "none"
+    if all(r.get("noise") or r.get("no_speech") or not (r.get("text") or "").strip() for r in near):
+        return "noise"
+    return "voice"
+
+
+_VOICE_NAMES = {"none": "発話なし", "noise": "声ではない音だけ", "voice": "声あり", "no_depart": "離脱の記録なし"}
+
+
+def summarize_spots(session_id: str, spots: list[dict], voices: dict[tuple, str]) -> str:
+    """聞く前の自動の数: 読めなかったフォールドを、札が離れた前後の声の有無で分ける（種類ごと・時間帯ごと）。
+    `voices` = (hand_id, 行の番号) → `fold_voice` の結果。コールは物の手がかりが無いので数だけ。"""
+    kinds: Counter = Counter()
+    folds: Counter = Counter()
+    by_hour: dict[str, Counter] = {}
+    for spot in spots:
+        hour = datetime.fromtimestamp(spot["lo"]).strftime("%H時")
+        for m in spot["missed"]:
+            kinds[m["action"]] += 1
+            if m["action"] == "fold":
+                v = voices.get((spot["hand_id"], m["index"]), "no_depart")
+                folds[v] += 1
+                by_hour.setdefault(hour, Counter())[v] += 1
+
+    def fmt(c: Counter) -> str:
+        return f"{sum(c.values())} 行 = " + "・".join(
+            f"{_VOICE_NAMES[k]} {c[k]}" for k in ("none", "noise", "voice", "no_depart") if c[k])
+
+    lines = [f"{session_id[:8]}: 読めなかった " + "・".join(f"{_ACTION_NAMES.get(k, k)} {v}" for k, v in kinds.most_common())]
+    if folds:
+        lines.append(f"  フォールド（札が離れた −{DEPART_BEFORE_SEC:g}〜+{DEPART_AFTER_SEC:g} 秒の声）: {fmt(folds)}")
+        for hour, c in sorted(by_hour.items()):
+            lines.append(f"    {hour}: {fmt(c)}")
+    return "\n".join(lines)
 
 
 # ――― 音声 ―――
@@ -195,6 +260,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--kinds", default=",".join(DEFAULT_KINDS), help="確かめるアクション（既定 call,fold）")
     ap.add_argument("--out", type=Path, help="書き出す HTML（既定 listen_<sid 8 桁>.html）")
     ap.add_argument("--read", type=Path, help="ページが書き出した JSON をまとめる")
+    ap.add_argument("--summary", action="store_true", help="ページを作らず、聞く前の自動の数（前後の声の有無）だけ出す")
     args = ap.parse_args(argv)
     if args.read:
         print(read_labels(args.read))
@@ -215,17 +281,29 @@ def main(argv: Optional[list[str]] = None) -> int:
             gt = truth_hands(_read_json(gt_path))
             record = _read_json(files.path(".json")) or {}
             transcripts = _read_jsonl(files.path(".transcripts.jsonl"))
+            events = _read_jsonl(files.path(".events.jsonl"))
             if not gt["hands"] or not transcripts:
                 continue
             live = [h for h in record.get("hands") or [] if isinstance(h, dict)]
             windows = hand_windows(live)
             by_id = {h.get("hand_id"): h for h in live}
             spots = []
+            voices: dict[tuple, str] = {}
             for hand in gt["hands"]:
                 if hand.get("hand_id") in windows and not is_excluded(hand):
                     hand = with_streets(hand, by_id.get(hand["hand_id"]))
-                    spots += missed_spots(hand, transcripts, windows[hand["hand_id"]], kinds)
+                    found = missed_spots(hand, transcripts, windows[hand["hand_id"]], kinds)
+                    gone = departures(events, windows[hand["hand_id"]])
+                    for spot in found:
+                        for m in spot["missed"]:
+                            if m["action"] == "fold":
+                                voices[(spot["hand_id"], m["index"])] = fold_voice(transcripts, gone.get(m["seat"]))
+                    spots += found
             if not spots:
+                continue
+            print(summarize_spots(files.session_id, spots, voices))
+            if args.summary:
+                made += 1
                 continue
             audio: dict[str, str] = {}
             missing = 0
