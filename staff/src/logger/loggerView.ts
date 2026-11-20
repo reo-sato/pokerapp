@@ -11,15 +11,21 @@ export function statusLine(r: LoggerStatusResponse | null): { text: string; tone
   const phase = r.state?.phase;
   switch (r.status) {
     case "running":
-      if (phase === "setup") return { text: "卓の設定待ち（PC の設定画面で「始める」を押してください）", tone: "warn" };
+      if (phase === "setup") {
+        return r.state?.mode === "headless"
+          ? { text: "起動中（卓の設定を確かめています）", tone: "warn" }
+          : { text: "卓の設定待ち（PC の設定画面で「始める」を押してください）", tone: "warn" };
+      }
       if (phase === "starting") return { text: "起動中", tone: "warn" };
       if (phase === "stopping") return { text: "終了中（確定していないハンドを閉じて保存しています）", tone: "warn" };
       if (phase === "transcribing") return { text: "終了中（記録は保存済み。聞き流した発話を書き起こしています）", tone: "warn" };
       return { text: "動作中", tone: "ok" };
     case "unresponsive":
       return { text: `応答なし（心拍が ${Math.round(r.heartbeat_age_sec ?? 0)} 秒来ていません）`, tone: "bad" };
-    case "crashed":
-      return { text: "止まりました（終了の手順を通らずに終わった）", tone: "bad" };
+    case "crashed": {
+      const hand = r.crash?.hand_id != null ? `・ハンド ${r.crash.hand_id} は記録の途中` : "";
+      return { text: `止まりました（終了の手順を通らずに終わった${hand}）`, tone: "bad" };
+    }
     default:
       return { text: "止まっています（ロガーは動いていません）", tone: "muted" };
   }

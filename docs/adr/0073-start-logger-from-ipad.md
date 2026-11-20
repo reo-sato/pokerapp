@@ -327,7 +327,16 @@ Proposed（2026-11-18。オーナー「最終的に、iPad アプリからの操
   標準入力を使わない）・終了の制御 `stop`（聞き取り待ちを通さない。画面なしのロガーは端末の q と同じ手順へ、端末のロガーには
   未適用で知らせる。いま動いているロガー宛てでは session_id が必須）・終了の段階（stopping → transcribing = 記録は保存済み →
   stopped）・制御のファイルを最初から読む（2026-11-19）
-- [ ] 段階 C〜E
+- [x] C: 店舗サーバーの見張り役（`core/logger_supervisor.py`）・起動の受け口 `POST /api/staff/logger/start` と材料
+  `GET /api/staff/logger/setup`・落ちたときの後始末（お知らせ・live_hand の削除。セッションは閉じない）・
+  スタッフ画面の「卓を始める」と「終了」・更新のガード（`install.ps1 -Update` はロガーが動いていれば断る、`-Force`）（2026-11-20）
+  - 子は `CREATE_NO_WINDOW` で起動（段階 0 で親のタスクを止めても残った形）。引き取りは状態のファイルで見えていればよい。
+  - 終了は既存の `POST /api/staff/logger/control {type: stop, session_id}`。端末（RDP）で起動したロガーには「終了」を出さない。
+  - あとに回したもの: D10 のセッションの印（`source: "logger"` = schema・同期・クラウドまで要る）・iPad でのストラクチャーの
+    編集（PC の設定画面に残す）・席ごとの `player_id`（登録済みのお客さんは名前で選ぶ = `find_or_create` が同じ人に結ぶ）・
+    応答しないロガーの強制終了・真のアクション入力（8791）の制御の認可。
+  - 店舗 PC で確かめること: 店舗サーバーのタスクを止めてもロガーが残るか（段階 0 は console_probe の子で確かめた）。
+- [ ] A3（iPad の操作のボタン）・D・E
 
 ## Related
 

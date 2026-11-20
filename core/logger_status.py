@@ -208,6 +208,19 @@ class LoggerStatus:
                 logger.warning("お知らせを書けません", exc_info=True)
 
 
+def append_notice(kind: str, text: str, directory: Optional[Path] = None, **fields: Any) -> int:
+    """ロガーの外（見張り役）からお知らせを 1 行足す。番号は最後の行の続き（ロガーが落ちたあとに使う, ADR-0073 D7）。"""
+    d = directory or state_dir()
+    last = read_notices(d, since=0, limit=1).get("last_seq") or 0
+    row = {"seq": int(last) + 1, "t": time.time(), "kind": kind, "text": str(text)[:500], **fields}
+    try:
+        with (d / NOTICES_FILE).open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        logger.warning("お知らせを書けません", exc_info=True)
+    return row["seq"]
+
+
 # ───────────────────────── 読む側（店舗サーバーの API） ─────────────────────────
 
 

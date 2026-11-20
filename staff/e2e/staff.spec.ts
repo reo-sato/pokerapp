@@ -144,3 +144,22 @@ test("create a new session from the list", async ({ page }) => {
   // 成功メッセージと一覧行の両方に現れるため first() で一覧到達だけ確認する。
   await expect(page.getByText("E2E 卓").first()).toBeVisible();
 });
+
+test("start the hand logger from the iPad and stop it (ADR-0073 stage C)", async ({ page }) => {
+  await login(page);
+  await page.getByText("卓を始める", { exact: true }).click();
+  await expect(page.getByText("1 ハンド目のボタン")).toBeVisible();
+  // 席を 1 つにすると、店舗サーバーと同じく項目の横に誤りが出る
+  for (const seat of ["席2", "席3", "席4", "席5", "席6"]) {
+    await page.getByText(seat, { exact: true }).first().click();
+  }
+  await page.getByText("始める", { exact: true }).click();
+  await expect(page.getByText(/使う席を 2 つ以上/).first()).toBeVisible();
+  await page.getByText("席2", { exact: true }).first().click();
+  await page.getByText("始める", { exact: true }).click();
+  await expect(page.getByText("動作中")).toBeVisible();
+  await page.getByText("終了", { exact: true }).click();
+  await expect(page.getByText("本当に終了しますか？")).toBeVisible();
+  await page.getByText("終了する", { exact: true }).click();
+  await expect(page.getByText(/止まっています/)).toBeVisible();
+});

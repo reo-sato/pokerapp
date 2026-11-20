@@ -3,6 +3,7 @@ import { Pressable, Text, View } from "react-native";
 
 import type { StaffRepository } from "../api/repository";
 import type { LoggerNotice, LoggerStatusResponse } from "../api/types";
+import { StaffApiError } from "../api/types";
 import {
   backlogLine,
   mergeNotices,
@@ -15,7 +16,8 @@ import {
   statusLine,
   type Tone,
 } from "../logger/loggerView";
-import { colors, styles } from "./common";
+import { canStart, canStop } from "../logger/setupForm";
+import { Button, colors, styles } from "./common";
 
 const POLL_MS = 3000;
 const SHOWN = 8;
@@ -24,10 +26,13 @@ function toneColor(t: Tone): string {
   return t === "ok" ? colors.ok : t === "warn" ? colors.warn : t === "bad" ? colors.neg : colors.muted;
 }
 
-/** ロガーの様子（ADR-0073 D3）: 動いているか・マイク・RFID・お知らせ。3 秒ごとに読み直す（読むだけ）。 */
-export function LoggerPanel(props: { repository: StaffRepository }): React.JSX.Element {
-  const { repository } = props;
+/** ロガーの様子（ADR-0073 D3）: 動いているか・マイク・RFID・お知らせ。3 秒ごとに読み直す。
+ * 止まっていれば「卓を始める」（`onStart` = 卓の設定の画面へ）、動いていれば「終了」（画面の中で確かめる, 段階 C）。 */
+export function LoggerPanel(props: { repository: StaffRepository; onStart?: () => void }): React.JSX.Element {
+  const { repository, onStart } = props;
   const [status, setStatus] = useState<LoggerStatusResponse | null>(null);
+  const [confirmStop, setConfirmStop] = useState(false);
+  const [stopMsg, setStopMsg] = useState<string | null>(null);
   const [notices, setNotices] = useState<LoggerNotice[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
@@ -56,6 +61,16 @@ export function LoggerPanel(props: { repository: StaffRepository }): React.JSX.E
     };
   }, [repository]);
 
+  const onStop = (): void => {
+    const sid = status?.state?.session_id;
+    if (!sid) return;
+    setConfirmStop(false);
+    repository
+      .stopLogger(sid)
+      .then(() => setStopMsg("終了を送りました（確定していないハンドを閉じて保存します）"))
+      .catch((e) => setStopMsg(e instanceof StaffApiError ? e.message : String(e)));
+  };
+
   const head = statusLine(status);
   const lines = [micLine(status), asrLine(status), rfidLine(status)].filter((x): x is { text: string; tone: Tone } => x !== null);
   const sub = sessionLine(status);
@@ -79,6 +94,25 @@ export function LoggerPanel(props: { repository: StaffRepository }): React.JSX.E
       {rdp ? <Text style={[styles.cardMeta, { color: colors.warn }]}>{rdp}</Text> : null}
       {backlog ? <Text style={[styles.cardMeta, { color: colors.warn }]}>{backlog}</Text> : null}
       {error ? <Text style={[styles.cardMeta, { color: colors.neg }]}>読めません: {error}</Text> : null}
+      {onStart && canStart(status) ? (
+        <Button label="卓を始める" onPress={onStart} style={{ marginTop: 10, alignSelf: "flex-start" }} />
+      ) : null}
+      {canStop(status) && status?.state?.mode === "headless" ? (
+        confirmStop ? (
+          <View style={[styles.row, { marginTop: 10, flexWrap: "wrap" }]}>
+            <Text style={[styles.cardMeta, { marginRight: 10, marginTop: 0, color: colors.text }]}>本当に終了しますか？</Text>
+            <Button label="終了する" kind="danger" onPress={onStop} style={{ marginRight: 8 }} />
+            <Button label="やめる" kind="ghost" onPress={() => setConfirmStop(false)} />
+          </View>
+        ) : (
+          <Button label="終了" kind="neutral" onPress={() => { setStopMsg(null); setConfirmStop(true); }}
+                  style={{ marginTop: 10, alignSelf: "flex-start" }} />
+        )
+      ) : null}
+      {canStop(status) && status?.state?.mode !== "headless" ? (
+        <Text style={styles.cardMeta}>このロガーは店舗 PC（RDP）で起動しています。終了は PC の端末で q。</Text>
+      ) : null}
+      {stopMsg ? <Text style={[styles.cardMeta, { color: colors.warn }]}>{stopMsg}</Text> : null}
       {notices.length ? (
         <View style={{ marginTop: 8 }}>
           {shown.map((n) => (

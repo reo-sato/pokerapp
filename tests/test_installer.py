@@ -209,6 +209,14 @@ class TestFieldFindings:
         """-Update はファイルを差し替えても実行中の古いスクリプトで続きを走らせてしまう → 起動し直す。"""
         assert "-File $PSCommandPath" in self._install_ps1()
 
+    def test_update_is_refused_while_the_logger_runs(self):
+        """iPad から起動したロガー（ADR-0073 段階 C）が動いている間に venv を入れ替えると記録が止まる → 更新を断る。"""
+        text = self._install_ps1()
+        assert "function Test-LoggerRunning" in text and "logs\\logger_state.json" in text
+        assert "[switch]$Force" in text and "(Test-LoggerRunning) -and -not $Force" in text
+        guard = text.index("(Test-LoggerRunning) -and -not $Force")
+        assert guard < text.index("        Invoke-Update\r\n"), "ファイルを入れ替える前に断る"
+
     def test_update_remembers_the_branch_it_was_installed_from(self):
         """update.cmd は -Branch を渡さない。覚えていないと既定の verify-v1 で別ブランチの導入を上書きする。"""
         text = self._install_ps1()

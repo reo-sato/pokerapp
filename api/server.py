@@ -390,6 +390,7 @@ def create_app(
     show_truth: "bool | str" = False,
     today_only: bool = False,
     clock: Callable[[], datetime] = datetime.now,
+    logger_supervisor: Any = None,
 ) -> FastAPI:
     """viewer API の FastAPI app を構築する（repository は DI, ADR-0008 の流儀）。
 
@@ -1187,7 +1188,58 @@ def create_app(
             return err
         from core.logger_status import read_logger
 
-        return read_logger()
+        got = read_logger()
+        if logger_supervisor is not None and got["status"] == "crashed":
+            got["crash"] = logger_supervisor.crash()      # 落ちた記録（ハンド N は途中で止まった, ADR-0073 D7）
+        got["can_start"] = logger_supervisor is not None
+        return got
+
+    @app.get("/api/staff/logger/setup", response_model=None)
+    def staff_logger_setup(request: Request) -> "JSONResponse | dict":
+        """iPad の「卓を始める」の材料: 前回の設定・ストラクチャーの一覧・前回の時計（ADR-0073 D8・D9）。"""
+        err = _staff_guard(request, need_write=False)
+        if err is not None:
+            return err
+        from core.blind_structure import BlindStructureStore
+        from tools.session_setup_ui import load_last_setup, resumable_clock
+
+        last = {k: v for k, v in load_last_setup(Path(log_dir)).items() if k != "log_dir"}
+        return {"last": last, "structures": [st.to_dict() for st in BlindStructureStore().list_structures()],
+                "resume": resumable_clock(Path(log_dir)), "can_start": logger_supervisor is not None}
+
+    @app.post("/api/staff/logger/start", response_model=None)
+    async def staff_logger_start(request: Request) -> "JSONResponse | dict":
+        """卓の設定でロガーを起動する（店舗サーバーの見張り役 = `core/logger_supervisor.py`, ADR-0073 段階 C）。
+        誤りは項目ごと（400 `invalid_setup` の `errors`）。動いていれば 409 `logger_running`。"""
+        err = _staff_guard(request, need_write=True)
+        if err is not None:
+            return err
+        if logger_supervisor is None:
+            return JSONResponse(status_code=503, content={
+                "code": "logger_start_unavailable",
+                "message": "このプロセスからはロガーを起動できません（店舗サーバーで動かしてください）"})
+        from core.logger_supervisor import LoggerBusy, TooSoon
+        from tools.session_setup_ui import SetupError
+
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        try:
+            started = logger_supervisor.start(body)
+        except SetupError as e:
+            first = e.errors[0]["message"] if e.errors else "卓の設定が使えません"
+            return JSONResponse(status_code=400, content={"code": "invalid_setup", "message": first,
+                                                          "errors": e.errors})
+        except LoggerBusy as e:
+            return JSONResponse(status_code=409, content={
+                "code": "logger_running", "message": f"{e.holder_text or 'ロガー'}が動いています"})
+        except TooSoon as e:
+            return JSONResponse(status_code=429, content={"code": "too_soon", "message": str(e)})
+        except OSError as e:
+            return JSONResponse(status_code=500, content={"code": "logger_start_failed",
+                                                          "message": f"ロガーを起動できません: {e}"})
+        return JSONResponse(status_code=201, content=started)
 
     @app.get("/api/staff/logger/notices", response_model=None)
     def staff_logger_notices(request: Request, since: int = 0, limit: int = 100) -> "JSONResponse | dict":

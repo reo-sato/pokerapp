@@ -11,6 +11,9 @@ import type { StaffRepository } from "./repository";
 import {
   type ControlCommand,
   type LoggerNoticesResponse,
+  type LoggerSetup,
+  type LoggerSetupResponse,
+  type LoggerStartResponse,
   type LoggerStatusResponse,
   type GroundTruthEditPayload,
   type GroundTruthHand,
@@ -175,13 +178,15 @@ export class MockStaffRepository implements StaffRepository {
 
   // ――― セッション / player ―――
 
-  /** 偽物のロガー: 最初のセッションで動作中（試験で `logger` / `loggerNotices` を書き換えられる）。 */
+  /** 偽物のロガー: 前に動いていたロガーが終わった状態（「卓を始める」から動かせる。試験で `logger` / `loggerNotices` を
+   * 書き換えられる）。 */
   logger: LoggerStatusResponse = {
-    status: "running",
+    status: "stopped",
     heartbeat_age_sec: 1.2,
-    holder_text: "端末（RDP）で起動したロガー（pid 4242）",
+    holder_text: null,
+    can_start: true,
     state: {
-      phase: "running",
+      phase: "stopped",
       mode: "cli",
       pid: 4242,
       session_id: sessions[0]?.session_id ?? null,
@@ -214,6 +219,65 @@ export class MockStaffRepository implements StaffRepository {
     const start = reset ? 0 : since;
     const rows = this.loggerNotices.filter((n) => n.seq > start);
     return { notices: clone(rows), last_seq: rows.length ? rows[rows.length - 1].seq : start, reset };
+  }
+
+  /** 偽物の「卓を始める」の材料（前回の設定・ストラクチャー）。 */
+  loggerSetup: LoggerSetupResponse = {
+    last: { mode: "ring", seats: [1, 2, 3, 4, 5, 6], names: { "1": "Alice", "2": "Bob" }, stacks: {},
+            default_stack: 20000, sb: 100, bb: 200, structure: "デイリー", level: 1, elapsed_min: 0,
+            start_time: null, button: 6, stackless: true },
+    structures: [{ name: "デイリー", levels: [{ sb: 100, bb: 200, ante: 200, minutes: 20 },
+                                              { sb: 200, bb: 400, ante: 400, minutes: 20 }] }],
+    resume: null,
+    can_start: true,
+  };
+
+  async getLoggerSetup(): Promise<LoggerSetupResponse> {
+    this.requireAuth();
+    return clone(this.loggerSetup);
+  }
+
+  async startLogger(setup: LoggerSetup): Promise<LoggerStartResponse> {
+    this.requireAuth();
+    if (this.logger.status === "running" || this.logger.status === "unresponsive") {
+      throw new StaffApiError({ code: "logger_running", message: `${this.logger.holder_text ?? "ロガー"}が動いています` });
+    }
+    const errors = [];
+    if (new Set(setup.seats).size < 2 || setup.seats.some((s) => s < 1 || s > 9)) {
+      errors.push({ field: "seats", message: "使う席を 2 つ以上選んでください（1〜9）" });
+    }
+    if (setup.mode === "ring" && !(setup.sb >= 1 && setup.bb >= setup.sb)) {
+      errors.push({ field: "bb", message: "SB は BB 以下にしてください" });
+    }
+    if (setup.button != null && !setup.seats.includes(setup.button)) {
+      errors.push({ field: "button", message: "1 ハンド目のボタン席は、使う席のどれかにしてください" });
+    }
+    if (errors.length) {
+      throw new StaffApiError({ code: "invalid_setup", message: errors[0].message, errors });
+    }
+    // ロガーは起動するとセッションを作る（ADR-0073 D10）
+    const session = await this.createSession(undefined, setup.mode === "ring" ? { sb: setup.sb, bb: setup.bb } : undefined);
+    this.loggerSetup.last = clone(setup);
+    this.logger = {
+      status: "running", heartbeat_age_sec: 0.5, holder_text: "iPad から起動したロガー（pid 5151）", can_start: true,
+      state: { phase: "running", mode: "headless", pid: 5151, session_id: session.session_id,
+               started_at: new Date().toISOString(),
+               table: { mode: setup.mode, seats: [...setup.seats].sort((a, b) => a - b),
+                        sb: setup.mode === "ring" ? setup.sb : null, bb: setup.mode === "ring" ? setup.bb : null } },
+    };
+    return { pid: 5151, started_at: new Date().toISOString() };
+  }
+
+  async stopLogger(sessionId: string): Promise<void> {
+    this.requireAuth();
+    if (this.logger.status !== "running" || !this.logger.state?.session_id) {
+      throw new StaffApiError({ code: "logger_not_running", message: "ロガーは動いていません" });
+    }
+    if (this.logger.state.session_id !== sessionId) {
+      throw new StaffApiError({ code: "session_mismatch", message: "動いているロガーのセッションと違います" });
+    }
+    this.logger = { ...this.logger, status: "stopped", holder_text: null,
+                    state: { ...this.logger.state, phase: "stopped", ended_at: new Date().toISOString() } };
   }
 
   async listSessions(): Promise<StaffSession[]> {

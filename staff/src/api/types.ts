@@ -294,6 +294,13 @@ export interface ApiError {
   code: string;
   message: string;
   field?: string;
+  /** 項目ごとの誤り（卓の設定 = 400 invalid_setup, ADR-0073 段階 C）。 */
+  errors?: FieldError[];
+}
+
+export interface FieldError {
+  field: string;
+  message: string;
 }
 
 /**
@@ -303,11 +310,13 @@ export interface ApiError {
 export class StaffApiError extends Error {
   readonly code: string;
   readonly field?: string;
+  readonly errors?: FieldError[];
 
   constructor(err: ApiError) {
     super(err.message);
     this.code = err.code;
     this.field = err.field;
+    this.errors = err.errors;
   }
 }
 
@@ -342,6 +351,57 @@ export interface LoggerStatusResponse {
   state: LoggerState | null;
   heartbeat_age_sec: number | null;
   holder_text: string | null;
+  /** 店舗サーバーから起動できるか（見張り役がある = ADR-0073 段階 C）。 */
+  can_start?: boolean;
+  /** 落ちたロガーの記録（status が crashed のとき）。 */
+  crash?: { pid?: number | null; session_id?: string | null; hand_id?: number | null; at?: string } | null;
+}
+
+// ――― iPad から起動（ADR-0073 段階 C。GET /api/staff/logger/setup, POST /api/staff/logger/start）―――
+
+/** 卓の設定（PC の設定画面と同じ形 = tools/session_setup_ui.DEFAULT_SETUP）。 */
+export interface LoggerSetup {
+  mode: "ring" | "tournament";
+  seats: number[];
+  names: Record<string, string>;
+  stacks: Record<string, number>;
+  default_stack: number;
+  sb: number;
+  bb: number;
+  structure: string;
+  level: number;
+  elapsed_min: number;
+  start_time: string | null;
+  button: number | null;
+  stackless: boolean;
+}
+
+export interface StructureLevel {
+  sb?: number;
+  bb?: number;
+  ante?: number;
+  minutes: number;
+  break?: boolean;
+}
+
+export interface BlindStructureInfo {
+  name: string;
+  levels: StructureLevel[];
+  starting_stack?: number;
+  start_time?: string;
+}
+
+export interface LoggerSetupResponse {
+  last: Partial<LoggerSetup>;
+  structures: BlindStructureInfo[];
+  /** 前回の時計（16 時間以内）: 続きから始めるときの値。 */
+  resume: { structure: string; level: number; elapsed_min: number; text?: string } | null;
+  can_start: boolean;
+}
+
+export interface LoggerStartResponse {
+  pid: number | null;
+  started_at: string;
 }
 
 /** 端末に出たお知らせ 1 行（kind = notice / unapplied / action / heard / cards）。 */

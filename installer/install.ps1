@@ -34,6 +34,7 @@ param(
     [switch]$NoShortcuts,
     [switch]$NonInteractive,
     [switch]$DryRun,
+    [switch]$Force,
     [string]$Branch = "verify-v1",
     [string]$Commit = "",
     [string]$Repo = "reo-sato/pokerapp",
@@ -421,6 +422,17 @@ function Test-StoreServerTask {
     return [bool](Get-ScheduledTask -TaskName $StoreServerTask -ErrorAction SilentlyContinue)
 }
 
+function Test-LoggerRunning {
+    # iPad から起動したハンドロガー（店舗サーバーの子のプロセス, ADR-0073 段階 C）や端末のロガーが動いている間に更新すると、
+    # 使っている venv・ファイルを入れ替えて記録が止まる。状態のファイル（logs\logger_state.json）の段階が「終了」でなく、
+    # その pid のプロセスが動いていれば「動いている」。
+    $statePath = Join-Path $AppDir "logs\logger_state.json"
+    if (-not (Test-Path $statePath)) { return $false }
+    try { $state = Get-Content -Raw -Encoding UTF8 $statePath | ConvertFrom-Json } catch { return $false }
+    if (-not $state -or $state.phase -eq "stopped" -or -not $state.pid) { return $false }
+    return [bool](Get-Process -Id ([int]$state.pid) -ErrorAction SilentlyContinue)
+}
+
 function Stop-StoreServer {
     # 店舗サーバー（installer\store_server_task.ps1, ADR-0065）が venv の python を使っている間は、依存の入れ替えが
     # 失敗し得る（読み込み中のファイル）。更新の前に止め、終わったら Start-StoreServer で新しい版を起動する。
@@ -476,6 +488,10 @@ if ($DryRun) { Write-Log "DryRun: 表示のみで何も変更しません" "WARN
 try {
     if ($Uninstall) { Invoke-Uninstall; exit 0 }
     if ($Update) {
+        if ((Test-LoggerRunning) -and -not $Force -and $env:POKERAPP_FORCE_UPDATE -ne "1") {
+            Write-Log "ロガーが動いています。iPad で「終了」してから更新してください（構わず更新するなら -Force）" "ERROR"
+            exit 1
+        }
         Write-Log "ファイルの更新" "STEP"
         Invoke-Update
         if (-not $DryRun) {

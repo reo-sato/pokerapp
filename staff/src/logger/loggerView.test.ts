@@ -86,7 +86,7 @@ test("MockStaffRepository: ロガーの様子とお知らせ（認可・since・
   const repo = new MockStaffRepository();
   await assert.rejects(repo.getLoggerStatus());
   repo.setToken(VALID_STAFF_TOKEN);
-  assert.equal((await repo.getLoggerStatus()).status, "running");
+  assert.equal((await repo.getLoggerStatus()).status, "stopped");               // 偽物は「卓を始める」から（段階 C）
   assert.deepEqual((await repo.listLoggerNotices(0)).notices.map((x) => x.seq), [1, 2, 3]);
   assert.deepEqual((await repo.listLoggerNotices(2)).notices.map((x) => x.seq), [3]);
   const after = await repo.listLoggerNotices(99);

@@ -20,6 +20,7 @@ import { MockStaffRepository } from "./src/api/mockRepository";
 import type { StaffRepository } from "./src/api/repository";
 import type { StaffSession } from "./src/api/types";
 import { colors } from "./src/screens/common";
+import { LoggerStartScreen } from "./src/screens/LoggerStartScreen";
 import { LoginScreen } from "./src/screens/LoginScreen";
 import { MenuScreen } from "./src/screens/MenuScreen";
 import { PlayersScreen } from "./src/screens/PlayersScreen";
@@ -31,6 +32,7 @@ type Route =
   | { name: "sessions" }
   | { name: "players" }
   | { name: "menu" }
+  | { name: "loggerStart" }
   | { name: "table"; session: StaffSession };
 
 export default function App(): React.JSX.Element {
@@ -58,6 +60,7 @@ export default function App(): React.JSX.Element {
           onSelect={(session) => setRoute({ name: "table", session })}
           onOpenPlayers={() => setRoute({ name: "players" })}
           onOpenMenu={() => setRoute({ name: "menu" })}
+          onStartLogger={() => setRoute({ name: "loggerStart" })}
           onLogout={() => {
             repository.clearToken();
             setRoute({ name: "login" });
@@ -68,6 +71,13 @@ export default function App(): React.JSX.Element {
         <PlayersScreen
           repository={repository}
           onBack={() => setRoute({ name: "sessions" })}
+        />
+      )}
+      {route.name === "loggerStart" && (
+        <LoggerStartScreen
+          repository={repository}
+          onBack={() => setRoute({ name: "sessions" })}
+          onStarted={() => setRoute({ name: "sessions" })}
         />
       )}
       {route.name === "menu" && (

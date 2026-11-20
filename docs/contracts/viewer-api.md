@@ -195,8 +195,10 @@ read-only の `--viewer-api` でも読める（スタッフトークンは要る
 
 | method | path | write | body | 返り値 |
 |--------|------|-------|------|--------|
-| GET | `/api/staff/logger` | no | — | 200 `{status: "running"\|"unresponsive"\|"crashed"\|"stopped", state, holder, heartbeat_age_sec, holder_text}`。`state` = `{phase: "starting"\|"setup"\|"running"\|"stopping"\|"stopped", mode, pid, session_id, started_at, updated_at, table, mic, rfid, speech_backlog, transcriber, notice_seq, …}`（無ければ null）。ロックは取ってみず、持ち主の pid と心拍（15 秒）で判断 |
+| GET | `/api/staff/logger` | no | — | 200 `{status: "running"\|"unresponsive"\|"crashed"\|"stopped", state, holder, heartbeat_age_sec, holder_text, can_start, crash?}`（`crash` = 落ちたときの記録 `{pid, session_id, hand_id, at}`, 段階 C）。`state` = `{phase: "starting"\|"setup"\|"running"\|"stopping"\|"stopped", mode, pid, session_id, started_at, updated_at, table, mic, rfid, speech_backlog, transcriber, notice_seq, …}`（無ければ null）。ロックは取ってみず、持ち主の pid と心拍（15 秒）で判断 |
 | GET | `/api/staff/logger/notices?since=&limit=` | no | — | 200 `{notices: [{seq, t, kind, text, session_id, hand_id?}], last_seq, reset}`。`kind` = notice / unapplied / action / heard / cards。`since` が今の最大の番号より大きい（ロガーが起動し直した）なら初めから返して `reset: true` |
+| GET | `/api/staff/logger/setup` | no | — | 200 `{last, structures, resume, can_start}`。iPad の「卓を始める」の材料（ADR-0073 段階 C）: 前回の卓の設定（`logs/last_session_setup.json`、`log_dir` は除く）・ストラクチャーの一覧・前回の時計（16 時間以内, 無ければ null）・店舗サーバーから起動できるか |
+| POST | `/api/staff/logger/start` | yes | 卓の設定（PC の設定画面と同じ形 = `mode, seats, names, stacks, default_stack, sb, bb, structure, level, elapsed_min, start_time, button, stackless`。`log_dir` は受け取らない） | 201 `{pid, started_at}`。店舗サーバーの見張り役が `main.py --headless --setup` を子のプロセスとして起動する。400 `invalid_setup`（`errors: [{field, message}]` = 項目ごと）/ 409 `logger_running`（PC で起動したロガーも含む）/ 429 `too_soon`（10 秒以内）/ 503 `logger_start_unavailable`（見張り役の無いプロセス）。終了は `POST /api/staff/logger/control {type: "stop", session_id}` |
 
 ### error code（再利用 + 新規）
 

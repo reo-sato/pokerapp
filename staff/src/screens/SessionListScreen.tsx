@@ -31,6 +31,8 @@ export function SessionListScreen(props: {
   onOpenPlayers: () => void;
   onOpenMenu: () => void;
   onLogout: () => void;
+  /** 「卓を始める」（iPad からロガーを起動, ADR-0073 段階 C）。 */
+  onStartLogger?: () => void;
 }): React.JSX.Element {
   const { repository, onSelect, onOpenPlayers, onOpenMenu, onLogout } = props;
   const state = useAsync(() => repository.listSessions(), [repository]);
@@ -109,7 +111,7 @@ export function SessionListScreen(props: {
       <Text style={styles.subtitle}>卓を選んで会計・注文・座席を操作します。</Text>
 
       {/* ハンドロガーの様子（ADR-0073 D3。RDP で起動したロガーも見える） */}
-      <LoggerPanel repository={repository} />
+      <LoggerPanel repository={repository} onStart={props.onStartLogger} />
 
       {/* 本日の集計（締め作業の目安。確定は各卓の精算 commit） */}
       <View style={styles.card}>

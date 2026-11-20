@@ -13,6 +13,9 @@
 import type {
   ControlCommand,
   LoggerNoticesResponse,
+  LoggerSetup,
+  LoggerSetupResponse,
+  LoggerStartResponse,
   LoggerStatusResponse,
   GroundTruthEditPayload,
   GroundTruthHand,
@@ -59,6 +62,12 @@ export interface StaffRepository {
   getLoggerStatus(): Promise<LoggerStatusResponse>;
   /** 端末に出たお知らせ（`since` の番号より後, GET /api/staff/logger/notices）。 */
   listLoggerNotices(since: number): Promise<LoggerNoticesResponse>;
+  /** 「卓を始める」の材料: 前回の設定・ストラクチャーの一覧・前回の時計（ADR-0073 段階 C）。 */
+  getLoggerSetup(): Promise<LoggerSetupResponse>;
+  /** 卓の設定でロガーを起動する。誤りは StaffApiError（invalid_setup の errors = 項目ごと / logger_running / too_soon）。 */
+  startLogger(setup: LoggerSetup): Promise<LoggerStartResponse>;
+  /** 動いているロガーを終了する（session_id で取り違えを防ぐ）。 */
+  stopLogger(sessionId: string): Promise<void>;
 
   // ――― セッション（卓選択 / ライフサイクル, ADR-0038 §B）―――
   /** 全 session 一覧（staff の卓選択用, GET /api/staff/sessions）。 */

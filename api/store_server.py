@@ -55,7 +55,7 @@ LOG_PATH = Path(__file__).resolve().parent.parent / "logs" / "store_server.log"
 def create_store_app(cfg: dict, *, player_repo: PlayerRepository, session_repo: SessionRepository,
                      ledger_repo: LedgerRepository, order_repo: OrderRequestRepository,
                      menu: MenuMaster, cloud_status: Optional[Callable[[], dict]] = None,
-                     cloud_links=None):
+                     cloud_links=None, logger_supervisor=None):
     """会計の書き手の API（注文 write・スタッフの会計 write が有効）を作る。
 
     会計画面（`--ledger` + `viewer_api.enabled`）と店舗サーバー（`--serve`）の両方がこれを使い、
@@ -73,6 +73,7 @@ def create_store_app(cfg: dict, *, player_repo: PlayerRepository, session_repo: 
         staff_web_dir=STAFF_WEB_DIR,     # スタッフ用 iPad 画面（ADR-0064）
         cloud_status=cloud_status,       # クラウドへの送信の状態（ADR-0067 2b, 店舗サーバーだけ）
         cloud_links=cloud_links,         # 閲覧リンクの発行（ADR-0067 2c, 店舗サーバーだけ）
+        logger_supervisor=logger_supervisor,   # iPad からロガーを起動する（ADR-0073 段階 C, 店舗サーバーだけ）
         **auth_kwargs_from_config(api_cfg),   # L1 PIN（ADR-0027）
     )
 
@@ -195,6 +196,17 @@ def start_live_estimator(cfg: dict, log_dir: Path, stop: threading.Event):
     return estimator
 
 
+def start_logger_supervisor(cfg: dict, log_dir: Path, stop: threading.Event):
+    """iPad からハンドロガーを起動・見張る見張り役（ADR-0073 段階 C）。`store_server.logger_start=false` なら None。"""
+    if (cfg.get("store_server") or {}).get("logger_start", True) is False:
+        return None
+    from core.logger_supervisor import LoggerSupervisor
+
+    supervisor = LoggerSupervisor(log_dir)
+    keep_running("ロガーの見張り", lambda: supervisor.run_forever(stop), stop)
+    return supervisor
+
+
 def start_audio_retention(cfg: dict, log_dir: Path, stop: threading.Event) -> Optional[int]:
     """発話の音声を `audio.keep_days`（既定 90）日で消す見回り（1 日 1 回）。消さない設定なら None。"""
     from core import audio_retention
@@ -227,6 +239,7 @@ def run_store_server(cfg: dict, host: Optional[str] = None, port: Optional[int] 
         player_repo = PlayerRepository()
         session_repo = SessionRepository(player_repo=player_repo)
         syncer = start_cloud_sync(cfg, stop)
+        supervisor = start_logger_supervisor(cfg, Path(settings["log_dir"]), stop)
         app = create_store_app(
             cfg, player_repo=player_repo, session_repo=session_repo,
             ledger_repo=LedgerRepository(session_repo=session_repo, player_repo=player_repo),
@@ -234,6 +247,7 @@ def run_store_server(cfg: dict, host: Optional[str] = None, port: Optional[int] 
             menu=MenuMaster(),
             cloud_status=syncer.status if syncer else (lambda: {"enabled": False}),
             cloud_links=syncer,
+            logger_supervisor=supervisor,
         )
         _side_servers(settings, stop)
         start_live_estimator(cfg, Path(settings["log_dir"]), stop)

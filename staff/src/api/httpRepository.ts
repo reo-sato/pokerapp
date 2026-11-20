@@ -13,6 +13,9 @@ import type { StaffRepository } from "./repository";
 import {
   type ControlCommand,
   type LoggerNoticesResponse,
+  type LoggerSetup,
+  type LoggerSetupResponse,
+  type LoggerStartResponse,
   type LoggerStatusResponse,
   type GroundTruthEditPayload,
   type GroundTruthHand,
@@ -70,6 +73,7 @@ export class HttpStaffRepository implements StaffRepository {
       throw new StaffApiError({
         code: (body as { code?: string })?.code ?? "unknown_error",
         message: (body as { message?: string })?.message ?? `HTTP ${res.status}`,
+        errors: (body as { errors?: { field: string; message: string }[] })?.errors,
       });
     }
     return body as T;
@@ -106,6 +110,18 @@ export class HttpStaffRepository implements StaffRepository {
 
   listLoggerNotices(since: number): Promise<LoggerNoticesResponse> {
     return this.get<LoggerNoticesResponse>(`/api/staff/logger/notices?since=${Math.max(0, Math.floor(since))}`);
+  }
+
+  getLoggerSetup(): Promise<LoggerSetupResponse> {
+    return this.get<LoggerSetupResponse>("/api/staff/logger/setup");
+  }
+
+  startLogger(setup: LoggerSetup): Promise<LoggerStartResponse> {
+    return this.send<LoggerStartResponse>("POST", "/api/staff/logger/start", setup);
+  }
+
+  async stopLogger(sessionId: string): Promise<void> {
+    await this.send("POST", "/api/staff/logger/control", { type: "stop", session_id: sessionId });
   }
 
   async listSessions(): Promise<StaffSession[]> {

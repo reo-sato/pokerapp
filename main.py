@@ -848,7 +848,7 @@ def _load_test_script(spec: str) -> dict:
     return data
 
 
-def run_cli(script: str | None = None, setup: str | Path | None = None) -> None:
+def run_cli(script: str | None = None, setup: str | Path | None = None) -> int:
     """CLI のロガー。ロガーを 1 つに限るロックを取り、状態とお知らせのファイルを書きながら `_run_cli` を動かす
     （ADR-0073 D2・D3。iPad でロガーの様子を見るため）。ロックが取れなければ起動しない。"""
     global _LOGGER_STATUS
@@ -859,7 +859,7 @@ def run_cli(script: str | None = None, setup: str | Path | None = None) -> None:
     if not lock.acquire_with_retries(mode):
         print(f"別のロガーが動いています: {describe_logger_holder(lock.holder())}。"
               "そちらを終了（q）してから起動してください。")
-        return
+        return 1                     # 画面なしのロガーは終了コード 1（見張り役のログに残る, ADR-0073 段階 C）
     try:
         from core.version import describe as describe_version
 
@@ -871,7 +871,7 @@ def run_cli(script: str | None = None, setup: str | Path | None = None) -> None:
     try:
         status.set(phase="setup")
         status.start()
-        _run_cli(script, status, setup)
+        return _run_cli(script, status, setup) or 0
     finally:
         _LOGGER_STATUS = None
         status.close()
@@ -893,7 +893,7 @@ def _headless_session_config(path: str | Path) -> dict:
     return config
 
 
-def _run_cli(script: str | None, status, setup: str | Path | None = None) -> None:
+def _run_cli(script: str | None, status, setup: str | Path | None = None) -> "int | None":
     """Phase 1 CLIモード: AudioThread + IntegrationThread を起動してセッションを録音する。
 
     `script`（`--script`）: 台本のハンド（`tools/test_script.py`, テスト方針 週 1）。卓の設定は台本から取り（入力なし）、
@@ -922,7 +922,7 @@ def _run_cli(script: str | None, status, setup: str | Path | None = None) -> Non
         except (OSError, ValueError) as e:            # 読めない・検証の誤り（SetupError も ValueError）
             print(f"卓の設定が使えません: {e}")
             status.notice("notice", f"卓の設定が使えません: {e}")
-            return
+            return 1
     elif test_script is None:
         session_cfg, setup_app = _session_config(cfg)
     table = session_cfg.get("table")
@@ -1987,8 +1987,7 @@ def main() -> None:
         if not args.setup:
             print("--headless には --setup <卓の設定の JSON> が要ります")
             sys.exit(2)
-        run_cli(setup=args.setup)
-        return
+        sys.exit(run_cli(setup=args.setup))
     if args.cli:
         run_cli(script=args.script)
     elif args.script:
