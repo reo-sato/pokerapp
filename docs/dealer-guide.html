@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ディーラーの読み上げ</title>
+<!--
+  ディーラー用の手引き（紙 1 枚, A4 縦）。店舗 PC かスマホのブラウザで開いて印刷する。
+  中身は docs/usage.md「読み上げの基本」と ADR-0068 の決まりを、卓で読める形に短く並べ直したもの（2026-11-20, ADR-0074）。
+  決まりを変えたら usage.md と一緒にここも直す。
+-->
+<style>
+  :root {
+    --ink: #1b2027; --muted: #5a6371; --line: #d5dae1; --paper: #ffffff;
+    --accent: #0f5f8c; --accent-bg: #e8f2f8; --ok: #17663a; --ng: #a3341c; --ng-bg: #fbece7;
+    color-scheme: light;
+  }
+  @page { size: A4 portrait; margin: 12mm 13mm; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--paper); color: var(--ink);
+    font: 13px/1.55 "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; display: grid; gap: 12px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+           border-bottom: 2px solid var(--ink); padding-bottom: 6px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: .02em; }
+  header p { margin: 0; color: var(--muted); font-size: 12px; }
+  h2 { font-size: 14px; margin: 0 0 6px; padding-left: 8px; border-left: 4px solid var(--accent); }
+  .three { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .rule { background: var(--accent-bg); border-radius: 6px; padding: 10px 11px; display: grid; gap: 4px; align-content: start; }
+  .rule .n { font-size: 11px; font-weight: 700; color: var(--accent); letter-spacing: .08em; }
+  .rule b { font-size: 16px; line-height: 1.35; text-wrap: balance; }
+  .rule .ex { font-size: 13px; }
+  .rule .why { font-size: 11.5px; color: var(--muted); }
+  .say { font-weight: 700; white-space: nowrap; }
+  .gap { color: var(--accent); font-weight: 700; padding: 0 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { border-top: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: top; }
+  th { width: 34%; font-weight: 700; white-space: nowrap; }
+  td .why { color: var(--muted); font-size: 11.5px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .box { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+  .ok, .ng { display: grid; grid-template-columns: 1.4em 1fr; gap: 2px 4px; margin: 0; padding: 0; list-style: none; }
+  .ok li, .ng li { display: contents; }
+  .ok li::before { content: "○"; color: var(--ok); font-weight: 700; }
+  .ng li::before { content: "×"; color: var(--ng); font-weight: 700; }
+  .ng-box { background: var(--ng-bg); border-color: transparent; }
+  ul.plain { margin: 0; padding-left: 1.2em; }
+  ul.plain li { margin: 1px 0; }
+  footer { color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); padding-top: 6px; }
+  @media (max-width: 560px) { .three, .pair { grid-template-columns: 1fr; } th { white-space: normal; } }
+  @media print { body { padding: 0; font-size: 12px; } main { gap: 9px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>ディーラーの読み上げ</h1>
+    <p>口元のマイクで記録しています。席番号は言わなくて大丈夫です（手番の順で決まります）。</p>
+  </header>
+
+  <section>
+    <h2>いちばん大事な 3 つ</h2>
+    <div class="three">
+      <div class="rule">
+        <span class="n">1</span>
+        <b>1 つのアクションごとに 1 拍あける</b>
+        <span class="ex"><span class="say">フォールド</span><span class="gap">・・</span><span class="say">フォールド</span><span class="gap">・・</span><span class="say">コール</span></span>
+        <span class="why">半秒以上の間があれば、アクションが 1 つずつ別に聞き取れます。続けて言うと 2 つ目の語が崩れ、そのあとの人のアクションまでずれます。</span>
+      </div>
+      <div class="rule">
+        <span class="n">2</span>
+        <b>コールとチェックは毎回言う</b>
+        <span class="ex"><span class="say">チェック</span><span class="gap">・・</span><span class="say">チェック</span><span class="gap">・・</span><span class="say">600</span></span>
+        <span class="why">同じアクションが続いても省きません。言われなかった分はあとで補いますが、そのハンドは「要確認」になります。</span>
+      </div>
+      <div class="rule">
+        <span class="n">3</span>
+        <b>フォールドは札が離れたのを見てから、1 人ずつ</b>
+        <span class="ex"><span class="say">フォールド</span>（1 人分）<span class="gap">・・</span><span class="say">フォールド</span>（次の人）</span>
+        <span class="why">札の離脱と「フォールド」の声を 1 対 1 で組にしています。まとめて 1 回だと、誰が降りたか分からなくなります。</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>言い方</h2>
+    <table>
+      <tr><th>ベット・レイズ</th><td><span class="say">額だけ</span>（「600」「2千500」）。レイズは<b>トータルの額</b>（上乗せ分ではない）。額は 1 息で言い切る<div class="why">「2千…500」と途中で切ると、後ろの数が次の発話に回ります。</div></td></tr>
+      <tr><th>チェックレイズ</th><td><span class="say">レイズ 1200</span> とだけ<div class="why">「チェック、レイズ」と区切ると 2 人分のアクションに聞こえます。</div></td></tr>
+      <tr><th>チェックアラウンド</th><td>ストリートが変わるとき（次の札を置く前）に</td></tr>
+      <tr><th>オールイン</th><td><span class="say">オールイン</span>。数えるときは「カウントします」→ 数える →「オールインは 〜点」</td></tr>
+      <tr><th>ショーダウン</th><td>ショーダウンになったら必ず <span class="say">ショウダウン</span><div class="why">声が無いハンドは「全員降りて終わった」とみています。</div></td></tr>
+      <tr><th>手札を見せた</th><td>見せるたびに<b>役名</b>（「ツーペア」「キングヒット」など）。見せずに降りたら <span class="say">フォールド</span></td></tr>
+      <tr><th>言い間違えた</th><td><span class="say">失礼しました</span> と言ってから、正しいアクションをもう一度</td></tr>
+    </table>
+  </section>
+
+  <div class="pair">
+    <section class="box">
+      <h2>よい例</h2>
+      <ul class="ok">
+        <li><span><span class="say">1200</span><span class="gap">・・</span><span class="say">フォールド</span><span class="gap">・・</span><span class="say">コール</span></span></li>
+        <li><span><span class="say">2千500</span>（額は 1 息で言い切り、次の人の前で 1 拍）</span></li>
+        <li><span>ハンドの終わりのほうも、最初と同じ間で</span></li>
+      </ul>
+    </section>
+    <section class="box ng-box">
+      <h2>聞き取れなくなる例</h2>
+      <ul class="ng">
+        <li><span>「フォールドフォールドコール」と 1 息で</span></li>
+        <li><span>「コールですか？」の確かめだけで、確定の言葉が無い（確かめの文はアクションになりません）</span></li>
+        <li><span>次の札を置く前に、次のストリートのアクションを言う</span></li>
+      </ul>
+    </section>
+  </div>
+
+  <section>
+    <h2>マイク</h2>
+    <ul class="plain">
+      <li>口元に付けたまま、向きを変えない。手や髪で覆わない。</li>
+      <li>雑談は気にしなくて大丈夫です。アクションの言葉だけ、はっきり区切って。</li>
+      <li>長時間でも同じ間を保ってください（セッションの後半ほど聞き取れる割合が下がっていました）。</li>
+    </ul>
+  </section>
+
+  <footer>Poker Hand Logger ・ ディーラー用（2026-11-20）。くわしくは docs/usage.md「読み上げの基本」。</footer>
+</main>
+</body>
+</html>
