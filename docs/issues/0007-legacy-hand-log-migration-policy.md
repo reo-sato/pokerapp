@@ -6,7 +6,10 @@
 
 ## Status
 
-Open
+**Won't fix（2026-11-20, 今後の計画で「やらない」と決めた。必要になったら新しい ISSUE で開く）**
+
+
+前の状態: Open
 
 ## Severity / Priority
 

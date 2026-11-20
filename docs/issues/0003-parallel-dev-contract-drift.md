@@ -6,7 +6,10 @@
 
 ## Status
 
-Open（Phase 0a で部分緩和。残りは Phase 0b〜各 phase の freeze で対処）
+**Won't fix（2026-11-20, 今後の計画で「やらない」と決めた。必要になったら新しい ISSUE で開く）**
+
+
+前の状態: Open（Phase 0a で部分緩和。残りは Phase 0b〜各 phase の freeze で対処）
 
 ## Severity / Priority
 
